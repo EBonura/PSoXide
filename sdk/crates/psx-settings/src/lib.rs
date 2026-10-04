@@ -273,40 +273,84 @@ pub fn load<B: psx_mc::Block, const ACTIONS: usize, const SCORES: usize>(
     Profile::decode(&bytes[..len]).map_err(CardError::Codec)
 }
 
-/// Save a profile to the controller-1 memory-card slot. Existing files with
-/// the same name are replaced. A card that is not formatted is refused with
-/// `CardError::Card(psx_mc::Error::NotFormatted)` and not touched; use
-/// [`format_and_save_slot_one`] once the player has agreed to format.
+/// Save a profile to the controller-1 memory-card slot, driving the port
+/// through `port`. Existing files with the same name are replaced. A card that
+/// is not formatted is refused with `CardError::Card(psx_mc::Error::NotFormatted)`
+/// and not touched; use [`format_and_save_to_slot_one`] once the player has
+/// agreed to format.
 #[cfg(feature = "card")]
+pub fn save_to_slot_one<const ACTIONS: usize, const SCORES: usize>(
+    port: &mut psx_mc::ControllerPort,
+    name: &str,
+    title: &str,
+    profile: &Profile<ACTIONS, SCORES>,
+) -> Result<(), CardError> {
+    let mut card = psx_mc::Card::new(psx_mc::HardwareCard::on_port(port, psx_mc::Slot::One));
+    save(&mut card, name, title, profile)
+}
+
+/// [`save_to_slot_one`] on a token the caller does not hold.
+#[cfg(feature = "card")]
+#[deprecated(note = "use `save_to_slot_one` with the `ControllerPort` token")]
 pub fn save_slot_one<const ACTIONS: usize, const SCORES: usize>(
     name: &str,
     title: &str,
     profile: &Profile<ACTIONS, SCORES>,
 ) -> Result<(), CardError> {
-    let mut card = psx_mc::Card::new(psx_mc::HardwareCard::new(psx_mc::Slot::One));
-    save(&mut card, name, title, profile)
+    save_to_slot_one(&mut steal_port(), name, title, profile)
 }
 
 /// [`format_and_save`] on the controller-1 memory-card slot. This is the
 /// call that can erase a card's directory; reach it only from an explicit
 /// "format this card?" answer.
 #[cfg(feature = "card")]
+pub fn format_and_save_to_slot_one<const ACTIONS: usize, const SCORES: usize>(
+    port: &mut psx_mc::ControllerPort,
+    name: &str,
+    title: &str,
+    profile: &Profile<ACTIONS, SCORES>,
+) -> Result<(), CardError> {
+    let mut card = psx_mc::Card::new(psx_mc::HardwareCard::on_port(port, psx_mc::Slot::One));
+    format_and_save(&mut card, name, title, profile)
+}
+
+/// [`format_and_save_to_slot_one`] on a token the caller does not hold.
+#[cfg(feature = "card")]
+#[deprecated(note = "use `format_and_save_to_slot_one` with the `ControllerPort` token")]
 pub fn format_and_save_slot_one<const ACTIONS: usize, const SCORES: usize>(
     name: &str,
     title: &str,
     profile: &Profile<ACTIONS, SCORES>,
 ) -> Result<(), CardError> {
-    let mut card = psx_mc::Card::new(psx_mc::HardwareCard::new(psx_mc::Slot::One));
-    format_and_save(&mut card, name, title, profile)
+    format_and_save_to_slot_one(&mut steal_port(), name, title, profile)
 }
 
-/// Load a profile from the controller-1 memory-card slot.
+/// Load a profile from the controller-1 memory-card slot, driving the port
+/// through `port`.
 #[cfg(feature = "card")]
+pub fn load_from_slot_one<const ACTIONS: usize, const SCORES: usize>(
+    port: &mut psx_mc::ControllerPort,
+    name: &str,
+) -> Result<Profile<ACTIONS, SCORES>, CardError> {
+    let mut card = psx_mc::Card::new(psx_mc::HardwareCard::on_port(port, psx_mc::Slot::One));
+    load(&mut card, name)
+}
+
+/// [`load_from_slot_one`] on a token the caller does not hold.
+#[cfg(feature = "card")]
+#[deprecated(note = "use `load_from_slot_one` with the `ControllerPort` token")]
 pub fn load_slot_one<const ACTIONS: usize, const SCORES: usize>(
     name: &str,
 ) -> Result<Profile<ACTIONS, SCORES>, CardError> {
-    let mut card = psx_mc::Card::new(psx_mc::HardwareCard::new(psx_mc::Slot::One));
-    load(&mut card, name)
+    load_from_slot_one(&mut steal_port(), name)
+}
+
+/// The token for a deprecated forwarder that never took one.
+#[cfg(feature = "card")]
+fn steal_port() -> psx_mc::ControllerPort {
+    // SAFETY: a token is a logic guard, not a memory-safety one (see
+    // `psx_io::periph`), and the old functions never took one.
+    unsafe { psx_mc::ControllerPort::steal() }
 }
 
 #[inline]
