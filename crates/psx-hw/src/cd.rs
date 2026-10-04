@@ -6,6 +6,70 @@
 /// Controller register base (index/status register; ports 1..3 follow).
 pub const BASE: u32 = 0x1F80_1800;
 
+/// The four byte registers. Which function a register has depends on the
+/// index in the low two bits of [`INDEX`](reg::INDEX); only the functions
+/// the SDK uses are named.
+pub mod reg {
+    /// Index/status register: writes select the register bank, reads return
+    /// the [`index_status`](super::index_status) bits.
+    #[doc(alias = "CD_INDEX")]
+    pub const INDEX: u32 = super::BASE;
+    /// Index 0: command byte (write), response FIFO (read).
+    pub const COMMAND_RESPONSE: u32 = super::BASE + 1;
+    /// Index 0: parameter FIFO (write), data FIFO (read).
+    pub const PARAMETER: u32 = super::BASE + 2;
+    /// Index 0: request register (write). Index 1: interrupt flag (read and
+    /// write), see [`irq`](super::irq).
+    pub const REQUEST_IRQ: u32 = super::BASE + 3;
+}
+
+/// Bits of the index/status register read at [`reg::INDEX`].
+pub mod index_status {
+    /// Bits 0..=1: the selected register bank.
+    pub const INDEX_MASK: u8 = 0b11;
+    /// Bit 2: an XA-ADPCM sector is being played (the ADPCM FIFO is not empty).
+    pub const ADPCM_BUSY: u8 = 1 << 2;
+    /// Bit 3: the parameter FIFO is empty.
+    pub const PARAM_EMPTY: u8 = 1 << 3;
+    /// Bit 4: the parameter FIFO has room for another byte.
+    pub const PARAM_NOT_FULL: u8 = 1 << 4;
+    /// Bit 5: the response FIFO holds at least one byte.
+    pub const RESPONSE_NOT_EMPTY: u8 = 1 << 5;
+    /// Bit 6: the data FIFO holds at least one byte.
+    pub const DATA_FIFO_NOT_EMPTY: u8 = 1 << 6;
+    /// Bit 7: a command is being transmitted to the drive.
+    pub const COMMAND_BUSY: u8 = 1 << 7;
+}
+
+/// Interrupt codes and the writes that handle them.
+///
+/// Reading the interrupt flag register (index 1 of [`reg::REQUEST_IRQ`])
+/// returns one of the response codes in its low bits; writing bits to it
+/// acknowledges them.
+pub mod irq {
+    /// INT1: a data sector is ready.
+    pub const DATA_READY: u8 = 1;
+    /// INT2: a second-response command finished.
+    pub const COMPLETE: u8 = 2;
+    /// INT3: a command was accepted (first response).
+    pub const ACKNOWLEDGE: u8 = 3;
+    /// INT4: the end of the data or audio was reached.
+    pub const DATA_END: u8 = 4;
+    /// INT5: the command failed or the disc is in error.
+    pub const ERROR: u8 = 5;
+    /// Interrupt flag write that acknowledges every pending code.
+    pub const ACK_ALL: u8 = 0x1F;
+    /// Interrupt flag write bit that also empties the parameter FIFO.
+    pub const CLEAR_PARAMETER_FIFO: u8 = 0x40;
+}
+
+/// Bits of the request register (index 0 of [`reg::REQUEST_IRQ`], write).
+pub mod request {
+    /// Arm the data FIFO so the next sector's bytes can be popped; writing 0
+    /// drops it again.
+    pub const WANT_DATA: u8 = 0x80;
+}
+
 /// Setmode bit: allow CD-DA playback via `Play`.
 pub const MODE_CDDA: u8 = 1 << 0;
 /// Setmode bit: auto-pause at the end of a CD-DA track. The drive stops on its
@@ -139,4 +203,42 @@ pub mod xa {
     /// past the end meets audio sectors (which raise no data IRQ) and not
     /// whatever follows the file on the disc.
     pub const END_GUARD_SECTORS: u32 = 16;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn register_file_is_four_consecutive_bytes() {
+        assert_eq!(
+            [
+                reg::INDEX,
+                reg::COMMAND_RESPONSE,
+                reg::PARAMETER,
+                reg::REQUEST_IRQ
+            ],
+            [0x1F80_1800, 0x1F80_1801, 0x1F80_1802, 0x1F80_1803]
+        );
+    }
+
+    #[test]
+    fn status_and_interrupt_codes_follow_psx_spx() {
+        assert_eq!(index_status::PARAM_NOT_FULL, 0x10);
+        assert_eq!(index_status::RESPONSE_NOT_EMPTY, 0x20);
+        assert_eq!(index_status::DATA_FIFO_NOT_EMPTY, 0x40);
+        assert_eq!(index_status::COMMAND_BUSY, 0x80);
+        assert_eq!(
+            [
+                irq::DATA_READY,
+                irq::COMPLETE,
+                irq::ACKNOWLEDGE,
+                irq::DATA_END,
+                irq::ERROR
+            ],
+            [1, 2, 3, 4, 5]
+        );
+        assert_eq!(irq::ACK_ALL, 0x1F);
+        assert_eq!(request::WANT_DATA, 0x80);
+    }
 }
