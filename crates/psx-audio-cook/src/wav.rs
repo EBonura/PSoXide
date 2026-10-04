@@ -38,6 +38,16 @@ fn u32le(b: &[u8], at: usize) -> Result<u32, Error> {
 
 /// Parse a WAV file into mono samples plus loop metadata.
 pub fn read(bytes: &[u8]) -> Result<Wav, Error> {
+    parse(bytes).map(|(wav, _)| wav)
+}
+
+/// Parse a WAV file into its sample rate and one sample vector per channel,
+/// each scaled like [`Wav::samples`]. A one-channel file gives one vector.
+pub fn read_channels(bytes: &[u8]) -> Result<(u32, Vec<Vec<f64>>), Error> {
+    parse(bytes).map(|(wav, planar)| (wav.rate, planar))
+}
+
+fn parse(bytes: &[u8]) -> Result<(Wav, Vec<Vec<f64>>), Error> {
     if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
         return Err(Error::Wav("expected RIFF/WAVE header".into()));
     }
@@ -100,16 +110,19 @@ pub fn read(bytes: &[u8]) -> Result<Wav, Error> {
     };
     let frame = width * channels as usize;
     let mut samples = Vec::with_capacity(data.len() / frame);
+    let mut planar = vec![Vec::with_capacity(data.len() / frame); channels as usize];
     for f in data.chunks_exact(frame) {
         let mut sum = 0.0;
-        for c in f.chunks_exact(width) {
-            sum += match (format, width) {
+        for (c, plane) in f.chunks_exact(width).zip(planar.iter_mut()) {
+            let value = match (format, width) {
                 (1, 1) => (c[0] as f64 - 128.0) * 256.0,
                 (1, 2) => i16::from_le_bytes([c[0], c[1]]) as f64,
                 (1, 3) => (i32::from_le_bytes([0, c[0], c[1], c[2]]) >> 8) as f64 / 256.0,
                 (1, 4) => i32::from_le_bytes([c[0], c[1], c[2], c[3]]) as f64 / 65536.0,
                 _ => f32::from_le_bytes([c[0], c[1], c[2], c[3]]) as f64 * 32768.0,
             };
+            plane.push(value);
+            sum += value;
         }
         samples.push(sum / channels as f64);
     }
@@ -119,13 +132,14 @@ pub fn read(bytes: &[u8]) -> Result<Wav, Error> {
         (None, Some(s)) if s < n => (Some(s), None),
         _ => (None, None),
     };
-    Ok(Wav {
+    let wav = Wav {
         rate,
         samples,
         loop_start,
         loop_end,
         bits,
-    })
+    };
+    Ok((wav, planar))
 }
 
 /// Encode mono 16-bit PCM as a WAV file.
