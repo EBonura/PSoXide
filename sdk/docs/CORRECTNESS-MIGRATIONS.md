@@ -168,3 +168,19 @@ The deprecated `psx_io::cdrom` forwarders keep their `Response` return and
 hand back `Response::empty()` on an error. No game calls the blocking forms
 (they use `try_*`); the one caller in the tree is the `hello-cdda` example,
 updated to ignore the result as it always did.
+
+## psx-settings: saving never formats a card (settings-01)
+
+`save_slot_one` formatted any card whose frame 0 did not start with `MC`,
+which rewrites the directory and drops every other save on it, from a helper
+named "save settings". `settings::save` and `save_slot_one` now return
+`CardError::Card(psx_mc::Error::NotFormatted)` and leave the card untouched.
+Formatting is `format_and_save` / `format_and_save_slot_one`, for after the
+player has said yes to "format this card?". A formatted card is saved onto
+as before.
+
+Callers of `save_slot_one` that relied on the silent format and so now see
+`NotFormatted` on a blank card: nitroxide `game/src/main.rs` (1), voxide
+`game/src/main.rs` (1), PSoXide-editor `engine/examples/game-invaders` and
+`game-pong` (1 each). Each should show a prompt and call
+`format_and_save_slot_one` on yes. `load_slot_one` is unchanged.

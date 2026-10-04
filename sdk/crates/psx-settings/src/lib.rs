@@ -223,6 +223,12 @@ pub enum CardError {
 }
 
 /// Save one profile into a standard PS1 memory-card file.
+///
+/// A card without the `MC` header is not written to: this returns
+/// `CardError::Card(psx_mc::Error::NotFormatted)` and leaves the card as it
+/// was, so the game can ask the player before calling
+/// [`format_and_save`]. Formatting drops every save on the card from its
+/// directory.
 #[cfg(feature = "card")]
 pub fn save<B: psx_mc::Block, const ACTIONS: usize, const SCORES: usize>(
     card: &mut psx_mc::Card<B>,
@@ -230,10 +236,30 @@ pub fn save<B: psx_mc::Block, const ACTIONS: usize, const SCORES: usize>(
     title: &str,
     profile: &Profile<ACTIONS, SCORES>,
 ) -> Result<(), CardError> {
+    if !card.is_formatted().map_err(CardError::Card)? {
+        return Err(CardError::Card(psx_mc::Error::NotFormatted));
+    }
     let mut bytes = [0u8; MAX_RECORD_LEN];
     let len = profile.encode(&mut bytes).map_err(CardError::Codec)?;
     card.write(name, title, &bytes[..len])
         .map_err(CardError::Card)
+}
+
+/// Format the card if it has no `MC` header, then save the profile. Call
+/// this only after the player agreed to format: it replaces the directory of
+/// an unformatted card, and every save the card held stops being listed. A
+/// formatted card is left alone and the profile is saved onto it.
+#[cfg(feature = "card")]
+pub fn format_and_save<B: psx_mc::Block, const ACTIONS: usize, const SCORES: usize>(
+    card: &mut psx_mc::Card<B>,
+    name: &str,
+    title: &str,
+    profile: &Profile<ACTIONS, SCORES>,
+) -> Result<(), CardError> {
+    if !card.is_formatted().map_err(CardError::Card)? {
+        card.format().map_err(CardError::Card)?;
+    }
+    save(card, name, title, profile)
 }
 
 /// Load one exact profile shape from a standard PS1 memory-card file.
@@ -247,8 +273,10 @@ pub fn load<B: psx_mc::Block, const ACTIONS: usize, const SCORES: usize>(
     Profile::decode(&bytes[..len]).map_err(CardError::Codec)
 }
 
-/// Save a profile to the controller-1 memory-card slot, formatting a blank
-/// card first. Existing files with the same name are overwritten.
+/// Save a profile to the controller-1 memory-card slot. Existing files with
+/// the same name are replaced. A card that is not formatted is refused with
+/// `CardError::Card(psx_mc::Error::NotFormatted)` and not touched; use
+/// [`format_and_save_slot_one`] once the player has agreed to format.
 #[cfg(feature = "card")]
 pub fn save_slot_one<const ACTIONS: usize, const SCORES: usize>(
     name: &str,
@@ -256,11 +284,20 @@ pub fn save_slot_one<const ACTIONS: usize, const SCORES: usize>(
     profile: &Profile<ACTIONS, SCORES>,
 ) -> Result<(), CardError> {
     let mut card = psx_mc::Card::new(psx_mc::HardwareCard::new(psx_mc::Slot::One));
-    match card.is_formatted().map_err(CardError::Card)? {
-        true => {}
-        false => card.format().map_err(CardError::Card)?,
-    }
     save(&mut card, name, title, profile)
+}
+
+/// [`format_and_save`] on the controller-1 memory-card slot. This is the
+/// call that can erase a card's directory; reach it only from an explicit
+/// "format this card?" answer.
+#[cfg(feature = "card")]
+pub fn format_and_save_slot_one<const ACTIONS: usize, const SCORES: usize>(
+    name: &str,
+    title: &str,
+    profile: &Profile<ACTIONS, SCORES>,
+) -> Result<(), CardError> {
+    let mut card = psx_mc::Card::new(psx_mc::HardwareCard::new(psx_mc::Slot::One));
+    format_and_save(&mut card, name, title, profile)
 }
 
 /// Load a profile from the controller-1 memory-card slot.
@@ -354,5 +391,58 @@ mod tests {
         save(&mut card, "BESLES-00000SETTEST1", "SETTINGS TEST", &profile).unwrap();
         let loaded = load::<_, 2, 2>(&mut card, "BESLES-00000SETTEST1").unwrap();
         assert_eq!(loaded, profile);
+    }
+
+    /// A card holding another game's save whose `MC` header frame was lost.
+    #[cfg(feature = "card")]
+    fn card_without_header() -> psx_mc::Card<psx_mc::RamCard> {
+        let mut card = psx_mc::Card::new(psx_mc::RamCard::new());
+        card.format().unwrap();
+        card.write("BESLES-00000OTHER001", "OTHER", b"another save")
+            .unwrap();
+        let mut image = *card.into_inner().image();
+        image[..psx_mc::FRAME_SIZE].fill(0);
+        psx_mc::Card::new(psx_mc::RamCard::from_image(&image).unwrap())
+    }
+
+    #[cfg(feature = "card")]
+    #[test]
+    fn saving_to_an_unformatted_card_is_refused_and_touches_nothing() {
+        let profile = Profile::<2, 1>::new(ACTIONS);
+        let mut card = card_without_header();
+        let before = *card.device().image();
+        assert_eq!(
+            save(&mut card, "BESLES-00000SETTEST1", "SETTINGS TEST", &profile),
+            Err(CardError::Card(psx_mc::Error::NotFormatted))
+        );
+        assert_eq!(card.device().image(), &before);
+    }
+
+    #[cfg(feature = "card")]
+    #[test]
+    fn formatting_is_a_separate_explicit_call() {
+        let profile = Profile::<2, 1>::new(ACTIONS);
+        // A blank card is formatted and written.
+        let mut blank = psx_mc::Card::new(psx_mc::RamCard::new());
+        format_and_save(
+            &mut blank,
+            "BESLES-00000SETTEST1",
+            "SETTINGS TEST",
+            &profile,
+        )
+        .unwrap();
+        assert_eq!(
+            load::<_, 2, 1>(&mut blank, "BESLES-00000SETTEST1").unwrap(),
+            profile
+        );
+        // A formatted card keeps its other saves.
+        let mut card = psx_mc::Card::new(psx_mc::RamCard::new());
+        card.format().unwrap();
+        card.write("BESLES-00000OTHER001", "OTHER", b"another save")
+            .unwrap();
+        format_and_save(&mut card, "BESLES-00000SETTEST1", "SETTINGS TEST", &profile).unwrap();
+        let mut buf = [0u8; 32];
+        let n = card.read("BESLES-00000OTHER001", &mut buf).unwrap();
+        assert_eq!(&buf[..n], b"another save");
     }
 }
