@@ -173,3 +173,32 @@ fn validation_survives_arbitrary_damage() {
         }
     }
 }
+
+/// The decoder derives its field width from the key-byte count in the blob
+/// (`(1 << (2 * key_bytes)) - 1`), which would overflow its 32-bit shifts for a
+/// wide count. Validation must reject every count above four, and a model it
+/// accepts must decode cleanly at any realistic position. (The blob here is
+/// sized for two-byte keys, so wider counts that fit the shifts are rejected
+/// too, for running off its end.)
+#[test]
+fn every_key_byte_count_is_either_rejected_or_decodes_without_overflow() {
+    let (blob, at) = build_blob();
+    let mut accepted = 0;
+    for key_bytes in 0..=255u8 {
+        let mut damaged = blob.clone();
+        damaged[at.rot_key_bytes] = key_bytes;
+        let Some(model) = new(damaged) else {
+            continue;
+        };
+        assert!(key_bytes <= 4, "{key_bytes} key bytes must be rejected");
+        accepted += 1;
+        let mut out = [Affine::ZERO; N_BONES];
+        // Up to 131,075 (about 512 source frames), the longest position the
+        // decoder's `position * factor` multiply holds in 32 bits.
+        for pos in [0, 1, 255, 256, 4 * 256, 100_000, 131_075] {
+            model.decode(0, pos, &mut out);
+        }
+    }
+    // The two-byte blob itself is among the accepted counts.
+    assert!(accepted >= 1);
+}
