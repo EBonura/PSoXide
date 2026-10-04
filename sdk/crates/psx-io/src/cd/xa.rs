@@ -160,7 +160,9 @@ trait Drive {
     fn set_filter(&mut self, file: u8, channel: u8) -> bool;
     fn set_target(&mut self, lba: u32) -> bool;
     fn start_streaming(&mut self) -> bool;
-    fn pause(&mut self);
+    /// Pause the drive and wait for it; `false` if the drive refused (it
+    /// does during the seek at the start of a read).
+    fn pause(&mut self) -> bool;
     /// Absolute LBA the head is reading, if the drive answers.
     fn head_lba(&mut self) -> Option<u32>;
 }
@@ -183,8 +185,8 @@ impl Drive for Mmio {
     fn start_streaming(&mut self) -> bool {
         try_command(CMD_READS, &[], COMMAND_SPINS).is_some()
     }
-    fn pause(&mut self) {
-        let _ = try_pause_until_complete(PAUSE_SPINS);
+    fn pause(&mut self) -> bool {
+        try_pause_until_complete(PAUSE_SPINS)
     }
     fn head_lba(&mut self) -> Option<u32> {
         let position = PlayPosition::parse(&try_play_position(COMMAND_SPINS)?)?;
@@ -209,6 +211,8 @@ struct Engine {
     state: State,
     song: Option<XaSong>,
     looping: bool,
+    /// A pause was refused; try again at the next poll.
+    pause_pending: bool,
     start_lba: u32,
     head_lba: u32,
 }
@@ -219,6 +223,7 @@ impl Engine {
             state: State::Idle,
             song: None,
             looping: false,
+            pause_pending: false,
             start_lba: 0,
             head_lba: 0,
         }
@@ -264,13 +269,16 @@ impl Engine {
         }
         self.start_lba = start;
         self.head_lba = start;
+        self.pause_pending = false;
         self.state = State::Seeking;
         Ok(())
     }
 
+    /// Pause a running drive. The drive refuses a pause during the seek that
+    /// starts a read, so a refused pause is retried by [`Self::poll`].
     fn stop(&mut self, drive: &mut impl Drive) {
         if self.state != State::Idle {
-            drive.pause();
+            self.pause_pending = !drive.pause();
         }
         self.state = State::Idle;
         self.song = None;
@@ -278,6 +286,9 @@ impl Engine {
 
     fn poll(&mut self, drive: &mut impl Drive) -> XaEvent {
         let Some(song) = self.song else {
+            if self.pause_pending {
+                self.pause_pending = !drive.pause();
+            }
             return XaEvent::Idle;
         };
         let end = self.start_lba + song.file.span_sector_count();
@@ -401,6 +412,7 @@ mod tests {
         log: Vec<String>,
         fail_at: Option<&'static str>,
         heads: Vec<Option<u32>>,
+        pause_refusals: u32,
     }
 
     impl Fake {
@@ -433,8 +445,13 @@ mod tests {
         fn start_streaming(&mut self) -> bool {
             self.step("read")
         }
-        fn pause(&mut self) {
+        fn pause(&mut self) -> bool {
             self.log.push("pause".into());
+            if self.pause_refusals > 0 {
+                self.pause_refusals -= 1;
+                return false;
+            }
+            true
         }
         fn head_lba(&mut self) -> Option<u32> {
             if self.heads.is_empty() {
@@ -559,6 +576,45 @@ mod tests {
         engine.stop(&mut drive);
         assert_eq!(drive.log.last().unwrap(), "pause");
         assert_eq!(engine.poll(&mut drive), XaEvent::Idle);
+    }
+
+    #[test]
+    fn a_refused_pause_is_retried_at_the_next_polls() {
+        let mut drive = Fake {
+            pause_refusals: 2,
+            ..Fake::default()
+        };
+        let mut engine = Engine::new();
+        engine
+            .start(&mut drive, song(DriveSpeed::Single), false)
+            .unwrap();
+        drive.log.clear();
+        engine.stop(&mut drive);
+        assert_eq!(engine.poll(&mut drive), XaEvent::Idle);
+        assert_eq!(engine.poll(&mut drive), XaEvent::Idle);
+        assert_eq!(drive.log, ["pause", "pause", "pause"]);
+        // Accepted: no further commands.
+        assert_eq!(engine.poll(&mut drive), XaEvent::Idle);
+        assert_eq!(drive.log.len(), 3);
+    }
+
+    #[test]
+    fn starting_a_song_cancels_a_pending_pause() {
+        let mut drive = Fake {
+            pause_refusals: 5,
+            ..Fake::default()
+        };
+        let mut engine = Engine::new();
+        engine
+            .start(&mut drive, song(DriveSpeed::Single), false)
+            .unwrap();
+        engine.stop(&mut drive);
+        engine
+            .start(&mut drive, song(DriveSpeed::Single), false)
+            .unwrap();
+        drive.log.clear();
+        assert_eq!(engine.poll(&mut drive), XaEvent::Playing);
+        assert!(drive.log.is_empty());
     }
 
     #[test]
