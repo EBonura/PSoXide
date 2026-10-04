@@ -1,15 +1,20 @@
 //! Painter-order command streaming with bounded GPU DMA nodes.
 //!
-//! Each complete GP0 packet stays together in a node of at most 15 payload
-//! words (16 including its DMA tag). Submitted storage remains immutable until
-//! DMA completes. The backing slice is static so moving or forgetting the
-//! stream cannot invalidate an in-flight DMA address. No allocation is used.
+//! Each complete GP0 packet stays together in one node of at most
+//! [`NODE_PAYLOAD_WORDS`] payload words after its DMA tag. Submitted storage
+//! remains immutable until DMA completes. The backing slice is static, so
+//! moving or forgetting the stream cannot invalidate an in-flight DMA
+//! address. No allocation is used.
 
 use core::marker::PhantomData;
 use core::ptr::NonNull;
 use psx_io::periph::GpuDma;
 
-/// Conservative merged primitive payload limit, excluding the DMA tag.
+/// Most payload words the stream packs into one node, after its tag.
+///
+/// One word under [`crate::MAX_NODE_WORDS`], the node length the
+/// hardware-tests v1.24 drawing case points to. The spare word is a margin,
+/// not a second measured limit.
 pub const NODE_PAYLOAD_WORDS: usize = 15;
 const _: () = assert!(NODE_PAYLOAD_WORDS <= crate::MAX_NODE_WORDS);
 const END: u32 = 0x00ff_ffff;
