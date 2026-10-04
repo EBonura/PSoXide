@@ -50,6 +50,11 @@ pub struct Gpu(GpuDma); // the psx-io token, zero-sized
   examples built byte-identical or frame-identical against the free
   functions it replaced.
 
+Ownership is complete inside psx-gpu only. psx-vram, psx-font, psx-osk and
+psx-fx still write GP0 without the token, and psx-io's port writes are safe
+free functions anyone can call. Work package WP2 moves them onto `&mut Gpu`
+(or the token), after which the borrow checker sees every GPU writer.
+
 ## DMA: prove the buffer outlives the transfer
 
 The DMA controller reads and writes RAM with no regard for borrows, so the
