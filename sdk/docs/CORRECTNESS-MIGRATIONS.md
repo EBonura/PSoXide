@@ -184,3 +184,23 @@ Callers of `save_slot_one` that relied on the silent format and so now see
 `game/src/main.rs` (1), PSoXide-editor `engine/examples/game-invaders` and
 `game-pong` (1 each). Each should show a prompt and call
 `format_and_save_slot_one` on yes. `load_slot_one` is unchanged.
+
+## psx-cache: a late load cannot fill another key's slot (cache-01)
+
+`SlotCache::reserve` returned a bare slot index and `mark_ready(slot, value)`
+stored into any occupied slot. A load that finished after its key was
+evicted, and its slot given to another key, wrote its value under that other
+key: `reserve(1)`, `evict(1)`, `reserve(2)` (same slot), `mark_ready(slot,
+value_for_1)` left key 2 `Ready` with key 1's value. Asynchronous loads
+(a CD read finishing frames later) are exactly when that happens.
+
+| Old | New |
+| --- | --- |
+| `reserve(key) -> Option<usize>` | `begin_load(key) -> Option<Reservation>` (`Reservation::slot()`, `key()`) |
+| `mark_ready(slot, value)` | `finish_load(reservation, value) -> Result<(), Stale>` |
+
+`finish_load` stores only if the reservation's key still owns the slot and
+returns `Stale` otherwise. The old pair stays, deprecated and unchanged, for
+one stage. Caller: hk-psx `shared/hk-cache/src/lib.rs` (1 `reserve`, 1
+`mark_ready`, the latter in the same call so it cannot go stale today; move
+it anyway when a load can span frames).
