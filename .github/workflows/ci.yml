@@ -15,7 +15,15 @@ jobs:
       - run: cargo fmt --manifest-path sdk/Cargo.toml --all -- --check
       - run: make check
       - run: make test
-      - run: rustup component add miri && make miri
       - run: make lint
       - name: Build a PS1 executable without editor or emulator sources
         run: make hello-tri
+  miri:
+    # Every SDK crate under Miri, Stacked and Tree Borrows. Its own job:
+    # interpreted tests take far longer than the native ones.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - run: rustup component add miri
+      - run: make miri

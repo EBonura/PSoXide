@@ -540,6 +540,10 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "exhaustive sweep, minutes under Miri; make test runs it natively"
+    )]
     fn unsigned_square_root_full_domain_boundaries() {
         let check = |n: u64| {
             let r = u64::from(isqrt_u64(n));
@@ -563,6 +567,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "exhaustive sweep, minutes under Miri; make test runs it natively"
+    )]
     fn mul_div_u32_preserves_full_width_animation_phases() {
         let check = |a: u32, b: u32, d: u32| {
             let expected = u64::from(a) * u64::from(b) / u64::from(d);
@@ -593,6 +601,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "exhaustive sweep, minutes under Miri; make test runs it natively"
+    )]
     fn wrapped_scroll_matches_wide_oracle_at_wrap_and_tick_boundaries() {
         let check = |speed: i16, phase: u8, period: u16, tick: u32, hz: u16| {
             let distance = if hz == 0 {
@@ -648,6 +660,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "exhaustive sweep, minutes under Miri; make test runs it natively"
+    )]
     fn invariant_divisor_31_is_exact() {
         let mut state = 0x9e37_79b9_7f4a_7c15u64;
         let mut next = || {
@@ -707,6 +723,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "exhaustive sweep, minutes under Miri; make test runs it natively"
+    )]
     fn mul_q12_i32_matches_wide_where_exact() {
         // Random pairs across the whole tracer domain (Q20.12 points up to
         // +-2^24 against Q3.12 normals up to +-4096) plus the classic edges;
@@ -777,6 +797,10 @@ mod tests {
 
     /// The nibble root this replaced, below 2^48: the two must agree.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "exhaustive sweep, minutes under Miri; make test runs it natively"
+    )]
     fn isqrt_u64_matches_the_nibble_root_below_2_48() {
         let mut next = xorshift(0x9e37_79b9_7f4a_7c15);
         for i in 0..4_000_000u64 {
@@ -790,6 +814,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "exhaustive sweep, minutes under Miri; make test runs it natively"
+    )]
     fn isqrt_u64_is_exact_at_every_path_boundary() {
         // Squares either side of the table seed, the 2^48 fast-path limit,
         // the clamped Newton start (seed 2^24 - 1) and the top of the domain.
@@ -814,6 +842,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "exhaustive sweep, minutes under Miri; make test runs it natively"
+    )]
     fn isqrt_u64_matches_definition_at_every_magnitude() {
         let mut next = xorshift(0x2545_f491_4f6c_dd1d);
         for i in 0..2_000_000u64 {
@@ -826,6 +858,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "exhaustive sweep, minutes under Miri; make test runs it natively"
+    )]
     fn div_u64_by_u32_every_short_divisor_and_digit_boundary() {
         let check = |n: u64, d: u32| {
             assert_eq!(
@@ -923,6 +959,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "exhaustive sweep, minutes under Miri; make test runs it natively"
+    )]
     fn mul_div_i32_matches_i64_on_random_inputs_at_every_magnitude() {
         let mut next = xorshift(0x5817_9513_0bad_cafe);
         for i in 0..2_000_000u32 {
@@ -954,6 +994,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "exhaustive sweep, minutes under Miri; make test runs it natively"
+    )]
     fn shift_multiplies_match_i64_for_every_shift() {
         let check = |a: i32, b: i32, shift: u32| {
             let product = i64::from(a) * i64::from(b);
