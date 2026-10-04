@@ -37,14 +37,18 @@ pub enum Fault {
 
 #[derive(Debug)]
 pub struct Model {
+    // psx-numeric-allow-next-line: host-only controller model, compiled under cfg(test)
     pub now: u64,
     pub selected: bool,
     pub step: usize,
     pub final_step: usize,
     pub cmd: u8,
     pub last_rx: u8,
+    // psx-numeric-allow-next-line: host-only controller model, compiled under cfg(test)
     pub ack_at: u64,
+    // psx-numeric-allow-next-line: host-only controller model, compiled under cfg(test)
     pub ack_end: u64,
+    // psx-numeric-allow-next-line: host-only controller model, compiled under cfg(test)
     pub pending: Vec<(u8, u64)>,
     /// ID the pad reports now: 0x41, 0x73, 0xF3, or 0xFF for an empty port.
     pub id: u8,
@@ -62,9 +66,13 @@ pub struct Model {
     /// ticks late, and a host that clocks the next byte before that ACK
     /// ended gets `byte`'s reply again instead of a fresh one: the packet
     /// slips.
+    // psx-numeric-allow-next-line: host-only controller model, compiled under cfg(test)
     pub slow_ack: Option<(usize, u64)>,
+    // psx-numeric-allow-next-line: host-only controller model, compiled under cfg(test)
     pub rx_delay: u64,
+    // psx-numeric-allow-next-line: host-only controller model, compiled under cfg(test)
     pub ack_delay: u64,
+    // psx-numeric-allow-next-line: host-only controller model, compiled under cfg(test)
     pub ack_width: u64,
     pub fault: Fault,
     pub fault_byte: usize,

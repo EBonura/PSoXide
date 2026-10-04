@@ -18,12 +18,15 @@
 //! except the finished table.
 
 /// One in the 2.62 fixed point used for the intermediate math.
+// psx-numeric-allow-next-line: const-evaluated; only the finished i16 table exists at run time
 const ONE: i128 = 1 << 62;
 
 /// Coefficient scale: the matrix is in 1.15 fixed point.
+// psx-numeric-allow-next-line: const-evaluated; only the finished i16 table exists at run time
 const SCALE: i128 = 1 << 15;
 
 /// arctan(1/x) in 2.62 fixed point, from its alternating series.
+// psx-numeric-allow-next-line: const-evaluated; only the finished i16 table exists at run time
 const fn atan_inv(x: i128) -> i128 {
     let x2 = x * x;
     let mut power = ONE / x; // 1 / x^(2i+1)
@@ -43,10 +46,12 @@ const fn atan_inv(x: i128) -> i128 {
 }
 
 /// pi in 2.62 fixed point (Machin: pi = 16 atan(1/5) - 4 atan(1/239)).
+// psx-numeric-allow-next-line: const-evaluated; only the finished i16 table exists at run time
 const PI: i128 = 16 * atan_inv(5) - 4 * atan_inv(239);
 
 /// cos(a * pi / 16) in 2.62 fixed point, for `a` in 0..=8 (the first
 /// quadrant), from the Taylor series around zero.
+// psx-numeric-allow-next-line: const-evaluated; only the finished i16 table exists at run time
 const fn cos_sixteenths(a: i128) -> i128 {
     let theta = PI * a / 16;
     let mut term = ONE;
@@ -64,6 +69,7 @@ const fn cos_sixteenths(a: i128) -> i128 {
 /// trunc(32768 * cos(m * pi / 16)) for any `m`, folding the angle into
 /// the first quadrant and carrying the sign separately.
 const fn basis(m: usize) -> i16 {
+    // psx-numeric-allow-next-line: const-evaluated; only the finished i16 table exists at run time
     let m = (m % 32) as i128;
     let (a, negative) = match m {
         0..=8 => (m, false),
@@ -85,6 +91,7 @@ const fn basis(m: usize) -> i16 {
 }
 
 /// floor(sqrt(n)), by bisection.
+// psx-numeric-allow-next-line: const-evaluated; only the finished i16 table exists at run time
 const fn isqrt(n: u64) -> u64 {
     let (mut lo, mut hi) = (0u64, n + 1);
     while hi - lo > 1 {
