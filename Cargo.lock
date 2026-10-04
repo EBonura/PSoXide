@@ -137,6 +137,7 @@ dependencies = [
 name = "psx-audio-cook"
 version = "0.1.0"
 dependencies = [
+ "psx-hw",
  "psxed-format",
 ]
 
