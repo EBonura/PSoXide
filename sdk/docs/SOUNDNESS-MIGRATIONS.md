@@ -91,21 +91,20 @@ Callers: hl-psx `game/src/main.rs` (`md` parsed at line 4867, compacted at
 replace the `compact_visible_body_frames_raw` block with:
 
 ```rust
+let remap = core::ptr::addr_of_mut!(MODEL_SCRATCH).cast::<u16>();
 // `md` borrows these bytes; it is not used again from here.
-let blob = core::slice::from_raw_parts_mut(buf_ptr.add(gw).cast::<u8>(), glen);
-let remap = core::slice::from_raw_parts_mut(
-    core::ptr::addr_of_mut!(MODEL_SCRATCH).cast::<u16>(),
-    MAX_MODEL_VERTS,
-);
-if let Some(compact_kept) = Model::compact_visible_bodies(blob, visible_bodies, remap) {
+if let Some(compact_kept) = Model::compact_visible_bodies(
+    core::slice::from_raw_parts_mut(buf_ptr.add(gw).cast::<u8>(), glen),
+    visible_bodies,
+    core::slice::from_raw_parts_mut(remap, MAX_MODEL_VERTS),
+) {
     kept = compact_kept;
-    // the face-index loop as before, reading `remap[i]` instead of
-    // `core::ptr::read(remap.add(i))`
+    // the face-index loop unchanged: both slices are dead, so its raw
+    // `remap` reads are fine
 }
 ```
 
-`md` must not be used after the call (it is not today). The face-index
-loop may keep its raw reads; indexing the slice adds a bounds check per
-face at load time only. `streamed_model_bytes_at` hands `md` the KSEG0 alias
-of the same RAM (`canonical_ram_const`), so the two pointers differ in
-address but not in memory: the rule above is what keeps it sound.
+`md` must not be used after the call (it is not today).
+`streamed_model_bytes_at` hands `md` the KSEG0 alias of the same RAM
+(`canonical_ram_const`), so the two pointers differ in address but not in
+memory: the rule above is what keeps it sound.
