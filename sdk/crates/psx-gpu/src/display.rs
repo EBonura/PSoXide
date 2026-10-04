@@ -291,6 +291,13 @@ impl DoubleBuffer {
         gp1::display_start(x as u32, y as u32)
     }
 
+    /// The draw-area and draw-offset words for the buffer being drawn.
+    #[cfg(feature = "present-queue")]
+    pub(crate) const fn draw_target_words(&self) -> [u32; 3] {
+        let (_, top) = self.draw_origin();
+        crate::gpu::draw_target_words(top, self.size.0, self.size.1)
+    }
+
     /// Program the draw area and draw offset for the buffer being drawn.
     pub fn apply_draw_target(&self, _gpu: &mut crate::Gpu) {
         let (_, top) = self.draw_origin();

@@ -434,10 +434,19 @@ impl<const N: usize, S> FrameStorage<N, S> {
     }
 
     /// Clear the table and run `build` with the frame and the storage.
-    fn build<R>(&mut self, build: impl for<'f> FnOnce(&mut OtFrame<'f, N>, &'f mut S) -> R) -> R {
+    pub(crate) fn build<R>(
+        &mut self,
+        build: impl for<'f> FnOnce(&mut OtFrame<'f, N>, &'f mut S) -> R,
+    ) -> R {
         let Self { ot, packets } = self;
         let mut frame = ot.frame();
         build(&mut frame, packets)
+    }
+
+    /// The node the table built last starts its walk at.
+    #[cfg(feature = "present-queue")]
+    pub(crate) fn submit_head(&self) -> *const u32 {
+        self.ot.submit_head()
     }
 
     /// Kick the table built last without waiting.
