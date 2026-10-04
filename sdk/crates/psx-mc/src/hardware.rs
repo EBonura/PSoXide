@@ -182,6 +182,13 @@ impl<P: BorrowMut<ControllerPort>> HardwareCard<P> {
     pub fn last_trace(&self) -> TransportTrace {
         self.trace
     }
+
+    /// The port, between transactions, for another driver that shares it (a
+    /// pad poll). Every frame read or write finishes inside its own call, so
+    /// the card is never mid-transaction when this is reachable.
+    pub fn controller_port(&mut self) -> &mut ControllerPort {
+        self.port.borrow_mut()
+    }
 }
 
 /// One frame transaction's view of the port: the shared transport plus the
