@@ -196,7 +196,10 @@ pub fn vsync() {
     while timers::counter(timers::Timer::Timer1) < 242 {}
 }
 
-/// Texture color depth passed to [`Gpu::set_texture_page`].
+/// Texture color depth for the deprecated `set_texture_page`.
+#[deprecated(
+    note = "only `set_texture_page` used it; `TextureMaterial` and psx-vram's `TextureDepth` describe texture pages"
+)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub enum TextureDepth {

@@ -3,6 +3,11 @@
 //! driver method runs; `sdk/docs/MIGRATION-psx-gpu.md` lists the
 //! replacements and every downstream call site.
 
+#![allow(
+    deprecated,
+    reason = "the forwarders use the deprecated types they kept"
+)]
+
 use crate::display::{DisplayConfig, Resolution, VideoMode};
 use crate::gpu;
 use crate::material::{BlendMode, TextureMaterial};
@@ -98,9 +103,17 @@ pub fn set_mask_mode(set_on_draw: bool, check_before_draw: bool) {
 }
 
 /// Select a texture page for textured rectangles.
-#[deprecated(note = "use `Gpu::set_texture_page`")]
+#[deprecated(note = "use `Gpu::set_draw_mode` with a `TextureMaterial` for the page")]
 pub fn set_texture_page(tpage_x: u16, tpage_y: u16, depth: TextureDepth) {
-    gpu::set_texture_page((tpage_x, tpage_y), depth);
+    psx_io::gpu::wait_command_ready();
+    psx_io::gpu::write_command(psx_hw::gpu::gp0::draw_mode(
+        (tpage_x / 64) as u32,
+        (tpage_y / 256) as u32,
+        0,
+        depth as u32,
+        false,
+        true,
+    ));
 }
 
 /// Fill a VRAM rectangle with a solid color.
