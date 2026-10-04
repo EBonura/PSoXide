@@ -546,6 +546,9 @@ impl Model {
                 } else if !hi {
                     let (i, f, nk) = seg(d, off, rc, pos_q8);
                     let kb = u8_at(d, p + 4) as usize;
+                    // `tracks_fit` rejects `kb > 4`, so a model that got this far
+                    // has `w <= 8` and the field shifts below cannot overflow.
+                    debug_assert!(kb <= 4, "a validated rotation track has 0..=4 key bytes");
                     let w = (kb as u32) << 1;
                     let mask = (1u32 << w) - 1;
                     let (b0, b1, b2, b3) = (
