@@ -990,6 +990,10 @@ impl AnimationClipBakeKind {
 /// skeleton-shared data.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AnimationClipResource {
+    /// Keep authored sample timing, including any terminal sampler sentinel.
+    /// Used by transitions whose handoff must land on an exact pose and tick.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub preserve_samples: bool,
     /// Path to the cooked `.psxanim` artifact.
     pub psxanim_path: String,
     /// Skeleton this clip targets.

@@ -3382,6 +3382,7 @@ fn animation_library_resources_roundtrip_and_resolve_by_path() {
     let idle_animation = project.add_resource(
         "Idle",
         ResourceData::AnimationClip(AnimationClipResource {
+            preserve_samples: false,
             psxanim_path: "assets/animations/idle.psxanim".to_string(),
             skeleton: Some(skeleton),
             target_model: None,
@@ -3475,6 +3476,7 @@ fn model_targeted_animation_clips_do_not_leak_across_shared_skeletons() {
         ResourceData::Model(make_model("assets/models/b.psxmdl")),
     );
     let make_clip = |path: &str, target_model| AnimationClipResource {
+        preserve_samples: false,
         psxanim_path: path.to_string(),
         skeleton: Some(skeleton),
         target_model,

@@ -621,6 +621,37 @@ pub fn analyze_pxbsp_draw_cost(
     }))
 }
 
+/// Resolve camera samples using the exact cooked BSP, not approximate surface bounds.
+/// Coordinates are authored editor units; conversion preserves sub-engine-unit precision.
+/// Leaf zero is solid/exterior and must never be treated as a cheap playable area.
+pub fn pxbsp_leaves_at_authored_points(
+    package: &PlaytestPackage,
+    points: &[[i32; 3]],
+) -> Result<Vec<Option<usize>>, String> {
+    let PlaytestWorldGeometry::Pxbsp(world) = &package.world_geometry else {
+        return Err("the package has no PXBSP world geometry".into());
+    };
+    let mut map = psx_bsp::pxbsp_resident::PxbspResidentMap::with_capacity(world.bytes.len());
+    map.load(0, &mut SliceReader::new(&world.bytes))
+        .map_err(|error| format!("could not load cooked PXBSP: {error}"))?;
+    points
+        .iter()
+        .map(|point| {
+            let q12 = |v: i32| {
+                v.checked_mul(4096 / crate::units::WORLD_UNIT_DIVISOR)
+                    .ok_or_else(|| {
+                        format!("authored point {point:?} exceeds the BSP coordinate range")
+                    })
+            };
+            Ok(map.point_leaf_index(psx_bsp::Vec3I32 {
+                x: q12(point[0])?,
+                y: q12(point[1])?,
+                z: q12(point[2])?,
+            }))
+        })
+        .collect()
+}
+
 fn pxbsp_leaf_authored_surface_bounds(
     leaf: Leaf,
     marks: psx_bsp::RecordSlice<'_, u16>,
@@ -1307,6 +1338,12 @@ mod tests {
                 && leaf.base_triangle_count <= total
                 && leaf.authored_surface_anchor.is_some()
         }));
+        let sampled =
+            pxbsp_leaves_at_authored_points(&package, &[[8256, 65, 12352], [8256, 32, 12352]])
+                .expect("authored camera samples");
+        assert!(sampled[0].is_some_and(|leaf| leaf > 0));
+        assert_eq!(sampled[1], Some(0));
+        assert!(pxbsp_leaves_at_authored_points(&package, &[[i32::MAX, 0, 0]]).is_err());
         let budget = cooked_playtest_budgets(&project, &package);
         assert_eq!(
             budget.packet_count,

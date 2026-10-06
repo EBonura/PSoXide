@@ -458,6 +458,7 @@ fn main() {
             .unwrap_or_else(|e| fail(format!("{}: {e}", psxanim_path.display())));
 
         let resource = AnimationClipResource {
+            preserve_samples: false,
             psxanim_path: relative_to(&psxanim_path, &project_root),
             skeleton: model_skeleton,
             target_model: Some(model_id),
@@ -893,6 +894,7 @@ fn build_native_model(
             project,
             format!("{pack_name}_{stem}"),
             AnimationClipResource {
+                preserve_samples: false,
                 psxanim_path: relative_to(&psxanim_path, project_root),
                 skeleton: skeleton_id,
                 target_model: Some(model_id),

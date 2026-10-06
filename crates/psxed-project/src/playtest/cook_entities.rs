@@ -1746,10 +1746,14 @@ pub(crate) fn register_model_for_instance(
         };
         let corrected_source = psx_asset::Animation::from_bytes(&animation_bytes)
             .expect("host-generated corrected animation must parse");
+        let preserve_samples = animation_resource
+            .and_then(|id| project.resource(id))
+            .is_some_and(|resource| matches!(&resource.data,
+                ResourceData::AnimationClip(clip) if clip.preserve_samples));
         let source_frame_count = corrected_source.frame_count();
         let (source_frame_first, source_frame_last) = crate::animation_resample::live_frame_range(
             &corrected_source,
-            project.animation_trim_still_percent,
+            if preserve_samples { 0 } else { project.animation_trim_still_percent },
         );
         // Resample AFTER pose correction, so the budget is measured against the
         // poses that actually ship, and BEFORE frame bounds are baked, so the
@@ -1759,12 +1763,12 @@ pub(crate) fn register_model_for_instance(
         // rather than against a stretch of stillness that is about to go.
         let animation_bytes = trim_still_ends(
             animation_bytes,
-            project.animation_trim_still_percent,
+            if preserve_samples { 0 } else { project.animation_trim_still_percent },
             &label,
         );
         let animation_bytes = resample_under_budget(
             animation_bytes,
-            project.animation_error_budget_degrees,
+            if preserve_samples { 0 } else { project.animation_error_budget_degrees },
             &label,
         );
         let corrected_anim = psx_asset::Animation::from_bytes(&animation_bytes)

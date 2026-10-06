@@ -753,6 +753,7 @@ pub fn import_animation_library(
         let id = project.add_resource(
             clip.sanitized_name.clone(),
             ResourceData::AnimationClip(AnimationClipResource {
+                preserve_samples: false,
                 psxanim_path: relativise(&path, Some(project_root)),
                 skeleton: Some(skeleton_id),
                 target_model: None,
@@ -944,6 +945,7 @@ pub fn bake_animation_source_for_model(
     let stored_path = relativise(&clip_path, Some(project_root));
     let resource_name = format!("{model_name} / {clip_name}");
     let clip_resource = AnimationClipResource {
+        preserve_samples: false,
         psxanim_path: stored_path,
         skeleton,
         target_model: Some(model_id),
