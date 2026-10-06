@@ -33,7 +33,7 @@ pub(super) fn model_tables() -> mr::ModelTables {
 const HORIZON_STANCE_RGB: (u8, u8, u8) = (255, 113, 58);
 const ZENITH_STANCE_RGB: (u8, u8, u8) = (108, 224, 198);
 
-fn stance_rgb(stance: VitalityChannelId) -> (u8, u8, u8) {
+pub(super) fn stance_rgb(stance: VitalityChannelId) -> (u8, u8, u8) {
     match stance {
         VitalityChannelId::One => HORIZON_STANCE_RGB,
         VitalityChannelId::Two => ZENITH_STANCE_RGB,
@@ -825,6 +825,15 @@ impl Playtest {
         // this is the number that says which cooked frame is on screen.
         if let Some(pose) = self.player_actor_pose {
             self.player_dash_assembly.observe(pose);
+            if let Some(character) = self.character.as_ref() {
+                self.player_scarf.tick(
+                    model_tables(),
+                    pose,
+                    player_phase_height(character),
+                    player.y,
+                    ctx.video_hz,
+                );
+            }
             if pose.action() == CharacterAnimationAction::Intro
                 && self.opening.take_punch(pose.pose().phase_q12())
             {
@@ -908,6 +917,7 @@ impl Playtest {
     pub(super) fn clear_actor_pose_snapshots(&mut self) {
         self.player_actor_pose = None;
         self.player_dash_assembly = mr::PlayerDashAssembly::new();
+        self.player_scarf = mr::PlayerScarf::new();
         self.previous_player_actor_pose = None;
         self.previous_instance_actor_poses.fill(None);
         for pose in self.instance_actor_poses.iter_mut() {

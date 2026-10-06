@@ -42,6 +42,8 @@ mod death_dissolve;
 pub use death_dissolve::{ModelDeathCapture, ModelDeathDissolve};
 mod dash_assembly;
 pub use dash_assembly::PlayerDashAssembly;
+mod scarf;
+pub use scarf::PlayerScarf;
 mod instances;
 mod phase_assembly;
 mod shadows;

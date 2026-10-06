@@ -66,6 +66,64 @@ impl ModelPhaseAssembly {
         self.elapsed >= self.duration
     }
 
+    /// Untextured clothing follows the body's burst and height-ordered arrival
+    /// clock. Transform the live cloth targets without disturbing its solver.
+    /// After arrival the exact target is returned, and no finish fade is applied.
+    pub(super) fn cloth_fragment(
+        self,
+        target: [WorldVertex; 3],
+        index: usize,
+    ) -> Option<[WorldVertex; 3]> {
+        if self.is_assembled() {
+            return Some(target);
+        }
+        let center = WorldVertex::new(
+            (target[0].x + target[1].x + target[2].x) / 3,
+            (target[0].y + target[1].y + target[2].y) / 3,
+            (target[0].z + target[1].z + target[2].z) / 3,
+        );
+        let (offset, scale) = if self.elapsed < BURST_TICKS {
+            let progress = i32::from(self.elapsed) * 256 / i32::from(BURST_TICKS);
+            let radius = self.height * progress / 384;
+            let angle = Angle::from_q12((index as u16 & 7) * 512);
+            (
+                WorldVertex::new(
+                    angle.sin_q12() * radius >> 12,
+                    (index as i32 % 3 - 1) * radius / 2,
+                    angle.cos_q12() * radius >> 12,
+                ),
+                256 - (progress * progress >> 8),
+            )
+        } else {
+            let height =
+                ((center.y - self.floor_y).clamp(0, self.height) * 4096 / self.height) as u16;
+            let (age, remaining) = self.flight(height);
+            if age == 0 {
+                return None;
+            }
+            if age == FLIGHT_TICKS {
+                return Some(target);
+            }
+            let angle = Angle::from_q12((index as u16).wrapping_mul(1567));
+            let radius = self.height * (65 + (index % 4) as i32 * 12) / 100;
+            (
+                WorldVertex::new(
+                    ((angle.sin_q12() * radius >> 12) * remaining) >> 8,
+                    (((index % 7) as i32 - 3) * self.height / 16 * remaining) >> 8,
+                    ((angle.cos_q12() * radius >> 12) * remaining) >> 8,
+                ),
+                256 + remaining,
+            )
+        };
+        Some(target.map(|p| {
+            WorldVertex::new(
+                center.x + offset.x + ((p.x - center.x) * scale >> 8),
+                center.y + offset.y + ((p.y - center.y) * scale >> 8),
+                center.z + offset.z + ((p.z - center.z) * scale >> 8),
+            )
+        }))
+    }
+
     fn finish_strength_q8(self) -> i32 {
         let restore = self
             .elapsed
@@ -437,6 +495,47 @@ fn merge_attached(stats: &mut WorldRenderStats, next: TexturedModelRenderStats) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cloth_bursts_and_reassembles_on_the_body_clock_without_finish_fade() {
+        let target = [
+            WorldVertex::new(-20, 850, 0),
+            WorldVertex::new(20, 850, 0),
+            WorldVertex::new(0, 800, 0),
+        ];
+        let base = ModelPhaseAssembly::new(0, 72, (108, 224, 198), 0, 1000).unwrap();
+        assert_eq!(base.cloth_fragment(target, 2), Some(target));
+        let burst = ModelPhaseAssembly { elapsed: 6, ..base };
+        assert_ne!(burst.cloth_fragment(target, 2), Some(target));
+        assert_ne!(
+            burst.cloth_fragment(target, 2),
+            burst.cloth_fragment(target, 3)
+        );
+        assert_eq!(
+            ModelPhaseAssembly {
+                elapsed: 12,
+                ..base
+            }
+            .cloth_fragment(target, 2),
+            None
+        );
+        let height = (833u32 * 4096 / 1000) as u16;
+        let arrival = base.arrival(height);
+        assert_ne!(
+            ModelPhaseAssembly {
+                elapsed: arrival - 9,
+                ..base
+            }
+            .cloth_fragment(target, 2),
+            Some(target)
+        );
+        for elapsed in arrival..108 {
+            assert_eq!(
+                ModelPhaseAssembly { elapsed, ..base }.cloth_fragment(target, 2),
+                Some(target)
+            );
+        }
+    }
 
     #[test]
     fn feet_land_before_head_and_all_pieces_finish_on_time() {

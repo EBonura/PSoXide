@@ -1803,6 +1803,29 @@ impl Scene for Playtest {
                             &mut world,
                         )
                     });
+                // Share the stance burst/reassembly clock, but keep scarf packets
+                // outside the body's finish fade so its stance hue persists.
+                if !camera_in_player && player_lighting.is_some() {
+                    self.player_scarf.draw(
+                        camera,
+                        stance_rgb(self.player_stance.active()),
+                        player_phase_assembly(
+                            self.player_stance,
+                            &self.player_stance_config,
+                            player,
+                            player_phase_height(character),
+                        )
+                        .filter(|_| {
+                            matches!(
+                                self.player_dash_assembly.visual(ctx.sim_tick),
+                                psx_game_runtime::model_rendering::DashWireVisual::Solid
+                            )
+                        }),
+                        actor_options,
+                        &mut primitive_packets,
+                        &mut world,
+                    );
+                }
                 telemetry::stage_end(telemetry::stage::PLAYER);
                 emit_model_counters(
                     player_draw.stats,
