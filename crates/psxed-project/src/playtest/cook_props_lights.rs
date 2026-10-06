@@ -2008,6 +2008,12 @@ pub(crate) fn push_game_entity(
         return false;
     }
     let mut flags = psx_level::game_entity_flags::ENABLED;
+    if enemy.training {
+        flags |= psx_level::game_entity_flags::TRAINING;
+    }
+    if enemy.tactical {
+        flags |= psx_level::game_entity_flags::TACTICAL;
+    }
     if state_clips.run_supported {
         flags |= psx_level::game_entity_flags::CAN_RUN;
     }
@@ -2061,6 +2067,7 @@ pub(crate) fn push_game_entity(
         reaction_ticks: enemy.reaction_ticks,
         preferred_distance: enemy.preferred_distance,
         spacing_tolerance: enemy.spacing_tolerance,
+        spacing_speed_percent: enemy.spacing_speed_percent.clamp(1, 100),
         decision_interval_ticks: enemy.decision_interval_ticks,
         circle_chance: enemy.circle_chance,
         attack_priority: enemy.attack_priority,

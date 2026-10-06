@@ -1809,6 +1809,8 @@ pub struct PlaytestGameEntity {
     /// enough for the authored Light Attack event at the cooked clip rate.
     pub attack_active_ticks: u16,
     /// Attack-state ticks for Horizon Heavy.
+    /// Circling/retreat percentage of walk speed; quantized to whole units, minimum one.
+    pub spacing_speed_percent: u8,
     pub heavy_attack_active_ticks: u16,
     /// Attack-state ticks for the projectile action.
     pub ranged_attack_active_ticks: u16,

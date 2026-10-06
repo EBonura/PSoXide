@@ -226,6 +226,7 @@ fn enemy_behavior_deserializes_without_combat_director_tuning_fields() {
     assert_eq!(enemy.reaction_ticks, defaults.reaction_ticks);
     assert_eq!(enemy.preferred_distance, defaults.preferred_distance);
     assert_eq!(enemy.spacing_tolerance, defaults.spacing_tolerance);
+    assert_eq!(enemy.spacing_speed_percent, 100);
     assert_eq!(
         enemy.decision_interval_ticks,
         defaults.decision_interval_ticks
@@ -4684,4 +4685,24 @@ fn action_chains_cook_and_reject_missing_targets_bad_windows_and_duplicates() {
             report.errors
         );
     }
+}
+
+#[test]
+fn graybox_single_enemy_tactical_encounter_cooks_with_approved_walk() {
+    let root = projects_dir().join("graybox-reach");
+    let source = std::fs::read_to_string(root.join("project.ron")).unwrap();
+    let project = ProjectDocument::from_ron_str(&source).unwrap();
+    let (package, report) = playtest::build_package(&project, &root);
+    assert!(report.is_ok(), "{:?}", report.errors);
+    let package = package.unwrap();
+    assert_eq!(package.game_entities.len(), 1);
+    let enemy = &package.game_entities[0];
+    assert_ne!(enemy.flags & psx_level::game_entity_flags::TACTICAL, 0);
+    assert_ne!(enemy.flags & psx_level::game_entity_flags::TRAINING, 0);
+    assert_ne!(enemy.walk_clip, enemy.run_clip);
+    assert_ne!(enemy.attack_clip, enemy.heavy_attack_clip);
+    assert_ne!(enemy.attack_clip, enemy.ranged_attack_clip);
+    let walk = project.resources.iter().find(|r| r.name == "Light Enemy / Walk").unwrap();
+    let ResourceData::AnimationClip(walk) = &walk.data else { panic!("walk clip"); };
+    assert_eq!(walk.psxanim_path, "assets/animations/light_walk_v5/walk.psxanim");
 }

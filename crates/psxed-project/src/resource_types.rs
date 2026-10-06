@@ -2298,6 +2298,12 @@ pub struct EnemyBehaviorSettings {
     /// 60 Hz ticks of post-attack recovery (the punish window).
     #[serde(default = "default_enemy_recovery_ticks")]
     pub recovery_ticks: u8,
+    /// Enable sustained tactical movement and explicit blocked-path recovery.
+    #[serde(default)]
+    pub tactical: bool,
+    /// Show encounter diagnostics and enable Select + L1 to restart the encounter.
+    #[serde(default)]
+    pub training: bool,
     /// Poise pool; poise damage past it staggers the enemy.
     #[serde(default = "default_enemy_poise")]
     pub poise: u16,
@@ -2317,6 +2323,9 @@ pub struct EnemyBehaviorSettings {
     /// grant the default rather than nothing.
     #[serde(default = "default_enemy_soul_value")]
     pub soul_value: u16,
+    /// Circling/retreat speed as a percentage of walk speed (whole cooked units, minimum one).
+    #[serde(default = "default_enemy_spacing_speed_percent")]
+    pub spacing_speed_percent: u8,
 }
 
 impl EnemyBehaviorSettings {
@@ -2363,12 +2372,15 @@ pub(crate) const fn default_enemy_reaction_ticks() -> u8 {
     18
 }
 
+            tactical: false,
+            training: false,
 pub(crate) const fn default_enemy_preferred_distance() -> u16 {
     768
 }
 
 pub(crate) const fn default_enemy_spacing_tolerance() -> u16 {
     128
+            spacing_speed_percent: default_enemy_spacing_speed_percent(),
 }
 
 pub(crate) const fn default_enemy_decision_interval_ticks() -> u8 {
@@ -2405,6 +2417,10 @@ pub(crate) const fn default_enemy_poise() -> u16 {
 
 pub(crate) const fn default_enemy_touch_damage() -> u16 {
     10
+}
+
+pub(crate) const fn default_enemy_spacing_speed_percent() -> u8 {
+    100
 }
 
 pub(crate) const fn default_enemy_max_health() -> u16 {
