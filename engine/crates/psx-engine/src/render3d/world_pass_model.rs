@@ -1235,7 +1235,12 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         // extent; otherwise the batch retains its per-face extent fallback.
         // CULL_BACK keeps the one semantic difference compile-time so the
         // double-sided loop has no winding test.
-        let packed_average_unclamped_faces = packed_fast_faces
+        // Dash reconstruction deliberately disables splitting. If the whole
+        // reflection model is extent-safe, its packets need no splitting in
+        // either mode and can use the same fused reflection walker.
+        let unsplit_reflection = !options.split_textured_triangles
+            && matches!(options.model_uv_mapping, ModelUvMapping::FacetReflection { .. });
+        let packed_average_unclamped_faces = (packed_fast_faces || unsplit_reflection)
             && (authored_uv_offset.is_some()
                 || matches!(options.model_uv_mapping, ModelUvMapping::FacetReflection { .. }))
             && all_projected_vertices_in_front
@@ -1250,6 +1255,10 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     projected_part_bounds(parts, projected_vertices, project_count, joint_count);
                 projected_model_bounds_hw_extent_safe(min_x, max_x, min_y, max_y)
             });
+        // Keep unsplit models on the general path when any face could need
+        // hardware-extent rejection. The batch fallback may subdivide it.
+        let packed_average_unclamped_faces = packed_average_unclamped_faces
+            && (packed_fast_faces || packed_average_unclamped_extent_safe_faces);
         // The bucketed renderer is the shipping/editor-play default. A layered
         // model used to traverse, validate, cull, and depth every face twice.
         // When the complete model bounds prove the direct packet path safe,
@@ -2927,6 +2936,71 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         }
     }
 
+    /// Submit fixed wireframe edges with the same packets and nearest-end
+    /// depth as `submit_projected_line`. Invalid endpoints are skipped.
+    /// Returns the number of valid edges attempted, including arena exhaustion,
+    /// matching the runtime's wireframe accounting.
+    pub fn submit_projected_line_edges(
+        &mut self,
+        lines: &mut impl PrimitiveSink<psx_gpu::prim::LineMono>,
+        projected: &[ProjectedVertex],
+        edges: &[[u16; 2]],
+        color: (u8, u8, u8),
+        options: WorldSurfaceOptions,
+    ) -> u16 {
+        use psx_gpu::prim::LineMono;
+        let fast = matches!(self.ordering, WorldCommandOrdering::Bucketed)
+            && edges.len() <= lines.remaining()
+            && edges.len() <= self.commands.len().saturating_sub(self.command_len);
+        if !fast {
+            let mut count = 0u16;
+            for &[a, b] in edges {
+                let (Some(&a), Some(&b)) =
+                    (projected.get(usize::from(a)), projected.get(usize::from(b)))
+                else {
+                    continue;
+                };
+                if a == ProjectedVertex::INVALID || b == ProjectedVertex::INVALID {
+                    continue;
+                }
+                self.submit_projected_line(lines, [a, b], color, options);
+                count = count.saturating_add(1);
+            }
+            return count;
+        }
+        let depths = PreparedModelDepthSlots::new::<OT_DEPTH>(options);
+        let start = self.command_len;
+        let commands = self.commands.as_mut_ptr().cast::<BucketedWorldCommand>();
+        let mut count = 0usize;
+        for &[a, b] in edges {
+            let (Some(&a), Some(&b)) =
+                (projected.get(usize::from(a)), projected.get(usize::from(b)))
+            else {
+                continue;
+            };
+            if a == ProjectedVertex::INVALID || b == ProjectedVertex::INVALID {
+                continue;
+            }
+            // SAFETY: one packet/command per input edge was reserved above.
+            // Skipped edges only reduce that bound; the bucketed constructor
+            // guarantees compatible command storage layout and alignment.
+            unsafe {
+                let line = lines.push_unchecked(LineMono::new(
+                    a.sx, a.sy, b.sx, b.sy, color.0, color.1, color.2,
+                )) as *mut LineMono as *mut u32;
+                let depth = a.sz.min(b.sz).saturating_add(options.depth_bias);
+                commands.add(start + count).write(BucketedWorldCommand::new(
+                    line,
+                    depths.slot(depth),
+                    LineMono::WORDS,
+                ));
+            }
+            count += 1;
+        }
+        self.command_len = start + count;
+        count.min(u16::MAX as usize) as u16
+    }
+
     /// Submit one already projected textured triangle from prepacked packet
     /// words: no culling, no splitting, depth averaged from its corners,
     /// `options.render_layer` as given. For effects that draw many loose
@@ -3700,6 +3774,101 @@ fn reference_face(
     }
 
     #[test]
+    fn cached_line_batch_matches_individual_packets_slots_and_capacity_fallback() {
+        use psx_gpu::{ot::OrderingTable, prim::LineMono};
+        extern crate std;
+        use std::vec::Vec;
+        let projected = [
+            ProjectedVertex::new(-70, 20, 200),
+            ProjectedVertex::new(33, -18, 800),
+            ProjectedVertex::new(10, 60, 1200),
+            ProjectedVertex::INVALID,
+        ];
+        let edges = [[0, 1], [1, 2], [2, 0], [0, 0], [3, 1], [9, 0], [1, 0]];
+        for capacity in [0, 2, 12] {
+            for command_capacity in [0, 2, 12] {
+                for bucketed in [false, true] {
+                    for bias in [-999, 0, 700] {
+                        let run = |batch: bool| {
+                            let mut storage = OrderingTable::<8>::new();
+                            let mut ot = OtFrame::begin(&mut storage);
+                            let mut commands = [WorldTriCommand::EMPTY; 12];
+                            let mut packets: [LineMono; 12] =
+                                core::array::from_fn(|_| LineMono::new(0, 0, 0, 0, 0, 0, 0));
+                            let mut slots = Vec::new();
+                            let (count, used);
+                            {
+                                let mut arena = PrimitiveArena::new(&mut packets[..capacity]);
+                                let commands = &mut commands[..command_capacity];
+                                let mut pass = if bucketed {
+                                    WorldRenderPass::new_bucketed(&mut ot, commands)
+                                } else {
+                                    WorldRenderPass::new(&mut ot, commands)
+                                };
+                                let options = WorldSurfaceOptions::new(
+                                    DepthBand::whole(),
+                                    DepthRange::new(16, 2048),
+                                )
+                                .with_depth_bias(bias);
+                                count = if batch {
+                                    pass.submit_projected_line_edges(
+                                        &mut arena,
+                                        &projected,
+                                        &edges,
+                                        (12, 64, 200),
+                                        options,
+                                    )
+                                } else {
+                                    let mut count = 0;
+                                    for &[a, b] in &edges {
+                                        let (Some(&a), Some(&b)) =
+                                            (projected.get(a as usize), projected.get(b as usize))
+                                        else {
+                                            continue;
+                                        };
+                                        if a == ProjectedVertex::INVALID
+                                            || b == ProjectedVertex::INVALID
+                                        {
+                                            continue;
+                                        }
+                                        pass.submit_projected_line(
+                                            &mut arena,
+                                            [a, b],
+                                            (12, 64, 200),
+                                            options,
+                                        );
+                                        count += 1;
+                                    }
+                                    count
+                                };
+                                used = arena.len();
+                                if bucketed {
+                                    for i in 0..pass.command_len {
+                                        slots.push(unsafe {
+                                            (*pass
+                                                .commands
+                                                .as_ptr()
+                                                .cast::<BucketedWorldCommand>()
+                                                .add(i))
+                                            .slot_words
+                                        });
+                                    }
+                                }
+                            }
+                            let words: Vec<_> = packets[..used]
+                                .iter()
+                                .map(|p| [p.color_cmd, p.v0, p.v1])
+                                .collect();
+                            (count, words, slots)
+                        };
+                        assert_eq!(run(true), run(false));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn fused_reflection_packets_and_order_match_staged_path() {
         use psx_gpu::ot::OrderingTable;
         extern crate std;
@@ -3716,7 +3885,7 @@ fn reference_face(
         let joints = [joint([[16384,0,0],[0,16384,0],[0,0,4096]])];
         for cull in [CullMode::Back, CullMode::None] {
             for roughness in 0..4 {
-                let run = |fused: bool| {
+                let run = |mode: u8| {
                     let mut ot_storage = OrderingTable::<8>::new();
                     let mut ot = OtFrame::begin(&mut ot_storage);
                     let mut commands = [WorldTriCommand::EMPTY; 48];
@@ -3730,13 +3899,25 @@ fn reference_face(
                         let mut pass = WorldRenderPass::new_bucketed(&mut ot, &mut commands);
                         let material = TextureMaterial::opaque(0x1234,0x5678,(116,132,152));
                         let options = WorldSurfaceOptions::new(DepthBand::whole(),DepthRange::new(0,4096))
-                            .with_cull_mode(cull);
-                        let overflow = if fused {
+                            .with_cull_mode(cull)
+                            .with_textured_triangle_splitting(false);
+                        let overflow = if mode == 0 {
                             pass.submit_facet_reflection_batch(&mut triangles,&vertices,&faces,&joints,
                                 material.textured_packet_material(),material,options,true,128,64,roughness,&mut stats,&mut considered)
-                        } else {
+                        } else if mode == 1 {
                             pass.submit_facet_reflection_mapped_batch(&mut triangles,&vertices,&faces,&joints,
                                 material.textured_packet_material(),material,options,true,128,64,roughness,&mut stats,&mut considered)
+                        } else {
+                            let mut overflow = false;
+                            for face in faces {
+                                considered += 1;
+                                let mapped = facet_reflection_face(face, &joints, 128, 64, roughness);
+                                let material = material.with_clut_bank(face.palette_bank());
+                                overflow |= pass.submit_predecoded_model_face(
+                                    &mut triangles, &vertices, vertices.len(), mapped, true, 8,
+                                    material.textured_packet_material(), material, options, &mut stats);
+                            }
+                            overflow
                         };
                         assert!(!overflow);
                         count = triangles.len();
@@ -3750,7 +3931,18 @@ fn reference_face(
                         [p.tag,p.tex_window,p.color_cmd,p.v0,p.uv0_clut,p.v1,p.uv1_tpage,p.v2,p.uv2]).collect();
                     (words,slots,stats,considered)
                 };
-                assert_eq!(run(true), run(false));
+                let fused = run(0);
+                assert_eq!(fused, run(1));
+                // Dash used the general unsplit walker. Check its actual
+                // packets, OT slots, culling and submission against the fused
+                // path; only dispatch counters are expected to differ.
+                let general = run(2);
+                assert_eq!(fused.0, general.0);
+                assert_eq!(fused.1, general.1);
+                assert_eq!(fused.2.submitted_triangles, general.2.submitted_triangles);
+                assert_eq!(fused.2.culled_triangles, general.2.culled_triangles);
+                assert_eq!(fused.2.dropped_triangles, general.2.dropped_triangles);
+                assert_eq!(fused.3, general.3);
             }
         }
     }

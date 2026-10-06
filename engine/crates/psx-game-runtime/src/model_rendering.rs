@@ -1372,6 +1372,34 @@ pub fn player_pose_draws_wireframe(
 /// Bind-pose rather than screen-space edge lengths: which edge is longest
 /// barely changes under skinning, and choosing in model space means the cage
 /// does not flicker between edges as the pose animates.
+fn model_wireframe_edge(
+    face: TexturedModelRenderFace,
+    vertices: &[ModelVertex],
+    limit: usize,
+) -> Option<[u16; 2]> {
+    let indices = face.vertex_indices();
+    let mut best = (0i32, [0u16; 2]);
+    for corner in 0..3 {
+        let a = indices[corner];
+        let b = indices[(corner + 1) % 3];
+        if usize::from(a) >= limit || usize::from(b) >= limit {
+            continue;
+        }
+        let (pa, pb) = (
+            vertices[usize::from(a)].position,
+            vertices[usize::from(b)].position,
+        );
+        let dx = i32::from(pa.x) - i32::from(pb.x);
+        let dy = i32::from(pa.y) - i32::from(pb.y);
+        let dz = i32::from(pa.z) - i32::from(pb.z);
+        let length = dx * dx + dy * dy + dz * dz;
+        if length > best.0 {
+            best = (length, [a, b]);
+        }
+    }
+    (best.0 != 0).then_some(best.1)
+}
+
 fn submit_model_wireframe<const OT_DEPTH: usize>(
     lines: &mut impl PrimitiveSink<LineMono>,
     projected: &[ProjectedVertex],
@@ -1380,38 +1408,21 @@ fn submit_model_wireframe<const OT_DEPTH: usize>(
     color: (u8, u8, u8),
     options: WorldSurfaceOptions,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+    cache: Option<&mut PlayerDashAssembly>,
 ) -> u16 {
     let wire_options = options.with_render_layer(psx_engine::WorldRenderLayer::Opaque);
+    if let Some(edges) = cache.and_then(|cache| cache.wire_edges(faces, vertices, projected.len()))
+    {
+        return world.submit_projected_line_edges(lines, projected, edges, color, wire_options);
+    }
     let mut drawn = 0u16;
-    for (face_index, face) in faces.iter().enumerate() {
-        // Every second face rather than every fourth: at a quarter the cage
-        // read as a handful of loose sticks, not a body (measured on the
-        // 506-face player at 320x240); at half it keeps the silhouette.
-        if face_index & 1 != 0 {
+    for face in faces.iter().step_by(2) {
+        let Some([a, b]) =
+            model_wireframe_edge(*face, vertices, projected.len().min(vertices.len()))
+        else {
             continue;
-        }
-        let indices = face.vertex_indices();
-        let mut best = (0i32, 0usize, 0usize);
-        for corner in 0..3 {
-            let a = indices[corner] as usize;
-            let b = indices[(corner + 1) % 3] as usize;
-            let limit = projected.len().min(vertices.len());
-            if a >= limit || b >= limit {
-                continue;
-            }
-            let (pa, pb) = (vertices[a].position, vertices[b].position);
-            let dx = i32::from(pa.x) - i32::from(pb.x);
-            let dy = i32::from(pa.y) - i32::from(pb.y);
-            let dz = i32::from(pa.z) - i32::from(pb.z);
-            let length = dx * dx + dy * dy + dz * dz;
-            if length > best.0 {
-                best = (length, a, b);
-            }
-        }
-        if best.0 == 0 {
-            continue;
-        }
-        let (a, b) = (projected[best.1], projected[best.2]);
+        };
+        let (a, b) = (projected[usize::from(a)], projected[usize::from(b)]);
         if a == ProjectedVertex::INVALID || b == ProjectedVertex::INVALID {
             continue;
         }
@@ -1622,6 +1633,7 @@ pub fn draw_player_from_pose<
                     DASH_WIRE_COLOR,
                     options,
                     world,
+                    dash_assembly.as_deref_mut(),
                 );
                 stats
             }
@@ -1719,7 +1731,9 @@ pub fn draw_player_from_pose<
         material,
         secondary_material,
         model_options,
-        if phase_assembly.is_some() { &[] } else { faces },
+        // Capture only needs the posed vertices. Emitting the invisible body
+        // and then degenerating all of its packets wastes the first dash frame.
+        if phase_assembly.is_some() || capture_departure { &[] } else { faces },
         model_parts,
         model_vertices,
         PROFILE,
@@ -1733,15 +1747,6 @@ pub fn draw_player_from_pose<
                 *camera,
                 material,
             );
-        }
-        let end = triangles.used_slots();
-        // SAFETY: only the fresh body occupies these textured packet slots.
-        // Its fragments now live in the departure cloud; retain the DMA chain.
-        unsafe {
-            triangles.mutate_typed_slots::<TriTextured>(first_body_slot, end, |triangle| {
-                triangle.v1 = triangle.v0;
-                triangle.v2 = triangle.v0;
-            });
         }
     }
     if let Some(assembly) = phase_assembly {
@@ -1792,6 +1797,7 @@ pub fn draw_player_from_pose<
                         (wire_color.0 as u8, wire_color.1 as u8, wire_color.2 as u8),
                         options,
                         world,
+                        dash_assembly.as_deref_mut(),
                     ));
         }
     }
