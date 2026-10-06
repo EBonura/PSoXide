@@ -1212,6 +1212,22 @@ impl Playtest {
             return None;
         }
         let clip = character.clip_for(anim);
+        if anim == PlayerAnim::WalkWindup {
+            // Enter the walk when the endpoint is reached, without holding
+            // that pose for an additional sample interval.
+            let model = self.models.get(character.model.to_usize())?.as_ref()?;
+            let animation = model.clip(&self.clips, clip)?;
+            let range = character.action_frame_range(anim.action());
+            let end = u32::from(range.end)
+                .min(u32::from(animation.frame_count().saturating_sub(2)));
+            let start = u32::from(range.start).min(end);
+            let step = animation.phase_at_tick_scaled_q12(
+                1,
+                video_hz.as_u16(),
+                self.player_action_speed_q8(character, anim),
+            );
+            return Some(((end - start) << 12).div_ceil(step.max(1)).max(1));
+        }
         Some(
             self.player_clip_duration_vblanks(
                 character,

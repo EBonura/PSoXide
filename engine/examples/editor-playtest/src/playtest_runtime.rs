@@ -111,7 +111,11 @@ const _: () = {
 /// must start crisply but settle slowly, and a gait change can afford a long
 /// fade only because the clips are phase-matched.
 fn player_blend_ticks(from: PlayerAnim, to: PlayerAnim) -> u32 {
-    if player_anim_is_stop(to) && from.is_gait() {
+    if from == PlayerAnim::WalkWindup && to == PlayerAnim::Walk {
+        // The windup reaches the moving walk entry pose. Blending from its
+        // clamped endpoint would brake the stride again after preparation.
+        0
+    } else if player_anim_is_stop(to) && from.is_gait() {
         4
     } else if player_anim_is_attack(to) || to.is_motor_fixed_action() {
         // Entering a committed action: its first frames carry the read.
@@ -2315,6 +2319,19 @@ mod life_reset_tests {
         assert!(!raw.is_null());
         unsafe { Playtest::init_zeroed(raw) };
         unsafe { std::boxed::Box::from_raw(raw) }
+    }
+
+    #[test]
+    fn walk_windup_hands_off_without_blending_a_frozen_endpoint() {
+        let mut scene = test_scene();
+        scene.anim_state = PlayerAnim::Walk;
+        scene.anim_blend_from = Some((PlayerAnim::WalkWindup, 40, SimTick::from_u32(100)));
+        assert!(scene.player_anim_blend(SimTick::from_u32(100)).is_none());
+        assert!(scene.player_anim_blend(SimTick::from_u32(102)).is_none());
+
+        // An interrupted stop still blends when movement resumes.
+        scene.anim_blend_from = Some((PlayerAnim::WalkWinddown, 12, SimTick::from_u32(100)));
+        assert!(scene.player_anim_blend(SimTick::from_u32(100)).is_some());
     }
 
     #[test]

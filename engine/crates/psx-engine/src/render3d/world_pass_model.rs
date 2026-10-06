@@ -184,6 +184,9 @@ fn camera_crystal_packet_materials(
 
 /// Normal-driven matcap lookup using existing cooked UV storage. No extra pass,
 /// vertex duplication, framebuffer reads, or per-pixel work is required.
+// Keep this in the face walker: outlining adds argument/result spills and
+// call overhead to every visible face on the R3000.
+#[inline(always)]
 fn facet_reflection_face(
     mut face: TexturedModelRenderFace,
     joints: &[JointViewTransform],
@@ -207,11 +210,14 @@ fn facet_reflection_face(
     let ny = dot(1) / (MODEL_GTE_XY_SCALE * 8);
     let nz = dot(2) / 8;
     let len = (nx.abs() + ny.abs() + nz.abs()).max(1);
-    let quantum = 1 << roughness.min(3);
+    // len >= abs(n): both dividend and divisor are nonnegative, and the
+    // quotient is already inside the texture. Quantization is a power-of-two
+    // mask, avoiding a second dynamic division for each coordinate on MIPS.
+    let quantum_mask = !((1u32 << roughness.min(3)) - 1);
     let coord = |n: i32, size: u8| {
-        let max = i32::from(size.max(1)) - 1;
-        let x = ((len + n) * max / (2 * len)).clamp(0, max);
-        ((x / quantum) * quantum) as u16
+        let max = u32::from(size.max(1)) - 1;
+        let x = (len + n) as u32 * max / (2 * len) as u32;
+        (x & quantum_mask) as u16
     };
     let u = i32::from(coord(nx, width));
     let v = i32::from(coord(ny, height));
@@ -1870,6 +1876,88 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     /// this scratch buffer outside the scratchpad walker bounds stack usage.
     #[inline(never)]
     fn submit_facet_reflection_batch(
+        &mut self, triangles: &mut impl PrimitiveSink<TriTextured>,
+        projected: &[ProjectedVertex], faces: &[TexturedModelRenderFace],
+        joints: &[JointViewTransform], packet: TexturedPacketMaterial,
+        material: TextureMaterial, options: WorldSurfaceOptions, extent_safe: bool,
+        width: u8, height: u8, roughness: u8,
+        stats: &mut TexturedModelRenderStats, considered: &mut u32,
+    ) -> bool {
+        if extent_safe && matches!(self.ordering, WorldCommandOrdering::Bucketed)
+            && faces.len() <= triangles.remaining()
+            && faces.len() <= self.commands.len().saturating_sub(self.command_len)
+        {
+            // As for the authored-UV walker, projection has released its
+            // scratchpad region. This path neither clips nor subdivides.
+            // The post-link stack guard proves the complete call tree fits.
+            unsafe {
+                ModelFaceWalkerStack::run(|| {
+                    self.submit_facet_reflection_extent_safe(
+                        triangles, projected, faces, joints, packet, options,
+                        width, height, roughness, stats, considered);
+                });
+            }
+            return false;
+        }
+        self.submit_facet_reflection_mapped_batch(triangles, projected, faces,
+            joints, packet, material, options, extent_safe, width, height,
+            roughness, stats, considered)
+    }
+
+    /// Fuse visibility, reflection coordinates and packet output. The old
+    /// 16-face staging loop loaded/cull-tested each vertex twice and rebuilt
+    /// submission state for every chunk, including chunks of hidden faces.
+    #[inline(never)]
+    fn submit_facet_reflection_extent_safe(
+        &mut self, triangles: &mut impl PrimitiveSink<TriTextured>,
+        projected: &[ProjectedVertex], faces: &[TexturedModelRenderFace],
+        joints: &[JointViewTransform], packet: TexturedPacketMaterial,
+        options: WorldSurfaceOptions, width: u8, height: u8, roughness: u8,
+        stats: &mut TexturedModelRenderStats, considered: &mut u32,
+    ) {
+        debug_assert!(faces.len() <= triangles.remaining());
+        debug_assert!(faces.len() <= self.commands.len().saturating_sub(self.command_len));
+        let command_start = self.command_len;
+        let commands = self.commands.as_mut_ptr().cast::<BucketedWorldCommand>();
+        let depth_slots = PreparedModelDepthSlots::new::<OT_DEPTH>(options);
+        let mut culled = 0u16;
+        let mut submitted = 0usize;
+        for source in faces {
+            // SAFETY: the caller validated all indices and projected all
+            // vertices, and preflighted a packet/command for every face.
+            let (face, addresses) = unsafe {
+                model_face_addresses_scheduled(source, projected.as_ptr())
+            };
+            let p = unsafe { [*addresses[0], *addresses[1], *addresses[2]] };
+            let xy = [(p[0].sx, p[0].sy), (p[1].sx, p[1].sy), (p[2].sx, p[2].sy)];
+            if options.cull_mode == CullMode::Back
+                && psx_gte::scene::screen_area_mac0_scheduled(xy) <= 0
+            {
+                culled = culled.wrapping_add(1);
+                continue;
+            }
+            let mapped = facet_reflection_face(face, joints, width, height, roughness);
+            let triangle = unsafe {
+                triangles.push_unchecked(TriTextured::with_packet_material_packed_uv_words(
+                    xy, mapped.uv_words(), packet.with_clut_bank(face.palette_bank())))
+            } as *mut TriTextured as *mut u32;
+            let depth = ((p[0].sz + p[1].sz + p[2].sz) / 3).saturating_add(options.depth_bias);
+            unsafe {
+                commands.add(command_start + submitted).write(BucketedWorldCommand::new(
+                    triangle, depth_slots.slot(depth), TriTextured::WORDS));
+            }
+            submitted += 1;
+        }
+        self.command_len = command_start + submitted;
+        let processed = faces.len().min(u16::MAX as usize) as u16;
+        *considered = considered.wrapping_add(u32::from(processed));
+        let submitted = submitted.min(u16::MAX as usize) as u16;
+        flush_packed_unclamped_model_batch_stats(stats, 0, processed, processed,
+            culled, submitted, submitted, 0);
+    }
+
+    #[inline(never)]
+    fn submit_facet_reflection_mapped_batch(
         &mut self, triangles: &mut impl PrimitiveSink<TriTextured>,
         projected: &[ProjectedVertex], faces: &[TexturedModelRenderFace],
         joints: &[JointViewTransform], packet: TexturedPacketMaterial,
@@ -3543,6 +3631,128 @@ mod facet_reflection_tests {
     }
     fn joint(m: [[i16; 3]; 3]) -> JointViewTransform {
         JointViewTransform { rotation: Mat3I16 { m }, translation: Vec3I32::ZERO }
+    }
+fn reference_face(
+    mut face: TexturedModelRenderFace,
+    joints: &[JointViewTransform],
+    width: u8,
+    height: u8,
+    roughness: u8,
+) -> TexturedModelRenderFace {
+    let words = face.uv_words();
+    let n = [words[0] as u8 as i8 as i32, (words[0] >> 8) as u8 as i8 as i32,
+        words[1] as u8 as i8 as i32];
+    let Some(joint) = joints.get((words[1] >> 8) as usize) else {
+        for k in 0..3 { face = face.with_corner_uv_word(k, 0); }
+        return face;
+    };
+    let m = joint.rotation.m;
+    let dot = |row: usize| i32::from(m[row][0]) * n[0]
+        + i32::from(m[row][1]) * n[1] + i32::from(m[row][2]) * n[2];
+    // Projection scales X/Y by four to improve GTE precision; undo that
+    // anisotropy before normal lookup. Uniform model scale cancels in L1.
+    let nx = dot(0) / (MODEL_GTE_XY_SCALE * 8);
+    let ny = dot(1) / (MODEL_GTE_XY_SCALE * 8);
+    let nz = dot(2) / 8;
+    let len = (nx.abs() + ny.abs() + nz.abs()).max(1);
+    let quantum = 1 << roughness.min(3);
+    let coord = |n: i32, size: u8| {
+        let max = i32::from(size.max(1)) - 1;
+        let x = ((len + n) * max / (2 * len)).clamp(0, max);
+        ((x / quantum) * quantum) as u16
+    };
+    let u = i32::from(coord(nx, width));
+    let v = i32::from(coord(ny, height));
+    // Optional authored microfacet gradients. Six 2-bit offsets occupy the
+    // final UV word; bit 15 opts in. Each triangle samples a small patch,
+    // retaining its own normal while allowing light to fade across its face.
+    let gradient = words[2];
+    for k in 0..3 {
+        let (du, dv) = if gradient & 0x8000 != 0 {
+            let bits = gradient >> (k * 4);
+            ((i32::from(bits & 3) * 2 - 3) * 4,
+             (i32::from((bits >> 2) & 3) * 2 - 3) * 4)
+        } else { (0, 0) };
+        let uv = (u + du).clamp(0, i32::from(width.max(1)) - 1) as u16
+            | (((v + dv).clamp(0, i32::from(height.max(1)) - 1) as u16) << 8);
+        face = face.with_corner_uv_word(k, uv);
+    }
+    face
+}
+
+
+    #[test]
+    fn optimized_coordinates_match_original_integer_mapping() {
+        let mut seed = 0x873a2431u32;
+        let mut next = || { seed = seed.wrapping_mul(1664525).wrapping_add(1013904223); seed };
+        for _ in 0..20000 {
+            let n = [next() as i8, next() as i8, next() as i8];
+            let m = core::array::from_fn(|_| core::array::from_fn(|_| next() as i16));
+            let j = joint(m);
+            let f = face(n, 0).with_corner_uv_word(2, next() as u16);
+            let w = next() as u8;
+            let h = next() as u8;
+            let roughness = (next() % 8) as u8;
+            let a = facet_reflection_face(f, &[j], w, h, roughness);
+            let b = reference_face(f, &[j], w, h, roughness);
+            assert_eq!(a.corner_words, b.corner_words);
+        }
+    }
+
+    #[test]
+    fn fused_reflection_packets_and_order_match_staged_path() {
+        use psx_gpu::ot::OrderingTable;
+        extern crate std;
+        use std::vec::Vec;
+        const ZERO: TriTextured = TriTextured::new([(0,0);3],[(0,0);3],0,0,(0,0,0));
+        let vertices = [ProjectedVertex::new(-20,-30,512),
+            ProjectedVertex::new(40,-10,800), ProjectedVertex::new(10,60,1200)];
+        let faces: [_; 37] = core::array::from_fn(|i| {
+            let indices = match i % 3 { 0 => [0,1,2], 1 => [0,2,1], _ => [0,0,2] };
+            TexturedModelRenderFace::new_with_palette_bank(indices,
+                [((i as u8).wrapping_mul(7),128), (127, if i == 5 {255} else {0}), (0,0)], (i%4) as u8)
+                .with_corner_uv_word(2, if i%2 == 0 {0x8f30} else {0})
+        });
+        let joints = [joint([[16384,0,0],[0,16384,0],[0,0,4096]])];
+        for cull in [CullMode::Back, CullMode::None] {
+            for roughness in 0..4 {
+                let run = |fused: bool| {
+                    let mut ot_storage = OrderingTable::<8>::new();
+                    let mut ot = OtFrame::begin(&mut ot_storage);
+                    let mut commands = [WorldTriCommand::EMPTY; 48];
+                    let mut packets = [ZERO; 48];
+                    let mut stats = TexturedModelRenderStats::default();
+                    let mut considered = 0;
+                    let mut slots = Vec::new();
+                    let count;
+                    {
+                        let mut triangles = PrimitiveArena::new(&mut packets);
+                        let mut pass = WorldRenderPass::new_bucketed(&mut ot, &mut commands);
+                        let material = TextureMaterial::opaque(0x1234,0x5678,(116,132,152));
+                        let options = WorldSurfaceOptions::new(DepthBand::whole(),DepthRange::new(0,4096))
+                            .with_cull_mode(cull);
+                        let overflow = if fused {
+                            pass.submit_facet_reflection_batch(&mut triangles,&vertices,&faces,&joints,
+                                material.textured_packet_material(),material,options,true,128,64,roughness,&mut stats,&mut considered)
+                        } else {
+                            pass.submit_facet_reflection_mapped_batch(&mut triangles,&vertices,&faces,&joints,
+                                material.textured_packet_material(),material,options,true,128,64,roughness,&mut stats,&mut considered)
+                        };
+                        assert!(!overflow);
+                        count = triangles.len();
+                        for i in 0..pass.command_len {
+                            // The bucketed pass initialized precisely this prefix.
+                            let command = unsafe { *pass.commands.as_ptr().cast::<BucketedWorldCommand>().add(i) };
+                            slots.push(command.slot_words);
+                        }
+                    }
+                    let words: Vec<_> = packets[..count].iter().map(|p|
+                        [p.tag,p.tex_window,p.color_cmd,p.v0,p.uv0_clut,p.v1,p.uv1_tpage,p.v2,p.uv2]).collect();
+                    (words,slots,stats,considered)
+                };
+                assert_eq!(run(true), run(false));
+            }
+        }
     }
     #[test]
     fn facet_uv_tracks_normal_rotation_and_preserves_face_identity() {
