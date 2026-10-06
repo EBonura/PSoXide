@@ -1339,6 +1339,8 @@ pub mod material_flags {
     pub const FACE_BOTH: u16 = 0x0002;
     /// Model override samples the active room's reflection-probe texture.
     pub const MODEL_REFLECTION_PROBE: u16 = 1 << 2;
+    /// Model UV bytes encode signed facet normals and their dominant skin joint.
+    pub const MODEL_REFLECTION_FACET_NORMALS: u16 = 1 << 5;
     /// Two-bit roughness level for the reflected UV projection.
     pub const MODEL_REFLECTION_ROUGHNESS_SHIFT: u16 = 3;
     /// Mask for the reflected UV roughness level.
@@ -2082,6 +2084,11 @@ impl LevelModelSecondaryLayer {
         self.flags & material_flags::MODEL_REFLECTION_PROBE != 0
     }
 
+    /// Whether model UV bytes contain the packed facet-normal reflection layout.
+    pub const fn uses_facet_reflection(self) -> bool {
+        self.flags & material_flags::MODEL_REFLECTION_FACET_NORMALS != 0
+    }
+
     /// Quantised reflected-UV roughness (`0 = sharp`, `3 = rough`).
     pub const fn reflection_roughness_level(self) -> u8 {
         ((self.flags & material_flags::MODEL_REFLECTION_ROUGHNESS_MASK)
@@ -2139,6 +2146,11 @@ impl LevelModelMaterialOverride {
     /// Whether this override should sample the current room's baked probe.
     pub const fn uses_room_reflection_probe(self) -> bool {
         self.flags & material_flags::MODEL_REFLECTION_PROBE != 0
+    }
+
+    /// Whether model UV bytes contain the packed facet-normal reflection layout.
+    pub const fn uses_facet_reflection(self) -> bool {
+        self.flags & material_flags::MODEL_REFLECTION_FACET_NORMALS != 0
     }
 
     /// Quantised reflected-UV roughness (`0 = sharp`, `3 = rough`).

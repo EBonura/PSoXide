@@ -623,7 +623,9 @@ fn model_secondary_layer(
     v %= texture_height.max(1);
     let offset = ModelUvOffset::new(u, v);
     let mapping = if layer.uses_room_reflection_probe() {
-        if layer.texture_asset.is_some() {
+        if layer.texture_asset.is_some() && layer.uses_facet_reflection() {
+            ModelUvMapping::FacetReflection { texture_width, texture_height, roughness: layer.reflection_roughness_level() }
+        } else if layer.texture_asset.is_some() {
             ModelUvMapping::CameraCrystal {
                 roughness: layer.reflection_roughness_level(),
             }
@@ -705,7 +707,13 @@ fn model_material_and_cull(
                     for channel in &mut reflection_override.tint_rgb {
                         *channel = ((u16::from(*channel) * strength + 127) / 255) as u8;
                     }
-                    let mapping = if material_override.texture_asset.is_some() {
+                    let mapping = if material_override.texture_asset.is_some() && material_override.uses_facet_reflection() {
+                        ModelUvMapping::FacetReflection {
+                            texture_width: vram_slot_texture_size_u8(slot.texture_width),
+                            texture_height: vram_slot_texture_size_u8(slot.texture_height),
+                            roughness: material_override.reflection_roughness_level(),
+                        }
+                    } else if material_override.texture_asset.is_some() {
                         ModelUvMapping::CameraCrystal {
                             roughness: material_override.reflection_roughness_level(),
                         }
@@ -757,6 +765,11 @@ fn model_requires_cpu_blend(model: Model<'_>) -> bool {
     false
 }
 
+/// Material-study extension: PSMD flag bit 6 marks the six UV bytes as
+/// Q7 normal XYZ, dominant joint, and a 16-bit corner-gradient word.
+/// This reflection-only model must be drawn with FacetReflection mapping.
+const MODEL_FACET_REFLECTION_UVS: u16 = 1 << 6;
+
 fn decode_model_render_faces(
     model: Model<'_>,
     texture_width: u16,
@@ -772,7 +785,11 @@ fn decode_model_render_faces(
         return None;
     }
 
-    let (max_u, max_v) = model_render_uv_limits(texture_width, texture_height);
+    // Reflection metadata uses every bit, including signed normals and
+    // the gradient enable bit. Atlas UV clamping would corrupt it.
+    let (max_u, max_v) = if model.flags() & MODEL_FACET_REFLECTION_UVS != 0 {
+        (u8::MAX, u8::MAX)
+    } else { model_render_uv_limits(texture_width, texture_height) };
     let mut i = 0usize;
     while i < face_count {
         let face = model.face(i as u16)?;
@@ -1645,7 +1662,13 @@ pub fn draw_player_from_pose<
         character.visual_scale_q8,
         base_material,
     );
-    let material = lit_tint.map_or(material, |bias| bias.apply(material));
+    // The reflection map contains its lighting. Keep its authored neutral
+    // palette intact while reviewing the crystal material.
+    let material = if matches!(uv_mapping, ModelUvMapping::FacetReflection { .. }) {
+        base_material
+    } else {
+        lit_tint.map_or(material, |bias| bias.apply(material))
+    };
     let model_options = options
         .with_depth_policy(DepthPolicy::Average)
         .with_cull_mode(cull_mode)
@@ -2754,6 +2777,32 @@ mod tests {
     use crate::vram::VramSlotClutMode;
     use psx_gpu::material::TextureWindow;
     use psx_vram::VramHandle;
+
+    #[test]
+    fn reflection_face_metadata_survives_small_atlas_loading() {
+        let mut bytes = [0u8; 64];
+        bytes[..4].copy_from_slice(b"PSMD");
+        bytes[4..6].copy_from_slice(&5u16.to_le_bytes());
+        bytes[8..12].copy_from_slice(&52u32.to_le_bytes());
+        for (offset, value) in [(16,3u16),(18,1),(22,128),(24,128),(26,4096)] {
+            bytes[offset..offset+2].copy_from_slice(&value.to_le_bytes());
+        }
+        let uvs = [(221u8,200u8),(152,23),(180,143)];
+        for (i, &(u,v)) in uvs.iter().enumerate() {
+            let offset = 52+i*4;
+            bytes[offset..offset+2].copy_from_slice(&(i as u16).to_le_bytes());
+            bytes[offset+2]=u; bytes[offset+3]=v;
+        }
+        for metadata in [false,true] {
+            let flags=2u16 | if metadata { MODEL_FACET_REFLECTION_UVS } else {0};
+            bytes[6..8].copy_from_slice(&flags.to_le_bytes());
+            let model=Model::from_bytes(&bytes).unwrap();
+            let mut faces=[TexturedModelRenderFace::ZERO;1];
+            let mut cursor=0;
+            assert_eq!(decode_model_render_faces(model,128,128,&mut faces,&mut cursor),Some(1));
+            assert_eq!(faces[0].uvs(),if metadata {uvs} else {[(127,127),(127,23),(127,127)]});
+        }
+    }
 
     fn slot(texture_window: TextureWindow) -> VramSlot {
         VramSlot {

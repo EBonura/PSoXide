@@ -474,6 +474,20 @@ pub enum ModelUvMapping {
         /// Quantised response roughness (`0 = sharp`, `3 = rough`).
         roughness: u8,
     },
+    /// Sample a normal-driven reflection patch across each crystal facet.
+    /// Cooked UV bytes are [signed nx, signed ny, signed nz, dominant joint,
+    /// gradient low, gradient high]. Gradient bit 15 enables six 2-bit offsets.
+    /// The model must carry the FACET_REFLECTION asset flag to preserve these bytes.
+    /// Normals are bind-space Q7; the joint view matrix rotates them each frame.
+    /// This deliberately approximates blended joint normals by the dominant joint.
+    FacetReflection {
+        /// Reflection-map width in texels.
+        texture_width: u8,
+        /// Reflection-map height in texels.
+        texture_height: u8,
+        /// UV quantisation level, 0 through 3.
+        roughness: u8,
+    },
     /// Project the model through the screen into the active room's compact
     /// environment map. Roughness is a 0..=3 UV-quantisation level.
     ScreenSpaceReflection {

@@ -157,7 +157,10 @@ impl StanceCluts {
         character: &RuntimeCharacter,
         stance: VitalityChannelId,
     ) -> Option<(AssetId, u16)> {
-        let texture = character.material_override?.texture_asset?;
+        let material = character.material_override?;
+        // Inspect crystal with its authored neutral palette in both stances.
+        if material.uses_facet_reflection() { return None; }
+        let texture = material.texture_asset?;
         let index = stance.index();
         if self.player[index] == 0 {
             // The texture streams with the rooms, so this waits for it.
