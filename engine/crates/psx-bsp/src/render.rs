@@ -247,8 +247,11 @@ const MAX_RENDER_ENTITIES: usize = 512;
 const CLUT_DEFAULT: u16 = 240 << 6;
 const DUMMY_LIGHT_STYLE: usize = 64;
 // Two-level subdivision emits at most 19 packets for one source triangle;
-// 13 words covers the larger textured-Gouraud quad packet.
+// 13 words covers the larger compact textured-Gouraud quad packet.
 const WORST_PACKET_WORDS_PER_TRIANGLE: usize = 19 * 13;
+// Page-local PXBSP packets also reset GP0(E2): model packets may change it
+// between world draws in the ordering table.
+const WORST_PAGE_LOCAL_PACKET_WORDS_PER_TRIANGLE: usize = 19 * 14;
 // A scoped windowed polygon adds its GP0(E2) selector and full-window reset.
 const WORST_WINDOWED_PACKET_WORDS_PER_TRIANGLE: usize = 19 * 15;
 const ALIAS_PACKET_WORDS: usize =
@@ -2136,7 +2139,7 @@ impl Renderer {
             };
             let face_worst_words = (vertex_count - 2)
                 * if compact_surface {
-                    WORST_PACKET_WORDS_PER_TRIANGLE
+                    WORST_PAGE_LOCAL_PACKET_WORDS_PER_TRIANGLE
                 } else {
                     WORST_WINDOWED_PACKET_WORDS_PER_TRIANGLE
                 };
@@ -4258,7 +4261,7 @@ mod tests {
     }
 
     #[test]
-    fn draws_cooker_proven_page_local_face_without_texture_window_packets() {
+    fn page_local_world_faces_reset_model_texture_window_before_every_polygon() {
         configure_projection();
         let mut lumps = valid_lumps();
         let mut vertices = Vec::new();
@@ -4318,21 +4321,35 @@ mod tests {
         while offset < frame.packet_words {
             let data_words = (packets[offset] >> 24) as usize;
             let uv_offsets: &[usize] = match data_words {
-                9 => {
-                    assert_eq!(packets[offset + 1] >> 24, 0x34);
-                    &[3, 6, 9]
+                10 => {
+                    assert_eq!(packets[offset + 2] >> 24, 0x34);
+                    &[4, 7, 10]
                 }
-                12 => {
-                    assert_eq!(packets[offset + 1] >> 24, 0x3c);
-                    &[3, 6, 9, 12]
+                13 => {
+                    assert_eq!(packets[offset + 2] >> 24, 0x3c);
+                    &[4, 7, 10, 13]
                 }
                 _ => panic!("unexpected compact packet length {data_words}"),
             };
-            assert_ne!(packets[offset + 1], binding.texture_window_word);
+            // Reproduce the state left by Aletha's 128x128 reflection atlas.
+            // Each independently sorted world packet must override it.
+            let model_window = 0xe208_0210u32;
+            let windowed_v = |window: u32, v: u8| {
+                let mask = ((window >> 5) & 31) * 8;
+                let origin = ((window >> 15) & 31) * 8;
+                ((u32::from(v) & !mask) | (origin & mask)) as u8
+            };
+            assert_eq!(windowed_v(model_window, 64), 192);
+            // Without the packet-local reset, the grid's V=64 samples the
+            // reflection atlas at V=192 instead, often yielding transparency.
+            let reset = packets[offset + 1];
+            assert_eq!(reset, psx_gpu::material::TextureWindow::NONE.word());
             for &uv_offset in uv_offsets {
                 let uv_word = packets[offset + uv_offset];
                 assert!((32..96).contains(&((uv_word & 0xff) as u8)));
-                assert!((64..128).contains(&(((uv_word >> 8) & 0xff) as u8)));
+                let v = ((uv_word >> 8) & 0xff) as u8;
+                assert!((64..128).contains(&v));
+                assert_eq!(windowed_v(reset, v), v);
             }
             offset += data_words + 1;
             packet_count += 1;

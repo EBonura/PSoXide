@@ -812,9 +812,10 @@ pub struct ClassicAffineWindowedBatchSurface {
 
 /// One PXBSP fan whose packet shape is selected per surface.
 ///
-/// Cooker-proven page-local UVs use compact GP0(34h/3Ch) packets. Tiled,
-/// animated, translucent, and other exceptional materials retain the
-/// self-contained GP0(E2) selector and reset used by the windowed path.
+/// Cooker-proven page-local UVs select the full texture window before each
+/// GP0(34h/3Ch) polygon. Other OT packets (notably character models) can leave
+/// a nonzero window active between world polygons. Tiled, animated and
+/// translucent materials retain their own selector and trailing reset.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct ClassicAffineMixedBatchSurface {
@@ -828,7 +829,7 @@ pub struct ClassicAffineMixedBatchSurface {
     pub clut: u16,
     /// Wrapping U/V offset used only by the windowed packet shape.
     pub uv_offset: [u8; 2],
-    /// Non-zero selects compact packets without GP0(E2).
+    /// Non-zero selects page-local UVs with a GP0(E2) full-window prefix.
     pub compact: u8,
     /// Fully encoded GP0(E2) command used by windowed packets.
     pub texture_window_word: u32,
@@ -5082,8 +5083,10 @@ pub unsafe fn submit_classic_affine_scoped_windowed_batch(
 ///
 /// # Safety
 /// The vertex, descriptor, scratch-tail, output-capacity, and lifetime
-/// contract matches [`submit_classic_affine_batch`]. Windowed descriptors
-/// must carry a valid GP0(E2) command; compact descriptors ignore it.
+/// contract matches [`submit_classic_affine_batch`], except output must allow
+/// 19 * 15 words per source triangle (including tags and state commands).
+/// Windowed descriptors must carry a valid GP0(E2) command; page-local
+/// descriptors ignore it and prepend the full-window selector instead.
 pub unsafe fn submit_classic_affine_mixed_batch(
     vertices: *mut ClassicAffineVertex,
     vertex_count: usize,
@@ -5123,11 +5126,17 @@ pub unsafe fn submit_classic_affine_mixed_batch(
         let surface = unsafe { ptr::read(surface_ptr) };
         let submitted = if surface.compact != 0 {
             let run_output = next;
-            let mut writer = PacketWriter {
+            // World and model packets interleave by depth. A page-local
+            // world polygon must reset a model's window in its own DMA node;
+            // resetting once at the start of the world pass is insufficient.
+            let mut writer = WindowedPacketWriter::<false> {
                 next,
                 packets: 0,
                 clut_high_word: 0,
                 tpage_high_word: 0,
+                uv_offset: [0; 2],
+                texture_window_word: TextureWindow::NONE.word(),
+                color_command_word: 0x3400_0000,
                 profile,
             };
             while surface_ptr != surface_end {
@@ -7203,14 +7212,15 @@ mod tests {
         assert_eq!((submit.packets, submit.hardware_triangles), (2, 2));
         assert_eq!(
             unsafe { submit.next_packet.offset_from(packets.as_ptr()) },
-            22
+            23
         );
-        assert_eq!(packets[0] >> 24, 9);
-        assert_eq!(packets[1] >> 24, 0x34);
-        assert_eq!(packets[10] >> 24, 11);
-        assert_eq!(packets[11], window);
-        assert_eq!(packets[12] >> 24, 0x34);
-        assert_eq!(packets[21], TextureWindow::NONE.word());
+        assert_eq!(packets[0] >> 24, 10);
+        assert_eq!(packets[1], TextureWindow::NONE.word());
+        assert_eq!(packets[2] >> 24, 0x34);
+        assert_eq!(packets[11] >> 24, 11);
+        assert_eq!(packets[12], window);
+        assert_eq!(packets[13] >> 24, 0x34);
+        assert_eq!(packets[22], TextureWindow::NONE.word());
     }
 
     #[test]
