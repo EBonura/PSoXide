@@ -2326,6 +2326,35 @@ impl Scene for Playtest {
             draw_lock_target_indicator(target, camera, overlay_tick, self.player_stance.active());
         }
 
+        if let (Some(font), Some(index)) = (self.ui_fonts[0].as_ref(),
+            GAME_ENTITIES.iter().position(|r| r.flags & psx_level::game_entity_flags::TRAINING != 0))
+        {
+            use psx_game_runtime::entities::{EnemyGoal, GameEntityState};
+            let t = self.game_entities.tactical_snapshot(index);
+            let label = match self.game_entities.state(index) {
+                GameEntityState::Idle => "OBSERVE",
+                GameEntityState::Patrol => "PATROL",
+                GameEntityState::Windup => "WINDUP",
+                GameEntityState::Attack => "ATTACK",
+                GameEntityState::Recover => "RECOVERY",
+                GameEntityState::Staggered => "STAGGER",
+                GameEntityState::Dead => "DEFEATED",
+                GameEntityState::Aggro => match t.goal {
+                    EnemyGoal::Approach if t.running => "PURSUE",
+                    EnemyGoal::Approach => "STALK",
+                    EnemyGoal::CircleLeft => "CIRCLE LEFT",
+                    EnemyGoal::CircleRight => "CIRCLE RIGHT",
+                    EnemyGoal::Retreat => "RETREAT",
+                    EnemyGoal::WaitRetry => "WAIT / RETRY",
+                    EnemyGoal::Reposition => "REPOSITION",
+                    EnemyGoal::ReturnHome => "RETURN HOME",
+                    _ => "ASSESS",
+                },
+            };
+            font.draw_text(8, 202, label, (200, 220, 225));
+            font.draw_text(8, 216, "SELECT+L1 RESET  SELECT+R1 BLOCKED", (150, 170, 175));
+        }
+
         // Damage numbers sit above the world and below the panels: they
         // are combat feedback, so a message box that is up should cover
         // them rather than compete with them.

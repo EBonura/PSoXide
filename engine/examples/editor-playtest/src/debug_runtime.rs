@@ -941,3 +941,25 @@ pub(super) fn debug_log_reconcile_pass(
     line.push_hex_mask(window_mask);
     line.emit();
 }
+
+/// Sample the opt-in encounter with a shared simulation clock. Diagnostic builds
+/// only; normal disc builds compile the call and formatting out entirely.
+#[cfg(feature = "emulator-telemetry")]
+pub(super) fn debug_log_enemy_tactics(
+    tick: u32,
+    player: [i32; 3],
+    position: [i32; 3],
+    yaw: i16,
+    state: u8,
+    clip: u16,
+    t: psx_game_runtime::entities::EnemyTacticalSnapshot,
+) {
+    let mut line = DebugLogLine::new("enemy-study,");
+    for value in [tick as i32, player[0], player[1], player[2], position[0], position[1], position[2],
+        i32::from(yaw), i32::from(state), i32::from(clip), t.goal as i32, t.result as i32,
+        i32::from(t.generation), i32::from(t.remaining), i32::from(t.running), i32::from(t.retries)] {
+        line.push_i32(value);
+        line.push_byte(b',');
+    }
+    line.emit();
+}

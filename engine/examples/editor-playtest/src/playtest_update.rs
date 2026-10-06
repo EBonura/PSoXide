@@ -352,6 +352,16 @@ impl Playtest {
                 }
             }
         }
+        #[cfg(feature = "emulator-telemetry")]
+        if now.is_multiple_of(12) {
+            if let Some(index) = GAME_ENTITIES.iter().position(|r| r.flags & psx_level::game_entity_flags::TRAINING != 0) {
+                crate::debug_runtime::debug_log_enemy_tactics(now, player_pos,
+                    self.game_entities.position(index), self.game_entities.yaw(index),
+                    self.game_entities.state(index) as u8,
+                    self.game_entities.clip_for_state(GAME_ENTITIES, index).clip,
+                    self.game_entities.tactical_snapshot(index));
+            }
+        }
         self.logic.tick(
             LOGIC,
             psx_game_runtime::logic::LogicTickInput {
@@ -539,6 +549,35 @@ impl Playtest {
     }
 
     pub(super) fn update_gameplay(&mut self, ctx: &mut Ctx) {
+        if GAME_ENTITIES.iter().any(|r| r.flags & psx_level::game_entity_flags::TRAINING != 0)
+            && ctx.is_held(button::SELECT)
+            && (ctx.just_pressed(button::L1) || ctx.just_pressed(button::R1))
+        {
+            self.reset_new_game();
+            self.respawn_after_death();
+            self.gameplay_epoch = ctx.sim_tick;
+            self.gameplay_epoch_set = true;
+            self.anim_start_tick = ctx.sim_tick;
+            if ctx.just_pressed(button::R1) {
+                // Graybox training pen: a real 48-unit wall above the motor's
+                // 40-unit step limit, with the player on the adjacent 96-unit shelf.
+                if let Some(index) = GAME_ENTITIES.iter().position(|r| r.flags & psx_level::game_entity_flags::TRAINING != 0) {
+                    self.game_entities.place_training_actor(GAME_ENTITIES, index, [256, 0, -128], 1024);
+                    self.motor.snap_to(RoomPoint::new(336, 96, -128), Angle::from_q12(3072));
+                    // Start pitched down into the pen so the shelf does not
+                    // hide the enemy below the ordinary shoulder camera.
+                    let view = self.camera_config();
+                    let target = self.camera_target(None, false);
+                    self.camera.snap_to_player_with_yaw(target, view, Angle::from_q12(768));
+                    self.camera.update_vblanks(PROJECTION, None, target, ThirdPersonCameraInput {
+                        yaw_delta_q12: 0,
+                        pitch_delta_q12: 384,
+                        recenter: false,
+                    }, view, 1);
+                }
+            }
+            return;
+        }
         // First gameplay update after loading: anchor the animation
         // epoch here so value-based phases do not inherit the variable
         // loading duration (see `gameplay_epoch` in main.rs).
@@ -553,7 +592,8 @@ impl Playtest {
             self.room_materials_unresolved = true;
             self.gameplay_epoch = ctx.sim_tick;
             self.gameplay_epoch_set = true;
-            if self.start_player_anim_action(PlayerAnim::Intro, ctx.sim_tick, ctx.video_hz) {
+            if !GAME_ENTITIES.iter().any(|r| r.flags & psx_level::game_entity_flags::TRAINING != 0)
+                && self.start_player_anim_action(PlayerAnim::Intro, ctx.sim_tick, ctx.video_hz) {
                 self.ground_opening_player();
                 self.opening = opening_sequence::OpeningSequence::start(
                     self.anim_lock_until_tick.saturating_sub(ctx.sim_tick),

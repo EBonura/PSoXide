@@ -1729,6 +1729,10 @@ pub struct LevelLogicRecord {
     pub wait_ticks: i16,
     /// First kind-specific argument.
     pub arg0: u16,
+    /// Sustained tactical goals, contextual attacks and movement recovery.
+    pub const TACTICAL: u16 = 1 << 3;
+    /// Opt-in single-enemy encounter reset and diagnostic overlay.
+    pub const TRAINING: u16 = 1 << 4;
     /// Second kind-specific argument.
     pub arg1: u16,
     /// Kind-defined entity link ([`logic_kind::DOOR`] stores a
@@ -1901,6 +1905,8 @@ pub struct LevelGameEntityRecord {
     /// a legal single-channel actor: the runtime treats an empty second pool
     /// as already spent, so the entity dies on the first pool alone.
     pub max_health_secondary: u16,
+    /// Circling/retreat percentage of walk speed; quantized to whole units, minimum one.
+    pub spacing_speed_percent: u8,
     /// Souls the player is credited for landing the killing blow.
     ///
     /// Authored per enemy so the reward curve is tuned in the editor next to

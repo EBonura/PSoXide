@@ -34,6 +34,9 @@
 //!
 //! [`commit_body_step`]: psx_engine::character_motor::commit_body_step
 
+mod tactics;
+pub use tactics::{EnemyGoal, EnemyGoalResult, EnemyTacticalSnapshot};
+
 use crate::combat::{arc_hits_circle, MeleeArc};
 use crate::vitality::{DualVitality, VitalityChannelId, VitalityPool};
 use psx_level::{
@@ -547,6 +550,7 @@ pub struct MeleeArcStats {
 /// `STANCE_BOUND_ATTACKS` selects stance-locked combat at compile time.
 /// The default retains the distance-only behavior for games without stances.
 pub struct GameEntities<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool = false> {
+    tactics: [tactics::TacticalState; MAX_ENTITIES],
     /// Live entity count = `min(records.len(), MAX_ENTITIES)`.
     count: u16,
     /// Cooked records past `MAX_ENTITIES` that could not spawn.
@@ -765,6 +769,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
     /// link-time-zero (`.bss`) scene storage. Not meaningful until
     /// [`Self::spawn_from_records`] runs.
     pub const EMPTY: Self = Self {
+        tactics: [tactics::TacticalState::EMPTY; MAX_ENTITIES],
         count: 0,
         overflow: 0,
         x: [0; MAX_ENTITIES],
@@ -815,6 +820,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
         self.count = count as u16;
         self.overflow = (records.len() - count).min(u16::MAX as usize) as u16;
         for (index, record) in records.iter().enumerate().take(count) {
+            self.tactics[index].seed = 0x9e3779b9u32.wrapping_add(index as u32 * 97);
             self.x[index] = record.x;
             self.y[index] = record.y;
             self.z[index] = record.z;
@@ -1206,6 +1212,11 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
             return GameEntityClip::default();
         }
         let record = &records[index];
+        if Self::is_tactical(record) {
+            if let Some(clip) = self.tactical_clip(record, index) {
+                return clip;
+            }
+        }
         let ticks = self.state_ticks[index];
         let attack_clip = self.selected_attack_clip(record, index);
         let attack_active_ticks = self.selected_attack_active_ticks(record, index);
@@ -1512,6 +1523,9 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
                 index += 1;
                 continue;
             }
+            self.tactics[index].home_cooldown = self.tactics[index]
+                .home_cooldown
+                .saturating_sub(delta_ticks);
             self.advance_stance_swap(index, delta_ticks);
             self.stance_swap_cooldown[index] =
                 self.stance_swap_cooldown[index].saturating_sub(delta_ticks);
@@ -1577,6 +1591,9 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
                         // The acquisition reaction belongs to first notice;
                         // recovery already supplied this attack's pause.
                         self.state_ticks[index] = u16::from(record.reaction_ticks);
+                        if Self::is_tactical(record) {
+                            self.choose_spacing(record, index, input);
+                        }
                     }
                 }
                 GameEntityState::Staggered => {
@@ -1800,6 +1817,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
             let state = self.state(index);
             let ready = state == GameEntityState::Aggro
                 && record.room == input.player_room
+                && self.tactical_attack_ready(record, index)
                 && self.attack_cooldown[index] == 0
                 && self.state_ticks[index] >= u16::from(record.reaction_ticks)
                 && self.player_within(
@@ -1849,6 +1867,9 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
         state: GameEntityState,
         stats: &mut GameEntityTickStats,
     ) {
+        if matches!(state, GameEntityState::Staggered | GameEntityState::Dead) {
+            self.finish_goal(index, EnemyGoalResult::Cancelled);
+        }
         self.state[index] = state as u8;
         self.state_ticks[index] = 0;
         if matches!(state, GameEntityState::Staggered | GameEntityState::Dead) {
@@ -1975,6 +1996,15 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
         input: GameEntityTickInput<'_>,
         mover: &mut impl GameEntityMover,
     ) -> bool {
+        if Self::is_tactical(record)
+            && (!within_xz(
+                [record.x, record.z],
+                [input.player[0], input.player[2]],
+                i32::from(record.aggro_radius),
+            ) || self.tactics[index].home_cooldown != 0)
+        {
+            return false;
+        }
         if !self.player_in_notice_range(record, index, input) {
             return false;
         }
@@ -2033,6 +2063,9 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
         stats: &mut GameEntityTickStats,
     ) {
         if self.player_noticed(record, index, input, mover) {
+            if Self::is_tactical(record) {
+                self.remember_target(index, input.player);
+            }
             self.enter_state(index, GameEntityState::Aggro, stats);
             return;
         }
@@ -2054,6 +2087,9 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
         stats: &mut GameEntityTickStats,
     ) {
         if self.player_noticed(record, index, input, mover) {
+            if Self::is_tactical(record) {
+                self.remember_target(index, input.player);
+            }
             self.enter_state(index, GameEntityState::Aggro, stats);
             return;
         }
@@ -2078,6 +2114,10 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
         delta_ticks: u16,
         stats: &mut GameEntityTickStats,
     ) {
+        if Self::is_tactical(record) {
+            self.tick_tactical(record, index, input, mover, delta_ticks, stats);
+            return;
+        }
         let leash = i32::from(record.aggro_radius).saturating_mul(GAME_ENTITY_LEASH_FACTOR);
         if input.player_room != record.room || !self.player_within(index, input, leash) {
             // Souls de-aggro: drop the chase and return to the idle
@@ -2688,7 +2728,7 @@ fn within_xz(a: [i32; 2], b: [i32; 2], radius: i32) -> bool {
 mod tests {
     use super::*;
 
-    const fn test_record(
+    pub(super) const fn test_record(
         x: i32,
         z: i32,
         patrol_dx: i32,
@@ -2738,6 +2778,7 @@ mod tests {
             reaction_ticks: 0,
             preferred_distance: 512,
             spacing_tolerance: 0,
+            spacing_speed_percent: 100,
             decision_interval_ticks: 1,
             circle_chance: 0,
             attack_priority: 1,
@@ -2801,6 +2842,7 @@ mod tests {
         aggro_radius: 4096,
         preferred_distance: 1200,
         spacing_tolerance: 100,
+        spacing_speed_percent: 100,
         attack_min_range: 500,
         attack_max_range: 1600,
         flags: game_entity_flags::ENABLED
@@ -2991,6 +3033,7 @@ mod tests {
             aggro_radius: 146,
             preferred_distance: 48,
             spacing_tolerance: 8,
+            spacing_speed_percent: 100,
             attack_min_range: 32,
             attack_max_range: 256,
             reaction_ticks: 42,
@@ -3442,6 +3485,7 @@ mod tests {
             aggro_radius: 1024,
             preferred_distance: 512,
             spacing_tolerance: 128,
+            spacing_speed_percent: 100,
             decision_interval_ticks: 1,
             circle_chance: 0,
             ..test_record(
@@ -3561,6 +3605,7 @@ mod tests {
             aggro_radius: 2048,
             preferred_distance: 700,
             spacing_tolerance: 100,
+            spacing_speed_percent: 100,
             decision_interval_ticks: 1,
             circle_chance: 100,
             ..test_record(
