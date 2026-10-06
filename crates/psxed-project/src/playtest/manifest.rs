@@ -4059,6 +4059,9 @@ fn reflection_material_flags(reflection: Option<crate::ReflectionProbeMaterial>)
     if let Some(reflection) = reflection {
         let roughness_level = u16::from(reflection.roughness >> 6).min(3);
         flags |= psx_level::material_flags::MODEL_REFLECTION_PROBE;
+        if reflection.facet_normals {
+            flags |= psx_level::material_flags::MODEL_REFLECTION_FACET_NORMALS;
+        }
         flags |= roughness_level << psx_level::material_flags::MODEL_REFLECTION_ROUGHNESS_SHIFT;
         flags |= u16::from(reflection.strength)
             << psx_level::material_flags::MODEL_REFLECTION_STRENGTH_SHIFT;

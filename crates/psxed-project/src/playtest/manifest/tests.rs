@@ -112,6 +112,7 @@ fn reflective_model_material_packs_probe_controls_without_losing_sidedness() {
         motion: crate::MaterialUvMotion::default(),
         secondary_layer: None,
         reflection_probe: Some(crate::ReflectionProbeMaterial {
+            facet_normals: true,
             enabled: true,
             strength: 173,
             roughness: 191,
@@ -130,6 +131,7 @@ fn reflective_model_material_packs_probe_controls_without_losing_sidedness() {
     };
     assert_eq!(cooked.sidedness(), psx_level::LevelMaterialSidedness::Both);
     assert!(cooked.uses_room_reflection_probe());
+    assert!(cooked.uses_facet_reflection());
     assert_eq!(cooked.reflection_roughness_level(), 2);
     assert_eq!(cooked.reflection_strength(), 173);
 }

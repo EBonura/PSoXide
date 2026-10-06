@@ -284,6 +284,10 @@ impl Default for GeneratedMaterialTexture {
 /// Authoring controls for a room reflection-probe material.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReflectionProbeMaterial {
+    /// Read packed facet normals from model UV words for a reflection-only map.
+    /// Requires a model cooked with the facet-normal UV layout.
+    #[serde(default, skip_serializing_if = "bool_is_false")]
+    pub facet_normals: bool,
     /// Project the material's own texture in screen space for a cheap,
     /// camera-reactive crystal/reflection treatment on models.
     #[serde(default, skip_serializing_if = "bool_is_false")]
@@ -297,6 +301,7 @@ pub struct ReflectionProbeMaterial {
 impl Default for ReflectionProbeMaterial {
     fn default() -> Self {
         Self {
+            facet_normals: false,
             enabled: false,
             strength: 255,
             roughness: 8,
@@ -1083,6 +1088,7 @@ impl MaterialResource {
             },
             transition: TransitionMaterialTexture::DEFAULT,
             reflection: ReflectionProbeMaterial {
+                facet_normals: false,
                 enabled: false,
                 strength: 255,
                 roughness: 8,
@@ -1148,6 +1154,7 @@ impl MaterialResource {
             },
             transition: TransitionMaterialTexture::DEFAULT,
             reflection: ReflectionProbeMaterial {
+                facet_normals: false,
                 enabled: false,
                 strength: 255,
                 roughness: 8,
