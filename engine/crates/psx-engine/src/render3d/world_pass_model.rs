@@ -3001,6 +3001,87 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         count.min(u16::MAX as usize) as u16
     }
 
+    /// Submit indexed, solid-color Gouraud triangles with shared depth setup.
+    /// Packet colors, depth clamping and culling match individual submissions.
+    /// Invalid indices/vertices are skipped. Callers own clipping/extent checks,
+    /// as with `submit_gouraud_triangle`. Capacity/sorted-mode fallbacks retain
+    /// the scalar path; the bucketed fast path reserves its complete upper bound.
+    pub fn submit_solid_gouraud_faces(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<psx_gpu::prim::TriGouraud>,
+        projected: &[ProjectedVertex],
+        faces: &[([u16; 3], (u8, u8, u8))],
+        options: WorldSurfaceOptions,
+    ) -> u16 {
+        use psx_gpu::prim::TriGouraud;
+        let fast = matches!(self.ordering, WorldCommandOrdering::Bucketed)
+            && faces.len() <= triangles.remaining()
+            && faces.len() <= self.commands.len().saturating_sub(self.command_len);
+        if !fast {
+            let mut count = 0u16;
+            for &(indices, color) in faces {
+                let [Some(&a), Some(&b), Some(&c)] = indices.map(|i| projected.get(i as usize))
+                else {
+                    continue;
+                };
+                let p = [a, b, c];
+                if p.contains(&ProjectedVertex::INVALID) {
+                    continue;
+                }
+                count = count.saturating_add(
+                    self.submit_gouraud_triangle(
+                        triangles,
+                        p.map(|v| ProjectedLit {
+                            sx: v.sx,
+                            sy: v.sy,
+                            sz: v.sz.clamp(0, 65535) as u16,
+                            r: color.0,
+                            g: color.1,
+                            b: color.2,
+                        }),
+                        options,
+                    )
+                    .submitted_triangles,
+                );
+            }
+            return count;
+        }
+        let depths = PreparedModelDepthSlots::new::<OT_DEPTH>(options);
+        let commands = self.commands.as_mut_ptr().cast::<BucketedWorldCommand>();
+        let start = self.command_len;
+        let mut count = 0usize;
+        for &(indices, color) in faces {
+            let [Some(&a), Some(&b), Some(&c)] = indices.map(|i| projected.get(i as usize)) else {
+                continue;
+            };
+            let p = [a, b, c];
+            if p.contains(&ProjectedVertex::INVALID) || projected_culled(p, options.cull_mode) {
+                continue;
+            }
+            let [z0, z1, z2] = p.map(|v| v.sz.clamp(0, 65535));
+            let depth = options
+                .depth_policy
+                .depth_values(z0, z1, z2)
+                .saturating_add(options.depth_bias);
+            // SAFETY: at most one packet and command per face; the complete
+            // upper bound was reserved above. Bucketed command layout is
+            // guaranteed by the render-pass constructor. Skips reduce usage.
+            unsafe {
+                let packet = triangles
+                    .push_unchecked(TriGouraud::new(p.map(|v| (v.sx, v.sy)), [color; 3]))
+                    as *mut TriGouraud as *mut u32;
+                commands.add(start + count).write(BucketedWorldCommand::new(
+                    packet,
+                    depths.slot(depth),
+                    TriGouraud::WORDS,
+                ));
+            }
+            count += 1;
+        }
+        self.command_len = start + count;
+        count.min(u16::MAX as usize) as u16
+    }
+
     /// Submit one already projected textured triangle from prepacked packet
     /// words: no culling, no splitting, depth averaged from its corners,
     /// `options.render_layer` as given. For effects that draw many loose
@@ -3862,6 +3943,144 @@ fn reference_face(
                             (count, words, slots)
                         };
                         assert_eq!(run(true), run(false));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn solid_gouraud_batch_matches_scalar_packets_depths_culling_and_exhaustion() {
+        use psx_gpu::{ot::OrderingTable, prim::TriGouraud};
+        extern crate std;
+        use std::vec::Vec;
+        let projected = [
+            ProjectedVertex::new(-70, 20, 200),
+            ProjectedVertex::new(33, -18, 800),
+            ProjectedVertex::new(10, 60, 1200),
+            ProjectedVertex::new(25, 80, 70000),
+            ProjectedVertex::new(15, 30, -50),
+            ProjectedVertex::INVALID,
+        ];
+        let faces = [
+            ([0, 1, 2], (255, 113, 58)),
+            ([2, 1, 0], (108, 224, 198)),
+            ([0, 0, 0], (20, 30, 40)),
+            ([1, 3, 4], (255, 255, 255)),
+            ([5, 1, 2], (0, 0, 0)),
+            ([99, 0, 1], (0, 0, 0)),
+            ([4, 2, 1], (12, 64, 200)),
+        ];
+        for capacity in [0, 2, 12] {
+            for command_capacity in [0, 2, 12] {
+                for mode in 0..3 {
+                    for cull in [CullMode::None, CullMode::Back, CullMode::Front] {
+                        for policy in [
+                            DepthPolicy::Average,
+                            DepthPolicy::Nearest,
+                            DepthPolicy::Farthest,
+                            DepthPolicy::Fixed(615),
+                        ] {
+                            for bias in [i32::MIN, -999, 0, 700, i32::MAX] {
+                                let run = |batch: bool| {
+                                    let mut storage = OrderingTable::<8>::new();
+                                    let mut ot = OtFrame::begin(&mut storage);
+                                    let mut commands = [WorldTriCommand::EMPTY; 12];
+                                    let mut packets: [TriGouraud; 12] =
+                                        core::array::from_fn(|_| {
+                                            TriGouraud::new([(0, 0); 3], [(0, 0, 0); 3])
+                                        });
+                                    let mut keys = Vec::new();
+                                    let (count, used);
+                                    {
+                                        let mut arena =
+                                            PrimitiveArena::new(&mut packets[..capacity]);
+                                        let commands = &mut commands[..command_capacity];
+                                        let mut pass = match mode {
+                                            0 => WorldRenderPass::new_bucketed(&mut ot, commands),
+                                            1 => WorldRenderPass::new(&mut ot, commands),
+                                            _ => WorldRenderPass::new_deferred_sorted(
+                                                &mut ot, commands,
+                                            ),
+                                        };
+                                        let options = WorldSurfaceOptions::new(
+                                            DepthBand::whole(),
+                                            DepthRange::new(16, 2048),
+                                        )
+                                        .with_depth_bias(bias)
+                                        .with_depth_policy(policy)
+                                        .with_cull_mode(cull);
+                                        count = if batch {
+                                            pass.submit_solid_gouraud_faces(
+                                                &mut arena, &projected, &faces, options,
+                                            )
+                                        } else {
+                                            let mut count = 0;
+                                            for &(indices, color) in &faces {
+                                                let [Some(&a), Some(&b), Some(&c)] =
+                                                    indices.map(|i| projected.get(i as usize))
+                                                else {
+                                                    continue;
+                                                };
+                                                let p = [a, b, c];
+                                                if p.contains(&ProjectedVertex::INVALID) {
+                                                    continue;
+                                                }
+                                                count += pass
+                                                    .submit_gouraud_triangle(
+                                                        &mut arena,
+                                                        p.map(|v| ProjectedLit {
+                                                            sx: v.sx,
+                                                            sy: v.sy,
+                                                            sz: v.sz.clamp(0, 65535) as u16,
+                                                            r: color.0,
+                                                            g: color.1,
+                                                            b: color.2,
+                                                        }),
+                                                        options,
+                                                    )
+                                                    .submitted_triangles;
+                                            }
+                                            count
+                                        };
+                                        used = arena.len();
+                                        for i in 0..pass.command_len {
+                                            keys.push(if mode == 0 {
+                                                (
+                                                    unsafe {
+                                                        (*pass
+                                                            .commands
+                                                            .as_ptr()
+                                                            .cast::<BucketedWorldCommand>()
+                                                            .add(i))
+                                                        .slot_words
+                                                    },
+                                                    0,
+                                                    0,
+                                                    0,
+                                                )
+                                            } else {
+                                                let c = pass.commands[i];
+                                                (
+                                                    usize::from(c.slot),
+                                                    c.depth,
+                                                    c.order,
+                                                    c.render_layer,
+                                                )
+                                            });
+                                        }
+                                    }
+                                    let words: Vec<_> = packets[..used]
+                                        .iter()
+                                        .map(|p| {
+                                            [p.color0_cmd, p.v0, p.color1, p.v1, p.color2, p.v2]
+                                        })
+                                        .collect();
+                                    (count, words, keys)
+                                };
+                                assert_eq!(run(true), run(false));
+                            }
+                        }
                     }
                 }
             }

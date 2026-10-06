@@ -385,6 +385,8 @@ impl PlayerScarf {
             .with_cull_mode(CullMode::None)
             .with_render_layer(WorldRenderLayer::Opaque);
         let mut submitted = 0;
+        let mut batch = [([0u16; 3], (0u8, 0u8, 0u8)); 30];
+        let mut batch_len = 0;
         for strip in 0..15 {
             let (a, b, shade) = if strip < 8 {
                 (
@@ -433,8 +435,18 @@ impl PlayerScarf {
                         && p.sy < 1023
                 }) && projected_triangle_batchable(p)
                 {
-                    submitted += submit_cloth_triangle(p, tint, options, triangles, world);
+                    batch[batch_len] = (indices.map(|i| i as u16), tint);
+                    batch_len += 1;
                 } else {
+                    // Keep original submission order when clipping interrupts
+                    // the mesh, including triangles at equal ordering depth.
+                    submitted += world.submit_solid_gouraud_faces(
+                        triangles,
+                        &projected,
+                        &batch[..batch_len],
+                        options,
+                    );
+                    batch_len = 0;
                     submitted += submit_clipped_cloth(
                         indices.map(|i| camera.view_vertex(vertices[i])),
                         camera,
@@ -446,6 +458,8 @@ impl PlayerScarf {
                 }
             }
         }
+        submitted +=
+            world.submit_solid_gouraud_faces(triangles, &projected, &batch[..batch_len], options);
         submitted
     }
 }
