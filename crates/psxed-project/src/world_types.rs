@@ -361,6 +361,44 @@ pub struct ResolvedFarVistaSettings {
     pub tint: [u8; 3],
 }
 
+/// Optional combat camera composition, in authored world units.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorldCameraProfile {
+    /// Preferred trailing distance.
+    pub distance: i32,
+    /// Camera height above the player origin.
+    pub height: i32,
+    /// Focus height above the player origin.
+    pub target_height: i32,
+    /// Vertical field of view, clamped to 38-48 degrees.
+    pub fov_y_degrees: u8,
+}
+
+impl Default for WorldCameraProfile {
+    fn default() -> Self {
+        Self {
+            distance: default_world_camera_distance(),
+            height: default_world_camera_height(),
+            target_height: default_world_camera_target_height(),
+            fov_y_degrees: 43,
+        }
+    }
+}
+
+impl WorldCameraProfile {
+    pub fn normalized(self) -> Self {
+        Self {
+            distance: self
+                .distance
+                .clamp(MIN_WORLD_CAMERA_DISTANCE, MAX_WORLD_CAMERA_DISTANCE),
+            height: self.height.clamp(0, MAX_WORLD_CAMERA_HEIGHT),
+            target_height: self.target_height.clamp(0, MAX_WORLD_CAMERA_HEIGHT),
+            fov_y_degrees: self.fov_y_degrees.clamp(38, 48),
+        }
+    }
+}
+
 /// World-level third-person camera configuration inherited by
 /// descendant Rooms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -383,12 +421,36 @@ pub struct WorldCameraSettings {
     /// Manual orbit input speed level. Higher values turn faster.
     #[serde(default = "default_world_camera_orbit_speed_level")]
     pub orbit_speed_level: u8,
+    /// Ramp held orbit input from a gentle rate to a fast rate.
+    #[serde(default)]
+    pub accelerated_orbit: bool,
+    /// Keep the selected elevation when recentering behind the player.
+    #[serde(default)]
+    pub recenter_preserves_pitch: bool,
+    /// Vertical field of view in degrees; zero preserves the legacy lens.
+    #[serde(default)]
+    pub fov_y_degrees: u8,
+    /// Smooth changes to camera distance, offsets and field of view.
+    #[serde(default)]
+    pub blend_profiles: bool,
+    /// Frame the live lock target using a separate elevated camera anchor.
+    #[serde(default)]
+    pub lock_target_framing: bool,
+    /// Optional distance, height and lens while locked on.
+    #[serde(default)]
+    pub lock_profile: Option<crate::WorldCameraProfile>,
     /// Camera origin follow lag shift. Lower values move faster.
     #[serde(default = "default_world_camera_position_lag_shift")]
     pub position_lag_shift: u8,
+    /// Vertical position smoothing override; absent follows the shared lag setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position_vertical_lag_shift: Option<u8>,
     /// Camera focus follow lag shift. Lower values move faster.
     #[serde(default = "default_world_camera_focus_lag_shift")]
     pub focus_lag_shift: u8,
+    /// Vertical focus smoothing override; absent follows the shared lag setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focus_vertical_lag_shift: Option<u8>,
     /// Collision boom recovery lag shift. Lower values move faster.
     #[serde(default = "default_world_camera_distance_lag_shift")]
     pub distance_lag_shift: u8,
@@ -413,8 +475,24 @@ impl WorldCameraSettings {
                 MIN_WORLD_CAMERA_ORBIT_SPEED_LEVEL,
                 MAX_WORLD_CAMERA_ORBIT_SPEED_LEVEL,
             ),
+            accelerated_orbit: self.accelerated_orbit,
+            recenter_preserves_pitch: self.recenter_preserves_pitch,
+            fov_y_degrees: if self.fov_y_degrees == 0 {
+                0
+            } else {
+                self.fov_y_degrees.clamp(38, 48)
+            },
+            blend_profiles: self.blend_profiles,
+            lock_target_framing: self.lock_target_framing,
+            lock_profile: self.lock_profile.map(WorldCameraProfile::normalized),
             position_lag_shift: self.position_lag_shift.min(MAX_WORLD_CAMERA_LAG_SHIFT),
+            position_vertical_lag_shift: self
+                .position_vertical_lag_shift
+                .map(|shift| shift.min(MAX_WORLD_CAMERA_LAG_SHIFT)),
             focus_lag_shift: self.focus_lag_shift.min(MAX_WORLD_CAMERA_LAG_SHIFT),
+            focus_vertical_lag_shift: self
+                .focus_vertical_lag_shift
+                .map(|shift| shift.min(MAX_WORLD_CAMERA_LAG_SHIFT)),
             distance_lag_shift: self.distance_lag_shift.min(MAX_WORLD_CAMERA_LAG_SHIFT),
         }
     }
@@ -429,8 +507,16 @@ impl Default for WorldCameraSettings {
             lock_rise_percent: default_world_camera_lock_rise_percent(),
             min_floor_clearance: default_world_camera_min_floor_clearance(),
             orbit_speed_level: default_world_camera_orbit_speed_level(),
+            accelerated_orbit: false,
+            recenter_preserves_pitch: false,
+            fov_y_degrees: 0,
+            blend_profiles: false,
+            lock_target_framing: false,
+            lock_profile: None,
             position_lag_shift: default_world_camera_position_lag_shift(),
+            position_vertical_lag_shift: None,
             focus_lag_shift: default_world_camera_focus_lag_shift(),
+            focus_vertical_lag_shift: None,
             distance_lag_shift: default_world_camera_distance_lag_shift(),
         }
     }

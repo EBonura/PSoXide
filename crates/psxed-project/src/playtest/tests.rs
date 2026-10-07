@@ -244,3 +244,59 @@ fn legacy_combat_volume_keeps_its_single_section() {
         [crate::CombatHitWindow { start: 8, end: 11 }]
     );
 }
+
+#[test]
+fn camera_controls_survive_cooking_and_manifest_export() {
+    for split in [false, true] {
+        let mut project = ProjectDocument::starter();
+        let settings = crate::WorldCameraSettings {
+            position_lag_shift: 1,
+            focus_lag_shift: 2,
+            accelerated_orbit: split,
+            recenter_preserves_pitch: split,
+            fov_y_degrees: if split { 43 } else { 0 },
+            blend_profiles: split,
+            lock_target_framing: split,
+            lock_profile: split.then_some(crate::WorldCameraProfile {
+                distance: 3900,
+                height: 1900,
+                target_height: 1160,
+                fov_y_degrees: 46,
+            }),
+            position_vertical_lag_shift: split.then_some(3),
+            focus_vertical_lag_shift: split.then_some(4),
+            ..crate::WorldCameraSettings::default()
+        };
+        // Set every authored camera source so this fixture covers the resolved
+        // camera regardless of whether the starter supplies a player override.
+        for node in &mut project.active_scene_mut().nodes {
+            match &mut node.kind {
+                crate::NodeKind::Camera { settings: camera } => *camera = settings,
+                crate::NodeKind::World { camera, .. } => *camera = settings,
+                _ => {}
+            }
+        }
+        let (package, report) = build_package(&project, &crate::default_project_dir());
+        assert!(report.is_ok(), "camera fixture cooks: {:?}", report.errors);
+        let package = package.expect("package");
+        assert!(!package.rooms.is_empty());
+        let (position, focus) = if split { (3, 4) } else { (1, 2) };
+        for room in &package.rooms {
+            assert_eq!(room.camera.accelerated_orbit, split);
+            assert_eq!(room.camera.recenter_preserves_pitch, split);
+            assert_eq!(room.camera.blend_profiles, split);
+            assert_eq!(room.camera.lock_target_framing, split);
+            assert_eq!(room.camera.lock_profile, split.then_some(crate::WorldCameraProfile { distance: 244, height: 119, target_height: 73, fov_y_degrees: 46 }));
+            assert_eq!(room.camera.position_vertical_lag_shift, position);
+            assert_eq!(room.camera.focus_vertical_lag_shift, focus);
+        }
+        let source = super::manifest::render_manifest_source(&package);
+        assert!(source.contains(&format!("accelerated_orbit: {split}")));
+        assert!(source.contains(&format!("recenter_preserves_pitch: {split}")));
+        if split {
+            assert!(source.contains("Some(LevelCameraProfile { distance: 244, height: 119, target_height: 73, fov_y_degrees: 46 })"));
+        }
+        assert!(source.contains(&format!("position_vertical_lag_shift: {position}")));
+        assert!(source.contains(&format!("focus_vertical_lag_shift: {focus}")));
+    }
+}

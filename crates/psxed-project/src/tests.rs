@@ -254,8 +254,21 @@ fn camera_node_kind_serializes_roundtrip() {
             lock_rise_percent: 24,
             min_floor_clearance: 96,
             orbit_speed_level: 6,
+            accelerated_orbit: true,
+            recenter_preserves_pitch: true,
+            fov_y_degrees: 43,
+            blend_profiles: true,
+            lock_target_framing: true,
+            lock_profile: Some(WorldCameraProfile {
+                distance: 3900,
+                height: 1900,
+                target_height: 1160,
+                fov_y_degrees: 46,
+            }),
             position_lag_shift: 1,
+            position_vertical_lag_shift: Some(4),
             focus_lag_shift: 2,
+            focus_vertical_lag_shift: Some(4),
             distance_lag_shift: 3,
         },
     };
@@ -4686,6 +4699,55 @@ fn action_chains_cook_and_reject_missing_targets_bad_windows_and_duplicates() {
         );
     }
 }
+
+#[test]
+fn camera_vertical_smoothing_preserves_legacy_settings_and_clamps_overrides() {
+    let legacy: WorldCameraSettings = ron::from_str("(position_lag_shift: 1, focus_lag_shift: 5)")
+        .expect("older camera settings load");
+    assert!(!legacy.accelerated_orbit);
+    assert!(!legacy.recenter_preserves_pitch);
+    assert!(!legacy.blend_profiles);
+    assert!(!legacy.lock_target_framing);
+    assert_eq!(legacy.fov_y_degrees, 0);
+    assert_eq!(legacy.lock_profile, None);
+    assert_eq!(legacy.position_vertical_lag_shift, None);
+    assert_eq!(legacy.focus_vertical_lag_shift, None);
+    assert_eq!((legacy.position_lag_shift, legacy.focus_lag_shift), (1, 5));
+    let split = WorldCameraSettings {
+        position_vertical_lag_shift: Some(255),
+        focus_vertical_lag_shift: Some(0),
+        ..legacy
+    }
+    .normalized();
+    assert_eq!(
+        split.position_vertical_lag_shift,
+        Some(MAX_WORLD_CAMERA_LAG_SHIFT)
+    );
+    assert_eq!(split.focus_vertical_lag_shift, Some(0));
+}
+
+#[test]
+fn camera_profiles_normalize_extremes_and_preserve_legacy_lens() {
+    let settings = WorldCameraSettings {
+        fov_y_degrees: 255,
+        lock_profile: Some(WorldCameraProfile {
+            distance: -1,
+            height: -9,
+            target_height: i32::MAX,
+            fov_y_degrees: 0,
+        }),
+        ..Default::default()
+    }
+    .normalized();
+    assert_eq!(settings.fov_y_degrees, 48);
+    let profile = settings.lock_profile.unwrap();
+    assert_eq!(profile.distance, MIN_WORLD_CAMERA_DISTANCE);
+    assert_eq!(profile.height, 0);
+    assert_eq!(profile.target_height, MAX_WORLD_CAMERA_HEIGHT);
+    assert_eq!(profile.fov_y_degrees, 38);
+    assert_eq!(WorldCameraSettings::default().normalized().fov_y_degrees, 0);
+}
+
 
 #[test]
 fn graybox_single_enemy_tactical_encounter_cooks_with_approved_walk() {

@@ -670,8 +670,20 @@ pub fn build_package(
             lock_rise_percent: resolved_camera.lock_rise_percent,
             min_floor_clearance: resolved_camera.min_floor_clearance,
             orbit_speed_level: resolved_camera.orbit_speed_level,
+            accelerated_orbit: resolved_camera.accelerated_orbit,
+            recenter_preserves_pitch: resolved_camera.recenter_preserves_pitch,
+            fov_y_degrees: resolved_camera.fov_y_degrees,
+            blend_profiles: resolved_camera.blend_profiles,
+            lock_target_framing: resolved_camera.lock_target_framing,
+            lock_profile: resolved_camera.lock_profile,
             position_lag_shift: resolved_camera.position_lag_shift,
+            position_vertical_lag_shift: resolved_camera
+                .position_vertical_lag_shift
+                .unwrap_or(resolved_camera.position_lag_shift),
             focus_lag_shift: resolved_camera.focus_lag_shift,
+            focus_vertical_lag_shift: resolved_camera
+                .focus_vertical_lag_shift
+                .unwrap_or(resolved_camera.focus_lag_shift),
             distance_lag_shift: resolved_camera.distance_lag_shift,
         },
         flags: 0,
@@ -2040,8 +2052,20 @@ pub fn build_package(
                     lock_rise_percent: camera.lock_rise_percent,
                     min_floor_clearance: camera.min_floor_clearance,
                     orbit_speed_level: camera.orbit_speed_level,
+                    accelerated_orbit: camera.accelerated_orbit,
+                    recenter_preserves_pitch: camera.recenter_preserves_pitch,
+                    fov_y_degrees: camera.fov_y_degrees,
+                    blend_profiles: camera.blend_profiles,
+                    lock_target_framing: camera.lock_target_framing,
+                    lock_profile: camera.lock_profile,
                     position_lag_shift: camera.position_lag_shift,
+                    position_vertical_lag_shift: camera
+                        .position_vertical_lag_shift
+                        .unwrap_or(camera.position_lag_shift),
                     focus_lag_shift: camera.focus_lag_shift,
+                    focus_vertical_lag_shift: camera
+                        .focus_vertical_lag_shift
+                        .unwrap_or(camera.focus_lag_shift),
                     distance_lag_shift: camera.distance_lag_shift,
                 };
             }

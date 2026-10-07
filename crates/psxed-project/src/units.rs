@@ -181,6 +181,11 @@ fn scale_node(node: &mut SceneNode) {
             camera.height = div_i32(camera.height);
             camera.target_height = div_i32(camera.target_height);
             camera.min_floor_clearance = div_i32(camera.min_floor_clearance);
+            if let Some(profile) = &mut camera.lock_profile {
+                profile.distance = div_i32_min1(profile.distance);
+                profile.height = div_i32(profile.height);
+                profile.target_height = div_i32(profile.target_height);
+            }
             culling.draw_distance = div_i32_min1(culling.draw_distance);
             culling.bsp_patch_extent = div_i32_min1(culling.bsp_patch_extent);
             physics.gravity_per_tick = div_i32_min1(physics.gravity_per_tick);
@@ -278,6 +283,11 @@ fn scale_node(node: &mut SceneNode) {
             settings.height = div_i32(settings.height);
             settings.target_height = div_i32(settings.target_height);
             settings.min_floor_clearance = div_i32(settings.min_floor_clearance);
+            if let Some(profile) = &mut settings.lock_profile {
+                profile.distance = div_i32_min1(profile.distance);
+                profile.height = div_i32(profile.height);
+                profile.target_height = div_i32(profile.target_height);
+            }
         }
         NodeKind::PointOfInterest {
             radius,
@@ -339,6 +349,11 @@ fn scale_resource(data: &mut ResourceData) {
             character.camera_height = div_i32(character.camera_height);
             character.camera_target_height = div_i32(character.camera_target_height);
             character.camera_min_floor_clearance = div_i32(character.camera_min_floor_clearance);
+            if let Some(profile) = &mut character.camera_lock_profile {
+                profile.distance = div_i32_min1(profile.distance);
+                profile.height = div_i32(profile.height);
+                profile.target_height = div_i32(profile.target_height);
+            }
             if let Some(behavior) = &mut character.enemy_behavior {
                 scale_enemy_behavior(behavior);
             }
@@ -633,6 +648,52 @@ pub fn trim_animation_blob_to_window(bytes: &[u8], start: u16, end: u16) -> Opti
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn camera_profiles_scale_lengths_but_preserve_lens_and_behavior() {
+        let mut project = ProjectDocument::starter();
+        let settings = crate::WorldCameraSettings {
+            fov_y_degrees: 43,
+            blend_profiles: true,
+            lock_target_framing: true,
+            lock_profile: Some(crate::WorldCameraProfile {
+                distance: 3900,
+                height: 1900,
+                target_height: 1160,
+                fov_y_degrees: 46,
+            }),
+            ..Default::default()
+        };
+        for node in &mut project.active_scene_mut().nodes {
+            match &mut node.kind {
+                NodeKind::World { camera, .. } | NodeKind::Camera { settings: camera } => {
+                    *camera = settings
+                }
+                _ => {}
+            }
+        }
+        scale_project_to_engine_units(&mut project);
+        let mut checked = 0;
+        for node in &project.active_scene().nodes {
+            let camera = match &node.kind {
+                NodeKind::World { camera, .. } | NodeKind::Camera { settings: camera } => camera,
+                _ => continue,
+            };
+            assert_eq!(
+                camera.lock_profile,
+                Some(crate::WorldCameraProfile {
+                    distance: 244,
+                    height: 119,
+                    target_height: 73,
+                    fov_y_degrees: 46
+                })
+            );
+            assert_eq!(camera.fov_y_degrees, 43);
+            assert!(camera.blend_profiles && camera.lock_target_framing);
+            checked += 1;
+        }
+        assert!(checked > 0);
+    }
 
     #[test]
     fn scaled_world_sector_preserves_point_light_reach() {

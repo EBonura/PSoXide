@@ -1983,12 +1983,36 @@ pub struct CharacterResource {
     /// Manual orbit speed copied to a newly placed player camera.
     #[serde(default = "default_world_camera_orbit_speed_level")]
     pub camera_orbit_speed_level: u8,
+    /// Ramp held orbit input from a gentle rate to a fast rate.
+    #[serde(default)]
+    pub camera_accelerated_orbit: bool,
+    /// Keep the selected elevation when recentering behind the player.
+    #[serde(default)]
+    pub camera_recenter_preserves_pitch: bool,
+    /// Vertical field of view in degrees; zero preserves the legacy lens.
+    #[serde(default)]
+    pub camera_fov_y_degrees: u8,
+    /// Smooth changes to camera distance, offsets and field of view.
+    #[serde(default)]
+    pub camera_blend_profiles: bool,
+    /// Frame the live lock target using a separate elevated camera anchor.
+    #[serde(default)]
+    pub camera_lock_target_framing: bool,
+    /// Optional distance, height and lens while locked on.
+    #[serde(default)]
+    pub camera_lock_profile: Option<crate::WorldCameraProfile>,
     /// Camera origin follow lag copied to a newly placed player camera.
     #[serde(default = "default_world_camera_position_lag_shift")]
     pub camera_position_lag_shift: u8,
+    /// Vertical position smoothing override; absent follows the shared lag setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera_position_vertical_lag_shift: Option<u8>,
     /// Camera focus follow lag copied to a newly placed player camera.
     #[serde(default = "default_world_camera_focus_lag_shift")]
     pub camera_focus_lag_shift: u8,
+    /// Vertical focus smoothing override; absent follows the shared lag setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera_focus_vertical_lag_shift: Option<u8>,
     /// Collision boom recovery lag copied to a newly placed player camera.
     #[serde(default = "default_world_camera_distance_lag_shift")]
     pub camera_distance_lag_shift: u8,
@@ -2113,8 +2137,16 @@ impl CharacterResource {
             camera_lock_rise_percent: default_world_camera_lock_rise_percent(),
             camera_min_floor_clearance: default_world_camera_min_floor_clearance(),
             camera_orbit_speed_level: default_world_camera_orbit_speed_level(),
+            camera_accelerated_orbit: false,
+            camera_recenter_preserves_pitch: false,
+            camera_fov_y_degrees: 0,
+            camera_blend_profiles: false,
+            camera_lock_target_framing: false,
+            camera_lock_profile: None,
             camera_position_lag_shift: default_world_camera_position_lag_shift(),
+            camera_position_vertical_lag_shift: None,
             camera_focus_lag_shift: default_world_camera_focus_lag_shift(),
+            camera_focus_vertical_lag_shift: None,
             camera_distance_lag_shift: default_world_camera_distance_lag_shift(),
         }
     }
@@ -2128,8 +2160,16 @@ impl CharacterResource {
             lock_rise_percent: self.camera_lock_rise_percent,
             min_floor_clearance: self.camera_min_floor_clearance,
             orbit_speed_level: self.camera_orbit_speed_level,
+            accelerated_orbit: self.camera_accelerated_orbit,
+            recenter_preserves_pitch: self.camera_recenter_preserves_pitch,
+            fov_y_degrees: self.camera_fov_y_degrees,
+            blend_profiles: self.camera_blend_profiles,
+            lock_target_framing: self.camera_lock_target_framing,
+            lock_profile: self.camera_lock_profile,
             position_lag_shift: self.camera_position_lag_shift,
+            position_vertical_lag_shift: self.camera_position_vertical_lag_shift,
             focus_lag_shift: self.camera_focus_lag_shift,
+            focus_vertical_lag_shift: self.camera_focus_vertical_lag_shift,
             distance_lag_shift: self.camera_distance_lag_shift,
         }
     }
@@ -2332,6 +2372,9 @@ impl EnemyBehaviorSettings {
     /// Authoring defaults for a freshly enabled enemy.
     pub const fn defaults() -> Self {
         Self {
+            tactical: false,
+            training: false,
+            spacing_speed_percent: default_enemy_spacing_speed_percent(),
             aggro_radius: default_enemy_aggro_radius(),
             patrol_offset: [0; 3],
             patrol_wait_ticks: default_enemy_patrol_wait_ticks(),
@@ -2372,15 +2415,12 @@ pub(crate) const fn default_enemy_reaction_ticks() -> u8 {
     18
 }
 
-            tactical: false,
-            training: false,
 pub(crate) const fn default_enemy_preferred_distance() -> u16 {
     768
 }
 
 pub(crate) const fn default_enemy_spacing_tolerance() -> u16 {
     128
-            spacing_speed_percent: default_enemy_spacing_speed_percent(),
 }
 
 pub(crate) const fn default_enemy_decision_interval_ticks() -> u8 {

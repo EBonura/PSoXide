@@ -476,10 +476,26 @@ pub struct PlaytestCamera {
     pub min_floor_clearance: i32,
     /// Manual orbit input speed level. Higher values turn faster.
     pub orbit_speed_level: u8,
+    /// Ramp held orbit input from a gentle rate to a fast rate.
+    pub accelerated_orbit: bool,
+    /// Keep the selected elevation when recentering behind the player.
+    pub recenter_preserves_pitch: bool,
+    /// Vertical field of view in degrees; zero preserves the legacy lens.
+    pub fov_y_degrees: u8,
+    /// Smooth changes to camera distance, offsets and field of view.
+    pub blend_profiles: bool,
+    /// Frame the live lock target using a separate elevated camera anchor.
+    pub lock_target_framing: bool,
+    /// Optional distance, height and lens while locked on.
+    pub lock_profile: Option<crate::WorldCameraProfile>,
     /// Camera origin follow lag shift. Lower values move faster.
     pub position_lag_shift: u8,
+    /// Resolved vertical position lag shift. Lower values move faster.
+    pub position_vertical_lag_shift: u8,
     /// Camera focus follow lag shift. Lower values move faster.
     pub focus_lag_shift: u8,
+    /// Resolved vertical focus lag shift. Lower values move faster.
+    pub focus_vertical_lag_shift: u8,
     /// Collision boom recovery lag shift. Lower values move faster.
     pub distance_lag_shift: u8,
 }
