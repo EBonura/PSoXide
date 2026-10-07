@@ -262,6 +262,7 @@ fn camera_controls_survive_cooking_and_manifest_export() {
                 height: 1900,
                 target_height: 1160,
                 fov_y_degrees: 46,
+                shoulder_offset: 384,
             }),
             position_vertical_lag_shift: split.then_some(3),
             focus_vertical_lag_shift: split.then_some(4),
@@ -286,7 +287,7 @@ fn camera_controls_survive_cooking_and_manifest_export() {
             assert_eq!(room.camera.recenter_preserves_pitch, split);
             assert_eq!(room.camera.blend_profiles, split);
             assert_eq!(room.camera.lock_target_framing, split);
-            assert_eq!(room.camera.lock_profile, split.then_some(crate::WorldCameraProfile { distance: 244, height: 119, target_height: 73, fov_y_degrees: 46 }));
+            assert_eq!(room.camera.lock_profile, split.then_some(crate::WorldCameraProfile { distance: 244, height: 119, target_height: 73, fov_y_degrees: 46, shoulder_offset: 24 }));
             assert_eq!(room.camera.position_vertical_lag_shift, position);
             assert_eq!(room.camera.focus_vertical_lag_shift, focus);
         }
@@ -294,7 +295,7 @@ fn camera_controls_survive_cooking_and_manifest_export() {
         assert!(source.contains(&format!("accelerated_orbit: {split}")));
         assert!(source.contains(&format!("recenter_preserves_pitch: {split}")));
         if split {
-            assert!(source.contains("Some(LevelCameraProfile { distance: 244, height: 119, target_height: 73, fov_y_degrees: 46 })"));
+            assert!(source.contains("Some(LevelCameraProfile { distance: 244, height: 119, target_height: 73, fov_y_degrees: 46, shoulder_offset: 24 })"));
         }
         assert!(source.contains(&format!("position_vertical_lag_shift: {position}")));
         assert!(source.contains(&format!("focus_vertical_lag_shift: {focus}")));

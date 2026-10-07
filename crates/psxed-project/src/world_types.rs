@@ -371,6 +371,8 @@ pub struct WorldCameraProfile {
     pub height: i32,
     /// Focus height above the player origin.
     pub target_height: i32,
+    /// Signed camera-right offset while locked, in authored world units.
+    pub shoulder_offset: i32,
     /// Vertical field of view, clamped to 38-48 degrees.
     pub fov_y_degrees: u8,
 }
@@ -382,6 +384,7 @@ impl Default for WorldCameraProfile {
             height: default_world_camera_height(),
             target_height: default_world_camera_target_height(),
             fov_y_degrees: 43,
+            shoulder_offset: 0,
         }
     }
 }
@@ -395,6 +398,7 @@ impl WorldCameraProfile {
             height: self.height.clamp(0, MAX_WORLD_CAMERA_HEIGHT),
             target_height: self.target_height.clamp(0, MAX_WORLD_CAMERA_HEIGHT),
             fov_y_degrees: self.fov_y_degrees.clamp(38, 48),
+            shoulder_offset: self.shoulder_offset.clamp(-MAX_WORLD_CAMERA_DISTANCE, MAX_WORLD_CAMERA_DISTANCE),
         }
     }
 }

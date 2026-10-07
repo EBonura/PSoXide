@@ -184,6 +184,7 @@ fn scale_node(node: &mut SceneNode) {
             if let Some(profile) = &mut camera.lock_profile {
                 profile.distance = div_i32_min1(profile.distance);
                 profile.height = div_i32(profile.height);
+                profile.shoulder_offset = div_i32(profile.shoulder_offset);
                 profile.target_height = div_i32(profile.target_height);
             }
             culling.draw_distance = div_i32_min1(culling.draw_distance);
@@ -286,6 +287,7 @@ fn scale_node(node: &mut SceneNode) {
             if let Some(profile) = &mut settings.lock_profile {
                 profile.distance = div_i32_min1(profile.distance);
                 profile.height = div_i32(profile.height);
+                profile.shoulder_offset = div_i32(profile.shoulder_offset);
                 profile.target_height = div_i32(profile.target_height);
             }
         }
@@ -352,6 +354,7 @@ fn scale_resource(data: &mut ResourceData) {
             if let Some(profile) = &mut character.camera_lock_profile {
                 profile.distance = div_i32_min1(profile.distance);
                 profile.height = div_i32(profile.height);
+                profile.shoulder_offset = div_i32(profile.shoulder_offset);
                 profile.target_height = div_i32(profile.target_height);
             }
             if let Some(behavior) = &mut character.enemy_behavior {
@@ -661,6 +664,7 @@ mod tests {
                 height: 1900,
                 target_height: 1160,
                 fov_y_degrees: 46,
+                shoulder_offset: -384,
             }),
             ..Default::default()
         };
@@ -685,7 +689,8 @@ mod tests {
                     distance: 244,
                     height: 119,
                     target_height: 73,
-                    fov_y_degrees: 46
+                    fov_y_degrees: 46,
+                    shoulder_offset: -24,
                 })
             );
             assert_eq!(camera.fov_y_degrees, 43);

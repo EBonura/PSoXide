@@ -975,7 +975,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             room.camera.fov_y_degrees,
             room.camera.blend_profiles,
             room.camera.lock_target_framing,
-            room.camera.lock_profile.map_or_else(|| "None".to_owned(), |p| format!("Some(LevelCameraProfile {{ distance: {}, height: {}, target_height: {}, fov_y_degrees: {} }})", p.distance, p.height, p.target_height, p.fov_y_degrees)),
+            room.camera.lock_profile.map_or_else(|| "None".to_owned(), |p| format!("Some(LevelCameraProfile {{ distance: {}, height: {}, target_height: {}, fov_y_degrees: {}, shoulder_offset: {} }})", p.distance, p.height, p.target_height, p.fov_y_degrees, p.shoulder_offset)),
             room.camera.position_lag_shift,
             room.camera.position_vertical_lag_shift,
             room.camera.focus_lag_shift,

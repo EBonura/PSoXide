@@ -264,6 +264,7 @@ fn camera_node_kind_serializes_roundtrip() {
                 height: 1900,
                 target_height: 1160,
                 fov_y_degrees: 46,
+                shoulder_offset: 0,
             }),
             position_lag_shift: 1,
             position_vertical_lag_shift: Some(4),
@@ -4735,6 +4736,7 @@ fn camera_profiles_normalize_extremes_and_preserve_legacy_lens() {
             height: -9,
             target_height: i32::MAX,
             fov_y_degrees: 0,
+            shoulder_offset: 0,
         }),
         ..Default::default()
     }
