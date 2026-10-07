@@ -226,7 +226,7 @@ impl Playtest {
             }
             // Three small contact glints replace the former overhead tether.
             if self.hook_attached == Some(index) {
-                for (x, y) in [(0, 0), (4, -57), (18, -64)] {
+                for (x, y) in [(0, 0), (4, -58), (18, -66)] {
                     let r = if self.hook_charge.ready() { 3 } else { 2 };
                     let color = if self.hook_charge.ready() {
                         (255, 245, 210)
