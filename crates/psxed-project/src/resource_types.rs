@@ -275,6 +275,11 @@ pub enum CharacterAnimationAction {
     RangedAttack,
     LightAttackFollowup,
     LightAttackFinisher,
+    RangedAim,
+    RangedWalk,
+    RangedBackward,
+    RangedLeft,
+    RangedRight,
 }
 
 impl CharacterAnimationAction {
@@ -323,6 +328,11 @@ impl CharacterAnimationAction {
         Self::RangedAttack,
         Self::LightAttackFollowup,
         Self::LightAttackFinisher,
+        Self::RangedAim,
+        Self::RangedWalk,
+        Self::RangedBackward,
+        Self::RangedLeft,
+        Self::RangedRight,
     ];
 
     /// Actions exposed by current editor authoring. `StunRecovery` remains in
@@ -363,6 +373,11 @@ impl CharacterAnimationAction {
         Self::RangedAttack,
         Self::LightAttackFollowup,
         Self::LightAttackFinisher,
+        Self::RangedAim,
+        Self::RangedWalk,
+        Self::RangedBackward,
+        Self::RangedLeft,
+        Self::RangedRight,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -405,6 +420,11 @@ impl CharacterAnimationAction {
             Self::RangedAttack => "Ranged Attack",
             Self::LightAttackFollowup => "Horizon Light 2",
             Self::LightAttackFinisher => "Horizon Light 3",
+            Self::RangedAim => "Ranged Aim",
+            Self::RangedWalk => "Ranged Walk",
+            Self::RangedBackward => "Ranged Backward",
+            Self::RangedLeft => "Ranged Left",
+            Self::RangedRight => "Ranged Right",
         }
     }
 
@@ -446,6 +466,11 @@ impl CharacterAnimationAction {
             Self::RangedAttack => 33,
             Self::LightAttackFollowup => 34,
             Self::LightAttackFinisher => 35,
+            Self::RangedAim => 36,
+            Self::RangedWalk => 37,
+            Self::RangedBackward => 38,
+            Self::RangedLeft => 39,
+            Self::RangedRight => 40,
         }
     }
 
@@ -484,7 +509,8 @@ impl CharacterAnimationAction {
             | Self::VertHeavyAttack
             | Self::VertComboAttack
             | Self::LightAttackFollowup
-            | Self::LightAttackFinisher => None,
+            | Self::LightAttackFinisher
+            | Self::RangedAim | Self::RangedWalk | Self::RangedBackward | Self::RangedLeft | Self::RangedRight => None,
         }
     }
 
@@ -1669,6 +1695,14 @@ impl CharacterCombatCapsule {
     }
 }
 
+/// Chooses the authored contact contract for a weapon.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WeaponClass {
+    #[default]
+    Melee,
+    Ranged,
+}
+
 /// Gameplay weapon resource: model reference, grip/pivot, authored
 /// attack hit volumes, and the melee-arc combat numbers (the phase-3
 /// combat contract: update-band hit resolution sweeps a flat arc in
@@ -1678,6 +1712,9 @@ impl CharacterCombatCapsule {
 /// existing weapon RON loads (and fights) unchanged.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WeaponResource {
+    /// Ranged weapons use character projectile emitters instead of a melee arc.
+    #[serde(default)]
+    pub class: WeaponClass,
     /// Visual model used for the weapon. `None` is allowed during
     /// authoring so hitboxes can be blocked in before art lands.
     #[serde(default)]
@@ -1712,6 +1749,7 @@ impl WeaponResource {
     /// Minimal editable weapon.
     pub fn defaults() -> Self {
         Self {
+            class: WeaponClass::Melee,
             model: None,
             default_character_socket: default_character_socket(),
             grip: WeaponGrip::default(),

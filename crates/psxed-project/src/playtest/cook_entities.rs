@@ -3055,7 +3055,7 @@ pub(crate) fn register_weapon_for_equipment(
     // able to connect. Serde defaults are non-zero, so only an
     // explicitly authored zero trips these.
     let mut arc_ok = true;
-    if weapon.arc_reach == 0 {
+    if weapon.class == crate::WeaponClass::Melee && weapon.arc_reach == 0 {
         report.error_at(
             PlaytestValidationTarget::Resource(weapon_resource_id),
             format!(
@@ -3066,7 +3066,8 @@ pub(crate) fn register_weapon_for_equipment(
         );
         arc_ok = false;
     }
-    if weapon.arc_half_angle_degrees == 0 || weapon.arc_half_angle_degrees > 170 {
+    if weapon.class == crate::WeaponClass::Melee
+        && (weapon.arc_half_angle_degrees == 0 || weapon.arc_half_angle_degrees > 170) {
         report.error_at(
             PlaytestValidationTarget::Resource(weapon_resource_id),
             format!(

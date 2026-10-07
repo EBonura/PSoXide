@@ -4768,3 +4768,26 @@ fn graybox_single_enemy_tactical_encounter_cooks_with_approved_walk() {
     let ResourceData::AnimationClip(walk) = &walk.data else { panic!("walk clip"); };
     assert_eq!(walk.psxanim_path, "assets/animations/light_walk_v5/walk.psxanim");
 }
+
+#[test]
+fn graybox_ranged_weapon_cooks_without_a_melee_arc_but_melee_still_requires_one() {
+    let root = projects_dir().join("graybox-reach");
+    let source = std::fs::read_to_string(root.join("project.ron")).unwrap();
+    let mut project = ProjectDocument::from_ron_str(&source).unwrap();
+    let (package, report) = playtest::build_package(&project, &root);
+    assert!(report.is_ok(), "{:?}", report.errors);
+    let package = package.unwrap();
+    let weapon = package.weapons.iter().find(|w| w.name == "Zenith Projector").unwrap();
+    assert_eq!(weapon.arc_reach, 0);
+    assert_eq!(weapon.hitbox_count, 0);
+    assert!(package.combat_capsules.iter().any(|c|
+        c.action == psx_level::CharacterAnimationAction::RangedAttack.to_index() as u8
+            && c.flags & psx_level::combat_capsule_flags::PROJECTILE_EMITTER != 0
+            && c.damage > 0 && c.poise_damage == 0));
+    let ResourceData::Weapon(weapon) = &mut project.resources.iter_mut()
+        .find(|r| r.name == "Zenith Projector").unwrap().data else { panic!("weapon resource") };
+    assert_eq!(weapon.class, WeaponClass::Ranged);
+    weapon.class = WeaponClass::Melee;
+    let (_, report) = playtest::build_package(&project, &root);
+    assert!(!report.is_ok(), "A melee weapon with a zero arc must still be rejected");
+}
