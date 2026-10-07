@@ -690,6 +690,19 @@ impl LevelFarVistaRecord {
     };
 }
 
+/// Cooked combat camera composition in runtime world units.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct LevelCameraProfile {
+    /// Preferred trailing distance.
+    pub distance: i32,
+    /// Camera offset above the player root.
+    pub height: i32,
+    /// Focus offset above the player root.
+    pub target_height: i32,
+    /// Vertical lens angle in degrees.
+    pub fov_y_degrees: u8,
+}
+
 /// Resolved third-person camera settings for one cooked room.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LevelCameraRecord {
@@ -705,10 +718,26 @@ pub struct LevelCameraRecord {
     pub min_floor_clearance: i32,
     /// Manual orbit input speed level. Higher values turn faster.
     pub orbit_speed_level: u8,
+    /// Ramp held orbit input from a gentle rate to a fast rate.
+    pub accelerated_orbit: bool,
+    /// Keep the selected elevation when recentering behind the player.
+    pub recenter_preserves_pitch: bool,
+    /// Vertical field of view in degrees; zero preserves the legacy lens.
+    pub fov_y_degrees: u8,
+    /// Smooth changes to camera distance, offsets and field of view.
+    pub blend_profiles: bool,
+    /// Frame the live lock target using a separate elevated camera anchor.
+    pub lock_target_framing: bool,
+    /// Optional distance, height and lens while locked on.
+    pub lock_profile: Option<LevelCameraProfile>,
     /// Camera origin follow lag shift. Lower values move faster.
     pub position_lag_shift: u8,
+    /// Resolved vertical position lag shift. Lower values move faster.
+    pub position_vertical_lag_shift: u8,
     /// Camera focus follow lag shift. Lower values move faster.
     pub focus_lag_shift: u8,
+    /// Resolved vertical focus lag shift. Lower values move faster.
+    pub focus_vertical_lag_shift: u8,
     /// Collision boom recovery lag shift. Lower values move faster.
     pub distance_lag_shift: u8,
 }
@@ -722,8 +751,16 @@ impl LevelCameraRecord {
         lock_rise_percent: 25,
         min_floor_clearance: 64,
         orbit_speed_level: 5,
+        accelerated_orbit: false,
+        recenter_preserves_pitch: false,
+        fov_y_degrees: 0,
+        blend_profiles: false,
+        lock_target_framing: false,
+        lock_profile: None,
         position_lag_shift: 2,
+        position_vertical_lag_shift: 2,
         focus_lag_shift: 2,
+        focus_vertical_lag_shift: 2,
         distance_lag_shift: 3,
     };
 }
@@ -1692,6 +1729,10 @@ pub mod game_entity_flags {
     /// uses its cooked range band at distance and keeps close-range attacks
     /// on the Horizon light/heavy actions.
     pub const RANGED_ATTACK: u16 = 1 << 2;
+    /// Sustained tactical goals, contextual attacks and movement recovery.
+    pub const TACTICAL: u16 = 1 << 3;
+    /// Opt-in single-enemy encounter reset and diagnostic overlay.
+    pub const TRAINING: u16 = 1 << 4;
 }
 
 /// One cooked logic entity, shaped after hl-psx's campaign-proven
@@ -1729,10 +1770,6 @@ pub struct LevelLogicRecord {
     pub wait_ticks: i16,
     /// First kind-specific argument.
     pub arg0: u16,
-    /// Sustained tactical goals, contextual attacks and movement recovery.
-    pub const TACTICAL: u16 = 1 << 3;
-    /// Opt-in single-enemy encounter reset and diagnostic overlay.
-    pub const TRAINING: u16 = 1 << 4;
     /// Second kind-specific argument.
     pub arg1: u16,
     /// Kind-defined entity link ([`logic_kind::DOOR`] stores a

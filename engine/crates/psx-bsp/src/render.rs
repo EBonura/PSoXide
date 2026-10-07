@@ -1395,6 +1395,9 @@ impl Renderer {
     /// Declare the projection the caller renders with (GTE H and screen
     /// half-extents), so the brush-face frustum clip matches it.
     pub fn set_view_projection(&mut self, projection: ViewProjection) {
+        if self.view_projection != projection {
+            self.reuse_pxbsp_valid = false;
+        }
         self.view_projection = projection;
     }
 
@@ -3908,6 +3911,18 @@ fn scale_baked_color_q7(color: u32, scale_q7: u8) -> u32 {
 mod tests {
     use super::*;
     use crate::pxbsp::PxbspLumpKind;
+
+    #[test]
+    fn projection_change_invalidates_reused_world_selection() {
+        let mut renderer = Renderer::new();
+        renderer.reuse_pxbsp_valid = true;
+        let mut projection = renderer.view_projection();
+        renderer.set_view_projection(projection);
+        assert!(renderer.reuse_pxbsp_valid);
+        projection.focal_length += 1;
+        renderer.set_view_projection(projection);
+        assert!(!renderer.reuse_pxbsp_valid);
+    }
 
     #[test]
     fn exact_view_rotation_matches_the_table_form_at_table_angles() {

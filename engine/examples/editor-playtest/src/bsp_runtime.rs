@@ -702,7 +702,12 @@ impl BspRuntime {
                     pxbsp.origin.y >> 12,
                     pxbsp.origin.z >> 12,
                 ],
-                self.renderer.view_projection(),
+                psx_bsp::render::ViewProjection {
+                    focal_length: camera.projection.focal_length,
+                    half_width: i32::from(camera.projection.screen_x),
+                    half_height: i32::from(camera.projection.screen_y),
+                    ..self.renderer.view_projection()
+                },
             )
         };
         let mut visibility = WorldObjectVisibility::NONE;
@@ -1548,9 +1553,14 @@ impl BspRuntime {
             i32::from(PROJECTION.screen_y) << 16,
         );
         psx_gte::scene::set_projection_plane(
-            PROJECTION.focal_length.clamp(1, i32::from(u16::MAX)) as u16
+            camera.projection.focal_length.clamp(1, i32::from(u16::MAX)) as u16,
         );
         psx_gte::scene::set_avsz_weights(0x155, 0x100);
+        let mut projection = self.renderer.view_projection();
+        projection.focal_length = camera.projection.focal_length;
+        projection.half_width = i32::from(camera.projection.screen_x);
+        projection.half_height = i32::from(camera.projection.screen_y);
+        self.renderer.set_view_projection(projection);
         let view_rotation = pxbsp_view_rotation(camera);
         let camera = pxbsp_camera(camera);
         let view = load_pxbsp_view_rotation(camera.origin, view_rotation);

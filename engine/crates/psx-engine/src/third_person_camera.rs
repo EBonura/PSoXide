@@ -8,6 +8,12 @@
 //! lock-on facing, and a spring-arm collision solve that shortens the
 //! boom without taking yaw control away from the player.
 
+mod framing;
+mod profile;
+use framing::lock_pitch_goal;
+use profile::ProfileBlend;
+pub use profile::ThirdPersonCameraProfile;
+
 use crate::floor_sample::{height_at_local, triangle_heights_to_quad};
 use crate::{
     collision_query::{
@@ -67,6 +73,22 @@ pub struct ThirdPersonCameraConfig {
     pub pitch_max_q12: i16,
     /// Display frames before auto-alignment resumes after manual camera input.
     pub manual_cooldown_frames: u8,
+    /// Fade automatic alignment back in over this many display ticks after cooldown.
+    pub manual_release_frames: u8,
+    /// Optional accelerated orbit speed level (1-7). Input deltas must use
+    /// `accelerated_orbit_step_q12` as their full-stick rate.
+    pub accelerated_orbit_speed: Option<u8>,
+    /// Keep the chosen orbit pitch during recenter, completing yaw in 18 ticks.
+    pub recenter_preserves_pitch: bool,
+    /// Vertical FOV, clamped to 38-48 degrees. Zero keeps the supplied projection.
+    pub fov_y_degrees: u8,
+    /// Ease profile values at 60 Hz, with a second distance approach stage.
+    pub blend_profiles: bool,
+    /// Use the elevated lock anchor to steer pitch around the player focus.
+    /// Replaces legacy target bias and lock height boost.
+    pub lock_target_framing: bool,
+    /// Optional composition while a lock target is present.
+    pub lock_profile: Option<ThirdPersonCameraProfile>,
     /// Maximum auto-align yaw movement per display frame.
     pub auto_align_step: Angle,
     /// When true, ease the unlocked camera behind player yaw while moving.
@@ -75,8 +97,14 @@ pub struct ThirdPersonCameraConfig {
     pub lock_on_align_step: Angle,
     /// Position lag strength as a power-of-two divisor.
     pub position_lag_shift: u8,
+    /// Vertical position lag override. None uses `position_lag_shift`.
+    pub position_vertical_lag_shift: Option<u8>,
     /// Focus lag strength as a power-of-two divisor.
     pub focus_lag_shift: u8,
+    /// Vertical focus lag override. None uses `focus_lag_shift`. A slower
+    /// vertical setting limits focus lag to a quarter of `target_height`
+    /// so sharp height changes cannot leave the look-at point above the actor.
+    pub focus_vertical_lag_shift: Option<u8>,
     /// Ease-out strength when collision lets the camera extend again.
     pub distance_lag_shift: u8,
     /// Display frames to hold the shortened boom before easing out.
@@ -109,16 +137,67 @@ impl ThirdPersonCameraConfig {
             pitch_min_q12: -192,
             pitch_max_q12: 704,
             manual_cooldown_frames: 42,
+            manual_release_frames: 0,
+            accelerated_orbit_speed: None,
+            recenter_preserves_pitch: false,
+            fov_y_degrees: 0,
+            blend_profiles: false,
+            lock_target_framing: false,
+            lock_profile: None,
             auto_align_step: Angle::from_q12(18),
             auto_align_when_moving: false,
             lock_on_align_step: Angle::from_q12(64),
             position_lag_shift: 2,
+            position_vertical_lag_shift: None,
             focus_lag_shift: 2,
+            focus_vertical_lag_shift: None,
             distance_lag_shift: 3,
             collision_release_delay_frames: 4,
             collision_solve_interval: 1,
         }
     }
+}
+
+/// Full-stick angular rate per 60 Hz display tick for the accelerated orbit mode.
+/// A squared speed option interpolates 80-240 degrees/second (normal) or
+/// 180-500 (fast). Level is clamped to the editor's supported 1-7 range.
+/// Rounding is to the nearest Q0.12 turn unit; both axes use the same rate.
+pub fn accelerated_orbit_step_q12(speed_level: u8, fast: bool) -> i16 {
+    let level = i32::from(speed_level.clamp(1, 7));
+    let (base, span) = if fast { (180, 320) } else { (80, 160) };
+    (((base * 100 + span * level * level) * 4096 + 1_080_000) / 2_160_000) as i16
+}
+
+// Each axis has its own signed hold timer. Release/reversal clears fractional
+// carry too, so old motion cannot leak into a fresh gesture. Input is already
+// deadzone-scaled; keep its magnitude while changing the maximum angular rate.
+fn accelerated_orbit_delta(
+    delta: i16,
+    speed: Option<u8>,
+    ramp: &mut i8,
+    remainder: &mut i32,
+) -> i16 {
+    let Some(speed) = speed else {
+        *ramp = 0;
+        *remainder = 0;
+        return delta;
+    };
+    if delta == 0 || delta.signum() != i16::from(ramp.signum()) {
+        *ramp = 0;
+        *remainder = 0;
+    }
+    if delta == 0 {
+        return 0;
+    }
+    let held = i32::from(ramp.unsigned_abs()).min(36);
+    let normal = i32::from(accelerated_orbit_step_q12(speed, false));
+    let fast = i32::from(accelerated_orbit_step_q12(speed, true));
+    let divisor = normal * 36;
+    let numerator = i32::from(delta) * (normal * 36 + (fast - normal) * held) + *remainder;
+    let step = numerator / divisor;
+    *remainder = numerator % divisor;
+    *ramp = (held + 1).min(36) as i8 * delta.signum() as i8;
+    step.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
 }
 
 /// Per-display-frame camera input.
@@ -169,15 +248,23 @@ pub struct ThirdPersonCameraFrame {
 /// Runtime state for the third-person camera.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct ThirdPersonCameraState {
+    profile: ProfileBlend,
     yaw: Angle,
     pitch_q12: i16,
     frame_pitch_q12: i16,
     lock_height_offset: i32,
+    lock_pitch_offset_q12: i16,
     base_position_y: i32,
     distance: i32,
     position: RoomPoint,
     focus: RoomPoint,
     manual_cooldown: u8,
+    manual_release: u8,
+    yaw_ramp: i8,
+    pitch_ramp: i8,
+    yaw_remainder: i32,
+    pitch_remainder: i32,
+    recenter_remaining: u8,
     recenter_active: bool,
     collision_release_delay: u8,
     initialized: bool,
@@ -194,15 +281,23 @@ impl ThirdPersonCameraState {
     /// Create a camera state with an initial orbit yaw.
     pub const fn new(yaw: Angle) -> Self {
         Self {
+            profile: ProfileBlend::new(),
             yaw,
             pitch_q12: 0,
             frame_pitch_q12: 0,
             lock_height_offset: 0,
+            lock_pitch_offset_q12: 0,
             base_position_y: 0,
             distance: 0,
             position: RoomPoint::ZERO,
             focus: RoomPoint::ZERO,
             manual_cooldown: 0,
+            manual_release: 0,
+            yaw_ramp: 0,
+            pitch_ramp: 0,
+            yaw_remainder: 0,
+            pitch_remainder: 0,
+            recenter_remaining: 0,
             recenter_active: false,
             collision_release_delay: 0,
             initialized: false,
@@ -238,6 +333,8 @@ impl ThirdPersonCameraState {
         yaw: Angle,
     ) {
         let config = normalize_config(config);
+        self.profile.snap(config, target.lock_target.is_some());
+        let config = self.profile.apply(config);
         self.yaw = yaw;
         self.recenter_active = false;
         self.distance = config
@@ -246,6 +343,7 @@ impl ThirdPersonCameraState {
         self.pitch_q12 = default_pitch_q12(config);
         self.frame_pitch_q12 = self.pitch_q12;
         self.lock_height_offset = 0;
+        self.lock_pitch_offset_q12 = 0;
         self.focus = player_focus(target.player, config.target_height);
         self.base_position_y = camera_height_goal(target.player, self.pitch_q12, config);
         self.position = camera_position_at_height(
@@ -256,6 +354,12 @@ impl ThirdPersonCameraState {
             self.base_position_y,
         );
         self.manual_cooldown = 0;
+        self.manual_release = 0;
+        self.yaw_ramp = 0;
+        self.pitch_ramp = 0;
+        self.yaw_remainder = 0;
+        self.pitch_remainder = 0;
+        self.recenter_remaining = 0;
         self.collision_release_delay = 0;
         self.clear_orbit_hold = false;
         self.initialized = true;
@@ -402,11 +506,20 @@ impl ThirdPersonCameraState {
         config: ThirdPersonCameraConfig,
         delta_vblanks: u16,
     ) -> Result<ThirdPersonCameraFrame, CollisionQueryError> {
+        self.profile.set_base_projection(projection);
         let steps = delta_vblanks.clamp(1, MAX_CAMERA_CATCHUP_VBLANKS);
         let config = normalize_config(config);
         let mut i = 0;
         while i < steps {
-            self.advance_one_vblank(collision, target, input, config)?;
+            self.advance_one_vblank(
+                collision,
+                target,
+                ThirdPersonCameraInput {
+                    recenter: input.recenter && i == 0,
+                    ..input
+                },
+                config,
+            )?;
             i += 1;
         }
         Ok(self.current_frame(projection))
@@ -423,27 +536,65 @@ impl ThirdPersonCameraState {
             self.snap_to_player(target, config);
         }
 
+        let previous_default_pitch = default_pitch_q12(self.profile.apply(config));
+        self.profile.advance(config, target.lock_target.is_some());
+        let mut config = self.profile.apply(config);
+        if config.lock_target_framing && config.fov_y_degrees == 0 {
+            config.fov_y_degrees = self.profile.vertical_fov_degrees();
+        }
+        // Preserve the player's orbit adjustment as the authored composition changes.
+        if config.blend_profiles || config.lock_profile.is_some() {
+            self.pitch_q12 = self
+                .pitch_q12
+                .saturating_add(default_pitch_q12(config).saturating_sub(previous_default_pitch))
+                .clamp(config.pitch_min_q12, config.pitch_max_q12);
+        }
+        if config.lock_target_framing && target.lock_target.is_some() {
+            config.focus_lag_shift = config.focus_lag_shift.min(2);
+            config.focus_vertical_lag_shift = Some(
+                config
+                    .focus_vertical_lag_shift
+                    .unwrap_or(config.focus_lag_shift)
+                    .min(3),
+            );
+        }
         let focus_goal = camera_focus_goal(target, config, self.distance);
         // The orbit the previous frame settled on, before input and steering.
         let previous_yaw = self.yaw;
 
         if input.recenter {
             self.recenter_active = true;
+            self.recenter_remaining = 18;
         }
         if target.lock_target.is_some() {
             self.recenter_active = false;
         }
 
+        let yaw_delta = accelerated_orbit_delta(
+            input.yaw_delta_q12,
+            config.accelerated_orbit_speed,
+            &mut self.yaw_ramp,
+            &mut self.yaw_remainder,
+        );
+        let pitch_delta = accelerated_orbit_delta(
+            input.pitch_delta_q12,
+            config.accelerated_orbit_speed,
+            &mut self.pitch_ramp,
+            &mut self.pitch_remainder,
+        );
         if input.yaw_delta_q12 != 0 || input.pitch_delta_q12 != 0 {
             self.recenter_active = false;
-            self.yaw = self.yaw.add_signed_q12(input.yaw_delta_q12);
+            self.yaw = self.yaw.add_signed_q12(yaw_delta);
             self.pitch_q12 = self
                 .pitch_q12
-                .saturating_add(input.pitch_delta_q12)
+                .saturating_add(pitch_delta)
                 .clamp(config.pitch_min_q12, config.pitch_max_q12);
             self.manual_cooldown = config.manual_cooldown_frames;
+            self.manual_release = config.manual_release_frames;
         } else if self.manual_cooldown != 0 {
             self.manual_cooldown -= 1;
+        } else if self.manual_release != 0 {
+            self.manual_release -= 1;
         }
 
         let player_back_yaw = target.player_yaw.add(Angle::HALF);
@@ -466,7 +617,22 @@ impl ThirdPersonCameraState {
             (
                 player_back_yaw,
                 if self.recenter_active {
-                    config.lock_on_align_step
+                    if config.recenter_preserves_pitch {
+                        let remaining = u16::from(self.recenter_remaining.max(1));
+                        let error = self.yaw.shortest_delta_q12(player_back_yaw).unsigned_abs();
+                        Angle::from_q12(error.div_ceil(remaining))
+                    } else {
+                        config.lock_on_align_step
+                    }
+                } else if config.manual_release_frames != 0 {
+                    let released = config
+                        .manual_release_frames
+                        .saturating_sub(self.manual_release);
+                    Angle::from_q12(
+                        (u32::from(config.auto_align_step.as_q12()) * u32::from(released)
+                            / u32::from(config.manual_release_frames))
+                            as u16,
+                    )
                 } else {
                     config.auto_align_step
                 },
@@ -476,18 +642,45 @@ impl ThirdPersonCameraState {
         };
         self.yaw = self.yaw.approach_q12(desired_yaw, yaw_step.as_q12());
         if self.recenter_active {
+            self.recenter_remaining = self.recenter_remaining.saturating_sub(1);
+            let recenter_pitch = if config.recenter_preserves_pitch {
+                self.pitch_q12
+            } else {
+                default_pitch_q12(config)
+            };
             self.pitch_q12 = approach_i16(
                 self.pitch_q12,
-                default_pitch_q12(config),
+                recenter_pitch,
                 config.lock_on_align_step.as_q12() as i16,
             );
-            if self.yaw == player_back_yaw && self.pitch_q12 == default_pitch_q12(config) {
+            if self.yaw == player_back_yaw && self.pitch_q12 == recenter_pitch {
                 self.recenter_active = false;
             }
         }
 
         let previous_focus = self.focus;
-        let proposed_focus = approach_vertex_shift(self.focus, focus_goal, config.focus_lag_shift);
+        let mut proposed_focus = approach_vertex_shift(
+            self.focus,
+            focus_goal,
+            config.focus_lag_shift,
+            config
+                .focus_vertical_lag_shift
+                .unwrap_or(config.focus_lag_shift),
+        );
+        if config
+            .focus_vertical_lag_shift
+            .is_some_and(|vertical| vertical > config.focus_lag_shift)
+        {
+            // A long vertical tail works on steps, but after a drop it can
+            // leave the focus above the player while collision pulls the eye
+            // below it. Bound that tail before checking the focus segment;
+            // camera clearance must still be able to override the framing.
+            let vertical_slack = (config.target_height / 4).max(1);
+            proposed_focus.y = proposed_focus.y.clamp(
+                focus_goal.y.saturating_sub(vertical_slack),
+                focus_goal.y.saturating_add(vertical_slack),
+            );
+        }
         // Lock bias and follow lag can put the look-at point through a pillar.
         // Start below the look-at height, which may sit above the player's
         // collision body and enter a low ceiling.
@@ -514,9 +707,29 @@ impl ThirdPersonCameraState {
             .base_position_y
             .saturating_add(self.focus.y.saturating_sub(previous_focus.y));
 
-        // Ease toward the authored lock-on height. The complete arm,
-        // including this lift, shortens along the collision-tested ray.
-        let lock_height_goal = if target.lock_target.is_some() {
+        // Reference framing keeps the focus above the player and moves the
+        // orbit around it. Keep manual pitch separately so unlock can restore it.
+        let lock_pitch_goal = if config.lock_target_framing {
+            target
+                .lock_target
+                .and_then(|lock| lock_pitch_goal(self.focus, lock, self.distance, config))
+        } else {
+            None
+        };
+        let offset_goal = lock_pitch_goal.map_or(0, |pitch| pitch - self.pitch_q12);
+        let old_pitch_offset = self.lock_pitch_offset_q12;
+        // 1-sqrt(1-.3) in Q12, adapting the native 30 Hz chase to 60 Hz.
+        let error = i32::from(offset_goal) - i32::from(self.lock_pitch_offset_q12);
+        let step = error * 669 / 4096;
+        self.lock_pitch_offset_q12 += if step == 0 { error.signum() } else { step } as i16;
+        let orbit_pitch = self
+            .pitch_q12
+            .saturating_add(self.lock_pitch_offset_q12)
+            .clamp(config.pitch_min_q12, config.pitch_max_q12);
+
+        // Legacy framing retains its authored height lift. Angular framing
+        // already accounts for elevation, so adding that lift would count twice.
+        let lock_height_goal = if target.lock_target.is_some() && !config.lock_target_framing {
             config.lock_height_boost
         } else {
             0
@@ -527,7 +740,7 @@ impl ThirdPersonCameraState {
             config.focus_lag_shift.saturating_add(2),
         )
         .clamp(0, config.lock_height_boost);
-        let base_camera_y_goal = camera_height_goal(target.player, self.pitch_q12, config);
+        let base_camera_y_goal = camera_height_goal(target.player, orbit_pitch, config);
         let locked_camera_y_goal = base_camera_y_goal.saturating_add(self.lock_height_offset);
 
         // Spring-arm sweep throttle: the sweep dominates the camera's
@@ -537,6 +750,8 @@ impl ThirdPersonCameraState {
         // camera moves (manual orbit, lock-on, recenter) always solve
         // fresh so the throttle never fights the player's hand.
         let solve_now = self.solve_phase == 0
+            || self.profile.changing()
+            || old_pitch_offset != self.lock_pitch_offset_q12
             || input.yaw_delta_q12 != 0
             || input.pitch_delta_q12 != 0
             || input.recenter
@@ -551,27 +766,39 @@ impl ThirdPersonCameraState {
             let mut solve = collision.solve(
                 self.focus,
                 self.yaw,
-                self.pitch_q12,
+                orbit_pitch,
                 locked_camera_y_goal,
                 config,
             )?;
             let wanted = clear_orbit_distance(config);
-            if input.yaw_delta_q12 != 0 || solve.distance >= wanted {
-                // The player turned the camera, or the steered orbit is clear.
+            if input.yaw_delta_q12 != 0 || target.lock_target.is_none() {
                 self.clear_orbit_hold = false;
-            } else if self.clear_orbit_hold && self.yaw != previous_yaw {
-                // Steering would walk the arm back into the wall a step at a
-                // time until it collapses and swings out again. Hold still.
-                let held = collision.solve(
-                    self.focus,
-                    previous_yaw,
-                    self.pitch_q12,
-                    locked_camera_y_goal,
-                    config,
-                )?;
-                if held.distance > solve.distance {
+            } else if self.clear_orbit_hold {
+                // A clear incremental steering step does not mean the target
+                // bearing is clear. Hold the side view until that full bearing
+                // reopens, otherwise steering repeatedly collapses the arm.
+                let desired = if self.yaw == desired_yaw {
+                    solve
+                } else {
+                    collision.solve(
+                        self.focus,
+                        desired_yaw,
+                        orbit_pitch,
+                        locked_camera_y_goal,
+                        config,
+                    )?
+                };
+                if desired.distance >= wanted {
+                    self.clear_orbit_hold = false;
+                } else if self.yaw != previous_yaw {
                     self.yaw = previous_yaw;
-                    solve = held;
+                    solve = collision.solve(
+                        self.focus,
+                        previous_yaw,
+                        orbit_pitch,
+                        locked_camera_y_goal,
+                        config,
+                    )?;
                 }
             }
             if target.lock_target.is_some()
@@ -590,7 +817,8 @@ impl ThirdPersonCameraState {
                     self.focus,
                     self.yaw,
                     previous_yaw.shortest_delta_q12(self.yaw),
-                    self.pitch_q12,
+                    solve.distance,
+                    orbit_pitch,
                     locked_camera_y_goal,
                     config,
                 )? {
@@ -642,7 +870,7 @@ impl ThirdPersonCameraState {
             self.focus,
             self.distance,
             self.yaw,
-            self.pitch_q12,
+            orbit_pitch,
             base_camera_y_goal,
         );
         if collision_solve.pull_in || swung {
@@ -663,7 +891,9 @@ impl ThirdPersonCameraState {
             self.base_position_y = approach_i32_shift(
                 self.base_position_y,
                 base_camera_y_goal,
-                config.position_lag_shift,
+                config
+                    .position_vertical_lag_shift
+                    .unwrap_or(config.position_lag_shift),
             );
         }
         let lock_lift =
@@ -687,19 +917,15 @@ impl ThirdPersonCameraState {
                 // `distance` is the boom length: the orbit applies cos(pitch)
                 // to obtain its horizontal radius. Storing the radius here
                 // would apply that shortening a second time on the next tick.
-                let cos_pitch = signed_q12_angle(self.pitch_q12)
-                    .cos()
-                    .raw()
-                    .saturating_abs();
+                let cos_pitch = signed_q12_angle(orbit_pitch).cos().raw().saturating_abs();
                 self.distance = div_q12_i32(horizontal, cos_pitch.max(1)).min(self.distance);
                 self.collision_release_delay = config.collision_release_delay_frames;
                 self.solve_phase = 0;
                 endpoint_clamped = true;
             }
         }
-        self.frame_pitch_q12 = self
-            .pitch_q12
-            .saturating_add(lock_pitch_offset_q12(config, self.lock_height_offset));
+        self.frame_pitch_q12 =
+            orbit_pitch.saturating_add(lock_pitch_offset_q12(config, self.lock_height_offset));
 
         self.last_pull_in = collision_solve.pull_in || endpoint_clamped;
         self.last_rotated = false;
@@ -708,7 +934,12 @@ impl ThirdPersonCameraState {
 
     fn current_frame(&self, projection: WorldProjection) -> ThirdPersonCameraFrame {
         ThirdPersonCameraFrame {
-            camera: camera_from_position_focus(projection, self.position, self.focus, self.yaw),
+            camera: camera_from_position_focus(
+                self.projection(projection),
+                self.position,
+                self.focus,
+                self.yaw,
+            ),
             focus: self.focus,
             yaw: self.yaw,
             pitch_q12: self.frame_pitch_q12,
@@ -716,6 +947,11 @@ impl ThirdPersonCameraState {
             collision_pull_in: self.last_pull_in,
             collision_rotated: self.last_rotated,
         }
+    }
+
+    /// Projection shared by geometry, sky, visibility and overlays for this camera.
+    pub fn projection(&self, base: WorldProjection) -> WorldProjection {
+        self.profile.projection(base)
     }
 
     /// Current orbit yaw.
@@ -776,18 +1012,22 @@ fn clear_orbit_distance(config: ThirdPersonCameraConfig) -> i32 {
 /// collapsed below [`clear_orbit_trigger`]. The search fans out from `yaw`, turning
 /// first against `steering_q12` (the way steering just moved it), and takes
 /// the first arm of [`clear_orbit_distance`], else the longest one past
-/// `min_distance`. `None` keeps the collapsed arm: every
-/// direction is blocked, as in a narrow vent.
+/// `min_distance`. A candidate must improve clearance by at least the collision
+/// margin. `None` keeps the current arm when no better view is available.
 fn clear_orbit_yaw<C: CameraCollisionBackend>(
     collision: &mut C,
     focus: RoomPoint,
     yaw: Angle,
     steering_q12: i16,
+    current_distance: i32,
     pitch_q12: i16,
     camera_y: i32,
     config: ThirdPersonCameraConfig,
 ) -> Result<Option<(Angle, CollisionSolve)>, CollisionQueryError> {
     let wanted = clear_orbit_distance(config);
+    let minimum = current_distance
+        .saturating_add(config.collision_margin.max(1))
+        .max(config.min_distance);
     let away: i16 = if steering_q12 > 0 { -1 } else { 1 };
     let mut best: Option<(Angle, CollisionSolve)> = None;
     let mut step = 1;
@@ -799,6 +1039,9 @@ fn clear_orbit_yaw<C: CameraCollisionBackend>(
             }
             let candidate = yaw.add_signed_q12(side * step * CLEAR_ORBIT_STEP_Q12);
             let solve = collision.solve(focus, candidate, pitch_q12, camera_y, config)?;
+            if solve.distance < minimum {
+                continue;
+            }
             if solve.distance >= wanted {
                 return Ok(Some((candidate, solve)));
             }
@@ -1032,7 +1275,10 @@ fn normalize_config(mut config: ThirdPersonCameraConfig) -> ThirdPersonCameraCon
         config.lock_on_align_step = config.auto_align_step;
     }
     config.position_lag_shift = config.position_lag_shift.min(6);
+    config.position_vertical_lag_shift =
+        config.position_vertical_lag_shift.map(|shift| shift.min(6));
     config.focus_lag_shift = config.focus_lag_shift.min(6);
+    config.focus_vertical_lag_shift = config.focus_vertical_lag_shift.map(|shift| shift.min(6));
     config.distance_lag_shift = config.distance_lag_shift.min(6);
     config.lock_height_boost = config.lock_height_boost.max(0);
     config.collision_solve_interval = config.collision_solve_interval.clamp(1, 4);
@@ -1079,15 +1325,11 @@ fn camera_focus_goal(
         return player;
     };
 
-    // Bias a quarter of the way toward the target so both combatants remain
-    // legible. Keep the vertical focus on the player: lock-on elevation is a
-    // camera-orbit adjustment, and must never drag the player down and out of
-    // frame. Cap the horizontal offset relative to spring-arm length so a
-    // distant target cannot drag the player out of frame during break grace.
-    // Use the shortened arm: a full-distance offset can put the camera
-    // between the player and target when a wall pushes it forward.
-    let target_focus = player_focus(lock, config.target_height);
-    let blended = lerp_vertex(player, target_focus, 1, 4);
+    if config.lock_target_framing {
+        return player;
+    }
+    // Legacy composition biases a quarter of the way toward the target.
+    let blended = lerp_vertex(player, player_focus(lock, config.target_height), 1, 4);
     let max_offset = (arm_distance.min(config.distance) / 3).max(0);
     RoomPoint::new(
         player.x.saturating_add(
@@ -1820,11 +2062,13 @@ fn camera_from_position_focus(
 }
 
 fn default_pitch_q12(config: ThirdPersonCameraConfig) -> i16 {
-    pitch_from_vertical_distance(
-        config.height.saturating_sub(config.target_height),
-        config.distance,
-    )
-    .clamp(config.pitch_min_q12, config.pitch_max_q12)
+    let vertical = config.height.saturating_sub(config.target_height);
+    let pitch = if config.lock_target_framing {
+        framing::pitch_from_height_offset(vertical, config.distance)
+    } else {
+        pitch_from_vertical_distance(vertical, config.distance)
+    };
+    pitch.clamp(config.pitch_min_q12, config.pitch_max_q12)
 }
 
 fn lock_pitch_offset_q12(config: ThirdPersonCameraConfig, height_offset: i32) -> i16 {
@@ -1917,10 +2161,15 @@ fn approach_i32_shift(current: i32, target: i32, shift: u8) -> i32 {
     }
 }
 
-fn approach_vertex_shift(current: RoomPoint, target: RoomPoint, shift: u8) -> RoomPoint {
+fn approach_vertex_shift(
+    current: RoomPoint,
+    target: RoomPoint,
+    shift: u8,
+    vertical_shift: u8,
+) -> RoomPoint {
     RoomPoint::new(
         approach_i32_shift(current.x, target.x, shift),
-        approach_i32_shift(current.y, target.y, shift),
+        approach_i32_shift(current.y, target.y, vertical_shift),
         approach_i32_shift(current.z, target.z, shift),
     )
 }
@@ -2108,6 +2357,117 @@ mod tests {
             assert_eq!(camera.yaw(), behind);
             assert!(frame.distance < config.min_distance, "{frame:?}");
             assert_eq!(camera.distance(), frame.distance);
+        }
+    }
+
+    // A tight corner with a narrow blocked bearing and equally usable side
+    // views. The partially clear version cannot fit a full camera boom.
+    struct CornerOrbitBackend {
+        side_distance: i32,
+        blocked: bool,
+    }
+    impl CameraCollisionBackend for CornerOrbitBackend {
+        fn constrain_segment(
+            &mut self,
+            _start: RoomPoint,
+            end: RoomPoint,
+            _config: ThirdPersonCameraConfig,
+        ) -> Result<RoomPoint, CollisionQueryError> {
+            Ok(end)
+        }
+        fn clamp_to_floor(
+            &mut self,
+            p: RoomPoint,
+            _clearance: i32,
+        ) -> Result<RoomPoint, CollisionQueryError> {
+            Ok(p)
+        }
+        fn solve(
+            &mut self,
+            _focus: RoomPoint,
+            yaw: Angle,
+            _pitch: i16,
+            _height: i32,
+            config: ThirdPersonCameraConfig,
+        ) -> Result<CollisionSolve, CollisionQueryError> {
+            let distance = if !self.blocked {
+                config.distance
+            } else if yaw.shortest_delta_q12(Angle::HALF).unsigned_abs() < 128 {
+                4
+            } else {
+                self.side_distance
+            };
+            Ok(CollisionSolve {
+                distance,
+                pull_in: distance < config.distance,
+            })
+        }
+    }
+
+    #[test]
+    fn locked_corner_holds_one_clear_side_until_target_bearing_reopens() {
+        let projection = WorldProjection::new(160, 120, 320, 64);
+        let config = ThirdPersonCameraConfig::character(400, 100, 50);
+        let target = ThirdPersonCameraTarget {
+            lock_target: Some(RoomPoint::new(0, 0, 1000)),
+            ..trace_target()
+        };
+        for side_distance in [config.min_distance + 6, config.distance] {
+            let mut backend = CornerOrbitBackend {
+                side_distance,
+                blocked: true,
+            };
+            let mut camera = ThirdPersonCameraState::new(Angle::HALF);
+            camera.snap_to_player_with_yaw(target, config, Angle::HALF);
+            let first = camera
+                .update_vblanks_with_backend(
+                    projection,
+                    &mut backend,
+                    target,
+                    ThirdPersonCameraInput::default(),
+                    config,
+                    1,
+                )
+                .unwrap();
+            assert_ne!(first.yaw, Angle::HALF);
+            for _ in 0..120 {
+                let frame = camera
+                    .update_vblanks_with_backend(
+                        projection,
+                        &mut backend,
+                        target,
+                        ThirdPersonCameraInput::default(),
+                        config,
+                        1,
+                    )
+                    .unwrap();
+                assert_eq!(
+                    frame.yaw, first.yaw,
+                    "no orbit cycling with side distance {side_distance}"
+                );
+                assert!(frame.distance >= side_distance);
+            }
+            backend.blocked = false;
+            let mut last = camera.yaw();
+            for _ in 0..120 {
+                let frame = camera
+                    .update_vblanks_with_backend(
+                        projection,
+                        &mut backend,
+                        target,
+                        ThirdPersonCameraInput::default(),
+                        config,
+                        1,
+                    )
+                    .unwrap();
+                assert!(
+                    last.shortest_delta_q12(frame.yaw).unsigned_abs()
+                        <= config.lock_on_align_step.as_q12()
+                );
+                last = frame.yaw;
+            }
+            assert_eq!(camera.yaw(), Angle::HALF);
+            assert!(!camera.clear_orbit_hold);
         }
     }
 
@@ -2780,6 +3140,248 @@ mod tests {
     }
 
     #[test]
+    fn accelerated_orbit_ramps_and_resets_on_release_and_reversal() {
+        let normal = accelerated_orbit_step_q12(3, false);
+        let fast = accelerated_orbit_step_q12(3, true);
+        assert_eq!((normal, fast), (18, 40));
+        assert_eq!(
+            (
+                accelerated_orbit_step_q12(5, false),
+                accelerated_orbit_step_q12(5, true)
+            ),
+            (23, 49)
+        );
+        let (mut ramp, mut remainder) = (0, 0);
+        assert_eq!(
+            accelerated_orbit_delta(normal, Some(3), &mut ramp, &mut remainder),
+            normal
+        );
+        for _ in 1..36 {
+            let step = accelerated_orbit_delta(normal, Some(3), &mut ramp, &mut remainder);
+            assert!((normal..=fast).contains(&step));
+        }
+        assert_eq!(
+            accelerated_orbit_delta(normal, Some(3), &mut ramp, &mut remainder),
+            fast
+        );
+        assert_eq!(
+            accelerated_orbit_delta(-normal, Some(3), &mut ramp, &mut remainder),
+            -normal
+        );
+        assert_eq!(
+            accelerated_orbit_delta(0, Some(3), &mut ramp, &mut remainder),
+            0
+        );
+        assert_eq!((ramp, remainder), (0, 0));
+        assert_eq!(
+            accelerated_orbit_delta(-normal, Some(3), &mut ramp, &mut remainder),
+            -normal
+        );
+        assert_eq!(
+            accelerated_orbit_delta(normal, None, &mut ramp, &mut remainder),
+            normal
+        );
+        assert_eq!((ramp, remainder), (0, 0));
+    }
+
+    #[test]
+    fn accelerated_orbit_preserves_small_input_and_signed_symmetry() {
+        let (mut positive, mut negative) = (0, 0);
+        let (mut positive_rem, mut negative_rem) = (0, 0);
+        let (mut sum_positive, mut sum_negative) = (0, 0);
+        for _ in 0..360 {
+            sum_positive += accelerated_orbit_delta(1, Some(3), &mut positive, &mut positive_rem);
+            sum_negative += accelerated_orbit_delta(-1, Some(3), &mut negative, &mut negative_rem);
+            assert_eq!(sum_positive, -sum_negative);
+        }
+        assert!(sum_positive > 700, "fractional fast rates must accumulate");
+    }
+
+    #[test]
+    fn accelerated_orbit_catchup_matches_individual_ticks_and_stops_on_release() {
+        let projection = WorldProjection::new(160, 120, 320, 64);
+        let mut config = ThirdPersonCameraConfig::character(219, 113, 73);
+        config.accelerated_orbit_speed = Some(3);
+        config.recenter_preserves_pitch = true;
+        let target = ThirdPersonCameraTarget {
+            player: RoomPoint::ZERO,
+            player_yaw: Angle::ZERO,
+            moving: false,
+            lock_target: None,
+        };
+        let mut grouped = ThirdPersonCameraState::new(Angle::HALF);
+        let mut single = grouped;
+        for input in [
+            ThirdPersonCameraInput {
+                yaw_delta_q12: 18,
+                pitch_delta_q12: 3,
+                recenter: false,
+            },
+            ThirdPersonCameraInput {
+                yaw_delta_q12: -18,
+                pitch_delta_q12: 0,
+                recenter: false,
+            },
+            ThirdPersonCameraInput::default(),
+        ] {
+            for _ in 0..12 {
+                grouped.update_vblanks(projection, None, target, input, config, 4);
+                for _ in 0..4 {
+                    single.update(projection, None, target, input, config);
+                }
+                assert_eq!(grouped, single);
+            }
+        }
+        let yaw = single.yaw();
+        let pitch = single.pitch_q12;
+        single.update(
+            projection,
+            None,
+            target,
+            ThirdPersonCameraInput::default(),
+            config,
+        );
+        assert_eq!((single.yaw(), single.pitch_q12), (yaw, pitch));
+        grouped.update_vblanks(
+            projection,
+            None,
+            target,
+            ThirdPersonCameraInput {
+                recenter: true,
+                ..Default::default()
+            },
+            config,
+            4,
+        );
+        for i in 0..4 {
+            single.update(
+                projection,
+                None,
+                target,
+                ThirdPersonCameraInput {
+                    recenter: i == 0,
+                    ..Default::default()
+                },
+                config,
+            );
+        }
+        assert_eq!(grouped, single);
+    }
+
+    #[test]
+    fn recenter_retains_selected_pitch_and_finishes_in_eighteen_ticks() {
+        let projection = WorldProjection::new(160, 120, 320, 64);
+        for initial_yaw in [Angle::ZERO, Angle::QUARTER, Angle::from_q12(4090)] {
+            for pitch_delta in [-256, 256] {
+                let mut config = ThirdPersonCameraConfig::character(219, 113, 73);
+                config.recenter_preserves_pitch = true;
+                let target = ThirdPersonCameraTarget {
+                    player: RoomPoint::ZERO,
+                    player_yaw: Angle::ZERO,
+                    moving: false,
+                    lock_target: None,
+                };
+                let mut camera = ThirdPersonCameraState::new(initial_yaw);
+                camera.snap_to_player_with_yaw(target, config, initial_yaw);
+                camera.update(
+                    projection,
+                    None,
+                    target,
+                    ThirdPersonCameraInput {
+                        pitch_delta_q12: pitch_delta,
+                        ..Default::default()
+                    },
+                    config,
+                );
+                let retained = camera.pitch_q12;
+                for tick in 0..18 {
+                    camera.update(
+                        projection,
+                        None,
+                        target,
+                        ThirdPersonCameraInput {
+                            recenter: tick == 0,
+                            ..Default::default()
+                        },
+                        config,
+                    );
+                    assert_eq!(camera.pitch_q12, retained);
+                }
+                assert_eq!(camera.yaw(), Angle::HALF);
+                assert!(!camera.recenter_active);
+                // The legacy policy remains selectable.
+                config.recenter_preserves_pitch = false;
+                for tick in 0..18 {
+                    camera.update(
+                        projection,
+                        None,
+                        target,
+                        ThirdPersonCameraInput {
+                            recenter: tick == 0,
+                            ..Default::default()
+                        },
+                        config,
+                    );
+                }
+                assert_eq!(camera.pitch_q12, default_pitch_q12(config));
+            }
+        }
+    }
+
+    #[test]
+    fn manual_release_waits_then_gradually_restores_automatic_alignment() {
+        let projection = WorldProjection::new(160, 120, 320, 64);
+        let mut config = ThirdPersonCameraConfig::character(219, 113, 73);
+        config.auto_align_when_moving = true;
+        config.manual_cooldown_frames = 120;
+        config.manual_release_frames = 60;
+        let target = ThirdPersonCameraTarget {
+            player: RoomPoint::ZERO,
+            player_yaw: Angle::ZERO,
+            moving: true,
+            lock_target: None,
+        };
+        let mut camera = ThirdPersonCameraState::new(Angle::HALF);
+        camera.update(
+            projection,
+            None,
+            target,
+            ThirdPersonCameraInput {
+                yaw_delta_q12: 1024,
+                ..Default::default()
+            },
+            config,
+        );
+        let initial = camera.yaw();
+        for _ in 0..120 {
+            camera.update(
+                projection,
+                None,
+                target,
+                ThirdPersonCameraInput::default(),
+                config,
+            );
+            assert_eq!(camera.yaw(), initial);
+        }
+        let mut last_step = 0;
+        for tick in 1..=60 {
+            let before = camera.yaw();
+            camera.update(
+                projection,
+                None,
+                target,
+                ThirdPersonCameraInput::default(),
+                config,
+            );
+            let step = before.shortest_delta_q12(camera.yaw()).unsigned_abs();
+            assert_eq!(step, config.auto_align_step.as_q12() * tick / 60);
+            assert!(step >= last_step);
+            last_step = step;
+        }
+        assert_eq!(camera.manual_release, 0);
+    }
+
+    #[test]
     fn recenter_eases_camera_behind_player_yaw() {
         let mut camera = ThirdPersonCameraState::new(Angle::HALF);
         let config = ThirdPersonCameraConfig::character(1400, 700, 0);
@@ -2831,6 +3433,285 @@ mod tests {
             !camera.recenter_active,
             "manual orbit must cancel recentering"
         );
+    }
+
+    fn profiled_config() -> ThirdPersonCameraConfig {
+        let mut config = ThirdPersonCameraConfig::character(219, 113, 73);
+        config.lock_height_boost = 11;
+        config.fov_y_degrees = 43;
+        config.blend_profiles = true;
+        config.lock_target_framing = true;
+        config.position_vertical_lag_shift = Some(3);
+        config.focus_vertical_lag_shift = Some(4);
+        config.lock_profile = Some(ThirdPersonCameraProfile {
+            distance: 244,
+            height: 119,
+            target_height: 73,
+            fov_y_degrees: 46,
+        });
+        config
+    }
+
+    #[test]
+    fn reference_lock_framing_keeps_player_pivot_and_handles_target_height() {
+        let mut config = ThirdPersonCameraConfig::character(158, 61, 61);
+        config.lock_target_framing = true;
+        config.fov_y_degrees = 43;
+        config.pitch_min_q12 = -455;
+        config.pitch_max_q12 = 796;
+        let projection = WorldProjection::new(160, 120, 320, 4);
+        let mut pitches = [0; 3];
+        for (index, elevation) in [-50, 61, 206].into_iter().enumerate() {
+            let mut target = ThirdPersonCameraTarget {
+                player: RoomPoint::ZERO,
+                player_yaw: Angle::ZERO,
+                moving: false,
+                lock_target: Some(RoomPoint::new(0, elevation, 896)),
+            };
+            let mut camera = ThirdPersonCameraState::new(Angle::HALF);
+            for _ in 0..500 {
+                camera.update(
+                    projection,
+                    None,
+                    target,
+                    ThirdPersonCameraInput::default(),
+                    config,
+                );
+            }
+            assert_eq!(camera.focus, RoomPoint::new(0, 61, 0));
+            assert_eq!(camera.pitch_q12, 0, "lock leaves the manual pitch intact");
+            let frame = camera.current_frame(projection);
+            pitches[index] = frame.pitch_q12;
+            let enemy = frame
+                .camera
+                .projection
+                .project_view(frame.camera.view_vertex(target.lock_target.unwrap()))
+                .expect("enemy remains in front of the camera");
+            // 120 - focal(305) * tan(43/2 * .45) is about screen Y=68.
+            assert!((64..=72).contains(&enemy.sy), "target framing: {enemy:?}");
+            for y in [0, 90] {
+                let point = frame
+                    .camera
+                    .projection
+                    .project_view(frame.camera.view_vertex(RoomPoint::new(0, y, 0)))
+                    .expect("player stays in front of camera");
+                assert!(
+                    (0..240).contains(&point.sy),
+                    "player height {y}, target height {elevation}: {point:?}"
+                );
+            }
+            target.lock_target = None;
+            for _ in 0..200 {
+                camera.update(
+                    projection,
+                    None,
+                    target,
+                    ThirdPersonCameraInput::default(),
+                    config,
+                );
+            }
+            assert_eq!(camera.lock_pitch_offset_q12, 0);
+            assert_eq!(camera.current_frame(projection).pitch_q12, 0);
+        }
+        assert!(pitches[0] > pitches[1] && pitches[1] > pitches[2]);
+    }
+
+    #[test]
+    fn raised_reference_profile_keeps_lock_anchor_clear_and_restores_free_height() {
+        let mut config = ThirdPersonCameraConfig::character(208, 144, 80);
+        config.lock_target_framing = true;
+        config.fov_y_degrees = 43;
+        let projection = WorldProjection::new(160, 120, 305, 4);
+        let mut target = ThirdPersonCameraTarget {
+            player: RoomPoint::ZERO,
+            player_yaw: Angle::ZERO,
+            moving: false,
+            lock_target: None,
+        };
+        let mut camera = ThirdPersonCameraState::new(Angle::HALF);
+        for _ in 0..200 {
+            camera.update(
+                projection,
+                None,
+                target,
+                ThirdPersonCameraInput::default(),
+                config,
+            );
+        }
+        let free = camera.current_frame(projection);
+        target.lock_target = Some(RoomPoint::new(0, 78, 384));
+        for _ in 0..200 {
+            camera.update(
+                projection,
+                None,
+                target,
+                ThirdPersonCameraInput::default(),
+                config,
+            );
+        }
+        let locked = camera.current_frame(projection);
+        let screen_y = |point| {
+            locked
+                .camera
+                .projection
+                .project_view(locked.camera.view_vertex(point))
+                .unwrap()
+                .sy
+        };
+        let anchor_y = screen_y(target.lock_target.unwrap());
+        assert!(
+            (65..=71).contains(&anchor_y),
+            "raised profile must preserve target framing: {anchor_y}"
+        );
+        let head_y = screen_y(RoomPoint::new(0, 90, 0));
+        assert!(
+            head_y >= anchor_y + 28,
+            "player head must clear the lock anchor: {head_y}/{anchor_y}"
+        );
+        assert!(
+            screen_y(RoomPoint::ZERO) <= 224,
+            "player feet retain a bottom margin"
+        );
+        target.lock_target = None;
+        for _ in 0..200 {
+            camera.update(
+                projection,
+                None,
+                target,
+                ThirdPersonCameraInput::default(),
+                config,
+            );
+        }
+        let restored = camera.current_frame(projection);
+        assert_eq!(restored.camera.position, free.camera.position);
+        assert_eq!(restored.pitch_q12, free.pitch_q12);
+    }
+
+    #[test]
+    fn lock_framing_unlock_restores_the_manual_pitch_with_inherited_lens() {
+        let mut config = ThirdPersonCameraConfig::character(158, 61, 61);
+        config.lock_target_framing = true;
+        let projection = WorldProjection::new(160, 120, 305, 4);
+        let mut target = ThirdPersonCameraTarget {
+            player: RoomPoint::ZERO,
+            player_yaw: Angle::ZERO,
+            moving: false,
+            lock_target: None,
+        };
+        let mut camera = ThirdPersonCameraState::new(Angle::HALF);
+        camera.update(
+            projection,
+            None,
+            target,
+            ThirdPersonCameraInput {
+                pitch_delta_q12: 120,
+                ..ThirdPersonCameraInput::default()
+            },
+            config,
+        );
+        assert_eq!(camera.pitch_q12, 120);
+        target.lock_target = Some(RoomPoint::new(0, 61, 400));
+        for _ in 0..200 {
+            camera.update(
+                projection,
+                None,
+                target,
+                ThirdPersonCameraInput::default(),
+                config,
+            );
+        }
+        assert_eq!(camera.pitch_q12, 120);
+        assert!((151..=155).contains(&camera.current_frame(projection).pitch_q12));
+        assert_eq!(
+            camera.current_frame(projection).camera.projection,
+            projection
+        );
+        target.lock_target = None;
+        for _ in 0..200 {
+            camera.update(
+                projection,
+                None,
+                target,
+                ThirdPersonCameraInput::default(),
+                config,
+            );
+        }
+        assert_eq!(camera.lock_pitch_offset_q12, 0);
+        assert_eq!(camera.current_frame(projection).pitch_q12, 120);
+    }
+
+    #[test]
+    fn profile_transitions_match_grouped_ticks_and_restore_free_framing() {
+        let config = profiled_config();
+        let projection = WorldProjection::new(160, 120, 320, 4);
+        let mut target = ThirdPersonCameraTarget {
+            player: RoomPoint::ZERO,
+            player_yaw: Angle::ZERO,
+            moving: false,
+            lock_target: None,
+        };
+        let mut one = ThirdPersonCameraState::new(Angle::HALF);
+        let mut batch = one;
+        for tick in 0..150 {
+            target.lock_target = if (10..60).contains(&tick) {
+                Some(RoomPoint::new(0, if tick < 30 { 180 } else { 20 }, 400))
+            } else {
+                None
+            };
+            for _ in 0..4 {
+                one.update(
+                    projection,
+                    None,
+                    target,
+                    ThirdPersonCameraInput::default(),
+                    config,
+                );
+            }
+            batch.update_vblanks(
+                projection,
+                None,
+                target,
+                ThirdPersonCameraInput::default(),
+                config,
+                4,
+            );
+            assert_eq!(one, batch);
+        }
+        assert_eq!(one.focus.y, 73);
+        assert!((303..=306).contains(&one.current_frame(projection).camera.projection.focal_length));
+    }
+
+    #[test]
+    fn profile_collision_failure_rolls_back_lens_and_transition_state() {
+        let config = profiled_config();
+        let projection = WorldProjection::new(160, 120, 320, 4);
+        let mut camera = ThirdPersonCameraState::new(Angle::HALF);
+        let mut target = trace_target();
+        camera.update(
+            projection,
+            None,
+            target,
+            ThirdPersonCameraInput::default(),
+            config,
+        );
+        let before = camera;
+        target.lock_target = Some(RoomPoint::new(0, 300, 400));
+        let mut provider = HalfDistanceTraceProvider {
+            fail: true,
+            calls: 0,
+        };
+        assert_eq!(
+            camera.update_vblanks_with_trace_provider(
+                projection,
+                &mut provider,
+                target,
+                ThirdPersonCameraInput::default(),
+                config,
+                4
+            ),
+            Err(CollisionQueryError)
+        );
+        assert_eq!(camera, before);
     }
 
     #[test]
@@ -3103,6 +3984,166 @@ mod tests {
             );
         }
         assert_eq!(frame.camera.position.y, target.player.y + config.height);
+    }
+
+    #[test]
+    fn vertical_follow_softens_height_changes_without_slowing_horizontal_focus() {
+        let projection = WorldProjection::new(160, 120, 320, 64);
+        for height_delta in [-256, 256] {
+            let shared = ThirdPersonCameraConfig::character(2000, 1000, 850);
+            let mut split = shared;
+            split.position_vertical_lag_shift = Some(3);
+            split.focus_vertical_lag_shift = Some(4);
+            let mut target = ThirdPersonCameraTarget {
+                player: RoomPoint::ZERO,
+                player_yaw: Angle::ZERO,
+                moving: true,
+                lock_target: None,
+            };
+            let mut ordinary = ThirdPersonCameraState::new(Angle::HALF);
+            ordinary.snap_to_player(target, shared);
+            let mut softened = ordinary;
+            let initial = ordinary.current_frame(projection);
+            target.player = RoomPoint::new(256, height_delta, 256);
+            let input = ThirdPersonCameraInput::default();
+            let a = ordinary.update(projection, None, target, input, shared);
+            let b = softened.update(projection, None, target, input, split);
+            assert_eq!((b.focus.x, b.focus.z), (a.focus.x, a.focus.z));
+            assert!((b.focus.y - initial.focus.y).abs() < (a.focus.y - initial.focus.y).abs());
+            assert!(
+                (b.camera.position.y - initial.camera.position.y).abs()
+                    < (a.camera.position.y - initial.camera.position.y).abs()
+            );
+            for _ in 0..512 {
+                softened.update(projection, None, target, input, split);
+            }
+            assert_eq!(softened.focus.y, target.player.y + split.target_height);
+            assert_eq!(softened.position.y, target.player.y + split.height);
+        }
+    }
+
+    #[test]
+    fn vertical_focus_lag_stays_near_the_player_after_sharp_height_changes() {
+        let projection = WorldProjection::new(160, 120, 320, 64);
+        let mut config = ThirdPersonCameraConfig::character(219, 113, 73);
+        config.position_vertical_lag_shift = Some(3);
+        config.focus_vertical_lag_shift = Some(4);
+        for delta in [-160, 160] {
+            let mut target = trace_target();
+            let mut camera = ThirdPersonCameraState::new(Angle::HALF);
+            camera.snap_to_player(target, config);
+            target.player.y += delta;
+            let frame = camera.update(
+                projection,
+                None,
+                target,
+                ThirdPersonCameraInput::default(),
+                config,
+            );
+            let desired_focus_y = target.player.y + config.target_height;
+            assert!((frame.focus.y - desired_focus_y).abs() <= config.target_height / 4);
+        }
+    }
+
+    #[test]
+    fn vertical_position_lag_can_change_without_changing_focus() {
+        let projection = WorldProjection::new(160, 120, 320, 64);
+        let shared = ThirdPersonCameraConfig::character(2000, 1000, 850);
+        let mut split = shared;
+        split.position_vertical_lag_shift = Some(4);
+        let target = trace_target();
+        let mut ordinary = ThirdPersonCameraState::new(Angle::HALF);
+        ordinary.snap_to_player(target, shared);
+        let mut softened = ordinary;
+        let initial = ordinary.current_frame(projection);
+        let input = ThirdPersonCameraInput {
+            yaw_delta_q12: 32,
+            pitch_delta_q12: 64,
+            recenter: false,
+        };
+        let a = ordinary.update(projection, None, target, input, shared);
+        let b = softened.update(projection, None, target, input, split);
+        assert_eq!(b.focus, a.focus);
+        assert_eq!(b.yaw, a.yaw);
+        assert_eq!(
+            (b.camera.position.x, b.camera.position.z),
+            (a.camera.position.x, a.camera.position.z)
+        );
+        assert!(
+            (b.camera.position.y - initial.camera.position.y).abs()
+                < (a.camera.position.y - initial.camera.position.y).abs()
+        );
+    }
+
+    #[test]
+    fn vertical_follow_catchup_matches_display_ticks_and_shared_fallback() {
+        let projection = WorldProjection::new(160, 120, 320, 64);
+        for steps in [1, 2, 3] {
+            for independent in [false, true] {
+                let mut config = ThirdPersonCameraConfig::character(2000, 1000, 850);
+                config.position_lag_shift = 1;
+                config.focus_lag_shift = 3;
+                if independent {
+                    config.position_vertical_lag_shift = Some(3);
+                    config.focus_vertical_lag_shift = Some(4);
+                }
+                let mut target = trace_target();
+                let mut stepped = ThirdPersonCameraState::new(Angle::HALF);
+                stepped.snap_to_player(target, config);
+                let mut batched = stepped;
+                let mut explicit_shared = stepped;
+                let mut explicit_config = config;
+                if !independent {
+                    explicit_config.position_vertical_lag_shift = Some(config.position_lag_shift);
+                    explicit_config.focus_vertical_lag_shift = Some(config.focus_lag_shift);
+                }
+                for i in 0..40 {
+                    target.player.y = if i < 20 { 256 } else { -128 };
+                    target.player.x += 32;
+                    let input = ThirdPersonCameraInput::default();
+                    for _ in 0..steps {
+                        stepped.update(projection, None, target, input, config);
+                    }
+                    let frame =
+                        batched.update_vblanks(projection, None, target, input, config, steps);
+                    let explicit = explicit_shared.update_vblanks(
+                        projection,
+                        None,
+                        target,
+                        input,
+                        explicit_config,
+                        steps,
+                    );
+                    assert_eq!(frame, stepped.current_frame(projection));
+                    assert_eq!(frame, explicit);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn vertical_lag_does_not_delay_obstruction_pull_in() {
+        let projection = WorldProjection::new(160, 120, 320, 64);
+        let mut config = ThirdPersonCameraConfig::character(1400, 700, 0);
+        config.position_vertical_lag_shift = Some(6);
+        config.focus_vertical_lag_shift = Some(6);
+        let target = trace_target();
+        let mut camera = ThirdPersonCameraState::new(Angle::HALF);
+        camera.snap_to_player(target, config);
+        let before = camera.position();
+        let frame = camera
+            .update_vblanks_with_trace_provider(
+                projection,
+                &mut CloseDistanceTraceProvider,
+                target,
+                ThirdPersonCameraInput::default(),
+                config,
+                1,
+            )
+            .expect("obstructed camera");
+        assert!(frame.collision_pull_in);
+        assert!(frame.distance < config.min_distance);
+        assert!(frame.camera.position.y < before.y);
     }
 
     #[test]

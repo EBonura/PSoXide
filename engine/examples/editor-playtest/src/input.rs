@@ -73,8 +73,17 @@ pub(crate) fn camera_input(
     ctx: &Ctx,
     orbit_speed_level: u8,
     deadzone: i16,
+    accelerated: bool,
 ) -> ThirdPersonCameraInput {
     let (right_x, right_y) = camera_stick_axes(ctx, deadzone);
+    if accelerated {
+        let step = psx_engine::accelerated_orbit_step_q12(orbit_speed_level, false);
+        return ThirdPersonCameraInput {
+            yaw_delta_q12: stick_axis_delta(InputAxis::new(right_x.saturating_neg()), step, 0),
+            pitch_delta_q12: stick_axis_delta(InputAxis::new(right_y), step, 0),
+            recenter: false,
+        };
+    }
     ThirdPersonCameraInput {
         yaw_delta_q12: stick_to_yaw_delta(
             InputAxis::new(right_x.saturating_neg()),
@@ -83,7 +92,8 @@ pub(crate) fn camera_input(
         ),
         pitch_delta_q12: stick_to_pitch_delta(InputAxis::new(right_y), orbit_speed_level, 0),
         // All four shoulder buttons belong to combat. Manual right-stick
-        // orbit remains available; camera recenter has no dedicated binding.
+        // orbit remains available; R3 requests recenter in the gameplay loop
+        // when there is no eligible lock target.
         recenter: false,
     }
 }

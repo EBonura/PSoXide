@@ -514,7 +514,7 @@ impl Playtest {
             spawn_camera_yaw,
         );
         self.render_camera = world_camera_from_position_focus(
-            PROJECTION,
+            self.camera.projection(PROJECTION),
             self.camera.position(),
             self.camera.focus(),
         );

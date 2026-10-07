@@ -942,6 +942,31 @@ pub(super) fn debug_log_reconcile_pass(
     line.emit();
 }
 
+/// Sparse diagnostic evidence for lens/profile and target-anchor transitions.
+#[cfg(feature = "emulator-telemetry")]
+pub(super) fn debug_log_camera_profile(
+    tick: u32,
+    focal: i32,
+    distance: i32,
+    locked: bool,
+    focus_y: i32,
+    anchor_y: Option<i32>,
+) {
+    let mut line = DebugLogLine::new("camera-profile tick=");
+    line.push_u32(tick);
+    line.push_str(" focal=");
+    line.push_u32(focal.max(0) as u32);
+    line.push_str(" distance=");
+    line.push_u32(distance.max(0) as u32);
+    line.push_str(" locked=");
+    line.push_u32(u32::from(locked));
+    line.push_str(" focus_y_biased=");
+    line.push_u32(encode_debug_map_position(focus_y));
+    line.push_str(" anchor_y_biased=");
+    line.push_u32(anchor_y.map_or(0, encode_debug_map_position));
+    line.emit();
+}
+
 /// Sample the opt-in encounter with a shared simulation clock. Diagnostic builds
 /// only; normal disc builds compile the call and formatting out entirely.
 #[cfg(feature = "emulator-telemetry")]

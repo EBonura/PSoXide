@@ -915,7 +915,7 @@ impl Playtest {
             },
         );
         self.render_camera = world_camera_from_position_focus(
-            PROJECTION,
+            self.camera.projection(PROJECTION),
             self.camera.position(),
             self.camera.focus(),
         );
@@ -1744,8 +1744,36 @@ impl Playtest {
             // intersection exactly.
             config.collision_margin = BSP_CAMERA_WALL_MARGIN;
         }
+        config.recenter_preserves_pitch = camera.recenter_preserves_pitch;
+        config.fov_y_degrees = camera.fov_y_degrees;
+        config.blend_profiles = camera.blend_profiles;
+        config.lock_target_framing = camera.lock_target_framing;
+        if camera.lock_target_framing {
+            // Native ordinary orbit limits, converted from degrees to Q12 turns.
+            config.pitch_min_q12 = -455; // -40 degrees
+            config.pitch_max_q12 = 796; // +70 degrees
+        }
+        config.lock_profile =
+            camera
+                .lock_profile
+                .map(|profile| psx_engine::ThirdPersonCameraProfile {
+                    distance: profile.distance,
+                    height: profile.height,
+                    target_height: profile.target_height,
+                    fov_y_degrees: profile.fov_y_degrees,
+                });
+        config.max_distance = config
+            .max_distance
+            .max(camera.lock_profile.map_or(0, |p| p.distance));
+        if camera.accelerated_orbit {
+            config.accelerated_orbit_speed = Some(camera.orbit_speed_level);
+            config.manual_cooldown_frames = 120;
+            config.manual_release_frames = 60;
+        }
         config.position_lag_shift = camera.position_lag_shift;
+        config.position_vertical_lag_shift = Some(camera.position_vertical_lag_shift);
         config.focus_lag_shift = camera.focus_lag_shift;
+        config.focus_vertical_lag_shift = Some(camera.focus_vertical_lag_shift);
         config.distance_lag_shift = camera.distance_lag_shift;
         config.collision_solve_interval = CAMERA_COLLISION_SOLVE_INTERVAL;
         config
@@ -1815,6 +1843,26 @@ impl Playtest {
     }
 
     pub(super) fn update_follow_camera(&mut self, ctx: &Ctx) -> WorldCamera {
+        let camera = self.solve_follow_camera(ctx);
+        #[cfg(feature = "emulator-telemetry")]
+        if ctx.sim_tick.every(30) {
+            debug_log_camera_profile(
+                ctx.sim_tick.as_u32(),
+                camera.projection.focal_length,
+                self.camera.distance(),
+                self.is_locked(),
+                self.camera.focus().y,
+                self.lock_target
+                    .or(self.soft_lock_target)
+                    .and_then(|index| self.camera_target_anchor(index))
+                    .map(|point| point.y),
+            );
+        }
+        camera
+    }
+
+    fn solve_follow_camera(&mut self, ctx: &Ctx) -> WorldCamera {
+        let config = self.camera_config();
         let mut input = if self.is_locked() {
             ThirdPersonCameraInput {
                 yaw_delta_q12: 0,
@@ -1824,14 +1872,23 @@ impl Playtest {
                 recenter: false,
             }
         } else {
-            camera_input(ctx, self.camera_orbit_speed_level(), self.analog_deadzone)
+            camera_input(
+                ctx,
+                self.camera_orbit_speed_level(),
+                self.analog_deadzone,
+                config.accelerated_orbit_speed.is_some(),
+            )
         };
         input.recenter |= core::mem::take(&mut self.camera_recenter_requested);
-        let lock_target = self
-            .lock_target_position()
-            .or_else(|| self.soft_lock_target_position());
+        let lock_target = if config.lock_target_framing {
+            self.lock_target
+                .or(self.soft_lock_target)
+                .and_then(|index| self.camera_target_anchor(index))
+        } else {
+            self.lock_target_position()
+                .or_else(|| self.soft_lock_target_position())
+        };
         let target = self.camera_target(lock_target, self.anim_state != PlayerAnim::Idle);
-        let config = self.camera_config();
         let mut prop_blockers =
             psx_engine::FixedScratch::<CharacterCollisionAabb, MAX_STATIC_PROP_AABB_BLOCKERS>::new(
             );
@@ -1843,7 +1900,7 @@ impl Playtest {
             // Invalid generated prop collision freezes the existing camera
             // instead of treating the obstructed boom as clear.
             return world_camera_from_position_focus(
-                PROJECTION,
+                self.camera.projection(PROJECTION),
                 self.camera.position(),
                 self.camera.focus(),
             );
@@ -1896,7 +1953,7 @@ impl Playtest {
                 let mut collision_rooms =
                     [const { CharacterCollisionRoom::EMPTY }; MAX_COLLISION_ROOMS];
                 let margin = config
-                    .distance
+                    .max_distance
                     .saturating_add(config.collision_margin)
                     .max(config.min_distance)
                     .saturating_add(CAMERA_ROOM_CACHE_QUANTUM);
@@ -1951,6 +2008,17 @@ impl Playtest {
         let model_instance = self.lock_target.or(self.soft_lock_target)?;
         self.target_position(model_instance)?;
         game_entity_for_instance(u16::try_from(model_instance).ok()?)
+    }
+
+    /// Camera-only anchor: three quarters of the scaled model's standing height.
+    /// Gameplay targeting continues to use the live root position.
+    fn camera_target_anchor(&self, index: usize) -> Option<RoomPoint> {
+        let instance = MODEL_INSTANCES.get(index)?;
+        let root = self.target_position(index)?;
+        let height = MODELS.get(instance.model.to_usize()).map(|model| {
+            i32::from(model.world_height) * i32::from(instance.visual_scale_q8) / 256
+        })?;
+        Some(root.with_y(root.y.saturating_add(height.saturating_mul(3) / 4)))
     }
 
     pub(super) fn target_position(&self, index: usize) -> Option<RoomPoint> {

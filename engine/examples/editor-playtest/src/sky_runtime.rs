@@ -26,7 +26,7 @@ pub(super) fn draw_sky_panorama(
         ASSETS,
         SCREEN_W,
         SCREEN_H,
-        FOCAL,
+        camera.projection.focal_length,
         find_sky_panorama_vram_slot,
         ensure_sky_panorama_uploaded,
         sky_panorama_tpage_word,
@@ -44,6 +44,7 @@ pub(super) fn draw_sky_panorama(
 /// mixed cells against six cube faces, which was 7% of the whole-level tape.
 struct CubeSkyPacketCache {
     rotation: [[i16; 3]; 3],
+    focal_length: i32,
     tpage_word: u16,
     clut_word: u16,
     valid: bool,
@@ -54,6 +55,7 @@ struct CubeSkyPacketCache {
 
 static mut CUBE_SKY_PACKET_CACHE: CubeSkyPacketCache = CubeSkyPacketCache {
     rotation: [[0; 3]; 3],
+    focal_length: 0,
     tpage_word: 0,
     clut_word: 0,
     valid: false,
@@ -131,7 +133,7 @@ pub(super) fn draw_scene_sky(
                     view.rotation,
                     [SCREEN_W as i16, SCREEN_H as i16],
                     [SCREEN_W as i16 / 2, SCREEN_H as i16 / 2],
-                    FOCAL as i16,
+                    camera.projection.focal_length.clamp(1, i32::from(i16::MAX)) as i16,
                     material_tick,
                     output,
                 )
@@ -141,6 +143,7 @@ pub(super) fn draw_scene_sky(
                 let cache = &mut *core::ptr::addr_of_mut!(CUBE_SKY_PACKET_CACHE);
                 if cache.valid
                     && cache.rotation == view.rotation.m
+                    && cache.focal_length == camera.projection.focal_length
                     && cache.tpage_word == slot.tpage_word
                     && cache.clut_word == slot.clut_word
                 {
@@ -157,12 +160,13 @@ pub(super) fn draw_scene_sky(
                         view.rotation,
                         [SCREEN_W as i16, SCREEN_H as i16],
                         [SCREEN_W as i16 / 2, SCREEN_H as i16 / 2],
-                        FOCAL as i16,
+                        camera.projection.focal_length.clamp(1, i32::from(i16::MAX)) as i16,
                         output,
                     );
                     let words = submitted.next_packet.offset_from(output).max(0) as usize;
                     core::ptr::copy_nonoverlapping(output, cache.stream.as_mut_ptr(), words);
                     cache.rotation = view.rotation.m;
+                    cache.focal_length = camera.projection.focal_length;
                     cache.tpage_word = slot.tpage_word;
                     cache.clut_word = slot.clut_word;
                     cache.words = words;

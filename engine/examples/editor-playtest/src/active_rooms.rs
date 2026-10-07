@@ -799,7 +799,9 @@ impl Playtest {
             self.visibility.view_anchor,
             view_threshold,
         );
-        let view_changed = view_sin_key != self.visibility.view_sin_key
+        let view_changed = self.render_camera.projection.focal_length
+            != self.visibility.view_focal_length
+            || view_sin_key != self.visibility.view_sin_key
             || view_cos_key != self.visibility.view_cos_key
             || view_pitch_sin_key != self.visibility.view_pitch_sin_key
             || view_pitch_cos_key != self.visibility.view_pitch_cos_key;

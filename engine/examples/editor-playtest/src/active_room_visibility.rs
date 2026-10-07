@@ -47,7 +47,7 @@ impl Playtest {
             current_record,
             view,
             camera_global,
-            PROJECTION,
+            self.render_camera.projection,
             FAR_Z,
             RUNTIME_SCHEDULE.portal_min_width_q12,
             RUNTIME_SCHEDULE.portal_max_depth,

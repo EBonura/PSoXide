@@ -87,6 +87,8 @@ pub struct RoomVisibility<
     pub view_anchor: RoomPoint,
     /// Quantised yaw sine of the latest refreshed view.
     pub view_sin_key: i16,
+    /// Lens used by the last portal traversal; changing FOV invalidates it.
+    pub view_focal_length: i32,
     /// Quantised yaw cosine of the latest refreshed view.
     pub view_cos_key: i16,
     /// Quantised pitch sine of the latest refreshed view.
@@ -126,6 +128,7 @@ impl<
         visible_build_failed_mask: RuntimeDebugMask::EMPTY,
         view_anchor: RoomPoint::ZERO,
         view_sin_key: 0,
+        view_focal_length: 0,
         view_cos_key: 0,
         view_pitch_sin_key: 0,
         view_pitch_cos_key: 0,
@@ -221,6 +224,7 @@ impl<
         portal_max_depth: u8,
         collect_room_bounds: impl FnOnce(&mut [PortalRoomBounds; MAX_PORTAL_ROOM_BOUNDS]) -> usize,
     ) -> PortalVisibilityCamera {
+        self.view_focal_length = projection.focal_length;
         let half_fov_x_tan_q12 = ((projection.screen_x as i32).saturating_mul(4096)
             / projection.focal_length.max(1))
         .max(1);

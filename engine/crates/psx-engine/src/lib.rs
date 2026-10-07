@@ -208,8 +208,9 @@ pub use scratch::{BoundedSink, FixedScratch, SliceSink};
 pub use psx_gte::math::{Mat3I16, Vec3I16};
 pub use scene::{Ctx, QueuedFrame, RenderSubmission, Scene, SceneStateRef};
 pub use third_person_camera::{
-    ThirdPersonCameraConfig, ThirdPersonCameraFrame, ThirdPersonCameraInput,
-    ThirdPersonCameraState, ThirdPersonCameraTarget,
+    accelerated_orbit_step_q12, ThirdPersonCameraConfig, ThirdPersonCameraFrame,
+    ThirdPersonCameraInput, ThirdPersonCameraProfile, ThirdPersonCameraState,
+    ThirdPersonCameraTarget,
 };
 pub use transform::{ActorTransform, RoomPoint, Vec3World, WorldVertex};
 pub use ui::{draw_scene, is_focusable, node_nav_rect, UiTextureSlot, UI_CANVAS_H, UI_CANVAS_W};
