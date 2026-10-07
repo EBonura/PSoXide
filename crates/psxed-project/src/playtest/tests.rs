@@ -301,3 +301,28 @@ fn camera_controls_survive_cooking_and_manifest_export() {
         assert!(source.contains(&format!("focus_vertical_lag_shift: {focus}")));
     }
 }
+
+#[test]
+fn hook_points_round_trip_and_cook_with_world_scale() {
+    let mut project = ProjectDocument::starter();
+    let scene = project.active_scene_mut();
+    let id = scene.add_node(scene.root, "Upper landing", NodeKind::HookPoint);
+    scene.node_mut(id).unwrap().transform.translation = [4096.0, 2048.0, -2048.0];
+    let text = ron::to_string(&project).unwrap();
+    let project: ProjectDocument = ron::from_str(&text).unwrap();
+    let (package, report) = build_package(&project, &crate::default_project_dir());
+    assert!(report.is_ok(), "{:?}", report.errors);
+    let package = package.unwrap();
+    let hook = package.entities.iter().find(|e| e.kind == PlaytestEntityKind::HookPoint).unwrap();
+    assert_eq!((hook.x, hook.y, hook.z), (256, 128, -128));
+}
+
+#[test]
+fn hook_point_cap_is_reported_instead_of_silently_ignoring_landings() {
+    let mut project = ProjectDocument::starter();
+    let scene = project.active_scene_mut();
+    for _ in 0..=psx_level::MAX_HOOK_POINTS { scene.add_node(scene.root, "Hook", NodeKind::HookPoint); }
+    let (package, report) = build_package(&project, &crate::default_project_dir());
+    assert!(package.is_none());
+    assert!(report.errors.iter().any(|e| e.contains("32 hook points")));
+}

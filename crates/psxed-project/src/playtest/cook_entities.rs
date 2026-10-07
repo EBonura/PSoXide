@@ -401,6 +401,26 @@ pub(crate) fn remap_runtime_model_clip(
         .flatten()
 }
 
+/// Keep an explicitly configured stun active through its final recovery pose.
+pub(crate) fn cooked_game_entity_stagger_ticks(
+    timing: Option<(u16, u16)>,
+    speed_q8: u16,
+    range: psx_level::CharacterActionFrameRange,
+) -> u16 {
+    let Some((hz, count)) = timing.filter(|_| speed_q8 != 0) else {
+        return 32;
+    };
+    let last = count.saturating_sub(2);
+    let start = range.start.min(last);
+    let end = range.end.min(last).max(start);
+    // Match the guest's integer phase step, including truncation at slow rates.
+    let base_step = (u64::from(hz.max(1)) << 12) / 60;
+    let step = (base_step * u64::from(speed_q8) / 256).max(1);
+    let phase = u64::from(end - start) << 12;
+    // Keep the final recovery pose visible for one tick before leaving Staggered.
+    (phase.div_ceil(step) + 1).min(u64::from(u16::MAX)) as u16
+}
+
 /// Keep an enemy in its committed Attack state until every authored combat
 /// event has been sampled and enough clip time remains for the authored
 /// recovery state to reach the final frame. Entity state clocks are 60 Hz;
@@ -1143,6 +1163,49 @@ pub(crate) fn cook_player_character(
         }
     }
 
+    let mut combat_windows = [psx_level::CharacterCombatWindow::NONE; psx_level::MAX_CHARACTER_COMBAT_WINDOWS];
+    if let Some((set_id, _, set)) = animation_set {
+        for (index, window) in set.combat_windows.iter().enumerate() {
+            let action = window.action.to_index();
+            let fallback = matches!(window.action, CharacterAnimationAction::Backstep | CharacterAnimationAction::DashLeft | CharacterAnimationAction::DashRight)
+                && action_clips[action] == CHARACTER_CLIP_NONE;
+            let source_action = if fallback { CharacterAnimationAction::Roll } else { window.action };
+            let source = action_clips[source_action.to_index()];
+            let clip = (source != CHARACTER_CLIP_NONE).then(|| model_clips.get(usize::from(model.clip_first + source))).flatten();
+            let valid = index < combat_windows.len()
+                && !set.combat_windows[..index].iter().any(|w| w.action == window.action && w.kind == window.kind)
+                && set.action_clips.iter().any(|b| b.action == source_action)
+                && action_flags[action] & psx_level::character_action_flags::LOOPING == 0
+                && !matches!(window.action, CharacterAnimationAction::Death | CharacterAnimationAction::Intro | CharacterAnimationAction::HookLaunch)
+                && clip.is_some_and(|c| window.start <= window.end && window.start >= c.source_frame_first && u32::from(window.end) <= u32::from(c.source_frame_last) + 1);
+            if !valid {
+                report.error_at(PlaytestValidationTarget::Resource(set_id), format!("Invalid {:?} {:?} combat window: require unique action/channel, bound non-looping clip, [start,end) inside clip, and at most {} windows; Death/Intro/HookLaunch cannot be cancelled", window.action, window.kind, combat_windows.len()));
+                return None;
+            }
+            let clip = clip?;
+            let remap = |frame| remap_authored_frame(frame, clip.source_frame_first, clip.source_frame_last, clip.cooked_frame_count);
+            let start = remap(window.start);
+            let end = if window.start == window.end { start } else { remap(window.end - 1).saturating_add(1) };
+            let range = action_frame_ranges[action];
+            // The final stored pose is the endpoint sentinel; the renderer's
+            // normalized one-shot range ends at frame_count - 2.
+            let playable_end = range.end.min(clip.cooked_frame_count.saturating_sub(2)).saturating_add(1);
+            if start < range.start || end > playable_end {
+                report.error_at(PlaytestValidationTarget::Resource(set_id), format!("Invalid {:?} combat window outside selected playback range", window.action));
+                return None;
+            }
+            combat_windows[index] = psx_level::CharacterCombatWindow { action: action as u8, kind: window.kind.cooked(), start, end };
+        }
+        for window in &set.combat_windows {
+            use crate::CombatWindowKind as K;
+            let allowed = match window.kind { K::AttackBuffer => Some(K::Attack), K::DodgeBuffer => Some(K::Dodge), _ => None };
+            if allowed.is_some_and(|kind| !set.combat_windows.iter().any(|w| w.action == window.action && w.kind == kind && w.end > w.start && w.end > window.start)) {
+                report.error_at(PlaytestValidationTarget::Resource(set_id), format!("Invalid {:?} combat buffer: requires a reachable permission window", window.action));
+                return None;
+            }
+        }
+    }
+
     if settings.radius == 0 {
         report.error_maybe_at(
             character_id.map(PlaytestValidationTarget::Resource),
@@ -1296,6 +1359,7 @@ pub(crate) fn cook_player_character(
         action_frame_ranges,
         action_pushes,
         action_chains,
+        combat_windows,
         combat_capsule_first,
         combat_capsule_count,
         visual_offset,
@@ -2802,6 +2866,8 @@ pub(crate) struct GameEntityStateClips {
     pub ranged_attack_frame_range: psx_level::CharacterActionFrameRange,
     pub ranged_attack_action: u8,
     pub stagger: u16,
+    pub stagger_speed_q8: u16,
+    pub stagger_frame_range: psx_level::CharacterActionFrameRange,
     pub death: u16,
 }
 
@@ -2830,6 +2896,8 @@ impl GameEntityStateClips {
             ranged_attack_frame_range: psx_level::CharacterActionFrameRange::FULL,
             ranged_attack_action: CharacterAnimationAction::RangedAttack.to_index() as u8,
             stagger: clip,
+            stagger_speed_q8: 0,
+            stagger_frame_range: psx_level::CharacterActionFrameRange::FULL,
             death: clip,
         }
     }
@@ -2914,6 +2982,9 @@ pub(crate) fn game_entity_state_clips(
         })
         .unwrap_or(CharacterAnimationAction::RangedAttack);
     let ranged_attack = optional(ranged_action).unwrap_or(attack);
+    let stagger = optional(CharacterAnimationAction::Stun)
+        .or_else(|| optional(CharacterAnimationAction::HitReact))
+        .unwrap_or(fallback_attack);
     Some(GameEntityStateClips {
         idle,
         // Intro is the first-activation role for non-player Characters; for
@@ -2949,10 +3020,14 @@ pub(crate) fn game_entity_state_clips(
         // A poise break is one complete authored Stun clip, including its
         // recovery. Older characters without that action keep their existing
         // HitReact behavior rather than becoming animationless.
-        stagger: optional(CharacterAnimationAction::Stun)
-            .or_else(|| optional(CharacterAnimationAction::HitReact))
-            .map(|playback| playback.clip)
-            .unwrap_or(idle),
+        stagger: stagger.clip,
+        // Existing unconfigured clips retain the legacy half-second reaction.
+        stagger_speed_q8: if stagger.authored_options {
+            stagger.speed_q8
+        } else {
+            0
+        },
+        stagger_frame_range: stagger.frame_range,
         death: optional(CharacterAnimationAction::Death)
             .map(|playback| playback.clip)
             .unwrap_or(idle),
@@ -2961,6 +3036,7 @@ pub(crate) fn game_entity_state_clips(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct GameEntityActionPlayback {
+    authored_options: bool,
     clip: u16,
     speed_q8: u16,
     frame_range: psx_level::CharacterActionFrameRange,
@@ -2969,6 +3045,7 @@ struct GameEntityActionPlayback {
 impl GameEntityActionPlayback {
     const fn unscaled(clip: u16) -> Self {
         Self {
+            authored_options: false,
             clip,
             speed_q8: psx_level::CHARACTER_ACTION_SPEED_UNSCALED_Q8,
             frame_range: psx_level::CharacterActionFrameRange::FULL,
@@ -3001,6 +3078,7 @@ fn character_optional_action_playback(
         .and_then(|binding| binding.options);
     let index = project.resolved_model_animation_index(model_resource_id, animation_id)?;
     Some(GameEntityActionPlayback {
+        authored_options: options.is_some(),
         clip: remap_runtime_model_clip(model_clip_remaps, model_resource_id, index)?,
         speed_q8: character_action_speed_for(options),
         frame_range: character_action_frame_range_for(options),
@@ -3743,6 +3821,20 @@ mod socket_anchor_tests {
         cooked_game_entity_attack_active_ticks, remap_authored_duration, remap_authored_frame,
     };
     use crate::model_import::model_joint_bind_anchor;
+
+    #[test]
+    fn stagger_timing_covers_recovery_and_keeps_legacy_defaults() {
+        use super::cooked_game_entity_stagger_ticks as ticks;
+        use psx_level::CharacterActionFrameRange as Range;
+        assert_eq!(ticks(Some((30, 44)), 256, Range::FULL), 85);
+        assert_eq!(ticks(Some((30, 44)), 128, Range::FULL), 169);
+        assert_eq!(ticks(Some((30, 44)), 256, Range { start: 12, end: 42 }), 61);
+        // At 10 Hz the fixed-point phase step rounds down: reaching 15
+        // requires 91 ticks at 1x, plus a tick showing the final pose.
+        assert_eq!(ticks(Some((10, 17)), 256, Range::FULL), 92);
+        assert_eq!(ticks(Some((30, 44)), 0, Range::FULL), 32);
+        assert_eq!(ticks(None, 256, Range::FULL), 32);
+    }
 
     #[test]
     fn idle_action_binding_wins_when_a_new_attack_changes_model_clip_order() {

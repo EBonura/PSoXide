@@ -22,6 +22,8 @@ pub enum NodeKind {
     Group,
     /// Spatial transform node.
     Node3D,
+    /// Elevated teleport landing. Place at the centre of a clear platform.
+    HookPoint,
     /// Composed world object. The node owns transform/identity;
     /// behaviour is expressed by component-node children such as
     /// [`ModelRenderer`](Self::ModelRenderer),
@@ -520,6 +522,7 @@ impl NodeKind {
             Self::Node => "Node",
             Self::Group => "Group",
             Self::Node3D => "Node3D",
+            Self::HookPoint => "Hook Point",
             Self::Entity => "Entity",
             Self::World { .. } => "World",
             Self::Section { .. } => "Section",

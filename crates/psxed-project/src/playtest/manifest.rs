@@ -886,7 +886,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         let sky_cyclorama_quads = &sky_cyclorama_refs[room_index];
         let _ = writeln!(
             out,
-            "    LevelRoomRecord {{ name: {:?}, world_asset: AssetId({}), origin_x: {}, origin_z: {}, origin_y: {}, sector_size: {}, draw_distance: {}, chunk_activation_radius_sectors: {}, visibility_radius: {}, resident_chunk_limit: {}, visible_chunk_limit: {}, gravity_per_tick: {}, material_first: MaterialIndex({}), material_count: {}, portal_first: {}, portal_count: {}, near_room_first: {}, near_room_count: {}, overlapped_room_first: {}, overlapped_room_count: {}, fog_rgb: [{}, {}, {}], fog_near: {}, fog_far: {}, atmosphere_rgb: [{}, {}, {}], atmosphere_density: {}, atmosphere_fall_speed_q4: {}, atmosphere_wind_speed_q4: {}, sky: LevelSkyRecord {{ top_rgb: [{}, {}, {}], horizon_rgb: [{}, {}, {}], bottom_rgb: [{}, {}, {}], horizon_percent: {}, horizon_thickness_percent: {}, skybox_columns: {}, skybox_rows: {}, flags: {}, texture_asset: AssetId({}), cyclorama_quads: {}, cloud_layer: LevelCloudLayerRecord {{ texture_asset: AssetId({}), color_rgb: [{}, {}, {}], density: {}, altitude: {}, extent: {}, tile_count: {}, scroll_speed: [{}, {}], noise_seed: 0x{:08x}, flags: {} }} }}, far_vista: LevelFarVistaRecord {{ texture_assets: {}, radius: {}, height: {}, vertical_offset: {}, segments: {}, rotation_degrees: {}, tint_rgb: [{}, {}, {}], flags: {} }}, camera: LevelCameraRecord {{ distance: {}, height: {}, target_height: {}, lock_rise_percent: {}, min_floor_clearance: {}, orbit_speed_level: {}, accelerated_orbit: {}, recenter_preserves_pitch: {}, fov_y_degrees: {}, blend_profiles: {}, lock_target_framing: {}, lock_profile: {}, position_lag_shift: {}, position_vertical_lag_shift: {}, focus_lag_shift: {}, focus_vertical_lag_shift: {}, distance_lag_shift: {} }}, flags: {} }},",
+            "    LevelRoomRecord {{ name: {:?}, world_asset: AssetId({}), origin_x: {}, origin_z: {}, origin_y: {}, sector_size: {}, draw_distance: {}, chunk_activation_radius_sectors: {}, visibility_radius: {}, resident_chunk_limit: {}, visible_chunk_limit: {}, gravity_per_tick_q8: {}, material_first: MaterialIndex({}), material_count: {}, portal_first: {}, portal_count: {}, near_room_first: {}, near_room_count: {}, overlapped_room_first: {}, overlapped_room_count: {}, fog_rgb: [{}, {}, {}], fog_near: {}, fog_far: {}, atmosphere_rgb: [{}, {}, {}], atmosphere_density: {}, atmosphere_fall_speed_q4: {}, atmosphere_wind_speed_q4: {}, sky: LevelSkyRecord {{ top_rgb: [{}, {}, {}], horizon_rgb: [{}, {}, {}], bottom_rgb: [{}, {}, {}], horizon_percent: {}, horizon_thickness_percent: {}, skybox_columns: {}, skybox_rows: {}, flags: {}, texture_asset: AssetId({}), cyclorama_quads: {}, cloud_layer: LevelCloudLayerRecord {{ texture_asset: AssetId({}), color_rgb: [{}, {}, {}], density: {}, altitude: {}, extent: {}, tile_count: {}, scroll_speed: [{}, {}], noise_seed: 0x{:08x}, flags: {} }} }}, far_vista: LevelFarVistaRecord {{ texture_assets: {}, radius: {}, height: {}, vertical_offset: {}, segments: {}, rotation_degrees: {}, tint_rgb: [{}, {}, {}], flags: {} }}, camera: LevelCameraRecord {{ distance: {}, height: {}, target_height: {}, lock_rise_percent: {}, min_floor_clearance: {}, orbit_speed_level: {}, accelerated_orbit: {}, recenter_preserves_pitch: {}, fov_y_degrees: {}, blend_profiles: {}, lock_target_framing: {}, lock_profile: {}, position_lag_shift: {}, position_vertical_lag_shift: {}, focus_lag_shift: {}, focus_vertical_lag_shift: {}, distance_lag_shift: {} }}, flags: {} }},",
             room.name,
             room.world_asset_index
                 .unwrap_or(usize::from(u16::MAX)),
@@ -899,7 +899,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             room.visibility_radius,
             room.resident_chunk_limit,
             room.visible_chunk_limit,
-            room.gravity_per_tick,
+            room.gravity_per_tick_q8,
             room.material_first,
             room.material_count,
             room.portal_first,
@@ -2325,7 +2325,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         };
         let _ = writeln!(
             out,
-            "    LevelGameEntityRecord {{ room: RoomIndex({}), kind: {}, targetname: {}, model_instance: {model_instance}, idle_clip: {}, alert_clip: {}, turn_clip: {}, walk_clip: {}, walk_backward_clip: {}, strafe_left_clip: {}, strafe_right_clip: {}, run_clip: {}, attack_clip: {}, attack_speed_q8: {}, attack_frame_range: CharacterActionFrameRange {{ start: {}, end: {} }}, heavy_attack_clip: {}, heavy_attack_speed_q8: {}, heavy_attack_frame_range: CharacterActionFrameRange {{ start: {}, end: {} }}, ranged_attack_clip: {}, ranged_attack_speed_q8: {}, ranged_attack_frame_range: CharacterActionFrameRange {{ start: {}, end: {} }}, stagger_clip: {}, death_clip: {}, combat_capsule_first: CombatCapsuleIndex({}), combat_capsule_count: {}, ranged_attack_action: {}, x: {}, y: {}, z: {}, yaw: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, patrol_x: {}, patrol_y: {}, patrol_z: {}, patrol_wait_ticks: {}, aggro_radius: {}, reaction_ticks: {}, preferred_distance: {}, spacing_tolerance: {}, spacing_speed_percent: {}, decision_interval_ticks: {}, circle_chance: {}, attack_priority: {}, attack_cooldown_ticks: {}, group_attack_delay_ticks: {}, windup_ticks: {}, attack_active_ticks: {}, heavy_attack_active_ticks: {}, ranged_attack_active_ticks: {}, recovery_ticks: {}, attack_min_range: {}, attack_max_range: {}, poise: {}, touch_damage: {}, max_health: {}, max_health_secondary: {}, soul_value: {}, flags: {} }},",
+            "    LevelGameEntityRecord {{ room: RoomIndex({}), kind: {}, targetname: {}, model_instance: {model_instance}, idle_clip: {}, alert_clip: {}, turn_clip: {}, walk_clip: {}, walk_backward_clip: {}, strafe_left_clip: {}, strafe_right_clip: {}, run_clip: {}, attack_clip: {}, attack_speed_q8: {}, attack_frame_range: CharacterActionFrameRange {{ start: {}, end: {} }}, heavy_attack_clip: {}, heavy_attack_speed_q8: {}, heavy_attack_frame_range: CharacterActionFrameRange {{ start: {}, end: {} }}, ranged_attack_clip: {}, ranged_attack_speed_q8: {}, ranged_attack_frame_range: CharacterActionFrameRange {{ start: {}, end: {} }}, stagger_clip: {}, stagger_speed_q8: {}, stagger_frame_range: CharacterActionFrameRange {{ start: {}, end: {} }}, stagger_ticks: {}, death_clip: {}, combat_capsule_first: CombatCapsuleIndex({}), combat_capsule_count: {}, ranged_attack_action: {}, x: {}, y: {}, z: {}, yaw: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, patrol_x: {}, patrol_y: {}, patrol_z: {}, patrol_wait_ticks: {}, aggro_radius: {}, reaction_ticks: {}, preferred_distance: {}, spacing_tolerance: {}, spacing_speed_percent: {}, decision_interval_ticks: {}, circle_chance: {}, attack_priority: {}, attack_cooldown_ticks: {}, group_attack_delay_ticks: {}, windup_ticks: {}, attack_active_ticks: {}, heavy_attack_active_ticks: {}, ranged_attack_active_ticks: {}, recovery_ticks: {}, attack_min_range: {}, attack_max_range: {}, poise: {}, touch_damage: {}, max_health: {}, max_health_secondary: {}, soul_value: {}, flags: {} }},",
             entity.room,
             entity.kind,
             entity.targetname,
@@ -2350,6 +2350,10 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             entity.ranged_attack_frame_range.start,
             entity.ranged_attack_frame_range.end,
             entity.stagger_clip,
+            entity.stagger_speed_q8,
+            entity.stagger_frame_range.start,
+            entity.stagger_frame_range.end,
+            entity.stagger_ticks,
             entity.death_clip,
             entity.combat_capsule_first,
             entity.combat_capsule_count,
@@ -2479,7 +2483,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             .join(", ");
         let _ = writeln!(
             out,
-            "    LevelCharacterRecord {{ model: ModelIndex({}), action_clips: [{}], action_flags: [{}], action_speeds: [{}], action_frame_ranges: [{}], action_pushes: [{}], action_chains: [{}], combat_capsule_first: CombatCapsuleIndex({}), combat_capsule_count: {}, visual_offset: [{}, {}, {}], visual_yaw: {}, visual_scale_q8: {}, weight_q8: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, turn_speed_degrees_per_second: {}, stamina_max_q12: {}, sprint_min_q12: {}, sprint_drain_q12: {}, stamina_recover_q12: {}, roll_cost_q12: {}, roll_speed: {}, roll_active_frames: {}, roll_recovery_frames: {}, roll_invulnerable_frames: {}, backstep_cost_q12: {}, backstep_speed: {}, backstep_active_frames: {}, backstep_recovery_frames: {}, backstep_invulnerable_frames: {}, stance_aligned_damage_q12: {}, stance_opposed_damage_q12: {}, stance_regen_delay_ticks: {}, stance_broken_regen_delay_ticks: {}, stance_regen_per_tick_q12: {}, stance_break_threshold_q12: {}, stance_swap_cooldown_ticks: {}, stance_swap_duration_ticks: {}, camera_distance: {}, camera_height: {}, camera_target_height: {}, material_override: {}, flags: 0 }},",
+            "    LevelCharacterRecord {{ model: ModelIndex({}), action_clips: [{}], action_flags: [{}], action_speeds: [{}], action_frame_ranges: [{}], action_pushes: [{}], action_chains: [{}], combat_windows: [{}], combat_capsule_first: CombatCapsuleIndex({}), combat_capsule_count: {}, visual_offset: [{}, {}, {}], visual_yaw: {}, visual_scale_q8: {}, weight_q8: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, turn_speed_degrees_per_second: {}, stamina_max_q12: {}, sprint_min_q12: {}, sprint_drain_q12: {}, stamina_recover_q12: {}, roll_cost_q12: {}, roll_speed: {}, roll_active_frames: {}, roll_recovery_frames: {}, roll_invulnerable_frames: {}, backstep_cost_q12: {}, backstep_speed: {}, backstep_active_frames: {}, backstep_recovery_frames: {}, backstep_invulnerable_frames: {}, stance_aligned_damage_q12: {}, stance_opposed_damage_q12: {}, stance_regen_delay_ticks: {}, stance_broken_regen_delay_ticks: {}, stance_regen_per_tick_q12: {}, stance_break_threshold_q12: {}, stance_swap_cooldown_ticks: {}, stance_swap_duration_ticks: {}, camera_distance: {}, camera_height: {}, camera_target_height: {}, material_override: {}, flags: 0 }},",
             character.model,
             action_clips,
             action_flags,
@@ -2487,6 +2491,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             action_frame_ranges,
             action_pushes,
             character.action_chains.iter().map(|c| format!("psx_level::CharacterActionChain {{ action: {}, next_action: {}, input_start: {}, input_end: {}, handoff_frame: {}, blend_ticks: {} }}", c.action, c.next_action, c.input_start, c.input_end, c.handoff_frame, c.blend_ticks)).collect::<Vec<_>>().join(", "),
+            character.combat_windows.iter().map(|w| format!("psx_level::CharacterCombatWindow {{ action: {}, kind: psx_level::CombatWindowKind::{:?}, start: {}, end: {} }}", w.action, w.kind, w.start, w.end)).collect::<Vec<_>>().join(", "),
             character.combat_capsule_first,
             character.combat_capsule_count,
             character.visual_offset[0],
@@ -2551,6 +2556,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     out.push_str("pub static ENTITIES: &[EntityRecord] = &[\n");
     for entity in &package.entities {
         let kind = match entity.kind {
+            PlaytestEntityKind::HookPoint => "EntityKind::HookPoint",
             PlaytestEntityKind::Marker => "EntityKind::Marker",
             PlaytestEntityKind::StaticMesh => "EntityKind::StaticMesh",
         };

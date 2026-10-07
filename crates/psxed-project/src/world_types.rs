@@ -701,6 +701,10 @@ pub struct WorldPhysicsSettings {
     /// in engine units per fixed 60 Hz tick squared.
     #[serde(default = "default_world_gravity_per_tick")]
     pub gravity_per_tick: i32,
+    /// Optional precise acceleration in Q8 authoring units per 60 Hz tick squared.
+    /// Takes precedence over the legacy whole-unit value when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gravity_per_tick_q8: Option<i32>,
 }
 
 impl WorldPhysicsSettings {
@@ -710,6 +714,7 @@ impl WorldPhysicsSettings {
             gravity_per_tick: self
                 .gravity_per_tick
                 .clamp(MIN_WORLD_GRAVITY_PER_TICK, MAX_WORLD_GRAVITY_PER_TICK),
+            gravity_per_tick_q8: self.gravity_per_tick_q8.map(|v| v.clamp(0, MAX_WORLD_GRAVITY_PER_TICK * 256)),
         }
     }
 }
@@ -718,6 +723,7 @@ impl Default for WorldPhysicsSettings {
     fn default() -> Self {
         Self {
             gravity_per_tick: default_world_gravity_per_tick(),
+            gravity_per_tick_q8: None,
         }
     }
 }

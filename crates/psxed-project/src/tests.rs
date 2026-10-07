@@ -3423,6 +3423,7 @@ fn animation_library_resources_roundtrip_and_resolve_by_path() {
             action_clips: Vec::new(),
             weapon_appearance_tracks: Vec::new(),
             action_chains: Vec::new(),
+            combat_windows: Vec::new(),
             clips: Vec::new(),
         }),
     );
@@ -4792,4 +4793,82 @@ fn graybox_ranged_weapon_cooks_without_a_melee_arc_but_melee_still_requires_one(
     weapon.class = WeaponClass::Melee;
     let (_, report) = playtest::build_package(&project, &root);
     assert!(!report.is_ok(), "A melee weapon with a zero arc must still be rejected");
+}
+
+#[test]
+fn combat_windows_default_empty_and_cook_validate_the_authored_contract() {
+    let legacy: AnimationSetResource = ron::from_str("(clips: [])").unwrap();
+    assert!(legacy.combat_windows.is_empty());
+    let root = default_project_dir().parent().unwrap().join("graybox-reach");
+    let mut project = ProjectDocument::load_from_path(root.join("project.ron")).unwrap();
+    let id = project.resources.iter().find(|r| r.name == "Aletha Delivered Animation Set").unwrap().id;
+    let windows = vec![
+        AnimationCombatWindow { action: CharacterAnimationAction::HitReact, kind: CombatWindowKind::DodgeBuffer, start: 24, end: 81 },
+        AnimationCombatWindow { action: CharacterAnimationAction::HitReact, kind: CombatWindowKind::Dodge, start: 60, end: 81 },
+    ];
+    let ResourceData::AnimationSet(set) = &mut project.resource_mut(id).unwrap().data else { panic!() };
+    set.combat_windows = windows.clone();
+    let (package, report) = playtest::build_package(&project, &root);
+    assert!(report.is_ok(), "{:?}", report.errors);
+    let character = package.unwrap().characters.into_iter().find(|c| c.source_resource == ResourceId(62)).unwrap();
+    assert_eq!(character.combat_windows[1].start, 60);
+    assert_eq!(character.combat_windows[1].end, 81);
+    assert_eq!(character.combat_windows[1].kind, psx_level::CombatWindowKind::Dodge);
+    for case in 0..6 {
+        let mut broken = project.clone();
+        let ResourceData::AnimationSet(set) = &mut broken.resource_mut(id).unwrap().data else { panic!() };
+        match case {
+            0 => set.combat_windows.push(windows[0]),
+            1 => set.combat_windows[1].end = 900,
+            2 => set.combat_windows[1].start = 82,
+            3 => { set.combat_windows.pop(); },
+            4 => set.combat_windows[1].action = CharacterAnimationAction::Death,
+            _ => { set.combat_windows[1].start = 81; set.combat_windows[1].end = 82; },
+        }
+        let (_, report) = playtest::build_package(&broken, &root);
+        assert!(report.errors.iter().any(|e| e.contains("combat")), "case {case}: {:?}", report.errors);
+    }
+}
+
+#[test]
+fn hook_launch_action_round_trips_without_moving_existing_slots() {
+    let action = CharacterAnimationAction::HookLaunch;
+    let encoded = ron::ser::to_string(&action).unwrap();
+    assert_eq!(ron::from_str::<CharacterAnimationAction>(&encoded).unwrap(), action);
+    assert_eq!(CharacterAnimationAction::RangedRight.to_index(), 40);
+    assert_eq!(action.to_index(), psx_level::CharacterAnimationAction::HookLaunch.to_index());
+    assert!(CharacterAnimationAction::AUTHORABLE.contains(&action));
+}
+
+#[test]
+fn arch_perch_action_round_trips_without_moving_existing_slots() {
+    let action = CharacterAnimationAction::ArchPerch;
+    let encoded = ron::ser::to_string(&action).unwrap();
+    assert_eq!(ron::from_str::<CharacterAnimationAction>(&encoded).unwrap(), action);
+    assert_eq!(CharacterAnimationAction::HookLaunch.to_index(), 41);
+    assert_eq!(action.to_index(), 42);
+    assert_eq!(action.to_index(), psx_level::CharacterAnimationAction::ArchPerch.to_index());
+    assert!(CharacterAnimationAction::AUTHORABLE.contains(&action));
+}
+
+#[test]
+fn fractional_world_gravity_survives_authoring_units_and_legacy_defaults() {
+    let legacy: WorldPhysicsSettings = ron::from_str("(gravity_per_tick:96)").unwrap();
+    assert_eq!(legacy.gravity_per_tick_q8,None);
+    let mut project=ProjectDocument::new("fractional gravity");
+    let root=project.active_scene().root;
+    if let NodeKind::World {physics,..}=&mut project.active_scene_mut().node_mut(root).unwrap().kind {
+        physics.gravity_per_tick=96;
+        physics.gravity_per_tick_q8=Some(512);
+    }
+    crate::units::scale_project_to_engine_units(&mut project);
+    if let NodeKind::World {physics,..}=&project.active_scene().node(root).unwrap().kind {
+        assert_eq!(physics.gravity_per_tick,6);
+        assert_eq!(physics.gravity_per_tick_q8,Some(32));
+    } else { panic!("world"); }
+    assert_eq!(CharacterAnimationAction::ArchPerch.to_index(),42);
+    for (action,index) in [(CharacterAnimationAction::Fall,43),(CharacterAnimationAction::Land,44)] {
+        assert_eq!(action.to_index(),index);
+        assert_eq!(ron::from_str::<CharacterAnimationAction>(&ron::ser::to_string(&action).unwrap()).unwrap(),action);
+    }
 }

@@ -280,6 +280,10 @@ pub enum CharacterAnimationAction {
     RangedBackward,
     RangedLeft,
     RangedRight,
+    HookLaunch,
+    ArchPerch,
+    Fall,
+    Land,
 }
 
 impl CharacterAnimationAction {
@@ -333,6 +337,10 @@ impl CharacterAnimationAction {
         Self::RangedBackward,
         Self::RangedLeft,
         Self::RangedRight,
+        Self::HookLaunch,
+        Self::ArchPerch,
+        Self::Fall,
+        Self::Land,
     ];
 
     /// Actions exposed by current editor authoring. `StunRecovery` remains in
@@ -378,6 +386,10 @@ impl CharacterAnimationAction {
         Self::RangedBackward,
         Self::RangedLeft,
         Self::RangedRight,
+        Self::HookLaunch,
+        Self::ArchPerch,
+        Self::Fall,
+        Self::Land,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -425,6 +437,10 @@ impl CharacterAnimationAction {
             Self::RangedBackward => "Ranged Backward",
             Self::RangedLeft => "Ranged Left",
             Self::RangedRight => "Ranged Right",
+            Self::HookLaunch => "Hook Launch",
+            Self::ArchPerch => "Arch Perch",
+            Self::Fall => "Fall",
+            Self::Land => "Land",
         }
     }
 
@@ -471,6 +487,10 @@ impl CharacterAnimationAction {
             Self::RangedBackward => 38,
             Self::RangedLeft => 39,
             Self::RangedRight => 40,
+            Self::HookLaunch => 41,
+            Self::ArchPerch => 42,
+            Self::Fall => 43,
+            Self::Land => 44,
         }
     }
 
@@ -496,7 +516,7 @@ impl CharacterAnimationAction {
             Self::DashLeft | Self::DashRight => Some(AnimationRole::Roll),
             // A spawn intro is its own thing; no existing role fits, and
             // guessing one would auto-assign it to gameplay slots.
-            Self::Intro => None,
+            Self::Intro | Self::HookLaunch | Self::ArchPerch | Self::Fall | Self::Land => None,
             Self::WalkWindup | Self::WalkWinddown | Self::WalkWinddownAlt => {
                 Some(AnimationRole::Walk)
             }
@@ -675,6 +695,33 @@ impl CharacterAnimationAction {
             None
         }
     }
+}
+
+/// Channels on the shared combat timeline. Values are source clip frames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CombatWindowKind { AttackBuffer, Attack, DodgeBuffer, Dodge, Movement, Invulnerable, Armored }
+impl CombatWindowKind {
+    pub const ALL: [Self; 7] = [Self::AttackBuffer, Self::Attack, Self::DodgeBuffer, Self::Dodge, Self::Movement, Self::Invulnerable, Self::Armored];
+    pub const fn cooked(self) -> psx_level::CombatWindowKind {
+        match self {
+            Self::AttackBuffer => psx_level::CombatWindowKind::AttackBuffer,
+            Self::Attack => psx_level::CombatWindowKind::Attack,
+            Self::DodgeBuffer => psx_level::CombatWindowKind::DodgeBuffer,
+            Self::Dodge => psx_level::CombatWindowKind::Dodge,
+            Self::Movement => psx_level::CombatWindowKind::Movement,
+            Self::Invulnerable => psx_level::CombatWindowKind::Invulnerable,
+            Self::Armored => psx_level::CombatWindowKind::Armored,
+        }
+    }
+}
+/// Half-open [start, end) interval; equal endpoints explicitly close a channel.
+/// Omit a channel to retain legacy behavior. One interval per action/channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnimationCombatWindow {
+    pub action: CharacterAnimationAction,
+    pub kind: CombatWindowKind,
+    pub start: u16,
+    pub end: u16,
 }
 
 /// Resource-based action binding used by Animation Sets.
@@ -1138,6 +1185,9 @@ pub struct AnimationSetResource {
     /// Optional R1 handoffs, expressed on the source action timeline.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub action_chains: Vec<AnimationActionChain>,
+    /// Shared combat permissions, authored in source frames.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub combat_windows: Vec<AnimationCombatWindow>,
     /// Extra clips included with the set, such as attacks, hit
     /// reactions, death clips, emotes, and experiments.
     #[serde(default)]
@@ -1157,6 +1207,7 @@ impl AnimationSetResource {
             action_clips: Vec::new(),
             weapon_appearance_tracks: Vec::new(),
             action_chains: Vec::new(),
+            combat_windows: Vec::new(),
             clips: Vec::new(),
         }
     }
@@ -2336,6 +2387,12 @@ impl Default for CharacterResource {
 /// projects load (and round-trip) unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnemyBehaviorSettings {
+    /// Enable sustained tactical movement and explicit blocked-path recovery.
+    #[serde(default)]
+    pub tactical: bool,
+    /// Show encounter diagnostics and enable Select + L1 to restart the encounter.
+    #[serde(default)]
+    pub training: bool,
     /// XZ radius (engine units) inside which the player is noticed.
     #[serde(default = "default_enemy_aggro_radius")]
     pub aggro_radius: u16,
@@ -2355,6 +2412,9 @@ pub struct EnemyBehaviorSettings {
     /// Half-width of the preferred-distance band, in engine units.
     #[serde(default = "default_enemy_spacing_tolerance")]
     pub spacing_tolerance: u16,
+    /// Circling/retreat speed as a percentage of walk speed; retains fractional units.
+    #[serde(default = "default_enemy_spacing_speed_percent")]
+    pub spacing_speed_percent: u8,
     /// 60 Hz ticks between hold/circle intent re-evaluations.
     #[serde(default = "default_enemy_decision_interval_ticks")]
     pub decision_interval_ticks: u8,
@@ -2376,12 +2436,6 @@ pub struct EnemyBehaviorSettings {
     /// 60 Hz ticks of post-attack recovery (the punish window).
     #[serde(default = "default_enemy_recovery_ticks")]
     pub recovery_ticks: u8,
-    /// Enable sustained tactical movement and explicit blocked-path recovery.
-    #[serde(default)]
-    pub tactical: bool,
-    /// Show encounter diagnostics and enable Select + L1 to restart the encounter.
-    #[serde(default)]
-    pub training: bool,
     /// Poise pool; poise damage past it staggers the enemy.
     #[serde(default = "default_enemy_poise")]
     pub poise: u16,
@@ -2401,9 +2455,6 @@ pub struct EnemyBehaviorSettings {
     /// grant the default rather than nothing.
     #[serde(default = "default_enemy_soul_value")]
     pub soul_value: u16,
-    /// Circling/retreat speed as a percentage of walk speed (whole cooked units, minimum one).
-    #[serde(default = "default_enemy_spacing_speed_percent")]
-    pub spacing_speed_percent: u8,
 }
 
 impl EnemyBehaviorSettings {
@@ -2412,13 +2463,13 @@ impl EnemyBehaviorSettings {
         Self {
             tactical: false,
             training: false,
-            spacing_speed_percent: default_enemy_spacing_speed_percent(),
             aggro_radius: default_enemy_aggro_radius(),
             patrol_offset: [0; 3],
             patrol_wait_ticks: default_enemy_patrol_wait_ticks(),
             reaction_ticks: default_enemy_reaction_ticks(),
             preferred_distance: default_enemy_preferred_distance(),
             spacing_tolerance: default_enemy_spacing_tolerance(),
+            spacing_speed_percent: default_enemy_spacing_speed_percent(),
             decision_interval_ticks: default_enemy_decision_interval_ticks(),
             circle_chance: default_enemy_circle_chance(),
             attack_priority: default_enemy_attack_priority(),
@@ -2455,6 +2506,10 @@ pub(crate) const fn default_enemy_reaction_ticks() -> u8 {
 
 pub(crate) const fn default_enemy_preferred_distance() -> u16 {
     768
+}
+
+pub(crate) const fn default_enemy_spacing_speed_percent() -> u8 {
+    100
 }
 
 pub(crate) const fn default_enemy_spacing_tolerance() -> u16 {
@@ -2495,10 +2550,6 @@ pub(crate) const fn default_enemy_poise() -> u16 {
 
 pub(crate) const fn default_enemy_touch_damage() -> u16 {
     10
-}
-
-pub(crate) const fn default_enemy_spacing_speed_percent() -> u8 {
-    100
 }
 
 pub(crate) const fn default_enemy_max_health() -> u16 {

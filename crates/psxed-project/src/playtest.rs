@@ -610,7 +610,7 @@ pub fn build_package(
         visibility_radius: resolved_culling.visibility_radius,
         resident_chunk_limit: playtest_streaming_resident_chunk_limit(streaming),
         visible_chunk_limit: streaming.visible_chunk_limit,
-        gravity_per_tick: resolved_physics.gravity_per_tick,
+        gravity_per_tick_q8: resolved_physics.gravity_per_tick_q8.unwrap_or_else(|| resolved_physics.gravity_per_tick.saturating_mul(256)),
         material_first: 0,
         material_count: 0,
         portal_first: 0,
@@ -1218,6 +1218,24 @@ pub fn build_package(
                                             + usize::from(combat_capsule_count),
                                 )
                                 .unwrap_or(&[]);
+                            let clip_timing_for = |clip_index: u16| {
+                                node_model_instance
+                                    .and_then(|instance| model_instances.get(instance as usize))
+                                    .and_then(|instance| models.get(instance.model as usize))
+                                    .and_then(|model| {
+                                        model_clips.get(
+                                            usize::from(model.clip_first)
+                                                .saturating_add(usize::from(clip_index)),
+                                        )
+                                    })
+                                    .and_then(|clip| assets.get(clip.animation_asset_index))
+                                    .and_then(|asset| {
+                                        psx_asset::Animation::from_bytes(&asset.bytes).ok()
+                                    })
+                                    .map(|animation| {
+                                        (animation.sample_rate_hz(), animation.frame_count())
+                                    })
+                            };
                             let attack_active_ticks_for =
                                 |action: CharacterAnimationAction,
                                  clip_index: u16,
@@ -1234,22 +1252,7 @@ pub fn build_package(
                                         })
                                         .map(|capsule| capsule.active_end_frame)
                                         .max();
-                                    let clip_timing = node_model_instance
-                                        .and_then(|instance| model_instances.get(instance as usize))
-                                        .and_then(|instance| models.get(instance.model as usize))
-                                        .and_then(|model| {
-                                            model_clips.get(
-                                                usize::from(model.clip_first)
-                                                    .saturating_add(usize::from(clip_index)),
-                                            )
-                                        })
-                                        .and_then(|clip| assets.get(clip.animation_asset_index))
-                                        .and_then(|asset| {
-                                            psx_asset::Animation::from_bytes(&asset.bytes).ok()
-                                        })
-                                        .map(|animation| {
-                                            (animation.sample_rate_hz(), animation.frame_count())
-                                        });
+                                    let clip_timing = clip_timing_for(clip_index);
                                     cooked_game_entity_attack_active_ticks(
                                         enemy.windup_ticks,
                                         enemy.recovery_ticks,
@@ -1281,6 +1284,11 @@ pub fn build_package(
                                 state_clips.ranged_attack_speed_q8,
                                 state_clips.ranged_attack_frame_range,
                             );
+                            let stagger_ticks = cooked_game_entity_stagger_ticks(
+                                clip_timing_for(state_clips.stagger),
+                                state_clips.stagger_speed_q8,
+                                state_clips.stagger_frame_range,
+                            );
                             let ok =
                                 report.blaming(PlaytestValidationTarget::Node(node.id), |report| {
                                     push_game_entity(
@@ -1304,6 +1312,7 @@ pub fn build_package(
                                         attack_active_ticks,
                                         heavy_attack_active_ticks,
                                         ranged_attack_active_ticks,
+                                        stagger_ticks,
                                         projectile_attack_range,
                                         &mut names,
                                         &mut game_entities,
@@ -1577,11 +1586,16 @@ pub fn build_package(
                     drain_per_second: *drain_per_second,
                 });
             }
-            NodeKind::SpawnPoint { player: false, .. } => {
+            NodeKind::HookPoint | NodeKind::SpawnPoint { player: false, .. } => {
+                if matches!(node.kind, NodeKind::HookPoint)
+                    && entities.iter().filter(|e| e.kind == PlaytestEntityKind::HookPoint).count() >= psx_level::MAX_HOOK_POINTS {
+                    report.error_at(PlaytestValidationTarget::Node(node.id), "A project supports at most 32 hook points");
+                    return (None, report);
+                }
                 let pos = floor_pos;
                 entities.push(PlaytestEntity {
                     room: room_index,
-                    kind: PlaytestEntityKind::Marker,
+                    kind: if matches!(node.kind, NodeKind::HookPoint) { PlaytestEntityKind::HookPoint } else { PlaytestEntityKind::Marker },
                     x: pos[0],
                     y: pos[1],
                     z: pos[2],

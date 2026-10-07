@@ -897,7 +897,7 @@ fn test_room(world_asset_index: usize) -> PlaytestRoom {
         visibility_radius: 32,
         resident_chunk_limit: 10,
         visible_chunk_limit: 10,
-        gravity_per_tick: 96,
+        gravity_per_tick_q8: 96 * 256,
         material_first: 0,
         material_count: 0,
         portal_first: 0,

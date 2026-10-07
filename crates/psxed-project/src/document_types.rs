@@ -1822,6 +1822,7 @@ pub(crate) fn node_kind_reference_count(kind: &NodeKind, id: ResourceId) -> usiz
         }),
         NodeKind::Node
         | NodeKind::Group
+        | NodeKind::HookPoint
         | NodeKind::Node3D
         | NodeKind::Entity
         | NodeKind::Animator { .. }
@@ -1910,6 +1911,7 @@ pub(crate) fn clear_node_kind_references(kind: &mut NodeKind, id: ResourceId) ->
         }
         NodeKind::Node
         | NodeKind::Group
+        | NodeKind::HookPoint
         | NodeKind::Node3D
         | NodeKind::Entity
         | NodeKind::Animator { .. }

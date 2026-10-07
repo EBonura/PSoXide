@@ -247,9 +247,9 @@ pub struct PlaytestRoom {
     pub resident_chunk_limit: u8,
     /// Runtime room visible/drawable budget inherited from the World node.
     pub visible_chunk_limit: u8,
-    /// Downward acceleration inherited from the World node, in engine units
+    /// Downward acceleration inherited from the World node, in Q8 engine units
     /// per fixed 60 Hz tick squared.
-    pub gravity_per_tick: i32,
+    pub gravity_per_tick_q8: i32,
     /// First index into [`PlaytestPackage::materials`] for this
     /// room's slice.
     pub material_first: u16,
@@ -1773,6 +1773,12 @@ pub struct PlaytestGameEntity {
     pub ranged_attack_frame_range: psx_level::CharacterActionFrameRange,
     /// Complete Stun one-shot, including recovery (HitReact fallback).
     pub stagger_clip: u16,
+    /// Authored stun speed; zero preserves legacy 3x playback.
+    pub stagger_speed_q8: u16,
+    /// Inclusive authored stun range.
+    pub stagger_frame_range: psx_level::CharacterActionFrameRange,
+    /// Complete stun duration at 60 Hz; zero preserves the legacy 32 ticks.
+    pub stagger_ticks: u16,
     /// Death one-shot clip.
     pub death_clip: u16,
     /// First rig-attached volume in [`PlaytestPackage::combat_capsules`].
@@ -1809,6 +1815,8 @@ pub struct PlaytestGameEntity {
     pub preferred_distance: u16,
     /// Half-width of the desired-distance band.
     pub spacing_tolerance: u16,
+    /// Circling/retreat percentage of walk speed; retains fractional units.
+    pub spacing_speed_percent: u8,
     /// Hold/circle decision cadence in 60 Hz ticks.
     pub decision_interval_ticks: u8,
     /// Percent chance that an in-band decision circles.
@@ -1825,8 +1833,6 @@ pub struct PlaytestGameEntity {
     /// enough for the authored Light Attack event at the cooked clip rate.
     pub attack_active_ticks: u16,
     /// Attack-state ticks for Horizon Heavy.
-    /// Circling/retreat percentage of walk speed; quantized to whole units, minimum one.
-    pub spacing_speed_percent: u8,
     pub heavy_attack_active_ticks: u16,
     /// Attack-state ticks for the projectile action.
     pub ranged_attack_active_ticks: u16,
@@ -1872,6 +1878,8 @@ pub struct PlaytestSpawn {
 /// Coarse runtime kind for [`PlaytestEntity`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlaytestEntityKind {
+    /// Elevated hook landing; marker floats above the authored foot position.
+    HookPoint,
     /// Visual marker (debug cube).
     Marker,
     /// Static mesh instance pinned by `resource_slot`.
@@ -1901,6 +1909,8 @@ pub struct PlaytestCharacter {
     /// Forward push per action.
     pub action_pushes: [psx_level::CharacterActionPush; PLAYTEST_CHARACTER_ACTION_COUNT],
     pub action_chains: [psx_level::CharacterActionChain; psx_level::MAX_CHARACTER_ACTION_CHAINS],
+    /// Explicit combat permissions and protection windows.
+    pub combat_windows: [psx_level::CharacterCombatWindow; psx_level::MAX_CHARACTER_COMBAT_WINDOWS],
     /// First rig-attached volume in [`PlaytestPackage::combat_capsules`].
     pub combat_capsule_first: u16,
     /// Number of rig-attached volumes.
