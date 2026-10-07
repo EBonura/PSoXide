@@ -116,6 +116,14 @@ impl Playtest {
                     continue;
                 }
             }
+            let mut visual = release.visual;
+            visual.crystal = true;
+            visual.core_rgb = [224, 255, 248];
+            visual.glow_rgb = [96, 240, 192];
+            visual.glow_scale_q8 = 512;
+            visual.length_ticks = 3;
+            visual.trail_segments = 4;
+            visual.impact_rgb = [144, 248, 208];
             let spawn = ProjectileSpawn {
                 position: release.position,
                 velocity: projectiles::velocity_toward(release.position, target, release.speed),
@@ -132,11 +140,12 @@ impl Playtest {
                 owner: projectiles::NO_PROJECTILE_OWNER,
                 tint_rgb: release.tint_rgb,
                 damage_channel: projectiles::ProjectileDamageChannel::Zenith,
-                visual: release.visual,
+                visual,
             };
             if self.combat_projectiles.spawn(spawn).is_err() {
                 break;
             }
+            let _ = self.combat_projectile_impacts.spawn_muzzle(&spawn);
             self.ranged_ready.released |= 1u16 << emitter;
             self.queue_gameplay_sfx(LevelGameplaySfxEvent::ProjectileLaunch);
             telemetry::debug_log("player projectile:release");

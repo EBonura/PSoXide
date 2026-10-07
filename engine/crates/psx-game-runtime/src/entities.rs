@@ -582,9 +582,8 @@ pub struct GameEntities<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: b
     /// Same cooked cooldown as the player, with independent per-enemy clocks.
     stance_swap_delay: u16,
     stance_swap_cooldown: [u16; MAX_ENTITIES],
-    /// World aim elevation captured when the ranged tell commits.
-    ranged_aim_y: [i32; MAX_ENTITIES],
-    ranged_aim_distance: [i32; MAX_ENTITIES],
+    /// World aim point frozen at the charge cutoff, independent of muzzle offset.
+    ranged_aim_target: [[i32; 3]; MAX_ENTITIES],
     /// Patrol leg: 0 = toward the patrol anchor, 1 = toward spawn.
     patrol_leg: [u8; MAX_ENTITIES],
     /// Persistent eight-way local movement direction, in PSX yaw units.
@@ -785,8 +784,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
         poise: [crate::poise::Poise::EMPTY; MAX_ENTITIES],
         stance_swap_delay: 0,
         stance_swap_cooldown: [0; MAX_ENTITIES],
-        ranged_aim_y: [0; MAX_ENTITIES],
-        ranged_aim_distance: [0; MAX_ENTITIES],
+        ranged_aim_target: [[0; 3]; MAX_ENTITIES],
         patrol_leg: [0; MAX_ENTITIES],
         move_yaw: [0; MAX_ENTITIES],
         move_yaw_valid: [0; MAX_ENTITIES],
@@ -1076,12 +1074,26 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
     }
 
     fn capture_ranged_aim(&mut self, index: usize, input: GameEntityTickInput<'_>) {
-        let dx = input.player[0].saturating_sub(self.x[index]);
-        let dz = input.player[2].saturating_sub(self.z[index]);
-        self.ranged_aim_distance[index] =
-            psx_math::int32::isqrt_i32(dx.saturating_mul(dx).saturating_add(dz.saturating_mul(dz)))
-                .max(1);
-        self.ranged_aim_y[index] = input.player[1].saturating_add(input.player_height.max(0) / 2);
+        self.capture_ranged_target(index, input.player, input.player_height);
+    }
+
+    fn capture_ranged_target(&mut self, index: usize, player: [i32; 3], height: i32) {
+        let dx = player[0].saturating_sub(self.x[index]);
+        let dz = player[2].saturating_sub(self.z[index]);
+        let distance = psx_math::int32::isqrt_i32(
+            dx.saturating_mul(dx).saturating_add(dz.saturating_mul(dz)),
+        );
+        let yaw = self.yaw[index] as u16;
+        // Retain the limited body turn during the tell. The aim point lies on
+        // that bearing at the player's distance, rather than snapping sideways
+        // or backwards if the player outruns the enemy's turn rate.
+        self.ranged_aim_target[index] = [
+            self.x[index].saturating_add(psx_math::int32::mul_q12_i32(
+                distance, psx_math::sin_q12(yaw))),
+            player[1].saturating_add(height.max(0).saturating_mul(3) / 4),
+            self.z[index].saturating_add(psx_math::int32::mul_q12_i32(
+                distance, psx_math::cos_q12(yaw))),
+        ];
     }
 
     fn track_ranged_tell(
@@ -1159,29 +1171,25 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
                 )
                 .as_q12() as i16;
         }
-        self.ranged_aim_distance[index] =
-            psx_math::int32::isqrt_i32(dx.saturating_mul(dx).saturating_add(dz.saturating_mul(dz)))
-                .max(1);
-        self.ranged_aim_y[index] = player[1].saturating_add(player_height.max(0) / 2);
+        self.capture_ranged_target(index, player, player_height);
     }
 
-    /// Straight shot along the committed body bearing. Only the saved aim
-    /// elevation is used; the player's release-time position is never read.
-    pub fn ranged_velocity(&self, index: usize, muzzle: [i32; 3], speed: u16) -> [i32; 3] {
+    /// Target captured before release. Moving after the charge cutoff can evade
+    /// the shot: neither this query nor the projectile tracks the live player.
+    pub fn ranged_target(&self, index: usize) -> Option<[i32; 3]> {
         if index >= self.count() {
-            return [0; 3];
+            return None;
         }
-        let yaw = self.yaw[index] as u16;
-        let distance = self.ranged_aim_distance[index];
-        crate::projectiles::velocity_toward(
-            [0; 3],
-            [
-                psx_math::int32::mul_q12_i32(distance, psx_math::sin_q12(yaw)),
-                self.ranged_aim_y[index].saturating_sub(muzzle[1]),
-                psx_math::int32::mul_q12_i32(distance, psx_math::cos_q12(yaw)),
-            ],
-            speed,
-        )
+        Some(self.ranged_aim_target[index])
+    }
+
+    /// Converge from the actual animated muzzle onto the committed aim point.
+    /// A body-parallel ray misses by the cannon's full sideways/forward offset.
+    pub fn ranged_velocity(&self, index: usize, muzzle: [i32; 3], speed: u16) -> [i32; 3] {
+        let Some(target) = self.ranged_target(index) else {
+            return [0; 3];
+        };
+        crate::projectiles::velocity_toward(muzzle, target, speed)
     }
 
     /// Entity `index`'s two vitality pools, rehydrated from the dense state
@@ -4470,6 +4478,34 @@ mod tests {
         }
         assert_eq!(e.yaw(0), yaw);
         assert_eq!(e.ranged_velocity(0, [1000, 500, 1000], 160), velocity);
+    }
+
+    #[test]
+    fn ranged_aim_converges_from_both_sides_of_the_body() {
+        let mut e = GameEntities::<8>::EMPTY;
+        e.spawn_from_records(&RANGED_ENEMY);
+        e.x[0] = 0; e.z[0] = -256; e.yaw[0] = 2048;
+        e.capture_ranged_aim(0, GameEntityTickInput {
+            player: [0,0,-384], player_height: 64, ..near_input(&ACTIVE)
+        });
+        assert_eq!(e.ranged_target(0), Some([0,48,-384]));
+        assert!(e.ranged_velocity(0, [20,87,-333], 10)[0] < 0);
+        assert!(e.ranged_velocity(0, [-20,87,-333], 10)[0] > 0);
+        assert_eq!(e.ranged_target(99), None);
+    }
+
+    #[test]
+    fn ranged_aim_keeps_the_limited_turn_and_freezes_a_world_point() {
+        let mut e = GameEntities::<8>::EMPTY;
+        e.spawn_from_records(&RANGED_ENEMY);
+        e.x[0] = 0; e.z[0] = 0; e.yaw[0] = 0;
+        // A player behind the enemy does not make an instantaneous rear shot.
+        e.capture_ranged_aim(0, GameEntityTickInput {
+            player: [0,0,-128], player_height: 64, ..near_input(&ACTIVE)
+        });
+        assert_eq!(e.ranged_target(0), Some([0,48,128]));
+        e.x[0] = 40; e.yaw[0] = 1024;
+        assert_eq!(e.ranged_target(0), Some([0,48,128]));
     }
 
     #[test]

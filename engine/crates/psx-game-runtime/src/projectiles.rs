@@ -20,20 +20,31 @@ pub const NO_PROJECTILE_OWNER: u16 = u16::MAX;
 /// `target`. Large world deltas are shifted together before normalization, so
 /// the direction is preserved while all products remain native 32-bit on PS1.
 pub fn velocity_toward(start: [i32; 3], target: [i32; 3], speed: u16) -> [i32; 3] {
+    let (mut whole, fraction) = velocity_toward_parts(start, target, speed);
+    if whole == [0; 3] && fraction != [0; 3] {
+        let mut axis = 0;
+        for i in 1..3 {
+            if fraction[i].abs() > fraction[axis].abs() {
+                axis = i;
+            }
+        }
+        whole[axis] = i32::from(fraction[axis].signum());
+    }
+    whole
+}
+
+// Split velocity into world units plus a signed Q12 fraction. Keeping that
+// remainder avoids accumulating a whole-unit aiming error on every tick.
+fn velocity_toward_parts(start: [i32; 3], target: [i32; 3], speed: u16) -> ([i32; 3], [i16; 3]) {
     let mut delta = [
         target[0].saturating_sub(start[0]),
         target[1].saturating_sub(start[1]),
         target[2].saturating_sub(start[2]),
     ];
-    let mut maximum = delta[0]
-        .saturating_abs()
-        .max(delta[1].saturating_abs())
-        .max(delta[2].saturating_abs());
-    while maximum > 16_000 {
-        delta[0] >>= 1;
-        delta[1] >>= 1;
-        delta[2] >>= 1;
-        maximum >>= 1;
+    while delta.iter().any(|v| v.saturating_abs() > 16_000) {
+        for v in &mut delta {
+            *v >>= 1;
+        }
     }
     let length = isqrt_i32(
         square_i32_saturating(delta[0])
@@ -41,25 +52,16 @@ pub fn velocity_toward(start: [i32; 3], target: [i32; 3], speed: u16) -> [i32; 3
             .saturating_add(square_i32_saturating(delta[2])),
     );
     if length == 0 || speed == 0 {
-        return [0; 3];
+        return ([0; 3], [0; 3]);
     }
-    let speed = i32::from(speed);
-    let mut velocity = [
-        delta[0].saturating_mul(speed) / length,
-        delta[1].saturating_mul(speed) / length,
-        delta[2].saturating_mul(speed) / length,
-    ];
-    if velocity == [0; 3] {
-        let mut axis = 0usize;
-        if delta[1].saturating_abs() > delta[axis].saturating_abs() {
-            axis = 1;
-        }
-        if delta[2].saturating_abs() > delta[axis].saturating_abs() {
-            axis = 2;
-        }
-        velocity[axis] = delta[axis].signum();
+    let mut whole = [0; 3];
+    let mut fraction = [0; 3];
+    for i in 0..3 {
+        let product = delta[i] * i32::from(speed);
+        whole[i] = product / length;
+        fraction[i] = ((product % length) * 4096 / length) as i16;
     }
-    velocity
+    (whole, fraction)
 }
 
 /// Logical combat side used for friendly-fire rejection.
@@ -99,6 +101,8 @@ impl ProjectileDamageChannel {
 /// Bounded presentation contract carried beside projectile gameplay state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProjectileVisualStyle {
+    /// Faceted energy discharge with a persistent muzzle flash and shard impact.
+    pub crystal: bool,
     /// Bright velocity-aligned core.
     pub core_rgb: [u8; 3],
     /// Wider additive halo and muzzle charge.
@@ -124,6 +128,7 @@ pub struct ProjectileVisualStyle {
 impl ProjectileVisualStyle {
     /// Safe all-zero fixed-array initializer.
     pub const EMPTY: Self = Self {
+        crystal: false,
         core_rgb: [0; 3],
         glow_rgb: [0; 3],
         impact_rgb: [0; 3],
@@ -187,7 +192,8 @@ pub struct ProjectileSnapshot {
     pub origin: [i32; 3],
     /// Current center.
     pub position: [i32; 3],
-    /// Per-tick displacement.
+    /// Whole-unit velocity used by trails; aimed motion also accumulates a
+    /// private fractional remainder, so individual steps may differ by one.
     pub velocity: [i32; 3],
     /// Collision sphere radius.
     pub radius: u16,
@@ -270,6 +276,8 @@ pub struct ProjectileImpact {
     pub kind: ProjectileImpactKind,
     /// Room-local impact center.
     pub position: [i32; 3],
+    /// Incoming step retained after the projectile slot is freed.
+    pub velocity: [i32; 3],
     /// Collision room.
     pub room: RoomIndex,
     /// Collision radius of the stopped bolt.
@@ -293,6 +301,7 @@ impl ProjectileImpact {
         projectile: 0,
         kind: ProjectileImpactKind::World,
         position: [0; 3],
+        velocity: [0; 3],
         room: RoomIndex::ZERO,
         radius: 0,
         damage: 0,
@@ -366,6 +375,8 @@ pub struct CombatProjectiles<const N: usize> {
     positions: [[i32; 3]; N],
     origins: [[i32; 3]; N],
     velocities: [[i32; 3]; N],
+    velocity_fractions_q12: [[i16; 3]; N],
+    position_remainders_q12: [[i16; 3]; N],
     radii: [u16; N],
     damage: [u16; N],
     poise_damage: [u16; N],
@@ -387,6 +398,8 @@ impl<const N: usize> CombatProjectiles<N> {
             positions: [[0; 3]; N],
             origins: [[0; 3]; N],
             velocities: [[0; 3]; N],
+            velocity_fractions_q12: [[0; 3]; N],
+            position_remainders_q12: [[0; 3]; N],
             radii: [0; N],
             damage: [0; N],
             poise_damage: [0; N],
@@ -450,6 +463,8 @@ impl<const N: usize> CombatProjectiles<N> {
         self.positions[index] = spawn.position;
         self.origins[index] = spawn.position;
         self.velocities[index] = spawn.velocity;
+        self.velocity_fractions_q12[index] = [0; 3];
+        self.position_remainders_q12[index] = [0; 3];
         self.radii[index] = spawn.radius;
         self.damage[index] = spawn.damage;
         self.poise_damage[index] = spawn.poise_damage;
@@ -461,6 +476,21 @@ impl<const N: usize> CombatProjectiles<N> {
         self.damage_channels[index] = spawn.damage_channel;
         self.visuals[index] = spawn.visual;
         self.age_ticks[index] = 0;
+        Ok(index)
+    }
+
+    /// Fire toward a captured point with fractional accumulation. The target
+    /// is used only here, never during flight: this is a straight, dodgeable shot.
+    pub fn spawn_toward(
+        &mut self,
+        mut spawn: ProjectileSpawn,
+        target: [i32; 3],
+        speed: u16,
+    ) -> Result<usize, ProjectileSpawnError> {
+        let (whole, fraction) = velocity_toward_parts(spawn.position, target, speed);
+        spawn.velocity = whole;
+        let index = self.spawn(spawn)?;
+        self.velocity_fractions_q12[index] = fraction;
         Ok(index)
     }
 
@@ -484,7 +514,14 @@ impl<const N: usize> CombatProjectiles<N> {
             }
             stats.advanced = stats.advanced.saturating_add(1);
             let start = self.positions[index];
-            let requested_end = add3(start, self.velocities[index]);
+            let mut step = self.velocities[index];
+            for axis in 0..3 {
+                let accumulated = i32::from(self.position_remainders_q12[index][axis])
+                    + i32::from(self.velocity_fractions_q12[index][axis]);
+                step[axis] = step[axis].saturating_add(accumulated / 4096);
+                self.position_remainders_q12[index][axis] = (accumulated % 4096) as i16;
+            }
+            let requested_end = add3(start, step);
             let trace =
                 tracer.trace_projectile(self.rooms[index], start, requested_end, self.radii[index]);
             let (world_hit, trace_failed, end) = match trace {
@@ -536,6 +573,7 @@ impl<const N: usize> CombatProjectiles<N> {
                     projectile: index.min(u16::MAX as usize) as u16,
                     kind,
                     position,
+                    velocity: step,
                     room: self.rooms[index],
                     radius: self.radii[index],
                     damage: self.damage[index],
@@ -568,11 +606,29 @@ impl<const N: usize> CombatProjectiles<N> {
 
 /// One live, read-only impact presentation sample.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ProjectileEffectKind {
+    /// Contact with scenery, also the default for standalone break effects.
+    World = 0,
+    /// Contact with an actor hurtbox.
+    Actor = 1,
+    /// Brief discharge at the original firing position.
+    Muzzle = 2,
+}
+
+/// One live, read-only impact presentation sample.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProjectileImpactEffect {
+    /// Selects discharge, scenery sparks or actor shatter.
+    pub kind: ProjectileEffectKind,
     /// Room-local center.
     pub position: [i32; 3],
     /// Collision room.
     pub room: RoomIndex,
+    /// Incoming direction for the fracture fan.
+    pub velocity: [i32; 3],
+    /// Stable per-event variation; drawing never advances the random sequence.
+    pub seed: u32,
     /// Source collision radius.
     pub radius: u16,
     /// Current effect age.
@@ -586,7 +642,11 @@ pub struct ProjectileImpactEffect {
 /// slot is immediately recycled.
 pub struct ProjectileImpactEffects<const N: usize> {
     active: [u8; N],
+    kinds: [ProjectileEffectKind; N],
     positions: [[i32; 3]; N],
+    velocities: [[i32; 3]; N],
+    seeds: [u32; N],
+    sequence: u32,
     rooms: [RoomIndex; N],
     radii: [u16; N],
     ages: [u8; N],
@@ -598,7 +658,11 @@ impl<const N: usize> ProjectileImpactEffects<N> {
     pub const fn new() -> Self {
         Self {
             active: [0; N],
+            kinds: [ProjectileEffectKind::World; N],
             positions: [[0; 3]; N],
+            velocities: [[0; 3]; N],
+            seeds: [0; N],
+            sequence: 0,
             rooms: [RoomIndex::ZERO; N],
             radii: [0; N],
             ages: [0; N],
@@ -609,11 +673,46 @@ impl<const N: usize> ProjectileImpactEffects<N> {
     /// Remove all live effects.
     pub fn clear(&mut self) {
         self.active.fill(0);
+        self.sequence = 0;
     }
 
     /// Retain one resolved impact when a presentation slot is available.
     pub fn spawn(&mut self, impact: &ProjectileImpact) -> bool {
-        self.spawn_effect(impact.position, impact.room, impact.radius, impact.visual)
+        let kind = match impact.kind {
+            ProjectileImpactKind::Target { .. } => ProjectileEffectKind::Actor,
+            ProjectileImpactKind::World => ProjectileEffectKind::World,
+        };
+        let mut visual = impact.visual;
+        if visual.crystal {
+            visual.impact_lifetime_ticks = if kind == ProjectileEffectKind::Actor {
+                30
+            } else {
+                26
+            };
+        }
+        self.insert(
+            impact.position,
+            impact.room,
+            impact.radius,
+            visual,
+            kind,
+            impact.velocity,
+        )
+    }
+
+    /// The flash survives a first-tick impact and reuse of the projectile slot.
+    /// Call only after a projectile has successfully entered the combat pool.
+    pub fn spawn_muzzle(&mut self, shot: &ProjectileSpawn) -> bool {
+        let mut visual = shot.visual;
+        visual.impact_lifetime_ticks = 14;
+        self.insert(
+            shot.position,
+            shot.room,
+            shot.radius,
+            visual,
+            ProjectileEffectKind::Muzzle,
+            shot.velocity,
+        )
     }
 
     /// Retain a standalone impact-style effect. World systems such as
@@ -626,11 +725,36 @@ impl<const N: usize> ProjectileImpactEffects<N> {
         radius: u16,
         visual: ProjectileVisualStyle,
     ) -> bool {
+        self.insert(
+            position,
+            room,
+            radius,
+            visual,
+            ProjectileEffectKind::World,
+            [0; 3],
+        )
+    }
+
+    fn insert(
+        &mut self,
+        position: [i32; 3],
+        room: RoomIndex,
+        radius: u16,
+        visual: ProjectileVisualStyle,
+        kind: ProjectileEffectKind,
+        velocity: [i32; 3],
+    ) -> bool {
         let Some(index) = self.active.iter().position(|active| *active == 0) else {
             return false;
         };
         self.active[index] = 1;
+        self.kinds[index] = kind;
         self.positions[index] = position;
+        self.velocities[index] = velocity;
+        self.sequence = self.sequence.wrapping_add(1);
+        self.seeds[index] = self.sequence.wrapping_mul(0x9e3779b9)
+            ^ (position[0] as u32).rotate_left(7)
+            ^ (position[2] as u32).rotate_left(19);
         self.rooms[index] = room;
         self.radii[index] = radius;
         self.ages[index] = 0;
@@ -658,7 +782,10 @@ impl<const N: usize> ProjectileImpactEffects<N> {
             return None;
         }
         Some(ProjectileImpactEffect {
+            kind: self.kinds[index],
             position: self.positions[index],
+            velocity: self.velocities[index],
+            seed: self.seeds[index],
             room: self.rooms[index],
             radius: self.radii[index],
             age_ticks: self.ages[index],
@@ -751,6 +878,7 @@ mod tests {
                 trail_spacing_ticks: 1,
                 impact_lifetime_ticks: 10,
                 break_fragment_count: 0,
+                crystal: false,
             },
         }
     }
@@ -798,6 +926,83 @@ mod tests {
         assert_eq!(effect.visual.impact_rgb, [96, 240, 255]);
         effects.tick();
         assert_eq!(effects.get(0).unwrap().age_ticks, 1);
+    }
+
+    #[test]
+    fn aimed_slow_shots_hit_small_hurtboxes_from_offset_muzzles() {
+        // The actual Graybox miss, plus shallow components that truncate to
+        // zero at speed 10, across both signs and the authored range band.
+        for muzzle in [
+            [20, 87, -333],
+            [-22, 87, -380],
+            [20, 80, -128],
+            [-20, 80, -640],
+            [256, 80, -364],
+            [-256, 80, -404],
+        ] {
+            let aim = [0, 48, -384];
+            let mut shot = spawn(CombatTeam::Enemy);
+            shot.position = muzzle;
+            shot.radius = 1;
+            shot.lifetime_ticks = 90;
+            let player = ProjectileTarget {
+                target: 3,
+                team: CombatTeam::Player,
+                room: shot.room,
+                hurtbox: WorldCombatCapsule {
+                    start: [0, 30, -384],
+                    end: [0, 66, -384],
+                    radius: 11,
+                },
+            };
+            let mut pool = CombatProjectiles::<1>::new();
+            pool.spawn_toward(shot, aim, 10).unwrap();
+            let mut impacts = ProjectileImpacts::<1>::new();
+            let mut hit = false;
+            for _ in 0..90 {
+                hit |= pool
+                    .tick(&[player], &mut ClearWorld, &mut impacts)
+                    .actor_hits
+                    != 0;
+            }
+            assert!(hit, "stationary player missed from {muzzle:?}");
+        }
+    }
+
+    #[test]
+    fn aimed_shot_does_not_home_and_reused_slot_clears_fraction() {
+        let mut shot = spawn(CombatTeam::Enemy);
+        shot.position = [20, 80, 256];
+        shot.radius = 1;
+        shot.lifetime_ticks = 90;
+        let mut pool = CombatProjectiles::<1>::new();
+        pool.spawn_toward(shot, [0, 48, 0], 10).unwrap();
+        let dodged = ProjectileTarget {
+            target: 3,
+            team: CombatTeam::Player,
+            room: shot.room,
+            hurtbox: WorldCombatCapsule {
+                start: [64, 30, 0],
+                end: [64, 66, 0],
+                radius: 11,
+            },
+        };
+        let mut impacts = ProjectileImpacts::<1>::new();
+        for _ in 0..40 {
+            assert_eq!(
+                pool.tick(&[dodged], &mut ClearWorld, &mut impacts)
+                    .actor_hits,
+                0
+            );
+        }
+        // Plain fixed-velocity callers keep their old motion after slot reuse.
+        pool.clear();
+        shot.velocity = [1, 0, 0];
+        pool.spawn(shot).unwrap();
+        for _ in 0..5 {
+            pool.tick(&[], &mut ClearWorld, &mut impacts);
+        }
+        assert_eq!(pool.get(0).unwrap().position, [25, 80, 256]);
     }
 
     #[test]
@@ -887,6 +1092,67 @@ mod tests {
         let stats = pool.tick(&[], &mut ClearWorld, &mut impacts);
         assert_eq!(stats.expired, 1);
         assert!(pool.is_empty());
+    }
+
+    #[test]
+    fn discharge_survives_first_tick_impact_and_projectile_slot_reuse() {
+        let mut pool = CombatProjectiles::<1>::new();
+        let mut effects = ProjectileImpactEffects::<2>::new();
+        let mut shot = spawn(CombatTeam::Player);
+        shot.visual.crystal = true;
+        pool.spawn(shot).unwrap();
+        assert!(effects.spawn_muzzle(&shot));
+        let mut impacts = ProjectileImpacts::<1>::new();
+        pool.tick(
+            &[target(3, CombatTeam::Enemy, 100)],
+            &mut ClearWorld,
+            &mut impacts,
+        );
+        assert!(pool.is_empty());
+        assert!(effects.spawn(&impacts.as_slice()[0]));
+        assert_eq!(effects.get(0).unwrap().kind, ProjectileEffectKind::Muzzle);
+        assert_eq!(effects.get(1).unwrap().kind, ProjectileEffectKind::Actor);
+        pool.spawn(shot).unwrap();
+        assert!(
+            !effects.spawn_muzzle(&shot),
+            "bounded effects never evict a live flash"
+        );
+        for _ in 0..13 {
+            effects.tick();
+        }
+        assert_eq!(effects.get(0).unwrap().position, shot.position);
+        effects.tick();
+        assert!(effects.get(0).is_none());
+        assert!(effects.get(1).is_some());
+        for _ in 14..30 {
+            effects.tick();
+        }
+        assert!(effects.get(1).is_none());
+        effects.spawn_muzzle(&shot);
+        effects.clear();
+        assert!(effects.get(0).is_none());
+    }
+
+    #[test]
+    fn repeated_impacts_vary_but_replay_reset_restores_the_pattern() {
+        let mut effects = ProjectileImpactEffects::<2>::new();
+        let hit = ProjectileImpact {
+            velocity: [2, -3, 7],
+            position: [12, 40, 30],
+            radius: 2,
+            visual: ProjectileVisualStyle { crystal: true, ..ProjectileVisualStyle::EMPTY },
+            ..ProjectileImpact::EMPTY
+        };
+        assert!(effects.spawn(&hit));
+        let first = effects.get(0).unwrap();
+        assert_eq!(first.velocity, hit.velocity);
+        assert!(effects.spawn(&hit));
+        assert_ne!(first.seed, effects.get(1).unwrap().seed);
+        effects.tick();
+        assert_eq!(first.seed, effects.get(0).unwrap().seed);
+        effects.clear();
+        effects.spawn(&hit);
+        assert_eq!(first.seed, effects.get(0).unwrap().seed);
     }
 
     #[test]

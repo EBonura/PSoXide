@@ -1516,6 +1516,26 @@ impl Playtest {
         // Charge flares are sampled from the same retained pose token as the
         // eventual release, so the animated muzzle and presentation cannot
         // drift apart even when NPC simulation runs below source clip rate.
+        if self.ranged_ready.aiming() && self.anim_state == PlayerAnim::RangedAttack
+            && self.ranged_ready.released == 0
+        {
+            if let (Some(character), Some(pose)) = (self.character, self.player_actor_pose) {
+                let first = character.combat_capsule_first.to_usize();
+                let capsules = COMBAT_CAPSULES.get(first..first + usize::from(character.combat_capsule_count))
+                    .unwrap_or(&[]);
+                if let Some(mut charge) = psx_game_runtime::combat::authored_projectile_charge(
+                    capsules, CharacterAnimationAction::RangedAttack, Some(pose.pose())) {
+                    charge.visual.core_rgb = [224, 255, 248];
+                    charge.visual.glow_rgb = [64, 208, 168];
+                    let range = self.effect_depth_range(self.room_index);
+                    let clearance = -current_actor_surface_options(self.room_index, self.bsp.is_some()).depth_bias
+                        + i32::from(charge.radius.max(2));
+                    submitted += draw_projectile_charge(charge, camera, None,
+                        DepthRange::new(range.near() + clearance, range.far() + clearance),
+                        particle_material, ot, primitive_packets);
+                }
+            }
+        }
         let mut attack_index = 0usize;
         while attack_index < self.deferred_enemy_attacks.len() {
             let Some(attack) = self.deferred_enemy_attacks.get(attack_index) else {
@@ -1537,7 +1557,7 @@ impl Playtest {
                 .copied()
                 .flatten()
                 .map(|snapshot| snapshot.pose());
-            let Some(charge) = psx_game_runtime::combat::authored_projectile_charge(
+            let Some(mut charge) = psx_game_runtime::combat::authored_projectile_charge(
                 capsules,
                 attack.action(),
                 pose,
@@ -1565,7 +1585,11 @@ impl Playtest {
                 }
                 camera_for_room(camera, active)
             };
-            let depth_range = self.effect_depth_range(attack.room());
+            charge.visual = crate::game_logic_runtime::enemy_projectile_visual(charge.visual);
+            let range = self.effect_depth_range(attack.room());
+            let clearance = -current_actor_surface_options(attack.room(), self.bsp.is_some()).depth_bias
+                + i32::from(charge.radius.max(2));
+            let depth_range = DepthRange::new(range.near() + clearance, range.far() + clearance);
             submitted += draw_projectile_charge(
                 charge,
                 room_camera,
@@ -1653,7 +1677,15 @@ impl Playtest {
                     self.effect_depth_range(impact.room),
                 )
             };
-            submitted += draw_projectile_impact(
+            // Use the same half-sector clearance as actor meshes. A hit on a
+            // large floor/wall polygon also needs this allowance for its centre
+            // sort key. Effects still sort in world depth, never the HUD band.
+            let depth_range = if impact.visual.crystal {
+                let clearance = -current_actor_surface_options(impact.room, self.bsp.is_some()).depth_bias
+                    + i32::from(impact.radius.max(2));
+                DepthRange::new(depth_range.near() + clearance, depth_range.far() + clearance)
+            } else { depth_range };
+            let effect_submitted = draw_projectile_impact(
                 impact,
                 room_camera,
                 None,
@@ -1662,6 +1694,7 @@ impl Playtest {
                 ot,
                 primitive_packets,
             );
+            submitted += effect_submitted;
             impact_index += 1;
         }
         submitted

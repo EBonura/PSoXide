@@ -1004,3 +1004,11 @@ pub(super) fn debug_log_aim_camera(values: [i32; 14]) {
     for value in values { line.push_i32(value); line.push_byte(b','); }
     line.emit();
 }
+
+/// Muzzle, velocity, body target and retained player hurtbox for replay calibration.
+#[cfg(feature = "emulator-telemetry")]
+pub(super) fn debug_log_enemy_shot(values: [i32; 17]) {
+    let mut line = DebugLogLine::new("enemy-shot,");
+    for value in values { line.push_i32(value); line.push_byte(b','); }
+    line.emit();
+}

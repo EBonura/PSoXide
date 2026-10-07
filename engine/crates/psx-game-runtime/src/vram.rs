@@ -1133,7 +1133,9 @@ impl<
         }
 
         let mut clut = [0u8; 32];
-        let white = 0x7FFFu16.to_le_bytes();
+        // Textured PS1 semi-transparency requires STP on the texel as well
+        // as the primitive. Keep index zero transparent.
+        let white = 0xFFFFu16.to_le_bytes();
         clut[2] = white[0];
         clut[3] = white[1];
 

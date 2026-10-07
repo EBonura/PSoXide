@@ -32,6 +32,19 @@ use psx_game_runtime::projectiles::{
 
 const PLAYER_PROJECTILE_TARGET: u16 = u16::MAX - 1;
 
+/// Cold blue charge/bolt to distinguish enemy fire from Aletha's jade cannon.
+pub(super) fn enemy_projectile_visual(mut visual: ProjectileVisualStyle) -> ProjectileVisualStyle {
+    visual.crystal = true;
+    visual.core_rgb = [224, 244, 255];
+    visual.glow_rgb = [80, 144, 255];
+    visual.impact_rgb = [152, 208, 255];
+    visual.glow_scale_q8 = 512;
+    visual.length_ticks = 3;
+    visual.trail_segments = 4;
+    visual
+}
+
+
 fn weapon_swing_sfx(action: psx_level::CharacterAnimationAction) -> Option<LevelGameplaySfxEvent> {
     use psx_level::CharacterAnimationAction as Action;
     match action {
@@ -581,10 +594,27 @@ impl Playtest {
                         owner: attack.entity().min(u16::MAX as usize) as u16,
                         tint_rgb: release.tint_rgb,
                         damage_channel: release.damage_channel,
-                        visual: release.visual,
+                        visual: enemy_projectile_visual(release.visual),
                     };
-                    if self.combat_projectiles.spawn(spawn).is_ok() {
+                    let Some(target) = self.game_entities.ranged_target(attack.entity()) else { break; };
+                    if self.combat_projectiles.spawn_toward(spawn, target, release.speed).is_ok() {
+                        let _ = self.combat_projectile_impacts.spawn_muzzle(&spawn);
                         telemetry::debug_log("enemy projectile:release");
+                        #[cfg(feature = "emulator-telemetry")]
+                        {
+                            let hurt = player_capsules.iter()
+                                .find(|c| c.flags & psx_level::combat_capsule_flags::HURTBOX != 0)
+                                .and_then(|c| player_pose.and_then(|pose| combat::transform_actor_combat_capsule(c, pose)));
+                            if let Some(hurt) = hurt {
+                                crate::debug_runtime::debug_log_enemy_shot([
+                                    release.position[0], release.position[1], release.position[2],
+                                    velocity[0], velocity[1], velocity[2],
+                                    player_position[0], player_position[1], player_position[2], player_height,
+                                    hurt.start[0], hurt.start[1], hurt.start[2],
+                                    hurt.end[0], hurt.end[1], hurt.end[2], i32::from(hurt.radius),
+                                ]);
+                            }
+                        }
                         self.queue_gameplay_sfx(LevelGameplaySfxEvent::ProjectileLaunch);
                         let _ = self
                             .game_entities
@@ -778,6 +808,7 @@ impl Playtest {
                     target: PLAYER_PROJECTILE_TARGET,
                 })
             {
+                telemetry::debug_log("enemy projectile:player-hit");
                 hits = hits.saturating_add(1);
                 poise_total = poise_total.saturating_add(impact.poise_damage);
                 match impact.damage_channel {
@@ -1368,6 +1399,7 @@ impl Playtest {
                 trail_segments: 0,
                 trail_spacing_ticks: 1,
                 impact_lifetime_ticks: 32,
+                crystal: false,
                 // The brush runtime now fractures the actual textured face.
                 // Keep this burst for the emissive impact flare, without the
                 // old screen-space diamonds that pretended to be debris.

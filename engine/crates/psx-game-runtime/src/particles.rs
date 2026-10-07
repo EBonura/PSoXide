@@ -16,13 +16,17 @@ use psx_gpu::{
 use psx_level::{particle_emitter_flags, room_flags, LevelRoomRecord, ParticleEmitterRecord};
 use psx_math::int32::clamp_i16;
 
+mod crystal;
+mod fracture;
+use crystal::draw_crystal_discharge;
+
 /// Particle decals use the U=0 half of the shared shadow/particle 4bpp page;
 /// the placement and generated-texture sizing are the crate vram module's
 /// contract.
 use crate::vram::{PARTICLE_TEXEL_U, PARTICLE_TEXTURE_SIZE};
 use crate::{
     combat::AuthoredProjectileCharge,
-    projectiles::{ProjectileImpactEffect, ProjectileSnapshot},
+    projectiles::{ProjectileEffectKind, ProjectileImpactEffect, ProjectileSnapshot},
 };
 const PARTICLE_TEXEL_V: u8 = 0;
 const PARTICLE_UV_MAX: u8 = PARTICLE_TEXEL_U + PARTICLE_TEXTURE_SIZE as u8 - 1;
@@ -318,10 +322,20 @@ pub fn draw_projectile_bolt<const OT_DEPTH: usize>(
             i32::from(PARTICLE_MIN_SCREEN_SIZE),
             i32::from(PARTICLE_MAX_SCREEN_SIZE),
         ) as i16;
+    // Presentation width is independent of the swept collision radius.
+    let half = if projectile.visual.crystal {
+        (half + half / 2).max(3)
+    } else {
+        half
+    };
     let tail_position = projectile_offset(
         projectile.position,
         projectile.velocity,
-        -i32::from(projectile.visual.length_ticks.max(1)),
+        -i32::from(if projectile.visual.crystal {
+            u16::from(projectile.visual.length_ticks.max(1)).min(projectile.age_ticks.max(1))
+        } else {
+            u16::from(projectile.visual.length_ticks.max(1))
+        }),
     );
     let Some(tail) = project(tail_position) else {
         return 0;
@@ -356,12 +370,20 @@ pub fn draw_projectile_bolt<const OT_DEPTH: usize>(
     while trail < trail_count {
         let distance = i32::from(trail.saturating_add(1))
             .saturating_mul(i32::from(projectile.visual.trail_spacing_ticks.max(1)));
+        if projectile.visual.crystal && distance >= i32::from(projectile.age_ticks) {
+            break;
+        }
         let trail_head_position =
             projectile_offset(projectile.position, projectile.velocity, -distance);
         let trail_tail_position = projectile_offset(
             trail_head_position,
             projectile.velocity,
-            -i32::from(projectile.visual.length_ticks.max(1)),
+            -if projectile.visual.crystal {
+                i32::from(projectile.visual.length_ticks.max(1))
+                    .min(i32::from(projectile.age_ticks) - distance)
+            } else {
+                i32::from(projectile.visual.length_ticks.max(1))
+            },
         );
         if let (Some(trail_head), Some(trail_tail)) =
             (project(trail_head_position), project(trail_tail_position))
@@ -385,7 +407,20 @@ pub fn draw_projectile_bolt<const OT_DEPTH: usize>(
         }
         trail += 1;
     }
-    if projectile.age_ticks <= 2 {
+    if projectile.visual.crystal {
+        // A bolt travelling toward/away from the camera has a zero-length
+        // screen segment. Its bright head must still remain visible.
+        submitted += draw_particle_diamond(
+            head,
+            half.max(2),
+            particle_material
+                .with_tint(rgb_tuple(projectile.visual.core_rgb))
+                .with_blend_mode(BlendMode::Add),
+            slot,
+            ot,
+            primitive_packets,
+        );
+    } else if projectile.age_ticks <= 2 {
         if let Some(origin) = project(projectile.origin) {
             let flash_half = glow_half.saturating_add(projectile.age_ticks as i16 * 2);
             submitted += draw_particle_diamond(
@@ -425,7 +460,13 @@ pub fn draw_projectile_charge<const OT_DEPTH: usize>(
     };
     let base = ((i32::from(charge.radius) * camera.projection.focal_length) / center.sz.max(1))
         .clamp(2, i32::from(PARTICLE_MAX_SCREEN_SIZE)) as i16;
-    let pulse = ((u32::from(charge.progress_q8) * 5) >> 8) as i16;
+    let base = if charge.visual.crystal {
+        base.max(4)
+    } else {
+        base
+    };
+    let pulse =
+        ((u32::from(charge.progress_q8) * if charge.visual.crystal { 9 } else { 5 }) >> 8) as i16;
     let material = particle_material
         .with_tint(rgb_tuple(charge.visual.glow_rgb))
         .with_blend_mode(BlendMode::Add);
@@ -469,6 +510,26 @@ pub fn draw_projectile_impact<const OT_DEPTH: usize>(
     let Some(center) = center else {
         return 0;
     };
+    if impact.visual.crystal && impact.kind != ProjectileEffectKind::Muzzle {
+        let from = projectile_offset(impact.position, impact.velocity, -4);
+        let from = WorldVertex::new(from[0], from[1], from[2]);
+        let tail = if let Some(projector) = projector {
+            projector.project_world(from)
+        } else { camera.project_world(from) };
+        return fracture::draw_fracture(impact, center, tail, camera.projection.focal_length,
+            depth_range, particle_material, ot, primitive_packets);
+    }
+    if impact.visual.crystal {
+        return draw_crystal_discharge(
+            impact,
+            center,
+            camera.projection.focal_length,
+            depth_range,
+            particle_material,
+            ot,
+            primitive_packets,
+        );
+    }
     let lifetime = impact.visual.impact_lifetime_ticks.max(1);
     let age = impact.age_ticks.min(lifetime);
     let base = ((i32::from(impact.radius) * camera.projection.focal_length) / center.sz.max(1))
@@ -592,11 +653,12 @@ fn rgb_tuple(rgb: [u8; 3]) -> (u8, u8, u8) {
 }
 
 fn scale_rgb(rgb: [u8; 3], numerator: u16, denominator: u16) -> [u8; 3] {
-    let denominator = denominator.max(1);
+    let denominator = u32::from(denominator.max(1));
+    let numerator = u32::from(numerator);
     [
-        ((u16::from(rgb[0]) * numerator) / denominator).min(255) as u8,
-        ((u16::from(rgb[1]) * numerator) / denominator).min(255) as u8,
-        ((u16::from(rgb[2]) * numerator) / denominator).min(255) as u8,
+        ((u32::from(rgb[0]) * numerator) / denominator).min(255) as u8,
+        ((u32::from(rgb[1]) * numerator) / denominator).min(255) as u8,
+        ((u32::from(rgb[2]) * numerator) / denominator).min(255) as u8,
     ]
 }
 
@@ -614,8 +676,7 @@ fn draw_projectile_segment<const OT_DEPTH: usize>(
     let length =
         psx_math::int32::isqrt_i32(dx.saturating_mul(dx).saturating_add(dy.saturating_mul(dy)))
             .max(1);
-    let nx = (-dy).saturating_mul(i32::from(half)) / length;
-    let ny = dx.saturating_mul(i32::from(half)) / length;
+    let (nx, ny) = segment_normal(dx, dy, i32::from(half), length);
     draw_particle_oriented_quad(
         [
             (
@@ -948,4 +1009,38 @@ fn atmosphere_seed(index: u32) -> u32 {
     x ^= x >> 16;
     x = x.wrapping_mul(0x85eb_ca6b);
     x ^ (x >> 13)
+}
+
+// Round instead of truncating: a one-pixel diagonal otherwise becomes (0, 0)
+// and emits a zero-area quad, erasing most of the crystal ring and sparks.
+fn segment_normal(dx: i32, dy: i32, half: i32, length: i32) -> (i32, i32) {
+    let round = |component: i32| {
+        let value = component.saturating_mul(half);
+        value.saturating_add(value.signum() * (length / 2)) / length.max(1)
+    };
+    (round(-dy), round(dx))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn thin_diagonal_particles_keep_a_nonzero_width() {
+        for (dx, dy) in [(6, 6), (-6, 6), (6, -6), (-6, -6), (8, 0), (0, 8)] {
+            let normal = segment_normal(dx, dy, 1, 8);
+            assert_ne!(normal, (0, 0));
+            assert_eq!(normal.0 * dx + normal.1 * dy, 0);
+        }
+    }
+
+    #[test]
+    fn quadratic_fade_does_not_overflow_eight_bit_color_product() {
+        assert_eq!(
+            scale_rgb([255, 208, 144], 22 * 22, 22 * 22),
+            [255, 208, 144]
+        );
+        assert_eq!(scale_rgb([255, 208, 144], 11 * 11, 22 * 22), [63, 52, 36]);
+        assert_eq!(scale_rgb([255; 3], 0, 22 * 22), [0; 3]);
+    }
 }
