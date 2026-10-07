@@ -546,7 +546,9 @@ impl Playtest {
         )
     }
 
+    // Startup-only code: reserve RAM for gameplay allocations without shrinking hot render loops.
     #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     pub(super) fn load_runtime_models(&mut self) {
         #[cfg(not(feature = "cd-stream-bench"))]
         mr::load_runtime_models(
@@ -580,6 +582,9 @@ impl Playtest {
     /// Decode model source blobs from the shared loading scratch, retaining
     /// only compact geometry pools and VRAM atlas slots for gameplay.
     #[cfg(feature = "cd-stream-bench")]
+    // Startup-only code: reserve RAM for gameplay allocations without shrinking hot render loops.
+    #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     fn load_streamed_runtime_models(&mut self) {
         mr::reset_runtime_model_tables(
             &mut self.models,
@@ -845,6 +850,25 @@ impl Playtest {
             None => None,
         };
 
+        // Keep Aletha's authored legs running while the cannon plays its own
+        // upper-body shot. This retained pose also owns muzzle/hurtbox sampling.
+        if self.ranged_ready.firing(ctx.sim_tick.as_u32()) && self.anim_state != PlayerAnim::RangedAttack {
+            if let (Some(c),Some(pose))=(self.character,self.player_actor_pose) {
+                if pose.pose().animation().joint_count()==26 {
+                    if let Some(fire)=c.action_clip(CharacterAnimationAction::RangedAttack).to_option()
+                        .and_then(|clip|pose.model().clip(&self.clips,clip)) {
+                        let phase=mr::animation_phase_at_tick_q12(fire,
+                            ctx.sim_tick.as_u32().saturating_sub(self.ranged_ready.fire_started),ctx.video_hz,false,
+                            self.player_action_speed_q8(&c,PlayerAnim::RangedAttack),
+                            c.action_frame_range(CharacterAnimationAction::RangedAttack));
+                        self.player_actor_pose=Some(pose.with_pose(pose.pose().with_joint_layer(fire,phase,0x03ffff80)));
+                    }
+                }
+            }
+        }
+
+        self.player_actor_pose = self.player_actor_pose.map(|pose| self.arch_player_pose(pose, ctx.sim_tick));
+
         // Where rendering samples the phase is where it is worth measuring:
         // this is the number that says which cooked frame is on screen.
         if let Some(pose) = self.player_actor_pose {
@@ -931,6 +955,19 @@ impl Playtest {
                 elapsed_tick,
                 ctx.video_hz,
             );
+            if let Some(pose)=self.instance_actor_poses[index] {
+                if pose.pose().animation().joint_count()==22 {
+                    if let Some((entity,r))=GAME_ENTITIES.iter().enumerate().find(|(_,r)|usize::from(r.model_instance)==index) {
+                        if let Some((clip,ticks))=self.game_entities.firing_gait(r,entity) {
+                            if let Some(gait)=pose.model().clip(&self.clips,psx_level::ModelClipIndex(clip)) {
+                                let phase=mr::animation_phase_at_tick_q12(gait,u32::from(ticks),ctx.video_hz,true,256,
+                                    psx_level::CharacterActionFrameRange::FULL);
+                                self.instance_actor_poses[index]=Some(pose.with_pose(pose.pose().with_joint_layer(gait,phase,0x003fc000)));
+                            }
+                        }
+                    }
+                }
+            }
             self.enemy_swing_sound(index, previous, self.instance_actor_poses[index]);
             index += 1;
         }

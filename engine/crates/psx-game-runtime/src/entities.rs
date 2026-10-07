@@ -35,6 +35,7 @@
 //! [`commit_body_step`]: psx_engine::character_motor::commit_body_step
 
 mod tactics;
+mod flow;
 pub use tactics::{EnemyGoal, EnemyGoalResult, EnemyTacticalSnapshot};
 
 use crate::combat::{arc_hits_circle, MeleeArc};
@@ -174,7 +175,7 @@ pub const GAME_ENTITY_OPPOSED_DAMAGE_Q12: u16 = 6144;
 /// leaves this arc and the attack whiffs -- the souls punish loop.
 pub const GAME_ENTITY_ATTACK_HALF_ANGLE: u16 = 683;
 
-/// A readable half-second interruption; stun clips play at triple speed.
+/// Legacy interruption duration for records without authored stun timing.
 pub const GAME_ENTITY_STAGGER_TICKS: u16 = 32;
 
 /// De-aggro leash: the player escaping `aggro_radius` times this
@@ -306,6 +307,9 @@ pub struct GameEntityTickInput<'a> {
     /// live, so i-framing only the first half of a window still eats
     /// the tail (souls timing rules).
     pub player_invulnerable: bool,
+    /// Visible target's stance and vitality, for shared dual-stance decisions.
+    /// None retains distance-only policy for legacy callers and fixtures.
+    pub player_combat: Option<(VitalityChannelId, [u16; 2])>,
     /// Rooms currently in the active window (the portal-expanded
     /// set). Entities in other rooms and with no engaged behavior do
     /// not think this tick.
@@ -579,6 +583,14 @@ pub struct GameEntities<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: b
     health_secondary: [u16; MAX_ENTITIES],
     /// Accumulated poise damage (staggers past the record's pool).
     poise: [crate::poise::Poise; MAX_ENTITIES],
+    player_attack_read: u8,
+    projectile_threats: [Option<crate::projectiles::ProjectileThreat>; MAX_ENTITIES],
+    exchanges: [crate::ranged_tactics::RangedExchange; MAX_ENTITIES],
+    flow_enabled: bool,
+    flow: [crate::combat_flow::CombatFlow; MAX_ENTITIES],
+    recoil: [[i16; 3]; MAX_ENTITIES],
+    /// One-shot eye pulse age plus one; zero means no pulse (including spawn).
+    stance_pulse: [u8; MAX_ENTITIES],
     /// Same cooked cooldown as the player, with independent per-enemy clocks.
     stance_swap_delay: u16,
     stance_swap_cooldown: [u16; MAX_ENTITIES],
@@ -715,11 +727,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
         // edge too, or a hybrid can sit just outside melee forever.
         let melee_entry = i32::from(record.preferred_distance.max(record.attack_min_range))
             .saturating_add(i32::from(record.spacing_tolerance));
-        let limit = if was_melee {
-            melee_entry.saturating_add(i32::from(record.spacing_tolerance))
-        } else {
-            melee_entry
-        };
+        let limit = crate::combat_policy::melee_limit(melee_entry, i32::from(record.spacing_tolerance), was_melee);
         let melee = self.player_within(index, input, limit);
         if !STANCE_BOUND_ATTACKS {
             if melee {
@@ -782,6 +790,13 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
         health: [0; MAX_ENTITIES],
         health_secondary: [0; MAX_ENTITIES],
         poise: [crate::poise::Poise::EMPTY; MAX_ENTITIES],
+        player_attack_read: 0,
+        projectile_threats: [None; MAX_ENTITIES],
+        exchanges: [crate::ranged_tactics::RangedExchange::EMPTY; MAX_ENTITIES],
+        flow_enabled: false,
+        flow: [crate::combat_flow::CombatFlow::FULL; MAX_ENTITIES],
+        recoil: [[0; 3]; MAX_ENTITIES],
+        stance_pulse: [0; MAX_ENTITIES],
         stance_swap_delay: 0,
         stance_swap_cooldown: [0; MAX_ENTITIES],
         ranged_aim_target: [[0; 3]; MAX_ENTITIES],
@@ -826,6 +841,11 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
             self.health[index] = record.max_health;
             self.health_secondary[index] = record.max_health_secondary;
             self.poise[index] = crate::poise::Poise::EMPTY;
+            self.flow[index] = crate::combat_flow::CombatFlow::FULL;
+            self.exchanges[index] = crate::ranged_tactics::RangedExchange::EMPTY;
+            self.projectile_threats[index] = None;
+            self.recoil[index] = [0; 3];
+            self.stance_pulse[index] = 0;
             self.patrol_leg[index] = 0;
             self.move_yaw[index] = 0;
             self.move_yaw_valid[index] = 0;
@@ -895,6 +915,8 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
     }
 
     /// Behavior state of entity `index`.
+    pub fn state_age(&self, index: usize) -> u16 { self.state_ticks.get(index).copied().unwrap_or(0) }
+
     pub fn state(&self, index: usize) -> GameEntityState {
         if index >= self.count() {
             return GameEntityState::Dead;
@@ -1006,6 +1028,14 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
             && self.stance_swap_elapsed(index) < GAME_ENTITY_STANCE_SWAP_DURATION_TICKS
     }
 
+    /// Half-second eye pulse, once per actual stance change. No pulse on spawn.
+    pub fn stance_eye_pulse_q12(&self, index: usize) -> Option<u16> {
+        if index >= self.count() || self.state(index) == GameEntityState::Dead {
+            return None;
+        }
+        self.stance_pulse[index].checked_sub(1).map(|age| u16::from(age) * 4096 / 30)
+    }
+
     /// Apply the current enemy guard to one authored damage value: the
     /// exposed channel takes 1.5x, the guarded one a token 1 to 3 points.
     /// A zero-damage hit stays zero.
@@ -1015,8 +1045,9 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
         attack: VitalityChannelId,
         damage: u16,
     ) -> u16 {
-        if damage == 0 {
-            return 0;
+        if damage == 0 { return 0; }
+        if self.flow_enabled {
+            return (u32::from(damage) * if attack == self.stance(index) { 4 } else { 5 } / 4).min(65535) as u16;
         }
         if attack == self.stance(index) {
             return (damage / GAME_ENTITY_GUARDED_DAMAGE_DIVISOR).clamp(
@@ -1040,6 +1071,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
         damage: u16,
         poise_damage: u16,
     ) -> u16 {
+        if self.flow_enabled { return poise_damage; }
         if damage == 0 || attack != self.stance(index) {
             return poise_damage;
         }
@@ -1058,6 +1090,10 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
     }
 
     fn advance_stance_swap(&mut self, index: usize, delta_ticks: u16) {
+        if self.stance_pulse[index] != 0 {
+            let next = u16::from(self.stance_pulse[index]).saturating_add(delta_ticks);
+            self.stance_pulse[index] = if next > 30 { 0 } else { next as u8 };
+        }
         let elapsed = self
             .stance_swap_elapsed(index)
             .saturating_add(delta_ticks.min(u16::from(u8::MAX)) as u8);
@@ -1070,6 +1106,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
         }
         self.combat_flags[index] ^= GAME_ENTITY_STANCE_ZENITH;
         self.set_stance_swap_elapsed(index, 0);
+        self.stance_pulse[index] = 1;
         self.stance_swap_cooldown[index] = self.stance_swap_delay;
     }
 
@@ -1280,7 +1317,12 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
                     .saturating_add(ticks),
             ),
             GameEntityState::Staggered => GameEntityClip {
-                speed_q8: 768,
+                speed_q8: if record.stagger_speed_q8 == 0 {
+                    768
+                } else {
+                    record.stagger_speed_q8
+                },
+                frame_range: record.stagger_frame_range,
                 ..one_shot(record.stagger_clip, ticks)
             },
             GameEntityState::Dead => one_shot(record.death_clip, ticks),
@@ -1363,8 +1405,11 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
         }
         let armored = self.state(index) == GameEntityState::Attack
             && self.selected_attack_kind(index) == GAME_ENTITY_ATTACK_HEAVY;
-        let staggered = self.poise[index].hit(poise_damage, records[index].poise, armored);
+        let protected = self.flow_enabled && (!self.flow[index].can_interrupt()
+            || self.state(index) == GameEntityState::Staggered);
+        let staggered = !protected && self.poise[index].hit(poise_damage, records[index].poise, armored);
         if staggered {
+            if self.flow_enabled { self.flow[index].broke(); }
             self.release_attack_owner(index, u16::from(records[index].group_attack_delay_ticks));
             self.enter_state(
                 index,
@@ -1538,6 +1583,9 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
             self.stance_swap_cooldown[index] =
                 self.stance_swap_cooldown[index].saturating_sub(delta_ticks);
             self.poise[index].tick(delta_ticks);
+            self.flow[index].tick(delta_ticks, state == GameEntityState::Staggered);
+            self.exchanges[index].tick(delta_ticks);
+            if self.flow_enabled { self.step_recoil(record, index, mover, delta_ticks); }
             let behavior_awake = !matches!(state, GameEntityState::Idle | GameEntityState::Patrol);
             let spatially_active = index < 64 && self.spatial_active_mask & (1u64 << index) != 0;
             let activation_allows = if self.spatial_activation_enabled {
@@ -1571,6 +1619,8 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
                     self.tick_aggro(record, index, input, mover, delta_ticks, &mut stats)
                 }
                 GameEntityState::Windup => {
+                    self.step_firing(record,index,input,mover,delta_ticks);
+                    self.step_melee_tell(record,index,input,mover,delta_ticks);
                     if self.selected_attack_is_ranged(index) {
                         self.track_ranged_tell(record, index, input, delta_ticks);
                     }
@@ -1579,6 +1629,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
                     }
                 }
                 GameEntityState::Attack => {
+                    self.step_firing(record,index,input,mover,delta_ticks);
                     stats.attacking += 1;
                     match deferred.as_deref_mut() {
                         Some(attacks) => attacks.push(self.deferred_attack(record, index)),
@@ -1589,6 +1640,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
                     }
                 }
                 GameEntityState::Recover => {
+                    self.step_firing(record,index,input,mover,delta_ticks);
                     if self.state_ticks[index] >= u16::from(record.recovery_ticks) {
                         self.attack_cooldown[index] = u16::from(record.attack_cooldown_ticks);
                         self.release_attack_owner(
@@ -1605,7 +1657,13 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
                     }
                 }
                 GameEntityState::Staggered => {
-                    if self.state_ticks[index] >= GAME_ENTITY_STAGGER_TICKS {
+                    if self.state_ticks[index]
+                        >= if record.stagger_ticks == 0 {
+                            GAME_ENTITY_STAGGER_TICKS
+                        } else {
+                            record.stagger_ticks
+                        }
+                    {
                         self.enter_state(index, GameEntityState::Aggro, &mut stats);
                         // The authored reaction is for first acquisition, not
                         // an extra pause after the player already won a stagger.
@@ -1825,6 +1883,11 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
             let state = self.state(index);
             let ready = state == GameEntityState::Aggro
                 && record.room == input.player_room
+                // A dry cannon must not monopolize the shared attack slot
+                // while another enemy has a legal attack available.
+                && (!self.flow_enabled || !STANCE_BOUND_ATTACKS
+                    || self.stance(index) == VitalityChannelId::One
+                    || self.can_fire_energy(index))
                 && self.tactical_attack_ready(record, index)
                 && self.attack_cooldown[index] == 0
                 && self.state_ticks[index] >= u16::from(record.reaction_ticks)
@@ -2766,6 +2829,9 @@ mod tests {
             ranged_attack_speed_q8: CHARACTER_ACTION_SPEED_UNSCALED_Q8,
             ranged_attack_frame_range: CharacterActionFrameRange::FULL,
             stagger_clip: 4,
+            stagger_speed_q8: 0,
+            stagger_frame_range: CharacterActionFrameRange::FULL,
+            stagger_ticks: 0,
             death_clip: 5,
             combat_capsule_first: psx_level::CombatCapsuleIndex(0),
             combat_capsule_count: 0,
@@ -2885,6 +2951,7 @@ mod tests {
             player_height: 1024,
             player_noise_radius: 0,
             player_invulnerable: false,
+            player_combat: None,
             active_rooms,
         }
     }
@@ -2897,6 +2964,7 @@ mod tests {
             player_height: 1024,
             player_noise_radius: 0,
             player_invulnerable: false,
+            player_combat: None,
             active_rooms,
         }
     }
@@ -3002,6 +3070,32 @@ mod tests {
             self.calls += 1;
             position
         }
+    }
+
+    #[test]
+    fn prototype_both_colours_damage_and_share_poise() {
+        let mut e=GameEntities::<8>::EMPTY;
+        e.spawn_from_records(&DUAL_ENEMY);e.enable_combat_flow(true);
+        assert_eq!(e.scaled_stance_damage(0,VitalityChannelId::One,40),40);
+        assert_eq!(e.scaled_stance_damage(0,VitalityChannelId::Two,40),50);
+        let capacity=DUAL_ENEMY[0].poise;
+        assert!(!e.apply_stance_hit(&DUAL_ENEMY,0,VitalityChannelId::One,1,capacity/2).staggered);
+        assert!(e.apply_stance_hit(&DUAL_ENEMY,0,VitalityChannelId::Two,1,capacity-capacity/2).staggered);
+        let ticks=e.state_ticks[0];
+        assert!(!e.apply_stance_hit(&DUAL_ENEMY,0,VitalityChannelId::One,1,capacity*2).staggered);
+        assert_eq!(e.state_ticks[0],ticks);
+    }
+    #[test]
+    fn prototype_shot_interrupts_late_tell_and_cancels_retained_attack() {
+        let mut e=GameEntities::<8>::EMPTY;e.spawn_from_records(&DUAL_ENEMY);e.enable_combat_flow(true);
+        e.enter_state(0,GameEntityState::Windup,&mut GameEntityTickStats::default());
+        e.state_ticks[0]=0;assert!(!e.shot_opening(&DUAL_ENEMY,0));
+        e.state_ticks[0]=u16::from(DUAL_ENEMY[0].windup_ticks)/2;
+        assert!(e.shot_opening(&DUAL_ENEMY,0));
+        assert!(e.apply_projectile_hit(&DUAL_ENEMY,0,VitalityChannelId::Two,1,10).staggered);
+        assert!(!e.apply_projectile_hit(&DUAL_ENEMY,0,VitalityChannelId::Two,1,10).staggered);
+        for _ in 0..5 {e.spend_shot_energy(0);}
+        assert!(!e.can_fire_energy(0));e.gain_melee_energy(0,true);assert!(e.can_fire_energy(0));
     }
 
     #[test]
@@ -3511,6 +3605,7 @@ mod tests {
             player_height: 1024,
             player_noise_radius: 0,
             player_invulnerable: false,
+            player_combat: None,
             active_rooms: &ACTIVE,
         };
         let mut entities = GameEntities::<8>::EMPTY;
@@ -3832,6 +3927,7 @@ mod tests {
             player_height: 1024,
             player_noise_radius: 0,
             player_invulnerable: false,
+            player_combat: None,
             active_rooms: &ACTIVE,
         };
         // Move the player into the 512 aggro radius first.
@@ -3863,6 +3959,7 @@ mod tests {
             player_height: 1024,
             player_noise_radius: 0,
             player_invulnerable: false,
+            player_combat: None,
             active_rooms: &ACTIVE,
         };
         entities.tick(
@@ -3990,6 +4087,7 @@ mod tests {
             player_height: 1024,
             player_noise_radius: 0,
             player_invulnerable: false,
+            player_combat: None,
             active_rooms: rooms,
         };
         // Room 7 not active: gated, no thinking.
@@ -4018,6 +4116,7 @@ mod tests {
             player_height: 1024,
             player_noise_radius: 0,
             player_invulnerable: false,
+            player_combat: None,
             active_rooms: &ROOM_7,
         };
         let mut entities = GameEntities::<8>::EMPTY;
@@ -4055,6 +4154,7 @@ mod tests {
             player_height: 1024,
             player_noise_radius: 0,
             player_invulnerable: false,
+            player_combat: None,
             active_rooms: &ACTIVE,
         };
         entities.tick(&IDLE_ENEMY, aliased, &mut NoClipMover);
@@ -4264,6 +4364,29 @@ mod tests {
             (ranged.clip, ranged.speed_q8, ranged.frame_range),
             (12, 640, CharacterActionFrameRange::FULL)
         );
+    }
+
+    #[test]
+    fn authored_stagger_plays_at_its_speed_until_recovery_finishes() {
+        static SLOW_STUN: [LevelGameEntityRecord; 1] = [LevelGameEntityRecord {
+            stagger_speed_q8: 256,
+            stagger_frame_range: CharacterActionFrameRange { start: 0, end: 42 },
+            stagger_ticks: 85,
+            ..test_record(1000, 1000, 0, 512, game_entity_flags::ENABLED)
+        }];
+        let mut entities = GameEntities::<8>::EMPTY;
+        entities.spawn_from_records(&SLOW_STUN);
+        entities.apply_hit(&SLOW_STUN, 0, VitalityChannelId::One, 10, 60);
+        let clip = entities.clip_for_state(&SLOW_STUN, 0);
+        assert_eq!(clip.speed_q8, 256);
+        assert_eq!(clip.frame_range, SLOW_STUN[0].stagger_frame_range);
+        for _ in 0..84 {
+            entities.tick(&SLOW_STUN, far_input(&ACTIVE), &mut NoClipMover);
+            assert_eq!(entities.state(0), GameEntityState::Staggered);
+        }
+        assert_eq!(entities.clip_for_state(&SLOW_STUN, 0).phase_ticks, 84);
+        entities.tick(&SLOW_STUN, far_input(&ACTIVE), &mut NoClipMover);
+        assert_eq!(entities.state(0), GameEntityState::Aggro);
     }
 
     #[test]
@@ -4586,6 +4709,33 @@ mod tests {
         assert!(!entities.stance_swap_in_progress(0));
     }
 
+    #[test]
+    fn eye_pulse_is_one_shot_and_outlives_the_palette_swap() {
+        let mut e = GameEntities::<8>::EMPTY;
+        e.spawn_from_records(&DUAL_ENEMY);
+        assert_eq!(e.stance_eye_pulse_q12(0), None);
+        assert_eq!(e.stance_eye_pulse_q12(99), None);
+        e.set_stance_swap_delay(60);
+        e.mutate_stance(0);
+        assert_eq!(e.stance_eye_pulse_q12(0), Some(0));
+        e.advance_stance_swap(0, 12);
+        assert!(!e.stance_swap_in_progress(0));
+        assert!(e.stance_eye_pulse_q12(0).is_some());
+        let before = e.stance_eye_pulse_q12(0);
+        e.mutate_stance(0); // Cooldown rejection must not flash again.
+        assert_eq!(e.stance_eye_pulse_q12(0), before);
+        e.advance_stance_swap(0, 18);
+        assert_eq!(e.stance_eye_pulse_q12(0), None);
+        e.stance_swap_cooldown[0] = 0;
+        e.mutate_stance(0);
+        assert_eq!(e.stance(0), VitalityChannelId::One);
+        assert_eq!(e.stance_eye_pulse_q12(0), Some(0));
+        e.enter_state(0, GameEntityState::Dead, &mut GameEntityTickStats::default());
+        assert_eq!(e.stance_eye_pulse_q12(0), None);
+        e.spawn_from_records(&DUAL_ENEMY);
+        assert_eq!(e.stance_eye_pulse_q12(0), None);
+    }
+
     /// A hit inside the named channel's pool never touches the other one.
     /// This is the whole reason the channel is threaded down from the swing.
     #[test]
@@ -4804,6 +4954,7 @@ mod tests {
         advance_into_attack(&mut entities, near_input(&ACTIVE));
         let rolling = GameEntityTickInput {
             player_invulnerable: true,
+            player_combat: None,
             ..near_input(&ACTIVE)
         };
         let mut damage = 0u16;

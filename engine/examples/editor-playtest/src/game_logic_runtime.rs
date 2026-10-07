@@ -512,7 +512,7 @@ impl Playtest {
             None if self.bsp.is_some() => (BSP_PLAYER_RADIUS, BSP_PLAYER_HEIGHT),
             None => (0, 0),
         };
-        let player_invulnerable = self.player_invulnerable();
+        let player_invulnerable = self.player_invulnerable(ctx);
         let player_capsules = self
             .character
             .as_ref()
@@ -577,6 +577,7 @@ impl Playtest {
                     attacker_pose,
                     released,
                 ) {
+                    if !self.game_entities.can_fire_energy(attack.entity()) { break; }
                     let velocity = self.game_entities.ranged_velocity(
                         attack.entity(),
                         release.position,
@@ -599,6 +600,8 @@ impl Playtest {
                     let Some(target) = self.game_entities.ranged_target(attack.entity()) else { break; };
                     if self.combat_projectiles.spawn_toward(spawn, target, release.speed).is_ok() {
                         let _ = self.combat_projectile_impacts.spawn_muzzle(&spawn);
+                        self.game_entities.spend_shot_energy(attack.entity());
+                        if self.duel.active { duel::log_values("duel:shot", &[ctx.sim_tick.as_u32()-self.duel.started_tick(),1,u32::from(self.game_entities.energy(attack.entity()))]); }
                         telemetry::debug_log("enemy projectile:release");
                         #[cfg(feature = "emulator-telemetry")]
                         {
@@ -690,6 +693,7 @@ impl Playtest {
                     .connect_deferred_melee_window(attack, window_mask)
             };
             if connected {
+                self.game_entities.gain_melee_energy(attack.entity(), self.game_entities.attack_kind(attack.entity()) == 1);
                 hits = hits.saturating_add(1);
                 damage_total = damage_total.saturating_add(damage);
                 poise_total = poise_total.saturating_add(poise_damage);
@@ -762,6 +766,7 @@ impl Playtest {
                 target: index as u16, team: CombatTeam::Enemy, room: record.room, hurtbox,
             });
         }
+        let mut projectile_opening_hit = false;
         let mut projectile_impacts = ProjectileImpacts::<MAX_PROJECTILE_IMPACTS>::new();
         {
             let mut tracer = SceneProjectileWorldTracer {
@@ -789,7 +794,13 @@ impl Playtest {
                             psx_game_runtime::projectiles::ProjectileDamageChannel::Zenith => VitalityChannelId::Two,
                         };
                         let applied = self.game_entities.scaled_stance_damage(index, channel, impact.damage);
-                        let outcome = self.game_entities.apply_stance_hit(GAME_ENTITIES, index, channel, impact.damage, impact.poise_damage);
+                        let opening = self.game_entities.shot_opening(GAME_ENTITIES, index);
+                        let outcome = self.game_entities.apply_projectile_hit(GAME_ENTITIES, index, channel, impact.damage, impact.poise_damage);
+                        self.combat_flow.shot_hit(opening && outcome.staggered);
+                        if opening && outcome.staggered {
+                            telemetry::debug_log("flow:enemy-shot-interrupt");
+                            if self.duel.active { duel::log_values("duel:flow", &[ctx.sim_tick.as_u32()-self.duel.started_tick(),0,1]); }
+                        }
                         let now = self.gameplay_tick(ctx.sim_tick);
                         if outcome.connected {
                             self.damage_numbers.spawn(struck_actor_anchor(self.game_entities.position(index), record.height),
@@ -810,7 +821,11 @@ impl Playtest {
             {
                 telemetry::debug_log("enemy projectile:player-hit");
                 hits = hits.saturating_add(1);
-                poise_total = poise_total.saturating_add(impact.poise_damage);
+                let exposed = self.player_shot_opening();
+                projectile_opening_hit |= exposed && self.combat_flow.can_interrupt();
+                poise_total = poise_total.saturating_add(self.combat_flow.shot_poise(
+                    impact.poise_damage, psx_game_runtime::character::PLAYER_POISE, exposed));
+                if exposed && self.combat_flow.can_interrupt() { telemetry::debug_log("flow:player-shot-interrupt"); }
                 match impact.damage_channel {
                     psx_game_runtime::projectiles::ProjectileDamageChannel::Horizon => {
                         horizon_projectile_damage =
@@ -895,7 +910,16 @@ impl Playtest {
                         && frame <= capsule.active_end_frame
                 })
             });
-            let staggered = self.interrupt_player_on_poise_break(poise_total, armored, ctx);
+            let armored = self.player_combat_sample(ctx).active(psx_level::CombatWindowKind::Armored).unwrap_or(armored);
+            let staggered = self.react_player_to_hit(poise_total, armored, damage_total == 0, ctx);
+            if damage_total == 0 && staggered && projectile_opening_hit {
+                if self.duel.active { duel::log_values("duel:flow", &[ctx.sim_tick.as_u32()-self.duel.started_tick(),1,1]); }
+                for impact in projectile_impacts.as_slice() {
+                    if impact.kind == (ProjectileImpactKind::Target {target: PLAYER_PROJECTILE_TARGET}) {
+                        self.game_entities.projectile_connected(usize::from(impact.owner),true);
+                    }
+                }
+            }
             self.spawn_combat_hit_sparks(
                 player_position,
                 player_height.max(0) as u16,
@@ -1579,6 +1603,10 @@ impl Playtest {
                     hit.poise_damage,
                 );
                 if outcome.connected {
+                    if matches!(self.anim_state, PlayerAnim::HeavyAttack | PlayerAnim::VertHeavyAttack) {
+                        let p = self.motor.position();
+                        self.game_entities.recoil_from(entity, [p.x,p.y,p.z]);
+                    }
                     // Spawned here rather than from the returned stats
                     // because the damage is per-capsule: only this site
                     // knows which capsule actually connected.
@@ -1655,6 +1683,8 @@ impl Playtest {
 
     fn report_player_melee_stats(&mut self, stats: MeleeArcStats) {
         if stats.hits > 0 {
+            let heavy = matches!(self.anim_state, PlayerAnim::HeavyAttack | PlayerAnim::VertHeavyAttack);
+            for _ in 0..stats.hits { self.combat_flow.melee_hit(heavy); }
             telemetry::counter(telemetry::counter::PLAYER_MELEE_HITS, u32::from(stats.hits));
             let event = if matches!(
                 self.anim_state,

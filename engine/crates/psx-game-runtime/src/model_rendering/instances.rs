@@ -341,6 +341,8 @@ impl InstanceActorPoseSnapshot {
         self.clip_local
     }
 
+    pub const fn with_pose(mut self, pose: ActorPoseSnapshot) -> Self { self.pose=pose; self }
+
     /// Shared actor pose consumed by body, sockets, and combat volumes.
     pub const fn pose(self) -> ActorPoseSnapshot {
         self.pose

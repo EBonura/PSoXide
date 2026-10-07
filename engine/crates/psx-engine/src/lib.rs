@@ -242,3 +242,6 @@ pub use psx_pad::button;
 pub use psx_pad::{
     ActionBinding, ActionInput, ActionMap, AnalogSticks, Deadzone, PadMode, PadState, STICK_FULL,
 };
+
+mod masked_pose;
+pub use masked_pose::MaskedPoseBlend;

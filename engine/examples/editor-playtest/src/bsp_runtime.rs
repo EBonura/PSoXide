@@ -1374,6 +1374,36 @@ impl BspRuntime {
         motor.update_vblanks_with_trace_provider(&mut provider, input, config, delta_vblanks)
     }
 
+    pub(super) fn trace_hook_body(
+        &mut self,
+        from: RoomPoint,
+        to: RoomPoint,
+        config: CharacterMotorConfig,
+        destructibles: &RuntimeDestructibles<{ psx_level::MAX_DESTRUCTIBLES }>,
+        blockers: &[CharacterCollisionCylinder],
+        aabb_blockers: &[CharacterCollisionAabb],
+    ) -> Result<CollisionTrace, CollisionQueryError> {
+        let mut models = CollisionModels::new();
+        self.collision_models(&mut models, destructibles);
+        let shape = CollisionTraceShape::Body {
+            radius: config.radius,
+            height: config.height,
+        };
+        let hull_index = select_body_hull(PXBSP_BODY_HULLS, config.radius, config.height)
+            .ok_or(CollisionQueryError)?;
+        let mut provider = PxbspCollisionProvider::new(
+            &self.map,
+            hull_index,
+            models.as_slice(),
+            shape,
+            &mut self.trace_scratch,
+        )
+        .expect("validated PXBSP player collision provider");
+        let mut provider =
+            CharacterBlockerTraceProvider::new_with_aabbs(&mut provider, blockers, aabb_blockers);
+        trace_collision(&mut provider, CollisionTraceQuery::body(from, to, config.radius, config.height))
+    }
+
     /// Move one gameplay entity through the same static-world, transformed-
     /// mover, dynamic-cylinder, and authored-prop trace stack used by the
     /// player motor.

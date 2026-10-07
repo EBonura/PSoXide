@@ -424,6 +424,15 @@ trait CharacterCollisionBackend {
         shape: CollisionTraceShape,
     ) -> Result<Option<StandOutcome>, CollisionQueryError>;
 
+    fn air_position(&mut self, start: RoomPoint, target: RoomPoint, shape: CollisionTraceShape)
+        -> Result<Option<StandOutcome>, CollisionQueryError>;
+
+    fn move_position(&mut self, start: RoomPoint, target: RoomPoint, shape: CollisionTraceShape, grounded: bool)
+        -> Result<Option<StandOutcome>, CollisionQueryError> {
+        if grounded { self.stand_position(start,target,shape) }
+        else { self.air_position(start,target,shape) }
+    }
+
     fn recovery_position(
         &mut self,
         start: RoomPoint,
@@ -464,6 +473,17 @@ impl CharacterCollisionBackend for GridCharacterCollision<'_, '_, '_> {
         // floor, so the motor keeps re-querying it every tick.
         Ok(body_stand_position(self.collision, target, radius, height)
             .map(StandOutcome::unmeasured))
+    }
+
+    fn air_position(&mut self, _start: RoomPoint, target: RoomPoint, shape: CollisionTraceShape)
+        -> Result<Option<StandOutcome>, CollisionQueryError> {
+        let CollisionTraceShape::Body { radius, height } = shape else { return Err(CollisionQueryError); };
+        let c = self.collision;
+        let wall = if !c.rooms.is_empty() { body_hits_solid_wall_in_rooms(c.rooms,target,radius,height) }
+            else { c.room.is_some_and(|room| body_hits_solid_wall(room,target,radius,height)) };
+        let occupied = wall || body_hits_blocker(target,radius,height,c.blockers)
+            || body_hits_aabb_blocker(target,radius,height,c.aabb_blockers);
+        Ok((!occupied).then_some(StandOutcome::unmeasured(target)))
     }
 
     fn recovery_position(
@@ -509,6 +529,12 @@ impl<P: CollisionTraceProvider + ?Sized> CharacterCollisionBackend
         trace_stand_position(self.provider, start, target, shape)
     }
 
+    fn air_position(&mut self, start: RoomPoint, target: RoomPoint, shape: CollisionTraceShape)
+        -> Result<Option<StandOutcome>, CollisionQueryError> {
+        let trace=trace_collision(self.provider,CollisionTraceQuery {start,end:target,shape})?;
+        Ok((!trace.hit()).then_some(StandOutcome::unmeasured(target)))
+    }
+
     fn recovery_position(
         &mut self,
         start: RoomPoint,
@@ -542,8 +568,8 @@ pub struct CharacterMotorConfig {
     pub run_enabled: bool,
     /// Turn speed per display frame.
     pub yaw_step: Angle,
-    /// Downward acceleration in engine units per fixed 60 Hz tick squared.
-    pub gravity_per_tick: i32,
+    /// Downward acceleration in Q8 engine units per fixed 60 Hz tick squared.
+    pub gravity_per_tick_q8: i32,
     /// Gravity multiplier in Q8 fixed point (`256 = 1.0x`).
     pub weight_q8: u16,
     /// Maximum stamina, in Q12-style arbitrary units.
@@ -558,6 +584,9 @@ pub struct CharacterMotorConfig {
     pub roll_cost_q12: i32,
     /// Roll travel speed in Q8 world units per display frame.
     pub roll_speed: i32,
+    /// Redistribute roll travel into a short launch and decelerating tail.
+    /// Total unobstructed distance stays speed * active frames.
+    pub roll_decelerates: bool,
     /// Display frames where roll keeps moving.
     pub roll_active_frames: u8,
     /// Recovery display frames after roll movement ends.
@@ -600,7 +629,7 @@ impl CharacterMotorConfig {
             run_speed,
             run_enabled: true,
             yaw_step,
-            gravity_per_tick: GRAVITY_PER_TICK,
+            gravity_per_tick_q8: GRAVITY_PER_TICK * 256,
             weight_q8: DEFAULT_WEIGHT_Q8,
             stamina_max_q12: DEFAULT_STAMINA_MAX_Q12,
             sprint_min_q12: 384,
@@ -608,6 +637,7 @@ impl CharacterMotorConfig {
             stamina_recover_q12: 36,
             roll_cost_q12: 768,
             roll_speed: 6 << 8,
+            roll_decelerates: false,
             roll_active_frames: 14,
             roll_recovery_frames: 12,
             roll_invulnerable_frames: 10,
@@ -657,6 +687,21 @@ pub struct CharacterMotorInput {
     /// Rising-edge evade request. Directional input produces a roll in both
     /// free movement and lock-on; lock-on remains active through the action.
     pub evade: bool,
+}
+
+impl CharacterMotorInput {
+    /// Keep analog direction but use one locomotion pace outside the caller's
+    /// deadzone. Apply before animation startup ramps, so they still accelerate.
+    pub fn with_full_move_intent(mut self) -> Self {
+        let x = self.move_x.raw();
+        let z = self.move_z.raw();
+        let magnitude = isqrt_i32(square_i32_saturating(x).saturating_add(square_i32_saturating(z)));
+        if magnitude > 0 {
+            self.move_x = Q12::ONE.mul_ratio(x, magnitude);
+            self.move_z = Q12::ONE.mul_ratio(z, magnitude);
+        }
+        self
+    }
 }
 
 /// Current high-level action.
@@ -747,10 +792,12 @@ pub struct CharacterMotorState {
     /// Prevents held-sprint from pulsing Run/Walk every recovery
     /// frame after stamina reaches zero.
     sprint_exhausted: bool,
-    /// Vertical velocity in engine units per tick (negative = falling).
+    /// Vertical velocity in Q8 engine units per tick (negative = falling).
     /// Non-zero only while the body is airborne over a ledge or hole;
     /// reset to zero on landing.
-    velocity_y: i32,
+    velocity_y_q8: i32,
+    /// Fractional downward displacement retained between fixed ticks.
+    remainder_y_q8: i32,
     /// `true` while the feet rest on a floor. Gates the per-tick vertical
     /// work: a grounded body that has not moved in XZ reuses its cached
     /// floor and skips the multi-room ground query entirely. Cleared on
@@ -784,7 +831,8 @@ impl CharacterMotorState {
             action_anim: CharacterMotorAnim::Roll,
             sprint_latched: false,
             sprint_exhausted: false,
-            velocity_y: 0,
+            velocity_y_q8: 0,
+            remainder_y_q8: 0,
             grounded: false,
             ground_floor: 0,
             ground_anchor_x: 0,
@@ -816,10 +864,35 @@ impl CharacterMotorState {
         self.action_yaw = yaw;
         self.sprint_latched = false;
         self.sprint_exhausted = false;
-        self.velocity_y = 0;
+        self.velocity_y_q8 = 0;
+        self.remainder_y_q8 = 0;
         self.grounded = false;
         self.remainder_x_q8 = 0;
         self.remainder_z_q8 = 0;
+    }
+
+    /// Place a traversal body without refunding stamina or retaining fall speed.
+    pub fn teleport_to(&mut self, position: RoomPoint) {
+        let stamina = self.stamina_q12;
+        self.snap_to(position, self.yaw);
+        self.stamina_q12 = stamina;
+    }
+
+    /// Whether the last motor solve found supporting ground.
+    pub const fn grounded(&self) -> bool { self.grounded }
+
+    /// Signed airborne speed in Q8 world units per fixed tick.
+    pub const fn vertical_speed_q8(&self) -> i32 { self.velocity_y_q8 }
+
+    /// Hold a tethered body without running gravity, locomotion or stamina recovery.
+    /// Releasing the tether resumes ordinary gravity from rest on the next update.
+    pub fn suspended_frame(&mut self, facing: Option<Angle>) -> CharacterMotorFrame {
+        if let Some(yaw) = facing { self.face(yaw); }
+        self.velocity_y_q8 = 0;
+        self.remainder_y_q8 = 0;
+        self.grounded = false;
+        self.frame(CharacterMotorAnim::Idle, CharacterMotorAction::Idle,
+            false, false, false, false, false)
     }
 
     /// Turn the body to `yaw` at once. Position, stamina and any in-progress
@@ -1226,7 +1299,12 @@ impl CharacterMotorState {
         let recovery = frame >= profile.active_frames;
 
         let (moved, blocked) = if active {
-            let signed_speed = profile.speed.saturating_mul(profile.direction as i32);
+            let speed = if config.roll_decelerates && self.action == CharacterMotorAction::Roll {
+                decelerating_roll_step(profile.speed, frame, profile.active_frames)
+            } else {
+                profile.speed
+            };
+            let signed_speed = speed.saturating_mul(profile.direction as i32);
             self.try_move_at_yaw(
                 collision,
                 self.action_yaw,
@@ -1349,7 +1427,7 @@ impl CharacterMotorState {
     ) -> Result<(bool, bool), CollisionQueryError> {
         let shape = CollisionTraceShape::Body { radius, height };
         let probe_start_y = self.position.y;
-        if let Some(stand) = collision.stand_position(self.position, target, shape)? {
+        if let Some(stand) = collision.move_position(self.position, target, shape, self.grounded)? {
             self.position = stand.position;
             self.adopt_step_floor(stand.grounded_floor, probe_start_y);
             return Ok((true, false));
@@ -1357,7 +1435,7 @@ impl CharacterMotorState {
 
         let start = self.position;
         let x_only = RoomPoint::new(target.x, start.y, start.z);
-        if let Some(stand) = collision.stand_position(start, x_only, shape)? {
+        if let Some(stand) = collision.move_position(start, x_only, shape, self.grounded)? {
             let position = stand.position;
             self.position = position;
             self.adopt_step_floor(stand.grounded_floor, probe_start_y);
@@ -1365,7 +1443,7 @@ impl CharacterMotorState {
         }
 
         let z_only = RoomPoint::new(start.x, start.y, target.z);
-        if let Some(stand) = collision.stand_position(start, z_only, shape)? {
+        if let Some(stand) = collision.move_position(start, z_only, shape, self.grounded)? {
             let position = stand.position;
             self.position = position;
             self.adopt_step_floor(stand.grounded_floor, probe_start_y);
@@ -1467,7 +1545,8 @@ impl CharacterMotorState {
             && self.position.z == self.ground_anchor_z
         {
             self.position.y = self.ground_floor;
-            self.velocity_y = 0;
+            self.velocity_y_q8 = 0;
+            self.remainder_y_q8 = 0;
             return Ok(());
         }
 
@@ -1481,15 +1560,17 @@ impl CharacterMotorState {
             // No floor anywhere below (open void): hold rather than fall
             // forever. Matches the legacy no-room behaviour.
             self.grounded = false;
-            self.velocity_y = 0;
+            self.velocity_y_q8 = 0;
+            self.remainder_y_q8 = 0;
             return Ok(());
         };
 
-        if self.position.y.saturating_sub(floor) <= STEP_DOWN_HEIGHT {
+        if self.position.y <= floor || (self.grounded && self.position.y.saturating_sub(floor) <= STEP_DOWN_HEIGHT) {
             // On the floor, or within a step of it: snap down and ground.
             // Caching the cell lets the next idle tick take the fast path.
             self.position.y = floor;
-            self.velocity_y = 0;
+            self.velocity_y_q8 = 0;
+            self.remainder_y_q8 = 0;
             self.set_grounded(floor);
             return Ok(());
         }
@@ -1499,14 +1580,18 @@ impl CharacterMotorState {
         // on the floor without overshooting through it.
         self.grounded = false;
         let gravity = config
-            .gravity_per_tick
+            .gravity_per_tick_q8
             .saturating_mul(config.weight_q8 as i32)
             / DEFAULT_WEIGHT_Q8 as i32;
-        self.velocity_y = self.velocity_y.saturating_sub(gravity).max(-MAX_FALL_SPEED);
-        let next = self.position.y.saturating_add(self.velocity_y);
+        self.velocity_y_q8 = self.velocity_y_q8.saturating_sub(gravity).max(-MAX_FALL_SPEED * 256);
+        self.remainder_y_q8 = self.remainder_y_q8.saturating_add(self.velocity_y_q8);
+        let dy = self.remainder_y_q8 / 256;
+        self.remainder_y_q8 -= dy * 256;
+        let next = self.position.y.saturating_add(dy);
         if next <= floor {
             self.position.y = floor;
-            self.velocity_y = 0;
+            self.velocity_y_q8 = 0;
+            self.remainder_y_q8 = 0;
             self.set_grounded(floor);
         } else {
             self.position.y = next;
@@ -1591,6 +1676,29 @@ impl ActionProfile {
     }
 }
 
+/// Approximation of observed quickstep travel: 64% by 0.367s, 80% by
+/// 0.5s and 90% by 0.633s for a 60-tick travel interval. Cumulative
+/// differences preserve total Q8 distance regardless of interval length.
+fn decelerating_roll_step(speed: i32, frame: u8, active_frames: u8) -> i32 {
+    let cumulative = |tick: u16| -> i64 {
+        let phase = i32::from(tick) * 60 * 256 / i32::from(active_frames.max(1));
+        let knots = [(0, 0), (4, 350), (12, 3200), (22, 6400),
+            (30, 8000), (38, 9000), (60, 10000)];
+        let mut fraction = 10000;
+        for pair in knots.windows(2) {
+            let (a, va) = pair[0];
+            let (b, vb) = pair[1];
+            if phase <= b * 256 {
+                fraction = va + (vb - va) * (phase - a * 256).max(0) / ((b - a) * 256);
+                break;
+            }
+        }
+        i64::from(speed.max(0)) * i64::from(active_frames) * i64::from(fraction) / 10000
+    };
+    (cumulative(u16::from(frame) + 1) - cumulative(u16::from(frame)))
+        .clamp(0, i64::from(i32::MAX)) as i32
+}
+
 fn normalize_config(mut config: CharacterMotorConfig) -> CharacterMotorConfig {
     config.radius = config.radius.max(0);
     config.height = config.height.max(1);
@@ -1599,7 +1707,7 @@ fn normalize_config(mut config: CharacterMotorConfig) -> CharacterMotorConfig {
     if config.yaw_step == Angle::ZERO {
         config.yaw_step = Angle::from_q12(1);
     }
-    config.gravity_per_tick = config.gravity_per_tick.max(0);
+    config.gravity_per_tick_q8 = config.gravity_per_tick_q8.max(0);
     config.weight_q8 = config.weight_q8.clamp(MIN_WEIGHT_Q8, MAX_WEIGHT_Q8);
     config.stamina_max_q12 = config.stamina_max_q12.max(1);
     config.sprint_min_q12 = config.sprint_min_q12.clamp(0, config.stamina_max_q12);
@@ -3414,18 +3522,31 @@ fn cylinder_overlaps_aabb(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn hook_teleport_clears_fall_speed_without_refunding_stamina() {
+        let mut motor = super::CharacterMotorState::new(super::RoomPoint::ZERO, super::Angle::QUARTER);
+        motor.stamina_q12 = 1234;
+        motor.velocity_y_q8 = -40;
+        motor.action = super::CharacterMotorAction::Roll;
+        motor.teleport_to(super::RoomPoint::new(4, 200, 8));
+        assert_eq!(motor.stamina_q12, 1234);
+        assert_eq!(motor.velocity_y_q8, 0);
+        assert!(motor.action.is_idle());
+        assert_eq!(motor.position, super::RoomPoint::new(4, 200, 8));
+        assert_eq!(motor.yaw, super::Angle::QUARTER);
+    }
+    #[test]
     fn interruption_keeps_position_stamina_and_falling_velocity() {
         let mut motor =
             super::CharacterMotorState::new(super::RoomPoint::new(1, 2, 3), super::Angle::ZERO);
         motor.action = super::CharacterMotorAction::Roll;
         motor.action_frame = 7;
         motor.stamina_q12 = 1234;
-        motor.velocity_y = -20;
+        motor.velocity_y_q8 = -20;
         motor.interrupt_action();
         assert!(motor.action.is_idle());
         assert_eq!(motor.action_frame, 0);
         assert_eq!(motor.stamina_q12, 1234);
-        assert_eq!(motor.velocity_y, -20);
+        assert_eq!(motor.velocity_y_q8, -20);
         assert_eq!(motor.position, super::RoomPoint::new(1, 2, 3));
     }
     use super::*;
@@ -3757,6 +3878,23 @@ mod tests {
     /// so the first tick already faces the stick.
     fn config_instant_turn() -> CharacterMotorConfig {
         CharacterMotorConfig::character(64, 32 << 8, 64 << 8, Angle::from_q12(1024))
+    }
+
+    #[test]
+    fn trace_fall_keeps_ballistic_height_while_steering_and_under_catchup() {
+        for batch in [1,3] {
+            let mut motor=CharacterMotorState::new(RoomPoint::new(0,127,0),Angle::ZERO);
+            let mut provider=FlatTraceProvider::new(None);
+            let mut cfg=config();cfg.gravity_per_tick_q8=32;cfg.walk_speed=128;
+            for step in 1..=45/batch {
+                let frame=motor.update_vblanks_with_trace_provider(&mut provider,
+                    CharacterMotorInput {walk:1,..CharacterMotorInput::default()},cfg,batch as u16).unwrap();
+                let tick=step*batch;
+                assert_eq!(frame.position.y,(127-tick*(tick+1)/16).max(0),"tick {tick}");
+            }
+            assert!(motor.grounded());
+            assert_eq!(motor.vertical_speed_q8(),0);
+        }
     }
 
     #[test]
@@ -4866,6 +5004,59 @@ mod tests {
     }
 
     #[test]
+    fn fixed_pace_preserves_direction_and_zero_input() {
+        let idle = CharacterMotorInput::default().with_full_move_intent();
+        assert_eq!((idle.move_x, idle.move_z), (Q12::ZERO, Q12::ZERO));
+        for strength in [64, 512, 2048, 4096] {
+            let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
+            let input = CharacterMotorInput {
+                move_z: Q12::from_raw(strength),
+                ..CharacterMotorInput::default()
+            }.with_full_move_intent();
+            for _ in 0..60 { motor.update(None, input, config()); }
+            assert_eq!(motor.position().z, config().walk_speed * 60 / 256);
+        }
+        let diagonal = CharacterMotorInput {
+            move_x: Q12::from_raw(300), move_z: Q12::from_raw(-400),
+            ..CharacterMotorInput::default()
+        }.with_full_move_intent();
+        assert!((diagonal.move_x.raw() * 4 + diagonal.move_z.raw() * 3).abs() <= 4);
+        let length = isqrt_i32(square_i32_saturating(diagonal.move_x.raw())
+            + square_i32_saturating(diagonal.move_z.raw()));
+        assert!((length - Q12::SCALE).abs() <= 2);
+    }
+
+    #[test]
+    fn decelerating_roll_preserves_range_with_a_fast_launch_and_slow_tail() {
+        // Real Graybox cooked Q8 tuning: 46 authored units / 16 per tick.
+        let mut cfg = config();
+        cfg.roll_speed = 46 * 16;
+        cfg.roll_active_frames = 60;
+        cfg.roll_recovery_frames = 13;
+        cfg.roll_decelerates = true;
+        let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
+        let mut positions = [0; 73];
+        for tick in 0..73 {
+            let frame = motor.update(None, CharacterMotorInput {
+                move_z: Q12::ONE, evade: tick == 0,
+                ..CharacterMotorInput::default()
+            }, cfg);
+            positions[tick] = frame.position.z;
+        }
+        assert_eq!(positions[59], 172);
+        assert_eq!(positions[72], positions[59]);
+        assert!((positions[21] - 110).abs() <= 1);
+        assert!((positions[29] - 138).abs() <= 1);
+        assert!((positions[37] - 155).abs() <= 1);
+        assert!(motor.action().is_idle());
+        for duration in [1, 14, 22, 60, 120, 255] {
+            let total: i64 = (0..duration).map(|frame|
+                i64::from(decelerating_roll_step(736, frame, duration))).sum();
+            assert_eq!(total, 736 * i64::from(duration));
+        }
+    }
+
+    #[test]
     fn neutral_locked_evade_rolls_toward_target() {
         let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::HALF);
         let frame = motor.update(
@@ -5059,6 +5250,25 @@ mod tests {
     }
 
     #[test]
+    fn fractional_gravity_matches_ballistic_drop_with_and_without_air_steering() {
+        let bytes=flat_floor_world();let room=RuntimeRoom::from_bytes(&bytes).unwrap();
+        for steer in [false,true] {
+            let mut motor=CharacterMotorState::new(RoomPoint::new(512,127,512),Angle::ZERO);
+            let mut cfg=config();cfg.gravity_per_tick_q8=32;
+            let mut input=CharacterMotorInput::default();
+            if steer { input.walk=1;cfg.walk_speed=128; }
+            let mut landed=0;
+            for tick in 1..=60 {
+                let frame=motor.update_vblanks_with_collision(CharacterCollision::new(Some(room.collision()),&[]),input,cfg,1);
+                let expected=(127-tick*(tick+1)/16).max(0);
+                assert_eq!(frame.position.y,expected,"steer={steer}, tick={tick}");
+                if motor.grounded() {landed=tick;break;}
+            }
+            assert_eq!(landed,45);
+        }
+    }
+
+    #[test]
     fn airborne_body_falls_gradually_and_lands_on_floor() {
         // A flat floor at y=0; spawn the body high above it and apply no
         // input. Gravity must pull it down over several frames (not teleport)
@@ -5096,6 +5306,21 @@ mod tests {
         }
         assert_eq!(rest_y, 0, "lands exactly on the floor");
         assert!(min_y >= 0, "never falls through the floor (min={min_y})");
+    }
+
+    #[test]
+    fn suspended_body_holds_then_resumes_gravity() {
+        let bytes = flat_floor_world();
+        let room = RuntimeRoom::from_bytes(&bytes).unwrap();
+        let rooms = [CharacterCollisionRoom::new(room, 0, 0)];
+        let mut motor = CharacterMotorState::new(RoomPoint::new(512, 2048, 512), Angle::ZERO);
+        for _ in 0..600 {
+            assert_eq!(motor.suspended_frame(None).position.y, 2048);
+            assert!(!motor.grounded());
+        }
+        let frame = motor.update_vblanks_with_collision(CharacterCollision::rooms(&rooms, &[]),
+            CharacterMotorInput::default(), config(), 1);
+        assert_eq!(frame.position.y, 2048 - GRAVITY_PER_TICK);
     }
 
     #[test]
@@ -5212,7 +5437,7 @@ mod tests {
     }
 
     #[test]
-    fn idle_body_snaps_within_a_step_then_stays_grounded() {
+    fn low_airborne_body_integrates_until_contact_then_stays_grounded() {
         // Spawned within STEP_DOWN above a flat floor with no input: the body
         // snaps down onto the floor (not a fall) and then stays grounded tick
         // after tick via the cached fast path.
@@ -5228,7 +5453,7 @@ mod tests {
                 cfg,
                 1,
             );
-            assert_eq!(f.position.y, 0, "tick {i}: snapped onto floor and stays");
+            assert_eq!(f.position.y, [14, 2, 0][i.min(2)], "tick {i}: airborne until actual contact");
         }
     }
 

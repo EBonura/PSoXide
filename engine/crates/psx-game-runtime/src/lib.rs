@@ -9,6 +9,7 @@
 //! capacities arrive through generated budgets, cooked data arrives
 //! as `&'static` typed records, and state lives in owned arenas.
 
+#![cfg_attr(target_arch = "mips", feature(optimize_attribute))]
 #![no_std]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
@@ -23,6 +24,10 @@ pub mod cd_stream;
 pub mod character;
 pub mod combat;
 pub mod combat_feedback;
+pub mod combat_timing;
+pub mod combat_policy;
+pub mod combat_flow;
+pub mod ranged_tactics;
 pub mod cylinder_props;
 pub mod destructibles;
 pub mod entities;
@@ -47,3 +52,6 @@ pub mod vram;
 pub mod water;
 pub mod world_cells;
 pub mod world_visibility;
+
+/// Elevated hook acquisition and traversal.
+pub mod hook_points;

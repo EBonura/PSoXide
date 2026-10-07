@@ -372,7 +372,7 @@ mod tests {
             visibility_radius: 4,
             resident_chunk_limit: 4,
             visible_chunk_limit: 4,
-            gravity_per_tick: 0,
+            gravity_per_tick_q8: 0,
             material_first: MaterialIndex::ZERO,
             material_count: 0,
             portal_first: 0,

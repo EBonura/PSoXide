@@ -17,8 +17,9 @@ use crate::render::{
 };
 use crate::{Angle, WorldVertex, Q12};
 use core::mem::MaybeUninit;
+use crate::MaskedPoseBlend as ModelPoseBlend;
 use psx_asset::{
-    Animation, GteJointPose, JointPose, Mesh, Model, ModelPart, ModelPoseBlend, ModelVertex,
+    Animation, GteJointPose, JointPose, Mesh, Model, ModelPart, ModelVertex,
 };
 use psx_gpu::{
     material::{BlendMode, TextureMaterial, TexturedGouraudPacketMaterial, TexturedPacketMaterial},

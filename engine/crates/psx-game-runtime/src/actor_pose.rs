@@ -6,7 +6,8 @@
 //! provides the shared joint sampling path. Rendering remains a consumer of
 //! the snapshot rather than its owner.
 
-use psx_asset::{Animation, JointPose, ModelPoseBlend};
+use psx_engine::MaskedPoseBlend as ModelPoseBlend;
+use psx_asset::{Animation, JointPose};
 use psx_engine::{
     apply_model_pose_translation, compute_joint_world_basis, compute_joint_world_transform,
     JointWorldTransform, LocalToWorldScale, Mat3I16, ModelPoseTranslation, SimTick, WorldVertex,
@@ -79,6 +80,14 @@ impl ActorPoseSnapshot {
         self
     }
 
+    /// Overlay selected joints without changing the phase used for attack windows.
+    pub fn with_joint_layer(mut self, animation: Animation<'static>, phase: u32, mask: u32) -> Self {
+        self.blend_from = animation.looped_pose_sample_q12(phase).map(|sample| ModelPoseBlend {
+            sample, alpha_q12: 0, joint_mask: mask,
+        });
+        self
+    }
+
     /// Optional outgoing-pose crossfade sampled with the body.
     pub const fn blend_from(self) -> Option<ModelPoseBlend<'static>> {
         self.blend_from
@@ -122,6 +131,21 @@ impl ActorPoseSnapshot {
             self.rotation,
             self.local_to_world,
             self.origin,
+        ))
+    }
+
+    /// Transform a joint-local socket point using the retained body pose.
+    pub fn joint_world_point(self, joint: u16, local: [i32; 3]) -> Option<WorldVertex> {
+        let transform = self.joint_world_transform(joint)?;
+        let offset = |row: [i16; 3]| {
+            i32::from(row[0]).saturating_mul(local[0])
+                .saturating_add(i32::from(row[1]).saturating_mul(local[1]))
+                .saturating_add(i32::from(row[2]).saturating_mul(local[2])) >> 12
+        };
+        Some(WorldVertex::new(
+            transform.translation.x.saturating_add(offset(transform.rotation.m[0])),
+            transform.translation.y.saturating_add(offset(transform.rotation.m[1])),
+            transform.translation.z.saturating_add(offset(transform.rotation.m[2])),
         ))
     }
 
@@ -202,12 +226,24 @@ mod tests {
     }
 
     #[test]
+    fn joint_layer_mask_controls_the_same_pose_used_by_sockets() {
+        let base=one_joint_animation(&[100,100]);
+        let layer=one_joint_animation(&[300,300]);
+        let p=snapshot(1,base,None);
+        assert_eq!(p.with_joint_layer(layer,0,0).joint_pose(0),p.joint_pose(0));
+        let layered=p.with_joint_layer(layer,0,1);
+        assert_eq!(layered.joint_pose(0).unwrap().translation.x,350);
+        assert_eq!(layered.joint_world_transform(0).unwrap().translation.x,1350);
+    }
+
+    #[test]
     fn one_snapshot_drives_socket_basis_and_combat_capsule_geometry() {
         let outgoing = one_joint_animation(&[100, 100]);
         let incoming = one_joint_animation(&[300, 300]);
         let blend_from = outgoing
             .looped_pose_sample_q12(0)
             .map(|sample| ModelPoseBlend {
+            joint_mask: u32::MAX,
                 sample,
                 alpha_q12: 1 << 11,
             });
@@ -219,6 +255,8 @@ mod tests {
             .expect("joint transform and basis");
         assert_eq!(basis, Mat3I16::IDENTITY);
         assert_eq!(joint.translation, WorldVertex::new(1_250, 2_000, 3_000));
+        assert_eq!(pose.joint_world_point(0, [10, 20, 30]), Some(WorldVertex::new(1_260, 2_020, 3_030)));
+        assert_eq!(pose.joint_world_point(99, [0; 3]), None);
 
         let record = CombatCapsuleRecord {
             joint: 0,
@@ -351,6 +389,7 @@ mod tests {
         let blend_from = outgoing
             .looped_pose_sample_q12(0)
             .map(|sample| ModelPoseBlend {
+            joint_mask: u32::MAX,
                 sample,
                 alpha_q12: 1 << 12,
             });

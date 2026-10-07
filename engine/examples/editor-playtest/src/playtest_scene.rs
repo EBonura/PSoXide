@@ -1029,8 +1029,16 @@ impl Scene for Playtest {
     }
 
     fn update(&mut self, ctx: &mut Ctx) {
+        let physical = (ctx.pad, ctx.pad_prev);
+        self.duel_pad(ctx);
+        if self.duel.active && self.duel.finished {
+            self.game_entities.advance_defeated_animations(1);
+            self.refresh_actor_pose_snapshots(ctx);
+            ctx.pad=physical.0; ctx.pad_prev=physical.1;
+            return;
+        }
         self.player_poise.tick(1);
-        self.dash_wake.tick();
+        self.combat_flow.tick(1, matches!(self.anim_state, PlayerAnim::Stun | PlayerAnim::HitReact));
         self.update_gameplay(ctx);
         self.tick_poi_presentation();
         // This tail runs after every intentional early return in
@@ -1041,6 +1049,8 @@ impl Scene for Playtest {
             self.resolve_enemy_melee(ctx);
             self.resolve_player_melee(ctx);
         }
+        self.duel_observe(ctx);
+        ctx.pad=physical.0; ctx.pad_prev=physical.1;
     }
 
     fn render(&mut self, ctx: &mut Ctx) {
@@ -1807,7 +1817,7 @@ impl Scene for Playtest {
                 // Share the stance burst/reassembly clock, but keep scarf packets
                 // outside the body's finish fade so its stance hue persists.
                 if !camera_in_player && player_lighting.is_some() {
-                    self.player_scarf.draw_crystal(
+                    self.player_scarf.draw_crystal_with_dash(
                         camera,
                         stance_rgb(self.player_stance.active()),
                         player_phase_assembly(
@@ -1822,6 +1832,7 @@ impl Scene for Playtest {
                                 psx_game_runtime::model_rendering::DashWireVisual::Solid
                             )
                         }),
+                        self.player_dash_assembly.visual(ctx.sim_tick),
                         actor_options,
                         stance_crystal_material,
                         &mut primitive_packets,
@@ -1995,6 +2006,7 @@ impl Scene for Playtest {
                 &mut primitive_packets,
                 &mut world,
             );
+            self.draw_hook_beacons_world(camera, ctx.sim_tick, &mut primitive_packets, &mut world);
             self.draw_vitality_circles_world(
                 camera,
                 self.gameplay_tick(ctx.sim_tick),
@@ -2163,25 +2175,6 @@ impl Scene for Playtest {
             &mut primitive_packets,
         );
         let _ = self.draw_combat_projectiles(camera, &mut ot, &mut primitive_packets);
-        if let Some(material) = self.particle_material {
-            let projector =
-                PROP_PARTICLE_GTE_PROJECT_ENABLED.then(|| LoadedWorldCameraGte::load(camera));
-            for sample in self
-                .dash_wake
-                .samples()
-                .filter(|s| s.room == self.room_index)
-            {
-                let _ = psx_game_runtime::particles::draw_dash_sample(
-                    sample,
-                    camera,
-                    projector,
-                    self.effect_depth_range(sample.room),
-                    material,
-                    &mut ot,
-                    &mut primitive_packets,
-                );
-            }
-        }
         // The same authored blade capsules own enemy trails and damage.
         for (index, entity) in GAME_ENTITIES.iter().enumerate() {
             if entity.room != self.room_index {
@@ -2324,7 +2317,8 @@ impl Scene for Playtest {
             self.draw_collision_debug_overlay(camera);
         }
 
-        if self.player_has_ranged_weapon()
+        self.draw_hook_selection(camera);
+        if self.hook_selected.is_none() && self.player_has_ranged_weapon()
             && self.ranged_ready.aiming()
             && self.player_stance.active() == VitalityChannelId::Two
         {
@@ -2341,45 +2335,6 @@ impl Scene for Playtest {
             draw_lock_target_indicator(target, camera, overlay_tick, self.player_stance.active());
         }
 
-        if let (Some(font), Some(index)) = (self.ui_fonts[0].as_ref(),
-            GAME_ENTITIES.iter().position(|r| r.flags & psx_level::game_entity_flags::TRAINING != 0))
-        {
-            use psx_game_runtime::entities::{EnemyGoal, GameEntityState};
-            let t = self.game_entities.tactical_snapshot(index);
-            let label = match self.game_entities.state(index) {
-                GameEntityState::Idle => "OBSERVE",
-                GameEntityState::Patrol => "PATROL",
-                GameEntityState::Windup => "WINDUP",
-                GameEntityState::Attack => "ATTACK",
-                GameEntityState::Recover => "RECOVERY",
-                GameEntityState::Staggered => "STAGGER",
-                GameEntityState::Dead => "DEFEATED",
-                GameEntityState::Aggro => match t.goal {
-                    EnemyGoal::Approach if t.running => "PURSUE",
-                    EnemyGoal::Approach => "STALK",
-                    EnemyGoal::CircleLeft => "CIRCLE LEFT",
-                    EnemyGoal::CircleRight => "CIRCLE RIGHT",
-                    EnemyGoal::Retreat => "RETREAT",
-                    EnemyGoal::WaitRetry => "WAIT / RETRY",
-                    EnemyGoal::Reposition => "REPOSITION",
-                    EnemyGoal::ReturnHome => "RETURN HOME",
-                    _ => "ASSESS",
-                },
-            };
-            font.draw_text(8, 202, label, (200, 220, 225));
-            font.draw_text(8, 216, "SELECT+L1 RESET  SELECT+R1 BLOCKED", (150, 170, 175));
-        }
-
-        if self.player_has_ranged_weapon() {
-            if let Some(font) = self.ui_fonts[0].as_ref() {
-                if self.player_stance.active() == VitalityChannelId::Two {
-                    font.draw_text(8, 188, if self.ranged_ready.aiming() { "ZTH  R2 FIRE" } else { "ZTH  HOLD L2 TO AIM" }, (112, 232, 208));
-                } else {
-                    font.draw_text(8, 188, "HRZ  R1 COMBO  R2 HEAVY", (255, 176, 96));
-                }
-            }
-        }
-
         // Damage numbers sit above the world and below the panels: they
         // are combat feedback, so a message box that is up should cover
         // them rather than compete with them.
@@ -2391,10 +2346,8 @@ impl Scene for Playtest {
             let _drawn = self.damage_numbers.draw(&font, camera, room, overlay_tick);
         }
 
-        // The target vitality stack follows the player HUD's two-ribbon
-        // grammar and swap motion, but stays compact and omits the player's
-        // cooldown diamond. Anchor its shared left edge to the right of the
-        // target rather than covering the model from above.
+        // Hard lock wraps the existing reticle with dual vitality arcs.
+        // Soft targets keep their compact vitality stack beside the model.
         if !self.inventory_overlay_active {
             if let (Some(font), Some(target_index)) =
                 (self.ui_fonts[0].as_ref(), self.combat_target_entity_index())
@@ -2420,6 +2373,15 @@ impl Scene for Playtest {
                                 ((u32::from(current) * 4096) / u32::from(maximum)) as u16
                             }
                         };
+                        if self.is_locked() {
+                            if let Some(center) = self.lock_target_indicator_position().and_then(|p| camera.project_world(p)) {
+                                draw_lock_target_readout(
+                                    center, active,
+                                    health_share(VitalityChannelId::One),
+                                    health_share(VitalityChannelId::Two),
+                                );
+                            }
+                        } else {
                         draw_enemy_vitality_hud(
                             font,
                             projected.sx.saturating_add(40).clamp(4, SCREEN_W - 80),
@@ -2429,6 +2391,7 @@ impl Scene for Playtest {
                             health_share(active.other()),
                             self.game_entities.stance_swap_progress_q12(target_index),
                         );
+                        }
                     }
                 }
             }
@@ -2439,6 +2402,10 @@ impl Scene for Playtest {
         // beneath an authored slanted bar, leaving both visible at rest.
         if !self.inventory_overlay_active {
             if let Some(font) = self.ui_fonts[0].as_ref() {
+                if self.player_has_ranged_weapon() {
+                    draw_combat_energy(font, self.combat_flow.energy,
+                        self.hook_attached.map(|_| self.combat_flow.air_left));
+                }
                 const VITALITY_Q12_ONE: u16 = 4096;
                 let config = self.player_stance_config;
                 let active = self.player_stance.active();
@@ -2474,6 +2441,16 @@ impl Scene for Playtest {
                     cooldown_progress_q12,
                     echo_elapsed,
                 );
+            }
+        }
+
+        if let Some(font) = self.ui_fonts[0].as_ref() {
+            if self.duel.active {
+                let label=match self.duel.outcome {1=>"DUEL: PLAYER WINS",2=>"DUEL: ENEMY WINS",3=>"DUEL: DOUBLE KO",5=>"DUEL: TIME LIMIT",6=>"DUEL: NO PROGRESS",_=>"AI DUEL: BOTH STANCES"};
+                font.draw_text(8, 66, label, (240,220,150));
+                font.draw_text(8, 78, "PRESS A BUTTON TO TAKE OVER", (200,200,200));
+            } else if GAME_ENTITIES.iter().any(|r|r.flags & psx_level::game_entity_flags::TRAINING!=0) {
+                font.draw_text(8, 66, "SELECT+L2: AI DUEL", (180,190,200));
             }
         }
 

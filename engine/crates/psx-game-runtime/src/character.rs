@@ -11,6 +11,9 @@ use psx_level::{
     CHARACTER_ANIMATION_ACTION_COUNT,
 };
 
+/// Player poise pool: a 50-poise claw hit reacts; a 75-poise heavy breaks it.
+pub const PLAYER_POISE: u16 = 60;
+
 /// Animation state machine for the player: idle with no movement,
 /// walking for normal movement, running while Circle is held.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -36,14 +39,20 @@ pub enum PlayerAnim {
     RangedBackward,
     RangedLeft,
     RangedRight,
+    /// Hook takeoff, held on its last frame through wire travel.
+    HookLaunch,
+    Fall,
+    Land,
     /// Zenith axis: overhead strikes.
     VertLightAttack,
     VertHeavyAttack,
     /// First-spawn intro, played once with control locked out.
     Intro,
     Death,
-    /// A poise break interrupts the previous action until hit recovery ends.
+    /// An unarmoured hit interrupts the previous action until recovery ends.
     HitReact,
+    /// A poise break plays the complete stagger and recovery one-shot.
+    Stun,
     /// Idle-to-walk transition, one shot; Walk begins where it ends.
     WalkWindup,
     /// Walk-to-idle transition, one shot, over the motor's deceleration.
@@ -83,11 +92,15 @@ impl PlayerAnim {
             Self::RangedBackward => CharacterAnimationAction::RangedBackward,
             Self::RangedLeft => CharacterAnimationAction::RangedLeft,
             Self::RangedRight => CharacterAnimationAction::RangedRight,
+            Self::HookLaunch => CharacterAnimationAction::HookLaunch,
+            Self::Fall => CharacterAnimationAction::Fall,
+            Self::Land => CharacterAnimationAction::Land,
             Self::VertLightAttack => CharacterAnimationAction::VertLightAttack,
             Self::VertHeavyAttack => CharacterAnimationAction::VertHeavyAttack,
             Self::Intro => CharacterAnimationAction::Intro,
             Self::Death => CharacterAnimationAction::Death,
             Self::HitReact => CharacterAnimationAction::HitReact,
+            Self::Stun => CharacterAnimationAction::Stun,
             Self::WalkWindup => CharacterAnimationAction::WalkWindup,
             Self::WalkWinddown => CharacterAnimationAction::WalkWinddown,
             Self::WalkWinddownAlt => CharacterAnimationAction::WalkWinddownAlt,
@@ -114,6 +127,27 @@ impl PlayerAnim {
             self,
             Self::Roll | Self::Quickstep | Self::DashLeft | Self::DashRight
         )
+    }
+}
+
+/// Choose the player reaction without restarting an active recovery.
+/// A poise break can upgrade a normal hit, but never downgrade a stun.
+pub const fn player_damage_reaction(
+    poise_broken: bool,
+    armored: bool,
+    current: PlayerAnim,
+    action_locked: bool,
+) -> Option<PlayerAnim> {
+    if matches!(current, PlayerAnim::Death)
+        || (action_locked && matches!(current, PlayerAnim::Stun))
+    {
+        None
+    } else if poise_broken {
+        Some(PlayerAnim::Stun)
+    } else if armored || (action_locked && matches!(current, PlayerAnim::HitReact)) {
+        None
+    } else {
+        Some(PlayerAnim::HitReact)
     }
 }
 
@@ -165,6 +199,8 @@ pub struct RuntimeCharacter {
         [psx_level::CharacterActionFrameRange; CHARACTER_ANIMATION_ACTION_COUNT],
     pub action_pushes: [psx_level::CharacterActionPush; CHARACTER_ANIMATION_ACTION_COUNT],
     pub action_chains: [psx_level::CharacterActionChain; psx_level::MAX_CHARACTER_ACTION_CHAINS],
+    /// Explicit combat permissions and protection windows.
+    pub combat_windows: [psx_level::CharacterCombatWindow; psx_level::MAX_CHARACTER_COMBAT_WINDOWS],
     pub combat_capsule_first: psx_level::CombatCapsuleIndex,
     pub combat_capsule_count: u8,
     pub visual_offset: [i16; 3],
@@ -223,6 +259,7 @@ impl RuntimeCharacter {
             action_frame_ranges: c.action_frame_ranges,
             action_pushes: c.action_pushes,
             action_chains: c.action_chains,
+            combat_windows: c.combat_windows,
             combat_capsule_first: c.combat_capsule_first,
             combat_capsule_count: c.combat_capsule_count,
             visual_offset: c.visual_offset,
@@ -402,7 +439,11 @@ impl RuntimeCharacter {
             | CharacterAnimationAction::LightAttackFinisher => {
                 self.action_clip(anim.action()).to_option().unwrap_or(idle)
             }
-            CharacterAnimationAction::RangedAim
+            CharacterAnimationAction::HookLaunch
+            | CharacterAnimationAction::ArchPerch
+            | CharacterAnimationAction::Fall
+            | CharacterAnimationAction::Land
+            | CharacterAnimationAction::RangedAim
             | CharacterAnimationAction::RangedWalk
             | CharacterAnimationAction::RangedBackward
             | CharacterAnimationAction::RangedLeft
@@ -580,6 +621,36 @@ pub fn apply_player_damage(health: u16, already_dying: bool, damage: u16) -> Pla
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn player_reactions_distinguish_hits_breaks_and_heavy_armor() {
+        assert_eq!(player_damage_reaction(false, false, PlayerAnim::Run, false), Some(PlayerAnim::HitReact));
+        assert_eq!(player_damage_reaction(false, false, PlayerAnim::LightAttack, true), Some(PlayerAnim::HitReact));
+        assert_eq!(player_damage_reaction(false, true, PlayerAnim::HeavyAttack, true), None);
+        assert_eq!(player_damage_reaction(true, true, PlayerAnim::HeavyAttack, true), Some(PlayerAnim::Stun));
+        assert_eq!(PlayerAnim::Stun.action(), CharacterAnimationAction::Stun);
+    }
+
+    #[test]
+    fn player_poise_separates_light_heavy_and_accumulated_hits() {
+        let mut poise = crate::poise::Poise::EMPTY;
+        assert!(!poise.hit(50, PLAYER_POISE, false));
+        assert!(poise.hit(50, PLAYER_POISE, false));
+        let mut poise = crate::poise::Poise::EMPTY;
+        assert!(poise.hit(75, PLAYER_POISE, false));
+        let mut poise = crate::poise::Poise::EMPTY;
+        assert!(!poise.hit(75, PLAYER_POISE, true));
+    }
+
+    #[test]
+    fn player_reactions_upgrade_but_do_not_restart_or_downgrade_recovery() {
+        assert_eq!(player_damage_reaction(false, false, PlayerAnim::HitReact, true), None);
+        assert_eq!(player_damage_reaction(true, false, PlayerAnim::HitReact, true), Some(PlayerAnim::Stun));
+        assert_eq!(player_damage_reaction(false, false, PlayerAnim::Stun, true), None);
+        assert_eq!(player_damage_reaction(true, false, PlayerAnim::Stun, true), None);
+        assert_eq!(player_damage_reaction(false, false, PlayerAnim::Stun, false), Some(PlayerAnim::HitReact));
+        assert_eq!(player_damage_reaction(true, false, PlayerAnim::Death, true), None);
+    }
 
     #[test]
     fn player_damage_kills_exactly_at_zero() {

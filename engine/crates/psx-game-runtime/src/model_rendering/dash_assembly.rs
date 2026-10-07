@@ -89,6 +89,7 @@ impl DepartureFragment {
 /// Its visual lifetime does not extend the motor's action or invulnerability.
 pub struct PlayerDashAssembly {
     started: u32,
+    rebuild_start: u32,
     seen_dash: bool,
     explicit_burst: bool,
     active: bool,
@@ -106,6 +107,7 @@ impl PlayerDashAssembly {
     pub const fn new() -> Self {
         Self {
             started: 0,
+            rebuild_start: REBUILD_START,
             seen_dash: false,
             explicit_burst: false,
             active: false,
@@ -121,6 +123,7 @@ impl PlayerDashAssembly {
 
     fn start(&mut self, started: u32) {
         self.started = started;
+        self.rebuild_start = REBUILD_START;
         self.seen_dash = true;
         self.explicit_burst = false;
         self.active = true;
@@ -138,6 +141,12 @@ impl PlayerDashAssembly {
         self.seen_dash = false;
     }
 
+    /// Use the dash breakup while the wire body travels to a hook landing.
+    pub fn traverse(&mut self, now: SimTick, travel_ticks: u32) {
+        self.burst(now);
+        self.rebuild_start = travel_ticks;
+    }
+
     /// Discard particles and restore the solid body at a cinematic handoff.
     pub fn cancel(&mut self) {
         self.active = false;
@@ -153,18 +162,14 @@ impl PlayerDashAssembly {
     }
 
     fn observe_action(&mut self, action: CharacterAnimationAction, started: u32, now: u32) {
-        if matches!(
-            action,
-            CharacterAnimationAction::Roll
-                | CharacterAnimationAction::DashLeft
-                | CharacterAnimationAction::DashRight
-        ) {
+        if is_dash_action(action) {
             if !self.seen_dash || started != self.started {
                 self.start(started);
             }
         } else if matches!(
             action,
             CharacterAnimationAction::HitReact
+                | CharacterAnimationAction::Stun
                 | CharacterAnimationAction::Death
                 | CharacterAnimationAction::LightAttack
                 | CharacterAnimationAction::LightAttackFollowup
@@ -172,13 +177,19 @@ impl PlayerDashAssembly {
                 | CharacterAnimationAction::HeavyAttack
                 | CharacterAnimationAction::VertLightAttack
                 | CharacterAnimationAction::VertHeavyAttack
-        ) || (action == CharacterAnimationAction::Intro && !self.explicit_burst)
+                | CharacterAnimationAction::RangedAttack
+        ) || (!self.explicit_burst && matches!(action, CharacterAnimationAction::RangedAim
+                | CharacterAnimationAction::RangedWalk
+                | CharacterAnimationAction::RangedBackward
+                | CharacterAnimationAction::RangedLeft
+                | CharacterAnimationAction::RangedRight
+        )) || (action == CharacterAnimationAction::Intro && !self.explicit_burst)
         {
             // Combat feedback must immediately show the actual hit/attack pose.
             self.interrupted = true;
             self.capture_pending = false;
         }
-        if now.saturating_sub(self.started) >= REBUILD_END {
+        if now.saturating_sub(self.started) >= self.rebuild_start + (REBUILD_END - REBUILD_START) {
             self.active = false;
             self.capture_pending = false;
         }
@@ -190,11 +201,11 @@ impl PlayerDashAssembly {
             return DashWireVisual::Solid;
         }
         let age = now.as_u32().saturating_sub(self.started);
-        if age < REBUILD_START {
+        if age < self.rebuild_start {
             DashWireVisual::Wire
-        } else if age < REBUILD_END {
+        } else if age < self.rebuild_start + (REBUILD_END - REBUILD_START) {
             DashWireVisual::Restoring {
-                progress_q8: ((age - REBUILD_START) * 255 / (REBUILD_END - REBUILD_START)) as u8,
+                progress_q8: ((age - self.rebuild_start) * 255 / (REBUILD_END - REBUILD_START)) as u8,
             }
         } else {
             DashWireVisual::Solid
@@ -646,6 +657,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn hook_traversal_holds_wire_until_landing_then_rebuilds_and_can_be_interrupted() {
+        let mut effect = PlayerDashAssembly::new();
+        effect.traverse(SimTick::from_u32(100), 30);
+        effect.observe_action(CharacterAnimationAction::Idle, 100, 120);
+        assert_eq!(effect.visual(SimTick::from_u32(129)), DashWireVisual::Wire);
+        effect.observe_action(CharacterAnimationAction::RangedAim, 130, 130);
+        assert!(matches!(effect.visual(SimTick::from_u32(130)), DashWireVisual::Restoring { progress_q8: 0 }));
+        assert_eq!(effect.visual(SimTick::from_u32(166)), DashWireVisual::Solid);
+        effect.traverse(SimTick::from_u32(200), 30);
+        effect.observe_action(CharacterAnimationAction::HitReact, 204, 204);
+        assert_eq!(effect.visual(SimTick::from_u32(204)), DashWireVisual::Solid);
+    }
+
+    #[test]
     fn prepared_scatter_matches_original_for_every_effect_age() {
         for distance in 0..=255 {
             for height in [16, 80, 240] {
@@ -881,6 +906,35 @@ mod tests {
     }
 
     #[test]
+    fn every_direction_captures_once_and_reconstructs_after_locomotion_resumes() {
+        // Exercise the actual motor-to-animation vocabulary, including the
+        // locked backward Quickstep -> Backstep mapping that used to miss out.
+        for anim in [
+            PlayerAnim::Roll,
+            PlayerAnim::Quickstep,
+            PlayerAnim::DashLeft,
+            PlayerAnim::DashRight,
+        ] {
+            let mut effect = PlayerDashAssembly::new();
+            effect.observe_action(anim.action(), 100, 100);
+            assert!(effect.needs_capture(), "{anim:?}");
+            assert_eq!(effect.visual(SimTick::from_u32(100)), DashWireVisual::Wire);
+            effect.capture_pending = false;
+            effect.observe_action(anim.action(), 100, 101);
+            assert!(!effect.needs_capture(), "same dash must not restart: {anim:?}");
+            effect.observe_action(CharacterAnimationAction::Walk, 135, 135);
+            assert!(matches!(
+                effect.visual(SimTick::from_u32(135)),
+                DashWireVisual::Restoring { .. }
+            ));
+            effect.observe_action(CharacterAnimationAction::Idle, 148, 148);
+            assert_eq!(effect.visual(SimTick::from_u32(148)), DashWireVisual::Solid);
+            effect.observe_action(anim.action(), 180, 180);
+            assert!(effect.needs_capture(), "next dash must restart: {anim:?}");
+        }
+    }
+
+    #[test]
     fn reconstruction_outlasts_recovery_but_never_hides_a_hit_or_attack() {
         let mut effect = PlayerDashAssembly::new();
         effect.observe_action(CharacterAnimationAction::Roll, 100, 100);
@@ -899,6 +953,15 @@ mod tests {
         effect.observe_action(CharacterAnimationAction::Idle, 185, 198);
         assert_eq!(effect.visual(SimTick::from_u32(198)), DashWireVisual::Solid);
         assert!(!effect.needs_capture());
+    }
+
+    #[test]
+    fn poise_break_immediately_restores_the_body_after_a_dash() {
+        let mut effect = PlayerDashAssembly::new();
+        effect.observe_action(CharacterAnimationAction::Roll, 100, 100);
+        effect.observe_action(CharacterAnimationAction::Stun, 110, 110);
+        assert!(!effect.needs_capture());
+        assert_eq!(effect.visual(SimTick::from_u32(110)), DashWireVisual::Solid);
     }
 
     #[test]

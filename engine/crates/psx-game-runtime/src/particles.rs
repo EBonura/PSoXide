@@ -324,7 +324,7 @@ pub fn draw_projectile_bolt<const OT_DEPTH: usize>(
         ) as i16;
     // Presentation width is independent of the swept collision radius.
     let half = if projectile.visual.crystal {
-        (half + half / 2).max(3)
+        crystal_projectile_half(half)
     } else {
         half
     };
@@ -660,6 +660,43 @@ fn scale_rgb(rgb: [u8; 3], numerator: u16, denominator: u16) -> [u8; 3] {
         ((u32::from(rgb[1]) * numerator) / denominator).min(255) as u8,
         ((u32::from(rgb[2]) * numerator) / denominator).min(255) as u8,
     ]
+}
+
+/// One expanding, additive ring attached to an animated eye socket.
+/// Progress is simulation-owned; rendering never advances or retriggers it.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_stance_eye_pulse<const OT_DEPTH: usize>(
+    position: WorldVertex,
+    progress_q12: u16,
+    color: (u8, u8, u8),
+    camera: WorldCamera,
+    depth_range: DepthRange,
+    particle_material: TextureMaterial,
+    ot: &mut OtFrame<'_, OT_DEPTH>,
+    packets: &mut PrimitivePacketArena<'_>,
+) -> usize {
+    if progress_q12 >= 4096 { return 0; }
+    let Some(center) = camera.project_world(position) else { return 0; };
+    let progress = i32::from(progress_q12);
+    let world_radius = 2 + 22 * progress / 4096;
+    let radius = (world_radius * camera.projection.focal_length / center.sz.max(1)).clamp(2, 35);
+    let fade = 4096 - progress;
+    let brightness = (fade * fade / 4096) as u16;
+    let material = particle_material.with_tint(rgb_tuple(scale_rgb(
+        [color.0, color.1, color.2], brightness, 4096,
+    ))).with_blend_mode(BlendMode::Add);
+    let slot = depth_range.slot::<OT_DEPTH>(center.sz);
+    let point = |angle: u16| ProjectedVertex {
+        sx: center.sx.saturating_add((psx_math::cos_q12(angle) * radius / 4096) as i16),
+        sy: center.sy.saturating_add((psx_math::sin_q12(angle) * radius / 4096) as i16),
+        ..center
+    };
+    let mut submitted = 0;
+    for i in 0..20 {
+        submitted += draw_projectile_segment(point(i * 4096 / 20), point((i + 1) * 4096 / 20),
+            1, material, slot, ot, packets);
+    }
+    submitted
 }
 
 fn draw_projectile_segment<const OT_DEPTH: usize>(
@@ -1042,5 +1079,28 @@ mod tests {
         );
         assert_eq!(scale_rgb([255, 208, 144], 11 * 11, 22 * 22), [63, 52, 36]);
         assert_eq!(scale_rgb([255; 3], 0, 22 * 22), [0; 3]);
+    }
+}
+
+// Crystal bolts widen the ordinary sprite, but the glow clamp still requires
+// its lower bound to fit the global screen-size ceiling at close range.
+fn crystal_projectile_half(half: i16) -> i16 {
+    half.saturating_add(half / 2).clamp(3, PARTICLE_MAX_SCREEN_SIZE as i16)
+}
+
+#[cfg(test)]
+mod crystal_size_tests {
+    use super::*;
+    #[test]
+    fn near_camera_crystal_width_never_inverts_the_glow_clamp() {
+        for half in PARTICLE_MIN_SCREEN_SIZE as i16..=PARTICLE_MAX_SCREEN_SIZE as i16 {
+            let crystal = crystal_projectile_half(half);
+            assert!(crystal <= PARTICLE_MAX_SCREEN_SIZE as i16);
+            for scale in [256, 512, 1024, u16::MAX] {
+                let glow = ((i32::from(crystal) * i32::from(scale)) >> 8)
+                    .clamp(i32::from(crystal), i32::from(PARTICLE_MAX_SCREEN_SIZE));
+                assert!(glow >= i32::from(crystal));
+            }
+        }
     }
 }

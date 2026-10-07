@@ -26,6 +26,24 @@ impl Playtest {
     }
 
     pub(super) fn ranged_target(&self) -> [i32; 3] {
+        let target = self.unconstrained_ranged_target();
+        let Some(index) = self.hook_attached else { return target; };
+        let p=self.motor.position();
+        let dx=target[0]-p.x;let dz=target[2]-p.z;
+        let facing=Self::arch_facing(index);
+        let yaw=((i32::from(psx_math::atan2_q12(dx,dz))-i32::from(facing.as_q12())+2048)&4095)-2048;
+        let distance=psx_math::int32::isqrt_i32(dx.saturating_mul(dx).saturating_add(dz.saturating_mul(dz)));
+        let pitch=((i32::from(psx_math::atan2_q12(target[1]-p.y-55,distance.max(1)))+2048)&4095)-2048;
+        if (-910..=910).contains(&yaw) && (-683..=683).contains(&pitch) { return target; }
+        // Keep shots and the displayed aim point in the planted pose's outward
+        // firing arc; the body never rotates through its supporting masonry.
+        let y=facing.add_signed_q12(yaw.clamp(-910,910) as i16);
+        let pitch=Angle::ZERO.add_signed_q12(pitch.clamp(-683,683) as i16);
+        let horizontal=pitch.cos().mul_i32(2048);
+        [p.x+y.sin().mul_i32(horizontal),p.y+55+pitch.sin().mul_i32(2048),p.z+y.cos().mul_i32(horizontal)]
+    }
+
+    fn unconstrained_ranged_target(&self) -> [i32; 3] {
         if let Some(target) = self.lock_target_indicator_position() {
             // Anchor the offset to the player/target axis, not the pursuing
             // camera, so following it cannot feed back into the aim point.
@@ -48,6 +66,12 @@ impl Playtest {
                 target.z.saturating_sub(back.sin().mul_i32(right)),
             ];
         }
+        if !self.ranged_ready.aiming() {
+            let p = self.motor.position();
+            let yaw = self.motor.yaw();
+            return [p.x + yaw.sin().mul_i32(2048), p.y + self.motor_config().height / 2,
+                p.z + yaw.cos().mul_i32(2048)];
+        }
         // The orbit basis points from the subject toward the camera, so its
         // horizontal negative is the screen-centre shooting direction.
         let c = self.render_camera;
@@ -67,7 +91,6 @@ impl Playtest {
 
     pub(super) fn release_player_projectile(&mut self, ctx: &Ctx) {
         if !self.ranged_ready.firing(ctx.sim_tick.as_u32())
-            || !self.ranged_ready.can_fire()
             || self.player_stance.active() != VitalityChannelId::Two
         {
             return;
@@ -124,15 +147,15 @@ impl Playtest {
             visual.length_ticks = 3;
             visual.trail_segments = 4;
             visual.impact_rgb = [144, 248, 208];
+            if !self.combat_flow.can_shoot() { break; }
+            let damage = self.vitality_modifiers()
+                .outgoing_damage(VitalityChannelId::Two, release.damage);
             let spawn = ProjectileSpawn {
                 position: release.position,
                 velocity: projectiles::velocity_toward(release.position, target, release.speed),
                 radius: release.radius,
-                damage: self
-                    .vitality_modifiers()
-                    .outgoing_damage(VitalityChannelId::Two, release.damage),
-                // A ranged weapon deals ordinary health damage. It does not
-                // implement a timed firearm parry or guaranteed interrupt.
+                damage,
+                // The receiving actor evaluates the visible interrupt window.
                 poise_damage: release.poise_damage,
                 lifetime_ticks: release.lifetime_ticks,
                 room: self.room_index,
@@ -145,6 +168,8 @@ impl Playtest {
             if self.combat_projectiles.spawn(spawn).is_err() {
                 break;
             }
+            self.combat_flow.spend_shot();
+            if self.duel.active { duel::log_values("duel:shot", &[ctx.sim_tick.as_u32()-self.duel.started_tick(),0,u32::from(self.combat_flow.energy)]); }
             let _ = self.combat_projectile_impacts.spawn_muzzle(&spawn);
             self.ranged_ready.released |= 1u16 << emitter;
             self.queue_gameplay_sfx(LevelGameplaySfxEvent::ProjectileLaunch);

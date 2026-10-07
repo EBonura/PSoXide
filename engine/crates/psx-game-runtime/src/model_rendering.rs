@@ -8,7 +8,8 @@
 //! example's VRAM atlas uploader as a closure until its glue fully
 //! migrates.
 
-use psx_asset::{Animation, Model, ModelPart, ModelPoseBlend, ModelVertex};
+use psx_engine::MaskedPoseBlend as ModelPoseBlend;
+use psx_asset::{Animation, Model, ModelPart, ModelVertex};
 use psx_engine::{
     projected_triangle_batchable, telemetry, Angle, CullMode, DepthPolicy, JointViewTransform,
     JointWorldTransform, LocalToWorldScale, Mat3I16, ModelPoseTranslation, ModelUvMapping,
@@ -389,6 +390,19 @@ impl PlayerActorPoseSnapshot {
     /// stale: a different clip simply misses.
     pub const fn clip_first_root_xz(self) -> Option<[i32; 2]> {
         self.clip_first_root_xz
+    }
+
+    /// Replace the authoritative skeleton presentation while retaining gameplay action timing.
+    pub const fn with_pose(mut self, pose: ActorPoseSnapshot) -> Self {
+        self.pose = pose;
+        self
+    }
+
+    /// Use the presentation clip's bounds and invalidate cached root correction.
+    pub const fn with_presentation_clip(mut self, clip: ModelClipIndex) -> Self {
+        self.clip_local = clip;
+        self.clip_first_root_xz = None;
+        self
     }
 
     /// Shared actor pose consumed by rendering, sockets, and hit volumes.
@@ -1190,6 +1204,7 @@ pub(crate) fn player_pose_blend<const MAX_RUNTIME_MODEL_CLIPS: usize>(
     );
     anim.looped_pose_sample_q12(phase)
         .map(|sample| ModelPoseBlend {
+            joint_mask: u32::MAX,
             sample,
             alpha_q12: blend.alpha_q12,
         })
@@ -1262,7 +1277,7 @@ pub fn resolve_player_actor_pose<
         x,
         y,
         z,
-        clip_floor_lift(clip_anchor, model),
+        if matches!(anim_action, CharacterAnimationAction::Fall | CharacterAnimationAction::Land) { model.floor_lift } else { clip_floor_lift(clip_anchor, model) },
         local_to_world,
         character.visual_offset,
         &rotation,
@@ -1308,6 +1323,19 @@ pub enum DashWireVisual {
     },
 }
 
+// Locked backward evades keep the legacy Backstep animation slot even though
+// the motor uses the same directional roll action. Both effect paths must
+// recognize the same four directions.
+fn is_dash_action(action: CharacterAnimationAction) -> bool {
+    matches!(
+        action,
+        CharacterAnimationAction::Roll
+            | CharacterAnimationAction::Backstep
+            | CharacterAnimationAction::DashLeft
+            | CharacterAnimationAction::DashRight
+    )
+}
+
 fn dash_wire_visual(
     action: CharacterAnimationAction,
     elapsed: u32,
@@ -1315,14 +1343,7 @@ fn dash_wire_visual(
     recovery: u8,
 ) -> DashWireVisual {
     let finish = u32::from(travel) + u32::from(recovery) * 3 / 4;
-    if !matches!(
-        action,
-        CharacterAnimationAction::Roll
-            | CharacterAnimationAction::DashLeft
-            | CharacterAnimationAction::DashRight
-    ) || travel < 3
-        || elapsed >= finish
-    {
+    if !is_dash_action(action) || travel < 3 || elapsed >= finish {
         return DashWireVisual::Solid;
     }
     // At 22 travel + 13 recovery ticks: 10 breakup, 2 wire, 19 rebuild.
@@ -3128,6 +3149,7 @@ mod tests {
             assert_eq!(dash_wire_visual(action, 8, 22, 13), DashWireVisual::Solid);
         }
         for action in [
+            CharacterAnimationAction::Backstep,
             CharacterAnimationAction::DashLeft,
             CharacterAnimationAction::DashRight,
         ] {

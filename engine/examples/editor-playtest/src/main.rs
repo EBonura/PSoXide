@@ -26,7 +26,7 @@
 //! * CIRCLE hold       -- run while moving.
 //! * TRIANGLE          -- change stance; R3 toggles lock-on.
 //! * HRZ: R1 / R2      -- light combo / heavy melee.
-//! * ZTH: hold L2 + R2 -- aim + fire when ranged clips are bound.
+//! * ZTH: R2 fires; L2 optionally precision aims when ranged clips are bound.
 //! * Legacy projects without ranged bindings retain Zenith melee.
 
 // `cfg(test)` is false for every guest build, so `not(test)` holds and both
@@ -34,6 +34,7 @@
 // unchanged by construction, not by measurement. Under `cargo test` on the
 // host the crate picks up `std` and lets libtest supply its own `main`, which
 // is what lets `bsp_runtime`'s pure-function tests actually run.
+#![cfg_attr(target_arch = "mips", feature(optimize_attribute))]
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(not(test), no_main)]
 #![allow(static_mut_refs)]
@@ -136,6 +137,8 @@ use psx_game_runtime::cd_stream;
 mod character_runtime;
 mod combat_input;
 mod player_ranged;
+mod hook_runtime;
+mod hook_signposting;
 mod aim_control;
 mod damage_numbers;
 mod debug_runtime;
@@ -313,8 +316,10 @@ const PLAYER_ANIM_BLEND_ACTION_OUT_TICKS: u32 = 14;
 const PLAYER_ANIM_BLEND_GAIT_TICKS: u32 = 10;
 
 mod opening_sequence;
+mod duel;
 
 struct Playtest {
+    duel: duel::Duel,
     opening: opening_sequence::OpeningSequence,
     /// Active room. `None` until `init` runs and only `Some`
     /// when the manifest had at least one room and its bytes
@@ -418,11 +423,22 @@ struct Playtest {
     /// state, so it remains in scene BSS beside the entity SoA.
     combat_projectiles: RuntimeCombatProjectiles,
     ranged_ready: combat_input::RangedReady,
+    hook_selected: Option<usize>,
+    hook_burst_started: bool,
+    hook_fov_delta_q8: i32,
+    hook_camera_pitch: i16,
+    hook_visible: u32,
+    hook_travel: Option<psx_game_runtime::hook_points::HookTravel>,
+    hook_target: Option<usize>,
+    hook_attached: Option<usize>,
+    fall_from_arch: bool,
+    hook_charge: psx_game_runtime::hook_points::ArchCharge,
     aim_control: aim_control::AimControl,
     /// Fixed-capacity visual aftermath for stopped combat projectiles.
     combat_projectile_impacts: RuntimeProjectileImpactEffects,
-    dash_wake: psx_game_runtime::combat_feedback::DashWake,
     attack_buffer: combat_input::AttackBuffer,
+    authored_attack: psx_game_runtime::combat_timing::Request,
+    authored_dodge: psx_game_runtime::combat_timing::Request,
     attack_chain: psx_game_runtime::attack_chain::AttackChainState,
     chain_blend_ticks: u8,
     /// Floating damage numbers for hits dealt and taken. Purely
@@ -444,6 +460,7 @@ struct Playtest {
     /// spills its excess into Zenith.
     player_vitality: DualVitality,
     player_poise: psx_game_runtime::poise::Poise,
+    combat_flow: psx_game_runtime::combat_flow::CombatFlow,
     /// Which pool is active. Only the active pool takes damage and only the
     /// inactive one recovers, so swapping is how the player heals.
     player_stance: CombatStance,
@@ -733,6 +750,9 @@ impl Playtest {
     /// all-zero bytes can decode as `Some(<invalid payload>)`, and a
     /// `&mut Playtest` may only be minted once every field holds a valid
     /// value. Single-threaded boot path.
+    // Startup-only code: reserve RAM for gameplay allocations without shrinking hot render loops.
+    #[inline(never)]
+    #[cfg_attr(target_arch = "mips", optimize(size))]
     unsafe fn init_zeroed(scene: *mut Self) {
         use core::ptr::addr_of_mut;
         // Phase 1 -- validity: `None` for EVERY `Option` field, so the
@@ -750,6 +770,12 @@ impl Playtest {
         addr_of_mut!((*scene).player_scarf)
             .write(psx_game_runtime::model_rendering::PlayerScarf::new());
         addr_of_mut!((*scene).previous_player_actor_pose).write(None);
+        addr_of_mut!((*scene).hook_selected).write(None);
+        addr_of_mut!((*scene).hook_travel).write(None);
+        addr_of_mut!((*scene).hook_target).write(None);
+        addr_of_mut!((*scene).hook_attached).write(None);
+        addr_of_mut!((*scene).fall_from_arch).write(false);
+        addr_of_mut!((*scene).hook_charge).write(psx_game_runtime::hook_points::ArchCharge::EMPTY);
         addr_of_mut!((*scene).lock_target).write(None);
         addr_of_mut!((*scene).camera_recenter_requested).write(false);
         addr_of_mut!((*scene).soft_lock_target).write(None);
@@ -816,6 +842,7 @@ impl Playtest {
         self.player_contents_memo = None;
         self.player_vitality = DualVitality::equal(PLAYER_MAX_HEALTH);
         self.player_poise = psx_game_runtime::poise::Poise::EMPTY;
+        self.combat_flow = psx_game_runtime::combat_flow::CombatFlow::FULL;
         // Playtest lives in a zeroed MaybeUninit, and a zeroed stance config
         // would mean no damage and no recovery at all, so it is set explicitly
         // on every reset rather than relying on the zero pattern.

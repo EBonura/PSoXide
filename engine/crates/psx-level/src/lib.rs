@@ -798,8 +798,8 @@ pub struct LevelRoomRecord {
     pub resident_chunk_limit: u8,
     /// Maximum cooked rooms selected for drawing/collision for this world.
     pub visible_chunk_limit: u8,
-    /// Downward acceleration in engine units per fixed 60 Hz tick squared.
-    pub gravity_per_tick: i32,
+    /// Downward acceleration in Q8 engine units per fixed 60 Hz tick squared.
+    pub gravity_per_tick_q8: i32,
     /// First index into the global `MATERIALS` table for this
     /// room's material slice.
     pub material_first: MaterialIndex,
@@ -1461,6 +1461,8 @@ pub struct PlayerSpawnRecord {
 /// `LevelAssetRecord`s.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntityKind {
+    /// Elevated hook landing; marker floats above the authored foot position.
+    HookPoint,
     /// Visual marker (debug cube).
     Marker,
     /// Static mesh instance pinned by `resource_slot`.
@@ -1863,6 +1865,12 @@ pub struct LevelGameEntityRecord {
     /// Complete one-shot while Staggered: impact, disabled beat, and recovery.
     /// Cooked from the Stun action, with HitReact as the legacy fallback.
     pub stagger_clip: u16,
+    /// Authored stun speed; zero preserves legacy 3x playback.
+    pub stagger_speed_q8: u16,
+    /// Inclusive authored stun range.
+    pub stagger_frame_range: CharacterActionFrameRange,
+    /// Complete stun duration at 60 Hz; zero preserves the legacy 32 ticks.
+    pub stagger_ticks: u16,
     /// One-shot clip on death; holds its final frame as the corpse
     /// pose.
     pub death_clip: u16,
@@ -1907,6 +1915,8 @@ pub struct LevelGameEntityRecord {
     pub preferred_distance: u16,
     /// Half-width of the desired-distance band, in engine units.
     pub spacing_tolerance: u16,
+    /// Circling/retreat percentage of walk speed; retains fractional units.
+    pub spacing_speed_percent: u8,
     /// 60 Hz ticks between hold/circle intent re-evaluations.
     pub decision_interval_ticks: u8,
     /// Percentage of in-band decisions that choose circling.
@@ -1944,8 +1954,6 @@ pub struct LevelGameEntityRecord {
     /// a legal single-channel actor: the runtime treats an empty second pool
     /// as already spent, so the entity dies on the first pool alone.
     pub max_health_secondary: u16,
-    /// Circling/retreat percentage of walk speed; quantized to whole units, minimum one.
-    pub spacing_speed_percent: u8,
     /// Souls the player is credited for landing the killing blow.
     ///
     /// Authored per enemy so the reward curve is tuned in the editor next to
@@ -3776,7 +3784,7 @@ pub struct ParticleEmitterRecord {
 pub const CHARACTER_CLIP_NONE: OptionalModelClipIndex = OptionalModelClipIndex::NONE;
 
 /// Fixed action slots used by [`LevelCharacterRecord::action_clips`].
-pub const CHARACTER_ANIMATION_ACTION_COUNT: usize = 41;
+pub const CHARACTER_ANIMATION_ACTION_COUNT: usize = 45;
 
 /// Runtime animation action slot.
 ///
@@ -3872,6 +3880,14 @@ pub enum CharacterAnimationAction {
     RangedLeft = 39,
     /// Ready-weapon right pose.
     RangedRight = 40,
+    /// Hook anticipation and takeoff; final pose holds during wire flight.
+    HookLaunch = 41,
+    /// Surface-braced aim samples with fixed hand and foot contacts.
+    ArchPerch = 42,
+    /// Airborne release and sustained falling.
+    Fall = 43,
+    /// Ground-contact compression and recovery.
+    Land = 44,
 }
 
 impl CharacterAnimationAction {
@@ -3918,6 +3934,10 @@ impl CharacterAnimationAction {
         Self::RangedBackward,
         Self::RangedLeft,
         Self::RangedRight,
+        Self::HookLaunch,
+        Self::ArchPerch,
+        Self::Fall,
+        Self::Land,
     ];
 
     /// Convert to the cooked action slot index.
@@ -3998,6 +4018,47 @@ impl CharacterActionChain {
     };
 }
 
+/// Maximum explicit combat windows per character (192 bytes).
+pub const MAX_CHARACTER_COMBAT_WINDOWS: usize = 32;
+
+/// Meaning of a source-animation interval. Unauthored channels retain legacy behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum CombatWindowKind {
+    /// Accept and remember one attack press.
+    AttackBuffer,
+    /// Permit a remembered attack to replace recovery.
+    Attack,
+    /// Accept and remember one dodge press.
+    DodgeBuffer,
+    /// Permit a remembered dodge to replace recovery.
+    Dodge,
+    /// Permit locomotion to replace recovery.
+    Movement,
+    /// Replace the motor's dodge protection with this interval.
+    Invulnerable,
+    /// Replace the default heavy-hit armour interval.
+    Armored,
+}
+
+/// Half-open cooked-frame interval: start included, end excluded.
+/// Equal endpoints explicitly close a channel; action 255 is unused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CharacterCombatWindow {
+    /// Action slot or 255.
+    pub action: u8,
+    /// Window purpose.
+    pub kind: CombatWindowKind,
+    /// First included cooked frame.
+    pub start: u16,
+    /// First excluded cooked frame.
+    pub end: u16,
+}
+impl CharacterCombatWindow {
+    /// Unused entry.
+    pub const NONE: Self = Self { action: 255, kind: CombatWindowKind::AttackBuffer, start: 0, end: 0 };
+}
+
 /// Gameplay character -- backing model + role-clip mapping +
 /// capsule / camera / controller defaults. Layered on top of
 /// a [`LevelModelRecord`]; the player spawn references one of
@@ -4026,6 +4087,8 @@ pub struct LevelCharacterRecord {
     pub action_pushes: [CharacterActionPush; CHARACTER_ANIMATION_ACTION_COUNT],
     /// Bounded, optional attack handoffs. Empty entries use `CharacterActionChain::NONE`.
     pub action_chains: [CharacterActionChain; MAX_CHARACTER_ACTION_CHAINS],
+    /// Optional animation permissions and protection windows.
+    pub combat_windows: [CharacterCombatWindow; MAX_CHARACTER_COMBAT_WINDOWS],
     /// First rig-attached volume in `COMBAT_CAPSULES`.
     pub combat_capsule_first: CombatCapsuleIndex,
     /// Number of rig-attached volumes (bounded by
@@ -4647,3 +4710,6 @@ mod tests {
         assert_eq!(positive.offset_at_tick(25, 50), [1, 0]);
     }
 }
+
+/// Maximum authored elevated hook landings per project.
+pub const MAX_HOOK_POINTS: usize = 32;

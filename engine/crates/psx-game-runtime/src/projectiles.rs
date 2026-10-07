@@ -209,6 +209,14 @@ pub struct ProjectileSnapshot {
     pub lifetime_ticks: u16,
 }
 
+/// A live approaching projectile, not a prediction of an opponent's input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProjectileThreat {
+    pub position: [i32; 3],
+    pub velocity: [i32; 3],
+    pub ticks_to_contact: u16,
+}
+
 /// One actor hurtbox exposed to the projectile tick.
 ///
 /// Multiple entries may share a `target`; the resolver selects the earliest
@@ -431,6 +439,34 @@ impl<const N: usize> CombatProjectiles<N> {
     /// Whether no projectile is live.
     pub fn is_empty(&self) -> bool {
         !self.active.iter().any(|active| *active != 0)
+    }
+
+    /// Bounded look-ahead for an already visible, released hostile bolt.
+    /// The caller must still reject projectiles hidden behind world geometry.
+    #[cfg_attr(target_arch = "mips", optimize(size))]
+    pub fn incoming_threat(&self, team: CombatTeam, room: RoomIndex, feet: [i32;3],
+        radius: i32, height: i32) -> Option<ProjectileThreat> {
+        let mut result = None;
+        let mut soonest = 25;
+        for i in 0..N {
+            if self.active[i] == 0 || self.teams[i] == team || self.rooms[i] != room
+                || self.age_ticks[i] < 6 { continue; }
+            let p=self.positions[i]; let v=self.velocities[i];
+            let dx=feet[0].saturating_sub(p[0]); let dz=feet[2].saturating_sub(p[2]);
+            if dx.abs()>1024 || dz.abs()>1024 { continue; }
+            let speed=v[0].saturating_mul(v[0]).saturating_add(v[2].saturating_mul(v[2]));
+            if speed==0 { continue; }
+            let along=dx.saturating_mul(v[0]).saturating_add(dz.saturating_mul(v[2]));
+            let ticks=along/speed;
+            if ticks<1 || ticks>=soonest || ticks>i32::from(self.lifetime_ticks[i]) { continue; }
+            let miss_x=dx-v[0]*ticks; let miss_z=dz-v[2]*ticks;
+            let r=radius+i32::from(self.radii[i])+10;
+            let y=p[1]+v[1]*ticks;
+            if miss_x*miss_x+miss_z*miss_z>r*r || y<feet[1]-r || y>feet[1]+height+r { continue; }
+            soonest=ticks;
+            result=Some(ProjectileThreat { position:p, velocity:v, ticks_to_contact:ticks as u16 });
+        }
+        result
     }
 
     /// Read one live slot for rendering/debugging.
@@ -840,6 +876,21 @@ fn interpolate3_q12(start: [i32; 3], end: [i32; 3], phase_q12: u16) -> [i32; 3] 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn threat_read_requires_age_hostility_and_an_intersecting_trajectory() {
+        let mut p=CombatProjectiles::<2>::new();
+        let mut s=spawn(CombatTeam::Enemy);
+        s.position=[0,32,160];s.velocity=[0,0,-8];s.lifetime_ticks=120;
+        let i=p.spawn(s).unwrap();
+        assert!(p.incoming_threat(CombatTeam::Player,s.room,[0;3],12,64).is_none());
+        p.age_ticks[i]=6;
+        assert_eq!(p.incoming_threat(CombatTeam::Player,s.room,[0;3],12,64).unwrap().ticks_to_contact,20);
+        assert!(p.incoming_threat(CombatTeam::Enemy,s.room,[0;3],12,64).is_none());
+        p.velocities[i]=[8,0,0];
+        assert!(p.incoming_threat(CombatTeam::Player,s.room,[0;3],12,64).is_none());
+        p.velocities[i]=[0,0,8];
+        assert!(p.incoming_threat(CombatTeam::Player,s.room,[0;3],12,64).is_none());
+    }
 
     struct ClearWorld;
 

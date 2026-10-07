@@ -337,6 +337,16 @@ impl PlayerScarf {
         crystal: Option<TextureMaterial>, triangles: &mut PrimitivePacketArena<'_>,
         world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
     ) -> u16 {
+        self.draw_crystal_with_dash(camera, color, assembly, DashWireVisual::Solid, options, crystal, triangles, world)
+    }
+
+    /// Apply the body's dash wire/reassembly clock to the cloth as well.
+    pub fn draw_crystal_with_dash<const OT_DEPTH: usize>(
+        &self, camera: WorldCamera, color: (u8,u8,u8),
+        assembly: Option<ModelPhaseAssembly>, dash: DashWireVisual, options: WorldSurfaceOptions,
+        crystal: Option<TextureMaterial>, triangles: &mut PrimitivePacketArena<'_>,
+        world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+    ) -> u16 {
         if !self.active { return 0; }
         let mut vertices = [WorldVertex::ZERO; 32];
         // Two hand-shaped cloth edges, in 1/1024 of character height.
@@ -412,6 +422,19 @@ impl PlayerScarf {
             .into_iter()
             .enumerate()
             {
+                if !matches!(dash, DashWireVisual::Solid) {
+                    let p=indices.map(|i| projected[i]);
+                    if p.iter().all(|p| *p != ProjectedVertex::INVALID && p.sz > camera.projection.focal_length/2) {
+                        for edge in 0..3 {
+                            let _=world.submit_projected_line(triangles,[p[edge],p[(edge+1)%3]],DASH_WIRE_COLOR,options);
+                        }
+                    }
+                    let show = match dash {
+                        DashWireVisual::Restoring { progress_q8 } => (strip*2+facet)*255/30 < usize::from(progress_q8),
+                        _ => false,
+                    };
+                    if !show { continue; }
+                }
                 if let Some(material) = crystal {
                     let target = indices.map(|i| vertices[i]);
                     let fragment = match assembly {

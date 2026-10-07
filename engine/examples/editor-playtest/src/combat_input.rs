@@ -70,11 +70,13 @@ impl RangedReady {
         fire_until: 0,
     };
     pub fn tick(&mut self, enabled: bool, held: bool, interrupted: bool) {
-        if !enabled || !held || interrupted {
+        if !enabled || interrupted {
             self.ticks = 0;
             self.fire_until = 0;
-        } else {
+        } else if held {
             self.ticks = self.ticks.saturating_add(1).min(8);
+        } else {
+            self.ticks = 0;
         }
     }
     pub fn firing(&self, now: u32) -> bool {
@@ -88,6 +90,7 @@ impl RangedReady {
     pub fn aiming(&self) -> bool {
         self.ticks != 0
     }
+    pub fn ready(&self, now: u32) -> bool { self.aiming() || self.firing(now) }
     pub fn can_fire(&self) -> bool {
         self.ticks >= 8
     }
@@ -97,7 +100,7 @@ impl RangedReady {
 mod ranged_tests {
     use super::*;
     #[test]
-    fn releasing_aim_cancels_pending_shot_and_reentry_does_not_fire_it() {
+    fn releasing_precision_aim_preserves_shot_but_interruption_cancels_it() {
         let mut ready = RangedReady::EMPTY;
         for _ in 0..8 {
             ready.tick(true, true, false);
@@ -106,12 +109,12 @@ mod ranged_tests {
         assert!(ready.firing(110));
         assert!(!ready.firing(126));
         ready.tick(true, false, false);
-        assert!(!ready.firing(111));
+        assert!(ready.firing(111));
         for _ in 0..8 {
             ready.tick(true, true, false);
         }
         assert!(ready.can_fire());
-        assert!(!ready.firing(120));
+        assert!(ready.firing(120));
         ready.begin_shot(120, 26);
         ready.tick(true, true, true);
         assert!(!ready.firing(121));

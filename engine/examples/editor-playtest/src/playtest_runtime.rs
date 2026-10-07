@@ -111,7 +111,15 @@ const _: () = {
 /// must start crisply but settle slowly, and a gait change can afford a long
 /// fade only because the clips are phase-matched.
 fn player_blend_ticks(from: PlayerAnim, to: PlayerAnim) -> u32 {
-    if from == PlayerAnim::WalkWindup && to == PlayerAnim::Walk {
+    if to == PlayerAnim::Fall {
+        0
+    } else if to == PlayerAnim::Land {
+        2
+    } else if to == PlayerAnim::HookLaunch {
+        4
+    } else if from == PlayerAnim::HookLaunch {
+        10
+    } else if from == PlayerAnim::WalkWindup && to == PlayerAnim::Walk {
         // The windup reaches the moving walk entry pose. Blending from its
         // clamped endpoint would brake the stride again after preparation.
         0
@@ -645,10 +653,7 @@ impl Playtest {
         }
     }
 
-    /// Apply a legacy, untyped incoming hit. Horizon is the migration/default
-    /// channel; damage beyond its remaining health spills into Zenith. New
-    /// coloured attacks can call `DualVitality::apply_damage` directly once
-    /// their authored axis is available.
+    /// Apply an untyped incoming hit as aligned with the active stance.
     pub(super) fn apply_untyped_player_damage(&mut self, damage: u16) -> bool {
         let damage = self.vitality_modifiers().incoming_damage(damage);
         // Untyped damage has no colour to compare, so it is treated as aligned
@@ -658,9 +663,7 @@ impl Playtest {
         self.apply_stance_damage(active, damage)
     }
 
-    /// Route an authored coloured projectile into exactly one vitality pool.
-    /// Typed attacks deliberately never spill: reading the attack colour is
-    /// the player's opportunity to protect the correct half.
+    /// The projectile colour sets the multiplier; the active stance receives damage.
     pub(super) fn apply_typed_player_damage(
         &mut self,
         channel: psx_game_runtime::projectiles::ProjectileDamageChannel,
@@ -680,13 +683,17 @@ impl Playtest {
 
     /// Route one incoming hit through the stance.
     ///
-    /// Only the active pool is damaged; the attack's channel decides whether
-    /// that costs half or half again. A break swaps the stance here rather
-    /// than leaving the caller to notice.
+    /// Only the active pool is damaged. Ranged-equipped prototypes use 100%
+    /// matching / 125% opposite damage; other projects retain authored scaling.
+    /// A depleted pool swaps the stance here.
     fn apply_stance_damage(&mut self, attack: VitalityChannelId, damage: u16) -> bool {
         let before = u32::from(self.player_vitality.pool(VitalityChannelId::One).current())
             + u32::from(self.player_vitality.pool(VitalityChannelId::Two).current());
-        let config = self.player_stance_config;
+        let mut config = self.player_stance_config;
+        if self.player_has_ranged_weapon() {
+            config.aligned_damage_q12 = 4096;
+            config.opposed_damage_q12 = 5120;
+        }
         let outcome = self
             .player_stance
             .apply_damage(&mut self.player_vitality, attack, damage, &config)
@@ -757,6 +764,15 @@ impl Playtest {
     // Initial load and the menu share the full reset; keep one copy in RAM.
     #[inline(never)]
     pub(super) fn reset_new_game(&mut self) {
+        self.hook_travel = None;
+        self.hook_target = None;
+        self.hook_attached = None;
+        self.fall_from_arch = false;
+        self.hook_charge = psx_game_runtime::hook_points::ArchCharge::EMPTY;
+        self.hook_selected = None;
+        self.hook_visible = 0;
+        self.hook_fov_delta_q8 = 0;
+        self.hook_burst_started = false;
         self.opening = opening_sequence::OpeningSequence::default();
         // New Game must not reload a previous run from the card, including
         // when a card was absent at boot and becomes available later.
@@ -797,18 +813,21 @@ impl Playtest {
         // initial door states onto their box props (START_ON doors
         // begin open without a fire event).
         self.game_entities.spawn_from_records(GAME_ENTITIES);
+        self.game_entities.enable_combat_flow(self.player_has_ranged_weapon());
         self.game_entities
             .set_stance_swap_delay(self.player_stance_config.swap_cooldown_ticks);
         self.deferred_enemy_attacks.clear();
         self.combat_projectiles.clear();
         self.combat_projectile_impacts.clear();
-        self.dash_wake = psx_game_runtime::combat_feedback::DashWake::EMPTY;
         self.attack_buffer.clear();
+        self.authored_attack.clear();
+        self.authored_dodge.clear();
         self.attack_chain.clear();
         self.logic.init_from_records(LOGIC);
         self.logic_fired_reported = 0;
         self.player_vitality = DualVitality::equal(PLAYER_MAX_HEALTH);
         self.player_poise = psx_game_runtime::poise::Poise::EMPTY;
+        self.combat_flow = psx_game_runtime::combat_flow::CombatFlow::FULL;
         self.camera_recenter_requested = false;
         // Playtest lives in a zeroed MaybeUninit, and a zeroed stance config
         // would mean no damage and no recovery at all, so it is set explicitly
@@ -841,11 +860,13 @@ impl Playtest {
         self.ranged_ready = combat_input::RangedReady::EMPTY;
         self.aim_control = aim_control::AimControl::EMPTY;
         self.player_poise = psx_game_runtime::poise::Poise::EMPTY;
+        self.combat_flow = psx_game_runtime::combat_flow::CombatFlow::FULL;
         self.combat_projectiles.clear();
         self.combat_projectile_impacts.clear();
         self.deferred_enemy_attacks.clear();
-        self.dash_wake = psx_game_runtime::combat_feedback::DashWake::EMPTY;
         self.attack_buffer.clear();
+        self.authored_attack.clear();
+        self.authored_dodge.clear();
         self.attack_chain.clear();
         self.evade_buffer_vblanks = 0;
         self.swing_hit_mask = 0;
@@ -867,6 +888,15 @@ impl Playtest {
     /// (including fired-once triggers), door states, and box props are
     /// TRANSIENT and re-arm 1:1 from their cooked tables below.
     pub(super) fn respawn_after_death(&mut self) {
+        self.hook_travel = None;
+        self.hook_target = None;
+        self.hook_attached = None;
+        self.fall_from_arch = false;
+        self.hook_charge = psx_game_runtime::hook_points::ArchCharge::EMPTY;
+        self.hook_selected = None;
+        self.hook_visible = 0;
+        self.hook_fov_delta_q8 = 0;
+        self.hook_burst_started = false;
         let respawning_at_checkpoint = self.checkpoint.is_some();
         let (room, position, yaw) = if let Some(checkpoint) = self.checkpoint {
             (checkpoint.room, checkpoint.position, checkpoint.yaw)
@@ -902,6 +932,7 @@ impl Playtest {
         // as this life's PLAYER_WEAPON_ATTACHMENTS event.
         self.weapon_attach_reported = false;
         self.game_entities.spawn_from_records(GAME_ENTITIES);
+        self.game_entities.enable_combat_flow(self.player_has_ranged_weapon());
         self.game_entities
             .set_stance_swap_delay(self.player_stance_config.swap_cooldown_ticks);
         self.logic.init_from_records(LOGIC);
@@ -941,6 +972,8 @@ impl Playtest {
     /// Switch the player animation state, recording the outgoing
     /// pose so the renderer can crossfade instead of hard-cutting.
     pub(super) fn switch_player_anim(&mut self, anim: PlayerAnim, now: SimTick, video_hz: VideoHz) {
+        self.authored_attack.clear();
+        self.authored_dodge.clear();
         self.attack_chain.clear();
         self.chain_blend_ticks = 0;
         let old = self.anim_state;
@@ -1041,35 +1074,101 @@ impl Playtest {
         true
     }
 
-    pub(super) fn interrupt_player_on_poise_break(
+    #[cfg_attr(target_arch = "mips", optimize(size))]
+    pub(super) fn player_melee_read(&self) -> u8 {
+        if !matches!(self.anim_state, PlayerAnim::LightAttack | PlayerAnim::LightAttackFollowup
+            | PlayerAnim::LightAttackFinisher | PlayerAnim::HeavyAttack) { return 0; }
+        let (Some(c), Some(pose)) = (self.character, self.player_actor_pose) else { return 0; };
+        let first=c.combat_capsule_first.to_usize();
+        let frame=pose.pose().phase_q12() >> 12;
+        let mut first_hit=u32::MAX; let mut end_hit=0;
+        for capsule in COMBAT_CAPSULES.get(first..first+usize::from(c.combat_capsule_count)).unwrap_or(&[]) {
+            if capsule.flags & psx_level::combat_capsule_flags::HITBOX != 0
+                && capsule.action==self.anim_state.action().to_index() as u8 {
+                first_hit=first_hit.min(u32::from(capsule.active_start_frame));
+                end_hit=end_hit.max(u32::from(capsule.active_end_frame));
+            }
+        }
+        if first_hit==u32::MAX { 0 } else if frame<first_hit { 1 } else if frame>=end_hit { 3 } else { 2 }
+    }
+
+    /// The final half of a melee windup is readable and interruptible; active
+    /// heavy armour and ordinary movement never count as a firearm opening.
+    pub(super) fn player_shot_opening(&self) -> bool {
+        if !matches!(self.anim_state, PlayerAnim::LightAttack | PlayerAnim::LightAttackFollowup
+            | PlayerAnim::LightAttackFinisher | PlayerAnim::HeavyAttack) { return false; }
+        let (Some(c), Some(pose)) = (self.character, self.player_actor_pose) else { return false; };
+        let first = c.combat_capsule_first.to_usize();
+        let frame = pose.pose().phase_q12() >> 12;
+        COMBAT_CAPSULES.get(first..first + usize::from(c.combat_capsule_count)).unwrap_or(&[]).iter()
+            .filter(|c| c.flags & psx_level::combat_capsule_flags::HITBOX != 0
+                && c.action == self.anim_state.action().to_index() as u8)
+            .map(|c| u32::from(c.active_start_frame)).min()
+            .is_some_and(|start| frame >= start / 2 && frame < start)
+    }
+
+    pub(super) fn react_player_to_hit(
         &mut self,
         damage: u16,
         armored: bool,
+        shot_only: bool,
         ctx: &Ctx,
     ) -> bool {
-        if self.hazard_death_ticks_remaining != 0 || !self.player_poise.hit(damage, 20, armored) {
+        if self.hazard_death_ticks_remaining != 0 {
+            return false;
+        }
+        let poise_broken = self.combat_flow.can_interrupt() && !matches!(self.anim_state, PlayerAnim::Stun)
+            && self.player_poise.hit(damage, psx_game_runtime::character::PLAYER_POISE, armored);
+        if poise_broken { self.combat_flow.broke(); }
+        if shot_only && !poise_broken { return false; }
+        // Player animation starts and locks use the absolute simulation clock.
+        // Enemy animation phases use gameplay_tick; using that epoch here makes
+        // the reaction appear expired as soon as update_gameplay checks its lock.
+        let now = ctx.sim_tick;
+        let Some(mut reaction) = psx_game_runtime::character::player_damage_reaction(
+            poise_broken,
+            armored,
+            self.anim_state,
+            self.anim_lock_until_tick > now,
+        ) else {
+            return poise_broken;
+        };
+        // Older projects can still use their hit clip when no Stun is bound.
+        if reaction == PlayerAnim::Stun
+            && self.character.is_none_or(|c| c.action_clip(reaction.action()).is_none())
+        {
+            reaction = PlayerAnim::HitReact;
+        }
+        // An unbound ordinary hit should not freeze a character on an idle pose.
+        if !poise_broken
+            && self.character.is_none_or(|c| c.action_clip(reaction.action()).is_none())
+        {
             return false;
         }
         self.motor.interrupt_action();
         self.ranged_ready = combat_input::RangedReady::EMPTY;
         self.aim_control = aim_control::AimControl::EMPTY;
         self.attack_buffer.clear();
+        self.authored_attack.clear();
+        self.authored_dodge.clear();
         self.attack_chain.clear();
         self.evade_buffer_vblanks = 0;
         self.loco = LocoPhase::Idle;
-        let now = self.gameplay_tick(ctx.sim_tick);
-        let has_reaction = self.start_player_anim_action(PlayerAnim::HitReact, now, ctx.video_hz);
+        let has_reaction = self.start_player_anim_action(reaction, now, ctx.video_hz);
         let recovery = if has_reaction {
-            self.anim_lock_until_tick.saturating_sub(now).clamp(18, 48)
+            // Follow authored speed and range through the final recovery pose.
+            self.anim_lock_until_tick.saturating_sub(now).max(1)
         } else {
             18
         };
         // Missing hit-react assets still interrupt gameplay safely.
-        self.switch_player_anim(PlayerAnim::HitReact, now, ctx.video_hz);
+        if !has_reaction {
+            self.switch_player_anim(reaction, now, ctx.video_hz);
+        }
         self.anim_lock_until_tick = now.saturating_add(recovery);
         self.anim_blend_from = None;
-        telemetry::debug_log("player poise:break");
-        true
+        telemetry::debug_log(if poise_broken { "player poise:break" } else { "player hit:react" });
+        poise_broken
     }
 
     pub(super) fn spawn_combat_hit_sparks(
@@ -1124,6 +1223,19 @@ impl Playtest {
         true
     }
 
+    /// Resolve permissions on the same clip phase used by the visible player.
+    pub(super) fn player_combat_sample(&self, ctx: &Ctx) -> psx_game_runtime::combat_timing::Sample {
+        use psx_game_runtime::combat_timing::Sample;
+        let Some(character) = self.character.as_ref() else { return Sample::LEGACY; };
+        if !character.combat_windows.iter().any(|w| w.action == self.anim_state.action().to_index() as u8) { return Sample::LEGACY; }
+        let Some(clip) = self.models.get(character.model.to_usize()).copied().flatten()
+            .and_then(|model| model.clip(&self.clips, character.clip_for(self.anim_state))) else { return Sample::LEGACY; };
+        let phase = psx_game_runtime::model_rendering::animation_phase_at_tick_q12(
+            clip, ctx.sim_tick.saturating_sub(self.anim_start_tick), ctx.video_hz, false,
+            self.player_action_speed_q8(character, self.anim_state), character.action_frame_range(self.anim_state.action()));
+        psx_game_runtime::combat_timing::Sample::new(&character.combat_windows, self.anim_state.action().to_index() as u8, phase)
+    }
+
     /// Whether enemy melee and projectiles pass through the player this tick.
     ///
     /// The dodge's window is `roll_invulnerable_frames` motor ticks from its
@@ -1132,9 +1244,10 @@ impl Playtest {
     /// before `CombatStance::tick` in the same update, so contact resolution
     /// first sees elapsed = 1: `1..=frames` is `frames` ticks, the dodge's
     /// count, press tick included.
-    pub(super) fn player_invulnerable(&self) -> bool {
+    pub(super) fn player_invulnerable(&self, ctx: &Ctx) -> bool {
         let config = self.motor_config();
-        self.motor.is_action_invulnerable(config)
+        self.player_combat_sample(ctx).active(psx_level::CombatWindowKind::Invulnerable)
+            .unwrap_or_else(|| self.motor.is_action_invulnerable(config))
             || self.player_stance.swap_elapsed_ticks() <= u16::from(config.roll_invulnerable_frames)
     }
 
@@ -1149,8 +1262,9 @@ impl Playtest {
             ),
         }
         .without_stamina_limit();
+        config.roll_decelerates = self.character.is_some();
         if let Some(room) = ROOMS.get(self.room_index.to_usize()) {
-            config.gravity_per_tick = room.gravity_per_tick;
+            config.gravity_per_tick_q8 = room.gravity_per_tick_q8;
         }
         // Characterless brush projects use the cooker's matching debug body.
         // Authored characters keep their Character-bound radius and height so
@@ -1513,10 +1627,37 @@ impl Playtest {
             return 0;
         };
         let mut submitted = 0usize;
+        // A named eye socket follows the same sampled head as the visible mesh.
+        // Models without an authored eye simply omit this presentation effect.
+        for (index, record) in GAME_ENTITIES.iter().enumerate() {
+            let Some(progress) = self.game_entities.stance_eye_pulse_q12(index) else { continue; };
+            let room = record.room;
+            let room_camera = if self.bsp.is_some() {
+                if room != self.room_index { continue; }
+                camera
+            } else {
+                let Some(active) = self.window.rooms.iter().flatten().find(|r| r.index == room).copied() else { continue; };
+                if !self.portal_visibility_draws_room(room) { continue; }
+                camera_for_room(camera, active)
+            };
+            let Some(snapshot) = self.instance_actor_poses.get(usize::from(record.model_instance)).copied().flatten() else { continue; };
+            let model = snapshot.model();
+            let first = model.socket_first.to_usize();
+            let Some(socket) = MODEL_SOCKETS.get(first..first + usize::from(model.socket_count))
+                .and_then(|sockets| sockets.iter().find(|socket| socket.name == "stance_eye")) else { continue; };
+            let Some(eye) = snapshot.pose().joint_world_point(socket.joint, socket.translation) else { continue; };
+            let range = self.effect_depth_range(room);
+            let clearance = -current_actor_surface_options(room, self.bsp.is_some()).depth_bias + 2;
+            submitted += psx_game_runtime::particles::draw_stance_eye_pulse(
+                eye, progress, stance_rgb(self.game_entities.stance(index)), room_camera,
+                DepthRange::new(range.near() + clearance, range.far() + clearance),
+                particle_material, ot, primitive_packets,
+            );
+        }
         // Charge flares are sampled from the same retained pose token as the
         // eventual release, so the animated muzzle and presentation cannot
         // drift apart even when NPC simulation runs below source clip rate.
-        if self.ranged_ready.aiming() && self.anim_state == PlayerAnim::RangedAttack
+        if self.ranged_ready.firing(self.overlay_sim_tick.as_u32().wrapping_add(self.gameplay_epoch.as_u32()))
             && self.ranged_ready.released == 0
         {
             if let (Some(character), Some(pose)) = (self.character, self.player_actor_pose) {
@@ -1827,6 +1968,9 @@ impl Playtest {
             config.profile_response_q12 = 1024;
             config.preserve_profile_pitch = true;
             if self.ranged_ready.aiming() {
+                // Sky arches need an upward sightline; free and locked profiles stay authored.
+                config.pitch_min_q12 = -796;
+                config.pitch_max_q12 = 796;
                 config.composition_override = Some(psx_engine::ThirdPersonCameraProfile {
                     distance: camera.distance * 10 / 13,
                     height: camera.target_height + 16,
@@ -1907,7 +2051,13 @@ impl Playtest {
     }
 
     pub(super) fn update_follow_camera(&mut self, ctx: &Ctx) -> WorldCamera {
-        let camera = self.solve_follow_camera(ctx);
+        let mut camera = self.solve_follow_camera(ctx);
+        let age = self.hook_travel.map(|flight| ctx.sim_tick.as_u32().wrapping_sub(flight.started));
+        self.hook_fov_delta_q8 = psx_game_runtime::hook_points::ease_lens_q8(
+            self.hook_fov_delta_q8, psx_game_runtime::hook_points::lens_target_q8(age));
+        // Apply after profile solving so all free/locked user settings remain the baseline.
+        camera.projection.focal_length = (camera.projection.focal_length
+            * (256 + self.hook_fov_delta_q8) / 256).max(1);
         #[cfg(feature = "emulator-telemetry")]
         if self.player_has_ranged_weapon() && ctx.sim_tick.every(6) {
             let [x, y] = self.aim_control.angles();
@@ -1941,7 +2091,7 @@ impl Playtest {
         if self.aim_control.camera_transition(self.ranged_ready.aiming(), self.is_locked()) {
             self.camera.release_lock_preserving_view();
         }
-        let config = self.camera_config();
+        let mut config = self.camera_config();
         let mut input = if self.is_locked() {
             ThirdPersonCameraInput {
                 yaw_delta_q12: 0,
@@ -1964,6 +2114,23 @@ impl Playtest {
             let (x, y) = camera_stick_axes(ctx, self.analog_deadzone);
             input.yaw_delta_q12 = (-i32::from(x) * 12 / 128) as i16;
             input.pitch_delta_q12 = (i32::from(y) * 10 / 128) as i16;
+            input.recenter = false;
+        }
+        if let Some(flight) = self.hook_travel {
+            config.accelerated_orbit_speed = None;
+            config.auto_align_when_moving = false;
+            config.preserve_profile_pitch = true;
+            config.position_lag_shift = 0;
+            config.position_vertical_lag_shift = Some(0);
+            config.focus_lag_shift = 0;
+            config.focus_vertical_lag_shift = Some(0);
+            // Align during anticipation, then hold exactly behind the route.
+            // Both axes ignore stick/recenter input until flight is finished.
+            let yaw_error = self.camera.yaw().shortest_delta_q12(flight.camera_yaw(self.camera.yaw()));
+            input.yaw_delta_q12 = if ctx.sim_tick.as_u32().wrapping_sub(flight.started) < psx_game_runtime::hook_points::LAUNCH_TICKS {
+                yaw_error.clamp(-96, 96)
+            } else { yaw_error };
+            input.pitch_delta_q12 = self.hook_camera_pitch - self.camera.pitch_q12();
             input.recenter = false;
         }
         let lock_target = if self.ranged_ready.aiming() {
