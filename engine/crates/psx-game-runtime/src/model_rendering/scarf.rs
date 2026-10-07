@@ -419,11 +419,12 @@ impl PlayerScarf {
                         None => Some(target),
                     };
                     if let Some(fragment) = fragment {
-                        // Each broad face crosses the gradient. Slow movement of
-                        // the lookup makes the cloth shimmer without noise.
-                        let drift = ((self.tick / 3 + strip as u32 * 7) % 40) as i32;
-                        let uvs = if facet == 0 { [(8+drift,8),(88+drift,18),(16+drift,108)] }
-                                  else { [(16+drift,108),(88+drift,18),(88+drift,108)] };
+                        // Both triangles share the same continuous strip UVs.
+                        // Cloth movement supplies motion; the surface does not crawl.
+                        let v0 = if strip < 8 { 8 } else { 8 + (strip as i32 - 8) * 14 };
+                        let v1 = if strip < 8 { 108 } else { v0 + 14 };
+                        let uvs = if facet == 0 { [(20,v0),(20,v1),(108,v0)] }
+                                  else { [(108,v0),(20,v1),(108,v1)] };
                         submitted += submit_crystal_cloth(fragment.map(|v| camera.view_vertex(v)), uvs,
                             camera, material, options.with_material_layer(material), triangles, world);
                     }

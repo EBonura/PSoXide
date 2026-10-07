@@ -699,6 +699,8 @@ pub struct LevelCameraProfile {
     pub height: i32,
     /// Focus offset above the player root.
     pub target_height: i32,
+    /// Signed camera-right offset in runtime world units.
+    pub shoulder_offset: i32,
     /// Vertical lens angle in degrees.
     pub fov_y_degrees: u8,
 }

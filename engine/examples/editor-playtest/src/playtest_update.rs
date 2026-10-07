@@ -684,8 +684,12 @@ impl Playtest {
             if self.is_locked() {
                 self.lock_target = None;
             } else {
-                self.lock_target = self.find_best_lock_target(LOCK_RANGE);
-                self.camera_recenter_requested = self.lock_target.is_none();
+                // Read the current hold so simultaneous L2/R3 uses the reticle
+                // even before this tick has readied the weapon.
+                let aiming = ctx.is_held(button::L2) && self.player_has_ranged_weapon()
+                    && self.player_stance.active() == VitalityChannelId::Two;
+                self.lock_target = self.find_lock_target(LOCK_RANGE, aiming);
+                self.camera_recenter_requested = self.lock_target.is_none() && !aiming;
             }
             if self.is_locked() {
                 telemetry::debug_log("player lock:on");
@@ -765,6 +769,8 @@ impl Playtest {
             || self.player_stance.swap_in_progress(&self.player_stance_config);
         self.ranged_ready.tick(ranged && self.player_stance.active() == VitalityChannelId::Two,
             ctx.is_held(button::L2), interrupted);
+        self.aim_control.tick(self.ranged_ready.aiming(), self.is_locked(),
+            camera_stick_axes(ctx, self.analog_deadzone));
         if !self.ranged_ready.aiming() && self.anim_state == PlayerAnim::RangedAttack {
             // Lowering the weapon or dodging cancels a shot not yet released.
             self.anim_lock_until_tick = now;
@@ -772,10 +778,12 @@ impl Playtest {
             self.attack_buffer.clear();
         }
 
-        let lock_facing_yaw = self
+        let lock_facing_yaw = if self.ranged_ready.aiming() {
+            Some(self.ranged_facing_yaw())
+        } else { self
             .lock_target_position()
             .and_then(|target| psx_engine::yaw_to_point(self.motor.position(), target))
-            .or_else(|| self.ranged_ready.aiming().then(|| self.ranged_facing_yaw()));
+        };
         // The stick is read every tick, locked or not, so the evade latch
         // below always sees the direction the player is holding.
         let stick_input = motor_input(
@@ -1145,7 +1153,15 @@ impl Playtest {
                 self.lock_invalid_ticks = 0;
             } else if self.lock_target_valid(LOCK_BREAK_RANGE) {
                 self.lock_invalid_ticks = 0;
-                self.update_lock_target_switch(ctx);
+                if ranged && ctx.is_held(button::L2)
+                    && self.player_stance.active() == VitalityChannelId::Two {
+                    // Require stick neutral before a later target-switch flick;
+                    // releasing L2 with the stick held must not switch enemies.
+                    let (x, _) = ctx.pad.sticks.right_centered();
+                    self.lock_switch_stick_held = abs_i16(x) > LOCK_SWITCH_STICK_RELEASE;
+                } else {
+                    self.update_lock_target_switch(ctx);
+                }
             } else if self.lock_invalid_ticks >= LOCK_BREAK_GRACE_VBLANKS {
                 self.lock_target = None;
                 self.lock_switch_stick_held = false;
@@ -1158,7 +1174,7 @@ impl Playtest {
         self.camera_turning_last_tick = !self.is_locked()
             && psx_engine::Deadzone::new(self.analog_deadzone)
                 .outside(camera_right_x, camera_right_y);
-        if SOFT_LOCK_ENABLED {
+        if SOFT_LOCK_ENABLED && !self.ranged_ready.aiming() {
             self.update_soft_lock(ctx);
         } else {
             self.soft_lock_target = None;

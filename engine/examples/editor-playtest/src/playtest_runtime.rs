@@ -815,6 +815,7 @@ impl Playtest {
         // on every reset rather than relying on the zero pattern.
         self.player_stance = CombatStance::new(VitalityChannelId::One);
         self.ranged_ready = combat_input::RangedReady::EMPTY;
+        self.aim_control = aim_control::AimControl::EMPTY;
         self.vitality_circles = VitalityCircleState::EMPTY;
         self.power_up_loadout = PowerUpLoadout::DEFAULT;
         self.power_up_inventory = BoostInventory::EMPTY;
@@ -838,6 +839,7 @@ impl Playtest {
         self.player_vitality.refill();
         self.player_stance = CombatStance::new(VitalityChannelId::One);
         self.ranged_ready = combat_input::RangedReady::EMPTY;
+        self.aim_control = aim_control::AimControl::EMPTY;
         self.player_poise = psx_game_runtime::poise::Poise::EMPTY;
         self.combat_projectiles.clear();
         self.combat_projectile_impacts.clear();
@@ -853,6 +855,7 @@ impl Playtest {
         self.player_contents_memo = None;
         self.motor.interrupt_action();
         self.ranged_ready = combat_input::RangedReady::EMPTY;
+        self.aim_control = aim_control::AimControl::EMPTY;
         self.loco = LocoPhase::Idle;
     }
 
@@ -1049,6 +1052,7 @@ impl Playtest {
         }
         self.motor.interrupt_action();
         self.ranged_ready = combat_input::RangedReady::EMPTY;
+        self.aim_control = aim_control::AimControl::EMPTY;
         self.attack_buffer.clear();
         self.attack_chain.clear();
         self.evade_buffer_vblanks = 0;
@@ -1767,6 +1771,7 @@ impl Playtest {
                     height: profile.height,
                     target_height: profile.target_height,
                     fov_y_degrees: profile.fov_y_degrees,
+                    shoulder_offset: profile.shoulder_offset,
                 });
         config.max_distance = config
             .max_distance
@@ -1782,6 +1787,26 @@ impl Playtest {
         config.focus_vertical_lag_shift = Some(camera.focus_vertical_lag_shift);
         config.distance_lag_shift = camera.distance_lag_shift;
         config.collision_solve_interval = CAMERA_COLLISION_SOLVE_INTERVAL;
+        if self.player_has_ranged_weapon() {
+            // Aim overrides composition, never the persistent target. Reversing
+            // L2 changes the destination of the same live blend.
+            config.blend_profiles = true;
+            config.profile_response_q12 = 1024;
+            config.preserve_profile_pitch = true;
+            if self.ranged_ready.aiming() {
+                config.composition_override = Some(psx_engine::ThirdPersonCameraProfile {
+                    distance: camera.distance * 10 / 13,
+                    height: camera.target_height + 16,
+                    target_height: camera.target_height,
+                    shoulder_offset: camera.distance * 3 / 26,
+                    fov_y_degrees: camera.fov_y_degrees,
+                });
+                config.lock_frame_percent = 0;
+                config.lock_target_framing = true;
+                config.auto_align_when_moving = false;
+                config.accelerated_orbit_speed = None;
+            }
+        }
         config
     }
 
@@ -1851,6 +1876,18 @@ impl Playtest {
     pub(super) fn update_follow_camera(&mut self, ctx: &Ctx) -> WorldCamera {
         let camera = self.solve_follow_camera(ctx);
         #[cfg(feature = "emulator-telemetry")]
+        if self.player_has_ranged_weapon() && ctx.sim_tick.every(6) {
+            let [x, y] = self.aim_control.angles();
+            let [tx, ty, tz] = self.ranged_target();
+            crate::debug_runtime::debug_log_aim_camera([
+                ctx.sim_tick.as_u32() as i32, i32::from(self.ranged_ready.aiming()),
+                i32::from(self.is_locked()), i32::from(x), i32::from(y),
+                camera.position.x, camera.position.y, camera.position.z,
+                self.camera.distance(), i32::from(self.camera.pitch_q12()), tx, ty, tz,
+                self.lock_target.map_or(-1, |index| index as i32),
+            ]);
+        }
+        #[cfg(feature = "emulator-telemetry")]
         if ctx.sim_tick.every(30) {
             debug_log_camera_profile(
                 ctx.sim_tick.as_u32(),
@@ -1868,6 +1905,9 @@ impl Playtest {
     }
 
     fn solve_follow_camera(&mut self, ctx: &Ctx) -> WorldCamera {
+        if self.aim_control.camera_transition(self.ranged_ready.aiming(), self.is_locked()) {
+            self.camera.release_lock_preserving_view();
+        }
         let config = self.camera_config();
         let mut input = if self.is_locked() {
             ThirdPersonCameraInput {
@@ -1886,7 +1926,19 @@ impl Playtest {
             )
         };
         input.recenter |= core::mem::take(&mut self.camera_recenter_requested);
-        let lock_target = if config.lock_target_framing {
+        if self.ranged_ready.aiming() && !self.is_locked() {
+            // Deliberate aiming uses a lower, unaccelerated stick rate.
+            let (x, y) = camera_stick_axes(ctx, self.analog_deadzone);
+            input.yaw_delta_q12 = (-i32::from(x) * 12 / 128) as i16;
+            input.pitch_delta_q12 = (i32::from(y) * 10 / 128) as i16;
+            input.recenter = false;
+        }
+        let lock_target = if self.ranged_ready.aiming() {
+            self.lock_target_indicator_position().map(|_| {
+                let [x, y, z] = self.ranged_target();
+                RoomPoint::new(x, y, z)
+            })
+        } else if config.lock_target_framing {
             self.lock_target
                 .or(self.soft_lock_target)
                 .and_then(|index| self.camera_target_anchor(index))
@@ -2220,6 +2272,10 @@ impl Playtest {
     }
 
     pub(super) fn find_best_lock_target(&self, range: i32) -> Option<usize> {
+        self.find_lock_target(range, self.ranged_ready.aiming())
+    }
+
+    pub(super) fn find_lock_target(&self, range: i32, aiming: bool) -> Option<usize> {
         let player = self.motor.position();
         let view_yaw = self.camera.yaw().add(Angle::HALF);
         let range_sq = square_i32_saturating(range);
@@ -2239,6 +2295,16 @@ impl Playtest {
             let dz = point.z.saturating_sub(player.z);
             let dist_sq = square_i32_saturating(dx).saturating_add(square_i32_saturating(dz));
             if dist_sq == 0 || dist_sq > range_sq {
+                continue;
+            }
+            if aiming {
+                let Some(projected) = self.target_indicator_position(index)
+                    .and_then(|p| self.render_camera.project_world(p)) else { continue; };
+                let dx = i32::from(projected.sx) - i32::from(self.render_camera.projection.screen_x);
+                let dy = i32::from(projected.sy) - i32::from(self.render_camera.projection.screen_y);
+                if dx.abs() > 100 || dy.abs() > 80 { continue; }
+                let score = -(dx * dx + dy * dy);
+                if best.is_none_or(|(_, previous)| score > previous) { best = Some((index, score)); }
                 continue;
             }
             let Some((screen_x_q8, forward)) = horizontal_view_coordinates(player, point, view_yaw)

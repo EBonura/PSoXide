@@ -40,7 +40,8 @@ pub(super) fn lock_pitch_goal(
     let horizontal = isqrt_i32(x * x + z * z);
     let range = isqrt_i32(x * x + y * y + z * z).max(1);
     let elevation = i32::from(elevation_angle(y, horizontal));
-    let shift = i32::from(config.fov_y_degrees.clamp(38, 48)) * 4096 * 45 / 72_000;
+    let shift = i32::from(config.fov_y_degrees.clamp(38, 48)) * 4096
+        * i32::from(config.lock_frame_percent.min(90)) / 72_000;
     let correction_sin =
         ((boom.clamp(0, 65_535) / divisor) * signed_q12_angle(shift as i16).sin().raw() / range)
             .clamp(0, 4096);

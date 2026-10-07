@@ -996,3 +996,11 @@ pub(super) fn debug_log_player_weapon(values: [i32; 13]) {
     for value in values { line.push_i32(value); line.push_byte(b','); }
     line.emit();
 }
+
+/// Mode, tether and composition evidence for the deterministic camera tape.
+#[cfg(feature = "emulator-telemetry")]
+pub(super) fn debug_log_aim_camera(values: [i32; 14]) {
+    let mut line = DebugLogLine::new("aim-camera,");
+    for value in values { line.push_i32(value); line.push_byte(b','); }
+    line.emit();
+}

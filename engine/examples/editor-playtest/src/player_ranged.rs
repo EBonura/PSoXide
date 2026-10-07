@@ -27,7 +27,26 @@ impl Playtest {
 
     pub(super) fn ranged_target(&self) -> [i32; 3] {
         if let Some(target) = self.lock_target_indicator_position() {
-            return [target.x, target.y, target.z];
+            // Anchor the offset to the player/target axis, not the pursuing
+            // camera, so following it cannot feed back into the aim point.
+            let player = self.motor.position();
+            let back = psx_engine::yaw_to_point(player, target)
+                .unwrap_or(self.motor.yaw())
+                .add(Angle::HALF);
+            let depth = psx_math::int32::isqrt_i32(distance_xz_sq(player, target))
+                .saturating_add(self.camera.distance())
+                .clamp(1, 16_383);
+            let [x, y] = self.aim_control.angles();
+            let displacement = |angle: i16| {
+                let a = Angle::ZERO.add_signed_q12(angle);
+                depth * a.sin().raw() / a.cos().raw().max(1)
+            };
+            let right = displacement(x);
+            return [
+                target.x.saturating_add(back.cos().mul_i32(right)),
+                target.y.saturating_sub(displacement(y)),
+                target.z.saturating_sub(back.sin().mul_i32(right)),
+            ];
         }
         // The orbit basis points from the subject toward the camera, so its
         // horizontal negative is the screen-centre shooting direction.

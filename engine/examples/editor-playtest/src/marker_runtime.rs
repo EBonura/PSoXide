@@ -835,10 +835,19 @@ pub(super) fn draw_lock_target_indicator(
     center.sx = center.sx.saturating_sub(4);
     center.sy = center.sy.saturating_sub(2);
 
+    draw_target_reticle(center, elapsed_tick, stance);
+}
+
+/// Shared bracket artwork for lock-on and free aiming. Only lock-on applies
+/// the character's optical correction; free aim stays on the camera ray.
+pub(super) fn draw_target_reticle(
+    center: ProjectedVertex,
+    elapsed_tick: SimTick,
+    stance: psx_game_runtime::vitality::VitalityChannelId,
+) {
     let (breath, brightness) = target_lock_pulse(elapsed_tick);
     let white = target_lock_color(TARGET_LOCK_WHITE, brightness);
-    // The inner bracket carries the active stance, so the reticle says which
-    // pair R1/R2 will throw without the player leaving the target.
+    // The inner bracket carries the active stance.
     let cyan = target_lock_color(
         match stance {
             psx_game_runtime::vitality::VitalityChannelId::One => TARGET_LOCK_EMBER,

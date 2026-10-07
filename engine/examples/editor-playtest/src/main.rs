@@ -136,6 +136,7 @@ use psx_game_runtime::cd_stream;
 mod character_runtime;
 mod combat_input;
 mod player_ranged;
+mod aim_control;
 mod damage_numbers;
 mod debug_runtime;
 mod game_logic_runtime;
@@ -144,6 +145,7 @@ mod input;
 mod loc;
 mod marker_runtime;
 mod model_rendering;
+mod crystal_palette;
 mod overlay;
 mod particle_runtime;
 mod playtest_runtime;
@@ -416,6 +418,7 @@ struct Playtest {
     /// state, so it remains in scene BSS beside the entity SoA.
     combat_projectiles: RuntimeCombatProjectiles,
     ranged_ready: combat_input::RangedReady,
+    aim_control: aim_control::AimControl,
     /// Fixed-capacity visual aftermath for stopped combat projectiles.
     combat_projectile_impacts: RuntimeProjectileImpactEffects,
     dash_wake: psx_game_runtime::combat_feedback::DashWake,

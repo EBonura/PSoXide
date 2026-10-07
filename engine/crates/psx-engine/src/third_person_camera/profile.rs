@@ -10,13 +10,15 @@ pub struct ThirdPersonCameraProfile {
     pub height: i32,
     /// Focus height above the player root.
     pub target_height: i32,
+    /// Signed camera-right offset; zero centres the player.
+    pub shoulder_offset: i32,
     /// Vertical field of view, clamped to 38-48 degrees.
     pub fov_y_degrees: u8,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(super) struct ProfileBlend {
-    values: [i32; 4],
+    values: [i32; 5],
     distance: i32,
     active: bool,
     changing: bool,
@@ -28,7 +30,7 @@ pub(super) struct ProfileBlend {
 impl ProfileBlend {
     pub const fn new() -> Self {
         Self {
-            values: [0; 4],
+            values: [0; 5],
             distance: 0,
             active: false,
             changing: false,
@@ -38,18 +40,21 @@ impl ProfileBlend {
         }
     }
 
-    fn goal(&self, config: ThirdPersonCameraConfig, locked: bool) -> [i32; 4] {
+    fn goal(&self, config: ThirdPersonCameraConfig, locked: bool) -> [i32; 5] {
         let base = ThirdPersonCameraProfile {
             distance: config.distance,
             height: config.height,
             target_height: config.target_height,
             fov_y_degrees: config.fov_y_degrees,
+            shoulder_offset: config.shoulder_offset,
         };
-        let profile = if locked {
-            config.lock_profile.unwrap_or(base)
-        } else {
-            base
-        };
+        let profile = config.composition_override.unwrap_or_else(|| {
+            if locked {
+                config.lock_profile.unwrap_or(base)
+            } else {
+                base
+            }
+        });
         [
             profile
                 .distance
@@ -62,6 +67,7 @@ impl ProfileBlend {
             } else {
                 i32::from(profile.fov_y_degrees.clamp(38, 48)) * 4096
             },
+            profile.shoulder_offset.clamp(-32_767, 32_767) * 4096,
         ]
     }
 
@@ -92,9 +98,13 @@ impl ProfileBlend {
     }
 
     pub fn snap(&mut self, config: ThirdPersonCameraConfig, locked: bool) {
-        self.active =
-            config.blend_profiles || config.fov_y_degrees != 0 || config.lock_profile.is_some();
-        self.inherited_lens = if locked {
+        self.active = config.blend_profiles
+            || config.fov_y_degrees != 0
+            || config.lock_profile.is_some()
+            || config.composition_override.is_some();
+        self.inherited_lens = if let Some(profile) = config.composition_override {
+            profile.fov_y_degrees == 0
+        } else if locked {
             config
                 .lock_profile
                 .map_or(config.fov_y_degrees == 0, |p| p.fov_y_degrees == 0)
@@ -107,15 +117,19 @@ impl ProfileBlend {
     }
 
     pub fn advance(&mut self, config: ThirdPersonCameraConfig, locked: bool) {
-        let enabled =
-            config.blend_profiles || config.fov_y_degrees != 0 || config.lock_profile.is_some();
+        let enabled = config.blend_profiles
+            || config.fov_y_degrees != 0
+            || config.lock_profile.is_some()
+            || config.composition_override.is_some();
         if !self.active || !enabled || !config.blend_profiles {
             let before = self.values;
             self.snap(config, locked);
             self.changing = enabled && before != self.values;
             return;
         }
-        self.inherited_lens = if locked {
+        self.inherited_lens = if let Some(profile) = config.composition_override {
+            profile.fov_y_degrees == 0
+        } else if locked {
             config
                 .lock_profile
                 .map_or(config.fov_y_degrees == 0, |p| p.fov_y_degrees == 0)
@@ -126,10 +140,11 @@ impl ProfileBlend {
         let before = self.values;
         let distance_before = self.distance;
         // 1-sqrt(1-alpha30), rounded to Q12: .05 -> 104, .1 -> 210.
+        let response = i32::from(config.profile_response_q12.clamp(1, 4096));
         for (value, target) in self.values.iter_mut().zip(goal) {
-            *value = approach(*value, target, 104);
+            *value = approach(*value, target, response);
         }
-        self.distance = approach(self.distance, self.values[0], 210);
+        self.distance = approach(self.distance, self.values[0], response.max(210));
         self.changing = before != self.values || distance_before != self.distance;
     }
 
@@ -140,6 +155,7 @@ impl ProfileBlend {
             config.height = (self.values[1] + 2048) / 4096;
             config.target_height = (self.values[2] + 2048) / 4096;
             config.fov_y_degrees = ((self.values[3] + 2048) / 4096) as u8;
+            config.shoulder_offset = self.values[4] / 4096;
         }
         config
     }
@@ -178,6 +194,46 @@ fn approach(value: i32, goal: i32, rate: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn held_composition_is_independent_of_lock_and_reverses_without_reset() {
+        let mut c = config();
+        c.profile_response_q12 = 1024;
+        let aim = ThirdPersonCameraProfile {
+            distance: 160,
+            height: 96,
+            target_height: 80,
+            shoulder_offset: 24,
+            fov_y_degrees: 43,
+        };
+        for locked in [false, true] {
+            let mut blend = ProfileBlend::new();
+            blend.snap(c, locked);
+            let normal = blend.apply(c);
+            c.composition_override = Some(aim);
+            for _ in 0..6 {
+                blend.advance(c, locked);
+            }
+            let partial = blend.apply(c);
+            assert!(partial.distance > aim.distance && partial.distance < normal.distance);
+            assert!(partial.shoulder_offset > 0 && partial.shoulder_offset < 24);
+            c.composition_override = None;
+            blend.advance(c, locked);
+            assert!(blend.apply(c).shoulder_offset < partial.shoulder_offset);
+            assert!(blend.apply(c).shoulder_offset > 0);
+            c.composition_override = Some(aim);
+            for _ in 0..24 {
+                blend.advance(c, !locked);
+            }
+            assert!((blend.apply(c).distance - aim.distance).abs() <= 1);
+            assert!((blend.apply(c).shoulder_offset - 24).abs() <= 1);
+            c.composition_override = None;
+            for _ in 0..120 {
+                blend.advance(c, locked);
+            }
+            assert_eq!(blend.apply(c).distance, normal.distance);
+            assert_eq!(blend.apply(c).shoulder_offset, 0);
+        }
+    }
     fn config() -> ThirdPersonCameraConfig {
         let mut c = ThirdPersonCameraConfig::character(219, 113, 73);
         c.fov_y_degrees = 43;
@@ -187,6 +243,7 @@ mod tests {
             height: 119,
             target_height: 78,
             fov_y_degrees: 46,
+            shoulder_offset: 0,
         });
         c
     }

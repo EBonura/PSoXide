@@ -183,23 +183,17 @@ impl StanceCluts {
         let slot = model_texture_slot(texture)?;
         let index = stance.index();
         if self.player[index] == 0 {
-            let color = stance_rgb(stance);
+            let palette = super::crystal_palette::STANCE_CRYSTAL_PALETTES[index];
             self.player[index] = ensure_resident_clut_variant(texture, index as u8, |entries| {
                 for entry in entries {
                     if *entry == 0 { continue; }
                     let level = bgr555(*entry).into_iter().max().unwrap_or(0);
-                    let white = ((level - 20).max(0) * 256 / 11).min(256);
-                    let rgb = [color.0, color.1, color.2].map(|channel| {
-                        let tinted = i32::from(channel) * level / 255;
-                        (tinted + (level - tinted) * white / 256).clamp(0,31)
-                    });
-                    *entry = pack_bgr555(rgb) | if level < 26 { 0x8000 } else { 0 };
+                    *entry = palette[((level * 15 + 15) / 31).clamp(0, 15) as usize];
                 }
             })?;
         }
         Some(TextureMaterial::opaque(self.player[index], slot.tpage_word, (128,128,128))
-            .with_texture_window(slot.texture_window)
-            .with_blend_mode(BlendMode::Average))
+            .with_texture_window(slot.texture_window))
     }
 
     /// Build the Horizon and Zenith palette copies of one freshly uploaded

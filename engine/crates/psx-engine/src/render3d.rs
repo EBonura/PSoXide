@@ -480,6 +480,8 @@ pub enum ModelUvMapping {
     /// The model must carry the FACET_REFLECTION asset flag to preserve these bytes.
     /// Normals are bind-space Q7; the joint view matrix rotates them each frame.
     /// This deliberately approximates blended joint normals by the dominant joint.
+    /// Optional final UV-word bits 12-14 select material strips 1-4 across
+    /// the atlas width. Zero uses the full map. Bit 15 enables corner gradients.
     FacetReflection {
         /// Reflection-map width in texels.
         texture_width: u8,

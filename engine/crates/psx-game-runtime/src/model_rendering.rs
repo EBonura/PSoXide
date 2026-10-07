@@ -501,7 +501,7 @@ impl RuntimeModelAsset {
                 atlas_slot.clut_word,
                 atlas_slot.tpage_word,
                 (0x80, 0x80, 0x80),
-            ),
+            ).with_texture_window(atlas_slot.texture_window),
             clip_first: record.clip_first,
             clip_count: record.clip_count,
             default_clip: record.default_clip,
@@ -2812,6 +2812,29 @@ mod tests {
             let mut cursor=0;
             assert_eq!(decode_model_render_faces(model,128,128,&mut faces,&mut cursor),Some(1));
             assert_eq!(faces[0].uvs(),if metadata {uvs} else {[(127,127),(127,23),(127,127)]});
+
+            // The atlas may occupy any quadrant of a shared 4bpp page.
+            // Exercise the actual loader, not just the material constructor.
+            let record = LevelModelRecord {
+                name: "quadrant fixture", mesh_asset: AssetId(1), texture_asset: Some(AssetId(7)),
+                clip_first: ModelClipTableIndex(0), clip_count: 0, default_clip: ModelClipIndex(0),
+                socket_first: ModelSocketIndex(0), socket_count: 0,
+                world_height: 100, collision_radius: 10, flags: 0,
+            };
+            for (u, v) in [(0, 0), (128, 0), (0, 128), (128, 128)] {
+                let window = TextureWindow::power_of_two_tile(u, v, 128, 128);
+                let mut atlas = slot(window);
+                atlas.texture_width = 128;
+                atlas.texture_height = 128;
+                let mut vertices = [model.vertex(0).unwrap(); 3];
+                let asset = RuntimeModelAsset::from_record_bytes(
+                    ModelIndex(0), &record, &bytes, atlas, &mut faces, &mut 0,
+                    &mut [], &mut 0, &mut vertices, &mut 0,
+                ).unwrap();
+                assert_eq!(asset.material.texture_window_word(), window.word());
+                assert_eq!(asset.material.clut_word(), atlas.clut_word);
+                assert_eq!(asset.facet_reflection_size, metadata.then_some((128, 128)));
+            }
         }
     }
 

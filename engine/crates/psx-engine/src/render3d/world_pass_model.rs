@@ -225,14 +225,21 @@ fn facet_reflection_face(
     // final UV word; bit 15 opts in. Each triangle samples a small patch,
     // retaining its own normal while allowing light to fade across its face.
     let gradient = words[2];
+    // Bits 12-14 optionally select one of four horizontal material strips.
+    // Zero retains the full reflection map used by existing character assets.
+    // The strips share one CLUT, so different finishes need no extra draw pass.
+    let band = (gradient >> 12) & 7;
     for k in 0..3 {
         let (du, dv) = if gradient & 0x8000 != 0 {
             let bits = gradient >> (k * 4);
             ((i32::from(bits & 3) * 2 - 3) * 4,
              (i32::from((bits >> 2) & 3) * 2 - 3) * 4)
         } else { (0, 0) };
-        let uv = (u + du).clamp(0, i32::from(width.max(1)) - 1) as u16
-            | (((v + dv).clamp(0, i32::from(height.max(1)) - 1) as u16) << 8);
+        let mut mapped_u = (u + du).clamp(0, i32::from(width.max(1)) - 1) as u16;
+        if (1..=4).contains(&band) && width >= 4 {
+            mapped_u = ((band - 1) * u16::from(width) + mapped_u) >> 2;
+        }
+        let uv = mapped_u | (((v + dv).clamp(0, i32::from(height.max(1)) - 1) as u16) << 8);
         face = face.with_corner_uv_word(k, uv);
     }
     face
@@ -3844,7 +3851,10 @@ fn reference_face(
             let n = [next() as i8, next() as i8, next() as i8];
             let m = core::array::from_fn(|_| core::array::from_fn(|_| next() as i16));
             let j = joint(m);
-            let f = face(n, 0).with_corner_uv_word(2, next() as u16);
+            // Existing assets use only the enable bit and six corner offsets.
+            // Leave the newly assigned material-strip bits clear for this
+            // byte-for-byte comparison with the original mapping.
+            let f = face(n, 0).with_corner_uv_word(2, next() as u16 & 0x8fff);
             let w = next() as u8;
             let h = next() as u8;
             let roughness = (next() % 8) as u8;
@@ -4190,6 +4200,22 @@ fn reference_face(
                 assert!(result.uvs().iter().all(|&(u,v)| u<size.max(1) && v<size.max(1)));
             }
         }
+    }
+    #[test]
+    fn material_strips_keep_rotating_gradients_inside_the_selected_finish() {
+        let m = joint([[16384,0,0],[0,16384,0],[0,0,4096]]);
+        for band in 1..=4u16 {
+            for n in [[0,0,-127], [127,0,0], [-127,0,0], [0,127,0], [0,-127,0]] {
+                let f = face(n,0).with_corner_uv_word(2, 0x8f30 | (band << 12));
+                let mapped = facet_reflection_face(f, &[m], 128,128,0);
+                assert!(mapped.uvs().iter().all(|&(u,v)|
+                    u16::from(u) >= (band-1)*32 && u16::from(u) < band*32 && v < 128));
+                assert_eq!(mapped.vertex_indices(), f.vertex_indices());
+                assert_eq!(mapped.palette_bank(), f.palette_bank());
+            }
+        }
+        let f = face([0,0,-127],0).with_corner_uv_word(2, 0xaf30);
+        assert_eq!(facet_reflection_face(f,&[m],128,128,0).uvs(), [(44,51),(50,51),(50,75)]);
     }
     #[test]
     fn facet_lookup_stays_in_bounds_for_extreme_matrices_and_bad_joint() {

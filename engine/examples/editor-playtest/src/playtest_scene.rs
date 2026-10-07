@@ -2324,7 +2324,20 @@ impl Scene for Playtest {
             self.draw_collision_debug_overlay(camera);
         }
 
-        if let Some(target) = self.lock_target_indicator_position() {
+        if self.player_has_ranged_weapon()
+            && self.ranged_ready.aiming()
+            && self.player_stance.active() == VitalityChannelId::Two
+        {
+            let center = if self.is_locked() {
+                let [x, y, z] = self.ranged_target();
+                camera.project_world(RoomPoint::new(x, y, z))
+            } else {
+                Some(ProjectedVertex::new(camera.projection.screen_x, camera.projection.screen_y, 1))
+            };
+            if let Some(center) = center {
+                draw_target_reticle(center, overlay_tick, self.player_stance.active());
+            }
+        } else if let Some(target) = self.lock_target_indicator_position() {
             draw_lock_target_indicator(target, camera, overlay_tick, self.player_stance.active());
         }
 
@@ -2361,9 +2374,6 @@ impl Scene for Playtest {
             if let Some(font) = self.ui_fonts[0].as_ref() {
                 if self.player_stance.active() == VitalityChannelId::Two {
                     font.draw_text(8, 188, if self.ranged_ready.aiming() { "ZTH  R2 FIRE" } else { "ZTH  HOLD L2 TO AIM" }, (112, 232, 208));
-                    if self.ranged_ready.aiming() && !self.is_locked() {
-                        font.draw_text(158, 116, "+", (200, 255, 240));
-                    }
                 } else {
                     font.draw_text(8, 188, "HRZ  R1 COMBO  R2 HEAVY", (255, 176, 96));
                 }
