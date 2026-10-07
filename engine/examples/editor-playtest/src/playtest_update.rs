@@ -733,7 +733,7 @@ impl Playtest {
         }
 
         let now = ctx.sim_tick;
-        let action_locked =
+        let mut action_locked =
             self.anim_lock_until_tick > now || self.hazard_death_ticks_remaining > 0;
         self.refresh_active_interactable();
         if !action_locked && !poi_interaction_consumed {
@@ -758,16 +758,31 @@ impl Playtest {
             }
         }
         let circle = self.update_evade_run_button(ctx, delta_vblanks);
+        let ranged = self.player_has_ranged_weapon();
+        let interrupted = circle.evade || !self.motor.action().is_idle()
+            || self.hazard_death_ticks_remaining != 0
+            || (action_locked && self.anim_state != PlayerAnim::RangedAttack)
+            || self.player_stance.swap_in_progress(&self.player_stance_config);
+        self.ranged_ready.tick(ranged && self.player_stance.active() == VitalityChannelId::Two,
+            ctx.is_held(button::L2), interrupted);
+        if !self.ranged_ready.aiming() && self.anim_state == PlayerAnim::RangedAttack {
+            // Lowering the weapon or dodging cancels a shot not yet released.
+            self.anim_lock_until_tick = now;
+            action_locked = false;
+            self.attack_buffer.clear();
+        }
+
         let lock_facing_yaw = self
             .lock_target_position()
-            .and_then(|target| psx_engine::yaw_to_point(self.motor.position(), target));
+            .and_then(|target| psx_engine::yaw_to_point(self.motor.position(), target))
+            .or_else(|| self.ranged_ready.aiming().then(|| self.ranged_facing_yaw()));
         // The stick is read every tick, locked or not, so the evade latch
         // below always sees the direction the player is holding.
         let stick_input = motor_input(
             ctx,
             self.camera.yaw(),
             self.analog_deadzone,
-            circle.sprint,
+            circle.sprint && !self.ranged_ready.aiming(),
             circle.evade,
             lock_facing_yaw,
         );
@@ -852,11 +867,14 @@ impl Playtest {
         }
         // Ramp walking startup, but let released input stop the motor immediately.
         let stick_active = input.move_x.raw() != 0 || input.move_z.raw() != 0;
-        if !action_locked {
+        if !action_locked && !self.ranged_ready.aiming() {
             input = self.walk_transition_input(input, stick_active, now, ctx.video_hz);
         }
         let movement_start = self.motor.position();
         let mut config = self.motor_config();
+        if self.ranged_ready.aiming() {
+            config.walk_speed = (config.walk_speed * 3 / 4).max(1);
+        }
         let bsp_contents = self.player_contents_memo(config.height);
         if bsp_contents.is_some_and(|sample| sample.water_level > 0) {
             // Shared BSP liquids retain 60 percent locomotion. The same
@@ -1044,6 +1062,18 @@ impl Playtest {
             }
         }
 
+        #[cfg(feature = "emulator-telemetry")]
+        if self.player_has_ranged_weapon() && (ctx.sim_tick.every(12) || ctx.just_pressed(button::R2)) {
+            let p = self.motor.position();
+            crate::debug_runtime::debug_log_player_weapon([
+                ctx.sim_tick.as_u32() as i32, i32::from(ctx.is_held(button::L2)),
+                i32::from(ctx.is_held(button::R2)), i32::from(ctx.is_held(button::R1)),
+                i32::from(self.player_stance.active() == VitalityChannelId::Two),
+                i32::from(self.ranged_ready.aiming()), self.anim_state.action().to_index() as i32,
+                p.x, p.y, p.z, i32::from(self.is_locked()),
+                i32::from(self.game_entities.health(0)), i32::from(self.game_entities.health_secondary(0)),
+            ]);
+        }
         let previous_anim = self.anim_state;
         let new_state = if self.anim_lock_until_tick > now {
             // Any locked action (attack, evade, hit) cancels the walk phases.
@@ -1051,7 +1081,16 @@ impl Playtest {
             self.anim_state
         } else {
             let motor_anim = player_anim_from_motor(motor_frame.anim);
-            self.walk_transition_state(motor_anim, stick_active, now, ctx.video_hz)
+            if self.ranged_ready.aiming() && !motor_anim.is_motor_fixed_action() {
+                self.loco = LocoPhase::Idle;
+                if motor_anim == PlayerAnim::Idle && self.ranged_ready.firing(now.as_u32()) {
+                    PlayerAnim::RangedAttack
+                } else {
+                    Self::ranged_locomotion(motor_anim)
+                }
+            } else {
+                self.walk_transition_state(motor_anim, stick_active, now, ctx.video_hz)
+            }
         };
         telemetry::counter(
             telemetry::counter::PLAYER_ANIM_ACTION,
@@ -1059,6 +1098,9 @@ impl Playtest {
         );
         if new_state != self.anim_state {
             self.switch_player_anim(new_state, now, ctx.video_hz);
+            if new_state == PlayerAnim::RangedAttack {
+                self.anim_start_tick = SimTick::from_u32(self.ranged_ready.fire_started);
+            }
             if new_state == PlayerAnim::Roll {
                 telemetry::debug_log("player roll:start");
             }
@@ -1442,7 +1484,7 @@ impl Playtest {
         }
     }
 
-    /// R1/R2 select the active stance's light/heavy attack. Remember one
+    /// R1/R2 select melee light/heavy; ranged Zenith requires held L2 + R2. Remember one
     /// press for 12 ticks, allowing a late input to chain out of recovery.
     /// Capture its stance at press time; a later swap cannot change intent.
     ///
@@ -1452,6 +1494,31 @@ impl Playtest {
         if self.hazard_death_ticks_remaining != 0 {
             self.attack_buffer.clear();
             self.attack_chain.clear();
+            return false;
+        }
+        if self.player_has_ranged_weapon() && self.player_stance.active() == VitalityChannelId::Two {
+            self.attack_chain.clear();
+            if !self.ranged_ready.aiming() {
+                self.attack_buffer.clear();
+                return false;
+            }
+            if ctx.just_pressed(ACTIVE_HEAVY_ATTACK_BUTTON) {
+                self.attack_buffer.request(5, now.as_u32());
+            }
+            if !action_locked && self.motor.action().is_idle() && self.ranged_ready.can_fire()
+                && !self.ranged_ready.firing(now.as_u32()) {
+                if self.attack_buffer.take(now.as_u32()) == Some(5) {
+                    self.motor.face(self.ranged_facing_yaw());
+                    let Some(character) = self.character else { return false; };
+                    if self.lock_player_anim_action(&character, PlayerAnim::RangedAttack, now, ctx.video_hz) {
+                        let duration = self.anim_lock_until_tick.saturating_sub(now);
+                        self.ranged_ready.begin_shot(now.as_u32(), duration);
+                        self.anim_lock_until_tick = now;
+                        telemetry::debug_log("player ranged:start");
+                        return false;
+                    }
+                }
+            }
             return false;
         }
         let stance_offset = if self.player_stance.active() == VitalityChannelId::Two {

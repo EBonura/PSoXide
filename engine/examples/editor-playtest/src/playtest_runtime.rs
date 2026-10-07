@@ -629,6 +629,7 @@ impl Playtest {
             PlayerAnim::HeavyAttack,
             PlayerAnim::VertLightAttack,
             PlayerAnim::VertHeavyAttack,
+            PlayerAnim::RangedAttack,
         ] {
             let action = anim.action();
             let authored = character.action_speed(action);
@@ -639,7 +640,7 @@ impl Playtest {
 
     pub(super) const fn player_attack_channel(anim: PlayerAnim) -> VitalityChannelId {
         match anim {
-            PlayerAnim::VertLightAttack | PlayerAnim::VertHeavyAttack => VitalityChannelId::Two,
+            PlayerAnim::VertLightAttack | PlayerAnim::VertHeavyAttack | PlayerAnim::RangedAttack => VitalityChannelId::Two,
             _ => VitalityChannelId::One,
         }
     }
@@ -813,6 +814,7 @@ impl Playtest {
         // would mean no damage and no recovery at all, so it is set explicitly
         // on every reset rather than relying on the zero pattern.
         self.player_stance = CombatStance::new(VitalityChannelId::One);
+        self.ranged_ready = combat_input::RangedReady::EMPTY;
         self.vitality_circles = VitalityCircleState::EMPTY;
         self.power_up_loadout = PowerUpLoadout::DEFAULT;
         self.power_up_inventory = BoostInventory::EMPTY;
@@ -835,6 +837,7 @@ impl Playtest {
     fn reset_life_combat(&mut self) {
         self.player_vitality.refill();
         self.player_stance = CombatStance::new(VitalityChannelId::One);
+        self.ranged_ready = combat_input::RangedReady::EMPTY;
         self.player_poise = psx_game_runtime::poise::Poise::EMPTY;
         self.combat_projectiles.clear();
         self.combat_projectile_impacts.clear();
@@ -849,6 +852,7 @@ impl Playtest {
         self.previous_player_actor_pose = None;
         self.player_contents_memo = None;
         self.motor.interrupt_action();
+        self.ranged_ready = combat_input::RangedReady::EMPTY;
         self.loco = LocoPhase::Idle;
     }
 
@@ -1028,6 +1032,7 @@ impl Playtest {
         if player_anim_is_attack(anim) {
             // A fresh swing gets a fresh one-hit-per-enemy mask.
             self.swing_hit_mask = 0;
+            self.ranged_ready.released = 0;
             self.destructibles.begin_swing();
         }
         true
@@ -1043,6 +1048,7 @@ impl Playtest {
             return false;
         }
         self.motor.interrupt_action();
+        self.ranged_ready = combat_input::RangedReady::EMPTY;
         self.attack_buffer.clear();
         self.attack_chain.clear();
         self.evade_buffer_vblanks = 0;

@@ -241,7 +241,17 @@ fn submit_equipped_weapon<
         lighting.shade_model_material(origin, weapon_model.material),
         materialization_skin,
     );
+    // Crystal equipment contains its own lighting. Its CLUT marks the darker
+    // texels translucent while preserving opaque near-white reflections.
+    let (material, uv_mapping) = match weapon_model.facet_reflection_size {
+        Some((texture_width, texture_height)) => (
+            weapon_model.material.with_blend_mode(BlendMode::Average),
+            ModelUvMapping::FacetReflection { texture_width, texture_height, roughness: 0 },
+        ),
+        None => (material, ModelUvMapping::Authored),
+    };
     let model_options = options
+        .with_model_uv_mapping(uv_mapping)
         .with_depth_policy(DepthPolicy::Average)
         .with_cull_mode(CullMode::Back)
         .with_material_layer(material)

@@ -24,8 +24,10 @@
 //! * Right stick        -- camera yaw; vertical adjusts camera height.
 //! * CIRCLE tap        -- directional roll; lock-on remains active.
 //! * CIRCLE hold       -- run while moving.
-//! * R1 / R2           -- Horizon light / heavy attack.
-//! * L1 / L2           -- Zenith light / heavy attack.
+//! * TRIANGLE          -- change stance; R3 toggles lock-on.
+//! * HRZ: R1 / R2      -- light combo / heavy melee.
+//! * ZTH: hold L2 + R2 -- aim + fire when ranged clips are bound.
+//! * Legacy projects without ranged bindings retain Zenith melee.
 
 // `cfg(test)` is false for every guest build, so `not(test)` holds and both
 // attributes apply exactly as they always have -- the MIPS artifact is
@@ -133,6 +135,7 @@ mod bsp_runtime;
 use psx_game_runtime::cd_stream;
 mod character_runtime;
 mod combat_input;
+mod player_ranged;
 mod damage_numbers;
 mod debug_runtime;
 mod game_logic_runtime;
@@ -412,6 +415,7 @@ struct Playtest {
     /// Fixed-capacity swept combat projectiles. All-zero is an empty valid
     /// state, so it remains in scene BSS beside the entity SoA.
     combat_projectiles: RuntimeCombatProjectiles,
+    ranged_ready: combat_input::RangedReady,
     /// Fixed-capacity visual aftermath for stopped combat projectiles.
     combat_projectile_impacts: RuntimeProjectileImpactEffects,
     dash_wake: psx_game_runtime::combat_feedback::DashWake,

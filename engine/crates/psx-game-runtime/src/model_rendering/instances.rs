@@ -881,6 +881,7 @@ mod tests {
             vertex_count: 0,
             requires_cpu_blend: false,
             double_sided: false,
+            facet_reflection_size: None,
             world_height: 100,
             collision_radius: 24,
             local_to_world: LocalToWorldScale::IDENTITY,

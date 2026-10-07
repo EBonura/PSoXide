@@ -23,7 +23,7 @@
 use super::*;
 use psx_game_runtime::combat::{self, MeleeArc, WorldCombatCapsule};
 use psx_game_runtime::destructibles::{DamageChannel, DamageOutcome};
-use psx_game_runtime::entities::MeleeArcStats;
+use psx_game_runtime::entities::{GameEntityState, MeleeArcStats};
 use psx_game_runtime::model_rendering as mr;
 use psx_game_runtime::projectiles::{
     CombatTeam, ProjectileImpactKind, ProjectileImpacts, ProjectileSpawn, ProjectileTarget,
@@ -486,6 +486,7 @@ impl Playtest {
     /// stay misses.
     pub(super) fn resolve_enemy_melee(&mut self, ctx: &Ctx) {
         self.combat_projectile_impacts.tick();
+        self.release_player_projectile(ctx);
         if self.deferred_enemy_attacks.is_empty() && self.combat_projectiles.is_empty() {
             return;
         }
@@ -666,7 +667,7 @@ impl Playtest {
         }
         let mut projectile_targets = psx_engine::FixedScratch::<
             ProjectileTarget,
-            { psx_level::MAX_CHARACTER_COMBAT_CAPSULES },
+            { MAX_GAME_ENTITIES + psx_level::MAX_CHARACTER_COMBAT_CAPSULES },
         >::new();
         if !player_invulnerable {
             if let Some(pose) = player_pose {
@@ -707,6 +708,30 @@ impl Playtest {
                 });
             }
         }
+        // Use the primary animated hurtbox for projectile contact. A legacy
+        // actor without one retains its body capsule; authoring failures do
+        // not invent a larger target. Storage stays bounded at the actor limit.
+        for (index, record) in GAME_ENTITIES.iter().enumerate().take(self.game_entities.count()) {
+            if self.game_entities.state(index) == GameEntityState::Dead { continue; }
+            let p = self.game_entities.position(index);
+            let r = i32::from(record.radius).min(i32::from(record.height) / 2);
+            let fallback = WorldCombatCapsule {
+                start: [p[0], p[1] + r, p[2]],
+                end: [p[0], p[1] + i32::from(record.height) - r, p[2]],
+                radius: r.max(1) as u16,
+            };
+            let first = record.combat_capsule_first.to_usize();
+            let authored = COMBAT_CAPSULES.get(first..first + usize::from(record.combat_capsule_count))
+                .unwrap_or(&[]).iter().find(|c| c.flags & psx_level::combat_capsule_flags::HURTBOX != 0);
+            let hurtbox = if let Some(capsule) = authored {
+                let Some(pose) = self.instance_actor_poses.get(usize::from(record.model_instance)).copied().flatten() else { continue; };
+                let Some(hurtbox) = combat::transform_actor_combat_capsule(capsule, pose.pose()) else { continue; };
+                hurtbox
+            } else { fallback };
+            let _ = projectile_targets.try_push(ProjectileTarget {
+                target: index as u16, team: CombatTeam::Enemy, room: record.room, hurtbox,
+            });
+        }
         let mut projectile_impacts = ProjectileImpacts::<MAX_PROJECTILE_IMPACTS>::new();
         {
             let mut tracer = SceneProjectileWorldTracer {
@@ -725,6 +750,29 @@ impl Playtest {
         let mut zenith_projectile_damage = 0u16;
         for impact in projectile_impacts.as_slice() {
             let _ = self.combat_projectile_impacts.spawn(impact);
+            if let ProjectileImpactKind::Target { target } = impact.kind {
+                if target != PLAYER_PROJECTILE_TARGET {
+                    let index = usize::from(target);
+                    if let Some(record) = GAME_ENTITIES.get(index) {
+                        let channel = match impact.damage_channel {
+                            psx_game_runtime::projectiles::ProjectileDamageChannel::Horizon => VitalityChannelId::One,
+                            psx_game_runtime::projectiles::ProjectileDamageChannel::Zenith => VitalityChannelId::Two,
+                        };
+                        let applied = self.game_entities.scaled_stance_damage(index, channel, impact.damage);
+                        let outcome = self.game_entities.apply_stance_hit(GAME_ENTITIES, index, channel, impact.damage, impact.poise_damage);
+                        let now = self.gameplay_tick(ctx.sim_tick);
+                        if outcome.connected {
+                            self.damage_numbers.spawn(struck_actor_anchor(self.game_entities.position(index), record.height),
+                                record.room, applied, if channel == VitalityChannelId::Two {
+                                    DamageNumberChannel::Zenith
+                                } else { DamageNumberChannel::Horizon }, now);
+                            telemetry::debug_log("player projectile:hit");
+                        }
+                        if outcome.died { self.souls.award(record.soul_value, now.as_u32()); }
+                    }
+                }
+            }
+
             if impact.kind
                 == (ProjectileImpactKind::Target {
                     target: PLAYER_PROJECTILE_TARGET,
@@ -966,7 +1014,8 @@ impl Playtest {
     /// starts. Outside attack locks this is two compares.
     pub(super) fn resolve_player_melee(&mut self, ctx: &Ctx) {
         let now = ctx.sim_tick;
-        if !player_anim_is_attack(self.anim_state) || self.anim_lock_until_tick <= now {
+        if self.anim_state == PlayerAnim::RangedAttack
+            || !player_anim_is_attack(self.anim_state) || self.anim_lock_until_tick <= now {
             return;
         }
         let Some(character) = self.character else {

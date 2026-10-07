@@ -197,6 +197,18 @@ pub fn authored_projectile_release_pending(
 ) -> Option<(u8, AuthoredProjectileRelease)> {
     let pose = pose?;
     let frame = (pose.phase_q12() >> 12).min(u32::from(u16::MAX)) as u16;
+    authored_projectile_release_pending_at_frame(capsules, action, Some(pose), released_mask, frame)
+}
+
+/// Use the weapon's event clock while taking muzzle geometry from live locomotion.
+pub fn authored_projectile_release_pending_at_frame(
+    capsules: &[CombatCapsuleRecord],
+    action: CharacterAnimationAction,
+    pose: Option<ActorPoseSnapshot>,
+    released_mask: u16,
+    frame: u16,
+) -> Option<(u8, AuthoredProjectileRelease)> {
+    let pose = pose?;
     let action = action.to_index() as u8;
     capsules
         .iter()
@@ -1617,6 +1629,21 @@ mod tests {
                 CharacterAnimationAction::HeavyAttack,
                 0
             ));
+        }
+
+        #[test]
+        fn weapon_clock_releases_from_live_walking_pose_once() {
+            let mut emitter = capsule_record(0, combat_capsule_flags::PROJECTILE_EMITTER, ATTACK);
+            emitter.active_start_frame = 2;
+            emitter.active_end_frame = 3;
+            // Gait phase is unrelated to the shot; the muzzle follows the moving actor.
+            let pose = Some(pose_at([90, 20, -40], 18 << 12));
+            assert!(authored_projectile_release_pending(&[emitter], ATTACK, pose, 0).is_none());
+            assert!(authored_projectile_release_pending_at_frame(&[emitter], ATTACK, pose, 0, 1).is_none());
+            let (_, release) = authored_projectile_release_pending_at_frame(&[emitter], ATTACK, pose, 0, 2).unwrap();
+            assert_eq!(release.position, transform_actor_combat_capsule(&emitter, pose.unwrap()).unwrap().start);
+            assert!(authored_projectile_release_pending_at_frame(&[emitter], ATTACK, pose, 1, 2).is_none());
+            assert!(authored_projectile_release_pending_at_frame(&[emitter], ATTACK, pose, 0, 4).is_none());
         }
 
         #[test]

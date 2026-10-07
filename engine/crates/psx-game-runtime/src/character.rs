@@ -30,6 +30,12 @@ pub enum PlayerAnim {
     HeavyAttack,
     LightAttackFollowup,
     LightAttackFinisher,
+    RangedAttack,
+    RangedAim,
+    RangedWalk,
+    RangedBackward,
+    RangedLeft,
+    RangedRight,
     /// Zenith axis: overhead strikes.
     VertLightAttack,
     VertHeavyAttack,
@@ -71,6 +77,12 @@ impl PlayerAnim {
             Self::HeavyAttack => CharacterAnimationAction::HeavyAttack,
             Self::LightAttackFollowup => CharacterAnimationAction::LightAttackFollowup,
             Self::LightAttackFinisher => CharacterAnimationAction::LightAttackFinisher,
+            Self::RangedAttack => CharacterAnimationAction::RangedAttack,
+            Self::RangedAim => CharacterAnimationAction::RangedAim,
+            Self::RangedWalk => CharacterAnimationAction::RangedWalk,
+            Self::RangedBackward => CharacterAnimationAction::RangedBackward,
+            Self::RangedLeft => CharacterAnimationAction::RangedLeft,
+            Self::RangedRight => CharacterAnimationAction::RangedRight,
             Self::VertLightAttack => CharacterAnimationAction::VertLightAttack,
             Self::VertHeavyAttack => CharacterAnimationAction::VertHeavyAttack,
             Self::Intro => CharacterAnimationAction::Intro,
@@ -92,6 +104,7 @@ impl PlayerAnim {
         matches!(
             self,
             Self::Walk | Self::WalkBackward | Self::StrafeLeft | Self::StrafeRight | Self::Run
+                | Self::RangedWalk | Self::RangedBackward | Self::RangedLeft | Self::RangedRight
         )
     }
 
@@ -114,6 +127,7 @@ pub const fn player_anim_is_attack(anim: PlayerAnim) -> bool {
             | PlayerAnim::HeavyAttack
             | PlayerAnim::VertLightAttack
             | PlayerAnim::VertHeavyAttack
+            | PlayerAnim::RangedAttack
     )
 }
 
@@ -388,6 +402,11 @@ impl RuntimeCharacter {
             | CharacterAnimationAction::LightAttackFinisher => {
                 self.action_clip(anim.action()).to_option().unwrap_or(idle)
             }
+            CharacterAnimationAction::RangedAim
+            | CharacterAnimationAction::RangedWalk
+            | CharacterAnimationAction::RangedBackward
+            | CharacterAnimationAction::RangedLeft
+            | CharacterAnimationAction::RangedRight => self.action_clip(anim.action()).unwrap_or(idle),
             CharacterAnimationAction::RangedAttack => self
                 .action_clip(CharacterAnimationAction::RangedAttack)
                 .unwrap_or(idle),

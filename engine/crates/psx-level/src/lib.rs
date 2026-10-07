@@ -3774,7 +3774,7 @@ pub struct ParticleEmitterRecord {
 pub const CHARACTER_CLIP_NONE: OptionalModelClipIndex = OptionalModelClipIndex::NONE;
 
 /// Fixed action slots used by [`LevelCharacterRecord::action_clips`].
-pub const CHARACTER_ANIMATION_ACTION_COUNT: usize = 36;
+pub const CHARACTER_ANIMATION_ACTION_COUNT: usize = 41;
 
 /// Runtime animation action slot.
 ///
@@ -3860,6 +3860,16 @@ pub enum CharacterAnimationAction {
     LightAttackFollowup = 34,
     /// Final Horizon light strike.
     LightAttackFinisher = 35,
+    /// Ready-weapon aim pose.
+    RangedAim = 36,
+    /// Ready-weapon walk pose.
+    RangedWalk = 37,
+    /// Ready-weapon backward pose.
+    RangedBackward = 38,
+    /// Ready-weapon left pose.
+    RangedLeft = 39,
+    /// Ready-weapon right pose.
+    RangedRight = 40,
 }
 
 impl CharacterAnimationAction {
@@ -3901,6 +3911,11 @@ impl CharacterAnimationAction {
         Self::RangedAttack,
         Self::LightAttackFollowup,
         Self::LightAttackFinisher,
+        Self::RangedAim,
+        Self::RangedWalk,
+        Self::RangedBackward,
+        Self::RangedLeft,
+        Self::RangedRight,
     ];
 
     /// Convert to the cooked action slot index.

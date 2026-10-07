@@ -16,6 +16,7 @@ pub struct ModelPhaseAssembly {
     color: (u8, u8, u8),
     floor_y: i32,
     height: i32,
+    crystal_material: Option<TextureMaterial>,
 }
 
 impl ModelPhaseAssembly {
@@ -38,7 +39,13 @@ impl ModelPhaseAssembly {
             color,
             floor_y,
             height: height.max(1),
+            crystal_material: None,
         })
+    }
+
+    /// Optional stance palette shared with the procedural crystal scarf.
+    pub fn with_crystal_material(mut self, material: Option<TextureMaterial>) -> Self {
+        self.crystal_material = material; self
     }
 
     fn arrival(self, height_q12: u16) -> u16 {
@@ -280,7 +287,9 @@ pub(super) fn draw<const OT_DEPTH: usize>(
     let options = options.with_textured_triangle_splitting(false);
     let wire_options = options.with_depth_bias(options.depth_bias.saturating_add(2));
     let wire_color = assembly.wire_color();
-    let tint = assembly.tint(material.tint());
+    let crystal = assembly.crystal_material;
+    let material = crystal.unwrap_or(material);
+    let tint = if crystal.is_some() { (128,128,128) } else { assembly.tint(material.tint()) };
     let bursting = assembly.elapsed < BURST_TICKS;
     let burst_progress =
         i32::from(assembly.elapsed.min(BURST_TICKS)) * 256 / i32::from(BURST_TICKS);
@@ -296,7 +305,7 @@ pub(super) fn draw<const OT_DEPTH: usize>(
         material
             .with_raw_texture(false)
             .with_tint(tint)
-            .with_blend_mode(BlendMode::Opaque)
+            .with_blend_mode(if crystal.is_some() { BlendMode::Average } else { BlendMode::Opaque })
     };
     let mut burst_vertices = [ProjectedVertex::INVALID; 96];
     let mut burst_offsets = [ViewVertex::ZERO; 8];
@@ -314,7 +323,13 @@ pub(super) fn draw<const OT_DEPTH: usize>(
     }
     let mut attached = [TexturedModelRenderFace::ZERO; 32];
     let mut attached_count = 0;
-    for (index, face) in faces.iter().enumerate() {
+    for (index, original_face) in faces.iter().enumerate() {
+        let mapped_face = if crystal.is_some() {
+            let shift = (index % 4 * 12) as u8;
+            TexturedModelRenderFace::new(original_face.vertex_indices(),
+                [(shift,8),(90+shift,24),(20+shift,116)])
+        } else { *original_face };
+        let face = &mapped_face;
         let indices = face.vertex_indices().map(usize::from);
         if indices.iter().any(|&i| i >= projected.len()) {
             continue;
@@ -445,12 +460,15 @@ pub(super) fn draw<const OT_DEPTH: usize>(
             // A collapsed fourth corner uses the existing blended packet path
             // for one untextured facet. Its transparency is independent of the
             // model atlas's per-texel semi-transparency bits.
-            world.submit_blended_gouraud_quad(
-                triangles,
-                [points[0], points[1], points[2], points[2]],
-                BlendMode::Add,
-                options,
-            )
+            if let Some(crystal) = crystal {
+                let shift = (index % 4 * 12) as u8;
+                world.submit_textured_triangle(triangles, points.map(ProjectedVertex::from),
+                    [(shift,8),(90+shift,24),(20+shift,116)],
+                    crystal.with_tint(tint), options.with_material_layer(crystal))
+            } else {
+                world.submit_blended_gouraud_quad(triangles,
+                    [points[0], points[1], points[2], points[2]], BlendMode::Add, options)
+            }
         };
         stats.submitted_triangles = stats
             .submitted_triangles

@@ -327,9 +327,17 @@ impl PlayerScarf {
         triangles: &mut PrimitivePacketArena<'_>,
         world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
     ) -> u16 {
-        if !self.active {
-            return 0;
-        }
+        self.draw_crystal(camera, color, assembly, options, None, triangles, world)
+    }
+
+    /// Crystal atlas over the same procedural cloth, with an opaque fallback.
+    pub fn draw_crystal<const OT_DEPTH: usize>(
+        &self, camera: WorldCamera, color: (u8,u8,u8),
+        assembly: Option<ModelPhaseAssembly>, options: WorldSurfaceOptions,
+        crystal: Option<TextureMaterial>, triangles: &mut PrimitivePacketArena<'_>,
+        world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+    ) -> u16 {
+        if !self.active { return 0; }
         let mut vertices = [WorldVertex::ZERO; 32];
         // Two hand-shaped cloth edges, in 1/1024 of character height.
         // The upper edge hugs the neck; the wider lower edge folds onto the
@@ -404,6 +412,23 @@ impl PlayerScarf {
             .into_iter()
             .enumerate()
             {
+                if let Some(material) = crystal {
+                    let target = indices.map(|i| vertices[i]);
+                    let fragment = match assembly {
+                        Some(effect) => effect.cloth_fragment(target, strip * 2 + facet),
+                        None => Some(target),
+                    };
+                    if let Some(fragment) = fragment {
+                        // Each broad face crosses the gradient. Slow movement of
+                        // the lookup makes the cloth shimmer without noise.
+                        let drift = ((self.tick / 3 + strip as u32 * 7) % 40) as i32;
+                        let uvs = if facet == 0 { [(8+drift,8),(88+drift,18),(16+drift,108)] }
+                                  else { [(16+drift,108),(88+drift,18),(88+drift,108)] };
+                        submitted += submit_crystal_cloth(fragment.map(|v| camera.view_vertex(v)), uvs,
+                            camera, material, options.with_material_layer(material), triangles, world);
+                    }
+                    continue;
+                }
                 let tint = (
                     (u32::from(color.0) * brightness / 256) as u8,
                     (u32::from(color.1) * brightness / 256) as u8,
@@ -541,6 +566,34 @@ fn submit_clipped_cloth<const N: usize>(
             [polygon[0], polygon[i], polygon[i + 1]].map(|v| camera.projection.project_view(v))
         {
             submitted += submit_cloth_triangle([a, b, c], color, options, arena, world);
+        }
+    }
+    submitted
+}
+
+/// Clip position and UV together at the near plane, then submit native FT3s.
+fn submit_crystal_cloth<const N: usize>(
+    input: [ViewVertex;3], uvs: [(i32,i32);3], camera: WorldCamera,
+    material: TextureMaterial, options: WorldSurfaceOptions,
+    arena: &mut PrimitivePacketArena<'_>, world: &mut WorldRenderPass<'_, '_, N>,
+) -> u16 {
+    let near = camera.projection.near_z.max(1);
+    let mut polygon = [(ViewVertex::new(0,0,0),(0,0));4]; let mut count=0;
+    for i in 0..3 {
+        let j=(i+1)%3; let a=input[i]; let b=input[j];
+        if a.z>=near { polygon[count]=(a,uvs[i]); count+=1; }
+        if (a.z>=near)!=(b.z>=near) {
+            let t=(near-a.z)*4096/(b.z-a.z);
+            polygon[count]=(ViewVertex::new(a.x+((b.x-a.x)*t>>12),a.y+((b.y-a.y)*t>>12),near),
+                (uvs[i].0+((uvs[j].0-uvs[i].0)*t>>12),uvs[i].1+((uvs[j].1-uvs[i].1)*t>>12)));
+            count+=1;
+        }
+    }
+    let mut submitted=0;
+    for i in 1..count.saturating_sub(1) {
+        let corners=[polygon[0],polygon[i],polygon[i+1]];
+        if let [Some(a),Some(b),Some(c)]=corners.map(|v| camera.projection.project_view(v.0)) {
+            submitted+=world.submit_textured_triangle(arena,[a,b,c],corners.map(|v|(v.1.0.clamp(0,127) as u8,v.1.1.clamp(0,127) as u8)),material,options).submitted_triangles;
         }
     }
     submitted
@@ -727,6 +780,36 @@ mod tests {
             });
         }
     }
+    #[test]
+    fn crystal_near_clip_preserves_uvs_blending_and_packet_capacity() {
+        let camera = WorldCamera::orbit(WorldProjection::new(160,120,256,32),
+            WorldVertex::ZERO,1800,Angle::from_q12(0),Angle::from_q12(0));
+        let options = WorldSurfaceOptions::new(DepthBand::whole(),DepthRange::new(0,8192))
+            .with_cull_mode(CullMode::None);
+        let mut storage=OrderingTable::<64>::new();
+        let mut ot=OtFrame::begin(&mut storage);
+        let mut commands=[WorldTriCommand::EMPTY;64];
+        let mut slots=psx_engine::PrimitivePacketScratch::<2>::ZERO;
+        let mut arena=PrimitivePacketArena::new(&mut slots);
+        let mut world=WorldRenderPass::new_bucketed(&mut ot,&mut commands);
+        let crossing=[ViewVertex::new(0,0,16),ViewVertex::new(-8,-8,64),ViewVertex::new(8,-8,64)];
+        let material=TextureMaterial::opaque(42,0,(128,128,128)).with_blend_mode(BlendMode::Average);
+        for expected in [2,0] {
+            assert_eq!(submit_crystal_cloth(crossing,[(0,0),(127,0),(0,127)],camera,
+                material,options,&mut arena,&mut world),expected);
+        }
+        assert_eq!(arena.used_slots(),2);
+        unsafe {
+            arena.mutate_typed_slots::<TriTextured>(0,2,|t| {
+                assert_eq!(t.color_cmd>>24,0x26);
+                assert_eq!(t.uv0_clut>>16,42);
+                for uv in [t.uv0_clut,t.uv1_tpage,t.uv2] {
+                    assert!((uv&255)<=127 && ((uv>>8)&255)<=127);
+                }
+            });
+        }
+    }
+
     #[test]
     fn settled_tip_points_down_after_stopping() {
         let mut s = PlayerScarf::new();

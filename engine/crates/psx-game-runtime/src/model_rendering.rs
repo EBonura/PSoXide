@@ -330,6 +330,8 @@ pub struct RuntimeModelAsset {
     pub vertex_count: u16,
     pub requires_cpu_blend: bool,
     pub double_sided: bool,
+    /// Reflection-only atlas dimensions for equipment using packed facet normals.
+    pub facet_reflection_size: Option<(u8, u8)>,
     pub world_height: u16,
     pub collision_radius: u16,
     pub local_to_world: LocalToWorldScale,
@@ -513,6 +515,7 @@ impl RuntimeModelAsset {
             vertex_count: vertex_count as u16,
             requires_cpu_blend: model_requires_cpu_blend(model),
             double_sided: model.double_sided(),
+            facet_reflection_size: (model.flags() & MODEL_FACET_REFLECTION_UVS != 0).then_some((atlas_slot.texture_width.min(255) as u8, atlas_slot.texture_height.min(255) as u8)),
             world_height: record.world_height,
             collision_radius: record.collision_radius,
             local_to_world: LocalToWorldScale::from_q12(model.local_to_world_q12()),

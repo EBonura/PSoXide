@@ -1772,6 +1772,7 @@ impl Scene for Playtest {
                     && camera.position.z == follow.z
                     && self.camera.distance() < self.camera_config().min_distance;
                 let player_lighting = player_lighting.filter(|_| !camera_in_player);
+                let stance_crystal_material = self.stance_cluts.crystal_material(character, self.player_stance.active());
                 let player_draw =
                     player_lighting.map_or(PlayerModelDrawStats::default(), |lighting| {
                         let phase_assembly = player_phase_assembly(
@@ -1779,7 +1780,7 @@ impl Scene for Playtest {
                             &self.player_stance_config,
                             player,
                             player_phase_height(character),
-                        );
+                        ).map(|effect| effect.with_crystal_material(stance_crystal_material));
                         let stance_clut = self
                             .stance_cluts
                             .player_override_clut(character, self.player_stance.active());
@@ -1806,7 +1807,7 @@ impl Scene for Playtest {
                 // Share the stance burst/reassembly clock, but keep scarf packets
                 // outside the body's finish fade so its stance hue persists.
                 if !camera_in_player && player_lighting.is_some() {
-                    self.player_scarf.draw(
+                    self.player_scarf.draw_crystal(
                         camera,
                         stance_rgb(self.player_stance.active()),
                         player_phase_assembly(
@@ -1822,6 +1823,7 @@ impl Scene for Playtest {
                             )
                         }),
                         actor_options,
+                        stance_crystal_material,
                         &mut primitive_packets,
                         &mut world,
                     );
@@ -2353,6 +2355,19 @@ impl Scene for Playtest {
             };
             font.draw_text(8, 202, label, (200, 220, 225));
             font.draw_text(8, 216, "SELECT+L1 RESET  SELECT+R1 BLOCKED", (150, 170, 175));
+        }
+
+        if self.player_has_ranged_weapon() {
+            if let Some(font) = self.ui_fonts[0].as_ref() {
+                if self.player_stance.active() == VitalityChannelId::Two {
+                    font.draw_text(8, 188, if self.ranged_ready.aiming() { "ZTH  R2 FIRE" } else { "ZTH  HOLD L2 TO AIM" }, (112, 232, 208));
+                    if self.ranged_ready.aiming() && !self.is_locked() {
+                        font.draw_text(158, 116, "+", (200, 255, 240));
+                    }
+                } else {
+                    font.draw_text(8, 188, "HRZ  R1 COMBO  R2 HEAVY", (255, 176, 96));
+                }
+            }
         }
 
         // Damage numbers sit above the world and below the panels: they
