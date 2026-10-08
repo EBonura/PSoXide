@@ -32,19 +32,19 @@ the run are the two that need a person or touch the operator's card:
 **CONTROLLER TEST (P1 + P2)** and **MEMORY CARD (AT OWN RISK)**; the menu also
 has **VIEW LAST CAPTURE**.
 
-The run is ten areas, 56 steps, in this order (`src/run.rs`):
+The run is ten areas, 58 steps, in this order (`src/run.rs`):
 
 | # | Area | Steps |
 |---|---|---|
 | 0 | BOOT SNAPSHOT | `BOOT STATE` (what the BIOS left, read before anything touches it), `KERNEL TIMING` |
 | 1 | CPU AND RAM | cases, `CPU SWEEP`, `CPU AND BUS TIMING` |
-| 2 | IRQ, DMA, TIMERS | cases, timing, `TIMER PRECISION`, `TIMER 1 HBLANK RATE` |
+| 2 | IRQ, DMA, TIMERS | cases, timing, `TIMER PRECISION`, `TIMER 1 HBLANK RATE`, `POLLED TIMER TICK LOSS` |
 | 3 | GTE | cases, `GTE SWEEP`, `GTE TIMING`, `GTE COMMAND LATENCY`, `GTE PRECISION` |
 | 4 | GPU, MDEC, DISPLAY | cases, timing and MDEC, `GPU BATCHES`, `MDEC DECODE`, precision, `RASTER HASHES`, `DISPLAY WIDTHS`, `480I INTERLACE` |
 | 5 | SPU | `SPU INIT STATE`, precision, cases, `SPU MAP`, `SPU DMA TIMING`, `UI SAMPLE END AND LOOP` (SB1), `SPU RAM AND VOICES` (SB2), `CAPTURE RINGS` (SB4), `BANK HANDOFF` (PA4) |
 | 6 | CD, XA, CD-DA, STREAM | cases, `CD POLLED TIMING`, `CD DATA VERSUS AUDIO ROUTE` (PA1), `CD READ MECHANISMS` (CL2), `XA MUSIC LOOP`, `STREAM COST`, `CD-DA HANDOFF` |
-| 7 | SIO | cases, `SIO TIMING`, then the controller-port measurements described under "SIO measurements" below |
-| 8 | PERFORMANCE | stack and lever cases, `WARM PROBES`, `EXTENDED PROBES AND SHAPES`, `DMA VERSUS CPU LOADS` |
+| 7 | SIO | cases, `SIO TIMING`, then the controller-port and pad-engine measurements described under "SIO measurements" below (select delay, pad and card `/ACK` timing, pad and card together, the engine's sweep, pacings, card lease and load, hot-plug) |
+| 8 | PERFORMANCE | stack and lever cases, `WARM PROBES`, `EXTENDED PROBES AND SHAPES`, `DMA VERSUS CPU LOADS`, `AUDIT PROBES` |
 | 9 | DRIVE AND BUS STRESS | `CD MOTOR` (waits up to 20 s), then `REGISTER A/B (CAN HANG)` |
 
 **A reset between areas.** Each area starts with `reset_area`: the GPU reset

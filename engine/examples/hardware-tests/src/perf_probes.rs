@@ -19,8 +19,8 @@
 //!   MULT operand dependence, and the I-cache 4 KiB alias pair.
 //! * `RISKY` flips one bit of RAM_SIZE or the cache-control port around a
 //!   fixed workload and restores it. A wrong guess about an undocumented bit
-//!   can hang the console, so these run only from TARGETED PROBES > PERF A/B,
-//!   never from the default scan or the headless conformance capture. The
+//!   can hang the console, so these are the last step of the linear run
+//!   (`REGISTER A/B (CAN HANG)`), skipped when L2 is held at the start. The
 //!   record id is on screen while each one runs: a hang names its culprit.
 //!
 //! Marker ids 32 and up belong to this file (see the scheme in main.rs).
@@ -194,9 +194,7 @@ const SAFE: [Probe; 28] = [
 const T_SMALL: Arg = Arg::Imm(0x0000_0400);
 const LERP_A: Arg = Arg::Imm(0x0000_1234);
 
-/// The rest of the performance sweep. Runs from TARGETED PROBES, not with the
-/// standing battery: the full capture is already at its page budget, and this
-/// group is only interesting next to the register A/B records anyway.
+/// The rest of the performance sweep, the `EXTENDED PROBES AND SHAPES` step.
 const EXTENDED: [Probe; 39] = [
     probe(0x1E, 128, warm_nops, NONE, NONE).uncached(),
     // Each store is followed by three independent instructions, which a

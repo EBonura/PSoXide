@@ -36,11 +36,19 @@ says otherwise.
 | MDEC DIAGNOSTIC | Replaced by the short MDEC decode check (step `MDEC DECODE`, records `420`-`426`). |
 | FMV STREAM TEST (75 s of STR playback) | Removed. The decode check is the only FMV measurement in the suite now. |
 
-## Record ids
+## Records
 
-No record id was reassigned. Ids that belonged to removed screens
-(`1F0`-`1F5` of the FMV stream test) are no longer produced; the report tool
-still labels them so that older captures decode.
+Comparing a v1.24 full silicon capture with a v2.0 run, these timing records are not
+produced any more:
+
+| Records | Why |
+|---|---|
+| `01`, `02`, `03`, `04`, `09`, `0B`, `0C` (nop block, dependent ALU, cached load hazard, taken branch, scratchpad load, RAM store, scratchpad store) | The cold-start CPU records. Their minima moved by tens of cycles when unrelated code shifted (see "Timing records move when the guest binary changes"). Their warm twins `72`-`78` measure the same instructions with every line resident and are the standing records. |
+| `A0`-`AF` (the unpaced GPU fill battery) | Wrote primitives straight to GP0 and read GPUSTAT bit 26 as done; the v1.22 console captures showed that measures the FIFO, not the GPU. The paced list batches `100`-`114` replace them. |
+
+No other record id was reassigned or dropped. Ids that belonged to removed screens
+(`1F0`-`1F5` of the FMV stream test) are no longer produced; the report tool no longer
+carries a work value for them but still decodes older captures.
 
 ## What the SIO area gained
 

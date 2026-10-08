@@ -48,7 +48,7 @@ Bug fixed on the way: **SB2 never ran `begin_step` for segment 0 in v1.28 and ea
 
 The end-of-run noise Manny heard at the end of v1.28 was the payload-as-audio FSK tone that every capture started; the generator is deleted.
 
-Pins: SDK 73ab7ef7 (carries `psx-pad`'s `irq-engine`, used by the pad-engine steps) and emulator 575faaa (CD timing calibrated to the v1.28 silicon capture). The conformance count in the emulator is 149 pass, 2 fail, 83 info: cases 139 (`NCLIP controlled scene-C +2`) and 201 (`GTE vs IRQ, return to EPC: RTPS intact`), both failing in the v1.25 emulator baseline too (see below), so they are known emulator gaps and not an effect of the new order. On silicon (v1.28) 139 passes with a settled reference that is itself partial (`0xF3A`) and 201 fails.
+Pins: SDK 73ab7ef7 (carries `psx-pad`'s `irq-engine`, used by the pad-engine steps) and emulator 575faaa (CD timing calibrated to the v1.28 silicon capture). The emulator run is 58 steps, 11 QR pages and 619 records; its conformance count is 149 pass, 2 fail, 83 info: cases 139 (`NCLIP controlled scene-C +2`) and 201 (`GTE vs IRQ, return to EPC: RTPS intact`), both failing in the v1.25 emulator baseline too (see below), so they are known emulator gaps and not an effect of the new order. On silicon (v1.28) 139 passes with a settled reference that is itself partial (`0xF3A`) and 201 fails.
 
 ### v1.28 (2026-10-08, schema PX8)
 
