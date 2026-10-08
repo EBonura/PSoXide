@@ -1,0 +1,20 @@
+[package]
+name    = "pollbench"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+
+[workspace]
+
+[[bin]]
+name = "pollbench"
+path = "src/main.rs"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+
+[dependencies]
+psx-pad  = { path = "../../crates/psx-pad" }
+psx-rt   = { path = "../../crates/psx-rt" }
