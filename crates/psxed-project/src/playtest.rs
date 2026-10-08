@@ -49,8 +49,8 @@ use crate::{
     CharacterAnimationAction, CharacterControllerSettings, NodeKind, OptionId, OptionKind,
     ParticleEmitterSettings, PhysicsBodySettings, ProjectDocument, PsxBlendMode, ResourceData,
     ResourceId, SceneNode, UiAction, UiAnchor, UiGradient, UiImageEffect, UiNodeId, UiNodeKind,
-    UiRect, UiSfxCue, UiTextAlign, UiValueBinding, WorldCameraSettings, WorldStreamingSettings,
-    MAX_UI_LETTER_SPACING, MIN_UI_LETTER_SPACING, PHYSICS_WEIGHT_ONE_Q8,
+    UiRect, UiSfxCue, UiTextAlign, UiValueBinding, WorldCameraSettings, MAX_UI_LETTER_SPACING,
+    MIN_UI_LETTER_SPACING, PHYSICS_WEIGHT_ONE_Q8,
 };
 
 mod assets;
@@ -239,8 +239,7 @@ mod poi_persistence_tests {
 }
 
 pub use manifest::{
-    cook_to_dir, default_generated_dir, render_manifest_source, streamed_room_chunk_memory_report,
-    write_cook_result, write_package,
+    cook_to_dir, default_generated_dir, render_manifest_source, write_cook_result, write_package,
 };
 pub use performance::{playtest_performance_envelope, PlaytestPerformanceEnvelope};
 pub use schema::*;
@@ -418,29 +417,12 @@ pub(crate) struct PlayerSpawnCandidate<'a> {
     animator: Option<AnimatorComponent<'a>>,
 }
 
-fn playtest_streaming_resident_chunk_limit(streaming: WorldStreamingSettings) -> u8 {
-    std::env::var("PSXED_PLAYTEST_RESIDENT_CHUNK_LIMIT")
-        .ok()
-        .and_then(|raw| raw.trim().parse::<u8>().ok())
-        .map(|limit| {
-            limit.clamp(
-                crate::MIN_WORLD_STREAMING_RESIDENT_CHUNKS,
-                crate::MAX_WORLD_STREAMING_RESIDENT_CHUNKS,
-            )
-        })
-        .unwrap_or(streaming.resident_chunk_limit)
-}
-
 pub(crate) fn yaw_from_degrees(degrees: f32) -> i16 {
     angle_from_degrees(degrees)
 }
 
 pub(crate) fn angle_from_degrees(degrees: f32) -> i16 {
     crate::spatial::euler_degrees_to_q12(degrees) as i16
-}
-
-pub(crate) fn checked_u32(value: usize, what: &str) -> Result<u32, String> {
-    u32::try_from(value).map_err(|_| format!("{what} exceeds u32"))
 }
 
 /// Build a playtest package from `project`. Validates the scene
@@ -524,7 +506,6 @@ pub fn build_package(
     // pay for two cooks. Empty grids skip with a warning.
     let mut assets: Vec<PlaytestAsset> = Vec::new();
     let mut rooms: Vec<PlaytestRoom> = Vec::new();
-    let materials: Vec<PlaytestMaterial> = Vec::new();
     // Resolved psxt path → index into `assets` for texture page
     // deduplication (materials sharing one image share one page).
     // First-use order is deterministic because we walk rooms +
@@ -552,17 +533,6 @@ pub fn build_package(
         );
         return (None, report);
     }
-    let room_visibility: Vec<PlaytestRoomVisibility> = Vec::new();
-    let visibility_cells: Vec<PlaytestVisibilityCell> = Vec::new();
-    let visibility_pvs: Vec<PlaytestVisibilityPvs> = Vec::new();
-    let visibility_pvs_bits: Vec<u8> = Vec::new();
-    let room_surface_caches: Vec<PlaytestRoomSurfaceCache> = Vec::new();
-    let room_cache_cells: Vec<PlaytestCachedRoomCell> = Vec::new();
-    let room_cache_cell_vertices: Vec<u16> = Vec::new();
-    let room_cache_vertices: Vec<PlaytestCachedRoomVertex> = Vec::new();
-    let room_cache_surfaces: Vec<PlaytestCachedRoomSurface> = Vec::new();
-    let room_portals: Vec<PlaytestRoomPortal> = Vec::new();
-    let room_near_rooms: Vec<u16> = Vec::new();
 
     // The singleton record retains shared world/camera/sky settings for
     // the ordinary gameplay pipeline. Geometry, collision, visibility,
@@ -581,10 +551,6 @@ pub fn build_package(
         .world_culling_for_node(scene.root)
         .unwrap_or_default()
         .normalized();
-    let streaming = scene
-        .world_streaming_for_node(scene.root)
-        .unwrap_or_default()
-        .normalized();
     let resolved_physics = scene
         .world_physics_for_node(scene.root)
         .unwrap_or_default()
@@ -599,28 +565,12 @@ pub fn build_package(
         .resolved_for_room(false, [0; 3]);
     rooms.push(PlaytestRoom {
         name: "PXBSP World".to_string(),
-        world_asset_index: None,
         reflection_probe_asset_index: None,
-        origin_x: 0,
-        origin_z: 0,
-        origin_y: 0,
         sector_size: world_sector_size,
         draw_distance: resolved_culling.draw_distance,
-        chunk_activation_radius_sectors: resolved_culling.chunk_activation_radius_sectors,
-        visibility_radius: resolved_culling.visibility_radius,
-        resident_chunk_limit: playtest_streaming_resident_chunk_limit(streaming),
-        visible_chunk_limit: streaming.visible_chunk_limit,
         gravity_per_tick_q8: resolved_physics
             .gravity_per_tick_q8
             .unwrap_or_else(|| resolved_physics.gravity_per_tick.saturating_mul(256)),
-        material_first: 0,
-        material_count: 0,
-        portal_first: 0,
-        portal_count: 0,
-        near_room_first: 0,
-        near_room_count: 0,
-        overlapped_room_first: 0,
-        overlapped_room_count: 0,
         fog_rgb: [0; 3],
         fog_near: 0,
         fog_far: resolved_culling.draw_distance,
@@ -783,7 +733,7 @@ pub fn build_package(
         .sky
         .cloud_layer
         .texture_asset_index = sky_texture_asset_index;
-    let world_geometry = PlaytestWorldGeometry::Pxbsp(PlaytestPxbspWorld {
+    let world_geometry = PlaytestPxbspWorld {
         bytes: compiled.pxbsp.bytes,
         max_visible_faces: compiled.pxbsp.max_visible_faces,
         body_hulls: compiled.body_hulls,
@@ -801,13 +751,12 @@ pub fn build_package(
             })
             .collect(),
         leak_path: authored_leak_path,
-    });
+    };
 
     if rooms.is_empty() {
         report.error("BSP cook did not produce its world metadata record");
         return (None, report);
     }
-    let chunks = Vec::new();
 
     // Pass 3: spawn + entities + model instances + lights.
     let mut player_spawns: Vec<PlayerSpawnCandidate<'_>> = Vec::new();
@@ -826,7 +775,6 @@ pub fn build_package(
     let mut arch_props: Vec<PlaytestArchProp> = Vec::new();
     let mut arch_prop_surfaces: Vec<PlaytestArchPropSurface> = Vec::new();
     let mut arch_prop_collisions: Vec<PlaytestArchPropCollision> = Vec::new();
-    let water_cells: Vec<PlaytestWaterCell> = Vec::new();
     let mut combat_capsules: Vec<PlaytestCombatCapsule> = Vec::new();
     let mut weapon_hitboxes: Vec<PlaytestWeaponHitbox> = Vec::new();
     let mut weapons: Vec<PlaytestWeapon> = Vec::new();
@@ -1893,14 +1841,11 @@ pub fn build_package(
                 wait_ticks,
                 enabled,
             } => {
-                let bsp_door_link = match &world_geometry {
-                    PlaytestWorldGeometry::Pxbsp(world) => world
-                        .movers
-                        .iter()
-                        .position(|mover| mover.node == node.id.raw() as u32)
-                        .and_then(|index| u16::try_from(index).ok()),
-                    PlaytestWorldGeometry::Grid => None,
-                };
+                let bsp_door_link = world_geometry
+                    .movers
+                    .iter()
+                    .position(|mover| mover.node == node.id.raw() as u32)
+                    .and_then(|index| u16::try_from(index).ok());
                 let ok = report.blaming(PlaytestValidationTarget::Node(node.id), |report| {
                     push_logic_node(
                         node.name.as_str(),
@@ -2354,22 +2299,18 @@ pub fn build_package(
         &mut report,
     );
 
-    if let PlaytestWorldGeometry::Pxbsp(world) = &world_geometry {
-        validate_pxbsp_body_hulls(
-            project,
-            &world.body_hulls,
-            &characters,
-            &game_entities,
-            &mut report,
-        );
-    }
+    validate_pxbsp_body_hulls(
+        project,
+        &world_geometry.body_hulls,
+        &characters,
+        &game_entities,
+        &mut report,
+    );
 
     if !report.is_ok() {
         return (None, report);
     }
 
-    let room_floor_links = Vec::new();
-    let room_overlapped_rooms = Vec::new();
     let (
         ui_nodes,
         ui_paints,
@@ -2396,63 +2337,12 @@ pub fn build_package(
     lights.sort_by_key(|light| light.room);
     let options = cook_options(project);
 
-    // Fail closed on the boundary itself. Every grid spatial producer above
-    // is reachable only through `room_nodes`, which is provably empty for a
-    // BSP project - but "provably" decays as the cook grows, and the failure
-    // mode it decays into is silent: a BSP level that quietly streams grid
-    // rooms nobody authored. Re-check the outputs instead of trusting the
-    // guards, so a future leak is a named cook error on the first run.
-    //
-    // Two deliberate exceptions, per docs/quake-psoxide-convergence-handoff.md
-    // section 0.10, are NOT leaks and are excluded by name below:
-    //   * the singleton `PlaytestRoom` ("PXBSP World"), which is non-spatial
-    //     metadata (gravity, camera, sky, fog) with `world_asset_index: None`;
-    //   * the header-only WORLD.PAK the manifest writes from an empty world
-    //     pack order, kept so the disc layout and loader contract stay stable.
-    let leaks: [(&str, usize); 9] = [
-        ("room chunks", chunks.len()),
-        ("room visibility rows", room_visibility.len()),
-        ("visibility cells", visibility_cells.len()),
-        ("visibility PVS rows", visibility_pvs.len()),
-        ("room surface caches", room_surface_caches.len()),
-        ("room portals", room_portals.len()),
-        ("room floor links", room_floor_links.len()),
-        ("water cells", water_cells.len()),
-        (
-            "PSXW world assets",
-            assets
-                .iter()
-                .filter(|asset| asset.kind == PlaytestAssetKind::RoomWorld)
-                .count(),
-        ),
-    ];
-    for (what, count) in leaks {
-        if count != 0 {
-            report.error(format!(
-                "BSP project cooked {count} {what}; PXBSP is the only \
-                     spatial authority and grid spatial state must never be \
-                     produced for a BSP project"
-            ));
-        }
-    }
     if rooms.len() != 1 {
         report.error(format!(
             "BSP project cooked {} room records; exactly one non-spatial \
-                 metadata room is expected",
+             metadata room is expected",
             rooms.len()
         ));
-    }
-    if rooms.iter().any(|room| room.world_asset_index.is_some()) {
-        report.error(
-            "BSP project cooked a room referencing a PSXW world asset; the \
-                 metadata room must carry no world geometry",
-        );
-    }
-    if !matches!(world_geometry, PlaytestWorldGeometry::Pxbsp(_)) {
-        report.error(
-            "BSP project produced a grid world geometry payload; the cook \
-                 would ship a level with no world",
-        );
     }
     if !report.is_ok() {
         return (None, report);
@@ -2510,28 +2400,9 @@ pub fn build_package(
                 }
                 paths.into_iter().collect()
             },
-            runtime_depth_sort_mode: project.runtime_depth_sort_mode,
-            runtime_texture_split_mode: project.runtime_texture_split_mode,
-            runtime_room_draw_order_mode: project.runtime_room_draw_order_mode,
             runtime_texture_split_max_edge: project.runtime_texture_split_max_edge,
             assets,
             rooms,
-            chunks,
-            room_portals,
-            room_floor_links,
-            water_cells,
-            room_near_rooms,
-            room_overlapped_rooms,
-            materials,
-            room_visibility,
-            visibility_cells,
-            visibility_pvs,
-            visibility_pvs_bits,
-            room_surface_caches,
-            room_cache_cells,
-            room_cache_cell_vertices,
-            room_cache_vertices,
-            room_cache_surfaces,
             models,
             model_clips,
             model_clip_bounds,

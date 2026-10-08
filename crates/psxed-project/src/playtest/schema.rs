@@ -1,9 +1,7 @@
 //! Host-side package schema for embedded editor play mode.
 
 use crate::{
-    MaterialAnimation, MaterialFaceSidedness, NodeId, PsxBlendMode, ResourceId,
-    RuntimeDepthSortMode, RuntimeRoomDrawOrderMode, RuntimeTextureSplitMode, SkyCycloramaQuad,
-    UiGradientDirection, UiNodeKind, UiValueBinding,
+    NodeId, ResourceId, SkyCycloramaQuad, UiGradientDirection, UiNodeKind, UiValueBinding,
 };
 
 /// Number of cooked character animation action slots.
@@ -99,27 +97,12 @@ pub const CDDA_TRACKS_DIRNAME: &str = "cdda_tracks";
 /// runtime enum at write time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlaytestAssetKind {
-    /// Cooked `.psxw` room blob.
-    RoomWorld,
     /// Cooked `.psxt` texture blob (room atlas or model atlas).
     Texture,
     /// Cooked `.psxmdl` mesh blob.
     ModelMesh,
     /// Cooked `.psxanim` skeletal animation clip.
     ModelAnimation,
-}
-
-/// Geometry provider selected for the normal embedded-Play lifecycle.
-///
-/// Gameplay tables remain common to both variants. The distinction only
-/// chooses how the static world, visibility, and collision are supplied.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub enum PlaytestWorldGeometry {
-    /// Legacy sector-grid rooms backed by cooked `.psxw` assets.
-    #[default]
-    Grid,
-    /// One resident PXBSP world plus its authored brush-mover links.
-    Pxbsp(PlaytestPxbspWorld),
 }
 
 /// Resident PXBSP payload and the deterministic authored mover mapping needed
@@ -140,6 +123,19 @@ pub struct PlaytestPxbspWorld {
     pub movers: Vec<PlaytestPxbspMover>,
     /// Quake-style pointfile path; empty when the world is sealed.
     pub leak_path: Vec<[i32; 3]>,
+}
+
+impl Default for PlaytestPxbspWorld {
+    fn default() -> Self {
+        Self {
+            bytes: Vec::new(),
+            max_visible_faces: 0,
+            body_hulls: [psx_bsp::collision_provider::CookedBodyHull::new(0, 0, 0); 2],
+            texture_asset_indices: Vec::new(),
+            movers: Vec::new(),
+            leak_path: Vec::new(),
+        }
+    }
 }
 
 /// Link from an authored Door logic node to its PXBSP brush submodel.
@@ -219,55 +215,16 @@ impl PlaytestAsset {
 pub struct PlaytestRoom {
     /// Display name lifted from the editor scene tree.
     pub name: String,
-    /// Index into [`PlaytestPackage::assets`] of the room's `RoomWorld`
-    /// asset. Resident PXBSP worlds use `None`: their geometry, collision,
-    /// and PVS live in [`PlaytestWorldGeometry::Pxbsp`], not a dummy PSXW.
-    pub world_asset_index: Option<usize>,
     /// Host-baked 4bpp environment map used by reflective model materials in
     /// this runtime room. `None` when the project has no reflective materials.
     pub reflection_probe_asset_index: Option<usize>,
-    /// Editor-side `WorldGrid::origin[0]` (diagnostic only).
-    pub origin_x: i32,
-    /// Editor-side `WorldGrid::origin[1]`.
-    pub origin_z: i32,
-    /// Room vertical placement in engine units, from the Room node's
-    /// authored `Transform3::translation[1]`. Diagnostic only for now,
-    /// mirroring `origin_x` / `origin_z`: the cooker still normalizes
-    /// geometry to array-rooted at ground level.
-    pub origin_y: i32,
     /// Engine units per sector.
     pub sector_size: i32,
     /// Camera-space far plane used for room/actor rendering.
     pub draw_distance: i32,
-    /// Runtime room activation radius in world sectors.
-    pub chunk_activation_radius_sectors: i32,
-    /// Cooked PVS traversal radius in room cells.
-    pub visibility_radius: u16,
-    /// Runtime room residency budget inherited from the World node.
-    pub resident_chunk_limit: u8,
-    /// Runtime room visible/drawable budget inherited from the World node.
-    pub visible_chunk_limit: u8,
     /// Downward acceleration inherited from the World node, in Q8 engine units
     /// per fixed 60 Hz tick squared.
     pub gravity_per_tick_q8: i32,
-    /// First index into [`PlaytestPackage::materials`] for this
-    /// room's slice.
-    pub material_first: u16,
-    /// Number of material records in the slice. Matches the
-    /// cooked `.psxw`'s material count exactly.
-    pub material_count: u16,
-    /// First directed portal sourced from this room.
-    pub portal_first: u16,
-    /// Number of directed portals sourced from this room.
-    pub portal_count: u8,
-    /// First nearby room index. Reserved for portal streaming coherence.
-    pub near_room_first: u16,
-    /// Number of nearby room indices.
-    pub near_room_count: u8,
-    /// First overlapped room index. Reserved for stacked-room coherence.
-    pub overlapped_room_first: u16,
-    /// Number of overlapped room indices.
-    pub overlapped_room_count: u8,
     /// Fog/depth-cue far colour.
     pub fog_rgb: [u8; 3],
     /// Fog start distance in engine units.
@@ -290,101 +247,6 @@ pub struct PlaytestRoom {
     pub camera: PlaytestCamera,
     /// Room flags mirrored into the runtime manifest.
     pub flags: u16,
-}
-
-/// One cooked runtime room emitted from an authored map or manual portal split.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PlaytestChunk {
-    /// Owning runtime room index in [`PlaytestPackage::rooms`].
-    pub room: u16,
-    /// Stable editor Room node id, truncated for compact runtime
-    /// diagnostics.
-    pub authored_room: u32,
-    /// Stable order inside the authored Room's manual portal-room plan.
-    pub chunk_index: u16,
-    /// Runtime room origin X in authored grid sectors.
-    pub origin_x: i32,
-    /// Runtime room origin Z in authored grid sectors.
-    pub origin_z: i32,
-    /// Runtime room width in sectors.
-    pub width: u16,
-    /// Runtime room depth in sectors.
-    pub depth: u16,
-    /// Cardinal manual portal-neighbour rooms. `None` means no link.
-    pub neighbours: [Option<u16>; 4],
-    /// Estimated triangle count from the runtime room budget.
-    pub triangles: usize,
-    /// Estimated base `.psxw` byte count.
-    pub psxw_bytes: usize,
-    /// Estimated static-lit `.psxw` byte count.
-    pub static_lit_bytes: usize,
-    /// Number of populated cells in the cooked runtime room.
-    pub populated_cells: u16,
-    /// Runtime flags.
-    pub flags: u16,
-}
-
-/// One directed portal between cooked runtime rooms.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PlaytestRoomPortal {
-    /// Source room in [`PlaytestPackage::rooms`].
-    pub source_room: u16,
-    /// Destination room in [`PlaytestPackage::rooms`].
-    pub destination_room: u16,
-    /// Wall/floor/ceiling kind. Demo7 emits wall portals (`0`).
-    pub kind: u8,
-    /// Source-facing portal normal.
-    pub normal: [i16; 3],
-    /// World-space portal rectangle vertices `[BL, BR, TR, TL]`.
-    pub vertices: [[i32; 3]; 4],
-}
-
-/// Runtime floor-link metadata copied into compact collision sector records.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PlaytestRoomFloorLink {
-    /// Owning runtime room in [`PlaytestPackage::rooms`].
-    pub room: u16,
-    /// Sector X inside the cooked runtime room.
-    pub x: u16,
-    /// Sector Z inside the cooked runtime room.
-    pub z: u16,
-    /// Runtime room reached by moving upward through this sector.
-    pub above_room: Option<u16>,
-    /// Runtime room reached by moving downward through this sector.
-    pub below_room: Option<u16>,
-}
-
-/// One water-covered runtime sector. Records are sorted by
-/// `(room, x, z)` so the runtime can binary-search the player's current cell
-/// without scanning authored volumes or geometry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PlaytestWaterCell {
-    /// Owning runtime room.
-    pub room: u16,
-    /// Runtime-room-local sector X.
-    pub x: u16,
-    /// Runtime-room-local sector Z.
-    pub z: u16,
-    /// Optional texture asset for the visible water surface.
-    pub texture_asset_index: Option<usize>,
-    /// PSX semi-transparency code for the surface.
-    pub blend_mode: u8,
-    /// Material modulation tint.
-    pub tint_rgb: [u8; 3],
-    /// Material animation preserved for the water-surface render pass.
-    pub animation: MaterialAnimation,
-    /// Horizontal surface in runtime-room-local engine units.
-    pub surface_y: i32,
-    /// Terrain depth below the surface at the sector centre.
-    pub depth: u16,
-    /// Depth at which entering this cell starts water death.
-    pub lethal_depth: u16,
-    /// Movement speed retained while wading, as a percentage.
-    pub movement_percent: u8,
-    /// Ticks from lethal submersion to respawn.
-    pub death_delay_ticks: u8,
-    /// Required submersion before the lethal sequence begins.
-    pub death_submerge_depth: u16,
 }
 
 /// Resolved sky values written into one runtime room record.
@@ -498,164 +360,6 @@ pub struct PlaytestCamera {
     pub focus_vertical_lag_shift: u8,
     /// Collision boom recovery lag shift. Lower values move faster.
     pub distance_lag_shift: u8,
-}
-
-/// Per-room slice into generated visibility cells.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PlaytestRoomVisibility {
-    /// Owning room index.
-    pub room: u16,
-    /// First index into [`PlaytestPackage::visibility_cells`].
-    pub cell_first: u16,
-    /// Number of visibility cells for this room.
-    pub cell_count: u16,
-    /// First index into [`PlaytestPackage::visibility_pvs`].
-    pub pvs_first: u32,
-    /// Number of PVS records for this room.
-    pub pvs_count: u16,
-}
-
-/// One cooked position-cell PVS bitset slice.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PlaytestVisibilityPvs {
-    /// First byte in [`PlaytestPackage::visibility_pvs_bits`].
-    pub byte_first: u32,
-    /// Number of bitset bytes.
-    pub byte_count: u16,
-}
-
-/// One cooked room grid cell with precomputed visibility metadata.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PlaytestVisibilityCell {
-    /// Owning room index.
-    pub room: u16,
-    /// Cell X coordinate inside the cooked `.psxw`.
-    pub x: u16,
-    /// Cell Z coordinate inside the cooked `.psxw`.
-    pub z: u16,
-    /// Minimum surface height in room-local engine units.
-    pub min_y: i32,
-    /// Maximum surface height in room-local engine units.
-    pub max_y: i32,
-    /// Cardinal portal/open-edge mask.
-    pub portal_mask: u8,
-    /// Cardinal full-height solid-blocker mask.
-    pub blocker_mask: u8,
-    /// Room-local index into [`PlaytestPackage::room_cache_cells`]
-    /// relative to the owning room cache's `cell_first`.
-    pub cache_cell_index: u16,
-    /// Runtime flags.
-    pub flags: u16,
-}
-
-/// Per-room slice into generated cached room geometry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PlaytestRoomSurfaceCache {
-    /// Owning room index.
-    pub room: u16,
-    /// First index into [`PlaytestPackage::room_cache_cells`].
-    pub cell_first: u32,
-    /// Number of cached cell records for this room.
-    pub cell_count: u16,
-    /// First index into [`PlaytestPackage::room_cache_cell_vertices`].
-    /// A zero count means runtime derives the visible vertex set
-    /// from each cell's surface range.
-    pub cell_vertex_first: u32,
-    /// Number of per-cell cached vertex indices for this room.
-    pub cell_vertex_count: u16,
-    /// First index into [`PlaytestPackage::room_cache_vertices`].
-    pub vertex_first: u32,
-    /// Number of cached vertex records for this room.
-    pub vertex_count: u16,
-    /// First index into [`PlaytestPackage::room_cache_surfaces`].
-    pub surface_first: u32,
-    /// Number of cached surface records for this room.
-    pub surface_count: u16,
-}
-
-/// Cached populated-cell header generated for editor-playtest.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PlaytestCachedRoomCell {
-    /// Grid X coordinate inside the cooked room.
-    pub x: u16,
-    /// Grid Z coordinate inside the cooked room.
-    pub z: u16,
-    /// Minimum authored surface height in room-local engine units.
-    pub min_y: i32,
-    /// Maximum authored surface height in room-local engine units.
-    pub max_y: i32,
-    /// Precomputed visibility center as `[x, y, z]`.
-    pub visibility_center: [i32; 3],
-    /// Precomputed visibility radius.
-    pub visibility_radius: i32,
-    /// First cached surface in this room-local cell.
-    pub surface_first: u16,
-    /// Number of cached surfaces in this cell.
-    pub surface_count: u16,
-    /// First room-local vertex index entry for this cell.
-    pub vertex_first: u16,
-    /// Number of unique cached vertices referenced by this cell.
-    pub vertex_count: u16,
-}
-
-/// Cached deduplicated room vertex generated for editor-playtest.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PlaytestCachedRoomVertex {
-    /// Room-local X coordinate.
-    pub x: i32,
-    /// Room-local Y coordinate.
-    pub y: i32,
-    /// Room-local Z coordinate.
-    pub z: i32,
-}
-
-/// Cached room surface generated for editor-playtest.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PlaytestCachedRoomSurface {
-    /// Local room material slot referenced by this surface.
-    pub material_slot: u16,
-    /// Indices into the room-local cached vertex stream.
-    pub vertex_indices: [u16; 4],
-    /// Sector X coordinate for lighting-sample reconstruction.
-    pub sample_sx: u16,
-    /// Sector Z coordinate for lighting-sample reconstruction.
-    pub sample_sz: u16,
-    /// Surface ordinal for lighting-sample reconstruction.
-    pub sample_ordinal: u16,
-    /// Packed low 16 bits of each packet UV word: `u | v << 8`.
-    pub uv_words: [u16; 4],
-    /// Cached baked RGB values.
-    pub baked_vertex_rgb: [(u8, u8, u8); 4],
-    /// Packed surface kind plus cached render flags.
-    pub kind_flags: u8,
-    /// Runtime wall direction when this is a wall surface.
-    pub wall_direction: u8,
-    /// Authored diagonal split id for floors/ceilings.
-    pub split: u8,
-    /// Split-triangle index, or the whole-quad sentinel.
-    pub triangle_index: u8,
-}
-
-/// One material slot binding. Lifted from
-/// [`CookedWorldMaterial`] and pinned to its owning room.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PlaytestMaterial {
-    /// Owning room index in [`PlaytestPackage::rooms`].
-    pub room: u16,
-    /// Cooked-world local material slot -- matches the slot value
-    /// stored in the `.psxw`.
-    pub local_slot: u16,
-    /// Index into [`PlaytestPackage::assets`] of the texture
-    /// asset bound at this slot.
-    pub texture_asset_index: usize,
-    /// Per-material modulation tint.
-    pub tint_rgb: [u8; 3],
-    /// PS1 blend equation used by this room material.
-    pub blend_mode: PsxBlendMode,
-    /// One-pass room-material animation recipe.
-    pub animation: MaterialAnimation,
-    /// Which side(s) of faces using this material should render.
-    pub face_sidedness: MaterialFaceSidedness,
 }
 
 /// One animation clip bound to a [`PlaytestModel`]. Carries
@@ -2030,8 +1734,8 @@ pub struct PlaytestPackage {
     pub save_title: String,
     /// Project-authoritative BSP compiler quality used for this package.
     pub bsp_cook_mode: crate::brush_world::BrushWorldCookMode,
-    /// Static-world provider used by the normal Play lifecycle.
-    pub world_geometry: PlaytestWorldGeometry,
+    /// The resident PXBSP static world.
+    pub world_geometry: PlaytestPxbspWorld,
     /// Project-relative paths of every source texture the cook actually
     /// reached, deduplicated.
     ///
@@ -2051,12 +1755,6 @@ pub struct PlaytestPackage {
     /// textures. Not reachable from any room, so they need copying wholesale
     /// rather than by reachability.
     pub used_ui_paths: Vec<String>,
-    /// Cached-room depth sorting mode selected by the project.
-    pub runtime_depth_sort_mode: RuntimeDepthSortMode,
-    /// Runtime room triangle subdivision scope.
-    pub runtime_texture_split_mode: RuntimeTextureSplitMode,
-    /// Runtime active-room draw ordering policy.
-    pub runtime_room_draw_order_mode: RuntimeRoomDrawOrderMode,
     /// Projected edge threshold for runtime room surface subdivision.
     pub runtime_texture_split_max_edge: u16,
     /// Master asset table -- rooms first, then room textures,
@@ -2065,38 +1763,6 @@ pub struct PlaytestPackage {
     pub assets: Vec<PlaytestAsset>,
     /// Cooked rooms with material-slice metadata.
     pub rooms: Vec<PlaytestRoom>,
-    /// Runtime chunk metadata, one record per cooked room.
-    pub chunks: Vec<PlaytestChunk>,
-    /// Directed runtime room portal graph.
-    pub room_portals: Vec<PlaytestRoomPortal>,
-    /// Runtime floor links, indexed by `(room, x, z)` and copied into streamed collision chunks.
-    pub room_floor_links: Vec<PlaytestRoomFloorLink>,
-    /// Sorted water-sector lookup table.
-    pub water_cells: Vec<PlaytestWaterCell>,
-    /// Reserved near-room index table for room coherence / streaming.
-    pub room_near_rooms: Vec<u16>,
-    /// Reserved overlapped-room index table for stacked-room coherence.
-    pub room_overlapped_rooms: Vec<u16>,
-    /// Material records ordered as `(room, local_slot)`.
-    pub materials: Vec<PlaytestMaterial>,
-    /// Per-room visibility slices.
-    pub room_visibility: Vec<PlaytestRoomVisibility>,
-    /// Per-cell visibility metadata.
-    pub visibility_cells: Vec<PlaytestVisibilityCell>,
-    /// Per-visibility-cell PVS bitset slices.
-    pub visibility_pvs: Vec<PlaytestVisibilityPvs>,
-    /// Flattened PVS bitset bytes.
-    pub visibility_pvs_bits: Vec<u8>,
-    /// Per-room room-surface cache slices.
-    pub room_surface_caches: Vec<PlaytestRoomSurfaceCache>,
-    /// Flattened cached room cell records.
-    pub room_cache_cells: Vec<PlaytestCachedRoomCell>,
-    /// Flattened room-local vertex-index lists per cached cell.
-    pub room_cache_cell_vertices: Vec<u16>,
-    /// Flattened cached room vertex records.
-    pub room_cache_vertices: Vec<PlaytestCachedRoomVertex>,
-    /// Flattened cached room surface records.
-    pub room_cache_surfaces: Vec<PlaytestCachedRoomSurface>,
     /// Cooked model bundles, deduplicated across instances.
     pub models: Vec<PlaytestModel>,
     /// Per-model clip records ordered as `(model, clip_index)`.
@@ -2207,14 +1873,6 @@ pub struct PlaytestPackage {
 }
 
 impl PlaytestPackage {
-    /// Number of `RoomWorld` entries in [`Self::assets`].
-    pub fn room_asset_count(&self) -> usize {
-        self.assets
-            .iter()
-            .filter(|a| a.kind == PlaytestAssetKind::RoomWorld)
-            .count()
-    }
-
     /// Number of `Texture` entries in [`Self::assets`].
     pub fn texture_asset_count(&self) -> usize {
         self.assets
@@ -2238,62 +1896,6 @@ impl PlaytestPackage {
             .filter(|a| a.kind == PlaytestAssetKind::ModelAnimation)
             .count()
     }
-}
-
-/// Cooked memory footprint for one streamed room chunk.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct PlaytestStreamChunkMemory {
-    /// Owning room/chunk id.
-    pub room: u16,
-    /// Number of CD sectors occupied by the sector-aligned chunk.
-    pub sector_count: usize,
-    /// Unpadded `.psxc` payload bytes.
-    pub payload_bytes: usize,
-    /// Sector-aligned stream bytes.
-    pub stream_bytes: usize,
-    /// Fixed chunk header bytes.
-    pub header_bytes: usize,
-    /// Collision payload bytes.
-    pub collision_bytes: usize,
-    /// Cached cell table bytes consumed by the render path.
-    pub render_cell_bytes: usize,
-    /// Cached vertex table bytes consumed by the render path.
-    pub render_vertex_bytes: usize,
-    /// Per-cell cached vertex-index bytes consumed by the render path.
-    pub render_cell_vertex_bytes: usize,
-    /// Cached surface table bytes consumed by the render path.
-    pub render_surface_bytes: usize,
-    /// Total render-cache bytes.
-    pub render_cache_bytes: usize,
-    /// In-payload alignment padding between sections.
-    pub alignment_padding_bytes: usize,
-    /// Padding at the end of the file to fill CD sectors.
-    pub sector_padding_bytes: usize,
-}
-
-/// Summed memory footprint for streamed room chunks.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct PlaytestStreamMemoryTotals {
-    pub sector_count: usize,
-    pub payload_bytes: usize,
-    pub stream_bytes: usize,
-    pub header_bytes: usize,
-    pub collision_bytes: usize,
-    pub render_cell_bytes: usize,
-    pub render_vertex_bytes: usize,
-    pub render_cell_vertex_bytes: usize,
-    pub render_surface_bytes: usize,
-    pub render_cache_bytes: usize,
-    pub alignment_padding_bytes: usize,
-    pub sector_padding_bytes: usize,
-}
-
-/// Full streamed-room memory report generated at cook time.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct PlaytestStreamMemoryReport {
-    pub chunks: Vec<PlaytestStreamChunkMemory>,
-    pub totals: PlaytestStreamMemoryTotals,
-    pub largest_chunk: Option<PlaytestStreamChunkMemory>,
 }
 
 /// Outcome of validating a project for playtest. Errors block

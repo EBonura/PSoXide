@@ -348,9 +348,7 @@ mod projects_dir_tests {
         let (package, report) = playtest::build_package(&project, &root);
         assert!(report.is_ok(), "BSP starter cook: {:?}", report.errors);
         let package = package.expect("BSP starter package");
-        let playtest::PlaytestWorldGeometry::Pxbsp(world) = package.world_geometry else {
-            panic!("open courtyard did not cook PXBSP");
-        };
+        let world = package.world_geometry;
         let mut map = psx_bsp::pxbsp_resident::PxbspResidentMap::with_capacity(world.bytes.len());
         map.load(0, &mut psx_bsp::SliceReader::new(&world.bytes))
             .expect("load open courtyard PXBSP");

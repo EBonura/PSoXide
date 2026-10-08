@@ -20,7 +20,7 @@ use psxed_project::{
     default_project_dir,
     playtest::{
         analyze_pxbsp_draw_cost, build_package, cook_to_dir, default_generated_dir,
-        playtest_performance_envelope, streamed_room_chunk_memory_report, PlaytestWorldGeometry,
+        playtest_performance_envelope,
     },
     NodeKind, ProjectDocument,
 };
@@ -79,13 +79,11 @@ fn main() -> ExitCode {
                     psxed_project::playtest::cooked_playtest_budgets(&project, &package)
                         .concise_summary()
                 );
-                if let PlaytestWorldGeometry::Pxbsp(world) = &package.world_geometry {
-                    println!(
-                        "[cook-playtest] PXBSP: {} bytes  Movers: {}",
-                        world.bytes.len(),
-                        world.movers.len(),
-                    );
-                }
+                println!(
+                    "[cook-playtest] PXBSP: {} bytes  Movers: {}",
+                    package.world_geometry.bytes.len(),
+                    package.world_geometry.movers.len(),
+                );
                 match analyze_pxbsp_draw_cost(&package) {
                     Ok(Some(draw_cost)) => {
                         println!(
@@ -117,34 +115,18 @@ fn main() -> ExitCode {
                         eprintln!("[cook-playtest] warning: {error}");
                     }
                 }
-                let portal_marker_count = project
-                    .active_scene()
-                    .nodes()
-                    .iter()
-                    .filter(|node| matches!(node.kind, NodeKind::Portal { .. }))
-                    .count();
-                // Per-room residency counts: room world is
-                // always RAM-required; deduped texture assets
-                // (room materials + model atlases) are
-                // VRAM-required; model meshes + clips bump RAM.
+                // Per-room residency counts: deduped texture assets (world
+                // textures + model atlases) are VRAM-required; model meshes
+                // + clips bump RAM.
                 let mut total_ram_refs: usize = 0;
                 let mut total_vram_refs: usize = 0;
                 for (i, r) in package.rooms.iter().enumerate() {
-                    let mut ram_seen: Vec<usize> = r.world_asset_index.into_iter().collect();
+                    let mut ram_seen: Vec<usize> = Vec::new();
                     let mut vram_seen: Vec<usize> = Vec::new();
-                    let first = r.material_first as usize;
-                    let count = r.material_count as usize;
-                    for m in &package.materials[first..first + count] {
-                        if !vram_seen.contains(&m.texture_asset_index) {
-                            vram_seen.push(m.texture_asset_index);
-                        }
-                    }
                     if i == 0 {
-                        if let PlaytestWorldGeometry::Pxbsp(world) = &package.world_geometry {
-                            for &texture in &world.texture_asset_indices {
-                                if !vram_seen.contains(&texture) {
-                                    vram_seen.push(texture);
-                                }
+                        for &texture in &package.world_geometry.texture_asset_indices {
+                            if !vram_seen.contains(&texture) {
+                                vram_seen.push(texture);
                             }
                         }
                     }
@@ -186,83 +168,16 @@ fn main() -> ExitCode {
                     total_vram_refs += vram_seen.len();
                 }
                 println!(
-                    "[cook-playtest] Rooms: {}  Portal markers: {}  Assets: {}  Textures: {}  Models: {}  Model instances: {}  Materials: {}  RAM residency refs: {}  VRAM residency refs: {}  Entities: {}",
+                    "[cook-playtest] Rooms: {}  Assets: {}  Textures: {}  Models: {}  Model instances: {}  RAM residency refs: {}  VRAM residency refs: {}  Entities: {}",
                     package.rooms.len(),
-                    portal_marker_count,
                     package.assets.len(),
                     package.texture_asset_count(),
                     package.models.len(),
                     package.model_instances.len(),
-                    package.materials.len(),
                     total_ram_refs,
                     total_vram_refs,
                     package.entities.len(),
                 );
-                let total_room_bytes: usize = package
-                    .chunks
-                    .iter()
-                    .map(|chunk| chunk.static_lit_bytes)
-                    .sum();
-                let total_visibility_bytes = package.visibility_cells.len()
-                    * std::mem::size_of::<psxed_project::playtest::PlaytestVisibilityCell>();
-                let total_populated_cells: usize = package
-                    .chunks
-                    .iter()
-                    .map(|chunk| chunk.populated_cells as usize)
-                    .sum();
-                let total_triangles: usize =
-                    package.chunks.iter().map(|chunk| chunk.triangles).sum();
-                if let Some(largest) = package
-                    .chunks
-                    .iter()
-                    .max_by_key(|chunk| chunk.static_lit_bytes)
-                {
-                    println!(
-                        "[cook-playtest] Runtime rooms: {}  Populated cells: {}  Triangle est: {}  Room bytes: {}  Visibility bytes: {}  Largest: room {} portal-room {} {}x{} cells={} tris={} bytes={}",
-                        package.chunks.len(),
-                        total_populated_cells,
-                        total_triangles,
-                        total_room_bytes,
-                        total_visibility_bytes,
-                        largest.room,
-                        largest.chunk_index,
-                        largest.width,
-                        largest.depth,
-                        largest.populated_cells,
-                        largest.triangles,
-                        largest.static_lit_bytes,
-                    );
-                }
-                if let Ok(stream) = streamed_room_chunk_memory_report(&package) {
-                    let total = stream.totals.payload_bytes.max(1);
-                    println!(
-                        "[cook-playtest] Stream memory: payload={}B sectors={} stream={}B collision={}B ({:.1}%) render-cache={}B ({:.1}%) [cells={}B cell-verts={}B vertices={}B surfaces={}B] align-pad={}B sector-pad={}B",
-                        stream.totals.payload_bytes,
-                        stream.totals.sector_count,
-                        stream.totals.stream_bytes,
-                        stream.totals.collision_bytes,
-                        percent(stream.totals.collision_bytes, total),
-                        stream.totals.render_cache_bytes,
-                        percent(stream.totals.render_cache_bytes, total),
-                        stream.totals.render_cell_bytes,
-                        stream.totals.render_cell_vertex_bytes,
-                        stream.totals.render_vertex_bytes,
-                        stream.totals.render_surface_bytes,
-                        stream.totals.alignment_padding_bytes,
-                        stream.totals.sector_padding_bytes,
-                    );
-                    if let Some(largest) = stream.largest_chunk {
-                        println!(
-                            "[cook-playtest] Stream largest: room {} payload={}B stream={}B sectors={} collision={}B render-cache={}B",
-                            largest.room,
-                            largest.payload_bytes,
-                            largest.stream_bytes,
-                            largest.sector_count,
-                            largest.collision_bytes,
-                            largest.render_cache_bytes,
-                        );
-                    }
-                }
                 // Session-resident payloads, reported every cook so the trend
                 // is visible well before the ceiling. Over it, the cook has
                 // already refused and this line never prints.
@@ -287,15 +202,11 @@ fn main() -> ExitCode {
                             .tr_packets_before_hw_split
                             .saturating_add(envelope.prop_surfaces);
                         println!(
-                            "[cook-playtest] 30 FPS envelope: visible-rooms<={} single-room-PVS-surfaces<={} room-surfaces<={} authored-tris<={} TR+prop-packets-before-HW-split<={} resident-rooms<={} payload<={}B stream<={}B packet-capacity={}",
-                            envelope.visible_room_limit,
+                            "[cook-playtest] 30 FPS envelope: single-room-PVS-surfaces<={} room-surfaces<={} authored-tris<={} TR+prop-packets-before-HW-split<={} packet-capacity={}",
                             envelope.max_single_room_pvs_surfaces,
                             envelope.room_surfaces,
                             envelope.authored_triangles,
                             pre_hw_packets,
-                            envelope.resident_room_limit,
-                            envelope.resident_payload_bytes,
-                            envelope.resident_stream_bytes,
                             packet_capacity,
                         );
                         if pre_hw_packets > packet_capacity {
@@ -321,8 +232,4 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
-}
-
-fn percent(part: usize, total: usize) -> f64 {
-    (part as f64) * 100.0 / (total.max(1) as f64)
 }
