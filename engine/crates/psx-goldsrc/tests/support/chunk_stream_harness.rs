@@ -105,7 +105,7 @@ pub mod fake {
             event(Event::Stop);
         }
     }
-    pub fn ready() -> Result<bool, psx_io::cdrom::SectorPollError> {
+    pub fn ready() -> Result<bool, psx_io::cd::SectorPollError> {
         DEVICE.with(|d| {
             let mut d = d.borrow_mut();
             let code = if d.fault.error {
@@ -128,7 +128,7 @@ pub mod fake {
             match code {
                 0 => Ok(false),
                 1 => Ok(true),
-                _ => Err(psx_io::cdrom::SectorPollError),
+                _ => Err(psx_io::cd::SectorPollError),
             }
         })
     }
@@ -158,7 +158,7 @@ impl shared::ChunkReader for fake::Reader {
     unsafe fn stop(&mut self) {
         self.stop()
     }
-    unsafe fn ready(&mut self) -> Result<bool, psx_io::cdrom::SectorPollError> {
+    unsafe fn ready(&mut self) -> Result<bool, psx_io::cd::SectorPollError> {
         fake::ready()
     }
     unsafe fn find_entry(
