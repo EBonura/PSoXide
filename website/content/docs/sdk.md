@@ -1,6 +1,6 @@
 +++
 title = "PSoXide SDK documentation"
-description = "21 crate guides, searchable Rust APIs and 19 complete example programs for building PS1 homebrew."
+description = "22 crate guides, searchable Rust APIs and 20 complete example programs for building PS1 homebrew."
 weight = 3
 [extra]
 kind = "Reference"
@@ -42,13 +42,13 @@ framework is a separate layer and is not required for these examples.
 ## Build the documented revision
 
 The crate structures, full example listings and API reference use the same SDK
-revision as the embedded players: `c4116856255ee68de0bfa4993b5b13683fd1a885`.
+revision as the embedded players: `47a414f23895c0dd4cb5a6c1b3cd75bedf0b76dc`.
 After [installing the tools](@/docs/first-ps1-program.md#1-install-the-tools):
 
 ```sh
 git clone https://github.com/EBonura/PSoXide.git
 cd PSoXide
-git checkout c4116856255ee68de0bfa4993b5b13683fd1a885
+git checkout 47a414f23895c0dd4cb5a6c1b3cd75bedf0b76dc
 make disc EXAMPLE=hello-tri
 ```
 
@@ -66,7 +66,7 @@ PSoXide/
   rust-toolchain.toml         pinned compiler and components
   crates/                    shared formats and host tools
   sdk/
-    Cargo.toml               workspace containing the 21 SDK crates
+    Cargo.toml               workspace containing the 22 SDK crates
     psoxide.ld               target linker script
     crates/<crate>/src/      subsystem implementations
     examples/hello-tri/
@@ -83,7 +83,7 @@ compiling. Other examples keep data on the disc and load it at runtime; an EXE
 download alone does not contain those files or CD audio tracks.
 
 For a separate game repository, use the repository's
-[pinned component bootstrap workflow](https://github.com/EBonura/PSoXide/blob/c4116856255ee68de0bfa4993b5b13683fd1a885/README.md)
+[pinned component bootstrap workflow](https://github.com/EBonura/PSoXide/blob/47a414f23895c0dd4cb5a6c1b3cd75bedf0b76dc/README.md)
 to retain the shared dependencies and matching SDK revision.
 
 ## API reference
