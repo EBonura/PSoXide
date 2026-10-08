@@ -5,9 +5,11 @@ impl<const N: usize, const S: bool> GameEntities<N, S> {
     pub fn set_player_attack_read(&mut self, phase: u8) {
         self.player_attack_read = phase;
     }
+    /// Ranged-exchange role of entity `index` (cover, peek, evade ...), 0 when unknown.
     pub fn combat_role(&self, index: usize) -> u8 {
         self.tactics.get(index).map_or(0, |t| t.combat_role)
     }
+    /// Record the nearest incoming player projectile threat for each entity.
     pub fn observe_projectiles<const P: usize>(
         &mut self,
         records: &[LevelGameEntityRecord],
@@ -184,15 +186,19 @@ impl<const N: usize, const S: bool> GameEntities<N, S> {
         stats.retreating = stats.retreating.saturating_add(1);
         true
     }
+    /// Switch the Cortex energy/poise rules on or off; legacy records keep their old rules when off.
     pub fn enable_combat_flow(&mut self, enabled: bool) {
         self.flow_enabled = enabled;
     }
+    /// Current energy of entity `index`, 0 when out of range.
     pub fn energy(&self, index: usize) -> u16 {
         self.flow.get(index).map_or(0, |f| f.energy)
     }
+    /// True when flow rules are off or entity `index` can afford a shot.
     pub fn can_fire_energy(&self, index: usize) -> bool {
         !self.flow_enabled || self.flow.get(index).is_some_and(|f| f.can_shoot())
     }
+    /// Report that a shot by entity `index` landed; `interrupted` marks an interrupting hit.
     pub fn projectile_connected(&mut self, index: usize, interrupted: bool) {
         if self.flow_enabled {
             if let Some(f) = self.flow.get_mut(index) {
@@ -200,6 +206,7 @@ impl<const N: usize, const S: bool> GameEntities<N, S> {
             }
         }
     }
+    /// Charge one shot to entity `index` (flow mode only).
     pub fn spend_shot_energy(&mut self, index: usize) {
         if self.flow_enabled {
             if let Some(f) = self.flow.get_mut(index) {
@@ -207,6 +214,7 @@ impl<const N: usize, const S: bool> GameEntities<N, S> {
             }
         }
     }
+    /// Credit entity `index` for a connected melee hit (flow mode only).
     pub fn gain_melee_energy(&mut self, index: usize, heavy: bool) {
         if self.flow_enabled {
             if let Some(f) = self.flow.get_mut(index) {
@@ -214,6 +222,7 @@ impl<const N: usize, const S: bool> GameEntities<N, S> {
             }
         }
     }
+    /// True when entity `index` is in the second half of a windup and may be broken by a bolt.
     pub fn shot_opening(&self, records: &[LevelGameEntityRecord], index: usize) -> bool {
         self.flow_enabled
             && index < self.count()
@@ -223,6 +232,7 @@ impl<const N: usize, const S: bool> GameEntities<N, S> {
                     && self.flow[index].can_interrupt()
             })
     }
+    /// Apply a projectile hit; in flow mode the bolt's poise comes from `CombatFlow::shot_poise`.
     pub fn apply_projectile_hit(
         &mut self,
         records: &'static [LevelGameEntityRecord],
@@ -328,6 +338,7 @@ impl<const N: usize, const S: bool> GameEntities<N, S> {
         self.tactics[i].goal = tactics::EnemyGoal::Retreat;
         self.advance_tactical_animation(r, i, before, delta);
     }
+    /// Locomotion clip and phase to show while a moving entity winds up or fires; `None` otherwise.
     pub fn firing_gait(&self, r: &LevelGameEntityRecord, i: usize) -> Option<(u16, u16)> {
         (self.flow_enabled
             && i < self.count()

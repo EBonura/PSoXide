@@ -915,11 +915,12 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
         self.spatial_active_mask = mask.unwrap_or(0);
     }
 
-    /// Behavior state of entity `index`.
+    /// Ticks entity `index` has spent in its current behavior state.
     pub fn state_age(&self, index: usize) -> u16 {
         self.state_ticks.get(index).copied().unwrap_or(0)
     }
 
+    /// Behavior state of entity `index`; out-of-range indices read as `Dead`.
     pub fn state(&self, index: usize) -> GameEntityState {
         if index >= self.count() {
             return GameEntityState::Dead;

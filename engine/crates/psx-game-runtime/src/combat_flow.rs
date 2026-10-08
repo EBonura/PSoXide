@@ -1,6 +1,8 @@
 //! Prototype resource and interruption rules shared by player and NPCs.
 /// All rates use the 60 Hz simulation clock, independent of rendering.
+/// Energy ceiling, shared by player and NPCs.
 pub const ENERGY_MAX: u16 = 100;
+/// Energy charged per emitted projectile.
 pub const SHOT_COST: u16 = 20;
 /// AI rebuilds a useful three-shot reserve before leaving recovery melee.
 pub const AI_RESUME_ENERGY: u16 = 60;
@@ -8,17 +10,27 @@ pub const AI_RESUME_ENERGY: u16 = 60;
 pub const FOLLOWUP_TICKS: u16 = 480;
 /// Hold a melee response long enough to complete an attack after a failed escape.
 pub const CONTEST_SPACE_TICKS: u16 = 240;
+/// Energy gained by a connected light melee hit.
 pub const MELEE_GAIN: u16 = 12;
+/// Energy gained by a connected heavy melee hit.
 pub const HEAVY_GAIN: u16 = 20;
+/// Energy refilled per second while attached to an arch and not firing.
 pub const FLOAT_GAIN_PER_SECOND: u16 = 20;
+/// Attached ticks allowed per airborne excursion.
 pub const AIR_TICKS: u16 = 360;
+/// Consecutive grounded, unattached ticks needed to re-arm the air allowance.
 pub const GROUND_REARM_TICKS: u16 = 120;
+/// Ticks after a poise break reaction ends during which no further break can occur.
 pub const BREAK_GRACE_TICKS: u16 = 60;
 
 /// Ground sidestep tuning, on the 60 Hz simulation clock.
+/// Sidestep length in runtime units.
 pub const EVADE_DISTANCE: i32 = 72;
+/// Ticks spent moving during a sidestep.
 pub const EVADE_MOVE_TICKS: u16 = 18;
+/// Vulnerable ticks after the sidestep movement ends.
 pub const EVADE_RECOVERY_TICKS: u16 = 12;
+/// Ticks before another sidestep may start.
 pub const EVADE_COOLDOWN_TICKS: u16 = 120;
 
 /// Actual firing space: several body lengths beyond contact, bounded by the weapon.
@@ -35,11 +47,16 @@ pub fn ranged_band(preferred: i32, melee_reach: i32, weapon_max: i32) -> (i32, i
     (near, far.max(near))
 }
 
+/// Per-actor energy, poise-break grace and stance-preference state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CombatFlow {
+    /// Current energy, 0..=`ENERGY_MAX`.
     pub energy: u16,
+    /// Ticks left in which further poise breaks are refused.
     pub break_grace: u16,
+    /// Attached ticks left in this airborne excursion.
     pub air_left: u16,
+    /// Contact opportunity: 0 none, 1 after a heavy hit, 2 after an interrupting shot.
     pub followup: u8,
     followup_ticks: u16,
     recharging: bool,
@@ -49,6 +66,7 @@ pub struct CombatFlow {
     float_fraction: u16,
 }
 impl CombatFlow {
+    /// Full energy and air allowance, ranged phase open.
     pub const FULL: Self = Self {
         energy: ENERGY_MAX,
         break_grace: 0,
@@ -61,6 +79,7 @@ impl CombatFlow {
         ground_ticks: 0,
         float_fraction: 0,
     };
+    /// Advance the timers by `delta` ticks; grace only drains once `recovering` is false.
     pub fn tick(&mut self, delta: u16, recovering: bool) {
         self.contest_ticks = self.contest_ticks.saturating_sub(delta);
         self.followup_ticks = self.followup_ticks.saturating_sub(delta);
@@ -72,6 +91,7 @@ impl CombatFlow {
             self.break_grace = self.break_grace.saturating_sub(delta);
         }
     }
+    /// True when energy covers at least one shot.
     pub fn can_shoot(&self) -> bool {
         self.energy >= SHOT_COST
     }
@@ -134,6 +154,7 @@ impl CombatFlow {
         }
         attached && self.air_left == 0
     }
+    /// Record a shot landing; an interrupting hit ends the ranged phase and opens a follow-up.
     pub fn shot_hit(&mut self, interrupted: bool) {
         if interrupted {
             self.ranged_phase = false;
@@ -180,12 +201,15 @@ impl CombatFlow {
             0
         }
     }
+    /// True when a poise break is allowed (no grace running).
     pub fn can_interrupt(&self) -> bool {
         self.break_grace == 0
     }
+    /// Start the post-break grace window.
     pub fn broke(&mut self) {
         self.break_grace = BREAK_GRACE_TICKS;
     }
+    /// Poise damage a bolt deals: 0 during grace, the full capacity when `exposed`, else a quarter of `authored` capped at 10.
     pub fn shot_poise(&self, authored: u16, capacity: u16, exposed: bool) -> u16 {
         if !self.can_interrupt() {
             0

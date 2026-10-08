@@ -212,8 +212,11 @@ pub struct ProjectileSnapshot {
 /// A live approaching projectile, not a prediction of an opponent's input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProjectileThreat {
+    /// Projectile position in world units.
     pub position: [i32; 3],
+    /// Per-tick velocity in world units.
     pub velocity: [i32; 3],
+    /// Estimated ticks until the projectile reaches the target.
     pub ticks_to_contact: u16,
 }
 
@@ -584,10 +587,10 @@ impl<const N: usize> CombatProjectiles<N> {
             stats.advanced = stats.advanced.saturating_add(1);
             let start = self.positions[index];
             let mut step = self.velocities[index];
-            for axis in 0..3 {
+            for (axis, s) in step.iter_mut().enumerate() {
                 let accumulated = i32::from(self.position_remainders_q12[index][axis])
                     + i32::from(self.velocity_fractions_q12[index][axis]);
-                step[axis] = step[axis].saturating_add(accumulated / 4096);
+                *s = s.saturating_add(accumulated / 4096);
                 self.position_remainders_q12[index][axis] = (accumulated % 4096) as i16;
             }
             let requested_end = add3(start, step);
