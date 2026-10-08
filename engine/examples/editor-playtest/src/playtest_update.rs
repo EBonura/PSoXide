@@ -980,16 +980,6 @@ impl Playtest {
             config.walk_speed = config.walk_speed.saturating_mul(60) / 100;
             config.run_speed = config.run_speed.saturating_mul(60) / 100;
         }
-        if let Some(water) = self.water_cell_at(self.room_index, self.motor.position()) {
-            if self.motor.position().y < water.surface_y && water.depth < water.lethal_depth {
-                // The authored percentage is the exact retained locomotion
-                // speed. There is no hidden second slowdown band.
-                let movement_percent = water.movement_percent.clamp(10, 100);
-                let movement_percent = i32::from(movement_percent);
-                config.walk_speed = config.walk_speed.saturating_mul(movement_percent) / 100;
-                config.run_speed = config.run_speed.saturating_mul(movement_percent) / 100;
-            }
-        }
         if action_locked && player_anim_is_attack(self.anim_state) {
             if let Some(character) = self.character.as_ref() {
                 let character = self.player_character_for_anim(character, self.anim_state);
@@ -1078,24 +1068,12 @@ impl Playtest {
         }
 
         // The countdown/respawn below serves EVERY death cause: combat
-        // damage arms it from `resolve_enemy_melee`, hazards and lethal
-        // water from the sites above and below.
+        // damage arms it from `resolve_enemy_melee`, hazards from the site
+        // above.
         if hazard_countdown_was_active {
             self.hazard_death_ticks_remaining = self.hazard_death_ticks_remaining.saturating_sub(1);
             if self.hazard_death_ticks_remaining == 0 {
                 self.respawn_after_death();
-            }
-        } else if self.hazard_death_ticks_remaining == 0 {
-            if let Some(water) = self.water_cell_at(self.room_index, self.motor.position()) {
-                let submerged = self.motor.position().y
-                    <= water
-                        .surface_y
-                        .saturating_sub(i32::from(water.death_submerge_depth));
-                if water.depth >= water.lethal_depth && submerged {
-                    self.player_vitality.empty_all();
-                    self.arm_player_death(false, water.death_delay_ticks, now, ctx.video_hz);
-                    telemetry::debug_log("player water:death");
-                }
             }
         }
 

@@ -28,9 +28,6 @@
 #![no_std]
 #![warn(missing_docs)]
 
-/// Fixed-pool runtime traversal over cooked room portals.
-pub mod portal_visibility;
-
 /// Stable identifier assigned to every level asset by the editor
 /// compiler. `AssetId` values are deterministic across runs:
 /// rooms first (in scene-tree order), then textures (ordered by
@@ -70,146 +67,6 @@ macro_rules! typed_index {
 typed_index! {
     /// Index into the generated `ROOMS` table.
     pub struct RoomIndex;
-}
-
-/// Small fixed-width debug bitset for runtime room/portal telemetry.
-///
-/// This deliberately stores two 32-bit words instead of a `u64`: it preserves
-/// the old 64-bit mask surface for host tooling while keeping PS1 runtime code
-/// on native-width integer operations.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct RuntimeDebugMask {
-    lo: u32,
-    hi: u32,
-}
-
-impl RuntimeDebugMask {
-    /// Empty mask.
-    pub const EMPTY: Self = Self { lo: 0, hi: 0 };
-
-    /// Build from low/high 32-bit words.
-    pub const fn from_words(lo: u32, hi: u32) -> Self {
-        Self { lo, hi }
-    }
-
-    /// Build a mask with `index` set when it fits inside 64 debug bits.
-    pub const fn from_index(index: usize) -> Self {
-        if index < 32 {
-            Self {
-                lo: 1u32 << index,
-                hi: 0,
-            }
-        } else if index < 64 {
-            Self {
-                lo: 0,
-                hi: 1u32 << (index - 32),
-            }
-        } else {
-            Self::EMPTY
-        }
-    }
-
-    /// Build a room-index mask.
-    pub const fn from_room(room: RoomIndex) -> Self {
-        Self::from_index(room.to_usize())
-    }
-
-    /// Low 32 mask bits.
-    pub const fn lo(self) -> u32 {
-        self.lo
-    }
-
-    /// High 32 mask bits.
-    pub const fn hi(self) -> u32 {
-        self.hi
-    }
-
-    /// True when no bits are set.
-    pub const fn is_empty(self) -> bool {
-        self.lo == 0 && self.hi == 0
-    }
-
-    /// Return a copy with `index` set when it fits inside 64 debug bits.
-    pub const fn with_index(self, index: usize) -> Self {
-        let bit = Self::from_index(index);
-        Self {
-            lo: self.lo | bit.lo,
-            hi: self.hi | bit.hi,
-        }
-    }
-
-    /// Return a copy with `room` set.
-    pub const fn with_room(self, room: RoomIndex) -> Self {
-        self.with_index(room.to_usize())
-    }
-
-    /// Set `index` when it fits inside 64 debug bits.
-    pub fn insert_index(&mut self, index: usize) {
-        *self = self.with_index(index);
-    }
-
-    /// Set `room`.
-    pub fn insert_room(&mut self, room: RoomIndex) {
-        *self = self.with_room(room);
-    }
-
-    /// Test `index`.
-    pub const fn contains_index(self, index: usize) -> bool {
-        if index < 32 {
-            (self.lo & (1u32 << index)) != 0
-        } else if index < 64 {
-            (self.hi & (1u32 << (index - 32))) != 0
-        } else {
-            false
-        }
-    }
-}
-
-impl core::ops::BitOr for RuntimeDebugMask {
-    type Output = Self;
-
-    fn bitor(self, rhs: Self) -> Self::Output {
-        Self {
-            lo: self.lo | rhs.lo,
-            hi: self.hi | rhs.hi,
-        }
-    }
-}
-
-impl core::ops::BitOrAssign for RuntimeDebugMask {
-    fn bitor_assign(&mut self, rhs: Self) {
-        self.lo |= rhs.lo;
-        self.hi |= rhs.hi;
-    }
-}
-
-impl core::ops::BitAnd<u32> for RuntimeDebugMask {
-    type Output = u32;
-
-    fn bitand(self, rhs: u32) -> Self::Output {
-        self.lo & rhs
-    }
-}
-
-impl PartialEq<u32> for RuntimeDebugMask {
-    fn eq(&self, other: &u32) -> bool {
-        self.lo == *other && self.hi == 0
-    }
-}
-
-typed_index! {
-    /// Index into the generated `MATERIALS` table.
-    pub struct MaterialIndex;
-}
-
-typed_index! {
-    /// Index into the generated `VISIBILITY_CELLS` table.
-    pub struct VisibilityCellIndex;
-}
-
-typed_index! {
-    /// Local material slot stored inside a cooked `.psxw` face.
-    pub struct MaterialSlot;
 }
 
 typed_index! {
@@ -500,15 +357,13 @@ impl OptionalModelClipIndex {
 }
 
 /// Coarse asset class -- the runtime branches on this to pick a
-/// loader (`World::from_bytes` for rooms, `Texture::from_bytes`
-/// for textures). Restricted to the variants generated *and*
+/// loader (`Texture::from_bytes` for textures, model/animation
+/// parsers for meshes and clips). Restricted to the variants generated *and*
 /// consumed in this pass; future kinds (`ActorModel`,
 /// `LightSet`, `FarfieldCard`, `AudioBank`, …) land when both
 /// sides exist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssetKind {
-    /// Cooked `.psxw` room blob.
-    RoomWorld,
     /// Cooked `.psxt` texture blob (room material atlas, model
     /// atlas, etc -- any cooked indexed-colour PSX texture).
     Texture,
@@ -774,50 +629,12 @@ impl LevelCameraRecord {
 pub struct LevelRoomRecord {
     /// Display name -- surfaces in editor logs / debug HUDs.
     pub name: &'static str,
-    /// Cooked `.psxw` asset.
-    pub world_asset: AssetId,
-    /// Editor-side origin X (sectors). Diagnostic only -- the
-    /// cooker normalizes geometry to be array-rooted.
-    pub origin_x: i32,
-    /// Editor-side origin Z.
-    pub origin_z: i32,
-    /// Room vertical placement in engine units, authored from the
-    /// Room node's transform. Diagnostic only for now (the cooker
-    /// still array-roots geometry at ground level); it is the
-    /// preserved foundation for adaptive-style stacked rooms.
-    pub origin_y: i32,
     /// Engine units per sector.
     pub sector_size: i32,
     /// Camera-space far plane used for room/actor rendering.
     pub draw_distance: i32,
-    /// Runtime room activation radius in world sectors.
-    pub chunk_activation_radius_sectors: i32,
-    /// Cooked PVS traversal radius in room cells.
-    pub visibility_radius: u16,
-    /// Maximum cooked room payloads kept resident for this world.
-    pub resident_chunk_limit: u8,
-    /// Maximum cooked rooms selected for drawing/collision for this world.
-    pub visible_chunk_limit: u8,
     /// Downward acceleration in Q8 engine units per fixed 60 Hz tick squared.
     pub gravity_per_tick_q8: i32,
-    /// First index into the global `MATERIALS` table for this
-    /// room's material slice.
-    pub material_first: MaterialIndex,
-    /// Number of `LevelMaterialRecord`s in this room's slice.
-    /// Matches the cooked `.psxw`'s material count.
-    pub material_count: u16,
-    /// First directed portal in `ROOM_PORTALS` whose source is this room.
-    pub portal_first: u16,
-    /// Number of directed portal records sourced from this room.
-    pub portal_count: u8,
-    /// First room index in `ROOM_NEAR_ROOMS`.
-    pub near_room_first: u16,
-    /// Number of near-room records.
-    pub near_room_count: u8,
-    /// First room index in `ROOM_OVERLAPPED_ROOMS`.
-    pub overlapped_room_first: u16,
-    /// Number of overlapped-room records.
-    pub overlapped_room_count: u8,
     /// Fog/depth-cue far colour.
     pub fog_rgb: [u8; 3],
     /// Fog start distance in engine units.
@@ -842,208 +659,8 @@ pub struct LevelRoomRecord {
     pub flags: u16,
 }
 
-/// One directed portal between two cooked runtime rooms.
-///
-/// `normal_*` points back toward `source_room`, away from
-/// `destination_room`, and the vertex arrays encode the portal
-/// rectangle as `[BL, BR, TR, TL]` in world-space engine units.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LevelRoomPortalRecord {
-    /// Source room in the generated `ROOMS` table.
-    pub source_room: RoomIndex,
-    /// Destination room in the generated `ROOMS` table.
-    pub destination_room: RoomIndex,
-    /// Portal kind: `0` wall, `1` vertical placeholder.
-    pub kind: u8,
-    /// Source-facing normal X.
-    pub normal_x: i16,
-    /// Source-facing normal Y.
-    pub normal_y: i16,
-    /// Source-facing normal Z.
-    pub normal_z: i16,
-    /// X coordinate for each portal vertex.
-    pub vertex_x: [i32; 4],
-    /// Y coordinate for each portal vertex.
-    pub vertex_y: [i32; 4],
-    /// Z coordinate for each portal vertex.
-    pub vertex_z: [i32; 4],
-}
-
-/// One water-covered runtime sector. The generated table is sorted by
-/// `(room, x, z)` for allocation-free binary search at runtime.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LevelWaterCellRecord {
-    /// Owning runtime room.
-    pub room: RoomIndex,
-    /// Runtime-room-local sector X.
-    pub x: u16,
-    /// Runtime-room-local sector Z.
-    pub z: u16,
-    /// Texture drawn across this cell, or no surface for gameplay-only water.
-    pub texture_asset: Option<AssetId>,
-    /// Blend code from [`model_override_blend`].
-    pub blend_mode: u8,
-    /// Surface modulation tint.
-    pub tint_rgb: [u8; 3],
-    /// Animation inherited from the authored surface material.
-    pub animation: LevelMaterialAnimation,
-    /// Horizontal surface in room-local engine units.
-    pub surface_y: i32,
-    /// Terrain depth below the surface at the sector centre.
-    pub depth: u16,
-    /// Depth that makes this cell lethal.
-    pub lethal_depth: u16,
-    /// Ground speed retained while wading, as a percentage.
-    pub movement_percent: u8,
-    /// Ticks between lethal submersion and respawn.
-    pub death_delay_ticks: u8,
-    /// Submersion needed to start the lethal sequence.
-    pub death_submerge_depth: u16,
-}
-
-/// Cardinal open-portal neighbours for one cooked room.
-///
-/// Missing neighbours are encoded as `RoomIndex(u16::MAX)` so the
-/// record stays plain data in generated manifests.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LevelChunkNeighbours {
-    /// Room reachable through the north edge, if any.
-    pub north: RoomIndex,
-    /// Room reachable through the east edge, if any.
-    pub east: RoomIndex,
-    /// Room reachable through the south edge, if any.
-    pub south: RoomIndex,
-    /// Room reachable through the west edge, if any.
-    pub west: RoomIndex,
-}
-
-impl LevelChunkNeighbours {
-    /// Sentinel used for absent neighbour links.
-    pub const NONE: RoomIndex = RoomIndex(u16::MAX);
-
-    /// Empty neighbour set.
-    pub const EMPTY: Self = Self {
-        north: Self::NONE,
-        east: Self::NONE,
-        south: Self::NONE,
-        west: Self::NONE,
-    };
-}
-
-/// Runtime room metadata emitted by the playtest cooker.
-///
-/// Authored editor Rooms may be contiguous worlds; the cooker derives
-/// manual portal-delimited runtime rooms from them. This table lets
-/// the engine stream and render by explicit portal connectivity instead
-/// of deriving active neighbours from broad room bounds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LevelChunkRecord {
-    /// Owning room/chunk index in the generated `ROOMS` table.
-    pub room: RoomIndex,
-    /// Stable authored Room node id, truncated to 32 bits for a
-    /// compact runtime diagnostic key.
-    pub authored_room: u32,
-    /// Stable runtime-room order inside the authored Room's cook plan.
-    pub chunk_index: u16,
-    /// Runtime room origin X in authored grid sectors.
-    pub origin_x: i32,
-    /// Runtime room origin Z in authored grid sectors.
-    pub origin_z: i32,
-    /// Runtime room width in sectors.
-    pub width: u16,
-    /// Runtime room depth in sectors.
-    pub depth: u16,
-    /// Cardinal portal links inside the same authored Room.
-    pub neighbours: LevelChunkNeighbours,
-    /// Reserved.
-    pub flags: u16,
-}
-
-/// Generated CD streaming table entry for one cooked room payload.
-///
-/// The cooker emits this table from the same sector layout used to
-/// build `WORLD.PAK`, so runtime room streaming can seek directly to
-/// a room payload without reading the pack header/table from disc.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LevelWorldPackEntryRecord {
-    /// Room/chunk id in the generated `ROOMS` table.
-    pub room: RoomIndex,
-    /// Payload start sector relative to the beginning of `WORLD.PAK`.
-    pub sector_offset: u32,
-    /// Sector-aligned payload length.
-    pub sector_count: u32,
-    /// Original unpadded byte size.
-    pub byte_size: u32,
-    /// FNV-1a checksum of the unpadded payload.
-    pub checksum: u32,
-}
-
-/// Magic at the start of a streamed room chunk payload.
-///
-/// A streamed chunk stores a collision payload plus renderer-native
-/// cache records. The fixed header lets the runtime recover both
-/// views directly from the CD-loaded slot without rebuilding geometry
-/// or carrying a second global cache copy.
-pub const STREAMED_ROOM_CHUNK_MAGIC: [u8; 8] = *b"PSXCHNK\0";
-
-/// Streamed room chunk header version with explicit render,
-/// per-cell vertex-list, and collision payload boundaries.
-pub const STREAMED_ROOM_CHUNK_VERSION: u32 = 3;
-
-/// Byte length of the streamed room chunk header.
-pub const STREAMED_ROOM_CHUNK_HEADER_BYTES: usize = 64;
-
-/// Maximum streamed room chunk payload the RUNTIME can load.
-///
-/// This is the cook/runtime streaming contract: the runtime sizes its
-/// per-room CD slot from this constant (see the playtest's
-/// `MAX_STREAMED_ROOM_SLOT_BYTES`), and the cooker must refuse to emit
-/// any chunk larger than it. A chunk past this limit does not fail at
-/// cook or boot on its own -- the runtime's loader rejects it on every
-/// request with silent exponential backoff and the room simply never
-/// appears (observed 2026-07-15 with ~94KB rooms: an empty world
-/// rendering sky at a fake-perfect 30fps). Keep the two sides tied to
-/// this one constant so that failure mode stays impossible.
-pub const MAX_STREAMED_ROOM_CHUNK_BYTES: usize = 32 * 1024;
-
-/// Header offsets for a streamed room chunk payload.
-///
-/// The render path consumes the cache table ranges directly; the
-/// collision path consumes `COLLISION_OFFSET/COLLISION_BYTES`.
-pub mod streamed_room_chunk_header {
-    /// Header format version.
-    pub const VERSION: usize = 8;
-    /// Cooked room/chunk id.
-    pub const ROOM: usize = 12;
-    /// Unpadded payload byte count.
-    pub const TOTAL_BYTES: usize = 16;
-    /// Offset of the collision payload.
-    pub const COLLISION_OFFSET: usize = 20;
-    /// Collision payload byte count.
-    pub const COLLISION_BYTES: usize = 24;
-    /// Offset of the cached room-cell table.
-    pub const CELLS_OFFSET: usize = 28;
-    /// Number of cached room-cell records.
-    pub const CELL_COUNT: usize = 32;
-    /// Offset of the cached vertex table.
-    pub const VERTICES_OFFSET: usize = 36;
-    /// Number of cached vertex records.
-    pub const VERTEX_COUNT: usize = 40;
-    /// Offset of the cached surface table.
-    pub const SURFACES_OFFSET: usize = 44;
-    /// Number of cached surface records.
-    pub const SURFACE_COUNT: usize = 48;
-    /// Offset of the per-cell cached vertex-index table.
-    pub const CELL_VERTICES_OFFSET: usize = 52;
-    /// Number of per-cell cached vertex indices.
-    pub const CELL_VERTEX_COUNT: usize = 56;
-    /// Payload format flags.
-    pub const FLAGS: usize = 60;
-}
-
-/// The collision payload is the compact collision-only room format.
-pub const STREAMED_ROOM_CHUNK_FLAG_COLLISION_COMPACT: u32 = 1 << 0;
-
+// Compact grid-collision payload layout, kept only until the psx-engine grid
+// collision backend that parses it is removed.
 /// Magic at the start of a compact collision-only room payload.
 pub const COMPACT_COLLISION_MAGIC: [u8; 8] = *b"PSXCOLL\0";
 
@@ -1131,239 +748,23 @@ pub mod compact_collision_wall_flags {
     pub const SOLID: u8 = 1 << 0;
 }
 
-/// Visibility metadata for one cooked room/chunk. Points into the
-/// generated compact cell table and the cooked position-cell PVS table.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LevelRoomVisibilityRecord {
-    /// Owning room index.
-    pub room: RoomIndex,
-    /// First cell record for this room.
-    pub cell_first: VisibilityCellIndex,
-    /// Number of cell records in this room's visibility slice.
-    pub cell_count: u16,
-    /// First PVS record for this room in `VISIBILITY_PVS`.
-    pub pvs_first: u32,
-    /// Number of PVS records for this room. This normally matches
-    /// `cell_count`; each visibility cell has one anchor PVS.
-    pub pvs_count: u16,
-    /// Reserved.
-    pub flags: u16,
-}
-
-/// One cooked position-cell PVS bitset slice.
+/// Generated CD streaming table entry for one cooked room payload.
 ///
-/// Bits index the owning room's `LevelVisibilityCellRecord` slice.
-/// The runtime still applies camera/global filters and depth sorting,
-/// but it no longer builds a lookup table or traverses portals while
-/// rendering.
+/// The cooker emits this table from the same sector layout used to
+/// build `WORLD.PAK`, so runtime room streaming can seek directly to
+/// a room payload without reading the pack header/table from disc.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LevelVisibilityPvsRecord {
-    /// First byte in `VISIBILITY_PVS_BITS`.
-    pub byte_first: u32,
-    /// Number of bitset bytes.
-    pub byte_count: u16,
-    /// Reserved.
-    pub flags: u16,
-}
-
-/// Edge bitmasks used by [`LevelVisibilityCellRecord::portal_mask`]
-/// and [`LevelVisibilityCellRecord::blocker_mask`].
-pub mod visibility_edge_flags {
-    /// North edge, negative Z.
-    pub const NORTH: u8 = 1 << 0;
-    /// East edge, positive X.
-    pub const EAST: u8 = 1 << 1;
-    /// South edge, positive Z.
-    pub const SOUTH: u8 = 1 << 2;
-    /// West edge, negative X.
-    pub const WEST: u8 = 1 << 3;
-}
-
-/// Per-cell visibility flags.
-pub mod visibility_cell_flags {
-    /// Cell contains renderable room geometry.
-    pub const HAS_GEOMETRY: u16 = 1 << 0;
-}
-
-/// One generated grid cell with precomputed bounds and portal/blocker
-/// metadata. Bounds are room-local engine units and are used by the
-/// runtime to avoid walking wall/floor records just to frustum-test a
-/// cell.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LevelVisibilityCellRecord {
-    /// Owning room index.
+pub struct LevelWorldPackEntryRecord {
+    /// Room/chunk id in the generated `ROOMS` table.
     pub room: RoomIndex,
-    /// Grid X coordinate inside the cooked `.psxw`.
-    pub x: u16,
-    /// Grid Z coordinate inside the cooked `.psxw`.
-    pub z: u16,
-    /// Minimum authored surface height in this cell.
-    pub min_y: i32,
-    /// Maximum authored surface height in this cell.
-    pub max_y: i32,
-    /// Cardinal edges that are considered open for conservative
-    /// portal-style visibility traversal.
-    pub portal_mask: u8,
-    /// Cardinal edges that contain a conservative full-height solid
-    /// blocker.
-    pub blocker_mask: u8,
-    /// Room-local index into the matching `ROOM_CACHE_CELLS` slice,
-    /// or `u16::MAX` when no generated render-cache cell exists.
-    pub cache_cell_index: u16,
-    /// Reserved.
-    pub flags: u16,
-}
-
-/// Per-room slice into generated cached room-surface records.
-///
-/// The cache payload is frame-invariant room geometry: populated
-/// cells, deduplicated room-local vertices, and predecoded surface
-/// records. Camera projection remains runtime scratch.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LevelRoomSurfaceCacheRecord {
-    /// Owning room index.
-    pub room: RoomIndex,
-    /// First cell record for this room in `ROOM_CACHE_CELLS`.
-    pub cell_first: u32,
-    /// Number of cached cell records for this room.
-    pub cell_count: u16,
-    /// First per-cell vertex index for this room in
-    /// `ROOM_CACHE_CELL_VERTICES`. A zero count means the runtime
-    /// derives the visible vertex set from cell surface ranges.
-    pub cell_vertex_first: u32,
-    /// Number of per-cell vertex indices for this room.
-    pub cell_vertex_count: u16,
-    /// First vertex record for this room in `ROOM_CACHE_VERTICES`.
-    pub vertex_first: u32,
-    /// Number of cached vertex records for this room.
-    pub vertex_count: u16,
-    /// First surface record for this room in `ROOM_CACHE_SURFACES`.
-    pub surface_first: u32,
-    /// Number of cached surface records for this room.
-    pub surface_count: u16,
-    /// Reserved.
-    pub flags: u16,
-}
-
-/// Generated cached room cell header.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LevelCachedRoomCellRecord {
-    /// Grid X coordinate inside the cooked room.
-    pub x: u16,
-    /// Grid Z coordinate inside the cooked room.
-    pub z: u16,
-    /// Minimum authored surface height in room-local engine units.
-    pub min_y: i32,
-    /// Maximum authored surface height in room-local engine units.
-    pub max_y: i32,
-    /// Precomputed visibility center as `[x, y, z]`.
-    pub visibility_center: [i32; 3],
-    /// Precomputed visibility radius.
-    pub visibility_radius: i32,
-    /// First cached surface in this cell's room-local surface slice.
-    pub surface_first: u16,
-    /// Number of cached surfaces in this cell.
-    pub surface_count: u16,
-    /// First cached vertex index in this cell's room-local
-    /// cell-vertex slice.
-    pub vertex_first: u16,
-    /// Number of unique cached vertices referenced by this cell.
-    pub vertex_count: u16,
-}
-
-/// Generated cached room vertex.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LevelCachedRoomVertexRecord {
-    /// Room-local X coordinate in engine units.
-    pub x: i32,
-    /// Room-local Y coordinate in engine units.
-    pub y: i32,
-    /// Room-local Z coordinate in engine units.
-    pub z: i32,
-}
-
-/// Generated cached room surface.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LevelCachedRoomSurfaceRecord {
-    /// Local room material slot referenced by this surface.
-    pub material_slot: u16,
-    /// Indices into the room-local cached vertex stream.
-    pub vertex_indices: [u16; 4],
-    /// Sector X coordinate for the reconstructed lighting sample.
-    pub sample_sx: u16,
-    /// Sector Z coordinate for the reconstructed lighting sample.
-    pub sample_sz: u16,
-    /// Surface ordinal for the reconstructed lighting sample.
-    pub sample_ordinal: u16,
-    /// Packed low 16 bits of each packet UV word: `u | v << 8`.
-    pub uv_words: [u16; 4],
-    /// Cached baked RGB values.
-    pub baked_vertex_rgb: [(u8, u8, u8); 4],
-    /// Packed surface kind plus cached render flags.
-    pub kind_flags: u8,
-    /// Runtime wall direction when this is a wall surface.
-    pub wall_direction: u8,
-    /// Authored diagonal split id for floors/ceilings.
-    pub split: u8,
-    /// Split-triangle index, or the whole-quad sentinel.
-    pub triangle_index: u8,
-}
-
-/// One material slot for one room. The compiler emits records
-/// in `(room, local_slot)` order; the runtime walks the room's
-/// slice and binds `local_slot` → `texture_asset` into a
-/// `TextureMaterial` table indexed by the cooked face's stored
-/// material slot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LevelMaterialRecord {
-    /// Owning room index in [`LevelRoomRecord`] order.
-    pub room: RoomIndex,
-    /// Cooked-world local material slot. Matches the value the
-    /// `.psxw` stores per-face / per-wall.
-    pub local_slot: MaterialSlot,
-    /// Texture asset bound at this slot.
-    pub texture_asset: AssetId,
-    /// Per-material modulation tint. Renderer multiplies the
-    /// texture sample by this colour.
-    pub tint_rgb: [u8; 3],
-    /// Blend-mode code from [`model_override_blend`].
-    pub blend_mode: u8,
-    /// One-pass room-material animation.
-    pub animation: LevelMaterialAnimation,
-    /// Runtime material flags. Low two bits encode face sidedness
-    /// using [`material_flags::FACE_*`].
-    pub flags: u16,
-}
-
-/// Runtime animation attached to one room-material slot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum LevelMaterialAnimation {
-    /// No animation and no dynamic packet work.
-    #[default]
-    Static,
-    /// Signed Q8 UV motion through the resident texture.
-    UvScroll(LevelMaterialUvMotion),
-    /// Row-major frame selection inside one resident texture atlas.
-    Flipbook(LevelMaterialFlipbook),
-}
-
-/// Grid-packed room-material flipbook recipe.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LevelMaterialFlipbook {
-    /// Frame columns in the resident texture.
-    pub columns: u8,
-    /// Frame rows in the resident texture.
-    pub rows: u8,
-    /// Active cells in row-major order.
-    pub frame_count: u8,
-    /// Simulation ticks per frame.
-    pub ticks_per_frame: u8,
-    /// Initial frame index.
-    pub phase: u8,
+    /// Payload start sector relative to the beginning of `WORLD.PAK`.
+    pub sector_offset: u32,
+    /// Sector-aligned payload length.
+    pub sector_count: u32,
+    /// Original unpadded byte size.
+    pub byte_size: u32,
+    /// FNV-1a checksum of the unpadded payload.
+    pub checksum: u32,
 }
 
 /// Material flag bits stored in [`LevelMaterialRecord::flags`].
@@ -1399,41 +800,6 @@ pub enum LevelMaterialSidedness {
     Back,
     /// No winding cull.
     Both,
-}
-
-impl LevelMaterialRecord {
-    /// Decode the material's face-sidedness flags.
-    pub const fn sidedness(self) -> LevelMaterialSidedness {
-        match self.flags & material_flags::FACE_MASK {
-            material_flags::FACE_BACK => LevelMaterialSidedness::Back,
-            material_flags::FACE_BOTH => LevelMaterialSidedness::Both,
-            _ => LevelMaterialSidedness::Front,
-        }
-    }
-}
-
-/// Per-room residency contract. The runtime calls
-/// `ResidencyManager::ensure_room_resident` with this record on
-/// room enter; it lists exactly the assets that must be in RAM
-/// and VRAM before the room can render.
-///
-/// `warm_*` lists are placeholders for future preload hints
-/// (neighbour rooms, soon-to-be-streamed assets). They're
-/// always empty in this pass.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RoomResidencyRecord {
-    /// Owning room index.
-    pub room: RoomIndex,
-    /// Assets that must be RAM-resident before render.
-    pub required_ram: &'static [AssetId],
-    /// Assets that must be VRAM-resident (uploaded textures).
-    pub required_vram: &'static [AssetId],
-    /// Preload-hint assets that *should* be RAM-resident soon
-    /// (e.g. neighbour rooms across an open portal). Empty in
-    /// this pass.
-    pub warm_ram: &'static [AssetId],
-    /// Same idea for VRAM. Empty in this pass.
-    pub warm_vram: &'static [AssetId],
 }
 
 /// Player spawn point. Coordinates are room-local engine units
@@ -4229,28 +3595,6 @@ pub fn find_asset_of_kind(
     }
 }
 
-/// Snapshot of one `ensure_room_resident` call. Lets the caller
-/// log how many assets actually moved (vs. were already
-/// resident) without re-scanning the residency lists.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct ResidencyChangeSet {
-    /// Required RAM assets that weren't resident before this
-    /// call (i.e. would have been faulted in).
-    pub missing_ram_count: u16,
-    /// Required VRAM assets that weren't resident before this
-    /// call.
-    pub missing_vram_count: u16,
-    /// Required RAM assets already present.
-    pub already_resident_ram_count: u16,
-    /// Required VRAM assets already present.
-    pub already_resident_vram_count: u16,
-    /// Required RAM assets that didn't fit in the residency
-    /// table (capacity exceeded).
-    pub overflow_ram_count: u16,
-    /// Required VRAM assets that didn't fit.
-    pub overflow_vram_count: u16,
-}
-
 /// Tiny no-alloc residency tracker. Records which `AssetId`s
 /// the runtime considers RAM- or VRAM-resident. Capacity is
 /// fixed at compile time by `RAM_CAP` / `VRAM_CAP`; overflow
@@ -4321,35 +3665,6 @@ impl<const RAM_CAP: usize, const VRAM_CAP: usize> ResidencyManager<RAM_CAP, VRAM
     pub fn vram_len(&self) -> usize {
         self.vram.iter().filter(|s| s.is_some()).count()
     }
-
-    /// Run the residency contract for `room`: every required
-    /// asset is marked resident; the returned change-set says
-    /// which were already there, which were just brought in,
-    /// and which couldn't fit. Caller is responsible for the
-    /// actual upload (asset bytes → VRAM rect) for *missing*
-    /// VRAM assets.
-    pub fn ensure_room_resident(&mut self, room: &RoomResidencyRecord) -> ResidencyChangeSet {
-        let mut cs = ResidencyChangeSet::default();
-        for &id in room.required_ram {
-            if self.contains_ram(id) {
-                cs.already_resident_ram_count = cs.already_resident_ram_count.saturating_add(1);
-            } else if self.mark_ram_resident(id) {
-                cs.missing_ram_count = cs.missing_ram_count.saturating_add(1);
-            } else {
-                cs.overflow_ram_count = cs.overflow_ram_count.saturating_add(1);
-            }
-        }
-        for &id in room.required_vram {
-            if self.contains_vram(id) {
-                cs.already_resident_vram_count = cs.already_resident_vram_count.saturating_add(1);
-            } else if self.mark_vram_resident(id) {
-                cs.missing_vram_count = cs.missing_vram_count.saturating_add(1);
-            } else {
-                cs.overflow_vram_count = cs.overflow_vram_count.saturating_add(1);
-            }
-        }
-        cs
-    }
 }
 
 fn contains<const N: usize>(slots: &[Option<AssetId>; N], id: AssetId) -> bool {
@@ -4408,14 +3723,14 @@ fn remove<const N: usize>(slots: &mut [Option<AssetId>; N], id: AssetId) -> bool
 mod tests {
     use super::*;
 
-    static ROOM_BYTES: &[u8] = b"PSXW-stub";
+    static MESH_BYTES: &[u8] = b"PSXM-stub";
     static TEX_BYTES: &[u8] = b"PSXT-stub";
 
     static ASSETS: &[LevelAssetRecord] = &[
         LevelAssetRecord {
             id: AssetId(0),
-            kind: AssetKind::RoomWorld,
-            bytes: ROOM_BYTES,
+            kind: AssetKind::ModelMesh,
+            bytes: MESH_BYTES,
             ram_bytes: 9,
             vram_bytes: 0,
             flags: 0,
@@ -4445,7 +3760,7 @@ mod tests {
 
     #[test]
     fn find_asset_of_kind_filters_by_kind() {
-        assert!(find_asset_of_kind(ASSETS, AssetId(0), AssetKind::RoomWorld).is_some());
+        assert!(find_asset_of_kind(ASSETS, AssetId(0), AssetKind::ModelMesh).is_some());
         assert!(find_asset_of_kind(ASSETS, AssetId(0), AssetKind::Texture).is_none());
         assert!(find_asset_of_kind(ASSETS, AssetId(1), AssetKind::Texture).is_some());
     }
@@ -4453,25 +3768,12 @@ mod tests {
     #[test]
     fn residency_marks_missing_then_resident() {
         let mut r = ResidencyManager::<4, 4>::new();
-        let room = RoomResidencyRecord {
-            room: RoomIndex::ZERO,
-            required_ram: &[AssetId(0)],
-            required_vram: &[AssetId(1), AssetId(2)],
-            warm_ram: &[],
-            warm_vram: &[],
-        };
-
-        let first = r.ensure_room_resident(&room);
-        assert_eq!(first.missing_ram_count, 1);
-        assert_eq!(first.missing_vram_count, 2);
-        assert_eq!(first.already_resident_ram_count, 0);
-        assert_eq!(first.already_resident_vram_count, 0);
-
-        let second = r.ensure_room_resident(&room);
-        assert_eq!(second.missing_ram_count, 0);
-        assert_eq!(second.missing_vram_count, 0);
-        assert_eq!(second.already_resident_ram_count, 1);
-        assert_eq!(second.already_resident_vram_count, 2);
+        assert!(!r.contains_ram(AssetId(0)));
+        assert!(r.mark_ram_resident(AssetId(0)));
+        assert!(r.mark_vram_resident(AssetId(1)));
+        assert!(r.contains_ram(AssetId(0)));
+        assert!(r.contains_vram(AssetId(1)));
+        assert_eq!((r.ram_len(), r.vram_len()), (1, 1));
     }
 
     #[test]
@@ -4502,42 +3804,10 @@ mod tests {
     #[test]
     fn residency_overflow_is_reported_not_silent() {
         let mut r = ResidencyManager::<2, 2>::new();
-        let room = RoomResidencyRecord {
-            room: RoomIndex::ZERO,
-            required_ram: &[AssetId(1), AssetId(2), AssetId(3)],
-            required_vram: &[],
-            warm_ram: &[],
-            warm_vram: &[],
-        };
-        let cs = r.ensure_room_resident(&room);
-        assert_eq!(cs.missing_ram_count, 2);
-        assert_eq!(cs.overflow_ram_count, 1);
+        assert!(r.mark_ram_resident(AssetId(1)));
+        assert!(r.mark_ram_resident(AssetId(2)));
+        assert!(!r.mark_ram_resident(AssetId(3)));
         assert_eq!(r.ram_len(), 2);
-    }
-
-    #[test]
-    fn streamed_room_chunk_schema_sizes_are_stable() {
-        assert_eq!(STREAMED_ROOM_CHUNK_MAGIC, *b"PSXCHNK\0");
-        assert_eq!(STREAMED_ROOM_CHUNK_VERSION, 3);
-        assert_eq!(STREAMED_ROOM_CHUNK_HEADER_BYTES, 64);
-        assert_eq!(streamed_room_chunk_header::COLLISION_OFFSET, 20);
-        assert_eq!(streamed_room_chunk_header::CELL_VERTICES_OFFSET, 52);
-        assert_eq!(streamed_room_chunk_header::CELL_VERTEX_COUNT, 56);
-        assert_eq!(streamed_room_chunk_header::FLAGS, 60);
-        assert_eq!(STREAMED_ROOM_CHUNK_FLAG_COLLISION_COMPACT, 1);
-        assert_eq!(COMPACT_COLLISION_MAGIC, *b"PSXCOLL\0");
-        assert_eq!(COMPACT_COLLISION_VERSION, 2);
-        assert_eq!(COMPACT_COLLISION_HEADER_BYTES, 36);
-        assert_eq!(COMPACT_COLLISION_SECTOR_BYTES, 48);
-        assert_eq!(COMPACT_COLLISION_NO_ROOM, u16::MAX);
-        assert_eq!(COMPACT_COLLISION_WALL_BYTES, 20);
-        assert_eq!(COMPACT_COLLISION_HEIGHT_OVERRIDE_BYTES, 28);
-        assert_eq!(core::mem::size_of::<LevelCachedRoomCellRecord>(), 36);
-        assert_eq!(core::mem::size_of::<LevelCachedRoomVertexRecord>(), 12);
-        assert_eq!(core::mem::size_of::<LevelCachedRoomSurfaceRecord>(), 40);
-        assert_eq!(core::mem::align_of::<LevelCachedRoomCellRecord>(), 4);
-        assert_eq!(core::mem::align_of::<LevelCachedRoomVertexRecord>(), 4);
-        assert_eq!(core::mem::align_of::<LevelCachedRoomSurfaceRecord>(), 2);
     }
 
     // A vertical column of three same-width buttons, evenly spaced.

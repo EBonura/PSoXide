@@ -1567,12 +1567,6 @@ impl Scene for Playtest {
                 );
             }
         }
-        let _ = self.draw_player_water_wade_splash(
-            camera,
-            self.gameplay_tick(ctx.sim_tick),
-            &mut ot,
-            &mut primitive_packets,
-        );
 
         if !world_first {
             self.draw_world_and_sky(
@@ -1993,14 +1987,6 @@ impl Playtest {
         primitive_packets: &mut PrimitivePacketArena<'_>,
         world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
     ) -> ModelInstanceDrawStats {
-        draw_water(
-            room,
-            camera,
-            actor_options,
-            lighting,
-            primitive_packets,
-            world,
-        );
         telemetry::stage_begin(telemetry::stage::IMAGE_PROPS);
         box_prop_profile_begin(telemetry::stage::BOX_PROPS);
         draw_box_props(

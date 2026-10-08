@@ -89,7 +89,7 @@ use psx_level::{
     find_asset_of_kind, room_flags, AssetId, AssetKind, CharacterAnimationAction, InteractableKind,
     InteractableRecord, LevelBoxPropRecord, LevelCameraRecord, LevelCharacterRecord,
     LevelFarVistaRecord, LevelGameEntityRecord, LevelGameplaySfxEvent, LevelImagePropRecord,
-    LevelRoomRecord, LevelSkyRecord, LevelUiValueBinding, LevelWaterCellRecord, ModelClipIndex,
+    LevelRoomRecord, LevelSkyRecord, LevelUiValueBinding, ModelClipIndex,
     ParticleEmitterRecord, RoomIndex,
 };
 use psx_vram::{TextureDepth, TexturePage};
@@ -129,7 +129,6 @@ mod runtime_schedule;
 mod sky_runtime;
 mod souls;
 mod vram_runtime;
-mod water_runtime;
 mod world_objects_runtime;
 
 use box_props::*;
@@ -150,7 +149,6 @@ use runtime_schedule::RUNTIME_SCHEDULE;
 use sky_runtime::*;
 use souls::SoulsWallet;
 use vram_runtime::*;
-use water_runtime::*;
 use world_objects_runtime::*;
 
 // Placeholder manifests reference unused statics; populated
@@ -178,7 +176,7 @@ use generated::{
     MODEL_SOCKETS, PARTICLE_EMITTERS, PERSISTENT_FLAG_COUNT, PLAYER_CONTROLLER, PLAYER_SPAWN,
     PLAYTEST_PACKET_CAPACITY, PROJECT_SAVE_NAME, PROJECT_SAVE_TITLE, PXBSP_AMBIENT_RGB, ROOMS,
     ROOM_REFLECTION_PROBES, UI_FONTS, UI_NODES, UI_PAINTS, UI_SFX_CUES, UI_SFX_SAMPLES,
-    VITALITY_CIRCLES, WATER_CELLS, WEAPONS, WEAPON_APPEARANCES, WEAPON_HITBOXES, WORLD_MESSAGE,
+    VITALITY_CIRCLES, WEAPONS, WEAPON_APPEARANCES, WEAPON_HITBOXES, WORLD_MESSAGE,
     WORLD_OBJECTS,
 };
 #[cfg(feature = "cd-stream-bench")]

@@ -46,7 +46,6 @@ pub mod streaming;
 pub mod vitality;
 pub mod vitality_circles;
 pub mod vram;
-pub mod water;
 
 /// Elevated hook acquisition and traversal.
 pub mod hook_points;

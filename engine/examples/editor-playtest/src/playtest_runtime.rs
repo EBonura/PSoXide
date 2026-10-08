@@ -714,30 +714,6 @@ impl Playtest {
         self.gameplay_sfx_events |= event.bit();
     }
 
-    pub(super) fn water_cell_at(
-        &self,
-        room: RoomIndex,
-        position: RoomPoint,
-    ) -> Option<&'static LevelWaterCellRecord> {
-        // Two sim calls per tick (locomotion speed, then the lethal-depth
-        // check) each cost a room lookup and two `div_euclid` divides before
-        // searching. An empty cooked table can never match, so answer from the
-        // table's length instead. Exact, not a heuristic.
-        if WATER_CELLS.is_empty() {
-            return None;
-        }
-        let sector_size = i32::from(ROOMS.get(room.to_usize())?.sector_size);
-        if sector_size <= 0 {
-            return None;
-        }
-        let x = u16::try_from(position.x.div_euclid(sector_size)).ok()?;
-        let z = u16::try_from(position.z.div_euclid(sector_size)).ok()?;
-        WATER_CELLS
-            .binary_search_by_key(&(room, x, z), |cell| (cell.room, cell.x, cell.z))
-            .ok()
-            .and_then(|index| WATER_CELLS.get(index))
-    }
-
     /// Arm the shared player death sequence: `delay_ticks` of locked
     /// Death animation, then [`Self::respawn_after_death`] when the
     /// countdown in `update_gameplay` reaches zero. One arming point
@@ -1695,46 +1671,6 @@ impl Playtest {
             impact_index += 1;
         }
         submitted
-    }
-
-    /// Draw the player's lightweight water-foot splash when actually moving
-    /// through non-lethal water. The effect is capped at three sprite packets
-    /// and derives its phase from time, so it adds no persistent particle state.
-    pub(super) fn draw_player_water_wade_splash<'a>(
-        &self,
-        camera: WorldCamera,
-        elapsed_tick: SimTick,
-        ot: &mut OtFrame<'a, OT_DEPTH>,
-        primitive_packets: &mut PrimitivePacketArena<'a>,
-    ) -> usize {
-        if !self.player_moved_last_tick || self.hazard_death_ticks_remaining > 0 {
-            return 0;
-        }
-        let player = self.motor.position();
-        let Some(water) = self.water_cell_at(self.room_index, player) else {
-            return 0;
-        };
-        if player.y >= water.surface_y || water.depth >= water.lethal_depth {
-            return 0;
-        }
-        let Some(particle_material) = self.particle_material else {
-            return 0;
-        };
-        let depth_range = self.effect_depth_range(self.room_index);
-        let projector =
-            PROP_PARTICLE_GTE_PROJECT_ENABLED.then(|| LoadedWorldCameraGte::load(camera));
-        draw_water_wade_splash(
-            player.x,
-            water.surface_y,
-            player.z,
-            camera,
-            projector,
-            depth_range,
-            particle_material,
-            elapsed_tick,
-            ot,
-            primitive_packets,
-        )
     }
 
     /// Gameplay-anchored animation tick: raw sim ticks minus the epoch

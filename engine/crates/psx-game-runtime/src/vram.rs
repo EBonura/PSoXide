@@ -31,7 +31,7 @@ use psx_level::{
 };
 use psx_level::{
     find_asset_of_kind, sky_flags, AssetId, AssetKind, LevelAssetRecord, LevelRoomRecord,
-    ResidencyChangeSet, ResidencyManager, RoomIndex, RoomResidencyRecord,
+    ResidencyManager, RoomIndex,
 };
 use psx_vram::{
     upload_bytes, Clut, TextureDepth, TexturePage, VramAllocator, VramHandle, VramRect,
@@ -574,26 +574,6 @@ fn mark_vram_slot_ready<const RAM_ASSETS: usize, const VRAM_ASSETS: usize>(
     let _ = residency.mark_vram_resident(slot.asset);
 }
 
-/// True if any of the `count` desired rooms lists `asset` in its required VRAM set.
-fn vram_asset_required(
-    asset: AssetId,
-    desired: &[RoomIndex],
-    count: usize,
-    room_residency: &'static [RoomResidencyRecord],
-) -> bool {
-    for &room in desired.iter().take(count) {
-        if room == INVALID_ROOM_INDEX {
-            continue;
-        }
-        if let Some(res) = room_residency.iter().find(|r| r.room == room) {
-            if res.required_vram.contains(&asset) {
-                return true;
-            }
-        }
-    }
-    false
-}
-
 /// VRAM residency/upload runtime: the slot table, the unified allocator,
 /// the residency contract tracker, the async upload queue, and the
 /// sky/decal placements, owned as one struct. The game supplies its
@@ -715,12 +695,6 @@ impl<
         }
     }
 
-    /// Pre-mark a room's required asset set on the residency contract
-    /// tracker (see `RoomResidencyRecord`).
-    pub fn ensure_room_resident(&mut self, room: &RoomResidencyRecord) -> ResidencyChangeSet {
-        self.residency.ensure_room_resident(room)
-    }
-
     /// Find a free VRAM slot index, reusing holes left by eviction before growing
     /// into fresh entries. Returns `None` when the slot table is full.
     fn next_vram_slot(&self) -> Option<usize> {
@@ -766,44 +740,6 @@ impl<
                 }
             }
         }
-    }
-
-    /// Free room-texture VRAM slots that no desired room still requires,
-    /// returning their window/CLUT to the allocator, debounced on the
-    /// current room (the desired set only moves when the camera changes
-    /// room, so eviction stays off the per-frame path). Model atlases and
-    /// the sky persist for the session; only `ready` slots are freed so a
-    /// pending upload's async writeback cannot land in a slot that has
-    /// since been reused. Replaces the example's `LAST_EVICT_ROOM` /
-    /// `evict_unreferenced_vram` statics.
-    pub fn evict_unreferenced_vram(
-        &mut self,
-        current_room: RoomIndex,
-        desired: &[RoomIndex],
-        count: usize,
-        room_residency: &'static [RoomResidencyRecord],
-    ) {
-        if self.last_evict_room == current_room {
-            return;
-        }
-        for i in 0..VRAM_ASSETS {
-            let slot = match self.slots[i] {
-                Some(s) if s.ready => s,
-                _ => continue,
-            };
-            if !matches!(
-                slot.clut_mode,
-                VramSlotClutMode::OpaqueZero
-                    | VramSlotClutMode::TransparentZero
-                    | VramSlotClutMode::DirectionalSky
-            ) {
-                continue;
-            }
-            if !vram_asset_required(slot.asset, desired, count, room_residency) {
-                self.free_vram_slot(i);
-            }
-        }
-        self.last_evict_room = current_room;
     }
 
     /// Reserve the framebuffer and every region still owned by legacy hardcoded
