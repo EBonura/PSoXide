@@ -37,6 +37,9 @@ trybuild = "1"
 default = []
 boot-trace = ["psx-rt/boot-trace"]
 emulator-telemetry = []
+# Debug-line output only (no stage/counter events): a lighter path for guest
+# builds that are too close to the RAM limit for full emulator telemetry.
+debug-log = []
 hardware-boot-visual = []
 room-surface-profile = []
 # Experimental fixed 3x3 projection lattice for one-level TR room

@@ -1005,10 +1005,10 @@ pub(super) fn debug_log_aim_camera(values: [i32; 14]) {
     line.emit();
 }
 
-/// Per-update follow-camera pose: the exact eye, focus, orbit and boom values
-/// that explain what the camera did on a tape tick.
-#[cfg(feature = "emulator-telemetry")]
-pub(super) fn debug_log_camera_pose(values: [i32; 21]) {
+/// Per-update follow-camera pose: the exact eye, focus, orbit, boom and lift
+/// values that explain what the camera did on a tape tick.
+#[cfg(any(feature = "emulator-telemetry", feature = "camera-pose-log"))]
+pub(super) fn debug_log_camera_pose(values: [i32; 18]) {
     let mut line = DebugLogLine::new("camera-pose,");
     for value in values { line.push_i32(value); line.push_byte(b','); }
     line.emit();

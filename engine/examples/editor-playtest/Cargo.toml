@@ -86,6 +86,9 @@ cd-stream-bench = ["dep:psx-io", "psx-game-runtime/cd-stream-bench"]
 cd-stream-benchmark = ["cd-stream-bench", "psx-game-runtime/cd-stream-benchmark"]
 boot-trace = ["psx-engine/boot-trace", "psx-rt/boot-trace"]
 emulator-telemetry = ["psx-engine/emulator-telemetry"]
+# Per-update `camera-pose` debug lines only; fits builds that overflow RAM with
+# the full emulator-telemetry feature (Graybox Reach).
+camera-pose-log = ["psx-engine/debug-log"]
 hardware-boot-visual = ["psx-engine/hardware-boot-visual"]
 # The HWB explosion-hunt live-capture overlay (4 cycling pages + the
 # engine-side per-vertex capture). NOT a default: it costs real cycles

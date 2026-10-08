@@ -2073,24 +2073,19 @@ impl Playtest {
                 self.lock_target.map_or(-1, |index| index as i32),
             ]);
         }
-        #[cfg(feature = "emulator-telemetry")]
+        #[cfg(any(feature = "emulator-telemetry", feature = "camera-pose-log"))]
         {
             let player = self.motor.position();
             let eye = self.camera.position();
             let focus = self.camera.focus();
             let (right_x, _) = ctx.pad.sticks.right_centered();
-            let lock_anchor = self.lock_target.or(self.soft_lock_target)
-                .and_then(|index| self.camera_target_anchor(index));
             crate::debug_runtime::debug_log_camera_pose([
                 ctx.sim_tick.as_u32() as i32, player.x, player.y, player.z,
                 eye.x, eye.y, eye.z, focus.x, focus.y, focus.z,
                 i32::from(self.camera.yaw().as_q12()), i32::from(self.camera.pitch_q12()),
                 self.camera.distance(), i32::from(self.camera.collision_pull_in()),
-                i32::from(right_x), i32::from(self.is_locked()),
-                i32::from(self.motor.yaw().as_q12()),
-                self.soft_lock_target.map_or(-1, |index| index as i32),
-                i32::from(camera.projection.focal_length),
-                lock_anchor.map_or(0, |point| point.x), lock_anchor.map_or(0, |point| point.z),
+                i32::from(right_x), i32::from(self.camera.lift_pitch_q12()),
+                i32::from(self.camera.lift_goals_q12().0), i32::from(self.camera.lift_goals_q12().1),
             ]);
         }
         #[cfg(feature = "emulator-telemetry")]

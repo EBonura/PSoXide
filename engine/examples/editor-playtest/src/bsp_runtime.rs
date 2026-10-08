@@ -75,7 +75,7 @@ pub(super) const BSP_FALLBACK_CAMERA_HEIGHT: i32 = 40;
 pub(super) const BSP_FALLBACK_CAMERA_TARGET_HEIGHT: i32 = 32;
 pub(super) const BSP_FALLBACK_CAMERA_CLEARANCE: i32 = 8;
 /// Boom-to-wall margin for the point-traced follow camera in brush worlds.
-pub(super) const BSP_CAMERA_WALL_MARGIN: i32 = 12;
+pub(super) const BSP_CAMERA_WALL_MARGIN: i32 = 6;
 pub(super) const BSP_FALLBACK_CAMERA_MARGIN: i32 = 4;
 pub(super) const BSP_USE_DISTANCE: i32 = 256;
 const BSP_BOUNDS_VISIBILITY_CACHE_SIZE: usize = 16;
