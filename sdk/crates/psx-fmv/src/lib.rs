@@ -17,7 +17,7 @@
 //! Everything but [`mdec`] is plain logic, built and tested on the host; the
 //! driver only touches a register when one of its methods runs.
 //!
-//! Only bitstream version 2 is decoded so far; v3 differs in the DC
+//! Bitstream versions 1 and 2 (the same coding) are decoded; v3 differs in the DC
 //! coding and is rejected with [`bitstream::DecodeError::Version`].
 //!
 //! The encoder is `psxavenc` (zlib license), run as a host build tool:
