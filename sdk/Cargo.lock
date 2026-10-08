@@ -150,6 +150,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "psx-residency"
+version = "0.1.0"
+
+[[package]]
 name = "psx-rt"
 version = "0.1.0"
 dependencies = [
