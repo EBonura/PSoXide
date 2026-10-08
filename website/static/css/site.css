@@ -491,8 +491,11 @@ tr.is-psx td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
   .logo { height: 18px; }
   .nav-play { font-size: .8rem; padding: 8px; }
 }
-@media (min-width: 600px) and (max-width: 1099px) {
-  .nav { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+@media (min-width: 600px) and (max-width: 899px) {
+  .nav { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+@media (min-width: 900px) and (max-width: 1099px) {
+  .nav { grid-template-columns: repeat(7, minmax(0, 1fr)); }
 }
 .breadcrumbs { padding-top: 1.1rem; font-size: .85rem; color: var(--muted); }
 .breadcrumbs ol { display: flex; flex-wrap: wrap; gap: .4rem .6rem; list-style: none; margin: 0; padding: 0; }
