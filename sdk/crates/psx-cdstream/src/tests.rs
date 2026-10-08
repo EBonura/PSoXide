@@ -958,6 +958,77 @@ fn a_lease_can_be_withdrawn_while_pending() {
 }
 
 #[test]
+fn a_non_waiting_lease_takes_an_idle_drive() {
+    let mut engine = engine();
+    assert!(engine.try_audio_lease());
+    assert_eq!(engine.lease_state(), LeaseState::Granted);
+    assert_eq!(engine.owner(), Owner::Audio);
+    assert!(!engine.hw().source_open);
+    assert!(engine.release_audio_lease());
+}
+
+#[test]
+fn a_non_waiting_lease_leaves_nothing_pending_behind_a_busy_drive() {
+    let mut engine = engine();
+    let (a, b) = (Buf::new(6), Buf::new(2));
+    let reading = submit(&mut engine, request(100, 6, &a));
+    step_until_received(&mut engine, reading, 2);
+    assert!(!engine.try_audio_lease(), "a read is in flight");
+    assert_eq!(engine.lease_state(), LeaseState::None);
+    // A read submitted right after the refusal must not end up behind a
+    // lease: the one that was in flight is not aborted either.
+    let behind = submit(&mut engine, request(900, 2, &b));
+    run(&mut engine);
+    assert_eq!(finished(&mut engine, reading).outcome, Outcome::Done);
+    assert_eq!(finished(&mut engine, behind).outcome, Outcome::Done);
+    a.assert_sectors(100, 6);
+    b.assert_sectors(900, 2);
+    assert_eq!(engine.owner(), Owner::Data);
+    assert_eq!(engine.lease_state(), LeaseState::None);
+    assert_eq!(engine.stats().requests_cancelled, 0);
+    // Once the drive is idle the same call succeeds.
+    assert!(engine.try_audio_lease());
+}
+
+#[test]
+fn a_non_waiting_lease_is_not_granted_twice() {
+    let mut engine = engine();
+    assert!(engine.try_audio_lease());
+    assert!(engine.try_audio_lease(), "already held");
+    assert!(engine.release_audio_lease());
+    assert!(!engine.release_audio_lease());
+}
+
+#[test]
+fn a_withdrawn_lease_is_not_granted_behind_a_read_queued_after_it() {
+    // The hang this guards: a lease asked for while a read ran stayed pending,
+    // a read was queued behind it, and the transport granted the lease when
+    // the first read stopped, so the second one never started.
+    let mut engine = engine();
+    let (a, b) = (Buf::new(10), Buf::new(2));
+    let reading = submit(&mut engine, request(0, 10, &a));
+    step_until_received(&mut engine, reading, 2);
+    assert_eq!(engine.request_audio_lease(), LeaseState::Pending);
+    let behind = submit(&mut engine, request(500, 2, &b));
+    assert!(engine.withdraw_audio_lease());
+    assert_eq!(engine.lease_state(), LeaseState::None);
+    run(&mut engine);
+    assert_eq!(finished(&mut engine, reading).outcome, Outcome::Cancelled);
+    assert_eq!(finished(&mut engine, behind).outcome, Outcome::Done);
+    b.assert_sectors(500, 2);
+    assert_eq!(engine.owner(), Owner::Data);
+    assert!(!engine.withdraw_audio_lease(), "nothing left to withdraw");
+}
+
+#[test]
+fn a_granted_lease_is_not_withdrawn() {
+    let mut engine = engine();
+    assert_eq!(engine.request_audio_lease(), LeaseState::Granted);
+    assert!(!engine.withdraw_audio_lease());
+    assert_eq!(engine.owner(), Owner::Audio);
+}
+
+#[test]
 fn the_first_read_after_audio_pauses_first() {
     let mut engine = engine();
     engine.request_audio_lease();
