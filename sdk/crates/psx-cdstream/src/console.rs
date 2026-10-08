@@ -648,12 +648,25 @@ pub fn release_audio_lease(cd: Cd) -> Result<(), Cd> {
     })
 }
 
-/// Withdraw a lease that was asked for and has not been granted. Returns
-/// whether one was pending.
-pub fn withdraw_audio_lease() -> bool {
+/// Take the drive for audio only if it is free right now, in one step: the
+/// controller token if the lease was granted, `None` if a read is in flight.
+/// Nothing is left pending and the read is not aborted, so a read submitted
+/// afterwards is never parked behind a lease granted later. See
+/// [`Engine::try_audio_lease`]; end the lease with [`release_audio_lease`].
+pub fn try_take_audio_lease() -> Option<Cd> {
     with_engine(|engine| {
-        engine.lease_state() == LeaseState::Pending && engine.release_audio_lease()
+        if engine.try_audio_lease() {
+            TOKEN.take()
+        } else {
+            None
+        }
     })
+}
+
+/// Withdraw a lease that was asked for and has not been granted. Returns
+/// whether one was pending. See [`Engine::withdraw_audio_lease`].
+pub fn withdraw_audio_lease() -> bool {
+    with_engine(Engine::withdraw_audio_lease)
 }
 
 // --------------------------------------------------------------- diagnostics

@@ -422,6 +422,51 @@ impl<H: CdHw> Engine<H> {
         self.lease_state()
     }
 
+    /// Take the drive for audio only if it can be had right now, without
+    /// waiting and without leaving anything behind.
+    ///
+    /// Returns `true` when the lease is granted (the drive was idle, or the
+    /// program still holds it before [`attach`](Self::attach)). Returns
+    /// `false` when a request is in flight: nothing changes, no lease is left
+    /// pending and the request is not aborted, so a read submitted afterwards
+    /// cannot end up queued behind a lease that is granted later. Ask again
+    /// when the drive is idle.
+    ///
+    /// [`request_audio_lease`](Self::request_audio_lease) is for audio that
+    /// must displace a read; this is for audio that only wants the drive
+    /// while nobody else is using it.
+    pub fn try_audio_lease(&mut self) -> bool {
+        match self.owner {
+            Owner::Boot | Owner::Audio => true,
+            Owner::Data => {
+                if self.lease_pending || !self.is_idle() {
+                    return false;
+                }
+                self.grant_lease();
+                self.sync_source();
+                true
+            }
+        }
+    }
+
+    /// Withdraw a lease that was asked for and not yet granted. Returns
+    /// whether one was pending.
+    ///
+    /// Call it before submitting a read that must not wait for audio: a
+    /// pending lease is granted the moment the drive stops, which parks every
+    /// read queued behind it until the audio code gives the drive back. The
+    /// request that was aborted for the lease still ends
+    /// [`Outcome::Cancelled`] (resume it with [`Request::remaining_after`]).
+    /// A lease that is already granted is ended with
+    /// [`release_audio_lease`](Self::release_audio_lease).
+    pub fn withdraw_audio_lease(&mut self) -> bool {
+        if self.owner == Owner::Data && self.lease_pending {
+            self.lease_pending = false;
+            return true;
+        }
+        false
+    }
+
     /// Give the drive back after audio playback, or withdraw a lease that is
     /// still pending. Returns whether there was a lease to end.
     ///
@@ -430,8 +475,7 @@ impl<H: CdHw> Engine<H> {
     /// started in that window failed on a console). The next transfer starts
     /// with a recovery Pause if [`Config::pause_after_audio`] is set.
     pub fn release_audio_lease(&mut self) -> bool {
-        if self.owner == Owner::Data && self.lease_pending {
-            self.lease_pending = false;
+        if self.withdraw_audio_lease() {
             return true;
         }
         if self.owner != Owner::Audio {
