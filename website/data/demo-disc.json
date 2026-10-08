@@ -4,7 +4,6 @@
   "image_sha256": "d1e16f5deca68351b8361ab61bc7db90298497dc93817e72f8d7fe5be6657940",
   "menu": [
     "PSXCEL",
-    "GH-PSX",
     "PSOXIDE ARCADE",
     "CELESTE COLLECTION",
     "NITROXIDE",
@@ -19,12 +18,6 @@
       "name": "PSXcel",
       "disc_name": "PSXCEL",
       "version": "0.2.0"
-    },
-    {
-      "slug": "gh-psx",
-      "name": "GH-PSX",
-      "disc_name": "GH-PSX",
-      "version": "0.1.0"
     },
     {
       "slug": "arcade",

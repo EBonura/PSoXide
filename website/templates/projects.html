@@ -18,7 +18,8 @@
       <a href="#disc-contents">Demo disc contents</a>
       <a href="#original-projects">Games &amp; tools</a>
       <a href="#collection-games">Collection games</a>
-      <a href="#ports">Ports</a>
+      <a href="#rebuilt">WipEout</a>
+      <a href="#ports">Demade</a>
       <a href="#videos">Videos</a>
     </nav>
   </header>
@@ -39,7 +40,7 @@
       </li>
       {% endfor %}
     </ul>
-    <p class="muted small">Contents checked against the released {{ disc.version }} image. Credits also appear in the menu. Half-Life, Counter-Strike, Hollow Knight and Hardware Tests are not included in this public release.</p>
+    <p class="muted small">Contents checked against the released {{ disc.version }} image, apart from one early-alpha program that is being withdrawn and is not listed. Credits also appear in the menu. Half-Life, Hollow Knight and Hardware Tests are not included in this public release.</p>
   </section>
 
   <section class="section" id="original-projects">
@@ -99,16 +100,25 @@
     <p class="muted small" style="margin-top:1.2rem">Celeste (2016) and Celeste 2: Lani's Trek (2021) are by Maddy Thorson and Noel Berry; Celeste 2's music is by Lena Raine. These are unofficial fan ports. <a href="{{ get_url(path='@/legal.md') }}#ports-built-from-other-people-s-games">Credits and licensing</a>.</p>
   </section>
 
+  <section class="section" id="rebuilt">
+    <div class="section-head">
+      <span class="eyebrow">Coming soon</span>
+      <h2>WipEout, Rebuilt with PSoXide</h2>
+      {% for p in projects.rebuilt %}<p>{{ p.hook }}</p>{% endfor %}
+    </div>
+  </section>
+
   <section class="section" id="ports">
     <div class="section-head">
-      <span class="eyebrow">Game ports</span>
+      <span class="eyebrow">Demade with PSoXide</span>
       <h2>Ports and experiments</h2>
-      <p>These projects adapt existing games for the PS1. Owning a copy does not by itself grant permission to adapt or redistribute its content. Half-Life, Counter-Strike and Hollow Knight do not offer disc-image downloads. Quake’s converted shareware data has unresolved distribution-permission questions. Its screenshot is an emulator capture. Read the project-specific terms before reusing or sharing these works.</p>
+      <p>These projects adapt games from other platforms for the PS1. Owning a copy does not by itself grant permission to adapt or redistribute its content. Half-Life and Hollow Knight do not offer disc-image downloads. Quake’s converted shareware data has unresolved distribution-permission questions. Its screenshot is an emulator capture. Read the project-specific terms before reusing or sharing these works.</p>
     </div>
     <div class="grid two">
       {% for p in projects.port %}
       <article class="card port" id="{{ p.slug }}">
         {% if p.shot %}<figure class="screen native" style="margin:0"><img src="{{ get_url(path=p.shot) }}" alt="{{ p.shot_alt }}" width="320" height="240" loading="lazy"></figure>{% endif %}
+        <span class="badge">Demade with PSoXide</span>
         {% if p.slug in disc_slugs %}<span class="badge accent">On the demo disc {{ disc.version }}</span>{% endif %}
         <h3>{{ p.name }}</h3>
         <p>{{ p.hook }}</p>

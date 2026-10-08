@@ -53,7 +53,7 @@ let p = scene::project_vertex(*v);
 projected[i] = (p.sx, p.sy);
 ```
 
-The loop then connects the projected endpoints using `gpu::draw_line_mono`. Projection and rasterization are separate operations: the GTE gives you coordinates, and the GPU draws them.
+The loop then connects the projected endpoints using `LineMono` primitives drawn with `gpu.draw`. Projection and rasterization are separate operations: the GTE gives you coordinates, and the GPU draws them.
 
 ## Try a change
 

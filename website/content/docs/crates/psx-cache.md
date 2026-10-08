@@ -10,7 +10,7 @@ Use `psx-cache` to track which resources occupy a fixed set of slots. It manages
 
 ## How the crate is organized
 
-The single module exposes `SlotCache<V, N, MAX_KEY>` and `SlotState`. Slots move from Empty to Loading to Ready. Synchronous callers use `get_or_insert_with`; asynchronous loaders reserve a slot and mark it ready when the transfer completes.
+The single module exposes `SlotCache<V, N, MAX_KEY>` and `SlotState`. Slots move from Empty to Loading to Ready. Synchronous callers use `get_or_insert_with`; asynchronous loaders call `begin_load`, which returns a `Reservation`, and pass it to `finish_load` when the transfer completes. A reservation remembers its key, so a load that finishes after its slot was evicted and reused is refused with `Stale` instead of being stored under the wrong key.
 
 ## Integration notes
 
@@ -23,9 +23,9 @@ use psx_cache::SlotCache;
 
 fn main() {
     let mut cache = SlotCache::<u32, 2, 8>::new();
-    let slot = cache.reserve(3).expect("free slot");
+    let reservation = cache.begin_load(3).expect("free slot");
     assert!(cache.is_loading(3));
-    cache.mark_ready(slot, 42);
+    cache.finish_load(reservation, 42).expect("slot still owned");
     cache.pin(3);
     assert_eq!(cache.get(3), Some(&42));
     cache.unpin_all();
