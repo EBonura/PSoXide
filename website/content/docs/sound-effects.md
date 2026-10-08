@@ -59,7 +59,7 @@ The [controller guide](@/docs/controller-input.md) explains this distinction bet
 
 ## Use the screen to debug
 
-The example flashes the background and a `PLAYING` label for a short fixed number of frames when a channel is triggered. This is **trigger feedback**, not a measurement of whether the SPU voice is still audible. A working flash with no sound points you toward mute, output-device or SPU setup, rather than the input path.
+The example flashes the background and a `PLAYING` label for a short fixed number of frames when a channel is triggered. The flash is trigger feedback; it doesn't measure whether the SPU voice is still audible. A working flash with no sound points to mute, output-device or SPU setup instead of the input path.
 
 ## Try a change
 

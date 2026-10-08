@@ -9,7 +9,7 @@
 slug = "cortex-ignition"
 name = "Cortex Ignition"
 kind = "Original game"
-tagline = "A souls-like tech demo for the PS1. Aletha, a light-sword fighter, against the custodians of a fog-bound industrial city. Two stances, poise and lock-on."
+tagline = "A souls-like tech demo for the PS1. Aletha, a light-sword fighter, takes on the custodians of a fog-bound industrial city, with two stances, poise and lock-on."
 shot = "img/shots/cortex.png"
 shot_alt = "Cortex Ignition: Aletha standing in a dim industrial room, health and stamina bars at the top left"
 itch = "https://bonnie-studios.itch.io/cortex-ignition"
@@ -45,7 +45,7 @@ source = "voxide/README.md"
 slug = "psxcel"
 name = "PSXcel"
 kind = "Original app"
-tagline = "A spreadsheet that boots on a real PlayStation. Formulas, charts, themes and memory-card saves, all on a gamepad."
+tagline = "A spreadsheet that boots on a real PlayStation, with formulas, charts, themes and memory-card saves, all on a gamepad."
 shot = "img/shots/psxcel.png"
 shot_alt = "PSXcel: a green bar chart of monthly values"
 itch = "https://bonnie-studios.itch.io/psxcel"
@@ -103,7 +103,7 @@ source = "PSoXide-editor/docs/hardware-test-disc.md; verified v0.40 disc invento
 [[rebuilt]]
 slug = "wipeout"
 name = "WipEout"
-hook = "The 1995 PlayStation original, rebuilt for the same console and enhanced. We are aiming for 60 frames a second and adding a two-player split screen."
+hook = "The 1995 PlayStation original, rebuilt for the same console and enhanced. We're aiming for 60 frames a second and adding a two-player split screen."
 
 # Ports of games that belong to someone else ("Demade with PSoXide"). These cards use text, published
 # video links and, where set, an emulator capture (`shot`); game data is not

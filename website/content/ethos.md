@@ -10,20 +10,19 @@ eyebrow = "About PSoXide"
 **What if we never stopped developing for the original PlayStation?**
 
 Late in a console's commercial life, developers have had years to learn its
-hardware. PSoXide asks what happens when that learning continues: new games,
+hardware. I want to see what happens when that learning continues: new games,
 shared tools and further experiments on the same machine.
 
-I'm Manny, the developer behind Bonnie Studios. PSoXide brings together three
-pursuits:
+I'm Manny, the developer behind Bonnie Studios. PSoXide has three strands:
 
 - **Create:** brand-new PS1 games using modern software engineering practices.
 - **Port:** games brought to the console that were never released on it.
 - **Optimize:** existing PS1 games reimplemented by rewriting their original source
   for greater efficiency.
 
-The Rust SDK, engine, editor and emulator support this work. A useful discovery
-in one project can become a tool for the next: PSXcel's on-screen keyboard, for
-example, became the shared `psx-osk` SDK component.
+The Rust SDK, engine, editor and emulator support this work. Work that proves
+useful in one project gets reused in the next: PSXcel's on-screen keyboard, for
+example, is now the shared `psx-osk` SDK component.
 [See the PSXcel development notes](https://github.com/EBonura/psxcel).
 
 PSoXide builds on the work and knowledge shared by the PlayStation homebrew
@@ -37,10 +36,10 @@ content. These projects require a suitable licence, permission or another
 applicable legal basis. PSoXide’s own licence grants no rights to third-party
 games. See [Legal & licensing](@/legal.md#ports-and-reimplementations).
 
-The Optimize strand explores rewriting an existing PS1 game's source into a more
-efficient implementation for the same hardware. The aim is to learn what a
-different implementation can achieve, with changes to behaviour and presentation
-recorded alongside performance and memory measurements.
+The Optimize strand rewrites an existing PS1 game's source into a more
+efficient implementation for the same hardware, to learn what a different
+implementation can achieve. Changes to behaviour and presentation are recorded
+alongside performance and memory measurements.
 
 The first project in this strand, WipEout, is in progress: the 1995 PlayStation
 game rebuilt for the same console, labelled "Rebuilt with PSoXide". Nothing is
@@ -55,17 +54,15 @@ assistants. The [development workflow](@/docs/development-workflow.md) explains 
 to connect these steps. The [development methodology](@/docs/development-methodology.md)
 shows how measurements from real consoles improve the emulator and SDK.
 
-AI coding agents write nearly all of the code. I direct the architecture, review
+PSoXide is largely written with agentic coding. I direct the architecture, review
 and integrate changes, and validate results with automated tests and
 original-hardware checks. [How PSoXide is built](@/how-its-built.md) lists the
-rules the agents work to and the checks every change passes. Read [the provenance disclosure](@/legal.md#provenance)
-for the project's use of AI assistance and how provenance is tracked.
-
-The project uses the following practices:
+rules the agents work to and the checks every change passes. [The provenance disclosure](@/legal.md#provenance)
+covers the project's use of AI assistance and how provenance is tracked.
 
 - **Hardware testing.** Emulator checks complement testing on original hardware; they don't replace it. When the emulator and a real PlayStation disagree, the PlayStation is right.
 - **Recorded measurements.** The [comparison page](@/emulator/compare.md) ties its figures to recorded builds, explains the limits of the benchmark and separates measured results from work still in progress.
-- **Firmware and game data.** PSoXide doesn't need Sony's BIOS and can't load one. It does not distribute commercial disc images. Half-Life and Hollow Knight require your own game data; Quake uses the shareware episode's data. See [project-specific terms](@/legal.md#ports-built-from-other-people-s-games).
+- **Firmware and game data.** PSoXide doesn't need Sony's BIOS and can't load one. It doesn't distribute commercial disc images. Half-Life and Hollow Knight require your own game data; Quake uses the shareware episode's data. See [project-specific terms](@/legal.md#ports-built-from-other-people-s-games).
 - **Source and provenance.** The SDK, emulator and editor source is public under GPL-2.0-or-later, with provenance written down. Some experiments have no public release yet.
 
 ## Licensing and rights

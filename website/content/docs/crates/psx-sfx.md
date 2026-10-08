@@ -16,7 +16,7 @@ The single source module defines `Bank` for sample placement, `Sample` for resid
 
 Initialize the SPU before uploading a bank. Reserve its sample-memory region and voices against other audio systems. Call `Player::tick` regularly using the same clock frequency supplied to `Player::new`; it silences one-shots after their expected duration. One-shot samples include a silent parking tail, while looped ambience uses its loop-aware playback path. Inspect the API's behavior for invalid cooked data and exhausted sample memory before accepting external assets.
 
-The [complete audio example](@/docs/examples/hello-audio.md) teaches the underlying SPU path; it does not itself use `psx-sfx`. For this higher-level API, the reference below includes the bank/player usage sequence and method contracts.
+The [complete audio example](@/docs/examples/hello-audio.md) covers the underlying SPU path and doesn't use `psx-sfx`. The reference below has the bank/player usage sequence and method contracts.
 
 ## API, dependencies and source structure
 
