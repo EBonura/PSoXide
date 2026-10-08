@@ -808,30 +808,6 @@ impl ThirdPersonCameraState {
                 locked_camera_y_goal,
                 config,
             )?;
-            if input.yaw_delta_q12 != 0 && target.lock_target.is_none() && self.yaw != previous_yaw
-            {
-                // Manual orbit stops at a wall instead of sweeping the eye
-                // into the player's head. With her back to a wall the arm
-                // falls to the wall's distance over a wide arc of yaws; held
-                // through it the eye sits inside her body, the scene hides
-                // her and the view is the room from her head for as long as
-                // the stick is down. Refuse only a step that shortens an arm
-                // already under the body-clearing length; stepping out of
-                // that arc, or anywhere with room for the boom, is untouched.
-                if solve.distance < clear_orbit_trigger(config, true) {
-                    let held = collision.solve(
-                        self.focus,
-                        previous_yaw,
-                        orbit_pitch,
-                        locked_camera_y_goal,
-                        config,
-                    )?;
-                    if solve.distance < held.distance {
-                        self.yaw = previous_yaw;
-                        solve = held;
-                    }
-                }
-            }
             let wanted = clear_orbit_distance(config);
             if input.yaw_delta_q12 != 0 || target.lock_target.is_none() {
                 self.clear_orbit_hold = false;
@@ -4910,77 +4886,6 @@ mod tests {
             );
         }
         frames
-    }
-
-    #[test]
-    fn manual_orbit_stops_before_the_arm_collapses_into_a_pinned_player() {
-        // Player 13 units from a wall, camera swung right at full stick for
-        // far more than a half turn (the replay tape holds it for 100 ticks).
-        // Unrestricted, the arm falls under min_distance for 35 ticks, the
-        // scene hides her and the view is the room from inside her head.
-        let (config, target) = free_camera_world();
-        let mut camera = ThirdPersonCameraState::new(Angle::ZERO);
-        camera.snap_to_player_with_yaw(target, config, Angle::ZERO);
-        let frames = sweep_right(&mut camera, &PINNED_WORLD, 100);
-        let shortest = frames.iter().map(|frame| frame.distance).min().unwrap();
-        assert!(
-            shortest >= config.min_distance,
-            "arm fell to {shortest}, eye inside the player"
-        );
-        // It stopped at the wall rather than turning back: the stick is still
-        // down and the yaw has not moved for the last ticks.
-        let tail = &frames[frames.len() - 10..];
-        assert!(tail.iter().all(|frame| frame.yaw == tail[0].yaw));
-        let bearing_to_wall = Angle::HALF;
-        let to_wall = tail[0]
-            .yaw
-            .shortest_delta_q12(bearing_to_wall)
-            .unsigned_abs();
-        assert!(
-            to_wall > 256,
-            "stopped {to_wall} q12 units from the wall bearing"
-        );
-    }
-
-    #[test]
-    fn manual_orbit_leaves_a_collapsed_arm_in_either_direction() {
-        // Already inside the blocked arc (spawned there, or the player backed
-        // into the wall): the stick must still be able to swing out.
-        let (config, target) = free_camera_world();
-        let behind_wall = Angle::HALF;
-        for sign in [1i16, -1] {
-            let mut camera = ThirdPersonCameraState::new(behind_wall);
-            camera.snap_to_player_with_yaw(target, config, behind_wall);
-            let mut world = BoxWorld {
-                boxes: &PINNED_WORLD,
-            };
-            let step = accelerated_orbit_step_q12(5, false) * sign;
-            let mut last = None;
-            for _ in 0..90 {
-                last = Some(
-                    camera
-                        .update_vblanks_with_trace_provider(
-                            WorldProjection::new(160, 120, 320, 64),
-                            &mut world,
-                            target,
-                            ThirdPersonCameraInput {
-                                yaw_delta_q12: step,
-                                ..ThirdPersonCameraInput::default()
-                            },
-                            config,
-                            1,
-                        )
-                        .unwrap(),
-                );
-            }
-            let frame = last.unwrap();
-            assert!(frame.yaw != behind_wall, "stuck at the wall bearing");
-            assert!(
-                frame.distance >= config.min_distance,
-                "sign {sign}: arm {} after swinging out",
-                frame.distance
-            );
-        }
     }
 
     #[test]
