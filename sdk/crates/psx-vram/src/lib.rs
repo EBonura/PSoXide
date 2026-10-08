@@ -1242,6 +1242,62 @@ fn copy_to_vram_header(rect: VramRect) {
 /// so a wedge costs a `false` and a partial upload rather than a hang.
 #[doc(alias = "LoadImage")]
 pub fn dma_copy_to_vram(_dma: &mut GpuDma, rect: VramRect, words: &[u32]) -> bool {
+    if words.len() < copy_words(rect) {
+        return false;
+    }
+    // SAFETY: the check above proved `words` holds the whole rectangle, and
+    // it stays borrowed until this function returns; the wait below, or the
+    // abort on a wedge, ends the transfer before then.
+    if !unsafe { kick_copy_to_vram(rect, words.as_ptr()) } {
+        return false;
+    }
+    // On a wedge the GP0(A0) header is already out and the payload did not
+    // land, so VRAM holds a partial upload either way; report it.
+    dma::wait_or_abort(Channel::Gpu, dma::DEFAULT_SPINS)
+}
+
+/// [`dma_copy_to_vram`] without the completion wait: send the copy header,
+/// kick the block DMA and return, so the CPU keeps working while channel 2
+/// feeds the GPU. Poll [`dma_copy_to_vram_done`]; abort channel 2
+/// (`psx_io::dma::abort`) if it never finishes. Returns `false`, having
+/// touched nothing, for a transfer the DMA cannot express (see
+/// [`dma_copy_to_vram`]).
+///
+/// `words` points at the `(rect.w / 2) * rect.h` pixel words, as the slice
+/// of [`dma_copy_to_vram`] would.
+///
+/// # Safety
+/// `words` must point at that many readable words, alive and unmodified
+/// until [`dma_copy_to_vram_done`] returns `true` or channel 2 is aborted.
+/// Until then nothing else may write GP0 or program channel 2, so no
+/// drawing, other upload or frame submission; the `&mut GpuDma` borrow only
+/// covers the call itself.
+#[doc(alias = "LoadImage")]
+pub unsafe fn dma_copy_to_vram_start(_dma: &mut GpuDma, rect: VramRect, words: *const u32) -> bool {
+    // SAFETY: the caller upholds this function's contract.
+    unsafe { kick_copy_to_vram(rect, words) }
+}
+
+/// True once the transfer [`dma_copy_to_vram_start`] kicked has finished.
+#[inline]
+pub fn dma_copy_to_vram_done() -> bool {
+    !dma::is_busy(Channel::Gpu)
+}
+
+/// Words one block-DMA upload of `rect` sends.
+fn copy_words(rect: VramRect) -> usize {
+    (rect.w / 2) as usize * rect.h as usize
+}
+
+/// The GP0(A0) header, then a block DMA of the rectangle's words from
+/// `src`, with no wait. `false` (nothing touched) when the DMA cannot send
+/// the rectangle whole: an odd or zero width, a zero height, or a row wider
+/// than the GPU's 16-word FIFO.
+///
+/// # Safety
+/// `src` must point at [`copy_words`] readable words that stay unmodified
+/// until channel 2 finishes or is aborted.
+unsafe fn kick_copy_to_vram(rect: VramRect, src: *const u32) -> bool {
     if !rect.w.is_multiple_of(2) || rect.w == 0 || rect.h == 0 {
         return false;
     }
@@ -1253,11 +1309,6 @@ pub fn dma_copy_to_vram(_dma: &mut GpuDma, rect: VramRect, words: &[u32]) -> boo
     if words_per_row > 16 {
         return false;
     }
-    if words.len() < words_per_row as usize * rect.h as usize {
-        return false;
-    }
-    let src = words.as_ptr();
-
     let _pause = pause_recording();
     copy_to_vram_header(rect);
     // GP1(04h) = 2: route DMA words CPU→GP0. `psx-gpu::init` sets this,
@@ -1265,9 +1316,8 @@ pub fn dma_copy_to_vram(_dma: &mut GpuDma, rect: VramRect, words: &[u32]) -> boo
     write_display_control(gp1::dma_direction(2));
     dma::enable_channel(Channel::Gpu);
     // SAFETY: the channel was drained by `copy_to_vram_header`. The transfer
-    // reads `words_per_row * rect.h` words from `src`, which the check above
-    // proved lie inside `words`, borrowed until this function returns; the
-    // wait below, or the abort on a wedge, ends it before then.
+    // reads `words_per_row * rect.h` words from `src`, which the caller
+    // keeps readable and unmodified until it completes or is aborted.
     unsafe {
         dma::start(
             Channel::Gpu,
@@ -1280,9 +1330,7 @@ pub fn dma_copy_to_vram(_dma: &mut GpuDma, rect: VramRect, words: &[u32]) -> boo
             },
         )
     };
-    // On a wedge the GP0(A0) header is already out and the payload did not
-    // land, so VRAM holds a partial upload either way; report it.
-    dma::wait_or_abort(Channel::Gpu, dma::DEFAULT_SPINS)
+    true
 }
 
 /// Upload typed [`Color555`] pixels -- sugar over [`upload_16bpp`]
