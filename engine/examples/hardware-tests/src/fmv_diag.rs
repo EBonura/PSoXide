@@ -767,24 +767,24 @@ fn setup_once(v: usize) -> bool {
     ok
 }
 
-fn setup_a() -> bool {
+fn setup_a(_mdec: &mut mdec::Mdec) -> bool {
     setup_once(0)
 }
-fn setup_b() -> bool {
+fn setup_b(_mdec: &mut mdec::Mdec) -> bool {
     setup_once(1)
 }
-fn setup_c() -> bool {
+fn setup_c(_mdec: &mut mdec::Mdec) -> bool {
     !FAULT && setup_once(2)
 }
-fn setup_d() -> bool {
+fn setup_d(_mdec: &mut mdec::Mdec) -> bool {
     setup_once(3)
 }
-fn setup_e() -> bool {
+fn setup_e(_mdec: &mut mdec::Mdec) -> bool {
     setup_once(4)
 }
 
 /// The setup of the chosen sequence, or the SDK default.
-pub(crate) fn setup_fn(diag: &Diag) -> fn() -> bool {
+pub(crate) fn setup_fn(diag: &Diag) -> fn(&mut mdec::Mdec) -> bool {
     setup_for(diag.chosen.unwrap_or(SDK))
 }
 
@@ -873,7 +873,7 @@ pub(crate) fn play_all(diag: &mut Diag) -> hello_fmv::Outcome {
 const STOP_NAMES: [&str; 5] = ["END", "STALL", "WEDGED", "CD ERROR", "SETUP"];
 
 /// The MDEC setup for sequence `v` outside the battery.
-fn setup_for(v: usize) -> fn() -> bool {
+fn setup_for(v: usize) -> fn(&mut mdec::Mdec) -> bool {
     match v {
         0 => setup_a,
         1 => setup_b,
