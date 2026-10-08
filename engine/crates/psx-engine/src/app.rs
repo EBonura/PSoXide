@@ -601,6 +601,8 @@ impl App {
         boot_trace("psx-engine: scene init");
         boot_visual_checkpoint(&mut ctx, (180, 180, 0), "03 APP INIT BEGIN");
         app.init(&mut ctx);
+        // A card read in `init` borrowed the port from the pad engine.
+        ctx.release_controller_port();
         boot_visual_checkpoint(&mut ctx, (0, 120, 0), "13 APP INIT OK");
         boot_trace("psx-engine: scene init ok");
         clock.reset_origin();
