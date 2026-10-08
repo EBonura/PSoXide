@@ -382,7 +382,7 @@ fn describe(t: &Text, timed: &Timed) -> Text {
     if timed.ok {
         line.u(clock::ms(timed.done)).s("MS");
     } else {
-        line.s("FAIL ").u(timed.code & 0xFFFF);
+        line.s("FAIL ").hex(timed.code);
     }
     line
 }
@@ -424,7 +424,7 @@ pub fn lease_and_pause(screen: &mut Screen) {
     r.line(&t);
     for (i, seconds) in [0u32, 5, 15].into_iter().enumerate() {
         let mut label = Text::new();
-        label.s("PAUSE, WAIT ").u(seconds).s("S, READ ");
+        label.s("PAUSE+").u(seconds).s("S READ ");
         r.line(&describe(&label, &gaps[i]));
         let mut key = Text::new();
         key.s("PG").u(seconds);
@@ -482,7 +482,7 @@ pub fn stop_tests(screen: &mut Screen) {
     t.s("STOP ACK ").u(clock::ms(stop_ack)).s("MS");
     r.line(&t);
     r.line(&describe(
-        Text::new().s("READ AT ONCE AFTER STOP "),
+        Text::new().s("READ AFTER STOP "),
         &stop_after_ack,
     ));
     let mut t = Text::new();
@@ -495,10 +495,7 @@ pub fn stop_tests(screen: &mut Screen) {
     let mut t = Text::new();
     t.s("MOTOR OFF ").u(clock::ms(motor_off)).s("MS");
     r.line(&t);
-    r.line(&describe(
-        Text::new().s("READ AFTER MOTOR OFF "),
-        &stop_settled,
-    ));
+    r.line(&describe(Text::new().s("SETTLED READ "), &stop_settled));
     r.kv("SA", &[stop_ack, stop_after_ack.done, stop_after_ack.code]);
     r.kv("SN", &[recovered.done, recovered.code]);
     r.kv(
