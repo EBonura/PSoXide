@@ -1755,8 +1755,6 @@ pub struct PlaytestPackage {
     /// textures. Not reachable from any room, so they need copying wholesale
     /// rather than by reachability.
     pub used_ui_paths: Vec<String>,
-    /// Projected edge threshold for runtime room surface subdivision.
-    pub runtime_texture_split_max_edge: u16,
     /// Master asset table -- rooms first, then room textures,
     /// then per-model assets (mesh + atlas + clips), in
     /// deterministic order.

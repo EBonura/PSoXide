@@ -2367,7 +2367,6 @@ pub fn build_package(
                 }
                 paths.into_iter().collect()
             },
-            runtime_texture_split_max_edge: project.runtime_texture_split_max_edge,
             assets,
             rooms,
             models,
