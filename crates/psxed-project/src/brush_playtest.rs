@@ -8,7 +8,7 @@ mod tests {
     use std::path::Path;
 
     use crate::brush_world::{compile_brush_world, BrushWorldCookMode, BrushWorldCookOptions};
-    use crate::playtest::{PlaytestAssetKind, PlaytestWorldGeometry, StreamedClass};
+    use crate::playtest::{PlaytestAssetKind, StreamedClass};
     use crate::{
         ArchPropGeometry, BoxPropErosion, NodeKind, ProjectDocument, SkyMode, UvTransform,
         ARCH_PROP_MATERIAL_COUNT, BOX_PROP_FACE_COUNT,
@@ -42,9 +42,7 @@ mod tests {
             sky_flags::ENABLED | sky_flags::CUBE | sky_flags::THROUGH_SKY_SURFACES
         );
         let sky_asset = sky.texture_asset_index.expect("one scene sky texture");
-        let PlaytestWorldGeometry::Pxbsp(world) = &package.world_geometry else {
-            panic!("fixture did not cook PXBSP");
-        };
+        let world = &package.world_geometry;
         assert!(
             !world.texture_asset_indices.contains(&sky_asset),
             "scene sky must not be duplicated in the per-face texture table"
@@ -74,9 +72,7 @@ mod tests {
         let (package, report) = crate::playtest::build_package(&project, &fixture_dir);
         assert!(report.is_ok(), "normal brush package: {:?}", report.errors);
         let package = package.expect("normal package");
-        let crate::playtest::PlaytestWorldGeometry::Pxbsp(world) = &package.world_geometry else {
-            panic!("brush project selected the grid provider");
-        };
+        let world = &package.world_geometry;
         // Exact wire-size pin for the shared brush pipeline. PXBSP v6 keeps
         // compact bounded render nodes and compact native planes, leaf-owned render surfaces do not
         // duplicate node-face ranges, Quake outside fill removes surfaces
@@ -86,9 +82,6 @@ mod tests {
         assert_eq!(world.movers.len(), 1);
         assert_eq!(world.movers[0].model_index, 1);
         assert_eq!(package.rooms.len(), 1);
-        assert_eq!(package.rooms[0].world_asset_index, None);
-        assert!(package.chunks.is_empty());
-        assert!(package.room_visibility.is_empty());
         assert_eq!(package.assets.len(), 2);
         assert_eq!(package.texture_asset_count(), 2);
         assert_eq!(world.texture_asset_indices, [0]);
@@ -125,7 +118,6 @@ mod tests {
             .expect("resident PXBSP performance envelope");
         assert!(envelope.room_surfaces > 0);
         assert!(envelope.authored_triangles > 0);
-        assert_eq!(envelope.resident_stream_bytes, 0);
 
         let source = crate::playtest::render_manifest_source(&package);
         assert!(source.contains("pub const PLAYTEST_USES_PXBSP: bool = true;"));
@@ -134,8 +126,6 @@ mod tests {
         assert!(source.contains("PXBSP_MOVER_NODE_IDS: &[u32] = &[2]"));
         assert!(source.contains("CookedBodyHull::new(1, 1, 4)"));
         assert!(source.contains("CookedBodyHull::new(2, 2, 6)"));
-        assert!(source.contains("world_asset: AssetId(65535)"));
-        assert!(source.contains("ROOM_0_REQUIRED_VRAM: &[AssetId] = &[AssetId(1), AssetId(0)]"));
         assert!(source.contains("flags: asset_flags::STREAMED_GAMEPLAY_TRANSIENT"));
         assert!(source.contains("texture_asset: AssetId(1)"));
         assert!(!source.contains("BRUSH_TEXTURES"));
@@ -170,9 +160,7 @@ mod tests {
         let (package, report) = crate::playtest::build_package(&project, &fixture_dir);
         assert!(report.is_ok(), "normal brush package: {:?}", report.errors);
         let package = package.expect("normal package");
-        let crate::playtest::PlaytestWorldGeometry::Pxbsp(world) = &package.world_geometry else {
-            panic!("brush project selected the grid provider");
-        };
+        let world = &package.world_geometry;
 
         let enabled_world_bytes = {
             let enabled_project = ProjectDocument::from_ron_str(include_str!(
@@ -182,12 +170,7 @@ mod tests {
             let enabled_package = crate::playtest::build_package(&enabled_project, &fixture_dir)
                 .0
                 .expect("enabled normal package");
-            let crate::playtest::PlaytestWorldGeometry::Pxbsp(enabled_world) =
-                enabled_package.world_geometry
-            else {
-                panic!("enabled brush project selected the grid provider");
-            };
-            enabled_world.bytes
+            enabled_package.world_geometry.bytes
         };
 
         assert_eq!(package.rooms[0].sky.flags, 0);
@@ -200,8 +183,8 @@ mod tests {
             .assets
             .iter()
             .all(|asset| !asset.filename.starts_with("sky/")));
-        assert!(crate::playtest::render_manifest_source(&package)
-            .contains("ROOM_0_REQUIRED_VRAM: &[AssetId] = &[AssetId(0)]"));
+        assert!(!crate::playtest::render_manifest_source(&package)
+            .contains("texture_asset: AssetId(1)"));
     }
 
     #[test]
@@ -224,12 +207,8 @@ mod tests {
 
         assert_eq!(draft.bsp_cook_mode, BrushWorldCookMode::Draft);
         assert_eq!(release.bsp_cook_mode, BrushWorldCookMode::Release);
-        let PlaytestWorldGeometry::Pxbsp(draft_world) = &draft.world_geometry else {
-            panic!("Draft package is not PXBSP");
-        };
-        let PlaytestWorldGeometry::Pxbsp(release_world) = &release.world_geometry else {
-            panic!("Release package is not PXBSP");
-        };
+        let draft_world = &draft.world_geometry;
+        let release_world = &release.world_geometry;
         assert_ne!(draft_world.bytes, release_world.bytes);
         assert!(crate::playtest::render_manifest_source(&draft)
             .contains("pub const BSP_COOK_IS_RELEASE: bool = false;"));
@@ -487,9 +466,7 @@ mod tests {
         let (package, report) = crate::playtest::build_package(&project, &fixture_dir);
         assert!(report.is_ok(), "PXBSP prop package: {:?}", report.errors);
         let package = package.expect("PXBSP prop package");
-        let PlaytestWorldGeometry::Pxbsp(world) = &package.world_geometry else {
-            panic!("brush project selected the grid provider");
-        };
+        let world = &package.world_geometry;
         let mut map = PxbspResidentMap::with_capacity(world.bytes.len());
         map.load(0, &mut SliceReader::new(&world.bytes))
             .expect("resident prop PXBSP");

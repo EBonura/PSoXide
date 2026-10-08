@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 
 fn seed_ids_from_ron(ron: &str, out: &mut HashSet<u64>) {
     // Field-name-qualified id references in serialized scene/UI data.
-    // Covers every NodeKind variant, grid faces, wall segments and
-    // triangle overrides without enumerating them.
+    // Covers every NodeKind variant and brush face without enumerating
+    // them.
     let fields = [
         "mesh",
         "material",

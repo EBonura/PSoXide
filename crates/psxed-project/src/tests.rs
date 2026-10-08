@@ -45,37 +45,6 @@ fn ui_font_scale_serializes_as_decimal_multiplier() {
 }
 
 #[test]
-fn horizontal_face_height_samples_editor_corner_convention() {
-    let mut floor = GridHorizontalFace::flat(0, None);
-    floor.heights = [100, 200, 300, 400];
-
-    assert_eq!(floor.height_at_local(0, 1024, 1024), 100);
-    assert_eq!(floor.height_at_local(1024, 1024, 1024), 200);
-    assert_eq!(floor.height_at_local(1024, 0, 1024), 300);
-    assert_eq!(floor.height_at_local(0, 0, 1024), 400);
-}
-
-#[test]
-fn horizontal_face_lowest_height_includes_triangle_overrides() {
-    let mut floor = GridHorizontalFace::flat(128, None);
-    floor.heights = [64, 256, 384, 192];
-    assert_eq!(floor.lowest_height(), 64);
-
-    floor.triangle_heights_mut(1)[1] = -192;
-    assert_eq!(floor.lowest_height(), -192);
-}
-
-#[test]
-fn grid_floor_height_handles_negative_origin_cells() {
-    let mut grid = WorldGrid::empty(1, 1, 1024);
-    grid.origin = [-1, -1];
-    grid.set_floor(0, 0, 256, None);
-
-    assert_eq!(grid.floor_height_at_room_local(-512, -512), Some(256));
-    assert_eq!(grid.floor_height_at_room_local(0, 0), None);
-}
-
-#[test]
 fn snap_height_rounds_to_nearest_quantum() {
     assert_eq!(HEIGHT_QUANTUM, 64);
     // Exact multiples are unchanged (positive + negative).
@@ -719,627 +688,6 @@ fn legacy_double_sided_materials_still_resolve_to_both_faces() {
 
     assert_eq!(material.face_sidedness, MaterialFaceSidedness::Front);
     assert_eq!(material.sidedness(), MaterialFaceSidedness::Both);
-}
-
-#[test]
-fn grid_direction_physical_edges_use_editor_z_convention() {
-    assert_eq!(
-        GridDirection::North.physical_edge(2, 3),
-        Some(GridPhysicalEdge {
-            x: 2,
-            z: 4,
-            axis: GridEdgeAxis::EastWest,
-        })
-    );
-    assert_eq!(
-        GridDirection::South.physical_edge(2, 3),
-        Some(GridPhysicalEdge {
-            x: 2,
-            z: 3,
-            axis: GridEdgeAxis::EastWest,
-        })
-    );
-    assert_eq!(
-        GridDirection::East.physical_edge(2, 3),
-        Some(GridPhysicalEdge {
-            x: 3,
-            z: 3,
-            axis: GridEdgeAxis::NorthSouth,
-        })
-    );
-    assert_eq!(
-        GridDirection::West.physical_edge(2, 3),
-        Some(GridPhysicalEdge {
-            x: 2,
-            z: 3,
-            axis: GridEdgeAxis::NorthSouth,
-        })
-    );
-    assert_eq!(GridDirection::NorthWestSouthEast.physical_edge(2, 3), None);
-}
-
-#[test]
-fn cell_bounds_match_editor_corner_and_wall_convention() {
-    let grid = WorldGrid::empty(2, 2, 1024);
-    let bounds = grid.cell_bounds_world(1, 1);
-
-    assert_eq!(bounds.horizontal_corner_xz(Corner::NW), [1024, 2048]);
-    assert_eq!(bounds.horizontal_corner_xz(Corner::NE), [2048, 2048]);
-    assert_eq!(bounds.horizontal_corner_xz(Corner::SE), [2048, 1024]);
-    assert_eq!(bounds.horizontal_corner_xz(Corner::SW), [1024, 1024]);
-
-    assert_eq!(
-        bounds.wall_endpoints_xz(GridDirection::North),
-        Some(([1024, 2048], [2048, 2048]))
-    );
-    assert_eq!(
-        bounds.wall_endpoints_xz(GridDirection::South),
-        Some(([2048, 1024], [1024, 1024]))
-    );
-    assert_eq!(
-        bounds.wall_endpoints_xz(GridDirection::NorthWestSouthEast),
-        Some(([1024, 2048], [2048, 1024]))
-    );
-    assert_eq!(
-        bounds.wall_endpoints_xz(GridDirection::NorthEastSouthWest),
-        Some(([2048, 2048], [1024, 1024]))
-    );
-}
-
-#[test]
-fn wall_placement_aligns_bottom_edge_to_floor_vertices() {
-    let mut grid = WorldGrid::empty(1, 1, 1024);
-    let mut floor = GridHorizontalFace::flat(0, None);
-    floor.heights = [128, 256, 384, 512];
-    grid.ensure_sector(0, 0).unwrap().floor = Some(floor);
-
-    grid.add_wall_aligned_to_surfaces(0, 0, GridDirection::North, None);
-
-    let wall = grid
-        .sector(0, 0)
-        .unwrap()
-        .walls
-        .get(GridDirection::North)
-        .first()
-        .unwrap();
-    assert_eq!(wall.heights, [128, 256, 2304, 2176]);
-}
-
-#[test]
-fn wall_placement_aligns_top_edge_to_ceiling_vertices() {
-    let mut grid = WorldGrid::empty(1, 1, 1024);
-    let mut floor = GridHorizontalFace::flat(0, None);
-    floor.heights = [128, 256, 384, 512];
-    let mut ceiling = GridHorizontalFace::flat(1024, None);
-    ceiling.heights = [900, 1000, 1100, 1200];
-    let sector = grid.ensure_sector(0, 0).unwrap();
-    sector.floor = Some(floor);
-    sector.ceiling = Some(ceiling);
-
-    grid.add_wall_aligned_to_surfaces(0, 0, GridDirection::East, None);
-
-    let wall = grid
-        .sector(0, 0)
-        .unwrap()
-        .walls
-        .get(GridDirection::East)
-        .first()
-        .unwrap();
-    assert_eq!(wall.heights, [256, 384, 1100, 1000]);
-}
-
-#[test]
-fn diagonal_wall_placement_aligns_to_horizontal_diagonal_vertices() {
-    let mut grid = WorldGrid::empty(1, 1, 1024);
-    let mut floor = GridHorizontalFace::flat(0, None);
-    floor.heights = [128, 256, 384, 512];
-    let mut ceiling = GridHorizontalFace::flat(1024, None);
-    ceiling.heights = [900, 1000, 1100, 1200];
-    let sector = grid.ensure_sector(0, 0).unwrap();
-    sector.floor = Some(floor);
-    sector.ceiling = Some(ceiling);
-
-    grid.add_wall_aligned_to_surfaces(0, 0, GridDirection::NorthWestSouthEast, None);
-    grid.add_wall_aligned_to_surfaces(0, 0, GridDirection::NorthEastSouthWest, None);
-
-    let sector = grid.sector(0, 0).unwrap();
-    let nw_se = sector
-        .walls
-        .get(GridDirection::NorthWestSouthEast)
-        .first()
-        .unwrap();
-    let ne_sw = sector
-        .walls
-        .get(GridDirection::NorthEastSouthWest)
-        .first()
-        .unwrap();
-    assert_eq!(nw_se.heights, [128, 384, 1100, 900]);
-    assert_eq!(ne_sw.heights, [256, 512, 1200, 1000]);
-}
-
-#[test]
-fn ceiling_placement_aligns_edge_to_touching_wall_top() {
-    let mut grid = WorldGrid::empty(1, 1, 1024);
-    grid.ensure_sector(0, 0)
-        .unwrap()
-        .walls
-        .get_mut(GridDirection::North)
-        .push(GridVerticalFace::with_heights([0, 0, 1472, 1344], None));
-
-    grid.set_ceiling_aligned_to_neighbors(0, 0, None);
-
-    let ceiling = grid.sector(0, 0).unwrap().ceiling.as_ref().unwrap();
-    assert_eq!(ceiling.heights, [1344, 1472, 2048, 2048]);
-}
-
-#[test]
-fn floor_placement_with_one_flat_neighbor_uses_that_height_for_whole_face() {
-    let mut grid = WorldGrid::empty(2, 1, 1024);
-    grid.set_floor(0, 0, 384, None);
-
-    grid.set_floor_aligned_to_neighbors(1, 0, 0, None);
-
-    let floor = grid.sector(1, 0).unwrap().floor.as_ref().unwrap();
-    assert_eq!(floor.heights, [384; 4]);
-}
-
-#[test]
-fn floor_preview_for_off_grid_cell_matches_flat_neighbor_height() {
-    let mut grid = WorldGrid::empty(1, 1, 1024);
-    grid.set_floor(0, 0, 384, None);
-
-    let heights = grid.floor_heights_aligned_to_neighbors_for_world_cell(1, 0, 0);
-
-    assert_eq!(heights, [384; 4]);
-}
-
-#[test]
-fn floor_placement_with_one_sloped_neighbor_keeps_only_the_shared_edge() {
-    let mut grid = WorldGrid::empty(2, 1, 1024);
-    let mut floor = GridHorizontalFace::flat(0, None);
-    floor.heights = [128, 256, 384, 512];
-    grid.ensure_sector(0, 0).unwrap().floor = Some(floor);
-
-    grid.set_floor_aligned_to_neighbors(1, 0, 0, None);
-
-    let floor = grid.sector(1, 0).unwrap().floor.as_ref().unwrap();
-    assert_eq!(floor.heights, [256, 0, 0, 384]);
-}
-
-#[test]
-fn ceiling_placement_with_one_flat_neighbor_uses_that_height_for_whole_face() {
-    let mut grid = WorldGrid::empty(2, 1, 1024);
-    grid.ensure_sector(0, 0).unwrap().ceiling = Some(GridHorizontalFace::flat(1536, None));
-
-    grid.set_ceiling_aligned_to_neighbors(1, 0, None);
-
-    let ceiling = grid.sector(1, 0).unwrap().ceiling.as_ref().unwrap();
-    assert_eq!(ceiling.heights, [1536; 4]);
-}
-
-#[test]
-fn ceiling_preview_for_off_grid_cell_matches_flat_neighbor_height() {
-    let mut grid = WorldGrid::empty(1, 1, 1024);
-    grid.ensure_sector(0, 0).unwrap().ceiling = Some(GridHorizontalFace::flat(1536, None));
-
-    let heights = grid.ceiling_heights_aligned_to_neighbors_for_world_cell(1, 0);
-
-    assert_eq!(heights, [1536; 4]);
-}
-
-#[test]
-fn ceiling_placement_aligns_edge_to_touching_neighbor_wall_top() {
-    let mut grid = WorldGrid::empty(2, 1, 1024);
-    grid.ensure_sector(0, 0)
-        .unwrap()
-        .walls
-        .get_mut(GridDirection::East)
-        .push(GridVerticalFace::with_heights([0, 0, 1600, 1536], None));
-
-    grid.set_ceiling_aligned_to_neighbors(1, 0, None);
-
-    let ceiling = grid.sector(1, 0).unwrap().ceiling.as_ref().unwrap();
-    assert_eq!(ceiling.heights, [1536, 2048, 2048, 1600]);
-}
-
-#[test]
-fn ceiling_placement_aligns_edge_to_touching_neighbor_ceiling() {
-    let mut grid = WorldGrid::empty(2, 1, 1024);
-    let mut ceiling = GridHorizontalFace::flat(2048, None);
-    ceiling.heights = [1024, 1152, 1280, 1408];
-    grid.ensure_sector(0, 0).unwrap().ceiling = Some(ceiling);
-
-    grid.set_ceiling_aligned_to_neighbors(1, 0, None);
-
-    let ceiling = grid.sector(1, 0).unwrap().ceiling.as_ref().unwrap();
-    assert_eq!(ceiling.heights, [1152, 2048, 2048, 1280]);
-}
-
-#[test]
-fn off_grid_wall_preview_samples_adjacent_floor_edge() {
-    let mut grid = WorldGrid::empty(1, 1, 1024);
-    let mut floor = GridHorizontalFace::flat(0, None);
-    floor.heights = [128, 256, 384, 512];
-    grid.ensure_sector(0, 0).unwrap().floor = Some(floor);
-
-    let heights = grid.wall_heights_aligned_to_surfaces_for_world_cell(1, 0, GridDirection::West);
-
-    assert_eq!(heights, [384, 256, 2304, 2432]);
-}
-
-#[test]
-fn wall_stack_placement_starts_above_highest_wall_top() {
-    let mut grid = WorldGrid::empty(1, 1, 1024);
-    grid.add_wall(0, 0, GridDirection::North, 0, 1024, None);
-
-    let heights = grid.wall_heights_above_stack_or_surfaces(0, 0, GridDirection::North);
-
-    assert_eq!(heights, [1024, 1024, 3072, 3072]);
-}
-
-#[test]
-fn wall_stack_placement_preserves_sloped_top_edge() {
-    let mut grid = WorldGrid::empty(1, 1, 1024);
-    grid.ensure_sector(0, 0)
-        .unwrap()
-        .walls
-        .get_mut(GridDirection::North)
-        .push(GridVerticalFace::with_heights([0, 0, 1408, 1152], None));
-
-    let heights = grid.wall_heights_above_stack_or_surfaces(0, 0, GridDirection::North);
-
-    assert_eq!(heights, [1152, 1408, 3456, 3200]);
-}
-
-#[test]
-fn pushing_floor_below_preserves_existing_layers_and_inherits_room_look() {
-    let mut grid = WorldGrid::empty(2, 1, 1024);
-    grid.elevation = 4096;
-    grid.ambient_color = [18, 24, 31];
-    grid.set_floor(1, 0, 128, None);
-    grid.push_floor();
-    grid.floor_mut(1).unwrap().set_floor(0, 0, 64, None);
-
-    grid.push_floor_below();
-
-    assert_eq!(grid.floor_count(), 3);
-    assert_eq!(grid.elevation, 2048);
-    assert_eq!(grid.ambient_color, [18, 24, 31]);
-    assert!(grid.floor(0).unwrap().sector(1, 0).is_none());
-    assert!(grid.floor(1).unwrap().sector(1, 0).unwrap().floor.is_some());
-    assert_eq!(grid.floor(1).unwrap().elevation, 4096);
-    assert!(grid.floor(2).unwrap().sector(0, 0).unwrap().floor.is_some());
-    assert_eq!(grid.floor(2).unwrap().elevation, 6144);
-
-    let encoded = ron::ser::to_string_pretty(&grid, ron::ser::PrettyConfig::default()).unwrap();
-    let decoded: WorldGrid = ron::from_str(&encoded).unwrap();
-    assert_eq!(
-        decoded, grid,
-        "stacked layers must use the existing RON schema"
-    );
-}
-
-#[test]
-fn removing_empty_base_floor_promotes_upper_floor_and_reports_height_shift() {
-    let mut grid = WorldGrid::empty(2, 2, 1024);
-    grid.elevation = -2048;
-    grid.push_floor();
-    grid.floor_mut(1).unwrap().set_floor(1, 1, 0, None);
-
-    let shift = grid.remove_empty_floor(0).expect("empty base is removable");
-
-    assert_eq!(shift, 2048);
-    assert_eq!(grid.floor_count(), 1);
-    assert_eq!(grid.elevation, 0);
-    assert!(grid.sector(1, 1).unwrap().floor.is_some());
-}
-
-#[test]
-fn removing_empty_floor_refuses_the_only_or_a_populated_floor() {
-    let mut grid = WorldGrid::empty(1, 1, 1024);
-    assert_eq!(grid.remove_empty_floor(0), None);
-
-    grid.push_floor();
-    grid.set_floor(0, 0, 0, None);
-    assert_eq!(grid.remove_empty_floor(0), None);
-    assert_eq!(grid.floor_count(), 2);
-}
-
-#[test]
-fn stone_room_perimeter_uses_editor_direction_convention() {
-    let grid = WorldGrid::stone_room(2, 3, 1024, None, None);
-    let default_wall_height = default_wall_height_for_sector_size(1024);
-
-    for x in 0..grid.width {
-        assert!(!grid
-            .sector(x, 0)
-            .unwrap()
-            .walls
-            .get(GridDirection::South)
-            .is_empty());
-        assert!(grid
-            .sector(x, 0)
-            .unwrap()
-            .walls
-            .get(GridDirection::North)
-            .is_empty());
-        assert!(!grid
-            .sector(x, grid.depth - 1)
-            .unwrap()
-            .walls
-            .get(GridDirection::North)
-            .is_empty());
-        assert!(grid
-            .sector(x, grid.depth - 1)
-            .unwrap()
-            .walls
-            .get(GridDirection::South)
-            .is_empty());
-    }
-    let south_wall = grid
-        .sector(0, 0)
-        .unwrap()
-        .walls
-        .get(GridDirection::South)
-        .first()
-        .unwrap();
-    assert_eq!(
-        south_wall.heights,
-        [0, 0, default_wall_height, default_wall_height]
-    );
-}
-
-#[test]
-fn editor_to_room_local_round_trip_origin_zero() {
-    let grid = WorldGrid::stone_room(3, 3, 1024, None, None);
-    for editor in [[0.0_f32, 0.0], [1.5, -0.25], [-1.4, 1.49]] {
-        let world = grid.editor_to_room_local(editor);
-        let back = grid.room_local_to_editor(world);
-        assert!(
-            (back[0] - editor[0]).abs() < 1e-3,
-            "x: {editor:?} → {back:?}"
-        );
-        assert!(
-            (back[1] - editor[1]).abs() < 1e-3,
-            "z: {editor:?} → {back:?}"
-        );
-    }
-}
-
-#[test]
-fn editor_to_room_local_round_trip_negative_origin() {
-    let mut grid = WorldGrid::stone_room(3, 3, 1024, None, None);
-    // Force a -2/-3 origin via the public grow path so the
-    // test shape matches what auto-grow actually produces.
-    grid.extend_to_include(-2, -3);
-    assert_eq!(grid.origin, [-2, -3]);
-
-    for editor in [[0.0_f32, 0.0], [2.0, -1.25], [-3.5, 1.0]] {
-        let world = grid.editor_to_room_local(editor);
-        let back = grid.room_local_to_editor(world);
-        assert!(
-            (back[0] - editor[0]).abs() < 1e-3,
-            "x: {editor:?} → {back:?}"
-        );
-        assert!(
-            (back[1] - editor[1]).abs() < 1e-3,
-            "z: {editor:?} → {back:?}"
-        );
-    }
-}
-
-#[test]
-fn editor_cells_to_array_resolves_to_correct_cell() {
-    // Plain 3×3, origin [0, 0]: editor (0, 0) is room centre,
-    // which falls inside cell (1, 1).
-    let grid = WorldGrid::stone_room(3, 3, 1024, None, None);
-    assert_eq!(grid.editor_cells_to_array([0.0, 0.0]), Some((1, 1)));
-    assert_eq!(grid.editor_cells_to_array([-1.4, -1.4]), Some((0, 0)));
-    assert_eq!(grid.editor_cells_to_array([1.4, 1.4]), Some((2, 2)));
-    // Past the room edge: out of range.
-    assert_eq!(grid.editor_cells_to_array([-2.0, 0.0]), None);
-}
-
-#[test]
-fn editor_cells_to_array_after_negative_grow_is_origin_aware() {
-    // Negative-side grow: origin shifts but the previously-
-    // existing cells must remain reachable from the same
-    // editor coordinates. After `extend_to_include(-1, 0)` on a
-    // 3×3 starter the room becomes width=4, depth=3, origin=[-1,0].
-    // Old cell at world-cell (0, 0) is now at array (1, 0).
-    let mut grid = WorldGrid::stone_room(3, 3, 1024, None, None);
-    grid.extend_to_include(-1, 0);
-    assert_eq!(grid.origin, [-1, 0]);
-    assert_eq!(grid.width, 4);
-    // grid_center_cells = [-1 + 2, 0 + 1.5] = [1.0, 1.5]; cell
-    // (1, 0) has world-cell centre [0.5, 0.5], so editor centre
-    // is [0.5 - 1.0, 0.5 - 1.5] = [-0.5, -1.0].
-    assert_eq!(grid.editor_cells_to_array([-0.5, -1.0]), Some((1, 0)));
-    // Newly-included cell at array (0, 0) -- world-cell (-1, 0),
-    // editor centre [-0.5 - 1.0, -1.0] = [-1.5, -1.0].
-    assert_eq!(grid.editor_cells_to_array([-1.5, -1.0]), Some((0, 0)));
-}
-
-#[test]
-fn cell_center_world_in_editor_units_matches_helper() {
-    let mut grid = WorldGrid::stone_room(4, 5, 1024, None, None);
-    grid.extend_to_include(-2, -1);
-    let s = grid.sector_size as f32;
-    for (sx, sz) in [(0u16, 0u16), (1, 2), (3, 4)] {
-        let world_centre = grid.cell_center_world(sx, sz);
-        let editor = grid.world_cells_to_editor([world_centre[0] / s, world_centre[1] / s]);
-        // Same cell via editor_cells_to_array should round-trip.
-        assert_eq!(grid.editor_cells_to_array(editor), Some((sx, sz)));
-    }
-}
-
-#[test]
-fn authored_footprint_ignores_empty_allocation() {
-    let mut grid = WorldGrid::empty(8, 6, 1024);
-    let _ = grid.ensure_sector(0, 0);
-    grid.set_floor(2, 1, 0, None);
-    grid.add_wall(5, 4, GridDirection::North, 0, 1024, None);
-
-    let footprint = grid.authored_footprint().expect("authored geometry");
-    assert_eq!(
-        footprint,
-        WorldGridFootprint {
-            x: 2,
-            z: 1,
-            width: 4,
-            depth: 4,
-        }
-    );
-    assert_eq!(grid.populated_sector_count(), 2);
-
-    let budget = grid.authored_budget();
-    assert_eq!(budget.width, 4);
-    assert_eq!(budget.depth, 4);
-    assert_eq!(budget.total_cells, 16);
-    assert_eq!(budget.populated_cells, 2);
-}
-
-#[test]
-fn authored_footprint_is_empty_after_last_face_is_deleted() {
-    let mut grid = WorldGrid::empty(8, 6, 1024);
-    grid.set_floor(2, 1, 0, None);
-
-    grid.sector_mut(2, 1).expect("authored sector").floor = None;
-
-    assert_eq!(grid.populated_sector_count(), 0);
-    assert_eq!(grid.authored_footprint(), None);
-    assert_eq!(grid.authored_budget(), WorldGridBudget::default());
-}
-
-#[test]
-fn budget_empty_grid_reports_no_geometry() {
-    let grid = WorldGrid::empty(3, 3, 1024);
-    let b = grid.budget();
-    assert_eq!(b.width, 3);
-    assert_eq!(b.depth, 3);
-    assert_eq!(b.total_cells, 9);
-    assert_eq!(b.populated_cells, 0);
-    assert_eq!(b.floors, 0);
-    assert_eq!(b.ceilings, 0);
-    assert_eq!(b.walls, 0);
-    assert_eq!(b.triangles, 0);
-    // AssetHeader + active WorldHeader + 9 sector records.
-    // `.psxw` stores a record per cell whether populated or not.
-    assert_eq!(
-        b.psxw_bytes,
-        12 + psxed_format::world::WorldHeader::SIZE + 9 * psxed_format::world::SectorRecord::SIZE
-    );
-    assert_eq!(b.static_light_table_bytes, 0);
-    assert_eq!(b.psxw_static_lit_bytes, b.psxw_bytes);
-    assert_eq!(
-        b.future_compact_estimated_bytes,
-        12 + psxed_format::world::WorldHeader::SIZE + 9 * 28
-    );
-    assert!(!b.over_budget());
-    assert!(!b.static_lit_over_budget());
-}
-
-#[test]
-fn budget_starter_room_matches_authored_geometry() {
-    let grid = WorldGrid::stone_room(3, 3, 1024, None, None);
-    let b = grid.budget();
-    assert_eq!(b.populated_cells, 9);
-    assert_eq!(b.floors, 9);
-    assert_eq!(b.ceilings, 0);
-    // Perimeter only: 4 sides * 3 cells = 12 walls.
-    assert_eq!(b.walls, 12);
-    // 2 tris per face: 9 floors + 12 walls = 21 faces.
-    assert_eq!(b.triangles, 42);
-    // The future compact estimate should be strictly smaller
-    // than the active format once any geometry exists.
-    assert!(b.future_compact_estimated_bytes < b.psxw_bytes);
-    assert_eq!(
-        b.static_light_table_bytes,
-        (9 * 2 + 12) * psxed_format::world::SurfaceLightRecord::SIZE
-    );
-    assert_eq!(
-        b.psxw_static_lit_bytes,
-        b.psxw_bytes + b.static_light_table_bytes
-    );
-    assert!(!b.over_budget());
-    assert!(!b.static_lit_over_budget());
-}
-
-#[test]
-fn budget_counts_generated_floor_transition_walls() {
-    let mut grid = WorldGrid::empty(2, 1, 1024);
-    grid.set_floor(0, 0, 0, None);
-    grid.set_floor(1, 0, 512, None);
-
-    let b = grid.budget();
-
-    assert_eq!(b.floors, 2);
-    assert_eq!(b.walls, 1);
-    assert_eq!(b.triangles, 6);
-}
-
-#[test]
-fn budget_max_dimension_grid_within_caps() {
-    // Floors-only at MAX_ROOM_WIDTH × MAX_ROOM_DEPTH = 32 × 32.
-    // Stresses the byte-cap path without going over MAX_ROOM_TRIANGLES.
-    let mut grid = WorldGrid::empty(MAX_ROOM_WIDTH, MAX_ROOM_DEPTH, 1024);
-    for x in 0..MAX_ROOM_WIDTH {
-        for z in 0..MAX_ROOM_DEPTH {
-            grid.set_floor(x, z, 0, None);
-        }
-    }
-    let b = grid.budget();
-    assert_eq!(b.populated_cells, 1024);
-    assert_eq!(b.floors, 1024);
-    assert_eq!(b.triangles, 2048);
-    assert!(b.triangles <= MAX_ROOM_TRIANGLES);
-    // Active format remains under the byte cap for floors-only;
-    // the wall-stack-heavy worst case is what pushes rooms over.
-    assert!(b.psxw_bytes <= MAX_ROOM_BYTES);
-    assert!(b.psxw_static_lit_bytes > MAX_ROOM_BYTES);
-    assert!(b.future_compact_estimated_bytes <= MAX_ROOM_BYTES);
-    assert!(!b.over_budget());
-    assert!(b.static_lit_over_budget());
-}
-
-#[test]
-fn budget_flags_oversized_room_dimensions() {
-    // 64×16 fits the byte cap but blows past MAX_ROOM_WIDTH.
-    // The old `over_budget` check only watched triangles +
-    // bytes; this test pins the new width/depth check that
-    // catches asymmetric over-sized rooms.
-    let grid = WorldGrid::empty(MAX_ROOM_WIDTH * 2, MAX_ROOM_DEPTH / 2, 1024);
-    let b = grid.budget();
-    assert!(b.over_budget(), "{b:?}");
-}
-
-#[test]
-fn extend_to_include_grows_positively_without_shift() {
-    let mut grid = WorldGrid::stone_room(3, 3, 1024, None, None);
-    let baseline_floor_world = grid.cell_world_x(0); // 0
-    let cell = grid.extend_to_include(5, 1);
-    assert_eq!(cell, (5, 1));
-    assert_eq!(grid.width, 6);
-    assert_eq!(grid.depth, 3);
-    assert_eq!(grid.origin, [0, 0]);
-    // Old (0, 0) data still at array (0, 0), still at world 0.
-    assert_eq!(grid.cell_world_x(0), baseline_floor_world);
-    assert!(grid.sector(0, 0).is_some());
-}
-
-#[test]
-fn extend_to_include_grows_negatively_preserving_world_position() {
-    let mut grid = WorldGrid::stone_room(3, 3, 1024, None, None);
-    let cell = grid.extend_to_include(-2, 0);
-    assert_eq!(cell, (0, 0));
-    // Two new columns prepended in -X.
-    assert_eq!(grid.width, 5);
-    assert_eq!(grid.origin[0], -2);
-    // Old (0, 0) data is now at array (2, 0), still at world 0.
-    assert_eq!(grid.cell_world_x(2), 0);
-    assert!(grid.sector(2, 0).is_some());
-    // The newly-included cell at array (0, 0) is empty.
-    assert!(grid.sector(0, 0).is_none());
 }
 
 #[test]
@@ -2173,11 +1521,6 @@ fn starter_project_has_scene_tree_and_resources() {
     // character and weapon path.
     assert!(project.resources.len() >= 10);
     assert!(!project.active_scene().brushes.is_empty());
-    assert!(project
-        .active_scene()
-        .nodes()
-        .iter()
-        .all(|node| !matches!(node.kind, NodeKind::Section { .. })));
 
     let aletha = project
         .resources
@@ -2276,13 +1619,7 @@ fn legacy_door_motion_uses_brush_defaults() {
 fn adding_node_preserves_parent_child_relationship() {
     let mut scene = Scene::new("Test");
 
-    let room = scene.add_node(
-        scene.root,
-        "Room",
-        NodeKind::Section {
-            grid: WorldGrid::empty(2, 2, 1024),
-        },
-    );
+    let room = scene.add_node(scene.root, "Room", NodeKind::Node3D);
     let child = scene.add_node(
         room,
         "Spawn",
@@ -3911,10 +3248,7 @@ fn delete_resource_removes_entry_and_clears_references() {
     );
 
     let scene = project.active_scene_mut();
-    let mut grid = WorldGrid::empty(1, 1, 1024);
-    grid.set_floor(0, 0, 0, Some(target));
-    grid.add_wall(0, 0, GridDirection::North, 0, 1024, Some(target));
-    let room = scene.add_node(scene.root, "Room", NodeKind::Section { grid });
+    let room = scene.add_node(scene.root, "Room", NodeKind::Node3D);
     scene.add_node(
         room,
         "Mesh",
@@ -3962,12 +3296,12 @@ fn delete_resource_removes_entry_and_clears_references() {
             character: Some(target),
         },
     );
-    assert_eq!(project.resource_reference_count(target), 12);
+    assert_eq!(project.resource_reference_count(target), 10);
     let report = project
         .delete_resource_with_files(target, &root)
         .expect("resource exists");
     assert_eq!(report.removed.name, "Target");
-    assert_eq!(report.cleared_references, 12);
+    assert_eq!(report.cleared_references, 10);
     assert_eq!(
         report.deleted_files,
         vec![ResourceFileDelete {
@@ -3989,19 +3323,6 @@ fn delete_resource_removes_entry_and_clears_references() {
 
     for node in project.active_scene().nodes() {
         match &node.kind {
-            NodeKind::Section { grid } => {
-                let sector = grid.sector(0, 0).unwrap();
-                assert_eq!(sector.floor.as_ref().unwrap().material, None);
-                assert_eq!(
-                    sector
-                        .walls
-                        .get(GridDirection::North)
-                        .first()
-                        .unwrap()
-                        .material,
-                    None
-                );
-            }
             NodeKind::MeshInstance { mesh, material, .. } => {
                 assert_eq!((*mesh, *material), (None, None));
             }
@@ -4122,69 +3443,7 @@ fn delete_material_source_clears_inactive_version_recipes() {
 }
 
 #[test]
-fn corner_surviving_split_picks_diagonal_that_keeps_a_triangle() {
-    // Drop NE → only the NW-SE diagonal keeps a triangle.
-    // Drop NW → only the NE-SW diagonal keeps a triangle.
-    assert_eq!(Corner::NE.surviving_split(), GridSplit::NorthWestSouthEast);
-    assert_eq!(Corner::SW.surviving_split(), GridSplit::NorthWestSouthEast);
-    assert_eq!(Corner::NW.surviving_split(), GridSplit::NorthEastSouthWest);
-    assert_eq!(Corner::SE.surviving_split(), GridSplit::NorthEastSouthWest);
-}
-
-#[test]
-fn drop_corner_marks_face_as_triangle_and_flips_split() {
-    let mut face = GridHorizontalFace::flat(0, None);
-    face.split = GridSplit::NorthWestSouthEast; // would die if NW dropped
-    face.drop_corner(Corner::NW);
-    assert!(face.is_triangle());
-    assert_eq!(face.dropped_corner, Some(Corner::NW));
-    assert_eq!(face.split, GridSplit::NorthEastSouthWest);
-
-    face.restore_corner();
-    assert!(!face.is_triangle());
-    assert_eq!(face.dropped_corner, None);
-}
-
-#[test]
-fn horizontal_triangle_overrides_inherit_until_set() {
-    let parent = ResourceId(11);
-    let triangle = ResourceId(12);
-    let mut face = GridHorizontalFace::flat(0, Some(parent));
-    face.uv.offset = [3, 4];
-    face.walkable = true;
-
-    assert_eq!(face.triangle_material(0), Some(parent));
-    assert_eq!(face.triangle_uv(0), face.uv);
-    assert!(face.triangle_walkable(0));
-
-    let override_a = face.triangle_override_mut(0);
-    override_a.material = Some(GridTriangleMaterialOverride::Resource(triangle));
-    override_a.uv = Some(UvTransform {
-        offset: [9, 10],
-        span: [64, 32],
-        rotation: UvRotation::Deg90,
-        flip_u: true,
-        flip_v: false,
-    });
-    override_a.walkable = Some(false);
-
-    assert_eq!(face.triangle_material(0), Some(triangle));
-    assert_eq!(face.triangle_material(1), Some(parent));
-    assert_eq!(face.triangle_uv(0).offset, [9, 10]);
-    assert!(!face.triangle_walkable(0));
-    assert!(face.triangle_walkable(1));
-}
-
-#[test]
-fn drop_corner_on_wall_marks_triangle() {
-    let mut wall = GridVerticalFace::flat(0, 64, None);
-    wall.drop_corner(WallCorner::TL);
-    assert!(wall.is_triangle());
-    assert_eq!(wall.dropped_corner, Some(WallCorner::TL));
-}
-
-#[test]
-fn grid_uv_transform_rotates_quad_without_rebaking_texture() {
+fn uv_transform_rotates_quad_without_rebaking_texture() {
     let transform = UvTransform {
         offset: [0, 0],
         span: [0, 0],
@@ -4200,7 +3459,7 @@ fn grid_uv_transform_rotates_quad_without_rebaking_texture() {
 }
 
 #[test]
-fn grid_uv_transform_rotates_quad_45_degrees_without_rebaking_texture() {
+fn uv_transform_rotates_quad_45_degrees_without_rebaking_texture() {
     let transform = UvTransform {
         offset: [0, 0],
         span: [0, 0],
@@ -4216,7 +3475,7 @@ fn grid_uv_transform_rotates_quad_45_degrees_without_rebaking_texture() {
 }
 
 #[test]
-fn grid_uv_transform_rotates_quad_315_degrees_without_rebaking_texture() {
+fn uv_transform_rotates_quad_315_degrees_without_rebaking_texture() {
     let transform = UvTransform {
         offset: [0, 0],
         span: [0, 0],
@@ -4232,7 +3491,7 @@ fn grid_uv_transform_rotates_quad_315_degrees_without_rebaking_texture() {
 }
 
 #[test]
-fn grid_uv_transform_flips_and_wraps_ps1_uv_offsets() {
+fn uv_transform_flips_and_wraps_ps1_uv_offsets() {
     let transform = UvTransform {
         offset: [-8, 12],
         span: [0, 0],
@@ -4248,7 +3507,7 @@ fn grid_uv_transform_flips_and_wraps_ps1_uv_offsets() {
 }
 
 #[test]
-fn grid_uv_transform_scales_quad_span_without_rebaking_texture() {
+fn uv_transform_scales_quad_span_without_rebaking_texture() {
     let transform = UvTransform {
         offset: [0, 0],
         span: [0, 32],
@@ -4261,113 +3520,6 @@ fn grid_uv_transform_scales_quad_span_without_rebaking_texture() {
         transform.apply_to_quad([(0, 64), (64, 64), (64, 0), (0, 0)]),
         [(0, 32), (64, 32), (64, 0), (0, 0)]
     );
-}
-
-#[test]
-fn wall_autotile_sets_double_height_v_span_without_changing_geometry() {
-    let mut wall = GridVerticalFace::flat(0, 1536, None);
-    let heights = wall.heights;
-
-    let clamped = wall.autotile_uv(768);
-
-    assert!(!clamped);
-    assert_eq!(wall.heights, heights);
-    assert_eq!(wall.uv.span, [0, 128]);
-}
-
-#[test]
-fn wall_autotile_uses_partial_v_span_for_short_wall() {
-    let mut wall = GridVerticalFace::flat(0, 384, None);
-
-    let clamped = wall.autotile_uv(768);
-
-    assert!(!clamped);
-    assert_eq!(wall.heights, [0, 0, 384, 384]);
-    assert_eq!(wall.uv.span, [0, 32]);
-}
-
-#[test]
-fn wall_autotile_clamps_one_quad_to_ps1_uv_range() {
-    let mut wall = GridVerticalFace::flat(0, 768 * 5, None);
-
-    let clamped = wall.autotile_uv(768);
-
-    assert!(clamped);
-    assert_eq!(wall.heights, [0, 0, 3840, 3840]);
-    assert_eq!(wall.uv.span, [0, 255]);
-}
-
-#[test]
-fn default_tall_wall_keeps_single_authored_uv_primitive() {
-    let wall = GridVerticalFace::flat(0, 768 * 5, None);
-
-    let segments = wall.split_into_autotile_segments(768);
-
-    assert_eq!(segments.len(), 1);
-    assert_eq!(segments[0].heights, [0, 0, 3840, 3840]);
-    assert_eq!(segments[0].uv.span, [0, 0]);
-}
-
-#[test]
-fn wall_autotile_keeps_one_primitive_when_repeated_uvs_fit_packet() {
-    let mut wall = GridVerticalFace::flat(0, 1536, None);
-    wall.uv.offset[1] = -5;
-    wall.autotile_uv(768);
-
-    let segments = wall.split_into_autotile_segments(768);
-
-    assert_eq!(segments.len(), 1);
-    assert_eq!(segments[0].heights, [0, 0, 1536, 1536]);
-    assert_eq!(segments[0].uv.span, [0, 128]);
-    assert_eq!(segments[0].uv.offset[1], -5);
-}
-
-#[test]
-fn wall_autotile_segments_restore_clamped_tall_wall_density() {
-    let mut wall = GridVerticalFace::flat(0, 768 * 5, None);
-    wall.autotile_uv(768);
-
-    let segments = wall.split_into_autotile_segments(768);
-
-    assert_eq!(segments.len(), 5);
-    assert!(segments.iter().all(|segment| segment.uv.span == [0, 0]));
-    assert_eq!(segments[4].heights, [3072, 3072, 3840, 3840]);
-}
-
-#[test]
-fn wall_split_height_segments_keeps_uvs_and_sloped_edges_connected() {
-    let mut wall = GridVerticalFace::flat(0, 1536, None);
-    wall.heights = [0, 384, 1536, 1920];
-    wall.uv.span = [12, 96];
-
-    let segments = wall.split_into_height_segments(768);
-
-    assert_eq!(segments.len(), 3);
-    assert_eq!(
-        [
-            segments[0].heights[WallCorner::BL.idx()],
-            segments[0].heights[WallCorner::BR.idx()],
-        ],
-        [0, 384]
-    );
-    assert_eq!(
-        [
-            segments[2].heights[WallCorner::TL.idx()],
-            segments[2].heights[WallCorner::TR.idx()],
-        ],
-        [1920, 1536]
-    );
-    for pair in segments.windows(2) {
-        assert_eq!(
-            pair[0].heights[WallCorner::TL.idx()],
-            pair[1].heights[WallCorner::BL.idx()]
-        );
-        assert_eq!(
-            pair[0].heights[WallCorner::TR.idx()],
-            pair[1].heights[WallCorner::BR.idx()]
-        );
-    }
-    assert!(segments.iter().all(|segment| segment.uv.span == [12, 96]));
 }
 
 #[test]
@@ -4459,97 +3611,146 @@ fn legacy_texture_resources_migrate_into_materials_on_load() {
     assert_eq!(loaded.resources, reloaded.resources);
 }
 
-// --- Fail-closed grid boundary ----------------------------------------
-//
-// A BSP project must never instantiate grid spatial state. The cook's
-// guards are checked from both ends: the authored input that would start a
-// grid build is refused, and the cooked outputs are re-checked so a future
-// leak surfaces as a named error instead of a level that silently streams
-// rooms nobody authored.
+// --- Legacy grid worlds are refused, never dropped ---------------------
 
-/// The tracked BSP first-playable, loaded as a synthetic-mutation base.
-fn bsp_fixture() -> (ProjectDocument, std::path::PathBuf) {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../archive/fixtures/brush-first-playable");
-    let project = ProjectDocument::load_from_path(dir.join("project.ron"))
-        .expect("tracked BSP first-playable loads");
-    (project, dir)
-}
-
-#[test]
-fn a_bsp_project_holding_a_grid_section_fails_the_cook_closed() {
-    let (mut project, dir) = bsp_fixture();
-    let (baseline, report) = crate::playtest::build_package(&project, &dir);
-    assert!(
-        baseline.is_some(),
-        "unmutated fixture cooks: {:?}",
-        report.errors
-    );
-
+/// A serialized project with one extra top-level child whose kind text is
+/// replaced by `legacy_kind`, standing in for a pre-removal grid-world node.
+fn project_ron_with_legacy_nodes(legacy_kinds: &[&str]) -> String {
+    let mut project = ProjectDocument::new("legacy grid");
     let scene = project.active_scene_mut();
     let root = scene.root;
-    scene.add_node(
-        root,
-        "Smuggled Section",
-        NodeKind::Section {
-            grid: WorldGrid::stone_room(1, 1, 1024, None, None),
-        },
-    );
-
-    let (package, report) = crate::playtest::build_package(&project, &dir);
-    assert!(
-        package.is_none(),
-        "a BSP project holding a Section must not cook"
-    );
-    let joined = report.error_messages().join(" | ");
-    assert!(
-        joined.contains("grid Section") && joined.contains("Smuggled Section"),
-        "expected a named Section diagnostic, got {joined}"
-    );
-    assert!(
-        matches!(
-            report.focus_target(),
-            Some(crate::playtest::PlaytestValidationTarget::Node(_))
-        ),
-        "the diagnostic must focus the offending node, got {:?}",
-        report.focus_target()
-    );
+    for index in 0..legacy_kinds.len() {
+        scene.add_node(root, format!("Legacy {index}"), NodeKind::Node3D);
+    }
+    let mut ron = project.to_ron_string().expect("project serializes");
+    for legacy_kind in legacy_kinds {
+        assert!(ron.contains("kind: Node3D"), "scaffold node serialized");
+        ron = ron.replacen("kind: Node3D", &format!("kind: {legacy_kind}"), 1);
+    }
+    ron
 }
 
 #[test]
-fn a_cooked_bsp_package_carries_no_grid_spatial_state() {
-    let (project, dir) = bsp_fixture();
-    let (package, report) = crate::playtest::build_package(&project, &dir);
-    assert!(report.is_ok(), "BSP fixture cooks: {:?}", report.errors);
-    let package = package.expect("BSP package");
+fn legacy_grid_world_nodes_fail_the_load_with_a_clear_error() {
+    for variant in ["Section", "Room", "Map", "WaterVolume", "Portal"] {
+        let ron = project_ron_with_legacy_nodes(&[&format!("{variant}(grid: ())")]);
+        assert!(ron.contains(&format!("kind: {variant}(")), "{variant}");
+        match ProjectDocument::from_ron_str(&ron) {
+            Err(ProjectIoError::LegacyGridWorld { nodes }) => {
+                assert_eq!(nodes, 1, "{variant}");
+            }
+            other => panic!("{variant}: expected LegacyGridWorld, got {other:?}"),
+        }
+    }
+}
 
-    assert!(package.chunks.is_empty(), "no room chunks");
+#[test]
+fn legacy_grid_world_error_counts_every_node_and_names_the_kinds() {
+    let ron = project_ron_with_legacy_nodes(&[
+        "Section(grid: ())",
+        "WaterVolume(cells: [])",
+        "Portal(destination: 0)",
+    ]);
+    let error = ProjectDocument::from_ron_str(&ron).expect_err("legacy nodes refuse to load");
     assert!(
-        package.room_visibility.is_empty(),
-        "no room visibility rows"
+        matches!(error, ProjectIoError::LegacyGridWorld { nodes: 3 }),
+        "{error:?}"
     );
-    assert!(package.visibility_cells.is_empty(), "no visibility cells");
-    assert!(package.visibility_pvs.is_empty(), "no visibility PVS rows");
-    assert!(package.room_surface_caches.is_empty(), "no surface caches");
-    assert!(package.room_portals.is_empty(), "no room portals");
-    assert!(package.room_floor_links.is_empty(), "no floor links");
-    assert!(package.water_cells.is_empty(), "no grid water cells");
-    assert!(
-        !package
-            .assets
-            .iter()
-            .any(|asset| asset.kind == crate::playtest::PlaytestAssetKind::RoomWorld),
-        "no PSXW world assets"
-    );
-    // The deliberate exception: one non-spatial metadata room carrying
-    // gravity/camera/sky/fog, with no world geometry behind it. See
-    // docs/quake-psoxide-convergence-handoff.md section 0.10.
-    assert_eq!(package.rooms.len(), 1);
-    assert_eq!(package.rooms[0].world_asset_index, None);
+    let text = error.to_string();
+    assert!(text.contains("3 legacy grid-world node(s)"), "{text}");
+    for kind in ["Section", "Room", "Map", "Water Volume", "Portal"] {
+        assert!(text.contains(kind), "{kind} missing from {text:?}");
+    }
+}
+
+#[test]
+fn a_file_with_legacy_nodes_is_left_untouched_by_a_failed_load() {
+    let dir = unique_temp_dir("legacy-grid-load");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("project.ron");
+    let ron = project_ron_with_legacy_nodes(&["Section(grid: ())"]);
+    std::fs::write(&path, &ron).unwrap();
+
+    let error = ProjectDocument::load_from_path(&path).expect_err("legacy project refuses");
     assert!(matches!(
-        package.world_geometry,
-        crate::playtest::PlaytestWorldGeometry::Pxbsp(_)
+        error,
+        ProjectIoError::LegacyGridWorld { nodes: 1 }
     ));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), ron);
+
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Every `project.ron` shipped under `editor/projects` and
+/// `editor/archive/fixtures`.
+fn tracked_project_files() -> Vec<PathBuf> {
+    let editor = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut files = Vec::new();
+    for group in ["projects", "archive/fixtures"] {
+        let Ok(entries) = std::fs::read_dir(editor.join(group)) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let candidate = entry.path().join("project.ron");
+            if candidate.is_file() {
+                files.push(candidate);
+            }
+        }
+    }
+    files.sort();
+    files
+}
+
+#[test]
+fn every_tracked_project_loads_without_legacy_grid_nodes() {
+    let files = tracked_project_files();
+    assert!(
+        files.len() >= 8,
+        "expected the tracked projects and fixtures, found {files:?}"
+    );
+    for path in files {
+        let text = std::fs::read_to_string(&path).unwrap();
+        for variant in ["Section(", "Room(", "Map(", "WaterVolume(", "Portal("] {
+            assert!(
+                !text.contains(&format!("kind: {variant}")),
+                "{} still holds a legacy {variant} node",
+                path.display()
+            );
+        }
+        ProjectDocument::load_from_path(&path)
+            .unwrap_or_else(|error| panic!("{} fails to load: {error}", path.display()));
+    }
+}
+
+#[test]
+fn removed_world_tuning_keys_in_old_files_are_ignored() {
+    let ron = ProjectDocument::new("inert keys")
+        .to_ron_string()
+        .expect("project serializes");
+    assert!(ron.contains("culling: ("), "scaffold culling block");
+    assert!(ron.contains("physics: ("), "scaffold physics block");
+    let ron = ron
+        .replacen(
+            "culling: (",
+            "culling: (chunk_activation_radius_sectors: 64, visibility_radius: 32, ",
+            1,
+        )
+        .replacen(
+            "physics: (",
+            "streaming: (resident_chunk_limit: 10, visible_chunk_limit: 10), physics: (",
+            1,
+        );
+    assert!(ron.contains("streaming: (resident_chunk_limit"));
+
+    let project = ProjectDocument::from_ron_str(&ron).expect("inert keys do not break the load");
+    let root = project.active_scene().root;
+    let NodeKind::World { culling, .. } = &project.active_scene().node(root).unwrap().kind else {
+        panic!("scene root is not a World");
+    };
+    assert_eq!(
+        culling.draw_distance,
+        WorldCullingSettings::default().draw_distance
+    );
 }
 
 /// A binding is only identified by its socket here; the weapon is what the

@@ -22,7 +22,7 @@ use psxed_project::{
         analyze_pxbsp_draw_cost, build_package, cook_to_dir, default_generated_dir,
         playtest_performance_envelope,
     },
-    NodeKind, ProjectDocument,
+    ProjectDocument,
 };
 
 fn main() -> ExitCode {

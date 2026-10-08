@@ -1222,32 +1222,6 @@ mod tests {
     }
 
     #[test]
-    fn room_reflection_probe_is_deterministic_opaque_4bpp() {
-        let project = ProjectDocument::new("Probe test");
-        let mut grid = WorldGrid::stone_room(3, 2, 1024, None, None);
-        grid.ambient_color = [32, 48, 64];
-        grid.fog_color = [96, 80, 72];
-
-        let first = generate_room_reflection_probe_psxt(&project, &grid, Path::new("."))
-            .expect("room probe bakes");
-        let second = generate_room_reflection_probe_psxt(&project, &grid, Path::new("."))
-            .expect("room probe rebakes");
-        assert_eq!(first, second);
-
-        let texture = psx_asset::Texture::from_bytes(&first).expect("room probe PSXT parses");
-        assert_eq!(texture.width(), ROOM_REFLECTION_PROBE_SIZE);
-        assert_eq!(texture.height(), ROOM_REFLECTION_PROBE_SIZE);
-        assert_eq!(texture.depth(), psxed_format::texture::Depth::Bit4);
-        assert_eq!(texture.clut_entries(), 16);
-        assert!(!texture.is_index_zero_transparent());
-
-        grid.fog_color[0] = grid.fog_color[0].saturating_add(40);
-        let changed = generate_room_reflection_probe_psxt(&project, &grid, Path::new("."))
-            .expect("changed room probe bakes");
-        assert_ne!(first, changed, "room lighting must affect the baked probe");
-    }
-
-    #[test]
     fn generated_noise_is_deterministic_and_uses_full_4bpp_range() {
         let settings = ProceduralNoiseTexture::default();
         let first = generate_model_noise_indices(settings);

@@ -198,13 +198,7 @@ mod tests {
         );
 
         let scene = project.active_scene_mut();
-        let room = scene.add_node(
-            scene.root,
-            "Room",
-            NodeKind::Section {
-                grid: WorldGrid::stone_room(2, 2, 1024, Some(material), None),
-            },
-        );
+        let room = scene.add_node(scene.root, "Room", NodeKind::Entity);
         scene.add_node(
             room,
             "Emitter",
@@ -213,15 +207,6 @@ mod tests {
                     texture: Some(particle_texture),
                     ..ParticleEmitterSettings::default()
                 },
-            },
-        );
-        scene.add_node(
-            room,
-            "Water",
-            NodeKind::WaterVolume {
-                material: Some(material),
-                cells: vec![WaterVolumeCell::new(0, 0)],
-                settings: WaterVolumeSettings::default(),
             },
         );
         let entity = scene.add_node(room, "Entity", NodeKind::Entity);
@@ -240,7 +225,7 @@ mod tests {
             "Renderer",
             NodeKind::ModelRenderer {
                 model: Some(model),
-                material: None,
+                material: Some(material),
                 visual_offset: [0; 3],
                 visual_scale_q8: crate::MODEL_SCALE_ONE_Q8,
             },
