@@ -500,7 +500,7 @@ mod pxbsp_depth_order_tests {
                 .slot::<OT_DEPTH>(PXBSP_CLASSIC_DEPTH_RANGE, depth)
                 .index();
             let sz = (depth * scale) >> 12;
-            let classic_slot = usize::from(psx_gte::scene::classic_otz3_from_sum(
+            let classic_slot = usize::from(psx_gte::scene::classic_ordering_depth3_from_sum(
                 (sz as u32).saturating_mul(3),
             ));
             assert_eq!(dynamic_slot, classic_slot, "view depth {depth}");
@@ -508,7 +508,7 @@ mod pxbsp_depth_order_tests {
         // A few units past the far depth the world rejects the surface
         // (OTZ >= 2048) while runtime draws clamp to the back of the band.
         let sz = (2734 * scale) >> 12;
-        assert!(psx_gte::scene::classic_otz3_from_sum((sz as u32) * 3) >= 2048);
+        assert!(psx_gte::scene::classic_ordering_depth3_from_sum((sz as u32) * 3) >= 2048);
         assert_eq!(
             WORLD_BAND
                 .slot::<OT_DEPTH>(PXBSP_CLASSIC_DEPTH_RANGE, 2734)
