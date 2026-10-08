@@ -89,7 +89,7 @@ id = "licence"
 group = "project"
 home = true
 q = "Is it open source?"
-a = "Yes. The SDK, emulator, editor, engine and most games are GPL-2.0-or-later; the Quake port is GPL-2.0-only."
+a = "The SDK, emulator, editor and engine are GPL-2.0-or-later, as are most of the games; the Quake port is GPL-2.0-only. Half-Life is source-only for non-commercial use."
 link_text = "Licences in detail"
 link = "@/legal.md#code-and-licences"
 
@@ -98,7 +98,7 @@ id = "ports"
 group = "playing"
 home = true
 q = "Can I play Half-Life or Quake on it?"
-a = "Half-Life’s source is public. It requires your own game data and offers no disc-image download. Counter-Strike and Hollow Knight have no public builds. The Quake port is available, but permission to distribute converted shareware data remains unresolved in this review."
+a = "Half-Life’s source is public. It requires your own game data and offers no disc-image download. Hollow Knight has no public build. The Quake port is available, but permission to distribute converted shareware data remains unresolved in this review."
 link_text = "Port status and content rights"
 link = "@/legal.md#ports-built-from-other-people-s-games"
 

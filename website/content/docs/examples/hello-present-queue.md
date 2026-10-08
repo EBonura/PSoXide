@@ -22,6 +22,6 @@ Open `build/examples/mipsel-sony-psx/release/hello-present-queue.cue` in the emu
 
 For original hardware, read the [burned-disc requirements and warning](@/legal.md#running-burned-discs-on-original-hardware).
 
-## Source
+## Complete source
 
-This example is newer than the SDK revision the site embeds sources from. Read the [complete source on GitHub](https://github.com/EBonura/PSoXide/tree/main/sdk/examples/hello-present-queue).
+{{<sdk_example_source name="hello-present-queue" />}}

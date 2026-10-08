@@ -10,7 +10,7 @@ Use `psx-vram` to describe where textures and palettes live in the PS1's video m
 
 ## How the crate is organized
 
-This crate has one source module. `Color555` represents packed colour, `VramRect` describes bounded VRAM rectangles, `Tpage` carries texture-page coordinates and depth, and `Clut` carries palette coordinates. Upload helpers move caller-owned data into those regions.
+This crate has one source module. `Color555` represents packed colour, `VramRect` describes bounded VRAM rectangles, `TexturePage` carries texture-page coordinates and `TextureDepth` the bit depth, and `Clut` carries palette coordinates. Upload helpers move caller-owned data into those regions.
 
 ## Integration notes
 

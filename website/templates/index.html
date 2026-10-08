@@ -112,7 +112,10 @@
       </a>
       {% endfor %}
     </div>
-    <h3 class="subhead">Game ports</h3>
+    <h3 class="subhead">Coming soon: WipEout, Rebuilt with PSoXide</h3>
+    {% for p in projects.rebuilt %}<p class="small muted">{{ p.hook }}</p>{% endfor %}
+    <h3 class="subhead">Demade with PSoXide</h3>
+    <p class="small muted">Games from other platforms, adapted for the PlayStation.</p>
     <ul class="port-list">
       {% for p in projects.port %}
       <li><strong>{{ p.name }}.</strong> {{ p.hook }}</li>

@@ -26,6 +26,9 @@ The release contains eight outer programs, including two collections. Their
 five games are shown separately on the website so readers can find them. Do
 not count those five as five additional outer-menu entries.
 
+The site lists seven of the eight: one early-alpha program is deliberately
+omitted because it is being withdrawn (Manny, 2026-10-08).
+
 ## Differences from older descriptions
 
 The [download page](https://bonnie-studios.itch.io/psoxide-demo-disc) serves
@@ -34,8 +37,8 @@ carousel order. The main demo-disc checkout's README and deployment script
 also describe an earlier layout. The v0.40 release receipt uses the separate
 `release/lineup-v0.40.json` build recipe.
 
-Hardware Tests is absent from this public image and its receipt. Half-Life,
-Counter-Strike and Hollow Knight are absent too. Optional local editions and
+Hardware Tests is absent from this public image and its receipt. Half-Life
+and Hollow Knight are absent too. Optional local editions and
 standalone programs must not acquire a public demo-disc badge merely because
 the build system supports them.
 

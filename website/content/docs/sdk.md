@@ -1,6 +1,6 @@
 +++
 title = "PSoXide SDK documentation"
-description = "21 crate guides, searchable Rust APIs and 16 complete example programs for building PS1 homebrew."
+description = "21 crate guides, searchable Rust APIs and 19 complete example programs for building PS1 homebrew."
 weight = 3
 [extra]
 kind = "Reference"
@@ -42,13 +42,13 @@ framework is a separate layer and is not required for these examples.
 ## Build the documented revision
 
 The crate structures, full example listings and API reference use the same SDK
-revision as the embedded players: `e37dfe425a21b4475a131e094005622dfb98bc39`.
+revision as the embedded players: `7a61a6033fc8f81ad3ba15cd142a825cebeca4d1`.
 After [installing the tools](@/docs/first-ps1-program.md#1-install-the-tools):
 
 ```sh
 git clone https://github.com/EBonura/PSoXide.git
 cd PSoXide
-git checkout e37dfe425a21b4475a131e094005622dfb98bc39
+git checkout 7a61a6033fc8f81ad3ba15cd142a825cebeca4d1
 make disc EXAMPLE=hello-tri
 ```
 
@@ -83,7 +83,7 @@ compiling. Other examples keep data on the disc and load it at runtime; an EXE
 download alone does not contain those files or CD audio tracks.
 
 For a separate game repository, use the repository's
-[pinned component bootstrap workflow](https://github.com/EBonura/PSoXide/blob/e37dfe425a21b4475a131e094005622dfb98bc39/README.md)
+[pinned component bootstrap workflow](https://github.com/EBonura/PSoXide/blob/7a61a6033fc8f81ad3ba15cd142a825cebeca4d1/README.md)
 to retain the shared dependencies and matching SDK revision.
 
 ## API reference

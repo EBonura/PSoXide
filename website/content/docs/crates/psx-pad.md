@@ -10,7 +10,7 @@ Use `psx-pad` to read digital controllers and DualShock analog input over SIO0. 
 
 ## How the crate is organized
 
-The root defines button masks, pad state, polling, analog helpers and action mapping. `tracker::PadTracker`, also reexported at the root, tracks per-button edges and repeat timing.
+The root defines button masks, pad state, polling, analog helpers and action mapping. `PadReader` is bound to one port and returns the last clean state when a poll comes back garbled, and `require_analog_on` asks a DualShock for analog mode and locks it. Polling takes the `ControllerPort` token by `&mut`. `tracker::PadTracker`, also reexported at the root, tracks per-button edges and repeat timing.
 
 ## Integration notes
 

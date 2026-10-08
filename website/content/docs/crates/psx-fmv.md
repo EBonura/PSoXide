@@ -10,7 +10,7 @@ Use `psx-fmv` to assemble a movie-playback pipeline from explicit pieces. Your p
 
 ## How the crate is organized
 
-`str` demultiplexes sectors and assembles frame chunks. `bs` decodes version-2 bitstreams into MDEC run-length data. `mdec`, available on the PS1 target, transfers input and output through DMA0/DMA1. `iso` finds root-directory files in ISO9660 data.
+`stream` demultiplexes STR sectors and assembles frame chunks. `bitstream` decodes version-2 bitstreams into MDEC run-length data, with `rle` and `idct` below it. `mdec`, available on the PS1 target, transfers input and output through DMA0/DMA1 and holds the `MdecDma` token while it does. `iso` finds root-directory files in ISO9660 data.
 
 ## Integration notes
 

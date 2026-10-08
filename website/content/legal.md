@@ -82,12 +82,17 @@ derivations are credited in the source and provenance records. PSoXide does not
 claim a clean-room development process or guarantee that provenance reviews
 identify every third-party influence.
 
-Parts of the emulator core derive from PCSX-Redux (GPL-2.0-or-later), including
-recorded work on scheduling, DMA, SPU envelopes and CD-ROM timing. The relevant
-files retain their attribution. Other components were implemented using public
-hardware documentation and console observations. Behavioural comparisons and
-similarity scans are evidence with a defined scope, not proof of the absence of
-all derivation.
+Parts of the emulator core still derive from PCSX-Redux (GPL-2.0-or-later),
+including the event scheduler, DMA, SPU envelopes, the MDEC pipeline and SIO.
+Those files carry a provenance header that names PCSX-Redux, and the project's
+licence notice lists the same lineage. The high-level kernel emulation does not:
+it is written from public hardware documentation and console measurements (see
+[No BIOS](#no-bios)). The CD-ROM module dropped its Redux references on 4 October
+2026, but three of its delay values (for GetID, Pause and Stop) are still
+PCSX-Redux's, because replacing them changes the compatibility results. Other
+components were implemented using public hardware documentation and console
+observations. Behavioural comparisons and similarity scans are evidence with a
+defined scope, not proof of the absence of all derivation.
 
 See the [licence audit](https://github.com/EBonura/PSoXide/blob/main/docs/license-audit.md)
 and [HLE provenance record](https://github.com/EBonura/PSoXide-emulator/blob/main/docs/hle-bios-provenance.md).
@@ -100,10 +105,16 @@ high-level emulation (HLE). It does not require or load a Sony BIOS image; the
 external BIOS-loading paths were removed in September 2026. The SDK targets the
 hardware without requiring Sony’s proprietary SDK.
 
-The HLE provenance record describes public hardware documentation, MIT-licensed
-OpenBIOS references and black-box observations used during development. Its policy
-excludes Sony BIOS bytes, disassembly, fonts, logos, boot sounds and kernel memory
-images from committed implementation and fixtures. This describes the current
+The HLE provenance record says the kernel is written from public hardware
+documentation (the nocash psx-spx notes) and from measurements: which kernel
+functions games call, and timings taken on a console. It states that other kernel
+implementations and SDKs (OpenBIOS, PCSX-Redux, nugget, psyqo and PSn00bSDK) are
+not read while the kernel is written and that nothing is translated from them, and
+that code once derived from one of them was deleted and written again in October
+2026; the git history shows those rewrites as commits that start with "Rewrite".
+The record's policy excludes
+Sony BIOS bytes, disassembly, fonts, logos, boot sounds and kernel memory images
+from committed implementation and fixtures. This describes the current
 implementation and recorded checks, not an unlimited guarantee about every
 historical copy, fork or artifact.
 
@@ -138,14 +149,6 @@ distribution policy does not establish that Valve’s terms authorize every aspe
 of this work. See [HL-PSX licensing](https://github.com/EBonura/hl-psx/blob/main/LICENSING.md)
 and [source provenance](https://github.com/EBonura/hl-psx/blob/main/PROVENANCE.md).
 
-### Counter-Strike
-
-An unofficial experiment using locally supplied game data, with no public build.
-No Valve game assets or completed disc images are offered as project releases.
-Any future distribution requires its own review of code provenance, game-content
-rights and applicable terms; Half-Life’s public source does not establish permission
-for this separate project.
-
 ### Hollow Knight
 
  An experiment that cooks rooms, sprites, text and audio from a local install. Those files belong to their owners, the project's licence gives no rights to them or to their converted form, and footage is public on Bonnie Studios' YouTube channel, but there is no public build.
@@ -168,7 +171,7 @@ and [port provenance](https://github.com/EBonura/quake-psx/blob/main/PROVENANCE.
 ## Music and other assets
 
 - **Just Music:** four tracks, used in NitroXide and on the demo disc menu with the artist's permission. Non-commercial; don't redistribute the audio on its own.
-- **Goncharov by magikAAAAArp:** used in GH-PSX and Magikarp Pong with the band's permission, and so is their album art.
+- **Goncharov by magikAAAAArp:** used in Magikaaaaarp Pong with the band's permission, and so is their album art.
 - **Carmelo Miceli:** the Cortex Ignition menu and combat music, written for the game and used with the composer's permission.
 - **Models, textures, sounds and fonts:** sources and licences are tracked in project records, including unresolved provenance items. Examples include the Torment Textures pack (with attribution) and the VT323 font (SIL Open Font License) in the SDK's [asset-provenance.md](https://github.com/EBonura/PSoXide/blob/main/docs/asset-provenance.md), and Kenney's CC0 interface sounds in the Celeste credits.
 
@@ -191,8 +194,8 @@ modification.
 
 ## Trademarks
 
-PlayStation is a trademark of Sony Interactive Entertainment Inc. Half-Life and
-Counter-Strike are trademarks of Valve Corporation. Other game and product names
+PlayStation is a trademark of Sony Interactive Entertainment Inc. Half-Life is a
+trademark of Valve Corporation. Other game and product names
 belong to their respective owners and identify the works or compatibility being
 discussed. PSoXide is not affiliated with, sponsored by or endorsed by Sony, Valve
 or the other rights holders named here.

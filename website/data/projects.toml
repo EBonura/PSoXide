@@ -53,17 +53,6 @@ repo = "https://github.com/EBonura/psxcel"
 source = "psxcel/README.md"
 
 [[original]]
-slug = "gh-psx"
-name = "GH-PSX"
-kind = "Original game, early alpha"
-tagline = "A Guitar Hero style rhythm game. Notes scroll down a GTE-projected 5-fret highway in time with CD audio streamed off the disc."
-shot = "img/shots/ghpsx.png"
-shot_alt = "GH-PSX: a five-lane note highway in perspective"
-itch = ""
-repo = ""
-source = "gh-psx/README.md"
-
-[[original]]
 slug = "arcade"
 name = "PSoXide Arcade"
 kind = "Original collection"
@@ -71,13 +60,13 @@ tagline = "Breakout, Space Invaders and Magikaaaaarp Pong behind a cabinet-style
 shot = "img/shots/arcade.png"
 shot_alt = "PSoXide Arcade selector with Space Invaders, Breakout and Credits and Links"
 itch = ""
-repo = ""
+repo = "https://github.com/EBonura/psoxide-arcade"
 source = "psoxide-arcade/README.md"
 
 [[original]]
 slug = "celeste"
 name = "Celeste Classic Collection"
-kind = "Unofficial fan port"
+kind = "Demade with PSoXide, unofficial fan port"
 tagline = "The PICO-8 originals, Celeste and Celeste 2: Lani's Trek, on one disc with a cover-art launcher. Levels, art and music are the creators'; the port is fan work."
 shot = "img/shots/celeste-collection.png"
 shot_alt = "Celeste Classic Collection menu with separate Celeste and Celeste 2 choices"
@@ -108,7 +97,15 @@ repo = "https://github.com/EBonura/PSoXide-editor/tree/main/engine/examples/hard
 disc_note = "Available from source; not included in the public Demo Disc v0.40."
 source = "PSoXide-editor/docs/hardware-test-disc.md; verified v0.40 disc inventory"
 
-# Ports of games that belong to someone else. These cards use text, published
+# Games that first shipped on the PlayStation, rebuilt for the same console
+# ("Rebuilt with PSoXide"). Text only: no screenshot is published until Manny
+# approves one, because frames show the original game's art.
+[[rebuilt]]
+slug = "wipeout"
+name = "WipEout"
+hook = "The 1995 PlayStation original, rebuilt for the same console and enhanced. We are aiming for 60 frames a second and adding a two-player split screen."
+
+# Ports of games that belong to someone else ("Demade with PSoXide"). These cards use text, published
 # video links and, where set, an emulator capture (`shot`); game data is not
 # distributed by this site.
 [[port]]
@@ -134,22 +131,13 @@ repo = "https://github.com/EBonura/hl-psx"
 source = "hl-psx/README.md; hl-psx/LICENSING.md"
 
 [[port]]
-slug = "counter-strike"
-name = "Counter-Strike 1.6"
-hook = "Two-player split-screen against bots on one console."
-data = "Bring-your-own-assets, like Half-Life. Tested in the emulator only so far, not yet on original hardware. No public build yet."
-itch = ""
-repo = ""
-source = "cs-psx/README.md"
-
-[[port]]
 slug = "hollow-knight"
 video = "https://www.youtube.com/watch?v=qwAME_xVGhw"
 name = "Hollow Knight"
 hook = "An experimental native port that converts rooms, sprites, text, audio and gameplay data from a local installation."
 data = "Early work in progress. Needs your own copy of the game. No public build yet."
 itch = ""
-repo = ""
+repo = "https://github.com/EBonura/hk-psx"
 source = "hk-psx/README.md"
 
 # Games selected from the collection menus rather than the outer carousel.

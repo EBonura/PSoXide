@@ -26,27 +26,31 @@ The PS1 does not give these primitives a per-pixel depth buffer. Drawing order d
 This example uses 16 slots. The GPU receives slot 15 first and slot 0 last, so lower slots appear in front. These are chosen sort keys, not a measurement the GPU computes for you.
 
 ```rust
-OT.clear();
-OT.add(10, &mut TRIS[0], TriGouraud::WORDS);
-OT.add(8, &mut TRIS[1], TriGouraud::WORDS);
-OT.add(6, &mut TRIS[2], TriGouraud::WORDS);
+let mut ot_frame = ot.frame();
+let [back, middle, front] = &mut tris;
+*back = red;
+*middle = green;
+*front = blue;
+ot_frame.add(10, back);
+ot_frame.add(8, middle);
+ot_frame.add(6, front);
 ```
 
-The third triangle is in front of the second, which is in front of the first. Within one bucket, insertion order matters too: `add` prepends the packet. Do not treat equal-depth triangles as automatically sorted.
+The third triangle is in front of the second, which is in front of the first. Within one bucket, insertion order matters too: `add` prepends the packet, so the most recently added packet in a slot draws first. Do not treat equal-depth triangles as automatically sorted.
 
 ## Keep packets alive until DMA finishes
 
-`TriGouraud` stores a GPU packet and its linked-list tag. The example puts the ordering table and triangle packets in static RAM so their addresses remain valid while DMA reads them.
+`TriGouraud` stores a GPU packet and its linked-list tag. `ot.frame()` clears the table and returns an `OtFrame` that borrows the table, and `add` takes each packet by exclusive reference for the length of that borrow. The compiler therefore refuses to let you move, reuse or drop a packet, or clear the table, while the frame is still linked.
 
-The `unsafe` block covers access to these mutable statics. This example has one writer. In a larger renderer, use a clearly owned frame arena and wait for the previous submission to finish before clearing or reusing its memory. A Rust reference alone cannot tell you whether the GPU is still reading a packet.
+`submit` consumes the frame, starts the DMA and waits for the walk to finish, which releases the borrow. A frame that overlaps the next one's work needs packet storage that outlives a single call; the SDK has a `FrameStorage` type for that, documented in the [psx-gpu](@/docs/crates/psx-gpu.md) API reference.
 
 ## Submit the frame
 
-After updating vertices and colours, clear the table, link the packets, clear the back buffer and submit:
+After updating vertices and colours and adding the packets, clear the back buffer and submit through the GPU's DMA token:
 
 ```rust
-fb.clear(0, 0, 48);
-OT.submit();
+fb.clear(&mut gpu, (0, 0, 48));
+ot_frame.submit(gpu.dma_mut());
 ```
 
 The checked-in example then waits for vertical blank and swaps buffers. Keep its complete frame loop when experimenting; copying only the packet creation leaves out the display and synchronization setup.
