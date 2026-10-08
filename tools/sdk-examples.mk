@@ -31,7 +31,7 @@ PGO_ARGS ?=
 PGO_VARIANTS ?= --variant off --variant default --variant hot=500 --variant hot=500+profi
 GATE ?=
 
-.PHONY: example disc hello-tri hello-tri-disc run-tri examples pgo-collect pgo-choose hello-xa-disc hello-xa-gate hello-cdstream-disc hello-cdstream-gate
+.PHONY: example disc hello-tri hello-tri-disc run-tri examples pgo-collect pgo-choose hello-xa-disc hello-xa-gate hello-cdstream-disc hello-cdstream-gate hello-cdstream-probe-disc hello-cdstream-probe-gate
 examples:
 	@set -e; for example in hello-tri hello-input hello-ot hello-gte hello-tex hello-memcard hello-spstack hello-gteirq hello-present hello-present-queue; do $(MAKE) -f tools/sdk-examples.mk disc EXAMPLE=$$example; done
 
@@ -80,6 +80,23 @@ hello-cdstream-disc:
 hello-cdstream-gate: hello-cdstream-disc
 	@test -n "$(FRONTEND)" || (echo "Set FRONTEND to the PSoXide-emulator executable"; exit 1)
 	sh tools/cdstream_gate.sh "$(FRONTEND)" "$(BUILD)/$(TARGET)/release/hello-cdstream.cue"
+# hello-cdstream-probe is the console measurement disc for the streaming
+# design: a 24 MiB benchmark file for the seek table (CDEXTRA.BIN, 12288
+# sectors) and one CD-DA tone track. Burn it with the steps in the example's
+# docs page; the numbers it measures appear on screen and as QR codes.
+PROBE_DIR := $(BUILD)/hello-cdstream-probe-assets
+hello-cdstream-probe-disc:
+	$(MAKE) example EXAMPLE=hello-cdstream-probe
+	mkdir -p "$(PROBE_DIR)"
+	cargo run -q --release --locked -p psx-iso --example cdtest_file -- "$(PROBE_DIR)/CDEXTRA.BIN" 12288
+	cargo run -q --release --locked -p psx-audio-cook --example cdprobe_tone -- "$(PROBE_DIR)/tone.pcm"
+	cargo run --locked --release -p mkisopsx -- --exe "$(BUILD)/$(TARGET)/release/hello-cdstream-probe.exe" \
+		--out "$(BUILD)/$(TARGET)/release/hello-cdstream-probe.bin" --volume CDPROBE \
+		--file "$(PROBE_DIR)/CDEXTRA.BIN" --cdda-track "$(PROBE_DIR)/tone.pcm"
+# Runs the probe headless and checks it reaches its report: make hello-cdstream-probe-gate FRONTEND=/path/to/frontend
+hello-cdstream-probe-gate: hello-cdstream-probe-disc
+	@test -n "$(FRONTEND)" || (echo "Set FRONTEND to the PSoXide-emulator executable"; exit 1)
+	sh tools/cdstream_probe_gate.sh "$(FRONTEND)" "$(BUILD)/$(TARGET)/release/hello-cdstream-probe.cue"
 hello-tri:
 	$(MAKE) example EXAMPLE=hello-tri
 hello-tri-disc:

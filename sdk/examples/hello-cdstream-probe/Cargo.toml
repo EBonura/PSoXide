@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+[package]
+name    = "hello-cdstream-probe"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+
+[workspace]
+
+[[bin]]
+name = "hello-cdstream-probe"
+path = "src/main.rs"
+
+[profile.release]
+# Size, not speed: this is a measurement screen, and a smaller image has
+# fewer load-delay hazards for the post-link patcher to reroute.
+opt-level = "s"
+panic = "abort"
+codegen-units = 1
+lto = true
+
+[dependencies]
+psx-cdstream = { path = "../../crates/psx-cdstream" }
+psx-font     = { path = "../../crates/psx-font" }
+psx-fmv      = { path = "../../crates/psx-fmv" }
+psx-gpu      = { path = "../../crates/psx-gpu" }
+psx-hw       = { path = "../../../crates/psx-hw" }
+psx-io       = { path = "../../crates/psx-io" }
+psx-pad      = { path = "../../crates/psx-pad" }
+psx-rt       = { path = "../../crates/psx-rt", features = ["hazard-trampolines-256"] }
+psx-spu      = { path = "../../crates/psx-spu" }
+psx-vram     = { path = "../../crates/psx-vram" }
+qrcodegen-no-heap = "1.8.1"
