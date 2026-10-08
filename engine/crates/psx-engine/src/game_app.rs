@@ -129,6 +129,7 @@ const CDDA_RETRY_TICKS: u32 = 60;
 // dispatched without waiting and its reply is read on a later tick.
 const CDDA_STATUS_TICKS: u32 = 4;
 const CDDA_DEFAULT_VOLUME_PERCENT: u8 = 25;
+const CDDA_RANDOM_START_MAX_SECONDS: u32 = 15;
 #[cfg(any(target_arch = "mips", test))]
 const CDDA_PLAYBACK_MODE: u8 = psx_io::cdrom::MODE_CDDA | psx_io::cdrom::MODE_AUTO_PAUSE;
 #[cfg(target_arch = "mips")]
@@ -733,8 +734,13 @@ fn cdda_set_volume(_volume_percent: u8) {}
 
 // GetTD rounds track starts down to a second. Stay one second inside the
 // selected track and three seconds before the next index (including its pregap).
+// New fights vary only within the opening 15 seconds, so they cannot begin
+// near the end of a long song and immediately incur the loop's return seek.
 fn random_cdda_second(start: u32, end: u32, seed: u32) -> Option<u32> {
-    let span = end.checked_sub(start)?.checked_sub(4)?;
+    let span = end
+        .checked_sub(start)?
+        .checked_sub(4)?
+        .min(CDDA_RANDOM_START_MAX_SECONDS);
     if span == 0 {
         return None;
     }
@@ -5475,13 +5481,10 @@ mod tests {
 
     #[test]
     fn random_music_start_stays_inside_the_selected_track() {
-        let mut distinct = [0; 4];
-        for (i, seed) in [0, 12345, 987654, u32::MAX].into_iter().enumerate() {
+        for seed in [0, 12345, 987654, u32::MAX] {
             let second = random_cdda_second(100, 300, seed).unwrap();
             assert!((101..297).contains(&second));
-            distinct[i] = second;
         }
-        assert!(distinct.windows(2).all(|pair| pair[0] != pair[1]));
         assert_eq!(random_cdda_second(100, 104, 123), None);
         assert_eq!(random_cdda_second(400, 100, 123), None);
         assert_eq!(random_cdda_second(u32::MAX, u32::MAX, 123), None);
@@ -5490,6 +5493,23 @@ mod tests {
             0,
             "lead-out is not a relocatable track"
         );
+    }
+
+    #[test]
+    fn combat_music_random_start_stays_within_the_first_fifteen_seconds() {
+        for seed in (0..1024).chain([u32::MAX]) {
+            for start in [0, 100, u32::MAX - 300] {
+                let second = random_cdda_second(start, start + 200, seed).unwrap();
+                assert!((start + 1..=start + 15).contains(&second), "{second}");
+            }
+            // Short cues still keep the existing end-of-track/pregap margin.
+            let second = random_cdda_second(100, 110, seed).unwrap();
+            assert!((101..107).contains(&second));
+        }
+        let offsets: std::collections::BTreeSet<_> = (0..100)
+            .map(|seed| random_cdda_second(100, 300, seed).unwrap() - 100)
+            .collect();
+        assert_eq!(offsets, (1..=15).collect());
     }
 
     #[test]
