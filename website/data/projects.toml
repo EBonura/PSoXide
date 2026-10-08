@@ -103,7 +103,7 @@ source = "PSoXide-editor/docs/hardware-test-disc.md; verified v0.40 disc invento
 [[rebuilt]]
 slug = "wipeout"
 name = "WipEout"
-hook = "The 1995 PlayStation original, rebuilt for the same console and enhanced. We're aiming for 60 frames a second and adding a two-player split screen."
+hook = "The 1995 PlayStation original, rebuilt for the same console and enhanced. I'm aiming for 60 frames a second and adding a two-player split screen."
 
 # Ports of games that belong to someone else ("Demade with PSoXide"). These cards use text, published
 # video links and, where set, an emulator capture (`shot`); game data is not
