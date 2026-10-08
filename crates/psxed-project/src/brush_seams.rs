@@ -165,6 +165,36 @@ pub fn weld_vertices(polygons: &mut [Vec<[f64; 3]>], skip: impl Fn(usize) -> boo
     moved
 }
 
+/// Edges (`polygon`, `edge`) of `polygons` that no other polygon of
+/// `polygons` or `neighbours` shares. After conforming, every edge of a
+/// closed drawn surface is shared with exactly one other polygon, so these
+/// mark openings in the surface (or an edge against geometry that is not
+/// drawn).
+pub fn open_edges(polygons: &[Vec<[i32; 3]>], neighbours: &[Vec<[i32; 3]>]) -> Vec<(usize, usize)> {
+    let key = |a: [i32; 3], b: [i32; 3]| if a <= b { (a, b) } else { (b, a) };
+    let mut count: HashMap<([i32; 3], [i32; 3]), usize> = HashMap::new();
+    for polygon in polygons.iter().chain(neighbours) {
+        for edge in 0..polygon.len() {
+            let a = polygon[edge];
+            let b = polygon[(edge + 1) % polygon.len()];
+            if a != b {
+                *count.entry(key(a, b)).or_default() += 1;
+            }
+        }
+    }
+    let mut open = Vec::new();
+    for (index, polygon) in polygons.iter().enumerate() {
+        for edge in 0..polygon.len() {
+            let a = polygon[edge];
+            let b = polygon[(edge + 1) % polygon.len()];
+            if a != b && count[&key(a, b)] == 1 {
+                open.push((index, edge));
+            }
+        }
+    }
+    open
+}
+
 /// Growth caused by [`conform_t_junctions`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ConformStats {
