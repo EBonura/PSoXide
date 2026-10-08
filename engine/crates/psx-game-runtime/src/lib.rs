@@ -9,7 +9,10 @@
 //! capacities arrive through generated budgets, cooked data arrives
 //! as `&'static` typed records, and state lives in owned arenas.
 
-#![cfg_attr(target_arch = "mips", feature(optimize_attribute))]
+#![cfg_attr(
+    target_arch = "mips",
+    feature(optimize_attribute, asm_experimental_arch)
+)]
 #![no_std]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]

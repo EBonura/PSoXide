@@ -26,6 +26,7 @@ collision-debug-overlay = []
 # Explicit paths, same rationale as psx-engine: resolvable when
 # consumed from outside the engine workspace.
 psx-asset     = { path = "../../../sdk/crates/psx-asset" }
+psx-cdstream  = { path = "../../../sdk/crates/psx-cdstream" }
 psx-engine    = { path = "../psx-engine" }
 psx-font      = { path = "../../../sdk/crates/psx-font" }
 psx-gpu       = { path = "../../../sdk/crates/psx-gpu" }

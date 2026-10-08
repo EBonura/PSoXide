@@ -388,15 +388,10 @@ impl<const PAGES: usize, const ASSETS: usize> PersistentAssetStreamer<PAGES, ASS
             return false;
         }
         // The session-lifetime asset read happens behind a loading screen, so
-        // there is nothing to stay responsive for and every reason to keep up
-        // with the drive: sectors that land between frames are stepped over,
-        // and the only evidence is a checksum failure later.
+        // there is nothing to stay responsive for and every reason to keep the
+        // staging ring drained at the drive's rate: a ring that runs dry stops
+        // the drive and costs the next window a seek.
         self.job.set_wait_for_sectors(true);
-        // The authored loading screen renders between productive bursts. End
-        // ReadN at that boundary and resume from the next LBA on the following
-        // pump, otherwise the one-sector controller advances while UI packets
-        // are being prepared and silently drops payload data.
-        self.job.set_pause_at_poll_boundary(true);
         self.job.poll_into(cd, &mut self.storage, max_sectors);
         self.finish_if_done()
     }

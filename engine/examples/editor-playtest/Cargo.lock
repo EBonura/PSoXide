@@ -35,6 +35,7 @@ name = "psx-asset"
 version = "0.1.0"
 dependencies = [
  "psx-gte",
+ "psx-hw",
  "psxed-format",
 ]
 
@@ -50,10 +51,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "psx-cdstream"
+version = "0.1.0"
+dependencies = [
+ "psx-hw",
+ "psx-io",
+ "psx-rt",
+]
+
+[[package]]
 name = "psx-engine"
 version = "0.1.0"
 dependencies = [
  "psx-asset",
+ "psx-cdstream",
  "psx-font",
  "psx-gpu",
  "psx-gte",
@@ -87,6 +98,7 @@ name = "psx-game-runtime"
 version = "0.1.0"
 dependencies = [
  "psx-asset",
+ "psx-cdstream",
  "psx-engine",
  "psx-font",
  "psx-gpu",
@@ -112,6 +124,7 @@ name = "psx-gte"
 version = "0.1.0"
 dependencies = [
  "psx-gte-core",
+ "psx-hw",
 ]
 
 [[package]]
@@ -158,7 +171,6 @@ dependencies = [
 name = "psx-pack"
 version = "0.1.0"
 dependencies = [
- "psx-hw",
  "psx-io",
 ]
 
@@ -205,6 +217,9 @@ dependencies = [
 [[package]]
 name = "psx-telemetry"
 version = "0.1.0"
+dependencies = [
+ "psx-hw",
+]
 
 [[package]]
 name = "psx-tick"
