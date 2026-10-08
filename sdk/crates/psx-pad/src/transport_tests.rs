@@ -124,9 +124,54 @@ fn a_stuck_acknowledge_on_select_recovers_on_the_next_attempt() {
 }
 
 #[test]
-fn only_four_empty_replies_mean_no_pad() {
+fn an_empty_socket_is_told_at_once_and_cheaply() {
+    let absent = poll_with(Model {
+        id: 0xFF,
+        ..Model::default()
+    });
+    assert_eq!(absent.mode, PadMode::Disconnected);
+    // One attempt: the setup delay and the address byte's short wait, not
+    // four attempts of the long one (about 12,000 reads).
+    mock::with(|m| {
+        assert_eq!((m.attempts, m.sends), (1, 1));
+        assert!(m.now < 2_000, "{} register accesses", m.now);
+    });
+    // A reader that never saw a pad is told the same, once.
+    start(Model {
+        id: 0xFF,
+        ..Model::default()
+    });
+    let mut reader = PadReader::port1();
+    assert_eq!(reader.poll_on(&mut MockBus).mode, PadMode::Disconnected);
+    mock::with(|m| assert_eq!(m.attempts, 1));
+    // And it is found when the pad is plugged in.
+    mock::with(|m| m.id = 0x73);
+    let back = reader.poll_on(&mut MockBus);
+    assert_eq!((back.mode, back.buttons.bits()), (PadMode::Analog, 0));
+}
+
+#[test]
+fn a_pad_that_was_there_has_its_absence_confirmed_four_times() {
+    // Four empty replies in a row: gone.
     start(Model {
         sequence: vec![
+            (0x73, Fault::None, 0),
+            (0xFF, Fault::None, 0),
+            (0xFF, Fault::None, 0),
+            (0xFF, Fault::None, 0),
+            (0xFF, Fault::None, 0),
+        ],
+        ..Model::default()
+    });
+    let mut reader = PadReader::port1();
+    assert_eq!(reader.poll_on(&mut MockBus).mode, PadMode::Analog);
+    assert_eq!(reader.poll_on(&mut MockBus).mode, PadMode::Disconnected);
+    mock::with(|m| assert_eq!(m.attempts, 5));
+    // One of the four is a garbled packet: not proof of absence, so the reader
+    // keeps what it last read cleanly.
+    start(Model {
+        sequence: vec![
+            (0x73, Fault::None, 0),
             (0xFF, Fault::None, 0),
             (0x73, Fault::Rx, 3),
             (0xFF, Fault::None, 0),
@@ -134,15 +179,21 @@ fn only_four_empty_replies_mean_no_pad() {
         ],
         ..Model::default()
     });
-    assert_eq!(poll_on(&mut MockBus, Port::One).mode, PadMode::Unknown);
-    let absent = poll_with(Model {
-        id: 0xFF,
+    let mut reader = PadReader::port1();
+    let held = reader.poll_on(&mut MockBus);
+    assert_eq!(reader.poll_on(&mut MockBus), held);
+    mock::with(|m| assert_eq!(m.attempts, 5));
+}
+
+#[test]
+fn a_slow_address_acknowledgement_inside_the_bios_limit_still_reads() {
+    // The address byte's wait is shortened to the BIOS's own limit; a pad that
+    // answers inside it is unaffected.
+    let pad = poll_with(Model {
+        slow_ack: Some((0, 400)),
         ..Model::default()
     });
-    assert_eq!(absent.mode, PadMode::Disconnected);
-    mock::with(|m| m.id = 0x73);
-    let back = poll_on(&mut MockBus, Port::One);
-    assert_eq!((back.mode, back.buttons.bits()), (PadMode::Analog, 0));
+    assert_eq!(pad.mode, PadMode::Analog);
 }
 
 #[test]
