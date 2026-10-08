@@ -42,6 +42,11 @@
 //!   releasing the lease takes it back and queued reads carry on. End audio
 //!   with Pause, never Stop: after Stop the motor spins down, reports status
 //!   0 for a second or two, and reads started then failed on a console.
+//!   A lease that is asked for and left pending is granted the moment the
+//!   drive stops, ahead of any read queued meanwhile. Audio that must not
+//!   hold up reads uses [`Engine::try_audio_lease`], which takes the drive
+//!   only if it is free and leaves nothing pending, or ends the pending
+//!   request with [`Engine::withdraw_audio_lease`].
 //!
 //! # Use
 //!
