@@ -167,6 +167,18 @@ fn main() {
     }
     line("updates_after_lease", console::snapshot().port(Port::One).updates);
 
+    // psx-cdstream installs its wrapper after the engine's: the two chain, so
+    // the pad keeps being read. (Before they chained, this silenced the pad.)
+    let before = console::snapshot().port(Port::One).updates;
+    if psx_cdstream::install(peripherals.cd, psx_cdstream::Config::DEFAULT).is_err() {
+        tty::println("padcheck: cdstream install refused");
+    }
+    for _ in 0..30 {
+        spin_to_next_vblank();
+    }
+    let chained = console::snapshot().port(Port::One).updates - before;
+    line("updates_after_cdstream_install", chained);
+
     let stats = console::stats();
     line("events", stats.events);
     line("kicks", stats.kicks);
@@ -207,6 +219,7 @@ fn main() {
     check(stats.stalls == 0 && stats.spurious == 0, "no stalls or spurious interrupts");
     check(console::handler_stack_unused_bytes() >= 256, "the handler stack has room");
     check(console::snapshot().port(Port::One).updates > snap.port(Port::One).updates, "polling resumes after the lease");
+    check(chained >= 25, "the pad is still read after psx-cdstream installs its wrapper");
     if failures == 0 {
         tty::println("padcheck: PASS");
     }

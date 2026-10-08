@@ -192,6 +192,8 @@ static mut PSX_PAD_IRQ_CONTEXT: [u32; 34] = [0; 34];
 /// led to when [`install`] ran.
 #[no_mangle]
 static mut PSX_PAD_NEXT_HANDLER: u32 = 0;
+/// Set by [`install`], cleared by [`uninstall`].
+static mut INSTALLED: bool = false;
 
 /// Run `f` on the engine with CPU interrupts off.
 #[inline(always)]
@@ -376,15 +378,16 @@ fn install_vector() -> bool {
     // fetches the new words, and the wrapper is declared stack-safe so
     // scratchpad stacks stay allowed.
     unsafe {
+        // Installed before (and uninstalled since): already in the chain.
+        if core::ptr::read_volatile(&raw const PSX_PAD_NEXT_HANDLER) != 0 {
+            return true;
+        }
         let current = core::ptr::read_volatile(EXCEPTION_VECTOR);
         if current & J_MASK != J_OPCODE {
             return false;
         }
         let next = ((current & !J_MASK) << 2) | 0x8000_0000;
         let wrapper = psx_pad_exception_wrapper as *const () as usize as u32;
-        if next == wrapper {
-            return false;
-        }
         core::ptr::write_volatile(&raw mut PSX_PAD_NEXT_HANDLER, next);
         core::ptr::write_volatile(EXCEPTION_VECTOR, J_OPCODE | ((wrapper >> 2) & !J_MASK));
         core::ptr::write_volatile(EXCEPTION_VECTOR.add(1), 0);
@@ -414,10 +417,9 @@ fn paint_stack() {
 /// handler the vector leads to and start polling on every VBlank.
 ///
 /// From here the port belongs to the engine, so nothing may poll it
-/// synchronously; a memory card borrows it through [`lease`]. Put the
-/// program's other exception wrappers (psx-cdstream's) in the vector first and
-/// install this last, so it chains to them: a wrapper installed afterwards
-/// replaces this one. Ask for analog mode with the synchronous
+/// synchronously; a memory card borrows it through [`lease`]. It chains to
+/// whatever the vector led to, and psx-cdstream's wrapper does the same, so
+/// the two can be installed in either order. Ask for analog mode with the synchronous
 /// `require_analog_on` before installing, or with [`request_analog`] after.
 ///
 /// If psx-rt's handler is not in the vector yet this installs it first
@@ -452,6 +454,8 @@ pub fn install(port: ControllerPort, config: Config) -> Result<(), ControllerPor
         *engine = Engine::new(Mmio::new(), &PUBLISHED, config);
     });
     irq::set_mask(irq::mask() | SIO_BIT | TIMER_BIT | VBLANK_BIT);
+    // SAFETY: foreground; written here and in `uninstall` only.
+    unsafe { core::ptr::write_volatile(&raw mut INSTALLED, true) };
     Ok(())
 }
 
@@ -467,22 +471,19 @@ pub fn uninstall() -> Option<ControllerPort> {
     irq::set_mask(irq::mask() & !(SIO_BIT | TIMER_BIT));
     timers::set_mode(Timer::Timer0, 0);
     irq::acknowledge(SIO_BIT | TIMER_BIT);
+    // SAFETY: foreground; written here and in `install` only.
+    unsafe { core::ptr::write_volatile(&raw mut INSTALLED, false) };
     // SAFETY: foreground; the engine is leased to this call, so nothing else
     // takes the token.
     unsafe { (*TOKEN.0.get()).take() }
 }
 
-/// Whether the wrapper is the exception vector's handler now.
+/// Whether [`install`] has run and [`uninstall`] has not. The wrapper is then
+/// in the exception chain: first in the vector, or behind psx-cdstream's, which
+/// chains to it.
 pub fn is_installed() -> bool {
-    #[cfg(target_arch = "mips")]
-    {
-        // SAFETY: a read of the kernel's vector word.
-        let word = unsafe { core::ptr::read_volatile(EXCEPTION_VECTOR) };
-        let wrapper = psx_pad_exception_wrapper as *const () as usize as u32;
-        word == (J_OPCODE | ((wrapper >> 2) & !J_MASK))
-    }
-    #[cfg(not(target_arch = "mips"))]
-    false
+    // SAFETY: a volatile read of a flag the foreground writes.
+    unsafe { core::ptr::read_volatile(&raw const INSTALLED) }
 }
 
 // ------------------------------------------------------------ the foreground
