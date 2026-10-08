@@ -4237,7 +4237,6 @@ mod tests {
         assert_eq!(frame.yaw, Angle::QUARTER);
     }
 
-
     #[test]
     fn analog_sprint_reports_run() {
         let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);

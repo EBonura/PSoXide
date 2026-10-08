@@ -3284,8 +3284,7 @@ mod tests {
                     for _ in 0..steps {
                         stepped.update(projection, target, input, config);
                     }
-                    let frame =
-                        batched.update_vblanks(projection, target, input, config, steps);
+                    let frame = batched.update_vblanks(projection, target, input, config, steps);
                     let explicit = explicit_shared.update_vblanks(
                         projection,
                         target,
@@ -3521,7 +3520,6 @@ mod tests {
         assert_eq!(caught_up.focus(), stepped.focus());
     }
 
-
     #[test]
     fn explicit_start_yaw_does_not_follow_player_yaw() {
         let mut camera = ThirdPersonCameraState::new(Angle::ZERO);
@@ -3674,5 +3672,4 @@ mod tests {
         assert!(frame.focus.z - target.player.z < frame.distance / 2);
         assert_eq!(frame.focus.y, config.target_height);
     }
-
 }

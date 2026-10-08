@@ -125,8 +125,8 @@ pub use affine_surface::{
 pub use angle::Angle;
 pub use app::{App, Config, VisualPacing};
 pub use character_motor::{
-    commit_body_direction_with_trace_provider, commit_body_step_with_trace_provider, BodyStep, CharacterBlockerTraceProvider,
-    CharacterCollisionAabb, CharacterCollisionCylinder,
+    commit_body_direction_with_trace_provider, commit_body_step_with_trace_provider, BodyStep,
+    CharacterBlockerTraceProvider, CharacterCollisionAabb, CharacterCollisionCylinder,
     CharacterMotorAction, CharacterMotorAnim, CharacterMotorConfig, CharacterMotorFrame,
     CharacterMotorInput, CharacterMotorState,
 };
