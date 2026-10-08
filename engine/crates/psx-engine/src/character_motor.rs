@@ -6,14 +6,13 @@
 //! Inputs are intent-shaped rather than pad-shaped so callers can feed
 //! either player controls or future behaviour-tree output.
 
-use crate::floor_sample::{height_at_local, triangle_heights_to_quad};
 use crate::{
     collision_query::{
         trace_collision, CollisionQueryError, CollisionTrace, CollisionTraceProvider,
         CollisionTraceQuery, CollisionTraceShape, COLLISION_FRACTION_ONE_Q12,
     },
     fixed::div_q12_i32,
-    Angle, RoomCollision, RoomPoint, RuntimeCollisionRoom, RuntimeRoom, Q12,
+    Angle, RoomPoint, Q12,
 };
 use psx_math::int32::{abs_i32, isqrt_i32, square_i32_saturating};
 
@@ -64,13 +63,6 @@ const TRACE_FLOOR_PROBE_LIFT: i32 = 1;
 /// This range covers both step-down grounding and one terminal-velocity tick;
 /// only ledges/falls need the legacy long fallback.
 const TRACE_FLOOR_NEAR_PROBE_DOWN: i32 = STEP_DOWN_HEIGHT + MAX_FALL_SPEED + TRACE_FLOOR_PROBE_LIFT;
-const DIR_NORTH: u8 = 0;
-const DIR_EAST: u8 = 1;
-const DIR_SOUTH: u8 = 2;
-const DIR_WEST: u8 = 3;
-const DIR_NORTH_WEST_SOUTH_EAST: u8 = 4;
-const DIR_NORTH_EAST_SOUTH_WEST: u8 = 5;
-
 /// Vertical cylinder used by coarse character collision.
 ///
 /// `position` is the floor anchor / bottom centre. The occupied
@@ -240,153 +232,6 @@ impl<P: CollisionTraceProvider + ?Sized> CharacterBlockerTraceProvider<'_, '_, P
     }
 }
 
-/// One room collision view placed in the motor's current local
-/// coordinate space.
-///
-/// Chunked levels keep the player expressed in the current chunk's
-/// room-local coordinates. Adjacent chunks are therefore queried by
-/// subtracting their offset from that same current-space point.
-#[derive(Copy, Clone, Debug)]
-pub struct CharacterCollisionRoom<'room> {
-    /// Runtime room/chunk handle.
-    pub room: Option<RuntimeCollisionRoom<'room>>,
-    /// Offset from the motor's current room origin to this room's
-    /// origin, in engine units.
-    pub offset_x: i32,
-    /// Offset from the motor's current room origin to this room's
-    /// origin, in engine units.
-    pub offset_z: i32,
-    /// Vertical offset from the motor's current room elevation to this
-    /// room's, in engine units. Stacked floors are separate collision
-    /// rooms at distinct `origin_y`; this lets the motor see an upper
-    /// floor's surface at its true height (so you can step up onto it)
-    /// instead of collapsed to the current room's elevation.
-    pub offset_y: i32,
-}
-
-impl<'room> CharacterCollisionRoom<'room> {
-    /// Empty non-colliding placeholder for fixed stack buffers.
-    pub const EMPTY: Self = Self {
-        room: None,
-        offset_x: 0,
-        offset_z: 0,
-        offset_y: 0,
-    };
-
-    /// Build a collision room with a current-space origin offset.
-    pub const fn new(room: RuntimeRoom<'room>, offset_x: i32, offset_z: i32) -> Self {
-        Self {
-            room: Some(RuntimeCollisionRoom::Runtime(room)),
-            offset_x,
-            offset_z,
-            offset_y: 0,
-        }
-    }
-
-    /// Build a collision room from an explicit collision payload source.
-    pub const fn from_collision(
-        room: RuntimeCollisionRoom<'room>,
-        offset_x: i32,
-        offset_z: i32,
-    ) -> Self {
-        Self {
-            room: Some(room),
-            offset_x,
-            offset_z,
-            offset_y: 0,
-        }
-    }
-
-    /// Set the vertical (elevation) offset, for stacked-floor collision
-    /// rooms. Builder form keeps the common offset_y=0 constructors terse.
-    pub const fn with_offset_y(mut self, offset_y: i32) -> Self {
-        self.offset_y = offset_y;
-        self
-    }
-}
-
-/// Collision inputs consumed by [`CharacterMotorState`].
-#[derive(Copy, Clone, Debug)]
-pub struct CharacterCollision<'room, 'room_ref, 'blockers> {
-    /// Optional room grid collision.
-    pub room: Option<RoomCollision<'room, 'room_ref>>,
-    /// Optional multi-room collision set, in the same current-space
-    /// coordinate system as the motor. When present, this takes
-    /// precedence over `room`.
-    pub rooms: &'blockers [CharacterCollisionRoom<'room>],
-    /// Other coarse actor bodies that block this motor.
-    pub blockers: &'blockers [CharacterCollisionCylinder],
-    /// Static axis-aligned prop bodies that block this motor.
-    pub aabb_blockers: &'blockers [CharacterCollisionAabb],
-}
-
-impl<'room, 'room_ref, 'blockers> CharacterCollision<'room, 'room_ref, 'blockers> {
-    /// Build a collision context from an optional room and blocker slice.
-    pub const fn new(
-        room: Option<RoomCollision<'room, 'room_ref>>,
-        blockers: &'blockers [CharacterCollisionCylinder],
-    ) -> Self {
-        Self {
-            room,
-            rooms: &[],
-            blockers,
-            aabb_blockers: &[],
-        }
-    }
-
-    /// Build a collision context from an optional room, actor
-    /// cylinders, and static AABB blockers.
-    pub const fn new_with_aabbs(
-        room: Option<RoomCollision<'room, 'room_ref>>,
-        blockers: &'blockers [CharacterCollisionCylinder],
-        aabb_blockers: &'blockers [CharacterCollisionAabb],
-    ) -> Self {
-        Self {
-            room,
-            rooms: &[],
-            blockers,
-            aabb_blockers,
-        }
-    }
-
-    /// Build a collision context from multiple offset room chunks.
-    pub const fn rooms(
-        rooms: &'blockers [CharacterCollisionRoom<'room>],
-        blockers: &'blockers [CharacterCollisionCylinder],
-    ) -> Self {
-        Self {
-            room: None,
-            rooms,
-            blockers,
-            aabb_blockers: &[],
-        }
-    }
-
-    /// Build a multi-room collision context with static AABB blockers.
-    pub const fn rooms_with_aabbs(
-        rooms: &'blockers [CharacterCollisionRoom<'room>],
-        blockers: &'blockers [CharacterCollisionCylinder],
-        aabb_blockers: &'blockers [CharacterCollisionAabb],
-    ) -> Self {
-        Self {
-            room: None,
-            rooms,
-            blockers,
-            aabb_blockers,
-        }
-    }
-
-    /// Build a context that only checks room geometry.
-    pub const fn room(room: Option<RoomCollision<'room, 'room_ref>>) -> Self {
-        Self {
-            room,
-            rooms: &[],
-            blockers: &[],
-            aabb_blockers: &[],
-        }
-    }
-}
-
 /// Where a body ends one committed step, plus the supporting floor the step
 /// itself measured there.
 ///
@@ -452,80 +297,6 @@ trait CharacterCollisionBackend {
     ) -> Result<Option<StandOutcome>, CollisionQueryError>;
 
     fn has_world_collision(&self) -> bool;
-}
-
-struct GridCharacterCollision<'room, 'room_ref, 'blockers> {
-    collision: CharacterCollision<'room, 'room_ref, 'blockers>,
-}
-
-impl CharacterCollisionBackend for GridCharacterCollision<'_, '_, '_> {
-    fn supporting_floor(
-        &mut self,
-        position: RoomPoint,
-        _shape: CollisionTraceShape,
-    ) -> Result<Option<i32>, CollisionQueryError> {
-        Ok(supporting_floor_height(
-            &self.collision,
-            position.x,
-            position.z,
-            position.y,
-        ))
-    }
-
-    fn stand_position(
-        &mut self,
-        _start: RoomPoint,
-        target: RoomPoint,
-        shape: CollisionTraceShape,
-    ) -> Result<Option<StandOutcome>, CollisionQueryError> {
-        let CollisionTraceShape::Body { radius, height } = shape else {
-            return Err(CollisionQueryError);
-        };
-        // The grid backend is left exactly as it was: it reports no measured
-        // floor, so the motor keeps re-querying it every tick.
-        Ok(body_stand_position(self.collision, target, radius, height)
-            .map(StandOutcome::unmeasured))
-    }
-
-    fn air_position(
-        &mut self,
-        _start: RoomPoint,
-        target: RoomPoint,
-        shape: CollisionTraceShape,
-    ) -> Result<Option<StandOutcome>, CollisionQueryError> {
-        let CollisionTraceShape::Body { radius, height } = shape else {
-            return Err(CollisionQueryError);
-        };
-        let c = self.collision;
-        let wall = if !c.rooms.is_empty() {
-            body_hits_solid_wall_in_rooms(c.rooms, target, radius, height)
-        } else {
-            c.room
-                .is_some_and(|room| body_hits_solid_wall(room, target, radius, height))
-        };
-        let occupied = wall
-            || body_hits_blocker(target, radius, height, c.blockers)
-            || body_hits_aabb_blocker(target, radius, height, c.aabb_blockers);
-        Ok((!occupied).then_some(StandOutcome::unmeasured(target)))
-    }
-
-    fn recovery_position(
-        &mut self,
-        start: RoomPoint,
-        shape: CollisionTraceShape,
-    ) -> Result<Option<StandOutcome>, CollisionQueryError> {
-        let CollisionTraceShape::Body { height, .. } = shape else {
-            return Err(CollisionQueryError);
-        };
-        Ok(body_stand_position(self.collision, start, 0, height).map(StandOutcome::unmeasured))
-    }
-
-    fn has_world_collision(&self) -> bool {
-        self.collision.room.is_some()
-            || !self.collision.rooms.is_empty()
-            || !self.collision.blockers.is_empty()
-            || !self.collision.aabb_blockers.is_empty()
-    }
 }
 
 struct TraceCharacterCollision<'provider, P: ?Sized> {
@@ -970,53 +741,6 @@ impl CharacterMotorState {
         // the XZ cell and the active rooms may differ. Vertical velocity is
         // intentionally preserved so a fall continues across a room change.
         self.grounded = false;
-    }
-
-    /// Advance the motor by one frame.
-    pub fn update(
-        &mut self,
-        collision: Option<RoomCollision<'_, '_>>,
-        input: CharacterMotorInput,
-        config: CharacterMotorConfig,
-    ) -> CharacterMotorFrame {
-        self.update_vblanks(collision, input, config, 1)
-    }
-
-    /// Advance the motor by elapsed display ticks.
-    ///
-    /// Heavy render paths can miss VBlanks. Animation already uses
-    /// display time, so the motor catches up with small fixed
-    /// substeps instead of scaling one large collision step. The cap
-    /// prevents a long pause from spending a whole frame in movement
-    /// catch-up.
-    pub fn update_vblanks(
-        &mut self,
-        collision: Option<RoomCollision<'_, '_>>,
-        input: CharacterMotorInput,
-        config: CharacterMotorConfig,
-        delta_vblanks: u16,
-    ) -> CharacterMotorFrame {
-        self.update_vblanks_with_collision(
-            CharacterCollision::room(collision),
-            input,
-            config,
-            delta_vblanks,
-        )
-    }
-
-    /// Advance the motor by elapsed display ticks with room and actor collision.
-    pub fn update_vblanks_with_collision(
-        &mut self,
-        collision: CharacterCollision<'_, '_, '_>,
-        input: CharacterMotorInput,
-        config: CharacterMotorConfig,
-        delta_vblanks: u16,
-    ) -> CharacterMotorFrame {
-        let mut collision = GridCharacterCollision { collision };
-        match self.update_vblanks_with_backend(&mut collision, input, config, delta_vblanks) {
-            Ok(frame) => frame,
-            Err(_) => unreachable!("grid collision queries are infallible"),
-        }
     }
 
     /// Advance the motor through an allocation-free trace provider.
@@ -1924,25 +1648,6 @@ fn trace_stand_position<P: CollisionTraceProvider + ?Sized>(
     }))
 }
 
-/// Resolve the supporting floor height under `(x, z)` in the motor's
-/// current space, preferring the multi-room (streaming) collision and
-/// falling back to a single room. `None` means no floor anywhere below
-/// (an open void), in which case the caller holds position.
-fn supporting_floor_height(
-    collision: &CharacterCollision<'_, '_, '_>,
-    x: i32,
-    z: i32,
-    feet_y: i32,
-) -> Option<i32> {
-    if !collision.rooms.is_empty() {
-        supporting_floor_in_rooms(collision.rooms, x, z, feet_y)
-    } else if let Some(room) = collision.room {
-        floor_height_at(room, x, z)
-    } else {
-        None
-    }
-}
-
 /// Feet height when moving onto a cell whose floor is `floor`. Snap to the
 /// floor for steps up and small steps down, but for a drop deeper than
 /// [`STEP_DOWN_HEIGHT`] keep the feet at their current height so the body
@@ -1956,42 +1661,6 @@ fn resolve_step_down(feet_y: i32, floor: i32) -> i32 {
     }
 }
 
-fn body_stand_position(
-    collision: CharacterCollision<'_, '_, '_>,
-    target: RoomPoint,
-    radius: i32,
-    height: i32,
-) -> Option<RoomPoint> {
-    let radius = radius.max(0);
-    let height = height.max(1);
-    let position = if !collision.rooms.is_empty() {
-        let floor = stand_height_in_rooms(collision.rooms, target.x, target.z, radius, target.y)?;
-        let position = target.with_y(resolve_step_down(target.y, floor));
-        if body_hits_solid_wall_in_rooms(collision.rooms, position, radius, height) {
-            return None;
-        }
-        position
-    } else {
-        match collision.room {
-            Some(room) => {
-                let floor = stand_height(room, target.x, target.z, radius)?;
-                let position = target.with_y(resolve_step_down(target.y, floor));
-                if body_hits_solid_wall(room, position, radius, height) {
-                    return None;
-                }
-                position
-            }
-            None => target,
-        }
-    };
-    if body_hits_blocker(position, radius, height, collision.blockers)
-        || body_hits_aabb_blocker(position, radius, height, collision.aabb_blockers)
-    {
-        return None;
-    }
-    Some(position)
-}
-
 /// Outcome of one AI-body walk step through [`commit_body_step`].
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct BodyStep {
@@ -2001,76 +1670,6 @@ pub struct BodyStep {
     pub moved: bool,
     /// Whether any axis of the requested step was rejected.
     pub blocked: bool,
-}
-
-/// One collision-checked walk step for a non-player body cylinder (the
-/// game-entity runtime's movement primitive, phase 3 of
-/// docs/game-runtime-plan.md). Attempts `start + (dx, 0, dz)` with the
-/// same stand test / axis-slide cascade the player motor's move commit
-/// uses ([`body_stand_position`]: grid floor lookup, walkable-footprint
-/// samples, [`STEP_UP_HEIGHT`]/[`STEP_DOWN_HEIGHT`] step rules, wall and
-/// blocker rejection), so entities obey exactly the collision rules the
-/// player does.
-///
-/// One deliberate difference from the player: entities do not fall in
-/// this slice. Where the player walks out over a deep ledge and
-/// `apply_vertical` drops them, an AI step whose destination floor is
-/// more than [`STEP_DOWN_HEIGHT`] below the feet is REJECTED (the axis
-/// slide still applies), so patrol/chase paths never leave the walkable
-/// grid. Gravity for thrown/falling entities is the combat slice's
-/// work.
-pub fn commit_body_step(
-    collision: CharacterCollision<'_, '_, '_>,
-    start: RoomPoint,
-    dx: i32,
-    dz: i32,
-    radius: i32,
-    height: i32,
-) -> BodyStep {
-    let target = RoomPoint::new(
-        start.x.saturating_add(dx),
-        start.y,
-        start.z.saturating_add(dz),
-    );
-    if target.x == start.x && target.z == start.z {
-        return BodyStep {
-            position: start,
-            moved: false,
-            blocked: false,
-        };
-    }
-
-    if let Some(position) = body_grounded_stand_position(collision, target, radius, height) {
-        return BodyStep {
-            position,
-            moved: true,
-            blocked: false,
-        };
-    }
-
-    // Blocked on the full step: slide along the free axis, exactly the
-    // player commit's cascade order (X first, then Z).
-    let x_only = RoomPoint::new(target.x, start.y, start.z);
-    if let Some(position) = body_grounded_stand_position(collision, x_only, radius, height) {
-        return BodyStep {
-            position,
-            moved: position.x != start.x || position.z != start.z,
-            blocked: true,
-        };
-    }
-    let z_only = RoomPoint::new(start.x, start.y, target.z);
-    if let Some(position) = body_grounded_stand_position(collision, z_only, radius, height) {
-        return BodyStep {
-            position,
-            moved: position.x != start.x || position.z != start.z,
-            blocked: true,
-        };
-    }
-    BodyStep {
-        position: start,
-        moved: false,
-        blocked: true,
-    }
 }
 
 /// Collision-check one non-player body step through a trace provider.
@@ -2208,191 +1807,6 @@ fn trace_body_grounded_stand_position<P: CollisionTraceProvider + ?Sized>(
     Ok(Some(position.with_y(floor)))
 }
 
-/// [`body_stand_position`] plus the AI grounding rule: the committed
-/// spot must have supporting floor within [`STEP_DOWN_HEIGHT`] of the
-/// feet (`body_stand_position` holds the feet height over deeper
-/// drops for the player's fall path; for AI that reads as "off the
-/// walkable grid" and rejects the candidate).
-fn body_grounded_stand_position(
-    collision: CharacterCollision<'_, '_, '_>,
-    target: RoomPoint,
-    radius: i32,
-    height: i32,
-) -> Option<RoomPoint> {
-    let position = body_stand_position(collision, target, radius, height)?;
-    if collision.rooms.is_empty() && collision.room.is_none() {
-        // No room collision wired (unit-test/no-clip shapes): trust it.
-        return Some(position);
-    }
-    let floor = supporting_floor_height(&collision, position.x, position.z, position.y)?;
-    if position.y.saturating_sub(floor) > STEP_DOWN_HEIGHT {
-        return None;
-    }
-    Some(position.with_y(floor))
-}
-
-fn stand_height_in_rooms(
-    rooms: &[CharacterCollisionRoom<'_>],
-    x: i32,
-    z: i32,
-    radius: i32,
-    feet_y: i32,
-) -> Option<i32> {
-    let height = supporting_floor_in_rooms(rooms, x, z, feet_y)?;
-    if radius <= 0 {
-        return Some(height);
-    }
-    let r = radius.max(0);
-    let footprint_clear = floor_walkable_at_rooms(rooms, x.saturating_sub(r), z)
-        && floor_walkable_at_rooms(rooms, x.saturating_add(r), z)
-        && floor_walkable_at_rooms(rooms, x, z.saturating_sub(r))
-        && floor_walkable_at_rooms(rooms, x, z.saturating_add(r));
-    footprint_clear.then_some(height)
-}
-
-#[cfg(test)]
-fn floor_height_at_rooms(rooms: &[CharacterCollisionRoom<'_>], x: i32, z: i32) -> Option<i32> {
-    for collision_room in rooms {
-        let Some(room) = collision_room.room else {
-            continue;
-        };
-        if let Some(height) = floor_height_at_collision_room(*collision_room, room, x, z) {
-            return Some(height);
-        }
-    }
-    None
-}
-
-/// Highest floor at `(x, z)` the feet can rest on: the tallest floor across
-/// ALL collision rooms that sits at or below `feet_y + STEP_UP_HEIGHT`
-/// (a step up is reachable; anything higher is a wall or ceiling). This
-/// picks the floor by elevation, not by room order -- essential for stacked
-/// floors, where the player standing on an upper floor must rest on it
-/// rather than be pulled down to the lower floor occupying the same X/Z.
-/// Returns `None` when the only floors lie above reach (open space above
-/// the feet).
-fn supporting_floor_in_rooms(
-    rooms: &[CharacterCollisionRoom<'_>],
-    x: i32,
-    z: i32,
-    feet_y: i32,
-) -> Option<i32> {
-    let reach = feet_y.saturating_add(STEP_UP_HEIGHT);
-    let mut best: Option<i32> = None;
-    for collision_room in rooms {
-        let Some(room) = collision_room.room else {
-            continue;
-        };
-        if let Some(height) = floor_height_at_collision_room(*collision_room, room, x, z) {
-            if height <= reach {
-                best = Some(best.map_or(height, |b| b.max(height)));
-            }
-        }
-    }
-    best
-}
-
-/// Multi-room walkability check used by the cylinder-footprint samples.
-fn floor_walkable_at_rooms(rooms: &[CharacterCollisionRoom<'_>], x: i32, z: i32) -> bool {
-    for collision_room in rooms {
-        let Some(room) = collision_room.room else {
-            continue;
-        };
-        if floor_walkable_at_collision_room(*collision_room, room, x, z) {
-            return true;
-        }
-    }
-    false
-}
-
-fn floor_height_at_collision_room(
-    collision_room: CharacterCollisionRoom<'_>,
-    room: RuntimeCollisionRoom<'_>,
-    x: i32,
-    z: i32,
-) -> Option<i32> {
-    floor_height_at(
-        room.collision(),
-        x.saturating_sub(collision_room.offset_x),
-        z.saturating_sub(collision_room.offset_z),
-    )
-    .map(|height| height.saturating_add(collision_room.offset_y))
-}
-
-fn floor_walkable_at_collision_room(
-    collision_room: CharacterCollisionRoom<'_>,
-    room: RuntimeCollisionRoom<'_>,
-    x: i32,
-    z: i32,
-) -> bool {
-    floor_walkable_at(
-        room.collision(),
-        x.saturating_sub(collision_room.offset_x),
-        z.saturating_sub(collision_room.offset_z),
-    )
-}
-
-fn body_hits_solid_wall_in_rooms(
-    rooms: &[CharacterCollisionRoom<'_>],
-    position: RoomPoint,
-    radius: i32,
-    height: i32,
-) -> bool {
-    for collision_room in rooms {
-        let Some(room) = collision_room.room else {
-            continue;
-        };
-        if !collision_room_contains_point(*collision_room, room, position.x, position.z) {
-            continue;
-        }
-        let local_position = RoomPoint::new(
-            position.x.saturating_sub(collision_room.offset_x),
-            position.y.saturating_sub(collision_room.offset_y),
-            position.z.saturating_sub(collision_room.offset_z),
-        );
-        if body_hits_solid_wall(room.collision(), local_position, radius, height) {
-            return true;
-        }
-    }
-    false
-}
-
-fn collision_room_contains_point(
-    collision_room: CharacterCollisionRoom<'_>,
-    room: RuntimeCollisionRoom<'_>,
-    x: i32,
-    z: i32,
-) -> bool {
-    let Some((x0, x1, z0, z1)) = collision_room_bounds(collision_room, room) else {
-        return false;
-    };
-    if x < x0 || x >= x1 || z < z0 || z >= z1 {
-        return false;
-    }
-    let sector_size = room.sector_size();
-    if sector_size <= 0 {
-        return false;
-    }
-    let sx = (x.saturating_sub(x0) / sector_size) as u16;
-    let sz = (z.saturating_sub(z0) / sector_size) as u16;
-    room.collision().sector_probe(sx, sz).is_some()
-}
-
-fn collision_room_bounds(
-    collision_room: CharacterCollisionRoom<'_>,
-    room: RuntimeCollisionRoom<'_>,
-) -> Option<(i32, i32, i32, i32)> {
-    let sector_size = room.sector_size();
-    if sector_size <= 0 {
-        return None;
-    }
-    let x0 = collision_room.offset_x;
-    let z0 = collision_room.offset_z;
-    let x1 = x0.checked_add((room.width() as i32).checked_mul(sector_size)?)?;
-    let z1 = z0.checked_add((room.depth() as i32).checked_mul(sector_size)?)?;
-    Some((x0, x1, z0, z1))
-}
-
 fn analog_move_vector(input: CharacterMotorInput) -> Option<(Q12, Q12, Q12)> {
     let x = input.move_x.raw();
     let z = input.move_z.raw();
@@ -2481,260 +1895,6 @@ fn locked_locomotion_anim(facing_yaw: Angle, move_yaw: Angle) -> CharacterMotorA
     } else {
         CharacterMotorAnim::StrafeRight
     }
-}
-
-fn stand_height(room: RoomCollision<'_, '_>, x: i32, z: i32, radius: i32) -> Option<i32> {
-    let height = floor_height_at(room, x, z)?;
-    if radius <= 0 {
-        return Some(height);
-    }
-    let r = radius.max(0);
-    let footprint_clear = floor_walkable_at(room, x.saturating_sub(r), z)
-        && floor_walkable_at(room, x.saturating_add(r), z)
-        && floor_walkable_at(room, x, z.saturating_sub(r))
-        && floor_walkable_at(room, x, z.saturating_add(r));
-    footprint_clear.then_some(height)
-}
-
-fn floor_probe(room: RoomCollision<'_, '_>, x: i32, z: i32, need_height: bool) -> Option<i32> {
-    let s = room.sector_size();
-    if s <= 0 || x < 0 || z < 0 {
-        return None;
-    }
-    let sx = x / s;
-    let sz = z / s;
-    if sx < 0 || sz < 0 || sx >= room.width() as i32 || sz >= room.depth() as i32 {
-        return None;
-    }
-    let local_x = (x - sx * s).clamp(0, s);
-    let local_z = (z - sz * s).clamp(0, s);
-    let sector = room.sector_floor_collision(sx as u16, sz as u16, local_x, local_z, s)?;
-    if !sector.walkable() {
-        return None;
-    }
-    if !need_height {
-        return Some(0);
-    }
-    let heights = triangle_heights_to_quad(
-        sector.floor_heights(),
-        sector.split(),
-        sector.triangle(),
-        sector.triangle_heights(),
-    );
-    Some(height_at_local(
-        heights,
-        sector.split(),
-        local_x,
-        local_z,
-        s,
-    ))
-}
-
-/// Interpolated floor height at a point, or `None` if it is off walkable floor.
-fn floor_height_at(room: RoomCollision<'_, '_>, x: i32, z: i32) -> Option<i32> {
-    floor_probe(room, x, z, true)
-}
-
-/// Whether a point sits on walkable floor, without interpolating its height.
-/// The four cylinder-footprint samples in `stand_height` only need this; skipping
-/// the interpolation drops `triangle_heights_to_quad` + `height_at_local` (and its
-/// per-axis divides) for four of every five floor queries.
-fn floor_walkable_at(room: RoomCollision<'_, '_>, x: i32, z: i32) -> bool {
-    floor_probe(room, x, z, false).is_some()
-}
-
-fn body_hits_solid_wall(
-    room: RoomCollision<'_, '_>,
-    position: RoomPoint,
-    radius: i32,
-    height: i32,
-) -> bool {
-    if radius <= 0 {
-        return false;
-    }
-    let s = room.sector_size();
-    if s <= 0 {
-        return true;
-    }
-    let min_sx = (position.x.saturating_sub(radius).max(0) / s)
-        .saturating_sub(1)
-        .max(0);
-    let max_sx = (position.x.saturating_add(radius).max(0) / s).saturating_add(1);
-    let min_sz = (position.z.saturating_sub(radius).max(0) / s)
-        .saturating_sub(1)
-        .max(0);
-    let max_sz = (position.z.saturating_add(radius).max(0) / s).saturating_add(1);
-    let mut sx = min_sx;
-    while sx <= max_sx && sx < room.width() as i32 {
-        let mut sz = min_sz;
-        while sz <= max_sz && sz < room.depth() as i32 {
-            if let Some(sector) = room.sector_probe(sx as u16, sz as u16) {
-                let mut i = 0;
-                while i < sector.wall_count() {
-                    if let Some(wall) = room.sector_probe_wall(sector, i) {
-                        if wall.solid()
-                            && wall_blocks_body(position.y, height, wall.heights())
-                            && circle_overlaps_wall_segment(
-                                position.x,
-                                position.z,
-                                radius,
-                                sx,
-                                sz,
-                                s,
-                                wall.direction(),
-                            )
-                        {
-                            return true;
-                        }
-                    }
-                    i += 1;
-                }
-            }
-            sz += 1;
-        }
-        sx += 1;
-    }
-    false
-}
-
-/// Whether a solid wall blocks the body, accounting for stair-stepping.
-/// A wall blocks when it overlaps the body's vertical span AND its top
-/// rises more than [`STEP_UP_HEIGHT`] above the body's feet. A lower
-/// riser is a step the character climbs: the floor probe has already
-/// confirmed walkable floor at the target X/Z, so the body rises onto it
-/// rather than being stopped. `apply_vertical` then settles the feet on the
-/// step surface the next tick.
-fn wall_blocks_body(feet_y: i32, body_height: i32, wall_heights: [i32; 4]) -> bool {
-    if !vertical_ranges_overlap(feet_y, body_height, wall_heights) {
-        return false;
-    }
-    let wall_top = wall_heights.iter().copied().max().unwrap_or(feet_y);
-    // Steppable riser: top within a step of the feet -> not a blocker.
-    wall_top > feet_y.saturating_add(STEP_UP_HEIGHT)
-}
-
-fn vertical_ranges_overlap(body_y: i32, body_height: i32, wall_heights: [i32; 4]) -> bool {
-    let body_min = body_y;
-    let body_max = body_y.saturating_add(body_height.max(1));
-    let mut wall_min = wall_heights[0];
-    let mut wall_max = wall_heights[0];
-    let mut i = 1;
-    while i < wall_heights.len() {
-        wall_min = wall_min.min(wall_heights[i]);
-        wall_max = wall_max.max(wall_heights[i]);
-        i += 1;
-    }
-    body_max > wall_min && body_min < wall_max
-}
-
-fn circle_overlaps_wall_segment(
-    cx: i32,
-    cz: i32,
-    radius: i32,
-    sx: i32,
-    sz: i32,
-    sector_size: i32,
-    direction: u8,
-) -> bool {
-    let Some((ax, az, bx, bz)) = wall_segment_xz(sx, sz, sector_size, direction) else {
-        return false;
-    };
-    circle_overlaps_segment(cx, cz, radius, ax, az, bx, bz)
-}
-
-fn wall_segment_xz(
-    sx: i32,
-    sz: i32,
-    sector_size: i32,
-    direction: u8,
-) -> Option<(i32, i32, i32, i32)> {
-    let x0 = sx.saturating_mul(sector_size);
-    let x1 = x0.saturating_add(sector_size);
-    let z0 = sz.saturating_mul(sector_size);
-    let z1 = z0.saturating_add(sector_size);
-    match direction {
-        DIR_NORTH => Some((x0, z0, x1, z0)),
-        DIR_EAST => Some((x1, z0, x1, z1)),
-        DIR_SOUTH => Some((x1, z1, x0, z1)),
-        DIR_WEST => Some((x0, z1, x0, z0)),
-        DIR_NORTH_WEST_SOUTH_EAST => Some((x0, z0, x1, z1)),
-        DIR_NORTH_EAST_SOUTH_WEST => Some((x1, z0, x0, z1)),
-        _ => None,
-    }
-}
-
-fn circle_overlaps_segment(
-    cx: i32,
-    cz: i32,
-    radius: i32,
-    ax: i32,
-    az: i32,
-    bx: i32,
-    bz: i32,
-) -> bool {
-    // Most walls in the small sector neighbourhood are nowhere near the body.
-    // Reject them before the closest-point projection, whose Q12 divide is
-    // comparatively expensive on the R3000.
-    let radius = radius.max(0);
-    if cx < ax.min(bx).saturating_sub(radius)
-        || cx > ax.max(bx).saturating_add(radius)
-        || cz < az.min(bz).saturating_sub(radius)
-        || cz > az.max(bz).saturating_add(radius)
-    {
-        return false;
-    }
-    let vx = bx.saturating_sub(ax);
-    let vz = bz.saturating_sub(az);
-    let wx = cx.saturating_sub(ax);
-    let wz = cz.saturating_sub(az);
-    let len_sq = square_i32_saturating(vx).saturating_add(square_i32_saturating(vz));
-    if len_sq <= 0 {
-        return square_i32_saturating(cx.saturating_sub(ax))
-            .saturating_add(square_i32_saturating(cz.saturating_sub(az)))
-            <= square_i32_saturating(radius);
-    }
-    let dot = wx.saturating_mul(vx).saturating_add(wz.saturating_mul(vz));
-    let t_q12 = div_q12_i32(dot, len_sq).clamp(0, Q12::SCALE);
-    let t = Q12::from_raw(t_q12);
-    let closest_x = ax.saturating_add(t.mul_i32(vx));
-    let closest_z = az.saturating_add(t.mul_i32(vz));
-    square_i32_saturating(cx.saturating_sub(closest_x))
-        .saturating_add(square_i32_saturating(cz.saturating_sub(closest_z)))
-        <= square_i32_saturating(radius)
-}
-
-fn body_hits_blocker(
-    position: RoomPoint,
-    radius: i32,
-    height: i32,
-    blockers: &[CharacterCollisionCylinder],
-) -> bool {
-    if radius <= 0 || height <= 0 {
-        return false;
-    }
-    for blocker in blockers {
-        if cylinder_overlaps(position, radius, height, *blocker) {
-            return true;
-        }
-    }
-    false
-}
-
-fn body_hits_aabb_blocker(
-    position: RoomPoint,
-    radius: i32,
-    height: i32,
-    blockers: &[CharacterCollisionAabb],
-) -> bool {
-    if radius <= 0 || height <= 0 {
-        return false;
-    }
-    for blocker in blockers {
-        if cylinder_overlaps_aabb(position, radius, height, *blocker) {
-            return true;
-        }
-    }
-    false
 }
 
 fn merge_collision_trace(best: &mut CollisionTrace, candidate: CollisionTrace) {
@@ -3529,59 +2689,6 @@ fn blocker_contact_normal(dx: i32, dz: i32, move_x: i32, move_z: i32) -> [i16; 3
     }
 }
 
-fn cylinder_overlaps(
-    position: RoomPoint,
-    radius: i32,
-    height: i32,
-    blocker: CharacterCollisionCylinder,
-) -> bool {
-    let other_radius = blocker.radius.max(0);
-    let other_height = blocker.height.max(0);
-    if other_radius == 0 || other_height == 0 {
-        return false;
-    }
-    let top = position.y.saturating_add(height.max(1));
-    let other_top = blocker.position.y.saturating_add(other_height);
-    if top <= blocker.position.y || other_top <= position.y {
-        return false;
-    }
-    let radius_sum = radius.max(0).saturating_add(other_radius);
-    if radius_sum <= 0 {
-        return false;
-    }
-    let dx = position.x.saturating_sub(blocker.position.x);
-    let dz = position.z.saturating_sub(blocker.position.z);
-    square_i32_saturating(dx).saturating_add(square_i32_saturating(dz))
-        <= square_i32_saturating(radius_sum)
-}
-
-fn cylinder_overlaps_aabb(
-    position: RoomPoint,
-    radius: i32,
-    height: i32,
-    blocker: CharacterCollisionAabb,
-) -> bool {
-    let min_x = blocker.min.x.min(blocker.max.x);
-    let max_x = blocker.min.x.max(blocker.max.x);
-    let min_y = blocker.min.y.min(blocker.max.y);
-    let max_y = blocker.min.y.max(blocker.max.y);
-    let min_z = blocker.min.z.min(blocker.max.z);
-    let max_z = blocker.min.z.max(blocker.max.z);
-    if min_x == max_x || min_y == max_y || min_z == max_z {
-        return false;
-    }
-    let top = position.y.saturating_add(height.max(1));
-    if top <= min_y || max_y <= position.y {
-        return false;
-    }
-    let closest_x = position.x.clamp(min_x, max_x);
-    let closest_z = position.z.clamp(min_z, max_z);
-    let dx = position.x.saturating_sub(closest_x);
-    let dz = position.z.saturating_sub(closest_z);
-    square_i32_saturating(dx).saturating_add(square_i32_saturating(dz))
-        <= square_i32_saturating(radius.max(0))
-}
-
 #[cfg(test)]
 mod tests {
     #[test]
@@ -3614,7 +2721,53 @@ mod tests {
         assert_eq!(motor.position, super::RoomPoint::new(1, 2, 3));
     }
     use super::*;
-    use crate::RuntimeRoom;
+
+    /// Open flat-floor stand-in for the removed grid backend's "no room"
+    /// collision: floor at y = 0, nothing else in the world.
+    trait OpenFloorUpdate {
+        fn update_vblanks(
+            &mut self,
+            collision: Option<core::convert::Infallible>,
+            input: CharacterMotorInput,
+            config: CharacterMotorConfig,
+            delta_vblanks: u16,
+        ) -> CharacterMotorFrame;
+
+        fn update(
+            &mut self,
+            collision: Option<core::convert::Infallible>,
+            input: CharacterMotorInput,
+            config: CharacterMotorConfig,
+        ) -> CharacterMotorFrame;
+    }
+
+    impl OpenFloorUpdate for CharacterMotorState {
+        fn update_vblanks(
+            &mut self,
+            collision: Option<core::convert::Infallible>,
+            input: CharacterMotorInput,
+            config: CharacterMotorConfig,
+            delta_vblanks: u16,
+        ) -> CharacterMotorFrame {
+            assert!(collision.is_none());
+            self.update_vblanks_with_trace_provider(
+                &mut FlatTraceProvider::new(None),
+                input,
+                config,
+                delta_vblanks,
+            )
+            .expect("flat floor traces never fail")
+        }
+
+        fn update(
+            &mut self,
+            collision: Option<core::convert::Infallible>,
+            input: CharacterMotorInput,
+            config: CharacterMotorConfig,
+        ) -> CharacterMotorFrame {
+            self.update_vblanks(collision, input, config, 1)
+        }
+    }
 
     struct FlatTraceProvider {
         calls: u8,
@@ -4673,128 +3826,6 @@ mod tests {
     }
 
     #[test]
-    fn low_riser_is_steppable_not_blocking() {
-        // Feet on the lower floor at y=0, body 768 tall. A short riser
-        // (top 320, a demo-scale step) overlaps the body but is within a
-        // step of the feet, so it must NOT block: the character steps up.
-        let step = [0, 0, 20, 20];
-        assert!(vertical_ranges_overlap(0, 48, step), "step overlaps body");
-        assert!(
-            !wall_blocks_body(0, 48, step),
-            "a low riser within STEP_UP_HEIGHT must be steppable"
-        );
-    }
-
-    #[test]
-    fn full_wall_still_blocks() {
-        // A real wall (top 1792, a full sector) rises far above the feet
-        // and must block.
-        let wall = [0, 0, 1792, 1792];
-        assert!(
-            wall_blocks_body(0, 768, wall),
-            "a full-height wall must block"
-        );
-    }
-
-    #[test]
-    fn step_at_threshold_boundary() {
-        // Exactly STEP_UP_HEIGHT above the feet is still steppable; one
-        // unit higher blocks. Guards the off-by-one at the boundary.
-        let at = [0, 0, STEP_UP_HEIGHT, STEP_UP_HEIGHT];
-        let over = [0, 0, STEP_UP_HEIGHT + 1, STEP_UP_HEIGHT + 1];
-        assert!(
-            !wall_blocks_body(0, 768, at),
-            "top == feet+STEP_UP steppable"
-        );
-        assert!(wall_blocks_body(0, 768, over), "one unit higher blocks");
-    }
-
-    #[test]
-    fn wall_below_feet_does_not_block() {
-        // A wall entirely below the feet (e.g. seen from an upper floor)
-        // doesn't overlap the body and never blocks.
-        let below = [-1024, -1024, -512, -512];
-        assert!(!wall_blocks_body(0, 768, below));
-    }
-
-    fn world_with_internal_south_wall() -> [u8; 184] {
-        const ASSET_HEADER: usize = 12;
-        const WORLD_HEADER: usize = 20;
-        const SECTOR_RECORD: usize = 60;
-        const WALL_RECORD: usize = 32;
-        const SECTOR0: usize = ASSET_HEADER + WORLD_HEADER;
-        const SECTOR1: usize = SECTOR0 + SECTOR_RECORD;
-        const WALL0: usize = SECTOR1 + SECTOR_RECORD;
-        let payload_len = (WORLD_HEADER + SECTOR_RECORD * 2 + WALL_RECORD) as u32;
-        let mut buf = [0u8; 184];
-        buf[0..4].copy_from_slice(b"PSXW");
-        buf[4..6].copy_from_slice(&3u16.to_le_bytes());
-        buf[8..12].copy_from_slice(&payload_len.to_le_bytes());
-        buf[12..14].copy_from_slice(&1u16.to_le_bytes());
-        buf[14..16].copy_from_slice(&2u16.to_le_bytes());
-        buf[16..20].copy_from_slice(&1024i32.to_le_bytes());
-        buf[20..22].copy_from_slice(&2u16.to_le_bytes());
-        buf[22..24].copy_from_slice(&1u16.to_le_bytes());
-        buf[24..26].copy_from_slice(&1u16.to_le_bytes());
-
-        buf[SECTOR0] = 1 | 4;
-        buf[SECTOR0 + 8..SECTOR0 + 10].copy_from_slice(&0u16.to_le_bytes());
-        buf[SECTOR0 + 10..SECTOR0 + 12].copy_from_slice(&1u16.to_le_bytes());
-        buf[SECTOR1] = 1 | 4;
-        buf[SECTOR1 + 8..SECTOR1 + 10].copy_from_slice(&1u16.to_le_bytes());
-
-        buf[WALL0] = DIR_SOUTH;
-        buf[WALL0 + 1] = 1;
-        buf[WALL0 + 8..WALL0 + 12].copy_from_slice(&0i32.to_le_bytes());
-        buf[WALL0 + 12..WALL0 + 16].copy_from_slice(&0i32.to_le_bytes());
-        buf[WALL0 + 16..WALL0 + 20].copy_from_slice(&1024i32.to_le_bytes());
-        buf[WALL0 + 20..WALL0 + 24].copy_from_slice(&1024i32.to_le_bytes());
-        buf
-    }
-
-    fn flat_floor_world() -> [u8; 92] {
-        const ASSET_HEADER: usize = 12;
-        const WORLD_HEADER: usize = 20;
-        const SECTOR_RECORD: usize = 60;
-        const SECTOR0: usize = ASSET_HEADER + WORLD_HEADER;
-        let payload_len = (WORLD_HEADER + SECTOR_RECORD) as u32;
-        let mut buf = [0u8; 92];
-        buf[0..4].copy_from_slice(b"PSXW");
-        buf[4..6].copy_from_slice(&3u16.to_le_bytes());
-        buf[8..12].copy_from_slice(&payload_len.to_le_bytes());
-        buf[12..14].copy_from_slice(&1u16.to_le_bytes());
-        buf[14..16].copy_from_slice(&1u16.to_le_bytes());
-        buf[16..20].copy_from_slice(&1024i32.to_le_bytes());
-        buf[20..22].copy_from_slice(&1u16.to_le_bytes());
-        buf[22..24].copy_from_slice(&1u16.to_le_bytes());
-
-        buf[SECTOR0] = 1 | 4;
-        buf[SECTOR0 + 4..SECTOR0 + 6].copy_from_slice(&0u16.to_le_bytes());
-        buf
-    }
-
-    fn sparse_two_sector_world() -> [u8; 152] {
-        const ASSET_HEADER: usize = 12;
-        const WORLD_HEADER: usize = 20;
-        const SECTOR_RECORD: usize = 60;
-        const SECTOR0: usize = ASSET_HEADER + WORLD_HEADER;
-        let payload_len = (WORLD_HEADER + SECTOR_RECORD * 2) as u32;
-        let mut buf = [0u8; 152];
-        buf[0..4].copy_from_slice(b"PSXW");
-        buf[4..6].copy_from_slice(&3u16.to_le_bytes());
-        buf[8..12].copy_from_slice(&payload_len.to_le_bytes());
-        buf[12..14].copy_from_slice(&2u16.to_le_bytes());
-        buf[14..16].copy_from_slice(&1u16.to_le_bytes());
-        buf[16..20].copy_from_slice(&1024i32.to_le_bytes());
-        buf[20..22].copy_from_slice(&2u16.to_le_bytes());
-        buf[22..24].copy_from_slice(&1u16.to_le_bytes());
-
-        buf[SECTOR0] = 1 | 4;
-        buf[SECTOR0 + 4..SECTOR0 + 6].copy_from_slice(&0u16.to_le_bytes());
-        buf
-    }
-
-    #[test]
     fn forward_input_moves_along_yaw() {
         let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
         let frame = motor.update(
@@ -5206,474 +4237,6 @@ mod tests {
         assert_eq!(frame.yaw, Angle::QUARTER);
     }
 
-    #[test]
-    fn actor_cylinder_blocks_horizontal_overlap() {
-        let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
-        let mut cfg = config();
-        cfg.walk_speed = 160 << 8;
-        cfg.height = 768;
-        let blockers = [CharacterCollisionCylinder::new(
-            RoomPoint::new(0, 0, 160),
-            64,
-            768,
-        )];
-        let frame = motor.update_vblanks_with_collision(
-            CharacterCollision::new(None, &blockers),
-            CharacterMotorInput {
-                walk: 1,
-                ..CharacterMotorInput::default()
-            },
-            cfg,
-            1,
-        );
-        assert_eq!(frame.position, RoomPoint::ZERO);
-        assert!(!frame.moved);
-        assert!(frame.blocked);
-    }
-
-    #[test]
-    fn actor_cylinder_ignores_vertical_gap() {
-        let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
-        let mut cfg = config();
-        cfg.walk_speed = 160 << 8;
-        cfg.height = 256;
-        let blockers = [CharacterCollisionCylinder::new(
-            RoomPoint::new(0, 512, 160),
-            64,
-            256,
-        )];
-        let frame = motor.update_vblanks_with_collision(
-            CharacterCollision::new(None, &blockers),
-            CharacterMotorInput {
-                walk: 1,
-                ..CharacterMotorInput::default()
-            },
-            cfg,
-            1,
-        );
-        assert_eq!(frame.position, RoomPoint::new(0, 0, 160));
-        assert!(frame.moved);
-        assert!(!frame.blocked);
-    }
-
-    #[test]
-    fn actor_aabb_blocks_horizontal_overlap() {
-        let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
-        let mut cfg = config();
-        cfg.walk_speed = 160 << 8;
-        cfg.height = 768;
-        let blockers = [CharacterCollisionAabb::new(
-            RoomPoint::new(-64, 0, 96),
-            RoomPoint::new(64, 768, 224),
-        )];
-        let frame = motor.update_vblanks_with_collision(
-            CharacterCollision::new_with_aabbs(None, &[], &blockers),
-            CharacterMotorInput {
-                walk: 1,
-                ..CharacterMotorInput::default()
-            },
-            cfg,
-            1,
-        );
-        assert_eq!(frame.position, RoomPoint::ZERO);
-        assert!(!frame.moved);
-        assert!(frame.blocked);
-    }
-
-    #[test]
-    fn solid_wall_between_walkable_sectors_blocks_cylinder() {
-        let bytes = world_with_internal_south_wall();
-        let room = RuntimeRoom::from_bytes(&bytes).expect("test room parses");
-        let mut motor = CharacterMotorState::new(RoomPoint::new(512, 0, 800), Angle::ZERO);
-        let mut cfg = config();
-        cfg.walk_speed = 288 << 8;
-        cfg.height = 768;
-        let frame = motor.update(
-            Some(room.collision()),
-            CharacterMotorInput {
-                walk: 1,
-                ..CharacterMotorInput::default()
-            },
-            cfg,
-        );
-        assert_eq!(frame.position, RoomPoint::new(512, 0, 800));
-        assert!(!frame.moved);
-        assert!(frame.blocked);
-    }
-
-    #[test]
-    fn stacked_floor_reports_elevation_in_current_space() {
-        // A collision room offset up by 3584 engine units (an upper floor)
-        // must report its floor at the current-space height 3584, not its
-        // room-local 0. Without the offset_y handling the motor would see
-        // the upper floor at Y=0 and never let the player step up onto it.
-        let bytes = flat_floor_world();
-        let upper = RuntimeRoom::from_bytes(&bytes).expect("upper room parses");
-        let rooms = [CharacterCollisionRoom::new(upper, 0, 0).with_offset_y(3584)];
-        // Query a cell inside the room footprint.
-        let h = floor_height_at_rooms(&rooms, 512, 512);
-        assert_eq!(h, Some(3584), "upper floor must report its true elevation");
-    }
-
-    #[test]
-    fn ground_floor_unaffected_by_zero_offset() {
-        // offset_y defaults to 0, so a ground room is byte-identical to
-        // before: floor at room-local 0.
-        let bytes = flat_floor_world();
-        let ground = RuntimeRoom::from_bytes(&bytes).expect("ground room parses");
-        let rooms = [CharacterCollisionRoom::new(ground, 0, 0)];
-        assert_eq!(floor_height_at_rooms(&rooms, 512, 512), Some(0));
-    }
-
-    #[test]
-    fn resolve_step_down_snaps_small_drops_but_drops_into_falls() {
-        // Steps up always snap to the floor (gravity never lifts the feet).
-        assert_eq!(resolve_step_down(0, 640), 640);
-        // A drop within STEP_DOWN_HEIGHT snaps straight down (descending a step).
-        assert_eq!(resolve_step_down(0, -STEP_DOWN_HEIGHT), -STEP_DOWN_HEIGHT);
-        assert_eq!(
-            resolve_step_down(0, -STEP_DOWN_HEIGHT + 1),
-            -STEP_DOWN_HEIGHT + 1
-        );
-        // One unit deeper than a step keeps the feet put: the body walks out
-        // over the ledge at its current height and gravity takes over.
-        assert_eq!(resolve_step_down(0, -STEP_DOWN_HEIGHT - 1), 0);
-        assert_eq!(resolve_step_down(0, -3584), 0);
-    }
-
-    #[test]
-    fn fractional_gravity_matches_ballistic_drop_with_and_without_air_steering() {
-        let bytes = flat_floor_world();
-        let room = RuntimeRoom::from_bytes(&bytes).unwrap();
-        for steer in [false, true] {
-            let mut motor = CharacterMotorState::new(RoomPoint::new(512, 127, 512), Angle::ZERO);
-            let mut cfg = config();
-            cfg.gravity_per_tick_q8 = 32;
-            let mut input = CharacterMotorInput::default();
-            if steer {
-                input.walk = 1;
-                cfg.walk_speed = 128;
-            }
-            let mut landed = 0;
-            for tick in 1..=60 {
-                let frame = motor.update_vblanks_with_collision(
-                    CharacterCollision::new(Some(room.collision()), &[]),
-                    input,
-                    cfg,
-                    1,
-                );
-                let expected = (127 - tick * (tick + 1) / 16).max(0);
-                assert_eq!(frame.position.y, expected, "steer={steer}, tick={tick}");
-                if motor.grounded() {
-                    landed = tick;
-                    break;
-                }
-            }
-            assert_eq!(landed, 45);
-        }
-    }
-
-    #[test]
-    fn airborne_body_falls_gradually_and_lands_on_floor() {
-        // A flat floor at y=0; spawn the body high above it and apply no
-        // input. Gravity must pull it down over several frames (not teleport)
-        // and settle it exactly on the floor without passing through.
-        let bytes = flat_floor_world();
-        let room = RuntimeRoom::from_bytes(&bytes).expect("room parses");
-        let rooms = [CharacterCollisionRoom::new(room, 0, 0)];
-        let mut motor = CharacterMotorState::new(RoomPoint::new(512, 2048, 512), Angle::ZERO);
-        let cfg = config();
-
-        let f1 = motor.update_vblanks_with_collision(
-            CharacterCollision::rooms(&rooms, &[]),
-            CharacterMotorInput::default(),
-            cfg,
-            1,
-        );
-        assert!(f1.position.y < 2048, "gravity pulls the body down");
-        assert!(
-            f1.position.y > 0,
-            "it falls gradually, not teleporting to the floor (y={})",
-            f1.position.y
-        );
-
-        let mut min_y = f1.position.y;
-        let mut rest_y = f1.position.y;
-        for _ in 0..60 {
-            let f = motor.update_vblanks_with_collision(
-                CharacterCollision::rooms(&rooms, &[]),
-                CharacterMotorInput::default(),
-                cfg,
-                1,
-            );
-            rest_y = f.position.y;
-            min_y = min_y.min(f.position.y);
-        }
-        assert_eq!(rest_y, 0, "lands exactly on the floor");
-        assert!(min_y >= 0, "never falls through the floor (min={min_y})");
-    }
-
-    #[test]
-    fn suspended_body_holds_then_resumes_gravity() {
-        let bytes = flat_floor_world();
-        let room = RuntimeRoom::from_bytes(&bytes).unwrap();
-        let rooms = [CharacterCollisionRoom::new(room, 0, 0)];
-        let mut motor = CharacterMotorState::new(RoomPoint::new(512, 2048, 512), Angle::ZERO);
-        for _ in 0..600 {
-            assert_eq!(motor.suspended_frame(None).position.y, 2048);
-            assert!(!motor.grounded());
-        }
-        let frame = motor.update_vblanks_with_collision(
-            CharacterCollision::rooms(&rooms, &[]),
-            CharacterMotorInput::default(),
-            config(),
-            1,
-        );
-        assert_eq!(frame.position.y, 2048 - GRAVITY_PER_TICK);
-    }
-
-    #[test]
-    fn weight_scales_airborne_gravity() {
-        let bytes = flat_floor_world();
-        let room = RuntimeRoom::from_bytes(&bytes).expect("room parses");
-        let rooms = [CharacterCollisionRoom::new(room, 0, 0)];
-
-        let mut normal = CharacterMotorState::new(RoomPoint::new(512, 2048, 512), Angle::ZERO);
-        let normal_frame = normal.update_vblanks_with_collision(
-            CharacterCollision::rooms(&rooms, &[]),
-            CharacterMotorInput::default(),
-            config(),
-            1,
-        );
-
-        let mut heavy_config = config();
-        heavy_config.weight_q8 = DEFAULT_WEIGHT_Q8 * 2;
-        let mut heavy = CharacterMotorState::new(RoomPoint::new(512, 2048, 512), Angle::ZERO);
-        let heavy_frame = heavy.update_vblanks_with_collision(
-            CharacterCollision::rooms(&rooms, &[]),
-            CharacterMotorInput::default(),
-            heavy_config,
-            1,
-        );
-
-        assert_eq!(normal_frame.position.y, 2048 - GRAVITY_PER_TICK);
-        assert_eq!(heavy_frame.position.y, 2048 - GRAVITY_PER_TICK * 2);
-    }
-
-    #[test]
-    fn airborne_body_falls_to_lower_stacked_floor() {
-        // Upper room: cell 0 has floor at y=0, cell 1 is a hole. A lower room
-        // sits under the hole, dropped 3584 units. A body standing over the
-        // hole must fall through and land on the lower floor at -3584.
-        let upper_bytes = sparse_two_sector_world();
-        let upper = RuntimeRoom::from_bytes(&upper_bytes).expect("upper parses");
-        let lower_bytes = flat_floor_world();
-        let lower = RuntimeRoom::from_bytes(&lower_bytes).expect("lower parses");
-        let rooms = [
-            CharacterCollisionRoom::new(upper, 0, 0),
-            CharacterCollisionRoom::new(lower, 1024, 0).with_offset_y(-224),
-        ];
-        // x in [1024, 2048) is the hole cell.
-        let mut motor = CharacterMotorState::new(RoomPoint::new(1536, 0, 512), Angle::ZERO);
-        let cfg = config();
-        let mut rest_y = 0;
-        let mut min_y = 0;
-        for _ in 0..60 {
-            let f = motor.update_vblanks_with_collision(
-                CharacterCollision::rooms(&rooms, &[]),
-                CharacterMotorInput::default(),
-                cfg,
-                1,
-            );
-            rest_y = f.position.y;
-            min_y = min_y.min(f.position.y);
-        }
-        assert_eq!(rest_y, -224, "falls through the hole onto the lower floor");
-        assert!(min_y >= -224, "never falls through the lower floor");
-    }
-
-    #[test]
-    fn standing_on_upper_stacked_floor_does_not_fall_to_lower() {
-        // Regression: the collision lists the LOWER room first, then the upper
-        // floor at +3584. A body standing on the upper floor (feet 3584) must
-        // rest there, not be pulled down by gravity to the lower floor at 0
-        // that occupies the same X/Z. (First-match floor lookup would return
-        // the lower floor and drop the player through the upper one.)
-        let lower_bytes = flat_floor_world();
-        let upper_bytes = flat_floor_world();
-        let lower = RuntimeRoom::from_bytes(&lower_bytes).expect("lower parses");
-        let upper = RuntimeRoom::from_bytes(&upper_bytes).expect("upper parses");
-        let rooms = [
-            CharacterCollisionRoom::new(lower, 0, 0),
-            CharacterCollisionRoom::new(upper, 0, 0).with_offset_y(3584),
-        ];
-        let mut motor = CharacterMotorState::new(RoomPoint::new(512, 3584, 512), Angle::ZERO);
-        let cfg = config();
-        for _ in 0..30 {
-            let f = motor.update_vblanks_with_collision(
-                CharacterCollision::rooms(&rooms, &[]),
-                CharacterMotorInput::default(),
-                cfg,
-                1,
-            );
-            assert_eq!(
-                f.position.y, 3584,
-                "stays on the upper floor, not pulled down to the lower"
-            );
-        }
-    }
-
-    #[test]
-    fn solid_wall_in_later_stacked_room_still_blocks() {
-        // The lower room overlaps X/Z and is listed first, but the body is on
-        // the upper floor. Multi-room wall checks must keep scanning after a
-        // lower-room non-hit, otherwise upper-room walls are ignored.
-        let lower_bytes = flat_floor_world();
-        let upper_bytes = world_with_internal_south_wall();
-        let lower = RuntimeRoom::from_bytes(&lower_bytes).expect("lower parses");
-        let upper = RuntimeRoom::from_bytes(&upper_bytes).expect("upper parses");
-        let rooms = [
-            CharacterCollisionRoom::new(lower, 0, 0),
-            CharacterCollisionRoom::new(upper, 0, 0).with_offset_y(3584),
-        ];
-
-        assert!(body_hits_solid_wall_in_rooms(
-            &rooms,
-            RoomPoint::new(512, 3584, 1000),
-            96,
-            768
-        ));
-    }
-
-    #[test]
-    fn low_airborne_body_integrates_until_contact_then_stays_grounded() {
-        // Spawned within STEP_DOWN above a flat floor with no input: the body
-        // snaps down onto the floor (not a fall) and then stays grounded tick
-        // after tick via the cached fast path.
-        let bytes = flat_floor_world();
-        let room = RuntimeRoom::from_bytes(&bytes).expect("room parses");
-        let rooms = [CharacterCollisionRoom::new(room, 0, 0)];
-        let mut motor = CharacterMotorState::new(RoomPoint::new(512, 20, 512), Angle::ZERO);
-        let cfg = config();
-        for i in 0..20 {
-            let f = motor.update_vblanks_with_collision(
-                CharacterCollision::rooms(&rooms, &[]),
-                CharacterMotorInput::default(),
-                cfg,
-                1,
-            );
-            assert_eq!(
-                f.position.y,
-                [14, 2, 0][i.min(2)],
-                "tick {i}: airborne until actual contact"
-            );
-        }
-    }
-
-    #[test]
-    fn grounded_walk_keeps_feet_on_flat_floor() {
-        // Regression: with gravity in place, ordinary walking on a flat floor
-        // still keeps the feet glued at y=0 (no drift, no float).
-        let bytes = flat_floor_world();
-        let room = RuntimeRoom::from_bytes(&bytes).expect("room parses");
-        let rooms = [CharacterCollisionRoom::new(room, 0, 0)];
-        let mut motor = CharacterMotorState::new(RoomPoint::new(128, 0, 128), Angle::ZERO);
-        let mut cfg = config();
-        cfg.walk_speed = 64 << 8;
-        for _ in 0..8 {
-            let f = motor.update_vblanks_with_collision(
-                CharacterCollision::rooms(&rooms, &[]),
-                CharacterMotorInput {
-                    walk: 1,
-                    ..CharacterMotorInput::default()
-                },
-                cfg,
-                1,
-            );
-            assert_eq!(f.position.y, 0, "feet stay on the flat floor while walking");
-        }
-    }
-
-    #[test]
-    fn multi_room_collision_crosses_flat_chunk_seam() {
-        let bytes_a = flat_floor_world();
-        let bytes_b = flat_floor_world();
-        let room_a = RuntimeRoom::from_bytes(&bytes_a).expect("room a parses");
-        let room_b = RuntimeRoom::from_bytes(&bytes_b).expect("room b parses");
-        let rooms = [
-            CharacterCollisionRoom::new(room_a, 0, 0),
-            CharacterCollisionRoom::new(room_b, 1024, 0),
-        ];
-        let mut motor = CharacterMotorState::new(RoomPoint::new(960, 0, 512), Angle::QUARTER);
-        let mut cfg = config();
-        cfg.walk_speed = 128 << 8;
-        cfg.radius = 96;
-
-        let frame = motor.update_vblanks_with_collision(
-            CharacterCollision::rooms(&rooms, &[]),
-            CharacterMotorInput {
-                walk: 1,
-                ..CharacterMotorInput::default()
-            },
-            cfg,
-            1,
-        );
-
-        assert_eq!(frame.position, RoomPoint::new(1088, 0, 512));
-        assert!(frame.moved);
-        assert!(!frame.blocked);
-    }
-
-    #[test]
-    fn collision_room_membership_ignores_empty_cells_inside_bounds() {
-        let bytes = sparse_two_sector_world();
-        let room = RuntimeRoom::from_bytes(&bytes).expect("sparse room parses");
-        let collision = CharacterCollisionRoom::new(room, 0, 0);
-
-        assert!(collision_room_contains_point(
-            collision,
-            RuntimeCollisionRoom::Runtime(room),
-            512,
-            512
-        ));
-        assert!(!collision_room_contains_point(
-            collision,
-            RuntimeCollisionRoom::Runtime(room),
-            1536,
-            512
-        ));
-    }
-
-    #[test]
-    fn diagonal_wall_segment_blocks_cylinder_overlap() {
-        assert!(circle_overlaps_wall_segment(
-            512,
-            512,
-            64,
-            0,
-            0,
-            1024,
-            DIR_NORTH_WEST_SOUTH_EAST
-        ));
-        assert!(circle_overlaps_wall_segment(
-            512,
-            512,
-            64,
-            0,
-            0,
-            1024,
-            DIR_NORTH_EAST_SOUTH_WEST
-        ));
-        assert!(!circle_overlaps_wall_segment(
-            512,
-            700,
-            64,
-            0,
-            0,
-            1024,
-            DIR_NORTH_WEST_SOUTH_EAST
-        ));
-    }
 
     #[test]
     fn analog_sprint_reports_run() {
@@ -5692,6 +4255,24 @@ mod tests {
         assert_eq!(frame.position, RoomPoint::new(64, 0, 0));
         assert_eq!(frame.anim, CharacterMotorAnim::Run);
         assert!(frame.sprinting);
+    }
+
+    #[test]
+    fn backwards_free_evade_rolls_in_the_requested_direction() {
+        let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
+        let frame = motor.update(
+            None,
+            CharacterMotorInput {
+                walk: -1,
+                evade: true,
+                ..CharacterMotorInput::default()
+            },
+            config(),
+        );
+        assert_eq!(frame.action, CharacterMotorAction::Roll);
+        assert_eq!(frame.anim, CharacterMotorAnim::Roll);
+        assert_eq!(frame.yaw, Angle::HALF);
+        assert_eq!(frame.position, RoomPoint::new(0, 0, -6));
     }
 
     #[test]
@@ -5717,41 +4298,41 @@ mod tests {
     }
 
     #[test]
-    fn sprint_consumes_stamina_and_reports_run() {
+    fn evade_starts_roll_with_invulnerability() {
         let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
         let frame = motor.update(
             None,
             CharacterMotorInput {
                 walk: 1,
-                sprint: true,
+                evade: true,
                 ..CharacterMotorInput::default()
             },
             config(),
         );
-        assert_eq!(frame.position, RoomPoint::new(0, 0, 64));
-        assert_eq!(frame.anim, CharacterMotorAnim::Run);
-        assert!(frame.sprinting);
-        assert!(frame.stamina_q12 < DEFAULT_STAMINA_MAX_Q12);
+        assert_eq!(frame.action, CharacterMotorAction::Roll);
+        assert_eq!(frame.anim, CharacterMotorAnim::Roll);
+        assert!(frame.invulnerable);
+        assert_eq!(frame.position, RoomPoint::new(0, 0, 6));
     }
 
     #[test]
-    fn unlimited_stamina_profile_never_drains_or_gates_sprint() {
-        let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
-        let cfg = config().without_stamina_limit();
-        let input = CharacterMotorInput {
-            walk: 1,
-            sprint: true,
-            ..CharacterMotorInput::default()
-        };
-
-        for _ in 0..2_000 {
-            let frame = motor.update(None, input, cfg);
-            assert!(frame.sprinting);
-            assert_eq!(frame.stamina_q12, cfg.stamina_max_q12);
+    fn grounded_walk_keeps_feet_on_flat_floor() {
+        // Regression: with gravity in place, ordinary walking on a flat floor
+        // still keeps the feet glued at y=0 (no drift, no float).
+        let mut motor = CharacterMotorState::new(RoomPoint::new(128, 0, 128), Angle::ZERO);
+        let mut cfg = config();
+        cfg.walk_speed = 64 << 8;
+        for _ in 0..8 {
+            let f = motor.update(
+                None,
+                CharacterMotorInput {
+                    walk: 1,
+                    ..CharacterMotorInput::default()
+                },
+                cfg,
+            );
+            assert_eq!(f.position.y, 0, "feet stay on the flat floor while walking");
         }
-        assert_eq!(cfg.sprint_min_q12, 0);
-        assert_eq!(cfg.roll_cost_q12, 0);
-        assert_eq!(cfg.backstep_cost_q12, 0);
     }
 
     #[test]
@@ -5831,74 +4412,6 @@ mod tests {
     }
 
     #[test]
-    fn vblank_delta_matches_repeated_single_frame_updates() {
-        let cfg = config();
-        let input = CharacterMotorInput {
-            walk: 1,
-            sprint: true,
-            ..CharacterMotorInput::default()
-        };
-        let mut stepped = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
-        let mut caught_up = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
-
-        let _ = stepped.update(None, input, cfg);
-        let expected = stepped.update(None, input, cfg);
-        let actual = caught_up.update_vblanks(None, input, cfg, 2);
-
-        assert_eq!(actual.position, expected.position);
-        assert_eq!(actual.yaw, expected.yaw);
-        assert_eq!(actual.anim, expected.anim);
-        assert_eq!(actual.stamina_q12, expected.stamina_q12);
-        assert_eq!(caught_up.stamina_q12(), stepped.stamina_q12());
-    }
-
-    #[test]
-    fn vblank_delta_consumes_evade_edge_once() {
-        let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
-        let mut cfg = config();
-        cfg.roll_cost_q12 = 512;
-        cfg.roll_speed = 0;
-        cfg.roll_active_frames = 1;
-        cfg.roll_recovery_frames = 0;
-        cfg.roll_invulnerable_frames = 1;
-        cfg.stamina_recover_q12 = 0;
-        motor.stamina_q12 = 1024;
-
-        let frame = motor.update_vblanks(
-            None,
-            CharacterMotorInput {
-                walk: 1,
-                evade: true,
-                ..CharacterMotorInput::default()
-            },
-            cfg,
-            2,
-        );
-
-        assert_eq!(frame.anim, CharacterMotorAnim::Walk);
-        assert_eq!(frame.action, CharacterMotorAction::Idle);
-        assert_eq!(frame.stamina_q12, 512);
-    }
-
-    #[test]
-    fn evade_starts_roll_with_invulnerability() {
-        let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
-        let frame = motor.update(
-            None,
-            CharacterMotorInput {
-                walk: 1,
-                evade: true,
-                ..CharacterMotorInput::default()
-            },
-            config(),
-        );
-        assert_eq!(frame.action, CharacterMotorAction::Roll);
-        assert_eq!(frame.anim, CharacterMotorAnim::Roll);
-        assert!(frame.invulnerable);
-        assert_eq!(frame.position, RoomPoint::new(0, 0, 6));
-    }
-
-    #[test]
     fn is_action_invulnerable_tracks_the_roll_i_frame_window() {
         let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
         let mut cfg = config();
@@ -5930,155 +4443,90 @@ mod tests {
     }
 
     #[test]
-    fn backwards_free_evade_rolls_in_the_requested_direction() {
+    fn sprint_consumes_stamina_and_reports_run() {
         let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
         let frame = motor.update(
             None,
             CharacterMotorInput {
-                walk: -1,
-                evade: true,
+                walk: 1,
+                sprint: true,
                 ..CharacterMotorInput::default()
             },
             config(),
         );
-        assert_eq!(frame.action, CharacterMotorAction::Roll);
-        assert_eq!(frame.anim, CharacterMotorAnim::Roll);
-        assert_eq!(frame.yaw, Angle::HALF);
-        assert_eq!(frame.position, RoomPoint::new(0, 0, -6));
+        assert_eq!(frame.position, RoomPoint::new(0, 0, 64));
+        assert_eq!(frame.anim, CharacterMotorAnim::Run);
+        assert!(frame.sprinting);
+        assert!(frame.stamina_q12 < DEFAULT_STAMINA_MAX_Q12);
     }
 
     #[test]
-    fn body_step_moves_on_open_floor_and_no_clips_without_collision() {
-        // On a flat floor the step commits fully.
-        let bytes = flat_floor_world();
-        let room = RuntimeRoom::from_bytes(&bytes).expect("room parses");
-        let rooms = [CharacterCollisionRoom::new(room, 0, 0)];
-        let step = commit_body_step(
-            CharacterCollision::rooms(&rooms, &[]),
-            RoomPoint::new(400, 0, 400),
-            96,
-            32,
-            64,
-            768,
-        );
-        assert_eq!(step.position, RoomPoint::new(496, 0, 432));
-        assert!(step.moved);
-        assert!(!step.blocked);
-        // With no collision wired at all, the step passes through
-        // (the player commit's no-room fallback; unit-test shape).
-        let step = commit_body_step(
-            CharacterCollision::room(None),
-            RoomPoint::new(0, 0, 0),
-            10,
-            -10,
-            64,
-            768,
-        );
-        assert_eq!(step.position, RoomPoint::new(10, 0, -10));
-        assert!(step.moved);
+    fn unlimited_stamina_profile_never_drains_or_gates_sprint() {
+        let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
+        let cfg = config().without_stamina_limit();
+        let input = CharacterMotorInput {
+            walk: 1,
+            sprint: true,
+            ..CharacterMotorInput::default()
+        };
+
+        for _ in 0..2_000 {
+            let frame = motor.update(None, input, cfg);
+            assert!(frame.sprinting);
+            assert_eq!(frame.stamina_q12, cfg.stamina_max_q12);
+        }
+        assert_eq!(cfg.sprint_min_q12, 0);
+        assert_eq!(cfg.roll_cost_q12, 0);
+        assert_eq!(cfg.backstep_cost_q12, 0);
     }
 
     #[test]
-    fn body_step_blocks_on_solid_wall_like_the_player() {
-        // The internal south wall between the two sectors blocks the
-        // +Z step, exactly as the player motor test above.
-        let bytes = world_with_internal_south_wall();
-        let room = RuntimeRoom::from_bytes(&bytes).expect("test room parses");
-        let step = commit_body_step(
-            CharacterCollision::room(Some(room.collision())),
-            RoomPoint::new(512, 0, 800),
-            0,
-            288,
-            64,
-            768,
+    fn vblank_delta_consumes_evade_edge_once() {
+        let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
+        let mut cfg = config();
+        cfg.roll_cost_q12 = 512;
+        cfg.roll_speed = 0;
+        cfg.roll_active_frames = 1;
+        cfg.roll_recovery_frames = 0;
+        cfg.roll_invulnerable_frames = 1;
+        cfg.stamina_recover_q12 = 0;
+        motor.stamina_q12 = 1024;
+
+        let frame = motor.update_vblanks(
+            None,
+            CharacterMotorInput {
+                walk: 1,
+                evade: true,
+                ..CharacterMotorInput::default()
+            },
+            cfg,
+            2,
         );
-        assert_eq!(step.position, RoomPoint::new(512, 0, 800));
-        assert!(!step.moved);
-        assert!(step.blocked);
+
+        assert_eq!(frame.anim, CharacterMotorAnim::Walk);
+        assert_eq!(frame.action, CharacterMotorAction::Idle);
+        assert_eq!(frame.stamina_q12, 512);
     }
 
     #[test]
-    fn body_step_slides_along_the_blocked_axis() {
-        // Diagonal step into the same south wall: Z is rejected, X
-        // slides (the player commit's axis cascade).
-        let bytes = world_with_internal_south_wall();
-        let room = RuntimeRoom::from_bytes(&bytes).expect("test room parses");
-        let step = commit_body_step(
-            CharacterCollision::room(Some(room.collision())),
-            RoomPoint::new(400, 0, 800),
-            96,
-            288,
-            64,
-            768,
-        );
-        assert_eq!(step.position, RoomPoint::new(496, 0, 800));
-        assert!(step.moved);
-        assert!(step.blocked);
-    }
+    fn vblank_delta_matches_repeated_single_frame_updates() {
+        let cfg = config();
+        let input = CharacterMotorInput {
+            walk: 1,
+            sprint: true,
+            ..CharacterMotorInput::default()
+        };
+        let mut stepped = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
+        let mut caught_up = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
 
-    #[test]
-    fn body_step_refuses_to_leave_the_walkable_grid() {
-        // One walkable sector (1024x1024): stepping past its edge finds
-        // no floor and is rejected -- an AI body never walks into the
-        // void the way a player can walk off a ledge and fall.
-        let bytes = flat_floor_world();
-        let room = RuntimeRoom::from_bytes(&bytes).expect("room parses");
-        let rooms = [CharacterCollisionRoom::new(room, 0, 0)];
-        let step = commit_body_step(
-            CharacterCollision::rooms(&rooms, &[]),
-            RoomPoint::new(900, 0, 512),
-            600,
-            0,
-            32,
-            768,
-        );
-        assert_eq!(step.position, RoomPoint::new(900, 0, 512));
-        assert!(!step.moved);
-        assert!(step.blocked);
-    }
+        let _ = stepped.update(None, input, cfg);
+        let expected = stepped.update(None, input, cfg);
+        let actual = caught_up.update_vblanks(None, input, cfg, 2);
 
-    #[test]
-    fn body_step_respects_cylinder_and_aabb_blockers() {
-        let bytes = flat_floor_world();
-        let room = RuntimeRoom::from_bytes(&bytes).expect("room parses");
-        let rooms = [CharacterCollisionRoom::new(room, 0, 0)];
-        let cylinders = [CharacterCollisionCylinder::new(
-            RoomPoint::new(512, 0, 700),
-            64,
-            768,
-        )];
-        let step = commit_body_step(
-            CharacterCollision::rooms(&rooms, &cylinders),
-            RoomPoint::new(512, 0, 500),
-            0,
-            160,
-            64,
-            768,
-        );
-        assert_eq!(
-            step.position,
-            RoomPoint::new(512, 0, 500),
-            "cylinder blocker rejects the step"
-        );
-        assert!(step.blocked);
-
-        let aabbs = [CharacterCollisionAabb::new(
-            RoomPoint::new(400, 0, 600),
-            RoomPoint::new(624, 768, 700),
-        )];
-        let step = commit_body_step(
-            CharacterCollision::rooms_with_aabbs(&rooms, &[], &aabbs),
-            RoomPoint::new(512, 0, 480),
-            0,
-            160,
-            32,
-            768,
-        );
-        assert_eq!(
-            step.position,
-            RoomPoint::new(512, 0, 480),
-            "aabb blocker rejects the step"
-        );
-        assert!(step.blocked);
+        assert_eq!(actual.position, expected.position);
+        assert_eq!(actual.yaw, expected.yaw);
+        assert_eq!(actual.anim, expected.anim);
+        assert_eq!(actual.stamina_q12, expected.stamina_q12);
+        assert_eq!(caught_up.stamina_q12(), stepped.stamina_q12());
     }
 }

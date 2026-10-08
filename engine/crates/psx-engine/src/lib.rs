@@ -61,7 +61,6 @@ pub mod attributed_clip;
 pub mod character_motor;
 pub mod collision_query;
 pub mod fixed;
-mod floor_sample;
 pub mod frames;
 pub mod game_app;
 pub mod lighting;
@@ -83,7 +82,6 @@ mod time;
 pub mod transform;
 mod transitions;
 pub mod ui;
-pub mod world;
 pub mod world_render;
 
 /// Compare two `usize` values without exposing an R3000A load-delay hazard.
@@ -127,9 +125,8 @@ pub use affine_surface::{
 pub use angle::Angle;
 pub use app::{App, Config, VisualPacing};
 pub use character_motor::{
-    commit_body_direction_with_trace_provider, commit_body_step,
-    commit_body_step_with_trace_provider, BodyStep, CharacterBlockerTraceProvider,
-    CharacterCollision, CharacterCollisionAabb, CharacterCollisionCylinder, CharacterCollisionRoom,
+    commit_body_direction_with_trace_provider, commit_body_step_with_trace_provider, BodyStep, CharacterBlockerTraceProvider,
+    CharacterCollisionAabb, CharacterCollisionCylinder,
     CharacterMotorAction, CharacterMotorAnim, CharacterMotorConfig, CharacterMotorFrame,
     CharacterMotorInput, CharacterMotorState,
 };
@@ -190,12 +187,6 @@ pub use third_person_camera::{
 };
 pub use transform::{ActorTransform, RoomPoint, Vec3World, WorldVertex};
 pub use ui::{draw_scene, is_focusable, node_nav_rect, UiTextureSlot, UI_CANVAS_H, UI_CANVAS_W};
-pub use world::{
-    CompactCollisionParseError, CompactCollisionRoom, GridDirection, GridHorizontalFace,
-    GridSector, GridSplit, GridVerticalFace, GridWalls, RoomCollision, RoomRender,
-    RuntimeCollisionRoom, RuntimeRoom, SectorCollision, SectorRender, WallCollision, WallRender,
-    WorldMaterialId,
-};
 pub use world_render::{
     NoWorldSurfaceLighting, SurfaceSidedness, WorldMaterialAnimation, WorldRenderMaterial,
     WorldSurfaceKind, WorldSurfaceLighting, WorldSurfaceSample,
