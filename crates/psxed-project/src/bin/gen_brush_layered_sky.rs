@@ -275,7 +275,7 @@ mod tests {
         let texture = psx_asset::Texture::from_bytes(&bytes).unwrap();
         assert_eq!([texture.width(), texture.height()], [256, 128]);
         assert_eq!(texture.depth(), Depth::Bit4);
-        assert!(texture.index_zero_transparent());
+        assert!(texture.is_index_zero_transparent());
         let pixels = texture.pixel_bytes();
         assert!(pixels.iter().any(|byte| byte & 0x0f == 0));
         let _ = std::fs::remove_file(generated);

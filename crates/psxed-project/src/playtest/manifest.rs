@@ -3356,7 +3356,7 @@ fn compact_horizontal_triangle_heights(heights: [i32; 4], split: u8, index: usiz
 
 fn append_compact_collision_wall(out: &mut Vec<u8>, wall: psx_asset::WorldWall) {
     out.push(wall.direction());
-    out.push(if wall.solid() {
+    out.push(if wall.is_solid() {
         psx_level::compact_collision_wall_flags::SOLID
     } else {
         0

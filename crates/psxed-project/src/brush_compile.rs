@@ -8,8 +8,8 @@
 //! to the next brush, and past the last brush is EMPTY.
 // ponytail: chains are exact but unbalanced (depth = total face count)
 // and planes are not deduplicated or sealed against the void; the
-// qbsp-style balanced build with outer sealing replaces this when the
-// full compiler lands.
+// balanced build with outer sealing replaces this when the full
+// compiler lands.
 
 use crate::brush::{Brush, BrushContents, FaceUv, Plane};
 use crate::ResourceId;
@@ -131,19 +131,16 @@ pub struct CompiledSurfaceBsp {
     pub surfaces: Vec<CompiledSurface>,
 }
 
-/// qbsp-parity hard cap on face extent, world units: every cooked
-/// surface subdivides so no piece spans more than this along any axis,
-/// with or without lights (Quake's qbsp splits every face to its
-/// lightmap extents the same way; small faces are also its near-plane
-/// safety, since an eye-plane-crossing sliver saturates past the GPU's
-/// 1023x511 draw limit and skips instead of wrapping). 2048 here is
-/// measured, not aesthetic: PSoXide content runs ~18x Quake's unit
-/// scale, so this is already finer than Quake's ~272 units scaled
-/// proportionally, and the sanctum's worst PVS leaf sits at 2097
-/// surfaces / 4198 packets against the 4096-packet arena. 1024 cooks
-/// but overflows the arena (7472); 256 cooks only thanks to exact
-/// leaf marks and then wants 37918 packets, which no runtime budget
-/// survives. Tighten only together with a packet/RAM plan.
+/// Hard cap on face extent, world units: every cooked surface subdivides
+/// so no piece spans more than this along any axis, with or without
+/// lights. Small faces are the near-plane safety: an eye-plane-crossing
+/// sliver saturates past the GPU's 1023x511 draw limit and is skipped
+/// instead of wrapping. 2048 here is measured, not aesthetic: the
+/// sanctum's worst PVS leaf sits at 2097 surfaces / 4198 packets against
+/// the 4096-packet arena. 1024 cooks but overflows the arena (7472); 256
+/// cooks only thanks to exact leaf marks and then wants 37918 packets,
+/// which no runtime budget survives. Tighten only together with a
+/// packet/RAM plan.
 pub const SURFACE_EXTENT_UNITS: f64 = 2048.0;
 
 /// Large host-side branches divide exact splitter scoring across CPU cores.
@@ -555,7 +552,7 @@ pub fn build_surface_bsp(surfaces: &[CompiledSurface]) -> CompiledSurfaceBsp {
     bsp
 }
 
-/// qbsp-parity leaf marking: each node surface is pushed down both
+/// Exact leaf marking: each node surface is pushed down both
 /// subtrees of its owning node, split by every deeper plane, and marks
 /// exactly the leaves its fragments reach. Mark totals therefore scale
 /// with surface count instead of combinatorially with tree depth, which

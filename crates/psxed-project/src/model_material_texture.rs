@@ -595,7 +595,7 @@ pub fn compose_transition_psxt(
             let sample_x = x % texture.width();
             let sample_y = y % texture.height();
             let index = texture_4bpp_index(texture, sample_x, sample_y);
-            let transparent = texture.index_zero_transparent() && index == 0;
+            let transparent = texture.is_index_zero_transparent() && index == 0;
             let rgb = tinted_clut_rgb(texture, index, tint);
             rgba.push([rgb[0], rgb[1], rgb[2], if transparent { 0 } else { 255 }]);
         }
@@ -739,7 +739,7 @@ pub fn compose_two_material_flipbook_psxt(
 }
 
 fn cycle_source_rgba(texture: psx_asset::Texture<'_>, index: u8) -> [u8; 4] {
-    let transparent = texture.index_zero_transparent() && index == 0;
+    let transparent = texture.is_index_zero_transparent() && index == 0;
     let rgb = tinted_clut_rgb(texture, index, [MATERIAL_NEUTRAL_TINT; 3]);
     [rgb[0], rgb[1], rgb[2], if transparent { 0 } else { 255 }]
 }
@@ -988,8 +988,9 @@ pub fn fuse_average_add_quarter_psxt(
             let primary_index = texture_4bpp_index(primary, x, y);
             let secondary_index =
                 texture_4bpp_index(secondary, x % secondary.width(), y % secondary.height());
-            let primary_visible = !(primary.index_zero_transparent() && primary_index == 0);
-            let secondary_visible = !(secondary.index_zero_transparent() && secondary_index == 0);
+            let primary_visible = !(primary.is_index_zero_transparent() && primary_index == 0);
+            let secondary_visible =
+                !(secondary.is_index_zero_transparent() && secondary_index == 0);
             if !primary_visible && !secondary_visible {
                 rgba.push([0, 0, 0, 0]);
                 continue;
@@ -1469,7 +1470,7 @@ mod tests {
         assert_eq!(texture.height(), ROOM_REFLECTION_PROBE_SIZE);
         assert_eq!(texture.depth(), psxed_format::texture::Depth::Bit4);
         assert_eq!(texture.clut_entries(), 16);
-        assert!(!texture.index_zero_transparent());
+        assert!(!texture.is_index_zero_transparent());
 
         grid.fog_color[0] = grid.fog_color[0].saturating_add(40);
         let changed = generate_room_reflection_probe_psxt(&project, &grid, Path::new("."))
@@ -1548,7 +1549,7 @@ mod tests {
         assert_eq!(texture.width(), MODEL_NOISE_TEXTURE_SIZE);
         assert_eq!(texture.height(), MODEL_NOISE_TEXTURE_SIZE);
         assert_eq!(texture.clut_entries(), 16);
-        assert!(texture.index_zero_transparent());
+        assert!(texture.is_index_zero_transparent());
     }
 
     #[test]
@@ -1569,7 +1570,7 @@ mod tests {
         let texture = psx_asset::Texture::from_bytes(&bytes).expect("generated PSXT parses");
         assert_eq!((texture.width(), texture.height()), (16, 16));
         assert_eq!(texture.clut_entries(), 16);
-        assert!(!texture.index_zero_transparent());
+        assert!(!texture.is_index_zero_transparent());
         assert_eq!(bytes, generate_material_texture_psxt(settings));
         assert_ne!(
             bytes,
@@ -1648,7 +1649,7 @@ mod tests {
         assert_eq!((texture.width(), texture.height()), (4, 2));
         assert_eq!(texture.depth(), psxed_format::texture::Depth::Bit4);
         assert_eq!(texture.clut_entries(), 16);
-        assert!(texture.index_zero_transparent());
+        assert!(texture.is_index_zero_transparent());
         assert_eq!(texture_4bpp_index(texture, 0, 0), 0);
         assert_ne!(texture_4bpp_index(texture, 1, 0), 0);
         assert_ne!(texture_4bpp_index(texture, 2, 0), 0);
