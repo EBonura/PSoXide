@@ -76,8 +76,9 @@ independent implementation. See the UK Intellectual Property Office’s
 
 ## Provenance
 
-Development uses AI coding assistants under human direction, review and testing.
-A large part of the code was written with their assistance. Known upstream
+Development uses AI coding agents under human direction, review and testing.
+The agents wrote nearly all of the code; [how PSoXide is built](@/how-its-built.md)
+lists the rules they work to and the checks each change passes. Known upstream
 derivations are credited in the source and provenance records. PSoXide does not
 claim a clean-room development process or guarantee that provenance reviews
 identify every third-party influence.
