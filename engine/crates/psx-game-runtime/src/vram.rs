@@ -39,7 +39,8 @@ use psx_vram::{
 };
 use upload_queue::{VramUploadJob, VramUploadKind, VramUploadQueue};
 
-use crate::room_cache::INVALID_ROOM_INDEX;
+/// Sentinel for "no room" in room-index arrays.
+const INVALID_ROOM_INDEX: RoomIndex = RoomIndex(u16::MAX);
 
 /// Pixel fonts are short (glyph_h <= 16), so a 128-row atlas cap is
 /// generous; the game sizes its [`FontPackScratch`] from this and the

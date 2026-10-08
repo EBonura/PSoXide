@@ -211,15 +211,3 @@ pub(super) fn draw_far_vista_ring(
         world,
     );
 }
-
-/// True once the room's sky + far-vista textures are VRAM-resident.
-#[cfg(feature = "cd-stream-bench")]
-pub(super) fn room_backdrop_textures_ready(record: &LevelRoomRecord) -> bool {
-    psx_game_runtime::sky::room_backdrop_textures_ready(
-        record,
-        ASSETS,
-        find_sky_texture_vram_slot,
-        ensure_sky_texture_uploaded,
-        ensure_texture_uploaded_with_clut_mode,
-    )
-}

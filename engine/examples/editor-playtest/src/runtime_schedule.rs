@@ -6,17 +6,8 @@ use psx_game_runtime::schedule::RuntimeScheduleConfig;
 
 /// Central runtime scheduling policy.
 ///
-/// Keep memory residency, render visibility, and background work pacing as
-/// separate knobs. The stream pool may hold many rooms, but the active render
-/// window should stay tied to the authored visible-room budget.
+/// Background work pacing and the fixed-tick catch-up cap.
 pub(crate) const RUNTIME_SCHEDULE: RuntimeScheduleConfig = RuntimeScheduleConfig {
-    portal_max_depth: 8,
-    portal_min_width_q12: 4,
-    active_refresh_sectors: 4,
-    active_job_builds_per_tick: 1,
-    retained_inactive_rooms: 0,
-    post_cross_render_debug_frames: 0,
-    stream_load_batch_count: 4,
     // Drain ceiling per background pump, not a request. Must stay at or above
     // what the drive delivers in a pump period (see
     // `drive_sectors_per_background_tick`, currently 5 at double speed) or

@@ -534,7 +534,9 @@ impl Playtest {
         for v in candidates {
             let len =
                 isqrt_i32(square_i32_saturating(v[0]).saturating_add(square_i32_saturating(v[1])));
-            let toward = v[0].saturating_mul(dx).saturating_add(v[1].saturating_mul(dz));
+            let toward = v[0]
+                .saturating_mul(dx)
+                .saturating_add(v[1].saturating_mul(dz));
             if len == 0 || toward < 0 {
                 continue;
             }

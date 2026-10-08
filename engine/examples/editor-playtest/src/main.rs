@@ -52,46 +52,17 @@ fn game_trace(message: &str) {
 fn game_trace(_message: &str) {}
 
 use psx_asset::{Animation, ModelPart, ModelVertex};
-// Used by the vis-full-active-chunks default AND by the PVS path's
-// no-anchor fallback (a far room with no usable portal anchor draws
-// every cell through the cached path).
-#[cfg(feature = "world-grid-visible")]
-#[cfg(not(playtest_pxbsp))]
-use psx_engine::draw_indexed_cached_room_vertex_lit_all_cells;
-#[cfg(not(playtest_pxbsp))]
-use psx_engine::draw_room_vertex_lit;
 use psx_engine::ui::UiTextureSlot;
-#[cfg(not(playtest_pxbsp))]
-use psx_engine::world_render::PortalCellWindow;
-#[cfg(feature = "cd-stream-bench")]
-use psx_engine::CompactCollisionRoom;
-#[cfg(feature = "world-grid-visible")]
-use psx_engine::GridVisibilityStats;
-#[cfg(all(
-    feature = "world-grid-visible",
-    not(feature = "vis-full-active-chunks")
-))]
-use psx_engine::GridVisibleCell;
 use psx_engine::{
-    button, horizontal_view_coordinates, prewarm_indexed_cached_room_quads, telemetry,
-    AdaptiveSubdivisionKindMask, Angle, App, CachedRoomCell, CachedRoomSurface, CharacterCollision,
-    CharacterCollisionAabb, CharacterCollisionCylinder, CharacterCollisionRoom, CharacterMotorAnim,
-    CharacterMotorConfig, CharacterMotorInput, CharacterMotorState, Config, Ctx, DepthBand,
-    DepthRange, LoadedWorldCameraGte, OtFrame, PacketFramePair, PrimitivePacketArena,
-    PrimitivePacketScratch, PrimitiveSink, ProjectedVertex, QueuedFrame, RenderSubmission, Rgb8,
-    RoomPoint, RuntimeCollisionRoom, RuntimeRoom, Scene, SceneStateRef, SchedulerConfig, SimTick,
-    TexturedModelRenderFace, ThirdPersonCameraConfig, ThirdPersonCameraInput,
-    ThirdPersonCameraState, ThirdPersonCameraTarget, VideoHz, VisualPacing, WorldCamera,
-    WorldProjection, WorldRenderMaterial, WorldRenderPass, WorldSurfaceOptions, WorldTriCommand,
+    button, horizontal_view_coordinates, telemetry, AdaptiveSubdivisionKindMask, Angle, App,
+    CharacterCollisionAabb, CharacterCollisionCylinder, CharacterMotorAnim, CharacterMotorConfig,
+    CharacterMotorInput, CharacterMotorState, Config, Ctx, DepthBand, DepthRange,
+    LoadedWorldCameraGte, OtFrame, PacketFramePair, PrimitivePacketArena, PrimitivePacketScratch,
+    PrimitiveSink, ProjectedVertex, QueuedFrame, RenderSubmission, Rgb8, RoomPoint, Scene,
+    SceneStateRef, SchedulerConfig, SimTick, TexturedModelRenderFace, ThirdPersonCameraConfig,
+    ThirdPersonCameraInput, ThirdPersonCameraState, ThirdPersonCameraTarget, VideoHz, VisualPacing,
+    WorldCamera, WorldProjection, WorldRenderPass, WorldSurfaceOptions, WorldTriCommand,
     WorldVertex, PRIMITIVE_PACKET_SLOT_WORDS, Q12,
-};
-#[cfg(all(
-    feature = "world-grid-visible",
-    not(feature = "vis-full-active-chunks")
-))]
-#[cfg(not(playtest_pxbsp))]
-use psx_engine::{
-    draw_indexed_cached_room_vertex_lit_visible_cells, draw_room_vertex_lit_visible_cells,
 };
 use psx_font::FontAtlas;
 use psx_game_runtime::vitality::{
@@ -114,46 +85,38 @@ use psx_gpu::{
     },
     Gpu,
 };
-use psx_level::portal_visibility::{
-    debug_portal_clip, PortalClipDebug, PortalClipDebugDecision, PortalClipDebugPlane,
-    PortalClipDebugRect, PortalFrustum, PortalRoomBounds, PortalVisibilityCamera,
-    PortalVisibilityResult,
-};
 use psx_level::{
-    find_asset_of_kind, room_flags, AssetId, AssetKind, CharacterAnimationAction, EntityRecord,
-    InteractableKind, InteractableRecord, LevelBoxPropRecord, LevelCameraRecord,
-    LevelCharacterRecord, LevelChunkRecord, LevelFarVistaRecord, LevelGameEntityRecord,
-    LevelGameplaySfxEvent, LevelImagePropRecord, LevelRoomRecord, LevelSkyRecord,
-    LevelUiValueBinding, LevelWaterCellRecord, ModelClipIndex, ParticleEmitterRecord, RoomIndex,
-    RuntimeDebugMask,
+    find_asset_of_kind, room_flags, AssetId, AssetKind, CharacterAnimationAction, InteractableKind,
+    InteractableRecord, LevelBoxPropRecord, LevelCameraRecord, LevelCharacterRecord,
+    LevelFarVistaRecord, LevelGameEntityRecord, LevelGameplaySfxEvent, LevelImagePropRecord,
+    LevelRoomRecord, LevelSkyRecord, LevelUiValueBinding, LevelWaterCellRecord, ModelClipIndex,
+    ParticleEmitterRecord, RoomIndex,
 };
 use psx_vram::{TextureDepth, TexturePage};
 
-mod active_room_cache;
-mod active_room_streaming;
-mod active_room_visibility;
-mod active_rooms;
 mod box_props;
 mod bsp_runtime;
 #[cfg(feature = "cd-stream-benchmark")]
 use psx_game_runtime::cd_stream;
+mod aim_control;
 mod character_runtime;
 mod combat_input;
-mod player_ranged;
-mod hook_runtime;
-mod hook_signposting;
-mod aim_control;
+mod crystal_palette;
 mod damage_numbers;
 mod debug_runtime;
+#[cfg(feature = "emulator-telemetry")]
+use debug_runtime::*;
 mod game_logic_runtime;
+mod hook_runtime;
+mod hook_signposting;
 mod image_props_runtime;
 mod input;
 mod loc;
 mod marker_runtime;
 mod model_rendering;
-mod crystal_palette;
 mod overlay;
 mod particle_runtime;
+mod player_ranged;
 mod playtest_runtime;
 mod playtest_scene;
 mod playtest_update;
@@ -165,19 +128,14 @@ mod runtime_config;
 mod runtime_schedule;
 mod sky_runtime;
 mod souls;
-mod visibility_runtime;
-mod visible_cell_runtime;
 mod vram_runtime;
 mod water_runtime;
 mod world_objects_runtime;
 
-use active_room_cache::*;
-use active_room_streaming::*;
 use box_props::*;
 use bsp_runtime::*;
 use character_runtime::*;
 use damage_numbers::*;
-use debug_runtime::*;
 use game_logic_runtime::*;
 use image_props_runtime::*;
 use input::*;
@@ -191,9 +149,6 @@ use runtime_config::*;
 use runtime_schedule::RUNTIME_SCHEDULE;
 use sky_runtime::*;
 use souls::SoulsWallet;
-use visibility_runtime::*;
-#[cfg(not(playtest_pxbsp))]
-use visible_cell_runtime::*;
 use vram_runtime::*;
 use water_runtime::*;
 use world_objects_runtime::*;
@@ -216,33 +171,23 @@ pub(crate) const USES_PXBSP: bool = generated::PLAYTEST_USES_PXBSP;
 
 use generated::{
     ARCH_PROPS, ARCH_PROP_COLLISIONS, ARCH_PROP_SURFACES, ASSETS, BOOST_MODULES, BOX_PROPS,
-    BOX_PROP_STATE_COUNT, BOX_PROP_SURFACES, CACHED_ROOM_DRAW_ORDER_MODE,
-    CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE, CHARACTERS, COMBAT_CAPSULES, CYLINDER_PROPS,
-    CYLINDER_PROP_SURFACES, DESTRUCTIBLES, ENTITIES, EQUIPMENT, GAMEPLAY_SFX_CUES, GAME_ENTITIES,
-    IMAGE_PROPS, INTERACTABLES, INTERACTABLE_MESSAGES, LIGHTS, LOGIC, MATERIALS, MODELS,
-    MODEL_CLIPS, MODEL_CLIP_BOUNDS, MODEL_FRAME_BOUNDS, MODEL_INSTANCES, MODEL_SOCKETS,
-    PARTICLE_EMITTERS, PERSISTENT_FLAG_COUNT, PLAYER_CONTROLLER, PLAYER_SPAWN,
+    BOX_PROP_STATE_COUNT, BOX_PROP_SURFACES, CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE, CHARACTERS,
+    COMBAT_CAPSULES, CYLINDER_PROPS, CYLINDER_PROP_SURFACES, DESTRUCTIBLES, ENTITIES, EQUIPMENT,
+    GAMEPLAY_SFX_CUES, GAME_ENTITIES, IMAGE_PROPS, INTERACTABLES, INTERACTABLE_MESSAGES, LIGHTS,
+    LOGIC, MODELS, MODEL_CLIPS, MODEL_CLIP_BOUNDS, MODEL_FRAME_BOUNDS, MODEL_INSTANCES,
+    MODEL_SOCKETS, PARTICLE_EMITTERS, PERSISTENT_FLAG_COUNT, PLAYER_CONTROLLER, PLAYER_SPAWN,
     PLAYTEST_PACKET_CAPACITY, PROJECT_SAVE_NAME, PROJECT_SAVE_TITLE, PXBSP_AMBIENT_RGB, ROOMS,
-    ROOM_CACHE_CELLS, ROOM_CACHE_CELL_VERTICES, ROOM_CACHE_SURFACES, ROOM_CACHE_VERTICES,
-    ROOM_CHUNKS, ROOM_OVERLAPPED_ROOMS, ROOM_PORTALS, ROOM_REFLECTION_PROBES, ROOM_RESIDENCY,
-    ROOM_SURFACE_CACHES, ROOM_VISIBILITY, UI_FONTS, UI_NODES, UI_PAINTS, UI_SFX_CUES,
-    UI_SFX_SAMPLES, VISIBILITY_CELLS, VITALITY_CIRCLES, WATER_CELLS, WEAPONS, WEAPON_APPEARANCES,
-    WEAPON_HITBOXES, WORLD_MESSAGE, WORLD_OBJECTS,
+    ROOM_REFLECTION_PROBES, UI_FONTS, UI_NODES, UI_PAINTS, UI_SFX_CUES, UI_SFX_SAMPLES,
+    VITALITY_CIRCLES, WATER_CELLS, WEAPONS, WEAPON_APPEARANCES, WEAPON_HITBOXES, WORLD_MESSAGE,
+    WORLD_OBJECTS,
 };
 #[cfg(feature = "cd-stream-bench")]
 use generated::{
     GAMEPLAY_PACK_MAX_CHUNK_BYTES, PERSISTENT_ASSET_PAGE_COUNT, PERSISTENT_ASSET_SLOT_COUNT,
     UI_PACK_IMAGE_CACHE_SLOTS, UI_PACK_MAX_CHUNK_BYTES, UI_PACK_START_LBA, UI_PACK_TOC,
-    UI_SFX_MAX_SAMPLE_BYTES, UI_SFX_PACK_FIRST_CHUNK, WORLD_PACK_MAX_CHUNK_BYTES,
-    WORLD_PACK_START_LBA, WORLD_PACK_TOC, WORLD_RESIDENT_CHUNK_LIMIT, WORLD_RESIDENT_PAGE_COUNT,
-    WORLD_STREAM_SLOT_COUNT,
+    UI_SFX_MAX_SAMPLE_BYTES, UI_SFX_PACK_FIRST_CHUNK,
 };
 use generated::{GAME_FLOW, OPTIONS, UI_SCENES};
-#[cfg(all(
-    feature = "world-grid-visible",
-    not(feature = "vis-full-active-chunks")
-))]
-use generated::{VISIBILITY_PVS, VISIBILITY_PVS_BITS};
 
 /// Two ordering tables, alternated with the packet scratch's frame pair: the
 /// runner starts building a frame while the GPU still walks the previous
@@ -274,31 +219,6 @@ fn world_camera_from_position_focus(
     )
 }
 
-fn yaw_q12_from_basis(sin_yaw: i32, cos_yaw: i32) -> u16 {
-    if sin_yaw == 0 && cos_yaw == 0 {
-        return 0;
-    }
-    let ax = abs_i32(sin_yaw);
-    let az = abs_i32(cos_yaw);
-    let base = if ax <= az {
-        ax.saturating_mul(512) / az.max(1)
-    } else {
-        1024 - (az.saturating_mul(512) / ax.max(1))
-    };
-    let angle = if cos_yaw >= 0 {
-        if sin_yaw >= 0 {
-            base
-        } else {
-            4096 - base
-        }
-    } else if sin_yaw >= 0 {
-        2048 - base
-    } else {
-        2048 + base
-    };
-    (angle & 0x0fff) as u16
-}
-
 /// Locomotion crossfade window in sim ticks (60 Hz): long enough to
 /// soften idle/walk/run cuts, short enough that matrix-lerp shrink
 /// stays invisible.
@@ -318,60 +238,21 @@ const PLAYER_ANIM_BLEND_ACTION_OUT_TICKS: u32 = 14;
 /// averaging opposite halves of a stride.
 const PLAYER_ANIM_BLEND_GAIT_TICKS: u32 = 10;
 
-mod opening_sequence;
 mod duel;
+mod opening_sequence;
 
 struct Playtest {
     duel: duel::Duel,
     opening: opening_sequence::OpeningSequence,
-    /// Active room. `None` until `init` runs and only `Some`
-    /// when the manifest had at least one room and its bytes
-    /// parsed.
-    room: Option<RuntimeRoom<'static>>,
     /// Explicit resident BSP backend selected by the cooked manifest. Invalid
     /// BSP data fails initialization instead of falling back to another world
     /// representation.
     bsp: Option<BspRuntime>,
-    /// Active collision room. Streamed builds use a compact
-    /// collision-only payload here instead of a full `.psxw`.
-    current_collision_room: Option<RuntimeCollisionRoom<'static>>,
     /// Ambient RGB for the room containing the player.
     current_ambient_rgb: [u8; 3],
-    /// Active-room window runtime state (the cache-budgeted draw
-    /// chunks, the incremental rebuild job staged against them, the
-    /// request anchor, and skip diagnostics), owned by
-    /// `psx_game_runtime::room_window` since the phase-1 carve.
-    window: RuntimeRoomWindow,
-    /// Portal-visibility runtime state (traversal result, root, bounds
-    /// cache, view keys, per-refresh diagnostics), owned by
-    /// `psx_game_runtime::room_visibility` since the phase-1 carve.
-    visibility: RuntimeRoomVisibility,
-    portal_stream_priority_current: u16,
-    portal_stream_priority_visible: u16,
-    portal_stream_priority_frontier: u16,
-    /// Per-active-slot visible-cell caches over one shared pool, owned
-    /// by `psx_game_runtime::world_cells` since the phase-2 carve.
-    #[cfg(all(
-        feature = "world-grid-visible",
-        not(feature = "vis-full-active-chunks")
-    ))]
-    visible_cells: RuntimeVisibleCellSelector,
     /// Index in ROOMS the player is currently in. Used to scope
     /// model-instance + light queries.
     room_index: RoomIndex,
-    /// The resident desired-set the last residency pass actually requested (the
-    /// camera ring + visible). The boot gate waits for THIS to be resident, not
-    /// the legacy player `stream_ring`, so loading completes against the set
-    /// streaming actually loads.
-    resident_desired: [RoomIndex; STREAMED_ROOM_SLOT_COUNT],
-    resident_desired_count: usize,
-    /// Active room's material table, ordered by `local_slot`.
-    /// Indexed directly by the slot value the cooked `.psxw`
-    /// stores per face.
-    materials: [WorldRenderMaterial; MAX_ROOM_MATERIALS],
-    /// `materials[..material_count]` is the in-use slice; rest
-    /// is `None`.
-    material_count: usize,
     /// Player locomotion state: position, yaw, stamina, and evade actions.
     motor: CharacterMotorState,
     /// Resolved Character driving the player -- `None` when no
@@ -403,16 +284,12 @@ struct Playtest {
     /// Winddown variant chosen for the current stop (the gait's winddown from
     /// the stride start, its mirror from the half stride).
     loco_stop_anim: PlayerAnim,
-    /// Active-window reconcile needed: set by visibility refreshes,
-    /// crossings, and stream progress; cleared when a pass converges.
-    /// Keeps the steady-state reconcile at a two-branch early-out.
-    active_window_dirty: bool,
     /// Breakable box-prop state (broken bits, derived data, falls,
     /// break bursts), owned by `psx_game_runtime::box_props` since the
     /// phase-2 carve.
     box_props: RuntimeBoxProps,
     /// One health/affinity owner shared by brush submodels and typed world
-    /// objects in either BSP or legacy-grid scenes.
+    /// objects.
     destructibles: RuntimeDestructibles<{ psx_level::MAX_DESTRUCTIBLES }>,
     /// Souls-like game-entity SoA state over the cooked
     /// `GAME_ENTITIES` records (phase 3; empty for record-free
@@ -590,15 +467,6 @@ struct Playtest {
     fps_display: u8,
     #[cfg(feature = "fps-overlay")]
     fps_display_worst: u8,
-    /// Cached camera collision-room set: the follow camera's per-tick
-    /// room gather cost ~half of its 50k tick budget and the set only
-    /// changes when the player crosses a coarse cell or the active
-    /// window changes (see `camera_rooms_key`).
-    camera_collision_rooms: [CharacterCollisionRoom<'static>; MAX_COLLISION_ROOMS],
-    camera_collision_room_count: usize,
-    /// (current room, player cell x/z at the cache quantum, active-room
-    /// mask) the cached camera room set was gathered for.
-    camera_rooms_key: (RoomIndex, i32, i32, u32, u32),
     /// Last movement result; stationary frames can use a broader cached
     /// visibility candidate set without rebuilding it for camera-only turns.
     player_moved_last_tick: bool,
@@ -736,20 +604,6 @@ struct Playtest {
     /// Display-window picture offset (pixels right, scanlines down) selected by
     /// the front-end Settings scene; zero is the standard centred picture.
     screen_offset: (i16, i16),
-    /// Host-visible render breadcrumbs emitted for a few frames after
-    /// crossing into another room.
-    post_cross_debug_frames: u8,
-    /// Slow down verbose portal diagnostics so the host terminal cannot
-    /// stall the playtest when a portal is rejected every camera tick.
-    portal_debug_log_cooldown: u8,
-    /// True while any active room's texture is unresolved (in flight OR
-    /// dropped). Drives the material-refresh retry: a DROPPED texture
-    /// (upload queue full at build time) never produces an upload
-    /// completion, so a completion-gated refresh would leave it on the
-    /// untextured fallback forever (the menu-path wall-flicker bug:
-    /// the fallback's CLUT sits at VRAM (0,0) inside the framebuffer,
-    /// so the surface visibly tracks framebuffer contents).
-    room_materials_unresolved: bool,
 }
 
 impl Playtest {
@@ -775,9 +629,7 @@ impl Playtest {
         // compiler picked for each `None` encoding (empirically, the
         // room/model/font/material `Option`s niche into a payload
         // bool/enum byte, making their `None` a NON-zero byte).
-        addr_of_mut!((*scene).room).write(None);
         addr_of_mut!((*scene).bsp).write(None);
-        addr_of_mut!((*scene).current_collision_room).write(None);
         addr_of_mut!((*scene).character).write(None);
         addr_of_mut!((*scene).player_actor_pose).write(None);
         addr_of_mut!((*scene).player_dash_assembly)
@@ -816,14 +668,6 @@ impl Playtest {
             addr_of_mut!((*scene).instance_actor_poses[slot]).write(None);
             addr_of_mut!((*scene).previous_instance_actor_poses[slot]).write(None);
         }
-        for slot in 0..MAX_ACTIVE_ROOMS {
-            addr_of_mut!((*scene).window.rooms[slot]).write(None);
-            addr_of_mut!((*scene).window.job.rooms[slot]).write(None);
-            addr_of_mut!((*scene).window.job.previous_rooms[slot]).write(None);
-        }
-        for slot in 0..MAX_COLLISION_ROOMS {
-            addr_of_mut!((*scene).camera_collision_rooms[slot].room).write(None);
-        }
         // Phase 2 -- boot state: every field is now a valid value, so
         // mint the exclusive borrow and stamp the non-zero initial state.
         (*scene).init_boot_state();
@@ -838,21 +682,6 @@ impl Playtest {
     fn init_boot_state(&mut self) {
         self.current_ambient_rgb = [0x80; 3];
         self.destructibles = RuntimeDestructibles::EMPTY;
-        self.visibility.init();
-        #[cfg(all(
-            feature = "world-grid-visible",
-            not(feature = "vis-full-active-chunks")
-        ))]
-        self.visible_cells.init();
-        for room in self.window.job.requested_rooms.iter_mut() {
-            *room = INVALID_ROOM_INDEX;
-        }
-        for room in self.resident_desired.iter_mut() {
-            *room = INVALID_ROOM_INDEX;
-        }
-        for material in self.materials.iter_mut() {
-            *material = room_material_fallback();
-        }
         self.motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
         self.player_contents_memo = None;
         self.player_vitality = DualVitality::equal(PLAYER_MAX_HEALTH);
@@ -909,14 +738,12 @@ impl Playtest {
             Q12::ONE,
         );
         self.prepared_overlay_camera = self.overlay_camera;
-        self.camera_rooms_key = (INVALID_ROOM_INDEX, i32::MIN, i32::MIN, 0, 0);
         for vertex in self.model_vertices.iter_mut() {
             *vertex = ModelVertex::ZERO;
         }
         self.streaming_jobs = RuntimeStreamingJobs::new();
         self.analog_deadzone = ANALOG_DEADZONE_DEFAULT;
         self.brightness_level = BRIGHTNESS_DEFAULT;
-        self.room_materials_unresolved = true;
         self.bsp_instance_visible_mask = u16::MAX;
     }
 
@@ -927,58 +754,18 @@ impl Playtest {
         // loading screen with nothing to stay responsive for.
         #[cfg(feature = "cd-stream-bench")]
         if !self.step_persistent_model_assets() {
-            // The model pack and WORLD.PAK share one physical CD controller.
-            // Finish the session-lifetime read before room residency can seek.
+            // The persistent model pack owns the CD controller until its
+            // session-lifetime read finishes.
             return;
         }
-        // Resident PXBSP owns world geometry, PVS, and collision. It has no
-        // synthetic PSXW room stream/window; only shared VRAM uploads and BSP
-        // material resolution remain after persistent models are ready.
-        if self.bsp.is_some() {
-            if background_tick {
-                let _ = self.streaming_jobs.step_vram_uploads();
-                if let Some(bsp) = self.bsp.as_mut() {
-                    let _ = bsp.refresh_materials();
-                }
+        // Resident PXBSP owns world geometry, PVS, and collision; only shared
+        // VRAM uploads and BSP material resolution remain after persistent
+        // models are ready.
+        if self.bsp.is_some() && background_tick {
+            let _ = self.streaming_jobs.step_vram_uploads();
+            if let Some(bsp) = self.bsp.as_mut() {
+                let _ = bsp.refresh_materials();
             }
-            return;
-        }
-        #[cfg(feature = "cd-stream-bench")]
-        if background_tick {
-            // Residency owner: the single per-frame declaration of which rooms
-            // must be resident (pin + load), so the build paths no longer have
-            // to request residency themselves.
-            telemetry::stage_begin(telemetry::stage::SIM_RESIDENCY);
-            self.update_room_residency();
-            telemetry::stage_end(telemetry::stage::SIM_RESIDENCY);
-        }
-        #[cfg(feature = "cd-stream-bench")]
-        let stream_progress = if background_tick {
-            telemetry::stage_begin(telemetry::stage::SIM_PUMP);
-            let progress = self.pump_room_stream(RUNTIME_SCHEDULE.stream_pump_sectors_per_tick);
-            telemetry::stage_end(telemetry::stage::SIM_PUMP);
-            progress
-        } else {
-            false
-        };
-        if background_tick {
-            // Stream progress marks the window dirty: newly resident
-            // rooms can unblock builds the last pass skipped.
-            #[cfg(feature = "cd-stream-bench")]
-            if stream_progress {
-                self.active_window_dirty = true;
-            }
-            // Pump the material refresh while any room texture is unresolved, not
-            // only when an upload completes. A dropped texture (queue was full) is
-            // never queued, so it produces no completion to wake a refresh; without
-            // the unresolved retry it stays the untextured fallback forever (and
-            // the fallback CLUT lives inside the framebuffer, so the surface
-            // visibly tracks stale frame contents -- the menu-path wall flicker).
-            let upload_completed = self.streaming_jobs.step_vram_uploads();
-            if upload_completed || self.room_materials_unresolved {
-                self.room_materials_unresolved = self.refresh_active_room_materials();
-            }
-            self.reconcile_active_room_window();
         }
     }
 
@@ -1032,35 +819,7 @@ impl Playtest {
                 ]);
                 return false;
             }
-            let bsp_ready = self.bsp.as_ref().is_none_or(BspRuntime::materials_ready);
-            if !self.chunked_level() {
-                return bsp_ready;
-            }
-            let Some(record) = ROOMS.get(self.room_index.to_usize()) else {
-                return true;
-            };
-            let textures_ready = self.initial_stream_ring_textures_ready();
-            let conditions = [
-                ("collision_room", self.current_collision_room.is_some()),
-                ("window_job_idle", !self.window.job.active),
-                (
-                    "portal_rooms_active",
-                    self.portal_visible_rooms_are_active(record),
-                ),
-                ("ring_resident", self.initial_stream_ring_resident()),
-                ("ring_textures", textures_ready),
-                ("bsp_textures", bsp_ready),
-                ("vram_uploads_idle", self.streaming_jobs.vram_uploads_idle()),
-                ("stream_quiet", !streamed_room_stream_active()),
-            ];
-            self.trace_world_ready_conditions(&conditions);
-            let mut ready = true;
-            let mut i = 0;
-            while i < conditions.len() {
-                ready &= conditions[i].1;
-                i += 1;
-            }
-            ready
+            self.bsp.as_ref().is_none_or(BspRuntime::materials_ready)
         }
     }
 
@@ -1104,75 +863,6 @@ impl Playtest {
                 i += 1;
             }
         }
-    }
-
-    #[cfg(feature = "cd-stream-bench")]
-    fn initial_stream_ring_resident(&self) -> bool {
-        let count = self.resident_desired_count.min(STREAMED_ROOM_SLOT_COUNT);
-        if count == 0 {
-            return false;
-        }
-        let mut i = 0usize;
-        while i < count {
-            let room = self.resident_desired[i];
-            if room == INVALID_ROOM_INDEX || !streamed_room_is_resident(room) {
-                return false;
-            }
-            i += 1;
-        }
-
-        let Some(record) = ROOMS.get(self.room_index.to_usize()) else {
-            return true;
-        };
-        let visible_limit = self.portal_visible_room_limit(record);
-        let mut visible = 0usize;
-        while visible < visible_limit {
-            let room = self.visibility.result.rooms[visible].room;
-            if room != INVALID_ROOM_INDEX && !streamed_room_is_resident(room) {
-                return false;
-            }
-            visible += 1;
-        }
-        true
-    }
-
-    #[cfg(feature = "cd-stream-bench")]
-    fn initial_stream_ring_textures_ready(&mut self) -> bool {
-        let mut ready = true;
-        let count = self.resident_desired_count.min(STREAMED_ROOM_SLOT_COUNT);
-        let mut i = 0usize;
-        while i < count {
-            let room = self.resident_desired[i];
-            if room != INVALID_ROOM_INDEX {
-                if let Some(record) = ROOMS.get(room.to_usize()) {
-                    ready &= room_material_textures_ready(record);
-                    ready &= room_backdrop_textures_ready(record);
-                }
-                ready &= room_reflection_probe_ready(room);
-                ready &= room_prop_textures_ready(room);
-            }
-            i += 1;
-        }
-
-        let Some(record) = ROOMS.get(self.room_index.to_usize()) else {
-            return ready;
-        };
-        let visible_limit = self.portal_visible_room_limit(record);
-        let mut visible = 0usize;
-        while visible < visible_limit {
-            let room = self.visibility.result.rooms[visible].room;
-            if room != INVALID_ROOM_INDEX && !room_requested(room, &self.resident_desired, count) {
-                if let Some(record) = ROOMS.get(room.to_usize()) {
-                    ready &= room_material_textures_ready(record);
-                    ready &= room_backdrop_textures_ready(record);
-                }
-                ready &= room_reflection_probe_ready(room);
-                ready &= room_prop_textures_ready(room);
-            }
-            visible += 1;
-        }
-
-        ready
     }
 
     fn update_evade_run_button(&mut self, ctx: &Ctx, delta_vblanks: u16) -> EvadeRunIntent {
@@ -1351,8 +1041,3 @@ fn main() -> ! {
         scene,
     );
 }
-
-#[cfg(not(playtest_pxbsp))]
-use generated::{CACHED_ROOM_DEPTH_MODE, CACHED_ROOM_TEXTURE_SPLIT_MODE};
-#[cfg(not(playtest_pxbsp))]
-use psx_engine::{CachedRoomDepthMode, CachedRoomSubdivisionMode};

@@ -159,7 +159,9 @@ impl StanceCluts {
     ) -> Option<(AssetId, u16)> {
         let material = character.material_override?;
         // Inspect crystal with its authored neutral palette in both stances.
-        if material.uses_facet_reflection() { return None; }
+        if material.uses_facet_reflection() {
+            return None;
+        }
         let texture = material.texture_asset?;
         let index = stance.index();
         if self.player[index] == 0 {
@@ -175,10 +177,14 @@ impl StanceCluts {
     /// Reuse the player's crystal reflection map for the procedural scarf and
     /// flying stance facets. Keep white highlights while tinting the midtones.
     pub(super) fn crystal_material(
-        &mut self, character: &RuntimeCharacter, stance: VitalityChannelId,
+        &mut self,
+        character: &RuntimeCharacter,
+        stance: VitalityChannelId,
     ) -> Option<TextureMaterial> {
         let material = character.material_override?;
-        if !material.uses_facet_reflection() { return None; }
+        if !material.uses_facet_reflection() {
+            return None;
+        }
         let texture = material.texture_asset?;
         let slot = model_texture_slot(texture)?;
         let index = stance.index();
@@ -186,14 +192,18 @@ impl StanceCluts {
             let palette = super::crystal_palette::STANCE_CRYSTAL_PALETTES[index];
             self.player[index] = ensure_resident_clut_variant(texture, index as u8, |entries| {
                 for entry in entries {
-                    if *entry == 0 { continue; }
+                    if *entry == 0 {
+                        continue;
+                    }
                     let level = bgr555(*entry).into_iter().max().unwrap_or(0);
                     *entry = palette[((level * 15 + 15) / 31).clamp(0, 15) as usize];
                 }
             })?;
         }
-        Some(TextureMaterial::opaque(self.player[index], slot.tpage_word, (128,128,128))
-            .with_texture_window(slot.texture_window))
+        Some(
+            TextureMaterial::opaque(self.player[index], slot.tpage_word, (128, 128, 128))
+                .with_texture_window(slot.texture_window),
+        )
     }
 
     /// Build the Horizon and Zenith palette copies of one freshly uploaded
@@ -500,12 +510,6 @@ impl Playtest {
         if persistent_assets_arena().ready() && !self.runtime_models_loaded {
             self.load_runtime_models();
             self.runtime_models_loaded = true;
-            // Model parsing owns the CD first. Only now seed portal visibility
-            // and the incremental room-window job; the same tick can reconcile
-            // and pump WORLD.PAK without two readers sharing the controller.
-            if self.bsp.is_none() {
-                self.load_active_room_window();
-            }
         }
         self.runtime_models_loaded
     }
@@ -852,22 +856,37 @@ impl Playtest {
 
         // Keep Aletha's authored legs running while the cannon plays its own
         // upper-body shot. This retained pose also owns muzzle/hurtbox sampling.
-        if self.ranged_ready.firing(ctx.sim_tick.as_u32()) && self.anim_state != PlayerAnim::RangedAttack {
-            if let (Some(c),Some(pose))=(self.character,self.player_actor_pose) {
-                if pose.pose().animation().joint_count()==26 {
-                    if let Some(fire)=c.action_clip(CharacterAnimationAction::RangedAttack).to_option()
-                        .and_then(|clip|pose.model().clip(&self.clips,clip)) {
-                        let phase=mr::animation_phase_at_tick_q12(fire,
-                            ctx.sim_tick.as_u32().saturating_sub(self.ranged_ready.fire_started),ctx.video_hz,false,
-                            self.player_action_speed_q8(&c,PlayerAnim::RangedAttack),
-                            c.action_frame_range(CharacterAnimationAction::RangedAttack));
-                        self.player_actor_pose=Some(pose.with_pose(pose.pose().with_joint_layer(fire,phase,0x03ffff80)));
+        if self.ranged_ready.firing(ctx.sim_tick.as_u32())
+            && self.anim_state != PlayerAnim::RangedAttack
+        {
+            if let (Some(c), Some(pose)) = (self.character, self.player_actor_pose) {
+                if pose.pose().animation().joint_count() == 26 {
+                    if let Some(fire) = c
+                        .action_clip(CharacterAnimationAction::RangedAttack)
+                        .to_option()
+                        .and_then(|clip| pose.model().clip(&self.clips, clip))
+                    {
+                        let phase = mr::animation_phase_at_tick_q12(
+                            fire,
+                            ctx.sim_tick
+                                .as_u32()
+                                .saturating_sub(self.ranged_ready.fire_started),
+                            ctx.video_hz,
+                            false,
+                            self.player_action_speed_q8(&c, PlayerAnim::RangedAttack),
+                            c.action_frame_range(CharacterAnimationAction::RangedAttack),
+                        );
+                        self.player_actor_pose = Some(
+                            pose.with_pose(pose.pose().with_joint_layer(fire, phase, 0x03ffff80)),
+                        );
                     }
                 }
             }
         }
 
-        self.player_actor_pose = self.player_actor_pose.map(|pose| self.arch_player_pose(pose, ctx.sim_tick));
+        self.player_actor_pose = self
+            .player_actor_pose
+            .map(|pose| self.arch_player_pose(pose, ctx.sim_tick));
 
         // Where rendering samples the phase is where it is worth measuring:
         // this is the number that says which cooked frame is on screen.
@@ -955,14 +974,29 @@ impl Playtest {
                 elapsed_tick,
                 ctx.video_hz,
             );
-            if let Some(pose)=self.instance_actor_poses[index] {
-                if pose.pose().animation().joint_count()==22 {
-                    if let Some((entity,r))=GAME_ENTITIES.iter().enumerate().find(|(_,r)|usize::from(r.model_instance)==index) {
-                        if let Some((clip,ticks))=self.game_entities.firing_gait(r,entity) {
-                            if let Some(gait)=pose.model().clip(&self.clips,psx_level::ModelClipIndex(clip)) {
-                                let phase=mr::animation_phase_at_tick_q12(gait,u32::from(ticks),ctx.video_hz,true,256,
-                                    psx_level::CharacterActionFrameRange::FULL);
-                                self.instance_actor_poses[index]=Some(pose.with_pose(pose.pose().with_joint_layer(gait,phase,0x003fc000)));
+            if let Some(pose) = self.instance_actor_poses[index] {
+                if pose.pose().animation().joint_count() == 22 {
+                    if let Some((entity, r)) = GAME_ENTITIES
+                        .iter()
+                        .enumerate()
+                        .find(|(_, r)| usize::from(r.model_instance) == index)
+                    {
+                        if let Some((clip, ticks)) = self.game_entities.firing_gait(r, entity) {
+                            if let Some(gait) = pose
+                                .model()
+                                .clip(&self.clips, psx_level::ModelClipIndex(clip))
+                            {
+                                let phase = mr::animation_phase_at_tick_q12(
+                                    gait,
+                                    u32::from(ticks),
+                                    ctx.video_hz,
+                                    true,
+                                    256,
+                                    psx_level::CharacterActionFrameRange::FULL,
+                                );
+                                self.instance_actor_poses[index] = Some(pose.with_pose(
+                                    pose.pose().with_joint_layer(gait, phase, 0x003fc000),
+                                ));
                             }
                         }
                     }

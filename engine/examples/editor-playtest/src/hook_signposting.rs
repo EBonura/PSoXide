@@ -16,7 +16,7 @@ impl Playtest {
             return;
         };
         // Small surface bias only: unlike HUD graphics, these must sort behind walls.
-        let options = pxbsp_surface_options(room)
+        let options = room_surface_options(room)
             .with_depth_bias(-2)
             .with_cull_mode(psx_engine::CullMode::None);
         for (_slot, (index, h)) in ENTITIES
@@ -280,10 +280,7 @@ impl Playtest {
                 color,
                 BlendMode::Average,
             ));
-            for end in [
-                (corner.0 - x * 5, corner.1),
-                (corner.0, corner.1 - y * 5),
-            ] {
+            for end in [(corner.0 - x * 5, corner.1), (corner.0, corner.1 - y * 5)] {
                 gpu.draw(
                     &psx_gpu::prim::LineMono::new(
                         corner.0, corner.1, end.0, end.1, color.0, color.1, color.2,
