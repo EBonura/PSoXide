@@ -20,10 +20,13 @@ I'm Manny, the developer behind Bonnie Studios. PSoXide has three strands:
 - **Optimize:** existing PS1 games reimplemented by rewriting their original source
   for greater efficiency.
 
-The Rust SDK, engine, editor and emulator support this work. Work that proves
-useful in one project gets reused in the next: PSXcel's on-screen keyboard, for
-example, is now the shared `psx-osk` SDK component.
-[See the PSXcel development notes](https://github.com/EBonura/psxcel).
+The Rust SDK, engine, editor and emulator support this work, so a fix made once
+reaches every game. Sony's own SCPH-1200 controller, for example, gave no
+response to PSoXide games at first, while a third-party pad worked. A test disc
+on a real console showed that the official pad needs a short delay after it's
+selected. That fix lives in the shared `psx-pad` crate, so every game built on
+the SDK reads official controllers.
+[How psx-pad works](@/docs/crates/psx-pad.md).
 
 PSoXide builds on the work and knowledge shared by the PlayStation homebrew
 community. The [projects page](@/projects/_index.md) records what you can play or
