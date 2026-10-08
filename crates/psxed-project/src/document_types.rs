@@ -267,158 +267,6 @@ impl EditorViewState {
     }
 }
 
-/// Runtime depth sorting policy for cooked cached room geometry.
-///
-/// This affects embedded play and generated runtime manifests. The editor
-/// preview remains the reference view, but the PS1 path needs explicit
-/// tradeoffs between stable ordering and per-triangle work.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum RuntimeDepthSortMode {
-    /// Use the legacy fixed cell depth key for every cached surface.
-    FixedCell,
-    /// Use per-triangle depth for sloped/high-span horizontal surfaces.
-    Hybrid,
-    /// Like hybrid, but also sorts high-depth-span walls per triangle.
-    #[default]
-    HybridWalls,
-    /// Use per-triangle projected depth for every cached surface.
-    PerTriangle,
-}
-
-impl RuntimeDepthSortMode {
-    pub const ALL: [Self; 4] = [
-        Self::Hybrid,
-        Self::HybridWalls,
-        Self::PerTriangle,
-        Self::FixedCell,
-    ];
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::FixedCell => "Fixed cell",
-            Self::Hybrid => "Hybrid",
-            Self::HybridWalls => "Hybrid + walls",
-            Self::PerTriangle => "Per triangle",
-        }
-    }
-
-    pub const fn description(self) -> &'static str {
-        match self {
-            Self::FixedCell => "Fast legacy ordering. Can show overlap errors on ramps.",
-            Self::Hybrid => "Uses per-triangle depth only where sloped floors need it.",
-            Self::HybridWalls => {
-                "Also sorts high-depth-span walls per triangle for ramp/wall conflicts."
-            }
-            Self::PerTriangle => "Most precise cached-room ordering. Costs more sort work.",
-        }
-    }
-
-    pub const fn manifest_value(self) -> u8 {
-        match self {
-            Self::FixedCell => 0,
-            Self::Hybrid => 1,
-            Self::HybridWalls => 2,
-            Self::PerTriangle => 3,
-        }
-    }
-}
-
-/// Default projected edge threshold for runtime room subdivision.
-///
-/// `0` keeps the fixed adaptive depth-band schedule without additional
-/// projected-edge refinement. Lower positive values split more aggressively.
-pub const DEFAULT_RUNTIME_TEXTURE_SPLIT_MAX_EDGE: u16 = 0;
-
-pub(crate) const fn default_runtime_texture_split_max_edge() -> u16 {
-    DEFAULT_RUNTIME_TEXTURE_SPLIT_MAX_EDGE
-}
-
-/// Scope for runtime room triangle subdivision.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum RuntimeTextureSplitMode {
-    /// Apply depth-band subdivision and optional edge refinement everywhere.
-    #[default]
-    All,
-    /// Apply the edge threshold only to surfaces using per-triangle depth.
-    DepthSorted,
-    /// Apply the edge threshold only to sloped/high-depth-span surfaces.
-    Risky,
-}
-
-impl RuntimeTextureSplitMode {
-    pub const ALL: [Self; 3] = [Self::All, Self::DepthSorted, Self::Risky];
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::All => "All surfaces",
-            Self::DepthSorted => "Depth sorted",
-            Self::Risky => "Risky only",
-        }
-    }
-
-    pub const fn description(self) -> &'static str {
-        match self {
-            Self::All => "adaptive depth-band subdivision applies to every cached room surface.",
-            Self::DepthSorted => {
-                "Only surfaces using per-triangle depth receive depth-band subdivision."
-            }
-            Self::Risky => {
-                "Only sloped or high-depth-span surfaces receive depth-band subdivision."
-            }
-        }
-    }
-
-    pub const fn manifest_value(self) -> u8 {
-        match self {
-            Self::All => 0,
-            Self::DepthSorted => 1,
-            Self::Risky => 2,
-        }
-    }
-}
-
-/// Runtime draw ordering for active room chunks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum RuntimeRoomDrawOrderMode {
-    /// Sort active visible rooms by their camera-space center depth.
-    #[default]
-    Distance,
-    /// Draw rooms in portal traversal order.
-    Portal,
-    /// Draw active slots in runtime slot order.
-    Slot,
-}
-
-impl RuntimeRoomDrawOrderMode {
-    pub const ALL: [Self; 3] = [Self::Distance, Self::Portal, Self::Slot];
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Distance => "Distance",
-            Self::Portal => "Portal order",
-            Self::Slot => "Slot order",
-        }
-    }
-
-    pub const fn description(self) -> &'static str {
-        match self {
-            Self::Distance => "Current behavior. Sort active rooms by camera-space center depth.",
-            Self::Portal => {
-                "Draw rooms in portal traversal order, closer to adaptive-style visibility."
-            }
-            Self::Slot => "Stable runtime slot order for debugging streaming/order interactions.",
-        }
-    }
-
-    pub const fn manifest_value(self) -> u8 {
-        match self {
-            Self::Distance => 0,
-            Self::Portal => 1,
-            Self::Slot => 2,
-        }
-    }
-}
-
 /// One editor project document.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectDocument {
@@ -469,18 +317,6 @@ pub struct ProjectDocument {
     /// their quiet stretch is part of the cycle.
     #[serde(default, skip_serializing_if = "is_zero_u8")]
     pub animation_trim_still_percent: u8,
-    /// Cooked playtest cached-room depth sorting mode.
-    #[serde(default)]
-    pub runtime_depth_sort_mode: RuntimeDepthSortMode,
-    /// Runtime room triangle subdivision scope.
-    #[serde(default)]
-    pub runtime_texture_split_mode: RuntimeTextureSplitMode,
-    /// Runtime active-room draw ordering policy.
-    #[serde(default)]
-    pub runtime_room_draw_order_mode: RuntimeRoomDrawOrderMode,
-    /// Optional projected-edge refinement layered over depth-band subdivision.
-    #[serde(default = "default_runtime_texture_split_max_edge")]
-    pub runtime_texture_split_max_edge: u16,
     /// Open scenes. The first scene is the active scene for now.
     pub scenes: Vec<Scene>,
     /// Authored screen-space UI scenes. The first scene is the HUD for now.
@@ -551,10 +387,6 @@ impl ProjectDocument {
             animation_trim_still_percent: 0,
             bsp_cook_mode: crate::brush_world::BrushWorldCookMode::default(),
             collision_hull_bsp: true,
-            runtime_depth_sort_mode: RuntimeDepthSortMode::default(),
-            runtime_texture_split_mode: RuntimeTextureSplitMode::default(),
-            runtime_room_draw_order_mode: RuntimeRoomDrawOrderMode::default(),
-            runtime_texture_split_max_edge: DEFAULT_RUNTIME_TEXTURE_SPLIT_MAX_EDGE,
             scenes: vec![Scene::new("Main")],
             ui_scenes,
             scene_states,

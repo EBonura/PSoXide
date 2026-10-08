@@ -285,11 +285,6 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         out,
         "pub const BOX_PROP_STATE_COUNT: usize = {box_prop_state_count};\n",
     );
-    let runtime_texture_split_max_edge = package.runtime_texture_split_max_edge;
-    let _ = writeln!(
-        out,
-        "pub const CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE: u16 = {runtime_texture_split_max_edge};\n",
-    );
 
     // Force 4-byte alignment on embedded asset blobs. A zero-size
     // `[u32; 0]` marker bumps the wrapper's alignment to a word; the
