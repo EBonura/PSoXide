@@ -1,6 +1,8 @@
 # PSoXide SDK
 
-> **Built with agentic coding.** AI coding agents write most of the code in PSoXide. I direct them, review what they produce, and test the results in the emulator and on a real PlayStation.
+> **Largely written with agentic coding.** I direct the agents and test their work in two places: PSoXide's emulator, which profiles every cycle, and a real PlayStation, which shows me where the emulator is wrong. Working between them is where the accuracy and the speed come from. [How PSoXide is built](https://ebonura.github.io/PSoXide/how-its-built/)
+>
+> **AI-generated content:** code. The examples' textures and fonts are third-party and credited in [docs/asset-provenance.md](docs/asset-provenance.md).
 
 Bare-metal Rust tools and libraries for the original PlayStation. This is the
 SDK repository at the original **EBonura/PSoXide** URL. It provides the runtime,
