@@ -2846,8 +2846,6 @@ mod tests {
         },
     ];
 
-    const ACTIVE: [RoomIndex; 1] = [RoomIndex(0)];
-
     fn far_input() -> GameEntityTickInput {
         GameEntityTickInput {
             player: [100_000, 0, 100_000],

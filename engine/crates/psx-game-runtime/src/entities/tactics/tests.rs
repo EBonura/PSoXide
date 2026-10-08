@@ -34,7 +34,6 @@ const fn enemy() -> LevelGameEntityRecord {
     r
 }
 static ENEMY: [LevelGameEntityRecord; 1] = [enemy()];
-static ROOMS: [RoomIndex; 1] = [RoomIndex(0)];
 fn input(p: [i32; 3]) -> GameEntityTickInput {
     GameEntityTickInput {
         player: p,
