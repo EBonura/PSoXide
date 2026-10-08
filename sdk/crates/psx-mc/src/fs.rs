@@ -64,7 +64,7 @@ fn checksum(frame: &[u8; FRAME_SIZE]) -> u8 {
 }
 
 /// Blocks needed to hold `total` payload bytes (including the container header).
-fn blocks_for(total: usize) -> usize {
+pub(crate) const fn blocks_for(total: usize) -> usize {
     if total <= FIRST_BLOCK_CAP {
         1
     } else {
