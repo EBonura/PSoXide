@@ -26,6 +26,10 @@ pub struct TJunction {
 
 const BUCKET: i32 = 128;
 
+/// A polygon corner indexed for the edge search: owning polygon, corner
+/// index within it, and its position.
+type IndexedCorner = (usize, usize, [i32; 3]);
+
 fn bucket(position: [i32; 3]) -> [i32; 3] {
     position.map(|value| value.div_euclid(BUCKET))
 }
@@ -69,7 +73,7 @@ pub fn point_on_edge_interior(point: [i32; 3], a: [i32; 3], b: [i32; 3], toleran
 /// Every corner that touches a foreign edge interior without being one of
 /// that edge's corners. `tolerance` is in world units.
 pub fn find_t_junctions(polygons: &[Vec<[i32; 3]>], tolerance: i64) -> Vec<TJunction> {
-    let mut grid: HashMap<[i32; 3], Vec<(usize, usize, [i32; 3])>> = HashMap::new();
+    let mut grid: HashMap<[i32; 3], Vec<IndexedCorner>> = HashMap::new();
     for (index, polygon) in polygons.iter().enumerate() {
         for (corner_index, &corner) in polygon.iter().enumerate() {
             grid.entry(bucket(corner))
