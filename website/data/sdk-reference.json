@@ -1,5 +1,5 @@
 {
-  "revision": "47a414f23895c0dd4cb5a6c1b3cd75bedf0b76dc",
+  "revision": "0d09fa09313fb64b7a7e7de9174b7cdb9f1d1619",
   "crates": [
     {
       "name": "psx-io",
@@ -1233,6 +1233,110 @@
         {
           "path": "src/tests.rs",
           "summary": "The transport state machine against a scripted drive."
+        }
+      ]
+    },
+    {
+      "name": "psx-residency",
+      "description": "Residency policy for streamed data: contiguous page pools with generation handles, priority classes, pinning, distance-then-LRU eviction with hysteresis, retry backoff, and a transport-agnostic request interface. Host-testable, no heap.",
+      "features": {},
+      "dependencies": [],
+      "files": [
+        {
+          "path": "Cargo.toml",
+          "summary": ""
+        },
+        {
+          "path": "src/backoff.rs",
+          "summary": "Retry backoff for failed reads."
+        },
+        {
+          "path": "src/buffer.rs",
+          "summary": "RAM backing for a page pool."
+        },
+        {
+          "path": "src/config.rs",
+          "summary": "Budgets and policy knobs."
+        },
+        {
+          "path": "src/engine.rs",
+          "summary": "The residency engine: what is wanted, what is resident, what to read next"
+        },
+        {
+          "path": "src/host.rs",
+          "summary": "The edge of the crate: what the engine asks of its host, and what it hands"
+        },
+        {
+          "path": "src/key.rs",
+          "summary": "Resource keys, categories and request priority classes."
+        },
+        {
+          "path": "src/lib.rs",
+          "summary": "Residency policy for streamed data."
+        },
+        {
+          "path": "src/pool.rs",
+          "summary": "Contiguous-run page allocation with generation handles."
+        },
+        {
+          "path": "src/slots.rs",
+          "summary": "Fixed-slot residency policy: a handful of equally sized private arenas, a"
+        },
+        {
+          "path": "src/tests/harness.rs",
+          "summary": "A scripted host and small builders shared by the engine tests."
+        },
+        {
+          "path": "src/tests/mod.rs",
+          "summary": "Engine tests: scenario tests of the policy and randomized property tests."
+        },
+        {
+          "path": "src/tests/properties.rs",
+          "summary": "Randomized property tests: random wanted lists, random transport outcomes,"
+        },
+        {
+          "path": "src/tests/scenarios.rs",
+          "summary": ""
+        }
+      ]
+    },
+    {
+      "name": "psx-residency-sim",
+      "description": "Host-side drive model and route simulator for psx-residency: replays a route through a region graph against the real residency engine and a drive model built from the silicon seek and read measurements, and reports deadline slack and misses.",
+      "features": {},
+      "dependencies": [
+        {
+          "name": "psx-residency",
+          "target": "all targets",
+          "optional": false,
+          "features": [],
+          "sdk": true
+        }
+      ],
+      "files": [
+        {
+          "path": "Cargo.toml",
+          "summary": ""
+        },
+        {
+          "path": "src/churn.rs",
+          "summary": "Fragmentation under churn: how a pool behaves when variable-length runs"
+        },
+        {
+          "path": "src/drive.rs",
+          "summary": "The CD drive as the silicon measurements describe it."
+        },
+        {
+          "path": "src/lib.rs",
+          "summary": "Host-side drive model and route simulator for `psx-residency`."
+        },
+        {
+          "path": "src/run.rs",
+          "summary": "The route simulator: the real engine against the drive model."
+        },
+        {
+          "path": "src/world.rs",
+          "summary": "Region graphs and routes for the simulator."
         }
       ]
     }

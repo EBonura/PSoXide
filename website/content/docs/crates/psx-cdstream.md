@@ -24,6 +24,8 @@ Up to `QUEUE_DEPTH` requests wait behind the active one, most urgent `Priority` 
 
 CD-DA and XA playback cannot share the drive with data reads. `request_audio_lease` stops the read in flight, waits for the drive to stop, closes the CD interrupt source and lets you collect the controller token with `take_audio_lease`; `release_audio_lease` takes it back and queued reads carry on. End audio with Pause, not Stop: after Stop the motor spins down and reads started in the next second or two failed on a console.
 
+A lease that was asked for and left pending is granted the moment the drive stops, ahead of any read queued meanwhile, so a read submitted in between waits for audio to finish. Audio that should not hold up reads calls `try_take_audio_lease`, which takes the drive only if it is free and otherwise leaves nothing behind, or ends the pending request with `withdraw_audio_lease`.
+
 `install` takes the controller token that `SectorReader::release` returns, so the compiler keeps the polled reader and the interrupt transport from using the drive at once. `uninstall` hands the token back.
 
 The counters (`StreamStats`) are published as the `PSX_CD_STATS` symbol for tools that read guest memory. The `trace` feature also records the last 128 controller events.

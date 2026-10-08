@@ -102,6 +102,16 @@
       "purpose": "Interrupt-driven CD streaming: a queue of read requests drained one sector per drive interrupt, seek-first, abortable at the next sector, contiguous requests chained without a seek, and a drive arbiter for CD-DA. The state machine is host-tested against a scripted drive."
     },
     {
+      "name": "psx-residency",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/crates/psx-residency",
+      "purpose": "Residency policy for streamed data: contiguous page pools with generation handles, priority classes, pinning, distance-then-LRU eviction, retry backoff, and a fixed-slot policy. It decides what to load and what to evict and never touches the drive; reads go out through a trait. Host-tested, no heap."
+    },
+    {
+      "name": "psx-residency-sim",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/crates/psx-residency-sim",
+      "purpose": "Host-only route simulator for `psx-residency`: replays a route through a region graph against the real policy and a drive model built from the silicon seek and read measurements, and reports deadline slack and misses."
+    },
+    {
       "name": "psx-telemetry",
       "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/crates/psx-telemetry",
       "purpose": "Shared guest/host telemetry id tables for the emulator profiling hooks."
