@@ -261,10 +261,6 @@ fn the_card_uses_the_pad_transport_not_a_private_one() {
 }
 
 #[test]
-#[cfg_attr(
-    miri,
-    ignore = "the post-write settle is hundreds of thousands of interpreted reads"
-)]
 fn a_written_frame_lands_on_the_card_and_reads_back() {
     let mut bus = CardBus::new(Behaviour::Normal);
     let data = core::array::from_fn(|i| (i as u8).wrapping_mul(3) ^ 0xA5);
@@ -275,6 +271,62 @@ fn a_written_frame_lands_on_the_card_and_reads_back() {
     let (result, out, _) = read(&mut bus, 0x2FF);
     assert_eq!(result, Ok(()));
     assert_eq!(out, data);
+}
+
+/// A frame write through the same entry point `HardwareCard` uses.
+fn write_through(
+    bus: &mut CardBus,
+    frame: u16,
+    data: &[u8; FRAME_SIZE],
+    settle: bool,
+) -> Result<()> {
+    let mut trace = TransportTrace::new();
+    write_transaction(
+        bus,
+        Slot::One,
+        Timing::default(),
+        &mut trace,
+        frame,
+        data,
+        settle,
+    )
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "the post-write settle is hundreds of thousands of interpreted reads"
+)]
+fn the_settled_write_spins_out_the_commit_and_the_unsettled_one_leaves_it_to_the_caller() {
+    let data = core::array::from_fn(|i| (i as u8).wrapping_mul(5) ^ 0x3C);
+    let mut settled = CardBus::new(Behaviour::Normal);
+    assert_eq!(write_through(&mut settled, 0x40, &data, true), Ok(()));
+    let mut unsettled = CardBus::new(Behaviour::Normal);
+    assert_eq!(write_through(&mut unsettled, 0x40, &data, false), Ok(()));
+
+    // Same bytes on the wire and on the card; the only difference is the
+    // wait, one status read per spin.
+    assert_eq!(unsettled.frame(0x40), &data[..]);
+    assert_eq!(settled.frame(0x40), unsettled.frame(0x40));
+    assert_eq!(settled.sent, unsettled.sent);
+    assert_eq!(
+        settled.now - unsettled.now,
+        u64::from(POST_WRITE_SETTLE_SPINS)
+    );
+}
+
+#[test]
+fn a_frame_past_the_end_owes_no_commit_wait_either_way() {
+    let data = [0u8; FRAME_SIZE];
+    for settle in [false, true] {
+        let mut bus = CardBus::new(Behaviour::Normal);
+        let before = bus.now;
+        assert_eq!(
+            write_through(&mut bus, FRAME_COUNT as u16, &data, settle),
+            Err(Error::OutOfRange)
+        );
+        assert_eq!((bus.now, bus.sent), (before, 0));
+    }
 }
 
 #[test]

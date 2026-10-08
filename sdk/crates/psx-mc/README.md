@@ -40,6 +40,35 @@ let len = card.read("BESLES-00000MYGAME01", &mut buf)?;
 Names are the BIOS file name (region+product code + label, ≤ 20 ASCII); the
 title is the human-readable label the card manager shows (≤ 32 ASCII).
 
+## Saving without stopping the frame
+
+`Card::write` blocks: a save is dozens of frame transactions, each followed by
+the card's flash-commit wait, so it freezes a game loop for seconds. A
+`CardJob` runs the same operations a little at a time. It never does more than
+one card transaction per `step`, and it keeps the commit waits (`SETTLE_VBLANKS`
+vblanks after every frame write) by counting vblanks instead of spinning:
+
+```rust
+use psx_mc::{queue_frames, CardJob, HardwareCard, Slot, Step};
+
+static mut JOB: CardJob<{ queue_frames(2048) }> = CardJob::new();
+
+job.begin();
+// once per game frame, with the port borrowed for the call only:
+let mut card = HardwareCard::on_port(&mut port, Slot::One);
+match job.step(&mut card, vblank_count())? {
+    Step::NeedsPlan => job.plan(|c| c.write(NAME, TITLE, &save_bytes))?,
+    Step::Done => { /* saved */ }
+    _ => {} // Probing, Writing, Waiting: draw the progress bar
+}
+```
+
+The plan closure runs the ordinary `Card` calls (`format`, `write`, `delete`,
+`list`) against the directory the job read first, and its writes are queued in
+the order the filesystem chose, so the old save still stays whole until the new
+one is complete. `queue_frames` and `FORMAT_FRAMES` size the queue, and
+`progress_q8` feeds a progress bar. The blocking calls are unchanged.
+
 ## Compression (feature `compress`)
 
 ```rust
@@ -71,6 +100,10 @@ cargo test -p psx-mc --no-default-features --features compress
 - **Filesystem + compression**: 17 host unit tests against `RamCard` (CRUD,
   multi-block chains, overwrite/delete, capacity, checksums, image reopen,
   compressed round-trips).
+- **Incremental saves**: host tests run a `CardJob` against a card that logs
+  every transaction with its vblank: byte-identical result to the blocking
+  call, one transaction per step, the commit wait kept after every write, the
+  old save readable when the card is pulled after any number of writes.
 - **SIO0 transport**: the `hello-memcard` example (`make hello-memcard`) runs
   format → write → read → verify (plain and compressed) against a real card and
   paints `ALL PASS`; verified green under the PSoXide emulator's card model.
