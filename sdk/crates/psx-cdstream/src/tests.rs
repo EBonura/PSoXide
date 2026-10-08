@@ -175,6 +175,58 @@ fn a_transfer_is_seek_first_at_double_speed() {
 }
 
 #[test]
+fn single_speed_sets_the_mode_to_zero() {
+    let config = Config {
+        double_speed: false,
+        ..Config::DEFAULT
+    };
+    let mut engine = engine_with(config);
+    let buf = Buf::new(2);
+    let ticket = submit(&mut engine, request(100, 2, &buf));
+    run(&mut engine);
+    assert_eq!(finished(&mut engine, ticket).outcome, Outcome::Done);
+    let drive = engine.hw();
+    assert_eq!(drive.commands(), BRACKET);
+    assert_eq!(drive.log[2].params, [0]);
+    assert_eq!(drive.mode, 0);
+    buf.assert_sectors(100, 2);
+}
+
+#[test]
+fn the_speed_can_change_between_transfers() {
+    let mut engine = engine();
+    let buf = Buf::new(1);
+    submit(&mut engine, request(10, 1, &buf));
+    run(&mut engine);
+    engine.configure(Config {
+        double_speed: false,
+        ..Config::DEFAULT
+    });
+    submit(&mut engine, request(20, 1, &buf));
+    run(&mut engine);
+    let modes: Vec<u8> = engine
+        .hw()
+        .log
+        .iter()
+        .filter(|sent| sent.command == CMD_SETMODE)
+        .map(|sent| sent.params[0])
+        .collect();
+    assert_eq!(modes, [MODE_DOUBLE_SPEED, 0]);
+}
+
+#[test]
+fn the_handler_peak_can_be_started_over() {
+    let mut engine = engine();
+    engine.hw_mut().clock_step = 7;
+    let buf = Buf::new(2);
+    submit(&mut engine, request(0, 2, &buf));
+    run(&mut engine);
+    assert!(engine.stats().max_irq_ticks > 0);
+    engine.reset_max_irq_ticks();
+    assert_eq!(engine.stats().max_irq_ticks, 0);
+}
+
+#[test]
 fn setloc_names_the_sector_in_absolute_minutes_seconds_frames() {
     let mut engine = engine();
     let lbas = [0, 1, 74, 75, 4499, 4500, 333_000];
