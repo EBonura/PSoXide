@@ -89,8 +89,8 @@ use psx_level::{
     find_asset_of_kind, room_flags, AssetId, AssetKind, CharacterAnimationAction, InteractableKind,
     InteractableRecord, LevelBoxPropRecord, LevelCameraRecord, LevelCharacterRecord,
     LevelFarVistaRecord, LevelGameEntityRecord, LevelGameplaySfxEvent, LevelImagePropRecord,
-    LevelRoomRecord, LevelSkyRecord, LevelUiValueBinding, ModelClipIndex,
-    ParticleEmitterRecord, RoomIndex,
+    LevelRoomRecord, LevelSkyRecord, LevelUiValueBinding, ModelClipIndex, ParticleEmitterRecord,
+    RoomIndex,
 };
 use psx_vram::{TextureDepth, TexturePage};
 

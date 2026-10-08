@@ -367,9 +367,7 @@ impl Playtest {
         }
         self.logic.tick(
             LOGIC,
-            psx_game_runtime::logic::LogicTickInput {
-                player: player_pos,
-            },
+            psx_game_runtime::logic::LogicTickInput { player: player_pos },
             now,
         );
         self.dispatch_logic_effects();
