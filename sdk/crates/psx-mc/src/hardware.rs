@@ -42,6 +42,13 @@ const FIRST_COMMAND_SETTLE_SPINS: u32 = 1_024;
 /// Conservative volatile-MMIO delay after a 128-byte sector write. Reference
 /// drivers leave at least two video periods before accessing the card again.
 /// This intentionally covers the slower 50 Hz case as well as 60 Hz consoles.
+///
+/// This is the wait the blocking [`Block::write_frame`] spins away. In the
+/// emulator one spin costs about 8 cycles, which makes it between five and six
+/// video periods (a VoXide save step, drawing included, takes seven); it is
+/// not measured on a console. A
+/// [`CardJob`](crate::CardJob) keeps the same wait as
+/// [`SETTLE_VBLANKS`](crate::SETTLE_VBLANKS) vblanks instead of spinning.
 const POST_WRITE_SETTLE_SPINS: u32 = 400_000;
 
 /// Which controller/card port to use.
@@ -344,11 +351,6 @@ impl<T: Transport> Link<'_, T> {
         let end = self.xfer(0x00, false); // terminator
         self.end();
 
-        // Leave the card idle while its non-volatile write finishes. Starting
-        // another transaction too early can produce a protocol-successful
-        // readback while still losing directory updates across a power cycle.
-        self.bus.delay(POST_WRITE_SETTLE_SPINS);
-
         if id1 == 0xFF {
             return Err(Error::NoCard);
         }
@@ -390,6 +392,31 @@ fn check_range(frame: u16) -> Result<()> {
     }
 }
 
+/// One frame write on `bus`. With `settle`, the card is then left idle while
+/// its non-volatile write finishes; starting another transaction too early can
+/// produce a protocol-successful readback while still losing directory updates
+/// across a power cycle. Without it, the wait is the caller's to keep (see
+/// [`Block::write_frame_unsettled`]). A frame refused before the port was
+/// touched owes no wait.
+fn write_transaction<T: Transport>(
+    bus: &mut T,
+    slot: Slot,
+    timing: Timing,
+    trace: &mut TransportTrace,
+    frame: u16,
+    data: &[u8; FRAME_SIZE],
+    settle: bool,
+) -> Result<()> {
+    check_range(frame)?;
+    let result = transact(bus, slot, timing, trace, |link| {
+        link.write_frame(frame, data)
+    });
+    if settle {
+        bus.delay(POST_WRITE_SETTLE_SPINS);
+    }
+    result
+}
+
 impl<P: BorrowMut<ControllerPort>> Block for HardwareCard<P> {
     fn read_frame(&mut self, frame: u16, out: &mut [u8; FRAME_SIZE]) -> Result<()> {
         check_range(frame)?;
@@ -404,14 +431,28 @@ impl<P: BorrowMut<ControllerPort>> Block for HardwareCard<P> {
     }
 
     fn write_frame(&mut self, frame: u16, data: &[u8; FRAME_SIZE]) -> Result<()> {
-        check_range(frame)?;
         let (slot, timing) = (self.slot, self.timing);
-        transact(
+        write_transaction(
             self.port.borrow_mut(),
             slot,
             timing,
             &mut self.trace,
-            |link| link.write_frame(frame, data),
+            frame,
+            data,
+            true,
+        )
+    }
+
+    fn write_frame_unsettled(&mut self, frame: u16, data: &[u8; FRAME_SIZE]) -> Result<()> {
+        let (slot, timing) = (self.slot, self.timing);
+        write_transaction(
+            self.port.borrow_mut(),
+            slot,
+            timing,
+            &mut self.trace,
+            frame,
+            data,
+            false,
         )
     }
 }

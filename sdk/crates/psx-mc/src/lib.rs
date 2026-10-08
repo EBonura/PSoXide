@@ -40,6 +40,15 @@
 //! let len = card.read("BESLES-00000MYGAME01", &mut buf)?;
 //! ```
 //!
+//! ## Saving without stopping the frame
+//!
+//! `Card::write` on a [`HardwareCard`] is a blocking call: every frame
+//! transaction takes milliseconds and each write is followed by the card's
+//! commit time, so a save holds the CPU for seconds. A game loop that must
+//! keep drawing hands the same operations to a [`CardJob`], which reads the
+//! directory, runs them against a staged copy, then sends the writes one per
+//! step with the commit waits spread over vblanks. See the [`job`] docs.
+//!
 //! All logic below the transport is pure and covered by host unit tests
 //! (`cargo test --no-default-features`, optionally `--features compress`).
 
@@ -47,6 +56,7 @@
 #![allow(clippy::result_unit_err)]
 
 mod fs;
+pub mod job;
 mod ram;
 
 #[cfg(test)]
@@ -59,6 +69,7 @@ pub mod compress;
 #[doc(alias = "SIO0")]
 pub mod hardware;
 
+pub use job::{queue_frames, CardJob, Staged, Step, DIR_FRAMES, FORMAT_FRAMES, SETTLE_VBLANKS};
 pub use ram::RamCard;
 
 #[cfg(feature = "hw")]
@@ -164,6 +175,19 @@ pub trait Block {
     fn read_frame(&mut self, frame: u16, out: &mut [u8; FRAME_SIZE]) -> Result<()>;
     /// Write `data` to frame `frame` (0..[`FRAME_COUNT`]).
     fn write_frame(&mut self, frame: u16, data: &[u8; FRAME_SIZE]) -> Result<()>;
+    /// [`write_frame`](Self::write_frame) without waiting out the card's
+    /// commit time afterwards.
+    ///
+    /// A physical card needs time to commit a frame to flash after the
+    /// transfer, and no other transaction may reach it until that has passed.
+    /// `write_frame` spins that time away inside the call; this variant returns
+    /// as soon as the transfer ends, and the caller owes the card
+    /// [`SETTLE_VBLANKS`] before the next read or write. [`CardJob`] is that
+    /// caller, spreading the wait over frames. A device with no commit time
+    /// (the default) simply writes.
+    fn write_frame_unsettled(&mut self, frame: u16, data: &[u8; FRAME_SIZE]) -> Result<()> {
+        self.write_frame(frame, data)
+    }
 }
 
 // --------------------------------------------------------------------------
