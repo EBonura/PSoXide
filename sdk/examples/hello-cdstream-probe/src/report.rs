@@ -57,6 +57,19 @@ impl Text {
         self.s(core::str::from_utf8(&digits[at..]).unwrap_or("?"))
     }
 
+    /// `value` as eight hex digits.
+    pub fn hex(&mut self, value: u32) -> &mut Self {
+        const DIGITS: &[u8; 16] = b"0123456789abcdef";
+        for i in 0..8 {
+            let nibble = ((value >> ((7 - i) * 4)) & 15) as usize;
+            if self.len < LINE_CHARS {
+                self.bytes[self.len] = DIGITS[nibble];
+                self.len += 1;
+            }
+        }
+        self
+    }
+
     /// `value` in tenths as `12.3`.
     pub fn tenths(&mut self, value: u32) -> &mut Self {
         self.u(value / 10).s(".").u(value % 10)
