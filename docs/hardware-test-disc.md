@@ -17,7 +17,7 @@ same id may name two different measurements. Baselines are named by version
 rather than date. The bump rule and the full history of what each version
 changed are in [hardware-test-versions.md](hardware-test-versions.md).
 
-Current: **v1.27**, schema PX8. Not comparable with v0.18 captures, whose timing
+Current: **v1.28**, schema PX8. Not comparable with v0.18 captures, whose timing
 was sampled without interrupt masking.
 
 ## Test tiers
@@ -261,7 +261,7 @@ hardware state until the operator chooses an entry. Menus fit without scrolling:
    | `RESULTS BY SECTION` | All checks, then CPU/RAM/IRQ/DMA/TIMERS/GPU/GTE/SPU/CDROM/SIO |
    | `HARDWARE SCANS` | CPU sweep, GTE sweep, SPU register map |
    | `TARGETED PROBES` | SB1/SB2/SB4 SPU probes, controller SIO timing, CD-chain and PA1-PA5 audio probes, `PERF SWEEP (SAFE)` and `PERF A/B (MAY HANG)` |
-   | `CONSOLE TESTS (V1.27)` | Four cases for one console session: kernel timing on the real BIOS, display widths, 480i interlace, XA music looping (see below). Each leaves its numbers in the next capture |
+   | `CONSOLE TESTS (V1.27)` | Seven cases for one console session: kernel timing on the real BIOS, display widths, 480i interlace, XA music looping, and (v1.28) the CD streaming transport's cost, the CD-DA hand-off and the motor after Pause and Stop (see below). Each leaves its numbers in the next capture |
    | `VIDEO LEVELS (TV/CAPTURE)` | Grey ramp and flat fields for display-chain checks |
    | `AUDIO READOUT` | Steps the tone off / through each rate, showing its state inline |
    | `RESUME FROM TEST` | Restarts a long battery after a selected test index |
@@ -362,6 +362,68 @@ tone songs as the channels of one 37.8 kHz stereo single-speed file) and puts
 it on the disc after `MOVIE.STR` with `mkisopsx --xa-file`. A program
 chain-loaded from another disc needs `HWSONGS.XA` in its own part of the image,
 found by name.
+
+## CD stream cases (v1.28)
+
+Three more cases on the `CONSOLE TESTS` page, plus `CD STREAM, ALL THREE` that
+runs them in turn. They exist for the SDK's streaming transport
+(`psx-cdstream`, the interrupt-driven reader the streaming design in
+[streaming-design-2026-10-08.md](streaming-design-2026-10-08.md) is built on),
+which the characterisation capture never runs: its CD records read by polling.
+Each installs the transport, measures, removes it and leaves records `2F0`-`2F7`,
+`300`-`30B` and `310`-`315` in the capture (decoded by `hwtest-report.py` as
+`cdstream_cost`, `cdstream_cdda` and `cdstream_motor` rows). Run them after the
+full characterisation: the transport's exception wrapper stays in the vector
+when it is removed, and the 20 s motor wait and the read after Stop are the
+kind of thing that can leave the drive in a state the earlier records should not
+inherit. All three read `CDTEST.BIN` (460 sectors of the `PSOXSTRM` pattern at
+LBA 564) and check what they get against the pattern, so a layout that moved
+shows as failed data.
+
+**CD STREAM COST.** A sustained read at double speed (240 sectors) and at single
+speed (120 sectors), three runs each. Sectors a second; the foreground CPU the
+sector pops take (a fixed spin loop runs through the read and is compared with
+the same loop run with nothing reading, so the difference is time the interrupt
+handler took, in microseconds per sector and as a share of the CPU); the longest
+handler call, from Timer 2; interrupts per sector; the time to the first sector
+of a read that starts with a seek back from the run before; sectors discarded
+and chained; the handler's private stack never touched.
+
+**CD-DA HANDOFF.** How long a lease request takes to stop a read in flight
+(four tries). Then, three times, the proper hand-off: the tone plays, a Pause
+(its acknowledge and its completion are `T_pause`), GetlocP is saved, the
+transport reads 64 sectors (time to the first and to the last), the tone is
+resumed with SetLoc and Play from the saved position (time until the drive
+reports PLAYING, and whether GetlocP two seconds later says it continued from
+there rather than from the start of the track). Then two reads that start while
+the tone is still playing, one with the transport's recovery Pause and one with
+no Pause at all.
+
+Whether CD-DA survives is read off the hardware, not heard. Before the read,
+over a third of a second, three things are sampled: the drive's PLAYING status
+bit, whether GetlocP's position advances, and the SPU's capture buffer for CD
+input (SPU RAM 0 to 3FFh, the CD left channel after the CD volume), whose
+peak-to-peak range is large while the tone reaches the SPU and zero otherwise.
+During the read the capture buffer is sampled once a VBlank, giving the share of
+samples that still carried signal and when the first silent one came. After the
+read the three are sampled again. A third control read, after a proper Pause,
+should show no signal at all. If the before-sample does not show signal in the
+capture buffer (record `308`/`30A` flags, bit 2), the method is blind on that
+console and the other two signals are the evidence. The emulator models the
+capture buffer, so its numbers prove the suite runs and the pipeline decodes;
+it has no laser, so they say nothing about a console.
+
+**CD MOTOR.** A read after a Pause and a wait of 0, 5 and 15 seconds (does the
+motor spin down on its own, and what does the next read cost); a read right
+after a Stop (reported to fail on a console); and a read after a Stop once
+GetStat says the motor stopped. The transport must read again afterwards.
+
+What the suite already measured for the streaming design, so these cases do
+not repeat it: seeks by distance forward and back (`90`-`93`, `C0`-`C7`), polled
+read rate at 1x and 2x (`94`, `95`), command latencies including Pause (`96`-`9A`),
+a read with and without live audio (`9B` against `9C`), the cost of starting the
+tone (`9D`) and GetlocP during playback (`9E`). They use raw commands; the new
+cases add the transport's own cost and the audio hand-off around it.
 
 ## Timing records move when the guest binary changes
 

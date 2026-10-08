@@ -35,8 +35,23 @@ pub(crate) const INTERLACE_COUNT: usize = 2;
 /// XA music loop: `0x2E0` to `0x2E3`.
 pub(crate) const XA_RECORD: u16 = 0x2E0;
 pub(crate) const XA_COUNT: usize = 4;
-/// Slots the four cases can fill in the timing report.
-pub(crate) const RECORD_SLOTS: usize = KERNEL_COUNT + WIDTH_COUNT + INTERLACE_COUNT + XA_COUNT;
+/// CD STREAM COST (v1.28): `0x2F0` to `0x2F7`.
+pub(crate) const CDCOST_RECORD: u16 = 0x2F0;
+pub(crate) const CDCOST_COUNT: usize = 8;
+/// CD-DA HANDOFF (v1.28): `0x300` to `0x30B`.
+pub(crate) const CDHANDOFF_RECORD: u16 = 0x300;
+pub(crate) const CDHANDOFF_COUNT: usize = 12;
+/// CD MOTOR (v1.28): `0x310` to `0x315`.
+pub(crate) const CDMOTOR_RECORD: u16 = 0x310;
+pub(crate) const CDMOTOR_COUNT: usize = 6;
+/// Slots the seven cases can fill in the timing report.
+pub(crate) const RECORD_SLOTS: usize = KERNEL_COUNT
+    + WIDTH_COUNT
+    + INTERLACE_COUNT
+    + XA_COUNT
+    + CDCOST_COUNT
+    + CDHANDOFF_COUNT
+    + CDMOTOR_COUNT;
 
 /// What the last run of each case left, folded into every later capture that
 /// carries the timing block.
@@ -46,6 +61,9 @@ pub(crate) struct Results {
     pub(crate) widths: Option<[TimingRecord; WIDTH_COUNT]>,
     pub(crate) interlace: Option<[TimingRecord; INTERLACE_COUNT]>,
     pub(crate) xa: Option<[TimingRecord; XA_COUNT]>,
+    pub(crate) cd_cost: Option<[TimingRecord; CDCOST_COUNT]>,
+    pub(crate) cd_handoff: Option<[TimingRecord; CDHANDOFF_COUNT]>,
+    pub(crate) cd_motor: Option<[TimingRecord; CDMOTOR_COUNT]>,
 }
 
 impl Results {
@@ -55,16 +73,22 @@ impl Results {
             widths: None,
             interlace: None,
             xa: None,
+            cd_cost: None,
+            cd_handoff: None,
+            cd_motor: None,
         }
     }
 
     /// Every record the cases have left so far.
     pub(crate) fn for_each(&self, mut f: impl FnMut(&TimingRecord)) {
-        let groups: [&[TimingRecord]; 4] = [
+        let groups: [&[TimingRecord]; 7] = [
             self.kernel.as_ref().map_or(&[], |r| r.as_slice()),
             self.widths.as_ref().map_or(&[], |r| r.as_slice()),
             self.interlace.as_ref().map_or(&[], |r| r.as_slice()),
             self.xa.as_ref().map_or(&[], |r| r.as_slice()),
+            self.cd_cost.as_ref().map_or(&[], |r| r.as_slice()),
+            self.cd_handoff.as_ref().map_or(&[], |r| r.as_slice()),
+            self.cd_motor.as_ref().map_or(&[], |r| r.as_slice()),
         ];
         for record in groups.iter().flat_map(|group| group.iter()) {
             f(record);
@@ -253,6 +277,12 @@ pub(crate) enum ConsoleCase {
     DisplayWidths,
     Interlace,
     XaLoop,
+    /// v1.28: the CD STREAM cases (cdstream_cases.rs).
+    CdCost,
+    CdHandoff,
+    CdMotor,
+    /// The three CD STREAM cases in turn.
+    CdAll,
 }
 
 /// Run `case` on `gpu`, store what it measured in `results` and print the
@@ -284,6 +314,10 @@ pub(crate) fn run_case(gpu: &mut Gpu, results: &mut Results, case: ConsoleCase) 
             tty_kv("xa", "loops", run.loops);
             tty_kv("xa", "getlocp_updates", run.getlocp_updates() as u32);
         }
+        ConsoleCase::CdCost
+        | ConsoleCase::CdHandoff
+        | ConsoleCase::CdMotor
+        | ConsoleCase::CdAll => crate::cdstream_cases::run(gpu, results, case),
     }
 }
 

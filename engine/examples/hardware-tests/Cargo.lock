@@ -15,6 +15,7 @@ dependencies = [
  "hello-fmv",
  "hello-memcard",
  "psx-asset",
+ "psx-cdstream",
  "psx-engine",
  "psx-fmv",
  "psx-font",
@@ -73,14 +74,6 @@ dependencies = [
  "psx-hw",
  "psx-io",
  "psx-rt",
-]
-
-[[package]]
-name = "psx-display"
-version = "0.1.0"
-dependencies = [
- "psx-gpu",
- "psx-hw",
 ]
 
 [[package]]

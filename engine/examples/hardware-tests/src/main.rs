@@ -51,6 +51,7 @@ macro_rules! probe_gpu {
 mod audio_link;
 mod audio_probe;
 mod cd_chain_probe;
+mod cdstream_cases;
 mod console_tests;
 mod controller_test;
 mod cpu_tests;
@@ -217,9 +218,9 @@ unsafe extern "C" {
 //
 // History, one entry per version: docs/hardware-test-versions.md.
 const SUITE_VERSION_MAJOR: u8 = 1;
-const SUITE_VERSION_MINOR: u8 = 27;
+const SUITE_VERSION_MINOR: u8 = 28;
 /// Display form. Keep in step with the two constants above.
-const SUITE_VERSION: &str = "HWTEST v1.27";
+const SUITE_VERSION: &str = "HWTEST v1.28";
 const SCREEN_W: i16 = 320;
 const SCREEN_H: i16 = 240;
 const FONT_TPAGE: TexturePage = TexturePage::new(320, 0, TextureDepth::Bit4);
@@ -695,8 +696,8 @@ struct ScanReport {
 
 /// v1.26 added up to 127 MDEC diagnostic records (fmv_diag.rs) on top of the
 /// 189 a characterisation plus an FMV run fills; v1.27 adds the console tests'
-/// 18 (console_tests.rs).
-const TIMING_RECORD_COUNT: usize = 354;
+/// 18 and v1.28 the CD STREAM cases' 26 (console_tests.rs).
+const TIMING_RECORD_COUNT: usize = 380;
 const _: () = assert!(TIMING_RECORD_COUNT == 336 + console_tests::RECORD_SLOTS);
 
 /// Which records a timing scan takes.
@@ -895,7 +896,7 @@ const PROBES_MENU: [(&str, MenuAction); 13] = [
     ("BACK", MenuAction::Back),
 ];
 
-const CONSOLE_MENU: [(&str, MenuAction); 5] = [
+const CONSOLE_MENU: [(&str, MenuAction); 9] = [
     (
         "KERNEL TIMING (BIOS)",
         MenuAction::RunConsole(ConsoleCase::KernelTiming),
@@ -909,6 +910,23 @@ const CONSOLE_MENU: [(&str, MenuAction); 5] = [
         MenuAction::RunConsole(ConsoleCase::Interlace),
     ),
     ("XA MUSIC LOOP", MenuAction::RunConsole(ConsoleCase::XaLoop)),
+    // v1.28: the streaming transport (cdstream_cases.rs).
+    (
+        "CD STREAM COST (V1.28)",
+        MenuAction::RunConsole(ConsoleCase::CdCost),
+    ),
+    (
+        "CD-DA HANDOFF (V1.28)",
+        MenuAction::RunConsole(ConsoleCase::CdHandoff),
+    ),
+    (
+        "CD MOTOR (V1.28)",
+        MenuAction::RunConsole(ConsoleCase::CdMotor),
+    ),
+    (
+        "CD STREAM, ALL THREE",
+        MenuAction::RunConsole(ConsoleCase::CdAll),
+    ),
     ("BACK", MenuAction::Back),
 ];
 

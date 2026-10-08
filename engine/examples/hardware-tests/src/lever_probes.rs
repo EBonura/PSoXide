@@ -934,7 +934,7 @@ const SP_ROUNDS: u32 = 32;
 const SP_IRQ_PERIOD: u16 = 1531;
 /// The scratchpad run must take at least this many interrupts from inside.
 const SP_MIN_IRQS: u32 = 64;
-const CDTEST_LBA: u32 = 524;
+const CDTEST_LBA: u32 = 564;
 
 static mut SCRATCHPAD_SAVE: [u32; 256] = [0; 256];
 

@@ -33,6 +33,22 @@ shipped without either, which is why no machine-code baseline exists for them.
 
 ## History
 
+### v1.28 (2026-10-08, schema PX8)
+
+Three `CD STREAM` cases join `CONSOLE TESTS`, with `CD STREAM, ALL THREE` to run them in turn (`src/cdstream_cases.rs`; details in [hardware-test-disc.md](hardware-test-disc.md)). They measure the SDK's streaming transport, `psx-cdstream`, which the polled CD records never run, for milestone M0 of [streaming-design-2026-10-08.md](streaming-design-2026-10-08.md):
+
+* `CD STREAM COST`: a sustained read through the transport at double and single speed. Sectors a second, foreground CPU lost to the sector pops (microseconds per sector and share), longest handler call (Timer 2), interrupts per sector, first-sector time, chained and discarded sectors.
+* `CD-DA HANDOFF`: lease request to granted while a read runs; Pause to idle after CD-DA (`T_pause`); first data sector after audio; Play after SetLoc to PLAYING and whether the position continued from the saved one. Then a read that starts while the tone plays, with and without the transport's recovery Pause, judged from the drive's PLAYING bit, GetlocP advancing and the SPU CD-input capture buffer sampled during the read, so no listening is needed.
+* `CD MOTOR`: a read after a Pause and a wait of 0, 5 and 15 s; a read right after Stop; a read once the motor has stopped.
+
+New timing-block records, present only once a case has run: `2F0`-`2F7` cost, `300`-`30B` hand-off, `310`-`315` motor (layouts in each function's doc and `tools/hwtest-report.py` `cdstream_rows`). `TIMING_RECORD_COUNT` grows to 380. No existing record changed meaning, hence MINOR.
+
+Three things changed under the suite and are worth knowing when comparing captures:
+
+* **CDTEST shrank from 500 to 460 sectors** (it went from 600 to 500 earlier): the boot EXE needs room for the transport. `CDTEST.BIN` now starts at LBA 564 instead of 524, so `cd_chain_probe.rs`, `lever_probes.rs` and the new cases name 564; `MOVIE.STR`, `HWSONGS.XA` and the CD-DA track keep their LBAs. The EXE is 508 of 542 sectors. Records `90`-`C7` read at LBA 424 and are untouched.
+* **The SDK pin moves to 2be27c140**, a commit on the SDK branch `feat/cdstream-probe` (not on SDK main), because that is where `psx-cdstream` lives. The pin is 57 commits past the previous one (38ba81f0e); `fmv_diag.rs` only needed its MDEC setup functions to take the new `&mut Mdec` driver argument. That SDK deletes `OrderingTable::iter_packets`, which the pinned emulator's `psx-gpu-render` still calls, so the emulator pin has to move (to d44685a or later) before the editor frontend builds against it.
+* The machine-code baseline for v1.28 is pinned; shared timing records may move with the new code layout and SDK, as at every bump.
+
 ### v1.27 (2026-10-04, schema PX8)
 
 `CONSOLE TESTS (V1.27)` joins the main menu, after TARGETED PROBES, as a page of four cases for one console session (`src/console_tests.rs`, `kernel_timing.rs`, `display_widths.rs`, `xa_loop.rs`; details in [hardware-test-disc.md](hardware-test-disc.md)):
