@@ -15,9 +15,9 @@
 use psx_font::FontAtlas;
 use psx_gpu::display::DoubleBuffer;
 use psx_gpu::Gpu;
-use psx_io::periph::GpuDma;
+use psx_io::periph::{ControllerPort, GpuDma};
 use psx_level::{AssetId, LevelOptionDef, LevelUiValueBinding, LevelWorldLayer};
-use psx_pad::{button, poll_port2, ActionInput, ActionMap, PadState};
+use psx_pad::{button, poll_on, ActionInput, ActionMap, PadState, Port};
 
 use crate::frames::{SimTick, VideoHz, VisualFrame};
 use crate::ui::UiTextureSlot;
@@ -128,6 +128,7 @@ pub struct Ctx {
     pub fb: DoubleBuffer,
     runtime_requests: RuntimeRequests,
     gpu_dma: Option<GpuDma>,
+    controller_port: Option<ControllerPort>,
     present_queue_hook: Option<*const u32>,
 }
 
@@ -151,6 +152,7 @@ impl Ctx {
             fb,
             runtime_requests: RuntimeRequests::default(),
             gpu_dma: None,
+            controller_port: None,
             present_queue_hook: None,
         }
     }
@@ -158,6 +160,26 @@ impl Ctx {
     /// Hand the context the GPU DMA token; the app runner does this once.
     pub(crate) fn set_gpu_dma(&mut self, dma: GpuDma) {
         self.gpu_dma = Some(dma);
+    }
+
+    /// Hand the context the controller-port token; the app runner does this
+    /// once, after its boot-time pad negotiation.
+    pub(crate) fn set_controller_port(&mut self, port: ControllerPort) {
+        self.controller_port = Some(port);
+    }
+
+    /// The controller-port token, for polling a pad or negotiating its mode
+    /// through `psx_pad::poll_on` and its siblings. Memory-card drivers
+    /// borrow it from here too, so a card and a poll never overlap.
+    ///
+    /// # Panics
+    ///
+    /// Outside the app runner, which takes the token at boot.
+    #[inline]
+    pub fn controller_port(&mut self) -> &mut ControllerPort {
+        self.controller_port
+            .as_mut()
+            .expect("the app runner holds the controller-port token")
     }
 
     /// The GPU DMA token, for [`OtFrame::submit`](crate::OtFrame::submit)
@@ -264,7 +286,7 @@ impl Ctx {
     #[inline]
     pub fn refresh_second_pad(&mut self) -> PadState {
         self.pad2_prev = self.pad2;
-        self.pad2 = poll_port2();
+        self.pad2 = poll_on(self.controller_port(), Port::Two);
         self.pad2
     }
 

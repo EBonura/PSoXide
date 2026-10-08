@@ -52,6 +52,9 @@ pub(super) const SCREEN_CX: i16 = 160;
 pub(super) const SCREEN_CY: i16 = 120;
 pub(super) const FOCAL: i32 = 320;
 pub(super) const NEAR_Z: i32 = 4;
+/// Follow-camera boom under which the player model is skipped (the eye is
+/// inside her). Her capsule radius is about 11.75; the near plane is 4.
+pub(super) const PLAYER_HIDE_BOOM: i32 = 14;
 pub(super) const FAR_Z: i32 = 1024;
 pub(super) const PROJECTION: WorldProjection =
     WorldProjection::new(SCREEN_CX, SCREEN_CY, FOCAL, NEAR_Z);
@@ -220,7 +223,7 @@ pub(super) fn room_surface_options(record: &LevelRoomRecord) -> WorldSurfaceOpti
         .with_adaptive_subdivision_max_levels(ROOM_ADAPTIVE_SUBDIVISION_LEVELS)
         .with_adaptive_subdivision_kinds(ROOM_ADAPTIVE_SUBDIVISION_KINDS)
         .with_adaptive_subdivision_debug_levels(cfg!(feature = "tessellation-debug"))
-        .with_textured_triangle_max_edge(CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE)
+        .with_textured_triangle_max_edge(ROOM_TEXTURE_SPLIT_MAX_EDGE)
 }
 
 pub(super) fn fallback_surface_options() -> WorldSurfaceOptions {
@@ -228,7 +231,7 @@ pub(super) fn fallback_surface_options() -> WorldSurfaceOptions {
         .with_adaptive_subdivision(true)
         .with_adaptive_subdivision_max_levels(ROOM_ADAPTIVE_SUBDIVISION_LEVELS)
         .with_adaptive_subdivision_kinds(ROOM_ADAPTIVE_SUBDIVISION_KINDS)
-        .with_textured_triangle_max_edge(CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE)
+        .with_textured_triangle_max_edge(ROOM_TEXTURE_SPLIT_MAX_EDGE)
 }
 
 /// Actor clearance: pull the actor toward the camera by half a sector so a
@@ -277,6 +280,9 @@ pub(super) const MAX_RUNTIME_MODEL_PARTS: usize = crate::generated::MODEL_PART_C
 /// Predecoded vertices shared by every cooked model.
 pub(super) const MAX_RUNTIME_MODEL_DECODED_VERTICES: usize =
     crate::generated::MODEL_DECODED_VERTEX_CAPACITY;
+/// Projected edge threshold used to subdivide close room triangles. `0`
+/// keeps the fixed adaptive depth-band schedule.
+pub(super) const ROOM_TEXTURE_SPLIT_MAX_EDGE: u16 = 0;
 /// Projected edge threshold used to subdivide close model triangles.
 pub(super) const MODEL_TEXTURE_SPLIT_MAX_EDGE: u16 = 0;
 /// Joint-transform scratch -- all biped rigs we currently cook
@@ -494,7 +500,7 @@ mod pxbsp_depth_order_tests {
                 .slot::<OT_DEPTH>(PXBSP_CLASSIC_DEPTH_RANGE, depth)
                 .index();
             let sz = (depth * scale) >> 12;
-            let classic_slot = usize::from(psx_gte::scene::classic_otz3_from_sum(
+            let classic_slot = usize::from(psx_gte::scene::classic_ordering_depth3_from_sum(
                 (sz as u32).saturating_mul(3),
             ));
             assert_eq!(dynamic_slot, classic_slot, "view depth {depth}");
@@ -502,7 +508,7 @@ mod pxbsp_depth_order_tests {
         // A few units past the far depth the world rejects the surface
         // (OTZ >= 2048) while runtime draws clamp to the back of the band.
         let sz = (2734 * scale) >> 12;
-        assert!(psx_gte::scene::classic_otz3_from_sum((sz as u32) * 3) >= 2048);
+        assert!(psx_gte::scene::classic_ordering_depth3_from_sum((sz as u32) * 3) >= 2048);
         assert_eq!(
             WORLD_BAND
                 .slot::<OT_DEPTH>(PXBSP_CLASSIC_DEPTH_RANGE, 2734)

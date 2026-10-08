@@ -58,6 +58,7 @@ pub mod affine_surface;
 pub mod angle;
 pub mod app;
 pub mod attributed_clip;
+pub mod cd_drive;
 pub mod character_motor;
 pub mod collision_query;
 pub mod fixed;
@@ -201,6 +202,10 @@ pub use psx_pad::button;
 pub use psx_pad::{
     ActionBinding, ActionInput, ActionMap, AnalogSticks, Deadzone, PadMode, PadState, STICK_FULL,
 };
+
+/// The controller-port token behind [`Ctx::controller_port`], for scenes that
+/// drive a memory card or negotiate a pad mode without a direct `psx-io` dep.
+pub use psx_io::periph::ControllerPort;
 
 mod masked_pose;
 pub use masked_pose::MaskedPoseBlend;

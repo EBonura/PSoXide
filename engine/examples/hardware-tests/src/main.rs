@@ -9,6 +9,11 @@
 #![no_std]
 #![no_main]
 #![allow(static_mut_refs)]
+// The probes drive the pad, SPU and CD-ROM registers directly and on purpose,
+// the way the BIOS and the first-party games of the era did, so the free
+// functions that predate the SDK's ownership tokens stay in use here. The
+// engine and the game crates do not get this allowance.
+#![allow(deprecated)]
 #![cfg_attr(target_arch = "mips", feature(asm_experimental_arch))]
 
 extern crate psx_rt;

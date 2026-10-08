@@ -89,8 +89,8 @@ use psx_level::{
     find_asset_of_kind, room_flags, AssetId, AssetKind, CharacterAnimationAction, InteractableKind,
     InteractableRecord, LevelBoxPropRecord, LevelCameraRecord, LevelCharacterRecord,
     LevelFarVistaRecord, LevelGameEntityRecord, LevelGameplaySfxEvent, LevelImagePropRecord,
-    LevelRoomRecord, LevelSkyRecord, LevelUiValueBinding, ModelClipIndex,
-    ParticleEmitterRecord, RoomIndex,
+    LevelRoomRecord, LevelSkyRecord, LevelUiValueBinding, ModelClipIndex, ParticleEmitterRecord,
+    RoomIndex,
 };
 use psx_vram::{TextureDepth, TexturePage};
 
@@ -155,7 +155,13 @@ use world_objects_runtime::*;
 // manifests reference all of them. Quiet either side here.
 #[allow(dead_code, unused_imports)]
 mod generated {
+    // Host tests never read the local cook: `generated/` holds whatever project
+    // was last built, so a test that depended on it passed or failed with that
+    // choice. They run against a checked-in fixture instead.
+    #[cfg(not(test))]
     include!(env!("PSXED_PLAYTEST_MANIFEST"));
+    #[cfg(test)]
+    include!("../test-fixtures/level_manifest.rs");
 }
 
 /// The cooked project's world format, known at build time.
@@ -169,15 +175,14 @@ pub(crate) const USES_PXBSP: bool = generated::PLAYTEST_USES_PXBSP;
 
 use generated::{
     ARCH_PROPS, ARCH_PROP_COLLISIONS, ARCH_PROP_SURFACES, ASSETS, BOOST_MODULES, BOX_PROPS,
-    BOX_PROP_STATE_COUNT, BOX_PROP_SURFACES, CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE, CHARACTERS,
-    COMBAT_CAPSULES, CYLINDER_PROPS, CYLINDER_PROP_SURFACES, DESTRUCTIBLES, ENTITIES, EQUIPMENT,
-    GAMEPLAY_SFX_CUES, GAME_ENTITIES, IMAGE_PROPS, INTERACTABLES, INTERACTABLE_MESSAGES, LIGHTS,
-    LOGIC, MODELS, MODEL_CLIPS, MODEL_CLIP_BOUNDS, MODEL_FRAME_BOUNDS, MODEL_INSTANCES,
-    MODEL_SOCKETS, PARTICLE_EMITTERS, PERSISTENT_FLAG_COUNT, PLAYER_CONTROLLER, PLAYER_SPAWN,
-    PLAYTEST_PACKET_CAPACITY, PROJECT_SAVE_NAME, PROJECT_SAVE_TITLE, PXBSP_AMBIENT_RGB, ROOMS,
-    ROOM_REFLECTION_PROBES, UI_FONTS, UI_NODES, UI_PAINTS, UI_SFX_CUES, UI_SFX_SAMPLES,
-    VITALITY_CIRCLES, WEAPONS, WEAPON_APPEARANCES, WEAPON_HITBOXES, WORLD_MESSAGE,
-    WORLD_OBJECTS,
+    BOX_PROP_STATE_COUNT, BOX_PROP_SURFACES, CHARACTERS, COMBAT_CAPSULES, CYLINDER_PROPS,
+    CYLINDER_PROP_SURFACES, DESTRUCTIBLES, ENTITIES, EQUIPMENT, GAMEPLAY_SFX_CUES, GAME_ENTITIES,
+    IMAGE_PROPS, INTERACTABLES, INTERACTABLE_MESSAGES, LIGHTS, LOGIC, MODELS, MODEL_CLIPS,
+    MODEL_CLIP_BOUNDS, MODEL_FRAME_BOUNDS, MODEL_INSTANCES, MODEL_SOCKETS, PARTICLE_EMITTERS,
+    PERSISTENT_FLAG_COUNT, PLAYER_CONTROLLER, PLAYER_SPAWN, PLAYTEST_PACKET_CAPACITY,
+    PROJECT_SAVE_NAME, PROJECT_SAVE_TITLE, PXBSP_AMBIENT_RGB, ROOMS, ROOM_REFLECTION_PROBES,
+    UI_FONTS, UI_NODES, UI_PAINTS, UI_SFX_CUES, UI_SFX_SAMPLES, VITALITY_CIRCLES, WEAPONS,
+    WEAPON_APPEARANCES, WEAPON_HITBOXES, WORLD_MESSAGE, WORLD_OBJECTS,
 };
 #[cfg(feature = "cd-stream-bench")]
 use generated::{

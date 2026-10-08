@@ -122,6 +122,10 @@ const GAMEPLAY_SFX_VOICE_COUNT: u8 = 3;
 #[cfg(target_arch = "mips")]
 const COMBAT_VOICE: u8 = 19;
 const CDDA_RETRY_TICKS: u32 = 60;
+/// Ticks between asks for the audio lease while a data read still holds the
+/// drive. An ask is one cheap check, so it stays short whatever a console's
+/// handoff costs.
+const CDDA_LEASE_RETRY_TICKS: u32 = 2;
 // Loop poll period. The drive's auto-pause at the end of the track is only
 // seen through GetStat, so this bounds the silence before the replay's seek
 // starts. At 30 ticks, with the confirming poll another 30 ticks later, the
@@ -274,6 +278,10 @@ struct CddaPlayer {
     /// reaches [`CDDA_STOPPED_CONFIRMATIONS`].
     stopped_polls: u8,
     status_irq_enable: Option<u8>,
+    /// Where to restart a track a data read displaced (absolute BCD
+    /// minute, second, frame from GetlocP). `None` plays from the start or a
+    /// random point as a fresh cue does.
+    resume: Option<crate::cd_drive::DiscPosition>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -349,6 +357,11 @@ impl FlowTransition {
 }
 
 /// Combat music ramps: one second in, two seconds out (60 Hz ticks).
+///
+/// Console handoffs between music and data reads take about a second each way
+/// (`cd_drive::HANDOFF_VBLANKS`), not the emulator's few milliseconds: a combat
+/// start that has to wait for a read, or a read that displaces the track, is
+/// silent for about that long. The ramps are policy and stay as authored.
 const COMBAT_MUSIC_FADE_IN_TICKS: u16 = 60;
 const COMBAT_MUSIC_FADE_OUT_TICKS: u16 = 120;
 
@@ -369,6 +382,7 @@ impl CddaPlayer {
             routed: false,
             stopped_polls: 0,
             status_irq_enable: None,
+            resume: None,
             target_volume_percent: CDDA_DEFAULT_VOLUME_PERCENT,
             fade_start_volume_percent: CDDA_DEFAULT_VOLUME_PERCENT,
             fade_ticks_total: 0,
@@ -478,9 +492,14 @@ impl CddaPlayer {
         }
     }
 
+    /// Stop the music on purpose so data reads can have the drive: Pause (never
+    /// Stop), then give the audio lease back. A displaced track's pending
+    /// resume is dropped with it.
     fn release_for_data_reads(&mut self, tick: u32) {
         self.cancel_status_query();
         self.stopped_polls = 0;
+        self.resume = None;
+        crate::cd_drive::clear_yield();
         self.requested = MusicCue::SILENT;
         self.random_start = false;
         self.current_track = 0;
@@ -517,6 +536,17 @@ impl CddaPlayer {
         if self.requested.track == 0 {
             return;
         }
+        if self.routed && !crate::cd_drive::music_holds() {
+            self.displaced(tick);
+        }
+        if crate::cd_drive::resume_pending() {
+            // A data read displaced the track. Wait until the drive is free,
+            // then start it again at the saved position.
+            let Some(position) = crate::cd_drive::take_resume() else {
+                return;
+            };
+            self.resume = position;
+        }
         if self.current_track == self.requested.track {
             self.maybe_loop_with(tick, begin, finish, cancel);
             // A confirmed track end replays in this same tick.
@@ -528,6 +558,12 @@ impl CddaPlayer {
             return;
         }
         if !self.routed {
+            // Music asks for the drive; a data read in flight or queued keeps
+            // it, and the lease is granted a tick or two after the last read.
+            if !crate::cd_drive::music_acquire() {
+                self.next_retry_tick = tick.saturating_add(CDDA_LEASE_RETRY_TICKS);
+                return;
+            }
             // A faded start routes at the ramp's current level (0), not the cue's.
             if self.fade_ticks_left == 0 {
                 self.current_volume_percent = self.requested.volume_percent;
@@ -544,14 +580,16 @@ impl CddaPlayer {
         } else {
             self.requested.track
         };
-        if let Some(value) = cdda_issue_step(self.step, track, self.seek_second) {
+        if let Some(value) = cdda_issue_step(self.step, track, self.seek_second, self.resume) {
             match self.step {
                 CddaStartStep::SetMode => {
                     self.step = CddaStartStep::Demute;
                     self.next_retry_tick = tick.saturating_add(2);
                 }
                 CddaStartStep::Demute => {
-                    self.step = if self.random_start {
+                    self.step = if self.resume.is_some() {
+                        CddaStartStep::SetLocation
+                    } else if self.random_start {
                         CddaStartStep::TrackCount
                     } else {
                         CddaStartStep::Play
@@ -581,6 +619,7 @@ impl CddaPlayer {
                 }
                 CddaStartStep::Play | CddaStartStep::PlayLocation => {
                     self.random_start = false;
+                    self.resume = None;
                     self.current_track = self.requested.track;
                     self.next_status_tick = tick.saturating_add(CDDA_STATUS_TICKS);
                 }
@@ -591,9 +630,26 @@ impl CddaPlayer {
     }
 
     fn cancel_status_query(&mut self) {
-        if self.status_irq_enable.take().is_some() {
+        if self.status_irq_enable.take().is_some() && crate::cd_drive::music_holds() {
             cdda_cancel_status();
         }
+    }
+
+    /// A data read took the drive: the track was paused where it stood and
+    /// the lease released. Forget the playback state so the start sequence
+    /// runs again once the drive is free; the saved position replaces the
+    /// random start.
+    fn displaced(&mut self, tick: u32) {
+        // The pause that displaced the track cleared the controller, so a
+        // status query in flight is simply gone (touching the controller now
+        // would collide with the transport).
+        self.status_irq_enable = None;
+        self.stopped_polls = 0;
+        self.random_start = false;
+        self.current_track = 0;
+        self.step = CddaStartStep::SetMode;
+        self.next_retry_tick = tick;
+        self.routed = false;
     }
 
     fn maybe_loop_with(
@@ -684,13 +740,19 @@ fn music_volume_percent(
     }
 }
 
+/// Reset the SPU through the driver, which `psx_spu::init` used to do on a
+/// token nobody held. The driver is built from the token the runner handed
+/// over, or from the one a previous reset gave back.
 #[cfg(target_arch = "mips")]
-fn menu_audio_init() {
-    psx_spu::init();
+fn menu_audio_init(spu: &mut Option<psx_spu::Spu>, spu_dma: &mut Option<psx_io::periph::SpuDma>) {
+    let dma = match spu.take() {
+        Some(driver) => driver.release(),
+        None => spu_dma
+            .take()
+            .expect("the app runner hands the game the SPU DMA token"),
+    };
+    *spu = Some(psx_spu::Spu::new(dma));
 }
-
-#[cfg(not(target_arch = "mips"))]
-fn menu_audio_init() {}
 
 #[cfg(target_arch = "mips")]
 fn scaled_pitch(base_q12: u16, multiplier_q12: u16) -> psx_spu::Pitch {
@@ -772,7 +834,12 @@ fn cdda_toc_second(bytes: &[u8]) -> Option<u32> {
 }
 
 #[cfg(target_arch = "mips")]
-fn cdda_issue_step(step: CddaStartStep, track: u8, second: u32) -> Option<u32> {
+fn cdda_issue_step(
+    step: CddaStartStep,
+    track: u8,
+    second: u32,
+    resume: Option<crate::cd_drive::DiscPosition>,
+) -> Option<u32> {
     let mut params = [0; 3];
     let (command, count) = match step {
         CddaStartStep::SetMode => {
@@ -786,8 +853,12 @@ fn cdda_issue_step(step: CddaStartStep, track: u8, second: u32) -> Option<u32> {
             (0x14, 1)
         }
         CddaStartStep::SetLocation => {
-            params[0] = psx_io::cd::bin_to_bcd((second / 60) as u8);
-            params[1] = psx_io::cd::bin_to_bcd((second % 60) as u8);
+            if let Some(position) = resume {
+                params = position;
+            } else {
+                params[0] = psx_io::cd::bin_to_bcd((second / 60) as u8);
+                params[1] = psx_io::cd::bin_to_bcd((second % 60) as u8);
+            }
             (psx_hw::cd::CMD_SETLOC, 3)
         }
         CddaStartStep::PlayLocation => (psx_hw::cd::CMD_PLAY, 0),
@@ -796,7 +867,9 @@ fn cdda_issue_step(step: CddaStartStep, track: u8, second: u32) -> Option<u32> {
             (psx_hw::cd::CMD_PLAY, 1)
         }
     };
-    let response = psx_io::cd::try_command(command, &params[..count], CDDA_COMMAND_SPINS)?;
+    let response = crate::cd_drive::with_token(|cd| {
+        cd.try_command(command, &params[..count], CDDA_COMMAND_SPINS)
+    })??;
     let bytes = response.bytes();
     if bytes.first().is_none_or(|status| status & 1 != 0) {
         return None;
@@ -811,7 +884,12 @@ fn cdda_issue_step(step: CddaStartStep, track: u8, second: u32) -> Option<u32> {
 }
 
 #[cfg(not(target_arch = "mips"))]
-fn cdda_issue_step(_step: CddaStartStep, _track: u8, _second: u32) -> Option<u32> {
+fn cdda_issue_step(
+    _step: CddaStartStep,
+    _track: u8,
+    _second: u32,
+    _resume: Option<crate::cd_drive::DiscPosition>,
+) -> Option<u32> {
     #[cfg(test)]
     HOST_CDDA_STEPS.with(|steps| steps.borrow_mut().push(_step));
     Some(0)
@@ -839,7 +917,7 @@ fn flow_trace(_message: &str) {}
 
 #[cfg(target_arch = "mips")]
 fn cdda_begin_status() -> Option<u8> {
-    psx_io::cd::dispatch_command(psx_hw::cd::CMD_GETSTAT, &[], 0)
+    crate::cd_drive::with_token(|cd| cd.dispatch_command(psx_hw::cd::CMD_GETSTAT, &[], 0))?
 }
 
 #[cfg(not(target_arch = "mips"))]
@@ -862,14 +940,19 @@ fn cdda_status_stopped(status: u8) -> Option<bool> {
 /// an error response without interpreting it as the end of the song.
 #[cfg(target_arch = "mips")]
 fn cdda_finish_status(irq_enable: u8) -> Option<Option<bool>> {
-    let irq = psx_io::cd::irq_flag_value();
+    // Without the token the lease is gone and so is the query; consume it.
+    let Some(irq) = crate::cd_drive::with_token(|cd| cd.irq_flag_value()) else {
+        return Some(None);
+    };
     if irq == 0 {
         return None;
     }
     if irq != 3 && irq != 5 {
         // Auto-pause can deliver INT4 before the outstanding GetStat ACK.
-        psx_io::cd::discard_response();
-        psx_io::cd::acknowledge_irq(irq);
+        crate::cd_drive::with_token(|cd| {
+            cd.discard_response();
+            cd.acknowledge_irq(irq);
+        });
         return None;
     }
     // GetStat has one response byte. Select the response FIFO, read it once,
@@ -882,7 +965,7 @@ fn cdda_finish_status(irq_enable: u8) -> Option<Option<bool>> {
             None
         }
     };
-    psx_io::cd::restore_irq_output(irq_enable);
+    crate::cd_drive::with_token(|cd| cd.restore_irq_output(irq_enable));
     Some(if irq == 3 {
         status.and_then(cdda_status_stopped)
     } else {
@@ -899,20 +982,22 @@ fn cdda_finish_status(_irq_enable: u8) -> Option<Option<bool>> {
 fn cdda_cancel_status() {
     // A cancelled command may still ACK later. Keep IRQ output masked, like
     // the SDK's timed-out polled commands, until the next CD command takes over.
-    psx_io::cd::restore_irq_output(0);
+    crate::cd_drive::with_token(|cd| cd.restore_irq_output(0));
 }
 
 #[cfg(not(target_arch = "mips"))]
 fn cdda_cancel_status() {}
 
-#[cfg(target_arch = "mips")]
+/// End playback and give the drive back. The Pause (never Stop: the motor
+/// would spin down and data reads started in the next second or two fail on a
+/// console) is only sent while music holds the lease; otherwise a data read may
+/// own the controller and a polled command would collide with its interrupts.
 fn cdda_release_for_data_reads() {
-    psx_spu::enable_cd_audio(false);
-    let _ = psx_io::cd::try_pause_until_complete(CDDA_COMMAND_SPINS);
+    if crate::cd_drive::music_holds() {
+        crate::cd_drive::stop_playback();
+    }
+    crate::cd_drive::music_release();
 }
-
-#[cfg(not(target_arch = "mips"))]
-fn cdda_release_for_data_reads() {}
 
 /// Cursor + small scratch tracking where in the [`GameFlow`] the
 /// runtime currently sits.
@@ -1090,6 +1175,12 @@ pub struct GameApp<'a, S: Scene> {
     option_len: usize,
     /// Nonblocking CD-DA menu music driver.
     cdda: CddaPlayer,
+    /// The SPU DMA token until the first menu-audio reset builds the driver.
+    #[cfg(target_arch = "mips")]
+    spu_dma: Option<psx_io::periph::SpuDma>,
+    /// The SPU driver, once the menu audio has reset the SPU.
+    #[cfg(target_arch = "mips")]
+    spu: Option<psx_spu::Spu>,
     /// Combat music currently requested (edge-detected against the scene).
     combat_music_engaged: bool,
     /// Uploaded UI SFX sample metadata, capped for no-alloc runtime lookup.
@@ -1299,6 +1390,10 @@ impl<'a, S: Scene> GameApp<'a, S> {
             option_values,
             option_len,
             cdda: CddaPlayer::new(),
+            #[cfg(target_arch = "mips")]
+            spu_dma: None,
+            #[cfg(target_arch = "mips")]
+            spu: None,
             combat_music_engaged: false,
             ui_sfx_runtime_samples: [UiSfxRuntimeSample::EMPTY; MAX_UI_SFX_SAMPLES],
             ui_sfx_runtime_len: 0,
@@ -1366,8 +1461,16 @@ impl<'a, S: Scene> GameApp<'a, S> {
             .apply_options(self.options, &values[..len.min(MAX_OPTIONS)], ctx);
     }
 
+    /// Hand the game the SPU DMA token; the app runner does this once, before
+    /// the scene's `init`.
+    #[cfg(target_arch = "mips")]
+    pub(crate) fn set_spu_dma(&mut self, dma: psx_io::periph::SpuDma) {
+        self.spu_dma = Some(dma);
+    }
+
     fn init_menu_audio(&mut self) {
-        menu_audio_init();
+        #[cfg(target_arch = "mips")]
+        menu_audio_init(&mut self.spu, &mut self.spu_dma);
         self.upload_ui_sfx_samples();
     }
 
@@ -1382,7 +1485,10 @@ impl<'a, S: Scene> GameApp<'a, S> {
             let mut upload = |bytes: &[u8]| {
                 let audio = psx_asset::Audio::from_bytes(bytes).expect("ui psau sample");
                 let adpcm = audio.adpcm_bytes();
-                psx_spu::upload_adpcm(psx_spu::SpuAddr::new(addr), adpcm);
+                self.spu
+                    .as_mut()
+                    .expect("menu audio reset the SPU before the upload")
+                    .upload_adpcm(psx_spu::SpuAddr::new(addr), adpcm);
                 uploaded = Some((
                     adpcm.len() as u32,
                     psx_spu::Pitch::for_sample_rate(audio.sample_rate_hz()).as_u16(),
@@ -5678,6 +5784,111 @@ mod tests {
             "a loop replays the track; mode and demute still hold"
         );
         assert_eq!(player.current_track, 2);
+    }
+
+    fn steady_cue() -> MusicCue {
+        MusicCue {
+            track: 2,
+            volume_percent: 80,
+            loop_track: false,
+        }
+    }
+
+    /// Run `ticks` player updates and return the drive steps they issued.
+    fn run_player(player: &mut CddaPlayer, from: u32, ticks: u32) -> std::vec::Vec<CddaStartStep> {
+        let mut steps = std::vec::Vec::new();
+        for tick in from..from + ticks {
+            player.update_with(tick, || Some(0), |_| Some(Some(false)), || {});
+            steps.extend(HOST_CDDA_STEPS.with(|s| core::mem::take(&mut *s.borrow_mut())));
+        }
+        steps
+    }
+
+    #[test]
+    fn music_takes_the_audio_lease_before_its_first_command() {
+        use crate::cd_drive::{host_events, HostEvent};
+        let mut player = CddaPlayer::new();
+        player.request(steady_cue(), 0);
+        let steps = run_player(&mut player, 0, 20);
+        assert_eq!(steps.first(), Some(&CddaStartStep::SetMode));
+        assert_eq!(host_events(), std::vec![HostEvent::Acquire]);
+        assert_eq!(player.current_track, 2);
+        player.release_for_data_reads(30);
+        assert_eq!(
+            host_events(),
+            std::vec![HostEvent::Acquire, HostEvent::Release],
+            "stopping the music hands the lease back"
+        );
+    }
+
+    #[test]
+    fn music_waits_for_a_data_read_instead_of_pre_empting_it() {
+        use crate::cd_drive::{host_events, host_set_data_busy};
+        host_set_data_busy(true);
+        let mut player = CddaPlayer::new();
+        player.request(steady_cue(), 0);
+        assert!(run_player(&mut player, 0, 40).is_empty());
+        assert!(host_events().is_empty(), "no lease while a read is queued");
+        host_set_data_busy(false);
+        assert!(!run_player(&mut player, 40, 20).is_empty());
+        assert_eq!(player.current_track, 2);
+    }
+
+    #[test]
+    fn a_displaced_track_resumes_at_its_saved_position() {
+        use crate::cd_drive::{
+            host_events, host_set_data_busy, host_set_position, yield_music_for_data, HostEvent,
+        };
+        let mut player = CddaPlayer::new();
+        player.request(steady_cue(), 0);
+        run_player(&mut player, 0, 20);
+        assert_eq!(player.current_track, 2);
+
+        // A data read needs the drive: the track is paused where it stands.
+        host_set_position(Some([0x01, 0x23, 0x45]));
+        assert!(yield_music_for_data());
+        host_set_data_busy(true);
+        assert_eq!(
+            host_events(),
+            std::vec![HostEvent::Acquire, HostEvent::Release, HostEvent::Yield]
+        );
+        // While the read runs the player stays quiet and keeps its cue.
+        assert!(run_player(&mut player, 100, 30).is_empty());
+        assert_eq!(player.requested.track, 2);
+        assert_eq!(host_events().len(), 3, "music did not take the drive back");
+
+        // The read is done: the lease comes back and the track restarts from
+        // the saved position, not from the beginning and not at a random point.
+        host_set_data_busy(false);
+        let steps = run_player(&mut player, 130, 30);
+        assert_eq!(
+            steps,
+            std::vec![
+                CddaStartStep::SetMode,
+                CddaStartStep::Demute,
+                CddaStartStep::SetLocation,
+                CddaStartStep::PlayLocation,
+            ]
+        );
+        assert_eq!(player.current_track, 2);
+        assert_eq!(player.resume, None);
+        assert_eq!(host_events().last(), Some(&HostEvent::Acquire));
+    }
+
+    #[test]
+    fn stopping_music_on_purpose_does_not_resume_it() {
+        use crate::cd_drive::{host_set_data_busy, host_set_position, yield_music_for_data};
+        let mut player = CddaPlayer::new();
+        player.request(steady_cue(), 0);
+        run_player(&mut player, 0, 20);
+        host_set_position(Some([0x01, 0x23, 0x45]));
+        assert!(yield_music_for_data());
+        host_set_data_busy(true);
+        // The scene ends the music while it is displaced.
+        player.release_for_data_reads(50);
+        host_set_data_busy(false);
+        assert!(run_player(&mut player, 60, 40).is_empty());
+        assert_eq!(player.current_track, 0);
     }
 
     #[test]

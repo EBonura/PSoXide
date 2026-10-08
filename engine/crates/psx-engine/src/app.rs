@@ -6,11 +6,11 @@
 //! ```text
 //!   Gpu::new + draw_area + draw_offset
 //!   DoubleBuffer::new
-//!   require_analog_port1
+//!   require_analog_on (port 1)
 //!   scene.init(&mut ctx)
 //!   loop:
 //!     ctx.pad_prev ← ctx.pad           (one-frame input history)
-//!     ctx.pad      ← PadReader::poll() (port 1)
+//!     ctx.pad      ← PadReader::poll_on() (port 1)
 //!     ask FrameScheduler for the next task:
 //!       fixed update  -> poll pad + scene.update(&mut ctx)
 //!       visual render -> clear + scene.render(&mut ctx) + present
@@ -43,7 +43,7 @@ use psx_level::{
     GameFlow, LevelGameplaySfxCueRecord, LevelOptionDef, LevelUiNodeRecord, LevelUiPaintRecord,
     LevelUiScene, LevelUiSfxCueRecord, LevelUiSfxSampleRecord,
 };
-use psx_pad::{enable_analog_port1, require_analog_port1, PadReader};
+use psx_pad::{enable_analog_on, require_analog_on, PadReader, Port};
 
 use crate::game_app::{GameApp, GAMEPLAY_ONLY};
 use crate::present_queue::{PresentQueue, ENABLED as PRESENT_QUEUE_ENABLED};
@@ -535,7 +535,8 @@ impl App {
         // mode. An original digital controller answers "digital only" and
         // the same button-input path serves it; a pad that is not plugged in
         // yet is negotiated again when it connects (see `run_scheduled`).
-        let _ = require_analog_port1();
+        let mut controller_port = peripherals.controller_port;
+        let _ = require_analog_on(&mut controller_port, Port::One);
 
         // Seed pad + pad_prev from a real poll so a button already held at
         // boot does NOT register as `just_pressed` on the first frame. This
@@ -545,7 +546,7 @@ impl App {
         // both seeded to the current state, an input must actually transition
         // (release then press) to count as a press.
         let mut pad_reader = PadReader::port1();
-        let initial_pad = pad_reader.poll();
+        let initial_pad = pad_reader.poll_on(&mut controller_port);
         let mut ctx = Ctx::new(
             SimTick::ZERO,
             VisualFrame::ZERO,
@@ -555,6 +556,7 @@ impl App {
             fb,
         );
         ctx.set_gpu_dma(gpu.release());
+        ctx.set_controller_port(controller_port);
         boot_visual_checkpoint(&mut ctx, (200, 96, 0), "02 CTX READY");
 
         // The wrapper is the Scene the scheduled loop drives: its
@@ -572,6 +574,9 @@ impl App {
             config.loading_ui_scene,
             scene,
         );
+
+        #[cfg(target_arch = "mips")]
+        app.set_spu_dma(peripherals.spu_dma);
 
         boot_trace("psx-engine: scene init");
         boot_visual_checkpoint(&mut ctx, (180, 180, 0), "03 APP INIT BEGIN");
@@ -687,15 +692,15 @@ impl App {
                         boot_trace("psx-engine: pad poll begin");
                         boot_visual_checkpoint(&mut ctx, (220, 100, 0), "22 PAD POLL BEGIN");
                     }
-                    ctx.pad = pad_reader.poll();
+                    ctx.pad = pad_reader.poll_on(ctx.controller_port());
                     if ctx.pad.is_connected() && !pad_was_connected {
                         // A newly attached DualShock starts in digital mode.
                         // Negotiate again on the connection edge so hot-plug
                         // behaves the same as a controller present at boot.
                         // The shorter-spaced request: this runs in the frame
-                        // loop, where `require_analog_port1` would stall.
-                        let _ = enable_analog_port1();
-                        ctx.pad = pad_reader.poll();
+                        // loop, where `require_analog_on` would stall.
+                        let _ = enable_analog_on(ctx.controller_port(), Port::One);
+                        ctx.pad = pad_reader.poll_on(ctx.controller_port());
                     }
                     pad_was_connected = ctx.pad.is_connected();
                     if !traced_update {

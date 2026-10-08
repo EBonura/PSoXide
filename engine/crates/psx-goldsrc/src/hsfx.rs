@@ -7,7 +7,7 @@
 //! payload retain the valid prefix rather than rejecting the whole bank.
 use psx_asset::Audio;
 use psx_sfx::{OneShot, Sample, PARKING_TAIL as SAMPLE_TAIL};
-use psx_spu::{self as spu, Adsr, SpuAddr, Voice, Volume};
+use psx_spu::{Adsr, Spu, SpuAddr, Voice, Volume};
 
 const SPU_SAMPLE_BASE: u32 = 0x1010;
 const VOICE_POOL: u8 = 15;
@@ -429,11 +429,14 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
     /// repeat register at a shared silence block was tried in psx-spu and the
     /// launcher capture showed voices running straight past it.
     ///
+    /// `spu` must be a freshly created driver: [`Spu::new`] resets the SPU and
+    /// writes the silence block, which this function used to do itself through
+    /// the free `psx_spu::init`. Call it immediately before this.
+    ///
     /// # Safety
     /// Serialize calls with all users of this bank and its SPU voice channels.
     #[inline(never)]
-    pub unsafe fn init_from_pack(&mut self, pack: &[u8]) -> usize {
-        spu::init();
+    pub unsafe fn init_from_pack(&mut self, spu: &mut Spu, pack: &[u8]) -> usize {
         if pack.len() < 8 || &pack[0..4] != b"HSFX" {
             return 0;
         }
@@ -454,7 +457,7 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
                 break;
             }
             let addr = SpuAddr::new(next_addr);
-            spu::upload_adpcm(addr, bytes);
+            spu.upload_adpcm(addr, bytes);
             self.addrs[i] = next_addr;
             self.rates[i] = audio.sample_rate_hz();
             // Park this sample before the next one starts. Sixteen-byte aligned
@@ -462,7 +465,7 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
             // SPU address granularity, not the block size.
             next_addr = (next_addr + bytes.len() as u32 + 15) & !15;
             if next_addr + SAMPLE_TAIL.len() as u32 <= 512 * 1024 {
-                spu::upload_adpcm(SpuAddr::new(next_addr), &SAMPLE_TAIL);
+                spu.upload_adpcm(SpuAddr::new(next_addr), &SAMPLE_TAIL);
                 next_addr += SAMPLE_TAIL.len() as u32;
             }
             ready = i + 1;
@@ -478,7 +481,7 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
     /// # Safety
     /// Serialize calls with all users of this bank and its SPU voice channels.
     #[inline(never)]
-    pub unsafe fn load_dialogue_pack(&mut self, pack: &[u8]) -> usize {
+    pub unsafe fn load_dialogue_pack(&mut self, spu: &mut Spu, pack: &[u8]) -> usize {
         // The previous map may changelevel in the middle of a sentence. Silence
         // and stop voice 15 before DMA writes replace the region it is decoding.
         self.stop_dialogue();
@@ -503,7 +506,7 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
             if next_addr + bytes.len() as u32 > 512 * 1024 {
                 break; // out of SPU RAM: drop the rest of this map's dialogue
             }
-            spu::upload_adpcm(SpuAddr::new(next_addr), bytes);
+            spu.upload_adpcm(SpuAddr::new(next_addr), bytes);
             self.voice_addrs[i] = next_addr;
             let rate = audio.sample_rate_hz().min(u16::MAX as u32);
             let ticks = ((audio.sample_count().saturating_mul(20) + rate.saturating_sub(1)) / rate)
@@ -520,7 +523,7 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
             // consecutively too, so a voice reading past one runs into the next.
             next_addr = (next_addr + bytes.len() as u32 + 15) & !15;
             if next_addr + SAMPLE_TAIL.len() as u32 <= 512 * 1024 {
-                spu::upload_adpcm(SpuAddr::new(next_addr), &SAMPLE_TAIL);
+                spu.upload_adpcm(SpuAddr::new(next_addr), &SAMPLE_TAIL);
                 next_addr += SAMPLE_TAIL.len() as u32;
             }
             ready = i + 1;

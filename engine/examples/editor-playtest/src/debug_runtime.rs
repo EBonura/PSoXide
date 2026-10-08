@@ -1,19 +1,23 @@
 //! Emulator-only diagnostic lines for the deterministic replay studies. Each
-//! writer is compiled out of every build without `emulator-telemetry`.
+//! writer is compiled out of every build without `emulator-telemetry`; the
+//! camera pose line also builds under the lighter `camera-pose-log`.
 
-#[cfg(feature = "emulator-telemetry")]
+#[cfg(any(feature = "emulator-telemetry", feature = "camera-pose-log"))]
+#[cfg_attr(not(feature = "emulator-telemetry"), allow(dead_code, unused_imports))]
 use super::*;
 
-#[cfg(feature = "emulator-telemetry")]
+#[cfg(any(feature = "emulator-telemetry", feature = "camera-pose-log"))]
 const DEBUG_LOG_LINE_CAP: usize = 256;
 
-#[cfg(feature = "emulator-telemetry")]
+#[cfg(any(feature = "emulator-telemetry", feature = "camera-pose-log"))]
+#[cfg_attr(not(feature = "emulator-telemetry"), allow(dead_code, unused_imports))]
 struct DebugLogLine {
     bytes: [u8; DEBUG_LOG_LINE_CAP],
     len: usize,
 }
 
-#[cfg(feature = "emulator-telemetry")]
+#[cfg(any(feature = "emulator-telemetry", feature = "camera-pose-log"))]
+#[cfg_attr(not(feature = "emulator-telemetry"), allow(dead_code, unused_imports))]
 impl DebugLogLine {
     fn new(prefix: &str) -> Self {
         let mut line = Self {
@@ -156,6 +160,18 @@ pub(super) fn debug_log_player_weapon(values: [i32; 13]) {
 #[cfg(feature = "emulator-telemetry")]
 pub(super) fn debug_log_aim_camera(values: [i32; 14]) {
     let mut line = DebugLogLine::new("aim-camera,");
+    for value in values {
+        line.push_i32(value);
+        line.push_byte(b',');
+    }
+    line.emit();
+}
+
+/// Per-update follow-camera pose: the exact eye, focus, orbit, boom and lift
+/// values that explain what the camera did on a tape tick.
+#[cfg(any(feature = "emulator-telemetry", feature = "camera-pose-log"))]
+pub(super) fn debug_log_camera_pose(values: [i32; 21]) {
+    let mut line = DebugLogLine::new("camera-pose,");
     for value in values {
         line.push_i32(value);
         line.push_byte(b',');

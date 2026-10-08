@@ -11,6 +11,7 @@ description = "PSoXide engine layer. Scene/App framework + canonical unit types 
 # resolves cleanly when consumed from outside its native workspace
 # (the editor frontend pulls it in for the 3D-viewport host renderer).
 psx-asset = { path = "../../../sdk/crates/psx-asset" }
+psx-cdstream = { path = "../../../sdk/crates/psx-cdstream" }
 psx-font  = { path = "../../../sdk/crates/psx-font" }
 psx-gpu   = { path = "../../../sdk/crates/psx-gpu" }
 psx-gte   = { path = "../../../sdk/crates/psx-gte" }
@@ -37,6 +38,9 @@ trybuild = "1"
 default = []
 boot-trace = ["psx-rt/boot-trace"]
 emulator-telemetry = []
+# Debug-line output only (no stage/counter events): a lighter path for guest
+# builds that are too close to the RAM limit for full emulator telemetry.
+debug-log = []
 hardware-boot-visual = []
 room-surface-profile = []
 # Player skinned-vertex live-capture instrument (the HWB-008..011
