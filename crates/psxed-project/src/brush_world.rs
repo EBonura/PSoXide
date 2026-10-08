@@ -2916,6 +2916,58 @@ mod tests {
         );
     }
 
+    #[test]
+    fn cooked_world_has_no_t_junctions_where_a_platform_meets_the_floor() {
+        // A platform standing on the room floor carves the floor face and
+        // leaves floor corners on the platform's base edges: the T-junction
+        // pattern that rasterises as hairline cracks. The cook must emit
+        // faces that meet only at shared vertices.
+        let mut project = authored_project();
+        let material = project.active_scene().brushes[0].faces[0].material;
+        let mut platform = Brush::cuboid([600, 64, 600], [900, 192, 800]);
+        for face in &mut platform.faces {
+            face.material = material;
+        }
+        project.active_scene_mut().brushes.push(platform);
+        let world = compile_brush_world(
+            &project,
+            BrushWorldCookOptions {
+                project_root: Path::new("."),
+                mode: BrushWorldCookMode::Draft,
+                ambient: [24; 3],
+                texture_asset_base: 40,
+                collision_hulls: Default::default(),
+            },
+        )
+        .expect("cook with a platform");
+        let mut map =
+            psx_bsp::pxbsp_resident::PxbspResidentMap::with_capacity(world.pxbsp.bytes.len());
+        map.load(0, &mut psx_bsp::SliceReader::new(&world.pxbsp.bytes))
+            .expect("cooked PXBSP loads");
+        let vertices = map.vertices();
+        let faces = map.faces();
+        let polygons: Vec<Vec<[i32; 3]>> = (0..faces.len())
+            .filter_map(|index| faces.get(index))
+            .map(|face| {
+                (0..face.vertex_count as usize)
+                    .filter_map(|k| vertices.get(face.first_vertex as usize + k))
+                    .map(|v| {
+                        [
+                            i32::from(v.position.x),
+                            i32::from(v.position.y),
+                            i32::from(v.position.z),
+                        ]
+                    })
+                    .collect()
+            })
+            .collect();
+        assert!(polygons.len() > 6, "the platform must add faces");
+        assert!(
+            crate::brush_seams::find_t_junctions(&polygons, 1).is_empty(),
+            "cooked faces must not carry T-junctions"
+        );
+    }
+
     fn authored_world(mode: BrushWorldCookMode) -> CompiledBrushWorld {
         let project = authored_project();
         compile_brush_world(

@@ -363,6 +363,30 @@ mod tests {
     }
 
     #[test]
+    fn csg_output_for_a_platform_on_a_floor_has_t_junctions_until_conformed() {
+        use crate::brush::Brush;
+        let brushes = vec![
+            Brush::cuboid([0, 0, 0], [1024, 64, 1024]),
+            Brush::cuboid([100, 64, 100], [400, 192, 300]),
+        ];
+        let mut polygons: Vec<Vec<[f64; 3]>> = crate::brush_compile::compile_csg_surfaces(&brushes)
+            .into_iter()
+            .map(|surface| surface.vertices)
+            .collect();
+        assert!(
+            !find_t_junctions(&rounded(&polygons), 1).is_empty(),
+            "the carved floor must leave corners on the platform's base edges"
+        );
+        let before: usize = polygons.iter().map(Vec::len).sum();
+        let stats = conform_t_junctions(&mut polygons, |_| false);
+        assert!(find_t_junctions(&rounded(&polygons), 1).is_empty());
+        assert_eq!(
+            polygons.iter().map(Vec::len).sum::<usize>(),
+            before + stats.vertices_added
+        );
+    }
+
+    #[test]
     fn a_half_unit_point_rounds_identically_after_welding() {
         // The same midpoint reached with opposite noise around x.5.
         let mut polygons = vec![
