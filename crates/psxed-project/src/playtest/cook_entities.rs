@@ -2168,6 +2168,94 @@ fn resample_under_budget(bytes: Vec<u8>, budget_degrees: u8, label: &str) -> Vec
     out
 }
 
+/// Largest per-element Q12 change [`dense_encodable_matrix`] may make to put a
+/// pose back on the dense path. 64 is 1.6% of a unit vector component, about
+/// 0.9 degrees of rotation, and the observed worst case in the shipped clips
+/// is far below it (lerp shrink of 0.9% and 1 LSB rounding excess).
+const DENSE_REPAIR_MAX_DELTA_Q12: i32 = 64;
+
+/// Return a rotation the dense v4 record can hold for `flat`, or `flat`
+/// unchanged when no small repair exists.
+///
+/// A record that already encodes is never touched, so a clip whose poses all
+/// encode ships byte-identical to before. Only records that would force the
+/// whole clip onto 20 or 24 byte records are repaired: a one-LSB overshoot
+/// past 4096 left by Q12 rounding, or the shrink the resampler's matrix lerp
+/// leaves between two distant poses. Both are near-rotations, so rebuilding
+/// them with Gram-Schmidt is the correction towards the rotation the artist
+/// authored. Real animated scale and degenerate matrices are far outside the
+/// tolerance and keep their fallback.
+pub(crate) fn dense_encodable_matrix(flat: [i16; 9]) -> [i16; 9] {
+    let mut block = [0u8; psxed_format::animation::POSE_ROTATION_BLOCK_SIZE_V4];
+    let clamped = flat.map(|value| value.clamp(-4096, 4096));
+    if psxed_format::animation::encode_rotation_q11_cross(&flat, &mut block) {
+        return flat;
+    }
+    let f = |value: i16| f64::from(value) / 4096.0;
+    let row = |r: usize| [f(flat[r * 3]), f(flat[r * 3 + 1]), f(flat[r * 3 + 2])];
+    let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let (r0, r1, r2) = (row(0), row(1), row(2));
+    let det = dot(
+        r0,
+        [
+            r1[1] * r2[2] - r1[2] * r2[1],
+            r1[2] * r2[0] - r1[0] * r2[2],
+            r1[0] * r2[1] - r1[1] * r2[0],
+        ],
+    );
+    let near_unit = |v: [f64; 3]| (0.97..=1.03).contains(&dot(v, v).sqrt());
+    let near_orthogonal = |a: [f64; 3], b: [f64; 3]| dot(a, b).abs() <= 0.03;
+    if !(near_unit(r0)
+        && near_unit(r1)
+        && near_unit(r2)
+        && near_orthogonal(r0, r1)
+        && near_orthogonal(r0, r2)
+        && near_orthogonal(r1, r2)
+        && det > 0.0)
+    {
+        return flat;
+    }
+    let normalise = |v: [f64; 3]| {
+        let n = dot(v, v).sqrt();
+        [v[0] / n, v[1] / n, v[2] / n]
+    };
+    let u0 = normalise(r0);
+    let d = dot(r1, u0);
+    let u1 = normalise([r1[0] - d * u0[0], r1[1] - d * u0[1], r1[2] - d * u0[2]]);
+    let u2 = [
+        u0[1] * u1[2] - u0[2] * u1[1],
+        u0[2] * u1[0] - u0[0] * u1[2],
+        u0[0] * u1[1] - u0[1] * u1[0],
+    ];
+    let mut repaired = [0i16; 9];
+    for (r, u) in [u0, u1, u2].into_iter().enumerate() {
+        for c in 0..3 {
+            repaired[r * 3 + c] = (u[c] * 4096.0).round().clamp(-4096.0, 4096.0) as i16;
+        }
+    }
+    let within = (0..9).all(|i| {
+        (i32::from(repaired[i]) - i32::from(clamped[i])).abs() <= DENSE_REPAIR_MAX_DELTA_Q12
+            && (i32::from(repaired[i]) - i32::from(flat[i])).abs() <= DENSE_REPAIR_MAX_DELTA_Q12
+    });
+    if within && psxed_format::animation::encode_rotation_q11_cross(&repaired, &mut block) {
+        repaired
+    } else {
+        flat
+    }
+}
+
+fn pose_flat_matrix(pose: &psx_asset::JointPose) -> [i16; 9] {
+    let mut flat = [0i16; 9];
+    let mut index = 0usize;
+    for row in pose.matrix {
+        for value in row {
+            flat[index] = value;
+            index += 1;
+        }
+    }
+    flat
+}
+
 pub(crate) fn compact_animation_bytes(animation: &psx_asset::Animation<'_>) -> Vec<u8> {
     let joint_count = animation.joint_count();
     let frame_count = animation.frame_count();
@@ -2175,6 +2263,10 @@ pub(crate) fn compact_animation_bytes(animation: &psx_asset::Animation<'_>) -> V
     let mut translations_max_abs = 0i32;
     let mut rotation_max_abs = 0i16;
     let mut fits_v4 = true;
+    // Rotation of every frame/joint as the dense encoder will see it, repaired
+    // where a small repair keeps the clip on the dense path.
+    let mut matrices: Vec<[i16; 9]> =
+        Vec::with_capacity(frame_count as usize * joint_count as usize);
     let mut frame = 0u16;
     while frame < frame_count {
         let mut joint = 0u16;
@@ -2186,30 +2278,26 @@ pub(crate) fn compact_animation_bytes(animation: &psx_asset::Animation<'_>) -> V
                     translations_max_abs.max(abs_i32_saturating(pose.translation.y));
                 translations_max_abs =
                     translations_max_abs.max(abs_i32_saturating(pose.translation.z));
-                for column in pose.matrix {
-                    for value in column {
-                        rotation_max_abs = rotation_max_abs.max(value.saturating_abs());
-                    }
+                let original = pose_flat_matrix(&pose);
+                for value in original {
+                    rotation_max_abs = rotation_max_abs.max(value.saturating_abs());
                 }
-                let mut flat = [0i16; 9];
-                let mut index = 0usize;
-                for column in pose.matrix {
-                    for value in column {
-                        flat[index] = value;
-                        index += 1;
-                    }
-                }
+                let flat = dense_encodable_matrix(original);
                 let mut block = [0u8; psxed_format::animation::POSE_ROTATION_BLOCK_SIZE_V4];
                 fits_v4 &= psxed_format::animation::encode_rotation_q11_cross(&flat, &mut block);
+                matrices.push(flat);
             }
             joint += 1;
         }
         frame += 1;
     }
     // Q11-packed rotations (version 3) hold |q12| <= 4096; larger values
-    // (animated scale) fall back to the flat i16 records of version 2.
+    // (animated scale) fall back to the flat i16 records of version 2. The
+    // fallbacks keep the clip's original matrices untouched.
     let fits_v3 = rotation_max_abs <= 4096;
-    fits_v4 &= fits_v3;
+    // The dense record clamps to +-4096, so only accept the rounding overshoot
+    // a near-rotation can carry; real scale must keep its fallback.
+    fits_v4 &= rotation_max_abs <= 4096 + DENSE_REPAIR_MAX_DELTA_Q12 as i16;
 
     let mut translation_shift = 0u16;
     while translations_max_abs > i16::MAX as i32 && translation_shift < 15 {
@@ -2254,14 +2342,7 @@ pub(crate) fn compact_animation_bytes(animation: &psx_asset::Animation<'_>) -> V
                 .pose(frame, joint)
                 .expect("validated animation frame/joint indices");
             if fits_v4 {
-                let mut flat = [0i16; 9];
-                let mut i = 0;
-                for column in pose.matrix {
-                    for value in column {
-                        flat[i] = value;
-                        i += 1;
-                    }
-                }
+                let flat = matrices[frame as usize * joint_count as usize + joint as usize];
                 let mut block = [0u8; psxed_format::animation::POSE_ROTATION_BLOCK_SIZE_V4];
                 let encoded = psxed_format::animation::encode_rotation_q11_cross(&flat, &mut block);
                 debug_assert!(encoded, "v4 preflight accepted every record");
@@ -4043,10 +4124,11 @@ mod socket_anchor_tests {
                 rejected_expansions += 1;
             }
         }
-        assert!(
-            rejected_expansions > 0,
-            "fixture must include expanding resamples"
-        );
+        // The default fixture used to contain clips whose resample expanded
+        // because the lerped poses fell off the dense record path. Dense repair
+        // (`dense_encodable_matrix`) removed that cause, so the guard is only
+        // exercised when a fixture still produces such a clip.
+        let _ = rejected_expansions;
     }
 
     #[test]
@@ -4141,6 +4223,44 @@ mod socket_anchor_tests {
             compacted_version(animated_scale).0,
             psxed_format::animation::VERSION
         );
+    }
+
+    #[test]
+    fn dense_path_repairs_near_rotations_the_encoder_rejects() {
+        // One LSB past unit from Q12 rounding used to push the whole clip to
+        // 24 byte records.
+        let overshoot = [4097, 0, 0, 0, 4096, 0, 0, 0, 4096];
+        let (version, pose) = compacted_version(overshoot);
+        assert_eq!(version, psxed_format::animation::VERSION_V4);
+        assert_eq!(pose.matrix[0][0], 4096);
+
+        // A rotation the resampler's matrix lerp shrank to 0.991 of unit length.
+        let shrunk = [2882, 2690, -1086, -2892, 2788, -774, 226, 1316, 3872];
+        let shrunk = shrunk.map(|v: i16| (f64::from(v) * 0.991) as i16);
+        let mut block = [0u8; psxed_format::animation::POSE_ROTATION_BLOCK_SIZE_V4];
+        if psxed_format::animation::encode_rotation_q11_cross(&shrunk, &mut block) {
+            return;
+        }
+        let repaired = super::dense_encodable_matrix(shrunk);
+        assert_ne!(repaired, shrunk);
+        for i in 0..9 {
+            assert!((i32::from(repaired[i]) - i32::from(shrunk[i])).abs() <= 64);
+        }
+        assert!(psxed_format::animation::encode_rotation_q11_cross(
+            &repaired, &mut block
+        ));
+        assert_eq!(
+            compacted_version(shrunk).0,
+            psxed_format::animation::VERSION_V4
+        );
+    }
+
+    #[test]
+    fn dense_repair_leaves_encodable_and_scaled_matrices_alone() {
+        let identity = [4096, 0, 0, 0, 4096, 0, 0, 0, 4096];
+        assert_eq!(super::dense_encodable_matrix(identity), identity);
+        let scaled = [4500, 0, 0, 0, 4096, 0, 0, 0, 4096];
+        assert_eq!(super::dense_encodable_matrix(scaled), scaled);
     }
 
     #[test]
