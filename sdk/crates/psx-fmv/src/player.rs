@@ -31,7 +31,9 @@
 //! game lends a buffer that is idle while the movie plays, such as a level
 //! buffer at boot. The player takes over the CD drive, the MDEC, DMA
 //! channels 0 to 2, root counter 2, the display and the VRAM under
-//! [`Config::buffers`] while it runs; the SPU must already be initialised.
+//! [`Config::buffers`] while it runs. No frame of the caller's may be in
+//! flight on the GPU when it starts, and the SPU must already be
+//! initialised.
 
 use core::ptr::addr_of_mut;
 
@@ -634,6 +636,8 @@ fn setup_mdec() -> bool {
 /// halfwords.
 fn clear_buffers(dma: &mut GpuDma, config: &Config) {
     let gpu = Gpu::from_dma_mut(dma);
+    // A frame the caller kicked before the movie may still be walking.
+    gpu.wait_idle();
     let line = config.screen_width * halfwords_x2(config.depth) / 2;
     for &(x, y) in &config.buffers {
         gpu.draw(&FillRect::new(
