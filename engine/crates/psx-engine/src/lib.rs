@@ -58,6 +58,7 @@ pub mod affine_surface;
 pub mod angle;
 pub mod app;
 pub mod attributed_clip;
+pub mod cd_drive;
 pub mod character_motor;
 pub mod collision_query;
 pub mod fixed;
