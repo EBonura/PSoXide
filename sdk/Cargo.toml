@@ -23,6 +23,7 @@ members = [
     "crates/psx-fmv",
     "crates/psx-tick",
     "crates/psx-residency",
+    "crates/psx-residency-sim",
 ]
 
 # The examples are built against the MIPS target via a separate
@@ -69,3 +70,4 @@ psx-pack = { path = "crates/psx-pack" }
 psx-fmv  = { path = "crates/psx-fmv" }
 psx-osk = { path = "crates/psx-osk" }
 psx-residency = { path = "crates/psx-residency" }
+psx-residency-sim = { path = "crates/psx-residency-sim" }
