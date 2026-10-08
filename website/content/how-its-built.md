@@ -48,13 +48,10 @@ Every project's README and itch.io page carries an "AI-generated content" line t
 | Project | AI-generated content that ships |
 | --- | --- |
 | SDK, emulator, editor, engine | Code. The editor repository also holds two placeholder character models made with an AI 3D-model generator, used by an engine example. |
-| Cortex Ignition | Code, most level textures and the sky (made with an image model, then reduced to 64 by 64 PS1 textures) and some animation clips (generated with a motion model, then edited). The music is by Carmelo Miceli. |
-| VoXide | Code only. The textures and sounds are CC0 packs, credited in the game. |
-| NitroXide, Celeste Classic Collection, Quake, PSXcel, PSoXide Arcade, the demo disc | Code. Their other assets are credited in each project's README. |
+| Cortex Ignition | Code, most level textures and the sky (made with an image model, then reduced to 64 by 64 PS1 textures) and some animation clips (generated with a motion model, then edited). The 3D art is by Alberto Busicchio and the music by Carmelo Miceli, both credited in the game. The voice and effect recordings come from asset packs. |
+| VoXide, NitroXide, Celeste Classic Collection, Quake, PSXcel, PSoXide Arcade, the demo disc | Code only. Everything else is third-party or the original creators', credited in each project's README and in the game. |
 | Half-Life, Hollow Knight | Code only. The build converts game data from your own copy, and the projects distribute none of it. |
 | WipEout | Code, and a remastered texture pack that an image model generated from the original textures. |
-
-<!-- Review before publishing: rows for NitroXide, Celeste, Quake, PSXcel, Arcade and the demo disc list code only because their repositories record nothing else; confirm the car models, launcher art and disc label art. -->
 
 ## Criticism is welcome
 
