@@ -1,6 +1,9 @@
 use super::*;
 use psx_math::int32::InvariantDivisor31;
 
+/// A solid-colour face: three projected-vertex indices and its RGB.
+type SolidFace = ([u16; 3], (u8, u8, u8));
+
 /// The back-culled extent-safe model face walker runs with its stack in the
 /// scratchpad (per drawn face it reloads a dozen spilled loop invariants).
 /// It starts after the blended-vertex chunk, the model pass's only
@@ -195,15 +198,21 @@ fn facet_reflection_face(
     roughness: u8,
 ) -> TexturedModelRenderFace {
     let words = face.uv_words();
-    let n = [words[0] as u8 as i8 as i32, (words[0] >> 8) as u8 as i8 as i32,
-        words[1] as u8 as i8 as i32];
+    let n = [
+        words[0] as u8 as i8 as i32,
+        (words[0] >> 8) as u8 as i8 as i32,
+        words[1] as u8 as i8 as i32,
+    ];
     let Some(joint) = joints.get((words[1] >> 8) as usize) else {
-        for k in 0..3 { face = face.with_corner_uv_word(k, 0); }
+        for k in 0..3 {
+            face = face.with_corner_uv_word(k, 0);
+        }
         return face;
     };
     let m = joint.rotation.m;
-    let dot = |row: usize| i32::from(m[row][0]) * n[0]
-        + i32::from(m[row][1]) * n[1] + i32::from(m[row][2]) * n[2];
+    let dot = |row: usize| {
+        i32::from(m[row][0]) * n[0] + i32::from(m[row][1]) * n[1] + i32::from(m[row][2]) * n[2]
+    };
     // Projection scales X/Y by four to improve GTE precision; undo that
     // anisotropy before normal lookup. Uniform model scale cancels in L1.
     let nx = dot(0) / (MODEL_GTE_XY_SCALE * 8);
@@ -232,9 +241,13 @@ fn facet_reflection_face(
     for k in 0..3 {
         let (du, dv) = if gradient & 0x8000 != 0 {
             let bits = gradient >> (k * 4);
-            ((i32::from(bits & 3) * 2 - 3) * 4,
-             (i32::from((bits >> 2) & 3) * 2 - 3) * 4)
-        } else { (0, 0) };
+            (
+                (i32::from(bits & 3) * 2 - 3) * 4,
+                (i32::from((bits >> 2) & 3) * 2 - 3) * 4,
+            )
+        } else {
+            (0, 0)
+        };
         let mut mapped_u = (u + du).clamp(0, i32::from(width.max(1)) - 1) as u16;
         if (1..=4).contains(&band) && width >= 4 {
             mapped_u = ((band - 1) * u16::from(width) + mapped_u) >> 2;
@@ -252,7 +265,11 @@ fn model_face_with_uv_mapping(
     joints: &[JointViewTransform],
 ) -> TexturedModelRenderFace {
     let (texture_width, texture_height, roughness, uv_offset) = match mapping {
-        ModelUvMapping::FacetReflection { texture_width, texture_height, roughness } => {
+        ModelUvMapping::FacetReflection {
+            texture_width,
+            texture_height,
+            roughness,
+        } => {
             return facet_reflection_face(face, joints, texture_width, texture_height, roughness);
         }
         ModelUvMapping::Authored => return face,
@@ -1233,7 +1250,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             ModelUvMapping::Authored => Some(ModelUvOffset::ZERO),
             ModelUvMapping::AuthoredOffset(offset) => Some(offset),
             ModelUvMapping::CameraCrystal { .. } => Some(ModelUvOffset::ZERO),
-            ModelUvMapping::ScreenSpaceReflection { .. } | ModelUvMapping::FacetReflection { .. } => None,
+            ModelUvMapping::ScreenSpaceReflection { .. }
+            | ModelUvMapping::FacetReflection { .. } => None,
         };
         // Back-culled and double-sided models can share the unclamped batch.
         // CullMode::None previously fell through to the general per-face path,
@@ -1246,10 +1264,16 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         // reflection model is extent-safe, its packets need no splitting in
         // either mode and can use the same fused reflection walker.
         let unsplit_reflection = !options.split_textured_triangles
-            && matches!(options.model_uv_mapping, ModelUvMapping::FacetReflection { .. });
+            && matches!(
+                options.model_uv_mapping,
+                ModelUvMapping::FacetReflection { .. }
+            );
         let packed_average_unclamped_faces = (packed_fast_faces || unsplit_reflection)
             && (authored_uv_offset.is_some()
-                || matches!(options.model_uv_mapping, ModelUvMapping::FacetReflection { .. }))
+                || matches!(
+                    options.model_uv_mapping,
+                    ModelUvMapping::FacetReflection { .. }
+                ))
             && all_projected_vertices_in_front
             && options.depth_policy == DepthPolicy::Average
             && all_projected_vertices_inside_hw_bounds
@@ -1318,11 +1342,27 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             }
         } else if packed_average_unclamped_faces {
             let projected_vertices = &projected_vertices[..project_count];
-            let overflow = if let ModelUvMapping::FacetReflection { texture_width, texture_height, roughness } = options.model_uv_mapping {
-                self.submit_facet_reflection_batch(triangles, projected_vertices, faces,
-                    joint_view_transforms, packet_material, material, options,
+            let overflow = if let ModelUvMapping::FacetReflection {
+                texture_width,
+                texture_height,
+                roughness,
+            } = options.model_uv_mapping
+            {
+                self.submit_facet_reflection_batch(
+                    triangles,
+                    projected_vertices,
+                    faces,
+                    joint_view_transforms,
+                    packet_material,
+                    material,
+                    options,
                     packed_average_unclamped_extent_safe_faces,
-                    texture_width, texture_height, roughness, &mut stats, &mut faces_considered)
+                    texture_width,
+                    texture_height,
+                    roughness,
+                    &mut stats,
+                    &mut faces_considered,
+                )
             } else if packed_average_unclamped_extent_safe_faces {
                 if options.cull_mode == CullMode::Back {
                     let stats = &mut stats;
@@ -1892,14 +1932,23 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     /// this scratch buffer outside the scratchpad walker bounds stack usage.
     #[inline(never)]
     fn submit_facet_reflection_batch(
-        &mut self, triangles: &mut impl PrimitiveSink<TriTextured>,
-        projected: &[ProjectedVertex], faces: &[TexturedModelRenderFace],
-        joints: &[JointViewTransform], packet: TexturedPacketMaterial,
-        material: TextureMaterial, options: WorldSurfaceOptions, extent_safe: bool,
-        width: u8, height: u8, roughness: u8,
-        stats: &mut TexturedModelRenderStats, considered: &mut u32,
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        projected: &[ProjectedVertex],
+        faces: &[TexturedModelRenderFace],
+        joints: &[JointViewTransform],
+        packet: TexturedPacketMaterial,
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+        extent_safe: bool,
+        width: u8,
+        height: u8,
+        roughness: u8,
+        stats: &mut TexturedModelRenderStats,
+        considered: &mut u32,
     ) -> bool {
-        if extent_safe && matches!(self.ordering, WorldCommandOrdering::Bucketed)
+        if extent_safe
+            && matches!(self.ordering, WorldCommandOrdering::Bucketed)
             && faces.len() <= triangles.remaining()
             && faces.len() <= self.commands.len().saturating_sub(self.command_len)
         {
@@ -1909,15 +1958,28 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             unsafe {
                 ModelFaceWalkerStack::run(|| {
                     self.submit_facet_reflection_extent_safe(
-                        triangles, projected, faces, joints, packet, options,
-                        width, height, roughness, stats, considered);
+                        triangles, projected, faces, joints, packet, options, width, height,
+                        roughness, stats, considered,
+                    );
                 });
             }
             return false;
         }
-        self.submit_facet_reflection_mapped_batch(triangles, projected, faces,
-            joints, packet, material, options, extent_safe, width, height,
-            roughness, stats, considered)
+        self.submit_facet_reflection_mapped_batch(
+            triangles,
+            projected,
+            faces,
+            joints,
+            packet,
+            material,
+            options,
+            extent_safe,
+            width,
+            height,
+            roughness,
+            stats,
+            considered,
+        )
     }
 
     /// Fuse visibility, reflection coordinates and packet output. The old
@@ -1925,11 +1987,18 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     /// submission state for every chunk, including chunks of hidden faces.
     #[inline(never)]
     fn submit_facet_reflection_extent_safe(
-        &mut self, triangles: &mut impl PrimitiveSink<TriTextured>,
-        projected: &[ProjectedVertex], faces: &[TexturedModelRenderFace],
-        joints: &[JointViewTransform], packet: TexturedPacketMaterial,
-        options: WorldSurfaceOptions, width: u8, height: u8, roughness: u8,
-        stats: &mut TexturedModelRenderStats, considered: &mut u32,
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        projected: &[ProjectedVertex],
+        faces: &[TexturedModelRenderFace],
+        joints: &[JointViewTransform],
+        packet: TexturedPacketMaterial,
+        options: WorldSurfaceOptions,
+        width: u8,
+        height: u8,
+        roughness: u8,
+        stats: &mut TexturedModelRenderStats,
+        considered: &mut u32,
     ) {
         debug_assert!(faces.len() <= triangles.remaining());
         debug_assert!(faces.len() <= self.commands.len().saturating_sub(self.command_len));
@@ -1941,13 +2010,11 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         for source in faces {
             // SAFETY: the caller validated all indices and projected all
             // vertices, and preflighted a packet/command for every face.
-            let (face, addresses) = unsafe {
-                model_face_addresses_scheduled(source, projected.as_ptr())
-            };
+            let (face, addresses) =
+                unsafe { model_face_addresses_scheduled(source, projected.as_ptr()) };
             let p = unsafe { [*addresses[0], *addresses[1], *addresses[2]] };
             let xy = [(p[0].sx, p[0].sy), (p[1].sx, p[1].sy), (p[2].sx, p[2].sy)];
-            if options.cull_mode == CullMode::Back
-                && psx_gte::scene::screen_area_mac0_scheduled(xy) <= 0
+            if options.cull_mode == CullMode::Back && psx_gte::scene::screen_area_scheduled(xy) <= 0
             {
                 culled = culled.wrapping_add(1);
                 continue;
@@ -1955,12 +2022,20 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             let mapped = facet_reflection_face(face, joints, width, height, roughness);
             let triangle = unsafe {
                 triangles.push_unchecked(TriTextured::with_packet_material_packed_uv_words(
-                    xy, mapped.uv_words(), packet.with_clut_bank(face.palette_bank())))
+                    xy,
+                    mapped.uv_words(),
+                    packet.with_clut_bank(face.palette_bank()),
+                ))
             } as *mut TriTextured as *mut u32;
             let depth = ((p[0].sz + p[1].sz + p[2].sz) / 3).saturating_add(options.depth_bias);
             unsafe {
-                commands.add(command_start + submitted).write(BucketedWorldCommand::new(
-                    triangle, depth_slots.slot(depth), TriTextured::WORDS));
+                commands
+                    .add(command_start + submitted)
+                    .write(BucketedWorldCommand::new(
+                        triangle,
+                        depth_slots.slot(depth),
+                        TriTextured::WORDS,
+                    ));
             }
             submitted += 1;
         }
@@ -1968,27 +2043,40 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         let processed = faces.len().min(u16::MAX as usize) as u16;
         *considered = considered.wrapping_add(u32::from(processed));
         let submitted = submitted.min(u16::MAX as usize) as u16;
-        flush_packed_unclamped_model_batch_stats(stats, 0, processed, processed,
-            culled, submitted, submitted, 0);
+        flush_packed_unclamped_model_batch_stats(
+            stats, 0, processed, processed, culled, submitted, submitted, 0,
+        );
     }
 
     #[inline(never)]
     fn submit_facet_reflection_mapped_batch(
-        &mut self, triangles: &mut impl PrimitiveSink<TriTextured>,
-        projected: &[ProjectedVertex], faces: &[TexturedModelRenderFace],
-        joints: &[JointViewTransform], packet: TexturedPacketMaterial,
-        material: TextureMaterial, options: WorldSurfaceOptions, extent_safe: bool,
-        width: u8, height: u8, roughness: u8,
-        stats: &mut TexturedModelRenderStats, considered: &mut u32,
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        projected: &[ProjectedVertex],
+        faces: &[TexturedModelRenderFace],
+        joints: &[JointViewTransform],
+        packet: TexturedPacketMaterial,
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+        extent_safe: bool,
+        width: u8,
+        height: u8,
+        roughness: u8,
+        stats: &mut TexturedModelRenderStats,
+        considered: &mut u32,
     ) -> bool {
         let mut mapped = [TexturedModelRenderFace::ZERO; 16];
         for chunk in faces.chunks(16) {
             for (dst, face) in mapped.iter_mut().zip(chunk.iter().copied()) {
-                let [a,b,c] = face.vertex_indices().map(|i| projected[usize::from(i)]);
-                let area = (i32::from(b.sx)-i32::from(a.sx)) * (i32::from(c.sy)-i32::from(a.sy))
-                    - (i32::from(b.sy)-i32::from(a.sy)) * (i32::from(c.sx)-i32::from(a.sx));
-                *dst = if options.cull_mode == CullMode::Back && area <= 0 { face }
-                    else { facet_reflection_face(face, joints, width, height, roughness) };
+                let [a, b, c] = face.vertex_indices().map(|i| projected[usize::from(i)]);
+                let area = (i32::from(b.sx) - i32::from(a.sx))
+                    * (i32::from(c.sy) - i32::from(a.sy))
+                    - (i32::from(b.sy) - i32::from(a.sy)) * (i32::from(c.sx) - i32::from(a.sx));
+                *dst = if options.cull_mode == CullMode::Back && area <= 0 {
+                    face
+                } else {
+                    facet_reflection_face(face, joints, width, height, roughness)
+                };
             }
             let faces = &mapped[..chunk.len()];
             let overflow = if extent_safe {
@@ -2001,12 +2089,36 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 }
             } else if options.cull_mode == CullMode::Back {
                 self.submit_predecoded_model_faces_packed_average_unclamped_batch::<true>(
-                    triangles, projected, faces, packet, None, ModelUvOffset::ZERO, true, material, options, stats, considered)
+                    triangles,
+                    projected,
+                    faces,
+                    packet,
+                    None,
+                    ModelUvOffset::ZERO,
+                    true,
+                    material,
+                    options,
+                    stats,
+                    considered,
+                )
             } else {
                 self.submit_predecoded_model_faces_packed_average_unclamped_batch::<false>(
-                    triangles, projected, faces, packet, None, ModelUvOffset::ZERO, true, material, options, stats, considered)
+                    triangles,
+                    projected,
+                    faces,
+                    packet,
+                    None,
+                    ModelUvOffset::ZERO,
+                    true,
+                    material,
+                    options,
+                    stats,
+                    considered,
+                )
             };
-            if overflow { return true; }
+            if overflow {
+                return true;
+            }
         }
         false
     }
@@ -3017,7 +3129,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         &mut self,
         triangles: &mut impl PrimitiveSink<psx_gpu::prim::TriGouraud>,
         projected: &[ProjectedVertex],
-        faces: &[([u16; 3], (u8, u8, u8))],
+        faces: &[SolidFace],
         options: WorldSurfaceOptions,
     ) -> u16 {
         use psx_gpu::prim::TriGouraud;
@@ -3788,65 +3900,83 @@ mod camera_crystal_route_tests {
 mod facet_reflection_tests {
     use super::*;
     fn face(n: [i8; 3], joint: u8) -> TexturedModelRenderFace {
-        TexturedModelRenderFace::new_with_palette_bank([4, 5, 6],
-            [(n[0] as u8, n[1] as u8), (n[2] as u8, joint), (0, 0)], 2)
+        TexturedModelRenderFace::new_with_palette_bank(
+            [4, 5, 6],
+            [(n[0] as u8, n[1] as u8), (n[2] as u8, joint), (0, 0)],
+            2,
+        )
     }
     fn joint(m: [[i16; 3]; 3]) -> JointViewTransform {
-        JointViewTransform { rotation: Mat3I16 { m }, translation: Vec3I32::ZERO }
+        JointViewTransform {
+            rotation: Mat3I16 { m },
+            translation: Vec3I32::ZERO,
+        }
     }
-fn reference_face(
-    mut face: TexturedModelRenderFace,
-    joints: &[JointViewTransform],
-    width: u8,
-    height: u8,
-    roughness: u8,
-) -> TexturedModelRenderFace {
-    let words = face.uv_words();
-    let n = [words[0] as u8 as i8 as i32, (words[0] >> 8) as u8 as i8 as i32,
-        words[1] as u8 as i8 as i32];
-    let Some(joint) = joints.get((words[1] >> 8) as usize) else {
-        for k in 0..3 { face = face.with_corner_uv_word(k, 0); }
-        return face;
-    };
-    let m = joint.rotation.m;
-    let dot = |row: usize| i32::from(m[row][0]) * n[0]
-        + i32::from(m[row][1]) * n[1] + i32::from(m[row][2]) * n[2];
-    // Projection scales X/Y by four to improve GTE precision; undo that
-    // anisotropy before normal lookup. Uniform model scale cancels in L1.
-    let nx = dot(0) / (MODEL_GTE_XY_SCALE * 8);
-    let ny = dot(1) / (MODEL_GTE_XY_SCALE * 8);
-    let nz = dot(2) / 8;
-    let len = (nx.abs() + ny.abs() + nz.abs()).max(1);
-    let quantum = 1 << roughness.min(3);
-    let coord = |n: i32, size: u8| {
-        let max = i32::from(size.max(1)) - 1;
-        let x = ((len + n) * max / (2 * len)).clamp(0, max);
-        ((x / quantum) * quantum) as u16
-    };
-    let u = i32::from(coord(nx, width));
-    let v = i32::from(coord(ny, height));
-    // Optional authored microfacet gradients. Six 2-bit offsets occupy the
-    // final UV word; bit 15 opts in. Each triangle samples a small patch,
-    // retaining its own normal while allowing light to fade across its face.
-    let gradient = words[2];
-    for k in 0..3 {
-        let (du, dv) = if gradient & 0x8000 != 0 {
-            let bits = gradient >> (k * 4);
-            ((i32::from(bits & 3) * 2 - 3) * 4,
-             (i32::from((bits >> 2) & 3) * 2 - 3) * 4)
-        } else { (0, 0) };
-        let uv = (u + du).clamp(0, i32::from(width.max(1)) - 1) as u16
-            | (((v + dv).clamp(0, i32::from(height.max(1)) - 1) as u16) << 8);
-        face = face.with_corner_uv_word(k, uv);
+    fn reference_face(
+        mut face: TexturedModelRenderFace,
+        joints: &[JointViewTransform],
+        width: u8,
+        height: u8,
+        roughness: u8,
+    ) -> TexturedModelRenderFace {
+        let words = face.uv_words();
+        let n = [
+            words[0] as u8 as i8 as i32,
+            (words[0] >> 8) as u8 as i8 as i32,
+            words[1] as u8 as i8 as i32,
+        ];
+        let Some(joint) = joints.get((words[1] >> 8) as usize) else {
+            for k in 0..3 {
+                face = face.with_corner_uv_word(k, 0);
+            }
+            return face;
+        };
+        let m = joint.rotation.m;
+        let dot = |row: usize| {
+            i32::from(m[row][0]) * n[0] + i32::from(m[row][1]) * n[1] + i32::from(m[row][2]) * n[2]
+        };
+        // Projection scales X/Y by four to improve GTE precision; undo that
+        // anisotropy before normal lookup. Uniform model scale cancels in L1.
+        let nx = dot(0) / (MODEL_GTE_XY_SCALE * 8);
+        let ny = dot(1) / (MODEL_GTE_XY_SCALE * 8);
+        let nz = dot(2) / 8;
+        let len = (nx.abs() + ny.abs() + nz.abs()).max(1);
+        let quantum = 1 << roughness.min(3);
+        let coord = |n: i32, size: u8| {
+            let max = i32::from(size.max(1)) - 1;
+            let x = ((len + n) * max / (2 * len)).clamp(0, max);
+            ((x / quantum) * quantum) as u16
+        };
+        let u = i32::from(coord(nx, width));
+        let v = i32::from(coord(ny, height));
+        // Optional authored microfacet gradients. Six 2-bit offsets occupy the
+        // final UV word; bit 15 opts in. Each triangle samples a small patch,
+        // retaining its own normal while allowing light to fade across its face.
+        let gradient = words[2];
+        for k in 0..3 {
+            let (du, dv) = if gradient & 0x8000 != 0 {
+                let bits = gradient >> (k * 4);
+                (
+                    (i32::from(bits & 3) * 2 - 3) * 4,
+                    (i32::from((bits >> 2) & 3) * 2 - 3) * 4,
+                )
+            } else {
+                (0, 0)
+            };
+            let uv = (u + du).clamp(0, i32::from(width.max(1)) - 1) as u16
+                | (((v + dv).clamp(0, i32::from(height.max(1)) - 1) as u16) << 8);
+            face = face.with_corner_uv_word(k, uv);
+        }
+        face
     }
-    face
-}
-
 
     #[test]
     fn optimized_coordinates_match_original_integer_mapping() {
         let mut seed = 0x873a2431u32;
-        let mut next = || { seed = seed.wrapping_mul(1664525).wrapping_add(1013904223); seed };
+        let mut next = || {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            seed
+        };
         for _ in 0..20000 {
             let n = [next() as i8, next() as i8, next() as i8];
             let m = core::array::from_fn(|_| core::array::from_fn(|_| next() as i16));
@@ -4102,16 +4232,30 @@ fn reference_face(
         use psx_gpu::ot::OrderingTable;
         extern crate std;
         use std::vec::Vec;
-        const ZERO: TriTextured = TriTextured::new([(0,0);3],[(0,0);3],0,0,(0,0,0));
-        let vertices = [ProjectedVertex::new(-20,-30,512),
-            ProjectedVertex::new(40,-10,800), ProjectedVertex::new(10,60,1200)];
+        const ZERO: TriTextured = TriTextured::new([(0, 0); 3], [(0, 0); 3], 0, 0, (0, 0, 0));
+        let vertices = [
+            ProjectedVertex::new(-20, -30, 512),
+            ProjectedVertex::new(40, -10, 800),
+            ProjectedVertex::new(10, 60, 1200),
+        ];
         let faces: [_; 37] = core::array::from_fn(|i| {
-            let indices = match i % 3 { 0 => [0,1,2], 1 => [0,2,1], _ => [0,0,2] };
-            TexturedModelRenderFace::new_with_palette_bank(indices,
-                [((i as u8).wrapping_mul(7),128), (127, if i == 5 {255} else {0}), (0,0)], (i%4) as u8)
-                .with_corner_uv_word(2, if i%2 == 0 {0x8f30} else {0})
+            let indices = match i % 3 {
+                0 => [0, 1, 2],
+                1 => [0, 2, 1],
+                _ => [0, 0, 2],
+            };
+            TexturedModelRenderFace::new_with_palette_bank(
+                indices,
+                [
+                    ((i as u8).wrapping_mul(7), 128),
+                    (127, if i == 5 { 255 } else { 0 }),
+                    (0, 0),
+                ],
+                (i % 4) as u8,
+            )
+            .with_corner_uv_word(2, if i % 2 == 0 { 0x8f30 } else { 0 })
         });
-        let joints = [joint([[16384,0,0],[0,16384,0],[0,0,4096]])];
+        let joints = [joint([[16384, 0, 0], [0, 16384, 0], [0, 0, 4096]])];
         for cull in [CullMode::Back, CullMode::None] {
             for roughness in 0..4 {
                 let run = |mode: u8| {
@@ -4126,25 +4270,62 @@ fn reference_face(
                     {
                         let mut triangles = PrimitiveArena::new(&mut packets);
                         let mut pass = WorldRenderPass::new_bucketed(&mut ot, &mut commands);
-                        let material = TextureMaterial::opaque(0x1234,0x5678,(116,132,152));
-                        let options = WorldSurfaceOptions::new(DepthBand::whole(),DepthRange::new(0,4096))
-                            .with_cull_mode(cull)
-                            .with_textured_triangle_splitting(false);
+                        let material = TextureMaterial::opaque(0x1234, 0x5678, (116, 132, 152));
+                        let options =
+                            WorldSurfaceOptions::new(DepthBand::whole(), DepthRange::new(0, 4096))
+                                .with_cull_mode(cull)
+                                .with_textured_triangle_splitting(false);
                         let overflow = if mode == 0 {
-                            pass.submit_facet_reflection_batch(&mut triangles,&vertices,&faces,&joints,
-                                material.textured_packet_material(),material,options,true,128,64,roughness,&mut stats,&mut considered)
+                            pass.submit_facet_reflection_batch(
+                                &mut triangles,
+                                &vertices,
+                                &faces,
+                                &joints,
+                                material.textured_packet_material(),
+                                material,
+                                options,
+                                true,
+                                128,
+                                64,
+                                roughness,
+                                &mut stats,
+                                &mut considered,
+                            )
                         } else if mode == 1 {
-                            pass.submit_facet_reflection_mapped_batch(&mut triangles,&vertices,&faces,&joints,
-                                material.textured_packet_material(),material,options,true,128,64,roughness,&mut stats,&mut considered)
+                            pass.submit_facet_reflection_mapped_batch(
+                                &mut triangles,
+                                &vertices,
+                                &faces,
+                                &joints,
+                                material.textured_packet_material(),
+                                material,
+                                options,
+                                true,
+                                128,
+                                64,
+                                roughness,
+                                &mut stats,
+                                &mut considered,
+                            )
                         } else {
                             let mut overflow = false;
                             for face in faces {
                                 considered += 1;
-                                let mapped = facet_reflection_face(face, &joints, 128, 64, roughness);
+                                let mapped =
+                                    facet_reflection_face(face, &joints, 128, 64, roughness);
                                 let material = material.with_clut_bank(face.palette_bank());
                                 overflow |= pass.submit_predecoded_model_face(
-                                    &mut triangles, &vertices, vertices.len(), mapped, true, 8,
-                                    material.textured_packet_material(), material, options, &mut stats);
+                                    &mut triangles,
+                                    &vertices,
+                                    vertices.len(),
+                                    mapped,
+                                    true,
+                                    8,
+                                    material.textured_packet_material(),
+                                    material,
+                                    options,
+                                    &mut stats,
+                                );
                             }
                             overflow
                         };
@@ -4152,13 +4333,29 @@ fn reference_face(
                         count = triangles.len();
                         for i in 0..pass.command_len {
                             // The bucketed pass initialized precisely this prefix.
-                            let command = unsafe { *pass.commands.as_ptr().cast::<BucketedWorldCommand>().add(i) };
+                            let command = unsafe {
+                                *pass.commands.as_ptr().cast::<BucketedWorldCommand>().add(i)
+                            };
                             slots.push(command.slot_words);
                         }
                     }
-                    let words: Vec<_> = packets[..count].iter().map(|p|
-                        [p.tag,p.tex_window,p.color_cmd,p.v0,p.uv0_clut,p.v1,p.uv1_tpage,p.v2,p.uv2]).collect();
-                    (words,slots,stats,considered)
+                    let words: Vec<_> = packets[..count]
+                        .iter()
+                        .map(|p| {
+                            [
+                                p.tag,
+                                p.tex_window,
+                                p.color_cmd,
+                                p.v0,
+                                p.uv0_clut,
+                                p.v1,
+                                p.uv1_tpage,
+                                p.v2,
+                                p.uv2,
+                            ]
+                        })
+                        .collect();
+                    (words, slots, stats, considered)
                 };
                 let fused = run(0);
                 assert_eq!(fused, run(1));
@@ -4178,55 +4375,89 @@ fn reference_face(
     #[test]
     fn facet_uv_tracks_normal_rotation_and_preserves_face_identity() {
         let f = face([0, 0, -127], 0);
-        let a = facet_reflection_face(f, &[joint([[16384,0,0],[0,16384,0],[0,0,4096]])], 128,128,0);
-        assert_eq!(a.uvs(), [(63,63);3]);
-        let b = facet_reflection_face(f, &[joint([[0,0,16384],[0,16384,0],[-4096,0,0]])], 128,128,0);
-        assert_eq!(b.uvs(), [(0,63);3]);
-        assert_eq!(b.vertex_indices(), [4,5,6]);
+        let a = facet_reflection_face(
+            f,
+            &[joint([[16384, 0, 0], [0, 16384, 0], [0, 0, 4096]])],
+            128,
+            128,
+            0,
+        );
+        assert_eq!(a.uvs(), [(63, 63); 3]);
+        let b = facet_reflection_face(
+            f,
+            &[joint([[0, 0, 16384], [0, 16384, 0], [-4096, 0, 0]])],
+            128,
+            128,
+            0,
+        );
+        assert_eq!(b.uvs(), [(0, 63); 3]);
+        assert_eq!(b.vertex_indices(), [4, 5, 6]);
         assert_eq!(b.palette_bank(), 2);
     }
     #[test]
     fn authored_gradient_spreads_corners_and_clamps_at_texture_edges() {
-        let f = face([0,0,-127],0).with_corner_uv_word(2, 0x8f30);
-        let m = joint([[16384,0,0],[0,16384,0],[0,0,4096]]);
-        let result = facet_reflection_face(f, &[m],128,128,0);
-        assert_eq!(result.uvs(), [(51,51),(75,51),(75,75)]);
+        let f = face([0, 0, -127], 0).with_corner_uv_word(2, 0x8f30);
+        let m = joint([[16384, 0, 0], [0, 16384, 0], [0, 0, 4096]]);
+        let result = facet_reflection_face(f, &[m], 128, 128, 0);
+        assert_eq!(result.uvs(), [(51, 51), (75, 51), (75, 75)]);
         assert_eq!(result.vertex_indices(), f.vertex_indices());
         assert_eq!(result.palette_bank(), f.palette_bank());
-        for n in [[127,0,0],[-127,0,0],[0,127,0],[0,-127,0]] {
-            let f = face(n,0).with_corner_uv_word(2,0x8f30);
-            for size in [0,1,128,255] {
-                let result=facet_reflection_face(f,&[m],size,size,0);
-                assert!(result.uvs().iter().all(|&(u,v)| u<size.max(1) && v<size.max(1)));
+        for n in [[127, 0, 0], [-127, 0, 0], [0, 127, 0], [0, -127, 0]] {
+            let f = face(n, 0).with_corner_uv_word(2, 0x8f30);
+            for size in [0, 1, 128, 255] {
+                let result = facet_reflection_face(f, &[m], size, size, 0);
+                assert!(result
+                    .uvs()
+                    .iter()
+                    .all(|&(u, v)| u < size.max(1) && v < size.max(1)));
             }
         }
     }
     #[test]
     fn material_strips_keep_rotating_gradients_inside_the_selected_finish() {
-        let m = joint([[16384,0,0],[0,16384,0],[0,0,4096]]);
+        let m = joint([[16384, 0, 0], [0, 16384, 0], [0, 0, 4096]]);
         for band in 1..=4u16 {
-            for n in [[0,0,-127], [127,0,0], [-127,0,0], [0,127,0], [0,-127,0]] {
-                let f = face(n,0).with_corner_uv_word(2, 0x8f30 | (band << 12));
-                let mapped = facet_reflection_face(f, &[m], 128,128,0);
-                assert!(mapped.uvs().iter().all(|&(u,v)|
-                    u16::from(u) >= (band-1)*32 && u16::from(u) < band*32 && v < 128));
+            for n in [
+                [0, 0, -127],
+                [127, 0, 0],
+                [-127, 0, 0],
+                [0, 127, 0],
+                [0, -127, 0],
+            ] {
+                let f = face(n, 0).with_corner_uv_word(2, 0x8f30 | (band << 12));
+                let mapped = facet_reflection_face(f, &[m], 128, 128, 0);
+                assert!(mapped
+                    .uvs()
+                    .iter()
+                    .all(|&(u, v)| u16::from(u) >= (band - 1) * 32
+                        && u16::from(u) < band * 32
+                        && v < 128));
                 assert_eq!(mapped.vertex_indices(), f.vertex_indices());
                 assert_eq!(mapped.palette_bank(), f.palette_bank());
             }
         }
-        let f = face([0,0,-127],0).with_corner_uv_word(2, 0xaf30);
-        assert_eq!(facet_reflection_face(f,&[m],128,128,0).uvs(), [(44,51),(50,51),(50,75)]);
+        let f = face([0, 0, -127], 0).with_corner_uv_word(2, 0xaf30);
+        assert_eq!(
+            facet_reflection_face(f, &[m], 128, 128, 0).uvs(),
+            [(44, 51), (50, 51), (50, 75)]
+        );
     }
     #[test]
     fn facet_lookup_stays_in_bounds_for_extreme_matrices_and_bad_joint() {
-        for n in [[-128,-128,-128], [127,127,127], [0,0,0]] {
-            for m in [[[i16::MIN;3];3], [[i16::MAX;3];3], [[0;3];3]] {
-                for size in [0,1,128,255] {
-                    let result=facet_reflection_face(face(n,0), &[joint(m)],size,size,3);
-                    assert!(result.uvs().iter().all(|&(u,v)| u<size.max(1) && v<size.max(1)));
+        for n in [[-128, -128, -128], [127, 127, 127], [0, 0, 0]] {
+            for m in [[[i16::MIN; 3]; 3], [[i16::MAX; 3]; 3], [[0; 3]; 3]] {
+                for size in [0, 1, 128, 255] {
+                    let result = facet_reflection_face(face(n, 0), &[joint(m)], size, size, 3);
+                    assert!(result
+                        .uvs()
+                        .iter()
+                        .all(|&(u, v)| u < size.max(1) && v < size.max(1)));
                 }
             }
         }
-        assert_eq!(facet_reflection_face(face([0,0,-127],255), &[],128,128,0).uvs(), [(0,0);3]);
+        assert_eq!(
+            facet_reflection_face(face([0, 0, -127], 255), &[], 128, 128, 0).uvs(),
+            [(0, 0); 3]
+        );
     }
 }

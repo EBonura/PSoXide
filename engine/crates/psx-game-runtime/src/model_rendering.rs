@@ -8,8 +8,8 @@
 //! example's VRAM atlas uploader as a closure until its glue fully
 //! migrates.
 
-use psx_engine::MaskedPoseBlend as ModelPoseBlend;
 use psx_asset::{Animation, Model, ModelPart, ModelVertex};
+use psx_engine::MaskedPoseBlend as ModelPoseBlend;
 use psx_engine::{
     projected_triangle_batchable, telemetry, Angle, CullMode, DepthPolicy, JointViewTransform,
     JointWorldTransform, LocalToWorldScale, Mat3I16, ModelPoseTranslation, ModelUvMapping,
@@ -515,7 +515,8 @@ impl RuntimeModelAsset {
                 atlas_slot.clut_word,
                 atlas_slot.tpage_word,
                 (0x80, 0x80, 0x80),
-            ).with_texture_window(atlas_slot.texture_window),
+            )
+            .with_texture_window(atlas_slot.texture_window),
             clip_first: record.clip_first,
             clip_count: record.clip_count,
             default_clip: record.default_clip,
@@ -529,7 +530,10 @@ impl RuntimeModelAsset {
             vertex_count: vertex_count as u16,
             requires_cpu_blend: model_requires_cpu_blend(model),
             double_sided: model.is_double_sided(),
-            facet_reflection_size: (model.flags() & MODEL_FACET_REFLECTION_UVS != 0).then_some((atlas_slot.texture_width.min(255) as u8, atlas_slot.texture_height.min(255) as u8)),
+            facet_reflection_size: (model.flags() & MODEL_FACET_REFLECTION_UVS != 0).then_some((
+                atlas_slot.texture_width.min(255) as u8,
+                atlas_slot.texture_height.min(255) as u8,
+            )),
             world_height: record.world_height,
             collision_radius: record.collision_radius,
             local_to_world: LocalToWorldScale::from_q12(model.local_to_world_q12()),
@@ -643,7 +647,11 @@ fn model_secondary_layer(
     let offset = ModelUvOffset::new(u, v);
     let mapping = if layer.uses_room_reflection_probe() {
         if layer.texture_asset.is_some() && layer.uses_facet_reflection() {
-            ModelUvMapping::FacetReflection { texture_width, texture_height, roughness: layer.reflection_roughness_level() }
+            ModelUvMapping::FacetReflection {
+                texture_width,
+                texture_height,
+                roughness: layer.reflection_roughness_level(),
+            }
         } else if layer.texture_asset.is_some() {
             ModelUvMapping::CameraCrystal {
                 roughness: layer.reflection_roughness_level(),
@@ -726,7 +734,9 @@ fn model_material_and_cull(
                     for channel in &mut reflection_override.tint_rgb {
                         *channel = ((u16::from(*channel) * strength + 127) / 255) as u8;
                     }
-                    let mapping = if material_override.texture_asset.is_some() && material_override.uses_facet_reflection() {
+                    let mapping = if material_override.texture_asset.is_some()
+                        && material_override.uses_facet_reflection()
+                    {
                         ModelUvMapping::FacetReflection {
                             texture_width: vram_slot_texture_size_u8(slot.texture_width),
                             texture_height: vram_slot_texture_size_u8(slot.texture_height),
@@ -808,7 +818,9 @@ fn decode_model_render_faces(
     // the gradient enable bit. Atlas UV clamping would corrupt it.
     let (max_u, max_v) = if model.flags() & MODEL_FACET_REFLECTION_UVS != 0 {
         (u8::MAX, u8::MAX)
-    } else { model_render_uv_limits(texture_width, texture_height) };
+    } else {
+        model_render_uv_limits(texture_width, texture_height)
+    };
     let mut i = 0usize;
     while i < face_count {
         let face = model.face(i as u16)?;
@@ -1277,7 +1289,14 @@ pub fn resolve_player_actor_pose<
         x,
         y,
         z,
-        if matches!(anim_action, CharacterAnimationAction::Fall | CharacterAnimationAction::Land) { model.floor_lift } else { clip_floor_lift(clip_anchor, model) },
+        if matches!(
+            anim_action,
+            CharacterAnimationAction::Fall | CharacterAnimationAction::Land
+        ) {
+            model.floor_lift
+        } else {
+            clip_floor_lift(clip_anchor, model)
+        },
         local_to_world,
         character.visual_offset,
         &rotation,
@@ -1759,7 +1778,11 @@ pub fn draw_player_from_pose<
         model_options,
         // Capture only needs the posed vertices. Emitting the invisible body
         // and then degenerating all of its packets wastes the first dash frame.
-        if phase_assembly.is_some() || capture_departure { &[] } else { faces },
+        if phase_assembly.is_some() || capture_departure {
+            &[]
+        } else {
+            faces
+        },
         model_parts,
         model_vertices,
         PROFILE,
@@ -1823,7 +1846,7 @@ pub fn draw_player_from_pose<
                         (wire_color.0 as u8, wire_color.1 as u8, wire_color.2 as u8),
                         options,
                         world,
-                        dash_assembly.as_deref_mut(),
+                        dash_assembly,
                     ));
         }
     }
@@ -2816,31 +2839,54 @@ mod tests {
         bytes[..4].copy_from_slice(b"PSMD");
         bytes[4..6].copy_from_slice(&5u16.to_le_bytes());
         bytes[8..12].copy_from_slice(&52u32.to_le_bytes());
-        for (offset, value) in [(16,3u16),(18,1),(22,128),(24,128),(26,4096)] {
-            bytes[offset..offset+2].copy_from_slice(&value.to_le_bytes());
+        for (offset, value) in [(16, 3u16), (18, 1), (22, 128), (24, 128), (26, 4096)] {
+            bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
         }
-        let uvs = [(221u8,200u8),(152,23),(180,143)];
-        for (i, &(u,v)) in uvs.iter().enumerate() {
-            let offset = 52+i*4;
-            bytes[offset..offset+2].copy_from_slice(&(i as u16).to_le_bytes());
-            bytes[offset+2]=u; bytes[offset+3]=v;
+        let uvs = [(221u8, 200u8), (152, 23), (180, 143)];
+        for (i, &(u, v)) in uvs.iter().enumerate() {
+            let offset = 52 + i * 4;
+            bytes[offset..offset + 2].copy_from_slice(&(i as u16).to_le_bytes());
+            bytes[offset + 2] = u;
+            bytes[offset + 3] = v;
         }
-        for metadata in [false,true] {
-            let flags=2u16 | if metadata { MODEL_FACET_REFLECTION_UVS } else {0};
+        for metadata in [false, true] {
+            let flags = 2u16
+                | if metadata {
+                    MODEL_FACET_REFLECTION_UVS
+                } else {
+                    0
+                };
             bytes[6..8].copy_from_slice(&flags.to_le_bytes());
-            let model=Model::from_bytes(&bytes).unwrap();
-            let mut faces=[TexturedModelRenderFace::ZERO;1];
-            let mut cursor=0;
-            assert_eq!(decode_model_render_faces(model,128,128,&mut faces,&mut cursor),Some(1));
-            assert_eq!(faces[0].uvs(),if metadata {uvs} else {[(127,127),(127,23),(127,127)]});
+            let model = Model::from_bytes(&bytes).unwrap();
+            let mut faces = [TexturedModelRenderFace::ZERO; 1];
+            let mut cursor = 0;
+            assert_eq!(
+                decode_model_render_faces(model, 128, 128, &mut faces, &mut cursor),
+                Some(1)
+            );
+            assert_eq!(
+                faces[0].uvs(),
+                if metadata {
+                    uvs
+                } else {
+                    [(127, 127), (127, 23), (127, 127)]
+                }
+            );
 
             // The atlas may occupy any quadrant of a shared 4bpp page.
             // Exercise the actual loader, not just the material constructor.
             let record = LevelModelRecord {
-                name: "quadrant fixture", mesh_asset: AssetId(1), texture_asset: Some(AssetId(7)),
-                clip_first: ModelClipTableIndex(0), clip_count: 0, default_clip: ModelClipIndex(0),
-                socket_first: ModelSocketIndex(0), socket_count: 0,
-                world_height: 100, collision_radius: 10, flags: 0,
+                name: "quadrant fixture",
+                mesh_asset: AssetId(1),
+                texture_asset: Some(AssetId(7)),
+                clip_first: ModelClipTableIndex(0),
+                clip_count: 0,
+                default_clip: ModelClipIndex(0),
+                socket_first: ModelSocketIndex(0),
+                socket_count: 0,
+                world_height: 100,
+                collision_radius: 10,
+                flags: 0,
             };
             for (u, v) in [(0, 0), (128, 0), (0, 128), (128, 128)] {
                 let window = TextureWindow::power_of_two_tile(u, v, 128, 128);
@@ -2849,9 +2895,18 @@ mod tests {
                 atlas.texture_height = 128;
                 let mut vertices = [model.vertex(0).unwrap(); 3];
                 let asset = RuntimeModelAsset::from_record_bytes(
-                    ModelIndex(0), &record, &bytes, atlas, &mut faces, &mut 0,
-                    &mut [], &mut 0, &mut vertices, &mut 0,
-                ).unwrap();
+                    ModelIndex(0),
+                    &record,
+                    &bytes,
+                    atlas,
+                    &mut faces,
+                    &mut 0,
+                    &mut [],
+                    &mut 0,
+                    &mut vertices,
+                    &mut 0,
+                )
+                .unwrap();
                 assert_eq!(asset.material.texture_window_word(), window.word());
                 assert_eq!(asset.material.clut_word(), atlas.clut_word);
                 assert_eq!(asset.facet_reflection_size, metadata.then_some((128, 128)));

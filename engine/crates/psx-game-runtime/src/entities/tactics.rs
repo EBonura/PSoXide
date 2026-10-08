@@ -175,18 +175,29 @@ impl<const N: usize, const S: bool> GameEntities<N, S> {
     /// Let defeated actors finish their collapse while an encounter result stops AI and damage.
     pub fn advance_defeated_animations(&mut self, ticks: u16) {
         for index in 0..self.count() {
-            if self.state(index)==GameEntityState::Dead {
-                self.state_ticks[index]=self.state_ticks[index].saturating_add(ticks);
+            if self.state(index) == GameEntityState::Dead {
+                self.state_ticks[index] = self.state_ticks[index].saturating_add(ticks);
             }
         }
     }
 
     /// Committed attack family, for encounter diagnostics (light=0, heavy=1, ranged=2).
-    pub fn attack_kind(&self, index: usize) -> u8 { self.selected_attack_kind(index) }
+    pub fn attack_kind(&self, index: usize) -> u8 {
+        self.selected_attack_kind(index)
+    }
 
     /// Seed a flagged encounter without changing health, cooldowns or attack ownership.
-    pub fn seed_training_actor(&mut self, records: &[LevelGameEntityRecord], index: usize, seed: u32) {
-        if index < self.count() && records.get(index).is_some_and(|r| r.flags & game_entity_flags::TRAINING != 0) {
+    pub fn seed_training_actor(
+        &mut self,
+        records: &[LevelGameEntityRecord],
+        index: usize,
+        seed: u32,
+    ) {
+        if index < self.count()
+            && records
+                .get(index)
+                .is_some_and(|r| r.flags & game_entity_flags::TRAINING != 0)
+        {
             self.tactics[index].seed = seed.max(1);
         }
     }
@@ -236,7 +247,13 @@ impl<const N: usize, const S: bool> GameEntities<N, S> {
         t.turning = false;
     }
 
-    pub(super) fn begin_goal(&mut self, index: usize, goal: EnemyGoal, ticks: u16, separation: i32) {
+    pub(super) fn begin_goal(
+        &mut self,
+        index: usize,
+        goal: EnemyGoal,
+        ticks: u16,
+        separation: i32,
+    ) {
         self.finish_goal(index, EnemyGoalResult::Cancelled);
         let t = &mut self.tactics[index];
         t.goal = goal;
@@ -318,9 +335,13 @@ impl<const N: usize, const S: bool> GameEntities<N, S> {
             }
         } else {
             match t.goal {
-                EnemyGoal::Evade => if self.intent(i) == GameEntityIntent::CircleLeft {
-                    r.strafe_left_clip
-                } else { r.strafe_right_clip },
+                EnemyGoal::Evade => {
+                    if self.intent(i) == GameEntityIntent::CircleLeft {
+                        r.strafe_left_clip
+                    } else {
+                        r.strafe_right_clip
+                    }
+                }
                 EnemyGoal::CircleLeft => r.strafe_left_clip,
                 EnemyGoal::CircleRight => r.strafe_right_clip,
                 EnemyGoal::Retreat => r.walk_backward_clip,
@@ -332,7 +353,10 @@ impl<const N: usize, const S: bool> GameEntities<N, S> {
 
     fn tactical_walk_speed_q8(r: &LevelGameEntityRecord, goal: EnemyGoal) -> i32 {
         let speed = r.walk_speed.max(1).saturating_mul(256);
-        if matches!(goal, EnemyGoal::CircleLeft | EnemyGoal::CircleRight | EnemyGoal::Retreat) {
+        if matches!(
+            goal,
+            EnemyGoal::CircleLeft | EnemyGoal::CircleRight | EnemyGoal::Retreat
+        ) {
             (speed.saturating_mul(i32::from(r.spacing_speed_percent.clamp(1, 100))) / 100).max(1)
         } else {
             speed
@@ -350,15 +374,21 @@ impl<const N: usize, const S: bool> GameEntities<N, S> {
         before: [i32; 3],
         delta: u16,
     ) {
-        if self.state(i) != GameEntityState::Aggro && !(self.flow_enabled && (self.selected_attack_is_ranged(i) || self.state(i)==GameEntityState::Windup)
-            && matches!(self.state(i),GameEntityState::Windup|GameEntityState::Attack|GameEntityState::Recover)) {
+        if self.state(i) != GameEntityState::Aggro
+            && !(self.flow_enabled
+                && (self.selected_attack_is_ranged(i) || self.state(i) == GameEntityState::Windup)
+                && matches!(
+                    self.state(i),
+                    GameEntityState::Windup | GameEntityState::Attack | GameEntityState::Recover
+                ))
+        {
             self.tactics[i].animation_clip = u16::MAX;
             return;
         }
         let dx = self.x[i].saturating_sub(before[0]).clamp(-64, 64);
         let dz = self.z[i].saturating_sub(before[2]).clamp(-64, 64);
-        self.tactics[i].moved = dx != 0 || dz != 0
-            || (self.tactics[i].motion_deferred && self.tactics[i].moved);
+        self.tactics[i].moved =
+            dx != 0 || dz != 0 || (self.tactics[i].motion_deferred && self.tactics[i].moved);
         let clip = self.tactical_locomotion_clip(r, i);
         // Objective lifetimes and animation clocks are independent. Replanning
         // the same gait must not snap both feet back to their first frame.
@@ -414,7 +444,9 @@ impl<const N: usize, const S: bool> GameEntities<N, S> {
             // A readable half-to-one-second reset, not a multi-second refusal
             // to consider another attack while the player recovers for free.
             36 + self.draw(i, 37)
-        } else { base + self.draw(i, spread) };
+        } else {
+            base + self.draw(i, spread)
+        };
         self.begin_goal(i, goal, duration, separation);
         // The director must let the spacing goal finish before granting another swing.
         if goal == EnemyGoal::Hold {
@@ -438,9 +470,18 @@ impl<const N: usize, const S: bool> GameEntities<N, S> {
         ranged: bool,
     ) {
         let close = self.player_within(i, input, Self::melee_attack_reach(r, input) * 3 / 4);
-        let roll = if ranged || self.tactics[i].repeat_count >= 2 { 0 } else { self.draw(i, 100) };
-        let kind = crate::combat_policy::attack_choice(ranged, close,
-            self.tactics[i].last_attack, self.tactics[i].repeat_count, roll);
+        let roll = if ranged || self.tactics[i].repeat_count >= 2 {
+            0
+        } else {
+            self.draw(i, 100)
+        };
+        let kind = crate::combat_policy::attack_choice(
+            ranged,
+            close,
+            self.tactics[i].last_attack,
+            self.tactics[i].repeat_count,
+            roll,
+        );
         let t = &mut self.tactics[i];
         t.repeat_count = if t.last_attack == kind {
             t.repeat_count.saturating_add(1)
@@ -499,7 +540,8 @@ impl<const N: usize, const S: bool> GameEntities<N, S> {
             }
             let home = t.goal == EnemyGoal::ReturnHome;
             if t.retries == 0 {
-                t.recovery_distance = Self::distance(after, if home { target } else { t.last_seen });
+                t.recovery_distance =
+                    Self::distance(after, if home { target } else { t.last_seen });
             }
             let retries = t.retries.saturating_add(1);
             self.finish_goal(i, EnemyGoalResult::Blocked);
@@ -660,9 +702,7 @@ impl<const N: usize, const S: bool> GameEntities<N, S> {
                 self.enter_state(i, GameEntityState::Idle, stats);
                 return;
             }
-            if self.tactics[i].retries >= 3
-                || !inside_leash
-                || self.tactics[i].unseen_ticks >= 240
+            if self.tactics[i].retries >= 3 || !inside_leash || self.tactics[i].unseen_ticks >= 240
             {
                 self.go_home(r, i);
             } else {
@@ -680,8 +720,11 @@ impl<const N: usize, const S: bool> GameEntities<N, S> {
             return;
         }
         if goal != EnemyGoal::None && previous > 0 && self.tactics[i].remaining == 0 {
-            if self.flow_enabled && goal == EnemyGoal::BreakAway && visible
-                && self.player_within(i, input, Self::melee_attack_reach(r, input) * 3) {
+            if self.flow_enabled
+                && goal == EnemyGoal::BreakAway
+                && visible
+                && self.player_within(i, input, Self::melee_attack_reach(r, input) * 3)
+            {
                 self.flow[i].contest_space();
             }
             self.finish_goal(i, EnemyGoalResult::Expired);
@@ -710,39 +753,79 @@ impl<const N: usize, const S: bool> GameEntities<N, S> {
             && self.tactics[i].last_attack == GAME_ENTITY_ATTACK_RANGED
             && self.tactics[i].repeat_count >= 2
             && self.player_within(i, input, i32::from(r.preferred_distance) * 3);
-        let melee = melee_height_reachable && (self.update_melee_chase(r, i, input) || press_after_cannon);
+        let melee =
+            melee_height_reachable && (self.update_melee_chase(r, i, input) || press_after_cannon);
         let separated = !self.player_within(i, input, Self::melee_attack_reach(r, input) * 2);
         // Reconsider resource/height changes during spacing, but preserve physical
         // obstacle recovery goals and every committed attack animation.
-        let can_replan = matches!(goal, EnemyGoal::None | EnemyGoal::Approach | EnemyGoal::Hold
-            | EnemyGoal::TakeCover | EnemyGoal::Peek | EnemyGoal::Evade)
-            || (self.flow_enabled && matches!(goal, EnemyGoal::CircleLeft | EnemyGoal::CircleRight | EnemyGoal::Retreat | EnemyGoal::BreakAway)
-                && self.tactics[i].phase >= 24);
+        let can_replan = matches!(
+            goal,
+            EnemyGoal::None
+                | EnemyGoal::Approach
+                | EnemyGoal::Hold
+                | EnemyGoal::TakeCover
+                | EnemyGoal::Peek
+                | EnemyGoal::Evade
+        ) || (self.flow_enabled
+            && matches!(
+                goal,
+                EnemyGoal::CircleLeft
+                    | EnemyGoal::CircleRight
+                    | EnemyGoal::Retreat
+                    | EnemyGoal::BreakAway
+            )
+            && self.tactics[i].phase >= 24);
         // Free locomotion can evade in either stance, including with an empty
         // Energy reserve. Windup/attack/recovery never enter this policy.
-        if self.flow_enabled && !self.stance_swap_in_progress(i)
-            && self.exchanges[i].try_evade(self.position(i), i32::from(r.radius),
-                i32::from(r.height), self.projectile_threats[i],
-                &mut |a,b| mover.line_of_sight(r.room,a,b)) {
-            self.step_ranged_exchange(r,i,input,mover,delta,i32::from(r.attack_max_range),stats);
+        if self.flow_enabled
+            && !self.stance_swap_in_progress(i)
+            && self.exchanges[i].try_evade(
+                self.position(i),
+                i32::from(r.radius),
+                i32::from(r.height),
+                self.projectile_threats[i],
+                &mut |a, b| mover.line_of_sight(r.room, a, b),
+            )
+        {
+            self.step_ranged_exchange(
+                r,
+                i,
+                input,
+                mover,
+                delta,
+                i32::from(r.attack_max_range),
+                stats,
+            );
             return;
         }
         if S && can_replan {
-            let (stance, reason) = crate::combat_policy::stance_choice(melee, self.stance(i),
-                [self.health[i], self.health_secondary[i]], [r.max_health, r.max_health_secondary],
-                press_after_cannon, if visible { input.player_combat } else {None});
+            let (stance, reason) = crate::combat_policy::stance_choice(
+                melee,
+                self.stance(i),
+                [self.health[i], self.health_secondary[i]],
+                [r.max_health, r.max_health_secondary],
+                press_after_cannon,
+                if visible { input.player_combat } else { None },
+            );
             let mut stance_reason = reason as u8;
             let mut desired = stance;
             if self.flow_enabled {
                 desired = if self.flow[i].preferred_stance(stance.index() as u8, separated) == 0 {
-                    VitalityChannelId::One } else { VitalityChannelId::Two };
+                    VitalityChannelId::One
+                } else {
+                    VitalityChannelId::Two
+                };
                 stance_reason = self.flow[i].stance_reason(stance_reason, separated);
                 let (near, _) = crate::combat_flow::ranged_band(
-                    i32::from(r.preferred_distance), Self::melee_attack_reach(r, input) + 16,
-                    i32::from(r.attack_max_range));
-                if desired == VitalityChannelId::Two && self.stance(i) == VitalityChannelId::One
+                    i32::from(r.preferred_distance),
+                    Self::melee_attack_reach(r, input) + 16,
+                    i32::from(r.attack_max_range),
+                );
+                if desired == VitalityChannelId::Two
+                    && self.stance(i) == VitalityChannelId::One
                     && Self::distance(self.position(i), home) >= i32::from(r.aggro_radius)
-                    && self.player_within(i, input, near) {
+                    && self.player_within(i, input, near)
+                {
                     // Stay ready to defend at the boundary. Swapping out and back
                     // cannot create an escape route that does not exist.
                     desired = VitalityChannelId::One;
@@ -781,19 +864,30 @@ impl<const N: usize, const S: bool> GameEntities<N, S> {
             Self::attack_reach(r, input)
         };
         let p = i32::from(r.preferred_distance).max(Self::melee_attack_reach(r, input));
-        let (fire_near, fire_far) = crate::combat_flow::ranged_band(p,
-            Self::melee_attack_reach(r, input) + 16, i32::from(r.attack_max_range));
+        let (fire_near, fire_far) = crate::combat_flow::ranged_band(
+            p,
+            Self::melee_attack_reach(r, input) + 16,
+            i32::from(r.attack_max_range),
+        );
         if self.flow_enabled {
             self.tactics[i].combat_role = 0;
             if melee {
                 self.exchanges[i].reset();
-                if self.step_melee_defense(r,i,input,mover,delta,stats) { return; }
+                if self.step_melee_defense(r, i, input, mover, delta, stats) {
+                    return;
+                }
                 goal = self.tactics[i].goal;
-            } else if self.can_fire_energy(i) && !self.player_within(i,input,Self::melee_attack_reach(r,input)*2) {
-                if self.step_ranged_exchange(r,i,input,mover,delta,fire_far,stats) { return; }
+            } else if self.can_fire_energy(i)
+                && !self.player_within(i, input, Self::melee_attack_reach(r, input) * 2)
+                && self.step_ranged_exchange(r, i, input, mover, delta, fire_far, stats)
+            {
+                return;
             }
-            if matches!(goal, EnemyGoal::TakeCover | EnemyGoal::Peek | EnemyGoal::Evade) {
-                self.finish_goal(i,EnemyGoalResult::Cancelled);
+            if matches!(
+                goal,
+                EnemyGoal::TakeCover | EnemyGoal::Peek | EnemyGoal::Evade
+            ) {
+                self.finish_goal(i, EnemyGoalResult::Cancelled);
                 goal = EnemyGoal::None;
             }
         }
@@ -801,10 +895,21 @@ impl<const N: usize, const S: bool> GameEntities<N, S> {
             self.finish_goal(i, EnemyGoalResult::Cancelled);
             goal = EnemyGoal::None;
         }
-        if self.flow_enabled && !melee && visible && self.can_fire_energy(i)
+        if self.flow_enabled
+            && !melee
+            && visible
+            && self.can_fire_energy(i)
             && self.player_within(i, input, fire_near)
-            && matches!(goal, EnemyGoal::None | EnemyGoal::Approach | EnemyGoal::Hold
-                | EnemyGoal::CircleLeft | EnemyGoal::CircleRight | EnemyGoal::Retreat) {
+            && matches!(
+                goal,
+                EnemyGoal::None
+                    | EnemyGoal::Approach
+                    | EnemyGoal::Hold
+                    | EnemyGoal::CircleLeft
+                    | EnemyGoal::CircleRight
+                    | EnemyGoal::Retreat
+            )
+        {
             self.release_attack_owner(i, 0);
             self.begin_goal(i, EnemyGoal::BreakAway, 180, fire_far);
             goal = EnemyGoal::BreakAway;
@@ -829,11 +934,22 @@ impl<const N: usize, const S: bool> GameEntities<N, S> {
             } else {
                 Self::melee_attack_reach(r, input)
             };
-            let separation = if self.flow_enabled { if melee { reach } else { fire_far } } else { separation };
+            let separation = if self.flow_enabled {
+                if melee {
+                    reach
+                } else {
+                    fire_far
+                }
+            } else {
+                separation
+            };
             self.begin_goal(i, EnemyGoal::Approach, 300, separation);
             goal = EnemyGoal::Approach;
         }
-        let error = if matches!(goal, EnemyGoal::ReturnHome | EnemyGoal::Reposition | EnemyGoal::BreakAway) {
+        let error = if matches!(
+            goal,
+            EnemyGoal::ReturnHome | EnemyGoal::Reposition | EnemyGoal::BreakAway
+        ) {
             0
         } else {
             self.face_tactical(i, target, delta)
@@ -852,8 +968,16 @@ impl<const N: usize, const S: bool> GameEntities<N, S> {
                 ),
             )
             && error <= 341
-            && (melee || !self.player_within(i, input,
-                if self.flow_enabled { fire_near } else { i32::from(r.attack_min_range) }))
+            && (melee
+                || !self.player_within(
+                    i,
+                    input,
+                    if self.flow_enabled {
+                        fire_near
+                    } else {
+                        i32::from(r.attack_min_range)
+                    },
+                ))
         {
             self.choose_attack(r, i, input, !melee);
             if !melee {
@@ -868,7 +992,10 @@ impl<const N: usize, const S: bool> GameEntities<N, S> {
             && self.player_within(i, input, i32::from(r.attack_min_range))
             && !matches!(
                 goal,
-                EnemyGoal::ReturnHome | EnemyGoal::Reposition | EnemyGoal::Retreat | EnemyGoal::BreakAway
+                EnemyGoal::ReturnHome
+                    | EnemyGoal::Reposition
+                    | EnemyGoal::Retreat
+                    | EnemyGoal::BreakAway
             )
         {
             self.release_attack_owner(i, 0);
@@ -963,13 +1090,22 @@ impl<const N: usize, const S: bool> GameEntities<N, S> {
                     self.finish_goal(i, EnemyGoalResult::Cancelled);
                     return;
                 }
-                destination = [before[0].saturating_add(before[0].saturating_sub(target[0])),
-                    before[1], before[2].saturating_add(before[2].saturating_sub(target[2]))];
+                destination = [
+                    before[0].saturating_add(before[0].saturating_sub(target[0])),
+                    before[1],
+                    before[2].saturating_add(before[2].saturating_sub(target[2])),
+                ];
                 self.set_intent(i, GameEntityIntent::Retreat);
                 // Turning and running are visible, collision-bound and vulnerable.
-                if self.face_tactical(i, destination, delta) > 683 { return; }
+                if self.face_tactical(i, destination, delta) > 683 {
+                    return;
+                }
                 running = Self::can_run(r);
-                speed = if running { r.run_speed.max(1) } else { r.walk_speed.max(1) };
+                speed = if running {
+                    r.run_speed.max(1)
+                } else {
+                    r.walk_speed.max(1)
+                };
                 stats.retreating = stats.retreating.saturating_add(1);
             }
             EnemyGoal::Retreat => {
@@ -1081,20 +1217,16 @@ impl<const N: usize, const S: bool> GameEntities<N, S> {
             );
         }
         // Steering commits position, while the tactical policy owns bounded facing.
-        self.yaw[i] = if matches!(goal, EnemyGoal::ReturnHome | EnemyGoal::Reposition | EnemyGoal::BreakAway) {
+        self.yaw[i] = if matches!(
+            goal,
+            EnemyGoal::ReturnHome | EnemyGoal::Reposition | EnemyGoal::BreakAway
+        ) {
             facing
         } else {
             old_yaw
         };
         self.tactics[i].moved = Self::distance(before, self.position(i)) > 0;
-        self.monitor_progress(
-            r,
-            i,
-            before,
-            destination,
-            requested_step,
-            delta,
-        );
+        self.monitor_progress(r, i, before, destination, requested_step, delta);
     }
 }
 

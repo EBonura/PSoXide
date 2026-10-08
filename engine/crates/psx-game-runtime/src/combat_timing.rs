@@ -242,7 +242,7 @@ mod tests {
                 for tick in 0..hz * 3 {
                     let phase = (u64::from(tick) * 20 * 4096 * u64::from(speed)
                         / (u64::from(hz) * 256)) as u32;
-                    let press = if phase >= 3 << 12 && phase < 5 << 12 {
+                    let press = if (3 << 12..5 << 12).contains(&phase) {
                         1
                     } else {
                         0

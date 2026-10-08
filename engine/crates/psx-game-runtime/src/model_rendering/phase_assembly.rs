@@ -45,7 +45,8 @@ impl ModelPhaseAssembly {
 
     /// Optional stance palette shared with the procedural crystal scarf.
     pub fn with_crystal_material(mut self, material: Option<TextureMaterial>) -> Self {
-        self.crystal_material = material; self
+        self.crystal_material = material;
+        self
     }
 
     fn arrival(self, height_q12: u16) -> u16 {
@@ -95,11 +96,11 @@ impl ModelPhaseAssembly {
             let angle = Angle::from_q12((index as u16 & 7) * 512);
             (
                 WorldVertex::new(
-                    angle.sin_q12() * radius >> 12,
+                    (angle.sin_q12() * radius) >> 12,
                     (index as i32 % 3 - 1) * radius / 2,
-                    angle.cos_q12() * radius >> 12,
+                    (angle.cos_q12() * radius) >> 12,
                 ),
-                256 - (progress * progress >> 8),
+                256 - ((progress * progress) >> 8),
             )
         } else {
             let height =
@@ -115,18 +116,18 @@ impl ModelPhaseAssembly {
             let radius = self.height * (65 + (index % 4) as i32 * 12) / 100;
             (
                 WorldVertex::new(
-                    ((angle.sin_q12() * radius >> 12) * remaining) >> 8,
+                    (((angle.sin_q12() * radius) >> 12) * remaining) >> 8,
                     (((index % 7) as i32 - 3) * self.height / 16 * remaining) >> 8,
-                    ((angle.cos_q12() * radius >> 12) * remaining) >> 8,
+                    (((angle.cos_q12() * radius) >> 12) * remaining) >> 8,
                 ),
                 256 + remaining,
             )
         };
         Some(target.map(|p| {
             WorldVertex::new(
-                center.x + offset.x + ((p.x - center.x) * scale >> 8),
-                center.y + offset.y + ((p.y - center.y) * scale >> 8),
-                center.z + offset.z + ((p.z - center.z) * scale >> 8),
+                center.x + offset.x + (((p.x - center.x) * scale) >> 8),
+                center.y + offset.y + (((p.y - center.y) * scale) >> 8),
+                center.z + offset.z + (((p.z - center.z) * scale) >> 8),
             )
         }))
     }
@@ -289,7 +290,11 @@ pub(super) fn draw<const OT_DEPTH: usize>(
     let wire_color = assembly.wire_color();
     let crystal = assembly.crystal_material;
     let material = crystal.unwrap_or(material);
-    let tint = if crystal.is_some() { (128,128,128) } else { assembly.tint(material.tint()) };
+    let tint = if crystal.is_some() {
+        (128, 128, 128)
+    } else {
+        assembly.tint(material.tint())
+    };
     let bursting = assembly.elapsed < BURST_TICKS;
     let burst_progress =
         i32::from(assembly.elapsed.min(BURST_TICKS)) * 256 / i32::from(BURST_TICKS);
@@ -305,7 +310,11 @@ pub(super) fn draw<const OT_DEPTH: usize>(
         material
             .with_raw_texture(false)
             .with_tint(tint)
-            .with_blend_mode(if crystal.is_some() { BlendMode::Average } else { BlendMode::Opaque })
+            .with_blend_mode(if crystal.is_some() {
+                BlendMode::Average
+            } else {
+                BlendMode::Opaque
+            })
     };
     let mut burst_vertices = [ProjectedVertex::INVALID; 96];
     let mut burst_offsets = [ViewVertex::ZERO; 8];
@@ -326,9 +335,13 @@ pub(super) fn draw<const OT_DEPTH: usize>(
     for (index, original_face) in faces.iter().enumerate() {
         let mapped_face = if crystal.is_some() {
             let shift = (index % 4 * 12) as u8;
-            TexturedModelRenderFace::new(original_face.vertex_indices(),
-                [(shift,8),(90+shift,24),(20+shift,116)])
-        } else { *original_face };
+            TexturedModelRenderFace::new(
+                original_face.vertex_indices(),
+                [(shift, 8), (90 + shift, 24), (20 + shift, 116)],
+            )
+        } else {
+            *original_face
+        };
         let face = &mapped_face;
         let indices = face.vertex_indices().map(usize::from);
         if indices.iter().any(|&i| i >= projected.len()) {
@@ -462,12 +475,20 @@ pub(super) fn draw<const OT_DEPTH: usize>(
             // model atlas's per-texel semi-transparency bits.
             if let Some(crystal) = crystal {
                 let shift = (index % 4 * 12) as u8;
-                world.submit_textured_triangle(triangles, points.map(ProjectedVertex::from),
-                    [(shift,8),(90+shift,24),(20+shift,116)],
-                    crystal.with_tint(tint), options.with_material_layer(crystal))
+                world.submit_textured_triangle(
+                    triangles,
+                    points.map(ProjectedVertex::from),
+                    [(shift, 8), (90 + shift, 24), (20 + shift, 116)],
+                    crystal.with_tint(tint),
+                    options.with_material_layer(crystal),
+                )
             } else {
-                world.submit_blended_gouraud_quad(triangles,
-                    [points[0], points[1], points[2], points[2]], BlendMode::Add, options)
+                world.submit_blended_gouraud_quad(
+                    triangles,
+                    [points[0], points[1], points[2], points[2]],
+                    BlendMode::Add,
+                    options,
+                )
             }
         };
         stats.submitted_triangles = stats

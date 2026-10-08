@@ -534,7 +534,8 @@ impl Playtest {
         for v in candidates {
             let len =
                 isqrt_i32(square_i32_saturating(v[0]).saturating_add(square_i32_saturating(v[1])));
-            if len == 0 || i64::from(v[0]) * i64::from(dx) + i64::from(v[1]) * i64::from(dz) < 0 {
+            let toward = v[0].saturating_mul(dx).saturating_add(v[1].saturating_mul(dz));
+            if len == 0 || toward < 0 {
                 continue;
             }
             let step = [v[0] * 160 / len, v[1] * 160 / len];

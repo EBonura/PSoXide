@@ -424,13 +424,25 @@ trait CharacterCollisionBackend {
         shape: CollisionTraceShape,
     ) -> Result<Option<StandOutcome>, CollisionQueryError>;
 
-    fn air_position(&mut self, start: RoomPoint, target: RoomPoint, shape: CollisionTraceShape)
-        -> Result<Option<StandOutcome>, CollisionQueryError>;
+    fn air_position(
+        &mut self,
+        start: RoomPoint,
+        target: RoomPoint,
+        shape: CollisionTraceShape,
+    ) -> Result<Option<StandOutcome>, CollisionQueryError>;
 
-    fn move_position(&mut self, start: RoomPoint, target: RoomPoint, shape: CollisionTraceShape, grounded: bool)
-        -> Result<Option<StandOutcome>, CollisionQueryError> {
-        if grounded { self.stand_position(start,target,shape) }
-        else { self.air_position(start,target,shape) }
+    fn move_position(
+        &mut self,
+        start: RoomPoint,
+        target: RoomPoint,
+        shape: CollisionTraceShape,
+        grounded: bool,
+    ) -> Result<Option<StandOutcome>, CollisionQueryError> {
+        if grounded {
+            self.stand_position(start, target, shape)
+        } else {
+            self.air_position(start, target, shape)
+        }
     }
 
     fn recovery_position(
@@ -475,14 +487,25 @@ impl CharacterCollisionBackend for GridCharacterCollision<'_, '_, '_> {
             .map(StandOutcome::unmeasured))
     }
 
-    fn air_position(&mut self, _start: RoomPoint, target: RoomPoint, shape: CollisionTraceShape)
-        -> Result<Option<StandOutcome>, CollisionQueryError> {
-        let CollisionTraceShape::Body { radius, height } = shape else { return Err(CollisionQueryError); };
+    fn air_position(
+        &mut self,
+        _start: RoomPoint,
+        target: RoomPoint,
+        shape: CollisionTraceShape,
+    ) -> Result<Option<StandOutcome>, CollisionQueryError> {
+        let CollisionTraceShape::Body { radius, height } = shape else {
+            return Err(CollisionQueryError);
+        };
         let c = self.collision;
-        let wall = if !c.rooms.is_empty() { body_hits_solid_wall_in_rooms(c.rooms,target,radius,height) }
-            else { c.room.is_some_and(|room| body_hits_solid_wall(room,target,radius,height)) };
-        let occupied = wall || body_hits_blocker(target,radius,height,c.blockers)
-            || body_hits_aabb_blocker(target,radius,height,c.aabb_blockers);
+        let wall = if !c.rooms.is_empty() {
+            body_hits_solid_wall_in_rooms(c.rooms, target, radius, height)
+        } else {
+            c.room
+                .is_some_and(|room| body_hits_solid_wall(room, target, radius, height))
+        };
+        let occupied = wall
+            || body_hits_blocker(target, radius, height, c.blockers)
+            || body_hits_aabb_blocker(target, radius, height, c.aabb_blockers);
         Ok((!occupied).then_some(StandOutcome::unmeasured(target)))
     }
 
@@ -529,9 +552,20 @@ impl<P: CollisionTraceProvider + ?Sized> CharacterCollisionBackend
         trace_stand_position(self.provider, start, target, shape)
     }
 
-    fn air_position(&mut self, start: RoomPoint, target: RoomPoint, shape: CollisionTraceShape)
-        -> Result<Option<StandOutcome>, CollisionQueryError> {
-        let trace=trace_collision(self.provider,CollisionTraceQuery {start,end:target,shape})?;
+    fn air_position(
+        &mut self,
+        start: RoomPoint,
+        target: RoomPoint,
+        shape: CollisionTraceShape,
+    ) -> Result<Option<StandOutcome>, CollisionQueryError> {
+        let trace = trace_collision(
+            self.provider,
+            CollisionTraceQuery {
+                start,
+                end: target,
+                shape,
+            },
+        )?;
         Ok((!trace.hit()).then_some(StandOutcome::unmeasured(target)))
     }
 
@@ -695,7 +729,8 @@ impl CharacterMotorInput {
     pub fn with_full_move_intent(mut self) -> Self {
         let x = self.move_x.raw();
         let z = self.move_z.raw();
-        let magnitude = isqrt_i32(square_i32_saturating(x).saturating_add(square_i32_saturating(z)));
+        let magnitude =
+            isqrt_i32(square_i32_saturating(x).saturating_add(square_i32_saturating(z)));
         if magnitude > 0 {
             self.move_x = Q12::ONE.mul_ratio(x, magnitude);
             self.move_z = Q12::ONE.mul_ratio(z, magnitude);
@@ -879,20 +914,33 @@ impl CharacterMotorState {
     }
 
     /// Whether the last motor solve found supporting ground.
-    pub const fn grounded(&self) -> bool { self.grounded }
+    pub const fn grounded(&self) -> bool {
+        self.grounded
+    }
 
     /// Signed airborne speed in Q8 world units per fixed tick.
-    pub const fn vertical_speed_q8(&self) -> i32 { self.velocity_y_q8 }
+    pub const fn vertical_speed_q8(&self) -> i32 {
+        self.velocity_y_q8
+    }
 
     /// Hold a tethered body without running gravity, locomotion or stamina recovery.
     /// Releasing the tether resumes ordinary gravity from rest on the next update.
     pub fn suspended_frame(&mut self, facing: Option<Angle>) -> CharacterMotorFrame {
-        if let Some(yaw) = facing { self.face(yaw); }
+        if let Some(yaw) = facing {
+            self.face(yaw);
+        }
         self.velocity_y_q8 = 0;
         self.remainder_y_q8 = 0;
         self.grounded = false;
-        self.frame(CharacterMotorAnim::Idle, CharacterMotorAction::Idle,
-            false, false, false, false, false)
+        self.frame(
+            CharacterMotorAnim::Idle,
+            CharacterMotorAction::Idle,
+            false,
+            false,
+            false,
+            false,
+            false,
+        )
     }
 
     /// Turn the body to `yaw` at once. Position, stamina and any in-progress
@@ -1565,7 +1613,9 @@ impl CharacterMotorState {
             return Ok(());
         };
 
-        if self.position.y <= floor || (self.grounded && self.position.y.saturating_sub(floor) <= STEP_DOWN_HEIGHT) {
+        if self.position.y <= floor
+            || (self.grounded && self.position.y.saturating_sub(floor) <= STEP_DOWN_HEIGHT)
+        {
             // On the floor, or within a step of it: snap down and ground.
             // Caching the cell lets the next idle tick take the fast path.
             self.position.y = floor;
@@ -1583,7 +1633,10 @@ impl CharacterMotorState {
             .gravity_per_tick_q8
             .saturating_mul(config.weight_q8 as i32)
             / DEFAULT_WEIGHT_Q8 as i32;
-        self.velocity_y_q8 = self.velocity_y_q8.saturating_sub(gravity).max(-MAX_FALL_SPEED * 256);
+        self.velocity_y_q8 = self
+            .velocity_y_q8
+            .saturating_sub(gravity)
+            .max(-MAX_FALL_SPEED * 256);
         self.remainder_y_q8 = self.remainder_y_q8.saturating_add(self.velocity_y_q8);
         let dy = self.remainder_y_q8 / 256;
         self.remainder_y_q8 -= dy * 256;
@@ -1680,10 +1733,17 @@ impl ActionProfile {
 /// 0.5s and 90% by 0.633s for a 60-tick travel interval. Cumulative
 /// differences preserve total Q8 distance regardless of interval length.
 fn decelerating_roll_step(speed: i32, frame: u8, active_frames: u8) -> i32 {
-    let cumulative = |tick: u16| -> i64 {
+    let cumulative = |tick: u16| -> i32 {
         let phase = i32::from(tick) * 60 * 256 / i32::from(active_frames.max(1));
-        let knots = [(0, 0), (4, 350), (12, 3200), (22, 6400),
-            (30, 8000), (38, 9000), (60, 10000)];
+        let knots = [
+            (0, 0),
+            (4, 350),
+            (12, 3200),
+            (22, 6400),
+            (30, 8000),
+            (38, 9000),
+            (60, 10000),
+        ];
         let mut fraction = 10000;
         for pair in knots.windows(2) {
             let (a, va) = pair[0];
@@ -1693,10 +1753,13 @@ fn decelerating_roll_step(speed: i32, frame: u8, active_frames: u8) -> i32 {
                 break;
             }
         }
-        i64::from(speed.max(0)) * i64::from(active_frames) * i64::from(fraction) / 10000
+        psx_math::int32::mul_div_i32(
+            speed.max(0).saturating_mul(i32::from(active_frames)),
+            fraction,
+            10000,
+        )
     };
-    (cumulative(u16::from(frame) + 1) - cumulative(u16::from(frame)))
-        .clamp(0, i64::from(i32::MAX)) as i32
+    (cumulative(u16::from(frame) + 1) - cumulative(u16::from(frame))).max(0)
 }
 
 fn normalize_config(mut config: CharacterMotorConfig) -> CharacterMotorConfig {
@@ -3523,7 +3586,8 @@ fn cylinder_overlaps_aabb(
 mod tests {
     #[test]
     fn hook_teleport_clears_fall_speed_without_refunding_stamina() {
-        let mut motor = super::CharacterMotorState::new(super::RoomPoint::ZERO, super::Angle::QUARTER);
+        let mut motor =
+            super::CharacterMotorState::new(super::RoomPoint::ZERO, super::Angle::QUARTER);
         motor.stamina_q12 = 1234;
         motor.velocity_y_q8 = -40;
         motor.action = super::CharacterMotorAction::Roll;
@@ -3882,18 +3946,33 @@ mod tests {
 
     #[test]
     fn trace_fall_keeps_ballistic_height_while_steering_and_under_catchup() {
-        for batch in [1,3] {
-            let mut motor=CharacterMotorState::new(RoomPoint::new(0,127,0),Angle::ZERO);
-            let mut provider=FlatTraceProvider::new(None);
-            let mut cfg=config();cfg.gravity_per_tick_q8=32;cfg.walk_speed=128;
-            for step in 1..=45/batch {
-                let frame=motor.update_vblanks_with_trace_provider(&mut provider,
-                    CharacterMotorInput {walk:1,..CharacterMotorInput::default()},cfg,batch as u16).unwrap();
-                let tick=step*batch;
-                assert_eq!(frame.position.y,(127-tick*(tick+1)/16).max(0),"tick {tick}");
+        for batch in [1, 3] {
+            let mut motor = CharacterMotorState::new(RoomPoint::new(0, 127, 0), Angle::ZERO);
+            let mut provider = FlatTraceProvider::new(None);
+            let mut cfg = config();
+            cfg.gravity_per_tick_q8 = 32;
+            cfg.walk_speed = 128;
+            for step in 1..=45 / batch {
+                let frame = motor
+                    .update_vblanks_with_trace_provider(
+                        &mut provider,
+                        CharacterMotorInput {
+                            walk: 1,
+                            ..CharacterMotorInput::default()
+                        },
+                        cfg,
+                        batch as u16,
+                    )
+                    .unwrap();
+                let tick = step * batch;
+                assert_eq!(
+                    frame.position.y,
+                    (127 - tick * (tick + 1) / 16).max(0),
+                    "tick {tick}"
+                );
             }
             assert!(motor.grounded());
-            assert_eq!(motor.vertical_speed_q8(),0);
+            assert_eq!(motor.vertical_speed_q8(), 0);
         }
     }
 
@@ -5012,17 +5091,24 @@ mod tests {
             let input = CharacterMotorInput {
                 move_z: Q12::from_raw(strength),
                 ..CharacterMotorInput::default()
-            }.with_full_move_intent();
-            for _ in 0..60 { motor.update(None, input, config()); }
+            }
+            .with_full_move_intent();
+            for _ in 0..60 {
+                motor.update(None, input, config());
+            }
             assert_eq!(motor.position().z, config().walk_speed * 60 / 256);
         }
         let diagonal = CharacterMotorInput {
-            move_x: Q12::from_raw(300), move_z: Q12::from_raw(-400),
+            move_x: Q12::from_raw(300),
+            move_z: Q12::from_raw(-400),
             ..CharacterMotorInput::default()
-        }.with_full_move_intent();
+        }
+        .with_full_move_intent();
         assert!((diagonal.move_x.raw() * 4 + diagonal.move_z.raw() * 3).abs() <= 4);
-        let length = isqrt_i32(square_i32_saturating(diagonal.move_x.raw())
-            + square_i32_saturating(diagonal.move_z.raw()));
+        let length = isqrt_i32(
+            square_i32_saturating(diagonal.move_x.raw())
+                + square_i32_saturating(diagonal.move_z.raw()),
+        );
         assert!((length - Q12::SCALE).abs() <= 2);
     }
 
@@ -5036,12 +5122,17 @@ mod tests {
         cfg.roll_decelerates = true;
         let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
         let mut positions = [0; 73];
-        for tick in 0..73 {
-            let frame = motor.update(None, CharacterMotorInput {
-                move_z: Q12::ONE, evade: tick == 0,
-                ..CharacterMotorInput::default()
-            }, cfg);
-            positions[tick] = frame.position.z;
+        for (tick, position) in positions.iter_mut().enumerate() {
+            let frame = motor.update(
+                None,
+                CharacterMotorInput {
+                    move_z: Q12::ONE,
+                    evade: tick == 0,
+                    ..CharacterMotorInput::default()
+                },
+                cfg,
+            );
+            *position = frame.position.z;
         }
         assert_eq!(positions[59], 172);
         assert_eq!(positions[72], positions[59]);
@@ -5050,8 +5141,9 @@ mod tests {
         assert!((positions[37] - 155).abs() <= 1);
         assert!(motor.action().is_idle());
         for duration in [1, 14, 22, 60, 120, 255] {
-            let total: i64 = (0..duration).map(|frame|
-                i64::from(decelerating_roll_step(736, frame, duration))).sum();
+            let total: i64 = (0..duration)
+                .map(|frame| i64::from(decelerating_roll_step(736, frame, duration)))
+                .sum();
             assert_eq!(total, 736 * i64::from(duration));
         }
     }
@@ -5251,20 +5343,33 @@ mod tests {
 
     #[test]
     fn fractional_gravity_matches_ballistic_drop_with_and_without_air_steering() {
-        let bytes=flat_floor_world();let room=RuntimeRoom::from_bytes(&bytes).unwrap();
-        for steer in [false,true] {
-            let mut motor=CharacterMotorState::new(RoomPoint::new(512,127,512),Angle::ZERO);
-            let mut cfg=config();cfg.gravity_per_tick_q8=32;
-            let mut input=CharacterMotorInput::default();
-            if steer { input.walk=1;cfg.walk_speed=128; }
-            let mut landed=0;
-            for tick in 1..=60 {
-                let frame=motor.update_vblanks_with_collision(CharacterCollision::new(Some(room.collision()),&[]),input,cfg,1);
-                let expected=(127-tick*(tick+1)/16).max(0);
-                assert_eq!(frame.position.y,expected,"steer={steer}, tick={tick}");
-                if motor.grounded() {landed=tick;break;}
+        let bytes = flat_floor_world();
+        let room = RuntimeRoom::from_bytes(&bytes).unwrap();
+        for steer in [false, true] {
+            let mut motor = CharacterMotorState::new(RoomPoint::new(512, 127, 512), Angle::ZERO);
+            let mut cfg = config();
+            cfg.gravity_per_tick_q8 = 32;
+            let mut input = CharacterMotorInput::default();
+            if steer {
+                input.walk = 1;
+                cfg.walk_speed = 128;
             }
-            assert_eq!(landed,45);
+            let mut landed = 0;
+            for tick in 1..=60 {
+                let frame = motor.update_vblanks_with_collision(
+                    CharacterCollision::new(Some(room.collision()), &[]),
+                    input,
+                    cfg,
+                    1,
+                );
+                let expected = (127 - tick * (tick + 1) / 16).max(0);
+                assert_eq!(frame.position.y, expected, "steer={steer}, tick={tick}");
+                if motor.grounded() {
+                    landed = tick;
+                    break;
+                }
+            }
+            assert_eq!(landed, 45);
         }
     }
 
@@ -5318,8 +5423,12 @@ mod tests {
             assert_eq!(motor.suspended_frame(None).position.y, 2048);
             assert!(!motor.grounded());
         }
-        let frame = motor.update_vblanks_with_collision(CharacterCollision::rooms(&rooms, &[]),
-            CharacterMotorInput::default(), config(), 1);
+        let frame = motor.update_vblanks_with_collision(
+            CharacterCollision::rooms(&rooms, &[]),
+            CharacterMotorInput::default(),
+            config(),
+            1,
+        );
         assert_eq!(frame.position.y, 2048 - GRAVITY_PER_TICK);
     }
 
@@ -5453,7 +5562,11 @@ mod tests {
                 cfg,
                 1,
             );
-            assert_eq!(f.position.y, [14, 2, 0][i.min(2)], "tick {i}: airborne until actual contact");
+            assert_eq!(
+                f.position.y,
+                [14, 2, 0][i.min(2)],
+                "tick {i}: airborne until actual contact"
+            );
         }
     }
 

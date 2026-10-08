@@ -88,7 +88,7 @@ pub(super) fn draw_crystal_discharge<'a, const OT_DEPTH: usize>(
     let radius = base + base * motion_age / if muzzle { 5 } else { 7 };
     let ring = material(effect.visual.glow_rgb, fade * fade, life * life);
     for i in 0..8 {
-        if muzzle && (i + age as usize / 2) % 4 == 0 {
+        if muzzle && (i + age as usize / 2).is_multiple_of(4) {
             continue;
         }
         if !muzzle && !actor && i % 2 == 1 {

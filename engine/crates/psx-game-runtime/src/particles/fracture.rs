@@ -11,8 +11,8 @@ fn hash(mut value: u32) -> u32 {
 }
 
 fn rotated((x, y): (i32, i32), angle: i32) -> (i32, i32) {
-    let sin = i32::from(psx_math::sin_q12((angle & 4095) as u16));
-    let cos = i32::from(psx_math::cos_q12((angle & 4095) as u16));
+    let sin = psx_math::sin_q12((angle & 4095) as u16);
+    let cos = psx_math::cos_q12((angle & 4095) as u16);
     ((x * cos - y * sin) / 4096, (x * sin + y * cos) / 4096)
 }
 

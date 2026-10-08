@@ -224,11 +224,10 @@ type PxbspSelectionStack = ScratchpadStack<0, { psx_engine::scratchpad::SIZE }>;
 // Regions live around the selection call: none but its own stack.
 const _: () = assert_disjoint(&[PxbspSelectionStack::REGION]);
 const DUMMY_LIGHT_STYLE: usize = 64;
-// Splitting bounds the packets one source triangle can produce; 13 words
-// covers the larger textured-Gouraud quad packet with its tag.
-const WORST_PACKET_WORDS_PER_TRIANGLE: usize = psx_engine::AFFINE_PACKETS_PER_TRIANGLE * 13;
-// Page-local PXBSP packets also reset GP0(E2): model packets may change it
-// between world draws in the ordering table.
+// Splitting bounds the packets one source triangle can produce. Page-local
+// PXBSP packets lead with a GP0(E2) window reset (model packets may change it
+// between world draws in the ordering table), so 14 words cover the larger
+// textured-Gouraud quad packet with its tag and that reset.
 const WORST_PAGE_LOCAL_PACKET_WORDS_PER_TRIANGLE: usize =
     psx_engine::AFFINE_PACKETS_PER_TRIANGLE * 14;
 // A scoped windowed polygon adds its GP0(E2) selector and full-window reset.

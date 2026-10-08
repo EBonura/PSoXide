@@ -514,9 +514,19 @@ pub fn draw_projectile_impact<'a, const OT_DEPTH: usize>(
         let from = WorldVertex::new(from[0], from[1], from[2]);
         let tail = if let Some(projector) = projector {
             projector.project_world(from)
-        } else { camera.project_world(from) };
-        return fracture::draw_fracture(impact, center, tail, camera.projection.focal_length,
-            depth_range, particle_material, ot, primitive_packets);
+        } else {
+            camera.project_world(from)
+        };
+        return fracture::draw_fracture(
+            impact,
+            center,
+            tail,
+            camera.projection.focal_length,
+            depth_range,
+            particle_material,
+            ot,
+            primitive_packets,
+        );
     }
     if impact.visual.crystal {
         return draw_crystal_discharge(
@@ -674,26 +684,45 @@ pub fn draw_stance_eye_pulse<'a, const OT_DEPTH: usize>(
     ot: &mut OtFrame<'a, OT_DEPTH>,
     packets: &mut PrimitivePacketArena<'a>,
 ) -> usize {
-    if progress_q12 >= 4096 { return 0; }
-    let Some(center) = camera.project_world(position) else { return 0; };
+    if progress_q12 >= 4096 {
+        return 0;
+    }
+    let Some(center) = camera.project_world(position) else {
+        return 0;
+    };
     let progress = i32::from(progress_q12);
     let world_radius = 2 + 22 * progress / 4096;
     let radius = (world_radius * camera.projection.focal_length / center.sz.max(1)).clamp(2, 35);
     let fade = 4096 - progress;
     let brightness = (fade * fade / 4096) as u16;
-    let material = particle_material.with_tint(rgb_tuple(scale_rgb(
-        [color.0, color.1, color.2], brightness, 4096,
-    ))).with_blend_mode(BlendMode::Add);
+    let material = particle_material
+        .with_tint(rgb_tuple(scale_rgb(
+            [color.0, color.1, color.2],
+            brightness,
+            4096,
+        )))
+        .with_blend_mode(BlendMode::Add);
     let slot = depth_range.slot::<OT_DEPTH>(center.sz);
     let point = |angle: u16| ProjectedVertex {
-        sx: center.sx.saturating_add((psx_math::cos_q12(angle) * radius / 4096) as i16),
-        sy: center.sy.saturating_add((psx_math::sin_q12(angle) * radius / 4096) as i16),
+        sx: center
+            .sx
+            .saturating_add((psx_math::cos_q12(angle) * radius / 4096) as i16),
+        sy: center
+            .sy
+            .saturating_add((psx_math::sin_q12(angle) * radius / 4096) as i16),
         ..center
     };
     let mut submitted = 0;
     for i in 0..20 {
-        submitted += draw_projectile_segment(point(i * 4096 / 20), point((i + 1) * 4096 / 20),
-            1, material, slot, ot, packets);
+        submitted += draw_projectile_segment(
+            point(i * 4096 / 20),
+            point((i + 1) * 4096 / 20),
+            1,
+            material,
+            slot,
+            ot,
+            packets,
+        );
     }
     submitted
 }
@@ -1094,7 +1123,8 @@ mod tests {
 // Crystal bolts widen the ordinary sprite, but the glow clamp still requires
 // its lower bound to fit the global screen-size ceiling at close range.
 fn crystal_projectile_half(half: i16) -> i16 {
-    half.saturating_add(half / 2).clamp(3, PARTICLE_MAX_SCREEN_SIZE as i16)
+    half.saturating_add(half / 2)
+        .clamp(3, PARTICLE_MAX_SCREEN_SIZE)
 }
 
 #[cfg(test)]
@@ -1102,9 +1132,9 @@ mod crystal_size_tests {
     use super::*;
     #[test]
     fn near_camera_crystal_width_never_inverts_the_glow_clamp() {
-        for half in PARTICLE_MIN_SCREEN_SIZE as i16..=PARTICLE_MAX_SCREEN_SIZE as i16 {
+        for half in PARTICLE_MIN_SCREEN_SIZE..=PARTICLE_MAX_SCREEN_SIZE {
             let crystal = crystal_projectile_half(half);
-            assert!(crystal <= PARTICLE_MAX_SCREEN_SIZE as i16);
+            assert!(crystal <= PARTICLE_MAX_SCREEN_SIZE);
             for scale in [256, 512, 1024, u16::MAX] {
                 let glow = ((i32::from(crystal) * i32::from(scale)) >> 8)
                     .clamp(i32::from(crystal), i32::from(PARTICLE_MAX_SCREEN_SIZE));

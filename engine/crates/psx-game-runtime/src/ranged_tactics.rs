@@ -150,10 +150,8 @@ impl RangedExchange {
                 }
             }
             SEEK_COVER if self.timer == 0 => self.enter(SEARCH, 144, from),
-            COVERED => {
-                if self.timer == 0 || !concealed(from, target, radius, height, clear) {
-                    self.enter(PEEK, 120, self.peek);
-                }
+            COVERED if (self.timer == 0 || !concealed(from, target, radius, height, clear)) => {
+                self.enter(PEEK, 120, self.peek);
             }
             PEEK => {
                 if distance(from, self.peek) <= 4 && clear(eye(from, height), eye(target, height)) {
@@ -294,26 +292,35 @@ mod tests {
     }
     #[test]
     fn evade_has_recovery_and_cooldown_survives_stance_reset() {
-        let mut e=RangedExchange::EMPTY;
-        let threat=Some(ProjectileThreat {position:[0,36,160],velocity:[0,0,-8],ticks_to_contact:20});
-        assert!(e.try_evade([0;3],12,72,threat,&mut |_,_|true));
+        let mut e = RangedExchange::EMPTY;
+        let threat = Some(ProjectileThreat {
+            position: [0, 36, 160],
+            velocity: [0, 0, -8],
+            ticks_to_contact: 20,
+        });
+        assert!(e.try_evade([0; 3], 12, 72, threat, &mut |_, _| true));
         e.tick(EVADE_MOVE_TICKS);
-        let recovery=e.current_order([20,0,0]);
-        assert!(recovery.evade);assert!(!recovery.moving && !recovery.fire);
+        let recovery = e.current_order([20, 0, 0]);
+        assert!(recovery.evade);
+        assert!(!recovery.moving && !recovery.fire);
         e.tick(EVADE_RECOVERY_TICKS);
         e.reset();
-        assert!(!e.try_evade([0;3],12,72,threat,&mut |_,_|true));
-        e.tick(EVADE_COOLDOWN_TICKS-EVADE_MOVE_TICKS-EVADE_RECOVERY_TICKS);
-        assert!(e.try_evade([0;3],12,72,threat,&mut |_,_|true));
+        assert!(!e.try_evade([0; 3], 12, 72, threat, &mut |_, _| true));
+        e.tick(EVADE_COOLDOWN_TICKS - EVADE_MOVE_TICKS - EVADE_RECOVERY_TICKS);
+        assert!(e.try_evade([0; 3], 12, 72, threat, &mut |_, _| true));
     }
     #[test]
     fn evade_chooses_the_other_lane_when_first_side_is_blocked() {
-        let mut e=RangedExchange::EMPTY;
-        let threat=Some(ProjectileThreat {position:[0,36,160],velocity:[0,0,-8],ticks_to_contact:20});
-        assert!(e.try_evade([0;3],12,72,threat,&mut |_,b| b[0] <= 32));
-        assert!(e.current_order([0;3]).destination[0]<0);
-        e=RangedExchange::EMPTY;
-        assert!(!e.try_evade([0;3],12,72,threat,&mut |_,b| b[0].abs()<32));
+        let mut e = RangedExchange::EMPTY;
+        let threat = Some(ProjectileThreat {
+            position: [0, 36, 160],
+            velocity: [0, 0, -8],
+            ticks_to_contact: 20,
+        });
+        assert!(e.try_evade([0; 3], 12, 72, threat, &mut |_, b| b[0] <= 32));
+        assert!(e.current_order([0; 3]).destination[0] < 0);
+        e = RangedExchange::EMPTY;
+        assert!(!e.try_evade([0; 3], 12, 72, threat, &mut |_, b| b[0].abs() < 32));
     }
     #[test]
     fn hides_behind_actual_geometry_then_peeks_before_firing() {

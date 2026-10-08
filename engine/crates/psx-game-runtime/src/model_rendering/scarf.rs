@@ -332,22 +332,42 @@ impl PlayerScarf {
 
     /// Crystal atlas over the same procedural cloth, with an opaque fallback.
     pub fn draw_crystal<const OT_DEPTH: usize>(
-        &self, camera: WorldCamera, color: (u8,u8,u8),
-        assembly: Option<ModelPhaseAssembly>, options: WorldSurfaceOptions,
-        crystal: Option<TextureMaterial>, triangles: &mut PrimitivePacketArena<'_>,
+        &self,
+        camera: WorldCamera,
+        color: (u8, u8, u8),
+        assembly: Option<ModelPhaseAssembly>,
+        options: WorldSurfaceOptions,
+        crystal: Option<TextureMaterial>,
+        triangles: &mut PrimitivePacketArena<'_>,
         world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
     ) -> u16 {
-        self.draw_crystal_with_dash(camera, color, assembly, DashWireVisual::Solid, options, crystal, triangles, world)
+        self.draw_crystal_with_dash(
+            camera,
+            color,
+            assembly,
+            DashWireVisual::Solid,
+            options,
+            crystal,
+            triangles,
+            world,
+        )
     }
 
     /// Apply the body's dash wire/reassembly clock to the cloth as well.
     pub fn draw_crystal_with_dash<const OT_DEPTH: usize>(
-        &self, camera: WorldCamera, color: (u8,u8,u8),
-        assembly: Option<ModelPhaseAssembly>, dash: DashWireVisual, options: WorldSurfaceOptions,
-        crystal: Option<TextureMaterial>, triangles: &mut PrimitivePacketArena<'_>,
+        &self,
+        camera: WorldCamera,
+        color: (u8, u8, u8),
+        assembly: Option<ModelPhaseAssembly>,
+        dash: DashWireVisual,
+        options: WorldSurfaceOptions,
+        crystal: Option<TextureMaterial>,
+        triangles: &mut PrimitivePacketArena<'_>,
         world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
     ) -> u16 {
-        if !self.active { return 0; }
+        if !self.active {
+            return 0;
+        }
         let mut vertices = [WorldVertex::ZERO; 32];
         // Two hand-shaped cloth edges, in 1/1024 of character height.
         // The upper edge hugs the neck; the wider lower edge folds onto the
@@ -423,17 +443,28 @@ impl PlayerScarf {
             .enumerate()
             {
                 if !matches!(dash, DashWireVisual::Solid) {
-                    let p=indices.map(|i| projected[i]);
-                    if p.iter().all(|p| *p != ProjectedVertex::INVALID && p.sz > camera.projection.focal_length/2) {
+                    let p = indices.map(|i| projected[i]);
+                    if p.iter().all(|p| {
+                        *p != ProjectedVertex::INVALID && p.sz > camera.projection.focal_length / 2
+                    }) {
                         for edge in 0..3 {
-                            let _=world.submit_projected_line(triangles,[p[edge],p[(edge+1)%3]],DASH_WIRE_COLOR,options);
+                            let _ = world.submit_projected_line(
+                                triangles,
+                                [p[edge], p[(edge + 1) % 3]],
+                                DASH_WIRE_COLOR,
+                                options,
+                            );
                         }
                     }
                     let show = match dash {
-                        DashWireVisual::Restoring { progress_q8 } => (strip*2+facet)*255/30 < usize::from(progress_q8),
+                        DashWireVisual::Restoring { progress_q8 } => {
+                            (strip * 2 + facet) * 255 / 30 < usize::from(progress_q8)
+                        }
                         _ => false,
                     };
-                    if !show { continue; }
+                    if !show {
+                        continue;
+                    }
                 }
                 if let Some(material) = crystal {
                     let target = indices.map(|i| vertices[i]);
@@ -444,12 +475,26 @@ impl PlayerScarf {
                     if let Some(fragment) = fragment {
                         // Both triangles share the same continuous strip UVs.
                         // Cloth movement supplies motion; the surface does not crawl.
-                        let v0 = if strip < 8 { 8 } else { 8 + (strip as i32 - 8) * 14 };
+                        let v0 = if strip < 8 {
+                            8
+                        } else {
+                            8 + (strip as i32 - 8) * 14
+                        };
                         let v1 = if strip < 8 { 108 } else { v0 + 14 };
-                        let uvs = if facet == 0 { [(20,v0),(20,v1),(108,v0)] }
-                                  else { [(108,v0),(20,v1),(108,v1)] };
-                        submitted += submit_crystal_cloth(fragment.map(|v| camera.view_vertex(v)), uvs,
-                            camera, material, options.with_material_layer(material), triangles, world);
+                        let uvs = if facet == 0 {
+                            [(20, v0), (20, v1), (108, v0)]
+                        } else {
+                            [(108, v0), (20, v1), (108, v1)]
+                        };
+                        submitted += submit_crystal_cloth(
+                            fragment.map(|v| camera.view_vertex(v)),
+                            uvs,
+                            camera,
+                            material,
+                            options.with_material_layer(material),
+                            triangles,
+                            world,
+                        );
                     }
                     continue;
                 }
@@ -577,8 +622,8 @@ fn submit_clipped_cloth<const N: usize>(
         if (a.z >= near) != (b.z >= near) {
             let t = (near - a.z) * 4096 / (b.z - a.z);
             polygon[count] = ViewVertex::new(
-                a.x + ((b.x - a.x) * t >> 12),
-                a.y + ((b.y - a.y) * t >> 12),
+                a.x + (((b.x - a.x) * t) >> 12),
+                a.y + (((b.y - a.y) * t) >> 12),
                 near,
             );
             count += 1;
@@ -597,27 +642,54 @@ fn submit_clipped_cloth<const N: usize>(
 
 /// Clip position and UV together at the near plane, then submit native FT3s.
 fn submit_crystal_cloth<const N: usize>(
-    input: [ViewVertex;3], uvs: [(i32,i32);3], camera: WorldCamera,
-    material: TextureMaterial, options: WorldSurfaceOptions,
-    arena: &mut PrimitivePacketArena<'_>, world: &mut WorldRenderPass<'_, '_, N>,
+    input: [ViewVertex; 3],
+    uvs: [(i32, i32); 3],
+    camera: WorldCamera,
+    material: TextureMaterial,
+    options: WorldSurfaceOptions,
+    arena: &mut PrimitivePacketArena<'_>,
+    world: &mut WorldRenderPass<'_, '_, N>,
 ) -> u16 {
     let near = camera.projection.near_z.max(1);
-    let mut polygon = [(ViewVertex::new(0,0,0),(0,0));4]; let mut count=0;
+    let mut polygon = [(ViewVertex::new(0, 0, 0), (0, 0)); 4];
+    let mut count = 0;
     for i in 0..3 {
-        let j=(i+1)%3; let a=input[i]; let b=input[j];
-        if a.z>=near { polygon[count]=(a,uvs[i]); count+=1; }
-        if (a.z>=near)!=(b.z>=near) {
-            let t=(near-a.z)*4096/(b.z-a.z);
-            polygon[count]=(ViewVertex::new(a.x+((b.x-a.x)*t>>12),a.y+((b.y-a.y)*t>>12),near),
-                (uvs[i].0+((uvs[j].0-uvs[i].0)*t>>12),uvs[i].1+((uvs[j].1-uvs[i].1)*t>>12)));
-            count+=1;
+        let j = (i + 1) % 3;
+        let a = input[i];
+        let b = input[j];
+        if a.z >= near {
+            polygon[count] = (a, uvs[i]);
+            count += 1;
+        }
+        if (a.z >= near) != (b.z >= near) {
+            let t = (near - a.z) * 4096 / (b.z - a.z);
+            polygon[count] = (
+                ViewVertex::new(
+                    a.x + (((b.x - a.x) * t) >> 12),
+                    a.y + (((b.y - a.y) * t) >> 12),
+                    near,
+                ),
+                (
+                    uvs[i].0 + (((uvs[j].0 - uvs[i].0) * t) >> 12),
+                    uvs[i].1 + (((uvs[j].1 - uvs[i].1) * t) >> 12),
+                ),
+            );
+            count += 1;
         }
     }
-    let mut submitted=0;
+    let mut submitted = 0;
     for i in 1..count.saturating_sub(1) {
-        let corners=[polygon[0],polygon[i],polygon[i+1]];
-        if let [Some(a),Some(b),Some(c)]=corners.map(|v| camera.projection.project_view(v.0)) {
-            submitted+=world.submit_textured_triangle(arena,[a,b,c],corners.map(|v|(v.1.0.clamp(0,127) as u8,v.1.1.clamp(0,127) as u8)),material,options).submitted_triangles;
+        let corners = [polygon[0], polygon[i], polygon[i + 1]];
+        if let [Some(a), Some(b), Some(c)] = corners.map(|v| camera.projection.project_view(v.0)) {
+            submitted += world
+                .submit_textured_triangle(
+                    arena,
+                    [a, b, c],
+                    corners.map(|v| (v.1 .0.clamp(0, 127) as u8, v.1 .1.clamp(0, 127) as u8)),
+                    material,
+                    options,
+                )
+                .submitted_triangles;
         }
     }
     submitted
@@ -806,29 +878,49 @@ mod tests {
     }
     #[test]
     fn crystal_near_clip_preserves_uvs_blending_and_packet_capacity() {
-        let camera = WorldCamera::orbit(WorldProjection::new(160,120,256,32),
-            WorldVertex::ZERO,1800,Angle::from_q12(0),Angle::from_q12(0));
-        let options = WorldSurfaceOptions::new(DepthBand::whole(),DepthRange::new(0,8192))
+        let camera = WorldCamera::orbit(
+            WorldProjection::new(160, 120, 256, 32),
+            WorldVertex::ZERO,
+            1800,
+            Angle::from_q12(0),
+            Angle::from_q12(0),
+        );
+        let options = WorldSurfaceOptions::new(DepthBand::whole(), DepthRange::new(0, 8192))
             .with_cull_mode(CullMode::None);
-        let mut storage=OrderingTable::<64>::new();
-        let mut ot=OtFrame::begin(&mut storage);
-        let mut commands=[WorldTriCommand::EMPTY;64];
-        let mut slots=psx_engine::PrimitivePacketScratch::<2>::ZERO;
-        let mut arena=PrimitivePacketArena::new(&mut slots);
-        let mut world=WorldRenderPass::new_bucketed(&mut ot,&mut commands);
-        let crossing=[ViewVertex::new(0,0,16),ViewVertex::new(-8,-8,64),ViewVertex::new(8,-8,64)];
-        let material=TextureMaterial::opaque(42,0,(128,128,128)).with_blend_mode(BlendMode::Average);
-        for expected in [2,0] {
-            assert_eq!(submit_crystal_cloth(crossing,[(0,0),(127,0),(0,127)],camera,
-                material,options,&mut arena,&mut world),expected);
+        let mut storage = OrderingTable::<64>::new();
+        let mut ot = OtFrame::begin(&mut storage);
+        let mut commands = [WorldTriCommand::EMPTY; 64];
+        let mut slots = psx_engine::PrimitivePacketScratch::<2>::ZERO;
+        let mut arena = PrimitivePacketArena::new(&mut slots);
+        let mut world = WorldRenderPass::new_bucketed(&mut ot, &mut commands);
+        let crossing = [
+            ViewVertex::new(0, 0, 16),
+            ViewVertex::new(-8, -8, 64),
+            ViewVertex::new(8, -8, 64),
+        ];
+        let material =
+            TextureMaterial::opaque(42, 0, (128, 128, 128)).with_blend_mode(BlendMode::Average);
+        for expected in [2, 0] {
+            assert_eq!(
+                submit_crystal_cloth(
+                    crossing,
+                    [(0, 0), (127, 0), (0, 127)],
+                    camera,
+                    material,
+                    options,
+                    &mut arena,
+                    &mut world
+                ),
+                expected
+            );
         }
-        assert_eq!(arena.used_slots(),2);
+        assert_eq!(arena.used_slots(), 2);
         unsafe {
-            arena.mutate_typed_slots::<TriTextured>(0,2,|t| {
-                assert_eq!(t.color_cmd>>24,0x26);
-                assert_eq!(t.uv0_clut>>16,42);
-                for uv in [t.uv0_clut,t.uv1_tpage,t.uv2] {
-                    assert!((uv&255)<=127 && ((uv>>8)&255)<=127);
+            arena.mutate_typed_slots::<TriTextured>(0, 2, |t| {
+                assert_eq!(t.color_cmd >> 24, 0x26);
+                assert_eq!(t.uv0_clut >> 16, 42);
+                for uv in [t.uv0_clut, t.uv1_tpage, t.uv2] {
+                    assert!((uv & 255) <= 127 && ((uv >> 8) & 255) <= 127);
                 }
             });
         }
