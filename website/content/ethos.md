@@ -20,13 +20,15 @@ I'm Manny, the developer behind Bonnie Studios. PSoXide has three strands:
 - **Optimize:** existing PS1 games reimplemented by rewriting their original source
   for greater efficiency.
 
-The Rust SDK, engine, editor and emulator support this work, so a fix made once
-reaches every game. Sony's own SCPH-1200 controller, for example, gave no
-response to PSoXide games at first, while a third-party pad worked. A test disc
-on a real console showed that the official pad needs a short delay after it's
-selected. That fix lives in the shared `psx-pad` crate, so every game built on
-the SDK reads official controllers.
-[How psx-pad works](@/docs/crates/psx-pad.md).
+The Rust SDK, engine, editor and emulator support this work, and each project
+leaves something behind for the next. The Quake port's level format, collision
+and BSP renderer became the engine's shared
+[`psx-bsp`](https://github.com/EBonura/PSoXide-editor/tree/main/engine/crates/psx-bsp)
+crate, and Cortex Ignition's levels run on it. Quake's present queue, which hands
+finished frames to the GPU on the vertical blank, moved into the SDK the same way,
+and Quake now uses the shared version. In a Cortex Ignition stress test with one
+enemy it raised the frame rate from 19.8 to 25 fps. It isn't switched on in
+Cortex yet.
 
 PSoXide builds on the work and knowledge shared by the PlayStation homebrew
 community. The [projects page](@/projects/_index.md) records what you can play or
