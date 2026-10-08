@@ -99,8 +99,15 @@ impl Drop for Session {
         if !self.installed {
             return;
         }
-        // A transaction in flight finishes within a frame or two.
+        // The engine starts its transactions from the VBlank interrupt, so the
+        // moment after a VBlank edge is exactly when one is on the wire and the
+        // port cannot be handed back. Wait out the wire time (under two
+        // milliseconds), then ask.
         for _ in 0..8 {
+            let _ = spin_frame(|| {});
+            timers::set_mode(Timer::Timer2, 0);
+            timers::set_counter(Timer::Timer2, 0);
+            while timers::counter(Timer::Timer2) < 60_000 {}
             if console::uninstall().is_some() {
                 // The wrapper stays in the vector after `uninstall`, and
                 // `install` refuses a vector that already leads to it, so put
@@ -108,7 +115,6 @@ impl Drop for Session {
                 psx_rt::interrupts::install_vblank_counter();
                 return;
             }
-            let _ = spin_frame(|| {});
         }
     }
 }
