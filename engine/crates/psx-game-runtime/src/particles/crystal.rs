@@ -14,14 +14,14 @@ const OCTAGON: [(i32, i32); 8] = [
 ];
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn draw_crystal_discharge<const OT_DEPTH: usize>(
+pub(super) fn draw_crystal_discharge<'a, const OT_DEPTH: usize>(
     effect: ProjectileImpactEffect,
     center: ProjectedVertex,
     focal: i32,
     depth_range: DepthRange,
     particle_material: TextureMaterial,
-    ot: &mut OtFrame<'_, OT_DEPTH>,
-    packets: &mut PrimitivePacketArena<'_>,
+    ot: &mut OtFrame<'a, OT_DEPTH>,
+    packets: &mut PrimitivePacketArena<'a>,
 ) -> usize {
     let muzzle = effect.kind == ProjectileEffectKind::Muzzle;
     let actor = effect.kind == ProjectileEffectKind::Actor;

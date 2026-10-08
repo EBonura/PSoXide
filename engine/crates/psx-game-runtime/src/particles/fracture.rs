@@ -52,15 +52,15 @@ fn chip(seed: u32, index: usize) -> Chip {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn draw_fracture<const OT_DEPTH: usize>(
+pub(super) fn draw_fracture<'a, const OT_DEPTH: usize>(
     effect: ProjectileImpactEffect,
     center: ProjectedVertex,
     tail: Option<ProjectedVertex>,
     focal: i32,
     depth_range: DepthRange,
     material: TextureMaterial,
-    ot: &mut OtFrame<'_, OT_DEPTH>,
-    packets: &mut PrimitivePacketArena<'_>,
+    ot: &mut OtFrame<'a, OT_DEPTH>,
+    packets: &mut PrimitivePacketArena<'a>,
 ) -> usize {
     let age = i32::from(effect.age_ticks);
     let life = i32::from(effect.visual.impact_lifetime_ticks);
@@ -197,18 +197,19 @@ pub(super) fn draw_fracture<const OT_DEPTH: usize>(
     count
 }
 
-fn quad<const OT_DEPTH: usize>(
+fn quad<'a, const OT_DEPTH: usize>(
     vertices: [(i16, i16); 4],
     colors: [(u8, u8, u8); 4],
     slot: psx_engine::DepthSlot,
-    ot: &mut OtFrame<'_, OT_DEPTH>,
-    packets: &mut PrimitivePacketArena<'_>,
+    ot: &mut OtFrame<'a, OT_DEPTH>,
+    packets: &mut PrimitivePacketArena<'a>,
 ) -> usize {
-    let Some(packet) = packets.push(QuadGouraudBlended::new(vertices, colors, BlendMode::Add))
+    let Some(packet) =
+        packets.push_packet(QuadGouraudBlended::new(vertices, colors, BlendMode::Add))
     else {
         return 0;
     };
-    ot.add_slot(slot, packet, QuadGouraudBlended::WORDS);
+    ot.add_packet_slot(slot, packet);
     1
 }
 

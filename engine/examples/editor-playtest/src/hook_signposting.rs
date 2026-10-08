@@ -254,7 +254,7 @@ impl Playtest {
 
     /// Selection is the only overlay. Visibility and body clearance were
     /// proven by refresh_hook_target; unavailable points never get brackets.
-    pub(super) fn draw_hook_selection(&self, camera: WorldCamera) {
+    pub(super) fn draw_hook_selection(&self, gpu: &mut psx_gpu::Gpu, camera: WorldCamera) {
         if !self.ranged_ready.aiming() {
             return;
         }
@@ -273,18 +273,24 @@ impl Playtest {
         let radius = (camera.projection.focal_length * 42 / center.sz.max(1)).clamp(10, 30) as i16;
         for (x, y) in [(-1, -1), (1, -1), (1, 1), (-1, 1)] {
             let corner = (center.sx + x * radius, center.sy + y * radius);
-            psx_gpu::draw_line_mono_blended(
-                corner,
+            let color = (232, 255, 244);
+            gpu.set_draw_mode(psx_gpu::material::TextureMaterial::blended(
+                0,
+                0,
+                color,
+                BlendMode::Average,
+            ));
+            for end in [
                 (corner.0 - x * 5, corner.1),
-                (232, 255, 244),
-                BlendMode::Average,
-            );
-            psx_gpu::draw_line_mono_blended(
-                corner,
                 (corner.0, corner.1 - y * 5),
-                (232, 255, 244),
-                BlendMode::Average,
-            );
+            ] {
+                gpu.draw(
+                    &psx_gpu::prim::LineMono::new(
+                        corner.0, corner.1, end.0, end.1, color.0, color.1, color.2,
+                    )
+                    .translucent(),
+                );
+            }
         }
     }
 }

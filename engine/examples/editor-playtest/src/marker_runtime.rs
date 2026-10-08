@@ -836,12 +836,13 @@ pub(super) fn draw_lock_target_indicator(
     center.sx = center.sx.saturating_sub(4);
     center.sy = center.sy.saturating_sub(2);
 
-    draw_target_reticle(center, elapsed_tick, stance);
+    draw_target_reticle(gpu, center, elapsed_tick, stance);
 }
 
 /// Shared bracket artwork for lock-on and free aiming. Only lock-on applies
 /// the character's optical correction; free aim stays on the camera ray.
 pub(super) fn draw_target_reticle(
+    gpu: &mut Gpu,
     center: ProjectedVertex,
     elapsed_tick: SimTick,
     stance: psx_game_runtime::vitality::VitalityChannelId,
@@ -926,6 +927,7 @@ pub(super) fn draw_target_reticle(
 /// Dual vitality around the shared aim brackets. The active coloured rim
 /// marks the guarded stance even when that channel's vitality is empty.
 pub(super) fn draw_lock_target_readout(
+    gpu: &mut Gpu,
     mut center: ProjectedVertex,
     stance: VitalityChannelId,
     horizon: u16,
@@ -938,14 +940,14 @@ pub(super) fn draw_lock_target_readout(
     }
     let muted = (44, 48, 52);
     let inactive = (128, 136, 140);
-    let line = |a: (i32, i32), b: (i32, i32), color| {
+    let line = |gpu: &mut Gpu, a: (i32, i32), b: (i32, i32), color| {
         let x0 = center.sx.saturating_add(a.0 as i16);
         let y0 = center.sy.saturating_add(a.1 as i16);
         let x1 = center.sx.saturating_add(b.0 as i16);
         let y1 = center.sy.saturating_add(b.1 as i16);
         let (r, g, b) = color;
-        draw_line_mono(x0, y0 + 1, x1, y1 + 1, 4, 10, 14);
-        draw_line_mono(x0, y0, x1, y1, r, g, b);
+        gpu.draw(&LineMono::new(x0, y0 + 1, x1, y1 + 1, 4, 10, 14));
+        gpu.draw(&LineMono::new(x0, y0, x1, y1, r, g, b));
     };
     let point = |angle: i32, radius: i32| (
         psx_math::cos_q12(angle as u16) * radius / 4096,
@@ -953,14 +955,24 @@ pub(super) fn draw_lock_target_readout(
     );
     // At native 320x240, broad filled sectors keep a clean silhouette.
     // Stacking thin radial lines lets their shadows cut holes in neighbours.
-    let sector = |a: i32, b: i32, inner: i32, outer: i32, color: (u8, u8, u8)| {
+    let sector = |gpu: &mut Gpu, a: i32, b: i32, inner: i32, outer: i32, color: (u8, u8, u8)| {
         let screen = |angle, radius| {
             let (x, y) = point(angle, radius);
             (center.sx + x as i16, center.sy + y as i16)
         };
         let corners = [screen(a, inner), screen(a, outer), screen(b, outer), screen(b, inner)];
-        psx_gpu::draw_tri_flat([corners[0], corners[1], corners[2]], color.0, color.1, color.2);
-        psx_gpu::draw_tri_flat([corners[0], corners[2], corners[3]], color.0, color.1, color.2);
+        gpu.draw(&TriFlat::new(
+            [corners[0], corners[1], corners[2]],
+            color.0,
+            color.1,
+            color.2,
+        ));
+        gpu.draw(&TriFlat::new(
+            [corners[0], corners[2], corners[3]],
+            color.0,
+            color.1,
+            color.2,
+        ));
     };
     for (channel, fill, start) in [
         (VitalityChannelId::One, horizon, 130 * 4096 / 360),
@@ -971,15 +983,15 @@ pub(super) fn draw_lock_target_readout(
             let a = start + segment * 100 * 4096 / 3600;
             let b = a + 7 * 4096 / 360;
             let amount = (i32::from(fill.min(4096)) * 10 - segment * 4096).clamp(0, 4096);
-            sector(a - 8, b + 8, 47, 54, (4, 10, 14));
-            sector(a, b, 48, 53, muted);
+            sector(gpu, a - 8, b + 8, 47, 54, (4, 10, 14));
+            sector(gpu, a, b, 48, 53, muted);
             if amount > 0 {
-                sector(a, a + (b - a) * amount / 4096, 48, 53, rgb);
+                sector(gpu, a, a + (b - a) * amount / 4096, 48, 53, rgb);
             }
             if channel == stance {
                 // An independent outline never pretends to be remaining HP.
                 let end = start + (segment + 1) * 100 * 4096 / 3600;
-                line(point(a, 57), point(end, 57), rgb);
+                line(gpu, point(a, 57), point(end, 57), rgb);
             }
         }
     }

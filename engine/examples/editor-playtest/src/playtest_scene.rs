@@ -2492,7 +2492,9 @@ impl Scene for Playtest {
                         if self.is_locked() {
                             if let Some(center) = self.lock_target_indicator_position().and_then(|p| camera.project_world(p)) {
                                 draw_lock_target_readout(
-                                    center, active,
+                                    gpu,
+                                    center,
+                                    active,
                                     health_share(VitalityChannelId::One),
                                     health_share(VitalityChannelId::Two),
                                 );
@@ -2520,7 +2522,7 @@ impl Scene for Playtest {
         if !self.inventory_overlay_active {
             if let Some(font) = self.ui_fonts[0].as_ref() {
                 if self.player_has_ranged_weapon() {
-                    draw_combat_energy(font, self.combat_flow.energy,
+                    draw_combat_energy(gpu, font, self.combat_flow.energy,
                         self.hook_attached.map(|_| self.combat_flow.air_left));
                 }
                 const VITALITY_Q12_ONE: u16 = 4096;
