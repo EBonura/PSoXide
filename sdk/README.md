@@ -23,7 +23,7 @@ the editor and emulator share one simulation.
 | [`psx-gte`](crates/psx-gte) | GTE (COP2) wrappers. MIPS emits inline-asm coprocessor ops; host routes through `psx-gte-core`. |
 | [`psx-gte-core`](crates/psx-gte-core) | Pure-Rust GTE state machine and fixed-point math. Shared by `psx-gte` and the emulator; bit-exact against a real-console conformance corpus. |
 | [`psx-math`](crates/psx-math) | Fixed-point math: Q0.12 angles + sin/cos/atan2, int32 helpers, decimal text formatting. |
-| [`psx-pad`](crates/psx-pad) | SIO0 controller polling: digital + DualShock analog, `PadTracker` edges/repeat, diagnostic pacing. |
+| [`psx-pad`](crates/psx-pad) | SIO0 controller polling: digital + DualShock analog, `PadTracker` edges/repeat, diagnostic pacing. Feature `irq-engine`: the interrupt-driven engine that polls both ports from VBlank and IRQ7 without waiting ([PAD-IRQ-ENGINE](docs/PAD-IRQ-ENGINE.md)). |
 | [`psx-tick`](crates/psx-tick) | Fixed-timestep game clock: per-game tick rate and catch-up policy, a render phase for interpolation, and consistency counters. Callers pass the VBlank count, so every rule is host-testable. |
 | [`psx-font`](crates/psx-font) | Bitmap-font atlas: 1bpp source → 4bpp CLUT VRAM texture, GP0 textured-rect draw path. |
 | [`psx-fx`](crates/psx-fx) | Arcade-style visual effects: particle pools, screen shake, deterministic RNG. |
@@ -55,6 +55,8 @@ Build and run them via the top-level `Makefile` (see the
 | `hello-tex` | Textured primitives + CLUT upload. |
 | `hello-ot` | Ordering-table depth sorting. |
 | `hello-input` | Controller polling via `psx-pad`. |
+| `pollbench` | Cycles one synchronous controller poll costs: port 1, an empty port 2, both. |
+| `pad-engine-check` | The interrupt-driven pad engine against the synchronous driver: CPU left to the game, snapshot, lease. |
 | `hello-gte` | GTE-accelerated transforms. |
 | `hello-audio` | SPU voice playback. |
 | `hello-cdda` | CD-DA audio tracks. |
