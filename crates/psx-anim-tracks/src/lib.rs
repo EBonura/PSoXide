@@ -266,6 +266,32 @@ fn is_rigid(m: &M3) -> bool {
         && dot(r0, cross) > 0.0
 }
 
+/// `true` when `m` is close to a rotation: unit rows within 3%, nearly
+/// orthogonal, positive determinant.
+pub fn is_rotation_like(m: &MatQ12) -> bool {
+    is_rigid(&mat_f64(m))
+}
+
+/// Blend two rotations by `t` (`0..=1`) along the short arc and return the
+/// result as a Q12 rotation, or `None` when either is not close to a rotation.
+///
+/// Linear interpolation of the matrices shrinks the result between two distant
+/// poses (to about 0.99 of unit length at 30 degrees apart); this does not.
+pub fn blend_rotations(a: &MatQ12, b: &MatQ12, t: f64) -> Option<MatQ12> {
+    let (ma, mb) = (mat_f64(a), mat_f64(b));
+    if !is_rigid(&ma) || !is_rigid(&mb) {
+        return None;
+    }
+    let m = mat_from_quat(nlerp(quat_from_mat(&ma), quat_from_mat(&mb), t));
+    let mut out = [[0i16; 3]; 3];
+    for r in 0..3 {
+        for c in 0..3 {
+            out[r][c] = (m[r][c] * 4096.0).round() as i16;
+        }
+    }
+    Some(out)
+}
+
 /// Farthest-point sample of at most `n` points (the farthest from the origin
 /// first). Used to keep the search cheap; the final check uses every point.
 fn reduce_probes(all: &[V3], n: usize) -> Vec<V3> {
