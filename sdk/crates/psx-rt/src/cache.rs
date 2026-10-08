@@ -18,15 +18,12 @@
 //! - clears SR before touching the cache control register, so no
 //!   interrupt can run while the scratchpad is unmapped or the cache is
 //!   isolated;
-//! - selects [`cache_control::FLUSH`], sets SR.IsC alone, and zeroes the
+//! - selects `cache_control::FLUSH`, sets SR.IsC alone, and zeroes the
 //!   tag of every line;
-//! - clears SR.IsC before writing [`cache_control::RUNNING`] back, since
+//! - clears SR.IsC before writing `cache_control::RUNNING` back, since
 //!   whether a store to FFFE0130h reaches the port while the cache is
 //!   isolated isn't documented;
 //! - puts the caller's SR back and returns.
-//!
-//! [`cache_control::FLUSH`]: psx_hw::memory::cache_control::FLUSH
-//! [`cache_control::RUNNING`]: psx_hw::memory::cache_control::RUNNING
 
 #[cfg(target_arch = "mips")]
 use psx_hw::memory::cache_control;
