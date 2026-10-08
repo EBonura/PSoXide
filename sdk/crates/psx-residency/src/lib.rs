@@ -7,7 +7,8 @@
 //! crate makes those decisions and nothing else. It never touches the drive:
 //! requests go out through the [`Host`] trait and outcomes come back through
 //! [`Residency::complete_read`], so the same policy runs against the
-//! interrupt-driven transport on the console and against a drive model on the host.
+//! interrupt-driven transport on the console and against the drive model in
+//! `psx-residency-sim` on the host.
 //!
 //! # Vocabulary
 //!
@@ -82,7 +83,10 @@
 //!
 //! [`slots`] is the fixed-slot policy lifted from hk-psx's `room_residency.rs`
 //! (private arenas, a wishlist, a stored-then-decoded pipeline) for games that
-//! keep a handful of equally sized slots.
+//! keep a handful of equally sized slots. `psx-residency-sim`, a separate
+//! host-only crate, models the drive from the silicon seek and read
+//! measurements and replays routes against the real engine to report deadline
+//! slack and misses.
 //!
 //! Unlike `psx-cache`, which caches small values in fixed slots, this crate
 //! owns variable-length contiguous page runs and the request lifecycle.

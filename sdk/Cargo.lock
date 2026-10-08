@@ -154,6 +154,13 @@ name = "psx-residency"
 version = "0.1.0"
 
 [[package]]
+name = "psx-residency-sim"
+version = "0.1.0"
+dependencies = [
+ "psx-residency",
+]
+
+[[package]]
 name = "psx-rt"
 version = "0.1.0"
 dependencies = [
