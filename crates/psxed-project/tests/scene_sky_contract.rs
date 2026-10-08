@@ -4,7 +4,6 @@ use psx_bsp::pxbsp::material_flags;
 use psx_bsp::pxbsp_resident::PxbspResidentMap;
 use psx_bsp::SliceReader;
 use psx_level::sky_flags;
-use psxed_project::playtest::PlaytestWorldGeometry;
 use psxed_project::{
     MaterialResource, NodeKind, ProjectDocument, ResourceData, SkyMode, SkyVisibility,
 };
@@ -91,9 +90,7 @@ fn directional_fixture_cooks_one_scene_sky_and_textureless_apertures() {
         sky_flags::ENABLED | sky_flags::CUBE | sky_flags::THROUGH_SKY_SURFACES
     );
     let sky_asset = sky.texture_asset_index.expect("one scene sky texture");
-    let PlaytestWorldGeometry::Pxbsp(world) = &package.world_geometry else {
-        panic!("fixture did not cook PXBSP");
-    };
+    let world = &package.world_geometry;
     assert!(!world.texture_asset_indices.contains(&sky_asset));
 
     let mut map = PxbspResidentMap::with_capacity(world.bytes.len());

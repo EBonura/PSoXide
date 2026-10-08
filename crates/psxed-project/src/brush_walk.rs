@@ -22,7 +22,7 @@ use psx_engine::{
     RoomPoint,
 };
 
-use crate::playtest::{PlaytestPackage, PlaytestWorldGeometry};
+use crate::playtest::PlaytestPackage;
 use crate::units::WORLD_UNIT_DIVISOR;
 
 /// One leg of a walk.
@@ -70,12 +70,7 @@ pub fn walk_player_hull(
     height_authored: i32,
     leg_authored: i32,
 ) -> Result<WalkResult, String> {
-    let PlaytestWorldGeometry::Pxbsp(world) = &package.world_geometry else {
-        return Err(
-            "this project did not cook to a PXBSP world, so there is nothing to walk on"
-                .to_string(),
-        );
-    };
+    let world = &package.world_geometry;
     if waypoints.len() < 2 {
         return Err("give at least a start and an end waypoint".to_string());
     }

@@ -9,7 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{GridUvTransform, ResourceId, HEIGHT_QUANTUM};
+use crate::{ResourceId, UvTransform, HEIGHT_QUANTUM};
 
 /// Authored-scale wrappers: the editor preview and inspector expand at
 /// the historical 64-unit quantum; the scaled BSP cook passes its own.
@@ -161,8 +161,8 @@ pub(crate) const fn default_arch_prop_materials() -> [Option<ResourceId>; ARCH_P
     [None; ARCH_PROP_MATERIAL_COUNT]
 }
 
-pub(crate) const fn default_arch_prop_uvs() -> [GridUvTransform; ARCH_PROP_MATERIAL_COUNT] {
-    [GridUvTransform::IDENTITY; ARCH_PROP_MATERIAL_COUNT]
+pub(crate) const fn default_arch_prop_uvs() -> [UvTransform; ARCH_PROP_MATERIAL_COUNT] {
+    [UvTransform::IDENTITY; ARCH_PROP_MATERIAL_COUNT]
 }
 
 /// One generated ArchProp quad in node-local engine units.

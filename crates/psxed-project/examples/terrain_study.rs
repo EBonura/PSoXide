@@ -130,9 +130,7 @@ fn main() {
             "BUDGET {}",
             playtest::cooked_playtest_budgets(&p, &package).concise_summary()
         );
-        if let playtest::PlaytestWorldGeometry::Pxbsp(w) = &package.world_geometry {
-            println!("BSP_BYTES {}", w.bytes.len());
-        }
+        println!("BSP_BYTES {}", package.world_geometry.bytes.len());
         if let Some(d) = playtest::analyze_pxbsp_draw_cost(&package).unwrap() {
             println!(
                 "DRAW faces={} triangles={} leaves={} unreadable_pvs={}",

@@ -1279,6 +1279,10 @@ impl ProjectDocument {
         let mut project: Self = match ron::from_str(source) {
             Ok(project) => project,
             Err(first_error) => {
+                let nodes = legacy_grid_node_count(source);
+                if nodes > 0 {
+                    return Err(ProjectIoError::LegacyGridWorld { nodes });
+                }
                 let migrated = migrate_legacy_project_ron(source);
                 if migrated == source {
                     return Err(ProjectIoError::Parse(first_error));
@@ -1520,7 +1524,6 @@ impl ProjectDocument {
                         far_vista,
                         camera,
                         culling,
-                        streaming,
                         physics,
                         world_message,
                     } => {
@@ -1552,7 +1555,6 @@ impl ProjectDocument {
                         far_vista.segments = far_vista.segments.clamp(3, 16);
                         *camera = camera.normalized();
                         *culling = culling.normalized();
-                        *streaming = streaming.normalized();
                         *physics = physics.normalized();
                         if let Some(message) = world_message {
                             normalize_message_pages(&mut message.pages);
@@ -1594,20 +1596,6 @@ impl ProjectDocument {
                     sector_size,
                     false,
                 );
-            }
-            let orphan_rooms: Vec<NodeId> = scene
-                .nodes()
-                .iter()
-                .filter(|node| matches!(node.kind, NodeKind::Section { .. }))
-                .filter(|node| scene.world_sector_size_for_node(node.id).is_none())
-                .map(|node| node.id)
-                .collect();
-            for room_id in orphan_rooms {
-                if let Some(node) = scene.node_mut(room_id) {
-                    if let NodeKind::Section { grid } = &mut node.kind {
-                        grid.rescale_sector_size(grid.sector_size);
-                    }
-                }
             }
         }
     }
@@ -1799,8 +1787,6 @@ pub(crate) fn clear_resource_data_references(data: &mut ResourceData, id: Resour
 
 pub(crate) fn node_kind_reference_count(kind: &NodeKind, id: ResourceId) -> usize {
     match kind {
-        NodeKind::Section { grid } => grid_resource_reference_count(grid, id),
-        NodeKind::WaterVolume { material, .. } => option_resource_reference_count(*material, id),
         NodeKind::MeshInstance { mesh, material, .. } => {
             option_resource_reference_count(*mesh, id)
                 + option_resource_reference_count(*material, id)
@@ -1849,8 +1835,7 @@ pub(crate) fn node_kind_reference_count(kind: &NodeKind, id: ResourceId) -> usiz
         | NodeKind::Logic { .. }
         | NodeKind::Destructible { .. }
         | NodeKind::PointLight { .. }
-        | NodeKind::VitalityCircle { .. }
-        | NodeKind::Portal { .. } => 0,
+        | NodeKind::VitalityCircle { .. } => 0,
     }
 }
 
@@ -1879,8 +1864,6 @@ pub(crate) fn clear_far_vista_resource_references(
 
 pub(crate) fn clear_node_kind_references(kind: &mut NodeKind, id: ResourceId) -> usize {
     match kind {
-        NodeKind::Section { grid } => clear_grid_resource_references(grid, id),
-        NodeKind::WaterVolume { material, .. } => clear_option_resource(material, id),
         NodeKind::MeshInstance { mesh, material, .. } => {
             clear_option_resource(mesh, id) + clear_option_resource(material, id)
         }
@@ -1938,51 +1921,8 @@ pub(crate) fn clear_node_kind_references(kind: &mut NodeKind, id: ResourceId) ->
         | NodeKind::Logic { .. }
         | NodeKind::Destructible { .. }
         | NodeKind::PointLight { .. }
-        | NodeKind::VitalityCircle { .. }
-        | NodeKind::Portal { .. } => 0,
+        | NodeKind::VitalityCircle { .. } => 0,
     }
-}
-
-pub(crate) fn grid_resource_reference_count(grid: &WorldGrid, id: ResourceId) -> usize {
-    let mut count = 0;
-    for sector in grid.sectors.iter().flatten() {
-        if let Some(face) = &sector.floor {
-            count += option_resource_reference_count(face.material, id);
-        }
-        if let Some(face) = &sector.ceiling {
-            count += option_resource_reference_count(face.material, id);
-        }
-        for direction in GridDirection::ALL {
-            for wall in sector.walls.get(direction) {
-                count += option_resource_reference_count(wall.material, id);
-            }
-        }
-    }
-    for floor in &grid.floors_above {
-        count += grid_resource_reference_count(floor, id);
-    }
-    count
-}
-
-pub(crate) fn clear_grid_resource_references(grid: &mut WorldGrid, id: ResourceId) -> usize {
-    let mut count = 0;
-    for sector in grid.sectors.iter_mut().flatten() {
-        if let Some(face) = &mut sector.floor {
-            count += clear_option_resource(&mut face.material, id);
-        }
-        if let Some(face) = &mut sector.ceiling {
-            count += clear_option_resource(&mut face.material, id);
-        }
-        for direction in GridDirection::ALL {
-            for wall in sector.walls.get_mut(direction) {
-                count += clear_option_resource(&mut wall.material, id);
-            }
-        }
-    }
-    for floor in &mut grid.floors_above {
-        count += clear_grid_resource_references(floor, id);
-    }
-    count
 }
 
 pub(crate) fn option_resource_reference_count(value: Option<ResourceId>, id: ResourceId) -> usize {
@@ -1996,6 +1936,17 @@ pub(crate) fn clear_option_resource(value: &mut Option<ResourceId>, id: Resource
     } else {
         0
     }
+}
+
+/// Number of removed grid-world scene nodes in a project's RON text.
+///
+/// The variants no longer exist, so serde reports an opaque unknown-variant
+/// error; scanning the text names the real cause.
+fn legacy_grid_node_count(source: &str) -> usize {
+    ["Section(", "Room(", "Map(", "WaterVolume(", "Portal("]
+        .iter()
+        .map(|variant| source.matches(&format!("kind: {variant}")).count())
+        .sum()
 }
 
 pub(crate) fn migrate_legacy_project_ron(source: &str) -> String {
@@ -2025,13 +1976,6 @@ pub(crate) fn apply_world_sector_size_to_descendants(
             continue;
         };
         match &mut node.kind {
-            NodeKind::Section { grid } => {
-                if rescale {
-                    grid.rescale_sector_size(sector_size);
-                } else {
-                    grid.normalize_stacked_sector_size(sector_size);
-                }
-            }
             NodeKind::Collider { shape, .. } if rescale => {
                 rescale_collider_shape(shape, old_sector_size, sector_size);
             }

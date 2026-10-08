@@ -12,9 +12,8 @@ use psx_bsp::{BrushModel, ClipNode, CookedRecord, Face, Leaf, Node, Plane, Slice
 use psx_engine::PRIMITIVE_PACKET_SLOT_WORDS;
 
 use super::{
-    playtest_performance_envelope, streamed_room_chunk_memory_report, PlaytestAssetKind,
-    PlaytestInteractableKind, PlaytestPackage, PlaytestValidationTarget, PlaytestWorldGeometry,
-    StreamedClass,
+    playtest_performance_envelope, PlaytestAssetKind, PlaytestInteractableKind, PlaytestPackage,
+    PlaytestValidationTarget, StreamedClass,
 };
 use crate::brush_world::BrushWorldCookMode;
 use crate::{NodeKind, ProjectDocument, ResourceData};
@@ -397,20 +396,14 @@ pub fn cooked_playtest_budgets(
     project: &ProjectDocument,
     package: &PlaytestPackage,
 ) -> PlaytestBudgetReport {
-    let mut bsp_bytes = 0usize;
-    let mut pvs_bytes = package.visibility_pvs_bits.len()
-        + package.visibility_pvs.len() * size_of::<super::PlaytestVisibilityPvs>();
-    let mut pvs_row_bytes = package
-        .visibility_pvs
-        .iter()
-        .map(|pvs| usize::from(pvs.byte_count))
-        .max()
-        .unwrap_or(0);
+    let mut pvs_bytes = 0usize;
+    let mut pvs_row_bytes = 0usize;
     let mut light_bytes = package.lights.len() * size_of::<super::PlaytestLight>();
     let mut bsp_packets = 0usize;
 
-    if let PlaytestWorldGeometry::Pxbsp(world) = &package.world_geometry {
-        bsp_bytes = world.bytes.len();
+    let bsp_bytes = package.world_geometry.bytes.len();
+    {
+        let world = &package.world_geometry;
         if let Ok(index) = PxbspIndex::read(&mut SliceReader::new(&world.bytes)) {
             let visibility = index.lump(PxbspLumpKind::Visibility);
             let vertices = index.lump(PxbspLumpKind::Vertices);
@@ -448,12 +441,7 @@ pub fn cooked_playtest_budgets(
         .filter(|asset| asset.kind != PlaytestAssetKind::Texture)
         .map(|asset| asset.bytes.len())
         .sum::<usize>();
-    let stream_bytes = streamed_room_chunk_memory_report(package)
-        .map(|stream| stream.totals.stream_bytes)
-        .unwrap_or(0);
-    let ram_bytes = bsp_bytes
-        .saturating_add(non_texture_bytes)
-        .saturating_add(stream_bytes);
+    let ram_bytes = bsp_bytes.saturating_add(non_texture_bytes);
     let ram_asset_slots = package
         .assets
         .iter()
@@ -462,11 +450,8 @@ pub fn cooked_playtest_budgets(
         .saturating_add(usize::from(bsp_bytes != 0));
     let vram_asset_slots = texture_assets.len();
     let packet_count = cooked_packet_count(package, bsp_packets);
-    let packet_limit = if matches!(package.world_geometry, PlaytestWorldGeometry::Pxbsp(_)) {
-        derived_packet_capacity(packet_count).min(PLAYTEST_PXBSP_PACKET_CAPACITY_CEILING)
-    } else {
-        derived_packet_capacity(packet_count)
-    };
+    let packet_limit =
+        derived_packet_capacity(packet_count).min(PLAYTEST_PXBSP_PACKET_CAPACITY_CEILING);
     let mut report = PlaytestBudgetReport {
         stage: PlaytestBudgetStage::Cooked,
         mode: package.bsp_cook_mode,
@@ -497,9 +482,7 @@ pub fn cooked_playtest_budgets(
 pub fn analyze_pxbsp_draw_cost(
     package: &PlaytestPackage,
 ) -> Result<Option<PxbspDrawCostReport>, String> {
-    let PlaytestWorldGeometry::Pxbsp(world) = &package.world_geometry else {
-        return Ok(None);
-    };
+    let world = &package.world_geometry;
     let mut map = psx_bsp::pxbsp_resident::PxbspResidentMap::with_capacity(world.bytes.len());
     map.load(0, &mut SliceReader::new(&world.bytes))
         .map_err(|error| format!("could not load cooked PXBSP for draw-cost analysis: {error}"))?;
@@ -628,9 +611,7 @@ pub fn pxbsp_leaves_at_authored_points(
     package: &PlaytestPackage,
     points: &[[i32; 3]],
 ) -> Result<Vec<Option<usize>>, String> {
-    let PlaytestWorldGeometry::Pxbsp(world) = &package.world_geometry else {
-        return Err("the package has no PXBSP world geometry".into());
-    };
+    let world = &package.world_geometry;
     let mut map = psx_bsp::pxbsp_resident::PxbspResidentMap::with_capacity(world.bytes.len());
     map.load(0, &mut SliceReader::new(&world.bytes))
         .map_err(|error| format!("could not load cooked PXBSP: {error}"))?;
@@ -752,13 +733,8 @@ fn cooked_packet_count(package: &PlaytestPackage, bsp_packets: usize) -> usize {
 /// Per-project primitive arena capacity the generated manifest publishes for
 /// this cooked package.
 pub fn cooked_manifest_packet_capacity(package: &PlaytestPackage) -> usize {
-    let capacity =
-        derived_packet_capacity(cooked_packet_count(package, cooked_bsp_packets(package)));
-    if matches!(package.world_geometry, PlaytestWorldGeometry::Pxbsp(_)) {
-        capacity.min(PLAYTEST_PXBSP_PACKET_CAPACITY_CEILING)
-    } else {
-        capacity
-    }
+    derived_packet_capacity(cooked_packet_count(package, cooked_bsp_packets(package)))
+        .min(PLAYTEST_PXBSP_PACKET_CAPACITY_CEILING)
 }
 
 fn authored_texture_paths(project: &ProjectDocument) -> BTreeSet<String> {
@@ -798,15 +774,7 @@ fn attach_budget_issues(project: &ProjectDocument, report: &mut PlaytestBudgetRe
         .iter()
         .enumerate()
         .max_by_key(|(_, brush)| brush.faces.len())
-        .map(|(brush, _)| PlaytestValidationTarget::Brush { brush, face: None })
-        .or_else(|| {
-            project
-                .active_scene()
-                .nodes()
-                .iter()
-                .find(|node| matches!(node.kind, NodeKind::Section { .. }))
-                .map(|node| PlaytestValidationTarget::Node(node.id))
-        });
+        .map(|(brush, _)| PlaytestValidationTarget::Brush { brush, face: None });
     let texture_target = project
         .resources
         .iter()
@@ -1293,9 +1261,7 @@ mod tests {
         let (package, report) = build_package(&project, &fixture_dir);
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         let package = package.expect("cooked PXBSP package");
-        let PlaytestWorldGeometry::Pxbsp(world) = &package.world_geometry else {
-            panic!("tracked fixture must cook PXBSP");
-        };
+        let world = &package.world_geometry;
         let index = PxbspIndex::read(&mut SliceReader::new(&world.bytes)).expect("PXBSP index");
         assert_eq!(index.version(), PxbspVersion::V6);
         let faces = index.lump(PxbspLumpKind::Faces);

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use psxed_project::{
-    playtest::{analyze_pxbsp_draw_cost, build_package, PlaytestWorldGeometry},
+    playtest::{analyze_pxbsp_draw_cost, build_package},
     ProjectDocument,
 };
 
@@ -92,9 +92,7 @@ fn main() -> ExitCode {
         report.non_solid_leaf_count,
         report.unreadable_pvs_leaf_count,
     );
-    if let PlaytestWorldGeometry::Pxbsp(world) = &package.world_geometry {
-        print_face_widths(&world.bytes);
-    }
+    print_face_widths(&package.world_geometry.bytes);
     for leaf in report.heaviest_leaves(limit) {
         let location = leaf.authored_surface_anchor.map_or_else(
             || "anchor unavailable".to_string(),

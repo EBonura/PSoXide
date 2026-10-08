@@ -8,7 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{GridUvTransform, ResourceId, DEFAULT_WORLD_SECTOR_SIZE};
+use crate::{ResourceId, UvTransform, DEFAULT_WORLD_SECTOR_SIZE};
 
 pub const CYLINDER_PROP_MATERIAL_COUNT: usize = 4;
 pub const CYLINDER_PROP_MATERIAL_NAMES: [&str; CYLINDER_PROP_MATERIAL_COUNT] =
@@ -164,8 +164,8 @@ pub(crate) const fn default_cylinder_prop_materials(
     [None; CYLINDER_PROP_MATERIAL_COUNT]
 }
 
-pub(crate) const fn default_cylinder_prop_uvs() -> [GridUvTransform; CYLINDER_PROP_MATERIAL_COUNT] {
-    [GridUvTransform::IDENTITY; CYLINDER_PROP_MATERIAL_COUNT]
+pub(crate) const fn default_cylinder_prop_uvs() -> [UvTransform; CYLINDER_PROP_MATERIAL_COUNT] {
+    [UvTransform::IDENTITY; CYLINDER_PROP_MATERIAL_COUNT]
 }
 
 /// One generated polygon. Triangles repeat their final vertex in slot three so

@@ -5,7 +5,6 @@ use std::fmt::Write as _;
 use super::*;
 use crate::{UiFontChoice, UiGradientDirection, UiImageEffect, UiNodeKind, UiValueBinding};
 
-const STREAMED_ROOM_SLOT_BYTES: usize = 32 * 1024;
 const CD_SECTOR_BYTES: usize = 2048;
 
 fn remove_optional_file(path: &std::path::Path) -> std::io::Result<()> {
@@ -14,50 +13,6 @@ fn remove_optional_file(path: &std::path::Path) -> std::io::Result<()> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
     }
-}
-
-/// Refuse a package whose cooked room chunks cannot fit the runtime's per-room
-/// CD slot.
-///
-/// The runtime slot is sized from `MAX_STREAMED_ROOM_CHUNK_BYTES`, so an
-/// oversized chunk would fail every load silently and the room would never
-/// appear. Reported for all offending rooms at once rather than one per cook,
-/// since a large level tends to trip several.
-fn validate_streamed_room_chunks(package: &PlaytestPackage) -> std::io::Result<()> {
-    let mut offenders = Vec::new();
-    for room_index in 0..package.rooms.len() {
-        if package.rooms[room_index].world_asset_index.is_none() {
-            continue;
-        }
-        let payload = streamed_room_chunk_payload(package, room_index as u16)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        if payload.len() > psx_level::MAX_STREAMED_ROOM_CHUNK_BYTES {
-            offenders.push((room_index, payload.len()));
-        }
-    }
-    if offenders.is_empty() {
-        return Ok(());
-    }
-    let mut message = format!(
-        "{} room chunk(s) exceed the {}-byte runtime room slot \
-         (psx_level::MAX_STREAMED_ROOM_CHUNK_BYTES). The portal-room plan splits on \
-         authored seams only and does not consult this budget, so a room with no \
-         interior seam can cook to any size:",
-        offenders.len(),
-        psx_level::MAX_STREAMED_ROOM_CHUNK_BYTES,
-    );
-    for (room_index, len) in &offenders {
-        let _ = write!(message, "\n  room {room_index}: {len} bytes");
-    }
-    let _ = write!(
-        message,
-        "\nAdd portal seams to split the offending room(s), or reduce their geometry. \
-         Nothing was written; the previously generated output is intact."
-    );
-    Err(std::io::Error::new(
-        std::io::ErrorKind::InvalidData,
-        message,
-    ))
 }
 
 /// `LevelModelFrameBoundsRecord` stores its sphere as `i16` to halve the
@@ -92,7 +47,6 @@ pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io
     // destroys the cooked manifest of whichever project was there before. The
     // oversized-chunk case is the one that actually fires, so check every room
     // up front and fail as a clean no-op.
-    validate_streamed_room_chunks(package)?;
     validate_model_frame_bounds(package)?;
     // Same discipline for the session-resident payloads. Without this the
     // ceiling is only reported by a MIPS link failure naming a section, long
@@ -108,21 +62,18 @@ pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io
         ));
     }
 
-    let rooms_dir = generated_dir.join(ROOMS_DIRNAME);
     let stream_chunks_dir = generated_dir.join(STREAM_CHUNKS_DIRNAME);
     let ui_stream_chunks_dir = generated_dir.join(UI_STREAM_CHUNKS_DIRNAME);
     let textures_dir = generated_dir.join(TEXTURES_DIRNAME);
     let models_dir = generated_dir.join(MODELS_DIRNAME);
     let ui_sfx_dir = generated_dir.join(UI_SFX_DIRNAME);
     let cdda_tracks_dir = generated_dir.join(CDDA_TRACKS_DIRNAME);
-    std::fs::create_dir_all(&rooms_dir)?;
     std::fs::create_dir_all(&stream_chunks_dir)?;
     std::fs::create_dir_all(&ui_stream_chunks_dir)?;
     std::fs::create_dir_all(&textures_dir)?;
     std::fs::create_dir_all(&models_dir)?;
     std::fs::create_dir_all(&ui_sfx_dir)?;
     std::fs::create_dir_all(&cdda_tracks_dir)?;
-    purge_directory_files(&rooms_dir, "psxw")?;
     purge_directory_files(&stream_chunks_dir, "psxc")?;
     purge_directory_files(&ui_stream_chunks_dir, "psxt")?;
     purge_directory_files(&textures_dir, "psxt")?;
@@ -135,23 +86,16 @@ pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io
 
     let pxbsp_path = generated_dir.join(crate::brush_playtest::BRUSH_WORLD_FILENAME);
     let brush_leak_path = generated_dir.join(crate::brush_playtest::BRUSH_LEAK_FILENAME);
-    match &package.world_geometry {
-        PlaytestWorldGeometry::Grid => {
-            remove_optional_file(&pxbsp_path)?;
-            remove_optional_file(&brush_leak_path)?;
+    let world = &package.world_geometry;
+    std::fs::write(&pxbsp_path, &world.bytes)?;
+    if world.leak_path.is_empty() {
+        remove_optional_file(&brush_leak_path)?;
+    } else {
+        let mut pointfile = String::new();
+        for &[x, y, z] in &world.leak_path {
+            writeln!(pointfile, "{x} {y} {z}").expect("writing to String cannot fail");
         }
-        PlaytestWorldGeometry::Pxbsp(world) => {
-            std::fs::write(&pxbsp_path, &world.bytes)?;
-            if world.leak_path.is_empty() {
-                remove_optional_file(&brush_leak_path)?;
-            } else {
-                let mut pointfile = String::new();
-                for &[x, y, z] in &world.leak_path {
-                    writeln!(pointfile, "{x} {y} {z}").expect("writing to String cannot fail");
-                }
-                std::fs::write(&brush_leak_path, pointfile)?;
-            }
-        }
+        std::fs::write(&brush_leak_path, pointfile)?;
     }
 
     for asset in &package.assets {
@@ -160,7 +104,6 @@ pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io
         // subpath; rooms + room-only textures stay flat in
         // their respective dirs.
         let target = match asset.kind {
-            PlaytestAssetKind::RoomWorld => rooms_dir.join(&asset.filename),
             PlaytestAssetKind::Texture if asset.filename.contains('/') => {
                 generated_dir.join(&asset.filename)
             }
@@ -200,27 +143,11 @@ pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io
             bytes,
         )?;
     }
-    for room_index in world_pack_order(package) {
-        let payload = streamed_room_chunk_payload(package, room_index)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        // Cook/runtime streaming contract: the runtime's per-room CD slot
-        // is sized from this constant; an oversized chunk would fail every
-        // runtime load silently and the room would never appear. Refuse to
-        // ship it.
-        // Already validated before any filesystem mutation; see
-        // `validate_streamed_room_chunks`.
-        debug_assert!(payload.len() <= psx_level::MAX_STREAMED_ROOM_CHUNK_BYTES);
-        std::fs::write(
-            stream_chunks_dir.join(streamed_room_chunk_filename(room_index)),
-            payload,
-        )?;
-    }
-
     let manifest = render_manifest_source(package);
     std::fs::write(generated_dir.join(COOKED_MANIFEST_FILENAME), manifest)?;
     std::fs::write(
         generated_dir.join(WORLD_PACK_ORDER_FILENAME),
-        render_world_pack_order(package),
+        render_world_pack_order(),
     )?;
     std::fs::write(
         generated_dir.join(UI_PACK_ORDER_FILENAME),
@@ -252,186 +179,6 @@ fn write_aligned_asset_bytes_static(out: &mut String, static_name: &str, include
     );
     let _ = writeln!(out, "    &ALIGNED.bytes");
     let _ = writeln!(out, "}};");
-}
-
-fn write_cached_room_lighting_policy(
-    out: &mut String,
-    has_room_fog: bool,
-    all_room_fog_is_black: bool,
-) {
-    if has_room_fog {
-        let source = r#"
-#[repr(transparent)]
-pub struct ProjectCachedRoomLighting<'a> {
-    lighting: &'a super::RuntimeRoomLighting,
-}
-
-impl<'a> ProjectCachedRoomLighting<'a> {
-    #[inline(always)]
-    pub const fn new(lighting: &'a super::RuntimeRoomLighting) -> Self {
-        Self { lighting }
-    }
-}
-
-impl psx_engine::WorldSurfaceLighting for ProjectCachedRoomLighting<'_> {
-    #[inline(always)]
-    fn shade(
-        &self,
-        sample: psx_engine::WorldSurfaceSample,
-        material: psx_engine::WorldRenderMaterial,
-    ) -> psx_engine::WorldRenderMaterial {
-        psx_engine::WorldSurfaceLighting::shade(self.lighting, sample, material)
-    }
-
-    #[inline(always)]
-    fn shade_vertex(
-        &self,
-        sample: psx_engine::WorldSurfaceSample,
-        vertex: psx_engine::RoomPoint,
-        material: psx_engine::WorldRenderMaterial,
-    ) -> (u8, u8, u8) {
-        psx_engine::WorldSurfaceLighting::shade_vertex(self.lighting, sample, vertex, material)
-    }
-
-    #[inline(always)]
-    fn shade_vertices(
-        &self,
-        sample: psx_engine::WorldSurfaceSample,
-        vertices: [psx_engine::WorldVertex; 4],
-        material: psx_engine::WorldRenderMaterial,
-    ) -> [(u8, u8, u8); 4] {
-        psx_engine::WorldSurfaceLighting::shade_vertices(
-            self.lighting,
-            sample,
-            vertices,
-            material,
-        )
-    }
-
-    #[inline(always)]
-    fn shade_vertices_with_depths(
-        &self,
-        sample: psx_engine::WorldSurfaceSample,
-        vertices: [psx_engine::WorldVertex; 4],
-        depths: [i32; 4],
-        material: psx_engine::WorldRenderMaterial,
-    ) -> [(u8, u8, u8); 4] {
-        psx_engine::WorldSurfaceLighting::shade_vertices_with_depths(
-            self.lighting,
-            sample,
-            vertices,
-            depths,
-            material,
-        )
-    }
-
-    #[inline(always)]
-    fn shade_cached_baked_vertices(
-        &self,
-        sample: psx_engine::WorldSurfaceSample,
-        depths: Option<[i32; 4]>,
-        _material: psx_engine::WorldRenderMaterial,
-    ) -> Option<[(u8, u8, u8); 4]> {
-        let vertex_rgb = sample.baked_vertex_rgb?;
-        if !self.lighting.fog_enabled || self.lighting.fog_far <= self.lighting.fog_near {
-            return Some(vertex_rgb);
-        }
-        let depths = depths?;
-        Some([
-            self.lighting.apply_vertex_fog_weight(vertex_rgb[0], depths[0]),
-            self.lighting.apply_vertex_fog_weight(vertex_rgb[1], depths[1]),
-            self.lighting.apply_vertex_fog_weight(vertex_rgb[2], depths[2]),
-            self.lighting.apply_vertex_fog_weight(vertex_rgb[3], depths[3]),
-        ])
-    }
-
-    #[inline(always)]
-    fn shade_prewarmed_baked_vertices(
-        &self,
-        sample: psx_engine::WorldSurfaceSample,
-        depths: Option<[i32; 4]>,
-    ) -> Option<[(u8, u8, u8); 4]> {
-        let vertex_rgb = sample.baked_vertex_rgb?;
-        if !self.lighting.fog_enabled || self.lighting.fog_far <= self.lighting.fog_near {
-            return Some(vertex_rgb);
-        }
-        let depths = depths?;
-        Some([
-            self.lighting.apply_vertex_fog_weight(vertex_rgb[0], depths[0]),
-            self.lighting.apply_vertex_fog_weight(vertex_rgb[1], depths[1]),
-            self.lighting.apply_vertex_fog_weight(vertex_rgb[2], depths[2]),
-            self.lighting.apply_vertex_fog_weight(vertex_rgb[3], depths[3]),
-        ])
-    }
-
-    #[inline(always)]
-    fn uses_direct_baked_vertex_rgb(&self) -> bool {
-        psx_engine::WorldSurfaceLighting::uses_direct_baked_vertex_rgb(self.lighting)
-    }
-
-    #[inline(always)]
-    fn prepare_vertex_depth(&self, depth: i32) -> i32 {
-        psx_engine::WorldSurfaceLighting::prepare_vertex_depth(self.lighting, depth)
-    }
-
-    #[inline(always)]
-    fn uses_vertex_depths(&self) -> bool {
-        psx_engine::WorldSurfaceLighting::uses_vertex_depths(self.lighting)
-    }
-
-    #[inline(always)]
-    fn needs_surface_sample_center(&self, sample_has_baked_rgb: bool) -> bool {
-        psx_engine::WorldSurfaceLighting::needs_surface_sample_center(
-            self.lighting,
-            sample_has_baked_rgb,
-        )
-    }
-}
-
-#[cfg(not(playtest_pxbsp))]
-macro_rules! draw_project_cached_room {
-    (
-        $lighting:expr,
-        $draw:path,
-        [$($before:expr),* $(,)?],
-        [$($after:expr),* $(,)?]
-    ) => {{
-        let cached_lighting = $crate::generated::ProjectCachedRoomLighting::new($lighting);
-        $draw($($before,)* &cached_lighting, true, $($after,)*)
-    }};
-}
-#[cfg(not(playtest_pxbsp))]
-pub(crate) use draw_project_cached_room;
-
-"#;
-        if all_room_fog_is_black {
-            out.push_str(&source.replace(
-                "self.lighting.apply_vertex_fog_weight",
-                "psx_game_runtime::room_lighting::apply_black_room_fog_weight",
-            ));
-        } else {
-            out.push_str(source);
-        }
-    } else {
-        out.push_str(
-            r#"
-#[cfg(not(playtest_pxbsp))]
-macro_rules! draw_project_cached_room {
-    (
-        $lighting:expr,
-        $draw:path,
-        [$($before:expr),* $(,)?],
-        [$($after:expr),* $(,)?]
-    ) => {
-        $draw($($before,)* $lighting, false, $($after,)*)
-    };
-}
-#[cfg(not(playtest_pxbsp))]
-pub(crate) use draw_project_cached_room;
-
-"#,
-        );
-    }
 }
 
 pub fn render_manifest_source(package: &PlaytestPackage) -> String {
@@ -480,21 +227,6 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         "pub const PLAYTEST_PACKET_CAPACITY: usize = {};\n",
         super::budget::cooked_manifest_packet_capacity(package)
     );
-    let has_room_fog = package
-        .rooms
-        .iter()
-        .any(|room| room.flags & psx_level::room_flags::FOG_ENABLED != 0);
-    let all_room_fog_is_black = has_room_fog
-        && package.rooms.iter().all(|room| {
-            room.flags & psx_level::room_flags::FOG_ENABLED == 0 || room.fog_rgb == [0, 0, 0]
-        });
-    write_cached_room_lighting_policy(&mut out, has_room_fog, all_room_fog_is_black);
-    let world_pack_toc = world_pack_toc(package);
-    let world_pack_max_chunk_bytes = world_pack_toc
-        .iter()
-        .map(|entry| entry.byte_size as usize)
-        .max()
-        .unwrap_or(0);
     // UI.PAK immediately follows WORLD.PAK in the ISO file order, so its
     // start LBA is the WORLD.PAK start LBA plus the WORLD.PAK total sectors.
     // WORLD.PAK itself starts after a fixed boot area: SYSTEM.CNF and PSX.EXE
@@ -538,51 +270,6 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         .sum::<usize>()
         .div_ceil(CD_SECTOR_BYTES)
         .max(1);
-    let resident_chunk_limit = package
-        .rooms
-        .iter()
-        .map(|room| room.resident_chunk_limit as usize)
-        .max()
-        .unwrap_or(crate::MIN_WORLD_STREAMING_RESIDENT_CHUNKS as usize)
-        .clamp(
-            crate::MIN_WORLD_STREAMING_RESIDENT_CHUNKS as usize,
-            crate::MAX_WORLD_STREAMING_RESIDENT_CHUNKS as usize,
-        );
-    // Keep two independently evictable look-ahead rooms beyond the authored
-    // protected window. RAM is budgeted in exact 2 KiB disc pages, using the
-    // largest possible combination of simultaneously resident chunks; this is
-    // a cook-time proof that any runtime choice of this many rooms fits.
-    let world_stream_slot_count = resident_chunk_limit
-        .saturating_add(2)
-        .min(world_pack_toc.len())
-        .max(1);
-    let mut world_chunk_sector_counts = world_pack_toc
-        .iter()
-        .map(|entry| entry.sector_count as usize)
-        .collect::<Vec<_>>();
-    world_chunk_sector_counts.sort_unstable_by(|a, b| b.cmp(a));
-    let world_resident_page_count = world_chunk_sector_counts
-        .iter()
-        .take(world_stream_slot_count)
-        .copied()
-        .sum::<usize>()
-        .max(1);
-    let _ = writeln!(
-        out,
-        "pub const WORLD_RESIDENT_CHUNK_LIMIT: usize = {resident_chunk_limit};\n",
-    );
-    let _ = writeln!(
-        out,
-        "pub const WORLD_PACK_MAX_CHUNK_BYTES: usize = {world_pack_max_chunk_bytes};\n",
-    );
-    let _ = writeln!(
-        out,
-        "pub const WORLD_STREAM_SLOT_COUNT: usize = {world_stream_slot_count};\n",
-    );
-    let _ = writeln!(
-        out,
-        "pub const WORLD_RESIDENT_PAGE_COUNT: usize = {world_resident_page_count};\n",
-    );
     let _ = writeln!(
         out,
         "pub const PERSISTENT_ASSET_SLOT_COUNT: usize = {persistent_asset_slot_count};\n",
@@ -597,21 +284,6 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     let _ = writeln!(
         out,
         "pub const BOX_PROP_STATE_COUNT: usize = {box_prop_state_count};\n",
-    );
-    let runtime_depth_sort_mode = package.runtime_depth_sort_mode.manifest_value();
-    let _ = writeln!(
-        out,
-        "pub const CACHED_ROOM_DEPTH_MODE: u8 = {runtime_depth_sort_mode};\n",
-    );
-    let runtime_texture_split_mode = package.runtime_texture_split_mode.manifest_value();
-    let _ = writeln!(
-        out,
-        "pub const CACHED_ROOM_TEXTURE_SPLIT_MODE: u8 = {runtime_texture_split_mode};\n",
-    );
-    let runtime_room_draw_order_mode = package.runtime_room_draw_order_mode.manifest_value();
-    let _ = writeln!(
-        out,
-        "pub const CACHED_ROOM_DRAW_ORDER_MODE: u8 = {runtime_room_draw_order_mode};\n",
     );
     let runtime_texture_split_max_edge = package.runtime_texture_split_max_edge;
     let _ = writeln!(
@@ -630,75 +302,59 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     out.push_str("    bytes: Bytes,\n");
     out.push_str("}\n\n");
 
-    match &package.world_geometry {
-        PlaytestWorldGeometry::Grid => {
-            out.push_str("pub const PLAYTEST_USES_PXBSP: bool = false;\n");
-            out.push_str("pub const PXBSP_AMBIENT_RGB: [u8; 3] = [0; 3];\n");
-            out.push_str("pub const PXBSP_FACE_CHAIN_CAPACITY: usize = 0;\n");
-            out.push_str("pub static PXBSP_WORLD: &[u8] = &[];\n");
-            out.push_str("pub static PXBSP_MOVER_NODE_IDS: &[u32] = &[];\n");
-            out.push_str("pub static PXBSP_MOVER_MODEL_INDICES: &[u16] = &[];\n");
-            out.push_str(
-                "pub static PXBSP_BODY_HULLS: &[psx_bsp::collision_provider::CookedBodyHull] = &[];\n\n",
-            );
-        }
-        PlaytestWorldGeometry::Pxbsp(world) => {
-            out.push_str("pub const PLAYTEST_USES_PXBSP: bool = true;\n");
-            // Keep actor/prop lighting on the same ambient contract used by
-            // the brush light bake. PXBSP surfaces carry baked vertex light;
-            // dynamic world content consumes this generated constant instead
-            // of depending on a synthetic PSXW room header.
-            out.push_str("pub const PXBSP_AMBIENT_RGB: [u8; 3] = [32; 3];\n");
-            let _ = writeln!(
-                out,
-                "pub const PXBSP_FACE_CHAIN_CAPACITY: usize = {};",
-                world.max_visible_faces,
-            );
-            write_aligned_asset_bytes_static(
-                &mut out,
-                "PXBSP_WORLD",
-                crate::brush_playtest::BRUSH_WORLD_FILENAME,
-            );
-            let node_ids = world
-                .movers
-                .iter()
-                .map(|mover| mover.node.to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
-            let model_indices = world
-                .movers
-                .iter()
-                .map(|mover| mover.model_index.to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
-            let _ = writeln!(
-                out,
-                "pub static PXBSP_MOVER_NODE_IDS: &[u32] = &[{node_ids}];"
-            );
-            let _ = writeln!(
-                out,
-                "pub static PXBSP_MOVER_MODEL_INDICES: &[u16] = &[{model_indices}];"
-            );
-            out.push_str(
-                "pub static PXBSP_BODY_HULLS: &[psx_bsp::collision_provider::CookedBodyHull] = &[\n",
-            );
-            for hull in world.body_hulls {
-                let _ = writeln!(
-                    out,
-                    "    psx_bsp::collision_provider::CookedBodyHull::new({}, {}, {}),",
-                    hull.hull_index, hull.radius, hull.height,
-                );
-            }
-            out.push_str("];\n\n");
-        }
+    let world = &package.world_geometry;
+    out.push_str("pub const PLAYTEST_USES_PXBSP: bool = true;\n");
+    // Keep actor/prop lighting on the same ambient contract used by the
+    // brush light bake. PXBSP surfaces carry baked vertex light; dynamic
+    // world content consumes this generated constant.
+    out.push_str("pub const PXBSP_AMBIENT_RGB: [u8; 3] = [32; 3];\n");
+    let _ = writeln!(
+        out,
+        "pub const PXBSP_FACE_CHAIN_CAPACITY: usize = {};",
+        world.max_visible_faces,
+    );
+    write_aligned_asset_bytes_static(
+        &mut out,
+        "PXBSP_WORLD",
+        crate::brush_playtest::BRUSH_WORLD_FILENAME,
+    );
+    let node_ids = world
+        .movers
+        .iter()
+        .map(|mover| mover.node.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let model_indices = world
+        .movers
+        .iter()
+        .map(|mover| mover.model_index.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let _ = writeln!(
+        out,
+        "pub static PXBSP_MOVER_NODE_IDS: &[u32] = &[{node_ids}];"
+    );
+    let _ = writeln!(
+        out,
+        "pub static PXBSP_MOVER_MODEL_INDICES: &[u16] = &[{model_indices}];"
+    );
+    out.push_str(
+        "pub static PXBSP_BODY_HULLS: &[psx_bsp::collision_provider::CookedBodyHull] = &[\n",
+    );
+    for hull in world.body_hulls {
+        let _ = writeln!(
+            out,
+            "    psx_bsp::collision_provider::CookedBodyHull::new({}, {}, {}),",
+            hull.hull_index, hull.radius, hull.height,
+        );
     }
+    out.push_str("];\n\n");
 
     // Emit one named static per asset so the include_bytes! call
     // sites are easy to grep for. Asset records reference these
     // statics so the slice is still constructible at compile time.
     for (i, asset) in package.assets.iter().enumerate() {
         let include_path = match asset.kind {
-            PlaytestAssetKind::RoomWorld => format!("{ROOMS_DIRNAME}/{}", asset.filename),
             PlaytestAssetKind::Texture if asset.filename.contains('/') => asset.filename.clone(),
             PlaytestAssetKind::Texture => format!("{TEXTURES_DIRNAME}/{}", asset.filename),
             PlaytestAssetKind::ModelMesh | PlaytestAssetKind::ModelAnimation => {
@@ -711,11 +367,10 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             asset_static_name(asset, i),
             asset.source_label,
         );
-        // Room worlds always stream off WORLD.PAK; streamed Texture
-        // assets (UI images) stream off UI.PAK. Both emit empty baked
-        // bytes under `cd-stream-bench` and the normal word-aligned
-        // `include_bytes!` static when the feature is off.
-        if asset.kind == PlaytestAssetKind::RoomWorld || asset.is_streamed() {
+        // Streamed Texture assets (UI images) stream off UI.PAK. They emit
+        // empty baked bytes under `cd-stream-bench` and the normal
+        // word-aligned `include_bytes!` static when the feature is off.
+        if asset.is_streamed() {
             let _ = writeln!(out, "#[cfg(feature = \"cd-stream-bench\")]");
             let _ = writeln!(
                 out,
@@ -748,7 +403,6 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     out.push_str("pub static ASSETS: &[LevelAssetRecord] = &[\n");
     for (i, asset) in package.assets.iter().enumerate() {
         let kind = match asset.kind {
-            PlaytestAssetKind::RoomWorld => "AssetKind::RoomWorld",
             PlaytestAssetKind::Texture => "AssetKind::Texture",
             PlaytestAssetKind::ModelMesh => "AssetKind::ModelMesh",
             PlaytestAssetKind::ModelAnimation => "AssetKind::ModelAnimation",
@@ -765,27 +419,6 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         let _ = writeln!(
             out,
             "    LevelAssetRecord {{ id: AssetId({i}), kind: {kind}, bytes: {static_name}, ram_bytes: {ram_bytes}, vram_bytes: {vram_bytes}, flags: {flags} }},"
-        );
-    }
-    out.push_str("];\n\n");
-
-    out.push_str("/// Per-room material bindings - slot the `.psxw` stores → texture asset.\n");
-    out.push_str("pub static MATERIALS: &[LevelMaterialRecord] = &[\n");
-    for material in &package.materials {
-        let flags = material_flags_for_sidedness(material.face_sidedness);
-        let animation = level_material_animation_literal(material.animation);
-        let _ = writeln!(
-            out,
-            "    LevelMaterialRecord {{ room: RoomIndex({}), local_slot: MaterialSlot({}), texture_asset: AssetId({}), tint_rgb: [{}, {}, {}], blend_mode: {}, animation: {}, flags: {} }},",
-            material.room,
-            material.local_slot,
-            material.texture_asset_index,
-            material.tint_rgb[0],
-            material.tint_rgb[1],
-            material.tint_rgb[2],
-            model_override_blend_code(material.blend_mode),
-            animation,
-            flags,
         );
     }
     out.push_str("];\n\n");
@@ -886,28 +519,11 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         let sky_cyclorama_quads = &sky_cyclorama_refs[room_index];
         let _ = writeln!(
             out,
-            "    LevelRoomRecord {{ name: {:?}, world_asset: AssetId({}), origin_x: {}, origin_z: {}, origin_y: {}, sector_size: {}, draw_distance: {}, chunk_activation_radius_sectors: {}, visibility_radius: {}, resident_chunk_limit: {}, visible_chunk_limit: {}, gravity_per_tick_q8: {}, material_first: MaterialIndex({}), material_count: {}, portal_first: {}, portal_count: {}, near_room_first: {}, near_room_count: {}, overlapped_room_first: {}, overlapped_room_count: {}, fog_rgb: [{}, {}, {}], fog_near: {}, fog_far: {}, atmosphere_rgb: [{}, {}, {}], atmosphere_density: {}, atmosphere_fall_speed_q4: {}, atmosphere_wind_speed_q4: {}, sky: LevelSkyRecord {{ top_rgb: [{}, {}, {}], horizon_rgb: [{}, {}, {}], bottom_rgb: [{}, {}, {}], horizon_percent: {}, horizon_thickness_percent: {}, skybox_columns: {}, skybox_rows: {}, flags: {}, texture_asset: AssetId({}), cyclorama_quads: {}, cloud_layer: LevelCloudLayerRecord {{ texture_asset: AssetId({}), color_rgb: [{}, {}, {}], density: {}, altitude: {}, extent: {}, tile_count: {}, scroll_speed: [{}, {}], noise_seed: 0x{:08x}, flags: {} }} }}, far_vista: LevelFarVistaRecord {{ texture_assets: {}, radius: {}, height: {}, vertical_offset: {}, segments: {}, rotation_degrees: {}, tint_rgb: [{}, {}, {}], flags: {} }}, camera: LevelCameraRecord {{ distance: {}, height: {}, target_height: {}, lock_rise_percent: {}, min_floor_clearance: {}, orbit_speed_level: {}, accelerated_orbit: {}, recenter_preserves_pitch: {}, fov_y_degrees: {}, blend_profiles: {}, lock_target_framing: {}, lock_profile: {}, position_lag_shift: {}, position_vertical_lag_shift: {}, focus_lag_shift: {}, focus_vertical_lag_shift: {}, distance_lag_shift: {} }}, flags: {} }},",
+            "    LevelRoomRecord {{ name: {:?}, sector_size: {}, draw_distance: {}, gravity_per_tick_q8: {}, fog_rgb: [{}, {}, {}], fog_near: {}, fog_far: {}, atmosphere_rgb: [{}, {}, {}], atmosphere_density: {}, atmosphere_fall_speed_q4: {}, atmosphere_wind_speed_q4: {}, sky: LevelSkyRecord {{ top_rgb: [{}, {}, {}], horizon_rgb: [{}, {}, {}], bottom_rgb: [{}, {}, {}], horizon_percent: {}, horizon_thickness_percent: {}, skybox_columns: {}, skybox_rows: {}, flags: {}, texture_asset: AssetId({}), cyclorama_quads: {}, cloud_layer: LevelCloudLayerRecord {{ texture_asset: AssetId({}), color_rgb: [{}, {}, {}], density: {}, altitude: {}, extent: {}, tile_count: {}, scroll_speed: [{}, {}], noise_seed: 0x{:08x}, flags: {} }} }}, far_vista: LevelFarVistaRecord {{ texture_assets: {}, radius: {}, height: {}, vertical_offset: {}, segments: {}, rotation_degrees: {}, tint_rgb: [{}, {}, {}], flags: {} }}, camera: LevelCameraRecord {{ distance: {}, height: {}, target_height: {}, lock_rise_percent: {}, min_floor_clearance: {}, orbit_speed_level: {}, accelerated_orbit: {}, recenter_preserves_pitch: {}, fov_y_degrees: {}, blend_profiles: {}, lock_target_framing: {}, lock_profile: {}, position_lag_shift: {}, position_vertical_lag_shift: {}, focus_lag_shift: {}, focus_vertical_lag_shift: {}, distance_lag_shift: {} }}, flags: {} }},",
             room.name,
-            room.world_asset_index
-                .unwrap_or(usize::from(u16::MAX)),
-            room.origin_x,
-            room.origin_z,
-            room.origin_y,
             room.sector_size,
             room.draw_distance,
-            room.chunk_activation_radius_sectors,
-            room.visibility_radius,
-            room.resident_chunk_limit,
-            room.visible_chunk_limit,
             room.gravity_per_tick_q8,
-            room.material_first,
-            room.material_count,
-            room.portal_first,
-            room.portal_count,
-            room.near_room_first,
-            room.near_room_count,
-            room.overlapped_room_first,
-            room.overlapped_room_count,
             room.fog_rgb[0],
             room.fog_rgb[1],
             room.fog_rgb[2],
@@ -997,122 +613,6 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     }
     out.push_str("];\n\n");
 
-    out.push_str("/// Cooked runtime chunk metadata.\n");
-    out.push_str("pub static ROOM_CHUNKS: &[LevelChunkRecord] = &[\n");
-    for chunk in &package.chunks {
-        let [north, east, south, west] = chunk.neighbours;
-        let _ = writeln!(
-            out,
-            "    LevelChunkRecord {{ room: RoomIndex({}), authored_room: {}, chunk_index: {}, origin_x: {}, origin_z: {}, width: {}, depth: {}, neighbours: LevelChunkNeighbours {{ north: {}, east: {}, south: {}, west: {} }}, flags: {} }},",
-            chunk.room,
-            chunk.authored_room,
-            chunk.chunk_index,
-            chunk.origin_x,
-            chunk.origin_z,
-            chunk.width,
-            chunk.depth,
-            room_index_or_none(north),
-            room_index_or_none(east),
-            room_index_or_none(south),
-            room_index_or_none(west),
-            chunk.flags,
-        );
-    }
-    out.push_str("];\n\n");
-
-    out.push_str("/// Directed runtime room portal graph.\n");
-    out.push_str("pub static ROOM_PORTALS: &[LevelRoomPortalRecord] = &[\n");
-    for portal in &package.room_portals {
-        let _ = writeln!(
-            out,
-            "    LevelRoomPortalRecord {{ source_room: RoomIndex({}), destination_room: RoomIndex({}), kind: {}, normal_x: {}, normal_y: {}, normal_z: {}, vertex_x: [{}, {}, {}, {}], vertex_y: [{}, {}, {}, {}], vertex_z: [{}, {}, {}, {}] }},",
-            portal.source_room,
-            portal.destination_room,
-            portal.kind,
-            portal.normal[0],
-            portal.normal[1],
-            portal.normal[2],
-            portal.vertices[0][0],
-            portal.vertices[1][0],
-            portal.vertices[2][0],
-            portal.vertices[3][0],
-            portal.vertices[0][1],
-            portal.vertices[1][1],
-            portal.vertices[2][1],
-            portal.vertices[3][1],
-            portal.vertices[0][2],
-            portal.vertices[1][2],
-            portal.vertices[2][2],
-            portal.vertices[3][2],
-        );
-    }
-    out.push_str("];\n\n");
-
-    out.push_str("/// Water-covered runtime sectors, sorted by room/x/z.\n");
-    out.push_str("pub static WATER_CELLS: &[LevelWaterCellRecord] = &[\n");
-    for water in &package.water_cells {
-        let texture_asset = water
-            .texture_asset_index
-            .map(|asset| format!("Some(AssetId({asset}))"))
-            .unwrap_or_else(|| "None".to_string());
-        let animation = level_material_animation_literal(water.animation);
-        let _ = writeln!(
-            out,
-            "    LevelWaterCellRecord {{ room: RoomIndex({}), x: {}, z: {}, texture_asset: {texture_asset}, blend_mode: {}, tint_rgb: {:?}, animation: {animation}, surface_y: {}, depth: {}, lethal_depth: {}, movement_percent: {}, death_delay_ticks: {}, death_submerge_depth: {} }},",
-            water.room,
-            water.x,
-            water.z,
-            water.blend_mode,
-            water.tint_rgb,
-            water.surface_y,
-            water.depth,
-            water.lethal_depth,
-            water.movement_percent,
-            water.death_delay_ticks,
-            water.death_submerge_depth,
-        );
-    }
-    out.push_str("];\n\n");
-
-    out.push_str("/// Room indices near each runtime room, reserved for portal streaming.\n");
-    out.push_str("pub static ROOM_NEAR_ROOMS: &[RoomIndex] = &[\n");
-    for room in &package.room_near_rooms {
-        let _ = writeln!(out, "    RoomIndex({room}),");
-    }
-    out.push_str("];\n\n");
-
-    out.push_str("/// Room indices overlapping each runtime room, reserved for stacked rooms.\n");
-    out.push_str("pub static ROOM_OVERLAPPED_ROOMS: &[RoomIndex] = &[\n");
-    for room in &package.room_overlapped_rooms {
-        let _ = writeln!(out, "    RoomIndex({room}),");
-    }
-    out.push_str("];\n\n");
-
-    out.push_str("/// Absolute disc LBA where WORLD.PAK starts in the playtest ISO layout.\n");
-    let _ = writeln!(
-        out,
-        "pub const WORLD_PACK_START_LBA: u32 = {};",
-        psx_iso::WORLD_PACK_DEFAULT_START_LBA
-    );
-    out.push('\n');
-
-    out.push_str(
-        "/// Cooked WORLD.PAK room table generated from the same layout as the ISO packer.\n",
-    );
-    out.push_str("pub static WORLD_PACK_TOC: &[LevelWorldPackEntryRecord] = &[\n");
-    for entry in &world_pack_toc {
-        let _ = writeln!(
-            out,
-            "    LevelWorldPackEntryRecord {{ room: RoomIndex({}), sector_offset: {}, sector_count: {}, byte_size: {}, checksum: {} }},",
-            entry.chunk_id,
-            entry.sector_offset,
-            entry.sector_count,
-            entry.byte_size,
-            entry.checksum,
-        );
-    }
-    out.push_str("];\n\n");
-
     out.push_str(
         "/// Absolute disc LBA where UI.PAK starts in the playtest ISO layout.\n\
          /// UI.PAK is packed immediately after WORLD.PAK by the ISO builder.\n",
@@ -1181,252 +681,6 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             entry.sector_count,
             entry.byte_size,
             entry.checksum,
-        );
-    }
-    out.push_str("];\n\n");
-
-    out.push_str("/// Per-room visibility slices.\n");
-    out.push_str("pub static ROOM_VISIBILITY: &[LevelRoomVisibilityRecord] = &[\n");
-    for visibility in &package.room_visibility {
-        let _ = writeln!(
-            out,
-            "    LevelRoomVisibilityRecord {{ room: RoomIndex({}), cell_first: VisibilityCellIndex({}), cell_count: {}, pvs_first: {}, pvs_count: {}, flags: 0 }},",
-            visibility.room,
-            visibility.cell_first,
-            visibility.cell_count,
-            visibility.pvs_first,
-            visibility.pvs_count,
-        );
-    }
-    out.push_str("];\n\n");
-
-    out.push_str("/// Cooked position-cell PVS bitset slices.\n");
-    out.push_str("pub static VISIBILITY_PVS: &[LevelVisibilityPvsRecord] = &[\n");
-    for pvs in &package.visibility_pvs {
-        let _ = writeln!(
-            out,
-            "    LevelVisibilityPvsRecord {{ byte_first: {}, byte_count: {}, flags: 0 }},",
-            pvs.byte_first, pvs.byte_count,
-        );
-    }
-    out.push_str("];\n\n");
-
-    out.push_str("/// Cooked position-cell PVS bitset bytes.\n");
-    out.push_str("pub static VISIBILITY_PVS_BITS: &[u8] = &[\n");
-    for byte in &package.visibility_pvs_bits {
-        let _ = writeln!(out, "    {},", byte);
-    }
-    out.push_str("];\n\n");
-
-    out.push_str("/// Cooked grid-cell visibility metadata.\n");
-    out.push_str("pub static VISIBILITY_CELLS: &[LevelVisibilityCellRecord] = &[\n");
-    for cell in &package.visibility_cells {
-        let _ = writeln!(
-            out,
-            "    LevelVisibilityCellRecord {{ room: RoomIndex({}), x: {}, z: {}, min_y: {}, max_y: {}, portal_mask: {}, blocker_mask: {}, cache_cell_index: {}, flags: {} }},",
-            cell.room,
-            cell.x,
-            cell.z,
-            cell.min_y,
-            cell.max_y,
-            cell.portal_mask,
-            cell.blocker_mask,
-            cell.cache_cell_index,
-            cell.flags,
-        );
-    }
-    out.push_str("];\n\n");
-
-    out.push_str("#[cfg(feature = \"cd-stream-bench\")]\n");
-    out.push_str("/// Stream builds read room-surface cache slices from `.psxc` chunks.\n");
-    out.push_str("pub static ROOM_SURFACE_CACHES: &[LevelRoomSurfaceCacheRecord] = &[];\n\n");
-    out.push_str("#[cfg(not(feature = \"cd-stream-bench\"))]\n");
-    out.push_str("/// Per-room generated room-surface cache slices.\n");
-    out.push_str("pub static ROOM_SURFACE_CACHES: &[LevelRoomSurfaceCacheRecord] = &[\n");
-    for cache in &package.room_surface_caches {
-        let _ = writeln!(
-            out,
-            "    LevelRoomSurfaceCacheRecord {{ room: RoomIndex({}), cell_first: {}, cell_count: {}, cell_vertex_first: {}, cell_vertex_count: {}, vertex_first: {}, vertex_count: {}, surface_first: {}, surface_count: {}, flags: 0 }},",
-            cache.room,
-            cache.cell_first,
-            cache.cell_count,
-            cache.cell_vertex_first,
-            cache.cell_vertex_count,
-            cache.vertex_first,
-            cache.vertex_count,
-            cache.surface_first,
-            cache.surface_count,
-        );
-    }
-    out.push_str("];\n\n");
-
-    out.push_str("#[cfg(feature = \"cd-stream-bench\")]\n");
-    out.push_str("/// Stream builds read cached room cells from `.psxc` chunks.\n");
-    out.push_str("pub static ROOM_CACHE_CELLS: &[LevelCachedRoomCellRecord] = &[];\n\n");
-    out.push_str("#[cfg(not(feature = \"cd-stream-bench\"))]\n");
-    out.push_str("/// Generated cached room cells.\n");
-    out.push_str("pub static ROOM_CACHE_CELLS: &[LevelCachedRoomCellRecord] = &[\n");
-    for cell in &package.room_cache_cells {
-        let _ = writeln!(
-            out,
-            "    LevelCachedRoomCellRecord {{ x: {}, z: {}, min_y: {}, max_y: {}, visibility_center: [{}, {}, {}], visibility_radius: {}, surface_first: {}, surface_count: {}, vertex_first: {}, vertex_count: {} }},",
-            cell.x,
-            cell.z,
-            cell.min_y,
-            cell.max_y,
-            cell.visibility_center[0],
-            cell.visibility_center[1],
-            cell.visibility_center[2],
-            cell.visibility_radius,
-            cell.surface_first,
-            cell.surface_count,
-            cell.vertex_first,
-            cell.vertex_count,
-        );
-    }
-    out.push_str("];\n\n");
-
-    out.push_str("#[cfg(feature = \"cd-stream-bench\")]\n");
-    out.push_str("/// Stream builds read cached cell vertex indices from `.psxc` chunks.\n");
-    out.push_str("pub static ROOM_CACHE_CELL_VERTICES: &[u16] = &[];\n\n");
-    out.push_str("#[cfg(not(feature = \"cd-stream-bench\"))]\n");
-    out.push_str("/// Generated cached cell vertex indices.\n");
-    out.push_str("pub static ROOM_CACHE_CELL_VERTICES: &[u16] = &[\n");
-    for vertex_index in &package.room_cache_cell_vertices {
-        let _ = writeln!(out, "    {},", vertex_index);
-    }
-    out.push_str("];\n\n");
-
-    out.push_str("#[cfg(feature = \"cd-stream-bench\")]\n");
-    out.push_str("/// Stream builds read cached room vertices from `.psxc` chunks.\n");
-    out.push_str("pub static ROOM_CACHE_VERTICES: &[LevelCachedRoomVertexRecord] = &[];\n\n");
-    out.push_str("#[cfg(not(feature = \"cd-stream-bench\"))]\n");
-    out.push_str("/// Generated cached room vertices.\n");
-    out.push_str("pub static ROOM_CACHE_VERTICES: &[LevelCachedRoomVertexRecord] = &[\n");
-    for vertex in &package.room_cache_vertices {
-        let _ = writeln!(
-            out,
-            "    LevelCachedRoomVertexRecord {{ x: {}, y: {}, z: {} }},",
-            vertex.x, vertex.y, vertex.z,
-        );
-    }
-    out.push_str("];\n\n");
-
-    out.push_str("#[cfg(feature = \"cd-stream-bench\")]\n");
-    out.push_str("/// Stream builds read cached room surfaces from `.psxc` chunks.\n");
-    out.push_str("pub static ROOM_CACHE_SURFACES: &[LevelCachedRoomSurfaceRecord] = &[];\n\n");
-    out.push_str("#[cfg(not(feature = \"cd-stream-bench\"))]\n");
-    out.push_str("/// Generated cached room surfaces.\n");
-    out.push_str("pub static ROOM_CACHE_SURFACES: &[LevelCachedRoomSurfaceRecord] = &[\n");
-    for surface in &package.room_cache_surfaces {
-        let _ = writeln!(
-            out,
-            "    LevelCachedRoomSurfaceRecord {{ material_slot: {}, vertex_indices: [{}, {}, {}, {}], sample_sx: {}, sample_sz: {}, sample_ordinal: {}, uv_words: [{}, {}, {}, {}], baked_vertex_rgb: [({}, {}, {}), ({}, {}, {}), ({}, {}, {}), ({}, {}, {})], kind_flags: {}, wall_direction: {}, split: {}, triangle_index: {} }},",
-            surface.material_slot,
-            surface.vertex_indices[0],
-            surface.vertex_indices[1],
-            surface.vertex_indices[2],
-            surface.vertex_indices[3],
-            surface.sample_sx,
-            surface.sample_sz,
-            surface.sample_ordinal,
-            surface.uv_words[0],
-            surface.uv_words[1],
-            surface.uv_words[2],
-            surface.uv_words[3],
-            surface.baked_vertex_rgb[0].0,
-            surface.baked_vertex_rgb[0].1,
-            surface.baked_vertex_rgb[0].2,
-            surface.baked_vertex_rgb[1].0,
-            surface.baked_vertex_rgb[1].1,
-            surface.baked_vertex_rgb[1].2,
-            surface.baked_vertex_rgb[2].0,
-            surface.baked_vertex_rgb[2].1,
-            surface.baked_vertex_rgb[2].2,
-            surface.baked_vertex_rgb[3].0,
-            surface.baked_vertex_rgb[3].1,
-            surface.baked_vertex_rgb[3].2,
-            surface.kind_flags,
-            surface.wall_direction,
-            surface.split,
-            surface.triangle_index,
-        );
-    }
-    out.push_str("];\n\n");
-
-    // Per-room residency: required RAM = the room's world asset plus every
-    // persistent animation clip referenced by an instance or player character.
-    // Model mesh source blobs are streamed through transient scratch and decoded
-    // into fixed geometry pools, so they are deliberately absent here.
-    // Required VRAM = every distinct texture asset
-    // (room materials + room reflection probes + far-vista panels + model atlases)
-    // referenced by this room. Warm lists mirror touching chunks
-    // so the runtime can preload neighbours without owning their
-    // shared assets twice.
-    let residency_requirements: Vec<(Vec<usize>, Vec<usize>)> = package
-        .rooms
-        .iter()
-        .enumerate()
-        .map(|(i, room)| room_required_assets(package, i, room))
-        .collect();
-    let warm_requirements: Vec<(Vec<usize>, Vec<usize>)> = package
-        .rooms
-        .iter()
-        .enumerate()
-        .map(|(i, _room)| warm_assets_for_room(package, &residency_requirements, i))
-        .collect();
-
-    for (i, (required_ram, required_vram)) in residency_requirements.iter().enumerate() {
-        let _ = writeln!(out, "/// Room {i} required RAM assets.");
-        out.push_str(&format!(
-            "pub static ROOM_{i}_REQUIRED_RAM: &[AssetId] = &["
-        ));
-        for (j, idx) in required_ram.iter().enumerate() {
-            if j > 0 {
-                out.push_str(", ");
-            }
-            let _ = write!(out, "AssetId({idx})");
-        }
-        out.push_str("];\n");
-        let _ = writeln!(out, "/// Room {i} required VRAM assets.");
-        out.push_str(&format!(
-            "pub static ROOM_{i}_REQUIRED_VRAM: &[AssetId] = &["
-        ));
-        for (j, idx) in required_vram.iter().enumerate() {
-            if j > 0 {
-                out.push_str(", ");
-            }
-            let _ = write!(out, "AssetId({idx})");
-        }
-        out.push_str("];\n");
-        let (warm_ram, warm_vram) = &warm_requirements[i];
-        let _ = writeln!(out, "/// Room {i} warm RAM assets.");
-        out.push_str(&format!("pub static ROOM_{i}_WARM_RAM: &[AssetId] = &["));
-        for (j, idx) in warm_ram.iter().enumerate() {
-            if j > 0 {
-                out.push_str(", ");
-            }
-            let _ = write!(out, "AssetId({idx})");
-        }
-        out.push_str("];\n");
-        let _ = writeln!(out, "/// Room {i} warm VRAM assets.");
-        out.push_str(&format!("pub static ROOM_{i}_WARM_VRAM: &[AssetId] = &["));
-        for (j, idx) in warm_vram.iter().enumerate() {
-            if j > 0 {
-                out.push_str(", ");
-            }
-            let _ = write!(out, "AssetId({idx})");
-        }
-        out.push_str("];\n");
-    }
-    out.push('\n');
-
-    out.push_str("/// Per-room residency contract.\n");
-    out.push_str("pub static ROOM_RESIDENCY: &[RoomResidencyRecord] = &[\n");
-    for (i, _room) in package.rooms.iter().enumerate() {
-        let _ = writeln!(
-            out,
-            "    RoomResidencyRecord {{ room: RoomIndex({i}), required_ram: ROOM_{i}_REQUIRED_RAM, required_vram: ROOM_{i}_REQUIRED_VRAM, warm_ram: ROOM_{i}_WARM_RAM, warm_vram: ROOM_{i}_WARM_VRAM }},",
         );
     }
     out.push_str("];\n\n");
@@ -2570,15 +1824,11 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     out
 }
 
-fn render_world_pack_order(package: &PlaytestPackage) -> String {
-    let mut out = String::from(
+fn render_world_pack_order() -> String {
+    String::from(
         "# PSoXide WORLD.PAK room order\n\
          # One cooked room id per line. Generated by cook-playtest.\n",
-    );
-    for room in world_pack_order(package) {
-        let _ = writeln!(out, "{room}");
-    }
-    out
+    )
 }
 
 fn write_cdda_tracks(package: &PlaytestPackage, cdda_tracks_dir: &Path) -> std::io::Result<String> {
@@ -2606,27 +1856,10 @@ fn write_cdda_tracks(package: &PlaytestPackage, cdda_tracks_dir: &Path) -> std::
     Ok(out)
 }
 
-fn world_pack_chunks(package: &PlaytestPackage) -> Vec<(u32, Vec<u8>)> {
-    let mut chunks: Vec<(u32, Vec<u8>)> = Vec::new();
-    for room in world_pack_order(package) {
-        let payload =
-            streamed_room_chunk_payload(package, room).expect("valid streamed room chunk payload");
-        chunks.push((room as u32, payload));
-    }
-    chunks
-}
-
-fn world_pack_toc(package: &PlaytestPackage) -> Vec<psx_iso::WorldPackBuildEntry> {
-    world_pack_layout(package).entries
-}
-
-fn world_pack_layout(package: &PlaytestPackage) -> psx_iso::WorldPackLayout {
-    let chunks = world_pack_chunks(package);
-    let refs = chunks
-        .iter()
-        .map(|(room, bytes)| (*room, bytes.as_slice()))
-        .collect::<Vec<_>>();
-    psx_iso::build_world_pack_layout(&refs)
+/// WORLD.PAK is header-only: no world content streams off it, but the pack
+/// stays on the disc so UI.PAK's start LBA and the loader contract are stable.
+fn world_pack_layout(_package: &PlaytestPackage) -> psx_iso::WorldPackLayout {
+    psx_iso::build_world_pack_layout(&[])
 }
 
 /// Streamed assets in pack order, paired with their asset index (used
@@ -2708,935 +1941,9 @@ fn render_ui_pack_order(package: &PlaytestPackage) -> String {
     out
 }
 
-fn streamed_room_chunk_filename(room: u16) -> String {
-    format!("room_{room:03}.psxc")
-}
-
-pub fn streamed_room_chunk_memory_report(
-    package: &PlaytestPackage,
-) -> Result<PlaytestStreamMemoryReport, String> {
-    let mut report = PlaytestStreamMemoryReport::default();
-    let room_count = package.rooms.len().min(u16::MAX as usize + 1);
-    for room in 0..room_count {
-        if package.rooms[room].world_asset_index.is_none() {
-            continue;
-        }
-        let memory = streamed_room_chunk_memory(package, room as u16)?;
-        report.totals.sector_count += memory.sector_count;
-        report.totals.payload_bytes += memory.payload_bytes;
-        report.totals.stream_bytes += memory.stream_bytes;
-        report.totals.header_bytes += memory.header_bytes;
-        report.totals.collision_bytes += memory.collision_bytes;
-        report.totals.render_cell_bytes += memory.render_cell_bytes;
-        report.totals.render_cell_vertex_bytes += memory.render_cell_vertex_bytes;
-        report.totals.render_vertex_bytes += memory.render_vertex_bytes;
-        report.totals.render_surface_bytes += memory.render_surface_bytes;
-        report.totals.render_cache_bytes += memory.render_cache_bytes;
-        report.totals.alignment_padding_bytes += memory.alignment_padding_bytes;
-        report.totals.sector_padding_bytes += memory.sector_padding_bytes;
-        if report
-            .largest_chunk
-            .map(|largest| memory.stream_bytes > largest.stream_bytes)
-            .unwrap_or(true)
-        {
-            report.largest_chunk = Some(memory);
-        }
-        report.chunks.push(memory);
-    }
-    Ok(report)
-}
-
-fn streamed_room_chunk_memory(
-    package: &PlaytestPackage,
-    room: u16,
-) -> Result<PlaytestStreamChunkMemory, String> {
-    let layout = streamed_room_chunk_layout(package, room)?;
-    let payload = streamed_room_chunk_payload(package, room)?;
-    let payload_bytes = payload.len();
-    let sector_size = psx_iso::SECTOR_USER_DATA_BYTES;
-    let sector_count = payload_bytes.saturating_add(sector_size - 1) / sector_size;
-    let stream_bytes = sector_count.saturating_mul(sector_size);
-    let render_cell_bytes =
-        layout.cell_count * std::mem::size_of::<psx_level::LevelCachedRoomCellRecord>();
-    let render_vertex_bytes =
-        layout.vertex_count * std::mem::size_of::<psx_level::LevelCachedRoomVertexRecord>();
-    let render_cell_vertex_bytes = layout.cell_vertex_count * std::mem::size_of::<u16>();
-    let render_surface_bytes =
-        layout.surface_count * std::mem::size_of::<psx_level::LevelCachedRoomSurfaceRecord>();
-    let render_cache_bytes =
-        render_cell_bytes + render_cell_vertex_bytes + render_vertex_bytes + render_surface_bytes;
-    let accounted_bytes = psx_level::STREAMED_ROOM_CHUNK_HEADER_BYTES
-        + layout.collision_payload.len()
-        + render_cache_bytes;
-    let alignment_padding_bytes = payload_bytes.saturating_sub(accounted_bytes);
-    Ok(PlaytestStreamChunkMemory {
-        room,
-        sector_count,
-        payload_bytes,
-        stream_bytes,
-        header_bytes: psx_level::STREAMED_ROOM_CHUNK_HEADER_BYTES,
-        collision_bytes: layout.collision_payload.len(),
-        render_cell_bytes,
-        render_cell_vertex_bytes,
-        render_vertex_bytes,
-        render_surface_bytes,
-        render_cache_bytes,
-        alignment_padding_bytes,
-        sector_padding_bytes: stream_bytes.saturating_sub(payload_bytes),
-    })
-}
-
-#[derive(Clone)]
-struct StreamedRoomChunkLayout<'a> {
-    collision_payload: Vec<u8>,
-    collision_flags: u32,
-    cell_slice: &'a [PlaytestCachedRoomCell],
-    cell_vertex_slice: &'a [u16],
-    include_cell_vertices: bool,
-    vertex_slice: &'a [PlaytestCachedRoomVertex],
-    surface_slice: &'a [PlaytestCachedRoomSurface],
-    cell_count: usize,
-    cell_vertex_count: usize,
-    vertex_count: usize,
-    surface_count: usize,
-}
-
-fn streamed_room_chunk_layout(
-    package: &PlaytestPackage,
-    room: u16,
-) -> Result<StreamedRoomChunkLayout<'_>, String> {
-    let room_record = package
-        .rooms
-        .get(room as usize)
-        .ok_or_else(|| format!("missing room record {room}"))?;
-    let world_asset_index = room_record
-        .world_asset_index
-        .ok_or_else(|| format!("room {room} is resident PXBSP and has no streamed PSXW chunk"))?;
-    let asset = package
-        .assets
-        .get(world_asset_index)
-        .ok_or_else(|| format!("room {room} references missing world asset"))?;
-    if asset.kind != PlaytestAssetKind::RoomWorld {
-        return Err(format!(
-            "room {room} world asset '{}' is not a collision room payload",
-            asset.source_label
-        ));
-    }
-
-    let cache = package
-        .room_surface_caches
-        .iter()
-        .find(|cache| cache.room == room)
-        .copied();
-    let cell_slice = cache
-        .and_then(|cache| {
-            checked_slice(
-                &package.room_cache_cells,
-                cache.cell_first as usize,
-                cache.cell_count as usize,
-            )
-        })
-        .unwrap_or(&[]);
-    let vertex_slice = cache
-        .and_then(|cache| {
-            checked_slice(
-                &package.room_cache_vertices,
-                cache.vertex_first as usize,
-                cache.vertex_count as usize,
-            )
-        })
-        .unwrap_or(&[]);
-    let cell_vertex_slice = cache
-        .and_then(|cache| {
-            checked_slice(
-                &package.room_cache_cell_vertices,
-                cache.cell_vertex_first as usize,
-                cache.cell_vertex_count as usize,
-            )
-        })
-        .unwrap_or(&[]);
-    let surface_slice = cache
-        .and_then(|cache| {
-            checked_slice(
-                &package.room_cache_surfaces,
-                cache.surface_first as usize,
-                cache.surface_count as usize,
-            )
-        })
-        .unwrap_or(&[]);
-
-    let collision_payload =
-        compact_collision_payload(&asset.bytes, room, &package.room_floor_links)?;
-    let include_cell_vertices = !cell_vertex_slice.is_empty()
-        && streamed_room_chunk_payload_len(
-            collision_payload.len(),
-            cell_slice.len(),
-            cell_vertex_slice.len(),
-            vertex_slice.len(),
-            surface_slice.len(),
-        ) <= STREAMED_ROOM_SLOT_BYTES;
-    let cell_vertex_slice = if include_cell_vertices {
-        cell_vertex_slice
-    } else {
-        &[]
-    };
-
-    Ok(StreamedRoomChunkLayout {
-        collision_payload,
-        collision_flags: psx_level::STREAMED_ROOM_CHUNK_FLAG_COLLISION_COMPACT,
-        cell_slice,
-        cell_vertex_slice,
-        include_cell_vertices,
-        vertex_slice,
-        surface_slice,
-        cell_count: cell_slice.len(),
-        cell_vertex_count: cell_vertex_slice.len(),
-        vertex_count: vertex_slice.len(),
-        surface_count: surface_slice.len(),
-    })
-}
-
-fn streamed_room_chunk_payload(package: &PlaytestPackage, room: u16) -> Result<Vec<u8>, String> {
-    let layout = streamed_room_chunk_layout(package, room)?;
-    let cell_slice = layout.cell_slice;
-    let cell_vertex_slice = layout.cell_vertex_slice;
-    let vertex_slice = layout.vertex_slice;
-    let surface_slice = layout.surface_slice;
-
-    let mut out = vec![0u8; psx_level::STREAMED_ROOM_CHUNK_HEADER_BYTES];
-    align_vec(&mut out, 4);
-    let collision_offset = out.len();
-    out.extend_from_slice(&layout.collision_payload);
-    align_vec(&mut out, 4);
-    let cells_offset = out.len();
-    append_cached_room_cells(&mut out, cell_slice, layout.include_cell_vertices);
-    align_vec(&mut out, 2);
-    let cell_vertices_offset = out.len();
-    append_cached_room_cell_vertices(&mut out, cell_vertex_slice);
-    align_vec(&mut out, 4);
-    let vertices_offset = out.len();
-    append_cached_room_vertices(&mut out, vertex_slice);
-    align_vec(&mut out, 4);
-    let surfaces_offset = out.len();
-    append_cached_room_surfaces(&mut out, surface_slice);
-    align_vec(&mut out, 4);
-
-    out[..8].copy_from_slice(&psx_level::STREAMED_ROOM_CHUNK_MAGIC);
-    write_u32_le(
-        &mut out,
-        psx_level::streamed_room_chunk_header::VERSION,
-        psx_level::STREAMED_ROOM_CHUNK_VERSION,
-    )?;
-    write_u32_le(
-        &mut out,
-        psx_level::streamed_room_chunk_header::ROOM,
-        u32::from(room),
-    )?;
-    let total_len = out.len();
-    write_u32_le(
-        &mut out,
-        psx_level::streamed_room_chunk_header::TOTAL_BYTES,
-        checked_u32(total_len, "streamed room chunk size")?,
-    )?;
-    write_u32_le(
-        &mut out,
-        psx_level::streamed_room_chunk_header::COLLISION_OFFSET,
-        checked_u32(collision_offset, "streamed room collision offset")?,
-    )?;
-    write_u32_le(
-        &mut out,
-        psx_level::streamed_room_chunk_header::COLLISION_BYTES,
-        checked_u32(
-            layout.collision_payload.len(),
-            "streamed room collision byte count",
-        )?,
-    )?;
-    write_u32_le(
-        &mut out,
-        psx_level::streamed_room_chunk_header::CELLS_OFFSET,
-        checked_u32(cells_offset, "streamed room cells offset")?,
-    )?;
-    write_u32_le(
-        &mut out,
-        psx_level::streamed_room_chunk_header::CELL_COUNT,
-        checked_u32(cell_slice.len(), "streamed room cell count")?,
-    )?;
-    write_u32_le(
-        &mut out,
-        psx_level::streamed_room_chunk_header::VERTICES_OFFSET,
-        checked_u32(vertices_offset, "streamed room vertices offset")?,
-    )?;
-    write_u32_le(
-        &mut out,
-        psx_level::streamed_room_chunk_header::VERTEX_COUNT,
-        checked_u32(vertex_slice.len(), "streamed room vertex count")?,
-    )?;
-    write_u32_le(
-        &mut out,
-        psx_level::streamed_room_chunk_header::SURFACES_OFFSET,
-        checked_u32(surfaces_offset, "streamed room surfaces offset")?,
-    )?;
-    write_u32_le(
-        &mut out,
-        psx_level::streamed_room_chunk_header::SURFACE_COUNT,
-        checked_u32(surface_slice.len(), "streamed room surface count")?,
-    )?;
-    write_u32_le(
-        &mut out,
-        psx_level::streamed_room_chunk_header::CELL_VERTICES_OFFSET,
-        checked_u32(
-            cell_vertices_offset,
-            "streamed room cell vertex indices offset",
-        )?,
-    )?;
-    write_u32_le(
-        &mut out,
-        psx_level::streamed_room_chunk_header::CELL_VERTEX_COUNT,
-        checked_u32(
-            cell_vertex_slice.len(),
-            "streamed room cell vertex index count",
-        )?,
-    )?;
-    write_u32_le(
-        &mut out,
-        psx_level::streamed_room_chunk_header::FLAGS,
-        layout.collision_flags,
-    )?;
-    Ok(out)
-}
-
-fn streamed_room_chunk_payload_len(
-    collision_bytes: usize,
-    cell_count: usize,
-    cell_vertex_count: usize,
-    vertex_count: usize,
-    surface_count: usize,
-) -> usize {
-    let mut len = psx_level::STREAMED_ROOM_CHUNK_HEADER_BYTES;
-    len = align_usize(len, 4);
-    len = len.saturating_add(collision_bytes);
-    len = align_usize(len, 4);
-    len = len.saturating_add(
-        cell_count.saturating_mul(std::mem::size_of::<psx_level::LevelCachedRoomCellRecord>()),
-    );
-    len = align_usize(len, 2);
-    len = len.saturating_add(cell_vertex_count.saturating_mul(std::mem::size_of::<u16>()));
-    len = align_usize(len, 4);
-    len = len.saturating_add(
-        vertex_count.saturating_mul(std::mem::size_of::<psx_level::LevelCachedRoomVertexRecord>()),
-    );
-    len = align_usize(len, 4);
-    len = len.saturating_add(
-        surface_count
-            .saturating_mul(std::mem::size_of::<psx_level::LevelCachedRoomSurfaceRecord>()),
-    );
-    align_usize(len, 4)
-}
-
-fn align_usize(value: usize, align: usize) -> usize {
-    if align <= 1 {
-        return value;
-    }
-    let rem = value % align;
-    if rem == 0 {
-        value
-    } else {
-        value.saturating_add(align - rem)
-    }
-}
-
-fn compact_collision_payload(
-    bytes: &[u8],
-    room_index: u16,
-    floor_links: &[PlaytestRoomFloorLink],
-) -> Result<Vec<u8>, String> {
-    let room = psx_engine::RuntimeRoom::from_bytes(bytes)
-        .map_err(|e| format!("room collision source did not parse: {e:?}"))?;
-    let width = room.width();
-    let depth = room.depth();
-    let sector_count = width
-        .checked_mul(depth)
-        .ok_or_else(|| "room collision sector count overflowed u16".to_string())?;
-    let wall_count = room.world().wall_count();
-    let mut sectors =
-        Vec::with_capacity(sector_count as usize * psx_level::COMPACT_COLLISION_SECTOR_BYTES);
-    let mut height_overrides = Vec::new();
-
-    let render = room.render();
-    let collision = room.collision();
-    let mut sx = 0u16;
-    while sx < width {
-        let mut sz = 0u16;
-        while sz < depth {
-            let render_sector = render.sector(sx, sz);
-            let collision_sector = collision.sector(sx, sz);
-            append_compact_collision_sector(
-                &mut sectors,
-                &mut height_overrides,
-                sx,
-                sz,
-                depth,
-                render_sector,
-                collision_sector,
-                compact_floor_link_targets(floor_links, room_index, sx, sz),
-            )?;
-            sz += 1;
-        }
-        sx += 1;
-    }
-
-    let mut walls =
-        Vec::with_capacity(wall_count as usize * psx_level::COMPACT_COLLISION_WALL_BYTES);
-    let mut wall_index = 0u16;
-    while wall_index < wall_count {
-        let wall = room
-            .world()
-            .wall(wall_index)
-            .ok_or_else(|| format!("room collision wall {wall_index} missing"))?;
-        append_compact_collision_wall(&mut walls, wall);
-        wall_index += 1;
-    }
-
-    let override_count =
-        height_overrides.len() / psx_level::COMPACT_COLLISION_HEIGHT_OVERRIDE_BYTES;
-    if override_count > u16::MAX as usize {
-        return Err("room collision height override count overflowed u16".to_string());
-    }
-
-    let mut out = vec![0u8; psx_level::COMPACT_COLLISION_HEADER_BYTES];
-    out[..8].copy_from_slice(&psx_level::COMPACT_COLLISION_MAGIC);
-    write_u32_le(
-        &mut out,
-        psx_level::compact_collision_header::VERSION,
-        psx_level::COMPACT_COLLISION_VERSION,
-    )?;
-    write_u16_le(&mut out, psx_level::compact_collision_header::WIDTH, width)?;
-    write_u16_le(&mut out, psx_level::compact_collision_header::DEPTH, depth)?;
-    write_i32_le(
-        &mut out,
-        psx_level::compact_collision_header::SECTOR_SIZE,
-        room.sector_size(),
-    )?;
-    write_u16_le(
-        &mut out,
-        psx_level::compact_collision_header::SECTOR_COUNT,
-        sector_count,
-    )?;
-    write_u16_le(
-        &mut out,
-        psx_level::compact_collision_header::WALL_COUNT,
-        wall_count,
-    )?;
-    write_u16_le(
-        &mut out,
-        psx_level::compact_collision_header::HEIGHT_OVERRIDE_COUNT,
-        override_count as u16,
-    )?;
-    out[psx_level::compact_collision_header::AMBIENT_RGB
-        ..psx_level::compact_collision_header::AMBIENT_RGB + 3]
-        .copy_from_slice(&room.render().ambient_color());
-    out.extend_from_slice(&sectors);
-    out.extend_from_slice(&walls);
-    out.extend_from_slice(&height_overrides);
-    Ok(out)
-}
-
-fn append_compact_collision_sector(
-    out: &mut Vec<u8>,
-    height_overrides: &mut Vec<u8>,
-    sx: u16,
-    sz: u16,
-    depth: u16,
-    render_sector: Option<psx_engine::SectorRender>,
-    collision_sector: Option<psx_engine::SectorCollision>,
-    floor_links: (Option<u16>, Option<u16>),
-) -> Result<(), String> {
-    let mut flags = 0u8;
-    let mut floor_triangle_flags = 0u8;
-    let mut ceiling_triangle_flags = 0u8;
-    let floor_split = render_sector
-        .map(|sector| sector.floor_split())
-        .unwrap_or(0);
-    let ceiling_split = render_sector
-        .map(|sector| sector.ceiling_split())
-        .unwrap_or(0);
-    let floor_heights = render_sector
-        .map(|sector| sector.floor_heights())
-        .unwrap_or([0; 4]);
-    let ceiling_heights = render_sector
-        .map(|sector| sector.ceiling_heights())
-        .unwrap_or([0; 4]);
-    let first_wall = render_sector.map(|sector| sector.first_wall()).unwrap_or(0);
-    let wall_count = render_sector.map(|sector| sector.wall_count()).unwrap_or(0);
-
-    if let Some(render_sector) = render_sector {
-        if render_sector.has_floor() {
-            flags |= psx_level::compact_collision_sector_flags::HAS_FLOOR;
-        }
-        if render_sector.has_ceiling() {
-            flags |= psx_level::compact_collision_sector_flags::HAS_CEILING;
-        }
-        floor_triangle_flags = compact_floor_triangle_flags(render_sector, collision_sector);
-        ceiling_triangle_flags = compact_ceiling_triangle_flags(render_sector);
-        if collision_sector
-            .map(|sector| sector.floor_walkable())
-            .unwrap_or(false)
-        {
-            flags |= psx_level::compact_collision_sector_flags::FLOOR_WALKABLE;
-        }
-        append_height_override_if_needed(
-            height_overrides,
-            sx,
-            sz,
-            depth,
-            psx_level::compact_collision_surface::FLOOR,
-            floor_split,
-            floor_heights,
-            [
-                render_sector.floor_triangle_heights(0),
-                render_sector.floor_triangle_heights(1),
-            ],
-            floor_triangle_flags,
-        )?;
-        append_height_override_if_needed(
-            height_overrides,
-            sx,
-            sz,
-            depth,
-            psx_level::compact_collision_surface::CEILING,
-            ceiling_split,
-            ceiling_heights,
-            [
-                render_sector.ceiling_triangle_heights(0),
-                render_sector.ceiling_triangle_heights(1),
-            ],
-            ceiling_triangle_flags,
-        )?;
-    }
-    if floor_links.0.is_some() {
-        flags |= psx_level::compact_collision_sector_flags::HAS_FLOOR_ABOVE;
-    }
-    if floor_links.1.is_some() {
-        flags |= psx_level::compact_collision_sector_flags::HAS_FLOOR_BELOW;
-    }
-
-    out.push(flags);
-    out.push(floor_split);
-    out.push(ceiling_split);
-    out.push(floor_triangle_flags);
-    out.push(ceiling_triangle_flags);
-    out.push(0);
-    append_u16_le(out, first_wall);
-    append_u16_le(out, wall_count);
-    append_u16_le(out, 0);
-    for value in floor_heights {
-        append_i32_le(out, value);
-    }
-    for value in ceiling_heights {
-        append_i32_le(out, value);
-    }
-    append_u16_le(
-        out,
-        floor_links
-            .0
-            .unwrap_or(psx_level::COMPACT_COLLISION_NO_ROOM),
-    );
-    append_u16_le(
-        out,
-        floor_links
-            .1
-            .unwrap_or(psx_level::COMPACT_COLLISION_NO_ROOM),
-    );
-    Ok(())
-}
-
-fn compact_floor_link_targets(
-    floor_links: &[PlaytestRoomFloorLink],
-    room: u16,
-    x: u16,
-    z: u16,
-) -> (Option<u16>, Option<u16>) {
-    floor_links
-        .iter()
-        .find(|link| link.room == room && link.x == x && link.z == z)
-        .map(|link| (link.above_room, link.below_room))
-        .unwrap_or((None, None))
-}
-
-fn compact_floor_triangle_flags(
-    render: psx_engine::SectorRender,
-    collision: Option<psx_engine::SectorCollision>,
-) -> u8 {
-    let mut flags = 0u8;
-    for index in 0..2 {
-        if render.floor_triangle_present(index) {
-            flags |= compact_triangle_present_bit(index);
-        }
-        if collision
-            .map(|sector| sector.floor_triangle_walkable(index))
-            .unwrap_or(false)
-        {
-            flags |= compact_triangle_walkable_bit(index);
-        }
-    }
-    flags
-}
-
-fn compact_ceiling_triangle_flags(render: psx_engine::SectorRender) -> u8 {
-    let mut flags = 0u8;
-    for index in 0..2 {
-        if render.ceiling_triangle_present(index) {
-            flags |= compact_triangle_present_bit(index);
-        }
-    }
-    flags
-}
-
-fn compact_triangle_present_bit(index: usize) -> u8 {
-    if index == 0 {
-        psx_level::compact_collision_triangle_flags::TRI_A_PRESENT
-    } else {
-        psx_level::compact_collision_triangle_flags::TRI_B_PRESENT
-    }
-}
-
-fn compact_triangle_walkable_bit(index: usize) -> u8 {
-    if index == 0 {
-        psx_level::compact_collision_triangle_flags::TRI_A_WALKABLE
-    } else {
-        psx_level::compact_collision_triangle_flags::TRI_B_WALKABLE
-    }
-}
-
-fn append_height_override_if_needed(
-    out: &mut Vec<u8>,
-    sx: u16,
-    sz: u16,
-    depth: u16,
-    surface: u8,
-    split: u8,
-    heights: [i32; 4],
-    triangle_heights: [[i32; 3]; 2],
-    triangle_flags: u8,
-) -> Result<(), String> {
-    if triangle_flags == 0 {
-        return Ok(());
-    }
-    let derived = [
-        compact_horizontal_triangle_heights(heights, split, 0),
-        compact_horizontal_triangle_heights(heights, split, 1),
-    ];
-    if triangle_heights == derived {
-        return Ok(());
-    }
-    let sector_index = sx
-        .checked_mul(depth)
-        .and_then(|base| base.checked_add(sz))
-        .ok_or_else(|| "compact collision override sector index overflowed".to_string())?;
-    append_u16_le(out, sector_index);
-    out.push(surface);
-    out.push(0);
-    for value in triangle_heights[0] {
-        append_i32_le(out, value);
-    }
-    for value in triangle_heights[1] {
-        append_i32_le(out, value);
-    }
-    Ok(())
-}
-
-fn compact_horizontal_triangle_heights(heights: [i32; 4], split: u8, index: usize) -> [i32; 3] {
-    let corners = psxed_format::world::topology::split_triangle(split, index);
-    [
-        heights[corners[0]],
-        heights[corners[1]],
-        heights[corners[2]],
-    ]
-}
-
-fn append_compact_collision_wall(out: &mut Vec<u8>, wall: psx_asset::WorldWall) {
-    out.push(wall.direction());
-    out.push(if wall.is_solid() {
-        psx_level::compact_collision_wall_flags::SOLID
-    } else {
-        0
-    });
-    append_u16_le(out, wall.shape());
-    for value in wall.heights() {
-        append_i32_le(out, value);
-    }
-}
-
-fn checked_slice<T>(items: &[T], first: usize, count: usize) -> Option<&[T]> {
-    let end = first.checked_add(count)?;
-    items.get(first..end)
-}
-
-fn align_vec(out: &mut Vec<u8>, align: usize) {
-    let padding = (align - (out.len() % align)) % align;
-    out.resize(out.len() + padding, 0);
-}
-
-fn write_u32_le(out: &mut [u8], offset: usize, value: u32) -> Result<(), String> {
-    let dst = out
-        .get_mut(offset..offset + 4)
-        .ok_or_else(|| format!("streamed chunk header write out of bounds at {offset}"))?;
-    dst.copy_from_slice(&value.to_le_bytes());
-    Ok(())
-}
-
-fn write_u16_le(out: &mut [u8], offset: usize, value: u16) -> Result<(), String> {
-    let dst = out
-        .get_mut(offset..offset + 2)
-        .ok_or_else(|| format!("streamed chunk header write out of bounds at {offset}"))?;
-    dst.copy_from_slice(&value.to_le_bytes());
-    Ok(())
-}
-
-fn write_i32_le(out: &mut [u8], offset: usize, value: i32) -> Result<(), String> {
-    let dst = out
-        .get_mut(offset..offset + 4)
-        .ok_or_else(|| format!("streamed chunk header write out of bounds at {offset}"))?;
-    dst.copy_from_slice(&value.to_le_bytes());
-    Ok(())
-}
-
-fn append_u16_le(out: &mut Vec<u8>, value: u16) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
-fn append_i32_le(out: &mut Vec<u8>, value: i32) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
-fn append_cached_room_cells(
-    out: &mut Vec<u8>,
-    cells: &[PlaytestCachedRoomCell],
-    include_cell_vertices: bool,
-) {
-    debug_assert_eq!(
-        std::mem::size_of::<psx_level::LevelCachedRoomCellRecord>(),
-        36
-    );
-    for cell in cells {
-        append_u16_le(out, cell.x);
-        append_u16_le(out, cell.z);
-        append_i32_le(out, cell.min_y);
-        append_i32_le(out, cell.max_y);
-        for value in cell.visibility_center {
-            append_i32_le(out, value);
-        }
-        append_i32_le(out, cell.visibility_radius);
-        append_u16_le(out, cell.surface_first);
-        append_u16_le(out, cell.surface_count);
-        if include_cell_vertices {
-            append_u16_le(out, cell.vertex_first);
-            append_u16_le(out, cell.vertex_count);
-        } else {
-            append_u16_le(out, 0);
-            append_u16_le(out, 0);
-        }
-    }
-}
-
-fn append_cached_room_vertices(out: &mut Vec<u8>, vertices: &[PlaytestCachedRoomVertex]) {
-    debug_assert_eq!(
-        std::mem::size_of::<psx_level::LevelCachedRoomVertexRecord>(),
-        12
-    );
-    for vertex in vertices {
-        append_i32_le(out, vertex.x);
-        append_i32_le(out, vertex.y);
-        append_i32_le(out, vertex.z);
-    }
-}
-
-fn append_cached_room_cell_vertices(out: &mut Vec<u8>, vertices: &[u16]) {
-    for vertex in vertices {
-        append_u16_le(out, *vertex);
-    }
-}
-
-fn append_cached_room_surfaces(out: &mut Vec<u8>, surfaces: &[PlaytestCachedRoomSurface]) {
-    debug_assert_eq!(
-        std::mem::size_of::<psx_level::LevelCachedRoomSurfaceRecord>(),
-        40
-    );
-    for surface in surfaces {
-        append_u16_le(out, surface.material_slot);
-        for index in surface.vertex_indices {
-            append_u16_le(out, index);
-        }
-        append_u16_le(out, surface.sample_sx);
-        append_u16_le(out, surface.sample_sz);
-        append_u16_le(out, surface.sample_ordinal);
-        for uv_word in surface.uv_words {
-            append_u16_le(out, uv_word);
-        }
-        for (r, g, b) in surface.baked_vertex_rgb {
-            out.push(r);
-            out.push(g);
-            out.push(b);
-        }
-        out.push(surface.kind_flags);
-        out.push(surface.wall_direction);
-        out.push(surface.split);
-        out.push(surface.triangle_index);
-    }
-}
-
-fn world_pack_order(package: &PlaytestPackage) -> Vec<u16> {
-    let mut order = world_pack_order_from_chunks(
-        package.rooms.len(),
-        package.spawn.map(|spawn| spawn.room),
-        &package.chunks,
-    );
-    order.retain(|room| {
-        package
-            .rooms
-            .get(*room as usize)
-            .is_some_and(|room| room.world_asset_index.is_some())
-    });
-    order
-}
-
-fn world_pack_order_from_chunks(
-    room_count: usize,
-    spawn_room: Option<u16>,
-    chunks: &[PlaytestChunk],
-) -> Vec<u16> {
-    let room_count = room_count.min(u16::MAX as usize + 1);
-    let mut order = Vec::with_capacity(room_count);
-    if room_count == 0 {
-        return order;
-    }
-
-    let mut visited = vec![false; room_count];
-    let mut current = spawn_room
-        .filter(|room| (*room as usize) < room_count)
-        .unwrap_or(0);
-
-    loop {
-        append_world_pack_component(current, chunks, &mut visited, &mut order);
-        if order.len() >= room_count {
-            break;
-        }
-        let Some(next) = nearest_unvisited_pack_room(current, room_count, chunks, &visited) else {
-            break;
-        };
-        current = next;
-    }
-
-    let mut room = 0usize;
-    while room < room_count {
-        if !visited[room] {
-            visited[room] = true;
-            order.push(room as u16);
-        }
-        room += 1;
-    }
-    order
-}
-
-fn append_world_pack_component(
-    start_room: u16,
-    chunks: &[PlaytestChunk],
-    visited: &mut [bool],
-    order: &mut Vec<u16>,
-) {
-    let start = start_room as usize;
-    if start >= visited.len() || visited[start] {
-        return;
-    }
-
-    let mut queue = Vec::new();
-    queue.push(start_room);
-    visited[start] = true;
-    let mut head = 0usize;
-    while head < queue.len() {
-        let room = queue[head];
-        head += 1;
-        order.push(room);
-
-        let Some(chunk) = chunk_for_pack_room(chunks, room) else {
-            continue;
-        };
-        let mut neighbours = [(u8::MAX, u16::MAX); 4];
-        let mut neighbour_count = 0usize;
-        for (direction, neighbour) in chunk.neighbours.iter().enumerate() {
-            let Some(neighbour) = *neighbour else {
-                continue;
-            };
-            if neighbour as usize >= visited.len() || visited[neighbour as usize] {
-                continue;
-            }
-            let same_authored = chunk_for_pack_room(chunks, neighbour)
-                .is_some_and(|other| other.authored_room == chunk.authored_room);
-            let tier = if same_authored { 0 } else { 1 };
-            neighbours[neighbour_count] = (tier * 4 + direction as u8, neighbour);
-            neighbour_count += 1;
-        }
-        neighbours[..neighbour_count].sort_by_key(|(score, room)| (*score, *room));
-        let mut i = 0usize;
-        while i < neighbour_count {
-            let neighbour = neighbours[i].1;
-            if (neighbour as usize) < visited.len() && !visited[neighbour as usize] {
-                visited[neighbour as usize] = true;
-                queue.push(neighbour);
-            }
-            i += 1;
-        }
-    }
-}
-
-fn nearest_unvisited_pack_room(
-    anchor_room: u16,
-    room_count: usize,
-    chunks: &[PlaytestChunk],
-    visited: &[bool],
-) -> Option<u16> {
-    let (anchor_x, anchor_z) = pack_room_center(chunks, anchor_room);
-    let mut best_room = None;
-    let mut best_distance = i128::MAX;
-    let mut room = 0usize;
-    while room < room_count {
-        if visited.get(room).copied().unwrap_or(true) {
-            room += 1;
-            continue;
-        }
-        let (x, z) = pack_room_center(chunks, room as u16);
-        let dx = x as i128 - anchor_x as i128;
-        let dz = z as i128 - anchor_z as i128;
-        let distance = dx.saturating_mul(dx).saturating_add(dz.saturating_mul(dz));
-        if best_room.is_none() || distance < best_distance {
-            best_room = Some(room as u16);
-            best_distance = distance;
-        }
-        room += 1;
-    }
-    best_room
-}
-
-fn pack_room_center(chunks: &[PlaytestChunk], room: u16) -> (i64, i64) {
-    chunk_for_pack_room(chunks, room)
-        .map(|chunk| {
-            (
-                chunk.origin_x as i64 * 2 + chunk.width as i64,
-                chunk.origin_z as i64 * 2 + chunk.depth as i64,
-            )
-        })
-        .unwrap_or((room as i64 * 2, 0))
-}
-
-fn chunk_for_pack_room(chunks: &[PlaytestChunk], room: u16) -> Option<&PlaytestChunk> {
-    chunks.iter().find(|chunk| chunk.room == room)
-}
-
 fn asset_vram_bytes(asset: &PlaytestAsset) -> usize {
     match asset.kind {
-        PlaytestAssetKind::RoomWorld
-        | PlaytestAssetKind::ModelMesh
-        | PlaytestAssetKind::ModelAnimation => 0,
+        PlaytestAssetKind::ModelMesh | PlaytestAssetKind::ModelAnimation => 0,
         PlaytestAssetKind::Texture => texture_vram_bytes(asset).unwrap_or(asset.bytes.len()),
     }
 }
@@ -3644,12 +1951,6 @@ fn asset_vram_bytes(asset: &PlaytestAsset) -> usize {
 fn texture_vram_bytes(asset: &PlaytestAsset) -> Option<usize> {
     let texture = psx_asset::Texture::from_bytes(&asset.bytes).ok()?;
     Some(texture.pixel_bytes().len() + texture.clut_bytes().len())
-}
-
-fn room_index_or_none(index: Option<u16>) -> String {
-    index
-        .map(|index| format!("RoomIndex({index})"))
-        .unwrap_or_else(|| "LevelChunkNeighbours::NONE".to_string())
 }
 
 fn render_weapon_hit_shape(shape: PlaytestWeaponHitShape) -> String {
@@ -4084,34 +2385,6 @@ fn reflection_material_flags(reflection: Option<crate::ReflectionProbeMaterial>)
     flags
 }
 
-fn level_material_animation_literal(animation: crate::MaterialAnimation) -> String {
-    match animation.mode {
-        crate::MaterialAnimationMode::Static => "LevelMaterialAnimation::Static".to_string(),
-        crate::MaterialAnimationMode::UvScroll => {
-            let motion = animation.uv_scroll;
-            format!(
-                "LevelMaterialAnimation::UvScroll(LevelMaterialUvMotion {{ enabled: true, speed_u_q8: {}, speed_v_q8: {}, phase_u: {}, phase_v: {} }})",
-                motion.speed_u_q8, motion.speed_v_q8, motion.phase_u, motion.phase_v,
-            )
-        }
-        crate::MaterialAnimationMode::Flipbook => {
-            let flipbook = animation.flipbook.normalized();
-            format!(
-                "LevelMaterialAnimation::Flipbook(LevelMaterialFlipbook {{ columns: {}, rows: {}, frame_count: {}, ticks_per_frame: {}, phase: {} }})",
-                flipbook.columns,
-                flipbook.rows,
-                flipbook.frame_count,
-                flipbook.ticks_per_frame,
-                flipbook.phase,
-            )
-        }
-        // The retained grid renderer does not yet carry dynamic material-light
-        // multipliers. Brush worlds encode this recipe directly in PXBSP;
-        // legacy grid rooms retain their static authored tint.
-        crate::MaterialAnimationMode::LightPulse => "LevelMaterialAnimation::Static".to_string(),
-    }
-}
-
 /// Numeric `psx_level::model_override_blend` code for an authored
 /// blend mode.
 pub(crate) const fn model_override_blend_code(blend_mode: crate::PsxBlendMode) -> u8 {
@@ -4236,238 +2509,6 @@ pub fn write_cook_result(
         write_package(package, generated_dir)?;
     }
     Ok(())
-}
-
-fn room_required_assets(
-    package: &PlaytestPackage,
-    room_index: usize,
-    room: &PlaytestRoom,
-) -> (Vec<usize>, Vec<usize>) {
-    let first = room.material_first as usize;
-    let count = room.material_count as usize;
-    let mut required_vram: Vec<usize> = Vec::with_capacity(count);
-    for material in &package.materials[first..first + count] {
-        push_unique(&mut required_vram, material.texture_asset_index);
-    }
-    for asset_index in room.far_vista.texture_asset_indices.iter().flatten() {
-        push_unique(&mut required_vram, *asset_index);
-    }
-    if let Some(asset_index) = room.sky.texture_asset_index {
-        push_unique(&mut required_vram, asset_index);
-    }
-    if let Some(asset_index) = room.reflection_probe_asset_index {
-        push_unique(&mut required_vram, asset_index);
-    }
-    if room_index == 0 {
-        if let PlaytestWorldGeometry::Pxbsp(world) = &package.world_geometry {
-            for &asset_index in &world.texture_asset_indices {
-                push_unique(&mut required_vram, asset_index);
-            }
-        }
-    }
-    for prop in &package.image_props {
-        if prop.room == room_index as u16 {
-            push_unique(&mut required_vram, prop.texture_asset_index);
-        }
-    }
-    for prop in &package.box_props {
-        if prop.room == room_index as u16 {
-            for asset_index in prop.texture_asset_indices.iter().flatten() {
-                push_unique(&mut required_vram, *asset_index);
-            }
-        }
-    }
-    for prop in &package.cylinder_props {
-        if prop.room == room_index as u16 {
-            for asset_index in prop.texture_asset_indices.iter().flatten() {
-                push_unique(&mut required_vram, *asset_index);
-            }
-        }
-    }
-    for prop in &package.arch_props {
-        if prop.room == room_index as u16 {
-            for asset_index in prop.texture_asset_indices.iter().flatten() {
-                push_unique(&mut required_vram, *asset_index);
-            }
-        }
-    }
-    for water in &package.water_cells {
-        if water.room == room_index as u16 {
-            if let Some(asset_index) = water.texture_asset_index {
-                push_unique(&mut required_vram, asset_index);
-            }
-        }
-    }
-    let mut required_ram: Vec<usize> = room.world_asset_index.into_iter().collect();
-
-    // Models the room references -- placed MeshInstance bindings
-    // plus the player controller's character when its spawn lives
-    // in this room.
-    let room_index = room_index as u16;
-    let mut seen_models: Vec<u16> = Vec::new();
-    for inst in &package.model_instances {
-        if inst.room != room_index {
-            continue;
-        }
-        // Covering textures upload per instance (not per model), so
-        // they ride outside the seen_models dedupe.
-        if let Some(material_override) = inst.material_override {
-            if let Some(asset_index) = material_override.texture_asset_index {
-                push_unique(&mut required_vram, asset_index);
-            }
-            if let Some(layer) = material_override.secondary_layer {
-                if let Some(asset_index) = layer.texture_asset_index {
-                    push_unique(&mut required_vram, asset_index);
-                }
-            }
-        }
-        if seen_models.contains(&inst.model) {
-            continue;
-        }
-        seen_models.push(inst.model);
-        include_model_in_residency(package, inst.model, &mut required_ram, &mut required_vram);
-    }
-    if let Some(pc) = package.player_controller {
-        let character = &package.characters[pc.character as usize];
-        // The player renders in every room, so its covering texture
-        // is required everywhere (unlike the session-persistent model
-        // atlas, prop-mode texture slots are evictable).
-        if let Some(material_override) = character.material_override {
-            if let Some(asset_index) = material_override.texture_asset_index {
-                push_unique(&mut required_vram, asset_index);
-            }
-            if let Some(layer) = material_override.secondary_layer {
-                if let Some(asset_index) = layer.texture_asset_index {
-                    push_unique(&mut required_vram, asset_index);
-                }
-            }
-        }
-        if pc.spawn.room == room_index {
-            let model = character.model;
-            if !seen_models.contains(&model) {
-                seen_models.push(model);
-                include_model_in_residency(package, model, &mut required_ram, &mut required_vram);
-            }
-        }
-    }
-    for equipment in &package.equipment {
-        if equipment.room != room_index {
-            continue;
-        }
-        let Some(weapon) = package.weapons.get(equipment.weapon as usize) else {
-            continue;
-        };
-        if let Some(model) = weapon.model {
-            if !seen_models.contains(&model) {
-                seen_models.push(model);
-                include_model_in_residency(package, model, &mut required_ram, &mut required_vram);
-            }
-        }
-    }
-
-    (required_ram, required_vram)
-}
-
-fn warm_assets_for_room(
-    package: &PlaytestPackage,
-    residency_requirements: &[(Vec<usize>, Vec<usize>)],
-    room_index: usize,
-) -> (Vec<usize>, Vec<usize>) {
-    let mut warm_ram = Vec::new();
-    let mut warm_vram = Vec::new();
-    let Some((required_ram, required_vram)) = residency_requirements.get(room_index) else {
-        return (warm_ram, warm_vram);
-    };
-    for neighbour_index in 0..package.rooms.len() {
-        if neighbour_index == room_index
-            || !package_rooms_touch(package, room_index, neighbour_index)
-        {
-            continue;
-        }
-        let Some((neighbour_ram, neighbour_vram)) = residency_requirements.get(neighbour_index)
-        else {
-            continue;
-        };
-        for asset in neighbour_ram {
-            if !required_ram.contains(asset) {
-                push_unique(&mut warm_ram, *asset);
-            }
-        }
-        for asset in neighbour_vram {
-            if !required_vram.contains(asset) {
-                push_unique(&mut warm_vram, *asset);
-            }
-        }
-    }
-    (warm_ram, warm_vram)
-}
-
-fn package_rooms_touch(package: &PlaytestPackage, a: usize, b: usize) -> bool {
-    let Some((ax0, ax1, az0, az1)) = package_room_bounds(package, a) else {
-        return false;
-    };
-    let Some((bx0, bx1, bz0, bz1)) = package_room_bounds(package, b) else {
-        return false;
-    };
-    bx0 <= ax1 && bx1 >= ax0 && bz0 <= az1 && bz1 >= az0
-}
-
-fn package_room_bounds(
-    package: &PlaytestPackage,
-    room_index: usize,
-) -> Option<(i32, i32, i32, i32)> {
-    let room = package.rooms.get(room_index)?;
-    let asset = package.assets.get(room.world_asset_index?)?;
-    let world = psx_asset::World::from_bytes(&asset.bytes).ok()?;
-    let sector_size = room.sector_size;
-    let x0 = room.origin_x.saturating_mul(sector_size);
-    let z0 = room.origin_z.saturating_mul(sector_size);
-    let x1 = x0.saturating_add((world.width() as i32).saturating_mul(sector_size));
-    let z1 = z0.saturating_add((world.depth() as i32).saturating_mul(sector_size));
-    Some((x0, x1, z0, z1))
-}
-
-fn push_unique(values: &mut Vec<usize>, value: usize) {
-    if !values.contains(&value) {
-        values.push(value);
-    }
-}
-
-/// Add `model_index`'s atlas + every clip to a room's residency lists.
-/// Meshes are decoded from transient loading scratch into the fixed runtime
-/// geometry pools, so their source blobs do not stay resident. Idempotent
-/// through the caller's seen-set
-/// -- also dedupes within `required_ram` / `required_vram` so
-/// callers don't have to.
-///
-/// Pulled out so the per-room walk can register both placed MeshInstance models
-/// and the player character's model without duplicating bookkeeping. Without
-/// the player path, a Character whose backing model isn't also placed as a
-/// MeshInstance would miss its VRAM atlas and persistent animation clips.
-fn include_model_in_residency(
-    package: &PlaytestPackage,
-    model_index: u16,
-    required_ram: &mut Vec<usize>,
-    required_vram: &mut Vec<usize>,
-) {
-    let Some(model) = package.models.get(model_index as usize) else {
-        return;
-    };
-    if let Some(atlas) = model.texture_asset_index {
-        if !required_vram.contains(&atlas) {
-            required_vram.push(atlas);
-        }
-    }
-    let cf = model.clip_first as usize;
-    let cc = model.clip_count as usize;
-    if cf + cc > package.model_clips.len() {
-        return;
-    }
-    for clip in &package.model_clips[cf..cf + cc] {
-        if !required_ram.contains(&clip.animation_asset_index) {
-            required_ram.push(clip.animation_asset_index);
-        }
-    }
 }
 
 /// Resolve the per-asset `static` name for the include_bytes
@@ -4598,9 +2639,6 @@ use psx_level::{
     InteractableMessageRecord,
     InteractableRecord,
     LevelVitalityCircleRecord,
-    LevelCachedRoomCellRecord,
-    LevelCachedRoomSurfaceRecord,
-    LevelCachedRoomVertexRecord,
     LevelAssetRecord,
     LevelBoxPropRecord,
     LevelBoxPropSurfaceRecord,
@@ -4617,16 +2655,11 @@ use psx_level::{
     LevelGameplaySfxCueRecord,
     LevelGameplaySfxEvent,
     LevelLogicRecord,
-    LevelChunkNeighbours,
-    LevelChunkRecord,
     LevelCycloramaQuadRecord,
     LevelFarVistaRecord,
     LevelImagePropRecord,
     LevelDestructibleRecord,
     LevelWorldObjectRecord,
-    LevelMaterialAnimation,
-    LevelMaterialFlipbook,
-    LevelMaterialRecord,
     LevelMaterialUvMotion,
     LevelModelClipBoundsRecord,
     LevelModelClipRecord,
@@ -4637,11 +2670,7 @@ use psx_level::{
     LevelModelSecondaryLayer,
     LevelModelSocketRecord,
     LevelOptionDef,
-    LevelRoomPortalRecord,
     LevelRoomRecord,
-    LevelWaterCellRecord,
-    LevelRoomSurfaceCacheRecord,
-    LevelRoomVisibilityRecord,
     LevelSceneState,
     LevelSkyRecord,
     LevelTransition,
@@ -4660,12 +2689,8 @@ use psx_level::{
     LevelUiSfxSampleRecord,
     LevelUiValueBinding,
     LevelWorldLayer,
-    LevelVisibilityCellRecord,
-    LevelVisibilityPvsRecord,
     LevelWeaponRecord,
     LevelWorldPackEntryRecord,
-    MaterialIndex,
-    MaterialSlot,
     MODEL_CLIP_INHERIT,
     ModelClipIndex,
     ModelClipTableIndex,
@@ -4679,9 +2704,7 @@ use psx_level::{
     OptionalModelClipIndex,
     ResourceSlot,
     RoomIndex,
-    RoomResidencyRecord,
     UiNodeIndex,
-    VisibilityCellIndex,
     WeaponHitboxIndex,
     WeaponHitboxRecord,
     WeaponAppearanceRecord,
