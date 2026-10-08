@@ -855,15 +855,6 @@ pub struct SceneNode {
     pub kind: NodeKind,
     /// Local transform.
     pub transform: Transform3,
-    /// Which floor of the enclosing Room this node belongs to (0 =
-    /// ground). Stacked floors share the same XZ cells, so a node's
-    /// floor cannot be inferred from its Y (the authored standing height
-    /// is a placement default identical across projects). Recorded
-    /// explicitly at placement and consumed by the cook to bind the node
-    /// to the right runtime room. Default `0` keeps every existing
-    /// project (and all non-Room-child nodes) on the ground.
-    #[serde(default)]
-    pub floor: usize,
     /// Parent id, absent only for the scene root.
     pub parent: Option<NodeId>,
     /// Ordered child ids.
@@ -877,7 +868,6 @@ impl SceneNode {
             name: name.into(),
             kind,
             transform: Transform3::default(),
-            floor: 0,
             parent,
             children: Vec::new(),
         }
