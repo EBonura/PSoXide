@@ -44,13 +44,12 @@
 //! Key-on alignment came out of the same capture: every segment shows nine
 //! zero samples before the first envelope step.
 
-use psx_font::FontAtlas;
-use psx_rt::tty;
+use psx_rt::{interrupts, tty};
 use psx_spu::{self as spu, Adsr, Pitch, SpuAddr, Voice, Volume};
-use qrcodegen_no_heap::{QrCode, QrCodeEcc, Version};
 
-use crate::payload::{base64_encode, crc32, draw_qr, QR_QUIET};
-use crate::{hex2, hex8, spu_dma_read};
+use crate::console_tests::record;
+use crate::payload::crc32;
+use crate::{spu_dma_read, TimingRecord};
 
 // ---- Rings ---------------------------------------------------------------
 
@@ -106,45 +105,26 @@ const TONE_VOLUME: Volume = Volume::linear(1, 4);
 const SEGMENTS: usize = 5;
 /// Frames of audible tone per segment, then the gap. The capture itself
 /// happens inside frame 0; the tail is an operator cue, not the instrument.
-const TONE_FRAMES: u16 = 60;
-const GAP_FRAMES: u16 = 30;
 
-// ---- Payload -------------------------------------------------------------
+// ---- Results -------------------------------------------------------------
 
-/// Raw samples carried per segment beside the full-half CRC. 32 is enough to
+/// Raw samples kept per segment beside the full-half CRC. 32 is enough to
 /// see the interpolation kernel, the attack's first steps, the LFSR's first
 /// words, and the key-on latency, while the hash still covers all 256.
 const RAW_SAMPLES: usize = 32;
-/// magic, schema, segment count, raw count, run, noise shift, noise step, pad.
-const HEADER_BYTES: usize = 8;
-/// stat, envx, first-nonzero, CRC of the half, then the raw window.
-const SEGMENT_BYTES: usize = 2 + 2 + 2 + 4 + RAW_SAMPLES * 2;
-const BINARY_LEN: usize = HEADER_BYTES + SEGMENTS * SEGMENT_BYTES + 4;
-const BASE64_LEN: usize = BINARY_LEN.div_ceil(3) * 4;
-const QR_TEXT_MAX: usize = 4 + BASE64_LEN + 3 + 8;
 
-const QR_VERSION_NUM: u8 = 19;
-const QR_VERSION: Version = Version::new(QR_VERSION_NUM);
-const QR_SIZE: usize = 4 * QR_VERSION_NUM as usize + 17;
-const QR_BUFFER_LEN: usize = QR_VERSION.buffer_len();
-const QR_SCALE: i16 = 2;
-/// Byte-mode capacity at ECC Medium for version 19, from the ISO table. The
-/// assert is what stops a new segment being discovered on a burn.
-const QR_BYTE_CAPACITY: usize = 624;
-const _: () = assert!(QR_TEXT_MAX <= QR_BYTE_CAPACITY, "SB4 QR payload too big");
-const _: () = assert!(
-    (QR_SIZE as i16 + QR_QUIET * 2) * QR_SCALE <= 240,
-    "SB4 QR too tall"
-);
+/// rec sb4_hash: ring_half_crc_low, ring_half_crc_high, first_nonzero_sample (5 records, 0x490-0x494)
+pub(crate) const SB4_HASH: u16 = 0x490;
+/// rec sb4_state: spustat, envelope, raw_sample_16 (5 records, 0x49A-0x49E)
+pub(crate) const SB4_STATE: u16 = 0x49A;
 
 // Shift 13 clocks the LFSR fast enough that the 32 raw window words read
 // out an actual sequence; at the old shift 8 / step 2 the LFSR stepped only
-// every ~128 ticks and the window saw a constant on both platforms. The
-// payload header carries shift/step, so decoders need no flag day.
+// every ~128 ticks and the window saw a constant on both platforms.
 const NOISE_SHIFT: u8 = 13;
 const NOISE_STEP: u8 = 2;
 
-/// One captured half, as the payload will carry it.
+/// One captured half.
 #[derive(Copy, Clone)]
 struct Snapshot {
     /// SPUSTAT immediately after the read; bit 15 set means a half-flag
@@ -170,201 +150,38 @@ impl Snapshot {
     }
 }
 
-pub(crate) struct RingProbe {
-    segment: u8,
-    frame: u16,
-    complete: bool,
-    run: u8,
-    snapshots: [Snapshot; SEGMENTS],
-    qr_modules: [u8; (QR_SIZE * QR_SIZE).div_ceil(8)],
-    qr_size: u8,
-    binary_crc: u32,
-}
-
-impl RingProbe {
-    pub(crate) const fn new() -> Self {
-        Self {
-            segment: 0,
-            frame: 0,
-            complete: false,
-            run: 0,
-            snapshots: [Snapshot::empty(); SEGMENTS],
-            qr_modules: [0; (QR_SIZE * QR_SIZE).div_ceil(8)],
-            qr_size: 0,
-            binary_crc: 0,
-        }
-    }
-
-    pub(crate) fn start(&mut self) {
-        self.segment = 0;
-        self.frame = 0;
-        self.complete = false;
-        self.run = self.run.wrapping_add(1);
-        self.snapshots = [Snapshot::empty(); SEGMENTS];
-        self.qr_size = 0;
-        // Warm-console discipline: this runs from the demo disc's menu, after
-        // whatever the launcher and other probes left behind. Own everything.
-        spu::init();
-        spu::set_main_volume(Volume::HALF, Volume::HALF);
-        spu::enable_cd_audio(false);
-        upload_tables();
-        tty::println("hardware-tests: sb4 begin capture-ring readback");
-    }
-
-    pub(crate) fn restart(&mut self) {
-        self.start();
-    }
-
-    pub(crate) fn update(&mut self, _tick: u32) {
-        if self.complete {
-            return;
-        }
-        if self.frame == 0 {
-            let segment = self.segment as usize;
-            self.snapshots[segment] = run_segment(segment);
-            tty::print("hardware-tests: sb4 seg=");
-            tty::print(hex2(self.segment).as_str());
-            tty::print(" ");
-            tty::println(segment_label(self.segment));
-        }
-        self.frame = self.frame.saturating_add(1);
-        if self.frame == TONE_FRAMES {
-            Voice::release(all_used_mask());
-            Voice::set_noise_mask(0);
-        }
-        if self.frame >= TONE_FRAMES + GAP_FRAMES {
-            self.frame = 0;
-            if (self.segment as usize) + 1 < SEGMENTS {
-                self.segment += 1;
-            } else {
-                self.complete = true;
-                self.encode_qr();
-                self.print_payload();
-            }
-        }
-    }
-
-    /// The payload bytes, CRC included. Schema note: schema 1 fixes the
-    /// noise clock at shift 8 step 2; bump the schema if that ever changes,
-    /// because a captured LFSR row is meaningless without its clock.
-    fn build_binary(&self) -> [u8; BINARY_LEN] {
-        let mut binary = [0u8; BINARY_LEN];
-        binary[..4].copy_from_slice(b"SB4B");
-        binary[4] = 1;
-        binary[5] = SEGMENTS as u8;
-        binary[6] = RAW_SAMPLES as u8;
-        binary[7] = self.run;
-        let mut at = HEADER_BYTES;
-        for snap in &self.snapshots {
-            binary[at..at + 2].copy_from_slice(&snap.stat.to_le_bytes());
-            binary[at + 2..at + 4].copy_from_slice(&snap.envx.to_le_bytes());
-            binary[at + 4..at + 6].copy_from_slice(&snap.first.to_le_bytes());
-            binary[at + 6..at + 10].copy_from_slice(&snap.hash.to_le_bytes());
-            let mut raw_at = at + 10;
-            for sample in &snap.raw {
-                binary[raw_at..raw_at + 2].copy_from_slice(&sample.to_le_bytes());
-                raw_at += 2;
-            }
-            at += SEGMENT_BYTES;
-        }
-        let crc = crc32(&binary[..BINARY_LEN - 4]);
-        binary[BINARY_LEN - 4..].copy_from_slice(&crc.to_le_bytes());
-        binary
-    }
-
-    fn encode_qr(&mut self) {
-        let binary = self.build_binary();
-        self.binary_crc = u32::from_le_bytes([
-            binary[BINARY_LEN - 4],
-            binary[BINARY_LEN - 3],
-            binary[BINARY_LEN - 2],
-            binary[BINARY_LEN - 1],
-        ]);
-
-        let mut payload = [0u8; BASE64_LEN];
-        base64_encode(&binary, &mut payload);
-        let mut text = [0u8; QR_TEXT_MAX];
-        let mut len = 0usize;
-        append(&mut text, &mut len, b"SB4/");
-        append(&mut text, &mut len, &payload);
-        append(&mut text, &mut len, b"/C:");
-        append(
-            &mut text,
-            &mut len,
-            hex8(self.binary_crc).digits().as_bytes(),
+/// Run the five segments and return their records.
+pub(crate) fn run() -> [TimingRecord; SEGMENTS * 2] {
+    spu::init();
+    spu::set_main_volume(Volume::SILENCE, Volume::SILENCE);
+    spu::enable_cd_audio(false);
+    upload_tables();
+    tty::println("hardware-tests: sb4 begin capture-ring readback");
+    let mut out = [record(SB4_HASH, 0, 0, 0); SEGMENTS * 2];
+    for segment in 0..SEGMENTS {
+        let snap = run_segment(segment);
+        // Let the keyed voice release and the capture settle before the next
+        // edge; two frames is far past the ring period.
+        Voice::release(all_used_mask());
+        Voice::set_noise_mask(0);
+        interrupts::wait_vblank();
+        interrupts::wait_vblank();
+        out[segment] = record(
+            SB4_HASH + segment as u16,
+            snap.hash & 0xFFFF,
+            snap.hash >> 16,
+            snap.first as u32,
         );
-        let encoded = unsafe { core::str::from_utf8_unchecked(&text[..len]) };
-        let mut temp = [0u8; QR_BUFFER_LEN];
-        let mut output = [0u8; QR_BUFFER_LEN];
-        let Ok(qr) = QrCode::encode_text(
-            encoded,
-            &mut temp,
-            &mut output,
-            QrCodeEcc::Medium,
-            QR_VERSION,
-            QR_VERSION,
-            None,
-            false,
-        ) else {
-            self.qr_size = 0;
-            return;
-        };
-        self.qr_modules.fill(0);
-        self.qr_size = qr.size() as u8;
-        for y in 0..qr.size() {
-            for x in 0..qr.size() {
-                if qr.get_module(x, y) {
-                    let bit = y as usize * QR_SIZE + x as usize;
-                    self.qr_modules[bit / 8] |= 1 << (bit & 7);
-                }
-            }
-        }
+        out[SEGMENTS + segment] = record(
+            SB4_STATE + segment as u16,
+            snap.stat as u32,
+            snap.envx as u32,
+            snap.raw[16] as u16 as u32,
+        );
+        tty::print("hardware-tests: sb4 seg=");
+        tty::println(segment_label(segment as u8));
     }
-
-    /// The whole payload to the TTY, so a headless emulator run diffs this
-    /// probe without a QR in the loop. The QR is for silicon.
-    fn print_payload(&self) {
-        let binary = self.build_binary();
-        let mut payload = [0u8; BASE64_LEN];
-        base64_encode(&binary, &mut payload);
-        tty::print("hardware-tests: sb4 SB4/");
-        // SAFETY: base64 output is ASCII.
-        tty::print(unsafe { core::str::from_utf8_unchecked(&payload) });
-        tty::print("/C:");
-        tty::println(hex8(self.binary_crc).digits());
-    }
-
-    pub(crate) fn draw(&self, font: &FontAtlas) {
-        if !self.complete {
-            font.draw_text(8, 30, "CAPTURE-RING READBACK", (150, 170, 200));
-            font.draw_text(8, 44, "SEG", (140, 160, 190));
-            font.draw_text(48, 44, hex2(self.segment).as_str(), (232, 236, 244));
-            font.draw_text(72, 44, segment_label(self.segment), (96, 200, 255));
-            font.draw_text(8, 58, segment_description(self.segment), (220, 224, 230));
-            // Completed rows so far: latency and hash, the two numbers an
-            // operator can compare against a previous run on the spot.
-            let mut y = 80;
-            for (index, snap) in self.snapshots.iter().enumerate() {
-                if index >= self.segment as usize {
-                    break;
-                }
-                font.draw_text(8, y, segment_label(index as u8), (140, 160, 190));
-                font.draw_text(80, y, "T+", (140, 160, 190));
-                font.draw_text(100, y, hex8(snap.first as u32).digits(), (232, 236, 244));
-                font.draw_text(180, y, hex8(snap.hash).digits(), (96, 200, 255));
-                y += 12;
-            }
-            return;
-        }
-
-        font.draw_text(8, 30, "COMPLETE - PHOTOGRAPH THE QR", (96, 240, 128));
-        font.draw_text(8, 228, "X RERUN", (150, 170, 200));
-        if self.qr_size as usize != QR_SIZE {
-            font.draw_text(88, 112, "QR ENCODE FAILED", (255, 96, 96));
-            return;
-        }
-        draw_qr(&self.qr_modules, QR_SIZE, QR_SIZE, 44, QR_SCALE);
-    }
+    out
 }
 
 // ---- The capture itself --------------------------------------------------
@@ -549,24 +366,4 @@ fn segment_label(segment: u8) -> &'static str {
         4 => "VOICE3",
         _ => "?",
     }
-}
-
-fn segment_description(segment: u8) -> &'static str {
-    match segment {
-        0 => "V1 SQUARE: DECODE + KEY-ON LATENCY",
-        1 => "V1 HALF PITCH: INTERPOLATION KERNEL",
-        2 => "V1 SLOW ATTACK: ENVELOPE STEPPING",
-        3 => "V1 NOISE ON: LFSR SEQUENCE",
-        4 => "V3 SQUARE: THE OTHER RING",
-        _ => "?",
-    }
-}
-
-// ---- Local transport helpers, per the module pattern ---------------------
-
-fn append(target: &mut [u8], len: &mut usize, bytes: &[u8]) {
-    let end = (*len + bytes.len()).min(target.len());
-    let take = end - *len;
-    target[*len..end].copy_from_slice(&bytes[..take]);
-    *len = end;
 }

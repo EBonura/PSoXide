@@ -7,7 +7,7 @@
 //! the controller FIFO, and the DMA moves nothing while MADR stays put.
 //!
 //! Each variant reads the deterministic CDTEST region a different way,
-//! so one QR says which mechanism silicon actually honours:
+//! so one record each says which mechanism silicon actually honours:
 //!
 //!   SDKRD  SectorReader exactly as the SDK ships it
 //!   RAWNP  raw driver, no purge, BFRD then immediate DMA
@@ -18,16 +18,19 @@
 //!   CHCRQ  raw DMA with CHCR sampled at the kick and after a spin
 //!   SDKR2  SectorReader again: is the drive still sane afterwards?
 //!
-//! Per variant: OK bits, the CHCR pair, the first words read, the
-//! sector FNV against the expected value, channel-3 MADR after the
-//! transfer, drive/controller status, and the reader's diag snapshot.
+//! Per variant, record `0x500 + n`: bits 0-2 the OK bits (prepare, start,
+//! read), bit 3 the sector's FNV equal to the expected one, bit 4 the DMA
+//! channel was seen busy (the CHCR probe only); then the reader's diag
+//! snapshot (or the FIFO wait count) low half; then the drive and controller
+//! status bytes. A variant is clean when its first field reads 0x0F.
 
-use crate::payload::{append, base64_encode, crc32, draw_qr, BinaryBuffer};
-use psx_engine::{button, Ctx};
-use psx_font::FontAtlas;
+use crate::console_tests::record;
+use crate::TimingRecord;
 use psx_pack::cd::{SectorReader, SECTOR_WORDS};
 use psx_rt::tty;
-use qrcodegen_no_heap::{QrCode, QrCodeEcc, Version};
+
+/// rec cl2_variant: ok_bits_and_data_match, diag_or_fifo_wait_low, drive_state_high (eight records, 0x500-0x507)
+pub(crate) const CL2_RECORD: u16 = 0x500;
 
 /// First LBA of the CDTEST region on THIS disc (verified against the
 /// built image by scanning for the sector-aligned "PSOXSTRM" header; a
@@ -39,14 +42,6 @@ const CD_SPINS: u32 = 0x10_0000;
 
 const VARIANT_COUNT: usize = 8;
 const FIELD_COUNT: usize = 10;
-
-const QR_VERSION: Version = Version::new(17);
-const QR_SIZE: usize = 85;
-const QR_BUFFER_LEN: usize = QR_VERSION.buffer_len();
-const QR_SCALE: i16 = 2;
-const BINARY_LEN: usize = 16 + VARIANT_COUNT * FIELD_COUNT * 4 + 4;
-const BASE64_LEN: usize = BINARY_LEN.div_ceil(3) * 4;
-const QR_TEXT_MAX: usize = 4 + BASE64_LEN + 3 + 8;
 
 static mut LOW_BUFFER: [u32; SECTOR_WORDS] = [0; SECTOR_WORDS];
 
@@ -109,203 +104,6 @@ impl VariantRecord {
         Self {
             fields: [0; FIELD_COUNT],
         }
-    }
-}
-
-pub(crate) struct CdChainProbe {
-    next_variant: usize,
-    complete: bool,
-    run: u8,
-    records: [VariantRecord; VARIANT_COUNT],
-    qr_modules: [u8; (QR_SIZE * QR_SIZE).div_ceil(8)],
-    qr_size: u8,
-    binary_crc: u32,
-}
-
-impl CdChainProbe {
-    pub(crate) const fn new() -> Self {
-        Self {
-            next_variant: 0,
-            complete: false,
-            run: 0,
-            records: [VariantRecord::empty(); VARIANT_COUNT],
-            qr_modules: [0; (QR_SIZE * QR_SIZE).div_ceil(8)],
-            qr_size: 0,
-            binary_crc: 0,
-        }
-    }
-
-    pub(crate) fn start(&mut self) {
-        self.restart();
-    }
-
-    /// Returns `(timing_realign, consume_navigation_input)`. One variant
-    /// runs per call: each blocks for real drive time, so the scheduler
-    /// realigns after every one.
-    pub(crate) fn update(&mut self, ctx: &mut Ctx) -> (bool, bool) {
-        if self.complete {
-            if ctx.just_pressed(button::CROSS) {
-                self.restart();
-                return (true, true);
-            }
-            return (false, false);
-        }
-        self.step();
-        (true, true)
-    }
-
-    pub(crate) fn restart(&mut self) {
-        self.next_variant = 0;
-        self.complete = false;
-        self.run = self.run.wrapping_add(1);
-        self.records = [VariantRecord::empty(); VARIANT_COUNT];
-        self.qr_size = 0;
-        tty::println("cd-chain-probe: cl2 begin");
-    }
-
-    fn step(&mut self) {
-        if self.complete {
-            return;
-        }
-        let index = self.next_variant;
-        self.records[index] = run_variant(Variant::ALL[index], self.run);
-        print_record(Variant::ALL[index], &self.records[index]);
-        self.next_variant += 1;
-        if self.next_variant == VARIANT_COUNT {
-            self.complete = true;
-            self.encode_qr();
-            self.print_payload();
-        }
-    }
-
-    fn bad_variants(&self) -> u32 {
-        let mut bad = 0;
-        for record in &self.records {
-            let ok = record.fields[0] & 0x7 == 0x7 && record.fields[5] == record.fields[6];
-            if !ok {
-                bad += 1;
-            }
-        }
-        bad
-    }
-
-    fn encode_qr(&mut self) {
-        let mut binary = [0u8; BINARY_LEN];
-        let mut out = BinaryBuffer::new(&mut binary);
-        self.write_binary(&mut out, 0);
-        let crc = crc32(&out.bytes()[..BINARY_LEN - 4]);
-        binary[BINARY_LEN - 4..].copy_from_slice(&crc.to_le_bytes());
-        self.binary_crc = crc;
-
-        let mut payload = [0u8; BASE64_LEN];
-        assert_eq!(
-            base64_encode(&binary, &mut payload),
-            BASE64_LEN,
-            "CL2 Base64"
-        );
-        let mut text = [0u8; QR_TEXT_MAX];
-        let mut text_len = 0usize;
-        append(&mut text, &mut text_len, b"CL1/");
-        append(&mut text, &mut text_len, &payload);
-        append(&mut text, &mut text_len, b"/C:");
-        append(&mut text, &mut text_len, hex8(crc).as_str().as_bytes());
-        let encoded = unsafe { core::str::from_utf8_unchecked(&text[..text_len]) };
-        let mut temp = [0u8; QR_BUFFER_LEN];
-        let mut output = [0u8; QR_BUFFER_LEN];
-        let Ok(qr) = QrCode::encode_text(
-            encoded,
-            &mut temp,
-            &mut output,
-            QrCodeEcc::Medium,
-            QR_VERSION,
-            QR_VERSION,
-            None,
-            false,
-        ) else {
-            self.qr_size = 0;
-            return;
-        };
-        self.qr_modules.fill(0);
-        self.qr_size = qr.size() as u8;
-        for y in 0..qr.size() {
-            for x in 0..qr.size() {
-                if qr.get_module(x, y) {
-                    let bit = y as usize * QR_SIZE + x as usize;
-                    self.qr_modules[bit / 8] |= 1 << (bit & 7);
-                }
-            }
-        }
-    }
-
-    fn write_binary(&self, out: &mut BinaryBuffer<'_>, crc: u32) {
-        out.push_bytes(b"CL1B");
-        out.push_u8(3); // v3: CL2 mechanism matrix (raw driver + PIO)
-        out.push_u8(VARIANT_COUNT as u8);
-        out.push_u8(FIELD_COUNT as u8);
-        out.push_u8(self.run);
-        out.push_u32(CDTEST_LBA);
-        out.push_u32(CDTEST_SECTORS);
-        for record in self.records {
-            for value in record.fields {
-                out.push_u32(value);
-            }
-        }
-        out.push_u32(crc);
-        assert_eq!(out.len(), BINARY_LEN, "CL2 binary layout drift");
-    }
-
-    fn print_payload(&self) {
-        let mut binary = [0u8; BINARY_LEN];
-        let mut out = BinaryBuffer::new(&mut binary);
-        self.write_binary(&mut out, self.binary_crc);
-        let mut payload = [0u8; BASE64_LEN];
-        base64_encode(&binary, &mut payload);
-        tty::print("cd-chain-probe: CL1/");
-        tty::print(unsafe { core::str::from_utf8_unchecked(&payload) });
-        tty::print("/C:");
-        tty::println(hex8(self.binary_crc).as_str());
-    }
-
-    pub(crate) fn draw(&self, font: &FontAtlas) {
-        font.draw_text(8, 8, "CD MECHANISM MATRIX CL2 SA", (255, 232, 128));
-        if !self.complete {
-            for (i, variant) in Variant::ALL.iter().enumerate().take(self.next_variant) {
-                let record = &self.records[i];
-                let ok = record.fields[0] & 0x7 == 0x7 && record.fields[5] == record.fields[6];
-                let y = 24 + i as i16 * 12;
-                font.draw_text(8, y, variant.short(), (150, 170, 200));
-                font.draw_text(
-                    56,
-                    y,
-                    if ok { "OK" } else { "BAD" },
-                    if ok { (96, 240, 128) } else { (255, 96, 64) },
-                );
-                font.draw_text(88, y, hex8(record.fields[3]).as_str(), (232, 236, 244));
-                font.draw_text(164, y, hex8(record.fields[5]).as_str(), (200, 204, 220));
-            }
-            if self.next_variant < VARIANT_COUNT {
-                let y = 24 + self.next_variant as i16 * 12;
-                font.draw_text(
-                    8,
-                    y,
-                    Variant::ALL[self.next_variant].short(),
-                    (255, 216, 96),
-                );
-                font.draw_text(56, y, "RUNNING", (255, 216, 96));
-            }
-            return;
-        }
-        if self.bad_variants() == 0 {
-            font.draw_text(8, 24, "ALL VARIANTS OK - HOLD CAMERA ON QR", (96, 240, 128));
-        } else {
-            font.draw_text(8, 24, "BAD VARIANTS - HOLD CAMERA ON QR", (255, 96, 64));
-        }
-        font.draw_text(8, 230, "X RERUN MATRIX", (150, 170, 200));
-        if self.qr_size as usize != QR_SIZE {
-            font.draw_text(88, 112, "QR ENCODE FAILED", (255, 96, 96));
-            return;
-        }
-        draw_qr(&self.qr_modules, QR_SIZE, QR_SIZE, 42, QR_SCALE);
     }
 }
 
@@ -750,3 +548,21 @@ fn hex2(v: u8) -> Hex<2> {
 }
 
 // --- transport helpers ---------------------------------------------------
+
+/// Run all eight variants and return one record each.
+pub(crate) fn run_matrix() -> [TimingRecord; VARIANT_COUNT] {
+    core::array::from_fn(|n| {
+        let variant = Variant::ALL[n];
+        let rec = run_variant(variant, 1);
+        print_record(variant, &rec);
+        let ok = rec.fields[0] & 0x7;
+        let matched = (rec.fields[5] == rec.fields[6]) as u32;
+        let busy_seen = (rec.fields[9] >> 31) & 1;
+        record(
+            CL2_RECORD + n as u16,
+            ok | (matched << 3) | (busy_seen << 4),
+            rec.fields[9] & 0xFFFF,
+            rec.fields[8] >> 8,
+        )
+    })
+}

@@ -30,8 +30,8 @@
 //! exception wrapper stays in the vector after it is removed).
 
 use crate::console_tests::{
-    number, record, spread, text, Buttons, ConsoleCase, Screen, CDCOST_COUNT, CDCOST_RECORD,
-    CDHANDOFF_COUNT, CDHANDOFF_RECORD, CDMOTOR_COUNT, CDMOTOR_RECORD,
+    number, record, spread, text, Screen, CDCOST_COUNT, CDCOST_RECORD, CDHANDOFF_COUNT,
+    CDHANDOFF_RECORD, CDMOTOR_COUNT, CDMOTOR_RECORD,
 };
 use crate::TimingRecord;
 use core::hint::black_box;
@@ -231,8 +231,8 @@ impl Ui<'_, '_> {
             rows[n] = *line;
             n += 1;
         }
-        let mut buttons = Buttons::new();
-        loop {
+        // The run does not wait for anyone: the page stays up for half a second.
+        for _ in 0..30 {
             self.screen.clear((6, 8, 18));
             text(self.font, 8, 6, title, VALUE);
             text(
@@ -251,11 +251,7 @@ impl Ui<'_, '_> {
                     if i < records.len() { LABEL } else { NOTE },
                 );
             }
-            text(self.font, 8, 224, "CROSS: BACK TO MENU", NOTE);
             self.screen.present();
-            if buttons.poll().exit() {
-                break;
-            }
         }
     }
 }
@@ -1438,26 +1434,4 @@ pub(crate) fn run_motor(screen: &mut Screen, font: &FontAtlas) -> [TimingRecord;
     ];
     ui.table("CD MOTOR", ok, &MOTOR_NAMES, &records, &[]);
     records
-}
-
-/// Run one of the CD STREAM cases (or all three) on `gpu`, leaving its
-/// records in `results`.
-#[inline(never)]
-pub(crate) fn run(
-    gpu: &mut psx_gpu::Gpu,
-    results: &mut crate::console_tests::Results,
-    case: ConsoleCase,
-) {
-    let font = FontAtlas::upload(&psx_font::fonts::BASIC, crate::FONT_TPAGE, crate::FONT_CLUT);
-    let mut screen = Screen::new(gpu);
-    let all = case == ConsoleCase::CdAll;
-    if all || case == ConsoleCase::CdCost {
-        results.cd_cost = Some(run_cost(&mut screen, &font));
-    }
-    if all || case == ConsoleCase::CdHandoff {
-        results.cd_handoff = Some(run_handoff(&mut screen, &font));
-    }
-    if all || case == ConsoleCase::CdMotor {
-        results.cd_motor = Some(run_motor(&mut screen, &font));
-    }
 }

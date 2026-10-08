@@ -26,9 +26,7 @@
 //! The emulator's kernel is its own HLE one, so the same case run headless
 //! measures that.
 
-use crate::console_tests::{
-    bit, put_number, record, spread, text, Buttons, Screen, KERNEL_COUNT, KERNEL_RECORD,
-};
+use crate::console_tests::{bit, record, spread, KERNEL_COUNT, KERNEL_RECORD};
 use crate::TimingRecord;
 use psx_font::FontAtlas;
 use psx_io::{irq, timers};
@@ -339,110 +337,21 @@ pub(crate) fn start() -> Outcome {
     }
 }
 
-const LABEL: (u8, u8, u8) = (150, 170, 200);
-const VALUE: (u8, u8, u8) = (236, 240, 248);
-const NOTE: (u8, u8, u8) = (255, 216, 96);
-const COLUMNS: [i16; 4] = [120, 168, 216, 264];
-
-fn row(font: &FontAtlas, y: i16, label: &str, stat: &Stat, net: Option<u32>) {
-    text(font, 8, y, label, LABEL);
-    if stat.count == 0 {
-        text(font, COLUMNS[0], y, "-", LABEL);
-        return;
-    }
-    for (x, value) in COLUMNS.iter().zip([stat.min, stat.med, stat.max]) {
-        put_number(font, *x, y, value, VALUE);
-    }
-    if let Some(net) = net {
-        put_number(font, 276, y, net, NOTE);
-    }
-}
-
-/// The result screen. `status` is the line at the foot.
+/// Run the whole case. The BIOS VBlank round trip is the one part that can
+/// hang a kernel which does not acknowledge a VBlank nobody handles; it is
+/// skipped when `skip_bios_vblank` (the run was started to avoid risky steps).
+/// There is no picture of its own: the run's progress screen names the step.
 #[inline(never)]
-pub(crate) fn draw(font: &FontAtlas, out: &Outcome, status: &str) {
-    text(font, 8, 8, "KERNEL TIMING (CYCLES)", VALUE);
-    text(
-        font,
-        8,
-        20,
-        if out.standard_vector {
-            "VECTOR: BIOS SNAPSHOT"
-        } else {
-            "VECTOR: FALLBACK WORDS"
-        },
-        LABEL,
-    );
-    text(font, COLUMNS[0], 36, "MIN", LABEL);
-    text(font, COLUMNS[1], 36, "MED", LABEL);
-    text(font, COLUMNS[2], 36, "MAX", LABEL);
-    text(font, 276, 36, "NET", LABEL);
-    let net = |s: &Stat| s.med.saturating_sub(out.harness.med);
-    row(font, 50, "EMPTY CALL", &out.harness, None);
-    row(font, 62, "ENTER CS", &out.enter, Some(net(&out.enter)));
-    row(font, 74, "EXIT CS", &out.exit, Some(net(&out.exit)));
-    if out.enter.count != 0 {
-        text(font, 8, 86, "ENTER+EXIT NET", LABEL);
-        put_number(font, 276, 86, net(&out.enter) + net(&out.exit), NOTE);
-    }
-    row(font, 106, "VBLANK SDK", &out.sdk_vblank, None);
-    row(font, 118, "VBLANK BIOS", &out.bios_vblank, None);
-    if out.bios_vblank.count != 0 {
-        text(font, 8, 134, "BIOS GAPS", LABEL);
-        put_number(font, 120, 134, out.bios_vblank.count, VALUE);
-        text(font, 8, 146, "EVENT READY", LABEL);
-        put_number(font, 120, 146, out.events_seen, VALUE);
-        text(
-            font,
-            168,
-            146,
-            if out.event.is_some() {
-                "OPENED"
-            } else {
-                "NOT OPENED"
-            },
-            LABEL,
-        );
-    }
-    text(font, 8, 218, status, NOTE);
-}
-
-/// Frames the earlier results stay up before the BIOS VBlank part starts.
-const WARNING_FRAMES: u32 = 180;
-
-/// Show the screen for `frames` frames (or until the exit button when
-/// `frames` is zero).
-#[inline(never)]
-fn hold(screen: &mut Screen, font: &FontAtlas, out: &Outcome, status: &str, frames: u32) {
-    let mut buttons = Buttons::new();
-    let mut shown = 0u32;
-    while frames == 0 || shown < frames {
-        if buttons.poll().exit() {
-            break;
-        }
-        screen.clear((6, 8, 18));
-        draw(font, out, status);
-        screen.present();
-        shown += 1;
-    }
-}
-
-/// Run the whole case and leave the result on screen until CROSS.
-#[inline(never)]
-pub(crate) fn run(screen: &mut Screen, font: &FontAtlas) -> Outcome {
+pub(crate) fn run_headless(
+    _gpu: &mut psx_gpu::Gpu,
+    _font: &FontAtlas,
+    skip_bios_vblank: bool,
+) -> [TimingRecord; KERNEL_COUNT] {
     let mut out = start();
     measure_critical_sections(&mut out);
     measure_runtime_vblank(&mut out);
-    hold(
-        screen,
-        font,
-        &out,
-        "BIOS VBLANK NEXT (MAY HANG)",
-        WARNING_FRAMES,
-    );
-    measure_bios_vblank(&mut out);
-    // Interrupt handling put the runtime's clock back to zero; the caller
-    // realigns the engine after the case.
-    hold(screen, font, &out, "CROSS: BACK", 0);
-    out
+    if !skip_bios_vblank {
+        measure_bios_vblank(&mut out);
+    }
+    records(&out)
 }

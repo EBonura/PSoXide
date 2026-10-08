@@ -44,13 +44,12 @@
 //! truth that settles it, because a tone either comes out at 1575 Hz or
 //! it does not.
 
-use psx_font::FontAtlas;
+use psx_rt::interrupts;
 use psx_rt::tty;
 use psx_spu::{self as spu, Adsr, Pitch, SpuAddr, Voice, Volume};
-use qrcodegen_no_heap::{QrCode, QrCodeEcc, Version};
 
-use crate::payload::{append, base64_encode, crc32, draw_qr, QR_QUIET};
-use crate::{hex2, hex8, spu_dma_read};
+use crate::console_tests::record;
+use crate::{hex2, spu_dma_read, TimingRecord};
 
 // ---- Pass 1: SPU RAM integrity -----------------------------------------
 
@@ -72,10 +71,10 @@ static mut READBACK2: [u32; PATTERN_WORDS] = [0; PATTERN_WORDS];
 
 const TONE_SEGMENTS: usize = 22;
 const TONE_FIELDS: usize = 4;
-const TONE_FRAMES: u16 = 90;
-const GAP_FRAMES: u16 = 30;
+const TONE_FRAMES: u16 = 60;
+const GAP_FRAMES: u16 = 4;
 /// HOLD runs long enough for slow loop degradation to show.
-const HOLD_TONE_FRAMES: u16 = 300;
+const HOLD_TONE_FRAMES: u16 = 90;
 const EARLY_FRAME: u16 = 8;
 
 /// 64 blocks, not 2. The console keeps playing something other than this
@@ -90,8 +89,6 @@ const EARLY_FRAME: u16 = 8;
 /// same order as a real wavetable.
 const TABLE_BLOCKS: usize = 64;
 const TABLE_BYTES: usize = TABLE_BLOCKS * 16;
-/// 44100 / 28 samples per cycle, at SPU pitch 0x1000.
-const UNITY_HZ: u32 = 1575;
 const UNITY_PITCH: u16 = 0x1000;
 /// Shift 1 rather than 0: a capture chain with a little gain then cannot
 /// clip the tone into a square of its own.
@@ -138,30 +135,16 @@ const PITCH_LADDER: [u16; 7] = [0x0400, 0x0800, 0x1000, 0x2000, 0x3000, 0x3FFF, 
 // ---- Payload ------------------------------------------------------------
 
 const WORDS: usize = RAM_STAGES * RAM_FIELDS + TONE_SEGMENTS * TONE_FIELDS;
-/// 21, not 19. Each tone segment costs four words, and 22 of them push the
-/// payload to 667 characters against version 19's 624. Version 21 holds 711 and
-/// draws 101 modules, which at scale 2 with its quiet zone is 218 pixels of the
-/// 240 available -- denser to photograph, but the const asserts below are what
-/// stop that being discovered on a burn.
-const QR_VERSION_NUM: u8 = 21;
-const QR_VERSION: Version = Version::new(QR_VERSION_NUM);
-const QR_SIZE: usize = 4 * QR_VERSION_NUM as usize + 17;
-const QR_BUFFER_LEN: usize = QR_VERSION.buffer_len();
-const QR_SCALE: i16 = 2;
-const BINARY_LEN: usize = 20 + WORDS * 4 + 4;
-const BASE64_LEN: usize = BINARY_LEN.div_ceil(3) * 4;
-const QR_TEXT_MAX: usize = 4 + BASE64_LEN + 3 + 8;
 
-/// Byte-mode capacity at ECC Medium for `QR_VERSION_NUM`, from the ISO table.
-/// Version 17 holds 504 and v0.12 shipped a 519-byte payload, so `encode_text`
-/// failed and the screen drew QR ENCODE FAILED. Adding a segment must break the
-/// build, not the burn.
-const QR_BYTE_CAPACITY: usize = 711;
-const _: () = assert!(QR_TEXT_MAX <= QR_BYTE_CAPACITY, "SB2 QR payload too big");
-const _: () = assert!(
-    (QR_SIZE as i16 + QR_QUIET * 2) * QR_SCALE <= 240,
-    "SB2 QR too tall"
-);
+/// rec sb2_tone: late_envelope, repeat_address, start_address (22 records, 0x440-0x455)
+pub(crate) const SB2_TONE: u16 = 0x440;
+/// rec sb2_early: early_envelope_or_endx, late_pitch, table_word (22 records, 0x460-0x475)
+pub(crate) const SB2_EARLY: u16 = 0x460;
+/// rec sb2_ram: mismatching_words, first_bad_index, word_read_there (7 records, 0x480-0x486)
+pub(crate) const SB2_RAM: u16 = 0x480;
+/// Records the probe leaves.
+pub(crate) const RECORD_COUNT: usize = TONE_SEGMENTS * 2 + RAM_STAGES;
+pub(crate) type Records = [TimingRecord; RECORD_COUNT];
 
 pub(crate) struct SpuProbe {
     /// 0..RAM_STAGES = pass 1, then pass 2 segments, then done.
@@ -172,9 +155,6 @@ pub(crate) struct SpuProbe {
     words: [u32; WORDS],
     /// Words 0 and 4 of the uploaded table, read back from SPU RAM.
     table_back: [u32; 2],
-    qr_modules: [u8; (QR_SIZE * QR_SIZE).div_ceil(8)],
-    qr_size: u8,
-    binary_crc: u32,
 }
 
 impl SpuProbe {
@@ -186,9 +166,6 @@ impl SpuProbe {
             run: 0,
             words: [0; WORDS],
             table_back: [0; 2],
-            qr_modules: [0; (QR_SIZE * QR_SIZE).div_ceil(8)],
-            qr_size: 0,
-            binary_crc: 0,
         }
     }
 
@@ -199,9 +176,8 @@ impl SpuProbe {
         self.run = self.run.wrapping_add(1);
         self.words = [0; WORDS];
         self.table_back = [0; 2];
-        self.qr_size = 0;
         spu::init();
-        spu::set_main_volume(Volume::MAX, Volume::MAX);
+        spu::set_main_volume(Volume::SILENCE, Volume::SILENCE);
         spu::enable_cd_audio(false);
         // Every word says where it lives, so a shifted readback reports
         // its own offset rather than just "wrong".
@@ -210,10 +186,61 @@ impl SpuProbe {
             *word = 0x5A00_0000 | (index as u32 & 0x00FF_FFFF);
         }
         tty::println("hardware-tests: sb2 begin spu diagnostic");
+        self.begin_step();
     }
 
-    pub(crate) fn restart(&mut self) {
+    /// Run the whole probe, a frame at a time, and return its records.
+    pub(crate) fn run(&mut self) -> Records {
         self.start();
+        let mut tick = 0u32;
+        while !self.complete {
+            self.update(tick);
+            interrupts::wait_vblank();
+            tick += 1;
+        }
+        self.records()
+    }
+
+    /// The results as records: two per tone segment (`0x440 + segment`:
+    /// late envelope, repeat address, start address; `0x460 + segment`: the
+    /// early envelope or, for the termination segments, ENDX low half, the
+    /// pitch register, the table readback word) and one per RAM stage
+    /// (`0x480 + stage`: mismatching words, first bad index, what it read).
+    fn records(&self) -> Records {
+        let mut out = [record(SB2_TONE, 0, 0, 0); RECORD_COUNT];
+        for segment in 0..TONE_SEGMENTS {
+            let at = segment * TONE_FIELDS;
+            let early = self.words[at + 1];
+            let late = self.words[at + 2];
+            let loops = self.words[at + 3];
+            let termination = (15..19).contains(&segment);
+            out[segment * 2] = record(
+                SB2_TONE + segment as u16,
+                late & 0xFFFF,
+                loops >> 16,
+                loops & 0xFFFF,
+            );
+            out[segment * 2 + 1] = record(
+                SB2_EARLY + segment as u16,
+                if termination {
+                    early & 0xFFFF
+                } else {
+                    early & 0xFFFF
+                },
+                late >> 16,
+                self.table_back[segment & 1] & 0xFFFF,
+            );
+        }
+        for stage in 0..RAM_STAGES {
+            let at = TONE_SEGMENTS * TONE_FIELDS + stage * RAM_FIELDS;
+            out[TONE_SEGMENTS * 2 + stage] = record(
+                SB2_RAM + stage as u16,
+                self.words[at + 3],
+                self.words[at + 1],
+                self.words[at + 2] & 0xFFFF,
+            );
+        }
+        out
     }
 
     pub(crate) fn update(&mut self, tick: u32) {
@@ -396,8 +423,6 @@ impl SpuProbe {
             Voice::release(all_voices_mask());
             Voice::set_noise_mask(0);
             self.complete = true;
-            self.encode_qr();
-            self.print_payload();
         }
     }
 
@@ -414,7 +439,7 @@ impl SpuProbe {
             // silent behind it. Reset before the tables go up, so pass 2
             // measures playback rather than pass 1's leftovers.
             spu::init();
-            spu::set_main_volume(Volume::MAX, Volume::MAX);
+            spu::set_main_volume(Volume::SILENCE, Volume::SILENCE);
             spu::enable_cd_audio(false);
             upload_tables();
             // Read the table straight back. The console's repeat address
@@ -462,7 +487,7 @@ impl SpuProbe {
         tty::print("hardware-tests: sb2 tone seg=");
         tty::print(hex2(segment as u8).as_str());
         tty::print(" ");
-        tty::println(tone_label(segment as u8));
+        tty::println("");
     }
 
     /// One upload/readback combination, compared word for word.
@@ -527,137 +552,7 @@ impl SpuProbe {
         tty::print("hardware-tests: sb2 ram=");
         tty::print(hex2(stage as u8).as_str());
         tty::print(" bad=");
-        tty::print(hex8(bad).digits());
-        tty::print(" first=");
-        tty::println(hex8(first_bad).digits());
-    }
-
-    fn encode_qr(&mut self) {
-        let mut binary = [0u8; BINARY_LEN];
-        binary[..4].copy_from_slice(b"SB2B");
-        binary[4] = 1;
-        binary[5] = RAM_STAGES as u8;
-        binary[6] = TONE_SEGMENTS as u8;
-        binary[7] = self.run;
-        binary[8..12].copy_from_slice(&UNITY_HZ.to_le_bytes());
-        binary[12..16].copy_from_slice(&self.table_back[0].to_le_bytes());
-        binary[16..20].copy_from_slice(&self.table_back[1].to_le_bytes());
-        for (index, word) in self.words.iter().enumerate() {
-            let at = 20 + index * 4;
-            binary[at..at + 4].copy_from_slice(&word.to_le_bytes());
-        }
-        let crc = crc32(&binary[..BINARY_LEN - 4]);
-        binary[BINARY_LEN - 4..].copy_from_slice(&crc.to_le_bytes());
-        self.binary_crc = crc;
-
-        let mut payload = [0u8; BASE64_LEN];
-        base64_encode(&binary, &mut payload);
-        let mut text = [0u8; QR_TEXT_MAX];
-        let mut len = 0usize;
-        append(&mut text, &mut len, b"SB2/");
-        append(&mut text, &mut len, &payload);
-        append(&mut text, &mut len, b"/C:");
-        append(
-            &mut text,
-            &mut len,
-            hex8(self.binary_crc).digits().as_bytes(),
-        );
-        let encoded = unsafe { core::str::from_utf8_unchecked(&text[..len]) };
-        // Mirror the symbol's text like every other probe does, so a headless
-        // run can be decoded and diffed, not only photographed.
-        tty::print("hardware-tests: sb2 ");
-        tty::println(encoded);
-        let mut temp = [0u8; QR_BUFFER_LEN];
-        let mut output = [0u8; QR_BUFFER_LEN];
-        let Ok(qr) = QrCode::encode_text(
-            encoded,
-            &mut temp,
-            &mut output,
-            QrCodeEcc::Medium,
-            QR_VERSION,
-            QR_VERSION,
-            None,
-            false,
-        ) else {
-            self.qr_size = 0;
-            return;
-        };
-        self.qr_modules.fill(0);
-        self.qr_size = qr.size() as u8;
-        for y in 0..qr.size() {
-            for x in 0..qr.size() {
-                if qr.get_module(x, y) {
-                    let bit = y as usize * QR_SIZE + x as usize;
-                    self.qr_modules[bit / 8] |= 1 << (bit & 7);
-                }
-            }
-        }
-    }
-
-    fn print_payload(&self) {
-        tty::print("hardware-tests: sb2 crc=");
-        tty::println(hex8(self.binary_crc).digits());
-    }
-
-    /// The probe's own screen, starting BELOW the suite header.
-    ///
-    /// The first cut drew a title at y=8 and a subtitle at y=20, straight
-    /// over the harness's own "PS1 HARDWARE TESTS" and mode lines, and laid
-    /// the RAM verdict out in four columns 76 px wide -- too narrow for a
-    /// seven-character label plus an eight-digit value, so those collided
-    /// too. Everything here now starts at y=30 and the verdict is one
-    /// column, which is legible on a photographed CRT.
-    pub(crate) fn draw(&self, font: &FontAtlas) {
-        let step = self.step as usize;
-        if !self.complete {
-            if step < TONE_SEGMENTS {
-                let segment = step as u8;
-                font.draw_text(8, 30, "PASS 1 OF 2: TONE LADDER", (150, 170, 200));
-                font.draw_text(8, 44, "SEG", (140, 160, 190));
-                font.draw_text(48, 44, hex2(segment).as_str(), (232, 236, 244));
-                font.draw_text(72, 44, tone_label(segment), (96, 200, 255));
-                font.draw_text(8, 58, tone_description(segment), (220, 224, 230));
-                font.draw_text(8, 72, "EXPECT", (140, 160, 190));
-                font.draw_text(72, 72, tone_expectation(segment), (255, 216, 96));
-                font.draw_text(8, 92, "1.5S TONE THEN 0.5S SILENCE", (112, 136, 170));
-                font.draw_text(8, 106, "RECORD VIDEO *AND AUDIO*", (255, 128, 96));
-                font.draw_text(8, 120, "DO NOT TOUCH THE VOLUME MID-RUN", (255, 128, 96));
-                return;
-            }
-            font.draw_text(8, 30, "PASS 2 OF 2: SPU RAM, SILENT", (150, 170, 200));
-            let stage = (step - TONE_SEGMENTS) as u8;
-            font.draw_text(8, 44, "STAGE", (140, 160, 190));
-            font.draw_text(72, 44, ram_label(stage), (96, 200, 255));
-            font.draw_text(8, 58, ram_description(stage), (220, 224, 230));
-            self.draw_ram_verdict(font, 80);
-            return;
-        }
-
-        font.draw_text(8, 30, "COMPLETE - PHOTOGRAPH THE QR", (96, 240, 128));
-        font.draw_text(8, 228, "X RERUN", (150, 170, 200));
-        if self.qr_size as usize != QR_SIZE {
-            font.draw_text(88, 112, "QR ENCODE FAILED", (255, 96, 96));
-            return;
-        }
-        draw_qr(&self.qr_modules, QR_SIZE, QR_SIZE, 44, QR_SCALE);
-    }
-
-    /// Bad-word counts, one stage per row: label at x=8, count at x=88.
-    /// A seven-character label is 56 px and an eight-digit value 64, so a
-    /// single column is the only layout that fits both without collision.
-    fn draw_ram_verdict(&self, font: &FontAtlas, top: i16) {
-        font.draw_text(8, top, "SPU RAM BAD WORDS", (140, 160, 190));
-        for stage in 0..RAM_STAGES {
-            let bad = self.words[TONE_SEGMENTS * TONE_FIELDS + stage * RAM_FIELDS + 3];
-            let colour = if bad == 0 {
-                (96, 240, 128)
-            } else {
-                (255, 96, 96)
-            };
-            let y = top + 14 + stage as i16 * 12;
-            font.draw_text(8, y, ram_label(stage as u8), (200, 208, 220));
-            font.draw_text(88, y, hex8(bad).digits(), colour);
-        }
+        tty::println(if bad == 0 { "0" } else { "some" });
     }
 }
 
@@ -753,7 +648,13 @@ fn upload_tables() {
 /// at unity pitch); 2 gives one cycle per 56 samples, an octave down.
 fn build_square(table: &mut [u8], half_period_blocks: usize) {
     let period = 28 * half_period_blocks;
-    for block in 0..TABLE_BLOCKS {
+    // The table's own length decides the block count: this builds the 64-block
+    // tables and the 4-block termination pair alike. (It used to loop over
+    // TABLE_BLOCKS regardless, and nothing ever reached it, because the first
+    // segment was never begun: the tone segments played whatever the SPU RAM
+    // held. See hardware-test-versions.md, v2.0.)
+    let blocks = table.len() / 16;
+    for block in 0..blocks {
         let at = block * 16;
         table[at] = TONE_SHIFT; // filter 0
                                 // Loop-start on the first block, END+REPEAT on the LAST, nothing
@@ -762,7 +663,7 @@ fn build_square(table: &mut [u8], half_period_blocks: usize) {
                                 // block as END would have ended the sample after one of them.
         table[at + 1] = if block == 0 {
             0x04
-        } else if block == TABLE_BLOCKS - 1 {
+        } else if block == blocks - 1 {
             0x03
         } else {
             0x00
@@ -819,98 +720,5 @@ fn pio_read(addr: u32, out: &mut [u32]) {
         }
         psx_io::write_u16(psx_hw::spu::SPUCNT, cnt & !0x0030);
         psx_io::write_u16(psx_hw::spu::TRANSFER_CTRL, 0x0000);
-    }
-}
-
-fn ram_label(stage: u8) -> &'static str {
-    match stage {
-        0 => "DMA/DMA",
-        1 => "PIO/DMA",
-        2 => "PIO/PIO",
-        3 => "DMA/PIO",
-        4 => "HIGHADR",
-        5 => "SHORT",
-        6 => "TWICE",
-        _ => "?",
-    }
-}
-
-fn ram_description(stage: u8) -> &'static str {
-    match stage {
-        0 => "THE SDK PATH: DMA IN, DMA OUT",
-        1 => "CPU WRITES IN, DMA OUT",
-        2 => "CPU WRITES IN, CPU READS OUT",
-        3 => "DMA IN, CPU READS OUT",
-        4 => "SAME TEST FAR UP SPU RAM",
-        5 => "ONE ADPCM BLOCK ONLY",
-        6 => "READ TWICE: IS THE READER STABLE?",
-        _ => "?",
-    }
-}
-
-fn tone_label(segment: u8) -> &'static str {
-    match segment {
-        0 => "SYNC",
-        1 => "P 0400",
-        2 => "P 0800",
-        3 => "P 1000",
-        4 => "P 2000",
-        5 => "P 3000",
-        6 => "P 3FFF",
-        7 => "P 5000",
-        8 => "HOLD",
-        9 => "REKEY",
-        10 => "ADDRSWAP",
-        11 => "VOICES",
-        12 => "NOISE",
-        13 => "REPEXPL",
-        14 => "SMALLTAB",
-        15 => "PARKED",
-        16 => "UNPARKED",
-        17 => "ENDXBIT",
-        18 => "ENVZERO",
-        19 => "KEYVOL",
-        20 => "RETRIG",
-        21 => "XFERLIVE",
-        _ => "?",
-    }
-}
-
-fn tone_description(segment: u8) -> &'static str {
-    match segment {
-        0 => "THREE BURSTS: FIND T=0 IN THE AUDIO",
-        1..=6 => "PITCH LADDER ON ONE LOOPED TABLE",
-        7 => "OVER-RANGE PITCH: DOES SILICON CLAMP?",
-        8 => "ONE LOOP HELD 5S: DOES IT STAY CLEAN?",
-        9 => "RE-KEY EVERY 4 FRAMES (PICO-8 RATE)",
-        10 => "START ADDR CHANGED WITHOUT KEY ON",
-        11 => "1 THEN 4 THEN 8 VOICES TOGETHER",
-        12 => "NOISE MODE: SILICON'S OWN LFSR",
-        13 => "SAME TABLE, REPEAT ADDR SET BY HAND",
-        14 => "A 32-BYTE TABLE, SAME UPLOAD PATH",
-        _ => "?",
-    }
-}
-
-/// What a recording should show if silicon behaves. On screen so a wrong
-/// answer is audible to the operator without waiting for the decode.
-fn tone_expectation(segment: u8) -> &'static str {
-    match segment {
-        0 => "3 BEEPS 1575HZ",
-        1 => "394 HZ",
-        2 => "788 HZ",
-        3 => "1575 HZ",
-        4 => "3150 HZ",
-        5 => "4725 HZ",
-        6 => "6300 HZ",
-        7 => "6300 CLAMPED / 7875 NOT",
-        8 => "1575 STEADY, NO CLICKS",
-        9 => "1575, NO CLICK PER KEY",
-        10 => "1575 THEN 788 AT THE SWAP",
-        11 => "1575, LOUDER IN 3 STEPS",
-        12 => "HISS, NO TONE",
-        13 => "1575 HZ IF THE FLAG WAS THE FAULT",
-        14 => "1575 HZ IF SIZE NEVER MATTERED",
-        _ => "?",
     }
 }

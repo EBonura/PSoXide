@@ -18,17 +18,13 @@
 //! SDK's four generated tone songs as the channels of one 37.8 kHz stereo
 //! file, single speed; this case plays channel 0.
 
-use crate::console_tests::{
-    bit, put_number, record, spread, text, Buttons, Screen, XA_COUNT, XA_RECORD,
-};
+use crate::console_tests::{bit, record, spread, XA_COUNT, XA_RECORD};
 use crate::TimingRecord;
 use core::ptr::addr_of_mut;
 use psx_fmv::iso;
-use psx_font::FontAtlas;
 use psx_io::cd::xa::{DriveSpeed, Event, File, Player};
 use psx_io::timers;
 use psx_pack::cd::{SectorReader, SECTOR_WORDS};
-use psx_rt::interrupts;
 use psx_spu::{self as spu, CdVolume, Volume};
 
 /// The song file's name, and the numbers `xa-encode` printed in its manifest.
@@ -209,79 +205,9 @@ pub(crate) fn records(run: &Run) -> [TimingRecord; XA_COUNT] {
     ]
 }
 
-const LABEL: (u8, u8, u8) = (150, 170, 200);
-const VALUE: (u8, u8, u8) = (236, 240, 248);
-const NOTE: (u8, u8, u8) = (255, 216, 96);
-
-fn line(font: &FontAtlas, y: i16, label: &str, value: u32) {
-    text(font, 8, y, label, LABEL);
-    put_number(font, 120, y, value, VALUE);
-}
-
+/// Play the song on loop until it has looped twice (or plainly will not).
 #[inline(never)]
-fn draw(font: &FontAtlas, run: &Run) {
-    text(font, 8, 8, "XA MUSIC LOOP", VALUE);
-    text(font, 120, 8, SONG_FILE, LABEL);
-    text(font, 8, 22, "STATE", LABEL);
-    let colour = if run.play_error || run.no_loop {
-        (230, 100, 100)
-    } else {
-        NOTE
-    };
-    text(font, 120, 22, run.state, colour);
-    line(font, 36, "SONG MS", run.length_ms);
-    line(font, 48, "HEAD MS", run.elapsed_ms);
-    line(font, 60, "LOOPS", run.loops);
-    line(font, 72, "START MS", run.first_start_ms);
-    let mut gaps = run.gaps;
-    let (min, med, max) = spread(&mut gaps[..run.gap_count]);
-    text(font, 8, 90, "RESTART GAP MS", LABEL);
-    if run.gap_count != 0 {
-        text(font, 8, 102, "MIN", LABEL);
-        put_number(font, 40, 102, min, NOTE);
-        text(font, 104, 102, "MED", LABEL);
-        put_number(font, 136, 102, med, NOTE);
-        text(font, 200, 102, "MAX", LABEL);
-        put_number(font, 232, 102, max, NOTE);
-        for (k, gap) in run.gaps[..run.gap_count].iter().rev().take(8).enumerate() {
-            put_number(font, 8 + 38 * k as i16, 114, *gap, VALUE);
-        }
-    } else {
-        text(font, 8, 102, "NO LOOP YET", LABEL);
-    }
-    let mut periods = run.periods;
-    let (_, period, _) = spread(&mut periods[..run.period_count]);
-    line(font, 132, "PERIOD MS", period);
-    text(font, 8, 150, "GETLOCP", LABEL);
-    let (words, colour) = if !run.streaming_seen {
-        ("WAITING", LABEL)
-    } else if run.getlocp_updates() {
-        ("UPDATING", (96, 240, 128))
-    } else {
-        ("FROZEN OR SLOW", (230, 100, 100))
-    };
-    text(font, 120, 150, words, colour);
-    line(font, 162, "POSITIONS", run.distinct);
-    line(font, 174, "MAX STALL MS", run.max_stall_ms);
-    line(font, 186, "POLLS", run.polls);
-    text(font, 8, 218, "CROSS: BACK TO MENU", NOTE);
-}
-
-/// Frames between redraws: polling has to stay dense.
-const REDRAW_EVERY: u32 = 3;
-
-fn state_text(player: &Player, error: bool) -> &'static str {
-    match (error, player.is_playing(), player.is_streaming()) {
-        (true, _, _) => "PLAY REFUSED",
-        (_, false, _) => "STOPPED",
-        (_, true, false) => "SEEKING",
-        (_, true, true) => "PLAYING",
-    }
-}
-
-/// Play the song on loop until CROSS, START or TRIANGLE.
-#[inline(never)]
-pub(crate) fn run(screen: &mut Screen, font: &FontAtlas) -> Run {
+pub(crate) fn run() -> Run {
     let mut run = Run::new();
     // SAFETY: plain SPU register reads; the caller restores them from this.
     let (spucnt, cd_left, cd_right) = unsafe {
@@ -297,22 +223,16 @@ pub(crate) fn run(screen: &mut Screen, font: &FontAtlas) -> Run {
     spu::enable_cd_audio(true);
     let file = find_song_file();
     run.found = file.is_some();
-    let mut buttons = Buttons::new();
     if let Some(file) = file {
         // SAFETY: nothing else drives the controller from here on; the
         // reader above has stopped, and the player is released at the end.
         let mut player = Player::new(unsafe { psx_io::periph::Cd::steal() });
         player.set_volume(0x80, 0x80);
         run.length_ms = file.span_sector_count() * 1000 / SECTORS_PER_SECOND;
-        poll_loop(screen, font, &mut run, &mut player, file, &mut buttons);
+        poll_loop(&mut run, &mut player, file);
         player.release();
     } else {
         run.state = "FILE NOT FOUND";
-        while !buttons.poll().exit() {
-            screen.clear((6, 8, 18));
-            draw(font, &run);
-            screen.present();
-        }
     }
     psx_spu::set_cd_volume(
         psx_spu::CdVolume(cd_left as i16),
@@ -323,14 +243,7 @@ pub(crate) fn run(screen: &mut Screen, font: &FontAtlas) -> Run {
 }
 
 #[inline(never)]
-fn poll_loop(
-    screen: &mut Screen,
-    font: &FontAtlas,
-    run: &mut Run,
-    player: &mut Player,
-    file: File,
-    buttons: &mut Buttons,
-) {
+fn poll_loop(run: &mut Run, player: &mut Player, file: File) {
     let mut clock = Clock::start();
     let begun = clock.ticks();
     run.play_error = player.play(file.song(CHANNEL), true).is_err();
@@ -338,8 +251,7 @@ fn poll_loop(
     let mut awaiting_return = false;
     let mut head = u32::MAX;
     let mut head_changed = begun;
-    let mut frame = interrupts::vblank_count();
-    loop {
+    while !run.play_error {
         let event = player.poll();
         let now = clock.ticks();
         run.polls += 1;
@@ -375,20 +287,15 @@ fn poll_loop(
         }
         run.seconds = millis(now - begun) / 1000;
         run.no_loop = run.loops == 0 && millis(now - begun) > run.length_ms + 3000;
-        run.state = if run.no_loop {
-            "NO LOOP SEEN"
-        } else {
-            state_text(player, run.play_error)
-        };
-        if buttons.poll().exit() {
+        if run.no_loop || (run.loops >= 2 && !awaiting_return) {
             break;
         }
-        let v = interrupts::vblank_count();
-        if v.wrapping_sub(frame) >= REDRAW_EVERY {
-            frame = v;
-            screen.clear((6, 8, 18));
-            draw(font, run);
-            screen.flip();
-        }
     }
+    run.state = if run.no_loop {
+        "NO LOOP SEEN"
+    } else if run.play_error {
+        "PLAY REFUSED"
+    } else {
+        "LOOPED"
+    };
 }

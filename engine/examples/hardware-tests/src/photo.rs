@@ -24,12 +24,13 @@ use psx_rt::tty;
 use qrcodegen_no_heap::{QrCode, QrCodeEcc, Version};
 
 use crate::payload::{append, base64_encode, crc32, draw_qr, BinaryBuffer, QR_QUIET};
-use crate::{hex2, hex8, section_report, Mode, ScanReport, TestResult, TimingReport};
+use crate::report::{conformance_hash, hex4};
+use crate::{hex2, hex8, ScanReport, TestResult, TimingReport};
 
 /// Most pages a capture can need. Sized for the worst case a full
 /// characterisation run can produce with every conformance case failing, which
 /// is not a real console but is a real buffer.
-pub(crate) const CAPTURE_PAGE_MAX: usize = 12;
+pub(crate) const CAPTURE_PAGE_MAX: usize = 16;
 const BASE64_CHARS_PER_LINE: usize = 36;
 const BASE64_LINES_PER_PAGE: usize = 23;
 const BASE64_CHARS_PER_PAGE: usize = BASE64_CHARS_PER_LINE * BASE64_LINES_PER_PAGE;
@@ -43,7 +44,7 @@ const QR_VERSION_MAX: Version = Version::new(20);
 const QR_VERSION_MIN: Version = Version::new(10);
 const QR_SIZE: usize = 97;
 const QR_BUFFER_LEN: usize = QR_VERSION_MAX.buffer_len();
-const QR_TEXT_MAX: usize = 9 + BASE64_CHARS_PER_PAGE + 3 + 8;
+const QR_TEXT_MAX: usize = 13 + BASE64_CHARS_PER_PAGE + 3 + 8;
 /// Vertical room between the two header lines and the bottom of the screen.
 const QR_AREA: i16 = 210;
 
@@ -70,9 +71,7 @@ pub(crate) mod blocks {
     /// the TIMING block whenever there are any.
     pub const TIMING_EXT: u8 = 1 << 6;
 
-    /// What a routine run emits: verdicts, and detail only where it failed.
-    pub const CONFORMANCE: u8 = STATUS | FAILURES;
-    /// What a reference-establishing run emits: everything PX7 carried.
+    /// What every run emits: everything PX7 carried, plus the extended ids.
     pub const FULL: u8 = STATUS | FAILURES | OBSERVED | TIMING | MEMCTL | PRECISION;
 }
 
@@ -128,6 +127,7 @@ pub(crate) struct PhotoCapture {
     page_count: u8,
     flags: u8,
     failures: u16,
+    run_id: u16,
     binary_crc: u32,
     qr_modules: [u8; (QR_SIZE * QR_SIZE).div_ceil(8)],
     qr_size: u8,
@@ -143,21 +143,24 @@ impl PhotoCapture {
             page_count: 0,
             flags: 0,
             failures: 0,
+            run_id: 0,
             binary_crc: 0,
             qr_modules: [0; (QR_SIZE * QR_SIZE).div_ceil(8)],
             qr_size: 0,
         }
     }
 
+    /// Encode a finished run. `run_id_low` is the low byte of the run id; the
+    /// high byte rides in `timing.summary.runs`. Every run carries every block.
     pub(crate) fn encode(
         &mut self,
         timing: &TimingReport,
         results: &[TestResult; crate::TEST_COUNT],
-        conformance_run: u8,
+        run_id_low: u8,
         scans: [ScanReport; 3],
-        flags: u8,
-        page: usize,
     ) {
+        let conformance_run = run_id_low;
+        let flags = blocks::FULL;
         let mut binary = [0u8; BINARY_CAP];
         let mut out = BinaryBuffer::new(&mut binary);
         let byte_id = |record: &&crate::TimingRecord| record.id < 0x100;
@@ -188,8 +191,8 @@ impl PhotoCapture {
         out.push_u16(crate::PRECISION_VALUE_COUNT as u16);
         out.push_u8(3); // status bits per conformance case
         out.push_u8(scans.len() as u8);
-        out.push_u32(section_report(Mode::AllChecks, results).hash);
-        out.push_u32(section_report(Mode::GteChecks, results).hash);
+        out.push_u32(conformance_hash(results, false));
+        out.push_u32(conformance_hash(results, true));
         out.push_u32(timing.summary.hash);
         out.push_u32(timing.summary.aux);
 
@@ -286,10 +289,14 @@ impl PhotoCapture {
         self.flags = flags;
         self.failures = failures;
         self.binary_crc = crc;
+        self.run_id = u16::from(conformance_run) | (u16::from(timing.summary.runs) << 8);
         self.binary = binary;
-        self.encode_qr(page);
-
-        self.print_page(page);
+        self.encode_qr(0);
+        // The complete set on the TTY, so headless validation never depends
+        // on anyone paging through it.
+        for page in 0..self.page_count() {
+            self.print_page(page);
+        }
     }
 
     /// Never zero: page navigation divides by this, and it is read before the
@@ -325,6 +332,7 @@ impl PhotoCapture {
             &mut len,
             hex2(self.page_count).as_str().as_bytes(),
         );
+        append(&mut text, &mut len, hex4(self.run_id).as_str().as_bytes());
         append(&mut text, &mut len, b"/");
         append(&mut text, &mut len, self.page_chunk(page).as_bytes());
         append(&mut text, &mut len, b"/C:");
@@ -363,15 +371,6 @@ impl PhotoCapture {
         }
     }
 
-    /// The exact bytes the QR pages encode, for the audio link.
-    ///
-    /// Sliced to the encoded length: the backing array is cut for the
-    /// worst-case capture, and handing the whole thing to the audio link
-    /// once made its frame outgrow SPU RAM, so it silently sent nothing.
-    pub(crate) fn binary(&self) -> &[u8] {
-        &self.binary[..self.binary_len as usize]
-    }
-
     fn payload(&self) -> &str {
         unsafe { core::str::from_utf8_unchecked(&self.payload[..self.payload_len as usize]) }
     }
@@ -396,6 +395,7 @@ impl PhotoCapture {
         tty::print("hardware-tests: px8 PX8/");
         tty::print(hex2((page + 1) as u8).as_str());
         tty::print(hex2(self.page_count).as_str());
+        tty::print(hex4(self.run_id).as_str());
         tty::print("/");
         tty::print(self.page_chunk(page));
         tty::print("/C:");
@@ -404,32 +404,20 @@ impl PhotoCapture {
 }
 
 pub(crate) fn draw_capture_page(font: &FontAtlas, capture: &PhotoCapture, page: usize) {
-    // Title is shortened deliberately: the full string ran into the PAGE
-    // counter at x=208, and this header is what the operator reads off the TV
-    // to label a capture. A garbled page number is how captures get misfiled.
-    // Which capture this is, because the two kinds are told apart by the
-    // operator on the day and by the filename forever after. A conformance page
-    // photographed and filed as a characterisation reference is a diff against
-    // nothing.
-    let (title, tint) = if capture.flags & blocks::OBSERVED != 0 {
-        ("PX8 FULL", (255, 232, 128))
-    } else if capture.failures == 0 {
-        ("PX8 CONF - ALL PASS", (96, 240, 128))
+    // Header: which run, which page of how many, and the two CRCs the host
+    // checks. A garbled page number is how captures get misfiled, so the run
+    // id and the page count are the first things on the line.
+    let tint = if capture.failures == 0 {
+        (96, 240, 128)
     } else {
-        ("PX8 CONF - FAILURES", (255, 128, 96))
+        (255, 128, 96)
     };
-    font.draw_text(0, 0, title, tint);
+    font.draw_text(0, 0, "PX8 RUN", tint);
+    font.draw_text(64, 0, hex4(capture.run_id).as_str(), (232, 236, 244));
     font.draw_text(208, 0, "PAGE", (140, 160, 190));
     font.draw_text(248, 0, hex2((page + 1) as u8).as_str(), (232, 236, 244));
     font.draw_text(264, 0, "/", (140, 160, 190));
     font.draw_text(272, 0, hex2(capture.page_count).as_str(), (232, 236, 244));
-    // Labels are abbreviated so the navigation hint fits on the same line.
-    // START opening the menu has to be visible somewhere the operator is
-    // already looking, and this screen is where they spend the whole capture.
-    // Positions assume the 8px advance this font actually has. Labels are
-    // abbreviated so the navigation hint fits on the same line: START opening
-    // the menu has to be visible where the operator is already looking, and
-    // this is the screen they spend the whole capture on.
     font.draw_text(0, 10, "PG", (140, 160, 190));
     font.draw_text(
         20,
