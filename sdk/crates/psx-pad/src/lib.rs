@@ -49,6 +49,10 @@
 //! natural in game code.
 
 #![no_std]
+#![cfg_attr(
+    all(feature = "irq-engine", target_arch = "mips"),
+    feature(asm_experimental_arch)
+)]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
@@ -58,10 +62,15 @@ use psx_io::periph::ControllerPort;
 
 pub use psx_io::controller_port::Port;
 
+#[cfg(all(feature = "irq-engine", target_arch = "mips"))]
+pub mod console;
+pub mod engine;
 pub mod tracker;
 pub use tracker::PadTracker;
 
 // Under test the driver talks to a controller model, not the registers.
+#[cfg(test)]
+mod engine_tests;
 #[cfg(test)]
 mod mock_sio;
 #[cfg(test)]
