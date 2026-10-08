@@ -76,6 +76,9 @@ pub struct Model {
     pub ack_width: u64,
     pub fault: Fault,
     pub fault_byte: usize,
+    /// Model time the setup clock was last started at.
+    // psx-numeric-allow-next-line: host-only controller model, compiled under cfg(test)
+    pub clock_start: u64,
     /// Apply the fault to the first select only.
     pub fault_once: bool,
     /// Per-select `(id, fault, byte)` overrides, indexed by attempt.
@@ -127,6 +130,7 @@ impl Default for Model {
             ack_width: 5,
             fault: Fault::None,
             fault_byte: 3,
+            clock_start: 0,
             fault_once: false,
             sequence: Vec::new(),
             early: 0,
@@ -324,3 +328,28 @@ fn apply_command(m: &mut Model, index: usize, value: u8) {
         _ => {}
     }
 }
+
+/// Root counter 0 as the setup clock: one model tick is [`CYCLES_PER_TICK`]
+/// cycles.
+pub mod timers {
+    /// The root counters; only counter 0 is modelled.
+    #[derive(Clone, Copy)]
+    pub enum Timer {
+        /// Counter 0.
+        Timer0,
+    }
+
+    /// Restart the counter from zero.
+    pub fn set_mode(_timer: Timer, _mode: u16) {
+        super::with(|m| m.clock_start = m.now);
+    }
+
+    /// Cycles since the last mode write, modulo 65,536.
+    pub fn counter(_timer: Timer) -> u16 {
+        super::with(|m| ((m.now - m.clock_start) * super::CYCLES_PER_TICK) as u16)
+    }
+}
+
+/// Cycles one model tick stands for on the modelled setup clock.
+// psx-numeric-allow-next-line: host-only controller model, compiled under cfg(test)
+pub const CYCLES_PER_TICK: u64 = 100;

@@ -694,6 +694,12 @@ const ACK_WAIT_SPINS: u32 = 2_048;
 /// waits for each non-final byte's ACK readiness; the BIOS likewise paces bytes.
 pub const DEFAULT_SETUP_SPINS: u32 = 1_024;
 
+/// CPU cycles of setup time a prepared poll requires before its first byte:
+/// [`DEFAULT_SETUP_SPINS`] status reads at the 6.7 cycles each that the
+/// on-console sweep measured, rounded up. Spinning stays the measured contract;
+/// this only lets real work stand in for the spinning.
+pub const SETUP_CYCLES: u16 = 7_000;
+
 /// Poll the controller in port 1 once.
 ///
 /// The returned [`PadState`] always contains active-high buttons; in
@@ -703,7 +709,7 @@ pub const DEFAULT_SETUP_SPINS: u32 = 1_024;
 /// [`PadMode::Disconnected`] after the bounded acquisition attempts.
 #[doc(alias = "PadRead")]
 pub fn poll_port1() -> PadState {
-    poll_state(false)
+    poll_state(false, false)
 }
 
 /// Poll the controller in port 2 once.
@@ -711,7 +717,7 @@ pub fn poll_port1() -> PadState {
 /// The returned [`PadState`] always contains active-high buttons; in
 /// analog mode it also contains the four DualShock stick bytes.
 pub fn poll_port2() -> PadState {
-    poll_state(true)
+    poll_state(true, false)
 }
 
 /// Poll port 1 once and return the raw wire bytes plus `/ACK` observations,
@@ -814,6 +820,9 @@ pub fn require_analog_port2() -> AnalogRequirement {
 pub struct PadReader {
     port2: bool,
     last: PadState,
+    /// The port was selected by [`PadReader::prepare`] and the setup clock has
+    /// been running since.
+    prepared: bool,
 }
 
 impl PadReader {
@@ -822,6 +831,7 @@ impl PadReader {
         Self {
             port2: false,
             last: PadState::NONE,
+            prepared: false,
         }
     }
 
@@ -830,12 +840,40 @@ impl PadReader {
         Self {
             port2: true,
             last: PadState::NONE,
+            prepared: false,
         }
+    }
+
+    /// Select the port now, so the setup time the next poll needs passes while
+    /// the caller does other work.
+    ///
+    /// A poll spends most of its time on the setup delay between asserting the
+    /// select line and the first byte ([`DEFAULT_SETUP_SPINS`] status reads).
+    /// Called some work ahead of [`poll`](Self::poll), this asserts the line and
+    /// starts a cycle clock on root counter 0; the poll then spins the delay
+    /// only if the clock has not yet counted [`SETUP_CYCLES`]. The bytes, their
+    /// order and the `/ACK` pacing are those of a plain poll, so a prepared
+    /// poll reads the same state.
+    ///
+    /// The port stays selected until the poll; nothing else may use SIO0 in
+    /// between. A memory-card transfer would deselect it, and the poll would
+    /// find no pad and start over with the plain sequence (one extra
+    /// transaction, no wrong state).
+    pub fn prepare(&mut self) {
+        // SAFETY: `select` drives SIO0 only (SIO0 access contract), and the
+        // mode write configures root counter 0, which nothing else in the SDK
+        // uses.
+        unsafe {
+            select(self.port2, false);
+            psx_io::timers::set_mode(psx_io::timers::Timer::Timer0, 0);
+        }
+        self.prepared = true;
     }
 
     /// Poll the port once and return the latest clean state.
     pub fn poll(&mut self) -> PadState {
-        self.accept(poll_state(self.port2))
+        let prepared = core::mem::take(&mut self.prepared);
+        self.accept(poll_state(self.port2, prepared))
     }
 
     /// Fold one poll result into the reader and return the latest clean
@@ -865,13 +903,15 @@ impl PadReader {
 /// Transport failures are retried as whole transactions. Four address-byte
 /// replies of FF without ACK report Disconnected; a failure at any other
 /// stage reports Unknown instead of accepting partial button bytes.
-fn poll_state(port2: bool) -> PadState {
+fn poll_state(port2: bool, prepared: bool) -> PadState {
     let mut last = PadState::NONE;
     let mut all_absent = true;
     let mut tries = 0;
     while tries < 4 {
+        // Only the first transaction can use a select made ahead of the call;
+        // a retry starts from a fresh select like any plain poll.
         // SAFETY: `poll_once` only drives SIO0, under the SIO0 access contract above.
-        let s = unsafe { poll_once(port2) }.to_state();
+        let s = unsafe { poll_once(port2, prepared && tries == 0) }.to_state();
         if matches!(s.mode, PadMode::Digital | PadMode::Analog | PadMode::Config) {
             return s;
         }
@@ -1007,11 +1047,21 @@ unsafe fn ex(
 /// wait for each non-final byte's live ACK assertion and release. RX-ready
 /// only establishes that the current byte arrived, not that the controller
 /// is ready for the next one. No IRQ enable or CTRL rewrite is needed.
-unsafe fn poll_once(port2: bool) -> RawPoll {
+unsafe fn poll_once(port2: bool, prepared: bool) -> RawPoll {
     // SAFETY: every helper called here drives SIO0 only (SIO0 access contract).
     unsafe {
-        select(port2, false);
-        delay_reads(DEFAULT_SETUP_SPINS);
+        if prepared {
+            // `PadReader::prepare` selected the port and started the clock:
+            // spin only if the caller's work did not cover the setup time. A
+            // wrapped clock reads low, never high, so this never skips a wait
+            // that was owed.
+            if psx_io::timers::counter(psx_io::timers::Timer::Timer0) < SETUP_CYCLES {
+                delay_reads(DEFAULT_SETUP_SPINS);
+            }
+        } else {
+            select(port2, false);
+            delay_reads(DEFAULT_SETUP_SPINS);
+        }
         drain_rx();
         // A previous aborted transaction may have left ACK asserted.
         // Never count that old pulse as the new address byte's ACK.
@@ -1254,7 +1304,7 @@ fn request_analog(port2: bool, gap: u32) -> PadState {
         transaction(port2, [0x43, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
         delay_reads(gap);
     }
-    let mut state = poll_state(port2);
+    let mut state = poll_state(port2, false);
     let mut retries = 0;
     while state.mode == PadMode::Config && retries < CONFIG_EXIT_RETRIES {
         // The exit did not take: leave the pad in a playable mode rather
@@ -1264,7 +1314,7 @@ fn request_analog(port2: bool, gap: u32) -> PadState {
             transaction(port2, [0x43, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
             delay_reads(gap);
         }
-        state = poll_state(port2);
+        state = poll_state(port2, false);
         retries += 1;
     }
     state

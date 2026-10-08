@@ -310,3 +310,102 @@ fn a_missing_or_stuck_acknowledge_rejects_the_packet_and_recovers() {
         assert_eq!(pad.mode, PadMode::Analog, "{fault:?} recovers on retry");
     }
 }
+
+/// Run `work` model ticks of status reads between the select and the poll,
+/// then poll; returns the state and the ticks the poll itself took.
+fn prepared_poll(model: Model, work: u32) -> (PadState, u64) {
+    start(model);
+    let mut reader = PadReader::port1();
+    reader.prepare();
+    for _ in 0..work {
+        // SAFETY: the mock reads its own model; no hardware is involved.
+        let _ = unsafe { mock::read_u32(psx_hw::sio::sio0::STAT) };
+    }
+    let before = mock::with(|m| m.now);
+    let pad = reader.poll();
+    (pad, mock::with(|m| m.now) - before)
+}
+
+fn plain_poll_ticks(model: Model) -> (PadState, u64) {
+    start(model);
+    let mut reader = PadReader::port1();
+    let before = mock::with(|m| m.now);
+    let pad = reader.poll();
+    (pad, mock::with(|m| m.now) - before)
+}
+
+#[test]
+fn a_prepared_poll_reads_what_a_plain_poll_reads_in_far_fewer_reads() {
+    let held = button::CROSS | button::R1;
+    let model = || Model {
+        buttons: held,
+        ..Model::default()
+    };
+    let (plain, plain_ticks) = plain_poll_ticks(model());
+    let (prepared, prepared_ticks) = prepared_poll(model(), 100);
+    assert_eq!(prepared, plain);
+    assert_eq!(prepared.buttons.bits(), held);
+    assert!(plain_ticks >= 1_024, "plain poll took {plain_ticks} ticks");
+    assert!(
+        prepared_ticks < plain_ticks - 1_000,
+        "prepared {prepared_ticks} vs plain {plain_ticks}"
+    );
+    mock::with(|m| {
+        assert_eq!((m.attempts, m.mid_ctrl, m.early, m.tx_errors), (1, 0, 0, 0));
+        assert_eq!(m.sends, 9);
+        assert!(!m.is_selected());
+    });
+}
+
+#[test]
+fn a_prepared_poll_with_too_little_work_since_the_select_still_waits_the_setup_time() {
+    let (_, short) = prepared_poll(Model::default(), 60);
+    let (_, plain) = plain_poll_ticks(Model::default());
+    assert!(short + 60 >= plain, "short {short} plain {plain}");
+    mock::with(|m| assert_eq!((m.attempts, m.mid_ctrl), (1, 0)));
+}
+
+#[test]
+fn the_setup_clock_threshold_is_the_default_setup_delay_in_cycles() {
+    let ticks = u64::from(crate::SETUP_CYCLES) / mock::CYCLES_PER_TICK;
+    let (_, under) = prepared_poll(Model::default(), (ticks - 4) as u32);
+    let (_, over) = prepared_poll(Model::default(), (ticks + 2) as u32);
+    assert!(under > over + 900, "under {under} over {over}");
+}
+
+#[test]
+fn a_prepared_flag_serves_one_poll_only() {
+    start(Model::default());
+    let mut reader = PadReader::port1();
+    reader.prepare();
+    for _ in 0..100 {
+        // SAFETY: the mock reads its own model; no hardware is involved.
+        let _ = unsafe { mock::read_u32(psx_hw::sio::sio0::STAT) };
+    }
+    let _ = reader.poll();
+    let before = mock::with(|m| m.now);
+    let _ = reader.poll();
+    assert!(mock::with(|m| m.now) - before >= 1_024);
+}
+
+#[test]
+fn a_prepared_transaction_that_fails_is_retried_with_a_fresh_select() {
+    let (pad, _) = prepared_poll(fault_model(0x73, Fault::Rx, 3, true), 100);
+    assert_eq!(pad.mode, PadMode::Analog);
+    mock::with(|m| {
+        assert_eq!(m.attempts, 2);
+        assert_eq!(m.early, 0);
+    });
+}
+
+#[test]
+fn a_prepared_empty_port_reads_disconnected() {
+    let (pad, _) = prepared_poll(
+        Model {
+            id: 0xFF,
+            ..Model::default()
+        },
+        100,
+    );
+    assert_eq!(pad.mode, PadMode::Disconnected);
+}
