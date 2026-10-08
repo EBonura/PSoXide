@@ -27,8 +27,13 @@ dependencies = [
 name = "psx-fmv"
 version = "0.1.0"
 dependencies = [
+ "psx-gpu",
  "psx-hw",
  "psx-io",
+ "psx-pack",
+ "psx-rt",
+ "psx-spu",
+ "psx-vram",
 ]
 
 [[package]]

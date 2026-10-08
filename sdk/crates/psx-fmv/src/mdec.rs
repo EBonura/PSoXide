@@ -410,15 +410,24 @@ impl Mdec {
         Ok((out, finish.mdec.decode_finish()))
     }
 
-    /// Pull the next `dst.len()` words (a multiple of 32) of decoded pixels
-    /// over DMA1 and wait for them. For 15bpp one 16-pixel-wide column of
-    /// height `h` is `8 * h` words. `false` if DMA1 wedged.
-    pub fn read_column(&mut self, dst: &mut [u32]) -> bool {
-        let blocks = dst.len() / DMA_BLOCK_WORDS;
-        // Silicon reads a zero block count as 65,536 blocks, so a slice shorter
-        // than one block would be overrun by megabytes; one too long for BCR
-        // would be cut short. Refuse both rather than write past `dst`.
-        let Ok(blocks) = u16::try_from(blocks) else {
+    /// Start pulling the next `words` words (a multiple of 32) of decoded
+    /// pixels over DMA1 into `dst` and return at once;
+    /// [`column_done`](Self::column_done) says when they are in. The MDEC
+    /// decodes only while DMA1 drains its output, so a player that overlaps
+    /// work with the decode kicks the next column as soon as the last one
+    /// lands.
+    ///
+    /// Only whole 32-word blocks move. Returns `false`, having started
+    /// nothing, when that is no block at all or more than one transfer can
+    /// count: the controller reads a zero block count as 65,536 blocks, which
+    /// would run far past `dst`.
+    ///
+    /// # Safety
+    /// `dst` must point at `words` writable words that stay alive and
+    /// untouched until [`column_done`](Self::column_done) returns `true` or
+    /// DMA1 is aborted ([`abort_decode`](Self::abort_decode)).
+    pub unsafe fn read_column_start(&mut self, dst: *mut u32, words: usize) -> bool {
+        let Ok(blocks) = u16::try_from(words / DMA_BLOCK_WORDS) else {
             return false;
         };
         if blocks == 0 {
@@ -426,19 +435,47 @@ impl Mdec {
         }
         dma::abort(Channel::MdecOut);
         // SAFETY: the channel was just aborted, so it is idle. The transfer
-        // writes `blocks * DMA_BLOCK_WORDS` words, no more than `dst.len()`,
-        // into `dst`, borrowed exclusively until this function returns; the
-        // wait below, or the abort on a wedge, ends it before then.
+        // writes `blocks * DMA_BLOCK_WORDS` = `words` words at `dst`, which
+        // the caller keeps writable and untouched until it completes or is
+        // aborted.
         unsafe {
             dma::start(
                 Channel::MdecOut,
                 dma::Transfer {
-                    address: dst.as_mut_ptr() as u32,
+                    address: dst as u32,
                     size: dma::size_blocks(DMA_BLOCK_WORDS as u16, blocks),
                     control: CHCR_OUT,
                 },
             )
         };
+        true
+    }
+
+    /// True once the column [`read_column_start`](Self::read_column_start)
+    /// asked for has arrived.
+    #[inline]
+    pub fn column_done(&self) -> bool {
+        !dma::is_busy(Channel::MdecOut)
+    }
+
+    /// Stop both MDEC DMA channels, e.g. when a decode has taken too long. A
+    /// column or run-length buffer a transfer was using is free again once
+    /// this returns.
+    pub fn abort_decode(&mut self) {
+        dma::abort(Channel::MdecOut);
+        dma::abort(Channel::MdecIn);
+    }
+
+    /// Pull the next `dst.len()` words (a multiple of 32) of decoded pixels
+    /// over DMA1 and wait for them. For 15bpp one 16-pixel-wide column of
+    /// height `h` is `8 * h` words. `false` if DMA1 wedged.
+    pub fn read_column(&mut self, dst: &mut [u32]) -> bool {
+        // SAFETY: `dst` is borrowed exclusively until this function returns;
+        // the wait below, or the abort on a wedge, ends the transfer before
+        // then.
+        if !unsafe { self.read_column_start(dst.as_mut_ptr(), dst.len()) } {
+            return false;
+        }
         dma::wait_or_abort(Channel::MdecOut, DMA_SPINS)
     }
 
