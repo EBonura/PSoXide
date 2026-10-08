@@ -49,6 +49,7 @@ pub mod room_connections;
 pub mod sky_texture;
 pub mod spatial;
 pub mod streaming;
+pub mod terrain;
 pub mod texture_import;
 mod ui_types;
 pub mod units;
