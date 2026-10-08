@@ -127,7 +127,7 @@ pub(crate) fn validate(
     translation_shift: u8,
 ) -> Result<Tracks, ParseError> {
     let bad = ParseError::InvalidAnimationLayout;
-    if frame_count < 2 || frame_count > fmt::MAX_FRAMES || translation_shift > 8 {
+    if !(2..=fmt::MAX_FRAMES).contains(&frame_count) || translation_shift > 8 {
         return Err(bad);
     }
     let joints = joint_count as usize;
