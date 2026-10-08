@@ -21,10 +21,14 @@ Open `build/examples/mipsel-sony-psx/release/hello-input.cue` in the desktop emu
 
 ## Poll once each frame
 
-`poll_on(&mut port, Port::One)` returns the controller's connection mode, buttons and stick values. `port` is the controller-port token from `Peripherals`, shared with the memory card driver. Read it once at the beginning of your update and share that snapshot with the rest of your game:
+`PadReader::poll_on(&mut port)` returns the controller's connection mode, buttons and stick values. `port` is the controller-port token from `Peripherals`, shared with the memory card driver. A `PadReader` is bound to one socket (`PadReader::port1()` or `port2()`), and when a poll comes back garbled it returns the last clean state instead, so a held button does not read as released for one frame and then as a fresh press. Read it once at the beginning of your update and share that snapshot with the rest of your game:
 
 ```rust
-let state = poll_on(&mut port, Port::One);
+let mut port = peripherals.controller_port;
+let mut reader = PadReader::port1();
+
+// Inside the loop:
+let state = reader.poll_on(&mut port);
 let pad = state.buttons;
 if pad.is_held(button::UP) {
     r = r.saturating_add(4);
@@ -54,7 +58,7 @@ This is a small change you can make in `hello-input`; import `ButtonState` if it
 
 ## Check the connection and analogue mode
 
-A physical controller can disconnect or change mode. Use `state.is_connected()` before relying on input, and `state.is_analog()` before using `state.sticks`. The example displays the mode and raw stick bytes. Digital directional buttons and analogue axes are different inputs; do not assume a pad always returns stick data.
+A physical controller can disconnect or change mode. Use `state.is_connected()` before relying on input, and `state.is_analog()` before using `state.sticks`. The example displays the mode and raw stick bytes. It also asks for analog mode at boot with `require_analog_on` and asks again if a pad is plugged in later, because a program started from a launcher inherits whatever mode the last program left. Digital directional buttons and analogue axes are different inputs; do not assume a pad always returns stick data.
 
 ## Try a change
 

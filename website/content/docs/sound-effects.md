@@ -25,7 +25,7 @@ Before the render loop, the example initializes the SPU and parses each embedded
 
 ```rust
 let addr = SpuAddr::new(next_addr);
-spu.upload_adpcm(addr, audio.adpcm_bytes());
+spu_driver.upload_adpcm(addr, audio.adpcm_bytes());
 ch.voice.configure_sample(
     addr, audio.sample_rate_hz(), ch.volume, Adsr::sample(),
 );
@@ -50,7 +50,7 @@ Once the channels have been checked, start all newly triggered voices together:
 
 ```rust
 if on_mask != 0 {
-    Voice::key_on(on_mask);
+    Voice::start(on_mask);
 }
 prev_pad = pad;
 ```

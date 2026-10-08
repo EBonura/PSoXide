@@ -119,16 +119,6 @@ sha256 = "f72bb503168133501604f94069441e2deb2aa2b759d839595c1f357657cd87a5"
 emulator_sha256 = "dc04257de84b5520d99af0d6c15cdfe38444e4d985d47c1e3b924a73b5feebcf"
 
 [[capture]]
-file = "static/img/shots/ghpsx.png"
-source = "game library: GH-PSX 3D Rhythm Attack (gh-psx)/GH-PSX 3D Rhythm Attack (gh-psx).cue (GH-PSX 0.1.0)"
-frame = "ghpsx3/tick-002130.ppm"
-steps = 1300000000
-press = "300:start:8,600:cross:8,900:cross:8"
-interval = 30
-sha256 = "059e5a7237232f87b4ff9dc99053f56c7aa365e37d17863245f680362d538385"
-emulator_sha256 = "dc04257de84b5520d99af0d6c15cdfe38444e4d985d47c1e3b924a73b5feebcf"
-
-[[capture]]
 file = "static/img/shots/hwtests.png"
 source = "PSoXide-editor/build/examples/mipsel-sony-psx/release/hardware-tests.cue (HWTEST v1.24, built from PSoXide-editor main at 44d1f52b)"
 frame = "hw1/tick-000180.ppm"

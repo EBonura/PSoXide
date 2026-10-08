@@ -22,6 +22,6 @@ This generates the test songs, encodes them with `psx-audio-cook xa-encode` and 
 
 For original hardware, read the [burned-disc requirements and warning](@/legal.md#running-burned-discs-on-original-hardware).
 
-## Source
+## Complete source
 
-This example is newer than the SDK revision the site embeds sources from. Read the [complete source on GitHub](https://github.com/EBonura/PSoXide/tree/main/sdk/examples/hello-xa).
+{{<sdk_example_source name="hello-xa" />}}

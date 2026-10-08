@@ -89,39 +89,52 @@ Here's `sdk/examples/hello-tri/src/main.rs` with most comments removed:
 
 extern crate psx_rt; // keeps _start, the panic handler and (if enabled) the heap
 
-use psx_gpu::{self as gpu, framebuf::FrameBuffer, Resolution, VideoMode};
+use psx_gpu::display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode};
+use psx_gpu::prim::TriGouraud;
+use psx_gpu::Gpu;
 use psx_rt::tty;
 
 #[no_mangle]
 fn main() {
     tty::println("hello-tri: booted via HLE BIOS");
 
-    gpu::init(VideoMode::Ntsc, Resolution::R320X240);
+    let Some(peripherals) = psx_rt::Peripherals::take() else {
+        return;
+    };
+    let mut gpu = Gpu::new(
+        peripherals.gpu_dma,
+        DisplayConfig::new(VideoMode::Ntsc, Resolution::R320X240),
+    );
 
     // Two buffers: draw into one while the TV shows the other.
-    let mut fb = FrameBuffer::new(320, 240);
-    gpu::set_draw_area(0, 0, 319, 239);
-    gpu::set_draw_offset(0, 0);
+    let mut fb = DoubleBuffer::new(Resolution::R320X240);
+    gpu.set_draw_area((0, 0), (319, 239));
+    gpu.set_draw_offset((0, 0));
 
     tty::println("hello-tri: entering render loop");
     let mut frame: u16 = 0;
     loop {
-        fb.clear(0, 0, 64);
+        fb.clear(&mut gpu, (0, 0, 64));
 
         let wobble = (((frame % 60) as i16) - 30).abs();
         let verts = [(160, 40 + wobble), (60, 200 - wobble), (260, 200 - wobble)];
-        gpu::draw_tri_gouraud(verts, [(255, 64, 64), (64, 255, 64), (64, 64, 255)]);
+        gpu.draw(&TriGouraud::new(
+            verts,
+            [(255, 64, 64), (64, 255, 64), (64, 64, 255)],
+        ));
 
-        gpu::draw_sync();
+        gpu.wait_idle();
         psx_rt::interrupts::wait_vblank();
-        fb.swap();
+        fb.swap(&mut gpu);
 
         frame = frame.wrapping_add(1);
     }
 }
 ```
 
-There's no operating system underneath. `psx_rt` provides `_start`, zeroes the program's uninitialised globals and calls `main`. `tty::println` writes to the kernel's debug text output, which the emulator shows in its log; it doesn't appear on screen. From there it's you and the hardware: set the video mode, then loop forever. Clear the back buffer, send one triangle to the GPU, wait for the GPU to finish and for vertical blank, and swap buffers. Double buffering keeps the displayed frame separate from the one being drawn.
+There's no operating system underneath. `psx_rt` provides `_start`, zeroes the program's uninitialised globals and calls `main`. `tty::println` writes to the kernel's debug text output, which the emulator shows in its log; it doesn't appear on screen.
+
+Hardware access goes through owned tokens. `Peripherals::take()` hands out the set once and returns `None` after that, and `Gpu::new` consumes the GPU's DMA token, so only one piece of code can drive the GPU at a time. From there it's you and the hardware: set the video mode, then loop forever. Clear the back buffer, send one triangle to the GPU, wait for the GPU to finish and for vertical blank, and swap buffers. Double buffering keeps the displayed frame separate from the one being drawn.
 
 ## Where to go next
 
@@ -129,7 +142,7 @@ Build any other example the same way with `make disc EXAMPLE=<name>`:
 
 | Example | Shows |
 |---|---|
-| `hello-input` | Controller polling through `psx-pad` |
+| `hello-input` | Controller polling through `psx-pad`'s `PadReader` |
 | `hello-tex` | Textured sprites using a colour palette (CLUT) uploaded to video memory |
 | `hello-ot` | Depth sorting with an ordering table |
 | `hello-gte` | Transforms on the GTE, the PS1's geometry coprocessor |

@@ -80,7 +80,7 @@ A console capture then showed the demo disc menu's browse sound playing the star
 
 ## The Hardware Tests disc
 
-The [Hardware Tests disc](https://github.com/EBonura/PSoXide-editor/tree/main/engine/examples/hardware-tests) runs the same executable in PSoXide and on a real PlayStation. The current version in source is **v1.26** (26 September 2026). It lives in the editor repository and isn't on the public demo disc. Build it there with `make hardware-tests-disc`, then burn the BIN/CUE from `build/examples/mipsel-sony-psx/release/`.
+The [Hardware Tests disc](https://github.com/EBonura/PSoXide-editor/tree/main/engine/examples/hardware-tests) runs the same executable in PSoXide and on a real PlayStation. The current version in source is **v1.27** (4 October 2026). It lives in the editor repository and isn't on the public demo disc. Build it there with `make hardware-tests-disc`, then burn the BIN/CUE from `build/examples/mipsel-sony-psx/release/`.
 
 {{<figure src="img/shots/hwtests.png" alt="The Hardware Tests v1.24 main menu, listing RUN ALL TESTS + CAPTURE, FULL CHARACTERISATION CAPTURE, CONTROLLER TEST and other entries" native={true} width={320} height={240} caption="The main menu in v1.24. Later versions add MDEC DIAGNOSTIC and FMV STREAM TEST rows." />}}
 
