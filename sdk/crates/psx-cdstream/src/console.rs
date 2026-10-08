@@ -265,33 +265,48 @@ pub static mut PSX_CD_TRACE: [u32; 128] = [0; 128];
 #[no_mangle]
 pub static mut PSX_CD_TRACE_N: u32 = 0;
 
+/// Copy the counters into `PSX_CD_STATS`. Out of line: every wrapper and the
+/// handler end with this, and inlined it was a dozen loads and stores in each.
+#[inline(never)]
 fn publish(engine: &Engine<Mmio>) {
     // SAFETY: a plain store of a `repr(C)` block that only this module
     // writes; tools read it from outside the program.
     unsafe { core::ptr::write_volatile(&raw mut PSX_CD_STATS, engine.stats()) }
 }
 
-/// Run `f` on the engine with the CD source closed, then publish the
-/// counters and reopen the source if the engine wants it.
-fn with_engine<R>(f: impl FnOnce(&mut Engine<Mmio>) -> R) -> R {
-    // Close the source before the reference exists, so the handler cannot be
-    // running (or start) while this one is live.
+/// Start of a foreground section: close the CD source before the engine
+/// reference exists, so the handler cannot be running (or start) while this
+/// one is live. Out of line so each wrapper carries a call, not the sequence.
+#[inline(never)]
+fn enter() -> &'static mut Engine<Mmio> {
     let mask = irq::mask();
     irq::set_mask(mask & !CD_BIT);
-    // An empty asm is a compiler barrier. `compiler_fence` lowers to the
-    // MIPS-II SYNC instruction, which this CPU does not have.
-    // SAFETY: an empty asm, no operands and no effects beyond the barrier.
-    unsafe { core::arch::asm!("", options(nostack, preserves_flags)) };
     // SAFETY: the source is closed, so the handler (the only other user of
-    // the engine) cannot run until this section reopens it, and no other
+    // the engine) cannot run until `leave` reopens it, and no other
     // foreground reference exists because the CPU has one thread of control.
     let engine = unsafe { &mut *ENGINE.0.get() };
     engine.note_source_closed();
-    let result = f(engine);
+    engine
+}
+
+/// End of a foreground section: reopen the source if the engine wants it and
+/// publish the counters.
+#[inline(never)]
+fn leave(engine: &mut Engine<Mmio>) {
     engine.sync_source();
     publish(engine);
-    // SAFETY: as above.
-    unsafe { core::arch::asm!("", options(nostack, preserves_flags)) };
+}
+
+/// Run `f` on the engine with the CD source closed, then publish the
+/// counters and reopen the source if the engine wants it.
+///
+/// The section's entry and exit are calls, which the compiler cannot move
+/// the engine accesses across (both touch `I_MASK` through volatile stores).
+#[inline(always)]
+fn with_engine<R>(f: impl FnOnce(&mut Engine<Mmio>) -> R) -> R {
+    let engine = enter();
+    let result = f(engine);
+    leave(engine);
     result
 }
 
