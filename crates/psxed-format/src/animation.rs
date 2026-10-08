@@ -11,7 +11,7 @@
 //! ```text
 //!   AssetHeader (12 bytes)
 //!     magic       = b"PSXA"
-//!     version     = VERSION_V1, VERSION, VERSION_V3, VERSION_V4, or VERSION_V5
+//!     version     = VERSION_V1, VERSION, VERSION_V3, VERSION_V4, VERSION_V5, or VERSION_V6
 //!     flags       = reserved
 //!     payload_len = everything after this header
 //!
@@ -26,6 +26,7 @@
 //!     v3: 20 bytes, nine packed Q11 matrix elements + translation
 //!     v4: 16 bytes, six packed Q11 elements + correction + translation
 //!     v5: frame/joint u16 indices, padded to 4 bytes, then distinct v4 records
+//!     v6: per-joint keyed tracks, see below (no pose table)
 //! ```
 //!
 //! The pose matrix maps model-space vertices into the sampled animated
@@ -60,6 +61,87 @@ pub const VERSION_V4: u16 = 4;
 /// u16 per frame/joint selects a record. Pad the index table to four bytes;
 /// the remaining payload is the word-aligned dictionary of 16-byte v4 poses.
 pub const VERSION_V5: u16 = 5;
+
+/// Per-joint keyed tracks of smallest-three quaternion and variable-bit
+/// translation keys; see [`tracks`].
+pub const VERSION_V6: u16 = 6;
+
+/// Per-joint keyed tracks (`VERSION_V6`).
+///
+/// A v6 clip stores no pose table. Each joint owns one rotation track and one
+/// translation track; a track is `segments + 1` evenly spaced keys over the
+/// clip's `frame_count - 1` source intervals, and playback interpolates the two
+/// keys around the sampled position. Rotation keys are smallest-three
+/// quaternions, translation keys are variable-bit offsets from a per-joint
+/// minimum.
+///
+/// ```text
+///   AssetHeader (12)      version = 6
+///   AnimationHeader (8)   joint_count, frame_count, sample_rate_hz,
+///                         translation_shift (all translations are stored in
+///                         units of 1 << translation_shift)
+///   rate table (32)       u8 rate_count (1..=7), u8 pad,
+///                         u16 segments[7], u16 factor_q15[7], u16 pad
+///                         factor_q15 = round(segments * 32768 / (frame_count - 1))
+///   descriptors           joint_count * 16 bytes:
+///                           u8  rot_ctl    rate (0..=6, 7 = one constant key)
+///                                          | size_code << 3   (0 = 4 byte keys,
+///                                          1 = 5 byte keys, 2 = 6 byte keys)
+///                           u8  trans_ctl  rate | step_shift << 3
+///                           u16 axis_bits  bits x | bits y << 5 | bits z << 10
+///                           u16 rot_off    byte offset of the first rotation
+///                                          key from the key area start
+///                           u16 trans_off  likewise for translation keys
+///                           i16 min[3]     per-axis minimum, translation units
+///                           u8  trans_key_bytes (0..=6)
+///                           u8  pad
+///   key area              rotation and translation keys, byte packed
+///   slack (4 bytes)       zero, lets the decoder read a whole word at the last key
+/// ```
+///
+/// A rotation key holds, LSB first: the index (0..=3) of the omitted
+/// quaternion component, then the other three components (x, y, z, w order,
+/// skipping the omitted one) as signed integers of `10 + 2 * size_code` bits.
+/// The omitted component is the largest and is recovered as positive.
+/// A translation key packs `bits x`, `bits y`, `bits z` unsigned codes LSB
+/// first; axis value `= (min + (code << step_shift)) << translation_shift`.
+pub mod tracks {
+    /// Maximum number of distinct segment counts one clip can use.
+    pub const MAX_RATES: usize = 7;
+    /// Rate index meaning "one constant key".
+    pub const RATE_CONSTANT: u8 = 7;
+    /// Bytes of the rate table.
+    pub const RATE_TABLE_SIZE: usize = 32;
+    /// Bytes of one joint descriptor.
+    pub const DESCRIPTOR_SIZE: usize = 16;
+    /// Zero bytes after the last key.
+    pub const SLACK_BYTES: usize = 4;
+    /// Largest `frame_count` a v6 clip can have (positions are Q8 in a u16).
+    pub const MAX_FRAMES: u16 = 255;
+    /// Largest key area, bounded by the u16 offsets.
+    pub const MAX_KEY_AREA: usize = 0xffff;
+    /// Quaternion component bit width for a rotation size code.
+    pub const fn rotation_bits(size_code: u8) -> u32 {
+        10 + 2 * size_code as u32
+    }
+    /// Bytes of one rotation key for a size code.
+    pub const fn rotation_key_bytes(size_code: u8) -> usize {
+        4 + size_code as usize
+    }
+    /// Q12 magnitude that the largest stored component code maps to, the
+    /// reciprocal square root of two.
+    pub const COMPONENT_LIMIT_Q12: i32 = 2896;
+    /// Dequantisation multiplier, `COMPONENT_LIMIT_Q12 << 14` over the largest
+    /// code, rounded. A component is `(code * mul + (1 << 13)) >> 14`.
+    pub const fn component_mul(size_code: u8) -> i32 {
+        let levels = (1i64 << (rotation_bits(size_code) - 1)) - 1;
+        ((((COMPONENT_LIMIT_Q12 as i64) << 14) + levels / 2) / levels) as i32
+    }
+    /// Largest quaternion component code for a rotation size code.
+    pub const fn component_levels(size_code: u8) -> i32 {
+        (1i32 << (rotation_bits(size_code) - 1)) - 1
+    }
+}
 
 /// Byte layout of the animation payload header.
 #[repr(C, packed)]

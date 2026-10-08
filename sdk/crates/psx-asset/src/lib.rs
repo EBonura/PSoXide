@@ -43,6 +43,7 @@
 
 pub mod hma1;
 pub mod hmd8;
+pub mod tracks;
 
 use psx_gte::math::{Vec3I16, Vec3I32};
 
@@ -838,13 +839,19 @@ pub struct ModelFace {
 #[derive(Copy, Clone, Debug)]
 pub struct Animation<'a> {
     pose_indices: &'a [u8],
+    /// Pose table of v1 to v5 clips; the whole blob for a v6 clip.
     poses: &'a [u8],
     joint_count: u16,
     frame_count: u16,
     sample_rate_hz: u16,
+    /// Bytes of one pose record, or [`TRACKS_MARK`] for a v6 keyed-track clip.
     pose_record_size: usize,
     translation_shift: u8,
+    tracks: Option<tracks::Tracks>,
 }
+
+/// `pose_record_size` of a v6 clip, which has no pose records.
+const TRACKS_MARK: usize = 0;
 
 impl<'a> Animation<'a> {
     /// Parse a cooked `.psxanim` blob.
@@ -852,6 +859,7 @@ impl<'a> Animation<'a> {
         use psxed_format::animation::{
             AnimationHeader, MAGIC, POSE_RECORD_SIZE, POSE_RECORD_SIZE_V1, POSE_RECORD_SIZE_V3,
             POSE_RECORD_SIZE_V4, VERSION, VERSION_V1, VERSION_V3, VERSION_V4, VERSION_V5,
+            VERSION_V6,
         };
 
         if bytes.len() < psxed_format::AssetHeader::SIZE {
@@ -867,6 +875,7 @@ impl<'a> Animation<'a> {
             VERSION_V1 => POSE_RECORD_SIZE_V1,
             VERSION_V3 => POSE_RECORD_SIZE_V3,
             VERSION_V4 | VERSION_V5 => POSE_RECORD_SIZE_V4,
+            VERSION_V6 => TRACKS_MARK,
             _ => {
                 return Err(ParseError::UnsupportedVersion(version));
             }
@@ -892,6 +901,7 @@ impl<'a> Animation<'a> {
             || version == VERSION_V3
             || version == VERSION_V4
             || version == VERSION_V5
+            || version == VERSION_V6
         {
             let shift = read_u16(ah, 6);
             if shift > 15 {
@@ -903,6 +913,20 @@ impl<'a> Animation<'a> {
         };
         if joint_count == 0 || frame_count == 0 || sample_rate_hz == 0 {
             return Err(ParseError::InvalidAnimationLayout);
+        }
+
+        if version == VERSION_V6 {
+            let tracks = tracks::validate(bytes, joint_count, frame_count, translation_shift)?;
+            return Ok(Self {
+                pose_indices: &[],
+                poses: bytes,
+                joint_count,
+                frame_count,
+                sample_rate_hz,
+                pose_record_size: TRACKS_MARK,
+                translation_shift,
+                tracks: Some(tracks),
+            });
         }
 
         let mut off = payload_start + AnimationHeader::SIZE;
@@ -943,7 +967,14 @@ impl<'a> Animation<'a> {
             sample_rate_hz,
             pose_record_size,
             translation_shift,
+            tracks: None,
         })
+    }
+
+    /// `true` for a v6 clip of per-joint keyed tracks.
+    #[inline]
+    pub fn is_keyed_tracks(&self) -> bool {
+        self.tracks.is_some()
     }
 
     /// Number of joint poses per frame.
@@ -1023,6 +1054,12 @@ impl<'a> Animation<'a> {
     pub fn pose(&self, frame_index: u16, joint_index: u16) -> Option<JointPose> {
         if frame_index >= self.frame_count || joint_index >= self.joint_count {
             return None;
+        }
+        if let Some(tracks) = &self.tracks {
+            let pos = tracks::track_pos(self.poses, u32::from(frame_index) << 8);
+            // SAFETY: `tracks` came from `validate` for this blob and the joint
+            // index was checked above.
+            return Some(unsafe { tracks::joint_pose(tracks, joint_index as usize, &pos) });
         }
         let base = frame_index as usize * self.joint_count as usize * self.pose_record_size;
         // SAFETY: both indices were checked above. `from_bytes` validates
@@ -1358,6 +1395,15 @@ impl<'a> Animation<'a> {
         } else {
             base_frame + 1
         };
+        let alpha_q12 = (frame_q12 & 0x0fff) as u16;
+        let track_pos = if self.tracks.is_some() {
+            tracks::track_pos(
+                self.poses,
+                (u32::from(base_frame) << 8) | u32::from(alpha_q12 >> 4),
+            )
+        } else {
+            tracks::TrackPos::ZERO
+        };
         Some(AnimationPoseSample {
             animation: *self,
             base_frame,
@@ -1368,7 +1414,8 @@ impl<'a> Animation<'a> {
             next_frame_offset: next_frame as usize
                 * self.joint_count as usize
                 * self.pose_record_size,
-            alpha_q12: (frame_q12 & 0x0fff) as u16,
+            alpha_q12,
+            track_pos,
         })
     }
 }
@@ -1382,6 +1429,8 @@ pub struct AnimationPoseSample<'a> {
     base_frame_offset: usize,
     next_frame_offset: usize,
     alpha_q12: u16,
+    /// Key positions of a v6 clip; zero for every other version.
+    track_pos: tracks::TrackPos,
 }
 
 impl AnimationPoseSample<'_> {
@@ -1390,6 +1439,13 @@ impl AnimationPoseSample<'_> {
     pub fn pose(&self, joint_index: u16) -> Option<JointPose> {
         if joint_index >= self.animation.joint_count {
             return None;
+        }
+        if let Some(tracks) = &self.animation.tracks {
+            // SAFETY: `tracks` came from `validate` for this animation's blob
+            // and the joint index was checked above.
+            return Some(unsafe {
+                tracks::joint_pose(tracks, joint_index as usize, &self.track_pos)
+            });
         }
         if self.alpha_q12 == 0 || self.base_frame == self.next_frame {
             // SAFETY: the joint index was checked above and the frame offset
