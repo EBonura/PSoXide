@@ -138,8 +138,10 @@ let pad = psx_pad::console::pad(Port::One);
 The wrapper sits in the exception vector like psx-cdstream's: it saves the
 interrupted context, switches to its own 768-byte stack, runs the engine, restores
 the context and jumps to the handler that was in the vector before it
-(psx-rt's, or a cdstream wrapper that leads there). Install it last; a wrapper
-installed afterwards replaces it (`console::is_installed()` tells). It owns
+(psx-rt's, or a cdstream wrapper that leads there). psx-cdstream's wrapper
+chains the same way, so the two install in either order (before this change a
+cdstream installed after the engine replaced it and the pad went dead:
+`console::is_installed()` tells). It owns
 root counter 0 and takes the `ControllerPort` token, so nothing can poll the
 port synchronously while it runs, which `Lease` is for.
 
@@ -227,8 +229,8 @@ separate disc.
   supersedes: the timer interrupt is the setup wait, so there is nothing to
   prepare).
 * A game with its own exception handler in front of psx-rt's must chain to the
-  engine's wrapper for IRQ7 and counter 0 as well as VBlank, or install the
-  engine last.
+  engine's wrapper for IRQ7 and counter 0 as well as VBlank, or install it
+  before the engine (the engine chains to what it finds).
 * Port 2 hot-plug of a DualShock starts in digital mode; the game calls
   `request_analog` on the `Absent`-to-`Present` edge, as the engine runner does.
 * The synchronous driver keeps its cost. Its `PadReader::prepare_on` branch
