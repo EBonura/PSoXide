@@ -581,7 +581,6 @@ impl Playtest {
                         .snap_to_player_with_yaw(target, view, Angle::from_q12(768));
                     self.camera.update_vblanks(
                         PROJECTION,
-                        None,
                         target,
                         ThirdPersonCameraInput {
                             yaw_delta_q12: 0,
