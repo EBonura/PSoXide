@@ -734,7 +734,9 @@ mod tests {
             x ^= x << 5;
             x
         };
-        for case in 0..4000 {
+        // Miri is some orders slower; a few hundred streams still reach every path.
+        let cases = if cfg!(miri) { 150 } else { 4000 };
+        for case in 0..cases {
             let body = 8 + (next() % 400) as usize;
             let mut frame = std::vec![0u8; HEADER_BYTES + body];
             frame[0..2].copy_from_slice(&((next() % 64) as u16).to_le_bytes());
