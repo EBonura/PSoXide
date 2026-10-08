@@ -33,6 +33,23 @@ shipped without either, which is why no machine-code baseline exists for them.
 
 ## History
 
+### v2.0 (2026-10-08, schema PX8)
+
+MAJOR: the suite is one linear run (`src/run.rs`, [hardware-test-disc.md](hardware-test-disc.md)), ten areas in a fixed order with a reset at the start of each and a handoff record at the end. Every menu screen that was a separate probe is now a step of the run, except the controller test and the memory-card diagnostic, which need a person. What was removed and where each thing went is [hardware-test-v2-removed.md](hardware-test-v2-removed.md). Shared record ids keep their meaning, so a v1.28 silicon capture still compares record by record (`make hwtest-compare` does it), but a record's value can move because the state it starts from is now defined (a reset per area) and the order is different.
+
+New in the run:
+
+* Area handoff records `410`-`419`, final silence proof `41A` (flags `7F` silent), run info `41B`; boot snapshot `400`-`404`.
+* Folded probes (records unchanged): SB1 `430`-`436`, SB2 `440`-`486`, SB4 `490`-`49E`, PA4 `4A0`-`4AD` (two variants), PA1 `510`-`514`, CL2 `500`-`507`, the XA loop, kernel timing, display widths, 480i interlace, the three CD stream cases. A short MDEC decode check, `420`-`426`, replaces the MDEC diagnostic and the 75 s FMV stream playback.
+* Measurements that exist because the emulator could not settle them (records and fields in [hardware-test-disc.md](hardware-test-disc.md)): select-to-first-byte in cycles (`600`-`601`), `/ACK` latency and width per byte of a nine-byte pad poll and a four-byte card command, per port (`610`-`628`, `6C0`-`6CB`, answers `630`-`635`), pad and card reads taking turns, idle and under GPU load (`640`-`64F`), the SDK pad engine's setup sweep, Ack and Timed pacing, card lease and load behaviour (`660`-`693`, `6A0`-`6A6`), a hot-plug window (`638`-`63B`), Timer 1 on the HBlank clock free-running and tight-polled (`650`-`652`), the latency of 22 GTE commands read back with `mfc2`, with `swc2` and back to back (`150`-`195`), and DMA-versus-CPU RAM loads for the SPU, the ordering-table clear and GPU block channels (`140`-`145`).
+* `tools/hwtest-report.py --compare`, `--check-silence` and `--emulator-baseline`; `tools/hwtest-video-qr.py` groups pages by run id; `make hwtest-run`, `hwtest-diff`, `hwtest-compare`, `hwtest-baseline`.
+
+Bug fixed on the way: **SB2 never ran `begin_step` for segment 0 in v1.28 and earlier**, so its tables were never uploaded and the tone records of silicon captures taken before v2.0 (the SB2 tone rows) measured whatever the SPU RAM already held. They are not comparable with v2.0's.
+
+The end-of-run noise Manny heard at the end of v1.28 was the payload-as-audio FSK tone that every capture started; the generator is deleted.
+
+Pins: SDK 73ab7ef7 (carries `psx-pad`'s `irq-engine`, used by the pad-engine steps) and emulator 575faaa (CD timing calibrated to the v1.28 silicon capture). The conformance count in the emulator is 149 pass, 2 fail, 83 info: cases 139 (`NCLIP controlled scene-C +2`) and 201 (`GTE vs IRQ, return to EPC: RTPS intact`), both failing in the v1.25 emulator baseline too (see below), so they are known emulator gaps and not an effect of the new order. On silicon (v1.28) 139 passes with a settled reference that is itself partial (`0xF3A`) and 201 fails.
+
 ### v1.28 (2026-10-08, schema PX8)
 
 Three `CD STREAM` cases join `CONSOLE TESTS`, with `CD STREAM, ALL THREE` to run them in turn (`src/cdstream_cases.rs`; details in [hardware-test-disc.md](hardware-test-disc.md)). They measure the SDK's streaming transport, `psx-cdstream`, which the polled CD records never run, for milestone M0 of [streaming-design-2026-10-08.md](streaming-design-2026-10-08.md):

@@ -19,7 +19,7 @@
 //! capture is shown.
 //!
 //! The record ids this file owns:
-//! `0x410`-`0x419` area handoffs, `0x41A` final silence.
+//! `0x410`-`0x419` area handoffs, `0x41A` final silence, `0x41B` run info.
 
 use super::*;
 use crate::ui;
@@ -556,6 +556,16 @@ records_step!(records_gpu_batches, gpu_probes::push);
 records_step!(records_perf_safe, perf_probes::push_safe);
 records_step!(records_perf_extended, perf_probes::push_extended);
 records_step!(records_risky_ab, perf_probes::push_risky);
+records_step!(records_gte_latency, perf_probes::push_gte_latency);
+records_step!(records_dma_channels, perf_probes::push_dma_channels);
+records_step!(records_timer1_rate, timer1_rate::run);
+records_step!(records_sio_setup, sio_timing::setup_sweep);
+records_step!(records_sio_pad, sio_timing::pad_timing);
+records_step!(records_sio_card, sio_timing::card_timing);
+records_step!(records_engine_setup, pad_engine::setup_sweep);
+records_step!(records_engine_ack, pad_engine::pacing_ack);
+records_step!(records_engine_timed, pad_engine::pacing_timed);
+records_step!(records_engine_card, pad_engine::card_lease);
 
 fn run_tests(run: &mut Run, area: Area) {
     let total = TESTS.iter().filter(|spec| test_area(spec) == area).count();
@@ -580,6 +590,38 @@ fn run_tests(run: &mut Run, area: Area) {
         done += 1;
         ui::sub(done, total);
     }
+}
+
+/// Pad polls and card reads under load: the GPU load paints over the picture,
+/// so the progress screen is drawn again afterwards.
+fn step_sio_mix(run: &mut Run) {
+    sio_timing::pad_and_card(&mut run.timing.records, &mut run.next);
+    ui::repaint(run.font());
+}
+
+/// The engine with a GPU walk, SPU DMA and a CD read going; the load paints
+/// over the picture, so it is drawn again afterwards.
+fn step_engine_load(run: &mut Run) {
+    pad_engine::under_load(&mut run.timing.records, &mut run.next);
+    ui::repaint(run.font());
+}
+
+/// The optional hot-plug window. Says what it wants on the detail line and
+/// counts the seconds down.
+fn step_sio_hotplug(run: &mut Run) {
+    let font = run.font.take().expect("font uploaded by reset_area");
+    pad_engine::hotplug(
+        |seconds| {
+            let mut line = ui::Line::new();
+            line.s("OPTIONAL: UNPLUG AND REPLUG A PAD, ")
+                .u(seconds)
+                .s(" S");
+            ui::detail(&font, "SIO0", line.as_str());
+        },
+        &mut run.timing.records,
+        &mut run.next,
+    );
+    run.font = Some(font);
 }
 
 fn step_boot_snapshot(run: &mut Run) {
@@ -649,10 +691,12 @@ const STEPS: &[Step] = &[
     step(Area::IrqDmaTimers, "IRQ DMA TIMER CASES", tests_irq),
     step(Area::IrqDmaTimers, "IRQ DMA TIMER TIMING", records_irq),
     step(Area::IrqDmaTimers, "TIMER PRECISION", precision_timer_step),
+    step(Area::IrqDmaTimers, "TIMER 1 HBLANK RATE", records_timer1_rate),
     // 3
     step(Area::Gte, "GTE CASES", tests_gte),
     step(Area::Gte, "GTE SWEEP", step_gte_sweep),
     step(Area::Gte, "GTE TIMING", records_gte),
+    step(Area::Gte, "GTE COMMAND LATENCY", records_gte_latency),
     step(Area::Gte, "GTE PRECISION", precision_remaining_step),
     // 4
     step(Area::Gpu, "GPU CASES", tests_gpu),
@@ -684,6 +728,16 @@ const STEPS: &[Step] = &[
     // 7
     step(Area::Sio, "SIO CASES", tests_sio),
     step(Area::Sio, "SIO TIMING", records_sio),
+    step(Area::Sio, "SIO0 SELECT DELAY", records_sio_setup),
+    step(Area::Sio, "SIO0 PAD ACK TIMING", records_sio_pad),
+    step(Area::Sio, "SIO0 CARD ACK TIMING", records_sio_card),
+    step(Area::Sio, "PAD AND CARD UNDER LOAD", step_sio_mix),
+    step(Area::Sio, "ENGINE SETUP SWEEP", records_engine_setup),
+    step(Area::Sio, "ENGINE ACK PACING", records_engine_ack),
+    step(Area::Sio, "ENGINE TIMED PACING", records_engine_timed),
+    step(Area::Sio, "ENGINE AND CARD LEASE", records_engine_card),
+    step(Area::Sio, "ENGINE UNDER LOAD", step_engine_load),
+    step(Area::Sio, "PAD HOT-PLUG WINDOW", step_sio_hotplug),
     // 8
     step(Area::Perf, "STACK AND LEVER CASES", tests_perf),
     step(Area::Perf, "WARM PROBES", records_perf_safe),
@@ -692,6 +746,7 @@ const STEPS: &[Step] = &[
         "EXTENDED PROBES AND SHAPES",
         records_perf_extended,
     ),
+    step(Area::Perf, "DMA VERSUS CPU LOADS", records_dma_channels),
     // 9: last, hardest on the machine
     step(Area::Drive, "CD MOTOR", step_stream_motor),
     risky(Area::Drive, "REGISTER A/B (CAN HANG)", records_risky_ab),

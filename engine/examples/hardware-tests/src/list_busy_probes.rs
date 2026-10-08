@@ -589,3 +589,46 @@ macro_rules! loop_cases {
 loop_cases!(test_alu_counts, test_alu_cycles, 0, "alu iters");
 loop_cases!(test_ram_counts, test_ram_cycles, 1, "ram iters");
 loop_cases!(test_spad_counts, test_spad_cycles, 2, "spad iters");
+
+/// A GPU kept busy behind another measurement: channel 2 walks the list of
+/// large triangles again and again until [`GpuLoad::stop`]. The caller
+/// decides what runs alongside; this only keeps the GPU and the DMA channel
+/// working so the other measurement sees the bus a game would.
+pub(crate) struct GpuLoad {
+    armed: Armed,
+    head: u32,
+}
+
+impl GpuLoad {
+    pub(crate) fn start() -> Self {
+        let armed = arm(Kind::Expensive);
+        let head = addr_of_mut!(LIST) as u32;
+        // SAFETY: silicon probe: the transfer touches only memory this probe
+        // owns, which stays live and untouched until `stop` aborts it.
+        unsafe {
+            dma::raw::set_control(dma::Channel::Gpu, KICK);
+        }
+        Self { armed, head }
+    }
+
+    /// Start another walk if the last one finished.
+    pub(crate) fn keep_busy(&mut self) {
+        if !dma::is_busy(dma::Channel::Gpu) {
+            // SAFETY: as in `start`.
+            unsafe {
+                dma::raw::set_address(dma::Channel::Gpu, self.head);
+                dma::raw::set_control(dma::Channel::Gpu, KICK);
+            }
+        }
+    }
+
+    /// Stop the walk, let the GPU finish what it is drawing and put its DMA
+    /// direction back.
+    pub(crate) fn stop(&mut self) {
+        disarm(&self.armed, true);
+        let mut polls = 0u32;
+        while gpu_io::status().bits() & GPUSTAT_CMD_READY == 0 && polls < 2_000_000 {
+            polls += 1;
+        }
+    }
+}

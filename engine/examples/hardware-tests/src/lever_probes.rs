@@ -1114,7 +1114,10 @@ fn spu_mode(mode: u16) -> bool {
 }
 
 /// Everything else a game has going while the workload runs.
-struct Activity {
+pub(crate) struct Activity {
+    /// Poll the pad with the synchronous driver between rounds. Off when the
+    /// interrupt engine owns the port.
+    poll_pad: bool,
     head: u32,
     old_direction: u32,
     spu_enabled: bool,
@@ -1131,6 +1134,15 @@ static mut CD_SINK: [u32; SECTOR_WORDS] = [0; SECTOR_WORDS];
 
 impl Activity {
     fn start() -> Self {
+        Self::start_with(true)
+    }
+
+    /// The same load without touching the controller port.
+    pub(crate) fn start_without_pad() -> Self {
+        Self::start_with(false)
+    }
+
+    fn start_with(poll_pad: bool) -> Self {
         let head = build_list();
         let old_direction = (gpu_io::status().bits() >> 29) & 3;
         if !dma::wait_done(dma::Channel::Gpu, dma::DEFAULT_SPINS) {
@@ -1148,6 +1160,7 @@ impl Activity {
         let mut reader = SectorReader::new();
         let cd_streaming = reader.prepare() && reader.start_read(CDTEST_LBA);
         Self {
+            poll_pad,
             head,
             old_direction,
             spu_enabled,
@@ -1162,7 +1175,7 @@ impl Activity {
     }
 
     /// Between rounds, on the RAM stack: re-arm whatever has finished.
-    fn service(&mut self) {
+    pub(crate) fn service(&mut self) {
         if !dma::is_busy(dma::Channel::Gpu) {
             kick_list(self.head);
             self.gpu_kicks += 1;
@@ -1202,11 +1215,13 @@ impl Activity {
                 self.cd_streaming = false;
             }
         }
-        let _ = psx_pad::poll_port1();
-        self.pad_polls += 1;
+        if self.poll_pad {
+            let _ = psx_pad::poll_port1();
+            self.pad_polls += 1;
+        }
     }
 
-    fn stop(mut self) -> Self {
+    pub(crate) fn stop(mut self) -> Self {
         if !dma::wait_done(dma::Channel::Gpu, dma::DEFAULT_SPINS) {
             dma::abort(dma::Channel::Gpu);
         }

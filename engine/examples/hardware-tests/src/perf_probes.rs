@@ -337,6 +337,91 @@ const LEVERS: [Probe; 4] = [
     ),
 ];
 
+/// v2.0: every GTE command's latency as the CPU sees it, three ways. For each
+/// of 22 commands: the command then an immediate `mfc2` of MAC0, the same
+/// with MAC1, and the command back to back with itself. Whether a coprocessor
+/// read waits for the command, and for which registers, is the unknown; the
+/// back-to-back row is the command's issue-to-issue time for comparison.
+/// Ids `0x150`-`0x191`, three a command in the order of `GTE_LATENCY_NAMES`.
+const GTE_LATENCY: [Probe; 66] = [
+    probe(0x150, 16, lat_rtps_mac0, NONE, NONE).gte(),
+    probe(0x151, 16, lat_rtps_mac1, NONE, NONE).gte(),
+    probe(0x152, 16, lat_rtps_b2b, NONE, NONE).gte(),
+    probe(0x153, 16, lat_nclip_mac0, NONE, NONE).gte(),
+    probe(0x154, 16, lat_nclip_mac1, NONE, NONE).gte(),
+    probe(0x155, 16, lat_nclip_b2b, NONE, NONE).gte(),
+    probe(0x156, 16, lat_op_mac0, NONE, NONE).gte(),
+    probe(0x157, 16, lat_op_mac1, NONE, NONE).gte(),
+    probe(0x158, 16, lat_op_b2b, NONE, NONE).gte(),
+    probe(0x159, 16, lat_dpcs_mac0, NONE, NONE).gte(),
+    probe(0x15A, 16, lat_dpcs_mac1, NONE, NONE).gte(),
+    probe(0x15B, 16, lat_dpcs_b2b, NONE, NONE).gte(),
+    probe(0x15C, 16, lat_intpl_mac0, NONE, NONE).gte(),
+    probe(0x15D, 16, lat_intpl_mac1, NONE, NONE).gte(),
+    probe(0x15E, 16, lat_intpl_b2b, NONE, NONE).gte(),
+    probe(0x15F, 16, lat_mvmva_mac0, NONE, NONE).gte(),
+    probe(0x160, 16, lat_mvmva_mac1, NONE, NONE).gte(),
+    probe(0x161, 16, lat_mvmva_b2b, NONE, NONE).gte(),
+    probe(0x162, 8, lat_ncds_mac0, NONE, NONE).gte(),
+    probe(0x163, 8, lat_ncds_mac1, NONE, NONE).gte(),
+    probe(0x164, 8, lat_ncds_b2b, NONE, NONE).gte(),
+    probe(0x165, 8, lat_cdp_mac0, NONE, NONE).gte(),
+    probe(0x166, 8, lat_cdp_mac1, NONE, NONE).gte(),
+    probe(0x167, 8, lat_cdp_b2b, NONE, NONE).gte(),
+    probe(0x168, 8, lat_ncdt_mac0, NONE, NONE).gte(),
+    probe(0x169, 8, lat_ncdt_mac1, NONE, NONE).gte(),
+    probe(0x16A, 8, lat_ncdt_b2b, NONE, NONE).gte(),
+    probe(0x16B, 8, lat_nccs_mac0, NONE, NONE).gte(),
+    probe(0x16C, 8, lat_nccs_mac1, NONE, NONE).gte(),
+    probe(0x16D, 8, lat_nccs_b2b, NONE, NONE).gte(),
+    probe(0x16E, 16, lat_cc_mac0, NONE, NONE).gte(),
+    probe(0x16F, 16, lat_cc_mac1, NONE, NONE).gte(),
+    probe(0x170, 16, lat_cc_b2b, NONE, NONE).gte(),
+    probe(0x171, 8, lat_ncs_mac0, NONE, NONE).gte(),
+    probe(0x172, 8, lat_ncs_mac1, NONE, NONE).gte(),
+    probe(0x173, 8, lat_ncs_b2b, NONE, NONE).gte(),
+    probe(0x174, 8, lat_nct_mac0, NONE, NONE).gte(),
+    probe(0x175, 8, lat_nct_mac1, NONE, NONE).gte(),
+    probe(0x176, 8, lat_nct_b2b, NONE, NONE).gte(),
+    probe(0x177, 16, lat_sqr_mac0, NONE, NONE).gte(),
+    probe(0x178, 16, lat_sqr_mac1, NONE, NONE).gte(),
+    probe(0x179, 16, lat_sqr_b2b, NONE, NONE).gte(),
+    probe(0x17A, 16, lat_dcpl_mac0, NONE, NONE).gte(),
+    probe(0x17B, 16, lat_dcpl_mac1, NONE, NONE).gte(),
+    probe(0x17C, 16, lat_dcpl_b2b, NONE, NONE).gte(),
+    probe(0x17D, 8, lat_dpct_mac0, NONE, NONE).gte(),
+    probe(0x17E, 8, lat_dpct_mac1, NONE, NONE).gte(),
+    probe(0x17F, 8, lat_dpct_b2b, NONE, NONE).gte(),
+    probe(0x180, 16, lat_avsz3_mac0, NONE, NONE).gte(),
+    probe(0x181, 16, lat_avsz3_mac1, NONE, NONE).gte(),
+    probe(0x182, 16, lat_avsz3_b2b, NONE, NONE).gte(),
+    probe(0x183, 16, lat_avsz4_mac0, NONE, NONE).gte(),
+    probe(0x184, 16, lat_avsz4_mac1, NONE, NONE).gte(),
+    probe(0x185, 16, lat_avsz4_b2b, NONE, NONE).gte(),
+    probe(0x186, 8, lat_rtpt_mac0, NONE, NONE).gte(),
+    probe(0x187, 8, lat_rtpt_mac1, NONE, NONE).gte(),
+    probe(0x188, 8, lat_rtpt_b2b, NONE, NONE).gte(),
+    probe(0x189, 16, lat_gpf_mac0, NONE, NONE).gte(),
+    probe(0x18A, 16, lat_gpf_mac1, NONE, NONE).gte(),
+    probe(0x18B, 16, lat_gpf_b2b, NONE, NONE).gte(),
+    probe(0x18C, 16, lat_gpl_mac0, NONE, NONE).gte(),
+    probe(0x18D, 16, lat_gpl_mac1, NONE, NONE).gte(),
+    probe(0x18E, 16, lat_gpl_b2b, NONE, NONE).gte(),
+    probe(0x18F, 8, lat_ncct_mac0, NONE, NONE).gte(),
+    probe(0x190, 8, lat_ncct_mac1, NONE, NONE).gte(),
+    probe(0x191, 8, lat_ncct_b2b, NONE, NONE).gte(),
+];
+
+/// A store of a coprocessor register straight after a command (`swc2`), for
+/// four commands: the interlock the emulator now models for it was never
+/// measured on a console. Ids `0x192`-`0x195`.
+const GTE_SWC2: [Probe; 4] = [
+    probe(0x192, 16, lat_rtps_swc2_mac1, Arg::RamWord, NONE).gte(),
+    probe(0x193, 16, lat_rtps_swc2_sxy2, Arg::RamWord, NONE).gte(),
+    probe(0x194, 16, lat_nclip_swc2_mac0, Arg::RamWord, NONE).gte(),
+    probe(0x195, 16, lat_sqr_swc2_mac1, Arg::RamWord, NONE).gte(),
+];
+
 #[derive(Copy, Clone)]
 struct AbProbe {
     id: u16,
@@ -456,6 +541,106 @@ pub(crate) fn push_extended(records: &mut Records, next: &mut usize) {
     push_probes(&EXTENDED, records, next);
     push_probes(&SHAPES, records, next);
     push_dma(records, next);
+}
+
+/// The GTE command latency table (v2.0), with the GTE seeded before each
+/// sample so the inputs are defined.
+pub(crate) fn push_gte_latency(records: &mut Records, next: &mut usize) {
+    push_probes(&GTE_LATENCY, records, next);
+    push_probes(&GTE_SWC2, records, next);
+}
+
+/// Where the CPU's RAM loads wait on each DMA channel: 64 loads with the
+/// channel idle and the same loads right after kicking a transfer big enough
+/// to outlast them. GPU list walking is `push_dma`'s; these are the other
+/// three: SPU block DMA, OTC clear and GPU block DMA.
+pub(crate) fn push_dma_channels(records: &mut Records, next: &mut usize) {
+    type Overlap = fn(u32, u32, u32, u32) -> u16;
+    let data = Arg::RamWord.resolve();
+    let run: Overlap = timed_loads_with_dma;
+
+    // SPU: 256 words as 16 blocks of 16, written to SPU RAM at 16 cycles a
+    // halfword, which keeps the channel busy for thousands of cycles.
+    for (id, kick) in [(0x140u16, 0u32), (0x141, SPU_KICK)] {
+        let record = sample_timing(id, 64, || with_spu_dma(|base, head| run(base, head, kick, data)));
+        push_timing_record(records, next, record);
+    }
+    // OTC: 2048 words cleared backwards, one RAM write a word.
+    for (id, kick) in [(0x142u16, 0u32), (0x143, OTC_KICK)] {
+        let record = sample_timing(id, 64, || with_otc_dma(|base, head| run(base, head, kick, data)));
+        push_timing_record(records, next, record);
+    }
+    // GPU block DMA of NOP words: the channel reads RAM and the GPU takes it.
+    for (id, kick) in [(0x144u16, 0u32), (0x145, GPU_BLOCK_KICK)] {
+        let record = sample_timing(id, 64, || with_gpu_block_dma(|base, head| run(base, head, kick, data)));
+        push_timing_record(records, next, record);
+    }
+}
+
+const SPU_KICK: u32 =
+    psx_hw::dma::CHCR_TO_DEVICE | psx_hw::dma::CHCR_SYNC_BLOCK | psx_hw::dma::CHCR_START;
+const GPU_BLOCK_KICK: u32 = SPU_KICK;
+const OTC_KICK: u32 = psx_hw::dma::CHCR_STEP_BACKWARD
+    | psx_hw::dma::CHCR_SYNC_MANUAL
+    | psx_hw::dma::CHCR_START
+    | psx_hw::dma::CHCR_TRIGGER;
+
+static mut DMA_SOURCE: [u32; 256] = [0; 256];
+const OTC_WORDS: usize = 2048;
+static mut DMA_OT: [u32; OTC_WORDS] = [0; OTC_WORDS];
+
+/// Set the SPU up for a DMA write of 256 words and run `body(base, source)`,
+/// then put SPUCNT back. The channel's address and size are set; the body's
+/// assembly writes MADR and CHCR.
+fn with_spu_dma(body: impl FnOnce(u32, u32) -> u16) -> u16 {
+    use psx_hw::spu::{SPUCNT, TRANSFER_ADDR, TRANSFER_CTRL};
+    // SAFETY: SPU register writes and a DMA from memory this probe owns; the
+    // body waits the channel idle before it returns.
+    unsafe {
+        let old = psx_io::read_u16(SPUCNT);
+        let stopped = old & !0x0030;
+        psx_io::write_u16(SPUCNT, stopped);
+        psx_io::write_u16(TRANSFER_CTRL, 0x0004);
+        psx_io::write_u16(TRANSFER_ADDR, 0x0800);
+        psx_io::write_u16(SPUCNT, stopped | 0x0020);
+        dma::enable_channel(dma::Channel::Spu);
+        dma::raw::set_size(dma::Channel::Spu, dma::size_blocks(16, 16));
+        let source = (&raw mut DMA_SOURCE) as u32;
+        let elapsed = body(dma::Channel::Spu.register_base(), source);
+        psx_io::write_u16(SPUCNT, old);
+        elapsed
+    }
+}
+
+fn with_otc_dma(body: impl FnOnce(u32, u32) -> u16) -> u16 {
+    // SAFETY: a DMA into a table this probe owns; the body waits for idle.
+    unsafe {
+        let table = (&raw mut DMA_OT) as *mut u32;
+        dma::enable_channel(dma::Channel::OrderingTableClear);
+        dma::raw::set_size(
+            dma::Channel::OrderingTableClear,
+            dma::size_words(OTC_WORDS as u16),
+        );
+        let end = table.add(OTC_WORDS - 1) as u32;
+        body(dma::Channel::OrderingTableClear.register_base(), end)
+    }
+}
+
+fn with_gpu_block_dma(body: impl FnOnce(u32, u32) -> u16) -> u16 {
+    let old_direction = (gpu_io::status().bits() >> 29) & 3;
+    gpu_io::write_display_control(0x0400_0002); // DMA CPU -> GP0
+    dma::enable_channel(dma::Channel::Gpu);
+    // SAFETY: a DMA of GP0 NOPs from memory this probe owns; the body waits
+    // for idle.
+    let elapsed = unsafe {
+        dma::raw::set_size(dma::Channel::Gpu, dma::size_blocks(16, 16));
+        body(
+            dma::Channel::Gpu.register_base(),
+            (&raw mut DMA_SOURCE) as u32,
+        )
+    };
+    gpu_io::write_display_control(0x0400_0000 | old_direction);
+    elapsed
 }
 
 pub(crate) fn push_risky(records: &mut Records, next: &mut usize) {
@@ -848,6 +1033,107 @@ rtps_read_probe!(rtps_read_mac1, 111, 0, 0x480AC800);
 rtps_read_probe!(rtps_read_ir1, 112, 0, 0x480A4800);
 // The control: the same read once RTPS (15 clocks) has certainly finished.
 rtps_read_probe!(rtps_read_otz_after_gap, 113, 16, 0x480A3800);
+
+/// `$reps` x (GTE command `$word`; `$read`), then the usual idle tail. The
+/// read is `mfc2 $10` of MAC0 (0x480AC000) or MAC1 (0x480AC800): if it waits
+/// for the command, the block costs the command's latency a turn; if it does
+/// not, it costs two instructions. The back-to-back twin uses `gte_probe!`.
+macro_rules! gte_read_probe {
+    ($name:ident, $id:literal, $reps:literal, $word:literal, $read:literal) => {
+        warm_probe!(
+            $name,
+            $id,
+            concat!(
+                ".rept ",
+                stringify!($reps),
+                "\n",
+                ".word ",
+                stringify!($word),
+                "\n",
+                ".word ",
+                stringify!($read),
+                "\n",
+                ".endr\n",
+                ".rept 48\nnop\n.endr\n"
+            )
+        );
+    };
+}
+
+gte_read_probe!(lat_rtps_mac0, 130, 16, 0x4A080001, 0x480AC000);
+gte_read_probe!(lat_rtps_mac1, 131, 16, 0x4A080001, 0x480AC800);
+gte_probe!(lat_rtps_b2b, 132, 16, 0x4A080001, 0);
+gte_read_probe!(lat_nclip_mac0, 133, 16, 0x4A000006, 0x480AC000);
+gte_read_probe!(lat_nclip_mac1, 134, 16, 0x4A000006, 0x480AC800);
+gte_probe!(lat_nclip_b2b, 135, 16, 0x4A000006, 0);
+gte_read_probe!(lat_op_mac0, 136, 16, 0x4A08000C, 0x480AC000);
+gte_read_probe!(lat_op_mac1, 137, 16, 0x4A08000C, 0x480AC800);
+gte_probe!(lat_op_b2b, 138, 16, 0x4A08000C, 0);
+gte_read_probe!(lat_dpcs_mac0, 139, 16, 0x4A080010, 0x480AC000);
+gte_read_probe!(lat_dpcs_mac1, 140, 16, 0x4A080010, 0x480AC800);
+gte_probe!(lat_dpcs_b2b, 141, 16, 0x4A080010, 0);
+gte_read_probe!(lat_intpl_mac0, 142, 16, 0x4A080011, 0x480AC000);
+gte_read_probe!(lat_intpl_mac1, 143, 16, 0x4A080011, 0x480AC800);
+gte_probe!(lat_intpl_b2b, 144, 16, 0x4A080011, 0);
+gte_read_probe!(lat_mvmva_mac0, 145, 16, 0x4A080012, 0x480AC000);
+gte_read_probe!(lat_mvmva_mac1, 146, 16, 0x4A080012, 0x480AC800);
+gte_probe!(lat_mvmva_b2b, 147, 16, 0x4A080012, 0);
+gte_read_probe!(lat_ncds_mac0, 148, 8, 0x4A080013, 0x480AC000);
+gte_read_probe!(lat_ncds_mac1, 149, 8, 0x4A080013, 0x480AC800);
+gte_probe!(lat_ncds_b2b, 150, 8, 0x4A080013, 0);
+gte_read_probe!(lat_cdp_mac0, 151, 8, 0x4A080014, 0x480AC000);
+gte_read_probe!(lat_cdp_mac1, 152, 8, 0x4A080014, 0x480AC800);
+gte_probe!(lat_cdp_b2b, 153, 8, 0x4A080014, 0);
+gte_read_probe!(lat_ncdt_mac0, 154, 8, 0x4A080016, 0x480AC000);
+gte_read_probe!(lat_ncdt_mac1, 155, 8, 0x4A080016, 0x480AC800);
+gte_probe!(lat_ncdt_b2b, 156, 8, 0x4A080016, 0);
+gte_read_probe!(lat_nccs_mac0, 157, 8, 0x4A08001B, 0x480AC000);
+gte_read_probe!(lat_nccs_mac1, 158, 8, 0x4A08001B, 0x480AC800);
+gte_probe!(lat_nccs_b2b, 159, 8, 0x4A08001B, 0);
+gte_read_probe!(lat_cc_mac0, 160, 16, 0x4A08001C, 0x480AC000);
+gte_read_probe!(lat_cc_mac1, 161, 16, 0x4A08001C, 0x480AC800);
+gte_probe!(lat_cc_b2b, 162, 16, 0x4A08001C, 0);
+gte_read_probe!(lat_ncs_mac0, 163, 8, 0x4A08001E, 0x480AC000);
+gte_read_probe!(lat_ncs_mac1, 164, 8, 0x4A08001E, 0x480AC800);
+gte_probe!(lat_ncs_b2b, 165, 8, 0x4A08001E, 0);
+gte_read_probe!(lat_nct_mac0, 166, 8, 0x4A080020, 0x480AC000);
+gte_read_probe!(lat_nct_mac1, 167, 8, 0x4A080020, 0x480AC800);
+gte_probe!(lat_nct_b2b, 168, 8, 0x4A080020, 0);
+gte_read_probe!(lat_sqr_mac0, 169, 16, 0x4A080028, 0x480AC000);
+gte_read_probe!(lat_sqr_mac1, 170, 16, 0x4A080028, 0x480AC800);
+gte_probe!(lat_sqr_b2b, 171, 16, 0x4A080028, 0);
+gte_read_probe!(lat_dcpl_mac0, 172, 16, 0x4A080029, 0x480AC000);
+gte_read_probe!(lat_dcpl_mac1, 173, 16, 0x4A080029, 0x480AC800);
+gte_probe!(lat_dcpl_b2b, 174, 16, 0x4A080029, 0);
+gte_read_probe!(lat_dpct_mac0, 175, 8, 0x4A08002A, 0x480AC000);
+gte_read_probe!(lat_dpct_mac1, 176, 8, 0x4A08002A, 0x480AC800);
+gte_probe!(lat_dpct_b2b, 177, 8, 0x4A08002A, 0);
+gte_read_probe!(lat_avsz3_mac0, 178, 16, 0x4A08002D, 0x480AC000);
+gte_read_probe!(lat_avsz3_mac1, 179, 16, 0x4A08002D, 0x480AC800);
+gte_probe!(lat_avsz3_b2b, 180, 16, 0x4A08002D, 0);
+gte_read_probe!(lat_avsz4_mac0, 181, 16, 0x4A08002E, 0x480AC000);
+gte_read_probe!(lat_avsz4_mac1, 182, 16, 0x4A08002E, 0x480AC800);
+gte_probe!(lat_avsz4_b2b, 183, 16, 0x4A08002E, 0);
+gte_read_probe!(lat_rtpt_mac0, 184, 8, 0x4A080030, 0x480AC000);
+gte_read_probe!(lat_rtpt_mac1, 185, 8, 0x4A080030, 0x480AC800);
+gte_probe!(lat_rtpt_b2b, 186, 8, 0x4A080030, 0);
+gte_read_probe!(lat_gpf_mac0, 187, 16, 0x4A08003D, 0x480AC000);
+gte_read_probe!(lat_gpf_mac1, 188, 16, 0x4A08003D, 0x480AC800);
+gte_probe!(lat_gpf_b2b, 189, 16, 0x4A08003D, 0);
+gte_read_probe!(lat_gpl_mac0, 190, 16, 0x4A08003E, 0x480AC000);
+gte_read_probe!(lat_gpl_mac1, 191, 16, 0x4A08003E, 0x480AC800);
+gte_probe!(lat_gpl_b2b, 192, 16, 0x4A08003E, 0);
+gte_read_probe!(lat_ncct_mac0, 193, 8, 0x4A08003F, 0x480AC000);
+gte_read_probe!(lat_ncct_mac1, 194, 8, 0x4A08003F, 0x480AC800);
+gte_probe!(lat_ncct_b2b, 195, 8, 0x4A08003F, 0);
+
+// SWC2 straight after a command: a store of a coprocessor register is a read
+// of the result and may interlock like MFC2. swc2 rt,0($8) with $8 = a RAM
+// word: 0xE9190000 MAC1, 0xE9180000 MAC0, 0xE90E0000 SXY2.
+gte_read_probe!(lat_rtps_swc2_mac1, 196, 16, 0x4A080001, 0xE9190000);
+gte_read_probe!(lat_rtps_swc2_sxy2, 197, 16, 0x4A080001, 0xE90E0000);
+gte_read_probe!(lat_nclip_swc2_mac0, 198, 16, 0x4A000006, 0xE9180000);
+gte_read_probe!(lat_sqr_swc2_mac1, 199, 16, 0x4A080028, 0xE9190000);
 
 /// The cached twin of `warm_call_pairs`. It lives in the I-cache entry section
 /// at page offset 0x100, so its lines (16 to 51) can never share a cache index

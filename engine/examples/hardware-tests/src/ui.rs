@@ -81,7 +81,7 @@ pub(crate) fn banner(font: &FontAtlas) {
         gpu,
         8,
         24,
-        "ONE LINEAR RUN. DO NOT TOUCH THE PAD.",
+        "ONE LINEAR RUN. HANDS OFF UNLESS ASKED.",
         (150, 170, 200),
     );
     text(
@@ -94,6 +94,15 @@ pub(crate) fn banner(font: &FontAtlas) {
     );
     gpu.wait_idle();
     bar();
+}
+
+/// Clear the picture and draw the header again, keeping the step counters:
+/// for a step that painted over the screen (the GPU load behind the SIO
+/// measurements).
+pub(crate) fn repaint(font: &FontAtlas) {
+    gpu_io::wait_command_ready();
+    fill(0, 0, 320, 240, 0x0012_0806);
+    banner(font);
 }
 
 /// Name the area and step about to run, and move the bar to the step's start.

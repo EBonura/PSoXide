@@ -22,6 +22,7 @@ dependencies = [
  "psx-gte",
  "psx-hw",
  "psx-io",
+ "psx-mc",
  "psx-pack",
  "psx-pad",
  "psx-rt",
@@ -178,6 +179,7 @@ dependencies = [
  "psx-hw",
  "psx-io",
  "psx-math",
+ "psx-rt",
 ]
 
 [[package]]

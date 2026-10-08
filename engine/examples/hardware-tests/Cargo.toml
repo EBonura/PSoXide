@@ -41,7 +41,8 @@ psx-gte    = { path = "../../../sdk/crates/psx-gte" }
 psx-hw     = { path = "../../../crates/psx-hw" }
 psx-io     = { path = "../../../sdk/crates/psx-io" }
 psx-pack   = { path = "../../../sdk/crates/psx-pack" }
-psx-pad    = { path = "../../../sdk/crates/psx-pad" }
+psx-mc     = { path = "../../../sdk/crates/psx-mc" }
+psx-pad    = { path = "../../../sdk/crates/psx-pad", features = ["irq-engine"] }
 psx-rt     = { path = "../../../sdk/crates/psx-rt" }
 psx-spu    = { path = "../../../sdk/crates/psx-spu" }
 psx-vram   = { path = "../../../sdk/crates/psx-vram" }

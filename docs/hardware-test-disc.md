@@ -17,39 +17,68 @@ same id may name two different measurements. Baselines are named by version
 rather than date. The bump rule and the full history of what each version
 changed are in [hardware-test-versions.md](hardware-test-versions.md).
 
-Current: **v1.28**, schema PX8. Not comparable with v0.18 captures, whose timing
-was sampled without interrupt masking.
+Current: **v2.0**, schema PX8. Not comparable with v0.18 captures, whose timing
+was sampled without interrupt masking. v2.0 is a MAJOR bump from v1.28 because the
+suite is one linear run now (see below); shared records keep their ids and meaning,
+but the order they run in is different, and so is the state each one starts from.
+What was removed and where each thing went: [hardware-test-v2-removed.md](hardware-test-v2-removed.md).
 
-## Test tiers
+## The linear run (v2.0)
 
-Tests are split by one rule: **can this run in an arbitrary order without
-leaving hardware state behind?**
+One entry on the menu, **RUN HARDWARE TEST**, runs everything in a fixed order
+and ends in one capture. There is no second tier: nothing is a separate probe
+you have to remember to run, and nothing runs twice. The only screens outside
+the run are the two that need a person or touch the operator's card:
+**CONTROLLER TEST (P1 + P2)** and **MEMORY CARD (AT OWN RISK)**; the menu also
+has **VIEW LAST CAPTURE**.
 
-**Tier 1, the standing battery.** The 200 conformance cases, the CPU/GTE/SPU
-scans, 179 timing records (CPU, GTE, DMA, CD, CD-DA contention, GPU fill rate,
-MDEC, SIO, and the warm-harness performance probes) and 192 raw precision values including console identity and 22
-bit-exact raster hashes. These run only when `RUN ALL TESTS + CAPTURE` is
-selected, need no further controller input, and mirror every PX8 page to the
-debug TTY. This is what `make hwtest-diff` gates and what a checked-in baseline
-describes.
+The run is ten areas, 56 steps, in this order (`src/run.rs`):
 
-**Tier 2, bespoke probes.** PA2-PA5 and the controller probe. These own SPU
-state or need a specific boot state, so they cannot be batched: PA5 must
-snapshot untouched BIOS reverb state before SDK init, and its variants are one
-per reboot. They arm when selected from the main menu
-(`HardwareTests::enter_mode`), never at boot.
+| # | Area | Steps |
+|---|---|---|
+| 0 | BOOT SNAPSHOT | `BOOT STATE` (what the BIOS left, read before anything touches it), `KERNEL TIMING` |
+| 1 | CPU AND RAM | cases, `CPU SWEEP`, `CPU AND BUS TIMING` |
+| 2 | IRQ, DMA, TIMERS | cases, timing, `TIMER PRECISION`, `TIMER 1 HBLANK RATE` |
+| 3 | GTE | cases, `GTE SWEEP`, `GTE TIMING`, `GTE COMMAND LATENCY`, `GTE PRECISION` |
+| 4 | GPU, MDEC, DISPLAY | cases, timing and MDEC, `GPU BATCHES`, `MDEC DECODE`, precision, `RASTER HASHES`, `DISPLAY WIDTHS`, `480I INTERLACE` |
+| 5 | SPU | `SPU INIT STATE`, precision, cases, `SPU MAP`, `SPU DMA TIMING`, `UI SAMPLE END AND LOOP` (SB1), `SPU RAM AND VOICES` (SB2), `CAPTURE RINGS` (SB4), `BANK HANDOFF` (PA4) |
+| 6 | CD, XA, CD-DA, STREAM | cases, `CD POLLED TIMING`, `CD DATA VERSUS AUDIO ROUTE` (PA1), `CD READ MECHANISMS` (CL2), `XA MUSIC LOOP`, `STREAM COST`, `CD-DA HANDOFF` |
+| 7 | SIO | cases, `SIO TIMING`, then the controller-port measurements described under "SIO measurements" below |
+| 8 | PERFORMANCE | stack and lever cases, `WARM PROBES`, `EXTENDED PROBES AND SHAPES`, `DMA VERSUS CPU LOADS` |
+| 9 | DRIVE AND BUS STRESS | `CD MOTOR` (waits up to 20 s), then `REGISTER A/B (CAN HANG)` |
 
-A tier-2 probe must never become the boot mode. The disc once booted straight
-into PA5, whose `spu::init()` ran before every automatic capture, so the tier-1
-payload described a console PA5 had already touched. Boot now goes to the
-capture pages. Only a probe reached from a fresh boot sees a true BIOS handoff, so
-PA5's variants still require a reboot each.
+**A reset between areas.** Each area starts with `reset_area`: the GPU reset
+and the font uploaded again, every SPU voice keyed off with its volumes at
+zero, the CD drive initialised and paused, every DMA channel idle, the
+interrupt mask and our exception vector restored. Each area ends with a handoff
+record (`0x410`-`0x419`) whose flag bits say whether it left the machine clean;
+`0x3F` is clean. The GTE, which has no reset, is seeded where a step needs defined inputs.
+
+**Silent.** Sound is made only inside the SPU, XA and CD-DA steps. The run ends by
+keying every voice off, zeroing every volume, parking the CD drive and reading the SPU's
+capture buffer back, and records that proof (`0x41A`, flags `0x7F` = silent) before
+the QR pages come up. The v1.28 payload-as-audio tone, which was still sounding
+at the end of a v1.28 capture, no longer exists.
+
+**One risky step.** `REGISTER A/B (CAN HANG)` flips undocumented memory-controller
+and cache-control bits around a timed workload, one at a time, with the record id on
+screen. It is last, bounded, and skipped when **L2** is held as the run starts. If the
+console hangs inside it the screen names the record; power-cycle and run again with L2
+held. A hang at bus level cannot be pre-empted, which is the accepted trade.
+
+**Hands off.** The run needs no input after CROSS on the first row, with one exception:
+the `PAD HOT-PLUG WINDOW` step near the end of the SIO area (see below) shows a prompt for six
+seconds. Do nothing and it records "nothing happened".
+
+`make hwtest-run` runs it headless, `make hwtest-diff` compares it with the pinned
+emulator baseline, and `make hwtest-compare INPUT=<recording>` decodes a filmed
+run and diffs it against the last silicon captures.
 
 ## Testing controllers and analog drift
 
 Choose **CONTROLLER TEST (P1 + P2)** from the root menu. This is a friendly,
-interactive diagnostic; the older **CONTROLLER SIO TIMING** entry under
-TARGETED PROBES remains the low-level serial-handshake measurement.
+interactive diagnostic; the low-level serial-handshake measurement is part of the
+linear run (SIO measurements below).
 
 The controller test polls both front-panel ports every frame. Each side of the
 screen reports the connected controller mode and keeps a complete button
@@ -71,6 +100,12 @@ data.
 START is part of the button test, so it does not immediately leave this screen.
 Hold **START+SELECT** together for roughly three quarters of a second on either
 controller to return to the main menu.
+
+> **The per-probe sections that follow describe the v1.x flow.** The screens they name
+> (`PA2` to `PA5`, `Capturing timing data`, the console-tests page, the FMV and MDEC
+> screens) no longer exist; their measurements are steps of the linear run, with the
+> same record ids, and [hardware-test-v2-removed.md](hardware-test-v2-removed.md) says
+> which step took which. They are kept because they explain what the records mean.
 
 ## Capturing and clearing stale BIOS reverb state (`PA5`)
 
@@ -249,58 +284,38 @@ once from the completed PA2 screen to reach the older PA1 CD-route probe.
 ## Operator flow
 
 The disc boots side-effect free into its main menu. Nothing measures or changes
-hardware state until the operator chooses an entry. Menus fit without scrolling:
+hardware state until the operator chooses an entry:
 
-   | Root | Contains |
+   | Row | Contains |
    |---|---|
-   | `RUN ALL TESTS + CAPTURE` | Runs the standing conformance battery and builds the PX8 conformance capture: verdicts, and one record per failing case |
-   | `FULL CHARACTERISATION CAPTURE` | The same run, but the capture also carries timing envelopes, precision values and the register snapshot. Use when establishing a reference, not for a routine check |
+   | `RUN HARDWARE TEST` | The linear run. Row 0 is pinned: the headless rig fires CROSS at a fixed tick with the cursor at its boot position. Hold L2 as you press CROSS to skip the one step that can hang a console |
    | `CONTROLLER TEST (P1 + P2)` | Live two-port button, stick and analog-drift diagnostic |
    | `MEMORY CARD (AT OWN RISK)` | Card diagnostic behind a consent screen: it has had limited testing on real hardware and reads and writes the operator's card, so corruption cannot be ruled out. CIRCLE accepts the risk before any card traffic happens; writes additionally require the L1+R1+CROSS chord |
-   | `VIEW CAPTURE (QR PAGES)` | Back to the QR symbols the last capture produced |
-   | `RESULTS BY SECTION` | All checks, then CPU/RAM/IRQ/DMA/TIMERS/GPU/GTE/SPU/CDROM/SIO |
-   | `HARDWARE SCANS` | CPU sweep, GTE sweep, SPU register map |
-   | `TARGETED PROBES` | SB1/SB2/SB4 SPU probes, controller SIO timing, CD-chain and PA1-PA5 audio probes, `PERF SWEEP (SAFE)` and `PERF A/B (MAY HANG)` |
-   | `CONSOLE TESTS (V1.27)` | Seven cases for one console session: kernel timing on the real BIOS, display widths, 480i interlace, XA music looping, and (v1.28) the CD streaming transport's cost, the CD-DA hand-off and the motor after Pause and Stop (see below). Each leaves its numbers in the next capture |
-   | `VIDEO LEVELS (TV/CAPTURE)` | Grey ramp and flat fields for display-chain checks |
-   | `AUDIO READOUT` | Steps the tone off / through each rate, showing its state inline |
-   | `RESUME FROM TEST` | Restarts a long battery after a selected test index |
-   | `MDEC DIAGNOSTIC` | v1.26: six MDEC setup sequences x 8 runs, each with a probe decode, reset-latency traces and a one-frame CPU-vs-DMA control decode; result pages, then the QR pages (`src/fmv_diag.rs`, see hardware-test-versions.md). Two UP from the top row |
-   | `FMV STREAM TEST` | A 15 s cut (1,965 video sectors) of 2x STR video with XA audio behind each MDEC setup sequence that worked, every sector checked, each with a PASS/FAIL summary (see below); runs MDEC DIAGNOSTIC first if it has not run. Shows the last result inline; UP from the top row reaches it |
+   | `VIEW LAST CAPTURE` | Back to the QR symbols the last run produced |
 
-Up/Down moves, Cross runs, and START backs out one level. During the standing
-battery a progress bar names the in-flight case; after it completes, the capture
-pages appear and Left/Right pages through them.
-
-After a capture exists, the `AUDIO READOUT` menu row or SQUARE from another
-screen steps through the available rates and off. The menu shows whether the
-payload is ready and which rate is active.
+Up/Down moves, Cross runs, START backs out. During the run a progress screen
+names the area, the step and the in-flight case or record (the record id is also
+drawn as sixteen bit-cells under the bar, so a photo of a frozen screen names it).
+When the run finishes the capture pages appear; Left/Right turn them, and they also
+advance by themselves.
 
 ### Recording a capture
 
-Enable `AUDIO READOUT` after the capture finishes if audio transport is wanted.
-One unreadable QR symbol costs the whole visual capture because the payload is
-only valid complete; audio provides an independent recovery route.
+Start the recording before power-on and keep it going until the last QR page has been
+on screen. Film the screen, not the TV's menu. Every page must be readable: the whole
+payload is only valid complete, which `tools/hwtest-video-qr.py` checks with the
+whole-binary CRC. The pages carry a run id and the tool groups pages by it, so a
+recording that spans several runs is not combined into a payload that cannot check out.
 
-**Record at least three repetitions of the tone**, about 45 seconds. OBS encodes
-audio as AAC by default, and AAC is lossy: a link recorded through it does NOT
-decode from any single repetition. It decodes reliably from three via the
-per-bit majority vote, which is verified. Recording PCM/lossless instead removes
-the need, but three repetitions is the cheaper habit.
+There is no audio link any more. `AUDIO READOUT` is gone, so there is nothing to record
+besides video.
 
-**A recording usually spans several runs.** A reboot or `RUN ALL TESTS + CAPTURE`
-produces different measurements under the same page numbers, so pages from
-different runs cannot be combined; `tools/hwtest-video-qr.py` resolves this by
-requiring the whole-binary CRC to check out.
+Decode with one command:
 
+    make hwtest-compare INPUT=~/Movies/run.mov
 
-Record video **and** audio from before power-on. Let the bar finish. Scan the
-five pages. Then keep recording at least 15 seconds: one
-repetition of the audio payload is ~13.6 s. If it will not decode, press SQUARE
-again for a slower, more robust rate; the decoder detects which was used.
-
-Expect the battery to take noticeably longer than it used to. It does around 40
-real seeks plus the GPU, MDEC and SIO work.
+The run includes waits that are part of the measurement (the CD motor case waits up to
+20 s), and the six-second hot-plug window; the progress bar covers all of it.
 
 ## Console tests (v1.27)
 
@@ -897,6 +912,96 @@ shows how much of a transfer is fixed cost and how much is pacing the pad
 demands. The SCPH-1200 setup-delay hunt cost a whole session; this makes it a
 standing measurement. `0xFFFF` means the pad did not answer, which is distinct
 from a fast poll.
+
+## SIO measurements (v2.0, records `0x600`-`0x6A6`)
+
+Added so that what the emulator cannot settle becomes a number in the capture. None
+of these passes or fails; every one is laid out the same whether a pad, a card or
+nothing is plugged in (a port with nothing in it is a result). The guest is
+`src/sio_timing.rs` (raw register measurements) and `src/pad_engine.rs` (the
+SDK's interrupt-driven pad engine, `psx_pad::console`, opt-in per game; its design is
+`sdk/docs/PAD-IRQ-ENGINE.md` in the SDK). Times are system-clock cycles (33.8688 MHz)
+from Timer 2 unless a field says HBlanks (Timer 1). The memory card is only ever read.
+The field names of every record are in `tools/hwtest-report.py` (`V2_RECORDS`) and are
+decoded as rows `v2,<id>_<name>,<field>,<value>`.
+
+Raw port measurements, steps `SIO0 SELECT DELAY`, `SIO0 PAD ACK TIMING`,
+`SIO0 CARD ACK TIMING`:
+
+* `600`-`601`, select to first byte, port 1 then 2: 16 delays from 0 to 24,576 cycles
+  after `/CS` is asserted, four polls each; a poll counts when the first two bytes
+  pulsed `/ACK` and the third reply is `0x5A`. Fields: the shortest delay at which
+  all four polls were answered, the longest delay at which any failed, and a 16-bit
+  mask of the delays that were fully answered (bit n is delay n). This is the
+  question the official SCPH-1200 raised, in cycles instead of status-read spins; the
+  older sweep is `D0`-`DB`.
+* `610`-`618` (port 1) and `620`-`628` (port 2), one record per byte of a nine-byte
+  `0x42` pad poll: cycles from the byte's write to `/ACK` asserting, the pulse width,
+  and the cycles until the byte was received. Median of eight polls. A byte that gets
+  no `/ACK` (an empty port, or the last byte of a short reply) reads `0xFFFF`.
+  `630`-`631` hold what each port answered (replies 0 to 3 and a flag word: bits 0-8
+  which bytes pulsed `/ACK`, bit 9 the third reply was `0x5A`, bit 10 the `STAT` IRQ
+  latch after the release, bit 11 TX idle).
+* `6C0`-`6C3` and `6C8`-`6CB`, the same for the four bytes of a memory-card read
+  command (`81 52 00 00`, abandoned before any data moves); `634`-`635` hold the answers.
+* Empty-port behaviour is those same records on a port with nothing in it:
+  replies `0xFF`, no `/ACK`, the byte still received after its eight clocks.
+
+`PAD AND CARD UNDER LOAD`: `640`-`64F`, port 1 idle, port 1 loaded, port 2 idle, port 2
+loaded, three records each. A pad poll and a card frame read take turns, 24 rounds. Loaded
+means the GPU walking a list of large triangles behind them, with interrupts on. Records:
+pad polls and card reads that worked, with error counts; card frame time in HBlanks
+(min, median, max); pad poll time in cycles. A slot with no card gets rows of
+`0xFFFF`.
+
+Pad engine, steps `ENGINE SETUP SWEEP`, `ENGINE ACK PACING`, `ENGINE TIMED PACING`,
+`ENGINE AND CARD LEASE`, `ENGINE UNDER LOAD`, `PAD HOT-PLUG WINDOW`:
+
+* `660`-`666`: the engine's own select-to-first-byte path (a timer interrupt starts the
+  first byte), swept over 2,000 to 8,000 cycles in steps of 1,000, 100 frames each:
+  clean updates on port 1, faults, and each port's health.
+* `670`-`674` with `Ack` pacing and `678`-`67C` with `Timed` pacing, 600 frames each
+  with the pad asked into analog mode: updates, faults and health per port; interrupts,
+  stalls and spurious interrupts; the CPU a loop keeps (work per frame against the same
+  loop with nothing polling, so the engine's cost, and with port 2 as it is, empty or not,
+  its cost); mode changes seen on port 1 (a wrong identifier or a slipped packet shows
+  here), kicks, and the final mode. This answers whether the engine's one control-register
+  write between bytes corrupts a given pad, the question the 2026-06-22 result left open.
+* `690`-`693`: 600 frames of the engine with a memory-card sector read every ten frames
+  through `lease()`, on the first slot that holds a card: pad faults, frames the engine
+  skipped while the port was out, card checksum errors; reads ok and tried; the wait for
+  the lease (median, longest); card frame time in HBlanks. Reads only: this suite does not
+  write to the operator's card.
+* `6A0`-`6A6`: the engine with a GPU list walk, SPU DMA and a CD read going (no sound is
+  made: the SPU upload targets RAM that no voice plays), engine with no ports and with
+  both: loop rounds per frame (average, least, most), pad faults, stalls, spurious
+  interrupts, bytes of the handler's private stack never touched and the events handled.
+  The engine reports no per-event handler time, so the cost shows as lost loop rounds.
+* `638`-`63B`, hot-plug: a six-second window with a prompt ("OPTIONAL: UNPLUG AND REPLUG A
+  PAD"), both ports watched through the engine every frame: transitions, the health
+  before and after, polls with nothing there, and the frames of the first and last change.
+  Unplug and replug a pad in either port while the prompt is up, or do nothing.
+
+## Other v2.0 measurements
+
+* `GTE COMMAND LATENCY` (`150`-`191`, `192`-`195`): for each of 22 GTE commands, three
+  records: the command then an immediate `mfc2` of MAC0, the same of MAC1, and the command
+  back to back with itself; the cycles for eight or sixteen turns (the `work` of the
+  record). If a coprocessor read waits for the command the first two cost the command's
+  latency a turn; otherwise two instructions. `192`-`195` are `swc2` (a store of a
+  coprocessor register) straight after RTPS (MAC1 and SXY2), NCLIP (MAC0) and SQR (MAC1),
+  the interlock the emulator models for SWC2 without a console figure behind it.
+* `DMA VERSUS CPU LOADS` (`140`-`145`): 64 RAM loads with a DMA channel idle and the same
+  loads straight after kicking a transfer big enough to outlast them, for the SPU
+  (256 words), the ordering-table clear (2,048 words) and a block transfer of NOP words to
+  GP0. The GPU list walk is `35`, `36`, `9F`, `FE`.
+* `TIMER 1 HBLANK RATE` (`650`-`652`): Timer 1 on the HBlank clock over 120 frames, once
+  with nobody reading the counter and once with the CPU reading it in a tight loop:
+  counts per window, distinct values seen, the largest step between reads, and how many
+  reads the loop made. Does tight polling change what it counts?
+* The scratchpad-versus-RAM load and store cycles, the I-cache miss cost and the
+  multiply and divide latencies are the warm-harness records that already existed
+  (`72`-`8D`, `C8`, `C9`, `1C`-`1D`, `42`-`45`); this version does not repeat them.
 
 ## Console identity and raster hashes (precision `128`-`159`)
 
