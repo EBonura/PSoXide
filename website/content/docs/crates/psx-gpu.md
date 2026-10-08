@@ -14,7 +14,7 @@ Use `psx-gpu` to initialize the display, send drawing commands and manage frameb
 
 ## Integration notes
 
-Pick submission order deliberately. An ordering table is useful when geometry needs depth ordering; an ordered stream suits commands already in painter order. DMA reads the command storage asynchronously, so keep it alive until completion. `OrderedCommandStream` uses caller-provided static storage and an explicit fence before reuse or separate VRAM work. Drawing completion and VBlank are different events: queued presentation waits for the frame's closing draw-done command.
+Choose how to submit commands. An ordering table is useful when geometry needs depth ordering; an ordered stream suits commands already in painter order. DMA reads the command storage asynchronously, so keep it alive until completion. `OrderedCommandStream` uses caller-provided static storage and an explicit fence before reuse or separate VRAM work. Drawing completion and VBlank are different events: queued presentation waits for the frame's closing draw-done command.
 
 Complete examples: [triangle](@/docs/examples/hello-tri.md), [ordering table](@/docs/examples/hello-ot.md), [queued presentation](@/docs/examples/hello-present.md) and the [VBlank-kicked present queue](@/docs/examples/hello-present-queue.md).
 

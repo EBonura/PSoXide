@@ -23,7 +23,7 @@ Open `build/examples/mipsel-sony-psx/release/hello-ot.cue`. Three coloured trian
 
 The PS1 does not give these primitives a per-pixel depth buffer. Drawing order determines what covers what. An ordering table is a set of linked-list buckets: put each primitive into a depth slot, then submit the list to the GPU.
 
-This example uses 16 slots. The GPU receives slot 15 first and slot 0 last, so lower slots appear in front. These are chosen sort keys, not a measurement the GPU computes for you.
+This example uses 16 slots. The GPU receives slot 15 first and slot 0 last, so lower slots appear in front. You choose the sort keys; the GPU doesn't compute them.
 
 ```rust
 let mut ot_frame = ot.frame();

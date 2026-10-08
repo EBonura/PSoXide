@@ -8,7 +8,7 @@ eyebrow = "SDK example · full source"
 
 ## What this program does
 
-Compare the runtime memory routines against reference loops across sizes and alignments. The program reports MEMPROBE PASS or FAIL on screen and through debug output. This is a diagnostic rather than a game-loop template.
+Compare the runtime memory routines against reference loops across sizes and alignments. The program reports MEMPROBE PASS or FAIL on screen and through debug output. It's a diagnostic; don't use it as a game-loop template.
 
 ## Build and run
 

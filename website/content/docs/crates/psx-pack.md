@@ -16,7 +16,7 @@ The root defines pack headers, entries, checksums and HLZC/LZ4 decompression. `c
 
 Match the writer's format revision and preserve sector alignment. Size destination buffers for both stored and decompressed payloads. Check missing IDs, bounds and checksums before consuming a chunk. Read `SectorReader::prepare` carefully: it changes interrupt masking to VBlank-only, which your program must coordinate with other device users.
 
-The [hello-pack source](@/docs/examples/hello-pack.md) demonstrates the complete read/check/decompress path. Its historical fixture generator is absent from this SDK snapshot; the example page explains the expected fixture rather than claiming a plain data disc will pass.
+The [hello-pack source](@/docs/examples/hello-pack.md) demonstrates the complete read/check/decompress path. Its historical fixture generator is absent from this SDK snapshot; the example page describes the expected fixture, because a plain data disc won't pass.
 
 ## API, dependencies and source structure
 

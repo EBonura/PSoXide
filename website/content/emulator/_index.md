@@ -44,7 +44,7 @@ The **Developer** section has **Step one instruction** and **Advance one frame**
 
 ## See where the time goes
 
-The sidebar's **Guest performance (PS1)** panel describes the emulated console rather than your computer: how often the program presents a new frame, the cycle budget per vertical blank, where the CPU's cycles went (instruction issue, RAM loads, stack loads, stores, instruction fetch, waiting on the GTE or the multiply unit, hardware access), what limited each frame, CD, SPU, DMA, MDEC and interrupt activity, SPU voices and texture pages in use. It reads counters the emulator keeps, so it works on any program, including ones with no instrumentation. It holds two minutes of history at 60 Hz and exports it as CSV.
+The sidebar's **Guest performance (PS1)** panel reports on the emulated console: how often the program presents a new frame, the cycle budget per vertical blank, where the CPU's cycles went (instruction issue, RAM loads, stack loads, stores, instruction fetch, waiting on the GTE or the multiply unit, hardware access), what limited each frame, CD, SPU, DMA, MDEC and interrupt activity, SPU voices and texture pages in use. It reads counters the emulator keeps, so it works on any program, including ones with no instrumentation. It holds two minutes of history at 60 Hz and exports it as CSV.
 
 For numbers in a terminal, start the desktop app with `PSOXIDE_PROFILE=1`. It prints a one-line rolling average to stderr about once a second; `PSOXIDE_PROFILE=trace` prints every frame. Host timings are in milliseconds, and fields such as `emu_hz`, `draw_hz`, `cyc_f`, `instr_f` and `gte_f` describe the emulated workload.
 
@@ -52,7 +52,7 @@ For numbers in a terminal, start the desktop app with `PSOXIDE_PROFILE=1`. It pr
 
 F5 saves a state and F7 loads it again (the pinned save, or else the most recent) and keeps running. The save-states panel in the toolbar lists each save with a thumbnail and can load it paused. Save states use a PSoXide-specific format; they don't load in other emulators.
 
-F8 starts and stops a recording of controller port 1. On desktop the recording is written as a tape file under the game's config directory, and replaying it from **Load input replay** plays the same inputs back. Recording or replaying on desktop also writes a whole-run profile CSV next to the tape. The same tapes drive headless runs, which is how a bug report becomes a repeatable test.
+F8 starts and stops a recording of controller port 1. On desktop the recording is written as a tape file under the game's config directory, and replaying it from **Load input replay** plays the same inputs back. Recording or replaying on desktop also writes a whole-run profile CSV next to the tape. The same tapes drive headless runs, so a bug report can become a repeatable test.
 
 ## Run headlessly
 
@@ -64,7 +64,7 @@ The desktop binary has subcommands that run without a window. `launch` boots a d
 
 `--dump-hash` adds FNV-1a hashes of VRAM and of the displayed image, so two runs, or two builds, can be compared exactly. The summary also reports how many times the program polled the controller, and warns about two things that can work in the emulator and fail on a console: CD sectors dropped because the program serviced the drive too slowly, and GP0 command bursts that would overflow the real GPU's command FIFO.
 
-Some of the options that are most useful for homebrew:
+Useful options for homebrew:
 
 | Option | What it does |
 |---|---|
@@ -112,12 +112,12 @@ Browsers keep audio off until you click or press a key on the page. Clearing the
 
 ## Compatibility and accuracy
 
-Read the [development methodology](@/docs/development-methodology.md) for the
+The [development methodology](@/docs/development-methodology.md) describes the
 console test loop: record hardware measurements, compare them with the emulator,
-correct the model and preserve a repeatable test.
+correct the model and keep a repeatable test.
 
 The [comparison page](@/emulator/compare.md) has the measured headless memory use, how far each tested commercial game gets, and what's been checked against original hardware. For how the SDK and emulator are checked against a real console, see [Checking code against PlayStation hardware](@/docs/hardware-checks.md).
 
 {% <callout kind="warn" title="Test on a console too"> %}
-The emulator catches a lot, but it doesn't replace running on original hardware. When the two disagree, the console is right, and some behaviour (for example, what happens when an interrupt lands on a GTE command in a branch delay slot) isn't modelled.
+The emulator catches a lot, but original hardware has the last word. When the two disagree, the console is right. Some behaviour, such as what happens when an interrupt lands on a GTE command in a branch delay slot, isn't modelled.
 {% </callout> %}

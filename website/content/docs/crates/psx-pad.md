@@ -14,7 +14,7 @@ The root defines button masks, pad state, polling, analog helpers and action map
 
 ## Integration notes
 
-Poll once for an update and share that result with your game systems. Use held state for continuous motion and an edge for a one-shot action. A group-level `pressed_since` check and a per-button tracker have different semantics; choose deliberately when testing multiple buttons. Analog mode is not guaranteed: inspect the pad state and support a fallback. Memory-card traffic shares SIO0, so coordinate transactions rather than polling from competing owners.
+Poll once for an update and share that result with your game systems. Use held state for continuous motion and an edge for a one-shot action. A group-level `pressed_since` check and a per-button tracker have different semantics; pick the one that fits when you test several buttons. Analog mode is not guaranteed: inspect the pad state and support a fallback. Memory-card traffic shares SIO0, so coordinate transactions rather than polling from competing owners.
 
 Read the [controller how-to](@/docs/controller-input.md) and complete [hello-input source](@/docs/examples/hello-input.md).
 

@@ -1,6 +1,6 @@
 +++
 title = "PS1 homebrew, running in your browser"
-description = "Six actual PS1 programs running in the PSoXide emulator, right on this page. Try them, read the source and build your own."
+description = "Six PS1 programs running in the PSoXide emulator on this page. Try them, read the source and build your own."
 weight = 2
 [extra]
 kind = "Interactive examples"
@@ -8,11 +8,11 @@ eyebrow = "Learn by trying"
 +++
 
 The SDK builds each example as a PS1 executable. The PSoXide emulator runs that
-executable right here in the page, using the same emulation core as the desktop
+executable in the page, using the same emulation core as the desktop
 app. Download the EXE below any player to run the same program locally.
 
 Start with a triangle, then explore input, sprites, drawing order, 3D projection
-and sound. Each example links to its source and a practical how-to. To change
+and sound. Each example links to its source and a how-to. To change
 one, edit and rebuild it locally, then run your new EXE or disc image in the
 emulator.
 
@@ -101,7 +101,7 @@ For a console, build a disc image and read the
 
 Use a browser with WebAssembly SIMD and WebGL 2 enabled. If loading fails, try
 **Open player separately**, or download the EXE and use the desktop emulator.
-The small examples do not require a Sony BIOS or a commercial game installation.
+The small examples don't require a Sony BIOS or a commercial game installation.
 If input stops responding, click the game screen to restore focus. Starting a
 different player resets the earlier one, so it cannot keep consuming memory or
 playing audio in the background.

@@ -115,7 +115,7 @@ link = "@/projects/_index.md#videos"
 id = "accuracy"
 group = "emulator"
 q = "How accurate is it?"
-a = "A cross-emulator accuracy comparison is not available yet. PSoXide is tested against a real console using a hardware test battery, with documented differences and reproduction steps."
+a = "There's no cross-emulator accuracy comparison yet. PSoXide is tested against a real console using a hardware test battery, with documented differences and reproduction steps."
 link_text = "Accuracy section"
 link = "@/emulator/compare.md#accuracy"
 
