@@ -79,7 +79,7 @@ fn synthetic(frames: usize, joints: usize, seed: u64) -> ClipInput {
             rng.range(0.2, 1.0),
         ];
         let amp = rng.range(0.0, 1.2);
-        let phase = rng.range(0.0, 6.28);
+        let phase = rng.range(0.0, std::f64::consts::TAU);
         let tamp = rng.range(0.0, 400.0) * (j % 3 != 0) as i32 as f64;
         let mut rotations = vec![];
         let mut translations = vec![];
@@ -124,7 +124,7 @@ fn rotation_keys_decode_within_their_resolution() {
                 rng.range(-1.0, 1.0),
                 rng.range(-1.0, 1.0),
             ];
-            let q = quat(axis, rng.range(0.0, 6.28));
+            let q = quat(axis, rng.range(0.0, std::f64::consts::TAU));
             let key = encode_rot_key(q, size);
             let got = host::decode_rotation_key(&key, size);
             // Same hemisphere as the canonical key: largest component positive.
@@ -263,11 +263,17 @@ fn tighter_budget_never_costs_fewer_bytes() {
 
 #[test]
 fn corrupt_blobs_are_rejected_or_decode_cleanly() {
-    let clip = synthetic(30, 5, 31);
+    // Miri checks every raw read in the decoder; keep its share small.
+    let (frames, joints, rounds) = if cfg!(miri) {
+        (12, 3, 60)
+    } else {
+        (30, 5, 4000)
+    };
+    let clip = synthetic(frames, joints, 31);
     let (blob, _) = encode(&clip, &Options::default()).unwrap();
     let mut rng = Lcg(99);
     let mut accepted = 0usize;
-    for _ in 0..4000 {
+    for _ in 0..rounds {
         let mut b = blob.clone();
         for _ in 0..(1 + (rng.next() * 3.0) as usize) {
             let at = (rng.next() * b.len() as f64) as usize % b.len();

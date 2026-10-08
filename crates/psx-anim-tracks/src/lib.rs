@@ -842,7 +842,7 @@ pub fn encode(clip: &ClipInput, opts: &Options) -> Result<(Vec<u8>, Report), Rej
     }
     // Pad so the whole blob is a multiple of four bytes.
     let fixed = psxed_format::AssetHeader::SIZE + 8 + fmt::RATE_TABLE_SIZE + descs.len();
-    while (fixed + area.len() + fmt::SLACK_BYTES) % 4 != 0 {
+    while !(fixed + area.len() + fmt::SLACK_BYTES).is_multiple_of(4) {
         area.push(0);
     }
 
