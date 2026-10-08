@@ -76,7 +76,8 @@ fn main() {
     for _ in 0..FRAMES {
         total = total.wrapping_add(spin_to_next_vblank() / 16);
     }
-    line("idle_work_per_frame_x16", total / FRAMES);
+    let idle = total / FRAMES;
+    line("idle_work_per_frame_x16", idle);
 
     // Phase 2: the synchronous driver, both ports.
     let mut total = 0u32;
@@ -85,7 +86,8 @@ fn main() {
         let _ = poll_on(&mut port, Port::Two);
         total = total.wrapping_add(spin_to_next_vblank() / 16);
     }
-    line("sync_work_per_frame_x16", total / FRAMES);
+    let sync = total / FRAMES;
+    line("sync_work_per_frame_x16", sync);
 
     // Phase 3: the engine, in each configuration, 120 frames apiece.
     if console::install(port, Config::DEFAULT).is_err() {
@@ -116,7 +118,8 @@ fn main() {
     let mut last_buttons = 0xFFFF_u16;
     let mut last_seq = 0u32;
     let mut frame_no = 0u32;
-    for (label, config) in variants {
+    let mut work = [0u32; 6];
+    for (slot, (label, config)) in variants.into_iter().enumerate() {
         console::configure(config);
         let before = console::stats();
         let mut total = 0u32;
@@ -137,7 +140,8 @@ fn main() {
             }
             last_seq = snap.seq;
         }
-        line(label, total / FRAMES);
+        work[slot] = total / FRAMES;
+        line(label, work[slot]);
         let after = console::stats();
         line("  events_per_frame_x10", (after.events - before.events) * 10 / FRAMES);
     }
@@ -169,6 +173,36 @@ fn main() {
     line("stalls", stats.stalls);
     line("spurious", stats.spurious);
     line("stack_unused", console::handler_stack_unused_bytes() as u32);
+    // The gate. Work is iterations of an empty loop per frame, so a larger
+    // number is more CPU left to the game.
+    let mut failures = 0;
+    let mut check = |ok: bool, what: &str| {
+        if !ok {
+            failures += 1;
+            tty::print("padcheck: FAIL ");
+            tty::println(what);
+        }
+    };
+    let (no_ports, port1, both, timed) = (work[0], work[1], work[2], work[3]);
+    // The engine keeps at least 95% of the CPU with both ports polled; the
+    // synchronous driver, which this replaces, keeps under 80%.
+    check(both * 100 >= idle * 95, "engine with both ports keeps under 95% of the CPU");
+    check(sync * 100 <= idle * 80, "synchronous driver costs the 20% this exists to remove");
+    // An empty port 2 and the wrapper's own entry on every VBlank cost almost
+    // nothing: within a percent of the idle loop (the loop's phase against the
+    // VBlank moves the count by a few tenths of a percent).
+    check(no_ports * 100 >= idle * 99, "VBlank entry alone costs more than 1%");
+    check(both * 100 >= port1 * 99, "an empty port 2 costs more than 1%");
+    check(timed * 100 >= idle * 95, "fixed pacing keeps under 95% of the CPU");
+    check(snap.port(Port::One).health == psx_pad::engine::Health::Present, "port 1 is present");
+    check(snap.port(Port::Two).health == psx_pad::engine::Health::Absent, "port 2 is absent");
+    check(snap.port(Port::One).faults == 0 && snap.port(Port::Two).faults == 0, "no faults");
+    check(stats.stalls == 0 && stats.spurious == 0, "no stalls or spurious interrupts");
+    check(console::handler_stack_unused_bytes() >= 256, "the handler stack has room");
+    check(console::snapshot().port(Port::One).updates > snap.port(Port::One).updates, "polling resumes after the lease");
+    if failures == 0 {
+        tty::println("padcheck: PASS");
+    }
     tty::println("padcheck: done");
     loop {}
 }

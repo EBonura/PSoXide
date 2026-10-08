@@ -18,8 +18,8 @@ nothing on port 2):
 | before 011cea59 | 7,572 | 7,376 | 14,947 |
 | 011cea59 to main | 17,353 | 119,277 | 136,628 |
 
-That is 4% of a 30 fps frame budget up to 19% (a 60 fps frame is 564,480
-cycles). The jump is the empty socket: a poll that is not answered used to
+Against a 60 Hz frame of 564,480 cycles that is 3.1% for the one connected pad,
+21% for the empty port 2 and 24% for both. The jump is the empty socket: a poll that is not answered used to
 return at once; it now retries four times, each with the 1,024-read setup delay
 and a 2,048-read wait for an `/ACK` that never comes. A connected pad pays for
 the `/ACK` wait after every byte.
@@ -142,6 +142,41 @@ the context and jumps to the handler that was in the vector before it
 installed afterwards replaces it (`console::is_installed()` tells). It owns
 root counter 0 and takes the `ControllerPort` token, so nothing can poll the
 port synchronously while it runs, which `Lease` is for.
+
+## What it costs
+
+`examples/pad-engine-check` runs the three drivers on the same frames in the
+headless emulator and counts the iterations of an empty game loop that fit
+between VBlanks (the CPU the game keeps; emulated cycles, not wall time). The
+self-check at its end prints `PASS`.
+
+| Driver | Game loop kept | Cost per 60 Hz frame |
+|---|---|---|
+| nothing polls | 100% | 0 |
+| synchronous, both ports (main) | 76.1% | 136,000 cycles |
+| engine, VBlank entry only (no ports) | 99.9% | about 650 cycles |
+| engine, port 1 | 98.5% | about 8,500 cycles |
+| engine, both ports (port 2 empty) | 98.2% | about 10,000 cycles |
+| engine, both ports, fixed pacing | 98.0% | about 10,500 cycles |
+| engine, both ports, every other VBlank | 99.0% | about 5,500 cycles |
+
+An empty port 2 adds under a quarter of a percent (inside the noise of where the
+loop falls against the VBlank). The engine's cost is the events: about ten for a
+connected analog pad, two for an empty port, and about 1,000 cycles each in the
+emulator, of which 129 instructions are the wrapper and psx-rt's handler and the
+rest is the engine and the loads that miss without a data cache. For a single
+pad that is about what the old no-ACK synchronous driver spent (7,572 cycles),
+not less, so a game that polls one pad at a sim rate
+of 30 Hz sets `kick_every` to 2 and gains about 40% over today's synchronous
+poll, not more. The large gain is the empty socket and the setup delay, which
+are now free. NitroXide's attract demo: 38.18 fps on the 65a9b131 pin, 44.48
+fps with the engine, 44.96 on the old pin before 011cea59 (flips per emulated
+second after route tick 600).
+
+Where the remaining per-event cost could go: a handler for the byte events in
+assembly with four registers saved instead of twenty-two, and a direct return
+instead of a hop through psx-rt's handler for an interrupt that is only ours.
+Neither is done; both would be checked by the same self-check.
 
 ## What the host tests prove, and what they do not
 
