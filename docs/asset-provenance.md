@@ -34,6 +34,10 @@ is not recorded in the repo, it is listed as missing rather than invented.
 
 ## 3D Models
 
+> **Moved.** These two placeholder models now live in the PSoXide-editor repository
+> (`assets/models/obsidian_wraith` and `assets/models/hooded_wretch`). This repository
+> no longer contains them; the records below are kept for the audit trail.
+
 The two character models bundled in the repo were generated using
 **[Meshy](https://www.meshy.ai/)**, an AI 3D-model generation service.
 They are placeholder / development / proof-of-concept assets used by

@@ -133,10 +133,10 @@ own [provenance records](docs/asset-provenance.md). See
 
 ## How This Was Built
 
-PSoXide was developed with heavy use of AI coding assistants, with a human
-directing the architecture, debugging and hardware verification. A large part
-of the code was written by an AI assistant under human direction, review and
-integration.
+AI coding agents wrote nearly all of the code in PSoXide. A human directs the
+architecture, reviews every change and verifies the results on hardware.
+[How PSoXide is built](https://ebonura.github.io/PSoXide/how-its-built/) lists
+the rules the agents work to and the checks each change passes.
 
 This is not a clean-room implementation. An LLM is trained on large amounts of
 existing code, so AI-written code can carry influence from its training data
