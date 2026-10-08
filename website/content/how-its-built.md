@@ -40,18 +40,6 @@ A passing check is evidence for the workload it ran. Some releases go out tested
 - Emulator: [PROVENANCE.md](https://github.com/EBonura/PSoXide-emulator/blob/main/docs/PROVENANCE.md) and the [HLE provenance record](https://github.com/EBonura/PSoXide-emulator/blob/main/docs/hle-bios-provenance.md).
 - Games: [Quake](https://github.com/EBonura/quake-psx/blob/main/PROVENANCE.md), [Half-Life](https://github.com/EBonura/hl-psx/blob/main/PROVENANCE.md), [PSoXide Arcade](https://github.com/EBonura/psoxide-arcade/blob/main/THIRD_PARTY.md), [VoXide](https://github.com/EBonura/voxide/blob/main/assets/pack/CREDITS.md) and the editor's [asset provenance](https://github.com/EBonura/PSoXide-editor/blob/main/docs/asset-provenance.md) for Cortex Ignition.
 
-## What the AI generated, project by project
-
-Every project's README and itch.io page carries an "AI-generated content" line that says what ships to players: code, art and textures, sound and music, text.
-
-| Project | AI-generated content that ships |
-| --- | --- |
-| SDK, emulator, editor, engine | Code. The editor repository also holds two placeholder character models made with an AI 3D-model generator, used by an engine example. |
-| Cortex Ignition | Code, most level textures and the sky (made with an image model, then reduced to 64 by 64 PS1 textures) and some animation clips (generated with a motion model, then edited). The 3D art is by Alberto Busicchio and the music by Carmelo Miceli, both credited in the game. The voice and effect recordings come from asset packs. |
-| VoXide, NitroXide, Celeste Classic Collection, Quake, PSXcel, PSoXide Arcade, the demo disc | Code only. Everything else is third-party or the original creators', credited in each project's README and in the game. |
-| Half-Life, Hollow Knight | Code only. The build converts game data from your own copy, and the projects distribute none of it. |
-| WipEout | Code, and a remastered texture pack that an image model generated from the original textures. |
-
 ## Corrections
 
 If you think a claim here is wrong, a provenance record is missing or a game isn't doing what its page says, [open an issue](https://github.com/EBonura/PSoXide/issues). Say which page or file you mean and what you found. The [contact process](@/legal.md#contact) in the legal notice has the details.
