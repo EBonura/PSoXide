@@ -41,12 +41,13 @@ use psx_gpu::prim::FillRect;
 use psx_gpu::Gpu;
 use psx_hw::gpu::gp1;
 use psx_hw::mdec::{DECODE_15BPP, DECODE_24BPP};
-use psx_io::periph::GpuDma;
+use psx_io::periph::{Cd, GpuDma, MdecDma};
 use psx_pack::cd::{SectorReader, SECTOR_WORDS};
-use psx_rt::interrupts;
+use psx_rt::{interrupts, Peripherals};
 use psx_spu::CdVolume;
 use psx_vram::VramRect;
 
+use crate::mdec::Mdec;
 use crate::stream::{Chunk, FrameAssembler, CHUNK_PAYLOAD_BYTES, MAX_CHUNKS};
 use crate::{bitstream, mdec};
 
@@ -282,12 +283,28 @@ impl Buffers {
     }
 }
 
-static mut READER: SectorReader = SectorReader::new();
+static mut READER: Option<SectorReader> = None;
+static mut MDEC: Option<Mdec> = None;
 static mut SECTOR: [u32; SECTOR_WORDS] = [0; SECTOR_WORDS];
 
+/// Own the drive and the MDEC from here on, replacing any earlier owner.
+fn install_devices(cd: Cd, mdec: MdecDma) {
+    // SAFETY: single-threaded; nothing holds a reference from before.
+    unsafe {
+        *addr_of_mut!(READER) = Some(SectorReader::with_cd(cd));
+        *addr_of_mut!(MDEC) = Some(Mdec::new(mdec));
+    }
+}
+
 fn reader() -> &'static mut SectorReader {
-    // SAFETY: single-threaded; only the player uses its reader.
-    unsafe { &mut *addr_of_mut!(READER) }
+    // SAFETY: single-threaded; only the player uses its reader, and no
+    // caller keeps the reference across a call that takes another.
+    unsafe { (*addr_of_mut!(READER)).as_mut().expect("reader installed") }
+}
+
+fn mdec() -> &'static mut Mdec {
+    // SAFETY: as `reader`.
+    unsafe { (*addr_of_mut!(MDEC)).as_mut().expect("mdec installed") }
 }
 
 /// Read one sector synchronously into the player's sector buffer.
@@ -313,8 +330,11 @@ fn read_one(lba: u32) -> Option<&'static [u8]> {
 /// Find a file in the disc's root directory by name: `(lba, bytes)`.
 /// Takes the drive over (data mode, double speed) and leaves it stopped.
 pub fn find_root_file(name: &str) -> Option<(u32, u32)> {
-    // SAFETY: the caller is not using the drive; prepare takes it over.
-    if !unsafe { reader().prepare() } {
+    // SAFETY: the caller is not using the drive or the MDEC, as the module
+    // docs say; the player takes them over for as long as it runs.
+    let devices = unsafe { Peripherals::steal() };
+    install_devices(devices.cd, devices.mdec_dma);
+    if !reader().prepare() {
         return None;
     }
     let (root, _) = crate::iso::root_directory(read_one(crate::iso::PVD_LBA)?)?;
@@ -430,7 +450,7 @@ impl Columns {
     /// Move the transfers along; `true` once every column is in VRAM.
     fn service(&mut self, dma: &mut GpuDma, buf: &Buffers, height: u16) -> bool {
         if let Some(done) = self.reading {
-            if mdec::column_done() {
+            if mdec().column_done() {
                 self.reading = None;
                 self.filled = Some(done);
             }
@@ -461,7 +481,7 @@ impl Columns {
             if let Some(b) = (0..2).find(|&b| !held(b)) {
                 // SAFETY: buffer `b` is free (see `held`) and holds
                 // `column_words` words.
-                if unsafe { mdec::read_column_start(buf.column(b), buf.column_words) } {
+                if unsafe { mdec().read_column_start(buf.column(b), buf.column_words) } {
                     self.reading = Some((self.next, b));
                     self.next += 1;
                 } else {
@@ -564,7 +584,7 @@ impl Player {
                 && !self.cols.broken
             {
                 self.decoding = None;
-                if mdec::decode_finish() {
+                if mdec().decode_finish() {
                     self.in_a_row = 0;
                     let slot = if self.waiting[0].is_none() { 0 } else { 1 };
                     self.waiting[slot] = Some((b, due));
@@ -575,7 +595,7 @@ impl Player {
                 || interrupts::vblank_count().wrapping_sub(self.cols.started)
                     > DECODE_TIMEOUT_VBLANKS
             {
-                mdec::abort_decode();
+                mdec().abort_decode();
                 psx_io::dma::abort(psx_io::dma::Channel::Gpu);
                 // GP1(01h): drop a VRAM copy the abort left waiting for
                 // pixels.
@@ -629,7 +649,7 @@ impl Player {
 }
 
 fn setup_mdec() -> bool {
-    mdec::reset() && mdec::load_tables().is_some_and(|t| t.enable_writes != 0)
+    mdec().reset() && mdec().load_tables().is_some_and(|t| t.enable_writes != 0)
 }
 
 /// Every display buffer black. A 24-bit line is 1.5 times as wide in VRAM
@@ -704,14 +724,16 @@ pub fn play(
         column_words: column_words(movie, config.depth),
     };
 
-    // SAFETY: the player takes over the GPU, as its doc says; nothing else
-    // drives channel 2 or GP0 until it returns.
-    let mut dma = unsafe { GpuDma::steal() };
+    // SAFETY: the player takes over the drive, the MDEC and the GPU's DMA
+    // channel, as its doc says; nothing else drives them until it returns.
+    let devices = unsafe { Peripherals::steal() };
+    install_devices(devices.cd, devices.mdec_dma);
+    let mut dma = devices.gpu_dma;
 
     let r = reader();
-    // SAFETY: the player owns the drive until it returns; prepare takes it
-    // over from whatever used it before. Unmute: a muted drive plays no XA.
-    let ready = unsafe {
+    // The player owns the drive until it returns; prepare takes it over from
+    // whatever used it before. Unmute: a muted drive plays no XA.
+    let ready = {
         match movie.xa {
             Some((file, channel)) => {
                 r.prepare_mode(MODE_XA) && r.unmute() && r.set_filter(file, channel)
@@ -723,7 +745,7 @@ pub fn play(
         return setup_failed();
     }
     if movie.xa.is_some() {
-        psx_io::cd::set_audio_mixer(0x80, 0, 0x80, 0);
+        reader().cd_mut().set_audio_mixer(0x80, 0, 0x80, 0);
         psx_spu::set_cd_volume(CdVolume::MAX, CdVolume::MAX);
         psx_spu::enable_cd_audio(true);
     }
@@ -740,8 +762,8 @@ pub fn play(
         psx_io::gpu::write_display_control(GP1_DISPLAY_MODE | mode | DISPLAY_24BIT);
     }
 
-    // SAFETY: the reader was prepared above.
-    if !unsafe { r.start_read(movie.lba) } {
+    // The reader was prepared above.
+    if !r.start_read(movie.lba) {
         leave_display(&mut dma, config, mode);
         return setup_failed();
     }
@@ -847,7 +869,7 @@ pub fn play(
                 };
                 // SAFETY: the bitstream decoder writes only the other buffer
                 // until this decode is finished or given up.
-                if unsafe { mdec::decode_start(p.buf.rle(rle), words, depth) }.is_err() {
+                if unsafe { mdec().decode_start(p.buf.rle(rle), words, depth) }.is_err() {
                     // Nothing the decoder wrote can be sent (no whole block):
                     // nothing started, the frame is lost.
                     p.errors += 1;
@@ -868,15 +890,15 @@ pub fn play(
     }
     // A flip still queued would land after we hand the display back.
     let _ = interrupts::take_queued_display_control();
-    mdec::abort_decode();
+    mdec().abort_decode();
     psx_io::dma::abort(psx_io::dma::Channel::Gpu);
     if p.cols.uploading.is_some() {
         // The abort cut a VRAM copy short: drop the transfer the GPU still
         // waits to receive.
         psx_io::gpu::write_display_control(gp1::RESET_CMD_BUFFER);
     }
-    // SAFETY: stop the stream we started (also ends the XA audio).
-    unsafe { reader().stop() };
+    // Stop the stream we started (also ends the XA audio).
+    reader().stop();
     if movie.xa.is_some() {
         psx_spu::set_cd_volume(CdVolume(0), CdVolume(0));
     }
