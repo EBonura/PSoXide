@@ -52,6 +52,9 @@ pub(super) const SCREEN_CX: i16 = 160;
 pub(super) const SCREEN_CY: i16 = 120;
 pub(super) const FOCAL: i32 = 320;
 pub(super) const NEAR_Z: i32 = 4;
+/// Follow-camera boom under which the player model is skipped (the eye is
+/// inside her). Her capsule radius is about 11.75; the near plane is 4.
+pub(super) const PLAYER_HIDE_BOOM: i32 = 14;
 pub(super) const FAR_Z: i32 = 1024;
 pub(super) const PROJECTION: WorldProjection =
     WorldProjection::new(SCREEN_CX, SCREEN_CY, FOCAL, NEAR_Z);
