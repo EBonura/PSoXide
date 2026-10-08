@@ -32,6 +32,7 @@ the editor and emulator share one simulation.
 | [`psx-mc`](crates/psx-mc) | Memory-card driver: SIO0 transport, on-card filesystem format interoperable with the console's card manager, optional LZSS compression. |
 | [`psx-osk`](crates/psx-osk) | On-screen keyboard for pad-driven text entry: QWERTY/symbols pages, shift, PS4-style boxed keys. |
 | [`psx-pack`](crates/psx-pack) | Guest-side WORLD.PAK parsing + in-place HLZC/LZ4 decompression (reader half of `psx-iso`). |
+| [`psx-cdstream`](crates/psx-cdstream) | Interrupt-driven CD streaming: a queue of read requests drained one sector per drive interrupt, seek-first, abortable at the next sector, contiguous requests chained without a seek, and a drive arbiter for CD-DA. The state machine is host-tested against a scripted drive. |
 | [`psx-telemetry`](crates/psx-telemetry) | Shared guest/host telemetry id tables for the emulator profiling hooks. |
 | [`psx-fmv`](crates/psx-fmv) | FMV playback building blocks: STR sector demux, BS v2 bitstream to MDEC run-length decode, MDEC upload/decode via DMA0/DMA1 (guest only), ISO9660 root-file lookup. |
 
@@ -64,6 +65,7 @@ Build and run them via the top-level `Makefile` (see the
 | `hello-memcard` | Non-destructive memory-card diagnostic: reads and hashes all 1024 frames, then (L1+R1+Cross) writes and verifies one test save. |
 | `hello-memprobe` | Checks psx-rt's `memcpy`/`memset`/`memcmp` against reference loops for every size and alignment; prints `MEMPROBE PASS` or `FAIL`. |
 | `hello-pack` | `psx_pack::cd` smoke test: streams raw and compressed WORLD.PAK chunks off the disc and checks them. |
+| `hello-cdstream` | `psx-cdstream` on a disc: single, chained, prioritised, aborted-and-resumed and sustained reads of a known file checked byte for byte, an audio lease taken mid-read, and the foreground cost of a long read (`make hello-cdstream-disc`, `make hello-cdstream-gate`). |
 | `hello-i64probe` | Runs software 64-bit multiply/divide/modulo on the target and checks the results; covers psx-rt's `__divdi3`/`__moddi3` overrides. |
 | `hello-icache` | Rewrites a function in cached RAM and checks that `psx_rt::cache::flush_instruction_cache` makes the CPU run the new code; prints `ICACHE PASS`, `INCONCLUSIVE` (nothing was stale) or `FAIL`. |
 | `cdda-read-contention` | CD-ROM conformance probe: issues a data read while CD-DA is playing and records which IRQ the drive raises. |

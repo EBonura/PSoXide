@@ -97,6 +97,11 @@
       "purpose": "Guest-side WORLD.PAK parsing + in-place HLZC/LZ4 decompression (reader half of `psx-iso`)."
     },
     {
+      "name": "psx-cdstream",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/crates/psx-cdstream",
+      "purpose": "Interrupt-driven CD streaming: a queue of read requests drained one sector per drive interrupt, seek-first, abortable at the next sector, contiguous requests chained without a seek, and a drive arbiter for CD-DA. The state machine is host-tested against a scripted drive."
+    },
+    {
       "name": "psx-telemetry",
       "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/crates/psx-telemetry",
       "purpose": "Shared guest/host telemetry id tables for the emulator profiling hooks."
@@ -187,6 +192,11 @@
       "name": "hello-pack",
       "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/hello-pack",
       "shows": "`psx_pack::cd` smoke test: streams raw and compressed WORLD.PAK chunks off the disc and checks them."
+    },
+    {
+      "name": "hello-cdstream",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/hello-cdstream",
+      "shows": "`psx-cdstream` on a disc: single, chained, prioritised, aborted-and-resumed and sustained reads of a known file checked byte for byte, an audio lease taken mid-read, and the foreground cost of a long read (`make hello-cdstream-disc`, `make hello-cdstream-gate`)."
     },
     {
       "name": "hello-i64probe",
