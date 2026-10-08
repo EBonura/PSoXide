@@ -53,6 +53,10 @@ const STACK_FILL: u8 = 0xa5;
 const ACK_RELEASE_SPINS: u32 = 256;
 /// VBlanks [`lease`] waits for the engine to go idle before taking the port.
 const LEASE_PATIENCE_VBLANKS: u32 = 3;
+/// Attempts [`lease`] makes before it stops counting on VBlanks, which never
+/// arrive for a caller that has interrupts off. Each is a few dozen cycles, so
+/// this is several milliseconds, longer than a round on the wire.
+const LEASE_PATIENCE_ATTEMPTS: u32 = 4_000;
 
 // -------------------------------------------------------------------- port
 
@@ -447,7 +451,7 @@ pub fn install(port: ControllerPort, config: Config) -> Result<(), ControllerPor
     with_engine(|engine| {
         *engine = Engine::new(Mmio::new(), &PUBLISHED, config);
     });
-    irq::set_mask(masked | SIO_BIT | TIMER_BIT | VBLANK_BIT);
+    irq::set_mask(irq::mask() | SIO_BIT | TIMER_BIT | VBLANK_BIT);
     Ok(())
 }
 
@@ -585,15 +589,19 @@ pub fn try_lease() -> Option<Lease> {
 
 /// Borrow the port. Waits for a transaction in flight (under two
 /// milliseconds on the wire); if the engine has not gone idle after a few
-/// VBlanks it abandons the transaction instead of waiting longer.
+/// VBlanks it abandons the transaction instead of waiting longer. A caller
+/// with CPU interrupts off cannot let the transaction finish, so it waits a
+/// fixed number of attempts instead and then takes the port.
 pub fn lease() -> Lease {
     let start = psx_rt::interrupts::vblank_count();
+    let mut attempts = 0u32;
     loop {
         if let Some(lease) = try_lease() {
             return lease;
         }
+        attempts += 1;
         let waited = psx_rt::interrupts::vblank_count().wrapping_sub(start);
-        if waited >= LEASE_PATIENCE_VBLANKS {
+        if waited >= LEASE_PATIENCE_VBLANKS || attempts >= LEASE_PATIENCE_ATTEMPTS {
             let lease = take_lease(|engine| {
                 engine.force_lease();
                 true
