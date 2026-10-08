@@ -61,6 +61,22 @@ impl<const PAGES: usize, const ASSETS: usize> PersistentAssetStorage<PAGES, ASSE
         end
     }
 
+    #[cfg(test)]
+    fn resident(&self, slot: usize) -> bool {
+        slot < ASSETS && self.lengths[slot] != 0
+    }
+
+    #[cfg(test)]
+    /// Drop `slot`'s allocation. Its bytes stay in place until the next
+    /// compaction reclaims them.
+    fn release_slot(&mut self, slot: usize) {
+        if slot >= ASSETS || self.lengths[slot] == 0 {
+            return;
+        }
+        self.lengths[slot] = 0;
+        self.offsets[slot] = 0;
+    }
+
     /// Total live bytes, 4-aligned per asset, ignoring gaps.
     fn live_bytes(&self) -> usize {
         let mut total = 0usize;

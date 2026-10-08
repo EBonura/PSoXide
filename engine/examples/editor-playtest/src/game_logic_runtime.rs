@@ -201,7 +201,6 @@ pub(super) struct SceneEntityMover<'a> {
     /// Pre-tick dead flags: corpses stop blocking other movers.
     pub(super) entity_dead: &'a [bool],
     pub(super) player: RoomPoint,
-    pub(super) player_room: RoomIndex,
     pub(super) player_radius: i32,
     pub(super) player_height: i32,
 }
@@ -266,7 +265,7 @@ impl SceneEntityMover<'_> {
                 break;
             }
         }
-        if self.player_room == room && self.player_radius > 0 {
+        if self.player_radius > 0 {
             cylinders.try_push(CharacterCollisionCylinder::new(
                 self.player,
                 self.player_radius,
@@ -378,9 +377,6 @@ impl psx_game_runtime::entities::GameEntityMover for SceneEntityMover<'_> {
     }
 
     fn line_of_sight(&mut self, room: RoomIndex, from: [i32; 3], to: [i32; 3]) -> bool {
-        if room != self.player_room {
-            return false;
-        }
         let mut aabbs =
             psx_engine::FixedScratch::<CharacterCollisionAabb, MAX_STATIC_PROP_AABB_BLOCKERS>::new(
             );
@@ -644,7 +640,6 @@ impl Playtest {
                         GAME_ENTITIES,
                         attack,
                         player_position,
-                        self.room_index,
                         player_radius,
                     )
                     .then_some((entity.touch_damage, entity.touch_damage.max(20))),

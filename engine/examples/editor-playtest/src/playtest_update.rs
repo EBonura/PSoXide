@@ -222,9 +222,9 @@ impl Playtest {
             (entity_mask, logic_mask, instance_mask)
         });
         self.game_entities
-            .set_spatial_active_mask(spatial_masks.map(|masks| masks.0));
+            .set_spatial_active_mask(spatial_masks.map_or(0, |masks| masks.0));
         self.logic
-            .set_spatial_active_mask(spatial_masks.map(|masks| masks.1));
+            .set_spatial_active_mask(spatial_masks.map_or(0, |masks| masks.1));
         self.bsp_instance_visible_mask = spatial_masks.map_or(u16::MAX, |masks| masks.2 as u16);
         if let Some((entity_mask, _, _)) = spatial_masks {
             // Live entities whose leaf sits outside the player's PVS row
@@ -260,7 +260,6 @@ impl Playtest {
                 entity_positions,
                 entity_dead,
                 player,
-                player_room: self.room_index,
                 player_radius,
                 player_height,
             };
@@ -268,7 +267,6 @@ impl Playtest {
                 GAME_ENTITIES,
                 psx_game_runtime::entities::GameEntityTickInput {
                     player: player_pos,
-                    player_room: self.room_index,
                     player_radius,
                     player_height,
                     player_invulnerable,
@@ -284,8 +282,6 @@ impl Playtest {
                         self.anim_state,
                         player_height,
                     ),
-                    // PXBSP owns activation through the spatial mask.
-                    active_rooms: &[],
                 },
                 &mut mover,
                 npc_delta_ticks,
@@ -373,9 +369,6 @@ impl Playtest {
             LOGIC,
             psx_game_runtime::logic::LogicTickInput {
                 player: player_pos,
-                player_room: self.room_index,
-                // PXBSP owns activation through the spatial mask.
-                active_rooms: &[],
             },
             now,
         );

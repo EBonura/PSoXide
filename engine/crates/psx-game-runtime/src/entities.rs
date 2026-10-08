@@ -281,15 +281,14 @@ impl GameEntityMover for NoClipMover {
     }
 }
 
-/// Per-tick inputs the owning game threads in: the player pose and
-/// the portal-expanded active-room set the AI gating reads.
+/// Per-tick inputs the owning game threads in: the player pose. Which
+/// entities think is the owner's spatial mask, see
+/// [`GameEntities::set_spatial_active_mask`].
 #[derive(Clone, Copy)]
-pub struct GameEntityTickInput<'a> {
+pub struct GameEntityTickInput {
     /// Player position, world/room-local engine units (the same space
     /// the cooked records use).
     pub player: [i32; 3],
-    /// Room containing the player.
-    pub player_room: RoomIndex,
     /// Player body radius, engine units (the player Character's
     /// capsule; the other half of Character-derived attack reach).
     pub player_radius: i32,
@@ -307,10 +306,6 @@ pub struct GameEntityTickInput<'a> {
     /// Visible target's stance and vitality, for shared dual-stance decisions.
     /// None retains distance-only policy for legacy callers and fixtures.
     pub player_combat: Option<(VitalityChannelId, [u16; 2])>,
-    /// Rooms currently in the active window (the portal-expanded
-    /// set). Entities in other rooms and with no engaged behavior do
-    /// not think this tick.
-    pub active_rooms: &'a [RoomIndex],
 }
 
 /// Per-tick outcome counters, for overlays and budget telemetry.
@@ -318,7 +313,7 @@ pub struct GameEntityTickInput<'a> {
 pub struct GameEntityTickStats {
     /// Entities that ran their state machine this tick.
     pub thought: u16,
-    /// Entities skipped by the active-room gate.
+    /// Entities skipped by the spatial activation gate.
     pub gated: u16,
     /// Entities whose attack window is active this tick (the combat
     /// slice consumes these for contact resolution).
@@ -625,9 +620,7 @@ pub struct GameEntities<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: b
     /// Wrapping identity of the latest tick/tick-delta call. Deferred contact
     /// tokens are deliberately one-call capabilities.
     attack_tick_generation: u16,
-    /// Optional owner-supplied per-record activation (for BSP PVS/area
-    /// residency). When disabled, the legacy active-room gate remains exact.
-    spatial_activation_enabled: bool,
+    /// Owner-supplied per-record activation (BSP PVS/area residency).
     // psx-numeric-allow-next-line: fixed 64-record activation mask; bit ops only, two-word on R3000
     spatial_active_mask: u64,
 }
@@ -710,7 +703,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
         &mut self,
         record: &LevelGameEntityRecord,
         index: usize,
-        input: GameEntityTickInput<'_>,
+        input: GameEntityTickInput,
     ) -> bool {
         if !Self::has_ranged_attack(record) {
             return true;
@@ -816,7 +809,6 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
         attack_owner_chase_ticks: 0,
         director_delay_ticks: 0,
         attack_tick_generation: 0,
-        spatial_activation_enabled: false,
         spatial_active_mask: 0,
     };
 
@@ -907,12 +899,12 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
         self.overflow
     }
 
-    /// Select an owner-defined per-record activation mask, or restore the
-    /// legacy room-window gate with `None`.
+    /// Select which records the owner considers spatially active (bit `i`
+    /// is record `i`). An idle or patrolling entity only thinks while its bit
+    /// is set or the player is inside its notice range.
     // psx-numeric-allow-next-line: mirrors the fixed 64-record activation mask above; bit ops only
-    pub fn set_spatial_active_mask(&mut self, mask: Option<u64>) {
-        self.spatial_activation_enabled = mask.is_some();
-        self.spatial_active_mask = mask.unwrap_or(0);
+    pub fn set_spatial_active_mask(&mut self, mask: u64) {
+        self.spatial_active_mask = mask;
     }
 
     /// Ticks entity `index` has spent in its current behavior state.
@@ -1121,7 +1113,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
         self.stance_swap_cooldown[index] = self.stance_swap_delay;
     }
 
-    fn capture_ranged_aim(&mut self, index: usize, input: GameEntityTickInput<'_>) {
+    fn capture_ranged_aim(&mut self, index: usize, input: GameEntityTickInput) {
         self.capture_ranged_target(index, input.player, input.player_height);
     }
 
@@ -1151,7 +1143,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
         &mut self,
         record: &LevelGameEntityRecord,
         index: usize,
-        input: GameEntityTickInput<'_>,
+        input: GameEntityTickInput,
         delta: u16,
     ) {
         // Track only during the early tell. The final six ticks and the
@@ -1519,14 +1511,13 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
     }
 
     /// Advance every entity one 60 Hz tick. Thinking is gated on the
-    /// active-room set hl-psx-style: an entity outside the set only
+    /// owner's spatial mask hl-psx-style: an entity outside it only
     /// thinks while its behavior is engaged (anything past
-    /// Idle/Patrol), and an entity whose room id is out of range
-    /// stays awake -- a cook failure can never freeze an actor.
+    /// Idle/Patrol) or the player is inside its notice range.
     pub fn tick(
         &mut self,
         records: &'static [LevelGameEntityRecord],
-        input: GameEntityTickInput<'_>,
+        input: GameEntityTickInput,
         mover: &mut impl GameEntityMover,
     ) -> GameEntityTickStats {
         self.tick_delta(records, input, mover, 1)
@@ -1539,7 +1530,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
     pub fn tick_delta(
         &mut self,
         records: &'static [LevelGameEntityRecord],
-        input: GameEntityTickInput<'_>,
+        input: GameEntityTickInput,
         mover: &mut impl GameEntityMover,
         delta_ticks: u16,
     ) -> GameEntityTickStats {
@@ -1560,7 +1551,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
     pub fn tick_delta_deferred<const MAX_ATTACKS: usize>(
         &mut self,
         records: &'static [LevelGameEntityRecord],
-        input: GameEntityTickInput<'_>,
+        input: GameEntityTickInput,
         mover: &mut impl GameEntityMover,
         delta_ticks: u16,
         attacks: &mut DeferredGameEntityAttacks<MAX_ATTACKS>,
@@ -1572,7 +1563,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
     fn tick_delta_impl<const MAX_ATTACKS: usize>(
         &mut self,
         records: &'static [LevelGameEntityRecord],
-        input: GameEntityTickInput<'_>,
+        input: GameEntityTickInput,
         mover: &mut impl GameEntityMover,
         delta_ticks: u16,
         mut deferred: Option<&mut DeferredGameEntityAttacks<MAX_ATTACKS>>,
@@ -1608,13 +1599,10 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
             }
             let behavior_awake = !matches!(state, GameEntityState::Idle | GameEntityState::Patrol);
             let spatially_active = index < 64 && self.spatial_active_mask & (1u64 << index) != 0;
-            let activation_allows = if self.spatial_activation_enabled {
-                // PVS is a rendering broad phase, not a perception verdict.
-                // Nearby actors must still test sight/hearing around corners.
-                spatially_active || self.player_in_notice_range(record, index, input)
-            } else {
-                room_is_active(record.room, input.active_rooms)
-            };
+            // PVS is a rendering broad phase, not a perception verdict.
+            // Nearby actors must still test sight/hearing around corners.
+            let activation_allows =
+                spatially_active || self.player_in_notice_range(record, index, input);
             if !behavior_awake && !activation_allows {
                 stats.gated += 1;
                 index += 1;
@@ -1793,14 +1781,10 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
         records: &[LevelGameEntityRecord],
         attack: DeferredGameEntityAttack,
         player: [i32; 3],
-        player_room: RoomIndex,
         player_radius: i32,
     ) -> bool {
         let index = attack.entity();
-        if !self.deferred_attack_can_connect(attack)
-            || records.get(index).is_none()
-            || player_room != attack.room
-        {
+        if !self.deferred_attack_can_connect(attack) || records.get(index).is_none() {
             return false;
         }
         let record = &records[index];
@@ -1846,7 +1830,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
     fn update_combat_director(
         &mut self,
         records: &'static [LevelGameEntityRecord],
-        input: GameEntityTickInput<'_>,
+        input: GameEntityTickInput,
         delta_ticks: u16,
         stats: &mut GameEntityTickStats,
     ) {
@@ -1902,7 +1886,6 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
             let record = &records[index];
             let state = self.state(index);
             let ready = state == GameEntityState::Aggro
-                && record.room == input.player_room
                 // A dry cannon must not monopolize the shared attack slot
                 // while another enemy has a legal attack available.
                 && (!self.flow_enabled || !STANCE_BOUND_ATTACKS
@@ -2008,13 +1991,12 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
         &mut self,
         record: &LevelGameEntityRecord,
         index: usize,
-        input: GameEntityTickInput<'_>,
+        input: GameEntityTickInput,
         stats: &mut GameEntityTickStats,
     ) {
         if self.selected_attack_is_ranged(index)
             || self.combat_flags[index] & GAME_ENTITY_ATTACK_CONNECTED != 0
             || input.player_invulnerable
-            || input.player_room != record.room
         {
             return;
         }
@@ -2038,7 +2020,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
         stats.player_damage = stats.player_damage.saturating_add(record.touch_damage);
     }
 
-    fn player_within(&self, index: usize, input: GameEntityTickInput<'_>, radius: i32) -> bool {
+    fn player_within(&self, index: usize, input: GameEntityTickInput, radius: i32) -> bool {
         within_xz(
             [self.x[index], self.z[index]],
             [input.player[0], input.player[2]],
@@ -2048,7 +2030,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
 
     /// Attack-band outer edge. Ranged attacks use their authored maximum;
     /// melee uses both body radii plus the close-in margin.
-    fn attack_reach(record: &LevelGameEntityRecord, input: GameEntityTickInput<'_>) -> i32 {
+    fn attack_reach(record: &LevelGameEntityRecord, input: GameEntityTickInput) -> i32 {
         if Self::has_ranged_attack(record) {
             i32::from(record.attack_max_range)
         } else {
@@ -2058,7 +2040,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
         }
     }
 
-    fn melee_attack_reach(record: &LevelGameEntityRecord, input: GameEntityTickInput<'_>) -> i32 {
+    fn melee_attack_reach(record: &LevelGameEntityRecord, input: GameEntityTickInput) -> i32 {
         i32::from(record.radius)
             .saturating_add(input.player_radius.max(0))
             .saturating_add(GAME_ENTITY_ATTACK_REACH_MARGIN)
@@ -2068,13 +2050,12 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
         &self,
         record: &LevelGameEntityRecord,
         index: usize,
-        input: GameEntityTickInput<'_>,
+        input: GameEntityTickInput,
     ) -> bool {
-        input.player_room == record.room
-            && psx_math::int32::abs_i32(self.y[index].saturating_sub(input.player[1]))
-                <= i32::from(record.height)
-                    .max(input.player_height)
-                    .saturating_mul(2)
+        psx_math::int32::abs_i32(self.y[index].saturating_sub(input.player[1]))
+            <= i32::from(record.height)
+                .max(input.player_height)
+                .saturating_mul(2)
             && self.player_within(index, input, i32::from(record.aggro_radius))
     }
 
@@ -2084,7 +2065,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
         &self,
         record: &LevelGameEntityRecord,
         index: usize,
-        input: GameEntityTickInput<'_>,
+        input: GameEntityTickInput,
         mover: &mut impl GameEntityMover,
     ) -> bool {
         if Self::is_tactical(record)
@@ -2129,7 +2110,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
         &self,
         record: &LevelGameEntityRecord,
         index: usize,
-        input: GameEntityTickInput<'_>,
+        input: GameEntityTickInput,
         mover: &mut impl GameEntityMover,
     ) -> bool {
         let from = [
@@ -2149,7 +2130,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
         &mut self,
         record: &LevelGameEntityRecord,
         index: usize,
-        input: GameEntityTickInput<'_>,
+        input: GameEntityTickInput,
         mover: &mut impl GameEntityMover,
         stats: &mut GameEntityTickStats,
     ) {
@@ -2172,7 +2153,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
         &mut self,
         record: &LevelGameEntityRecord,
         index: usize,
-        input: GameEntityTickInput<'_>,
+        input: GameEntityTickInput,
         mover: &mut impl GameEntityMover,
         delta_ticks: u16,
         stats: &mut GameEntityTickStats,
@@ -2200,7 +2181,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
         &mut self,
         record: &LevelGameEntityRecord,
         index: usize,
-        input: GameEntityTickInput<'_>,
+        input: GameEntityTickInput,
         mover: &mut impl GameEntityMover,
         delta_ticks: u16,
         stats: &mut GameEntityTickStats,
@@ -2210,7 +2191,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
             return;
         }
         let leash = i32::from(record.aggro_radius).saturating_mul(GAME_ENTITY_LEASH_FACTOR);
-        if input.player_room != record.room || !self.player_within(index, input, leash) {
+        if !self.player_within(index, input, leash) {
             // Souls de-aggro: drop the chase and return to the idle
             // loop (return-to-post pathing is the nav slice).
             self.release_attack_owner(index, u16::from(record.group_attack_delay_ticks));
@@ -2399,7 +2380,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
         &mut self,
         record: &LevelGameEntityRecord,
         index: usize,
-        input: GameEntityTickInput<'_>,
+        input: GameEntityTickInput,
         yaw_offset: u16,
         speed: i32,
         mover: &mut impl GameEntityMover,
@@ -2706,23 +2687,6 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
     }
 }
 
-/// True when `room` is in the active window, or out of range of any
-/// possible cooked room (the fail-safe keeps a mis-cooked entity
-/// awake instead of frozen, hl-psx parity).
-fn room_is_active(room: RoomIndex, active_rooms: &[RoomIndex]) -> bool {
-    if room.raw() == u16::MAX {
-        return true;
-    }
-    let mut i = 0usize;
-    while i < active_rooms.len() {
-        if active_rooms[i] == room {
-            return true;
-        }
-        i += 1;
-    }
-    false
-}
-
 /// Clamped integer XZ radius test: early-out on either axis, then an
 /// exact squared compare in i32 (radius clamps to 32,767 so the sum
 /// of two squares stays inside i32).
@@ -2884,29 +2848,25 @@ mod tests {
 
     const ACTIVE: [RoomIndex; 1] = [RoomIndex(0)];
 
-    fn far_input(active_rooms: &[RoomIndex]) -> GameEntityTickInput<'_> {
+    fn far_input() -> GameEntityTickInput {
         GameEntityTickInput {
             player: [100_000, 0, 100_000],
-            player_room: RoomIndex(0),
             player_radius: 192,
             player_height: 1024,
             player_noise_radius: 0,
             player_invulnerable: false,
             player_combat: None,
-            active_rooms,
         }
     }
 
-    fn near_input(active_rooms: &[RoomIndex]) -> GameEntityTickInput<'_> {
+    fn near_input() -> GameEntityTickInput {
         GameEntityTickInput {
             player: [1200, 0, 1000],
-            player_room: RoomIndex(0),
             player_radius: 192,
             player_height: 1024,
             player_noise_radius: 0,
             player_invulnerable: false,
             player_combat: None,
-            active_rooms,
         }
     }
 
@@ -3076,7 +3036,8 @@ mod tests {
     fn empty_records_tick_is_inert() {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&[]);
-        let stats = entities.tick(&[], far_input(&ACTIVE), &mut NoClipMover);
+        entities.set_spatial_active_mask(u64::MAX);
+        let stats = entities.tick(&[], far_input(), &mut NoClipMover);
         assert_eq!(entities.count(), 0);
         assert_eq!(stats, GameEntityTickStats::default());
     }
@@ -3085,12 +3046,15 @@ mod tests {
     fn spawn_copies_records_and_disabled_spawn_dead() {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&IDLE_ENEMY);
+        entities.set_spatial_active_mask(u64::MAX);
         assert_eq!(entities.count(), 1);
         assert_eq!(entities.state(0), GameEntityState::Idle);
         assert_eq!(entities.position(0), [1000, 0, 1000]);
         assert_eq!(entities.health(0), 100);
 
         entities.spawn_from_records(&DISABLED_ENEMY);
+
+        entities.set_spatial_active_mask(u64::MAX);
         assert_eq!(entities.state(0), GameEntityState::Dead);
     }
 
@@ -3123,11 +3087,12 @@ mod tests {
         for delta in [1, 2] {
             let mut entities = GameEntities::<8>::EMPTY;
             entities.spawn_from_records(&ENEMY);
+            entities.set_spatial_active_mask(u64::MAX);
             let input = GameEntityTickInput {
                 player: [140, 0, 0],
                 player_radius: 12,
                 player_height: 64,
-                ..near_input(&ACTIVE)
+                ..near_input()
             };
             let mut ranged = 0;
             let mut melee = 0;
@@ -3152,9 +3117,9 @@ mod tests {
             e.set_stance_swap_delay(300);
             let far = GameEntityTickInput {
                 player: [2550, 0, 1000],
-                ..near_input(&ACTIVE)
+                ..near_input()
             };
-            let near = near_input(&ACTIVE);
+            let near = near_input();
             e.tick_delta(&RANGED_ENEMY, far, &mut BlockedMover, delta);
             e.tick_delta(&RANGED_ENEMY, far, &mut BlockedMover, delta);
             assert_eq!(e.stance(0), VitalityChannelId::Two);
@@ -3212,7 +3177,7 @@ mod tests {
             GameEntityState::Aggro,
             &mut GameEntityTickStats::default(),
         );
-        e.tick(&RANGED_ENEMY, near_input(&ACTIVE), &mut NoClipMover);
+        e.tick(&RANGED_ENEMY, near_input(), &mut NoClipMover);
         assert_eq!(e.stance(0), VitalityChannelId::Two);
         assert_eq!(e.intent(0), GameEntityIntent::Retreat);
         assert!(e.position(0)[0] < 1000);
@@ -3222,7 +3187,7 @@ mod tests {
         let before = e.position(0);
         let far = GameEntityTickInput {
             player: [2550, 0, 1000],
-            ..near_input(&ACTIVE)
+            ..near_input()
         };
         e.tick(&RANGED_ENEMY, far, &mut NoClipMover);
         assert_eq!(e.stance(0), VitalityChannelId::One);
@@ -3241,11 +3206,11 @@ mod tests {
         );
         let band = GameEntityTickInput {
             player: [2350, 0, 1000],
-            ..near_input(&ACTIVE)
+            ..near_input()
         };
         let far = GameEntityTickInput {
             player: [2550, 0, 1000],
-            ..near_input(&ACTIVE)
+            ..near_input()
         };
         e.tick_delta(&RANGED_ENEMY, band, &mut BlockedMover, 1);
         assert_eq!(
@@ -3284,7 +3249,7 @@ mod tests {
             e.enter_state(0, state, &mut GameEntityTickStats::default());
             let input = GameEntityTickInput {
                 player: [2550, 0, 1000],
-                ..near_input(&ACTIVE)
+                ..near_input()
             };
             e.tick_delta(&RANGED_ENEMY, input, &mut BlockedMover, 1);
             assert_eq!(e.stance(0), VitalityChannelId::One, "swap during {state:?}");
@@ -3297,7 +3262,7 @@ mod tests {
         close.spawn_from_records(&RANGED_ENEMY);
         let close_input = GameEntityTickInput {
             player: [1450, 0, 1000],
-            ..near_input(&ACTIVE)
+            ..near_input()
         };
         close.tick(&RANGED_ENEMY, close_input, &mut NoClipMover);
         close.tick(&RANGED_ENEMY, close_input, &mut NoClipMover);
@@ -3307,7 +3272,7 @@ mod tests {
 
         let still_close_input = GameEntityTickInput {
             player: [2300, 0, 1000],
-            ..near_input(&ACTIVE)
+            ..near_input()
         };
         let before_follow = close.position(0)[0];
         close.tick(&RANGED_ENEMY, still_close_input, &mut NoClipMover);
@@ -3320,7 +3285,7 @@ mod tests {
 
         let escaped_input = GameEntityTickInput {
             player: [2500, 0, 1000],
-            ..near_input(&ACTIVE)
+            ..near_input()
         };
         close.tick(&RANGED_ENEMY, escaped_input, &mut NoClipMover);
         assert_eq!(close.state(0), GameEntityState::Windup);
@@ -3342,9 +3307,10 @@ mod tests {
     fn close_hybrid_waiting_for_attack_slot_keeps_pursuing() {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&RANGED_PAIR);
+        entities.set_spatial_active_mask(u64::MAX);
         let input = GameEntityTickInput {
             player: [1450, 0, 1000],
-            ..near_input(&ACTIVE)
+            ..near_input()
         };
 
         entities.tick(&RANGED_PAIR, input, &mut NoClipMover);
@@ -3362,6 +3328,7 @@ mod tests {
     fn close_attacks_alternate_light_heavy_without_ranged_consuming_the_sequence() {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&RANGED_ENEMY);
+        entities.set_spatial_active_mask(u64::MAX);
 
         entities.select_attack(0, false);
         assert_eq!(
@@ -3395,6 +3362,7 @@ mod tests {
     fn model_instance_lookup_tracks_live_position_and_rejects_dead_entities() {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&TARGETED_ENEMY);
+        entities.set_spatial_active_mask(u64::MAX);
         assert_eq!(
             entities.live_position_for_model_instance(&TARGETED_ENEMY, 7),
             Some([1000, 0, 1000])
@@ -3445,6 +3413,7 @@ mod tests {
         ];
         let mut entities = GameEntities::<2>::EMPTY;
         entities.spawn_from_records(&MANY);
+        entities.set_spatial_active_mask(u64::MAX);
         assert_eq!(entities.count(), 2);
         assert_eq!(entities.overflow_count(), 1);
     }
@@ -3453,13 +3422,14 @@ mod tests {
     fn souls_attack_grammar_advances_through_windup_commit_punish() {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&IDLE_ENEMY);
+        entities.set_spatial_active_mask(u64::MAX);
         // Player inside aggro and attack reach (192 + 192 + 128 = 512
         // >= the 200-unit gap): Idle -> Aggro.
-        let stats = entities.tick(&IDLE_ENEMY, near_input(&ACTIVE), &mut NoClipMover);
+        let stats = entities.tick(&IDLE_ENEMY, near_input(), &mut NoClipMover);
         assert_eq!(entities.state(0), GameEntityState::Aggro);
         assert_eq!(stats.aggro_enters, 1);
         // Aggro -> Windup (in attack reach).
-        let stats = entities.tick(&IDLE_ENEMY, near_input(&ACTIVE), &mut NoClipMover);
+        let stats = entities.tick(&IDLE_ENEMY, near_input(), &mut NoClipMover);
         assert_eq!(entities.state(0), GameEntityState::Windup);
         assert_eq!(stats.windup_enters, 1);
         // Committing to the windup faces the player.
@@ -3469,7 +3439,7 @@ mod tests {
         let mut melee_attack_enters = 0;
         let mut ranged_attack_enters = 0;
         for _ in 0..3 {
-            let stats = entities.tick(&IDLE_ENEMY, near_input(&ACTIVE), &mut NoClipMover);
+            let stats = entities.tick(&IDLE_ENEMY, near_input(), &mut NoClipMover);
             attack_enters += stats.attack_enters;
             melee_attack_enters += stats.melee_attack_enters;
             ranged_attack_enters += stats.ranged_attack_enters;
@@ -3481,13 +3451,13 @@ mod tests {
         // Attack window then recovery.
         let mut saw_attacking = false;
         for _ in 0..GAME_ENTITY_ATTACK_ACTIVE_TICKS {
-            let stats = entities.tick(&IDLE_ENEMY, near_input(&ACTIVE), &mut NoClipMover);
+            let stats = entities.tick(&IDLE_ENEMY, near_input(), &mut NoClipMover);
             saw_attacking |= stats.attacking > 0;
         }
         assert!(saw_attacking);
         assert_eq!(entities.state(0), GameEntityState::Recover);
         for _ in 0..4 {
-            entities.tick(&IDLE_ENEMY, near_input(&ACTIVE), &mut NoClipMover);
+            entities.tick(&IDLE_ENEMY, near_input(), &mut NoClipMover);
         }
         assert_eq!(entities.state(0), GameEntityState::Aggro);
     }
@@ -3506,16 +3476,17 @@ mod tests {
         }];
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&REACTIVE);
-        entities.tick(&REACTIVE, near_input(&ACTIVE), &mut NoClipMover);
+        entities.set_spatial_active_mask(u64::MAX);
+        entities.tick(&REACTIVE, near_input(), &mut NoClipMover);
         assert_eq!(entities.state(0), GameEntityState::Aggro);
 
         for _ in 0..3 {
-            let stats = entities.tick(&REACTIVE, near_input(&ACTIVE), &mut BlockedMover);
+            let stats = entities.tick(&REACTIVE, near_input(), &mut BlockedMover);
             assert_eq!(stats.attack_grants, 0);
             assert_eq!(entities.attack_owner(), None);
             assert_eq!(entities.state(0), GameEntityState::Aggro);
         }
-        let stats = entities.tick(&REACTIVE, near_input(&ACTIVE), &mut BlockedMover);
+        let stats = entities.tick(&REACTIVE, near_input(), &mut BlockedMover);
         assert_eq!(stats.attack_grants, 1);
         assert_eq!(entities.attack_owner(), Some(0));
         assert_eq!(entities.state(0), GameEntityState::Windup);
@@ -3535,8 +3506,9 @@ mod tests {
         }];
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&REACTIVE);
+        entities.set_spatial_active_mask(u64::MAX);
 
-        entities.tick(&REACTIVE, near_input(&ACTIVE), &mut NoClipMover);
+        entities.tick(&REACTIVE, near_input(), &mut NoClipMover);
         assert_eq!(entities.state(0), GameEntityState::Aggro);
         assert_eq!(
             entities.clip_for_state(&REACTIVE, 0),
@@ -3548,10 +3520,10 @@ mod tests {
             }
         );
 
-        entities.tick(&REACTIVE, near_input(&ACTIVE), &mut NoClipMover);
+        entities.tick(&REACTIVE, near_input(), &mut NoClipMover);
         assert_eq!(entities.clip_for_state(&REACTIVE, 0).phase_ticks, 1);
-        entities.tick(&REACTIVE, near_input(&ACTIVE), &mut NoClipMover);
-        entities.tick(&REACTIVE, near_input(&ACTIVE), &mut NoClipMover);
+        entities.tick(&REACTIVE, near_input(), &mut NoClipMover);
+        entities.tick(&REACTIVE, near_input(), &mut NoClipMover);
         assert_ne!(entities.clip_for_state(&REACTIVE, 0).clip, 9);
     }
 
@@ -3574,16 +3546,15 @@ mod tests {
         }];
         let input = GameEntityTickInput {
             player: [1600, 0, 1000],
-            player_room: RoomIndex(0),
             player_radius: 192,
             player_height: 1024,
             player_noise_radius: 0,
             player_invulnerable: false,
             player_combat: None,
-            active_rooms: &ACTIVE,
         };
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&TRACKING);
+        entities.set_spatial_active_mask(u64::MAX);
         entities.tick(&TRACKING, input, &mut NoClipMover);
         entities.director_delay_ticks = 100;
 
@@ -3625,8 +3596,9 @@ mod tests {
         ];
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&PAIR);
-        entities.tick(&PAIR, near_input(&ACTIVE), &mut NoClipMover);
-        let stats = entities.tick(&PAIR, near_input(&ACTIVE), &mut BlockedMover);
+        entities.set_spatial_active_mask(u64::MAX);
+        entities.tick(&PAIR, near_input(), &mut NoClipMover);
+        let stats = entities.tick(&PAIR, near_input(), &mut BlockedMover);
 
         assert_eq!(stats.attack_grants, 1);
         assert_eq!(entities.attack_owner(), Some(0));
@@ -3650,16 +3622,17 @@ mod tests {
         }];
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&PACED);
-        entities.tick(&PACED, near_input(&ACTIVE), &mut BlockedMover);
-        entities.tick(&PACED, near_input(&ACTIVE), &mut BlockedMover);
+        entities.set_spatial_active_mask(u64::MAX);
+        entities.tick(&PACED, near_input(), &mut BlockedMover);
+        entities.tick(&PACED, near_input(), &mut BlockedMover);
         for _ in 0..PACED[0].windup_ticks {
-            entities.tick(&PACED, near_input(&ACTIVE), &mut BlockedMover);
+            entities.tick(&PACED, near_input(), &mut BlockedMover);
         }
         for _ in 0..GAME_ENTITY_ATTACK_ACTIVE_TICKS {
-            entities.tick(&PACED, near_input(&ACTIVE), &mut BlockedMover);
+            entities.tick(&PACED, near_input(), &mut BlockedMover);
         }
         for _ in 0..PACED[0].recovery_ticks {
-            entities.tick(&PACED, near_input(&ACTIVE), &mut BlockedMover);
+            entities.tick(&PACED, near_input(), &mut BlockedMover);
         }
         assert_eq!(entities.state(0), GameEntityState::Aggro);
         assert_eq!(entities.attack_owner(), None);
@@ -3667,11 +3640,11 @@ mod tests {
         assert_eq!(entities.director_delay_ticks, 3);
 
         for _ in 0..4 {
-            let stats = entities.tick(&PACED, near_input(&ACTIVE), &mut BlockedMover);
+            let stats = entities.tick(&PACED, near_input(), &mut BlockedMover);
             assert_eq!(stats.attack_grants, 0);
             assert_eq!(entities.state(0), GameEntityState::Aggro);
         }
-        let stats = entities.tick(&PACED, near_input(&ACTIVE), &mut BlockedMover);
+        let stats = entities.tick(&PACED, near_input(), &mut BlockedMover);
         assert_eq!(stats.attack_grants, 1);
         assert_eq!(entities.state(0), GameEntityState::Windup);
     }
@@ -3695,10 +3668,11 @@ mod tests {
         }];
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&SPACED);
+        entities.set_spatial_active_mask(u64::MAX);
         entities.state[0] = GameEntityState::Aggro as u8;
         entities.state_ticks[0] = 100;
         entities.attack_cooldown[0] = 100;
-        entities.tick(&SPACED, near_input(&ACTIVE), &mut NoClipMover);
+        entities.tick(&SPACED, near_input(), &mut NoClipMover);
         assert_eq!(entities.intent(0), GameEntityIntent::Retreat);
         assert_eq!(
             entities.clip_for_state(&SPACED, 0).clip,
@@ -3716,7 +3690,7 @@ mod tests {
         entities.attack_cooldown[0] = 100;
         let in_band = GameEntityTickInput {
             player: [1700, 0, 1000],
-            ..near_input(&ACTIVE)
+            ..near_input()
         };
         entities.tick(&SPACED, in_band, &mut NoClipMover);
         let expected_clip = match entities.intent(0) {
@@ -3736,6 +3710,7 @@ mod tests {
     fn clip_for_state_maps_states_and_spans_the_attack_one_shot() {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&IDLE_ENEMY);
+        entities.set_spatial_active_mask(u64::MAX);
         // Idle loops the idle clip from the state-entry tick.
         assert_eq!(
             entities.clip_for_state(&IDLE_ENEMY, 0),
@@ -3746,7 +3721,7 @@ mod tests {
                 ..GameEntityClip::default()
             }
         );
-        entities.tick(&IDLE_ENEMY, far_input(&ACTIVE), &mut NoClipMover);
+        entities.tick(&IDLE_ENEMY, far_input(), &mut NoClipMover);
         assert_eq!(
             entities.clip_for_state(&IDLE_ENEMY, 0),
             GameEntityClip {
@@ -3758,7 +3733,7 @@ mod tests {
         );
         // Newly acquired Aggro holds the idle clip until the director
         // grants an approach/attack intent.
-        entities.tick(&IDLE_ENEMY, near_input(&ACTIVE), &mut NoClipMover);
+        entities.tick(&IDLE_ENEMY, near_input(), &mut NoClipMover);
         assert_eq!(entities.state(0), GameEntityState::Aggro);
         assert_eq!(
             entities.clip_for_state(&IDLE_ENEMY, 0),
@@ -3773,7 +3748,7 @@ mod tests {
         // one-shot whose phase walks 1..=12 across Windup (3 ticks),
         // Attack (6 ticks), and Recover without resetting on the
         // state hops.
-        entities.tick(&IDLE_ENEMY, near_input(&ACTIVE), &mut NoClipMover);
+        entities.tick(&IDLE_ENEMY, near_input(), &mut NoClipMover);
         assert_eq!(entities.state(0), GameEntityState::Windup);
         assert_eq!(
             entities.clip_for_state(&IDLE_ENEMY, 0),
@@ -3785,7 +3760,7 @@ mod tests {
             }
         );
         for expected in 1..=12u16 {
-            entities.tick(&IDLE_ENEMY, near_input(&ACTIVE), &mut NoClipMover);
+            entities.tick(&IDLE_ENEMY, near_input(), &mut NoClipMover);
             assert_eq!(
                 entities.clip_for_state(&IDLE_ENEMY, 0),
                 GameEntityClip {
@@ -3810,7 +3785,7 @@ mod tests {
                 ..GameEntityClip::default()
             }
         );
-        entities.tick(&IDLE_ENEMY, far_input(&ACTIVE), &mut NoClipMover);
+        entities.tick(&IDLE_ENEMY, far_input(), &mut NoClipMover);
         assert_eq!(entities.clip_for_state(&IDLE_ENEMY, 0).phase_ticks, 1);
         // Death is a one-shot that keeps counting while Dead (the
         // clip finishes and holds its final frame), without waking
@@ -3827,7 +3802,7 @@ mod tests {
             }
         );
         for _ in 0..3 {
-            let stats = entities.tick(&IDLE_ENEMY, near_input(&ACTIVE), &mut NoClipMover);
+            let stats = entities.tick(&IDLE_ENEMY, near_input(), &mut NoClipMover);
             assert_eq!(stats.thought, 0);
         }
         assert_eq!(
@@ -3850,21 +3825,22 @@ mod tests {
     fn aggro_deaggros_past_leash_and_patrol_walks_legs() {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&PATROL_ENEMY);
+        entities.set_spatial_active_mask(u64::MAX);
         // Aggro from proximity...
-        entities.tick(&PATROL_ENEMY, near_input(&ACTIVE), &mut NoClipMover);
+        entities.tick(&PATROL_ENEMY, near_input(), &mut NoClipMover);
         assert_eq!(entities.state(0), GameEntityState::Aggro);
         // ...then the player leaves: leash drop back to Idle.
-        entities.tick(&PATROL_ENEMY, far_input(&ACTIVE), &mut NoClipMover);
+        entities.tick(&PATROL_ENEMY, far_input(), &mut NoClipMover);
         assert_eq!(entities.state(0), GameEntityState::Idle);
         // Idle waits patrol_wait_ticks (2) then patrols to the anchor
         // 400 units away at the record's Character walk speed.
-        entities.tick(&PATROL_ENEMY, far_input(&ACTIVE), &mut NoClipMover);
-        let stats = entities.tick(&PATROL_ENEMY, far_input(&ACTIVE), &mut NoClipMover);
+        entities.tick(&PATROL_ENEMY, far_input(), &mut NoClipMover);
+        let stats = entities.tick(&PATROL_ENEMY, far_input(), &mut NoClipMover);
         assert_eq!(entities.state(0), GameEntityState::Patrol);
         assert_eq!(stats.patrol_enters, 1);
         let mut walked = 0;
         while entities.state(0) == GameEntityState::Patrol && walked < 100 {
-            entities.tick(&PATROL_ENEMY, far_input(&ACTIVE), &mut NoClipMover);
+            entities.tick(&PATROL_ENEMY, far_input(), &mut NoClipMover);
             walked += 1;
         }
         assert_eq!(entities.state(0), GameEntityState::Idle);
@@ -3879,11 +3855,12 @@ mod tests {
         // anchor. Chase: one tick moves run_speed toward the player.
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&PATROL_ENEMY);
-        entities.tick(&PATROL_ENEMY, far_input(&ACTIVE), &mut NoClipMover);
-        entities.tick(&PATROL_ENEMY, far_input(&ACTIVE), &mut NoClipMover);
+        entities.set_spatial_active_mask(u64::MAX);
+        entities.tick(&PATROL_ENEMY, far_input(), &mut NoClipMover);
+        entities.tick(&PATROL_ENEMY, far_input(), &mut NoClipMover);
         assert_eq!(entities.state(0), GameEntityState::Patrol);
         let before = entities.position(0)[0];
-        entities.tick(&PATROL_ENEMY, far_input(&ACTIVE), &mut NoClipMover);
+        entities.tick(&PATROL_ENEMY, far_input(), &mut NoClipMover);
         assert_eq!(
             entities.position(0)[0] - before,
             PATROL_ENEMY[0].walk_speed,
@@ -3894,15 +3871,14 @@ mod tests {
         // leash) but outside the 512 attack reach, straight down +X:
         // the chase closes at run_speed.
         entities.spawn_from_records(&IDLE_ENEMY);
+        entities.set_spatial_active_mask(u64::MAX);
         let chase_input = GameEntityTickInput {
             player: [1800, 0, 1000],
-            player_room: RoomIndex(0),
             player_radius: 192,
             player_height: 1024,
             player_noise_radius: 0,
             player_invulnerable: false,
             player_combat: None,
-            active_rooms: &ACTIVE,
         };
         // Move the player into the 512 aggro radius first.
         let notice_input = GameEntityTickInput {
@@ -3926,15 +3902,14 @@ mod tests {
             [test_record(1000, 1000, 0, 512, game_entity_flags::ENABLED)];
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&WALK_ONLY_ENEMY);
+        entities.set_spatial_active_mask(u64::MAX);
         let chase_input = GameEntityTickInput {
             player: [1800, 0, 1000],
-            player_room: RoomIndex(0),
             player_radius: 192,
             player_height: 1024,
             player_noise_radius: 0,
             player_invulnerable: false,
             player_combat: None,
-            active_rooms: &ACTIVE,
         };
         entities.tick(
             &WALK_ONLY_ENEMY,
@@ -3963,11 +3938,12 @@ mod tests {
     fn blocked_mover_holds_position_but_state_machine_still_runs() {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&PATROL_ENEMY);
-        entities.tick(&PATROL_ENEMY, far_input(&ACTIVE), &mut BlockedMover);
-        entities.tick(&PATROL_ENEMY, far_input(&ACTIVE), &mut BlockedMover);
+        entities.set_spatial_active_mask(u64::MAX);
+        entities.tick(&PATROL_ENEMY, far_input(), &mut BlockedMover);
+        entities.tick(&PATROL_ENEMY, far_input(), &mut BlockedMover);
         assert_eq!(entities.state(0), GameEntityState::Patrol);
         for _ in 0..10 {
-            entities.tick(&PATROL_ENEMY, far_input(&ACTIVE), &mut BlockedMover);
+            entities.tick(&PATROL_ENEMY, far_input(), &mut BlockedMover);
         }
         // Fully blocked: never arrives, never leaves Patrol, position
         // pinned to spawn -- and no state corruption.
@@ -3979,12 +3955,13 @@ mod tests {
     fn heading_search_routes_patrol_around_a_finite_wall() {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&PATROL_ENEMY);
+        entities.set_spatial_active_mask(u64::MAX);
         entities.state[0] = GameEntityState::Patrol as u8;
         let mut mover = FiniteWallMover::default();
         let mut left_direct_line = false;
 
         for _ in 0..160 {
-            entities.tick(&PATROL_ENEMY, far_input(&ACTIVE), &mut mover);
+            entities.tick(&PATROL_ENEMY, far_input(), &mut mover);
             left_direct_line |= entities.position(0)[2] != PATROL_ENEMY[0].z;
             if entities.state(0) == GameEntityState::Idle {
                 break;
@@ -4018,8 +3995,8 @@ mod tests {
         let mut second_mover = FiniteWallMover::default();
 
         for _ in 0..160 {
-            first.tick(&PATROL_ENEMY, far_input(&ACTIVE), &mut first_mover);
-            second.tick(&PATROL_ENEMY, far_input(&ACTIVE), &mut second_mover);
+            first.tick(&PATROL_ENEMY, far_input(), &mut first_mover);
+            second.tick(&PATROL_ENEMY, far_input(), &mut second_mover);
             assert_eq!(first.position(0), second.position(0));
             assert_eq!(first.yaw(0), second.yaw(0));
             assert_eq!(first.state(0), second.state(0));
@@ -4034,12 +4011,13 @@ mod tests {
     fn heading_search_probes_each_direction_at_most_once() {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&PATROL_ENEMY);
+        entities.set_spatial_active_mask(u64::MAX);
         entities.state[0] = GameEntityState::Patrol as u8;
         let mut mover = CountingBlockedMover::default();
 
         for _ in 0..4 {
             let before = mover.calls;
-            entities.tick(&PATROL_ENEMY, far_input(&ACTIVE), &mut mover);
+            entities.tick(&PATROL_ENEMY, far_input(), &mut mover);
             assert!(
                 mover.calls - before <= usize::from(GAME_ENTITY_DIRECTION_PROBES_PER_TICK),
                 "the blocked search stays inside its per-tick probe budget"
@@ -4103,13 +4081,14 @@ mod tests {
     fn blocked_search_tries_the_reverse_heading_last() {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&PATROL_ENEMY);
+        entities.set_spatial_active_mask(u64::MAX);
         entities.state[0] = GameEntityState::Patrol as u8;
         // A working heading due north that the mover now refuses.
         entities.move_yaw[0] = 0;
         entities.move_yaw_valid[0] = 5;
         let mut mover = RecordingBlockedMover::default();
         for _ in 0..4 {
-            entities.tick(&PATROL_ENEMY, far_input(&ACTIVE), &mut mover);
+            entities.tick(&PATROL_ENEMY, far_input(), &mut mover);
         }
         assert_eq!(mover.len, 8);
         assert_eq!(mover.deltas[0], [0, 1], "the working heading goes first");
@@ -4125,51 +4104,27 @@ mod tests {
     }
 
     #[test]
-    fn thinking_gates_on_active_rooms_with_fail_safe() {
+    fn an_idle_enemy_ignores_a_player_outside_its_notice_range() {
         let mut entities = GameEntities::<8>::EMPTY;
-        entities.spawn_from_records(&FAR_ROOM_ENEMY);
-        let near_in_room_7 = |rooms: &'static [RoomIndex]| GameEntityTickInput {
-            player: [1200, 0, 1000],
-            player_room: RoomIndex(7),
-            player_radius: 192,
-            player_height: 1024,
-            player_noise_radius: 0,
-            player_invulnerable: false,
-            player_combat: None,
-            active_rooms: rooms,
-        };
-        // Room 7 not active: gated, no thinking.
-        let stats = entities.tick(&FAR_ROOM_ENEMY, near_in_room_7(&ACTIVE), &mut NoClipMover);
-        assert_eq!(stats.gated, 1);
-        assert_eq!(stats.thought, 0);
+        entities.spawn_from_records(&IDLE_ENEMY);
+        entities.set_spatial_active_mask(u64::MAX);
+        entities.tick(&IDLE_ENEMY, far_input(), &mut NoClipMover);
         assert_eq!(entities.state(0), GameEntityState::Idle);
-        // Room 7 active + player in room 7: thinks and aggros.
-        static BOTH: [RoomIndex; 2] = [RoomIndex(0), RoomIndex(7)];
-        let stats = entities.tick(&FAR_ROOM_ENEMY, near_in_room_7(&BOTH), &mut NoClipMover);
-        assert_eq!(stats.thought, 1);
-        assert_eq!(entities.state(0), GameEntityState::Aggro);
-        // Engaged behavior stays awake outside the active set
-        // (hl-psx: combat continues outside the PVS).
-        let stats = entities.tick(&FAR_ROOM_ENEMY, near_in_room_7(&ACTIVE), &mut NoClipMover);
-        assert_eq!(stats.thought, 1);
     }
 
     #[test]
     fn owner_spatial_mask_keeps_nearby_perception_and_engaged_combat_awake() {
-        static ROOM_7: [RoomIndex; 1] = [RoomIndex(7)];
         let input = GameEntityTickInput {
             player: [1200, 0, 1000],
-            player_room: RoomIndex(7),
             player_radius: 192,
             player_height: 1024,
             player_noise_radius: 0,
             player_invulnerable: false,
             player_combat: None,
-            active_rooms: &ROOM_7,
         };
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&FAR_ROOM_ENEMY);
-        entities.set_spatial_active_mask(Some(0));
+        entities.set_spatial_active_mask(0);
         let far = GameEntityTickInput {
             player: [12000, 0, 1000],
             ..input
@@ -4179,57 +4134,38 @@ mod tests {
         let stats = entities.tick(&FAR_ROOM_ENEMY, input, &mut NoClipMover);
         assert_eq!(stats.thought, 1, "nearby perception runs outside PVS");
 
-        entities.set_spatial_active_mask(Some(1));
+        entities.set_spatial_active_mask(1);
         let stats = entities.tick(&FAR_ROOM_ENEMY, input, &mut NoClipMover);
         assert_eq!(stats.thought, 1);
         assert_eq!(entities.state(0), GameEntityState::Windup);
 
-        entities.set_spatial_active_mask(Some(0));
+        entities.set_spatial_active_mask(0);
         let stats = entities.tick(&FAR_ROOM_ENEMY, input, &mut NoClipMover);
         assert_eq!(stats.thought, 1, "engaged behavior remains awake");
-    }
-
-    #[test]
-    fn aggro_requires_matching_player_room() {
-        // Same coordinates but the player is in another room: cooked
-        // positions are room-local, so no notice happens.
-        let mut entities = GameEntities::<8>::EMPTY;
-        entities.spawn_from_records(&IDLE_ENEMY);
-        let aliased = GameEntityTickInput {
-            player: [1200, 0, 1000],
-            player_room: RoomIndex(3),
-            player_radius: 192,
-            player_height: 1024,
-            player_noise_radius: 0,
-            player_invulnerable: false,
-            player_combat: None,
-            active_rooms: &ACTIVE,
-        };
-        entities.tick(&IDLE_ENEMY, aliased, &mut NoClipMover);
-        assert_eq!(entities.state(0), GameEntityState::Idle);
     }
 
     #[test]
     fn line_of_sight_gates_acquisition_and_attack_commit_without_dropping_aggro() {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&IDLE_ENEMY);
+        entities.set_spatial_active_mask(u64::MAX);
         let mut sight = SightMover::default();
 
-        entities.tick(&IDLE_ENEMY, far_input(&ACTIVE), &mut sight);
+        entities.tick(&IDLE_ENEMY, far_input(), &mut sight);
         assert_eq!(sight.queries, 0, "distance rejects before the BSP trace");
 
-        entities.tick(&IDLE_ENEMY, near_input(&ACTIVE), &mut sight);
+        entities.tick(&IDLE_ENEMY, near_input(), &mut sight);
         assert_eq!(entities.state(0), GameEntityState::Idle);
         assert_eq!(sight.queries, 1);
         assert_eq!(sight.last_from, [1000, 512, 1000]);
         assert_eq!(sight.last_to, [1200, 512, 1000]);
 
         sight.clear = true;
-        entities.tick(&IDLE_ENEMY, near_input(&ACTIVE), &mut sight);
+        entities.tick(&IDLE_ENEMY, near_input(), &mut sight);
         assert_eq!(entities.state(0), GameEntityState::Aggro);
 
         sight.clear = false;
-        entities.tick(&IDLE_ENEMY, near_input(&ACTIVE), &mut sight);
+        entities.tick(&IDLE_ENEMY, near_input(), &mut sight);
         assert_eq!(
             entities.state(0),
             GameEntityState::Aggro,
@@ -4237,7 +4173,7 @@ mod tests {
         );
 
         sight.clear = true;
-        entities.tick(&IDLE_ENEMY, near_input(&ACTIVE), &mut sight);
+        entities.tick(&IDLE_ENEMY, near_input(), &mut sight);
         assert_eq!(entities.state(0), GameEntityState::Windup);
     }
 
@@ -4259,12 +4195,12 @@ mod tests {
             player: [0, 0, -180],
             player_height: 64,
             player_radius: 12,
-            ..near_input(&ACTIVE)
+            ..near_input()
         };
         for delta in [1, 2] {
             let mut entities = GameEntities::<8>::EMPTY;
             entities.spawn_from_records(&ENEMY);
-            entities.set_spatial_active_mask(Some(0));
+            entities.set_spatial_active_mask(0);
             entities.tick_delta(&ENEMY, base, &mut NoClipMover, delta);
             assert_eq!(
                 entities.state(0),
@@ -4292,6 +4228,7 @@ mod tests {
                 "hears running behind"
             );
             entities.spawn_from_records(&ENEMY);
+            entities.set_spatial_active_mask(u64::MAX);
             let front = GameEntityTickInput {
                 player: [0, 0, 300],
                 ..base
@@ -4303,6 +4240,7 @@ mod tests {
                 "sees ahead without noise"
             );
             entities.spawn_from_records(&ENEMY);
+            entities.set_spatial_active_mask(u64::MAX);
             let close = GameEntityTickInput {
                 player: [0, 0, -90],
                 ..walking
@@ -4332,13 +4270,14 @@ mod tests {
         }];
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&ENEMY);
+        entities.set_spatial_active_mask(u64::MAX);
         let mut blocked = SightMover::default();
         let input = GameEntityTickInput {
             player: [0, 0, -120],
             player_height: 64,
             player_radius: 12,
             player_noise_radius: 256,
-            ..near_input(&ACTIVE)
+            ..near_input()
         };
         entities.tick(&ENEMY, input, &mut blocked);
         assert_eq!(entities.state(0), GameEntityState::Idle);
@@ -4357,6 +4296,7 @@ mod tests {
             "cannot attack through cover"
         );
         entities.spawn_from_records(&ENEMY);
+        entities.set_spatial_active_mask(u64::MAX);
         let upstairs = GameEntityTickInput {
             player: [0, 512, -40],
             ..input
@@ -4390,6 +4330,7 @@ mod tests {
         }];
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&PACED_ATTACK);
+        entities.set_spatial_active_mask(u64::MAX);
         entities.state[0] = GameEntityState::Windup as u8;
 
         entities.attack_mode[0] = GAME_ENTITY_ATTACK_LIGHT;
@@ -4424,16 +4365,17 @@ mod tests {
         }];
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&SLOW_STUN);
+        entities.set_spatial_active_mask(u64::MAX);
         entities.apply_hit(&SLOW_STUN, 0, VitalityChannelId::One, 10, 60);
         let clip = entities.clip_for_state(&SLOW_STUN, 0);
         assert_eq!(clip.speed_q8, 256);
         assert_eq!(clip.frame_range, SLOW_STUN[0].stagger_frame_range);
         for _ in 0..84 {
-            entities.tick(&SLOW_STUN, far_input(&ACTIVE), &mut NoClipMover);
+            entities.tick(&SLOW_STUN, far_input(), &mut NoClipMover);
             assert_eq!(entities.state(0), GameEntityState::Staggered);
         }
         assert_eq!(entities.clip_for_state(&SLOW_STUN, 0).phase_ticks, 84);
-        entities.tick(&SLOW_STUN, far_input(&ACTIVE), &mut NoClipMover);
+        entities.tick(&SLOW_STUN, far_input(), &mut NoClipMover);
         assert_eq!(entities.state(0), GameEntityState::Aggro);
     }
 
@@ -4441,6 +4383,7 @@ mod tests {
     fn hits_break_poise_then_kill() {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&IDLE_ENEMY);
+        entities.set_spatial_active_mask(u64::MAX);
         // Poise pool is 50: 60 poise damage staggers.
         let outcome = entities.apply_hit(&IDLE_ENEMY, 0, VitalityChannelId::One, 10, 60);
         assert_eq!(entities.state(0), GameEntityState::Staggered);
@@ -4448,14 +4391,14 @@ mod tests {
         assert!(outcome.connected && outcome.staggered && !outcome.died);
         // Stagger expires back into Aggro.
         for _ in 0..GAME_ENTITY_STAGGER_TICKS {
-            entities.tick(&IDLE_ENEMY, far_input(&ACTIVE), &mut NoClipMover);
+            entities.tick(&IDLE_ENEMY, far_input(), &mut NoClipMover);
         }
         assert_eq!(entities.state(0), GameEntityState::Aggro);
         // Lethal damage kills; dead entities stop thinking.
         let outcome = entities.apply_hit(&IDLE_ENEMY, 0, VitalityChannelId::One, 200, 0);
         assert!(outcome.connected && outcome.died);
         assert_eq!(entities.state(0), GameEntityState::Dead);
-        let stats = entities.tick(&IDLE_ENEMY, near_input(&ACTIVE), &mut NoClipMover);
+        let stats = entities.tick(&IDLE_ENEMY, near_input(), &mut NoClipMover);
         assert_eq!(stats.thought, 0);
         // A dead entity refuses further hits.
         assert_eq!(
@@ -4494,6 +4437,7 @@ mod tests {
     fn spawn_fills_both_vitality_channels() {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&DUAL_ENEMY);
+        entities.set_spatial_active_mask(u64::MAX);
         assert_eq!(entities.health(0), 60);
         assert_eq!(entities.health_secondary(0), 40);
         assert_eq!(entities.health_channel(0, VitalityChannelId::One), 60);
@@ -4587,7 +4531,7 @@ mod tests {
             e.mutate_stance(0);
             assert_eq!(e.stance_swap_cooldown(0), 900);
             for elapsed in (delta..900).step_by(usize::from(delta)) {
-                e.tick_delta(&DUAL_ENEMY, far_input(&ACTIVE), &mut NoClipMover, delta);
+                e.tick_delta(&DUAL_ENEMY, far_input(), &mut NoClipMover, delta);
                 e.mutate_stance(0);
                 assert_eq!(
                     e.stance(0),
@@ -4595,7 +4539,7 @@ mod tests {
                     "early swap at {elapsed}"
                 );
             }
-            e.tick_delta(&DUAL_ENEMY, far_input(&ACTIVE), &mut NoClipMover, delta);
+            e.tick_delta(&DUAL_ENEMY, far_input(), &mut NoClipMover, delta);
             e.mutate_stance(0);
             assert_eq!(e.stance(0), VitalityChannelId::One);
         }
@@ -4630,7 +4574,7 @@ mod tests {
         e.spawn_from_records(&ENEMY);
         let mut input = GameEntityTickInput {
             player: [2500, 0, 1000],
-            ..near_input(&ACTIVE)
+            ..near_input()
         };
         e.tick(&ENEMY, input, &mut NoClipMover);
         e.tick(&ENEMY, input, &mut NoClipMover);
@@ -4663,7 +4607,7 @@ mod tests {
             GameEntityTickInput {
                 player: [0, 0, -384],
                 player_height: 64,
-                ..near_input(&ACTIVE)
+                ..near_input()
             },
         );
         assert_eq!(e.ranged_target(0), Some([0, 48, -384]));
@@ -4685,7 +4629,7 @@ mod tests {
             GameEntityTickInput {
                 player: [0, 0, -128],
                 player_height: 64,
-                ..near_input(&ACTIVE)
+                ..near_input()
             },
         );
         assert_eq!(e.ranged_target(0), Some([0, 48, 128]));
@@ -4700,7 +4644,7 @@ mod tests {
         e.spawn_from_records(&RANGED_ENEMY);
         let input = GameEntityTickInput {
             player: [2500, 0, 1000],
-            ..near_input(&ACTIVE)
+            ..near_input()
         };
         for _ in 0..40 {
             e.tick(&RANGED_ENEMY, input, &mut NoClipMover);
@@ -4732,7 +4676,7 @@ mod tests {
         e.spawn_from_records(&RANGED_PAIR);
         let input = GameEntityTickInput {
             player: [1450, 0, 1000],
-            ..near_input(&ACTIVE)
+            ..near_input()
         };
         e.tick(&RANGED_PAIR, input, &mut BlockedMover);
         e.tick(&RANGED_PAIR, input, &mut BlockedMover);
@@ -4747,6 +4691,7 @@ mod tests {
     fn deliberate_stance_swap_reports_a_twelve_tick_tell() {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&DUAL_ENEMY);
+        entities.set_spatial_active_mask(u64::MAX);
         assert_eq!(entities.stance(0), VitalityChannelId::One);
         assert_eq!(entities.stance_swap_progress_q12(0), 4096);
 
@@ -4809,6 +4754,7 @@ mod tests {
     fn a_hit_drains_only_its_own_channel() {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&DUAL_ENEMY);
+        entities.set_spatial_active_mask(u64::MAX);
         entities.apply_hit(&DUAL_ENEMY, 0, VitalityChannelId::One, 20, 0);
         assert_eq!((entities.health(0), entities.health_secondary(0)), (40, 40));
         entities.apply_hit(&DUAL_ENEMY, 0, VitalityChannelId::Two, 15, 0);
@@ -4822,6 +4768,7 @@ mod tests {
     fn overkill_spills_into_the_other_channel() {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&DUAL_ENEMY);
+        entities.set_spatial_active_mask(u64::MAX);
         // 75 against a 60 Horizon pool: 60 lands, 15 crosses into Zenith.
         let outcome = entities.apply_hit(&DUAL_ENEMY, 0, VitalityChannelId::One, 75, 0);
         assert_eq!((entities.health(0), entities.health_secondary(0)), (0, 25));
@@ -4829,6 +4776,7 @@ mod tests {
 
         // And symmetrically, from the Zenith side on a fresh actor.
         entities.spawn_from_records(&DUAL_ENEMY);
+        entities.set_spatial_active_mask(u64::MAX);
         entities.apply_hit(&DUAL_ENEMY, 0, VitalityChannelId::Two, 55, 0);
         assert_eq!((entities.health(0), entities.health_secondary(0)), (45, 0));
     }
@@ -4840,6 +4788,7 @@ mod tests {
     fn death_needs_both_channels_empty() {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&DUAL_ENEMY);
+        entities.set_spatial_active_mask(u64::MAX);
         let outcome = entities.apply_hit(&DUAL_ENEMY, 0, VitalityChannelId::Two, 40, 0);
         assert!(outcome.connected && !outcome.died);
         assert_ne!(entities.state(0), GameEntityState::Dead);
@@ -4861,6 +4810,7 @@ mod tests {
     fn one_channel_attacker_still_kills_at_the_summed_pool() {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&DUAL_ENEMY);
+        entities.set_spatial_active_mask(u64::MAX);
         for _ in 0..3 {
             assert!(
                 !entities
@@ -4885,6 +4835,7 @@ mod tests {
         for damage in [u16::MAX, u16::MAX - 1, 60_000, 101, 100] {
             let mut entities = GameEntities::<8>::EMPTY;
             entities.spawn_from_records(&EVEN_ENEMY);
+            entities.set_spatial_active_mask(u64::MAX);
             let outcome = entities.apply_hit(&EVEN_ENEMY, 0, VitalityChannelId::One, damage, 0);
             assert!(
                 outcome.connected && outcome.died,
@@ -4906,6 +4857,7 @@ mod tests {
     fn one_short_of_the_combined_pools_does_not_kill() {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&EVEN_ENEMY);
+        entities.set_spatial_active_mask(u64::MAX);
         let outcome = entities.apply_hit(&EVEN_ENEMY, 0, VitalityChannelId::One, 99, 0);
         assert!(outcome.connected && !outcome.died);
         assert_eq!((entities.health(0), entities.health_secondary(0)), (0, 1));
@@ -4924,6 +4876,7 @@ mod tests {
     fn an_overwhelming_zenith_hit_kills_outright() {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&EVEN_ENEMY);
+        entities.set_spatial_active_mask(u64::MAX);
         assert!(
             entities
                 .apply_hit(&EVEN_ENEMY, 0, VitalityChannelId::Two, u16::MAX, 0)
@@ -4939,6 +4892,7 @@ mod tests {
     fn an_overwhelming_arc_hit_kills_outright() {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&EVEN_ENEMY);
+        entities.set_spatial_active_mask(u64::MAX);
         // Guard Zenith so the Horizon (One) swings below land on the exposed
         // channel (1.5x); these tests are about arc mechanics, not the chip.
         entities.combat_flags[0] |= GAME_ENTITY_STANCE_ZENITH;
@@ -4971,6 +4925,7 @@ mod tests {
     fn a_zero_second_pool_is_a_single_channel_actor() {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&IDLE_ENEMY);
+        entities.set_spatial_active_mask(u64::MAX);
         assert_eq!(entities.health_secondary(0), 0);
         assert!(
             entities
@@ -4983,7 +4938,7 @@ mod tests {
     /// Drive IDLE_ENEMY from spawn into its Attack window against the
     /// near-input player (windup_ticks = 3): Idle -> Aggro -> Windup
     /// -> 3 windup ticks -> Attack.
-    fn advance_into_attack(entities: &mut GameEntities<8>, input: GameEntityTickInput<'_>) {
+    fn advance_into_attack(entities: &mut GameEntities<8>, input: GameEntityTickInput) {
         for _ in 0..5 {
             entities.tick(&IDLE_ENEMY, input, &mut NoClipMover);
         }
@@ -4994,9 +4949,10 @@ mod tests {
     fn attack_window_damages_the_player_once_per_swing() {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&IDLE_ENEMY);
-        advance_into_attack(&mut entities, near_input(&ACTIVE));
+        entities.set_spatial_active_mask(u64::MAX);
+        advance_into_attack(&mut entities, near_input());
         // First active tick connects with the record's touch damage.
-        let stats = entities.tick(&IDLE_ENEMY, near_input(&ACTIVE), &mut NoClipMover);
+        let stats = entities.tick(&IDLE_ENEMY, near_input(), &mut NoClipMover);
         assert_eq!(stats.player_hits, 1);
         assert_eq!(stats.player_damage, IDLE_ENEMY[0].touch_damage);
         // The rest of the window and the recovery stay dry: one
@@ -5006,7 +4962,7 @@ mod tests {
         let mut later_damage = 0u16;
         for _ in 0..8 {
             later_damage += entities
-                .tick(&IDLE_ENEMY, near_input(&ACTIVE), &mut NoClipMover)
+                .tick(&IDLE_ENEMY, near_input(), &mut NoClipMover)
                 .player_damage;
         }
         assert_eq!(later_damage, 0);
@@ -5018,11 +4974,12 @@ mod tests {
         // Fully i-framed window: no contact at all.
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&IDLE_ENEMY);
-        advance_into_attack(&mut entities, near_input(&ACTIVE));
+        entities.set_spatial_active_mask(u64::MAX);
+        advance_into_attack(&mut entities, near_input());
         let rolling = GameEntityTickInput {
             player_invulnerable: true,
             player_combat: None,
-            ..near_input(&ACTIVE)
+            ..near_input()
         };
         let mut damage = 0u16;
         for _ in 0..GAME_ENTITY_ATTACK_ACTIVE_TICKS {
@@ -5037,10 +4994,11 @@ mod tests {
         // too early still gets clipped (souls timing rules).
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&IDLE_ENEMY);
-        advance_into_attack(&mut entities, near_input(&ACTIVE));
+        entities.set_spatial_active_mask(u64::MAX);
+        advance_into_attack(&mut entities, near_input());
         let early_roll = entities.tick(&IDLE_ENEMY, rolling, &mut NoClipMover);
         assert_eq!(early_roll.player_hits, 0);
-        let tail = entities.tick(&IDLE_ENEMY, near_input(&ACTIVE), &mut NoClipMover);
+        let tail = entities.tick(&IDLE_ENEMY, near_input(), &mut NoClipMover);
         assert_eq!(tail.player_hits, 1);
     }
 
@@ -5048,14 +5006,15 @@ mod tests {
     fn attacks_whiff_behind_the_committed_facing() {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&IDLE_ENEMY);
+        entities.set_spatial_active_mask(u64::MAX);
         // Commit the windup against a player at +X (facing locks to
         // 1024)...
-        advance_into_attack(&mut entities, near_input(&ACTIVE));
+        advance_into_attack(&mut entities, near_input());
         // ...then the player rolls PAST the body to -X: same reach,
         // outside the front arc, outside the point-blank ring.
         let behind = GameEntityTickInput {
             player: [800, 0, 1000],
-            ..near_input(&ACTIVE)
+            ..near_input()
         };
         let mut damage = 0u16;
         for _ in 0..GAME_ENTITY_ATTACK_ACTIVE_TICKS {
@@ -5076,9 +5035,9 @@ mod tests {
         stepped.state[0] = GameEntityState::Patrol as u8;
         batched.state[0] = GameEntityState::Patrol as u8;
 
-        stepped.tick(&PATROL_ENEMY, far_input(&ACTIVE), &mut NoClipMover);
-        stepped.tick(&PATROL_ENEMY, far_input(&ACTIVE), &mut NoClipMover);
-        batched.tick_delta(&PATROL_ENEMY, far_input(&ACTIVE), &mut NoClipMover, 2);
+        stepped.tick(&PATROL_ENEMY, far_input(), &mut NoClipMover);
+        stepped.tick(&PATROL_ENEMY, far_input(), &mut NoClipMover);
+        batched.tick_delta(&PATROL_ENEMY, far_input(), &mut NoClipMover, 2);
 
         assert_eq!(batched.position(0), stepped.position(0));
         assert_eq!(batched.yaw(0), stepped.yaw(0));
@@ -5089,6 +5048,7 @@ mod tests {
     fn occluded_melee_arc_blocks_without_latching_the_swing_bit() {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&IDLE_ENEMY);
+        entities.set_spatial_active_mask(u64::MAX);
         // Guard Zenith so the Horizon (One) swings below land on the exposed
         // channel (1.5x); these tests are about arc mechanics, not the chip.
         entities.combat_flags[0] |= GAME_ENTITY_STANCE_ZENITH;
@@ -5150,6 +5110,7 @@ mod tests {
     fn melee_arc_hits_once_per_swing_and_skips_dead_and_other_rooms() {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&IDLE_ENEMY);
+        entities.set_spatial_active_mask(u64::MAX);
         // Guard Zenith so the Horizon (One) swings below land on the exposed
         // channel (1.5x); these tests are about arc mechanics, not the chip.
         entities.combat_flags[0] |= GAME_ENTITY_STANCE_ZENITH;
@@ -5242,6 +5203,7 @@ mod tests {
         // room-local; a same-coordinate player in another room is an
         // alias, not a neighbor).
         entities.spawn_from_records(&IDLE_ENEMY);
+        entities.set_spatial_active_mask(u64::MAX);
         swing = 0;
         let wrong_room = MeleeArc {
             room: RoomIndex(2),
@@ -5296,13 +5258,7 @@ mod tests {
         attacks: &mut DeferredGameEntityAttacks<8>,
     ) {
         for _ in 0..5 {
-            entities.tick_delta_deferred(
-                &IDLE_ENEMY,
-                near_input(&ACTIVE),
-                &mut NoClipMover,
-                1,
-                attacks,
-            );
+            entities.tick_delta_deferred(&IDLE_ENEMY, near_input(), &mut NoClipMover, 1, attacks);
         }
         assert_eq!(entities.state(0), GameEntityState::Attack);
         // The Windup -> Attack transition tick runs the Windup arm; the
@@ -5315,6 +5271,7 @@ mod tests {
         let mut entities = GameEntities::<8>::EMPTY;
         let mut attacks = DeferredGameEntityAttacks::<8>::EMPTY;
         entities.spawn_from_records(&IDLE_ENEMY);
+        entities.set_spatial_active_mask(u64::MAX);
         advance_into_attack_deferred(&mut entities, &mut attacks);
         entities.yaw[0] = 0;
         entities.track_authored_melee_tell(0, [2000, 0, 1000], 2);
@@ -5333,6 +5290,7 @@ mod tests {
         let mut entities = GameEntities::<8>::EMPTY;
         let mut attacks = DeferredGameEntityAttacks::<8>::EMPTY;
         entities.spawn_from_records(&IDLE_ENEMY);
+        entities.set_spatial_active_mask(u64::MAX);
         advance_into_attack_deferred(&mut entities, &mut attacks);
         let windup = u16::from(IDLE_ENEMY[0].windup_ticks);
 
@@ -5342,7 +5300,7 @@ mod tests {
         for active_tick in 1..=GAME_ENTITY_ATTACK_ACTIVE_TICKS {
             let stats = entities.tick_delta_deferred(
                 &IDLE_ENEMY,
-                near_input(&ACTIVE),
+                near_input(),
                 &mut NoClipMover,
                 1,
                 &mut attacks,
@@ -5374,7 +5332,7 @@ mod tests {
         // The first Recover tick emits nothing.
         let stats = entities.tick_delta_deferred(
             &IDLE_ENEMY,
-            near_input(&ACTIVE),
+            near_input(),
             &mut NoClipMover,
             1,
             &mut attacks,
@@ -5388,10 +5346,12 @@ mod tests {
         let mut entities = GameEntities::<8>::EMPTY;
         assert!(!entities.encounter_cleared(&[]));
         entities.spawn_from_records(&IDLE_ENEMY);
+        entities.set_spatial_active_mask(u64::MAX);
         assert!(!entities.encounter_cleared(&IDLE_ENEMY));
         entities.state[0] = GameEntityState::Dead as u8;
         assert!(entities.encounter_cleared(&IDLE_ENEMY));
         entities.spawn_from_records(&IDLE_ENEMY);
+        entities.set_spatial_active_mask(u64::MAX);
         assert!(!entities.encounter_cleared(&IDLE_ENEMY));
         let mut disabled = IDLE_ENEMY;
         disabled[0].flags &= !game_entity_flags::ENABLED;
@@ -5405,6 +5365,7 @@ mod tests {
     fn melee_combo_windows_are_independent_and_interruptible() {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&IDLE_ENEMY);
+        entities.set_spatial_active_mask(u64::MAX);
         let mut stats = GameEntityTickStats::default();
         entities.enter_state(0, GameEntityState::Attack, &mut stats);
         let token = entities.deferred_attack(&IDLE_ENEMY[0], 0);
@@ -5430,6 +5391,7 @@ mod tests {
     fn ranged_volley_latches_each_emitter_and_interrupts_cancel_pending_shots() {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&IDLE_ENEMY);
+        entities.set_spatial_active_mask(u64::MAX);
         entities.attack_mode[0] = GAME_ENTITY_ATTACK_RANGED;
         let mut stats = GameEntityTickStats::default();
         entities.enter_state(0, GameEntityState::Attack, &mut stats);
@@ -5458,14 +5420,9 @@ mod tests {
         let mut entities = GameEntities::<8>::EMPTY;
         let mut attacks = DeferredGameEntityAttacks::<8>::EMPTY;
         entities.spawn_from_records(&IDLE_ENEMY);
+        entities.set_spatial_active_mask(u64::MAX);
         advance_into_attack_deferred(&mut entities, &mut attacks);
-        entities.tick_delta_deferred(
-            &IDLE_ENEMY,
-            near_input(&ACTIVE),
-            &mut NoClipMover,
-            1,
-            &mut attacks,
-        );
+        entities.tick_delta_deferred(&IDLE_ENEMY, near_input(), &mut NoClipMover, 1, &mut attacks);
         let token = attacks.get(0).unwrap();
         let player = [1200, 0, 1000];
 
@@ -5477,33 +5434,15 @@ mod tests {
         };
         assert!(!entities.deferred_attack_can_connect(stale_swing));
         assert!(!entities.connect_deferred_attack(stale_swing));
-        assert!(!entities.deferred_attack_legacy_arc_hits(
-            &IDLE_ENEMY,
-            stale_swing,
-            player,
-            RoomIndex(0),
-            192,
-        ));
+        assert!(!entities.deferred_attack_legacy_arc_hits(&IDLE_ENEMY, stale_swing, player, 192,));
 
         // The next entity tick retires the previous tick's tokens wholesale:
         // contact may only finalize against the poses retained for the tick
         // that emitted the token.
-        entities.tick_delta_deferred(
-            &IDLE_ENEMY,
-            near_input(&ACTIVE),
-            &mut NoClipMover,
-            1,
-            &mut attacks,
-        );
+        entities.tick_delta_deferred(&IDLE_ENEMY, near_input(), &mut NoClipMover, 1, &mut attacks);
         assert!(!entities.deferred_attack_can_connect(token));
         assert!(!entities.connect_deferred_attack(token));
-        assert!(!entities.deferred_attack_legacy_arc_hits(
-            &IDLE_ENEMY,
-            token,
-            player,
-            RoomIndex(0),
-            192,
-        ));
+        assert!(!entities.deferred_attack_legacy_arc_hits(&IDLE_ENEMY, token, player, 192,));
         let fresh = attacks.get(0).unwrap();
         assert!(entities.deferred_attack_can_connect(fresh));
     }
@@ -5513,63 +5452,27 @@ mod tests {
         let mut entities = GameEntities::<8>::EMPTY;
         let mut attacks = DeferredGameEntityAttacks::<8>::EMPTY;
         entities.spawn_from_records(&IDLE_ENEMY);
+        entities.set_spatial_active_mask(u64::MAX);
         advance_into_attack_deferred(&mut entities, &mut attacks);
-        entities.tick_delta_deferred(
-            &IDLE_ENEMY,
-            near_input(&ACTIVE),
-            &mut NoClipMover,
-            1,
-            &mut attacks,
-        );
+        entities.tick_delta_deferred(&IDLE_ENEMY, near_input(), &mut NoClipMover, 1, &mut attacks);
         let token = attacks.get(0).unwrap();
         let player = [1200, 0, 1000];
 
         // Legacy arc geometry (frozen origin/yaw/reach) agrees the player is
         // reachable before any connection, whiffs behind the committed
-        // facing, and never crosses rooms.
-        assert!(entities.deferred_attack_legacy_arc_hits(
-            &IDLE_ENEMY,
-            token,
-            player,
-            RoomIndex(0),
-            192,
-        ));
-        assert!(!entities.deferred_attack_legacy_arc_hits(
-            &IDLE_ENEMY,
-            token,
-            [800, 0, 1000],
-            RoomIndex(0),
-            192,
-        ));
-        assert!(!entities.deferred_attack_legacy_arc_hits(
-            &IDLE_ENEMY,
-            token,
-            player,
-            RoomIndex(2),
-            192,
-        ));
+        // facing.
+        assert!(entities.deferred_attack_legacy_arc_hits(&IDLE_ENEMY, token, player, 192,));
+        assert!(!entities.deferred_attack_legacy_arc_hits(&IDLE_ENEMY, token, [800, 0, 1000], 192,));
 
         // An authored-capsule connection latches the swing: the same token
         // cannot finalize twice, and the legacy arc goes dead with it, so one
         // swing can never damage through both policies.
         assert!(entities.connect_deferred_attack(token));
         assert!(!entities.connect_deferred_attack(token));
-        assert!(!entities.deferred_attack_legacy_arc_hits(
-            &IDLE_ENEMY,
-            token,
-            player,
-            RoomIndex(0),
-            192,
-        ));
+        assert!(!entities.deferred_attack_legacy_arc_hits(&IDLE_ENEMY, token, player, 192,));
 
         // The latch spans the remaining active ticks of the SAME swing.
-        entities.tick_delta_deferred(
-            &IDLE_ENEMY,
-            near_input(&ACTIVE),
-            &mut NoClipMover,
-            1,
-            &mut attacks,
-        );
+        entities.tick_delta_deferred(&IDLE_ENEMY, near_input(), &mut NoClipMover, 1, &mut attacks);
         let later = attacks.get(0).unwrap();
         assert_eq!(later.swing_sequence, token.swing_sequence);
         assert!(!entities.deferred_attack_can_connect(later));
