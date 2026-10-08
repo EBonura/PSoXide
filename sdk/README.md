@@ -33,6 +33,8 @@ the editor and emulator share one simulation.
 | [`psx-osk`](crates/psx-osk) | On-screen keyboard for pad-driven text entry: QWERTY/symbols pages, shift, PS4-style boxed keys. |
 | [`psx-pack`](crates/psx-pack) | Guest-side WORLD.PAK parsing + in-place HLZC/LZ4 decompression (reader half of `psx-iso`). |
 | [`psx-cdstream`](crates/psx-cdstream) | Interrupt-driven CD streaming: a queue of read requests drained one sector per drive interrupt, seek-first, abortable at the next sector, contiguous requests chained without a seek, and a drive arbiter for CD-DA. The state machine is host-tested against a scripted drive. |
+| [`psx-residency`](crates/psx-residency) | Residency policy for streamed data: contiguous page pools with generation handles, priority classes, pinning, distance-then-LRU eviction, retry backoff, and a fixed-slot policy. It decides what to load and what to evict and never touches the drive; reads go out through a trait. Host-tested, no heap. |
+| [`psx-residency-sim`](crates/psx-residency-sim) | Host-only route simulator for `psx-residency`: replays a route through a region graph against the real policy and a drive model built from the silicon seek and read measurements, and reports deadline slack and misses. |
 | [`psx-telemetry`](crates/psx-telemetry) | Shared guest/host telemetry id tables for the emulator profiling hooks. |
 | [`psx-fmv`](crates/psx-fmv) | FMV playback building blocks: STR sector demux, BS v2 bitstream to MDEC run-length decode, MDEC upload/decode via DMA0/DMA1 (guest only), ISO9660 root-file lookup. |
 
