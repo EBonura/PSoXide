@@ -129,9 +129,22 @@ pub struct Ctx {
     runtime_requests: RuntimeRequests,
     gpu_dma: Option<GpuDma>,
     controller_port: Option<ControllerPort>,
-    #[cfg(all(feature = "pad-irq", target_arch = "mips"))]
-    controller_lease: Option<psx_pad::console::Lease>,
+    /// The pad engine owns the port while it runs; a card borrows it here.
+    #[cfg(all(feature = "pad-irq-engine", target_arch = "mips"))]
+    pad_engine: PadEngine,
     present_queue_hook: Option<*const u32>,
+}
+
+/// The interrupt-driven pad engine, as the context uses it.
+#[cfg(all(feature = "pad-irq-engine", target_arch = "mips"))]
+#[derive(Default)]
+struct PadEngine {
+    /// The engine is installed and owns the port token.
+    running: bool,
+    /// Port 2 is being polled (the first `refresh_second_pad` switches it on).
+    second_port: bool,
+    /// The port, on loan to a card driver until the end of the tick.
+    lease: Option<psx_pad::console::Lease>,
 }
 
 impl Ctx {
@@ -155,8 +168,8 @@ impl Ctx {
             runtime_requests: RuntimeRequests::default(),
             gpu_dma: None,
             controller_port: None,
-            #[cfg(all(feature = "pad-irq", target_arch = "mips"))]
-            controller_lease: None,
+            #[cfg(all(feature = "pad-irq-engine", target_arch = "mips"))]
+            pad_engine: PadEngine::default(),
             present_queue_hook: None,
         }
     }
@@ -179,39 +192,65 @@ impl Ctx {
     /// # Panics
     ///
     /// Outside the app runner, which takes the token at boot.
-    #[cfg(not(all(feature = "pad-irq", target_arch = "mips")))]
+    ///
+    /// With the `pad-irq-engine` feature the pad engine owns the token and
+    /// this lends it: the first call in a tick takes a lease from the engine,
+    /// which polls nothing until the runner ends the tick. Keep to one card
+    /// transaction per tick.
     #[inline]
     pub fn controller_port(&mut self) -> &mut ControllerPort {
+        #[cfg(all(feature = "pad-irq-engine", target_arch = "mips"))]
+        if self.pad_engine.running {
+            return &mut **self
+                .pad_engine
+                .lease
+                .get_or_insert_with(psx_pad::console::lease);
+        }
         self.controller_port
             .as_mut()
             .expect("the app runner holds the controller-port token")
     }
 
-    /// With the interrupt-driven pad engine installed the engine owns the
-    /// port; this borrows it from the engine until the runner hands it back
-    /// at the end of the current scheduler step.
-    #[cfg(all(feature = "pad-irq", target_arch = "mips"))]
-    #[inline]
-    pub fn controller_port(&mut self) -> &mut ControllerPort {
-        if self.controller_port.is_some() {
-            return self.controller_port.as_mut().unwrap();
+    /// Start reading the pads from the interrupt-driven engine: install it
+    /// with the port token, or give the token back to the synchronous driver
+    /// if the engine cannot take the exception vector. Returns whether it is
+    /// running. The app runner calls this once, after its boot-time pad
+    /// negotiation.
+    #[cfg(all(feature = "pad-irq-engine", target_arch = "mips"))]
+    pub(crate) fn start_pad_engine(&mut self, port: ControllerPort) -> bool {
+        match psx_pad::console::install(port, psx_pad::engine::Config::PORT1_ONLY) {
+            Ok(()) => {
+                self.pad_engine.running = true;
+                true
+            }
+            Err(port) => {
+                self.set_controller_port(port);
+                false
+            }
         }
-        self.controller_lease
-            .get_or_insert_with(psx_pad::console::lease)
     }
 
-    /// Hand the controller port to the pad engine for good, after the
-    /// runner's init.
-    #[cfg(all(feature = "pad-irq", target_arch = "mips"))]
-    pub(crate) fn take_controller_port(&mut self) -> Option<ControllerPort> {
-        self.controller_port.take()
+    /// Whether the pads are read from the interrupt-driven engine.
+    #[inline]
+    pub(crate) fn pad_engine_running(&self) -> bool {
+        #[cfg(all(feature = "pad-irq-engine", target_arch = "mips"))]
+        {
+            self.pad_engine.running
+        }
+        #[cfg(not(all(feature = "pad-irq-engine", target_arch = "mips")))]
+        {
+            false
+        }
     }
 
-    /// Give a borrowed port back to the engine.
-    #[cfg(all(feature = "pad-irq", target_arch = "mips"))]
+    /// Give the port back to the engine if a card driver borrowed it this
+    /// tick. The app runner calls this after each update and render.
     #[inline]
     pub(crate) fn release_controller_port(&mut self) {
-        self.controller_lease = None;
+        #[cfg(all(feature = "pad-irq-engine", target_arch = "mips"))]
+        {
+            self.pad_engine.lease = None;
+        }
     }
 
     /// The GPU DMA token, for [`OtFrame::submit`](crate::OtFrame::submit)
@@ -318,8 +357,44 @@ impl Ctx {
     #[inline]
     pub fn refresh_second_pad(&mut self) -> PadState {
         self.pad2_prev = self.pad2;
+        #[cfg(all(feature = "pad-irq-engine", target_arch = "mips"))]
+        if self.pad_engine.running {
+            // The engine polls port 2 from the next VBlank on; until its
+            // first reading lands the port reads as no pad.
+            self.poll_second_port();
+            self.pad2 = psx_pad::console::pad(Port::Two);
+            return self.pad2;
+        }
         self.pad2 = poll_on(self.controller_port(), Port::Two);
         self.pad2
+    }
+
+    /// Ask the pad on `port` for analog mode and lock it there.
+    ///
+    /// On the synchronous driver this is `psx_pad::enable_analog_on`, which
+    /// blocks for a few frames and returns whether the pad took it. On the
+    /// pad engine the request is queued, one command per VBlank, and this
+    /// returns `false`; read the answer from [`Ctx::pad_for`]'s
+    /// `is_analog()` a few frames later. Port 2 is polled from here on.
+    pub fn enable_analog(&mut self, port: Port) -> bool {
+        #[cfg(all(feature = "pad-irq-engine", target_arch = "mips"))]
+        if self.pad_engine.running {
+            if port == Port::Two {
+                self.poll_second_port();
+            }
+            psx_pad::console::request_analog(port);
+            return false;
+        }
+        psx_pad::enable_analog_on(self.controller_port(), port)
+    }
+
+    /// Start the pad engine polling port 2, once.
+    #[cfg(all(feature = "pad-irq-engine", target_arch = "mips"))]
+    fn poll_second_port(&mut self) {
+        if !self.pad_engine.second_port {
+            self.pad_engine.second_port = true;
+            psx_pad::console::configure(psx_pad::engine::Config::DEFAULT);
+        }
     }
 
     /// Current pad sample for player index 0 or 1. Other indices are
