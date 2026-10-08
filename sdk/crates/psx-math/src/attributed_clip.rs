@@ -437,25 +437,23 @@ unsafe fn clip_convex_plane_raw<
     match traversal {
         ClipTraversal::PreviousToCurrent => {
             let mut previous_index = source.len() - 1;
+            // The vertices are read in place. Holding copies of `previous`
+            // and `current` (and of every crossing before it is emitted)
+            // costs a stack slot each, which for a 32-byte attributed vertex
+            // inlined six times into one renderer function was 128 bytes of
+            // frame that the scratchpad stack guard counted. `source` and
+            // `destination` do not alias, so a reference stays valid.
             // SAFETY: `source` is non-empty (early return above), so
             // `len - 1` is a valid index.
-            let mut previous = unsafe { *source.get_unchecked(previous_index) };
-            let mut previous_distance = plane.distance(previous_index, &previous);
+            let mut previous = unsafe { source.get_unchecked(previous_index) };
+            let mut previous_distance = plane.distance(previous_index, previous);
             let mut current_index = 0usize;
             while current_index < source.len() {
                 // SAFETY: the loop condition keeps `current_index < len`.
-                let current = unsafe { *source.get_unchecked(current_index) };
-                let current_distance = plane.distance(current_index, &current);
+                let current = unsafe { source.get_unchecked(current_index) };
+                let current_distance = plane.distance(current_index, current);
                 let current_inside = plane.inside(current_distance);
                 if current_inside != plane.inside(previous_distance) {
-                    let crossing = plane.intersection(
-                        previous_index,
-                        &previous,
-                        previous_distance,
-                        current_index,
-                        &current,
-                        current_distance,
-                    );
                     // SAFETY: `destination`/`destination_len` come straight from the
                     // caller, who guarantees room for every emitted vertex when
                     // `CHECK_CAPACITY` is false; with it set, `emit` bounds-checks.
@@ -464,7 +462,14 @@ unsafe fn clip_convex_plane_raw<
                             destination,
                             destination_len,
                             &mut written,
-                            crossing,
+                            plane.intersection(
+                                previous_index,
+                                previous,
+                                previous_distance,
+                                current_index,
+                                current,
+                                current_distance,
+                            ),
                         )
                     } {
                         return Err(written);
@@ -478,7 +483,7 @@ unsafe fn clip_convex_plane_raw<
                             destination,
                             destination_len,
                             &mut written,
-                            current,
+                            *current,
                         )
                     }
                 {
@@ -499,12 +504,12 @@ unsafe fn clip_convex_plane_raw<
                     current_index + 1
                 };
                 // SAFETY: the loop condition keeps `current_index < len`.
-                let current = unsafe { *source.get_unchecked(current_index) };
+                let current = unsafe { source.get_unchecked(current_index) };
                 // SAFETY: `next_index` is `current_index + 1` only when that is
                 // still `< len`, otherwise 0, which is valid for a non-empty slice.
-                let next = unsafe { *source.get_unchecked(next_index) };
-                let current_distance = plane.distance(current_index, &current);
-                let next_distance = plane.distance(next_index, &next);
+                let next = unsafe { source.get_unchecked(next_index) };
+                let current_distance = plane.distance(current_index, current);
+                let next_distance = plane.distance(next_index, next);
                 let current_inside = plane.inside(current_distance);
                 if current_inside
                     // SAFETY: same capacity contract as the crossing emit above:
@@ -514,21 +519,13 @@ unsafe fn clip_convex_plane_raw<
                             destination,
                             destination_len,
                             &mut written,
-                            current,
+                            *current,
                         )
                     }
                 {
                     return Err(written);
                 }
                 if current_inside != plane.inside(next_distance) {
-                    let crossing = plane.intersection(
-                        current_index,
-                        &current,
-                        current_distance,
-                        next_index,
-                        &next,
-                        next_distance,
-                    );
                     // SAFETY: `destination`/`destination_len` come straight from the
                     // caller, who guarantees room for every emitted vertex when
                     // `CHECK_CAPACITY` is false; with it set, `emit` bounds-checks.
@@ -537,7 +534,14 @@ unsafe fn clip_convex_plane_raw<
                             destination,
                             destination_len,
                             &mut written,
-                            crossing,
+                            plane.intersection(
+                                current_index,
+                                current,
+                                current_distance,
+                                next_index,
+                                next,
+                                next_distance,
+                            ),
                         )
                     } {
                         return Err(written);
