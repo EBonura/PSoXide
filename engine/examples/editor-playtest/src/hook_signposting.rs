@@ -91,6 +91,8 @@ impl Playtest {
                 )
             };
             let tick = now.as_u32().wrapping_sub(self.gameplay_epoch.as_u32());
+            // Lift the loose crown clear of the contact slab.
+            const FRAGMENT_LIFT: i32 = 48;
             // Convex, chipped profiles; varying thickness and bevels expose
             // bright fracture faces against the darker old stone.
             const STONES: [&[(i32, i32)]; 4] = [
@@ -128,7 +130,7 @@ impl Playtest {
                     0
                 };
                 let dy = if moving {
-                    wave * (3 + stone as i32) / 4096
+                    FRAGMENT_LIFT + wave * (3 + stone as i32) / 4096
                 } else {
                     0
                 };
@@ -208,7 +210,7 @@ impl Playtest {
             {
                 let phase = (((tick % 1800) * 4096 / 1800) as u16).wrapping_add(i as u16 * 1313);
                 let x = x + psx_math::cos_q12(phase) * 4 / 4096;
-                let y = y + psx_math::sin_q12(phase) * 6 / 4096;
+                let y = y + FRAGMENT_LIFT + psx_math::sin_q12(phase) * 6 / 4096;
                 let v = [
                     point(x - r, y - r, 13),
                     point(x + r, y, 17),
