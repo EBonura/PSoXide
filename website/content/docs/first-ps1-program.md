@@ -7,7 +7,7 @@ kind = "Walkthrough"
 eyebrow = "Walkthrough · SDK"
 +++
 
-By the end of this page you'll have `hello-tri`, a minimal PSoXide program, running as a real PlayStation disc image. It clears the screen to dark blue and draws one triangle with its vertex colours blended across it (Gouraud shading) that bounces a little each frame, so you can see the render loop is alive. No editor is involved: this is the bare-metal SDK on its own.
+This walkthrough builds `hello-tri`, a minimal PSoXide program, as a PlayStation disc image and runs it in the emulator. It clears the screen to dark blue and draws one triangle with its vertex colours blended across it (Gouraud shading) that bounces a little each frame, so you can see the render loop is alive. No editor is involved: this is the bare-metal SDK on its own.
 
 {{<example_player name="hello-tri" />}}
 
@@ -81,7 +81,7 @@ The CUE works in other PlayStation emulators too. You can also burn the image to
 
 ## What the program does
 
-Here's `sdk/examples/hello-tri/src/main.rs` with most comments removed:
+`sdk/examples/hello-tri/src/main.rs`, with most comments removed:
 
 ```rust
 #![no_std]
@@ -134,7 +134,7 @@ fn main() {
 
 There's no operating system underneath. `psx_rt` provides `_start`, zeroes the program's uninitialised globals and calls `main`. `tty::println` writes to the kernel's debug text output, which the emulator shows in its log; it doesn't appear on screen.
 
-Hardware access goes through owned tokens. `Peripherals::take()` hands out the set once and returns `None` after that, and `Gpu::new` consumes the GPU's DMA token, so only one piece of code can drive the GPU at a time. From there it's you and the hardware: set the video mode, then loop forever. Clear the back buffer, send one triangle to the GPU, wait for the GPU to finish and for vertical blank, and swap buffers. Double buffering keeps the displayed frame separate from the one being drawn.
+Hardware access goes through owned tokens. `Peripherals::take()` hands out the set once and returns `None` after that, and `Gpu::new` consumes the GPU's DMA token, so only one piece of code can drive the GPU at a time. The program sets the video mode, then loops forever: clear the back buffer, send one triangle to the GPU, wait for the GPU to finish and for vertical blank, and swap buffers. Double buffering keeps the displayed frame separate from the one being drawn.
 
 ## Where to go next
 

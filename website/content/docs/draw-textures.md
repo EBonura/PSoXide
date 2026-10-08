@@ -17,7 +17,7 @@ With the [SDK tools installed](@/docs/first-ps1-program.md#1-install-the-tools),
 make disc EXAMPLE=hello-tex
 ```
 
-Open `build/examples/mipsel-sony-psx/release/hello-tex.cue`. You should see two textured squares moving across a dark background. This example already includes cooked texture files, so you do not need the editor to build it.
+Open `build/examples/mipsel-sony-psx/release/hello-tex.cue`. You should see two textured squares moving across a dark background. This example already includes cooked texture files, so you don't need the editor to build it.
 
 ## Load a cooked texture
 

@@ -14,9 +14,9 @@ The root defines `Profile<ACTIONS, SCORES>`, validation, encoding/decoding and e
 
 ## Integration notes
 
-Initialize a profile from your action map, sanitize user-adjustable values, then encode into a caller-owned buffer. The record includes an explicit version and checksum. Handle missing, incompatible or corrupt records by restoring your chosen defaults. Card helpers still need a deliberate filename and save policy; they do not give the game ownership of every file on a card.
+Initialize a profile from your action map, sanitize user-adjustable values, then encode into a caller-owned buffer. The record includes an explicit version and checksum. Handle missing, incompatible or corrupt records by restoring your chosen defaults. You still choose the filename and save policy for the card helpers, and they don't give the game ownership of every file on a card.
 
-Study the [controller example](@/docs/examples/hello-input.md) for input handling and the [memory-card diagnostic](@/docs/examples/hello-memcard.md) for storage behavior. These are prerequisite examples, not dedicated `psx-settings` programs.
+Study the [controller example](@/docs/examples/hello-input.md) for input handling and the [memory-card diagnostic](@/docs/examples/hello-memcard.md) for storage behavior. Neither example uses `psx-settings` directly.
 
 ## API, dependencies and source structure
 

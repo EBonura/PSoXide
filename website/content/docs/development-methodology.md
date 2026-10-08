@@ -7,11 +7,10 @@ kind = "Methodology"
 eyebrow = "Development · Measure, compare, repeat"
 +++
 
-PSoXide asks what happens if we keep learning how to develop for the original
-PlayStation. That learning needs a reference: **the real console**. The emulator
-makes experiments quick to repeat; hardware measurements tell us where its model
-needs to change. Games expose practical problems, small test programs isolate
-them, and the results feed back into the emulator and SDK.
+PSoXide uses **the real console** as its reference. The emulator makes
+experiments quick to repeat; hardware measurements show where its model needs to
+change. Games expose practical problems, small test programs isolate them, and
+the results feed back into the emulator and SDK.
 
 For day-to-day commands, start with the [development workflow](@/docs/development-workflow.md).
 For the SDK's build checks and individual probe programs, see [hardware checks](@/docs/hardware-checks.md).
@@ -32,7 +31,7 @@ the last primitive being drawn?” is a testable question. A useful probe varies
 one condition and records register values, cycle counts, memory readback, pixel
 hashes or audio. The Hardware Tests suite covers CPU and geometry operations,
 graphics, sound, disc access, DMA, timers and controllers. A passing emulator run
-establishes a reproducible starting point; it does not establish what the console does.
+is a reproducible starting point and says nothing about what the console does.
 
 ### Freeze the experiment
 
@@ -106,11 +105,11 @@ behaviour and assumptions made by SDK code.
 After a fix, rerun the focused probe, the wider battery and affected game routes.
 Retain the console capture separately from the emulator baseline: the former
 records a hardware observation; the latter detects changes in our implementation.
-Review baseline changes rather than accepting new output merely to make a test
+Review baseline changes instead of accepting new output to make a test
 pass. If an SDK or game fix changes console behaviour, a console retest closes
 that claim.
 
-## A measured example: when drawing really finishes
+## A measured example: when drawing finishes
 
 On 23 September 2026, Hardware Tests v1.24 measured an expensive graphics list on
 a PAL console running in NTSC video mode. The test distinguished completion of
@@ -133,7 +132,7 @@ and accounted for drawing time. These are the recorded results for emulator
 `0d3f4c9` before and `561bd2c` after, not a blanket accuracy score.
 [Read the capture analysis and remaining discrepancies](https://github.com/EBonura/PSoXide-editor/blob/4f7adcf98ae3e0022b3257cb9d98a4a3122e15ea/docs/emulator-accuracy-from-silicon.md#gpu-dma-channel-2-stays-busy-while-the-list-draws).
 
-That distinction affected development decisions. An apparent roughly 21% gain
+That distinction changed development decisions. An apparent roughly 21% gain
 from one Half-Life rendering experiment depended on the old DMA model and did
 not survive the more realistic model. The same console capture showed why the
 SDK must wait for a draw-complete signal before presenting a frame: DMA readiness
@@ -175,6 +174,4 @@ emulator does not say how fast the game runs on a PS1. The
 
 Console revisions and peripherals can behave differently. Unmeasured behaviour
 stays unmeasured, and an explanation remains a hypothesis until a test can
-distinguish it from alternatives. Keeping those limits visible is how the
-emulator becomes a more useful development tool as the project learns more
-about the hardware.
+distinguish it from alternatives.

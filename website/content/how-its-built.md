@@ -1,18 +1,17 @@
 +++
 title = "How PSoXide is built"
-description = "PSoXide and its games are largely written with agentic coding. What I decide, which rules the agents work to, what every change has to pass, and where the provenance records live."
+description = "The rules the AI coding agents work to, the checks every change has to pass, and where the provenance records live."
 [extra]
 eyebrow = "About PSoXide · Largely written with agentic coding"
 +++
 
-**PSoXide and its games are largely written with agentic coding.** I'm Manny, and I direct the AI coding agents that write the code. I decide what gets built, set the rules they work to and review their changes. Then I test the work in two places: PSoXide's emulator, which profiles every cycle, and a real PlayStation, which shows me where the emulator is wrong. This page says what that means in practice, so you can judge the work and the claims on this site for yourself.
+**PSoXide and its games are largely written with agentic coding.** I direct the AI coding agents. I decide what gets built, set the rules they work to and review their changes. Then I test the work in two places: PSoXide's emulator, which profiles every cycle, and a real PlayStation, which shows where the emulator is wrong.
 
 ## What I do
 
-- **Decide what gets built.** The agents don't pick the projects, the architecture or the priorities. I do.
-- **Set the rules.** The next section lists them.
-- **Review every change.** Nothing lands without my review, including the commit messages.
-- **Test in the emulator and on hardware.** The emulator profiles every cycle and replays a bug the same way every time, which a console can't. A real PlayStation shows where the emulator is wrong. When the two disagree, the console is right and I fix the emulator to match: its CD timing and its MDEC transfer speed both come from measurements on my own consoles. Working between them is where the accuracy and the speed come from.
+The agents don't pick the projects, the architecture or the priorities. I do, and I set the rules in the next section. Nothing lands without my review, commit messages included.
+
+The emulator replays a bug the same way every time, which a console can't. When the two disagree, the console wins and I fix the emulator to match: its CD timing and its MDEC transfer speed both come from measurements on my own consoles.
 
 ## The rules the agents work to
 
@@ -23,7 +22,7 @@ eyebrow = "About PSoXide · Largely written with agentic coding"
 
 ## What every change has to pass
 
-The checks differ by project. Together they are:
+The checks differ by project. Each project runs some or all of these:
 
 - **Emulator tests.** The emulator core has its own test suite, and it runs the public [ps1-tests](https://github.com/JaCzekanski/ps1-tests) cases (58 of 61 self-checking cases pass, and that number is a gate).
 - **A 20-game compatibility run.** The emulator boots 20 commercial titles without a BIOS, and a change that alters the recorded display hashes needs an explanation. All 20 reach the in-game tier in headless runs. No person has played them through and rated them playable yet. The [comparison page](@/emulator/compare.md) lists the results in its compatibility section.
@@ -53,6 +52,6 @@ Every project's README and itch.io page carries an "AI-generated content" line t
 | Half-Life, Hollow Knight | Code only. The build converts game data from your own copy, and the projects distribute none of it. |
 | WipEout | Code, and a remastered texture pack that an image model generated from the original textures. |
 
-## Criticism is welcome
+## Corrections
 
-If you think a claim here is wrong, a provenance record is missing or a game isn't doing what its page says, [open an issue](https://github.com/EBonura/PSoXide/issues). Say which page or file you mean and what you found. The [contact process](@/legal.md#contact) in the legal notice has the details. I would rather fix the record than defend it.
+If you think a claim here is wrong, a provenance record is missing or a game isn't doing what its page says, [open an issue](https://github.com/EBonura/PSoXide/issues). Say which page or file you mean and what you found. The [contact process](@/legal.md#contact) in the legal notice has the details.

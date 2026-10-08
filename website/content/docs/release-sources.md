@@ -9,7 +9,7 @@ kind = "Reference"
 Checked on **30 September 2026**; the PSoXide Arcade row was added on 8 October 2026 after its repository became public. These references come from the public Demo Disc
 v0.40 component receipt, matched to BIN SHA-256
 `d1e16f5deca68351b8361ab61bc7db90298497dc93817e72f8d7fe5be6657940`.
-They identify recorded source revisions, not a certification that every release
+They identify recorded source revisions. They don’t certify that every release
 package satisfies every licence requirement.
 
 ## Demo Disc v0.40
@@ -50,7 +50,7 @@ are served with the player.
 
 The demo-disc browser player on itch.io is deployed separately. Its current WebAssembly artifact has
 not been matched to an exact source revision in this website review. The emulator
-revision above belongs to the disc’s build receipt; it must not be taken as the
+revision above belongs to the disc’s build receipt; it isn’t the
 revision of the live browser player. Standalone game downloads also need their
 own release-to-source mapping.
 

@@ -16,7 +16,7 @@
   <header class="page-head">
     <span class="eyebrow">Emulator</span>
     <h1>{{ page.title }}</h1>
-    <p class="lede">Recorded memory measurements, compatibility results and hardware validation for the PSoXide emulator. The results below describe specific builds and test conditions. Speed results are not currently published on this site.</p>
+    <p class="lede">Recorded memory measurements, compatibility results and hardware validation for the PSoXide emulator. The results below describe specific builds and test conditions. Speed results aren't published on this site.</p>
     <nav class="jumpbar" aria-label="On this page">
       {% if config.extra.show_speed %}<a href="#performance">Speed and memory</a><a href="#progress">Progress</a><a href="#per-game">Per game</a>{% endif %}<a href="#accuracy">Accuracy</a><a href="#compatibility">Compatibility</a><a href="#method">Method</a>
     </nav>
@@ -136,7 +136,7 @@
     <div class="section-head">
       <h2>Accuracy</h2>
       {% if acc.status == "placeholder" %}
-      <div class="callout warn"><span class="callout-title">Not measured yet</span>No cross-emulator accuracy comparison has been published yet. PSoXide is checked against original hardware, but those checks do not establish an accuracy ranking against other emulators.</div>
+      <div class="callout warn"><span class="callout-title">Not measured yet</span>No cross-emulator accuracy comparison has been published yet. PSoXide is checked against original hardware, but those checks don't establish an accuracy ranking against other emulators.</div>
       {% endif %}
     </div>
     {% if acc.status != "placeholder" %}
@@ -162,13 +162,13 @@
     </div>
     {% endfor %}
     {% endif %}
-    <p class="muted small" style="margin-top:1rem">Hardware validation: a hardware test battery runs on a real PlayStation, the results come back through a video recording, and every value is compared with what the emulator produces. Gaps found that way are written up with how to reproduce them in <a href="{{ config.extra.repo_emulator }}/blob/main/docs/emulator-accuracy-from-silicon.md">emulator-accuracy-from-silicon.md</a>.</p>
+    <p class="muted small" style="margin-top:1rem">Hardware validation: a hardware test battery runs on a real PlayStation, the results come back through a video recording, and every value is compared with what the emulator produces. I write up the gaps found that way, with steps to reproduce them, in <a href="{{ config.extra.repo_emulator }}/blob/main/docs/emulator-accuracy-from-silicon.md">emulator-accuracy-from-silicon.md</a>.</p>
   </section>
 
   <section class="section" id="compatibility">
     <div class="section-head">
       <h2>{{ compat.counts["in-game"] }} of {{ compat.total }} commercial games reach the in-game tier</h2>
-      <p>With no BIOS. The in-game tier includes gameplay or an in-engine opening scene after New Game; it does not mean a full playthrough. These are headless runs: a fixed schedule of Start and Cross presses, then the frames are checked by eye. A headless run can show at most "in-game"; "playable" and "perfect" need a person to play through a real stretch, and none of these has that rating yet.</p>
+      <p>All runs used no BIOS. The in-game tier includes gameplay or an in-engine opening scene after New Game; it doesn't mean a full playthrough. These are headless runs: a fixed schedule of Start and Cross presses, then the frames are checked by eye. A headless run can show at most "in-game"; "playable" and "perfect" need a person to play through a real stretch, and none of these has that rating yet.</p>
     </div>
     <div class="tierbar" role="img" aria-label="{{ compat.counts['in-game'] }} of {{ compat.total }} games at in-game">
       {% for tier in compat.tiers %}{% set n = compat.counts[tier] %}{% if n > 0 %}<span style="width:{{ n / compat.total * 100 }}%" title="{{ tier }}: {{ n }}"></span>{% endif %}{% endfor %}
