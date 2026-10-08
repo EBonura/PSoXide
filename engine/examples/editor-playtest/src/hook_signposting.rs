@@ -35,6 +35,9 @@ impl Playtest {
             {
                 continue;
             }
+            if hook_beacon_off_screen(camera, p) {
+                continue;
+            }
             let selected = self.hook_selected == Some(index) && self.ranged_ready.aiming();
             let tint = if selected {
                 (208, 255, 242)
@@ -54,27 +57,30 @@ impl Playtest {
             // silhouette so the same symbol remains readable from any approach.
             let ring = [(8, 0), (0, 8), (-8, 0), (0, -8)]
                 .map(|(x, z)| WorldVertex::new(center.x + x, center.y, center.z + z));
+            // Six shared corners: every projection is the same as projecting
+            // each triangle's corners separately, done once.
+            let core = project_all(
+                camera,
+                &[
+                    WorldVertex::new(center.x, center.y + 16, center.z),
+                    WorldVertex::new(center.x, center.y - 16, center.z),
+                    ring[0],
+                    ring[1],
+                    ring[2],
+                    ring[3],
+                ],
+            );
             for i in 0..4 {
-                hook_tri(
-                    [
-                        WorldVertex::new(center.x, center.y + 16, center.z),
-                        ring[i],
-                        ring[(i + 1) % 4],
-                    ],
+                submit_projected(
+                    [core[0], core[2 + i], core[2 + (i + 1) % 4]],
                     bright,
-                    camera,
                     options,
                     packets,
                     world,
                 );
-                hook_tri(
-                    [
-                        WorldVertex::new(center.x, center.y - 16, center.z),
-                        ring[(i + 1) % 4],
-                        ring[i],
-                    ],
+                submit_projected(
+                    [core[1], core[2 + (i + 1) % 4], core[2 + i]],
                     tint,
-                    camera,
                     options,
                     packets,
                     world,
@@ -171,19 +177,13 @@ impl Playtest {
                     109 + stone as u8 * 4,
                     108 + stone as u8 * 4,
                 );
+                // Up to eighteen corners shared by every face of the stone.
+                let pv = project_prefix(camera, &v, 3 * n);
                 for i in 1..n - 1 {
-                    hook_tri(
-                        [v[0], v[i], v[i + 1]],
-                        front,
-                        camera,
-                        options,
-                        packets,
-                        world,
-                    );
-                    hook_tri(
-                        [v[2 * n], v[2 * n + i + 1], v[2 * n + i]],
+                    submit_projected([pv[0], pv[i], pv[i + 1]], front, options, packets, world);
+                    submit_projected(
+                        [pv[2 * n], pv[2 * n + i + 1], pv[2 * n + i]],
                         (53, 65, 66),
-                        camera,
                         options,
                         packets,
                         world,
@@ -198,7 +198,7 @@ impl Playtest {
                     };
                     for (a, b, color) in [(0, n, bright), (n, 2 * n, (64, 78, 78))] {
                         for ids in [[a + i, a + j, b + j], [a + i, b + j, b + i]] {
-                            hook_tri(ids.map(|k| v[k]), color, camera, options, packets, world);
+                            submit_projected(ids.map(|k| pv[k]), color, options, packets, world);
                         }
                     }
                 }
@@ -217,13 +217,14 @@ impl Playtest {
                     point(x, y + r * 2, 15),
                     point(x, y, 27),
                 ];
+                let pv = project_all(camera, &v);
                 for (ids, color) in [
                     ([0, 1, 2], (139, 153, 145)),
                     ([0, 3, 1], (69, 85, 83)),
                     ([1, 3, 2], (93, 109, 104)),
                     ([2, 3, 0], (57, 70, 70)),
                 ] {
-                    hook_tri(ids.map(|k| v[k]), color, camera, options, packets, world);
+                    submit_projected(ids.map(|k| pv[k]), color, options, packets, world);
                 }
             }
             // Three small contact glints replace the former overhead tether.
@@ -303,7 +304,46 @@ fn hook_tri(
     packets: &mut PrimitivePacketArena<'_>,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) {
-    let [Some(a), Some(b), Some(c)] = points.map(|p| camera.project_world(p)) else {
+    submit_projected(
+        points.map(|p| camera.project_world(p)),
+        color,
+        options,
+        packets,
+        world,
+    );
+}
+
+/// Project a vertex list once so faces that share corners reuse the result.
+fn project_all<const N: usize>(
+    camera: WorldCamera,
+    points: &[WorldVertex; N],
+) -> [Option<psx_engine::ProjectedVertex>; N] {
+    core::array::from_fn(|i| camera.project_world(points[i]))
+}
+
+/// [`project_all`] for the first `used` corners; the rest stay unprojected.
+fn project_prefix<const N: usize>(
+    camera: WorldCamera,
+    points: &[WorldVertex; N],
+    used: usize,
+) -> [Option<psx_engine::ProjectedVertex>; N] {
+    core::array::from_fn(|i| {
+        if i < used {
+            camera.project_world(points[i])
+        } else {
+            None
+        }
+    })
+}
+
+fn submit_projected(
+    points: [Option<psx_engine::ProjectedVertex>; 3],
+    color: (u8, u8, u8),
+    options: WorldSurfaceOptions,
+    packets: &mut PrimitivePacketArena<'_>,
+    world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+) {
+    let [Some(a), Some(b), Some(c)] = points else {
         return;
     };
     if !psx_engine::projected_triangle_batchable([a, b, c]) {
@@ -318,4 +358,36 @@ fn hook_tri(
         b: color.2,
     });
     let _ = world.submit_gouraud_triangle(packets, lit, options);
+}
+
+/// Every vertex of a beacon lies within this distance of its anchor: the
+/// stones reach about 330 world units out, and the bound is rounded up.
+const BEACON_RADIUS: i32 = 360;
+/// Pixels past the screen edge a beacon may sit and still be kept.
+const BEACON_SCREEN_MARGIN: i32 = 64;
+
+/// Conservative test that no beacon triangle can reach the screen: the whole
+/// bounding sphere is behind the near plane or beyond one screen edge. A
+/// triangle with a corner behind the near plane is already dropped, and one
+/// wholly off screen draws nothing, so skipping the beacon changes no pixel.
+fn hook_beacon_off_screen(camera: WorldCamera, anchor: RoomPoint) -> bool {
+    let view = camera.view_vertex(WorldVertex::new(anchor.x, anchor.y, anchor.z));
+    let projection = camera.projection;
+    // View-space rounding of each corner is below one unit per axis.
+    let radius = BEACON_RADIUS + 4;
+    let far = view.z + radius;
+    if far < projection.near_z.max(1) {
+        return true;
+    }
+    let f = projection.focal_length;
+    let cx = i32::from(projection.screen_x);
+    let cy = i32::from(projection.screen_y);
+    let m = BEACON_SCREEN_MARGIN;
+    // A point at view (x, z) lands at cx + x * f / z. Every point of the
+    // sphere has z <= far, so a sphere whose smallest x exceeds the edge
+    // distance times far / f is wholly past that edge.
+    (view.x - radius) * f > (320 + m - cx) * far
+        || (-view.x - radius) * f > (cx + m) * far
+        || (view.y - radius) * f > (cy + m) * far
+        || (-view.y - radius) * f > (240 + m - cy) * far
 }
