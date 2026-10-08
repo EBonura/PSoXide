@@ -196,6 +196,7 @@ mod tests {
                 mode: BrushWorldCookMode::Draft,
                 ambient: [32; 3],
                 texture_asset_base: 0,
+                collision_hulls: Default::default(),
             },
         )
         .expect("compile generated liquid proof");

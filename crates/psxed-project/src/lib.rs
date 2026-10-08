@@ -29,6 +29,7 @@ pub mod brush_playtest;
 pub mod brush_portal;
 pub mod brush_primitives;
 pub mod brush_pxbsp;
+pub mod brush_region_hulls;
 pub mod brush_transform;
 mod brush_vis;
 pub mod brush_walk;

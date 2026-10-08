@@ -4,7 +4,7 @@ use crate::brush::{Brush, Plane};
 use crate::brush_compile::{pack_normalized_plane, pack_plane};
 
 const CONTENTS_EMPTY: i16 = psx_bsp::collision::CONTENTS_EMPTY;
-const HULL_EPSILON: f64 = 1.0 / 1024.0;
+pub(crate) const HULL_EPSILON: f64 = 1.0 / 1024.0;
 // E1M1's authored brush hull stays below the signed 16-bit clipnode ceiling
 // at 48 while cutting the worst moving-player leaf walks substantially. A
 // 32-brush leaf crosses 32,768 clipnodes and is therefore not representable.
@@ -48,12 +48,29 @@ pub enum CollisionHullCompileError {
     },
 }
 
+/// How the per-hull collision tree is built from the expanded brush polytopes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CollisionHullStrategy {
+    /// Axial split down to small leaves, each ending in per-brush plane chains.
+    SpatialChains,
+    /// One long per-brush plane chain per hull (reference for tests).
+    LinearChains,
+    /// Solid-leaf hull BSP over the expanded polytopes
+    /// (`brush_region_hulls`).
+    #[default]
+    HullBsp,
+}
+
 #[derive(Clone, Debug)]
-struct PreparedHullBrush {
+pub(crate) struct PreparedHullBrush {
+    /// Interned plane indices; empty under [`CollisionHullStrategy::HullBsp`],
+    /// which interns only the planes it actually splits on.
     planes: Vec<(i16, bool)>,
-    mins: [f64; 3],
-    maxs: [f64; 3],
-    contents: i16,
+    /// Packed plane records and whether each is flipped, in face order.
+    pub(crate) records: Vec<([u8; 14], bool)>,
+    pub(crate) mins: [f64; 3],
+    pub(crate) maxs: [f64; 3],
+    pub(crate) contents: i16,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -63,17 +80,33 @@ struct SpatialSplit {
 }
 
 /// Compile point and box-expanded collision trees into one record table.
+///
+/// This is the proven chain compiler, kept as the reference the hull BSP is
+/// tested against. The playtest cook picks its strategy from the project's
+/// `collision_hull_bsp` setting (default on).
 pub fn compile_collision_hulls(
     brushes: &[Brush],
     hulls: &[CollisionHullBounds],
 ) -> Result<CompiledCollisionHulls, CollisionHullCompileError> {
-    compile_collision_hulls_inner(brushes, hulls, true)
+    compile_collision_hulls_with(brushes, hulls, CollisionHullStrategy::SpatialChains)
+}
+
+/// [`compile_collision_hulls`] with an explicit tree-building strategy.
+///
+/// [`CollisionHullStrategy::HullBsp`] falls back to the spatial chains for
+/// any hull whose BSP would not fit the clipnode or plane limits.
+pub fn compile_collision_hulls_with(
+    brushes: &[Brush],
+    hulls: &[CollisionHullBounds],
+    strategy: CollisionHullStrategy,
+) -> Result<CompiledCollisionHulls, CollisionHullCompileError> {
+    compile_collision_hulls_inner(brushes, hulls, strategy)
 }
 
 fn compile_collision_hulls_inner(
     brushes: &[Brush],
     hulls: &[CollisionHullBounds],
-    spatial: bool,
+    strategy: CollisionHullStrategy,
 ) -> Result<CompiledCollisionHulls, CollisionHullCompileError> {
     limit("collision hulls", hulls.len(), MAX_MAP_HULLS)?;
     let mut ordered: Vec<_> = brushes.iter().enumerate().collect();
@@ -120,12 +153,15 @@ fn compile_collision_hulls_inner(
             }
 
             let mut face_planes = Vec::with_capacity(planes.len());
-            for (record, flipped) in planes {
-                let plane = intern_plane(&mut plane_records, record)?;
-                face_planes.push((plane, flipped));
+            if strategy != CollisionHullStrategy::HullBsp {
+                for &(record, flipped) in &planes {
+                    let plane = intern_plane(&mut plane_records, record)?;
+                    face_planes.push((plane, flipped));
+                }
             }
             prepared.push(PreparedHullBrush {
                 planes: face_planes,
+                records: planes,
                 mins,
                 maxs,
                 contents: brush.contents.runtime_contents(),
@@ -137,10 +173,41 @@ fn compile_collision_hulls_inner(
         // small fallback chains preserve the exact overlap semantics.
         prepared.reverse();
         let brushes: Vec<_> = (0..prepared.len()).collect();
-        head_nodes.push(if spatial {
-            build_spatial_hull(&prepared, &brushes, 0, &mut plane_records, &mut nodes)?
-        } else {
-            build_brush_chain(&prepared, &brushes, &mut nodes)?
+        head_nodes.push(match strategy {
+            CollisionHullStrategy::SpatialChains => {
+                build_spatial_hull(&prepared, &brushes, 0, &mut plane_records, &mut nodes)?
+            }
+            CollisionHullStrategy::LinearChains => {
+                build_brush_chain(&prepared, &brushes, &mut nodes)?
+            }
+            CollisionHullStrategy::HullBsp => {
+                let plane_mark = plane_records.len();
+                let node_mark = nodes.len();
+                match crate::brush_region_hulls::build_hull_bsp(
+                    &prepared,
+                    &mut plane_records,
+                    &mut nodes,
+                ) {
+                    Ok(head) => head,
+                    Err(CollisionHullCompileError::LimitExceeded { kind, count, .. }) => {
+                        #[cfg(test)]
+                        println!("  FALLBACK: {kind} {count}");
+                        let _ = (kind, count);
+                        // Roll back and keep the proven chain tree for this hull.
+                        plane_records.truncate(plane_mark);
+                        nodes.truncate(node_mark);
+                        for brush in &mut prepared {
+                            brush.planes.clear();
+                            for &(record, flipped) in &brush.records {
+                                let plane = intern_plane(&mut plane_records, record)?;
+                                brush.planes.push((plane, flipped));
+                            }
+                        }
+                        build_spatial_hull(&prepared, &brushes, 0, &mut plane_records, &mut nodes)?
+                    }
+                    Err(other) => return Err(other),
+                }
+            }
         });
     }
 
@@ -157,6 +224,14 @@ fn compile_collision_hulls_inner(
     })
 }
 
+fn spatial_leaf_brushes() -> usize {
+    #[cfg(test)]
+    if let Some(value) = std::env::var("HULL_LEAF").ok().and_then(|v| v.parse().ok()) {
+        return value;
+    }
+    SPATIAL_LEAF_BRUSHES
+}
+
 fn build_spatial_hull(
     brushes: &[PreparedHullBrush],
     active: &[usize],
@@ -164,7 +239,7 @@ fn build_spatial_hull(
     planes: &mut Vec<[u8; 14]>,
     nodes: &mut Vec<[i16; 3]>,
 ) -> Result<i16, CollisionHullCompileError> {
-    if active.len() <= SPATIAL_LEAF_BRUSHES || depth == MAX_SPATIAL_DEPTH {
+    if active.len() <= spatial_leaf_brushes() || depth == MAX_SPATIAL_DEPTH {
         return build_brush_chain(brushes, active, nodes);
     }
     let Some(split) = choose_spatial_split(brushes, active) else {
@@ -491,7 +566,7 @@ fn unique_edge_directions(solved: &crate::brush::SolvedBrush) -> Vec<[f64; 3]> {
     edges
 }
 
-fn intern_plane(
+pub(crate) fn intern_plane(
     planes: &mut Vec<[u8; 14]>,
     plane: [u8; 14],
 ) -> Result<i16, CollisionHullCompileError> {
@@ -507,7 +582,11 @@ fn intern_plane(
     Ok(index as i16)
 }
 
-fn limit(kind: &'static str, count: usize, max: usize) -> Result<(), CollisionHullCompileError> {
+pub(crate) fn limit(
+    kind: &'static str,
+    count: usize,
+    max: usize,
+) -> Result<(), CollisionHullCompileError> {
     if count > max {
         Err(CollisionHullCompileError::LimitExceeded { kind, count, max })
     } else {
@@ -642,8 +721,15 @@ mod tests {
                 brushes.push(Brush::cuboid(min, [min[0] + 48, 64, min[2] + 48]));
             }
         }
-        let spatial = compile_collision_hulls_inner(&brushes, &[PLAYER], true).expect("spatial");
-        let linear = compile_collision_hulls_inner(&brushes, &[PLAYER], false).expect("linear");
+        let spatial = compile_collision_hulls_inner(
+            &brushes,
+            &[PLAYER],
+            CollisionHullStrategy::SpatialChains,
+        )
+        .expect("spatial");
+        let linear =
+            compile_collision_hulls_inner(&brushes, &[PLAYER], CollisionHullStrategy::LinearChains)
+                .expect("linear");
         let spatial = hull(&spatial, 0);
         let linear = hull(&linear, 0);
 

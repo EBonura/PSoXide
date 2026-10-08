@@ -5,7 +5,8 @@ use std::path::Path;
 
 use crate::brush::{paraxial_uv, rebase_texel_uvs, Brush, BrushContents};
 use crate::brush_collision_hulls::{
-    compile_collision_hulls, CollisionHullBounds, CollisionHullCompileError, CompiledCollisionHulls,
+    compile_collision_hulls_with, CollisionHullBounds, CollisionHullCompileError,
+    CollisionHullStrategy, CompiledCollisionHulls,
 };
 use crate::brush_compile::{
     build_surface_bsp, compile_authored_surfaces, compile_csg_surfaces, pack_normalized_plane,
@@ -94,6 +95,8 @@ pub struct BrushWorldCookOptions<'a> {
     pub ambient: [u8; 3],
     /// First caller-owned runtime asset-table slot reserved for brush textures.
     pub texture_asset_base: u16,
+    /// How the body-hull collision trees are built.
+    pub collision_hulls: CollisionHullStrategy,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -335,7 +338,7 @@ impl From<PxbspBuildError> for BrushWorldCookError {
     }
 }
 
-fn authored_body_hulls(project: &ProjectDocument) -> [CookedBodyHull; 2] {
+pub(crate) fn authored_body_hulls(project: &ProjectDocument) -> [CookedBodyHull; 2] {
     let scene = project.active_scene();
     let character_resources: Vec<_> = project
         .resources
@@ -459,7 +462,7 @@ fn player_spawn_body(
     }
 }
 
-fn collision_hull_bounds(body_hulls: [CookedBodyHull; 2]) -> [CollisionHullBounds; 3] {
+pub(crate) fn collision_hull_bounds(body_hulls: [CookedBodyHull; 2]) -> [CollisionHullBounds; 3] {
     let bounds = |hull: CookedBodyHull| CollisionHullBounds {
         mins: [-hull.radius, 0, -hull.radius],
         maxs: [hull.radius, hull.height, hull.radius],
@@ -559,6 +562,7 @@ pub fn compile_brush_world(
         options.mode,
         options.ambient,
         &collision_hulls,
+        options.collision_hulls,
     )?;
     let collision_planes = RecordSlice::<Plane>::new(&world_collision.planes)
         .ok_or(BrushWorldCookError::InvalidWorldTree)?;
@@ -647,6 +651,7 @@ pub fn compile_brush_world(
             options.mode,
             options.ambient,
             &collision_hulls,
+            options.collision_hulls,
         )?;
         uv_window.add(submodel_uv_window);
         let model_index = u16::try_from(submodels.len() + 1)
@@ -1255,6 +1260,7 @@ fn compile_model(
     mode: BrushWorldCookMode,
     ambient: [u8; 3],
     collision_hulls: &[CollisionHullBounds; 3],
+    hull_strategy: CollisionHullStrategy,
 ) -> Result<CompiledModel, BrushWorldCookError> {
     let (topology_surfaces, render_surfaces) = compile_model_surfaces(brushes);
     let (mut bsp, portals, leak_diagnostic) =
@@ -1362,7 +1368,7 @@ fn compile_model(
             texture_dims,
         )?
     };
-    let collision = compile_runtime_collision_hulls(brushes, collision_hulls)?;
+    let collision = compile_runtime_collision_hulls(brushes, collision_hulls, hull_strategy)?;
     Ok((geometry, collision, leak_diagnostic.path, uv_window))
 }
 
@@ -1755,13 +1761,14 @@ fn prefer_csg_render_surfaces(csg_count: usize, authored_count: usize) -> bool {
 fn compile_runtime_collision_hulls(
     brushes: &[Brush],
     hulls: &[CollisionHullBounds; 3],
+    strategy: CollisionHullStrategy,
 ) -> Result<CompiledCollisionHulls, CollisionHullCompileError> {
     // Quake hull 0 is the classified render BSP itself. Do not duplicate the
     // entire point tree in clipnodes merely to satisfy the four-head model
     // record: the runtime never reads collision head zero. Keep one valid
     // empty sentinel head for format validation, followed by the two actual
     // box-expanded body hulls.
-    let mut collision = compile_collision_hulls(brushes, &hulls[1..])?;
+    let mut collision = compile_collision_hulls_with(brushes, &hulls[1..], strategy)?;
     let plane = if collision.planes.is_empty() {
         let (record, _) = pack_normalized_plane([1.0, 0.0, 0.0], 0.0)
             .ok_or(CollisionHullCompileError::InvalidPlane(None))?;
@@ -2864,6 +2871,7 @@ mod tests {
                 mode: BrushWorldCookMode::Draft,
                 ambient: [24; 3],
                 texture_asset_base: 40,
+                collision_hulls: Default::default(),
             },
         )
         .expect("draft cook with a light");
@@ -2883,6 +2891,7 @@ mod tests {
                 mode,
                 ambient: [24; 3],
                 texture_asset_base: 40,
+                collision_hulls: Default::default(),
             },
         )
         .expect("brush world")
@@ -3178,6 +3187,7 @@ mod tests {
                 mode: BrushWorldCookMode::Draft,
                 ambient: [24; 3],
                 texture_asset_base: 40,
+                collision_hulls: Default::default(),
             },
         )
         .expect("destructible brush world");
@@ -3327,6 +3337,7 @@ mod tests {
                     mode: BrushWorldCookMode::Draft,
                     ambient: [24; 3],
                     texture_asset_base: 40,
+                    collision_hulls: Default::default(),
                 },
             )
             .expect("liquid world");
@@ -3381,6 +3392,7 @@ mod tests {
                     mode: BrushWorldCookMode::Draft,
                     ambient: [24; 3],
                     texture_asset_base: 0,
+                    collision_hulls: Default::default(),
                 },
             )
             .expect_err("body overlaps the inner X wall even though its origin is empty"),
@@ -3412,6 +3424,7 @@ mod tests {
                 mode: BrushWorldCookMode::Draft,
                 ambient: [32; 3],
                 texture_asset_base: 0,
+                collision_hulls: Default::default(),
             },
         )
         .expect_err("bad mover");
@@ -3439,6 +3452,7 @@ mod tests {
                 mode: BrushWorldCookMode::Draft,
                 ambient: [32; 3],
                 texture_asset_base: 0,
+                collision_hulls: Default::default(),
             },
         )
         .expect_err("liquid mover");
@@ -3469,6 +3483,7 @@ mod tests {
                 mode: BrushWorldCookMode::Draft,
                 ambient: [32; 3],
                 texture_asset_base: 0,
+                collision_hulls: Default::default(),
             },
         )
         .expect_err("invalid brush");
@@ -3520,6 +3535,7 @@ mod tests {
                 mode: BrushWorldCookMode::Draft,
                 ambient: [24; 3],
                 texture_asset_base: 40,
+                collision_hulls: Default::default(),
             },
         )
         .expect_err("motionless door");

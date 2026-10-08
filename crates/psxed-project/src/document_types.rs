@@ -442,6 +442,13 @@ pub struct ProjectDocument {
     /// in the project keeps GUI and CLI cooks on one deterministic policy.
     #[serde(default)]
     pub bsp_cook_mode: crate::brush_world::BrushWorldCookMode,
+    /// Build the body-hull collision trees as solid-leaf hull BSPs
+    /// (`brush_region_hulls`) instead of per-brush plane chains. The output
+    /// format is identical; the tree is far shallower on dense geometry.
+    /// On by default; a project can write `collision_hull_bsp: false` to fall
+    /// back to the chain compiler.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub collision_hull_bsp: bool,
     /// Worst-case joint rotation error, in whole degrees, that the cook may
     /// introduce by resampling animation clips to a lower rate. `0` disables
     /// resampling and cooks every clip at its authored rate.
@@ -521,6 +528,14 @@ fn is_zero_u8(value: &u8) -> bool {
     *value == 0
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
 impl ProjectDocument {
     /// Create an empty project with one scene.
     pub fn new(name: impl Into<String>) -> Self {
@@ -535,6 +550,7 @@ impl ProjectDocument {
             animation_error_budget_degrees: 0,
             animation_trim_still_percent: 0,
             bsp_cook_mode: crate::brush_world::BrushWorldCookMode::default(),
+            collision_hull_bsp: true,
             runtime_depth_sort_mode: RuntimeDepthSortMode::default(),
             runtime_texture_split_mode: RuntimeTextureSplitMode::default(),
             runtime_room_draw_order_mode: RuntimeRoomDrawOrderMode::default(),

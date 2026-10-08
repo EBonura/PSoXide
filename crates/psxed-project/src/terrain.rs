@@ -661,6 +661,7 @@ mod integration_tests {
                 mode: crate::brush_world::BrushWorldCookMode::Draft,
                 ambient: [64; 3],
                 texture_asset_base: 0,
+                collision_hulls: Default::default(),
             },
         )
         .expect("generated terrain must cook through the regular world pipeline");
