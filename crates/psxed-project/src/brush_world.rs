@@ -1309,6 +1309,13 @@ fn compile_model(
             split_surfaces: uv_window.split_surfaces,
         });
     }
+    // The packer rounds every vertex to a whole unit and the GTE projects
+    // each face's vertices on their own, so faces only meet pixel-exactly at
+    // shared vertices. Every split above (CSG carving, the extent grid, the
+    // UV window, rectangle merging) cuts one face without cutting its
+    // neighbours, leaving corners that sit on a neighbour's edge. Weld those
+    // into the edges they touch so the drawn surface is watertight.
+    let render_surfaces = make_surfaces_watertight(render_surfaces, uv_window_skip);
     // The runtime draws a face only up to its batch bound; split wider ones
     // into same-triangle fans rather than let the packer refuse the level.
     let render_surfaces =
@@ -1370,6 +1377,33 @@ fn compile_model(
     };
     let collision = compile_runtime_collision_hulls(brushes, collision_hulls, hull_strategy)?;
     Ok((geometry, collision, leak_diagnostic.path, uv_window))
+}
+
+/// Weld and conform the drawable render surfaces; sky apertures are never
+/// drawn and stay as they are.
+fn make_surfaces_watertight(
+    mut surfaces: Vec<CompiledSurface>,
+    sky_materials: &std::collections::HashSet<Option<ResourceId>>,
+) -> Vec<CompiledSurface> {
+    let skip: Vec<bool> = surfaces
+        .iter()
+        .map(|surface| sky_materials.contains(&surface.material))
+        .collect();
+    let mut polygons: Vec<Vec<[f64; 3]>> = surfaces
+        .iter_mut()
+        .map(|surface| std::mem::take(&mut surface.vertices))
+        .collect();
+    let stats = crate::brush_seams::make_watertight(&mut polygons, |index| skip[index]);
+    for (surface, vertices) in surfaces.iter_mut().zip(polygons) {
+        surface.vertices = vertices;
+    }
+    if stats.vertices_added > 0 {
+        crate::playtest::emit_cook_output(format_args!(
+            "[brush-seams] conformed {} faces with {} T-junction vertices",
+            stats.polygons_changed, stats.vertices_added
+        ));
+    }
+    surfaces
 }
 
 fn compile_model_surfaces(brushes: &[Brush]) -> (Vec<CompiledSurface>, Vec<CompiledSurface>) {
