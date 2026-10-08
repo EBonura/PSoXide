@@ -66,9 +66,6 @@ default = [
     # docs/perf-30fps.md experiment 2.
     "world-order-bucketed",
     "ot-2048",
-    # Fixed 3x3 one-level TR subdivision lattice. The Cortex v1 A/B reduced
-    # matched room-surface work by 15.5% with bit-identical leaf packets.
-    "tr-subdivision-lattice",
     # VBlank-kicked presentation: +26% fps with one enemy on screen (19.8 to
     # 25.0). Frames that would fence early beside a queued frame, such as
     # with two melee enemies, go double-buffered instead (choose_present_queue).
@@ -97,9 +94,6 @@ room-surface-profile = ["psx-engine/room-surface-profile"]
 # per two fixed simulation ticks even when wall-clock VBlanks have accumulated,
 # so faster and slower builds present the same guest states.
 lockstep-visuals = []
-# A/B candidate: project the nine unique points of a one-level subdivided
-# room quad once, instead of projecting four overlapping child quads.
-tr-subdivision-lattice = ["psx-engine/tr-subdivision-lattice"]
 # Opt-in for projects whose close, strongly patterned ceilings visibly need
 # affine correction. The measured default spends subdivision on floors/walls.
 tr-subdivision-ceilings = []
@@ -118,7 +112,6 @@ world-selection-reuse = []
 actor-shadows-off = []
 # Projected (flattened-geometry) actor shadows instead of the blob decal.
 actor-shadows-projected = []
-cell-select-profile = ["psx-engine/cell-select-profile"]
 # High-contrast TR subdivision colors for emulator wireframe captures.
 # Diagnostic only: normal builds retain authored Gouraud lighting.
 tessellation-debug = []
