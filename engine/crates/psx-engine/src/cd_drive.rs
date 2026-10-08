@@ -15,10 +15,37 @@
 //! [`yield_music_for_data`]. The player notes where the track was
 //! (GetlocP), pauses, releases the lease and later resumes from that position
 //! once no data read is queued or running ([`take_resume`]).
+//!
+//! # Console timings
+//!
+//! The emulator hands the drive over in a few milliseconds. A console does
+//! not (hardware tests v1.28, console-tested): Pause on a playing track takes
+//! [`PAUSE_COMPLETE_MS`], and the first data sector after audio arrives about
+//! [`FIRST_SECTOR_AFTER_AUDIO_MS`] after the Pause. Audio coming back after a
+//! read is of the same order. Every wait on a handoff is therefore bounded by
+//! the VBlank clock, never by a count of polls (a poll count is a proxy for
+//! time and the emulator hides how bad a proxy it is), and sized from
+//! [`HANDOFF_VBLANKS`].
 
 use core::cell::UnsafeCell;
 
-/// Polled-command spin budget for the pause and position query a yield issues.
+/// Time a Pause takes to complete on a playing track, in milliseconds.
+/// Console-tested (hardware tests v1.28).
+pub const PAUSE_COMPLETE_MS: u32 = 123;
+
+/// Time from the Pause to the first data sector of the next read, in
+/// milliseconds. Console-tested (hardware tests v1.28).
+pub const FIRST_SECTOR_AFTER_AUDIO_MS: u32 = 945;
+
+/// One handoff between music and data, in VBlanks: about a second on a
+/// console in either direction. The slowest console figure above rounded up
+/// to whole seconds at the 60 Hz tick the engine budgets in.
+pub const HANDOFF_VBLANKS: u32 = 60;
+
+const _: () = assert!(FIRST_SECTOR_AFTER_AUDIO_MS < HANDOFF_VBLANKS * 1000 / 60);
+
+/// Polled-command spin budget for the position query a yield issues. The
+/// controller acknowledges quickly; only completions take mechanical time.
 #[cfg(target_arch = "mips")]
 const COMMAND_SPINS: u32 = 131_072;
 
@@ -154,57 +181,6 @@ pub fn ensure_transport() {
     });
 }
 
-/// The audio-lease half of the transport, so the acquire policy can be tested
-/// against a scripted drive.
-pub trait LeaseSource {
-    /// Ask the transport for the audio lease.
-    fn request(&mut self) -> psx_cdstream::LeaseState;
-    /// Collect the controller token once the lease is granted.
-    fn take(&mut self) -> bool;
-    /// Withdraw a lease that was asked for and not yet granted.
-    fn withdraw(&mut self);
-}
-
-/// Ask for the lease without leaving a request behind.
-///
-/// A lease the transport has not granted yet is withdrawn on the spot rather
-/// than left pending. A pending lease is granted by the transport itself a
-/// moment later, when its last transfer stops, and by then a data reader may
-/// have queued behind it believing the drive is free; the reads would wait on
-/// a lease nobody holds. Music asks again a tick later instead.
-pub fn try_lease<L: LeaseSource>(source: &mut L) -> bool {
-    match source.request() {
-        psx_cdstream::LeaseState::Granted => source.take(),
-        psx_cdstream::LeaseState::Pending => {
-            source.withdraw();
-            false
-        }
-        psx_cdstream::LeaseState::None => false,
-    }
-}
-
-#[cfg(target_arch = "mips")]
-struct Console;
-
-#[cfg(target_arch = "mips")]
-impl LeaseSource for Console {
-    fn request(&mut self) -> psx_cdstream::LeaseState {
-        psx_cdstream::request_audio_lease()
-    }
-
-    fn take(&mut self) -> bool {
-        let Some(token) = psx_cdstream::take_audio_lease() else {
-            return false;
-        };
-        with(|state| state.token = Some(token));
-        true
-    }
-
-    fn withdraw(&mut self) {
-        let _ = psx_cdstream::withdraw_audio_lease();
-    }
-}
-
 /// Ask for the drive on behalf of music. `true` once the lease is granted and
 /// the music code may issue polled commands; `false` while a data read is
 /// still being stopped (ask again next tick) or a data read is queued or
@@ -219,10 +195,18 @@ pub(crate) fn music_acquire() -> bool {
     #[cfg(target_arch = "mips")]
     {
         ensure_transport();
-        if !try_lease(&mut Console) {
+        // Takes the drive only if it is free right now and leaves no request
+        // pending: a pending lease would be granted a moment later, when the
+        // last transfer stops, and a data reader that queued behind it in the
+        // belief that the drive is free would wait on a lease nobody holds.
+        // Music asks again a tick later instead.
+        let Some(token) = psx_cdstream::try_take_audio_lease() else {
             return false;
-        }
-        with(|state| state.holding = true);
+        };
+        with(|state| {
+            state.token = Some(token);
+            state.holding = true;
+        });
         true
     }
     #[cfg(not(target_arch = "mips"))]
@@ -232,6 +216,14 @@ pub(crate) fn music_acquire() -> bool {
         record(HostEvent::Acquire);
         true
     }
+}
+
+/// Run `f` with the controller token while music holds the lease. `None` when
+/// it does not, so a polled command can never collide with the transport.
+/// `f` must not call back into this module.
+#[cfg(target_arch = "mips")]
+pub(crate) fn with_token<R>(f: impl FnOnce(&mut psx_io::periph::Cd) -> R) -> Option<R> {
+    with(|state| state.token.as_mut().map(f))
 }
 
 /// Whether the music code currently holds the lease.
@@ -334,7 +326,7 @@ pub(crate) fn resume_pending() -> bool {
 
 #[cfg(target_arch = "mips")]
 fn playback_position() -> Option<DiscPosition> {
-    let response = psx_io::cd::try_command(psx_hw::cd::CMD_GETLOCP, &[], COMMAND_SPINS)?;
+    let response = with_token(|cd| cd.try_command(psx_hw::cd::CMD_GETLOCP, &[], COMMAND_SPINS))??;
     let bytes = response.bytes();
     // Track, index, relative MSF, absolute MSF.
     if bytes.len() < 8 || bytes[0] == 0 {
@@ -355,11 +347,64 @@ fn playback_position() -> Option<DiscPosition> {
     }
 }
 
+/// The display clock, in VBlanks. Zero on the host.
+pub fn vblank_count() -> u32 {
+    #[cfg(target_arch = "mips")]
+    {
+        psx_rt::interrupts::vblank_count()
+    }
+    #[cfg(not(target_arch = "mips"))]
+    {
+        0
+    }
+}
+
 /// Stop routing the audio and Pause the drive (it stays spun up).
 pub(crate) fn stop_playback() {
     #[cfg(target_arch = "mips")]
     {
         psx_spu::enable_cd_audio(false);
-        let _ = psx_io::cd::try_pause_until_complete(COMMAND_SPINS);
+        let _ = with_token(|cd| pause_until_complete(cd));
     }
+}
+
+/// Send Pause and wait for its completion interrupt, giving up after
+/// [`HANDOFF_VBLANKS`]. Returns whether the drive reported completion.
+#[cfg(target_arch = "mips")]
+fn pause_until_complete(cd: &mut psx_io::periph::Cd) -> bool {
+    let Some(saved) = cd.dispatch_command(psx_hw::cd::CMD_PAUSE, &[], COMMAND_SPINS) else {
+        return false;
+    };
+    let start = vblank_count();
+    let mut acknowledged = false;
+    let done = loop {
+        if vblank_count().wrapping_sub(start) > HANDOFF_VBLANKS {
+            break false;
+        }
+        match cd.irq_flag_value() {
+            0 => {}
+            3 => {
+                cd.discard_response();
+                cd.acknowledge_irq(3);
+                acknowledged = true;
+            }
+            2 if acknowledged => {
+                cd.discard_response();
+                cd.acknowledge_irq(2);
+                break true;
+            }
+            other => {
+                // A drive error, or an interrupt that is not ours to keep.
+                cd.discard_response();
+                cd.acknowledge_irq(other);
+                if other == 5 {
+                    break false;
+                }
+            }
+        }
+    };
+    // A Pause still in flight may acknowledge late: keep the output masked
+    // until the transport takes the controller back.
+    cd.restore_irq_output(if done { saved } else { 0 });
+    done
 }

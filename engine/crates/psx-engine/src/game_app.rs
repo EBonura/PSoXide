@@ -123,7 +123,8 @@ const GAMEPLAY_SFX_VOICE_COUNT: u8 = 3;
 const COMBAT_VOICE: u8 = 19;
 const CDDA_RETRY_TICKS: u32 = 60;
 /// Ticks between asks for the audio lease while a data read still holds the
-/// drive.
+/// drive. An ask is one cheap check, so it stays short whatever a console's
+/// handoff costs.
 const CDDA_LEASE_RETRY_TICKS: u32 = 2;
 // Loop poll period. The drive's auto-pause at the end of the track is only
 // seen through GetStat, so this bounds the silence before the replay's seek
@@ -356,6 +357,11 @@ impl FlowTransition {
 }
 
 /// Combat music ramps: one second in, two seconds out (60 Hz ticks).
+///
+/// Console handoffs between music and data reads take about a second each way
+/// (`cd_drive::HANDOFF_VBLANKS`), not the emulator's few milliseconds: a combat
+/// start that has to wait for a read, or a read that displaces the track, is
+/// silent for about that long. The ramps are policy and stay as authored.
 const COMBAT_MUSIC_FADE_IN_TICKS: u16 = 60;
 const COMBAT_MUSIC_FADE_OUT_TICKS: u16 = 120;
 
@@ -861,7 +867,9 @@ fn cdda_issue_step(
             (psx_hw::cd::CMD_PLAY, 1)
         }
     };
-    let response = psx_io::cd::try_command(command, &params[..count], CDDA_COMMAND_SPINS)?;
+    let response = crate::cd_drive::with_token(|cd| {
+        cd.try_command(command, &params[..count], CDDA_COMMAND_SPINS)
+    })??;
     let bytes = response.bytes();
     if bytes.first().is_none_or(|status| status & 1 != 0) {
         return None;
@@ -909,7 +917,7 @@ fn flow_trace(_message: &str) {}
 
 #[cfg(target_arch = "mips")]
 fn cdda_begin_status() -> Option<u8> {
-    psx_io::cd::dispatch_command(psx_hw::cd::CMD_GETSTAT, &[], 0)
+    crate::cd_drive::with_token(|cd| cd.dispatch_command(psx_hw::cd::CMD_GETSTAT, &[], 0))?
 }
 
 #[cfg(not(target_arch = "mips"))]
@@ -932,14 +940,19 @@ fn cdda_status_stopped(status: u8) -> Option<bool> {
 /// an error response without interpreting it as the end of the song.
 #[cfg(target_arch = "mips")]
 fn cdda_finish_status(irq_enable: u8) -> Option<Option<bool>> {
-    let irq = psx_io::cd::irq_flag_value();
+    // Without the token the lease is gone and so is the query; consume it.
+    let Some(irq) = crate::cd_drive::with_token(|cd| cd.irq_flag_value()) else {
+        return Some(None);
+    };
     if irq == 0 {
         return None;
     }
     if irq != 3 && irq != 5 {
         // Auto-pause can deliver INT4 before the outstanding GetStat ACK.
-        psx_io::cd::discard_response();
-        psx_io::cd::acknowledge_irq(irq);
+        crate::cd_drive::with_token(|cd| {
+            cd.discard_response();
+            cd.acknowledge_irq(irq);
+        });
         return None;
     }
     // GetStat has one response byte. Select the response FIFO, read it once,
@@ -952,7 +965,7 @@ fn cdda_finish_status(irq_enable: u8) -> Option<Option<bool>> {
             None
         }
     };
-    psx_io::cd::restore_irq_output(irq_enable);
+    crate::cd_drive::with_token(|cd| cd.restore_irq_output(irq_enable));
     Some(if irq == 3 {
         status.and_then(cdda_status_stopped)
     } else {
@@ -969,7 +982,7 @@ fn cdda_finish_status(_irq_enable: u8) -> Option<Option<bool>> {
 fn cdda_cancel_status() {
     // A cancelled command may still ACK later. Keep IRQ output masked, like
     // the SDK's timed-out polled commands, until the next CD command takes over.
-    psx_io::cd::restore_irq_output(0);
+    crate::cd_drive::with_token(|cd| cd.restore_irq_output(0));
 }
 
 #[cfg(not(target_arch = "mips"))]

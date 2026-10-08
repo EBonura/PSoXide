@@ -62,6 +62,11 @@ pub(super) trait Transport {
     /// A new run is about to submit: make sure the transport exists and the
     /// drive is available for data.
     fn begin_transfer(&mut self);
+    /// The display clock in VBlanks, for deadlines that must hold in real
+    /// time. The host build has no clock.
+    fn vblank_count(&mut self) -> u32 {
+        0
+    }
 }
 
 /// The console's transport: the global `psx-cdstream` engine.
@@ -95,6 +100,10 @@ impl Transport for Hardware {
         // Music holding the lease would leave this read queued forever. It is
         // paused where it stands and resumes once the reads are done.
         psx_engine::cd_drive::yield_music_for_data();
+    }
+
+    fn vblank_count(&mut self) -> u32 {
+        psx_engine::cd_drive::vblank_count()
     }
 }
 

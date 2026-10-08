@@ -182,6 +182,12 @@ impl CdHw for Drive {
 struct Rig {
     engine: Engine<Drive>,
     irqs_per_call: u32,
+    /// Foreground service calls seen, the rig's stand-in for elapsed time.
+    services: u32,
+    /// Service calls the drive stays silent for before it raises anything.
+    silent_services: u32,
+    /// Service calls per VBlank on the rig's display clock; 0 stops the clock.
+    services_per_vblank: u32,
 }
 
 impl Rig {
@@ -191,10 +197,16 @@ impl Rig {
         Self {
             engine,
             irqs_per_call,
+            services: 0,
+            silent_services: 0,
+            services_per_vblank: 0,
         }
     }
 
     fn pump(&mut self) {
+        if self.services < self.silent_services {
+            return;
+        }
         for _ in 0..self.irqs_per_call {
             if !self.engine.hw_mut().raise() {
                 break;
@@ -228,23 +240,16 @@ impl Transport for Rig {
     }
 
     fn service(&mut self) {
+        self.services = self.services.saturating_add(1);
         self.engine.service();
     }
 
     fn begin_transfer(&mut self) {}
-}
 
-impl psx_engine::cd_drive::LeaseSource for Rig {
-    fn request(&mut self) -> LeaseState {
-        self.engine.request_audio_lease()
-    }
-
-    fn take(&mut self) -> bool {
-        self.engine.lease_state() == LeaseState::Granted
-    }
-
-    fn withdraw(&mut self) {
-        let _ = self.engine.release_audio_lease();
+    fn vblank_count(&mut self) -> u32 {
+        self.services
+            .checked_div(self.services_per_vblank)
+            .unwrap_or(0)
     }
 }
 
@@ -513,6 +518,47 @@ fn read_chunk_blocking_verifies_and_lands_the_unpadded_bytes() {
 }
 
 #[test]
+fn a_blocking_read_waits_out_a_console_music_handoff() {
+    // After audio the first sector takes about a second on a console. The
+    // rig's drive stays silent for that long on its display clock, which is
+    // more foreground spins than the old poll-count bound allowed, and the
+    // read still lands: the bound is time, not spins.
+    let spins_per_vblank = 30_000;
+    let handoff = psx_engine::cd_drive::FIRST_SECTOR_AFTER_AUDIO_MS * 60 / 1000;
+    let size = 2 * SECTOR_BYTES;
+    let pack = 300;
+    let entry = toc_entry(1, 0, size as u32, disc_checksum(pack, size));
+    let mut rig = Rig::new(3);
+    rig.services_per_vblank = spins_per_vblank;
+    rig.silent_services = handoff * spins_per_vblank;
+    assert!(rig.silent_services > 1_000_000);
+    let mut cd = CdController::zeroed();
+    let mut dst = std::vec![0u32; size / 4];
+    let result = read_chunk_blocking_with(&mut rig, &mut cd, pack, &[entry], 1, &mut dst);
+    assert_eq!(result.status, ROOM_CHUNK_STATUS_OK);
+    assert!(rig.vblank_count() >= handoff);
+}
+
+#[test]
+fn a_blocking_wait_on_a_dead_drive_gives_up_on_the_display_clock() {
+    let mut rig = Rig::new(3);
+    rig.services_per_vblank = 1_000;
+    rig.silent_services = u32::MAX;
+    let mut cd = CdController::zeroed();
+    cd.begin_run(&mut rig, 100, 1);
+    assert_eq!(
+        cd.wait_sector(&mut rig),
+        Err(crate::cd_stream::STATUS_DATA_TIMEOUT)
+    );
+    let waited = rig.vblank_count();
+    let deadline = crate::cd_stream::BLOCKING_READ_DEADLINE_VBLANKS;
+    assert!(
+        waited > deadline && waited < deadline + 10,
+        "gave up after {waited} vblanks"
+    );
+}
+
+#[test]
 fn read_chunk_blocking_reports_a_checksum_mismatch() {
     let size = 2 * SECTOR_BYTES;
     let entry = toc_entry(1, 0, size as u32, 0xDEAD_BEEF);
@@ -672,7 +718,7 @@ fn music_never_leaves_a_pending_lease_behind_a_busy_transport() {
     drain(&mut rig, &mut run, &mut stage, 6000, 3);
     // The last sector has landed but the drive is still pausing.
     assert!(!rig.engine.is_idle());
-    assert!(!psx_engine::cd_drive::try_lease(&mut rig));
+    assert!(!rig.engine.try_audio_lease());
     assert_eq!(rig.engine.lease_state(), LeaseState::None);
 
     // The next read starts as soon as the drive stops.
@@ -686,7 +732,7 @@ fn music_takes_an_idle_drive_and_gives_it_back_to_data() {
     let mut rig = Rig::new(1);
     let mut stage = TestStage::zeroed();
     let mut run = TestRun::ZERO;
-    assert!(psx_engine::cd_drive::try_lease(&mut rig));
+    assert!(rig.engine.try_audio_lease());
     assert_eq!(rig.engine.owner(), Owner::Audio);
     // A read queued under the lease waits for it.
     run.begin(&mut rig, &mut stage, 8000, 4);

@@ -113,12 +113,25 @@ pub const ROOM_CHUNK_STATUS_OK: u32 = STATUS_OK;
 /// 256 pumps is ~8.5 s at 30 pumps/second, well past any real seek and
 /// re-acquire, and short enough that a dead read reports instead of hanging.
 const EMPTY_PUMP_STALL_LIMIT: u32 = 256;
-/// Spins to wait for one sector of a blocking read before giving up. The
-/// transport's own no-progress watchdog ends a stalled transfer first; this
-/// only bounds a read whose request never started (nothing owns the drive).
-const DATA_READY_BLOCKING_POLL_LIMIT: u32 = 1_000_000;
+// The pump runs every second tick, so the limit must span a music handoff
+// (about a second, `HANDOFF_VBLANKS` ticks) with room to spare.
+const _: () = assert!(EMPTY_PUMP_STALL_LIMIT * 2 >= 2 * psx_engine::cd_drive::HANDOFF_VBLANKS);
+/// How long a blocking read waits for one sector before giving up, in VBlanks:
+/// the transport's own no-progress watchdog. It has to outlast a handoff from
+/// music, after which the first sector takes about a second on a console
+/// ([`psx_engine::cd_drive::FIRST_SECTOR_AFTER_AUDIO_MS`]) where the emulator
+/// takes a few milliseconds. It also bounds a read whose request never started
+/// (nothing owns the drive).
+pub(crate) const BLOCKING_READ_DEADLINE_VBLANKS: u32 =
+    psx_cdstream::Config::DEFAULT.timeout_vblanks;
+const _: () = assert!(BLOCKING_READ_DEADLINE_VBLANKS > psx_engine::cd_drive::HANDOFF_VBLANKS);
+/// Backstop for a blocking read when the display clock is not running: spins,
+/// not time, so it is set far past any real wait rather than tuned.
+const DATA_READY_BLOCKING_POLL_LIMIT: u32 = 50_000_000;
 /// Spins to wait for a sector already on its way. One arrives every 6.7 ms at
-/// double speed; this is well past that and far short of a hang.
+/// double speed; this is well past that and far short of a hang. It is a
+/// courtesy wait inside a pump; the first sector after a music handoff (about
+/// a second on a console) is carried by [`EMPTY_PUMP_STALL_LIMIT`] instead.
 const SECTOR_ARRIVAL_SPIN_LIMIT: u32 = 200_000;
 
 /// Why a sector did not arrive.
@@ -174,8 +187,23 @@ impl CdController {
 
     /// Wait for the next sector, bounded; a blocking read's single failure code.
     fn wait_sector<T: Transport>(&mut self, transport: &mut T) -> Result<(), u32> {
-        self.wait_sector_within(transport, DATA_READY_BLOCKING_POLL_LIMIT)
-            .map_err(Stall::status)
+        let start = transport.vblank_count();
+        let mut spins = 0u32;
+        loop {
+            match self.try_sector(transport) {
+                Err(Stall::Slow) => {
+                    spins += 1;
+                    if spins > DATA_READY_BLOCKING_POLL_LIMIT
+                        || transport.vblank_count().wrapping_sub(start)
+                            > BLOCKING_READ_DEADLINE_VBLANKS
+                    {
+                        return Err(Stall::Slow.status());
+                    }
+                    transport.service();
+                }
+                other => return other.map_err(Stall::status),
+            }
+        }
     }
 
     /// The next sector if it has landed, without waiting.
