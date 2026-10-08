@@ -98,7 +98,7 @@ id = "ports"
 group = "playing"
 home = true
 q = "Can I play Half-Life or Quake on it?"
-a = "Half-Life’s source is public. It requires your own game data and offers no disc-image download. Hollow Knight has no public build. The Quake port is available, but permission to distribute converted shareware data remains unresolved in this review."
+a = "Half-Life’s source is public. It requires your own game data and offers no disc-image download. Hollow Knight has no public build. The Quake port is available with the shareware episode's data."
 link_text = "Port status and content rights"
 link = "@/legal.md#ports-built-from-other-people-s-games"
 
