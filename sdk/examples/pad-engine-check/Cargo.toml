@@ -1,0 +1,20 @@
+[package]
+name    = "pad-engine-check"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+
+[workspace]
+
+[[bin]]
+name = "pad-engine-check"
+path = "src/main.rs"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+
+[dependencies]
+psx-pad  = { path = "../../crates/psx-pad", features = ["irq-engine"] }
+psx-rt   = { path = "../../crates/psx-rt" }
