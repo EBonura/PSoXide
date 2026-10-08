@@ -1,18 +1,18 @@
 +++
 title = "How PSoXide is built"
-description = "AI coding agents write nearly all of the code in PSoXide and its games. What I decide, which rules the agents work to, what every change has to pass, and where the provenance records live."
+description = "PSoXide and its games are largely written with agentic coding. What I decide, which rules the agents work to, what every change has to pass, and where the provenance records live."
 [extra]
-eyebrow = "About PSoXide · Built with agentic coding"
+eyebrow = "About PSoXide · Largely written with agentic coding"
 +++
 
-**AI coding agents write nearly all of the code in PSoXide and in its games.** I'm Manny, and I direct the agents. I decide what gets built, I set the rules they work to, I review every change, and I test the results in the emulator and on real PlayStation hardware. This page says what that means in practice, so you can judge the work and the claims on this site for yourself.
+**PSoXide and its games are largely written with agentic coding.** I'm Manny, and I direct the AI coding agents that write the code. I decide what gets built, set the rules they work to and review their changes. Then I test the work in two places: PSoXide's emulator, which profiles every cycle, and a real PlayStation, which shows me where the emulator is wrong. This page says what that means in practice, so you can judge the work and the claims on this site for yourself.
 
 ## What I do
 
 - **Decide what gets built.** The agents don't pick the projects, the architecture or the priorities. I do.
 - **Set the rules.** The next section lists them.
 - **Review every change.** Nothing lands without my review, including the commit messages.
-- **Test on hardware.** The emulator finds problems and makes them repeatable. When it disagrees with a real console, the console is right, and I test on my own consoles.
+- **Test in the emulator and on hardware.** The emulator profiles every cycle and replays a bug the same way every time, which a console can't. A real PlayStation shows where the emulator is wrong. When the two disagree, the console is right and I fix the emulator to match: its CD timing and its MDEC transfer speed both come from measurements on my own consoles. Working between them is where the accuracy and the speed come from.
 
 ## The rules the agents work to
 
