@@ -22,6 +22,7 @@ members = [
     "crates/psx-osk",
     "crates/psx-fmv",
     "crates/psx-tick",
+    "crates/psx-cdstream",
 ]
 
 # The examples are built against the MIPS target via a separate
@@ -67,3 +68,4 @@ psx-settings = { path = "crates/psx-settings" }
 psx-pack = { path = "crates/psx-pack" }
 psx-fmv  = { path = "crates/psx-fmv" }
 psx-osk = { path = "crates/psx-osk" }
+psx-cdstream = { path = "crates/psx-cdstream" }

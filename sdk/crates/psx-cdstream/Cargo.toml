@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+[package]
+name         = "psx-cdstream"
+version      = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description  = "Interrupt-driven CD-ROM sector streaming: a queue of read requests drained one sector per drive interrupt, seek-first, abortable at the next sector, with a drive arbiter for CD-DA. The state machine is host-testable behind a hardware trait."
+
+[dependencies]
+psx-hw = { workspace = true }
+psx-io = { workspace = true }
+psx-rt = { workspace = true }
+
+[features]
+default = []
+# Record the last 128 controller events in `PSX_CD_TRACE` (kind<<24 | phase<<16
+# | flag or command<<8 | received&0xff), index in `PSX_CD_TRACE_N`. For
+# cancel and ordering questions on a development disc; costs a store per event.
+trace = []
+
+[lints]
+workspace = true
