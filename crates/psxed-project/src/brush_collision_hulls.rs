@@ -189,10 +189,7 @@ fn compile_collision_hulls_inner(
                     &mut nodes,
                 ) {
                     Ok(head) => head,
-                    Err(CollisionHullCompileError::LimitExceeded { kind, count, .. }) => {
-                        #[cfg(test)]
-                        println!("  FALLBACK: {kind} {count}");
-                        let _ = (kind, count);
+                    Err(CollisionHullCompileError::LimitExceeded { .. }) => {
                         // Roll back and keep the proven chain tree for this hull.
                         plane_records.truncate(plane_mark);
                         nodes.truncate(node_mark);

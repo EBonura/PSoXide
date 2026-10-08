@@ -733,6 +733,7 @@ impl Context<'_> {
 }
 
 #[cfg(test)]
+#[allow(clippy::print_stdout)]
 mod tests {
     use super::*;
     use crate::brush::Brush;
@@ -1392,107 +1393,5 @@ mod tests {
             deferred as f64 / samples as f64,
             worst_stack,
         )
-    }
-
-    /// Debug aid: for contents mismatches, report how deep inside the old
-    /// solid the point sits (largest plane distance over its brush).
-    #[test]
-    #[ignore = "debug"]
-    fn debug_contents_mismatch_depth() {
-        let path = std::env::var("HULL_DEBUG_PROJECT")
-            .unwrap_or_else(|_| "editor/projects/graybox-terrain-light/project.ron".into());
-        let Some((brushes, hulls)) = project_inputs(&path) else {
-            return;
-        };
-        let bounds = &hulls[1..2];
-        let old =
-            compile_collision_hulls_with(&brushes, bounds, CollisionHullStrategy::SpatialChains)
-                .unwrap();
-        let new =
-            compile_collision_hulls_with(&brushes, bounds, CollisionHullStrategy::HullBsp).unwrap();
-        let (oh, nh) = (hull(&old, 0), hull(&new, 0));
-        let (min, max, _) = bounds_of(&brushes);
-        let mut rng = Rng(99);
-        let mut shown = 0;
-        let mut total = 0;
-        let mut bad = 0;
-        for _ in 0..400000 {
-            let p = [
-                rng.range(min[0], max[0]),
-                rng.range(min[1], max[1]),
-                rng.range(min[2], max[2]),
-            ];
-            let q = point(p);
-            total += 1;
-            if oh.point_contents(q) == nh.point_contents(q) {
-                continue;
-            }
-            bad += 1;
-            if shown < 8 {
-                shown += 1;
-                println!(
-                    "p {p:?}: old {:?} new {:?}",
-                    oh.point_contents(q),
-                    nh.point_contents(q)
-                );
-            }
-        }
-        println!("{bad} of {total} points differ");
-    }
-
-    /// Debug aid: grid-compare old and new contents around a point.
-    #[test]
-    #[ignore = "debug"]
-    fn debug_region_contents() {
-        let path = std::env::var("HULL_DEBUG_PROJECT")
-            .unwrap_or_else(|_| "editor/projects/graybox-terrain/project.ron".into());
-        let c: Vec<f64> = std::env::var("HULL_REGION")
-            .unwrap_or_else(|_| "15,126,-2562,40".into())
-            .split(',')
-            .filter_map(|v| v.parse().ok())
-            .collect();
-        let hull_index: usize = std::env::var("HULL_INDEX")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0);
-        let Some((brushes, hulls)) = project_inputs(&path) else {
-            return;
-        };
-        let bounds = &hulls[1..];
-        let old =
-            compile_collision_hulls_with(&brushes, bounds, CollisionHullStrategy::SpatialChains)
-                .unwrap();
-        let new =
-            compile_collision_hulls_with(&brushes, bounds, CollisionHullStrategy::HullBsp).unwrap();
-        let (oh, nh) = (hull(&old, hull_index), hull(&new, hull_index));
-        let step = 0.25;
-        let n = (c[3] / step) as i32;
-        let (mut count, mut lo, mut hi) = (0, [f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
-        let mut shown = 0;
-        for ix in -n..=n {
-            for iy in -n..=n {
-                for iz in -n..=n {
-                    let p = [
-                        c[0] + ix as f64 * step,
-                        c[1] + iy as f64 * step,
-                        c[2] + iz as f64 * step,
-                    ];
-                    let q = point(p);
-                    let (a, b) = (oh.point_contents(q), nh.point_contents(q));
-                    if a != b {
-                        count += 1;
-                        for k in 0..3 {
-                            lo[k] = lo[k].min(p[k]);
-                            hi[k] = hi[k].max(p[k]);
-                        }
-                        if shown < 5 {
-                            shown += 1;
-                            println!("  differ at {p:?}: old {a:?} new {b:?}");
-                        }
-                    }
-                }
-            }
-        }
-        println!("{count} differing grid points, bbox {lo:?} .. {hi:?}");
     }
 }
