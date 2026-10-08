@@ -58,8 +58,9 @@ Examples that use CD audio or WORLD.PAK need their own pack inputs; the generic
   patcher and scanner share one detector; given the link's `-Map` (`--map`),
   both bound each switch's jump table to its own function and read, and
   rewrite, nothing outside the map's `.text` (plus the trampoline array and
-  the proven jump table words). Without a map `hazard-patch` refuses unless
-  `--whole-image` is given, because data decodes as branches and loads. `stack-guard` proves every
+  the proven jump table words; `--code LO..HI` adds code the map does not
+  span). Without a map `hazard-patch` refuses unless `--whole-image` is given,
+  because data decodes as branches and loads. `stack-guard` proves every
   `psx_rt::scratchpad::ScratchpadStack` call tree in a linked exe fits its
   scratchpad region, from the exe and its ld.lld `-Map`. psoxide-pgo runs all
   three in-process.

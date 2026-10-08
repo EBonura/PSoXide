@@ -907,13 +907,16 @@ fn text_only_takes_the_bounds_from_the_map() {
         (status, String::from_utf8(out).unwrap())
     };
     let flagged = run(&scan::main, &args(&["--text-only"]));
-    assert_eq!(flagged, run(&|a, o| scan::main_in(a, text, o), &args(&[])));
+    assert_eq!(
+        flagged,
+        run(&|a, o| scan::main_in(a, &[text], o), &args(&[]))
+    );
     assert_eq!(flagged.0, 0, "{}", flagged.1);
     let flagged = run(&patch::main, &args(&["--check", "--text-only"]));
     assert_eq!(
         flagged,
         run(
-            &|a, o| patch::main_in(a, Some(text), o),
+            &|a, o| patch::main_in(a, Some(&[text]), o),
             &args(&["--check"])
         )
     );
@@ -1035,4 +1038,42 @@ fn patching_without_text_bounds_is_refused() {
         .unwrap()
         .contains("without .text bounds"));
     assert_eq!(std::fs::read(&exe).unwrap(), before);
+}
+
+#[test]
+fn code_ranges_extend_the_map_bounds() {
+    // A real hazard in a function the map's .text does not span (a code
+    // module linked elsewhere) is invisible to the bounded tools until
+    // `--code` names it.
+    let mut fx = Fixture::new();
+    let data = BASE + Image::DATA;
+    let module = BASE + 0x900;
+    fx.image.put(
+        0x900,
+        &[lui("at", hi(data)), jr("ra"), lbu("v0", lo(data), "at")],
+    );
+    fx.caller(0, "t::main", 0, &[module]);
+    let (exe, map) = fx.write();
+    let (exe, map) = (exe.to_str().unwrap(), map.to_str().unwrap());
+    let run = |extra: &[&str]| {
+        let mut args = vec![
+            exe.to_string(),
+            "--map".into(),
+            map.into(),
+            "--check".into(),
+        ];
+        args.extend(extra.iter().map(|a| a.to_string()));
+        let mut out = Vec::new();
+        let status = patch::main(&args, &mut out);
+        (status, String::from_utf8(out).unwrap())
+    };
+    assert_eq!(run(&[]).0, 0);
+    let range = format!("{:x}..{:x}", module, module + 0x40);
+    let (status, out) = run(&["--code", &range]);
+    assert_eq!(status, 1, "{out}");
+    assert!(
+        out.contains(&format!("hazard {:08x}: jr ra", module + 4)),
+        "{out}"
+    );
+    assert_eq!(run(&["--code", "nonsense"]).0, 2);
 }

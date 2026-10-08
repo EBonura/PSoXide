@@ -34,8 +34,9 @@ Prints every hazard as `branch | delay-slot load | consumer` and exits 1 if
 any image has one. Loads into $zero (cache probes) are ignored, and so is
 anything within 16 words of a word that does not decode as an instruction.
 `--map` (one image only) resolves jump tables as `hazard-patch --map` does,
-and scans only the map's `.text`, as `hazard-patch --map` patches only it
-(`--text-only` is accepted and does nothing). Without a map, or with
+and scans only the map's `.text` (plus `--code LO..HI` ranges), as
+`hazard-patch --map` patches only it (`--text-only` is accepted and does
+nothing). Without a map, or with
 `--whole-image`, every word of the load that looks like code is scanned, and
 data that decodes as a branch can be reported.
 It also warns, without failing, about a GTE command (COP2 `cofun`) in a
@@ -101,7 +102,7 @@ fn scan_in(
     map_path: Option<&str>,
     is_code: IsCode<'_>,
     table_ceiling: usize,
-    text: Option<(i64, i64)>,
+    text: Option<&[(i64, i64)]>,
     out: &mut dyn Write,
 ) -> Result<Vec<String>, ScanError> {
     let data = std::fs::read(path).map_err(|error| {
@@ -111,8 +112,8 @@ fn scan_in(
     let link_map: Option<LinkMap> = open_map(map_path, &data, out).map_err(ScanError::Failed)?;
     let base = load_address(&data);
     let mut listing = Listing::new(&data, base);
-    if let Some((lo, hi)) = text {
-        listing.retain_text(lo, hi);
+    if let Some(ranges) = text {
+        listing.retain_text(ranges);
     }
     let image_end = base + data.len() as i64 - HEADER;
     let image = Image {
@@ -172,7 +173,7 @@ fn scan_in(
 /// exit status.
 pub fn main(args: &[String], out: &mut dyn Write) -> i32 {
     match text_bounds(args, out) {
-        Ok(Some(text)) => main_in(args, text, out),
+        Ok(Some(text)) => main_in(args, &text, out),
         Ok(None) => main_with(args, &looks_like_code, out),
         Err(Some(status)) => status,
         Err(None) => {
@@ -184,7 +185,7 @@ pub fn main(args: &[String], out: &mut dyn Write) -> i32 {
 
 /// [`main`] over `text`, the `[lo, hi)` bounds of the image's `.text` from
 /// its link map: only those words are listed, and all of them are code.
-pub fn main_in(args: &[String], text: (i64, i64), out: &mut dyn Write) -> i32 {
+pub fn main_in(args: &[String], text: &[(i64, i64)], out: &mut dyn Write) -> i32 {
     run(args, &every_word, Some(text), out)
 }
 
@@ -193,7 +194,12 @@ pub fn main_with(args: &[String], is_code: IsCode<'_>, out: &mut dyn Write) -> i
     run(args, is_code, None, out)
 }
 
-fn run(args: &[String], is_code: IsCode<'_>, text: Option<(i64, i64)>, out: &mut dyn Write) -> i32 {
+fn run(
+    args: &[String],
+    is_code: IsCode<'_>,
+    text: Option<&[(i64, i64)]>,
+    out: &mut dyn Write,
+) -> i32 {
     let usage = |out: &mut dyn Write| {
         let _ = write!(out, "{USAGE}");
         2

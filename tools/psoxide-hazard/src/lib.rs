@@ -37,6 +37,8 @@ pub fn cli_args(args: &[String]) -> Option<(Vec<String>, bool, Option<String>)> 
             check_only = true;
         } else if arg == "--map" {
             map_path = Some(it.next()?.clone());
+        } else if arg == "--code" {
+            it.next()?; // its range is read by `code_ranges`
         } else if arg.starts_with("--") {
             continue;
         } else {
@@ -74,21 +76,51 @@ pub fn whole_image(args: &[String]) -> bool {
     args.iter().any(|arg| arg == "--whole-image")
 }
 
-/// The executable bounds the tools work within. With `--map` they are the
+/// The extra executable ranges of `--code LO..HI` (hex, `0x` optional,
+/// repeatable): code the map's `.text` does not span, such as a code module
+/// linked at another address into a composite image. `Err` names a bad
+/// range.
+pub fn code_ranges(args: &[String]) -> Result<Vec<(i64, i64)>, String> {
+    let mut ranges = Vec::new();
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        if arg != "--code" {
+            continue;
+        }
+        let value = it.next().ok_or("--code needs LO..HI")?;
+        let range = value.split_once("..").and_then(|(lo, hi)| {
+            let hex = |s: &str| i64::from_str_radix(s.trim_start_matches("0x"), 16).ok();
+            Some((hex(lo)?, hex(hi)?))
+        });
+        match range {
+            Some((lo, hi)) if 0x8001_0000 <= lo && lo < hi && hi <= 0x801F_8000 => {
+                ranges.push((lo, hi));
+            }
+            _ => {
+                return Err(format!(
+                    "bad --code range {value}: want LO..HI in RAM, in hex"
+                ))
+            }
+        }
+    }
+    Ok(ranges)
+}
+
+/// The executable ranges the tools work within. With `--map` they are the
 /// map's `.text` (`__text_start..__text_end`, the only executable section
-/// of `psoxide.ld`), whether or not `--text-only` is also given: the rest of
-/// the load is `.data`, `.rodata` and assets, and words there decode as
-/// plausible instructions (a slice length of 8 is `jr zero`, 0x11111111 is
-/// `beq t0,s1`), so nothing outside `.text` may be read as code or written.
-/// `Ok(None)` means no bounds: no `--map`, or `--whole-image`, the explicit
-/// request for the old heuristic over the whole load. `Err(None)` is a usage
-/// error (`--text-only` without `--map`); `Err(Some(status))` means the map
-/// could not be read or its bounds are not in RAM, already reported to
-/// `out`.
+/// of `psoxide.ld`) plus any `--code` ranges, whether or not `--text-only`
+/// is also given: the rest of the load is `.data`, `.rodata` and assets, and
+/// words there decode as plausible instructions (a slice length of 8 is
+/// `jr zero`, 0x11111111 is `beq t0,s1`), so nothing outside the code ranges
+/// may be read as code or written. `Ok(None)` means no bounds: no `--map`,
+/// or `--whole-image`, the explicit request for the old heuristic over the
+/// whole load. `Err(None)` is a usage error (`--text-only` without
+/// `--map`); `Err(Some(status))` means the map could not be read or its
+/// bounds are not in RAM, already reported to `out`.
 pub fn text_bounds(
     args: &[String],
     out: &mut dyn Write,
-) -> Result<Option<(i64, i64)>, Option<i32>> {
+) -> Result<Option<Vec<(i64, i64)>>, Option<i32>> {
     let text_only = args.iter().any(|arg| arg == "--text-only");
     let Some((_, _, map_path)) = cli_args(args) else {
         return Err(None);
@@ -108,7 +140,12 @@ pub fn text_bounds(
         let _ = writeln!(out, "implausible .text bounds {lo:#x}..{hi:#x}");
         return Err(Some(1));
     }
-    Ok(Some((lo, hi)))
+    let mut ranges = vec![(lo, hi)];
+    ranges.extend(code_ranges(args).map_err(|error| {
+        let _ = writeln!(out, "{error}");
+        Some(2)
+    })?);
+    Ok(Some(ranges))
 }
 
 /// Report a jump table entry that lands on a word the listing does not

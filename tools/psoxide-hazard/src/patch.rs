@@ -42,6 +42,7 @@ The trampolines live in psx-rt's `HAZARD_TRAMPOLINES` .data array (magic
 0x48415a54, capacity, words).
 
     hazard-patch game.exe --map game.map   # patch in place
+    hazard-patch game.exe --map game.map --code 80100000..80120000
     hazard-patch game.exe --map game.map --check
     hazard-patch game.exe --check          # report only, exit 1 on hazards
     hazard-patch game.exe --whole-image    # patch without a map (see below)
@@ -53,7 +54,9 @@ the jump table entries of a switch, which are data words the map proves lie
 in `.rodata`). Everything else in the load is `.data`, `.rodata` and assets,
 and its words decode as plausible instructions: a static slice of length 8
 is `jr zero`, 0x11111111 is `beq t0,s1`. Treated as code, a table like that
-is rewritten into jumps. A map from another link is refused. Scan an image
+is rewritten into jumps. `--code LO..HI` (hex, repeatable) adds code the
+map's `.text` does not span, such as a module linked at another address into
+a composite image. A map from another link is refused. Scan an image
 patched with `--map` with `hazard-scan --map` too. `--text-only` is accepted
 and does nothing: `--map` always bounds to `.text`.
 
@@ -82,7 +85,7 @@ fn env_addresses(name: &str) -> Vec<i64> {
 /// exit status.
 pub fn main(args: &[String], out: &mut dyn Write) -> i32 {
     match text_bounds(args, out) {
-        Ok(text) => main_in(args, text, out),
+        Ok(text) => main_in(args, text.as_deref(), out),
         Err(Some(status)) => status,
         Err(None) => {
             let _ = write!(out, "{USAGE}");
@@ -91,10 +94,10 @@ pub fn main(args: &[String], out: &mut dyn Write) -> i32 {
     }
 }
 
-/// [`main`] over `text`, the `[lo, hi)` bounds of the image's `.text` from
-/// its link map, when given: only those words are listed, and all of them
-/// are code (see [`Listing::retain_text`]).
-pub fn main_in(args: &[String], text: Option<(i64, i64)>, out: &mut dyn Write) -> i32 {
+/// [`main`] over `text`, the `[lo, hi)` code ranges of the image (its link
+/// map's `.text` and any `--code` ranges), when given: only those words are
+/// listed, and all of them are code (see [`Listing::retain_text`]).
+pub fn main_in(args: &[String], text: Option<&[(i64, i64)]>, out: &mut dyn Write) -> i32 {
     let is_code: IsCode<'_> = if text.is_some() {
         &every_word
     } else {
@@ -102,8 +105,8 @@ pub fn main_in(args: &[String], text: Option<(i64, i64)>, out: &mut dyn Write) -
     };
     let disassemble = |data: &[u8], base: i64| {
         let mut listing = Listing::new(data, base);
-        if let Some((lo, hi)) = text {
-            listing.retain_text(lo, hi);
+        if let Some(ranges) = text {
+            listing.retain_text(ranges);
         }
         listing
     };
@@ -199,10 +202,10 @@ pub fn main_in(args: &[String], text: Option<(i64, i64)>, out: &mut dyn Write) -
         data[off..off + 4].copy_from_slice(&value.to_le_bytes());
     };
     let put_word = |data: &mut [u8], addr: i64, value: u32| {
-        if let Some((lo, hi)) = text {
+        if let Some(ranges) = text {
             let (area_lo, area_hi) = tramp_area.get();
-            let inside = |lo: i64, hi: i64| lo <= addr && addr + 4 <= hi;
-            if !inside(lo, hi) && !inside(area_lo, area_hi) {
+            let inside = |&(lo, hi): &(i64, i64)| lo <= addr && addr + 4 <= hi;
+            if !ranges.iter().any(inside) && !inside(&(area_lo, area_hi)) {
                 outside_text.borrow_mut().push(addr);
                 return;
             }
