@@ -660,6 +660,13 @@ const ACK_WAIT_SPINS: u32 = Timing::PAD.ack_spins;
 /// waits for each non-final byte's ACK readiness; the BIOS likewise paces bytes.
 pub const DEFAULT_SETUP_SPINS: u32 = Timing::PAD.setup_spins;
 
+/// Spin budget for the address byte's `/ACK`, about 100 microseconds at 6.7
+/// cycles a spin: the kernel's own timeout for a device to answer. A socket with
+/// nothing in it never pulses `/ACK`, so this is what finding it empty costs
+/// after the setup delay. [`Timing::PAD`]'s 2,048 reads, which a slow byte
+/// part way through a packet may need, would cost four times as much.
+const ADDRESS_ACK_SPINS: u32 = 512;
+
 /// Poll the controller in `socket` once.
 ///
 /// The returned [`PadState`] always contains active-high buttons; in
@@ -672,7 +679,7 @@ pub const DEFAULT_SETUP_SPINS: u32 = Timing::PAD.setup_spins;
 /// stays borrowed for the length of the poll.
 #[doc(alias = "PadRead")]
 pub fn poll_on<T: Transport>(port: &mut T, socket: Port) -> PadState {
-    poll_state(port, socket)
+    poll_state(port, socket, false)
 }
 
 /// Poll port 1 once.
@@ -818,7 +825,10 @@ impl PadReader {
 
     /// Poll the port once and return the latest clean state.
     pub fn poll_on<T: Transport>(&mut self, port: &mut T) -> PadState {
-        let polled = poll_state(port, self.socket);
+        // A pad that was there a moment ago has its absence confirmed before
+        // the reader believes it; a socket that was already empty is told so
+        // at once.
+        let polled = poll_state(port, self.socket, self.last.is_connected());
         self.accept(polled)
     }
 
@@ -852,10 +862,18 @@ impl PadReader {
 /// button released", which makes a *held* button (jump, Start) look like a fresh
 /// press the next frame. So: when a controller answered but the DualShock ID
 /// handshake didn't validate, retry a few times and take the first clean read.
-/// Transport failures are retried as whole transactions. Four address-byte
-/// replies of FF without ACK report Disconnected; a failure at any other
-/// stage reports Unknown instead of accepting partial button bytes.
-fn poll_state<T: Transport>(bus: &mut T, socket: Port) -> PadState {
+/// Transport failures are retried as whole transactions, and a failure at any
+/// stage after the address byte reports Unknown instead of accepting partial
+/// button bytes.
+///
+/// An address byte that is not acknowledged and answered `0xFF` is an empty
+/// socket, and a poll that finds one returns at once: the setup delay and one
+/// short wait are all it costs, where four attempts cost a hundred thousand
+/// cycles a frame for a game that polls an empty port 2. `confirm_absent` is
+/// for a caller that saw a pad on this socket last time: one such reply could
+/// be a glitch on a pad that is still there, so it takes four before it says
+/// the pad is gone.
+fn poll_state<T: Transport>(bus: &mut T, socket: Port, confirm_absent: bool) -> PadState {
     let mut last = PadState::NONE;
     let mut all_absent = true;
     let mut tries = 0;
@@ -864,12 +882,15 @@ fn poll_state<T: Transport>(bus: &mut T, socket: Port) -> PadState {
         if matches!(s.mode, PadMode::Digital | PadMode::Analog | PadMode::Config) {
             return s;
         }
+        if s.mode == PadMode::Disconnected && !confirm_absent {
+            return s;
+        }
         all_absent &= s.mode == PadMode::Disconnected;
         last = s;
         tries += 1;
     }
-    // Only four complete address-byte replies of FF without ACK establish
-    // an absent device. Any other failed stage means an invalid transaction.
+    // Four complete address-byte replies of FF without ACK establish an
+    // absent device. Any other failed stage means an invalid transaction.
     if !all_absent {
         last.mode = PadMode::Unknown;
     }
@@ -997,7 +1018,14 @@ fn poll_once<T: Transport>(bus: &mut T, socket: Port) -> RawPoll {
 /// A complete selected-port poll, or no usable packet. The current ID
 /// determines the length; a mode toggle never reuses an earlier length.
 fn poll_selected<T: Transport>(bus: &mut T) -> Option<RawPoll> {
-    match bus.exchange(0x01, false, Timing::PAD) {
+    // The address byte is the one that tells a pad from an empty socket, so it
+    // gets the BIOS's own limit for a device to answer, not the longer budget
+    // for a slow byte part way through a packet.
+    let address = Timing {
+        ack_spins: ADDRESS_ACK_SPINS,
+        ..Timing::PAD
+    };
+    match bus.exchange(0x01, false, address) {
         Ok(_) => {}
         Err(ExchangeError::AckTimeout { reply: 0xFF }) => return Some(RawPoll::NONE),
         Err(_) => return None,
@@ -1164,7 +1192,7 @@ fn request_analog<T: Transport>(bus: &mut T, socket: Port, gap: u32) -> PadState
         [0x43, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
     );
     bus.delay(gap);
-    let mut state = poll_state(bus, socket);
+    let mut state = poll_state(bus, socket, false);
     let mut retries = 0;
     while state.mode == PadMode::Config && retries < CONFIG_EXIT_RETRIES {
         // The exit did not take: leave the pad in a playable mode rather
@@ -1175,7 +1203,7 @@ fn request_analog<T: Transport>(bus: &mut T, socket: Port, gap: u32) -> PadState
             [0x43, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
         );
         bus.delay(gap);
-        state = poll_state(bus, socket);
+        state = poll_state(bus, socket, false);
         retries += 1;
     }
     state
