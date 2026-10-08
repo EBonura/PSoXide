@@ -55,8 +55,10 @@ assistants. The [development workflow](@/docs/development-workflow.md) explains 
 to connect these steps. The [development methodology](@/docs/development-methodology.md)
 shows how measurements from real consoles improve the emulator and SDK.
 
-I direct the architecture, review and integrate changes, and validate results
-with automated tests and original-hardware checks. Read [the provenance disclosure](@/legal.md#provenance)
+AI coding agents write nearly all of the code. I direct the architecture, review
+and integrate changes, and validate results with automated tests and
+original-hardware checks. [How PSoXide is built](@/how-its-built.md) lists the
+rules the agents work to and the checks every change passes. Read [the provenance disclosure](@/legal.md#provenance)
 for the project's use of AI assistance and how provenance is tracked.
 
 The project uses the following practices:
