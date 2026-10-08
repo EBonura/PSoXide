@@ -40,7 +40,8 @@ pub struct SimConfig {
     pub placement: Placement,
     /// Whether compaction may move regions.
     pub movable: bool,
-    /// Bookkeeping budget per step (see [`psx_residency::Config::step_budget`]).
+    /// Bookkeeping budget per step, passed on as the `step_budget` of the
+    /// [`psx_residency::Config`].
     pub step_budget: u32,
     /// Regions pinned for the whole run (the home pin), at demand class.
     pub pinned: Vec<u32>,
