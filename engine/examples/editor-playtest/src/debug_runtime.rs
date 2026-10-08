@@ -1,19 +1,23 @@
 //! Emulator-only diagnostic lines for the deterministic replay studies. Each
-//! writer is compiled out of every build without `emulator-telemetry`.
+//! writer is compiled out of every build without `emulator-telemetry`; the
+//! camera pose line also builds under the lighter `camera-pose-log`.
 
-#[cfg(feature = "emulator-telemetry")]
+#[cfg(any(feature = "emulator-telemetry", feature = "camera-pose-log"))]
+#[cfg_attr(not(feature = "emulator-telemetry"), allow(dead_code, unused_imports))]
 use super::*;
 
-#[cfg(feature = "emulator-telemetry")]
+#[cfg(any(feature = "emulator-telemetry", feature = "camera-pose-log"))]
 const DEBUG_LOG_LINE_CAP: usize = 256;
 
-#[cfg(feature = "emulator-telemetry")]
+#[cfg(any(feature = "emulator-telemetry", feature = "camera-pose-log"))]
+#[cfg_attr(not(feature = "emulator-telemetry"), allow(dead_code, unused_imports))]
 struct DebugLogLine {
     bytes: [u8; DEBUG_LOG_LINE_CAP],
     len: usize,
 }
 
-#[cfg(feature = "emulator-telemetry")]
+#[cfg(any(feature = "emulator-telemetry", feature = "camera-pose-log"))]
+#[cfg_attr(not(feature = "emulator-telemetry"), allow(dead_code, unused_imports))]
 impl DebugLogLine {
     fn new(prefix: &str) -> Self {
         let mut line = Self {
