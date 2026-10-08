@@ -65,17 +65,7 @@ default = [
     # cycles per render vblank for no observed visual difference; see
     # docs/perf-30fps.md experiment 2.
     "world-order-bucketed",
-    "world-grid-visible",
     "ot-2048",
-    # Camera-independent visible-cell fills: the cached candidate list
-    # per (room, anchor) holds the full PVS set and per-frame camera
-    # culling happens downstream in cell_select/surface tests, so
-    # camera rotation no longer refills every drawn room each tick
-    # (was 33k avg / 184k spike ticks on the benchmark tape).
-    "vis-anchor-pvs-candidates",
-    # Fixed 3x3 one-level TR subdivision lattice. The Cortex v1 A/B reduced
-    # matched room-surface work by 15.5% with bit-identical leaf packets.
-    "tr-subdivision-lattice",
     # VBlank-kicked presentation: +26% fps with one enemy on screen (19.8 to
     # 25.0). Frames that would fence early beside a queued frame, such as
     # with two melee enemies, go double-buffered instead (choose_present_queue).
@@ -99,25 +89,11 @@ world-order-global = []
 world-order-slot = []
 world-order-linked = []
 world-order-bucketed = []
-world-grid-visible = ["psx-game-runtime/world-grid-visible"]
-vis-anchor-cache = ["psx-game-runtime/vis-anchor-cache"]
-vis-anchor-pvs-candidates = ["psx-game-runtime/vis-anchor-pvs-candidates"]
-vis-broad-pvs = ["psx-game-runtime/vis-broad-pvs"]
-vis-coarse-yaw = ["psx-game-runtime/vis-coarse-yaw"]
-vis-full-active-chunks = ["psx-game-runtime/vis-full-active-chunks"]
-vis-player-anchor = []
-# Drawn set = the frustum-clipped portal traversal (per-room draw_distance
-# far clamp + portal narrowing) instead of the unpruned reachability ring.
-# Opt-in until the pop-in behaviour passes an eyes-on gate.
-vis-draw-pruned = []
 room-surface-profile = ["psx-engine/room-surface-profile"]
 # Diagnostic-only cadence for semantic A/B comparisons. Render exactly once
 # per two fixed simulation ticks even when wall-clock VBlanks have accumulated,
 # so faster and slower builds present the same guest states.
 lockstep-visuals = []
-# A/B candidate: project the nine unique points of a one-level subdivided
-# room quad once, instead of projecting four overlapping child quads.
-tr-subdivision-lattice = ["psx-engine/tr-subdivision-lattice"]
 # Opt-in for projects whose close, strongly patterned ceilings visibly need
 # affine correction. The measured default spends subdivision on floors/walls.
 tr-subdivision-ceilings = []
@@ -136,7 +112,6 @@ world-selection-reuse = []
 actor-shadows-off = []
 # Projected (flattened-geometry) actor shadows instead of the blob decal.
 actor-shadows-projected = []
-cell-select-profile = ["psx-engine/cell-select-profile"]
 # High-contrast TR subdivision colors for emulator wireframe captures.
 # Diagnostic only: normal builds retain authored Gouraud lighting.
 tessellation-debug = []

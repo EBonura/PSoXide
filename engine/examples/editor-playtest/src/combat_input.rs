@@ -90,7 +90,9 @@ impl RangedReady {
     pub fn aiming(&self) -> bool {
         self.ticks != 0
     }
-    pub fn ready(&self, now: u32) -> bool { self.aiming() || self.firing(now) }
+    pub fn ready(&self, now: u32) -> bool {
+        self.aiming() || self.firing(now)
+    }
     pub fn can_fire(&self) -> bool {
         self.ticks >= 8
     }

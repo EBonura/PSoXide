@@ -1,5 +1,14 @@
 # Level residency and room streaming
 
+> **Superseded (2026-10-08).** The grid room window, room cache, room
+> visibility and room streamer this document describes were deleted with the
+> grid world. What survives is the sector-page pool and the failure-backoff,
+> pin and generation policy, now in `psx-game-runtime/src/streaming/`
+> (`page_pool.rs`, `scheduler_policy.rs`). The lifetime and staleness
+> contract below still holds for `PagePool`. The replacement design is
+> `docs/streaming-design-2026-10-08.md`. Kept as history and as input to
+> milestones M3 and M8 of that design.
+
 How rooms, materials, and texture assets reach RAM and VRAM at
 runtime. Rewritten 2026-06-12 from the phase-1 streaming audit
 (`docs/streaming-audit-2026-06-12.md`); the previous revision

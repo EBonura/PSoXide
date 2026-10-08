@@ -150,13 +150,14 @@ fn player_anim_is_stop(anim: PlayerAnim) -> bool {
 }
 
 impl Playtest {
-    /// Depth range for effects in `room`: they sort against whichever world
-    /// renderer owns the room, see [`world_depth_range`].
+    /// Depth range for effects in `room`: they sort against the resident
+    /// PXBSP renderer, see [`PXBSP_CLASSIC_DEPTH_RANGE`].
     pub(super) fn effect_depth_range(&self, room: RoomIndex) -> DepthRange {
-        ROOMS
-            .get(room.to_usize())
-            .map(|record| world_depth_range(record, self.bsp.is_some()))
-            .unwrap_or(WORLD_DEPTH_RANGE)
+        if ROOMS.get(room.to_usize()).is_some() {
+            PXBSP_CLASSIC_DEPTH_RANGE
+        } else {
+            WORLD_DEPTH_RANGE
+        }
     }
 
     pub(super) fn ensure_poi_save_loaded(&mut self) {
@@ -648,7 +649,9 @@ impl Playtest {
 
     pub(super) const fn player_attack_channel(anim: PlayerAnim) -> VitalityChannelId {
         match anim {
-            PlayerAnim::VertLightAttack | PlayerAnim::VertHeavyAttack | PlayerAnim::RangedAttack => VitalityChannelId::Two,
+            PlayerAnim::VertLightAttack
+            | PlayerAnim::VertHeavyAttack
+            | PlayerAnim::RangedAttack => VitalityChannelId::Two,
             _ => VitalityChannelId::One,
         }
     }
@@ -709,30 +712,6 @@ impl Playtest {
     #[inline]
     pub(super) fn queue_gameplay_sfx(&mut self, event: LevelGameplaySfxEvent) {
         self.gameplay_sfx_events |= event.bit();
-    }
-
-    pub(super) fn water_cell_at(
-        &self,
-        room: RoomIndex,
-        position: RoomPoint,
-    ) -> Option<&'static LevelWaterCellRecord> {
-        // Two sim calls per tick (locomotion speed, then the lethal-depth
-        // check) each cost a room lookup and two `div_euclid` divides before
-        // searching. An empty cooked table can never match, so answer from the
-        // table's length instead. Exact, not a heuristic.
-        if WATER_CELLS.is_empty() {
-            return None;
-        }
-        let sector_size = i32::from(ROOMS.get(room.to_usize())?.sector_size);
-        if sector_size <= 0 {
-            return None;
-        }
-        let x = u16::try_from(position.x.div_euclid(sector_size)).ok()?;
-        let z = u16::try_from(position.z.div_euclid(sector_size)).ok()?;
-        WATER_CELLS
-            .binary_search_by_key(&(room, x, z), |cell| (cell.room, cell.x, cell.z))
-            .ok()
-            .and_then(|index| WATER_CELLS.get(index))
     }
 
     /// Arm the shared player death sequence: `delay_ticks` of locked
@@ -813,7 +792,8 @@ impl Playtest {
         // initial door states onto their box props (START_ON doors
         // begin open without a fire event).
         self.game_entities.spawn_from_records(GAME_ENTITIES);
-        self.game_entities.enable_combat_flow(self.player_has_ranged_weapon());
+        self.game_entities
+            .enable_combat_flow(self.player_has_ranged_weapon());
         self.game_entities
             .set_stance_swap_delay(self.player_stance_config.swap_cooldown_ticks);
         self.deferred_enemy_attacks.clear();
@@ -932,7 +912,8 @@ impl Playtest {
         // as this life's PLAYER_WEAPON_ATTACHMENTS event.
         self.weapon_attach_reported = false;
         self.game_entities.spawn_from_records(GAME_ENTITIES);
-        self.game_entities.enable_combat_flow(self.player_has_ranged_weapon());
+        self.game_entities
+            .enable_combat_flow(self.player_has_ranged_weapon());
         self.game_entities
             .set_stance_swap_delay(self.player_stance_config.swap_cooldown_ticks);
         self.logic.init_from_records(LOGIC);
@@ -1076,34 +1057,71 @@ impl Playtest {
 
     #[cfg_attr(target_arch = "mips", optimize(size))]
     pub(super) fn player_melee_read(&self) -> u8 {
-        if !matches!(self.anim_state, PlayerAnim::LightAttack | PlayerAnim::LightAttackFollowup
-            | PlayerAnim::LightAttackFinisher | PlayerAnim::HeavyAttack) { return 0; }
-        let (Some(c), Some(pose)) = (self.character, self.player_actor_pose) else { return 0; };
-        let first=c.combat_capsule_first.to_usize();
-        let frame=pose.pose().phase_q12() >> 12;
-        let mut first_hit=u32::MAX; let mut end_hit=0;
-        for capsule in COMBAT_CAPSULES.get(first..first+usize::from(c.combat_capsule_count)).unwrap_or(&[]) {
+        if !matches!(
+            self.anim_state,
+            PlayerAnim::LightAttack
+                | PlayerAnim::LightAttackFollowup
+                | PlayerAnim::LightAttackFinisher
+                | PlayerAnim::HeavyAttack
+        ) {
+            return 0;
+        }
+        let (Some(c), Some(pose)) = (self.character, self.player_actor_pose) else {
+            return 0;
+        };
+        let first = c.combat_capsule_first.to_usize();
+        let frame = pose.pose().phase_q12() >> 12;
+        let mut first_hit = u32::MAX;
+        let mut end_hit = 0;
+        for capsule in COMBAT_CAPSULES
+            .get(first..first + usize::from(c.combat_capsule_count))
+            .unwrap_or(&[])
+        {
             if capsule.flags & psx_level::combat_capsule_flags::HITBOX != 0
-                && capsule.action==self.anim_state.action().to_index() as u8 {
-                first_hit=first_hit.min(u32::from(capsule.active_start_frame));
-                end_hit=end_hit.max(u32::from(capsule.active_end_frame));
+                && capsule.action == self.anim_state.action().to_index() as u8
+            {
+                first_hit = first_hit.min(u32::from(capsule.active_start_frame));
+                end_hit = end_hit.max(u32::from(capsule.active_end_frame));
             }
         }
-        if first_hit==u32::MAX { 0 } else if frame<first_hit { 1 } else if frame>=end_hit { 3 } else { 2 }
+        if first_hit == u32::MAX {
+            0
+        } else if frame < first_hit {
+            1
+        } else if frame >= end_hit {
+            3
+        } else {
+            2
+        }
     }
 
     /// The final half of a melee windup is readable and interruptible; active
     /// heavy armour and ordinary movement never count as a firearm opening.
     pub(super) fn player_shot_opening(&self) -> bool {
-        if !matches!(self.anim_state, PlayerAnim::LightAttack | PlayerAnim::LightAttackFollowup
-            | PlayerAnim::LightAttackFinisher | PlayerAnim::HeavyAttack) { return false; }
-        let (Some(c), Some(pose)) = (self.character, self.player_actor_pose) else { return false; };
+        if !matches!(
+            self.anim_state,
+            PlayerAnim::LightAttack
+                | PlayerAnim::LightAttackFollowup
+                | PlayerAnim::LightAttackFinisher
+                | PlayerAnim::HeavyAttack
+        ) {
+            return false;
+        }
+        let (Some(c), Some(pose)) = (self.character, self.player_actor_pose) else {
+            return false;
+        };
         let first = c.combat_capsule_first.to_usize();
         let frame = pose.pose().phase_q12() >> 12;
-        COMBAT_CAPSULES.get(first..first + usize::from(c.combat_capsule_count)).unwrap_or(&[]).iter()
-            .filter(|c| c.flags & psx_level::combat_capsule_flags::HITBOX != 0
-                && c.action == self.anim_state.action().to_index() as u8)
-            .map(|c| u32::from(c.active_start_frame)).min()
+        COMBAT_CAPSULES
+            .get(first..first + usize::from(c.combat_capsule_count))
+            .unwrap_or(&[])
+            .iter()
+            .filter(|c| {
+                c.flags & psx_level::combat_capsule_flags::HITBOX != 0
+                    && c.action == self.anim_state.action().to_index() as u8
+            })
+            .map(|c| u32::from(c.active_start_frame))
+            .min()
             .is_some_and(|start| frame >= start / 2 && frame < start)
     }
 
@@ -1117,10 +1135,17 @@ impl Playtest {
         if self.hazard_death_ticks_remaining != 0 {
             return false;
         }
-        let poise_broken = self.combat_flow.can_interrupt() && !matches!(self.anim_state, PlayerAnim::Stun)
-            && self.player_poise.hit(damage, psx_game_runtime::character::PLAYER_POISE, armored);
-        if poise_broken { self.combat_flow.broke(); }
-        if shot_only && !poise_broken { return false; }
+        let poise_broken = self.combat_flow.can_interrupt()
+            && !matches!(self.anim_state, PlayerAnim::Stun)
+            && self
+                .player_poise
+                .hit(damage, psx_game_runtime::character::PLAYER_POISE, armored);
+        if poise_broken {
+            self.combat_flow.broke();
+        }
+        if shot_only && !poise_broken {
+            return false;
+        }
         // Player animation starts and locks use the absolute simulation clock.
         // Enemy animation phases use gameplay_tick; using that epoch here makes
         // the reaction appear expired as soon as update_gameplay checks its lock.
@@ -1135,13 +1160,17 @@ impl Playtest {
         };
         // Older projects can still use their hit clip when no Stun is bound.
         if reaction == PlayerAnim::Stun
-            && self.character.is_none_or(|c| c.action_clip(reaction.action()).is_none())
+            && self
+                .character
+                .is_none_or(|c| c.action_clip(reaction.action()).is_none())
         {
             reaction = PlayerAnim::HitReact;
         }
         // An unbound ordinary hit should not freeze a character on an idle pose.
         if !poise_broken
-            && self.character.is_none_or(|c| c.action_clip(reaction.action()).is_none())
+            && self
+                .character
+                .is_none_or(|c| c.action_clip(reaction.action()).is_none())
         {
             return false;
         }
@@ -1167,7 +1196,11 @@ impl Playtest {
         }
         self.anim_lock_until_tick = now.saturating_add(recovery);
         self.anim_blend_from = None;
-        telemetry::debug_log(if poise_broken { "player poise:break" } else { "player hit:react" });
+        telemetry::debug_log(if poise_broken {
+            "player poise:break"
+        } else {
+            "player hit:react"
+        });
         poise_broken
     }
 
@@ -1224,16 +1257,43 @@ impl Playtest {
     }
 
     /// Resolve permissions on the same clip phase used by the visible player.
-    pub(super) fn player_combat_sample(&self, ctx: &Ctx) -> psx_game_runtime::combat_timing::Sample {
+    pub(super) fn player_combat_sample(
+        &self,
+        ctx: &Ctx,
+    ) -> psx_game_runtime::combat_timing::Sample {
         use psx_game_runtime::combat_timing::Sample;
-        let Some(character) = self.character.as_ref() else { return Sample::LEGACY; };
-        if !character.combat_windows.iter().any(|w| w.action == self.anim_state.action().to_index() as u8) { return Sample::LEGACY; }
-        let Some(clip) = self.models.get(character.model.to_usize()).copied().flatten()
-            .and_then(|model| model.clip(&self.clips, character.clip_for(self.anim_state))) else { return Sample::LEGACY; };
+        let Some(character) = self.character.as_ref() else {
+            return Sample::LEGACY;
+        };
+        if !character
+            .combat_windows
+            .iter()
+            .any(|w| w.action == self.anim_state.action().to_index() as u8)
+        {
+            return Sample::LEGACY;
+        }
+        let Some(clip) = self
+            .models
+            .get(character.model.to_usize())
+            .copied()
+            .flatten()
+            .and_then(|model| model.clip(&self.clips, character.clip_for(self.anim_state)))
+        else {
+            return Sample::LEGACY;
+        };
         let phase = psx_game_runtime::model_rendering::animation_phase_at_tick_q12(
-            clip, ctx.sim_tick.saturating_sub(self.anim_start_tick), ctx.video_hz, false,
-            self.player_action_speed_q8(character, self.anim_state), character.action_frame_range(self.anim_state.action()));
-        psx_game_runtime::combat_timing::Sample::new(&character.combat_windows, self.anim_state.action().to_index() as u8, phase)
+            clip,
+            ctx.sim_tick.saturating_sub(self.anim_start_tick),
+            ctx.video_hz,
+            false,
+            self.player_action_speed_q8(character, self.anim_state),
+            character.action_frame_range(self.anim_state.action()),
+        );
+        psx_game_runtime::combat_timing::Sample::new(
+            &character.combat_windows,
+            self.anim_state.action().to_index() as u8,
+            phase,
+        )
     }
 
     /// Whether enemy melee and projectiles pass through the player this tick.
@@ -1246,7 +1306,8 @@ impl Playtest {
     /// count, press tick included.
     pub(super) fn player_invulnerable(&self, ctx: &Ctx) -> bool {
         let config = self.motor_config();
-        self.player_combat_sample(ctx).active(psx_level::CombatWindowKind::Invulnerable)
+        self.player_combat_sample(ctx)
+            .active(psx_level::CombatWindowKind::Invulnerable)
             .unwrap_or_else(|| self.motor.is_action_invulnerable(config))
             || self.player_stance.swap_elapsed_ticks() <= u16::from(config.roll_invulnerable_frames)
     }
@@ -1334,157 +1395,6 @@ impl Playtest {
             )
     }
 
-    pub(super) fn collect_collision_rooms(
-        &self,
-        anchor: RoomPoint,
-        margin: i32,
-        out: &mut [CharacterCollisionRoom<'static>],
-    ) -> usize {
-        let mut count = 0usize;
-        let mut collected_rooms = [INVALID_ROOM_INDEX; MAX_COLLISION_ROOMS];
-        let current_authored = authored_room_for_chunk(self.room_index);
-        for active in self.window.rooms.iter().flatten() {
-            if count >= out.len() {
-                break;
-            }
-            if current_authored.is_some()
-                && authored_room_for_chunk(active.index) != current_authored
-            {
-                continue;
-            }
-            if !active_room_overlaps_collision_window(*active, anchor, margin) {
-                continue;
-            }
-            out[count] = CharacterCollisionRoom::from_collision(
-                active.collision_room,
-                active.offset_x,
-                active.offset_z,
-            )
-            .with_offset_y(active.offset_y);
-            collected_rooms[count] = active.index;
-            count += 1;
-        }
-        count = self.collect_current_portal_collision_rooms(
-            current_authored,
-            anchor,
-            margin,
-            out,
-            &mut collected_rooms,
-            count,
-        );
-        #[cfg(feature = "cd-stream-bench")]
-        {
-            count = self.collect_resident_streamed_collision_rooms(
-                current_authored,
-                anchor,
-                margin,
-                out,
-                &mut collected_rooms,
-                count,
-            );
-        }
-        count
-    }
-
-    pub(super) fn collect_current_portal_collision_rooms(
-        &self,
-        current_authored: Option<u32>,
-        anchor: RoomPoint,
-        margin: i32,
-        out: &mut [CharacterCollisionRoom<'static>],
-        collected_rooms: &mut [RoomIndex; MAX_COLLISION_ROOMS],
-        mut count: usize,
-    ) -> usize {
-        let Some(current_record) = ROOMS.get(self.room_index.to_usize()) else {
-            return count;
-        };
-        let portal_first = current_record.portal_first as usize;
-        let portal_end = portal_first.saturating_add(current_record.portal_count as usize);
-        let mut portal_index = portal_first;
-        while portal_index < portal_end.min(ROOM_PORTALS.len()) && count < out.len() {
-            let portal = ROOM_PORTALS[portal_index];
-            portal_index += 1;
-            if portal.source_room != self.room_index {
-                continue;
-            }
-            let index = portal.destination_room;
-            if collision_room_collected(collected_rooms, count, index) {
-                continue;
-            }
-            if current_authored.is_some() && authored_room_for_chunk(index) != current_authored {
-                continue;
-            }
-            let Some(chunk) = chunk_record_for_room(index) else {
-                continue;
-            };
-            let Some(record) = ROOMS.get(index.to_usize()) else {
-                continue;
-            };
-            if !chunk_overlaps_collision_window(*chunk, current_record, record, anchor, margin) {
-                continue;
-            }
-            let Some(room) = parse_collision_room_for_index(index, record) else {
-                continue;
-            };
-            out[count] = CharacterCollisionRoom::from_collision(
-                room,
-                room_origin_x(record).saturating_sub(room_origin_x(current_record)),
-                room_origin_z(record).saturating_sub(room_origin_z(current_record)),
-            )
-            .with_offset_y(record.origin_y.saturating_sub(current_record.origin_y));
-            collected_rooms[count] = index;
-            count += 1;
-        }
-        count
-    }
-
-    #[cfg(feature = "cd-stream-bench")]
-    pub(super) fn collect_resident_streamed_collision_rooms(
-        &self,
-        current_authored: Option<u32>,
-        anchor: RoomPoint,
-        margin: i32,
-        out: &mut [CharacterCollisionRoom<'static>],
-        collected_rooms: &mut [RoomIndex; MAX_COLLISION_ROOMS],
-        mut count: usize,
-    ) -> usize {
-        let Some(current_record) = ROOMS.get(self.room_index.to_usize()) else {
-            return count;
-        };
-        for chunk in ROOM_CHUNKS {
-            if count >= out.len() {
-                break;
-            }
-            if collision_room_collected(collected_rooms, count, chunk.room) {
-                continue;
-            }
-            if current_authored.is_some() && Some(chunk.authored_room) != current_authored {
-                continue;
-            }
-            if !streamed_room_is_resident(chunk.room) {
-                continue;
-            }
-            let Some(record) = ROOMS.get(chunk.room.to_usize()) else {
-                continue;
-            };
-            if !chunk_overlaps_collision_window(*chunk, current_record, record, anchor, margin) {
-                continue;
-            }
-            let Some(room) = parse_streamed_compact_collision_room(0, chunk.room) else {
-                continue;
-            };
-            out[count] = CharacterCollisionRoom::from_collision(
-                RuntimeCollisionRoom::Compact(room),
-                room_origin_x(record).saturating_sub(room_origin_x(current_record)),
-                room_origin_z(record).saturating_sub(room_origin_z(current_record)),
-            )
-            .with_offset_y(record.origin_y.saturating_sub(current_record.origin_y));
-            collected_rooms[count] = chunk.room;
-            count += 1;
-        }
-        count
-    }
-
     #[cfg(feature = "collision-debug-overlay")]
     pub(super) fn draw_collision_debug_overlay(&self, gpu: &mut Gpu, camera: WorldCamera) {
         if let Some(character) = self.character.as_ref() {
@@ -1516,25 +1426,6 @@ impl Playtest {
                 );
             }
         }
-        for active in self.window.rooms.iter().flatten().copied() {
-            let room_camera = camera_for_room(camera, active);
-            for inst in MODEL_INSTANCES {
-                if inst.room != active.index {
-                    continue;
-                }
-                let Some(model) = self.models.get(inst.model.to_usize()).copied().flatten() else {
-                    continue;
-                };
-                draw_collision_cylinder_debug(
-                    gpu,
-                    RoomPoint::new(inst.x, inst.y, inst.z),
-                    i32::from(model.collision_radius),
-                    i32::from(model.world_height),
-                    room_camera,
-                    (0xff, 0xd0, 0x40),
-                );
-            }
-        }
     }
 
     pub(super) fn draw_particle_emitters<'a>(
@@ -1548,72 +1439,34 @@ impl Playtest {
             return 0;
         };
         let mut submitted = 0usize;
-        if self.bsp.is_some() {
-            let depth_range = self.effect_depth_range(self.room_index);
-            let mut projector = None;
-            for emitter in PARTICLE_EMITTERS {
-                if emitter.room != self.room_index {
-                    continue;
-                }
-                let loaded_projector = match projector {
-                    Some(projector) => Some(projector),
-                    None => {
-                        if !PROP_PARTICLE_GTE_PROJECT_ENABLED {
-                            None
-                        } else {
-                            let loaded = LoadedWorldCameraGte::load(camera);
-                            projector = Some(loaded);
-                            Some(loaded)
-                        }
-                    }
-                };
-                submitted += draw_particle_emitter(
-                    *emitter,
-                    camera,
-                    loaded_projector,
-                    depth_range,
-                    particle_material,
-                    elapsed_tick,
-                    ot,
-                    primitive_packets,
-                );
-            }
-            return submitted;
-        }
-        for active in self.window.rooms.iter().flatten().copied() {
-            if !self.portal_visibility_draws_room(active.index) {
+        let depth_range = self.effect_depth_range(self.room_index);
+        let mut projector = None;
+        for emitter in PARTICLE_EMITTERS {
+            if emitter.room != self.room_index {
                 continue;
             }
-            let room_camera = camera_for_room(camera, active);
-            let depth_range = self.effect_depth_range(active.index);
-            let mut projector = None;
-            for emitter in PARTICLE_EMITTERS {
-                if emitter.room != active.index {
-                    continue;
-                }
-                let projector = match projector {
-                    Some(projector) => Some(projector),
-                    None => {
-                        if !PROP_PARTICLE_GTE_PROJECT_ENABLED {
-                            None
-                        } else {
-                            let loaded = LoadedWorldCameraGte::load(room_camera);
-                            projector = Some(loaded);
-                            Some(loaded)
-                        }
+            let loaded_projector = match projector {
+                Some(projector) => Some(projector),
+                None => {
+                    if !PROP_PARTICLE_GTE_PROJECT_ENABLED {
+                        None
+                    } else {
+                        let loaded = LoadedWorldCameraGte::load(camera);
+                        projector = Some(loaded);
+                        Some(loaded)
                     }
-                };
-                submitted += draw_particle_emitter(
-                    *emitter,
-                    room_camera,
-                    projector,
-                    depth_range,
-                    particle_material,
-                    elapsed_tick,
-                    ot,
-                    primitive_packets,
-                );
-            }
+                }
+            };
+            submitted += draw_particle_emitter(
+                *emitter,
+                camera,
+                loaded_projector,
+                depth_range,
+                particle_material,
+                elapsed_tick,
+                ot,
+                primitive_packets,
+            );
         }
         submitted
     }
@@ -1633,50 +1486,82 @@ impl Playtest {
         // A named eye socket follows the same sampled head as the visible mesh.
         // Models without an authored eye simply omit this presentation effect.
         for (index, record) in GAME_ENTITIES.iter().enumerate() {
-            let Some(progress) = self.game_entities.stance_eye_pulse_q12(index) else { continue; };
-            let room = record.room;
-            let room_camera = if self.bsp.is_some() {
-                if room != self.room_index { continue; }
-                camera
-            } else {
-                let Some(active) = self.window.rooms.iter().flatten().find(|r| r.index == room).copied() else { continue; };
-                if !self.portal_visibility_draws_room(room) { continue; }
-                camera_for_room(camera, active)
+            let Some(progress) = self.game_entities.stance_eye_pulse_q12(index) else {
+                continue;
             };
-            let Some(snapshot) = self.instance_actor_poses.get(usize::from(record.model_instance)).copied().flatten() else { continue; };
+            let room = record.room;
+            if room != self.room_index {
+                continue;
+            }
+            let room_camera = camera;
+            let Some(snapshot) = self
+                .instance_actor_poses
+                .get(usize::from(record.model_instance))
+                .copied()
+                .flatten()
+            else {
+                continue;
+            };
             let model = snapshot.model();
             let first = model.socket_first.to_usize();
-            let Some(socket) = MODEL_SOCKETS.get(first..first + usize::from(model.socket_count))
-                .and_then(|sockets| sockets.iter().find(|socket| socket.name == "stance_eye")) else { continue; };
-            let Some(eye) = snapshot.pose().joint_world_point(socket.joint, socket.translation) else { continue; };
+            let Some(socket) = MODEL_SOCKETS
+                .get(first..first + usize::from(model.socket_count))
+                .and_then(|sockets| sockets.iter().find(|socket| socket.name == "stance_eye"))
+            else {
+                continue;
+            };
+            let Some(eye) = snapshot
+                .pose()
+                .joint_world_point(socket.joint, socket.translation)
+            else {
+                continue;
+            };
             let range = self.effect_depth_range(room);
-            let clearance = -current_actor_surface_options(room, self.bsp.is_some()).depth_bias + 2;
+            let clearance = -current_actor_surface_options(room).depth_bias + 2;
             submitted += psx_game_runtime::particles::draw_stance_eye_pulse(
-                eye, progress, stance_rgb(self.game_entities.stance(index)), room_camera,
+                eye,
+                progress,
+                stance_rgb(self.game_entities.stance(index)),
+                room_camera,
                 DepthRange::new(range.near() + clearance, range.far() + clearance),
-                particle_material, ot, primitive_packets,
+                particle_material,
+                ot,
+                primitive_packets,
             );
         }
         // Charge flares are sampled from the same retained pose token as the
         // eventual release, so the animated muzzle and presentation cannot
         // drift apart even when NPC simulation runs below source clip rate.
-        if self.ranged_ready.firing(self.overlay_sim_tick.as_u32().wrapping_add(self.gameplay_epoch.as_u32()))
-            && self.ranged_ready.released == 0
+        if self.ranged_ready.firing(
+            self.overlay_sim_tick
+                .as_u32()
+                .wrapping_add(self.gameplay_epoch.as_u32()),
+        ) && self.ranged_ready.released == 0
         {
             if let (Some(character), Some(pose)) = (self.character, self.player_actor_pose) {
                 let first = character.combat_capsule_first.to_usize();
-                let capsules = COMBAT_CAPSULES.get(first..first + usize::from(character.combat_capsule_count))
+                let capsules = COMBAT_CAPSULES
+                    .get(first..first + usize::from(character.combat_capsule_count))
                     .unwrap_or(&[]);
                 if let Some(mut charge) = psx_game_runtime::combat::authored_projectile_charge(
-                    capsules, CharacterAnimationAction::RangedAttack, Some(pose.pose())) {
+                    capsules,
+                    CharacterAnimationAction::RangedAttack,
+                    Some(pose.pose()),
+                ) {
                     charge.visual.core_rgb = [224, 255, 248];
                     charge.visual.glow_rgb = [64, 208, 168];
                     let range = self.effect_depth_range(self.room_index);
-                    let clearance = -current_actor_surface_options(self.room_index, self.bsp.is_some()).depth_bias
+                    let clearance = -current_actor_surface_options(self.room_index).depth_bias
                         + i32::from(charge.radius.max(2));
-                    submitted += draw_projectile_charge(charge, camera, None,
+                    submitted += draw_projectile_charge(
+                        charge,
+                        camera,
+                        None,
                         DepthRange::new(range.near() + clearance, range.far() + clearance),
-                        particle_material, ot, primitive_packets);
+                        particle_material,
+                        ot,
+                        primitive_packets,
+                    );
                 }
             }
         }
@@ -1708,30 +1593,13 @@ impl Playtest {
             ) else {
                 continue;
             };
-            if attack.room() != self.room_index && self.bsp.is_some() {
+            if attack.room() != self.room_index {
                 continue;
             }
-            let room_camera = if self.bsp.is_some() {
-                camera
-            } else {
-                let Some(active) = self
-                    .window
-                    .rooms
-                    .iter()
-                    .flatten()
-                    .copied()
-                    .find(|active| active.index == attack.room())
-                else {
-                    continue;
-                };
-                if !self.portal_visibility_draws_room(attack.room()) {
-                    continue;
-                }
-                camera_for_room(camera, active)
-            };
+            let room_camera = camera;
             charge.visual = crate::game_logic_runtime::enemy_projectile_visual(charge.visual);
             let range = self.effect_depth_range(attack.room());
-            let clearance = -current_actor_surface_options(attack.room(), self.bsp.is_some()).depth_bias
+            let clearance = -current_actor_surface_options(attack.room()).depth_bias
                 + i32::from(charge.radius.max(2));
             let depth_range = DepthRange::new(range.near() + clearance, range.far() + clearance);
             submitted += draw_projectile_charge(
@@ -1750,33 +1618,11 @@ impl Playtest {
                 index += 1;
                 continue;
             };
-            let (room_camera, depth_range) = if self.bsp.is_some() {
-                if projectile.room != self.room_index {
-                    index += 1;
-                    continue;
-                }
-                (camera, self.effect_depth_range(projectile.room))
-            } else {
-                let Some(active) = self
-                    .window
-                    .rooms
-                    .iter()
-                    .flatten()
-                    .copied()
-                    .find(|active| active.index == projectile.room)
-                else {
-                    index += 1;
-                    continue;
-                };
-                if !self.portal_visibility_draws_room(projectile.room) {
-                    index += 1;
-                    continue;
-                }
-                (
-                    camera_for_room(camera, active),
-                    self.effect_depth_range(projectile.room),
-                )
-            };
+            if projectile.room != self.room_index {
+                index += 1;
+                continue;
+            }
+            let (room_camera, depth_range) = (camera, self.effect_depth_range(projectile.room));
             submitted += draw_projectile_bolt(
                 projectile,
                 room_camera,
@@ -1794,41 +1640,24 @@ impl Playtest {
                 impact_index += 1;
                 continue;
             };
-            let (room_camera, depth_range) = if self.bsp.is_some() {
-                if impact.room != self.room_index {
-                    impact_index += 1;
-                    continue;
-                }
-                (camera, self.effect_depth_range(impact.room))
-            } else {
-                let Some(active) = self
-                    .window
-                    .rooms
-                    .iter()
-                    .flatten()
-                    .copied()
-                    .find(|active| active.index == impact.room)
-                else {
-                    impact_index += 1;
-                    continue;
-                };
-                if !self.portal_visibility_draws_room(impact.room) {
-                    impact_index += 1;
-                    continue;
-                }
-                (
-                    camera_for_room(camera, active),
-                    self.effect_depth_range(impact.room),
-                )
-            };
+            if impact.room != self.room_index {
+                impact_index += 1;
+                continue;
+            }
+            let (room_camera, depth_range) = (camera, self.effect_depth_range(impact.room));
             // Use the same half-sector clearance as actor meshes. A hit on a
             // large floor/wall polygon also needs this allowance for its centre
             // sort key. Effects still sort in world depth, never the HUD band.
             let depth_range = if impact.visual.crystal {
-                let clearance = -current_actor_surface_options(impact.room, self.bsp.is_some()).depth_bias
+                let clearance = -current_actor_surface_options(impact.room).depth_bias
                     + i32::from(impact.radius.max(2));
-                DepthRange::new(depth_range.near() + clearance, depth_range.far() + clearance)
-            } else { depth_range };
+                DepthRange::new(
+                    depth_range.near() + clearance,
+                    depth_range.far() + clearance,
+                )
+            } else {
+                depth_range
+            };
             let effect_submitted = draw_projectile_impact(
                 impact,
                 room_camera,
@@ -1842,46 +1671,6 @@ impl Playtest {
             impact_index += 1;
         }
         submitted
-    }
-
-    /// Draw the player's lightweight water-foot splash when actually moving
-    /// through non-lethal water. The effect is capped at three sprite packets
-    /// and derives its phase from time, so it adds no persistent particle state.
-    pub(super) fn draw_player_water_wade_splash<'a>(
-        &self,
-        camera: WorldCamera,
-        elapsed_tick: SimTick,
-        ot: &mut OtFrame<'a, OT_DEPTH>,
-        primitive_packets: &mut PrimitivePacketArena<'a>,
-    ) -> usize {
-        if !self.player_moved_last_tick || self.hazard_death_ticks_remaining > 0 {
-            return 0;
-        }
-        let player = self.motor.position();
-        let Some(water) = self.water_cell_at(self.room_index, player) else {
-            return 0;
-        };
-        if player.y >= water.surface_y || water.depth >= water.lethal_depth {
-            return 0;
-        }
-        let Some(particle_material) = self.particle_material else {
-            return 0;
-        };
-        let depth_range = self.effect_depth_range(self.room_index);
-        let projector =
-            PROP_PARTICLE_GTE_PROJECT_ENABLED.then(|| LoadedWorldCameraGte::load(camera));
-        draw_water_wade_splash(
-            player.x,
-            water.surface_y,
-            player.z,
-            camera,
-            projector,
-            depth_range,
-            particle_material,
-            elapsed_tick,
-            ot,
-            primitive_packets,
-        )
     }
 
     /// Gameplay-anchored animation tick: raw sim ticks minus the epoch
@@ -2004,9 +1793,7 @@ impl Playtest {
     }
 
     pub(super) fn current_room_lighting(&self, camera: WorldCamera) -> Option<RuntimeRoomLighting> {
-        if self.bsp.is_none() {
-            self.current_collision_room?;
-        }
+        self.bsp.as_ref()?;
         let room_record = ROOMS.get(self.room_index.to_usize())?;
         Some(RuntimeRoomLighting {
             room_index: self.room_index,
@@ -2041,35 +1828,38 @@ impl Playtest {
         telemetry::stage_begin(telemetry::stage::CAMERA);
         self.render_camera = self.free_orbit_camera();
         telemetry::stage_end(telemetry::stage::CAMERA);
-        if CAMERA_SWEEP_FORCE_VISIBILITY {
-            self.force_refresh_active_room_window_view();
-        } else {
-            self.refresh_active_room_window_if_needed();
-        }
-        #[cfg(all(
-            feature = "world-grid-visible",
-            not(feature = "vis-full-active-chunks")
-        ))]
-        self.prewarm_visible_cell_caches();
     }
 
     pub(super) fn update_follow_camera(&mut self, ctx: &Ctx) -> WorldCamera {
         let mut camera = self.solve_follow_camera(ctx);
-        let age = self.hook_travel.map(|flight| ctx.sim_tick.as_u32().wrapping_sub(flight.started));
+        let age = self
+            .hook_travel
+            .map(|flight| ctx.sim_tick.as_u32().wrapping_sub(flight.started));
         self.hook_fov_delta_q8 = psx_game_runtime::hook_points::ease_lens_q8(
-            self.hook_fov_delta_q8, psx_game_runtime::hook_points::lens_target_q8(age));
+            self.hook_fov_delta_q8,
+            psx_game_runtime::hook_points::lens_target_q8(age),
+        );
         // Apply after profile solving so all free/locked user settings remain the baseline.
-        camera.projection.focal_length = (camera.projection.focal_length
-            * (256 + self.hook_fov_delta_q8) / 256).max(1);
+        camera.projection.focal_length =
+            (camera.projection.focal_length * (256 + self.hook_fov_delta_q8) / 256).max(1);
         #[cfg(feature = "emulator-telemetry")]
         if self.player_has_ranged_weapon() && ctx.sim_tick.every(6) {
             let [x, y] = self.aim_control.angles();
             let [tx, ty, tz] = self.ranged_target();
             crate::debug_runtime::debug_log_aim_camera([
-                ctx.sim_tick.as_u32() as i32, i32::from(self.ranged_ready.aiming()),
-                i32::from(self.is_locked()), i32::from(x), i32::from(y),
-                camera.position.x, camera.position.y, camera.position.z,
-                self.camera.distance(), i32::from(self.camera.pitch_q12()), tx, ty, tz,
+                ctx.sim_tick.as_u32() as i32,
+                i32::from(self.ranged_ready.aiming()),
+                i32::from(self.is_locked()),
+                i32::from(x),
+                i32::from(y),
+                camera.position.x,
+                camera.position.y,
+                camera.position.z,
+                self.camera.distance(),
+                i32::from(self.camera.pitch_q12()),
+                tx,
+                ty,
+                tz,
                 self.lock_target.map_or(-1, |index| index as i32),
             ]);
         }
@@ -2091,7 +1881,10 @@ impl Playtest {
     }
 
     fn solve_follow_camera(&mut self, ctx: &Ctx) -> WorldCamera {
-        if self.aim_control.camera_transition(self.ranged_ready.aiming(), self.is_locked()) {
+        if self
+            .aim_control
+            .camera_transition(self.ranged_ready.aiming(), self.is_locked())
+        {
             self.camera.release_lock_preserving_view();
         }
         let mut config = self.camera_config();
@@ -2129,10 +1922,17 @@ impl Playtest {
             config.focus_vertical_lag_shift = Some(0);
             // Align during anticipation, then hold exactly behind the route.
             // Both axes ignore stick/recenter input until flight is finished.
-            let yaw_error = self.camera.yaw().shortest_delta_q12(flight.camera_yaw(self.camera.yaw()));
-            input.yaw_delta_q12 = if ctx.sim_tick.as_u32().wrapping_sub(flight.started) < psx_game_runtime::hook_points::LAUNCH_TICKS {
+            let yaw_error = self
+                .camera
+                .yaw()
+                .shortest_delta_q12(flight.camera_yaw(self.camera.yaw()));
+            input.yaw_delta_q12 = if ctx.sim_tick.as_u32().wrapping_sub(flight.started)
+                < psx_game_runtime::hook_points::LAUNCH_TICKS
+            {
                 yaw_error.clamp(-96, 96)
-            } else { yaw_error };
+            } else {
+                yaw_error
+            };
             input.pitch_delta_q12 = self.hook_camera_pitch - self.camera.pitch_q12();
             input.recenter = false;
         }
@@ -2166,86 +1966,26 @@ impl Playtest {
                 self.camera.focus(),
             );
         }
-        // The cooked world backend cannot change during this scene. A
-        // compile-time branch excludes the grid spring-arm implementation
-        // from a BSP disc while keeping it available to grid projects.
-        if USES_PXBSP {
-            let bsp = self.bsp.as_mut().expect("resident BSP camera backend");
-            return bsp
-                .update_camera(
-                    &mut self.camera,
-                    target,
-                    input,
-                    config,
-                    1,
-                    prop_blockers.as_slice(),
-                    &self.destructibles,
-                )
-                .expect("PXBSP camera trace failed")
-                .camera;
-        }
-        if CAMERA_COLLISION_ENABLED && self.chunked_level() {
-            // The camera's blocking-room set changes only when the player
-            // crosses a coarse cell or the active window changes, so the
-            // per-tick gather (about half of the camera's measured 50k
-            // tick cost) is cached. The gather margin grows by the cache
-            // quantum, keeping the set a superset of "rooms within camera
-            // reach" anywhere inside the key cell -- the solve result is
-            // identical because out-of-reach rooms cannot block the sweep.
-            // The full-width streaming generation is part of the key because the
-            // cached CharacterCollisionRooms hold parses of streamed slot
-            // bytes: the active mask lags the pin set while the window job
-            // catches up, so residency turnover must force a re-gather
-            // even before the active mask changes (streaming audit,
-            // 'static slice contract).
-            const CAMERA_ROOM_CACHE_QUANTUM: i32 = 512;
-            #[cfg(feature = "cd-stream-bench")]
-            let resident_generation = room_streams_arena().residency_generation();
-            #[cfg(not(feature = "cd-stream-bench"))]
-            let resident_generation = 0u32;
-            let key = (
-                self.room_index,
-                target.player.x.div_euclid(CAMERA_ROOM_CACHE_QUANTUM),
-                target.player.z.div_euclid(CAMERA_ROOM_CACHE_QUANTUM),
-                self.window.generation(),
-                resident_generation,
+        let Some(bsp) = self.bsp.as_mut() else {
+            // No world cooked yet (the placeholder manifest): nothing to
+            // collide with, so hold the current view.
+            return world_camera_from_position_focus(
+                self.camera.projection(PROJECTION),
+                self.camera.position(),
+                self.camera.focus(),
             );
-            if key != self.camera_rooms_key {
-                let mut collision_rooms =
-                    [const { CharacterCollisionRoom::EMPTY }; MAX_COLLISION_ROOMS];
-                let margin = config
-                    .max_distance
-                    .saturating_add(config.collision_margin)
-                    .max(config.min_distance)
-                    .saturating_add(CAMERA_ROOM_CACHE_QUANTUM);
-                let count =
-                    self.collect_collision_rooms(target.player, margin, &mut collision_rooms);
-                self.camera_collision_rooms = collision_rooms;
-                self.camera_collision_room_count = count;
-                self.camera_rooms_key = key;
-            }
-            return self
-                .camera
-                .update_vblanks_with_collision_rooms(
-                    PROJECTION,
-                    &self.camera_collision_rooms[..self.camera_collision_room_count],
-                    target,
-                    input,
-                    config,
-                    1u16,
-                )
-                .camera;
-        }
-        let collision = if CAMERA_COLLISION_ENABLED {
-            self.current_collision_room
-                .as_ref()
-                .map(|room| room.collision())
-        } else {
-            None
         };
-        self.camera
-            .update_vblanks(PROJECTION, collision, target, input, config, 1u16)
-            .camera
+        bsp.update_camera(
+            &mut self.camera,
+            target,
+            input,
+            config,
+            1,
+            prop_blockers.as_slice(),
+            &self.destructibles,
+        )
+        .expect("PXBSP camera trace failed")
+        .camera
     }
 
     pub(super) fn lock_target_position(&self) -> Option<RoomPoint> {
@@ -2501,13 +2241,23 @@ impl Playtest {
                 continue;
             }
             if aiming {
-                let Some(projected) = self.target_indicator_position(index)
-                    .and_then(|p| self.render_camera.project_world(p)) else { continue; };
-                let dx = i32::from(projected.sx) - i32::from(self.render_camera.projection.screen_x);
-                let dy = i32::from(projected.sy) - i32::from(self.render_camera.projection.screen_y);
-                if dx.abs() > 100 || dy.abs() > 80 { continue; }
+                let Some(projected) = self
+                    .target_indicator_position(index)
+                    .and_then(|p| self.render_camera.project_world(p))
+                else {
+                    continue;
+                };
+                let dx =
+                    i32::from(projected.sx) - i32::from(self.render_camera.projection.screen_x);
+                let dy =
+                    i32::from(projected.sy) - i32::from(self.render_camera.projection.screen_y);
+                if dx.abs() > 100 || dy.abs() > 80 {
+                    continue;
+                }
                 let score = -(dx * dx + dy * dy);
-                if best.is_none_or(|(_, previous)| score > previous) { best = Some((index, score)); }
+                if best.is_none_or(|(_, previous)| score > previous) {
+                    best = Some((index, score));
+                }
                 continue;
             }
             let Some((screen_x_q8, forward)) = horizontal_view_coordinates(player, point, view_yaw)

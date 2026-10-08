@@ -93,17 +93,6 @@ impl Playtest {
             return;
         }
         telemetry::stage_begin(telemetry::stage::GAME_LOGIC);
-        // The portal-expanded active set as a compact index list; a
-        // handful of loads per tick at MAX_ACTIVE_ROOMS = 16.
-        let mut active_rooms =
-            [const { core::mem::MaybeUninit::<RoomIndex>::uninit() }; MAX_ACTIVE_ROOMS];
-        let mut active_count = 0usize;
-        for slot in self.window.rooms.iter() {
-            if let Some(active) = slot {
-                active_rooms[active_count].write(active.index);
-                active_count += 1;
-            }
-        }
         self.open_demo_outro_once();
         let player = self.motor.position();
         let player_pos = [player.x, player.y, player.z];
@@ -233,9 +222,9 @@ impl Playtest {
             (entity_mask, logic_mask, instance_mask)
         });
         self.game_entities
-            .set_spatial_active_mask(spatial_masks.map(|masks| masks.0));
+            .set_spatial_active_mask(spatial_masks.map_or(0, |masks| masks.0));
         self.logic
-            .set_spatial_active_mask(spatial_masks.map(|masks| masks.1));
+            .set_spatial_active_mask(spatial_masks.map_or(0, |masks| masks.1));
         self.bsp_instance_visible_mask = spatial_masks.map_or(u16::MAX, |masks| masks.2 as u16);
         if let Some((entity_mask, _, _)) = spatial_masks {
             // Live entities whose leaf sits outside the player's PVS row
@@ -257,19 +246,20 @@ impl Playtest {
             // `resolve_enemy_melee` re-queries invulnerability after the motor
             // update, pairing it with the same retained pose contact uses.
             let player_invulnerable = self.player_invulnerable(ctx);
-            self.game_entities.enable_combat_flow(self.player_has_ranged_weapon());
-            self.game_entities.set_player_attack_read(self.player_melee_read());
-            self.game_entities.observe_projectiles(GAME_ENTITIES, &self.combat_projectiles);
+            self.game_entities
+                .enable_combat_flow(self.player_has_ranged_weapon());
+            self.game_entities
+                .set_player_attack_read(self.player_melee_read());
+            self.game_entities
+                .observe_projectiles(GAME_ENTITIES, &self.combat_projectiles);
             let mut mover = SceneEntityMover {
                 bsp: self.bsp.as_mut(),
                 destructibles: &self.destructibles,
-                window: &self.window,
                 box_props: &self.box_props,
                 models: &self.models,
                 entity_positions,
                 entity_dead,
                 player,
-                player_room: self.room_index,
                 player_radius,
                 player_height,
             };
@@ -277,22 +267,21 @@ impl Playtest {
                 GAME_ENTITIES,
                 psx_game_runtime::entities::GameEntityTickInput {
                     player: player_pos,
-                    player_room: self.room_index,
                     player_radius,
                     player_height,
                     player_invulnerable,
-                    player_combat: Some((self.player_stance.active(), [
-                        self.player_vitality.pool(VitalityChannelId::One).current(),
-                        self.player_vitality.pool(VitalityChannelId::Two).current(),
-                    ])),
+                    player_combat: Some((
+                        self.player_stance.active(),
+                        [
+                            self.player_vitality.pool(VitalityChannelId::One).current(),
+                            self.player_vitality.pool(VitalityChannelId::Two).current(),
+                        ],
+                    )),
                     player_noise_radius: player_noise_radius(
                         self.player_moved_last_tick,
                         self.anim_state,
                         player_height,
                     ),
-                    // SAFETY: every active-room entry below `active_count` was
-                    // initialized while walking the resident window above.
-                    active_rooms: unsafe { initialized_prefix(&active_rooms, active_count) },
                 },
                 &mut mover,
                 npc_delta_ticks,
@@ -361,22 +350,25 @@ impl Playtest {
         }
         #[cfg(feature = "emulator-telemetry")]
         if now.is_multiple_of(12) {
-            if let Some(index) = GAME_ENTITIES.iter().position(|r| r.flags & psx_level::game_entity_flags::TRAINING != 0) {
-                crate::debug_runtime::debug_log_enemy_tactics(now, player_pos,
-                    self.game_entities.position(index), self.game_entities.yaw(index),
+            if let Some(index) = GAME_ENTITIES
+                .iter()
+                .position(|r| r.flags & psx_level::game_entity_flags::TRAINING != 0)
+            {
+                crate::debug_runtime::debug_log_enemy_tactics(
+                    now,
+                    player_pos,
+                    self.game_entities.position(index),
+                    self.game_entities.yaw(index),
                     self.game_entities.state(index) as u8,
                     self.game_entities.clip_for_state(GAME_ENTITIES, index).clip,
-                    self.game_entities.tactical_snapshot(index));
+                    self.game_entities.tactical_snapshot(index),
+                );
             }
         }
         self.logic.tick(
             LOGIC,
             psx_game_runtime::logic::LogicTickInput {
                 player: player_pos,
-                player_room: self.room_index,
-                // SAFETY: every active-room entry below `active_count` was
-                // initialized while walking the resident window above.
-                active_rooms: unsafe { initialized_prefix(&active_rooms, active_count) },
             },
             now,
         );
@@ -528,10 +520,6 @@ impl Playtest {
             self.camera.position(),
             self.camera.focus(),
         );
-        #[cfg(not(feature = "cd-stream-bench"))]
-        if self.bsp.is_none() {
-            self.load_active_room_window();
-        }
         #[cfg(feature = "cd-stream-benchmark")]
         cd_stream::run_benchmark(cd_arena());
     }
@@ -559,7 +547,9 @@ impl Playtest {
     }
 
     pub(super) fn update_gameplay(&mut self, ctx: &mut Ctx) {
-        if GAME_ENTITIES.iter().any(|r| r.flags & psx_level::game_entity_flags::TRAINING != 0)
+        if GAME_ENTITIES
+            .iter()
+            .any(|r| r.flags & psx_level::game_entity_flags::TRAINING != 0)
             && ctx.is_held(button::SELECT)
             && (ctx.just_pressed(button::L1) || ctx.just_pressed(button::R1))
         {
@@ -571,19 +561,35 @@ impl Playtest {
             if ctx.just_pressed(button::R1) {
                 // Graybox training pen: a real 48-unit wall above the motor's
                 // 40-unit step limit, with the player on the adjacent 96-unit shelf.
-                if let Some(index) = GAME_ENTITIES.iter().position(|r| r.flags & psx_level::game_entity_flags::TRAINING != 0) {
-                    self.game_entities.place_training_actor(GAME_ENTITIES, index, [256, 0, -128], 1024);
-                    self.motor.snap_to(RoomPoint::new(336, 96, -128), Angle::from_q12(3072));
+                if let Some(index) = GAME_ENTITIES
+                    .iter()
+                    .position(|r| r.flags & psx_level::game_entity_flags::TRAINING != 0)
+                {
+                    self.game_entities.place_training_actor(
+                        GAME_ENTITIES,
+                        index,
+                        [256, 0, -128],
+                        1024,
+                    );
+                    self.motor
+                        .snap_to(RoomPoint::new(336, 96, -128), Angle::from_q12(3072));
                     // Start pitched down into the pen so the shelf does not
                     // hide the enemy below the ordinary shoulder camera.
                     let view = self.camera_config();
                     let target = self.camera_target(None, false);
-                    self.camera.snap_to_player_with_yaw(target, view, Angle::from_q12(768));
-                    self.camera.update_vblanks(PROJECTION, None, target, ThirdPersonCameraInput {
-                        yaw_delta_q12: 0,
-                        pitch_delta_q12: 384,
-                        recenter: false,
-                    }, view, 1);
+                    self.camera
+                        .snap_to_player_with_yaw(target, view, Angle::from_q12(768));
+                    self.camera.update_vblanks(
+                        PROJECTION,
+                        target,
+                        ThirdPersonCameraInput {
+                            yaw_delta_q12: 0,
+                            pitch_delta_q12: 384,
+                            recenter: false,
+                        },
+                        view,
+                        1,
+                    );
                 }
             }
             return;
@@ -599,11 +605,13 @@ impl Playtest {
             // a material refresh so any upload that was dropped during
             // the loading burst is re-queued into the freed space.
             release_ui_images();
-            self.room_materials_unresolved = true;
             self.gameplay_epoch = ctx.sim_tick;
             self.gameplay_epoch_set = true;
-            if !GAME_ENTITIES.iter().any(|r| r.flags & psx_level::game_entity_flags::TRAINING != 0)
-                && self.start_player_anim_action(PlayerAnim::Intro, ctx.sim_tick, ctx.video_hz) {
+            if !GAME_ENTITIES
+                .iter()
+                .any(|r| r.flags & psx_level::game_entity_flags::TRAINING != 0)
+                && self.start_player_anim_action(PlayerAnim::Intro, ctx.sim_tick, ctx.video_hz)
+            {
                 self.ground_opening_player();
                 self.opening = opening_sequence::OpeningSequence::start(
                     self.anim_lock_until_tick.saturating_sub(ctx.sim_tick),
@@ -620,7 +628,6 @@ impl Playtest {
             return;
         }
         self.retry_poi_card_load(ctx.sim_tick.as_u32());
-        self.portal_debug_log_cooldown = self.portal_debug_log_cooldown.saturating_sub(1);
         self.step_streaming_jobs(ctx);
         if self.initial_world_message_active() {
             if ctx.just_pressed(INTERACT_BUTTON) {
@@ -659,7 +666,9 @@ impl Playtest {
         // only the inactive one recovers, so this is both the defensive and the
         // healing move. A refused press is silent: the cooldown and a broken
         // target are the two reasons, and both are already on the HUD.
-        if self.step_hook(ctx) { return; }
+        if self.step_hook(ctx) {
+            return;
+        }
         let circle_position = self.motor.position();
         let circle_locks_stance = self.vitality_circles.tick(
             VITALITY_CIRCLES,
@@ -699,7 +708,8 @@ impl Playtest {
             } else {
                 // Read the current hold so simultaneous L2/R3 uses the reticle
                 // even before this tick has readied the weapon.
-                let aiming = ctx.is_held(button::L2) && self.player_has_ranged_weapon()
+                let aiming = ctx.is_held(button::L2)
+                    && self.player_has_ranged_weapon()
                     && self.player_stance.active() == VitalityChannelId::Two;
                 self.lock_target = self.find_lock_target(LOCK_RANGE, aiming);
                 self.camera_recenter_requested = self.lock_target.is_none() && !aiming;
@@ -776,14 +786,24 @@ impl Playtest {
         }
         let circle = self.update_evade_run_button(ctx, delta_vblanks);
         let ranged = self.player_has_ranged_weapon();
-        let interrupted = circle.evade || !self.motor.action().is_idle()
+        let interrupted = circle.evade
+            || !self.motor.action().is_idle()
             || self.hazard_death_ticks_remaining != 0
-            || (action_locked && !matches!(self.anim_state, PlayerAnim::RangedAttack | PlayerAnim::Land))
-            || self.player_stance.swap_in_progress(&self.player_stance_config);
-        self.ranged_ready.tick(ranged && self.player_stance.active() == VitalityChannelId::Two,
-            ctx.is_held(button::L2), interrupted);
-        self.aim_control.tick(self.ranged_ready.aiming(), self.is_locked(),
-            camera_stick_axes(ctx, self.analog_deadzone));
+            || (action_locked
+                && !matches!(self.anim_state, PlayerAnim::RangedAttack | PlayerAnim::Land))
+            || self
+                .player_stance
+                .swap_in_progress(&self.player_stance_config);
+        self.ranged_ready.tick(
+            ranged && self.player_stance.active() == VitalityChannelId::Two,
+            ctx.is_held(button::L2),
+            interrupted,
+        );
+        self.aim_control.tick(
+            self.ranged_ready.aiming(),
+            self.is_locked(),
+            camera_stick_axes(ctx, self.analog_deadzone),
+        );
         if !self.ranged_ready.ready(now.as_u32()) && self.anim_state == PlayerAnim::RangedAttack {
             // Lowering the weapon or dodging cancels a shot not yet released.
             self.anim_lock_until_tick = now;
@@ -795,9 +815,9 @@ impl Playtest {
         self.refresh_hook_target();
         let lock_facing_yaw = if self.ranged_ready.ready(now.as_u32()) {
             Some(self.ranged_facing_yaw())
-        } else { self
-            .lock_target_position()
-            .and_then(|target| psx_engine::yaw_to_point(self.motor.position(), target))
+        } else {
+            self.lock_target_position()
+                .and_then(|target| psx_engine::yaw_to_point(self.motor.position(), target))
         };
         // The stick is read every tick, locked or not, so the evade latch
         // below always sees the direction the player is holding.
@@ -823,9 +843,17 @@ impl Playtest {
         let authored_dodge = timing.window(WindowKind::Dodge).is_some() && !actor_free;
         let evade = if authored_dodge {
             self.evade_buffer_vblanks = 0;
-            let accepted = self.authored_dodge.update(self.anim_state.action().to_index() as u8,
-                self.anim_start_tick.as_u32(), u8::from(circle.evade), timing,
-                WindowKind::DodgeBuffer, WindowKind::Dodge).is_some();
+            let accepted = self
+                .authored_dodge
+                .update(
+                    self.anim_state.action().to_index() as u8,
+                    self.anim_start_tick.as_u32(),
+                    u8::from(circle.evade),
+                    timing,
+                    WindowKind::DodgeBuffer,
+                    WindowKind::Dodge,
+                )
+                .is_some();
             if accepted {
                 self.motor.interrupt_action();
                 self.anim_lock_until_tick = now;
@@ -858,9 +886,15 @@ impl Playtest {
                 .saturating_sub(delta_vblanks.min(u8::MAX as u16) as u8);
             false
         };
-        if !authored_dodge { self.authored_dodge.clear(); }
+        if !authored_dodge {
+            self.authored_dodge.clear();
+        }
         // Permission to move does not itself truncate an idle recovery: require intent.
-        if !actor_free && stick_deflected && !evade && timing.active(WindowKind::Movement) == Some(true) {
+        if !actor_free
+            && stick_deflected
+            && !evade
+            && timing.active(WindowKind::Movement) == Some(true)
+        {
             self.motor.interrupt_action();
             self.anim_lock_until_tick = now;
             action_locked = false;
@@ -938,16 +972,6 @@ impl Playtest {
             config.walk_speed = config.walk_speed.saturating_mul(60) / 100;
             config.run_speed = config.run_speed.saturating_mul(60) / 100;
         }
-        if let Some(water) = self.water_cell_at(self.room_index, self.motor.position()) {
-            if self.motor.position().y < water.surface_y && water.depth < water.lethal_depth {
-                // The authored percentage is the exact retained locomotion
-                // speed. There is no hidden second slowdown band.
-                let movement_percent = water.movement_percent.clamp(10, 100);
-                let movement_percent = i32::from(movement_percent);
-                config.walk_speed = config.walk_speed.saturating_mul(movement_percent) / 100;
-                config.run_speed = config.run_speed.saturating_mul(movement_percent) / 100;
-            }
-        }
         if action_locked && player_anim_is_attack(self.anim_state) {
             if let Some(character) = self.character.as_ref() {
                 let character = self.player_character_for_anim(character, self.anim_state);
@@ -979,93 +1003,42 @@ impl Playtest {
         let mut aabb_blockers =
             psx_engine::FixedScratch::<CharacterCollisionAabb, MAX_STATIC_PROP_AABB_BLOCKERS>::new(
             );
-        if USES_PXBSP {
-            if self
-                .collect_static_prop_aabb_blockers_checked_into(&mut aabb_blockers)
-                .is_none()
-            {
-                // Cooked BSP collision state is authoritative. A malformed or
-                // overflowing prop table freezes this frame instead of
-                // allowing movement through a silently omitted blocker.
-                telemetry::stage_end(telemetry::stage::SIM_COLLISION);
-                return;
-            }
-        } else {
-            self.collect_static_prop_aabb_blockers_into(&mut aabb_blockers);
+        if self
+            .collect_static_prop_aabb_blockers_checked_into(&mut aabb_blockers)
+            .is_none()
+        {
+            // Cooked BSP collision state is authoritative. A malformed or
+            // overflowing prop table freezes this frame instead of
+            // allowing movement through a silently omitted blocker.
+            telemetry::stage_end(telemetry::stage::SIM_COLLISION);
+            return;
         }
         let falling_before_solve = !self.motor.grounded() && self.motor.vertical_speed_q8() < -256;
         let motor_frame = if self.hook_attached.is_some() {
             self.motor.suspended_frame(lock_facing_yaw)
-        } else if USES_PXBSP {
+        } else {
             // The resident provider owns its bounded hull scratch and mover
             // transforms. Actor/cylinder and authored image/box/arch blockers
-            // compose over that provider in stable cooked/live order; BSP
-            // frames never build a grid-room collision set.
+            // compose over that provider in stable cooked/live order.
             telemetry::stage_end(telemetry::stage::SIM_COLLISION);
             telemetry::stage_begin(telemetry::stage::SIM_SOLVE);
-            self.bsp
-                .as_mut()
-                .expect("checked resident BSP backend")
-                .update_motor(
-                    &mut self.motor,
-                    input,
-                    config,
-                    delta_vblanks,
-                    &self.destructibles,
-                    blockers.as_slice(),
-                    aabb_blockers.as_slice(),
-                )
-                .expect("PXBSP player trace failed")
-        } else {
-            let mut collision_rooms =
-                [const { CharacterCollisionRoom::EMPTY }; MAX_COLLISION_ROOMS];
-            let collision_room_count = if self.chunked_level() {
-                let catchup = delta_vblanks.min(4) as i32;
-                let margin = config
-                    .radius
-                    .saturating_add(config.run_speed.saturating_mul(catchup));
-                self.collect_collision_rooms(self.motor.position(), margin, &mut collision_rooms)
-            } else {
-                0
+            let Some(bsp) = self.bsp.as_mut() else {
+                // No world cooked yet (the placeholder manifest).
+                return;
             };
-            let single_collision_room = if collision_room_count == 1 {
-                collision_rooms[0].room
-            } else {
-                None
-            };
-            let room_collision = match collision_room_count {
-                0 => self
-                    .current_collision_room
-                    .as_ref()
-                    .map(|room| room.collision()),
-                1 => single_collision_room.as_ref().map(|room| room.collision()),
-                _ => None,
-            };
-            let collision = if collision_room_count <= 1 {
-                CharacterCollision::new_with_aabbs(
-                    room_collision,
-                    blockers.as_slice(),
-                    aabb_blockers.as_slice(),
-                )
-            } else {
-                CharacterCollision::rooms_with_aabbs(
-                    &collision_rooms[..collision_room_count],
-                    blockers.as_slice(),
-                    aabb_blockers.as_slice(),
-                )
-            };
-            telemetry::stage_end(telemetry::stage::SIM_COLLISION);
-            telemetry::stage_begin(telemetry::stage::SIM_SOLVE);
-            self.motor
-                .update_vblanks_with_collision(collision, input, config, delta_vblanks)
+            bsp.update_motor(
+                &mut self.motor,
+                input,
+                config,
+                delta_vblanks,
+                &self.destructibles,
+                blockers.as_slice(),
+                aabb_blockers.as_slice(),
+            )
+            .expect("PXBSP player trace failed")
         };
         telemetry::stage_end(telemetry::stage::SIM_SOLVE);
         self.player_moved_last_tick = motor_frame.moved;
-        telemetry::stage_begin(telemetry::stage::SIM_ROOM_TRACK);
-        if !self.update_current_room_from_player() {
-            self.refresh_active_room_window_if_needed();
-        }
-        telemetry::stage_end(telemetry::stage::SIM_ROOM_TRACK);
 
         let hazard_countdown_was_active = self.hazard_death_ticks_remaining > 0;
         if !hazard_countdown_was_active {
@@ -1087,42 +1060,48 @@ impl Playtest {
         }
 
         // The countdown/respawn below serves EVERY death cause: combat
-        // damage arms it from `resolve_enemy_melee`, hazards and lethal
-        // water from the sites above and below.
+        // damage arms it from `resolve_enemy_melee`, hazards from the site
+        // above.
         if hazard_countdown_was_active {
             self.hazard_death_ticks_remaining = self.hazard_death_ticks_remaining.saturating_sub(1);
             if self.hazard_death_ticks_remaining == 0 {
                 self.respawn_after_death();
             }
-        } else if self.hazard_death_ticks_remaining == 0 {
-            if let Some(water) = self.water_cell_at(self.room_index, self.motor.position()) {
-                let submerged = self.motor.position().y
-                    <= water
-                        .surface_y
-                        .saturating_sub(i32::from(water.death_submerge_depth));
-                if water.depth >= water.lethal_depth && submerged {
-                    self.player_vitality.empty_all();
-                    self.arm_player_death(false, water.death_delay_ticks, now, ctx.video_hz);
-                    telemetry::debug_log("player water:death");
-                }
-            }
         }
 
         #[cfg(feature = "emulator-telemetry")]
-        if self.player_has_ranged_weapon() && (ctx.sim_tick.every(12) || ctx.just_pressed(button::R2)) {
+        if self.player_has_ranged_weapon()
+            && (ctx.sim_tick.every(12) || ctx.just_pressed(button::R2))
+        {
             let p = self.motor.position();
             crate::debug_runtime::debug_log_player_weapon([
-                ctx.sim_tick.as_u32() as i32, i32::from(ctx.is_held(button::L2)),
-                i32::from(ctx.is_held(button::R2)), i32::from(ctx.is_held(button::R1)),
+                ctx.sim_tick.as_u32() as i32,
+                i32::from(ctx.is_held(button::L2)),
+                i32::from(ctx.is_held(button::R2)),
+                i32::from(ctx.is_held(button::R1)),
                 i32::from(self.player_stance.active() == VitalityChannelId::Two),
-                i32::from(self.ranged_ready.aiming()), self.anim_state.action().to_index() as i32,
-                p.x, p.y, p.z, i32::from(self.is_locked()),
-                i32::from(self.game_entities.health(0)), i32::from(self.game_entities.health_secondary(0)),
+                i32::from(self.ranged_ready.aiming()),
+                self.anim_state.action().to_index() as i32,
+                p.x,
+                p.y,
+                p.z,
+                i32::from(self.is_locked()),
+                i32::from(self.game_entities.health(0)),
+                i32::from(self.game_entities.health_secondary(0)),
             ]);
         }
-        if falling_before_solve && self.motor.grounded()
-            && !matches!(self.anim_state, PlayerAnim::Death | PlayerAnim::HitReact | PlayerAnim::Stun)
-            && self.character.is_some_and(|c| c.action_clip(CharacterAnimationAction::Land).to_option().is_some()) {
+        if falling_before_solve
+            && self.motor.grounded()
+            && !matches!(
+                self.anim_state,
+                PlayerAnim::Death | PlayerAnim::HitReact | PlayerAnim::Stun
+            )
+            && self.character.is_some_and(|c| {
+                c.action_clip(CharacterAnimationAction::Land)
+                    .to_option()
+                    .is_some()
+            })
+        {
             self.switch_player_anim(PlayerAnim::Land, now, ctx.video_hz);
             self.anim_lock_until_tick = SimTick::from_u32(now.as_u32().saturating_add(24));
             telemetry::debug_log("player fall:land");
@@ -1133,8 +1112,14 @@ impl Playtest {
         #[cfg(feature = "emulator-telemetry")]
         if self.anim_state == PlayerAnim::Fall || (falling_before_solve && self.motor.grounded()) {
             psx_rt::tty::print("player fall:sample ");
-            for value in [now.as_u32() as i32, self.motor.position().y, self.motor.vertical_speed_q8(), i32::from(self.motor.grounded())] {
-                psx_rt::tty::print_hex_u32(value as u32); psx_rt::tty::print(" ");
+            for value in [
+                now.as_u32() as i32,
+                self.motor.position().y,
+                self.motor.vertical_speed_q8(),
+                i32::from(self.motor.grounded()),
+            ] {
+                psx_rt::tty::print_hex_u32(value as u32);
+                psx_rt::tty::print(" ");
             }
             psx_rt::tty::println("");
         }
@@ -1143,8 +1128,15 @@ impl Playtest {
             // Any locked action (attack, evade, hit) cancels the walk phases.
             self.loco = LocoPhase::Idle;
             self.anim_state
-        } else if self.hook_attached.is_none() && !self.motor.grounded() && self.motor.vertical_speed_q8() < 0
-            && self.character.is_some_and(|c| c.action_clip(CharacterAnimationAction::Fall).to_option().is_some()) {
+        } else if self.hook_attached.is_none()
+            && !self.motor.grounded()
+            && self.motor.vertical_speed_q8() < 0
+            && self.character.is_some_and(|c| {
+                c.action_clip(CharacterAnimationAction::Fall)
+                    .to_option()
+                    .is_some()
+            })
+        {
             self.loco = LocoPhase::Idle;
             PlayerAnim::Fall
         } else {
@@ -1216,8 +1208,10 @@ impl Playtest {
                 self.lock_invalid_ticks = 0;
             } else if self.lock_target_valid(LOCK_BREAK_RANGE) {
                 self.lock_invalid_ticks = 0;
-                if ranged && ctx.is_held(button::L2)
-                    && self.player_stance.active() == VitalityChannelId::Two {
+                if ranged
+                    && ctx.is_held(button::L2)
+                    && self.player_stance.active() == VitalityChannelId::Two
+                {
                     // Require stick neutral before a later target-switch flick;
                     // releasing L2 with the stick held must not switch enemies.
                     let (x, _) = ctx.pad.sticks.right_centered();
@@ -1247,14 +1241,6 @@ impl Playtest {
         telemetry::stage_begin(telemetry::stage::CAMERA);
         self.render_camera = self.update_follow_camera(ctx);
         telemetry::stage_end(telemetry::stage::CAMERA);
-        telemetry::stage_begin(telemetry::stage::UPDATE_WINDOW);
-        self.refresh_active_room_window_if_needed();
-        telemetry::stage_end(telemetry::stage::UPDATE_WINDOW);
-        #[cfg(all(
-            feature = "world-grid-visible",
-            not(feature = "vis-full-active-chunks")
-        ))]
-        self.prewarm_visible_cell_caches();
     }
 }
 
@@ -1379,8 +1365,8 @@ impl Playtest {
             let model = self.models.get(character.model.to_usize())?.as_ref()?;
             let animation = model.clip(&self.clips, clip)?;
             let range = character.action_frame_range(anim.action());
-            let end = u32::from(range.end)
-                .min(u32::from(animation.frame_count().saturating_sub(2)));
+            let end =
+                u32::from(range.end).min(u32::from(animation.frame_count().saturating_sub(2)));
             let start = u32::from(range.start).min(end);
             let step = animation.phase_at_tick_scaled_q12(
                 1,
@@ -1576,21 +1562,38 @@ impl Playtest {
             self.attack_chain.clear();
             return false;
         }
-        if self.player_has_ranged_weapon() && self.player_stance.active() == VitalityChannelId::Two {
+        if self.player_has_ranged_weapon() && self.player_stance.active() == VitalityChannelId::Two
+        {
             self.attack_chain.clear();
             if ctx.just_pressed(ACTIVE_HEAVY_ATTACK_BUTTON)
-                && !action_locked && self.motor.action().is_idle()
-                && self.ranged_ready.aiming() && self.ranged_ready.can_fire() && !self.ranged_ready.firing(now.as_u32())
-                && self.begin_hook(now) { return true; }
+                && !action_locked
+                && self.motor.action().is_idle()
+                && self.ranged_ready.aiming()
+                && self.ranged_ready.can_fire()
+                && !self.ranged_ready.firing(now.as_u32())
+                && self.begin_hook(now)
+            {
+                return true;
+            }
             if ctx.just_pressed(ACTIVE_HEAVY_ATTACK_BUTTON) {
                 self.attack_buffer.request(5, now.as_u32());
             }
-            if !action_locked && self.motor.action().is_idle() && self.combat_flow.can_shoot()
-                && !self.ranged_ready.firing(now.as_u32()) {
+            if !action_locked
+                && self.motor.action().is_idle()
+                && self.combat_flow.can_shoot()
+                && !self.ranged_ready.firing(now.as_u32())
+            {
                 if self.attack_buffer.take(now.as_u32()) == Some(5) {
                     self.motor.face(self.ranged_facing_yaw());
-                    let Some(character) = self.character else { return false; };
-                    if self.lock_player_anim_action(&character, PlayerAnim::RangedAttack, now, ctx.video_hz) {
+                    let Some(character) = self.character else {
+                        return false;
+                    };
+                    if self.lock_player_anim_action(
+                        &character,
+                        PlayerAnim::RangedAttack,
+                        now,
+                        ctx.video_hz,
+                    ) {
                         let duration = self.anim_lock_until_tick.saturating_sub(now);
                         self.ranged_ready.begin_shot(now.as_u32(), duration);
                         self.anim_lock_until_tick = now;
@@ -1682,16 +1685,31 @@ impl Playtest {
         use psx_level::CombatWindowKind as WindowKind;
         let timing = self.player_combat_sample(ctx);
         let authored = timing.window(WindowKind::Attack).is_some();
-        let pressed = if ctx.just_pressed(ACTIVE_HEAVY_ATTACK_BUTTON) { 2 + stance_offset }
-            else if ctx.just_pressed(ACTIVE_LIGHT_ATTACK_BUTTON) { 1 + stance_offset } else { 0 };
+        let pressed = if ctx.just_pressed(ACTIVE_HEAVY_ATTACK_BUTTON) {
+            2 + stance_offset
+        } else if ctx.just_pressed(ACTIVE_LIGHT_ATTACK_BUTTON) {
+            1 + stance_offset
+        } else {
+            0
+        };
         let request = if authored {
             self.attack_buffer.clear();
-            self.authored_attack.update(action.to_index() as u8, self.anim_start_tick.as_u32(),
-                pressed, timing, WindowKind::AttackBuffer, WindowKind::Attack)
+            self.authored_attack.update(
+                action.to_index() as u8,
+                self.anim_start_tick.as_u32(),
+                pressed,
+                timing,
+                WindowKind::AttackBuffer,
+                WindowKind::Attack,
+            )
         } else {
             self.authored_attack.clear();
-            if pressed != 0 { self.attack_buffer.request(pressed, now.as_u32()); }
-            if action_locked || !self.motor.action().is_idle() { return false; }
+            if pressed != 0 {
+                self.attack_buffer.request(pressed, now.as_u32());
+            }
+            if action_locked || !self.motor.action().is_idle() {
+                return false;
+            }
             self.attack_buffer.take(now.as_u32())
         };
         if let Some(tag) = request {

@@ -6,25 +6,18 @@ use psx_level::{
     AssetId, BoostModuleRecord, CombatCapsuleRecord, EntityRecord, EquipmentRecord, FlowState,
     GameFlow, InteractableMessageRecord, InteractableRecord, LevelArchPropCollisionRecord,
     LevelArchPropRecord, LevelArchPropSurfaceRecord, LevelAssetRecord, LevelBoxPropRecord,
-    LevelBoxPropSurfaceRecord, LevelCachedRoomCellRecord, LevelCachedRoomSurfaceRecord,
-    LevelCachedRoomVertexRecord, LevelCameraRecord, LevelCharacterRecord, LevelChunkRecord,
-    LevelCylinderPropRecord, LevelCylinderPropSurfaceRecord, LevelDestructibleRecord,
+    LevelBoxPropSurfaceRecord, LevelCameraRecord, LevelCharacterRecord, LevelCylinderPropRecord, LevelCylinderPropSurfaceRecord, LevelDestructibleRecord,
     LevelFarVistaRecord, LevelGameEntityRecord, LevelGameplaySfxCueRecord, LevelImagePropRecord,
-    LevelLogicRecord, LevelMaterialRecord, LevelModelClipBoundsRecord, LevelModelClipRecord,
+    LevelLogicRecord, LevelModelClipBoundsRecord, LevelModelClipRecord,
     LevelModelFrameBoundsRecord, LevelModelInstanceRecord, LevelModelRecord,
-    LevelModelSocketRecord, LevelOptionDef, LevelRoomPortalRecord, LevelRoomRecord,
-    LevelRoomSurfaceCacheRecord, LevelRoomVisibilityRecord, LevelSceneState, LevelSkyRecord,
+    LevelModelSocketRecord, LevelOptionDef, LevelRoomRecord,
+    LevelSceneState, LevelSkyRecord,
     LevelTransition, LevelUiNodeRecord, LevelUiPaintRecord, LevelUiScene, LevelUiSfxCueRecord,
-    LevelUiSfxSampleRecord, LevelVisibilityCellRecord, LevelVisibilityPvsRecord,
-    LevelVitalityCircleRecord, LevelWaterCellRecord, LevelWeaponRecord, LevelWorldObjectRecord,
+    LevelUiSfxSampleRecord, LevelVitalityCircleRecord, LevelWeaponRecord, LevelWorldObjectRecord,
     LevelWorldPackEntryRecord, ParticleEmitterRecord, PlayerControllerRecord, PlayerSpawnRecord,
-    PointLightRecord, RoomIndex, RoomResidencyRecord, WeaponAppearanceRecord, WeaponHitboxRecord,
+    PointLightRecord, RoomIndex, WeaponAppearanceRecord, WeaponHitboxRecord,
 };
 
-pub const WORLD_RESIDENT_CHUNK_LIMIT: usize = 1;
-pub const WORLD_PACK_MAX_CHUNK_BYTES: usize = 0;
-pub const WORLD_STREAM_SLOT_COUNT: usize = 1;
-pub const WORLD_RESIDENT_PAGE_COUNT: usize = 1;
 pub const PERSISTENT_ASSET_SLOT_COUNT: usize = 1;
 pub const UI_PACK_MAX_CHUNK_BYTES: usize = 0;
 pub const UI_PACK_IMAGE_CACHE_SLOTS: usize = 1;
@@ -42,9 +35,6 @@ pub const MODEL_DECODED_VERTEX_CAPACITY: usize = 1;
 pub static INTERACTABLE_MESSAGE_PAGES_IT: &[&str] = &[];
 pub static BOOST_MODULES_IT: &[(&str, &str)] = &[];
 pub const PERSISTENT_ASSET_PAGE_COUNT: usize = 1;
-pub const CACHED_ROOM_DEPTH_MODE: u8 = 2;
-pub const CACHED_ROOM_TEXTURE_SPLIT_MODE: u8 = 0;
-pub const CACHED_ROOM_DRAW_ORDER_MODE: u8 = 0;
 pub const CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE: u16 = 0;
 pub const PLAYTEST_USES_PXBSP: bool = false;
 pub const PXBSP_AMBIENT_RGB: [u8; 3] = [0; 3];
@@ -55,25 +45,7 @@ pub static PXBSP_MOVER_NODE_IDS: &[u32] = &[];
 pub static PXBSP_MOVER_MODEL_INDICES: &[u16] = &[];
 pub static PXBSP_BODY_HULLS: &[psx_bsp::collision_provider::CookedBodyHull] = &[];
 pub static ASSETS: &[LevelAssetRecord] = &[];
-pub static MATERIALS: &[LevelMaterialRecord] = &[];
 pub static ROOMS: &[LevelRoomRecord] = &[];
-pub static ROOM_CHUNKS: &[LevelChunkRecord] = &[];
-pub static ROOM_PORTALS: &[LevelRoomPortalRecord] = &[];
-pub static WATER_CELLS: &[LevelWaterCellRecord] = &[];
-pub static ROOM_NEAR_ROOMS: &[RoomIndex] = &[];
-pub static ROOM_OVERLAPPED_ROOMS: &[RoomIndex] = &[];
-pub const WORLD_PACK_START_LBA: u32 = 1024;
-pub static WORLD_PACK_TOC: &[LevelWorldPackEntryRecord] = &[];
-pub static ROOM_VISIBILITY: &[LevelRoomVisibilityRecord] = &[];
-pub static VISIBILITY_PVS: &[LevelVisibilityPvsRecord] = &[];
-pub static VISIBILITY_PVS_BITS: &[u8] = &[];
-pub static VISIBILITY_CELLS: &[LevelVisibilityCellRecord] = &[];
-pub static ROOM_SURFACE_CACHES: &[LevelRoomSurfaceCacheRecord] = &[];
-pub static ROOM_CACHE_CELLS: &[LevelCachedRoomCellRecord] = &[];
-pub static ROOM_CACHE_CELL_VERTICES: &[u16] = &[];
-pub static ROOM_CACHE_VERTICES: &[LevelCachedRoomVertexRecord] = &[];
-pub static ROOM_CACHE_SURFACES: &[LevelCachedRoomSurfaceRecord] = &[];
-pub static ROOM_RESIDENCY: &[RoomResidencyRecord] = &[];
 pub static ROOM_REFLECTION_PROBES: &[Option<AssetId>] = &[];
 
 pub static PLAYER_SPAWN: PlayerSpawnRecord = PlayerSpawnRecord {
@@ -138,15 +110,3 @@ pub const PERSISTENT_FLAG_COUNT: u16 = 1;
 pub const PROJECT_SAVE_NAME: &str = "BESLES-PSOXIDE";
 pub const PROJECT_SAVE_TITLE: &str = "PSOXIDE PLAYTEST";
 pub const LOADING_UI_SCENE: u16 = psx_level::UI_SCENE_NONE;
-
-macro_rules! draw_project_cached_room {
-    (
-        $lighting:expr,
-        $draw:path,
-        [$($before:expr),* $(,)?],
-        [$($after:expr),* $(,)?]
-    ) => {
-        $draw($($before,)* $lighting, false, $($after,)*)
-    };
-}
-pub(crate) use draw_project_cached_room;
