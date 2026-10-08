@@ -155,7 +155,13 @@ use world_objects_runtime::*;
 // manifests reference all of them. Quiet either side here.
 #[allow(dead_code, unused_imports)]
 mod generated {
+    // Host tests never read the local cook: `generated/` holds whatever project
+    // was last built, so a test that depended on it passed or failed with that
+    // choice. They run against a checked-in fixture instead.
+    #[cfg(not(test))]
     include!(env!("PSXED_PLAYTEST_MANIFEST"));
+    #[cfg(test)]
+    include!("../test-fixtures/level_manifest.rs");
 }
 
 /// The cooked project's world format, known at build time.
