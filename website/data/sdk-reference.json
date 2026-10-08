@@ -1,5 +1,5 @@
 {
-  "revision": "0d09fa09313fb64b7a7e7de9174b7cdb9f1d1619",
+  "revision": "f2fec1c301f1b37cd14e3a2571c0e598fcc6dc00",
   "crates": [
     {
       "name": "psx-io",
@@ -1102,6 +1102,13 @@
       "features": {},
       "dependencies": [
         {
+          "name": "psx-gpu",
+          "target": "all targets",
+          "optional": false,
+          "features": [],
+          "sdk": true
+        },
+        {
           "name": "psx-hw",
           "target": "all targets",
           "optional": false,
@@ -1110,6 +1117,34 @@
         },
         {
           "name": "psx-io",
+          "target": "all targets",
+          "optional": false,
+          "features": [],
+          "sdk": true
+        },
+        {
+          "name": "psx-pack",
+          "target": "all targets",
+          "optional": false,
+          "features": [],
+          "sdk": true
+        },
+        {
+          "name": "psx-rt",
+          "target": "all targets",
+          "optional": false,
+          "features": [],
+          "sdk": true
+        },
+        {
+          "name": "psx-spu",
+          "target": "all targets",
+          "optional": false,
+          "features": [],
+          "sdk": true
+        },
+        {
+          "name": "psx-vram",
           "target": "all targets",
           "optional": false,
           "features": [],
@@ -1140,6 +1175,10 @@
         {
           "path": "src/mdec.rs",
           "summary": "MDEC driver: table upload, decode command, DMA0 in, DMA1 out."
+        },
+        {
+          "path": "src/player.rs",
+          "summary": "A streaming STR player a game can call: `play` streams one movie from"
         },
         {
           "path": "src/rle.rs",
