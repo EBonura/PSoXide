@@ -14,7 +14,7 @@ use crate::brush_compile::{
     subdivide_surfaces_to_budget, CompiledSurface, CompiledSurfaceBsp,
 };
 use crate::brush_light::{
-    bake_brush_vertex_lighting, BrushLightError, BrushMaterialTint, BrushPointLight,
+    bake_brush_vertex_lighting_along, BrushLightError, BrushMaterialTint, BrushPointLight,
 };
 use crate::brush_pack::{
     pack_bsp_geometry_with_visibility, BrushPackError, BspLighting, BspVisibility,
@@ -1315,7 +1315,7 @@ fn compile_model(
     // UV window, rectangle merging) cuts one face without cutting its
     // neighbours, leaving corners that sit on a neighbour's edge. Weld those
     // into the edges they touch so the drawn surface is watertight.
-    let render_surfaces = make_surfaces_watertight(render_surfaces, uv_window_skip);
+    let (render_surfaces, light_edges) = make_surfaces_watertight(render_surfaces, uv_window_skip);
     // The runtime draws a face only up to its batch bound; split wider ones
     // into same-triangle fans rather than let the packer refuse the level.
     let render_surfaces =
@@ -1357,16 +1357,22 @@ fn compile_model(
             BrushWorldCookMode::Draft => &[],
             BrushWorldCookMode::Release => light_occluders,
         };
-        let lighting =
-            bake_brush_vertex_lighting(&bsp.surfaces, occluders, ambient, lights, material_tints)
-                .map_err(|error| BrushWorldCookError::Light {
-                // `translate_lights` preserves scene order, so the reported
-                // light index indexes the same list `scene_lights` built.
-                node: match error {
-                    BrushLightError::InvalidLight(index) => light_nodes.get(index).copied(),
-                },
-                error,
-            })?;
+        let lighting = bake_brush_vertex_lighting_along(
+            &bsp.surfaces,
+            occluders,
+            ambient,
+            lights,
+            material_tints,
+            &light_edges,
+        )
+        .map_err(|error| BrushWorldCookError::Light {
+            // `translate_lights` preserves scene order, so the reported
+            // light index indexes the same list `scene_lights` built.
+            node: match error {
+                BrushLightError::InvalidLight(index) => light_nodes.get(index).copied(),
+            },
+            error,
+        })?;
         pack_bsp_geometry_with_visibility(
             &bsp,
             &portals,
@@ -1384,7 +1390,7 @@ fn compile_model(
 fn make_surfaces_watertight(
     mut surfaces: Vec<CompiledSurface>,
     sky_materials: &std::collections::HashSet<Option<ResourceId>>,
-) -> Vec<CompiledSurface> {
+) -> (Vec<CompiledSurface>, Vec<crate::brush_seams::LightEdge>) {
     let skip: Vec<bool> = surfaces
         .iter()
         .map(|surface| sky_materials.contains(&surface.material))
@@ -1403,7 +1409,7 @@ fn make_surfaces_watertight(
             stats.polygons_changed, stats.vertices_added
         ));
     }
-    surfaces
+    (surfaces, stats.light_edges)
 }
 
 fn compile_model_surfaces(brushes: &[Brush]) -> (Vec<CompiledSurface>, Vec<CompiledSurface>) {

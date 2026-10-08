@@ -39,6 +39,27 @@ pub fn bake_brush_vertex_lighting(
     lights: &[BrushPointLight],
     material_tints: &[BrushMaterialTint],
 ) -> Result<Vec<Vec<u32>>, BrushLightError> {
+    bake_brush_vertex_lighting_along(surfaces, occluders, ambient, lights, material_tints, &[])
+}
+
+/// Like [`bake_brush_vertex_lighting`], but a vertex that was inserted into an
+/// original edge takes the light interpolated between that edge's endpoints.
+pub fn bake_brush_vertex_lighting_along(
+    surfaces: &[CompiledSurface],
+    occluders: &[Brush],
+    ambient: [u8; 3],
+    lights: &[BrushPointLight],
+    material_tints: &[BrushMaterialTint],
+    light_edges: &[crate::brush_seams::LightEdge],
+) -> Result<Vec<Vec<u32>>, BrushLightError> {
+    let mut by_position: std::collections::HashMap<[u64; 3], Vec<&crate::brush_seams::LightEdge>> =
+        std::collections::HashMap::new();
+    for edge in light_edges {
+        by_position
+            .entry(edge.position.map(f64::to_bits))
+            .or_default()
+            .push(edge);
+    }
     for (index, light) in lights.iter().enumerate() {
         if !light.position.into_iter().all(f64::is_finite)
             || !light.radius.is_finite()
@@ -52,16 +73,65 @@ pub fn bake_brush_vertex_lighting(
     Ok(surfaces
         .iter()
         .map(|surface| {
-            let (normal, _) = normalized_plane(surface.plane);
+            let (normal, plane_distance) = normalized_plane(surface.plane);
             let tint = material_tints
                 .iter()
                 .find(|tint| tint.material == surface.material)
                 .map_or([128; 3], |tint| tint.color);
-            surface
-                .vertices
-                .iter()
+            let ring = &surface.vertices;
+            ring.iter()
                 .copied()
-                .map(|vertex| bake_vertex(vertex, normal, tint, ambient, lights, &brush_planes))
+                .enumerate()
+                .map(|(index, vertex)| {
+                    // An inserted vertex is straight: collinear with its ring
+                    // neighbours. A real corner of this surface keeps its own
+                    // bake even when a coplanar neighbour inserted it.
+                    let before = ring[(index + ring.len() - 1) % ring.len()];
+                    let after = ring[(index + 1) % ring.len()];
+                    let u = subtract(before, vertex);
+                    let v = subtract(after, vertex);
+                    let cross = [
+                        u[1] * v[2] - u[2] * v[1],
+                        u[2] * v[0] - u[0] * v[2],
+                        u[0] * v[1] - u[1] * v[0],
+                    ];
+                    let straight = dot(cross, cross) <= 1e-6 * dot(u, u) * dot(v, v);
+                    let on_plane = |p: [f64; 3]| (dot(normal, p) - plane_distance).abs() < 0.01;
+                    let edge = by_position
+                        .get(&vertex.map(f64::to_bits))
+                        .filter(|_| straight)
+                        .and_then(|edges| {
+                            edges.iter().find(|e| on_plane(e.from) && on_plane(e.to))
+                        });
+                    match edge {
+                        Some(edge) => {
+                            let a = bake_vertex(
+                                edge.from,
+                                normal,
+                                tint,
+                                ambient,
+                                lights,
+                                &brush_planes,
+                            );
+                            let b =
+                                bake_vertex(edge.to, normal, tint, ambient, lights, &brush_planes);
+                            let span = subtract(edge.to, edge.from);
+                            let length_sq = dot(span, span);
+                            let t = if length_sq > 0.0 {
+                                (dot(subtract(vertex, edge.from), span) / length_sq).clamp(0.0, 1.0)
+                            } else {
+                                0.0
+                            };
+                            let lerp = |shift: u32| {
+                                let ca = f64::from((a >> shift) & 0xff);
+                                let cb = f64::from((b >> shift) & 0xff);
+                                (ca + (cb - ca) * t).round().clamp(0.0, 255.0) as u32
+                            };
+                            lerp(0) | (lerp(8) << 8) | (lerp(16) << 16)
+                        }
+                        None => bake_vertex(vertex, normal, tint, ambient, lights, &brush_planes),
+                    }
+                })
                 .collect()
         })
         .collect())
@@ -362,5 +432,44 @@ mod tests {
             )
         };
         assert_eq!(args(), args());
+    }
+    #[test]
+    fn a_conformed_vertex_takes_the_light_interpolated_along_its_original_edge() {
+        // A light straight above the middle of the edge makes the midpoint far
+        // brighter than the average of the edge's corners.
+        let mut surface = upward_quad();
+        surface.vertices.push([64.0, 0.0, 0.0]);
+        let light = BrushPointLight {
+            position: [64.0, 60.0, 0.0],
+            radius: 256.0,
+            intensity_q8: 256,
+            color: [255, 255, 255],
+        };
+        let edge = crate::brush_seams::LightEdge {
+            position: [64.0, 0.0, 0.0],
+            from: [128.0, 0.0, 0.0],
+            to: [0.0, 0.0, 0.0],
+        };
+        let rebaked =
+            bake_brush_vertex_lighting(std::slice::from_ref(&surface), &[], [16; 3], &[light], &[])
+                .expect("bake");
+        let along = bake_brush_vertex_lighting_along(
+            std::slice::from_ref(&surface),
+            &[],
+            [16; 3],
+            &[light],
+            &[],
+            &[edge],
+        )
+        .expect("bake along");
+        let corner = |index: usize| i32::from(channels(rebaked[0][index])[0]);
+        let expected = (corner(3) + corner(0) + 1) / 2;
+        assert_eq!(i32::from(channels(along[0][4])[0]), expected);
+        assert!(
+            i32::from(channels(rebaked[0][4])[0]) > expected + 20,
+            "the re-baked midpoint must be brighter than the corner average"
+        );
+        // Real corners keep their own bake.
+        assert_eq!(&along[0][..4], &rebaked[0][..4]);
     }
 }

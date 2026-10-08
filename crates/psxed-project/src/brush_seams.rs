@@ -194,9 +194,24 @@ pub fn open_edges(polygons: &[Vec<[i32; 3]>], neighbours: &[Vec<[i32; 3]>]) -> V
     open
 }
 
+/// A vertex inserted into a polygon edge, with the original edge's endpoints,
+/// so a light bake can interpolate along that edge instead of evaluating the
+/// light at the new point.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LightEdge {
+    /// World position of the inserted vertex.
+    pub position: [f64; 3],
+    /// Start of the edge the vertex was inserted into.
+    pub from: [f64; 3],
+    /// End of the edge the vertex was inserted into.
+    pub to: [f64; 3],
+}
+
 /// Growth caused by [`conform_t_junctions`].
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ConformStats {
+    /// Every inserted vertex with its original edge.
+    pub light_edges: Vec<LightEdge>,
     /// Polygons that gained at least one vertex.
     pub polygons_changed: usize,
     /// Vertices inserted across all polygons.
@@ -266,6 +281,11 @@ pub fn conform_t_junctions(
             inserts.sort_by_key(|&(along, position, _)| (along, position));
             inserts.dedup_by_key(|&mut (_, position, _)| position);
             for (_, _, vertex) in inserts {
+                stats.light_edges.push(LightEdge {
+                    position: vertex,
+                    from: original[active[polygon]][edge],
+                    to: original[active[polygon]][(edge + 1) % count],
+                });
                 rebuilt.push(vertex);
                 stats.vertices_added += 1;
             }
