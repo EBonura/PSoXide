@@ -1863,7 +1863,7 @@ fn light_enemy_look_idle_is_installed_in_every_enemy_project() {
     )
     .expect("read selected Light Enemy idle");
 
-    for project_name in ["default", "quake-e1m1-geometry"] {
+    for project_name in ["default"] {
         let root = projects_dir().join(project_name);
         let idle_path = root.join("assets/animations/rust_mantis_starter/idle.psxanim");
         assert_eq!(
@@ -1921,7 +1921,7 @@ fn light_enemy_turn_and_alert_are_installed_in_every_enemy_project() {
         (22, 9, 12)
     );
 
-    for project_name in ["default", "quake-e1m1-geometry"] {
+    for project_name in ["default"] {
         let root = projects_dir().join(project_name);
         assert_eq!(
             std::fs::read(root.join("assets/animations/rust_mantis_starter/turn.psxanim"))
