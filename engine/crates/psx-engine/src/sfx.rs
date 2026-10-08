@@ -8,7 +8,7 @@
 //! Reach past this for anything sharing voices between sounds or needing a
 //! one-shot stopped on a clock. [`psx_sfx::Player`] does both.
 
-use psx_spu::{SpuAddr, Voice, Volume};
+use psx_spu::{Spu, SpuAddr, Voice, Volume};
 
 pub use psx_sfx::{Bank, OneShot, Player};
 
@@ -22,15 +22,41 @@ pub struct Sample<'a> {
     pub volume: Volume,
 }
 
-/// Upload a cooked `.psau` one-shot sample, configure its voice, and
-/// return the next free SPU RAM address.
+/// Upload a cooked `.psau` one-shot sample through `spu`, configure its voice,
+/// and return the next free SPU RAM address.
+pub fn upload_sample_on(
+    spu: &mut Spu,
+    v: Voice,
+    addr: SpuAddr,
+    bytes: &[u8],
+    volume: Volume,
+) -> SpuAddr {
+    let mut bank = Bank::new(addr);
+    OneShot::new(bank.upload_on(spu, bytes), volume).configure(v);
+    bank.next_addr()
+}
+
+/// Upload a packed bank of one-shot samples into consecutive SPU RAM through
+/// `spu`.
+pub fn upload_samples_on(spu: &mut Spu, mut addr: SpuAddr, samples: &[Sample<'_>]) -> SpuAddr {
+    for sample in samples {
+        addr = upload_sample_on(spu, sample.voice, addr, sample.bytes, sample.volume);
+    }
+    addr
+}
+
+/// [`upload_sample_on`] on a token the caller does not hold.
+#[deprecated(note = "use `upload_sample_on` with the `Spu` driver")]
+#[allow(deprecated)]
 pub fn upload_sample(v: Voice, addr: SpuAddr, bytes: &[u8], volume: Volume) -> SpuAddr {
     let mut bank = Bank::new(addr);
     OneShot::new(bank.upload(bytes), volume).configure(v);
     bank.next_addr()
 }
 
-/// Upload a packed bank of one-shot samples into consecutive SPU RAM.
+/// [`upload_samples_on`] on a token the caller does not hold.
+#[deprecated(note = "use `upload_samples_on` with the `Spu` driver")]
+#[allow(deprecated)]
 pub fn upload_samples(mut addr: SpuAddr, samples: &[Sample<'_>]) -> SpuAddr {
     for sample in samples {
         addr = upload_sample(sample.voice, addr, sample.bytes, sample.volume);

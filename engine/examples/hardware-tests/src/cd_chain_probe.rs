@@ -588,11 +588,11 @@ fn run_variant(variant: Variant, run: u8) -> VariantRecord {
     let (ok, chcr_kick, chcr_late, extra) = match variant {
         Variant::SdkRead | Variant::SdkReadAgain => {
             let mut reader = SectorReader::new();
-            let ok_prepare = unsafe { reader.prepare() };
-            let ok_start = ok_prepare && unsafe { reader.start_read(CDTEST_LBA) };
+            let ok_prepare = reader.prepare();
+            let ok_start = ok_prepare && reader.start_read(CDTEST_LBA);
             let ok_read = ok_start && unsafe { reader.read_sector(&mut *buffer) };
             let diag = reader.diagnostics();
-            unsafe { reader.stop() };
+            reader.stop();
             record.fields[9] = diag;
             (
                 (ok_prepare as u32) | ((ok_start as u32) << 1) | ((ok_read as u32) << 2),

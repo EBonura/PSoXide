@@ -6,8 +6,8 @@ enum PoiSaveLoad {
     Retry,
 }
 
-fn load_poi_save_from_card() -> PoiSaveLoad {
-    let mut card = psx_mc::Card::new(psx_mc::HardwareCard::new(psx_mc::Slot::One));
+fn load_poi_save_from_card(port: &mut psx_engine::ControllerPort) -> PoiSaveLoad {
+    let mut card = psx_mc::Card::new(psx_mc::HardwareCard::on_port(port, psx_mc::Slot::One));
     let mut bytes = [0u8; psx_game_runtime::save::SAVE_BLOCK_BYTES];
     let len = match card.read(PROJECT_SAVE_NAME, &mut bytes) {
         Ok(len) => len,
@@ -28,8 +28,8 @@ fn load_poi_save_from_card() -> PoiSaveLoad {
     }
 }
 
-fn save_poi_state_to_card(save: &SaveBlock) -> bool {
-    let mut card = psx_mc::Card::new(psx_mc::HardwareCard::new(psx_mc::Slot::One));
+fn save_poi_state_to_card(port: &mut psx_engine::ControllerPort, save: &SaveBlock) -> bool {
+    let mut card = psx_mc::Card::new(psx_mc::HardwareCard::on_port(port, psx_mc::Slot::One));
     if card.is_formatted() != Ok(true) {
         // Formatting is destructive and belongs behind an explicit System UI
         // confirmation, never inside a POI interaction.
@@ -160,11 +160,11 @@ impl Playtest {
         }
     }
 
-    pub(super) fn ensure_poi_save_loaded(&mut self) {
+    pub(super) fn ensure_poi_save_loaded(&mut self, port: &mut psx_engine::ControllerPort) {
         if self.poi_save_loaded {
             return;
         }
-        match load_poi_save_from_card() {
+        match load_poi_save_from_card(port) {
             PoiSaveLoad::Loaded(saved) => self.poi_save = saved,
             PoiSaveLoad::NewGame => {}
             PoiSaveLoad::Retry => return,
@@ -229,19 +229,23 @@ impl Playtest {
     /// Flush pending POI state at an intentional save boundary. Memory-card
     /// filesystem writes take many video periods on real hardware, so they
     /// must never run inside a live interaction or an arbitrary gameplay tick.
-    pub(super) fn flush_poi_save(&mut self) {
+    pub(super) fn flush_poi_save(&mut self, port: &mut psx_engine::ControllerPort) {
         if !self.poi_save_loaded || !self.poi_save_dirty {
             return;
         }
-        self.poi_save_dirty = !save_poi_state_to_card(&self.poi_save);
+        self.poi_save_dirty = !save_poi_state_to_card(port, &self.poi_save);
     }
 
-    pub(super) fn retry_poi_card_load(&mut self, tick: u32) {
+    pub(super) fn retry_poi_card_load(
+        &mut self,
+        tick: u32,
+        port: &mut psx_engine::ControllerPort,
+    ) {
         const RETRY_TICKS: u32 = 300;
         if self.poi_save_loaded || tick % RETRY_TICKS != 0 {
             return;
         }
-        self.ensure_poi_save_loaded();
+        self.ensure_poi_save_loaded(port);
     }
 
     pub(super) fn point_of_interest_available(&self, interactable: &InteractableRecord) -> bool {
@@ -1870,14 +1874,28 @@ impl Playtest {
             let focus = self.camera.focus();
             let (right_x, _) = ctx.pad.sticks.right_centered();
             crate::debug_runtime::debug_log_camera_pose([
-                ctx.sim_tick.as_u32() as i32, player.x, player.y, player.z,
-                eye.x, eye.y, eye.z, focus.x, focus.y, focus.z,
-                i32::from(self.camera.yaw().as_q12()), i32::from(self.camera.pitch_q12()),
-                self.camera.distance(), i32::from(self.camera.collision_pull_in()),
-                i32::from(right_x), i32::from(self.camera.lift_pitch_q12()),
-                i32::from(self.camera.lift_goals_q12().0), i32::from(self.camera.lift_goals_q12().1),
+                ctx.sim_tick.as_u32() as i32,
+                player.x,
+                player.y,
+                player.z,
+                eye.x,
+                eye.y,
+                eye.z,
+                focus.x,
+                focus.y,
+                focus.z,
+                i32::from(self.camera.yaw().as_q12()),
+                i32::from(self.camera.pitch_q12()),
+                self.camera.distance(),
+                i32::from(self.camera.collision_pull_in()),
+                i32::from(right_x),
+                i32::from(self.camera.lift_pitch_q12()),
+                i32::from(self.camera.lift_goals_q12().0),
+                i32::from(self.camera.lift_goals_q12().1),
                 i32::from(self.camera.slide_yaw_q12()),
-                self.bsp.as_ref().map_or(0, |bsp| bsp.camera_traces() as i32),
+                self.bsp
+                    .as_ref()
+                    .map_or(0, |bsp| bsp.camera_traces() as i32),
                 i32::from(self.camera.escape_goal_q12()),
             ]);
         }
@@ -2106,7 +2124,12 @@ impl Playtest {
     /// refuses the interaction. The legacy direct path remains only
     /// for hand-rolled manifests whose interactables carry no paired
     /// record.
-    pub(super) fn activate_interactable(&mut self, index: usize, now: u32) -> bool {
+    pub(super) fn activate_interactable(
+        &mut self,
+        index: usize,
+        now: u32,
+        port: &mut psx_engine::ControllerPort,
+    ) -> bool {
         let Some(interactable) = INTERACTABLES.get(index) else {
             return false;
         };
@@ -2121,7 +2144,7 @@ impl Playtest {
                 now,
             );
             if fired {
-                self.dispatch_logic_effects();
+                self.dispatch_logic_effects(port);
             }
             return fired;
         }
@@ -2131,12 +2154,15 @@ impl Playtest {
                 true
             }
             InteractableKind::Checkpoint => {
-                self.set_checkpoint(RuntimeCheckpoint {
-                    room: self.room_index,
-                    position: self.motor.position(),
-                    yaw: self.motor.yaw(),
-                    checkpoint_id: interactable.checkpoint_id,
-                });
+                self.set_checkpoint(
+                    RuntimeCheckpoint {
+                        room: self.room_index,
+                        position: self.motor.position(),
+                        yaw: self.motor.yaw(),
+                        checkpoint_id: interactable.checkpoint_id,
+                    },
+                    port,
+                );
                 self.open_interactable_message(interactable);
                 true
             }
@@ -2182,14 +2208,18 @@ impl Playtest {
     /// from the same pose is a no-op for the counter, while the first
     /// activation of a life (the checkpoint itself persists across
     /// respawn) and any pose/record change count once.
-    pub(super) fn set_checkpoint(&mut self, checkpoint: RuntimeCheckpoint) {
+    pub(super) fn set_checkpoint(
+        &mut self,
+        checkpoint: RuntimeCheckpoint,
+        port: &mut psx_engine::ControllerPort,
+    ) {
         if self.checkpoint != Some(checkpoint) {
             telemetry::counter(telemetry::counter::PLAYER_CHECKPOINT_ACTIVATIONS, 1);
         }
         self.checkpoint = Some(checkpoint);
         // Checkpoints are the genre-visible save boundary. POI interaction
         // stays smooth; its read/reward state reaches the card here instead.
-        self.flush_poi_save();
+        self.flush_poi_save(port);
     }
 
     pub(super) fn open_interactable_message(&mut self, interactable: &InteractableRecord) {

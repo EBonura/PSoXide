@@ -203,5 +203,9 @@ pub use psx_pad::{
     ActionBinding, ActionInput, ActionMap, AnalogSticks, Deadzone, PadMode, PadState, STICK_FULL,
 };
 
+/// The controller-port token behind [`Ctx::controller_port`], for scenes that
+/// drive a memory card or negotiate a pad mode without a direct `psx-io` dep.
+pub use psx_io::periph::ControllerPort;
+
 mod masked_pose;
 pub use masked_pose::MaskedPoseBlend;

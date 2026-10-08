@@ -734,13 +734,19 @@ fn music_volume_percent(
     }
 }
 
+/// Reset the SPU through the driver, which `psx_spu::init` used to do on a
+/// token nobody held. The driver is built from the token the runner handed
+/// over, or from the one a previous reset gave back.
 #[cfg(target_arch = "mips")]
-fn menu_audio_init() {
-    psx_spu::init();
+fn menu_audio_init(spu: &mut Option<psx_spu::Spu>, spu_dma: &mut Option<psx_io::periph::SpuDma>) {
+    let dma = match spu.take() {
+        Some(driver) => driver.release(),
+        None => spu_dma
+            .take()
+            .expect("the app runner hands the game the SPU DMA token"),
+    };
+    *spu = Some(psx_spu::Spu::new(dma));
 }
-
-#[cfg(not(target_arch = "mips"))]
-fn menu_audio_init() {}
 
 #[cfg(target_arch = "mips")]
 fn scaled_pitch(base_q12: u16, multiplier_q12: u16) -> psx_spu::Pitch {
@@ -1156,6 +1162,12 @@ pub struct GameApp<'a, S: Scene> {
     option_len: usize,
     /// Nonblocking CD-DA menu music driver.
     cdda: CddaPlayer,
+    /// The SPU DMA token until the first menu-audio reset builds the driver.
+    #[cfg(target_arch = "mips")]
+    spu_dma: Option<psx_io::periph::SpuDma>,
+    /// The SPU driver, once the menu audio has reset the SPU.
+    #[cfg(target_arch = "mips")]
+    spu: Option<psx_spu::Spu>,
     /// Combat music currently requested (edge-detected against the scene).
     combat_music_engaged: bool,
     /// Uploaded UI SFX sample metadata, capped for no-alloc runtime lookup.
@@ -1365,6 +1377,10 @@ impl<'a, S: Scene> GameApp<'a, S> {
             option_values,
             option_len,
             cdda: CddaPlayer::new(),
+            #[cfg(target_arch = "mips")]
+            spu_dma: None,
+            #[cfg(target_arch = "mips")]
+            spu: None,
             combat_music_engaged: false,
             ui_sfx_runtime_samples: [UiSfxRuntimeSample::EMPTY; MAX_UI_SFX_SAMPLES],
             ui_sfx_runtime_len: 0,
@@ -1432,8 +1448,16 @@ impl<'a, S: Scene> GameApp<'a, S> {
             .apply_options(self.options, &values[..len.min(MAX_OPTIONS)], ctx);
     }
 
+    /// Hand the game the SPU DMA token; the app runner does this once, before
+    /// the scene's `init`.
+    #[cfg(target_arch = "mips")]
+    pub(crate) fn set_spu_dma(&mut self, dma: psx_io::periph::SpuDma) {
+        self.spu_dma = Some(dma);
+    }
+
     fn init_menu_audio(&mut self) {
-        menu_audio_init();
+        #[cfg(target_arch = "mips")]
+        menu_audio_init(&mut self.spu, &mut self.spu_dma);
         self.upload_ui_sfx_samples();
     }
 
@@ -1448,7 +1472,10 @@ impl<'a, S: Scene> GameApp<'a, S> {
             let mut upload = |bytes: &[u8]| {
                 let audio = psx_asset::Audio::from_bytes(bytes).expect("ui psau sample");
                 let adpcm = audio.adpcm_bytes();
-                psx_spu::upload_adpcm(psx_spu::SpuAddr::new(addr), adpcm);
+                self.spu
+                    .as_mut()
+                    .expect("menu audio reset the SPU before the upload")
+                    .upload_adpcm(psx_spu::SpuAddr::new(addr), adpcm);
                 uploaded = Some((
                     adpcm.len() as u32,
                     psx_spu::Pitch::for_sample_rate(audio.sample_rate_hz()).as_u16(),

@@ -84,7 +84,7 @@ impl Playtest {
     /// with zero cooked records (cortex today) the guard keeps it to
     /// a two-load check, preserving the bit-identical gates and the
     /// budget's <1k idle rule.
-    pub(super) fn tick_gameplay_layer(&mut self, ctx: &Ctx) {
+    pub(super) fn tick_gameplay_layer(&mut self, ctx: &mut Ctx) {
         // Deferred tokens are one-simulation-tick capabilities. Clear even on
         // zero-record and 30 Hz off-ticks so an i-frame whiff can never be
         // replayed later against a different retained pose.
@@ -367,12 +367,10 @@ impl Playtest {
         }
         self.logic.tick(
             LOGIC,
-            psx_game_runtime::logic::LogicTickInput {
-                player: player_pos,
-            },
+            psx_game_runtime::logic::LogicTickInput { player: player_pos },
             now,
         );
-        self.dispatch_logic_effects();
+        self.dispatch_logic_effects(ctx.controller_port());
         telemetry::counter(
             telemetry::counter::GAME_ENTITIES_THOUGHT,
             u32::from(entity_stats.thought),
@@ -627,7 +625,7 @@ impl Playtest {
             self.update_opening(ctx);
             return;
         }
-        self.retry_poi_card_load(ctx.sim_tick.as_u32());
+        self.retry_poi_card_load(ctx.sim_tick.as_u32(), ctx.controller_port());
         self.step_streaming_jobs(ctx);
         if self.initial_world_message_active() {
             if ctx.just_pressed(INTERACT_BUTTON) {
@@ -766,7 +764,7 @@ impl Playtest {
         if !action_locked && !poi_interaction_consumed {
             if let Some(index) = self.active_interactable {
                 if ctx.just_pressed(INTERACT_BUTTON)
-                    && self.activate_interactable(index, now.as_u32())
+                    && self.activate_interactable(index, now.as_u32(), ctx.controller_port())
                 {
                     self.evade_run_hold_ticks = 0;
                     self.evade_run_hold_consumed = false;
@@ -775,7 +773,7 @@ impl Playtest {
                     return;
                 }
             } else if ctx.just_pressed(INTERACT_BUTTON)
-                && self.activate_nearest_bsp_door(now.as_u32())
+                && self.activate_nearest_bsp_door(now.as_u32(), ctx.controller_port())
             {
                 self.evade_run_hold_ticks = 0;
                 self.evade_run_hold_consumed = false;

@@ -1825,7 +1825,7 @@ impl Playtest {
     /// toggle their linked box prop, messages open the interactable
     /// overlay, checkpoints update the in-memory checkpoint (with the
     /// same confirmation overlay the legacy interactable path showed).
-    pub(super) fn dispatch_logic_effects(&mut self) {
+    pub(super) fn dispatch_logic_effects(&mut self, port: &mut psx_engine::ControllerPort) {
         if !self.logic.any_fired() {
             return;
         }
@@ -1856,14 +1856,17 @@ impl Playtest {
                     // chain alike: the fire mark is the one dispatch
                     // surface, so trigger-to-checkpoint chains land
                     // here exactly like interact prompts.
-                    self.set_checkpoint(RuntimeCheckpoint {
-                        room: self.room_index,
-                        position: self.motor.position(),
-                        yaw: self.motor.yaw(),
-                        checkpoint_id: interactable_for_logic(index)
-                            .map(|interactable| interactable.checkpoint_id)
-                            .unwrap_or(""),
-                    });
+                    self.set_checkpoint(
+                        RuntimeCheckpoint {
+                            room: self.room_index,
+                            position: self.motor.position(),
+                            yaw: self.motor.yaw(),
+                            checkpoint_id: interactable_for_logic(index)
+                                .map(|interactable| interactable.checkpoint_id)
+                                .unwrap_or(""),
+                        },
+                        port,
+                    );
                     self.open_logic_message(index, record);
                 }
                 // Graph plumbing (trigger volumes, relays,
@@ -1915,7 +1918,11 @@ impl Playtest {
     /// First-playable proximity use routed through the normal logic runtime.
     /// The brush cook stores each door's mover ordinal in `LevelLogicRecord::link`;
     /// firing the record keeps relays/masters/state semantics authoritative.
-    pub(super) fn activate_nearest_bsp_door(&mut self, now: u32) -> bool {
+    pub(super) fn activate_nearest_bsp_door(
+        &mut self,
+        now: u32,
+        port: &mut psx_engine::ControllerPort,
+    ) -> bool {
         let Some(mover) = self
             .bsp
             .as_ref()
@@ -1932,7 +1939,7 @@ impl Playtest {
             self.logic
                 .fire_index(LOGIC, index, psx_game_runtime::logic::UseCode::Toggle, now);
         if fired {
-            self.dispatch_logic_effects();
+            self.dispatch_logic_effects(port);
         }
         fired
     }

@@ -1146,7 +1146,7 @@ impl Activity {
         // CD DMA can latch busy for good, which would take the timing scan's
         // CD records with it, and no DMA channel can address the scratchpad.
         let mut reader = SectorReader::new();
-        let cd_streaming = unsafe { reader.prepare() && reader.start_read(CDTEST_LBA) };
+        let cd_streaming = reader.prepare() && reader.start_read(CDTEST_LBA);
         Self {
             head,
             old_direction,
@@ -1196,7 +1196,7 @@ impl Activity {
         }
         if self.cd_streaming && matches!(psx_io::cd::poll_data_sector(), Ok(true)) {
             let sink = unsafe { &mut *addr_of_mut!(CD_SINK) };
-            if unsafe { self.reader.read_sector(sink) } {
+            if self.reader.read_sector(sink) {
                 self.cd_sectors += 1;
             } else {
                 self.cd_streaming = false;
@@ -1217,7 +1217,7 @@ impl Activity {
             let _ = spu_mode(self.spucnt);
         }
         gpu_io::write_display_control(0x0400_0000 | self.old_direction);
-        unsafe { self.reader.stop() };
+        self.reader.stop();
         self.cd_streaming = false;
         self
     }

@@ -35,6 +35,9 @@ def main():
     with tempfile.TemporaryDirectory(prefix='hsfx-oracle-') as scratch:
         p = Path(scratch); (p/'src').mkdir()
         deps = '\n'.join(f'{name} = {{ path = "{ROOT}/sdk/crates/{name}" }}' for name in ['psx-asset', 'psx-io'])
+        # psx-spu names its register map through psx-hw, which lives in the
+        # repository's shared crates directory.
+        deps += f'\npsx-hw = {{ path = "{ROOT}/crates/psx-hw" }}'
         (p/'Cargo.toml').write_text('[package]\nname="hsfx-oracle"\nversion="0.0.0"\nedition="2021"\n[workspace]\n[dependencies]\n'+deps+'\n')
         spu_path = ROOT/'sdk/crates/psx-spu/src/lib.rs'; spu = spu_path.read_text()
         spu = re.sub(r'^#!.*\n', '', spu, flags=re.M)
@@ -43,6 +46,14 @@ def main():
         spu = replace_body(spu, 'read_reg16', '\nlet _ = addr; 0\n')
         spu = replace_body(spu, 'init', '\ncrate::record(crate::Op::Init);\n')
         spu = replace_body(spu, 'upload_adpcm', '\ncrate::record(crate::Op::Upload(dest.byte_offset(),bytes.to_vec()));\n')
+        # The shared source reaches the SPU through the `Spu` driver, whose
+        # reset and upload bodies are these two private functions; the frozen
+        # originals call the free functions patched above. Same recorders.
+        spu = replace_body(spu, 'init_with', '\ncrate::record(crate::Op::Init);\n')
+        spu = replace_body(spu, 'upload_adpcm_with', '\ncrate::record(crate::Op::Upload(dest.byte_offset(),bytes.to_vec()));\n')
+        # A driver without the reset, for the call that used to find the SPU
+        # already initialised (the dialogue loader).
+        spu += '\nimpl Spu { pub fn bare() -> Self { Self(unsafe { SpuDma::steal() }) } }\n'
         (p/'src/spu.rs').write_text(spu)
         sfx_path = ROOT/'sdk/crates/psx-sfx/src/lib.rs'; sfx = re.sub(r'^#!.*\n','',sfx_path.read_text(),flags=re.M)
         (p/'src/sfx.rs').write_text(hardware_imports(sfx))
@@ -73,7 +84,15 @@ pub unsafe fn snapshot()->Vec<u64>{let mut v=Vec::new();for n in ADDRS {v.push(n
                 name, formals, ret = m.groups()
                 if name in ['reset','snapshot']: continue
                 names=', '.join(x.split(':')[0].strip() for x in formals.split(',') if x.strip())
-                adapter += f'pub unsafe fn {name}({formals}){ret}{{STATE.{name}({names})}}\n'
+                # The shared bank takes the driver where the originals reached
+                # for the free functions. `init_from_pack` used to reset the SPU
+                # first: `Spu::new` does that, immediately before the call.
+                if name == 'init_from_pack':
+                    adapter += f'pub unsafe fn {name}({formals}){ret}{{let mut spu=crate::spu::Spu::new(psx_io::periph::SpuDma::steal());STATE.{name}(&mut spu, {names})}}\n'
+                elif name == 'load_dialogue_pack':
+                    adapter += f'pub unsafe fn {name}({formals}){ret}{{let mut spu=crate::spu::Spu::bare();STATE.{name}(&mut spu, {names})}}\n'
+                else:
+                    adapter += f'pub unsafe fn {name}({formals}){ret}{{STATE.{name}({names})}}\n'
             (p/f'src/new_{short}.rs').write_text(adapter)
         (p/'src/main.rs').write_text((HERE/'support/hsfx_harness.rs').read_text())
         run = subprocess.run(['cargo','run','--release','--quiet','--manifest-path',str(p/'Cargo.toml')], capture_output=True,text=True)

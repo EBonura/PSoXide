@@ -256,7 +256,13 @@ fn runtime_numeric_guard() -> Result<(), String> {
     ];
     push_child_src_dirs(&mut runtime_roots, &root.join("engine/examples"))?;
     for entry in sorted_dirs(&root.join("sdk/crates"))? {
-        if entry.file_name().and_then(|s| s.to_str()) == Some("psx-gte-core") {
+        // psx-gte-core is the host GTE model; psx-residency-sim replays a route
+        // against the real residency policy on the host and never links into a
+        // guest. Neither is runtime code.
+        if matches!(
+            entry.file_name().and_then(|s| s.to_str()),
+            Some("psx-gte-core" | "psx-residency-sim")
+        ) {
             continue;
         }
         runtime_roots.push(entry.join("src"));
@@ -277,12 +283,18 @@ fn runtime_numeric_guard() -> Result<(), String> {
     for runtime_root in runtime_roots {
         collect_rs_files(&runtime_root, &mut files, &mut seen)?;
     }
-    // `src/tests.rs` files are only included from a `#[cfg(test)] mod tests;`
-    // declaration. They are host reference oracles, not guest runtime code;
-    // the item blanker below still handles inline `#[cfg(test)]` modules.
+    // `src/tests.rs` and `src/tests/` are only included from a
+    // `#[cfg(test)] mod tests;` declaration. They are host reference oracles,
+    // not guest runtime code; the item blanker below still handles inline
+    // `#[cfg(test)]` modules.
     files.retain(|f| {
         !exempt_files.contains(f)
             && f.file_name().and_then(|name| name.to_str()) != Some("tests.rs")
+            && !f
+                .strip_prefix(&root)
+                .unwrap_or(f)
+                .components()
+                .any(|part| part.as_os_str() == "tests")
     });
     files.sort();
 

@@ -928,13 +928,13 @@ impl Scene for Playtest {
     /// Release the menu's streamed UI images when leaving a menu state so the
     /// gameplay room textures reclaim that VRAM. Font ownership is switched by
     /// `on_enter_state`, which replaces the menu pack with the HUD-only pack.
-    fn on_exit_state(&mut self, state: SceneStateRef, _ctx: &mut Ctx) {
+    fn on_exit_state(&mut self, state: SceneStateRef, ctx: &mut Ctx) {
         if state.has_gameplay() {
             // A gameplay-to-front-end handoff is the other safe save boundary.
             // Gameplay overlays share the gameplay resource key, so opening the
             // pause/inventory menu does not trigger a card write here.
             self.snapshot_resume_position();
-            self.flush_poi_save();
+            self.flush_poi_save(ctx.controller_port());
             // Re-anchor the animation epoch on the next gameplay entry
             // (see `gameplay_epoch` in main.rs).
             self.gameplay_epoch_set = false;
@@ -1012,7 +1012,7 @@ impl Scene for Playtest {
         // screen rather than spending the first live gameplay update on it.
         if !self.poi_save_load_attempted {
             self.poi_save_load_attempted = true;
-            self.ensure_poi_save_loaded();
+            self.ensure_poi_save_loaded(ctx.controller_port());
         }
         self.step_streaming_jobs(ctx);
         self.initial_world_ready()
