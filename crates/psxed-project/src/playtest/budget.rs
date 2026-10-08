@@ -774,15 +774,7 @@ fn attach_budget_issues(project: &ProjectDocument, report: &mut PlaytestBudgetRe
         .iter()
         .enumerate()
         .max_by_key(|(_, brush)| brush.faces.len())
-        .map(|(brush, _)| PlaytestValidationTarget::Brush { brush, face: None })
-        .or_else(|| {
-            project
-                .active_scene()
-                .nodes()
-                .iter()
-                .find(|node| matches!(node.kind, NodeKind::Section { .. }))
-                .map(|node| PlaytestValidationTarget::Node(node.id))
-        });
+        .map(|(brush, _)| PlaytestValidationTarget::Brush { brush, face: None });
     let texture_target = project
         .resources
         .iter()

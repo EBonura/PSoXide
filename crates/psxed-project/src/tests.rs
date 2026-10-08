@@ -4159,10 +4159,10 @@ fn horizontal_triangle_overrides_inherit_until_set() {
 
     let override_a = face.triangle_override_mut(0);
     override_a.material = Some(GridTriangleMaterialOverride::Resource(triangle));
-    override_a.uv = Some(GridUvTransform {
+    override_a.uv = Some(UvTransform {
         offset: [9, 10],
         span: [64, 32],
-        rotation: GridUvRotation::Deg90,
+        rotation: UvRotation::Deg90,
         flip_u: true,
         flip_v: false,
     });
@@ -4185,10 +4185,10 @@ fn drop_corner_on_wall_marks_triangle() {
 
 #[test]
 fn grid_uv_transform_rotates_quad_without_rebaking_texture() {
-    let transform = GridUvTransform {
+    let transform = UvTransform {
         offset: [0, 0],
         span: [0, 0],
-        rotation: GridUvRotation::Deg90,
+        rotation: UvRotation::Deg90,
         flip_u: false,
         flip_v: false,
     };
@@ -4201,10 +4201,10 @@ fn grid_uv_transform_rotates_quad_without_rebaking_texture() {
 
 #[test]
 fn grid_uv_transform_rotates_quad_45_degrees_without_rebaking_texture() {
-    let transform = GridUvTransform {
+    let transform = UvTransform {
         offset: [0, 0],
         span: [0, 0],
-        rotation: GridUvRotation::Deg45,
+        rotation: UvRotation::Deg45,
         flip_u: false,
         flip_v: false,
     };
@@ -4217,10 +4217,10 @@ fn grid_uv_transform_rotates_quad_45_degrees_without_rebaking_texture() {
 
 #[test]
 fn grid_uv_transform_rotates_quad_315_degrees_without_rebaking_texture() {
-    let transform = GridUvTransform {
+    let transform = UvTransform {
         offset: [0, 0],
         span: [0, 0],
-        rotation: GridUvRotation::Deg315,
+        rotation: UvRotation::Deg315,
         flip_u: false,
         flip_v: false,
     };
@@ -4233,10 +4233,10 @@ fn grid_uv_transform_rotates_quad_315_degrees_without_rebaking_texture() {
 
 #[test]
 fn grid_uv_transform_flips_and_wraps_ps1_uv_offsets() {
-    let transform = GridUvTransform {
+    let transform = UvTransform {
         offset: [-8, 12],
         span: [0, 0],
-        rotation: GridUvRotation::Deg0,
+        rotation: UvRotation::Deg0,
         flip_u: true,
         flip_v: false,
     };
@@ -4249,10 +4249,10 @@ fn grid_uv_transform_flips_and_wraps_ps1_uv_offsets() {
 
 #[test]
 fn grid_uv_transform_scales_quad_span_without_rebaking_texture() {
-    let transform = GridUvTransform {
+    let transform = UvTransform {
         offset: [0, 0],
         span: [0, 32],
-        rotation: GridUvRotation::Deg0,
+        rotation: UvRotation::Deg0,
         flip_u: false,
         flip_v: false,
     };

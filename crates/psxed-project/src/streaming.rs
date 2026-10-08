@@ -2,11 +2,9 @@
 
 use std::collections::HashSet;
 
-use crate::{
-    GridDirection, NodeId, NodeKind, ProjectDocument, ResourceData, ResourceId, WorldGrid,
-};
+use crate::{NodeKind, ProjectDocument, ResourceData, ResourceId};
 
-/// Referenced runtime-facing resources for a scene or room.
+/// Referenced runtime-facing resources for a scene.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SceneResourceUse {
     pub materials: Vec<ResourceId>,
@@ -20,23 +18,14 @@ pub struct SceneResourceUse {
     pub image_props: usize,
     pub lights: usize,
     pub particle_emitters: usize,
-    pub portals: usize,
 }
 
 /// Collect resources used by the active scene.
 pub fn collect_scene_resource_use(project: &ProjectDocument) -> SceneResourceUse {
-    collect_resource_use(project, None)
+    collect_resource_use(project)
 }
 
-/// Collect resources used by one Room and its descendants.
-pub fn collect_room_resource_use(project: &ProjectDocument, room_id: NodeId) -> SceneResourceUse {
-    collect_resource_use(project, Some(room_id))
-}
-
-fn collect_resource_use(
-    project: &ProjectDocument,
-    room_filter: Option<NodeId>,
-) -> SceneResourceUse {
+fn collect_resource_use(project: &ProjectDocument) -> SceneResourceUse {
     let scene = project.active_scene();
     let mut use_set = SceneResourceUse::default();
     let mut materials = HashSet::new();
@@ -46,19 +35,7 @@ fn collect_resource_use(
     let mut characters = HashSet::new();
 
     for node in scene.nodes() {
-        if let Some(room_id) = room_filter {
-            if !scene.is_descendant_of(node.id, room_id) {
-                continue;
-            }
-        }
-
         match &node.kind {
-            NodeKind::Section { grid } => {
-                collect_grid_resources(grid, &mut use_set, &mut materials);
-            }
-            NodeKind::WaterVolume { material, .. } => {
-                push_material(*material, &mut use_set, &mut materials);
-            }
             NodeKind::MeshInstance { mesh, material, .. } => {
                 push_material(*material, &mut use_set, &mut materials);
                 if let Some(mesh_id) = mesh {
@@ -116,7 +93,6 @@ fn collect_resource_use(
                     push_unique(texture_id, &mut use_set.textures, &mut textures);
                 }
             }
-            NodeKind::Portal { .. } => use_set.portals += 1,
             _ => {}
         }
     }
@@ -139,37 +115,6 @@ fn collect_resource_use(
     }
 
     use_set
-}
-
-fn collect_grid_resources(
-    grid: &WorldGrid,
-    use_set: &mut SceneResourceUse,
-    materials: &mut HashSet<ResourceId>,
-) {
-    // A Room owns every authored floor through its base grid. Resource
-    // residency therefore has to walk the complete stack, not just floor
-    // zero; otherwise upper-floor materials lose their native preview slots
-    // even though the runtime cooker (which walks every floor) renders them.
-    for floor_index in 0..grid.floor_count() {
-        let Some(floor_grid) = grid.floor(floor_index) else {
-            continue;
-        };
-        for sector in floor_grid.sectors.iter().flatten() {
-            if let Some(face) = &sector.floor {
-                push_material(face.triangle_material(0), use_set, materials);
-                push_material(face.triangle_material(1), use_set, materials);
-            }
-            if let Some(face) = &sector.ceiling {
-                push_material(face.triangle_material(0), use_set, materials);
-                push_material(face.triangle_material(1), use_set, materials);
-            }
-            for direction in GridDirection::ALL {
-                for wall in sector.walls.get(direction) {
-                    push_material(wall.material, use_set, materials);
-                }
-            }
-        }
-    }
 }
 
 fn push_material(
@@ -215,26 +160,7 @@ fn push_unique(id: ResourceId, out: &mut Vec<ResourceId>, seen: &mut HashSet<Res
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        CharacterResource, GridTriangleMaterialOverride, MaterialResource, NodeKind,
-        ParticleEmitterSettings, ResourceData, WaterVolumeCell, WaterVolumeSettings,
-    };
-
-    #[test]
-    fn budget_for_rect_counts_only_requested_area() {
-        let floor = ResourceId(1);
-        let mut grid = WorldGrid::empty(4, 4, 1024);
-        grid.set_floor(0, 0, 0, Some(floor));
-        grid.set_floor(3, 3, 0, Some(floor));
-
-        let left = grid.budget_for_rect(0, 0, 2, 4).unwrap();
-        let right = grid.budget_for_rect(2, 0, 2, 4).unwrap();
-
-        assert_eq!(left.total_cells, 8);
-        assert_eq!(right.total_cells, 8);
-        assert_eq!(left.floors, 1);
-        assert_eq!(right.floors, 1);
-    }
+    use crate::{CharacterResource, MaterialResource, ParticleEmitterSettings};
 
     #[test]
     fn scene_resource_use_follows_components_and_material_textures() {
@@ -331,48 +257,5 @@ mod tests {
         assert_eq!(use_set.model_instances, 1);
         assert_eq!(use_set.character_controllers, 1);
         assert_eq!(use_set.particle_emitters, 1);
-    }
-
-    #[test]
-    fn scene_resource_use_includes_stacked_floor_and_triangle_materials() {
-        let mut project = ProjectDocument::new("stacked-floor-resources");
-        let base_material = project.add_resource(
-            "base",
-            ResourceData::Material(MaterialResource::opaque(Some("base.psxt".to_string()))),
-        );
-        let upper_material = project.add_resource(
-            "upper",
-            ResourceData::Material(MaterialResource::opaque(Some("upper.psxt".to_string()))),
-        );
-        let triangle_material = project.add_resource(
-            "triangle",
-            ResourceData::Material(MaterialResource::opaque(Some("triangle.psxt".to_string()))),
-        );
-
-        let mut grid = WorldGrid::empty(1, 1, 1024);
-        grid.set_floor(0, 0, 0, Some(base_material));
-        let upper = grid.push_floor();
-        let upper_grid = grid.floor_mut(upper).expect("new upper floor");
-        upper_grid.set_floor(0, 0, 0, Some(upper_material));
-        upper_grid
-            .sector_mut(0, 0)
-            .expect("upper sector")
-            .floor
-            .as_mut()
-            .expect("upper floor face")
-            .triangle_override_mut(1)
-            .material = Some(GridTriangleMaterialOverride::Resource(triangle_material));
-
-        let scene = project.active_scene_mut();
-        scene.add_node(scene.root, "Room", NodeKind::Section { grid });
-
-        let use_set = collect_scene_resource_use(&project);
-        assert_eq!(
-            use_set.materials,
-            vec![base_material, upper_material, triangle_material]
-        );
-        assert!(use_set.textures.contains(&base_material));
-        assert!(use_set.textures.contains(&upper_material));
-        assert!(use_set.textures.contains(&triangle_material));
     }
 }

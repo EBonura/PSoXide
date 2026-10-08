@@ -7,7 +7,7 @@
 
 use crate::spatial::rotate_euler_local_q12;
 use crate::{
-    BoxPropErosion, CylinderPropGeometry, GridUvTransform, BOX_PROP_FACE_COUNT,
+    BoxPropErosion, CylinderPropGeometry, UvTransform, BOX_PROP_FACE_COUNT,
     BOX_PROP_FACE_VERTEX_INDICES, BOX_PROP_VERTEX_COUNT,
 };
 
@@ -145,11 +145,7 @@ pub fn image_prop_world_quad(
 
 /// The texel quad a slot's UV transform selects in a texture of this size:
 /// the corners the cook bakes into the prop record.
-pub fn prop_uv_corners(
-    uv: GridUvTransform,
-    texture_width: u16,
-    texture_height: u16,
-) -> [(u8, u8); 4] {
+pub fn prop_uv_corners(uv: UvTransform, texture_width: u16, texture_height: u16) -> [(u8, u8); 4] {
     let u_max = texture_width.saturating_sub(1).min(255) as u8;
     let v_max = texture_height.saturating_sub(1).min(255) as u8;
     uv.apply_to_quad([(0, 0), (u_max, 0), (u_max, v_max), (0, v_max)])

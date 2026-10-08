@@ -470,34 +470,9 @@ pub fn build_package(
     let mut report = PlaytestValidationReport::default();
     let scene = project.active_scene();
 
-    // Pass 1: enumerate Room nodes. Index = runtime room id.
-    let mut room_nodes: Vec<&SceneNode> = scene
-        .nodes()
-        .iter()
-        .filter(|node| matches!(node.kind, NodeKind::Section { .. }))
-        .collect();
-    room_nodes.sort_by_key(|node| node.id.raw());
     let uses_pxbsp = true;
     if scene.brushes.is_empty() {
         report.error("the active scene holds no brushes; BSP is the sole world source");
-        return (None, report);
-    }
-
-    if !room_nodes.is_empty() {
-        // Previously these were dropped in silence and the cook went green
-        // with the authored Sections missing from the level. A BSP project
-        // has exactly one spatial authority, so a Section is a contradiction
-        // to resolve in the editor, not a preference to apply here.
-        let node = room_nodes[0];
-        report.error_at(
-            PlaytestValidationTarget::Node(node.id),
-            format!(
-                "the scene holds {} removed grid Section node(s), starting \
-                 with '{}'; delete the obsolete nodes before building",
-                room_nodes.len(),
-                node.name
-            ),
-        );
         return (None, report);
     }
 
@@ -912,7 +887,7 @@ pub fn build_package(
     // Water is authored as BSP liquid brushes and is compiled with the world geometry.
 
     for node in scene.nodes() {
-        if node.id == scene.root || matches!(node.kind, NodeKind::Section { .. }) {
+        if node.id == scene.root {
             continue;
         }
         if node.kind.is_component() {
@@ -1869,12 +1844,6 @@ pub fn build_package(
                     return (None, report);
                 }
             }
-            NodeKind::Portal { .. } => {
-                if warned_unsupported.insert("Portal") {
-                    report
-                        .warn("Portal markers define runtime-room seams; not emitted as entities");
-                }
-            }
             NodeKind::ParticleEmitter { settings } => {
                 if !push_particle_emitter(
                     node.name.as_str(),
@@ -1891,8 +1860,6 @@ pub fn build_package(
             | NodeKind::Group
             | NodeKind::Node3D
             | NodeKind::World { .. }
-            | NodeKind::Section { .. }
-            | NodeKind::WaterVolume { .. }
             | NodeKind::ModelRenderer { .. }
             | NodeKind::Animator { .. }
             | NodeKind::Collider { .. }

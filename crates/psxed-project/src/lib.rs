@@ -34,18 +34,15 @@ mod brush_vis;
 pub mod brush_walk;
 pub mod brush_world;
 pub mod clip_window;
-pub mod floor_view;
 pub use animation_pose_correction::*;
 mod import_util;
 pub mod model_import;
 mod model_material_texture;
 pub use model_material_texture::*;
 pub mod playtest;
-pub mod portal_rooms;
 pub mod prop_surfaces;
 pub mod quake_map_import;
 pub mod resolve;
-pub mod room_connections;
 pub mod sky_texture;
 pub mod spatial;
 pub mod streaming;
@@ -482,6 +479,14 @@ pub enum ProjectIoError {
     Parse(ron::error::SpannedError),
     /// RON serialization error.
     Serialize(ron::Error),
+    /// The project still holds authored grid-world nodes (Section, Room,
+    /// Map, Water Volume or Portal). The grid world was removed, so these
+    /// nodes cannot be loaded; failing is the only way to avoid silently
+    /// dropping authored geometry and orphaning everything placed inside it.
+    LegacyGridWorld {
+        /// How many legacy grid-world nodes the file holds.
+        nodes: usize,
+    },
 }
 
 impl std::fmt::Display for ProjectIoError {
@@ -490,6 +495,13 @@ impl std::fmt::Display for ProjectIoError {
             Self::Io(error) => write!(f, "filesystem error: {error}"),
             Self::Parse(error) => write!(f, "project parse error: {error}"),
             Self::Serialize(error) => write!(f, "project serialization error: {error}"),
+            Self::LegacyGridWorld { nodes } => write!(
+                f,
+                "this project holds {nodes} legacy grid-world node(s) (Section, Room, Map, \
+                 Water Volume or Portal). Grid worlds were removed from the editor and \
+                 nothing was loaded or modified. Re-author the level as brushes, or open \
+                 the project with an earlier editor build to convert it first."
+            ),
         }
     }
 }
@@ -500,6 +512,7 @@ impl std::error::Error for ProjectIoError {
             Self::Io(error) => Some(error),
             Self::Parse(error) => Some(error),
             Self::Serialize(error) => Some(error),
+            Self::LegacyGridWorld { .. } => None,
         }
     }
 }

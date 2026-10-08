@@ -10,7 +10,7 @@ mod tests {
     use crate::brush_world::{compile_brush_world, BrushWorldCookMode, BrushWorldCookOptions};
     use crate::playtest::{PlaytestAssetKind, PlaytestWorldGeometry, StreamedClass};
     use crate::{
-        ArchPropGeometry, BoxPropErosion, GridUvTransform, NodeKind, ProjectDocument, SkyMode,
+        ArchPropGeometry, BoxPropErosion, NodeKind, ProjectDocument, SkyMode, UvTransform,
         ARCH_PROP_MATERIAL_COUNT, BOX_PROP_FACE_COUNT,
     };
     use psx_bsp::collision::{Trace, TraceScratch, Q12_ONE};
@@ -427,7 +427,7 @@ mod tests {
             "PXBSP blocking box",
             NodeKind::BoxProp {
                 materials: [Some(material); BOX_PROP_FACE_COUNT],
-                uvs: [GridUvTransform::IDENTITY; BOX_PROP_FACE_COUNT],
+                uvs: [UvTransform::IDENTITY; BOX_PROP_FACE_COUNT],
                 vertices: box_vertices,
                 collision_enabled: true,
                 break_flags: 0,
@@ -445,7 +445,7 @@ mod tests {
             "PXBSP decorative box",
             NodeKind::BoxProp {
                 materials: [Some(material); BOX_PROP_FACE_COUNT],
-                uvs: [GridUvTransform::IDENTITY; BOX_PROP_FACE_COUNT],
+                uvs: [UvTransform::IDENTITY; BOX_PROP_FACE_COUNT],
                 vertices: box_vertices,
                 collision_enabled: false,
                 break_flags: 0,
@@ -463,7 +463,7 @@ mod tests {
             "PXBSP blocking arch",
             NodeKind::ArchProp {
                 materials: [Some(material); ARCH_PROP_MATERIAL_COUNT],
-                uvs: [GridUvTransform::IDENTITY; ARCH_PROP_MATERIAL_COUNT],
+                uvs: [UvTransform::IDENTITY; ARCH_PROP_MATERIAL_COUNT],
                 geometry: ArchPropGeometry {
                     span_tiles: 2,
                     depth_tiles: 1,

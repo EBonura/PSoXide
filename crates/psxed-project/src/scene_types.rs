@@ -49,50 +49,12 @@ pub enum NodeKind {
         /// Runtime culling controls inherited by descendant rooms.
         #[serde(default)]
         culling: WorldCullingSettings,
-        /// Cook-time streaming controls inherited by descendant rooms.
-        #[serde(default)]
-        streaming: WorldStreamingSettings,
         /// Runtime physics controls inherited by descendant rooms.
         #[serde(default)]
         physics: WorldPhysicsSettings,
         /// Optional message shown once per game launch when this scene starts.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         world_message: Option<WorldMessage>,
-    },
-    /// One authored level section: a sector grid plus its child
-    /// entities and portal links.
-    ///
-    /// Named Section, not Room, because "room" already means two other
-    /// things: the runtime [`crate::portal_rooms::PortalRoom`] the cook
-    /// derives by splitting this grid at authored portals (the streaming,
-    /// PVS and residency unit, and what the size caps apply to), and the
-    /// chamber a player perceives. A Section is a named, placeable,
-    /// hideable authoring layer that can be saved as a prefab. One Section
-    /// usually becomes several runtime rooms.
-    ///
-    /// The alias chain keeps every project that was saved as `Map` or
-    /// `Room` loading unchanged.
-    #[serde(rename = "Section", alias = "Room", alias = "Map")]
-    Section {
-        /// Authored grid-world payload.
-        grid: WorldGrid,
-    },
-    /// A horizontal, cell-painted water body owned by one Room floor.
-    ///
-    /// The node's [`SceneNode::floor`] selects the stacked floor and `cells`
-    /// use that floor grid's persistent world-cell coordinates. `material`
-    /// renders only the exposed top surface; gameplay comes from `settings`,
-    /// never from the material.
-    WaterVolume {
-        /// Material used by the generated water surface.
-        #[serde(default)]
-        material: Option<ResourceId>,
-        /// Persistent world-cell footprint.
-        #[serde(default)]
-        cells: Vec<WaterVolumeCell>,
-        /// Shallow/lethal gameplay configuration.
-        #[serde(default)]
-        settings: WaterVolumeSettings,
     },
     /// Static or dynamic mesh / model instance.
     ///
@@ -156,7 +118,7 @@ pub enum NodeKind {
         materials: [Option<ResourceId>; BOX_PROP_FACE_COUNT],
         /// Per-face texture transforms in [`BOX_PROP_FACE_NAMES`] order.
         #[serde(default = "default_box_prop_uvs")]
-        uvs: [GridUvTransform; BOX_PROP_FACE_COUNT],
+        uvs: [UvTransform; BOX_PROP_FACE_COUNT],
         /// Editable local vertices, bottom ring then top ring.
         #[serde(default = "default_box_prop_vertices")]
         vertices: [[i16; 3]; BOX_PROP_VERTEX_COUNT],
@@ -182,7 +144,7 @@ pub enum NodeKind {
         materials: [Option<ResourceId>; CYLINDER_PROP_MATERIAL_COUNT],
         /// Per-slot texture transforms.
         #[serde(default = "default_cylinder_prop_uvs")]
-        uvs: [GridUvTransform; CYLINDER_PROP_MATERIAL_COUNT],
+        uvs: [UvTransform; CYLINDER_PROP_MATERIAL_COUNT],
         /// Compact procedural shape recipe.
         #[serde(default)]
         geometry: CylinderPropGeometry,
@@ -202,7 +164,7 @@ pub enum NodeKind {
         materials: [Option<ResourceId>; ARCH_PROP_MATERIAL_COUNT],
         /// Per-slot texture transforms.
         #[serde(default = "default_arch_prop_uvs")]
-        uvs: [GridUvTransform; ARCH_PROP_MATERIAL_COUNT],
+        uvs: [UvTransform; ARCH_PROP_MATERIAL_COUNT],
         /// Compact tile-native arch recipe.
         #[serde(default)]
         geometry: ArchPropGeometry,
@@ -485,20 +447,6 @@ pub enum NodeKind {
         #[serde(default)]
         character: Option<ResourceId>,
     },
-    /// Manual streaming/visibility graph edge: the cooker snaps the marker
-    /// to a grid edge and treats that edge as a room-to-room portal.
-    Portal {
-        /// Target room node by id, or `None` when not wired.
-        target_room: Option<NodeId>,
-        /// Entry-portal label on the target room.
-        target_entry: String,
-        /// Identifier this portal marker is known by in its source room.
-        entry_name: String,
-        /// Optional exact 3D portal plane imported from a Tomb
-        /// Raider-style level file.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        geometry: Option<PortalGeometry>,
-    },
 }
 
 impl NodeKind {
@@ -510,7 +458,6 @@ impl NodeKind {
             far_vista: FarVistaSettings::default(),
             camera: WorldCameraSettings::default(),
             culling: WorldCullingSettings::default(),
-            streaming: WorldStreamingSettings::default(),
             physics: WorldPhysicsSettings::default(),
             world_message: None,
         }
@@ -525,8 +472,6 @@ impl NodeKind {
             Self::HookPoint => "Hook Point",
             Self::Entity => "Entity",
             Self::World { .. } => "World",
-            Self::Section { .. } => "Section",
-            Self::WaterVolume { .. } => "Water Volume",
             Self::MeshInstance { .. } => "Mesh Instance",
             Self::ImageProp { .. } => "Image Prop",
             Self::BoxProp { .. } => "Box Prop",
@@ -547,7 +492,6 @@ impl NodeKind {
             Self::PointLight { .. } => "Point Light",
             Self::ParticleEmitter { .. } => "Particle Emitter",
             Self::SpawnPoint { .. } => "Spawn Point",
-            Self::Portal { .. } => "Portal",
         }
     }
 
@@ -1276,19 +1220,6 @@ impl Scene {
             let node = self.node(node_id)?;
             if let NodeKind::World { culling, .. } = &node.kind {
                 return Some(culling.normalized());
-            }
-            current = node.parent;
-        }
-        None
-    }
-
-    /// Streaming chunk settings inherited by `id` from the nearest World ancestor.
-    pub fn world_streaming_for_node(&self, id: NodeId) -> Option<WorldStreamingSettings> {
-        let mut current = Some(id);
-        while let Some(node_id) = current {
-            let node = self.node(node_id)?;
-            if let NodeKind::World { streaming, .. } = &node.kind {
-                return Some(streaming.normalized());
             }
             current = node.parent;
         }
