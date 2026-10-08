@@ -1876,6 +1876,9 @@ impl Playtest {
                 self.camera.distance(), i32::from(self.camera.collision_pull_in()),
                 i32::from(right_x), i32::from(self.camera.lift_pitch_q12()),
                 i32::from(self.camera.lift_goals_q12().0), i32::from(self.camera.lift_goals_q12().1),
+                i32::from(self.camera.slide_yaw_q12()),
+                self.bsp.as_ref().map_or(0, |bsp| bsp.camera_traces() as i32),
+                i32::from(self.camera.escape_goal_q12()),
             ]);
         }
         #[cfg(feature = "emulator-telemetry")]
