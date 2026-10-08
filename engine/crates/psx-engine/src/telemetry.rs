@@ -20,7 +20,10 @@ const EVENT_ADDR: *mut u32 = 0xBF80_2F00 as *mut u32;
 const VALUE_ADDR: *mut u32 = 0xBF80_2F04 as *mut u32;
 #[cfg(all(target_arch = "mips", feature = "emulator-telemetry"))]
 const CYCLE_ADDR: *const u32 = 0xBF80_2F08 as *const u32;
-#[cfg(all(target_arch = "mips", feature = "emulator-telemetry"))]
+#[cfg(all(
+    target_arch = "mips",
+    any(feature = "emulator-telemetry", feature = "debug-log")
+))]
 const LOG_ADDR: *mut u32 = 0xBF80_2F0C as *mut u32;
 
 /// Mark the start of a guest frame.
@@ -128,7 +131,10 @@ fn read_cycle_counter() -> u32 {
     0
 }
 
-#[cfg(all(target_arch = "mips", feature = "emulator-telemetry"))]
+#[cfg(all(
+    target_arch = "mips",
+    any(feature = "emulator-telemetry", feature = "debug-log")
+))]
 #[inline(always)]
 fn debug_byte(byte: u8) {
     unsafe {
@@ -136,7 +142,10 @@ fn debug_byte(byte: u8) {
     }
 }
 
-#[cfg(not(all(target_arch = "mips", feature = "emulator-telemetry")))]
+#[cfg(not(all(
+    target_arch = "mips",
+    any(feature = "emulator-telemetry", feature = "debug-log")
+)))]
 #[inline(always)]
 fn debug_byte(_byte: u8) {}
 

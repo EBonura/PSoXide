@@ -1314,7 +1314,7 @@ impl Scene for Playtest {
                 let camera_in_player = camera.position.x == follow.x
                     && camera.position.y == follow.y
                     && camera.position.z == follow.z
-                    && self.camera.distance() < self.camera_config().min_distance;
+                    && self.camera.distance() < PLAYER_HIDE_BOOM;
                 let player_lighting = player_lighting.filter(|_| !camera_in_player);
                 let stance_crystal_material = self
                     .stance_cluts

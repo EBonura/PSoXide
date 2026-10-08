@@ -75,7 +75,7 @@ pub(super) const BSP_FALLBACK_CAMERA_HEIGHT: i32 = 40;
 pub(super) const BSP_FALLBACK_CAMERA_TARGET_HEIGHT: i32 = 32;
 pub(super) const BSP_FALLBACK_CAMERA_CLEARANCE: i32 = 8;
 /// Boom-to-wall margin for the point-traced follow camera in brush worlds.
-pub(super) const BSP_CAMERA_WALL_MARGIN: i32 = 12;
+pub(super) const BSP_CAMERA_WALL_MARGIN: i32 = 16;
 pub(super) const BSP_FALLBACK_CAMERA_MARGIN: i32 = 4;
 pub(super) const BSP_USE_DISTANCE: i32 = 256;
 const BSP_BOUNDS_VISIBILITY_CACHE_SIZE: usize = 16;
@@ -334,6 +334,25 @@ impl fmt::Display for BspRuntimeInitError {
 }
 
 /// Resident brush world embedded in the ordinary [`crate::Playtest`] scene.
+/// Counts the traces a camera update asks of its provider.
+struct CountingTraceProvider<'a, P: ?Sized> {
+    inner: &'a mut P,
+    traces: u32,
+}
+
+impl<P: psx_engine::CollisionTraceProvider + ?Sized> psx_engine::CollisionTraceProvider
+    for CountingTraceProvider<'_, P>
+{
+    fn trace_into(
+        &mut self,
+        query: psx_engine::CollisionTraceQuery,
+        output: &mut psx_engine::CollisionTrace,
+    ) -> bool {
+        self.traces += 1;
+        self.inner.trace_into(query, output)
+    }
+}
+
 pub(super) struct BspRuntime {
     map: PxbspResidentMap,
     renderer: Renderer,
@@ -365,6 +384,7 @@ pub(super) struct BspRuntime {
     /// Packet words the world (plus its brush models) used last frame: the
     /// prediction [`Self::draw`] fences against before drawing.
     last_world_packet_words: usize,
+    camera_traces: u32,
 }
 
 impl BspRuntime {
@@ -534,6 +554,7 @@ impl BspRuntime {
             world_object_pvs: WorldObjectVisibility::NONE,
             fragment_events: [BspDestructibleFragmentEvent::EMPTY; MAX_BSP_DESTRUCTIBLES],
             last_world_packet_words: 0,
+            camera_traces: 0,
         })
     }
 
@@ -1543,14 +1564,26 @@ impl BspRuntime {
         .expect("validated PXBSP camera collision provider");
         let mut provider =
             CharacterBlockerTraceProvider::new_with_aabbs(&mut provider, &[], aabb_blockers);
-        camera.update_vblanks_with_trace_provider(
+        let mut counting = CountingTraceProvider {
+            inner: &mut provider,
+            traces: 0,
+        };
+        let frame = camera.update_vblanks_with_trace_provider(
             PROJECTION,
-            &mut provider,
+            &mut counting,
             target,
             input,
             config,
             delta_vblanks,
-        )
+        );
+        self.camera_traces = counting.traces;
+        frame
+    }
+
+    /// Point traces the last camera update spent: the spring arm, floor and
+    /// segment clamps, and the escape, lift and sight probes.
+    pub(super) fn camera_traces(&self) -> u32 {
+        self.camera_traces
     }
 
     /// Packet words the last world pass wrote.
