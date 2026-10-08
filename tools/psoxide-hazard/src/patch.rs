@@ -11,7 +11,7 @@ use crate::detect::{
 use crate::linkmap::io_message;
 use crate::listing::{load_address, word_at_offset, Listing, HEADER};
 use crate::text::{fields, int_hex, strip, trailing_hex};
-use crate::{cli_args, open_map, report_unlisted, text_only};
+use crate::{cli_args, open_map, report_unlisted, text_bounds, whole_image};
 
 /// Usage text.
 pub const USAGE: &str = "\
@@ -41,18 +41,27 @@ slot instead:
 The trampolines live in psx-rt's `HAZARD_TRAMPOLINES` .data array (magic
 0x48415a54, capacity, words).
 
-    hazard-patch game.exe          # patch in place
-    hazard-patch game.exe --check  # report only, exit 1 on hazards
-    hazard-patch game.exe --map game.map
-    hazard-patch game.exe --map game.map --text-only
+    hazard-patch game.exe --map game.map   # patch in place
+    hazard-patch game.exe --map game.map --check
+    hazard-patch game.exe --check          # report only, exit 1 on hazards
+    hazard-patch game.exe --whole-image    # patch without a map (see below)
 
-With `--map` (ld.lld's `-Map` output for the same link) a switch's jump
-table is proven, required to lie in `.rodata`, and bounded to its own
-function. A map from another link is refused. Scan an image patched with
-`--map` with `hazard-scan --map` too. `--text-only` (with `--map`) lists
-only the map's `.text` and treats every word there as code: 4bpp texture
-bytes elsewhere in the load decode as plausible branches (0x11111111 is
-`beq t0,s1`).
+`--map` (ld.lld's `-Map` output for the same link) is what makes patching
+safe. It gives the bounds of `.text`, the only executable section, and
+patching reads and rewrites only words there (plus the trampoline array, and
+the jump table entries of a switch, which are data words the map proves lie
+in `.rodata`). Everything else in the load is `.data`, `.rodata` and assets,
+and its words decode as plausible instructions: a static slice of length 8
+is `jr zero`, 0x11111111 is `beq t0,s1`. Treated as code, a table like that
+is rewritten into jumps. A map from another link is refused. Scan an image
+patched with `--map` with `hazard-scan --map` too. `--text-only` is accepted
+and does nothing: `--map` always bounds to `.text`.
+
+Without a map the executable bounds are unknown, so patching refuses (exit
+2) unless `--whole-image` asks for the heuristic over every word of the load:
+a word is code unless an undecodable word sits within 16 words of it. That
+mode can corrupt data and exists for images with no link map. `--check` only
+reports, and needs neither.
 
 Exit status is non-zero when a hazard cannot be patched, the array is
 missing or full, or the rescan after patching still finds one.
@@ -72,7 +81,7 @@ fn env_addresses(name: &str) -> Vec<i64> {
 /// Run the patcher with command-line `args` (no program name); returns the
 /// exit status.
 pub fn main(args: &[String], out: &mut dyn Write) -> i32 {
-    match text_only(args, out) {
+    match text_bounds(args, out) {
         Ok(text) => main_in(args, text, out),
         Err(Some(status)) => status,
         Err(None) => {
@@ -104,6 +113,16 @@ pub fn main_in(args: &[String], text: Option<(i64, i64)>, out: &mut dyn Write) -
     };
     if paths.len() != 1 {
         let _ = write!(out, "{USAGE}");
+        return 2;
+    }
+    if text.is_none() && !check_only && !whole_image(args) {
+        let _ = writeln!(
+            out,
+            "refusing to patch {} without .text bounds: pass the link map (--map game.map), \
+             or --whole-image to patch every word of the load that looks like code, which \
+             can rewrite data",
+            paths[0]
+        );
         return 2;
     }
     let path = Path::new(&paths[0]);
@@ -169,9 +188,26 @@ pub fn main_in(args: &[String], text: Option<(i64, i64)>, out: &mut dyn Write) -
     let word_at = |data: &[u8], addr: i64| -> u32 {
         word_at_offset(data, addr - base + HEADER).expect("word inside the image")
     };
-    let put_word = |data: &mut [u8], addr: i64, value: u32| {
+    // With `.text` bounds the only words this tool may write are in `.text`
+    // (the rerouted branches) or in the trampoline array; a write anywhere
+    // else is recorded and fails the run before the file is touched. Jump
+    // table entries are data words by design and go through `put_entry`.
+    let tramp_area = std::cell::Cell::new((0i64, 0i64));
+    let outside_text = std::cell::RefCell::new(Vec::new());
+    let write = |data: &mut [u8], addr: i64, value: u32| {
         let off = (addr - base + HEADER) as usize;
         data[off..off + 4].copy_from_slice(&value.to_le_bytes());
+    };
+    let put_word = |data: &mut [u8], addr: i64, value: u32| {
+        if let Some((lo, hi)) = text {
+            let (area_lo, area_hi) = tramp_area.get();
+            let inside = |lo: i64, hi: i64| lo <= addr && addr + 4 <= hi;
+            if !inside(lo, hi) && !inside(area_lo, area_hi) {
+                outside_text.borrow_mut().push(addr);
+                return;
+            }
+        }
+        write(data, addr, value);
     };
 
     // The trampoline array: magic, capacity, then free words.
@@ -194,6 +230,7 @@ pub fn main_in(args: &[String], text: Option<(i64, i64)>, out: &mut dyn Write) -
         );
         return 1;
     };
+    tramp_area.set((area_start, area_start + capacity * 4));
     // An earlier pass may have used the area. Its trampolines contain nops,
     // so the first zero word is not free space: resume after the last
     // non-zero word plus the nop in its delay slot (every trampoline ends
@@ -252,7 +289,7 @@ pub fn main_in(args: &[String], text: Option<(i64, i64)>, out: &mut dyn Write) -
                     tramp
                 }
             };
-            put_word(&mut data, *entry, tramp as u32);
+            write(&mut data, *entry, tramp as u32);
             patched += 1;
             let _ = writeln!(
                 out,
@@ -373,6 +410,18 @@ pub fn main_in(args: &[String], text: Option<(i64, i64)>, out: &mut dyn Write) -
         );
     }
 
+    let outside = outside_text.into_inner();
+    if !outside.is_empty() {
+        let list: Vec<String> = outside.iter().map(|a| format!("{a:08x}")).collect();
+        let _ = writeln!(
+            out,
+            "refusing to patch {path_text}: {} writes outside .text and the trampoline array \
+             ({}); nothing was written",
+            outside.len(),
+            list.join(" ")
+        );
+        return 1;
+    }
     if let Err(error) = std::fs::write(path, &data) {
         let _ = writeln!(out, "{}", io_message(&error, path));
         return 1;

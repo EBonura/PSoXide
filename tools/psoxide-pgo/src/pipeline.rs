@@ -496,8 +496,9 @@ impl Guest {
             // A `-Map` the guest's build.rs adds comes later on the link
             // line and wins.
             eprintln!(
-                "psoxide-pgo: warning: the link wrote no map to {}, so the hazard tools and \
-                 the stack guard run without one",
+                "psoxide-pgo: warning: the link wrote no map to {}; without it the hazard patcher \
+                 has no .text bounds and refuses to patch (it would read data as code), and the \
+                 stack guard runs without one",
                 map.display()
             );
             None
@@ -598,6 +599,12 @@ impl Guest {
     /// checks are psoxide-hazard's, run in this process and writing to its
     /// stdout; `--patcher`, `--scanner` and `--stack-guard` swap one for a
     /// program. Never piped: a swallowed failure ships an unpatched exe.
+    ///
+    /// The map is also what bounds the patcher and scanner to `.text`: with
+    /// it they read and rewrite nothing else (a `.rodata` table of small
+    /// integers decodes as branches and loads). Without one the built-in
+    /// patcher refuses, so a link whose map is missing fails here rather
+    /// than shipping corrupted data.
     fn patch(&self, exe: &Path, map: Option<&Path>) -> Result<()> {
         let args = |map_flag: bool| {
             let mut args = vec![exe.display().to_string()];

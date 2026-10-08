@@ -11,7 +11,7 @@ use crate::detect::{
 use crate::linkmap::{io_message, LinkMap};
 use crate::listing::{load_address, Listing, HEADER};
 use crate::text::strip;
-use crate::{cli_args, open_map, report_unlisted, text_only};
+use crate::{cli_args, open_map, report_unlisted, text_bounds};
 
 /// Usage text.
 pub const USAGE: &str = "\
@@ -28,13 +28,16 @@ latter). This scan proves an image is clean, whatever built it.
 
     hazard-scan path/to/game.exe [more.exe ...]
     hazard-scan path/to/game.exe --map path/to/game.map
-    hazard-scan path/to/game.exe --map path/to/game.map --text-only
+    hazard-scan path/to/game.exe              # no map: heuristic, see below
 
 Prints every hazard as `branch | delay-slot load | consumer` and exits 1 if
 any image has one. Loads into $zero (cache probes) are ignored, and so is
 anything within 16 words of a word that does not decode as an instruction.
 `--map` (one image only) resolves jump tables as `hazard-patch --map` does,
-and `--text-only` scans only the map's `.text` as `hazard-patch --text-only`.
+and scans only the map's `.text`, as `hazard-patch --map` patches only it
+(`--text-only` is accepted and does nothing). Without a map, or with
+`--whole-image`, every word of the load that looks like code is scanned, and
+data that decodes as a branch can be reported.
 It also warns, without failing, about a GTE command (COP2 `cofun`) in a
 branch delay slot: an interrupt taken on it runs the branch and the command
 twice. A slot load whose consumer cannot be seen from the image (`jr ra`,
@@ -168,7 +171,7 @@ fn scan_in(
 /// Run the scanner with command-line `args` (no program name); returns the
 /// exit status.
 pub fn main(args: &[String], out: &mut dyn Write) -> i32 {
-    match text_only(args, out) {
+    match text_bounds(args, out) {
         Ok(Some(text)) => main_in(args, text, out),
         Ok(None) => main_with(args, &looks_like_code, out),
         Err(Some(status)) => status,

@@ -56,8 +56,10 @@ Examples that use CD audio or WORLD.PAK need their own pack inputs; the generic
   `guest_symbol_gate.sh` (a link-map grep for 64-bit helpers): guest checks.
   psoxide-hazard decodes the image with `crates/psx-disasm`, no objdump. The
   patcher and scanner share one detector; given the link's `-Map` (`--map`),
-  both bound each switch's jump table to its own function, and `--text-only`
-  limits them to the map's `.text`. `stack-guard` proves every
+  both bound each switch's jump table to its own function and read, and
+  rewrite, nothing outside the map's `.text` (plus the trampoline array and
+  the proven jump table words). Without a map `hazard-patch` refuses unless
+  `--whole-image` is given, because data decodes as branches and loads. `stack-guard` proves every
   `psx_rt::scratchpad::ScratchpadStack` call tree in a linked exe fits its
   scratchpad region, from the exe and its ld.lld `-Map`. psoxide-pgo runs all
   three in-process.
@@ -94,7 +96,8 @@ moving its SDK pin past them changes four things:
 1. Its build driver runs `hazard-patch`, `hazard-scan` and `stack-guard`,
    built from the hydrated tree (`cargo build --release -p psoxide-hazard` in
    `.psoxide`), where it ran `python3 .psoxide/tools/hazard_patch.py`,
-   `hazard_scan.py` and `stack_guard.py`. The arguments are unchanged.
+   `hazard_scan.py` and `stack_guard.py`. The arguments are unchanged, except
+   that `hazard-patch` needs `--map` (the link's `-Map` output).
    psoxide-pgo runs them in-process, so a PGO build needs nothing.
 2. Its `components.lock.json` lists `tools/psoxide-hazard` for the SDK
    component in place of the three `.py` paths (`crates` already brings

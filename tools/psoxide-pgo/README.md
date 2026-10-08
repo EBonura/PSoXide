@@ -80,11 +80,15 @@ does not change the emitted bytes) to
 crate, the cargo arguments and the rustflags, so a build cargo finds fresh
 still has the map of its own link. The patcher and scanner get it as
 `--map`, which proves every jump table instead of guessing from the
-dispatch's block, and the stack guard gets it to prove every
-scratchpad stack call tree fits its region. A `-Map` the guest's own
-`build.rs` adds comes later on the link line and wins; the driver then warns
-and runs the tools without a map (and the stack guard refuses an image that
-switches to a scratchpad stack).
+dispatch's block and bounds both tools to the map's `.text`: nothing in
+`.data`, `.rodata` or an asset is read as code or rewritten (a static slice
+of length 8 decodes as `jr zero`, and a table like that was once patched into
+jumps). The stack guard gets the map to prove every scratchpad stack call
+tree fits its region. A `-Map` the guest's own `build.rs` adds comes later on
+the link line and wins; the driver then warns, and the patcher refuses to
+run without `.text` bounds (and the stack guard refuses an image that
+switches to a scratchpad stack). The guest's `build.rs` must hand the driver
+the map it asks the link for.
 
 Two conventions the guest must follow:
 
