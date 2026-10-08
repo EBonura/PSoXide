@@ -751,6 +751,16 @@ fn with_vertices(surface: &CompiledSurface, vertices: Vec<[f64; 3]>) -> Compiled
 }
 
 fn subtract_convex_brush(polygon: &[[f64; 3]], planes: &[Plane]) -> Vec<Vec<[f64; 3]>> {
+    // Adjacent terrain wedges touch at their sides, but sloped top planes
+    // can split an entirely exterior neighbour before the side plane rejects
+    // it. A separating plane proves there is nothing to subtract; preserve
+    // the original low-poly face instead of emitting artificial fragments.
+    if planes
+        .iter()
+        .any(|plane| classify_polygon(polygon, *plane) == PolygonSide::Front)
+    {
+        return vec![polygon.to_vec()];
+    }
     let mut inside = polygon.to_vec();
     let mut outside = Vec::new();
     for plane in planes {
