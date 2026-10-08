@@ -76,6 +76,11 @@ pub struct Model {
     pub ack_width: u64,
     pub fault: Fault,
     pub fault_byte: usize,
+    /// The transport has no setup clock (the trait default).
+    pub no_clock: bool,
+    /// Model time the setup clock was last started at.
+    // psx-numeric-allow-next-line: host-only controller model, compiled under cfg(test)
+    pub clock_start: u64,
     /// Apply the fault to the first select only.
     pub fault_once: bool,
     /// Per-select `(id, fault, byte)` overrides, indexed by attempt.
@@ -127,6 +132,8 @@ impl Default for Model {
             ack_width: 5,
             fault: Fault::None,
             fault_byte: 3,
+            no_clock: false,
+            clock_start: 0,
             fault_once: false,
             sequence: Vec::new(),
             early: 0,
@@ -353,4 +360,18 @@ impl psx_io::controller_port::Transport for MockBus {
         // SAFETY: as above.
         unsafe { write_u16(CTRL, value) }
     }
+    fn start_setup_clock(&mut self) -> bool {
+        with(|m| {
+            m.clock_start = m.now;
+            !m.no_clock
+        })
+    }
+    /// One model tick is [`CYCLES_PER_TICK`] cycles of this clock.
+    fn setup_clock(&mut self) -> u16 {
+        with(|m| ((m.now - m.clock_start) * CYCLES_PER_TICK) as u16)
+    }
 }
+
+/// Cycles one model tick stands for on the modelled setup clock.
+// psx-numeric-allow-next-line: host-only controller model, compiled under cfg(test)
+pub const CYCLES_PER_TICK: u64 = 100;

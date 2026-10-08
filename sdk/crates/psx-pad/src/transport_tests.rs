@@ -11,6 +11,7 @@ extern crate std;
 
 use crate::mock_sio::{self as mock, Fault, MockBus, Model};
 use crate::{button, poll_on, AnalogRequirement, PadMode, PadReader, PadState, Port};
+use psx_io::controller_port::Transport;
 use std::vec;
 
 fn start(model: Model) {
@@ -327,4 +328,124 @@ fn the_token_is_accepted(port: &mut psx_io::periph::ControllerPort) {
     let _ = poll_on(port, Port::One);
     let _ = PadReader::port2().poll_on(port);
     let _ = crate::require_analog_on(port, Port::Two);
+}
+
+/// Run `work` model ticks of status reads between the select and the poll,
+/// then poll; returns the state and the ticks the poll itself took.
+fn prepared_poll(model: Model, work: u32) -> (PadState, u64) {
+    start(model);
+    let mut reader = PadReader::port1();
+    let mut bus = MockBus;
+    reader.prepare_on(&mut bus);
+    for _ in 0..work {
+        let _ = bus.status();
+    }
+    let before = mock::with(|m| m.now);
+    let pad = reader.poll_on(&mut bus);
+    (pad, mock::with(|m| m.now) - before)
+}
+
+fn plain_poll_ticks(model: Model) -> (PadState, u64) {
+    start(model);
+    let mut bus = MockBus;
+    let mut reader = PadReader::port1();
+    let before = mock::with(|m| m.now);
+    let pad = reader.poll_on(&mut bus);
+    (pad, mock::with(|m| m.now) - before)
+}
+
+#[test]
+fn a_prepared_poll_reads_what_a_plain_poll_reads_in_far_fewer_reads() {
+    let held = button::CROSS | button::R1;
+    let model = || Model {
+        buttons: held,
+        ..Model::default()
+    };
+    let (plain, plain_ticks) = plain_poll_ticks(model());
+    let (prepared, prepared_ticks) = prepared_poll(model(), 100);
+    assert_eq!(prepared, plain);
+    assert_eq!(prepared.buttons.bits(), held);
+    // The 1,024-read setup delay is gone; the bytes cost the same.
+    assert!(plain_ticks >= 1_024, "plain poll took {plain_ticks} ticks");
+    assert!(
+        prepared_ticks < plain_ticks - 1_000,
+        "prepared {prepared_ticks} vs plain {plain_ticks}"
+    );
+    mock::with(|m| {
+        // One select for the whole transaction, no control write inside it,
+        // every byte of the analog packet sent in order, none early.
+        assert_eq!((m.attempts, m.mid_ctrl, m.early, m.tx_errors), (1, 0, 0, 0));
+        assert_eq!(m.sends, 9);
+        assert!(!m.is_selected());
+    });
+}
+
+#[test]
+fn a_prepared_poll_with_too_little_work_since_the_select_still_waits_the_setup_time() {
+    // 69 ticks of 100 cycles is just under SETUP_CYCLES.
+    let (_, short) = prepared_poll(Model::default(), 60);
+    let (_, plain) = plain_poll_ticks(Model::default());
+    assert!(short + 60 >= plain, "short {short} plain {plain}");
+    mock::with(|m| assert_eq!((m.attempts, m.mid_ctrl), (1, 0)));
+}
+
+#[test]
+fn the_setup_clock_threshold_is_the_default_setup_delay_in_cycles() {
+    // Just under: spins. At the threshold: no spins.
+    let ticks = u64::from(crate::SETUP_CYCLES) / mock::CYCLES_PER_TICK;
+    let (_, under) = prepared_poll(Model::default(), (ticks - 4) as u32);
+    let (_, over) = prepared_poll(Model::default(), (ticks + 2) as u32);
+    assert!(under > over + 900, "under {under} over {over}");
+}
+
+#[test]
+fn a_transport_without_a_setup_clock_polls_the_plain_way() {
+    let model = || Model {
+        no_clock: true,
+        ..Model::default()
+    };
+    let (prepared, prepared_ticks) = prepared_poll(model(), 1_000);
+    let (plain, plain_ticks) = plain_poll_ticks(model());
+    assert_eq!(prepared, plain);
+    // The select was made early, but the full delay is still spun.
+    assert!(prepared_ticks >= 1_024, "{prepared_ticks} vs {plain_ticks}");
+}
+
+#[test]
+fn a_prepared_flag_serves_one_poll_only() {
+    start(Model::default());
+    let mut bus = MockBus;
+    let mut reader = PadReader::port1();
+    reader.prepare_on(&mut bus);
+    for _ in 0..100 {
+        let _ = bus.status();
+    }
+    let _ = reader.poll_on(&mut bus);
+    let before = mock::with(|m| m.now);
+    let _ = reader.poll_on(&mut bus);
+    // The second poll got no head start.
+    assert!(mock::with(|m| m.now) - before >= 1_024);
+}
+
+#[test]
+fn a_prepared_transaction_that_fails_is_retried_with_a_fresh_select() {
+    // The first attempt loses byte 3's reply; the retry is a plain poll.
+    let (pad, _) = prepared_poll(fault_model(0x73, Fault::Rx, 3, true), 100);
+    assert_eq!(pad.mode, PadMode::Analog);
+    mock::with(|m| {
+        assert_eq!(m.attempts, 2);
+        assert_eq!(m.early, 0);
+    });
+}
+
+#[test]
+fn a_prepared_empty_port_reads_disconnected() {
+    let (pad, _) = prepared_poll(
+        Model {
+            id: 0xFF,
+            ..Model::default()
+        },
+        100,
+    );
+    assert_eq!(pad.mode, PadMode::Disconnected);
 }

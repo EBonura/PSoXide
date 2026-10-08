@@ -651,6 +651,12 @@ const ACK_WAIT_SPINS: u32 = Timing::PAD.ack_spins;
 /// waits for each non-final byte's ACK readiness; the BIOS likewise paces bytes.
 pub const DEFAULT_SETUP_SPINS: u32 = Timing::PAD.setup_spins;
 
+/// CPU cycles of setup time a prepared poll requires before its first byte:
+/// [`DEFAULT_SETUP_SPINS`] status reads at the 6.7 cycles each that the
+/// on-console sweep measured, rounded up. Spinning stays the measured contract;
+/// this only lets real work stand in for the spinning.
+pub const SETUP_CYCLES: u16 = 7_000;
+
 /// Poll the controller in `socket` once.
 ///
 /// The returned [`PadState`] always contains active-high buttons; in
@@ -663,7 +669,7 @@ pub const DEFAULT_SETUP_SPINS: u32 = Timing::PAD.setup_spins;
 /// stays borrowed for the length of the poll.
 #[doc(alias = "PadRead")]
 pub fn poll_on<T: Transport>(port: &mut T, socket: Port) -> PadState {
-    poll_state(port, socket)
+    poll_state(port, socket, false)
 }
 
 /// Poll port 1 once.
@@ -788,6 +794,9 @@ pub fn require_analog_port1() -> AnalogRequirement {
 pub struct PadReader {
     socket: Port,
     last: PadState,
+    /// The socket was selected by [`PadReader::prepare_on`] and the setup
+    /// clock has been running since.
+    prepared: bool,
 }
 
 impl PadReader {
@@ -796,6 +805,7 @@ impl PadReader {
         Self {
             socket: Port::One,
             last: PadState::NONE,
+            prepared: false,
         }
     }
 
@@ -804,13 +814,46 @@ impl PadReader {
         Self {
             socket: Port::Two,
             last: PadState::NONE,
+            prepared: false,
         }
+    }
+
+    /// Select the port now, so the setup time the next poll needs passes while
+    /// the caller does other work.
+    ///
+    /// A poll spends most of its time on the setup delay between asserting the
+    /// select line and the first byte (1,024 status reads, see
+    /// [`DEFAULT_SETUP_SPINS`]). Called some work ahead of
+    /// [`poll_on`](Self::poll_on), this asserts the line and starts a cycle
+    /// clock; the poll then spins only for whatever part of the delay the
+    /// clock says has not yet passed, which is none when the caller worked for
+    /// longer than [`SETUP_CYCLES`]. The bytes, their order and the `/ACK`
+    /// pacing are those of a plain poll, so a prepared poll reads the same
+    /// state.
+    ///
+    /// The port stays selected until the poll. Nothing else may use the
+    /// [`ControllerPort`] in between: a memory-card transfer would deselect it,
+    /// and the poll would find no pad and start over with the plain sequence
+    /// (one extra transaction, no wrong state). A transport without a setup
+    /// clock ignores the call.
+    pub fn prepare_on<T: Transport>(&mut self, port: &mut T) {
+        port.select(self.socket);
+        self.prepared = port.start_setup_clock();
     }
 
     /// Poll the port once and return the latest clean state.
     pub fn poll_on<T: Transport>(&mut self, port: &mut T) -> PadState {
-        let polled = poll_state(port, self.socket);
+        let prepared = core::mem::take(&mut self.prepared);
+        let polled = poll_state(port, self.socket, prepared);
         self.accept(polled)
+    }
+
+    /// [`prepare_on`](Self::prepare_on) for a caller that has no
+    /// [`ControllerPort`] token, as [`poll`](Self::poll) is for
+    /// [`poll_on`](Self::poll_on).
+    #[deprecated(note = "use `prepare_on` with the `ControllerPort` token")]
+    pub fn prepare(&mut self) {
+        self.prepare_on(&mut steal_port());
     }
 
     /// Poll the port once and return the latest clean state.
@@ -846,12 +889,14 @@ impl PadReader {
 /// Transport failures are retried as whole transactions. Four address-byte
 /// replies of FF without ACK report Disconnected; a failure at any other
 /// stage reports Unknown instead of accepting partial button bytes.
-fn poll_state<T: Transport>(bus: &mut T, socket: Port) -> PadState {
+fn poll_state<T: Transport>(bus: &mut T, socket: Port, prepared: bool) -> PadState {
     let mut last = PadState::NONE;
     let mut all_absent = true;
     let mut tries = 0;
     while tries < 4 {
-        let s = poll_once(bus, socket).to_state();
+        // Only the first transaction can use a select made ahead of the call;
+        // a retry starts from a fresh select like any plain poll.
+        let s = poll_once(bus, socket, prepared && tries == 0).to_state();
         if matches!(s.mode, PadMode::Digital | PadMode::Analog | PadMode::Config) {
             return s;
         }
@@ -965,15 +1010,16 @@ fn ex<T: Transport>(
 /// wait for each non-final byte's live ACK assertion and release. RX-ready
 /// only establishes that the current byte arrived, not that the controller
 /// is ready for the next one. No IRQ enable or CTRL rewrite is needed.
-fn poll_once<T: Transport>(bus: &mut T, socket: Port) -> RawPoll {
+fn poll_once<T: Transport>(bus: &mut T, socket: Port, prepared: bool) -> RawPoll {
     // A previous aborted transaction may have left ACK asserted: `begin` waits
     // for it to release, so an old pulse never counts as the new address
     // byte's ACK.
-    let result = if bus.begin(socket, Timing::PAD) {
-        poll_selected(bus)
+    let started = if prepared {
+        begin_prepared(bus)
     } else {
-        None
+        bus.begin(socket, Timing::PAD)
     };
+    let result = if started { poll_selected(bus) } else { None };
     // End the peripheral transaction on every path. On a failed byte, also
     // reset the deselected UART: deselect alone need not cancel a late RX byte
     // still in its shifter/FIFO. The next select restores MODE and BAUD before
@@ -983,6 +1029,19 @@ fn poll_once<T: Transport>(bus: &mut T, socket: Port) -> RawPoll {
         mode: PadMode::Unknown,
         ..RawPoll::NONE
     })
+}
+
+/// [`Transport::begin`] for a socket [`PadReader::prepare_on`] already
+/// selected: spin the setup delay only if the setup clock has not yet counted
+/// [`SETUP_CYCLES`], then drop stale bytes and wait out a held `/ACK` as
+/// `begin` does. No control-register write happens, so the select line is not
+/// disturbed.
+fn begin_prepared<T: Transport>(bus: &mut T) -> bool {
+    if bus.setup_clock() < SETUP_CYCLES {
+        bus.delay(Timing::PAD.setup_spins);
+    }
+    bus.drain_receive();
+    bus.wait_status_clear(STAT_DSR_LEVEL, Timing::PAD.ack_spins)
 }
 
 /// A complete selected-port poll, or no usable packet. The current ID
@@ -1155,7 +1214,7 @@ fn request_analog<T: Transport>(bus: &mut T, socket: Port, gap: u32) -> PadState
         [0x43, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
     );
     bus.delay(gap);
-    let mut state = poll_state(bus, socket);
+    let mut state = poll_state(bus, socket, false);
     let mut retries = 0;
     while state.mode == PadMode::Config && retries < CONFIG_EXIT_RETRIES {
         // The exit did not take: leave the pad in a playable mode rather
@@ -1166,7 +1225,7 @@ fn request_analog<T: Transport>(bus: &mut T, socket: Port, gap: u32) -> PadState
             [0x43, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
         );
         bus.delay(gap);
-        state = poll_state(bus, socket);
+        state = poll_state(bus, socket, false);
         retries += 1;
     }
     state

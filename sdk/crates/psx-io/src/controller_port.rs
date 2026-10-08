@@ -20,6 +20,7 @@
 //! ```
 
 use crate::periph::ControllerPort;
+use crate::timers::{self, Timer};
 use crate::{read_u32, read_u8, write_u16, write_u8};
 use psx_hw::sio::sio0;
 
@@ -133,6 +134,25 @@ pub trait Transport {
         // assert the select line.
         self.set_control(sio0::ctrl::ACK);
         self.set_control(sio0::selected_ctrl(port.is_two(), arm_ack_irq));
+    }
+
+    /// Restart the setup clock: a free-running count of CPU cycles that
+    /// reads zero now. A driver that selects a socket ahead of its
+    /// transaction reads [`setup_clock`](Self::setup_clock) later to see how
+    /// much of the setup time the caller's own work already covered.
+    ///
+    /// `false` means this transport has no such clock, and the driver must
+    /// spin the whole setup delay as [`begin`](Self::begin) does.
+    fn start_setup_clock(&mut self) -> bool {
+        false
+    }
+
+    /// Cycles since [`start_setup_clock`](Self::start_setup_clock), modulo
+    /// 65,536. A wrapped count reads low, never high, so a caller that waits
+    /// until the count passes a threshold has always waited at least that
+    /// long.
+    fn setup_clock(&mut self) -> u16 {
+        0
     }
 
     /// Release `/CS`, which resets the attached device's state machine.
@@ -298,6 +318,20 @@ impl Transport for ControllerPort {
         // socket and resets the port, nothing else.
         unsafe { write_u16(sio0::CTRL, value) }
     }
+
+    /// Root counter 0 on the system clock, free-running with no gate and no
+    /// interrupt. Nothing else in the SDK drives counter 0; counter 1 times
+    /// the video frame and counter 2 is the programs' own sampling clock.
+    #[inline(always)]
+    fn start_setup_clock(&mut self) -> bool {
+        timers::set_mode(Timer::Timer0, 0);
+        true
+    }
+
+    #[inline(always)]
+    fn setup_clock(&mut self) -> u16 {
+        timers::counter(Timer::Timer0)
+    }
 }
 
 #[cfg(test)]
@@ -388,6 +422,14 @@ mod tests {
         let mut bus = Script::default();
         bus.finish(false);
         assert_eq!(bus.control, [0, sio0::ctrl::RESET]);
+    }
+
+    #[test]
+    fn a_transport_without_a_setup_clock_says_so() {
+        let mut bus = Script::default();
+        assert!(!bus.start_setup_clock());
+        assert_eq!(bus.setup_clock(), 0);
+        assert!(bus.control.is_empty());
     }
 
     #[test]
