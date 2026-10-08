@@ -63,7 +63,7 @@ The project uses the following practices:
 
 - **Hardware testing.** Emulator checks complement testing on original hardware; they don't replace it. When the emulator and a real PlayStation disagree, the PlayStation is right.
 - **Recorded measurements.** The [comparison page](@/emulator/compare.md) ties its figures to recorded builds, explains the limits of the benchmark and separates measured results from work still in progress.
-- **Firmware and game data.** PSoXide doesn't need Sony's BIOS and can't load one. It does not distribute commercial disc images. Half-Life and Hollow Knight require your own game data; Quake uses shareware data whose conversion and distribution permissions need further review. See [project-specific terms](@/legal.md#ports-built-from-other-people-s-games).
+- **Firmware and game data.** PSoXide doesn't need Sony's BIOS and can't load one. It does not distribute commercial disc images. Half-Life and Hollow Knight require your own game data; Quake uses the shareware episode's data. See [project-specific terms](@/legal.md#ports-built-from-other-people-s-games).
 - **Source and provenance.** The SDK, emulator and editor source is public under GPL-2.0-or-later, with provenance written down. Some experiments have no public release yet.
 
 ## Licensing and rights
