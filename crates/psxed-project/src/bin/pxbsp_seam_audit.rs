@@ -1,6 +1,6 @@
 //! Read-only watertightness report for a cooked PXBSP.
 //!
-//! Usage: pxbsp-seam-audit <cooked.pxbsp> [tolerance-units] [sample-count]
+//! Usage: pxbsp-seam-audit <cooked.pxbsp | project.ron> [tolerance-units] [sample-count]
 
 use std::process::ExitCode;
 
@@ -14,11 +14,41 @@ fn main() -> ExitCode {
     };
     let tolerance = args.get(1).and_then(|v| v.parse().ok()).unwrap_or(1i64);
     let samples = args.get(2).and_then(|v| v.parse().ok()).unwrap_or(12usize);
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            eprintln!("{path}: {error}");
-            return ExitCode::from(2);
+    let bytes = if path.ends_with(".ron") {
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) => {
+                eprintln!("{path}: {error}");
+                return ExitCode::from(2);
+            }
+        };
+        let project = match psxed_project::ProjectDocument::from_ron_str(&text) {
+            Ok(project) => project,
+            Err(error) => {
+                eprintln!("{path}: parse failed: {error}");
+                return ExitCode::from(2);
+            }
+        };
+        let root = std::path::Path::new(path)
+            .parent()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let (package, validation) = psxed_project::playtest::build_package(&project, &root);
+        for error in &validation.errors {
+            eprintln!("error: {error}");
+        }
+        let Some(package) = package else {
+            eprintln!("the project did not produce a playtest package");
+            return ExitCode::from(1);
+        };
+        package.world_geometry.bytes.clone()
+    } else {
+        match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                eprintln!("{path}: {error}");
+                return ExitCode::from(2);
+            }
         }
     };
     let mut map = psx_bsp::pxbsp_resident::PxbspResidentMap::with_capacity(bytes.len());
@@ -74,6 +104,8 @@ fn main() -> ExitCode {
             t.position,
             face_ids[t.touching_polygon]
         );
+        println!("      face polygon {:?}", poly);
+        println!("      touching polygon {:?}", polygons[t.touching_polygon]);
     }
     ExitCode::SUCCESS
 }

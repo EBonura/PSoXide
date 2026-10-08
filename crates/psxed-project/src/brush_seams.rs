@@ -202,6 +202,9 @@ pub fn conform_t_junctions(
         .map(|&i| polygons[i].iter().copied().map(round_corner).collect())
         .collect();
     let junctions = find_t_junctions(&rounded, CONFORM_TOLERANCE_UNITS);
+    // Corner indices in `junctions` refer to the polygons as they were found,
+    // and a polygon that is rebuilt below shifts its own indices.
+    let original: Vec<Vec<[f64; 3]>> = polygons.to_vec();
     let mut stats = ConformStats::default();
     let mut cursor = 0;
     while cursor < junctions.len() {
@@ -216,7 +219,7 @@ pub fn conform_t_junctions(
         let count = source.len();
         let mut rebuilt = Vec::with_capacity(count + group.len());
         for edge in 0..count {
-            rebuilt.push(polygons[active[polygon]][edge]);
+            rebuilt.push(original[active[polygon]][edge]);
             let a = source[edge];
             let b = source[(edge + 1) % count];
             let direction = sub(b, a);
@@ -227,7 +230,7 @@ pub fn conform_t_junctions(
                     (
                         dot(sub(t.position, a), direction),
                         t.position,
-                        polygons[active[t.touching_polygon]][t.touching_corner],
+                        original[active[t.touching_polygon]][t.touching_corner],
                     )
                 })
                 .collect();
@@ -283,7 +286,7 @@ mod tests {
         assert_eq!(polygons[0].len(), 5);
         assert!(find_t_junctions(&rounded(&polygons), 1).is_empty());
         // The new corner sits between the edge's own corners, in order.
-        assert_eq!(polygons[0][2], [30.0, 0.0, 50.0]);
+        assert_eq!(polygons[0][3], [30.0, 0.0, 50.0]);
     }
 
     #[test]
@@ -297,6 +300,24 @@ mod tests {
         assert!(find_t_junctions(&rounded(&polygons), 1).is_empty());
         let xs: Vec<f64> = polygons[0].iter().map(|v| v[0]).collect();
         assert_eq!(xs, vec![0.0, 100.0, 100.0, 70.0, 60.0, 20.0, 10.0, 0.0]);
+    }
+
+    #[test]
+    fn two_polygons_that_both_gain_vertices_take_each_others_original_corners() {
+        // The long edges of A and B overlap with staggered corners, so each
+        // needs the other's corner, and either rebuild shifts corner indices.
+        let mut polygons = vec![
+            vec![[0.0, 0.0, 0.0], [60.0, 0.0, 0.0], [60.0, 0.0, 10.0], [0.0, 0.0, 10.0]],
+            vec![[40.0, 0.0, 10.0], [100.0, 0.0, 10.0], [100.0, 0.0, 20.0], [40.0, 0.0, 20.0]],
+            vec![[20.0, 0.0, 10.0], [40.0, 0.0, 10.0], [40.0, 0.0, 30.0], [20.0, 0.0, 30.0]],
+        ];
+        conform_t_junctions(&mut polygons, |_| false);
+        assert!(find_t_junctions(&rounded(&polygons), 1).is_empty());
+        for polygon in &polygons {
+            for pair in polygon.windows(2) {
+                assert_ne!(pair[0], pair[1], "no zero-length edge: {polygon:?}");
+            }
+        }
     }
 
     #[test]
