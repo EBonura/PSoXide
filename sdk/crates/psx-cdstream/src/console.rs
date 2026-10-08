@@ -7,7 +7,8 @@
 //! # Interrupt path
 //!
 //! The wrapper sits in the general exception vector in front of psx-rt's
-//! handler. For an interrupt with the CD source pending it saves the
+//! handler, or in front of another wrapper that leads there (the pad engine's),
+//! whichever was in the vector when [`install`] ran. For an interrupt with the CD source pending it saves the
 //! interrupted CPU context, switches to a private 2 KiB stack, calls the
 //! engine for one sector or one response, restores the context, and jumps to
 //! psx-rt's handler either way, so the VBlank counter, the display flip and
@@ -235,6 +236,12 @@ static mut PSX_CD_IRQ_STACK: Stack = Stack([0; HANDLER_STACK_BYTES]);
 /// Where the wrapper saves the interrupted context.
 #[no_mangle]
 static mut PSX_CD_IRQ_CONTEXT: [u32; 34] = [0; 34];
+/// The handler the wrapper hands every exception on to: whatever the vector
+/// led to when [`install`] first ran (psx-rt's, or another wrapper such as the
+/// pad engine's), so the wrappers can be installed in either order. Zero until
+/// then.
+#[no_mangle]
+static mut PSX_CD_NEXT_HANDLER: u32 = 0;
 
 /// The counters, as one block for tools that read guest memory:
 /// [`StreamStats`] with its field order. Updated after every interrupt and
@@ -416,8 +423,13 @@ psx_cdstream_exception_wrapper:
     lw    $31, 112($26)
     nop
 9:
-    # psx-rt's handler: VBlank, display flip, faults, strays, and the return.
-    j     __psx_rt_exception_handler
+    # The handler that was in the vector before this one: psx-rt's (VBlank,
+    # display flip, faults, strays, and the return), or another wrapper that
+    # leads there.
+    lui   $26, %hi({next})
+    lw    $26, %lo({next})($26)
+    nop
+    jr    $26
     nop
     .set at
     .set reorder
@@ -429,6 +441,7 @@ psx_cdstream_exception_wrapper:
     stack = sym PSX_CD_IRQ_STACK,
     stack_bytes = const HANDLER_STACK_BYTES,
     context = sym PSX_CD_IRQ_CONTEXT,
+    next = sym PSX_CD_NEXT_HANDLER,
     handler = sym psx_cdstream_interrupt,
 );
 
@@ -444,6 +457,8 @@ const _: () = {
 #[cfg(target_arch = "mips")]
 extern "C" {
     fn psx_cdstream_exception_wrapper();
+    #[link_name = "__psx_rt_exception_handler"]
+    fn psx_rt_exception_handler();
 }
 
 /// Called by the wrapper, on the private stack, with CPU interrupts off.
@@ -514,13 +529,30 @@ fn paint_stack() {
 fn install_vector() {
     const EXCEPTION_VECTOR: *mut u32 = 0x8000_0080 as *mut u32;
     const J_OPCODE: u32 = 0x0800_0000;
+    const J_MASK: u32 = 0xfc00_0000;
     let wrapper = psx_cdstream_exception_wrapper as *const () as usize as u32;
-    // SAFETY: the general exception vector is two words of kernel RAM; the
-    // wrapper switches stacks before it stores anything and hands over to
-    // psx-rt's handler, which is how psx-rt's own installer fills it. The
-    // instruction cache is flushed so the CPU fetches the new words, and the
-    // wrapper is declared stack-safe so scratchpad stacks stay allowed.
+    // SAFETY: the general exception vector is two words of kernel RAM. The
+    // handler it leads to now is kept in a static the wrapper reads, before the
+    // vector is rewritten; it is psx-rt's unless something chained in front of
+    // psx-rt (the pad engine's wrapper) is there, and anything that is not a
+    // `j` is replaced by psx-rt's as before. A wrapper that has been installed
+    // before is not put in front again: it is already in the chain, and
+    // writing the vector would drop whatever was installed since. The wrapper
+    // switches stacks before it stores anything and hands over with `$sp` as
+    // it found it. The instruction cache is flushed so the CPU fetches the new
+    // words, and the wrapper is declared stack-safe so scratchpad stacks stay
+    // allowed.
     unsafe {
+        if core::ptr::read_volatile(&raw const PSX_CD_NEXT_HANDLER) != 0 {
+            return;
+        }
+        let current = core::ptr::read_volatile(EXCEPTION_VECTOR);
+        let next = if current & J_MASK == J_OPCODE {
+            ((current & !J_MASK) << 2) | 0x8000_0000
+        } else {
+            psx_rt_exception_handler as *const () as usize as u32
+        };
+        core::ptr::write_volatile(&raw mut PSX_CD_NEXT_HANDLER, next);
         core::ptr::write_volatile(EXCEPTION_VECTOR, J_OPCODE | ((wrapper >> 2) & 0x03ff_ffff));
         core::ptr::write_volatile(EXCEPTION_VECTOR.add(1), 0);
         psx_rt::cache::flush_instruction_cache();
