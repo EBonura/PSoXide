@@ -64,13 +64,21 @@ fn main() -> ExitCode {
     let mut sky_faces = 0usize;
     let mut sky_polygons: Vec<Vec<[i32; 3]>> = Vec::new();
     for index in 0..faces.len() {
-        let Some(face) = faces.get(index) else { continue };
+        let Some(face) = faces.get(index) else {
+            continue;
+        };
         let sky = materials
             .get(face.texture.max(0) as usize)
             .is_some_and(|m| m.flags & psx_bsp::pxbsp::material_flags::SKY_APERTURE != 0);
         let polygon: Vec<[i32; 3]> = (0..face.vertex_count.max(0) as usize)
             .filter_map(|k| vertices.get(face.first_vertex as usize + k))
-            .map(|v| [i32::from(v.position.x), i32::from(v.position.y), i32::from(v.position.z)])
+            .map(|v| {
+                [
+                    i32::from(v.position.x),
+                    i32::from(v.position.y),
+                    i32::from(v.position.z),
+                ]
+            })
             .collect();
         if sky {
             sky_faces += 1;

@@ -49,12 +49,7 @@ fn cross_len_sq(a: [i64; 3], b: [i64; 3]) -> i64 {
 
 /// Whether `point` lies strictly inside the segment `a`-`b`, within
 /// `tolerance` world units of the line.
-pub fn point_on_edge_interior(
-    point: [i32; 3],
-    a: [i32; 3],
-    b: [i32; 3],
-    tolerance: i64,
-) -> bool {
+pub fn point_on_edge_interior(point: [i32; 3], a: [i32; 3], b: [i32; 3], tolerance: i64) -> bool {
     if point == a || point == b {
         return false;
     }
@@ -337,9 +332,24 @@ mod tests {
         // The long edges of A and B overlap with staggered corners, so each
         // needs the other's corner, and either rebuild shifts corner indices.
         let mut polygons = vec![
-            vec![[0.0, 0.0, 0.0], [60.0, 0.0, 0.0], [60.0, 0.0, 10.0], [0.0, 0.0, 10.0]],
-            vec![[40.0, 0.0, 10.0], [100.0, 0.0, 10.0], [100.0, 0.0, 20.0], [40.0, 0.0, 20.0]],
-            vec![[20.0, 0.0, 10.0], [40.0, 0.0, 10.0], [40.0, 0.0, 30.0], [20.0, 0.0, 30.0]],
+            vec![
+                [0.0, 0.0, 0.0],
+                [60.0, 0.0, 0.0],
+                [60.0, 0.0, 10.0],
+                [0.0, 0.0, 10.0],
+            ],
+            vec![
+                [40.0, 0.0, 10.0],
+                [100.0, 0.0, 10.0],
+                [100.0, 0.0, 20.0],
+                [40.0, 0.0, 20.0],
+            ],
+            vec![
+                [20.0, 0.0, 10.0],
+                [40.0, 0.0, 10.0],
+                [40.0, 0.0, 30.0],
+                [20.0, 0.0, 30.0],
+            ],
         ];
         conform_t_junctions(&mut polygons, |_| false);
         assert!(find_t_junctions(&rounded(&polygons), 1).is_empty());
@@ -390,8 +400,16 @@ mod tests {
     fn a_half_unit_point_rounds_identically_after_welding() {
         // The same midpoint reached with opposite noise around x.5.
         let mut polygons = vec![
-            vec![[0.0, 122.499_999_9, 0.0], [10.0, 0.0, 0.0], [0.0, 0.0, 10.0]],
-            vec![[0.0, 122.500_000_1, 0.0], [0.0, 0.0, 10.0], [-10.0, 0.0, 0.0]],
+            vec![
+                [0.0, 122.499_999_9, 0.0],
+                [10.0, 0.0, 0.0],
+                [0.0, 0.0, 10.0],
+            ],
+            vec![
+                [0.0, 122.500_000_1, 0.0],
+                [0.0, 0.0, 10.0],
+                [-10.0, 0.0, 0.0],
+            ],
         ];
         assert_ne!(
             round_corner(polygons[0][0]),
