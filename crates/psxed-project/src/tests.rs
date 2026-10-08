@@ -4165,3 +4165,15 @@ fn fractional_world_gravity_survives_authoring_units_and_legacy_defaults() {
         );
     }
 }
+
+#[test]
+fn legacy_scene_nodes_with_a_floor_field_still_load() {
+    let project = ProjectDocument::starter();
+    let ron = project.to_ron_string().unwrap();
+    assert!(!ron.contains("floor:"), "SceneNode no longer writes floor");
+
+    // Projects saved while SceneNode carried `floor` have it on every node.
+    let legacy = ron.replace("parent:", "floor: 2,\n parent:");
+    assert!(legacy.contains("floor: 2,"), "the fixture must hit a node");
+    assert_eq!(ProjectDocument::from_ron_str(&legacy).unwrap(), project);
+}
