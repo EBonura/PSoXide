@@ -1163,44 +1163,108 @@ pub(crate) fn cook_player_character(
         }
     }
 
-    let mut combat_windows = [psx_level::CharacterCombatWindow::NONE; psx_level::MAX_CHARACTER_COMBAT_WINDOWS];
+    let mut combat_windows =
+        [psx_level::CharacterCombatWindow::NONE; psx_level::MAX_CHARACTER_COMBAT_WINDOWS];
     if let Some((set_id, _, set)) = animation_set {
         for (index, window) in set.combat_windows.iter().enumerate() {
             let action = window.action.to_index();
-            let fallback = matches!(window.action, CharacterAnimationAction::Backstep | CharacterAnimationAction::DashLeft | CharacterAnimationAction::DashRight)
-                && action_clips[action] == CHARACTER_CLIP_NONE;
-            let source_action = if fallback { CharacterAnimationAction::Roll } else { window.action };
+            let fallback = matches!(
+                window.action,
+                CharacterAnimationAction::Backstep
+                    | CharacterAnimationAction::DashLeft
+                    | CharacterAnimationAction::DashRight
+            ) && action_clips[action] == CHARACTER_CLIP_NONE;
+            let source_action = if fallback {
+                CharacterAnimationAction::Roll
+            } else {
+                window.action
+            };
             let source = action_clips[source_action.to_index()];
-            let clip = (source != CHARACTER_CLIP_NONE).then(|| model_clips.get(usize::from(model.clip_first + source))).flatten();
+            let clip = (source != CHARACTER_CLIP_NONE)
+                .then(|| model_clips.get(usize::from(model.clip_first + source)))
+                .flatten();
             let valid = index < combat_windows.len()
-                && !set.combat_windows[..index].iter().any(|w| w.action == window.action && w.kind == window.kind)
+                && !set.combat_windows[..index]
+                    .iter()
+                    .any(|w| w.action == window.action && w.kind == window.kind)
                 && set.action_clips.iter().any(|b| b.action == source_action)
                 && action_flags[action] & psx_level::character_action_flags::LOOPING == 0
-                && !matches!(window.action, CharacterAnimationAction::Death | CharacterAnimationAction::Intro | CharacterAnimationAction::HookLaunch)
-                && clip.is_some_and(|c| window.start <= window.end && window.start >= c.source_frame_first && u32::from(window.end) <= u32::from(c.source_frame_last) + 1);
+                && !matches!(
+                    window.action,
+                    CharacterAnimationAction::Death
+                        | CharacterAnimationAction::Intro
+                        | CharacterAnimationAction::HookLaunch
+                )
+                && clip.is_some_and(|c| {
+                    window.start <= window.end
+                        && window.start >= c.source_frame_first
+                        && u32::from(window.end) <= u32::from(c.source_frame_last) + 1
+                });
             if !valid {
                 report.error_at(PlaytestValidationTarget::Resource(set_id), format!("Invalid {:?} {:?} combat window: require unique action/channel, bound non-looping clip, [start,end) inside clip, and at most {} windows; Death/Intro/HookLaunch cannot be cancelled", window.action, window.kind, combat_windows.len()));
                 return None;
             }
             let clip = clip?;
-            let remap = |frame| remap_authored_frame(frame, clip.source_frame_first, clip.source_frame_last, clip.cooked_frame_count);
+            let remap = |frame| {
+                remap_authored_frame(
+                    frame,
+                    clip.source_frame_first,
+                    clip.source_frame_last,
+                    clip.cooked_frame_count,
+                )
+            };
             let start = remap(window.start);
-            let end = if window.start == window.end { start } else { remap(window.end - 1).saturating_add(1) };
+            let end = if window.start == window.end {
+                start
+            } else {
+                remap(window.end - 1).saturating_add(1)
+            };
             let range = action_frame_ranges[action];
             // The final stored pose is the endpoint sentinel; the renderer's
             // normalized one-shot range ends at frame_count - 2.
-            let playable_end = range.end.min(clip.cooked_frame_count.saturating_sub(2)).saturating_add(1);
+            let playable_end = range
+                .end
+                .min(clip.cooked_frame_count.saturating_sub(2))
+                .saturating_add(1);
             if start < range.start || end > playable_end {
-                report.error_at(PlaytestValidationTarget::Resource(set_id), format!("Invalid {:?} combat window outside selected playback range", window.action));
+                report.error_at(
+                    PlaytestValidationTarget::Resource(set_id),
+                    format!(
+                        "Invalid {:?} combat window outside selected playback range",
+                        window.action
+                    ),
+                );
                 return None;
             }
-            combat_windows[index] = psx_level::CharacterCombatWindow { action: action as u8, kind: window.kind.cooked(), start, end };
+            combat_windows[index] = psx_level::CharacterCombatWindow {
+                action: action as u8,
+                kind: window.kind.cooked(),
+                start,
+                end,
+            };
         }
         for window in &set.combat_windows {
             use crate::CombatWindowKind as K;
-            let allowed = match window.kind { K::AttackBuffer => Some(K::Attack), K::DodgeBuffer => Some(K::Dodge), _ => None };
-            if allowed.is_some_and(|kind| !set.combat_windows.iter().any(|w| w.action == window.action && w.kind == kind && w.end > w.start && w.end > window.start)) {
-                report.error_at(PlaytestValidationTarget::Resource(set_id), format!("Invalid {:?} combat buffer: requires a reachable permission window", window.action));
+            let allowed = match window.kind {
+                K::AttackBuffer => Some(K::Attack),
+                K::DodgeBuffer => Some(K::Dodge),
+                _ => None,
+            };
+            if allowed.is_some_and(|kind| {
+                !set.combat_windows.iter().any(|w| {
+                    w.action == window.action
+                        && w.kind == kind
+                        && w.end > w.start
+                        && w.end > window.start
+                })
+            }) {
+                report.error_at(
+                    PlaytestValidationTarget::Resource(set_id),
+                    format!(
+                        "Invalid {:?} combat buffer: requires a reachable permission window",
+                        window.action
+                    ),
+                );
                 return None;
             }
         }
@@ -1812,12 +1876,18 @@ pub(crate) fn register_model_for_instance(
             .expect("host-generated corrected animation must parse");
         let preserve_samples = animation_resource
             .and_then(|id| project.resource(id))
-            .is_some_and(|resource| matches!(&resource.data,
-                ResourceData::AnimationClip(clip) if clip.preserve_samples));
+            .is_some_and(|resource| {
+                matches!(&resource.data,
+                ResourceData::AnimationClip(clip) if clip.preserve_samples)
+            });
         let source_frame_count = corrected_source.frame_count();
         let (source_frame_first, source_frame_last) = crate::animation_resample::live_frame_range(
             &corrected_source,
-            if preserve_samples { 0 } else { project.animation_trim_still_percent },
+            if preserve_samples {
+                0
+            } else {
+                project.animation_trim_still_percent
+            },
         );
         // Resample AFTER pose correction, so the budget is measured against the
         // poses that actually ship, and BEFORE frame bounds are baked, so the
@@ -1827,12 +1897,20 @@ pub(crate) fn register_model_for_instance(
         // rather than against a stretch of stillness that is about to go.
         let animation_bytes = trim_still_ends(
             animation_bytes,
-            if preserve_samples { 0 } else { project.animation_trim_still_percent },
+            if preserve_samples {
+                0
+            } else {
+                project.animation_trim_still_percent
+            },
             &label,
         );
         let animation_bytes = resample_under_budget(
             animation_bytes,
-            if preserve_samples { 0 } else { project.animation_error_budget_degrees },
+            if preserve_samples {
+                0
+            } else {
+                project.animation_error_budget_degrees
+            },
             &label,
         );
         let corrected_anim = psx_asset::Animation::from_bytes(&animation_bytes)
@@ -3145,7 +3223,8 @@ pub(crate) fn register_weapon_for_equipment(
         arc_ok = false;
     }
     if weapon.class == crate::WeaponClass::Melee
-        && (weapon.arc_half_angle_degrees == 0 || weapon.arc_half_angle_degrees > 170) {
+        && (weapon.arc_half_angle_degrees == 0 || weapon.arc_half_angle_degrees > 170)
+    {
         report.error_at(
             PlaytestValidationTarget::Resource(weapon_resource_id),
             format!(

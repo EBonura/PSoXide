@@ -610,7 +610,9 @@ pub fn build_package(
         visibility_radius: resolved_culling.visibility_radius,
         resident_chunk_limit: playtest_streaming_resident_chunk_limit(streaming),
         visible_chunk_limit: streaming.visible_chunk_limit,
-        gravity_per_tick_q8: resolved_physics.gravity_per_tick_q8.unwrap_or_else(|| resolved_physics.gravity_per_tick.saturating_mul(256)),
+        gravity_per_tick_q8: resolved_physics
+            .gravity_per_tick_q8
+            .unwrap_or_else(|| resolved_physics.gravity_per_tick.saturating_mul(256)),
         material_first: 0,
         material_count: 0,
         portal_first: 0,
@@ -1588,14 +1590,26 @@ pub fn build_package(
             }
             NodeKind::HookPoint | NodeKind::SpawnPoint { player: false, .. } => {
                 if matches!(node.kind, NodeKind::HookPoint)
-                    && entities.iter().filter(|e| e.kind == PlaytestEntityKind::HookPoint).count() >= psx_level::MAX_HOOK_POINTS {
-                    report.error_at(PlaytestValidationTarget::Node(node.id), "A project supports at most 32 hook points");
+                    && entities
+                        .iter()
+                        .filter(|e| e.kind == PlaytestEntityKind::HookPoint)
+                        .count()
+                        >= psx_level::MAX_HOOK_POINTS
+                {
+                    report.error_at(
+                        PlaytestValidationTarget::Node(node.id),
+                        "A project supports at most 32 hook points",
+                    );
                     return (None, report);
                 }
                 let pos = floor_pos;
                 entities.push(PlaytestEntity {
                     room: room_index,
-                    kind: if matches!(node.kind, NodeKind::HookPoint) { PlaytestEntityKind::HookPoint } else { PlaytestEntityKind::Marker },
+                    kind: if matches!(node.kind, NodeKind::HookPoint) {
+                        PlaytestEntityKind::HookPoint
+                    } else {
+                        PlaytestEntityKind::Marker
+                    },
                     x: pos[0],
                     y: pos[1],
                     z: pos[2],

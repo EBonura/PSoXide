@@ -287,7 +287,16 @@ fn camera_controls_survive_cooking_and_manifest_export() {
             assert_eq!(room.camera.recenter_preserves_pitch, split);
             assert_eq!(room.camera.blend_profiles, split);
             assert_eq!(room.camera.lock_target_framing, split);
-            assert_eq!(room.camera.lock_profile, split.then_some(crate::WorldCameraProfile { distance: 244, height: 119, target_height: 73, fov_y_degrees: 46, shoulder_offset: 24 }));
+            assert_eq!(
+                room.camera.lock_profile,
+                split.then_some(crate::WorldCameraProfile {
+                    distance: 244,
+                    height: 119,
+                    target_height: 73,
+                    fov_y_degrees: 46,
+                    shoulder_offset: 24
+                })
+            );
             assert_eq!(room.camera.position_vertical_lag_shift, position);
             assert_eq!(room.camera.focus_vertical_lag_shift, focus);
         }
@@ -313,7 +322,11 @@ fn hook_points_round_trip_and_cook_with_world_scale() {
     let (package, report) = build_package(&project, &crate::default_project_dir());
     assert!(report.is_ok(), "{:?}", report.errors);
     let package = package.unwrap();
-    let hook = package.entities.iter().find(|e| e.kind == PlaytestEntityKind::HookPoint).unwrap();
+    let hook = package
+        .entities
+        .iter()
+        .find(|e| e.kind == PlaytestEntityKind::HookPoint)
+        .unwrap();
     assert_eq!((hook.x, hook.y, hook.z), (256, 128, -128));
 }
 
@@ -321,7 +334,9 @@ fn hook_points_round_trip_and_cook_with_world_scale() {
 fn hook_point_cap_is_reported_instead_of_silently_ignoring_landings() {
     let mut project = ProjectDocument::starter();
     let scene = project.active_scene_mut();
-    for _ in 0..=psx_level::MAX_HOOK_POINTS { scene.add_node(scene.root, "Hook", NodeKind::HookPoint); }
+    for _ in 0..=psx_level::MAX_HOOK_POINTS {
+        scene.add_node(scene.root, "Hook", NodeKind::HookPoint);
+    }
     let (package, report) = build_package(&project, &crate::default_project_dir());
     assert!(package.is_none());
     assert!(report.errors.iter().any(|e| e.contains("32 hook points")));

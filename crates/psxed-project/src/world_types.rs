@@ -398,7 +398,9 @@ impl WorldCameraProfile {
             height: self.height.clamp(0, MAX_WORLD_CAMERA_HEIGHT),
             target_height: self.target_height.clamp(0, MAX_WORLD_CAMERA_HEIGHT),
             fov_y_degrees: self.fov_y_degrees.clamp(38, 48),
-            shoulder_offset: self.shoulder_offset.clamp(-MAX_WORLD_CAMERA_DISTANCE, MAX_WORLD_CAMERA_DISTANCE),
+            shoulder_offset: self
+                .shoulder_offset
+                .clamp(-MAX_WORLD_CAMERA_DISTANCE, MAX_WORLD_CAMERA_DISTANCE),
         }
     }
 }
@@ -714,7 +716,9 @@ impl WorldPhysicsSettings {
             gravity_per_tick: self
                 .gravity_per_tick
                 .clamp(MIN_WORLD_GRAVITY_PER_TICK, MAX_WORLD_GRAVITY_PER_TICK),
-            gravity_per_tick_q8: self.gravity_per_tick_q8.map(|v| v.clamp(0, MAX_WORLD_GRAVITY_PER_TICK * 256)),
+            gravity_per_tick_q8: self
+                .gravity_per_tick_q8
+                .map(|v| v.clamp(0, MAX_WORLD_GRAVITY_PER_TICK * 256)),
         }
     }
 }

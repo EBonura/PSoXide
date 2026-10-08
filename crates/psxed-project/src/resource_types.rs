@@ -530,7 +530,11 @@ impl CharacterAnimationAction {
             | Self::VertComboAttack
             | Self::LightAttackFollowup
             | Self::LightAttackFinisher
-            | Self::RangedAim | Self::RangedWalk | Self::RangedBackward | Self::RangedLeft | Self::RangedRight => None,
+            | Self::RangedAim
+            | Self::RangedWalk
+            | Self::RangedBackward
+            | Self::RangedLeft
+            | Self::RangedRight => None,
         }
     }
 
@@ -699,9 +703,25 @@ impl CharacterAnimationAction {
 
 /// Channels on the shared combat timeline. Values are source clip frames.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum CombatWindowKind { AttackBuffer, Attack, DodgeBuffer, Dodge, Movement, Invulnerable, Armored }
+pub enum CombatWindowKind {
+    AttackBuffer,
+    Attack,
+    DodgeBuffer,
+    Dodge,
+    Movement,
+    Invulnerable,
+    Armored,
+}
 impl CombatWindowKind {
-    pub const ALL: [Self; 7] = [Self::AttackBuffer, Self::Attack, Self::DodgeBuffer, Self::Dodge, Self::Movement, Self::Invulnerable, Self::Armored];
+    pub const ALL: [Self; 7] = [
+        Self::AttackBuffer,
+        Self::Attack,
+        Self::DodgeBuffer,
+        Self::Dodge,
+        Self::Movement,
+        Self::Invulnerable,
+        Self::Armored,
+    ];
     pub const fn cooked(self) -> psx_level::CombatWindowKind {
         match self {
             Self::AttackBuffer => psx_level::CombatWindowKind::AttackBuffer,
