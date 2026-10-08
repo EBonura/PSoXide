@@ -1005,6 +1005,15 @@ pub(super) fn debug_log_aim_camera(values: [i32; 14]) {
     line.emit();
 }
 
+/// Per-update follow-camera pose: the exact eye, focus, orbit and boom values
+/// that explain what the camera did on a tape tick.
+#[cfg(feature = "emulator-telemetry")]
+pub(super) fn debug_log_camera_pose(values: [i32; 21]) {
+    let mut line = DebugLogLine::new("camera-pose,");
+    for value in values { line.push_i32(value); line.push_byte(b','); }
+    line.emit();
+}
+
 /// Muzzle, velocity, body target and retained player hurtbox for replay calibration.
 #[cfg(feature = "emulator-telemetry")]
 pub(super) fn debug_log_enemy_shot(values: [i32; 17]) {

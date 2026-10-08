@@ -808,6 +808,30 @@ impl ThirdPersonCameraState {
                 locked_camera_y_goal,
                 config,
             )?;
+            if input.yaw_delta_q12 != 0 && target.lock_target.is_none() && self.yaw != previous_yaw
+            {
+                // Manual orbit stops at a wall instead of sweeping the eye
+                // into the player's head. With her back to a wall the arm
+                // falls to the wall's distance over a wide arc of yaws; held
+                // through it the eye sits inside her body, the scene hides
+                // her and the view is the room from her head for as long as
+                // the stick is down. Refuse only a step that shortens an arm
+                // already under the body-clearing length; stepping out of
+                // that arc, or anywhere with room for the boom, is untouched.
+                if solve.distance < clear_orbit_trigger(config, true) {
+                    let held = collision.solve(
+                        self.focus,
+                        previous_yaw,
+                        orbit_pitch,
+                        locked_camera_y_goal,
+                        config,
+                    )?;
+                    if solve.distance < held.distance {
+                        self.yaw = previous_yaw;
+                        solve = held;
+                    }
+                }
+            }
             let wanted = clear_orbit_distance(config);
             if input.yaw_delta_q12 != 0 || target.lock_target.is_none() {
                 self.clear_orbit_hold = false;
@@ -1022,6 +1046,11 @@ impl ThirdPersonCameraState {
     /// Current lagged focus point.
     pub const fn focus(&self) -> RoomPoint {
         self.focus
+    }
+
+    /// True when the last update shortened the arm or clamped the eye to geometry.
+    pub const fn collision_pull_in(&self) -> bool {
+        self.last_pull_in
     }
 
     /// Current arm length after collision. Under the config's
@@ -2234,6 +2263,7 @@ fn lerp_vertex(from: RoomPoint, to: RoomPoint, num: i32, den: i32) -> RoomPoint 
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
     use super::*;
     use crate::{CharacterBlockerTraceProvider, CharacterCollisionAabb, RuntimeRoom};
 
@@ -4724,5 +4754,248 @@ mod tests {
         );
 
         assert_eq!(frame.pitch_q12, 96);
+    }
+
+    /// Solid axis-aligned boxes, traced as points with the slab method.
+    struct BoxWorld {
+        boxes: &'static [([i32; 3], [i32; 3])],
+    }
+
+    impl CollisionTraceProvider for BoxWorld {
+        fn trace_into(
+            &mut self,
+            query: CollisionTraceQuery,
+            output: &mut crate::CollisionTrace,
+        ) -> bool {
+            let start = [query.start.x, query.start.y, query.start.z];
+            let end = [query.end.x, query.end.y, query.end.z];
+            let mut trace = crate::CollisionTrace::unobstructed(query.end);
+            let mut best = 4096i64;
+            for (lo, hi) in self.boxes {
+                let mut enter = 0i64;
+                let mut exit = 4096i64;
+                let mut normal = [0i16; 3];
+                let mut inside = true;
+                let mut ok = true;
+                for a in 0..3 {
+                    let d = (end[a] - start[a]) as i64;
+                    let (s, l, h) = (start[a], lo[a], hi[a]);
+                    if s < l || s > h {
+                        inside = false;
+                    }
+                    if d == 0 {
+                        if s < l || s > h {
+                            ok = false;
+                        }
+                        continue;
+                    }
+                    let t1 = (l - s) as i64 * 4096 / d;
+                    let t2 = (h - s) as i64 * 4096 / d;
+                    let (near, far, n) = if t1 < t2 {
+                        (t1, t2, -1i16)
+                    } else {
+                        (t2, t1, 1i16)
+                    };
+                    if near > enter {
+                        enter = near;
+                        normal = [0; 3];
+                        normal[a] = n * 4096;
+                    }
+                    exit = exit.min(far);
+                }
+                if !ok || enter > exit {
+                    continue;
+                }
+                if inside {
+                    trace.start_solid = true;
+                    trace.fraction_q12 = 0;
+                    trace.end = query.start;
+                    *output = trace;
+                    return true;
+                }
+                if enter < best && enter >= 0 {
+                    best = enter;
+                    trace.fraction_q12 = enter as i32;
+                    trace.normal_q12 = normal;
+                    trace.end = RoomPoint::new(
+                        query.start.x + ((end[0] - start[0]) as i64 * enter / 4096) as i32,
+                        query.start.y + ((end[1] - start[1]) as i64 * enter / 4096) as i32,
+                        query.start.z + ((end[2] - start[2]) as i64 * enter / 4096) as i32,
+                    );
+                }
+            }
+            *output = trace;
+            true
+        }
+    }
+
+    fn graybox_camera_config() -> ThirdPersonCameraConfig {
+        let mut config = ThirdPersonCameraConfig::character(208, 144, 80);
+        config.min_floor_clearance = 7;
+        config.collision_margin = 12;
+        config.pitch_min_q12 = -455;
+        config.pitch_max_q12 = 796;
+        config.recenter_preserves_pitch = true;
+        config.fov_y_degrees = 43;
+        config.blend_profiles = true;
+        config.lock_target_framing = true;
+        config.lock_profile = Some(ThirdPersonCameraProfile {
+            distance: 208,
+            height: 144,
+            target_height: 80,
+            fov_y_degrees: 43,
+            shoulder_offset: 0,
+        });
+        config.accelerated_orbit_speed = Some(5);
+        config.manual_cooldown_frames = 120;
+        config.manual_release_frames = 60;
+        config.position_lag_shift = 2;
+        config.position_vertical_lag_shift = Some(3);
+        config.focus_lag_shift = 2;
+        config.focus_vertical_lag_shift = Some(4);
+        config.distance_lag_shift = 3;
+        config.collision_solve_interval = 2;
+        config
+    }
+
+    /// The authored Graybox Reach camera, in runtime units.
+    fn free_camera_world() -> (ThirdPersonCameraConfig, ThirdPersonCameraTarget) {
+        (
+            graybox_camera_config(),
+            ThirdPersonCameraTarget {
+                player: RoomPoint::ZERO,
+                player_yaw: Angle::ZERO,
+                moving: false,
+                lock_target: None,
+            },
+        )
+    }
+
+    /// A flat floor, and a wall `PINNED_GAP` units behind (-z) the player.
+    static PINNED_WORLD: [([i32; 3], [i32; 3]); 2] = [
+        ([-100_000, -1_000, -100_000], [100_000, 0, 100_000]),
+        ([-100_000, -1_000, -100_000], [100_000, 2_000, -PINNED_GAP]),
+    ];
+    static OPEN_WORLD: [([i32; 3], [i32; 3]); 1] = [PINNED_WORLD[0]];
+    /// The enclosure wall the replay tape walks Aletha into: 13 units from
+    /// her centre.
+    const PINNED_GAP: i32 = 13;
+
+    /// Run `ticks` camera updates holding the stick at full right, returning
+    /// every frame.
+    fn sweep_right(
+        camera: &mut ThirdPersonCameraState,
+        world: &'static [([i32; 3], [i32; 3])],
+        ticks: usize,
+    ) -> std::vec::Vec<ThirdPersonCameraFrame> {
+        let (config, target) = free_camera_world();
+        let step = accelerated_orbit_step_q12(5, false);
+        let mut world = BoxWorld { boxes: world };
+        let mut frames = std::vec::Vec::new();
+        for _ in 0..ticks {
+            frames.push(
+                camera
+                    .update_vblanks_with_trace_provider(
+                        WorldProjection::new(160, 120, 320, 64),
+                        &mut world,
+                        target,
+                        ThirdPersonCameraInput {
+                            yaw_delta_q12: step,
+                            ..ThirdPersonCameraInput::default()
+                        },
+                        config,
+                        1,
+                    )
+                    .unwrap(),
+            );
+        }
+        frames
+    }
+
+    #[test]
+    fn manual_orbit_stops_before_the_arm_collapses_into_a_pinned_player() {
+        // Player 13 units from a wall, camera swung right at full stick for
+        // far more than a half turn (the replay tape holds it for 100 ticks).
+        // Unrestricted, the arm falls under min_distance for 35 ticks, the
+        // scene hides her and the view is the room from inside her head.
+        let (config, target) = free_camera_world();
+        let mut camera = ThirdPersonCameraState::new(Angle::ZERO);
+        camera.snap_to_player_with_yaw(target, config, Angle::ZERO);
+        let frames = sweep_right(&mut camera, &PINNED_WORLD, 100);
+        let shortest = frames.iter().map(|frame| frame.distance).min().unwrap();
+        assert!(
+            shortest >= config.min_distance,
+            "arm fell to {shortest}, eye inside the player"
+        );
+        // It stopped at the wall rather than turning back: the stick is still
+        // down and the yaw has not moved for the last ticks.
+        let tail = &frames[frames.len() - 10..];
+        assert!(tail.iter().all(|frame| frame.yaw == tail[0].yaw));
+        let bearing_to_wall = Angle::HALF;
+        let to_wall = tail[0]
+            .yaw
+            .shortest_delta_q12(bearing_to_wall)
+            .unsigned_abs();
+        assert!(
+            to_wall > 256,
+            "stopped {to_wall} q12 units from the wall bearing"
+        );
+    }
+
+    #[test]
+    fn manual_orbit_leaves_a_collapsed_arm_in_either_direction() {
+        // Already inside the blocked arc (spawned there, or the player backed
+        // into the wall): the stick must still be able to swing out.
+        let (config, target) = free_camera_world();
+        let behind_wall = Angle::HALF;
+        for sign in [1i16, -1] {
+            let mut camera = ThirdPersonCameraState::new(behind_wall);
+            camera.snap_to_player_with_yaw(target, config, behind_wall);
+            let mut world = BoxWorld {
+                boxes: &PINNED_WORLD,
+            };
+            let step = accelerated_orbit_step_q12(5, false) * sign;
+            let mut last = None;
+            for _ in 0..90 {
+                last = Some(
+                    camera
+                        .update_vblanks_with_trace_provider(
+                            WorldProjection::new(160, 120, 320, 64),
+                            &mut world,
+                            target,
+                            ThirdPersonCameraInput {
+                                yaw_delta_q12: step,
+                                ..ThirdPersonCameraInput::default()
+                            },
+                            config,
+                            1,
+                        )
+                        .unwrap(),
+                );
+            }
+            let frame = last.unwrap();
+            assert!(frame.yaw != behind_wall, "stuck at the wall bearing");
+            assert!(
+                frame.distance >= config.min_distance,
+                "sign {sign}: arm {} after swinging out",
+                frame.distance
+            );
+        }
+    }
+
+    #[test]
+    fn manual_orbit_is_unrestricted_with_room_for_the_arm() {
+        let (config, target) = free_camera_world();
+        let mut camera = ThirdPersonCameraState::new(Angle::ZERO);
+        camera.snap_to_player_with_yaw(target, config, Angle::ZERO);
+        let frames = sweep_right(&mut camera, &OPEN_WORLD, 100);
+        // Full-stick orbit turns through more than a whole turn of yaw in
+        // 100 ticks, with the boom never shortened.
+        assert!(frames.iter().all(|frame| frame.distance == config.distance));
+        let mut travelled = 0i32;
+        for pair in frames.windows(2) {
+            travelled += i32::from(pair[0].yaw.shortest_delta_q12(pair[1].yaw)).abs();
+        }
+        assert!(travelled > 4096, "orbit travelled {travelled}");
     }
 }
