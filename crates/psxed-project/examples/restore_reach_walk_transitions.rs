@@ -92,7 +92,7 @@ fn main() {
             .iter_mut()
             .find(|b| b.action == binding.action)
             .unwrap();
-        let mut replacement = binding.clone();
+        let mut replacement = *binding;
         replacement.clip = dst_id;
         *target = replacement;
         println!(

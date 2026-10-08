@@ -37,11 +37,11 @@ fn main() {
             .cloned()
             .collect();
         let original = Terrain::from_brushes(&source).unwrap();
-        assert!((0..2).all(|i| step[i] > 0 && original.cells[i] % step[i] == 0));
+        assert!((0..2).all(|i| step[i] > 0 && original.cells[i].is_multiple_of(step[i])));
         let mut terrain = original.clone();
-        for i in 0..2 {
-            terrain.cells[i] /= step[i];
-            terrain.spacing[i] *= step[i] as i32;
+        for (i, &factor) in step.iter().enumerate() {
+            terrain.cells[i] /= factor;
+            terrain.spacing[i] *= factor as i32;
         }
         terrain.heights.clear();
         for z in 0..=terrain.cells[1] {
