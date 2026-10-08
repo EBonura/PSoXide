@@ -94,9 +94,14 @@ impl Fixture {
         self.scan_with(&looks_like_code, TABLE_CEILING).1
     }
 
+    /// These fixtures have no link map, so patching needs `--whole-image`
+    /// (see `patching_needs_text_bounds`); `--check` does not.
     fn patch(&self, extra: &[&str]) -> (i32, String) {
         let mut args = vec![self.p()];
         args.extend_from_slice(extra);
+        if !extra.contains(&"--check") {
+            args.push("--whole-image");
+        }
         call(patch::main, &args)
     }
 
@@ -636,6 +641,7 @@ fn second_pass_keeps_earlier_trampolines() {
     // The diagnostic variable is process-wide, so this pass runs the binary.
     let first = Command::new(env!("CARGO_BIN_EXE_hazard-patch"))
         .arg(&fx.path)
+        .arg("--whole-image")
         .env("HAZARD_PATCH_ONLY", hex(image.addr(0x104)))
         .output()
         .unwrap();
@@ -682,7 +688,8 @@ fn the_binaries_take_the_same_command_lines() {
     assert_eq!(tool(patch_bin, &[fx.p(), "--check"]).0, 1);
     assert_eq!(tool(patch_bin, &[]).0, 2);
     assert_eq!(tool(scan_bin, &[]).0, 2);
-    assert_eq!(tool(patch_bin, &[fx.p()]).0, 0);
+    assert_eq!(tool(patch_bin, &[fx.p()]).0, 2, "no map, no --whole-image");
+    assert_eq!(tool(patch_bin, &[fx.p(), "--whole-image"]).0, 0);
     assert_eq!(
         tool(scan_bin, &[fx.p()]),
         (0, format!("0 hazards in {}\n", fx.p()))

@@ -68,17 +68,36 @@ pub fn open_map(
     }
 }
 
-/// The `.text` bounds `--text-only` asks for: `Ok(None)` without the flag,
-/// `Ok(Some((lo, hi)))` from the `--map` link map with it. `Err(None)` is a
-/// usage error (`--text-only` without `--map`); `Err(Some(status))` means
-/// the map could not be read or its bounds are not in RAM, already reported
-/// to `out`.
-pub fn text_only(args: &[String], out: &mut dyn Write) -> Result<Option<(i64, i64)>, Option<i32>> {
-    if !args.iter().any(|arg| arg == "--text-only") {
+/// True when `--whole-image` is given: the caller accepts the heuristic
+/// data guard over every word of the load (see [`detect::looks_like_code`]).
+pub fn whole_image(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == "--whole-image")
+}
+
+/// The executable bounds the tools work within. With `--map` they are the
+/// map's `.text` (`__text_start..__text_end`, the only executable section
+/// of `psoxide.ld`), whether or not `--text-only` is also given: the rest of
+/// the load is `.data`, `.rodata` and assets, and words there decode as
+/// plausible instructions (a slice length of 8 is `jr zero`, 0x11111111 is
+/// `beq t0,s1`), so nothing outside `.text` may be read as code or written.
+/// `Ok(None)` means no bounds: no `--map`, or `--whole-image`, the explicit
+/// request for the old heuristic over the whole load. `Err(None)` is a usage
+/// error (`--text-only` without `--map`); `Err(Some(status))` means the map
+/// could not be read or its bounds are not in RAM, already reported to
+/// `out`.
+pub fn text_bounds(
+    args: &[String],
+    out: &mut dyn Write,
+) -> Result<Option<(i64, i64)>, Option<i32>> {
+    let text_only = args.iter().any(|arg| arg == "--text-only");
+    let Some((_, _, map_path)) = cli_args(args) else {
+        return Err(None);
+    };
+    if whole_image(args) {
         return Ok(None);
     }
-    let Some((_, _, Some(map_path))) = cli_args(args) else {
-        return Err(None);
+    let Some(map_path) = map_path else {
+        return if text_only { Err(None) } else { Ok(None) };
     };
     let map = LinkMap::open(std::path::Path::new(&map_path)).map_err(|error| {
         let _ = writeln!(out, "{error}");

@@ -922,3 +922,117 @@ fn text_only_takes_the_bounds_from_the_map() {
     assert_eq!(run(&scan::main, &bare).0, 2);
     assert_eq!(run(&patch::main, &bare).0, 2);
 }
+
+/// A static slice of `{ label: &'static [u8], .. }` records in `.rodata`:
+/// each record is a pointer into the load (`lb at,..` read as code) and a
+/// length of 8 (`jr zero`). Twenty records, so the heuristic data guard sees
+/// nothing undecodable near any of them.
+fn setting_table() -> Vec<u32> {
+    (0..20).flat_map(|i| [0x8001_0A40 + 4 * i, 8]).collect()
+}
+
+/// `t::g` returns a byte loaded in its `jr ra` slot (a real hazard, in
+/// `.text`) while `.rodata` at BASE + 0x900 holds the table above.
+fn rodata_table_fixture() -> (Fixture, Vec<u32>) {
+    let mut fx = Fixture::new();
+    let data = BASE + Image::DATA;
+    fx.function(
+        1,
+        "t::g",
+        &[lui("at", hi(data)), jr("ra"), lbu("v0", lo(data), "at")],
+    );
+    fx.caller(0, "t::main", 0, &[fx.addr(1)]);
+    let table = setting_table();
+    fx.data(0x900, &table, Section::Named(".rodata"));
+    (fx, table)
+}
+
+#[test]
+fn patching_with_a_map_never_touches_rodata() {
+    // hl/wipeout options screen, 2026-10-08: `psoxide-pgo apply` ran the
+    // patcher with a map but without `--text-only`, so the heuristic data
+    // guard read this table as code, saw `jr zero` with a load in its slot,
+    // and rewrote table words into jumps.
+    let (fx, table) = rodata_table_fixture();
+    let (exe, map) = fx.write();
+    let (exe_arg, map_arg) = (exe.to_str().unwrap(), map.to_str().unwrap());
+    let rodata = |exe: &std::path::Path| {
+        let data = std::fs::read(exe).unwrap();
+        let start = 0x800 + 0x900;
+        data[start..start + 4 * table.len()].to_vec()
+    };
+    let before_exe = std::fs::read(&exe).unwrap();
+    let before = rodata(&exe);
+    assert_eq!(
+        before,
+        table
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .collect::<Vec<_>>()
+    );
+
+    // Without the map the whole-image heuristic does read the table as code:
+    // this is the failure the map bound exists to prevent.
+    let mut out = Vec::new();
+    assert_eq!(
+        patch::main(&[exe_arg.into(), "--check".into()], &mut out),
+        1
+    );
+    let out = String::from_utf8(out).unwrap();
+    assert!(
+        out.contains(&format!("hazard {:08x}: jr zero", BASE + 0x900 + 4)),
+        "{out}"
+    );
+    assert_eq!(std::fs::read(&exe).unwrap(), before_exe);
+
+    // With the map (and no other flag) only the real hazard is found and
+    // fixed, and every byte outside .text and the trampoline array is kept.
+    let args = |extra: &[&str]| {
+        let mut args = vec![exe_arg.to_string(), "--map".into(), map_arg.into()];
+        args.extend(extra.iter().map(|s| s.to_string()));
+        args
+    };
+    let mut out = Vec::new();
+    assert_eq!(patch::main(&args(&["--check"]), &mut out), 1);
+    let out = String::from_utf8(out).unwrap();
+    assert_eq!(out.matches("hazard ").count(), 1, "{out}");
+    assert!(out.contains("jr ra | slot lbu v0"), "{out}");
+    let mut out = Vec::new();
+    assert_eq!(patch::main(&args(&[]), &mut out), 0);
+    let out = String::from_utf8(out).unwrap();
+    assert!(out.contains("1 patched, 0 remaining"), "{out}");
+    let after_exe = std::fs::read(&exe).unwrap();
+    assert_eq!(rodata(&exe), before, "patching rewrote .rodata");
+    let changed: Vec<usize> = (0..before_exe.len())
+        .filter(|&i| before_exe[i] != after_exe[i])
+        .collect();
+    let (text_end, tramp) = (0x800 + 0x800, (0x800 + Image::TRAMPOLINES) as usize);
+    assert!(
+        changed
+            .iter()
+            .all(|&i| i < text_end || (tramp..tramp + 8 + 64 * 4).contains(&i)),
+        "bytes changed outside .text and the trampoline array: {changed:?}"
+    );
+    assert!(!changed.is_empty());
+
+    // The scanner agrees about what is code.
+    let mut out = Vec::new();
+    assert_eq!(scan::main(&args(&[]), &mut out), 0);
+    assert!(String::from_utf8(out)
+        .unwrap()
+        .ends_with(&format!("0 hazards in {exe_arg}\n")));
+}
+
+#[test]
+fn patching_without_text_bounds_is_refused() {
+    let (fx, _) = rodata_table_fixture();
+    let (exe, _) = fx.write();
+    let before = std::fs::read(&exe).unwrap();
+    let mut out = Vec::new();
+    let status = patch::main(&[exe.to_str().unwrap().to_string()], &mut out);
+    assert_eq!(status, 2);
+    assert!(String::from_utf8(out)
+        .unwrap()
+        .contains("without .text bounds"));
+    assert_eq!(std::fs::read(&exe).unwrap(), before);
+}
