@@ -6,17 +6,19 @@
 //! point the game-app driver calls; everything else is a private
 //! helper. Integer-only and alloc-free like the rest of the crate.
 
-use psx_gpu::{draw_quad_flat, draw_tri_flat_blended, material::BlendMode};
+use psx_gpu::material::{BlendMode, TextureMaterial};
+use psx_gpu::prim::{QuadFlat, TriFlat};
+use psx_gpu::Gpu;
 use psx_level::LevelTransitionKind;
 
 use crate::game_app::FlowTransition;
 
-pub(crate) fn render_transition_overlay(transition: FlowTransition) {
+pub(crate) fn render_transition_overlay(gpu: &mut Gpu, transition: FlowTransition) {
     match transition.spec.kind {
         LevelTransitionKind::None => {}
-        LevelTransitionKind::Fade => render_transition_fade(transition),
-        LevelTransitionKind::BlockDissolve => render_transition_blocks(transition),
-        LevelTransitionKind::GlitchBreak => render_transition_glitch(transition),
+        LevelTransitionKind::Fade => render_transition_fade(gpu, transition),
+        LevelTransitionKind::BlockDissolve => render_transition_blocks(gpu, transition),
+        LevelTransitionKind::GlitchBreak => render_transition_glitch(gpu, transition),
     }
 }
 
@@ -50,51 +52,53 @@ fn transition_color(transition: FlowTransition) -> (u8, u8, u8) {
     )
 }
 
-fn draw_fullscreen(color: (u8, u8, u8)) {
-    draw_quad_flat(
+fn draw_fullscreen(gpu: &mut Gpu, color: (u8, u8, u8)) {
+    gpu.draw(&QuadFlat::new(
         [(0, 0), (320, 0), (0, 240), (320, 240)],
         color.0,
         color.1,
         color.2,
+    ));
+}
+
+fn draw_fullscreen_average(gpu: &mut Gpu, color: (u8, u8, u8)) {
+    gpu.set_draw_mode(TextureMaterial::blended(
+        0,
+        0,
+        (color.0, color.1, color.2),
+        BlendMode::Average,
+    ));
+    gpu.draw(&TriFlat::new([(0, 0), (320, 0), (0, 240)], color.0, color.1, color.2).translucent());
+    gpu.set_draw_mode(TextureMaterial::blended(
+        0,
+        0,
+        (color.0, color.1, color.2),
+        BlendMode::Average,
+    ));
+    gpu.draw(
+        &TriFlat::new([(320, 0), (0, 240), (320, 240)], color.0, color.1, color.2).translucent(),
     );
 }
 
-fn draw_fullscreen_average(color: (u8, u8, u8)) {
-    draw_tri_flat_blended(
-        [(0, 0), (320, 0), (0, 240)],
-        color.0,
-        color.1,
-        color.2,
-        BlendMode::Average,
-    );
-    draw_tri_flat_blended(
-        [(320, 0), (0, 240), (320, 240)],
-        color.0,
-        color.1,
-        color.2,
-        BlendMode::Average,
-    );
-}
-
-fn draw_rect(x: i16, y: i16, w: u16, h: u16, color: (u8, u8, u8)) {
+fn draw_rect(gpu: &mut Gpu, x: i16, y: i16, w: u16, h: u16, color: (u8, u8, u8)) {
     if w == 0 || h == 0 {
         return;
     }
     let x1 = x.saturating_add(w.min(i16::MAX as u16) as i16);
     let y1 = y.saturating_add(h.min(i16::MAX as u16) as i16);
-    draw_quad_flat(
+    gpu.draw(&QuadFlat::new(
         [(x, y), (x1, y), (x, y1), (x1, y1)],
         color.0,
         color.1,
         color.2,
-    );
+    ));
 }
 
-fn render_transition_fade(transition: FlowTransition) {
+fn render_transition_fade(gpu: &mut Gpu, transition: FlowTransition) {
     let progress = transition_coverage_q8(transition);
     let color = transition_color(transition);
     if progress >= 244 {
-        draw_fullscreen(color);
+        draw_fullscreen(gpu, color);
         return;
     }
     let passes = match progress {
@@ -105,16 +109,16 @@ fn render_transition_fade(transition: FlowTransition) {
     };
     let mut i = 0;
     while i < passes {
-        draw_fullscreen_average(color);
+        draw_fullscreen_average(gpu, color);
         i += 1;
     }
 }
 
-fn render_transition_blocks(transition: FlowTransition) {
+fn render_transition_blocks(gpu: &mut Gpu, transition: FlowTransition) {
     let progress = transition_coverage_q8(transition);
     let color = transition_color(transition);
     if progress >= 252 {
-        draw_fullscreen(color);
+        draw_fullscreen(gpu, color);
         return;
     }
     let mut cell = 0u16;
@@ -123,17 +127,17 @@ fn render_transition_blocks(transition: FlowTransition) {
         if noise < progress {
             let x = ((cell % 20) * 16) as i16;
             let y = ((cell / 20) * 16) as i16;
-            draw_rect(x, y, 16, 16, color);
+            draw_rect(gpu, x, y, 16, 16, color);
         }
         cell += 1;
     }
 }
 
-fn render_transition_glitch(transition: FlowTransition) {
+fn render_transition_glitch(gpu: &mut Gpu, transition: FlowTransition) {
     let progress = transition_progress_q8(transition);
     let base = transition_color(transition);
     if progress >= 252 {
-        draw_fullscreen(base);
+        draw_fullscreen(gpu, base);
         return;
     }
 
@@ -145,7 +149,7 @@ fn render_transition_glitch(transition: FlowTransition) {
         let y = (n % 240) as i16;
         let h = 1 + ((n >> 8) % 5);
         let color = glitch_color(n, base, progress);
-        draw_rect(0, y, 320, h, color);
+        draw_rect(gpu, 0, y, 320, h, color);
         i += 1;
     }
 
@@ -157,7 +161,7 @@ fn render_transition_glitch(transition: FlowTransition) {
         let y = ((((n >> 6) % 30) * 8) as i16).min(232);
         let size = if n & 0x1000 != 0 { 16 } else { 8 };
         let color = glitch_color(n.rotate_left(3), base, progress);
-        draw_rect(x, y, size, size, color);
+        draw_rect(gpu, x, y, size, size, color);
         block += 1;
     }
 
@@ -169,7 +173,7 @@ fn render_transition_glitch(transition: FlowTransition) {
             if n < takeover {
                 let x = ((cell % 20) * 16) as i16;
                 let y = ((cell / 20) * 16) as i16;
-                draw_rect(x, y, 16, 16, base);
+                draw_rect(gpu, x, y, 16, 16, base);
             }
             cell += 1;
         }

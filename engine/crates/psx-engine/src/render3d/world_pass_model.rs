@@ -1140,7 +1140,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 // no staging copies, no per-vertex blend checks.
                 let mut pending: Option<(usize, [scene::Projected; 3])> = None;
                 while global_index + 3 <= run_end {
-                    let kicked = scene::rtpt_kick(
+                    let kicked = scene::start_project_triple(
                         vertices[global_index].position,
                         vertices[global_index + 1].position,
                         vertices[global_index + 2].position,
@@ -1796,7 +1796,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             };
 
             let area = if CULL_BACK || base_camera_crystal_materials.is_some() {
-                psx_gte::scene::screen_area_mac0_scheduled([
+                psx_gte::scene::screen_area_scheduled([
                     (projected[0].sx, projected[0].sy),
                     (projected[1].sx, projected[1].sy),
                     (projected[2].sx, projected[2].sy),
@@ -2108,7 +2108,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 ]
             };
             let area = if CULL_BACK || camera_crystal_materials.is_some() {
-                psx_gte::scene::screen_area_mac0_scheduled([
+                psx_gte::scene::screen_area_scheduled([
                     (projected[0].sx, projected[0].sy),
                     (projected[1].sx, projected[1].sy),
                     (projected[2].sx, projected[2].sy),
@@ -2386,7 +2386,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 ]
             };
             if CULL_BACK
-                && psx_gte::scene::screen_area_mac0_scheduled([
+                && psx_gte::scene::screen_area_scheduled([
                     (projected[0].sx, projected[0].sy),
                     (projected[1].sx, projected[1].sy),
                     (projected[2].sx, projected[2].sy),
@@ -3275,7 +3275,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         }
 
         let (uv0, uv1, uv2) = (uvs[0], uvs[1], uvs[2]);
-        let Some(tri) = triangles.push(TriTextured::with_material_packet_texcoords(
+        let Some(tri) = triangles.push(TriTextured::with_material(
             [
                 (verts[0].sx, verts[0].sy),
                 (verts[1].sx, verts[1].sy),

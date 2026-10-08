@@ -38,13 +38,13 @@ use psx_font::{
     fonts::{BASIC, BASIC_8X16},
     FontAtlas,
 };
-use psx_vram::{Clut, TexDepth, Tpage};
+use psx_vram::{Clut, TextureDepth, TexturePage};
 
 /// 8×8 atlas tpage. `x=320` is a multiple of 64 ✓ and clear of
 /// both display buffers (A at 0..320, B at 0..320 + vertical
 /// offset). 4bpp × 32 glyphs/row × 8-wide = 64 halfwords; atlas
 /// height is 32 halfwords for 128 glyphs -- sits inside tpage.
-const FONT_8X8_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
+const FONT_8X8_TPAGE: TexturePage = TexturePage::new(320, 0, TextureDepth::Bit4);
 /// 2-entry CLUT for the 8×8 atlas at (320, 256). X is a multiple
 /// of 16 ✓, clear of the display buffers ✓, clear of both atlases ✓.
 const FONT_8X8_CLUT: Clut = Clut::new(320, 256);
@@ -52,7 +52,7 @@ const FONT_8X8_CLUT: Clut = Clut::new(320, 256);
 /// 8×16 atlas tpage. Next slot along at `x=384` -- another multiple
 /// of 64. Same 64-halfword width (8-wide × 32 glyphs/row) but
 /// taller: 64 halfwords of atlas height for 128 × 8×16 glyphs.
-const FONT_8X16_TPAGE: Tpage = Tpage::new(384, 0, TexDepth::Bit4);
+const FONT_8X16_TPAGE: TexturePage = TexturePage::new(384, 0, TextureDepth::Bit4);
 /// 2-entry CLUT for the 8×16 atlas at (384, 256). Separate from
 /// the 8×8 CLUT so the two atlases are fully independent.
 const FONT_8X16_CLUT: Clut = Clut::new(384, 256);

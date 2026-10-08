@@ -10,17 +10,17 @@ use psx_font::{
     fonts::{BASIC, DRIPPY_SPACE, DRIPPY_SPACE_DISPLAY, KENNEY_PIXEL, ZEN_DOTS},
     FontAtlas,
 };
-use psx_vram::{Clut, TexDepth, Tpage};
+use psx_vram::{Clut, TextureDepth, TexturePage};
 
-const BASIC_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
+const BASIC_TPAGE: TexturePage = TexturePage::new(320, 0, TextureDepth::Bit4);
 const BASIC_CLUT: Clut = Clut::new(320, 256);
-const DRIPPY_TPAGE: Tpage = Tpage::new(384, 0, TexDepth::Bit4);
+const DRIPPY_TPAGE: TexturePage = TexturePage::new(384, 0, TextureDepth::Bit4);
 const DRIPPY_CLUT: Clut = Clut::new(384, 256);
-const DRIPPY_DISPLAY_TPAGE: Tpage = Tpage::new(448, 0, TexDepth::Bit4);
+const DRIPPY_DISPLAY_TPAGE: TexturePage = TexturePage::new(448, 0, TextureDepth::Bit4);
 const DRIPPY_DISPLAY_CLUT: Clut = Clut::new(448, 256);
-const KENNEY_TPAGE: Tpage = Tpage::new(512, 0, TexDepth::Bit4);
+const KENNEY_TPAGE: TexturePage = TexturePage::new(512, 0, TextureDepth::Bit4);
 const KENNEY_CLUT: Clut = Clut::new(512, 256);
-const ZEN_TPAGE: Tpage = Tpage::new(576, 0, TexDepth::Bit4);
+const ZEN_TPAGE: TexturePage = TexturePage::new(576, 0, TextureDepth::Bit4);
 const ZEN_CLUT: Clut = Clut::new(576, 256);
 
 struct Proof {

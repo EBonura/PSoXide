@@ -12,4 +12,5 @@ workspace = true
 [dependencies]
 psx-pack = { path = "../../../sdk/crates/psx-pack" }
 psx-io = { path = "../../../sdk/crates/psx-io" }
+psx-hw = { path = "../../../crates/psx-hw" }
 psx-font = { path = "../../../sdk/crates/psx-font" }

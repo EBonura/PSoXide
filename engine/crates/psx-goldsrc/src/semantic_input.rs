@@ -55,10 +55,10 @@ pub fn angle_step_nearest(axis: i32, rate: i32) -> i32 {
 }
 
 /// One-tick rising edge of a held action.  Both jump consumers need edge
-/// semantics from pm_shared.c: PM_Jump (:2554) requires a release between
-/// hops, and the ladder detach (:2116) tests IN_JUMP against oldbuttons --
-/// a Cross still held from the hop that reached a ladder must neither block
-/// the grab nor instantly dismount it.
+/// semantics, as in Half-Life play: a jump needs the button released between
+/// hops, and jumping off a ladder needs a fresh press. A Cross still held
+/// from the hop that reached a ladder must neither block the grab nor
+/// instantly dismount it.
 #[inline(always)]
 pub const fn rising_edge(held: bool, was_held: bool) -> bool {
     held && !was_held

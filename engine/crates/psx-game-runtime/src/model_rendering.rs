@@ -528,7 +528,7 @@ impl RuntimeModelAsset {
             vertex_first: vertex_first as u16,
             vertex_count: vertex_count as u16,
             requires_cpu_blend: model_requires_cpu_blend(model),
-            double_sided: model.double_sided(),
+            double_sided: model.is_double_sided(),
             facet_reflection_size: (model.flags() & MODEL_FACET_REFLECTION_UVS != 0).then_some((atlas_slot.texture_width.min(255) as u8, atlas_slot.texture_height.min(255) as u8)),
             world_height: record.world_height,
             collision_radius: record.collision_radius,
@@ -2974,8 +2974,11 @@ mod tests {
         );
         assert_eq!(material.clut_word(), 0x1234);
         // Slot tpage address/depth bits preserved, blend bits rewritten.
-        assert_eq!(material.tpage_word() & !(0x0060 | 0x0200), 0x018F & !0x0060);
-        assert_eq!((material.tpage_word() >> 5) & 0x3, 3);
+        assert_eq!(
+            material.texture_page_word() & !(0x0060 | 0x0200),
+            0x018F & !0x0060
+        );
+        assert_eq!((material.texture_page_word() >> 5) & 0x3, 3);
         assert_eq!(material.tint(), (96, 128, 160));
         assert_eq!(material.texture_window_word(), window.word());
         // Semi-transparent command bit set for translucent modes...

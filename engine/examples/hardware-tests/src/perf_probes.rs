@@ -191,9 +191,9 @@ const LERP_A: Arg = Arg::Imm(0x0000_1234);
 /// group is only interesting next to the register A/B records anyway.
 const EXTENDED: [Probe; 39] = [
     probe(0x1E, 128, warm_nops, NONE, NONE).uncached(),
-    // The write queue is four stores deep: Sony's notes and nugget's
-    // measurements both say a store followed by three independent
-    // instructions costs nothing. Against 0x76, 64 back-to-back stores.
+    // Each store is followed by three independent instructions, which a
+    // four-deep write queue should absorb for free. This probe measures
+    // that claim against 0x76's 64 back-to-back stores.
     probe(0x1F, 64, warm_stores_spaced, Arg::RamWord, NONE),
     // Warm GTE command latency: back-to-back commands, each stalling until
     // the one before it has finished.
@@ -881,25 +881,41 @@ fn build_empty_list(nodes: usize) -> u32 {
 /// Run `body` with the GPU DMA channel set up for a linked list, then put the
 /// GPU's DMA direction back.
 fn with_gpu_list_dma(body: impl FnOnce() -> u16) -> u16 {
-    let old_direction = (gpu_io::gpustat().bits() >> 29) & 3;
-    gpu_io::write_gp1(0x0400_0002); // DMA CPU -> GP0
+    let old_direction = (gpu_io::status().bits() >> 29) & 3;
+    gpu_io::write_display_control(0x0400_0002); // DMA CPU -> GP0
     dma::enable_channel(dma::Channel::Gpu);
-    dma::set_bcr_manual(dma::Channel::Gpu, 0);
+    // SAFETY: silicon probe: the transfer touches only memory this probe
+    // owns, which stays live and untouched until the probe waits the
+    // channel idle or aborts it.
+    unsafe {
+        dma::raw::set_size(dma::Channel::Gpu, dma::size_words(0));
+    }
     let elapsed = body();
-    gpu_io::write_gp1(0x0400_0000 | old_direction);
+    gpu_io::write_display_control(0x0400_0000 | old_direction);
     elapsed
 }
 
-const LIST_KICK: u32 = dma::CHCR_TO_DEVICE | dma::CHCR_SYNC_LINKED | dma::CHCR_START;
+const LIST_KICK: u32 =
+    psx_hw::dma::CHCR_TO_DEVICE | psx_hw::dma::CHCR_SYNC_LINKED | psx_hw::dma::CHCR_START;
 
 /// Cycles for the DMA controller to walk `nodes` empty packets.
 fn timed_empty_list(nodes: usize) -> u16 {
     let head = build_empty_list(nodes);
     with_gpu_list_dma(|| {
-        dma::set_madr(dma::Channel::Gpu, head);
+        // SAFETY: silicon probe: the transfer touches only memory this probe
+        // owns, which stays live and untouched until the probe waits the
+        // channel idle or aborts it.
+        unsafe {
+            dma::raw::set_address(dma::Channel::Gpu, head);
+        }
         psx_io::timers::set_mode(psx_io::timers::Timer::Timer2, 0);
         psx_io::timers::set_counter(psx_io::timers::Timer::Timer2, 0);
-        dma::set_chcr(dma::Channel::Gpu, LIST_KICK);
+        // SAFETY: silicon probe: the transfer touches only memory this probe
+        // owns, which stays live and untouched until the probe waits the
+        // channel idle or aborts it.
+        unsafe {
+            dma::raw::set_control(dma::Channel::Gpu, LIST_KICK);
+        }
         let mut polls = 0u32;
         while dma::is_busy(dma::Channel::Gpu) && polls < 1_000_000 {
             polls += 1;
@@ -914,7 +930,7 @@ fn timed_empty_list(nodes: usize) -> u16 {
 }
 
 fn push_dma(records: &mut Records, next: &mut usize) {
-    let base = dma::Channel::Gpu.base();
+    let base = dma::Channel::Gpu.register_base();
     push_timing_record(
         records,
         next,

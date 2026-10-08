@@ -4,12 +4,13 @@
 //! # Shape of the loop
 //!
 //! ```text
-//!   gpu::init + draw_area + draw_offset
-//!   FrameBuffer::new
+//!   Gpu::new + draw_area + draw_offset
+//!   DoubleBuffer::new
+//!   require_analog_port1
 //!   scene.init(&mut ctx)
 //!   loop:
 //!     ctx.pad_prev ← ctx.pad           (one-frame input history)
-//!     ctx.pad      ← poll_port1()
+//!     ctx.pad      ← PadReader::poll() (port 1)
 //!     ask FrameScheduler for the next task:
 //!       fixed update  -> poll pad + scene.update(&mut ctx)
 //!       visual render -> clear + scene.render(&mut ctx) + present
@@ -35,16 +36,18 @@
 //! they just tick and go. A scene that wants "exit" behaviour can
 //! idle its own state machine in place.
 
-use psx_gpu::framebuf::FrameBuffer;
-use psx_gpu::{self as gpu, Resolution, VideoMode};
+use psx_gpu::chain;
+use psx_gpu::display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode};
+use psx_gpu::Gpu;
 use psx_level::{
     GameFlow, LevelGameplaySfxCueRecord, LevelOptionDef, LevelUiNodeRecord, LevelUiPaintRecord,
     LevelUiScene, LevelUiSfxCueRecord, LevelUiSfxSampleRecord,
 };
-use psx_pad::{enable_analog_port1, poll_port1};
+use psx_pad::{enable_analog_port1, require_analog_port1, PadReader};
 
 use crate::game_app::{GameApp, GAMEPLAY_ONLY};
-use crate::scene::{Ctx, QueuedFrame, RenderSubmission, Scene};
+use crate::present_queue::{PresentQueue, ENABLED as PRESENT_QUEUE_ENABLED};
+use crate::scene::{Ctx, RenderSubmission, Scene};
 use crate::scheduler::{FrameScheduler, SchedulerAction, SchedulerConfig};
 use crate::telemetry;
 use crate::time::EngineClock;
@@ -61,13 +64,26 @@ fn boot_trace(message: &str) {
 fn boot_trace(_message: &str) {}
 
 #[cfg(all(target_arch = "mips", feature = "hardware-boot-visual"))]
-pub(crate) fn boot_visual_checkpoint(fb: &mut FrameBuffer, color: (u8, u8, u8), message: &str) {
-    boot_visual_checkpoint_hold(fb, color, message, 1);
+pub(crate) fn boot_visual_checkpoint(ctx: &mut Ctx, color: (u8, u8, u8), message: &str) {
+    boot_visual_checkpoint_hold(ctx, color, message, 1);
 }
 
 #[cfg(all(target_arch = "mips", feature = "hardware-boot-visual"))]
 pub(crate) fn boot_visual_checkpoint_hold(
-    fb: &mut FrameBuffer,
+    ctx: &mut Ctx,
+    color: (u8, u8, u8),
+    message: &str,
+    frames: u8,
+) {
+    let (gpu, fb) = ctx.gpu_and_buffers();
+    boot_visual_checkpoint_raw(gpu, fb, color, message, frames);
+}
+
+/// [`boot_visual_checkpoint_hold`] before the context exists.
+#[cfg(all(target_arch = "mips", feature = "hardware-boot-visual"))]
+fn boot_visual_checkpoint_raw(
+    gpu: &mut Gpu,
+    fb: &mut DoubleBuffer,
     color: (u8, u8, u8),
     message: &str,
     frames: u8,
@@ -75,56 +91,58 @@ pub(crate) fn boot_visual_checkpoint_hold(
     // A checkpoint can fire while a scene's async ordering-table DMA is
     // still walking; drain the channel before issuing immediate draws so
     // the diagnostic itself cannot corrupt the GP0 stream.
-    gpu::submit_linked_list_wait();
+    chain::wait(gpu.dma_mut());
     for _ in 0..frames.max(1) {
-        fb.clear(color.0, color.1, color.2);
-        draw_boot_text(fb, message);
-        gpu::draw_sync();
-        // Deliberately the deprecated fixed 242-HBlank delay, not
-        // rt::wait_vblank(): a checkpoint can fire before platform::init,
-        // and wait_vblank's lazy install would rewrite the exception
-        // vector and clobber I_MASK mid-boot. A fixed hold is all this
-        // diagnostic needs, and it is what was verified on silicon.
-        #[allow(deprecated)]
-        gpu::vsync();
-        fb.swap();
+        fb.clear(gpu, color);
+        draw_boot_text(gpu, fb, message);
+        gpu.wait_idle();
+        // Deliberately a fixed 242-HBlank delay, not rt::wait_vblank(): a
+        // checkpoint can fire before platform::init, and wait_vblank's lazy
+        // install would rewrite the exception vector and clobber I_MASK
+        // mid-boot. A fixed hold is all this diagnostic needs, and it is
+        // what was verified on silicon (the old psx_gpu::vsync).
+        // Timer 1 mode: bit 0 sync enable, bits 1-2 reset at VBlank, bit 8
+        // HBlank clock. Writing the mode restarts the count from zero.
+        psx_io::timers::set_mode(psx_io::timers::Timer::Timer1, 0x0103);
+        while psx_io::timers::counter(psx_io::timers::Timer::Timer1) < 242 {}
+        fb.swap(gpu);
     }
 }
 
 #[cfg(all(target_arch = "mips", feature = "hardware-boot-visual"))]
-fn draw_boot_text(fb: &FrameBuffer, message: &str) {
+fn draw_boot_text(gpu: &mut Gpu, fb: &DoubleBuffer, message: &str) {
     let scale = 2i16;
     let advance = 6 * scale;
     let line_height = 9 * scale;
     let start_x = 12i16;
     let mut x = start_x;
     let mut y = 16i16;
-    draw_boot_text_line(start_x, y, "CORTEX_IGNITION_V1", scale);
+    draw_boot_text_line(gpu, start_x, y, "CORTEX_IGNITION_V1", scale);
     y += line_height;
     for ch in message.chars() {
-        if ch == '\n' || x + advance >= fb.width as i16 - 8 {
+        if ch == '\n' || x + advance >= fb.size().0 as i16 - 8 {
             x = start_x;
             y += line_height;
             if ch == '\n' {
                 continue;
             }
         }
-        draw_boot_glyph(x, y, ch, scale);
+        draw_boot_glyph(gpu, x, y, ch, scale);
         x += advance;
     }
 }
 
 #[cfg(all(target_arch = "mips", feature = "hardware-boot-visual"))]
-fn draw_boot_text_line(mut x: i16, y: i16, text: &str, scale: i16) {
+fn draw_boot_text_line(gpu: &mut Gpu, mut x: i16, y: i16, text: &str, scale: i16) {
     let advance = 6 * scale;
     for ch in text.chars() {
-        draw_boot_glyph(x, y, ch, scale);
+        draw_boot_glyph(gpu, x, y, ch, scale);
         x += advance;
     }
 }
 
 #[cfg(all(target_arch = "mips", feature = "hardware-boot-visual"))]
-fn draw_boot_glyph(x: i16, y: i16, ch: char, scale: i16) {
+fn draw_boot_glyph(gpu: &mut Gpu, x: i16, y: i16, ch: char, scale: i16) {
     let rows = boot_glyph(ch);
     for (row, bits) in rows.iter().enumerate() {
         for col in 0..5 {
@@ -133,7 +151,7 @@ fn draw_boot_glyph(x: i16, y: i16, ch: char, scale: i16) {
             }
             let px = x + col as i16 * scale;
             let py = y + row as i16 * scale;
-            gpu::draw_quad_flat(
+            gpu.draw(&psx_gpu::prim::QuadFlat::new(
                 [
                     (px, py),
                     (px + scale - 1, py),
@@ -143,7 +161,7 @@ fn draw_boot_glyph(x: i16, y: i16, ch: char, scale: i16) {
                 255,
                 255,
                 255,
-            );
+            ));
         }
     }
 }
@@ -291,12 +309,23 @@ fn boot_glyph(ch: char) -> [u8; 7] {
 
 #[cfg(not(all(target_arch = "mips", feature = "hardware-boot-visual")))]
 #[inline(always)]
-pub(crate) fn boot_visual_checkpoint(_fb: &mut FrameBuffer, _color: (u8, u8, u8), _message: &str) {}
+pub(crate) fn boot_visual_checkpoint(_ctx: &mut Ctx, _color: (u8, u8, u8), _message: &str) {}
 
 #[cfg(not(all(target_arch = "mips", feature = "hardware-boot-visual")))]
 #[inline(always)]
 pub(crate) fn boot_visual_checkpoint_hold(
-    _fb: &mut FrameBuffer,
+    _ctx: &mut Ctx,
+    _color: (u8, u8, u8),
+    _message: &str,
+    _frames: u8,
+) {
+}
+
+#[cfg(not(all(target_arch = "mips", feature = "hardware-boot-visual")))]
+#[inline(always)]
+fn boot_visual_checkpoint_raw(
+    _gpu: &mut Gpu,
+    _fb: &mut DoubleBuffer,
     _color: (u8, u8, u8),
     _message: &str,
     _frames: u8,
@@ -480,26 +509,33 @@ impl App {
         scene: &mut S,
     ) -> ! {
         boot_trace("psx-engine: run");
-        gpu::init(config.video_mode, config.resolution);
+        // The runner owns the GPU for the whole run; scenes borrow it
+        // through `Ctx::gpu`.
+        let peripherals = psx_rt::Peripherals::take().expect("peripherals are taken once");
+        let mut gpu = Gpu::new(
+            peripherals.gpu_dma,
+            DisplayConfig::new(config.video_mode, config.resolution),
+        );
         boot_trace("psx-engine: gpu ok");
         let mut clock = EngineClock::new();
         boot_trace("psx-engine: clock ok");
-        let fb = FrameBuffer::new(config.screen_w, config.screen_h);
-        gpu::set_draw_area(
-            0,
-            0,
-            config.screen_w.saturating_sub(1),
-            config.screen_h.saturating_sub(1),
+        let mut fb = DoubleBuffer::new(config.resolution);
+        gpu.set_draw_area(
+            (0, 0),
+            (
+                config.screen_w.saturating_sub(1),
+                config.screen_h.saturating_sub(1),
+            ),
         );
-        gpu::set_draw_offset(0, 0);
-        let mut fb = fb;
-        boot_visual_checkpoint(&mut fb, (160, 0, 0), "01 FRAMEBUFFER READY");
+        gpu.set_draw_offset((0, 0));
+        boot_visual_checkpoint_raw(&mut gpu, &mut fb, (160, 0, 0), "01 FRAMEBUFFER READY", 1);
         boot_trace("psx-engine: framebuffer ok");
 
         // Ask a DualShock-compatible controller to enter and lock analog
-        // mode. Original digital controllers safely ignore the request and
-        // continue through the same button-input path.
-        let _ = enable_analog_port1();
+        // mode. An original digital controller answers "digital only" and
+        // the same button-input path serves it; a pad that is not plugged in
+        // yet is negotiated again when it connects (see `run_scheduled`).
+        let _ = require_analog_port1();
 
         // Seed pad + pad_prev from a real poll so a button already held at
         // boot does NOT register as `just_pressed` on the first frame. This
@@ -508,7 +544,8 @@ impl App {
         // not instantly activate a menu button and skip into gameplay. With
         // both seeded to the current state, an input must actually transition
         // (release then press) to count as a press.
-        let initial_pad = poll_port1();
+        let mut pad_reader = PadReader::port1();
+        let initial_pad = pad_reader.poll();
         let mut ctx = Ctx::new(
             SimTick::ZERO,
             VisualFrame::ZERO,
@@ -517,7 +554,8 @@ impl App {
             initial_pad,
             fb,
         );
-        boot_visual_checkpoint(&mut ctx.fb, (200, 96, 0), "02 CTX READY");
+        ctx.set_gpu_dma(gpu.release());
+        boot_visual_checkpoint(&mut ctx, (200, 96, 0), "02 CTX READY");
 
         // The wrapper is the Scene the scheduled loop drives: its
         // init/update/render dispatch to the borrowed gameplay scene
@@ -536,15 +574,15 @@ impl App {
         );
 
         boot_trace("psx-engine: scene init");
-        boot_visual_checkpoint(&mut ctx.fb, (180, 180, 0), "03 APP INIT BEGIN");
+        boot_visual_checkpoint(&mut ctx, (180, 180, 0), "03 APP INIT BEGIN");
         app.init(&mut ctx);
-        boot_visual_checkpoint(&mut ctx.fb, (0, 120, 0), "13 APP INIT OK");
+        boot_visual_checkpoint(&mut ctx, (0, 120, 0), "13 APP INIT OK");
         boot_trace("psx-engine: scene init ok");
         clock.reset_origin();
 
         let visual_interval = config.visual_pacing.interval_vblanks();
         boot_trace("psx-engine: loop");
-        Self::run_scheduled(config, &mut app, clock, ctx, visual_interval);
+        Self::run_scheduled(config, &mut app, clock, ctx, pad_reader, visual_interval);
     }
 
     fn run_scheduled<S: Scene>(
@@ -552,6 +590,7 @@ impl App {
         scene: &mut S,
         mut clock: EngineClock,
         mut ctx: Ctx,
+        mut pad_reader: PadReader,
         visual_interval: u16,
     ) -> ! {
         let mut scheduler = FrameScheduler::new(config.scheduler, visual_interval);
@@ -616,12 +655,7 @@ impl App {
                         }
                         Self::present_pending(scene, &mut clock, &mut ctx, &mut pending_present);
                         if !traced_present {
-                            boot_visual_checkpoint_hold(
-                                &mut ctx.fb,
-                                (0, 220, 0),
-                                "49 PRESENT OK",
-                                60,
-                            );
+                            boot_visual_checkpoint_hold(&mut ctx, (0, 220, 0), "49 PRESENT OK", 60);
                             boot_trace("psx-engine: present ok");
                             traced_present = true;
                         }
@@ -639,39 +673,41 @@ impl App {
                 SchedulerAction::RunFixedUpdate { tick } => {
                     if !traced_update {
                         boot_trace("psx-engine: update begin");
-                        boot_visual_checkpoint(&mut ctx.fb, (0, 0, 180), "20 UPDATE BEGIN");
+                        boot_visual_checkpoint(&mut ctx, (0, 0, 180), "20 UPDATE BEGIN");
                     }
                     telemetry::task_begin(telemetry::task::FIXED_UPDATE);
                     telemetry::frame_begin(tick.as_u32());
                     ctx.sim_tick = tick;
                     if !traced_update {
-                        boot_visual_checkpoint(&mut ctx.fb, (220, 0, 0), "21 FRAME BEGIN");
+                        boot_visual_checkpoint(&mut ctx, (220, 0, 0), "21 FRAME BEGIN");
                     }
                     emit_sim_tick_counters(visual_interval);
                     ctx.pad_prev = ctx.pad;
                     if !traced_update {
                         boot_trace("psx-engine: pad poll begin");
-                        boot_visual_checkpoint(&mut ctx.fb, (220, 100, 0), "22 PAD POLL BEGIN");
+                        boot_visual_checkpoint(&mut ctx, (220, 100, 0), "22 PAD POLL BEGIN");
                     }
-                    ctx.pad = poll_port1();
+                    ctx.pad = pad_reader.poll();
                     if ctx.pad.is_connected() && !pad_was_connected {
                         // A newly attached DualShock starts in digital mode.
                         // Negotiate again on the connection edge so hot-plug
                         // behaves the same as a controller present at boot.
+                        // The shorter-spaced request: this runs in the frame
+                        // loop, where `require_analog_port1` would stall.
                         let _ = enable_analog_port1();
-                        ctx.pad = poll_port1();
+                        ctx.pad = pad_reader.poll();
                     }
                     pad_was_connected = ctx.pad.is_connected();
                     if !traced_update {
                         boot_trace("psx-engine: pad poll ok");
-                        boot_visual_checkpoint(&mut ctx.fb, (220, 220, 0), "23 PAD POLL OK");
+                        boot_visual_checkpoint(&mut ctx, (220, 220, 0), "23 PAD POLL OK");
                     }
 
                     telemetry::stage_begin(telemetry::stage::UPDATE);
                     scene.update(&mut ctx);
                     telemetry::stage_end(telemetry::stage::UPDATE);
                     if !traced_update {
-                        boot_visual_checkpoint(&mut ctx.fb, (0, 140, 180), "29 UPDATE OK");
+                        boot_visual_checkpoint(&mut ctx, (0, 140, 180), "29 UPDATE OK");
                         boot_trace("psx-engine: update ok");
                         traced_update = true;
                     }
@@ -700,7 +736,10 @@ impl App {
                     missed_visual_intervals,
                     fixed_update_clamped: _,
                 } => {
-                    let submission = scene.render_submission();
+                    let mut submission = scene.render_submission();
+                    if !PRESENT_QUEUE_ENABLED && submission == RenderSubmission::PresentQueue {
+                        submission = RenderSubmission::QueuedDoubleBuffered;
+                    }
                     if submission == RenderSubmission::PresentQueue {
                         if !present_queue.active {
                             // The queue starts on an idle GPU: present what
@@ -718,7 +757,7 @@ impl App {
                         // The frame before the last published one used this
                         // frame's ordering table, packets and nodes.
                         telemetry::stage_begin(telemetry::stage::OT_WAIT);
-                        psx_rt::present::wait_arena_free();
+                        present_queue.wait_arena_free();
                         telemetry::stage_end(telemetry::stage::OT_WAIT);
                     } else if present_queue.active {
                         present_queue.stop(&mut clock, &mut ctx);
@@ -734,7 +773,7 @@ impl App {
                     let queued_previous = if submission == RenderSubmission::Queued {
                         pending_present.take().inspect(|_| {
                             telemetry::stage_begin(telemetry::stage::OT_WAIT);
-                            gpu::submit_linked_list_wait();
+                            chain::wait(ctx.gpu_dma());
                             telemetry::stage_end(telemetry::stage::OT_WAIT);
                         })
                     } else if matches!(
@@ -752,32 +791,30 @@ impl App {
                     };
                     if !traced_render {
                         boot_trace("psx-engine: render begin");
-                        boot_visual_checkpoint(&mut ctx.fb, (120, 0, 180), "30 RENDER BEGIN");
+                        boot_visual_checkpoint(&mut ctx, (120, 0, 180), "30 RENDER BEGIN");
                     }
                     telemetry::task_begin(telemetry::task::VISUAL_RENDER);
                     if submission == RenderSubmission::Immediate {
                         telemetry::stage_begin(telemetry::stage::FRAME_CLEAR);
                         if !traced_render {
-                            boot_visual_checkpoint(&mut ctx.fb, (80, 0, 120), "31 CLEAR BEGIN");
+                            boot_visual_checkpoint(&mut ctx, (80, 0, 120), "31 CLEAR BEGIN");
                         }
-                        ctx.fb.clear(
-                            config.clear_color.0,
-                            config.clear_color.1,
-                            config.clear_color.2,
-                        );
+                        {
+                            let (gpu, fb) = ctx.gpu_and_buffers();
+                            fb.clear(gpu, config.clear_color);
+                        }
                         if !traced_render {
-                            boot_visual_checkpoint(&mut ctx.fb, (80, 40, 160), "32 CLEAR OK");
+                            boot_visual_checkpoint(&mut ctx, (80, 40, 160), "32 CLEAR OK");
                         }
                         telemetry::stage_end(telemetry::stage::FRAME_CLEAR);
                     }
 
                     telemetry::stage_begin(telemetry::stage::RENDER);
                     if !traced_render {
-                        boot_visual_checkpoint(
-                            &mut ctx.fb,
-                            (100, 40, 180),
-                            "33 SCENE RENDER BEGIN",
-                        );
+                        boot_visual_checkpoint(&mut ctx, (100, 40, 180), "33 SCENE RENDER BEGIN");
+                    }
+                    if submission == RenderSubmission::PresentQueue {
+                        ctx.set_present_queue_hook(Some(present_queue.hook()));
                     }
                     if submission == RenderSubmission::PresentQueue {
                         ctx.set_present_queue_hook(Some(present_queue.hook()));
@@ -786,7 +823,7 @@ impl App {
                     ctx.set_present_queue_hook(None);
                     if !traced_render {
                         boot_visual_checkpoint_hold(
-                            &mut ctx.fb,
+                            &mut ctx,
                             (180, 180, 255),
                             "38 SCENE RENDER RETURNED",
                             60,
@@ -804,7 +841,7 @@ impl App {
                     if submission.is_queued() && !published {
                         if let Some(previous_misses) = queued_previous {
                             telemetry::stage_begin(telemetry::stage::OT_WAIT);
-                            gpu::draw_sync();
+                            ctx.gpu().wait_idle();
                             telemetry::stage_end(telemetry::stage::OT_WAIT);
 
                             telemetry::stage_begin(telemetry::stage::RENDER);
@@ -829,7 +866,10 @@ impl App {
                             // resolved before any visual frame runs), which
                             // the acknowledge inside the queue requires.
                             telemetry::stage_begin(telemetry::stage::PRESENT);
-                            clock.queue_display_flip(ctx.fb.begin_deferred_swap());
+                            {
+                                let (gpu, fb) = ctx.gpu_and_buffers();
+                                clock.queue_display_flip(gpu, fb.begin_deferred_swap());
+                            }
                             telemetry::stage_end(telemetry::stage::PRESENT);
                             deferred_flip = Some(previous_misses);
                         } else {
@@ -840,12 +880,7 @@ impl App {
                         }
                     }
                     if !traced_render {
-                        boot_visual_checkpoint_hold(
-                            &mut ctx.fb,
-                            (220, 220, 220),
-                            "39 RENDER OK",
-                            60,
-                        );
+                        boot_visual_checkpoint_hold(&mut ctx, (220, 220, 220), "39 RENDER OK", 60);
                         boot_trace("psx-engine: render ok");
                         traced_render = true;
                     }
@@ -878,13 +913,15 @@ impl App {
     /// [`EngineClock::display_flip_pending`] is true -- that is the whole
     /// reason the work is split out of the present.
     fn finish_deferred_flip<S: Scene>(config: Config, scene: &mut S, ctx: &mut Ctx) {
-        ctx.fb.apply_draw_target();
+        {
+            let (gpu, fb) = ctx.gpu_and_buffers();
+            fb.apply_draw_target(gpu);
+        }
         telemetry::stage_begin(telemetry::stage::FRAME_CLEAR);
-        ctx.fb.clear(
-            config.clear_color.0,
-            config.clear_color.1,
-            config.clear_color.2,
-        );
+        {
+            let (gpu, fb) = ctx.gpu_and_buffers();
+            fb.clear(gpu, config.clear_color);
+        }
         telemetry::stage_end(telemetry::stage::FRAME_CLEAR);
         scene.submit_render(ctx);
     }
@@ -915,8 +952,8 @@ impl App {
         // hardware this wait is the real GPU draw time left uncovered
         // by the fixed updates that ran since the kick.
         telemetry::stage_begin(telemetry::stage::OT_WAIT);
-        gpu::submit_linked_list_wait();
-        gpu::draw_sync();
+        chain::wait(ctx.gpu_dma());
+        ctx.gpu().wait_idle();
         telemetry::stage_end(telemetry::stage::OT_WAIT);
 
         telemetry::stage_begin(telemetry::stage::RENDER);
@@ -924,9 +961,15 @@ impl App {
         telemetry::stage_end(telemetry::stage::RENDER);
 
         telemetry::stage_begin(telemetry::stage::PRESENT);
-        clock.queue_display_flip(ctx.fb.begin_deferred_swap());
+        {
+            let (gpu, fb) = ctx.gpu_and_buffers();
+            clock.queue_display_flip(gpu, fb.begin_deferred_swap());
+        }
         let landed = clock.wait_display_flip();
-        ctx.fb.apply_draw_target();
+        {
+            let (gpu, fb) = ctx.gpu_and_buffers();
+            fb.apply_draw_target(gpu);
+        }
         telemetry::stage_end(telemetry::stage::PRESENT);
         if !landed {
             telemetry::counter(telemetry::counter::VISUAL_DEADLINE_MISSES, 1);

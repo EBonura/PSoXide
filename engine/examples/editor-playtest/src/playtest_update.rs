@@ -1236,7 +1236,7 @@ impl Playtest {
         let (camera_right_x, camera_right_y) = ctx.pad.sticks.right_centered();
         self.camera_turning_last_tick = !self.is_locked()
             && psx_engine::Deadzone::new(self.analog_deadzone)
-                .outside(camera_right_x, camera_right_y);
+                .is_outside(camera_right_x, camera_right_y);
         if SOFT_LOCK_ENABLED && !self.ranged_ready.aiming() {
             self.update_soft_lock(ctx);
         } else {

@@ -4,6 +4,8 @@
 //! summarise SPU RAM with, and QR module lookup. One copy, so a host decoder
 //! that checks one probe's CRC checks them all.
 
+use psx_gpu::prim::QuadFlat;
+
 /// Bounded little-endian writer over a caller-owned buffer. Writing past the
 /// end panics: a payload that outgrew its buffer is a layout bug, and a
 /// truncated capture would decode as a different, wrong one.
@@ -129,9 +131,14 @@ pub(crate) const QR_QUIET: i16 = 4;
 /// centred horizontally at `top`: a white field, then one black rectangle per
 /// horizontal run of dark modules.
 pub(crate) fn draw_qr(modules: &[u8], stride: usize, size: usize, top: i16, scale: i16) {
+    probe_gpu!(gpu);
     let total = (size as i16 + QR_QUIET * 2) * scale;
     let left = (320 - total) / 2;
-    psx_gpu::draw_rect_flat(left, top, total as u16, total as u16, 255, 255, 255);
+    gpu.draw(&QuadFlat::rect(
+        (left, top),
+        (total as u16, total as u16),
+        (255, 255, 255),
+    ));
     let data_left = left + QR_QUIET * scale;
     let data_top = top + QR_QUIET * scale;
     for y in 0..size {
@@ -145,15 +152,14 @@ pub(crate) fn draw_qr(modules: &[u8], stride: usize, size: usize, top: i16, scal
                 x += 1;
             }
             if first < x {
-                psx_gpu::draw_rect_flat(
-                    data_left + first as i16 * scale,
-                    data_top + y as i16 * scale,
-                    ((x - first) as i16 * scale) as u16,
-                    scale as u16,
-                    0,
-                    0,
-                    0,
-                );
+                gpu.draw(&QuadFlat::rect(
+                    (
+                        data_left + first as i16 * scale,
+                        data_top + y as i16 * scale,
+                    ),
+                    (((x - first) as i16 * scale) as u16, scale as u16),
+                    (0, 0, 0),
+                ));
             }
         }
     }

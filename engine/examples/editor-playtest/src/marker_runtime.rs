@@ -822,6 +822,7 @@ pub(super) fn draw_entity_markers(
 }
 
 pub(super) fn draw_lock_target_indicator(
+    gpu: &mut Gpu,
     target: RoomPoint,
     camera: WorldCamera,
     elapsed_tick: SimTick,
@@ -863,12 +864,14 @@ pub(super) fn draw_target_reticle(
         let outer_radius = TARGET_LOCK_OUTER_RADIUS + breath;
         let outer_corner = TARGET_LOCK_OUTER_CORNER + breath;
         draw_target_lock_line(
+            gpu,
             center,
             (sx * outer_corner, sy * outer_radius),
             (sx * outer_radius, sy * outer_corner),
             white,
         );
         draw_target_lock_line(
+            gpu,
             center,
             (sx * outer_radius, sy * outer_corner),
             (sx * outer_radius, sy * TARGET_LOCK_OUTER_STEM_END),
@@ -878,12 +881,14 @@ pub(super) fn draw_target_reticle(
         let inner_radius = TARGET_LOCK_INNER_RADIUS + breath;
         let inner_corner = TARGET_LOCK_INNER_CORNER + breath;
         draw_target_lock_line(
+            gpu,
             center,
             (sx * inner_corner, sy * inner_radius),
             (sx * inner_radius, sy * inner_corner),
             cyan,
         );
         draw_target_lock_line(
+            gpu,
             center,
             (sx * inner_radius, sy * inner_corner),
             (sx * inner_radius, sy * TARGET_LOCK_INNER_STEM_END),
@@ -891,6 +896,7 @@ pub(super) fn draw_target_reticle(
         );
 
         draw_target_lock_line(
+            gpu,
             center,
             (sx * TARGET_LOCK_SPOKE_INNER, sy * TARGET_LOCK_SPOKE_INNER),
             (sx * TARGET_LOCK_SPOKE_OUTER, sy * TARGET_LOCK_SPOKE_OUTER),
@@ -907,7 +913,13 @@ pub(super) fn draw_target_reticle(
         [(left, top), (right, top), (left, bottom)],
         [(right, top), (right, bottom), (left, bottom)],
     ] {
-        draw_tri_flat_blended(verts, cyan.0, cyan.1, cyan.2, BlendMode::Average);
+        gpu.set_draw_mode(TextureMaterial::blended(
+            0,
+            0,
+            (cyan.0, cyan.1, cyan.2),
+            BlendMode::Average,
+        ));
+        gpu.draw(&TriFlat::new(verts, cyan.0, cyan.1, cyan.2).translucent());
     }
 }
 
@@ -998,6 +1010,7 @@ fn target_lock_color(color: (u8, u8, u8), brightness: u8) -> (u8, u8, u8) {
 /// from the centre on the minor axis, keeping mirrored parts symmetrical and
 /// giving horizontal, vertical, and diagonal pieces even weight at 320x240.
 fn draw_target_lock_line(
+    gpu: &mut Gpu,
     center: ProjectedVertex,
     from: (i32, i32),
     to: (i32, i32),
@@ -1031,7 +1044,8 @@ fn draw_target_lock_line(
                 .saturating_add(to.1)
                 .saturating_add(offset.1),
         );
-        psx_gpu::draw_line_mono_blended((x0, y0), (x1, y1), color, BlendMode::Average);
+        gpu.set_draw_mode(TextureMaterial::blended(0, 0, color, BlendMode::Average));
+        gpu.draw(&LineMono::new(x0, y0, x1, y1, color.0, color.1, color.2).translucent());
     }
 }
 

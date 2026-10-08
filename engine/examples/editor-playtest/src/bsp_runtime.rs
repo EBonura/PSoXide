@@ -952,7 +952,7 @@ impl BspRuntime {
             // features. An opaque material may still use CLUT entry zero as a
             // binary mask, so preserve an explicit PSXT transparent-zero flag
             // instead of forcing all opaque room materials to opaque-zero.
-            let slot = if texture.index_zero_transparent() {
+            let slot = if texture.is_index_zero_transparent() {
                 ensure_texture_uploaded(asset_id, asset.bytes)
             } else if material.blend_mode == material_blend::OPAQUE {
                 ensure_room_texture_uploaded(asset_id, asset.bytes)
@@ -1550,6 +1550,11 @@ impl BspRuntime {
         )
     }
 
+    /// Packet words the last world pass wrote.
+    pub(super) fn last_world_packet_words(&self) -> usize {
+        self.last_world_packet_words
+    }
+
     /// True when last frame's world, with an eighth to spare, would fit in
     /// the slots the in-flight frame leaves free, so drawing it now needs no
     /// fence.
@@ -1585,7 +1590,7 @@ impl BspRuntime {
         psx_gte::scene::set_projection_plane(
             camera.projection.focal_length.clamp(1, i32::from(u16::MAX)) as u16,
         );
-        psx_gte::scene::set_avsz_weights(0x155, 0x100);
+        psx_gte::scene::set_average_z_weights(0x155, 0x100);
         let mut projection = self.renderer.view_projection();
         projection.focal_length = camera.projection.focal_length;
         projection.half_width = i32::from(camera.projection.screen_x);

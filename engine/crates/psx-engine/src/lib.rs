@@ -54,11 +54,11 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
+pub mod affine_surface;
 pub mod angle;
 pub mod app;
 pub mod attributed_clip;
 pub mod character_motor;
-pub mod classic_affine;
 pub mod collision_query;
 pub mod fixed;
 mod floor_sample;
@@ -67,6 +67,7 @@ pub mod game_app;
 pub mod lighting;
 pub mod microgame;
 pub mod movement;
+mod present_queue;
 pub mod projection;
 pub mod render;
 pub mod render3d;
@@ -118,6 +119,11 @@ pub(crate) fn r3000_usize_gt(left: usize, right: usize) -> bool {
     }
 }
 
+pub use affine_surface::{
+    compose_model_view_transform, materialize_baked_surface_vertices, materialize_surface_vertices,
+    submit_surface_batch, AffineSurface, AffineVertex, SurfaceProfile, SurfaceSourceVertex,
+    SurfaceSubmit, AFFINE_PACKETS_PER_TRIANGLE, AFFINE_SPLIT_SCRATCH_VERTICES,
+};
 pub use angle::Angle;
 pub use app::{App, Config, VisualPacing};
 pub use character_motor::{
@@ -126,38 +132,6 @@ pub use character_motor::{
     CharacterCollision, CharacterCollisionAabb, CharacterCollisionCylinder, CharacterCollisionRoom,
     CharacterMotorAction, CharacterMotorAnim, CharacterMotorConfig, CharacterMotorFrame,
     CharacterMotorInput, CharacterMotorState,
-};
-pub use classic_affine::{
-    census_classic_affine_projected_batch_topology,
-    collect_classic_affine_indexed_projection_slots,
-    collect_classic_affine_projected_subdivision_requests, compose_classic_alias_transform,
-    materialize_classic_affine_baked_light_vertices,
-    materialize_classic_affine_indexed_baked_vertices,
-    materialize_classic_affine_indexed_baked_vertices_with_projection_slots,
-    materialize_classic_affine_indexed_projected_vertices,
-    materialize_classic_affine_indexed_vertices, materialize_classic_affine_word_vertices,
-    materialize_project_classic_affine_indexed_baked_vertices,
-    materialize_project_classic_affine_indexed_batch, project_classic_affine_indexed_vertices,
-    project_classic_affine_indexed_vertices_dense, project_classic_affine_vertices,
-    submit_classic_affine_batch, submit_classic_affine_fan, submit_classic_affine_mixed_batch,
-    submit_classic_affine_packed_fan, submit_classic_affine_planned_resident_batch,
-    submit_classic_affine_projected_batch, submit_classic_affine_projected_fan,
-    submit_classic_affine_resident_batch, submit_classic_affine_scoped_windowed_batch,
-    submit_classic_affine_scoped_windowed_fan, submit_classic_affine_windowed_batch,
-    submit_classic_affine_windowed_fan, submit_classic_alias_model,
-    submit_classic_alias_view_model, ClassicAffineBatchSurface, ClassicAffineIndexedBatchSource,
-    ClassicAffineIndexedCorner, ClassicAffineMixedBatchSurface, ClassicAffinePacketPlan,
-    ClassicAffinePlannedSubmit, ClassicAffinePosition, ClassicAffineProfile,
-    ClassicAffineProjectedVertex, ClassicAffineResidentBatchSurface, ClassicAffineResidentSubmit,
-    ClassicAffineSourceVertex, ClassicAffineSubdivisionRequest, ClassicAffineSubmit,
-    ClassicAffineTopologyCensus, ClassicAffineTopologyKey, ClassicAffineVertex,
-    ClassicAffineWindowedBatchSurface, ClassicAffineWordSourceVertex, ClassicAliasFace,
-    ClassicAliasProjectedVertex, ClassicAliasVertex,
-};
-pub use classic_affine::{quake_error_bounded_profile, QUAKE_COARSE_ERROR_BUDGET_Q3};
-#[cfg(feature = "classic-affine-quake-specialized-kernel")]
-pub use classic_affine::{
-    submit_quake_classic_affine_batch, submit_quake_classic_affine_batch_budget,
 };
 
 pub use collision_query::{
@@ -178,11 +152,13 @@ pub use movement::{
     horizontal_view_coordinates, yaw_to_point, CameraRelativeMove, InputAxis, InputAxisProfile,
     InputVector,
 };
+/// The GPU DMA ownership token [`OtFrame::submit`] takes; scenes borrow
+/// the app runner's through [`Ctx::gpu_dma`].
+pub use psx_io::periph::GpuDma;
 pub use render::{
-    CameraDepth, DepthBand, DepthRange, DepthSlot, GpuPacket, OtDepth, OtFrame, OtSubmitInFlight,
-    PacketFramePair, PrimitiveArena, PrimitivePacketArena, PrimitivePacketScratch,
-    PrimitivePacketStream, PrimitivePacketWordReservation, PrimitiveSink, RoomSurfaceSink,
-    PRIMITIVE_PACKET_SLOT_WORDS,
+    CameraDepth, DepthBand, DepthRange, DepthSlot, GpuPacket, OtDepth, OtFrame, PacketFramePair,
+    PrimitiveArena, PrimitivePacketArena, PrimitivePacketScratch, PrimitivePacketStream,
+    PrimitivePacketWordReservation, PrimitiveSink, RoomSurfaceSink, PRIMITIVE_PACKET_SLOT_WORDS,
 };
 pub use render3d::{
     apply_model_pose_translation, compute_joint_view_transform, compute_joint_world_basis,

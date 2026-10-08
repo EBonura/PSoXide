@@ -44,14 +44,14 @@ use psx_engine::{
     ActorTransform, App, Config, Ctx, DepthBand, DepthRange, GouraudMeshOptions, GouraudRenderPass,
     GouraudTriCommand, OtDepth, OtFrame, PrimitiveArena, Scene, SimTick, Vec3World,
 };
-use psx_font::{fonts::BASIC_8X16, u16_hex, FontAtlas};
+use psx_font::{fonts::BASIC_8X16, format_u16, FontAtlas};
 use psx_gpu::ot::OrderingTable;
 use psx_gpu::prim::{QuadGouraud, RectFlat, TriGouraud};
 use psx_gte::lighting::ProjectedLit;
 use psx_gte::math::{Mat3I16, Vec3I16, Vec3I32};
 use psx_gte::scene;
 use psx_math::sincos;
-use psx_vram::{Clut, TexDepth, Tpage};
+use psx_vram::{Clut, TextureDepth, TexturePage};
 
 // ----------------------------------------------------------------------
 // Screen / scene geometry
@@ -72,7 +72,7 @@ const PROJ_H: u16 = 280;
 /// fit in Vec3I16 (the GTE's native vertex type).
 const WORLD_Z: i32 = 0x5000;
 
-const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
+const FONT_TPAGE: TexturePage = TexturePage::new(320, 0, TextureDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
 
 // Cube mesh: 24 verts, 12 triangles, face-split so per-vertex
@@ -345,7 +345,7 @@ impl Scene for Lighting {
     fn init(&mut self, _ctx: &mut Ctx) {
         scene::set_screen_offset((SCREEN_W as i32 / 2) << 16, (SCREEN_H as i32 / 2) << 16);
         scene::set_projection_plane(PROJ_H);
-        scene::set_avsz_weights(0x155, 0xAA);
+        scene::set_average_z_weights(0x155, 0xAA);
         self.font = Some(FontAtlas::upload(&BASIC_8X16, FONT_TPAGE, FONT_CLUT));
     }
 
@@ -377,19 +377,20 @@ impl Scene for Lighting {
     }
 
     fn render(&mut self, ctx: &mut Ctx) {
-        self.build_frame_ot(ctx.sim_tick);
+        self.build_frame_ot(ctx.sim_tick, ctx.gpu_dma());
         let font = self.font.as_ref().expect("font uploaded in init");
         self.draw_hud(font, ctx.sim_tick);
     }
 }
 
 impl Lighting {
-    fn build_frame_ot(&mut self, tick: SimTick) {
+    fn build_frame_ot(&mut self, tick: SimTick, dma: &mut psx_engine::GpuDma) {
         let frame = tick.as_u32();
         let mut ot = unsafe { OtFrame::begin(&mut OT) };
         let mut gouraud = unsafe { PrimitiveArena::new(&mut GOURAUD_TRIS) };
-        let mut markers = unsafe { PrimitiveArena::new(&mut LIGHT_MARKERS) };
-        let mut backgrounds = unsafe { PrimitiveArena::new(core::slice::from_mut(&mut BG_QUAD)) };
+        let mut markers = unsafe { psx_gpu::frame::PrimitiveArena::new(&mut LIGHT_MARKERS) };
+        let mut backgrounds =
+            unsafe { psx_gpu::frame::PrimitiveArena::new(core::slice::from_mut(&mut BG_QUAD)) };
 
         let cube = Mesh::from_bytes(CUBE_BLOB).expect("cube blob");
 
@@ -430,7 +431,7 @@ impl Lighting {
             // projected screen-space output.
             let rot_scaled = actor.scaled_rotation();
             let cube_proj = unsafe { &mut CUBE_PROJ };
-            for vi in 0..cube.vert_count() {
+            for vi in 0..cube.vertex_count() {
                 let vl = cube.vertex(vi);
                 let nl = cube.vertex_normal(vi).unwrap_or(Vec3I16::new(0, 0x1000, 0));
 
@@ -499,7 +500,7 @@ impl Lighting {
             ot.add_packet(LIGHT_MARKER_SLOT, marker);
         }
 
-        ot.submit();
+        ot.submit(dma);
     }
 
     fn draw_hud(&self, font: &FontAtlas, tick: SimTick) {
@@ -508,7 +509,7 @@ impl Lighting {
         font.draw_text(SCREEN_W - 68, 4, "4 lights", (180, 180, 220));
 
         font.draw_text(4, SCREEN_H - 20, "frame", (160, 160, 200));
-        let frame_hex = u16_hex((tick.as_u32() & 0xFFFF) as u16);
+        let frame_hex = format_u16((tick.as_u32() & 0xFFFF) as u16);
         font.draw_text(
             4 + 8 * 6,
             SCREEN_H - 20,
@@ -517,7 +518,7 @@ impl Lighting {
         );
 
         font.draw_text(SCREEN_W / 2 - 8 * 3, SCREEN_H - 20, "tri", (160, 160, 200));
-        let tri = u16_hex(self.tri_count);
+        let tri = format_u16(self.tri_count);
         font.draw_text(
             SCREEN_W / 2 + 8,
             SCREEN_H - 20,
@@ -526,7 +527,7 @@ impl Lighting {
         );
 
         font.draw_text(SCREEN_W - 100, SCREEN_H - 20, "cubes", (160, 160, 200));
-        let cubes = u16_hex(NUM_CUBES as u16);
+        let cubes = format_u16(NUM_CUBES as u16);
         font.draw_text(
             SCREEN_W - 52,
             SCREEN_H - 20,

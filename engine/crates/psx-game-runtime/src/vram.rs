@@ -34,7 +34,8 @@ use psx_level::{
     ResidencyChangeSet, ResidencyManager, RoomIndex, RoomResidencyRecord,
 };
 use psx_vram::{
-    upload_bytes, Clut, TexDepth, Tpage, VramAllocator, VramHandle, VramRect, VramRegionSource,
+    upload_bytes, Clut, TextureDepth, TexturePage, VramAllocator, VramHandle, VramRect,
+    VramRegionSource,
 };
 use upload_queue::{VramUploadJob, VramUploadKind, VramUploadQueue};
 
@@ -103,13 +104,13 @@ pub struct VramLayout {
     /// First VRAM x of the room-material 4bpp page band.
     pub room_tpage_base_x: u16,
     /// Shared room-material tpage (the band's first page).
-    pub shared_tpage: Tpage,
+    pub shared_tpage: TexturePage,
     /// Room-material band page stride in halfwords.
     pub room_tpage_stride_hw: u16,
     /// Largest square room texture edge in texels.
     pub room_tile_texels: u16,
     /// Model-atlas indexed-texture region origin page.
-    pub model_tpage: Tpage,
+    pub model_tpage: TexturePage,
     /// Maximum physical halfword width reserved for one model atlas.
     pub model_tpage_max_halfwords: u16,
     /// First VRAM row of the managed CLUT band.
@@ -626,7 +627,7 @@ pub struct VramRuntime<
     /// The lower-right 128x128 quadrant of a one-page font pack when its upload
     /// stays in the upper half. Gameplay shadow and particle pixels borrow this
     /// otherwise-unused space; the font pack remains the sole page owner.
-    font_effect_page: Option<Tpage>,
+    font_effect_page: Option<TexturePage>,
     /// Current room at the last eviction pass. Eviction only runs when the
     /// streamed residency set shifts (the player crosses into a new room),
     /// keeping it off the per-frame path.
@@ -646,7 +647,7 @@ pub struct VramRuntime<
     /// Shadow and particle pixels normally borrow the gameplay font page; if a
     /// future font pack fills that page, the fourth quadrant is reserved as a
     /// safe fallback.
-    small_texture_page: Option<Tpage>,
+    small_texture_page: Option<TexturePage>,
     small_texture_region: VramHandle,
     small_model_quadrants: u8,
     shadow_clut_region: VramHandle,
@@ -873,7 +874,7 @@ impl<
             (Some(metrics), VramHandle::Rect(rect))
                 if metrics.pages == 1 && metrics.upload_rows <= 128 =>
             {
-                Some(Tpage::new(rect.x, rect.y, TexDepth::Bit4))
+                Some(TexturePage::new(rect.x, rect.y, TextureDepth::Bit4))
             }
             _ => None,
         };
@@ -945,16 +946,16 @@ impl<
         self.sky_clut_words[band.min(SKY_PANORAMA_PALETTE_BANDS - 1)]
     }
 
-    fn small_texture_page(&mut self) -> Option<Tpage> {
+    fn small_texture_page(&mut self) -> Option<TexturePage> {
         if self.small_texture_page.is_none() {
-            let (tpage, region) = self.allocator.alloc_page_run(1, TexDepth::Bit4, 256)?;
+            let (tpage, region) = self.allocator.alloc_page_run(1, TextureDepth::Bit4, 256)?;
             self.small_texture_page = Some(tpage);
             self.small_texture_region = region;
         }
         self.small_texture_page
     }
 
-    fn allocate_small_model_quadrant(&mut self) -> Option<(Tpage, u8, u8)> {
+    fn allocate_small_model_quadrant(&mut self) -> Option<(TexturePage, u8, u8)> {
         let page = self.small_texture_page()?;
         for quadrant in 0..4u8 {
             let bit = 1u8 << quadrant;
@@ -973,7 +974,7 @@ impl<
     /// Prefer unused pixels in the resident HUD-font page. If the active font
     /// pack is too tall, reserve quadrant three of the small-model page and
     /// retain the previous collision-free layout.
-    fn effect_texture_page(&mut self) -> Option<Tpage> {
+    fn effect_texture_page(&mut self) -> Option<TexturePage> {
         if let Some(page) = self.font_effect_page {
             return Some(page);
         }
@@ -1023,8 +1024,8 @@ impl<
 
         Some(
             TextureMaterial::blended(
-                clut.uv_clut_word(),
-                page.uv_tpage_word(0),
+                clut.uv_word(),
+                page.uv_word(0),
                 (0x80, 0x80, 0x80),
                 BlendMode::Average,
             )
@@ -1064,8 +1065,8 @@ impl<
 
         Some(
             TextureMaterial::blended(
-                clut.uv_clut_word(),
-                page.uv_tpage_word(0),
+                clut.uv_word(),
+                page.uv_word(0),
                 (0x80, 0x80, 0x80),
                 BlendMode::Add,
             )
@@ -1155,8 +1156,8 @@ impl<
 
         Some(
             TextureMaterial::blended(
-                clut_pos.uv_clut_word(),
-                page.uv_tpage_word(0),
+                clut_pos.uv_word(),
+                page.uv_word(0),
                 (0x80, 0x80, 0x80),
                 BlendMode::Average,
             )
@@ -1243,7 +1244,7 @@ impl<
         asset_bytes: &[u8],
     ) -> Option<VramSlot> {
         let texture = Texture::from_bytes(asset_bytes).ok()?;
-        let clut_mode = if texture.index_zero_transparent() {
+        let clut_mode = if texture.is_index_zero_transparent() {
             VramSlotClutMode::TransparentZero
         } else {
             VramSlotClutMode::OpaqueZero
@@ -1353,7 +1354,8 @@ impl<
         }
 
         let idx = self.next_vram_slot()?;
-        let (left_tpage, page_region) = self.allocator.alloc_page_run(6, TexDepth::Bit4, 256)?;
+        let (left_tpage, page_region) =
+            self.allocator.alloc_page_run(6, TextureDepth::Bit4, 256)?;
         let (clut, clut_region) = match self.allocator.alloc_clut(DIRECTIONAL_SKY_CLUT_ENTRIES) {
             Some(allocation) => allocation,
             None => {
@@ -1385,8 +1387,8 @@ impl<
             asset: asset_id,
             clut_mode: VramSlotClutMode::DirectionalSky,
             ready: true,
-            clut_word: clut.uv_clut_word(),
-            tpage_word: left_tpage.uv_tpage_word(0),
+            clut_word: clut.uv_word(),
+            tpage_word: left_tpage.uv_word(0),
             texture_window: TextureWindow::NONE,
             texture_width: texture.width(),
             texture_height: texture.height(),
@@ -1410,7 +1412,7 @@ impl<
         resolve: &impl Fn(AssetId) -> Option<&'r [u8]>,
     ) -> Option<VramSlot> {
         let texture = Texture::from_bytes(asset_bytes).ok()?;
-        let clut_mode = if texture.index_zero_transparent() {
+        let clut_mode = if texture.is_index_zero_transparent() {
             VramSlotClutMode::TransparentZero
         } else {
             VramSlotClutMode::OpaqueZero
@@ -1496,8 +1498,8 @@ impl<
             asset: asset_id,
             clut_mode,
             ready: false,
-            clut_word: clut.uv_clut_word(),
-            tpage_word: tpage.uv_tpage_word(0),
+            clut_word: clut.uv_word(),
+            tpage_word: tpage.uv_word(0),
             texture_window: TextureWindow::NONE,
             texture_width: texture.width(),
             texture_height: texture.height(),
@@ -1601,7 +1603,7 @@ impl<
                 asset: asset_id,
                 clut_mode,
                 ready: false,
-                clut_word: clut.uv_clut_word(),
+                clut_word: clut.uv_word(),
                 tpage_word: shared_texture.tpage_word,
                 texture_window: shared_texture.texture_window,
                 texture_width: shared_texture.texture_width,
@@ -1667,8 +1669,8 @@ impl<
             asset: asset_id,
             clut_mode,
             ready: false,
-            clut_word: clut.uv_clut_word(),
-            tpage_word: tpage.uv_tpage_word(0),
+            clut_word: clut.uv_word(),
+            tpage_word: tpage.uv_word(0),
             texture_window: TextureWindow::power_of_two_tile(
                 placement.origin_u(),
                 placement.origin_v(),
@@ -1834,8 +1836,9 @@ impl<
         // Two contiguous 4bpp pages (the 512-texel panorama) + one CLUT per band,
         // all from the unified allocator. The page-run and per-band CLUT handles are
         // retained so `release_streamed_sky` can free them on gameplay exit.
-        let (left_tpage, page_region) = self.allocator.alloc_page_run(2, TexDepth::Bit4, 256)?;
-        let right_tpage = Tpage::new(left_tpage.x() + 64, left_tpage.y(), TexDepth::Bit4);
+        let (left_tpage, page_region) =
+            self.allocator.alloc_page_run(2, TextureDepth::Bit4, 256)?;
+        let right_tpage = TexturePage::new(left_tpage.x() + 64, left_tpage.y(), TextureDepth::Bit4);
         let mut sky_cluts = [Clut::new(0, 0); SKY_PANORAMA_PALETTE_BANDS];
         let mut sky_clut_regions = [VramHandle::Empty; SKY_PANORAMA_PALETTE_BANDS];
         for (dst, region_dst) in sky_cluts.iter_mut().zip(sky_clut_regions.iter_mut()) {
@@ -1843,9 +1846,9 @@ impl<
             *dst = clut;
             *region_dst = clut_region;
         }
-        self.sky_page_tpage_words = [left_tpage.uv_tpage_word(0), right_tpage.uv_tpage_word(0)];
+        self.sky_page_tpage_words = [left_tpage.uv_word(0), right_tpage.uv_word(0)];
         for (band, clut) in sky_cluts.iter().enumerate() {
-            self.sky_clut_words[band] = clut.uv_clut_word();
+            self.sky_clut_words[band] = clut.uv_word();
         }
         self.sky_page_region = page_region;
         self.sky_clut_regions = sky_clut_regions;
@@ -1866,7 +1869,7 @@ impl<
             upload_model_clut(
                 VramRect::new(clut.x(), clut.y(), SKY_PANORAMA_CLUT_ENTRIES, 1),
                 &texture.clut_bytes()[offset..offset + clut_row_bytes],
-                texture.index_zero_transparent(),
+                texture.is_index_zero_transparent(),
             );
         }
         telemetry::stage_end(telemetry::stage::VRAM_UPLOAD);
@@ -2000,7 +2003,8 @@ impl<
         }
 
         let idx = self.next_vram_slot()?;
-        let (left_tpage, page_region) = self.allocator.alloc_page_run(6, TexDepth::Bit4, 256)?;
+        let (left_tpage, page_region) =
+            self.allocator.alloc_page_run(6, TextureDepth::Bit4, 256)?;
         let (clut, clut_region) = match self.allocator.alloc_clut(DIRECTIONAL_SKY_CLUT_ENTRIES) {
             Some(allocation) => allocation,
             None => {
@@ -2093,8 +2097,8 @@ impl<
             asset: asset_id,
             clut_mode: VramSlotClutMode::DirectionalSky,
             ready: true,
-            clut_word: clut.uv_clut_word(),
-            tpage_word: left_tpage.uv_tpage_word(0),
+            clut_word: clut.uv_word(),
+            tpage_word: left_tpage.uv_word(0),
             texture_window: TextureWindow::NONE,
             texture_width: DIRECTIONAL_SKY_ATLAS_WIDTH,
             texture_height: DIRECTIONAL_SKY_ATLAS_HEIGHT,
@@ -2191,8 +2195,8 @@ impl<
         }
         let texture = Texture::from_bytes(asset_bytes).ok()?;
         let texture_depth = match texture.clut_entries() {
-            16 | 32 | 48 | 64 => TexDepth::Bit4,
-            256 => TexDepth::Bit8,
+            16 | 32 | 48 | 64 => TextureDepth::Bit4,
+            256 => TextureDepth::Bit8,
             _ => return None,
         };
 
@@ -2218,7 +2222,7 @@ impl<
         // Three current 128-square 4bpp character atlases share one page via
         // GP0(E2) quadrants. Larger or 8bpp atlases keep the general dedicated
         // page-run path, so format support and visual quality are unchanged.
-        let packed_quadrant = texture_depth == TexDepth::Bit4
+        let packed_quadrant = texture_depth == TextureDepth::Bit4
             && texture_width == 128
             && texture_height == 128
             && texture_halfwords_per_row == 32;
@@ -2263,7 +2267,7 @@ impl<
         upload_model_clut(
             clut_rect,
             texture.clut_bytes(),
-            texture.index_zero_transparent(),
+            texture.is_index_zero_transparent(),
         );
         telemetry::stage_end(telemetry::stage::VRAM_UPLOAD);
 
@@ -2271,8 +2275,8 @@ impl<
             asset: asset_id,
             clut_mode: VramSlotClutMode::ModelAtlas,
             ready: true,
-            clut_word: clut.uv_clut_word(),
-            tpage_word: tpage.uv_tpage_word(0),
+            clut_word: clut.uv_word(),
+            tpage_word: tpage.uv_word(0),
             texture_window,
             texture_width,
             texture_height,
@@ -2336,11 +2340,11 @@ impl<
         upload_model_clut(
             VramRect::new(position.x(), position.y(), texture.clut_entries(), 1),
             &bytes[..entries * 2],
-            texture.index_zero_transparent(),
+            texture.is_index_zero_transparent(),
         );
         let slot = VramSlot {
             clut_mode: mode,
-            clut_word: position.uv_clut_word(),
+            clut_word: position.uv_word(),
             // The pixels belong to the base atlas slot.
             region: VramHandle::Empty,
             clut_region,
@@ -2558,10 +2562,10 @@ mod tests {
     const ARENA_LAYOUT: VramLayout = VramLayout {
         framebuffer: VramRect::new(0, 0, 320, 480),
         room_tpage_base_x: 640,
-        shared_tpage: Tpage::new(640, 0, TexDepth::Bit4),
+        shared_tpage: TexturePage::new(640, 0, TextureDepth::Bit4),
         room_tpage_stride_hw: 64,
         room_tile_texels: 256,
-        model_tpage: Tpage::new(384, 256, TexDepth::Bit4),
+        model_tpage: TexturePage::new(384, 256, TextureDepth::Bit4),
         model_tpage_max_halfwords: 64,
         clut_base_y: 480,
     };
@@ -2577,7 +2581,7 @@ mod tests {
         vram.reserve_static_vram_regions(ARENA_LAYOUT);
         assert!(
             vram.allocator
-                .alloc_page_run(6, TexDepth::Bit4, 0)
+                .alloc_page_run(6, TextureDepth::Bit4, 0)
                 .is_some(),
             "unused six-page room capacity must remain available"
         );
@@ -2586,7 +2590,7 @@ mod tests {
         vram.reserve_static_vram_regions(ARENA_LAYOUT);
         assert!(
             vram.allocator
-                .alloc_page_run(metrics.pages, TexDepth::Bit4, 0)
+                .alloc_page_run(metrics.pages, TextureDepth::Bit4, 0)
                 .is_some(),
             "the packed request must fit the five-page free band"
         );
@@ -2618,24 +2622,24 @@ mod tests {
         // 256-square Sword/Mantis/Tank atlas, one small-model page for Aletha,
         // and six full cube faces.
         vram.allocator
-            .alloc_page_run(1, TexDepth::Bit4, 0)
+            .alloc_page_run(1, TextureDepth::Bit4, 0)
             .expect("HUD page");
         vram.allocator.alloc_window(64, 64).expect("room page");
         vram.allocator
-            .alloc_page_run(1, TexDepth::Bit4, 256)
+            .alloc_page_run(1, TextureDepth::Bit4, 256)
             .expect("shared 256-square enemy atlas");
         vram.allocator
-            .alloc_page_run(1, TexDepth::Bit4, 256)
+            .alloc_page_run(1, TextureDepth::Bit4, 256)
             .expect("small-model page");
         vram.allocator
-            .alloc_page_run(6, TexDepth::Bit4, 256)
+            .alloc_page_run(6, TextureDepth::Bit4, 256)
             .expect("six cube faces");
 
         let mut free_pages = 0;
         for row in [0, 256] {
             while vram
                 .allocator
-                .alloc_page_run(1, TexDepth::Bit4, row)
+                .alloc_page_run(1, TextureDepth::Bit4, row)
                 .is_some()
             {
                 free_pages += 1;

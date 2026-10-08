@@ -6,6 +6,8 @@
 //! events at clean boundaries.
 
 use psx_font::FontAtlas;
+use psx_gpu::prim::QuadFlat;
+use psx_gpu::Gpu;
 use psx_settings::Profile;
 
 use crate::{button, Ctx};
@@ -222,17 +224,17 @@ impl<const SCORES: usize> MicrogameShell<SCORES> {
     }
 
     /// Draw the shell over the game's existing frame.
-    pub fn draw(&self, font: &FontAtlas, title: &str) {
+    pub fn draw(&self, gpu: &mut Gpu, font: &FontAtlas, title: &str) {
         match self.screen {
             MicrogameScreen::Playing => {}
-            MicrogameScreen::Title => self.draw_title(font, title),
-            MicrogameScreen::Paused => self.draw_pause(font),
-            MicrogameScreen::Results => self.draw_results(font),
+            MicrogameScreen::Title => self.draw_title(gpu, font, title),
+            MicrogameScreen::Paused => self.draw_pause(gpu, font),
+            MicrogameScreen::Results => self.draw_results(gpu, font),
         }
     }
 
-    fn draw_title(&self, font: &FontAtlas, title: &str) {
-        panel(28, 32, 264, 184);
+    fn draw_title(&self, gpu: &mut Gpu, font: &FontAtlas, title: &str) {
+        panel(gpu, 28, 32, 264, 184);
         centered(font, 48, title, (255, 226, 132));
         centered(font, 67, "PSOXIDE ARCADE", (112, 184, 232));
         let best = self
@@ -246,7 +248,7 @@ impl<const SCORES: usize> MicrogameShell<SCORES> {
         while row < TITLE_ROWS {
             let y = 94 + row as i16 * 22;
             if row == self.title_row {
-                psx_gpu::draw_rect_flat(52, y - 3, 216, 18, 36, 58, 90);
+                gpu.draw(&QuadFlat::rect((52, y - 3), (216, 18), (36, 58, 90)));
             }
             font.draw_text(64, y, labels[row], row_color(row == self.title_row));
             match row {
@@ -261,21 +263,21 @@ impl<const SCORES: usize> MicrogameShell<SCORES> {
         centered(font, 196, "X SELECT   D-PAD ADJUST", (142, 148, 166));
     }
 
-    fn draw_pause(&self, font: &FontAtlas) {
-        panel(68, 65, 184, 112);
+    fn draw_pause(&self, gpu: &mut Gpu, font: &FontAtlas) {
+        panel(gpu, 68, 65, 184, 112);
         centered(font, 78, "PAUSED", (255, 226, 132));
         let labels = ["RESUME", "RESTART", "TITLE"];
         for (row, label) in labels.iter().enumerate() {
             let y = 106 + row as i16 * 20;
             if row == self.pause_row {
-                psx_gpu::draw_rect_flat(88, y - 3, 144, 18, 36, 58, 90);
+                gpu.draw(&QuadFlat::rect((88, y - 3), (144, 18), (36, 58, 90)));
             }
             centered(font, y, label, row_color(row == self.pause_row));
         }
     }
 
-    fn draw_results(&self, font: &FontAtlas) {
-        panel(52, 66, 216, 112);
+    fn draw_results(&self, gpu: &mut Gpu, font: &FontAtlas) {
+        panel(gpu, 52, 66, 216, 112);
         centered(font, 80, "ROUND COMPLETE", (255, 226, 132));
         font.draw_text(76, 111, "SCORE", (150, 176, 212));
         draw_number(font, 196, 111, self.result_score, (248, 236, 154));
@@ -310,11 +312,11 @@ fn difficulty_name(value: usize) -> &'static str {
     }
 }
 
-fn panel(x: i16, y: i16, w: u16, h: u16) {
-    psx_gpu::draw_rect_flat(x - 2, y - 2, w + 4, h + 4, 3, 7, 16);
-    psx_gpu::draw_rect_flat(x, y, w, h, 12, 20, 38);
-    psx_gpu::draw_rect_flat(x, y, w, 2, 78, 116, 158);
-    psx_gpu::draw_rect_flat(x, y + h as i16 - 2, w, 2, 5, 9, 20);
+fn panel(gpu: &mut Gpu, x: i16, y: i16, w: u16, h: u16) {
+    gpu.draw(&QuadFlat::rect((x - 2, y - 2), (w + 4, h + 4), (3, 7, 16)));
+    gpu.draw(&QuadFlat::rect((x, y), (w, h), (12, 20, 38)));
+    gpu.draw(&QuadFlat::rect((x, y), (w, 2), (78, 116, 158)));
+    gpu.draw(&QuadFlat::rect((x, y + h as i16 - 2), (w, 2), (5, 9, 20)));
 }
 
 fn row_color(selected: bool) -> (u8, u8, u8) {
@@ -380,7 +382,7 @@ mod tests {
                 mode: PadMode::Digital,
                 ..PadState::NONE
             },
-            psx_gpu::framebuf::FrameBuffer::new(320, 240),
+            psx_gpu::display::DoubleBuffer::new(psx_gpu::display::Resolution::R320X240),
         )
     }
 

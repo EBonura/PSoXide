@@ -522,9 +522,9 @@ impl PxbspResidentMap {
         hull_index: usize,
     ) -> Option<CollisionHull<'_>> {
         if hull_index == 0 {
-            // Quake hull 0: point traces walk the render BSP (balanced,
-            // leaf contents from the leaf records) instead of the cooked
-            // per-brush clipnode chain.
+            // Hull 0 is the point hull: point traces walk the render BSP
+            // (balanced, leaf contents from the leaf records) instead of a
+            // cooked per-brush clip-node chain.
             // SAFETY: validate_references range-checked every node's plane,
             // children and leaf children and every model head node at load.
             return Some(unsafe {
@@ -580,12 +580,12 @@ impl PxbspResidentMap {
                     .saturating_add(mul_q12_i32(point.y, plane.normal.y as i32))
                     .saturating_add(mul_q12_i32(point.z, plane.normal.z as i32)),
             };
-            // A point exactly on the plane takes the FRONT child, which is
-            // Quake's SV_HullPointContents rule and what the collision hull's
-            // point_contents_from already does. Sending the tie to the back
-            // child instead walks into the solid side and resolves leaf 0, the
-            // outside-world leaf: standing exactly on a floor plane then culls
-            // every face and shows the sky through the ground.
+            // A point exactly on the plane takes the FRONT child, the same tie
+            // rule the collision hull's point_contents_from uses. Sending the
+            // tie to the back child instead walks into the solid side and
+            // resolves leaf 0, the outside-world leaf: standing exactly on a
+            // floor plane then culls every face and shows the sky through the
+            // ground.
             node_index = node.children[(dot.saturating_sub(plane.distance) < 0) as usize];
         }
     }
@@ -593,10 +593,9 @@ impl PxbspResidentMap {
     /// Return whether an axis-aligned Q20.12 box touches any leaf selected by
     /// a decompressed world PVS row.
     ///
-    /// This is the Quake `SV_LinkEdict`/efrag visibility rule without a
-    /// retained linked list: a dynamic entity remains active and drawable if
-    /// any part of its bounds reaches a visible leaf, even when its origin is
-    /// across a BSP plane. The traversal allocates nothing. An unusually deep
+    /// No per-entity leaf list is retained: a dynamic entity remains active
+    /// and drawable if any part of its bounds reaches a visible leaf, even
+    /// when its origin is across a BSP plane. The traversal allocates nothing. An unusually deep
     /// tree which exhausts the fixed traversal stack fails open so visibility
     /// optimisation can never make an entity disappear.
     pub fn aabb_touches_visible_leaf(
@@ -845,98 +844,40 @@ impl PxbspResidentMap {
     }
 }
 
+/// Smallest and largest value of `normal . p` over every point `p` of the box.
+///
+/// A plane flagged axial (kind 0, 1 or 2) answers with the box's extent on
+/// that axis. Otherwise the dot product is separable per axis, so each axis
+/// independently contributes its low or high coordinate: the low one to the
+/// minimum when the component is non-negative and the high one when it is
+/// negative, and the other way round for the maximum. The stored `sign_bits`
+/// (bit `axis` set for a negative component) choose the side, which keeps the
+/// query to three selects and six Q12 products.
 fn aabb_plane_dot_range(mins: Vec3I32, maxs: Vec3I32, plane: CompactPlane) -> (i32, i32) {
-    match plane.kind {
-        0 => (mins.x, maxs.x),
-        1 => (mins.y, maxs.y),
-        2 => (mins.z, maxs.z),
-        _ => {
-            let (minimum, maximum) = match plane.sign_bits & 7 {
-                0 => (mins, maxs),
-                1 => (
-                    Vec3I32 {
-                        x: maxs.x,
-                        y: mins.y,
-                        z: mins.z,
-                    },
-                    Vec3I32 {
-                        x: mins.x,
-                        y: maxs.y,
-                        z: maxs.z,
-                    },
-                ),
-                2 => (
-                    Vec3I32 {
-                        x: mins.x,
-                        y: maxs.y,
-                        z: mins.z,
-                    },
-                    Vec3I32 {
-                        x: maxs.x,
-                        y: mins.y,
-                        z: maxs.z,
-                    },
-                ),
-                3 => (
-                    Vec3I32 {
-                        x: maxs.x,
-                        y: maxs.y,
-                        z: mins.z,
-                    },
-                    Vec3I32 {
-                        x: mins.x,
-                        y: mins.y,
-                        z: maxs.z,
-                    },
-                ),
-                4 => (
-                    Vec3I32 {
-                        x: mins.x,
-                        y: mins.y,
-                        z: maxs.z,
-                    },
-                    Vec3I32 {
-                        x: maxs.x,
-                        y: maxs.y,
-                        z: mins.z,
-                    },
-                ),
-                5 => (
-                    Vec3I32 {
-                        x: maxs.x,
-                        y: mins.y,
-                        z: maxs.z,
-                    },
-                    Vec3I32 {
-                        x: mins.x,
-                        y: maxs.y,
-                        z: mins.z,
-                    },
-                ),
-                6 => (
-                    Vec3I32 {
-                        x: mins.x,
-                        y: maxs.y,
-                        z: maxs.z,
-                    },
-                    Vec3I32 {
-                        x: maxs.x,
-                        y: mins.y,
-                        z: mins.z,
-                    },
-                ),
-                _ => (maxs, mins),
-            };
-            (
-                mul_q12_i32(minimum.x, i32::from(plane.normal.x))
-                    .saturating_add(mul_q12_i32(minimum.y, i32::from(plane.normal.y)))
-                    .saturating_add(mul_q12_i32(minimum.z, i32::from(plane.normal.z))),
-                mul_q12_i32(maximum.x, i32::from(plane.normal.x))
-                    .saturating_add(mul_q12_i32(maximum.y, i32::from(plane.normal.y)))
-                    .saturating_add(mul_q12_i32(maximum.z, i32::from(plane.normal.z))),
-            )
-        }
+    let lo = [mins.x, mins.y, mins.z];
+    let hi = [maxs.x, maxs.y, maxs.z];
+    if plane.kind < 3 {
+        let axis = usize::from(plane.kind);
+        return (lo[axis], hi[axis]);
     }
+    let normal = [
+        i32::from(plane.normal.x),
+        i32::from(plane.normal.y),
+        i32::from(plane.normal.z),
+    ];
+    let mut minimum = 0i32;
+    let mut maximum = 0i32;
+    for axis in 0..3 {
+        let negative = plane.sign_bits & (1 << axis) != 0;
+        let (near, far) = if negative {
+            (hi[axis], lo[axis])
+        } else {
+            (lo[axis], hi[axis])
+        };
+        minimum = minimum.saturating_add(mul_q12_i32(near, normal[axis]));
+        maximum = maximum.saturating_add(mul_q12_i32(far, normal[axis]));
+    }
+    (minimum, maximum)
 }
 
 impl Default for PxbspResidentMap {
@@ -1668,8 +1609,8 @@ pub(crate) mod tests {
 
     #[test]
     fn a_point_exactly_on_a_plane_takes_the_front_child() {
-        // Quake's SV_HullPointContents sends only d < 0 to the back child, and
-        // CollisionHull::point_contents_from already matches that. This lookup
+        // CollisionHull::point_contents_from sends only d < 0 to the back
+        // child. This lookup
         // used <= 0, so a point resting exactly on a plane walked into the
         // solid side and resolved leaf 0, the outside-world leaf.
         //

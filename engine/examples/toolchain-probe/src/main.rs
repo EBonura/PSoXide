@@ -39,8 +39,8 @@ fn main() -> ! {
     psx_gpu::set_draw_area(0, 0, 319, 239);
     psx_gpu::set_draw_offset(0, 0);
     loop {
-        psx_gpu::vsync();
-        psx_gpu::draw_sync();
+        psx_rt::interrupts::wait_vblank();
+        psx_gpu::wait_idle();
         psx_gpu::fill_rect(0, 0, 320, 240, 0, 0, 0);
         // 32 cells, most significant bit leftmost, white for one.
         for bit in 0..32u32 {

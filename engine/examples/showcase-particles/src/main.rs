@@ -13,13 +13,13 @@
 
 extern crate psx_rt;
 
-use psx_engine::{button, App, Config, Ctx, OtFrame, PrimitiveArena, Scene};
-use psx_font::{fonts::BASIC_8X16, u16_hex, FontAtlas};
+use psx_engine::{button, App, Config, Ctx, OtFrame, Scene};
+use psx_font::{fonts::BASIC_8X16, format_u16, FontAtlas};
 use psx_fx::{LcgRng, ParticlePool};
 use psx_gpu::ot::OrderingTable;
 use psx_gpu::prim::{QuadGouraud, RectFlat};
 use psx_math::{cos_q12, sin_q12};
-use psx_vram::{Clut, TexDepth, Tpage};
+use psx_vram::{Clut, TextureDepth, TexturePage};
 
 const SCREEN_W: i16 = 320;
 const SCREEN_H: i16 = 240;
@@ -28,7 +28,7 @@ const BG_SLOT: usize = OT_DEPTH - 1;
 const AUTO_SLOT: usize = 4;
 const MARKER_SLOT: usize = 1;
 
-const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
+const FONT_TPAGE: TexturePage = TexturePage::new(320, 0, TextureDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
 
 static mut OT: OrderingTable<OT_DEPTH> = OrderingTable::new();
@@ -100,10 +100,11 @@ impl Scene for ShowcaseParticles {
         self.particles.update(1);
     }
 
-    fn render(&mut self, _ctx: &mut Ctx) {
+    fn render(&mut self, ctx: &mut Ctx) {
         let mut ot = unsafe { OtFrame::begin(&mut OT) };
-        let mut rects = unsafe { PrimitiveArena::new(&mut RECTS) };
-        let mut backgrounds = unsafe { PrimitiveArena::new(core::slice::from_mut(&mut BG_QUAD)) };
+        let mut rects = unsafe { psx_gpu::frame::PrimitiveArena::new(&mut RECTS) };
+        let mut backgrounds =
+            unsafe { psx_gpu::frame::PrimitiveArena::new(core::slice::from_mut(&mut BG_QUAD)) };
 
         let Some(bg) = backgrounds.push(QuadGouraud::new(
             [(0, 0), (SCREEN_W, 0), (0, SCREEN_H), (SCREEN_W, SCREEN_H)],
@@ -126,27 +127,27 @@ impl Scene for ShowcaseParticles {
             ot.add_packet(MARKER_SLOT, marker);
         }
 
-        ot.submit();
+        ot.submit(ctx.gpu_dma());
 
         if let Some(font) = self.font.as_ref() {
             font.draw_text(4, 4, "SHOWCASE-PARTICLES", (220, 230, 250));
             font.draw_text(4, 222, "D-PAD MOVE  X/O BURST", (150, 170, 210));
             font.draw_text(224, 4, "LIVE", (150, 170, 210));
-            let live = u16_hex(self.particles.live_count() as u16);
+            let live = format_u16(self.particles.live_count() as u16);
             font.draw_text(264, 4, live.as_str(), (230, 220, 160));
         }
     }
 }
 
-fn render_particles<const N: usize, const OT_N: usize>(
+fn render_particles<'a, const N: usize, const OT_N: usize>(
     particles: &ParticlePool<N>,
-    rects: &mut PrimitiveArena<'_, RectFlat>,
-    ot: &mut OtFrame<'_, OT_N>,
+    rects: &mut psx_gpu::frame::PrimitiveArena<'a, RectFlat>,
+    ot: &mut OtFrame<'a, OT_N>,
     slot: usize,
 ) -> usize {
     let mut written = 0;
     for p in particles.particles() {
-        if !p.alive() {
+        if !p.is_alive() {
             continue;
         }
 

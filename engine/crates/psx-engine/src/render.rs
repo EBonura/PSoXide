@@ -8,48 +8,14 @@
 
 use psx_gpu::{
     ot::OrderingTable,
-    prim::{
-        LineMono, QuadFlat, QuadGouraud, QuadTextured, QuadTexturedGouraud, QuadTexturedMaterial,
-        RectFlat, Sprite, TriFlat, TriGouraud, TriTextured, TriTexturedGouraud,
-    },
+    prim::{QuadTexturedGouraud, TriTexturedGouraud},
 };
+use psx_io::periph::GpuDma;
 use psx_math::int32::InvariantDivisor31;
 
-/// GPU primitive packet that can be inserted into an ordering table.
-///
-/// The associated `WORDS` value is the number of data words following
-/// the packet tag. SDK primitive structs expose this as an inherent
-/// constant; this trait lets engine render helpers use it without
-/// every call site repeating the constant manually.
-pub trait GpuPacket {
-    /// Number of data words after the tag word.
-    const WORDS: u8;
-}
-
-macro_rules! impl_gpu_packet {
-    ($($ty:ty),+ $(,)?) => {
-        $(
-            impl GpuPacket for $ty {
-                const WORDS: u8 = <$ty>::WORDS;
-            }
-        )+
-    };
-}
-
-impl_gpu_packet!(
-    TriFlat,
-    TriGouraud,
-    QuadFlat,
-    RectFlat,
-    QuadGouraud,
-    LineMono,
-    TriTextured,
-    TriTexturedGouraud,
-    QuadTextured,
-    QuadTexturedGouraud,
-    QuadTexturedMaterial,
-    Sprite,
-);
+/// GPU primitive packet that can be inserted into an ordering table; the
+/// SDK trait, re-exported where engine code has always found it.
+pub use psx_gpu::prim::GpuPacket;
 
 /// Camera-space depth used for ordering-table mapping.
 ///
@@ -296,15 +262,17 @@ impl DepthBand {
     }
 }
 
-/// One frame's mutable view of an ordering table.
+/// One frame's view of an ordering table: the engine's depth helpers over
+/// [`psx_gpu::frame::OtFrame`].
 ///
-/// Constructing this with [`begin`](Self::begin) clears the table for
-/// the current frame. Calling [`submit`](Self::submit) consumes the
-/// frame view, which keeps call sites honest: all inserts happen
-/// before the DMA submission.
+/// [`begin`](Self::begin) clears the table and borrows it for `'a`. Every
+/// packet added through the typed methods is borrowed for `'a` too, so it
+/// stays alive and unmoved until [`submit`](Self::submit) has waited out
+/// the walk. Raw packets go in through the `unsafe` `add_raw*` methods,
+/// whose callers vouch for the packet's lifetime.
 #[must_use = "call submit() to send the ordering table to the GPU"]
 pub struct OtFrame<'a, const DEPTH: usize> {
-    ot: &'a mut OrderingTable<DEPTH>,
+    frame: psx_gpu::frame::OtFrame<'a, DEPTH>,
 }
 
 impl<'a, const DEPTH: usize> OtFrame<'a, DEPTH> {
@@ -314,25 +282,25 @@ impl<'a, const DEPTH: usize> OtFrame<'a, DEPTH> {
     /// ordering table has the same requirement.
     pub fn begin(ot: &'a mut OrderingTable<DEPTH>) -> Self {
         debug_assert!(DEPTH > 0);
-        ot.clear();
-        Self { ot }
+        Self { frame: ot.frame() }
     }
 
     /// Continue inserting into an already-started ordering table.
     ///
-    /// This is for bridge code that still owns legacy OT emission but
-    /// wants an engine render pass to append packets into that same
-    /// frame. Callers are responsible for clearing `ot` before the
-    /// first packet of the frame.
-    pub fn resume(ot: &'a mut OrderingTable<DEPTH>) -> Self {
+    /// This is for a frame built in more than one pass (a scene pass,
+    /// then an overlay pass) over the same table.
+    ///
+    /// # Safety
+    ///
+    /// See [`OrderingTable::resume_frame`]: every packet `ot` already links
+    /// must stay live and unmodified until this frame's walk has finished,
+    /// and `ot` must not be walking.
+    pub unsafe fn resume(ot: &'a mut OrderingTable<DEPTH>) -> Self {
         debug_assert!(DEPTH > 0);
-        Self { ot }
-    }
-
-    /// Insert a primitive at a raw OT slot.
-    pub fn add<T>(&mut self, slot: usize, prim: &mut T, words: u8) {
-        debug_assert!(words <= 15);
-        self.ot.add(slot, prim, words);
+        // SAFETY: forwarded contract.
+        Self {
+            frame: unsafe { ot.resume_frame() },
+        }
     }
 
     /// Insert a raw primitive packet pointer at a raw OT slot.
@@ -342,13 +310,8 @@ impl<'a, const DEPTH: usize> OtFrame<'a, DEPTH> {
     /// that remains writable until the ordering-table DMA has consumed
     /// it. `words` is the number of data words following the tag word.
     pub unsafe fn add_raw(&mut self, slot: usize, packet_ptr: *mut u32, words: u8) {
-        debug_assert!(words <= 15);
-        unsafe { self.ot.insert(slot, packet_ptr, words) };
-    }
-
-    /// Insert a primitive at a typed OT slot.
-    pub fn add_slot<T>(&mut self, slot: DepthSlot, prim: &mut T, words: u8) {
-        self.add(slot.index(), prim, words);
+        // SAFETY: forwarded contract.
+        unsafe { self.frame.add_raw(slot, packet_ptr, words) };
     }
 
     /// Insert a raw primitive packet pointer at a typed OT slot.
@@ -356,6 +319,7 @@ impl<'a, const DEPTH: usize> OtFrame<'a, DEPTH> {
     /// # Safety
     /// Same requirements as [`add_raw`](Self::add_raw).
     pub unsafe fn add_raw_slot(&mut self, slot: DepthSlot, packet_ptr: *mut u32, words: u8) {
+        // SAFETY: forwarded contract.
         unsafe { self.add_raw(slot.index(), packet_ptr, words) };
     }
 
@@ -363,11 +327,12 @@ impl<'a, const DEPTH: usize> OtFrame<'a, DEPTH> {
     ///
     /// # Safety
     /// Same requirements as [`add_raw`](Self::add_raw). In addition, `slot`
-    /// must be less than `DEPTH`.
+    /// must be less than `DEPTH` and `words` at most
+    /// [`psx_gpu::MAX_NODE_WORDS`].
     #[inline(always)]
     pub unsafe fn add_raw_unchecked(&mut self, slot: usize, packet_ptr: *mut u32, words: u8) {
-        debug_assert!(words <= 15);
-        unsafe { self.ot.insert_unchecked(slot, packet_ptr, words) };
+        // SAFETY: forwarded contract.
+        unsafe { self.frame.add_raw_unchecked(slot, packet_ptr, words) };
     }
 
     /// Insert a raw primitive whose packet length is already in GPU-tag form
@@ -383,9 +348,10 @@ impl<'a, const DEPTH: usize> OtFrame<'a, DEPTH> {
         packet_ptr: *mut u32,
         tag_high: u32,
     ) {
+        // SAFETY: forwarded contract.
         unsafe {
-            self.ot
-                .insert_unchecked_tag_high(slot, packet_ptr, tag_high)
+            self.frame
+                .add_raw_tag_high_unchecked(slot, packet_ptr, tag_high)
         };
     }
 
@@ -397,17 +363,19 @@ impl<'a, const DEPTH: usize> OtFrame<'a, DEPTH> {
     /// # Safety
     ///
     /// `commands` must point at `command_count * 2` readable words laid out
-    /// as that method documents, and the ordering table must have room for
-    /// them: neither is checked here.
+    /// as that method documents, every encoded slot must be less than
+    /// `DEPTH`, and every packet must meet [`add_raw`](Self::add_raw)'s
+    /// contract: none of this is checked here.
     #[inline(always)]
     pub unsafe fn add_packed_commands_reverse_unchecked(
         &mut self,
         commands: *const usize,
         command_count: usize,
     ) {
+        // SAFETY: forwarded contract.
         unsafe {
-            self.ot
-                .insert_packed_commands_reverse_unchecked(commands, command_count)
+            self.frame
+                .add_packed_commands_reverse_unchecked(commands, command_count)
         };
     }
 
@@ -422,7 +390,8 @@ impl<'a, const DEPTH: usize> OtFrame<'a, DEPTH> {
     /// submitted ordering-table DMA has completed.
     #[inline(always)]
     pub unsafe fn add_tagged_packet_stream_unchecked(&mut self, first: *mut u32, end: *mut u32) {
-        unsafe { self.ot.insert_tagged_packet_stream_unchecked(first, end) };
+        // SAFETY: forwarded contract.
+        unsafe { self.frame.add_tagged_packet_stream_unchecked(first, end) };
     }
 
     /// Insert a tagged stream committed from the shared primitive packet
@@ -445,43 +414,33 @@ impl<'a, const DEPTH: usize> OtFrame<'a, DEPTH> {
         if stream.is_empty() {
             return;
         }
+        // SAFETY: forwarded contract; `stream` is one committed range.
         unsafe {
-            self.ot
-                .insert_tagged_packet_stream_unchecked(stream.first, stream.end)
+            self.frame
+                .add_tagged_packet_stream_unchecked(stream.first, stream.end)
         };
     }
 
     /// Insert a known SDK GPU packet at a raw OT slot.
-    pub fn add_packet<T: GpuPacket>(&mut self, slot: usize, prim: &mut T) {
-        self.add(slot, prim, T::WORDS);
+    #[inline(always)]
+    pub fn add_packet<T: GpuPacket>(&mut self, slot: usize, prim: &'a mut T) {
+        self.frame.add(slot, prim);
     }
 
     /// Insert a known SDK GPU packet at a typed OT slot.
-    pub fn add_packet_slot<T: GpuPacket>(&mut self, slot: DepthSlot, prim: &mut T) {
-        self.add_slot(slot, prim, T::WORDS);
-    }
-
-    /// Map camera-space `depth` through `range` and insert the
-    /// primitive into the resulting OT slot.
-    pub fn add_depth<T>(&mut self, range: DepthRange, depth: i32, prim: &mut T, words: u8) {
-        self.add_camera_depth(range, CameraDepth::new(depth), prim, words);
-    }
-
-    /// Map typed camera-space `depth` through `range` and insert the
-    /// primitive into the resulting OT slot.
-    pub fn add_camera_depth<T>(
-        &mut self,
-        range: DepthRange,
-        depth: CameraDepth,
-        prim: &mut T,
-        words: u8,
-    ) {
-        self.add_slot(range.slot_depth::<DEPTH>(depth), prim, words);
+    #[inline(always)]
+    pub fn add_packet_slot<T: GpuPacket>(&mut self, slot: DepthSlot, prim: &'a mut T) {
+        self.add_packet(slot.index(), prim);
     }
 
     /// Map camera-space `depth` through `range` and insert a known
     /// SDK GPU packet into the resulting OT slot.
-    pub fn add_packet_depth<T: GpuPacket>(&mut self, range: DepthRange, depth: i32, prim: &mut T) {
+    pub fn add_packet_depth<T: GpuPacket>(
+        &mut self,
+        range: DepthRange,
+        depth: i32,
+        prim: &'a mut T,
+    ) {
         self.add_packet_camera_depth(range, CameraDepth::new(depth), prim);
     }
 
@@ -491,7 +450,7 @@ impl<'a, const DEPTH: usize> OtFrame<'a, DEPTH> {
         &mut self,
         range: DepthRange,
         depth: CameraDepth,
-        prim: &mut T,
+        prim: &'a mut T,
     ) {
         self.add_packet_slot(range.slot_depth::<DEPTH>(depth), prim);
     }
@@ -505,61 +464,25 @@ impl<'a, const DEPTH: usize> OtFrame<'a, DEPTH> {
     /// `head` must be a linked-list node that ends the list itself, live and
     /// unmodified while the table is walked.
     pub unsafe fn end_with_chain(&mut self, head: *const u32) {
-        unsafe { self.ot.end_with_chain(head) }
+        // SAFETY: forwarded contract.
+        unsafe { self.frame.end_with_chain(head) }
     }
 
     /// The first node the table's walk reads.
     pub fn submit_head(&self) -> *const u32 {
-        self.ot.submit_head()
+        self.frame.submit_head()
     }
 
-    /// Submit this frame's ordering table via DMA linked-list mode.
-    pub fn submit(self) {
-        self.ot.submit();
+    /// Submit this frame's ordering table and wait for the walk.
+    pub fn submit(self, dma: &mut GpuDma) {
+        self.frame.submit(dma);
     }
 
-    /// Kick this frame's ordering-table DMA without blocking on the GPU
-    /// draw, returning an [`OtSubmitInFlight`] guard that must be waited
-    /// on before the table is reused.
-    ///
-    /// The ordering table and every primitive it chains must stay live
-    /// and unmodified until [`OtSubmitInFlight::wait`] returns. This is
-    /// the seam profiling code uses to time the GPU-draw wait separately
-    /// from the CPU-side build + kick, and the seam a future render
-    /// pipeline uses to overlap the GPU draw with CPU work.
-    pub fn submit_async(self) -> OtSubmitInFlight {
-        self.ot.submit_async();
-        OtSubmitInFlight(())
+    /// Submit this frame's ordering table, run `overlap` while the GPU
+    /// walks it, then wait for the walk.
+    pub fn submit_with<R>(self, dma: &mut GpuDma, overlap: impl FnOnce() -> R) -> R {
+        self.frame.submit_with(dma, overlap)
     }
-}
-
-/// In-flight ordering-table DMA kicked by [`OtFrame::submit_async`].
-///
-/// It carries no borrow yet: the caller must keep the ordering table and
-/// primitive storage alive until [`wait`](Self::wait). The private unit field
-/// keeps it constructible only here. `#[must_use]` flags a *dropped* guard (a
-/// kicked DMA whose handle is discarded); it does not by itself enforce that
-/// `wait()` runs before the table is reused -- today the sole caller waits
-/// immediately, and a future overlap pipeline will tie the borrow in.
-#[must_use = "call wait() for the GPU DMA before reusing the ordering table"]
-pub struct OtSubmitInFlight(());
-
-impl OtSubmitInFlight {
-    /// Block until the kicked ordering-table DMA walk has finished.
-    pub fn wait(self) {
-        psx_gpu::submit_linked_list_wait();
-    }
-
-    /// Hand completion to the app runner's presentation flip.
-    ///
-    /// The runner drains the channel (and the GPU queue) before calling
-    /// [`Scene::render_overlay`](crate::Scene::render_overlay) and
-    /// flipping the display, so a scene that kicks at the end of
-    /// [`Scene::render`](crate::Scene::render) can detach instead of
-    /// blocking. The ordering table and primitive storage stay borrowed
-    /// by the walker until that flip; the scene must not touch them or
-    /// issue immediate GP0 draws in between.
-    pub fn detach(self) {}
 }
 
 /// Fixed backing storage for primitive packets.
@@ -1186,7 +1109,9 @@ impl<'a> PrimitivePacketArena<'a> {
     ///
     /// Every slot in `start_slot..end_slot` must have been initialized as `T`
     /// during this arena frame and must still contain `T`. The callback must
-    /// not modify the packet's tag or retain the reference.
+    /// not modify the packet's tag or retain the reference, and no reference
+    /// [`push_packet`](Self::push_packet) returned for these slots may be used
+    /// while it runs.
     pub unsafe fn mutate_typed_slots<T>(
         &mut self,
         start_slot: usize,
@@ -1247,7 +1172,11 @@ impl<'a> PrimitivePacketArena<'a> {
         })
     }
 
-    fn push_packet<T>(&mut self, prim: T) -> Option<&mut T> {
+    /// Write `prim` into the next slot and borrow it for the rest of `'a`,
+    /// so it can be linked into an [`OtFrame<'a, _>`](OtFrame) with the
+    /// typed adds. `None` when the packet does not fit a slot or the arena
+    /// is full.
+    pub fn push_packet<T: 'a>(&mut self, prim: T) -> Option<&'a mut T> {
         let size = core::mem::size_of::<T>();
         if size == 0 || size > core::mem::size_of::<PrimitivePacketSlot>() {
             return None;
@@ -1261,6 +1190,11 @@ impl<'a> PrimitivePacketArena<'a> {
         self.claim(1);
         let ptr = self.cursor.cast::<T>();
         self.cursor = self.cursor.wrapping_offset(self.step);
+        // SAFETY: `claim` and the checks above put `ptr` on an unused slot of
+        // `storage`, borrowed for `'a`, with room and alignment for `T`.
+        // The cursor never returns to a slot during `'a`, so no safe method
+        // hands this slot out again; the unsafe `mutate_typed_slots` and
+        // `reuse_packet` leave that to their callers.
         unsafe {
             ptr.write(prim);
             self.used_slots += 1;
@@ -1299,7 +1233,7 @@ impl<'a> PrimitivePacketArena<'a> {
     }
 }
 
-impl<T> PrimitiveSink<T> for PrimitivePacketArena<'_> {
+impl<'a, T: 'a> PrimitiveSink<T> for PrimitivePacketArena<'a> {
     fn len(&self) -> usize {
         self.packet_count
     }
@@ -1407,8 +1341,14 @@ fn packet_cursor(
 #[cfg(target_arch = "mips")]
 #[inline(always)]
 fn wait_for_in_flight_list() {
+    #[cfg(feature = "present-queue")]
     psx_rt::present::wait_slot_empty();
-    psx_gpu::submit_linked_list_wait();
+    // SAFETY: the wait reads channel 2's status until the walk the frame's
+    // owner kicked has finished, and starts nothing. The fence runs from a
+    // packet push deep in a scene's render, where the runner's token (held
+    // by `Ctx`) is not at hand but is idle: nothing else drives channel 2
+    // until this returns.
+    psx_gpu::chain::wait(unsafe { &mut psx_io::periph::GpuDma::steal() });
 }
 
 /// Host builds have no DMA; the tests count fences instead.

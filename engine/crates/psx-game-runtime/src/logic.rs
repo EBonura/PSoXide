@@ -21,14 +21,31 @@
 
 use psx_level::{logic_flags, logic_kind, LevelLogicRecord, RoomIndex, LOGIC_NAME_NONE};
 
-/// hl-parity use codes carried by queued events.
-pub mod use_type {
-    /// Force off/closed.
-    pub const OFF: u8 = 0;
-    /// Force on/open.
-    pub const ON: u8 = 1;
-    /// Toggle current state.
-    pub const TOGGLE: u8 = 3;
+/// What a use asks of the record it reaches. Records fired by an output
+/// (relays, delayed chains, interact prompts) always toggle; the explicit
+/// on/off forms let a script force a door or gate input to a known state.
+///
+/// The discriminants are this runtime's own two-bit packing in a queued
+/// event; nothing cooked stores them.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UseCode {
+    /// Flip the record's current state.
+    Toggle = 0,
+    /// Force the record on, open or satisfied.
+    On = 1,
+    /// Force the record off, closed or unsatisfied.
+    Off = 2,
+}
+
+impl UseCode {
+    const fn from_bits(bits: u16) -> Self {
+        match bits & 0x3 {
+            1 => Self::On,
+            2 => Self::Off,
+            _ => Self::Toggle,
+        }
+    }
 }
 
 /// Maximum same-tick fan-out recursion depth (hl-psx parity). Chains
@@ -83,12 +100,12 @@ impl LogicEvent {
         self.meta & 1 != 0
     }
 
-    const fn use_code(self) -> u8 {
-        ((self.meta >> 1) & 0x3) as u8
+    const fn use_code(self) -> UseCode {
+        UseCode::from_bits(self.meta >> 1)
     }
 
-    const fn meta_for(active: bool, use_code: u8) -> u16 {
-        (active as u16) | (((use_code & 0x3) as u16) << 1)
+    const fn meta_for(active: bool, use_code: UseCode) -> u16 {
+        (active as u16) | ((use_code as u16) << 1)
     }
 }
 
@@ -265,7 +282,7 @@ impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: u
         &mut self,
         records: &'static [LevelLogicRecord],
         target: u16,
-        code: u8,
+        code: UseCode,
         now: u32,
     ) {
         self.fire_targets(records, target, code, now, 0);
@@ -280,7 +297,7 @@ impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: u
         &mut self,
         records: &'static [LevelLogicRecord],
         index: usize,
-        code: u8,
+        code: UseCode,
         now: u32,
     ) -> bool {
         if index >= self.count().min(records.len()) {
@@ -355,7 +372,7 @@ impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: u
                 && point_in_aabb(input.player, record.min, record.max)
                 && self.master_satisfied(records, record.master)
             {
-                self.activate(records, index, use_type::TOGGLE, now, 0);
+                self.activate(records, index, UseCode::Toggle, now, 0);
             }
             index += 1;
         }
@@ -376,7 +393,7 @@ impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: u
         }
     }
 
-    fn enqueue(&mut self, at: u32, target: u16, killtarget: u16, code: u8) {
+    fn enqueue(&mut self, at: u32, target: u16, killtarget: u16, code: UseCode) {
         if target == LOGIC_NAME_NONE && killtarget == LOGIC_NAME_NONE {
             return;
         }
@@ -416,7 +433,7 @@ impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: u
         &mut self,
         records: &'static [LevelLogicRecord],
         target: u16,
-        code: u8,
+        code: UseCode,
         now: u32,
         depth: u8,
     ) {
@@ -448,7 +465,7 @@ impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: u
         &mut self,
         records: &'static [LevelLogicRecord],
         index: usize,
-        code: u8,
+        code: UseCode,
         now: u32,
         depth: u8,
     ) {
@@ -460,8 +477,8 @@ impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: u
                 let required = i16::try_from(record.arg0.max(1)).unwrap_or(i16::MAX);
                 let was_satisfied = self.counter[index] >= required;
                 self.counter[index] = match code {
-                    use_type::ON => self.counter[index].saturating_add(1).min(required),
-                    use_type::OFF => self.counter[index].saturating_sub(1).max(0),
+                    UseCode::On => self.counter[index].saturating_add(1).min(required),
+                    UseCode::Off => self.counter[index].saturating_sub(1).max(0),
                     _ => {
                         if was_satisfied {
                             0
@@ -480,8 +497,8 @@ impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: u
             logic_kind::DOOR => {
                 let open = self.counter[index] != 0;
                 let next = match code {
-                    use_type::ON => true,
-                    use_type::OFF => false,
+                    UseCode::On => true,
+                    UseCode::Off => false,
                     _ => !open,
                 };
                 if next == open {
@@ -521,12 +538,12 @@ impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: u
                 now.saturating_add(u32::from(record.delay_ticks)),
                 record.target,
                 record.killtarget,
-                use_type::TOGGLE,
+                UseCode::Toggle,
             );
             return;
         }
         self.kill_targets(records, record.killtarget);
-        self.fire_targets(records, record.target, use_type::TOGGLE, now, depth + 1);
+        self.fire_targets(records, record.target, UseCode::Toggle, now, depth + 1);
     }
 
     fn mark_fired(&mut self, index: usize) {
@@ -749,11 +766,11 @@ mod tests {
         logic.tick(&GATED, input_at([0, 0, 0]), 1);
         assert!(!logic.door_open(2));
         // One input on: still locked.
-        logic.fire_by_name(&GATED, 4, use_type::ON, 2);
+        logic.fire_by_name(&GATED, 4, UseCode::On, 2);
         logic.tick(&GATED, input_at([0, 0, 0]), 3);
         assert!(!logic.door_open(2));
         // Second input satisfies the gate: the trigger passes.
-        logic.fire_by_name(&GATED, 4, use_type::ON, 4);
+        logic.fire_by_name(&GATED, 4, UseCode::On, 4);
         logic.tick(&GATED, input_at([0, 0, 0]), 5);
         assert!(logic.door_open(2));
         // Unknown master fails open (hl parity).
@@ -795,7 +812,7 @@ mod tests {
         ];
         let mut logic = TestLogic::EMPTY;
         logic.init_from_records(&RING);
-        logic.fire_by_name(&RING, 1, use_type::TOGGLE, 1);
+        logic.fire_by_name(&RING, 1, UseCode::Toggle, 1);
         let stats = logic.stats();
         assert!(stats.depth_drops > 0, "ring must trip the depth cap");
         assert!(stats.fired <= u16::from(LOGIC_FIRE_DEPTH_MAX) + 2);
@@ -816,7 +833,7 @@ mod tests {
         ];
         let mut logic = TestLogic::EMPTY;
         logic.init_from_records(&KILL);
-        logic.fire_by_name(&KILL, 1, use_type::TOGGLE, 1);
+        logic.fire_by_name(&KILL, 1, UseCode::Toggle, 1);
         assert!(logic.is_removed(1), "killtarget retired the door");
 
         // Queue overflow: 4 slots, 5 delayed enqueues.
@@ -829,7 +846,7 @@ mod tests {
         let mut logic = TestLogic::EMPTY;
         logic.init_from_records(&DELAYED);
         for now in 0..5 {
-            logic.fire_by_name(&DELAYED, 1, use_type::TOGGLE, now);
+            logic.fire_by_name(&DELAYED, 1, UseCode::Toggle, now);
         }
         let stats = logic.stats();
         assert_eq!(stats.queued, 4);
@@ -911,7 +928,7 @@ mod tests {
         let mut logic = TestLogic::EMPTY;
         logic.init_from_records(&TWINS);
         assert!(!logic.any_fired());
-        assert!(logic.fire_index(&TWINS, 1, use_type::TOGGLE, 1));
+        assert!(logic.fire_index(&TWINS, 1, UseCode::Toggle, 1));
         assert!(!logic.door_open(0));
         assert!(logic.door_open(1));
         assert!(logic.any_fired());
@@ -919,7 +936,7 @@ mod tests {
         assert!(logic.take_fired(1));
         assert!(!logic.any_fired());
         // Out of range: refused.
-        assert!(!logic.fire_index(&TWINS, 2, use_type::TOGGLE, 2));
+        assert!(!logic.fire_index(&TWINS, 2, UseCode::Toggle, 2));
 
         // A retired (fire-once) record refuses an indexed fire.
         static ONCE: [LevelLogicRecord; 1] = [LevelLogicRecord {
@@ -929,9 +946,9 @@ mod tests {
         }];
         let mut logic = TestLogic::EMPTY;
         logic.init_from_records(&ONCE);
-        assert!(logic.fire_index(&ONCE, 0, use_type::TOGGLE, 1));
+        assert!(logic.fire_index(&ONCE, 0, UseCode::Toggle, 1));
         assert!(logic.is_removed(0));
-        assert!(!logic.fire_index(&ONCE, 0, use_type::TOGGLE, 2));
+        assert!(!logic.fire_index(&ONCE, 0, UseCode::Toggle, 2));
     }
 
     #[test]
@@ -950,9 +967,9 @@ mod tests {
         ];
         let mut logic = TestLogic::EMPTY;
         logic.init_from_records(&GATED);
-        assert!(!logic.fire_index(&GATED, 0, use_type::TOGGLE, 1));
-        logic.fire_by_name(&GATED, 4, use_type::ON, 2);
-        assert!(logic.fire_index(&GATED, 0, use_type::TOGGLE, 3));
+        assert!(!logic.fire_index(&GATED, 0, UseCode::Toggle, 1));
+        logic.fire_by_name(&GATED, 4, UseCode::On, 2);
+        assert!(logic.fire_index(&GATED, 0, UseCode::Toggle, 3));
     }
 
     #[test]
@@ -1004,13 +1021,13 @@ mod tests {
         }];
         let mut logic = TestLogic::EMPTY;
         logic.init_from_records(&DOOR);
-        logic.fire_by_name(&DOOR, 3, use_type::ON, 1);
+        logic.fire_by_name(&DOOR, 3, UseCode::On, 1);
         assert!(logic.take_fired(0), "closed -> open is an activation");
-        logic.fire_by_name(&DOOR, 3, use_type::ON, 2);
+        logic.fire_by_name(&DOOR, 3, UseCode::On, 2);
         assert!(!logic.take_fired(0), "already-open ON is not");
-        logic.fire_by_name(&DOOR, 3, use_type::OFF, 3);
+        logic.fire_by_name(&DOOR, 3, UseCode::Off, 3);
         assert!(logic.take_fired(0), "open -> closed is an activation");
-        logic.fire_by_name(&DOOR, 3, use_type::TOGGLE, 4);
+        logic.fire_by_name(&DOOR, 3, UseCode::Toggle, 4);
         assert!(logic.take_fired(0), "toggle always changes state");
     }
 

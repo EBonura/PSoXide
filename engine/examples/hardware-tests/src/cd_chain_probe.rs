@@ -25,7 +25,6 @@
 use crate::payload::{append, base64_encode, crc32, draw_qr, BinaryBuffer};
 use psx_engine::{button, Ctx};
 use psx_font::FontAtlas;
-use psx_io::cdrom;
 use psx_pack::cd::{SectorReader, SECTOR_WORDS};
 use psx_rt::tty;
 use qrcodegen_no_heap::{QrCode, QrCodeEcc, Version};
@@ -333,33 +332,34 @@ const CMD_SETMODE: u8 = 0x0E;
 const MODE_DOUBLE_2048: u8 = 0x80;
 
 fn wr_index(index: u8) {
-    unsafe { psx_io::write8(CD_STATUS_REG, index & 3) };
+    unsafe { psx_io::write_u8(CD_STATUS_REG, index & 3) };
 }
 
 fn cd_status() -> u8 {
     wr_index(0);
-    unsafe { psx_io::read8(CD_STATUS_REG) }
+    unsafe { psx_io::read_u8(CD_STATUS_REG) }
 }
 
 fn irq_flag() -> u8 {
     wr_index(1);
-    let f = unsafe { psx_io::read8(CD_IRQ_REG) } & 0x1F;
+    let f = unsafe { psx_io::read_u8(CD_IRQ_REG) } & 0x1F;
     wr_index(0);
     f
 }
 
 fn ack_all() {
     wr_index(1);
-    unsafe { psx_io::write8(CD_IRQ_REG, 0x5F) };
-    psx_io::irq::ack(1 << psx_io::irq::source::CDROM);
+    unsafe { psx_io::write_u8(CD_IRQ_REG, 0x5F) };
+    psx_io::irq::acknowledge(1 << psx_hw::irq::source::CDROM);
     wr_index(0);
 }
 
 fn drain_responses() {
     wr_index(0);
     let mut guard = 0;
-    while unsafe { psx_io::read8(CD_STATUS_REG) } & STATUS_RESPONSE_NOT_EMPTY != 0 && guard < 256 {
-        let _ = unsafe { psx_io::read8(CD_RESPONSE_REG) };
+    while unsafe { psx_io::read_u8(CD_STATUS_REG) } & STATUS_RESPONSE_NOT_EMPTY != 0 && guard < 256
+    {
+        let _ = unsafe { psx_io::read_u8(CD_RESPONSE_REG) };
         guard += 1;
     }
 }
@@ -370,27 +370,27 @@ fn send_cmd(command: u8, params: &[u8], expected: u8) -> bool {
     drain_responses();
     // Reset the parameter FIFO before queueing parameters.
     wr_index(1);
-    unsafe { psx_io::write8(CD_IRQ_REG, 0x40) };
+    unsafe { psx_io::write_u8(CD_IRQ_REG, 0x40) };
     wr_index(0);
     for &p in params {
         let mut spins = 0u32;
-        while unsafe { psx_io::read8(CD_STATUS_REG) } & STATUS_PARAM_NOT_FULL == 0 {
+        while unsafe { psx_io::read_u8(CD_STATUS_REG) } & STATUS_PARAM_NOT_FULL == 0 {
             spins += 1;
             if spins > CD_SPINS {
                 return false;
             }
         }
-        unsafe { psx_io::write8(CD_DATA_REG, p) }; // param FIFO shares 1F801802 writes
+        unsafe { psx_io::write_u8(CD_DATA_REG, p) }; // param FIFO shares 1F801802 writes
     }
-    unsafe { psx_io::write8(CD_RESPONSE_REG, command) };
+    unsafe { psx_io::write_u8(CD_RESPONSE_REG, command) };
     let mut spins = 0u32;
     loop {
         let flag = irq_flag();
         if flag == expected {
             drain_responses();
             wr_index(1);
-            unsafe { psx_io::write8(CD_IRQ_REG, expected) };
-            psx_io::irq::ack(1 << psx_io::irq::source::CDROM);
+            unsafe { psx_io::write_u8(CD_IRQ_REG, expected) };
+            psx_io::irq::acknowledge(1 << psx_hw::irq::source::CDROM);
             wr_index(0);
             return true;
         }
@@ -426,11 +426,11 @@ fn lba_to_msf(lba: u32) -> [u8; 3] {
 /// Prepare the controller: VBlank-only I_MASK, channel 3 enabled, IRQs
 /// unmasked at the controller, pending flags drained, optional purge.
 fn raw_prepare(purge: bool) -> bool {
-    psx_io::irq::set_mask(1 << psx_io::irq::source::VBLANK);
-    psx_io::irq::ack(1 << psx_io::irq::source::CDROM);
-    psx_io::dma::enable_channel(psx_io::dma::Channel::Cdrom);
+    psx_io::irq::set_mask(1 << psx_hw::irq::source::VBLANK);
+    psx_io::irq::acknowledge(1 << psx_hw::irq::source::CDROM);
+    psx_io::dma::enable_channel(psx_io::dma::Channel::Cd);
     wr_index(1);
-    unsafe { psx_io::write8(CD_DATA_REG, 0x1F) }; // IRQ-enable register at index 1
+    unsafe { psx_io::write_u8(CD_DATA_REG, 0x1F) }; // IRQ-enable register at index 1
     wr_index(0);
     let mut guard = 0;
     while irq_flag() != 0 && guard < 16 {
@@ -441,7 +441,7 @@ fn raw_prepare(purge: bool) -> bool {
     ack_all();
     if purge {
         wr_index(0);
-        unsafe { psx_io::write8(CD_IRQ_REG, 0x00) }; // Request: BFRD off
+        unsafe { psx_io::write_u8(CD_IRQ_REG, 0x00) }; // Request: BFRD off
     }
     send_cmd(CMD_SETMODE, &[MODE_DOUBLE_2048], IRQ_ACK)
 }
@@ -467,8 +467,8 @@ fn wait_data_ready() -> bool {
 fn ack_data_ready() {
     drain_responses();
     wr_index(1);
-    unsafe { psx_io::write8(CD_IRQ_REG, IRQ_DATA_READY) };
-    psx_io::irq::ack(1 << psx_io::irq::source::CDROM);
+    unsafe { psx_io::write_u8(CD_IRQ_REG, IRQ_DATA_READY) };
+    psx_io::irq::acknowledge(1 << psx_hw::irq::source::CDROM);
     wr_index(0);
 }
 
@@ -511,7 +511,7 @@ fn raw_read(
         } => {
             // Arm BFRD, optionally wait until the FIFO reports data.
             wr_index(0);
-            unsafe { psx_io::write8(CD_IRQ_REG, 0x80) };
+            unsafe { psx_io::write_u8(CD_IRQ_REG, 0x80) };
             wr_index(0);
             if wait_fifo {
                 let mut spins = 0u32;
@@ -520,28 +520,38 @@ fn raw_read(
                 }
                 extra = spins;
             }
-            psx_io::dma::set_madr(psx_io::dma::Channel::Cdrom, buffer as u32);
-            psx_io::dma::set_bcr_manual(psx_io::dma::Channel::Cdrom, SECTOR_WORDS as u16);
-            psx_io::dma::set_chcr(psx_io::dma::Channel::Cdrom, 0x1140_0100);
+            // SAFETY: silicon probe: the transfer touches only memory this probe
+            // owns, which stays live and untouched until the probe waits the
+            // channel idle or aborts it.
+            unsafe {
+                psx_io::dma::raw::set_address(psx_io::dma::Channel::Cd, buffer as u32);
+                psx_io::dma::raw::set_size(
+                    psx_io::dma::Channel::Cd,
+                    psx_io::dma::size_words(SECTOR_WORDS as u16),
+                );
+                psx_io::dma::raw::set_control(psx_io::dma::Channel::Cd, 0x1140_0100);
+            }
             if probe_chcr {
-                chcr_kick = unsafe { psx_io::read32(psx_io::dma::Channel::Cdrom.base() + 0x8) };
+                chcr_kick =
+                    unsafe { psx_io::read_u32(psx_io::dma::Channel::Cd.register_base() + 0x8) };
             }
             let mut busy_seen = false;
             let mut spins = 0u32;
-            while psx_io::dma::is_busy(psx_io::dma::Channel::Cdrom) && spins < 65_536 {
+            while psx_io::dma::is_busy(psx_io::dma::Channel::Cd) && spins < 65_536 {
                 busy_seen = true;
                 spins += 1;
             }
             if probe_chcr {
-                chcr_late = unsafe { psx_io::read32(psx_io::dma::Channel::Cdrom.base() + 0x8) };
+                chcr_late =
+                    unsafe { psx_io::read_u32(psx_io::dma::Channel::Cd.register_base() + 0x8) };
                 extra |= (busy_seen as u32) << 31;
             }
-            psx_io::irq::ack(1 << psx_io::irq::source::DMA);
+            psx_io::irq::acknowledge(1 << psx_hw::irq::source::DMA);
             ok |= 4;
         }
         Transfer::Pio => {
             wr_index(0);
-            unsafe { psx_io::write8(CD_IRQ_REG, 0x80) };
+            unsafe { psx_io::write_u8(CD_IRQ_REG, 0x80) };
             wr_index(0);
             let mut spins = 0u32;
             while cd_status() & STATUS_DATA_NOT_EMPTY == 0 && spins < 2_000_000 {
@@ -554,10 +564,10 @@ fn raw_read(
                 // pops two), so byte reads are the one width both worlds
                 // agree on. Slow is fine; unambiguous is the point.
                 for word_index in 0..SECTOR_WORDS {
-                    let b0 = unsafe { psx_io::read8(CD_DATA_REG) } as u32;
-                    let b1 = unsafe { psx_io::read8(CD_DATA_REG) } as u32;
-                    let b2 = unsafe { psx_io::read8(CD_DATA_REG) } as u32;
-                    let b3 = unsafe { psx_io::read8(CD_DATA_REG) } as u32;
+                    let b0 = unsafe { psx_io::read_u8(CD_DATA_REG) } as u32;
+                    let b1 = unsafe { psx_io::read_u8(CD_DATA_REG) } as u32;
+                    let b2 = unsafe { psx_io::read_u8(CD_DATA_REG) } as u32;
+                    let b3 = unsafe { psx_io::read_u8(CD_DATA_REG) } as u32;
                     unsafe { (*buffer)[word_index] = (b3 << 24) | (b2 << 16) | (b1 << 8) | b0 };
                 }
                 ok |= 4;
@@ -581,7 +591,7 @@ fn run_variant(variant: Variant, run: u8) -> VariantRecord {
             let ok_prepare = unsafe { reader.prepare() };
             let ok_start = ok_prepare && unsafe { reader.start_read(CDTEST_LBA) };
             let ok_read = ok_start && unsafe { reader.read_sector(&mut *buffer) };
-            let diag = reader.diag();
+            let diag = reader.diagnostics();
             unsafe { reader.stop() };
             record.fields[9] = diag;
             (
@@ -635,7 +645,7 @@ fn run_variant(variant: Variant, run: u8) -> VariantRecord {
     record.fields[4] = words[1];
     record.fields[5] = fnv1a_words(words);
     record.fields[6] = expected_sector_fnv();
-    record.fields[7] = unsafe { psx_io::read32(psx_io::dma::Channel::Cdrom.base()) };
+    record.fields[7] = unsafe { psx_io::read_u32(psx_io::dma::Channel::Cd.register_base()) };
     record.fields[8] = drive_state();
     if record.fields[9] == 0 {
         record.fields[9] = extra;
@@ -644,14 +654,14 @@ fn run_variant(variant: Variant, run: u8) -> VariantRecord {
 }
 
 fn drive_state() -> u32 {
-    let hw_status = unsafe { psx_io::read8(0x1F80_1800) };
+    let hw_status = unsafe { psx_io::read_u8(0x1F80_1800) };
     let irq_flag = unsafe {
-        psx_io::write8(0x1F80_1800, 1);
-        let f = psx_io::read8(0x1F80_1803) & 0x1F;
-        psx_io::write8(0x1F80_1800, 0);
+        psx_io::write_u8(0x1F80_1800, 1);
+        let f = psx_io::read_u8(0x1F80_1803) & 0x1F;
+        psx_io::write_u8(0x1F80_1800, 0);
         f
     };
-    let stat = cdrom::try_get_stat(CD_SPINS)
+    let stat = psx_io::cd::try_status(CD_SPINS)
         .and_then(|r| r.bytes().first().copied())
         .unwrap_or(0xEE);
     ((hw_status as u32) << 24) | ((irq_flag as u32) << 16) | ((stat as u32) << 8)

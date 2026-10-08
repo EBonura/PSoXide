@@ -2990,7 +2990,7 @@ fn projected_triangle_back_facing(verts: [ProjectedVertex; 3]) -> bool {
     // surface walk. Use the hardware NCLIP path with the silicon-measured
     // input/result gaps instead of paying two serialized CPU multiplies for
     // every candidate face.
-    psx_gte::scene::screen_area_mac0_scheduled([
+    psx_gte::scene::screen_area_scheduled([
         (verts[0].sx, verts[0].sy),
         (verts[1].sx, verts[1].sy),
         (verts[2].sx, verts[2].sy),

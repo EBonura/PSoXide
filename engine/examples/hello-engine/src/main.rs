@@ -23,7 +23,8 @@
 
 extern crate psx_rt;
 
-use psx_engine::{button, Angle, App, Config, Ctx, OtFrame, PrimitiveArena, Scene};
+use psx_engine::{button, Angle, App, Config, Ctx, OtFrame, Scene};
+use psx_gpu::frame::PrimitiveArena;
 use psx_gpu::ot::OrderingTable;
 use psx_gpu::prim::{QuadGouraud, RectFlat};
 use psx_math::sincos;
@@ -118,7 +119,7 @@ impl Scene for Game {
         };
         ot.add_packet(1, quad);
 
-        ot.submit();
+        ot.submit(ctx.gpu_dma());
     }
 }
 

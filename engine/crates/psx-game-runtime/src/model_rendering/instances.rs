@@ -1,7 +1,7 @@
 use super::*;
 use crate::vram::SHADOW_TEXEL_U;
 #[cfg(feature = "collision-debug-overlay")]
-use psx_gpu::draw_line_mono;
+use psx_gpu::{prim::LineMono, Gpu};
 
 /// Shadow decals share the shadow/particle 4bpp page allocated by the unified
 /// VRAM allocator. UVs are page-relative, so only the page base moves; the
@@ -234,6 +234,7 @@ pub fn actor_shadow_radius(shadow: ShadowTuning, base_radius: i32) -> i32 {
 /// Immediate-mode wireframe cylinder for tuning actor blockers.
 #[cfg(feature = "collision-debug-overlay")]
 pub fn draw_collision_cylinder_debug(
+    gpu: &mut Gpu,
     position: RoomPoint,
     radius: i32,
     height: i32,
@@ -267,10 +268,10 @@ pub fn draw_collision_cylinder_debug(
     i = 0;
     while i < COLLISION_DEBUG_SEGMENTS {
         let next = (i + 1) % COLLISION_DEBUG_SEGMENTS;
-        draw_optional_debug_line(bottom[i], bottom[next], color);
-        draw_optional_debug_line(top[i], top[next], color);
+        draw_optional_debug_line(gpu, bottom[i], bottom[next], color);
+        draw_optional_debug_line(gpu, top[i], top[next], color);
         if i.is_multiple_of(2) {
-            draw_optional_debug_line(bottom[i], top[i], color);
+            draw_optional_debug_line(gpu, bottom[i], top[i], color);
         }
         i += 1;
     }
@@ -297,11 +298,18 @@ fn screen_xy(vertex: ProjectedVertex) -> (i16, i16) {
 }
 
 #[cfg(feature = "collision-debug-overlay")]
-fn draw_optional_debug_line(a: Option<(i16, i16)>, b: Option<(i16, i16)>, color: (u8, u8, u8)) {
+fn draw_optional_debug_line(
+    gpu: &mut Gpu,
+    a: Option<(i16, i16)>,
+    b: Option<(i16, i16)>,
+    color: (u8, u8, u8),
+) {
     let (Some(a), Some(b)) = (a, b) else {
         return;
     };
-    draw_line_mono(a.0, a.1, b.0, b.1, color.0, color.1, color.2);
+    gpu.draw(&LineMono::new(
+        a.0, a.1, b.0, b.1, color.0, color.1, color.2,
+    ));
 }
 
 /// One placed model instance's render-independent per-tick pose authority.

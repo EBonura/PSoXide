@@ -46,7 +46,7 @@
 //! Plain `Copy` data, no allocator, integer-only. Flow / scene / node
 //! tables are `&'static` slices that the linker pins.
 
-use psx_gpu::draw_quad_flat;
+use psx_gpu::prim::QuadFlat;
 use psx_level::{
     first_focus, next_focus, scene_state_flags, ui_node_flags, FlowState, GameFlow,
     LevelGameplaySfxCueRecord, LevelGameplaySfxEvent, LevelOptionDef, LevelSceneState,
@@ -131,7 +131,7 @@ const CDDA_STATUS_TICKS: u32 = 4;
 const CDDA_DEFAULT_VOLUME_PERCENT: u8 = 25;
 const CDDA_RANDOM_START_MAX_SECONDS: u32 = 15;
 #[cfg(any(target_arch = "mips", test))]
-const CDDA_PLAYBACK_MODE: u8 = psx_io::cdrom::MODE_CDDA | psx_io::cdrom::MODE_AUTO_PAUSE;
+const CDDA_PLAYBACK_MODE: u8 = psx_hw::cd::MODE_CDDA | psx_hw::cd::MODE_AUTO_PAUSE;
 #[cfg(target_arch = "mips")]
 const CDDA_COMMAND_SPINS: u32 = 131_072;
 // GetStat is asynchronous: allow a full second for its response without
@@ -766,38 +766,37 @@ fn cdda_toc_second(bytes: &[u8]) -> Option<u32> {
     {
         return None;
     }
-    let minutes = u32::from(psx_io::cdrom::bcd_to_bin(bytes[1]));
-    let seconds = u32::from(psx_io::cdrom::bcd_to_bin(bytes[2]));
+    let minutes = u32::from(psx_io::cd::bcd_to_bin(bytes[1]));
+    let seconds = u32::from(psx_io::cd::bcd_to_bin(bytes[2]));
     Some(minutes * 60 + seconds)
 }
 
 #[cfg(target_arch = "mips")]
 fn cdda_issue_step(step: CddaStartStep, track: u8, second: u32) -> Option<u32> {
-    use psx_io::cdrom;
     let mut params = [0; 3];
     let (command, count) = match step {
         CddaStartStep::SetMode => {
             params[0] = CDDA_PLAYBACK_MODE;
-            (cdrom::CMD_SETMODE, 1)
+            (psx_hw::cd::CMD_SETMODE, 1)
         }
-        CddaStartStep::Demute => (cdrom::CMD_DEMUTE, 0),
+        CddaStartStep::Demute => (psx_hw::cd::CMD_DEMUTE, 0),
         CddaStartStep::TrackCount => (0x13, 0),
         CddaStartStep::TrackStart | CddaStartStep::TrackEnd => {
-            params[0] = cdrom::bin_to_bcd(cdda_physical_track(track));
+            params[0] = psx_io::cd::bin_to_bcd(cdda_physical_track(track));
             (0x14, 1)
         }
         CddaStartStep::SetLocation => {
-            params[0] = cdrom::bin_to_bcd((second / 60) as u8);
-            params[1] = cdrom::bin_to_bcd((second % 60) as u8);
-            (cdrom::CMD_SETLOC, 3)
+            params[0] = psx_io::cd::bin_to_bcd((second / 60) as u8);
+            params[1] = psx_io::cd::bin_to_bcd((second % 60) as u8);
+            (psx_hw::cd::CMD_SETLOC, 3)
         }
-        CddaStartStep::PlayLocation => (cdrom::CMD_PLAY, 0),
+        CddaStartStep::PlayLocation => (psx_hw::cd::CMD_PLAY, 0),
         CddaStartStep::Play => {
-            params[0] = cdrom::bin_to_bcd(cdda_physical_track(track));
-            (cdrom::CMD_PLAY, 1)
+            params[0] = psx_io::cd::bin_to_bcd(cdda_physical_track(track));
+            (psx_hw::cd::CMD_PLAY, 1)
         }
     };
-    let response = cdrom::try_command(command, &params[..count], CDDA_COMMAND_SPINS)?;
+    let response = psx_io::cd::try_command(command, &params[..count], CDDA_COMMAND_SPINS)?;
     let bytes = response.bytes();
     if bytes.first().is_none_or(|status| status & 1 != 0) {
         return None;
@@ -805,7 +804,7 @@ fn cdda_issue_step(step: CddaStartStep, track: u8, second: u32) -> Option<u32> {
     match step {
         CddaStartStep::TrackCount => bytes
             .get(2)
-            .map(|value| u32::from(cdrom::bcd_to_bin(*value))),
+            .map(|value| u32::from(psx_io::cd::bcd_to_bin(*value))),
         CddaStartStep::TrackStart | CddaStartStep::TrackEnd => cdda_toc_second(bytes),
         _ => Some(0),
     }
@@ -840,7 +839,7 @@ fn flow_trace(_message: &str) {}
 
 #[cfg(target_arch = "mips")]
 fn cdda_begin_status() -> Option<u8> {
-    psx_io::cdrom::dispatch_command(psx_io::cdrom::CMD_GETSTAT, &[], 0)
+    psx_io::cd::dispatch_command(psx_hw::cd::CMD_GETSTAT, &[], 0)
 }
 
 #[cfg(not(target_arch = "mips"))]
@@ -850,7 +849,7 @@ fn cdda_begin_status() -> Option<u8> {
 
 #[cfg(any(target_arch = "mips", test))]
 fn cdda_status_stopped(status: u8) -> Option<bool> {
-    use psx_io::cdrom::{STAT_PLAYING, STAT_READING, STAT_SEEKING};
+    use psx_hw::cd::{STAT_PLAYING, STAT_READING, STAT_SEEKING};
     if status & 0x11 != 0 {
         // Error or open lid is not a confirmed track boundary.
         None
@@ -863,15 +862,14 @@ fn cdda_status_stopped(status: u8) -> Option<bool> {
 /// an error response without interpreting it as the end of the song.
 #[cfg(target_arch = "mips")]
 fn cdda_finish_status(irq_enable: u8) -> Option<Option<bool>> {
-    use psx_io::cdrom;
-    let irq = cdrom::irq_flag_value();
+    let irq = psx_io::cd::irq_flag_value();
     if irq == 0 {
         return None;
     }
     if irq != 3 && irq != 5 {
         // Auto-pause can deliver INT4 before the outstanding GetStat ACK.
-        cdrom::discard_response();
-        cdrom::acknowledge_irq(irq);
+        psx_io::cd::discard_response();
+        psx_io::cd::acknowledge_irq(irq);
         return None;
     }
     // GetStat has one response byte. Select the response FIFO, read it once,
@@ -884,7 +882,7 @@ fn cdda_finish_status(irq_enable: u8) -> Option<Option<bool>> {
             None
         }
     };
-    cdrom::restore_irq_output(irq_enable);
+    psx_io::cd::restore_irq_output(irq_enable);
     Some(if irq == 3 {
         status.and_then(cdda_status_stopped)
     } else {
@@ -901,7 +899,7 @@ fn cdda_finish_status(_irq_enable: u8) -> Option<Option<bool>> {
 fn cdda_cancel_status() {
     // A cancelled command may still ACK later. Keep IRQ output masked, like
     // the SDK's timed-out polled commands, until the next CD command takes over.
-    psx_io::cdrom::restore_irq_output(0);
+    psx_io::cd::restore_irq_output(0);
 }
 
 #[cfg(not(target_arch = "mips"))]
@@ -910,7 +908,7 @@ fn cdda_cancel_status() {}
 #[cfg(target_arch = "mips")]
 fn cdda_release_for_data_reads() {
     psx_spu::enable_cd_audio(false);
-    let _ = psx_io::cdrom::try_pause_until_complete(CDDA_COMMAND_SPINS);
+    let _ = psx_io::cd::try_pause_until_complete(CDDA_COMMAND_SPINS);
 }
 
 #[cfg(not(target_arch = "mips"))]
@@ -1332,7 +1330,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
     /// result to that option's `[min, max]`. No-op for the unbound
     /// sentinel or an unknown id, so a stray binding cannot panic or write
     /// out of range.
-    fn adjust_option(&mut self, option_id: u16, delta: i32) -> bool {
+    fn adjust_option(&mut self, option_id: u16, delta: i32, ctx: &mut Ctx) -> bool {
         if option_id == UI_OPTION_NONE {
             return false;
         }
@@ -1349,7 +1347,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
             return false;
         }
         self.option_values[index] = next;
-        self.apply_current_options();
+        self.apply_current_options(ctx);
         true
     }
 
@@ -1357,15 +1355,15 @@ impl<'a, S: Scene> GameApp<'a, S> {
     /// this after front-end edits so global presentation options (screen
     /// position, gamma, etc.) can preview immediately, and gameplay entry calls
     /// it so the same values are active for play.
-    fn apply_current_options(&mut self) {
+    fn apply_current_options(&mut self, ctx: &mut Ctx) {
         let values = self.option_values;
         let len = self.option_len;
-        self.apply_option_values(&values, len);
+        self.apply_option_values(&values, len, ctx);
     }
 
-    fn apply_option_values(&mut self, values: &[i32; MAX_OPTIONS], len: usize) {
+    fn apply_option_values(&mut self, values: &[i32; MAX_OPTIONS], len: usize, ctx: &mut Ctx) {
         self.gameplay
-            .apply_options(self.options, &values[..len.min(MAX_OPTIONS)]);
+            .apply_options(self.options, &values[..len.min(MAX_OPTIONS)], ctx);
     }
 
     fn init_menu_audio(&mut self) {
@@ -1728,7 +1726,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
         // Hand the current option values to gameplay on every entry (not just
         // first init), so a setting changed in a front-end menu before Play
         // takes effect this session.
-        self.apply_option_values(&option_values, option_len);
+        self.apply_option_values(&option_values, option_len, ctx);
         let state = self.state_ref_at(state_index);
         self.gameplay.on_flow_state_entered(state, ctx);
     }
@@ -2211,7 +2209,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
     /// (clamped) and focus stays put: a slider owns the horizontal axis so
     /// the player can scrub its value. Otherwise the press falls through to
     /// ordinary horizontal focus movement. `right` selects the direction.
-    fn horizontal_press(&mut self, first: usize, count: usize, right: bool) {
+    fn horizontal_press(&mut self, first: usize, count: usize, right: bool, ctx: &mut Ctx) {
         if let Some(node_index) = self.resolved_focus(first, count) {
             if let Some(node) = self.nodes.get(node_index).copied() {
                 if matches!(node.kind, LevelUiNodeKind::Slider) && node.option != UI_OPTION_NONE {
@@ -2220,7 +2218,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
                         return;
                     }
                     let delta = if right { step } else { -step };
-                    let changed = self.adjust_option(node.option, delta);
+                    let changed = self.adjust_option(node.option, delta, ctx);
                     self.play_node_sfx_event(
                         node,
                         if changed {
@@ -2473,7 +2471,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
             // Nudge the bound option by the authored delta (clamped). A
             // dynamic-label refresh from the new value is a later step.
             LevelUiAction::SetOption { option, delta } => {
-                let _ = self.adjust_option(option, delta);
+                let _ = self.adjust_option(option, delta, ctx);
             }
             LevelUiAction::Game { id } => {
                 self.gameplay.game_ui_action(id, ctx);
@@ -2517,10 +2515,10 @@ impl<'a, S: Scene> GameApp<'a, S> {
         // LEFT / RIGHT scrub a focused slider's bound option, or move focus
         // horizontally for any other control.
         if ctx.just_pressed(button::LEFT) {
-            self.horizontal_press(first, count, false);
+            self.horizontal_press(first, count, false, ctx);
         }
         if ctx.just_pressed(button::RIGHT) {
-            self.horizontal_press(first, count, true);
+            self.horizontal_press(first, count, true, ctx);
         }
         // Shoulder navigation is reserved for menu/category focus rather
         // than slider adjustment. This lets a PS1 L1/R1 tab rail remain
@@ -2651,12 +2649,12 @@ impl<'a, S: Scene> GameApp<'a, S> {
     fn render_ui_scene(&mut self, scene: u16, ctx: &mut Ctx) {
         // Resolve the scene's pool block, then resolve focus, so the
         // highlighted control matches the one input acts on.
-        crate::app::boot_visual_checkpoint(&mut ctx.fb, (40, 80, 220), "37 UI RANGE BEGIN");
+        crate::app::boot_visual_checkpoint(ctx, (40, 80, 220), "37 UI RANGE BEGIN");
         let (first, count) = self.scene_node_range(scene);
-        crate::app::boot_visual_checkpoint(&mut ctx.fb, (40, 120, 220), "37 UI RANGE OK");
+        crate::app::boot_visual_checkpoint(ctx, (40, 120, 220), "37 UI RANGE OK");
         let focused = self.resolved_focus(first, count);
         let focus_offset = self.focus_motion_offset(focused);
-        crate::app::boot_visual_checkpoint(&mut ctx.fb, (40, 160, 220), "37 UI FOCUS OK");
+        crate::app::boot_visual_checkpoint(ctx, (40, 160, 220), "37 UI FOCUS OK");
         // Copy the node pool + option store out of `self` first so the
         // resolver closures borrow only these Copy locals, not `self`
         // (draw_scene already borrows `self.nodes`).
@@ -2704,8 +2702,10 @@ impl<'a, S: Scene> GameApp<'a, S> {
         // and buttons draw with the same glyphs the HUD uses. Empty slots
         // skip text or fall back to slot 0 in the renderer.
         let font_table = collect_ui_font_table(|index| self.gameplay.ui_font_at(index));
-        crate::app::boot_visual_checkpoint(&mut ctx.fb, (40, 200, 220), "37 UI DRAW BEGIN");
+        crate::app::boot_visual_checkpoint(ctx, (40, 200, 220), "37 UI DRAW BEGIN");
+        let frame_tag = (ctx.sim_tick.as_u32() & 0xffff) as u16;
         ui::draw_scene(
+            ctx.gpu(),
             nodes,
             first,
             count,
@@ -2714,7 +2714,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
             focused,
             focus_offset,
             &focus_style,
-            (ctx.sim_tick.as_u32() & 0xffff) as u16,
+            frame_tag,
             ui_text_seed,
             &mut textures,
             &value,
@@ -2730,13 +2730,14 @@ impl<'a, S: Scene> GameApp<'a, S> {
             .min(MENU_FOCUS_MOTION_FRAMES);
         if let Some(activation) = self.ui_activation.filter(|active| active.scene == scene) {
             ui::draw_activation_echo(
+                ctx.gpu(),
                 nodes,
                 usize::from(activation.node),
                 &focus_style,
                 activation.elapsed,
             );
         }
-        crate::app::boot_visual_checkpoint(&mut ctx.fb, (80, 220, 220), "37 UI DRAW OK");
+        crate::app::boot_visual_checkpoint(ctx, (80, 220, 220), "37 UI DRAW OK");
     }
 
     /// Pop to the remembered `return_to` state, if one is set. The
@@ -2750,7 +2751,12 @@ impl<'a, S: Scene> GameApp<'a, S> {
     }
 
     fn render_loading_screen(&mut self, ctx: &mut Ctx) {
-        draw_quad_flat([(0, 0), (320, 0), (0, 240), (320, 240)], 4, 6, 10);
+        ctx.gpu().draw(&QuadFlat::new(
+            [(0, 0), (320, 0), (0, 240), (320, 240)],
+            4,
+            6,
+            10,
+        ));
         if self.loading_scene_active() {
             // Authored loading scene: re-upload its images from the
             // front-end RAM cache (no CD contention with the world
@@ -2766,7 +2772,12 @@ impl<'a, S: Scene> GameApp<'a, S> {
             return;
         }
         // Built-in fallback: dark fill, divider, centered label.
-        draw_quad_flat([(96, 136), (224, 136), (96, 138), (224, 138)], 34, 48, 64);
+        ctx.gpu().draw(&QuadFlat::new(
+            [(96, 136), (224, 136), (96, 138), (224, 138)],
+            34,
+            48,
+            64,
+        ));
         if let Some(font) = self.gameplay.ui_font_at(0) {
             let text = "loading";
             let x = ((i32::from(ui::UI_CANVAS_W) - i32::from(font.text_width(text))) / 2)
@@ -2887,24 +2898,24 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
         // Menu music and UI SFX share SPU state. Initialise once here and
         // upload the generated UI SFX bank before any UI scene starts routing
         // CD-DA audio.
-        crate::app::boot_visual_checkpoint(&mut ctx.fb, (255, 80, 0), "04 MENU AUDIO BEGIN");
+        crate::app::boot_visual_checkpoint(ctx, (255, 80, 0), "04 MENU AUDIO BEGIN");
         self.init_menu_audio();
-        crate::app::boot_visual_checkpoint(&mut ctx.fb, (255, 0, 80), "05 MENU AUDIO OK");
+        crate::app::boot_visual_checkpoint(ctx, (255, 0, 80), "05 MENU AUDIO OK");
 
         // Legacy boot-time shared-asset hook. Scenes that have migrated to the
         // per-state resource lifecycle leave this a no-op and acquire their
         // resources in `on_enter_state` instead.
-        crate::app::boot_visual_checkpoint(&mut ctx.fb, (255, 160, 0), "06 SHARED ASSETS BEGIN");
+        crate::app::boot_visual_checkpoint(ctx, (255, 160, 0), "06 SHARED ASSETS BEGIN");
         self.gameplay.load_shared_assets(ctx);
-        crate::app::boot_visual_checkpoint(&mut ctx.fb, (0, 200, 80), "07 SHARED ASSETS OK");
+        crate::app::boot_visual_checkpoint(ctx, (0, 200, 80), "07 SHARED ASSETS OK");
 
         // Acquire the entry state's resource set (e.g. the UI font atlas) up
         // front, so both the loading screen and the first menu frame have it.
         // This is the per-scene enter hook the flow previously left as a TODO.
         let entry = self.cursor.current;
-        crate::app::boot_visual_checkpoint(&mut ctx.fb, (255, 0, 255), "08 RESOURCES BEGIN");
+        crate::app::boot_visual_checkpoint(ctx, (255, 0, 255), "08 RESOURCES BEGIN");
         self.switch_resources(entry, ctx);
-        crate::app::boot_visual_checkpoint(&mut ctx.fb, (80, 255, 80), "09 RESOURCES OK");
+        crate::app::boot_visual_checkpoint(ctx, (80, 255, 80), "09 RESOURCES OK");
 
         // Enter the configured entry state. Any Gameplay entry, including the
         // gameplay-only default, first parks on loading so streaming scenes can
@@ -2923,9 +2934,9 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
             // Cursor already at the UI-only entry from FlowCursor::new.
             // Apply defaults once so global presentation options preview
             // correctly even before the player starts gameplay.
-            crate::app::boot_visual_checkpoint(&mut ctx.fb, (255, 255, 255), "11 OPTIONS BEGIN");
-            self.apply_current_options();
-            crate::app::boot_visual_checkpoint(&mut ctx.fb, (0, 255, 160), "12 OPTIONS OK");
+            crate::app::boot_visual_checkpoint(ctx, (255, 255, 255), "11 OPTIONS BEGIN");
+            self.apply_current_options(ctx);
+            crate::app::boot_visual_checkpoint(ctx, (0, 255, 160), "12 OPTIONS OK");
             // Park a fade at full coverage; `update` releases it once the
             // entry scene's streamed images are all in VRAM. A scene with
             // nothing left to stream composes on its first frame and needs
@@ -3051,13 +3062,9 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
     }
 
     fn render(&mut self, ctx: &mut Ctx) {
-        crate::app::boot_visual_checkpoint(&mut ctx.fb, (120, 40, 200), "34 GAMEAPP RENDER BEGIN");
+        crate::app::boot_visual_checkpoint(ctx, (120, 40, 200), "34 GAMEAPP RENDER BEGIN");
         if self.loading_pending() {
-            crate::app::boot_visual_checkpoint(
-                &mut ctx.fb,
-                (140, 40, 220),
-                "35 LOADING RENDER BEGIN",
-            );
+            crate::app::boot_visual_checkpoint(ctx, (140, 40, 220), "35 LOADING RENDER BEGIN");
             if self.cursor.loading_is_unrendered() {
                 // First frame of this loading pass: anchor the hold timer.
                 self.loading_hold_start_tick = ctx.sim_tick.as_u32();
@@ -3066,30 +3073,22 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
             self.render_loading_screen(ctx);
             self.gameplay.render_post_process(ctx);
             if let Some(transition) = self.transition {
-                render_transition_overlay(transition);
+                render_transition_overlay(ctx.gpu(), transition);
             }
             if let Some(transition) = self.loading_exit_transition {
-                render_transition_overlay(transition);
+                render_transition_overlay(ctx.gpu(), transition);
             } else {
                 self.cursor.mark_loading_rendered();
             }
             return;
         }
-        crate::app::boot_visual_checkpoint(&mut ctx.fb, (140, 80, 220), "35 TAG RESOLVE BEGIN");
+        crate::app::boot_visual_checkpoint(ctx, (140, 80, 220), "35 TAG RESOLVE BEGIN");
         let tag = self.current_tag();
-        crate::app::boot_visual_checkpoint(&mut ctx.fb, (160, 80, 220), "36 TAG RESOLVE OK");
+        crate::app::boot_visual_checkpoint(ctx, (160, 80, 220), "36 TAG RESOLVE OK");
         if tag.has_gameplay() {
-            crate::app::boot_visual_checkpoint(
-                &mut ctx.fb,
-                (180, 80, 220),
-                "37 GAMEPLAY RENDER BEGIN",
-            );
+            crate::app::boot_visual_checkpoint(ctx, (180, 80, 220), "37 GAMEPLAY RENDER BEGIN");
             self.gameplay.render(ctx);
-            crate::app::boot_visual_checkpoint(
-                &mut ctx.fb,
-                (200, 80, 220),
-                "38 GAMEPLAY RENDER OK",
-            );
+            crate::app::boot_visual_checkpoint(ctx, (200, 80, 220), "38 GAMEPLAY RENDER OK");
             // The gameplay scene may have kicked its ordering-table DMA
             // asynchronously; everything that composites over it (pause
             // UI, transition fades) draws in render_overlay, after the
@@ -3097,14 +3096,9 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
             return;
         }
         if let Some(scene) = tag.ui_scene() {
-            crate::app::boot_visual_checkpoint(&mut ctx.fb, (200, 120, 220), "37 UI RENDER BEGIN");
+            crate::app::boot_visual_checkpoint(ctx, (200, 120, 220), "37 UI RENDER BEGIN");
             self.render_ui_scene(scene, ctx);
-            crate::app::boot_visual_checkpoint_hold(
-                &mut ctx.fb,
-                (220, 120, 220),
-                "38 UI RENDER OK",
-                60,
-            );
+            crate::app::boot_visual_checkpoint_hold(ctx, (220, 120, 220), "38 UI RENDER OK", 60);
         }
     }
 
@@ -3140,13 +3134,13 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
         }
         self.gameplay.render_post_process(ctx);
         if let Some(transition) = self.transition {
-            render_transition_overlay(transition);
+            render_transition_overlay(ctx.gpu(), transition);
         }
         if let Some(transition) = self.loading_exit_transition {
-            render_transition_overlay(transition);
+            render_transition_overlay(ctx.gpu(), transition);
         }
         if let Some(reveal) = self.boot_reveal {
-            render_transition_overlay(reveal);
+            render_transition_overlay(ctx.gpu(), reveal);
         }
     }
 }
@@ -3155,7 +3149,7 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
 mod tests {
     use super::*;
     use crate::frames::{SimTick, VideoHz, VisualFrame};
-    use psx_gpu::framebuf::FrameBuffer;
+    use psx_gpu::display::{DoubleBuffer, Resolution};
     use psx_pad::ButtonState;
 
     #[test]
@@ -3303,7 +3297,7 @@ mod tests {
         fn render(&mut self, _ctx: &mut Ctx) {
             self.renders += 1;
         }
-        fn apply_options(&mut self, options: &[LevelOptionDef], values: &[i32]) {
+        fn apply_options(&mut self, options: &[LevelOptionDef], values: &[i32], _ctx: &mut Ctx) {
             self.option_applications += 1;
             self.last_option_value = options
                 .iter()
@@ -3350,7 +3344,7 @@ mod tests {
             VideoHz::NTSC,
             PadState::NONE,
             PadState::NONE,
-            FrameBuffer::new(320, 240),
+            DoubleBuffer::new(Resolution::R320X240),
         )
     }
 
@@ -5475,7 +5469,7 @@ mod tests {
         // detect end-of-track and re-play without seeking the laser mid-song.
         assert_eq!(
             CDDA_PLAYBACK_MODE,
-            psx_io::cdrom::MODE_CDDA | psx_io::cdrom::MODE_AUTO_PAUSE
+            psx_hw::cd::MODE_CDDA | psx_hw::cd::MODE_AUTO_PAUSE
         );
     }
 
@@ -6043,8 +6037,9 @@ mod tests {
             psx_level::UI_SCENE_NONE,
             &mut scene,
         );
-        app.adjust_option(UI_OPTION_NONE, 3);
-        app.adjust_option(12345, 3);
+        let mut ctx = test_ctx();
+        app.adjust_option(UI_OPTION_NONE, 3, &mut ctx);
+        app.adjust_option(12345, 3, &mut ctx);
         assert_eq!(value_of(&app, OPT_ID), 4, "store untouched by stray ids");
     }
 }

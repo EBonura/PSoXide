@@ -5,7 +5,7 @@
 //! in a loop, passing a [`Ctx`] that carries the live-per-frame
 //! things the scene needs: the current pad state (with edge-detection
 //! helpers), the simulation and visual-frame counters, the display cadence,
-//! and a [`FrameBuffer`] ready to draw into.
+//! and the [`DoubleBuffer`] and [`Gpu`] it draws with.
 //!
 //! The split into `update` + `render` is cosmetic -- both get the
 //! same `Ctx`. Keeping them separate reads better and makes it easy
@@ -13,7 +13,9 @@
 //! update, replay without re-rendering, etc).
 
 use psx_font::FontAtlas;
-use psx_gpu::framebuf::FrameBuffer;
+use psx_gpu::display::DoubleBuffer;
+use psx_gpu::Gpu;
+use psx_io::periph::GpuDma;
 use psx_level::{AssetId, LevelOptionDef, LevelUiValueBinding, LevelWorldLayer};
 use psx_pad::{button, poll_port2, ActionInput, ActionMap, PadState};
 
@@ -53,11 +55,15 @@ pub enum RenderSubmission {
     /// `render` ends its ordering table on [`Ctx::present_queue_hook`] right
     /// after clearing it and reserves overlay space;
     /// [`Scene::take_queued_frame`] then returns both, and the runner records
-    /// [`Scene::render_overlay`] into that space with psx-io's GP0 capture.
-    /// The overlay must therefore only issue GP0 commands (no VRAM uploads).
+    /// [`Scene::render_overlay`] into that space with psx-io's command
+    /// recording. Display-control writes are not recorded; psx-vram uploads
+    /// reach the GPU at once, outside the recording.
     /// When `take_queued_frame` returns `None`, the runner presents the frame
     /// through the `QueuedDoubleBuffered` path instead, so the scene must
     /// also support [`Scene::submit_render`].
+    ///
+    /// Needs psx-engine's `present-queue` feature; without it the runner
+    /// presents these scenes as `QueuedDoubleBuffered`.
     PresentQueue,
 }
 
@@ -119,8 +125,9 @@ pub struct Ctx {
     /// Frame buffer the scene draws into. Immediate scenes receive it cleared
     /// before [`Scene::render`]; queued scenes prepare CPU packets first and
     /// receive the clear immediately before [`Scene::submit_render`].
-    pub fb: FrameBuffer,
+    pub fb: DoubleBuffer,
     runtime_requests: RuntimeRequests,
+    gpu_dma: Option<GpuDma>,
     present_queue_hook: Option<*const u32>,
 }
 
@@ -131,7 +138,7 @@ impl Ctx {
         video_hz: VideoHz,
         pad: PadState,
         pad_prev: PadState,
-        fb: FrameBuffer,
+        fb: DoubleBuffer,
     ) -> Self {
         Self {
             sim_tick,
@@ -143,8 +150,54 @@ impl Ctx {
             pad2_prev: PadState::NONE,
             fb,
             runtime_requests: RuntimeRequests::default(),
+            gpu_dma: None,
             present_queue_hook: None,
         }
+    }
+
+    /// Hand the context the GPU DMA token; the app runner does this once.
+    pub(crate) fn set_gpu_dma(&mut self, dma: GpuDma) {
+        self.gpu_dma = Some(dma);
+    }
+
+    /// The GPU DMA token, for [`OtFrame::submit`](crate::OtFrame::submit)
+    /// and the other calls that walk or write through channel 2.
+    ///
+    /// # Panics
+    ///
+    /// Outside the app runner, which takes the token at boot.
+    #[inline]
+    pub fn gpu_dma(&mut self) -> &mut GpuDma {
+        self.gpu_dma
+            .as_mut()
+            .expect("the app runner holds the GPU DMA token")
+    }
+
+    /// The GPU driver, for immediate drawing and the other calls that write
+    /// GP0 or GP1. It borrows the context, so nothing can draw while a
+    /// linked-list walk the same borrow started is still being waited on.
+    ///
+    /// # Panics
+    ///
+    /// Outside the app runner, which takes the token at boot.
+    #[inline]
+    pub fn gpu(&mut self) -> &mut Gpu {
+        Gpu::from_dma_mut(self.gpu_dma())
+    }
+
+    /// The GPU driver and the double buffer together, for calls such as
+    /// `ctx.fb.clear(gpu, ..)` that need both at once.
+    ///
+    /// # Panics
+    ///
+    /// Outside the app runner, which takes the token at boot.
+    #[inline]
+    pub fn gpu_and_buffers(&mut self) -> (&mut Gpu, &mut DoubleBuffer) {
+        let dma = self
+            .gpu_dma
+            .as_mut()
+            .expect("the app runner holds the GPU DMA token");
+        (Gpu::from_dma_mut(dma), &mut self.fb)
     }
 
     /// During a [`RenderSubmission::PresentQueue`] render, the node the
@@ -500,10 +553,9 @@ pub trait Scene {
     /// build CPU-side packets here; the runner clears the next back buffer and
     /// calls [`submit_render`](Scene::submit_render) afterwards.
     ///
-    /// A scene that kicks its ordering table asynchronously (via
-    /// [`OtFrame::submit_async`](crate::OtFrame::submit_async) +
-    /// [`OtSubmitInFlight::detach`](crate::OtSubmitInFlight::detach))
-    /// must not issue any immediate GP0 draw after the kick; put that
+    /// A scene that kicks its ordering table asynchronously (with
+    /// [`psx_gpu::submit_linked_list_raw_async`], leaving the wait to the
+    /// runner) must not issue any immediate GP0 draw after the kick; put that
     /// work in [`render_overlay`](Scene::render_overlay) instead, which
     /// the engine calls once the GPU has drained the table.
     ///
@@ -670,13 +722,14 @@ pub trait Scene {
     /// table and the parallel live-value slice (`values[i]` is the current value
     /// of `options[i]`, already clamped to that option's range). A scene reads
     /// whatever settings it cares about by matching `option.id` and caches or
-    /// applies them.
+    /// applies them. `ctx` is there for options that program the hardware, the
+    /// display window's picture offset for one, through `ctx.gpu()`.
     ///
     /// Values are not delivered per frame: front-end menus publish only when an
     /// option changes, and live in-game adjustment is a separate, later concern.
     /// Default is a no-op.
     #[allow(unused_variables)]
-    fn apply_options(&mut self, options: &[LevelOptionDef], values: &[i32]) {}
+    fn apply_options(&mut self, options: &[LevelOptionDef], values: &[i32], ctx: &mut Ctx) {}
 
     /// Acquire the VRAM/asset resources a flow state needs, through the
     /// project's VRAM allocator. The flow driver calls this once, immediately

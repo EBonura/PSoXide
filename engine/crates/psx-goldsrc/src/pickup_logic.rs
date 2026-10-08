@@ -6,8 +6,8 @@ const PLAYER_HALF_WIDTH: i32 = 16;
 const PICKUP_HEIGHT: i32 = 16;
 
 /// Overlap the linked GoldSrc boxes, with Y as this port's vertical axis.
-/// SetObjectCollisionBox expands the player and ordinary items by one unit.
-/// Weapons override it with an exact (-24,-24,0)..(24,24,16) box instead.
+/// In Half-Life the player and ordinary items touch with their boxes grown by
+/// one unit; weapons use an exact (-24,-24,0)..(24,24,16) box instead.
 /// The caller supplies the live collision hull, including a blocked unduck.
 #[inline]
 fn touches_box(

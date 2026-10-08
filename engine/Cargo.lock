@@ -88,6 +88,7 @@ name = "psx-chainloader"
 version = "0.1.0"
 dependencies = [
  "psx-font",
+ "psx-hw",
  "psx-io",
  "psx-pack",
 ]
@@ -104,6 +105,7 @@ dependencies = [
  "psx-font",
  "psx-gpu",
  "psx-gte",
+ "psx-hw",
  "psx-io",
  "psx-level",
  "psx-math",
@@ -164,6 +166,7 @@ dependencies = [
 name = "psx-gpu"
 version = "0.1.0"
 dependencies = [
+ "bitflags",
  "psx-hw",
  "psx-io",
 ]
@@ -211,6 +214,7 @@ version = "0.1.0"
 name = "psx-pack"
 version = "0.1.0"
 dependencies = [
+ "psx-hw",
  "psx-io",
 ]
 

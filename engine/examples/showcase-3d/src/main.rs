@@ -37,14 +37,14 @@ use psx_engine::{
     GouraudRenderPass, GouraudTriCommand, OtDepth, OtFrame, PrimitiveArena, Scene, SimTick,
     Vec3World,
 };
-use psx_font::{fonts::BASIC_8X16, u16_hex, FontAtlas};
+use psx_font::{fonts::BASIC_8X16, format_u16, FontAtlas};
 use psx_fx::{LcgRng, ParticlePool, ShakeState};
 use psx_gpu::ot::OrderingTable;
 use psx_gpu::prim::{QuadGouraud, RectFlat, TriGouraud};
 use psx_gte::lighting::{Light, LightRig, ProjectedLit};
 use psx_gte::math::{Mat3I16, Vec3I16, Vec3I32};
 use psx_gte::scene;
-use psx_vram::{Clut, TexDepth, Tpage};
+use psx_vram::{Clut, TextureDepth, TexturePage};
 
 /// Cooked mesh blobs -- produced at build time by `psxed` from
 /// `vendor/*.obj`, embedded here so the homebrew is self-
@@ -146,7 +146,7 @@ const LIGHT_ORBIT_PER_FRAME: u16 = 32;
 // Font + VRAM
 // ----------------------------------------------------------------------
 
-const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
+const FONT_TPAGE: TexturePage = TexturePage::new(320, 0, TextureDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
 
 // ----------------------------------------------------------------------
@@ -233,7 +233,7 @@ impl Scene for Showcase3D {
     fn init(&mut self, _ctx: &mut Ctx) {
         scene::set_screen_offset((SCREEN_W as i32 / 2) << 16, (SCREEN_H as i32 / 2) << 16);
         scene::set_projection_plane(PROJ_H);
-        scene::set_avsz_weights(0x155, 0xAA);
+        scene::set_average_z_weights(0x155, 0xAA);
         self.font = Some(FontAtlas::upload(&BASIC_8X16, FONT_TPAGE, FONT_CLUT));
         self.init_starfield();
     }
@@ -284,7 +284,7 @@ impl Scene for Showcase3D {
         }
         self.sparks.update(1);
 
-        self.build_frame_ot(ctx.sim_tick);
+        self.build_frame_ot(ctx.sim_tick, ctx.gpu_dma());
         let font = self.font.as_ref().expect("font uploaded in init");
         self.draw_hud(font, ctx.sim_tick);
     }
@@ -315,12 +315,13 @@ impl Showcase3D {
         }
     }
 
-    fn build_frame_ot(&mut self, tick: SimTick) {
+    fn build_frame_ot(&mut self, tick: SimTick, dma: &mut psx_engine::GpuDma) {
         let frame = tick.as_u32();
         let mut ot = unsafe { OtFrame::begin(&mut OT) };
-        let mut rects = unsafe { PrimitiveArena::new(&mut SCENE_RECTS) };
+        let mut rects = unsafe { psx_gpu::frame::PrimitiveArena::new(&mut SCENE_RECTS) };
         let mut gouraud = unsafe { PrimitiveArena::new(&mut GOURAUD_TRIS) };
-        let mut backgrounds = unsafe { PrimitiveArena::new(core::slice::from_mut(&mut BG_QUAD)) };
+        let mut backgrounds =
+            unsafe { psx_gpu::frame::PrimitiveArena::new(core::slice::from_mut(&mut BG_QUAD)) };
 
         let (shake_dx, shake_dy) = self.shake.tick();
 
@@ -433,7 +434,7 @@ impl Showcase3D {
             (shake_dx, shake_dy),
         );
 
-        ot.submit();
+        ot.submit(dma);
     }
 
     fn draw_hud(&self, font: &FontAtlas, tick: SimTick) {
@@ -444,7 +445,7 @@ impl Showcase3D {
         font.draw_text(SCREEN_W - 64, 20, "teapot", (120, 200, 240));
 
         font.draw_text(4, SCREEN_H - 20, "frame", (160, 160, 200));
-        let frame_hex = u16_hex((tick.as_u32() & 0xFFFF) as u16);
+        let frame_hex = format_u16((tick.as_u32() & 0xFFFF) as u16);
         font.draw_text(
             4 + 8 * 6,
             SCREEN_H - 20,
@@ -453,7 +454,7 @@ impl Showcase3D {
         );
 
         font.draw_text(SCREEN_W / 2 - 8 * 3, SCREEN_H - 20, "tri", (160, 160, 200));
-        let tri = u16_hex(self.tri_count);
+        let tri = format_u16(self.tri_count);
         font.draw_text(
             SCREEN_W / 2 + 8,
             SCREEN_H - 20,
@@ -462,7 +463,7 @@ impl Showcase3D {
         );
 
         font.draw_text(SCREEN_W - 100, SCREEN_H - 20, "stars", (160, 160, 200));
-        let stars = u16_hex(STAR_COUNT as u16);
+        let stars = format_u16(STAR_COUNT as u16);
         font.draw_text(
             SCREEN_W - 52,
             SCREEN_H - 20,
@@ -518,16 +519,16 @@ fn transform_axis(m: &Mat3I16, row: usize, v: Vec3World) -> i32 {
     (sum >> 12) as i32
 }
 
-fn render_particles<const N: usize, const OT_N: usize>(
+fn render_particles<'a, const N: usize, const OT_N: usize>(
     particles: &ParticlePool<N>,
-    rects: &mut PrimitiveArena<'_, RectFlat>,
-    ot: &mut OtFrame<'_, OT_N>,
+    rects: &mut psx_gpu::frame::PrimitiveArena<'a, RectFlat>,
+    ot: &mut OtFrame<'a, OT_N>,
     slot: usize,
     shake: (i16, i16),
 ) -> usize {
     let mut written = 0;
     for p in particles.particles() {
-        if !p.alive() {
+        if !p.is_alive() {
             continue;
         }
 

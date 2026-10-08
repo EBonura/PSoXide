@@ -46,9 +46,9 @@ const BINARY_LEN: usize = 264;
 const BASE64_LEN: usize = 352;
 const QR_TEXT_MAX: usize = 4 + BASE64_LEN + 3 + 8;
 
-const VOICE_BASE: u32 = psx_io::spu::SPU_BASE + DIALOGUE_VOICE as u32 * 16;
-const ENDX_LO: u32 = psx_io::spu::SPU_BASE + 0x19C;
-const ENDX_HI: u32 = psx_io::spu::SPU_BASE + 0x19E;
+const VOICE_BASE: u32 = psx_hw::spu::BASE + DIALOGUE_VOICE as u32 * 16;
+const ENDX_LO: u32 = psx_hw::spu::BASE + 0x19C;
+const ENDX_HI: u32 = psx_hw::spu::BASE + 0x19E;
 
 #[derive(Copy, Clone)]
 struct StageRecord {
@@ -153,9 +153,9 @@ impl VoiceProbe {
 
         if self.stage == 0 {
             if self.stage_frame == 15 {
-                Voice::key_on(Voice::V0.mask());
+                Voice::start(Voice::V0.mask());
             } else if self.stage_frame == 45 {
-                Voice::key_off(Voice::V0.mask());
+                Voice::release(Voice::V0.mask());
                 Voice::V0.set_volume(Volume::SILENCE, Volume::SILENCE);
             }
         }
@@ -177,7 +177,7 @@ impl VoiceProbe {
         } else {
             let voice = Voice::new(DIALOGUE_VOICE);
             voice.set_volume(Volume::SILENCE, Volume::SILENCE);
-            Voice::key_off(voice.mask());
+            Voice::release(voice.mask());
             self.complete = true;
             self.encode_qr();
             self.print_payload();
@@ -199,7 +199,7 @@ impl VoiceProbe {
             4 => {
                 let voice = Voice::new(DIALOGUE_VOICE);
                 voice.set_volume(Volume::SILENCE, Volume::SILENCE);
-                Voice::key_off(voice.mask());
+                Voice::release(voice.mask());
                 self.load_banks(true);
                 self.play_target();
             }
@@ -282,15 +282,15 @@ impl VoiceProbe {
             Volume::linear(1, 4),
             Adsr::sample(),
         );
-        Voice::key_on(voice.mask());
+        Voice::start(voice.mask());
     }
 
     fn capture_stage(&mut self, tick: u32) {
-        let spucnt = unsafe { psx_io::read16(psx_io::spu::SPUCNT) };
-        let spustat = unsafe { psx_io::read16(psx_io::spu::SPUSTAT) };
-        let read = |offset| unsafe { psx_io::read16(VOICE_BASE + offset) };
-        let endx_lo = unsafe { psx_io::read16(ENDX_LO) };
-        let endx_hi = unsafe { psx_io::read16(ENDX_HI) };
+        let spucnt = unsafe { psx_io::read_u16(psx_hw::spu::SPUCNT) };
+        let spustat = unsafe { psx_io::read_u16(psx_hw::spu::SPUSTAT) };
+        let read = |offset| unsafe { psx_io::read_u16(VOICE_BASE + offset) };
+        let endx_lo = unsafe { psx_io::read_u16(ENDX_LO) };
+        let endx_hi = unsafe { psx_io::read_u16(ENDX_HI) };
         self.records[self.stage as usize].fields = [
             ((self.stage as u32) << 24) | (tick & 0x00FF_FFFF),
             ((spucnt as u32) << 16) | spustat as u32,
@@ -525,7 +525,7 @@ fn target_bytes(pack: &[u8]) -> Option<&[u8]> {
 /// only by waiting for SPUSTAT's delayed mode mirror before arming DMA and by
 /// allowing the final FIFO words to drain before returning to Stop mode.
 fn upload_adpcm_settled(dest: SpuAddr, bytes: &[u8]) -> UploadTiming {
-    use psx_io::spu::{SPUCNT, SPUSTAT, TRANSFER_ADDR, TRANSFER_CTRL};
+    use psx_hw::spu::{SPUCNT, SPUSTAT, TRANSFER_ADDR, TRANSFER_CTRL};
     assert!((bytes.as_ptr() as usize).is_multiple_of(4) && bytes.len().is_multiple_of(4));
     let words = (bytes.len() / 4) as u32;
     let block_size = if words.is_multiple_of(16) {
@@ -542,20 +542,23 @@ fn upload_adpcm_settled(dest: SpuAddr, bytes: &[u8]) -> UploadTiming {
     let block_count = words / block_size;
     let mut timing = UploadTiming::default();
     unsafe {
-        let stopped = psx_io::read16(SPUCNT) & !0x0030;
-        psx_io::write16(SPUCNT, stopped);
+        let stopped = psx_io::read_u16(SPUCNT) & !0x0030;
+        psx_io::write_u16(SPUCNT, stopped);
         timing.max_mode_polls = wait_mode(stopped);
-        psx_io::write16(TRANSFER_CTRL, 0x0004);
-        psx_io::write16(TRANSFER_ADDR, dest.byte_offset().wrapping_div(8) as u16);
-        psx_io::write16(SPUCNT, stopped | 0x0020);
+        psx_io::write_u16(TRANSFER_CTRL, 0x0004);
+        psx_io::write_u16(TRANSFER_ADDR, dest.byte_offset().wrapping_div(8) as u16);
+        psx_io::write_u16(SPUCNT, stopped | 0x0020);
         timing.max_mode_polls = timing.max_mode_polls.max(wait_mode(stopped | 0x0020));
 
         dma::enable_channel(dma::Channel::Spu);
-        dma::set_madr(dma::Channel::Spu, bytes.as_ptr() as u32);
-        dma::set_bcr_block(dma::Channel::Spu, block_size as u16, block_count as u16);
-        dma::set_chcr(
+        dma::raw::set_address(dma::Channel::Spu, bytes.as_ptr() as u32);
+        dma::raw::set_size(
             dma::Channel::Spu,
-            dma::CHCR_TO_DEVICE | dma::CHCR_SYNC_BLOCK | dma::CHCR_START,
+            dma::size_blocks(block_size as u16, block_count as u16),
+        );
+        dma::raw::set_control(
+            dma::Channel::Spu,
+            psx_hw::dma::CHCR_TO_DEVICE | psx_hw::dma::CHCR_SYNC_BLOCK | psx_hw::dma::CHCR_START,
         );
         let mut dma_guard = 0u32;
         while dma::is_busy(dma::Channel::Spu) && dma_guard < 1_000_000 {
@@ -566,14 +569,14 @@ fn upload_adpcm_settled(dest: SpuAddr, bytes: &[u8]) -> UploadTiming {
         // revisions.  A bounded poll plus a fixed FIFO-sized settling window
         // keeps this comparison safe even when one status bit is sticky.
         let mut drain = 0u16;
-        while psx_io::read16(SPUSTAT) & 0x2080 != 0 && drain != u16::MAX {
+        while psx_io::read_u16(SPUSTAT) & 0x2080 != 0 && drain != u16::MAX {
             drain = drain.wrapping_add(1);
         }
         timing.max_drain_polls = drain;
         for _ in 0..4096 {
             core::hint::spin_loop();
         }
-        psx_io::write16(SPUCNT, stopped);
+        psx_io::write_u16(SPUCNT, stopped);
         timing.max_mode_polls = timing.max_mode_polls.max(wait_mode(stopped));
     }
     timing
@@ -582,7 +585,8 @@ fn upload_adpcm_settled(dest: SpuAddr, bytes: &[u8]) -> UploadTiming {
 fn wait_mode(want: u16) -> u16 {
     let mut polls = 0u16;
     unsafe {
-        while psx_io::read16(psx_io::spu::SPUSTAT) & 0x003F != want & 0x003F && polls != u16::MAX {
+        while psx_io::read_u16(psx_hw::spu::SPUSTAT) & 0x003F != want & 0x003F && polls != u16::MAX
+        {
             polls = polls.wrapping_add(1);
         }
     }

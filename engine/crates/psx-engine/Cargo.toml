@@ -14,6 +14,7 @@ psx-asset = { path = "../../../sdk/crates/psx-asset" }
 psx-font  = { path = "../../../sdk/crates/psx-font" }
 psx-gpu   = { path = "../../../sdk/crates/psx-gpu" }
 psx-gte   = { path = "../../../sdk/crates/psx-gte" }
+psx-hw    = { path = "../../../crates/psx-hw" }
 psx-io    = { path = "../../../sdk/crates/psx-io" }
 psx-level = { path = "../psx-level" }
 psx-math  = { path = "../../../sdk/crates/psx-math" }
@@ -45,25 +46,15 @@ tr-subdivision-lattice = []
 # cell_depth / cell_collect CSV columns). Off by default: the per-cell
 # begin/end telemetry writes cost ~4k cycles/frame on the benchmark tape.
 cell-select-profile = []
-# Visual-exact CPU/GPU trade: after the conservative whole-face gate admits a
-# lattice, rely on the PS1 draw area instead of rejecting each child packet.
-classic-affine-gpu-lattice-clip = []
-# Broader visual-exact form: delegate every child GT3/GT4 rejection to the
-# draw area after the source surface survives its conservative admission gate.
-classic-affine-gpu-polygon-clip = ["classic-affine-gpu-lattice-clip"]
-# Monomorphize the ordinary batch submitter around Quake's one fixed profile
-# so depth/error policy and viewport constants are compile-time facts.
-classic-affine-quake-specialized-kernel = []
-# Error-bounded / quad-lattice fan tessellation (profile fields
-# `subdivide_error_px_q3` and `quad_lattice`). Opt-in: the dispatch alone
-# grows every fan submitter's frame, and Cortex's PXBSP writer runs on a
-# scratchpad stack with 8 bytes to spare. Without it those fields are ignored.
-classic-affine-lattice = []
 # Player skinned-vertex live-capture instrument (the HWB-008..011
 # explosion-hunt channel). Off by default: the per-vertex observe and
 # per-joint compose recording cost real cycles and must not ride along
 # in shipping or performance-measurement builds.
 vert-debug = []
+# Hand frames of scenes that ask for RenderSubmission::PresentQueue to
+# psx-rt's VBlank-kicked present queue. Without it those scenes present the
+# QueuedDoubleBuffered way, and no SDK code pays for the queue.
+present-queue = ["psx-rt/present-queue"]
 
 [lints]
 workspace = true

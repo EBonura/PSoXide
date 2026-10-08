@@ -13,12 +13,13 @@
 //! goes through a [`GameEntityMover`] the owning game backs with the
 //! engine motor's [`commit_body_step`] -- the exact grid-collision
 //! stand/slide/step rules the player uses. Blocked patrol and chase
-//! movement adopts Quake's bounded eight-direction chase search:
-//! persist a working direction, reconsider occasionally, and try the
-//! turnaround last. This gives BSP-aware local routing without a
-//! navmesh, heap allocation, or an unbounded search. Attack CONTACT
-//! resolution is the combat slice (see [`crate::combat`]). Games with
-//! retained actor poses use [`Self::tick_delta_deferred`] to freeze each active
+//! movement steers on eight compass headings: keep a working heading,
+//! re-aim at the goal on a per-entity countdown, and when blocked rank
+//! the headings by how directly they close on the goal, with the reverse
+//! last. This gives BSP-aware local routing without a navmesh, heap
+//! allocation, or an unbounded search. Attack CONTACT resolution is the
+//! combat slice (see [`crate::combat`]). Games with retained actor poses
+//! use [`Self::tick_delta_deferred`] to freeze each active
 //! swing's exact attack clip/phase, resolve authored capsules from the
 //! same pose the body and equipment consume, and then latch the hit
 //! through [`Self::connect_deferred_attack`]. The legacy immediate
@@ -202,14 +203,10 @@ const GAME_ENTITY_TURN_PRESENTATION_THRESHOLD: u16 = 8;
 /// single simulation-tick yaw change still reads as a planted pivot.
 const GAME_ENTITY_TURN_PRESENTATION_TICKS: u8 = 48;
 
-/// Quake's close-enough tolerance when choosing the direct chase axes.
-const GAME_ENTITY_CHASE_AXIS_EPSILON: i32 = 10;
-
-/// Collision directions evaluated in one simulation tick. Quake can scan all
-/// eight immediately because its monster move uses a single cheap hull trace;
-/// PSoXide's player-equivalent body step performs several stand/floor traces.
-/// Spreading the same bounded search across four 30 Hz NPC ticks prevents one
-/// blocked actor from consuming a visual frame.
+/// Collision probes one entity may spend steering in one simulation tick.
+/// Each probe is a player-equivalent body step (several stand and floor
+/// traces), so a blocked entity spreads its eight-heading search over up to
+/// four 30 Hz NPC ticks instead of spending a visual frame on it.
 const GAME_ENTITY_DIRECTION_PROBES_PER_TICK: u8 = 2;
 
 /// Movement backend the owning game supplies per tick: one
@@ -239,7 +236,7 @@ pub trait GameEntityMover {
 
     /// Attempt one authored chase direction without inventing a second
     /// direction through axis sliding. The default preserves existing movers;
-    /// BSP backends override this with Quake-style exact-direction hull motion.
+    /// BSP backends override this with an exact-direction hull step.
     fn step_direction(
         &mut self,
         entity: usize,
@@ -2411,12 +2408,19 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
         self.face_toward(index, input.player);
     }
 
-    /// One motor-checked step toward `goal` in XZ at `speed` engine
-    /// units per tick. Free movement persists one of eight Quake-style
-    /// chase directions. A blocked direction invokes a bounded local
-    /// search over the remaining directions, with the turnaround tried
-    /// last. Returns `true` on arrival (within one step of the goal and
-    /// the final hop committed).
+    /// One motor-checked step toward `goal` in XZ at `speed` engine units
+    /// per tick, steering on the eight compass headings. Returns `true`
+    /// once the entity stands on the goal.
+    ///
+    /// Within one step of the goal the entity hops straight onto it.
+    /// Further out it walks its working heading while that heading still
+    /// moves it and does not point away from the goal, and re-aims at the
+    /// goal when a per-entity countdown runs out. A blocked heading starts a
+    /// search that ranks the eight headings by how directly they close on
+    /// the goal and saves the reverse of the blocked heading for last. A
+    /// search probes each heading at most once and spends at most
+    /// [`GAME_ENTITY_DIRECTION_PROBES_PER_TICK`] collision probes per tick,
+    /// so a long search resumes on the next tick from `move_tried`.
     fn step_toward(
         &mut self,
         record: &LevelGameEntityRecord,
@@ -2429,48 +2433,68 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
         let dx = goal[0].saturating_sub(self.x[index]);
         let dz = goal[2].saturating_sub(self.z[index]);
         if dx == 0 && dz == 0 {
+            self.move_yaw_valid[index] = 0;
+            self.move_tried[index] = 0;
             return true;
         }
-        let arriving = dx.abs() <= speed && dz.abs() <= speed;
-        if arriving {
-            let position = [self.x[index], self.y[index], self.z[index]];
+        let mut probes = GAME_ENTITY_DIRECTION_PROBES_PER_TICK;
+        if within_xz([dx, dz], [0, 0], speed) {
+            probes -= 1;
             if self.try_exact_step(record, index, dx, dz, mover) {
                 self.move_yaw_valid[index] = 0;
                 self.move_tried[index] = 0;
                 return true;
             }
-            if self.x[index] != position[0] || self.z[index] != position[2] {
+        }
+
+        let goal_direction = Self::scaled_direction(dx, dz);
+        let current = Self::heading_of(self.move_yaw[index]);
+        if self.move_yaw_valid[index] != 0 {
+            let countdown = self.move_yaw_valid[index];
+            let receding = Self::heading_score(current, goal_direction) < 0;
+            if countdown > 1 && !receding {
+                if probes == 0 {
+                    return false;
+                }
+                probes -= 1;
+                if self.probe_heading(record, index, current, speed, mover) {
+                    self.move_yaw_valid[index] = countdown - 1;
+                    return false;
+                }
+                // Blocked: search from here, never retrying this heading.
+                self.move_tried[index] = 1 << current;
+            }
+            // Either blocked or due to re-aim; `move_yaw` stays the anchor
+            // the ranking prefers on ties and whose reverse goes last.
+            self.move_yaw_valid[index] = 0;
+        } else if self.move_tried[index] == 0 {
+            // A fresh choice with no heading anchors on the best heading.
+            let best = Self::ranked_headings(goal_direction, None, index)[0];
+            self.move_yaw[index] = u16::from(best) * GAME_ENTITY_DIRECTION_STEP;
+        }
+
+        let anchor = Self::heading_of(self.move_yaw[index]);
+        let order = Self::ranked_headings(goal_direction, Some(anchor), index);
+        let mut tried = self.move_tried[index];
+        for heading in order {
+            if tried & (1 << heading) != 0 {
+                continue;
+            }
+            if probes == 0 {
+                self.move_tried[index] = tried;
+                return false;
+            }
+            probes -= 1;
+            tried |= 1 << heading;
+            if self.probe_heading(record, index, heading, speed, mover) {
+                self.move_yaw[index] = u16::from(heading) * GAME_ENTITY_DIRECTION_STEP;
+                self.move_yaw_valid[index] = Self::reaim_countdown(index);
+                self.move_tried[index] = 0;
                 return false;
             }
         }
-
-        // Quake reconsiders one movement call in four even when its current
-        // direction still works. Derive the choice from entity-local state so
-        // host tests, replays, and console runs make identical decisions.
-        let choice = self.state_ticks[index]
-            .wrapping_mul(37)
-            .wrapping_add((index as u16).wrapping_mul(17));
-        let reconsider = self.move_yaw_valid[index] == 0 || choice & 3 == 1;
-        let mut tried = if reconsider {
-            0
-        } else {
-            self.move_tried[index]
-        };
-        let mut probes = 0u8;
-        if !reconsider {
-            let old_yaw = self.move_yaw[index];
-            let old_bit = Self::direction_bit(old_yaw);
-            if tried & old_bit == 0 {
-                tried |= old_bit;
-                probes += 1;
-                if self.step_direction(record, index, old_yaw, speed, mover) {
-                    self.move_tried[index] = 0;
-                    return false;
-                }
-            }
-        }
-
-        self.new_chase_direction(record, index, goal, speed, choice, tried, probes, mover);
+        // Every heading failed: hold this tick and start over next tick.
+        self.move_tried[index] = 0;
         false
     }
 
@@ -2499,214 +2523,118 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
             && committed[2] == position[2].saturating_add(dz)
     }
 
-    /// Quake's `newchasedir` ordering, adapted to deterministic entity-local
-    /// entropy and an eight-bit attempted-direction mask. The mask removes the
-    /// duplicate probes present in the original C routine while preserving its
-    /// preference order. Two probes run now; the remaining directions resume
-    /// on later NPC ticks from the retained mask.
-    #[allow(clippy::too_many_arguments)]
-    fn new_chase_direction(
-        &mut self,
-        record: &LevelGameEntityRecord,
-        index: usize,
-        goal: [i32; 3],
-        speed: i32,
-        choice: u16,
-        mut tried: u8,
-        mut probes: u8,
-        mover: &mut impl GameEntityMover,
-    ) {
-        let dx = goal[0].saturating_sub(self.x[index]);
-        let dz = goal[2].saturating_sub(self.z[index]);
-        let old_yaw = if self.move_yaw_valid[index] != 0 {
-            self.move_yaw[index] & GAME_ENTITY_YAW_MASK
-        } else {
-            Self::nearest_direction(atan2_q12(dx, dz))
-        };
-        let turnaround = old_yaw.wrapping_add(GAME_ENTITY_HALF_TURN) & GAME_ENTITY_YAW_MASK;
+    /// Unit vector of each compass heading in Q12, in the motor's yaw
+    /// convention (heading `k` is yaw `k * 512`; x = sin, z = cos).
+    const HEADING_UNIT_Q12: [[i32; 2]; 8] = [
+        [0, 4096],
+        [2896, 2896],
+        [4096, 0],
+        [2896, -2896],
+        [0, -4096],
+        [-2896, -2896],
+        [-4096, 0],
+        [-2896, 2896],
+    ];
 
-        let x_yaw = if dx > GAME_ENTITY_CHASE_AXIS_EPSILON {
-            Some(GAME_ENTITY_QUARTER_TURN)
-        } else if dx < -GAME_ENTITY_CHASE_AXIS_EPSILON {
-            Some(GAME_ENTITY_QUARTER_TURN.wrapping_mul(3))
-        } else {
-            None
-        };
-        let z_yaw = if dz > GAME_ENTITY_CHASE_AXIS_EPSILON {
-            Some(0)
-        } else if dz < -GAME_ENTITY_CHASE_AXIS_EPSILON {
-            Some(GAME_ENTITY_HALF_TURN)
-        } else {
-            None
-        };
+    /// Successful steps a working heading is kept before the entity
+    /// re-aims at its goal. The per-entity offset keeps a group of
+    /// entities from re-aiming on the same tick.
+    fn reaim_countdown(index: usize) -> u8 {
+        8 + (index & 7) as u8
+    }
 
-        if let (Some(x_yaw), Some(z_yaw)) = (x_yaw, z_yaw) {
-            let diagonal = match (x_yaw, z_yaw) {
-                (GAME_ENTITY_QUARTER_TURN, 0) => GAME_ENTITY_DIRECTION_STEP,
-                (GAME_ENTITY_QUARTER_TURN, GAME_ENTITY_HALF_TURN) => {
-                    GAME_ENTITY_QUARTER_TURN + GAME_ENTITY_DIRECTION_STEP
+    fn heading_of(yaw: u16) -> u8 {
+        ((yaw & GAME_ENTITY_YAW_MASK) / GAME_ENTITY_DIRECTION_STEP) as u8
+    }
+
+    /// The goal offset shifted down until a Q12 dot product with a heading
+    /// unit vector cannot overflow `i32`; only its direction matters.
+    fn scaled_direction(dx: i32, dz: i32) -> [i32; 2] {
+        let mut direction = [dx, dz];
+        while direction[0].unsigned_abs() >= 1 << 18 || direction[1].unsigned_abs() >= 1 << 18 {
+            direction = [direction[0] >> 1, direction[1] >> 1];
+        }
+        direction
+    }
+
+    /// How directly `heading` closes on the goal: the goal offset projected
+    /// onto the heading's unit vector. Negative means moving away.
+    fn heading_score(heading: u8, direction: [i32; 2]) -> i32 {
+        let unit = Self::HEADING_UNIT_Q12[usize::from(heading & 7)];
+        unit[0] * direction[0] + unit[1] * direction[1]
+    }
+
+    /// The eight headings, most goal-closing first. Ties go to the heading
+    /// nearer the anchor, then to the entity's preferred turning side. The
+    /// anchor's reverse is moved to the end whatever its score.
+    fn ranked_headings(direction: [i32; 2], anchor: Option<u8>, index: usize) -> [u8; 8] {
+        let clockwise_first = index & 1 == 0;
+        let key = |heading: u8| -> (i32, u8, bool) {
+            let score = Self::heading_score(heading, direction);
+            let (separation, clockwise) = match anchor {
+                Some(anchor) => {
+                    let turn = heading.wrapping_sub(anchor) & 7;
+                    (turn.min(8 - turn), turn <= 4)
                 }
-                (yaw, GAME_ENTITY_HALF_TURN) if yaw == GAME_ENTITY_QUARTER_TURN.wrapping_mul(3) => {
-                    GAME_ENTITY_HALF_TURN + GAME_ENTITY_DIRECTION_STEP
-                }
-                _ => GAME_ENTITY_HALF_TURN + GAME_ENTITY_QUARTER_TURN + GAME_ENTITY_DIRECTION_STEP,
+                None => (0, true),
             };
-            if diagonal != turnaround
-                && self.try_chase_direction(
-                    record,
-                    index,
-                    diagonal,
-                    speed,
-                    &mut tried,
-                    &mut probes,
-                    mover,
-                )
-            {
-                return;
+            (score, separation, clockwise == clockwise_first)
+        };
+        // `a` ranks before `b`: higher score, then smaller separation from
+        // the anchor, then the preferred side.
+        let before = |a: u8, b: u8| -> bool {
+            let (score_a, separation_a, side_a) = key(a);
+            let (score_b, separation_b, side_b) = key(b);
+            if score_a != score_b {
+                return score_a > score_b;
+            }
+            if separation_a != separation_b {
+                return separation_a < separation_b;
+            }
+            side_a && !side_b
+        };
+        let mut order = [0u8, 1, 2, 3, 4, 5, 6, 7];
+        for position in 1..order.len() {
+            let mut slot = position;
+            while slot > 0 && before(order[slot], order[slot - 1]) {
+                order.swap(slot, slot - 1);
+                slot -= 1;
             }
         }
-
-        let mut first_axis = x_yaw;
-        let mut second_axis = z_yaw;
-        if choice & 3 != 0 || dz.saturating_abs() > dx.saturating_abs() {
-            core::mem::swap(&mut first_axis, &mut second_axis);
-        }
-        for yaw in [first_axis, second_axis].into_iter().flatten() {
-            if yaw != turnaround
-                && self.try_chase_direction(
-                    record,
-                    index,
-                    yaw,
-                    speed,
-                    &mut tried,
-                    &mut probes,
-                    mover,
-                )
-            {
-                return;
+        if let Some(anchor) = anchor {
+            let reverse = (anchor + 4) & 7;
+            if let Some(at) = order.iter().position(|&heading| heading == reverse) {
+                order[at..].rotate_left(1);
             }
         }
-
-        if old_yaw != turnaround
-            && self.try_chase_direction(
-                record,
-                index,
-                old_yaw,
-                speed,
-                &mut tried,
-                &mut probes,
-                mover,
-            )
-        {
-            return;
-        }
-
-        if choice & 4 != 0 {
-            let mut direction = 0u16;
-            while direction < 4096 {
-                if direction != turnaround
-                    && self.try_chase_direction(
-                        record,
-                        index,
-                        direction,
-                        speed,
-                        &mut tried,
-                        &mut probes,
-                        mover,
-                    )
-                {
-                    return;
-                }
-                direction += GAME_ENTITY_DIRECTION_STEP;
-            }
-        } else {
-            let mut direction = 4096u16;
-            while direction != 0 {
-                direction -= GAME_ENTITY_DIRECTION_STEP;
-                if direction != turnaround
-                    && self.try_chase_direction(
-                        record,
-                        index,
-                        direction,
-                        speed,
-                        &mut tried,
-                        &mut probes,
-                        mover,
-                    )
-                {
-                    return;
-                }
-            }
-        }
-
-        if self.try_chase_direction(
-            record,
-            index,
-            turnaround,
-            speed,
-            &mut tried,
-            &mut probes,
-            mover,
-        ) {
-            return;
-        }
-        self.move_yaw[index] = old_yaw;
-        self.move_yaw_valid[index] = 1;
-        self.move_tried[index] = if tried == u8::MAX { 0 } else { tried };
+        order
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn try_chase_direction(
+    /// Probe one compass heading with an exact-direction body step and
+    /// commit whatever the mover allows. Any movement counts as success.
+    fn probe_heading(
         &mut self,
         record: &LevelGameEntityRecord,
         index: usize,
-        yaw: u16,
-        speed: i32,
-        tried: &mut u8,
-        probes: &mut u8,
-        mover: &mut impl GameEntityMover,
-    ) -> bool {
-        let bit = Self::direction_bit(yaw);
-        if *tried & bit != 0 || *probes >= GAME_ENTITY_DIRECTION_PROBES_PER_TICK {
-            return false;
-        }
-        *tried |= bit;
-        *probes += 1;
-        if !self.step_direction(record, index, yaw, speed, mover) {
-            return false;
-        }
-        self.move_yaw[index] = yaw & GAME_ENTITY_YAW_MASK;
-        self.move_yaw_valid[index] = 1;
-        self.move_tried[index] = 0;
-        true
-    }
-
-    /// Attempt one quantized direction through the existing collision motor.
-    fn step_direction(
-        &mut self,
-        record: &LevelGameEntityRecord,
-        index: usize,
-        yaw: u16,
+        heading: u8,
         speed: i32,
         mover: &mut impl GameEntityMover,
     ) -> bool {
-        let sin = psx_math::sin_q12(yaw);
-        let cos = psx_math::cos_q12(yaw);
-        let step_x = Self::q12_step_component(sin, speed);
-        let step_z = Self::q12_step_component(cos, speed);
+        let unit = Self::HEADING_UNIT_Q12[usize::from(heading & 7)];
+        let dx = Self::q12_step_component(unit[0], speed);
+        let dz = Self::q12_step_component(unit[1], speed);
         let position = [self.x[index], self.y[index], self.z[index]];
         let committed = mover.step_direction(
             index,
             record.room,
             position,
-            step_x,
-            step_z,
+            dx,
+            dz,
             i32::from(record.radius),
             i32::from(record.height).max(1),
         );
-        let moved = committed[0] != position[0] || committed[2] != position[2];
         self.commit_step(index, position, committed);
-        moved
+        committed[0] != position[0] || committed[2] != position[2]
     }
 
     fn commit_step(&mut self, index: usize, position: [i32; 3], committed: [i32; 3]) {
@@ -2720,9 +2648,9 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
         }
     }
 
-    /// Preserve a non-zero component for one-unit low-detail speeds. Quake's
-    /// fixed-point positions retain that fraction; the runtime's integer room
-    /// coordinates need an explicit one-unit step instead.
+    /// Preserve a non-zero component for one-unit low-detail speeds: the
+    /// runtime's integer room coordinates would otherwise drop a diagonal
+    /// step's sub-unit component and stall the entity.
     fn q12_step_component(direction_q12: i32, speed: i32) -> i32 {
         let product = direction_q12.saturating_mul(speed.max(1));
         let component = product >> 12;
@@ -2731,16 +2659,6 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
         } else {
             component
         }
-    }
-
-    fn nearest_direction(yaw: u16) -> u16 {
-        ((yaw.wrapping_add(GAME_ENTITY_DIRECTION_STEP / 2) & GAME_ENTITY_YAW_MASK)
-            / GAME_ENTITY_DIRECTION_STEP)
-            * GAME_ENTITY_DIRECTION_STEP
-    }
-
-    fn direction_bit(yaw: u16) -> u8 {
-        1u8 << ((yaw & GAME_ENTITY_YAW_MASK) / GAME_ENTITY_DIRECTION_STEP)
     }
 
     /// Face the XZ direction toward `goal` (PSX angle units, the
@@ -4002,7 +3920,7 @@ mod tests {
     }
 
     #[test]
-    fn quake_chase_search_routes_patrol_around_a_finite_wall() {
+    fn heading_search_routes_patrol_around_a_finite_wall() {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&PATROL_ENEMY);
         entities.state[0] = GameEntityState::Patrol as u8;
@@ -4033,7 +3951,7 @@ mod tests {
     }
 
     #[test]
-    fn quake_chase_search_is_deterministic_across_identical_runs() {
+    fn heading_search_is_deterministic_across_identical_runs() {
         let mut first = GameEntities::<8>::EMPTY;
         let mut second = GameEntities::<8>::EMPTY;
         first.spawn_from_records(&PATROL_ENEMY);
@@ -4057,7 +3975,7 @@ mod tests {
     }
 
     #[test]
-    fn quake_chase_search_probes_each_direction_at_most_once() {
+    fn heading_search_probes_each_direction_at_most_once() {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&PATROL_ENEMY);
         entities.state[0] = GameEntityState::Patrol as u8;
@@ -4074,6 +3992,80 @@ mod tests {
 
         assert_eq!(mover.calls, 8, "every eight-way direction is probed once");
         assert_eq!(entities.position(0), [1000, 0, 1000]);
+    }
+
+    /// Records every probed step delta and refuses all of them.
+    #[derive(Default)]
+    struct RecordingBlockedMover {
+        deltas: [[i32; 2]; 16],
+        len: usize,
+    }
+    impl GameEntityMover for RecordingBlockedMover {
+        fn step(
+            &mut self,
+            _entity: usize,
+            _room: RoomIndex,
+            position: [i32; 3],
+            dx: i32,
+            dz: i32,
+            _radius: i32,
+            _height: i32,
+        ) -> [i32; 3] {
+            if self.len < self.deltas.len() {
+                self.deltas[self.len] = [dx.signum(), dz.signum()];
+            }
+            self.len += 1;
+            position
+        }
+    }
+
+    #[test]
+    fn heading_ranking_closes_on_the_goal_first() {
+        type Entities = GameEntities<8>;
+        // Goal due east (+x), no anchor: east, then the two diagonals that
+        // still close on it, then north/south, then away.
+        let order = Entities::ranked_headings([1000, 0], None, 0);
+        assert_eq!(order[0], 2);
+        assert_eq!(
+            {
+                let mut pair = [order[1], order[2]];
+                pair.sort_unstable();
+                pair
+            },
+            [1, 3]
+        );
+        assert_eq!(order[7], 6);
+        // An anchor moves its own reverse to the very end.
+        let anchored = Entities::ranked_headings([1000, 0], Some(0), 0);
+        assert_eq!(anchored[7], 4);
+        // Ties prefer the heading nearer the anchor.
+        let toward_north = Entities::ranked_headings([1000, 0], Some(0), 0);
+        assert_eq!(toward_north[1], 1);
+    }
+
+    #[test]
+    fn blocked_search_tries_the_reverse_heading_last() {
+        let mut entities = GameEntities::<8>::EMPTY;
+        entities.spawn_from_records(&PATROL_ENEMY);
+        entities.state[0] = GameEntityState::Patrol as u8;
+        // A working heading due north that the mover now refuses.
+        entities.move_yaw[0] = 0;
+        entities.move_yaw_valid[0] = 5;
+        let mut mover = RecordingBlockedMover::default();
+        for _ in 0..4 {
+            entities.tick(&PATROL_ENEMY, far_input(&ACTIVE), &mut mover);
+        }
+        assert_eq!(mover.len, 8);
+        assert_eq!(mover.deltas[0], [0, 1], "the working heading goes first");
+        assert_eq!(mover.deltas[1], [1, 0], "then the most goal-closing one");
+        assert_eq!(mover.deltas[7], [0, -1], "the reverse goes last");
+        let mut probed = [[0i32; 2]; 8];
+        probed.copy_from_slice(&mover.deltas[..8]);
+        probed.sort_unstable();
+        assert!(
+            probed.windows(2).all(|pair| pair[0] != pair[1]),
+            "each heading is probed once"
+        );
     }
 
     #[test]

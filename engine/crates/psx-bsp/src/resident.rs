@@ -1,7 +1,6 @@
 //! Validated resident storage for cooked XBSP maps.
 //!
-//! Lifted from quake-psx `game/src/asset.rs` commit 83a6349, same GPL-2
-//! authorship. Storage lookup, texture upload and episode selection remain
+//! Storage lookup, texture upload and episode selection remain
 //! caller-owned; this module reads map data only through [`ReadAt`].
 
 use alloc::vec::Vec;

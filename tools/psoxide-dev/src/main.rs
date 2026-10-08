@@ -82,55 +82,147 @@ fn lint_policy_guard() -> Result<(), String> {
     let root = repo_root();
     // The three real workspace roots. editor/ and emu/ merged into the
     // root workspace (abeb9fef) -- their crates inherit root's lints.
-    let manifests = [
-        root.join("Cargo.toml"),
-        root.join("engine/Cargo.toml"),
-        root.join("sdk/Cargo.toml"),
-    ];
+    // Root and engine are the editor's own and must match exactly. sdk/ is
+    // imported from PSoXide, which may be stricter: it must carry every
+    // editor lint at the same level or a stricter one, and may add its own.
+    let reference_path = root.join("Cargo.toml");
+    let engine_path = root.join("engine/Cargo.toml");
+    let sdk_path = root.join("sdk/Cargo.toml");
     let sections = ["workspace.lints.rust", "workspace.lints.clippy"];
     let mut violations = Vec::new();
-    let reference_path = &manifests[0];
-    let mut reference = HashMap::new();
     for section in sections {
-        let body = extract_toml_section(reference_path, section)?;
-        if body.is_none() {
+        let reference = extract_toml_section(&reference_path, section)?;
+        let Some(reference) = reference else {
             violations.push(format!(
                 "{} missing [{section}]",
-                relative_to_root(reference_path)
+                relative_to_root(&reference_path)
             ));
+            continue;
+        };
+        match extract_toml_section(&engine_path, section)? {
+            None => violations.push(format!(
+                "{} missing [{section}]",
+                relative_to_root(&engine_path)
+            )),
+            Some(engine) if engine != reference => violations.push(format!(
+                "{} [{section}] differs from {}",
+                relative_to_root(&engine_path),
+                relative_to_root(&reference_path)
+            )),
+            Some(_) => {}
         }
-        reference.insert(section, body);
-    }
-    for manifest in manifests.iter().skip(1) {
-        for section in sections {
-            let expected = reference.get(section).and_then(|value| value.as_ref());
-            let actual = extract_toml_section(manifest, section)?;
-            match (expected, actual.as_ref()) {
-                (_, None) => violations.push(format!(
-                    "{} missing [{section}]",
-                    relative_to_root(manifest)
-                )),
-                (Some(expected), Some(actual)) if expected != actual => violations.push(format!(
-                    "{} [{section}] differs from {}",
-                    relative_to_root(manifest),
-                    relative_to_root(reference_path)
-                )),
-                _ => {}
+        match extract_toml_section(&sdk_path, section)? {
+            None => violations.push(format!(
+                "{} missing [{section}]",
+                relative_to_root(&sdk_path)
+            )),
+            Some(sdk) => {
+                for problem in lints_at_least_as_strict(&reference, &sdk) {
+                    violations.push(format!(
+                        "{} [{section}] {problem} (editor: {})",
+                        relative_to_root(&sdk_path),
+                        relative_to_root(&reference_path)
+                    ));
+                }
             }
         }
     }
     if !violations.is_empty() {
         eprintln!("lint policy guard failed.");
         eprintln!(
-            "Keep [workspace.lints.rust] and [workspace.lints.clippy] identical in every Cargo workspace manifest.\n"
+            "Keep [workspace.lints.rust] and [workspace.lints.clippy] identical in the root and engine manifests; sdk/ may only add lints or make them stricter.\n"
         );
         for violation in violations {
             eprintln!("{violation}");
         }
         return Err("lint policy guard failed".to_string());
     }
-    println!("lint policy guard: ok ({} manifests)", manifests.len());
+    println!("lint policy guard: ok (3 manifests)");
     Ok(())
+}
+
+/// One `[workspace.lints.*]` entry: its level and its priority.
+#[derive(Debug, PartialEq, Eq)]
+struct LintSetting {
+    level: u8,
+    priority: i64,
+}
+
+/// Rank a lint level from `allow` (0) to `forbid` (3).
+fn lint_level_rank(level: &str) -> Option<u8> {
+    match level {
+        "allow" | "expect" => Some(0),
+        "warn" => Some(1),
+        "deny" => Some(2),
+        "forbid" => Some(3),
+        _ => None,
+    }
+}
+
+/// Parse `name = "level"` or `name = { level = "level", priority = n }`.
+fn parse_lint_line(line: &str) -> Option<(String, LintSetting)> {
+    let (name, value) = line.split_once('=')?;
+    let name = name.trim().to_string();
+    let value = value.trim();
+    let quoted = |text: &str| -> Option<String> {
+        let text = text.trim();
+        let inner = text.strip_prefix('"')?;
+        Some(inner[..inner.find('"')?].to_string())
+    };
+    let (level, priority) = if let Some(table) = value.strip_prefix('{') {
+        let table = table.trim_end().strip_suffix('}')?;
+        let mut level = None;
+        let mut priority = 0;
+        for field in table.split(',') {
+            let (key, field_value) = field.split_once('=')?;
+            match key.trim() {
+                "level" => level = Some(quoted(field_value)?),
+                "priority" => priority = field_value.trim().parse().ok()?,
+                _ => return None,
+            }
+        }
+        (level?, priority)
+    } else {
+        (quoted(value)?, 0)
+    };
+    Some((
+        name,
+        LintSetting {
+            level: lint_level_rank(&level)?,
+            priority,
+        },
+    ))
+}
+
+/// Every lint in `editor` must appear in `sdk` at the same level or a
+/// stricter one, with the same priority. Returns one message per lint that
+/// does not, naming it.
+fn lints_at_least_as_strict(editor: &[String], sdk: &[String]) -> Vec<String> {
+    let sdk: HashMap<String, LintSetting> = sdk
+        .iter()
+        .filter_map(|line| parse_lint_line(line))
+        .collect();
+    let mut problems = Vec::new();
+    for line in editor {
+        if line.trim_start().starts_with('#') {
+            continue;
+        }
+        let Some((name, wanted)) = parse_lint_line(line) else {
+            problems.push(format!("cannot read the editor entry `{line}`"));
+            continue;
+        };
+        match sdk.get(&name) {
+            None => problems.push(format!("is missing `{name}`")),
+            Some(found) if found.level < wanted.level => {
+                problems.push(format!("sets `{name}` weaker than the editor"))
+            }
+            Some(found) if found.priority != wanted.priority => {
+                problems.push(format!("sets `{name}` with a different priority"))
+            }
+            Some(_) => {}
+        }
+    }
+    problems
 }
 
 fn extract_toml_section(path: &Path, section: &str) -> Result<Option<Vec<String>>, String> {
@@ -2516,5 +2608,67 @@ fn also_ships() -> u64 { 2 }
         // Offsets must survive, or reported line numbers drift.
         assert_eq!(out.len(), src.len());
         assert_eq!(out.lines().count(), src.lines().count());
+    }
+
+    fn lines(text: &str) -> Vec<String> {
+        text.lines().map(str::to_string).collect()
+    }
+
+    const EDITOR_LINTS: &str = "\
+missing_docs = \"warn\"
+rust_2018_idioms = { level = \"warn\", priority = -1 }
+dbg_macro = \"deny\"";
+
+    #[test]
+    fn sdk_lints_equal_to_the_editor_pass() {
+        let editor = lines(EDITOR_LINTS);
+        assert!(lints_at_least_as_strict(&editor, &editor).is_empty());
+    }
+
+    #[test]
+    fn sdk_lints_that_add_or_tighten_pass() {
+        let editor = lines(EDITOR_LINTS);
+        let sdk = lines(
+            "\
+missing_docs = \"deny\"
+rust_2018_idioms = { level = \"warn\", priority = -1 }
+dbg_macro = \"forbid\"
+undocumented_unsafe_blocks = \"warn\"",
+        );
+        assert!(lints_at_least_as_strict(&editor, &sdk).is_empty());
+    }
+
+    #[test]
+    fn sdk_lints_that_drop_or_weaken_one_fail_and_name_it() {
+        let editor = lines(EDITOR_LINTS);
+        let missing = lines(
+            "\
+missing_docs = \"warn\"
+rust_2018_idioms = { level = \"warn\", priority = -1 }",
+        );
+        assert_eq!(
+            lints_at_least_as_strict(&editor, &missing),
+            ["is missing `dbg_macro`"]
+        );
+        let weaker = lines(
+            "\
+missing_docs = \"allow\"
+rust_2018_idioms = { level = \"warn\", priority = -1 }
+dbg_macro = \"deny\"",
+        );
+        assert_eq!(
+            lints_at_least_as_strict(&editor, &weaker),
+            ["sets `missing_docs` weaker than the editor"]
+        );
+        let reprioritised = lines(
+            "\
+missing_docs = \"warn\"
+rust_2018_idioms = { level = \"warn\", priority = 0 }
+dbg_macro = \"deny\"",
+        );
+        assert_eq!(
+            lints_at_least_as_strict(&editor, &reprioritised),
+            ["sets `rust_2018_idioms` with a different priority"]
+        );
     }
 }

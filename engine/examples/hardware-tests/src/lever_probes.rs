@@ -36,7 +36,7 @@ use core::hint::black_box;
 use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
 
 use psx_io::gpu as gpu_io;
-use psx_io::{cdrom, dma, irq, timers};
+use psx_io::{dma, irq, timers};
 use psx_pack::cd::{SectorReader, SECTOR_WORDS};
 
 use crate::{gpu_read_word_at, seed_gte_state, spin, IrqGuard, TestResult};
@@ -69,7 +69,7 @@ impl Vector {
             write_volatile(EXCEPTION_VECTOR, J_OPCODE | ((target >> 2) & 0x03FF_FFFF));
             write_volatile(EXCEPTION_VECTOR.add(1), 0);
         }
-        psx_rt::cache::flush_i_cache();
+        psx_rt::cache::flush_instruction_cache();
         drop(guard);
         Self { saved }
     }
@@ -80,7 +80,7 @@ impl Vector {
             write_volatile(EXCEPTION_VECTOR, self.saved[0]);
             write_volatile(EXCEPTION_VECTOR.add(1), self.saved[1]);
         }
-        psx_rt::cache::flush_i_cache();
+        psx_rt::cache::flush_instruction_cache();
         drop(guard);
     }
 }
@@ -106,9 +106,9 @@ fn set_status_register(sr: u32) {
 /// psx-rt applies a queued display word at the next VBlank. The probes' own
 /// handlers do not, so apply any word still waiting before taking the vector.
 fn apply_pending_display_word() {
-    let word = psx_rt::interrupts::take_pending_gp1();
+    let word = psx_rt::interrupts::take_queued_display_control();
     if word != 0 {
-        gpu_io::write_gp1(word);
+        gpu_io::write_display_control(word);
     }
 }
 
@@ -256,8 +256,10 @@ fn start_timer_irqs(period: u16) -> (u32, u32) {
         timers::Timer::Timer2,
         TIMER_RESET_AT_TARGET | TIMER_IRQ_ON_TARGET | TIMER_IRQ_REPEAT,
     );
-    irq::ack(1 << irq::source::TIMER2);
-    irq::set_mask(old_mask | (1 << irq::source::TIMER2) | (1 << irq::source::VBLANK));
+    irq::acknowledge(1 << psx_hw::irq::source::TIMER2);
+    irq::set_mask(
+        old_mask | (1 << psx_hw::irq::source::TIMER2) | (1 << psx_hw::irq::source::VBLANK),
+    );
     set_status_register(old_sr | SR_IE | SR_IM2);
     (old_mask, old_sr)
 }
@@ -266,7 +268,7 @@ fn stop_timer_irqs((old_mask, old_sr): (u32, u32)) {
     let guard = IrqGuard::mask();
     timers::set_mode(timers::Timer::Timer2, 0);
     irq::set_mask(old_mask);
-    irq::ack(1 << irq::source::TIMER2);
+    irq::acknowledge(1 << psx_hw::irq::source::TIMER2);
     drop(guard);
     set_status_register(old_sr);
 }
@@ -685,8 +687,9 @@ fn pq_slot_full() -> bool {
 }
 
 fn present_queue_run() -> PresentCounts {
+    probe_gpu!(gpu);
     apply_pending_display_word();
-    let old_direction = (gpu_io::gpustat().bits() >> 29) & 3;
+    let old_direction = (gpu_io::status().bits() >> 29) & 3;
     let old_timer1 = timers::mode(timers::Timer::Timer1);
     timers::set_mode(timers::Timer::Timer1, TIMER1_LINES_SINCE_VBLANK);
     unsafe {
@@ -703,12 +706,12 @@ fn present_queue_run() -> PresentCounts {
         }
     }
     // Nothing of ours may be walking when the handler takes over channel 2.
-    if !dma::wait_done(dma::Channel::Gpu, dma::DEFAULT_DMA_SPINS) {
+    if !dma::wait_done(dma::Channel::Gpu, dma::DEFAULT_SPINS) {
         dma::abort(dma::Channel::Gpu);
     }
-    gpu_io::write_gp1(0x0200_0000);
+    gpu_io::write_display_control(0x0200_0000);
     let old_mask = irq::mask();
-    irq::set_mask(old_mask | (1 << irq::source::VBLANK));
+    irq::set_mask(old_mask | (1 << psx_hw::irq::source::VBLANK));
     let old_sr = status_register();
     let vector = Vector::install(__hwtest_present_handler);
     set_status_register(old_sr | SR_IE | SR_IM2);
@@ -785,14 +788,14 @@ fn present_queue_run() -> PresentCounts {
     vector.restore();
     drop(guard);
     set_status_register(old_sr);
-    let last_done = dma::wait_done(dma::Channel::Gpu, dma::DEFAULT_DMA_SPINS);
+    let last_done = dma::wait_done(dma::Channel::Gpu, dma::DEFAULT_SPINS);
     if !last_done {
         dma::abort(dma::Channel::Gpu);
-        gpu_io::write_gp1(0x0100_0000);
+        gpu_io::write_display_control(0x0100_0000);
         counts.timeouts += 1;
     }
     let mut polls = 0u32;
-    while gpu_io::gpustat().bits() & (1 << 24) == 0 && polls < 1_000_000 {
+    while gpu_io::status().bits() & (1 << 24) == 0 && polls < 1_000_000 {
         polls += 1;
     }
     if polls == 1_000_000 {
@@ -802,9 +805,9 @@ fn present_queue_run() -> PresentCounts {
     counts.skipped = unsafe { read_volatile(addr_of!(HWTEST_PQ_SKIPPED)) };
     counts.edges = unsafe { read_volatile(addr_of!(HWTEST_PQ_EDGES)) };
 
-    gpu_io::write_gp1(0x0200_0000);
-    irq::ack(1 << irq::source::GPU);
-    gpu_io::write_gp1(0x0400_0000 | old_direction);
+    gpu_io::write_display_control(0x0200_0000);
+    irq::acknowledge(1 << psx_hw::irq::source::GPU);
+    gpu_io::write_display_control(0x0400_0000 | old_direction);
     irq::set_mask(old_mask);
     timers::set_mode(timers::Timer::Timer1, old_timer1 & 0x03FF);
 
@@ -819,8 +822,8 @@ fn present_queue_run() -> PresentCounts {
     } else {
         counts.marker_bad = 2;
     }
-    psx_gpu::set_draw_area(0, 0, 1023, 511);
-    psx_gpu::set_draw_offset(0, 0);
+    gpu.set_draw_area((0, 0), (1023, 511));
+    gpu.set_draw_offset((0, 0));
     counts
 }
 
@@ -1061,7 +1064,8 @@ fn round_seed(round: u32) -> u32 {
 /// Words the background GPU list walks: empty packets, 10 clocks a node.
 const LIST_NODES: usize = 2048;
 static mut LEVER_LIST: [u32; LIST_NODES] = [0; LIST_NODES];
-const LIST_KICK: u32 = dma::CHCR_TO_DEVICE | dma::CHCR_SYNC_LINKED | dma::CHCR_START;
+const LIST_KICK: u32 =
+    psx_hw::dma::CHCR_TO_DEVICE | psx_hw::dma::CHCR_SYNC_LINKED | psx_hw::dma::CHCR_START;
 
 fn build_list() -> u32 {
     let list = addr_of_mut!(LEVER_LIST) as *mut u32;
@@ -1077,9 +1081,14 @@ fn build_list() -> u32 {
 }
 
 fn kick_list(head: u32) {
-    dma::set_madr(dma::Channel::Gpu, head);
-    dma::set_bcr_manual(dma::Channel::Gpu, 0);
-    dma::set_chcr(dma::Channel::Gpu, LIST_KICK);
+    // SAFETY: silicon probe: the transfer touches only memory this probe
+    // owns, which stays live and untouched until the probe waits the
+    // channel idle or aborts it.
+    unsafe {
+        dma::raw::set_address(dma::Channel::Gpu, head);
+        dma::raw::set_size(dma::Channel::Gpu, dma::size_words(0));
+        dma::raw::set_control(dma::Channel::Gpu, LIST_KICK);
+    }
 }
 
 const SPUCNT: u32 = 0x1F80_1DAA;
@@ -1093,9 +1102,9 @@ const SPU_SCRATCH_ADDR: u32 = 0x6_0000;
 const SPU_BLOCKS: u16 = 64;
 
 fn spu_mode(mode: u16) -> bool {
-    unsafe { psx_io::write16(SPUCNT, mode) };
+    unsafe { psx_io::write_u16(SPUCNT, mode) };
     let mut polls = 0;
-    while unsafe { psx_io::read16(SPUSTAT) } & 0x3F != mode & 0x3F {
+    while unsafe { psx_io::read_u16(SPUSTAT) } & 0x3F != mode & 0x3F {
         polls += 1;
         if polls > 100_000 {
             return false;
@@ -1123,14 +1132,14 @@ static mut CD_SINK: [u32; SECTOR_WORDS] = [0; SECTOR_WORDS];
 impl Activity {
     fn start() -> Self {
         let head = build_list();
-        let old_direction = (gpu_io::gpustat().bits() >> 29) & 3;
-        if !dma::wait_done(dma::Channel::Gpu, dma::DEFAULT_DMA_SPINS) {
+        let old_direction = (gpu_io::status().bits() >> 29) & 3;
+        if !dma::wait_done(dma::Channel::Gpu, dma::DEFAULT_SPINS) {
             dma::abort(dma::Channel::Gpu);
         }
-        gpu_io::write_gp1(0x0400_0002);
+        gpu_io::write_display_control(0x0400_0002);
         dma::enable_channel(dma::Channel::Gpu);
         dma::enable_channel(dma::Channel::Spu);
-        let spucnt = unsafe { psx_io::read16(SPUCNT) } & !0x0030;
+        let spucnt = unsafe { psx_io::read_u16(SPUCNT) } & !0x0030;
         let spu_enabled = spucnt & 0x8000 != 0;
         // The SDK's reader, as games use it: PIO pops of a ReadN stream.
         // Channel 3 is deliberately not used: on the project console chopping
@@ -1161,24 +1170,31 @@ impl Activity {
         if self.spu_enabled && !dma::is_busy(dma::Channel::Spu) {
             let ready = spu_mode(self.spucnt) && {
                 unsafe {
-                    psx_io::write16(SPU_TRANSFER_CTRL, 0x0004);
-                    psx_io::write16(SPU_TRANSFER_ADDR, (SPU_SCRATCH_ADDR / 8) as u16);
+                    psx_io::write_u16(SPU_TRANSFER_CTRL, 0x0004);
+                    psx_io::write_u16(SPU_TRANSFER_ADDR, (SPU_SCRATCH_ADDR / 8) as u16);
                 }
                 spu_mode(self.spucnt | 0x0020)
             };
             if ready {
-                dma::set_madr(dma::Channel::Spu, self.head);
-                dma::set_bcr_block(dma::Channel::Spu, 16, SPU_BLOCKS);
-                dma::set_chcr(
-                    dma::Channel::Spu,
-                    dma::CHCR_TO_DEVICE | dma::CHCR_SYNC_BLOCK | dma::CHCR_START,
-                );
+                // SAFETY: silicon probe: the transfer touches only memory this probe
+                // owns, which stays live and untouched until the probe waits the
+                // channel idle or aborts it.
+                unsafe {
+                    dma::raw::set_address(dma::Channel::Spu, self.head);
+                    dma::raw::set_size(dma::Channel::Spu, dma::size_blocks(16, SPU_BLOCKS));
+                    dma::raw::set_control(
+                        dma::Channel::Spu,
+                        psx_hw::dma::CHCR_TO_DEVICE
+                            | psx_hw::dma::CHCR_SYNC_BLOCK
+                            | psx_hw::dma::CHCR_START,
+                    );
+                }
                 self.spu_kicks += 1;
             } else {
                 self.spu_enabled = false;
             }
         }
-        if self.cd_streaming && matches!(cdrom::poll_data_sector(), Ok(true)) {
+        if self.cd_streaming && matches!(psx_io::cd::poll_data_sector(), Ok(true)) {
             let sink = unsafe { &mut *addr_of_mut!(CD_SINK) };
             if unsafe { self.reader.read_sector(sink) } {
                 self.cd_sectors += 1;
@@ -1191,16 +1207,16 @@ impl Activity {
     }
 
     fn stop(mut self) -> Self {
-        if !dma::wait_done(dma::Channel::Gpu, dma::DEFAULT_DMA_SPINS) {
+        if !dma::wait_done(dma::Channel::Gpu, dma::DEFAULT_SPINS) {
             dma::abort(dma::Channel::Gpu);
         }
-        if !dma::wait_done(dma::Channel::Spu, dma::DEFAULT_DMA_SPINS) {
+        if !dma::wait_done(dma::Channel::Spu, dma::DEFAULT_SPINS) {
             dma::abort(dma::Channel::Spu);
         }
         if self.spu_kicks != 0 {
             let _ = spu_mode(self.spucnt);
         }
-        gpu_io::write_gp1(0x0400_0000 | self.old_direction);
+        gpu_io::write_display_control(0x0400_0000 | self.old_direction);
         unsafe { self.reader.stop() };
         self.cd_streaming = false;
         self
@@ -1371,8 +1387,8 @@ fn timed_level2(on_scratchpad: bool, during_dma: bool) -> u16 {
     let mut old_direction = 0;
     if during_dma {
         let head = build_list();
-        old_direction = (gpu_io::gpustat().bits() >> 29) & 3;
-        gpu_io::write_gp1(0x0400_0002);
+        old_direction = (gpu_io::status().bits() >> 29) & 3;
+        gpu_io::write_display_control(0x0400_0002);
         dma::enable_channel(dma::Channel::Gpu);
         kick_list(head);
     }
@@ -1383,10 +1399,10 @@ fn timed_level2(on_scratchpad: bool, during_dma: bool) -> u16 {
     };
     run_entry(timed_level2_entry, &mut call, on_scratchpad);
     if during_dma {
-        if !dma::wait_done(dma::Channel::Gpu, dma::DEFAULT_DMA_SPINS) {
+        if !dma::wait_done(dma::Channel::Gpu, dma::DEFAULT_SPINS) {
             dma::abort(dma::Channel::Gpu);
         }
-        gpu_io::write_gp1(0x0400_0000 | old_direction);
+        gpu_io::write_display_control(0x0400_0000 | old_direction);
     }
     restore_scratchpad();
     call.elapsed as u16

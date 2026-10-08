@@ -33,10 +33,9 @@
 
 use psx_font::FontAtlas;
 use psx_gpu::{
-    draw_line_mono, draw_quad_flat, draw_quad_textured_gouraud_material,
-    draw_quad_textured_material, draw_tri_flat, draw_tri_flat_blended, draw_tri_gouraud,
-    draw_tri_gouraud_blended,
     material::{BlendMode, TextureMaterial, TextureWindow},
+    prim::{LineMono, QuadFlat, QuadTexturedGouraud, QuadTexturedMaterial, TriFlat, TriGouraud},
+    Gpu,
 };
 use psx_level::{
     ui_node_flags, ui_shape, AssetId, LevelOptionDef, LevelUiFocusEffect, LevelUiFocusStyle,
@@ -780,6 +779,7 @@ fn linked_focus_bounds(
 /// `visible` lets higher-level runtime code apply game/input state to
 /// authored nodes without baking those states into this renderer.
 pub fn draw_scene(
+    gpu: &mut Gpu,
     nodes: &[LevelUiNodeRecord],
     first: usize,
     count: usize,
@@ -836,7 +836,7 @@ pub fn draw_scene(
             | LevelUiNodeKind::Music
             | LevelUiNodeKind::Timer => {}
             LevelUiNodeKind::Rect => {
-                draw_shape_node(node, resolved, paints, None, None);
+                draw_shape_node(gpu, node, resolved, paints, None, None);
             }
             LevelUiNodeKind::Label => {
                 if let Some(font) = node_font(fonts, node.font) {
@@ -848,6 +848,7 @@ pub fn draw_scene(
                             if let Some(control) = node_resolved(nodes, control_index) {
                                 let control = control.translated(focus_offset.0, focus_offset.1);
                                 draw_linked_focus_background(
+                                    gpu,
                                     linked_focus_bounds(
                                         nodes,
                                         first,
@@ -878,15 +879,16 @@ pub fn draw_scene(
                 }
             }
             LevelUiNodeKind::Image => {
-                draw_image(node, resolved, frame, textures);
+                draw_image(gpu, node, resolved, frame, textures);
             }
             LevelUiNodeKind::Bar => {
                 let max_q12 = value(node.max).max(1);
                 let value_q12 = value(node.value).clamp(0, max_q12);
                 if node.texture_asset.0 != u16::MAX && node.option >= 2 {
-                    draw_sprite_bar(node, resolved, value_q12, max_q12, textures);
+                    draw_sprite_bar(gpu, node, resolved, value_q12, max_q12, textures);
                 } else {
                     draw_status_bar(
+                        gpu,
                         resolved,
                         value_q12,
                         max_q12,
@@ -897,6 +899,7 @@ pub fn draw_scene(
             }
             LevelUiNodeKind::Button => {
                 draw_button(
+                    gpu,
                     node_font(fonts, node.font),
                     node,
                     resolved,
@@ -910,6 +913,7 @@ pub fn draw_scene(
                 );
                 if is_focused {
                     draw_focus_ring(
+                        gpu,
                         linked_focus_bounds(nodes, first, index, focus_resolved, focus_offset),
                         focus_style,
                         frame,
@@ -923,6 +927,7 @@ pub fn draw_scene(
                 // option yields 0/1 (empty track).
                 let (fill_num, fill_den) = slider_fill(node.option, options, option_value);
                 draw_slider(
+                    gpu,
                     resolved,
                     fill_num,
                     fill_den,
@@ -932,6 +937,7 @@ pub fn draw_scene(
                 );
                 if is_focused {
                     draw_focus_ring(
+                        gpu,
                         linked_focus_bounds(nodes, first, index, focus_resolved, focus_offset),
                         focus_style,
                         frame,
@@ -951,6 +957,7 @@ pub fn draw_scene(
 /// corners expand along their real perimeter instead of falling back to an
 /// axis-aligned rectangle. Everything is integer-only and allocation-free.
 pub fn draw_activation_echo(
+    gpu: &mut Gpu,
     nodes: &[LevelUiNodeRecord],
     node_index: usize,
     style: &LevelUiFocusStyle,
@@ -984,6 +991,7 @@ pub fn draw_activation_echo(
         let flash = scale_color_q8(style.color_a, strength);
         let polygon = shape_polygon(resolved, config.corners, config.cut, 1);
         draw_shape_polygon(
+            gpu,
             &polygon,
             UiPaint::Solid(flash),
             resolved.width,
@@ -998,7 +1006,7 @@ pub fn draw_activation_echo(
         let strength = 255u8.saturating_sub((frame as u8).saturating_mul(44));
         let color = scale_color_q8(style.color_a, strength);
         let polygon = shape_polygon(resolved, config.corners, config.cut, 0);
-        draw_shape_outline(&polygon, color);
+        draw_shape_outline(gpu, &polygon, color);
     }
 
     for ring in 0..2u16 {
@@ -1008,7 +1016,7 @@ pub fn draw_activation_echo(
         };
         let color = scale_color_q8(style.color_a, strength);
         let polygon = shape_polygon(resolved, config.corners, config.cut, -i32::from(expansion));
-        draw_shape_outline(&polygon, color);
+        draw_shape_outline(gpu, &polygon, color);
     }
 }
 
@@ -1033,6 +1041,7 @@ fn activation_echo_layer(frame: u16, delay: u16, ring: u16) -> Option<(u8, u8)> 
 /// scene's [`LevelUiFocusStyle`] selects the animation; everything
 /// is integer-only flat quads, no allocation.
 fn draw_focus_ring(
+    gpu: &mut Gpu,
     node: UiResolvedNode,
     style: &LevelUiFocusStyle,
     frame: u16,
@@ -1047,24 +1056,24 @@ fn draw_focus_ring(
     let margin = i16::from(style.margin);
     match style.effect {
         LevelUiFocusEffect::Solid => {
-            draw_ring_edges(node, width, height, thickness, margin, style.color_a);
+            draw_ring_edges(gpu, node, width, height, thickness, margin, style.color_a);
         }
         LevelUiFocusEffect::Pulse => {
             let wave = focus_wave(frame, style.period);
             let color = lerp_color(style.color_a, style.color_b, wave);
-            draw_ring_edges(node, width, height, thickness, margin, color);
+            draw_ring_edges(gpu, node, width, height, thickness, margin, color);
         }
         LevelUiFocusEffect::Corners => {
-            draw_focus_corners(node, width, height, thickness, margin, style, frame);
+            draw_focus_corners(gpu, node, width, height, thickness, margin, style, frame);
         }
         LevelUiFocusEffect::Tracer => {
             if let Some(config) = shape {
                 if config.corners != 0 && config.cut != 0 {
-                    draw_focus_shape_tracer(node, thickness, margin, config, style, frame);
+                    draw_focus_shape_tracer(gpu, node, thickness, margin, config, style, frame);
                     return;
                 }
             }
-            draw_focus_tracer(node, width, height, thickness, margin, style, frame);
+            draw_focus_tracer(gpu, node, width, height, thickness, margin, style, frame);
         }
     }
 }
@@ -1073,6 +1082,7 @@ fn draw_focus_ring(
 /// the control and whose band extends `thickness` pixels further out.
 /// `margin = 1, thickness = 1` reproduces the classic 1px ring.
 fn draw_ring_edges(
+    gpu: &mut Gpu,
     node: UiResolvedNode,
     width: i16,
     height: i16,
@@ -1082,20 +1092,30 @@ fn draw_ring_edges(
 ) {
     let e = margin + thickness - 1;
     let outer_w = width + 2 * e;
-    draw_quad_flat(node.subrect(-e, -e, outer_w, thickness), r, g, b);
-    draw_quad_flat(
+    gpu.draw(&QuadFlat::new(
+        node.subrect(-e, -e, outer_w, thickness),
+        r,
+        g,
+        b,
+    ));
+    gpu.draw(&QuadFlat::new(
         node.subrect(-e, height + margin - 1, outer_w, thickness),
         r,
         g,
         b,
-    );
-    draw_quad_flat(node.subrect(-e, 0, thickness, height), r, g, b);
-    draw_quad_flat(
+    ));
+    gpu.draw(&QuadFlat::new(
+        node.subrect(-e, 0, thickness, height),
+        r,
+        g,
+        b,
+    ));
+    gpu.draw(&QuadFlat::new(
         node.subrect(width + margin - 1, 0, thickness, height),
         r,
         g,
         b,
-    );
+    ));
 }
 
 /// Triangle wave (0..=255..=0) over one `period`-frame cycle. A zero
@@ -1118,6 +1138,7 @@ fn lerp_color(a: (u8, u8, u8), b: (u8, u8, u8), t: u8) -> (u8, u8, u8) {
 /// Targeting-reticle brackets: an L at each corner that breathes up to
 /// 2px outward while its colour pulses `color_b -> color_a`.
 fn draw_focus_corners(
+    gpu: &mut Gpu,
     node: UiResolvedNode,
     width: i16,
     height: i16,
@@ -1137,27 +1158,47 @@ fn draw_focus_corners(
         .min(height / 2 + e);
     let t = thickness;
     // Top-left.
-    draw_quad_flat(node.subrect(-e, -e, len, t), r, g, b);
-    draw_quad_flat(node.subrect(-e, -e, t, len), r, g, b);
+    gpu.draw(&QuadFlat::new(node.subrect(-e, -e, len, t), r, g, b));
+    gpu.draw(&QuadFlat::new(node.subrect(-e, -e, t, len), r, g, b));
     // Top-right.
-    draw_quad_flat(node.subrect(width + e - len, -e, len, t), r, g, b);
-    draw_quad_flat(node.subrect(width + d - 1, -e, t, len), r, g, b);
+    gpu.draw(&QuadFlat::new(
+        node.subrect(width + e - len, -e, len, t),
+        r,
+        g,
+        b,
+    ));
+    gpu.draw(&QuadFlat::new(
+        node.subrect(width + d - 1, -e, t, len),
+        r,
+        g,
+        b,
+    ));
     // Bottom-left.
-    draw_quad_flat(node.subrect(-e, height + d - 1, len, t), r, g, b);
-    draw_quad_flat(node.subrect(-e, height + e - len, t, len), r, g, b);
+    gpu.draw(&QuadFlat::new(
+        node.subrect(-e, height + d - 1, len, t),
+        r,
+        g,
+        b,
+    ));
+    gpu.draw(&QuadFlat::new(
+        node.subrect(-e, height + e - len, t, len),
+        r,
+        g,
+        b,
+    ));
     // Bottom-right.
-    draw_quad_flat(
+    gpu.draw(&QuadFlat::new(
         node.subrect(width + e - len, height + d - 1, len, t),
         r,
         g,
         b,
-    );
-    draw_quad_flat(
+    ));
+    gpu.draw(&QuadFlat::new(
         node.subrect(width + d - 1, height + e - len, t, len),
         r,
         g,
         b,
-    );
+    ));
 }
 
 /// Number of comet segments behind the tracer head; each one steps
@@ -1167,6 +1208,7 @@ const TRACER_SEGMENTS: i32 = 6;
 /// A faint base ring plus a bright head orbiting the perimeter with a
 /// gradient tail. One lap per `period` frames, clockwise.
 fn draw_focus_tracer(
+    gpu: &mut Gpu,
     node: UiResolvedNode,
     width: i16,
     height: i16,
@@ -1175,7 +1217,7 @@ fn draw_focus_tracer(
     style: &LevelUiFocusStyle,
     frame: u16,
 ) {
-    draw_ring_edges(node, width, height, thickness, margin, style.color_b);
+    draw_ring_edges(gpu, node, width, height, thickness, margin, style.color_b);
     if style.period == 0 {
         return;
     }
@@ -1194,7 +1236,8 @@ fn draw_focus_tracer(
         let color = lerp_color(style.color_a, style.color_b, brightness);
         let start = (head - (k + 1) * seg).rem_euclid(perimeter);
         draw_perimeter_run(
-            node, width, height, thickness, margin, perimeter, outer_w, outer_h, start, seg, color,
+            gpu, node, width, height, thickness, margin, perimeter, outer_w, outer_h, start, seg,
+            color,
         );
     }
 }
@@ -1204,6 +1247,7 @@ fn draw_focus_tracer(
 /// vertices so its head and tail traverse the 45-degree edges instead of
 /// orbiting an invisible rectangle.
 fn draw_focus_shape_tracer(
+    gpu: &mut Gpu,
     node: UiResolvedNode,
     thickness: i16,
     margin: i16,
@@ -1214,7 +1258,7 @@ fn draw_focus_shape_tracer(
     for layer in 0..thickness {
         let expansion = margin.saturating_add(layer);
         let polygon = shape_polygon(node, config.corners, config.cut, -i32::from(expansion));
-        draw_shape_outline(&polygon, style.color_b);
+        draw_shape_outline(gpu, &polygon, style.color_b);
         if style.period == 0 {
             continue;
         }
@@ -1228,12 +1272,12 @@ fn draw_focus_shape_tracer(
             let brightness = (255 - tail * 255 / TRACER_SEGMENTS) as u8;
             let color = lerp_color(style.color_a, style.color_b, brightness);
             let start = (head - (tail + 1) * segment_len).rem_euclid(perimeter);
-            draw_shape_perimeter_run(&polygon, perimeter, start, segment_len, color);
+            draw_shape_perimeter_run(gpu, &polygon, perimeter, start, segment_len, color);
         }
     }
 }
 
-fn draw_shape_outline(polygon: &UiShapePolygon, (r, g, b): (u8, u8, u8)) {
+fn draw_shape_outline(gpu: &mut Gpu, polygon: &UiShapePolygon, (r, g, b): (u8, u8, u8)) {
     if polygon.len < 2 {
         return;
     }
@@ -1241,7 +1285,7 @@ fn draw_shape_outline(polygon: &UiShapePolygon, (r, g, b): (u8, u8, u8)) {
         let next = (index + 1) % polygon.len;
         let from = polygon.vertices[index].screen;
         let to = polygon.vertices[next].screen;
-        draw_line_mono(from.0, from.1, to.0, to.1, r, g, b);
+        gpu.draw(&LineMono::new(from.0, from.1, to.0, to.1, r, g, b));
     }
 }
 
@@ -1282,6 +1326,7 @@ fn shape_edge_point(
 }
 
 fn draw_shape_perimeter_run(
+    gpu: &mut Gpu,
     polygon: &UiShapePolygon,
     perimeter: i32,
     mut start: i32,
@@ -1316,7 +1361,7 @@ fn draw_shape_perimeter_run(
         let to_vertex = polygon.vertices[(edge_index + 1) % polygon.len];
         let from = shape_edge_point(from_vertex, to_vertex, edge_start, edge_length);
         let to = shape_edge_point(from_vertex, to_vertex, edge_start + run, edge_length);
-        draw_line_mono(from.0, from.1, to.0, to.1, r, g, b);
+        gpu.draw(&LineMono::new(from.0, from.1, to.0, to.1, r, g, b));
         start += run;
         length -= run;
     }
@@ -1327,6 +1372,7 @@ fn draw_shape_perimeter_run(
 /// down, bottom right-to-left, left edge up), splitting across edges
 /// and the wrap point as needed.
 fn draw_perimeter_run(
+    gpu: &mut Gpu,
     node: UiResolvedNode,
     width: i16,
     height: i16,
@@ -1361,16 +1407,21 @@ fn draw_perimeter_run(
         let e16 = e as i16;
         match edge {
             // Top, left-to-right.
-            0 => draw_quad_flat(node.subrect(-e16 + off16, -e16, run16, thickness), r, g, b),
+            0 => gpu.draw(&QuadFlat::new(
+                node.subrect(-e16 + off16, -e16, run16, thickness),
+                r,
+                g,
+                b,
+            )),
             // Right, top-to-bottom.
-            1 => draw_quad_flat(
+            1 => gpu.draw(&QuadFlat::new(
                 node.subrect(width + d - 1, -e16 + off16, thickness, run16),
                 r,
                 g,
                 b,
-            ),
+            )),
             // Bottom, right-to-left.
-            2 => draw_quad_flat(
+            2 => gpu.draw(&QuadFlat::new(
                 node.subrect(
                     width + e16 - off16 - run16,
                     height + d - 1,
@@ -1380,14 +1431,14 @@ fn draw_perimeter_run(
                 r,
                 g,
                 b,
-            ),
+            )),
             // Left, bottom-to-top.
-            _ => draw_quad_flat(
+            _ => gpu.draw(&QuadFlat::new(
                 node.subrect(-e16, height + e16 - off16 - run16, thickness, run16),
                 r,
                 g,
                 b,
-            ),
+            )),
         }
         start += run;
         len -= run;
@@ -2697,6 +2748,7 @@ fn aligned_text_x(
 }
 
 fn draw_image(
+    gpu: &mut Gpu,
     node: &LevelUiNodeRecord,
     resolved: UiResolvedNode,
     frame: u16,
@@ -2718,16 +2770,21 @@ fn draw_image(
         ) {
             let colors =
                 image_effect_vertex_colors(rgb(node.color), node.image_effect, frame, verts);
-            draw_tri_gouraud(
+            gpu.draw(&TriGouraud::new(
                 [verts[0], verts[1], verts[2]],
                 [colors[0], colors[1], colors[2]],
-            );
-            draw_tri_gouraud(
+            ));
+            gpu.draw(&TriGouraud::new(
                 [verts[1], verts[2], verts[3]],
                 [colors[1], colors[2], colors[3]],
-            );
+            ));
         } else {
-            draw_quad_flat(verts, node.color[0], node.color[1], node.color[2]);
+            gpu.draw(&QuadFlat::new(
+                verts,
+                node.color[0],
+                node.color[1],
+                node.color[2],
+            ));
         }
         return;
     }
@@ -2740,14 +2797,14 @@ fn draw_image(
     let tex_h = texture_size_u8(slot.texture_height).saturating_sub(1);
     let uvs = [(0, 0), (tex_w, 0), (0, tex_h), (tex_w, tex_h)];
     if node.image_effect == LevelUiImageEffect::None {
-        draw_quad_textured_material(verts, uvs, material);
+        gpu.draw(&QuadTexturedMaterial::with_material(verts, uvs, material));
     } else {
-        draw_quad_textured_gouraud_material(
+        gpu.draw(&QuadTexturedGouraud::with_material(
             verts,
             uvs,
             image_effect_vertex_colors(rgb(node.color), node.image_effect, frame, verts),
             material,
-        );
+        ));
     }
 }
 
@@ -2924,6 +2981,7 @@ fn add_light(color: (u8, u8, u8), lift: u8) -> (u8, u8, u8) {
 }
 
 fn draw_status_bar(
+    gpu: &mut Gpu,
     resolved: UiResolvedNode,
     value: i32,
     max_value: i32,
@@ -2932,25 +2990,31 @@ fn draw_status_bar(
 ) {
     let width = resolved.width as i16;
     let height = resolved.height as i16;
-    draw_quad_flat(resolved.subrect(-1, -1, width + 2, height + 2), 12, 14, 18);
-    draw_quad_paint(resolved.verts, background);
+    gpu.draw(&QuadFlat::new(
+        resolved.subrect(-1, -1, width + 2, height + 2),
+        12,
+        14,
+        18,
+    ));
+    draw_quad_paint(gpu, resolved.verts, background);
 
     let fill_width = status_fill_width(width, value, max_value);
     if fill_width > 0 {
-        draw_quad_paint(resolved.subrect(0, 0, fill_width, height), fill);
+        draw_quad_paint(gpu, resolved.subrect(0, 0, fill_width, height), fill);
         if height > 3 && fill.is_solid() {
             let color = brighten(fill.from());
-            draw_quad_flat(
+            gpu.draw(&QuadFlat::new(
                 resolved.subrect(0, 0, fill_width, 1),
                 color.0,
                 color.1,
                 color.2,
-            );
+            ));
         }
     }
 }
 
 fn draw_sprite_bar(
+    gpu: &mut Gpu,
     node: &LevelUiNodeRecord,
     resolved: UiResolvedNode,
     value: i32,
@@ -2968,11 +3032,11 @@ fn draw_sprite_bar(
     let material = TextureMaterial::opaque(slot.clut_word, slot.tpage_word, rgb(node.color))
         .with_texture_window(slot.texture_window);
     let u1 = texture_size_u8(slot.texture_width).saturating_sub(1);
-    draw_quad_textured_material(
+    gpu.draw(&QuadTexturedMaterial::with_material(
         resolved.verts,
         [(0, v0), (u1, v0), (0, v1), (u1, v1)],
         material,
-    );
+    ));
 }
 
 fn bar_frame_index(value: i32, max_value: i32, frame_count: u8) -> u8 {
@@ -3030,6 +3094,7 @@ fn status_fill_width(width: i16, value: i32, max_value: i32) -> i16 {
 /// horizontal alignment + word-wrap path as [`LevelUiNodeKind::Label`]
 /// and vertically centred. The focus ring is drawn by [`draw_scene`].
 fn draw_button(
+    gpu: &mut Gpu,
     font: Option<&FontAtlas>,
     node: &LevelUiNodeRecord,
     resolved: UiResolvedNode,
@@ -3060,7 +3125,7 @@ fn draw_button(
         resolved
     };
     let config = if draw_chrome {
-        draw_shape_node(node, chrome_resolved, paints, Some(fill), sweep)
+        draw_shape_node(gpu, node, chrome_resolved, paints, Some(fill), sweep)
     } else {
         shape_config(node)
     };
@@ -3072,12 +3137,12 @@ fn draw_button(
         && fill.is_solid()
     {
         let color = brighten(fill.from());
-        draw_quad_flat(
+        gpu.draw(&QuadFlat::new(
             chrome_resolved.subrect(0, 0, chrome_resolved.width as i16, 1),
             color.0,
             color.1,
             color.2,
-        );
+        ));
     }
     let Some(font) = font else {
         return;
@@ -3134,6 +3199,7 @@ const SLIDER_FOCUS_SHAPE: UiShapeConfig = UiShapeConfig {
 /// same animated red gradient as the main-menu buttons while keeping the
 /// slider itself thin and readable.
 fn draw_linked_focus_background(
+    gpu: &mut Gpu,
     resolved: UiResolvedNode,
     frame: u16,
     focus_style: &LevelUiFocusStyle,
@@ -3155,6 +3221,7 @@ fn draw_linked_focus_background(
         focus_style.period,
     );
     draw_shape_polygon(
+        gpu,
         &polygon,
         fill,
         resolved.width,
@@ -3162,6 +3229,7 @@ fn draw_linked_focus_background(
         shape.semi_transparent_fill,
     );
     draw_focus_sweep(
+        gpu,
         resolved,
         shape,
         UiShapeSweep {
@@ -3225,6 +3293,7 @@ fn shape_config(node: &LevelUiNodeRecord) -> UiShapeConfig {
 /// Legacy nodes stay on the original quad path; styled nodes use a convex
 /// 4..=8 vertex polygon and remain allocation-free on PS1.
 fn draw_shape_node(
+    gpu: &mut Gpu,
     node: &LevelUiNodeRecord,
     resolved: UiResolvedNode,
     paints: &[LevelUiPaintRecord],
@@ -3235,7 +3304,7 @@ fn draw_shape_node(
     let fill = fill_override.unwrap_or_else(|| shape_paint(node.color, node.color_paint, paints));
     if config.corners == 0 && config.border == 0 && !config.semi_transparent_fill {
         if !config.transparent {
-            draw_quad_paint(resolved.verts, fill);
+            draw_quad_paint(gpu, resolved.verts, fill);
         }
         return config;
     }
@@ -3243,6 +3312,7 @@ fn draw_shape_node(
     let outer = shape_polygon(resolved, config.corners, config.cut, 0);
     if !config.transparent {
         draw_shape_polygon(
+            gpu,
             &outer,
             fill,
             resolved.width,
@@ -3250,11 +3320,12 @@ fn draw_shape_node(
             config.semi_transparent_fill,
         );
         if let Some(sweep) = sweep {
-            draw_focus_sweep(resolved, config, sweep);
+            draw_focus_sweep(gpu, resolved, config, sweep);
         }
     }
     if config.border != 0 {
         draw_shape_border(
+            gpu,
             resolved,
             outer,
             config,
@@ -3286,7 +3357,12 @@ fn focus_sweep_rect(
     Some((x as i16, y as i16, band_width as i16, band_height as i16))
 }
 
-fn draw_focus_sweep(resolved: UiResolvedNode, config: UiShapeConfig, sweep: UiShapeSweep) {
+fn draw_focus_sweep(
+    gpu: &mut Gpu,
+    resolved: UiResolvedNode,
+    config: UiShapeConfig,
+    sweep: UiShapeSweep,
+) {
     let Some((x, y, width, height)) = focus_sweep_rect(
         resolved.width,
         resolved.height,
@@ -3299,24 +3375,38 @@ fn draw_focus_sweep(resolved: UiResolvedNode, config: UiShapeConfig, sweep: UiSh
     let left_width = (width / 2).max(1);
     let right_width = width.saturating_sub(left_width).max(1);
     let peak = scale_color_q8(sweep.color, 112);
-    draw_focus_sweep_half(resolved.subrect(x, y, left_width, height), (0, 0, 0), peak);
     draw_focus_sweep_half(
+        gpu,
+        resolved.subrect(x, y, left_width, height),
+        (0, 0, 0),
+        peak,
+    );
+    draw_focus_sweep_half(
+        gpu,
         resolved.subrect(x.saturating_add(left_width), y, right_width, height),
         peak,
         (0, 0, 0),
     );
 }
 
-fn draw_focus_sweep_half(vertices: [(i16, i16); 4], left: (u8, u8, u8), right: (u8, u8, u8)) {
-    draw_tri_gouraud_blended(
-        [vertices[0], vertices[1], vertices[2]],
-        [left, right, left],
-        BlendMode::Add,
+fn draw_focus_sweep_half(
+    gpu: &mut Gpu,
+    vertices: [(i16, i16); 4],
+    left: (u8, u8, u8),
+    right: (u8, u8, u8),
+) {
+    gpu.set_draw_mode(TextureMaterial::blended(0, 0, (0, 0, 0), BlendMode::Add));
+    gpu.draw(
+        &TriGouraud::new([vertices[0], vertices[1], vertices[2]], [left, right, left])
+            .translucent(),
     );
-    draw_tri_gouraud_blended(
-        [vertices[1], vertices[2], vertices[3]],
-        [right, left, right],
-        BlendMode::Add,
+    gpu.set_draw_mode(TextureMaterial::blended(0, 0, (0, 0, 0), BlendMode::Add));
+    gpu.draw(
+        &TriGouraud::new(
+            [vertices[1], vertices[2], vertices[3]],
+            [right, left, right],
+        )
+        .translucent(),
     );
 }
 
@@ -3453,6 +3543,7 @@ impl UiShapeColors {
 /// project does not have to spare for a path that costs 551 cycles a frame.
 #[inline(never)]
 fn draw_shape_polygon(
+    gpu: &mut Gpu,
     polygon: &UiShapePolygon,
     paint: UiPaint,
     width: u16,
@@ -3466,6 +3557,7 @@ fn draw_shape_polygon(
     let colors = &paint_colors.colors;
     for index in 1..polygon.len - 1 {
         draw_shape_triangle(
+            gpu,
             [
                 polygon.vertices[0].screen,
                 polygon.vertices[index].screen,
@@ -3479,6 +3571,7 @@ fn draw_shape_polygon(
 }
 
 fn draw_shape_border(
+    gpu: &mut Gpu,
     resolved: UiResolvedNode,
     outer: UiShapePolygon,
     config: UiShapeConfig,
@@ -3491,7 +3584,7 @@ fn draw_shape_border(
         || resolved.width <= border as u16 * 2
         || resolved.height <= border as u16 * 2
     {
-        draw_shape_polygon(&outer, paint, resolved.width, resolved.height, false);
+        draw_shape_polygon(gpu, &outer, paint, resolved.width, resolved.height, false);
         return;
     }
     let outer_paint = UiShapeColors::new(&outer, paint, resolved.width, resolved.height);
@@ -3500,6 +3593,7 @@ fn draw_shape_border(
     for index in 0..outer.len {
         let next = (index + 1) % outer.len;
         draw_shape_triangle(
+            gpu,
             [
                 outer.vertices[index].screen,
                 outer.vertices[next].screen,
@@ -3510,6 +3604,7 @@ fn draw_shape_border(
             false,
         );
         draw_shape_triangle(
+            gpu,
             [
                 outer.vertices[next].screen,
                 inner.vertices[index].screen,
@@ -3528,6 +3623,7 @@ fn draw_shape_border(
 /// a flat triangle from `colors[0]`, a gradient draws a Gouraud triangle
 /// from all three.
 fn draw_shape_triangle(
+    gpu: &mut Gpu,
     screen: [(i16, i16); 3],
     colors: [(u8, u8, u8); 3],
     gouraud: bool,
@@ -3535,16 +3631,28 @@ fn draw_shape_triangle(
 ) {
     if gouraud {
         if blended {
-            draw_tri_gouraud_blended(screen, colors, BlendMode::Average);
+            gpu.set_draw_mode(TextureMaterial::blended(
+                0,
+                0,
+                colors[0],
+                BlendMode::Average,
+            ));
+            gpu.draw(&TriGouraud::new(screen, colors).translucent());
         } else {
-            draw_tri_gouraud(screen, colors);
+            gpu.draw(&TriGouraud::new(screen, colors));
         }
     } else {
         let (r, g, b) = colors[0];
         if blended {
-            draw_tri_flat_blended(screen, r, g, b, BlendMode::Average);
+            gpu.set_draw_mode(TextureMaterial::blended(
+                0,
+                0,
+                (r, g, b),
+                BlendMode::Average,
+            ));
+            gpu.draw(&TriFlat::new(screen, r, g, b).translucent());
         } else {
-            draw_tri_flat(screen, r, g, b);
+            gpu.draw(&TriFlat::new(screen, r, g, b));
         }
     }
 }
@@ -3573,6 +3681,7 @@ fn shape_paint_color(paint: UiPaint, local: (i32, i32), width: u16, height: u16)
 /// an out-of-range value cannot run the knob off the track. The bound
 /// option's value feeds this through [`slider_fill`] in [`draw_scene`].
 fn draw_slider(
+    gpu: &mut Gpu,
     resolved: UiResolvedNode,
     fill_num: i32,
     fill_den: i32,
@@ -3585,14 +3694,19 @@ fn draw_slider(
     if width <= 0 || height <= 0 {
         return;
     }
-    draw_quad_flat(resolved.subrect(-1, -1, width + 2, height + 2), 12, 14, 18);
-    draw_quad_paint(resolved.verts, track);
+    gpu.draw(&QuadFlat::new(
+        resolved.subrect(-1, -1, width + 2, height + 2),
+        12,
+        14,
+        18,
+    ));
+    draw_quad_paint(gpu, resolved.verts, track);
 
     let den = fill_den.max(1);
     let num = fill_num.clamp(0, den);
     let fill_width = ((width as i32).saturating_mul(num) / den) as i16;
     if fill_width > 0 {
-        draw_quad_paint(resolved.subrect(0, 0, fill_width, height), fill);
+        draw_quad_paint(gpu, resolved.subrect(0, 0, fill_width, height), fill);
     }
 
     // Knob: a fixed-width rect centred on the fill edge, clamped so it
@@ -3601,26 +3715,26 @@ fn draw_slider(
     let edge = fill_width as i32;
     let knob_x = (edge - knob_w as i32 / 2).clamp(0, width as i32 - knob_w as i32);
     let knob_x = knob_x.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-    draw_quad_paint(resolved.subrect(knob_x, -1, knob_w, height + 2), knob);
+    draw_quad_paint(gpu, resolved.subrect(knob_x, -1, knob_w, height + 2), knob);
 }
 
-fn draw_quad_paint(verts: [(i16, i16); 4], paint: UiPaint) {
+fn draw_quad_paint(gpu: &mut Gpu, verts: [(i16, i16); 4], paint: UiPaint) {
     match paint {
-        UiPaint::Solid(color) => draw_quad_flat(verts, color.0, color.1, color.2),
+        UiPaint::Solid(color) => gpu.draw(&QuadFlat::new(verts, color.0, color.1, color.2)),
         UiPaint::Gradient {
             from,
             to,
             direction,
         } => {
             let colors = gradient_vertex_colors(from, to, direction);
-            draw_tri_gouraud(
+            gpu.draw(&TriGouraud::new(
                 [verts[0], verts[1], verts[2]],
                 [colors[0], colors[1], colors[2]],
-            );
-            draw_tri_gouraud(
+            ));
+            gpu.draw(&TriGouraud::new(
                 [verts[1], verts[2], verts[3]],
                 [colors[1], colors[2], colors[3]],
-            );
+            ));
         }
     }
 }
@@ -3725,6 +3839,7 @@ fn screen_resolved_node(x: i16, y: i16, width: u16, height: u16) -> UiResolvedNo
 /// Long text is word-wrapped and hard-capped to the variant's line budget;
 /// page splitting remains the caller's responsibility.
 pub fn draw_message_panel(
+    gpu: &mut Gpu,
     font: &FontAtlas,
     page_text: &str,
     variant: MessagePanelVariant,
@@ -3736,10 +3851,11 @@ pub fn draw_message_panel(
 ) {
     let layout = message_panel_layout(variant);
     let resolved = screen_resolved_node(layout.x, layout.y, layout.width, layout.height);
-    draw_archive_panel_chrome(resolved, frame);
+    draw_archive_panel_chrome(gpu, resolved, frame);
     let visible_characters = typewriter_frame / MESSAGE_PANEL_TYPE_TICKS_PER_CHAR;
     let visible_text = text_prefix_chars(page_text, usize::from(visible_characters));
     draw_message_panel_body(
+        gpu,
         font,
         page_text,
         visible_text,
@@ -3759,6 +3875,7 @@ pub fn draw_message_panel(
 /// throughout the transition. Copy is deliberately absent while the frame is
 /// moving; the message types on only after the full two-line panel settles.
 pub fn draw_expanding_message_panel(
+    gpu: &mut Gpu,
     font: &FontAtlas,
     action: &str,
     page_text: &str,
@@ -3773,7 +3890,7 @@ pub fn draw_expanding_message_panel(
     let target = message_panel_layout(MessagePanelVariant::PointOfInterest);
     let layout = message_panel_transition_layout(prompt, target, transition_frame);
     let resolved = screen_resolved_node(layout.x, layout.y, layout.width, layout.height);
-    draw_archive_panel_chrome(resolved, frame);
+    draw_archive_panel_chrome(gpu, resolved, frame);
 
     // Activation clears the compact prompt immediately. Let the panel itself
     // be the only thing on screen until its geometry has completely settled;
@@ -3784,6 +3901,7 @@ pub fn draw_expanding_message_panel(
     let visible_characters = typewriter_frame / MESSAGE_PANEL_TYPE_TICKS_PER_CHAR;
     let visible_text = text_prefix_chars(page_text, usize::from(visible_characters));
     draw_message_panel_body(
+        gpu,
         font,
         page_text,
         visible_text,
@@ -3800,6 +3918,7 @@ pub fn draw_expanding_message_panel(
 /// owned by the caller until the final presented frame, but copy is hidden
 /// while the panel contracts, just as it is during expansion.
 pub fn draw_dismissing_message_panel(
+    gpu: &mut Gpu,
     font: &FontAtlas,
     variant: MessagePanelVariant,
     acquired_item: bool,
@@ -3826,6 +3945,7 @@ pub fn draw_dismissing_message_panel(
     };
     let layout = message_panel_transition_layout(collapsed, target, remaining_frames);
     draw_archive_panel_chrome(
+        gpu,
         screen_resolved_node(layout.x, layout.y, layout.width, layout.height),
         frame,
     );
@@ -3835,6 +3955,7 @@ pub fn draw_dismissing_message_panel(
 /// panel. The geometry shrinks in place with no copy during motion; the exact
 /// acquired item then types on and remains explicitly dismissible with Cross.
 pub fn draw_item_acquired_panel(
+    gpu: &mut Gpu,
     font: &FontAtlas,
     item_name: &str,
     frame: u16,
@@ -3847,7 +3968,7 @@ pub fn draw_item_acquired_panel(
     let source = message_panel_layout(MessagePanelVariant::PointOfInterest);
     let layout = message_panel_transition_layout(source, ITEM_ACQUIRED_LAYOUT, transition_frame);
     let resolved = screen_resolved_node(layout.x, layout.y, layout.width, layout.height);
-    draw_archive_panel_chrome(resolved, frame);
+    draw_archive_panel_chrome(gpu, resolved, frame);
     if transition_frame < MESSAGE_PANEL_EXPAND_FRAMES {
         return;
     }
@@ -3886,7 +4007,7 @@ pub fn draw_item_acquired_panel(
         UiPaint::Solid((202, 154, 136)),
     );
     if visible_name.len() == item_name.len() {
-        draw_message_dismiss_hint(font, layout, cross_prompt, dismiss_action);
+        draw_message_dismiss_hint(gpu, font, layout, cross_prompt, dismiss_action);
     }
 }
 
@@ -3903,6 +4024,7 @@ fn text_prefix_chars(text: &str, character_count: usize) -> &str {
 }
 
 fn draw_message_panel_body(
+    gpu: &mut Gpu,
     font: &FontAtlas,
     page_text: &str,
     visible_text: &str,
@@ -3962,15 +4084,16 @@ fn draw_message_panel_body(
 
     if show_page_pips {
         let resolved = screen_resolved_node(layout.x, layout.y, layout.width, layout.height);
-        draw_message_page_pips(resolved, MessagePageMeta::new(page.index, page.count));
+        draw_message_page_pips(gpu, resolved, MessagePageMeta::new(page.index, page.count));
     }
-    draw_message_dismiss_hint(font, layout, cross_prompt, dismiss_action);
+    draw_message_dismiss_hint(gpu, font, layout, cross_prompt, dismiss_action);
 }
 
 /// Keep the close control visible for the entire readable phase. Cross may
 /// first complete the typewriter or advance a paged message, but it is always
 /// the control that ultimately dismisses the open panel.
 fn draw_message_dismiss_hint(
+    gpu: &mut Gpu,
     font: &FontAtlas,
     layout: MessagePanelLayout,
     cross_prompt: Option<UiTextureSlot>,
@@ -3991,7 +4114,7 @@ fn draw_message_dismiss_hint(
     let text_x = layout
         .x
         .saturating_add((layout.width as i16 - INSET_X - control_width).max(INSET_X));
-    let action_x = draw_controller_prompt_prefix(font, cross_prompt, text_x, text_y);
+    let action_x = draw_controller_prompt_prefix(gpu, font, cross_prompt, text_x, text_y);
     draw_scaled_text_paint(
         font,
         action_x,
@@ -4008,6 +4131,7 @@ fn draw_message_dismiss_hint(
 /// `action` is the verb only (normally `"READ"`); the control prefix is kept
 /// in the shared visual so every POI consistently presents the same control.
 pub fn draw_interaction_prompt_panel(
+    gpu: &mut Gpu,
     font: &FontAtlas,
     action: &str,
     frame: u16,
@@ -4015,8 +4139,8 @@ pub fn draw_interaction_prompt_panel(
 ) {
     let layout = interaction_prompt_layout(font, action, cross_prompt.is_some());
     let resolved = screen_resolved_node(layout.x, layout.y, layout.width, layout.height);
-    draw_archive_panel_chrome(resolved, frame);
-    draw_interaction_prompt_text(font, action, layout, cross_prompt);
+    draw_archive_panel_chrome(gpu, resolved, frame);
+    draw_interaction_prompt_text(gpu, font, action, layout, cross_prompt);
 }
 
 fn interaction_prompt_layout(
@@ -4045,6 +4169,7 @@ fn interaction_prompt_layout(
 }
 
 fn draw_interaction_prompt_text(
+    gpu: &mut Gpu,
     font: &FontAtlas,
     action: &str,
     layout: MessagePanelLayout,
@@ -4061,7 +4186,7 @@ fn draw_interaction_prompt_text(
             .max(0)
             / 2) as i16,
     );
-    let action_x = draw_controller_prompt_prefix(font, cross_prompt, text_x, text_y);
+    let action_x = draw_controller_prompt_prefix(gpu, font, cross_prompt, text_x, text_y);
     draw_scaled_text_paint(
         font,
         action_x,
@@ -4085,6 +4210,7 @@ fn controller_prompt_prefix_width(has_prompt: bool) -> i16 {
 }
 
 fn draw_controller_prompt_prefix(
+    gpu: &mut Gpu,
     font: &FontAtlas,
     prompt: Option<UiTextureSlot>,
     x: i16,
@@ -4107,11 +4233,11 @@ fn draw_controller_prompt_prefix(
         .with_texture_window(slot.texture_window);
     let u1 = texture_size_u8(slot.texture_width).saturating_sub(1);
     let v1 = texture_size_u8(slot.texture_height).saturating_sub(1);
-    draw_quad_textured_material(
+    gpu.draw(&QuadTexturedMaterial::with_material(
         resolved.verts,
         [(0, 0), (u1, 0), (0, v1), (u1, v1)],
         material,
-    );
+    ));
     x.saturating_add(CONTROLLER_PROMPT_ICON_SIZE as i16 + CONTROLLER_PROMPT_GAP)
 }
 
@@ -4165,7 +4291,7 @@ fn lerp_u16_q8(from: u16, to: u16, progress: u16) -> u16 {
         .clamp(0, i32::from(u16::MAX)) as u16
 }
 
-fn draw_archive_panel_chrome(resolved: UiResolvedNode, frame: u16) {
+fn draw_archive_panel_chrome(gpu: &mut Gpu, resolved: UiResolvedNode, frame: u16) {
     let config = UiShapeConfig {
         corners: ui_shape::TOP_LEFT | ui_shape::BOTTOM_RIGHT,
         cut: 5,
@@ -4178,6 +4304,7 @@ fn draw_archive_panel_chrome(resolved: UiResolvedNode, frame: u16) {
     // keeps pale copy readable over bright characters/geometry; the red pass
     // above it retains the established translucent Archive language.
     draw_shape_polygon(
+        gpu,
         &outer,
         UiPaint::Solid((2, 1, 2)),
         resolved.width,
@@ -4185,6 +4312,7 @@ fn draw_archive_panel_chrome(resolved: UiResolvedNode, frame: u16) {
         true,
     );
     draw_shape_polygon(
+        gpu,
         &outer,
         UiPaint::Gradient {
             from: (70, 18, 18),
@@ -4196,6 +4324,7 @@ fn draw_archive_panel_chrome(resolved: UiResolvedNode, frame: u16) {
         true,
     );
     draw_focus_sweep(
+        gpu,
         resolved,
         config,
         UiShapeSweep {
@@ -4205,6 +4334,7 @@ fn draw_archive_panel_chrome(resolved: UiResolvedNode, frame: u16) {
         },
     );
     draw_shape_border(
+        gpu,
         resolved,
         outer,
         config,
@@ -4243,7 +4373,7 @@ fn wrapped_line_count(
     lines.max(1)
 }
 
-fn draw_message_page_pips(resolved: UiResolvedNode, page: MessagePageMeta) {
+fn draw_message_page_pips(gpu: &mut Gpu, resolved: UiResolvedNode, page: MessagePageMeta) {
     if page.count <= 1 {
         return;
     }
@@ -4259,12 +4389,12 @@ fn draw_message_page_pips(resolved: UiResolvedNode, page: MessagePageMeta) {
         } else {
             (64, 26, 24)
         };
-        draw_quad_flat(
+        gpu.draw(&QuadFlat::new(
             resolved.subrect(start_x + i16::from(index) * 3, y, 2, 1),
             color.0,
             color.1,
             color.2,
-        );
+        ));
         index += 1;
     }
 }

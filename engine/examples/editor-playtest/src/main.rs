@@ -105,11 +105,14 @@ use psx_game_runtime::{
     save::{SaveBlock, SavedPlayerPosition},
 };
 use psx_gpu::{
-    draw_line_mono, draw_tri_flat_blended,
+    display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode},
     material::{BlendMode, TextureMaterial},
     ot::OrderingTable,
-    prim::{QuadTexturedGouraud, TriTextured, TriTexturedGouraud},
-    VideoMode,
+    prim::{
+        LineMono, QuadFlat, QuadTexturedGouraud, QuadTexturedMaterial, Sprite, TriFlat,
+        TriTextured, TriTexturedGouraud,
+    },
+    Gpu,
 };
 use psx_level::portal_visibility::{
     debug_portal_clip, PortalClipDebug, PortalClipDebugDecision, PortalClipDebugPlane,
@@ -124,7 +127,7 @@ use psx_level::{
     LevelUiValueBinding, LevelWaterCellRecord, ModelClipIndex, ParticleEmitterRecord, RoomIndex,
     RuntimeDebugMask,
 };
-use psx_vram::{TexDepth, Tpage};
+use psx_vram::{TextureDepth, TexturePage};
 
 mod active_room_cache;
 mod active_room_streaming;
@@ -654,6 +657,15 @@ struct Playtest {
     queued_head: *const u32,
     queued_overlay: *mut u32,
     queued_overlay_words: usize,
+    /// The present queue is held off: last frame's packets ahead of the
+    /// world pass would not fit beside a queued frame, so the paired-arena
+    /// fence would wait for its kick early in the frame. Zero (the
+    /// `init_zeroed` state) offers the queue.
+    present_queue_held_off: bool,
+    /// Frames in the current stay: in the queue, or held off and fitting.
+    present_queue_frames: u16,
+    /// Doublings of the re-entry wait after short stays in the queue.
+    present_queue_backoff: u8,
     /// Sim ticks since the last POI presentation step.
     poi_presentation_subtick: u8,
     /// Unique reward currently replacing the just-closed POI message panel.
@@ -721,6 +733,9 @@ struct Playtest {
     analog_deadzone: i16,
     /// User-facing 1..=6 presentation brightness level.
     brightness_level: u8,
+    /// Display-window picture offset (pixels right, scanlines down) selected by
+    /// the front-end Settings scene; zero is the standard centred picture.
+    screen_offset: (i16, i16),
     /// Host-visible render breadcrumbs emitted for a few frames after
     /// crossing into another room.
     post_cross_debug_frames: u8,

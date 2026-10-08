@@ -242,7 +242,7 @@ impl SpuProbe {
             // SYNC: three 10-frame bursts, for finding t=0 in the audio.
             0 => match self.frame {
                 0 | 20 | 40 => key_voice(VOICE, UNITY_PITCH, SPU_TABLE_ADDR),
-                10 | 30 | 50 => Voice::key_off(Voice::new(VOICE).mask()),
+                10 | 30 | 50 => Voice::release(Voice::new(VOICE).mask()),
                 _ => {}
             },
             // REKEY at PICO-8's note rate.
@@ -310,7 +310,7 @@ impl SpuProbe {
             19 => match self.frame {
                 0 => key_voice(VOICE, UNITY_PITCH, SPU_TERM_PARKED_ADDR),
                 20 => Voice::new(VOICE).set_volume(Volume::SILENCE, Volume::SILENCE),
-                40 => Voice::key_on(Voice::new(VOICE).mask()),
+                40 => Voice::start(Voice::new(VOICE).mask()),
                 _ => {}
             },
             // RETRIG: key a voice that is still sounding, which is what the
@@ -322,7 +322,7 @@ impl SpuProbe {
             // accumulates state across an interrupted sample.
             20 => {
                 if self.frame.is_multiple_of(12) && self.frame < tone_frames {
-                    Voice::key_on(Voice::new(VOICE).mask());
+                    Voice::start(Voice::new(VOICE).mask());
                 }
                 if self.frame == 0 {
                     key_voice(VOICE, UNITY_PITCH, SPU_TERM_PARKED_ADDR);
@@ -359,7 +359,7 @@ impl SpuProbe {
         // question they ask is whether the voice reached its own terminator,
         // and the sticky flag is the only direct evidence of that.
         if (15..19).contains(&segment) && self.frame + 2 == tone_frames {
-            self.words[at + 1] = Voice::voices_ended();
+            self.words[at + 1] = Voice::ended_voices();
         }
         if self.frame + 2 == tone_frames {
             // ENDXBIT keys voice 1, so read the voice the segment actually
@@ -367,18 +367,18 @@ impl SpuProbe {
             let observed = if segment == 17 { 1 } else { VOICE };
             let (pitch, env) = read_voice(observed);
             self.words[at + 2] = ((pitch as u32) << 16) | env as u32;
-            let base = psx_io::spu::SPU_BASE + observed as u32 * 16;
+            let base = psx_hw::spu::BASE + observed as u32 * 16;
             // +6 is the START address. The first cut read +4 here, which is
             // the PITCH register, so the payload's "start" column was the
             // pitch repeated -- harmless but misleading in a capture.
-            let start = unsafe { psx_io::read16(base + 6) };
+            let start = unsafe { psx_io::read_u16(base + 6) };
             // The loop truth: where silicon jumps at an END block, in
             // 8-byte units. It should equal the table's own start.
-            let repeat = unsafe { psx_io::read16(base + 14) };
+            let repeat = unsafe { psx_io::read_u16(base + 14) };
             self.words[at + 3] = ((repeat as u32) << 16) | start as u32;
         }
         if self.frame == tone_frames {
-            Voice::key_off(all_voices_mask());
+            Voice::release(all_voices_mask());
         }
 
         self.frame = self.frame.saturating_add(1);
@@ -393,7 +393,7 @@ impl SpuProbe {
             self.step += 1;
             self.begin_step();
         } else {
-            Voice::key_off(all_voices_mask());
+            Voice::release(all_voices_mask());
             Voice::set_noise_mask(0);
             self.complete = true;
             self.encode_qr();
@@ -429,7 +429,7 @@ impl SpuProbe {
             pio_read(SPU_TABLE_ADDR, &mut back);
             self.table_back = [back[0], back[4]];
         }
-        Voice::key_off(all_voices_mask());
+        Voice::release(all_voices_mask());
         Voice::set_noise_mask(0);
         match segment {
             0 => {} // SYNC keys itself
@@ -454,8 +454,8 @@ impl SpuProbe {
             14 => key_voice(VOICE, UNITY_PITCH, SPU_SMALL_ADDR),
             13 => {
                 key_voice(VOICE, UNITY_PITCH, SPU_TABLE_ADDR);
-                let base = psx_io::spu::SPU_BASE + VOICE as u32 * 16;
-                unsafe { psx_io::write16(base + 14, (SPU_TABLE_ADDR / 8) as u16) };
+                let base = psx_hw::spu::BASE + VOICE as u32 * 16;
+                unsafe { psx_io::write_u16(base + 14, (SPU_TABLE_ADDR / 8) as u16) };
             }
             _ => {}
         }
@@ -666,9 +666,9 @@ fn all_voices_mask() -> u32 {
 }
 
 fn read_voice(index: u8) -> (u16, u16) {
-    let base = psx_io::spu::SPU_BASE + index as u32 * 16;
-    let pitch = unsafe { psx_io::read16(base + 4) };
-    let env = unsafe { psx_io::read16(base + 12) };
+    let base = psx_hw::spu::BASE + index as u32 * 16;
+    let pitch = unsafe { psx_io::read_u16(base + 4) };
+    let env = unsafe { psx_io::read_u16(base + 12) };
     (pitch, env)
 }
 
@@ -684,7 +684,7 @@ fn key_voice(index: u8, pitch: u16, addr: u32) {
         lower: 0x000F,
         upper: 0x0000,
     });
-    Voice::key_on(voice.mask());
+    Voice::start(voice.mask());
 }
 
 /// Build both square tables and upload them. Block 0 carries loop-start,
@@ -788,18 +788,18 @@ fn build_square(table: &mut [u8], half_period_blocks: usize) {
 /// block sizing, nothing but the SPU's own FIFO.
 fn pio_write(addr: u32, words: &[u32]) {
     unsafe {
-        psx_io::write16(psx_io::spu::TRANSFER_CTRL, 0x0000);
-        psx_io::write16(psx_io::spu::TRANSFER_ADDR, (addr / 8) as u16);
-        psx_io::write16(psx_io::spu::TRANSFER_CTRL, 0x0004);
-        let cnt = psx_io::read16(psx_io::spu::SPUCNT);
-        psx_io::write16(psx_io::spu::SPUCNT, (cnt & !0x0030) | 0x0010); // manual write
+        psx_io::write_u16(psx_hw::spu::TRANSFER_CTRL, 0x0000);
+        psx_io::write_u16(psx_hw::spu::TRANSFER_ADDR, (addr / 8) as u16);
+        psx_io::write_u16(psx_hw::spu::TRANSFER_CTRL, 0x0004);
+        let cnt = psx_io::read_u16(psx_hw::spu::SPUCNT);
+        psx_io::write_u16(psx_hw::spu::SPUCNT, (cnt & !0x0030) | 0x0010); // manual write
         for &word in words {
-            psx_io::write16(psx_io::spu::TRANSFER_DATA, word as u16);
-            psx_io::write16(psx_io::spu::TRANSFER_DATA, (word >> 16) as u16);
+            psx_io::write_u16(psx_hw::spu::TRANSFER_DATA, word as u16);
+            psx_io::write_u16(psx_hw::spu::TRANSFER_DATA, (word >> 16) as u16);
         }
-        psx_io::write16(psx_io::spu::SPUCNT, cnt & !0x0030);
+        psx_io::write_u16(psx_hw::spu::SPUCNT, cnt & !0x0030);
         // 0x0004, never 0: see the note in pio_read.
-        psx_io::write16(psx_io::spu::TRANSFER_CTRL, 0x0004);
+        psx_io::write_u16(psx_hw::spu::TRANSFER_CTRL, 0x0004);
     }
 }
 
@@ -807,18 +807,18 @@ fn pio_write(addr: u32, words: &[u32]) {
 /// that difference is the SPU's read pipeline.
 fn pio_read(addr: u32, out: &mut [u32]) {
     unsafe {
-        psx_io::write16(psx_io::spu::TRANSFER_CTRL, 0x0000);
-        psx_io::write16(psx_io::spu::TRANSFER_ADDR, (addr / 8) as u16);
-        psx_io::write16(psx_io::spu::TRANSFER_CTRL, 0x0004);
-        let cnt = psx_io::read16(psx_io::spu::SPUCNT);
-        psx_io::write16(psx_io::spu::SPUCNT, (cnt & !0x0030) | 0x0030); // manual read
+        psx_io::write_u16(psx_hw::spu::TRANSFER_CTRL, 0x0000);
+        psx_io::write_u16(psx_hw::spu::TRANSFER_ADDR, (addr / 8) as u16);
+        psx_io::write_u16(psx_hw::spu::TRANSFER_CTRL, 0x0004);
+        let cnt = psx_io::read_u16(psx_hw::spu::SPUCNT);
+        psx_io::write_u16(psx_hw::spu::SPUCNT, (cnt & !0x0030) | 0x0030); // manual read
         for word in out.iter_mut() {
-            let lo = psx_io::read16(psx_io::spu::TRANSFER_DATA) as u32;
-            let hi = psx_io::read16(psx_io::spu::TRANSFER_DATA) as u32;
+            let lo = psx_io::read_u16(psx_hw::spu::TRANSFER_DATA) as u32;
+            let hi = psx_io::read_u16(psx_hw::spu::TRANSFER_DATA) as u32;
             *word = lo | (hi << 16);
         }
-        psx_io::write16(psx_io::spu::SPUCNT, cnt & !0x0030);
-        psx_io::write16(psx_io::spu::TRANSFER_CTRL, 0x0000);
+        psx_io::write_u16(psx_hw::spu::SPUCNT, cnt & !0x0030);
+        psx_io::write_u16(psx_hw::spu::TRANSFER_CTRL, 0x0000);
     }
 }
 

@@ -76,8 +76,10 @@ default = [
     # Fixed 3x3 one-level TR subdivision lattice. The Cortex v1 A/B reduced
     # matched room-surface work by 15.5% with bit-identical leaf packets.
     "tr-subdivision-lattice",
-    # VBlank-kicked presentation: +26% fps with one enemy on screen, +1% on
-    # top of the world-placement rule with two (stress harness, 2026-10-03).
+    # VBlank-kicked presentation: +26% fps with one enemy on screen (19.8 to
+    # 25.0). Frames that would fence early beside a queued frame, such as
+    # with two melee enemies, go double-buffered instead (choose_present_queue).
+    # Stress harness, 2026-10-03.
     "present-queue",
 ]
 cd-stream-bench = ["dep:psx-io", "psx-game-runtime/cd-stream-bench"]
@@ -92,7 +94,7 @@ hardware-boot-visual = ["psx-engine/hardware-boot-visual"]
 vert-debug-overlay = ["psx-engine/vert-debug"]
 # Hand every gameplay frame to psx-rt's VBlank-kicked present queue
 # (RenderSubmission::PresentQueue) instead of kicking it from the runner.
-present-queue = []
+present-queue = ["psx-engine/present-queue"]
 world-order-global = []
 world-order-slot = []
 world-order-linked = []
@@ -122,11 +124,6 @@ tr-subdivision-ceilings = []
 # Experiment-only stress profile that expands the distance band fourfold so
 # the upward-camera tape exercises ceiling subdivision even in tall rooms.
 tr-subdivision-wide-band = []
-# Quake II transfer candidate: after the source PVS, backface, frustum, and
-# whole-surface gates admit a surface, let the GPU draw area clip generated
-# classic-affine polygons instead of repeating four CPU screen-edge tests.
-# Opt-in until the Cortex route and original hardware visual gates pass.
-classic-affine-gpu-polygon-clip = ["psx-engine/classic-affine-gpu-polygon-clip"]
 # Experiment-only reference cadence for measuring the existing 30 Hz NPC
 # schedule against collision/decision work on every 60 Hz simulation tick.
 npc-think-60hz = []

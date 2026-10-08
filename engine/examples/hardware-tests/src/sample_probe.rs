@@ -56,7 +56,7 @@ const SPU_SAMPLE_BASE: u32 = 0x1010;
 /// The launcher's browse voice, mirrored exactly.
 const BEEP_VOICE: u8 = 0;
 
-const ENDX_LO: u32 = psx_io::spu::SPU_BASE + 0x19C;
+const ENDX_LO: u32 = psx_hw::spu::BASE + 0x19C;
 
 /// Readback staging for the audit: ui_beep is 2 KiB of psau, so its
 /// ADPCM fits with room to spare.
@@ -195,20 +195,20 @@ impl SampleProbe {
             2 => {
                 // A browse mash: retrigger every ten frames, four times.
                 if matches!(self.stage_frame, 10 | 20 | 30) {
-                    Voice::key_on(Voice::new(BEEP_VOICE).mask());
+                    Voice::start(Voice::new(BEEP_VOICE).mask());
                 }
             }
             3 if self.stage_frame == 60 => {
-                Voice::key_off(Voice::new(BEEP_VOICE).mask());
+                Voice::release(Voice::new(BEEP_VOICE).mask());
             }
             _ => {}
         }
 
         if let Some(slot) = CHECKPOINTS.iter().position(|&f| f == self.stage_frame) {
             let voice = BEEP_VOICE;
-            let base = psx_io::spu::SPU_BASE + voice as u32 * 16;
-            let env = unsafe { psx_io::read16(base + 12) };
-            let endx = unsafe { psx_io::read16(ENDX_LO) };
+            let base = psx_hw::spu::BASE + voice as u32 * 16;
+            let env = unsafe { psx_io::read_u16(base + 12) };
+            let endx = unsafe { psx_io::read_u16(ENDX_LO) };
             let endx_bit = (endx >> BEEP_VOICE) & 1;
             self.records[stage].fields[1 + slot] = ((env as u32) << 16) | endx_bit as u32;
         }
@@ -225,7 +225,7 @@ impl SampleProbe {
         tty::print(" last=");
         tty::println(hex8(record.fields[FIELD_COUNT - 1]).digits());
 
-        Voice::key_off(Voice::new(BEEP_VOICE).mask());
+        Voice::release(Voice::new(BEEP_VOICE).mask());
         self.stage_frame = 0;
         if stage + 1 < STAGE_COUNT {
             self.stage += 1;
@@ -296,7 +296,7 @@ impl SampleProbe {
         let voice = Voice::new(voice);
         // The launcher's exact volume, so the trace is its trace.
         voice.configure_sample(SpuAddr::new(addr), rate, Volume::linear(1, 14), adsr);
-        Voice::key_on(voice.mask());
+        Voice::start(voice.mask());
     }
 
     fn encode_qr(&mut self) {

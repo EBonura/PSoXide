@@ -47,8 +47,8 @@ const BINARY_LEN: usize = 272;
 const BASE64_LEN: usize = 364;
 const QR_TEXT_MAX: usize = 4 + BASE64_LEN + 3 + 8;
 
-const ENDX_LO: u32 = psx_io::spu::SPU_BASE + 0x19C;
-const ENDX_HI: u32 = psx_io::spu::SPU_BASE + 0x19E;
+const ENDX_LO: u32 = psx_hw::spu::BASE + 0x19C;
+const ENDX_HI: u32 = psx_hw::spu::BASE + 0x19E;
 
 #[derive(Copy, Clone)]
 struct StageRecord {
@@ -141,9 +141,9 @@ impl TransitionProbe {
 
         let mut realign = false;
         match (self.stage, self.stage_frame) {
-            (0, 15) => Voice::key_on(Voice::V0.mask()),
+            (0, 15) => Voice::start(Voice::V0.mask()),
             (0, 45) => {
-                Voice::key_off(Voice::V0.mask());
+                Voice::release(Voice::V0.mask());
                 Voice::V0.set_volume(Volume::SILENCE, Volume::SILENCE);
             }
             (2, 15) => {
@@ -184,7 +184,7 @@ impl TransitionProbe {
             self.stop_map_voices();
             let menu = Voice::new(MENU_VOICE);
             menu.set_volume(Volume::SILENCE, Volume::SILENCE);
-            Voice::key_off(menu.mask());
+            Voice::release(menu.mask());
             self.complete = true;
             self.encode_qr();
             self.print_payload();
@@ -347,25 +347,25 @@ impl TransitionProbe {
             Volume::linear(num, den),
             Adsr::sample(),
         );
-        Voice::key_on(voice.mask());
+        Voice::start(voice.mask());
     }
 
     fn stop_map_voices(&self) {
         for index in [MAP_ONESHOT_VOICE, DIALOGUE_VOICE, LOOP_VOICE] {
             Voice::new(index).set_volume(Volume::SILENCE, Volume::SILENCE);
         }
-        Voice::key_off(MAP_ACTIVE_MASK);
+        Voice::release(MAP_ACTIVE_MASK);
     }
 
     fn capture_stage(&mut self, tick: u32) {
-        let spucnt = unsafe { psx_io::read16(psx_io::spu::SPUCNT) };
-        let spustat = unsafe { psx_io::read16(psx_io::spu::SPUSTAT) };
-        let endx_lo = unsafe { psx_io::read16(ENDX_LO) };
-        let endx_hi = unsafe { psx_io::read16(ENDX_HI) };
+        let spucnt = unsafe { psx_io::read_u16(psx_hw::spu::SPUCNT) };
+        let spustat = unsafe { psx_io::read_u16(psx_hw::spu::SPUSTAT) };
+        let endx_lo = unsafe { psx_io::read_u16(ENDX_LO) };
+        let endx_hi = unsafe { psx_io::read_u16(ENDX_HI) };
         let voice_state = |voice: u8| {
-            let base = psx_io::spu::SPU_BASE + voice as u32 * 16;
-            let volume = unsafe { psx_io::read16(base) };
-            let current = unsafe { psx_io::read16(base + 12) };
+            let base = psx_hw::spu::BASE + voice as u32 * 16;
+            let volume = unsafe { psx_io::read_u16(base) };
+            let current = unsafe { psx_io::read_u16(base + 12) };
             ((volume as u32) << 16) | current as u32
         };
         self.records[self.stage as usize].fields = [
@@ -551,14 +551,14 @@ fn build_adpcm(output: &mut [u8], blocks: u32, looped: bool, pattern: SamplePatt
 }
 
 fn stable_read_hash(addr: u32) -> u32 {
-    let original_delay = unsafe { psx_io::read32(SPU_DELAY) };
-    unsafe { psx_io::write32(SPU_DELAY, original_delay | 0x0200_0000) };
+    let original_delay = unsafe { psx_io::read_u32(SPU_DELAY) };
+    unsafe { psx_io::write_u32(SPU_DELAY, original_delay | 0x0200_0000) };
     for _ in 0..64 {
         core::hint::spin_loop();
     }
     let mut back = [0u32; READBACK_BYTES / 4];
     spu_dma_read(addr, &mut back);
-    unsafe { psx_io::write32(SPU_DELAY, original_delay) };
+    unsafe { psx_io::write_u32(SPU_DELAY, original_delay) };
     fnv32_words(&back)
 }
 

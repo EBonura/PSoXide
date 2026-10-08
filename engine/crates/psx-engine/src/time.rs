@@ -4,6 +4,8 @@
 //! [`crate::scene::Ctx`]: `sim_tick` and `visual_frame`. This module
 //! keeps the platform VBlank counter private to the app runner.
 
+use psx_gpu::Gpu;
+
 pub(crate) struct EngineClock {
     origin_vblank: u32,
     last_present_vblank: u32,
@@ -54,8 +56,8 @@ impl EngineClock {
     /// mid-frame shears the picture on real hardware, since GP1 display
     /// start applies from the next scanline. The CPU is free to do other
     /// work until [`wait_display_flip`](Self::wait_display_flip).
-    pub(crate) fn queue_display_flip(&mut self, display_start: u32) {
-        platform::queue_display_flip(display_start);
+    pub(crate) fn queue_display_flip(&mut self, gpu: &mut Gpu, display_start: u32) {
+        platform::queue_display_flip(gpu, display_start);
     }
 
     /// `true` while a word passed to
@@ -79,7 +81,7 @@ impl EngineClock {
     /// edge so it still does not tear, rather than left in the handler's
     /// slot. Abandoning it is not one bad frame, it is permanent:
     /// the next frame's [`Self::queue_display_flip`] overwrites the slot, so
-    /// that display start never reaches the GPU while `FrameBuffer` has
+    /// that display start never reaches the GPU while `DoubleBuffer` has
     /// already moved its draw side on. From then on the runner clears and
     /// redraws the buffer the display is scanning out, and every overlay drawn
     /// after the world -- the HUD, message panels, damage numbers -- is wiped
@@ -124,14 +126,14 @@ mod platform {
         }
     }
 
-    pub(super) fn queue_display_flip(display_start: u32) {
-        psx_gpu::arm_draw_done();
-        psx_gpu::signal_draw_done();
-        psx_rt::interrupts::queue_gp1_at_vblank(display_start);
+    pub(super) fn queue_display_flip(gpu: &mut psx_gpu::Gpu, display_start: u32) {
+        gpu.arm_draw_done();
+        gpu.signal_draw_done();
+        psx_rt::interrupts::queue_display_control_at_vblank(display_start);
     }
 
     pub(super) fn display_flip_pending() -> bool {
-        psx_rt::interrupts::gp1_queue_pending()
+        psx_rt::interrupts::is_display_control_queued()
     }
 
     /// Write a still-queued display start straight to GP1. Called just after
@@ -139,9 +141,9 @@ mod platform {
     /// display side in step with the draw side is worth showing a frame whose
     /// GP0(1Fh) never arrived.
     pub(super) fn apply_pending_display_flip() {
-        let word = psx_rt::interrupts::take_pending_gp1();
+        let word = psx_rt::interrupts::take_queued_display_control();
         if word != 0 {
-            psx_io::gpu::write_gp1(word);
+            psx_io::gpu::write_display_control(word);
         }
     }
 }
@@ -160,7 +162,7 @@ mod platform {
 
     /// Host: no IRQ exists to consume the queue, so a flip is applied the
     /// instant it is queued and never reads back as pending.
-    pub(super) fn queue_display_flip(_display_start: u32) {}
+    pub(super) fn queue_display_flip(_gpu: &mut psx_gpu::Gpu, _display_start: u32) {}
 
     pub(super) fn display_flip_pending() -> bool {
         false

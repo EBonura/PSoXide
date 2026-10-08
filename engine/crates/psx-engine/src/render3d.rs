@@ -1919,7 +1919,7 @@ impl<'a, 'ot, 'arena, const OT_DEPTH: usize> GouraudRenderPass<'a, 'ot, 'arena, 
         options: GouraudMeshOptions,
     ) -> MeshRenderStats {
         let mut stats = MeshRenderStats::default();
-        let mesh_verts = mesh.vert_count() as usize;
+        let mesh_verts = mesh.vertex_count() as usize;
         let project_count = mesh_verts
             .min(projected_vertices.len())
             .min(u16::MAX as usize);
@@ -3210,7 +3210,7 @@ pub mod player_vert_debug {
                     vl: [view_blend.x, view_blend.y, view_blend.z],
                     sx: p.sx,
                     sy: p.sy,
-                    flag: scene::read_flag(),
+                    flag: scene::error_flags(),
                 };
             }
         }

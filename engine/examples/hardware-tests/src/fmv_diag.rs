@@ -49,20 +49,20 @@ use core::ptr::addr_of_mut;
 use psx_engine::button;
 use psx_fmv::mdec;
 use psx_font::FontAtlas;
-use psx_gpu as gpu;
+use psx_gpu::prim::FillRect;
 use psx_io::dma::{self, Channel};
 use psx_io::{irq, timers};
 use psx_rt::{interrupts, tty};
 
 const MDEC0: u32 = 0x1F80_1820;
 const MDEC1: u32 = 0x1F80_1824;
-const RESET: u32 = mdec::CONTROL_RESET;
-const ENABLE: u32 = mdec::CONTROL_ENABLE_DMA;
-const BUSY: u32 = mdec::STATUS_BUSY;
-const IN_REQUEST: u32 = mdec::STATUS_IN_REQUEST;
-const IN_FULL: u32 = mdec::STATUS_IN_FULL;
-const SET_QUANT: u32 = mdec::COMMAND_SET_QUANT;
-const SET_SCALE: u32 = mdec::COMMAND_SET_SCALE;
+const RESET: u32 = psx_hw::mdec::CONTROL_RESET;
+const ENABLE: u32 = psx_hw::mdec::CONTROL_ENABLE_DMA;
+const BUSY: u32 = psx_hw::mdec::STATUS_BUSY;
+const IN_REQUEST: u32 = psx_hw::mdec::STATUS_IN_REQUEST;
+const IN_FULL: u32 = psx_hw::mdec::STATUS_IN_FULL;
+const SET_QUANT: u32 = psx_hw::mdec::COMMAND_SET_QUANT;
+const SET_SCALE: u32 = psx_hw::mdec::COMMAND_SET_SCALE;
 
 /// Headless test build only (`--features diag-fault`): fakes a table DMA
 /// timeout in A, a probe DMA1 timeout in E and a setup failure behind C's
@@ -281,19 +281,19 @@ fn trace(font: &FontAtlas, busy: bool, enable: bool) -> Trace {
 #[inline(always)]
 fn st() -> u32 {
     // SAFETY: MDEC status read.
-    unsafe { psx_io::read32(MDEC1) }
+    unsafe { psx_io::read_u32(MDEC1) }
 }
 
 #[inline(always)]
 fn ctl(value: u32) {
     // SAFETY: MDEC control write.
-    unsafe { psx_io::write32(MDEC1, value) }
+    unsafe { psx_io::write_u32(MDEC1, value) }
 }
 
 #[inline(always)]
 fn cmd(value: u32) {
     // SAFETY: MDEC command/parameter write.
-    unsafe { psx_io::write32(MDEC0, value) }
+    unsafe { psx_io::write_u32(MDEC0, value) }
 }
 
 fn snap(run: &mut Run, slot: usize) {
@@ -322,7 +322,7 @@ fn delay(clocks: u16) {
 
 fn bcr(ch: Channel) -> u32 {
     // SAFETY: DMA register read.
-    unsafe { psx_io::read32(ch.base() + 4) }
+    unsafe { psx_io::read_u32(ch.register_base() + 4) }
 }
 
 /// MADR of the last kick on each MDEC channel, for words-moved at a timeout.
@@ -336,11 +336,11 @@ fn record_timeout(run: &mut Run, ch: Channel) {
     // SAFETY: DMA register reads; KICK_MADR is single-threaded.
     run.timeout = unsafe {
         [
-            dma::chcr(ch),
+            dma::control(ch),
             bcr(ch),
-            dma::madr(ch),
-            psx_io::read32(dma::DPCR),
-            psx_io::read32(dma::DICR),
+            dma::address(ch),
+            psx_io::read_u32(psx_hw::dma::DPCR),
+            psx_io::read_u32(psx_hw::dma::DICR),
             (*addr_of_mut!(KICK_MADR))[ch as usize & 1],
         ]
     };
@@ -357,9 +357,14 @@ fn dma_in(words: *const u32, count: usize) {
 fn dma_in_raw(words: *const u32, count: usize) {
     // SAFETY: single-threaded bookkeeping.
     unsafe { (*addr_of_mut!(KICK_MADR))[0] = words as u32 };
-    dma::set_madr(Channel::MdecIn, words as u32);
-    dma::set_bcr_block(Channel::MdecIn, 32, (count / 32) as u16);
-    dma::set_chcr(Channel::MdecIn, CHCR_IN);
+    // SAFETY: silicon probe: the transfer touches only memory this probe
+    // owns, which stays live and untouched until the probe waits the
+    // channel idle or aborts it.
+    unsafe {
+        dma::raw::set_address(Channel::MdecIn, words as u32);
+        dma::raw::set_size(Channel::MdecIn, dma::size_blocks(32, (count / 32) as u16));
+        dma::raw::set_control(Channel::MdecIn, CHCR_IN);
+    }
 }
 
 fn dma_done(ch: Channel) -> bool {
@@ -503,11 +508,16 @@ fn variant_e(run: &mut Run) -> bool {
     // SetDMAPriority(DMA_MDEC_IN/OUT, 3): priority 3 and the enable bit.
     // SAFETY: DPCR read-modify-write, then channel stops, as the library.
     unsafe {
-        let dpcr = psx_io::read32(dma::DPCR);
-        psx_io::write32(dma::DPCR, (dpcr & !0xFF) | 0xBB);
+        let dpcr = psx_io::read_u32(psx_hw::dma::DPCR);
+        psx_io::write_u32(psx_hw::dma::DPCR, (dpcr & !0xFF) | 0xBB);
     }
-    dma::set_chcr(Channel::MdecIn, 0x0000_0201);
-    dma::set_chcr(Channel::MdecOut, 0x0000_0200);
+    // SAFETY: silicon probe: the transfer touches only memory this probe
+    // owns, which stays live and untouched until the probe waits the
+    // channel idle or aborts it.
+    unsafe {
+        dma::raw::set_control(Channel::MdecIn, 0x0000_0201);
+        dma::raw::set_control(Channel::MdecOut, 0x0000_0200);
+    }
     ctl(RESET);
     ctl(ENABLE);
     // DecDCTinSync before each command and after each DMA. The library
@@ -539,9 +549,8 @@ fn variant_f(run: &mut Run) -> bool {
     let settled_bit = if settled { 0x8000 } else { 0 };
     match mdec::load_tables() {
         Some(tables) => {
-            run.extra = settled_bit
-                | tables.enable_writes as u16
-                | ((tables.cpu_uploads as u16) << 8);
+            run.extra =
+                settled_bit | tables.enable_writes as u16 | ((tables.cpu_uploads as u16) << 8);
             snap(run, SNAP_TABLES);
             true
         }
@@ -555,8 +564,9 @@ fn variant_f(run: &mut Run) -> bool {
     }
 }
 
-const SEQUENCES: [fn(&mut Run) -> bool; VARIANTS] =
-    [variant_a, variant_b, variant_c, variant_d, variant_e, variant_f];
+const SEQUENCES: [fn(&mut Run) -> bool; VARIANTS] = [
+    variant_a, variant_b, variant_c, variant_d, variant_e, variant_f,
+];
 
 // --- The probe decode ------------------------------------------------------
 
@@ -595,15 +605,23 @@ fn probe(run: &mut Run) -> bool {
     // SAFETY: PROBE_OUT is only touched here, with DMA1 idle.
     let out = unsafe { &mut *addr_of_mut!(PROBE_OUT) };
     out.fill(PROBE_FILL);
-    cmd(mdec::DECODE_15BPP | 32);
+    cmd(psx_hw::mdec::DECODE_15BPP | 32);
     run.probe_dreq = poll(IN_REQUEST, IN_REQUEST);
     dma_in(PROBE_IN.as_ptr(), 32);
     dma::abort(Channel::MdecOut);
     // SAFETY: single-threaded bookkeeping.
     unsafe { (*addr_of_mut!(KICK_MADR))[1] = out.as_mut_ptr() as u32 };
-    dma::set_madr(Channel::MdecOut, out.as_mut_ptr() as u32);
-    dma::set_bcr_block(Channel::MdecOut, 32, (PROBE_OUT_WORDS / 32) as u16);
-    dma::set_chcr(Channel::MdecOut, CHCR_OUT);
+    // SAFETY: silicon probe: the transfer touches only memory this probe
+    // owns, which stays live and untouched until the probe waits the
+    // channel idle or aborts it.
+    unsafe {
+        dma::raw::set_address(Channel::MdecOut, out.as_mut_ptr() as u32);
+        dma::raw::set_size(
+            Channel::MdecOut,
+            dma::size_blocks(32, (PROBE_OUT_WORDS / 32) as u16),
+        );
+        dma::raw::set_control(Channel::MdecOut, CHCR_OUT);
+    }
     let out_done = dma_done(Channel::MdecOut) && !(FAULT && FAULT_PROBE.load());
     let in_done = dma_done(Channel::MdecIn);
     snap(run, SNAP_PROBE);
@@ -651,7 +669,7 @@ pub(crate) fn run_battery(font: &FontAtlas) -> Diag {
     let timer_mode = timers::mode(timers::Timer::Timer2) & 0x03FF;
     timers::set_mode(timers::Timer::Timer2, 0);
     // SAFETY: DPCR read.
-    let dpcr = unsafe { psx_io::read32(dma::DPCR) };
+    let dpcr = unsafe { psx_io::read_u32(psx_hw::dma::DPCR) };
     let mut variants = [Variant {
         pass_mask: 0,
         run_fails: 0,
@@ -673,7 +691,7 @@ pub(crate) fn run_battery(font: &FontAtlas) -> Diag {
             let mask = irq::mask();
             irq::set_mask(0);
             // SAFETY: DPCR write, back to what the battery found.
-            unsafe { psx_io::write32(dma::DPCR, dpcr) };
+            unsafe { psx_io::write_u32(psx_hw::dma::DPCR, dpcr) };
             abort_both();
             if v != 0 || r != 0 {
                 prepare(r % 2 == 1);
@@ -801,6 +819,7 @@ fn play_order(diag: &Diag) -> ([usize; VARIANTS], usize) {
 /// stays up for a few seconds with the next run named under it; the last
 /// one is left on screen for the caller. Returns the first run's outcome.
 pub(crate) fn play_all(diag: &mut Diag) -> hello_fmv::Outcome {
+    probe_gpu!(gpu);
     let (order, n) = play_order(diag);
     let mut first = hello_fmv::Outcome::default();
     for (i, &v) in order[..n].iter().enumerate() {
@@ -821,12 +840,12 @@ pub(crate) fn play_all(diag: &mut Diag) -> hello_fmv::Outcome {
         // The player left its summary displayed at VRAM row 0 and its own
         // fonts over the suite's atlas.
         let font = FontAtlas::upload(&psx_font::fonts::BASIC, crate::FONT_TPAGE, crate::FONT_CLUT);
-        gpu::set_draw_area(0, 0, 319, 239);
-        gpu::set_draw_offset(0, 0);
+        gpu.set_draw_area((0, 0), (319, 239));
+        gpu.set_draw_offset((0, 0));
         let stop = Line::new()
             .s("STOP ")
             .s(STOP_NAMES[(outcome.stop as usize).min(STOP_NAMES.len() - 1)]);
-        gpu::fill_rect(192, 0, 128, 10, 0, 0, 0);
+        gpu.draw(&FillRect::new((192, 0), (128, 10), (0, 0, 0)));
         font.draw_text(200, 2, stop.as_str(), YELLOW);
         if i + 1 < n {
             let next = Line::new()
@@ -837,10 +856,10 @@ pub(crate) fn play_all(diag: &mut Diag) -> hello_fmv::Outcome {
                 .s(" NEXT: ")
                 .s(PLAY_LABELS[order[i + 1]])
                 .s(" IN 4 S");
-            gpu::fill_rect(0, 226, 320, 12, 0, 0, 0);
+            gpu.draw(&FillRect::new((0, 226), (320, 12), (0, 0, 0)));
             font.draw_text(X0, 228, next.as_str(), YELLOW);
         }
-        gpu::draw_sync();
+        gpu.wait_idle();
         if i + 1 < n {
             let start = interrupts::vblank_count();
             while interrupts::vblank_count().wrapping_sub(start) < SUMMARY_VBLANKS {
@@ -1165,25 +1184,32 @@ const X0: i16 = 16;
 const PAGES: usize = 2 + VARIANTS;
 
 fn begin_screen() {
-    gpu::set_draw_area(0, 0, 319, 239);
-    gpu::set_draw_offset(0, 0);
-    gpu::fill_rect(0, 0, 320, 240, 0, 0, 0);
+    probe_gpu!(gpu);
+    gpu.set_draw_area((0, 0), (319, 239));
+    gpu.set_draw_offset((0, 0));
+    gpu.draw(&FillRect::new((0, 0), (320, 240), (0, 0, 0)));
 }
 
 fn end_screen() {
-    gpu::draw_sync();
-    psx_io::gpu::write_gp1(0x0500_0000);
+    probe_gpu!(gpu);
+    gpu.wait_idle();
+    psx_io::gpu::write_display_control(0x0500_0000);
 }
 
 /// One progress line in the band under the title, replacing the last.
 /// Drawn between runs and phases, never inside a sequence, so it cannot
 /// change a sequence's timing. A hang leaves the last line on screen.
 fn progress_line(font: &FontAtlas, row: i16, text: &str, tint: (u8, u8, u8)) {
-    gpu::set_draw_area(0, 0, 319, 239);
-    gpu::set_draw_offset(0, 0);
-    gpu::fill_rect(0, 60 + 12 * row as u16, 320, 12, 0, 0, 0);
+    probe_gpu!(gpu);
+    gpu.set_draw_area((0, 0), (319, 239));
+    gpu.set_draw_offset((0, 0));
+    gpu.draw(&FillRect::new(
+        (0, 60 + 12 * row as u16),
+        (320, 12),
+        (0, 0, 0),
+    ));
     font.draw_text(X0, 62 + 12 * row, text, tint);
-    gpu::draw_sync();
+    gpu.wait_idle();
 }
 
 /// Variant, run and phase, with MDEC1 and DMA0 CHCR as they are now.
@@ -1203,7 +1229,7 @@ fn progress(font: &FontAtlas, v: usize, r: usize, phase: &str) {
         .s("MDEC1 ")
         .hex(st(), 8)
         .s(" DMA0 CHCR ")
-        .hex(dma::chcr(Channel::MdecIn), 8);
+        .hex(dma::control(Channel::MdecIn), 8);
     progress_line(font, 1, regs.as_str(), WHITE);
 }
 
@@ -1251,7 +1277,11 @@ fn draw_summary(font: &FontAtlas, diag: &Diag) {
     font.draw_text(X0, 138, line.as_str(), WHITE);
     match diag.chosen {
         Some(v) => {
-            let line = Line::new().s("MOVIE USES ").s(LETTERS[v]).s(" ").s(NAMES[v]);
+            let line = Line::new()
+                .s("MOVIE USES ")
+                .s(LETTERS[v])
+                .s(" ")
+                .s(NAMES[v]);
             font.draw_text(X0, 160, line.as_str(), GREEN);
         }
         None => font.draw_text(X0, 160, "NO SEQUENCE WORKED: SDK DEFAULT", RED),
@@ -1293,8 +1323,17 @@ fn draw_variant(font: &FontAtlas, diag: &Diag, v: usize) {
         .dec(variant.detail_run as u32 + 1)
         .s(": ")
         .s(if run.fail == 0 { "WORKED" } else { "FAIL " })
-        .s(if run.fail == 0 { "" } else { STEP_NAMES[fail.min(STEP_NAMES.len() - 1)] });
-    font.draw_text(X0, 54, detail.as_str(), if run.fail == 0 { GREEN } else { RED });
+        .s(if run.fail == 0 {
+            ""
+        } else {
+            STEP_NAMES[fail.min(STEP_NAMES.len() - 1)]
+        });
+    font.draw_text(
+        X0,
+        54,
+        detail.as_str(),
+        if run.fail == 0 { GREEN } else { RED },
+    );
     for (slot, name) in SNAP_NAMES.iter().enumerate() {
         let line = Line::new().s("MDEC1 ").s(name).s(" ");
         let line = if run.taken & (1 << slot) != 0 {
@@ -1332,7 +1371,11 @@ fn draw_variant(font: &FontAtlas, diag: &Diag, v: usize) {
     }
     if v == 0 && run.rescue != 0 {
         let line = Line::new()
-            .s(if run.rescue == 1 { "LATE ENABLE: FREED " } else { "LATE ENABLE: STUCK " })
+            .s(if run.rescue == 1 {
+                "LATE ENABLE: FREED "
+            } else {
+                "LATE ENABLE: STUCK "
+            })
             .hex(run.rescue_status, 8);
         font.draw_text(X0, 176, line.as_str(), YELLOW);
     }
@@ -1393,12 +1436,20 @@ fn draw_latency(font: &FontAtlas, diag: &Diag) {
         .hex(c.cpu_sum, 8)
         .s(" DMA ")
         .s(if c.dma_ok { "OK " } else { "FAIL " });
-    let tint = if c.cpu_ok && c.dma_ok && c.cpu_sum == c.dma_sum { GREEN } else { RED };
+    let tint = if c.cpu_ok && c.dma_ok && c.cpu_sum == c.dma_sum {
+        GREEN
+    } else {
+        RED
+    };
     font.draw_text(X0, 172, line.as_str(), tint);
     let line = Line::new()
         .s("DMA SUM ")
         .hex(c.dma_sum, 8)
-        .s(if c.cpu_sum == c.dma_sum { " SAME" } else { " DIFFERENT" });
+        .s(if c.cpu_sum == c.dma_sum {
+            " SAME"
+        } else {
+            " DIFFERENT"
+        });
     font.draw_text(X0, 184, line.as_str(), tint);
     let line = Line::new()
         .s("WORDS CPU ")
@@ -1476,7 +1527,11 @@ fn print_tty(diag: &Diag) {
             .hex(run.extra as u32, 4);
         tty::print(tail.as_str());
         for slot in 0..SNAPS {
-            let snap = Line::new().s(" s").dec(slot as u32).s("=").hex(run.snaps[slot], 8);
+            let snap = Line::new()
+                .s(" s")
+                .dec(slot as u32)
+                .s("=")
+                .hex(run.snaps[slot], 8);
             tty::print(snap.as_str());
         }
         tty::println("");

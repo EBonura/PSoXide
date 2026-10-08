@@ -48,5 +48,5 @@ pub fn upload_samples(mut addr: SpuAddr, samples: &[Sample<'_>]) -> SpuAddr {
 /// does both properly.
 #[inline]
 pub fn play(v: Voice) {
-    Voice::key_on(v.mask());
+    Voice::start(v.mask());
 }
