@@ -62,6 +62,10 @@ pub struct Options {
     /// Worst allowed displacement of any probe at any source frame, model units.
     pub budget_units: f64,
     /// Share of the budget given to rotation; translation gets the rest.
+    ///
+    /// Translation keys are integers, so a small share still costs few extra
+    /// bits, while rotation keys get cheaper with every unit; measured on the
+    /// Graybox Reach clips 0.8 is within 1% of the best split.
     pub rotation_share: f64,
 }
 
@@ -69,7 +73,7 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             budget_units: 4.0,
-            rotation_share: 0.6,
+            rotation_share: 0.8,
         }
     }
 }
@@ -90,6 +94,13 @@ pub enum Reject {
     Unreachable {
         /// Joint index.
         joint: usize,
+        /// `"rotation"` or `"translation"`.
+        channel: &'static str,
+        /// Error of the finest track tried (every source frame, widest keys),
+        /// model units; the budget share it had to meet is above it.
+        finest: f64,
+        /// Budget share for that channel, model units.
+        limit: f64,
     },
     /// The key area exceeds what 16 bit offsets address.
     KeyAreaTooLarge,
@@ -479,6 +490,23 @@ fn rot_candidates(
     (ladder.iter().map(|&s| best(s)).collect(), best(0))
 }
 
+/// Error of every-frame rotation keys at the widest size: the floor no budget
+/// below it can beat.
+fn rot_finest(truth: &Truth, probes: &[V3]) -> f64 {
+    let frames = truth.q.len();
+    let mut keys = Vec::new();
+    for f in 0..frames {
+        keys.extend_from_slice(&encode_rot_key(truth.q[f], 2));
+    }
+    let mut worst: f64 = 0.0;
+    for f in 0..frames {
+        let a = host::decode_rotation_key(&window(&keys, f, 6), 2);
+        let m = host::blend_rotation(a, None, 0);
+        worst = worst.max(rot_err(&m, &truth.r[f], probes));
+    }
+    worst
+}
+
 fn bit_length(v: u64) -> u32 {
     64 - v.leading_zeros()
 }
@@ -722,15 +750,36 @@ pub fn encode(clip: &ClipInput, opts: &Options) -> Result<(Vec<u8>, Report), Rej
     }
     // A translation track with no data bytes costs nothing but a constant key.
     let chosen = choose_rates(&costs, &constants).ok_or_else(|| {
-        // Name the first joint with no feasible option at all.
-        let joint = (0..joints)
-            .find(|&j| {
-                [&rot_c[j], &tr_c[j]]
-                    .iter()
-                    .any(|(c, k)| k.is_none() && c.iter().all(Option::is_none))
-            })
-            .unwrap_or(0);
-        Reject::Unreachable { joint }
+        // Name the first channel with no feasible option at all and measure how
+        // close the finest track gets.
+        for j in 0..joints {
+            let (rc, rk) = &rot_c[j];
+            if rk.is_none() && rc.iter().all(Option::is_none) {
+                let probes = reduce_probes(&probe_sets[j], 32);
+                let finest = rot_finest(&truths[j], &probes);
+                return Reject::Unreachable {
+                    joint: j,
+                    channel: "rotation",
+                    finest,
+                    limit: rot_limit,
+                };
+            }
+            let (tc, tk) = &tr_c[j];
+            if tk.is_none() && tc.iter().all(Option::is_none) {
+                return Reject::Unreachable {
+                    joint: j,
+                    channel: "translation",
+                    finest: f64::NAN,
+                    limit: trans_limit,
+                };
+            }
+        }
+        Reject::Unreachable {
+            joint: 0,
+            channel: "rate selection",
+            finest: f64::NAN,
+            limit: 0.0,
+        }
     })?;
     let rate_segs: Vec<usize> = chosen.iter().map(|&i| ladder[i]).collect();
 

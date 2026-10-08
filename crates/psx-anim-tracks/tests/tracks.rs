@@ -247,7 +247,7 @@ fn tighter_budget_never_costs_fewer_bytes() {
             &clip,
             &Options {
                 budget_units: budget,
-                rotation_share: 0.6,
+                rotation_share: 0.8,
             },
         )
         .unwrap();
