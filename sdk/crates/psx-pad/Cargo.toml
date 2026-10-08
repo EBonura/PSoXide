@@ -10,6 +10,16 @@ description  = "SIO0 controller polling: digital and DualShock analog pads, plus
 psx-hw = { workspace = true }
 psx-io = { path = "../psx-io" }
 psx-math = { path = "../psx-math" }
+# Only the console side of the interrupt engine (`console`) needs the runtime,
+# for its exception vector. The engine's state machine does not.
+psx-rt = { path = "../psx-rt", optional = true }
+
+[features]
+default = []
+# `console`: the interrupt-driven pad engine on the real serial port, with its
+# exception wrapper, timer and lease. Opt-in per game; the synchronous driver
+# is unchanged and stays the default (`sdk/docs/PAD-IRQ-ENGINE.md`).
+irq-engine = ["dep:psx-rt"]
 
 [lints]
 workspace = true

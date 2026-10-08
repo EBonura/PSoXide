@@ -161,6 +161,7 @@ dependencies = [
  "psx-hw",
  "psx-io",
  "psx-math",
+ "psx-rt",
 ]
 
 [[package]]
