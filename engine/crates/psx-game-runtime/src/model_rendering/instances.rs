@@ -349,6 +349,7 @@ impl InstanceActorPoseSnapshot {
         self.clip_local
     }
 
+    /// Replace the actor pose snapshot.
     pub const fn with_pose(mut self, pose: ActorPoseSnapshot) -> Self {
         self.pose = pose;
         self

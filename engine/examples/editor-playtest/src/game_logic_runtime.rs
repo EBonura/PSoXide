@@ -44,7 +44,6 @@ pub(super) fn enemy_projectile_visual(mut visual: ProjectileVisualStyle) -> Proj
     visual
 }
 
-
 fn weapon_swing_sfx(action: psx_level::CharacterAnimationAction) -> Option<LevelGameplaySfxEvent> {
     use psx_level::CharacterAnimationAction as Action;
     match action {
@@ -194,7 +193,6 @@ impl ActivePlayerCapsule {
 pub(super) struct SceneEntityMover<'a> {
     pub(super) bsp: Option<&'a mut BspRuntime>,
     pub(super) destructibles: &'a RuntimeDestructibles<{ psx_level::MAX_DESTRUCTIBLES }>,
-    pub(super) window: &'a RuntimeRoomWindow,
     pub(super) box_props: &'a RuntimeBoxProps,
     pub(super) models: &'a [Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
     /// Pre-tick entity positions (entities move one at a time inside
@@ -203,21 +201,8 @@ pub(super) struct SceneEntityMover<'a> {
     /// Pre-tick dead flags: corpses stop blocking other movers.
     pub(super) entity_dead: &'a [bool],
     pub(super) player: RoomPoint,
-    pub(super) player_room: RoomIndex,
     pub(super) player_radius: i32,
     pub(super) player_height: i32,
-}
-
-impl SceneEntityMover<'_> {
-    /// The active-window slot for `room`, if its collision is
-    /// resident.
-    fn active_room(&self, room: RoomIndex) -> Option<&ActiveRuntimeRoom> {
-        self.window
-            .rooms
-            .iter()
-            .flatten()
-            .find(|active| active.index == room)
-    }
 }
 
 impl SceneEntityMover<'_> {
@@ -280,7 +265,7 @@ impl SceneEntityMover<'_> {
                 break;
             }
         }
-        if self.player_room == room && self.player_radius > 0 {
+        if self.player_radius > 0 {
             cylinders.try_push(CharacterCollisionCylinder::new(
                 self.player,
                 self.player_radius,
@@ -297,12 +282,11 @@ impl SceneEntityMover<'_> {
         let mut aabbs =
             psx_engine::FixedScratch::<CharacterCollisionAabb, MAX_STATIC_PROP_AABB_BLOCKERS>::new(
             );
-        // Backend selection is cooked, not a per-actor fallback decision.
-        if USES_PXBSP {
-            let bsp = self
-                .bsp
-                .as_deref_mut()
-                .expect("resident BSP entity backend");
+        {
+            let Some(bsp) = self.bsp.as_deref_mut() else {
+                // No world cooked yet (the placeholder manifest).
+                return position;
+            };
             let Some(_) = self
                 .box_props
                 .collect_collision_blockers_checked_into(BOX_PROPS, room, &mut aabbs)
@@ -360,42 +344,8 @@ impl SceneEntityMover<'_> {
                 )
             }
             .expect("PXBSP entity trace failed");
-            return [step.position.x, step.position.y, step.position.z];
+            [step.position.x, step.position.y, step.position.z]
         }
-
-        self.box_props
-            .collect_collision_blockers_into(BOX_PROPS, room, &mut aabbs);
-        psx_game_runtime::arch_props::collect_arch_prop_collision_blockers_into(
-            ARCH_PROPS,
-            ARCH_PROP_COLLISIONS,
-            room,
-            &mut aabbs,
-        );
-        psx_game_runtime::image_props::collect_image_prop_collision_blockers_into(
-            IMAGE_PROPS,
-            room,
-            &mut aabbs,
-        );
-
-        // Entity coordinates are their OWN room's local space, so the grid
-        // collision room enters with zero offsets (window offsets translate
-        // rooms into the CURRENT room's space for the player).
-        let Some(active) = self.active_room(room) else {
-            return position;
-        };
-        let collision_rooms = [CharacterCollisionRoom::from_collision(
-            active.collision_room,
-            0,
-            0,
-        )];
-        let collision = CharacterCollision::rooms_with_aabbs(
-            &collision_rooms,
-            cylinders.as_slice(),
-            aabbs.as_slice(),
-        );
-        let step =
-            psx_engine::character_motor::commit_body_step(collision, start, dx, dz, radius, height);
-        [step.position.x, step.position.y, step.position.z]
     }
 }
 
@@ -427,9 +377,6 @@ impl psx_game_runtime::entities::GameEntityMover for SceneEntityMover<'_> {
     }
 
     fn line_of_sight(&mut self, room: RoomIndex, from: [i32; 3], to: [i32; 3]) -> bool {
-        if room != self.player_room {
-            return false;
-        }
         let mut aabbs =
             psx_engine::FixedScratch::<CharacterCollisionAabb, MAX_STATIC_PROP_AABB_BLOCKERS>::new(
             );
@@ -467,7 +414,6 @@ impl psx_game_runtime::entities::GameEntityMover for SceneEntityMover<'_> {
             return false;
         };
         let Some(bsp) = self.bsp.as_deref_mut() else {
-            // Legacy grid projects have no arbitrary 3D segment provider.
             return true;
         };
         bsp.trace_point_segment(
@@ -577,7 +523,9 @@ impl Playtest {
                     attacker_pose,
                     released,
                 ) {
-                    if !self.game_entities.can_fire_energy(attack.entity()) { break; }
+                    if !self.game_entities.can_fire_energy(attack.entity()) {
+                        break;
+                    }
                     let velocity = self.game_entities.ranged_velocity(
                         attack.entity(),
                         release.position,
@@ -597,24 +545,56 @@ impl Playtest {
                         damage_channel: release.damage_channel,
                         visual: enemy_projectile_visual(release.visual),
                     };
-                    let Some(target) = self.game_entities.ranged_target(attack.entity()) else { break; };
-                    if self.combat_projectiles.spawn_toward(spawn, target, release.speed).is_ok() {
+                    let Some(target) = self.game_entities.ranged_target(attack.entity()) else {
+                        break;
+                    };
+                    if self
+                        .combat_projectiles
+                        .spawn_toward(spawn, target, release.speed)
+                        .is_ok()
+                    {
                         let _ = self.combat_projectile_impacts.spawn_muzzle(&spawn);
                         self.game_entities.spend_shot_energy(attack.entity());
-                        if self.duel.active { duel::log_values("duel:shot", &[ctx.sim_tick.as_u32()-self.duel.started_tick(),1,u32::from(self.game_entities.energy(attack.entity()))]); }
+                        if self.duel.active {
+                            duel::log_values(
+                                "duel:shot",
+                                &[
+                                    ctx.sim_tick.as_u32() - self.duel.started_tick(),
+                                    1,
+                                    u32::from(self.game_entities.energy(attack.entity())),
+                                ],
+                            );
+                        }
                         telemetry::debug_log("enemy projectile:release");
                         #[cfg(feature = "emulator-telemetry")]
                         {
-                            let hurt = player_capsules.iter()
+                            let hurt = player_capsules
+                                .iter()
                                 .find(|c| c.flags & psx_level::combat_capsule_flags::HURTBOX != 0)
-                                .and_then(|c| player_pose.and_then(|pose| combat::transform_actor_combat_capsule(c, pose)));
+                                .and_then(|c| {
+                                    player_pose.and_then(|pose| {
+                                        combat::transform_actor_combat_capsule(c, pose)
+                                    })
+                                });
                             if let Some(hurt) = hurt {
                                 crate::debug_runtime::debug_log_enemy_shot([
-                                    release.position[0], release.position[1], release.position[2],
-                                    velocity[0], velocity[1], velocity[2],
-                                    player_position[0], player_position[1], player_position[2], player_height,
-                                    hurt.start[0], hurt.start[1], hurt.start[2],
-                                    hurt.end[0], hurt.end[1], hurt.end[2], i32::from(hurt.radius),
+                                    release.position[0],
+                                    release.position[1],
+                                    release.position[2],
+                                    velocity[0],
+                                    velocity[1],
+                                    velocity[2],
+                                    player_position[0],
+                                    player_position[1],
+                                    player_position[2],
+                                    player_height,
+                                    hurt.start[0],
+                                    hurt.start[1],
+                                    hurt.start[2],
+                                    hurt.end[0],
+                                    hurt.end[1],
+                                    hurt.end[2],
+                                    i32::from(hurt.radius),
                                 ]);
                             }
                         }
@@ -660,7 +640,6 @@ impl Playtest {
                         GAME_ENTITIES,
                         attack,
                         player_position,
-                        self.room_index,
                         player_radius,
                     )
                     .then_some((entity.touch_damage, entity.touch_damage.max(20))),
@@ -693,7 +672,10 @@ impl Playtest {
                     .connect_deferred_melee_window(attack, window_mask)
             };
             if connected {
-                self.game_entities.gain_melee_energy(attack.entity(), self.game_entities.attack_kind(attack.entity()) == 1);
+                self.game_entities.gain_melee_energy(
+                    attack.entity(),
+                    self.game_entities.attack_kind(attack.entity()) == 1,
+                );
                 hits = hits.saturating_add(1);
                 damage_total = damage_total.saturating_add(damage);
                 poise_total = poise_total.saturating_add(poise_damage);
@@ -745,8 +727,14 @@ impl Playtest {
         // Use the primary animated hurtbox for projectile contact. A legacy
         // actor without one retains its body capsule; authoring failures do
         // not invent a larger target. Storage stays bounded at the actor limit.
-        for (index, record) in GAME_ENTITIES.iter().enumerate().take(self.game_entities.count()) {
-            if self.game_entities.state(index) == GameEntityState::Dead { continue; }
+        for (index, record) in GAME_ENTITIES
+            .iter()
+            .enumerate()
+            .take(self.game_entities.count())
+        {
+            if self.game_entities.state(index) == GameEntityState::Dead {
+                continue;
+            }
             let p = self.game_entities.position(index);
             let r = i32::from(record.radius).min(i32::from(record.height) / 2);
             let fallback = WorldCombatCapsule {
@@ -755,15 +743,33 @@ impl Playtest {
                 radius: r.max(1) as u16,
             };
             let first = record.combat_capsule_first.to_usize();
-            let authored = COMBAT_CAPSULES.get(first..first + usize::from(record.combat_capsule_count))
-                .unwrap_or(&[]).iter().find(|c| c.flags & psx_level::combat_capsule_flags::HURTBOX != 0);
+            let authored = COMBAT_CAPSULES
+                .get(first..first + usize::from(record.combat_capsule_count))
+                .unwrap_or(&[])
+                .iter()
+                .find(|c| c.flags & psx_level::combat_capsule_flags::HURTBOX != 0);
             let hurtbox = if let Some(capsule) = authored {
-                let Some(pose) = self.instance_actor_poses.get(usize::from(record.model_instance)).copied().flatten() else { continue; };
-                let Some(hurtbox) = combat::transform_actor_combat_capsule(capsule, pose.pose()) else { continue; };
+                let Some(pose) = self
+                    .instance_actor_poses
+                    .get(usize::from(record.model_instance))
+                    .copied()
+                    .flatten()
+                else {
+                    continue;
+                };
+                let Some(hurtbox) = combat::transform_actor_combat_capsule(capsule, pose.pose())
+                else {
+                    continue;
+                };
                 hurtbox
-            } else { fallback };
+            } else {
+                fallback
+            };
             let _ = projectile_targets.try_push(ProjectileTarget {
-                target: index as u16, team: CombatTeam::Enemy, room: record.room, hurtbox,
+                target: index as u16,
+                team: CombatTeam::Enemy,
+                room: record.room,
+                hurtbox,
             });
         }
         let mut projectile_opening_hit = false;
@@ -790,26 +796,55 @@ impl Playtest {
                     let index = usize::from(target);
                     if let Some(record) = GAME_ENTITIES.get(index) {
                         let channel = match impact.damage_channel {
-                            psx_game_runtime::projectiles::ProjectileDamageChannel::Horizon => VitalityChannelId::One,
-                            psx_game_runtime::projectiles::ProjectileDamageChannel::Zenith => VitalityChannelId::Two,
+                            psx_game_runtime::projectiles::ProjectileDamageChannel::Horizon => {
+                                VitalityChannelId::One
+                            }
+                            psx_game_runtime::projectiles::ProjectileDamageChannel::Zenith => {
+                                VitalityChannelId::Two
+                            }
                         };
-                        let applied = self.game_entities.scaled_stance_damage(index, channel, impact.damage);
+                        let applied =
+                            self.game_entities
+                                .scaled_stance_damage(index, channel, impact.damage);
                         let opening = self.game_entities.shot_opening(GAME_ENTITIES, index);
-                        let outcome = self.game_entities.apply_projectile_hit(GAME_ENTITIES, index, channel, impact.damage, impact.poise_damage);
+                        let outcome = self.game_entities.apply_projectile_hit(
+                            GAME_ENTITIES,
+                            index,
+                            channel,
+                            impact.damage,
+                            impact.poise_damage,
+                        );
                         self.combat_flow.shot_hit(opening && outcome.staggered);
                         if opening && outcome.staggered {
                             telemetry::debug_log("flow:enemy-shot-interrupt");
-                            if self.duel.active { duel::log_values("duel:flow", &[ctx.sim_tick.as_u32()-self.duel.started_tick(),0,1]); }
+                            if self.duel.active {
+                                duel::log_values(
+                                    "duel:flow",
+                                    &[ctx.sim_tick.as_u32() - self.duel.started_tick(), 0, 1],
+                                );
+                            }
                         }
                         let now = self.gameplay_tick(ctx.sim_tick);
                         if outcome.connected {
-                            self.damage_numbers.spawn(struck_actor_anchor(self.game_entities.position(index), record.height),
-                                record.room, applied, if channel == VitalityChannelId::Two {
+                            self.damage_numbers.spawn(
+                                struck_actor_anchor(
+                                    self.game_entities.position(index),
+                                    record.height,
+                                ),
+                                record.room,
+                                applied,
+                                if channel == VitalityChannelId::Two {
                                     DamageNumberChannel::Zenith
-                                } else { DamageNumberChannel::Horizon }, now);
+                                } else {
+                                    DamageNumberChannel::Horizon
+                                },
+                                now,
+                            );
                             telemetry::debug_log("player projectile:hit");
                         }
-                        if outcome.died { self.souls.award(record.soul_value, now.as_u32()); }
+                        if outcome.died {
+                            self.souls.award(record.soul_value, now.as_u32());
+                        }
                     }
                 }
             }
@@ -824,8 +859,13 @@ impl Playtest {
                 let exposed = self.player_shot_opening();
                 projectile_opening_hit |= exposed && self.combat_flow.can_interrupt();
                 poise_total = poise_total.saturating_add(self.combat_flow.shot_poise(
-                    impact.poise_damage, psx_game_runtime::character::PLAYER_POISE, exposed));
-                if exposed && self.combat_flow.can_interrupt() { telemetry::debug_log("flow:player-shot-interrupt"); }
+                    impact.poise_damage,
+                    psx_game_runtime::character::PLAYER_POISE,
+                    exposed,
+                ));
+                if exposed && self.combat_flow.can_interrupt() {
+                    telemetry::debug_log("flow:player-shot-interrupt");
+                }
                 match impact.damage_channel {
                     psx_game_runtime::projectiles::ProjectileDamageChannel::Horizon => {
                         horizon_projectile_damage =
@@ -910,13 +950,26 @@ impl Playtest {
                         && frame <= capsule.active_end_frame
                 })
             });
-            let armored = self.player_combat_sample(ctx).active(psx_level::CombatWindowKind::Armored).unwrap_or(armored);
+            let armored = self
+                .player_combat_sample(ctx)
+                .active(psx_level::CombatWindowKind::Armored)
+                .unwrap_or(armored);
             let staggered = self.react_player_to_hit(poise_total, armored, damage_total == 0, ctx);
             if damage_total == 0 && staggered && projectile_opening_hit {
-                if self.duel.active { duel::log_values("duel:flow", &[ctx.sim_tick.as_u32()-self.duel.started_tick(),1,1]); }
+                if self.duel.active {
+                    duel::log_values(
+                        "duel:flow",
+                        &[ctx.sim_tick.as_u32() - self.duel.started_tick(), 1, 1],
+                    );
+                }
                 for impact in projectile_impacts.as_slice() {
-                    if impact.kind == (ProjectileImpactKind::Target {target: PLAYER_PROJECTILE_TARGET}) {
-                        self.game_entities.projectile_connected(usize::from(impact.owner),true);
+                    if impact.kind
+                        == (ProjectileImpactKind::Target {
+                            target: PLAYER_PROJECTILE_TARGET,
+                        })
+                    {
+                        self.game_entities
+                            .projectile_connected(usize::from(impact.owner), true);
                     }
                 }
             }
@@ -1070,7 +1123,9 @@ impl Playtest {
     pub(super) fn resolve_player_melee(&mut self, ctx: &Ctx) {
         let now = ctx.sim_tick;
         if self.anim_state == PlayerAnim::RangedAttack
-            || !player_anim_is_attack(self.anim_state) || self.anim_lock_until_tick <= now {
+            || !player_anim_is_attack(self.anim_state)
+            || self.anim_lock_until_tick <= now
+        {
             return;
         }
         let Some(character) = self.character else {
@@ -1603,9 +1658,12 @@ impl Playtest {
                     hit.poise_damage,
                 );
                 if outcome.connected {
-                    if matches!(self.anim_state, PlayerAnim::HeavyAttack | PlayerAnim::VertHeavyAttack) {
+                    if matches!(
+                        self.anim_state,
+                        PlayerAnim::HeavyAttack | PlayerAnim::VertHeavyAttack
+                    ) {
                         let p = self.motor.position();
-                        self.game_entities.recoil_from(entity, [p.x,p.y,p.z]);
+                        self.game_entities.recoil_from(entity, [p.x, p.y, p.z]);
                     }
                     // Spawned here rather than from the returned stats
                     // because the damage is per-capsule: only this site
@@ -1683,8 +1741,13 @@ impl Playtest {
 
     fn report_player_melee_stats(&mut self, stats: MeleeArcStats) {
         if stats.hits > 0 {
-            let heavy = matches!(self.anim_state, PlayerAnim::HeavyAttack | PlayerAnim::VertHeavyAttack);
-            for _ in 0..stats.hits { self.combat_flow.melee_hit(heavy); }
+            let heavy = matches!(
+                self.anim_state,
+                PlayerAnim::HeavyAttack | PlayerAnim::VertHeavyAttack
+            );
+            for _ in 0..stats.hits {
+                self.combat_flow.melee_hit(heavy);
+            }
             telemetry::counter(telemetry::counter::PLAYER_MELEE_HITS, u32::from(stats.hits));
             let event = if matches!(
                 self.anim_state,

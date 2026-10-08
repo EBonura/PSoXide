@@ -6,10 +6,7 @@
 //! them without baking the source blobs into the executable.
 
 use psx_engine::telemetry;
-use psx_level::{
-    asset_flags, AssetId, AssetKind, LevelAssetRecord, LevelWorldPackEntryRecord, RoomIndex,
-    RoomResidencyRecord,
-};
+use psx_level::{asset_flags, LevelAssetRecord, LevelWorldPackEntryRecord};
 
 use crate::cd_stream::{
     CdController, WorldChunkDestination, WorldRoomSlotsReadJob, ROOM_CHUNK_STATUS_OK, SECTOR_BYTES,
@@ -64,6 +61,22 @@ impl<const PAGES: usize, const ASSETS: usize> PersistentAssetStorage<PAGES, ASSE
         end
     }
 
+    #[cfg(test)]
+    fn resident(&self, slot: usize) -> bool {
+        slot < ASSETS && self.lengths[slot] != 0
+    }
+
+    #[cfg(test)]
+    /// Drop `slot`'s allocation. Its bytes stay in place until the next
+    /// compaction reclaims them.
+    fn release_slot(&mut self, slot: usize) {
+        if slot >= ASSETS || self.lengths[slot] == 0 {
+            return;
+        }
+        self.lengths[slot] = 0;
+        self.offsets[slot] = 0;
+    }
+
     /// Total live bytes, 4-aligned per asset, ignoring gaps.
     fn live_bytes(&self) -> usize {
         let mut total = 0usize;
@@ -75,20 +88,6 @@ impl<const PAGES: usize, const ASSETS: usize> PersistentAssetStorage<PAGES, ASSE
             slot += 1;
         }
         total
-    }
-
-    fn resident(&self, slot: usize) -> bool {
-        slot < ASSETS && self.lengths[slot] != 0
-    }
-
-    /// Drop `slot`'s allocation. Its bytes stay in place until the next
-    /// compaction reclaims them.
-    fn release_slot(&mut self, slot: usize) {
-        if slot >= ASSETS || self.lengths[slot] == 0 {
-            return;
-        }
-        self.lengths[slot] = 0;
-        self.offsets[slot] = 0;
     }
 
     /// Pack every live allocation toward byte zero in slot order, closing the
@@ -372,141 +371,6 @@ impl<const PAGES: usize, const ASSETS: usize> PersistentAssetStreamer<PAGES, ASS
         self.finish_if_done();
     }
 
-    /// Whether `asset` must keep its RAM bytes for any room in `desired`.
-    ///
-    /// The keep-set spans all four cooked sets, not just the RAM pair. A texture
-    /// is listed only under `required_vram`/`warm_vram` -- cortex_v1's persistent
-    /// textures are ids 27 and 33, and neither appears in any `required_ram` --
-    /// but VRAM is uploaded FROM these RAM bytes, so dropping them leaves the
-    /// texture unable to re-upload once its VRAM slot is evicted. Keying
-    /// eviction on the RAM sets alone silently discarded every persistent
-    /// texture on the first residency pass and only looked correct because the
-    /// already-uploaded VRAM copies survived.
-    ///
-    /// The warm sets are included so crossing a portal does not evict exactly
-    /// what the neighbour is about to want.
-    pub fn ram_asset_required(
-        asset: AssetId,
-        desired: &[RoomIndex],
-        room_residency: &[RoomResidencyRecord],
-    ) -> bool {
-        for &room in desired {
-            let Some(res) = room_residency.iter().find(|r| r.room == room) else {
-                continue;
-            };
-            let listed = res.required_ram.contains(&asset)
-                || res.warm_ram.contains(&asset)
-                || res.required_vram.contains(&asset)
-                || res.warm_vram.contains(&asset);
-            if listed {
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Whether an asset of this kind may be released while gameplay runs.
-    ///
-    /// Texture payloads are read once at VRAM upload and the uploaded copy is
-    /// what gets sampled, so dropping the RAM bytes is safe and they reload from
-    /// the keep-set if a room wants them again.
-    ///
-    /// Model meshes are also safe after loading: their faces, parts, vertices,
-    /// and counts are copied into fixed runtime pools. Animation clips still
-    /// borrow their packed payload and must remain pinned for the level.
-    const fn evictable(kind: AssetKind) -> bool {
-        matches!(
-            kind,
-            AssetKind::Texture | AssetKind::RoomWorld | AssetKind::ModelMesh
-        )
-    }
-
-    /// Make the persistent set match `desired`'s residency needs.
-    ///
-    /// Releases anything no desired room needs, then arms one grouped read for
-    /// only the assets that are missing. An asset already resident is skipped,
-    /// so walking into a neighbour that shares assets with the current room
-    /// costs no CD traffic at all. Returns whether a new read was armed.
-    ///
-    /// Does nothing while a read is already in flight, so the caller may call
-    /// this every frame and let the window settle.
-    pub fn request_rooms(
-        &mut self,
-        pack_lba: u32,
-        toc: &[LevelWorldPackEntryRecord],
-        assets: &[LevelAssetRecord],
-        desired: &[RoomIndex],
-        room_residency: &[RoomResidencyRecord],
-    ) -> bool {
-        if self.failed || self.job.is_active() {
-            return false;
-        }
-        // Evict first: a release can free the very bytes the delta needs.
-        for asset in assets {
-            if asset.flags & asset_flags::STREAMED_GAMEPLAY_PERSISTENT == 0 {
-                continue;
-            }
-            if !Self::evictable(asset.kind) {
-                continue;
-            }
-            let slot = asset.id.0 as usize;
-            if slot < ASSETS
-                && self.storage.resident(slot)
-                && !Self::ram_asset_required(asset.id, desired, room_residency)
-            {
-                self.storage.release_slot(slot);
-            }
-        }
-
-        let mut count = 0usize;
-        for asset in assets {
-            if asset.flags & asset_flags::STREAMED_GAMEPLAY_PERSISTENT == 0 {
-                continue;
-            }
-            if !Self::ram_asset_required(asset.id, desired, room_residency) {
-                continue;
-            }
-            let slot = asset.id.0 as usize;
-            let byte_count = asset.ram_bytes as usize;
-            if slot >= ASSETS || byte_count == 0 {
-                self.fail(asset.id.0, ASSET_FAIL_BAD_RECORD);
-                return false;
-            }
-            if self.storage.resident(slot) {
-                continue;
-            }
-            if count >= ASSETS {
-                self.fail(asset.id.0, ASSET_FAIL_BAD_RECORD);
-                return false;
-            }
-            if !self.storage.prepare_slot(slot, byte_count) {
-                self.fail(asset.id.0, ASSET_FAIL_NO_SPACE);
-                return false;
-            }
-            self.ids[count] = asset.id.0;
-            self.slots[count] = slot;
-            self.capacities[count] = byte_count;
-            count += 1;
-        }
-
-        self.asset_count = count;
-        self.started = true;
-        if count == 0 {
-            self.ready = true;
-            return false;
-        }
-        self.ready = false;
-        self.job.start(
-            pack_lba,
-            toc,
-            &self.ids[..count],
-            &self.slots[..count],
-            &self.capacities[..count],
-        );
-        self.finish_if_done();
-        true
-    }
-
     /// Identity of the pool's byte layout; changes when compaction moved live
     /// assets, so anything holding decoded pointers must rebuild.
     pub const fn layout_generation(&self) -> u32 {
@@ -658,6 +522,7 @@ impl<const PAGES: usize, const ASSETS: usize> Default for PersistentAssetStreame
 #[cfg(test)]
 mod tests {
     use super::*;
+    use psx_level::{AssetId, AssetKind};
 
     #[test]
     fn packed_assets_are_word_aligned_stable_and_independent() {
@@ -712,125 +577,6 @@ mod tests {
             vram_bytes: 0,
             flags: asset_flags::STREAMED_GAMEPLAY_PERSISTENT,
         }
-    }
-
-    const fn residency(
-        room: u16,
-        required_ram: &'static [AssetId],
-        warm_ram: &'static [AssetId],
-    ) -> RoomResidencyRecord {
-        RoomResidencyRecord {
-            room: RoomIndex(room),
-            required_ram,
-            required_vram: &[],
-            warm_ram,
-            warm_vram: &[],
-        }
-    }
-
-    /// The point of the whole exercise: crossing into a neighbour that shares
-    /// assets must not re-read them, and must drop only what nothing needs.
-    ///
-    /// Each case starts from a fresh streamer with residency staged directly, so
-    /// this exercises the delta plan rather than CD job mechanics.
-    #[test]
-    fn requesting_a_neighbourhood_plans_only_the_missing_assets() {
-        type Streamer = PersistentAssetStreamer<4, 8>;
-        const ROOMS: &[RoomResidencyRecord] = &[
-            // Room 0 needs asset 1 and warms asset 2 (its neighbour's).
-            residency(0, &[AssetId(1)], &[AssetId(2)]),
-            // Room 2 needs asset 2 and warms asset 3. Asset 1 becomes unwanted.
-            residency(2, &[AssetId(2)], &[AssetId(3)]),
-        ];
-        let assets = [
-            persistent_asset(1, 64),
-            persistent_asset(2, 64),
-            persistent_asset(3, 64),
-        ];
-
-        // Cold entry to room 0: both its required and warm assets are planned,
-        // and the asset only room 2 wants is left alone.
-        let mut cold = Streamer::new();
-        assert!(cold.request_rooms(0, &[], &assets, &[RoomIndex(0)], ROOMS));
-        assert_eq!(
-            cold.asset_count, 2,
-            "asset 3 is in neither of room 0's sets"
-        );
-        assert_eq!(&cold.ids[..2], &[1, 2]);
-
-        // Nothing missing: planning must arm no read at all.
-        let mut warm = Streamer::new();
-        assert!(warm.storage.prepare_slot(1, 64));
-        assert!(warm.storage.prepare_slot(2, 64));
-        assert!(!warm.request_rooms(0, &[], &assets, &[RoomIndex(0)], ROOMS));
-        assert_eq!(warm.asset_count, 0, "resident assets are not re-read");
-        assert!(warm.ready(), "an already-satisfied window is ready");
-
-        // Crossing to room 2 with 1 and 2 resident: asset 2 is shared and must
-        // survive, asset 1 is wanted by nobody, only asset 3 is read.
-        let mut crossing = Streamer::new();
-        assert!(crossing.storage.prepare_slot(1, 64));
-        assert!(crossing.storage.prepare_slot(2, 64));
-        assert!(crossing.request_rooms(0, &[], &assets, &[RoomIndex(2)], ROOMS));
-        assert_eq!(crossing.asset_count, 1, "only the delta is read");
-        assert_eq!(crossing.ids[0], 3);
-        assert!(!crossing.storage.resident(1), "asset 1 evicted");
-        assert!(crossing.storage.resident(2), "shared asset retained");
-    }
-
-    /// Decoded meshes may be released, while animation bytes still back live
-    /// parsed clips and must survive an eviction pass.
-    #[test]
-    fn decoded_model_meshes_are_evictable_but_animation_clips_are_pinned() {
-        type Streamer = PersistentAssetStreamer<4, 8>;
-        const ROOMS: &[RoomResidencyRecord] = &[residency(0, &[AssetId(1)], &[])];
-        let assets = [
-            persistent_asset(1, 64),
-            persistent_asset(2, 64),
-            persistent_asset_of(3, 64, AssetKind::ModelMesh),
-            persistent_asset_of(4, 64, AssetKind::ModelAnimation),
-        ];
-        let mut streamer = Streamer::new();
-        for slot in 1..=4 {
-            assert!(streamer.storage.prepare_slot(slot, 64));
-        }
-        streamer.request_rooms(0, &[], &assets, &[RoomIndex(0)], ROOMS);
-        assert!(streamer.storage.resident(1), "required texture kept");
-        assert!(!streamer.storage.resident(2), "unwanted texture evicted");
-        assert!(!streamer.storage.resident(3), "decoded model mesh evicted");
-        assert!(streamer.storage.resident(4), "animation clip pinned");
-    }
-
-    #[test]
-    fn keep_set_spans_required_and_warm_across_every_desired_room() {
-        type Streamer = PersistentAssetStreamer<4, 8>;
-        const ROOMS: &[RoomResidencyRecord] = &[
-            residency(0, &[AssetId(1)], &[AssetId(2)]),
-            RoomResidencyRecord {
-                room: RoomIndex(1),
-                required_ram: &[AssetId(3)],
-                required_vram: &[AssetId(5)],
-                warm_ram: &[],
-                warm_vram: &[],
-            },
-        ];
-        let desired = [RoomIndex(0), RoomIndex(1)];
-        // Asset 5 is listed only under required_vram, which still needs its RAM
-        // bytes alive to upload from.
-        for (id, want) in [(1u16, true), (2, true), (3, true), (5, true), (4, false)] {
-            assert_eq!(
-                Streamer::ram_asset_required(AssetId(id), &desired, ROOMS),
-                want,
-                "asset {id}"
-            );
-        }
-        // A room with no residency record contributes nothing rather than
-        // dragging in everything.
-        assert!(!Streamer::ram_asset_required(
-            AssetId(1),
-            &[RoomIndex(9)],
-            ROOMS
-        ));
     }
 
     /// The property whole-level residency was missing: a freed asset's bytes

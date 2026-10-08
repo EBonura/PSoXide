@@ -1401,7 +1401,10 @@ impl BspRuntime {
         .expect("validated PXBSP player collision provider");
         let mut provider =
             CharacterBlockerTraceProvider::new_with_aabbs(&mut provider, blockers, aabb_blockers);
-        trace_collision(&mut provider, CollisionTraceQuery::body(from, to, config.radius, config.height))
+        trace_collision(
+            &mut provider,
+            CollisionTraceQuery::body(from, to, config.radius, config.height),
+        )
     }
 
     /// Move one gameplay entity through the same static-world, transformed-

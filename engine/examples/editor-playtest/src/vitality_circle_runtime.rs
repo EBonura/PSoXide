@@ -25,7 +25,7 @@ impl Playtest {
         let Some(base_material) = self.vitality_circle_material else {
             return;
         };
-        let options = current_actor_surface_options(self.room_index, self.bsp.is_some());
+        let options = current_actor_surface_options(self.room_index);
         for (index, circle) in VITALITY_CIRCLES.iter().enumerate() {
             if circle.room != self.room_index {
                 continue;

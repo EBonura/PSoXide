@@ -1,9 +1,8 @@
 //! The example's mutable runtime state, folded into ONE arena struct
 //! behind ONE static (phase 1.5 of docs/game-runtime-plan.md). The
 //! former `static mut` instances (`VRAM_RUNTIME`, `FONT_PACK_SCRATCH`,
-//! `PRIMITIVE_PACKETS`, `WORLD_COMMANDS`, `UI_IMAGE_CACHE`, `PERSISTENT_ASSETS`,
-//! `STREAMED_ROOM_SLOTS`, `ROOM_STREAM_SCHEDULER`, `ROOM_MATERIAL_POOL`,
-//! `PREBUILT_ROOM_QUADS`) are now [`RuntimeArenas`] fields.
+//! `PRIMITIVE_PACKETS`, `WORLD_COMMANDS`, `UI_IMAGE_CACHE`, `PERSISTENT_ASSETS`)
+//! are now [`RuntimeArenas`] fields.
 //!
 //! Flat-binary discipline: the arena's project-sized buffers must stay
 //! link-time-zero (`.bss` is NOLOAD in the PSX-EXE), so the static is
@@ -16,15 +15,9 @@
 //! DISTINCT fields never overlap in memory, so holding one while
 //! minting another mirrors the old disjoint-statics aliasing exactly;
 //! the pre-existing rule is unchanged: never hold two borrows of the
-//! SAME field at once, and treat streamed-slot views as stale after the
-//! next streaming step (the [`StreamedRoomPages`] staleness contract).
-//! The two world-backend overlays below are the deliberate exception:
-//! PXBSP and grid streaming are mutually exclusive for the whole scene,
-//! while PXBSP frame-face collection finishes before model projection
-//! starts. Their accessors assert the persistent-backend choice and document
-//! the shorter per-frame handoff respectively.
-//!
-//! [`StreamedRoomPages`]: psx_game_runtime::room_streaming::StreamedRoomPages
+//! SAME field at once. The frame-backend overlay below is the deliberate
+//! exception: PXBSP frame-face collection finishes before model projection
+//! starts, and its accessors document that shorter per-frame handoff.
 
 use super::*;
 use crate::generated::PXBSP_FACE_CHAIN_CAPACITY;
@@ -61,16 +54,10 @@ pub(super) struct RuntimeArenas {
     /// Front-end/gameplay RAM overlay (see [`FrontEndGameplayOverlay`]).
     #[cfg(feature = "cd-stream-bench")]
     pub(super) overlay: FrontEndGameplayOverlay,
-    /// Persistent world-backend RAM: grid streaming state or the resident
-    /// PXBSP renderer's visibility face chain. Only one spatial backend can
-    /// be selected by the cooked manifest.
-    pub(super) world_backend: PersistentWorldBackendOverlay,
+    /// The resident PXBSP renderer's session-lifetime visibility face chain.
+    pub(super) pxbsp_visible_faces: [u16; PXBSP_FACE_CHAIN_CAPACITY],
     /// Rotation-keyed sky-cyclorama packet cache (phase-2 sky carve).
     pub(super) sky: [psx_game_runtime::sky::SkyCyclorama; PANORAMA_CACHE_COUNT],
-    /// Accepted-cell draw scratch for the cached-room draw paths
-    /// (phase-2 visible-cell carve).
-    #[cfg(feature = "world-grid-visible")]
-    pub(super) cell_scratch: RuntimeCellDrawScratch,
     /// Per-frame scratch shared by the PXBSP face filter and model submits.
     /// BSP static-world/mover drawing completes before any model path runs.
     pub(super) frame_backend: FrameWorldBackendOverlay,
@@ -82,52 +69,18 @@ pub(super) struct RuntimeArenas {
     pub(super) cd: psx_game_runtime::cd_stream::CdController,
 }
 
-/// Persistent arenas used only by the synthetic/grid world backend.
-///
-/// The CD build keeps prebuilt quads and room projection in
-/// [`FrontEndGameplayOverlay`], while the resident build keeps them here.
-pub(super) struct GridWorldArenas {
-    /// Streamed-room sector pages the CD loads land in directly.
-    #[cfg(feature = "cd-stream-bench")]
-    pub(super) streamed_slots: RuntimeStreamedRoomSlots,
-    /// Streamed-room residency scheduler over `streamed_slots`.
-    #[cfg(feature = "cd-stream-bench")]
-    pub(super) room_streams: RuntimeRoomStreamScheduler,
-    /// Room-surface materials pooled by resident stream slot.
-    #[cfg(feature = "cd-stream-bench")]
-    pub(super) room_materials: RuntimeRoomMaterialPool,
-    /// Prebuilt GP0(3Ch) room-quad packets (docs/perf-30fps.md).
-    #[cfg(not(feature = "cd-stream-bench"))]
-    pub(super) prebuilt_quads: RuntimePrebuiltRoomQuads,
-    /// Per-frame projected-vertex scratch for cached-room draws.
-    #[cfg(not(feature = "cd-stream-bench"))]
-    pub(super) _room_projection: RuntimeCachedRoomProjection,
-}
-
-/// Session-lifetime overlay between the mutually exclusive spatial backends.
-pub(super) union PersistentWorldBackendOverlay {
-    pub(super) grid: core::mem::ManuallyDrop<GridWorldArenas>,
-    pub(super) pxbsp_visible_faces: core::mem::ManuallyDrop<[u16; PXBSP_FACE_CHAIN_CAPACITY]>,
-}
-
 /// Frame-lifetime overlay between BSP face filtering and model projection.
 pub(super) union FrameWorldBackendOverlay {
     pub(super) model: core::mem::ManuallyDrop<RuntimeModelDrawScratch>,
     pub(super) pxbsp_frame_faces: core::mem::ManuallyDrop<[u16; PXBSP_FACE_CHAIN_CAPACITY]>,
 }
 
-// Keep both overlays honest as generated project capacities change. Rust
+// Keep the overlay honest as generated project capacities change. Rust
 // unions use the largest variant (rounded to their common alignment); the
-// present grid/model variants are 32-bit aligned and larger than the u16
-// chains, so either assertion failing means this carve no longer has the
-// promised zero-static-RAM cost and must be reviewed at cook/runtime together.
+// model variant is 32-bit aligned and larger than the u16 chain, so the
+// assertion failing means this carve no longer has the promised
+// zero-static-RAM cost and must be reviewed at cook/runtime together.
 const PXBSP_FACE_CHAIN_BYTES: usize = core::mem::size_of::<[u16; PXBSP_FACE_CHAIN_CAPACITY]>();
-const PERSISTENT_WORLD_OVERLAY_PAYLOAD_BYTES: usize =
-    if core::mem::size_of::<GridWorldArenas>() > PXBSP_FACE_CHAIN_BYTES {
-        core::mem::size_of::<GridWorldArenas>()
-    } else {
-        PXBSP_FACE_CHAIN_BYTES
-    };
 const FRAME_WORLD_OVERLAY_PAYLOAD_BYTES: usize =
     if core::mem::size_of::<RuntimeModelDrawScratch>() > PXBSP_FACE_CHAIN_BYTES {
         core::mem::size_of::<RuntimeModelDrawScratch>()
@@ -137,16 +90,9 @@ const FRAME_WORLD_OVERLAY_PAYLOAD_BYTES: usize =
 const fn aligned_union_bytes(payload: usize, alignment: usize) -> usize {
     ((payload + alignment - 1) / alignment) * alignment
 }
-const PERSISTENT_WORLD_OVERLAY_BYTES: usize = aligned_union_bytes(
-    PERSISTENT_WORLD_OVERLAY_PAYLOAD_BYTES,
-    core::mem::align_of::<PersistentWorldBackendOverlay>(),
-);
 const FRAME_WORLD_OVERLAY_BYTES: usize = aligned_union_bytes(
     FRAME_WORLD_OVERLAY_PAYLOAD_BYTES,
     core::mem::align_of::<FrameWorldBackendOverlay>(),
-);
-const _: () = assert!(
-    core::mem::size_of::<PersistentWorldBackendOverlay>() == PERSISTENT_WORLD_OVERLAY_BYTES
 );
 const _: () =
     assert!(core::mem::size_of::<FrameWorldBackendOverlay>() == FRAME_WORLD_OVERLAY_BYTES);
@@ -178,8 +124,6 @@ pub(super) union LoadRenderOverlay {
 /// Gameplay-only arenas that overlay the front-end UI-image cache.
 pub(super) struct GameplayAssetArenas {
     pub(super) persistent_assets: RuntimePersistentAssetStreamer,
-    pub(super) prebuilt_quads: RuntimePrebuiltRoomQuads,
-    pub(super) _room_projection: RuntimeCachedRoomProjection,
 }
 
 /// RAM union of the streamed front-end UI-image cache and every gameplay-only
@@ -192,8 +136,8 @@ pub(super) struct GameplayAssetArenas {
 ///   (`prepare_loading_assets`), which uploads the loading art, invalidates
 ///   the UI cache, resets the gameplay asset streamer in place, and hands the
 ///   bytes over.
-/// - `gameplay` is written only by the persistent-asset loader, room builds,
-///   and world draws, all after that handoff point.
+/// - `gameplay` is written only by the persistent-asset loader, after that
+///   handoff point.
 /// - Returning to a menu re-preloads the cache from CD because
 ///   gameplay exit drops every parsed view and reinitializes the UI cache's
 ///   metadata before `service_menu_ui_images` sees the union again.
@@ -219,21 +163,12 @@ impl RuntimeArenas {
         overlay: FrontEndGameplayOverlay {
             gameplay: core::mem::ManuallyDrop::new(GameplayAssetArenas {
                 persistent_assets: RuntimePersistentAssetStreamer::zeroed(),
-                prebuilt_quads: RuntimePrebuiltRoomQuads::zeroed(),
-                _room_projection: RuntimeCachedRoomProjection::zeroed(),
             }),
         },
-        // Both variants are all-zero images. Select the PXBSP side here so
-        // boot never constructs the inactive grid backend in a BSP build;
-        // grid builds stamp their non-zero scheduler state in `init` below.
-        world_backend: PersistentWorldBackendOverlay {
-            pxbsp_visible_faces: core::mem::ManuallyDrop::new([0; PXBSP_FACE_CHAIN_CAPACITY]),
-        },
+        pxbsp_visible_faces: [0; PXBSP_FACE_CHAIN_CAPACITY],
         // Zero state = invalid cache key, so the first draw rebuilds;
         // no init stamping needed.
         sky: [const { psx_game_runtime::sky::SkyCyclorama::zeroed() }; PANORAMA_CACHE_COUNT],
-        #[cfg(feature = "world-grid-visible")]
-        cell_scratch: RuntimeCellDrawScratch::zeroed(),
         frame_backend: FrameWorldBackendOverlay {
             pxbsp_frame_faces: core::mem::ManuallyDrop::new([0; PXBSP_FACE_CHAIN_CAPACITY]),
         },
@@ -246,28 +181,6 @@ impl RuntimeArenas {
     /// static initializers stored in `.data`) onto the zeroed storage.
     fn init(&mut self) {
         self.vram = RuntimeVram::new(VRAM_LAYOUT);
-        if !USES_PXBSP {
-            // SAFETY: the cook selects the grid backend for the complete
-            // scene lifetime, so the PXBSP chain variant is never borrowed.
-            let grid = unsafe {
-                &mut *core::ptr::addr_of_mut!(self.world_backend.grid).cast::<GridWorldArenas>()
-            };
-            #[cfg(feature = "cd-stream-bench")]
-            {
-                grid.room_streams = RuntimeRoomStreamScheduler::new();
-                grid.room_materials.init(room_material_fallback());
-            }
-            #[cfg(not(feature = "cd-stream-bench"))]
-            grid.prebuilt_quads.reset_claims();
-        }
-        // SAFETY: boot-time init; the overlay's gameplay side is the
-        // all-zero image here and reset_claims only stamps claim keys.
-        #[cfg(feature = "cd-stream-bench")]
-        unsafe {
-            let gameplay =
-                core::ptr::addr_of_mut!(self.overlay.gameplay).cast::<GameplayAssetArenas>();
-            (*gameplay).prebuilt_quads.reset_claims();
-        }
         self.debris_cache.init();
     }
 }
@@ -279,16 +192,6 @@ static mut RUNTIME_ARENAS: RuntimeArenas = RuntimeArenas::ZEROED;
 /// Raw projection base for the field accessors below.
 fn arenas_ptr() -> *mut RuntimeArenas {
     core::ptr::addr_of_mut!(RUNTIME_ARENAS)
-}
-
-/// Raw projection of the persistent grid variant. In a PXBSP project these
-/// bytes hold `pxbsp_visible_faces`, so every grid accessor fails closed.
-fn grid_world_ptr() -> *mut GridWorldArenas {
-    assert!(
-        !USES_PXBSP,
-        "grid world arena reached in a PXBSP build; face-chain storage is live"
-    );
-    unsafe { core::ptr::addr_of_mut!((*arenas_ptr()).world_backend.grid).cast::<GridWorldArenas>() }
 }
 
 /// Initialize the arena state. Must run once, before
@@ -348,23 +251,6 @@ pub(super) fn ui_images_arena_mut() -> &'static mut RuntimeUiImageCache {
     }
 }
 
-/// Shared borrow of the streamed-room page pool. Views resolved out
-/// of the slots inherit the type's staleness contract: re-resolve after
-/// every streaming step.
-#[cfg(feature = "cd-stream-bench")]
-pub(super) fn streamed_slots_arena() -> &'static RuntimeStreamedRoomSlots {
-    // SAFETY: `grid_world_ptr` proves the persistent grid variant is active.
-    unsafe { &(*grid_world_ptr()).streamed_slots }
-}
-
-/// Exclusive borrow of the streamed-room page pool (the CD pump's
-/// write destination).
-#[cfg(feature = "cd-stream-bench")]
-pub(super) fn streamed_slots_arena_mut() -> &'static mut RuntimeStreamedRoomSlots {
-    // SAFETY: `grid_world_ptr` proves the persistent grid variant is active.
-    unsafe { &mut (*grid_world_ptr()).streamed_slots }
-}
-
 /// Shared borrow of stable persistent gameplay asset storage.
 #[cfg(feature = "cd-stream-bench")]
 pub(super) fn persistent_assets_arena() -> &'static RuntimePersistentAssetStreamer {
@@ -387,56 +273,10 @@ pub(super) fn persistent_assets_arena_mut() -> &'static mut RuntimePersistentAss
     }
 }
 
-/// Exclusive borrow of the streamed-room scheduler, same discipline as
-/// the old `ROOM_STREAM_SCHEDULER` static.
-#[cfg(feature = "cd-stream-bench")]
-pub(super) fn room_streams_arena() -> &'static mut RuntimeRoomStreamScheduler {
-    // SAFETY: `grid_world_ptr` proves the persistent grid variant is active.
-    unsafe { &mut (*grid_world_ptr()).room_streams }
-}
-
-/// Shared borrow of the per-stream-slot room-material pool.
-#[cfg(feature = "cd-stream-bench")]
-pub(super) fn room_materials_arena() -> &'static RuntimeRoomMaterialPool {
-    // SAFETY: `grid_world_ptr` proves the persistent grid variant is active.
-    unsafe { &(*grid_world_ptr()).room_materials }
-}
-
-/// Exclusive borrow of the per-stream-slot room-material pool.
-#[cfg(feature = "cd-stream-bench")]
-pub(super) fn room_materials_arena_mut() -> &'static mut RuntimeRoomMaterialPool {
-    // SAFETY: `grid_world_ptr` proves the persistent grid variant is active.
-    unsafe { &mut (*grid_world_ptr()).room_materials }
-}
-
-/// Exclusive borrow of the prebuilt room-quad pool. The returned
-/// `'static` claim slices stay writable across frames by design (the
-/// present flip's DMA drain makes in-place patching safe).
-pub(super) fn prebuilt_quads_arena() -> &'static mut RuntimePrebuiltRoomQuads {
-    // SAFETY: see `vram_arena` + the `FrontEndGameplayOverlay` contract.
-    #[cfg(feature = "cd-stream-bench")]
-    unsafe {
-        let gameplay =
-            core::ptr::addr_of_mut!((*arenas_ptr()).overlay.gameplay).cast::<GameplayAssetArenas>();
-        &mut (*gameplay).prebuilt_quads
-    }
-    #[cfg(not(feature = "cd-stream-bench"))]
-    unsafe {
-        &mut (*grid_world_ptr()).prebuilt_quads
-    }
-}
-
 /// Exclusive borrow of the sky-cyclorama packet cache.
 pub(super) fn sky_arena() -> Option<&'static mut psx_game_runtime::sky::SkyCyclorama> {
     // SAFETY: see `vram_arena`.
     unsafe { (*arenas_ptr()).sky.get_mut(0) }
-}
-
-/// Exclusive borrow of the accepted-cell draw scratch.
-#[cfg(feature = "world-grid-visible")]
-pub(super) fn cell_scratch_arena() -> &'static mut RuntimeCellDrawScratch {
-    // SAFETY: see `vram_arena`.
-    unsafe { &mut (*arenas_ptr()).cell_scratch }
 }
 
 /// Exclusive borrow of the model draw scratch.
@@ -452,21 +292,12 @@ pub(super) fn model_scratch_arena() -> &'static mut RuntimeModelDrawScratch {
 
 /// Session-lifetime PXBSP visible-face chain.
 pub(super) fn pxbsp_visible_face_chain_arena() -> &'static mut [u16; PXBSP_FACE_CHAIN_CAPACITY] {
-    assert!(USES_PXBSP, "PXBSP face-chain arena reached in a grid build");
-    // SAFETY: the manifest selects PXBSP for the complete scene lifetime;
-    // `grid_world_ptr` cannot succeed in this build.
-    unsafe {
-        &mut *core::ptr::addr_of_mut!((*arenas_ptr()).world_backend.pxbsp_visible_faces)
-            .cast::<[u16; PXBSP_FACE_CHAIN_CAPACITY]>()
-    }
+    // SAFETY: see `vram_arena`.
+    unsafe { &mut (*arenas_ptr()).pxbsp_visible_faces }
 }
 
 /// Per-frame PXBSP face-filter chain, live only until BSP drawing returns.
 pub(super) fn pxbsp_frame_face_chain_arena() -> &'static mut [u16; PXBSP_FACE_CHAIN_CAPACITY] {
-    assert!(
-        USES_PXBSP,
-        "PXBSP frame face-chain arena reached in a grid build"
-    );
     // SAFETY: the BSP pass precedes every `model_scratch_arena` borrow and
     // retires this chain before returning. The model pass may then overwrite
     // the backing bytes while the retained Vec facade has length zero.
@@ -480,22 +311,6 @@ pub(super) fn pxbsp_frame_face_chain_arena() -> &'static mut [u16; PXBSP_FACE_CH
 pub(super) fn debris_cache_arena() -> &'static mut RuntimeDebrisCache {
     // SAFETY: see `vram_arena`.
     unsafe { &mut (*arenas_ptr()).debris_cache }
-}
-
-/// Exclusive borrow of the cached-room projection scratch.
-#[cfg(not(playtest_pxbsp))]
-pub(super) fn room_projection_arena() -> &'static mut RuntimeCachedRoomProjection {
-    // SAFETY: see `vram_arena` + the `FrontEndGameplayOverlay` contract.
-    #[cfg(feature = "cd-stream-bench")]
-    unsafe {
-        let gameplay =
-            core::ptr::addr_of_mut!((*arenas_ptr()).overlay.gameplay).cast::<GameplayAssetArenas>();
-        &mut (*gameplay)._room_projection
-    }
-    #[cfg(not(feature = "cd-stream-bench"))]
-    unsafe {
-        &mut (*grid_world_ptr())._room_projection
-    }
 }
 
 /// Exclusive borrow of the CD controller driver state.

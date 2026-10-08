@@ -385,32 +385,6 @@ struct ProjectedTexturedGouraudVertex {
     color: (u8, u8, u8),
 }
 
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-struct TexturedGouraudViewVertex {
-    position: ViewVertex,
-    u: i32,
-    v: i32,
-    color: (u8, u8, u8),
-}
-
-impl TexturedGouraudViewVertex {
-    const ZERO: Self = Self {
-        position: ViewVertex::ZERO,
-        u: 0,
-        v: 0,
-        color: (0, 0, 0),
-    };
-
-    const fn new(position: ViewVertex, uv_word: u16, color: (u8, u8, u8)) -> Self {
-        Self {
-            position,
-            u: (uv_word & 0xff) as i32,
-            v: (uv_word >> 8) as i32,
-            color,
-        }
-    }
-}
-
 impl ProjectedTexturedGouraudVertex {
     const fn new(projected: ProjectedVertex, u: i32, v: i32, color: (u8, u8, u8)) -> Self {
         Self {
@@ -1159,93 +1133,6 @@ impl LoadedAnchoredCameraGte {
     }
 }
 
-pub(crate) fn project_world_vertex_indices_gte(
-    camera: WorldCamera,
-    vertices: &[WorldVertex],
-    indices: &[u16],
-    projected_vertices: &mut [ProjectedVertex],
-) {
-    load_world_camera_gte(camera);
-    let near_z = camera.projection.near_z;
-    let limit = vertices.len().min(projected_vertices.len());
-    let mut group = [0usize; 3];
-    let mut group_count = 0usize;
-    for raw_index in indices {
-        let index = *raw_index as usize;
-        if index >= limit {
-            continue;
-        }
-        group[group_count] = index;
-        group_count += 1;
-        if group_count == 3 {
-            project_world_index_group_gte(camera, vertices, projected_vertices, near_z, group);
-            group_count = 0;
-        }
-    }
-    let mut i = 0usize;
-    while i < group_count {
-        project_world_vertex_cpu(camera, vertices, projected_vertices, group[i]);
-        i += 1;
-    }
-}
-
-/// Project one contiguous cached world-vertex slice through the GTE.
-///
-/// Dense room views already reference most of their cache. Walking a second
-/// index stream and maintaining a per-frame dedup bitset costs more CPU than
-/// projecting the small remainder, while the GTE itself has substantial
-/// headroom. Keep this separate from the indexed path so sparse portal views
-/// can continue projecting only the vertices they actually use.
-pub(crate) fn project_world_vertices_gte(
-    camera: WorldCamera,
-    vertices: &[WorldVertex],
-    projected_vertices: &mut [ProjectedVertex],
-) {
-    load_world_camera_gte(camera);
-    let near_z = camera.projection.near_z;
-    let limit = vertices.len().min(projected_vertices.len());
-    let mut index = 0usize;
-    while index.saturating_add(3) <= limit {
-        project_world_index_group_gte(
-            camera,
-            vertices,
-            projected_vertices,
-            near_z,
-            [index, index + 1, index + 2],
-        );
-        index += 3;
-    }
-    while index < limit {
-        project_world_vertex_cpu(camera, vertices, projected_vertices, index);
-        index += 1;
-    }
-}
-
-fn project_world_index_group_gte(
-    camera: WorldCamera,
-    vertices: &[WorldVertex],
-    projected_vertices: &mut [ProjectedVertex],
-    near_z: i32,
-    indices: [usize; 3],
-) {
-    let a_index = indices[0];
-    let b_index = indices[1];
-    let c_index = indices[2];
-    let a = world_vertex_gte_input(vertices[a_index]);
-    let b = world_vertex_gte_input(vertices[b_index]);
-    let c = world_vertex_gte_input(vertices[c_index]);
-    if let (Some(a), Some(b), Some(c)) = (a, b, c) {
-        let projected = scene::project_triangle_scheduled(a, b, c);
-        projected_vertices[a_index] = valid_projected_from_gte(projected[0], near_z);
-        projected_vertices[b_index] = valid_projected_from_gte(projected[1], near_z);
-        projected_vertices[c_index] = valid_projected_from_gte(projected[2], near_z);
-    } else {
-        project_world_vertex_cpu(camera, vertices, projected_vertices, a_index);
-        project_world_vertex_cpu(camera, vertices, projected_vertices, b_index);
-        project_world_vertex_cpu(camera, vertices, projected_vertices, c_index);
-    }
-}
-
 /// Coarse render layer for world surfaces inside one ordering table.
 ///
 /// PS1 ordering tables are still depth-first. This layer only resolves
@@ -1563,44 +1450,7 @@ pub(crate) struct PreparedTriangleDepth {
     depth: i32,
 }
 
-impl PreparedTriangleDepth {
-    /// Build a prepared depth from fixed-depth world surface options.
-    #[inline(always)]
-    pub(crate) fn from_fixed_options<const OT_DEPTH: usize>(
-        options: WorldSurfaceOptions,
-    ) -> Option<Self> {
-        let DepthPolicy::Fixed(depth) = options.depth_policy else {
-            return None;
-        };
-        let depth = CameraDepth::new(depth.saturating_add(options.depth_bias));
-        Some(Self {
-            slot: options
-                .depth_band
-                .slot_depth::<OT_DEPTH>(options.depth_range, depth),
-            depth: depth.raw(),
-        })
-    }
-
-    /// Build a prepared depth from a whole-quad surface's own averaged
-    /// projected depth -- the same key its two split leaves would each
-    /// approximate. Lets risky (triangle-depth) whole-quad surfaces
-    /// stay on the single-packet quad path with a per-surface sort key
-    /// instead of falling back to two triangle leaves.
-    #[inline(always)]
-    pub(crate) fn from_quad_average<const OT_DEPTH: usize>(
-        options: WorldSurfaceOptions,
-        projected: [ProjectedVertex; 4],
-    ) -> Self {
-        let average = (projected[0].sz + projected[1].sz + projected[2].sz + projected[3].sz) / 4;
-        let depth = CameraDepth::new(average.saturating_add(options.depth_bias));
-        Self {
-            slot: options
-                .depth_band
-                .slot_depth::<OT_DEPTH>(options.depth_range, depth),
-            depth: depth.raw(),
-        }
-    }
-}
+impl PreparedTriangleDepth {}
 
 /// Scratch command for a mixed world render pass.
 ///
@@ -2166,198 +2016,6 @@ fn load_world_camera_gte(camera: WorldCamera) {
     scene::load_translation(translation);
 }
 
-/// Install an identity camera-space transform for adaptive-style generated
-/// vertices. The authored room vertices have already been transformed into
-/// view space; RTPS is used here only for the perspective divide, exactly as
-/// in the original subdivision path.
-fn load_adaptive_view_projection_gte(projection: WorldProjection) {
-    load_world_projection_gte(projection);
-    scene::load_rotation(&Mat3I16::IDENTITY);
-    scene::load_translation(Vec3I32::ZERO);
-}
-
-/// Project one ordinary (Y-up) camera-space point with the identity RTPS state
-/// installed by [`load_adaptive_view_projection_gte`].
-fn project_adaptive_view_vertex_gte(
-    vertex: ViewVertex,
-    projection: WorldProjection,
-) -> Option<ProjectedVertex> {
-    if vertex.z <= 0 || vertex.z < projection.near_z {
-        return None;
-    }
-    let Some(input) = adaptive_view_gte_input(vertex) else {
-        return projection.project_view(vertex);
-    };
-    adaptive_projected_option_from_gte(scene::project_vertex_scheduled(input), projection.near_z)
-}
-
-/// Project three generated camera-space vertices with one RTPT, matching the
-/// batched GTE path in adaptive's room subdivision loop.
-fn project_adaptive_view_triangle_gte(
-    vertices: [ViewVertex; 3],
-    projection: WorldProjection,
-) -> Option<[ProjectedVertex; 3]> {
-    if vertices
-        .iter()
-        .any(|vertex| vertex.z <= 0 || vertex.z < projection.near_z)
-    {
-        return None;
-    }
-    let inputs = [
-        adaptive_view_gte_input(vertices[0]),
-        adaptive_view_gte_input(vertices[1]),
-        adaptive_view_gte_input(vertices[2]),
-    ];
-    let [Some(a), Some(b), Some(c)] = inputs else {
-        return Some([
-            projection.project_view(vertices[0])?,
-            projection.project_view(vertices[1])?,
-            projection.project_view(vertices[2])?,
-        ]);
-    };
-    let projected = scene::project_triangle_scheduled(a, b, c);
-    Some([
-        adaptive_projected_option_from_gte(projected[0], projection.near_z)?,
-        adaptive_projected_option_from_gte(projected[1], projection.near_z)?,
-        adaptive_projected_option_from_gte(projected[2], projection.near_z)?,
-    ])
-}
-
-/// Project a generated camera-space quad as RTPT + RTPS rather than four
-/// independent RTPS operations.
-fn project_adaptive_view_quad_gte(
-    vertices: [ViewVertex; 4],
-    projection: WorldProjection,
-) -> Option<[ProjectedVertex; 4]> {
-    let triangle =
-        project_adaptive_view_triangle_gte([vertices[0], vertices[1], vertices[2]], projection)?;
-    Some([
-        triangle[0],
-        triangle[1],
-        triangle[2],
-        project_adaptive_view_vertex_gte(vertices[3], projection)?,
-    ])
-}
-
-/// Project the fixed 3x3 point lattice of a one-level subdivided quad.
-///
-/// The recursive path projects four overlapping child quads (16 inputs).
-/// This schedule emits three RTPT operations and reuses the shared edge and
-/// centre results, matching the table-driven topology used by later PS1 Tomb
-/// Raider room renderers.
-#[cfg(feature = "tr-subdivision-lattice")]
-fn project_adaptive_view_lattice_gte(
-    vertices: [ViewVertex; 9],
-    projection: WorldProjection,
-    root_projected: Option<[ProjectedVertex; 4]>,
-) -> Option<[ProjectedVertex; 9]> {
-    if vertices
-        .iter()
-        .any(|vertex| vertex.z <= 0 || vertex.z < projection.near_z)
-    {
-        return None;
-    }
-    if let Some(root) = root_projected {
-        let generated = [
-            adaptive_view_gte_input(vertices[1]),
-            adaptive_view_gte_input(vertices[3]),
-            adaptive_view_gte_input(vertices[4]),
-            adaptive_view_gte_input(vertices[5]),
-            adaptive_view_gte_input(vertices[7]),
-        ];
-        let [Some(top), Some(left), Some(center), Some(right), Some(bottom)] = generated else {
-            return Some([
-                root[0],
-                projection.project_view(vertices[1])?,
-                root[1],
-                projection.project_view(vertices[3])?,
-                projection.project_view(vertices[4])?,
-                projection.project_view(vertices[5])?,
-                root[2],
-                projection.project_view(vertices[7])?,
-                root[3],
-            ]);
-        };
-        let first = scene::project_triangle_scheduled(top, left, center);
-        let second = scene::project_triangle_scheduled(right, bottom, center);
-        return Some([
-            root[0],
-            adaptive_projected_option_from_gte(first[0], projection.near_z)?,
-            root[1],
-            adaptive_projected_option_from_gte(first[1], projection.near_z)?,
-            adaptive_projected_option_from_gte(first[2], projection.near_z)?,
-            adaptive_projected_option_from_gte(second[0], projection.near_z)?,
-            root[2],
-            adaptive_projected_option_from_gte(second[1], projection.near_z)?,
-            root[3],
-        ]);
-    }
-    let inputs = [
-        adaptive_view_gte_input(vertices[0]),
-        adaptive_view_gte_input(vertices[1]),
-        adaptive_view_gte_input(vertices[2]),
-        adaptive_view_gte_input(vertices[3]),
-        adaptive_view_gte_input(vertices[4]),
-        adaptive_view_gte_input(vertices[5]),
-        adaptive_view_gte_input(vertices[6]),
-        adaptive_view_gte_input(vertices[7]),
-        adaptive_view_gte_input(vertices[8]),
-    ];
-    let [Some(a), Some(b), Some(c), Some(d), Some(e), Some(f), Some(g), Some(h), Some(i)] = inputs
-    else {
-        return Some([
-            projection.project_view(vertices[0])?,
-            projection.project_view(vertices[1])?,
-            projection.project_view(vertices[2])?,
-            projection.project_view(vertices[3])?,
-            projection.project_view(vertices[4])?,
-            projection.project_view(vertices[5])?,
-            projection.project_view(vertices[6])?,
-            projection.project_view(vertices[7])?,
-            projection.project_view(vertices[8])?,
-        ]);
-    };
-    let top = scene::project_triangle_scheduled(a, b, c);
-    let middle = scene::project_triangle_scheduled(d, e, f);
-    let bottom = scene::project_triangle_scheduled(g, h, i);
-    Some([
-        adaptive_projected_option_from_gte(top[0], projection.near_z)?,
-        adaptive_projected_option_from_gte(top[1], projection.near_z)?,
-        adaptive_projected_option_from_gte(top[2], projection.near_z)?,
-        adaptive_projected_option_from_gte(middle[0], projection.near_z)?,
-        adaptive_projected_option_from_gte(middle[1], projection.near_z)?,
-        adaptive_projected_option_from_gte(middle[2], projection.near_z)?,
-        adaptive_projected_option_from_gte(bottom[0], projection.near_z)?,
-        adaptive_projected_option_from_gte(bottom[1], projection.near_z)?,
-        adaptive_projected_option_from_gte(bottom[2], projection.near_z)?,
-    ])
-}
-
-#[inline(always)]
-fn adaptive_view_gte_input(vertex: ViewVertex) -> Option<Vec3I16> {
-    Some(Vec3I16::new(
-        i16::try_from(vertex.x).ok()?,
-        i16::try_from(vertex.y.checked_neg()?).ok()?,
-        i16::try_from(vertex.z).ok()?,
-    ))
-}
-
-#[inline(always)]
-fn adaptive_projected_option_from_gte(
-    projected: psx_gte::scene::Projected,
-    near_z: i32,
-) -> Option<ProjectedVertex> {
-    if (projected.sz as i32) < near_z {
-        None
-    } else {
-        Some(ProjectedVertex::new(
-            projected.sx,
-            projected.sy,
-            projected.sz as i32,
-        ))
-    }
-}
-
 #[inline(always)]
 fn world_vertex_gte_input(vertex: WorldVertex) -> Option<Vec3I16> {
     // One combined i16 range test: `v + 0x8000` fits u16 exactly when
@@ -2379,19 +2037,6 @@ fn world_vertex_gte_input(vertex: WorldVertex) -> Option<Vec3I16> {
         vertex.y as i16,
         vertex.z as i16,
     ))
-}
-
-fn project_world_vertex_cpu(
-    camera: WorldCamera,
-    vertices: &[WorldVertex],
-    projected_vertices: &mut [ProjectedVertex],
-    index: usize,
-) {
-    if let Some(projected) = camera.project_world(vertices[index]) {
-        projected_vertices[index] = projected;
-    } else {
-        projected_vertices[index] = ProjectedVertex::INVALID;
-    }
 }
 
 /// Compose the GTE transform for one joint of a placed model
@@ -4000,47 +3645,6 @@ fn midpoint_projected_textured_gouraud(
     )
 }
 
-fn midpoint_textured_gouraud_view(
-    a: TexturedGouraudViewVertex,
-    b: TexturedGouraudViewVertex,
-) -> TexturedGouraudViewVertex {
-    TexturedGouraudViewVertex {
-        position: ViewVertex::new(
-            midpoint_i32(a.position.x, b.position.x),
-            midpoint_i32(a.position.y, b.position.y),
-            midpoint_i32(a.position.z, b.position.z),
-        ),
-        u: midpoint_i32(a.u, b.u),
-        v: midpoint_i32(a.v, b.v),
-        color: (
-            midpoint_u8(a.color.0, b.color.0),
-            midpoint_u8(a.color.1, b.color.1),
-            midpoint_u8(a.color.2, b.color.2),
-        ),
-    }
-}
-
-fn textured_gouraud_view_uv_word(vertex: TexturedGouraudViewVertex) -> u16 {
-    (vertex.u.clamp(0, 255) as u16) | ((vertex.v.clamp(0, 255) as u16) << 8)
-}
-
-fn adaptive_quad_farthest_depth(vertices: &[TexturedGouraudViewVertex; 4]) -> i32 {
-    vertices[0]
-        .position
-        .z
-        .max(vertices[1].position.z)
-        .max(vertices[2].position.z)
-        .max(vertices[3].position.z)
-}
-
-fn adaptive_triangle_farthest_depth(vertices: &[TexturedGouraudViewVertex; 3]) -> i32 {
-    vertices[0]
-        .position
-        .z
-        .max(vertices[1].position.z)
-        .max(vertices[2].position.z)
-}
-
 fn midpoint_i16(a: i16, b: i16) -> i16 {
     midpoint_i32(a as i32, b as i32) as i16
 }
@@ -4080,62 +3684,6 @@ fn clip_textured_triangle_to_near(
     count
 }
 
-fn clip_textured_gouraud_triangle_to_near(
-    verts: [TexturedGouraudViewVertex; 3],
-    near_z: i32,
-    out: &mut [TexturedGouraudViewVertex; 4],
-) -> usize {
-    let mut count = 0;
-    let mut prev = verts[2];
-    let mut prev_inside = prev.position.z >= near_z;
-    let mut i = 0;
-    while i < verts.len() {
-        let current = verts[i];
-        let current_inside = current.position.z >= near_z;
-        if current_inside != prev_inside {
-            out[count] = intersect_textured_gouraud_near(prev, current, near_z);
-            count += 1;
-        }
-        if current_inside {
-            out[count] = current;
-            count += 1;
-        }
-        prev = current;
-        prev_inside = current_inside;
-        i += 1;
-    }
-    count
-}
-
-fn intersect_textured_gouraud_near(
-    a: TexturedGouraudViewVertex,
-    b: TexturedGouraudViewVertex,
-    near_z: i32,
-) -> TexturedGouraudViewVertex {
-    let dz = b.position.z - a.position.z;
-    if dz == 0 {
-        return TexturedGouraudViewVertex {
-            position: ViewVertex::new(a.position.x, a.position.y, near_z),
-            ..a
-        };
-    }
-    let num = near_z - a.position.z;
-    TexturedGouraudViewVertex {
-        position: ViewVertex::new(
-            lerp_i32(a.position.x, b.position.x, num, dz),
-            lerp_i32(a.position.y, b.position.y, num, dz),
-            near_z,
-        ),
-        u: lerp_i32(a.u, b.u, num, dz),
-        v: lerp_i32(a.v, b.v, num, dz),
-        color: (
-            lerp_u8(a.color.0, b.color.0, num, dz),
-            lerp_u8(a.color.1, b.color.1, num, dz),
-            lerp_u8(a.color.2, b.color.2, num, dz),
-        ),
-    }
-}
-
 fn intersect_textured_near(
     a: TexturedViewVertex,
     b: TexturedViewVertex,
@@ -4167,10 +3715,6 @@ fn lerp_i32(a: i32, b: i32, numerator: i32, denominator: i32) -> i32 {
         return a;
     }
     a.saturating_add(b.saturating_sub(a).saturating_mul(numerator) / denominator)
-}
-
-fn lerp_u8(a: u8, b: u8, numerator: i32, denominator: i32) -> u8 {
-    lerp_i32(a as i32, b as i32, numerator, denominator).clamp(0, 255) as u8
 }
 
 fn merge_world_stats(stats: &mut WorldRenderStats, next: WorldRenderStats) {

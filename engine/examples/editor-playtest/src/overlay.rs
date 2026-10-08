@@ -1183,15 +1183,42 @@ pub(crate) fn draw_opening_fade(gpu: &mut Gpu, fb: &DoubleBuffer, amount: u8) {
 }
 
 /// Resource is independent of the animated stance bars above it.
-pub(crate) fn draw_combat_energy(gpu: &mut Gpu, font: &FontAtlas, energy: u16, air_left: Option<u16>) {
+pub(crate) fn draw_combat_energy(
+    gpu: &mut Gpu,
+    font: &FontAtlas,
+    energy: u16,
+    air_left: Option<u16>,
+) {
     use psx_game_runtime::combat_flow::{AIR_TICKS, ENERGY_MAX, SHOT_COST};
-    let rgb = if energy < SHOT_COST { (235, 108, 82) } else { (220, 194, 110) };
-    draw_vitality_bar(gpu, font, (34, 33, 104, 11), 3,
-        (u32::from(energy.min(ENERGY_MAX)) * 4096 / u32::from(ENERGY_MAX)) as u16, rgb, "ENG");
+    let rgb = if energy < SHOT_COST {
+        (235, 108, 82)
+    } else {
+        (220, 194, 110)
+    };
+    draw_vitality_bar(
+        gpu,
+        font,
+        (34, 33, 104, 11),
+        3,
+        (u32::from(energy.min(ENERGY_MAX)) * 4096 / u32::from(ENERGY_MAX)) as u16,
+        rgb,
+        "ENG",
+    );
     if let Some(ticks) = air_left {
-        let rgb = if ticks < 120 {(255,96,64)} else {(180,210,220)};
-        draw_rect(gpu, 142,35,48,6,(25,30,34));
-        draw_rect(gpu, 143,36,(u32::from(ticks.min(AIR_TICKS))*46/u32::from(AIR_TICKS)) as i16,4,rgb);
-        font.draw_text(142,44,"TETHER",rgb);
+        let rgb = if ticks < 120 {
+            (255, 96, 64)
+        } else {
+            (180, 210, 220)
+        };
+        draw_rect(gpu, 142, 35, 48, 6, (25, 30, 34));
+        draw_rect(
+            gpu,
+            143,
+            36,
+            (u32::from(ticks.min(AIR_TICKS)) * 46 / u32::from(AIR_TICKS)) as i16,
+            4,
+            rgb,
+        );
+        font.draw_text(142, 44, "TETHER", rgb);
     }
 }

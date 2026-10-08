@@ -4,24 +4,36 @@ use crate::combat_flow::{
 };
 use crate::projectiles::ProjectileThreat;
 
+/// Mode: in the open, free to fire.
 pub const OPEN: u8 = 0;
+/// Mode: moving toward a cover point.
 pub const SEEK_COVER: u8 = 1;
+/// Mode: waiting behind cover.
 pub const COVERED: u8 = 2;
+/// Mode: stepping out of cover to take a shot.
 pub const PEEK: u8 = 3;
+/// Mode: sidestepping an incoming projectile.
 pub const EVADE: u8 = 4;
+/// Mode: scanning for a new cover point.
 pub const SEARCH: u8 = 5;
 
+/// What the caller should do this tick.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RangedOrder {
+    /// World position to walk toward.
     pub destination: [i32; 3],
+    /// True when the actor should move to `destination`.
     pub moving: bool,
+    /// True when the actor may start a shot.
     pub fire: bool,
+    /// True while a projectile sidestep is active.
     pub evade: bool,
 }
 
 /// Fixed storage, including an incremental search rather than an unbounded frame spike.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RangedExchange {
+    /// Current mode, one of the mode constants in this module.
     pub mode: u8,
     cover: [i32; 3],
     peek: [i32; 3],
@@ -35,6 +47,7 @@ pub struct RangedExchange {
     side: i32,
 }
 impl RangedExchange {
+    /// Open-field state with no timers running.
     pub const EMPTY: Self = Self {
         mode: OPEN,
         cover: [0; 3],
@@ -48,16 +61,19 @@ impl RangedExchange {
         candidate: 0,
         side: 1,
     };
+    /// Advance the timers by `delta` ticks.
     pub fn tick(&mut self, delta: u16) {
         self.timer = self.timer.saturating_sub(delta);
         self.decision_delay = self.decision_delay.saturating_sub(delta);
         self.evade_delay = self.evade_delay.saturating_sub(delta);
     }
+    /// Return to the open state; the sidestep cooldown carries over.
     pub fn reset(&mut self) {
         let cooldown = self.evade_delay;
         *self = Self::EMPTY;
         self.evade_delay = cooldown;
     }
+    /// The order implied by the current mode, without making a new decision.
     pub fn current_order(&self, from: [i32; 3]) -> RangedOrder {
         self.order(from)
     }

@@ -415,7 +415,7 @@ impl<const N: usize, const S: bool> GameEntities<N, S> {
         &mut self,
         r: &LevelGameEntityRecord,
         i: usize,
-        input: GameEntityTickInput<'_>,
+        input: GameEntityTickInput,
     ) {
         let p = i32::from(r.preferred_distance).max(Self::melee_attack_reach(r, input));
         let roll = self.draw(i, 100);
@@ -466,7 +466,7 @@ impl<const N: usize, const S: bool> GameEntities<N, S> {
         &mut self,
         r: &LevelGameEntityRecord,
         i: usize,
-        input: GameEntityTickInput<'_>,
+        input: GameEntityTickInput,
         ranged: bool,
     ) {
         let close = self.player_within(i, input, Self::melee_attack_reach(r, input) * 3 / 4);
@@ -572,7 +572,7 @@ impl<const N: usize, const S: bool> GameEntities<N, S> {
         &mut self,
         r: &LevelGameEntityRecord,
         i: usize,
-        input: GameEntityTickInput<'_>,
+        input: GameEntityTickInput,
         mover: &mut impl GameEntityMover,
         delta: u16,
         stats: &mut GameEntityTickStats,
@@ -594,7 +594,7 @@ impl<const N: usize, const S: bool> GameEntities<N, S> {
         &mut self,
         r: &LevelGameEntityRecord,
         i: usize,
-        input: GameEntityTickInput<'_>,
+        input: GameEntityTickInput,
         mover: &mut impl GameEntityMover,
         delta: u16,
         stats: &mut GameEntityTickStats,
@@ -603,14 +603,12 @@ impl<const N: usize, const S: bool> GameEntities<N, S> {
         self.tactics[i].turning = false;
         self.tactics[i].phase = self.tactics[i].phase.wrapping_add(delta);
         let home = [r.x, r.y, r.z];
-        let inside_leash = input.player_room == r.room
-            && within_xz(
-                [r.x, r.z],
-                [input.player[0], input.player[2]],
-                i32::from(r.aggro_radius) * 2,
-            );
-        let visible =
-            input.player_room == r.room && self.player_in_line_of_sight(r, i, input, mover);
+        let inside_leash = within_xz(
+            [r.x, r.z],
+            [input.player[0], input.player[2]],
+            i32::from(r.aggro_radius) * 2,
+        );
+        let visible = self.player_in_line_of_sight(r, i, input, mover);
         if visible {
             self.tactics[i].last_seen = input.player;
             self.tactics[i].unseen_ticks = 0;

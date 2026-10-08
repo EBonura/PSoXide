@@ -38,20 +38,14 @@ pub mod poi;
 pub mod poise;
 pub mod projectiles;
 pub mod ranged_tactics;
-pub mod room_cache;
 pub mod room_lighting;
-pub mod room_streaming;
-pub mod room_visibility;
-pub mod room_window;
 pub mod save;
 pub mod schedule;
 pub mod sky;
+pub mod streaming;
 pub mod vitality;
 pub mod vitality_circles;
 pub mod vram;
-pub mod water;
-pub mod world_cells;
-pub mod world_visibility;
 
 /// Elevated hook acquisition and traversal.
 pub mod hook_points;

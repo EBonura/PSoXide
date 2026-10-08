@@ -11,15 +11,15 @@
 //! visuals in the next slice. With zero cooked records every entry
 //! point returns immediately (the phase-3 budget's <1k idle rule).
 //!
-//! Visibility policy: the per-tick player-touch scan gates on the
-//! portal-expanded active-room set; the delay queue and re-arm timers
+//! Visibility policy: the per-tick player-touch scan gates on the owner's
+//! spatial mask (the PXBSP PVS row); the delay queue and re-arm timers
 //! process globally so a timed chain never freezes when the player
 //! looks away (hl parity: PVS gates monster thinking, not logic).
 //!
 //! Crate rules hold: no statics, no unsafe, `const N` capacities,
 //! `&'static` cooked records, all-zero [`LogicRuntime::EMPTY`].
 
-use psx_level::{logic_flags, logic_kind, LevelLogicRecord, RoomIndex, LOGIC_NAME_NONE};
+use psx_level::{logic_flags, logic_kind, LevelLogicRecord, LOGIC_NAME_NONE};
 
 /// What a use asks of the record it reaches. Records fired by an output
 /// (relays, delayed chains, interact prompts) always toggle; the explicit
@@ -123,15 +123,12 @@ pub struct LogicStats {
 }
 
 /// Per-tick inputs: the player pose (trigger-volume touches are
-/// player-only this slice) and the active-room gate set.
+/// player-only this slice). Which records scan is the owner's spatial mask,
+/// see [`LogicRuntime::set_spatial_active_mask`].
 #[derive(Clone, Copy)]
-pub struct LogicTickInput<'a> {
-    /// Player position, room-local engine units.
+pub struct LogicTickInput {
+    /// Player position, engine units.
     pub player: [i32; 3],
-    /// Room containing the player.
-    pub player_room: RoomIndex,
-    /// Portal-expanded active-room set gating the touch scan.
-    pub active_rooms: &'a [RoomIndex],
 }
 
 /// Owned logic runtime over the cooked record table. Record `i`
@@ -164,8 +161,7 @@ pub struct LogicRuntime<
     queue_drops: u16,
     depth_drops: u16,
     fired: u16,
-    /// Optional owner-supplied per-record activation for touch scans.
-    spatial_activation_enabled: bool,
+    /// Owner-supplied per-record activation for touch scans.
     // psx-numeric-allow-next-line: fixed 64-record activation mask; bit ops only, two-word on R3000
     spatial_active_mask: u64,
 }
@@ -186,7 +182,6 @@ impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: u
         queue_drops: 0,
         depth_drops: 0,
         fired: 0,
-        spatial_activation_enabled: false,
         spatial_active_mask: 0,
     };
 
@@ -222,12 +217,11 @@ impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: u
         self.overflow
     }
 
-    /// Select an owner-defined per-record activation mask, or restore the
-    /// legacy room-window gate with `None`.
+    /// Select which records the owner considers spatially active (bit `i`
+    /// is record `i`). Trigger volumes only scan while their bit is set.
     // psx-numeric-allow-next-line: mirrors the fixed 64-record activation mask; bit ops only
-    pub fn set_spatial_active_mask(&mut self, mask: Option<u64>) {
-        self.spatial_activation_enabled = mask.is_some();
-        self.spatial_active_mask = mask.unwrap_or(0);
+    pub fn set_spatial_active_mask(&mut self, mask: u64) {
+        self.spatial_active_mask = mask;
     }
 
     /// Rolling counters.
@@ -327,14 +321,9 @@ impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: u
     }
 
     /// Advance one 60 Hz tick: drain due events, re-arm waiting
-    /// records, and run the player-touch scan over trigger volumes in
-    /// active rooms.
-    pub fn tick(
-        &mut self,
-        records: &'static [LevelLogicRecord],
-        input: LogicTickInput<'_>,
-        now: u32,
-    ) {
+    /// records, and run the player-touch scan over trigger volumes the
+    /// owner's spatial mask marks active.
+    pub fn tick(&mut self, records: &'static [LevelLogicRecord], input: LogicTickInput, now: u32) {
         if self.count == 0 {
             return;
         }
@@ -357,17 +346,9 @@ impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: u
                 }
                 LogicState::Ready => {}
             }
-            // Touch requires the player IN the volume's room (cooked
-            // bounds are room-local; a raw AABB test aliases across
-            // rooms) plus the active-room gate for scan cost.
-            let spatially_active = index < 64 && self.spatial_active_mask & (1u64 << index) != 0;
-            let activation_allows = if self.spatial_activation_enabled {
-                spatially_active
-            } else {
-                room_is_active(record.room, input.active_rooms)
-            };
+            // The owner's spatial mask gates the touch scan for scan cost.
+            let activation_allows = index < 64 && self.spatial_active_mask & (1u64 << index) != 0;
             if record.kind == logic_kind::TRIGGER_VOLUME
-                && input.player_room == record.room
                 && activation_allows
                 && point_in_aabb(input.player, record.min, record.max)
                 && self.master_satisfied(records, record.master)
@@ -576,23 +557,6 @@ impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: u
     }
 }
 
-/// See [`GameEntities`]' twin: fail-safe active test.
-///
-/// [`GameEntities`]: crate::entities::GameEntities
-fn room_is_active(room: RoomIndex, active_rooms: &[RoomIndex]) -> bool {
-    if room.raw() == u16::MAX {
-        return true;
-    }
-    let mut i = 0usize;
-    while i < active_rooms.len() {
-        if active_rooms[i] == room {
-            return true;
-        }
-        i += 1;
-    }
-    false
-}
-
 /// Inclusive AABB containment. Zero-height boxes (cooked from
 /// XZ-radius interactables) compare Y as equal-only, which the touch
 /// scan never reaches (those kinds are use-fired, not touch-fired).
@@ -608,6 +572,7 @@ fn point_in_aabb(point: [i32; 3], min: [i32; 3], max: [i32; 3]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use psx_level::RoomIndex;
 
     type TestLogic = LogicRuntime<8, 1, 4>;
 
@@ -635,20 +600,15 @@ mod tests {
         }
     }
 
-    const ACTIVE: [RoomIndex; 1] = [RoomIndex(0)];
-
-    fn input_at(pos: [i32; 3]) -> LogicTickInput<'static> {
-        LogicTickInput {
-            player: pos,
-            player_room: RoomIndex(0),
-            active_rooms: &ACTIVE,
-        }
+    fn input_at(pos: [i32; 3]) -> LogicTickInput {
+        LogicTickInput { player: pos }
     }
 
     #[test]
     fn empty_records_tick_is_inert() {
         let mut logic = TestLogic::EMPTY;
         logic.init_from_records(&[]);
+        logic.set_spatial_active_mask(u64::MAX);
         logic.tick(&[], input_at([0, 0, 0]), 1);
         assert_eq!(logic.stats(), LogicStats::default());
     }
@@ -679,6 +639,7 @@ mod tests {
     fn trigger_relay_door_chain_delays_through_the_queue() {
         let mut logic = TestLogic::EMPTY;
         logic.init_from_records(&TRIGGER_DOOR_CHAIN);
+        logic.set_spatial_active_mask(u64::MAX);
         // Player outside the volume: nothing fires.
         logic.tick(&TRIGGER_DOOR_CHAIN, input_at([500, 0, 0]), 1);
         assert!(!logic.door_open(2));
@@ -717,6 +678,7 @@ mod tests {
         ];
         let mut logic = TestLogic::EMPTY;
         logic.init_from_records(&ONCE);
+        logic.set_spatial_active_mask(u64::MAX);
         logic.tick(&ONCE, input_at([0, 0, 0]), 1);
         assert!(logic.door_open(1));
         assert!(logic.is_removed(0), "wait -1 retires after one fire");
@@ -727,6 +689,7 @@ mod tests {
         // The wait=30 trigger from the chain re-arms after 30 ticks.
         let mut logic = TestLogic::EMPTY;
         logic.init_from_records(&TRIGGER_DOOR_CHAIN);
+        logic.set_spatial_active_mask(u64::MAX);
         logic.tick(&TRIGGER_DOOR_CHAIN, input_at([0, 0, 0]), 2);
         assert!(logic.take_fired(0));
         // Still inside during the wait: no second fire.
@@ -762,6 +725,7 @@ mod tests {
         ];
         let mut logic = TestLogic::EMPTY;
         logic.init_from_records(&GATED);
+        logic.set_spatial_active_mask(u64::MAX);
         // Locked: standing in the trigger does nothing.
         logic.tick(&GATED, input_at([0, 0, 0]), 1);
         assert!(!logic.door_open(2));
@@ -790,6 +754,7 @@ mod tests {
         ];
         let mut logic = TestLogic::EMPTY;
         logic.init_from_records(&TYPO);
+        logic.set_spatial_active_mask(u64::MAX);
         logic.tick(&TYPO, input_at([0, 0, 0]), 1);
         assert!(logic.door_open(1));
     }
@@ -812,6 +777,7 @@ mod tests {
         ];
         let mut logic = TestLogic::EMPTY;
         logic.init_from_records(&RING);
+        logic.set_spatial_active_mask(u64::MAX);
         logic.fire_by_name(&RING, 1, UseCode::Toggle, 1);
         let stats = logic.stats();
         assert!(stats.depth_drops > 0, "ring must trip the depth cap");
@@ -833,6 +799,7 @@ mod tests {
         ];
         let mut logic = TestLogic::EMPTY;
         logic.init_from_records(&KILL);
+        logic.set_spatial_active_mask(u64::MAX);
         logic.fire_by_name(&KILL, 1, UseCode::Toggle, 1);
         assert!(logic.is_removed(1), "killtarget retired the door");
 
@@ -845,6 +812,7 @@ mod tests {
         }];
         let mut logic = TestLogic::EMPTY;
         logic.init_from_records(&DELAYED);
+        logic.set_spatial_active_mask(u64::MAX);
         for now in 0..5 {
             logic.fire_by_name(&DELAYED, 1, UseCode::Toggle, now);
         }
@@ -854,39 +822,7 @@ mod tests {
     }
 
     #[test]
-    fn touch_scan_gates_on_active_rooms() {
-        static FAR_TRIGGER: [LevelLogicRecord; 2] = [
-            LevelLogicRecord {
-                room: RoomIndex(7),
-                targetname: 1,
-                target: 3,
-                min: [-100, -100, -100],
-                max: [100, 100, 100],
-                ..blank(logic_kind::TRIGGER_VOLUME)
-            },
-            LevelLogicRecord {
-                targetname: 3,
-                ..blank(logic_kind::DOOR)
-            },
-        ];
-        let mut logic = TestLogic::EMPTY;
-        logic.init_from_records(&FAR_TRIGGER);
-        // Room 7 inactive: the volume does not test.
-        logic.tick(&FAR_TRIGGER, input_at([0, 0, 0]), 1);
-        assert!(!logic.door_open(1));
-        // Room 7 active: it fires.
-        let both = [RoomIndex(0), RoomIndex(7)];
-        let input = LogicTickInput {
-            player: [0, 0, 0],
-            player_room: RoomIndex(7),
-            active_rooms: &both,
-        };
-        logic.tick(&FAR_TRIGGER, input, 2);
-        assert!(logic.door_open(1));
-    }
-
-    #[test]
-    fn owner_spatial_mask_replaces_room_gate_for_touch_scan() {
+    fn owner_spatial_mask_gates_the_touch_scan() {
         static TRIGGER: [LevelLogicRecord; 2] = [
             LevelLogicRecord {
                 targetname: 1,
@@ -902,11 +838,11 @@ mod tests {
         ];
         let mut logic = TestLogic::EMPTY;
         logic.init_from_records(&TRIGGER);
-        logic.set_spatial_active_mask(Some(0));
+        logic.set_spatial_active_mask(0);
         logic.tick(&TRIGGER, input_at([0, 0, 0]), 1);
         assert!(!logic.door_open(1));
 
-        logic.set_spatial_active_mask(Some(1));
+        logic.set_spatial_active_mask(1);
         logic.tick(&TRIGGER, input_at([0, 0, 0]), 2);
         assert!(logic.door_open(1));
     }
@@ -927,6 +863,7 @@ mod tests {
         ];
         let mut logic = TestLogic::EMPTY;
         logic.init_from_records(&TWINS);
+        logic.set_spatial_active_mask(u64::MAX);
         assert!(!logic.any_fired());
         assert!(logic.fire_index(&TWINS, 1, UseCode::Toggle, 1));
         assert!(!logic.door_open(0));
@@ -946,6 +883,7 @@ mod tests {
         }];
         let mut logic = TestLogic::EMPTY;
         logic.init_from_records(&ONCE);
+        logic.set_spatial_active_mask(u64::MAX);
         assert!(logic.fire_index(&ONCE, 0, UseCode::Toggle, 1));
         assert!(logic.is_removed(0));
         assert!(!logic.fire_index(&ONCE, 0, UseCode::Toggle, 2));
@@ -967,6 +905,7 @@ mod tests {
         ];
         let mut logic = TestLogic::EMPTY;
         logic.init_from_records(&GATED);
+        logic.set_spatial_active_mask(u64::MAX);
         assert!(!logic.fire_index(&GATED, 0, UseCode::Toggle, 1));
         logic.fire_by_name(&GATED, 4, UseCode::On, 2);
         assert!(logic.fire_index(&GATED, 0, UseCode::Toggle, 3));
@@ -995,6 +934,7 @@ mod tests {
         ];
         let mut logic = TestLogic::EMPTY;
         logic.init_from_records(&TRIGGER_CHECKPOINT);
+        logic.set_spatial_active_mask(u64::MAX);
         // Outside the volume: neither record fires.
         logic.tick(&TRIGGER_CHECKPOINT, input_at([500, 0, 0]), 1);
         assert!(!logic.any_fired());
@@ -1021,6 +961,7 @@ mod tests {
         }];
         let mut logic = TestLogic::EMPTY;
         logic.init_from_records(&DOOR);
+        logic.set_spatial_active_mask(u64::MAX);
         logic.fire_by_name(&DOOR, 3, UseCode::On, 1);
         assert!(logic.take_fired(0), "closed -> open is an activation");
         logic.fire_by_name(&DOOR, 3, UseCode::On, 2);
@@ -1047,6 +988,7 @@ mod tests {
         ];
         let mut logic = TestLogic::EMPTY;
         logic.init_from_records(&FLAGGED);
+        logic.set_spatial_active_mask(u64::MAX);
         assert!(logic.is_removed(0), "flag-disabled record retires");
         assert!(logic.door_open(1), "START_ON door begins open");
     }

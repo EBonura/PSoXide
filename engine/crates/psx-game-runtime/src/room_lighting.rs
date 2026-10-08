@@ -1,128 +1,15 @@
-//! Room lighting and room-material-table policy, carved out of
-//! `editor-playtest`'s `room_lighting_runtime` module (phase 2 of
-//! docs/game-runtime-plan.md). [`RuntimeRoomLighting`] is the per-room
-//! shading view (ambient + cooked point lights + authored fog) the
-//! world render pass consumes; cooked tables (`LIGHTS`, `MATERIALS`,
-//! `ASSETS`) arrive as `&'static` psx-level records and the
-//! VRAM-coupled texture resolvers arrive as closures until their glue
-//! fully migrates.
+//! Room lighting policy, carved out of `editor-playtest`'s
+//! `room_lighting_runtime` module (phase 2 of docs/game-runtime-plan.md).
+//! [`RuntimeRoomLighting`] is the per-room shading view (ambient + cooked
+//! point lights + authored fog) the world render pass consumes; the cooked
+//! `LIGHTS` table arrives as `&'static` psx-level records.
 
 use psx_engine::{
-    telemetry, MaterialTint, PointLightSample, Rgb8, RoomPoint, WorldCamera,
-    WorldMaterialAnimation, WorldRenderMaterial, WorldSurfaceLighting, WorldSurfaceSample,
-    WorldVertex, Q8,
+    MaterialTint, PointLightSample, Rgb8, RoomPoint, WorldCamera, WorldRenderMaterial,
+    WorldSurfaceLighting, WorldSurfaceSample, WorldVertex, Q8,
 };
 use psx_gpu::material::TextureMaterial;
-use psx_level::{
-    find_asset_of_kind, AssetId, AssetKind, LevelMaterialAnimation, LevelMaterialRecord,
-    LevelMaterialSidedness, LevelRoomRecord, PointLightRecord, RoomIndex,
-};
-
-use crate::model_rendering::model_override_blend_mode;
-use crate::vram::{vram_slot_texture_size_u8, VramSlot};
-
-/// Walk `room.material_first..material_first + material_count`,
-/// resolve each material's texture asset, and build a
-/// TextureMaterial in `out` indexed by `local_slot`. Each
-/// texture asset is uploaded at most once across the program
-/// lifetime -- the residency manager + VRAM_SLOTS tracks who's
-/// already up.
-///
-/// Returns the highest `local_slot + 1` so the caller knows the
-/// in-use prefix length.
-pub fn build_room_materials<const MAX_ROOM_MATERIALS: usize>(
-    room: &LevelRoomRecord,
-    materials: &'static [LevelMaterialRecord],
-    assets: &'static [psx_level::LevelAssetRecord],
-    out: &mut [Option<WorldRenderMaterial>; MAX_ROOM_MATERIALS],
-    mut ensure_room_texture_uploaded: impl FnMut(AssetId, &[u8]) -> Option<VramSlot>,
-    pending_room_texture_upload: impl Fn(AssetId) -> bool,
-) -> (usize, bool) {
-    let first = room.material_first.to_usize();
-    let count = room.material_count as usize;
-    let slice: &[LevelMaterialRecord] = &materials[first..first + count];
-
-    let mut max_slot: usize = 0;
-    let mut all_resolved = true;
-    for material in slice {
-        let slot = material.local_slot.to_usize();
-        if slot >= MAX_ROOM_MATERIALS {
-            // The room references more distinct materials than the per-room table
-            // holds: this slot, and every surface that uses it, is dropped. Count
-            // it so the drop is visible instead of silent. This was the root cause
-            // of the demo10 invisible frieze/stairs (slots >= the old cap of 8).
-            telemetry::counter(telemetry::counter::ROOM_MATERIAL_SLOT_OVERFLOW, 1);
-            continue;
-        }
-        if slot + 1 > max_slot {
-            max_slot = slot + 1;
-        }
-        let Some(asset) = find_asset_of_kind(assets, material.texture_asset, AssetKind::Texture)
-        else {
-            continue;
-        };
-        let Some(slot_record) = ensure_room_texture_uploaded(asset.id, asset.bytes) else {
-            all_resolved = false;
-            // Distinguish a real drop (the silent untextured fallback, queue full
-            // or VRAM full) from a still-in-flight upload that resolves on a later
-            // refresh: only the former should count as a missing-texture drop.
-            if !pending_room_texture_upload(asset.id) {
-                telemetry::counter(telemetry::counter::ROOM_MATERIAL_TEXTURE_DROPS, 1);
-            }
-            continue;
-        };
-        let texture = TextureMaterial::blended(
-            slot_record.clut_word,
-            slot_record.tpage_word,
-            rgb_tuple(material.tint_rgb),
-            model_override_blend_mode(material.blend_mode),
-        )
-        .with_texture_window(slot_record.texture_window);
-        let full_width = vram_slot_texture_size_u8(slot_record.texture_width);
-        let full_height = vram_slot_texture_size_u8(slot_record.texture_height);
-        let (texture_width, texture_height, animation) = match material.animation {
-            LevelMaterialAnimation::Static => {
-                (full_width, full_height, WorldMaterialAnimation::Static)
-            }
-            LevelMaterialAnimation::UvScroll(motion) => (
-                full_width,
-                full_height,
-                WorldMaterialAnimation::UvScroll {
-                    speed_u_q8: motion.speed_u_q8,
-                    speed_v_q8: motion.speed_v_q8,
-                    phase_u: motion.phase_u,
-                    phase_v: motion.phase_v,
-                },
-            ),
-            LevelMaterialAnimation::Flipbook(flipbook) => {
-                let columns = flipbook.columns.max(1);
-                let rows = flipbook.rows.max(1);
-                (
-                    (full_width / columns).max(1),
-                    (full_height / rows).max(1),
-                    WorldMaterialAnimation::Flipbook {
-                        columns,
-                        frame_count: flipbook
-                            .frame_count
-                            .max(1)
-                            .min(columns.saturating_mul(rows)),
-                        ticks_per_frame: flipbook.ticks_per_frame.max(1),
-                        phase: flipbook.phase,
-                    },
-                )
-            }
-        };
-        let render_material = match material.sidedness() {
-            LevelMaterialSidedness::Front => WorldRenderMaterial::front(texture),
-            LevelMaterialSidedness::Back => WorldRenderMaterial::back(texture),
-            LevelMaterialSidedness::Both => WorldRenderMaterial::both(texture),
-        }
-        .with_texture_size(texture_width, texture_height)
-        .with_animation(animation);
-        out[slot] = Some(render_material);
-    }
-    (max_slot, all_resolved)
-}
+use psx_level::{PointLightRecord, RoomIndex};
 
 /// Per-room shading view: the room's ambient colour, its cooked point
 /// lights, the render camera (for fog depth), and the authored fog

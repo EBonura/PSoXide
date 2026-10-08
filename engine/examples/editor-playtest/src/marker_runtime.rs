@@ -19,13 +19,6 @@ const TARGET_LOCK_CYAN: (u8, u8, u8) = (32, 220, 224);
 const TARGET_LOCK_EMBER: (u8, u8, u8) = (236, 88, 52);
 const TARGET_LOCK_PULSE_FRAMES: u32 = 72;
 
-/// Marker visualization tuning. Markers are debug stubs -- keep
-/// them visible at orbit-camera scales without dominating the
-/// scene.
-const MARKER_HALF: i32 = 6;
-const MARKER_LIFT: i32 = MARKER_HALF;
-const MARKER_TINT: (u8, u8, u8) = (0xff, 0xa8, 0x40);
-
 const ARCHIVE_BEACON_MIN_HEIGHT: i32 = 6;
 const ARCHIVE_BEACON_MAX_HEIGHT: i32 = 32;
 const ARCHIVE_BEACON_ACTIVE_ROTATION_FRAMES: u32 = 180;
@@ -164,15 +157,8 @@ where
     submitted
 }
 
-fn archive_beacon_surface_options(
-    record: &LevelRoomRecord,
-    uses_pxbsp: bool,
-) -> WorldSurfaceOptions {
-    if uses_pxbsp {
-        pxbsp_actor_surface_options(record)
-    } else {
-        actor_surface_options(record)
-    }
+fn archive_beacon_surface_options(record: &LevelRoomRecord) -> WorldSurfaceOptions {
+    pxbsp_actor_surface_options(record)
 }
 
 impl Playtest {
@@ -221,7 +207,7 @@ impl Playtest {
         let Some(record) = ROOMS.get(self.room_index.to_usize()) else {
             return 0;
         };
-        let options = archive_beacon_surface_options(record, self.bsp.is_some());
+        let options = archive_beacon_surface_options(record);
         let open_poi = self
             .poi_messages
             .active()
@@ -744,83 +730,6 @@ where
     usize::from(submitted)
 }
 
-/// Draw one tinted cube per generated entity record. Cubes
-/// reuse the room's first material with an override tint so
-/// markers stand out from the surrounding geometry without
-/// needing a dedicated texture upload.
-pub(super) fn draw_entity_markers(
-    entities: &[EntityRecord],
-    current_room: RoomIndex,
-    materials: &[WorldRenderMaterial],
-    camera: &WorldCamera,
-    options: WorldSurfaceOptions,
-    triangles: &mut impl PrimitiveSink<TriTextured>,
-    world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
-) {
-    if entities.is_empty() || materials.is_empty() {
-        return;
-    }
-    // Reuse the room's first material so we don't need a
-    // dedicated marker texture. Tint override picks up the
-    // existing CLUT + tpage but recolours.
-    let material = materials[0].texture.with_tint(MARKER_TINT);
-    let opts = options.with_material_layer(material);
-    const UVS: [(u8, u8); 4] = [(0, 0), (64, 0), (64, 64), (0, 64)];
-
-    for entity in entities {
-        if entity.room != current_room || entity.kind == psx_level::EntityKind::HookPoint {
-            continue;
-        }
-        let cx = entity.x;
-        let cy = entity.y - MARKER_LIFT - MARKER_HALF;
-        let cz = entity.z;
-        let h = MARKER_HALF;
-
-        let top = [
-            WorldVertex::new(cx - h, cy - h, cz - h),
-            WorldVertex::new(cx + h, cy - h, cz - h),
-            WorldVertex::new(cx + h, cy - h, cz + h),
-            WorldVertex::new(cx - h, cy - h, cz + h),
-        ];
-        let bottom = [
-            WorldVertex::new(cx - h, cy + h, cz + h),
-            WorldVertex::new(cx + h, cy + h, cz + h),
-            WorldVertex::new(cx + h, cy + h, cz - h),
-            WorldVertex::new(cx - h, cy + h, cz - h),
-        ];
-        let north = [
-            WorldVertex::new(cx - h, cy - h, cz - h),
-            WorldVertex::new(cx + h, cy - h, cz - h),
-            WorldVertex::new(cx + h, cy + h, cz - h),
-            WorldVertex::new(cx - h, cy + h, cz - h),
-        ];
-        let south = [
-            WorldVertex::new(cx + h, cy - h, cz + h),
-            WorldVertex::new(cx - h, cy - h, cz + h),
-            WorldVertex::new(cx - h, cy + h, cz + h),
-            WorldVertex::new(cx + h, cy + h, cz + h),
-        ];
-        let east = [
-            WorldVertex::new(cx + h, cy - h, cz - h),
-            WorldVertex::new(cx + h, cy - h, cz + h),
-            WorldVertex::new(cx + h, cy + h, cz + h),
-            WorldVertex::new(cx + h, cy + h, cz - h),
-        ];
-        let west = [
-            WorldVertex::new(cx - h, cy - h, cz + h),
-            WorldVertex::new(cx - h, cy - h, cz - h),
-            WorldVertex::new(cx - h, cy + h, cz - h),
-            WorldVertex::new(cx - h, cy + h, cz + h),
-        ];
-
-        for face in [top, bottom, north, south, east, west] {
-            if let Some(projected) = camera.project_world_quad(face) {
-                let _ = world.submit_textured_quad(triangles, projected, UVS, material, opts);
-            }
-        }
-    }
-}
-
 pub(super) fn draw_lock_target_indicator(
     gpu: &mut Gpu,
     target: RoomPoint,
@@ -949,10 +858,12 @@ pub(super) fn draw_lock_target_readout(
         gpu.draw(&LineMono::new(x0, y0 + 1, x1, y1 + 1, 4, 10, 14));
         gpu.draw(&LineMono::new(x0, y0, x1, y1, r, g, b));
     };
-    let point = |angle: i32, radius: i32| (
-        psx_math::cos_q12(angle as u16) * radius / 4096,
-        psx_math::sin_q12(angle as u16) * radius / 4096,
-    );
+    let point = |angle: i32, radius: i32| {
+        (
+            psx_math::cos_q12(angle as u16) * radius / 4096,
+            psx_math::sin_q12(angle as u16) * radius / 4096,
+        )
+    };
     // At native 320x240, broad filled sectors keep a clean silhouette.
     // Stacking thin radial lines lets their shadows cut holes in neighbours.
     let sector = |gpu: &mut Gpu, a: i32, b: i32, inner: i32, outer: i32, color: (u8, u8, u8)| {
@@ -960,7 +871,12 @@ pub(super) fn draw_lock_target_readout(
             let (x, y) = point(angle, radius);
             (center.sx + x as i16, center.sy + y as i16)
         };
-        let corners = [screen(a, inner), screen(a, outer), screen(b, outer), screen(b, inner)];
+        let corners = [
+            screen(a, inner),
+            screen(a, outer),
+            screen(b, outer),
+            screen(b, inner),
+        ];
         gpu.draw(&TriFlat::new(
             [corners[0], corners[1], corners[2]],
             color.0,
@@ -978,7 +894,11 @@ pub(super) fn draw_lock_target_readout(
         (VitalityChannelId::One, horizon, 130 * 4096 / 360),
         (VitalityChannelId::Two, zenith, -50 * 4096 / 360),
     ] {
-        let rgb = if channel == stance { stance_rgb(channel) } else { inactive };
+        let rgb = if channel == stance {
+            stance_rgb(channel)
+        } else {
+            inactive
+        };
         for segment in 0..10 {
             let a = start + segment * 100 * 4096 / 3600;
             let b = a + 7 * 4096 / 360;
@@ -1084,30 +1004,24 @@ mod depth_tests {
     use super::*;
 
     #[test]
-    fn beacon_behind_actor_stays_behind_in_both_world_formats() {
+    fn beacon_behind_actor_stays_behind() {
         let mut record = ROOMS[0];
         record.sector_size = 64;
-        for bsp in [false, true] {
-            let actor = if bsp {
-                pxbsp_actor_surface_options(&record)
-            } else {
-                actor_surface_options(&record)
-            };
-            let beacon = archive_beacon_surface_options(&record, bsp);
-            // At a 16-unit separation the old 2-sector marker clearance
-            // overtook the actor's half-sector clearance by 80 units.
-            for actor_z in [128, 256, 512] {
-                let actor_key = actor_z + actor.depth_bias;
-                let marker_key = actor_z + 16 + beacon.depth_bias;
-                assert!(
-                    marker_key > actor_key,
-                    "far marker must not overtake player"
-                );
-                assert!(
-                    marker_key - 2 > actor_key,
-                    "frame outline must retain the body's clearance"
-                );
-            }
+        let actor = pxbsp_actor_surface_options(&record);
+        let beacon = archive_beacon_surface_options(&record);
+        // At a 16-unit separation the old 2-sector marker clearance
+        // overtook the actor's half-sector clearance by 80 units.
+        for actor_z in [128, 256, 512] {
+            let actor_key = actor_z + actor.depth_bias;
+            let marker_key = actor_z + 16 + beacon.depth_bias;
+            assert!(
+                marker_key > actor_key,
+                "far marker must not overtake player"
+            );
+            assert!(
+                marker_key - 2 > actor_key,
+                "frame outline must retain the body's clearance"
+            );
         }
     }
 }

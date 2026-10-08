@@ -433,9 +433,7 @@ impl Playtest {
         self.player_scarf = psx_game_runtime::model_rendering::PlayerScarf::new();
         self.anim_state = PlayerAnim::HookLaunch;
         self.ranged_ready = combat_input::RangedReady::EMPTY;
-        self.update_current_room_from_player();
         self.render_camera = self.update_follow_camera(ctx);
-        self.refresh_active_room_window_if_needed();
         if flight.finished(ctx.sim_tick.as_u32()) {
             self.hook_travel = None;
             self.hook_attached = self.hook_target.take();

@@ -1638,7 +1638,8 @@ mod tests {
             emitter.active_start_frame = 2;
             emitter.active_end_frame = 3;
             // Gait phase is unrelated to the shot; the muzzle follows the moving actor.
-            let pose = Some(pose_at([90, 20, -40], 18 << 12));
+            let actor_pose = pose_at([90, 20, -40], 18 << 12);
+            let pose = Some(actor_pose);
             assert!(authored_projectile_release_pending(&[emitter], ATTACK, pose, 0).is_none());
             assert!(
                 authored_projectile_release_pending_at_frame(&[emitter], ATTACK, pose, 0, 1)
@@ -1649,7 +1650,7 @@ mod tests {
                     .unwrap();
             assert_eq!(
                 release.position,
-                transform_actor_combat_capsule(&emitter, pose.unwrap())
+                transform_actor_combat_capsule(&emitter, actor_pose)
                     .unwrap()
                     .start
             );

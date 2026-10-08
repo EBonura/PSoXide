@@ -27,32 +27,6 @@ pub(super) fn draw_particle_emitter<'a>(
     )
 }
 
-pub(super) fn draw_water_wade_splash<'a>(
-    x: i32,
-    surface_y: i32,
-    z: i32,
-    camera: WorldCamera,
-    projector: Option<LoadedWorldCameraGte>,
-    depth_range: DepthRange,
-    particle_material: TextureMaterial,
-    elapsed_tick: SimTick,
-    ot: &mut OtFrame<'a, OT_DEPTH>,
-    primitive_packets: &mut PrimitivePacketArena<'a>,
-) -> usize {
-    psx_game_runtime::particles::draw_water_wade_splash(
-        x,
-        surface_y,
-        z,
-        camera,
-        projector,
-        depth_range,
-        particle_material,
-        elapsed_tick,
-        ot,
-        primitive_packets,
-    )
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_projectile_bolt<'a>(
     projectile: psx_game_runtime::projectiles::ProjectileSnapshot,

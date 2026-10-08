@@ -40,47 +40,6 @@ fn upload_bytes_for(asset_id: AssetId) -> Option<&'static [u8]> {
     }
 }
 
-/// Pre-mark a room's required asset set on the residency contract
-/// tracker (the crate runtime owns the `ResidencyManager`).
-pub(super) fn ensure_room_resident(residency: &psx_level::RoomResidencyRecord) {
-    let _ = vram_arena().ensure_room_resident(residency);
-}
-
-/// Scope the persistent RAM asset set to `desired`'s residency needs.
-///
-/// Releases texture payloads no desired room requires or warms, and reads only
-/// the ones that are missing, so crossing into a neighbour that shares textures
-/// costs no CD traffic. Model meshes and clips stay pinned for the level; see
-/// `PersistentAssetStreamer::evictable`.
-pub(super) fn request_persistent_assets(desired: &[RoomIndex], count: usize) {
-    let desired = &desired[..count.min(desired.len())];
-    let arena = persistent_assets_arena_mut();
-    // The streamer counts PERSISTENT_ASSET_LOAD_FAILURES on the failing edge
-    // itself, so every path that gives up is counted, not just this one.
-    arena.request_rooms(
-        UI_PACK_START_LBA,
-        UI_PACK_TOC,
-        ASSETS,
-        desired,
-        ROOM_RESIDENCY,
-    );
-    telemetry::counter(
-        telemetry::counter::PERSISTENT_ASSET_RESIDENT_BYTES,
-        arena.resident_bytes().min(u32::MAX as usize) as u32,
-    );
-}
-
-/// Debounced room-texture eviction against the desired resident set;
-/// policy and the last-evict-room debounce live on
-/// `VramRuntime::evict_unreferenced_vram`.
-pub(super) fn evict_unreferenced_vram(
-    current_room: RoomIndex,
-    desired: &[RoomIndex],
-    count: usize,
-) {
-    vram_arena().evict_unreferenced_vram(current_room, desired, count, ROOM_RESIDENCY);
-}
-
 /// Start a short grace period after entering a menu scene. This lets the boot
 /// frame (or transition cover) present before the next UI.PAK read starts.
 #[cfg(feature = "cd-stream-bench")]
@@ -186,10 +145,6 @@ impl RuntimeStreamingJobs {
     pub(super) fn step_vram_uploads(self) -> bool {
         vram_arena().step_uploads(self.vram_rows_per_tick, &upload_bytes_for)
     }
-
-    pub(super) fn vram_uploads_idle(self) -> bool {
-        vram_arena().uploads_idle()
-    }
 }
 
 /// Sky panorama page tpage word (`page` 0 or 1), from the runtime's
@@ -237,11 +192,6 @@ pub(super) fn find_room_texture_vram_slot(asset_id: AssetId) -> Option<VramSlot>
     vram_arena().find_room_texture_vram_slot(asset_id)
 }
 
-/// True while `asset_id` has a room-texture upload still in flight.
-pub(super) fn pending_room_texture_upload(asset_id: AssetId) -> bool {
-    vram_arena().pending_room_texture_upload(asset_id)
-}
-
 /// Upload `asset_bytes` to VRAM if not already resident (CLUT mode from
 /// the texture's transparency flag).
 pub(super) fn ensure_texture_uploaded(asset_id: AssetId, asset_bytes: &[u8]) -> Option<VramSlot> {
@@ -263,26 +213,6 @@ pub(super) fn ensure_sky_texture_uploaded(
     asset_bytes: &[u8],
 ) -> Option<VramSlot> {
     vram_arena().ensure_sky_texture_uploaded(VRAM_LAYOUT, kind, asset_id, asset_bytes)
-}
-
-/// Queue (or resolve) the room-owned reflection probe. The active-room window
-/// calls this for the current and warm adjacent rooms, so a portal crossing
-/// only switches the selected resident slot.
-pub(super) fn room_reflection_probe_ready(room: RoomIndex) -> bool {
-    let Some(asset_id) = ROOM_REFLECTION_PROBES
-        .get(room.to_usize())
-        .copied()
-        .flatten()
-    else {
-        return true;
-    };
-    if find_room_texture_vram_slot(asset_id).is_some() {
-        return true;
-    }
-    let Some(bytes) = upload_bytes_for(asset_id) else {
-        return false;
-    };
-    ensure_room_texture_uploaded(asset_id, bytes).is_some_and(|slot| slot.ready)
 }
 
 /// Upload a UI texture, stepping the upload queue so menu images resolve
@@ -320,29 +250,6 @@ pub(super) fn prop_texture_slot(texture_asset: AssetId) -> Option<VramSlot> {
 pub(super) fn model_texture_slot(texture_asset: AssetId) -> Option<VramSlot> {
     let bytes = upload_bytes_for(texture_asset)?;
     ensure_texture_uploaded(texture_asset, bytes)
-}
-
-/// True once every image/box prop texture of `room` is VRAM-resident.
-#[cfg(feature = "cd-stream-bench")]
-pub(super) fn room_prop_textures_ready(room: RoomIndex) -> bool {
-    if !vram_arena().room_prop_textures_ready(
-        VRAM_LAYOUT,
-        ASSETS,
-        IMAGE_PROPS,
-        BOX_PROPS,
-        CYLINDER_PROPS,
-        ARCH_PROPS,
-        room,
-    ) {
-        return false;
-    }
-    WATER_CELLS
-        .iter()
-        .filter(|cell| cell.room == room)
-        .all(|cell| {
-            cell.texture_asset
-                .is_none_or(|asset| prop_texture_slot(asset).is_some())
-        })
 }
 
 /// Upload the streamed sky panorama synchronously from `asset_bytes`.

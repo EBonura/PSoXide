@@ -55,35 +55,6 @@ impl Playtest {
         );
     }
 
-    pub(super) fn collect_static_prop_aabb_blockers_into<S: BoundedSink<CharacterCollisionAabb>>(
-        &self,
-        out: &mut S,
-    ) -> usize {
-        let mut count =
-            self.box_props
-                .collect_collision_blockers_into(BOX_PROPS, self.room_index, out);
-        count += psx_game_runtime::arch_props::collect_arch_prop_collision_blockers_into(
-            ARCH_PROPS,
-            ARCH_PROP_COLLISIONS,
-            self.room_index,
-            out,
-        );
-        count += psx_game_runtime::image_props::collect_image_prop_collision_blockers_into_filtered(
-            IMAGE_PROPS,
-            self.room_index,
-            out,
-            |index| {
-                typed_world_object_active(
-                    WORLD_OBJECTS,
-                    &self.destructibles,
-                    psx_level::world_object_kind::IMAGE_PROP,
-                    index,
-                )
-            },
-        );
-        count
-    }
-
     /// Checked no-clear collection for resident BSP collision scratch.
     pub(super) fn collect_static_prop_aabb_blockers_checked_into<
         S: BoundedSink<CharacterCollisionAabb>,

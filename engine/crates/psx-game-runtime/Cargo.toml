@@ -8,8 +8,8 @@ description = "PSoXide game layer: streaming/residency/VRAM policy and (in later
 
 [features]
 # Streamed-world build shape (editor-playtest's default, which forwards
-# it): room-surface materials pool by resident stream slot instead of
-# living inline in `ActiveRuntimeRoom`.
+# it): enables the CD-backed asset streamer, VRAM upload queue and UI image
+# cache.
 cd-stream-bench = []
 # CD throughput probe (`cd_stream::run_benchmark`). Declared here since
 # phase 1.5: the module carried its `cd-stream-benchmark` cfgs from the
@@ -17,16 +17,6 @@ cd-stream-bench = []
 # the feature, so the probe silently compiled out (and every cfg warned)
 # until the game's own feature forwarded it again.
 cd-stream-benchmark = ["cd-stream-bench"]
-# Grid-visibility build shape + its algorithm-variant toggles, declared
-# here since the phase-2 visible-cell carve so the moved policy keeps
-# compiling to the exact same shape the example selects (the example
-# forwards each of these from its own feature of the same name).
-world-grid-visible = []
-vis-full-active-chunks = []
-vis-anchor-cache = []
-vis-anchor-pvs-candidates = []
-vis-coarse-yaw = []
-vis-broad-pvs = []
 # Immediate-mode actor collision cylinders. Keep this out of shipping builds:
 # the helper is intentionally explicit and sizeable on MIPS, and is only useful
 # while tuning authored collision bounds.

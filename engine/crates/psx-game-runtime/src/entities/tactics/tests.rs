@@ -34,17 +34,14 @@ const fn enemy() -> LevelGameEntityRecord {
     r
 }
 static ENEMY: [LevelGameEntityRecord; 1] = [enemy()];
-static ROOMS: [RoomIndex; 1] = [RoomIndex(0)];
-fn input(p: [i32; 3]) -> GameEntityTickInput<'static> {
+fn input(p: [i32; 3]) -> GameEntityTickInput {
     GameEntityTickInput {
         player: p,
-        player_room: RoomIndex(0),
         player_radius: 12,
         player_height: 64,
         player_noise_radius: 100,
         player_invulnerable: false,
         player_combat: None,
-        active_rooms: &ROOMS,
     }
 }
 #[derive(Default)]
@@ -640,6 +637,7 @@ fn fractional_spacing_keeps_short_steps_and_cadence_without_idle_flicker() {
 fn terminal_presentation_advances_only_defeated_actors() {
     let mut entities = GameEntities::<2>::EMPTY;
     entities.spawn_from_records(&ENEMY);
+    entities.set_spatial_active_mask(u64::MAX);
     let before = entities.state_ticks[0];
     entities.advance_defeated_animations(10);
     assert_eq!(entities.state_ticks[0], before);

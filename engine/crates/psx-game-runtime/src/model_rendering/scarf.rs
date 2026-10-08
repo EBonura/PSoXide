@@ -161,11 +161,9 @@ impl PlayerScarf {
         // the moving attachment. The displacement becomes physical inertia.
         let bound = height * Q * 2;
         for i in 0..POINTS {
-            for axis in 0..3 {
-                self.points[i][axis] =
-                    (self.points[i][axis] + delta[axis] * Q).clamp(-bound, bound);
-                self.previous[i][axis] =
-                    (self.previous[i][axis] + delta[axis] * Q).clamp(-bound, bound);
+            for (axis, d) in delta.iter().enumerate() {
+                self.points[i][axis] = (self.points[i][axis] + d * Q).clamp(-bound, bound);
+                self.previous[i][axis] = (self.previous[i][axis] + d * Q).clamp(-bound, bound);
             }
         }
         let pins = [self.rest_point(0, 0), self.rest_point(0, 1)];
@@ -187,10 +185,10 @@ impl PlayerScarf {
         let damping = if hz <= 25 { 236 } else { 240 };
         for i in 2..POINTS {
             let old = self.points[i];
-            for axis in 0..3 {
+            for (axis, o) in old.iter().enumerate() {
                 let velocity =
-                    ((old[axis] - self.previous[i][axis]) * damping / 256).clamp(-segment, segment);
-                self.points[i][axis] = (old[axis] + velocity).clamp(-bound, bound);
+                    ((o - self.previous[i][axis]) * damping / 256).clamp(-segment, segment);
+                self.points[i][axis] = (o + velocity).clamp(-bound, bound);
             }
             self.points[i][1] -= gravity;
             self.previous[i] = old;
