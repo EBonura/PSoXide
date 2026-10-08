@@ -16,7 +16,7 @@ A `Request` names a run of sectors and the memory they go to. `Priority` orders 
 
 ## Integration notes
 
-Every transfer is Setloc, SeekL, Setmode (double speed), ReadN: the sequence the BIOS uses. A bare Setloc plus ReadN began delivering while the mechanism was still settling and corrupted long streams on a console. Sectors are popped by the CPU, because chopped CD DMA was unreliable on a console; that costs CPU time while a read runs, so read in bursts when there is work.
+Every transfer is Setloc, SeekL, Setmode (double speed), ReadN: the sequence the BIOS uses. A bare Setloc plus ReadN began delivering while the mechanism was still settling and corrupted long streams on a console. Sectors are popped by the CPU, because chopped CD DMA was unreliable on a console; that costs CPU time while a read runs, so read in bursts when there is work. `Config::double_speed` clears for single speed, which halves the sectors per second and so how often the handler runs.
 
 `cancel` only sets a flag. The handler drops the next sector and pauses the drive itself, because a Pause sent from the main loop while sectors were arriving lost its acknowledge on silicon. The request ends `Cancelled` with the number of sectors that had landed, and `Request::remaining_after` builds the request that continues it. `Request::with_resumes` makes the transport do that itself after a drive error.
 
@@ -28,7 +28,7 @@ CD-DA and XA playback cannot share the drive with data reads. `request_audio_lea
 
 The counters (`StreamStats`) are published as the `PSX_CD_STATS` symbol for tools that read guest memory. The `trace` feature also records the last 128 controller events.
 
-The state machine and the scripted drive are covered by host tests. The console wrapper and the register sequences are the same ones the earlier game-local transports shipped, but this crate has been run only in the emulator so far; a console run is still to do.
+The state machine and the scripted drive are covered by host tests. The console wrapper and the register sequences are the same ones the earlier game-local transports shipped, but this crate has been run only in the emulator so far; a console run is still to do. `hello-cdstream-probe` is the disc for that run.
 
 ## Example
 
