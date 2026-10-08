@@ -192,10 +192,17 @@ fn main() {
     // nothing: within a percent of the idle loop (the loop's phase against the
     // VBlank moves the count by a few tenths of a percent).
     check(no_ports * 100 >= idle * 99, "VBlank entry alone costs more than 1%");
-    check(both * 100 >= port1 * 99, "an empty port 2 costs more than 1%");
+    // A pad in port 2 (the emulator's `--pad2`) is polled for real, so only
+    // an empty socket is expected to be free.
+    let populated = snap.port(Port::Two).health == psx_pad::engine::Health::Present;
+    if populated {
+        tty::println("padcheck: port 2 is populated");
+    } else {
+        check(both * 100 >= port1 * 99, "an empty port 2 costs more than 1%");
+        check(snap.port(Port::Two).health == psx_pad::engine::Health::Absent, "port 2 is absent");
+    }
     check(timed * 100 >= idle * 95, "fixed pacing keeps under 95% of the CPU");
     check(snap.port(Port::One).health == psx_pad::engine::Health::Present, "port 1 is present");
-    check(snap.port(Port::Two).health == psx_pad::engine::Health::Absent, "port 2 is absent");
     check(snap.port(Port::One).faults == 0 && snap.port(Port::Two).faults == 0, "no faults");
     check(stats.stalls == 0 && stats.spurious == 0, "no stalls or spurious interrupts");
     check(console::handler_stack_unused_bytes() >= 256, "the handler stack has room");
