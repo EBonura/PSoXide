@@ -1,6 +1,6 @@
 +++
 title = "PSoXide SDK documentation"
-description = "22 crate guides, searchable Rust APIs and 20 complete example programs for building PS1 homebrew."
+description = "24 crate guides, searchable Rust APIs and 20 complete example programs for building PS1 homebrew."
 weight = 3
 [extra]
 kind = "Reference"
@@ -28,6 +28,7 @@ Pick the crates your program needs:
 | Read controls and build a UI | [psx-pad](@/docs/crates/psx-pad.md), [psx-font](@/docs/crates/psx-font.md) | [psx-osk](@/docs/crates/psx-osk.md), [psx-settings](@/docs/crates/psx-settings.md) |
 | Play sounds and effects | [psx-spu](@/docs/crates/psx-spu.md), [psx-sfx](@/docs/crates/psx-sfx.md) | [psx-asset](@/docs/crates/psx-asset.md) for cooked audio |
 | Load and manage assets | [psx-asset](@/docs/crates/psx-asset.md), [psx-pack](@/docs/crates/psx-pack.md) | [psx-cache](@/docs/crates/psx-cache.md) for residency |
+| Stream data from the disc while the game runs | [psx-cdstream](@/docs/crates/psx-cdstream.md) | [psx-residency](@/docs/crates/psx-residency.md) for what to keep resident, [psx-residency-sim](@/docs/crates/psx-residency-sim.md) to check a route on the host |
 | Save player data | [psx-mc](@/docs/crates/psx-mc.md) | [psx-settings](@/docs/crates/psx-settings.md) for preferences |
 | Add visual effects or video | [psx-fx](@/docs/crates/psx-fx.md), [psx-fmv](@/docs/crates/psx-fmv.md) | GPU, SPU and CD services |
 | Instrument a program | [psx-telemetry](@/docs/crates/psx-telemetry.md) | Emulator profiling support |
@@ -42,13 +43,13 @@ framework is a separate layer and is not required for these examples.
 ## Build the documented revision
 
 The crate structures, full example listings and API reference use the same SDK
-revision as the embedded players: `47a414f23895c0dd4cb5a6c1b3cd75bedf0b76dc`.
+revision as the embedded players: `0d09fa09313fb64b7a7e7de9174b7cdb9f1d1619`.
 After [installing the tools](@/docs/first-ps1-program.md#1-install-the-tools):
 
 ```sh
 git clone https://github.com/EBonura/PSoXide.git
 cd PSoXide
-git checkout 47a414f23895c0dd4cb5a6c1b3cd75bedf0b76dc
+git checkout 0d09fa09313fb64b7a7e7de9174b7cdb9f1d1619
 make disc EXAMPLE=hello-tri
 ```
 
@@ -66,7 +67,7 @@ PSoXide/
   rust-toolchain.toml         pinned compiler and components
   crates/                    shared formats and host tools
   sdk/
-    Cargo.toml               workspace containing the 22 SDK crates
+    Cargo.toml               workspace containing the 24 SDK crates
     psoxide.ld               target linker script
     crates/<crate>/src/      subsystem implementations
     examples/hello-tri/
@@ -83,7 +84,7 @@ compiling. Other examples keep data on the disc and load it at runtime; an EXE
 download alone does not contain those files or CD audio tracks.
 
 For a separate game repository, use the repository's
-[pinned component bootstrap workflow](https://github.com/EBonura/PSoXide/blob/47a414f23895c0dd4cb5a6c1b3cd75bedf0b76dc/README.md)
+[pinned component bootstrap workflow](https://github.com/EBonura/PSoXide/blob/0d09fa09313fb64b7a7e7de9174b7cdb9f1d1619/README.md)
 to retain the shared dependencies and matching SDK revision.
 
 ## API reference
