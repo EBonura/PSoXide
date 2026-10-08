@@ -530,6 +530,19 @@ pub fn uninstall() -> Option<Cd> {
 
 // ------------------------------------------------------------ the foreground
 
+/// Change the configuration; it applies from the next event. See
+/// [`Engine::configure`]. ([`Config::time_handler`] is only read by
+/// [`install`].)
+pub fn configure(config: Config) {
+    with_engine(|engine| engine.configure(config));
+}
+
+/// Start the longest-handler measurement over. See
+/// [`Engine::reset_max_irq_ticks`].
+pub fn reset_max_irq_ticks() {
+    with_engine(Engine::reset_max_irq_ticks);
+}
+
 /// Queue a read. See [`Engine::submit`].
 pub fn submit(request: Request) -> Result<Ticket, SubmitError> {
     with_engine(|engine| engine.submit(request))
