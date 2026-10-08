@@ -102,6 +102,10 @@ impl Drop for Session {
         // A transaction in flight finishes within a frame or two.
         for _ in 0..8 {
             if console::uninstall().is_some() {
+                // The wrapper stays in the vector after `uninstall`, and
+                // `install` refuses a vector that already leads to it, so put
+                // the runtime's handler back for the next session.
+                psx_rt::interrupts::install_vblank_counter();
                 return;
             }
             let _ = spin_frame(|| {});
@@ -229,10 +233,7 @@ fn pacing_run(pacing: BytePacing, records: &mut Records, next: &mut usize) {
     }
     let after = console::snapshot();
     let stats = console::stats();
-    let rows = [
-        (0u16, Port::One),
-        (1u16, Port::Two),
-    ];
+    let rows = [(0u16, Port::One), (1u16, Port::Two)];
     for (offset, port) in rows {
         let (a, b) = (before.port(port), after.port(port));
         push(
@@ -259,7 +260,12 @@ fn pacing_run(pacing: BytePacing, records: &mut Records, next: &mut usize) {
     push(
         records,
         next,
-        record(WORK_RECORD + base, work_total / PACING_FRAMES, work_min, idle),
+        record(
+            WORK_RECORD + base,
+            work_total / PACING_FRAMES,
+            work_min,
+            idle,
+        ),
     );
     let pad = after.port(Port::One).pad;
     push(

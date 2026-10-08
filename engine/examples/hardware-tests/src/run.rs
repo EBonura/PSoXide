@@ -558,7 +558,9 @@ records_step!(records_perf_extended, perf_probes::push_extended);
 records_step!(records_risky_ab, perf_probes::push_risky);
 records_step!(records_gte_latency, perf_probes::push_gte_latency);
 records_step!(records_dma_channels, perf_probes::push_dma_channels);
+records_step!(records_audit, perf_probes::push_audit);
 records_step!(records_timer1_rate, timer1_rate::run);
+records_step!(records_tick_loss, timer1_rate::tick_loss);
 records_step!(records_sio_setup, sio_timing::setup_sweep);
 records_step!(records_sio_pad, sio_timing::pad_timing);
 records_step!(records_sio_card, sio_timing::card_timing);
@@ -613,10 +615,8 @@ fn step_sio_hotplug(run: &mut Run) {
     pad_engine::hotplug(
         |seconds| {
             let mut line = ui::Line::new();
-            line.s("OPTIONAL: UNPLUG AND REPLUG A PAD, ")
-                .u(seconds)
-                .s(" S");
-            ui::detail(&font, "SIO0", line.as_str());
+            line.s("UNPLUG+REPLUG ONE (OPTIONAL) ").u(seconds).s("S");
+            ui::detail(&font, "PAD", line.as_str());
         },
         &mut run.timing.records,
         &mut run.next,
@@ -691,7 +691,16 @@ const STEPS: &[Step] = &[
     step(Area::IrqDmaTimers, "IRQ DMA TIMER CASES", tests_irq),
     step(Area::IrqDmaTimers, "IRQ DMA TIMER TIMING", records_irq),
     step(Area::IrqDmaTimers, "TIMER PRECISION", precision_timer_step),
-    step(Area::IrqDmaTimers, "TIMER 1 HBLANK RATE", records_timer1_rate),
+    step(
+        Area::IrqDmaTimers,
+        "TIMER 1 HBLANK RATE",
+        records_timer1_rate,
+    ),
+    step(
+        Area::IrqDmaTimers,
+        "POLLED TIMER TICK LOSS",
+        records_tick_loss,
+    ),
     // 3
     step(Area::Gte, "GTE CASES", tests_gte),
     step(Area::Gte, "GTE SWEEP", step_gte_sweep),
@@ -747,6 +756,7 @@ const STEPS: &[Step] = &[
         records_perf_extended,
     ),
     step(Area::Perf, "DMA VERSUS CPU LOADS", records_dma_channels),
+    step(Area::Perf, "AUDIT PROBES", records_audit),
     // 9: last, hardest on the machine
     step(Area::Drive, "CD MOTOR", step_stream_motor),
     risky(Area::Drive, "REGISTER A/B (CAN HANG)", records_risky_ab),

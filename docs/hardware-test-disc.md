@@ -977,9 +977,9 @@ Pad engine, steps `ENGINE SETUP SWEEP`, `ENGINE ACK PACING`, `ENGINE TIMED PACIN
   both: loop rounds per frame (average, least, most), pad faults, stalls, spurious
   interrupts, bytes of the handler's private stack never touched and the events handled.
   The engine reports no per-event handler time, so the cost shows as lost loop rounds.
-* `638`-`63B`, hot-plug: a six-second window with a prompt ("OPTIONAL: UNPLUG AND REPLUG A
-  PAD"), both ports watched through the engine every frame: transitions, the health
-  before and after, polls with nothing there, and the frames of the first and last change.
+* `638`-`63B`, hot-plug: a six-second window with a prompt ("UNPLUG+REPLUG ONE (OPTIONAL)" and
+  the seconds left), both ports watched through the engine every frame: transitions, the health
+  before and after, frames the port read absent, and the frames of the first and last change.
   Unplug and replug a pad in either port while the prompt is up, or do nothing.
 
 ## Other v2.0 measurements
@@ -999,6 +999,39 @@ Pad engine, steps `ENGINE SETUP SWEEP`, `ENGINE ACK PACING`, `ENGINE TIMED PACIN
   with nobody reading the counter and once with the CPU reading it in a tight loop:
   counts per window, distinct values seen, the largest step between reads, and how many
   reads the loop made. Does tight polling change what it counts?
+* The emulator timing audit's measurement list (M1 to M11), all warm-harness records on
+  Timer 2 with interrupts masked and five samples (min, median, max), step `AUDIT PROBES`
+  in the performance area unless noted:
+  * M1 GTE read forms after RTPS: `swc2` (`192`, `193`), `cfc2` of FLAG (`196`),
+    `lwc2` of IR1 (`197`); `192`/`193` are in `GTE COMMAND LATENCY`. M2, `mfc2` after NCLIP, is the NCLIP
+    rows `153`/`154` of the same table.
+  * M3 memory-mapped register read costs, 64 reads each: Timer 0, 1 and 2 counters
+    (`1A0`-`1A2`), DMA channel 2 CHCR (`1A3`), DPCR (`1A4`), Timer 2 mode (`1A5`).
+  * M4 scratchpad byte and half loads and stores (`1A8`-`1AB`), against the word ones (`75`, `77`).
+  * M5 isolated cache (COP0 Status bit 16): 64 stores (`1AC`), the control through the same
+    instructions without the bit (`1AD`), 64 loads (`1AE`). Run from KSEG1 with interrupts off.
+  * M6 DMA contention matrix: the GPU list walk (`35`, `36`, `9F`, `FE`), the SPU, OTC and
+    GPU block channels (`140`-`145`). The CD (channel 3) and MDEC (channels 0 and 1) are
+    **not** in the matrix: each needs a consumer on the far side, and a transfer nobody
+    drains either ends too soon to overlap 64 loads or never ends, and the probe waits for
+    the channel to go idle. CD DMA also latched busy on the project console before. The CD's
+    cost to the CPU is measured as lost loop time in `STREAM COST` and `ENGINE UNDER LOAD`.
+  * M7 controlled-cold code: the I-cache flushed, then eight instructions that are nops
+    (`1B0`), one store (`1B1`), one RAM load (`1B2`) and one register load, I_STAT (`1B3`).
+    The flush, not a 4 KiB evictor, is what makes the lines cold.
+  * M8 BIOS ROM: sixteen words in sequence (`1B4`) and one word repeatedly (`1B5`), through
+    KSEG1. Single-word ROM and expansion loads are `4B`, `55`-`5D`.
+  * M9 texture page and CLUT alternation: already `10B`, `10C` (GPU batches).
+  * M10 multiply and divide unit: `multu` then `divu` (`1B8`), `divu` then `multu` (`1B9`),
+    `multu` then `mfhi` straight away (`1BA`), `mtlo` while a multiply runs (`1BB`).
+  * M11 polled-counter tick loss (highest priority), step `POLLED TIMER TICK LOSS`,
+    `6B0`-`6B7`: Timer 2 on the system clock, Timer 2 at an eighth of it, Timer 0 on the
+    system clock and Timer 0 on the dot clock, each read in a tight loop for 30 frames
+    while Timer 1 on the HBlank clock runs free as the reference (read at the two ends
+    only). Ticks per HBlank times 16, the HBlanks, the largest step between reads, the
+    reads made and the steps over 64. A reader that loses ticks while it polls shows as
+    fewer ticks per line than the same timer's nominal rate. `650`-`652` do the same for
+    Timer 1 itself, free-running against tight-polled.
 * The scratchpad-versus-RAM load and store cycles, the I-cache miss cost and the
   multiply and divide latencies are the warm-harness records that already existed
   (`72`-`8D`, `C8`, `C9`, `1C`-`1D`, `42`-`45`); this version does not repeat them.

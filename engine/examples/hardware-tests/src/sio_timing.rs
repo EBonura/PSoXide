@@ -182,7 +182,11 @@ fn exchange(port: &mut ControllerPort, tx: u8) -> Byte {
 /// release. With `mask_irq` the interrupt flag is clear for the whole thing.
 fn transaction(port2: bool, delay: u16, tx: &[u8], mask_irq: bool) -> Seen {
     let mut port = token();
-    let _irq = if mask_irq { Some(IrqGuard::mask()) } else { None };
+    let _irq = if mask_irq {
+        Some(IrqGuard::mask())
+    } else {
+        None
+    };
     let mut seen = Seen {
         bytes: [Byte::none(); 9],
         status: 0,
@@ -401,11 +405,22 @@ fn mix(port2: bool, load: bool, records: &mut Records, next: &mut usize) {
             MIX_COUNT_RECORD + base,
             (pad_ok << 8) | MIX_ROUNDS as u32,
             (card_ok << 8) | MIX_ROUNDS as u32,
-            no_card.min(15) | (protocol.min(15) << 4) | (checksum.min(15) << 8) | (pad_lost.min(15) << 12),
+            no_card.min(15)
+                | (protocol.min(15) << 4)
+                | (checksum.min(15) << 8)
+                | (pad_lost.min(15) << 12),
         ),
     );
-    push(records, next, record(MIX_CARD_RECORD + base, fmin, fmed, fmax));
-    push(records, next, record(MIX_PAD_RECORD + base, pmin, pmed, pmax));
+    push(
+        records,
+        next,
+        record(MIX_CARD_RECORD + base, fmin, fmed, fmax),
+    );
+    push(
+        records,
+        next,
+        record(MIX_PAD_RECORD + base, pmin, pmed, pmax),
+    );
 }
 
 /// Port 1 and 2, idle and under load. A port with no card gets one probe
@@ -417,7 +432,6 @@ pub(crate) fn pad_and_card(records: &mut Records, next: &mut usize) {
         let mut probe = HardwareCard::on_port(&mut port, slot);
         let mut buf = [0u8; 128];
         let present = !matches!(probe.read_frame(0, &mut buf), Err(CardError::NoCard));
-        drop(probe);
         if !present {
             for load in [false, true] {
                 let base = 4 * (2 * port2 as u16 + load as u16);
@@ -425,7 +439,12 @@ pub(crate) fn pad_and_card(records: &mut Records, next: &mut usize) {
                 push(
                     records,
                     next,
-                    record(MIX_CARD_RECORD + base, NONE as u32, NONE as u32, NONE as u32),
+                    record(
+                        MIX_CARD_RECORD + base,
+                        NONE as u32,
+                        NONE as u32,
+                        NONE as u32,
+                    ),
                 );
                 push(
                     records,

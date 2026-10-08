@@ -213,7 +213,6 @@ impl SpuProbe {
             let early = self.words[at + 1];
             let late = self.words[at + 2];
             let loops = self.words[at + 3];
-            let termination = (15..19).contains(&segment);
             out[segment * 2] = record(
                 SB2_TONE + segment as u16,
                 late & 0xFFFF,
@@ -222,11 +221,7 @@ impl SpuProbe {
             );
             out[segment * 2 + 1] = record(
                 SB2_EARLY + segment as u16,
-                if termination {
-                    early & 0xFFFF
-                } else {
-                    early & 0xFFFF
-                },
+                early & 0xFFFF,
                 late >> 16,
                 self.table_back[segment & 1] & 0xFFFF,
             );

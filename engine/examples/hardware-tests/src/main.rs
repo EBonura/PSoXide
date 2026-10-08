@@ -2024,12 +2024,12 @@ fn push_timing_record(
     }
 }
 
-/// Repeat the probe with interrupts masked, then keep min/median/max.
-///
-/// Masking matters: without it the only defence against a VBlank or CD IRQ
-/// landing inside a measured window is that one of the repeats happens to
-/// escape, so the min/max gap reports "did an interrupt hit" rather than real
-/// hardware jitter. With IE clear the spread is the silicon's own.
+// Repeat the probe with interrupts masked, then keep min/median/max.
+//
+// Masking matters: without it the only defence against a VBlank or CD IRQ
+// landing inside a measured window is that one of the repeats happens to
+// escape, so the min/max gap reports "did an interrupt hit" rather than real
+// hardware jitter. With IE clear the spread is the silicon's own.
 
 // One shared body behind a dyn call. A generic body is monomorphised once per
 // call site, which is ~150 copies of the sampling loop in an EXE that has a

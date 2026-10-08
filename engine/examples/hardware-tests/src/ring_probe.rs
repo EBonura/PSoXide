@@ -103,8 +103,8 @@ const TONE_VOLUME: Volume = Volume::linear(1, 4);
 // ---- Segments ------------------------------------------------------------
 
 const SEGMENTS: usize = 5;
-/// Frames of audible tone per segment, then the gap. The capture itself
-/// happens inside frame 0; the tail is an operator cue, not the instrument.
+// Frames of audible tone per segment, then the gap. The capture itself
+// happens inside frame 0; the tail is an operator cue, not the instrument.
 
 // ---- Results -------------------------------------------------------------
 
