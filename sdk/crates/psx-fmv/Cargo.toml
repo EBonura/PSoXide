@@ -14,6 +14,12 @@ description  = "FMV playback building blocks: STR sector demux, BS v2 bitstream 
 # ownership tests run there.
 psx-hw = { workspace = true }
 psx-io = { workspace = true }
+# The streaming player (`player`) drives the drive, the display and the SPU.
+psx-gpu = { workspace = true }
+psx-pack = { workspace = true }
+psx-rt = { workspace = true }
+psx-spu = { workspace = true }
+psx-vram = { workspace = true }
 
 [lints]
 workspace = true
