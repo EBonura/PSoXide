@@ -76,14 +76,15 @@ impl Listing {
         self.get(addr).map_or("", |e| e.args.as_str())
     }
 
-    /// Forget every entry outside `[lo, hi)`. A caller that has the link
-    /// map's `.text` bounds lists only code: 4bpp texture bytes elsewhere in
-    /// the load decode as plausible branches (0x11111111 is `beq t0,s1`).
-    pub fn retain_text(&mut self, lo: i64, hi: i64) {
+    /// Forget every entry outside the `[lo, hi)` ranges. A caller that has
+    /// the link map's `.text` bounds lists only code: 4bpp texture bytes
+    /// elsewhere in the load decode as plausible branches (0x11111111 is
+    /// `beq t0,s1`).
+    pub fn retain_text(&mut self, ranges: &[(i64, i64)]) {
         let start = self.start;
         for (i, entry) in self.entries.iter_mut().enumerate() {
             let addr = start + 4 * i as i64;
-            if addr < lo || addr >= hi {
+            if !ranges.iter().any(|&(lo, hi)| lo <= addr && addr < hi) {
                 *entry = None;
             }
         }
