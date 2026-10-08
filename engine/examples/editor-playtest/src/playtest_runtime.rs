@@ -1874,14 +1874,28 @@ impl Playtest {
             let focus = self.camera.focus();
             let (right_x, _) = ctx.pad.sticks.right_centered();
             crate::debug_runtime::debug_log_camera_pose([
-                ctx.sim_tick.as_u32() as i32, player.x, player.y, player.z,
-                eye.x, eye.y, eye.z, focus.x, focus.y, focus.z,
-                i32::from(self.camera.yaw().as_q12()), i32::from(self.camera.pitch_q12()),
-                self.camera.distance(), i32::from(self.camera.collision_pull_in()),
-                i32::from(right_x), i32::from(self.camera.lift_pitch_q12()),
-                i32::from(self.camera.lift_goals_q12().0), i32::from(self.camera.lift_goals_q12().1),
+                ctx.sim_tick.as_u32() as i32,
+                player.x,
+                player.y,
+                player.z,
+                eye.x,
+                eye.y,
+                eye.z,
+                focus.x,
+                focus.y,
+                focus.z,
+                i32::from(self.camera.yaw().as_q12()),
+                i32::from(self.camera.pitch_q12()),
+                self.camera.distance(),
+                i32::from(self.camera.collision_pull_in()),
+                i32::from(right_x),
+                i32::from(self.camera.lift_pitch_q12()),
+                i32::from(self.camera.lift_goals_q12().0),
+                i32::from(self.camera.lift_goals_q12().1),
                 i32::from(self.camera.slide_yaw_q12()),
-                self.bsp.as_ref().map_or(0, |bsp| bsp.camera_traces() as i32),
+                self.bsp
+                    .as_ref()
+                    .map_or(0, |bsp| bsp.camera_traces() as i32),
                 i32::from(self.camera.escape_goal_q12()),
             ]);
         }
