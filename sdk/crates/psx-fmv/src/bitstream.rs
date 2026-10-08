@@ -9,11 +9,11 @@
 //! | 0..2  | MDEC data size in 32-bit words (low half of the MDEC command) |
 //! | 2..4  | `0x3800` (high half of a 15bpp decode command) |
 //! | 4..6  | quantization scale, 1..63 |
-//! | 6..8  | bitstream version (2 or 3) |
+//! | 6..8  | bitstream version (1, 2 or 3) |
 //!
 //! The body is read as little-endian 16-bit words, most significant bit
 //! first. Macroblocks come in column-major order (top to bottom, then left
-//! to right), six 8x8 blocks each: Cr, Cb, Y0..Y3. In version 2 every
+//! to right), six 8x8 blocks each: Cr, Cb, Y0..Y3. In versions 1 and 2 every
 //! block starts with a raw 10-bit signed DC value (`0x1FF` there ends the
 //! frame), followed by the AC run/level codes of the MPEG-1 DCT
 //! coefficient table (ISO 11172-2 table B.5c, with the sign bit after the
@@ -40,7 +40,7 @@ const V2_END_OF_FRAME: u32 = 0x1FF;
 pub enum DecodeError {
     /// Shorter than the 8-byte header.
     Truncated,
-    /// Bitstream version other than 2.
+    /// Bitstream version other than 1 or 2.
     Version(u16),
     /// A bit pattern that is not in the code table.
     BadCode,
@@ -336,7 +336,10 @@ impl<'a> Bits<'a> {
     }
 }
 
-/// Decode one version-2 BS frame (header included) into MDEC halfwords.
+/// Decode one version-1 or version-2 BS frame (header included) into MDEC
+/// halfwords. The two versions code the bitstream the same way: version 1
+/// is what the earliest (1995) Sony encoder wrote, WipEout's intro among
+/// them.
 ///
 /// Stops at the end-of-frame code or after `max_macroblocks`, whichever
 /// comes first, then pads the output with [`END_OF_BLOCK`] to a multiple of
@@ -354,7 +357,7 @@ pub fn decode_frame(
     pump: &mut impl FnMut(),
 ) -> Result<usize, DecodeError> {
     let header = Header::parse(frame)?;
-    if header.version != 2 {
+    if !(1..=2).contains(&header.version) {
         return Err(DecodeError::Version(header.version));
     }
     let qscale = ((header.qscale as u32) & 0x3F) << 10;
@@ -571,6 +574,22 @@ mod tests {
         }
         assert_eq!(out[5], (40 << 10) | 0x155);
         assert_eq!(out[6], END_OF_BLOCK);
+    }
+
+    #[test]
+    fn version_1_decodes_like_version_2() {
+        let mut w = Writer::new();
+        for block in 0..6u32 {
+            w.put(10, 0x1F0 + block);
+            let (len, code, _, _) = AC_CODES[block as usize * 7];
+            w.put(len as u32, code as u32);
+            w.put(1, block & 1);
+            w.put(2, 0b10);
+        }
+        let (mut frame, len) = w.frame(3);
+        let v2 = decode(&frame[..len], 1);
+        frame[6..8].copy_from_slice(&1u16.to_le_bytes());
+        assert_eq!(decode(&frame[..len], 1), v2);
     }
 
     #[test]
