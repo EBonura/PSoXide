@@ -455,14 +455,21 @@ fn spacing_speed_slows_only_directional_movement_at_both_tick_rates() {
                 assert_eq!(e.tactics[0].goal, goal);
                 assert!(e.tactics[0].moved);
                 displacements[index] = e.x[0].abs() + e.z[0].abs();
-                let expected_speed = if goal == EnemyGoal::Approach || percent == 100 { 2 } else { 1 };
+                let expected_speed = if goal == EnemyGoal::Approach || percent == 100 {
+                    2
+                } else {
+                    1
+                };
                 assert_eq!(e.tactics[0].requested, expected_speed * delta);
             }
             if goal == EnemyGoal::Approach {
                 assert_eq!(displacements[0], displacements[1]);
             } else {
                 // Integer Q12 steering may differ by one world unit.
-                assert!((displacements[0] - 2 * displacements[1]).abs() <= 1, "{goal:?}, delta {delta}");
+                assert!(
+                    (displacements[0] - 2 * displacements[1]).abs() <= 1,
+                    "{goal:?}, delta {delta}"
+                );
             }
         }
     }
@@ -534,7 +541,11 @@ fn post_attack_circling_uses_a_wider_personal_space() {
 fn slower_spacing_gait_clock_uses_its_own_nominal_speed() {
     let mut r = enemy();
     r.spacing_speed_percent = 50;
-    for goal in [EnemyGoal::CircleLeft, EnemyGoal::CircleRight, EnemyGoal::Retreat] {
+    for goal in [
+        EnemyGoal::CircleLeft,
+        EnemyGoal::CircleRight,
+        EnemyGoal::Retreat,
+    ] {
         for delta in [1, 2] {
             let mut e = engaged();
             e.begin_goal(0, goal, 240, 96);
@@ -572,7 +583,10 @@ fn brief_cover_during_retry_preserves_target_memory_for_reposition() {
     e.remember_target(0, [0, 0, 100]);
     e.begin_goal(0, EnemyGoal::WaitRetry, 2, 0);
     e.tactics[0].retries = 1;
-    let mut m = Arena { hidden: true, ..Default::default() };
+    let mut m = Arena {
+        hidden: true,
+        ..Default::default()
+    };
     tick(&mut e, &mut m, [0, 0, 100], 2);
     assert_eq!(e.tactics[0].goal, EnemyGoal::Reposition);
 }
@@ -624,15 +638,15 @@ fn fractional_spacing_keeps_short_steps_and_cadence_without_idle_flicker() {
 
 #[test]
 fn terminal_presentation_advances_only_defeated_actors() {
-    let mut entities=GameEntities::<2>::EMPTY;
+    let mut entities = GameEntities::<2>::EMPTY;
     entities.spawn_from_records(&ENEMY);
-    let before=entities.state_ticks[0];
+    let before = entities.state_ticks[0];
     entities.advance_defeated_animations(10);
-    assert_eq!(entities.state_ticks[0],before);
-    entities.state[0]=GameEntityState::Dead as u8;
+    assert_eq!(entities.state_ticks[0], before);
+    entities.state[0] = GameEntityState::Dead as u8;
     entities.advance_defeated_animations(10);
-    assert_eq!(entities.state_ticks[0],before+10);
-    assert_eq!(entities.state(0),GameEntityState::Dead);
+    assert_eq!(entities.state_ticks[0], before + 10);
+    assert_eq!(entities.state(0), GameEntityState::Dead);
 }
 
 #[test]
@@ -650,7 +664,10 @@ fn elevated_target_does_not_bait_ground_melee() {
             fired = true;
         }
     }
-    assert!(fired, "hybrid must still pressure a visible overhead target");
+    assert!(
+        fired,
+        "hybrid must still pressure a visible overhead target"
+    );
 }
 
 #[test]
@@ -660,14 +677,20 @@ fn energy_replan_interrupts_spacing_but_not_an_attack() {
     e.mutate_stance(0);
     e.advance_stance_swap(0, 12);
     e.stance_swap_cooldown[0] = 0;
-    for _ in 0..5 { e.spend_shot_energy(0); }
+    for _ in 0..5 {
+        e.spend_shot_energy(0);
+    }
     e.begin_goal(0, EnemyGoal::CircleRight, 300, 64);
     e.tactics[0].phase = 24;
     tick(&mut e, &mut Arena::default(), [0, 0, 140], 2);
     assert_eq!(e.stance(0), VitalityChannelId::One);
     assert_eq!(e.tactics[0].stance_reason, 5);
     assert_ne!(e.tactics[0].goal, EnemyGoal::CircleRight);
-    e.enter_state(0, GameEntityState::Attack, &mut GameEntityTickStats::default());
+    e.enter_state(
+        0,
+        GameEntityState::Attack,
+        &mut GameEntityTickStats::default(),
+    );
     e.stance_swap_cooldown[0] = 0;
     tick(&mut e, &mut Arena::default(), [0, 200, 140], 2);
     assert_eq!(e.stance(0), VitalityChannelId::One);
@@ -677,8 +700,12 @@ fn energy_replan_interrupts_spacing_but_not_an_attack() {
 fn empty_enemy_does_not_claw_at_an_overhead_perch_or_invent_energy() {
     let mut e = engaged();
     e.enable_combat_flow(true);
-    for _ in 0..5 { e.spend_shot_energy(0); }
-    for _ in 0..150 { tick(&mut e, &mut Arena::default(), [0, 150, 100], 2); }
+    for _ in 0..5 {
+        e.spend_shot_energy(0);
+    }
+    for _ in 0..150 {
+        tick(&mut e, &mut Arena::default(), [0, 150, 100], 2);
+    }
     assert_eq!(e.stance(0), VitalityChannelId::Two);
     assert_ne!(e.state(0), GameEntityState::Attack);
     assert_eq!(e.energy(0), 0);
@@ -690,7 +717,11 @@ fn crowded_melee_tell_moves_through_collision_then_plants() {
     let mut e = engaged();
     e.enable_combat_flow(true);
     e.select_attack(0, false);
-    e.enter_state(0, GameEntityState::Windup, &mut GameEntityTickStats::default());
+    e.enter_state(
+        0,
+        GameEntityState::Windup,
+        &mut GameEntityTickStats::default(),
+    );
     let mut arena = Arena::default();
     e.step_melee_tell(&ENEMY[0], 0, input([0, 0, 26]), &mut arena, 2);
     assert!(e.position(0)[2] < 0);
@@ -722,7 +753,10 @@ fn heavy_contact_creates_firing_distance_before_attacking() {
             break;
         }
     }
-    assert!(escaped, "a connected heavy attack should create an escape opportunity");
+    assert!(
+        escaped,
+        "a connected heavy attack should create an escape opportunity"
+    );
     assert!(attacked, "escape must lead back to a legal shot");
 }
 
@@ -730,13 +764,19 @@ fn heavy_contact_creates_firing_distance_before_attacking() {
 fn blocked_breakaway_never_fakes_arrival_or_shoots_at_contact() {
     let mut e = engaged();
     e.enable_combat_flow(true);
-    let mut arena = Arena { blocked: true, ..Arena::default() };
+    let mut arena = Arena {
+        blocked: true,
+        ..Arena::default()
+    };
     let start = e.position(0);
     let mut defended = false;
     for _ in 0..180 {
         tick(&mut e, &mut arena, [0, 0, 26], 2);
         assert_eq!(e.position(0), start);
-        if matches!(e.state(0), GameEntityState::Windup | GameEntityState::Attack) {
+        if matches!(
+            e.state(0),
+            GameEntityState::Windup | GameEntityState::Attack
+        ) {
             assert!(!e.selected_attack_is_ranged(0));
             defended = true;
         }
@@ -772,7 +812,10 @@ fn boundary_defender_only_switches_to_cannon_when_there_is_firing_space() {
     let edge = i32::from(ENEMY[0].aggro_radius);
     e.z[0] = edge;
     e.attack_cooldown[0] = 600;
-    let mut arena = Arena { blocked: true, ..Arena::default() };
+    let mut arena = Arena {
+        blocked: true,
+        ..Arena::default()
+    };
     tick(&mut e, &mut arena, [0, 0, edge - 26], 2);
     assert_eq!(e.stance(0), VitalityChannelId::One);
     e.finish_goal(0, EnemyGoalResult::Cancelled);
@@ -782,61 +825,88 @@ fn boundary_defender_only_switches_to_cannon_when_there_is_firing_space() {
 
 #[test]
 fn bullet_evasion_uses_its_own_lane_and_respects_collision() {
-    let mut e=engaged();let mut m=Arena::default();
-    e.tactics[0].last_seen=[0,0,224];
-    e.move_yaw_valid[0]=1;e.move_yaw[0]=0;
-    e.projectile_threats[0]=Some(crate::projectiles::ProjectileThreat {
-        position:[0,32,160],velocity:[0,0,-8],ticks_to_contact:20 });
-    let mut stats=GameEntityTickStats::default();
-    assert!(e.step_ranged_exchange(&ENEMY[0],0,input([0,0,224]),&mut m,1,256,&mut stats));
-    assert!(e.x[0]>0);assert_eq!(e.z[0],0);
-    let before=e.position(0);m.blocked=true;
-    assert!(e.step_ranged_exchange(&ENEMY[0],0,input([0,0,224]),&mut m,1,256,&mut stats));
-    assert_eq!(e.position(0),before);
+    let mut e = engaged();
+    let mut m = Arena::default();
+    e.tactics[0].last_seen = [0, 0, 224];
+    e.move_yaw_valid[0] = 1;
+    e.move_yaw[0] = 0;
+    e.projectile_threats[0] = Some(crate::projectiles::ProjectileThreat {
+        position: [0, 32, 160],
+        velocity: [0, 0, -8],
+        ticks_to_contact: 20,
+    });
+    let mut stats = GameEntityTickStats::default();
+    assert!(e.step_ranged_exchange(&ENEMY[0], 0, input([0, 0, 224]), &mut m, 1, 256, &mut stats));
+    assert!(e.x[0] > 0);
+    assert_eq!(e.z[0], 0);
+    let before = e.position(0);
+    m.blocked = true;
+    assert!(e.step_ranged_exchange(&ENEMY[0], 0, input([0, 0, 224]), &mut m, 1, 256, &mut stats));
+    assert_eq!(e.position(0), before);
 }
 #[test]
 fn visible_melee_recovery_releases_an_active_defensive_retreat() {
-    let mut e=engaged();let mut m=Arena::default();
-    let mut stats=GameEntityTickStats::default();
+    let mut e = engaged();
+    let mut m = Arena::default();
+    let mut stats = GameEntityTickStats::default();
     e.set_player_attack_read(1);
-    assert!(e.step_melee_defense(&ENEMY[0],0,input([0,0,50]),&mut m,1,&mut stats));
-    assert_eq!(e.tactics[0].goal,EnemyGoal::Retreat);
+    assert!(e.step_melee_defense(&ENEMY[0], 0, input([0, 0, 50]), &mut m, 1, &mut stats));
+    assert_eq!(e.tactics[0].goal, EnemyGoal::Retreat);
     e.set_player_attack_read(3);
-    assert!(!e.step_melee_defense(&ENEMY[0],0,input([0,0,50]),&mut m,1,&mut stats));
-    assert_eq!(e.tactics[0].goal,EnemyGoal::None);
-    assert_eq!(e.combat_role(0),7);
+    assert!(!e.step_melee_defense(&ENEMY[0], 0, input([0, 0, 50]), &mut m, 1, &mut stats));
+    assert_eq!(e.tactics[0].goal, EnemyGoal::None);
+    assert_eq!(e.combat_role(0), 7);
 }
 
 #[test]
 fn empty_energy_melee_enemy_sidesteps_with_lateral_clip_then_plants() {
-    let mut e=engaged();let mut m=Arena::default();
-    e.enable_combat_flow(true);e.flow[0].energy=0;
-    e.stance_swap_cooldown[0]=6000;
-    e.projectile_threats[0]=Some(crate::projectiles::ProjectileThreat {
-        position:[0,32,160],velocity:[0,0,-8],ticks_to_contact:20 });
-    tick(&mut e,&mut m,[0,0,224],2);
-    assert_eq!(e.tactics[0].goal,EnemyGoal::Evade);
-    assert_eq!(e.intent(0),GameEntityIntent::CircleRight);
-    assert_eq!(e.clip_for_state(&ENEMY,0).clip,ENEMY[0].strafe_right_clip);
-    assert_eq!(e.x[0],8);assert_eq!(e.flow[0].energy,0);
-    e.projectile_threats[0]=None;
-    for _ in 0..9 { tick(&mut e,&mut m,[0,0,224],2); }
-    let p=e.position(0);
-    assert!(p[0]>=64 && p[0]<=72);assert_eq!(p[2],0);
-    tick(&mut e,&mut m,[0,0,224],2);
-    assert_eq!(e.position(0),p);
-    assert_eq!(e.state(0),GameEntityState::Aggro);
-    assert_eq!(e.clip_for_state(&ENEMY,0).clip,ENEMY[0].idle_clip);
+    let mut e = engaged();
+    let mut m = Arena::default();
+    e.enable_combat_flow(true);
+    e.flow[0].energy = 0;
+    e.stance_swap_cooldown[0] = 6000;
+    e.projectile_threats[0] = Some(crate::projectiles::ProjectileThreat {
+        position: [0, 32, 160],
+        velocity: [0, 0, -8],
+        ticks_to_contact: 20,
+    });
+    tick(&mut e, &mut m, [0, 0, 224], 2);
+    assert_eq!(e.tactics[0].goal, EnemyGoal::Evade);
+    assert_eq!(e.intent(0), GameEntityIntent::CircleRight);
+    assert_eq!(e.clip_for_state(&ENEMY, 0).clip, ENEMY[0].strafe_right_clip);
+    assert_eq!(e.x[0], 8);
+    assert_eq!(e.flow[0].energy, 0);
+    e.projectile_threats[0] = None;
+    for _ in 0..9 {
+        tick(&mut e, &mut m, [0, 0, 224], 2);
+    }
+    let p = e.position(0);
+    assert!(p[0] >= 64 && p[0] <= 72);
+    assert_eq!(p[2], 0);
+    tick(&mut e, &mut m, [0, 0, 224], 2);
+    assert_eq!(e.position(0), p);
+    assert_eq!(e.state(0), GameEntityState::Aggro);
+    assert_eq!(e.clip_for_state(&ENEMY, 0).clip, ENEMY[0].idle_clip);
 }
 #[test]
 fn projectile_evade_does_not_cancel_committed_actions() {
-    for state in [GameEntityState::Windup,GameEntityState::Attack,GameEntityState::Recover] {
-        let mut e=engaged();let mut m=Arena::default();e.enable_combat_flow(true);
-        e.state[0]=state as u8;e.state_ticks[0]=0;
-        e.projectile_threats[0]=Some(crate::projectiles::ProjectileThreat {
-            position:[0,32,160],velocity:[0,0,-8],ticks_to_contact:20 });
-        tick(&mut e,&mut m,[0,0,224],2);
-        assert_ne!(e.tactics[0].goal,EnemyGoal::Evade);
-        assert_eq!(e.state(0),state);
+    for state in [
+        GameEntityState::Windup,
+        GameEntityState::Attack,
+        GameEntityState::Recover,
+    ] {
+        let mut e = engaged();
+        let mut m = Arena::default();
+        e.enable_combat_flow(true);
+        e.state[0] = state as u8;
+        e.state_ticks[0] = 0;
+        e.projectile_threats[0] = Some(crate::projectiles::ProjectileThreat {
+            position: [0, 32, 160],
+            velocity: [0, 0, -8],
+            ticks_to_contact: 20,
+        });
+        tick(&mut e, &mut m, [0, 0, 224], 2);
+        assert_ne!(e.tactics[0].goal, EnemyGoal::Evade);
+        assert_eq!(e.state(0), state);
     }
 }

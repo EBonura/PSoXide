@@ -246,7 +246,11 @@ fn submit_equipped_weapon<
     let (material, uv_mapping) = match weapon_model.facet_reflection_size {
         Some((texture_width, texture_height)) => (
             weapon_model.material.with_blend_mode(BlendMode::Opaque),
-            ModelUvMapping::FacetReflection { texture_width, texture_height, roughness: 0 },
+            ModelUvMapping::FacetReflection {
+                texture_width,
+                texture_height,
+                roughness: 0,
+            },
         ),
         None => (material, ModelUvMapping::Authored),
     };

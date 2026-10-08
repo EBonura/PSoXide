@@ -4056,7 +4056,12 @@ pub struct CharacterCombatWindow {
 }
 impl CharacterCombatWindow {
     /// Unused entry.
-    pub const NONE: Self = Self { action: 255, kind: CombatWindowKind::AttackBuffer, start: 0, end: 0 };
+    pub const NONE: Self = Self {
+        action: 255,
+        kind: CombatWindowKind::AttackBuffer,
+        start: 0,
+        end: 0,
+    };
 }
 
 /// Gameplay character -- backing model + role-clip mapping +

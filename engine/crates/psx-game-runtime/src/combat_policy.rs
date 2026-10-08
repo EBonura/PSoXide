@@ -116,8 +116,30 @@ mod tests {
     #[test]
     fn guard_colour_does_not_override_spacing() {
         use VitalityChannelId::*;
-        assert_eq!(stance_choice(true, One, [100,100],[100,100],false,Some((One,[100,100]))).0,One);
-        assert_eq!(stance_choice(false, Two,[100,100],[100,100],false,Some((Two,[100,100]))).0,Two);
+        assert_eq!(
+            stance_choice(
+                true,
+                One,
+                [100, 100],
+                [100, 100],
+                false,
+                Some((One, [100, 100]))
+            )
+            .0,
+            One
+        );
+        assert_eq!(
+            stance_choice(
+                false,
+                Two,
+                [100, 100],
+                [100, 100],
+                false,
+                Some((Two, [100, 100]))
+            )
+            .0,
+            Two
+        );
     }
     #[test]
     fn attacks_mix_without_an_endless_heavy_repeat() {

@@ -35,8 +35,8 @@
 //!
 //! [`commit_body_step`]: psx_engine::character_motor::commit_body_step
 
-mod tactics;
 mod flow;
+mod tactics;
 pub use tactics::{EnemyGoal, EnemyGoalResult, EnemyTacticalSnapshot};
 
 use crate::combat::{arc_hits_circle, MeleeArc};
@@ -724,7 +724,11 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
         // edge too, or a hybrid can sit just outside melee forever.
         let melee_entry = i32::from(record.preferred_distance.max(record.attack_min_range))
             .saturating_add(i32::from(record.spacing_tolerance));
-        let limit = crate::combat_policy::melee_limit(melee_entry, i32::from(record.spacing_tolerance), was_melee);
+        let limit = crate::combat_policy::melee_limit(
+            melee_entry,
+            i32::from(record.spacing_tolerance),
+            was_melee,
+        );
         let melee = self.player_within(index, input, limit);
         if !STANCE_BOUND_ATTACKS {
             if melee {
@@ -912,7 +916,9 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
     }
 
     /// Behavior state of entity `index`.
-    pub fn state_age(&self, index: usize) -> u16 { self.state_ticks.get(index).copied().unwrap_or(0) }
+    pub fn state_age(&self, index: usize) -> u16 {
+        self.state_ticks.get(index).copied().unwrap_or(0)
+    }
 
     pub fn state(&self, index: usize) -> GameEntityState {
         if index >= self.count() {
@@ -1030,7 +1036,9 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
         if index >= self.count() || self.state(index) == GameEntityState::Dead {
             return None;
         }
-        self.stance_pulse[index].checked_sub(1).map(|age| u16::from(age) * 4096 / 30)
+        self.stance_pulse[index]
+            .checked_sub(1)
+            .map(|age| u16::from(age) * 4096 / 30)
     }
 
     /// Apply the current enemy guard to one authored damage value: the
@@ -1042,9 +1050,12 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
         attack: VitalityChannelId,
         damage: u16,
     ) -> u16 {
-        if damage == 0 { return 0; }
+        if damage == 0 {
+            return 0;
+        }
         if self.flow_enabled {
-            return (u32::from(damage) * if attack == self.stance(index) { 4 } else { 5 } / 4).min(65535) as u16;
+            return (u32::from(damage) * if attack == self.stance(index) { 4 } else { 5 } / 4)
+                .min(65535) as u16;
         }
         if attack == self.stance(index) {
             return (damage / GAME_ENTITY_GUARDED_DAMAGE_DIVISOR).clamp(
@@ -1068,7 +1079,9 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
         damage: u16,
         poise_damage: u16,
     ) -> u16 {
-        if self.flow_enabled { return poise_damage; }
+        if self.flow_enabled {
+            return poise_damage;
+        }
         if damage == 0 || attack != self.stance(index) {
             return poise_damage;
         }
@@ -1114,19 +1127,22 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
     fn capture_ranged_target(&mut self, index: usize, player: [i32; 3], height: i32) {
         let dx = player[0].saturating_sub(self.x[index]);
         let dz = player[2].saturating_sub(self.z[index]);
-        let distance = psx_math::int32::isqrt_i32(
-            dx.saturating_mul(dx).saturating_add(dz.saturating_mul(dz)),
-        );
+        let distance =
+            psx_math::int32::isqrt_i32(dx.saturating_mul(dx).saturating_add(dz.saturating_mul(dz)));
         let yaw = self.yaw[index] as u16;
         // Retain the limited body turn during the tell. The aim point lies on
         // that bearing at the player's distance, rather than snapping sideways
         // or backwards if the player outruns the enemy's turn rate.
         self.ranged_aim_target[index] = [
             self.x[index].saturating_add(psx_math::int32::mul_q12_i32(
-                distance, psx_math::sin_q12(yaw))),
+                distance,
+                psx_math::sin_q12(yaw),
+            )),
             player[1].saturating_add(height.max(0).saturating_mul(3) / 4),
             self.z[index].saturating_add(psx_math::int32::mul_q12_i32(
-                distance, psx_math::cos_q12(yaw))),
+                distance,
+                psx_math::cos_q12(yaw),
+            )),
         ];
     }
 
@@ -1402,11 +1418,15 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
         }
         let armored = self.state(index) == GameEntityState::Attack
             && self.selected_attack_kind(index) == GAME_ENTITY_ATTACK_HEAVY;
-        let protected = self.flow_enabled && (!self.flow[index].can_interrupt()
-            || self.state(index) == GameEntityState::Staggered);
-        let staggered = !protected && self.poise[index].hit(poise_damage, records[index].poise, armored);
+        let protected = self.flow_enabled
+            && (!self.flow[index].can_interrupt()
+                || self.state(index) == GameEntityState::Staggered);
+        let staggered =
+            !protected && self.poise[index].hit(poise_damage, records[index].poise, armored);
         if staggered {
-            if self.flow_enabled { self.flow[index].broke(); }
+            if self.flow_enabled {
+                self.flow[index].broke();
+            }
             self.release_attack_owner(index, u16::from(records[index].group_attack_delay_ticks));
             self.enter_state(
                 index,
@@ -1582,7 +1602,9 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
             self.poise[index].tick(delta_ticks);
             self.flow[index].tick(delta_ticks, state == GameEntityState::Staggered);
             self.exchanges[index].tick(delta_ticks);
-            if self.flow_enabled { self.step_recoil(record, index, mover, delta_ticks); }
+            if self.flow_enabled {
+                self.step_recoil(record, index, mover, delta_ticks);
+            }
             let behavior_awake = !matches!(state, GameEntityState::Idle | GameEntityState::Patrol);
             let spatially_active = index < 64 && self.spatial_active_mask & (1u64 << index) != 0;
             let activation_allows = if self.spatial_activation_enabled {
@@ -1616,8 +1638,8 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
                     self.tick_aggro(record, index, input, mover, delta_ticks, &mut stats)
                 }
                 GameEntityState::Windup => {
-                    self.step_firing(record,index,input,mover,delta_ticks);
-                    self.step_melee_tell(record,index,input,mover,delta_ticks);
+                    self.step_firing(record, index, input, mover, delta_ticks);
+                    self.step_melee_tell(record, index, input, mover, delta_ticks);
                     if self.selected_attack_is_ranged(index) {
                         self.track_ranged_tell(record, index, input, delta_ticks);
                     }
@@ -1626,7 +1648,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
                     }
                 }
                 GameEntityState::Attack => {
-                    self.step_firing(record,index,input,mover,delta_ticks);
+                    self.step_firing(record, index, input, mover, delta_ticks);
                     stats.attacking += 1;
                     match deferred.as_deref_mut() {
                         Some(attacks) => attacks.push(self.deferred_attack(record, index)),
@@ -1637,7 +1659,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
                     }
                 }
                 GameEntityState::Recover => {
-                    self.step_firing(record,index,input,mover,delta_ticks);
+                    self.step_firing(record, index, input, mover, delta_ticks);
                     if self.state_ticks[index] >= u16::from(record.recovery_ticks) {
                         self.attack_cooldown[index] = u16::from(record.attack_cooldown_ticks);
                         self.release_attack_owner(
@@ -2992,28 +3014,61 @@ mod tests {
 
     #[test]
     fn prototype_both_colours_damage_and_share_poise() {
-        let mut e=GameEntities::<8>::EMPTY;
-        e.spawn_from_records(&DUAL_ENEMY);e.enable_combat_flow(true);
-        assert_eq!(e.scaled_stance_damage(0,VitalityChannelId::One,40),40);
-        assert_eq!(e.scaled_stance_damage(0,VitalityChannelId::Two,40),50);
-        let capacity=DUAL_ENEMY[0].poise;
-        assert!(!e.apply_stance_hit(&DUAL_ENEMY,0,VitalityChannelId::One,1,capacity/2).staggered);
-        assert!(e.apply_stance_hit(&DUAL_ENEMY,0,VitalityChannelId::Two,1,capacity-capacity/2).staggered);
-        let ticks=e.state_ticks[0];
-        assert!(!e.apply_stance_hit(&DUAL_ENEMY,0,VitalityChannelId::One,1,capacity*2).staggered);
-        assert_eq!(e.state_ticks[0],ticks);
+        let mut e = GameEntities::<8>::EMPTY;
+        e.spawn_from_records(&DUAL_ENEMY);
+        e.enable_combat_flow(true);
+        assert_eq!(e.scaled_stance_damage(0, VitalityChannelId::One, 40), 40);
+        assert_eq!(e.scaled_stance_damage(0, VitalityChannelId::Two, 40), 50);
+        let capacity = DUAL_ENEMY[0].poise;
+        assert!(
+            !e.apply_stance_hit(&DUAL_ENEMY, 0, VitalityChannelId::One, 1, capacity / 2)
+                .staggered
+        );
+        assert!(
+            e.apply_stance_hit(
+                &DUAL_ENEMY,
+                0,
+                VitalityChannelId::Two,
+                1,
+                capacity - capacity / 2
+            )
+            .staggered
+        );
+        let ticks = e.state_ticks[0];
+        assert!(
+            !e.apply_stance_hit(&DUAL_ENEMY, 0, VitalityChannelId::One, 1, capacity * 2)
+                .staggered
+        );
+        assert_eq!(e.state_ticks[0], ticks);
     }
     #[test]
     fn prototype_shot_interrupts_late_tell_and_cancels_retained_attack() {
-        let mut e=GameEntities::<8>::EMPTY;e.spawn_from_records(&DUAL_ENEMY);e.enable_combat_flow(true);
-        e.enter_state(0,GameEntityState::Windup,&mut GameEntityTickStats::default());
-        e.state_ticks[0]=0;assert!(!e.shot_opening(&DUAL_ENEMY,0));
-        e.state_ticks[0]=u16::from(DUAL_ENEMY[0].windup_ticks)/2;
-        assert!(e.shot_opening(&DUAL_ENEMY,0));
-        assert!(e.apply_projectile_hit(&DUAL_ENEMY,0,VitalityChannelId::Two,1,10).staggered);
-        assert!(!e.apply_projectile_hit(&DUAL_ENEMY,0,VitalityChannelId::Two,1,10).staggered);
-        for _ in 0..5 {e.spend_shot_energy(0);}
-        assert!(!e.can_fire_energy(0));e.gain_melee_energy(0,true);assert!(e.can_fire_energy(0));
+        let mut e = GameEntities::<8>::EMPTY;
+        e.spawn_from_records(&DUAL_ENEMY);
+        e.enable_combat_flow(true);
+        e.enter_state(
+            0,
+            GameEntityState::Windup,
+            &mut GameEntityTickStats::default(),
+        );
+        e.state_ticks[0] = 0;
+        assert!(!e.shot_opening(&DUAL_ENEMY, 0));
+        e.state_ticks[0] = u16::from(DUAL_ENEMY[0].windup_ticks) / 2;
+        assert!(e.shot_opening(&DUAL_ENEMY, 0));
+        assert!(
+            e.apply_projectile_hit(&DUAL_ENEMY, 0, VitalityChannelId::Two, 1, 10)
+                .staggered
+        );
+        assert!(
+            !e.apply_projectile_hit(&DUAL_ENEMY, 0, VitalityChannelId::Two, 1, 10)
+                .staggered
+        );
+        for _ in 0..5 {
+            e.spend_shot_energy(0);
+        }
+        assert!(!e.can_fire_energy(0));
+        e.gain_melee_energy(0, true);
+        assert!(e.can_fire_energy(0));
     }
 
     #[test]
@@ -4599,13 +4654,20 @@ mod tests {
     fn ranged_aim_converges_from_both_sides_of_the_body() {
         let mut e = GameEntities::<8>::EMPTY;
         e.spawn_from_records(&RANGED_ENEMY);
-        e.x[0] = 0; e.z[0] = -256; e.yaw[0] = 2048;
-        e.capture_ranged_aim(0, GameEntityTickInput {
-            player: [0,0,-384], player_height: 64, ..near_input(&ACTIVE)
-        });
-        assert_eq!(e.ranged_target(0), Some([0,48,-384]));
-        assert!(e.ranged_velocity(0, [20,87,-333], 10)[0] < 0);
-        assert!(e.ranged_velocity(0, [-20,87,-333], 10)[0] > 0);
+        e.x[0] = 0;
+        e.z[0] = -256;
+        e.yaw[0] = 2048;
+        e.capture_ranged_aim(
+            0,
+            GameEntityTickInput {
+                player: [0, 0, -384],
+                player_height: 64,
+                ..near_input(&ACTIVE)
+            },
+        );
+        assert_eq!(e.ranged_target(0), Some([0, 48, -384]));
+        assert!(e.ranged_velocity(0, [20, 87, -333], 10)[0] < 0);
+        assert!(e.ranged_velocity(0, [-20, 87, -333], 10)[0] > 0);
         assert_eq!(e.ranged_target(99), None);
     }
 
@@ -4613,14 +4675,22 @@ mod tests {
     fn ranged_aim_keeps_the_limited_turn_and_freezes_a_world_point() {
         let mut e = GameEntities::<8>::EMPTY;
         e.spawn_from_records(&RANGED_ENEMY);
-        e.x[0] = 0; e.z[0] = 0; e.yaw[0] = 0;
+        e.x[0] = 0;
+        e.z[0] = 0;
+        e.yaw[0] = 0;
         // A player behind the enemy does not make an instantaneous rear shot.
-        e.capture_ranged_aim(0, GameEntityTickInput {
-            player: [0,0,-128], player_height: 64, ..near_input(&ACTIVE)
-        });
-        assert_eq!(e.ranged_target(0), Some([0,48,128]));
-        e.x[0] = 40; e.yaw[0] = 1024;
-        assert_eq!(e.ranged_target(0), Some([0,48,128]));
+        e.capture_ranged_aim(
+            0,
+            GameEntityTickInput {
+                player: [0, 0, -128],
+                player_height: 64,
+                ..near_input(&ACTIVE)
+            },
+        );
+        assert_eq!(e.ranged_target(0), Some([0, 48, 128]));
+        e.x[0] = 40;
+        e.yaw[0] = 1024;
+        assert_eq!(e.ranged_target(0), Some([0, 48, 128]));
     }
 
     #[test]
@@ -4722,7 +4792,11 @@ mod tests {
         e.mutate_stance(0);
         assert_eq!(e.stance(0), VitalityChannelId::One);
         assert_eq!(e.stance_eye_pulse_q12(0), Some(0));
-        e.enter_state(0, GameEntityState::Dead, &mut GameEntityTickStats::default());
+        e.enter_state(
+            0,
+            GameEntityState::Dead,
+            &mut GameEntityTickStats::default(),
+        );
         assert_eq!(e.stance_eye_pulse_q12(0), None);
         e.spawn_from_records(&DUAL_ENEMY);
         assert_eq!(e.stance_eye_pulse_q12(0), None);

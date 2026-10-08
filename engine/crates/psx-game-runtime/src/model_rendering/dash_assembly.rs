@@ -178,12 +178,16 @@ impl PlayerDashAssembly {
                 | CharacterAnimationAction::VertLightAttack
                 | CharacterAnimationAction::VertHeavyAttack
                 | CharacterAnimationAction::RangedAttack
-        ) || (!self.explicit_burst && matches!(action, CharacterAnimationAction::RangedAim
-                | CharacterAnimationAction::RangedWalk
-                | CharacterAnimationAction::RangedBackward
-                | CharacterAnimationAction::RangedLeft
-                | CharacterAnimationAction::RangedRight
-        )) || (action == CharacterAnimationAction::Intro && !self.explicit_burst)
+        ) || (!self.explicit_burst
+            && matches!(
+                action,
+                CharacterAnimationAction::RangedAim
+                    | CharacterAnimationAction::RangedWalk
+                    | CharacterAnimationAction::RangedBackward
+                    | CharacterAnimationAction::RangedLeft
+                    | CharacterAnimationAction::RangedRight
+            ))
+            || (action == CharacterAnimationAction::Intro && !self.explicit_burst)
         {
             // Combat feedback must immediately show the actual hit/attack pose.
             self.interrupted = true;
@@ -205,7 +209,8 @@ impl PlayerDashAssembly {
             DashWireVisual::Wire
         } else if age < self.rebuild_start + (REBUILD_END - REBUILD_START) {
             DashWireVisual::Restoring {
-                progress_q8: ((age - self.rebuild_start) * 255 / (REBUILD_END - REBUILD_START)) as u8,
+                progress_q8: ((age - self.rebuild_start) * 255 / (REBUILD_END - REBUILD_START))
+                    as u8,
             }
         } else {
             DashWireVisual::Solid
@@ -663,7 +668,10 @@ mod tests {
         effect.observe_action(CharacterAnimationAction::Idle, 100, 120);
         assert_eq!(effect.visual(SimTick::from_u32(129)), DashWireVisual::Wire);
         effect.observe_action(CharacterAnimationAction::RangedAim, 130, 130);
-        assert!(matches!(effect.visual(SimTick::from_u32(130)), DashWireVisual::Restoring { progress_q8: 0 }));
+        assert!(matches!(
+            effect.visual(SimTick::from_u32(130)),
+            DashWireVisual::Restoring { progress_q8: 0 }
+        ));
         assert_eq!(effect.visual(SimTick::from_u32(166)), DashWireVisual::Solid);
         effect.traverse(SimTick::from_u32(200), 30);
         effect.observe_action(CharacterAnimationAction::HitReact, 204, 204);
@@ -921,7 +929,10 @@ mod tests {
             assert_eq!(effect.visual(SimTick::from_u32(100)), DashWireVisual::Wire);
             effect.capture_pending = false;
             effect.observe_action(anim.action(), 100, 101);
-            assert!(!effect.needs_capture(), "same dash must not restart: {anim:?}");
+            assert!(
+                !effect.needs_capture(),
+                "same dash must not restart: {anim:?}"
+            );
             effect.observe_action(CharacterAnimationAction::Walk, 135, 135);
             assert!(matches!(
                 effect.visual(SimTick::from_u32(135)),

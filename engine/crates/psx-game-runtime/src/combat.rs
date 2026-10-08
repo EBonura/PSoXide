@@ -1640,11 +1640,27 @@ mod tests {
             // Gait phase is unrelated to the shot; the muzzle follows the moving actor.
             let pose = Some(pose_at([90, 20, -40], 18 << 12));
             assert!(authored_projectile_release_pending(&[emitter], ATTACK, pose, 0).is_none());
-            assert!(authored_projectile_release_pending_at_frame(&[emitter], ATTACK, pose, 0, 1).is_none());
-            let (_, release) = authored_projectile_release_pending_at_frame(&[emitter], ATTACK, pose, 0, 2).unwrap();
-            assert_eq!(release.position, transform_actor_combat_capsule(&emitter, pose.unwrap()).unwrap().start);
-            assert!(authored_projectile_release_pending_at_frame(&[emitter], ATTACK, pose, 1, 2).is_none());
-            assert!(authored_projectile_release_pending_at_frame(&[emitter], ATTACK, pose, 0, 4).is_none());
+            assert!(
+                authored_projectile_release_pending_at_frame(&[emitter], ATTACK, pose, 0, 1)
+                    .is_none()
+            );
+            let (_, release) =
+                authored_projectile_release_pending_at_frame(&[emitter], ATTACK, pose, 0, 2)
+                    .unwrap();
+            assert_eq!(
+                release.position,
+                transform_actor_combat_capsule(&emitter, pose.unwrap())
+                    .unwrap()
+                    .start
+            );
+            assert!(
+                authored_projectile_release_pending_at_frame(&[emitter], ATTACK, pose, 1, 2)
+                    .is_none()
+            );
+            assert!(
+                authored_projectile_release_pending_at_frame(&[emitter], ATTACK, pose, 0, 4)
+                    .is_none()
+            );
         }
 
         #[test]

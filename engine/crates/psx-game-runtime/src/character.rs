@@ -116,8 +116,15 @@ impl PlayerAnim {
     pub const fn is_gait(self) -> bool {
         matches!(
             self,
-            Self::Walk | Self::WalkBackward | Self::StrafeLeft | Self::StrafeRight | Self::Run
-                | Self::RangedWalk | Self::RangedBackward | Self::RangedLeft | Self::RangedRight
+            Self::Walk
+                | Self::WalkBackward
+                | Self::StrafeLeft
+                | Self::StrafeRight
+                | Self::Run
+                | Self::RangedWalk
+                | Self::RangedBackward
+                | Self::RangedLeft
+                | Self::RangedRight
         )
     }
 
@@ -447,7 +454,9 @@ impl RuntimeCharacter {
             | CharacterAnimationAction::RangedWalk
             | CharacterAnimationAction::RangedBackward
             | CharacterAnimationAction::RangedLeft
-            | CharacterAnimationAction::RangedRight => self.action_clip(anim.action()).unwrap_or(idle),
+            | CharacterAnimationAction::RangedRight => {
+                self.action_clip(anim.action()).unwrap_or(idle)
+            }
             CharacterAnimationAction::RangedAttack => self
                 .action_clip(CharacterAnimationAction::RangedAttack)
                 .unwrap_or(idle),
@@ -624,10 +633,22 @@ mod tests {
 
     #[test]
     fn player_reactions_distinguish_hits_breaks_and_heavy_armor() {
-        assert_eq!(player_damage_reaction(false, false, PlayerAnim::Run, false), Some(PlayerAnim::HitReact));
-        assert_eq!(player_damage_reaction(false, false, PlayerAnim::LightAttack, true), Some(PlayerAnim::HitReact));
-        assert_eq!(player_damage_reaction(false, true, PlayerAnim::HeavyAttack, true), None);
-        assert_eq!(player_damage_reaction(true, true, PlayerAnim::HeavyAttack, true), Some(PlayerAnim::Stun));
+        assert_eq!(
+            player_damage_reaction(false, false, PlayerAnim::Run, false),
+            Some(PlayerAnim::HitReact)
+        );
+        assert_eq!(
+            player_damage_reaction(false, false, PlayerAnim::LightAttack, true),
+            Some(PlayerAnim::HitReact)
+        );
+        assert_eq!(
+            player_damage_reaction(false, true, PlayerAnim::HeavyAttack, true),
+            None
+        );
+        assert_eq!(
+            player_damage_reaction(true, true, PlayerAnim::HeavyAttack, true),
+            Some(PlayerAnim::Stun)
+        );
         assert_eq!(PlayerAnim::Stun.action(), CharacterAnimationAction::Stun);
     }
 
@@ -644,12 +665,30 @@ mod tests {
 
     #[test]
     fn player_reactions_upgrade_but_do_not_restart_or_downgrade_recovery() {
-        assert_eq!(player_damage_reaction(false, false, PlayerAnim::HitReact, true), None);
-        assert_eq!(player_damage_reaction(true, false, PlayerAnim::HitReact, true), Some(PlayerAnim::Stun));
-        assert_eq!(player_damage_reaction(false, false, PlayerAnim::Stun, true), None);
-        assert_eq!(player_damage_reaction(true, false, PlayerAnim::Stun, true), None);
-        assert_eq!(player_damage_reaction(false, false, PlayerAnim::Stun, false), Some(PlayerAnim::HitReact));
-        assert_eq!(player_damage_reaction(true, false, PlayerAnim::Death, true), None);
+        assert_eq!(
+            player_damage_reaction(false, false, PlayerAnim::HitReact, true),
+            None
+        );
+        assert_eq!(
+            player_damage_reaction(true, false, PlayerAnim::HitReact, true),
+            Some(PlayerAnim::Stun)
+        );
+        assert_eq!(
+            player_damage_reaction(false, false, PlayerAnim::Stun, true),
+            None
+        );
+        assert_eq!(
+            player_damage_reaction(true, false, PlayerAnim::Stun, true),
+            None
+        );
+        assert_eq!(
+            player_damage_reaction(false, false, PlayerAnim::Stun, false),
+            Some(PlayerAnim::HitReact)
+        );
+        assert_eq!(
+            player_damage_reaction(true, false, PlayerAnim::Death, true),
+            None
+        );
     }
 
     #[test]

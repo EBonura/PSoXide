@@ -558,7 +558,9 @@ impl ThirdPersonCameraState {
             config.fov_y_degrees = self.profile.vertical_fov_degrees();
         }
         // Preserve the player's orbit adjustment as the authored composition changes.
-        if !config.preserve_profile_pitch && (config.blend_profiles || config.lock_profile.is_some()) {
+        if !config.preserve_profile_pitch
+            && (config.blend_profiles || config.lock_profile.is_some())
+        {
             self.pitch_q12 = self
                 .pitch_q12
                 .saturating_add(default_pitch_q12(config).saturating_sub(previous_default_pitch))
@@ -617,8 +619,12 @@ impl ThirdPersonCameraState {
         let shoulder_yaw = target.lock_target.map_or(self.yaw, |lock| {
             yaw_to_point(target.player, lock).add(Angle::HALF)
         });
-        focus_goal.x = focus_goal.x.saturating_add(shoulder_yaw.cos().mul_i32(config.shoulder_offset));
-        focus_goal.z = focus_goal.z.saturating_sub(shoulder_yaw.sin().mul_i32(config.shoulder_offset));
+        focus_goal.x = focus_goal
+            .x
+            .saturating_add(shoulder_yaw.cos().mul_i32(config.shoulder_offset));
+        focus_goal.z = focus_goal
+            .z
+            .saturating_sub(shoulder_yaw.sin().mul_i32(config.shoulder_offset));
         let player_back_yaw = target.player_yaw.add(Angle::HALF);
         let (desired_yaw, yaw_step) = if let Some(lock) = target.lock_target {
             let dx = lock.x.saturating_sub(target.player.x).saturating_abs();
@@ -632,8 +638,15 @@ impl ThirdPersonCameraState {
             } else {
                 // Aim from the shifted pivot, keeping the enemy central while
                 // the player remains to the left of the firing sightline.
-                yaw_to_point(if config.shoulder_offset == 0 { target.player } else { focus_goal }, lock)
-                    .add(Angle::HALF)
+                yaw_to_point(
+                    if config.shoulder_offset == 0 {
+                        target.player
+                    } else {
+                        focus_goal
+                    },
+                    lock,
+                )
+                .add(Angle::HALF)
             };
             (bearing, config.lock_on_align_step)
         } else if self.recenter_active
@@ -3498,8 +3511,11 @@ mod tests {
         config.lock_target_framing = true;
         config.fov_y_degrees = 43;
         config.lock_profile = Some(ThirdPersonCameraProfile {
-            distance: 160, height: 96, target_height: 80,
-            fov_y_degrees: 43, shoulder_offset: 24,
+            distance: 160,
+            height: 96,
+            target_height: 80,
+            fov_y_degrees: 43,
+            shoulder_offset: 24,
         });
         let mut target = trace_target();
         let mut state = ThirdPersonCameraState::new(Angle::HALF);
@@ -3507,40 +3523,79 @@ mod tests {
         target.lock_target = Some(RoomPoint::new(0, 78, 120));
         let mut previous_x = state.position.x;
         for _ in 0..300 {
-            let frame = state.update(projection, None, target, ThirdPersonCameraInput::default(), config);
-            assert!((frame.camera.position.x - previous_x).abs() <= 3, "shoulder transition snaps");
+            let frame = state.update(
+                projection,
+                None,
+                target,
+                ThirdPersonCameraInput::default(),
+                config,
+            );
+            assert!(
+                (frame.camera.position.x - previous_x).abs() <= 3,
+                "shoulder transition snaps"
+            );
             previous_x = frame.camera.position.x;
         }
         let frame = state.current_frame(projection);
-        let player = frame.camera.project_world(RoomPoint::new(0, 70, 0)).unwrap();
-        let enemy = frame.camera.project_world(target.lock_target.unwrap()).unwrap();
-        assert!(player.sx < 130, "player must clear the central view: {player:?}");
-        assert!(enemy.sx > player.sx && (enemy.sx - 160).abs() <= 8, "enemy must stay near centre: {enemy:?}");
+        let player = frame
+            .camera
+            .project_world(RoomPoint::new(0, 70, 0))
+            .unwrap();
+        let enemy = frame
+            .camera
+            .project_world(target.lock_target.unwrap())
+            .unwrap();
+        assert!(
+            player.sx < 130,
+            "player must clear the central view: {player:?}"
+        );
+        assert!(
+            enemy.sx > player.sx && (enemy.sx - 160).abs() <= 8,
+            "enemy must stay near centre: {enemy:?}"
+        );
         assert!(state.position.x <= -22);
         target.lock_target = None;
         for _ in 0..500 {
-            state.update(projection, None, target, ThirdPersonCameraInput::default(), config);
+            state.update(
+                projection,
+                None,
+                target,
+                ThirdPersonCameraInput::default(),
+                config,
+            );
         }
         assert_eq!(state.focus.x, 0);
         // Unlock preserves the orbit angle, but removes the shoulder framing.
-        let player = state.current_frame(projection).camera
-            .project_world(RoomPoint::new(0, 70, 0)).unwrap();
-        assert!((player.sx - 160).abs() <= 1, "free camera recentres the player: {player:?}");
+        let player = state
+            .current_frame(projection)
+            .camera
+            .project_world(RoomPoint::new(0, 70, 0))
+            .unwrap();
+        assert!(
+            (player.sx - 160).abs() <= 1,
+            "free camera recentres the player: {player:?}"
+        );
         assert_eq!(state.distance(), config.distance);
     }
 
     struct ShoulderWallTraceProvider;
     impl CollisionTraceProvider for ShoulderWallTraceProvider {
-        fn trace_into(&mut self, query: CollisionTraceQuery, output: &mut crate::CollisionTrace) -> bool {
+        fn trace_into(
+            &mut self,
+            query: CollisionTraceQuery,
+            output: &mut crate::CollisionTrace,
+        ) -> bool {
             let mut trace = crate::CollisionTrace::unobstructed(query.end);
             // Wall on the camera's right, in world coordinates for a +Z lock.
             if query.end.x < -12 && query.start.x >= -12 {
                 let clear = query.start.x + 12;
                 let span = query.start.x - query.end.x;
                 trace.fraction_q12 = clear * COLLISION_FRACTION_ONE_Q12 / span;
-                trace.end = RoomPoint::new(-12,
+                trace.end = RoomPoint::new(
+                    -12,
                     query.start.y + (query.end.y - query.start.y) * clear / span,
-                    query.start.z + (query.end.z - query.start.z) * clear / span);
+                    query.start.z + (query.end.z - query.start.z) * clear / span,
+                );
             }
             *output = trace;
             true
@@ -3552,19 +3607,38 @@ mod tests {
         let mut config = ThirdPersonCameraConfig::character(160, 96, 80);
         config.lock_target_framing = true;
         config.lock_profile = Some(ThirdPersonCameraProfile {
-            distance: 160, height: 96, target_height: 80,
-            fov_y_degrees: 43, shoulder_offset: 32,
+            distance: 160,
+            height: 96,
+            target_height: 80,
+            fov_y_degrees: 43,
+            shoulder_offset: 32,
         });
         let target = ThirdPersonCameraTarget {
-            lock_target: Some(RoomPoint::new(0, 78, 120)), ..trace_target()
+            lock_target: Some(RoomPoint::new(0, 78, 120)),
+            ..trace_target()
         };
         let mut state = ThirdPersonCameraState::new(Angle::HALF);
         for _ in 0..180 {
-            let frame = state.update_vblanks_with_trace_provider(
-                WorldProjection::new(160,120,305,4), &mut ShoulderWallTraceProvider,
-                target, ThirdPersonCameraInput::default(), config, 1).unwrap();
-            assert!(frame.focus.x >= -12, "pivot crossed the wall: {:?}", frame.focus);
-            assert!(frame.camera.position.x >= -12, "eye crossed the wall: {:?}", frame.camera.position);
+            let frame = state
+                .update_vblanks_with_trace_provider(
+                    WorldProjection::new(160, 120, 305, 4),
+                    &mut ShoulderWallTraceProvider,
+                    target,
+                    ThirdPersonCameraInput::default(),
+                    config,
+                    1,
+                )
+                .unwrap();
+            assert!(
+                frame.focus.x >= -12,
+                "pivot crossed the wall: {:?}",
+                frame.focus
+            );
+            assert!(
+                frame.camera.position.x >= -12,
+                "eye crossed the wall: {:?}",
+                frame.camera.position
+            );
         }
     }
 
@@ -3577,30 +3651,60 @@ mod tests {
         config.lock_target_framing = true;
         config.lock_frame_percent = 0;
         config.composition_override = Some(ThirdPersonCameraProfile {
-            distance: 160, height: 96, target_height: 80,
-            fov_y_degrees: 43, shoulder_offset: 24,
+            distance: 160,
+            height: 96,
+            target_height: 80,
+            fov_y_degrees: 43,
+            shoulder_offset: 24,
         });
         let projection = WorldProjection::new(160, 120, 305, 4);
         let mut target = ThirdPersonCameraTarget {
-            lock_target: Some(RoomPoint::new(0, 78, 180)), ..trace_target()
+            lock_target: Some(RoomPoint::new(0, 78, 180)),
+            ..trace_target()
         };
         let mut state = ThirdPersonCameraState::new(Angle::HALF);
         for _ in 0..120 {
-            state.update(projection, None, target, ThirdPersonCameraInput::default(), config);
+            state.update(
+                projection,
+                None,
+                target,
+                ThirdPersonCameraInput::default(),
+                config,
+            );
         }
         let before = state.current_frame(projection);
-        let enemy = before.camera.project_world(target.lock_target.unwrap()).unwrap();
-        assert!((enemy.sy - 120).abs() <= 3, "aim should centre the shot: {enemy:?}");
+        let enemy = before
+            .camera
+            .project_world(target.lock_target.unwrap())
+            .unwrap();
+        assert!(
+            (enemy.sy - 120).abs() <= 3,
+            "aim should centre the shot: {enemy:?}"
+        );
         state.release_lock_preserving_view();
         target.lock_target = None;
         for _ in 0..30 {
-            let frame = state.update(projection, None, target, ThirdPersonCameraInput::default(), config);
+            let frame = state.update(
+                projection,
+                None,
+                target,
+                ThirdPersonCameraInput::default(),
+                config,
+            );
             assert!((frame.pitch_q12 - before.pitch_q12).abs() <= 1);
         }
         let mut state = ThirdPersonCameraState::new(Angle::HALF);
         for _ in 0..120 {
-            let frame = state.update_vblanks_with_trace_provider(projection,
-                &mut ShoulderWallTraceProvider, target, ThirdPersonCameraInput::default(), config, 1).unwrap();
+            let frame = state
+                .update_vblanks_with_trace_provider(
+                    projection,
+                    &mut ShoulderWallTraceProvider,
+                    target,
+                    ThirdPersonCameraInput::default(),
+                    config,
+                    1,
+                )
+                .unwrap();
             assert!(frame.camera.position.x >= -12 && frame.focus.x >= -12);
         }
     }

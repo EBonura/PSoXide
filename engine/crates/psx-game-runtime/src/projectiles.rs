@@ -444,27 +444,60 @@ impl<const N: usize> CombatProjectiles<N> {
     /// Bounded look-ahead for an already visible, released hostile bolt.
     /// The caller must still reject projectiles hidden behind world geometry.
     #[cfg_attr(target_arch = "mips", optimize(size))]
-    pub fn incoming_threat(&self, team: CombatTeam, room: RoomIndex, feet: [i32;3],
-        radius: i32, height: i32) -> Option<ProjectileThreat> {
+    pub fn incoming_threat(
+        &self,
+        team: CombatTeam,
+        room: RoomIndex,
+        feet: [i32; 3],
+        radius: i32,
+        height: i32,
+    ) -> Option<ProjectileThreat> {
         let mut result = None;
         let mut soonest = 25;
         for i in 0..N {
-            if self.active[i] == 0 || self.teams[i] == team || self.rooms[i] != room
-                || self.age_ticks[i] < 6 { continue; }
-            let p=self.positions[i]; let v=self.velocities[i];
-            let dx=feet[0].saturating_sub(p[0]); let dz=feet[2].saturating_sub(p[2]);
-            if dx.abs()>1024 || dz.abs()>1024 { continue; }
-            let speed=v[0].saturating_mul(v[0]).saturating_add(v[2].saturating_mul(v[2]));
-            if speed==0 { continue; }
-            let along=dx.saturating_mul(v[0]).saturating_add(dz.saturating_mul(v[2]));
-            let ticks=along/speed;
-            if ticks<1 || ticks>=soonest || ticks>i32::from(self.lifetime_ticks[i]) { continue; }
-            let miss_x=dx-v[0]*ticks; let miss_z=dz-v[2]*ticks;
-            let r=radius+i32::from(self.radii[i])+10;
-            let y=p[1]+v[1]*ticks;
-            if miss_x*miss_x+miss_z*miss_z>r*r || y<feet[1]-r || y>feet[1]+height+r { continue; }
-            soonest=ticks;
-            result=Some(ProjectileThreat { position:p, velocity:v, ticks_to_contact:ticks as u16 });
+            if self.active[i] == 0
+                || self.teams[i] == team
+                || self.rooms[i] != room
+                || self.age_ticks[i] < 6
+            {
+                continue;
+            }
+            let p = self.positions[i];
+            let v = self.velocities[i];
+            let dx = feet[0].saturating_sub(p[0]);
+            let dz = feet[2].saturating_sub(p[2]);
+            if dx.abs() > 1024 || dz.abs() > 1024 {
+                continue;
+            }
+            let speed = v[0]
+                .saturating_mul(v[0])
+                .saturating_add(v[2].saturating_mul(v[2]));
+            if speed == 0 {
+                continue;
+            }
+            let along = dx
+                .saturating_mul(v[0])
+                .saturating_add(dz.saturating_mul(v[2]));
+            let ticks = along / speed;
+            if ticks < 1 || ticks >= soonest || ticks > i32::from(self.lifetime_ticks[i]) {
+                continue;
+            }
+            let miss_x = dx - v[0] * ticks;
+            let miss_z = dz - v[2] * ticks;
+            let r = radius + i32::from(self.radii[i]) + 10;
+            let y = p[1] + v[1] * ticks;
+            if miss_x * miss_x + miss_z * miss_z > r * r
+                || y < feet[1] - r
+                || y > feet[1] + height + r
+            {
+                continue;
+            }
+            soonest = ticks;
+            result = Some(ProjectileThreat {
+                position: p,
+                velocity: v,
+                ticks_to_contact: ticks as u16,
+            });
         }
         result
     }
@@ -878,18 +911,33 @@ mod tests {
     use super::*;
     #[test]
     fn threat_read_requires_age_hostility_and_an_intersecting_trajectory() {
-        let mut p=CombatProjectiles::<2>::new();
-        let mut s=spawn(CombatTeam::Enemy);
-        s.position=[0,32,160];s.velocity=[0,0,-8];s.lifetime_ticks=120;
-        let i=p.spawn(s).unwrap();
-        assert!(p.incoming_threat(CombatTeam::Player,s.room,[0;3],12,64).is_none());
-        p.age_ticks[i]=6;
-        assert_eq!(p.incoming_threat(CombatTeam::Player,s.room,[0;3],12,64).unwrap().ticks_to_contact,20);
-        assert!(p.incoming_threat(CombatTeam::Enemy,s.room,[0;3],12,64).is_none());
-        p.velocities[i]=[8,0,0];
-        assert!(p.incoming_threat(CombatTeam::Player,s.room,[0;3],12,64).is_none());
-        p.velocities[i]=[0,0,8];
-        assert!(p.incoming_threat(CombatTeam::Player,s.room,[0;3],12,64).is_none());
+        let mut p = CombatProjectiles::<2>::new();
+        let mut s = spawn(CombatTeam::Enemy);
+        s.position = [0, 32, 160];
+        s.velocity = [0, 0, -8];
+        s.lifetime_ticks = 120;
+        let i = p.spawn(s).unwrap();
+        assert!(p
+            .incoming_threat(CombatTeam::Player, s.room, [0; 3], 12, 64)
+            .is_none());
+        p.age_ticks[i] = 6;
+        assert_eq!(
+            p.incoming_threat(CombatTeam::Player, s.room, [0; 3], 12, 64)
+                .unwrap()
+                .ticks_to_contact,
+            20
+        );
+        assert!(p
+            .incoming_threat(CombatTeam::Enemy, s.room, [0; 3], 12, 64)
+            .is_none());
+        p.velocities[i] = [8, 0, 0];
+        assert!(p
+            .incoming_threat(CombatTeam::Player, s.room, [0; 3], 12, 64)
+            .is_none());
+        p.velocities[i] = [0, 0, 8];
+        assert!(p
+            .incoming_threat(CombatTeam::Player, s.room, [0; 3], 12, 64)
+            .is_none());
     }
 
     struct ClearWorld;
@@ -1191,7 +1239,10 @@ mod tests {
             velocity: [2, -3, 7],
             position: [12, 40, 30],
             radius: 2,
-            visual: ProjectileVisualStyle { crystal: true, ..ProjectileVisualStyle::EMPTY },
+            visual: ProjectileVisualStyle {
+                crystal: true,
+                ..ProjectileVisualStyle::EMPTY
+            },
             ..ProjectileImpact::EMPTY
         };
         assert!(effects.spawn(&hit));
