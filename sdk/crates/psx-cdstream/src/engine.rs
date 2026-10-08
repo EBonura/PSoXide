@@ -103,16 +103,22 @@ pub struct Config {
     /// transport then owns. The longest call is `max_irq_ticks`, in
     /// system-clock / 8 ticks that wrap after about 15.5 ms.
     pub time_handler: bool,
+    /// Read at double speed (150 sectors per second, the default and the
+    /// only rate a streamer wants). Clear it for single speed (75 sectors
+    /// per second), which halves the CPU the sector pops cost per second of
+    /// reading; it applies from the next transfer.
+    pub double_speed: bool,
 }
 
 impl Config {
     /// The defaults: 600 VBlanks, interrupt source always on, recovery pause
-    /// after audio, no handler timing.
+    /// after audio, no handler timing, double speed.
     pub const DEFAULT: Config = Config {
         timeout_vblanks: 600,
         irq_mask_policy: IrqMaskPolicy::AlwaysOn,
         pause_after_audio: true,
         time_handler: false,
+        double_speed: true,
     };
 }
 
@@ -321,6 +327,13 @@ impl<H: CdHw> Engine<H> {
             error: self.error,
             ..self.stats
         }
+    }
+
+    /// Start the longest-handler measurement over
+    /// ([`StreamStats::max_irq_ticks`] to 0), to attribute the peak to the
+    /// next stretch of work.
+    pub fn reset_max_irq_ticks(&mut self) {
+        self.stats.max_irq_ticks = 0;
     }
 
     /// Requests waiting behind the active one.
@@ -607,7 +620,12 @@ impl<H: CdHw> Engine<H> {
             }
             (Phase::StartingSeek, flag::ACKNOWLEDGE) => self.change(Phase::Seeking),
             (Phase::Seeking, flag::COMPLETE) => {
-                self.command(CMD_SETMODE, &[MODE_DOUBLE_SPEED], Phase::SettingMode)
+                let mode = if self.config.double_speed {
+                    MODE_DOUBLE_SPEED
+                } else {
+                    0
+                };
+                self.command(CMD_SETMODE, &[mode], Phase::SettingMode)
             }
             (Phase::SettingMode, flag::ACKNOWLEDGE) => {
                 self.command(CMD_READN, &[], Phase::StartingRead)
