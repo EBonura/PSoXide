@@ -769,4 +769,105 @@ mod tests {
             );
         }
     }
+
+    /// The kernel as it was before it read vertices in place: `previous`,
+    /// `current` and `next` held by value.
+    fn by_value_reference(
+        source: &[Vertex],
+        destination: &mut [Vertex],
+        plane: &Plane<'_>,
+        traversal: ClipTraversal,
+    ) -> usize {
+        let mut written = 0;
+        let mut emit = |v: Vertex| {
+            destination[written] = v;
+            written += 1;
+        };
+        match traversal {
+            ClipTraversal::PreviousToCurrent => {
+                let mut previous_index = source.len() - 1;
+                let mut previous = source[previous_index];
+                let mut previous_distance = plane.distance(previous_index, &previous);
+                for (current_index, &current) in source.iter().enumerate() {
+                    let current_distance = plane.distance(current_index, &current);
+                    let inside = plane.inside(current_distance);
+                    if inside != plane.inside(previous_distance) {
+                        emit(plane.intersection(
+                            previous_index,
+                            &previous,
+                            previous_distance,
+                            current_index,
+                            &current,
+                            current_distance,
+                        ));
+                    }
+                    if inside {
+                        emit(current);
+                    }
+                    previous_index = current_index;
+                    previous = current;
+                    previous_distance = current_distance;
+                }
+            }
+            ClipTraversal::CurrentToNext => {
+                for current_index in 0..source.len() {
+                    let next_index = (current_index + 1) % source.len();
+                    let (current, next) = (source[current_index], source[next_index]);
+                    let current_distance = plane.distance(current_index, &current);
+                    let next_distance = plane.distance(next_index, &next);
+                    let inside = plane.inside(current_distance);
+                    if inside {
+                        emit(current);
+                    }
+                    if inside != plane.inside(next_distance) {
+                        emit(plane.intersection(
+                            current_index,
+                            &current,
+                            current_distance,
+                            next_index,
+                            &next,
+                            next_distance,
+                        ));
+                    }
+                }
+            }
+        }
+        written
+    }
+
+    #[test]
+    fn reading_vertices_in_place_clips_exactly_as_copying_them_did() {
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..20_000 {
+            let len = 1 + (next() % 8) as usize;
+            let mut source = [Vertex::default(); 8];
+            for v in &mut source[..len] {
+                *v = Vertex((next() as i32) % 1000, (next() as i32) % 1000);
+            }
+            let source = &source[..len];
+            for traversal in [
+                ClipTraversal::PreviousToCurrent,
+                ClipTraversal::CurrentToNext,
+            ] {
+                let mut want = [Vertex::default(); 16];
+                let want_len = by_value_reference(source, &mut want, &Plane(None), traversal);
+                let mut got = [Vertex::default(); 16];
+                let got_len =
+                    clip_to_plane(source, &mut got, &Plane(None), traversal).expect("2 * len fits");
+                assert_eq!((got_len, &got[..got_len]), (want_len, &want[..want_len]));
+                let mut unchecked = [Vertex::default(); 16];
+                // SAFETY: 16 slots hold the 2 * len a plane can emit at most.
+                let unchecked_len = unsafe {
+                    clip_to_plane_unchecked(source, &mut unchecked, &Plane(None), traversal)
+                };
+                assert_eq!(&unchecked[..unchecked_len], &want[..want_len]);
+            }
+        }
+    }
 }
