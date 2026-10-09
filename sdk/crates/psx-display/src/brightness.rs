@@ -14,11 +14,11 @@ use psx_hw::gpu::{gp0, packet};
 
 use crate::label::Label;
 
-/// Grey (of 255) the overlay adds per step to brighten. Brighter lifts the
-/// blacks, so it adds a little more per step than darker takes off.
-const GAIN_PER_STEP_BRIGHTER: u8 = 8;
-/// Grey (of 255) the overlay takes off per step to darken.
-const GAIN_PER_STEP_DARKER: u8 = 6;
+/// Grey (of 255) the overlay carries per step, either way. The GPU blends in
+/// five bits per channel and a rectangle's grey is its top five bits, so 8 is
+/// the smallest grey that changes the picture by one blend unit: every step
+/// moves it by exactly one more than the step before.
+const GAIN_PER_STEP: u8 = 8;
 
 /// GP0(E1h) semi-transparency field value for `background + foreground`.
 const BLEND_ADD: u32 = 1;
@@ -116,14 +116,10 @@ impl Brightness {
     }
 
     /// Grey of 255 the overlay carries: zero at the default, else the step
-    /// count times 8 (brighter) or 6 (darker).
+    /// count times 8, darker or brighter. On the GPU's five bits that is
+    /// exactly the step count (1 to 5) subtracted or added per channel.
     pub const fn overlay_gain(self) -> u8 {
-        let steps = self.0.unsigned_abs();
-        if self.0 > 0 {
-            steps * GAIN_PER_STEP_BRIGHTER
-        } else {
-            steps * GAIN_PER_STEP_DARKER
-        }
+        self.0.unsigned_abs() * GAIN_PER_STEP
     }
 
     /// The overlay grey while a screen fades: [`overlay_gain`](Self::overlay_gain)
@@ -187,7 +183,7 @@ impl Brightness {
 /// use psx_display::Brightness;
 /// use psx_gpu::display::Resolution;
 /// let overlay = Brightness::new(-2).overlay(Resolution::R320X240).unwrap();
-/// assert_eq!(overlay.color_command & 0x00FF_FFFF, 12 * 0x0001_0101);
+/// assert_eq!(overlay.color_command & 0x00FF_FFFF, 16 * 0x0001_0101);
 /// assert!(Brightness::DEFAULT.overlay(Resolution::R320X240).is_none());
 /// ```
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -257,54 +253,39 @@ mod tests {
     use super::{Brightness, BrightnessOverlay};
     use psx_gpu::display::Resolution;
 
-    /// WipEout's rule as its renderer states it: grey per step is 8 when the
-    /// level is above zero and 6 otherwise.
-    fn wipeout_gain(level: i8) -> u32 {
-        level.unsigned_abs() as u32 * if level > 0 { 8 } else { 6 }
+    /// The grey of step `n` either way, as the overlay states it.
+    fn grey(n: i8) -> u32 {
+        n.unsigned_abs() as u32 * 8
     }
 
-    /// WipEout's four packet words for a 320x240 frame: the draw-mode word,
-    /// the rectangle command, its corner and its size.
-    fn wipeout_words(level: i8) -> [u32; 4] {
-        let mode = if level > 0 { 0xE100_0020 } else { 0xE100_0040 };
+    /// The four packet words for a 320x240 frame: the draw-mode word (GP0
+    /// E1h with B + F or B - F, and bit 10 set so an interlaced frame can draw
+    /// into the field being shown), the rectangle command, its corner and its
+    /// size.
+    fn words(level: i8) -> [u32; 4] {
+        let mode = if level > 0 { 0xE100_0420 } else { 0xE100_0440 };
         [
             mode,
-            0x6200_0000 | (wipeout_gain(level) * 0x0001_0101),
+            0x6200_0000 | (grey(level) * 0x0001_0101),
             0,
             320 | (240 << 16),
         ]
     }
 
     #[test]
-    fn the_gain_table_is_wipeouts_for_every_step() {
-        let darker = [0, 6, 12, 18, 24, 30];
-        let brighter = [0, 8, 16, 24, 32, 40];
+    fn the_gain_table_is_eight_grey_per_step_both_ways() {
+        let table = [0, 8, 16, 24, 32, 40];
         for steps in 0..=5i8 {
             assert_eq!(
                 Brightness::new(-steps).overlay_gain(),
-                darker[steps as usize]
+                table[steps as usize]
             );
-            assert_eq!(
-                Brightness::new(steps).overlay_gain(),
-                brighter[steps as usize]
-            );
-        }
-        for level in -5..=5i8 {
-            assert_eq!(
-                Brightness::new(level).overlay_gain() as u32,
-                wipeout_gain(level),
-                "level {level}"
-            );
+            assert_eq!(Brightness::new(steps).overlay_gain(), table[steps as usize]);
         }
     }
 
     #[test]
-    fn the_overlay_words_are_wipeouts_for_every_step() {
-        // The only difference is GP0(E1h) bit 10, "drawing to the display
-        // area allowed", which WipEout leaves clear: the GPU ignores it for
-        // progressive frames, and an interlaced 480-line frame needs it set
-        // to draw into the field being shown.
-        const DRAW_TO_DISPLAY: u32 = 1 << 10;
+    fn the_overlay_words_are_pinned_for_every_step() {
         for level in -5..=5i8 {
             if level == 0 {
                 continue;
@@ -312,10 +293,44 @@ mod tests {
             let overlay = Brightness::new(level)
                 .overlay(Resolution::R320X240)
                 .unwrap();
-            let mut words = overlay.words();
-            assert_eq!(words[0] & DRAW_TO_DISPLAY, DRAW_TO_DISPLAY);
-            words[0] &= !DRAW_TO_DISPLAY;
-            assert_eq!(words, wipeout_words(level), "level {level}");
+            assert_eq!(overlay.words(), words(level), "level {level}");
+        }
+        // Spelled out for the two ends.
+        assert_eq!(
+            Brightness::MIN
+                .overlay(Resolution::R320X240)
+                .unwrap()
+                .words(),
+            [0xE100_0440, 0x6228_2828, 0, 0x00F0_0140]
+        );
+        assert_eq!(
+            Brightness::MAX
+                .overlay(Resolution::R320X240)
+                .unwrap()
+                .words(),
+            [0xE100_0420, 0x6228_2828, 0, 0x00F0_0140]
+        );
+    }
+
+    /// The brighter words are the ones WipEout always drew (its draw-mode word
+    /// leaves bit 10 clear: the GPU ignores it for progressive frames).
+    #[test]
+    fn the_brighter_words_are_wipeouts() {
+        for level in 1..=5i8 {
+            let mut w = Brightness::new(level)
+                .overlay(Resolution::R320X240)
+                .unwrap()
+                .words();
+            w[0] &= !(1 << 10);
+            assert_eq!(
+                w,
+                [
+                    0xE100_0020,
+                    0x6200_0000 | (level as u32 * 8 * 0x0001_0101),
+                    0,
+                    320 | (240 << 16)
+                ]
+            );
         }
     }
 
@@ -324,7 +339,7 @@ mod tests {
     #[test]
     fn the_faded_gain_is_hollow_knights() {
         for level in -5..=5i8 {
-            let per = if level > 0 { 8 } else { 6 };
+            let per = 8;
             for fade in 0..=u8::MAX {
                 let want = (level.unsigned_abs() as u32 * per * fade as u32 / 128).min(255) as u8;
                 assert_eq!(
@@ -351,7 +366,7 @@ mod tests {
         let half = Brightness::new(-4)
             .faded_overlay(Resolution::R320X240, 64)
             .unwrap();
-        assert_eq!(half.color_command, 0x6200_0000 | (12 * 0x0001_0101));
+        assert_eq!(half.color_command, 0x6200_0000 | (16 * 0x0001_0101));
         assert_eq!(half.draw_mode, full.draw_mode ^ 0x0000_0060);
     }
 
@@ -429,14 +444,24 @@ mod tests {
 
     /// The GPU blends in five bits per channel and a rectangle's grey is its
     /// top five bits (`>> 3`, no dither on a rectangle; the emulator's
-    /// `blend_pixel` and `rgb24_to_rgb15` do the same), so what a step takes
-    /// off or adds to the picture is this table, not the gain. DARKER 1 draws
-    /// nothing and DARKER 4 and 5 are the same picture. This pins that
-    /// behaviour so a change to the gains is a visible decision.
+    /// `blend_pixel` and `rgb24_to_bgr15` do the same), so what a step takes
+    /// off or adds to the picture is the grey `>> 3`. Every step must be a
+    /// different amount from its neighbours, the same either way: a smaller
+    /// per-step grey leaves dead or repeated steps.
     #[test]
-    fn the_gpu_sees_five_bit_channels() {
+    fn every_step_is_a_distinct_five_bit_amount() {
         let five_bit = |level: i8| Brightness::new(level).overlay_gain() >> 3;
-        assert_eq!([-1, -2, -3, -4, -5].map(five_bit), [0, 1, 2, 3, 3]);
+        assert_eq!([-1, -2, -3, -4, -5].map(five_bit), [1, 2, 3, 4, 5]);
         assert_eq!([1, 2, 3, 4, 5].map(five_bit), [1, 2, 3, 4, 5]);
+        for level in -4..=4i8 {
+            let here = five_bit(level);
+            let next = five_bit(level + level.signum());
+            if level != 0 {
+                assert_eq!(next, here + 1, "level {level}");
+            }
+        }
+        assert_eq!(five_bit(0), 0);
+        assert_eq!(five_bit(1), 1);
+        assert_eq!(five_bit(-1), 1);
     }
 }
