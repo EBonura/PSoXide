@@ -6,5 +6,11 @@ license.workspace = true
 repository.workspace = true
 description  = "Fixed-point math primitives for the PS1 SDK: Q0.12 angles + sin/cos LUTs, plus scaffolding for Q3.12 / Q16.16 / vec / mat as they land."
 
+[features]
+default = []
+# Hand-scheduled R3000 kernels (`asm_kernels.rs`) used by `clip_lanes8_plane`
+# instead of its portable definition. Off by default; bit-identical.
+asm-kernels = []
+
 [lints]
 workspace = true
