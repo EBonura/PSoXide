@@ -13,9 +13,10 @@ use, especially a commercial one, consult a qualified attorney.
 
 - PSoXide is licensed **GPL-2.0-or-later**.
 - It is **not** a clean-room implementation, and it does not claim to be.
-- Parts of the emulator core are derived from **PCSX-Redux**
-  (GPL-2.0-or-later). That derivation is the reason the license is GPL, and
-  it is tracked explicitly, file by file.
+- Most of the emulator core was rewritten from hardware documentation and
+  console measurements. Some of its behaviour was first matched to
+  **PCSX-Redux** (GPL-2.0-or-later) traces, and the GPL license keeps that
+  lineage compliant. The emulator's own provenance record tracks each case.
 - The project was built with **heavy AI assistance**. That is disclosed here
   and in the README. Disclosure is an honest statement, not a warranty that
   the code is clean-room or free of third-party influence.
@@ -60,15 +61,14 @@ track provenance explicitly and conservatively. See "Provenance model" and
 
 PSoXide distinguishes, per file, between three kinds of origin:
 
-1. **Derived from PCSX-Redux.** Several emulator-core subsystems are
-   parity-matched against, and in places derived from, PCSX-Redux
-   (GPL-2.0-or-later): for example the event scheduler, DMA semantics, SPU
-   ADSR tables and voice model, MDEC IDCT and colour pipeline, CD-ROM command
-   timing (transcribed from `core/cdrom.cc`), and parts of the
-   hardware-renderer primitive pipeline. These files carry a `## Provenance`
-   header naming PCSX-Redux, its copyright holders, and its license, with
-   inline `Redux` markers at the points of correspondence. They are treated
-   as derivative works of Redux.
+1. **Behaviour matched to PCSX-Redux.** Some emulator-core behaviour (CPU
+   interrupt sampling and exception entry, bus event ordering, video timing,
+   a few GPU conventions and a few CD-ROM delay values) was first chosen to
+   match PCSX-Redux (GPL-2.0-or-later) traces. The source text is the
+   project's own, the cases are marked `gate-pinned` in code, and the
+   emulator's `docs/PROVENANCE.md` lists them. Earlier audits treated more of
+   the core, including the event scheduler, DMA, SPU and MDEC, as derived
+   from Redux; those modules have since been rewritten from documentation.
 
 2. **Implemented from hardware documentation and real-console testing.**
    Other subsystems (for example the GTE, the interrupt controller, the pad,
@@ -84,12 +84,14 @@ PSoXide distinguishes, per file, between three kinds of origin:
    sourced carry the project's GPL-2.0-or-later license. This is separate from
    the AI-assistance disclosure above, which is not a clean-room guarantee.
 
-The full audit, including the Redux subsystem list and the corrections made
-over time, is in [`license-audit.md`](license-audit.md). External projects
-used only as **behavioural references** or **external test tools** (Mednafen,
-DuckStation, JaCzekanski's ps1-tests, the MiSTer core) are credited in
-[`LICENSE`](../LICENSE), contribute no source code, and a cross-language
-similarity scan recorded in the audit found no copied code from them.
+The audit history, including the corrections made over time, is in
+[`license-audit.md`](license-audit.md). External projects used only as
+**behavioural references** or **external test tools** (Mednafen, DuckStation,
+JaCzekanski's ps1-tests, the MiSTer core) are credited in
+[`LICENSE`](../LICENSE) and are not meant to contribute source code. A
+2026-06 similarity scan found none, but a later source inspection found two
+shader ports from DuckStation and Hyllian's code, which were removed; a scan
+is corroboration, not clearance.
 
 ## What this means if you build on PSoXide
 
@@ -141,10 +143,8 @@ What the project does to keep that risk small and visible:
 - **Explicit derivation tracking.** Known derivations carry per-file
   `## Provenance` headers; the lineage is stated, not disguised.
 - **License audit.** [`license-audit.md`](license-audit.md) records the
-  derivation list, the corrections made, and a cross-language similarity scan
-  against the reference emulators that found no copied code (with its own
-  honest caveat that cross-language scanning cannot prove a negative with
-  certainty).
+  audit history and the corrections made, including a cross-language
+  similarity scan whose caveat is that scanning cannot prove a negative.
 - **Dependency checks.** `cargo-deny` enforces a GPL-compatible dependency
   license allow-list across every workspace (see [`deny.toml`](../deny.toml)),
   and CI runs it on every change.
