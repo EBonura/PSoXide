@@ -236,11 +236,7 @@ impl Playtest {
         self.poi_save_dirty = !save_poi_state_to_card(port, &self.poi_save);
     }
 
-    pub(super) fn retry_poi_card_load(
-        &mut self,
-        tick: u32,
-        port: &mut psx_engine::ControllerPort,
-    ) {
+    pub(super) fn retry_poi_card_load(&mut self, tick: u32, port: &mut psx_engine::ControllerPort) {
         const RETRY_TICKS: u32 = 300;
         if self.poi_save_loaded || tick % RETRY_TICKS != 0 {
             return;
