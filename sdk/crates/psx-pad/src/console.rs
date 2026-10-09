@@ -458,6 +458,9 @@ pub fn install(port: ControllerPort, config: Config) -> Result<(), ControllerPor
     // A polled CD read cuts `I_MASK` down to VBlank for its whole stream; the
     // engine runs on these two sources alone, so it asks to keep them.
     irq::keep_enabled_while_polling(SIO_BIT | TIMER_BIT);
+    // psx-rt's handler would acknowledge these as strays if they reach it
+    // pending, behind another wrapper's handler or this one's.
+    psx_rt::interrupts::claim_interrupt_sources(SIO_BIT | TIMER_BIT);
     // SAFETY: foreground; written here and in `uninstall` only.
     unsafe { core::ptr::write_volatile(&raw mut INSTALLED, true) };
     Ok(())
@@ -497,6 +500,7 @@ pub fn uninstall() -> Option<ControllerPort> {
     }
     irq::set_mask(irq::mask() & !(SIO_BIT | TIMER_BIT));
     irq::release_polling_keep(SIO_BIT | TIMER_BIT);
+    psx_rt::interrupts::release_interrupt_sources(SIO_BIT | TIMER_BIT);
     timers::set_mode(Timer::Timer0, 0);
     irq::acknowledge(SIO_BIT | TIMER_BIT);
     // SAFETY: foreground; written here and in `install` only.

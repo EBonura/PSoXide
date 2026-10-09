@@ -506,6 +506,9 @@ pub fn install(cd: Cd, config: Config) -> Result<(), Cd> {
     }
     paint_stack();
     install_vector();
+    // psx-rt's handler would acknowledge a CD interrupt that reaches it
+    // pending, behind another wrapper's handler or this one's: claim it.
+    psx_rt::interrupts::claim_interrupt_sources(CD_BIT);
     with_engine(|engine| {
         engine.hw_mut().time_handler = config.time_handler;
         engine.configure(config);
