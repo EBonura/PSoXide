@@ -89,6 +89,7 @@ impl HardwareTests {
     /// The whole run, then the capture.
     fn start_run(&mut self, ctx: &mut Ctx) {
         let skip_risky = ctx.is_held(button::L2);
+        self.run.write_cards = ctx.is_held(button::L1) && ctx.is_held(button::R1);
         tty::println("hardware-tests: run begins");
         run::execute(&mut self.run, ctx, ctx.pad, skip_risky);
         // The run left its own picture and font; the scene's are back below.

@@ -971,8 +971,10 @@ Pad engine, steps `ENGINE SETUP SWEEP`, `ENGINE ACK PACING`, `ENGINE TIMED PACIN
 * `690`-`693`: 600 frames of the engine with a memory-card sector read every ten frames
   through `lease()`, on the first slot that holds a card: pad faults, frames the engine
   skipped while the port was out, card checksum errors; reads ok and tried; the wait for
-  the lease (median, longest); card frame time in HBlanks. Reads only: this suite does not
-  write to the operator's card.
+  the lease (median, longest); card frame time in HBlanks. Reads only, unless L1 and R1 are held
+  while CROSS starts the run, as the card diagnostic asks for its writes: then every frame read is
+  also written back with the bytes just read (the card's contents do not change), and `694` holds
+  the writes ok and tried and the write time in HBlanks.
 * `720`-`749`, the engine under load: seven phases of six records each (loop rounds per
   frame; faults, stalls and spurious interrupts; handler stack left, events and kicks; the
   load generator's own interrupt state; `I_MASK` and `I_STAT`; totals since install). Phases:

@@ -58,6 +58,8 @@ const CARD_OPS_RECORD: u16 = 0x691;
 const CARD_WAIT_RECORD: u16 = 0x692;
 /// rec engine_card_frame: card_frame_hblanks_min, card_frame_hblanks_med, card_frame_hblanks_max (0x693)
 const CARD_FRAME_RECORD: u16 = 0x693;
+/// rec engine_card_writes: writes_ok, writes_tried, write_frame_hblanks_med (the same bytes written back, only with L1 and R1 held at the start, 0x694)
+const CARD_WRITES_RECORD: u16 = 0x694;
 /// rec engine_load_work: rounds_avg, rounds_min, rounds_max (a frame's loop rounds, seven phases of six records from 0x720: no ports with all load, both ports alone, with GPU, with SPU, with CD as the SDK reader leaves I_MASK, with CD and the pad interrupts re-enabled, with all three)
 const LOAD_WORK_RECORD: u16 = 0x720;
 /// rec engine_load_health: pad_faults, stalls, spurious (0x721 and every sixth after)
@@ -376,8 +378,9 @@ pub(crate) fn hotplug(mut progress: impl FnMut(u32), records: &mut Records, next
 // ----------------------------------------------------------- card, leased
 
 /// A card read through the engine's lease, beside the engine polling pads.
-/// Only the first slot that holds a card is used. Reads only.
-pub(crate) fn card_lease(records: &mut Records, next: &mut usize) {
+/// Only the first slot that holds a card is used. Reads only unless
+/// `write_back`, which also writes each frame back with the bytes just read.
+pub(crate) fn card_lease(records: &mut Records, next: &mut usize, write_back: bool) {
     let session = Session::start(Config::DEFAULT);
     if !session.installed {
         refused(records, next, CARD_PAD_RECORD);
@@ -401,6 +404,7 @@ pub(crate) fn card_lease(records: &mut Records, next: &mut usize) {
         push(records, next, record(CARD_OPS_RECORD, 0, 0, 0));
         push(records, next, record(CARD_WAIT_RECORD, NONE, NONE, NONE));
         push(records, next, record(CARD_FRAME_RECORD, NONE, NONE, NONE));
+        push(records, next, record(CARD_WRITES_RECORD, 0, 0, NONE));
         return;
     };
     let before = console::snapshot();
@@ -410,6 +414,8 @@ pub(crate) fn card_lease(records: &mut Records, next: &mut usize) {
     let mut frames = [0u32; (CARD_FRAMES / CARD_EVERY) as usize];
     let (mut ok, mut tried, mut checksum) = (0u32, 0u32, 0u32);
     let mut buf = [0u8; 128];
+    let mut write_times = [0u32; (CARD_FRAMES / CARD_EVERY) as usize];
+    let (mut writes_ok, mut writes_tried) = (0u32, 0u32);
     for frame in 0..CARD_FRAMES {
         let _ = spin_frame(|| {});
         if frame % CARD_EVERY != 0 {
@@ -422,9 +428,19 @@ pub(crate) fn card_lease(records: &mut Records, next: &mut usize) {
         waits[index] = timers::counter(Timer::Timer2) as u32;
         let mut card = HardwareCard::on_port(&mut *lease, slot);
         timers::set_counter(Timer::Timer1, 0);
-        let result = card.read_frame(((index as u16) * 5) % 64, &mut buf);
+        let frame_number = ((index as u16) * 5) % 64;
+        let result = card.read_frame(frame_number, &mut buf);
         frames[index] = timers::counter(Timer::Timer1) as u32;
         tried += 1;
+        if write_back && result.is_ok() {
+            timers::set_counter(Timer::Timer1, 0);
+            let written = card.write_frame(frame_number, &buf);
+            write_times[index] = timers::counter(Timer::Timer1) as u32;
+            writes_tried += 1;
+            if written.is_ok() {
+                writes_ok += 1;
+            }
+        }
         match result {
             Ok(()) => ok += 1,
             Err(CardError::BadChecksum) => checksum += 1,
@@ -467,6 +483,17 @@ pub(crate) fn card_lease(records: &mut Records, next: &mut usize) {
         ),
     );
     push(records, next, record(CARD_FRAME_RECORD, fmin, fmed, fmax));
+    let (_, write_med, _) = crate::console_tests::spread(&mut write_times);
+    push(
+        records,
+        next,
+        record(
+            CARD_WRITES_RECORD,
+            writes_ok,
+            writes_tried,
+            if write_back { write_med } else { NONE },
+        ),
+    );
 }
 
 // ------------------------------------------------------------ under load
@@ -511,7 +538,7 @@ pub(crate) fn under_load(records: &mut Records, next: &mut usize) {
         if phase >= 5 {
             irq::set_mask(irq::mask() | (1 << 7) | (1 << 4));
         }
-        let mask_start = irq::mask();
+        let mask_start = irq::mask() & 0xFFFF;
         let _ = spin_frame(|| {
             if let Some(load) = load.as_mut() {
                 load.service_timed();
@@ -533,8 +560,8 @@ pub(crate) fn under_load(records: &mut Records, next: &mut usize) {
         let after = console::snapshot();
         let stats = console::stats();
         let diag = load.as_ref().map(|load| load.diag()).unwrap_or_default();
-        let mask_end = irq::mask();
-        let stat_end = irq::pending();
+        let mask_end = irq::mask() & 0xFFFF;
+        let stat_end = irq::pending() & 0xFFFF;
         if let Some(load) = load.take() {
             let _ = load.stop();
         }

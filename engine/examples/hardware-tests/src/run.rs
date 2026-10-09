@@ -123,6 +123,10 @@ pub(crate) struct Run {
     pub(crate) pad: PadState,
     /// Skip the steps that can hang a console (hold L2 when starting).
     pub(crate) skip_risky: bool,
+    /// Write memory-card frames back (the same bytes just read) in the pad
+    /// engine's lease step: only when L1 and R1 were held at the start, as
+    /// the card diagnostic asks for its writes.
+    pub(crate) write_cards: bool,
     handoffs: [Handoff; AREA_COUNT],
     irq_baseline: u32,
     dpcr_baseline: u32,
@@ -147,6 +151,7 @@ impl Run {
             scans: [ScanReport::pending(); 3],
             pad: PadState::NONE,
             skip_risky: false,
+            write_cards: false,
             handoffs: [Handoff {
                 flags: 0,
                 irq_mask: 0,
@@ -569,7 +574,6 @@ records_step!(records_sio_card, sio_timing::card_timing);
 records_step!(records_engine_setup, pad_engine::setup_sweep);
 records_step!(records_engine_ack, pad_engine::pacing_ack);
 records_step!(records_engine_timed, pad_engine::pacing_timed);
-records_step!(records_engine_card, pad_engine::card_lease);
 
 fn run_tests(run: &mut Run, area: Area) {
     let total = TESTS.iter().filter(|spec| test_area(spec) == area).count();
@@ -601,6 +605,12 @@ fn run_tests(run: &mut Run, area: Area) {
 fn step_sio_mix(run: &mut Run) {
     sio_timing::pad_and_card(&mut run.timing.records, &mut run.next);
     ui::repaint(run.font());
+}
+
+/// Card sector reads (and, with L1 and R1 held at the start, write-backs of the
+/// same bytes) through the engine's lease.
+fn step_engine_card(run: &mut Run) {
+    pad_engine::card_lease(&mut run.timing.records, &mut run.next, run.write_cards);
 }
 
 /// The engine with a GPU walk, SPU DMA and a CD read going; the load paints
@@ -754,7 +764,7 @@ const STEPS: &[Step] = &[
     step(Area::Sio, "ENGINE SETUP SWEEP", records_engine_setup),
     step(Area::Sio, "ENGINE ACK PACING", records_engine_ack),
     step(Area::Sio, "ENGINE TIMED PACING", records_engine_timed),
-    step(Area::Sio, "ENGINE AND CARD LEASE", records_engine_card),
+    step(Area::Sio, "ENGINE AND CARD LEASE", step_engine_card),
     step(Area::Sio, "ENGINE UNDER LOAD", step_engine_load),
     step(Area::Sio, "DUALSHOCK MOTORS", step_rumble),
     step(Area::Sio, "PAD HOT-PLUG WINDOW", step_sio_hotplug),
