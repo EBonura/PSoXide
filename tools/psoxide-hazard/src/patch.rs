@@ -465,7 +465,7 @@ fn pass(
         );
         return 1;
     }
-    if let Err(error) = std::fs::write(path, &data) {
+    if let Err(error) = write_whole(path, &data) {
         let _ = writeln!(out, "{}", io_message(&error, path));
         return 1;
     }
@@ -502,8 +502,42 @@ fn pass(
     i32::from(!remaining.is_empty())
 }
 
+/// Replace `path` with `data` in one step: written beside it, then renamed
+/// over it, so a full disk or a kill part way leaves the old image whole
+/// instead of a truncated one. A run now writes up to [`MAX_PASSES`] times.
+fn write_whole(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".hazard-tmp");
+    let temp = path.with_file_name(name);
+    let written = std::fs::write(&temp, data)
+        .and_then(|()| std::fs::set_permissions(&temp, std::fs::metadata(path)?.permissions()))
+        .and_then(|()| std::fs::rename(&temp, path));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    written
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_failed_write_leaves_the_image_and_no_temporary() {
+        let dir = std::env::temp_dir().join(format!("hazard-write-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let image = dir.join("game.exe");
+        std::fs::write(&image, b"old").unwrap();
+        super::write_whole(&image, b"new image").unwrap();
+        assert_eq!(std::fs::read(&image).unwrap(), b"new image");
+        assert!(!dir.join("game.exe.hazard-tmp").exists());
+        // The target is a directory: the rename fails, nothing is left behind.
+        let blocked = dir.join("blocked.exe");
+        std::fs::create_dir(&blocked).unwrap();
+        assert!(super::write_whole(&blocked, b"x").is_err());
+        assert!(!dir.join("blocked.exe.hazard-tmp").exists());
+        assert!(blocked.is_dir());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn usage_without_a_path() {
         let mut out = Vec::new();
