@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+[package]
+name         = "psx-display"
+version      = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description  = "Picture options for PSoXide games: a BRIGHTNESS stepper (DEFAULT, DARKER n, BRIGHTER n) with its one-packet GPU overlay, a SCREEN X/Y stepper, label text and a save byte each."
+
+[dependencies]
+psx-hw  = { workspace = true }
+psx-gpu = { workspace = true }
+
+[lints]
+workspace = true
