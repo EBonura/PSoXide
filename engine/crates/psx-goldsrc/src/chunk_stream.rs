@@ -60,23 +60,23 @@ pub trait ChunkReader {
 impl ChunkReader for psx_pack::cd::SectorReader {
     #[inline]
     unsafe fn prepare(&mut self) -> bool {
-        unsafe { Self::prepare(self) }
+        Self::prepare(self)
     }
     #[inline]
     unsafe fn start_read(&mut self, lba: u32) -> bool {
-        unsafe { Self::start_read(self, lba) }
+        Self::start_read(self, lba)
     }
     #[inline]
     unsafe fn read_sector(&mut self, dst: &mut [u32; SECTOR_WORDS]) -> bool {
-        unsafe { Self::read_sector(self, dst) }
+        Self::read_sector(self, dst)
     }
     #[inline]
     unsafe fn stop(&mut self) {
-        unsafe { Self::stop(self) }
+        Self::stop(self)
     }
     #[inline]
     unsafe fn ready(&mut self) -> Result<bool, psx_io::cd::SectorPollError> {
-        psx_io::cd::poll_data_sector()
+        self.cd_mut().poll_data_sector()
     }
     #[inline]
     unsafe fn find_entry(
