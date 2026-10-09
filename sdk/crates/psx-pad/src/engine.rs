@@ -857,7 +857,10 @@ impl<'p, H: Hw> Engine<'p, H> {
                     && !ctl.refused
                     && pad.mode == PadMode::Analog
                 {
+                    // The analog request just answered keeps its answer.
+                    let answer = job.outcome;
                     *job = AnalogJob::start(JobKind::Rumble);
+                    job.outcome = answer;
                 }
             }
             Outcome::Absent => {

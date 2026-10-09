@@ -1215,3 +1215,37 @@ fn motors_on_the_second_port_are_independent_of_the_first() {
     assert_eq!(rig.pad(Port::One).motors, (false, 0));
     assert_eq!(rig.pad(Port::Two).motors, (true, 77));
 }
+
+#[test]
+fn rumble_enabled_during_an_analog_request_does_not_erase_its_answer() {
+    let mut rig = Rig::new(Config::PORT1_ONLY);
+    rig.plug(
+        Port::One,
+        Pad {
+            id: 0x41,
+            analog_requested: false,
+            ..Pad::dualshock_analog()
+        },
+    );
+    rig.frame();
+    rig.engine.request_analog(Port::One);
+    rig.frame();
+    // The request is under way as a plain analog job; the motors are wanted
+    // after it started, so the engine maps them once the pad reads analog.
+    rig.engine.enable_rumble(Port::One);
+    // The verifying poll is the first to read analog mode; the answer must be
+    // there when it is published, even though the motor mapping starts at once.
+    for _ in 0..12 {
+        rig.frame();
+        if rig.snap().port(Port::One).pad.mode == PadMode::Analog {
+            break;
+        }
+    }
+    assert_eq!(
+        rig.engine.analog_outcome(Port::One),
+        Some(AnalogRequirement::Analog),
+        "the rumble job started by the same poll must not erase the answer"
+    );
+    rig.frames(8);
+    assert!(rig.engine.rumble_mapped(Port::One));
+}
