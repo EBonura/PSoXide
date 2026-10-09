@@ -47,6 +47,16 @@ struct Pad {
     drop_ack_at: Option<u8>,
     /// Reply to the ID's second byte.
     magic: u8,
+    /// The motors are mapped to the poll bytes (command 0x4D in config mode).
+    mapped: bool,
+    /// What the motors are doing: small on, large level.
+    motors: (bool, u8),
+    /// `(ID answered, byte 3, byte 4)` of every 0x42 poll.
+    motor_tx: Vec<(u8, u8, u8)>,
+    /// Command byte of every packet.
+    cmds: Vec<u8>,
+    pending_small: u8,
+    map_small: bool,
     // Per-select state.
     step: u8,
     cmd: u8,
@@ -68,6 +78,12 @@ impl Pad {
             slips_if_early: false,
             drop_ack_at: None,
             magic: 0x5A,
+            mapped: false,
+            motors: (false, 0),
+            motor_tx: Vec::new(),
+            cmds: Vec::new(),
+            pending_small: 0,
+            map_small: false,
             step: 0,
             cmd: 0,
             last_reply: 0xFF,
@@ -106,6 +122,19 @@ impl Pad {
     }
 
     fn apply(&mut self, idx: u8, value: u8) {
+        if idx == 1 {
+            self.cmds.push(value);
+        }
+        match (self.cmd, idx) {
+            (0x42, 3) => self.pending_small = value,
+            (0x42, 4) => {
+                self.motor_tx.push((self.id, self.pending_small, value));
+                if self.mapped && self.id == 0x73 {
+                    self.motors = (self.pending_small & 1 != 0, value);
+                }
+            }
+            _ => {}
+        }
         if !self.dualshock {
             return;
         }
@@ -119,6 +148,10 @@ impl Pad {
                 }
             }
             (0x44, 3) => self.analog_requested = value == 1,
+            // The mapping: small motor on the first motor byte, large on the
+            // second. Only configuration mode takes it.
+            (0x4D, 3) if self.id == 0xF3 => self.map_small = value == 0x00,
+            (0x4D, 4) if self.id == 0xF3 => self.mapped = self.map_small && value == 0x01,
             _ => {}
         }
     }
@@ -983,4 +1016,202 @@ fn a_new_engine_on_the_same_snapshot_starts_its_counters_again() {
     let snap = published.read();
     assert_eq!(snap.port(Port::One).updates, 0);
     assert_eq!(snap.port(Port::One).health, Health::Unseen);
+}
+
+// -------------------------------------------------------------- rumble
+
+use crate::Rumble;
+
+fn commands(rig: &mut Rig, port: Port) -> Vec<u8> {
+    rig.pad(port)
+        .cmds
+        .iter()
+        .copied()
+        .filter(|&c| c != 0x42)
+        .collect()
+}
+
+#[test]
+fn enabling_rumble_maps_the_motors_in_one_visit_and_then_every_poll_carries_them() {
+    let mut rig = Rig::new(Config::PORT1_ONLY);
+    rig.plug(Port::One, Pad::dualshock_analog());
+    rig.frame();
+    rig.engine.enable_rumble(Port::One);
+    rig.frames(5);
+    assert_eq!(
+        commands(&mut rig, Port::One),
+        [0x43, 0x4D, 0x43],
+        "enter, map, exit"
+    );
+    assert!(rig.pad(Port::One).mapped);
+    assert!(rig.engine.rumble_mapped(Port::One));
+    assert_eq!(rig.pad(Port::One).id, 0x73, "analog mode left as it was");
+    rig.engine.set_rumble(Port::One, Rumble::new(true, 200));
+    rig.frames(2);
+    assert_eq!(rig.pad(Port::One).motors, (true, 200));
+    let last = *rig.pad(Port::One).motor_tx.last().unwrap();
+    assert_eq!(last, (0x73, 0x01, 200));
+}
+
+#[test]
+fn an_analog_request_with_the_motors_wanted_maps_them_in_the_same_visit() {
+    let mut rig = Rig::new(Config::PORT1_ONLY);
+    rig.plug(
+        Port::One,
+        Pad {
+            id: 0x41,
+            analog_requested: false,
+            ..Pad::dualshock_analog()
+        },
+    );
+    rig.engine.enable_rumble(Port::One);
+    rig.frames(1);
+    // The rumble job started first; let it finish, then ask for analog mode.
+    rig.frames(6);
+    rig.engine.request_analog(Port::One);
+    rig.frames(8);
+    assert_eq!(
+        rig.engine.analog_outcome(Port::One),
+        Some(AnalogRequirement::Analog)
+    );
+    assert!(rig.engine.rumble_mapped(Port::One));
+    // Wanted with nothing plugged in, then a digital-mode DualShock appears and
+    // analog mode is asked for: one visit to configuration mode does both.
+    let mut rig = Rig::new(Config::PORT1_ONLY);
+    rig.engine.enable_rumble(Port::One);
+    rig.frames(3);
+    assert!(!rig.engine.analog_pending(Port::One));
+    rig.plug(
+        Port::One,
+        Pad {
+            id: 0x41,
+            analog_requested: false,
+            ..Pad::dualshock_analog()
+        },
+    );
+    rig.frame();
+    rig.engine.request_analog(Port::One);
+    rig.frames(8);
+    assert_eq!(commands(&mut rig, Port::One), [0x43, 0x44, 0x4D, 0x43]);
+    assert_eq!(
+        rig.engine.analog_outcome(Port::One),
+        Some(AnalogRequirement::Analog)
+    );
+    assert!(rig.engine.rumble_mapped(Port::One));
+}
+
+#[test]
+fn stopping_the_motors_sends_zeros_on_the_next_poll() {
+    let mut rig = Rig::new(Config::PORT1_ONLY);
+    rig.plug(Port::One, Pad::dualshock_analog());
+    rig.engine.enable_rumble(Port::One);
+    rig.frames(5);
+    rig.engine.set_rumble(Port::One, Rumble::new(true, 255));
+    rig.frames(2);
+    assert_eq!(rig.pad(Port::One).motors, (true, 255));
+    assert!(rig.engine.motors_requested());
+    rig.engine.stop_motors();
+    assert!(!rig.engine.motors_requested());
+    rig.frame();
+    assert_eq!(rig.pad(Port::One).motors, (false, 0));
+    // And disabling stops asking for them at all.
+    rig.engine.set_rumble(Port::One, Rumble::new(true, 9));
+    rig.engine.disable_rumble(Port::One);
+    assert!(rig.engine.rumble(Port::One).is_off());
+}
+
+#[test]
+fn a_digital_pad_is_asked_once_and_hears_only_zeros() {
+    let mut rig = Rig::new(Config::PORT1_ONLY);
+    rig.plug(Port::One, Pad::digital());
+    rig.engine.enable_rumble(Port::One);
+    rig.engine.set_rumble(Port::One, Rumble::new(true, 255));
+    rig.frames(12);
+    assert!(!rig.engine.rumble_mapped(Port::One));
+    assert!(rig.engine.rumble_refused(Port::One));
+    let cmds = commands(&mut rig, Port::One);
+    assert_eq!(cmds, [0x43, 0x4D, 0x43], "asked once, not every frame");
+    assert!(rig
+        .pad(Port::One)
+        .motor_tx
+        .iter()
+        .all(|&(_, s, l)| (s, l) == (0, 0)));
+}
+
+#[test]
+fn a_pad_that_refuses_configuration_mode_is_asked_once_and_not_driven() {
+    let mut rig = Rig::new(Config::PORT1_ONLY);
+    rig.plug(
+        Port::One,
+        Pad {
+            dualshock: false,
+            ..Pad::dualshock_analog()
+        },
+    );
+    rig.engine.enable_rumble(Port::One);
+    rig.engine.set_rumble(Port::One, Rumble::new(true, 255));
+    rig.frames(12);
+    assert!(rig.engine.rumble_refused(Port::One));
+    assert_eq!(commands(&mut rig, Port::One), [0x43, 0x4D, 0x43]);
+    assert!(rig
+        .pad(Port::One)
+        .motor_tx
+        .iter()
+        .all(|&(_, s, l)| (s, l) == (0, 0)));
+    assert_eq!(rig.pad(Port::One).motors, (false, 0));
+    // Wanting it again asks again.
+    rig.engine.enable_rumble(Port::One);
+    rig.frames(6);
+    assert_eq!(commands(&mut rig, Port::One).len(), 6);
+}
+
+#[test]
+fn a_replugged_pad_is_mapped_again_and_a_pad_that_vanishes_mid_sequence_is_not() {
+    let mut rig = Rig::new(Config::PORT1_ONLY);
+    rig.plug(Port::One, Pad::dualshock_analog());
+    rig.engine.enable_rumble(Port::One);
+    rig.engine.set_rumble(Port::One, Rumble::new(false, 120));
+    rig.frames(6);
+    assert_eq!(rig.pad(Port::One).motors, (false, 120));
+    // Unplugged and plugged in again: a fresh pad has no mapping.
+    rig.unplug(Port::One);
+    rig.frame();
+    assert!(!rig.engine.rumble_mapped(Port::One));
+    rig.plug(Port::One, Pad::dualshock_analog());
+    rig.frames(6);
+    assert!(
+        rig.pad(Port::One).mapped,
+        "mapped again without being asked"
+    );
+    assert_eq!(rig.pad(Port::One).motors, (false, 120));
+    // Gone between the enter and the map: the request ends Absent, nothing is
+    // mapped, and the next pad is mapped when it appears.
+    let mut rig = Rig::new(Config::PORT1_ONLY);
+    rig.plug(Port::One, Pad::dualshock_analog());
+    rig.engine.enable_rumble(Port::One);
+    rig.frame();
+    rig.unplug(Port::One);
+    rig.frames(2);
+    assert!(!rig.engine.rumble_mapped(Port::One));
+    assert_eq!(
+        rig.engine.analog_outcome(Port::One),
+        Some(AnalogRequirement::Absent)
+    );
+    rig.plug(Port::One, Pad::dualshock_analog());
+    rig.frames(6);
+    assert!(rig.engine.rumble_mapped(Port::One));
+}
+
+#[test]
+fn motors_on_the_second_port_are_independent_of_the_first() {
+    let mut rig = Rig::new(Config::DEFAULT);
+    rig.plug(Port::One, Pad::dualshock_analog());
+    rig.plug(Port::Two, Pad::dualshock_analog());
+    rig.engine.enable_rumble(Port::One);
+    rig.engine.enable_rumble(Port::Two);
+    rig.frames(6);
+    rig.engine.set_rumble(Port::Two, Rumble::new(true, 77));
+    rig.frames(2);
+    assert_eq!(rig.pad(Port::One).motors, (false, 0));
+    assert_eq!(rig.pad(Port::Two).motors, (true, 77));
 }
