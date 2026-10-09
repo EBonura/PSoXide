@@ -7,7 +7,9 @@
 //! decoder still recovers the payload, which converts "untested until we burn a
 //! disc" into a concrete pass/fail matrix.
 //!
-//!     psoxide-hwtest audio-chaintest build/hwtest-audio.wav
+//! ```text
+//! psoxide-hwtest audio-chaintest build/hwtest-audio.wav
+//! ```
 //!
 //! It cannot prove the real chain works. It can prove the decoder is not brittle
 //! against the specific degradations a capture chain is known to introduce,

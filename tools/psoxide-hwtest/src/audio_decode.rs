@@ -4,7 +4,9 @@
 //! forever, so a recording made through a capture card carries the payload
 //! continuously instead of in photographed QR stills. This recovers it.
 //!
-//!     psoxide-hwtest audio-decode capture.wav --out payload.bin
+//! ```text
+//! psoxide-hwtest audio-decode capture.wav --out payload.bin
+//! ```
 //!
 //! Each bit is one ADPCM block: exactly 28 samples at 44.1 kHz. The two tones
 //! sit on exact DFT bins of a 28-sample window (1575 Hz = bin 1, 3150 Hz =
