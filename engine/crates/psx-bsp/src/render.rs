@@ -1221,6 +1221,14 @@ impl AttributedClipPlane<AffineVertex> for PxbspClipPlane<'_> {
         second: &AffineVertex,
         second_distance: Self::Distance,
     ) -> AffineVertex {
+        // Two faces share an edge but traverse it in opposite directions; a
+        // fixed endpoint order gives both the same crossing.
+        let (first, first_distance, second, second_distance) = if first.position <= second.position
+        {
+            (first, first_distance, second, second_distance)
+        } else {
+            (second, second_distance, first, first_distance)
+        };
         let fraction = crossing_fraction_q16_i32(first_distance, second_distance);
         lerp_vertex(first, second, fraction)
     }
@@ -4813,6 +4821,39 @@ mod frustum_tests {
             undecided * 20 < checked,
             "{undecided} of {checked} plane tests were undecided"
         );
+    }
+
+    #[test]
+    fn shared_edge_clips_to_the_same_vertex_in_either_direction() {
+        // Two faces visit a shared edge in opposite directions. The crossing
+        // must not depend on which endpoint comes first, or the neighbours
+        // disagree by a pixel and leave a crack.
+        let (planes, _) = planes_for([37, 70, 273], 1024, 100);
+        let mut state = 0x2b7e_1516u32;
+        let mut crossings = 0usize;
+        for _ in 0..4000 {
+            let point = |state: &mut u32| {
+                let mut axis = || (lcg(state) % 1400) as i16 - 700;
+                [axis(), axis(), axis()]
+            };
+            let a = vertex(point(&mut state));
+            let mut b = vertex(point(&mut state));
+            b.uv = [(lcg(&mut state) % 256) as u8, (lcg(&mut state) % 256) as u8];
+            b.color = lcg(&mut state) & 0x00ff_ffff;
+            for plane in &planes.planes {
+                let da = FrustumPlanes::distance(plane, a.position);
+                let db = FrustumPlanes::distance(plane, b.position);
+                if (da >= 0) == (db >= 0) {
+                    continue;
+                }
+                let clip = PxbspClipPlane(plane);
+                let forward = clip.intersection(0, &a, da, 1, &b, db);
+                let backward = clip.intersection(1, &b, db, 0, &a, da);
+                assert_eq!(forward, backward, "plane {plane:?} edge {a:?} {b:?}");
+                crossings += 1;
+            }
+        }
+        assert!(crossings > 500, "only {crossings} crossings exercised");
     }
 
     #[test]
