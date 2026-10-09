@@ -492,6 +492,14 @@ impl<'p, H: Hw> Engine<'p, H> {
         self.phase == Phase::Idle
     }
 
+    /// Publish the current readings. A freshly built engine calls this so the
+    /// snapshot a previous engine left behind does not outlive it: its
+    /// counters start again from zero.
+    pub fn publish_readings(&self) {
+        self.published
+            .publish(&[self.ports[0].reading, self.ports[1].reading]);
+    }
+
     /// The latest publication.
     pub fn snapshot(&self) -> Snapshot {
         self.published.read()

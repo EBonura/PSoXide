@@ -108,6 +108,19 @@ again up to three times. `console::analog_outcome(port)` reports
 answer before it starts (a launcher) keeps calling `require_analog_on` before
 `install`, as it does today.
 
+## Polled CD reads
+
+`SectorReader` (the pack loader, the FMV streamer) holds `I_MASK` at VBlank for
+a whole stream, which silences the engine's two sources: IRQ7 and counter 0.
+The first headless run with a polled read going showed it: every transaction
+stalled and faulted, one per VBlank (60 stalls and 60 faults for 60 kicks in 120
+frames, since an abandoned round skips the next kick). The engine now registers
+its sources with `psx_io::irq::keep_enabled_while_polling` and the reader
+leaves them on; `uninstall` releases them. A source with its own handler that
+works through interrupts alone should do the same. `pad-engine-check` with
+feature `cd-read` and a disc reproduces it (33 stalls and 33 faults without the
+registration, none with it).
+
 ## Memory cards
 
 A card transaction needs the port for its whole length, so the engine hands the
@@ -122,6 +135,18 @@ step.
 This is arbitration by exclusion, not interleaving: a sector transfer is about
 as long as a frame, and a pad packet cannot be inserted into the middle of a
 card packet on the same wires.
+
+## Uninstall and install again
+
+`uninstall` waits for the transaction in flight (it abandons it after the same
+patience as `lease`), closes the engine's sources and returns the port token;
+it returns `None` only when the engine is not installed or a `Lease` holds the
+port. The wrapper stays in the vector, chained. `install` finds it there, resets
+the engine and the snapshot, and takes the port again, so a program that hands
+the port to a synchronous driver for a while needs no workaround. (Before the
+chain change `install` refused while the wrapper was still first in the vector,
+and `uninstall` returned `None` for as long as a round was in flight, which is
+nearly always right after a VBlank.)
 
 ## Installing
 

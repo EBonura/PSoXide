@@ -967,3 +967,20 @@ fn the_snapshot_sequence_counts_publications_and_always_reads_the_latest() {
         last = snap.seq;
     }
 }
+
+#[test]
+fn a_new_engine_on_the_same_snapshot_starts_its_counters_again() {
+    // Uninstall and install again builds a new engine over the same published
+    // snapshot; the old engine's counts must not outlive it.
+    let mut rig = Rig::new(Config::PORT1_ONLY);
+    rig.plug(Port::One, analog_with(button::START));
+    rig.frames(5);
+    assert_eq!(rig.snap().port(Port::One).updates, 5);
+    let published = rig.published;
+    let sim = Sim::new();
+    let again = Engine::new(sim, published, Config::PORT1_ONLY);
+    again.publish_readings();
+    let snap = published.read();
+    assert_eq!(snap.port(Port::One).updates, 0);
+    assert_eq!(snap.port(Port::One).health, Health::Unseen);
+}
