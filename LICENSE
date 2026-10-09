@@ -362,19 +362,23 @@ their subsidiaries. "PlayStation" and related marks are trademarks of
 their respective owners and are referenced here solely to describe the
 hardware target this software emulates.
 
-The emulator core was developed alongside the following references:
+The emulator lives in the PSoXide-emulator repository, whose LICENSE and
+docs/PROVENANCE.md are the authoritative record for it. The references it
+was developed alongside, repeated here for the SDK's readers:
 
 - PCSX-Redux (https://github.com/grumpycoders/pcsx-redux),
   GPL-2.0-or-later. Used during bring-up as a differential parity
   oracle (that harness has since been retired; real PS1 hardware is
-  the accuracy oracle now) and as a reference implementation for ADSR
-  envelope rate tables, AAN IDCT + YUV->RGB pipeline (MDEC), DMA
-  interrupt-controller register semantics, CD-ROM command timing, and
-  the hardware-renderer primitive pipeline. Algorithm shapes and
-  naming conventions are kept close to Redux's in those modules. The
-  CPU triangle rasterizer is no longer Redux's scanline algorithm: it
-  was rewritten in 2026-06 to the silicon-verified coverage rule after
-  hardware measurements disproved Redux's edge behaviour.
+  the accuracy oracle now) and, early on, as a reference implementation.
+  In 2026-10 the event scheduler, the DMA register file, the SIO model,
+  the MDEC, the SPU (voices, envelopes, noise, reverb) and the CD-ROM
+  timing constants were rewritten from PSX-SPX and this project's
+  console measurements. The CPU core, the bus, the GPU command layer and
+  the hardware renderer have not been rewritten as a whole: they keep a
+  short list of behaviours that were chosen to match Redux traces and are
+  now pinned by the compat gates, and three CD-ROM response delays still
+  hold values inherited from the earlier engine. PSoXide-emulator's
+  docs/PROVENANCE.md lists each of them.
 
 - nocash PSX-SPX (https://problemkaputt.de/psxspx.htm) -- public
   hardware documentation used for register layout, ADPCM filter
@@ -382,11 +386,11 @@ The emulator core was developed alongside the following references:
 
 - DuckStation (https://github.com/stenzek/duckstation), CC-BY-NC-ND
   4.0 -- consulted as a behavioural reference (triangle coverage
-  rule, CD-ROM data-read semantics, GTE behaviour). No source code
-  from DuckStation is included or derived in this repository;
-  observations about its documented/runtime behaviour informed
-  implementations that are independently validated against real PS1
-  hardware.
+  rule, CD-ROM data-read semantics, GTE behaviour). The earlier SPU
+  carried comments citing names that match DuckStation's SPU source
+  (they were labelled as PSX-SPX); that code was rewritten in 2026-10
+  and no DuckStation-derived code is knowingly retained. See
+  PSoXide-emulator's docs/PROVENANCE.md.
 
 - Mednafen-PSX (https://mednafen.github.io/), GPL-2.0-or-later --
   consulted as a behavioural reference for PSX subsystem semantics,
@@ -405,10 +409,6 @@ The emulator core was developed alongside the following references:
   operation ordering). No HDL or code from it is included or derived
   in this repository.
 
-- Neill Corlett's SPU envelope notes -- the canonical write-up of PSX
-  SPU envelope decode behaviour, embedded as quoted commentary in
-  PCSX-Redux's `src/spu/adsr.cc`. Referenced via that quotation.
-
 The SDK, engine, and editor build on the following as influences. No
 source code from them is included or derived in this repository:
 
@@ -425,6 +425,6 @@ source code from them is included or derived in this repository:
   fork Godot.
 
 PlayStation firmware images and commercial game assets are not included or
-redistributed. PSoXide boots homebrew through its independently implemented
-runtime and does not load external firmware. Hardware interface descriptions
+redistributed. PSoXide boots discs and homebrew on its independently implemented
+HLE kernel and does not load console firmware. Hardware interface descriptions
 and third-party attribution above identify provenance and compatibility.
