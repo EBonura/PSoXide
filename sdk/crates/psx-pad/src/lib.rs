@@ -1294,7 +1294,7 @@ fn request_rumble<T: Transport>(bus: &mut T, socket: Port, gap: u32) -> (PadStat
         [0x43, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
     );
     bus.delay(gap);
-    let mut state = poll_state(bus, socket, false, Rumble::OFF);
+    let mut state = poll_state(bus, socket, true, Rumble::OFF);
     let mut retries = 0;
     while state.mode == PadMode::Config && retries < CONFIG_EXIT_RETRIES {
         transaction(
@@ -1303,7 +1303,7 @@ fn request_rumble<T: Transport>(bus: &mut T, socket: Port, gap: u32) -> (PadStat
             [0x43, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
         );
         bus.delay(gap);
-        state = poll_state(bus, socket, false, Rumble::OFF);
+        state = poll_state(bus, socket, true, Rumble::OFF);
         retries += 1;
     }
     (state, mapped)
@@ -1340,7 +1340,7 @@ fn request_analog<T: Transport>(bus: &mut T, socket: Port, gap: u32) -> PadState
         [0x43, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
     );
     bus.delay(gap);
-    let mut state = poll_state(bus, socket, false, Rumble::OFF);
+    let mut state = poll_state(bus, socket, true, Rumble::OFF);
     let mut retries = 0;
     while state.mode == PadMode::Config && retries < CONFIG_EXIT_RETRIES {
         // The exit did not take: leave the pad in a playable mode rather
@@ -1351,7 +1351,7 @@ fn request_analog<T: Transport>(bus: &mut T, socket: Port, gap: u32) -> PadState
             [0x43, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
         );
         bus.delay(gap);
-        state = poll_state(bus, socket, false, Rumble::OFF);
+        state = poll_state(bus, socket, true, Rumble::OFF);
         retries += 1;
     }
     state

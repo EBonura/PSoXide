@@ -484,7 +484,7 @@ pub fn install(port: ControllerPort, config: Config) -> Result<(), ControllerPor
 /// `None` when the engine is not installed or a [`Lease`] holds the port: a
 /// card transaction is not the engine's to cut short.
 pub fn uninstall() -> Option<ControllerPort> {
-    if !is_installed() {
+    if !installed_flag() {
         return None;
     }
     // Leave nothing spinning in a pad that is about to be polled by something
@@ -524,10 +524,28 @@ pub fn uninstall() -> Option<ControllerPort> {
     unsafe { (*TOKEN.0.get()).take() }
 }
 
-/// Whether [`install`] has run and [`uninstall`] has not. The wrapper is then
-/// in the exception chain: first in the vector, or behind psx-cdstream's, which
-/// chains to it.
+/// Whether [`install`] has run, [`uninstall`] has not, and psx-rt's handler has
+/// not been put back in the vector since (which drops the wrapper from the
+/// exception chain: `false` then, and the engine no longer runs). Otherwise
+/// the wrapper is in the chain, first in the vector or behind psx-cdstream's,
+/// which chains to it.
 pub fn is_installed() -> bool {
+    #[cfg(target_arch = "mips")]
+    {
+        // psx-rt's handler going back into the vector drops the wrapper from
+        // the chain without telling it; the epoch says whether that happened.
+        // SAFETY: a volatile read of a word the foreground writes.
+        let epoch = unsafe { core::ptr::read_volatile(&raw const PSX_PAD_EPOCH) };
+        installed_flag() && epoch == psx_rt::interrupts::vector_epoch()
+    }
+    #[cfg(not(target_arch = "mips"))]
+    installed_flag()
+}
+
+/// Whether [`install`] ran and [`uninstall`] has not, whether or not the
+/// wrapper is still in the vector. [`uninstall`] goes by this: it must still be
+/// able to give the port back when the wrapper was dropped from under it.
+fn installed_flag() -> bool {
     // SAFETY: a volatile read of a flag the foreground writes.
     unsafe { core::ptr::read_volatile(&raw const INSTALLED) }
 }
