@@ -922,7 +922,7 @@ nothing is plugged in (a port with nothing in it is a result). The guest is
 `src/sio_timing.rs` (raw register measurements) and `src/pad_engine.rs` (the
 SDK's interrupt-driven pad engine, `psx_pad::console`, opt-in per game; its design is
 `sdk/docs/PAD-IRQ-ENGINE.md` in the SDK). Times are system-clock cycles (33.8688 MHz)
-from Timer 2 unless a field says HBlanks (Timer 1). The memory card is only ever read.
+from Timer 2 unless a field says HBlanks (Timer 1). The memory card is read, and written only where a record below says so.
 The field names of every record are in `tools/hwtest-report.py` (`V2_RECORDS`) and are
 decoded as rows `v2,<id>_<name>,<field>,<value>`.
 
