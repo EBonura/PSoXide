@@ -32,7 +32,7 @@ the run are the two that need a person or touch the operator's card:
 **CONTROLLER TEST (P1 + P2)** and **MEMORY CARD (AT OWN RISK)**; the menu also
 has **VIEW LAST CAPTURE**.
 
-The run is ten areas, 58 steps, in this order (`src/run.rs`):
+The run is ten areas, 61 steps, in this order (`src/run.rs`):
 
 | # | Area | Steps |
 |---|---|---|
@@ -43,9 +43,9 @@ The run is ten areas, 58 steps, in this order (`src/run.rs`):
 | 4 | GPU, MDEC, DISPLAY | cases, timing and MDEC, `GPU BATCHES`, `MDEC DECODE`, precision, `RASTER HASHES`, `DISPLAY WIDTHS`, `480I INTERLACE` |
 | 5 | SPU | `SPU INIT STATE`, precision, cases, `SPU MAP`, `SPU DMA TIMING`, `UI SAMPLE END AND LOOP` (SB1), `SPU RAM AND VOICES` (SB2), `CAPTURE RINGS` (SB4), `BANK HANDOFF` (PA4) |
 | 6 | CD, XA, CD-DA, STREAM | cases, `CD POLLED TIMING`, `CD DATA VERSUS AUDIO ROUTE` (PA1), `CD READ MECHANISMS` (CL2), `XA MUSIC LOOP`, `STREAM COST`, `CD-DA HANDOFF` |
-| 7 | SIO | cases, `SIO TIMING`, then the controller-port and pad-engine measurements described under "SIO measurements" below (select delay, pad and card `/ACK` timing, pad and card together, the engine's sweep, pacings, card lease and load, hot-plug) |
-| 8 | PERFORMANCE | stack and lever cases, `WARM PROBES`, `EXTENDED PROBES AND SHAPES`, `DMA VERSUS CPU LOADS`, `AUDIT PROBES` |
-| 9 | DRIVE AND BUS STRESS | `CD MOTOR` (waits up to 20 s), then `REGISTER A/B (CAN HANG)` |
+| 7 | SIO | cases, `SIO TIMING`, then the controller-port and pad-engine measurements described under "SIO measurements" below (select delay, pad and card `/ACK` timing, pad and card together, the engine's sweep, pacings, card lease and load, the DualShock motors, hot-plug) |
+| 8 | PERFORMANCE | stack and lever cases, `WARM PROBES`, `EXTENDED PROBES AND SHAPES`, `DMA VERSUS CPU LOADS`, `MDEC DMA VERSUS CPU`, `AUDIT PROBES` |
+| 9 | DRIVE AND BUS STRESS | `CD DMA VERSUS CPU`, `CD MOTOR` (waits up to 20 s), then `REGISTER A/B (CAN HANG)` |
 
 **A reset between areas.** Each area starts with `reset_area`: the GPU reset
 and the font uploaded again, every SPU voice keyed off with its volumes at
@@ -66,9 +66,10 @@ screen. It is last, bounded, and skipped when **L2** is held as the run starts. 
 console hangs inside it the screen names the record; power-cycle and run again with L2
 held. A hang at bus level cannot be pre-empted, which is the accepted trade.
 
-**Hands off.** The run needs no input after CROSS on the first row, with one exception:
-the `PAD HOT-PLUG WINDOW` step near the end of the SIO area (see below) shows a prompt for six
-seconds. Do nothing and it records "nothing happened".
+**Hands off.** The run needs no input after CROSS on the first row, with two optional
+exceptions in the SIO area: the `DUALSHOCK MOTORS` step asks, for each motor level, whether the pad
+vibrated (CROSS yes, CIRCLE no, three seconds to answer), and the `PAD HOT-PLUG WINDOW` shows a
+prompt for six seconds. Answer nothing and they record "no answer" and "nothing happened".
 
 `make hwtest-run` runs it headless, `make hwtest-diff` compares it with the pinned
 emulator baseline, and `make hwtest-compare INPUT=<recording>` decodes a filmed
@@ -972,15 +973,46 @@ Pad engine, steps `ENGINE SETUP SWEEP`, `ENGINE ACK PACING`, `ENGINE TIMED PACIN
   skipped while the port was out, card checksum errors; reads ok and tried; the wait for
   the lease (median, longest); card frame time in HBlanks. Reads only: this suite does not
   write to the operator's card.
-* `6A0`-`6A6`: the engine with a GPU list walk, SPU DMA and a CD read going (no sound is
-  made: the SPU upload targets RAM that no voice plays), engine with no ports and with
-  both: loop rounds per frame (average, least, most), pad faults, stalls, spurious
-  interrupts, bytes of the handler's private stack never touched and the events handled.
-  The engine reports no per-event handler time, so the cost shows as lost loop rounds.
+* `720`-`749`, the engine under load: seven phases of six records each (loop rounds per
+  frame; faults, stalls and spurious interrupts; handler stack left, events and kicks; the
+  load generator's own interrupt state; `I_MASK` and `I_STAT`; totals since install). Phases:
+  the engine with no ports polled under the whole load (control), both ports alone, then with
+  the GPU list walk, the SPU upload and the CD sector stream one at a time, then CD with the
+  pad interrupts re-opened, then all three with them open. The load runs in the foreground with
+  interrupts enabled and every call is timed: the longest call, how many outlast a pad byte on
+  the wire (1,100 cycles), and how many began with interrupts disabled or with a pad or
+  engine-timer interrupt already pending. The finding in the emulator: the SDK's
+  `SectorReader` sets `I_MASK` to VBlank only while it runs, which switches off the engine's
+  SIO and root-counter-0 interrupts; with that mask the engine stalls and faults on half the
+  frames (phase 4), with the two bits re-opened it does not (phases 5 and 6). The probe is not
+  the cause: it never masks interrupts, and no load call began with them off.
 * `638`-`63B`, hot-plug: a six-second window with a prompt ("UNPLUG+REPLUG ONE (OPTIONAL)" and
   the seconds left), both ports watched through the engine every frame: transitions, the health
   before and after, frames the port read absent, and the frames of the first and last change.
   Unplug and replug a pad in either port while the prompt is up, or do nothing.
+
+### DualShock motors (records `760`-`768`)
+
+Step `DUALSHOCK MOTORS`, at the end of the SIO area before the hot-plug window, written out as
+packets (`src/rumble.rs`) until the SDK's motor API lands. For each port: a plain poll for the
+identifier; config-mode entry (`01 43 00 01`) and an `01 45` query to see whether the pad now
+answers `F3`; the motor mapping (`01 4D 00 00 01 FF FF FF FF`, which returns the old mapping);
+config-mode exit (`01 43 00 00 5A...`); then a poll with both motors commanded and one with them
+stopped. A digital pad, or an empty port, must not answer `F3` and must come out unchanged; an
+analog pad in digital mode is expected to accept. Records per port: `760`/`763` identifiers and
+a flag word (bit 0 the entry answered `5A`, 1 config mode confirmed, 2 and 3 the mapping answered
+`5A` and `F3`, 4 the exit answered `F3`, 5 and 6 the motor poll kept the identifier and `5A`,
+7 no pad, 8 the query answered `5A`); `761`/`764` the old mapping bytes; `762`/`765` the motor
+poll's identifier, `5A` and buttons, and the identifier after the stop; `767`/`768` the cost of a
+poll with the motors idle and with both on, in cycles from select to release (median of eight).
+
+Operator part, on the first port that accepted the config packets (`766`): the small motor on for
+a second, the large motor at 0, 64, 128, 192 and 255 for a second each, and a series of pulses of
+1, 2, 4, 8 and 15 frames on each motor, asking after each "FELT? X YES O NO" (CROSS yes, CIRCLE
+no, three seconds to answer; no answer is its own value). The record packs two bits per stimulus,
+in that order (0 none, 1 yes, 2 no), the number asked, and the port. Every motor is stopped with
+several polls of zeros before the step ends. With no pad that takes the config packets the
+record reads `FFFF` and nothing is asked.
 
 ## Other v2.0 measurements
 
@@ -999,41 +1031,58 @@ Pad engine, steps `ENGINE SETUP SWEEP`, `ENGINE ACK PACING`, `ENGINE TIMED PACIN
   with nobody reading the counter and once with the CPU reading it in a tight loop:
   counts per window, distinct values seen, the largest step between reads, and how many
   reads the loop made. Does tight polling change what it counts?
-* The emulator timing audit's measurement list (M1 to M11), all warm-harness records on
-  Timer 2 with interrupts masked and five samples (min, median, max), step `AUDIT PROBES`
-  in the performance area unless noted:
-  * M1 GTE read forms after RTPS: `swc2` (`192`, `193`), `cfc2` of FLAG (`196`),
-    `lwc2` of IR1 (`197`); `192`/`193` are in `GTE COMMAND LATENCY`. M2, `mfc2` after NCLIP, is the NCLIP
-    rows `153`/`154` of the same table.
-  * M3 memory-mapped register read costs, 64 reads each: Timer 0, 1 and 2 counters
-    (`1A0`-`1A2`), DMA channel 2 CHCR (`1A3`), DPCR (`1A4`), Timer 2 mode (`1A5`).
-  * M4 scratchpad byte and half loads and stores (`1A8`-`1AB`), against the word ones (`75`, `77`).
-  * M5 isolated cache (COP0 Status bit 16): 64 stores (`1AC`), the control through the same
-    instructions without the bit (`1AD`), 64 loads (`1AE`). Run from KSEG1 with interrupts off.
-  * M6 DMA contention matrix: the GPU list walk (`35`, `36`, `9F`, `FE`), the SPU, OTC and
-    GPU block channels (`140`-`145`). The CD (channel 3) and MDEC (channels 0 and 1) are
-    **not** in the matrix: each needs a consumer on the far side, and a transfer nobody
-    drains either ends too soon to overlap 64 loads or never ends, and the probe waits for
-    the channel to go idle. CD DMA also latched busy on the project console before. The CD's
-    cost to the CPU is measured as lost loop time in `STREAM COST` and `ENGINE UNDER LOAD`.
-  * M7 controlled-cold code: the I-cache flushed, then eight instructions that are nops
-    (`1B0`), one store (`1B1`), one RAM load (`1B2`) and one register load, I_STAT (`1B3`).
-    The flush, not a 4 KiB evictor, is what makes the lines cold.
-  * M8 BIOS ROM: sixteen words in sequence (`1B4`) and one word repeatedly (`1B5`), through
-    KSEG1. Single-word ROM and expansion loads are `4B`, `55`-`5D`.
-  * M9 texture page and CLUT alternation: already `10B`, `10C` (GPU batches).
-  * M10 multiply and divide unit: `multu` then `divu` (`1B8`), `divu` then `multu` (`1B9`),
-    `multu` then `mfhi` straight away (`1BA`), `mtlo` while a multiply runs (`1BB`).
-  * M11 polled-counter tick loss (highest priority), step `POLLED TIMER TICK LOSS`,
-    `6B0`-`6B7`: Timer 2 on the system clock, Timer 2 at an eighth of it, Timer 0 on the
-    system clock and Timer 0 on the dot clock, each read in a tight loop for 30 frames
-    while Timer 1 on the HBlank clock runs free as the reference (read at the two ends
-    only). Ticks per HBlank times 16, the HBlanks, the largest step between reads, the
-    reads made and the steps over 64. A reader that loses ticks while it polls shows as
-    fewer ticks per line than the same timer's nominal rate. `650`-`652` do the same for
-    Timer 1 itself, free-running against tight-polled.
+* The emulator timing audit's measurement list, `TIMING-AUDIT-STEPS.md` (M1 to M11), warm
+  harness unless noted: the block twice, the second pass timed on Timer 2 at the system clock,
+  interrupts masked, five samples (min, median, max):
+  * M1 GTE early reads, copies of `130` (RTPS, the read, 20 nops, sixteen turns): `swc2 $14` to
+    the scratchpad (`192`), `cfc2 $31` (`193`), `lwc2 $0` from the scratchpad (`194`). Interlocked
+    is `130`'s 638; free is about 400. M2: the same `swc2` to cached RAM (`195`).
+  * M3 MMIO read cost, 64 x (lw, nop), timed by a counter other than the one read: Timer 0
+    counter, DMA channel 2 CHCR and DPCR timed by Timer 2 (`1A0`-`1A2`); Timer 2's counter timed
+    by Timer 0 on the system clock (`1A3`).
+  * M4 scratchpad `lb`, `lbu`, `lh`, `lhu`, `sb`, `sh`, 64 each with a nop (`1A8`-`1AD`).
+  * M5 isolated cache: 64 `sw` and 64 `lw` run through KSEG1 with Status.IsC clear against the
+    scratchpad (the control, `1B0`, `1B1`), set (`1B2`, `1B3`), and set with the cache-control
+    TAG bit as well (`1B4`, `1B5`). The Status read-modify-write is in all six; the epilogue is the
+    BIOS's flush (IsC, TAG, a zero word to all 256 lines).
+  * M6 CPU/DMA matrix, loops of 64, idle against channel running: GPU 512-node empty list walk
+    with 64 `sw` back to back (`1E0` idle, `1E1` during), `sw` + 3 nops (`1E2`, `1E3`), `lw` + 3
+    nops (`1E4`, `1E5`), scratchpad `lw` + nop (`1E6`, `1E7`), `lw` + nop (`9F`, `FE`); OTC channel
+    6, 1024 words, `lw` + nop (`142`, `143`); SPU channel 4, 512 halfwords (`140`, `141`); GPU
+    block channel (`144`, `145`). The idle references are `76`, `1F`, `74`, `75`. The CD and MDEC
+    rows need the far end really there, so they are field records, `700`-`709`: loop clocks idle,
+    loop clocks during, and the transfer's own duration in units of 32 clocks, with every wait
+    bounded (about 2 million clocks) and `FFFF` for a timeout. CD (`700`-`707`): SetMode (1x or
+    2x, 2048 or 2340 bytes), SetLoc to the test region, ReadN, wait for INT1 so a sector is
+    buffered, BFRD, DMA 3 to RAM under the loop; `lw` loop then `sw` loop for each of the four
+    combinations. MDEC (`708`, `709`): reset, tables, a decode command for four macroblocks, DMA 1
+    started to drain, DMA 0 kicked to feed under the loop. Step `CD DMA VERSUS CPU` is in the
+    drive area, ahead of `CD MOTOR`.
+  * M7 controlled-cold code: the 4 KiB evictor `1C` uses before every sample, then (a) 64 `sw` to
+    RAM, (b) 64 `sw` to the scratchpad, (c) 32 x (lw GPUSTAT, nop), (d) 32 x (lw RAM, nop), (e) 64
+    nops (`1B8`-`1BC`); one pass, nothing warmed.
+  * M8 warm BIOS ROM (`1C0`-`1C3`), EXP1 (`1C4`-`1C7`) and EXP3 (`1C8`-`1CB`), through KSEG1: 64 x
+    (lw, nop), 64 bare `lw`, then `lhu` and `lbu` with a nop.
+  * M9 GPU texture state, `200`-`223`: a list of 16 textured triangles at 8x8, 16x32 and 32x32,
+    at 4, 8 and 15 bits a texel, each (a) one page and one CLUT, (b) alternating page, (c)
+    alternating CLUT, (d) one page with the UV window moving. Clocks for the list (divide by 16).
+    Anchors `10C` and `10B`. 15 bpp has no CLUT, so (c) repeats (a) there.
+  * M10 multiply/divide unit: `divu`, `multu` (small), a gap of 0, 10, 30 or 36 nops, `mflo`
+    (`1D0`-`1D3`) against `divu` and 36 nops (`1D4`); `multu` large, `mtlo`, `mflo` (`1D5`, small
+    operand `1D8`); `multu`, `mthi`, `mfhi` (small `1D6`, large `1D7`).
+  * M11 polled-counter tick loss, `6B0`-`6B7` (step `POLLED TIMER TICK LOSS`): an assembly loop
+    reads the counter and adds the 16-bit steps it sees until about a second of ticks is
+    reached, with Timer 1 on HBlank free-running as the reference, read at the two ends only.
+    Loops of 6 and 14 instructions, for Timer 2 and Timer 0 on the system clock, Timer 2 at an
+    eighth and Timer 0 on the dot clock. Record: reference HBlanks, ticks seen in thousands,
+    ticks per HBlank times 16; the lost fraction is one minus ticks per HBlank over the nominal
+    rate (2,172 system clocks to a line in the audit's figure). Deviations from the audit's
+    wording: about one second rather than a second and a half, so Timer 1 (65,536 lines is 4.2 s)
+    cannot wrap when a counter loses most of its ticks; Timer 1 is the reference for every case,
+    because Timer 0 on the system clock wraps in 1.9 ms and cannot count a second from its two
+    ends. `650`-`652` do the same for Timer 1 itself, free against polled.
 * The scratchpad-versus-RAM load and store cycles, the I-cache miss cost and the
-  multiply and divide latencies are the warm-harness records that already existed
+  multiply and divide latencies already measured are the records that existed before
   (`72`-`8D`, `C8`, `C9`, `1C`-`1D`, `42`-`45`); this version does not repeat them.
 
 ## Console identity and raster hashes (precision `128`-`159`)

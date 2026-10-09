@@ -58,16 +58,18 @@ const CARD_OPS_RECORD: u16 = 0x691;
 const CARD_WAIT_RECORD: u16 = 0x692;
 /// rec engine_card_frame: card_frame_hblanks_min, card_frame_hblanks_med, card_frame_hblanks_max (0x693)
 const CARD_FRAME_RECORD: u16 = 0x693;
-/// rec engine_load_work: rounds_avg, rounds_min, rounds_max (a frame's loop rounds, seven phases of five records from 0x720: no ports with all load, both ports alone, with GPU, with SPU, with CD as the SDK reader leaves I_MASK, with CD and the pad interrupts re-enabled, with all three)
+/// rec engine_load_work: rounds_avg, rounds_min, rounds_max (a frame's loop rounds, seven phases of six records from 0x720: no ports with all load, both ports alone, with GPU, with SPU, with CD as the SDK reader leaves I_MASK, with CD and the pad interrupts re-enabled, with all three)
 const LOAD_WORK_RECORD: u16 = 0x720;
-/// rec engine_load_health: pad_faults, stalls, spurious (0x721 and every fifth after)
+/// rec engine_load_health: pad_faults, stalls, spurious (0x721 and every sixth after)
 const LOAD_HEALTH_RECORD: u16 = 0x721;
-/// rec engine_load_stack: handler_stack_unused_bytes, events, kicks (0x722 and every fifth after)
+/// rec engine_load_stack: handler_stack_unused_bytes, events, kicks (0x722 and every sixth after)
 const LOAD_STACK_RECORD: u16 = 0x722;
-/// rec engine_load_irq: longest_load_call_cycles, load_calls_over_a_byte, entered_ie_clear_and_pending (0x723 and every fifth after)
+/// rec engine_load_irq: longest_load_call_cycles, load_calls_over_a_byte, entered_ie_clear_and_pending (0x723 and every sixth after)
 const LOAD_IRQ_RECORD: u16 = 0x723;
-/// rec engine_load_mask: i_mask_after_load_start, i_mask_at_end, i_stat_at_end (0x724 and every fifth after)
+/// rec engine_load_mask: i_mask_after_load_start, i_mask_at_end, i_stat_at_end (0x724 and every sixth after)
 const LOAD_MASK_RECORD: u16 = 0x724;
+/// rec engine_load_totals: port1_faults_since_install, stalls_since_install, port1_updates_since_install (0x725 and every sixth after)
+const LOAD_TOTALS_RECORD: u16 = 0x725;
 
 const NONE: u32 = 0xFFFF;
 /// Give a frame up after this many loop rounds if no VBlank arrives.
@@ -488,7 +490,7 @@ pub(crate) fn under_load(records: &mut Records, next: &mut usize) {
         } else {
             Config::DEFAULT
         };
-        let base = 5 * phase;
+        let base = 6 * phase;
         let session = Session::start(config);
         if !session.installed {
             refused(records, next, LOAD_WORK_RECORD + base);
@@ -549,9 +551,19 @@ pub(crate) fn under_load(records: &mut Records, next: &mut usize) {
                 after
                     .port(Port::One)
                     .faults
-                    .wrapping_sub(before.port(Port::One).faults),
-                stats.stalls.wrapping_sub(stats_before.stalls),
-                stats.spurious.wrapping_sub(stats_before.spurious),
+                    .saturating_sub(before.port(Port::One).faults),
+                stats.stalls.saturating_sub(stats_before.stalls),
+                stats.spurious.saturating_sub(stats_before.spurious),
+            ),
+        );
+        push(
+            records,
+            next,
+            record(
+                LOAD_TOTALS_RECORD + base,
+                after.port(Port::One).faults,
+                stats.stalls,
+                after.port(Port::One).updates,
             ),
         );
         push(

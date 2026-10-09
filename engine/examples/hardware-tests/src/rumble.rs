@@ -36,16 +36,16 @@ use psx_rt::interrupts;
 
 type Records = [TimingRecord; TIMING_RECORD_COUNT];
 
-/// rec rumble_config: pad_id_plain, pad_id_in_config_mode, config_flags (port 1 then 2, three records each from 0x740)
-const RUMBLE_CONFIG_RECORD: u16 = 0x740;
-/// rec rumble_mapping: old_mapping_bytes_0_1, old_mapping_bytes_2_3, old_mapping_bytes_4_5 (0x741 and 0x744)
-const RUMBLE_MAPPING_RECORD: u16 = 0x741;
-/// rec rumble_after: id_and_5a_after_motor_poll, buttons_in_that_poll, id_after_stop_all (0x742 and 0x745)
-const RUMBLE_AFTER_RECORD: u16 = 0x742;
-/// rec rumble_operator: answers_two_bits_each, stimuli_asked, port_tested (0x746; answers 0 none, 1 yes, 2 no, in order: small, large 0 64 128 192 255, large pulses, small pulses)
-const RUMBLE_OPERATOR_RECORD: u16 = 0x746;
-/// rec rumble_poll_cost: poll_cycles_idle, poll_cycles_motors_on, polls_each (port 1 0x747, port 2 0x748)
-const RUMBLE_COST_RECORD: u16 = 0x747;
+/// rec rumble_config: pad_id_plain, pad_id_in_config_mode, config_flags (port 1 then 2, three records each from 0x760)
+const RUMBLE_CONFIG_RECORD: u16 = 0x760;
+/// rec rumble_mapping: old_mapping_bytes_0_1, old_mapping_bytes_2_3, old_mapping_bytes_4_5 (0x761 and 0x764)
+const RUMBLE_MAPPING_RECORD: u16 = 0x761;
+/// rec rumble_after: id_and_5a_after_motor_poll, buttons_in_that_poll, id_after_stop_all (0x762 and 0x765)
+const RUMBLE_AFTER_RECORD: u16 = 0x762;
+/// rec rumble_operator: answers_two_bits_each, stimuli_asked, port_tested (0x766; answers 0 none, 1 yes, 2 no, in order: small, large 0 64 128 192 255, large pulses, small pulses)
+const RUMBLE_OPERATOR_RECORD: u16 = 0x766;
+/// rec rumble_poll_cost: poll_cycles_idle, poll_cycles_motors_on, polls_each (port 1 0x767, port 2 0x768)
+const RUMBLE_COST_RECORD: u16 = 0x767;
 
 const NONE: u32 = 0xFFFF;
 const ENTER_CONFIG: [u8; 9] = [0x01, 0x43, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00];

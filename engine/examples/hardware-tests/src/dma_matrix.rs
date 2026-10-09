@@ -161,7 +161,12 @@ fn run_loop(kind: Loop, base_a: u32, madr: u32, chcr: u32, base_b: u32, data: u3
 /// The loop on its own, warmed by a first call, from the address `data`.
 fn idle_loop(kind: Loop, base: u32, data: u32) -> u16 {
     let _ = run_loop(kind, base, 0, 0, base, data);
-    run_loop(kind, base, 0, 0, base, data).0
+    // The smallest of five: a DRAM refresh slot landing in a 64-load loop
+    // adds tens of clocks to the one it hits.
+    (0..5)
+        .map(|_| run_loop(kind, base, 0, 0, base, data).0)
+        .min()
+        .unwrap_or(0)
 }
 
 /// The channel's registers after a row, on the TTY, so a timeout can be told
