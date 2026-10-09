@@ -33,7 +33,7 @@ GATE ?=
 
 .PHONY: example disc hello-tri hello-tri-disc run-tri examples pgo-collect pgo-choose hello-xa-disc hello-xa-gate hello-cdstream-disc hello-cdstream-gate
 examples:
-	@set -e; for example in hello-tri hello-input hello-ot hello-gte hello-tex hello-memcard hello-spstack hello-gteirq hello-present hello-present-queue; do $(MAKE) -f tools/sdk-examples.mk disc EXAMPLE=$$example; done
+	@set -e; for example in hello-tri hello-input hello-ot hello-gte hello-tex hello-memcard hello-spstack hello-gteirq hello-present hello-present-queue hello-asmprobe; do $(MAKE) -f tools/sdk-examples.mk disc EXAMPLE=$$example; done
 
 example:
 	@test -f "sdk/examples/$(EXAMPLE)/Cargo.toml"
