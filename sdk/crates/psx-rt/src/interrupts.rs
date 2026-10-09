@@ -584,6 +584,15 @@ pub fn install_vblank_counter() {
         core::ptr::write_volatile(EXCEPTION_VECTOR.add(1), 0);
         crate::cache::flush_instruction_cache();
 
+        // Whatever wrapper was in front of the old handler is gone: a wrapper
+        // that kept its own record of being installed can tell by the epoch,
+        // and no source is claimed any more.
+        core::ptr::write_volatile(
+            &raw mut VECTOR_EPOCH,
+            core::ptr::read_volatile(&raw const VECTOR_EPOCH).wrapping_add(1),
+        );
+        core::ptr::write_volatile(&raw mut __psx_rt_claimed_irq, 0);
+
         core::ptr::write_volatile(&raw mut __psx_rt_vblank_count, 0);
         irq::acknowledge(1 << psx_hw::irq::source::VBLANK);
         // This handler services VBlank only. After a BIOS disc boot, do not
@@ -597,6 +606,24 @@ pub fn install_vblank_counter() {
 /// Install and enable the VBlank counter interrupt path.
 #[cfg(not(target_arch = "mips"))]
 pub fn install_vblank_counter() {}
+
+/// How many times [`install_vblank_counter`] has put psx-rt's handler in the
+/// vector. That drops every wrapper chained in front of it, so a wrapper
+/// (psx-cdstream's, the pad engine's) that remembers installing itself is
+/// still in the chain only while this reads what it read then.
+#[cfg(target_arch = "mips")]
+static mut VECTOR_EPOCH: u32 = 0;
+
+/// See [`VECTOR_EPOCH`]; zero off-target.
+pub fn vector_epoch() -> u32 {
+    #[cfg(target_arch = "mips")]
+    // SAFETY: a volatile aligned read of a word only this module writes.
+    unsafe {
+        core::ptr::read_volatile(&raw const VECTOR_EPOCH)
+    }
+    #[cfg(not(target_arch = "mips"))]
+    0
+}
 
 /// Unexpected exceptions survived so far. Non-zero means some access
 /// faulted and was stepped over; the value it read or wrote is garbage.
