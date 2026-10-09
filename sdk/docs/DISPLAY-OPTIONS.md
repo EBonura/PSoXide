@@ -24,8 +24,9 @@ ownership and no cost per frame at `DEFAULT`.
 
 The GPU has no gamma, so the overlay is one semi-transparent grey rectangle
 (GP0 62h, behind a GP0(E1h) draw-mode word) over the finished frame: `B - F`
-to darken, `B + F` to brighten. The grey is 6 per step darker and 8 per step
-brighter (brighter adds more because it lifts the blacks). `BrightnessOverlay`
+to darken, `B + F` to brighten. The grey is 8 per step either way, which on the
+GPU's five bits per channel is exactly one more unit per step: DARKER 1 to 5
+subtract 1 to 5 and BRIGHTER 1 to 5 add 1 to 5. `BrightnessOverlay`
 implements `GpuPacket`, so it goes into an `OtFrame` (`add(0, &mut overlay)`)
 or straight to the GPU (`Gpu::draw(&overlay)`); `words()` gives the four
 payload words for a game that copies packets into its own arena.
@@ -47,32 +48,26 @@ it. It is real gamma, costs nothing per pixel, and an overlay would add a
 packet per frame there. Those games use the crate for the row text, the
 centred reading and the save byte only.
 
-## Differences from the WipEout copy
+## Differences from WipEout's private copy
 
-The gain table and the packet words are WipEout's, step for step (the host
-tests rebuild its formula and its words and compare all ten non-default
-steps). One word differs: GP0(E1h) bit 10 ("drawing to the display area
-allowed") is set here and clear in WipEout. The GPU ignores it for a
+The brighter steps and their packet words are WipEout's. The darker steps are
+not: WipEout took 6 grey per step off, which the GPU's five bits per channel
+turned into 0, 1, 2, 3, 3 (DARKER 1 drew nothing, DARKER 4 and 5 were the same
+picture). Manny approved 8 per step, so DARKER 1 to 5 now subtract 1 to 5 and
+every step differs from its neighbours. The finding was source-inspected on the
+emulator's blend and colour conversion (`gpu/blend.rs`), not tested on a
+console; the unit test `every_step_is_a_distinct_five_bit_amount` pins the
+property and `the_overlay_words_are_pinned_for_every_step` the words.
+
+The byte encoding is unchanged. A saved setting keeps its step number, so a
+save at DARKER 3 still reads DARKER 3 and only the look changes: it now takes
+3 units off a channel where it took 2 before.
+
+One word differs from WipEout's: GP0(E1h) bit 10 ("drawing to the display
+area allowed") is set here and clear in WipEout. The GPU ignores it for a
 progressive frame, and a 480-line interlaced frame needs it to draw into the
 field being shown. The save bytes are WipEout's, so an existing WipEout save
 reads unchanged.
-
-## Finding: the darker steps are coarser than they read
-
-The GPU blends in five bits per channel and a rectangle's grey is its top five
-bits. Seen through that, the table is:
-
-| Step | 1 | 2 | 3 | 4 | 5 |
-| --- | --- | --- | --- | --- | --- |
-| DARKER (grey 6, 12, 18, 24, 30) | 0 | 1 | 2 | 3 | 3 |
-| BRIGHTER (grey 8, 16, 24, 32, 40) | 1 | 2 | 3 | 4 | 5 |
-
-So DARKER 1 draws nothing and DARKER 4 and DARKER 5 are the same picture. This
-is source-inspected on the emulator's blend and colour conversion
-(`gpu/blend.rs`), not tested on a console, and the unit test
-`the_gpu_sees_five_bit_channels` pins it. The fix, if Manny wants it, is a
-darker grey of 8 per step; it changes how WipEout's existing DARKER steps look,
-so it is his call, and it is one constant.
 
 ## Per game
 
@@ -162,7 +157,7 @@ measure the added code. `Label` is 13 bytes; a table of eight is 104.
 sets) from `render_post_process`. Cut over to a `-5..=5` option with
 `Brightness::new(value)` and a single `gpu.draw(&overlay)`. On the GPU's five
 bits the old six levels (grey -24, -14, -6, 0, +6, +14) are exactly
-`DARKER 4`, `DARKER 2`, `DARKER 1`, `DEFAULT`, `DEFAULT`, `BRIGHTER 1`, so
+`DARKER 3`, `DARKER 1`, `DEFAULT`, `DEFAULT`, `DEFAULT`, `BRIGHTER 1`, so
 every look it can show today is reachable, and its shipped level 6 is
 `BRIGHTER 1` (set the option's default to 1 to keep the current first-boot
 picture). What is missing is a UI node that prints text for an option's value:
@@ -186,8 +181,6 @@ game to take both options.
 
 ## Open points for Manny
 
-- Whether to fix the coarse darker steps (grey 8 per step). It changes
-  WipEout's look.
 - `psx-settings::Profile.brightness` (0 to 100, default 75) is read by no
   renderer and is clamped by `sanitize`, so it cannot hold a signed step. The
   clean fix is a record version that replaces it with a `Brightness` byte and
