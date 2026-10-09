@@ -51,6 +51,17 @@ const RUMBLE_OPERATOR_RECORD: u16 = 0x766;
 /// rec rumble_poll_cost: poll_cycles_idle, poll_cycles_motors_on, polls_each (port 1 0x767, port 2 0x768)
 const RUMBLE_COST_RECORD: u16 = 0x767;
 
+/// rec rumble_enter_a: last_attempt_replies_1_2, replies_3_4, replies_5_6 (the nine-byte reply to Enter Config, bytes 1 to 8 as pairs; port 1 0x769, port 2 0x76B; v2.1 saw 0xFF with no 0x5A)
+const RUMBLE_ENTER_A_RECORD: u16 = 0x769;
+/// rec rumble_enter_b: last_attempt_replies_7_8, attempts_made, first_attempt_replies_1_2 (port 1 0x76A, port 2 0x76C; up to four attempts a frame apart, stopping at the first 0x5A)
+const RUMBLE_ENTER_B_RECORD: u16 = 0x76A;
+/// rec pad_identity: reply_id_and_5a, reply_buttons, reply_sticks_01 (a plain poll, bytes 1 to 6 of the reply as pairs; port 1 0x76D, port 2 0x76E; the id says digital 0x41, analog 0x73, config 0xF3)
+const PAD_IDENTITY_RECORD: u16 = 0x76D;
+/// rec pad_model: query_replies_3_4, query_replies_5_6, query_replies_7_8 (the 0x45 model query after the attempts to enter config mode; port 1 0x76F, port 2 0x770; bytes 3 to 8 are the model, mode and LED bytes when the pad is in config mode, 0xFF otherwise)
+const PAD_MODEL_RECORD: u16 = 0x76F;
+/// Attempts at Enter Config, a frame apart.
+const ENTER_ATTEMPTS: u32 = 4;
+
 const NONE: u32 = 0xFFFF;
 const ENTER_CONFIG: [u8; 9] = [0x01, 0x43, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00];
 const MAP_MOTORS: [u8; 9] = [0x01, 0x4D, 0x00, 0x00, 0x01, 0xFF, 0xFF, 0xFF, 0xFF];
@@ -107,19 +118,125 @@ fn stop_all(port2: bool) {
 
 /// The three config-mode packets and the first motor poll, on one port.
 /// Returns the identifier it saw, and whether a config-capable pad is there.
-fn objective(port2: bool, records: &mut Records, next: &mut usize) -> bool {
+fn pair(seen: &crate::sio_timing::Seen, a: usize) -> u32 {
+    ((seen.bytes[a].reply as u32) << 8) | seen.bytes[a + 1].reply as u32
+}
+
+/// A plain poll, its first six reply bytes recorded and put on the screen
+/// (`PAD n ID 73 5A BTN ...`), so a film of the run says which pad it was.
+fn identity(font: &FontAtlas, port2: bool, records: &mut Records, next: &mut usize) -> u8 {
+    let id_record = PAD_IDENTITY_RECORD + port2 as u16;
+    crate::bounds::record_start(id_record);
+    wait_frames(1);
+    let seen = send(port2, &poll(0, 0));
+    push_timing_record(
+        records,
+        next,
+        record(id_record, pair(&seen, 1), pair(&seen, 3), pair(&seen, 5)),
+    );
+    let mut line = ui::Line::new();
+    line.s("PORT ")
+        .u(port2 as u32 + 1)
+        .s(" REC ")
+        .hex(id_record as u32, 3)
+        .s(" ID ")
+        .hex(seen.bytes[1].reply as u32, 2)
+        .s(" ")
+        .hex(seen.bytes[2].reply as u32, 2)
+        .s(" ")
+        .hex(pair(&seen, 3), 4)
+        .s(" ")
+        .hex(pair(&seen, 5), 4);
+    ui::detail(font, "PAD", line.as_str());
+    wait_frames(90);
+    seen.bytes[1].reply
+}
+
+/// The three config-mode packets and the first motor poll, on one port, each
+/// packet a frame after the last. Enter Config is tried up to four times; its
+/// reply bytes and the model query's are recorded and shown. Returns whether a
+/// config-capable pad is there.
+fn objective(font: &FontAtlas, port2: bool, records: &mut Records, next: &mut usize) -> bool {
     let slot = 3 * port2 as u16;
     let base = RUMBLE_CONFIG_RECORD + slot;
+    let id_plain = identity(font, port2, records, next);
     crate::bounds::record_start(base);
+    wait_frames(1);
     let plain = send(port2, &poll(0, 0));
-    let id_plain = plain.bytes[1].reply;
     let present = plain.bytes[2].reply == 0x5A;
-    let enter = send(port2, &ENTER_CONFIG);
+    let enter_record = RUMBLE_ENTER_A_RECORD + 2 * port2 as u16;
+    crate::bounds::record_start(enter_record);
+    let mut attempts = 0u32;
+    let mut first_replies = 0u32;
+    let mut enter = send(port2, &ENTER_CONFIG);
+    for attempt in 0..ENTER_ATTEMPTS {
+        if attempt != 0 {
+            wait_frames(1);
+            enter = send(port2, &ENTER_CONFIG);
+        }
+        attempts += 1;
+        if attempt == 0 {
+            first_replies = pair(&enter, 1);
+        }
+        if enter.bytes[2].reply == 0x5A {
+            break;
+        }
+    }
+    push_timing_record(
+        records,
+        next,
+        record(
+            enter_record,
+            pair(&enter, 1),
+            pair(&enter, 3),
+            pair(&enter, 5),
+        ),
+    );
+    push_timing_record(
+        records,
+        next,
+        record(
+            RUMBLE_ENTER_B_RECORD + 2 * port2 as u16,
+            pair(&enter, 7),
+            attempts,
+            first_replies,
+        ),
+    );
+    wait_frames(1);
     let query = send(port2, &QUERY);
+    let model_record = PAD_MODEL_RECORD + port2 as u16;
+    push_timing_record(
+        records,
+        next,
+        record(
+            model_record,
+            pair(&query, 3),
+            pair(&query, 5),
+            pair(&query, 7),
+        ),
+    );
+    let mut line = ui::Line::new();
+    line.s("P")
+        .u(port2 as u32 + 1)
+        .s(" ENTER ")
+        .u(attempts)
+        .s("X ")
+        .hex(pair(&enter, 1), 4)
+        .s(" Q ")
+        .hex(pair(&query, 1), 4)
+        .s(" ")
+        .hex(pair(&query, 3), 4)
+        .s(" ")
+        .hex(pair(&query, 5), 4);
+    ui::detail(font, "CFG", line.as_str());
+    wait_frames(90);
     let in_config = query.bytes[1].reply == 0xF3;
+    wait_frames(1);
     let map = send(port2, &MAP_MOTORS);
+    wait_frames(1);
     let exit = send(port2, &EXIT_CONFIG);
     // The motors on, then the stop, as a game would.
+    wait_frames(1);
     let motors = send(port2, &poll(0x01, 0xFF));
     let after_stop = {
         stop_all(port2);
@@ -279,7 +396,7 @@ fn operator(font: &FontAtlas, port2: bool, records: &mut Records, next: &mut usi
 pub(crate) fn run(font: &FontAtlas, records: &mut Records, next: &mut usize) {
     let mut tested = None;
     for port2 in [false, true] {
-        if objective(port2, records, next) && tested.is_none() {
+        if objective(font, port2, records, next) && tested.is_none() {
             tested = Some(port2);
         }
         poll_cost(port2, records, next);

@@ -262,6 +262,23 @@ impl Line {
         self
     }
 
+    /// `digits` hexadecimal digits of `v`, most significant first.
+    pub(crate) fn hex(&mut self, v: u32, digits: u32) -> &mut Self {
+        for place in (0..digits.min(8)).rev() {
+            let nibble = ((v >> (4 * place)) & 0xF) as u8;
+            let ch = if nibble < 10 {
+                b'0' + nibble
+            } else {
+                b'A' + nibble - 10
+            };
+            if self.len < self.buf.len() {
+                self.buf[self.len] = ch;
+                self.len += 1;
+            }
+        }
+        self
+    }
+
     pub(crate) fn as_str(&self) -> &str {
         core::str::from_utf8(&self.buf[..self.len]).unwrap_or("")
     }
