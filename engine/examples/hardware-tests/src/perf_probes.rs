@@ -716,6 +716,97 @@ pub(crate) fn push_dma_channels(records: &mut Records, next: &mut usize) {
         push_timing_record(records, next, record);
     }
     push_dma_end(records, next, DmaGroup::GpuBlock);
+    push_rekick(records, next);
+}
+
+/// rec dma_rekick_first: bcr_after_first_high_half, bcr_after_first_low_half, flags (0x7A0; bit 0 the first kick, with BCR set, was still busy at the bound; the count after a transfer that finished is what a kick without a rewrite starts from)
+const REKICK_FIRST_RECORD: u16 = 0x7A0;
+/// rec dma_rekick_second: bcr_after_second_high_half, bcr_after_second_low_half, flags (0x7A1; the same SPU channel kicked again without writing BCR; bit 0 still busy at the bound, bit 1 the first kick was still busy, bit 2 CHCR START still set after the stop)
+const REKICK_SECOND_RECORD: u16 = 0x7A1;
+/// rec dma_rekick_progress: blocks_past_source, bound_iterations_used, madr_low_half_at_the_bound (0x7A2; blocks the second kick moved before the bound, from MADR; a count of 0 meaning 65,536 blocks shows as a transfer that does not end)
+const REKICK_PROGRESS_RECORD: u16 = 0x7A2;
+
+/// What a block-mode kick does when BCR was left at the count the last
+/// transfer ended on. One bounded case on the SPU channel (16 blocks of 16
+/// words, kicked, waited out, kicked again without writing BCR). The silicon
+/// hypothesis from v2.1 is that BCR reads 0 once the blocks are done and a
+/// count of 0 runs 65,536 blocks; the wait after the second kick is the same
+/// counted loop as the probes' and the channel is stopped at the bound. Every
+/// other probe in this file writes BCR before each kick.
+fn push_rekick(records: &mut Records, next: &mut usize) {
+    crate::bounds::record_start(REKICK_FIRST_RECORD);
+    let mut seen = [0u32; 8];
+    let _ = with_spu_dma(|base, head| {
+        let channel = dma::Channel::Spu;
+        let bound = crate::bounds::scale(DMA_FINAL_WAIT_ITERATIONS);
+        // SAFETY: silicon probe: the transfers read only memory this probe
+        // owns plus whatever follows it, write SPU RAM from the staging
+        // address, and are stopped at the bound.
+        unsafe {
+            dma::raw::set_address(channel, head);
+            dma::raw::set_control(channel, SPU_KICK);
+            let mut spins = 0u32;
+            while dma::is_busy(channel) && spins < bound {
+                spins += 1;
+            }
+            let first_busy = dma::is_busy(channel);
+            if first_busy {
+                dma::abort(channel);
+            }
+            let after_first = psx_io::read_u32(base + 4);
+            // Again, BCR as the first transfer left it.
+            dma::raw::set_address(channel, head);
+            dma::raw::set_control(channel, SPU_KICK);
+            let mut again = 0u32;
+            while dma::is_busy(channel) && again < bound {
+                again += 1;
+            }
+            let busy = dma::is_busy(channel);
+            let chcr = dma::control(channel);
+            let madr = dma::address(channel);
+            let after_second = psx_io::read_u32(base + 4);
+            if busy {
+                dma::abort(channel);
+            }
+            let stopped = dma::is_busy(channel);
+            seen = [
+                after_first,
+                after_second,
+                (busy as u32) | ((first_busy as u32) << 1) | ((stopped as u32) << 2),
+                (madr & 0x00FF_FFFF).wrapping_sub(head & 0x00FF_FFFF) / 64,
+                again,
+                madr & 0xFFFF,
+                chcr >> 16,
+                0,
+            ];
+        }
+        0
+    });
+    push_timing_record(
+        records,
+        next,
+        crate::console_tests::record(
+            REKICK_FIRST_RECORD,
+            seen[0] >> 16,
+            seen[0] & 0xFFFF,
+            (seen[2] >> 1) & 1,
+        ),
+    );
+    push_timing_record(
+        records,
+        next,
+        crate::console_tests::record(
+            REKICK_SECOND_RECORD,
+            seen[1] >> 16,
+            seen[1] & 0xFFFF,
+            seen[2],
+        ),
+    );
+    push_timing_record(
+        records,
+        next,
+        crate::console_tests::record(REKICK_PROGRESS_RECORD, seen[3], seen[4], seen[5]),
+    );
 }
 
 const SPU_KICK: u32 =
@@ -875,7 +966,8 @@ fn with_spu_dma(body: impl FnOnce(u32, u32) -> u16) -> u16 {
         record[1] = record[1].max(waits[1]);
         record[2] += (waits[1] >= SPU_MODE_WAIT_ITERATIONS) as u32;
         dma::enable_channel(dma::Channel::Spu);
-        dma::raw::set_size(dma::Channel::Spu, dma::size_blocks(16, 16));
+        DMA_BCR = dma::size_blocks(16, 16);
+        dma::raw::set_size(dma::Channel::Spu, DMA_BCR);
         let source = (&raw mut DMA_SOURCE) as u32;
         let elapsed = body(dma::Channel::Spu.register_base(), source);
         let status = psx_io::read_u16(SPUSTAT) as u32;
@@ -894,10 +986,8 @@ fn with_otc_dma(body: impl FnOnce(u32, u32) -> u16) -> u16 {
     unsafe {
         let table = (&raw mut DMA_OT) as *mut u32;
         dma::enable_channel(dma::Channel::OrderingTableClear);
-        dma::raw::set_size(
-            dma::Channel::OrderingTableClear,
-            dma::size_words(OTC_WORDS as u16),
-        );
+        DMA_BCR = dma::size_words(OTC_WORDS as u16);
+        dma::raw::set_size(dma::Channel::OrderingTableClear, DMA_BCR);
         let end = table.add(OTC_WORDS - 1) as u32;
         let elapsed = body(dma::Channel::OrderingTableClear.register_base(), end);
         dma_settle(DmaGroup::Otc, dma::Channel::OrderingTableClear, 0xFFFF);
@@ -912,7 +1002,8 @@ fn with_gpu_block_dma(body: impl FnOnce(u32, u32) -> u16) -> u16 {
     // SAFETY: a DMA of GP0 NOPs from memory this probe owns; the body's waits
     // are counted and a stuck channel is stopped below.
     let elapsed = unsafe {
-        dma::raw::set_size(dma::Channel::Gpu, dma::size_blocks(16, 16));
+        DMA_BCR = dma::size_blocks(16, 16);
+        dma::raw::set_size(dma::Channel::Gpu, DMA_BCR);
         body(
             dma::Channel::Gpu.register_base(),
             (&raw mut DMA_SOURCE) as u32,
@@ -1668,7 +1759,8 @@ fn with_gpu_list_dma(body: impl FnOnce() -> u16) -> u16 {
     // owns, which stays live and untouched until the probe waits the
     // channel idle or aborts it.
     unsafe {
-        dma::raw::set_size(dma::Channel::Gpu, dma::size_words(0));
+        DMA_BCR = dma::size_words(0);
+        dma::raw::set_size(dma::Channel::Gpu, DMA_BCR);
     }
     let elapsed = body();
     // A list that never ended leaves the direction off, not as it was.
@@ -1690,6 +1782,7 @@ fn timed_empty_list(nodes: usize) -> u16 {
         // channel idle or aborts it.
         unsafe {
             dma::raw::set_address(dma::Channel::Gpu, head);
+            dma::raw::set_size(dma::Channel::Gpu, dma::size_words(0));
         }
         psx_io::timers::set_mode(psx_io::timers::Timer::Timer2, 0);
         psx_io::timers::set_counter(psx_io::timers::Timer::Timer2, 0);
@@ -1775,6 +1868,14 @@ fn push_dma(records: &mut Records, next: &mut usize) {
 /// ended. OR-ed over a record's samples; cleared by the caller.
 static mut DMA_WAIT_FLAGS: u32 = 0;
 
+/// The BCR value the overlap probes write before every kick. Silicon counts a
+/// block-mode BCR down as the blocks go, so the value set once before a probe
+/// reads 0 after the first transfer, and a kick with a count of 0 runs 65,536
+/// blocks (v2.1: the SPU and GPU block channels never went idle). Written
+/// inside the probe, ahead of the timed span, so every kick starts the transfer
+/// it describes.
+static mut DMA_BCR: u32 = 0;
+
 /// Loop iterations a wait on a DMA channel's busy bit gets before the block
 /// kicks anyway (before a pass: an idle channel reads idle at once) or gives
 /// up (after the loop: the longest legitimate transfer here, the SPU's 256
@@ -1800,6 +1901,7 @@ macro_rules! dma_overlap_probe {
             let flags: u32;
             let pre = crate::bounds::scale(DMA_PRE_WAIT_ITERATIONS);
             let post = crate::bounds::scale(DMA_FINAL_WAIT_ITERATIONS);
+            let bcr = unsafe { DMA_BCR };
             unsafe {
                 core::arch::asm!(
                     ".set noreorder",
@@ -1824,6 +1926,7 @@ macro_rules! dma_overlap_probe {
                     "ori $15, $15, 1",
                     "5:",
                     "sw $9, 0($8)",
+                    "sw $2, 4($8)",
                     "sw $zero, 4($11)",
                     "sw $zero, 0($11)",
                     "sw $14, 8($8)",
@@ -1853,6 +1956,7 @@ macro_rules! dma_overlap_probe {
                     in("$24") data,
                     in("$4") pre,
                     in("$5") post,
+                    in("$2") bcr,
                     lateout("$3") _,
                     lateout("$10") _,
                     lateout("$11") _,

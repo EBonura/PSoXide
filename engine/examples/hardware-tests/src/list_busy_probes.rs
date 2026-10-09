@@ -272,6 +272,12 @@ fn kick_and_stamp(armed: &Armed) -> Stamps {
         bit28: NOT_SEEN,
         bit26: NOT_SEEN,
     };
+    // BCR is rewritten before every kick, as everywhere in this suite: silicon
+    // counts it down as a transfer runs.
+    // SAFETY: a register write to an idle channel.
+    unsafe {
+        dma::raw::set_size(dma::Channel::Gpu, dma::size_words(0));
+    }
     let guard = IrqGuard::mask();
     let mut clock = Clock::start();
     let mut guard_count = 0u32;
@@ -452,6 +458,10 @@ fn throughput(kind: LoopKind) -> Throughput {
     drop(guard);
 
     let armed = arm(Kind::Expensive);
+    // SAFETY: a register write to an idle channel.
+    unsafe {
+        dma::raw::set_size(dma::Channel::Gpu, dma::size_words(0));
+    }
     let guard = IrqGuard::mask();
     timers::set_mode(timers::Timer::Timer2, 0);
     // SAFETY: silicon probe: the transfer touches only memory this probe
@@ -617,6 +627,7 @@ impl GpuLoad {
         // SAFETY: silicon probe: the transfer touches only memory this probe
         // owns, which stays live and untouched until `stop` aborts it.
         unsafe {
+            dma::raw::set_size(dma::Channel::Gpu, dma::size_words(0));
             dma::raw::set_control(dma::Channel::Gpu, KICK);
         }
         Self { armed, head }
@@ -628,6 +639,7 @@ impl GpuLoad {
             // SAFETY: as in `start`.
             unsafe {
                 dma::raw::set_address(dma::Channel::Gpu, self.head);
+                dma::raw::set_size(dma::Channel::Gpu, dma::size_words(0));
                 dma::raw::set_control(dma::Channel::Gpu, KICK);
             }
         }

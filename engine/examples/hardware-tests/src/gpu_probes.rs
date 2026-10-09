@@ -458,6 +458,10 @@ fn submit_and_time(head: u32) -> u16 {
         let _ = gpu_io::status();
     }
 
+    // SAFETY: a register write to an idle channel; BCR before every kick.
+    unsafe {
+        dma::raw::set_size(dma::Channel::Gpu, dma::size_words(0));
+    }
     timers::set_mode(timers::Timer::Timer2, 0);
     timers::set_counter(timers::Timer::Timer2, 0);
     // SAFETY: silicon probe: the transfer touches only memory this probe
