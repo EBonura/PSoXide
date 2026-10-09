@@ -29,10 +29,11 @@ fails part way instead of decoding what arrived. A rejected poll resets the
 deselected UART so a late byte cannot leak into the next poll, and is retried
 a few times before it is reported as `PadMode::Unknown` with every button
 released. An empty socket is the exception: an address byte that is not
-acknowledged within the kernel's own 100 microseconds and answers `0xFF` is
+acknowledged within 1,024 spins (about 7,000 cycles on silicon, about four
+times the slowest answer measured there) and answers `0xFF` is
 reported as `PadMode::Disconnected` at once, so a game that polls an empty port 2
-every frame pays the setup delay and that one short wait (about 13,000 cycles)
-rather than four long ones (about 119,000). A `PadReader` that last saw a pad on
+every frame pays the setup delay and that one short wait rather than four long
+ones (about 119,000 cycles). A `PadReader` that last saw a pad on
 the socket asks four times before it believes the pad is gone.
 
 ## At boot
