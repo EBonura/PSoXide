@@ -610,7 +610,7 @@ pub(crate) fn run(font: &FontAtlas, records: &mut Records, next: &mut usize) {
     let first = choose(
         font,
         "WHICH PAD",
-        "X 1200 O 110 SQ OTHER TRI NONE",
+        "X 1200 O 110 SQ OTH TR NONE",
         MODEL_ANSWER_FRAMES,
     );
     push_timing_record(records, next, choice_record(PAD_CHOICE_RECORD, &first));
@@ -619,8 +619,8 @@ pub(crate) fn run(font: &FontAtlas, records: &mut Records, next: &mut usize) {
     crate::bounds::record_start(PAD_CHOICE_RECORD + 1);
     let second = choose(
         font,
-        "SWAP PAD",
-        "THEN X 1200 O 110 SQ OTHER TRI NONE",
+        "SWAP",
+        "THEN X 1200 O 110 SQ OTH TR NONE",
         SWAP_ANSWER_FRAMES,
     );
     push_timing_record(records, next, choice_record(PAD_CHOICE_RECORD + 1, &second));

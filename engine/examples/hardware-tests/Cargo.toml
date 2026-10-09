@@ -10,6 +10,13 @@ license = "GPL-2.0-or-later"
 
 [workspace]
 
+[features]
+# Verification builds only, never shipped: the first makes the card-write gate
+# see a checksum mismatch (nothing may be written); the second changes one byte
+# of the write (the changed byte shows where it landed).
+gate-test-bad-checksum = []
+gate-test-marker = []
+
 [[bin]]
 name = "hardware-tests"
 path = "src/main.rs"

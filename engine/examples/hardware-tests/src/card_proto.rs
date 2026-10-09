@@ -12,10 +12,11 @@
 //! are `FF`, the flag byte, `5A 5D`, a dummy, the MSB, `5C 5D`, the MSB and LSB
 //! again, 128 data bytes, the checksum and `47`. A write is 138 bytes: `81 57 00 00 MSB LSB`, 128 data
 //! bytes, the checksum and three zeros (`5C 5D`, then the status). For each
-//! slot with a card the read is done four times (frame 0, which is only
-//! read), every byte's `/ACK` rise, width and arrival kept; the writes happen
-//! only with L1 and R1 held at the start, and write back the same 128 bytes
-//! the read returned, to the same frame. A slot with no card answers `FF` and
+//! slot with a card the read is done four times (of frame 40, see
+//! `WRITE_FRAME`), every byte's `/ACK` rise, width and arrival kept; the writes happen
+//! only with L1 and R1 held at the start and only when every gate on the
+//! reads passes (see `slot`), and write back the same 128 bytes the read
+//! returned, to the same frame. A slot with no card answers `FF` and
 //! never pulses `/ACK`; the empty-slot record says so.
 //!
 //! Times are system-clock cycles from the byte's write; a time that did not
@@ -50,7 +51,7 @@ pub(crate) const CARD_PROTO_WRITE_HEAD_RECORD: u16 = 0x891;
 pub(crate) const CARD_PROTO_WRITE_DATA_RECORD: u16 = 0x897;
 /// rec card_proto_write_tail: ack_rise_cycles, ack_width_cycles, byte_done_cycles (the write's checksum byte and the three bytes after it: 0x899 to 0x89C; port 2 from 0x8B9)
 pub(crate) const CARD_PROTO_WRITE_TAIL_RECORD: u16 = 0x899;
-/// rec card_proto_write_total: span_low_half, span_high_half, flags (a sector write: span as for the read; flags bit 0 the status byte was 47 (good), bit 1 skipped because L1 and R1 were not held, bit 2 skipped because the read was not good, bits 8 to 15 the status byte; port 1 0x89D, port 2 0x8BD)
+/// rec card_proto_write_total: span_low_half, span_high_half, flags (a sector write: span as for the read; flags bit 0 the status byte was 47 (good), bit 1 not written because L1 and R1 were not held, bit 2 not written because the slot is empty or a read was not good, bit 3 because a read's checksum did not match, bit 4 because a read had the card's error flag, bit 5 because the four reads returned different data (a write happens only when none of bits 1 to 5 is set), bits 8 to 15 the status byte; port 1 0x89D, port 2 0x8BD)
 pub(crate) const CARD_PROTO_WRITE_TOTAL_RECORD: u16 = 0x89D;
 /// rec card_proto_write_replies: replies_134_and_135, replies_136_and_137, status_after_low_half (the last four replies of a write and SIO0 STAT low half after it; port 1 0x89E, port 2 0x8BE)
 pub(crate) const CARD_PROTO_WRITE_REPLIES_RECORD: u16 = 0x89E;
@@ -62,7 +63,15 @@ const READ_ROUNDS: usize = 4;
 const WRITE_ROUNDS: usize = 2;
 const HEAD_READ: usize = 10;
 const HEAD_WRITE: usize = 6;
-const FRAME: u16 = 0;
+/// The sector read four times and written back: frame 40, one of the unused
+/// frames of block 0. Block 0 is the card's own: frame 0 the header ("MC"),
+/// frames 1 to 15 the directory, 16 to 35 the broken-sector list and its
+/// replacements, 36 to 62 unused, 63 the BIOS's write-test frame (psx-spx,
+/// from memory, not re-checked here; the SDK's formatter, psx-mc `fs.rs`,
+/// likewise clears 36 to 63 as system frames with no content). A torn write
+/// here cannot make the BIOS see an unformatted card, which one to the header
+/// or the directory could. Frame 0 is never written.
+const WRITE_FRAME: u16 = 40;
 
 static mut BYTES: [Byte; READ_LEN] = [Byte::none(); READ_LEN];
 static mut READS: [[Byte; READ_LEN]; READ_ROUNDS] = [[Byte::none(); READ_LEN]; READ_ROUNDS];
@@ -72,8 +81,8 @@ fn read_command() -> [u8; READ_LEN] {
     let mut tx = [0u8; READ_LEN];
     tx[0] = 0x81;
     tx[1] = 0x52;
-    tx[4] = (FRAME >> 8) as u8;
-    tx[5] = FRAME as u8;
+    tx[4] = (WRITE_FRAME >> 8) as u8;
+    tx[5] = WRITE_FRAME as u8;
     tx
 }
 
@@ -267,27 +276,56 @@ fn slot(port2: bool, write: bool, records: &mut Records, next: &mut usize) {
     push_timing_record(records, next, b_row);
     let _ = status;
 
-    // The write: only when asked, only after a good read, and only the bytes
-    // the read returned.
-    let skipped_flag = (!write) as u32 | (((!ok) as u32) << 1);
-    if !write || !ok {
+    // The write happens only when it was asked for AND every gate passes:
+    // the slot holds a card, all four reads were good (flag byte, 5A, 5D and
+    // the terminator 47), every read's checksum matches the one computed from
+    // its bytes, none reported the card's error flag (bit 2 of the flag byte),
+    // and the four reads returned identical data. Anything else writes
+    // nothing, and the reason is recorded. What is written is the bytes just
+    // read, to the frame just read.
+    let all_good = !empty && good_reads as usize == READ_ROUNDS;
+    let all_sums = !empty
+        && reads.iter().all(|round| checksum_ok(round))
+        && !cfg!(feature = "gate-test-bad-checksum");
+    let error_flag = !empty && reads.iter().any(|round| round[1].reply & 0x04 != 0);
+    let identical = !empty
+        && reads[1..].iter().all(|round| {
+            round[10..138]
+                .iter()
+                .zip(&reads[0][10..138])
+                .all(|(a, b)| a.reply == b.reply)
+        });
+    let gates = all_good && all_sums && !error_flag && identical;
+    if !write || !gates {
+        let reasons = ((!write) as u32) << 1
+            | ((!all_good) as u32) << 2
+            | ((!all_sums) as u32) << 3
+            | (error_flag as u32) << 4
+            | ((!identical) as u32) << 5;
         for offset in 0x11u16..0x1D {
             push_timing_record(records, next, record(base + offset, NONE, NONE, NONE));
         }
-        push_timing_record(records, next, record(base + 0x1D, 0, 0, skipped_flag << 1));
+        push_timing_record(records, next, record(base + 0x1D, 0, 0, reasons));
         push_timing_record(records, next, record(base + 0x1E, NONE, NONE, NONE));
         return;
     }
-    let source = &reads[first_good.unwrap_or(0)];
+    let source = &reads[0];
     let mut wtx = [0u8; WRITE_LEN];
     wtx[0] = 0x81;
     wtx[1] = 0x57;
-    wtx[4] = (FRAME >> 8) as u8;
-    wtx[5] = FRAME as u8;
-    let mut check = wtx[4] ^ wtx[5];
+    wtx[4] = (WRITE_FRAME >> 8) as u8;
+    wtx[5] = WRITE_FRAME as u8;
     for i in 0..128 {
         wtx[6 + i] = source[10 + i].reply;
-        check ^= wtx[6 + i];
+    }
+    // Verification builds only: change one byte, so a run on a private card
+    // shows that the write lands on WRITE_FRAME and nowhere else.
+    if cfg!(feature = "gate-test-marker") {
+        wtx[6] ^= 0xA5;
+    }
+    let mut check = wtx[4] ^ wtx[5];
+    for byte in &wtx[6..134] {
+        check ^= byte;
     }
     wtx[134] = check;
     let mut span_w = 0u32;

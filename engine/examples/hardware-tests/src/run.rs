@@ -137,11 +137,15 @@ pub(crate) struct Run {
     pub(crate) pad: PadState,
     /// Skip the steps that can hang a console (hold L2 when starting).
     pub(crate) skip_risky: bool,
-    /// Write memory-card frames back (the same bytes just read) in the pad
-    /// engine's lease step, and show the checkpoint pages after each area: only
+    /// Write memory-card frames back (the same bytes just read): the pad
+    /// engine's lease step rewrites about sixty frames of block 0 with the
+    /// bytes it read, and the card protocol step writes one unused frame. Only
     /// when L1 and R1 were held at the start, as the card diagnostic asks for
     /// its writes.
     pub(crate) write_cards: bool,
+    /// Show a QR checkpoint page set after each area: only when START and R2
+    /// were held at the start, a chord apart from the card writes.
+    pub(crate) checkpoints: bool,
     /// An id for the checkpoint files of this run.
     pub(crate) checkpoint_id: u16,
     handoffs: [Handoff; AREA_COUNT],
@@ -171,6 +175,7 @@ impl Run {
             pad: PadState::NONE,
             skip_risky: false,
             write_cards: false,
+            checkpoints: false,
             checkpoint_id: 0,
             handoffs: [Handoff {
                 flags: 0,
@@ -828,9 +833,10 @@ const STEPS: &[Step] = &[
     step(Area::Gpu, "RASTER HASHES", precision_identity_step),
     step(Area::Gpu, "DISPLAY WIDTHS", step_widths),
     step(Area::Gpu, "480I INTERLACE", step_interlace),
-    step(Area::Gpu, "GPU DMA EDGE CASES", step_dma_edge),
     step(Area::Gpu, "WORKLOAD CALIBRATION", step_calibration),
     step(Area::Gpu, "TEXTURE UV WINDOWS", step_uv_windows),
+    // After the two above: a wedged list or FIFO here cannot cost them.
+    step(Area::Gpu, "GPU DMA EDGE CASES", step_dma_edge),
     // 5
     step(Area::Spu, "SPU INIT STATE", step_spu_init),
     step(Area::Spu, "SPU PRECISION", precision_spu_step),
@@ -1009,7 +1015,7 @@ pub(crate) fn execute(
         if current != Some(step.area) {
             if let Some(previous) = current {
                 handoff(run, previous);
-                if run.write_cards {
+                if run.checkpoints {
                     show_checkpoint(run, capture);
                 }
             }
@@ -1166,7 +1172,7 @@ const CHECKPOINT_PAGE_FRAMES: u32 = 90;
 
 /// The capture so far, encoded quietly and shown as its QR pages (not printed
 /// to the TTY), so that a run that stops partway leaves its first areas on film.
-/// Only with L1 and R1 held as the run started: a full set after every area
+/// Only with START and R2 held as the run started: a full set after every area
 /// is a lot of pages to film.
 fn show_checkpoint(run: &mut Run, capture: &mut crate::photo::PhotoCapture) {
     run.timing.summary.runs = (run.checkpoint_id >> 8) as u8;
