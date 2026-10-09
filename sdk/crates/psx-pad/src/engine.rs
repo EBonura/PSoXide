@@ -31,7 +31,10 @@
 //! exception wrapper, the timer, the registers) is in `console.rs`.
 //! `sdk/docs/PAD-IRQ-ENGINE.md` is the design.
 
-use crate::{decode_buttons, mode_from_id_low, AnalogRequirement, AnalogSticks, PadMode, PadState};
+use crate::{
+    decode_buttons, mode_from_id_low, AnalogRequirement, AnalogSticks, PadMode, PadState, Rumble,
+    MOTOR_MAP_PACKET,
+};
 use core::cell::UnsafeCell;
 use core::ptr::{read_volatile, write_volatile};
 use psx_hw::sio::sio0::stat;
@@ -333,6 +336,9 @@ struct Txn {
     /// says otherwise.
     len: u8,
     rx: [u8; 9],
+    /// The motor bytes of a poll, for a pad that answers as an analog
+    /// DualShock: zeros unless the port's motors are mapped.
+    motors: (u8, u8),
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -349,27 +355,63 @@ enum Phase {
 enum Outcome {
     Pad(PadState),
     Absent,
-    Configured,
+    /// A configuration packet went through; `mapped` when it was the motor
+    /// mapping and the pad answered it from configuration mode.
+    Configured {
+        mapped: bool,
+    },
     Failed(Fault),
 }
 
-/// The three configuration packets that put a DualShock in analog mode and
-/// lock it there, one per VBlank, the spacing Sony's libpad uses.
-const ANALOG_PACKETS: [[u8; 8]; 3] = [
-    [0x43, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00],
-    [0x44, 0x00, 0x01, 0x03, 0x00, 0x00, 0x00, 0x00],
-    [0x43, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
-];
+const ENTER_CONFIG: [u8; 8] = [0x43, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00];
+const EXIT_CONFIG: [u8; 8] = [0x43, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+const ANALOG_LOCK: [u8; 8] = [0x44, 0x00, 0x01, 0x03, 0x00, 0x00, 0x00, 0x00];
+
+/// The configuration packets of a request, one per VBlank, the spacing Sony's
+/// libpad uses.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum JobKind {
+    /// Analog mode, locked.
+    Analog,
+    /// Analog mode, locked, and the motors mapped, in one visit to
+    /// configuration mode.
+    AnalogRumble,
+    /// The motors mapped; the pad's mode is left as it is.
+    Rumble,
+}
+
+impl JobKind {
+    const fn packets(self) -> &'static [[u8; 8]] {
+        match self {
+            JobKind::Analog => &[ENTER_CONFIG, ANALOG_LOCK, EXIT_CONFIG],
+            JobKind::AnalogRumble => &[ENTER_CONFIG, ANALOG_LOCK, MOTOR_MAP_PACKET, EXIT_CONFIG],
+            JobKind::Rumble => &[ENTER_CONFIG, MOTOR_MAP_PACKET, EXIT_CONFIG],
+        }
+    }
+
+    /// Packets in the sequence; the exit is the last, and the step after it
+    /// waits for a poll to check what the pad settled on.
+    const fn len(self) -> u8 {
+        self.packets().len() as u8
+    }
+
+    const fn maps_motors(self) -> bool {
+        !matches!(self, JobKind::Analog)
+    }
+}
+
 /// Exit-config repeats for a pad still answering ID 0xF3 afterwards.
 const EXIT_RETRIES: u8 = 3;
 /// Failed configuration attempts before the request gives up.
 const ANALOG_FAULT_LIMIT: u8 = 8;
 
-/// A request to put a port's pad in locked analog mode, in progress.
+/// A configuration request on a port, in progress.
 #[derive(Copy, Clone, Debug)]
 struct AnalogJob {
-    /// 0 none; 1..=3 the packet to send; 4 waiting for a poll to verify.
+    /// 0 none; 1..=`kind.len()` the packet to send; the step after waits for
+    /// a poll to verify.
     step: u8,
+    kind: JobKind,
     retries: u8,
     faults: u8,
     outcome: Option<AnalogRequirement>,
@@ -378,16 +420,40 @@ struct AnalogJob {
 impl AnalogJob {
     const NONE: AnalogJob = AnalogJob {
         step: 0,
+        kind: JobKind::Analog,
         retries: 0,
         faults: 0,
         outcome: None,
     };
+
+    const fn start(kind: JobKind) -> AnalogJob {
+        AnalogJob {
+            step: 1,
+            kind,
+            ..AnalogJob::NONE
+        }
+    }
+
+    /// The step that waits for a verifying poll.
+    const fn verify_step(&self) -> u8 {
+        self.kind.len() + 1
+    }
 }
 
 #[derive(Copy, Clone, Debug)]
 struct PortCtl {
     reading: PortReading,
     job: AnalogJob,
+    /// What the motors are asked for on every poll.
+    rumble: Rumble,
+    /// The game wants the motors on this port; the engine maps them whenever
+    /// a pad appears and has not been mapped.
+    rumble_wanted: bool,
+    /// The pad took the motor mapping since it last appeared.
+    mapped: bool,
+    /// The pad did not take it (a digital pad, a pad that refuses
+    /// configuration mode); not asked again until the pad is replugged.
+    refused: bool,
 }
 
 /// Index of `port` in the engine's per-port arrays.
@@ -399,10 +465,13 @@ const fn index(port: Port) -> usize {
 }
 
 /// The byte the host sends as exchange `idx` of a packet.
-const fn tx_byte(kind: &Kind, idx: u8) -> u8 {
+const fn tx_byte(kind: &Kind, idx: u8, id: u8, motors: (u8, u8)) -> u8 {
     match (kind, idx) {
         (_, 0) => 0x01,
         (Kind::Poll, 1) => 0x42,
+        // The two motor bytes, to a pad that answered as an analog DualShock.
+        (Kind::Poll, 3) if id == 0x73 => motors.0,
+        (Kind::Poll, 4) if id == 0x73 => motors.1,
         (Kind::Poll, _) => 0x00,
         (Kind::Config(packet), _) => packet[idx as usize - 1],
     }
@@ -440,12 +509,17 @@ impl<'p, H: Hw> Engine<'p, H> {
                 idx: 0,
                 len: 9,
                 rx: [0; 9],
+                motors: (0, 0),
             },
             owner: Owner::Engine,
             vblanks: 0,
             ports: [PortCtl {
                 reading: PortReading::UNSEEN,
                 job: AnalogJob::NONE,
+                rumble: Rumble::OFF,
+                rumble_wanted: false,
+                mapped: false,
+                refused: false,
             }; 2],
             stats: Stats {
                 events: 0,
@@ -584,9 +658,17 @@ impl<'p, H: Hw> Engine<'p, H> {
             return;
         }
         let port = if i == 0 { Port::One } else { Port::Two };
-        let kind = match self.ports[i].job.step {
-            step @ 1..=3 => Kind::Config(ANALOG_PACKETS[step as usize - 1]),
-            _ => Kind::Poll,
+        let ctl = &self.ports[i];
+        let job = &ctl.job;
+        let kind = if job.step >= 1 && job.step <= job.kind.len() {
+            Kind::Config(job.kind.packets()[job.step as usize - 1])
+        } else {
+            Kind::Poll
+        };
+        let motors = if ctl.mapped {
+            ctl.rumble.bytes()
+        } else {
+            (0, 0)
         };
         self.txn = Txn {
             port,
@@ -595,6 +677,7 @@ impl<'p, H: Hw> Engine<'p, H> {
             idx: 0,
             len: 9,
             rx: [0; 9],
+            motors,
         };
         self.hw.select(port, self.txn.pacing == BytePacing::Ack);
         self.hw.arm_deadline(self.config.setup_cycles);
@@ -618,7 +701,12 @@ impl<'p, H: Hw> Engine<'p, H> {
         }
         let last = idx + 1 == self.txn.len;
         self.txn.idx = idx;
-        self.hw.transmit(tx_byte(&self.txn.kind, idx));
+        self.hw.transmit(tx_byte(
+            &self.txn.kind,
+            idx,
+            self.txn.rx[1],
+            self.txn.motors,
+        ));
         let budget = if last {
             self.config.last_byte_cycles
         } else {
@@ -669,7 +757,11 @@ impl<'p, H: Hw> Engine<'p, H> {
         if idx + 1 >= self.txn.len {
             let outcome = match self.txn.kind {
                 Kind::Poll => Outcome::Pad(self.decode()),
-                Kind::Config(_) => Outcome::Configured,
+                Kind::Config(packet) => Outcome::Configured {
+                    mapped: packet[0] == MOTOR_MAP_PACKET[0]
+                        && self.txn.rx[1] == 0xF3
+                        && self.txn.rx[2] == 0x5A,
+                },
             };
             self.finish(outcome);
         } else {
@@ -720,7 +812,7 @@ impl<'p, H: Hw> Engine<'p, H> {
         }
         self.phase = Phase::Idle;
         self.record(i, outcome);
-        if !matches!(outcome, Outcome::Configured) {
+        if !matches!(outcome, Outcome::Configured { .. }) {
             self.published
                 .publish(&[self.ports[0].reading, self.ports[1].reading]);
         }
@@ -732,7 +824,7 @@ impl<'p, H: Hw> Engine<'p, H> {
         self.end(Outcome::Failed(Fault::RxMissing));
     }
 
-    /// Fold an outcome into the port's reading and its analog request.
+    /// Fold an outcome into the port's reading and its configuration request.
     fn record(&mut self, i: usize, outcome: Outcome) {
         let ctl = &mut self.ports[i];
         let reading = &mut ctl.reading;
@@ -742,28 +834,49 @@ impl<'p, H: Hw> Engine<'p, H> {
                 reading.pad = pad;
                 reading.health = Health::Present;
                 reading.updates = reading.updates.wrapping_add(1);
-                if job.step == 4 {
+                if job.step == job.verify_step() {
                     if pad.mode == PadMode::Config && job.retries < EXIT_RETRIES {
                         // The exit did not take: send it again.
                         job.retries += 1;
-                        job.step = 3;
+                        job.step = job.kind.len();
                     } else {
                         job.outcome = Some(AnalogRequirement::from_mode(pad.mode));
                         job.step = 0;
+                        // A mapping that was asked for and not taken stays
+                        // refused until the pad is plugged in again.
+                        if job.kind.maps_motors() && !ctl.mapped {
+                            ctl.refused = true;
+                        }
                     }
+                }
+                // A pad that appeared (or came back) with the motors wanted
+                // and not mapped: map them. Only an analog DualShock has them.
+                if job.step == 0
+                    && ctl.rumble_wanted
+                    && !ctl.mapped
+                    && !ctl.refused
+                    && pad.mode == PadMode::Analog
+                {
+                    *job = AnalogJob::start(JobKind::Rumble);
                 }
             }
             Outcome::Absent => {
                 reading.pad = PadState::NONE;
                 reading.health = Health::Absent;
                 reading.updates = reading.updates.wrapping_add(1);
+                // A pad that is plugged in again has lost its mapping.
+                ctl.mapped = false;
+                ctl.refused = false;
                 if job.step != 0 {
                     job.outcome = Some(AnalogRequirement::Absent);
                     job.step = 0;
                 }
             }
-            Outcome::Configured => {
-                if (1..=3).contains(&job.step) {
+            Outcome::Configured { mapped } => {
+                if mapped {
+                    ctl.mapped = true;
+                }
+                if job.step >= 1 && job.step <= job.kind.len() {
                     job.step += 1;
                 }
             }
@@ -794,13 +907,75 @@ impl<'p, H: Hw> Engine<'p, H> {
     /// running changes nothing. [`analog_outcome`]
     /// (Self::analog_outcome) answers once that is done.
     pub fn request_analog(&mut self, port: Port) {
-        let job = &mut self.ports[index(port)].job;
-        if job.step == 0 {
-            *job = AnalogJob {
-                step: 1,
-                ..AnalogJob::NONE
+        let ctl = &mut self.ports[index(port)];
+        if ctl.job.step == 0 {
+            // With the motors wanted and not mapped, the same visit to
+            // configuration mode maps them.
+            let kind = if ctl.rumble_wanted && !ctl.mapped {
+                JobKind::AnalogRumble
+            } else {
+                JobKind::Analog
             };
+            ctl.job = AnalogJob::start(kind);
         }
+    }
+
+    /// Put the motors of the pad on `port` under the poll: map them, whenever
+    /// a DualShock in analog mode is there and again each time one is plugged
+    /// in, and send them [`set_rumble`](Self::set_rumble)'s request on every
+    /// poll from then on. [`rumble_mapped`](Self::rumble_mapped) says whether
+    /// the pad took it; a digital pad and a pad that refuses configuration
+    /// mode never do, and are asked once per plug-in.
+    pub fn enable_rumble(&mut self, port: Port) {
+        let ctl = &mut self.ports[index(port)];
+        ctl.rumble_wanted = true;
+        ctl.refused = false;
+        if ctl.job.step == 0 && !ctl.mapped {
+            ctl.job = AnalogJob::start(JobKind::Rumble);
+        }
+    }
+
+    /// Stop wanting the motors on `port`: they are asked to stop on the next
+    /// poll, and the pad is not mapped again after a replug.
+    pub fn disable_rumble(&mut self, port: Port) {
+        let ctl = &mut self.ports[index(port)];
+        ctl.rumble_wanted = false;
+        ctl.rumble = Rumble::OFF;
+    }
+
+    /// What the motors on `port` are asked to do on every poll. Nothing
+    /// reaches a pad until it is mapped.
+    pub fn set_rumble(&mut self, port: Port, rumble: Rumble) {
+        self.ports[index(port)].rumble = rumble;
+    }
+
+    /// What the motors on `port` are asked for.
+    pub fn rumble(&self, port: Port) -> Rumble {
+        self.ports[index(port)].rumble
+    }
+
+    /// Whether the pad on `port` took the motor mapping.
+    pub fn rumble_mapped(&self, port: Port) -> bool {
+        self.ports[index(port)].mapped
+    }
+
+    /// Whether the pad on `port` was asked for its motors and did not take
+    /// the mapping.
+    pub fn rumble_refused(&self, port: Port) -> bool {
+        self.ports[index(port)].refused
+    }
+
+    /// Ask every motor on both ports to stop: for a pause, a menu or an exit.
+    /// The pads hear it on their next poll.
+    pub fn stop_motors(&mut self) {
+        for ctl in &mut self.ports {
+            ctl.rumble = Rumble::OFF;
+        }
+    }
+
+    /// Whether any motor is being asked to run.
+    pub fn motors_requested(&self) -> bool {
+        self.ports.iter().any(|ctl| !ctl.rumble.is_off())
     }
 
     /// What the pad on `port` settled on after [`request_analog`]

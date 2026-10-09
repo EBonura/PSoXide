@@ -59,6 +59,18 @@ pub struct Model {
     /// Analog requested by a 0x44 command, applied when config mode exits.
     pub analog_requested: bool,
     pub locked: bool,
+    /// The motors are mapped to the poll bytes (command 0x4D in config mode).
+    pub rumble_mapped: bool,
+    /// What the motors are doing: small on, large level. Set by a poll that
+    /// reaches a mapped pad in analog mode.
+    pub motors: (bool, u8),
+    /// The two motor bytes of every 0x42 poll: `(ID answered, byte 3, byte 4)`.
+    pub motor_tx: Vec<(u8, u8, u8)>,
+    /// Command byte of every transaction, in order.
+    pub cmd_log: Vec<u8>,
+    /// Mapping parameter bytes of every 0x4D, as sent.
+    pub map_params: Vec<[u8; 6]>,
+    pub pending_small: u8,
     /// Exit-config commands to ignore, the SCPH-110 failure that parks the
     /// pad answering ID 0xF3.
     pub ignore_exits: u32,
@@ -120,6 +132,12 @@ impl Default for Model {
             dualshock: true,
             analog_requested: false,
             locked: false,
+            rumble_mapped: false,
+            motors: (false, 0),
+            motor_tx: Vec::new(),
+            cmd_log: Vec::new(),
+            map_params: Vec::new(),
+            pending_small: 0,
             ignore_exits: 0,
             slow_ack: None,
             rx_delay: 3,
@@ -250,6 +268,7 @@ pub unsafe fn write_u8(addr: u32, value: u8) {
         }
         if index == 1 {
             m.cmd = value;
+            m.cmd_log.push(value);
             m.final_step = if m.id == 0x41 { 4 } else { 8 };
         }
         let expected = match index {
@@ -263,6 +282,7 @@ pub unsafe fn write_u8(addr: u32, value: u8) {
         }
         let fresh = reply(m, index);
         apply_command(m, index, value);
+        note_motors(m, index, value);
         let slipped = early && m.slow_ack.is_some_and(|(byte, _)| byte + 1 == index);
         let rx = if slipped { m.last_rx } else { fresh };
         m.last_rx = rx;
@@ -302,6 +322,32 @@ fn reply(m: &Model, index: usize) -> u8 {
         4 if m.cmd == 0x42 => !((m.buttons >> 8) as u8),
         _ if m.cmd == 0x42 => 0x80,
         _ => 0x00,
+    }
+}
+
+/// Track the motor bytes of a poll and the mapping of a 0x4D.
+fn note_motors(m: &mut Model, index: usize, value: u8) {
+    if m.id == 0xFF {
+        return;
+    }
+    match (m.cmd, index) {
+        (0x42, 3) => m.pending_small = value,
+        (0x42, 4) => {
+            m.motor_tx.push((m.id, m.pending_small, value));
+            if m.rumble_mapped && m.id == 0x73 {
+                m.motors = (m.pending_small & 1 != 0, value);
+            }
+        }
+        (0x4D, 3) => m.map_params.push([value, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]),
+        (0x4D, 4..=8) if m.id == 0xF3 && m.dualshock => {
+            if let Some(last) = m.map_params.last_mut() {
+                last[index - 3] = value;
+                if index == 4 {
+                    m.rumble_mapped = last[0] == 0x00 && last[1] == 0x01;
+                }
+            }
+        }
+        _ => {}
     }
 }
 
