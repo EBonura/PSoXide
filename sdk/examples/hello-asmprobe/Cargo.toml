@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+[package]
+name    = "hello-asmprobe"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+
+[workspace]
+
+[[bin]]
+name = "hello-asmprobe"
+path = "src/main.rs"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+
+[dependencies]
+psx-gpu  = { path = "../../crates/psx-gpu", features = ["asm-kernels"] }
+psx-rt   = { path = "../../crates/psx-rt" }
+psx-io   = { path = "../../crates/psx-io" }
+psx-math = { path = "../../crates/psx-math", features = ["asm-kernels"] }

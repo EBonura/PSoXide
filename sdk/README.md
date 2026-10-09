@@ -68,6 +68,7 @@ Build and run them via the top-level `Makefile` (see the
 | `hello-fmv` | FMV console test: streams a 2x STR with XA audio, decodes it with `psx-fmv`, and shows sector counts (LOST/BAD) over the video. |
 | `hello-memcard` | Non-destructive memory-card diagnostic: reads and hashes all 1024 frames, then (L1+R1+Cross) writes and verifies one test save. |
 | `hello-memprobe` | Checks psx-rt's `memcpy`/`memset`/`memcmp` against reference loops for every size and alignment; prints `MEMPROBE PASS` or `FAIL`. |
+| `hello-asmprobe` | Differential test and cycle benchmark for the hand-scheduled kernels (`psx-gpu` and `psx-math` `asm-kernels`): bit-identical against the portable definition on random and edge inputs, then timed; prints `ASMPROBE PASS` or `FAIL` and `BENCH` lines. |
 | `hello-pack` | `psx_pack::cd` smoke test: streams raw and compressed WORLD.PAK chunks off the disc and checks them. |
 | `hello-cdstream` | `psx-cdstream` on a disc: single, chained, prioritised, aborted-and-resumed and sustained reads of a known file checked byte for byte, an audio lease taken mid-read, and the foreground cost of a long read (`make hello-cdstream-disc`, `make hello-cdstream-gate`). |
 | `hello-i64probe` | Runs software 64-bit multiply/divide/modulo on the target and checks the results; covers psx-rt's `__divdi3`/`__moddi3` overrides. |
