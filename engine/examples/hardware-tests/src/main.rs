@@ -5245,7 +5245,7 @@ fn push_timing_record(
     tty_print_dec_u16(record.max);
     tty::println("");
     // Saturate rather than index past the end: with panic=abort an overflow
-    // would hang the console mid-scan. tools/test_hwtest_tools.py keeps the
+    // would hang the console mid-scan. tools/psoxide-hwtest/tests keeps the
     // slot count ahead of the record count.
     if let Some(slot) = records.get_mut(*next) {
         *slot = record;
@@ -10356,7 +10356,7 @@ fn measure_dram_refresh() -> (u16, u16) {
 // before the Timer 2 counter is cleared. Each block is bracketed by a pair of
 // `ori $zero, $zero, imm` words: start = 0x34000000 | (id << 1), end = start | 1,
 // with `id` unique across the crate. They write no register, LLVM never emits
-// them, and tools/verify-hwtest-machine-code.py finds every pair in the linked
+// them, and tools/psoxide-hwtest (verify-machine-code) finds every pair in the linked
 // PS-X EXE to audit the words between them (make hwtest-verify-code; spans are
 // pinned by id in docs/hardware-refs/). Ids in use: 1-25 here, 32+ in
 // perf_probes.rs.

@@ -13,7 +13,7 @@ both are written into every payload.
 
 **MAJOR** when an existing record's meaning changes: a probe redefined, a clock
 swapped, sampling semantics altered. Captures across a MAJOR boundary are **not
-comparable**, and `hwtest-report.py` refuses the diff unless
+comparable**, and `psoxide-hwtest report` refuses the diff unless
 `--allow-suite-mismatch` is passed.
 
 **MINOR** when records are only added, or a bug is fixed that leaves every
@@ -44,7 +44,7 @@ shipped without either, which is why no machine-code baseline exists for them.
 
 The disc gains `HWSONGS.XA` after `MOVIE.STR` (468 sectors), which moves the CD-DA track outward by that much. `CDTEST.BIN` and `MOVIE.STR` keep their LBAs. The SDK is pinned at ae6e1ef10. The boot EXE grows to 493 of its 502 sectors.
 
-New timing-block records, present only once a case has run, as for the FMV test: `2C0`-`2C5` kernel timing, `2D0`-`2D5` one per display width, `2D6`-`2D7` interlace, `2E0`-`2E3` XA loop (layouts in each module's `records`, decoded by `tools/hwtest-report.py` `console_rows`). `TIMING_RECORD_COUNT` grows to 354. No existing record changed meaning, hence MINOR.
+New timing-block records, present only once a case has run, as for the FMV test: `2C0`-`2C5` kernel timing, `2D0`-`2D5` one per display width, `2D6`-`2D7` interlace, `2E0`-`2E3` XA loop (layouts in each module's `records`, decoded by ``psoxide-hwtest report`` `console_rows`). `TIMING_RECORD_COUNT` grows to 354. No existing record changed meaning, hence MINOR.
 
 ### v1.26 (2026-09-26, schema PX8)
 
@@ -74,7 +74,7 @@ run). The pass criteria apply to the cut. Every result goes on screen and into
 the capture, which is now encoded after either row even without a timing scan,
 and the QR pages open straight after. New timing-block ids, all packed
 halfword streams rather than timings (layout in `fmv_diag::records`, decoded
-by `tools/hwtest-report.py`): `200`-`25D` per sequence, `260` overview,
+by ``psoxide-hwtest report``): `200`-`25D` per sequence, `260` overview,
 `270`-`287` playbacks, `290`-`29E` reset traces, `2A0`-`2A2` the control
 decode. `1F0`-`1F5` keep their meaning and describe the first playback.
 TIMING_RECORD_COUNT grows to 336 and CAPTURE_PAGE_MAX to 12.
@@ -139,13 +139,13 @@ clean against the v1.23 emulator baseline (`drift=0`, the only failure still
 10, because the worst-case payload with every case failing no longer fits nine
 pages (the emulator's full characterisation capture grows from five pages to
 six), and `HWTEST_STEPS` from 400M to 480M, because the headless conformance
-capture now completes between 420M and 430M instructions. `hwtest-report.py`
+capture now completes between 420M and 430M instructions. `psoxide-hwtest report`
 names the new records and no longer indexes past the end of a baseline with
 fewer cases. The list-busy cases take the worst-case payload to 9.54 pages of
 the 10, leave the emulator's full characterisation capture at six pages and the
 headless conformance capture still complete by 430M instructions; the
 conformance baseline was re-pinned after they were added (`drift=0` against the
-pin without them), and `hwtest-report.py` prints them as a labelled
+pin without them), and `psoxide-hwtest report` prints them as a labelled
 `list_busy` table.
 
 ### v1.23 (2026-09-17, schema PX8 with the TIMING_EXT block)
@@ -404,14 +404,14 @@ pages counted from the payload, and QR symbols size themselves to it.
 
 No record redefined, so minor: v1.8 PX7 captures remain comparable, and the
 emulator baseline is unchanged from v1.8 (24 of 173 fail, 20 of them GTE
-NCLIP). `hwtest-report.py` reads PX8 and the archived px7 references, and its
+NCLIP). `psoxide-hwtest report` reads PX8 and the archived px7 references, and its
 regression gate names a failure that appeared and one that stopped
 reproducing rather than only a moved digest.
 
 Two repairs landed after the bump (2026-08-06): the audio link had been
 silently dead since this commit because the capture handed it the whole
 worst-case buffer instead of the encoded slice, and its FSK frame no longer
-fit SPU RAM; and `hwtest-audio-decode.py --emit-pages` still emitted a PX7
+fit SPU RAM; and `psoxide-hwtest audio-decode --emit-pages` still emitted a PX7
 page prefix. Both fixed; `docs/hardware-refs/hwtest-machine-code-v1.14.txt`
 was generated against the repaired EXE, so the pristine 2026-08-05 build
 differs from it in total word count (probe spans are identical).
@@ -636,5 +636,5 @@ Tiering:
 
 Conformance battery plus CPU/GTE/DMA timing, sampled **without** interrupt
 masking and reported as min/max only. Historic captures remain readable
-(`hwtest-report.py` still parses PX5 and PX6) but their timing records must not
+(`psoxide-hwtest report` still parses PX5 and PX6) but their timing records must not
 be diffed against v1.x.

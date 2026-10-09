@@ -16,8 +16,8 @@ page is kept, and the combination satisfying the whole-binary CRC is written.
 
 Targeted-probe QRs (PA1-PA5, SB1-SB4) seen in the same recording are written as
 sidecar files next to the output: pages-pa5.txt, pages-sb4.txt, and so on, one
-payload line each, ready for tools/hwtest-audio-report.py /
-tools/hwtest-sb4-report.py. A probe payload is accepted when its decoded
+payload line each, ready for psoxide-hwtest audio-report /
+psoxide-hwtest sb4-report. A probe payload is accepted when its decoded
 binary's trailing CRC32 checks out (the wire text's /C: field is not the chunk
 CRC for probes, so the binary self-check is the validation that matters).
 
@@ -226,7 +226,7 @@ def main() -> int:
         print(
             f"FAIL: recovered {sorted(seen)} of {total_pages}; missing {missing}.\n"
             "      Some symbols do not survive the capture chain. Use the audio\n"
-            "      readout (tools/hwtest-audio-decode.py) for a complete payload.",
+            "      readout (psoxide-hwtest audio-decode) for a complete payload.",
             file=sys.stderr,
         )
         return 1

@@ -21,7 +21,7 @@ use psx_font::FontAtlas;
 use psx_rt::interrupts;
 
 /// First of the timing-block ids that carry the last FMV run. The triples do
-/// not hold min/median/max: tools/hwtest-report.py names each field.
+/// not hold min/median/max: tools/psoxide-hwtest (report) names each field.
 pub(crate) const FIRST_RECORD: u16 = 0x1F0;
 /// 0x1F0 pass, good, total; 0x1F1 lost, bad, dropped; 0x1F2 drive errors,
 /// decode errors, first problem LBA; 0x1F3 shown, late, VBlanks; 0x1F4

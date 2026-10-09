@@ -42,7 +42,7 @@
 //!
 //! Results go on screen (a summary page and one page per sequence) and into
 //! the capture as timing-block records 0x200-0x25B plus 0x260; see
-//! [`records`] for the layout and tools/hwtest-report.py for the decoder.
+//! [`records`] for the layout and tools/psoxide-hwtest (report) for the decoder.
 
 use crate::{TimingRecord, TIMING_RECORD_COUNT, TIMING_RECORD_UNUSED};
 use core::ptr::addr_of_mut;

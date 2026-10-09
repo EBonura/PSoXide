@@ -13,7 +13,7 @@
 //! Each case runs as a blocking screen of its own (like the FMV test), keeps
 //! its result on screen until CROSS, and leaves timing-block records `0x2C0`
 //! and up in the capture, so the QR pages that open afterwards carry it. The
-//! record layout is in each module's `records` and in tools/hwtest-report.py.
+//! record layout is in each module's `records` and in tools/psoxide-hwtest (report).
 
 use crate::{TimingRecord, TIMING_RECORD_COUNT, TIMING_RECORD_UNUSED};
 use psx_engine::button;

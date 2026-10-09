@@ -12,7 +12,7 @@ version. The schema says how bytes are laid out; the suite version says what a
 record id *means*, which a schema version cannot express because an id can be
 redefined without the layout changing.
 
-`hwtest-report.py` refuses to diff captures across a MAJOR suite bump, since the
+`psoxide-hwtest report` refuses to diff captures across a MAJOR suite bump, since the
 same id may name two different measurements. Baselines are named by version
 rather than date. The bump rule and the full history of what each version
 changed are in [hardware-test-versions.md](hardware-test-versions.md).
@@ -104,7 +104,7 @@ the final QR and note whether noise starts during stage 06 (`T0A0 MAP BANK
 ONLY`). Decode the final payload with:
 
 ```sh
-python3 tools/hwtest-audio-report.py /tmp/pa5-qr.txt
+psoxide-hwtest audio-report /tmp/pa5-qr.txt
 ```
 
 Press TRIANGLE from the completed PA5 screen to return to the menu.
@@ -165,7 +165,7 @@ register state, ENDX, SPUCNT/SPUSTAT, bank dimensions, and readback hashes.
 Decode each final `PA4/.../C:...` QR with:
 
 ```sh
-python3 tools/hwtest-audio-report.py /tmp/pa4-qr.txt
+psoxide-hwtest audio-report /tmp/pa4-qr.txt
 ```
 
 Press TRIANGLE from the completed PA4 screen to return to the menu.
@@ -198,7 +198,7 @@ Record the complete run without changing capture volume. Leave the final QR
 visible for several seconds, decode its `PA3/.../C:...` text, then run:
 
 ```sh
-python3 tools/hwtest-audio-report.py /tmp/pa3-qr.txt
+psoxide-hwtest audio-report /tmp/pa3-qr.txt
 ```
 
 Press TRIANGLE from the completed PA3 screen to return to the menu.
@@ -225,7 +225,7 @@ Leave the final QR visible for several seconds. Decode its `PA2/.../C:...` text
 from any clear OBS frame and run:
 
 ```sh
-python3 tools/hwtest-audio-report.py /tmp/pa2-qr.txt
+psoxide-hwtest audio-report /tmp/pa2-qr.txt
 ```
 
 The report preserves SPUCNT/SPUSTAT, all voice-15 registers, ENDX, maximum
@@ -307,7 +307,7 @@ real seeks plus the GPU, MDEC and SIO work.
 `MAIN MENU > CONSOLE TESTS (V1.27)` holds four cases. Each takes over the
 display for its run, keeps its result up until CROSS, then opens the QR pages
 with its records in the capture (records `2C0`-`2E3`, decoded by
-`hwtest-report.py` as `console_*` rows). They are for filming: the answer is
+`psoxide-hwtest report` as `console_*` rows). They are for filming: the answer is
 on the screen, and the QR pages carry the numbers behind it.
 
 **KERNEL TIMING (BIOS).** The SDK runtime replaces the BIOS exception vector,
@@ -401,7 +401,7 @@ assembly block and reports the second pass, and the block starts on a
 cache-line boundary. Every line it executes is resident by the time it is
 timed, so the result is a property of the instructions alone. In the emulator
 these records have zero jitter where their older twins show 70-90 cycles.
-`hwtest-report.py --layout-immune-timing-only` counts timing drift only for
+`psoxide-hwtest report --layout-immune-timing-only` counts timing drift only for
 these ids, which is the useful gate for a refactor that moves code.
 
 | Id | Record | Question |
@@ -660,7 +660,7 @@ drains. An hl-psx optimisation measures +21% on the default model and nothing
 on the FIFO one, so which is true decides it. Code in `src/list_busy_probes.rs`;
 indices 211-233, so RESUME FROM TEST at 211 runs only these and the timing
 scan. The values are INFO and travel only in the FULL CHARACTERISATION capture;
-`hwtest-report.py` prints them as a labelled `list_busy` table.
+`psoxide-hwtest report` prints them as a labelled `list_busy` table.
 
 Four lists, each ending in GP0(1Fh), all drawing into the 320x240 area at
 (0, 0) after a black fill that is fenced with its own GP0(1Fh):
@@ -763,7 +763,7 @@ are counters, not min/median/max: `1F0` pass, good, total; `1F1` lost, bad,
 dropped; `1F2` drive errors, decode errors, first problem LBA (FFFF none);
 `1F3` shown, late, VBlanks; `1F4` kilocycles per frame for the bitstream, MDEC
 plus upload, and waiting; `1F5` last good LBA, run count, setup failure code.
-`hwtest-report.py` prints them as an `fmv` table and re-derives the verdict
+`psoxide-hwtest report` prints them as an `fmv` table and re-derives the verdict
 from the counters. A capture taken before the run is re-encoded with them at
 once (and so carries the timing block even if it was a routine one); a capture
 taken after it picks them up from its own timing scan. Run it after FULL
@@ -942,7 +942,7 @@ The record preserves all 173 conformance observations and their statuses, all
 90 timing min/max pairs, CPU/GTE/SPU startup-scan summaries, the nine
 memory-control registers, run IDs, section digests, and 128 raw precision
 values. Fixed schema ordering avoids repeating labels and IDs on screen.
-`tools/hwtest-report.py` accepts all three strings mirrored to the debug TTY
+``psoxide-hwtest report`` accepts all three strings mirrored to the debug TTY
 and reconstructs the complete report. It remains backward-compatible with
 two-page PX5 captures.
 
@@ -1083,8 +1083,8 @@ binary FSK and loops it in hardware, forever, with no CPU involvement. Point a
 capture card at the console, record, and decode:
 
 ```sh
-python3 tools/hwtest-audio-decode.py capture.wav --emit-pages pages.txt
-python3 tools/hwtest-report.py pages.txt
+psoxide-hwtest audio-decode capture.wav --emit-pages pages.txt
+psoxide-hwtest report pages.txt
 ```
 
 One repetition takes about 13.6 seconds, so any recording longer than that
@@ -1173,7 +1173,7 @@ Two baselines are pinned, and they answer different questions:
 
 The second matters because a timing record only means what this document
 claims if the instructions inside its measured window are still the ones the
-source asked for. `tools/verify-hwtest-machine-code.py` extracts each span
+source asked for. ``psoxide-hwtest verify-machine-code`` extracts each span
 from the linked EXE and digests it. Markers are `ori $zero, $zero, imm` words
 (start `0x34000000 | id << 1`, end `start | 1`), which write no register and
 which no compiler emits, so the verifier discovers probes by scanning the
@@ -1213,7 +1213,7 @@ disc report raw values only.
 
 Completed pages are also mirrored verbatim to the debug TTY with the prefix
 `hardware-tests: px6 `. This lets the headless release gate feed the exact same
-payload to `hwtest-report.py` without host-side image recognition.
+payload to `psoxide-hwtest report` without host-side image recognition.
 
 `mkisopsx` currently warns that it does not supply a licensed PS1 system area.
 Use the same real-console burn/boot method that worked for the previous test
