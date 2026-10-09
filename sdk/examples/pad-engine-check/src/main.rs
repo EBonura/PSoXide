@@ -221,6 +221,19 @@ fn main() {
     }
     line("updates_after_reinstall", reinstalled);
 
+    // Motors: the engine maps them (command 0x4D) and sends the request with
+    // each poll; stop_motors returns once a poll with them off has gone out.
+    console::enable_rumble(Port::One);
+    console::set_rumble(Port::One, psx_pad::Rumble::new(true, 200));
+    for _ in 0..30 {
+        spin_to_next_vblank();
+    }
+    let rumble_mapped = console::rumble_mapped(Port::One);
+    let faults_before_stop = console::snapshot().port(Port::One).faults;
+    console::stop_motors();
+    let stopped = console::snapshot().port(Port::One).faults == faults_before_stop;
+    line("rumble_mapped", u32::from(rumble_mapped));
+
     // psx-cdstream installs its wrapper after the engine's: the two chain, so
     // the pad keeps being read. (Before they chained, this silenced the pad.)
     let before = console::snapshot().port(Port::One).updates;
@@ -316,6 +329,8 @@ fn main() {
         check(cd_updates >= 45, "the pad is still read during a polled CD read");
     }
     check(stream_ok, "psx-cdstream reads 64 sectors while the engine polls");
+    check(rumble_mapped, "the engine maps the motors of the emulator's pad");
+    check(stopped, "stopping the motors does not fault the port");
     check(handed_back, "uninstall hands the port back");
     check(reinstalled >= 15, "install works again after uninstall");
     check(chained >= 25, "the pad is still read after psx-cdstream installs its wrapper");

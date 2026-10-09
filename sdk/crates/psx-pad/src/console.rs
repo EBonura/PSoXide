@@ -29,7 +29,7 @@
 //! which keeps the engine off the port until it is dropped.
 
 use crate::engine::{Config, Engine, Hw, Owner, PortReading, Published, Snapshot, Stats};
-use crate::{AnalogRequirement, PadState};
+use crate::{AnalogRequirement, PadState, Rumble};
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
 use psx_hw::irq::source;
@@ -478,6 +478,11 @@ pub fn uninstall() -> Option<ControllerPort> {
     if !is_installed() {
         return None;
     }
+    // Leave nothing spinning in a pad that is about to be polled by something
+    // that does not know about it.
+    if with_engine(|engine| engine.motors_requested()) {
+        stop_motors();
+    }
     let start = psx_rt::interrupts::vblank_count();
     let mut attempts = 0u32;
     loop {
@@ -556,6 +561,59 @@ pub fn request_analog(port: Port) {
 /// What the pad settled on after [`request_analog`]; `None` while pending.
 pub fn analog_outcome(port: Port) -> Option<AnalogRequirement> {
     with_engine(|engine| engine.analog_outcome(port))
+}
+
+/// Put the motors of the pad on `port` under the poll. The engine maps them
+/// (command 0x4D, in the same visit to configuration mode as an analog request
+/// if one is pending) whenever an analog DualShock is there and again each time
+/// one is plugged in, then sends [`set_rumble`]'s request with every poll.
+/// [`rumble_mapped`] says whether the pad took it.
+pub fn enable_rumble(port: Port) {
+    with_engine(|engine| engine.enable_rumble(port));
+}
+
+/// Stop wanting the motors on `port`. They are told to stop on the next poll.
+pub fn disable_rumble(port: Port) {
+    with_engine(|engine| engine.disable_rumble(port));
+}
+
+/// What the motors on `port` are asked to do on every poll. Takes effect on a
+/// pad that has been mapped; a digital pad ignores it.
+pub fn set_rumble(port: Port, rumble: Rumble) {
+    with_engine(|engine| engine.set_rumble(port, rumble));
+}
+
+/// Whether the pad on `port` took the motor mapping.
+pub fn rumble_mapped(port: Port) -> bool {
+    with_engine(|engine| engine.rumble_mapped(port))
+}
+
+/// Stop every motor now and return once a poll with the motors off has gone
+/// out on each port, so a program can pause, open a menu, or hand the port over
+/// knowing nothing is still spinning. Waits as [`lease`] does, three VBlanks at
+/// most; a port a [`Lease`] holds is not polled meanwhile. An unplugged pad has
+/// nothing to stop.
+pub fn stop_motors() {
+    let (start, idle) = with_engine(|engine| {
+        engine.stop_motors();
+        (engine.stats().kicks, engine.is_idle())
+    });
+    // A round already on the wire took its motor bytes when it started; the
+    // next round is the first to send zeros.
+    let target = start.wrapping_add(if idle { 1 } else { 2 });
+    let first = psx_rt::interrupts::vblank_count();
+    let mut attempts = 0u32;
+    loop {
+        let done = with_engine(|engine| {
+            let kicks = engine.stats().kicks;
+            kicks.wrapping_sub(target) < 0x8000_0000 && engine.is_idle()
+        });
+        attempts += 1;
+        let waited = psx_rt::interrupts::vblank_count().wrapping_sub(first);
+        if done || waited >= LEASE_PATIENCE_VBLANKS || attempts >= LEASE_PATIENCE_ATTEMPTS {
+            return;
+        }
+    }
 }
 
 /// Who may use the port now.
