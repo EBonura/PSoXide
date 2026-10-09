@@ -153,11 +153,20 @@ impl CdHw for Mmio {
         // emulator run, because the foreground closes the source around
         // every call.) Stale bits are cleared by `attach` and by the
         // preamble of every command.
-        let mask = irq::mask();
+        //
+        // psx-rt's handler would acknowledge a CD interrupt that reaches it
+        // pending, behind another wrapper's handler or this one's, so the
+        // source is claimed while it is open, when this wrapper is the one
+        // servicing it. Closed, nobody here services it and the claim is
+        // dropped: code that opens the source itself (a polled read, audio
+        // playback) then has its strays acknowledged by psx-rt as before,
+        // instead of an exception taken again for ever.
         if enabled {
-            irq::set_mask(mask | CD_BIT);
+            psx_rt::interrupts::claim_interrupt_sources(CD_BIT);
+            irq::set_mask(irq::mask() | CD_BIT);
         } else {
-            irq::set_mask(mask & !CD_BIT);
+            irq::set_mask(irq::mask() & !CD_BIT);
+            psx_rt::interrupts::release_interrupt_sources(CD_BIT);
         }
     }
 
@@ -506,9 +515,6 @@ pub fn install(cd: Cd, config: Config) -> Result<(), Cd> {
     }
     paint_stack();
     install_vector();
-    // psx-rt's handler would acknowledge a CD interrupt that reaches it
-    // pending, behind another wrapper's handler or this one's: claim it.
-    psx_rt::interrupts::claim_interrupt_sources(CD_BIT);
     with_engine(|engine| {
         engine.hw_mut().time_handler = config.time_handler;
         engine.configure(config);
