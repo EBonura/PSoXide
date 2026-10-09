@@ -255,7 +255,7 @@ primitives:
 |---|---|---|---|
 | PPM decode + region hash | `host/quake-build/main.rs:311-335` (`ImageRegion`, `PpmImage`) | `host/hl-build/regression.rs:735-798` (`ppm_token`, `ppm_rgb`, `ppm_changed_pixels`) | `emu/crates/psoxide-validation` |
 | profile CSV column extraction | in `host/quake-build/main.rs` | `regression.rs:605-642` (`csv_column`, `csv_column_occurrence`) | `tools/vblank_chart.py` |
-| percentile / timing summary | in `host/quake-build/main.rs` | `regression.rs:799-889` | `tools/cortex_30fps_report.py` |
+| percentile / timing summary | in `host/quake-build/main.rs` | `regression.rs:799-889` | `psoxide-perf cortex-30fps-report` |
 | frontend discovery + launch | in `host/quake-build/main.rs` | `regression.rs:567-604`, `890-1003` | Makefile targets |
 | guest-stage hydration + isolated CARGO_HOME | `host/quake-build/main.rs:37-177` | `host/hl-build/main.rs` | `tools/build_guest_staged.sh` |
 | scenario table | implicit in per-feature regression bins | `regression.rs:38-502` (29 + 14 + 5 + 16 scenarios) | validation suite RON |
