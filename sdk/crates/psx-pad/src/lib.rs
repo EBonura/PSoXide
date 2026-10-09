@@ -437,6 +437,45 @@ impl PadState {
     }
 }
 
+/// What the two motors of a DualShock are asked to do on a poll.
+///
+/// The small motor is on or off, the large motor has a level. The request
+/// rides in two bytes of every poll once the motors are mapped
+/// ([`enable_rumble_on`]); a pad that is not a DualShock in analog mode
+/// ignores it, and the driver sends it zeros.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct Rumble {
+    /// The small (high-frequency) motor: on or off.
+    pub small: bool,
+    /// The large (low-frequency) motor's level; below about 0x40 it does not
+    /// spin.
+    pub large: u8,
+}
+
+impl Rumble {
+    /// Both motors off.
+    pub const OFF: Rumble = Rumble {
+        small: false,
+        large: 0,
+    };
+
+    /// A request for the two motors.
+    pub const fn new(small: bool, large: u8) -> Self {
+        Rumble { small, large }
+    }
+
+    /// Whether both motors are off.
+    pub const fn is_off(self) -> bool {
+        !self.small && self.large == 0
+    }
+
+    /// The two poll bytes: the small motor's (bit 0) and the large motor's
+    /// level, in the order [`MOTOR_MAP_PACKET`] maps them.
+    pub(crate) const fn bytes(self) -> (u8, u8) {
+        (self.small as u8, self.large)
+    }
+}
+
 /// One logical game action bound to up to two physical button masks.
 ///
 /// A mask may contain more than one button; any held bit activates the
@@ -679,7 +718,14 @@ const ADDRESS_ACK_SPINS: u32 = 512;
 /// stays borrowed for the length of the poll.
 #[doc(alias = "PadRead")]
 pub fn poll_on<T: Transport>(port: &mut T, socket: Port) -> PadState {
-    poll_state(port, socket, false)
+    poll_state(port, socket, false, Rumble::OFF)
+}
+
+/// [`poll_on`] with the motors asked for `rumble`. A pad that is not a
+/// DualShock reporting analog mode is sent zeros; the request takes effect on
+/// one that has been through [`enable_rumble_on`].
+pub fn poll_rumble_on<T: Transport>(port: &mut T, socket: Port, rumble: Rumble) -> PadState {
+    poll_state(port, socket, false, rumble)
 }
 
 /// Poll port 1 once.
@@ -804,6 +850,8 @@ pub fn require_analog_port1() -> AnalogRequirement {
 pub struct PadReader {
     socket: Port,
     last: PadState,
+    /// What the motors are asked for on every poll.
+    rumble: Rumble,
 }
 
 impl PadReader {
@@ -812,6 +860,7 @@ impl PadReader {
         Self {
             socket: Port::One,
             last: PadState::NONE,
+            rumble: Rumble::OFF,
         }
     }
 
@@ -820,6 +869,7 @@ impl PadReader {
         Self {
             socket: Port::Two,
             last: PadState::NONE,
+            rumble: Rumble::OFF,
         }
     }
 
@@ -828,8 +878,32 @@ impl PadReader {
         // A pad that was there a moment ago has its absence confirmed before
         // the reader believes it; a socket that was already empty is told so
         // at once.
-        let polled = poll_state(port, self.socket, self.last.is_connected());
+        let polled = poll_state(port, self.socket, self.last.is_connected(), self.rumble);
         self.accept(polled)
+    }
+
+    /// What the motors are asked to do on every poll from now on. Takes effect
+    /// on a DualShock in analog mode that has been through
+    /// [`enable_rumble_on`](Self::enable_rumble_on).
+    pub fn set_rumble(&mut self, rumble: Rumble) {
+        self.rumble = rumble;
+    }
+
+    /// What the motors are asked for now.
+    pub const fn rumble(&self) -> Rumble {
+        self.rumble
+    }
+
+    /// Map the motors on this reader's pad. See [`enable_rumble_on`].
+    pub fn enable_rumble_on<T: Transport>(&mut self, port: &mut T) -> bool {
+        enable_rumble_on(port, self.socket)
+    }
+
+    /// Stop both motors now: ask for none and poll once so the pad hears it.
+    /// For a pause, a menu, an exit; an unplugged pad has nothing to stop.
+    pub fn stop_motors_on<T: Transport>(&mut self, port: &mut T) -> PadState {
+        self.rumble = Rumble::OFF;
+        self.poll_on(port)
     }
 
     /// Poll the port once and return the latest clean state.
@@ -873,12 +947,17 @@ impl PadReader {
 /// for a caller that saw a pad on this socket last time: one such reply could
 /// be a glitch on a pad that is still there, so it takes four before it says
 /// the pad is gone.
-fn poll_state<T: Transport>(bus: &mut T, socket: Port, confirm_absent: bool) -> PadState {
+fn poll_state<T: Transport>(
+    bus: &mut T,
+    socket: Port,
+    confirm_absent: bool,
+    rumble: Rumble,
+) -> PadState {
     let mut last = PadState::NONE;
     let mut all_absent = true;
     let mut tries = 0;
     while tries < 4 {
-        let s = poll_once(bus, socket).to_state();
+        let s = poll_once(bus, socket, rumble).to_state();
         if matches!(s.mode, PadMode::Digital | PadMode::Analog | PadMode::Config) {
             return s;
         }
@@ -995,12 +1074,12 @@ fn ex<T: Transport>(
 /// wait for each non-final byte's live ACK assertion and release. RX-ready
 /// only establishes that the current byte arrived, not that the controller
 /// is ready for the next one. No IRQ enable or CTRL rewrite is needed.
-fn poll_once<T: Transport>(bus: &mut T, socket: Port) -> RawPoll {
+fn poll_once<T: Transport>(bus: &mut T, socket: Port, rumble: Rumble) -> RawPoll {
     // A previous aborted transaction may have left ACK asserted: `begin` waits
     // for it to release, so an old pulse never counts as the new address
     // byte's ACK.
     let result = if bus.begin(socket, Timing::PAD) {
-        poll_selected(bus)
+        poll_selected(bus, rumble)
     } else {
         None
     };
@@ -1017,7 +1096,7 @@ fn poll_once<T: Transport>(bus: &mut T, socket: Port) -> RawPoll {
 
 /// A complete selected-port poll, or no usable packet. The current ID
 /// determines the length; a mode toggle never reuses an earlier length.
-fn poll_selected<T: Transport>(bus: &mut T) -> Option<RawPoll> {
+fn poll_selected<T: Transport>(bus: &mut T, rumble: Rumble) -> Option<RawPoll> {
     // The address byte is the one that tells a pad from an empty socket, so it
     // gets the BIOS's own limit for a device to answer, not the longer budget
     // for a slow byte part way through a packet.
@@ -1040,8 +1119,16 @@ fn poll_selected<T: Transport>(bus: &mut T) -> Option<RawPoll> {
         return None;
     }
     let analog = mode.has_sticks();
-    let buttons_low = bus.exchange(0x00, false, Timing::PAD).ok()?;
-    let buttons_high = bus.exchange(0x00, !analog, Timing::PAD).ok()?;
+    // The two bytes the motors ride in, for a DualShock reporting analog
+    // mode; every other pad, and a pad parked in configuration mode, gets
+    // zeros.
+    let (small, large) = if mode == PadMode::Analog {
+        rumble.bytes()
+    } else {
+        (0, 0)
+    };
+    let buttons_low = bus.exchange(small, false, Timing::PAD).ok()?;
+    let buttons_high = bus.exchange(large, !analog, Timing::PAD).ok()?;
     let sticks = if analog {
         AnalogSticks {
             right_x: bus.exchange(0x00, false, Timing::PAD).ok()?,
@@ -1161,6 +1248,64 @@ const REQUIRE_ANALOG_GAP_SPINS: u32 = 96 * DEFAULT_SETUP_SPINS;
 /// still reports buttons, but never analog, and ignores the Analog lock.
 const CONFIG_EXIT_RETRIES: u32 = 3;
 
+/// The config-mode packet that maps the motors: the first mapping byte (`0x00`)
+/// puts the small motor on the first byte after the poll command's two, the
+/// second (`0x01`) the large motor on the next, and `0xFF` leaves a slot
+/// unused. A DualShock forgets it when it loses power.
+pub const MOTOR_MAP_PACKET: [u8; 8] = [0x4D, 0x00, 0x00, 0x01, 0xFF, 0xFF, 0xFF, 0xFF];
+
+/// Put a DualShock's motors under the poll: enter configuration mode, map the
+/// small motor to the first motor byte and the large motor to the second
+/// ([`MOTOR_MAP_PACKET`]), and leave configuration mode, spaced a video frame
+/// apart as [`require_analog_on`] spaces its commands. Returns whether the pad
+/// took the mapping from configuration mode and then reports DualShock analog
+/// mode, which is the only mode a poll sends motor bytes in; a digital pad, a
+/// pad that refuses configuration mode, or one that drops out part way returns
+/// `false` and is polled as before. The pad's analog or digital
+/// mode is left as it was. Call it again after a pad is plugged in.
+///
+/// This blocks for a few frames; the interrupt engine does the same without
+/// blocking (`console::enable_rumble`).
+pub fn enable_rumble_on<T: Transport>(port: &mut T, socket: Port) -> bool {
+    let (state, mapped) = request_rumble(port, socket, REQUIRE_ANALOG_GAP_SPINS);
+    mapped && state.is_analog()
+}
+
+/// Send the mapping sequence and return the state the pad settled on, and
+/// whether the pad answered the mapping packet from configuration mode (ID
+/// `0xF3`, magic `0x5A`): one that refused to enter it, or dropped out, did not
+/// take the mapping.
+fn request_rumble<T: Transport>(bus: &mut T, socket: Port, gap: u32) -> (PadState, bool) {
+    transaction(
+        bus,
+        socket,
+        [0x43, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00],
+    );
+    bus.delay(gap);
+    let answer = transaction(bus, socket, MOTOR_MAP_PACKET);
+    let mapped = answer[0] == 0xF3 && answer[1] == 0x5A;
+    bus.delay(gap);
+    transaction(
+        bus,
+        socket,
+        [0x43, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+    );
+    bus.delay(gap);
+    let mut state = poll_state(bus, socket, false, Rumble::OFF);
+    let mut retries = 0;
+    while state.mode == PadMode::Config && retries < CONFIG_EXIT_RETRIES {
+        transaction(
+            bus,
+            socket,
+            [0x43, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+        );
+        bus.delay(gap);
+        state = poll_state(bus, socket, false, Rumble::OFF);
+        retries += 1;
+    }
+    (state, mapped)
+}
+
 fn enable_analog<T: Transport>(bus: &mut T, socket: Port) -> bool {
     request_analog(bus, socket, CONFIG_COMMAND_GAP_SPINS).is_analog()
 }
@@ -1192,7 +1337,7 @@ fn request_analog<T: Transport>(bus: &mut T, socket: Port, gap: u32) -> PadState
         [0x43, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
     );
     bus.delay(gap);
-    let mut state = poll_state(bus, socket, false);
+    let mut state = poll_state(bus, socket, false, Rumble::OFF);
     let mut retries = 0;
     while state.mode == PadMode::Config && retries < CONFIG_EXIT_RETRIES {
         // The exit did not take: leave the pad in a playable mode rather
@@ -1203,7 +1348,7 @@ fn request_analog<T: Transport>(bus: &mut T, socket: Port, gap: u32) -> PadState
             [0x43, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
         );
         bus.delay(gap);
-        state = poll_state(bus, socket, false);
+        state = poll_state(bus, socket, false, Rumble::OFF);
         retries += 1;
     }
     state
