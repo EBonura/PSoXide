@@ -67,10 +67,14 @@
 //!   positions, accumulated velocities, etc.
 
 #![no_std]
+#![cfg_attr(target_arch = "mips", feature(asm_experimental_arch))]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
+#[cfg(all(target_arch = "mips", feature = "asm-kernels"))]
+mod asm_kernels;
 pub mod attributed_clip;
+pub mod clip_lanes;
 pub mod color;
 pub mod fmt;
 pub mod int32;
