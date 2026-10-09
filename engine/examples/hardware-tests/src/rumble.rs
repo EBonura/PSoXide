@@ -97,7 +97,8 @@ fn stop_all(port2: bool) {
 /// The three config-mode packets and the first motor poll, on one port.
 /// Returns the identifier it saw, and whether a config-capable pad is there.
 fn objective(port2: bool, records: &mut Records, next: &mut usize) -> bool {
-    let base = RUMBLE_CONFIG_RECORD + 3 * port2 as u16;
+    let slot = 3 * port2 as u16;
+    let base = RUMBLE_CONFIG_RECORD + slot;
     let plain = send(port2, &poll(0, 0));
     let id_plain = plain.bytes[1].reply;
     let present = plain.bytes[2].reply == 0x5A;
@@ -132,12 +133,16 @@ fn objective(port2: bool, records: &mut Records, next: &mut usize) -> bool {
         ),
     );
     let m = |a: usize, b: usize| ((map.bytes[a].reply as u32) << 8) | map.bytes[b].reply as u32;
-    push_timing_record(records, next, record(base + 1, m(3, 4), m(5, 6), m(7, 8)));
+    push_timing_record(
+        records,
+        next,
+        record(RUMBLE_MAPPING_RECORD + slot, m(3, 4), m(5, 6), m(7, 8)),
+    );
     push_timing_record(
         records,
         next,
         record(
-            base + 2,
+            RUMBLE_AFTER_RECORD + slot,
             ((motors.bytes[1].reply as u32) << 8) | motors.bytes[2].reply as u32,
             ((motors.bytes[3].reply as u32) << 8) | motors.bytes[4].reply as u32,
             after_stop.bytes[1].reply as u32,
