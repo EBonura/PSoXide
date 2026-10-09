@@ -44,6 +44,13 @@ const MIX_CARD_RECORD: u16 = 0x641;
 /// rec sio_mix_pad: pad_poll_cycles_min, pad_poll_cycles_med, pad_poll_cycles_max (0x642 0x646 0x64A 0x64E)
 const MIX_PAD_RECORD: u16 = 0x642;
 
+/// rec sio_mix_fault: round_and_kind, fault_and_exchange, exchanges_and_acks (the first failed card frame read of a mix pass: round in the high bits, kind 1 no card, 2 protocol, 3 checksum, 4 other; transport fault 0 none, 1 TX, 2 RX, 3 ACK, 4 ACK release in the high nibble with the exchange it happened at; port 1 idle, port 1 loaded, port 2 idle, port 2 loaded from 0x6D0 in steps of three; all zero when nothing failed)
+const MIX_FAULT_RECORD: u16 = 0x6D0;
+/// rec sio_mix_fault_prefix_a: response_bytes_0_1, response_bytes_2_3, response_bytes_4_5 (the card's first six replies of that frame read: select, command flags, 0x5A, 0x5D, then the echoes; 0x6D1 and every third after)
+const MIX_FAULT_PREFIX_A_RECORD: u16 = 0x6D1;
+/// rec sio_mix_fault_prefix_b: response_bytes_6_7, response_bytes_8_9, failures_of_any_kind (the ACK byte pair 0x5C 0x5D and the address echoes, then how many frames failed in the pass; a protocol error with these all right and no transport fault means the terminator byte was wrong; 0x6D2 and every third after)
+const MIX_FAULT_PREFIX_B_RECORD: u16 = 0x6D2;
+
 /// A time that did not happen.
 const NONE: u16 = 0xFFFF;
 /// `STAT` reads before giving up on an `/ACK`. At a few cycles a read this is
@@ -366,6 +373,8 @@ fn mix(port2: bool, load: bool, records: &mut Records, next: &mut usize) {
     let mut pad_ok = 0u32;
     let mut card_ok = 0u32;
     let (mut no_card, mut protocol, mut checksum, mut pad_lost) = (0u32, 0u32, 0u32, 0u32);
+    let mut failures = 0u32;
+    let mut first_failure: Option<(u32, u32, psx_mc::TransportTrace)> = None;
     let mut frame_times = [0u32; MIX_ROUNDS];
     let mut pad_times = [0u32; MIX_ROUNDS];
     let mut port = token();
@@ -388,11 +397,33 @@ fn mix(port2: bool, load: bool, records: &mut Records, next: &mut usize) {
         timers::set_counter(Timer::Timer1, 0);
         let result = card.read_frame((round as u16 * 7) % 64, &mut buf);
         frame_times[round] = timers::counter(Timer::Timer1) as u32;
-        match result {
-            Ok(()) => card_ok += 1,
-            Err(CardError::NoCard) => no_card += 1,
-            Err(CardError::BadChecksum) => checksum += 1,
-            Err(_) => protocol += 1,
+        let kind = match result {
+            Ok(()) => {
+                card_ok += 1;
+                0
+            }
+            Err(CardError::NoCard) => {
+                no_card += 1;
+                1
+            }
+            Err(CardError::BadChecksum) => {
+                checksum += 1;
+                3
+            }
+            Err(CardError::Protocol) => {
+                protocol += 1;
+                2
+            }
+            Err(_) => {
+                protocol += 1;
+                4
+            }
+        };
+        if kind != 0 {
+            failures += 1;
+            if first_failure.is_none() {
+                first_failure = Some((round as u32, kind, card.last_trace()));
+            }
         }
     }
     drop(guard);
@@ -424,6 +455,71 @@ fn mix(port2: bool, load: bool, records: &mut Records, next: &mut usize) {
         next,
         record(MIX_PAD_RECORD + base, pmin, pmed, pmax),
     );
+    push_fault(
+        records,
+        next,
+        3 * (2 * port2 as u16 + load as u16),
+        failures,
+        first_failure,
+    );
+}
+
+fn fault_code(fault: psx_mc::TransportFault) -> u32 {
+    match fault {
+        psx_mc::TransportFault::None => 0,
+        psx_mc::TransportFault::TxTimeout => 1,
+        psx_mc::TransportFault::RxTimeout => 2,
+        psx_mc::TransportFault::AckTimeout => 3,
+        psx_mc::TransportFault::AckReleaseTimeout => 4,
+    }
+}
+
+/// The three evidence records of a mix pass: what the first failed frame read
+/// looked like on the wire, as far as the SDK's trace kept it.
+fn push_fault(
+    records: &mut Records,
+    next: &mut usize,
+    slot: u16,
+    failures: u32,
+    first: Option<(u32, u32, psx_mc::TransportTrace)>,
+) {
+    let id = MIX_FAULT_RECORD + slot;
+    let Some((round, kind, trace)) = first else {
+        push(records, next, record(id, 0, 0, 0));
+        push(
+            records,
+            next,
+            record(MIX_FAULT_PREFIX_A_RECORD + slot, 0, 0, 0),
+        );
+        push(
+            records,
+            next,
+            record(MIX_FAULT_PREFIX_B_RECORD + slot, 0, 0, failures),
+        );
+        return;
+    };
+    let p = trace.response_prefix;
+    let pair = |a: usize| ((p[a] as u32) << 8) | p[a + 1] as u32;
+    push(
+        records,
+        next,
+        record(
+            id,
+            (round << 4) | kind,
+            (fault_code(trace.fault) << 12) | (trace.fault_exchange as u32 & 0xFFF),
+            ((trace.exchanges as u32 & 0xFF) << 8) | (trace.acknowledgements as u32 & 0xFF),
+        ),
+    );
+    push(
+        records,
+        next,
+        record(MIX_FAULT_PREFIX_A_RECORD + slot, pair(0), pair(2), pair(4)),
+    );
+    push(
+        records,
+        next,
+        record(MIX_FAULT_PREFIX_B_RECORD + slot, pair(6), pair(8), failures),
+    );
 }
 
 /// Port 1 and 2, idle and under load. A port with no card gets one probe
@@ -453,6 +549,22 @@ pub(crate) fn pad_and_card(records: &mut Records, next: &mut usize) {
                     records,
                     next,
                     record(MIX_PAD_RECORD + base, NONE as u32, NONE as u32, NONE as u32),
+                );
+                let slot = 3 * (2 * port2 as u16 + load as u16);
+                push(
+                    records,
+                    next,
+                    record(MIX_FAULT_RECORD + slot, 0xFFFF, 0xFFFF, 0xFFFF),
+                );
+                push(
+                    records,
+                    next,
+                    record(MIX_FAULT_PREFIX_A_RECORD + slot, 0xFFFF, 0xFFFF, 0xFFFF),
+                );
+                push(
+                    records,
+                    next,
+                    record(MIX_FAULT_PREFIX_B_RECORD + slot, 0xFFFF, 0xFFFF, 0xFFFF),
                 );
             }
             continue;

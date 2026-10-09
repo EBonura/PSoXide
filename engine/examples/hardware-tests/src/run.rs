@@ -19,7 +19,8 @@
 //! capture is shown.
 //!
 //! The record ids this file owns:
-//! `0x410`-`0x419` area handoffs, `0x41A` final silence, `0x41B` run info.
+//! `0x410`-`0x419` area handoffs, `0x41A` final silence, `0x41B` run info,
+//! `0x41C` the handoff baseline.
 
 use super::*;
 use crate::ui;
@@ -101,6 +102,8 @@ const H_CLEAN: u16 = 0x3F;
 
 /// rec handoff: clean_flags_0x3F_is_clean, interrupt_mask, voices_active_high_dma_busy_mask_low
 pub(crate) const HANDOFF: u16 = 0x410;
+/// rec handoff_baseline: irq_mask_baseline, dpcr_baseline_low_half, dpcr_baseline_high_half (the values every area's handoff is compared with, taken as the run started; v2.1 recorded 0x3D in all ten areas without them)
+pub(crate) const HANDOFF_BASELINE: u16 = 0x41C;
 /// rec silence_final: flags_0x7F_is_silent, cd_capture_peak, voices_with_envelope
 pub(crate) const SILENCE_FINAL: u16 = 0x41A;
 /// rec run_info: skipped_risky, steps, records_taken
@@ -944,6 +947,16 @@ fn finish(run: &mut Run) {
         );
         push_timing_record(&mut run.timing.records, &mut run.next, record);
     }
+    push_timing_record(
+        &mut run.timing.records,
+        &mut run.next,
+        crate::console_tests::record(
+            HANDOFF_BASELINE,
+            run.irq_baseline,
+            run.dpcr_baseline & 0xFFFF,
+            run.dpcr_baseline >> 16,
+        ),
+    );
     let silence = crate::console_tests::record(
         SILENCE_FINAL,
         run.silence[0] as u32,
