@@ -9,6 +9,7 @@ description  = "Allocator-free, versioned game preferences and memory-card persi
 
 [dependencies]
 psx-mc = { workspace = true, optional = true }
+psx-display = { workspace = true }
 psx-pad = { workspace = true }
 
 [features]

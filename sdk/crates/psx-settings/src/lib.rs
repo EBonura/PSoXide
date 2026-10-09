@@ -10,14 +10,26 @@
 #![no_std]
 #![warn(missing_docs)]
 
+use psx_display::{Brightness, ScreenOffset};
 use psx_pad::ActionMap;
 
 /// On-card record magic.
 pub const MAGIC: [u8; 4] = *b"PSST";
 /// Current record format version.
-pub const VERSION: u8 = 1;
-/// Header bytes before action bindings and scores.
-const HEADER_LEN: usize = 16;
+///
+/// Version 1 held a 0..=100 brightness percentage that no game used. Version 2
+/// replaces it with the [`Brightness`] step (the save byte of
+/// [`Brightness::to_byte`]) and adds the [`ScreenOffset`] bytes after the
+/// checksum. [`Profile::decode`] still reads version 1 records and gives the
+/// two picture options their defaults; [`Profile::encode`] writes version 2.
+pub const VERSION: u8 = 2;
+/// The oldest record version [`Profile::decode`] reads.
+const OLDEST_VERSION: u8 = 1;
+/// Header bytes before action bindings and scores, in a version 1 record.
+const HEADER_LEN_V1: usize = 16;
+/// Header bytes before action bindings and scores, in a version 2 record:
+/// the version 1 header plus the screen X and Y bytes.
+const HEADER_LEN: usize = 18;
 /// Bytes occupied by one action binding.
 const BINDING_LEN: usize = 4;
 /// Bytes occupied by one high score.
@@ -34,8 +46,10 @@ pub const FLAG_INVERT_Y: u8 = 1 << 0;
 /// number of high-score slots (usually one per difficulty).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Profile<const ACTIONS: usize, const SCORES: usize> {
-    /// Display brightness, 0..=100.
-    pub brightness: u8,
+    /// Picture brightness: `DEFAULT`, `DARKER 1..=5` or `BRIGHTER 1..=5`.
+    pub brightness: Brightness,
+    /// Picture position on the television, within 16 pixels each way.
+    pub screen_offset: ScreenOffset,
     /// Sound-effect volume, 0..=100.
     pub sfx_volume: u8,
     /// Music volume, 0..=100.
@@ -61,7 +75,8 @@ impl<const ACTIONS: usize, const SCORES: usize> Profile<ACTIONS, SCORES> {
     /// caller's game-specific action map.
     pub const fn new(actions: ActionMap<ACTIONS>) -> Self {
         Self {
-            brightness: 75,
+            brightness: Brightness::DEFAULT,
+            screen_offset: ScreenOffset::CENTRE,
             sfx_volume: 100,
             music_volume: 100,
             move_deadzone: 18,
@@ -74,14 +89,15 @@ impl<const ACTIONS: usize, const SCORES: usize> Profile<ACTIONS, SCORES> {
         }
     }
 
-    /// Exact encoded byte length for this profile shape.
+    /// Exact encoded byte length for this profile shape (the current version).
     pub const fn encoded_len() -> usize {
         HEADER_LEN + ACTIONS * BINDING_LEN + SCORES * SCORE_LEN
     }
 
     /// Clamp user-controlled values to safe shared ranges.
     pub fn sanitize(&mut self) {
-        self.brightness = self.brightness.min(100);
+        // `Brightness` and `ScreenOffset` clamp in their constructors, so any
+        // value a profile holds is already inside -5..=5 and -16..=16.
         self.sfx_volume = self.sfx_volume.min(100);
         self.music_volume = self.music_volume.min(100);
         self.move_deadzone = self.move_deadzone.clamp(0, 64);
@@ -129,7 +145,7 @@ impl<const ACTIONS: usize, const SCORES: usize> Profile<ACTIONS, SCORES> {
         out[5] = ACTIONS as u8;
         out[6] = SCORES as u8;
         out[7] = self.flags;
-        out[8] = self.brightness;
+        out[8] = self.brightness.to_byte();
         out[9] = self.sfx_volume;
         out[10] = self.music_volume;
         out[11] = self.move_deadzone;
@@ -146,29 +162,51 @@ impl<const ACTIONS: usize, const SCORES: usize> Profile<ACTIONS, SCORES> {
             put_u32(out, cursor, score);
             cursor += SCORE_LEN;
         }
+        let [screen_x, screen_y] = self.screen_offset.to_bytes();
+        out[16] = screen_x;
+        out[17] = screen_y;
         out[15] = checksum(&out[..15], &out[HEADER_LEN..len]);
         Ok(len)
     }
 
-    /// Decode a profile of this exact action/score shape.
+    /// Decode a profile of this exact action/score shape, from a record of
+    /// the current version or of version 1 (which carries no picture options,
+    /// so those read as their defaults).
     pub fn decode(bytes: &[u8]) -> Result<Self, CodecError> {
-        let len = Self::encoded_len();
-        if len > MAX_RECORD_LEN || bytes.len() < len {
+        if bytes.len() < HEADER_LEN_V1 {
             return Err(CodecError::BufferTooSmall);
         }
         if bytes[..4] != MAGIC {
             return Err(CodecError::BadMagic);
         }
-        if bytes[4] != VERSION {
+        let version = bytes[4];
+        if !(OLDEST_VERSION..=VERSION).contains(&version) {
             return Err(CodecError::UnsupportedVersion);
+        }
+        let header_len = if version == 1 {
+            HEADER_LEN_V1
+        } else {
+            HEADER_LEN
+        };
+        let len = header_len + ACTIONS * BINDING_LEN + SCORES * SCORE_LEN;
+        if len > MAX_RECORD_LEN || bytes.len() < len {
+            return Err(CodecError::BufferTooSmall);
         }
         if bytes[5] as usize != ACTIONS || bytes[6] as usize != SCORES {
             return Err(CodecError::WrongShape);
         }
-        if bytes[15] != checksum(&bytes[..15], &bytes[HEADER_LEN..len]) {
+        if bytes[15] != checksum(&bytes[..15], &bytes[header_len..len]) {
             return Err(CodecError::BadChecksum);
         }
-        let mut cursor = HEADER_LEN;
+        let (brightness, screen_offset) = if version == 1 {
+            (Brightness::DEFAULT, ScreenOffset::CENTRE)
+        } else {
+            (
+                Brightness::from_byte(bytes[8]),
+                ScreenOffset::from_bytes([bytes[16], bytes[17]]),
+            )
+        };
+        let mut cursor = header_len;
         let mut bindings = [psx_pad::ActionBinding::UNBOUND; ACTIONS];
         for binding in &mut bindings {
             binding.primary = get_u16(bytes, cursor);
@@ -181,7 +219,8 @@ impl<const ACTIONS: usize, const SCORES: usize> Profile<ACTIONS, SCORES> {
             cursor += SCORE_LEN;
         }
         let mut profile = Self {
-            brightness: bytes[8],
+            brightness,
+            screen_offset,
             sfx_volume: bytes[9],
             music_volume: bytes[10],
             move_deadzone: bytes[11],
@@ -385,21 +424,183 @@ mod tests {
         ActionBinding::new(button::START, 0),
     ]);
 
+    /// A version 1 record exactly as the first release wrote it: a 16 byte
+    /// header whose byte 8 is a 0..=100 brightness percentage.
+    fn version_one_record(percent: u8) -> ([u8; MAX_RECORD_LEN], usize) {
+        let mut out = [0u8; MAX_RECORD_LEN];
+        let len = HEADER_LEN_V1 + 2 * BINDING_LEN + 3 * SCORE_LEN;
+        out[..4].copy_from_slice(&MAGIC);
+        out[4] = 1;
+        out[5] = 2;
+        out[6] = 3;
+        out[7] = FLAG_INVERT_Y;
+        out[8] = percent;
+        out[9] = 80;
+        out[10] = 60;
+        out[11] = 20;
+        out[12] = 14;
+        out[13] = 120;
+        out[14] = 2;
+        put_u16(&mut out, 16, button::CROSS);
+        put_u16(&mut out, 18, button::CIRCLE);
+        put_u16(&mut out, 20, button::START);
+        put_u16(&mut out, 22, 0);
+        put_u32(&mut out, 24, 7);
+        put_u32(&mut out, 28, 42);
+        put_u32(&mut out, 32, 9);
+        out[15] = checksum(&out[..15], &out[HEADER_LEN_V1..len]);
+        (out, len)
+    }
+
     #[test]
     fn profile_round_trips_and_sanitizes() {
         let mut original = Profile::<2, 3>::new(ACTIONS);
-        original.brightness = 140;
         original.look_speed_percent = 220;
         original.set_invert_y(true);
         original.high_scores = [7, 42, 9];
         let mut bytes = [0u8; MAX_RECORD_LEN];
         let len = original.encode(&mut bytes).unwrap();
+        assert_eq!(len, Profile::<2, 3>::encoded_len());
+        assert_eq!(bytes[4], VERSION);
         let decoded = Profile::<2, 3>::decode(&bytes[..len]).unwrap();
-        assert_eq!(decoded.brightness, 100);
         assert_eq!(decoded.look_speed_percent, 200);
         assert!(decoded.invert_y());
         assert_eq!(decoded.actions, ACTIONS);
         assert_eq!(decoded.high_scores, [7, 42, 9]);
+        assert_eq!(decoded.brightness, Brightness::DEFAULT);
+        assert_eq!(decoded.screen_offset, ScreenOffset::CENTRE);
+    }
+
+    #[test]
+    fn every_brightness_step_and_screen_offset_round_trips() {
+        for level in -5..=5i8 {
+            let mut original = Profile::<2, 1>::new(ACTIONS);
+            original.brightness = Brightness::new(level);
+            original.screen_offset = ScreenOffset::new(level * 3, -level * 3);
+            let mut bytes = [0u8; MAX_RECORD_LEN];
+            let len = original.encode(&mut bytes).unwrap();
+            let decoded = Profile::<2, 1>::decode(&bytes[..len]).unwrap();
+            assert_eq!(decoded.brightness.level(), level);
+            assert_eq!(
+                decoded.screen_offset.pixels(),
+                ((level * 3) as i16, (-level * 3) as i16)
+            );
+            assert_eq!(decoded, original);
+        }
+    }
+
+    #[test]
+    fn the_brightness_byte_is_the_display_crates_save_byte() {
+        let mut profile = Profile::<2, 1>::new(ACTIONS);
+        profile.brightness = Brightness::new(-3);
+        let mut bytes = [0u8; MAX_RECORD_LEN];
+        profile.encode(&mut bytes).unwrap();
+        assert_eq!(bytes[8], Brightness::new(-3).to_byte());
+        assert_eq!(bytes[8], 0xFD);
+    }
+
+    #[test]
+    fn an_out_of_range_brightness_or_offset_byte_is_clamped_on_load() {
+        let mut profile = Profile::<2, 1>::new(ACTIONS);
+        let mut bytes = [0u8; MAX_RECORD_LEN];
+        let len = profile.encode(&mut bytes).unwrap();
+        // 0x7F is +127 and 0x80 is -128 in two's complement; 0x64 stands for
+        // the old percentage scale. Re-seal the checksum after each edit.
+        for (byte, level) in [(0x7F, 5), (0x80, -5), (0x64, 5), (0xFB, -5), (0x05, 5)] {
+            bytes[8] = byte;
+            bytes[16] = 0x7F;
+            bytes[17] = 0x80;
+            bytes[15] = checksum(&bytes[..15], &bytes[HEADER_LEN..len]);
+            profile = Profile::<2, 1>::decode(&bytes[..len]).unwrap();
+            assert_eq!(profile.brightness.level(), level);
+            assert_eq!(profile.screen_offset.pixels(), (16, -16));
+        }
+    }
+
+    #[test]
+    fn a_version_one_record_loads_with_the_picture_defaults() {
+        // 75 was the shipped percentage; 100 is its ceiling; 0 its floor.
+        for percent in [75, 100, 0] {
+            let (bytes, len) = version_one_record(percent);
+            let loaded = Profile::<2, 3>::decode(&bytes[..len]).unwrap();
+            assert_eq!(loaded.brightness, Brightness::DEFAULT);
+            assert_eq!(loaded.screen_offset, ScreenOffset::CENTRE);
+            // Everything else the old record held survives.
+            assert_eq!(loaded.sfx_volume, 80);
+            assert_eq!(loaded.music_volume, 60);
+            assert_eq!(loaded.move_deadzone, 20);
+            assert_eq!(loaded.look_deadzone, 14);
+            assert_eq!(loaded.look_speed_percent, 120);
+            assert_eq!(loaded.difficulty, 2);
+            assert!(loaded.invert_y());
+            assert_eq!(loaded.actions, ACTIONS);
+            assert_eq!(loaded.high_scores, [7, 42, 9]);
+        }
+    }
+
+    #[test]
+    fn a_version_one_record_is_rewritten_as_version_two() {
+        let (old, old_len) = version_one_record(75);
+        let mut loaded = Profile::<2, 3>::decode(&old[..old_len]).unwrap();
+        loaded.brightness = loaded.brightness.stepped(2);
+        let mut bytes = [0u8; MAX_RECORD_LEN];
+        let len = loaded.encode(&mut bytes).unwrap();
+        assert_eq!(len, old_len + 2);
+        assert_eq!(bytes[4], 2);
+        let reloaded = Profile::<2, 3>::decode(&bytes[..len]).unwrap();
+        assert_eq!(reloaded, loaded);
+        assert_eq!(reloaded.brightness.level(), 2);
+        assert_eq!(reloaded.high_scores, [7, 42, 9]);
+    }
+
+    #[test]
+    fn a_torn_version_one_record_and_an_unknown_version_are_rejected() {
+        let (mut bytes, len) = version_one_record(75);
+        bytes[len - 1] ^= 0x01;
+        assert_eq!(
+            Profile::<2, 3>::decode(&bytes[..len]),
+            Err(CodecError::BadChecksum)
+        );
+        let (mut bytes, len) = version_one_record(75);
+        bytes[4] = 0;
+        assert_eq!(
+            Profile::<2, 3>::decode(&bytes[..len]),
+            Err(CodecError::UnsupportedVersion)
+        );
+        bytes[4] = VERSION + 1;
+        assert_eq!(
+            Profile::<2, 3>::decode(&bytes[..len]),
+            Err(CodecError::UnsupportedVersion)
+        );
+        // A version 1 record cut short of its payload is too small, not a
+        // version 2 reading of the next bytes.
+        let (bytes, len) = version_one_record(75);
+        assert_eq!(
+            Profile::<2, 3>::decode(&bytes[..len - 1]),
+            Err(CodecError::BufferTooSmall)
+        );
+        // Another shape is refused for both versions.
+        let (bytes, len) = version_one_record(75);
+        assert_eq!(
+            Profile::<2, 2>::decode(&bytes[..len]),
+            Err(CodecError::WrongShape)
+        );
+    }
+
+    #[cfg(feature = "card")]
+    #[test]
+    fn a_version_one_card_file_loads_and_is_replaced_by_version_two() {
+        let (old, old_len) = version_one_record(75);
+        let mut card = psx_mc::Card::new(psx_mc::RamCard::new());
+        card.format().unwrap();
+        card.write("BESLES-00000SETTEST1", "SETTINGS TEST", &old[..old_len])
+            .unwrap();
+        let mut profile = load::<_, 2, 3>(&mut card, "BESLES-00000SETTEST1").unwrap();
+        assert_eq!(profile.brightness, Brightness::DEFAULT);
+        profile.brightness = Brightness::new(-4);
+        save(&mut card, "BESLES-00000SETTEST1", "SETTINGS TEST", &profile).unwrap();
+        let reloaded = load::<_, 2, 3>(&mut card, "BESLES-00000SETTEST1").unwrap();
+        assert_eq!(reloaded, profile);
     }
 
     #[test]
