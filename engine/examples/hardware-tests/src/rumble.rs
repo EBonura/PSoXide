@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //! DualShock motors, on the wire, in the controller section of the run.
 //!
-//! The packet sequence is the documented one, written out here byte by byte so
-//! the console's answers are the evidence (the SDK's motor API will replace
-//! the packets, not the questions):
+//! The objective part writes the documented packet sequence out byte by byte so
+//! the console's raw answers are the evidence; the operator part drives the
+//! motors through the SDK's own API (`psx_pad::enable_rumble_on` and
+//! `poll_rumble_on`), so the console tests what ships. The packets:
 //!
 //! * enter config mode: `01 43 00 01 00 00 00 00 00`;
 //! * map the motors: `01 4D 00 00 01 FF FF FF FF` (poll byte 0 drives the
@@ -32,6 +33,9 @@ use crate::sio_timing::{transaction, SAFE_SETUP};
 use crate::ui;
 use crate::{push_timing_record, TimingRecord, TIMING_RECORD_COUNT};
 use psx_font::FontAtlas;
+use psx_io::controller_port::Port;
+use psx_io::periph::ControllerPort;
+use psx_pad::{button, Rumble};
 use psx_rt::interrupts;
 
 type Records = [TimingRecord; TIMING_RECORD_COUNT];
@@ -42,7 +46,7 @@ const RUMBLE_CONFIG_RECORD: u16 = 0x760;
 const RUMBLE_MAPPING_RECORD: u16 = 0x761;
 /// rec rumble_after: id_and_5a_after_motor_poll, buttons_in_that_poll, id_after_stop_all (0x762 and 0x765)
 const RUMBLE_AFTER_RECORD: u16 = 0x762;
-/// rec rumble_operator: answers_two_bits_each, stimuli_asked, port_tested (0x766; answers 0 none, 1 yes, 2 no, in order: small, large 0 64 128 192 255, large pulses, small pulses)
+/// rec rumble_operator: answers_two_bits_each, stimuli_asked, port_tested_and_api_enabled_in_bit_8 (0x766; answers 0 none, 1 yes, 2 no, in order: small, large 0 64 128 192 255, large pulses, small pulses)
 const RUMBLE_OPERATOR_RECORD: u16 = 0x766;
 /// rec rumble_poll_cost: poll_cycles_idle, poll_cycles_motors_on, polls_each (port 1 0x767, port 2 0x768)
 const RUMBLE_COST_RECORD: u16 = 0x767;
@@ -71,26 +75,33 @@ fn wait_frames(count: u32) {
     }
 }
 
-/// Poll once a frame with the given motor bytes for `frames` frames; returns
-/// the last poll's buttons (active low) and whether the pad answered.
-fn hold(port2: bool, small: u8, large: u8, frames: u32) -> (u16, bool) {
-    let mut buttons = 0xFFFFu16;
-    let mut answered = false;
+fn socket(port2: bool) -> Port {
+    if port2 {
+        Port::Two
+    } else {
+        Port::One
+    }
+}
+
+fn api_poll(port2: bool, rumble: Rumble) -> psx_pad::PadState {
+    // SAFETY: a token is a logic guard; nothing else drives SIO0 here.
+    let mut port = unsafe { ControllerPort::steal() };
+    psx_pad::poll_rumble_on(&mut port, socket(port2), rumble)
+}
+
+/// Poll once a frame through the SDK with the given motors for `frames`
+/// frames.
+fn hold(port2: bool, small: u8, large: u8, frames: u32) {
     for _ in 0..frames {
         wait_frames(1);
-        let seen = send(port2, &poll(small, large));
-        if seen.bytes[2].reply == 0x5A {
-            answered = true;
-            buttons = ((seen.bytes[3].reply as u16) << 8) | seen.bytes[4].reply as u16;
-        }
+        let _ = api_poll(port2, Rumble::new(small != 0, large));
     }
-    (buttons, answered)
 }
 
 fn stop_all(port2: bool) {
     for _ in 0..4 {
         wait_frames(1);
-        let _ = send(port2, &poll(0, 0));
+        let _ = api_poll(port2, Rumble::OFF);
     }
 }
 
@@ -155,6 +166,7 @@ fn objective(port2: bool, records: &mut Records, next: &mut usize) -> bool {
 /// Poll cost with the motors idle and with both running, in system-clock
 /// cycles from select to release, median of eight polls each.
 fn poll_cost(port2: bool, records: &mut Records, next: &mut usize) {
+    crate::bounds::record_start(RUMBLE_COST_RECORD + port2 as u16);
     let mut idle = [0u32; 8];
     let mut busy = [0u32; 8];
     for slot in idle.iter_mut() {
@@ -183,9 +195,8 @@ fn ask(font: &FontAtlas, port2: bool, question: &str) -> u32 {
     let mut released = 0;
     for _ in 0..90 {
         wait_frames(1);
-        let seen = send(port2, &poll(0, 0));
-        let buttons = seen.bytes[4].reply;
-        let pressed = seen.bytes[2].reply == 0x5A && (buttons & 0x60) != 0x60;
+        let state = api_poll(port2, Rumble::OFF);
+        let pressed = state.buttons.bits() & (button::CROSS | button::CIRCLE) != 0;
         if pressed {
             released = 0;
         } else {
@@ -197,15 +208,11 @@ fn ask(font: &FontAtlas, port2: bool, question: &str) -> u32 {
     }
     for _ in 0..180 {
         wait_frames(1);
-        let seen = send(port2, &poll(0, 0));
-        if seen.bytes[2].reply != 0x5A {
-            continue;
-        }
-        let buttons = seen.bytes[4].reply;
-        if buttons & 0x40 == 0 {
+        let state = api_poll(port2, Rumble::OFF);
+        if state.buttons.bits() & button::CROSS != 0 {
             return 1;
         }
-        if buttons & 0x20 == 0 {
+        if state.buttons.bits() & button::CIRCLE != 0 {
             return 2;
         }
     }
@@ -214,7 +221,7 @@ fn ask(font: &FontAtlas, port2: bool, question: &str) -> u32 {
 
 fn prompt(font: &FontAtlas, port2: bool, what: &str, small: u8, large: u8) -> u32 {
     ui::detail(font, "MOTOR", what);
-    let _ = hold(port2, small, large, 60);
+    hold(port2, small, large, 60);
     stop_all(port2);
     let mut line = ui::Line::new();
     line.s(what).s(" FELT? X YES O NO");
@@ -225,13 +232,17 @@ fn prompt(font: &FontAtlas, port2: bool, what: &str, small: u8, large: u8) -> u3
 /// stillness.
 fn pulses(port2: bool, small: u8, large: u8) {
     for length in [1u32, 2, 4, 8, 15] {
-        let _ = hold(port2, small, large, length);
+        hold(port2, small, large, length);
         stop_all(port2);
         wait_frames(length.min(8));
     }
 }
 
 fn operator(font: &FontAtlas, port2: bool, records: &mut Records, next: &mut usize) {
+    // The SDK's own enable (config entry, mapping, exit, a frame apart each).
+    // SAFETY: a token is a logic guard; nothing else drives SIO0 here.
+    let mut port = unsafe { ControllerPort::steal() };
+    let enabled = psx_pad::enable_rumble_on(&mut port, socket(port2));
     let mut answers = 0u32;
     let mut asked = 0u32;
     let mut put = |value: u32| {
@@ -254,7 +265,12 @@ fn operator(font: &FontAtlas, port2: bool, records: &mut Records, next: &mut usi
     push_timing_record(
         records,
         next,
-        record(RUMBLE_OPERATOR_RECORD, answers, asked, port2 as u32 + 1),
+        record(
+            RUMBLE_OPERATOR_RECORD,
+            answers,
+            asked,
+            (port2 as u32 + 1) | ((enabled as u32) << 8),
+        ),
     );
 }
 
@@ -270,12 +286,6 @@ pub(crate) fn run(font: &FontAtlas, records: &mut Records, next: &mut usize) {
     }
     match tested {
         Some(port2) => {
-            // Map the motors again: leaving config mode is not remembered
-            // across a power cycle but is across polls, so this is only
-            // belt and braces after the objective pass.
-            let _ = send(port2, &ENTER_CONFIG);
-            let _ = send(port2, &MAP_MOTORS);
-            let _ = send(port2, &EXIT_CONFIG);
             operator(font, port2, records, next);
         }
         None => push_timing_record(records, next, record(RUMBLE_OPERATOR_RECORD, NONE, 0, NONE)),
