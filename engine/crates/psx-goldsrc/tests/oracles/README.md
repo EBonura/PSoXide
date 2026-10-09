@@ -21,7 +21,7 @@ simulate optical seek time, FIFO loss, DMA or hardware acknowledgement timing.
 Run from the editor root:
 
 ```sh
-python3 engine/crates/psx-goldsrc/tests/chunk_stream_oracle.py
+cargo test --manifest-path engine/Cargo.toml -p psx-goldsrc --test chunk_stream_oracle
 ```
 
 ## Renderer
@@ -31,7 +31,7 @@ unit tests. `RENDER-PROVENANCE.json` reconstructs the CS 988f original using
 only its frozen viewport delta and verifies both original hashes. There is
 one frozen legacy body, not two maintained implementations.
 
-`render_oracle.py` compiles the current shared owner with both thin view
+`render_oracle.rs` compiles the current shared owner with both thin view
 adapters and compares 30,000 full-screen and 210,000 split/windowed polygons
 across six focal lengths, including both split orientations and return to full screen. It compares every output coordinate, RGB/UV/depth,
 clip count and order, guard/extent/refinement decision directly. It also runs
@@ -41,5 +41,5 @@ production internals remain private. These are host release arithmetic gates;
 MIPS layout, GPU output, state and timing are separate acceptance gates.
 
 ```sh
-python3 engine/crates/psx-goldsrc/tests/render_oracle.py
+cargo test --manifest-path engine/Cargo.toml -p psx-goldsrc --test render_oracle
 ```

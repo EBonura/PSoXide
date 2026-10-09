@@ -26,3 +26,10 @@ performance-telemetry = []
 # so `frontend launch --warp-log` can score soft-projected geometry too.
 # Retail hardware ignores the writes; shipping builds compile them out.
 warp-probe = []
+
+[dev-dependencies]
+# The frozen-oracle tests (tests/*_oracle.rs) rewrite legacy source with regexes
+# and check its recorded hashes.
+regex = "1"
+serde_json = "1"
+sha2 = "0.10"
