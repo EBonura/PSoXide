@@ -1135,6 +1135,26 @@ fn only_while_busy_opens_the_source_for_the_transfer_alone() {
 }
 
 #[test]
+fn a_state_query_reopens_the_source_it_finds_closed_and_still_answers() {
+    // The console wrapper closes the source around every foreground call and
+    // tells the engine so; the query must still report where the ticket is,
+    // and leave the source open afterwards.
+    let mut engine = engine();
+    let buf = Buf::new(2);
+    let first = submit(&mut engine, request(0, 2, &buf));
+    let second = submit(&mut engine, request(100, 1, &buf));
+    engine.hw_mut().source_calls.clear();
+    engine.hw_mut().source_open = false;
+    engine.note_source_closed();
+    assert!(matches!(engine.state(first), RequestState::Active { .. }));
+    assert_eq!(engine.hw().source_calls, [true]);
+    engine.hw_mut().source_open = false;
+    engine.note_source_closed();
+    assert_eq!(engine.state(second), RequestState::Queued);
+    assert!(engine.hw().source_open);
+}
+
+#[test]
 fn always_on_keeps_the_source_open_between_transfers() {
     let mut engine = engine();
     assert!(engine.hw().source_open);
