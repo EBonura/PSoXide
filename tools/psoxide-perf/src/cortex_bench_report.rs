@@ -23,8 +23,8 @@ use regex::Regex;
 
 use crate::pyjson::Json;
 use crate::util::{
-    dict_rows, parse_hex, parse_int, read_text, round_places, usage_error, Cli, Error, Result,
-    Token,
+    dict_rows, join_display, parse_hex, parse_int, read_text, round_places, usage_error, Cli,
+    Error, Result, Token,
 };
 
 /// The per-category cycle columns of a `--cpu-cycle-profile-log`.
@@ -196,18 +196,6 @@ fn text_of(value: &Json) -> String {
         Json::Null => "None".to_string(),
         other => other.dumps(None, false),
     }
-}
-
-/// Join like `pathlib`: the `.` components disappear.
-fn join_display(base: &Path, name: &str) -> String {
-    let mut path = PathBuf::new();
-    for component in base.components() {
-        if !matches!(component, std::path::Component::CurDir) {
-            path.push(component);
-        }
-    }
-    path.push(name);
-    path.display().to_string()
 }
 
 const USAGE: &str = "psoxide-perf cortex-bench-report OUT_DIR [--baseline DIR]";

@@ -432,6 +432,134 @@ pub fn usage_error(usage: &str, message: &str) -> i32 {
     2
 }
 
+/// A CSV whose cells are integers, decimal or `0x` hex, as the engine-stress
+/// scripts read them: `int(v, 16) if v.startswith('0x') else int(v or 0)`.
+pub struct IntTable {
+    header: Vec<String>,
+    /// One vector of cells per CSV row, in header order.
+    pub rows: Vec<Vec<i128>>,
+}
+
+impl IntTable {
+    /// Parse CSV text. A short row is an error (Python's `None.startswith`).
+    pub fn parse(text: &str) -> Result<IntTable> {
+        let (header, raw) = dict_rows(text)?;
+        let mut rows = Vec::new();
+        for row in &raw {
+            let mut cells = Vec::new();
+            for name in &header {
+                if row.is_missing(name) {
+                    return Err(Error(
+                        "AttributeError: 'NoneType' object has no attribute 'startswith'"
+                            .to_string(),
+                    ));
+                }
+                let value = row.get(name).unwrap_or("");
+                cells.push(if let Some(hex) = value.strip_prefix("0x") {
+                    i128::from_str_radix(hex, 16).map_err(|_| {
+                        Error(format!("invalid literal for int() with base 16: {value:?}"))
+                    })?
+                } else if value.is_empty() {
+                    0
+                } else {
+                    value
+                        .trim()
+                        .parse::<i128>()
+                        .map_err(|_| Error(format!("invalid literal for int(): {value:?}")))?
+                });
+            }
+            rows.push(cells);
+        }
+        Ok(IntTable { header, rows })
+    }
+
+    /// Read and parse a CSV file.
+    pub fn read(path: &std::path::Path) -> Result<IntTable> {
+        IntTable::parse(&read_text(path)?)
+    }
+
+    /// Column index, if the header names it.
+    pub fn column(&self, name: &str) -> Option<usize> {
+        self.header.iter().position(|h| h == name)
+    }
+
+    /// Cell `name` of row `row` (`row['name']`): an absent column is a KeyError.
+    pub fn at(&self, row: usize, name: &str) -> Result<i128> {
+        let column = self
+            .column(name)
+            .ok_or_else(|| Error(format!("KeyError: '{name}'")))?;
+        Ok(self.rows[row][column])
+    }
+
+    /// Cell `name` of row `row`, or 0 when the column is absent (`row.get(name, 0)`).
+    pub fn at_or_zero(&self, row: usize, name: &str) -> i128 {
+        self.column(name).map_or(0, |c| self.rows[row][c])
+    }
+}
+
+/// `os.path.relpath(target, start)` for absolute paths.
+pub fn relpath(target: &std::path::Path, start: &std::path::Path) -> std::path::PathBuf {
+    let target: Vec<_> = target.components().collect();
+    let start: Vec<_> = start.components().collect();
+    let common = target
+        .iter()
+        .zip(&start)
+        .take_while(|(a, b)| a == b)
+        .count();
+    let mut result = std::path::PathBuf::new();
+    for _ in common..start.len() {
+        result.push("..");
+    }
+    for component in &target[common..] {
+        result.push(component);
+    }
+    if result.as_os_str().is_empty() {
+        result.push(".");
+    }
+    result
+}
+
+/// Join like `pathlib`: the `.` components disappear and a trailing slash is dropped.
+pub fn join_display(base: &std::path::Path, name: &str) -> String {
+    let mut path = std::path::PathBuf::new();
+    for component in base.components() {
+        if !matches!(component, std::path::Component::CurDir) {
+            path.push(component);
+        }
+    }
+    path.push(name);
+    path.display().to_string()
+}
+
+/// Python's `repr()` of a string.
+pub fn py_repr_str(text: &str) -> String {
+    let quote = if text.contains('\'') && !text.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
+    let mut out = String::new();
+    out.push(quote);
+    for c in text.chars() {
+        match c {
+            c if c == quote => {
+                out.push('\\');
+                out.push(c);
+            }
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
+                out.push_str(&format!("\\x{:02x}", c as u32))
+            }
+            c => out.push(c),
+        }
+    }
+    out.push(quote);
+    out
+}
+
 /// Python's `str.splitlines()` (without line ends): breaks on LF, CR, CRLF and
 /// the other Unicode line boundaries.
 pub fn splitlines(text: &str) -> Vec<&str> {
