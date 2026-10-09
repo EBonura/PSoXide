@@ -326,45 +326,11 @@ impl PhotoCapture {
         }
     }
 
-    /// Bytes [`save_blob`](Self::save_blob) needs: a small header and the
-    /// binary.
-    pub(crate) const SAVED_CAP: usize = 8 + BINARY_CAP;
-
-    /// The encoded capture as a card file: flags, failure count and run id,
-    /// then the binary. Returns the length written to `out`.
-    pub(crate) fn save_blob(&self, out: &mut [u8]) -> usize {
-        let len = 8 + self.binary_len as usize;
-        out[0] = self.flags;
-        out[1..3].copy_from_slice(&self.failures.to_le_bytes());
-        out[3..5].copy_from_slice(&self.run_id.to_le_bytes());
-        out[5..8].copy_from_slice(&[0; 3]);
-        out[8..len].copy_from_slice(&self.binary[..self.binary_len as usize]);
-        len
-    }
-
-    /// Take a capture back from a card file written by `save_blob`, ready to
-    /// page through. `false` if the file cannot be one.
-    pub(crate) fn load_saved(&mut self, blob: &[u8]) -> bool {
-        if blob.len() <= 8 || blob.len() - 8 > BINARY_CAP {
-            return false;
-        }
-        let binary_len = blob.len() - 8;
-        self.binary[..binary_len].copy_from_slice(&blob[8..]);
-        let encoded_len = base64_encode(&self.binary[..binary_len], &mut self.payload);
-        self.binary_len = binary_len as u16;
-        self.payload_len = encoded_len as u16;
-        self.page_count = encoded_len.div_ceil(BASE64_CHARS_PER_PAGE).max(1) as u8;
-        self.flags = blob[0];
-        self.failures = u16::from_le_bytes([blob[1], blob[2]]);
-        self.run_id = u16::from_le_bytes([blob[3], blob[4]]);
-        self.binary_crc = u32::from_le_bytes([
-            blob[blob.len() - 4],
-            blob[blob.len() - 3],
-            blob[blob.len() - 2],
-            blob[blob.len() - 1],
-        ]);
-        self.encode_qr(0);
-        true
+    /// Draw `page` of the capture as it stands, without printing it: for the
+    /// per-area checkpoint pages, which must not reach the TTY (only the final
+    /// capture's pages do).
+    pub(crate) fn prepare_page(&mut self, page: usize) {
+        self.encode_qr(page);
     }
 
     /// Never zero: page navigation divides by this, and it is read before the

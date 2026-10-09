@@ -21,14 +21,13 @@ enum Mode {
     Capture,
 }
 
-const MENU: [&str; 5] = [
+const MENU: [&str; 4] = [
     // Row 0 is pinned: `make hwtest-run` selects it by firing CROSS at a fixed
     // tick with the cursor still at its boot position.
     "RUN HARDWARE TEST",
     "CONTROLLER TEST (P1 + P2)",
     "MEMORY CARD (AT OWN RISK)",
     "VIEW LAST CAPTURE",
-    "VIEW SAVED RESULTS (CARD)",
 ];
 const MENU_TOP: i16 = 64;
 const MENU_ROW_PITCH: i16 = 14;
@@ -166,15 +165,8 @@ impl Scene for HardwareTests {
                             self.memcard_armed = false;
                             self.mode = Mode::MemoryCard;
                         }
-                        3 => {
-                            if self.have_capture {
-                                self.open_capture();
-                                self.capture.render_page(0);
-                            }
-                        }
                         _ => {
-                            if crate::checkpoint::load(&mut self.capture) {
-                                self.have_capture = true;
+                            if self.have_capture {
                                 self.open_capture();
                                 self.capture.render_page(0);
                             }

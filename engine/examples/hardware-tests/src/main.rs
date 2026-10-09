@@ -50,7 +50,6 @@ mod bounds;
 mod cd_chain_probe;
 mod cd_route;
 mod cdstream_cases;
-mod checkpoint;
 mod console_tests;
 mod controller_test;
 mod cpu_tests;

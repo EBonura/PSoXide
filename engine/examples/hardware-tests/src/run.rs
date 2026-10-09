@@ -124,8 +124,9 @@ pub(crate) struct Run {
     /// Skip the steps that can hang a console (hold L2 when starting).
     pub(crate) skip_risky: bool,
     /// Write memory-card frames back (the same bytes just read) in the pad
-    /// engine's lease step: only when L1 and R1 were held at the start, as
-    /// the card diagnostic asks for its writes.
+    /// engine's lease step, and show the checkpoint pages after each area: only
+    /// when L1 and R1 were held at the start, as the card diagnostic asks for
+    /// its writes.
     pub(crate) write_cards: bool,
     /// An id for the checkpoint files of this run.
     pub(crate) checkpoint_id: u16,
@@ -888,7 +889,7 @@ pub(crate) fn execute(
             if let Some(previous) = current {
                 handoff(run, previous);
                 if run.write_cards {
-                    save_checkpoint(run, capture);
+                    show_checkpoint(run, capture);
                 }
             }
             reset_area(run, ctx, step.area);
@@ -979,9 +980,14 @@ fn finish(run: &mut Run) {
     report::print_conformance_report(&run.results);
 }
 
-/// The capture so far, encoded quietly and written to the card, so that a run
-/// that stops partway leaves its first areas behind.
-fn save_checkpoint(run: &mut Run, capture: &mut crate::photo::PhotoCapture) {
+/// Frames each checkpoint page stays up.
+const CHECKPOINT_PAGE_FRAMES: u32 = 90;
+
+/// The capture so far, encoded quietly and shown as its QR pages (not printed
+/// to the TTY), so that a run that stops partway leaves its first areas on film.
+/// Only with L1 and R1 held as the run started: a full set after every area
+/// is a lot of pages to film.
+fn show_checkpoint(run: &mut Run, capture: &mut crate::photo::PhotoCapture) {
     run.timing.summary.runs = (run.checkpoint_id >> 8) as u8;
     capture.encode_quiet(
         &run.timing,
@@ -989,7 +995,14 @@ fn save_checkpoint(run: &mut Run, capture: &mut crate::photo::PhotoCapture) {
         run.checkpoint_id as u8,
         run.scans,
     );
-    let _ = crate::checkpoint::save(capture);
+    for page in 0..capture.page_count() {
+        capture.prepare_page(page);
+        crate::photo::draw_capture_page(run.font(), capture, page);
+        for _ in 0..CHECKPOINT_PAGE_FRAMES {
+            let _ = interrupts::try_wait_vblank(4_000_000);
+        }
+    }
+    ui::repaint(run.font());
 }
 
 /// Whether every area's handoff came back clean and the final silence check
