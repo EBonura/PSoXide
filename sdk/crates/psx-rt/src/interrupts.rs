@@ -441,21 +441,29 @@ static mut __psx_rt_claimed_irq: u32 = 0;
 /// is taken again at once, into the owner. Call from foreground code when the
 /// wrapper is installed; [`release_interrupt_sources`] undoes it.
 pub fn claim_interrupt_sources(bits: u32) {
-    // SAFETY: a foreground read-modify-write of a word the exception handler
-    // only reads; an aligned word store cannot tear.
-    unsafe {
-        let claimed = core::ptr::read_volatile(&raw const __psx_rt_claimed_irq);
-        core::ptr::write_volatile(&raw mut __psx_rt_claimed_irq, claimed | bits);
-    }
+    // The CD wrapper's engine opens and closes its source, and so claims and
+    // releases it, from its interrupt handler too; with interrupts on, that
+    // could land between this read and write and be overwritten.
+    psx_io::irq::without_interrupts(|| {
+        // SAFETY: the read-modify-write runs with CPU interrupts off, so no
+        // handler writes the word meanwhile; the exception handler only reads
+        // it, and an aligned word store cannot tear.
+        unsafe {
+            let claimed = core::ptr::read_volatile(&raw const __psx_rt_claimed_irq);
+            core::ptr::write_volatile(&raw mut __psx_rt_claimed_irq, claimed | bits);
+        }
+    });
 }
 
 /// Undo [`claim_interrupt_sources`] for `bits`.
 pub fn release_interrupt_sources(bits: u32) {
-    // SAFETY: as in `claim_interrupt_sources`.
-    unsafe {
-        let claimed = core::ptr::read_volatile(&raw const __psx_rt_claimed_irq);
-        core::ptr::write_volatile(&raw mut __psx_rt_claimed_irq, claimed & !bits);
-    }
+    psx_io::irq::without_interrupts(|| {
+        // SAFETY: as in `claim_interrupt_sources`.
+        unsafe {
+            let claimed = core::ptr::read_volatile(&raw const __psx_rt_claimed_irq);
+            core::ptr::write_volatile(&raw mut __psx_rt_claimed_irq, claimed & !bits);
+        }
+    });
 }
 
 /// The sources currently claimed.
@@ -1239,6 +1247,19 @@ mod tests {
             GPU_BIT
         );
         assert_eq!(stray_interrupt_sources(CDROM_BIT, VBLANK_BIT, INTERRUPT), 0);
+    }
+
+    #[test]
+    fn claims_add_and_release_independently() {
+        // Nothing else in the host tests touches the claim word.
+        assert_eq!(claimed_interrupt_sources(), 0);
+        claim_interrupt_sources(0x80 | 0x10);
+        claim_interrupt_sources(0x01);
+        assert_eq!(claimed_interrupt_sources(), 0x91);
+        release_interrupt_sources(0x10);
+        assert_eq!(claimed_interrupt_sources(), 0x81);
+        release_interrupt_sources(0x81);
+        assert_eq!(claimed_interrupt_sources(), 0);
     }
 
     #[test]

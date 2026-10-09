@@ -526,3 +526,22 @@ fn rumble_is_off_by_default_and_the_plain_poll_is_unchanged() {
     poll_on(&mut MockBus, Port::One);
     mock::with(|m| assert_eq!(m.motor_tx, [(0x73, 0, 0)]));
 }
+
+#[test]
+fn one_empty_reply_right_after_the_exit_does_not_make_a_requested_pad_absent() {
+    // The pad was just configured, so it is there: a single unanswered address
+    // byte on the verifying poll is retried like any glitch on a pad that was
+    // seen, not taken for an unplug.
+    start(Model {
+        sequence: vec![
+            (0x41, Fault::None, 0),
+            (0xF3, Fault::None, 0),
+            (0xF3, Fault::None, 0),
+            (0xFF, Fault::None, 0),
+            (0x73, Fault::None, 0),
+        ],
+        ..digital_dualshock()
+    });
+    assert_eq!(require_quickly(), AnalogRequirement::Analog);
+    mock::with(|m| assert_eq!(m.attempts, 5));
+}
