@@ -33,6 +33,16 @@ shipped without either, which is why no machine-code baseline exists for them.
 
 ## History
 
+### v2.3 (2026-10-09, schema PX8)
+
+MINOR: harness fixes for what the v2.2 console run showed. Records are added; three existing ones change what they report, named below (`0x767`/`0x768`, the first field of `0x41C`, and the handoff flag bit 1), because the old values were measuring the harness rather than the machine.
+
+- Motor questions (`rumble.rs`): the v2.2 answers looked shifted by one prompt (a CROSS landed at once on `LARGE 0`). Each question now stays up for a second with the pad ignored, then waits for every button to be let go, then takes the next press (four seconds for both). A button still held after that is a no answer, never an answer. New records `0x771`-`0x773` (the raw button word of each answer, then a mask of questions whose buttons were never let go) and `0x774`-`0x776` (the frame each answer arrived on, counted from the question appearing, then a mask of questions that saw a button down during the first second). Also written, as `FFFF`, when no pad takes the config packets.
+- Poll cost (`0x767`/`0x768`): now the cycles from the first byte written to the last byte received. v2.2 recorded the transaction total, which is the last byte's unanswered wait (15.9k idle and with motors on, the harness's own timeout).
+- Handoff baseline (`0x41C`): the interrupt mask is compared on its eleven source bits (0x7FF) on both sides. The v2.2 console read the baseline with the upper half set, the later reads with it clear, so every area was flagged 0x3D and the summary said to look at record `410`. The first field of `0x41C` is the masked baseline; the full 32-bit words are in `0x41D` (baseline low half, baseline high half, the last handoff's high half), and the per-area mask in `0x410`-`0x419` is masked too.
+- Summary screen: the RUN ID on the cover is the id the page headers carry, fixed when the capture is encoded. v2.2 mixed the vblank count into it every time it was drawn.
+- SPU RAM precondition (`run.rs`): SPU RAM is not cleared at power on and a previous program's data stays through a disc swap. At the start of the SPU area the run now zeroes SPU RAM from 0x1010 up with the DMA upload and records three regions before (`0x777`) and after (`0x778`), each folded to 16 bits. The conformance cases that write and read back (`0xBE`, `0xBF`) and SB1/SB2 report what they read, and for a write that does not land that is whatever was there: v2.2 moved `0xBE`/`0xBF` (38FD746D, B0526890; v1.24, v1.28 and v2.1 had DB9A456D, 53C8E737) and records `431`, `481`, `493`. They should now agree from run to run. The emulator starts with zeroed SPU RAM, so its values do not move.
+
 ### v2.2 (2026-10-09, schema PX8)
 
 MINOR: records are only added; every existing record measures what it did, except where the first item below stops two probes from measuring a runaway. Pins the SDK pad integration branch (`integ/pad-2026-10-08`) and drives the motors through its motor API again.

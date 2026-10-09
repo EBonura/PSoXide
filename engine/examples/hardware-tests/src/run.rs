@@ -20,7 +20,8 @@
 //!
 //! The record ids this file owns:
 //! `0x410`-`0x419` area handoffs, `0x41A` final silence, `0x41B` run info,
-//! `0x41C` the handoff baseline.
+//! `0x41C` the handoff baseline, `0x41D` the raw interrupt mask words,
+//! `0x777` and `0x778` SPU RAM before and after the scrub.
 
 use super::*;
 use crate::ui;
@@ -102,8 +103,13 @@ const H_CLEAN: u16 = 0x3F;
 
 /// rec handoff: clean_flags_0x3F_is_clean, interrupt_mask, voices_active_high_dma_busy_mask_low
 pub(crate) const HANDOFF: u16 = 0x410;
-/// rec handoff_baseline: irq_mask_baseline, dpcr_baseline_low_half, dpcr_baseline_high_half (the values every area's handoff is compared with, taken as the run started; v2.1 recorded 0x3D in all ten areas without them)
+/// rec handoff_baseline: irq_mask_baseline_bits_0_to_10, dpcr_baseline_low_half, dpcr_baseline_high_half (the values every area's handoff is compared with, taken as the run started; v2.1 recorded 0x3D in all ten areas without them; v2.3 masks the interrupt mask to its eleven source bits, the upper bits are not the controller's and read set on the v2.2 console run)
 pub(crate) const HANDOFF_BASELINE: u16 = 0x41C;
+/// rec handoff_irq_raw: irq_baseline_raw_low_half, irq_baseline_raw_high_half, irq_last_handoff_raw_high_half (the full 32-bit interrupt mask reads, so the upper half is on record; v2.2 clamped the baseline to 0xFFFF and flagged every area)
+pub(crate) const HANDOFF_IRQ_RAW: u16 = 0x41D;
+/// The interrupt mask's implemented bits (the eleven sources); the rest of a
+/// 32-bit read is not the controller's.
+const IRQ_MASK_BITS: u32 = 0x07FF;
 /// rec silence_final: flags_0x7F_is_silent, cd_capture_peak, voices_with_envelope
 pub(crate) const SILENCE_FINAL: u16 = 0x41A;
 /// rec run_info: skipped_risky, steps, records_taken
@@ -135,6 +141,8 @@ pub(crate) struct Run {
     pub(crate) checkpoint_id: u16,
     handoffs: [Handoff; AREA_COUNT],
     irq_baseline: u32,
+    /// The last handoff's full 32-bit interrupt mask read.
+    irq_last_raw: u32,
     dpcr_baseline: u32,
     vector_ref: [u32; 2],
     silence: [u16; 3],
@@ -165,6 +173,7 @@ impl Run {
                 busy: 0xFFFF,
             }; AREA_COUNT],
             irq_baseline: 0,
+            irq_last_raw: 0,
             dpcr_baseline: 0,
             vector_ref: [0; 2],
             silence: [0; 3],
@@ -339,6 +348,9 @@ pub(crate) fn reset_area(run: &mut Run, ctx: &mut Ctx, area: Area) {
     // starts from what a game would.
     psx_spu::init();
     silence_spu();
+    if area == Area::Spu {
+        scrub_spu_ram(run);
+    }
     if area != Area::Boot {
         cd_reset();
     }
@@ -355,6 +367,72 @@ pub(crate) fn reset_area(run: &mut Run, ctx: &mut Ctx, area: Area) {
     ctx.request_timing_realign();
     ui::banner(run.font());
     irq::set_mask(run.irq_baseline);
+}
+
+/// rec spu_ram_prescrub: fold_0x1010_4kb, fold_0x3000_6kb, fold_0x30000_4kb (SPU RAM as the run found it at the start of the SPU area, each region folded to 16 bits; the SPU tests read these back after writing, so what a write that does not land reads as is whatever was here; SPU RAM is not cleared at power on and a previous program's data stays)
+pub(crate) const SPU_RAM_PRESCRUB: u16 = 0x777;
+/// rec spu_ram_postscrub: fold_0x1010_4kb, fold_0x3000_6kb, fold_0x30000_4kb (the same regions after the scrub wrote zeros over SPU RAM from 0x1010 up; equal to each other across runs and consoles, which the prescrub values are not)
+pub(crate) const SPU_RAM_POSTSCRUB: u16 = 0x778;
+
+/// Regions of SPU RAM the SPU tests write and read back, as (address, words):
+/// the sample bank base the SB2 RAM stages use, the span the conformance
+/// cases use (0x3000 to 0x4800), and the high address of SB2 stage 4.
+const SPU_SCRUB_REGIONS: [(u32, usize); 3] = [(0x1010, 1024), (0x3000, 1536), (0x3_0000, 1024)];
+const SPU_RAM_END: u32 = 0x8_0000;
+const SPU_SCRUB_CHUNK_WORDS: usize = 4096;
+static mut SPU_SCRUB_ZEROS: [u32; SPU_SCRUB_CHUNK_WORDS] = [0; SPU_SCRUB_CHUNK_WORDS];
+static mut SPU_SCRUB_READ: [u32; 1536] = [0; 1536];
+
+/// Each scrub region read back and folded to 16 bits.
+fn spu_scrub_folds() -> [u32; 3] {
+    // SAFETY: single thread; the buffer is this function's.
+    let buffer = unsafe { &mut *core::ptr::addr_of_mut!(SPU_SCRUB_READ) };
+    let mut folds = [0u32; 3];
+    for (fold, (addr, words)) in folds.iter_mut().zip(SPU_SCRUB_REGIONS) {
+        spu_dma_read(addr, &mut buffer[..words]);
+        let hash = fnv32_words(&buffer[..words]);
+        *fold = (hash ^ (hash >> 16)) & 0xFFFF;
+    }
+    folds
+}
+
+/// SPU RAM is not cleared at power on, and what a previous program left stays
+/// through a disc swap or a reset. The SPU cases write a pattern and read it
+/// back; on the console some of those writes do not land (0xBE, 0xBF), so the
+/// readback hash was whatever the last program left there: v1.24, v1.28 and
+/// v2.1 agreed, v2.2 did not. Zero SPU RAM from 0x1010 up with the DMA upload
+/// (the path 0xA6 shows landing) before the SPU area starts, and record the
+/// regions before and after.
+fn scrub_spu_ram(run: &mut Run) {
+    crate::bounds::record_start(SPU_RAM_PRESCRUB);
+    let before = spu_scrub_folds();
+    // SAFETY: single thread; the zero buffer is this function's and never written.
+    let zeros = unsafe { &*core::ptr::addr_of!(SPU_SCRUB_ZEROS) };
+    let chunk_bytes = (SPU_SCRUB_CHUNK_WORDS * 4) as u32;
+    let mut addr = 0x1010u32;
+    while addr < SPU_RAM_END {
+        // Up to the next 16 KB boundary first, then whole chunks.
+        let next = ((addr / chunk_bytes) + 1) * chunk_bytes;
+        let bytes = (next.min(SPU_RAM_END) - addr) as usize;
+        // SAFETY: the zero buffer is a static array of at least `bytes` bytes.
+        let slice = unsafe { core::slice::from_raw_parts(zeros.as_ptr() as *const u8, bytes) };
+        psx_spu::upload_adpcm(SpuAddr::new(addr), slice);
+        addr = next;
+    }
+    crate::bounds::record_start(SPU_RAM_POSTSCRUB);
+    let after = spu_scrub_folds();
+    run.push(crate::console_tests::record(
+        SPU_RAM_PRESCRUB,
+        before[0],
+        before[1],
+        before[2],
+    ));
+    run.push(crate::console_tests::record(
+        SPU_RAM_POSTSCRUB,
+        after[0],
+        after[1],
+        after[2],
+    ));
 }
 
 fn busy_mask() -> u16 {
@@ -388,7 +466,9 @@ fn handoff(run: &mut Run, area: Area) {
     if read_vector() == run.vector_ref {
         flags |= H_VECTOR;
     }
-    if irq::mask() == run.irq_baseline {
+    let mask_raw = irq::mask();
+    run.irq_last_raw = mask_raw;
+    if mask_raw & IRQ_MASK_BITS == run.irq_baseline & IRQ_MASK_BITS {
         flags |= H_IRQ_MASK;
     }
     if busy == 0 {
@@ -406,11 +486,11 @@ fn handoff(run: &mut Run, area: Area) {
     }
     run.handoffs[area.index()] = Handoff {
         flags,
-        irq_mask: irq::mask() as u16,
+        irq_mask: (mask_raw & IRQ_MASK_BITS) as u16,
         busy: ((active as u16) << 8) | busy,
     };
     tty::print("hardware-tests: handoff mask=0x");
-    tty::print_hex_u32(irq::mask());
+    tty::print_hex_u32(mask_raw);
     tty::print(" baseline=0x");
     tty::print_hex_u32(run.irq_baseline);
     tty::print("\n");
@@ -952,9 +1032,19 @@ fn finish(run: &mut Run) {
         &mut run.next,
         crate::console_tests::record(
             HANDOFF_BASELINE,
-            run.irq_baseline,
+            run.irq_baseline & IRQ_MASK_BITS,
             run.dpcr_baseline & 0xFFFF,
             run.dpcr_baseline >> 16,
+        ),
+    );
+    push_timing_record(
+        &mut run.timing.records,
+        &mut run.next,
+        crate::console_tests::record(
+            HANDOFF_IRQ_RAW,
+            run.irq_baseline & 0xFFFF,
+            run.irq_baseline >> 16,
+            run.irq_last_raw >> 16,
         ),
     );
     let silence = crate::console_tests::record(

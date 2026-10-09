@@ -48,7 +48,7 @@ const RUMBLE_MAPPING_RECORD: u16 = 0x761;
 const RUMBLE_AFTER_RECORD: u16 = 0x762;
 /// rec rumble_operator: answers_two_bits_each, stimuli_asked, port_tested_and_api_enabled_in_bit_8 (0x766; answers 0 none, 1 yes, 2 no, in order: small, large 0 64 128 192 255, large pulses, small pulses)
 const RUMBLE_OPERATOR_RECORD: u16 = 0x766;
-/// rec rumble_poll_cost: poll_cycles_idle, poll_cycles_motors_on, polls_each (port 1 0x767, port 2 0x768)
+/// rec rumble_poll_cost: poll_cycles_idle, poll_cycles_motors_on, polls_each (port 1 0x767, port 2 0x768; cycles from the first byte written to the last byte received, v2.3; v2.2 recorded the last byte's unanswered timeout window)
 const RUMBLE_COST_RECORD: u16 = 0x767;
 
 /// rec rumble_enter_a: last_attempt_replies_1_2, replies_3_4, replies_5_6 (the nine-byte reply to Enter Config, bytes 1 to 8 as pairs; port 1 0x769, port 2 0x76B; v2.1 saw 0xFF with no 0x5A)
@@ -59,10 +59,22 @@ const RUMBLE_ENTER_B_RECORD: u16 = 0x76A;
 const PAD_IDENTITY_RECORD: u16 = 0x76D;
 /// rec pad_model: query_replies_3_4, query_replies_5_6, query_replies_7_8 (the 0x45 model query after the attempts to enter config mode; port 1 0x76F, port 2 0x770; bytes 3 to 8 are the model, mode and LED bytes when the pad is in config mode, 0xFF otherwise)
 const PAD_MODEL_RECORD: u16 = 0x76F;
+/// rec rumble_answer_buttons: raw_buttons_stimulus_0, raw_buttons_stimulus_1, raw_buttons_stimulus_2 (0x771 stimuli 0 to 2, 0x772 stimuli 3 to 5, 0x773 stimuli 6 and 7 then a mask of the questions whose buttons were never let go; a word is the pad's active-high button bits when the answer was taken, 0xFFFF for no answer)
+const RUMBLE_ANSWER_BUTTONS_RECORD: u16 = 0x771;
+/// rec rumble_answer_frames: answer_frame_stimulus_0, answer_frame_stimulus_1, answer_frame_stimulus_2 (frames from the question appearing to the answer; 0x774 stimuli 0 to 2, 0x775 stimuli 3 to 5, 0x776 stimuli 6 and 7 then a mask of the questions that saw a button down during the first second, when input is ignored; 0xFFFF for no answer)
+const RUMBLE_ANSWER_FRAMES_RECORD: u16 = 0x774;
+/// Frames a question stays up with the pad ignored.
+const ASK_SHOW_FRAMES: u32 = 60;
+/// Consecutive frames with no button down before a question takes a press.
+const ASK_RELEASED_FRAMES: u32 = 6;
+/// Frames after the first second in which the release and then the press must come.
+const ASK_ANSWER_FRAMES: u32 = 240;
 /// Attempts at Enter Config, a frame apart.
 const ENTER_ATTEMPTS: u32 = 4;
 
 const NONE: u32 = 0xFFFF;
+/// Questions the operator part asks.
+const STIMULI: usize = 8;
 const ENTER_CONFIG: [u8; 9] = [0x01, 0x43, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00];
 const MAP_MOTORS: [u8; 9] = [0x01, 0x4D, 0x00, 0x00, 0x01, 0xFF, 0xFF, 0xFF, 0xFF];
 const EXIT_CONFIG: [u8; 9] = [0x01, 0x43, 0x00, 0x00, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A];
@@ -281,18 +293,21 @@ fn objective(font: &FontAtlas, port2: bool, records: &mut Records, next: &mut us
 }
 
 /// Poll cost with the motors idle and with both running, in system-clock
-/// cycles from select to release, median of eight polls each.
+/// cycles from the first byte written to the last byte received (the select
+/// delay and the wait for an answer that never comes after the last byte are
+/// not in it), median of eight polls each. v2.2 used the transaction's total,
+/// which is the last byte's unanswered window.
 fn poll_cost(port2: bool, records: &mut Records, next: &mut usize) {
     crate::bounds::record_start(RUMBLE_COST_RECORD + port2 as u16);
     let mut idle = [0u32; 8];
     let mut busy = [0u32; 8];
     for slot in idle.iter_mut() {
         wait_frames(1);
-        *slot = send(port2, &poll(0, 0)).total as u32;
+        *slot = send(port2, &poll(0, 0)).span;
     }
     for slot in busy.iter_mut() {
         wait_frames(1);
-        *slot = send(port2, &poll(0x01, 0xFF)).total as u32;
+        *slot = send(port2, &poll(0x01, 0xFF)).span;
     }
     stop_all(port2);
     let (_, idle_med, _) = spread(&mut idle);
@@ -304,39 +319,76 @@ fn poll_cost(port2: bool, records: &mut Records, next: &mut usize) {
     );
 }
 
-/// Ask `question` and wait three seconds for CROSS (yes) or CIRCLE (no) on
-/// the pad, polled once a frame with the motors at zero. 1 yes, 2 no, 0 none.
-fn ask(font: &FontAtlas, port2: bool, question: &str) -> u32 {
-    ui::detail(font, "MOTOR", question);
-    // Let a button still held from the last answer go first.
-    let mut released = 0;
-    for _ in 0..90 {
-        wait_frames(1);
-        let state = api_poll(port2, Rumble::OFF);
-        let pressed = state.buttons.bits() & (button::CROSS | button::CIRCLE) != 0;
-        if pressed {
-            released = 0;
-        } else {
-            released += 1;
-        }
-        if released >= 6 {
-            break;
-        }
-    }
-    for _ in 0..180 {
-        wait_frames(1);
-        let state = api_poll(port2, Rumble::OFF);
-        if state.buttons.bits() & button::CROSS != 0 {
-            return 1;
-        }
-        if state.buttons.bits() & button::CIRCLE != 0 {
-            return 2;
-        }
-    }
-    0
+/// What one question got.
+#[derive(Copy, Clone)]
+struct Answer {
+    /// 1 yes, 2 no, 0 none.
+    value: u32,
+    /// The raw active-high button word when the answer was taken.
+    buttons: u32,
+    /// Frames from the question appearing to the answer.
+    frame: u32,
+    /// A button was down during the first second, when input is ignored.
+    early: bool,
+    /// No frame in the answer window had every button up.
+    stuck: bool,
 }
 
-fn prompt(font: &FontAtlas, port2: bool, what: &str, small: u8, large: u8) -> u32 {
+impl Answer {
+    const NONE: Answer = Answer {
+        value: 0,
+        buttons: NONE,
+        frame: NONE,
+        early: false,
+        stuck: false,
+    };
+}
+
+/// Ask `question`. The pad is polled once a frame with the motors at zero. For
+/// the first second the question only shows (a press during it is noted and
+/// ignored), then every button must be up for a few frames in a row, and only
+/// a press after that counts: CROSS yes, CIRCLE no. Four seconds for the
+/// release and the press together; every wait is a frame count.
+fn ask(font: &FontAtlas, port2: bool, question: &str) -> Answer {
+    ui::detail(font, "MOTOR", question);
+    let mut answer = Answer::NONE;
+    let mut frame = 0u32;
+    for _ in 0..ASK_SHOW_FRAMES {
+        wait_frames(1);
+        frame += 1;
+        let state = api_poll(port2, Rumble::OFF);
+        if state.buttons.bits() != 0 {
+            answer.early = true;
+        }
+    }
+    let mut released = 0u32;
+    for _ in 0..ASK_ANSWER_FRAMES {
+        wait_frames(1);
+        frame += 1;
+        let bits = api_poll(port2, Rumble::OFF).buttons.bits();
+        if released < ASK_RELEASED_FRAMES {
+            released = if bits == 0 { released + 1 } else { 0 };
+            continue;
+        }
+        let value = if bits & button::CROSS != 0 {
+            1
+        } else if bits & button::CIRCLE != 0 {
+            2
+        } else {
+            0
+        };
+        if value != 0 {
+            answer.value = value;
+            answer.buttons = bits as u32;
+            answer.frame = frame;
+            return answer;
+        }
+    }
+    answer.stuck = released < ASK_RELEASED_FRAMES;
+    answer
+}
+
+fn prompt(font: &FontAtlas, port2: bool, what: &str, small: u8, large: u8) -> Answer {
     ui::detail(font, "MOTOR", what);
     hold(port2, small, large, 60);
     stop_all(port2);
@@ -361,9 +413,11 @@ fn operator(font: &FontAtlas, port2: bool, records: &mut Records, next: &mut usi
     let mut port = unsafe { ControllerPort::steal() };
     let enabled = psx_pad::enable_rumble_on(&mut port, socket(port2));
     let mut answers = 0u32;
-    let mut asked = 0u32;
-    let mut put = |value: u32| {
-        answers |= value << (2 * asked);
+    let mut taken = [Answer::NONE; STIMULI];
+    let mut asked = 0usize;
+    let mut put = |answer: Answer| {
+        answers |= answer.value << (2 * asked);
+        taken[asked] = answer;
         asked += 1;
     };
     put(prompt(font, port2, "SMALL ON", 0x01, 0x00));
@@ -385,10 +439,58 @@ fn operator(font: &FontAtlas, port2: bool, records: &mut Records, next: &mut usi
         record(
             RUMBLE_OPERATOR_RECORD,
             answers,
-            asked,
+            asked as u32,
             (port2 as u32 + 1) | ((enabled as u32) << 8),
         ),
     );
+    push_answer_records(records, next, &taken);
+}
+
+/// The raw button words and arrival frames of the operator's answers, in the
+/// six records `0x771` to `0x776`.
+fn push_answer_records(records: &mut Records, next: &mut usize, taken: &[Answer; STIMULI]) {
+    let mut stuck = 0u32;
+    let mut early = 0u32;
+    for (index, answer) in taken.iter().enumerate() {
+        stuck |= (answer.stuck as u32) << index;
+        early |= (answer.early as u32) << index;
+    }
+    let word = |index: usize, frames: bool| -> u32 {
+        match taken.get(index) {
+            Some(answer) if frames => answer.frame,
+            Some(answer) => answer.buttons,
+            None => NONE,
+        }
+    };
+    for group in 0..3usize {
+        let base = group * 3;
+        // Stimuli 6 and 7 only fill two slots; the third carries the mask.
+        let (buttons_tail, frames_tail) = if group == 2 {
+            (stuck, early)
+        } else {
+            (word(base + 2, false), word(base + 2, true))
+        };
+        push_timing_record(
+            records,
+            next,
+            record(
+                RUMBLE_ANSWER_BUTTONS_RECORD + group as u16,
+                word(base, false),
+                word(base + 1, false),
+                buttons_tail,
+            ),
+        );
+        push_timing_record(
+            records,
+            next,
+            record(
+                RUMBLE_ANSWER_FRAMES_RECORD + group as u16,
+                word(base, true),
+                word(base + 1, true),
+                frames_tail,
+            ),
+        );
+    }
 }
 
 /// The whole step. The operator part runs on the first port that answers the
@@ -405,6 +507,9 @@ pub(crate) fn run(font: &FontAtlas, records: &mut Records, next: &mut usize) {
         Some(port2) => {
             operator(font, port2, records, next);
         }
-        None => push_timing_record(records, next, record(RUMBLE_OPERATOR_RECORD, NONE, 0, NONE)),
+        None => {
+            push_timing_record(records, next, record(RUMBLE_OPERATOR_RECORD, NONE, 0, NONE));
+            push_answer_records(records, next, &[Answer::NONE; STIMULI]);
+        }
     }
 }

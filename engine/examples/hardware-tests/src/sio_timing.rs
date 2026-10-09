@@ -95,6 +95,18 @@ impl Byte {
         self.rise != NONE
     }
 
+    /// Cycles this byte took from the write: to `/ACK` releasing when it was
+    /// answered, otherwise to its arrival (0 when neither was seen).
+    const fn span(&self) -> u16 {
+        if self.fall != NONE {
+            self.fall
+        } else if self.done != NONE {
+            self.done
+        } else {
+            0
+        }
+    }
+
     const fn width(&self) -> u16 {
         if self.rise != NONE && self.fall != NONE && self.fall >= self.rise {
             self.fall - self.rise
@@ -109,8 +121,15 @@ pub(crate) struct Seen {
     pub(crate) bytes: [Byte; 9],
     /// `STAT` after the release.
     pub(crate) status: u32,
-    /// System-clock cycles from select to release.
+    /// System-clock cycles from select to release. The counter restarts with
+    /// every byte, so this is the last byte's window, which for a pad whose
+    /// last byte is never answered is the harness's own timeout.
     pub(crate) total: u16,
+    /// System-clock cycles from the first byte written to the last byte
+    /// received: each acknowledged byte up to its `/ACK` releasing, the
+    /// unanswered last byte up to its arrival. The cost of the exchange
+    /// itself, the select delay not included.
+    pub(crate) span: u32,
 }
 
 fn token() -> ControllerPort {
@@ -198,6 +217,7 @@ pub(crate) fn transaction(port2: bool, delay: u16, tx: &[u8], mask_irq: bool) ->
         bytes: [Byte::none(); 9],
         status: 0,
         total: 0,
+        span: 0,
     };
     port.set_mode(sio0::MODE_8N1);
     port.set_baud(sio0::BAUD_250KHZ);
@@ -210,6 +230,7 @@ pub(crate) fn transaction(port2: bool, delay: u16, tx: &[u8], mask_irq: bool) ->
     let _ = port.wait_status_clear(sio0::stat::DSR_LEVEL, 4_096);
     for (slot, byte) in seen.bytes.iter_mut().zip(tx.iter()) {
         *slot = exchange(&mut port, *byte);
+        seen.span += slot.span() as u32;
     }
     seen.total = count();
     port.deselect();

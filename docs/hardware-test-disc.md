@@ -68,7 +68,7 @@ held. A hang at bus level cannot be pre-empted, which is the accepted trade.
 
 **Hands off.** The run needs no input after CROSS on the first row, with two optional
 exceptions in the SIO area: the `DUALSHOCK MOTORS` step asks, for each motor level, whether the pad
-vibrated (CROSS yes, CIRCLE no, three seconds to answer), and the `PAD HOT-PLUG WINDOW` shows a
+vibrated (CROSS yes, CIRCLE no; the question shows for a second with the pad ignored, then every button must be let go, then four seconds to answer), and the `PAD HOT-PLUG WINDOW` shows a
 prompt for six seconds. Answer nothing and they record "no answer" and "nothing happened".
 
 `make hwtest-run` runs it headless, `make hwtest-diff` compares it with the pinned
@@ -1007,7 +1007,8 @@ a flag word (bit 0 the entry answered `5A`, 1 config mode confirmed, 2 and 3 the
 `5A` and `F3`, 4 the exit answered `F3`, 5 and 6 the motor poll kept the identifier and `5A`,
 7 no pad, 8 the query answered `5A`); `761`/`764` the old mapping bytes; `762`/`765` the motor
 poll's identifier, `5A` and buttons, and the identifier after the stop; `767`/`768` the cost of a
-poll with the motors idle and with both on, in cycles from select to release (median of eight).
+poll with the motors idle and with both on, in cycles from the first byte written to the last byte
+received (median of eight; v2.2 and earlier recorded the last byte's unanswered window instead).
 
 v2.2 adds, per port: `76D`/`76E` the pad identity (a plain poll's id and `5A`, button bytes and
 stick bytes) and the same on the screen for a second and a half; Enter Config tried up to four
@@ -1019,8 +1020,12 @@ is in config mode and `FF` when not.
 Operator part, on the first port that accepted the config packets (`766`): the small motor on for
 a second, the large motor at 0, 64, 128, 192 and 255 for a second each, and a series of pulses of
 1, 2, 4, 8 and 15 frames on each motor, asking after each "FELT? X YES O NO" (CROSS yes, CIRCLE
-no, three seconds to answer; no answer is its own value). The record packs two bits per stimulus,
-in that order (0 none, 1 yes, 2 no), the number asked, and the port. Every motor is stopped with
+no; the question shows for a second with the pad ignored, then every button must be let go, then
+four seconds to answer; no answer is its own value). The record packs two bits per stimulus,
+in that order (0 none, 1 yes, 2 no), the number asked, and the port. v2.3 adds `771`-`773` (the raw
+button word of each answer, then a mask of questions whose buttons were never let go) and
+`774`-`776` (the frame each answer arrived on, then a mask of questions that saw a button down in
+the first second). Every motor is stopped with
 several polls of zeros before the step ends. With no pad that takes the config packets the
 record reads `FFFF` and nothing is asked.
 

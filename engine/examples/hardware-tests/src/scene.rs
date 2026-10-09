@@ -43,6 +43,9 @@ pub(crate) struct HardwareTests {
     run: Run,
     capture: PhotoCapture,
     have_capture: bool,
+    /// The run id the last capture's pages carry in their headers, fixed when
+    /// the capture was encoded (the cover shows this one, not a fresh mix).
+    capture_run_id: u16,
     /// 0 is the cover; 1..=page_count are the QR pages.
     view: usize,
     view_frames: u32,
@@ -65,6 +68,7 @@ impl HardwareTests {
             run: Run::new(),
             capture: PhotoCapture::new(),
             have_capture: false,
+            capture_run_id: 0,
             view: 0,
             view_frames: 0,
             manual_until: 0,
@@ -94,11 +98,14 @@ impl HardwareTests {
         run::execute(&mut self.run, ctx, ctx.pad, skip_risky, &mut self.capture);
         // The run left its own picture and font; the scene's are back below.
         self.font = Some(ui::upload_font());
-        self.run.timing.summary.runs = (self.run_id() >> 8) as u8;
+        // One id, taken once: the page headers and the cover both show it.
+        let id = self.new_run_id();
+        self.capture_run_id = id;
+        self.run.timing.summary.runs = (id >> 8) as u8;
         self.capture.encode(
             &self.run.timing,
             &self.run.results,
-            self.run_id() as u8,
+            id as u8,
             self.run.scans,
         );
         self.have_capture = true;
@@ -118,7 +125,7 @@ impl HardwareTests {
 
     /// A 16-bit id for this run, so pages from different runs in one
     /// recording can be told apart before any CRC is checked.
-    fn run_id(&self) -> u16 {
+    fn new_run_id(&self) -> u16 {
         let h = mix32(
             self.run.timing.summary.hash,
             psx_rt::interrupts::vblank_count(),
@@ -320,7 +327,7 @@ impl HardwareTests {
         line.s("FILM FROM HERE, ").u(pages as u32).s(" PAGES");
         font.draw_text(8, 56, line.as_str(), (255, 232, 128));
         let mut line = ui::Line::new();
-        line.s("RUN ID ").s(hex4(self.run_id()).as_str());
+        line.s("RUN ID ").s(hex4(self.capture_run_id).as_str());
         font.draw_text(8, 72, line.as_str(), (232, 236, 244));
         font.draw_text(
             8,
