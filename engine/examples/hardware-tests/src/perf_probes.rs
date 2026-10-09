@@ -773,7 +773,7 @@ fn push_rekick(records: &mut Records, next: &mut usize) {
                 after_first,
                 after_second,
                 (busy as u32) | ((first_busy as u32) << 1) | ((stopped as u32) << 2),
-                (madr & 0x00FF_FFFF).wrapping_sub(head & 0x00FF_FFFF) / 64,
+                (madr & 0x00FF_FFFF).saturating_sub(head & 0x00FF_FFFF) / 64,
                 again,
                 madr & 0xFFFF,
                 chcr >> 16,
