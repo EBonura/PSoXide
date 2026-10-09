@@ -33,6 +33,16 @@ shipped without either, which is why no machine-code baseline exists for them.
 
 ## History
 
+### v2.2 (2026-10-09, schema PX8)
+
+MINOR: records are only added; every existing record measures what it did, except where the first item below stops two probes from measuring a runaway. Pins the SDK pad integration branch (`integ/pad-2026-10-08`) and drives the motors through its motor API again.
+
+- DMA BCR (`perf_probes.rs`, `list_busy_probes.rs`, `gpu_probes.rs`): the overlap probes set BCR once and then kicked the channel twice per call and many calls per record. Silicon counts a block-mode BCR down as the blocks go, so every kick after the first started with a count of 0, which the controller runs as 65,536 blocks; that is the v2.1 hang in `DMA VERSUS CPU LOADS` (SPU and GPU block channels never idle, BCR high half 0xFF06 and 0xFEEE, MADR hundreds of blocks past the source). Every probe now writes BCR inside the pass, ahead of the timed span, and the linked-list kicks rewrite `size_words(0)` before each kick. One deliberate case, `0x7A0`-`0x7A2`, kicks the SPU channel again without writing BCR and records the count after the first transfer, what the second did and how far it got before the counted bound stopped it.
+- DualShock motors (`rumble.rs`): the config packets are a frame apart, Enter Config is tried up to four times (v2.1: id 0xFF, no 0x5A on the console), and its reply bytes, the attempts and the model query's reply are recorded (`0x769`-`0x76C`, `0x76F`-`0x770`) and shown on the screen. The operator part uses `psx_pad::enable_rumble_on` and `poll_rumble_on`.
+- Pad identity (`0x76D`-`0x76E`): a plain poll's id, 0x5A, button and stick bytes per port, on the screen for a second and a half, so a film says which pad it was.
+- Handoff baseline (`0x41C`): the IRQ mask and DPCR the handoffs are compared with (v2.1 reported flag 0x3D in all ten areas with no baseline to read it against).
+- Card frame reads (`0x6D0`-`0x6DB`): for each of the four mix passes the first failed frame read, its kind, the SDK transport fault and the exchange it happened at, and the first ten response bytes the SDK kept (v2.1: 3 of 24 and 2 of 24 frames failed with protocol errors under GPU load). The reads themselves are unchanged.
+
 ### v2.1 (2026-10-09, schema PX8)
 
 Fix for a silicon hang in `DMA VERSUS CPU LOADS` (area 9, step 56): `dma_overlap_probe!` waited on CHCR bit 24 with no bound, so a channel that never cleared START froze the disc.

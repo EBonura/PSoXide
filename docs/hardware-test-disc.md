@@ -995,8 +995,9 @@ Pad engine, steps `ENGINE SETUP SWEEP`, `ENGINE ACK PACING`, `ENGINE TIMED PACIN
 
 ### DualShock motors (records `760`-`768`)
 
-Step `DUALSHOCK MOTORS`, at the end of the SIO area before the hot-plug window, written out as
-packets (`src/rumble.rs`) until the SDK's motor API lands. For each port: a plain poll for the
+Step `DUALSHOCK MOTORS`, at the end of the SIO area before the hot-plug window (`src/rumble.rs`;
+the objective part is written out as packets, the operator part uses the SDK's motor API). For
+each port, every packet a frame after the last: a plain poll for the
 identifier; config-mode entry (`01 43 00 01`) and an `01 45` query to see whether the pad now
 answers `F3`; the motor mapping (`01 4D 00 00 01 FF FF FF FF`, which returns the old mapping);
 config-mode exit (`01 43 00 00 5A...`); then a poll with both motors commanded and one with them
@@ -1007,6 +1008,13 @@ a flag word (bit 0 the entry answered `5A`, 1 config mode confirmed, 2 and 3 the
 7 no pad, 8 the query answered `5A`); `761`/`764` the old mapping bytes; `762`/`765` the motor
 poll's identifier, `5A` and buttons, and the identifier after the stop; `767`/`768` the cost of a
 poll with the motors idle and with both on, in cycles from select to release (median of eight).
+
+v2.2 adds, per port: `76D`/`76E` the pad identity (a plain poll's id and `5A`, button bytes and
+stick bytes) and the same on the screen for a second and a half; Enter Config tried up to four
+times a frame apart, with the last attempt's reply bytes 1 to 8 in `769`/`76B` and `76A`/`76C`
+(the second also holds the attempts made and the first attempt's id and `5A`); the `01 45`
+query's reply bytes 3 to 8 in `76F`/`770`, which carry the model, mode and LED bytes when the pad
+is in config mode and `FF` when not.
 
 Operator part, on the first port that accepted the config packets (`766`): the small motor on for
 a second, the large motor at 0, 64, 128, 192 and 255 for a second each, and a series of pulses of
