@@ -29,7 +29,7 @@ use crate::TimingRecord;
 use psx_pack::cd::{SectorReader, SECTOR_WORDS};
 use psx_rt::tty;
 
-/// rec cl2_variant: ok_bits_and_data_match, diag_or_fifo_wait_low, drive_state_high (eight records, 0x500-0x507)
+/// rec cl2_variant: ok_bits_and_data_match, diag_or_fifo_wait_low, drive_state_high (eight records, 0x500-0x507; v2.4: the first field carries the CD status byte in bits 8 to 15 and the third is the index/status register in its high byte and the IRQ flag in its low byte, where it used to clamp to 0xFFFF)
 pub(crate) const CL2_RECORD: u16 = 0x500;
 
 /// First LBA of the CDTEST region on THIS disc (verified against the
@@ -558,11 +558,17 @@ pub(crate) fn run_matrix() -> [TimingRecord; VARIANT_COUNT] {
         let ok = rec.fields[0] & 0x7;
         let matched = (rec.fields[5] == rec.fields[6]) as u32;
         let busy_seen = (rec.fields[9] >> 31) & 1;
+        // v2.4: the drive state is `(index/status register << 24) | (IRQ flag
+        // << 16) | (status byte << 8)`. The third field used to be that word
+        // shifted down by 8, 24 bits wide, so it clamped to 0xFFFF in every
+        // capture. Now the third field is the register and the flag (16
+        // bits) and the status byte rides in bits 8 to 15 of the first.
+        let state = rec.fields[8];
         record(
             CL2_RECORD + n as u16,
-            ok | (matched << 3) | (busy_seen << 4),
+            ok | (matched << 3) | (busy_seen << 4) | (((state >> 8) & 0xFF) << 8),
             rec.fields[9] & 0xFFFF,
-            rec.fields[8] >> 8,
+            state >> 16,
         )
     })
 }

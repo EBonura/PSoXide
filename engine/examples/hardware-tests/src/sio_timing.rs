@@ -75,14 +75,14 @@ const CARD_READ: [u8; 4] = [0x81, 0x52, 0x00, 0x00];
 pub(crate) struct Byte {
     pub(crate) reply: u8,
     /// Cycles from the write to the byte being received.
-    done: u16,
+    pub(crate) done: u16,
     /// Cycles from the write to `/ACK` asserting, and to it releasing.
-    rise: u16,
-    fall: u16,
+    pub(crate) rise: u16,
+    pub(crate) fall: u16,
 }
 
 impl Byte {
-    const fn none() -> Self {
+    pub(crate) const fn none() -> Self {
         Self {
             reply: 0xFF,
             done: NONE,
@@ -91,13 +91,13 @@ impl Byte {
         }
     }
 
-    const fn acked(&self) -> bool {
+    pub(crate) const fn acked(&self) -> bool {
         self.rise != NONE
     }
 
     /// Cycles this byte took from the write: to `/ACK` releasing when it was
     /// answered, otherwise to its arrival (0 when neither was seen).
-    const fn span(&self) -> u16 {
+    pub(crate) const fn span(&self) -> u16 {
         if self.fall != NONE {
             self.fall
         } else if self.done != NONE {
@@ -107,7 +107,7 @@ impl Byte {
         }
     }
 
-    const fn width(&self) -> u16 {
+    pub(crate) const fn width(&self) -> u16 {
         if self.rise != NONE && self.fall != NONE && self.fall >= self.rise {
             self.fall - self.rise
         } else {
@@ -237,6 +237,57 @@ pub(crate) fn transaction(port2: bool, delay: u16, tx: &[u8], mask_irq: bool) ->
     seen.status = port.status();
     port.reset();
     // Let the device and the line settle before anyone selects again.
+    pause(4_000);
+    seen
+}
+
+/// What a transaction longer than nine bytes left behind.
+pub(crate) struct LongSeen {
+    /// Bytes clocked (fewer than asked when the first was never answered).
+    pub(crate) sent: usize,
+    /// `STAT` after the release.
+    pub(crate) status: u32,
+    /// System-clock cycles from the first byte written to the last received.
+    pub(crate) span: u32,
+}
+
+/// A transaction of any length (a memory-card sector is 140 bytes), the edges
+/// of every byte kept in `out`. With `stop_if_silent` it ends after the first
+/// byte when nothing answered it (an empty slot): the port is released at
+/// once. Interrupts are masked for the whole transaction.
+pub(crate) fn transaction_long(
+    port2: bool,
+    delay: u16,
+    tx: &[u8],
+    out: &mut [Byte],
+    stop_if_silent: bool,
+) -> LongSeen {
+    let mut port = token();
+    let _irq = IrqGuard::mask();
+    let mut seen = LongSeen {
+        sent: 0,
+        status: 0,
+        span: 0,
+    };
+    port.set_mode(sio0::MODE_8N1);
+    port.set_baud(sio0::BAUD_250KHZ);
+    port.set_control(sio0::ctrl::ACK);
+    restart();
+    port.set_control(sio0::selected_ctrl(port2, false));
+    while count() < delay {}
+    port.drain_receive();
+    let _ = port.wait_status_clear(sio0::stat::DSR_LEVEL, 4_096);
+    for (index, (slot, byte)) in out.iter_mut().zip(tx.iter()).enumerate() {
+        *slot = exchange(&mut port, *byte);
+        seen.sent = index + 1;
+        seen.span += slot.span() as u32;
+        if index == 0 && stop_if_silent && !slot.acked() {
+            break;
+        }
+    }
+    port.deselect();
+    seen.status = port.status();
+    port.reset();
     pause(4_000);
     seen
 }

@@ -6,11 +6,12 @@
 //! `0x2C0`-`0x315` range. The record layout is in each module and in
 //! tools/hwtest-report.py.
 
+use crate::report::hex2;
 use crate::TimingRecord;
 use psx_font::FontAtlas;
 use psx_gpu::display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode};
 use psx_gpu::Gpu;
-use psx_rt::interrupts;
+use psx_rt::{interrupts, tty};
 
 /// Kernel timing: `0x2C0` to `0x2C5`.
 pub(crate) const KERNEL_RECORD: u16 = 0x2C0;
@@ -35,7 +36,24 @@ pub(crate) const CDMOTOR_RECORD: u16 = 0x310;
 pub(crate) const CDMOTOR_COUNT: usize = 6;
 /// One timing record whose three fields carry values of the case's own.
 pub(crate) fn record(id: u16, a: u32, b: u32, c: u32) -> TimingRecord {
-    let clamp = |value: u32| value.min(0xFFFF) as u16;
+    let clamp = |value: u32| {
+        // u32::MAX is a deliberate "none" and reads 0xFFFF either way.
+        if value > 0xFFFF && value != u32::MAX {
+            // SAFETY: single thread; plain statics.
+            unsafe {
+                crate::CLAMPED_FIELDS += 1;
+                if crate::FIRST_CLAMPED_ID == 0 {
+                    crate::FIRST_CLAMPED_ID = id;
+                }
+                crate::LAST_CLAMPED_ID = id;
+            }
+            tty::print("hardware-tests: field over 16 bits clamped in rec ");
+            tty::print(hex2((id >> 8) as u8).as_str());
+            tty::print(hex2(id as u8).as_str());
+            tty::print("\n");
+        }
+        value.min(0xFFFF) as u16
+    };
     TimingRecord {
         id,
         work: 0,

@@ -20,7 +20,8 @@
 //!
 //! The record ids this file owns:
 //! `0x410`-`0x419` area handoffs, `0x41A` final silence, `0x41B` run info,
-//! `0x41C` the handoff baseline, `0x41D` the raw interrupt mask words,
+//! `0x41C` the handoff baseline, `0x41D` the raw interrupt mask words, `0x41E` the
+//! record integrity check,
 //! `0x777` and `0x778` SPU RAM before and after the scrub.
 
 use super::*;
@@ -107,6 +108,10 @@ pub(crate) const HANDOFF: u16 = 0x410;
 pub(crate) const HANDOFF_BASELINE: u16 = 0x41C;
 /// rec handoff_irq_raw: irq_baseline_raw_low_half, irq_baseline_raw_high_half, irq_last_handoff_raw_high_half (the full 32-bit interrupt mask reads, so the upper half is on record; v2.2 clamped the baseline to 0xFFFF and flagged every area)
 pub(crate) const HANDOFF_IRQ_RAW: u16 = 0x41D;
+/// rec record_integrity: duplicate_ids, clamped_fields, dropped_records (checks the run makes on its own record list before the capture is encoded: how many record ids were pushed more than once, how many record fields were larger than 16 bits and so clamped, and how many records did not fit; all three are zero in a sound run)
+pub(crate) const RECORD_INTEGRITY: u16 = 0x41E;
+/// rec record_integrity_ids: first_clamped_id, last_clamped_id, first_duplicate_id (which records the integrity record counted: the first and the last record id with a clamped field and the first id pushed twice; 0 for none)
+pub(crate) const RECORD_INTEGRITY_IDS: u16 = 0x41F;
 /// The interrupt mask's implemented bits (the eleven sources); the rest of a
 /// 32-bit read is not the controller's.
 const IRQ_MASK_BITS: u32 = 0x07FF;
@@ -823,6 +828,9 @@ const STEPS: &[Step] = &[
     step(Area::Gpu, "RASTER HASHES", precision_identity_step),
     step(Area::Gpu, "DISPLAY WIDTHS", step_widths),
     step(Area::Gpu, "480I INTERLACE", step_interlace),
+    step(Area::Gpu, "GPU DMA EDGE CASES", step_dma_edge),
+    step(Area::Gpu, "WORKLOAD CALIBRATION", step_calibration),
+    step(Area::Gpu, "TEXTURE UV WINDOWS", step_uv_windows),
     // 5
     step(Area::Spu, "SPU INIT STATE", step_spu_init),
     step(Area::Spu, "SPU PRECISION", precision_spu_step),
@@ -847,6 +855,7 @@ const STEPS: &[Step] = &[
     step(Area::Sio, "SIO0 SELECT DELAY", records_sio_setup),
     step(Area::Sio, "SIO0 PAD ACK TIMING", records_sio_pad),
     step(Area::Sio, "SIO0 CARD ACK TIMING", records_sio_card),
+    step(Area::Sio, "CARD SECTOR PROTOCOL", step_card_proto),
     step(Area::Sio, "PAD AND CARD UNDER LOAD", step_sio_mix),
     step(Area::Sio, "ENGINE SETUP SWEEP", records_engine_setup),
     step(Area::Sio, "ENGINE ACK PACING", records_engine_ack),
@@ -869,6 +878,9 @@ const STEPS: &[Step] = &[
     // 9: last, hardest on the machine
     step(Area::Drive, "CD DMA VERSUS CPU", records_cd_dma),
     step(Area::Drive, "CD MOTOR", step_stream_motor),
+    // Last of the safe steps: it changes the display mode, and a failure here
+    // cannot stop anything before it (only the risky step after it).
+    step(Area::Drive, "480I DRAW RULE", step_field_rule),
     risky(Area::Drive, "REGISTER A/B (CAN HANG)", records_risky_ab),
 ];
 
@@ -879,6 +891,32 @@ fn step_mdec(run: &mut Run) {
 fn step_widths(run: &mut Run) {
     probe_gpu!(gpu);
     run.push_all(&display_widths::run_widths(gpu));
+}
+
+fn step_field_rule(run: &mut Run) {
+    field_rule::run(&mut run.timing.records, &mut run.next);
+    ui::repaint(run.font());
+}
+
+fn step_dma_edge(run: &mut Run) {
+    dma_edge::run(&mut run.timing.records, &mut run.next);
+    ui::repaint(run.font());
+}
+
+fn step_calibration(run: &mut Run) {
+    workload::run_calibration(&mut run.timing.records, &mut run.next);
+    ui::repaint(run.font());
+}
+
+fn step_uv_windows(run: &mut Run) {
+    workload::run_uv(&mut run.timing.records, &mut run.next);
+    ui::repaint(run.font());
+}
+
+/// A memory-card sector read byte by byte, and with L1 and R1 held at the
+/// start the same sector written back.
+fn step_card_proto(run: &mut Run) {
+    card_proto::run(run.write_cards, &mut run.timing.records, &mut run.next);
 }
 
 fn step_interlace(run: &mut Run) {
@@ -1045,6 +1083,46 @@ fn finish(run: &mut Run) {
             run.irq_baseline & 0xFFFF,
             run.irq_baseline >> 16,
             run.irq_last_raw >> 16,
+        ),
+    );
+    // The run checks its own record list: an id pushed twice, a field cut to
+    // 16 bits and a record that did not fit would each put a measurement
+    // somewhere it does not belong.
+    let mut duplicates = 0u32;
+    let mut first_duplicate = 0u32;
+    for (index, record) in run.timing.records[..run.next].iter().enumerate() {
+        if run.timing.records[..index]
+            .iter()
+            .any(|other| other.id == record.id)
+        {
+            duplicates += 1;
+            if first_duplicate == 0 {
+                first_duplicate = record.id as u32;
+            }
+        }
+    }
+    // SAFETY: single thread; plain statics.
+    let (clamped, dropped, first_clamped, last_clamped) = unsafe {
+        (
+            crate::CLAMPED_FIELDS,
+            crate::DROPPED_RECORDS,
+            crate::FIRST_CLAMPED_ID,
+            crate::LAST_CLAMPED_ID,
+        )
+    };
+    push_timing_record(
+        &mut run.timing.records,
+        &mut run.next,
+        crate::console_tests::record(RECORD_INTEGRITY, duplicates, clamped, dropped),
+    );
+    push_timing_record(
+        &mut run.timing.records,
+        &mut run.next,
+        crate::console_tests::record(
+            RECORD_INTEGRITY_IDS,
+            first_clamped as u32,
+            last_clamped as u32,
+            first_duplicate,
         ),
     );
     let silence = crate::console_tests::record(

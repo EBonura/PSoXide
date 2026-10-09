@@ -32,7 +32,7 @@ the run are the two that need a person or touch the operator's card:
 **CONTROLLER TEST (P1 + P2)** and **MEMORY CARD (AT OWN RISK)**; the menu also
 has **VIEW LAST CAPTURE**.
 
-The run is ten areas, 61 steps, in this order (`src/run.rs`):
+The run is ten areas, 66 steps, in this order (`src/run.rs`):
 
 | # | Area | Steps |
 |---|---|---|
@@ -40,12 +40,12 @@ The run is ten areas, 61 steps, in this order (`src/run.rs`):
 | 1 | CPU AND RAM | cases, `CPU SWEEP`, `CPU AND BUS TIMING` |
 | 2 | IRQ, DMA, TIMERS | cases, timing, `TIMER PRECISION`, `TIMER 1 HBLANK RATE`, `POLLED TIMER TICK LOSS` |
 | 3 | GTE | cases, `GTE SWEEP`, `GTE TIMING`, `GTE COMMAND LATENCY`, `GTE PRECISION` |
-| 4 | GPU, MDEC, DISPLAY | cases, timing and MDEC, `GPU BATCHES`, `MDEC DECODE`, precision, `RASTER HASHES`, `DISPLAY WIDTHS`, `480I INTERLACE` |
+| 4 | GPU, MDEC, DISPLAY | cases, timing and MDEC, `GPU BATCHES`, `MDEC DECODE`, precision, `RASTER HASHES`, `DISPLAY WIDTHS`, `480I INTERLACE`, `GPU DMA EDGE CASES`, `WORKLOAD CALIBRATION`, `TEXTURE UV WINDOWS` (the last four are v2.4, described under "v2.4 measurements") |
 | 5 | SPU | `SPU INIT STATE`, precision, cases, `SPU MAP`, `SPU DMA TIMING`, `UI SAMPLE END AND LOOP` (SB1), `SPU RAM AND VOICES` (SB2), `CAPTURE RINGS` (SB4), `BANK HANDOFF` (PA4) |
 | 6 | CD, XA, CD-DA, STREAM | cases, `CD POLLED TIMING`, `CD DATA VERSUS AUDIO ROUTE` (PA1), `CD READ MECHANISMS` (CL2), `XA MUSIC LOOP`, `STREAM COST`, `CD-DA HANDOFF` |
-| 7 | SIO | cases, `SIO TIMING`, then the controller-port and pad-engine measurements described under "SIO measurements" below (select delay, pad and card `/ACK` timing, pad and card together, the engine's sweep, pacings, card lease and load, the DualShock motors, hot-plug) |
+| 7 | SIO | cases, `SIO TIMING`, then the controller-port and pad-engine measurements described under "SIO measurements" below (select delay, pad and card `/ACK` timing, `CARD SECTOR PROTOCOL` (v2.4), pad and card together, the engine's sweep, pacings, card lease and load, the DualShock motors, hot-plug) |
 | 8 | PERFORMANCE | stack and lever cases, `WARM PROBES`, `EXTENDED PROBES AND SHAPES`, `DMA VERSUS CPU LOADS`, `MDEC DMA VERSUS CPU`, `AUDIT PROBES` |
-| 9 | DRIVE AND BUS STRESS | `CD DMA VERSUS CPU`, `CD MOTOR` (waits up to 20 s), then `REGISTER A/B (CAN HANG)` |
+| 9 | DRIVE AND BUS STRESS | `CD DMA VERSUS CPU`, `CD MOTOR` (waits up to 20 s), `480I DRAW RULE` (v2.4, last of the safe steps), then `REGISTER A/B (CAN HANG)` |
 
 **A reset between areas.** Each area starts with `reset_area`: the GPU reset
 and the font uploaded again, every SPU voice keyed off with its volumes at
@@ -1028,6 +1028,20 @@ button word of each answer, then a mask of questions whose buttons were never le
 the first second). Every motor is stopped with
 several polls of zeros before the step ends. With no pad that takes the config packets the
 record reads `FFFF` and nothing is asked.
+
+## v2.4 measurements
+
+Written for the emulator work (`feat/hwtest-v2.4-2026-10-09`); the film or capture decodes with `python3 tools/hwtest-report.py --v24 <page file>`, which prints each table and checks that every record describes the case it should (a failed check is the harness, not the machine).
+
+**480i draw rule** (`src/field_rule.rs`, `0x800`-`0x852`). GP1(08h) 512 x 480 interlaced, GPUSTAT bit 31 sampled about 3 ms after VBlank (so a field cannot flip under a command) and retried up to six frames until it has the wanted value. One command over a 64 x 16 scratch area that an upload cleared first: GP0 fill, flat rectangle, two flat triangles, a textured quad (opaque texels, raw), a vertical line, a VRAM-to-VRAM copy, and an upload as the control. Each record is `row_mask` (a bit per row that holds something afterwards), `descriptor` and `flags`; the descriptor names the command, E1 bit 10, the field asked for, the mode, whether the scratch area is inside the displayed rectangle or beside it, and the variant, so a record cannot be read as another case. `--v24` prints the 7 x 4 table (command by bit 10 by field). Expected if the emulator's model is right: bit 10 clear gives `0xAAAA` for field 0 and `0x5555` for field 1 on fill, rectangle, triangles, textured quad and line, `0xFFFF` for the copy and the upload, and `0xFFFF` everywhere with bit 10 set and in the other modes. Further cases: the scratch area outside the displayed rectangle (is the rule about the picture or all of VRAM), a polygon whose own texpage word sets bit 10, the draw-area top and the draw offset on an odd row (is the parity the absolute VRAM row), the display start on an odd row, a fill issued at once after VBlank on four frames, the same commands with the display blanked (GP1 03h; is the rule off then), and the clocks (divided by 8) of a 256 x 240 fill and rectangle with the rule on and off.
+
+**GPU DMA edge cases** (`src/dma_edge.rs`, `0x860`-`0x873`). *Stop mid-node:* the list is a 512 x 256 rectangle, an upload node of 48 distinct words, and a second upload node of 8; CHCR START is cleared a fixed number of clocks after the kick; after the GPU has had time to finish, a GP0(1Fh) interrupt request says whether it is idle (it is swallowed while a command is unfinished), the command buffer is reset and the destination rows are read back. `words_of_the_node_landed` of 48 means the whole node reached the GPU after the stop; about 13 means only what was in the FIFO; the second node landing means the walk went on. *Block FIFO:* the same upload carried by a request-mode transfer (64 and 256 words, blocks of 16, and 64 words in blocks of 8) behind the rectangle and, as the control, with the GPU idle; the landed words and the clocks.
+
+**Memory-card protocol** (`src/card_proto.rs`, `0x880`-`0x8BF`, port 1 then port 2). A 140-byte sector read of frame 0 (`81 52 00 00 MSB LSB` and filler; replies `FF`, flag, `5A 5D`, dummy, MSB, `5C 5D`, MSB, LSB, 128 data, checksum, `47`), four times, every byte's `/ACK` rise and width and arrival time; the first ten bytes one record each, the 128 data bytes as min/median/max, the checksum and terminator bytes, the span and a validity word, the replies. With L1 and R1 held at the start, the same 128 bytes written back to frame 0 (138 bytes, status `47`), twice. A slot with no card answers `FF` and never pulses `/ACK`: the first byte's record says so.
+
+**Calibration and UV windows** (`src/workload.rs`, `0x8C0`-`0x8C5` and `0x8E0`-`0x92B`). See the module header.
+
+**Pads** (`src/rumble.rs`, `0x940`-`0x962`). The motor step names the pad (CROSS SCPH-1200, CIRCLE SCPH-110, SQUARE another, TRIANGLE none or digital), runs, asks for the swap, names the second pad, and runs the battery again if it was named. Answers use the debounced question (one second with the pad ignored, release, then a press).
 
 ## Other v2.0 measurements
 

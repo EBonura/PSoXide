@@ -69,6 +69,29 @@ const ASK_SHOW_FRAMES: u32 = 60;
 const ASK_RELEASED_FRAMES: u32 = 6;
 /// Frames after the first second in which the release and then the press must come.
 const ASK_ANSWER_FRAMES: u32 = 240;
+/// The second pad's records are the first's plus this: 0x760 + 0x1E0 = 0x940.
+const PASS_TWO_OFFSET: u16 = 0x1E0;
+static mut ID_OFFSET: u16 = 0;
+
+/// A record id of the pass in progress.
+fn rid(base: u16) -> u16 {
+    // SAFETY: single thread; a plain static.
+    base + unsafe { ID_OFFSET }
+}
+
+fn set_pass(second: bool) {
+    // SAFETY: single thread; a plain static.
+    unsafe { ID_OFFSET = if second { PASS_TWO_OFFSET } else { 0 } };
+}
+
+/// rec pad_choice: model_code, raw_buttons, answer_frame (which pad the operator said was in port 1: code 1 SCPH-1200 by CROSS, 2 SCPH-110 by CIRCLE, 3 another pad by SQUARE, 4 no pad or a digital one by TRIANGLE, 0 no answer; the raw button word and the frame the answer arrived on; 0x960 the first pad, 0x961 the pad after the swap)
+const PAD_CHOICE_RECORD: u16 = 0x960;
+/// rec pad_passes: flags, config_ports, answer_flags (0x962; flags bit 0 the second pass ran, bit 1 the first pass found a pad that took the config packets, bit 2 the second; config_ports the port the operator part ran on, 1 or 2, first pass in the low byte and second in the high byte, 0 for none; answer_flags bit 0 the first model question's release wait ran out, bit 1 its first second saw a button down, bits 2 and 3 the same for the second question)
+const PAD_PASSES_RECORD: u16 = 0x962;
+/// Frames the swap and model question may take for the pad after the swap.
+const SWAP_ANSWER_FRAMES: u32 = 1_500;
+/// Frames the first model question may take.
+const MODEL_ANSWER_FRAMES: u32 = 600;
 /// Attempts at Enter Config, a frame apart.
 const ENTER_ATTEMPTS: u32 = 4;
 
@@ -137,7 +160,7 @@ fn pair(seen: &crate::sio_timing::Seen, a: usize) -> u32 {
 /// A plain poll, its first six reply bytes recorded and put on the screen
 /// (`PAD n ID 73 5A BTN ...`), so a film of the run says which pad it was.
 fn identity(font: &FontAtlas, port2: bool, records: &mut Records, next: &mut usize) -> u8 {
-    let id_record = PAD_IDENTITY_RECORD + port2 as u16;
+    let id_record = rid(PAD_IDENTITY_RECORD + port2 as u16);
     crate::bounds::record_start(id_record);
     wait_frames(1);
     let seen = send(port2, &poll(0, 0));
@@ -170,13 +193,13 @@ fn identity(font: &FontAtlas, port2: bool, records: &mut Records, next: &mut usi
 /// config-capable pad is there.
 fn objective(font: &FontAtlas, port2: bool, records: &mut Records, next: &mut usize) -> bool {
     let slot = 3 * port2 as u16;
-    let base = RUMBLE_CONFIG_RECORD + slot;
+    let base = rid(RUMBLE_CONFIG_RECORD + slot);
     let id_plain = identity(font, port2, records, next);
     crate::bounds::record_start(base);
     wait_frames(1);
     let plain = send(port2, &poll(0, 0));
     let present = plain.bytes[2].reply == 0x5A;
-    let enter_record = RUMBLE_ENTER_A_RECORD + 2 * port2 as u16;
+    let enter_record = rid(RUMBLE_ENTER_A_RECORD + 2 * port2 as u16);
     crate::bounds::record_start(enter_record);
     let mut attempts = 0u32;
     let mut first_replies = 0u32;
@@ -208,7 +231,7 @@ fn objective(font: &FontAtlas, port2: bool, records: &mut Records, next: &mut us
         records,
         next,
         record(
-            RUMBLE_ENTER_B_RECORD + 2 * port2 as u16,
+            rid(RUMBLE_ENTER_B_RECORD + 2 * port2 as u16),
             pair(&enter, 7),
             attempts,
             first_replies,
@@ -216,7 +239,7 @@ fn objective(font: &FontAtlas, port2: bool, records: &mut Records, next: &mut us
     );
     wait_frames(1);
     let query = send(port2, &QUERY);
-    let model_record = PAD_MODEL_RECORD + port2 as u16;
+    let model_record = rid(PAD_MODEL_RECORD + port2 as u16);
     push_timing_record(
         records,
         next,
@@ -277,13 +300,13 @@ fn objective(font: &FontAtlas, port2: bool, records: &mut Records, next: &mut us
     push_timing_record(
         records,
         next,
-        record(RUMBLE_MAPPING_RECORD + slot, m(3, 4), m(5, 6), m(7, 8)),
+        record(rid(RUMBLE_MAPPING_RECORD + slot), m(3, 4), m(5, 6), m(7, 8)),
     );
     push_timing_record(
         records,
         next,
         record(
-            RUMBLE_AFTER_RECORD + slot,
+            rid(RUMBLE_AFTER_RECORD + slot),
             ((motors.bytes[1].reply as u32) << 8) | motors.bytes[2].reply as u32,
             ((motors.bytes[3].reply as u32) << 8) | motors.bytes[4].reply as u32,
             after_stop.bytes[1].reply as u32,
@@ -298,7 +321,7 @@ fn objective(font: &FontAtlas, port2: bool, records: &mut Records, next: &mut us
 /// not in it), median of eight polls each. v2.2 used the transaction's total,
 /// which is the last byte's unanswered window.
 fn poll_cost(port2: bool, records: &mut Records, next: &mut usize) {
-    crate::bounds::record_start(RUMBLE_COST_RECORD + port2 as u16);
+    crate::bounds::record_start(rid(RUMBLE_COST_RECORD + port2 as u16));
     let mut idle = [0u32; 8];
     let mut busy = [0u32; 8];
     for slot in idle.iter_mut() {
@@ -315,7 +338,12 @@ fn poll_cost(port2: bool, records: &mut Records, next: &mut usize) {
     push_timing_record(
         records,
         next,
-        record(RUMBLE_COST_RECORD + port2 as u16, idle_med, busy_med, 8),
+        record(
+            rid(RUMBLE_COST_RECORD + port2 as u16),
+            idle_med,
+            busy_med,
+            8,
+        ),
     );
 }
 
@@ -350,33 +378,63 @@ impl Answer {
 /// a press after that counts: CROSS yes, CIRCLE no. Four seconds for the
 /// release and the press together; every wait is a frame count.
 fn ask(font: &FontAtlas, port2: bool, question: &str) -> Answer {
-    ui::detail(font, "MOTOR", question);
+    ask_with(
+        font,
+        "MOTOR",
+        question,
+        Some(port2),
+        ASK_ANSWER_FRAMES,
+        |bits| {
+            if bits & button::CROSS != 0 {
+                1
+            } else if bits & button::CIRCLE != 0 {
+                2
+            } else {
+                0
+            }
+        },
+    )
+}
+
+/// The same question with the answer window and the meaning of the buttons
+/// given. `port2` of `None` reads both ports' pads together.
+fn ask_with(
+    font: &FontAtlas,
+    group: &str,
+    question: &str,
+    port2: Option<bool>,
+    answer_frames: u32,
+    classify: fn(u16) -> u32,
+) -> Answer {
+    ui::detail(font, group, question);
+    let read = || -> u16 {
+        match port2 {
+            Some(second) => api_poll(second, Rumble::OFF).buttons.bits(),
+            None => {
+                api_poll(false, Rumble::OFF).buttons.bits()
+                    | api_poll(true, Rumble::OFF).buttons.bits()
+            }
+        }
+    };
     let mut answer = Answer::NONE;
     let mut frame = 0u32;
     for _ in 0..ASK_SHOW_FRAMES {
         wait_frames(1);
         frame += 1;
-        let state = api_poll(port2, Rumble::OFF);
-        if state.buttons.bits() != 0 {
+        if read() != 0 {
             answer.early = true;
         }
     }
     let mut released = 0u32;
-    for _ in 0..ASK_ANSWER_FRAMES {
+    for _ in 0..answer_frames {
         wait_frames(1);
         frame += 1;
-        let bits = api_poll(port2, Rumble::OFF).buttons.bits();
+        let bits = read();
         if released < ASK_RELEASED_FRAMES {
             released = if bits == 0 { released + 1 } else { 0 };
             continue;
         }
-        let value = if bits & button::CROSS != 0 {
-            1
-        } else if bits & button::CIRCLE != 0 {
-            2
-        } else {
-            0
-        };
+        let value = classify(bits);
         if value != 0 {
             answer.value = value;
             answer.buttons = bits as u32;
@@ -386,6 +444,24 @@ fn ask(font: &FontAtlas, port2: bool, question: &str) -> Answer {
     }
     answer.stuck = released < ASK_RELEASED_FRAMES;
     answer
+}
+
+/// Which pad is in the port: CROSS SCPH-1200, CIRCLE SCPH-110, SQUARE another
+/// model, TRIANGLE none or a digital pad.
+fn choose(font: &FontAtlas, group: &str, text: &str, answer_frames: u32) -> Answer {
+    ask_with(font, group, text, None, answer_frames, |bits| {
+        if bits & button::CROSS != 0 {
+            1
+        } else if bits & button::CIRCLE != 0 {
+            2
+        } else if bits & button::SQUARE != 0 {
+            3
+        } else if bits & button::TRIANGLE != 0 {
+            4
+        } else {
+            0
+        }
+    })
 }
 
 fn prompt(font: &FontAtlas, port2: bool, what: &str, small: u8, large: u8) -> Answer {
@@ -437,7 +513,7 @@ fn operator(font: &FontAtlas, port2: bool, records: &mut Records, next: &mut usi
         records,
         next,
         record(
-            RUMBLE_OPERATOR_RECORD,
+            rid(RUMBLE_OPERATOR_RECORD),
             answers,
             asked as u32,
             (port2 as u32 + 1) | ((enabled as u32) << 8),
@@ -474,7 +550,7 @@ fn push_answer_records(records: &mut Records, next: &mut usize, taken: &[Answer;
             records,
             next,
             record(
-                RUMBLE_ANSWER_BUTTONS_RECORD + group as u16,
+                rid(RUMBLE_ANSWER_BUTTONS_RECORD + group as u16),
                 word(base, false),
                 word(base + 1, false),
                 buttons_tail,
@@ -484,7 +560,7 @@ fn push_answer_records(records: &mut Records, next: &mut usize, taken: &[Answer;
             records,
             next,
             record(
-                RUMBLE_ANSWER_FRAMES_RECORD + group as u16,
+                rid(RUMBLE_ANSWER_FRAMES_RECORD + group as u16),
                 word(base, true),
                 word(base + 1, true),
                 frames_tail,
@@ -493,9 +569,10 @@ fn push_answer_records(records: &mut Records, next: &mut usize, taken: &[Answer;
     }
 }
 
-/// The whole step. The operator part runs on the first port that answers the
-/// config packets; with none, its record says so (`0xFFFF`).
-pub(crate) fn run(font: &FontAtlas, records: &mut Records, next: &mut usize) {
+/// One pass over the pad in port 1 (and port 2): identity, config, the cost
+/// of a poll, and when a config-capable pad is there the operator's questions.
+/// Returns the port the operator part ran on.
+fn pass(font: &FontAtlas, records: &mut Records, next: &mut usize) -> Option<bool> {
     let mut tested = None;
     for port2 in [false, true] {
         if objective(font, port2, records, next) && tested.is_none() {
@@ -508,8 +585,70 @@ pub(crate) fn run(font: &FontAtlas, records: &mut Records, next: &mut usize) {
             operator(font, port2, records, next);
         }
         None => {
-            push_timing_record(records, next, record(RUMBLE_OPERATOR_RECORD, NONE, 0, NONE));
+            push_timing_record(
+                records,
+                next,
+                record(rid(RUMBLE_OPERATOR_RECORD), NONE, 0, NONE),
+            );
             push_answer_records(records, next, &[Answer::NONE; STIMULI]);
         }
     }
+    tested
+}
+
+fn choice_record(id: u16, answer: &Answer) -> TimingRecord {
+    record(id, answer.value, answer.buttons, answer.frame)
+}
+
+/// The whole step: the pad in the port is named by the operator and run
+/// through the battery; then the operator may swap it for another, name that
+/// one, and the battery runs again into the second set of records (`0x940`
+/// and up). No answer to the second question means no second pass.
+pub(crate) fn run(font: &FontAtlas, records: &mut Records, next: &mut usize) {
+    crate::bounds::record_start(PAD_CHOICE_RECORD);
+    set_pass(false);
+    let first = choose(
+        font,
+        "WHICH PAD",
+        "X 1200 O 110 SQ OTHER TRI NONE",
+        MODEL_ANSWER_FRAMES,
+    );
+    push_timing_record(records, next, choice_record(PAD_CHOICE_RECORD, &first));
+    let tested_first = pass(font, records, next);
+
+    crate::bounds::record_start(PAD_CHOICE_RECORD + 1);
+    let second = choose(
+        font,
+        "SWAP PAD",
+        "THEN X 1200 O 110 SQ OTHER TRI NONE",
+        SWAP_ANSWER_FRAMES,
+    );
+    push_timing_record(records, next, choice_record(PAD_CHOICE_RECORD + 1, &second));
+    let mut tested_second = None;
+    let second_ran = second.value != 0;
+    if second_ran {
+        set_pass(true);
+        tested_second = pass(font, records, next);
+        set_pass(false);
+    }
+    let port_code = |tested: Option<bool>| match tested {
+        Some(false) => 1u32,
+        Some(true) => 2,
+        None => 0,
+    };
+    push_timing_record(
+        records,
+        next,
+        record(
+            PAD_PASSES_RECORD,
+            second_ran as u32
+                | ((tested_first.is_some() as u32) << 1)
+                | ((tested_second.is_some() as u32) << 2),
+            port_code(tested_first) | (port_code(tested_second) << 8),
+            first.stuck as u32
+                | ((first.early as u32) << 1)
+                | ((second.stuck as u32) << 2)
+                | ((second.early as u32) << 3),
+        ),
+    );
 }

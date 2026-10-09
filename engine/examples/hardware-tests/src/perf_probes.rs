@@ -959,6 +959,7 @@ fn with_spu_dma(body: impl FnOnce(u32, u32) -> u16) -> u16 {
             }
         }
         // The first sample's wait, the longest of all of them, how many ran out.
+        #[allow(clippy::deref_addrof)]
         let record = &mut *(&raw mut SPU_MODE_ITERATIONS);
         if record[0] == 0 {
             record[0] = waits[1];

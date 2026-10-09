@@ -47,6 +47,7 @@ macro_rules! probe_gpu {
 
 mod boot;
 mod bounds;
+mod card_proto;
 mod cd_chain_probe;
 mod cd_route;
 mod cdstream_cases;
@@ -54,7 +55,9 @@ mod console_tests;
 mod controller_test;
 mod cpu_tests;
 mod display_widths;
+mod dma_edge;
 mod dma_matrix;
+mod field_rule;
 mod gpu_probes;
 mod handoff_probe;
 mod kernel_timing;
@@ -78,6 +81,8 @@ mod spu_probe;
 mod tick_loss;
 mod timer1_rate;
 mod ui;
+mod v24;
+mod workload;
 mod xa_loop;
 use cpu_tests::*;
 use payload::fnv32_words;
@@ -212,9 +217,9 @@ unsafe extern "C" {
 //
 // History, one entry per version: docs/hardware-test-versions.md.
 const SUITE_VERSION_MAJOR: u8 = 2;
-const SUITE_VERSION_MINOR: u8 = 3;
+const SUITE_VERSION_MINOR: u8 = 4;
 /// Display form. Keep in step with the two constants above.
-const SUITE_VERSION: &str = "HWTEST v2.3";
+const SUITE_VERSION: &str = "HWTEST v2.4";
 const SCREEN_W: i16 = 320;
 const SCREEN_H: i16 = 240;
 const FONT_TPAGE: TexturePage = TexturePage::new(320, 0, TextureDepth::Bit4);
@@ -403,7 +408,7 @@ struct ScanReport {
 }
 
 /// Slots in the timing report. `run::tests` asserts the largest run fits.
-const TIMING_RECORD_COUNT: usize = 800;
+const TIMING_RECORD_COUNT: usize = 1100;
 const MEMORY_CONTROL_REGISTER_COUNT: usize = MEMORY_CONTROL_REGISTERS.len();
 /// Captured with the timing block, in this order (the host names them by
 /// position). The first nine are the bus configuration the BIOS left.
@@ -2025,8 +2030,18 @@ fn push_timing_record(
     if let Some(slot) = records.get_mut(*next) {
         *slot = record;
         *next += 1;
+    } else {
+        // SAFETY: single thread; a plain static.
+        unsafe { DROPPED_RECORDS += 1 };
     }
 }
+
+/// Records that did not fit, and record fields clamped to 16 bits: both are
+/// counted into the integrity record `0x41E` instead of passing silently.
+static mut DROPPED_RECORDS: u32 = 0;
+static mut CLAMPED_FIELDS: u32 = 0;
+static mut FIRST_CLAMPED_ID: u16 = 0;
+static mut LAST_CLAMPED_ID: u16 = 0;
 
 // Repeat the probe with interrupts masked, then keep min/median/max.
 //

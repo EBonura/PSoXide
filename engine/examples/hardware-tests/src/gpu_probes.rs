@@ -439,7 +439,7 @@ fn build_list(entry: &Case) -> u32 {
     list as u32
 }
 
-fn submit_and_time(head: u32) -> u16 {
+pub(crate) fn submit_and_time(head: u32) -> u16 {
     let old_direction = (gpu_io::status().bits() >> 29) & 3;
     gpu_io::write_display_control(0x0200_0000); // acknowledge any stale GPU interrupt
     gpu_io::write_display_control(0x0400_0002); // DMA CPU -> GP0
