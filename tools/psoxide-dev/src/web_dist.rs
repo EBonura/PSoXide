@@ -194,16 +194,21 @@ pub fn run(args: &[String]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct Dist(PathBuf);
 
     impl Dist {
         /// The reviewed public layout: one data file and tracks 2 through 8.
         fn public() -> Dist {
-            let stamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_nanos());
-            let dir = std::env::temp_dir().join(format!("web-dist-{}-{stamp}", std::process::id()));
+            // A per-process counter keeps parallel tests (and several
+            // fixtures in one test) in separate directories; a clock stamp
+            // alone collides on coarse timers.
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            let serial = NEXT.fetch_add(1, Ordering::Relaxed);
+            let dir =
+                std::env::temp_dir().join(format!("web-dist-{}-{serial}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
             fs::create_dir_all(&dir).unwrap();
             let mut manifest = vec!["data demo-data.bin.gz 1 1 0".to_string()];
             for (number, title) in PUBLIC_TRACK_TITLES {
