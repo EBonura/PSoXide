@@ -25,3 +25,5 @@ psx-io      = { path = "../../crates/psx-io" }
 # The polled CD read phase. Needs a disc (`frontend launch --disc`): without one
 # the reader waits out its drive timeouts.
 cd-read = []
+# Reads sectors through psx-cdstream while the engine polls both ports. Needs a disc.
+cd-stream = []
