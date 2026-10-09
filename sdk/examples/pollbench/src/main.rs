@@ -15,21 +15,17 @@
 
 extern crate psx_rt;
 
-use core::ptr::{read_volatile, write_volatile};
+use psx_io::timers::{self, Timer};
 use psx_rt::tty;
 
 /// Number of polls per phase.
 const POLLS: u32 = 200;
 
-/// Root counter 2: current value, mode.
-const T2_COUNTER: *const u32 = 0x1F80_1120 as *const u32;
-const T2_MODE: *mut u32 = 0x1F80_1124 as *mut u32;
 /// Mode bit 9 selects system clock / 8 for counter 2.
-const T2_SYSCLK_DIV8: u32 = 1 << 9;
+const T2_SYSCLK_DIV8: u16 = 1 << 9;
 
 fn now() -> u32 {
-    // SAFETY: a read of root counter 2's current-value register.
-    unsafe { read_volatile(T2_COUNTER) & 0xFFFF }
+    u32::from(timers::counter(Timer::Timer2))
 }
 
 /// Counter ticks (8 CPU cycles each) spent in `body`, over `POLLS` calls.
@@ -57,8 +53,7 @@ fn report(label: &str, total_ticks: u32) {
 
 #[no_mangle]
 fn main() {
-    // SAFETY: counter 2's mode register; nothing else uses the counter here.
-    unsafe { write_volatile(T2_MODE, T2_SYSCLK_DIV8) };
+    timers::set_mode(Timer::Timer2, T2_SYSCLK_DIV8);
     report(
         "port1",
         ticks(|| {
