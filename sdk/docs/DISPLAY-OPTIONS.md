@@ -112,10 +112,9 @@ application (`renderer.rs::set_brightness_level`) and the stepping code stay.
 `Music`, `Track`, `Back`; add `Brightness` after `Music`, a line in
 `settings_rows()` and in `draw_settings` (label and value are drawn
 separately already, so the value is `label.as_str()` from a local `Label`).
-The pause list also reaches Settings. The byte needs a home: the profile
-saved through `psx_settings` has a `brightness` field, but it is 0 to 100 and
-`sanitize` clamps it, so a step stored there would be clamped. Add a field to
-the settings record in its next version (see the last section). Its overlay HUD is drawn
+The pause list also reaches Settings. The byte lives in the
+`psx_settings::Profile`: its `brightness` is a `Brightness` and its
+`screen_offset` a `ScreenOffset` (record version 2, see the last section). Its overlay HUD is drawn
 immediate after the table is submitted (see `draw_now_playing`), so the
 brightness overlay is drawn immediate after that, with the full-screen draw
 area restored.
@@ -181,12 +180,18 @@ game to take both options.
 
 ## Open points for Manny
 
-- `psx-settings::Profile.brightness` (0 to 100, default 75) is read by no
-  renderer and is clamped by `sanitize`, so it cannot hold a signed step. The
-  clean fix is a record version that replaces it with a `Brightness` byte and
-  adds the two offset bytes, with a decode that maps the old field to the
-  default. That is a format change for every game that saves a profile
-  (NitroXide, VoXide), so it is a separate change.
 - Quake and HL read `DEFAULT` at their shipped palette row, not at the neutral
   curve. This keeps `DEFAULT` meaning "the intended look"; say if the neutral
   row should be the centre instead.
+
+## The settings record
+
+`psx-settings` record version 2 replaced the unused 0 to 100 `brightness`
+percentage with the `Brightness` save byte (header byte 8) and added the
+`ScreenOffset` bytes (header bytes 16 and 17, after the checksum), so a profile
+is two bytes longer. `Profile::decode` still reads version 1 records and gives
+both options their defaults (`DEFAULT`, `CENTRE`); `encode` always writes
+version 2, so the first save after an update upgrades the file. A build that
+only knows version 1 refuses a version 2 record (`UnsupportedVersion`) and
+falls back to its defaults, so keep the game and its save on the same SDK.
+Host tests pin both versions, every step, and out-of-range bytes clamping.
