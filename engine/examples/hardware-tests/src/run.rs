@@ -127,6 +127,8 @@ pub(crate) struct Run {
     /// engine's lease step: only when L1 and R1 were held at the start, as
     /// the card diagnostic asks for its writes.
     pub(crate) write_cards: bool,
+    /// An id for the checkpoint files of this run.
+    pub(crate) checkpoint_id: u16,
     handoffs: [Handoff; AREA_COUNT],
     irq_baseline: u32,
     dpcr_baseline: u32,
@@ -152,6 +154,7 @@ impl Run {
             pad: PadState::NONE,
             skip_risky: false,
             write_cards: false,
+            checkpoint_id: 0,
             handoffs: [Handoff {
                 flags: 0,
                 irq_mask: 0,
@@ -857,9 +860,16 @@ fn step_spu_init(run: &mut Run) {
 }
 
 /// Run everything, in order. Blocks; the picture is the progress screen.
-pub(crate) fn execute(run: &mut Run, ctx: &mut Ctx, pad: PadState, skip_risky: bool) {
+pub(crate) fn execute(
+    run: &mut Run,
+    ctx: &mut Ctx,
+    pad: PadState,
+    skip_risky: bool,
+    capture: &mut crate::photo::PhotoCapture,
+) {
     run.pad = pad;
     run.skip_risky = skip_risky;
+    run.checkpoint_id = (interrupts::vblank_count() as u16) ^ 0x5A5A;
     run.irq_baseline = irq::mask();
     // SAFETY: plain read of the DMA control word.
     run.dpcr_baseline = unsafe { psx_io::read_u32(DPCR) };
@@ -877,6 +887,9 @@ pub(crate) fn execute(run: &mut Run, ctx: &mut Ctx, pad: PadState, skip_risky: b
         if current != Some(step.area) {
             if let Some(previous) = current {
                 handoff(run, previous);
+                if run.write_cards {
+                    save_checkpoint(run, capture);
+                }
             }
             reset_area(run, ctx, step.area);
             current = Some(step.area);
@@ -898,6 +911,9 @@ pub(crate) fn execute(run: &mut Run, ctx: &mut Ctx, pad: PadState, skip_risky: b
         tty_print_dec_u16(index as u16);
         tty::print(" ");
         tty::println(step.name);
+        // Forget a skip from the step before; look at SELECT for this one.
+        bounds::begin_step();
+        bounds::poll();
         (step.run)(run);
     }
     if let Some(previous) = current {
@@ -961,6 +977,19 @@ fn finish(run: &mut Run) {
     }
     run.timing.summary = ScanReport::info(run.next as u16, hash, jitter);
     report::print_conformance_report(&run.results);
+}
+
+/// The capture so far, encoded quietly and written to the card, so that a run
+/// that stops partway leaves its first areas behind.
+fn save_checkpoint(run: &mut Run, capture: &mut crate::photo::PhotoCapture) {
+    run.timing.summary.runs = (run.checkpoint_id >> 8) as u8;
+    capture.encode_quiet(
+        &run.timing,
+        &run.results,
+        run.checkpoint_id as u8,
+        run.scans,
+    );
+    let _ = crate::checkpoint::save(capture);
 }
 
 /// Whether every area's handoff came back clean and the final silence check

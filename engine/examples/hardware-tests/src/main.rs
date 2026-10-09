@@ -46,9 +46,11 @@ macro_rules! probe_gpu {
 }
 
 mod boot;
+mod bounds;
 mod cd_chain_probe;
 mod cd_route;
 mod cdstream_cases;
+mod checkpoint;
 mod console_tests;
 mod controller_test;
 mod cpu_tests;
@@ -211,9 +213,9 @@ unsafe extern "C" {
 //
 // History, one entry per version: docs/hardware-test-versions.md.
 const SUITE_VERSION_MAJOR: u8 = 2;
-const SUITE_VERSION_MINOR: u8 = 0;
+const SUITE_VERSION_MINOR: u8 = 1;
 /// Display form. Keep in step with the two constants above.
-const SUITE_VERSION: &str = "HWTEST v2.0";
+const SUITE_VERSION: &str = "HWTEST v2.1";
 const SCREEN_W: i16 = 320;
 const SCREEN_H: i16 = 240;
 const FONT_TPAGE: TexturePage = TexturePage::new(320, 0, TextureDepth::Bit4);
@@ -2049,7 +2051,7 @@ where
 
 #[inline(never)]
 fn sample_timing_dyn(id: u16, work: u16, probe: &mut dyn FnMut() -> u16) -> TimingRecord {
-    ui::record_id(id);
+    bounds::record_start(id);
     let mut samples = [0u16; TIMING_SAMPLES];
     let guard = IrqGuard::mask();
     let mut run = 0;
@@ -2207,6 +2209,11 @@ const CD_TEST_LBA: u32 = 424;
 /// instead: a poll count is only a proxy for time and drifts with CPU and bus
 /// speed, which is exactly wrong for measuring a drive.
 const CD_SPINS: u32 = 200_000;
+/// Loop passes the deadline-bound CD waits get besides their HBlank deadline,
+/// so that a stopped timer cannot make them endless. A pass is a CD register
+/// read and a counter read, some twenty clocks; the deadline is half a
+/// second of HBlanks, so this is a good deal more than it can use.
+const CD_WAIT_SPINS: u32 = 30_000_000;
 /// Real-time deadline for one mechanical CD operation, in Timer 1 HBlank ticks
 /// (~63.9 us each). 31,250 ticks is about two seconds, comfortably past a
 /// full-stroke seek on a slow CD-R while still bounding a dead drive.
@@ -2251,8 +2258,12 @@ fn cd_command_until_complete_timed(command: u8, params: &[u8]) -> bool {
         return false;
     };
     let mut seen_ack = false;
+    let mut spins = 0u32;
     let ok = loop {
-        if timers::counter(timers::Timer::Timer1) >= CD_DEADLINE_HBLANKS {
+        spins += 1;
+        if timers::counter(timers::Timer::Timer1) >= CD_DEADLINE_HBLANKS
+            || spins > bounds::scale(CD_WAIT_SPINS)
+        {
             break false;
         }
         match psx_io::cd::irq_flag_value() {
@@ -2398,8 +2409,12 @@ fn cd_getlocp_during_playback() -> u16 {
 
 /// Wait for one streamed data sector under the same real-time deadline.
 fn cd_sector_timed() -> bool {
+    let mut spins = 0u32;
     loop {
-        if timers::counter(timers::Timer::Timer1) >= CD_DEADLINE_HBLANKS {
+        spins += 1;
+        if timers::counter(timers::Timer::Timer1) >= CD_DEADLINE_HBLANKS
+            || spins > bounds::scale(CD_WAIT_SPINS)
+        {
             return false;
         }
         match psx_io::cd::irq_flag_value() {

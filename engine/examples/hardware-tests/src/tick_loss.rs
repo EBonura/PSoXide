@@ -113,6 +113,7 @@ fn case(
     records: &mut Records,
     next: &mut usize,
 ) {
+    crate::bounds::record_start(id);
     timers::set_mode(timer, mode);
     timers::set_counter(timer, 0);
     timers::set_mode(Timer::Timer1, HBLANK_CLOCK);

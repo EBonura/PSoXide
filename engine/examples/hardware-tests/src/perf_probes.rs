@@ -680,7 +680,9 @@ pub(crate) fn push_audit(records: &mut Records, next: &mut usize) {
 /// Where the CPU's RAM loads wait on each DMA channel: 64 loads with the
 /// channel idle and the same loads right after kicking a transfer big enough
 /// to outlast them. GPU list walking is `push_dma`'s; these are the other
-/// three: SPU block DMA, OTC clear and GPU block DMA.
+/// three: SPU block DMA, OTC clear and GPU block DMA. A channel that never
+/// goes idle is stopped and described (`0x780`-`0x787`) and the next one
+/// runs.
 pub(crate) fn push_dma_channels(records: &mut Records, next: &mut usize) {
     type Overlap = fn(u32, u32, u32, u32) -> u16;
     let data = Arg::RamWord.resolve();
@@ -688,26 +690,32 @@ pub(crate) fn push_dma_channels(records: &mut Records, next: &mut usize) {
 
     // SPU: 256 words as 16 blocks of 16, written to SPU RAM at 16 cycles a
     // halfword, which keeps the channel busy for thousands of cycles.
+    dma_end_reset(DmaGroup::Spu);
     for (id, kick) in [(0x140u16, 0u32), (0x141, SPU_KICK)] {
         let record = sample_timing(id, 64, || {
             with_spu_dma(|base, head| run(base, head, kick, data))
         });
         push_timing_record(records, next, record);
     }
+    push_dma_end(records, next, DmaGroup::Spu);
     // OTC: 1024 words cleared backwards, one RAM write a word.
+    dma_end_reset(DmaGroup::Otc);
     for (id, kick) in [(0x142u16, 0u32), (0x143, OTC_KICK)] {
         let record = sample_timing(id, 64, || {
             with_otc_dma(|base, head| run(base, head, kick, data))
         });
         push_timing_record(records, next, record);
     }
+    push_dma_end(records, next, DmaGroup::Otc);
     // GPU block DMA of NOP words: the channel reads RAM and the GPU takes it.
+    dma_end_reset(DmaGroup::GpuBlock);
     for (id, kick) in [(0x144u16, 0u32), (0x145, GPU_BLOCK_KICK)] {
         let record = sample_timing(id, 64, || {
             with_gpu_block_dma(|base, head| run(base, head, kick, data))
         });
         push_timing_record(records, next, record);
     }
+    push_dma_end(records, next, DmaGroup::GpuBlock);
 }
 
 const SPU_KICK: u32 =
@@ -722,31 +730,167 @@ static mut DMA_SOURCE: [u32; 256] = [0; 256];
 const OTC_WORDS: usize = 1024;
 static mut DMA_OT: [u32; OTC_WORDS] = [0; OTC_WORDS];
 
+/// The DMA rows whose end state is described: each group's records are
+/// `0x780 + 2 * group` and the next one.
+#[derive(Copy, Clone)]
+enum DmaGroup {
+    Spu = 0,
+    Otc = 1,
+    GpuBlock = 2,
+    GpuList = 3,
+}
+
+/// rec dma_end: timeout_flags, chcr_high_half, device_status (SPU, OTC, GPU block and GPU list groups, 0x780 0x782 0x784 0x786; flags bit 0 busy before a kick, bit 1 busy after the loop, bit 2 the SPU mode never matched, bit 3 something stopped; ffff in the status = none)
+const DMA_END_RECORD: u16 = 0x780;
+/// rec dma_end_registers: madr_low_half, bcr_high_half, bcr_low_half (the same groups, 0x781 0x783 0x785 0x787; read after the timeout, before the channel was stopped)
+const DMA_END_REGISTERS_RECORD: u16 = 0x781;
+/// rec spu_mode_wait: iterations_first, iterations_longest, mode_never_matched (SPUSTAT bits 5-0 against the SPUCNT mode before the SPU DMA kick, 0x788)
+const SPU_MODE_WAIT_RECORD: u16 = 0x788;
+
+#[derive(Copy, Clone)]
+struct DmaEnd {
+    flags: u32,
+    chcr: u32,
+    status: u32,
+    madr: u32,
+    bcr: u32,
+    seen: bool,
+}
+
+const DMA_END_BLANK: DmaEnd = DmaEnd {
+    flags: 0,
+    chcr: 0,
+    status: 0xFFFF,
+    madr: 0,
+    bcr: 0,
+    seen: false,
+};
+static mut DMA_END: [DmaEnd; 4] = [DMA_END_BLANK; 4];
+/// SPUSTAT wait before the SPU DMA kick: iterations the first and the
+/// longest took.
+static mut SPU_MODE_ITERATIONS: [u32; 3] = [0; 3];
+const SPU_MODE_WAIT_ITERATIONS: u32 = 100_000;
+
+fn dma_end_reset(group: DmaGroup) {
+    // SAFETY: single thread; plain statics.
+    unsafe {
+        DMA_END[group as usize] = DMA_END_BLANK;
+        DMA_WAIT_FLAGS = 0;
+        if matches!(group, DmaGroup::Spu) {
+            SPU_MODE_ITERATIONS = [0; 3];
+        }
+    }
+}
+
+/// After a probe call: take the wait flags, and if a wait ran out describe
+/// the channel (CHCR, MADR, BCR and `status`) and stop it by clearing CHCR.
+/// Without a timeout the last call's state is kept.
+fn dma_settle(group: DmaGroup, channel: dma::Channel, status: u32) {
+    // SAFETY: single thread; plain statics, and register reads.
+    unsafe {
+        let flags = DMA_WAIT_FLAGS;
+        DMA_WAIT_FLAGS = 0;
+        let end = &mut DMA_END[group as usize];
+        end.flags |= flags;
+        if flags != 0 || !end.seen {
+            let base = channel.register_base();
+            end.chcr = dma::control(channel);
+            end.madr = dma::address(channel);
+            end.bcr = psx_io::read_u32(base + 4);
+            end.status = status;
+            end.seen = flags == 0 || end.seen;
+        }
+        if flags & 3 != 0 {
+            end.flags |= 8;
+            dma::abort(channel);
+        }
+    }
+}
+
+fn push_dma_end(records: &mut Records, next: &mut usize, group: DmaGroup) {
+    // SAFETY: single thread; plain statics.
+    let end = unsafe { DMA_END[group as usize] };
+    let id = DMA_END_RECORD + 2 * group as u16;
+    push_timing_record(
+        records,
+        next,
+        crate::console_tests::record(id, end.flags, end.chcr >> 16, end.status),
+    );
+    push_timing_record(
+        records,
+        next,
+        crate::console_tests::record(
+            DMA_END_REGISTERS_RECORD + 2 * group as u16,
+            end.madr & 0xFFFF,
+            end.bcr >> 16,
+            end.bcr & 0xFFFF,
+        ),
+    );
+    if matches!(group, DmaGroup::Spu) {
+        // SAFETY: single thread; plain static.
+        let wait = unsafe { SPU_MODE_ITERATIONS };
+        push_timing_record(
+            records,
+            next,
+            crate::console_tests::record(SPU_MODE_WAIT_RECORD, wait[0], wait[1], wait[2]),
+        );
+    }
+}
+
 /// Set the SPU up for a DMA write of 256 words and run `body(base, source)`,
 /// then put SPUCNT back. The channel's address and size are set; the body's
-/// assembly writes MADR and CHCR.
+/// assembly writes MADR and CHCR. SPUSTAT bits 5-0 follow SPUCNT's mode a
+/// moment after it is written (psx-spx), and a kick before they match is the
+/// suspect for a block write that never ends, so the wait is counted and its
+/// length recorded; if it runs out the kick goes ahead and says so.
 fn with_spu_dma(body: impl FnOnce(u32, u32) -> u16) -> u16 {
-    use psx_hw::spu::{SPUCNT, TRANSFER_ADDR, TRANSFER_CTRL};
+    use psx_hw::spu::{SPUCNT, SPUSTAT, TRANSFER_ADDR, TRANSFER_CTRL};
     // SAFETY: SPU register writes and a DMA from memory this probe owns; the
-    // body waits the channel idle before it returns.
+    // body's waits are counted and a stuck channel is stopped below.
     unsafe {
         let old = psx_io::read_u16(SPUCNT);
         let stopped = old & !0x0030;
-        psx_io::write_u16(SPUCNT, stopped);
-        psx_io::write_u16(TRANSFER_CTRL, 0x0004);
-        psx_io::write_u16(TRANSFER_ADDR, 0x0800);
-        psx_io::write_u16(SPUCNT, stopped | 0x0020);
+        let mut waits = [0u32; 2];
+        for (slot, mode) in [stopped, stopped | 0x0020].into_iter().enumerate() {
+            psx_io::write_u16(SPUCNT, mode);
+            if slot == 1 {
+                psx_io::write_u16(TRANSFER_CTRL, 0x0004);
+                psx_io::write_u16(TRANSFER_ADDR, 0x0800);
+            }
+            let limit = crate::bounds::scale(SPU_MODE_WAIT_ITERATIONS);
+            let mut iterations = 0u32;
+            while psx_io::read_u16(SPUSTAT) & 0x003F != mode & 0x003F && iterations < limit {
+                iterations += 1;
+            }
+            waits[slot] = iterations;
+            if iterations >= limit && limit > 1 {
+                DMA_WAIT_FLAGS |= 4;
+            }
+        }
+        // The first sample's wait, the longest of all of them, how many ran out.
+        let record = &mut *(&raw mut SPU_MODE_ITERATIONS);
+        if record[0] == 0 {
+            record[0] = waits[1];
+        }
+        record[1] = record[1].max(waits[1]);
+        record[2] += (waits[1] >= SPU_MODE_WAIT_ITERATIONS) as u32;
         dma::enable_channel(dma::Channel::Spu);
         dma::raw::set_size(dma::Channel::Spu, dma::size_blocks(16, 16));
         let source = (&raw mut DMA_SOURCE) as u32;
         let elapsed = body(dma::Channel::Spu.register_base(), source);
+        let status = psx_io::read_u16(SPUSTAT) as u32;
+        dma_settle(DmaGroup::Spu, dma::Channel::Spu, status);
+        // Mode 0 on the SPU side too, so a transfer that never ended is not
+        // left armed.
+        psx_io::write_u16(SPUCNT, stopped);
         psx_io::write_u16(SPUCNT, old);
         elapsed
     }
 }
 
 fn with_otc_dma(body: impl FnOnce(u32, u32) -> u16) -> u16 {
-    // SAFETY: a DMA into a table this probe owns; the body waits for idle.
+    // SAFETY: a DMA into a table this probe owns; the body's waits are
+    // counted and a stuck channel is stopped below.
     unsafe {
         let table = (&raw mut DMA_OT) as *mut u32;
         dma::enable_channel(dma::Channel::OrderingTableClear);
@@ -755,7 +899,9 @@ fn with_otc_dma(body: impl FnOnce(u32, u32) -> u16) -> u16 {
             dma::size_words(OTC_WORDS as u16),
         );
         let end = table.add(OTC_WORDS - 1) as u32;
-        body(dma::Channel::OrderingTableClear.register_base(), end)
+        let elapsed = body(dma::Channel::OrderingTableClear.register_base(), end);
+        dma_settle(DmaGroup::Otc, dma::Channel::OrderingTableClear, 0xFFFF);
+        elapsed
     }
 }
 
@@ -763,8 +909,8 @@ fn with_gpu_block_dma(body: impl FnOnce(u32, u32) -> u16) -> u16 {
     let old_direction = (gpu_io::status().bits() >> 29) & 3;
     gpu_io::write_display_control(0x0400_0002); // DMA CPU -> GP0
     dma::enable_channel(dma::Channel::Gpu);
-    // SAFETY: a DMA of GP0 NOPs from memory this probe owns; the body waits
-    // for idle.
+    // SAFETY: a DMA of GP0 NOPs from memory this probe owns; the body's waits
+    // are counted and a stuck channel is stopped below.
     let elapsed = unsafe {
         dma::raw::set_size(dma::Channel::Gpu, dma::size_blocks(16, 16));
         body(
@@ -772,7 +918,12 @@ fn with_gpu_block_dma(body: impl FnOnce(u32, u32) -> u16) -> u16 {
             (&raw mut DMA_SOURCE) as u32,
         )
     };
-    gpu_io::write_display_control(0x0400_0000 | old_direction);
+    let status = gpu_io::status().bits();
+    dma_settle(DmaGroup::GpuBlock, dma::Channel::Gpu, status >> 16);
+    // A transfer that never ended leaves the direction at 0 (off); one that
+    // did gets the old direction back.
+    let timed_out = unsafe { DMA_END[DmaGroup::GpuBlock as usize].flags & 8 != 0 };
+    gpu_io::write_display_control(0x0400_0000 | if timed_out { 0 } else { old_direction });
     elapsed
 }
 
@@ -1520,7 +1671,10 @@ fn with_gpu_list_dma(body: impl FnOnce() -> u16) -> u16 {
         dma::raw::set_size(dma::Channel::Gpu, dma::size_words(0));
     }
     let elapsed = body();
-    gpu_io::write_display_control(0x0400_0000 | old_direction);
+    // A list that never ended leaves the direction off, not as it was.
+    // SAFETY: single thread; plain static.
+    let timed_out = unsafe { DMA_END[DmaGroup::GpuList as usize].flags & 8 != 0 };
+    gpu_io::write_display_control(0x0400_0000 | if timed_out { 0 } else { old_direction });
     elapsed
 }
 
@@ -1595,43 +1749,80 @@ fn push_dma(records: &mut Records, next: &mut usize) {
         (0x1E6, 64, timed_loads_with_dma, 0, scratchpad),
         (0x1E7, 64, timed_loads_with_dma, LIST_KICK, scratchpad),
     ];
+    dma_end_reset(DmaGroup::GpuList);
     for (id, work, run, chcr, data) in cases {
         // 512 rather than 1024: if the CPU does wait for the walk, the whole
         // walk lands in a 16-bit counter.
         let head = build_empty_list(512);
         let record = sample_timing(id, work, || {
-            with_gpu_list_dma(|| run(base, head, chcr, data))
+            with_gpu_list_dma(|| {
+                let elapsed = run(base, head, chcr, data);
+                dma_settle(
+                    DmaGroup::GpuList,
+                    dma::Channel::Gpu,
+                    gpu_io::status().bits() >> 16,
+                );
+                elapsed
+            })
         });
         push_timing_record(records, next, record);
     }
+    push_dma_end(records, next, DmaGroup::GpuList);
 }
+
+/// How the last overlap probe's waits ended: bit 0 the channel was still busy
+/// when a pass was about to kick it, bit 1 it was still busy when the block
+/// ended. OR-ed over a record's samples; cleared by the caller.
+static mut DMA_WAIT_FLAGS: u32 = 0;
+
+/// Loop iterations a wait on a DMA channel's busy bit gets before the block
+/// kicks anyway (before a pass: an idle channel reads idle at once) or gives
+/// up (after the loop: the longest legitimate transfer here, the SPU's 256
+/// words at about 16 cycles a halfword, is under 10,000 cycles; an iteration
+/// is about 20 cycles, so 20,000 of them is some 400,000 cycles, over ten
+/// milliseconds, forty times longer).
+const DMA_PRE_WAIT_ITERATIONS: u32 = 4_000;
+const DMA_FINAL_WAIT_ITERATIONS: u32 = 20_000;
 
 /// `$payload`, timed on the second pass, each pass starting by writing `chcr`
 /// to the DMA channel at `base` with MADR = `head`. Each pass first waits for
 /// the channel to go idle, and the block ends the same way, so the caller can
 /// restore the GPU's DMA direction. `$24` holds a RAM address for payloads
-/// that load.
+/// that load. Both waits are counted loops: a channel that never goes idle
+/// costs `DMA_PRE_WAIT_ITERATIONS` or `DMA_FINAL_WAIT_ITERATIONS` passes and
+/// sets a bit in `DMA_WAIT_FLAGS`, and the block goes on, so the caller can
+/// stop the channel and say what it found.
 macro_rules! dma_overlap_probe {
     ($name:ident, $start:literal, $end:literal, $payload:literal) => {
         #[inline(never)]
         fn $name(base: u32, head: u32, chcr: u32, data: u32) -> u16 {
             let elapsed: u32;
+            let flags: u32;
+            let pre = crate::bounds::scale(DMA_PRE_WAIT_ITERATIONS);
+            let post = crate::bounds::scale(DMA_FINAL_WAIT_ITERATIONS);
             unsafe {
                 core::arch::asm!(
                     ".set noreorder",
                     ".balign 16",
                     $start,
+                    "move $15, $zero",
                     "lui $11, 0x1F80",
                     "ori $11, $11, 0x1120",
                     "addiu $13, $zero, 2",
                     "2:",
+                    "move $3, $4",
                     "3:",
                     "lw $10, 8($8)",
                     "nop",
                     "srl $10, $10, 24",
                     "andi $10, $10, 1",
-                    "bnez $10, 3b",
+                    "beqz $10, 5f",
                     "nop",
+                    "addiu $3, $3, -1",
+                    "bnez $3, 3b",
+                    "nop",
+                    "ori $15, $15, 1",
+                    "5:",
                     "sw $9, 0($8)",
                     "sw $zero, 4($11)",
                     "sw $zero, 0($11)",
@@ -1641,25 +1832,36 @@ macro_rules! dma_overlap_probe {
                     "addiu $13, $13, -1",
                     "bnez $13, 2b",
                     "nop",
+                    "move $3, $5",
                     "4:",
                     "lw $10, 8($8)",
                     "nop",
                     "srl $10, $10, 24",
                     "andi $10, $10, 1",
-                    "bnez $10, 4b",
+                    "beqz $10, 6f",
                     "nop",
+                    "addiu $3, $3, -1",
+                    "bnez $3, 4b",
+                    "nop",
+                    "ori $15, $15, 2",
+                    "6:",
                     $end,
                     ".set reorder",
                     in("$8") base,
                     in("$9") head,
                     in("$14") chcr,
                     in("$24") data,
+                    in("$4") pre,
+                    in("$5") post,
+                    lateout("$3") _,
                     lateout("$10") _,
                     lateout("$11") _,
                     lateout("$12") elapsed,
                     lateout("$13") _,
+                    lateout("$15") flags,
                     options(nostack)
                 );
+                DMA_WAIT_FLAGS |= flags;
             }
             elapsed as u16
         }

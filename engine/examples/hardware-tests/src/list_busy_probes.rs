@@ -54,6 +54,9 @@ const KICK: u32 =
 pub(crate) const NOT_SEEN: u32 = u32::MAX;
 /// Give up on a list after this many clocks (about half a second).
 const POLL_LIMIT: u32 = 16_000_000;
+/// Loop passes a poll gets besides the clock limit, so that a stopped clock
+/// cannot make it endless: a pass is some forty clocks.
+const POLL_SPINS: u32 = 2_000_000;
 const GPUSTAT_IRQ: u32 = 1 << 24;
 const GPUSTAT_CMD_READY: u32 = 1 << 26;
 const GPUSTAT_DMA_READY: u32 = 1 << 28;
@@ -271,6 +274,7 @@ fn kick_and_stamp(armed: &Armed) -> Stamps {
     };
     let guard = IrqGuard::mask();
     let mut clock = Clock::start();
+    let mut guard_count = 0u32;
     // SAFETY: silicon probe: the transfer touches only memory this probe
     // owns, which stays live and untouched until the probe waits the
     // channel idle or aborts it.
@@ -301,7 +305,8 @@ fn kick_and_stamp(armed: &Armed) -> Stamps {
         if !busy && s.irq != NOT_SEEN && stat & ready == ready {
             break;
         }
-        if t > POLL_LIMIT {
+        guard_count += 1;
+        if t > POLL_LIMIT || guard_count > crate::bounds::scale(POLL_SPINS) {
             break;
         }
     }
@@ -458,7 +463,13 @@ fn throughput(kind: LoopKind) -> Throughput {
     let (iterations, cycles) = run_loop(kind, 0, WALK_CAP);
     // Let the drawing finish before anything else touches the GPU.
     let mut clock = Clock::start();
-    while gpu_io::status().bits() & GPUSTAT_IRQ == 0 && clock.now() < POLL_LIMIT {}
+    let mut spins = 0u32;
+    while gpu_io::status().bits() & GPUSTAT_IRQ == 0
+        && clock.now() < POLL_LIMIT
+        && spins < crate::bounds::scale(POLL_SPINS)
+    {
+        spins += 1;
+    }
     let irq_seen = gpu_io::status().bits() & GPUSTAT_IRQ != 0;
     drop(guard);
     disarm(&armed, irq_seen);

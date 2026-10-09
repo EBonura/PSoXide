@@ -21,13 +21,14 @@ enum Mode {
     Capture,
 }
 
-const MENU: [&str; 4] = [
+const MENU: [&str; 5] = [
     // Row 0 is pinned: `make hwtest-run` selects it by firing CROSS at a fixed
     // tick with the cursor still at its boot position.
     "RUN HARDWARE TEST",
     "CONTROLLER TEST (P1 + P2)",
     "MEMORY CARD (AT OWN RISK)",
     "VIEW LAST CAPTURE",
+    "VIEW SAVED RESULTS (CARD)",
 ];
 const MENU_TOP: i16 = 64;
 const MENU_ROW_PITCH: i16 = 14;
@@ -91,7 +92,7 @@ impl HardwareTests {
         let skip_risky = ctx.is_held(button::L2);
         self.run.write_cards = ctx.is_held(button::L1) && ctx.is_held(button::R1);
         tty::println("hardware-tests: run begins");
-        run::execute(&mut self.run, ctx, ctx.pad, skip_risky);
+        run::execute(&mut self.run, ctx, ctx.pad, skip_risky, &mut self.capture);
         // The run left its own picture and font; the scene's are back below.
         self.font = Some(ui::upload_font());
         self.run.timing.summary.runs = (self.run_id() >> 8) as u8;
@@ -165,8 +166,15 @@ impl Scene for HardwareTests {
                             self.memcard_armed = false;
                             self.mode = Mode::MemoryCard;
                         }
-                        _ => {
+                        3 => {
                             if self.have_capture {
+                                self.open_capture();
+                                self.capture.render_page(0);
+                            }
+                        }
+                        _ => {
+                            if crate::checkpoint::load(&mut self.capture) {
+                                self.have_capture = true;
                                 self.open_capture();
                                 self.capture.render_page(0);
                             }

@@ -229,6 +229,7 @@ fn answered(bytes: &[Byte; 9]) -> bool {
 /// answering: the question the SCPH-1200 asked, in cycles instead of spins.
 pub(crate) fn setup_sweep(records: &mut Records, next: &mut usize) {
     for port2 in [false, true] {
+        crate::bounds::record_start(SETUP_RECORD + port2 as u16);
         let mut mask = 0u32;
         let mut first_ok = NONE as u32;
         let mut last_fail = NONE as u32;
@@ -272,6 +273,7 @@ fn ack_timing(
     records: &mut Records,
     next: &mut usize,
 ) {
+    crate::bounds::record_start(first_id);
     let mut rise = [[0u32; ROUNDS]; 9];
     let mut width = [[0u32; ROUNDS]; 9];
     let mut done = [[0u32; ROUNDS]; 9];
@@ -360,6 +362,7 @@ const MIX_ROUNDS: usize = 24;
 fn mix(port2: bool, load: bool, records: &mut Records, next: &mut usize) {
     let slot = if port2 { Port::Two } else { Port::One };
     let base = 4 * (2 * port2 as u16 + load as u16);
+    crate::bounds::record_start(MIX_COUNT_RECORD + base);
     let mut pad_ok = 0u32;
     let mut card_ok = 0u32;
     let (mut no_card, mut protocol, mut checksum, mut pad_lost) = (0u32, 0u32, 0u32, 0u32);

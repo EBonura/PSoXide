@@ -50,6 +50,9 @@ const DMA_SPINS: u32 = 100_000;
 /// Status polls give up after this many system clocks (about 1.8 ms).
 const POLL_CLOCKS: u16 = 60_000;
 const NEVER: u16 = 0xFFFF;
+/// Status reads a poll gets besides its clock bound (about 1.8 ms is 60,000
+/// clocks; a read is under 20), so a stopped clock cannot make it endless.
+const POLL_SPINS: u32 = 200_000;
 const PREP_DELAY: u16 = 2_000;
 const PREP_WORDS: usize = 5;
 const TRACE_SAMPLES: usize = 4;
@@ -135,11 +138,15 @@ fn cmd(value: u32) {
 /// Timer 2 must be on the system clock (mode 0).
 fn poll(mask: u32, want: u32) -> u16 {
     timers::set_counter(timers::Timer::Timer2, 0);
+    let mut spins = 0u32;
     loop {
         if st() & mask == want {
             return timers::counter(timers::Timer::Timer2);
         }
-        if timers::counter(timers::Timer::Timer2) >= POLL_CLOCKS {
+        spins += 1;
+        if timers::counter(timers::Timer::Timer2) >= POLL_CLOCKS
+            || spins > crate::bounds::scale(POLL_SPINS)
+        {
             return NEVER;
         }
     }
@@ -276,6 +283,7 @@ fn trace(busy: bool) -> (u32, u32, u32) {
     let mut last = st();
     let mut last_status = last;
     let mut last_clock = timers::counter(timers::Timer::Timer2);
+    let mut guard = 0u32;
     loop {
         let now = st();
         let clock = timers::counter(timers::Timer::Timer2);
@@ -288,7 +296,8 @@ fn trace(busy: bool) -> (u32, u32, u32) {
                 break;
             }
         }
-        if clock >= TRACE_CLOCKS {
+        guard += 1;
+        if clock >= TRACE_CLOCKS || guard > crate::bounds::scale(POLL_SPINS) {
             break;
         }
     }

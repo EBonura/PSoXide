@@ -40,6 +40,7 @@ fn wait_edge() -> bool {
 }
 
 pub(crate) fn run(records: &mut Records, next: &mut usize) {
+    crate::bounds::record_start(FREE_RECORD);
     timers::set_mode(Timer::Timer1, HBLANK_CLOCK);
     timers::set_counter(Timer::Timer1, 0);
 

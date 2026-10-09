@@ -390,14 +390,21 @@ fn submit(file_sector: u32, sectors: u32, destination: *mut u32) -> Option<Ticke
     psx_cdstream::submit(request.with_priority(Priority::NORMAL)).ok()
 }
 
+/// Loop passes a wait on the transport gets whatever the clock says: a stopped
+/// clock must not make a wait endless. A pass is a few dozen clocks and the
+/// longest patience is some seconds, so this is far past any real wait.
+const WAIT_SPINS: u32 = 60_000_000;
+
 #[inline(never)]
 fn wait(ticket: Ticket) -> Option<Completion> {
     let start = now();
+    let mut spins = 0u32;
     loop {
         if let RequestState::Finished(done) = psx_cdstream::state(ticket) {
             return Some(done);
         }
-        if since(start) > PATIENCE {
+        spins += 1;
+        if since(start) > PATIENCE || spins > crate::bounds::scale(WAIT_SPINS) {
             return None;
         }
     }
@@ -407,8 +414,10 @@ fn wait(ticket: Ticket) -> Option<Completion> {
 #[inline(never)]
 fn wait_idle() {
     let start = now();
+    let mut spins = 0u32;
     while !(psx_cdstream::is_idle() && psx_cdstream::queued_count() == 0) {
-        if since(start) > PATIENCE {
+        spins += 1;
+        if since(start) > PATIENCE || spins > crate::bounds::scale(WAIT_SPINS) {
             return;
         }
     }
@@ -553,8 +562,10 @@ fn acquire_audio() -> Option<Cd> {
     wait_idle();
     let _ = psx_cdstream::request_audio_lease();
     let start = now();
+    let mut spins = 0u32;
     while psx_cdstream::lease_state() != LeaseState::Granted {
-        if since(start) > PATIENCE {
+        spins += 1;
+        if since(start) > PATIENCE || spins > crate::bounds::scale(WAIT_SPINS) {
             let _ = psx_cdstream::withdraw_audio_lease();
             return None;
         }

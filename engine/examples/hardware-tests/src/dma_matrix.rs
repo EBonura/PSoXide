@@ -33,11 +33,17 @@ type Records = [TimingRecord; TIMING_RECORD_COUNT];
 
 /// rec cd_dma_loop: loop_idle_clocks, loop_during_clocks, transfer_clocks_div32 (ffff = timeout; lw then sw for 1x 2048, 1x 2340, 2x 2048, 2x 2340, 0x700-0x707)
 const CD_DMA_RECORD: u16 = 0x700;
+/// rec dma_matrix_state: chcr_high_half, madr_low_half, device_status (after each row, CD 0x790-0x797 and MDEC 0x798 0x799; CD: status register and bit 8 data FIFO ready; MDEC: status high half)
+const STATE_RECORD: u16 = 0x790;
 /// rec mdec_dma_loop: loop_idle_clocks, loop_during_clocks, transfer_clocks_div32 (ffff = timeout; lw then sw, 0x708-0x709)
 const MDEC_DMA_RECORD: u16 = 0x708;
 
 const NONE: u32 = 0xFFFF;
 const CD_SPINS: u32 = 400_000;
+/// Passes of the wait for a channel to go idle after the loop. A pass is about
+/// 40 clocks, so this is a little over 2 million clocks, sixty milliseconds: a
+/// CD sector comes every 13 (1x) or 7 (2x), and a transfer here is 512 words.
+const WAIT_ITERATIONS: u32 = 50_000;
 /// The test region `cd_chain_probe.rs` and the stream cases read.
 const CDTEST_LBA: u32 = 564;
 const CD_WORDS_DATA: u16 = 512;
@@ -56,21 +62,41 @@ static mut CD_SINK: [u32; 592] = [0; 592];
 static mut MDEC_IN: [u32; MDEC_IN_WORDS] = [0; MDEC_IN_WORDS];
 static mut MDEC_OUT: [u32; MDEC_OUT_WORDS] = [0; MDEC_OUT_WORDS];
 static mut SCRATCH_DATA: [u32; 4] = [0; 4];
+/// What the last row saw of its channel and device before stopping anything.
+static mut LAST_STATE: [u32; 3] = [0; 3];
+
+fn note_state(channel: Channel, status: u32) {
+    // SAFETY: single thread; plain static.
+    unsafe {
+        LAST_STATE = [
+            dma::control(channel) >> 16,
+            dma::address(channel) & 0xFFFF,
+            status & 0xFFFF,
+        ];
+    }
+}
+
+fn push_state(records: &mut Records, next: &mut usize, id: u16) {
+    // SAFETY: single thread; plain static.
+    let state = unsafe { LAST_STATE };
+    push_timing_record(records, next, record(id, state[0], state[1], state[2]));
+}
 
 /// One kick, one loop, then wait for both channels to go idle, every wait
 /// bounded. `$8` and `$15` are the two channels' register bases (the same one
 /// when only one is used), `$9` the first channel's MADR, `$14` its CHCR (0 =
 /// nothing runs: the idle row), `$24` the address the loop reads or writes.
 /// Returns the loop's clocks in `$12` and, in `$2`, the clocks from the kick
-/// to both channels idle in units of 32 (so up to 63,000 units, about 2 million
-/// clocks), or -1 if that bound went by first. Timer 2 wraps every 65,536
-/// clocks; the wait counts the wraps.
+/// to both channels idle in units of 32, or -1 if `WAIT_ITERATIONS` passes of
+/// the wait went by first. The bound is a loop count, not a time; Timer 2 only
+/// measures, and wraps every 65,536 clocks, so the wait counts the wraps.
 macro_rules! bounded_overlap {
     ($name:ident, $id:literal, $payload:expr) => {
         #[inline(never)]
         fn $name(base_a: u32, madr_a: u32, chcr_a: u32, base_b: u32, data: u32) -> (u16, u16) {
             let loop_clocks: u32;
             let total: u32;
+            let bound = crate::bounds::scale(WAIT_ITERATIONS);
             // SAFETY: register writes and a DMA between memory this module
             // owns; the wait below is bounded and the caller aborts the
             // channels after a timeout.
@@ -90,6 +116,7 @@ macro_rules! bounded_overlap {
                         "lw $12, 0($11)\n",
                         "move $24, $zero\n",
                         "move $25, $zero\n",
+                        "move $5, $6\n",
                         "3:\n",
                         "lw $10, 8($8)\n",
                         "nop\n",
@@ -109,9 +136,8 @@ macro_rules! bounded_overlap {
                         "move $24, $2\n",
                         "beqz $10, 4f\n",
                         "nop\n",
-                        "lui $3, 0x1F\n",
-                        "sltu $3, $25, $3\n",
-                        "bnez $3, 3b\n",
+                        "addiu $5, $5, -1\n",
+                        "bnez $5, 3b\n",
                         "nop\n",
                         "b 5f\n",
                         "addiu $2, $zero, -1\n",
@@ -127,6 +153,8 @@ macro_rules! bounded_overlap {
                     in("$14") chcr_a,
                     in("$15") base_b,
                     in("$24") data,
+                    in("$6") bound,
+                    lateout("$5") _,
                     lateout("$25") _,
                     lateout("$2") total,
                     lateout("$3") _,
@@ -169,23 +197,6 @@ fn idle_loop(kind: Loop, base: u32, data: u32) -> u16 {
         .unwrap_or(0)
 }
 
-/// The channel's registers after a row, on the TTY, so a timeout can be told
-/// from a transfer that finished.
-fn debug_chcr(what: &str, channel: Channel, loop_clocks: u16, total: u16) {
-    use psx_rt::tty;
-    tty::print("hardware-tests: dma-matrix ");
-    tty::print(what);
-    tty::print(" chcr=0x");
-    tty::print_hex_u32(dma::control(channel));
-    tty::print(" madr=0x");
-    tty::print_hex_u32(dma::address(channel));
-    tty::print(" loop=");
-    crate::report::tty_print_dec_u16(loop_clocks);
-    tty::print(" total=");
-    crate::report::tty_print_dec_u16(total);
-    tty::println("");
-}
-
 fn pack(idle: u16, during: u16, transfer: u16) -> (u32, u32, u32) {
     (idle as u32, during as u32, transfer as u32)
 }
@@ -208,6 +219,7 @@ fn cd_row(fast: bool, whole: bool, kind: Loop) -> (u32, u32, u32) {
         && cd.try_start_reading(CD_SPINS).is_some()
         && cd.try_wait_data_sector(CD_SPINS);
     if !ready {
+        note_state(Channel::Cd, 0xFFFF);
         let _ = cd.try_pause_until_complete(CD_SPINS);
         return (idle as u32, NONE, NONE);
     }
@@ -225,7 +237,10 @@ fn cd_row(fast: bool, whole: bool, kind: Loop) -> (u32, u32, u32) {
         dma::raw::set_size(Channel::Cd, dma::size_words(words));
     }
     let (during, transfer) = run_loop(kind, base, sink, CD_KICK, base, ram);
-    debug_chcr("cd", Channel::Cd, during, transfer);
+    note_state(
+        Channel::Cd,
+        cd.status_register() as u32 | ((cd.is_data_fifo_ready() as u32) << 8),
+    );
     if transfer == 0xFFFF {
         dma::abort(Channel::Cd);
     }
@@ -240,12 +255,11 @@ pub(crate) fn cd(records: &mut Records, next: &mut usize) {
         .enumerate()
     {
         for (offset, kind) in [Loop::Loads, Loop::Stores].into_iter().enumerate() {
+            let id = CD_DMA_RECORD + (2 * index + offset) as u16;
+            crate::bounds::record_start(id);
             let (a, b, c) = cd_row(fast, whole, kind);
-            push_timing_record(
-                records,
-                next,
-                record(CD_DMA_RECORD + (2 * index + offset) as u16, a, b, c),
-            );
+            push_timing_record(records, next, record(id, a, b, c));
+            push_state(records, next, STATE_RECORD + (2 * index + offset) as u16);
         }
     }
     let mut cd = unsafe { Cd::steal() };
@@ -275,6 +289,7 @@ fn mdec_row(kind: Loop) -> (u32, u32, u32) {
     #[allow(deprecated)]
     let ready = psx_fmv::mdec::reset() && psx_fmv::mdec::load_tables().is_some();
     if !ready {
+        note_state(Channel::MdecIn, 0xFFFF);
         return (idle as u32, NONE, NONE);
     }
     let input = (&raw mut MDEC_IN) as u32;
@@ -306,8 +321,11 @@ fn mdec_row(kind: Loop) -> (u32, u32, u32) {
         dma::raw::set_size(Channel::MdecIn, dma::size_blocks(32, MACROBLOCKS as u16));
     }
     let (during, transfer) = run_loop(kind, base_in, input, MDEC_CHCR_IN, base_out, ram);
-    debug_chcr("mdec-in", Channel::MdecIn, during, transfer);
-    debug_chcr("mdec-out", Channel::MdecOut, during, transfer);
+    // SAFETY: MDEC status read.
+    note_state(
+        Channel::MdecOut,
+        unsafe { psx_io::read_u32(psx_hw::mdec::MDEC1) } >> 16,
+    );
     if transfer == 0xFFFF {
         dma::abort(Channel::MdecIn);
         dma::abort(Channel::MdecOut);
@@ -320,11 +338,10 @@ fn mdec_row(kind: Loop) -> (u32, u32, u32) {
 pub(crate) fn mdec(records: &mut Records, next: &mut usize) {
     timers::set_mode(timers::Timer::Timer2, 0);
     for (offset, kind) in [Loop::Loads, Loop::Stores].into_iter().enumerate() {
+        let id = MDEC_DMA_RECORD + offset as u16;
+        crate::bounds::record_start(id);
         let (a, b, c) = mdec_row(kind);
-        push_timing_record(
-            records,
-            next,
-            record(MDEC_DMA_RECORD + offset as u16, a, b, c),
-        );
+        push_timing_record(records, next, record(id, a, b, c));
+        push_state(records, next, STATE_RECORD + 8 + offset as u16);
     }
 }

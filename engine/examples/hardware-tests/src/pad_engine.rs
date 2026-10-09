@@ -99,6 +99,7 @@ struct Session {
 impl Session {
     fn start(config: Config) -> Self {
         let installed = console::install(token(), config).is_ok();
+        crate::bounds::set_engine_active(installed);
         Self { installed }
     }
 }
@@ -118,6 +119,7 @@ impl Drop for Session {
             timers::set_counter(Timer::Timer2, 0);
             while timers::counter(Timer::Timer2) < 60_000 {}
             if console::uninstall().is_some() {
+                crate::bounds::set_engine_active(false);
                 // The wrapper stays in the vector after `uninstall`, and
                 // `install` refuses a vector that already leads to it, so put
                 // the runtime's handler back for the next session.
@@ -178,6 +180,7 @@ pub(crate) fn setup_sweep(records: &mut Records, next: &mut usize) {
             refused(records, next, id);
             continue;
         }
+        crate::bounds::record_start(id);
         // The first frames settle the pad; count from the snapshot after.
         for _ in 0..4 {
             let _ = spin_frame(|| {});
@@ -225,6 +228,7 @@ fn pacing_run(pacing: BytePacing, records: &mut Records, next: &mut usize) {
         refused(records, next, PORT_RECORD + base);
         return;
     }
+    crate::bounds::record_start(PORT_RECORD + base);
     // Ask for analog mode as a game does; the pad settles within a few frames.
     console::request_analog(Port::One);
     for _ in 0..12 {
@@ -314,6 +318,7 @@ pub(crate) fn hotplug(mut progress: impl FnMut(u32), records: &mut Records, next
         refused(records, next, HOTPLUG_RECORD);
         return;
     }
+    crate::bounds::record_start(HOTPLUG_RECORD);
     for _ in 0..6 {
         let _ = spin_frame(|| {});
     }
@@ -386,6 +391,7 @@ pub(crate) fn card_lease(records: &mut Records, next: &mut usize, write_back: bo
         refused(records, next, CARD_PAD_RECORD);
         return;
     }
+    crate::bounds::record_start(CARD_PAD_RECORD);
     for _ in 0..6 {
         let _ = spin_frame(|| {});
     }
@@ -523,6 +529,7 @@ pub(crate) fn under_load(records: &mut Records, next: &mut usize) {
             refused(records, next, LOAD_WORK_RECORD + base);
             continue;
         }
+        crate::bounds::record_start(LOAD_WORK_RECORD + base);
         let mut load = match phase {
             0 | 6 => Some(Activity::start_without_pad()),
             1 => None,
