@@ -583,9 +583,21 @@ impl<H: CdHw> Engine<H> {
     }
 
     /// Where `ticket` is. Also runs the no-progress check ([`service`](Self::service)).
+    ///
+    /// The CD source is reopened only after the lookup. The console wrapper
+    /// closes the source before it hands the engine to foreground code, so the
+    /// handler cannot run meanwhile; reopening it first lets a pending
+    /// interrupt run the handler between the checks below, and a request that
+    /// the handler moves from the queue to the active slot in that gap is
+    /// found in neither and reported as [`RequestState::Unknown`].
     pub fn state(&mut self, ticket: Ticket) -> RequestState {
         self.service();
+        let state = self.lookup(ticket);
         self.sync_source();
+        state
+    }
+
+    fn lookup(&self, ticket: Ticket) -> RequestState {
         if let Some(active) = &self.active {
             if active.ticket == ticket {
                 return RequestState::Active {
