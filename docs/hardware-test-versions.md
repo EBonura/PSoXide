@@ -33,6 +33,17 @@ shipped without either, which is why no machine-code baseline exists for them.
 
 ## History
 
+### v2.1 (2026-10-09, schema PX8)
+
+Fix for a silicon hang in `DMA VERSUS CPU LOADS` (area 9, step 56): `dma_overlap_probe!` waited on CHCR bit 24 with no bound, so a channel that never cleared START froze the disc.
+
+- Every device wait is now counter-bounded. DMA probes: 4,000 iterations before the kick and 20,000 after (about 20 cycles each, so roughly 40x the longest legitimate SPU transfer). SPUSTAT mode match: 100,000. `dma_matrix`: 50,000. CD and cdstream: 60,000,000 / 30,000,000 spins. MDEC: 200,000. List-busy: 2,000,000.
+- A timeout is a measurement. The channel is stopped (CHCR=0, SPUCNT mode 0, GP1 direction 0) and `0x780-0x787` record flags (bit0 busy before kick, bit1 busy after loop, bit3 timed out), CHCR high half, device status, MADR and BCR. `0x788` records the SPUSTAT-match wait before an SPU kick. `0x790-0x799` record CD/MDEC DMA state.
+- The record id is drawn on screen before each record starts, so a hang names the probe.
+- Hold SELECT at any time to skip the current step (waits scale to 1 iteration).
+- Hold L1+R1 at boot to also show a QR checkpoint page at the end of each area (opt-in, also enables card write-back).
+- Emulator fault injection: `PSOXIDE_WEDGE_DMA=<channel mask>` leaves CHCR START latched; a run with SPU and OTC wedged (0x50) completes and records timeouts.
+
 ### v2.0 (2026-10-08, schema PX8)
 
 MAJOR: the suite is one linear run (`src/run.rs`, [hardware-test-disc.md](hardware-test-disc.md)), ten areas in a fixed order with a reset at the start of each and a handoff record at the end. Every menu screen that was a separate probe is now a step of the run, except the controller test and the memory-card diagnostic, which need a person. What was removed and where each thing went is [hardware-test-v2-removed.md](hardware-test-v2-removed.md). Shared record ids keep their meaning, so a v1.28 silicon capture still compares record by record (`make hwtest-compare` does it), but a record's value can move because the state it starts from is now defined (a reset per area) and the order is different.

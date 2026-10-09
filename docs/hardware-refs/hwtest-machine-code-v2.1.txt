@@ -1,4 +1,4 @@
-# exe=build/examples/mipsel-sony-psx/release/hardware-tests.exe words=226304 probes=206 layout_tags=6
+# exe=build/examples/mipsel-sony-psx/release/hardware-tests.exe words=228864 probes=206 layout_tags=6
 id,name,words,digest
 01,timed_empty,6,0x21bbd739
 04,timed_load_hazards_at,134,0xe88f9939
@@ -76,8 +76,8 @@ id,name,words,digest
 87,gte_mfc2,73,0x21f66c77
 89,lerp3_cpu,105,0x582a4387
 90,lerp3_gte,121,0x83701ac7
-91,timed_nops_with_dma,151,0xe18cd643
-92,timed_loads_with_dma,151,0x915cd643
+91,timed_nops_with_dma,162,0x0c0d9280
+92,timed_loads_with_dma,162,0x34899280
 93,warm_loads_spaced,329,0x1dc87177
 94,multu_gap_1,57,0xc53cb837
 95,multu_gap_2,73,0x2c09e4d7
@@ -193,11 +193,11 @@ id,name,words,digest
 220,m10_divu_36_nops,353,0xb14f81c7
 221,m10_multu_mtlo_mflo,105,0x45a71c57
 222,m10_multu_mthi_mfhi,105,0x99188fd7
-223,m6_gpu_walk_sw,87,0x3b62b583
-224,m6_gpu_walk_sw_3nops,279,0xe280c9c3
-225,m6_gpu_walk_lw_3nops,279,0x2fdcc9c3
-230,m6_bounded_overlap_lw,162,0x82a6efa2
-231,m6_bounded_overlap_sw,98,0x95333ca2
+223,m6_gpu_walk_sw,98,0x183d76c0
+224,m6_gpu_walk_sw_3nops,290,0xb51c2000
+225,m6_gpu_walk_lw_3nops,290,0x7df82000
+230,m6_bounded_overlap_lw,162,0x04f929a8
+231,m6_bounded_overlap_sw,98,0x37f508a8
 240,m11_poll_short_timer2,11,0xfe4dc967
 241,m11_poll_long_timer2,19,0x6680ab4f
 242,m11_poll_short_timer0,11,0xfe4dc967
