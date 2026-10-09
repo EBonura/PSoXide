@@ -206,11 +206,19 @@ fn main() {
         let model = Model::from_bytes(&mbytes).unwrap();
         tot_a += ba.len().next_multiple_of(4);
         tot_b += bb.len().next_multiple_of(4);
-        assert_eq!(
-            (a.frame_count(), a.joint_count()),
-            (b.frame_count(), b.joint_count()),
-            "{name}"
-        );
+        if (a.frame_count(), a.joint_count()) != (b.frame_count(), b.joint_count()) {
+            println!(
+                "{:<62} {:>7} {:>7} v{}>v{} frames {} -> {} (resampled differently, not compared)",
+                name,
+                ba.len(),
+                bb.len(),
+                u16::from_le_bytes([ba[4], ba[5]]),
+                u16::from_le_bytes([bb[4], bb[5]]),
+                a.frame_count(),
+                b.frame_count()
+            );
+            continue;
+        }
         // Per joint vertex sets for the displacement metric.
         let mut per_joint: Vec<Vec<V3>> = vec![vec![]; model.joint_count() as usize];
         for p in 0..model.part_count() {

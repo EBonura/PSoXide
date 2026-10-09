@@ -710,7 +710,26 @@ fn main() {
                 }
             }
         }
-        let sampled: Vec<Vec<V3>> = per_joint.iter().map(|v| sample_verts(v, 24)).collect();
+        let probe_r: f64 = std::env::var("PROBE_R")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.0);
+        let sampled: Vec<Vec<V3>> = per_joint
+            .iter()
+            .map(|v| {
+                let mut s = sample_verts(v, 24);
+                if probe_r > 0.0 {
+                    for a in 0..3 {
+                        for sign in [-1.0, 1.0] {
+                            let mut p = [0.0; 3];
+                            p[a] = sign * probe_r;
+                            s.push(p);
+                        }
+                    }
+                }
+                s
+            })
+            .collect();
         let parents: Vec<Option<usize>> = (0..model.joint_count())
             .map(|j| model.joint(j).unwrap().parent().map(|p| p as usize))
             .collect();
