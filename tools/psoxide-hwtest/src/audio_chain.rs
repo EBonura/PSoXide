@@ -120,11 +120,20 @@ const CASES: [(&str, Transform); 12] = [
     ("resample_32k", |s, r| (resample(s, r, 32000), 32000)),
     ("resample_96k", |s, r| (resample(s, r, 96000), 96000)),
     // Gain extremes: FSK should be immune, since it decides on which tone wins.
-    ("gain_x0.05", |s, r| (s.iter().map(|v| v * 0.05).collect(), r)),
-    ("gain_x8_clipped", |s, r| {
-        (s.iter().map(|v| (v * 8.0).clamp(-32768.0, 32767.0)).collect(), r)
+    ("gain_x0.05", |s, r| {
+        (s.iter().map(|v| v * 0.05).collect(), r)
     }),
-    ("dc_offset", |s, r| (s.iter().map(|v| v + 3000.0).collect(), r)),
+    ("gain_x8_clipped", |s, r| {
+        (
+            s.iter()
+                .map(|v| (v * 8.0).clamp(-32768.0, 32767.0))
+                .collect(),
+            r,
+        )
+    }),
+    ("dc_offset", |s, r| {
+        (s.iter().map(|v| v + 3000.0).collect(), r)
+    }),
     ("band_limit_5tap", |s, r| (band_limit(s, 5), r)),
     ("band_limit_9tap", |s, r| (band_limit(s, 9), r)),
     ("noise_10pct", |s, r| (noisy(s, 1, 0.10), r)),
@@ -134,7 +143,10 @@ const CASES: [(&str, Transform); 12] = [
         let mut noise = Noise(3);
         let sigma = 0.15 * peak(s);
         let stacked: Vec<f64> = resampled.iter().map(|v| v + noise.normal(sigma)).collect();
-        (band_limit(&stacked, 5).iter().map(|v| v * 0.3).collect(), 48000)
+        (
+            band_limit(&stacked, 5).iter().map(|v| v * 0.3).collect(),
+            48000,
+        )
     }),
 ];
 
@@ -148,7 +160,8 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<i32> {
             "--workdir" => {
                 i += 1;
                 workdir = Some(PathBuf::from(
-                    args.get(i).ok_or_else(|| Error("--workdir needs a value".into()))?,
+                    args.get(i)
+                        .ok_or_else(|| Error("--workdir needs a value".into()))?,
                 ));
             }
             flag if flag.starts_with("--") => bail!("unrecognized arguments: {flag}"),
@@ -159,9 +172,8 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<i32> {
     }
     let source = wav.ok_or_else(|| Error("the following arguments are required: wav".into()))?;
     let (samples, rate) = read_wav(&source)?;
-    let workdir = workdir.unwrap_or_else(|| {
-        source.parent().unwrap_or(Path::new(".")).join("chaintest")
-    });
+    let workdir =
+        workdir.unwrap_or_else(|| source.parent().unwrap_or(Path::new(".")).join("chaintest"));
     std::fs::create_dir_all(&workdir)?;
     writeln!(
         out,
@@ -175,7 +187,10 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<i32> {
         let (degraded, out_rate) = transform(&samples, rate);
         let path = workdir.join(format!("{name}.wav"));
         write_wav(&path, &degraded, out_rate)?;
-        let result = Command::new(&this).arg("audio-decode").arg(&path).output()?;
+        let result = Command::new(&this)
+            .arg("audio-decode")
+            .arg(&path)
+            .output()?;
         let ok = result.status.success();
         let stdout = String::from_utf8_lossy(&result.stdout);
         let mut detail = "";
@@ -187,8 +202,17 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<i32> {
         if !ok {
             failures += 1;
         }
-        writeln!(out, "{}  {name:22} {detail}", if ok { "PASS" } else { "FAIL" })?;
+        writeln!(
+            out,
+            "{}  {name:22} {detail}",
+            if ok { "PASS" } else { "FAIL" }
+        )?;
     }
-    writeln!(out, "# {}/{} degradations decoded", CASES.len() - failures, CASES.len())?;
+    writeln!(
+        out,
+        "# {}/{} degradations decoded",
+        CASES.len() - failures,
+        CASES.len()
+    )?;
     Ok(i32::from(failures != 0))
 }
