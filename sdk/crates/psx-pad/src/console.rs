@@ -192,6 +192,9 @@ static mut PSX_PAD_IRQ_CONTEXT: [u32; 34] = [0; 34];
 /// led to when [`install`] ran.
 #[no_mangle]
 static mut PSX_PAD_NEXT_HANDLER: u32 = 0;
+/// `psx_rt::interrupts::vector_epoch` when the wrapper was put in the vector.
+#[cfg(target_arch = "mips")]
+static mut PSX_PAD_EPOCH: u32 = 0;
 /// Set by [`install`], cleared by [`uninstall`].
 static mut INSTALLED: bool = false;
 
@@ -378,8 +381,13 @@ fn install_vector() -> bool {
     // fetches the new words, and the wrapper is declared stack-safe so
     // scratchpad stacks stay allowed.
     unsafe {
-        // Installed before (and uninstalled since): already in the chain.
-        if core::ptr::read_volatile(&raw const PSX_PAD_NEXT_HANDLER) != 0 {
+        // Installed before (and uninstalled since): already in the chain,
+        // unless psx-rt's handler went back into the vector since, which
+        // drops every wrapper in front of it (the epoch counts those).
+        let epoch = psx_rt::interrupts::vector_epoch();
+        if core::ptr::read_volatile(&raw const PSX_PAD_NEXT_HANDLER) != 0
+            && core::ptr::read_volatile(&raw const PSX_PAD_EPOCH) == epoch
+        {
             return true;
         }
         let current = core::ptr::read_volatile(EXCEPTION_VECTOR);
@@ -388,6 +396,7 @@ fn install_vector() -> bool {
         }
         let next = ((current & !J_MASK) << 2) | 0x8000_0000;
         let wrapper = psx_pad_exception_wrapper as *const () as usize as u32;
+        core::ptr::write_volatile(&raw mut PSX_PAD_EPOCH, epoch);
         core::ptr::write_volatile(&raw mut PSX_PAD_NEXT_HANDLER, next);
         core::ptr::write_volatile(EXCEPTION_VECTOR, J_OPCODE | ((wrapper >> 2) & !J_MASK));
         core::ptr::write_volatile(EXCEPTION_VECTOR.add(1), 0);

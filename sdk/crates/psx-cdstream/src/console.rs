@@ -251,6 +251,9 @@ static mut PSX_CD_IRQ_CONTEXT: [u32; 34] = [0; 34];
 /// then.
 #[no_mangle]
 static mut PSX_CD_NEXT_HANDLER: u32 = 0;
+/// `psx_rt::interrupts::vector_epoch` when the wrapper was put in the vector.
+#[cfg(target_arch = "mips")]
+static mut PSX_CD_EPOCH: u32 = 0;
 
 /// The counters, as one block for tools that read guest memory:
 /// [`StreamStats`] with its field order. Updated after every interrupt and
@@ -297,6 +300,9 @@ fn publish(engine: &Engine<Mmio>) {
 fn enter() -> &'static mut Engine<Mmio> {
     let mask = irq::mask();
     irq::set_mask(mask & !CD_BIT);
+    // Closed, nothing here services the source: the claim goes until `leave`
+    // opens it again.
+    psx_rt::interrupts::release_interrupt_sources(CD_BIT);
     // SAFETY: the source is closed, so the handler (the only other user of
     // the engine) cannot run until `leave` reopens it, and no other
     // foreground reference exists because the CPU has one thread of control.
@@ -545,16 +551,23 @@ fn install_vector() {
     // vector is rewritten; it is psx-rt's unless something chained in front of
     // psx-rt (the pad engine's wrapper) is there, and anything that is not a
     // `j` is replaced by psx-rt's as before. A wrapper that has been installed
-    // before is not put in front again: it is already in the chain, and
+    // since psx-rt last reset the vector is not put in front again: it is already in the chain, and
     // writing the vector would drop whatever was installed since. The wrapper
     // switches stacks before it stores anything and hands over with `$sp` as
     // it found it. The instruction cache is flushed so the CPU fetches the new
     // words, and the wrapper is declared stack-safe so scratchpad stacks stay
     // allowed.
     unsafe {
-        if core::ptr::read_volatile(&raw const PSX_CD_NEXT_HANDLER) != 0 {
+        // psx-rt's handler going back into the vector (anything that calls
+        // `install_vblank_counter`) drops this wrapper from the chain; the
+        // epoch says whether that has happened since.
+        let epoch = psx_rt::interrupts::vector_epoch();
+        if core::ptr::read_volatile(&raw const PSX_CD_NEXT_HANDLER) != 0
+            && core::ptr::read_volatile(&raw const PSX_CD_EPOCH) == epoch
+        {
             return;
         }
+        core::ptr::write_volatile(&raw mut PSX_CD_EPOCH, epoch);
         let current = core::ptr::read_volatile(EXCEPTION_VECTOR);
         let next = if current & J_MASK == J_OPCODE {
             ((current & !J_MASK) << 2) | 0x8000_0000
