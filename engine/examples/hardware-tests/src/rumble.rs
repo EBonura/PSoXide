@@ -172,8 +172,6 @@ fn identity(font: &FontAtlas, port2: bool, records: &mut Records, next: &mut usi
     let mut line = ui::Line::new();
     line.s("PORT ")
         .u(port2 as u32 + 1)
-        .s(" REC ")
-        .hex(id_record as u32, 3)
         .s(" ID ")
         .hex(seen.bytes[1].reply as u32, 2)
         .s(" ")
@@ -253,7 +251,7 @@ fn objective(font: &FontAtlas, port2: bool, records: &mut Records, next: &mut us
     let mut line = ui::Line::new();
     line.s("P")
         .u(port2 as u32 + 1)
-        .s(" ENTER ")
+        .s(" ")
         .u(attempts)
         .s("X ")
         .hex(pair(&enter, 1), 4)
@@ -609,7 +607,7 @@ pub(crate) fn run(font: &FontAtlas, records: &mut Records, next: &mut usize) {
     set_pass(false);
     let first = choose(
         font,
-        "WHICH PAD",
+        "WHICH",
         "X 1200 O 110 SQ OTH TR NONE",
         MODEL_ANSWER_FRAMES,
     );
@@ -620,7 +618,7 @@ pub(crate) fn run(font: &FontAtlas, records: &mut Records, next: &mut usize) {
     let second = choose(
         font,
         "SWAP",
-        "THEN X 1200 O 110 SQ OTH TR NONE",
+        "X 1200 O 110 SQ OTH TR NONE",
         SWAP_ANSWER_FRAMES,
     );
     push_timing_record(records, next, choice_record(PAD_CHOICE_RECORD + 1, &second));
