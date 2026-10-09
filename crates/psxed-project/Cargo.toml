@@ -37,6 +37,10 @@ name = "pxbsp-draw-cost"
 path = "src/bin/pxbsp_draw_cost.rs"
 
 [[bin]]
+name = "pxbsp-seam-audit"
+path = "src/bin/pxbsp_seam_audit.rs"
+
+[[bin]]
 name = "gen-brush-first-playable"
 path = "src/bin/gen_brush_first_playable.rs"
 

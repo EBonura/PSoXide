@@ -14,7 +14,7 @@ use crate::brush_compile::{
     subdivide_surfaces_to_budget, CompiledSurface, CompiledSurfaceBsp,
 };
 use crate::brush_light::{
-    bake_brush_vertex_lighting, BrushLightError, BrushMaterialTint, BrushPointLight,
+    bake_brush_vertex_lighting_along, BrushLightError, BrushMaterialTint, BrushPointLight,
 };
 use crate::brush_pack::{
     pack_bsp_geometry_with_visibility, BrushPackError, BspLighting, BspVisibility,
@@ -1309,6 +1309,13 @@ fn compile_model(
             split_surfaces: uv_window.split_surfaces,
         });
     }
+    // The packer rounds every vertex to a whole unit and the GTE projects
+    // each face's vertices on their own, so faces only meet pixel-exactly at
+    // shared vertices. Every split above (CSG carving, the extent grid, the
+    // UV window, rectangle merging) cuts one face without cutting its
+    // neighbours, leaving corners that sit on a neighbour's edge. Weld those
+    // into the edges they touch so the drawn surface is watertight.
+    let (render_surfaces, light_edges) = make_surfaces_watertight(render_surfaces, uv_window_skip);
     // The runtime draws a face only up to its batch bound; split wider ones
     // into same-triangle fans rather than let the packer refuse the level.
     let render_surfaces =
@@ -1350,16 +1357,22 @@ fn compile_model(
             BrushWorldCookMode::Draft => &[],
             BrushWorldCookMode::Release => light_occluders,
         };
-        let lighting =
-            bake_brush_vertex_lighting(&bsp.surfaces, occluders, ambient, lights, material_tints)
-                .map_err(|error| BrushWorldCookError::Light {
-                // `translate_lights` preserves scene order, so the reported
-                // light index indexes the same list `scene_lights` built.
-                node: match error {
-                    BrushLightError::InvalidLight(index) => light_nodes.get(index).copied(),
-                },
-                error,
-            })?;
+        let lighting = bake_brush_vertex_lighting_along(
+            &bsp.surfaces,
+            occluders,
+            ambient,
+            lights,
+            material_tints,
+            &light_edges,
+        )
+        .map_err(|error| BrushWorldCookError::Light {
+            // `translate_lights` preserves scene order, so the reported
+            // light index indexes the same list `scene_lights` built.
+            node: match error {
+                BrushLightError::InvalidLight(index) => light_nodes.get(index).copied(),
+            },
+            error,
+        })?;
         pack_bsp_geometry_with_visibility(
             &bsp,
             &portals,
@@ -1370,6 +1383,33 @@ fn compile_model(
     };
     let collision = compile_runtime_collision_hulls(brushes, collision_hulls, hull_strategy)?;
     Ok((geometry, collision, leak_diagnostic.path, uv_window))
+}
+
+/// Weld and conform the drawable render surfaces; sky apertures are never
+/// drawn and stay as they are.
+fn make_surfaces_watertight(
+    mut surfaces: Vec<CompiledSurface>,
+    sky_materials: &std::collections::HashSet<Option<ResourceId>>,
+) -> (Vec<CompiledSurface>, Vec<crate::brush_seams::LightEdge>) {
+    let skip: Vec<bool> = surfaces
+        .iter()
+        .map(|surface| sky_materials.contains(&surface.material))
+        .collect();
+    let mut polygons: Vec<Vec<[f64; 3]>> = surfaces
+        .iter_mut()
+        .map(|surface| std::mem::take(&mut surface.vertices))
+        .collect();
+    let stats = crate::brush_seams::make_watertight(&mut polygons, |index| skip[index]);
+    for (surface, vertices) in surfaces.iter_mut().zip(polygons) {
+        surface.vertices = vertices;
+    }
+    if stats.vertices_added > 0 {
+        crate::playtest::emit_cook_output(format_args!(
+            "[brush-seams] conformed {} faces with {} T-junction vertices",
+            stats.polygons_changed, stats.vertices_added
+        ));
+    }
+    (surfaces, stats.light_edges)
 }
 
 fn compile_model_surfaces(brushes: &[Brush]) -> (Vec<CompiledSurface>, Vec<CompiledSurface>) {
@@ -2879,6 +2919,58 @@ mod tests {
         assert_ne!(
             lit.pxbsp.bytes, unlit.pxbsp.bytes,
             "the light must change the packed vertex stream"
+        );
+    }
+
+    #[test]
+    fn cooked_world_has_no_t_junctions_where_a_platform_meets_the_floor() {
+        // A platform standing on the room floor carves the floor face and
+        // leaves floor corners on the platform's base edges: the T-junction
+        // pattern that rasterises as hairline cracks. The cook must emit
+        // faces that meet only at shared vertices.
+        let mut project = authored_project();
+        let material = project.active_scene().brushes[0].faces[0].material;
+        let mut platform = Brush::cuboid([600, 64, 600], [900, 192, 800]);
+        for face in &mut platform.faces {
+            face.material = material;
+        }
+        project.active_scene_mut().brushes.push(platform);
+        let world = compile_brush_world(
+            &project,
+            BrushWorldCookOptions {
+                project_root: Path::new("."),
+                mode: BrushWorldCookMode::Draft,
+                ambient: [24; 3],
+                texture_asset_base: 40,
+                collision_hulls: Default::default(),
+            },
+        )
+        .expect("cook with a platform");
+        let mut map =
+            psx_bsp::pxbsp_resident::PxbspResidentMap::with_capacity(world.pxbsp.bytes.len());
+        map.load(0, &mut psx_bsp::SliceReader::new(&world.pxbsp.bytes))
+            .expect("cooked PXBSP loads");
+        let vertices = map.vertices();
+        let faces = map.faces();
+        let polygons: Vec<Vec<[i32; 3]>> = (0..faces.len())
+            .filter_map(|index| faces.get(index))
+            .map(|face| {
+                (0..face.vertex_count as usize)
+                    .filter_map(|k| vertices.get(face.first_vertex as usize + k))
+                    .map(|v| {
+                        [
+                            i32::from(v.position.x),
+                            i32::from(v.position.y),
+                            i32::from(v.position.z),
+                        ]
+                    })
+                    .collect()
+            })
+            .collect();
+        assert!(polygons.len() > 6, "the platform must add faces");
+        assert!(
+            crate::brush_seams::find_t_junctions(&polygons, 1).is_empty(),
+            "cooked faces must not carry T-junctions"
         );
     }
 
