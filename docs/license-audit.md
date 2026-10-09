@@ -1,259 +1,151 @@
 # PSoXide License And Provenance Audit
 
-Audit date: 2026-04-29 (last revised 2026-07-31).
+Last revised: 2026-10-09. Dated sections record what an audit found on the day
+it ran; the current position below supersedes them where they differ.
 
-Scope: repository source, checked-in binary assets, generated artifacts,
-third-party references, and public README media.
-
-Publication decision: PSoXide is published as all three:
-
-- PS1 emulator and debugger,
-- PS1 SDK/runtime engine,
-- editor and game prototype.
-
-That is the right identity for the project, but it means the public
-release bar is higher than for a single-purpose emulator or SDK. Code,
-assets, docs, canaries, and generated outputs all need a coherent story.
+Scope of this file: the SDK repository (`crates/`, `sdk/`, `tools/`, `assets/`,
+the website). The emulator, the editor and engine, and the games each keep
+their own provenance record, listed below.
 
 ## Current Position
 
-PSoXide is licensed under **GPL-2.0-or-later**. The full license text
-is at [`LICENSE`](../LICENSE) at the repo root, alongside the project
-notice, third-party references, and credit.
+The SDK is licensed under **GPL-2.0-or-later**. The full license text is at
+[`LICENSE`](../LICENSE), alongside the project notice and the list of projects
+that were consulted as references. Every `Cargo.toml` declares the same license.
 
-The choice is deliberate. Several emulator-core subsystems are
-parity-matched against, and in places derived from, PCSX-Redux
-(GPL-2.0-or-later). Some of that code is best described as a derivative
-work under copyright law. Licensing PSoXide under the same
-GPL-2.0-or-later is exactly what the GPL asks of a derivative work: it
-keeps the lineage explicit and the distribution compliant, rather than
-trying to argue the derivation away.
+Policy: code that turns out to be copied or translated from another project is
+rewritten, not disclosed. A disclosure in this file does not change the
+license obligations of a copy; only removing the copy does.
 
-## Resolved Blockers
+Where each repository records its own provenance:
 
-### Root license files (resolved 2026-04-30)
+| Repository | Record |
+|---|---|
+| PSoXide-emulator | [`docs/PROVENANCE.md`](https://github.com/EBonura/PSoXide-emulator/blob/main/docs/PROVENANCE.md) (which modules were rewritten from documentation, which behaviours are still matched to PCSX-Redux traces, the texture filter) and [`docs/hle-bios-provenance.md`](https://github.com/EBonura/PSoXide-emulator/blob/main/docs/hle-bios-provenance.md) (the high-level kernel) |
+| PSoXide-editor | [`docs/license-audit.md`](https://github.com/EBonura/PSoXide-editor/blob/main/docs/license-audit.md) and [`docs/provenance-checklist.md`](https://github.com/EBonura/PSoXide-editor/blob/main/docs/provenance-checklist.md) |
+| hl-psx | [`PROVENANCE.md`](https://github.com/EBonura/hl-psx/blob/main/PROVENANCE.md): source-informed adaptation of Valve's public Half-Life SDK, and fixed-point adaptations of GPL-licensed Quake code |
+| quake-psx | [`PROVENANCE.md`](https://github.com/EBonura/quake-psx/blob/main/PROVENANCE.md) |
+| This repository | [`docs/asset-provenance.md`](asset-provenance.md), [`docs/firmware-cleanup.md`](firmware-cleanup.md), `sdk/crates/psx-font/vendor/PROVENANCE.md` |
 
-`LICENSE` now contains the GPL-2.0 canonical text plus the project
-notice and third-party reference notes. All `Cargo.toml` `license`
-fields declare `GPL-2.0-or-later`.
+## What Changed Since The Earlier Audits
+
+- The emulator's PCSX-Redux lineage is smaller than the 2026-06 audit
+  below describes. The event scheduler, DMA, SIO0, SPU and MDEC were rewritten
+  from the nocash PSX-SPX notes, console measurements and ps1-tests captures.
+  The CPU, bus, video timing, GPU and CD-ROM modules still contain behaviour
+  that was first matched to PCSX-Redux traces; the emulator's
+  `docs/PROVENANCE.md` lists each case and marks it `gate-pinned` in code.
+- The high-level kernel emulation replaced the external BIOS path. It is
+  written from public hardware documentation and console measurements.
+- The JINC2 and xBR texture filters were ports of third-party shader code
+  (Hyllian's jinc2 and DuckStation's xBR). They were removed from the emulator
+  on 2026-10-08. The Edge filter that replaces them was written from a
+  specification of the mathematics alone.
+- The 2026-06-11 revision below, which replaced the CPU triangle rasterizer
+  with one derived from silicon measurements, still stands.
+
+## Historical Results
 
 ### PCSX-Redux derivation (addressed 2026-06-03; revised 2026-06-11)
 
-Several emulator-core subsystems are parity-matched against, and in
-places derived from, PCSX-Redux: the event scheduler, DMA DICR
-semantics, SPU ADSR tables and voice model, MDEC AAN IDCT + YUV->RGB
-pipeline, CD-ROM command timing (transcribed from `core/cdrom.cc` with
-upstream line numbers), SIO baud timing, CPU cycle bias, bus/video
-timing, timers, and the hardware-renderer primitive pipeline
-(`psx-gpu-render`). These should be treated as derivative works of
-Redux.
+At that date several emulator-core subsystems were parity-matched against, and
+in places derived from, PCSX-Redux: the event scheduler, DMA DICR semantics,
+SPU ADSR tables and voice model, the MDEC AAN IDCT and YUV to RGB pipeline,
+CD-ROM command timing, SIO baud timing, CPU cycle bias, bus and video timing,
+timers, and the hardware-renderer primitive pipeline. They were treated as
+derivative works of Redux and carried `## Provenance` headers naming it.
+The scheduler, DMA, SIO0, SPU and MDEC items have since been rewritten (see
+above); the rest is tracked in the emulator's provenance record.
 
-Revision 2026-06-11, triangle rasterization: the CPU scanline-delta
-triangle rasterizer (formerly listed here as Redux-derived) was
-REPLACED in 2026-06 (`2f4b0063`) after real-hardware VRAM read-back
-tests proved Redux's edge-coverage rule wrong on silicon. The current
-`gpu.rs` triangle path implements the silicon-verified center-sampled coverage
-rule, written from documented behaviour (the same rule Mednafen and DuckStation
-implement) with no source from either project, and is verified pixel-exact
-against a real console. The compute-shader rasterizer crate was removed in the
-2026-06 dedup. The `gpu.rs` module keeps its Redux provenance header for the
-non-triangle paths (fills, rects, blending, dither) that retain Redux lineage.
+Revision 2026-06-11, triangle rasterization: the CPU scanline-delta triangle
+rasterizer was replaced in 2026-06 (`2f4b0063`) after real-hardware VRAM
+read-back tests showed Redux's edge-coverage rule differs from silicon. The
+current `gpu.rs` triangle path implements the silicon-verified center-sampled
+coverage rule from documented behaviour, with no source from Mednafen or
+DuckStation, and is verified pixel-exact against a console.
 
-Revision 2026-06-11, parity harness: the lockstep parity-oracle crate
-and its Makefile targets were removed (real PS1 hardware is the
-accuracy oracle). Retiring the testing harness does not change any derivation
-status above; provenance headers stay.
+Revision 2026-06-11, parity harness: the lockstep parity-oracle crate and its
+Makefile targets were removed; real hardware is the accuracy oracle.
 
-Additional behavioural references now credited in `LICENSE` (no code
-derived from either): JaCzekanski's ps1-tests (the real-console GTE
-conformance corpus consumed at runtime by `gte_fuzz_replay`, fetched
-from upstream, never committed) and the MiSTer PSX core (GTE internal
-operation ordering). The GTE remains implemented from hardware
-documentation; as of 2026-06-11 it is additionally validated bit-exact
-against the ps1-tests real-console corpus (1100/1100), which is a
-stronger independence basis than the retired Redux parity diffing.
+Additional behavioural references credited in `LICENSE` (no code derived from
+either): JaCzekanski's ps1-tests, the real-console GTE conformance corpus
+consumed at runtime by `gte_fuzz_replay` and fetched from upstream, never
+committed; and the MiSTer PSX core (GTE internal operation ordering). The GTE
+is implemented from hardware documentation and validated bit-exact against
+that corpus (1100/1100 as of 2026-06-11).
 
-GPL-2.0-or-later is the response the GPL prescribes for a derivative
-work, so distributing this code under it is compliant. To make the
-lineage explicit rather than implicit, every derived source file now
-carries a `## Provenance` header that names PCSX-Redux, its copyright
-holders (Copyright (C) the PCSX-Redux authors), and its license, and
-points back to this audit; inline `Redux` references mark the specific
-points of correspondence. Files that are implemented from hardware
-documentation and only parity-verified against Redux (the GTE, the
-interrupt controller, the pad, and XA-ADPCM decode) carry a header that
-says exactly that and are not claimed as derived.
-
-A correction worth recording: an earlier pass (2026-04-30) rewrote
-"port of" / "Direct port of" comments into softer "behaviour-parity"
-wording without changing the code. That was the wrong direction. For a
-derivative work, both GPL compliance and plain honesty call for louder
-attribution, not quieter. The per-file provenance headers described
-above supersede that change and restore explicit derivation language.
+A correction worth keeping: an earlier pass (2026-04-30) rewrote "port of"
+comments into softer "behaviour-parity" wording without changing the code.
+That was the wrong direction. Where code is derived, the attribution should be
+louder, not quieter.
 
 ### Cross-language similarity scan (2026-06-18)
 
-To check the AI-assisted emulator code against the reference emulators
-beyond the per-file provenance headers, a cross-language similarity scan was
-run over the emulator layer (`emu/crates/emulator-core/src` and
-`emu/crates/psx-gpu-render/src`) against full checkouts of DuckStation,
-PCSX-Redux, and the Mednafen PS1 core (Beetle-PSX). Three methods were used:
-identifier isolation (identifiers shared with one reference but not the
-others), verbatim 7-word comment-phrase matching, and numeric
-table/constant-sequence fingerprinting (to catch a copied lookup table).
+The emulator layer (`emu/crates/emulator-core/src` and
+`emu/crates/psx-gpu-render/src`, as they were then) was scanned against full
+checkouts of DuckStation, PCSX-Redux and the Mednafen PS1 core (Beetle-PSX)
+with three methods: identifier isolation, verbatim 7-word comment-phrase
+matching, and numeric table fingerprinting.
 
-Findings:
+- Identifier overlap was similar across all three references (DuckStation 46%,
+  Redux 40%, Mednafen 39%). A line-by-line translation of one emulator would
+  put it far above the others. The DuckStation-isolated identifiers were common
+  English words, Rust idioms, shared PSX-SPX names and register addresses, and
+  graphics-API terms.
+- Three verbatim comment phrases were shared with DuckStation: two nocash
+  PSX-SPX SPU reverb register names and one generic rasterization fragment.
+- The only non-trivial shared numeric sequence was the JPEG/MPEG zigzag scan
+  order the MDEC uses, a published constant.
 
-- Identifier overlap was comparable across all three references (DuckStation
-  46%, Redux 40%, Mednafen 39% of the emulator's identifiers). A line-by-line
-  translation of one emulator would put that emulator far above the others;
-  the flat distribution is consistent with a hardware-focused implementation
-  sharing common PS1 vocabulary, rather than an obvious line-by-line port of
-  one reference emulator. The DuckStation-isolated identifiers were
-  common English words, Rust standard idioms, shared PSX-SPX hardware names
-  and register addresses, and standard graphics-API terms, with none of
-  DuckStation's distinctive internal names.
-- Only three verbatim comment phrases were shared with DuckStation, all
-  benign: two are nocash PSX-SPX SPU reverb register names (shared upstream
-  documentation) and one is a generic rasterization fragment.
-- The only non-trivial shared numeric sequence is the standard JPEG/MPEG
-  zigzag scan order used by the PS1 MDEC, a published specification constant
-  present in every JPEG/MDEC implementation.
+The scan did not report the DuckStation and Hyllian shader ports listed above,
+which a source inspection on 2026-10-08 found. Scanning compares tokens,
+constants and comments, not semantics, read the 2026-06-18 result as
+corroboration with a defined scope, not as clearance.
 
-Conclusion: no copied code was found from DuckStation, Redux, or Mednafen
-beyond the Redux derivations already disclosed above. Redux overlap is
-expected and GPL-compatible.
+## Resolved
 
-Honest caveat: cross-language similarity scanning compares tokens, constants,
-and comments, not semantics, so it cannot prove the absence of a line-by-line
-semantic translation with mathematical certainty. The result is strong
-corroboration of the provenance model above, read together with the
-real-hardware validation process, which provides an additional non-source-code
-basis for validating behaviour.
+### Root license files (resolved 2026-04-30)
 
-## Resolved (continued)
+`LICENSE` contains the GPL-2.0 text plus the project notice and the list of
+consulted references. All `Cargo.toml` `license` fields declare
+`GPL-2.0-or-later`.
 
 ### Bundled asset provenance (resolved 2026-04-30)
 
-A complete asset inventory now lives at
-[`docs/asset-provenance.md`](asset-provenance.md), covering branding,
-3D models, textures, fonts, OBJ reference meshes, and
-README media. Per-directory `PROVENANCE.md` files exist beside the
-fonts ([`emu/crates/frontend/assets/fonts/PROVENANCE.md`](../emu/crates/frontend/assets/fonts/PROVENANCE.md))
-for the items where local context matters.
+[`asset-provenance.md`](asset-provenance.md) inventories branding, 3D models,
+textures, fonts, OBJ reference meshes and README media. The font sources are in
+`sdk/crates/psx-font/vendor/PROVENANCE.md`: font8x8 and IBM VGA (public
+domain), Kenney (CC0-1.0), Google Fonts families (OFL-1.1 or Apache-2.0) and
+Spleen 5x8 (BSD-2-Clause; binary distributions embedding it must carry the
+notice in `vendor/spleen-LICENSE`). Asset-level items that are still open (the
+exact Pexels URLs, retention of the Meshy subscription and export evidence) are
+tracked in `asset-provenance.md`, not here.
 
-Provenance is documented; the asset-level **release-gating** TODOs
-that remain (exact Pexels URLs) are tracked in
-`asset-provenance.md` itself, not here. Meshy model provenance is
-recorded there as paid-subscription, private, customer-owned generated
-assets; retain the subscription/export evidence with project records.
+### Dependency licenses (checked 2026-04-30)
 
-### Dependency license audit (resolved 2026-04-30)
-
-`cargo-deny` was installed and run across all workspaces (the repo-root
-host workspace plus the `sdk` and `engine` device workspaces) with the allow-list defined in
-[`deny.toml`](../deny.toml). All workspaces pass (`licenses ok`).
-
-The transitive dependency tree carries the following non-permissive
-licenses, all of which are compatible with GPL-2.0-or-later and are
-explicitly allow-listed:
-
-- **BSL-1.0** (Boost Software License 1.0) - permissive, OSI-approved,
-  FSF Free/Libre. Reaches the tree via `clipboard-win` and
-  `error-code` through `arboard` → `egui-winit`.
-- **OFL-1.1** (SIL Open Font License) - covers fonts bundled by
-  `epaint_default_fonts` (the egui default font crate). Fonts are
-  data, not linked code; bundling is "mere aggregation", not
-  derivative work.
-- **Ubuntu-font-1.0** - same crate, same aggregation rationale.
-
-Re-run any time with:
+`cargo-deny` was run with the allow-list in [`deny.toml`](../deny.toml) and
+reported `licenses ok`. The non-permissive licenses in the dependency tree are
+all GPL-compatible and allow-listed: BSL-1.0 (via `clipboard-win` and
+`error-code`), OFL-1.1 and Ubuntu-font-1.0 (fonts bundled by
+`epaint_default_fonts`; data, not linked code). That run covered the
+repository before the split. This repository's CI does not run
+`cargo-deny`; re-run it after dependency changes:
 
 ```bash
-for ws in . sdk engine; do
-  (cd "$ws" && cargo deny --manifest-path Cargo.toml check licenses \
-    --config "$(git rev-parse --show-toplevel)/deny.toml")
-done
+cargo deny --manifest-path Cargo.toml check licenses --config deny.toml
 ```
 
-`cargo-deny` now also runs in CI (see
-[`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) on every push and
-pull request, checking `licenses` and `sources` across all three workspaces.
-The `sources` check was hardened from `warn` to `deny` after confirming the
-dependency tree resolves entirely from crates.io with no git or
-alternate-registry sources. The `advisories` and `bans` checks are left at
-`warn` on purpose (rationale is in the `deny.toml` section comments): a
-crate's yanked/advisory status changing upstream should not break an
-unrelated change's CI, and duplicate transitive versions carry no licensing
-risk.
+## Open Items
 
-## Outstanding Blockers
-
-None. All previously identified blockers are resolved. The remaining
-items below are quality / completeness, not legal blockers.
-
-## Lower-Risk Or Documented Items
-
-- `sdk/crates/psx-font/vendor/PROVENANCE.md` documents the bundled font
-  sources: font8x8 and IBM VGA (Public Domain), Kenney (CC0-1.0),
-  Google Fonts families (OFL-1.1 / Apache-2.0), and Spleen 5x8
-  (BSD-2-Clause; binary distributions embedding it must carry the
-  notice in `vendor/spleen-LICENSE`).
-- `engine/examples/showcase-lights/vendor/cube.obj` is marked
-  hand-authored public domain in the file header.
-- `engine/examples/showcase-3d/vendor/teapot.obj` identifies itself as
-  a simplified Utah Teapot. Add explicit public-domain/attribution
-  notes before release.
-- `engine/examples/showcase-3d/vendor/suzanne.obj` was generated by
-  MeshLab, but the underlying Suzanne mesh provenance/license is not
-  written down. Add it before release.
-- `engine/examples/editor-playtest/generated/level_manifest.rs` is a
-  tracked placeholder with no `include_bytes!`. Cooked generated
-  manifests, rooms, textures, and models are ignored and regenerated.
-- `/build/` is ignored and should stay untracked.
-
-## Generated Artifacts
-
-Expected public-source contract:
-
-- Tracked: `engine/examples/editor-playtest/generated/level_manifest.rs`
-  placeholder only.
-- Ignored/regenerated:
-  `engine/examples/editor-playtest/generated/level_manifest.cooked.rs`,
-  plus cooked generated `rooms/`, `textures/`, and `models/`
-  directories under `engine/examples/editor-playtest/generated/`.
-- Ignored/regenerated: `/build/examples/.../*.exe`.
-- Tracked cooked demo assets: small `.psxt`, `.psxm`, `.psxmdl`, and
-  `.psxanim` blobs that examples or the default project need from a
-  clean clone.
-
-The tracked cooked demo assets still need provenance because generated
-binary blobs inherit the licensing of their source material.
+- Run `cargo-deny` against the split repositories and decide whether to add it
+  to their CI. The earlier statement that CI enforces it described the
+  repository before the split.
+- Any attribution or naming corrections that a future review surfaces.
 
 ## Third-Party References
 
-References in docs/comments include:
-
-- nocash PSX-SPX,
-- PCSX-Redux,
-- DuckStation,
-- public PS1 hardware behavior notes.
-
-Reference citations are fine. For public licensing, distinguish clearly
-between:
-
-- specifications and observations used to implement behavior,
-- external tools used for testing,
-- source code translated into this repository.
-
-The third category is the one that changes license obligations.
-
-## Recommended Pre-Publish Tasks
-
-1. Resolve the asset-level TODOs in
-   [`asset-provenance.md`](asset-provenance.md) (exact Pexels URLs,
-   SPU tone regeneration-or-delete decision, and retention of Meshy
-   subscription/export evidence).
-2. Capture fresh README screenshots from a clean clone after the
-   asset-level TODOs are settled.
-3. Any attribution or naming corrections surfaced by future review.
+References in docs and comments include nocash PSX-SPX, PCSX-Redux,
+DuckStation and public PS1 hardware notes. A citation is fine. For licensing,
+keep three things apart: specifications and observations used to implement
+behavior, external tools used for testing, and source code translated into this
+repository. The third changes license obligations.
