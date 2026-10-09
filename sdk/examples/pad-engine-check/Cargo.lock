@@ -13,6 +13,7 @@ name = "pad-engine-check"
 version = "0.1.0"
 dependencies = [
  "psx-cdstream",
+ "psx-io",
  "psx-pad",
  "psx-rt",
 ]

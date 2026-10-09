@@ -452,23 +452,51 @@ pub fn install(port: ControllerPort, config: Config) -> Result<(), ControllerPor
     irq::acknowledge(SIO_BIT | TIMER_BIT);
     with_engine(|engine| {
         *engine = Engine::new(Mmio::new(), &PUBLISHED, config);
+        engine.publish_readings();
     });
     irq::set_mask(irq::mask() | SIO_BIT | TIMER_BIT | VBLANK_BIT);
+    // A polled CD read cuts `I_MASK` down to VBlank for its whole stream; the
+    // engine runs on these two sources alone, so it asks to keep them.
+    irq::keep_enabled_while_polling(SIO_BIT | TIMER_BIT);
     // SAFETY: foreground; written here and in `uninstall` only.
     unsafe { core::ptr::write_volatile(&raw mut INSTALLED, true) };
     Ok(())
 }
 
-/// Give the port back to synchronous code. Succeeds only when no transaction
-/// is on the wire and no lease is out. The wrapper stays in the exception
-/// vector (a few instructions per exception) but the controller and counter 0
-/// sources are closed.
+/// Give the port back to synchronous code. Waits for the transaction in
+/// flight, as [`lease`] does (and abandons it after the same patience), then
+/// closes the controller and counter 0 sources. The wrapper stays in the
+/// exception vector, chained, a few instructions per exception; [`install`]
+/// finds it there and takes the port again.
+///
+/// `None` when the engine is not installed or a [`Lease`] holds the port: a
+/// card transaction is not the engine's to cut short.
 pub fn uninstall() -> Option<ControllerPort> {
-    let idle = with_engine(Engine::try_lease);
-    if !idle {
+    if !is_installed() {
         return None;
     }
+    let start = psx_rt::interrupts::vblank_count();
+    let mut attempts = 0u32;
+    loop {
+        let claimed = with_engine(|engine| {
+            if engine.owner() == Owner::Lease {
+                None
+            } else {
+                Some(engine.try_lease())
+            }
+        })?;
+        if claimed {
+            break;
+        }
+        attempts += 1;
+        let waited = psx_rt::interrupts::vblank_count().wrapping_sub(start);
+        if waited >= LEASE_PATIENCE_VBLANKS || attempts >= LEASE_PATIENCE_ATTEMPTS {
+            with_engine(Engine::force_lease);
+            break;
+        }
+    }
     irq::set_mask(irq::mask() & !(SIO_BIT | TIMER_BIT));
+    irq::release_polling_keep(SIO_BIT | TIMER_BIT);
     timers::set_mode(Timer::Timer0, 0);
     irq::acknowledge(SIO_BIT | TIMER_BIT);
     // SAFETY: foreground; written here and in `install` only.
