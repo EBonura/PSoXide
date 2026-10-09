@@ -317,6 +317,12 @@ pub struct ProjectDocument {
     /// their quiet stretch is part of the cycle.
     #[serde(default, skip_serializing_if = "is_zero_u8")]
     pub animation_trim_still_percent: u8,
+    /// Worst displacement, in model units, that packing a clip into per-joint
+    /// keyed tracks (`.psxanim` version 6) may add at any vertex or attachment
+    /// lever arm. `0` keeps every clip on the pose-table versions. A clip that
+    /// cannot meet the bound, or is not made of rotations, stays as it was.
+    #[serde(default, skip_serializing_if = "is_zero_u16")]
+    pub animation_track_budget_units: u16,
     /// Open scenes. The first scene is the active scene for now.
     pub scenes: Vec<Scene>,
     /// Authored screen-space UI scenes. The first scene is the HUD for now.
@@ -364,6 +370,10 @@ fn is_zero_u8(value: &u8) -> bool {
     *value == 0
 }
 
+fn is_zero_u16(value: &u16) -> bool {
+    *value == 0
+}
+
 fn default_true() -> bool {
     true
 }
@@ -385,6 +395,7 @@ impl ProjectDocument {
             editor_viewport: EditorViewportState::default(),
             animation_error_budget_degrees: 0,
             animation_trim_still_percent: 0,
+            animation_track_budget_units: 0,
             bsp_cook_mode: crate::brush_world::BrushWorldCookMode::default(),
             collision_hull_bsp: true,
             scenes: vec![Scene::new("Main")],

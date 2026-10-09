@@ -36,14 +36,24 @@ fn q12_sine_of_degrees(degrees: u8) -> i32 {
 
 /// One pose blended between two others, the way the runtime blends stored
 /// frames. `numerator/denominator` is the position between `a` and `b`.
+///
+/// Rotations blend along the short arc and stay rotations. Mixing the matrix
+/// elements instead shrinks the result between two distant poses (to about 0.99
+/// of unit length at 30 degrees), and that shrink used to be cooked into the
+/// resampled frames and shipped. Poses that are not rotations (animated scale)
+/// still blend element by element.
 fn blend(a: &JointPose, b: &JointPose, numerator: i32, denominator: i32) -> JointPose {
     let mix = |x: i32, y: i32| x + (y - x) * numerator / denominator.max(1);
-    let mut matrix = [[0i16; 3]; 3];
-    for (column, output_column) in matrix.iter_mut().enumerate() {
-        for (row, output) in output_column.iter_mut().enumerate() {
-            *output = mix(a.matrix[column][row] as i32, b.matrix[column][row] as i32) as i16;
+    let t = f64::from(numerator) / f64::from(denominator.max(1));
+    let matrix = psx_anim_tracks::blend_rotations(&a.matrix, &b.matrix, t).unwrap_or_else(|| {
+        let mut matrix = [[0i16; 3]; 3];
+        for (column, output_column) in matrix.iter_mut().enumerate() {
+            for (row, output) in output_column.iter_mut().enumerate() {
+                *output = mix(a.matrix[column][row] as i32, b.matrix[column][row] as i32) as i16;
+            }
         }
-    }
+        matrix
+    });
     // Start from a real translation so the vector type stays inferred; the
     // one `JointPose` uses is not the same `Vec3I32` this crate imports.
     let mut translation = a.translation;
@@ -581,5 +591,36 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn blending_two_rotations_keeps_a_rotation() {
+        // 60 degrees about z. Mixing matrix elements would put the midpoint at
+        // 0.966 of unit length; the blend must stay within rounding of 1.
+        let identity = JointPose {
+            matrix: [[4096, 0, 0], [0, 4096, 0], [0, 0, 4096]],
+            translation: Default::default(),
+        };
+        let turned = JointPose {
+            matrix: [[2048, -3547, 0], [3547, 2048, 0], [0, 0, 4096]],
+            translation: Default::default(),
+        };
+        for numerator in 1..8 {
+            let mid = blend(&identity, &turned, numerator, 8);
+            for row in mid.matrix {
+                let length_sq: i64 = row.iter().map(|&v| i64::from(v) * i64::from(v)).sum();
+                let deviation = (length_sq - 4096 * 4096).abs();
+                assert!(
+                    deviation < 4096 * 8,
+                    "row {row:?} length^2 off by {deviation}"
+                );
+            }
+        }
+        // Not rotations (animated scale): still element by element.
+        let doubled = JointPose {
+            matrix: [[8192, 0, 0], [0, 4096, 0], [0, 0, 4096]],
+            translation: Default::default(),
+        };
+        assert_eq!(blend(&identity, &doubled, 1, 2).matrix[0][0], 6144);
     }
 }

@@ -1913,6 +1913,18 @@ pub(crate) fn register_model_for_instance(
             },
             &label,
         );
+        // Last, after trimming and resampling have settled which frames ship, so
+        // the error bound is measured against the poses the runtime would
+        // otherwise have read, and so the baked frame bounds below describe the
+        // keyed clip the runtime will actually decode.
+        let socket_joints: Vec<u16> = model.attachments.iter().map(|s| s.joint).collect();
+        let animation_bytes = crate::animation_tracks::pack_tracks(
+            animation_bytes,
+            &parsed_model,
+            &socket_joints,
+            project.animation_track_budget_units,
+            &label,
+        );
         let corrected_anim = psx_asset::Animation::from_bytes(&animation_bytes)
             .expect("host-generated corrected animation must parse");
         let cooked_frame_count = corrected_anim.frame_count();
