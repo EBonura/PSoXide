@@ -35,6 +35,12 @@ pub const CHCR_CHOPPING_ENABLE: u32 = 1 << 8;
 /// CHCR.9..10 sync mode 0: manual, one burst of BCR words.
 pub const CHCR_SYNC_MANUAL: u32 = 0 << 9;
 /// CHCR.9..10 sync mode 1: block, BCR = block count x block size (words).
+///
+/// On silicon the controller counts BCR's block field down as blocks finish,
+/// so a finished transfer leaves it at 0, and a block kick with count 0 runs
+/// 65,536 blocks. Write BCR again before every kick; a second kick that
+/// reuses the old value runs away (console-tested on the SPU and GPU
+/// channels, hardware-tests v2.1).
 pub const CHCR_SYNC_BLOCK: u32 = 1 << 9;
 /// CHCR.9..10 sync mode 2: linked list, walks a chain of packet headers.
 pub const CHCR_SYNC_LINKED: u32 = 2 << 9;

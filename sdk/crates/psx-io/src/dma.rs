@@ -69,7 +69,10 @@ pub const fn size_words(words: u16) -> u32 {
 /// Size word for block sync: `block_count` blocks of `block_size` words.
 ///
 /// A zero field means 0x1_0000 on silicon, so a zero count is a 65,536-block
-/// transfer, not an empty one.
+/// transfer, not an empty one. The same goes for a count the controller has
+/// already counted down: silicon decrements the block field as blocks finish
+/// and leaves 0 behind, so the value is spent by the kick it armed. Store a
+/// fresh one before every block-sync kick ([`start`] does).
 #[doc(alias = "BCR")]
 #[inline(always)]
 pub const fn size_blocks(block_size: u16, block_count: u16) -> u32 {
@@ -100,6 +103,11 @@ pub struct Transfer {
 /// compiler-only barrier that publishes ordinary RAM stores made before the
 /// call (it emits no instruction), then control. The caller still enables
 /// the channel ([`enable_channel`]) and waits for completion ([`wait_done`]).
+///
+/// All three are stored on every call, and that is load-bearing for block
+/// sync: silicon counts the size register's block field down to 0 as the
+/// transfer runs, so a second kick that relied on the first call's size would
+/// run 65,536 blocks. Call `start` again, with the size, for each block kick.
 ///
 /// # Safety
 ///
@@ -182,6 +190,10 @@ pub mod raw {
     /// # Safety
     ///
     /// As [`set_address`]: the count sets the extent of the next transfer.
+    ///
+    /// In block sync (`CHCR_SYNC_BLOCK`) silicon decrements the block count as
+    /// blocks finish, so this store arms exactly one kick: write it again
+    /// before each later block-sync kick, or the second runs 65,536 blocks.
     #[doc(alias = "BCR")]
     #[inline(always)]
     pub unsafe fn set_size(ch: Channel, value: u32) {
@@ -191,6 +203,8 @@ pub mod raw {
 
     /// Write the channel's control register. With `CHCR_START` set this
     /// starts a transfer from whatever the address and size registers hold.
+    /// For a block-sync kick that holds only once per size store, because the
+    /// transfer spends the block count (see [`set_size`]).
     ///
     /// # Safety
     ///
