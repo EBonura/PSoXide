@@ -60,6 +60,7 @@ pub mod app;
 pub mod attributed_clip;
 pub mod cd_drive;
 pub mod character_motor;
+pub mod clip_lanes;
 pub mod collision_query;
 pub mod fixed;
 pub mod frames;

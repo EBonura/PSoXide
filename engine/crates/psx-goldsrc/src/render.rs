@@ -10,6 +10,7 @@ use psx_engine::attributed_clip::{
     clip_to_plane, lerp_q12_i32_wide as mix, ratio_q12_i32 as t_q12, AttributedClipPlane,
     ClipTraversal,
 };
+use psx_engine::clip_lanes::{clip_lanes8_plane, LanePlane};
 use psx_engine::projection::{
     half_space_outcode5, triangle_outside_common_plane, ScreenClipBounds,
 };
@@ -121,6 +122,11 @@ pub struct CVert {
 
 /// Screen-space vertex (true, unclamped coords) carried through the guard-band
 /// clip and into the emitter.
+///
+/// `repr(C)` because the view clip hands arrays of these to
+/// `psx_math::clip_lanes::clip_lanes8_plane`, which reads a vertex as the eight
+/// `i32` lanes `[x, y, z, r, g, b, u, v]`.
+#[repr(C)]
 #[derive(Clone, Copy)]
 pub struct SVert {
     pub x: i32,
@@ -130,12 +136,22 @@ pub struct SVert {
     pub uv: (i32, i32),
 }
 
+const _: () = {
+    use core::mem::{offset_of, size_of};
+    assert!(size_of::<SVert>() == 32);
+    assert!(offset_of!(SVert, x) == 0);
+    assert!(offset_of!(SVert, y) == 4);
+    assert!(offset_of!(SVert, z) == 8);
+    assert!(offset_of!(SVert, rgb) == 12);
+    assert!(offset_of!(SVert, uv) == 24);
+};
+
 /// Exact screen midpoint with perspective UVs and affine Gouraud colours.
 /// Inputs use positive u16 GTE depths and byte-range UV/RGB attributes.
 /// Depth is the harmonic mean. `lo + lo*(hi-lo)/(lo+hi)` avoids overflowing
 /// the doubled u16-depth product while retaining the exact integer quotient.
 #[inline(never)]
-pub fn perspective_screen_midpoint(a: SVert, b: SVert) -> SVert {
+pub fn perspective_screen_midpoint(a: &SVert, b: &SVert) -> SVert {
     let (za, zb) = (a.z.max(1) as u32, b.z.max(1) as u32);
     let d = za + zb;
     let lo = za.min(zb);
@@ -582,6 +598,7 @@ enum ViewPlane {
     Bottom,
 }
 
+#[cfg(test)]
 #[inline(always)]
 fn view_plane_distance<V: View>(view: &V, v: &SVert, plane: ViewPlane) -> i32 {
     let h = view.projection_h();
@@ -594,67 +611,9 @@ fn view_plane_distance<V: View>(view: &V, v: &SVert, plane: ViewPlane) -> i32 {
     }
 }
 
-fn lerp_view_plane(a: &SVert, b: &SVert, mut da: i32, mut db: i32, plane: ViewPlane) -> SVert {
-    // `visible_clip` runs independently for each source triangle. Canonical
-    // ordering makes a shared geometric edge survive every frustum plane with
-    // exactly the same rounded position on both sides.
-    let (a, b) = if (b.x, b.y, b.z) < (a.x, a.y, a.z) {
-        core::mem::swap(&mut da, &mut db);
-        (b, a)
-    } else {
-        (a, b)
-    };
-    let t = t_q12(da, da - db);
-    let mut v = SVert {
-        x: mix(a.x, b.x, t),
-        y: mix(a.y, b.y, t),
-        z: mix(a.z, b.z, t),
-        rgb: (
-            mix(a.rgb.0, b.rgb.0, t),
-            mix(a.rgb.1, b.rgb.1, t),
-            mix(a.rgb.2, b.rgb.2, t),
-        ),
-        uv: (mix(a.uv.0, b.uv.0, t), mix(a.uv.1, b.uv.1, t)),
-    };
-    if matches!(plane, ViewPlane::Near) {
-        v.z = NEAR_Z;
-    }
-    warp_probe_announce(v.x, v.y, v.z);
-    v
-}
-
-struct GoldSrcViewClipPlane<'a, V: View> {
-    plane: ViewPlane,
-    view: &'a V,
-}
-
-impl<V: View> AttributedClipPlane<SVert> for GoldSrcViewClipPlane<'_, V> {
-    type Distance = i32;
-
-    #[inline(always)]
-    fn distance(&self, _: usize, vertex: &SVert) -> Self::Distance {
-        view_plane_distance(self.view, vertex, self.plane)
-    }
-
-    #[inline(always)]
-    fn inside(&self, distance: Self::Distance) -> bool {
-        distance >= 0
-    }
-
-    #[inline(always)]
-    fn intersection(
-        &self,
-        _: usize,
-        first: &SVert,
-        first_distance: Self::Distance,
-        _: usize,
-        second: &SVert,
-        second_distance: Self::Distance,
-    ) -> SVert {
-        lerp_view_plane(first, second, first_distance, second_distance, self.plane)
-    }
-}
-
+/// One view-frustum plane as the four numbers `clip_lanes8_plane` needs. A
+/// vertex is inside when `lane * primary + z * depth + bias >= 0`; the near
+/// plane also lands every crossing exactly on `NEAR_Z`.
 fn clip_view_plane<V: View>(
     view: &V,
     inp: &[SVert],
@@ -662,13 +621,35 @@ fn clip_view_plane<V: View>(
     out: &mut [SVert; 8],
     plane: ViewPlane,
 ) -> usize {
-    clip_to_plane(
-        &inp[..n],
-        out,
-        &GoldSrcViewClipPlane { plane, view },
-        ClipTraversal::PreviousToCurrent,
-    )
-    .unwrap_or(out.len())
+    let h = view.projection_h();
+    let (primary_offset, primary, depth, bias, force_depth) = match plane {
+        ViewPlane::Near => (0, 0, 1, -NEAR_Z, 1),
+        ViewPlane::Left => (0, h, view.ofx() - view.vx0(), 0, 0),
+        ViewPlane::Right => (0, -h, view.vx1() - view.ofx(), 0, 0),
+        ViewPlane::Top => (4, h, view.ofy() - view.vy0(), 0, 0),
+        ViewPlane::Bottom => (4, -h, view.vy1() - view.ofy(), 0, 0),
+    };
+    let lane_plane = LanePlane {
+        primary_offset,
+        primary,
+        depth,
+        bias,
+        force_depth,
+        forced_depth: NEAR_Z,
+        capacity: out.len() as u32,
+    };
+    let source = &inp[..n];
+    // SAFETY: `SVert` is `repr(C)` of eight `i32` lanes in the order the kernel
+    // reads (asserted above), `source` and `out` are disjoint arrays, and `out`
+    // holds `capacity` vertices.
+    unsafe {
+        clip_lanes8_plane(
+            source.as_ptr().cast(),
+            n,
+            out.as_mut_ptr().cast(),
+            &lane_plane,
+        )
+    }
 }
 
 #[inline(always)]
