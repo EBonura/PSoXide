@@ -761,6 +761,12 @@ impl Playtest {
             // session-lifetime read finishes.
             return;
         }
+        // A streamed world reads its regions off the disc next, with the
+        // controller to itself; the loading screen holds until it is done.
+        #[cfg(feature = "world-stream")]
+        if let Some(bsp) = self.bsp.as_mut() {
+            let _ = bsp.step_world_stream(cd_arena());
+        }
         // Resident PXBSP owns world geometry, PVS, and collision; only shared
         // VRAM uploads and BSP material resolution remain after persistent
         // models are ready.
@@ -775,7 +781,9 @@ impl Playtest {
     fn initial_world_ready(&mut self) -> bool {
         #[cfg(not(feature = "cd-stream-bench"))]
         {
-            self.bsp.as_ref().is_none_or(BspRuntime::materials_ready)
+            self.bsp
+                .as_ref()
+                .is_none_or(|bsp| bsp.world_stream_ready() && bsp.materials_ready())
         }
         #[cfg(feature = "cd-stream-bench")]
         {
@@ -822,7 +830,9 @@ impl Playtest {
                 ]);
                 return false;
             }
-            self.bsp.as_ref().is_none_or(BspRuntime::materials_ready)
+            self.bsp
+                .as_ref()
+                .is_none_or(|bsp| bsp.world_stream_ready() && bsp.materials_ready())
         }
     }
 

@@ -40,9 +40,17 @@ const RESIDENT_LUMPS: [PxbspLumpKind; 14] = [
 pub enum PxbspMapLoadError<E> {
     Index(PxbspError<E>),
     Read(E),
-    TooLarge { required: usize, capacity: usize },
-    StaticLegacyVersion { found: u16 },
-    LegacyRecord { kind: PxbspLumpKind, index: usize },
+    TooLarge {
+        required: usize,
+        capacity: usize,
+    },
+    StaticLegacyVersion {
+        found: u16,
+    },
+    LegacyRecord {
+        kind: PxbspLumpKind,
+        index: usize,
+    },
     BadVertexData,
     BadPlane(usize),
     BadMaterial(usize, PxbspMaterialError),
@@ -55,6 +63,10 @@ pub enum PxbspMapLoadError<E> {
     BadBrushModel(usize),
     MissingWorldModel,
     BadEntity(usize),
+    /// The container carries a non-empty StreamingIndex; load it with
+    /// `load_streamed`.
+    #[cfg(feature = "streaming")]
+    StreamedWorldUnsupported,
 }
 
 impl<E: fmt::Display> fmt::Display for PxbspMapLoadError<E> {
@@ -96,6 +108,10 @@ impl<E: fmt::Display> fmt::Display for PxbspMapLoadError<E> {
             }
             Self::MissingWorldModel => output.write_str("PXBSP does not contain a world model"),
             Self::BadEntity(index) => write!(output, "entity {index} has an invalid leaf"),
+            #[cfg(feature = "streaming")]
+            Self::StreamedWorldUnsupported => {
+                output.write_str("streamed world must be loaded with load_streamed")
+            }
         }
     }
 }
@@ -109,7 +125,14 @@ pub struct PxbspResidentMap {
     ranges: [LumpRange; PXBSP_LUMP_COUNT],
     source_ranges: [LumpRange; PXBSP_LUMP_COUNT],
     source_file_len: u32,
+    /// Slot bookkeeping when the map was loaded as a streamed world.
+    #[cfg(feature = "streaming")]
+    stream: Option<alloc::boxed::Box<stream::StreamState>>,
 }
+
+#[cfg(feature = "streaming")]
+#[path = "pxbsp_stream.rs"]
+pub mod stream;
 
 /// Backing bytes for a validated resident map.
 ///
@@ -120,6 +143,15 @@ pub struct PxbspResidentMap {
 enum PxbspResidentStorage {
     Owned(Vec<u8>),
     Static(&'static [u8]),
+    /// Owned storage allocated as words so its base is four-byte aligned
+    /// whatever the allocator's state: the PS1 bump heap hands a byte vector
+    /// whatever address comes next, and the vertex and clipnode lumps are
+    /// read in place. Only a streamed map is made this way.
+    #[cfg(feature = "streaming")]
+    Words {
+        words: Vec<u32>,
+        len: usize,
+    },
 }
 
 impl PxbspResidentMap {
@@ -137,6 +169,8 @@ impl PxbspResidentMap {
             ranges: [LumpRange::EMPTY; PXBSP_LUMP_COUNT],
             source_ranges: [LumpRange::EMPTY; PXBSP_LUMP_COUNT],
             source_file_len: 0,
+            #[cfg(feature = "streaming")]
+            stream: None,
         }
     }
 
@@ -156,6 +190,10 @@ impl PxbspResidentMap {
                 found: index.version().wire(),
             });
         }
+        #[cfg(feature = "streaming")]
+        if index.lump(PxbspLumpKind::StreamingIndex).len != 0 {
+            return Err(PxbspMapLoadError::StreamedWorldUnsupported);
+        }
         let mut map = Self {
             map_id: None,
             generation: 0,
@@ -163,6 +201,8 @@ impl PxbspResidentMap {
             ranges: [LumpRange::EMPTY; PXBSP_LUMP_COUNT],
             source_ranges: [LumpRange::EMPTY; PXBSP_LUMP_COUNT],
             source_file_len: index.file_len(),
+            #[cfg(feature = "streaming")]
+            stream: None,
         };
         for kind in PxbspLumpKind::ALL {
             let range = index.lump(kind);
@@ -186,6 +226,10 @@ impl PxbspResidentMap {
     ) -> Result<(), PxbspMapLoadError<R::Error>> {
         self.prepare_owned_load();
         let index = PxbspIndex::read(reader).map_err(PxbspMapLoadError::Index)?;
+        #[cfg(feature = "streaming")]
+        if index.lump(PxbspLumpKind::StreamingIndex).len != 0 {
+            return Err(PxbspMapLoadError::StreamedWorldUnsupported);
+        }
 
         let total = RESIDENT_LUMPS.iter().try_fold(0usize, |total, &kind| {
             total
@@ -452,6 +496,10 @@ impl PxbspResidentMap {
         if leaf_index == 0 {
             return None;
         }
+        #[cfg(feature = "streaming")]
+        if self.stream.is_some() {
+            return self.streamed_leaf_visibility_dense(leaf_index, output);
+        }
         let leaf = self.leaves().get(leaf_index)?;
         let offset = usize::try_from(leaf.visibility_offset).ok()?;
         let visible_leaves = usize::try_from(self.world_visible_leaves()?).ok()?;
@@ -660,9 +708,17 @@ impl PxbspResidentMap {
 
     fn clear_loaded_state(&mut self) {
         self.map_id = None;
+        #[cfg(feature = "streaming")]
+        {
+            self.stream = None;
+        }
         match &mut self.storage {
             PxbspResidentStorage::Owned(bytes) => bytes.clear(),
             PxbspResidentStorage::Static(_) => self.storage = PxbspResidentStorage::Static(&[]),
+            #[cfg(feature = "streaming")]
+            PxbspResidentStorage::Words { .. } => {
+                self.storage = PxbspResidentStorage::Owned(Vec::new());
+            }
         }
         self.ranges = [LumpRange::EMPTY; PXBSP_LUMP_COUNT];
         self.source_ranges = [LumpRange::EMPTY; PXBSP_LUMP_COUNT];
@@ -676,8 +732,16 @@ impl PxbspResidentMap {
             PxbspResidentStorage::Static(_) => {
                 self.storage = PxbspResidentStorage::Owned(Vec::with_capacity(capacity));
             }
+            #[cfg(feature = "streaming")]
+            PxbspResidentStorage::Words { .. } => {
+                self.storage = PxbspResidentStorage::Owned(Vec::new());
+            }
         }
         self.map_id = None;
+        #[cfg(feature = "streaming")]
+        {
+            self.stream = None;
+        }
         self.ranges = [LumpRange::EMPTY; PXBSP_LUMP_COUNT];
         self.source_ranges = [LumpRange::EMPTY; PXBSP_LUMP_COUNT];
         self.source_file_len = 0;
@@ -687,6 +751,8 @@ impl PxbspResidentMap {
         match &self.storage {
             PxbspResidentStorage::Owned(bytes) => bytes.capacity(),
             PxbspResidentStorage::Static(bytes) => bytes.len(),
+            #[cfg(feature = "streaming")]
+            PxbspResidentStorage::Words { words, .. } => words.capacity() * 4,
         }
     }
 
@@ -694,6 +760,13 @@ impl PxbspResidentMap {
         match &self.storage {
             PxbspResidentStorage::Owned(bytes) => bytes,
             PxbspResidentStorage::Static(bytes) => bytes,
+            #[cfg(feature = "streaming")]
+            // SAFETY: `words` owns at least `len` initialised bytes (`len` is
+            // at most `words.len() * 4`, set when it was allocated) and u8 has
+            // no alignment requirement.
+            PxbspResidentStorage::Words { words, len } => unsafe {
+                core::slice::from_raw_parts(words.as_ptr().cast::<u8>(), *len)
+            },
         }
     }
 
@@ -701,6 +774,21 @@ impl PxbspResidentMap {
         match &mut self.storage {
             PxbspResidentStorage::Owned(bytes) => bytes,
             PxbspResidentStorage::Static(_) => unreachable!("prepared owned PXBSP load"),
+            #[cfg(feature = "streaming")]
+            PxbspResidentStorage::Words { .. } => unreachable!("word storage has no byte vector"),
+        }
+    }
+
+    /// The owned image as a mutable byte slice, whichever way it is stored.
+    #[cfg(feature = "streaming")]
+    pub(crate) fn owned_slice_mut(&mut self) -> &mut [u8] {
+        match &mut self.storage {
+            PxbspResidentStorage::Owned(bytes) => bytes,
+            PxbspResidentStorage::Static(_) => unreachable!("prepared owned PXBSP load"),
+            // SAFETY: as in `storage_bytes`, with exclusive access through `&mut self`.
+            PxbspResidentStorage::Words { words, len } => unsafe {
+                core::slice::from_raw_parts_mut(words.as_mut_ptr().cast::<u8>(), *len)
+            },
         }
     }
 

@@ -15,7 +15,7 @@ use psx_bsp::collision_provider::{
 use psx_bsp::destructible::{BrushDestructibleSet, BrushDestructibleSetError};
 use psx_bsp::mover::{BrushDoorSet, BrushDoorSetError};
 use psx_bsp::pxbsp::{
-    material_animation, material_blend, material_flags, PXBSP_MAX_VISIBILITY_BYTES,
+    material_animation, material_blend, material_flags, PxbspMaterial, PXBSP_MAX_VISIBILITY_BYTES,
 };
 use psx_bsp::pxbsp_resident::{PxbspMapLoadError, PxbspResidentMap};
 use psx_bsp::render::{
@@ -45,13 +45,16 @@ use psx_math::{cos_q12, sin_q12};
 
 use crate::generated::{
     ASSETS, DESTRUCTIBLES, PXBSP_BODY_HULLS, PXBSP_MOVER_MODEL_INDICES, PXBSP_MOVER_NODE_IDS,
-    PXBSP_WORLD, ROOMS, WORLD_OBJECTS,
+    PXBSP_STREAMED, PXBSP_WORLD, ROOMS, WORLD_OBJECTS,
 };
 use crate::world_objects_runtime::WorldObjectVisibility;
 use crate::{
     ensure_room_texture_uploaded, ensure_texture_uploaded, pxbsp_frame_face_chain_arena,
     pxbsp_visible_face_chain_arena, telemetry, PROJECTION,
 };
+
+#[cfg(feature = "world-stream")]
+mod world_stream;
 
 pub(super) const MAX_BSP_DOORS: usize = 16;
 pub(super) const MAX_BSP_DESTRUCTIBLES: usize = psx_level::MAX_DESTRUCTIBLES;
@@ -251,6 +254,12 @@ pub(super) enum BspRuntimeInitError {
         capacity: usize,
     },
     Map(PxbspMapLoadError<SliceReadError>),
+    /// The manifest ships a streamed world and this build cannot stream.
+    StreamedWorldNeedsTheFeature,
+    #[cfg(feature = "world-stream")]
+    StreamLoad(psx_bsp::pxbsp_resident::stream::StreamLoadError<SliceReadError>),
+    #[cfg(feature = "world-stream")]
+    MissingRegionPack,
     Doors(BrushDoorSetError),
     Destructibles(BrushDestructibleSetError),
     InvalidDestructibleTarget {
@@ -288,6 +297,15 @@ impl fmt::Display for BspRuntimeInitError {
                 "PXBSP world contains {count} materials, exceeding runtime capacity {capacity}"
             ),
             Self::Map(error) => write!(formatter, "PXBSP map load failed: {error:?}"),
+            Self::StreamedWorldNeedsTheFeature => formatter.write_str(
+                "the cooked world is streamed; build the guest with the world-stream feature",
+            ),
+            #[cfg(feature = "world-stream")]
+            Self::StreamLoad(error) => write!(formatter, "streamed PXBSP load failed: {error:?}"),
+            #[cfg(feature = "world-stream")]
+            Self::MissingRegionPack => {
+                formatter.write_str("the region pack is not in the UI.PAK table of contents")
+            }
             Self::Doors(error) => write!(formatter, "PXBSP mover load failed: {error:?}"),
             Self::Destructibles(error) => {
                 write!(formatter, "PXBSP destructible load failed: {error:?}")
@@ -353,6 +371,71 @@ impl<P: psx_engine::CollisionTraceProvider + ?Sized> psx_engine::CollisionTraceP
     }
 }
 
+/// Resolve one PXBSP material to its VRAM texture binding through the normal
+/// playtest VRAM owner. Returns `false` while the texture upload is still
+/// queued (the binding stays `None`); sky materials need no texture and
+/// resolve at once.
+fn resolve_material_binding(
+    material: &PxbspMaterial,
+    index: usize,
+    binding: &mut Option<PxbspTextureBinding>,
+) -> bool {
+    if material.flags & (material_flags::SKY_APERTURE | material_flags::DIRECTIONAL_SKY) != 0 {
+        *binding = None;
+        return true;
+    }
+    let asset_id = AssetId(material.texture_asset);
+    let asset = find_asset_of_kind(ASSETS, asset_id, AssetKind::Texture).unwrap_or_else(|| {
+        panic!(
+            "PXBSP material {index} references missing texture asset {}",
+            material.texture_asset
+        )
+    });
+    assert!(
+        !asset.bytes.is_empty(),
+        "PXBSP texture asset {} has no baked bytes; streamed BSP textures are not implemented",
+        material.texture_asset
+    );
+    let texture = Texture::from_bytes(asset.bytes).unwrap_or_else(|_| {
+        panic!(
+            "PXBSP texture asset {} is not a valid PSXT",
+            material.texture_asset
+        )
+    });
+    // Polygon blending and palette-zero cutout are independent PS1
+    // features. An opaque material may still use CLUT entry zero as a
+    // binary mask, so preserve an explicit PSXT transparent-zero flag
+    // instead of forcing all opaque room materials to opaque-zero.
+    let slot = if texture.is_index_zero_transparent() {
+        ensure_texture_uploaded(asset_id, asset.bytes)
+    } else if material.blend_mode == material_blend::OPAQUE {
+        ensure_room_texture_uploaded(asset_id, asset.bytes)
+    } else {
+        ensure_texture_uploaded(asset_id, asset.bytes)
+    };
+    let Some(slot) = slot else {
+        *binding = None;
+        return false;
+    };
+    if !slot.ready {
+        *binding = None;
+        return false;
+    }
+    let width = u8::try_from(slot.texture_width)
+        .expect("PXBSP texture width exceeds the packet UV contract");
+    let height = u8::try_from(slot.texture_height)
+        .expect("PXBSP texture height exceeds the packet UV contract");
+    *binding = Some(PxbspTextureBinding {
+        texture_page: slot.tpage_word,
+        clut: slot.clut_word,
+        texture_window_word: slot.texture_window.word(),
+        uv_origin: [0, 0],
+        page_uv_origin: slot.texture_window.origin_texels(),
+        texture_size: [width, height],
+    });
+    true
+}
+
 pub(super) struct BspRuntime {
     map: PxbspResidentMap,
     renderer: Renderer,
@@ -385,10 +468,22 @@ pub(super) struct BspRuntime {
     /// prediction [`Self::draw`] fences against before drawing.
     last_world_packet_words: usize,
     camera_traces: u32,
+    /// The region streamer and its bookkeeping (streamed worlds only).
+    #[cfg(feature = "world-stream")]
+    stream: world_stream::WorldStream,
 }
 
 impl BspRuntime {
     pub(super) fn load_manifest() -> Result<Self, BspRuntimeInitError> {
+        let loaded = Self::load_manifest_checked();
+        #[cfg(feature = "world-stream")]
+        if let Err(error) = &loaded {
+            world_stream::record_init_error(error);
+        }
+        loaded
+    }
+
+    fn load_manifest_checked() -> Result<Self, BspRuntimeInitError> {
         crate::game_trace("editor-playtest: bsp manifest begin");
         if PXBSP_WORLD.is_empty() {
             return Err(BspRuntimeInitError::EmptyWorld);
@@ -402,8 +497,21 @@ impl BspRuntime {
             }
         }
 
-        let map =
-            PxbspResidentMap::from_static(0, PXBSP_WORLD).map_err(BspRuntimeInitError::Map)?;
+        #[cfg(feature = "world-stream")]
+        let (map, stream) = if PXBSP_STREAMED {
+            world_stream::load_streamed_world()?
+        } else {
+            (
+                PxbspResidentMap::from_static(0, PXBSP_WORLD).map_err(BspRuntimeInitError::Map)?,
+                world_stream::WorldStream::whole(),
+            )
+        };
+        #[cfg(not(feature = "world-stream"))]
+        let map = if PXBSP_STREAMED {
+            return Err(BspRuntimeInitError::StreamedWorldNeedsTheFeature);
+        } else {
+            PxbspResidentMap::from_static(0, PXBSP_WORLD).map_err(BspRuntimeInitError::Map)?
+        };
         crate::game_trace("editor-playtest: bsp map ok");
         let mut doors = BrushDoorSet::EMPTY;
         doors
@@ -555,6 +663,8 @@ impl BspRuntime {
             fragment_events: [BspDestructibleFragmentEvent::EMPTY; MAX_BSP_DESTRUCTIBLES],
             last_world_packet_words: 0,
             camera_traces: 0,
+            #[cfg(feature = "world-stream")]
+            stream,
         })
     }
 
@@ -944,68 +1054,30 @@ impl BspRuntime {
         }
         let mut ready = true;
         for (index, material) in self.map.materials().iter().enumerate() {
-            if material.flags & (material_flags::SKY_APERTURE | material_flags::DIRECTIONAL_SKY)
-                != 0
-            {
+            if !self.material_required(index) {
                 self.materials[index] = None;
                 continue;
             }
-            let asset_id = AssetId(material.texture_asset);
-            let asset =
-                find_asset_of_kind(ASSETS, asset_id, AssetKind::Texture).unwrap_or_else(|| {
-                    panic!(
-                        "PXBSP material {index} references missing texture asset {}",
-                        material.texture_asset
-                    )
-                });
-            assert!(
-                !asset.bytes.is_empty(),
-                "PXBSP texture asset {} has no baked bytes; streamed BSP textures are not implemented",
-                material.texture_asset
-            );
-            let texture = Texture::from_bytes(asset.bytes).unwrap_or_else(|_| {
-                panic!(
-                    "PXBSP texture asset {} is not a valid PSXT",
-                    material.texture_asset
-                )
-            });
-            // Polygon blending and palette-zero cutout are independent PS1
-            // features. An opaque material may still use CLUT entry zero as a
-            // binary mask, so preserve an explicit PSXT transparent-zero flag
-            // instead of forcing all opaque room materials to opaque-zero.
-            let slot = if texture.is_index_zero_transparent() {
-                ensure_texture_uploaded(asset_id, asset.bytes)
-            } else if material.blend_mode == material_blend::OPAQUE {
-                ensure_room_texture_uploaded(asset_id, asset.bytes)
-            } else {
-                ensure_texture_uploaded(asset_id, asset.bytes)
-            };
-            let Some(slot) = slot else {
-                self.materials[index] = None;
-                ready = false;
-                continue;
-            };
-            if !slot.ready {
-                self.materials[index] = None;
-                ready = false;
-                continue;
-            }
-            let width = u8::try_from(slot.texture_width)
-                .expect("PXBSP texture width exceeds the packet UV contract");
-            let height = u8::try_from(slot.texture_height)
-                .expect("PXBSP texture height exceeds the packet UV contract");
-            self.materials[index] = Some(PxbspTextureBinding {
-                texture_page: slot.tpage_word,
-                clut: slot.clut_word,
-                texture_window_word: slot.texture_window.word(),
-                uv_origin: [0, 0],
-                page_uv_origin: slot.texture_window.origin_texels(),
-                texture_size: [width, height],
-            });
+            ready &= resolve_material_binding(&material, index, &mut self.materials[index]);
         }
         self.materials_latched = ready && self.materials_ready();
         self.materials_latched
     }
+
+    /// Whether material `index` has to be bound. Every material of a whole map.
+    #[cfg(not(feature = "world-stream"))]
+    fn material_required(&self, _index: usize) -> bool {
+        true
+    }
+
+    /// Whether the world can be played; a whole map always can.
+    #[cfg(not(feature = "world-stream"))]
+    pub(crate) fn world_stream_ready(&self) -> bool {
+        true
+    }
+
+    #[cfg(not(feature = "world-stream"))]
+    fn probe_stub(&mut self, _at: RoomPoint) {}
 
     /// Drop the resolved material table so the next `refresh_materials` rebuilds
     /// it. Call whenever the gameplay VRAM those bindings point at is released.
@@ -1023,10 +1095,12 @@ impl BspRuntime {
                 .materials()
                 .iter()
                 .zip(&self.materials)
-                .all(|(material, binding)| {
+                .enumerate()
+                .all(|(index, (material, binding))| {
                     material.flags
                         & (material_flags::SKY_APERTURE | material_flags::DIRECTIONAL_SKY)
                         != 0
+                        || !self.material_required(index)
                         || binding.is_some()
                 })
     }
@@ -1374,6 +1448,7 @@ impl BspRuntime {
         blockers: &[CharacterCollisionCylinder],
         aabb_blockers: &[CharacterCollisionAabb],
     ) -> Result<CharacterMotorFrame, CollisionQueryError> {
+        self.probe_stub(motor.position());
         let mut models = CollisionModels::new();
         self.collision_models(&mut models, destructibles);
         let shape = CollisionTraceShape::Body {

@@ -21,11 +21,15 @@ cd-stream-benchmark = ["cd-stream-bench"]
 # the helper is intentionally explicit and sizeable on MIPS, and is only useful
 # while tuning authored collision bounds.
 collision-debug-overlay = []
+# Streamed PXBSP worlds (design 2026-10-08, M7): the region streamer that
+# reads regions off the disc and installs them into the resident map.
+world-stream = ["dep:psx-bsp", "psx-bsp/streaming"]
 
 [dependencies]
 # Explicit paths, same rationale as psx-engine: resolvable when
 # consumed from outside the engine workspace.
 psx-asset     = { path = "../../../sdk/crates/psx-asset" }
+psx-bsp       = { path = "../psx-bsp", optional = true }
 psx-cdstream  = { path = "../../../sdk/crates/psx-cdstream" }
 psx-engine    = { path = "../psx-engine" }
 psx-font      = { path = "../../../sdk/crates/psx-font" }

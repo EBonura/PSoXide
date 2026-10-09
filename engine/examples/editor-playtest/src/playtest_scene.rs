@@ -9,6 +9,11 @@ const INVENTORY_UI_ASSIGN: u8 = 2;
 const INVENTORY_ITEM_COUNT: u8 = 3;
 const GAMEPLAY_SCENE_STATE_NAME: &str = "Gameplay";
 const INVENTORY_SCENE_STATE_NAME: &str = "Inventory Overlay";
+/// Sim tick at which the `lockstep-visuals` replay diagnostic opens the
+/// gameplay gate, above any build's load time (a whole map loads by tick ~40,
+/// a streamed one a few ticks later).
+#[cfg(feature = "lockstep-visuals")]
+const LOCKSTEP_GAMEPLAY_START_TICK: u32 = 64;
 
 /// Find the authored Basic 8x8 atlas used by HUD feedback. Cooked font slots
 /// are ordered by first use, so a hard-coded index would change whenever an
@@ -1015,7 +1020,15 @@ impl Scene for Playtest {
             self.ensure_poi_save_loaded(ctx.controller_port());
         }
         self.step_streaming_jobs(ctx);
-        self.initial_world_ready()
+        let ready = self.initial_world_ready();
+        // Replay diagnostic: a recorded input tape is indexed by pad poll,
+        // and the loading screen polls too, so a load that finishes a few
+        // ticks earlier or later (a streamed world against a whole-map one)
+        // starts gameplay at a different tape position. Open the gameplay
+        // gate at one fixed tick so two builds compare at equal gameplay time.
+        #[cfg(feature = "lockstep-visuals")]
+        let ready = ready && ctx.sim_tick.as_u32() >= LOCKSTEP_GAMEPLAY_START_TICK;
+        ready
     }
 
     /// Real load progress for the authored loading scene's bar: the

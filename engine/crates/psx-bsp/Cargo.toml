@@ -9,6 +9,13 @@ description = "Checked, allocation-free XBSP/PXBSP map readers. Shared by the gu
 [lints]
 workspace = true
 
+[features]
+# World streaming (design 2026-10-08, M6): the PXBSP region format, the
+# slotted resident map and the canonical-rank PVS decode. Off by default so
+# every consumer that does not stream (quake-psx, HL, CS) compiles exactly
+# the code it did before this feature existed.
+streaming = []
+
 [dependencies]
 psx-pack = { path = "../../../sdk/crates/psx-pack" }
 # Explicit paths (not `workspace = true`): psx-bsp is consumed from the

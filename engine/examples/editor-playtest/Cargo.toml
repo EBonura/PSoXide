@@ -74,6 +74,11 @@ default = [
 ]
 cd-stream-bench = ["dep:psx-io", "psx-game-runtime/cd-stream-bench"]
 cd-stream-benchmark = ["cd-stream-bench", "psx-game-runtime/cd-stream-benchmark"]
+# Streamed world (design 2026-10-08, M7): a world cooked with
+# PSXED_STREAM_WORLD=stream is a resident top container plus a region pack on
+# disc, read and installed while the loading screen runs. Off by default; the
+# whole-map build stays the default until the M7 gates pass.
+world-stream = ["cd-stream-bench", "psx-game-runtime/world-stream", "psx-bsp/streaming"]
 boot-trace = ["psx-engine/boot-trace", "psx-rt/boot-trace"]
 emulator-telemetry = ["psx-engine/emulator-telemetry"]
 # Per-update `camera-pose` debug lines only; fits builds that overflow RAM with

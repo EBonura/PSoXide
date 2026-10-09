@@ -1329,6 +1329,9 @@ pub struct Renderer {
     reuse_pxbsp_valid: bool,
     selection_reuse: bool,
     visibility: [u8; PXBSP_MAX_VISIBILITY_BYTES],
+    /// Compressed-row decode buffer of the streamed PVS path.
+    #[cfg(feature = "streaming")]
+    stream_row: [u8; PXBSP_MAX_VISIBILITY_BYTES],
     visible_leaf_count: usize,
     cached_pxbsp_visibility: Option<(u32, usize)>,
     light_styles: [u16; DUMMY_LIGHT_STYLE + 1],
@@ -1496,6 +1499,8 @@ impl Renderer {
             reuse_pxbsp_valid: false,
             selection_reuse: false,
             visibility: [0; PXBSP_MAX_VISIBILITY_BYTES],
+            #[cfg(feature = "streaming")]
+            stream_row: [0; PXBSP_MAX_VISIBILITY_BYTES],
             visible_leaf_count: 0,
             cached_pxbsp_visibility: None,
             view_projection: ViewProjection::DEFAULT,
@@ -2332,6 +2337,10 @@ impl Renderer {
             self.visible_leaf_count = 0;
             return false;
         }
+        #[cfg(feature = "streaming")]
+        if map.is_streamed() {
+            return self.mark_visible_streamed_faces(map, leaf_index);
+        }
         self.pxbsp_face_state.fill(0);
         self.visible_pxbsp_faces.clear();
 
@@ -2390,6 +2399,106 @@ impl Renderer {
         self.rebuild_pxbsp_node_visibility(map);
         self.cached_pxbsp_visibility = Some((map.generation(), leaf_index));
         true
+    }
+
+    /// PVS marking for a streamed map: expand the canonical-rank row of the
+    /// camera leaf into the dense virtual-leaf bitmap, then mark faces exactly
+    /// as the legacy path does. Selected at run time by
+    /// [`PxbspResidentMap::is_streamed`]; the legacy function above is not
+    /// otherwise touched.
+    #[cfg(feature = "streaming")]
+    #[inline(never)]
+    fn mark_visible_streamed_faces(&mut self, map: &PxbspResidentMap, leaf_index: usize) -> bool {
+        self.pxbsp_face_state.fill(0);
+        self.visible_pxbsp_faces.clear();
+        let Some(bits) = map.streamed_leaf_visibility_into(
+            leaf_index,
+            &mut self.stream_row,
+            &mut self.visibility,
+        ) else {
+            self.cached_pxbsp_visibility = None;
+            self.visible_leaf_count = 0;
+            return false;
+        };
+        let leaves = map.leaves();
+        let marks = map.mark_surfaces_native();
+        for byte_index in 0..bits / 8 {
+            let byte = self.visibility[byte_index];
+            if byte == 0 {
+                continue;
+            }
+            for bit in 0..8 {
+                if byte & (1 << bit) == 0 {
+                    continue;
+                }
+                let Some(leaf) = leaves.get(byte_index * 8 + bit + 1) else {
+                    return false;
+                };
+                let start = leaf.first_mark_surface as usize;
+                let end = start + leaf.mark_surface_count as usize;
+                for mark_index in start..end {
+                    let Some(&face) = marks.get(mark_index) else {
+                        return false;
+                    };
+                    set_packed_face_state(&mut self.pxbsp_face_state, face as usize, 1);
+                }
+            }
+        }
+        if !collect_marked_faces_ascending(
+            &self.pxbsp_face_state,
+            self.pxbsp_face_count,
+            &mut self.visible_pxbsp_faces,
+        ) {
+            self.pxbsp_face_state.fill(0);
+            self.cached_pxbsp_visibility = None;
+            self.visible_pxbsp_faces.clear();
+            self.visible_leaf_count = 0;
+            return false;
+        }
+        self.visible_leaf_count = bits;
+        self.rebuild_pxbsp_node_visibility(map);
+        self.cached_pxbsp_visibility = Some((map.generation(), leaf_index));
+        true
+    }
+
+    /// Run the world's PVS marking and frustum selection without drawing, and
+    /// return `(pvs_faces, frame_faces)`: the sorted face indices the leaf row
+    /// makes potentially visible, and the subset surviving hierarchical node
+    /// culling. A test and tooling hook for the streamed-versus-whole-map
+    /// equivalence gate; the draw path never calls it.
+    #[cfg(feature = "streaming")]
+    pub fn debug_world_selection(
+        &mut self,
+        map: &PxbspResidentMap,
+        camera: Camera,
+        view: ViewTransform,
+    ) -> Option<(Vec<u16>, Vec<u16>)> {
+        scene::load_rotation(&view.rotation);
+        scene::load_translation(view.translation);
+        let frustum = FrustumPlanes::from_view(
+            &view.rotation,
+            view.translation,
+            [
+                camera.origin.x >> 12,
+                camera.origin.y >> 12,
+                camera.origin.z >> 12,
+            ],
+            self.view_projection,
+        );
+        let ok = self.mark_visible_pxbsp_faces(map, camera.origin)
+            && unsafe {
+                PxbspSelectionStack::run(|| {
+                    self.select_frame_pxbsp_faces(map, camera.origin, &frustum)
+                })
+            };
+        let out = ok.then(|| {
+            (
+                self.visible_pxbsp_faces.clone(),
+                self.frame_pxbsp_faces.clone(),
+            )
+        });
+        self.retire_frame_pxbsp_selection();
+        out
     }
 
     /// Rebuild the per-node PVS stamp for render nodes. This runs only

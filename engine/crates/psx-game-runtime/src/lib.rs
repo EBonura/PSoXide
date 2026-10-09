@@ -41,6 +41,8 @@ pub mod poi;
 pub mod poise;
 pub mod projectiles;
 pub mod ranged_tactics;
+#[cfg(feature = "world-stream")]
+pub mod region_stream;
 pub mod room_lighting;
 pub mod save;
 pub mod schedule;

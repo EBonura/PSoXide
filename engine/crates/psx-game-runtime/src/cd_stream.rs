@@ -17,7 +17,13 @@
 use psx_engine::telemetry;
 use psx_level::LevelWorldPackEntryRecord;
 
+// Streamed-world region reads: compiled for the `world-stream` feature (and
+// for tests), so a build that does not stream carries none of it.
+#[cfg(any(test, feature = "world-stream"))]
+mod region;
 mod ring;
+#[cfg(any(test, feature = "world-stream"))]
+pub use self::region::{RegionRead, RegionReadProgress};
 #[cfg(target_arch = "mips")]
 use self::ring::Hardware as Console;
 #[cfg(not(target_arch = "mips"))]
@@ -1336,6 +1342,15 @@ fn read_chunks_contiguous_with<T: Transport>(
     if aborted {
         cd.abort_run(transport);
     }
+}
+
+/// Where chunk `chunk_id` of a pack sits, from its cooked table of contents.
+#[cfg(feature = "world-stream")]
+pub fn world_pack_chunk(
+    toc: &[LevelWorldPackEntryRecord],
+    chunk_id: u32,
+) -> Option<WorldChunkInfo> {
+    world_pack_entry_from_toc(toc, chunk_id)
 }
 
 fn world_pack_entry_from_toc(

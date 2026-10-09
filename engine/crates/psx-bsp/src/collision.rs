@@ -20,6 +20,13 @@ pub const CONTENTS_WATER: i16 = -3;
 pub const CONTENTS_SLIME: i16 = -4;
 pub const CONTENTS_LAVA: i16 = -5;
 pub const CONTENTS_SKY: i16 = -6;
+/// Wire-only contents of a stub leaf standing for a region that is not
+/// resident. A cooked streamed container carries it so a loader that cannot
+/// stream rejects the file (it is outside the valid -6..=-1 leaf range); a
+/// streaming loader canonicalises it to [`CONTENTS_SOLID`] in the resident
+/// image, which makes every tracer and point query treat unresident space as
+/// a wall without a single instruction added to the trace loops.
+pub const CONTENTS_UNRESIDENT: i16 = -7;
 pub const Q12_ONE: i32 = 4096;
 /// How far a trace stops short of the plane it hits, on the start side,
 /// in Q20.12: 1/32 of a unit. Without it a contact rounded onto the plane
