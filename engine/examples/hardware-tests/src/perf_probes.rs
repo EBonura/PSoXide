@@ -135,11 +135,6 @@ impl Probe {
         self.seed_gte = true;
         self
     }
-
-    const fn cold(mut self) -> Self {
-        self.cold = true;
-        self
-    }
 }
 
 // MULTU operands: `rs` picks the 6/9/13-cycle band, `rt` stays where the old
@@ -418,60 +413,133 @@ const GTE_LATENCY: [Probe; 66] = [
     probe(0x191, 8, lat_ncct_b2b, NONE, NONE).gte(),
 ];
 
-/// A store of a coprocessor register straight after a command (`swc2`), for
-/// four commands: the interlock the emulator now models for it was never
-/// measured on a console. Ids `0x192`-`0x195`.
-const GTE_SWC2: [Probe; 4] = [
-    probe(0x192, 16, lat_rtps_swc2_mac1, Arg::RamWord, NONE).gte(),
-    probe(0x193, 16, lat_rtps_swc2_sxy2, Arg::RamWord, NONE).gte(),
-    probe(0x194, 16, lat_nclip_swc2_mac0, Arg::RamWord, NONE).gte(),
-    probe(0x195, 16, lat_sqr_swc2_mac1, Arg::RamWord, NONE).gte(),
-];
-
-/// v2.0 audit items (ids `0x196`-`0x1BB`): GTE read forms, memory-mapped
-/// register reads, scratchpad sub-word accesses, the isolated cache, cold
-/// code, ROM reads and the multiply/divide unit. Safe to run anywhere.
-const AUDIT: [Probe; 25] = [
-    // M1: RTPS then cfc2 FLAG and lwc2 IR1 (swc2 is `GTE_SWC2`).
-    probe(0x196, 16, lat_rtps_cfc2_flag, NONE, NONE).gte(),
-    probe(0x197, 16, lat_rtps_lwc2_ir1, Arg::RamWord, NONE).gte(),
-    // M3: reading a timer counter, a DMA CHCR and DPCR 64 times.
-    probe(0x1A0, 64, warm_loads, Arg::Imm(0x1F80_1100), NONE),
-    probe(0x1A1, 64, warm_loads, Arg::Imm(0x1F80_1110), NONE),
-    probe(0x1A2, 64, warm_loads, Arg::Imm(0x1F80_1120), NONE),
-    probe(0x1A3, 64, warm_loads, Arg::Imm(0x1F80_10A8), NONE),
-    probe(0x1A4, 64, warm_loads, Arg::Imm(0x1F80_10F0), NONE),
-    probe(0x1A5, 64, warm_loads, Arg::Imm(0x1F80_1124), NONE),
-    // M4: scratchpad byte and half accesses against the word ones (`75`, `77`).
-    probe(0x1A8, 64, warm_byte_loads, Arg::Imm(SCRATCHPAD), NONE),
-    probe(0x1A9, 64, warm_half_loads, Arg::Imm(SCRATCHPAD), NONE),
-    probe(0x1AA, 64, warm_byte_stores, Arg::Imm(SCRATCHPAD), NONE),
-    probe(0x1AB, 64, warm_half_stores, Arg::Imm(SCRATCHPAD), NONE),
-    // M5: stores and loads with the cache isolated, and the control.
-    probe(0x1AC, 64, isolate_stores, Arg::RamWord, NONE).uncached(),
-    probe(0x1AD, 64, isolate_control_stores, Arg::RamWord, NONE).uncached(),
-    probe(0x1AE, 64, isolate_loads, Arg::RamWord, NONE).uncached(),
-    // M7: eight cold instructions, then one store, one RAM load and one
-    // register load as the access, the I-cache flushed before each sample.
-    probe(0x1B0, 8, cold_nops, NONE, NONE).cold(),
-    probe(0x1B1, 8, cold_store, Arg::RamWord, NONE).cold(),
-    probe(0x1B2, 8, cold_load, Arg::RamWord, NONE).cold(),
-    probe(0x1B3, 8, cold_mmio_load, Arg::Imm(I_STAT), NONE).cold(),
-    // M8: BIOS ROM words read in sequence (single word loads are `4B` and
-    // `55`-`5D`).
+/// The emulator timing audit's list (`TIMING-AUDIT-STEPS.md`), M1 to M8 and
+/// M10, as warm-harness records: Timer 2 on the system clock unless the
+/// comment says otherwise, interrupts masked, five samples.
+const AUDIT: [Probe; 46] = [
+    // M1: RTPS then swc2 / cfc2 / lwc2 (16 turns, 20 nops), against 0x130.
     probe(
-        0x1B4,
+        0x192,
+        16,
+        m1_swc2_sxy2_scratchpad,
+        Arg::Imm(SCRATCHPAD),
+        NONE,
+    )
+    .gte(),
+    probe(0x193, 16, m1_cfc2_flag, NONE, NONE).gte(),
+    probe(
+        0x194,
+        16,
+        m1_lwc2_zero_scratchpad,
+        Arg::Imm(SCRATCHPAD),
+        NONE,
+    )
+    .gte(),
+    // M2: the swc2 again, to cached RAM.
+    probe(0x195, 16, m2_swc2_sxy2_ram, Arg::RamWord, NONE).gte(),
+    // M3: MMIO read cost, 64 x (lw, nop), timed by a counter that is not the
+    // one read: Timer 0 counter, DMA2 CHCR and DPCR by Timer 2, Timer 2's
+    // counter by Timer 0.
+    probe(0x1A0, 64, warm_loads, Arg::Imm(0x1F80_1100), NONE),
+    probe(0x1A1, 64, warm_loads, Arg::Imm(0x1F80_10A8), NONE),
+    probe(0x1A2, 64, warm_loads, Arg::Imm(0x1F80_10F0), NONE),
+    probe(
+        0x1A3,
         64,
-        warm_sequential_loads,
+        m3_timer2_read_timed_by_timer0,
+        Arg::Imm(0x1F80_1120),
+        NONE,
+    ),
+    // M4: scratchpad lb, lbu, lh, lhu, sb, sh, 64 each with a nop.
+    probe(
+        0x1A8,
+        64,
+        warm_signed_byte_loads,
+        Arg::Imm(SCRATCHPAD),
+        NONE,
+    ),
+    probe(0x1A9, 64, warm_byte_loads, Arg::Imm(SCRATCHPAD), NONE),
+    probe(
+        0x1AA,
+        64,
+        warm_signed_half_loads,
+        Arg::Imm(SCRATCHPAD),
+        NONE,
+    ),
+    probe(0x1AB, 64, warm_half_loads, Arg::Imm(SCRATCHPAD), NONE),
+    probe(0x1AC, 64, warm_byte_stores_nop, Arg::Imm(SCRATCHPAD), NONE),
+    probe(0x1AD, 64, warm_half_stores_nop, Arg::Imm(SCRATCHPAD), NONE),
+    // M5: IsC clear against the scratchpad (control), IsC set, IsC and TAG
+    // set; 64 sw and 64 lw each, run through KSEG1.
+    probe(0x1B0, 64, isolate_control_sw, Arg::Imm(SCRATCHPAD), NONE).uncached(),
+    probe(0x1B1, 64, isolate_control_lw, Arg::Imm(SCRATCHPAD), NONE).uncached(),
+    probe(0x1B2, 64, isolate_data_sw, Arg::RamWord, NONE).uncached(),
+    probe(0x1B3, 64, isolate_data_lw, Arg::RamWord, NONE).uncached(),
+    probe(0x1B4, 64, isolate_tag_sw, Arg::RamWord, NONE).uncached(),
+    probe(0x1B5, 64, isolate_tag_lw, Arg::RamWord, NONE).uncached(),
+    // M7: the 4 KiB evictor before every sample, then (a) 64 sw to RAM, (b) 64
+    // sw to the scratchpad, (c) 32 x (lw GPUSTAT, nop), (d) 32 x (lw RAM, nop),
+    // (e) 64 nops.
+    probe(0x1B8, 64, m7_sw_ram, Arg::RamWord, Arg::IcacheBlock),
+    probe(
+        0x1B9,
+        64,
+        m7_sw_scratchpad,
+        Arg::Imm(SCRATCHPAD),
+        Arg::IcacheBlock,
+    ),
+    probe(
+        0x1BA,
+        32,
+        m7_gpustat_pairs,
+        Arg::Imm(GPUSTAT),
+        Arg::IcacheBlock,
+    ),
+    probe(0x1BB, 32, m7_ram_pairs, Arg::RamWord, Arg::IcacheBlock),
+    probe(0x1BC, 64, m7_nops, NONE, Arg::IcacheBlock),
+    // M8: warm BIOS ROM, EXP1 and EXP3, through KSEG1: 64 x (lw, nop), 64
+    // bare lw, then half and byte (lhu, lbu with a nop).
+    probe(0x1C0, 64, warm_loads, Arg::Imm(0xBFC0_0000), NONE),
+    probe(
+        0x1C1,
+        64,
+        warm_loads_back_to_back,
         Arg::Imm(0xBFC0_0000),
         NONE,
     ),
-    probe(0x1B5, 64, warm_loads, Arg::Imm(0xBFC0_0000), NONE),
-    // M10: the multiply/divide unit shared and read early.
-    probe(0x1B8, 8, muldiv_mult_then_div, RS_SMALL, RT),
-    probe(0x1B9, 8, muldiv_div_then_mult, NUMERATOR, DIVISOR),
-    probe(0x1BA, 16, muldiv_mult_then_mfhi, RS_SMALL, RT),
-    probe(0x1BB, 16, muldiv_mtlo_during_mult, RS_SMALL, RT),
+    probe(0x1C2, 64, warm_half_loads, Arg::Imm(0xBFC0_0000), NONE),
+    probe(0x1C3, 64, warm_byte_loads, Arg::Imm(0xBFC0_0000), NONE),
+    probe(0x1C4, 64, warm_loads, Arg::Imm(0xBF00_0000), NONE),
+    probe(
+        0x1C5,
+        64,
+        warm_loads_back_to_back,
+        Arg::Imm(0xBF00_0000),
+        NONE,
+    ),
+    probe(0x1C6, 64, warm_half_loads, Arg::Imm(0xBF00_0000), NONE),
+    probe(0x1C7, 64, warm_byte_loads, Arg::Imm(0xBF00_0000), NONE),
+    probe(0x1C8, 64, warm_loads, Arg::Imm(0xBFA0_0000), NONE),
+    probe(
+        0x1C9,
+        64,
+        warm_loads_back_to_back,
+        Arg::Imm(0xBFA0_0000),
+        NONE,
+    ),
+    probe(0x1CA, 64, warm_half_loads, Arg::Imm(0xBFA0_0000), NONE),
+    probe(0x1CB, 64, warm_byte_loads, Arg::Imm(0xBFA0_0000), NONE),
+    // M10: divu, multu small, mflo after a gap of 0, 10, 30 and 36 nops
+    // against divu and 36 nops; multu large, mtlo, mflo; multu, mthi, mfhi.
+    probe(0x1D0, 8, m10_divu_multu_gap0, RS_SMALL, DIVISOR),
+    probe(0x1D1, 8, m10_divu_multu_gap10, RS_SMALL, DIVISOR),
+    probe(0x1D2, 8, m10_divu_multu_gap30, RS_SMALL, DIVISOR),
+    probe(0x1D3, 8, m10_divu_multu_gap36, RS_SMALL, DIVISOR),
+    probe(0x1D4, 8, m10_divu_36_nops, RS_SMALL, DIVISOR),
+    probe(0x1D5, 16, m10_multu_mtlo_mflo, RS_LARGE, RT),
+    probe(0x1D6, 16, m10_multu_mthi_mfhi, RS_SMALL, RT),
+    probe(0x1D7, 16, m10_multu_mthi_mfhi, RS_LARGE, RT),
+    probe(0x1D8, 16, m10_multu_mtlo_mflo, RS_SMALL, RT),
 ];
 
 #[derive(Copy, Clone)]
@@ -602,7 +670,6 @@ pub(crate) fn push_extended(records: &mut Records, next: &mut usize) {
 /// sample so the inputs are defined.
 pub(crate) fn push_gte_latency(records: &mut Records, next: &mut usize) {
     push_probes(&GTE_LATENCY, records, next);
-    push_probes(&GTE_SWC2, records, next);
 }
 
 /// The emulator timing audit's list (M1 to M11 bar the polled-timer one).
@@ -627,7 +694,7 @@ pub(crate) fn push_dma_channels(records: &mut Records, next: &mut usize) {
         });
         push_timing_record(records, next, record);
     }
-    // OTC: 2048 words cleared backwards, one RAM write a word.
+    // OTC: 1024 words cleared backwards, one RAM write a word.
     for (id, kick) in [(0x142u16, 0u32), (0x143, OTC_KICK)] {
         let record = sample_timing(id, 64, || {
             with_otc_dma(|base, head| run(base, head, kick, data))
@@ -652,7 +719,7 @@ const OTC_KICK: u32 = psx_hw::dma::CHCR_STEP_BACKWARD
     | psx_hw::dma::CHCR_TRIGGER;
 
 static mut DMA_SOURCE: [u32; 256] = [0; 256];
-const OTC_WORDS: usize = 2048;
+const OTC_WORDS: usize = 1024;
 static mut DMA_OT: [u32; OTC_WORDS] = [0; OTC_WORDS];
 
 /// Set the SPU up for a DMA write of 256 words and run `body(base, source)`,
@@ -1193,51 +1260,143 @@ gte_read_probe!(lat_ncct_mac0, 193, 8, 0x4A08003F, 0x480AC000);
 gte_read_probe!(lat_ncct_mac1, 194, 8, 0x4A08003F, 0x480AC800);
 gte_probe!(lat_ncct_b2b, 195, 8, 0x4A08003F, 0);
 
-// SWC2 straight after a command: a store of a coprocessor register is a read
-// of the result and may interlock like MFC2. swc2 rt,0($8) with $8 = a RAM
-// word: 0xE9190000 MAC1, 0xE9180000 MAC0, 0xE90E0000 SXY2.
-gte_read_probe!(lat_rtps_swc2_mac1, 196, 16, 0x4A080001, 0xE9190000);
-gte_read_probe!(lat_rtps_swc2_sxy2, 197, 16, 0x4A080001, 0xE90E0000);
-gte_read_probe!(lat_nclip_swc2_mac0, 198, 16, 0x4A000006, 0xE9180000);
-gte_read_probe!(lat_sqr_swc2_mac1, 199, 16, 0x4A080028, 0xE9190000);
+// M1 and M2 of the timing audit: copies of the 0x130 shape (RTPS, the read,
+// then 20 nops, sixteen turns). An interlocked read costs 638 clocks a block as
+// 0x130 does, a free one about 400. swc2 $14,0($8): 0xE90E0000; cfc2 $10,$31:
+// 0x484AF800; lwc2 $0,0($8): 0xC9000000.
+rtps_read_probe!(m1_swc2_sxy2_scratchpad, 196, 0, 0xE90E0000);
+rtps_read_probe!(m1_cfc2_flag, 197, 0, 0x484AF800);
+rtps_read_probe!(m1_lwc2_zero_scratchpad, 198, 0, 0xC9000000);
+rtps_read_probe!(m2_swc2_sxy2_ram, 199, 0, 0xE90E0000);
 
-// RTPS then the other read forms: cfc2 $10,FLAG (0x484AF800) and lwc2 IR1,0($8)
-// (0xC9090000, which writes a register while the command may still run).
-gte_read_probe!(lat_rtps_cfc2_flag, 200, 16, 0x4A080001, 0x484AF800);
-gte_read_probe!(lat_rtps_lwc2_ir1, 201, 16, 0x4A080001, 0xC9090000);
+/// `warm_probe!` with the timer chosen by the caller (`$timer` is the low half
+/// of the counter's address: 0x1120 Timer 2, 0x1100 Timer 0, both on the
+/// system clock in mode 0), `$14` and `$15` free to the payload, and an
+/// `$epilogue` after the second pass, outside the timed window.
+macro_rules! warm_probe_ext {
+    ($name:ident, $id:literal, $timer:literal, $payload:expr, $epilogue:expr) => {
+        #[inline(never)]
+        fn $name(a: u32, b: u32) -> u16 {
+            let elapsed: u32;
+            unsafe {
+                core::arch::asm!(
+                    concat!(
+                        ".set noreorder\n",
+                        ".balign 16\n",
+                        ".word 0x34000000 | (", stringify!($id), " << 1)\n",
+                        "lui $11, 0x1F80\n",
+                        "ori $11, $11, ", stringify!($timer), "\n",
+                        "addiu $13, $zero, 2\n",
+                        "2:\n",
+                        "sw $zero, 4($11)\n",
+                        "sw $zero, 0($11)\n",
+                        $payload,
+                        "lw $12, 0($11)\n",
+                        "addiu $13, $13, -1\n",
+                        "bnez $13, 2b\n",
+                        "nop\n",
+                        $epilogue,
+                        ".word 0x34000001 | (", stringify!($id), " << 1)\n",
+                        ".set reorder"
+                    ),
+                    inout("$8") a => _,
+                    inout("$9") b => _,
+                    lateout("$10") _,
+                    lateout("$11") _,
+                    lateout("$12") elapsed,
+                    lateout("$13") _,
+                    lateout("$14") _,
+                    lateout("$15") _,
+                    options(nostack)
+                );
+            }
+            elapsed as u16
+        }
+    };
+}
 
-/// 64 stores or loads (`$payload`) with COP0 Status bit 16, isolate cache,
-/// set: they go to the data cache and never reach RAM. Runs from KSEG1 with
-/// interrupts masked, as the BIOS's own cache flush does. `$isolate` is the
-/// bit (`lui $9, 1`) or zero for the control through the same instructions.
+// M3: Timer 2's own counter read, timed by Timer 0 on the system clock (the
+// other MMIO reads are `warm_loads` on Timer 2).
+warm_probe_ext!(
+    m3_timer2_read_timed_by_timer0,
+    200,
+    0x1100,
+    ".rept 64\nlw $9, 0($8)\nnop\n.endr\n",
+    ""
+);
+
+// M4: scratchpad sub-word accesses, 64 each with a nop after.
+warm_probe!(
+    warm_signed_byte_loads,
+    201,
+    ".rept 64\nlb $9, 0($8)\nnop\n.endr\n"
+);
+warm_probe!(
+    warm_signed_half_loads,
+    202,
+    ".rept 64\nlh $9, 0($8)\nnop\n.endr\n"
+);
+warm_probe!(
+    warm_byte_stores_nop,
+    203,
+    ".rept 64\nsb $zero, 0($8)\nnop\n.endr\n"
+);
+warm_probe!(
+    warm_half_stores_nop,
+    204,
+    ".rept 64\nsh $zero, 0($8)\nnop\n.endr\n"
+);
+
+// M5: 64 sw and 64 lw run through KSEG1 with COP0 Status bit 16 (IsC) clear
+// against the scratchpad (the control), set, and set with the cache-control
+// TAG bit (bit 2) as well. The Status read-modify-write is in all of them, so
+// only the bit differs. The epilogue is the BIOS's own flush (IsC, TAG, a zero
+// word to all 256 lines) so the I-cache comes back with no valid line.
 macro_rules! isolate_probe {
-    ($name:ident, $id:literal, $isolate:literal, $access:literal) => {
-        warm_probe!(
+    ($name:ident, $id:literal, $enter:literal, $access:literal, $leave:literal) => {
+        warm_probe_ext!(
             $name,
             $id,
-            concat!(
-                "mfc0 $10, $12\nnop\n",
-                $isolate,
-                "or $9, $9, $10\nmtc0 $9, $12\nnop\nnop\n",
-                ".rept 64\n",
-                $access,
-                "\n.endr\n",
-                "mtc0 $10, $12\nnop\nnop\n"
-            )
+            0x1120,
+            concat!($enter, ".rept 64\n", $access, "\n.endr\n", $leave),
+            "lui $15, 0xFFFE\nori $15, $15, 0x0130\nlw $14, 0($15)\nnop\nori $9, $14, 4\nsw $9, 0($15)\nmfc0 $10, $12\nnop\nlui $9, 1\nor $9, $9, $10\nmtc0 $9, $12\nnop\nnop\nmove $9, $zero\n.rept 256\nsw $zero, 0($9)\naddiu $9, $9, 16\n.endr\nmtc0 $10, $12\nnop\nnop\nsw $14, 0($15)\n"
         );
     };
 }
-isolate_probe!(isolate_stores, 202, "lui $9, 1\n", "sw $zero, 0($8)");
 isolate_probe!(
-    isolate_control_stores,
-    203,
-    "move $9, $zero\n",
-    "sw $zero, 0($8)"
+    isolate_control_sw,
+    205,
+    "mfc0 $10, $12\nnop\nmove $9, $10\nmtc0 $9, $12\nnop\nnop\n",
+    "sw $zero, 0($8)",
+    "mtc0 $10, $12\nnop\nnop\n"
 );
-isolate_probe!(isolate_loads, 204, "lui $9, 1\n", "lw $9, 0($8)\nnop");
+isolate_probe!(
+    isolate_control_lw,
+    206,
+    "mfc0 $10, $12\nnop\nmove $9, $10\nmtc0 $9, $12\nnop\nnop\n",
+    "lw $9, 0($8)\nnop",
+    "mtc0 $10, $12\nnop\nnop\n"
+);
+isolate_probe!(
+    isolate_data_sw,
+    207,
+    "mfc0 $10, $12\nnop\nlui $9, 1\nor $9, $9, $10\nmtc0 $9, $12\nnop\nnop\n",
+    "sw $zero, 0($8)",
+    "mtc0 $10, $12\nnop\nnop\n"
+);
+isolate_probe!(
+    isolate_data_lw,
+    208,
+    "mfc0 $10, $12\nnop\nlui $9, 1\nor $9, $9, $10\nmtc0 $9, $12\nnop\nnop\n",
+    "lw $9, 0($8)\nnop",
+    "mtc0 $10, $12\nnop\nnop\n"
+);
+isolate_probe!(isolate_tag_sw, 209, "lui $15, 0xFFFE\nori $15, $15, 0x0130\nlw $14, 0($15)\nnop\nori $9, $14, 4\nsw $9, 0($15)\nmfc0 $10, $12\nnop\nlui $9, 1\nor $9, $9, $10\nmtc0 $9, $12\nnop\nnop\n", "sw $zero, 0($8)", "mtc0 $10, $12\nnop\nnop\nsw $14, 0($15)\n");
+isolate_probe!(isolate_tag_lw, 210, "lui $15, 0xFFFE\nori $15, $15, 0x0130\nlw $14, 0($15)\nnop\nori $9, $14, 4\nsw $9, 0($15)\nmfc0 $10, $12\nnop\nlui $9, 1\nor $9, $9, $10\nmtc0 $9, $12\nnop\nnop\n", "lw $9, 0($8)\nnop", "mtc0 $10, $12\nnop\nnop\nsw $14, 0($15)\n");
 
-/// One pass, cold: the caller flushes the I-cache first, so the block's own
-/// lines are refills and the access in `$payload` follows them.
+/// One pass, the I-cache evicted first by the 4 KiB block `0x1C` uses (`b` is
+/// its address; it returns through `$10`), so the lines of the code that
+/// follows are refills. M7.
 macro_rules! cold_probe {
     ($name:ident, $id:literal, $payload:expr) => {
         #[inline(never)]
@@ -1249,6 +1408,8 @@ macro_rules! cold_probe {
                         ".set noreorder\n",
                         ".balign 16\n",
                         ".word 0x34000000 | (", stringify!($id), " << 1)\n",
+                        "jalr $10, $9\n",
+                        "nop\n",
                         "lui $11, 0x1F80\n",
                         "ori $11, $11, 0x1120\n",
                         "sw $zero, 4($11)\n",
@@ -1270,37 +1431,51 @@ macro_rules! cold_probe {
         }
     };
 }
-cold_probe!(cold_nops, 205, ".rept 8\nnop\n.endr\n");
-cold_probe!(cold_store, 206, "sw $zero, 0($8)\n.rept 7\nnop\n.endr\n");
-cold_probe!(cold_load, 207, "lw $9, 0($8)\nnop\n.rept 6\nnop\n.endr\n");
+cold_probe!(m7_sw_ram, 211, ".rept 64\nsw $zero, 0($8)\n.endr\n");
+cold_probe!(m7_sw_scratchpad, 212, ".rept 64\nsw $zero, 0($8)\n.endr\n");
 cold_probe!(
-    cold_mmio_load,
-    208,
-    "lw $9, 0($8)\nnop\n.rept 6\nnop\n.endr\n"
+    m7_gpustat_pairs,
+    213,
+    ".rept 32\nlw $9, 0($8)\nnop\n.endr\n"
 );
+cold_probe!(m7_ram_pairs, 214, ".rept 32\nlw $9, 0($8)\nnop\n.endr\n");
+cold_probe!(m7_nops, 215, ".rept 64\nnop\n.endr\n");
 
-// Multiply and divide sharing the one unit: each pair back to back, then the
-// read. 0x01090019 multu $8,$9; 0x0109001B divu $8,$9; 0x00005012 mflo $10;
-// 0x00005010 mfhi $10; 0x01000013 mtlo $8.
+// M10: the multiply/divide unit. (a) divu, multu small, a gap, mflo, against
+// divu and 36 nops; (b) multu large, mtlo, mflo; (c) multu, mthi, mfhi.
+// 0x0109001B divu $8,$9; 0x01090019 multu $8,$9; 0x00005012 mflo $10;
+// 0x00005010 mfhi $10; 0x01000013 mtlo $8; 0x01000011 mthi $8.
+macro_rules! divmul_gap_probe {
+    ($name:ident, $id:literal, $gap:literal) => {
+        warm_probe!(
+            $name,
+            $id,
+            concat!(
+                ".rept 8\n.word 0x0109001B\n.word 0x01090019\n.rept ",
+                stringify!($gap),
+                "\nnop\n.endr\n.word 0x00005012\n.endr\n.rept 48\nnop\n.endr\n"
+            )
+        );
+    };
+}
+divmul_gap_probe!(m10_divu_multu_gap0, 216, 0);
+divmul_gap_probe!(m10_divu_multu_gap10, 217, 10);
+divmul_gap_probe!(m10_divu_multu_gap30, 218, 30);
+divmul_gap_probe!(m10_divu_multu_gap36, 219, 36);
 warm_probe!(
-    muldiv_mult_then_div,
-    209,
-    ".rept 8\n.word 0x01090019\n.word 0x0109001B\n.word 0x00005012\n.endr\n.rept 40\nnop\n.endr\n"
+    m10_divu_36_nops,
+    220,
+    ".rept 8\n.word 0x0109001B\n.rept 36\nnop\n.endr\n.endr\n.rept 48\nnop\n.endr\n"
 );
 warm_probe!(
-    muldiv_div_then_mult,
-    210,
-    ".rept 8\n.word 0x0109001B\n.word 0x01090019\n.word 0x00005012\n.endr\n.rept 40\nnop\n.endr\n"
+    m10_multu_mtlo_mflo,
+    221,
+    ".rept 16\n.word 0x01090019\n.word 0x01000013\n.word 0x00005012\n.endr\n.rept 48\nnop\n.endr\n"
 );
 warm_probe!(
-    muldiv_mult_then_mfhi,
-    211,
-    ".rept 16\n.word 0x01090019\n.word 0x00005010\n.endr\n.rept 40\nnop\n.endr\n"
-);
-warm_probe!(
-    muldiv_mtlo_during_mult,
-    212,
-    ".rept 16\n.word 0x01090019\n.word 0x01000013\n.word 0x00005012\n.endr\n.rept 40\nnop\n.endr\n"
+    m10_multu_mthi_mfhi,
+    222,
+    ".rept 16\n.word 0x01090019\n.word 0x01000011\n.word 0x00005010\n.endr\n.rept 48\nnop\n.endr\n"
 );
 
 /// The cached twin of `warm_call_pairs`. It lives in the I-cache entry section
@@ -1401,14 +1576,26 @@ fn push_dma(records: &mut Records, next: &mut usize) {
     // Then the same with 64 RAM loads in place of the nops: psx-spx says the
     // CPU runs during DMA only until it needs the bus.
     type Overlap = fn(u32, u32, u32, u32) -> u16;
-    let data = Arg::RamWord.resolve();
-    let cases: [(u16, u16, Overlap, u32); 4] = [
-        (0x35, 128, timed_nops_with_dma, 0),
-        (0x36, 128, timed_nops_with_dma, LIST_KICK),
-        (0x9F, 64, timed_loads_with_dma, 0),
-        (0xFE, 64, timed_loads_with_dma, LIST_KICK),
+    let ram = Arg::RamWord.resolve();
+    let scratchpad = SCRATCHPAD;
+    // (id, loop length, loop, CHCR, data address). The idle rows have CHCR 0.
+    // M6's GPU walk rows: 64 sw back to back, 64 sw + 3 nops, 64 lw + 3 nops,
+    // 64 scratchpad lw + nop, against the 0xFE control (64 lw + nop).
+    let cases: [(u16, u16, Overlap, u32, u32); 12] = [
+        (0x35, 128, timed_nops_with_dma, 0, ram),
+        (0x36, 128, timed_nops_with_dma, LIST_KICK, ram),
+        (0x9F, 64, timed_loads_with_dma, 0, ram),
+        (0xFE, 64, timed_loads_with_dma, LIST_KICK, ram),
+        (0x1E0, 64, timed_sw_with_dma, 0, ram),
+        (0x1E1, 64, timed_sw_with_dma, LIST_KICK, ram),
+        (0x1E2, 64, timed_sw_3nops_with_dma, 0, ram),
+        (0x1E3, 64, timed_sw_3nops_with_dma, LIST_KICK, ram),
+        (0x1E4, 64, timed_lw_3nops_with_dma, 0, ram),
+        (0x1E5, 64, timed_lw_3nops_with_dma, LIST_KICK, ram),
+        (0x1E6, 64, timed_loads_with_dma, 0, scratchpad),
+        (0x1E7, 64, timed_loads_with_dma, LIST_KICK, scratchpad),
     ];
-    for (id, work, run, chcr) in cases {
+    for (id, work, run, chcr, data) in cases {
         // 512 rather than 1024: if the CPU does wait for the walk, the whole
         // walk lands in a 16-bit counter.
         let head = build_empty_list(512);
@@ -1492,6 +1679,26 @@ dma_overlap_probe!(
     ".word 0x340000B8", // probe 92 start marker
     ".word 0x340000B9", // probe 92 end marker
     ".rept 64\nlw $10, 0($24)\nnop\n.endr"
+);
+
+// M6's other loop shapes.
+dma_overlap_probe!(
+    timed_sw_with_dma,
+    ".word 0x340001BE", // probe 223 start marker
+    ".word 0x340001BF", // probe 223 end marker
+    ".rept 64\nsw $zero, 0($24)\n.endr"
+);
+dma_overlap_probe!(
+    timed_sw_3nops_with_dma,
+    ".word 0x340001C0", // probe 224 start marker
+    ".word 0x340001C1", // probe 224 end marker
+    ".rept 64\nsw $zero, 0($24)\nnop\nnop\nnop\n.endr"
+);
+dma_overlap_probe!(
+    timed_lw_3nops_with_dma,
+    ".word 0x340001C2", // probe 225 start marker
+    ".word 0x340001C3", // probe 225 end marker
+    ".rept 64\nlw $10, 0($24)\nnop\nnop\nnop\n.endr"
 );
 
 /// Time one call to `target` with `mask` XORed into `register`, then put the

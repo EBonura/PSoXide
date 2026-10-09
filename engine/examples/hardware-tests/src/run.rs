@@ -559,8 +559,10 @@ records_step!(records_risky_ab, perf_probes::push_risky);
 records_step!(records_gte_latency, perf_probes::push_gte_latency);
 records_step!(records_dma_channels, perf_probes::push_dma_channels);
 records_step!(records_audit, perf_probes::push_audit);
+records_step!(records_cd_dma, dma_matrix::cd);
+records_step!(records_mdec_dma, dma_matrix::mdec);
 records_step!(records_timer1_rate, timer1_rate::run);
-records_step!(records_tick_loss, timer1_rate::tick_loss);
+records_step!(records_tick_loss, tick_loss::run);
 records_step!(records_sio_setup, sio_timing::setup_sweep);
 records_step!(records_sio_pad, sio_timing::pad_timing);
 records_step!(records_sio_card, sio_timing::card_timing);
@@ -756,8 +758,10 @@ const STEPS: &[Step] = &[
         records_perf_extended,
     ),
     step(Area::Perf, "DMA VERSUS CPU LOADS", records_dma_channels),
+    step(Area::Perf, "MDEC DMA VERSUS CPU", records_mdec_dma),
     step(Area::Perf, "AUDIT PROBES", records_audit),
     // 9: last, hardest on the machine
+    step(Area::Drive, "CD DMA VERSUS CPU", records_cd_dma),
     step(Area::Drive, "CD MOTOR", step_stream_motor),
     risky(Area::Drive, "REGISTER A/B (CAN HANG)", records_risky_ab),
 ];

@@ -53,6 +53,7 @@ mod console_tests;
 mod controller_test;
 mod cpu_tests;
 mod display_widths;
+mod dma_matrix;
 mod gpu_probes;
 mod handoff_probe;
 mod kernel_timing;
@@ -72,6 +73,7 @@ mod sample_probe;
 mod scene;
 mod sio_timing;
 mod spu_probe;
+mod tick_loss;
 mod timer1_rate;
 mod ui;
 mod xa_loop;
@@ -399,7 +401,7 @@ struct ScanReport {
 }
 
 /// Slots in the timing report. `run::tests` asserts the largest run fits.
-const TIMING_RECORD_COUNT: usize = 640;
+const TIMING_RECORD_COUNT: usize = 800;
 const MEMORY_CONTROL_REGISTER_COUNT: usize = MEMORY_CONTROL_REGISTERS.len();
 /// Captured with the timing block, in this order (the host names them by
 /// position). The first nine are the bus configuration the BIOS left.

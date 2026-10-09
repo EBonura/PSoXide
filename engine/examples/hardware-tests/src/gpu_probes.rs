@@ -173,6 +173,104 @@ pub(crate) fn push(records: &mut [TimingRecord; TIMING_RECORD_COUNT], next: &mut
         let record = sample_timing(entry.id, entry.count, || run(&entry));
         push_timing_record(records, next, record);
     }
+    push_texture_state(records, next);
+}
+
+/// M9 of the timing audit: what the texture state costs. A list of sixteen
+/// textured triangles at 8x8, 16x32 and 32x32, at 4, 8 and 15 bits a texel,
+/// each (a) with one page and one CLUT throughout, (b) alternating between two
+/// texture pages, (c) alternating between two CLUTs, (d) on one page but with
+/// the UV window moving. Clocks for the whole list (work 16: clocks per
+/// triangle is the record over 16). Anchors: `10C` (page alternation, 16x32
+/// 4bpp) and `10B` (CLUT alternation on rects). Ids from `0x200`, in the order
+/// size, depth, state; 15bpp has no CLUT, so its CLUT row is a repeat.
+const TEXTURE_STATE_FIRST: u16 = 0x200;
+const TEXTURE_SIZES: [(u32, u32); 3] = [(8, 8), (16, 32), (32, 32)];
+const TEXTURE_DEPTHS: [u32; 3] = [DEPTH_4BPP, DEPTH_8BPP, 2 << 7];
+
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum TextureState {
+    Same,
+    AlternatePage,
+    AlternateClut,
+    MovingWindow,
+}
+
+fn texture_state_list(width: u32, height: u32, depth: u32, state: TextureState) -> u32 {
+    let list = (&raw mut LIST) as *mut u32;
+    let mut at = 0usize;
+    let mut emit = |words: &[u32], last: bool| {
+        // SAFETY: the list holds MAX_PRIMS packets of up to nine words.
+        unsafe {
+            let next = if last {
+                0x00FF_FFFF
+            } else {
+                list.add(at + 1 + words.len()) as u32 & 0x00FF_FFFF
+            };
+            core::ptr::write_volatile(list.add(at), ((words.len() as u32) << 24) | next);
+            for (offset, word) in words.iter().enumerate() {
+                core::ptr::write_volatile(list.add(at + 1 + offset), *word);
+            }
+        }
+        at += 1 + words.len();
+    };
+    let xy = |x: u32, y: u32| (y << 16) | x;
+    for index in 0..16u32 {
+        let (x, y) = (DRAW_X, DRAW_Y + (index & 7));
+        let odd = index & 1 == 1;
+        let page = if state == TextureState::AlternatePage && odd {
+            TEX_PAGE_B
+        } else {
+            TEX_PAGE_A
+        };
+        let clut = if state == TextureState::AlternateClut && odd {
+            CLUT_B
+        } else {
+            CLUT_A
+        };
+        let (u0, v0) = if state == TextureState::MovingWindow {
+            ((index & 3) * 8, ((index >> 2) & 1) * 8)
+        } else {
+            (0, 0)
+        };
+        emit(
+            &[
+                0x2480_8080,
+                xy(x, y),
+                (clut << 16) | (v0 << 8) | u0,
+                xy(x + width, y),
+                ((page | depth) << 16) | (v0 << 8) | (u0 + width),
+                xy(x, y + height),
+                ((v0 + height) << 8) | u0,
+            ],
+            false,
+        );
+    }
+    emit(&[0x1F00_0000], true);
+    list as u32
+}
+
+fn push_texture_state(records: &mut [TimingRecord; TIMING_RECORD_COUNT], next: &mut usize) {
+    let environment = case(0, 16, 32, Shape::TexTri);
+    let mut id = TEXTURE_STATE_FIRST;
+    for (width, height) in TEXTURE_SIZES {
+        for depth in TEXTURE_DEPTHS {
+            for state in [
+                TextureState::Same,
+                TextureState::AlternatePage,
+                TextureState::AlternateClut,
+                TextureState::MovingWindow,
+            ] {
+                let record = sample_timing(id, 16, || {
+                    let head = texture_state_list(width, height, depth, state);
+                    set_environment(&environment);
+                    submit_and_time(head)
+                });
+                push_timing_record(records, next, record);
+                id += 1;
+            }
+        }
+    }
 }
 
 /// A 64x64 image with no zero texel in either depth, and two CLUT rows with

@@ -1117,6 +1117,10 @@ pub(crate) struct Activity {
     /// Poll the pad with the synchronous driver between rounds. Off when the
     /// interrupt engine owns the port.
     poll_pad: bool,
+    /// Which parts of the background run: the GPU list walk, the SPU upload,
+    /// the CD sector stream.
+    gpu_on: bool,
+    cd_started: bool,
     head: u32,
     old_direction: u32,
     spu_enabled: bool,
@@ -1127,21 +1131,46 @@ pub(crate) struct Activity {
     spu_kicks: u32,
     cd_sectors: u32,
     pad_polls: u32,
+    diag: ServiceDiag,
+}
+
+/// What `service_timed` saw of the load generator itself, so a console run can
+/// tell a generator that holds interrupts off from an engine that is wrong.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct ServiceDiag {
+    /// Calls made.
+    pub(crate) calls: u32,
+    /// The longest call, in system-clock cycles (Timer 2).
+    pub(crate) longest: u32,
+    /// Calls longer than a pad byte on the wire plus margin (1,100 cycles).
+    pub(crate) over_byte: u32,
+    /// Calls that began with CPU interrupts disabled (COP0 Status bit 0).
+    pub(crate) entered_ie_clear: u32,
+    /// Calls that began with the SIO or root counter 0 interrupt pending in
+    /// I_STAT while interrupts were enabled and unmasked: a source nobody
+    /// serviced in a call's worth of time.
+    pub(crate) entered_pending: u32,
 }
 
 static mut CD_SINK: [u32; SECTOR_WORDS] = [0; SECTOR_WORDS];
 
 impl Activity {
     fn start() -> Self {
-        Self::start_with(true)
+        Self::start_with(true, true, true, true)
     }
 
     /// The same load without touching the controller port.
     pub(crate) fn start_without_pad() -> Self {
-        Self::start_with(false)
+        Self::start_with(false, true, true, true)
     }
 
-    fn start_with(poll_pad: bool) -> Self {
+    /// Only the chosen parts of the background, none of them touching the
+    /// controller port.
+    pub(crate) fn start_parts(gpu: bool, spu: bool, cd: bool) -> Self {
+        Self::start_with(false, gpu, spu, cd)
+    }
+
+    fn start_with(poll_pad: bool, gpu: bool, spu: bool, cd: bool) -> Self {
         let head = build_list();
         let old_direction = (gpu_io::status().bits() >> 29) & 3;
         if !dma::wait_done(dma::Channel::Gpu, dma::DEFAULT_SPINS) {
@@ -1151,15 +1180,18 @@ impl Activity {
         dma::enable_channel(dma::Channel::Gpu);
         dma::enable_channel(dma::Channel::Spu);
         let spucnt = unsafe { psx_io::read_u16(SPUCNT) } & !0x0030;
-        let spu_enabled = spucnt & 0x8000 != 0;
+        let spu_enabled = spu && spucnt & 0x8000 != 0;
         // The SDK's reader, as games use it: PIO pops of a ReadN stream.
         // Channel 3 is deliberately not used: on the project console chopping
         // CD DMA can latch busy for good, which would take the timing scan's
         // CD records with it, and no DMA channel can address the scratchpad.
         let mut reader = SectorReader::new();
-        let cd_streaming = reader.prepare() && reader.start_read(CDTEST_LBA);
+        let cd_streaming = cd && reader.prepare() && reader.start_read(CDTEST_LBA);
+        psx_io::timers::set_mode(psx_io::timers::Timer::Timer2, 0);
         Self {
             poll_pad,
+            gpu_on: gpu,
+            cd_started: cd,
             head,
             old_direction,
             spu_enabled,
@@ -1170,12 +1202,42 @@ impl Activity {
             spu_kicks: 0,
             cd_sectors: 0,
             pad_polls: 0,
+            diag: ServiceDiag::default(),
         }
+    }
+
+    /// [`service`](Self::service), timed on Timer 2, with what the call found
+    /// when it began: whether interrupts were enabled and whether a pad or
+    /// engine-timer interrupt was already waiting.
+    pub(crate) fn service_timed(&mut self) {
+        let status: u32;
+        // SAFETY: a read of COP0 Status.
+        unsafe { core::arch::asm!("mfc0 $8, $12", "nop", lateout("$8") status) };
+        // SAFETY: a read of I_STAT.
+        let pending = unsafe { psx_io::read_u32(0x1F80_1070) };
+        if status & 1 == 0 {
+            self.diag.entered_ie_clear += 1;
+        } else if pending & ((1 << 7) | (1 << 4)) != 0 {
+            self.diag.entered_pending += 1;
+        }
+        let start = psx_io::timers::counter(psx_io::timers::Timer::Timer2);
+        self.service();
+        let took =
+            psx_io::timers::counter(psx_io::timers::Timer::Timer2).wrapping_sub(start) as u32;
+        self.diag.calls += 1;
+        self.diag.longest = self.diag.longest.max(took);
+        if took > 1_100 {
+            self.diag.over_byte += 1;
+        }
+    }
+
+    pub(crate) fn diag(&self) -> ServiceDiag {
+        self.diag
     }
 
     /// Between rounds, on the RAM stack: re-arm whatever has finished.
     pub(crate) fn service(&mut self) {
-        if !dma::is_busy(dma::Channel::Gpu) {
+        if self.gpu_on && !dma::is_busy(dma::Channel::Gpu) {
             kick_list(self.head);
             self.gpu_kicks += 1;
         }
@@ -1231,7 +1293,9 @@ impl Activity {
             let _ = spu_mode(self.spucnt);
         }
         gpu_io::write_display_control(0x0400_0000 | self.old_direction);
-        self.reader.stop();
+        if self.cd_started {
+            self.reader.stop();
+        }
         self.cd_streaming = false;
         self
     }

@@ -57,12 +57,14 @@ const CARD_OPS_RECORD: u16 = 0x691;
 const CARD_WAIT_RECORD: u16 = 0x692;
 /// rec engine_card_frame: card_frame_hblanks_min, card_frame_hblanks_med, card_frame_hblanks_max (0x693)
 const CARD_FRAME_RECORD: u16 = 0x693;
-/// rec engine_load_work: rounds_avg, rounds_min, rounds_max (a frame's loop rounds with the load running, engine with no ports 0x6A0, with both 0x6A4)
-const LOAD_WORK_RECORD: u16 = 0x6A0;
-/// rec engine_load_health: pad_faults, stalls, spurious (0x6A1, 0x6A5)
-const LOAD_HEALTH_RECORD: u16 = 0x6A1;
-/// rec engine_load_stack: handler_stack_unused_bytes, events, kicks (0x6A2, 0x6A6)
-const LOAD_STACK_RECORD: u16 = 0x6A2;
+/// rec engine_load_work: rounds_avg, rounds_min, rounds_max (a frame's loop rounds, six phases of four records from 0x720: no ports with all load, both ports alone, with GPU, with SPU, with CD, with all three)
+const LOAD_WORK_RECORD: u16 = 0x720;
+/// rec engine_load_health: pad_faults, stalls, spurious (0x721 and every fourth after)
+const LOAD_HEALTH_RECORD: u16 = 0x721;
+/// rec engine_load_stack: handler_stack_unused_bytes, events, kicks (0x722 and every fourth after)
+const LOAD_STACK_RECORD: u16 = 0x722;
+/// rec engine_load_irq: longest_load_call_cycles, load_calls_over_a_byte, entered_ie_clear_and_pending (0x723 and every fourth after)
+const LOAD_IRQ_RECORD: u16 = 0x723;
 
 const NONE: u32 = 0xFFFF;
 /// Give a frame up after this many loop rounds if no VBlank arrives.
@@ -464,8 +466,17 @@ pub(crate) fn card_lease(records: &mut Records, next: &mut usize) {
 
 // ------------------------------------------------------------ under load
 
+/// The engine with parts of the background a game has going. Phase 0 is the
+/// engine with no ports polled and the whole load (the control: its entry
+/// alone); phase 1 both ports with no load; phases 2 to 4 add the GPU list
+/// walk, the SPU upload and the CD sector stream one at a time; phase 5 all
+/// three. The load runs in the foreground with interrupts enabled; each
+/// call is timed and the records say whether any call was long enough to
+/// hold off a pad byte, or began with interrupts disabled or a pad interrupt
+/// left waiting, which is how a console run can tell the generator from the
+/// engine.
 pub(crate) fn under_load(records: &mut Records, next: &mut usize) {
-    for phase in 0..2u16 {
+    for phase in 0..6u16 {
         let config = if phase == 0 {
             Config {
                 ports: [false, false],
@@ -480,20 +491,37 @@ pub(crate) fn under_load(records: &mut Records, next: &mut usize) {
             refused(records, next, LOAD_WORK_RECORD + base);
             continue;
         }
-        let mut load = Activity::start_without_pad();
-        let _ = spin_frame(|| load.service());
+        let mut load = match phase {
+            0 | 5 => Some(Activity::start_without_pad()),
+            1 => None,
+            2 => Some(Activity::start_parts(true, false, false)),
+            3 => Some(Activity::start_parts(false, true, false)),
+            _ => Some(Activity::start_parts(false, false, true)),
+        };
+        let _ = spin_frame(|| {
+            if let Some(load) = load.as_mut() {
+                load.service_timed();
+            }
+        });
         let before = console::snapshot();
         let stats_before = console::stats();
         let (mut total, mut least, mut most) = (0u32, u32::MAX, 0u32);
         for _ in 0..LOAD_FRAMES {
-            let rounds = spin_frame(|| load.service());
+            let rounds = spin_frame(|| {
+                if let Some(load) = load.as_mut() {
+                    load.service_timed();
+                }
+            });
             total += rounds;
             least = least.min(rounds);
             most = most.max(rounds);
         }
         let after = console::snapshot();
         let stats = console::stats();
-        let _ = load.stop();
+        let diag = load.as_ref().map(|load| load.diag()).unwrap_or_default();
+        if let Some(load) = load.take() {
+            let _ = load.stop();
+        }
         push(
             records,
             next,
@@ -520,6 +548,16 @@ pub(crate) fn under_load(records: &mut Records, next: &mut usize) {
                 console::handler_stack_unused_bytes() as u32,
                 stats.events.wrapping_sub(stats_before.events),
                 stats.kicks.wrapping_sub(stats_before.kicks),
+            ),
+        );
+        push(
+            records,
+            next,
+            record(
+                LOAD_IRQ_RECORD + base,
+                diag.longest,
+                diag.over_byte,
+                (diag.entered_ie_clear.min(255) << 8) | diag.entered_pending.min(255),
             ),
         );
     }
