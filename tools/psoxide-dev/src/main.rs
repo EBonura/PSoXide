@@ -5,6 +5,8 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+mod web_dist;
+
 const ONE_VBLANK_CYCLES: u64 = 564_480;
 const CPU_HZ: f64 = 33_868_800.0;
 
@@ -30,6 +32,7 @@ fn run() -> Result<(), String> {
         "vblank-chart" => vblank_chart(&args),
         "gen-tones" => gen_tones(),
         "gen-fonts" => gen_fonts(),
+        "verify-web-dist" => web_dist::run(&args),
         "-h" | "--help" | "help" => Err(help()),
         other => Err(format!(
             "unknown psoxide-dev command `{other}`\n\n{}",
@@ -48,7 +51,8 @@ fn help() -> String {
        cortex-stream-guard [--profile profile.csv] [--cdda-log cdda.log]\n\
        vblank-chart --in <profile.csv> --out <chart.html> [--title TITLE]\n\
        gen-tones\n\
-       gen-fonts"
+       gen-fonts\n\
+       verify-web-dist <dist> [--public-disc]"
         .to_string()
 }
 
