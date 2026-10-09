@@ -233,6 +233,39 @@ fn main() {
     let chained = console::snapshot().port(Port::One).updates - before;
     line("updates_after_cdstream_install", chained);
 
+    // psx-cdstream reading while the engine polls both ports: the stream and
+    // the pad share the interrupt chain, and neither may lose the other's
+    // interrupts. Needs feature `cd-stream` and a disc.
+    #[cfg(feature = "cd-stream")]
+    let stream_ok = {
+        use psx_cdstream::{Outcome, Request, RequestState};
+        static mut SECTORS: [u32; 2048 / 4 * 64] = [0; 2048 / 4 * 64];
+        let before = console::stats();
+        let faults_before = console::snapshot().port(Port::One).faults;
+        // SAFETY: a static buffer of 64 sectors nothing else touches until
+        // the request has finished.
+        let request = unsafe { Request::new_raw(100, 64, core::ptr::addr_of_mut!(SECTORS).cast()) };
+        let mut done = false;
+        let mut sectors = 0;
+        if let Ok(ticket) = psx_cdstream::submit(request) {
+            for _ in 0..240 {
+                spin_to_next_vblank();
+                psx_cdstream::service();
+                if let RequestState::Finished(c) = psx_cdstream::state(ticket) {
+                    done = c.outcome == Outcome::Done;
+                    sectors = c.received;
+                    break;
+                }
+            }
+        }
+        line("stream_sectors", sectors);
+        line("stream_pad_faults", console::snapshot().port(Port::One).faults - faults_before);
+        line("stream_pad_stalls", console::stats().stalls - before.stalls);
+        done && sectors == 64
+    };
+    #[cfg(not(feature = "cd-stream"))]
+    let stream_ok = true;
+
     let stats = console::stats();
     line("events", stats.events);
     line("kicks", stats.kicks);
@@ -282,6 +315,7 @@ fn main() {
         check(cd_stalls == 0 && cd_faults == 0, "the engine stalls or faults during a polled CD read");
         check(cd_updates >= 45, "the pad is still read during a polled CD read");
     }
+    check(stream_ok, "psx-cdstream reads 64 sectors while the engine polls");
     check(handed_back, "uninstall hands the port back");
     check(reinstalled >= 15, "install works again after uninstall");
     check(chained >= 25, "the pad is still read after psx-cdstream installs its wrapper");
