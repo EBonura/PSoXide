@@ -454,6 +454,9 @@ pub fn build_package(
     project: &ProjectDocument,
     project_root: &Path,
 ) -> (Option<PlaytestPackage>, PlaytestValidationReport) {
+    // The streamed world cook (PSXED_STREAM_WORLD) partitions the authored
+    // document itself and scales its own clone.
+    let authored_project = project;
     // BSP projects cook at engine (Quake) scale: divide every authored
     // length by WORLD_UNIT_DIVISOR on an in-memory clone. Authored
     // files and the editor's preview stay at the historical scale.
@@ -623,29 +626,43 @@ pub fn build_package(
             return (None, report);
         }
     };
-    let compiled = match crate::brush_world::compile_brush_world(
-        project,
-        crate::brush_world::BrushWorldCookOptions {
-            project_root,
-            mode: project.bsp_cook_mode,
-            ambient: [32; 3],
-            texture_asset_base,
-            collision_hulls: if project.collision_hull_bsp {
-                crate::brush_collision_hulls::CollisionHullStrategy::HullBsp
-            } else {
-                crate::brush_collision_hulls::CollisionHullStrategy::SpatialChains
-            },
+    let world_options = crate::brush_world::BrushWorldCookOptions {
+        project_root,
+        mode: project.bsp_cook_mode,
+        ambient: [32; 3],
+        texture_asset_base,
+        collision_hulls: if project.collision_hull_bsp {
+            crate::brush_collision_hulls::CollisionHullStrategy::HullBsp
+        } else {
+            crate::brush_collision_hulls::CollisionHullStrategy::SpatialChains
         },
-    ) {
-        Ok(compiled) => compiled,
-        Err(error) => {
-            report.error_maybe_at(
-                brush_world_validation_target(&error),
-                format!("brush world compile failed: {error}"),
-            );
-            return (None, report);
-        }
     };
+    let stream_mode = crate::brush_world::stream_cook::StreamWorldMode::from_env();
+    let (compiled, streamed_parts) =
+        if stream_mode == crate::brush_world::stream_cook::StreamWorldMode::Off {
+            match crate::brush_world::compile_brush_world(project, world_options) {
+                Ok(compiled) => (compiled, None),
+                Err(error) => {
+                    report.error_maybe_at(
+                        brush_world_validation_target(&error),
+                        format!("brush world compile failed: {error}"),
+                    );
+                    return (None, report);
+                }
+            }
+        } else {
+            match crate::brush_world::stream_cook::cook_playtest_world(
+                authored_project,
+                world_options,
+                stream_mode,
+            ) {
+                Ok(cooked) => cooked,
+                Err(error) => {
+                    report.error(format!("streamed brush world compile failed: {error}"));
+                    return (None, report);
+                }
+            }
+        };
     for texture in &compiled.textures {
         let expected = assets.len();
         if usize::from(texture.asset_id) != expected {
@@ -731,6 +748,11 @@ pub fn build_package(
             })
             .collect(),
         leak_path: authored_leak_path,
+        stream: streamed_parts.map(|parts| PlaytestStreamedWorld {
+            container: parts.container,
+            region_pack: parts.region_pack,
+            regions: parts.regions,
+        }),
     };
 
     if rooms.is_empty() {

@@ -1445,7 +1445,27 @@ fn compile_model_topology(
     Vec<CompiledPortal>,
     BrushWorldLeakDiagnostic,
 ) {
-    let mut bsp = build_surface_bsp(topology_surfaces);
+    compile_model_topology_from_bsp(
+        build_surface_bsp(topology_surfaces),
+        brushes,
+        occupant_points,
+        log_result,
+    )
+}
+
+/// The portal, classification and outside-fill half of
+/// [`compile_model_topology`], for a surface BSP the caller already built (the
+/// streamed cook builds one BSP per cell under forced cut planes).
+fn compile_model_topology_from_bsp(
+    mut bsp: CompiledSurfaceBsp,
+    brushes: &[Brush],
+    occupant_points: &[[f64; 3]],
+    log_result: bool,
+) -> (
+    CompiledSurfaceBsp,
+    Vec<CompiledPortal>,
+    BrushWorldLeakDiagnostic,
+) {
     let portals = portalize_surface_bsp(&bsp);
     classify_bsp_leaves(&mut bsp, &portals, brushes);
     let mut leak_diagnostic = BrushWorldLeakDiagnostic::default();
@@ -2102,6 +2122,20 @@ fn page_local_texture_dims(
     source_dims: &std::collections::HashMap<Option<ResourceId>, [u16; 2]>,
     project_root: &Path,
 ) -> std::collections::HashMap<Option<ResourceId>, [u16; 2]> {
+    let mut geometries = vec![world];
+    geometries.extend(submodels.iter().map(|submodel| &submodel.geometry));
+    page_local_texture_dims_for(project, slots, &geometries, source_dims, project_root)
+}
+
+/// [`page_local_texture_dims`] over any set of packed geometries sharing one
+/// material slot table (a streamed world has one per region).
+fn page_local_texture_dims_for(
+    project: &ProjectDocument,
+    slots: &[Option<ResourceId>],
+    geometries: &[&PackedBspGeometry],
+    source_dims: &std::collections::HashMap<Option<ResourceId>, [u16; 2]>,
+    project_root: &Path,
+) -> std::collections::HashMap<Option<ResourceId>, [u16; 2]> {
     let mut output = source_dims.clone();
     let mut candidates = Vec::new();
     for (order, &material) in slots.iter().enumerate() {
@@ -2137,9 +2171,8 @@ fn page_local_texture_dims(
             continue;
         }
         let mut requirements = Vec::new();
-        collect_face_uv_requirements(world, material, &mut requirements);
-        for submodel in submodels {
-            collect_face_uv_requirements(&submodel.geometry, material, &mut requirements);
+        for geometry in geometries {
+            collect_face_uv_requirements(geometry, material, &mut requirements);
         }
         let Some((target, face_gain, extra_bytes)) =
             best_page_local_promotion(source, &requirements)
@@ -2567,6 +2600,81 @@ fn flat_white_psxt() -> Vec<u8> {
     )
     .expect("fixed brush fallback texture is valid")
 }
+
+/// The world front end the stream partitioner reuses: exactly the surfaces,
+/// texture dimensions and collision body bounds `compile_brush_world` feeds
+/// its static world model, without the BSP, visibility, lighting or packing.
+///
+/// Render surfaces are subdivided at the project's authored patch extent with
+/// no resident-face budget, because the partitioner exists to cook worlds that
+/// do not fit one resident map. `project` must already be at engine scale.
+pub(crate) struct PartitionFrontEnd {
+    /// Unsplit CSG surfaces: what the surface BSP is built from.
+    pub topology: Vec<CompiledSurface>,
+    /// PS1-sized render surfaces, before any region cut.
+    pub render: Vec<CompiledSurface>,
+    /// Static world brushes (door and destructible submodels excluded).
+    pub brushes: Vec<Brush>,
+    /// Point, then the two body hulls.
+    pub hull_bounds: [CollisionHullBounds; 3],
+    pub uv_window: UvWindowStats,
+}
+
+pub(crate) fn partition_front_end(
+    project: &ProjectDocument,
+    project_root: &Path,
+) -> Result<PartitionFrontEnd, BrushWorldCookError> {
+    let scene = project.active_scene();
+    let hull_bounds = collision_hull_bounds(authored_body_hulls(project));
+    let mut brushes = Vec::new();
+    for (brush_index, brush) in scene.brushes.iter().enumerate() {
+        if !brush.solve().is_valid() {
+            return Err(BrushWorldCookError::InvalidBrush {
+                brush: brush_index,
+                face: None,
+            });
+        }
+        if brush.mover.is_none() {
+            brushes.push(brush.clone());
+        }
+    }
+    if brushes.is_empty() {
+        return Err(BrushWorldCookError::EmptyStaticWorld);
+    }
+    let options = BrushWorldCookOptions {
+        project_root,
+        mode: BrushWorldCookMode::Draft,
+        ambient: [0; 3],
+        texture_asset_base: 0,
+        collision_hulls: CollisionHullStrategy::default(),
+    };
+    let texture_dims = brush_texture_dims(project, scene, &options);
+    let uv_window_skip = sky_aperture_materials(project);
+    let patch_extent = match &scene.node(NodeId::ROOT).unwrap().kind {
+        NodeKind::World { culling, .. } => culling.bsp_patch_extent.clamp(64, 256) as f64,
+        _ => ENGINE_SURFACE_EXTENT_UNITS,
+    };
+    let (topology, render) = compile_model_surfaces(&brushes);
+    let render = subdivide_drawable_surfaces(
+        merge_render_rectangles(render),
+        &uv_window_skip,
+        patch_extent,
+        usize::MAX,
+        &[],
+    );
+    let (render, uv_window) = fit_surfaces_to_uv_window(render, &texture_dims, &uv_window_skip);
+    let render = split_wide_surfaces(render, psx_bsp::render::PXBSP_MAX_FACE_VERTICES);
+    Ok(PartitionFrontEnd {
+        topology,
+        render,
+        brushes,
+        hull_bounds,
+        uv_window,
+    })
+}
+
+#[path = "brush_world_stream.rs"]
+pub mod stream_cook;
 
 #[cfg(test)]
 mod tests {

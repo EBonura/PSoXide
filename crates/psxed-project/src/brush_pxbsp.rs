@@ -757,7 +757,7 @@ fn pack_brush_model(
     Ok(output)
 }
 
-fn pack_materials(materials: &[PxbspMaterial]) -> Result<Vec<u8>, PxbspBuildError> {
+pub(crate) fn pack_materials(materials: &[PxbspMaterial]) -> Result<Vec<u8>, PxbspBuildError> {
     let mut output = Vec::with_capacity(materials.len() * PxbspMaterial::SIZE);
     for (index, material) in materials.iter().enumerate() {
         material
@@ -773,7 +773,7 @@ fn pack_materials(materials: &[PxbspMaterial]) -> Result<Vec<u8>, PxbspBuildErro
     Ok(output)
 }
 
-fn pack_entities(entities: &[PxbspEntityInput]) -> Result<Vec<u8>, PxbspBuildError> {
+pub(crate) fn pack_entities(entities: &[PxbspEntityInput]) -> Result<Vec<u8>, PxbspBuildError> {
     limit("entities", entities.len(), u16::MAX as usize)?;
     let record_bytes =
         entities
@@ -850,7 +850,7 @@ fn pack_entity_record(output: &mut [u8], entity: PxbspEntity) {
     output[30..32].copy_from_slice(&entity.payload_size.to_le_bytes());
 }
 
-fn write_pxbsp(lumps: &[Vec<u8>; PXBSP_LUMP_COUNT]) -> Result<Vec<u8>, PxbspBuildError> {
+pub(crate) fn write_pxbsp(lumps: &[Vec<u8>; PXBSP_LUMP_COUNT]) -> Result<Vec<u8>, PxbspBuildError> {
     let directory_end =
         PXBSP_HEADER_BYTES as usize + PXBSP_DIRECTORY_ENTRY_BYTES as usize * PXBSP_LUMP_COUNT;
     let mut output = vec![0; directory_end];
@@ -874,7 +874,7 @@ fn write_pxbsp(lumps: &[Vec<u8>; PXBSP_LUMP_COUNT]) -> Result<Vec<u8>, PxbspBuil
     Ok(output)
 }
 
-fn pack_runtime_planes(source: &[u8]) -> Result<Vec<u8>, PxbspBuildError> {
+pub(crate) fn pack_runtime_planes(source: &[u8]) -> Result<Vec<u8>, PxbspBuildError> {
     let mut output = Vec::with_capacity(source.len() / Plane::SIZE * CompactPlane::SIZE);
     for plane in source.chunks_exact(Plane::SIZE) {
         let kind = i32::from_le_bytes(plane[10..14].try_into().unwrap());
@@ -894,7 +894,7 @@ fn pack_runtime_planes(source: &[u8]) -> Result<Vec<u8>, PxbspBuildError> {
     Ok(output)
 }
 
-fn limit(kind: &'static str, count: usize, max: usize) -> Result<(), PxbspBuildError> {
+pub(crate) fn limit(kind: &'static str, count: usize, max: usize) -> Result<(), PxbspBuildError> {
     if count > max {
         Err(PxbspBuildError::LimitExceeded { kind, count, max })
     } else {
@@ -902,11 +902,11 @@ fn limit(kind: &'static str, count: usize, max: usize) -> Result<(), PxbspBuildE
     }
 }
 
-const fn align_up_4(value: usize) -> usize {
+pub(crate) const fn align_up_4(value: usize) -> usize {
     (value + 3) & !3
 }
 
-fn pack_vec3_i16(output: &mut Vec<u8>, value: [i16; 3]) {
+pub(crate) fn pack_vec3_i16(output: &mut Vec<u8>, value: [i16; 3]) {
     for component in value {
         push_i16(output, component);
     }
@@ -920,11 +920,11 @@ fn read_u16(bytes: &[u8], offset: usize) -> u16 {
     u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
 }
 
-fn push_i16(output: &mut Vec<u8>, value: i16) {
+pub(crate) fn push_i16(output: &mut Vec<u8>, value: i16) {
     output.extend_from_slice(&value.to_le_bytes());
 }
 
-fn push_u16(output: &mut Vec<u8>, value: u16) {
+pub(crate) fn push_u16(output: &mut Vec<u8>, value: u16) {
     output.extend_from_slice(&value.to_le_bytes());
 }
 

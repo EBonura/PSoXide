@@ -87,7 +87,15 @@ pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io
     let pxbsp_path = generated_dir.join(crate::brush_playtest::BRUSH_WORLD_FILENAME);
     let brush_leak_path = generated_dir.join(crate::brush_playtest::BRUSH_LEAK_FILENAME);
     let world = &package.world_geometry;
-    std::fs::write(&pxbsp_path, &world.bytes)?;
+    // A streamed build ships the resident top container; the region payloads
+    // ride in UI.PAK (see `region_pack_chunk`).
+    std::fs::write(
+        &pxbsp_path,
+        world
+            .stream
+            .as_ref()
+            .map_or(&world.bytes, |stream| &stream.container),
+    )?;
     if world.leak_path.is_empty() {
         remove_optional_file(&brush_leak_path)?;
     } else {
@@ -138,6 +146,12 @@ pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io
     // it off the disc instead of linking a copy that is dead after boot. The
     // `ui_sfx/` files above still back the linked (non-streaming) build.
     for (chunk_id, bytes) in ui_sfx_pack_chunks(package) {
+        std::fs::write(
+            ui_stream_chunks_dir.join(format!("ui_{chunk_id:03}.psxt")),
+            bytes,
+        )?;
+    }
+    if let Some((chunk_id, bytes)) = region_pack_chunk(package) {
         std::fs::write(
             ui_stream_chunks_dir.join(format!("ui_{chunk_id:03}.psxt")),
             bytes,
@@ -312,6 +326,23 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         &mut out,
         "PXBSP_WORLD",
         crate::brush_playtest::BRUSH_WORLD_FILENAME,
+    );
+    // Streamed world (design 2026-10-08, M7): `PXBSP_WORLD` is then the
+    // resident top container and the regions live in this UI.PAK chunk.
+    let _ = writeln!(
+        out,
+        "pub const PXBSP_STREAMED: bool = {};",
+        world.stream.is_some(),
+    );
+    let _ = writeln!(
+        out,
+        "pub const PXBSP_STREAM_PACK_CHUNK: u32 = {};",
+        region_pack_chunk_id(package),
+    );
+    let _ = writeln!(
+        out,
+        "pub const PXBSP_STREAM_REGIONS: usize = {};",
+        world.stream.as_ref().map_or(0, |stream| stream.regions),
     );
     let node_ids = world
         .movers
@@ -1871,7 +1902,23 @@ fn ui_pack_chunks(package: &PlaytestPackage) -> Vec<(u32, &[u8])> {
         .filter(|(_, asset)| asset.is_streamed())
         .map(|(index, asset)| (index as u32, asset.bytes.as_slice()))
         .chain(ui_sfx_pack_chunks(package))
+        .chain(region_pack_chunk(package))
         .collect()
+}
+
+/// UI.PAK chunk id of the streamed world's region pack: the first id past
+/// every asset index and UI SFX sample.
+fn region_pack_chunk_id(package: &PlaytestPackage) -> u32 {
+    ui_sfx_pack_first_chunk(package) + package.ui_sfx_samples.len() as u32
+}
+
+/// The region pack as a UI.PAK chunk, when the world is streamed.
+fn region_pack_chunk(package: &PlaytestPackage) -> Option<(u32, &[u8])> {
+    package
+        .world_geometry
+        .stream
+        .as_ref()
+        .map(|stream| (region_pack_chunk_id(package), stream.region_pack.as_slice()))
 }
 
 /// UI.PAK chunk id of the first UI SFX sample: the first id past every asset

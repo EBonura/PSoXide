@@ -411,7 +411,7 @@ fn validate_lighting(
     Ok(())
 }
 
-fn limit(kind: &'static str, count: usize, max: usize) -> Result<(), BrushPackError> {
+pub(crate) fn limit(kind: &'static str, count: usize, max: usize) -> Result<(), BrushPackError> {
     if count > max {
         Err(BrushPackError::LimitExceeded { kind, count, max })
     } else {
@@ -419,7 +419,10 @@ fn limit(kind: &'static str, count: usize, max: usize) -> Result<(), BrushPackEr
     }
 }
 
-fn intern_plane(planes: &mut Vec<[u8; 14]>, record: [u8; 14]) -> Result<i16, BrushPackError> {
+pub(crate) fn intern_plane(
+    planes: &mut Vec<[u8; 14]>,
+    record: [u8; 14],
+) -> Result<i16, BrushPackError> {
     let index = planes
         .iter()
         .position(|plane| *plane == record)
@@ -432,7 +435,7 @@ fn intern_plane(planes: &mut Vec<[u8; 14]>, record: [u8; 14]) -> Result<i16, Bru
     Ok(index as i16)
 }
 
-fn intern_material(
+pub(crate) fn intern_material(
     materials: &mut Vec<Option<ResourceId>>,
     material: Option<ResourceId>,
 ) -> Result<i16, BrushPackError> {
@@ -448,7 +451,7 @@ fn intern_material(
     Ok(index as i16)
 }
 
-fn pack_vertex(
+pub(crate) fn pack_vertex(
     output: &mut Vec<u8>,
     surface_index: usize,
     vertex_index: usize,
@@ -485,7 +488,7 @@ fn pack_vertex(
     Ok(())
 }
 
-fn vertex_light(lighting: &BspLighting<'_>, surface: usize, vertex: usize) -> u32 {
+pub(crate) fn vertex_light(lighting: &BspLighting<'_>, surface: usize, vertex: usize) -> u32 {
     match lighting {
         BspLighting::Fullbright => FULLBRIGHT_RGB,
         BspLighting::Baked(colors) => colors[surface][vertex],
@@ -592,7 +595,7 @@ fn portal_component_visibility(
     (visibility, offsets)
 }
 
-fn compress_visibility(row: &[u8]) -> Vec<u8> {
+pub(crate) fn compress_visibility(row: &[u8]) -> Vec<u8> {
     let mut output = Vec::new();
     let mut cursor = 0;
     while cursor < row.len() {
@@ -610,11 +613,11 @@ fn compress_visibility(row: &[u8]) -> Vec<u8> {
     output
 }
 
-fn surface_bounds(surfaces: &[CompiledSurface]) -> ([i16; 3], [i16; 3]) {
+pub(crate) fn surface_bounds(surfaces: &[CompiledSurface]) -> ([i16; 3], [i16; 3]) {
     Bounds::from_surfaces(surfaces).packed()
 }
 
-fn node_render_bounds(bsp: &CompiledSurfaceBsp) -> Vec<Bounds> {
+pub(crate) fn node_render_bounds(bsp: &CompiledSurfaceBsp) -> Vec<Bounds> {
     let leaf_bounds: Vec<_> = bsp
         .leaves
         .iter()
@@ -644,9 +647,9 @@ fn node_render_bounds(bsp: &CompiledSurfaceBsp) -> Vec<Bounds> {
 }
 
 #[derive(Clone, Copy)]
-struct Bounds {
-    min: [f64; 3],
-    max: [f64; 3],
+pub(crate) struct Bounds {
+    pub(crate) min: [f64; 3],
+    pub(crate) max: [f64; 3],
 }
 
 impl Bounds {
@@ -682,7 +685,7 @@ impl Bounds {
         self.include(other.max);
     }
 
-    fn packed(self) -> ([i16; 3], [i16; 3]) {
+    pub(crate) fn packed(self) -> ([i16; 3], [i16; 3]) {
         if !self.min[0].is_finite() {
             return ([0; 3], [0; 3]);
         }
@@ -697,7 +700,7 @@ fn clamp_i16(value: f64) -> i16 {
     value.clamp(i16::MIN as f64, i16::MAX as f64) as i16
 }
 
-fn pack_leaf_record(
+pub(crate) fn pack_leaf_record(
     output: &mut Vec<u8>,
     contents: i16,
     visibility_offset: i32,
@@ -727,11 +730,11 @@ fn pack_leaf_record(
     Ok(())
 }
 
-fn push_i16(output: &mut Vec<u8>, value: i16) {
+pub(crate) fn push_i16(output: &mut Vec<u8>, value: i16) {
     output.extend_from_slice(&value.to_le_bytes());
 }
 
-fn push_u16(output: &mut Vec<u8>, value: u16) {
+pub(crate) fn push_u16(output: &mut Vec<u8>, value: u16) {
     output.extend_from_slice(&value.to_le_bytes());
 }
 

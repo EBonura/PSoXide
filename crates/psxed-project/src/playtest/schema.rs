@@ -123,6 +123,23 @@ pub struct PlaytestPxbspWorld {
     pub movers: Vec<PlaytestPxbspMover>,
     /// Quake-style pointfile path; empty when the world is sealed.
     pub leak_path: Vec<[i32; 3]>,
+    /// The streamed form of the world (design 2026-10-08, M7), present only
+    /// when the cook ran with `PSXED_STREAM_WORLD=stream`. `bytes` stays the
+    /// whole-map container of the same geometry, which the budget and
+    /// analysis passes read; the guest loads `stream.container` instead.
+    pub stream: Option<PlaytestStreamedWorld>,
+}
+
+/// A world cooked as a resident top container plus a region pack on disc.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaytestStreamedWorld {
+    /// PXBSP v6 top container with a non-empty StreamingIndex; becomes the
+    /// guest's `PXBSP_WORLD`.
+    pub container: Vec<u8>,
+    /// Sector-aligned region payloads in disc order; one UI.PAK chunk.
+    pub region_pack: Vec<u8>,
+    /// Number of regions in the pack.
+    pub regions: usize,
 }
 
 impl Default for PlaytestPxbspWorld {
@@ -134,6 +151,7 @@ impl Default for PlaytestPxbspWorld {
             texture_asset_indices: Vec::new(),
             movers: Vec::new(),
             leak_path: Vec::new(),
+            stream: None,
         }
     }
 }

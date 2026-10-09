@@ -54,6 +54,46 @@ fn main() -> ExitCode {
     };
 
     let dir = default_generated_dir();
+    // World-streaming partition report (design 2026-10-08, M4). Host only and
+    // run first, so a world too large for one resident map still gets its
+    // verdict. Gate failures are advisory until the runtime consumes regions;
+    // PSXED_STREAM_GATE=enforce makes them fail the cook.
+    {
+        let mut params = psxed_project::brush_region::PartitionParams::default();
+        if let Ok(path) = std::env::var("PSXED_STREAM_PARAMS") {
+            match std::fs::read_to_string(&path)
+                .map_err(|e| e.to_string())
+                .and_then(|t| psxed_project::brush_region::CookOverrides::from_ron_str(&t))
+            {
+                Ok(overrides) => overrides.apply(&mut params),
+                Err(e) => eprintln!("[cook-playtest] warning: PSXED_STREAM_PARAMS {path}: {e}"),
+            }
+        }
+        match psxed_project::brush_region::cook_stream_report(
+            &project,
+            &project_root,
+            &dir,
+            &params,
+        ) {
+            Ok(report) => {
+                for line in report.text.lines().take(8) {
+                    println!("[cook-playtest] stream: {line}");
+                }
+                println!(
+                    "[cook-playtest] stream: full report in {}/stream_report.txt and stream_report.json",
+                    dir.display()
+                );
+                if !report.passed && std::env::var("PSXED_STREAM_GATE").as_deref() == Ok("enforce")
+                {
+                    eprintln!(
+                        "[cook-playtest] error: stream gate failed (PSXED_STREAM_GATE=enforce)"
+                    );
+                    return ExitCode::from(1);
+                }
+            }
+            Err(error) => eprintln!("[cook-playtest] warning: stream report skipped: {error}"),
+        }
+    }
     match cook_to_dir(&project, &project_root, &dir) {
         Ok(report) => {
             for warn in &report.warnings {
