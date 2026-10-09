@@ -188,6 +188,10 @@ struct Rig {
     silent_services: u32,
     /// Service calls per VBlank on the rig's display clock; 0 stops the clock.
     services_per_vblank: u32,
+    /// VBlanks added to the display clock by hand.
+    vblank_bias: u32,
+    /// State queries that answer `Unknown` before the real answer resumes.
+    forget_states: u32,
 }
 
 impl Rig {
@@ -200,6 +204,8 @@ impl Rig {
             services: 0,
             silent_services: 0,
             services_per_vblank: 0,
+            vblank_bias: 0,
+            forget_states: 0,
         }
     }
 
@@ -227,6 +233,10 @@ impl Transport for Rig {
 
     fn state(&mut self, ticket: Ticket) -> RequestState {
         self.pump();
+        if self.forget_states > 0 {
+            self.forget_states -= 1;
+            return RequestState::Unknown;
+        }
         self.engine.state(ticket)
     }
 
@@ -247,9 +257,11 @@ impl Transport for Rig {
     fn begin_transfer(&mut self) {}
 
     fn vblank_count(&mut self) -> u32 {
-        self.services
-            .checked_div(self.services_per_vblank)
-            .unwrap_or(0)
+        self.vblank_bias
+            + self
+                .services
+                .checked_div(self.services_per_vblank)
+                .unwrap_or(0)
     }
 }
 
@@ -448,8 +460,8 @@ fn a_drive_error_resumes_and_the_data_stays_exact_in_every_ring_shape() {
 #[test]
 fn an_unrecoverable_error_fails_the_run() {
     let mut rig = Rig::new(2);
-    // More errors than a request may resume from.
-    for _ in 0..10 {
+    // More errors than a request may resume from, and than the run restarts.
+    for _ in 0..64 {
         rig.engine.hw_mut().error_at.push(4000);
     }
     let mut stage = TestStage::zeroed();
@@ -467,6 +479,101 @@ fn an_unrecoverable_error_fails_the_run() {
         }
     }
     assert_eq!(failure, Some(STATUS_CD_ERROR));
+}
+
+#[test]
+fn a_run_survives_the_transport_losing_a_window() {
+    let mut rig = Rig::new(2);
+    let mut stage = TestStage::zeroed();
+    let mut run = TestRun::ZERO;
+    run.begin(&mut rig, &mut stage, 5000, 24);
+    // Take a few sectors, then the transport forgets the window in flight.
+    for index in 0..5 {
+        loop {
+            match run.next_sector(&mut rig, &mut stage) {
+                Poll::Sector => break,
+                Poll::Pending => rig.service(),
+                other => panic!("sector {index}: {other:?}"),
+            }
+        }
+        assert!(sector_matches(&run, &stage, 5000 + index));
+    }
+    rig.forget_states = 1;
+    for index in 5..24 {
+        let mut spins = 0;
+        loop {
+            match run.next_sector(&mut rig, &mut stage) {
+                Poll::Sector => break,
+                Poll::Pending => {
+                    spins += 1;
+                    assert!(spins < 10_000, "sector {index} never arrived");
+                }
+                other => panic!("sector {index}: {other:?}"),
+            }
+        }
+        assert!(
+            sector_matches(&run, &stage, 5000 + index),
+            "sector {index} holds the wrong words after the restart"
+        );
+    }
+    assert_eq!(run.next_sector(&mut rig, &mut stage), Poll::Done);
+}
+
+#[test]
+fn a_run_that_keeps_losing_its_window_fails_instead_of_looping() {
+    let mut rig = Rig::new(2);
+    rig.forget_states = u32::MAX;
+    let mut stage = TestStage::zeroed();
+    let mut run = TestRun::ZERO;
+    run.begin(&mut rig, &mut stage, 5000, 8);
+    let mut outcome = None;
+    for _ in 0..1_000 {
+        match run.next_sector(&mut rig, &mut stage) {
+            Poll::Failed(status) => {
+                outcome = Some(status);
+                break;
+            }
+            Poll::Sector | Poll::Done => break,
+            Poll::Pending => rig.service(),
+        }
+    }
+    assert_eq!(outcome, Some(crate::cd_stream::STATUS_DATA_TIMEOUT));
+}
+
+#[test]
+fn the_job_gives_up_on_a_silent_drive_by_the_display_clock_not_by_pump_count() {
+    let pack = 20_000;
+    let size = 2 * SECTOR_BYTES;
+    let ids = [1u16];
+    let toc = [toc_entry(
+        1,
+        10,
+        size as u32,
+        disc_checksum(pack + 10, size),
+    )];
+    let mut slots = Slots {
+        rows: [std::vec![0; size], std::vec![], std::vec![]],
+    };
+    let mut job = WorldRoomSlotsReadJob::<3>::new();
+    job.start(pack, &toc, &ids, &[0], &[size]);
+    let mut rig = Rig::new(1);
+    rig.silent_services = u32::MAX;
+    let mut cd = CdController::zeroed();
+    // Far more pumps than the old pump-count limit allowed, all inside the
+    // same VBlank: still waiting.
+    for _ in 0..5_000 {
+        job.poll_into_with(&mut rig, &mut cd, &mut slots, 4);
+    }
+    assert!(!job.is_done(), "a pump count must not fail a read");
+    // The slowest silicon transition plus margin is still waiting.
+    rig.vblank_bias = psx_engine::cd_drive::MOTOR_RESTART_MS * 60 / 1000 + 60;
+    job.poll_into_with(&mut rig, &mut cd, &mut slots, 4);
+    assert!(!job.is_done());
+    // Past the limit it fails with a timeout.
+    rig.vblank_bias = crate::cd_stream::STALL_LIMIT_VBLANKS + 100;
+    job.poll_into_with(&mut rig, &mut cd, &mut slots, 4);
+    assert!(job.is_done());
+    assert_eq!(job.statuses()[0], crate::cd_stream::STATUS_DATA_TIMEOUT);
 }
 
 fn toc_entry(

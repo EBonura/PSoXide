@@ -101,21 +101,29 @@ const STATUS_DEST_TOO_SMALL: u32 = 11;
 /// Status value reported by chunk reads that completed and verified.
 pub const ROOM_CHUNK_STATUS_OK: u32 = STATUS_OK;
 
-/// Consecutive `poll_into` calls that may find no sector waiting before the
-/// read is declared dead.
+/// How long a pump may keep finding no sector before the read is declared
+/// dead, in VBlanks counted from the last sector that landed (or the group's
+/// start).
 ///
-/// The unit is PUMP CALLS, not spins: the caller breaks out of its loop on the
-/// first empty result, so at most one increment happens per `poll_into`. The
-/// old 4096 was written as if it counted spins; at one pump per two sim ticks
-/// that was a 136-second budget, which is why a disc with nothing at the pack
-/// LBA hung an 8117-tick headless run without ever tripping the detector.
-///
-/// 256 pumps is ~8.5 s at 30 pumps/second, well past any real seek and
-/// re-acquire, and short enough that a dead read reports instead of hanging.
-const EMPTY_PUMP_STALL_LIMIT: u32 = 256;
-// The pump runs every second tick, so the limit must span a music handoff
-// (about a second, `HANDOFF_VBLANKS` ticks) with room to spare.
-const _: () = assert!(EMPTY_PUMP_STALL_LIMIT * 2 >= 2 * psx_engine::cd_drive::HANDOFF_VBLANKS);
+/// This is a duration, not a count of pumps: pumps run once or twice per
+/// simulation tick, and how many land inside a given wait depends on the
+/// frame rate and on what else the tick does, so a pump count turns the same
+/// drive latency into a pass or a failure depending on the build. Silicon
+/// worst cases (hardware tests v1.28): the first sector after a music
+/// hand-off 945 ms, a read on a stopped drive 1951 ms, a read issued while a
+/// Stop is still spinning down 2721 ms
+/// ([`psx_engine::cd_drive::MOTOR_RESTART_MS`]). The limit is the transport's
+/// own no-progress watchdog, so the foreground never gives up before the
+/// transport does.
+pub(crate) const STALL_LIMIT_VBLANKS: u32 = psx_cdstream::Config::DEFAULT.timeout_vblanks;
+const _: () = assert!(
+    STALL_LIMIT_VBLANKS * 1000 / 60 >= 2 * psx_engine::cd_drive::MOTOR_RESTART_MS,
+    "the stall limit must clear the slowest silicon drive transition twice over"
+);
+/// Times the job restarts a group after the run under it failed, before the
+/// failure becomes the job's. A restart costs a seek and loses no sector (the
+/// group resumes at the first sector not yet delivered).
+const GROUP_RETRIES: u8 = 3;
 /// How long a blocking read waits for one sector before giving up, in VBlanks:
 /// the transport's own no-progress watchdog. It has to outlast a handoff from
 /// music, after which the first sector takes about a second on a console
@@ -131,7 +139,7 @@ const DATA_READY_BLOCKING_POLL_LIMIT: u32 = 50_000_000;
 /// Spins to wait for a sector already on its way. One arrives every 6.7 ms at
 /// double speed; this is well past that and far short of a hang. It is a
 /// courtesy wait inside a pump; the first sector after a music handoff (about
-/// a second on a console) is carried by [`EMPTY_PUMP_STALL_LIMIT`] instead.
+/// a second on a console) is carried by [`STALL_LIMIT_VBLANKS`] instead.
 const SECTOR_ARRIVAL_SPIN_LIMIT: u32 = 200_000;
 
 /// Why a sector did not arrive.
@@ -322,7 +330,11 @@ pub struct WorldRoomSlotsReadJob<const N: usize> {
     group_start: u32,
     group_end: u32,
     sector_offset: u32,
-    empty_pumps: u32,
+    /// Whether the current wait for a sector has begun, and when (VBlank).
+    stalled: bool,
+    stall_since: u32,
+    /// Restarts left for the current group.
+    retries: u8,
     /// Whether this read may stay with the drive between sectors. See
     /// [`WorldRoomSlotsRead::set_wait_for_sectors`].
     wait_for_sectors: bool,
@@ -357,7 +369,9 @@ impl<const N: usize> WorldRoomSlotsReadJob<N> {
             group_start: 0,
             group_end: 0,
             sector_offset: 0,
-            empty_pumps: 0,
+            stalled: false,
+            stall_since: 0,
+            retries: 0,
             wait_for_sectors: false,
             world_pack_lba: 0,
             result: RoomChunkLoadResult {
@@ -385,7 +399,9 @@ impl<const N: usize> WorldRoomSlotsReadJob<N> {
             group_start: 0,
             group_end: 0,
             sector_offset: 0,
-            empty_pumps: 0,
+            stalled: false,
+            stall_since: 0,
+            retries: 0,
             wait_for_sectors: false,
             world_pack_lba: 0,
             result: RoomChunkLoadResult {
@@ -519,10 +535,13 @@ impl<const N: usize> WorldRoomSlotsReadJob<N> {
             match landed {
                 Ok(()) => {}
                 Err(Stall::Slow) => {
-                    // Merely slow: the pump-count stall budget decides when to
-                    // give up.
-                    self.empty_pumps = self.empty_pumps.saturating_add(1);
-                    if self.empty_pumps > EMPTY_PUMP_STALL_LIMIT {
+                    // Merely slow: the display clock decides when to give up,
+                    // measured from the last sector (or the group's start).
+                    let now = transport.vblank_count();
+                    if !self.stalled {
+                        self.stalled = true;
+                        self.stall_since = now;
+                    } else if now.wrapping_sub(self.stall_since) > STALL_LIMIT_VBLANKS {
                         self.fail_all(STATUS_DATA_TIMEOUT);
                         cd.abort_run(transport);
                         self.state = WorldRoomSlotsReadState::Done;
@@ -530,13 +549,22 @@ impl<const N: usize> WorldRoomSlotsReadJob<N> {
                     break;
                 }
                 Err(Stall::Failed(status)) => {
-                    self.fail_all(status);
                     cd.abort_run(transport);
-                    self.state = WorldRoomSlotsReadState::Done;
+                    if self.retries > 0 {
+                        // Drop the run and start the group again at the first
+                        // sector not yet delivered (`begin_next_group` resumes).
+                        self.retries -= 1;
+                        self.stalled = false;
+                        self.state = WorldRoomSlotsReadState::Ready;
+                    } else {
+                        self.fail_all(status);
+                        self.state = WorldRoomSlotsReadState::Done;
+                    }
                     break;
                 }
             }
-            self.empty_pumps = 0;
+            self.stalled = false;
+            self.retries = GROUP_RETRIES;
             // SAFETY: the sector buffer holds the sector the read above just
             // landed; SECTOR_BYTES are readable behind the pointer.
             unsafe {
@@ -662,9 +690,10 @@ impl<const N: usize> WorldRoomSlotsReadJob<N> {
             self.world_pack_lba.saturating_add(read_start),
             group_end - read_start,
         );
+        self.stalled = false;
         if !resuming {
             self.group_start = read_start;
-            self.empty_pumps = 0;
+            self.retries = GROUP_RETRIES;
         }
         self.group_end = group_end;
         self.sector_offset = read_start;

@@ -37,6 +37,14 @@ pub const PAUSE_COMPLETE_MS: u32 = 123;
 /// milliseconds. Console-tested (hardware tests v1.28).
 pub const FIRST_SECTOR_AFTER_AUDIO_MS: u32 = 945;
 
+/// The slowest drive transition measured on the console: a data read issued
+/// while a Stop is still spinning the motor down delivers its first sector
+/// this long after the read command, in milliseconds (hardware tests v1.28,
+/// record 0x315, one sample). Console-tested. A read on a stopped drive takes
+/// 1951 ms and the first sector after audio 945 ms, so a stall limit that
+/// clears twice this value clears them all.
+pub const MOTOR_RESTART_MS: u32 = 2721;
+
 /// One handoff between music and data, in VBlanks: about a second on a
 /// console in either direction. The slowest console figure above rounded up
 /// to whole seconds at the 60 Hz tick the engine budgets in.

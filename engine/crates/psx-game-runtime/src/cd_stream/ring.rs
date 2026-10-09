@@ -42,6 +42,13 @@ pub(super) type CdRun = Run<RING_WINDOWS, RING_WINDOW_SECTORS>;
 /// Drive errors a request may resume from before it gives up.
 const RESUMES_PER_REQUEST: u8 = 3;
 
+/// Times a run restarts itself after a window ended in a way that leaves the
+/// sectors unaccounted for (the transport lost the request, ended it short, or
+/// failed it for good) before the failure becomes the caller's. A restart
+/// stops the transport, then reads on from the first sector not yet handed
+/// out: it costs a seek and neither skips nor repeats a sector.
+const RUN_RESTARTS: u8 = 3;
+
 /// Foreground spins to wait for the transport to stop after an abort. The
 /// transport's own watchdog ends a stuck transfer long before this runs out.
 const QUIESCE_SPIN_LIMIT: u32 = 50_000_000;
@@ -231,6 +238,8 @@ pub(super) struct Run<const W: usize, const S: usize> {
     /// The sector the last `Poll::Sector` handed out: window and index.
     view_slot: u8,
     view_index: u32,
+    /// Restarts left (see [`RUN_RESTARTS`]); refilled by every sector handed out.
+    restarts: u8,
 }
 
 impl<const W: usize, const S: usize> Run<W, S> {
@@ -246,6 +255,7 @@ impl<const W: usize, const S: usize> Run<W, S> {
         dirty: false,
         view_slot: 0,
         view_index: 0,
+        restarts: RUN_RESTARTS,
     };
 
     /// Start reading `sectors` sectors from `lba` (program-relative). Anything
@@ -314,6 +324,33 @@ impl<const W: usize, const S: usize> Run<W, S> {
         }
     }
 
+    /// Stop everything and read on from the first sector not yet handed out,
+    /// if a restart is left. The caller keeps the sector it was last given (the
+    /// staging windows are only rewritten by later requests). `false` when the
+    /// budget is spent.
+    fn restart<T: Transport>(&mut self, transport: &mut T, stage: &mut Stage<W, S>) -> bool {
+        if self.restarts == 0 {
+            return false;
+        }
+        let restarts = self.restarts - 1;
+        let (view_slot, view_index) = (self.view_slot, self.view_index);
+        self.dirty = true;
+        self.quiesce(transport);
+        self.lba += self.taken;
+        self.total -= self.taken;
+        self.taken = 0;
+        self.submitted = 0;
+        self.head = 0;
+        self.live = 0;
+        self.windows = [Window::EMPTY; W];
+        self.restarts = restarts;
+        self.view_slot = view_slot;
+        self.view_index = view_index;
+        transport.begin_transfer();
+        self.fill(transport, stage);
+        true
+    }
+
     fn fail<T: Transport>(&mut self, transport: &mut T, status: u32) -> Poll {
         self.failure = status;
         self.dirty = true;
@@ -352,7 +389,14 @@ impl<const W: usize, const S: usize> Run<W, S> {
                 RequestState::Finished(done) => (window.landed + done.received, Some(done.outcome)),
                 // The result fell out of the transport's memory, which a run
                 // that polls every window cannot cause. Treat it as a lost read.
-                RequestState::Unknown => return self.fail(transport, STATUS_DATA_TIMEOUT),
+                RequestState::Unknown => {
+                    // The transport has no record of the window. Whatever it
+                    // is doing for us, start the rest of the run over.
+                    if self.restart(transport, stage) {
+                        return Poll::Pending;
+                    }
+                    return self.fail(transport, STATUS_DATA_TIMEOUT);
+                }
             };
             let landed = landed.min(window.sectors);
             if window.taken < landed {
@@ -360,6 +404,7 @@ impl<const W: usize, const S: usize> Run<W, S> {
                 // cannot see. The state read above is volatile; this barrier
                 // keeps the caller's loads of the sector behind it.
                 memory_barrier();
+                self.restarts = RUN_RESTARTS;
                 self.view_slot = slot as u8;
                 self.view_index = window.taken;
                 self.windows[slot].taken += 1;
@@ -374,9 +419,15 @@ impl<const W: usize, const S: usize> Run<W, S> {
                 None => return Poll::Pending,
                 Some(Outcome::Done) => {
                     // Done with fewer sectors than the window holds.
+                    if self.restart(transport, stage) {
+                        return Poll::Pending;
+                    }
                     return self.fail(transport, STATUS_DATA_TIMEOUT);
                 }
                 Some(Outcome::Failed(failure)) => {
+                    if self.restart(transport, stage) {
+                        return Poll::Pending;
+                    }
                     return self.fail(transport, status_for(failure));
                 }
                 Some(Outcome::Cancelled) => {
