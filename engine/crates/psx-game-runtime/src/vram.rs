@@ -96,8 +96,8 @@ const UI_TEXTURE_UPLOAD_MAX_STEPS: u8 = 8;
 /// VRAM placement contract the game passes into every [`VramRuntime`]
 /// method that reserves or allocates space (the PROJECTION-parameter
 /// pattern): the framebuffer, the preferred room-material page band, the
-/// preferred model-atlas region, and the managed CLUT band base row. Room and
-/// model pages are backed by the unified allocator only when actually used.
+/// preferred model-atlas region, and the managed CLUT band. Room and model
+/// pages are backed by the unified allocator only when actually used.
 #[derive(Copy, Clone)]
 pub struct VramLayout {
     /// Double-buffered framebuffer rect, reserved from the allocator.
@@ -114,8 +114,12 @@ pub struct VramLayout {
     pub model_tpage: TexturePage,
     /// Maximum physical halfword width reserved for one model atlas.
     pub model_tpage_max_halfwords: u16,
-    /// First VRAM row of the managed CLUT band.
-    pub clut_base_y: u16,
+    /// The managed CLUT band: the strip under the framebuffer that no texture
+    /// page covers (a page at page row 256 reaches VRAM row 511, so a band that
+    /// shares rows with one shares its pixels). The allocator reserves it, so
+    /// no page, strip or window can overlap it. Its height must equal the
+    /// `CLUT_ROWS` the [`VramRuntime`] is instantiated with.
+    pub clut_band: VramRect,
 }
 
 /// Shared transient load scratch (BSS, not on the stack). At boot it packs
@@ -666,15 +670,14 @@ impl<
         unsafe { core::mem::zeroed() }
     }
 
-    /// Empty runtime with the allocator's CLUT band rooted at
-    /// `layout.clut_base_y`; `const` so the game can keep it in static
-    /// storage.
+    /// Empty runtime whose CLUTs all lie in `layout.clut_band`, reserved in the
+    /// allocator; `const` so the game can keep it in static storage.
     pub const fn new(layout: VramLayout) -> Self {
         Self {
             residency: ResidencyManager::new(),
             slots: [VRAM_SLOT_EMPTY; VRAM_ASSETS],
             slot_count: 0,
-            allocator: VramAllocator::new(layout.clut_base_y),
+            allocator: VramAllocator::with_clut_band(layout.clut_band),
             regions_reserved: false,
             font_set: None,
             font_count: 0,
@@ -2504,10 +2507,26 @@ mod tests {
         room_tile_texels: 256,
         model_tpage: TexturePage::new(384, 256, TextureDepth::Bit4),
         model_tpage_max_halfwords: 64,
-        clut_base_y: 480,
+        clut_band: VramRect::new(0, 480, 320, 32),
     };
 
-    type TestVram = VramRuntime<1, 1, 6, 16>;
+    type TestVram = VramRuntime<1, 1, 6, 32>;
+
+    /// The CLUT band beside the framebuffer is disjoint from every page the
+    /// allocator can place, and every CLUT the runtime can allocate lies inside
+    /// it (the sky and font CLUTs included).
+    #[test]
+    fn clut_band_is_disjoint_from_framebuffer_and_pages() {
+        assert!(psx_vram::vram_layout_is_disjoint(&[
+            ARENA_LAYOUT.framebuffer,
+            ARENA_LAYOUT.clut_band,
+            VramRect::new(320, 0, 704, 256),
+            VramRect::new(320, 256, 704, 256),
+        ]));
+        let vram = TestVram::new(ARENA_LAYOUT);
+        assert_eq!(vram.allocator.clut_bounds(), ARENA_LAYOUT.clut_band);
+        assert!(vram.allocator.clut_band_is_reserved());
+    }
 
     #[test]
     fn arena_static_layout_does_not_pin_unused_room_capacity() {

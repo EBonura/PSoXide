@@ -349,9 +349,9 @@ pub(super) const MAX_RESIDENT_RAM_ASSETS: usize = 128;
 /// Capacity of the residency manager's VRAM table. Holds room
 /// material atlases + model atlases.
 pub(super) const MAX_RESIDENT_VRAM_ASSETS: usize = 64;
-/// CLUT-band rows the unified VRAM allocator manages, just past the back
-/// buffer (Stage 1: only the shared font CLUT lands here).
-pub(super) const VRAM_CLUT_ROWS: usize = 16;
+/// CLUT-band rows the unified VRAM allocator manages: the 32 rows under the
+/// back buffer (`VRAM_LAYOUT.clut_band`), 20 sixteen-entry slots wide.
+pub(super) const VRAM_CLUT_ROWS: usize = 32;
 /// The crate VRAM runtime (slot table, unified allocator, residency
 /// tracker, upload queue) instantiated with this example's budget consts.
 pub(super) type RuntimeVram = VramRuntime<

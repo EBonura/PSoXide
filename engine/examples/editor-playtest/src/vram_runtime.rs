@@ -21,9 +21,26 @@ pub(super) const VRAM_LAYOUT: VramLayout = VramLayout {
     room_tile_texels: ROOM_TILE_TEXELS,
     model_tpage: MODEL_TPAGE,
     model_tpage_max_halfwords: MODEL_TPAGE_MAX_HALFWORDS,
-    // First VRAM row of the managed CLUT band, just past the back buffer.
-    clut_base_y: 480,
+    // The CLUT band: the 320 x 32 strip under the back buffer, the only VRAM
+    // no texture page covers. A page at page row 256 runs to VRAM row 511, so
+    // the band used to share rows (and pixels) with every lower page and a
+    // texel read past the bottom of a window returned palette words.
+    clut_band: psx_vram::VramRect::new(0, 480, 320, VRAM_CLUT_ROWS as u16),
 };
+
+// Pin the layout: the framebuffer, the CLUT band and the two page rows the
+// allocator can place pages on (everything right of the framebuffer) share no
+// pixel, and the band is as tall as the allocator's CLUT row count. This is
+// the same for every project, so every cook runs against a disjoint layout.
+const _: () = assert!(
+    psx_vram::vram_layout_is_disjoint(&[
+        VRAM_LAYOUT.framebuffer,
+        VRAM_LAYOUT.clut_band,
+        psx_vram::VramRect::new(320, 0, 704, 256),
+        psx_vram::VramRect::new(320, 256, 704, 256),
+    ]),
+    "VRAM layout: framebuffer, CLUT band and texture pages overlap",
+);
 
 /// The upload queue's byte source by AssetId (the crate's
 /// `resolve_upload_bytes` rule over this example's cooked tables and
