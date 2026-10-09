@@ -78,7 +78,7 @@ pub fn base64_decode(text: &str) -> Result<Vec<u8>> {
     {
         bail!("Non-base64 digit found");
     }
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         bail!("Incorrect padding");
     }
     let value = |b: u8| -> u32 {

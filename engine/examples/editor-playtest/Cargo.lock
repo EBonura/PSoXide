@@ -60,6 +60,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "psx-display"
+version = "0.1.0"
+dependencies = [
+ "psx-gpu",
+ "psx-hw",
+]
+
+[[package]]
 name = "psx-engine"
 version = "0.1.0"
 dependencies = [
@@ -195,6 +203,7 @@ dependencies = [
 name = "psx-settings"
 version = "0.1.0"
 dependencies = [
+ "psx-display",
  "psx-pad",
 ]
 
