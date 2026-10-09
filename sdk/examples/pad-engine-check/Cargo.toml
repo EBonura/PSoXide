@@ -18,3 +18,4 @@ lto = true
 [dependencies]
 psx-pad  = { path = "../../crates/psx-pad", features = ["irq-engine"] }
 psx-rt   = { path = "../../crates/psx-rt" }
+psx-cdstream = { path = "../../crates/psx-cdstream" }
