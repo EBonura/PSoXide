@@ -611,6 +611,38 @@ fn view_plane_distance<V: View>(view: &V, v: &SVert, plane: ViewPlane) -> i32 {
     }
 }
 
+/// The crossing of an edge with a view plane as the generic clip computes it,
+/// kept for the oracle's unit tests: the lane kernel must reproduce it bit for
+/// bit from either end of the edge.
+#[cfg(test)]
+fn lerp_view_plane(a: &SVert, b: &SVert, mut da: i32, mut db: i32, plane: ViewPlane) -> SVert {
+    // `visible_clip` runs independently for each source triangle. Canonical
+    // ordering makes a shared geometric edge survive every frustum plane with
+    // exactly the same rounded position on both sides.
+    let (a, b) = if (b.x, b.y, b.z) < (a.x, a.y, a.z) {
+        core::mem::swap(&mut da, &mut db);
+        (b, a)
+    } else {
+        (a, b)
+    };
+    let t = t_q12(da, da - db);
+    let mut v = SVert {
+        x: mix(a.x, b.x, t),
+        y: mix(a.y, b.y, t),
+        z: mix(a.z, b.z, t),
+        rgb: (
+            mix(a.rgb.0, b.rgb.0, t),
+            mix(a.rgb.1, b.rgb.1, t),
+            mix(a.rgb.2, b.rgb.2, t),
+        ),
+        uv: (mix(a.uv.0, b.uv.0, t), mix(a.uv.1, b.uv.1, t)),
+    };
+    if matches!(plane, ViewPlane::Near) {
+        v.z = NEAR_Z;
+    }
+    v
+}
+
 /// One view-frustum plane as the four numbers `clip_lanes8_plane` needs. A
 /// vertex is inside when `lane * primary + z * depth + bias >= 0`; the near
 /// plane also lands every crossing exactly on `NEAR_Z`.

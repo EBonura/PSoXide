@@ -108,7 +108,7 @@ fn main() {
                 }
                 assert_eq!(
                     os(old::perspective_screen_midpoint(sp[0], sp[1])),
-                    ns(new::perspective_screen_midpoint(sn[0], sn[1]))
+                    ns(new::perspective_screen_midpoint(&sn[0], &sn[1]))
                 );
                 let xy = sp.map(|v| (v.x as i16, v.y as i16));
                 let packed = xy.map(|(x, y)| x as u16 as u32 | ((y as u16 as u32) << 16));
