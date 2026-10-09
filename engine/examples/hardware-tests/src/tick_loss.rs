@@ -133,7 +133,7 @@ fn case(
     let after = timers::counter(Timer::Timer1);
     drop(guard);
     let lines = after.wrapping_sub(before) as u32;
-    let per_line = (seen as u64 * 16 / lines.max(1) as u64) as u32;
+    let per_line = seen.wrapping_mul(16) / lines.max(1);
     push_timing_record(records, next, record(id, lines, seen >> 10, per_line));
     timers::set_mode(timer, 0);
 }
