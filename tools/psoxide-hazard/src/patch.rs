@@ -66,8 +66,13 @@ a word is code unless an undecodable word sits within 16 words of it. That
 mode can corrupt data and exists for images with no link map. `--check` only
 reports, and needs neither.
 
+Patching can change what the rescan proves (a switch whose table entries
+all moved to trampolines no longer resolves, so its `jr` needs the second
+kind of patch above), so a run repeats detect, patch and rescan until the
+image is clean. One invocation is enough; callers must not loop.
+
 Exit status is non-zero when a hazard cannot be patched, the array is
-missing or full, or the rescan after patching still finds one.
+missing or full, or the image still has one when a pass patches nothing.
 HAZARD_PATCH_SKIP=\"80012298,8008c30c\" leaves those sites alone and
 HAZARD_PATCH_ONLY=\"...\" patches nothing else (diagnostics; hex addresses).
 ";
@@ -94,10 +99,45 @@ pub fn main(args: &[String], out: &mut dyn Write) -> i32 {
     }
 }
 
+/// The most patch passes one run makes. Each pass that leaves hazards
+/// behind has patched at least one site, and a site is only ever patched
+/// once, so a run ends well before this; the cap is a backstop that turns
+/// a detector that never settles into a failure instead of a hang.
+const MAX_PASSES: usize = 8;
+
 /// [`main`] over `text`, the `[lo, hi)` code ranges of the image (its link
 /// map's `.text` and any `--code` ranges), when given: only those words are
 /// listed, and all of them are code (see [`Listing::retain_text`]).
+///
+/// Runs [`pass`] until the image is clean. Patching changes what the
+/// detector can prove: a switch whose table entries all moved to
+/// trampolines (which live in `.data`, outside the listed `.text`) no longer
+/// resolves, so its `jr` is reported again with an unknown consumer and
+/// needs the second kind of patch, which moves the slot load out. One run
+/// makes that second pass itself, so a build needs one invocation, not a
+/// loop around it.
 pub fn main_in(args: &[String], text: Option<&[(i64, i64)]>, out: &mut dyn Write) -> i32 {
+    let mut passes = 1;
+    loop {
+        let mut again = false;
+        let status = pass(args, text, out, &mut again);
+        if !again || passes == MAX_PASSES {
+            return status;
+        }
+        passes += 1;
+        let _ = writeln!(out, "hazards remain after patching; pass {passes}");
+    }
+}
+
+/// One detect, patch and rescan of the file in `args`. `again` is set when
+/// the rescan still found hazards after this pass patched something, so a
+/// further pass can make progress.
+fn pass(
+    args: &[String],
+    text: Option<&[(i64, i64)]>,
+    out: &mut dyn Write,
+    again: &mut bool,
+) -> i32 {
     let is_code: IsCode<'_> = if text.is_some() {
         &every_word
     } else {
@@ -458,6 +498,7 @@ pub fn main_in(args: &[String], text: Option<&[(i64, i64)]>, out: &mut dyn Write
     if !skip.is_empty() || !only.is_empty() {
         return 0;
     }
+    *again = patched > 0 && !remaining.is_empty();
     i32::from(!remaining.is_empty())
 }
 

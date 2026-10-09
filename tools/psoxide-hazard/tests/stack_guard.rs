@@ -1077,3 +1077,53 @@ fn code_ranges_extend_the_map_bounds() {
     );
     assert_eq!(run(&["--code", "nonsense"]).0, 2);
 }
+
+#[test]
+fn one_run_patches_to_a_fixed_point() {
+    // Both entries of t::a's table name the case that reads the slot load, so
+    // the first pass points both at one trampoline. That trampoline is in
+    // .data, outside the listed .text, so the rescan can no longer read the
+    // table (no entry lands in the function), the `jr` has an unknown
+    // consumer again, and the same run has to patch it a second way: move
+    // the load out of the slot. Editor-playtest's submit_textured_triangle_leaf
+    // (2026-10-09) did this, and its build needed hazard-patch twice.
+    let (fx, jr_at, cases) = code_pointer_dispatch(&[(".rodata", &[1, 1])]);
+    let out = patch_with_map(&fx, &[]);
+    let table_patches = format!(
+        "patched table entry {:08x} (jr at {jr_at:08x})",
+        BASE + 0x900
+    );
+    assert!(out.contains(&table_patches), "{out}");
+    assert!(
+        out.contains("hazards remain after patching; pass 2"),
+        "{out}"
+    );
+    assert!(
+        out.contains(&format!("patched jr at at {jr_at:08x}")),
+        "{out}"
+    );
+    assert!(
+        out.contains("1 patched, 0 remaining, 6/64 trampoline words"),
+        "{out}"
+    );
+    // The image is clean now: nothing for a second invocation to find or
+    // change.
+    let (exe, map) = (fx.dir.0.join("fixture.exe"), fx.dir.0.join("fixture.map"));
+    let patched = std::fs::read(&exe).unwrap();
+    let args: Vec<String> = [exe.to_str().unwrap(), "--map", map.to_str().unwrap()]
+        .iter()
+        .map(|a| a.to_string())
+        .collect();
+    let mut again = Vec::new();
+    assert_eq!(patch::main(&args, &mut again), 0);
+    assert!(String::from_utf8(again)
+        .unwrap()
+        .starts_with("0 hazards in"));
+    assert_eq!(std::fs::read(&exe).unwrap(), patched);
+    // The first pass's work is kept: both entries still go to the trampoline
+    // that jumps to the case.
+    let image = GuardImage::open(&exe, &map).unwrap();
+    let tramp = image.word_at(i64::from(BASE + 0x900));
+    assert_eq!(tramp, image.word_at(i64::from(BASE + 0x904)));
+    assert_ne!(tramp, i64::from(cases[1]));
+}
