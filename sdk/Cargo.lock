@@ -52,6 +52,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "psx-display"
+version = "0.1.0"
+dependencies = [
+ "psx-gpu",
+ "psx-hw",
+]
+
+[[package]]
 name = "psx-fmv"
 version = "0.1.0"
 dependencies = [
