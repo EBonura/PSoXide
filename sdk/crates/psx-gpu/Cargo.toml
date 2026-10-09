@@ -11,5 +11,12 @@ bitflags = { version = "2.6", default-features = false }
 psx-hw = { workspace = true }
 psx-io = { path = "../psx-io" }
 
+[features]
+default = []
+# Hand-scheduled R3000 kernels for the ordering-table link passes
+# (`asm_kernels.rs`), used instead of the inline-asm loops in `ot.rs`.
+# Off by default; bit-identical to them, faster on the cycle model.
+asm-kernels = []
+
 [lints]
 workspace = true

@@ -26,6 +26,8 @@
 #![no_std]
 #![cfg_attr(target_arch = "mips", feature(asm_experimental_arch))]
 
+#[cfg(all(target_arch = "mips", feature = "asm-kernels"))]
+mod asm_kernels;
 pub mod chain;
 mod compat;
 pub mod display;
