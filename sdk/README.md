@@ -20,6 +20,7 @@ the editor and emulator share one simulation.
 | [`psx-spu`](crates/psx-spu) | High-level SPU API: typed voices, volume, pitch, ADSR, ADPCM upload, key-on/off, loop chaining, noise. |
 | [`psx-sfx`](crates/psx-sfx) | One-shot sample banks, voice allocation and playback cutoff for SPU effects. |
 | [`psx-settings`](crates/psx-settings) | Versioned game preferences with optional memory-card persistence. |
+| [`psx-display`](crates/psx-display) | Picture options: the BRIGHTNESS stepper (`DEFAULT`, `DARKER n`, `BRIGHTER n`) with its one-packet GPU overlay, and the SCREEN X/Y stepper, each with row text and a save byte. Host-tested, no heap ([adoption guide](docs/DISPLAY-OPTIONS.md)). |
 | [`psx-gte`](crates/psx-gte) | GTE (COP2) wrappers. MIPS emits inline-asm coprocessor ops; host routes through `psx-gte-core`. |
 | [`psx-gte-core`](crates/psx-gte-core) | Pure-Rust GTE state machine and fixed-point math. Shared by `psx-gte` and the emulator; bit-exact against a real-console conformance corpus. |
 | [`psx-math`](crates/psx-math) | Fixed-point math: Q0.12 angles + sin/cos/atan2, int32 helpers, decimal text formatting. |
