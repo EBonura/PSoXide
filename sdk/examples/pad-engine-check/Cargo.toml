@@ -19,3 +19,9 @@ lto = true
 psx-pad  = { path = "../../crates/psx-pad", features = ["irq-engine"] }
 psx-rt   = { path = "../../crates/psx-rt" }
 psx-cdstream = { path = "../../crates/psx-cdstream" }
+psx-io      = { path = "../../crates/psx-io" }
+
+[features]
+# The polled CD read phase. Needs a disc (`frontend launch --disc`): without one
+# the reader waits out its drive timeouts.
+cd-read = []

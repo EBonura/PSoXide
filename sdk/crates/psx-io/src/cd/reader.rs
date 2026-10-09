@@ -26,8 +26,9 @@
 //! keeps CD-ROM interrupts away from the CPU for the length of a stream:
 //!
 //! * `I_MASK` is set to VBlank-only (by `prepare`, and again by each
-//!   `start_read`) until [`SectorReader::stop`] puts the previous value back. Every other source stops reaching the CPU in
-//!   between: a CD-ROM IRQ with no handler would otherwise be an unhandled-IRQ
+//!   `start_read`) until [`SectorReader::stop`] puts the previous value back,
+//!   plus whatever [`irq::keep_enabled_while_polling`] holds. Every other
+//!   source stops reaching the CPU in between: a CD-ROM IRQ with no handler would otherwise be an unhandled-IRQ
 //!   storm.
 //! * The latched CD-ROM `I_STAT` bit is acked and the controller's five IRQ
 //!   enables are switched on, then every pending controller IRQ is acked.
@@ -315,10 +316,11 @@ impl SectorReader {
     }
 
     /// Set `I_MASK` to VBlank-only, keeping the caller's mask for
-    /// [`stop`](Self::stop). Idempotent within a stream.
+    /// [`stop`](Self::stop), plus the sources [`irq::keep_enabled_while_polling`]
+    /// holds (the pad engine's). Idempotent within a stream.
     fn enter_polling_mask(&mut self) {
         self.saved_mask.keep(irq::mask());
-        irq::set_mask(1 << psx_hw::irq::source::VBLANK);
+        irq::set_mask((1 << psx_hw::irq::source::VBLANK) | irq::polling_keep());
     }
 
     fn restore_irq_mask(&mut self) {
