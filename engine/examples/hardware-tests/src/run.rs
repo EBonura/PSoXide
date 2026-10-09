@@ -610,6 +610,14 @@ fn step_engine_load(run: &mut Run) {
     ui::repaint(run.font());
 }
 
+/// The DualShock motor packets, the poll-cost comparison and the operator's
+/// yes or no for each motor level.
+fn step_rumble(run: &mut Run) {
+    let font = run.font.take().expect("font uploaded by reset_area");
+    rumble::run(&font, &mut run.timing.records, &mut run.next);
+    run.font = Some(font);
+}
+
 /// The optional hot-plug window. Says what it wants on the detail line and
 /// counts the seconds down.
 fn step_sio_hotplug(run: &mut Run) {
@@ -748,6 +756,7 @@ const STEPS: &[Step] = &[
     step(Area::Sio, "ENGINE TIMED PACING", records_engine_timed),
     step(Area::Sio, "ENGINE AND CARD LEASE", records_engine_card),
     step(Area::Sio, "ENGINE UNDER LOAD", step_engine_load),
+    step(Area::Sio, "DUALSHOCK MOTORS", step_rumble),
     step(Area::Sio, "PAD HOT-PLUG WINDOW", step_sio_hotplug),
     // 8
     step(Area::Perf, "STACK AND LEVER CASES", tests_perf),

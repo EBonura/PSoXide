@@ -52,7 +52,7 @@ const NONE: u16 = 0xFFFF;
 const WINDOW_READS: u32 = 1_200;
 /// Setup delay for the passes that are not about it: past every delay the
 /// sweep has seen an official pad need.
-const SAFE_SETUP: u16 = 24_576;
+pub(crate) const SAFE_SETUP: u16 = 24_576;
 
 /// Delays after asserting select, in system-clock cycles (33.8688 MHz).
 const DELAYS: [u16; 16] = [
@@ -65,8 +65,8 @@ const CARD_READ: [u8; 4] = [0x81, 0x52, 0x00, 0x00];
 
 /// One byte clocked out and what came of it.
 #[derive(Copy, Clone)]
-struct Byte {
-    reply: u8,
+pub(crate) struct Byte {
+    pub(crate) reply: u8,
     /// Cycles from the write to the byte being received.
     done: u16,
     /// Cycles from the write to `/ACK` asserting, and to it releasing.
@@ -98,12 +98,12 @@ impl Byte {
 }
 
 /// What one transaction left behind.
-struct Seen {
-    bytes: [Byte; 9],
+pub(crate) struct Seen {
+    pub(crate) bytes: [Byte; 9],
     /// `STAT` after the release.
-    status: u32,
+    pub(crate) status: u32,
     /// System-clock cycles from select to release.
-    total: u16,
+    pub(crate) total: u16,
 }
 
 fn token() -> ControllerPort {
@@ -180,7 +180,7 @@ fn exchange(port: &mut ControllerPort, tx: u8) -> Byte {
 
 /// One transaction: select the port, wait `delay` cycles, clock `tx` out,
 /// release. With `mask_irq` the interrupt flag is clear for the whole thing.
-fn transaction(port2: bool, delay: u16, tx: &[u8], mask_irq: bool) -> Seen {
+pub(crate) fn transaction(port2: bool, delay: u16, tx: &[u8], mask_irq: bool) -> Seen {
     let mut port = token();
     let _irq = if mask_irq {
         Some(IrqGuard::mask())

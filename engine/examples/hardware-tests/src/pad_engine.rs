@@ -26,6 +26,7 @@ use crate::console_tests::record;
 use crate::lever_probes::Activity;
 use crate::{push_timing_record, TimingRecord, TIMING_RECORD_COUNT};
 use psx_io::controller_port::Port;
+use psx_io::irq;
 use psx_io::periph::ControllerPort;
 use psx_io::timers::{self, Timer};
 use psx_mc::{Block, Error as CardError, HardwareCard};
@@ -57,14 +58,16 @@ const CARD_OPS_RECORD: u16 = 0x691;
 const CARD_WAIT_RECORD: u16 = 0x692;
 /// rec engine_card_frame: card_frame_hblanks_min, card_frame_hblanks_med, card_frame_hblanks_max (0x693)
 const CARD_FRAME_RECORD: u16 = 0x693;
-/// rec engine_load_work: rounds_avg, rounds_min, rounds_max (a frame's loop rounds, six phases of four records from 0x720: no ports with all load, both ports alone, with GPU, with SPU, with CD, with all three)
+/// rec engine_load_work: rounds_avg, rounds_min, rounds_max (a frame's loop rounds, seven phases of five records from 0x720: no ports with all load, both ports alone, with GPU, with SPU, with CD as the SDK reader leaves I_MASK, with CD and the pad interrupts re-enabled, with all three)
 const LOAD_WORK_RECORD: u16 = 0x720;
-/// rec engine_load_health: pad_faults, stalls, spurious (0x721 and every fourth after)
+/// rec engine_load_health: pad_faults, stalls, spurious (0x721 and every fifth after)
 const LOAD_HEALTH_RECORD: u16 = 0x721;
-/// rec engine_load_stack: handler_stack_unused_bytes, events, kicks (0x722 and every fourth after)
+/// rec engine_load_stack: handler_stack_unused_bytes, events, kicks (0x722 and every fifth after)
 const LOAD_STACK_RECORD: u16 = 0x722;
-/// rec engine_load_irq: longest_load_call_cycles, load_calls_over_a_byte, entered_ie_clear_and_pending (0x723 and every fourth after)
+/// rec engine_load_irq: longest_load_call_cycles, load_calls_over_a_byte, entered_ie_clear_and_pending (0x723 and every fifth after)
 const LOAD_IRQ_RECORD: u16 = 0x723;
+/// rec engine_load_mask: i_mask_after_load_start, i_mask_at_end, i_stat_at_end (0x724 and every fifth after)
+const LOAD_MASK_RECORD: u16 = 0x724;
 
 const NONE: u32 = 0xFFFF;
 /// Give a frame up after this many loop rounds if no VBlank arrives.
@@ -476,7 +479,7 @@ pub(crate) fn card_lease(records: &mut Records, next: &mut usize) {
 /// left waiting, which is how a console run can tell the generator from the
 /// engine.
 pub(crate) fn under_load(records: &mut Records, next: &mut usize) {
-    for phase in 0..6u16 {
+    for phase in 0..7u16 {
         let config = if phase == 0 {
             Config {
                 ports: [false, false],
@@ -485,19 +488,28 @@ pub(crate) fn under_load(records: &mut Records, next: &mut usize) {
         } else {
             Config::DEFAULT
         };
-        let base = 4 * phase;
+        let base = 5 * phase;
         let session = Session::start(config);
         if !session.installed {
             refused(records, next, LOAD_WORK_RECORD + base);
             continue;
         }
         let mut load = match phase {
-            0 | 5 => Some(Activity::start_without_pad()),
+            0 | 6 => Some(Activity::start_without_pad()),
             1 => None,
             2 => Some(Activity::start_parts(true, false, false)),
             3 => Some(Activity::start_parts(false, true, false)),
             _ => Some(Activity::start_parts(false, false, true)),
         };
+        // The SDK's sector reader sets I_MASK to VBlank only while it runs
+        // (`SectorReader::prepare`), which closes the pad engine's SIO and
+        // root-counter-0 interrupts. Phase 4 leaves it as the reader leaves
+        // it; phases 5 and 6 open those two again, to tell a reader that
+        // masks the engine from an engine that cannot share a frame with CD.
+        if phase >= 5 {
+            irq::set_mask(irq::mask() | (1 << 7) | (1 << 4));
+        }
+        let mask_start = irq::mask();
         let _ = spin_frame(|| {
             if let Some(load) = load.as_mut() {
                 load.service_timed();
@@ -519,6 +531,8 @@ pub(crate) fn under_load(records: &mut Records, next: &mut usize) {
         let after = console::snapshot();
         let stats = console::stats();
         let diag = load.as_ref().map(|load| load.diag()).unwrap_or_default();
+        let mask_end = irq::mask();
+        let stat_end = irq::pending();
         if let Some(load) = load.take() {
             let _ = load.stop();
         }
@@ -559,6 +573,11 @@ pub(crate) fn under_load(records: &mut Records, next: &mut usize) {
                 diag.over_byte,
                 (diag.entered_ie_clear.min(255) << 8) | diag.entered_pending.min(255),
             ),
+        );
+        push(
+            records,
+            next,
+            record(LOAD_MASK_RECORD + base, mask_start, mask_end, stat_end),
         );
     }
 }

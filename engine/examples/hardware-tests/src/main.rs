@@ -68,6 +68,7 @@ mod records;
 mod regs;
 mod report;
 mod ring_probe;
+mod rumble;
 mod run;
 mod sample_probe;
 mod scene;

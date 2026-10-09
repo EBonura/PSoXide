@@ -18,9 +18,9 @@
 //! The CPU loop (64 `lw` + nop, or 64 `sw` back to back, on RAM) is timed on
 //! Timer 2 from the kick, once with nothing running and once while the
 //! channel(s) run. The transfer's own duration is Timer 2 from the kick until
-//! the channels read idle. Every wait is bounded by that timer (60,000 clocks),
-//! and a timeout is recorded as `0xFFFF` instead of hanging; the channels are
-//! then aborted.
+//! the channels read idle, in units of 32 clocks. Every wait is bounded (about
+//! 2 million clocks, a twentieth of a second), and a timeout is recorded as
+//! `0xFFFF` instead of hanging; the channels are then aborted.
 
 use crate::console_tests::record;
 use crate::{push_timing_record, IrqGuard, TimingRecord, TIMING_RECORD_COUNT};
@@ -31,9 +31,9 @@ use psx_io::timers;
 
 type Records = [TimingRecord; TIMING_RECORD_COUNT];
 
-/// rec cd_dma_loop: loop_idle_clocks, loop_during_clocks, transfer_clocks (ffff = timeout; lw then sw for 1x 2048, 1x 2340, 2x 2048, 2x 2340, 0x700-0x707)
+/// rec cd_dma_loop: loop_idle_clocks, loop_during_clocks, transfer_clocks_div32 (ffff = timeout; lw then sw for 1x 2048, 1x 2340, 2x 2048, 2x 2340, 0x700-0x707)
 const CD_DMA_RECORD: u16 = 0x700;
-/// rec mdec_dma_loop: loop_idle_clocks, loop_during_clocks, transfer_clocks (ffff = timeout; lw then sw, 0x708-0x709)
+/// rec mdec_dma_loop: loop_idle_clocks, loop_during_clocks, transfer_clocks_div32 (ffff = timeout; lw then sw, 0x708-0x709)
 const MDEC_DMA_RECORD: u16 = 0x708;
 
 const NONE: u32 = 0xFFFF;
@@ -62,7 +62,9 @@ static mut SCRATCH_DATA: [u32; 4] = [0; 4];
 /// when only one is used), `$9` the first channel's MADR, `$14` its CHCR (0 =
 /// nothing runs: the idle row), `$24` the address the loop reads or writes.
 /// Returns the loop's clocks in `$12` and, in `$2`, the clocks from the kick
-/// to both channels idle, or -1 if 60,000 clocks went by first.
+/// to both channels idle in units of 32 (so up to 63,000 units, about 2 million
+/// clocks), or -1 if that bound went by first. Timer 2 wraps every 65,536
+/// clocks; the wait counts the wraps.
 macro_rules! bounded_overlap {
     ($name:ident, $id:literal, $payload:expr) => {
         #[inline(never)]
@@ -86,6 +88,8 @@ macro_rules! bounded_overlap {
                         "sw $14, 8($8)\n",
                         $payload,
                         "lw $12, 0($11)\n",
+                        "move $24, $zero\n",
+                        "move $25, $zero\n",
                         "3:\n",
                         "lw $10, 8($8)\n",
                         "nop\n",
@@ -94,19 +98,26 @@ macro_rules! bounded_overlap {
                         "or $10, $10, $3\n",
                         "srl $10, $10, 24\n",
                         "andi $10, $10, 1\n",
-                        "beqz $10, 4f\n",
-                        "nop\n",
                         "lw $2, 0($11)\n",
                         "nop\n",
-                        "ori $10, $zero, 60000\n",
-                        "sltu $3, $2, $10\n",
+                        "sltu $3, $2, $24\n",
+                        "beqz $3, 6f\n",
+                        "nop\n",
+                        "lui $3, 1\n",
+                        "addu $25, $25, $3\n",
+                        "6:\n",
+                        "move $24, $2\n",
+                        "beqz $10, 4f\n",
+                        "nop\n",
+                        "lui $3, 0x1F\n",
+                        "sltu $3, $25, $3\n",
                         "bnez $3, 3b\n",
                         "nop\n",
                         "b 5f\n",
                         "addiu $2, $zero, -1\n",
                         "4:\n",
-                        "lw $2, 0($11)\n",
-                        "nop\n",
+                        "addu $2, $2, $25\n",
+                        "srl $2, $2, 5\n",
                         "5:\n",
                         ".word 0x34000001 | (", stringify!($id), " << 1)\n",
                         ".set reorder"
@@ -116,6 +127,7 @@ macro_rules! bounded_overlap {
                     in("$14") chcr_a,
                     in("$15") base_b,
                     in("$24") data,
+                    lateout("$25") _,
                     lateout("$2") total,
                     lateout("$3") _,
                     lateout("$10") _,
@@ -150,6 +162,23 @@ fn run_loop(kind: Loop, base_a: u32, madr: u32, chcr: u32, base_b: u32, data: u3
 fn idle_loop(kind: Loop, base: u32, data: u32) -> u16 {
     let _ = run_loop(kind, base, 0, 0, base, data);
     run_loop(kind, base, 0, 0, base, data).0
+}
+
+/// The channel's registers after a row, on the TTY, so a timeout can be told
+/// from a transfer that finished.
+fn debug_chcr(what: &str, channel: Channel, loop_clocks: u16, total: u16) {
+    use psx_rt::tty;
+    tty::print("hardware-tests: dma-matrix ");
+    tty::print(what);
+    tty::print(" chcr=0x");
+    tty::print_hex_u32(dma::control(channel));
+    tty::print(" madr=0x");
+    tty::print_hex_u32(dma::address(channel));
+    tty::print(" loop=");
+    crate::report::tty_print_dec_u16(loop_clocks);
+    tty::print(" total=");
+    crate::report::tty_print_dec_u16(total);
+    tty::println("");
 }
 
 fn pack(idle: u16, during: u16, transfer: u16) -> (u32, u32, u32) {
@@ -191,6 +220,7 @@ fn cd_row(fast: bool, whole: bool, kind: Loop) -> (u32, u32, u32) {
         dma::raw::set_size(Channel::Cd, dma::size_words(words));
     }
     let (during, transfer) = run_loop(kind, base, sink, CD_KICK, base, ram);
+    debug_chcr("cd", Channel::Cd, during, transfer);
     if transfer == 0xFFFF {
         dma::abort(Channel::Cd);
     }
@@ -251,6 +281,14 @@ fn mdec_row(kind: Loop) -> (u32, u32, u32) {
             psx_hw::mdec::MDEC0,
             psx_hw::mdec::DECODE_24BPP | MDEC_IN_WORDS as u32,
         );
+        // DMA 0 only starts once the decoder asks for data (status bit 28),
+        // which takes a moment after the command; a kick before that parks.
+        let mut spins = 0u32;
+        while psx_io::read_u32(psx_hw::mdec::MDEC1) & psx_hw::mdec::STATUS_IN_REQUEST == 0
+            && spins < 200_000
+        {
+            spins += 1;
+        }
         dma::enable_channel(Channel::MdecIn);
         dma::enable_channel(Channel::MdecOut);
         // The drain first: block mode waits for the decoder's requests.
@@ -263,6 +301,8 @@ fn mdec_row(kind: Loop) -> (u32, u32, u32) {
         dma::raw::set_size(Channel::MdecIn, dma::size_blocks(32, MACROBLOCKS as u16));
     }
     let (during, transfer) = run_loop(kind, base_in, input, MDEC_CHCR_IN, base_out, ram);
+    debug_chcr("mdec-in", Channel::MdecIn, during, transfer);
+    debug_chcr("mdec-out", Channel::MdecOut, during, transfer);
     if transfer == 0xFFFF {
         dma::abort(Channel::MdecIn);
         dma::abort(Channel::MdecOut);
