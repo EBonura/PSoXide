@@ -134,7 +134,7 @@ fn an_empty_socket_is_told_at_once_and_cheaply() {
     // four attempts of the long one (about 12,000 reads).
     mock::with(|m| {
         assert_eq!((m.attempts, m.sends), (1, 1));
-        assert!(m.now < 2_000, "{} register accesses", m.now);
+        assert!(m.now < 3_000, "{} register accesses", m.now);
     });
     // A reader that never saw a pad is told the same, once.
     start(Model {

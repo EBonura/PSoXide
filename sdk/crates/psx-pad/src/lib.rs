@@ -660,12 +660,15 @@ const ACK_WAIT_SPINS: u32 = Timing::PAD.ack_spins;
 /// waits for each non-final byte's ACK readiness; the BIOS likewise paces bytes.
 pub const DEFAULT_SETUP_SPINS: u32 = Timing::PAD.setup_spins;
 
-/// Spin budget for the address byte's `/ACK`, about 100 microseconds at 6.7
-/// cycles a spin: the kernel's own timeout for a device to answer. A socket with
-/// nothing in it never pulses `/ACK`, so this is what finding it empty costs
-/// after the setup delay. [`Timing::PAD`]'s 2,048 reads, which a slow byte
-/// part way through a packet may need, would cost four times as much.
-const ADDRESS_ACK_SPINS: u32 = 512;
+/// Spin budget for the address byte's `/ACK`, about 7,000 cycles at 6.9 cycles
+/// a spin on silicon. A socket with nothing in it never pulses `/ACK`, so this
+/// is what finding it empty costs after the setup delay. [`Timing::PAD`]'s
+/// 2,048 reads, which a slow byte part way through a packet may need, would
+/// cost twice as much. The console measured the pad's `/ACK` rising 1,627 to
+/// 1,712 cycles after the write, the address byte slowest (v2.1, one pad), so
+/// 512 spins (about 3,550 cycles) was only 2.07 times the slowest answer seen;
+/// 1,024 gives the margin to other pads and to a transaction that starts late.
+const ADDRESS_ACK_SPINS: u32 = 1024;
 
 /// Poll the controller in `socket` once.
 ///
