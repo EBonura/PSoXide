@@ -83,16 +83,21 @@ derivations are credited in the source and provenance records. PSoXide does not
 claim a clean-room development process or guarantee that provenance reviews
 identify every third-party influence.
 
-Parts of the emulator core still derive from PCSX-Redux (GPL-2.0-or-later),
-including the event scheduler, DMA, SPU envelopes, the MDEC pipeline and SIO.
-Those files carry a provenance header that names PCSX-Redux, and the project's
-licence notice lists the same lineage. The high-level kernel emulation does not:
-it is written from public hardware documentation and console measurements (see
-[No BIOS](#no-bios)). The CD-ROM module dropped its Redux references on 4 October
-2026, but three of its delay values (for GetID, Pause and Stop) are still
-PCSX-Redux's, because replacing them changes the compatibility results. Other
-components were implemented using public hardware documentation and console
-observations. Behavioural comparisons and similarity scans are evidence with a
+The emulator core's event scheduler, DMA, SIO0, SPU (voices, envelopes, noise
+and reverb) and MDEC were rewritten from public hardware documentation (the
+nocash PSX-SPX notes), console measurements and the public ps1-tests captures.
+The high-level kernel emulation was written the same way (see
+[No BIOS](#no-bios)). Some behaviour in the CPU, bus, video timing, GPU and
+CD-ROM modules was first chosen to match PCSX-Redux (GPL-2.0-or-later) traces.
+The source text is the project's own, but no document or console measurement
+backs that behaviour. Each case is marked `gate-pinned` in the code and
+listed in the emulator's
+[provenance record](https://github.com/EBonura/PSoXide-emulator/blob/main/docs/PROVENANCE.md),
+together with the few CD-ROM delay values still pinned to earlier choices. The
+hardware renderer's texture filter is original work; two earlier filters that
+were ports of third-party shader code have been removed.
+
+Behavioural comparisons and similarity scans are evidence with a
 defined scope, not proof of the absence of all derivation.
 
 See the [licence audit](https://github.com/EBonura/PSoXide/blob/main/docs/license-audit.md)
