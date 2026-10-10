@@ -331,12 +331,17 @@ pub fn build_world_pack(chunks: &[(u32, &[u8])]) -> Vec<u8> {
 /// `generated/` tree); only the file set and order are shared here.
 pub fn add_playtest_files(
     builder: &mut IsoBuilder,
-    exe_bytes: Vec<u8>,
+    mut exe_bytes: Vec<u8>,
     world_pack: Option<Vec<u8>>,
     ui_pack: Option<Vec<u8>>,
     cdtest_sectors: Option<usize>,
 ) -> Result<(), PlaytestLayoutError> {
     builder.add_file("SYSTEM.CNF", default_system_cnf());
+    // The loader reads the header's whole sectors, so a link that stopped
+    // short of them (psoxide.ld starts .bss where .data ends) is padded here,
+    // before the extent is sized. A file that is not an executable, or is
+    // truncated, is left for the caller's own validation to refuse.
+    let _ = pad_to_payload(&mut exe_bytes);
     let exe_sectors = sectors_for_bytes(exe_bytes.len());
     let next_after_exe = PLAYTEST_BOOT_EXE_START_LBA.saturating_add(exe_sectors);
     let cdtest_sectors_u32 = cdtest_sectors.unwrap_or(0) as u32;
@@ -830,6 +835,26 @@ mod tests {
         exe[0x10..0x14].copy_from_slice(&0x8001_0000u32.to_le_bytes());
         exe[0x18..0x1C].copy_from_slice(&0x8001_0000u32.to_le_bytes());
         exe
+    }
+
+    #[test]
+    fn playtest_layout_pads_an_exe_the_linker_left_short_of_its_sectors() {
+        let mut exe = minimal_exe();
+        exe[0x1C..0x20].copy_from_slice(&4096u32.to_le_bytes());
+        exe.extend_from_slice(&[0x5A; 3000]);
+        let mut builder = IsoBuilder::new();
+        add_playtest_files(&mut builder, exe, None, None, None).unwrap();
+        let disc = Disc::from_bin(builder.build_bin());
+        let boot = load_boot_exe_from_disc(&disc).expect("boots");
+        assert_eq!(boot.exe.payload.len(), 4096);
+        assert!(boot.exe.payload[..3000].iter().all(|&b| b == 0x5A));
+        assert!(boot.exe.payload[3000..].iter().all(|&b| b == 0));
+        // The second payload sector is on the disc, not read from the next file.
+        let tail = disc
+            .read_sector_user(PLAYTEST_BOOT_EXE_START_LBA + 2)
+            .expect("second payload sector");
+        assert!(tail[..952].iter().all(|&b| b == 0x5A));
+        assert!(tail[952..].iter().all(|&b| b == 0));
     }
 
     #[test]
