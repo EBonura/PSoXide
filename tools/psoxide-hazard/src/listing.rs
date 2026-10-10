@@ -7,6 +7,41 @@ pub const HEADER: i64 = 0x800;
 /// Where an image without a PS-EXE header loads.
 pub const LOAD_ADDR: i64 = 0x8001_0000;
 
+/// Why [`pad_to_payload`] left a file alone.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Padding {
+    /// No `PS-X EXE` header: an image without one has nothing to pad to.
+    NotAnExe,
+    /// The header claims `expected` payload bytes and the file has `actual`,
+    /// a whole sector or more short.
+    Truncated { expected: usize, actual: usize },
+}
+
+/// Zero-fill a linked executable to the payload size its header claims and
+/// return how many bytes that added.
+///
+/// `psoxide.ld` starts `.bss` where `.data` ends and rounds the header's size
+/// up to whole sectors, so the flat file the linker writes can end up to 2047
+/// bytes short of it. The same rule as `psx_iso::pad_to_payload`, kept here
+/// so this tool has no dependency that a downstream `Cargo.lock` would have
+/// to learn about before it can take a new SDK.
+pub fn pad_to_payload(bytes: &mut Vec<u8>) -> Result<usize, Padding> {
+    const SECTOR: usize = 0x800;
+    if bytes.len() < HEADER as usize || !bytes.starts_with(b"PS-X EXE") {
+        return Err(Padding::NotAnExe);
+    }
+    let expected = u32::from_le_bytes(bytes[0x1C..0x20].try_into().unwrap()) as usize;
+    let actual = bytes.len() - HEADER as usize;
+    let Some(missing) = expected.checked_sub(actual) else {
+        return Ok(0);
+    };
+    if missing >= SECTOR {
+        return Err(Padding::Truncated { expected, actual });
+    }
+    bytes.resize(bytes.len() + missing, 0);
+    Ok(missing)
+}
+
 /// One listed instruction: objdump's mnemonic (`.word` for a word it does
 /// not decode) and its operand text.
 #[derive(Clone, Debug, PartialEq, Eq)]
