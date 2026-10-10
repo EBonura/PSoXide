@@ -689,3 +689,50 @@ fn the_binaries_take_the_same_command_lines() {
     );
     let _ = Path::new(fx.p());
 }
+
+#[test]
+fn patching_pads_a_short_last_sector_with_zeros() {
+    // psoxide.ld starts .bss where .data ends, so the flat file the linker
+    // writes can end up to 2047 bytes short of the sector-rounded size its
+    // header claims. The patcher is the step every build runs after a link.
+    let fx = Fixture::new();
+    let image = Image::new(0x8001_0000);
+    image.write(&fx.path);
+    let whole = std::fs::read(&fx.path).unwrap();
+    let short = &whole[..whole.len() - 0x6C];
+    assert!(short[short.len() - 4..].iter().all(|&b| b == 0));
+
+    std::fs::write(&fx.path, short).unwrap();
+    let (status, out) = fx.patch(&["--check"]);
+    assert_eq!(status, 0, "{out}");
+    assert_eq!(
+        std::fs::read(&fx.path).unwrap(),
+        short,
+        "--check writes nothing"
+    );
+
+    let (status, out) = fx.patch(&[]);
+    assert_eq!(status, 0, "{out}");
+    assert!(out.contains("padded"), "{out}");
+    assert!(out.contains("108 zero bytes"), "{out}");
+    assert_eq!(std::fs::read(&fx.path).unwrap(), whole);
+
+    // A padded file is left as it is, byte for byte.
+    let (status, out) = fx.patch(&[]);
+    assert_eq!(status, 0, "{out}");
+    assert!(!out.contains("padded"), "{out}");
+    assert_eq!(std::fs::read(&fx.path).unwrap(), whole);
+}
+
+#[test]
+fn patching_refuses_a_truncated_image() {
+    let fx = Fixture::new();
+    Image::new(0x8001_0000).write(&fx.path);
+    let whole = std::fs::read(&fx.path).unwrap();
+    let cut = &whole[..whole.len() - 0x800];
+    std::fs::write(&fx.path, cut).unwrap();
+    let (status, out) = fx.patch(&[]);
+    assert_eq!(status, 1, "{out}");
+    assert!(out.contains("truncated"), "{out}");
+    assert_eq!(std::fs::read(&fx.path).unwrap(), cut);
+}
