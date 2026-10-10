@@ -33,12 +33,16 @@ adjusted any other way.
 
     stack-guard game.exe game.map
     stack-guard game.exe game.map --root REGEX --budget BYTES
+    stack-guard game.exe game.map --forbid __psx_rt_flush_i_cache
 
 The map is ld.lld's `-Map` output for the same link. The exe may be
 hazard-patched: calls rerouted through HAZARD_TRAMPOLINES are followed to
 their targets. `--root`/`--budget` check a game's own stack switch instead
-(an entry name regex and its byte budget). Without a map the tool only checks
-that the image does not contain psx-rt's stack switch.
+(an entry name regex and its byte budget). `--forbid SYMBOL` (repeatable)
+fails a tree that reaches the function named SYMBOL: psx-rt's I-cache flush,
+`__psx_rt_flush_i_cache`, runs with the scratchpad unmapped, so a frame on the
+scratchpad stack would read the cache tags instead. Without a map the tool
+only checks that the image does not contain psx-rt's stack switch.
 ";
 
 const STACK_OVERHEAD: i64 = 20;
@@ -122,14 +126,17 @@ struct Walker<'a> {
     image: &'a GuardImage,
     detector: Detector<'a>,
     memo: HashMap<i64, (i64, Vec<String>)>,
+    /// Functions no tree may reach (`--forbid`).
+    forbidden: &'a [String],
 }
 
 impl<'a> Walker<'a> {
-    fn new(image: &'a GuardImage) -> Self {
+    fn new(image: &'a GuardImage, forbidden: &'a [String]) -> Self {
         Self {
             image,
             detector: Detector::new(image.image(), Some(&image.map)),
             memo: HashMap::new(),
+            forbidden,
         }
     }
 
@@ -224,6 +231,25 @@ impl<'a> Walker<'a> {
         let Some((start, end, name)) = self.image.map.function(addr) else {
             return Err(GuardError(format!("call to {addr:08x}, outside .text")));
         };
+        // A function can carry several symbols (an alias); any of them counts.
+        let named = |forbidden: &String| {
+            self.image
+                .map
+                .names
+                .get(&start)
+                .is_some_and(|names| names.iter().any(|(_, n)| n == forbidden))
+        };
+        if let Some(forbidden) = self.forbidden.iter().find(|f| named(f)) {
+            let callers: Vec<String> = path
+                .iter()
+                .filter_map(|&at| self.image.map.function(at))
+                .map(|(_, _, caller)| short(&caller))
+                .collect();
+            return Err(GuardError(format!(
+                "{} reaches {forbidden}, which no scratchpad stack tree may (--forbid)",
+                callers.last().map_or("the entry", String::as_str)
+            )));
+        }
         if let Some(known) = self.memo.get(&start) {
             return Ok(known.clone());
         }
@@ -348,6 +374,20 @@ pub fn check(
     budget: Option<i64>,
     out: &mut dyn Write,
 ) -> usize {
+    check_forbidding(exe, map_path, pattern, budget, &[], out)
+}
+
+/// [`check`], also failing a tree that reaches any function in `forbidden`
+/// (symbol names, as in the map): psx-rt's `__psx_rt_flush_i_cache` unmaps
+/// the scratchpad the tree's frames are on.
+pub fn check_forbidding(
+    exe: &Path,
+    map_path: Option<&Path>,
+    pattern: Option<&str>,
+    budget: Option<i64>,
+    forbidden: &[String],
+    out: &mut dyn Write,
+) -> usize {
     let Some(map_path) = map_path else {
         let data = match std::fs::read(exe) {
             Ok(data) => data,
@@ -409,7 +449,7 @@ pub fn check(
         );
         return 0;
     }
-    let mut walker = Walker::new(&image);
+    let mut walker = Walker::new(&image, forbidden);
     let mut failures = 0;
     for (address, name, limit, region) in entries {
         let place = region.map_or(String::new(), |(lo, hi)| format!("region {lo}..{hi}, "));
@@ -444,6 +484,7 @@ pub fn jump_table(image: &GuardImage, jr_addr: i64) -> Option<Vec<(i64, i64)>> {
 /// exit status.
 pub fn main(args: &[String], out: &mut dyn Write) -> i32 {
     let (mut paths, mut pattern, mut budget) = (Vec::new(), None, None);
+    let mut forbidden = Vec::new();
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -451,6 +492,13 @@ pub fn main(args: &[String], out: &mut dyn Write) -> i32 {
                 Some(value) => pattern = Some(value.clone()),
                 None => {
                     let _ = writeln!(out, "stack guard: --root needs a pattern");
+                    return 1;
+                }
+            },
+            "--forbid" => match it.next() {
+                Some(value) => forbidden.push(value.clone()),
+                None => {
+                    let _ = writeln!(out, "stack guard: --forbid needs a symbol");
                     return 1;
                 }
             },
@@ -470,7 +518,7 @@ pub fn main(args: &[String], out: &mut dyn Write) -> i32 {
     }
     let exe = Path::new(&paths[0]);
     let map = paths.get(1).map(Path::new);
-    let failures = check(exe, map, pattern.as_deref(), budget, out);
+    let failures = check_forbidding(exe, map, pattern.as_deref(), budget, &forbidden, out);
     if failures != 0 {
         let _ = writeln!(
             out,
