@@ -154,6 +154,21 @@ fn return_value_loaded_in_jr_ra_slot() {
         &[lui("at", hi(data)), jr("ra"), lbu("v0", lo(data), "at")],
     );
     fx.assert_fixed(&image, "s0", 1);
+    // Lock down every byte of the legacy no-module result, including the
+    // original branch site, trampoline, header and untouched data.
+    let mut expected = image.clone();
+    let tramp = image.addr(Image::TRAMPOLINES + 8);
+    expected.put(0x104, &[j(tramp), NOP]);
+    expected.put(
+        Image::TRAMPOLINES + 8,
+        &[lbu("v0", lo(data), "at"), jr("ra"), NOP],
+    );
+    let expected_path = fx._dir.0.join("expected.exe");
+    expected.write(&expected_path);
+    assert_eq!(
+        std::fs::read(&fx.path).unwrap(),
+        std::fs::read(expected_path).unwrap()
+    );
 }
 
 #[test]

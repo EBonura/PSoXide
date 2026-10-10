@@ -256,7 +256,106 @@ fn a_module_may_not_sit_on_resident_code() {
     let setup = setup(&hazardous());
     let (status, out) = run(patch::main, &setup, &declared(BASE + 0x100));
     assert_eq!(status, 2, "{out}");
-    assert!(out.contains("cover the code"), "{out}");
+    assert!(out.contains("overlap resident load bytes"), "{out}");
+}
+
+#[test]
+fn a_module_may_not_overwrite_resident_data() {
+    let setup = setup(&hazardous());
+    let (status, out) = run(patch::main, &setup, &declared(AT - SIZE));
+    assert_eq!(status, 2, "{out}");
+    assert!(out.contains("overlap resident load bytes"), "{out}");
+    assert_eq!(run(scan::main, &setup, &declared(AT - SIZE)).0, 2);
+}
+
+#[test]
+fn two_modules_patch_through_their_own_arrays() {
+    let setup = setup(&hazardous());
+    let second_link = LINK + 0x1000;
+    let second_at = AT + SIZE;
+    let mut file = std::fs::read(&setup.exe).unwrap();
+    let mut words = vec![NOP; SIZE as usize / 4];
+    words[..hazardous().len()].copy_from_slice(&hazardous());
+    words[ARRAY as usize / 4] = MAGIC;
+    words[ARRAY as usize / 4 + 1] = 16;
+    for word in words {
+        file.extend_from_slice(&word.to_le_bytes());
+    }
+    std::fs::write(&setup.exe, file).unwrap();
+    let mut flags = declared(AT);
+    flags.extend([
+        "--module".into(),
+        module_flag(second_link, SIZE, second_at),
+        "--code".into(),
+        format!("{:x}..{:x}", second_link, second_link + 0x40),
+        "--code".into(),
+        format!("{:x}..{:x}", second_link + ARRAY, second_link + END),
+    ]);
+    let (status, out) = run(patch::main, &setup, &flags);
+    assert_eq!(status, 0, "{out}");
+    assert!(
+        out.contains(&format!("trampoline {:08x}", LINK + ARRAY + 8)),
+        "{out}"
+    );
+    assert!(
+        out.contains(&format!("trampoline {:08x}", second_link + ARRAY + 8)),
+        "{out}"
+    );
+    let after = std::fs::read(&setup.exe).unwrap();
+    assert_eq!(word(&after, AT + 4), j(LINK + ARRAY + 8));
+    assert_eq!(word(&after, second_at + 4), j(second_link + ARRAY + 8));
+    assert_eq!(run(scan::main, &setup, &flags).0, 0);
+}
+
+#[test]
+fn resident_and_module_hazards_use_separate_arrays() {
+    let setup = setup(&hazardous());
+    let mut file = std::fs::read(&setup.exe).unwrap();
+    let resident = BASE + 0x40;
+    let offset = (resident - BASE) as usize + 0x800;
+    for (index, word) in hazardous().iter().enumerate() {
+        file[offset + index * 4..offset + index * 4 + 4].copy_from_slice(&word.to_le_bytes());
+    }
+    std::fs::write(&setup.exe, file).unwrap();
+    let flags = declared(AT);
+    let (status, out) = run(patch::main, &setup, &flags);
+    assert_eq!(status, 0, "{out}");
+    let after = std::fs::read(&setup.exe).unwrap();
+    assert_eq!(word(&after, resident + 4), j(BASE + Image::TRAMPOLINES + 8));
+    assert_eq!(word(&after, AT + 4), j(LINK + ARRAY + 8));
+    assert_eq!(run(scan::main, &setup, &flags).0, 0);
+}
+
+#[test]
+fn module_data_that_looks_like_an_array_is_not_used() {
+    let setup = setup(&hazardous());
+    let mut file = std::fs::read(&setup.exe).unwrap();
+    let offset = (AT + 0x50 - BASE) as usize + 0x800;
+    file[offset..offset + 4].copy_from_slice(&MAGIC.to_le_bytes());
+    file[offset + 4..offset + 8].copy_from_slice(&4u32.to_le_bytes());
+    std::fs::write(&setup.exe, file).unwrap();
+    let (status, out) = run(patch::main, &setup, &declared(AT));
+    assert_eq!(status, 0, "{out}");
+    let after = std::fs::read(&setup.exe).unwrap();
+    assert_eq!(word(&after, AT + 4), j(LINK + ARRAY + 8));
+    assert_eq!(word(&after, AT + 0x50), MAGIC);
+}
+
+#[test]
+fn an_array_crossing_the_module_end_is_refused() {
+    let setup = setup(&hazardous());
+    let mut file = std::fs::read(&setup.exe).unwrap();
+    let capacity_at = (AT + ARRAY + 4 - BASE) as usize + 0x800;
+    file[capacity_at..capacity_at + 4].copy_from_slice(&64u32.to_le_bytes());
+    let before = file.clone();
+    std::fs::write(&setup.exe, file).unwrap();
+    let (status, out) = run(patch::main, &setup, &declared(AT));
+    assert_eq!(status, 1, "{out}");
+    assert!(
+        out.contains("no HAZARD_TRAMPOLINES array for hazard"),
+        "{out}"
+    );
+    assert_eq!(std::fs::read(&setup.exe).unwrap(), before);
 }
 
 #[test]

@@ -54,9 +54,10 @@ impl Module {
         self.link.0 <= lo && lo < hi && hi <= self.link.1
     }
 
-    /// `[lo, hi)` load addresses of the module's bytes.
-    fn placed(&self) -> (i64, i64) {
-        (self.at, self.at + self.len())
+    /// `[lo, hi)` load addresses of the module's bytes, if representable.
+    fn placed(&self) -> Option<(i64, i64)> {
+        let len = self.link.1.checked_sub(self.link.0)?;
+        Some((self.at, self.at.checked_add(len)?))
     }
 }
 
@@ -95,7 +96,11 @@ fn parse(value: &str) -> Result<Module, String> {
              {LINK_WINDOW_LO:#x}..{LINK_WINDOW_HI:#x}, where no load has bytes of its own"
         ));
     }
-    Ok(Module { link: (lo, hi), at })
+    let module = Module { link: (lo, hi), at };
+    if module.placed().is_none() {
+        return Err(format!("bad --module {value}: the placement end overflows"));
+    }
+    Ok(module)
 }
 
 /// The modules of every `--module LINK_LO..LINK_HI@IMAGE_AT` in `args`.
@@ -119,7 +124,10 @@ pub fn modules(args: &[String]) -> Result<Vec<Module>, String> {
                     other.link.0, other.link.1
                 ));
             }
-            if overlap(module.placed(), other.placed()) {
+            if overlap(
+                module.placed().expect("parsed placement"),
+                other.placed().expect("parsed placement"),
+            ) {
                 return Err(format!(
                     "bad --module {value}: its bytes overlap those of the module linked at {:#x}..{:#x}",
                     other.link.0, other.link.1
@@ -147,8 +155,8 @@ impl Overlay {
     /// The overlay of `modules` over `file`, the bytes of a PS-EXE loaded at
     /// `base`. `code` is the image's executable ranges, `--code` ranges
     /// inside a module's link range included. Reports to `out` and returns
-    /// `Err(2)` when a module's bytes are not wholly inside the load, or
-    /// cover code that is not the module's own.
+    /// `Err(2)` when a module's bytes are not wholly inside the load, cover
+    /// the resident payload, or cover code that is not the module's own.
     pub fn new(
         modules: Vec<Module>,
         file: &[u8],
@@ -157,8 +165,30 @@ impl Overlay {
         out: &mut dyn Write,
     ) -> Result<Self, i32> {
         let load_end = base + file.len() as i64 - HEADER;
+        let resident_end = if modules.is_empty() {
+            None
+        } else if file.len() >= HEADER as usize && file.starts_with(b"PS-X EXE") {
+            let payload = u32::from_le_bytes(file[0x1c..0x20].try_into().unwrap());
+            Some(base + i64::from(payload))
+        } else {
+            let _ = writeln!(
+                out,
+                "bad --module: a PS-X EXE header is required to identify resident bytes"
+            );
+            return Err(2);
+        };
         for module in &modules {
-            let (lo, hi) = module.placed();
+            if !(LINK_WINDOW_LO <= module.link.0
+                && module.link.0 < module.link.1
+                && module.link.1 <= LINK_WINDOW_HI)
+            {
+                let _ = writeln!(out, "bad --module: link range is not in the RAM mirrors");
+                return Err(2);
+            }
+            let Some((lo, hi)) = module.placed() else {
+                let _ = writeln!(out, "bad --module: the placement end overflows");
+                return Err(2);
+            };
             let name = format!(
                 "--module {:#x}..{:#x}@{:#x}",
                 module.link.0, module.link.1, module.at
@@ -169,6 +199,15 @@ impl Overlay {
                     "bad {name}: its bytes {lo:#x}..{hi:#x} are not inside the load {base:#x}..{load_end:#x}"
                 );
                 return Err(2);
+            }
+            if let Some(resident_end) = resident_end {
+                if lo < resident_end {
+                    let _ = writeln!(
+                        out,
+                        "bad {name}: its bytes {lo:#x}..{hi:#x} overlap resident load bytes ending at {resident_end:#x}"
+                    );
+                    return Err(2);
+                }
             }
             if overlap(module.link, (base, load_end)) {
                 let _ = writeln!(
@@ -193,10 +232,26 @@ impl Overlay {
         Ok(Self { modules })
     }
 
-    /// True when `address` may hold the trampoline array a patch uses: any
-    /// address without modules, else one inside a module's link range.
-    pub fn holds(&self, address: i64) -> bool {
-        self.modules.is_empty() || self.modules.iter().any(|m| m.links(address, address + 1))
+    /// The module containing a link address, or `None` for resident code.
+    pub fn domain(&self, address: i64) -> Option<usize> {
+        self.modules
+            .iter()
+            .position(|m| m.links(address, address + 4))
+    }
+
+    /// True when the complete trampoline array lies in the given domain.
+    /// `None` denotes resident bytes outside every module's link range.
+    pub fn holds_span(&self, lo: i64, hi: i64, domain: Option<usize>) -> bool {
+        match domain {
+            Some(index) => self
+                .modules
+                .get(index)
+                .is_some_and(|module| module.links(lo, hi)),
+            None => !self
+                .modules
+                .iter()
+                .any(|module| overlap(module.link, (lo, hi))),
+        }
     }
 
     fn offset(address: i64, base: i64) -> usize {
@@ -281,6 +336,10 @@ mod tests {
             assert!(error.contains(bad), "{error}");
         }
         assert!(modules(&args(&["--module"])).is_err());
+        let overflow = "80410000..80410100@7fffffffffffff80";
+        assert!(modules(&args(&["--module", overflow]))
+            .unwrap_err()
+            .contains("placement end overflows"));
     }
 
     #[test]
@@ -288,6 +347,9 @@ mod tests {
         let base = 0x8001_0000;
         // A 0x20-byte payload, a 0x10-byte module after it.
         let mut file = vec![0u8; HEADER as usize + 0x30];
+        file[..8].copy_from_slice(b"PS-X EXE");
+        file[0x18..0x1c].copy_from_slice(&(base as u32).to_le_bytes());
+        file[0x1c..0x20].copy_from_slice(&0x20u32.to_le_bytes());
         for (i, b) in file[HEADER as usize..].iter_mut().enumerate() {
             *b = i as u8 + 1;
         }
@@ -318,6 +380,9 @@ mod tests {
         let back = overlay.collapse(&changed, file.len(), base);
         assert_eq!(back[HEADER as usize + 0x24], 0xEE);
         assert_eq!(back.len(), file.len());
-        assert!(overlay.holds(0x8041_0004) && !overlay.holds(base));
+        assert_eq!(overlay.domain(0x8041_0004), Some(0));
+        assert_eq!(overlay.domain(base), None);
+        assert!(overlay.holds_span(0x8041_0004, 0x8041_0010, Some(0)));
+        assert!(!overlay.holds_span(0x8041_0004, 0x8041_0014, Some(0)));
     }
 }
