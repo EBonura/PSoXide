@@ -152,6 +152,66 @@ fn a_module_is_checked_at_its_link_address() {
 }
 
 #[test]
+fn module_jump_tables_are_checked_at_link_addresses() {
+    let mut module = vec![NOP; 0x68 / 4];
+    module[0x60 / 4] = LINK + 8;
+    module[0x64 / 4] = LINK + 12;
+    let setup = setup(&module);
+    let row = |address: u32, size: u32, depth: usize, name: &str| {
+        format!(
+            "{address:8x} {address:8x} {size:8x}     4 {}{name}\n",
+            " ".repeat(depth)
+        )
+    };
+    let mut map = std::fs::read_to_string(&setup.map).unwrap();
+    map += &row(LINK, 0x40, 8, "/fixture.o:(.text.test)");
+    map += &row(LINK, 0x40, 16, "test");
+    map += &row(LINK + 0x60, 8, 8, "/fixture.o:(.rodata.test)");
+    std::fs::write(&setup.map, map).unwrap();
+
+    let flags = declared(AT);
+    let (status, out) = run(patch::main, &setup, &flags);
+    assert_eq!(status, 0, "{out}");
+    let (status, out) = run(scan::main, &setup, &flags);
+    assert_eq!(status, 0, "{out}");
+
+    let mut file = std::fs::read(&setup.exe).unwrap();
+    let table_at = (AT - BASE + 0x60) as usize + 0x800;
+    file[table_at..table_at + 4].copy_from_slice(&0u32.to_le_bytes());
+    std::fs::write(&setup.exe, &file).unwrap();
+    for main in [patch::main, scan::main] {
+        let (status, out) = run(main, &setup, &flags);
+        assert_eq!(status, 1, "{out}");
+        assert!(
+            out.contains("jump table words outside their function"),
+            "{out}"
+        );
+    }
+    assert_eq!(std::fs::read(&setup.exe).unwrap(), file);
+}
+
+#[test]
+fn bad_regular_map_does_not_publish_sector_padding() {
+    let setup = setup(&[]);
+    let mut file = std::fs::read(&setup.exe).unwrap();
+    file.truncate(0x800 + 0x1000 - 4);
+    std::fs::write(&setup.exe, &file).unwrap();
+    let mut map = std::fs::read_to_string(&setup.map).unwrap();
+    map += &format!(
+        "{:8x} {:8x} {:8x}     4         __data_end = .\n",
+        BASE + 0x800,
+        BASE + 0x800,
+        0
+    );
+    std::fs::write(&setup.map, map).unwrap();
+
+    let (status, out) = run(patch::main, &setup, &[]);
+    assert_eq!(status, 1, "{out}");
+    assert!(out.contains("map does not match this image"), "{out}");
+    assert_eq!(std::fs::read(&setup.exe).unwrap(), file);
+}
+
+#[test]
 fn a_hazard_in_a_module_is_patched_through_its_own_array() {
     let setup = setup(&hazardous());
     let before = std::fs::read(&setup.exe).unwrap();
