@@ -25,7 +25,7 @@
 //! `psx-iso::iso9660` so it's reusable from build scripts, test
 //! harnesses, or a future GUI bundler.
 
-use psx_iso::{add_playtest_files, build_world_pack, Exe, IsoBuilder};
+use psx_iso::{add_playtest_files, build_world_pack, pad_to_payload, Exe, IsoBuilder};
 use std::collections::HashSet;
 use std::env;
 use std::fs;
@@ -267,13 +267,24 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     }
 
-    let exe_bytes = match fs::read(&args.exe) {
+    let mut exe_bytes = match fs::read(&args.exe) {
         Ok(b) => b,
         Err(e) => {
             eprintln!("read {}: {e}", args.exe.display());
             return ExitCode::from(1);
         }
     };
+
+    // A link that starts .bss where .data ends writes a file that stops
+    // short of its header's sector-rounded size (hazard-patch pads it; this
+    // covers an executable that skipped that step). The disc needs whole
+    // sectors: the loader reads the size the header gives.
+    if let Ok(added @ 1..) = pad_to_payload(&mut exe_bytes) {
+        eprintln!(
+            "{}: padded with {added} zero bytes to the size its header claims",
+            args.exe.display()
+        );
+    }
 
     // Validate the input actually is a PSX-EXE before we bake it into
     // an ISO -- silently packing a corrupt file would produce a disc

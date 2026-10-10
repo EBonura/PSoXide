@@ -4,6 +4,8 @@
 use std::io::Write;
 use std::path::Path;
 
+use psx_iso::{pad_to_payload, ExeError};
+
 use crate::detect::{
     branch_sources, encode_j, every_word, is, load_destination, looks_like_code, reads, Detector,
     Hazard, Image, IsCode, COND, JUMPS, MAGIC,
@@ -65,6 +67,14 @@ Without a map the executable bounds are unknown, so patching refuses (exit
 a word is code unless an undecodable word sits within 16 words of it. That
 mode can corrupt data and exists for images with no link map. `--check` only
 reports, and needs neither.
+
+Every run that is not `--check` also zero-pads the file to the payload size
+its header claims. psoxide.ld starts .bss where .data ends and rounds the
+header's size up to whole sectors, so the flat file the linker writes can end
+up to 2047 bytes short of it; the kernel reads whole sectors, and the zeros
+land over the start of .bss, which `_start` clears. This is the one step
+every build runs after a link. A file short by a sector or more is refused as
+truncated, and an image without a PS-X EXE header is left as it is.
 
 Patching can change what the rescan proves (a switch whose table entries
 all moved to trampolines no longer resolves, so its `jr` needs the second
@@ -180,6 +190,32 @@ fn pass(
         Ok(map) => map,
         Err(status) => return status,
     };
+    if !check_only {
+        match pad_to_payload(&mut data) {
+            Ok(0) | Err(ExeError::TooShort | ExeError::BadMagic) => {}
+            Ok(added) => {
+                if let Err(error) = write_whole(path, &data) {
+                    let _ = writeln!(out, "{}", io_message(&error, path));
+                    return 1;
+                }
+                let _ = writeln!(
+                    out,
+                    "padded {} with {added} zero bytes to the {} bytes its header claims",
+                    path.display(),
+                    data.len() - HEADER as usize
+                );
+            }
+            Err(ExeError::TruncatedPayload { expected, actual }) => {
+                let _ = writeln!(
+                    out,
+                    "{} holds {actual} payload bytes and its header claims {expected}: truncated, \
+                     not just a short last sector; nothing was written",
+                    path.display()
+                );
+                return 1;
+            }
+        }
+    }
     let base = load_address(&data);
     let image_end = base + data.len() as i64 - HEADER;
     let listing = disassemble(&data, base);

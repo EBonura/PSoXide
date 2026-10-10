@@ -24,6 +24,12 @@
 //! byte-for-byte into RAM at `t_addr`. Side-loading bypasses the BIOS
 //! entirely: set the CPU's PC/GP/SP to the header values after copying
 //! the payload and execution starts in the homebrew.
+//!
+//! `t_size` is whole sectors, because the BIOS reads sectors. The SDK's
+//! linker script starts `.bss` at the true end of `.data`, so `t_size` can
+//! reach up to 2047 bytes past the last byte the linker writes; those bytes
+//! are zeros that land in the first bytes of `.bss`, which `_start` clears.
+//! [`pad_to_payload`] writes them into the flat file the linker produced.
 
 use alloc::vec::Vec;
 
@@ -127,6 +133,33 @@ impl Exe {
     }
 }
 
+/// Zero-fill a flat executable to the length its header claims.
+///
+/// `psoxide.ld` starts `.bss` where `.data` ends and rounds `t_size` up to
+/// whole sectors, so the file `ld.lld --oformat=binary` writes ends before
+/// the last sector does. Returns how many zero bytes were added, none for an
+/// executable that already carries its `t_size` (every older link). A
+/// shortfall of a whole sector or more is not a linker's trimmed `.bss` but
+/// a truncated file, and is refused.
+pub fn pad_to_payload(bytes: &mut Vec<u8>) -> Result<usize, ExeError> {
+    if bytes.len() < EXE_HEADER_BYTES {
+        return Err(ExeError::TooShort);
+    }
+    if &bytes[0..8] != MAGIC {
+        return Err(ExeError::BadMagic);
+    }
+    let expected = read_u32_le(&bytes[0x1C..]) as usize;
+    let actual = bytes.len() - EXE_HEADER_BYTES;
+    let Some(missing) = expected.checked_sub(actual) else {
+        return Ok(0);
+    };
+    if missing >= EXE_HEADER_BYTES {
+        return Err(ExeError::TruncatedPayload { expected, actual });
+    }
+    bytes.resize(bytes.len() + missing, 0);
+    Ok(missing)
+}
+
 fn read_u32_le(bytes: &[u8]) -> u32 {
     u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
 }
@@ -179,6 +212,53 @@ mod tests {
                 actual: 0
             })
         ));
+    }
+
+    #[test]
+    fn pads_a_short_last_sector_with_zeros() {
+        let mut raw = make_exe(0x8001_0000, 0x8001_0000, &[1; 2048]);
+        let whole = raw.clone();
+        raw[0x1C..0x20].copy_from_slice(&2048u32.to_le_bytes());
+        raw.truncate(EXE_HEADER_BYTES + 1500);
+        assert_eq!(pad_to_payload(&mut raw), Ok(548));
+        assert_eq!(raw.len(), whole.len());
+        assert!(raw[EXE_HEADER_BYTES + 1500..].iter().all(|&b| b == 0));
+        assert_eq!(
+            &raw[..EXE_HEADER_BYTES + 1500],
+            &whole[..EXE_HEADER_BYTES + 1500]
+        );
+        assert!(Exe::parse(&raw).is_ok());
+    }
+
+    #[test]
+    fn padding_leaves_a_whole_file_alone() {
+        let mut raw = make_exe(0x8001_0000, 0x8001_0000, &[7; 2048]);
+        let before = raw.clone();
+        assert_eq!(pad_to_payload(&mut raw), Ok(0));
+        assert_eq!(raw, before);
+        // Bytes past t_size, such as an old link's extra sectors, are kept.
+        raw.extend_from_slice(&[9; 100]);
+        assert_eq!(pad_to_payload(&mut raw), Ok(0));
+        assert_eq!(raw.len(), before.len() + 100);
+    }
+
+    #[test]
+    fn padding_refuses_a_truncated_file() {
+        let mut raw = make_exe(0x8001_0000, 0x8001_0000, &[1; 4096]);
+        raw.truncate(EXE_HEADER_BYTES + 2048);
+        assert_eq!(
+            pad_to_payload(&mut raw),
+            Err(ExeError::TruncatedPayload {
+                expected: 4096,
+                actual: 2048
+            })
+        );
+        assert_eq!(raw.len(), EXE_HEADER_BYTES + 2048);
+        assert_eq!(pad_to_payload(&mut vec![0; 10]), Err(ExeError::TooShort));
+        assert_eq!(
+            pad_to_payload(&mut vec![0; EXE_HEADER_BYTES]),
+            Err(ExeError::BadMagic)
+        );
     }
 
     #[test]
