@@ -161,6 +161,7 @@ impl Fixture {
             4,
         );
         row(tramp, 8 + 64 * 4, 16, "HAZARD_TRAMPOLINES", 1);
+        row(BASE + payload + payload_skew, 0, 8, "__data_end = .", 1);
         row(BASE + payload + payload_skew, 0, 8, "__bss_start = .", 1);
         let map = self.dir.0.join("fixture.map");
         std::fs::write(&map, lines.join("\n") + "\n").unwrap();
@@ -362,6 +363,46 @@ fn a_map_from_another_link_is_refused() {
     let mut fx = Fixture::new();
     fx.caller(1, &entry(0, 1024), 8, &[]);
     let (failures, out) = fx.guard_skewed(0x800, 0, None);
+    assert_eq!(failures, 1, "{out}");
+    assert!(out.contains("map does not match this image"), "{out}");
+}
+
+/// The fixture's map with `__data_end` and `__bss_start` moved to `end`,
+/// as a link whose .bss starts inside the last sector writes them.
+fn map_ending_data_at(map: &std::path::Path, end: u32) {
+    let text = std::fs::read_to_string(map).unwrap();
+    let old = format!("{:8x}", BASE + 0x1000);
+    let lines: Vec<String> = text
+        .lines()
+        .map(|line| {
+            if line.contains("__data_end = .") || line.contains("__bss_start = .") {
+                line.replace(&old, &format!("{end:8x}"))
+            } else {
+                line.to_string()
+            }
+        })
+        .collect();
+    std::fs::write(map, lines.join("\n") + "\n").unwrap();
+}
+
+#[test]
+fn a_data_end_inside_the_last_sector_matches_the_sector_rounded_payload() {
+    // psoxide.ld starts .bss where .data ends, and the header's payload size
+    // is that rounded up to whole sectors.
+    let mut fx = Fixture::new();
+    fx.caller(1, &entry(0, 1024), 8, &[]);
+    let (exe, map) = fx.write();
+    map_ending_data_at(&map, BASE + 0xF44);
+    let mut out = Vec::new();
+    let failures = stack_guard::check(&exe, Some(&map), None, None, &mut out);
+    let out = String::from_utf8(out).unwrap();
+    assert_eq!(failures, 0, "{out}");
+    // Past the sector boundary it is a different link's payload.
+    let (exe, map) = fx.write();
+    map_ending_data_at(&map, BASE + 0x1004);
+    let mut out = Vec::new();
+    let failures = stack_guard::check(&exe, Some(&map), None, None, &mut out);
+    let out = String::from_utf8(out).unwrap();
     assert_eq!(failures, 1, "{out}");
     assert!(out.contains("map does not match this image"), "{out}");
 }

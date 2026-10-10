@@ -12,7 +12,10 @@
 //! 1. The loader (our emulator or the real BIOS) copies the EXE
 //!    payload to `LOAD_ADDR` and jumps to [`_start`].
 //! 2. [`_start`] zeroes the `.bss` section using the linker-defined
-//!    `__bss_start` / `__bss_end` symbols.
+//!    `__bss_start` / `__bss_end` symbols. `.bss` starts where `.data`
+//!    ends, so the zero bytes that round the stored image up to whole
+//!    sectors (`hazard-patch` appends them) land over its first bytes and
+//!    are cleared with it; nothing may read `.bss` before this.
 //! 3. With the `alloc` feature, the bump allocator is seeded from
 //!    `__heap_start..__heap_end`.
 //! 4. `main()` is called. When it returns, we halt.
