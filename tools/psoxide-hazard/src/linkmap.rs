@@ -54,6 +54,7 @@ pub struct LinkMap {
     bounds: Vec<i64>,
     starts: Vec<i64>,
     rodata: Vec<(i64, i64)>,
+    extra_code: Vec<(i64, i64)>,
     entry: Option<i64>,
     /// `(table section address, size, (function start, end))` for every
     /// `.rodata.<function>` section whose function the map names.
@@ -144,8 +145,25 @@ impl LinkMap {
         Self::parse(&text, &path.display().to_string())
     }
 
+    /// Read a map with code modules declared by the caller. Only symbols in
+    /// those exact link ranges join the resident function index.
+    pub fn open_with_code(path: &Path, code: &[(i64, i64)]) -> Result<Self, MapError> {
+        let bytes = std::fs::read(path).map_err(|e| MapError(io_message(&e, path)))?;
+        let text = String::from_utf8_lossy(&bytes);
+        Self::parse_with_code(&text, &path.display().to_string(), code, true)
+    }
+
     /// Index a map's text; `path` names it in messages.
     pub fn parse(text: &str, path: &str) -> Result<Self, MapError> {
+        Self::parse_with_code(text, path, &[], false)
+    }
+
+    fn parse_with_code(
+        text: &str,
+        path: &str,
+        extra_code: &[(i64, i64)],
+        guard_roots: bool,
+    ) -> Result<Self, MapError> {
         let mut symbols = Vec::new();
         let mut sections = Vec::new();
         let mut rodata = Vec::new();
@@ -199,7 +217,22 @@ impl LinkMap {
         let mut names: HashMap<i64, Vec<(i64, String)>> = HashMap::new();
         let mut name_order = Vec::new();
         for (address, size, name) in symbols {
-            if lo <= address && address < hi {
+            if guard_roots
+                && name.starts_with("<psx_rt::scratchpad::ScratchpadStack<")
+                && !(lo <= address && address < hi)
+                && !extra_code
+                    .iter()
+                    .any(|&(start, end)| start <= address && address < end)
+            {
+                return Err(MapError(format!(
+                    "{path}: scratchpad stack entry {name} at {address:08x} is outside declared module code"
+                )));
+            }
+            if (lo <= address && address < hi)
+                || extra_code
+                    .iter()
+                    .any(|&(start, end)| start <= address && address < end)
+            {
                 names
                     .entry(address)
                     .or_insert_with(|| {
@@ -211,13 +244,19 @@ impl LinkMap {
         }
         let sections: Vec<(i64, i64)> = sections
             .into_iter()
-            .filter(|s| lo <= s.0 && s.0 < hi)
+            .filter(|s| {
+                (lo <= s.0 && s.0 < hi)
+                    || extra_code
+                        .iter()
+                        .any(|&(start, end)| start <= s.0 && s.0 < end)
+            })
             .collect();
         // Every symbol or section start ends the function before it.
         let mut bounds: Vec<i64> = names.keys().copied().collect();
         bounds.extend(sections.iter().map(|s| s.0));
         bounds.extend(sections.iter().map(|s| s.0 + s.1));
         bounds.push(hi);
+        bounds.extend(extra_code.iter().flat_map(|&(start, end)| [start, end]));
         bounds.sort_unstable();
         bounds.dedup();
         let mut starts: Vec<i64> = names.keys().copied().collect();
@@ -244,6 +283,7 @@ impl LinkMap {
             bounds,
             starts,
             rodata,
+            extra_code: extra_code.to_vec(),
             entry,
             tables,
         })
@@ -383,7 +423,12 @@ impl LinkMap {
                 return Some((start, end, name.clone()));
             }
         }
-        if self.text.0 <= addr && addr < self.text.1 {
+        if (self.text.0 <= addr && addr < self.text.1)
+            || self
+                .extra_code
+                .iter()
+                .any(|&(lo, hi)| lo <= addr && addr < hi)
+        {
             return Some((addr, next_bound(addr), format!("<unnamed {addr:08x}>")));
         }
         None
