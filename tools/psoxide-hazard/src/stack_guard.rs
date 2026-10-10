@@ -8,9 +8,10 @@ use std::path::Path;
 
 use regex::Regex;
 
-use crate::detect::{is, Detector, Image, READS_ALL};
+use crate::detect::{is, Detector, Image, MAGIC, READS_ALL};
 use crate::linkmap::{io_message, LinkMap};
-use crate::listing::{load_address, Listing, HEADER};
+use crate::listing::{load_address, word_at_offset, Listing, HEADER};
+use crate::module::{modules, Module, Overlay};
 use crate::text::{int_auto, sp_adjust, squeeze, strip, trailing_hex};
 
 /// Usage text.
@@ -34,6 +35,7 @@ adjusted any other way.
     stack-guard game.exe game.map
     stack-guard game.exe game.map --root REGEX --budget BYTES
     stack-guard game.exe game.map --forbid __psx_rt_flush_i_cache
+    stack-guard game.exe game.map --module 80408000..8040c000@801c0000 --forbid __psx_rt_flush_i_cache
 
 The map is ld.lld's `-Map` output for the same link. The exe may be
 hazard-patched: calls rerouted through HAZARD_TRAMPOLINES are followed to
@@ -45,6 +47,8 @@ scratchpad stack would read the cache tags instead. A forbidden symbol that
 is not linked is reported but does not fail. Without a map, `--forbid` fails
 because symbol reachability cannot be proved; otherwise the tool only checks
 that the image does not contain psx-rt's stack switch.
+`--module` (repeatable) maps compact appended module bytes to their link
+addresses for the proof, including calls into module code and trampolines.
 ";
 
 const STACK_OVERHEAD: i64 = 20;
@@ -76,23 +80,79 @@ pub struct GuardImage {
     pub listing: Listing,
     /// Its link map.
     pub map: LinkMap,
+    readable: Vec<(i64, i64)>,
+    trampolines: Vec<(i64, i64)>,
 }
 
 impl GuardImage {
     /// Read `exe` and its `map_path`, refusing a map from another link.
     pub fn open(exe: &Path, map_path: &Path) -> Result<Self, GuardError> {
-        let data = std::fs::read(exe).map_err(|e| GuardError(io_message(&e, exe)))?;
-        let base = load_address(&data);
+        Self::open_modules(exe, map_path, &[])
+    }
+
+    /// Open a compact image with its streamed modules at link addresses.
+    pub fn open_modules(
+        exe: &Path,
+        map_path: &Path,
+        modules: &[Module],
+    ) -> Result<Self, GuardError> {
+        let file = std::fs::read(exe).map_err(|e| GuardError(io_message(&e, exe)))?;
+        let base = load_address(&file);
+        let ranges: Vec<_> = modules.iter().map(|m| m.link).collect();
+        let map =
+            LinkMap::open_with_code(map_path, &ranges).map_err(|e| GuardError(e.to_string()))?;
+        let mut diagnostics = Vec::new();
+        let overlay = Overlay::new(modules.to_vec(), &file, base, &[map.text], &mut diagnostics)
+            .map_err(|_| GuardError(String::from_utf8_lossy(&diagnostics).trim().to_string()))?;
+        let data = overlay.expand(&file, base);
+        map.check(&data).map_err(|e| GuardError(e.to_string()))?;
         let image_end = base + data.len() as i64 - HEADER;
         let listing = Listing::new(&data, base);
-        let map = LinkMap::open(map_path).map_err(|e| GuardError(e.to_string()))?;
-        map.check(&data).map_err(|e| GuardError(e.to_string()))?;
+        let resident_end = if modules.is_empty() {
+            image_end
+        } else {
+            base + i64::from(u32::from_le_bytes(file[0x1c..0x20].try_into().unwrap()))
+        };
+        let mut readable = vec![(base, resident_end)];
+        readable.extend(ranges);
+        let mut trampolines = map.trampolines.into_iter().collect::<Vec<_>>();
+        for module in modules {
+            let mut found = None;
+            let mut addr = module.link.0;
+            while addr + 8 <= module.link.1 {
+                let offset = addr - base + HEADER;
+                if word_at_offset(&data, offset).map(i64::from) == Some(MAGIC) {
+                    let capacity = word_at_offset(&data, offset + 4).unwrap_or(0);
+                    let end = addr + 8 + i64::from(capacity) * 4;
+                    if capacity > 0
+                        && capacity <= 4096
+                        && end <= module.link.1
+                        && found.replace((addr, end)).is_some()
+                    {
+                        return Err(GuardError(format!(
+                            "module {:#x}..{:#x} has multiple trampoline arrays",
+                            module.link.0, module.link.1
+                        )));
+                    }
+                }
+                addr += 4;
+            }
+            let Some(span) = found else {
+                return Err(GuardError(format!(
+                    "module {:#x}..{:#x} has no complete trampoline array",
+                    module.link.0, module.link.1
+                )));
+            };
+            trampolines.push(span);
+        }
         Ok(Self {
             data,
             base,
             image_end,
             listing,
             map,
+            readable,
+            trampolines,
         })
     }
 
@@ -112,9 +172,15 @@ impl GuardImage {
     }
 
     fn in_trampolines(&self, addr: i64) -> bool {
-        self.map
-            .trampolines
-            .is_some_and(|(t0, t1)| t0 <= addr && addr < t1)
+        self.trampolines
+            .iter()
+            .any(|&(t0, t1)| t0 <= addr && addr < t1)
+    }
+
+    fn readable(&self, start: i64, end: i64) -> bool {
+        self.readable
+            .iter()
+            .any(|&(lo, hi)| lo <= start && start < end && end <= hi)
     }
 }
 
@@ -233,6 +299,11 @@ impl<'a> Walker<'a> {
         let Some((start, end, name)) = self.image.map.function(addr) else {
             return Err(GuardError(format!("call to {addr:08x}, outside .text")));
         };
+        if !self.image.readable(start, end) {
+            return Err(GuardError(format!(
+                "{name} at {start:08x}..{end:08x} is not wholly readable resident or declared module code"
+            )));
+        }
         // A function can carry several symbols (an alias); any of them counts.
         let named = |forbidden: &String| {
             self.image
@@ -390,11 +461,29 @@ pub fn check_forbidding(
     forbidden: &[String],
     out: &mut dyn Write,
 ) -> usize {
+    check_forbidding_modules(exe, map_path, pattern, budget, forbidden, &[], out)
+}
+
+/// Check a compact image with streamed modules mapped to their link addresses.
+pub fn check_forbidding_modules(
+    exe: &Path,
+    map_path: Option<&Path>,
+    pattern: Option<&str>,
+    budget: Option<i64>,
+    forbidden: &[String],
+    modules: &[Module],
+    out: &mut dyn Write,
+) -> usize {
     let Some(map_path) = map_path else {
-        if !forbidden.is_empty() {
+        if !forbidden.is_empty() || !modules.is_empty() {
+            let flags = if modules.is_empty() {
+                "--forbid"
+            } else {
+                "--module"
+            };
             let _ = writeln!(
                 out,
-                "stack guard: --forbid needs a link map to prove symbol reachability"
+                "stack guard: {flags} needs a link map to prove symbol reachability"
             );
             return 1;
         }
@@ -424,7 +513,7 @@ pub fn check_forbidding(
             return 1;
         }
     };
-    let image = match GuardImage::open(exe, map_path) {
+    let image = match GuardImage::open_modules(exe, map_path, modules) {
         Ok(image) => image,
         Err(error) => {
             let _ = writeln!(out, "stack guard: {error}");
@@ -528,16 +617,37 @@ pub fn main(args: &[String], out: &mut dyn Write) -> i32 {
                     return 1;
                 }
             },
+            "--module" => {
+                if it.next().is_none() {
+                    let _ = writeln!(out, "stack guard: --module needs LINK_LO..LINK_HI@IMAGE_AT");
+                    return 2;
+                }
+            }
             _ => paths.push(arg.clone()),
         }
     }
+    let modules = match modules(args) {
+        Ok(modules) => modules,
+        Err(error) => {
+            let _ = writeln!(out, "{error}");
+            return 2;
+        }
+    };
     if !(1..=2).contains(&paths.len()) || pattern.is_none() != budget.is_none() {
         let _ = write!(out, "{USAGE}");
         return 2;
     }
     let exe = Path::new(&paths[0]);
     let map = paths.get(1).map(Path::new);
-    let failures = check_forbidding(exe, map, pattern.as_deref(), budget, &forbidden, out);
+    let failures = check_forbidding_modules(
+        exe,
+        map,
+        pattern.as_deref(),
+        budget,
+        &forbidden,
+        &modules,
+        out,
+    );
     if failures != 0 {
         let _ = writeln!(
             out,
