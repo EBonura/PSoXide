@@ -57,7 +57,15 @@ fn frozen_renderer_matches_the_shared_owner_for_both_games() {
             .split_once("#[cfg(test)]")
             .expect("legacy renderer has unit tests")
             .1
-            .replace("use super::*;", UNIT_TEST_PRELUDE);
+            .replace("use super::*;", UNIT_TEST_PRELUDE)
+            .replace(
+                "perspective_screen_midpoint(a, b)",
+                "perspective_screen_midpoint(&a, &b)",
+            )
+            .replace(
+                "perspective_screen_midpoint(b, a)",
+                "perspective_screen_midpoint(&b, &a)",
+            );
         scratch.write("src/new.rs", &adapter);
         scratch.write(
             "src/shared.rs",
