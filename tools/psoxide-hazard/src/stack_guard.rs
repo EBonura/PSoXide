@@ -41,8 +41,10 @@ their targets. `--root`/`--budget` check a game's own stack switch instead
 (an entry name regex and its byte budget). `--forbid SYMBOL` (repeatable)
 fails a tree that reaches the function named SYMBOL: psx-rt's I-cache flush,
 `__psx_rt_flush_i_cache`, runs with the scratchpad unmapped, so a frame on the
-scratchpad stack would read the cache tags instead. Without a map the tool
-only checks that the image does not contain psx-rt's stack switch.
+scratchpad stack would read the cache tags instead. A forbidden symbol that
+is not linked is reported but does not fail. Without a map, `--forbid` fails
+because symbol reachability cannot be proved; otherwise the tool only checks
+that the image does not contain psx-rt's stack switch.
 ";
 
 const STACK_OVERHEAD: i64 = 20;
@@ -389,6 +391,13 @@ pub fn check_forbidding(
     out: &mut dyn Write,
 ) -> usize {
     let Some(map_path) = map_path else {
+        if !forbidden.is_empty() {
+            let _ = writeln!(
+                out,
+                "stack guard: --forbid needs a link map to prove symbol reachability"
+            );
+            return 1;
+        }
         let data = match std::fs::read(exe) {
             Ok(data) => data,
             Err(error) => {
@@ -422,6 +431,16 @@ pub fn check_forbidding(
             return 1;
         }
     };
+    for symbol in forbidden {
+        if !image
+            .map
+            .names
+            .values()
+            .any(|aliases| aliases.iter().any(|(_, name)| name == symbol))
+        {
+            let _ = writeln!(out, "stack guard: forbidden symbol {symbol} is not linked");
+        }
+    }
     let entries = roots(&image, pattern.as_ref(), budget);
     if entries.is_empty() {
         if let Some(pattern) = &pattern {

@@ -1198,6 +1198,57 @@ fn a_tree_that_reaches_a_forbidden_function_fails() {
     // Only the named function counts.
     let (failures, out) = guard_forbidding(&fx, &["t::unrelated"]);
     assert_eq!(failures, 0, "{out}");
+    assert!(
+        out.contains("forbidden symbol t::unrelated is not linked"),
+        "{out}"
+    );
+}
+
+#[test]
+fn a_forbidden_alias_is_found_through_a_tail_call() {
+    let mut fx = Fixture::new();
+    let flush = fx.leaf(4, "t::flush_body", 0);
+    let tail = fx.function(2, "t::tail", &[j(flush), NOP]);
+    fx.caller(1, &entry(0, 1024), 8, &[tail]);
+    let (exe, map) = fx.write();
+    let alias = format!(
+        "{flush:8x} {flush:8x} {zero:8x}     1                 __psx_rt_flush_i_cache\n",
+        zero = 0
+    );
+    let mut text = std::fs::read_to_string(&map).unwrap();
+    text.push_str(&alias);
+    std::fs::write(&map, text).unwrap();
+    let mut out = Vec::new();
+    let failures = stack_guard::check_forbidding(
+        &exe,
+        Some(&map),
+        None,
+        None,
+        &["__psx_rt_flush_i_cache".into()],
+        &mut out,
+    );
+    let out = String::from_utf8(out).unwrap();
+    assert_eq!(failures, 1, "{out}");
+    assert!(out.contains("reaches __psx_rt_flush_i_cache"), "{out}");
+}
+
+#[test]
+fn forbid_without_a_map_cannot_prove_reachability() {
+    let mut fx = Fixture::new();
+    fx.caller(1, &entry(0, 1024), 8, &[]);
+    let (exe, _) = fx.write();
+    let mut out = Vec::new();
+    let failures = stack_guard::check_forbidding(
+        &exe,
+        None,
+        None,
+        None,
+        &["__psx_rt_flush_i_cache".into()],
+        &mut out,
+    );
+    let out = String::from_utf8(out).unwrap();
+    assert_eq!(failures, 1, "{out}");
+    assert!(out.contains("--forbid needs a link map"), "{out}");
 }
 
 #[test]
