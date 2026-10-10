@@ -130,7 +130,7 @@ pub fn main_in(args: &[String], text: Option<(i64, i64)>, out: &mut dyn Write) -
         match pad_to_payload(&mut data) {
             Ok(0) | Err(Padding::NotAnExe) => {}
             Ok(added) => {
-                if let Err(error) = write_whole(path, &data) {
+                if let Err(error) = std::fs::write(path, &data) {
                     let _ = writeln!(out, "{}", io_message(&error, path));
                     return 1;
                 }
