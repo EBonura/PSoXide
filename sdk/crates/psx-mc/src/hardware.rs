@@ -216,7 +216,7 @@ struct Link<'a, T> {
 
 impl<T: Transport> Link<'_, T> {
     fn select(&mut self) {
-        if !self.bus.begin(self.slot, self.timing.link()) {
+        if !self.bus.begin_card(self.slot, self.timing.link()) {
             // The previous transaction left `/ACK` asserted and it never
             // released. Every exchange fails from here.
             self.record_fault(TransportFault::AckReleaseTimeout, 0);
@@ -245,7 +245,10 @@ impl<T: Transport> Link<'_, T> {
             return 0xff;
         }
         let exchange = self.trace.exchanges;
-        match self.bus.exchange(tx, !wait_ack, self.timing.link()) {
+        match self
+            .bus
+            .exchange_card(self.slot, tx, !wait_ack, self.timing.link())
+        {
             Ok(reply) => {
                 self.note_reply(exchange, reply);
                 if wait_ack {

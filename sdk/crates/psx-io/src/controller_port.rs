@@ -124,8 +124,8 @@ pub trait Transport {
     }
 
     /// [`select`](Self::select) with the `/ACK` interrupt armed when
-    /// `arm_ack_irq` is set, so `STAT` latches each pulse. Only a diagnostic
-    /// pacing wants that.
+    /// `arm_ack_irq` is set, so `STAT` latches each pulse. Memory cards use
+    /// this because a CPU interrupt can hide a complete short ACK pulse.
     fn select_with(&mut self, port: Port, arm_ack_irq: bool) {
         self.set_mode(sio0::MODE_8N1);
         self.set_baud(sio0::BAUD_250KHZ);
@@ -203,6 +203,26 @@ pub trait Transport {
     /// either way.
     fn begin(&mut self, port: Port, timing: Timing) -> bool {
         self.select(port);
+        self.finish_begin(timing)
+    }
+
+    /// Begin a memory-card transaction with the SIO ACK interrupt latch
+    /// armed. The card's short pulse can fall entirely inside an unrelated
+    /// CPU interrupt, after which the live DSR level no longer records it.
+    fn begin_card(&mut self, port: Port, timing: Timing) -> bool {
+        self.select_with(port, true);
+        let ready = self.finish_begin(timing);
+        if ready {
+            // A late ACK from the preceding transaction can arrive during
+            // setup. Its live level is gone now, but its IRQ latch must not
+            // count as the first byte's acknowledgement.
+            self.set_control(sio0::selected_ctrl(port.is_two(), true) | sio0::ctrl::ACK);
+        }
+        ready
+    }
+
+    /// Shared setup, stale RX drain and live ACK release check after select.
+    fn finish_begin(&mut self, timing: Timing) -> bool {
         self.delay(timing.setup_spins);
         self.drain_receive();
         self.wait_status_clear(sio0::stat::DSR_LEVEL, timing.ack_spins)
@@ -254,6 +274,36 @@ pub trait Transport {
             if !self.wait_status_clear(sio0::stat::DSR_LEVEL, timing.ack_spins) {
                 return Err(ExchangeError::AckStuck { reply });
             }
+        }
+        Ok(reply)
+    }
+
+    /// Card byte exchange. STAT.IRQ latches an ACK edge across a CPU
+    /// interrupt; the live DSR level still has to release before the next
+    /// byte, and CTRL.ACK clears only this byte's latch while /CS stays low.
+    fn exchange_card(
+        &mut self,
+        port: Port,
+        byte: u8,
+        is_last: bool,
+        timing: Timing,
+    ) -> Result<u8, ExchangeError> {
+        if !self.wait_status_set(sio0::stat::TX_READY, timing.byte_spins) {
+            return Err(ExchangeError::TxTimeout);
+        }
+        self.transmit(byte);
+        if !self.wait_status_set(sio0::stat::RX_NOT_EMPTY, timing.byte_spins) {
+            return Err(ExchangeError::RxTimeout);
+        }
+        let reply = self.receive();
+        if !is_last {
+            if !self.wait_status_set(sio0::stat::IRQ, timing.ack_spins) {
+                return Err(ExchangeError::AckTimeout { reply });
+            }
+            if !self.wait_status_clear(sio0::stat::DSR_LEVEL, timing.ack_spins) {
+                return Err(ExchangeError::AckStuck { reply });
+            }
+            self.set_control(sio0::selected_ctrl(port.is_two(), true) | sio0::ctrl::ACK);
         }
         Ok(reply)
     }
@@ -404,6 +454,22 @@ mod tests {
     }
 
     #[test]
+    fn card_begin_clears_an_ack_that_arrived_during_setup() {
+        // The earlier transaction's ACK arrives during the setup delay.
+        // Its live level has released by the time begin checks the line.
+        let mut bus = Script::with_status(&[sio0::stat::IRQ | DSR, 0, 0, 0]);
+        assert!(bus.begin_card(Port::One, TIMING));
+        assert_eq!(
+            bus.control,
+            [
+                sio0::ctrl::ACK,
+                sio0::selected_ctrl(false, true),
+                sio0::selected_ctrl(false, true) | sio0::ctrl::ACK,
+            ]
+        );
+    }
+
+    #[test]
     fn an_acknowledged_byte_waits_for_ack_to_assert_and_release() {
         // TX ready; RX arrives at once without an ack; ack asserts, releases.
         let mut bus = Script::with_status(&[TX, RX, DSR, 0]);
@@ -430,6 +496,42 @@ mod tests {
         assert_eq!(bus.exchange(0x00, true, TIMING), Ok(0x80));
         // Two status reads: TX ready and RX ready, nothing after.
         assert_eq!(bus.reads, 2);
+    }
+
+    #[test]
+    fn card_ack_latch_survives_a_pulse_hidden_by_an_interrupt() {
+        // The reply arrived before the card's ACK. The next observation is
+        // after the pulse: DSR is low, but STAT.IRQ still records the edge.
+        let mut bus = Script::with_status(&[TX, RX, sio0::stat::IRQ, 0]);
+        bus.received.push(0x5A);
+        assert_eq!(bus.exchange_card(Port::One, 0x00, false, TIMING), Ok(0x5A));
+        assert_eq!(
+            bus.control,
+            [sio0::selected_ctrl(false, true) | sio0::ctrl::ACK]
+        );
+
+        let mut live = Script::with_status(&[TX, RX, 0]);
+        live.received.push(0x5A);
+        assert_eq!(
+            live.exchange(0x00, false, TIMING),
+            Err(ExchangeError::AckTimeout { reply: 0x5A })
+        );
+    }
+
+    #[test]
+    fn card_terminator_needs_no_ack_and_missing_card_times_out() {
+        let mut last = Script::with_status(&[TX, RX]);
+        last.received.push(0x47);
+        assert_eq!(last.exchange_card(Port::One, 0, true, TIMING), Ok(0x47));
+        assert_eq!(last.reads, 2);
+        assert!(last.control.is_empty());
+
+        let mut absent = Script::with_status(&[TX, RX, 0]);
+        absent.received.push(0xFF);
+        assert_eq!(
+            absent.exchange_card(Port::One, 0x81, false, TIMING),
+            Err(ExchangeError::AckTimeout { reply: 0xFF })
+        );
     }
 
     #[test]
