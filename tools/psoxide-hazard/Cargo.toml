@@ -5,10 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Post-link guest checks for PS1 executables: the R3000 load-delay hazard patcher and scanner, and the scratchpad stack guard."
+description = "Post-link guest checks for PS1 executables: the R3000 load-delay hazard patcher (which also pads the image to its sector-rounded size) and scanner, and the scratchpad stack guard."
 
 [dependencies]
 psx-disasm = { path = "../../crates/psx-disasm" }
+psx-iso = { path = "../../crates/psx-iso" }
 regex = "1"
 
 [[bin]]
