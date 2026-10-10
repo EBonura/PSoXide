@@ -120,8 +120,9 @@ pub(crate) fn r3000_usize_gt(left: usize, right: usize) -> bool {
 
 pub use affine_surface::{
     compose_model_view_transform, materialize_baked_surface_vertices, materialize_surface_vertices,
-    submit_surface_batch, AffineSurface, AffineVertex, SurfaceProfile, SurfaceSourceVertex,
-    SurfaceSubmit, AFFINE_PACKETS_PER_TRIANGLE, AFFINE_SPLIT_SCRATCH_VERTICES,
+    submit_surface_batch, submit_surface_batch_near, submit_surface_batch_screened, AffineSurface,
+    AffineVertex, NearView, SurfaceProfile, SurfaceSourceVertex, SurfaceSubmit,
+    AFFINE_PACKETS_PER_TRIANGLE, AFFINE_SPLIT_SCRATCH_VERTICES,
 };
 pub use angle::Angle;
 pub use app::{App, Config, VisualPacing};

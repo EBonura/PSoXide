@@ -341,6 +341,51 @@ unsafe fn project_vertices(vertices: *mut AffineVertex, count: usize) {
     }
 }
 
+/// [`project_vertices`], reporting which vertices the GTE could not place.
+///
+/// The GTE sets FLAG bit 17 when its perspective divide saturates
+/// (`H >= 2 * SZ`) for any vertex of a command, so one `CFC2` per triple names
+/// the exact condition. Bit `i` of the result is set for every vertex of a
+/// triple (or the single vertex) that tripped it.
+///
+/// # Safety
+/// As [`project_vertices`]; `count` is at most 32.
+unsafe fn project_vertices_flagged(vertices: *mut AffineVertex, count: usize) -> u32 {
+    const DIVIDE_OVERFLOW: u32 = 1 << 17;
+    let mut flagged = 0u32;
+    let mut index = 0;
+    while index + 3 <= count {
+        // SAFETY: `index + 2 < count`.
+        let (a, b, c) = unsafe {
+            (
+                &mut *vertices.add(index),
+                &mut *vertices.add(index + 1),
+                &mut *vertices.add(index + 2),
+            )
+        };
+        let projected =
+            scene::project_triangle_scheduled(vec3(a.position), vec3(b.position), vec3(c.position));
+        if scene::error_flags() & DIVIDE_OVERFLOW != 0 {
+            flagged |= 0b111 << index;
+        }
+        store_projection(a, projected[0]);
+        store_projection(b, projected[1]);
+        store_projection(c, projected[2]);
+        index += 3;
+    }
+    while index < count {
+        // SAFETY: `index < count`.
+        let vertex = unsafe { &mut *vertices.add(index) };
+        let projected = scene::project_vertex_scheduled(vec3(vertex.position));
+        if scene::error_flags() & DIVIDE_OVERFLOW != 0 {
+            flagged |= 1 << index;
+        }
+        store_projection(vertex, projected);
+        index += 1;
+    }
+    flagged
+}
+
 /// Midpoint of two working vertices, symmetric in its arguments: positions,
 /// UVs and each colour channel are averaged (rounding down).
 #[inline(always)]
@@ -364,6 +409,165 @@ fn midpoint(a: &AffineVertex, b: &AffineVertex) -> AffineVertex {
 #[inline(always)]
 const fn screen_word(vertex: &AffineVertex) -> u32 {
     (vertex.screen[0] as u16 as u32) | ((vertex.screen[1] as u16 as u32) << 16)
+}
+
+/// The loaded GTE view, for projecting the vertices the GTE cannot.
+///
+/// The GTE's perspective divide saturates once `H >= 2 * SZ`: every vertex
+/// that close to the camera plane lands at a screen position pulled toward
+/// the screen centre, not where its perspective image is. A caller that
+/// clips a surface to the screen (so every vertex projects inside it) passes
+/// the loaded view to [`submit_surface_batch_near`], which reprojects such
+/// vertices exactly.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct NearView {
+    /// Q12 rows of the loaded rotation: `view = (row . position >> 12) + translation`.
+    pub rows: [[i16; 3]; 3],
+    /// Loaded GTE translation.
+    pub translation: [i32; 3],
+    /// GTE `H` register.
+    pub focal_length: i32,
+    /// Screen offset (`OFX`, `OFY`) in whole pixels.
+    pub center: [i32; 2],
+}
+
+/// Largest distance from the screen centre a reprojected vertex keeps
+/// (`AffineVertex::screen` holds 16 bits, and the clip below keeps its products
+/// inside 31).
+const LIMIT: i32 = 15_000;
+
+impl NearView {
+    /// Whether the GTE divide saturates for a vertex of this projected depth.
+    #[inline(always)]
+    pub const fn saturates(&self, depth: u32) -> bool {
+        self.focal_length >= 2 * depth as i32
+    }
+
+    /// Exact projection of `position`, or `None` when it has no positive
+    /// depth to divide by. Matches the GTE (`sx = (OFX + IR1 * H / SZ) >> 16`
+    /// with `IR1` saturated to 16 bits) wherever the GTE divide does not
+    /// saturate and the result fits its 11-bit screen range.
+    pub fn project(&self, position: [i16; 3]) -> Option<[i16; 2]> {
+        // A Q12 row against `i16` positions stays inside `i32`, and so does
+        // the product with the divisor once it is split at 16 bits: the PS1
+        // has no 64-bit arithmetic to spare.
+        let (x, y, z) = (
+            i32::from(position[0]),
+            i32::from(position[1]),
+            i32::from(position[2]),
+        );
+        let dot = |row: &[i16; 3]| {
+            (i32::from(row[0]) * x + i32::from(row[1]) * y + i32::from(row[2]) * z) >> 12
+        };
+        let depth = dot(&self.rows[2]) + self.translation[2];
+        if depth <= 0 {
+            return None;
+        }
+        let depth = depth.min(i32::from(u16::MAX)) as u32;
+        // `H << 16 / depth`, rounded: `H` is a 16-bit register, so it fits.
+        let divisor = (((self.focal_length as u32) << 16) + depth / 2) / depth;
+        // `IR * divisor >> 16` as `IR * high + (IR * low >> 16)`, exact for
+        // the floor shift, with no product past 31 bits (`high` is at most
+        // `H` and `IR` fits 16 bits).
+        let (high, low) = ((divisor >> 16) as i32, (divisor & 0xffff) as i32);
+        let offset = |axis: usize| -> i32 {
+            let ir = (dot(&self.rows[axis]) + self.translation[axis])
+                .clamp(i32::from(i16::MIN), i32::from(i16::MAX));
+            ir * high + ((ir * low) >> 16)
+        };
+        // The GTE saturates a screen coordinate at 11 bits, which bends the
+        // edges of a polygon that leaves the screen. Keep the exact offset
+        // from the screen centre, and only scale a point beyond `LIMIT` back
+        // along its ray from the centre, which keeps the direction of an edge
+        // toward it.
+        let (dx, dy) = (offset(0), offset(1));
+        let far = dx.abs().max(dy.abs());
+        let (dx, dy) = if far <= LIMIT {
+            (dx, dy)
+        } else {
+            // Drop low bits until `component * LIMIT` fits 31 bits.
+            let mut shift = 0;
+            while (far >> shift) > 60_000 {
+                shift += 1;
+            }
+            let far = far >> shift;
+            ((dx >> shift) * LIMIT / far, (dy >> shift) * LIMIT / far)
+        };
+        Some([(self.center[0] + dx) as i16, (self.center[1] + dy) as i16])
+    }
+}
+
+/// What a batch does to freshly projected vertices. `()` leaves the GTE's
+/// answer alone and is zero-sized, so the legacy submission carries nothing.
+trait Reproject: Copy {
+    /// Whether polygons are clipped to the GPU's window before they are written.
+    const CLIPS: bool;
+
+    /// Whether surfaces with a vertex the GTE divide saturates on are left
+    /// unwritten and reported to the caller.
+    const SCREENS: bool = false;
+
+    /// The end of the packet storage a clipped polygon may write up to.
+    fn limit(self) -> *mut u32;
+
+    /// # Safety
+    /// `vertices` must hold `count` initialised records.
+    unsafe fn fix(self, vertices: *mut AffineVertex, count: usize);
+}
+
+impl Reproject for () {
+    const CLIPS: bool = false;
+
+    #[inline(always)]
+    fn limit(self) -> *mut u32 {
+        core::ptr::null_mut()
+    }
+
+    #[inline(always)]
+    unsafe fn fix(self, _vertices: *mut AffineVertex, _count: usize) {}
+}
+
+/// A near-surface batch: the view to reproject with, and where the packet
+/// storage ends.
+type NearBatch<'a> = (&'a NearView, *mut u32);
+
+impl Reproject for NearBatch<'_> {
+    const CLIPS: bool = true;
+
+    #[inline(always)]
+    fn limit(self) -> *mut u32 {
+        self.1
+    }
+
+    #[inline(always)]
+    unsafe fn fix(self, vertices: *mut AffineVertex, count: usize) {
+        for index in 0..count {
+            // SAFETY: `index < count`.
+            let vertex = unsafe { &mut *vertices.add(index) };
+            if self.0.saturates(vertex.depth) {
+                if let Some(screen) = self.0.project(vertex.position) {
+                    vertex.screen = screen;
+                }
+            }
+        }
+    }
+}
+
+/// The shared batch with surfaces the GTE cannot place left to the caller.
+#[derive(Copy, Clone)]
+struct Screened;
+
+impl Reproject for Screened {
+    const CLIPS: bool = false;
+    const SCREENS: bool = true;
+
+    #[inline(always)]
+    fn limit(self) -> *mut u32 {
+        core::ptr::null_mut()
+    }
+
+    #[inline(always)]
+    unsafe fn fix(self, _vertices: *mut AffineVertex, _count: usize) {}
 }
 
 /// Packet writer for one batch.
@@ -407,8 +611,18 @@ impl PacketSink {
         if self.off_screen(corners) {
             return;
         }
-        let quad = corners.len() == 4;
-        let otz = if quad {
+        let otz = Self::average_depth(corners);
+        if !self.usable_slot(otz) {
+            return;
+        }
+        // SAFETY: the caller reserved room for the polygon's packet.
+        unsafe { self.write(surface, corners, otz) };
+    }
+
+    /// Ordering-table key of a polygon: the GTE's average of its depths.
+    #[inline(always)]
+    fn average_depth(corners: &[&AffineVertex]) -> u16 {
+        if corners.len() == 4 {
             scene::average_cached_z4([
                 corners[0].depth as u16,
                 corners[1].depth as u16,
@@ -421,10 +635,16 @@ impl PacketSink {
                 corners[1].depth as u16,
                 corners[2].depth as u16,
             ])
-        };
-        if !self.usable_slot(otz) {
-            return;
         }
+    }
+
+    /// Write the packet of a polygon keyed at `otz`.
+    ///
+    /// # Safety
+    /// `self.next` must have room for the polygon's packet.
+    #[inline(always)]
+    unsafe fn write(&mut self, surface: &AffineSurface, corners: &[&AffineVertex], otz: u16) {
+        let quad = corners.len() == 4;
         let windowed = surface.compact == 0;
         let polygon_words = if quad { QUAD_WORDS } else { TRI_WORDS };
         let mut command = surface.color_command_word & 0xff00_0000;
@@ -474,6 +694,302 @@ impl PacketSink {
     }
 }
 
+/// The GPU drops a triangle spanning 1024 columns or 512 rows, and reads
+/// vertices as 11-bit signed numbers. A clipped polygon stays inside this
+/// window, which is as large as the GPU draws around the 320x240 screen less
+/// the pixel the outward rounding of a cut may add on each side.
+const WINDOW_X: (i32, i32) = (-350, 670);
+const WINDOW_Y: (i32, i32) = (-134, 374);
+
+/// A polygon corner with its attributes widened for clipping.
+#[derive(Copy, Clone, Default)]
+struct ClipCorner {
+    x: i32,
+    y: i32,
+    u: i32,
+    v: i32,
+    color: [i32; 3],
+}
+
+impl ClipCorner {
+    fn of(vertex: &AffineVertex) -> Self {
+        Self {
+            x: i32::from(vertex.screen[0]),
+            y: i32::from(vertex.screen[1]),
+            u: i32::from(vertex.uv[0]),
+            v: i32::from(vertex.uv[1]),
+            color: [
+                (vertex.color & 0xff) as i32,
+                ((vertex.color >> 8) & 0xff) as i32,
+                ((vertex.color >> 16) & 0xff) as i32,
+            ],
+        }
+    }
+
+    fn vertex(&self) -> AffineVertex {
+        AffineVertex {
+            position: [0; 3],
+            uv: [self.u as u8, self.v as u8],
+            color: (self.color[0] as u32)
+                | ((self.color[1] as u32) << 8)
+                | ((self.color[2] as u32) << 16),
+            screen: [self.x as i16, self.y as i16],
+            depth: 0,
+        }
+    }
+}
+
+/// Twice the signed area of a triangle.
+fn cross(a: &ClipCorner, b: &ClipCorner, c: &ClipCorner) -> i32 {
+    (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
+}
+
+/// Whether the GPU draws a triangle with these screen corners as given.
+fn gpu_draws(corners: [&AffineVertex; 3]) -> bool {
+    let [a, b, c] = corners;
+    let pairs = [(a, b), (b, c), (c, a)];
+    pairs.iter().all(|(p, q)| {
+        i32::from(p.screen[0]).abs_diff(i32::from(q.screen[0])) <= 1023
+            && i32::from(p.screen[1]).abs_diff(i32::from(q.screen[1])) <= 511
+    }) && corners.iter().all(|corner| {
+        (-1024..=1023).contains(&i32::from(corner.screen[0]))
+            && (-1024..=1023).contains(&i32::from(corner.screen[1]))
+    })
+}
+
+/// Whether the GPU draws every triangle of a polygon with these corners: a
+/// bounding box inside its 11-bit coordinates and under the 1024 by 512 span.
+/// Sufficient for both halves of a quad; a failing quad is judged per triangle.
+#[inline(always)]
+fn within_gpu_limits(corners: &[&AffineVertex]) -> bool {
+    let (mut left, mut right) = (i32::MAX, i32::MIN);
+    let (mut top, mut bottom) = (i32::MAX, i32::MIN);
+    for corner in corners {
+        let (x, y) = (i32::from(corner.screen[0]), i32::from(corner.screen[1]));
+        left = left.min(x);
+        right = right.max(x);
+        top = top.min(y);
+        bottom = bottom.max(y);
+    }
+    left >= -1024
+        && right <= 1023
+        && top >= -1024
+        && bottom <= 1023
+        && right - left <= 1023
+        && bottom - top <= 511
+}
+
+/// The corner where segment `from -> to` crosses the line `axis = bound`
+/// (axis 0 is x, 1 is y). Attributes interpolate linearly in screen space,
+/// as the GPU does along an edge. The crossing point is rounded away from the
+/// polygon interior (`winding` is the sign of the triangle's area), so a
+/// polygon cut here overlaps a neighbour that continues past the cut rather
+/// than leaving a hairline between them.
+fn cut(from: &ClipCorner, to: &ClipCorner, axis: usize, bound: i32, winding: i32) -> ClipCorner {
+    // Coordinates along the cut axis, then along the other one.
+    let (from_a, from_b, to_a, to_b) = if axis == 0 {
+        (from.x, from.y, to.x, to.y)
+    } else {
+        (from.y, from.x, to.y, to.x)
+    };
+    let mut numerator = bound - from_a;
+    let mut denominator = to_a - from_a;
+    if denominator < 0 {
+        numerator = -numerator;
+        denominator = -denominator;
+    }
+    // `from + (to - from) * numerator / denominator`, rounded to nearest.
+    let nearest = |a: i32, b: i32| -> i32 {
+        (a * denominator + (b - a) * numerator + denominator / 2).div_euclid(denominator)
+    };
+    let exact = from_b * denominator + (to_b - from_b) * numerator;
+    let low = exact.div_euclid(denominator);
+    let point = |other: i32| -> (i32, i32) {
+        if axis == 0 {
+            (bound, other)
+        } else {
+            (other, bound)
+        }
+    };
+    // Which side of the edge a candidate lies on, positive toward the interior.
+    let interior = |other: i32| -> i32 {
+        let (x, y) = point(other);
+        let side = (to.x - from.x) * (y - from.y) - (to.y - from.y) * (x - from.x);
+        side * winding.signum()
+    };
+    let other = if exact.rem_euclid(denominator) != 0 && interior(low + 1) < interior(low) {
+        low + 1
+    } else {
+        low
+    };
+    let (x, y) = point(other);
+    ClipCorner {
+        x,
+        y,
+        u: nearest(from.u, to.u),
+        v: nearest(from.v, to.v),
+        color: [
+            nearest(from.color[0], to.color[0]),
+            nearest(from.color[1], to.color[1]),
+            nearest(from.color[2], to.color[2]),
+        ],
+    }
+}
+
+/// Clip a triangle to the window. Returns the convex polygon (at most seven
+/// corners) in the triangle's winding.
+fn clip_to_window(triangle: [ClipCorner; 3]) -> ([ClipCorner; 8], usize) {
+    let winding = cross(&triangle[0], &triangle[1], &triangle[2]);
+    let mut current = [ClipCorner::default(); 8];
+    current[..3].copy_from_slice(&triangle);
+    let mut count = 3;
+    // (axis, bound, keeps coordinates at least / at most the bound)
+    let bounds = [
+        (0usize, WINDOW_X.0, true),
+        (0, WINDOW_X.1, false),
+        (1, WINDOW_Y.0, true),
+        (1, WINDOW_Y.1, false),
+    ];
+    for (axis, bound, keep_above) in bounds {
+        let coordinate = |c: &ClipCorner| if axis == 0 { c.x } else { c.y };
+        let inside = |c: &ClipCorner| {
+            if keep_above {
+                coordinate(c) >= bound
+            } else {
+                coordinate(c) <= bound
+            }
+        };
+        let mut next = [ClipCorner::default(); 8];
+        let mut kept = 0;
+        for index in 0..count {
+            let from = current[index];
+            let to = current[(index + 1) % count];
+            match (inside(&from), inside(&to)) {
+                (true, true) => {
+                    next[kept] = to;
+                    kept += 1;
+                }
+                (true, false) => {
+                    next[kept] = cut(&from, &to, axis, bound, winding);
+                    kept += 1;
+                }
+                (false, true) => {
+                    next[kept] = cut(&from, &to, axis, bound, winding);
+                    next[kept + 1] = to;
+                    kept += 2;
+                }
+                (false, false) => {}
+            }
+        }
+        current = next;
+        count = kept;
+        if count < 3 {
+            return (current, 0);
+        }
+    }
+    (current, count)
+}
+
+impl PacketSink {
+    /// [`Self::polygon`] for surfaces projected without the GTE's divide
+    /// limits: a polygon the GPU draws is written as it stands, and only one
+    /// it would drop goes to [`Self::polygon_clipped`].
+    ///
+    /// # Safety
+    /// As [`Self::polygon_clipped`].
+    #[inline(always)]
+    unsafe fn polygon_near(
+        &mut self,
+        surface: &AffineSurface,
+        corners: &[&AffineVertex],
+        limit: *mut u32,
+    ) {
+        if self.off_screen(corners) {
+            return;
+        }
+        let otz = Self::average_depth(corners);
+        if !self.usable_slot(otz) {
+            return;
+        }
+        if within_gpu_limits(corners) {
+            // SAFETY: the caller reserved room for the polygon's packet.
+            unsafe { self.write(surface, corners, otz) };
+        } else {
+            // SAFETY: as above.
+            unsafe { self.polygon_clipped(surface, corners, otz, limit) };
+        }
+    }
+
+    /// Clip a polygon the GPU would drop to the window, for surfaces
+    /// projected without the GTE's divide limits: a polygon the GPU would drop whole (a span of 1024 columns or
+    /// 512 rows, or a corner outside its 11-bit coordinates) is clipped to the
+    /// window instead of lost. Polygons the GPU draws are written untouched.
+    ///
+    /// A clipped polygon can take several packets where the batch reserved
+    /// one, so every write first checks the room left before `limit`; a
+    /// polygon that no longer fits is lost, as it would be if the whole face
+    /// had overflowed the storage.
+    ///
+    /// # Safety
+    /// `self.next` must have room for the polygon's packet, and `limit` must
+    /// be the end of the storage it lies in.
+    #[inline(never)]
+    unsafe fn polygon_clipped(
+        &mut self,
+        surface: &AffineSurface,
+        corners: &[&AffineVertex],
+        otz: u16,
+        limit: *mut u32,
+    ) {
+        // The longest packet: a windowed quad with its tag and both windows.
+        const MOST_WORDS: isize = 15;
+        // SAFETY: both pointers lie in the storage the caller reserved.
+        let room = |next: *mut u32| unsafe { limit.offset_from(next) >= MOST_WORDS };
+        let quad = corners.len() == 4;
+        let first = [corners[0], corners[1], corners[2]];
+        let first_ok = gpu_draws(first);
+        let second = if quad {
+            [corners[1], corners[2], corners[3]]
+        } else {
+            first
+        };
+        let second_ok = !quad || gpu_draws(second);
+        if first_ok && second_ok {
+            // SAFETY: the caller reserved room for this packet.
+            unsafe { self.write(surface, corners, otz) };
+            return;
+        }
+        let triangles = [(first, first_ok), (second, second_ok)];
+        for (triangle, ok) in triangles.iter().take(if quad { 2 } else { 1 }) {
+            if !room(self.next) {
+                return;
+            }
+            if *ok {
+                // SAFETY: room checked above.
+                unsafe { self.write(surface, triangle, otz) };
+                continue;
+            }
+            let (polygon, count) = clip_to_window([
+                ClipCorner::of(triangle[0]),
+                ClipCorner::of(triangle[1]),
+                ClipCorner::of(triangle[2]),
+            ]);
+            for index in 1..count.saturating_sub(1) {
+                let (a, b, c) = (polygon[0], polygon[index], polygon[index + 1]);
+                if cross(&a, &b, &c) == 0 {
+                    continue;
+                }
+                if !room(self.next) {
+                    return;
+                }
+                let (a, b, c) = (a.vertex(), b.vertex(), c.vertex());
+                // SAFETY: room checked above.
+                unsafe { self.write(surface, &[&a, &b, &c], otz) };
+            }
+        }
+    }
+}
+
 /// A batch vertex or scratch slot by index.
 ///
 /// # Safety
@@ -489,16 +1005,17 @@ const EDGE_BC: u8 = 2;
 const EDGE_CA: u8 = 4;
 
 /// Splits one surface's fan triangles into pieces and writes their packets.
-struct Splitter<'a> {
+struct Splitter<'a, R: Reproject> {
     vertices: *mut AffineVertex,
     /// Index of the first scratch slot after the batch.
     scratch: usize,
     sink: &'a mut PacketSink,
     surface: AffineSurface,
     bands: [u32; 2],
+    view: R,
 }
 
-impl Splitter<'_> {
+impl<R: Reproject> Splitter<'_, R> {
     #[inline(always)]
     fn vertex(&self, index: usize) -> &AffineVertex {
         // SAFETY: every index handed out is a batch vertex or a scratch slot.
@@ -542,10 +1059,12 @@ impl Splitter<'_> {
         unsafe {
             if mask == EDGE_AB | EDGE_BC | EDGE_CA {
                 project_vertices(self.vertices.add(first), 3);
+                self.view.fix(self.vertices.add(first), 3);
             } else {
                 for (slot, (_, _, bit)) in slots.iter().zip(edges) {
                     if mask & bit != 0 {
                         project_vertices(self.vertices.add(*slot), 1);
+                        self.view.fix(self.vertices.add(*slot), 1);
                     }
                 }
             }
@@ -585,7 +1104,14 @@ impl Splitter<'_> {
             ]
         };
         // SAFETY: capacity per the contract.
-        unsafe { self.sink.polygon(&self.surface, &corners) };
+        unsafe {
+            if R::CLIPS {
+                self.sink
+                    .polygon_near(&self.surface, &corners, self.view.limit())
+            } else {
+                self.sink.polygon(&self.surface, &corners)
+            }
+        };
     }
 
     /// Emit triangles (p, q, r) and (q, r, s), which share the edge q-r, as
@@ -606,7 +1132,14 @@ impl Splitter<'_> {
             ]
         };
         // SAFETY: capacity per the contract.
-        unsafe { self.sink.polygon(&self.surface, &corners) };
+        unsafe {
+            if R::CLIPS {
+                self.sink
+                    .polygon_near(&self.surface, &corners, self.view.limit())
+            } else {
+                self.sink.polygon(&self.surface, &corners)
+            }
+        };
     }
 
     /// Second-level triangle: split once more where its edges ask for it and
@@ -722,6 +1255,93 @@ pub unsafe fn submit_surface_batch(
     output: *mut u32,
     profile: SurfaceProfile,
 ) -> SurfaceSubmit {
+    // SAFETY: the caller's contract is the inner function's.
+    unsafe {
+        submit_surface_batch_with(
+            vertices,
+            vertex_count,
+            surfaces,
+            surface_count,
+            output,
+            &profile,
+            (),
+        )
+        .0
+    }
+}
+
+/// [`submit_surface_batch`] for a batch some of whose surfaces may sit inside
+/// the GTE's divide-saturation zone: such a surface is left unwritten, and its
+/// index is bit `i` of the returned mask. Its vertices stay in the batch for
+/// the caller to hand to [`submit_surface_batch_near`].
+///
+/// # Safety
+/// As [`submit_surface_batch`], and `surface_count` is at most 32.
+pub unsafe fn submit_surface_batch_screened(
+    vertices: *mut AffineVertex,
+    vertex_count: usize,
+    surfaces: *const AffineSurface,
+    surface_count: usize,
+    output: *mut u32,
+    profile: &SurfaceProfile,
+) -> (SurfaceSubmit, u32) {
+    // SAFETY: the caller's contract is the inner function's.
+    unsafe {
+        submit_surface_batch_with(
+            vertices,
+            vertex_count,
+            surfaces,
+            surface_count,
+            output,
+            profile,
+            Screened,
+        )
+    }
+}
+
+/// [`submit_surface_batch`] for surfaces already clipped to the screen:
+/// vertices the GTE divide saturates on are reprojected exactly from `view`.
+///
+/// # Safety
+/// As [`submit_surface_batch`], with `output..end` the packet storage the
+/// writer may fill: a polygon clipped to the GPU's window takes more packets
+/// than the batch reserved, and is dropped when `end` leaves no room. `view`
+/// must describe the view loaded in the GTE.
+pub unsafe fn submit_surface_batch_near(
+    vertices: *mut AffineVertex,
+    vertex_count: usize,
+    surfaces: *const AffineSurface,
+    surface_count: usize,
+    output: *mut u32,
+    end: *mut u32,
+    profile: SurfaceProfile,
+    view: &NearView,
+) -> SurfaceSubmit {
+    // SAFETY: the caller's contract is the inner function's.
+    unsafe {
+        submit_surface_batch_with(
+            vertices,
+            vertex_count,
+            surfaces,
+            surface_count,
+            output,
+            &profile,
+            (view, end),
+        )
+        .0
+    }
+}
+
+#[inline(always)]
+unsafe fn submit_surface_batch_with<R: Reproject>(
+    vertices: *mut AffineVertex,
+    vertex_count: usize,
+    surfaces: *const AffineSurface,
+    surface_count: usize,
+    output: *mut u32,
+    profile: &SurfaceProfile,
+    view: R,
+) -> (SurfaceSubmit, u32) {
     let mut sink = PacketSink {
         next: output,
         packets: 0,
@@ -731,14 +1351,25 @@ pub unsafe fn submit_surface_batch(
         ot_depth: profile.ot_depth,
     };
     if vertices.is_null() || surfaces.is_null() || output.is_null() || vertex_count == 0 {
-        return SurfaceSubmit {
+        let none = SurfaceSubmit {
             next_packet: output,
             packets: 0,
             hardware_triangles: 0,
         };
+        return (none, 0);
     }
     // SAFETY: `vertex_count` initialised records per the contract.
-    unsafe { project_vertices(vertices, vertex_count) };
+    let flagged = unsafe {
+        let flagged = if R::SCREENS {
+            project_vertices_flagged(vertices, vertex_count)
+        } else {
+            project_vertices(vertices, vertex_count);
+            0
+        };
+        view.fix(vertices, vertex_count);
+        flagged
+    };
+    let mut deferred = 0u32;
     let bands = [
         u32::from(profile.split_once_below),
         u32::from(profile.split_twice_below.min(profile.split_once_below)),
@@ -751,21 +1382,47 @@ pub unsafe fn submit_surface_batch(
         if count < 3 || first + count > vertex_count {
             continue;
         }
+        if R::SCREENS && flagged != 0 {
+            // A flagged triple may belong to a neighbour: keep the surface
+            // unless one of its own vertices is the one the divide clamped.
+            let span = ((1u32 << count) - 1) << first;
+            if flagged & span != 0 && unsafe { saturates_any(vertices.add(first), count) } {
+                deferred |= 1 << index;
+                continue;
+            }
+        }
         let mut splitter = Splitter {
             vertices,
             scratch: vertex_count,
             sink: &mut sink,
             surface,
             bands,
+            view,
         };
         // SAFETY: range checked above; capacity and scratch per the contract.
         unsafe { splitter.surface(first, count) };
     }
-    SurfaceSubmit {
+    let submitted = SurfaceSubmit {
         next_packet: sink.next,
         packets: sink.packets,
         hardware_triangles: sink.triangles,
-    }
+    };
+    (submitted, deferred)
+}
+
+/// Whether any of `count` projected vertices has the depth at which the GTE
+/// divide saturates (`H >= 2 * SZ`, with `H` the projection plane loaded).
+///
+/// # Safety
+/// `vertices` must hold `count` initialised records.
+#[inline(never)]
+unsafe fn saturates_any(vertices: *const AffineVertex, count: usize) -> bool {
+    let h = psx_gte::read_control!(26) as i32;
+    (0..count).any(|index| {
+        // SAFETY: `index < count`.
+        let depth = unsafe { (*vertices.add(index)).depth };
+        h >= 2 * depth as i32
+    })
 }
 
 #[cfg(test)]
@@ -851,6 +1508,56 @@ mod tests {
         }
         assert_eq!(offset, used);
         (result, packets)
+    }
+
+    #[test]
+    fn a_screened_batch_defers_exactly_the_surfaces_with_a_saturating_vertex() {
+        // H = 160 saturates the divide at SZ <= 80. Triples run (0,1,2),
+        // (3,4,5), (6,7), so the far surface A shares one with the near B.
+        let far = |x: i16, y: i16| vertex([x, y, 400], [0, 0]);
+        let near = |x: i16, y: i16| vertex([x, y, 40], [0, 0]);
+        let vertices = [
+            far(-50, -50),
+            far(50, -50),
+            far(50, 50),
+            far(-50, 50),
+            near(-5, -5),
+            near(5, -5),
+            near(5, 5),
+            near(-5, 5),
+        ];
+        let surfaces = [surface(0, 4, false), surface(4, 4, false)];
+        configure();
+        let mut batch = vertices.to_vec();
+        batch.extend([AffineVertex::default(); AFFINE_SPLIT_SCRATCH_VERTICES]);
+        let mut words = std::vec![0u32; 4096];
+        let (screened, deferred) = unsafe {
+            submit_surface_batch_screened(
+                batch.as_mut_ptr(),
+                vertices.len(),
+                surfaces.as_ptr(),
+                surfaces.len(),
+                words.as_mut_ptr(),
+                &SurfaceProfile::PXBSP_THIRD_PERSON,
+            )
+        };
+        assert_eq!(deferred, 0b10, "only the near surface is left");
+        // The far surface is written exactly as the plain writer writes it.
+        let (plain, _) = submit(&vertices[..4], &surfaces[..1]);
+        assert_eq!(screened.packets, plain.packets);
+        assert!(screened.packets > 0);
+        // A batch with nothing near defers nothing.
+        let (_, none) = unsafe {
+            submit_surface_batch_screened(
+                batch.as_mut_ptr(),
+                4,
+                surfaces.as_ptr(),
+                1,
+                words.as_mut_ptr(),
+                &SurfaceProfile::PXBSP_THIRD_PERSON,
+            )
+        };
+        assert_eq!(none, 0);
     }
 
     #[test]
@@ -1034,5 +1741,189 @@ mod tests {
         assert_eq!(words[0] & WINDOWED_POLYGON_TAG, 0);
         assert_eq!(words[1], TextureWindow::NONE.word());
         assert_eq!(words[2] >> 24, 0x34);
+    }
+
+    fn corner(x: i32, y: i32, u: i32, v: i32) -> ClipCorner {
+        ClipCorner {
+            x,
+            y,
+            u,
+            v,
+            color: [u, v, 255 - u],
+        }
+    }
+
+    fn inside(polygon: &[ClipCorner], x: i32, y: i32, slack: i32) -> bool {
+        let point = ClipCorner {
+            x,
+            y,
+            ..ClipCorner::default()
+        };
+        let winding = cross(&polygon[0], &polygon[1], &polygon[2]).signum();
+        (0..polygon.len()).all(|index| {
+            let (a, b) = (&polygon[index], &polygon[(index + 1) % polygon.len()]);
+            cross(a, b, &point) * winding >= -slack
+        })
+    }
+
+    #[test]
+    fn a_triangle_beyond_the_gpu_limits_is_clipped_to_the_window_and_keeps_its_pixels() {
+        let mut state = 0x1234_5678u32;
+        let mut next = |span: i32| -> i32 {
+            state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            ((state >> 8) % (2 * span as u32)) as i32 - span
+        };
+        let mut clipped_count = 0;
+        for _ in 0..300 {
+            let triangle = [
+                corner(next(6000), next(6000), 10, 20),
+                corner(next(6000), next(6000), 200, 40),
+                corner(next(6000), next(6000), 90, 250),
+            ];
+            if cross(&triangle[0], &triangle[1], &triangle[2]) == 0 {
+                continue;
+            }
+            let (polygon, count) = clip_to_window(triangle);
+            if count == 0 {
+                continue;
+            }
+            clipped_count += 1;
+            for corner in &polygon[..count] {
+                assert!(
+                    (WINDOW_X.0 - 1..=WINDOW_X.1 + 1).contains(&corner.x)
+                        && (WINDOW_Y.0 - 1..=WINDOW_Y.1 + 1).contains(&corner.y),
+                    "corner ({}, {}) outside the window",
+                    corner.x,
+                    corner.y
+                );
+            }
+            // Every screen pixel the triangle covers, with a pixel to spare
+            // from its edges, is covered by the clipped polygon.
+            let winding = cross(&triangle[0], &triangle[1], &triangle[2]).signum();
+            for y in (0..240).step_by(7) {
+                for x in (0..320).step_by(7) {
+                    let strictly_inside = {
+                        let point = ClipCorner {
+                            x,
+                            y,
+                            ..ClipCorner::default()
+                        };
+                        (0..3).all(|index| {
+                            let (a, b) = (&triangle[index], &triangle[(index + 1) % 3]);
+                            let length = (((b.x - a.x) as f64).powi(2)
+                                + ((b.y - a.y) as f64).powi(2))
+                            .sqrt();
+                            (cross(a, b, &point) * winding) as f64 > 2.0 * length
+                        })
+                    };
+                    if strictly_inside {
+                        assert!(
+                            inside(&polygon[..count], x, y, 0),
+                            "pixel ({x}, {y}) lost by the clip"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(clipped_count > 100, "only {clipped_count} clips exercised");
+    }
+
+    #[test]
+    fn exact_projection_agrees_with_the_gte_where_it_does_not_saturate() {
+        // The PXBSP view: rotation scaled by 3, H = 320.
+        let scale = 0x3000;
+        scene::set_screen_offset(160 << 16, 120 << 16);
+        scene::set_projection_plane(320);
+        scene::load_rotation(&Mat3I16 {
+            m: [[scale, 0, 0], [0, scale, 0], [0, 0, scale]],
+        });
+        scene::load_translation(Vec3I32::ZERO);
+        let view = NearView {
+            rows: [[scale, 0, 0], [0, scale, 0], [0, 0, scale]],
+            translation: [0, 0, 0],
+            focal_length: 320,
+            center: [160, 120],
+        };
+        let mut state = 0x7e57_0001u32;
+        let mut axis = |span: i32| -> i16 {
+            state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            (((state >> 8) % (2 * span as u32)) as i32 - span) as i16
+        };
+        let mut compared = 0;
+        for _ in 0..20_000 {
+            let position = [axis(400), axis(400), axis(600).abs() + 1];
+            let projected = scene::project_vertex(vec3(position));
+            let depth = u32::from(projected.sz);
+            if view.saturates(depth) || depth == u32::from(u16::MAX) {
+                continue;
+            }
+            // Skip vertices the GTE clamps to its screen range.
+            if projected.sx.unsigned_abs() >= 0x3ff || projected.sy.unsigned_abs() >= 0x3ff {
+                continue;
+            }
+            let exact = view.project(position).expect("positive depth");
+            assert!(
+                (i32::from(exact[0]) - i32::from(projected.sx)).abs() <= 1
+                    && (i32::from(exact[1]) - i32::from(projected.sy)).abs() <= 1,
+                "{position:?} exact {exact:?} gte ({}, {})",
+                projected.sx,
+                projected.sy
+            );
+            compared += 1;
+        }
+        assert!(compared > 1000, "only {compared} compared");
+    }
+
+    #[test]
+    fn a_vertex_far_off_screen_keeps_its_direction_from_the_centre() {
+        let view = NearView {
+            rows: [[0x1000, 0, 0], [0, 0x1000, 0], [0, 0, 0x1000]],
+            translation: [0, 0, 0],
+            focal_length: 320,
+            center: [160, 120],
+        };
+        // 1 unit deep at 3000 units right and 1500 down: far beyond 16 bits.
+        let [x, y] = view.project([3000, 1500, 1]).expect("positive depth");
+        let (dx, dy) = (i32::from(x) - 160, i32::from(y) - 120);
+        assert!(dx.abs().max(dy.abs()) <= LIMIT);
+        assert!(dx.abs().max(dy.abs()) > LIMIT - 2, "scaled to the limit");
+        assert!((dx * 1500 - dy * 3000).abs() <= 3000 * 2, "direction kept");
+        // A vertex 10 units deep lands where the divide puts it.
+        assert_eq!(view.project([10, 5, 10]), Some([160 + 320, 120 + 160]));
+        assert_eq!(view.project([10, 5, 0]), None);
+    }
+
+    #[test]
+    fn a_triangle_within_the_gpu_limits_is_not_touched() {
+        let make = |x: i16, y: i16| AffineVertex {
+            screen: [x, y],
+            ..AffineVertex::default()
+        };
+        let (a, b, c) = (make(-300, -100), make(600, 300), make(100, 380));
+        assert!(gpu_draws([&a, &b, &c]));
+        let (a, b, c) = (make(-300, -300), make(600, 300), make(100, 380));
+        assert!(!gpu_draws([&a, &b, &c]), "a 600-row span is dropped");
+        let (a, b, c) = (make(-1100, 0), make(100, 10), make(100, 80));
+        assert!(
+            !gpu_draws([&a, &b, &c]),
+            "a corner outside 11 bits is dropped"
+        );
+    }
+
+    #[test]
+    fn cut_rounds_away_from_the_interior_and_interpolates_attributes() {
+        // The edge crosses x = 670 at y = 2.01; the third corner is below it.
+        let from = corner(0, 0, 0, 0);
+        let to = corner(1000, 3, 100, 200);
+        let below = corner(0, 100, 0, 0);
+        let winding = cross(&from, &to, &below);
+        let at = cut(&from, &to, 0, 670, winding);
+        assert_eq!((at.x, at.y), (670, 2), "away from the interior below");
+        assert_eq!((at.u, at.v), (67, 134));
+        // The same edge with the interior above rounds the other way.
+        let above = corner(0, -100, 0, 0);
+        let winding = cross(&from, &to, &above);
+        let at = cut(&from, &to, 0, 670, winding);
+        assert_eq!((at.x, at.y), (670, 3), "away from the interior above");
     }
 }

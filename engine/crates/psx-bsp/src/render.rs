@@ -14,8 +14,8 @@ use psx_engine::{
         AttributedClipPlane, ClipTraversal,
     },
     compose_model_view_transform, materialize_baked_surface_vertices, materialize_surface_vertices,
-    submit_surface_batch, AffineSurface, AffineVertex, SurfaceProfile, SurfaceSourceVertex,
-    SurfaceSubmit,
+    submit_surface_batch_near, submit_surface_batch_screened, AffineSurface, AffineVertex,
+    NearView, SurfaceProfile, SurfaceSourceVertex, SurfaceSubmit,
 };
 use psx_gte::math::{Mat3I16, Vec3I16 as GteVec3I16, Vec3I32 as GteVec3I32};
 use psx_gte::scene;
@@ -356,6 +356,14 @@ pub fn configure_projection() {
 /// 2048 units on a Cortex level that is about 3950 units long. Anything else
 /// that sorts into the same ordering table must key its depth through the
 /// same law; see [`pxbsp_classic_far_depth`].
+///
+/// The zone is `H / (2 * S)` units deep: 26 at H = 160, 53 at the third-person
+/// camera's H = 320. The GTE pulls a vertex that close toward the screen
+/// centre, so a wall or floor inside it was drawn warped and left holes at the
+/// screen edge. The GTE flags the divide that saturates, so the shared batch writer
+/// leaves such a surface to be drawn on its own, with its vertices projected
+/// exactly (see `psx_engine::NearView`) and any polygon the GPU would
+/// drop clipped to its window instead.
 pub const PXBSP_VIEW_SCALE_Q12: i32 = 0x3000;
 
 /// True view depth at which a flat PXBSP surface reaches OT slot `ot_depth`,
@@ -656,6 +664,16 @@ impl FrustumPlanes {
             focal_length: h,
             near_view,
             far_view,
+        }
+    }
+
+    /// The loaded view, for [`submit_surface_batch_near`].
+    fn projection_view(&self, center: [i32; 2]) -> NearView {
+        NearView {
+            rows: self.view_rows,
+            translation: self.view_translation,
+            focal_length: self.focal_length,
+            center,
         }
     }
 
@@ -1743,6 +1761,12 @@ impl Renderer {
         // On the guest they go to the head of the scratchpad, which is a
         // constant address and one-cycle reads; on the host a local copy
         // addressed off `sp`.
+        // Built from the caller's planes so `frustum_local` is never borrowed
+        // by the flushes: its fields stay in registers through the face loop.
+        let near_view = frustum.projection_view([
+            self.view_projection.half_width,
+            self.view_projection.half_height,
+        ]);
         let frustum_local = *frustum;
         let side_error = frustum_local.side_error;
         #[cfg(target_arch = "mips")]
@@ -1909,12 +1933,14 @@ impl Renderer {
                     stats.surface_batches = stats.surface_batches.saturating_add(1);
                 }
                 let submitted = unsafe {
-                    flush_pxbsp_batch(
+                    flush_pxbsp_batch_zone(
                         batch_vertices,
                         batch_vertex_count,
                         &batch_surfaces,
                         batch_surface_count,
                         next,
+                        end,
+                        &near_view,
                     )
                 };
                 next = submitted.next_packet;
@@ -1967,12 +1993,14 @@ impl Renderer {
             stats.surface_batches = stats.surface_batches.saturating_add(1);
         }
         let submitted = unsafe {
-            flush_pxbsp_batch(
+            flush_pxbsp_batch_zone(
                 batch_vertices,
                 batch_vertex_count,
                 &batch_surfaces,
                 batch_surface_count,
                 next,
+                end,
+                &near_view,
             )
         };
         next = submitted.next_packet;
@@ -3207,35 +3235,127 @@ fn packet_capacity(next: *mut u32, end: *mut u32, needed_words: usize) -> bool {
     remaining >= 0 && needed_words <= remaining as usize
 }
 
+/// What a flushed batch wrote, and the surfaces it left for the zone path.
+struct FlushedBatch {
+    submitted: SurfaceSubmit,
+    /// Bit `i` is set when surface `i` has a vertex the GTE divide saturates
+    /// on, so the writer left it for [`flush_pxbsp_batch_zone`].
+    deferred: u32,
+}
+
 unsafe fn flush_pxbsp_batch(
     vertices: &mut [AffineVertex],
     vertex_count: usize,
     surfaces: &[AffineSurface],
     surface_count: usize,
     output: *mut u32,
-) -> SurfaceSubmit {
+) -> FlushedBatch {
     if vertex_count == 0 || surface_count == 0 {
-        return SurfaceSubmit {
-            next_packet: output,
-            packets: 0,
-            hardware_triangles: 0,
+        return FlushedBatch {
+            submitted: SurfaceSubmit {
+                next_packet: output,
+                packets: 0,
+                hardware_triangles: 0,
+            },
+            deferred: 0,
         };
     }
     // SAFETY: the planes and the batch are the only scratchpad bytes live
     // around the flush (see PxbspWriterStack), the writer installs no
     // exception handler, and tools/stack_guard.py proves its call tree fits.
-    unsafe {
+    let (submitted, deferred) = unsafe {
         PxbspWriterStack::run(|| {
-            submit_surface_batch(
+            submit_surface_batch_screened(
                 vertices.as_mut_ptr(),
                 vertex_count,
                 surfaces.as_ptr(),
                 surface_count,
                 output,
-                PXBSP_RENDER_PROFILE,
+                &PXBSP_RENDER_PROFILE,
             )
         })
+    };
+    FlushedBatch {
+        submitted,
+        deferred,
     }
+}
+
+/// Flush a batch, then draw the surfaces the writer left because the GTE
+/// cannot place one of their vertices: each is projected exactly and any
+/// polygon the GPU would drop is clipped to its window instead.
+///
+/// # Safety
+/// As [`flush_pxbsp_batch`]; `end` is the end of the packet storage `output`
+/// lies in.
+#[inline(always)]
+unsafe fn flush_pxbsp_batch_zone(
+    vertices: &mut [AffineVertex],
+    vertex_count: usize,
+    surfaces: &[AffineSurface],
+    surface_count: usize,
+    output: *mut u32,
+    end: *mut u32,
+    view: &NearView,
+) -> SurfaceSubmit {
+    let FlushedBatch {
+        submitted,
+        deferred,
+    } = unsafe { flush_pxbsp_batch(vertices, vertex_count, surfaces, surface_count, output) };
+    if deferred == 0 {
+        return submitted;
+    }
+    unsafe { draw_zone_surfaces(vertices, surfaces, deferred, submitted, end, view) }
+}
+
+/// Draw the surfaces of a flushed batch the writer left for the zone path.
+///
+/// # Safety
+/// As [`flush_pxbsp_batch_zone`]; `deferred` names surfaces of `surfaces`.
+#[inline(never)]
+unsafe fn draw_zone_surfaces(
+    vertices: &[AffineVertex],
+    surfaces: &[AffineSurface],
+    mut deferred: u32,
+    mut submitted: SurfaceSubmit,
+    end: *mut u32,
+    view: &NearView,
+) -> SurfaceSubmit {
+    while deferred != 0 {
+        let index = deferred.trailing_zeros() as usize;
+        deferred &= deferred - 1;
+        let surface = surfaces[index];
+        let first = usize::from(surface.first_vertex);
+        let count = usize::from(surface.vertex_count);
+        let mut zone_vertices = [AffineVertex::default(); PXBSP_AFFINE_BATCH_VERTEX_CAPACITY];
+        zone_vertices[..count].copy_from_slice(&vertices[first..first + count]);
+        let own = AffineSurface {
+            first_vertex: 0,
+            ..surface
+        };
+        // SAFETY: the vertices are the surface's own, and `end` bounds the
+        // storage the batch reserved room in.
+        let drawn = unsafe {
+            submit_surface_batch_near(
+                zone_vertices.as_mut_ptr(),
+                count,
+                &own,
+                1,
+                submitted.next_packet,
+                end,
+                PXBSP_RENDER_PROFILE,
+                view,
+            )
+        };
+        submitted = SurfaceSubmit {
+            next_packet: drawn.next_packet,
+            packets: submitted.packets.wrapping_add(drawn.packets),
+            hardware_triangles: submitted
+                .hardware_triangles
+                .wrapping_add(drawn.hardware_triangles),
+        };
+    }
+    submitted
 }
 
 /// `MVMVA(mx=LLM, vx=V0, cv=none, sf=0, lm=0)`: three plane dots at once.
@@ -3743,6 +3863,80 @@ mod tests {
             visible.stats.packets, 0,
             "the exterior still sees the back of this face"
         );
+    }
+
+    #[test]
+    fn a_face_inside_the_saturation_zone_is_drawn_at_its_perspective_image() {
+        configure_projection();
+        let mut lumps = valid_lumps();
+        let mut vertices = Vec::new();
+        for position in [[64i16, -16, -16], [64, 16, -16], [64, 0, 16]] {
+            for component in position {
+                vertices.extend_from_slice(&component.to_le_bytes());
+            }
+            vertices.extend_from_slice(&[0, 0, 128, 0, 0, 0]);
+        }
+        lumps[PxbspLumpKind::Vertices as usize] = vertices;
+        let mins = [64i16, -16, -16].map(crate::encode_node_bound_min);
+        let maxs = [64i16, 16, 16].map(crate::encode_node_bound_max);
+        lumps[PxbspLumpKind::Nodes as usize][6..9].copy_from_slice(&mins.map(|value| value as u8));
+        lumps[PxbspLumpKind::Nodes as usize][9..12].copy_from_slice(&maxs.map(|value| value as u8));
+        let bytes = write_file(&lumps);
+        let mut map = PxbspResidentMap::with_capacity(bytes.len());
+        map.load(7, &mut SliceReader::new(&bytes))
+            .expect("resident map");
+        let binding = PxbspTextureBinding {
+            texture_page: 0x0105,
+            clut: 0x1234,
+            texture_window_word: 0xe200_0000,
+            uv_origin: [0; 2],
+            page_uv_origin: [0; 2],
+            texture_size: [64; 2],
+        };
+        // Sixteen units from a triangle that spans the whole view: H = 160
+        // and the x3 view saturate the GTE divide inside 26 units.
+        let camera = Camera {
+            origin: Vec3I32 {
+                x: 48 << 12,
+                y: 0,
+                z: 0,
+            },
+            angles: [0; 3],
+        };
+        let mut packets = [0u32; 4096];
+        let mut renderer = Renderer::new_pxbsp_with_nodes(map.faces().len(), map.nodes().len());
+        let frame = renderer.draw_pxbsp_world(
+            &map,
+            camera,
+            load_pxbsp_view(camera),
+            &[Some(binding)],
+            0,
+            &mut packets,
+        );
+        assert_eq!(frame.stats.visible_faces, 1);
+        assert!(frame.stats.packets > 0);
+        let mut offset = 0usize;
+        let mut corners = Vec::new();
+        while offset < frame.packet_words {
+            let data_words = (packets[offset] >> 24) as usize;
+            let quad = packets[offset + 2] >> 24 == 0x3e;
+            for corner in 0..if quad { 4 } else { 3 } {
+                let word = packets[offset + 3 + corner * 3];
+                corners.push((i32::from(word as i16), i32::from((word >> 16) as i16)));
+            }
+            offset += data_words + 1;
+        }
+        // The triangle's perspective image: depth 16 puts the corners 10
+        // pixels per unit from the centre. The divide saturates here, so the
+        // GTE alone would have pulled them in toward (160, 120).
+        for expected in [(0, 280), (0, -40), (320, 120)] {
+            assert!(
+                corners
+                    .iter()
+                    .any(|&(x, y)| { (x - expected.0).abs() <= 1 && (y - expected.1).abs() <= 1 }),
+                "no corner at {expected:?} in {corners:?}"
+            );
+        }
     }
 
     #[test]
