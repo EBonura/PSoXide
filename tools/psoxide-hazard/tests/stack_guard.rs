@@ -1168,3 +1168,66 @@ fn one_run_patches_to_a_fixed_point() {
     assert_eq!(tramp, image.word_at(i64::from(BASE + 0x904)));
     assert_ne!(tramp, i64::from(cases[1]));
 }
+
+fn guard_forbidding(fx: &Fixture, forbidden: &[&str]) -> (usize, String) {
+    let (exe, map) = fx.write();
+    let forbidden: Vec<String> = forbidden.iter().map(|f| f.to_string()).collect();
+    let mut out = Vec::new();
+    let failures =
+        stack_guard::check_forbidding(&exe, Some(&map), None, None, &forbidden, &mut out);
+    (failures, String::from_utf8(out).unwrap())
+}
+
+#[test]
+fn a_tree_that_reaches_a_forbidden_function_fails() {
+    // psx-rt's I-cache flush runs with the scratchpad unmapped: a frame on
+    // the scratchpad stack would read the cache tags. Opt-in, by symbol.
+    let mut fx = Fixture::new();
+    let flush = fx.leaf(4, "__psx_rt_flush_i_cache", 0);
+    let b = fx.caller(3, "t::b", 8, &[flush]);
+    let a = fx.caller(2, "t::a", 16, &[b]);
+    fx.caller(1, &entry(0, 1024), 8, &[a]);
+    let (failures, out) = fx.guard();
+    assert_eq!(failures, 0, "{out}");
+    let (failures, out) = guard_forbidding(&fx, &["__psx_rt_flush_i_cache"]);
+    assert_eq!(failures, 1, "{out}");
+    assert!(
+        out.contains("t::b reaches __psx_rt_flush_i_cache") && out.contains("--forbid"),
+        "{out}"
+    );
+    // Only the named function counts.
+    let (failures, out) = guard_forbidding(&fx, &["t::unrelated"]);
+    assert_eq!(failures, 0, "{out}");
+}
+
+#[test]
+fn a_forbidden_function_is_found_through_a_trampoline() {
+    let mut fx = Fixture::new();
+    let flush = fx.leaf(3, "__psx_rt_flush_i_cache", 0);
+    let tramp = fx.trampoline(&[NOP, j(flush), NOP]);
+    let body = [prologue(16), vec![jal(tramp), NOP], epilogue(16)].concat();
+    fx.function(2, "t::a", &body);
+    let a = fx.addr(2);
+    fx.caller(1, &entry(0, 1024), 8, &[a]);
+    let (failures, out) = guard_forbidding(&fx, &["__psx_rt_flush_i_cache"]);
+    assert_eq!(failures, 1, "{out}");
+    assert!(out.contains("reaches __psx_rt_flush_i_cache"), "{out}");
+}
+
+#[test]
+fn forbid_is_a_command_line_flag() {
+    let mut fx = Fixture::new();
+    let flush = fx.leaf(3, "__psx_rt_flush_i_cache", 0);
+    let a = fx.caller(2, "t::a", 16, &[flush]);
+    fx.caller(1, &entry(0, 1024), 8, &[a]);
+    let (exe, map) = fx.write();
+    let (exe, map) = (exe.to_str().unwrap(), map.to_str().unwrap());
+    assert_eq!(call(stack_guard::main, &[exe, map]).0, 0);
+    let (status, out) = call(
+        stack_guard::main,
+        &[exe, map, "--forbid", "__psx_rt_flush_i_cache"],
+    );
+    assert_eq!(status, 1, "{out}");
+    assert!(out.contains("1 scratchpad stack entries fail"), "{out}");
+    assert_eq!(call(stack_guard::main, &[exe, map, "--forbid"]).0, 1);
+}

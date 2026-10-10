@@ -18,6 +18,7 @@ use std::io::Write;
 pub mod detect;
 pub mod linkmap;
 pub mod listing;
+pub mod module;
 pub mod patch;
 pub mod scan;
 pub mod stack_guard;
@@ -37,8 +38,8 @@ pub fn cli_args(args: &[String]) -> Option<(Vec<String>, bool, Option<String>)> 
             check_only = true;
         } else if arg == "--map" {
             map_path = Some(it.next()?.clone());
-        } else if arg == "--code" {
-            it.next()?; // its range is read by `code_ranges`
+        } else if arg == "--code" || arg == "--module" {
+            it.next()?; // its range is read by `code_ranges` or `module::modules`
         } else if arg.starts_with("--") {
             continue;
         } else {
@@ -77,10 +78,12 @@ pub fn whole_image(args: &[String]) -> bool {
 }
 
 /// The extra executable ranges of `--code LO..HI` (hex, `0x` optional,
-/// repeatable): code the map's `.text` does not span, such as a code module
-/// linked at another address into a composite image. `Err` names a bad
-/// range.
+/// repeatable): code the map's `.text` does not span. A range is in RAM, or
+/// inside the link range of a `--module` (see [`module`]): the code of a
+/// module linked at another address than its bytes sit at, in link
+/// addresses. `Err` names a bad range.
 pub fn code_ranges(args: &[String]) -> Result<Vec<(i64, i64)>, String> {
+    let modules = module::modules(args)?;
     let mut ranges = Vec::new();
     let mut it = args.iter();
     while let Some(arg) = it.next() {
@@ -93,12 +96,15 @@ pub fn code_ranges(args: &[String]) -> Result<Vec<(i64, i64)>, String> {
             Some((hex(lo)?, hex(hi)?))
         });
         match range {
-            Some((lo, hi)) if 0x8001_0000 <= lo && lo < hi && hi <= 0x801F_8000 => {
+            Some((lo, hi))
+                if (0x8001_0000 <= lo && lo < hi && hi <= 0x801F_8000)
+                    || modules.iter().any(|m| m.links(lo, hi)) =>
+            {
                 ranges.push((lo, hi));
             }
             _ => {
                 return Err(format!(
-                    "bad --code range {value}: want LO..HI in RAM, in hex"
+                    "bad --code range {value}: want LO..HI in RAM or inside a --module link range, in hex"
                 ))
             }
         }
@@ -112,11 +118,12 @@ pub fn code_ranges(args: &[String]) -> Result<Vec<(i64, i64)>, String> {
 /// is also given: the rest of the load is `.data`, `.rodata` and assets, and
 /// words there decode as plausible instructions (a slice length of 8 is
 /// `jr zero`, 0x11111111 is `beq t0,s1`), so nothing outside the code ranges
-/// may be read as code or written. `Ok(None)` means no bounds: no `--map`,
-/// or `--whole-image`, the explicit request for the old heuristic over the
-/// whole load. `Err(None)` is a usage error (`--text-only` without
-/// `--map`); `Err(Some(status))` means the map could not be read or its
-/// bounds are not in RAM, already reported to `out`.
+/// may be read as code or written. A `--module` (see [`module`]) needs
+/// `--map`. `Ok(None)` means no bounds: no `--map`, or `--whole-image`, the
+/// explicit request for the old heuristic over the whole load. `Err(None)`
+/// is a usage error (`--text-only` without `--map`); `Err(Some(status))`
+/// means the map could not be read, its bounds are not in RAM, or a
+/// `--module` or `--code` is bad, already reported to `out`.
 pub fn text_bounds(
     args: &[String],
     out: &mut dyn Write,
@@ -125,6 +132,17 @@ pub fn text_bounds(
     let Some((_, _, map_path)) = cli_args(args) else {
         return Err(None);
     };
+    let modules = module::modules(args).map_err(|error| {
+        let _ = writeln!(out, "{error}");
+        Some(2)
+    })?;
+    if !modules.is_empty() && (whole_image(args) || map_path.is_none()) {
+        let _ = writeln!(
+            out,
+            "--module needs --map and not --whole-image: a module's code is the --code ranges inside its link range"
+        );
+        return Err(Some(2));
+    }
     if whole_image(args) {
         return Ok(None);
     }

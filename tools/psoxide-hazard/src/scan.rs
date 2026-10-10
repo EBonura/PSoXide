@@ -10,6 +10,7 @@ use crate::detect::{
 };
 use crate::linkmap::{io_message, LinkMap};
 use crate::listing::{load_address, Listing, HEADER};
+use crate::module::{modules, Module, Overlay};
 use crate::text::strip;
 use crate::{cli_args, open_map, report_unlisted, text_bounds};
 
@@ -34,7 +35,9 @@ Prints every hazard as `branch | delay-slot load | consumer` and exits 1 if
 any image has one. Loads into $zero (cache probes) are ignored, and so is
 anything within 16 words of a word that does not decode as an instruction.
 `--map` (one image only) resolves jump tables as `hazard-patch --map` does,
-and scans only the map's `.text` (plus `--code LO..HI` ranges), as
+and scans only the map's `.text` (plus `--code LO..HI` ranges and
+`--module LINK_LO..LINK_HI@IMAGE_AT` code modules, which are linked at one
+address and sit in the file at another, as `hazard-patch` describes), as
 `hazard-patch --map` patches only it (`--text-only` is accepted and does
 nothing). Without a map, or with
 `--whole-image`, every word of the load that looks like code is scanned, and
@@ -94,7 +97,7 @@ pub fn scan_with_ceiling(
     table_ceiling: usize,
     out: &mut dyn Write,
 ) -> Result<Vec<String>, ScanError> {
-    scan_in(path, map_path, is_code, table_ceiling, None, out)
+    scan_in(path, map_path, is_code, table_ceiling, None, &[], out)
 }
 
 fn scan_in(
@@ -103,14 +106,20 @@ fn scan_in(
     is_code: IsCode<'_>,
     table_ceiling: usize,
     text: Option<&[(i64, i64)]>,
+    modules: &[Module],
     out: &mut dyn Write,
 ) -> Result<Vec<String>, ScanError> {
-    let data = std::fs::read(path).map_err(|error| {
+    let file = std::fs::read(path).map_err(|error| {
         let _ = writeln!(out, "{}", io_message(&error, path));
         ScanError::Failed(1)
     })?;
-    let link_map: Option<LinkMap> = open_map(map_path, &data, out).map_err(ScanError::Failed)?;
-    let base = load_address(&data);
+    let link_map: Option<LinkMap> = open_map(map_path, &file, out).map_err(ScanError::Failed)?;
+    let base = load_address(&file);
+    // A code module sits in the file at one address and runs at another:
+    // scan the image with it at its link address.
+    let overlay = Overlay::new(modules.to_vec(), &file, base, text.unwrap_or(&[]), out)
+        .map_err(ScanError::Failed)?;
+    let data = overlay.expand(&file, base);
     let mut listing = Listing::new(&data, base);
     if let Some(ranges) = text {
         listing.retain_text(ranges);
@@ -210,6 +219,13 @@ fn run(
     if paths.is_empty() || (map_path.is_some() && paths.len() != 1) {
         return usage(out);
     }
+    let modules = match modules(args) {
+        Ok(modules) => modules,
+        Err(error) => {
+            let _ = writeln!(out, "{error}");
+            return 2;
+        }
+    };
     let mut total = 0;
     for path in &paths {
         let hazards = match scan_in(
@@ -218,6 +234,7 @@ fn run(
             is_code,
             TABLE_CEILING,
             text,
+            &modules,
             out,
         ) {
             Ok(hazards) => hazards,

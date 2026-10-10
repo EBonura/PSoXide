@@ -10,6 +10,7 @@ use crate::detect::{
 };
 use crate::linkmap::io_message;
 use crate::listing::{load_address, pad_to_payload, word_at_offset, Listing, Padding, HEADER};
+use crate::module::{modules, Overlay};
 use crate::text::{fields, int_hex, strip, trailing_hex};
 use crate::{cli_args, open_map, report_unlisted, text_bounds, whole_image};
 
@@ -39,10 +40,14 @@ slot instead:
                                                   j NEXT ; nop
 
 The trampolines live in psx-rt's `HAZARD_TRAMPOLINES` .data array (magic
-0x48415a54, capacity, words).
+0x48415a54, capacity, words), the first one in the image. A code module
+carries an array of its own; with `--module` the array is the first inside a
+module's link range.
 
     hazard-patch game.exe --map game.map   # patch in place
     hazard-patch game.exe --map game.map --code 80100000..80120000
+    hazard-patch game.exe --map game.map --module 80408000..80418000@801c0000 \\
+        --code 80408000..8040d480 --code 8040d4a0..80418000
     hazard-patch game.exe --map game.map --check
     hazard-patch game.exe --check          # report only, exit 1 on hazards
     hazard-patch game.exe --whole-image    # patch without a map (see below)
@@ -55,8 +60,16 @@ in `.rodata`). Everything else in the load is `.data`, `.rodata` and assets,
 and its words decode as plausible instructions: a static slice of length 8
 is `jr zero`, 0x11111111 is `beq t0,s1`. Treated as code, a table like that
 is rewritten into jumps. `--code LO..HI` (hex, repeatable) adds code the
-map's `.text` does not span, such as a module linked at another address into
-a composite image. A map from another link is refused. Scan an image
+map's `.text` does not span, such as a code module's. A module is linked at
+an address of its own in the RAM mirrors (0x80200000..0x80800000) while its
+bytes sit elsewhere in the load, usually appended after the resident image;
+`--module LINK_LO..LINK_HI@IMAGE_AT` (hex, repeatable) says where, and the
+module is checked and patched at its link address, so its jump targets and
+trampolines are link addresses, and written back to where its bytes sit.
+The module's code and its trampoline array are then `--code` ranges in link
+addresses, inside LINK_LO..LINK_HI. Its bytes must lie inside the load and
+may not cover other code or another module. A map from another link is
+refused. Scan an image
 patched with `--map` with `hazard-scan --map` too. `--text-only` is accepted
 and does nothing: `--map` always bounds to `.text`.
 
@@ -215,6 +228,21 @@ fn pass(
         }
     }
     let base = load_address(&data);
+    // A code module sits in the file at one address and runs at another:
+    // work on the image with it at its link address, and put it back.
+    let modules = match modules(args) {
+        Ok(modules) => modules,
+        Err(error) => {
+            let _ = writeln!(out, "{error}");
+            return 2;
+        }
+    };
+    let overlay = match Overlay::new(modules, &data, base, text.unwrap_or(&[]), out) {
+        Ok(overlay) => overlay,
+        Err(status) => return status,
+    };
+    let file_len = data.len();
+    let mut data = overlay.expand(&data, base);
     let image_end = base + data.len() as i64 - HEADER;
     let listing = disassemble(&data, base);
     let hazards = {
@@ -291,7 +319,9 @@ fn pass(
     let mut area = None;
     let mut off = HEADER;
     while off < data.len() as i64 - 8 {
-        if word_at_offset(&data, off).map(i64::from) == Some(MAGIC) {
+        if word_at_offset(&data, off).map(i64::from) == Some(MAGIC)
+            && overlay.holds(base + off - HEADER)
+        {
             let capacity = word_at_offset(&data, off + 4).unwrap_or(0);
             if 0 < capacity && capacity <= 4096 {
                 area = Some((base + off - HEADER + 8, i64::from(capacity)));
@@ -499,7 +529,7 @@ fn pass(
         );
         return 1;
     }
-    if let Err(error) = write_whole(path, &data) {
+    if let Err(error) = write_whole(path, &overlay.collapse(&data, file_len, base)) {
         let _ = writeln!(out, "{}", io_message(&error, path));
         return 1;
     }

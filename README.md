@@ -59,11 +59,15 @@ Examples that use CD audio or WORLD.PAK need their own pack inputs; the generic
   both bound each switch's jump table to its own function and read, and
   rewrite, nothing outside the map's `.text` (plus the trampoline array and
   the proven jump table words; `--code LO..HI` adds code the map does not
-  span). Without a map `hazard-patch` refuses unless `--whole-image` is given,
-  because data decodes as branches and loads. `stack-guard` proves every
+  span, and `--module LINK_LO..LINK_HI@IMAGE_AT` declares a code module linked
+  in the RAM mirrors whose bytes sit at another address of the load, which is
+  then checked and patched at its link address). Without a map `hazard-patch`
+  refuses unless `--whole-image` is given, because data decodes as branches
+  and loads. `stack-guard` proves every
   `psx_rt::scratchpad::ScratchpadStack` call tree in a linked exe fits its
-  scratchpad region, from the exe and its ld.lld `-Map`. psoxide-pgo runs all
-  three in-process. `hazard-patch` also zero-pads the flat file to the sector
+  scratchpad region, from the exe and its ld.lld `-Map` (`--forbid SYMBOL` also
+  fails a tree that reaches a function, such as psx-rt's I-cache flush).
+  psoxide-pgo runs all three in-process. `hazard-patch` also zero-pads the flat file to the sector
   multiple its header claims: `psoxide.ld` starts `.bss` where `.data` ends
   (the programs get back what used to be padding, up to 2047 bytes), so the
   linker's file stops short of the header's size, and the loader copies the
