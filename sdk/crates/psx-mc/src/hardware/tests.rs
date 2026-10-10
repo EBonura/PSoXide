@@ -42,6 +42,11 @@ struct CardBus {
     replies: VecDeque<(u8, u64)>,
     ack_from: u64,
     ack_until: u64,
+    ack_edge_pending: bool,
+    irq_latched: bool,
+    control_reg: u16,
+    interrupt_after_reply_at: Option<usize>,
+    drop_ack_at: Option<usize>,
     /// Every control-register write, in order.
     control: Vec<u16>,
     /// Control writes made while a byte exchange was under way.
@@ -69,6 +74,11 @@ impl CardBus {
             replies: VecDeque::new(),
             ack_from: 0,
             ack_until: 0,
+            ack_edge_pending: false,
+            irq_latched: false,
+            control_reg: 0,
+            interrupt_after_reply_at: None,
+            drop_ack_at: None,
             control: Vec::new(),
             control_between_bytes: 0,
             sent: 0,
@@ -147,18 +157,29 @@ impl CardBus {
         self.staged_ok = false;
         self.ack_from = 0;
         self.ack_until = 0;
+        self.ack_edge_pending = false;
+        self.irq_latched = false;
     }
 }
 
 impl Transport for CardBus {
     fn status(&mut self) -> u32 {
         self.now += 1;
+        if self.ack_edge_pending && self.now >= self.ack_from {
+            if self.control_reg & sio0::ctrl::ACK_IRQ_EN != 0 {
+                self.irq_latched = true;
+            }
+            self.ack_edge_pending = false;
+        }
         let mut status = sio0::stat::TX_READY;
         if self.replies.front().is_some_and(|&(_, at)| self.now >= at) {
             status |= sio0::stat::RX_NOT_EMPTY;
         }
         if self.now >= self.ack_from && self.now < self.ack_until {
             status |= sio0::stat::DSR_LEVEL;
+        }
+        if self.irq_latched {
+            status |= sio0::stat::IRQ;
         }
         status
     }
@@ -168,6 +189,9 @@ impl Transport for CardBus {
         match self.replies.front() {
             Some(&(byte, at)) if self.now >= at => {
                 self.replies.pop_front();
+                if self.interrupt_after_reply_at == Some(self.index - 1) {
+                    self.now = self.ack_until + 1;
+                }
                 byte
             }
             _ => panic!("read of an empty RX FIFO"),
@@ -191,9 +215,13 @@ impl Transport for CardBus {
         }
         let reply = self.reply(index);
         self.replies.push_back((reply, self.now + REPLY_TICKS));
-        if self.behaviour != Behaviour::Absent && index < self.last_index().max(1) {
+        if self.behaviour != Behaviour::Absent
+            && self.drop_ack_at != Some(index)
+            && index < self.last_index().max(1)
+        {
             self.ack_from = self.now + ACK_DELAY_TICKS;
             self.ack_until = self.ack_from + ACK_WIDTH_TICKS;
+            self.ack_edge_pending = true;
         }
         self.index += 1;
         self.sent += 1;
@@ -204,6 +232,10 @@ impl Transport for CardBus {
 
     fn set_control(&mut self, value: u16) {
         self.now += 1;
+        if value & sio0::ctrl::ACK != 0 {
+            self.irq_latched = false;
+        }
+        self.control_reg = value & !sio0::ctrl::ACK;
         if self.selected && value & sio0::ctrl::DTR != 0 && self.index != 0 {
             self.control_between_bytes += 1;
         }
@@ -249,15 +281,67 @@ fn a_frame_reads_back_what_the_card_holds() {
 }
 
 #[test]
-fn the_card_uses_the_pad_transport_not_a_private_one() {
+fn an_interrupt_can_hide_the_entire_ack_pulse_without_losing_a_card_byte() {
+    let mut bus = CardBus::new(Behaviour::Normal);
+    bus.interrupt_after_reply_at = Some(81);
+    let (result, out, trace) = read(&mut bus, 0x123);
+    assert_eq!(result, Ok(()));
+    assert_eq!(&out[..], bus.frame(0x123));
+    assert_eq!((trace.exchanges, trace.acknowledgements), (140, 139));
+    assert_eq!(trace.fault, TransportFault::None);
+}
+
+#[test]
+fn a_missing_ack_does_not_reuse_the_previous_byte_latch_and_recovers() {
+    let mut bus = CardBus::new(Behaviour::Normal);
+    bus.drop_ack_at = Some(81);
+    let (result, _, trace) = read(&mut bus, 0x123);
+    assert_eq!(result, Err(Error::Protocol));
+    assert_eq!(trace.fault, TransportFault::AckTimeout);
+    assert_eq!(trace.fault_exchange, 81);
+    assert_eq!(trace.exchanges, 82);
+    assert_eq!(
+        &bus.control[bus.control.len() - 2..],
+        &[0, sio0::ctrl::RESET]
+    );
+
+    bus.drop_ack_at = None;
+    let (result, out, trace) = read(&mut bus, 0x123);
+    assert_eq!(result, Ok(()));
+    assert_eq!(&out[..], bus.frame(0x123));
+    assert_eq!(trace.fault, TransportFault::None);
+}
+
+#[test]
+fn the_card_uses_the_shared_transport_with_a_latched_ack() {
     let mut bus = CardBus::new(Behaviour::Normal);
     let (result, _, _) = read(&mut bus, 5);
     assert_eq!(result, Ok(()));
-    // The select clears the latch, asserts the port without arming the /ACK
-    // interrupt, and the release drops it; nothing is written between bytes.
-    assert_eq!(bus.control, [sio0::ctrl::ACK, 0x0003, 0]);
-    assert_eq!(bus.control_between_bytes, 0);
-    assert!(bus.control.iter().all(|c| c & sio0::ctrl::ACK_IRQ_EN == 0));
+    // The card clears the latch before select, after setup, and after each acknowledged
+    // byte. The final byte has no ACK and the release drops /CS.
+    assert_eq!(bus.control.first(), Some(&sio0::ctrl::ACK));
+    assert_eq!(bus.control.get(1), Some(&sio0::selected_ctrl(false, true)));
+    assert_eq!(
+        bus.control.get(2),
+        Some(&(sio0::selected_ctrl(false, true) | sio0::ctrl::ACK))
+    );
+    assert_eq!(bus.control.last(), Some(&0));
+    assert_eq!(bus.control_between_bytes, 139);
+    assert_eq!(bus.control.len(), 143);
+}
+
+#[test]
+fn a_stale_ack_during_select_does_not_acknowledge_the_first_byte() {
+    let mut bus = CardBus::new(Behaviour::Normal);
+    bus.ack_from = 3;
+    bus.ack_until = 5;
+    bus.ack_edge_pending = true;
+    bus.drop_ack_at = Some(0);
+    let (result, _, trace) = read(&mut bus, 5);
+    assert_eq!(result, Err(Error::NoCard));
+    assert_eq!(trace.fault, TransportFault::AckTimeout);
+    assert_eq!(trace.fault_exchange, 0);
+    assert_eq!(bus.sent, 1);
 }
 
 #[test]
