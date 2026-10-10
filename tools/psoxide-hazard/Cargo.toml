@@ -9,7 +9,6 @@ description = "Post-link guest checks for PS1 executables: the R3000 load-delay 
 
 [dependencies]
 psx-disasm = { path = "../../crates/psx-disasm" }
-psx-iso = { path = "../../crates/psx-iso" }
 regex = "1"
 
 [[bin]]
