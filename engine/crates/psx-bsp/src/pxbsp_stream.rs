@@ -1334,7 +1334,9 @@ impl PxbspResidentMap {
         let view = (si.offset as usize)
             .checked_add(si.len as usize)
             .and_then(|end| container.get(si.offset as usize..end))
-            .ok_or(StreamLoadError::Map(PxbspMapLoadError::Read(SliceReadError)))?;
+            .ok_or(StreamLoadError::Map(PxbspMapLoadError::Read(
+                SliceReadError,
+            )))?;
         self.load_streamed_inner(map_id, &mut reader, slots, true, Some(view))
     }
 
