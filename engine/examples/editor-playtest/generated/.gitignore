@@ -21,3 +21,5 @@ sky/*.psxt
 ui_sfx/*.psau
 cdda_tracks/*.cdda
 models/
+stream_report.txt
+stream_report.json

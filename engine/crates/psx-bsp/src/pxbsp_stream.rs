@@ -1300,7 +1300,7 @@ impl PxbspResidentMap {
         reader: &mut R,
         slots: u16,
     ) -> Result<(), StreamLoadError<R::Error>> {
-        self.load_streamed_inner(map_id, reader, slots, false)
+        self.load_streamed_inner(map_id, reader, slots, false, None)
     }
 
     /// [`Self::load_streamed`] for a map made with `with_capacity(0)` (no
@@ -1313,7 +1313,29 @@ impl PxbspResidentMap {
         reader: &mut R,
         slots: u16,
     ) -> Result<(), StreamLoadError<R::Error>> {
-        self.load_streamed_inner(map_id, reader, slots, true)
+        self.load_streamed_inner(map_id, reader, slots, true, None)
+    }
+
+    /// [`Self::load_streamed_exact`] for a container that is already in
+    /// memory. The streaming index is parsed straight out of `container`, so
+    /// no temporary copy of that lump is allocated (the guest's bump heap
+    /// never gives one back), and the lump is not copied into the image
+    /// either: the parsed index is its only owner once the map is loaded.
+    pub fn load_streamed_exact_from_slice(
+        &mut self,
+        map_id: u32,
+        container: &[u8],
+        slots: u16,
+    ) -> Result<(), StreamLoadError<SliceReadError>> {
+        let mut reader = SliceReader::new(container);
+        let index = PxbspIndex::read(&mut reader)
+            .map_err(|e| StreamLoadError::Map(PxbspMapLoadError::Index(e)))?;
+        let si = index.lump(PxbspLumpKind::StreamingIndex);
+        let view = (si.offset as usize)
+            .checked_add(si.len as usize)
+            .and_then(|end| container.get(si.offset as usize..end))
+            .ok_or(StreamLoadError::Map(PxbspMapLoadError::Read(SliceReadError)))?;
+        self.load_streamed_inner(map_id, &mut reader, slots, true, Some(view))
     }
 
     fn load_streamed_inner<R: ReadAt>(
@@ -1322,6 +1344,7 @@ impl PxbspResidentMap {
         reader: &mut R,
         slots: u16,
         exact: bool,
+        index_view: Option<&[u8]>,
     ) -> Result<(), StreamLoadError<R::Error>> {
         self.prepare_owned_load();
         self.stream = None;
@@ -1335,11 +1358,17 @@ impl PxbspResidentMap {
             ));
         }
         let si = index.lump(PxbspLumpKind::StreamingIndex);
-        let mut si_bytes = alloc::vec![0u8; si.len as usize];
-        reader
-            .read_exact_at(si.offset, &mut si_bytes)
-            .map_err(|e| StreamLoadError::Map(PxbspMapLoadError::Read(e)))?;
-        let sindex = StreamingIndex::parse(&si_bytes).map_err(StreamLoadError::Stream)?;
+        let sindex = match index_view {
+            Some(view) => StreamingIndex::parse(view),
+            None => {
+                let mut si_bytes = alloc::vec![0u8; si.len as usize];
+                reader
+                    .read_exact_at(si.offset, &mut si_bytes)
+                    .map_err(|e| StreamLoadError::Map(PxbspMapLoadError::Read(e)))?;
+                StreamingIndex::parse(&si_bytes)
+            }
+        }
+        .map_err(StreamLoadError::Stream)?;
         let rpad = sindex.top_leaf_pad();
         if slots == 0 || rpad + slots as usize * sindex.caps.leaves as usize > MAX_VIRTUAL_LEAVES {
             return Err(StreamLoadError::Slots);
@@ -1403,6 +1432,9 @@ impl PxbspResidentMap {
                 (source, (top_n + slots_n * slot_n) * rec)
             } else if kind == PxbspLumpKind::Visibility {
                 (source, source + slots_n * caps.vis_bytes as usize)
+            } else if exact && kind == PxbspLumpKind::StreamingIndex {
+                // The parsed index owns this lump; the image keeps no copy.
+                (0, 0)
             } else {
                 (source, source)
             };
@@ -1442,7 +1474,7 @@ impl PxbspResidentMap {
         for kind in RESIDENT_LUMPS {
             destination = align_up_4(destination);
             let source = index.lump(kind);
-            let end = destination + source.len as usize;
+            let end = destination + top_len[kind as usize];
             if let Err(error) =
                 reader.read_exact_at(source.offset, &mut self.owned_slice_mut()[destination..end])
             {
@@ -2603,11 +2635,49 @@ mod tests {
             .load_streamed_exact(1, &mut SliceReader::new(&w.container), 3)
             .expect("exact load");
         let bytes = exact.owned_slice_mut().len();
-        assert_eq!(bytes, reference.storage_bytes().len());
+        // The parsed index owns the streaming index lump, so the image keeps
+        // no copy of it; everything else is laid out as in the reference.
+        assert_eq!(
+            bytes + w.index.encode().len(),
+            reference.storage_bytes().len()
+        );
         assert_eq!(exact.storage_capacity(), bytes.div_ceil(4) * 4);
         assert_eq!(exact.storage_bytes().as_ptr() as usize & 3, 0);
+        assert!(exact.streaming_index().is_empty());
         exact.install_region(1, 2, &w.payloads[1]).unwrap();
         exact.check_integrity().unwrap();
+    }
+
+    #[test]
+    fn loading_from_a_slice_matches_loading_through_a_reader() {
+        let w = world(4);
+        let mut through_reader = PxbspResidentMap::with_capacity(0);
+        through_reader
+            .load_streamed_exact(1, &mut SliceReader::new(&w.container), 3)
+            .expect("reader load");
+        let mut from_slice = PxbspResidentMap::with_capacity(0);
+        from_slice
+            .load_streamed_exact_from_slice(1, &w.container, 3)
+            .expect("slice load");
+        assert_eq!(from_slice.storage_bytes(), through_reader.storage_bytes());
+        assert_eq!(
+            from_slice.streaming().unwrap().index(),
+            through_reader.streaming().unwrap().index()
+        );
+        for (region, slot) in [(1u16, 2u16), (0, 0), (2, 1)] {
+            from_slice
+                .install_region(region, slot, &w.payloads[region as usize])
+                .unwrap();
+            through_reader
+                .install_region(region, slot, &w.payloads[region as usize])
+                .unwrap();
+        }
+        assert_eq!(from_slice.storage_bytes(), through_reader.storage_bytes());
+        // A container whose index lump runs past its end is refused.
+        let mut cut = w.container.clone();
+        cut.truncate(cut.len() - 8);
+        let mut refused = PxbspResidentMap::with_capacity(0);
+        assert!(refused.load_streamed_exact_from_slice(1, &cut, 3).is_err());
     }
 
     #[test]
