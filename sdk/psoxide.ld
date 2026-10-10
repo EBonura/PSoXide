@@ -53,7 +53,7 @@ SECTIONS {
         LONG(_start);               /* 010h initial PC */
         LONG(0);                    /* 014h initial GP: the runtime does not use $gp */
         LONG(LOAD_ADDR);            /* 018h destination address */
-        LONG(__data_end - __text_start); /* 01Ch bytes stored after the header */
+        LONG(__image_end - __text_start); /* 01Ch bytes stored after the header */
         LONG(0);                    /* 020h data start: nothing for the kernel to do */
         LONG(0);                    /* 024h data size */
         LONG(0);                    /* 028h BSS start: `_start` clears .bss itself */
@@ -108,9 +108,18 @@ SECTIONS {
         *(.data .data.*);
         *(.rodata .rodata.*);
         *(.got);
-        . = ALIGN(2048);   /* 2 KiB-align for ISO sector loading later */
+        . = ALIGN(4);
         __data_end = .;
     } > IMAGE
+
+    /* The kernel loads whole sectors, so the header's size reaches the next
+       800h boundary past the data. Those last bytes (under a sector) are
+       zeros that `hazard-patch` appends to the flat file (psx-iso's
+       `pad_to_payload`), and the loader copies them over the start of .bss,
+       which `_start` clears before anything reads it. Starting .bss right
+       after the data instead of after this padding gives the program the
+       bytes back. */
+    __image_end = __text_start + ((__data_end - __text_start + EXE_HEAD_BYTES - 1) & ~(EXE_HEAD_BYTES - 1));
 
     /* Uninitialised data - zeroed by `_start`, not stored in file. */
     .bss (NOLOAD) : {
@@ -128,7 +137,8 @@ SECTIONS {
 
     /* The header above only describes the image if these hold. */
     ASSERT(__text_start == LOAD_ADDR, "the entry section must start at LOAD_ADDR")
-    ASSERT((__data_end - __text_start) % EXE_HEAD_BYTES == 0, "the stored image must be whole 800h-byte sectors")
+    ASSERT((__image_end - __text_start) % EXE_HEAD_BYTES == 0, "the stored image must be whole 800h-byte sectors")
+    ASSERT(__image_end - __data_end < EXE_HEAD_BYTES, "the stored image may reach past the data by under one sector")
 
     /* Discard MIPS ABI glue not needed on bare metal. */
     /DISCARD/ : {
