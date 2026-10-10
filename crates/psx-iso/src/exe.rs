@@ -82,7 +82,9 @@ pub struct Exe {
 
 impl Exe {
     /// Parse a raw PSX-EXE byte stream. The slice must contain the
-    /// full header (2 KiB) plus at least `t_size` payload bytes.
+    /// full header (2 KiB) plus `t_size` payload bytes, except that up to
+    /// a sector short of a whole-sector `t_size` is read as zeros (see
+    /// [`pad_to_payload`], which writes them into the file instead).
     pub fn parse(bytes: &[u8]) -> Result<Self, ExeError> {
         if bytes.len() < EXE_HEADER_BYTES {
             return Err(ExeError::TooShort);
@@ -101,14 +103,25 @@ impl Exe {
         let initial_sp_offset = read_u32_le(&bytes[0x34..]);
 
         let payload_available = bytes.len() - EXE_HEADER_BYTES;
-        if (t_size as usize) > payload_available {
+        let wanted = t_size as usize;
+        // A linker that starts `.bss` where `.data` ends (psoxide.ld) writes
+        // a flat file that stops short of the whole sectors `t_size` counts,
+        // and the missing tail is zeros the loader would have read from the
+        // rest of the sector. A raw file is accepted that way when the size
+        // is whole sectors and under one sector is missing; any other
+        // shortfall is a truncated file.
+        let tail_only = wanted.is_multiple_of(EXE_HEADER_BYTES)
+            && wanted - payload_available.min(wanted) < EXE_HEADER_BYTES;
+        if wanted > payload_available && !tail_only {
             return Err(ExeError::TruncatedPayload {
-                expected: t_size as usize,
+                expected: wanted,
                 actual: payload_available,
             });
         }
 
-        let payload = bytes[EXE_HEADER_BYTES..EXE_HEADER_BYTES + t_size as usize].to_vec();
+        let mut payload =
+            bytes[EXE_HEADER_BYTES..EXE_HEADER_BYTES + wanted.min(payload_available)].to_vec();
+        payload.resize(wanted, 0);
 
         Ok(Self {
             initial_pc,
@@ -228,6 +241,43 @@ mod tests {
             &whole[..EXE_HEADER_BYTES + 1500]
         );
         assert!(Exe::parse(&raw).is_ok());
+    }
+
+    #[test]
+    fn parse_reads_a_short_last_sector_as_zeros() {
+        let mut raw = make_exe(0x8001_0000, 0x8001_0000, &[1; 1500]);
+        raw[0x1C..0x20].copy_from_slice(&2048u32.to_le_bytes());
+        let exe = Exe::parse(&raw).unwrap();
+        assert_eq!(exe.payload.len(), 2048);
+        assert!(exe.payload[..1500].iter().all(|&b| b == 1));
+        assert!(exe.payload[1500..].iter().all(|&b| b == 0));
+        // The same bytes padded in the file parse to the same payload.
+        pad_to_payload(&mut raw).unwrap();
+        assert_eq!(Exe::parse(&raw).unwrap().payload, exe.payload);
+    }
+
+    #[test]
+    fn parse_still_refuses_other_shortfalls() {
+        // A whole sector or more missing.
+        let mut raw = make_exe(0x8001_0000, 0x8001_0000, &[1; 2048]);
+        raw[0x1C..0x20].copy_from_slice(&4096u32.to_le_bytes());
+        assert!(matches!(
+            Exe::parse(&raw),
+            Err(ExeError::TruncatedPayload {
+                expected: 4096,
+                actual: 2048
+            })
+        ));
+        // A size that is not whole sectors never came from the linker.
+        let mut odd = make_exe(0x8001_0000, 0x8001_0000, &[1; 1000]);
+        odd[0x1C..0x20].copy_from_slice(&1500u32.to_le_bytes());
+        assert!(matches!(
+            Exe::parse(&odd),
+            Err(ExeError::TruncatedPayload {
+                expected: 1500,
+                actual: 1000
+            })
+        ));
     }
 
     #[test]
