@@ -40,9 +40,9 @@ slot instead:
                                                   j NEXT ; nop
 
 The trampolines live in psx-rt's `HAZARD_TRAMPOLINES` .data array (magic
-0x48415a54, capacity, words), the first one in the image. A code module
-carries an array of its own; with `--module` the array is the first inside a
-module's link range.
+0x48415a54, capacity, words). Without modules the first valid array is used.
+Each code module carries its own array, declared in one `--code` range.
+Hazards in the resident image and in different modules use separate arrays.
 
     hazard-patch game.exe --map game.map   # patch in place
     hazard-patch game.exe --map game.map --code 80100000..80120000
@@ -68,9 +68,8 @@ module is checked and patched at its link address, so its jump targets and
 trampolines are link addresses, and written back to where its bytes sit.
 The module's code and its trampoline array are then `--code` ranges in link
 addresses, inside LINK_LO..LINK_HI. Its bytes must lie inside the load and
-may not cover other code or another module. A map from another link is
-refused. Scan an image
-patched with `--map` with `hazard-scan --map` too. `--text-only` is accepted
+may not cover resident load bytes or another module. A map from another link is
+refused. Scan an image patched with `--map` with `hazard-scan --map` too. `--text-only` is accepted
 and does nothing: `--map` always bounds to `.text`.
 
 Without a map the executable bounds are unknown, so patching refuses (exit
@@ -315,37 +314,57 @@ fn pass(
         write(data, addr, value);
     };
 
-    // The trampoline array: magic, capacity, then free words.
-    let mut area = None;
+    // Find one complete trampoline array for each address domain. Resident
+    // code and each streamed module must use their own array: their link
+    // addresses do not coexist in the guest's RAM at run time.
+    struct Area {
+        domain: Option<usize>,
+        start: i64,
+        capacity: i64,
+        cursor: i64,
+        touched: bool,
+    }
+    let mut areas: Vec<Area> = Vec::new();
     let mut off = HEADER;
     while off < data.len() as i64 - 8 {
-        if word_at_offset(&data, off).map(i64::from) == Some(MAGIC)
-            && overlay.holds(base + off - HEADER)
-        {
+        if word_at_offset(&data, off).map(i64::from) == Some(MAGIC) {
             let capacity = word_at_offset(&data, off + 4).unwrap_or(0);
             if 0 < capacity && capacity <= 4096 {
-                area = Some((base + off - HEADER + 8, i64::from(capacity)));
-                break;
+                let header = base + off - HEADER;
+                let start = header + 8;
+                let end = start + i64::from(capacity) * 4;
+                let domain = overlay.domain(header);
+                let declared = domain.is_none()
+                    || text.is_some_and(|ranges| {
+                        ranges.iter().any(|&(lo, hi)| lo <= header && end <= hi)
+                    });
+                if end <= image_end
+                    && declared
+                    && overlay.holds_span(header, end, domain)
+                    && !areas.iter().any(|area| area.domain == domain)
+                {
+                    let used = (0..i64::from(capacity))
+                        .rev()
+                        .find(|i| word_at(&data, start + i * 4) != 0);
+                    areas.push(Area {
+                        domain,
+                        start,
+                        capacity: i64::from(capacity),
+                        cursor: used.map_or(0, |last| last + 2),
+                        touched: false,
+                    });
+                }
             }
         }
         off += 4;
     }
-    let Some((area_start, capacity)) = area else {
+    if areas.is_empty() {
         let _ = writeln!(
             out,
             "no HAZARD_TRAMPOLINES array (magic {MAGIC:#x}) in {path_text}"
         );
         return 1;
-    };
-    tramp_area.set((area_start, area_start + capacity * 4));
-    // An earlier pass may have used the area. Its trampolines contain nops,
-    // so the first zero word is not free space: resume after the last
-    // non-zero word plus the nop in its delay slot (every trampoline ends
-    // with a jump and one nop).
-    let used = (0..capacity)
-        .rev()
-        .find(|i| word_at(&data, area_start + i * 4) != 0);
-    let mut cursor = used.map_or(0, |last| last + 2);
+    }
 
     let nop = 0u32;
     let mut patched = 0;
@@ -358,7 +377,7 @@ fn pass(
     // fall-through, and patching it twice would rewrite the first `j TRAMP`.
     let mut seen = Vec::new();
     // Table entries pointing at the same consumer share one trampoline.
-    let mut table_trampolines: Vec<(i64, i64)> = Vec::new();
+    let mut table_trampolines: Vec<(Option<usize>, i64, i64)> = Vec::new();
     for h in &hazards {
         let Hazard {
             addr,
@@ -371,17 +390,32 @@ fn pass(
         } = h;
         let addr = *addr;
         let op = *op;
+        let domain = overlay.domain(addr);
+        let Some(area) = areas.iter_mut().find(|area| area.domain == domain) else {
+            let _ = writeln!(
+                out,
+                "no HAZARD_TRAMPOLINES array for hazard at {addr:08x} in {path_text}"
+            );
+            return 1;
+        };
+        let (area_start, capacity) = (area.start, area.capacity);
+        let cursor = &mut area.cursor;
+        area.touched = true;
+        tramp_area.set((area_start, area_start + capacity * 4));
         if let (Some(entry), Some(consumer)) = (entry, consumer) {
             if left_alone(addr) {
                 let _ = writeln!(out, "left alone {addr:08x} (diagnostic request)");
                 continue;
             }
-            let tramp = match table_trampolines.iter().find(|t| t.0 == *consumer) {
-                Some(&(_, tramp)) => tramp,
+            let tramp = match table_trampolines
+                .iter()
+                .find(|t| t.0 == domain && t.1 == *consumer)
+            {
+                Some(&(_, _, tramp)) => tramp,
                 None => {
-                    let tramp = area_start + cursor * 4;
+                    let tramp = area_start + *cursor * 4;
                     let words = [nop, encode_j(*consumer, false), nop];
-                    if cursor + words.len() as i64 > capacity {
+                    if *cursor + words.len() as i64 > capacity {
                         let _ = writeln!(
                             out,
                             "trampoline array full at {addr:08x} ({capacity} words)"
@@ -391,8 +425,8 @@ fn pass(
                     for (i, w) in words.iter().enumerate() {
                         put_word(&mut data, tramp + i as i64 * 4, *w);
                     }
-                    cursor += words.len() as i64;
-                    table_trampolines.push((*consumer, tramp));
+                    *cursor += words.len() as i64;
+                    table_trampolines.push((domain, *consumer, tramp));
                     tramp
                 }
             };
@@ -444,8 +478,8 @@ fn pass(
                 // to the original return address.
                 words.extend([encode_j(addr + 8, false), nop]);
             }
-            let tramp = area_start + cursor * 4;
-            if cursor + words.len() as i64 > capacity {
+            let tramp = area_start + *cursor * 4;
+            if *cursor + words.len() as i64 > capacity {
                 let _ = writeln!(
                     out,
                     "trampoline array full at {addr:08x} ({capacity} words)"
@@ -455,7 +489,7 @@ fn pass(
             for (i, w) in words.iter().enumerate() {
                 put_word(&mut data, tramp + i as i64 * 4, *w);
             }
-            cursor += words.len() as i64;
+            *cursor += words.len() as i64;
             put_word(&mut data, addr, encode_j(tramp, false));
             put_word(&mut data, addr + 4, nop);
             patched += 1;
@@ -481,7 +515,7 @@ fn pass(
         }
         let target = trailing_hex(args).expect("branch target");
         let original = word_at(&data, addr);
-        let tramp = area_start + cursor * 4;
+        let tramp = area_start + *cursor * 4;
         let words: Vec<u32> = if is(op, JUMPS) {
             put_word(&mut data, addr, encode_j(tramp, op == "jal"));
             vec![nop, encode_j(target, false), nop]
@@ -498,7 +532,7 @@ fn pass(
                 nop,
             ]
         };
-        if cursor + words.len() as i64 > capacity {
+        if *cursor + words.len() as i64 > capacity {
             let _ = writeln!(
                 out,
                 "trampoline array full at {addr:08x} ({capacity} words)"
@@ -508,7 +542,7 @@ fn pass(
         for (i, w) in words.iter().enumerate() {
             put_word(&mut data, tramp + i as i64 * 4, *w);
         }
-        cursor += words.len() as i64;
+        *cursor += words.len() as i64;
         patched += 1;
         let _ = writeln!(
             out,
@@ -554,6 +588,13 @@ fn pass(
     for h in &remaining {
         let _ = writeln!(out, "still hazardous {:08x}: {} {}", h.addr, h.op, h.args);
     }
+    let selected: Vec<&Area> = if areas.iter().any(|area| area.touched) {
+        areas.iter().filter(|area| area.touched).collect()
+    } else {
+        areas.iter().take(1).collect()
+    };
+    let cursor: i64 = selected.iter().map(|area| area.cursor).sum();
+    let capacity: i64 = selected.iter().map(|area| area.capacity).sum();
     let _ = writeln!(
         out,
         "{patched} patched, {} remaining, {cursor}/{capacity} trampoline words used in {path_text}",
