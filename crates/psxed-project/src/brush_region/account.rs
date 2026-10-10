@@ -47,6 +47,9 @@ pub struct PayloadCounts {
     pub header_bytes: u32,
     /// Dense PVS rows (design 3.4), filled once visibility is known.
     pub pvs_bytes: u32,
+    /// The encoded payload size, once a cook has produced it. It replaces the
+    /// count based estimate everywhere a size is read.
+    pub measured_bytes: Option<u32>,
 }
 
 impl PayloadCounts {
@@ -65,14 +68,18 @@ impl PayloadCounts {
     }
 
     pub fn bytes(&self) -> u32 {
-        self.bytes_without_pvs() + self.pvs_bytes
+        self.measured_bytes
+            .unwrap_or_else(|| self.bytes_without_pvs() + self.pvs_bytes)
     }
 
     /// Bytes that stay in the page pool once installed. Inline textures are
     /// uploaded to VRAM during install and their landing bytes are freed, so
     /// they cost read time but not pool space. [E, design 4.5 install flow]
     pub fn resident_bytes(&self) -> u32 {
-        self.bytes() - self.inline_texture_bytes
+        match self.measured_bytes {
+            Some(bytes) => bytes,
+            None => self.bytes() - self.inline_texture_bytes,
+        }
     }
 
     pub fn sectors(&self) -> u32 {

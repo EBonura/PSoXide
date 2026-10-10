@@ -7,7 +7,7 @@ use super::gate::{set_bytes, GateFailure};
 use super::geometry::V3;
 use super::input::PartitionInput;
 use super::layout::SEEK_CLASSES;
-use super::Partition;
+use super::{ClosureSource, Partition};
 
 /// Bump when a key is renamed or removed.
 pub const REPORT_VERSION: u32 = 1;
@@ -350,7 +350,12 @@ impl StreamReport {
                 Value::Obj(vec![
                     (
                         "method",
-                        text("sampled line of sight over brush solids (estimate)"),
+                        text(match p.closure.source {
+                            ClosureSource::Sampled => {
+                                "sampled line of sight over brush solids (estimate)"
+                            }
+                            ClosureSource::PortalFlow => "the cook's own portal flow (measured)",
+                        }),
                     ),
                     ("closure_max", int(gate.max_closure)),
                     ("closure_median", int(median(&closure_sizes))),
@@ -359,7 +364,7 @@ impl StreamReport {
                         "row_limit_bytes",
                         int(psx_bsp::pxbsp::PXBSP_MAX_VISIBILITY_BYTES),
                     ),
-                    ("leaf_cap", int(params.caps.leaves)),
+                    ("leaf_cap", int(gate.row_leaf_cap)),
                     ("rays_cast", int(p.closure.rays_cast)),
                     ("max_need_archetypes", int(gate.max_need_archetypes)),
                 ]),
@@ -427,6 +432,9 @@ impl StreamReport {
                 "pool",
                 Value::Obj(vec![
                     ("pool_bytes", int(params.pool_bytes)),
+                    ("skeleton_bytes", int(gate.skeleton_bytes)),
+                    ("skeleton_measured", Value::Bool(gate.skeleton_measured)),
+                    ("pool_available_bytes", int(gate.pool_available)),
                     ("home_pin_bytes", int(gate.home_pin_bytes)),
                     ("peak", peak_json(&gate.pool)),
                     ("peak_pessimistic", peak_json(&gate.pool_pessimistic)),
@@ -545,13 +553,20 @@ impl StreamReport {
         );
         let _ = writeln!(
             t,
-            "Visibility [estimate: sampled line of sight, {} rays]: closure max {} median {}, widest PVS row {} B of {} B (rank rows, leaf cap {})",
-            grouped(p.closure.rays_cast),
+            "Visibility [{}]: closure max {} median {}, widest PVS row {} B of {} B (rank rows, leaf cap {})",
+            match p.closure.source {
+                ClosureSource::Sampled => format!(
+                    "estimate: sampled line of sight, {} rays",
+                    grouped(p.closure.rays_cast)
+                ),
+                ClosureSource::PortalFlow =>
+                    "measured: the cook's portal flow".to_string(),
+            },
             gate.max_closure,
             median(&closure_sizes),
             gate.max_row_bytes,
             psx_bsp::pxbsp::PXBSP_MAX_VISIBILITY_BYTES,
-            params.caps.leaves
+            gate.row_leaf_cap
         );
         let _ = writeln!(
             t,
@@ -600,10 +615,13 @@ impl StreamReport {
             Some(pk) => {
                 let _ = writeln!(
                     t,
-                    "Pool verdict: {}  peak {} B of {} B pool [E] (inline textures excluded: VRAM) in region {} (ball needs {} regions, with lead {}; home pin {} B)",
-                    if pk.bytes <= u64::from(params.pool_bytes) { "PASS" } else { "FAIL" },
+                    "Pool verdict: {}  peak {} B of {} B available [{} B pool - 2 x {} B {} skeleton] (inline textures excluded: VRAM) in region {} (ball needs {} regions, with lead {}; home pin {} B)",
+                    if pk.bytes <= gate.pool_available { "PASS" } else { "FAIL" },
                     grouped(pk.bytes),
+                    grouped(gate.pool_available),
                     grouped(u64::from(params.pool_bytes)),
+                    grouped(gate.skeleton_bytes),
+                    if gate.skeleton_measured { "measured" } else { "estimated" },
                     pk.region,
                     pk.need_regions,
                     pk.lead_regions,
@@ -720,7 +738,14 @@ impl StreamReport {
                 grouped(need_bytes[r])
             );
         }
-        let _ = writeln!(t, "Notes: cuts are axis-aligned; visibility is estimated, not portal flow; archetype pack bytes and install CPU are unmeasured; collision is costed with the shipping compiler on whole brushes; labels [M] measured, [D] derived, [E] estimate.");
+        let _ = writeln!(
+            t,
+            "Notes: cuts are axis-aligned; visibility is {}; archetype pack bytes and install CPU are unmeasured; collision is costed with the shipping compiler on whole brushes; labels [M] measured, [D] derived, [E] estimate.",
+            match p.closure.source {
+                ClosureSource::Sampled => "estimated, not portal flow",
+                ClosureSource::PortalFlow => "the cook's own portal flow, not an estimate",
+            }
+        );
 
         Self {
             passed,

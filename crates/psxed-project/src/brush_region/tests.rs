@@ -270,3 +270,17 @@ fn cook_overrides_are_recorded_in_the_report() {
     .apply(&mut same);
     assert!(same.overrides.is_empty());
 }
+
+#[test]
+fn the_far_reject_distance_covers_what_the_renderer_draws() {
+    // The clustered visibility flow drops everything past `vis_distance`. The
+    // classic world path rejects true depth past the first order table slot
+    // it cannot key; a viewpoint, not a player, is what the flow measures
+    // from, so the camera offset the default adds on top is slack.
+    let far = psx_bsp::render::pxbsp_classic_far_depth(2048) as f64;
+    assert!(
+        PartitionParams::default().vis_distance >= far,
+        "{} against a far reject of {far}",
+        PartitionParams::default().vis_distance
+    );
+}

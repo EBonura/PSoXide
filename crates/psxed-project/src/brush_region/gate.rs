@@ -117,6 +117,13 @@ pub struct GateReport {
     pub windows_total: usize,
     pub pool: Option<PoolPeak>,
     pub pool_pessimistic: Option<PoolPeak>,
+    /// Bytes the resident skeleton takes out of the pool, and what is left
+    /// for region pages.
+    pub skeleton_bytes: u64,
+    pub skeleton_measured: bool,
+    /// Leaf capacity the rank-row width was computed with.
+    pub row_leaf_cap: u32,
+    pub pool_available: u64,
     pub home_pin_bytes: u64,
     pub max_need_archetypes: usize,
     /// Regions with walkable floor or spawns that no chain of open apertures
@@ -169,6 +176,21 @@ fn shared_of(regions: &[Region], set: &BitSet) -> BTreeSet<usize> {
     shared
 }
 
+/// What a cook measured that the gates otherwise estimate.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct GateMeasured {
+    /// The resident container's size.
+    pub skeleton_bytes: u64,
+    /// The per-region leaf capacity the rank rows were laid out with.
+    pub leaf_cap: u32,
+    /// Median encoded region payload. The drive model reads a region of this
+    /// size, not of the size the cut search aimed at.
+    pub median_region_bytes: u32,
+}
+
+/// `measured`: the cook's own container size and leaf capacity, when there is
+/// one; otherwise the skeleton is the wire-size estimate from the region
+/// count and the visibility lists, and the leaf capacity the slot cap.
 pub(crate) fn evaluate(
     input: &PartitionInput,
     params: &PartitionParams,
@@ -176,10 +198,12 @@ pub(crate) fn evaluate(
     graph: &RegionGraph,
     closure: &Closure,
     run_speed: f64,
+    measured: Option<GateMeasured>,
 ) -> GateReport {
     let n = regions.len();
     let v_max = params.v_max(run_speed);
-    let typical_sectors = (params.region_target_bytes / SECTOR_BYTES).max(1);
+    let typical_bytes = measured.map_or(params.region_target_bytes, |m| m.median_region_bytes);
+    let typical_sectors = typical_bytes.div_ceil(SECTOR_BYTES).max(1);
     let read_ms = params.read_ms(typical_sectors);
     let t_region_ms = f64::from(params.seek_near_ms) + read_ms;
     let t_region_pessimistic_ms = 2.0 * f64::from(params.seek_far_ms) + read_ms;
@@ -223,10 +247,11 @@ pub(crate) fn evaluate(
     }
 
     // Rank-row width: bit = rank * Lcap + local leaf.
+    let row_leaf_cap = measured.map_or(params.caps.leaves, |m| m.leaf_cap);
     let mut max_closure = 0;
     let mut max_row_bytes = 0;
     for (r, visible) in closure.visible.iter().enumerate() {
-        let bits = visible.len() as u32 * params.caps.leaves;
+        let bits = visible.len() as u32 * row_leaf_cap;
         let bytes = bits.div_ceil(8);
         max_closure = max_closure.max(visible.len());
         max_row_bytes = max_row_bytes.max(bytes);
@@ -396,11 +421,16 @@ pub(crate) fn evaluate(
     };
     let pool = peak(h_lead);
     let pool_pessimistic = peak(h_lead_pessimistic);
+    let skeleton_bytes = measured
+        .map(|m| m.skeleton_bytes)
+        .unwrap_or_else(|| super::skeleton_bytes(n, closure.visible.iter().map(Vec::len).sum()));
+    // Baked into `.data` and copied onto the heap: paid twice.
+    let pool_available = u64::from(params.pool_bytes).saturating_sub(2 * skeleton_bytes);
     if let Some(p) = &pool {
-        if p.bytes > u64::from(params.pool_bytes) {
+        if p.bytes > pool_available {
             failures.push(GateFailure::PoolExceeded {
                 bytes: p.bytes,
-                pool: params.pool_bytes,
+                pool: pool_available.min(u64::from(u32::MAX)) as u32,
                 region: p.region,
                 position: p.position,
             });
@@ -457,6 +487,10 @@ pub(crate) fn evaluate(
         windows_total,
         pool,
         pool_pessimistic,
+        skeleton_bytes,
+        skeleton_measured: measured.is_some(),
+        row_leaf_cap,
+        pool_available,
         home_pin_bytes,
         max_need_archetypes,
         unreachable,

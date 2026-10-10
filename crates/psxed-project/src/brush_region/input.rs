@@ -462,8 +462,11 @@ impl ReachGrid {
 
 /// Standable floor points reachable on foot from the player start.
 ///
-/// Every upward-facing, non-sky render surface contributes one point just
-/// above its centroid. Two points connect when they are within
+/// Every upward-facing, non-sky render surface contributes a point just above
+/// its centroid and, when it is wider than [`WALK_SAMPLE`], a grid of points
+/// across it (a floor cut into big patches would otherwise leave a doorway
+/// between two patch centroids with nothing to walk through). Two points
+/// connect when they are within
 /// [`WALK_LINK_XZ`] horizontally and [`WALK_LINK_Y`] vertically with no
 /// solid between points lifted a body height off the floor, so a wall between
 /// two floors separates them and a stair of 28-unit steps does not. [E]
@@ -480,6 +483,56 @@ const WALK_LINK_XZ: f64 = 400.0;
 const WALK_LINK_Y: f64 = 64.0;
 /// Body lift for the wall test between floor points. [E]
 const WALK_LIFT: f64 = 24.0;
+/// Spacing of the extra floor points across a large upward surface. A door is
+/// 192 units wide, so this keeps at least one point in every doorway. [E]
+const WALK_SAMPLE: f64 = 96.0;
+
+/// Floor points on one upward-facing convex polygon: the centroid, and a grid
+/// of [`WALK_SAMPLE`] spacing inside it when it is large.
+fn floor_samples(surface: &CompiledSurface) -> Vec<V3> {
+    let c = super::geometry::polygon_centroid(&surface.vertices);
+    let mut points = vec![[c[0], c[1] + 1.0, c[2]]];
+    let bounds = Aabb::from_points(&surface.vertices);
+    let (ex, ez) = (bounds.extent(0), bounds.extent(2));
+    if ex <= WALK_SAMPLE && ez <= WALK_SAMPLE {
+        return points;
+    }
+    let n = surface.plane.normal.map(|v| v as f64);
+    if n[1].abs() < 1.0e-9 {
+        return points;
+    }
+    let dist = surface.plane.dist as f64;
+    let (nx, nz) = (
+        (ex / WALK_SAMPLE).ceil().max(1.0) as usize,
+        (ez / WALK_SAMPLE).ceil().max(1.0) as usize,
+    );
+    let vs = &surface.vertices;
+    for i in 0..nx {
+        for j in 0..nz {
+            let x = bounds.min[0] + ex * (i as f64 + 0.5) / nx as f64;
+            let z = bounds.min[2] + ez * (j as f64 + 0.5) / nz as f64;
+            // Inside the convex polygon in the xz projection: every edge has
+            // the point on one common side.
+            let mut sign = 0.0f64;
+            let inside = (0..vs.len()).all(|k| {
+                let (a, b) = (vs[k], vs[(k + 1) % vs.len()]);
+                let cross = (b[0] - a[0]) * (z - a[2]) - (b[2] - a[2]) * (x - a[0]);
+                if cross.abs() < 1.0e-9 {
+                    return true;
+                }
+                if sign == 0.0 {
+                    sign = cross.signum();
+                }
+                cross.signum() == sign
+            });
+            if inside {
+                let y = (dist - n[0] * x - n[2] * z) / n[1];
+                points.push([x, y + 1.0, z]);
+            }
+        }
+    }
+    points
+}
 
 impl WalkIndex {
     fn key(p: V3) -> (i32, i32) {
@@ -528,8 +581,7 @@ fn walk_flood(
         if n[1] / len < 0.5 {
             continue;
         }
-        let c = super::geometry::polygon_centroid(&surface.vertices);
-        points.push([c[0], c[1] + 1.0, c[2]]);
+        points.extend(floor_samples(surface));
     }
     if points.is_empty() {
         return None;

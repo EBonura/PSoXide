@@ -89,6 +89,7 @@ impl BrushWorldCookMode {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct BrushWorldCookOptions<'a> {
     pub project_root: &'a Path,
     pub mode: BrushWorldCookMode,

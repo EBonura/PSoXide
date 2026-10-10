@@ -11,6 +11,9 @@ use crate::brush_portal::CompiledPortal;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
+mod cluster;
+pub(crate) use cluster::{clustered_portal_rows, ClusterFlow};
+
 /// Original Quake VIS winding/plane tolerance (`VIS.H::ON_EPSILON`).
 const ON_EPSILON: f64 = 0.1;
 
@@ -39,6 +42,18 @@ struct DirectedPortal {
     to_leaf: usize,
     plane: VisPlane,
     winding: Vec<[f64; 3]>,
+}
+
+/// The conservative `mightsee` set of each directed portal: precomputed for
+/// the whole-map flow, computed on first use for a clustered one.
+trait Mightsee {
+    fn get(&self, portal: usize) -> &[u64];
+}
+
+impl Mightsee for [Vec<u64>] {
+    fn get(&self, portal: usize) -> &[u64] {
+        &self[portal]
+    }
 }
 
 #[derive(Clone)]
@@ -103,7 +118,7 @@ pub(crate) fn quake_portal_flow_rows(
         for _ in 0..worker_count {
             let directed = &directed;
             let outgoing = &outgoing;
-            let mightsee = &mightsee;
+            let mightsee = mightsee.as_slice();
             let portal_visibility = &portal_visibility;
             let status = &status;
             let order = &order;
@@ -237,11 +252,11 @@ fn runtime_visibility_rows(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn flow_portal(
+fn flow_portal<M: Mightsee + ?Sized>(
     portal_index: usize,
     portals: &[DirectedPortal],
     outgoing: &[Vec<usize>],
-    mightsee: &[Vec<u64>],
+    mightsee: &M,
     portal_visibility: &[OnceLock<Vec<u64>>],
     status: &[AtomicU8],
     order_rank: &[usize],
@@ -255,7 +270,7 @@ fn flow_portal(
         source: portal.winding.clone(),
         pass: None,
         portal_plane: portal.plane,
-        mightsee: mightsee[portal_index].clone(),
+        mightsee: mightsee.get(portal_index).to_vec(),
     };
     recursive_leaf_flow(
         portal.to_leaf,
@@ -279,6 +294,19 @@ fn directed_open_portals(
     portals: &[CompiledPortal],
     leaf_mapping: &[i16],
 ) -> Vec<DirectedPortal> {
+    directed_open_portals_by(bsp, portals, |leaf| {
+        let runtime = leaf_mapping[leaf];
+        (runtime > 0).then(|| runtime as usize - 1)
+    })
+}
+
+/// Both directions of every portal between two visible leaves. `dense` maps a
+/// host leaf to its visible-leaf index, `None` for a solid leaf.
+fn directed_open_portals_by(
+    bsp: &CompiledSurfaceBsp,
+    portals: &[CompiledPortal],
+    dense: impl Fn(usize) -> Option<usize>,
+) -> Vec<DirectedPortal> {
     let mut output = Vec::new();
     for portal in portals {
         if !bsp.leaves[portal.front_leaf].contents.is_visible()
@@ -286,8 +314,9 @@ fn directed_open_portals(
         {
             continue;
         }
-        let back = leaf_mapping[portal.back_leaf] as usize - 1;
-        let front = leaf_mapping[portal.front_leaf] as usize - 1;
+        let (Some(back), Some(front)) = (dense(portal.back_leaf), dense(portal.front_leaf)) else {
+            continue;
+        };
         let (normal, distance) = normalized_plane(portal.plane);
         let plane = VisPlane { normal, distance };
         output.push(DirectedPortal {
@@ -343,13 +372,13 @@ fn base_portals_may_see(source: &DirectedPortal, target: &DirectedPortal) -> boo
 }
 
 #[allow(clippy::too_many_arguments)]
-fn recursive_leaf_flow(
+fn recursive_leaf_flow<M: Mightsee + ?Sized>(
     leaf: usize,
     head_plane: VisPlane,
     previous: &FlowStack,
     portals: &[DirectedPortal],
     outgoing: &[Vec<usize>],
-    mightsee: &[Vec<u64>],
+    mightsee: &M,
     portal_visibility: &[OnceLock<Vec<u64>>],
     status: &[AtomicU8],
     order_rank: &[usize],
@@ -368,7 +397,7 @@ fn recursive_leaf_flow(
         if path[portal.to_leaf] || !bit_is_set(&previous.mightsee, portal.to_leaf) {
             continue;
         }
-        let test = if order_rank[portal_index] < current_rank {
+        let test: &[u64] = if order_rank[portal_index] < current_rank {
             while status[portal_index].load(Ordering::Acquire) != 2 {
                 std::thread::yield_now();
             }
@@ -376,7 +405,7 @@ fn recursive_leaf_flow(
                 .get()
                 .expect("done portal must have published visbits")
         } else {
-            &mightsee[portal_index]
+            mightsee.get(portal_index)
         };
         let next_mightsee = intersect_bits(&previous.mightsee, test);
         if !has_unseen_bits(&next_mightsee, leaf_visibility) {

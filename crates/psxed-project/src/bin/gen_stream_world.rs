@@ -47,8 +47,19 @@ fn main() {
         .unwrap_or_else(|e| panic!("write: {e}"));
     let s = &world.stats;
     println!(
-        "[gen-stream-world] wrote {}: {} modules ({} rooms, {} corridors, {} interiors, {} courtyards, {} terrain), {} door edges, {} brushes, {} enemies, {} hooks, {} routes",
+        "[gen-stream-world] wrote {}: {} modules ({} rooms, {} corridors, {} interiors, {} courtyards, {} terrain), {} door edges (degree <= {}, {} overflows), {} brushes, {} enemies, {} hooks, {} routes",
         out_dir.display(), s.modules, s.rooms, s.corridors, s.interiors, s.courtyards, s.terrains,
-        s.edges, s.brushes, s.enemies, s.hooks, world.routes.routes.len(),
+        s.edges, s.max_door_degree, s.degree_overflows, s.brushes, s.enemies, s.hooks, world.routes.routes.len(),
+    );
+    println!(
+        "[gen-stream-world] modules estimate {} to {} B in the cut model (target {} B), {} B in all; {} over budget, {} trimmed",
+        s.min_module_bytes, s.max_module_bytes, config.region_target_bytes, s.estimated_bytes, s.over_budget_modules, s.trimmed_modules,
+    );
+    println!(
+        "[gen-stream-world] {}",
+        world
+            .plan
+            .describe(config.region_target_bytes)
+            .replace('\n', "\n[gen-stream-world] ")
     );
 }

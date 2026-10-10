@@ -77,6 +77,16 @@ impl BitSet {
     }
 }
 
+/// Where V(R) came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClosureSource {
+    /// Sampled line of sight over the brush solids: an estimate that can miss
+    /// a thin sightline.
+    Sampled,
+    /// The streamed cook's clustered portal flow (design 3.4): the real thing.
+    PortalFlow,
+}
+
 #[derive(Clone, Debug)]
 pub struct Closure {
     /// V(R): sorted region ids including R itself.
@@ -89,6 +99,7 @@ pub struct Closure {
     pub hook_pulls: Vec<Vec<u32>>,
     pub rays_cast: u64,
     pub regions: usize,
+    pub source: ClosureSource,
 }
 
 /// Viewpoints in a region: standing points above its upward-facing
@@ -195,6 +206,28 @@ pub(crate) fn compute_closure(
     let rays_cast = per_region.iter().map(|(_, r)| r).sum();
     let visible: Vec<Vec<u32>> = per_region.into_iter().map(|(v, _)| v).collect();
 
+    let (need, hook_pulls) = needs_from_visible(input, params, regions, &visible);
+    Closure {
+        visible,
+        need,
+        viewers,
+        hook_pulls,
+        rays_cast,
+        regions: n,
+        source: ClosureSource::Sampled,
+    }
+}
+
+/// `Need(R)` and the hook landings pulled into it, from `V(R)`: the closure of
+/// each hook point whose region R sees and that is in hook range joins R's
+/// requirement (design 4.1).
+pub(crate) fn needs_from_visible(
+    input: &PartitionInput,
+    params: &PartitionParams,
+    regions: &[Region],
+    visible: &[Vec<u32>],
+) -> (Vec<BitSet>, Vec<Vec<u32>>) {
+    let n = regions.len();
     // Hook landing region of every hook point.
     let mut hook_region = vec![None; input.hooks.len()];
     for region in regions {
@@ -220,12 +253,5 @@ pub(crate) fn compute_closure(
             }
         }
     }
-    Closure {
-        visible,
-        need,
-        viewers,
-        hook_pulls,
-        rays_cast,
-        regions: n,
-    }
+    (need, hook_pulls)
 }

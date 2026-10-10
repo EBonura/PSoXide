@@ -49,6 +49,7 @@ pub mod quake_map_import;
 pub mod resolve;
 pub mod sky_texture;
 pub mod spatial;
+pub mod stream_walk;
 pub mod stream_world;
 pub mod streaming;
 pub mod terrain;

@@ -34,8 +34,9 @@ pub mod fixtures;
 pub mod geometry;
 
 mod account;
+mod budget;
 mod closure;
-mod cuts;
+pub(crate) mod cuts;
 mod gate;
 mod graph;
 mod input;
@@ -48,7 +49,8 @@ mod tests_world;
 
 pub(crate) use account::clip_surfaces_indexed;
 pub use account::{PayloadCounts, Region};
-pub use closure::Closure;
+pub use budget::{union_regions, PoolPlan};
+pub use closure::{Closure, ClosureSource};
 pub use cuts::{CutNode, CutTree};
 pub use gate::{GateFailure, GateReport, PoolPeak, RhoEdge, RhoWindow};
 pub use graph::{Aperture, RegionGraph};
@@ -61,15 +63,114 @@ use geometry::{Aabb, V3};
 /// Bytes per CD sector. [M]
 pub const SECTOR_BYTES: u32 = 2048;
 
-/// Pool for region pages, the design's `P_world`. [E]
+/// Main RAM the world pool can be carved from, as measured on the Graybox
+/// Reach guest by `occupancy-report` (design 4.5, 2026-10-08). Every field
+/// is a measurement or a labelled estimate, and the pool is derived from them,
+/// never typed in.
 ///
-/// The design defines it as the bytes reclaimed from the static image minus a
-/// safety floor and leaves the number to M0. Reclaimed here means: the baked
-/// PXBSP (graybox-reach cooks to 90,892 B, measured), the BSP textures in
-/// `.data` (97,576 B, survey) and the free heap (41,040 B, survey), minus a
-/// 16 KiB safety floor. Per-archetype clip residency may free more; that is
-/// unmeasured and left out, which makes this figure conservative.
-pub const P_WORLD_ESTIMATE_BYTES: u32 = 90_892 + 97_576 + 41_040 - 16_384;
+/// The persistent-asset arena (clips, models and atlases) is the bulk of the
+/// guest's RAM. The compressed-animation passes (dense repair, then keyed
+/// tracks) have landed and the headroom below is measured after them, so the
+/// 153 KB and 182 KB they gave back are already in it. `arena_reclaim_bytes`
+/// is for a pass that has not landed, and is zero.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RamBudget {
+    /// Region cap minus the linked static image. [M, link map: cap 1,998,848
+    /// minus image 1,665,892 (`__bss_end` 0x801a6764 less 0x80010000)]
+    pub static_headroom_bytes: u32,
+    /// Heap in use at gameplay, apart from the region pool itself. The heap
+    /// lives inside the headroom, so it is not available to the pool. [M,
+    /// headless emulator RAM dump of the streamed guest at poll 1500,
+    /// 2026-10-10: 107,466 B in use, less the 102,477 B pool image and the
+    /// 708 B top container copy; the whole-map guest holds 3,761 B]
+    pub heap_in_use_bytes: u32,
+    /// The baked PXBSP a streamed world stops baking into `.data`; the
+    /// resident skeleton takes some of it back. [M, link map: the
+    /// `PXBSP_WORLD` symbol is 0x16e70]
+    pub baked_bsp_image_bytes: u32,
+    /// Static RAM the streamed guest spends beyond the whole-map one, apart
+    /// from the world it no longer bakes: the region reader and streamer code,
+    /// their buffers and counters. [M, link maps, 2026-10-10: the whole-map
+    /// headroom 331,676 B plus the 93,808 B image, less the streamed guest's
+    /// 389,340 B headroom and its 708 B baked container]
+    pub stream_overhead_bytes: u32,
+    /// Fragmentation margin, install scratch and growth. [E]
+    pub safety_floor_bytes: u32,
+    /// The persistent-asset arena. Information only. [M, cook manifest:
+    /// 150 pages of 2,048 B]
+    pub persistent_asset_arena_bytes: u32,
+    /// Part of that arena handed to the world once models are compressed.
+    /// Zero today. [E]
+    pub arena_reclaim_bytes: u32,
+}
+
+/// Graybox Reach, the editor-playtest guest linked from editor main 1974d8e1's
+/// tree (SDK pin be42239a5), 2026-10-10, whole-map and streamed
+/// (`world-stream`, three regions). The 2026-10-09 figures (a2d5039d) were
+/// headroom 332,956 and heap 3,764, with no streamed guest to measure; the
+/// streamed guest turned out to cost 35,436 B of static RAM that the model had
+/// not counted.
+pub const RAM_BUDGET: RamBudget = RamBudget {
+    static_headroom_bytes: 331_676,
+    heap_in_use_bytes: 4_281,
+    baked_bsp_image_bytes: 93_808,
+    stream_overhead_bytes: 35_436,
+    safety_floor_bytes: 16_384,
+    persistent_asset_arena_bytes: 307_200,
+    arena_reclaim_bytes: 0,
+};
+
+impl RamBudget {
+    /// Bytes for region pages before the resident skeleton is paid for:
+    /// headroom minus the heap in use, plus the image no longer baked, plus
+    /// what the arena gives back, minus the streaming code's static cost and
+    /// the safety floor. [D]
+    pub const fn world_pool_bytes(&self) -> u32 {
+        self.static_headroom_bytes - self.heap_in_use_bytes
+            + self.baked_bsp_image_bytes
+            + self.arena_reclaim_bytes
+            - self.stream_overhead_bytes
+            - self.safety_floor_bytes
+    }
+
+    /// The arithmetic as a line for the report.
+    pub fn describe(&self) -> String {
+        format!(
+            "{} headroom - {} heap in use + {} baked PXBSP no longer baked + {} arena reclaimed - {} streaming code - {} safety floor = {} B",
+            self.static_headroom_bytes,
+            self.heap_in_use_bytes,
+            self.baked_bsp_image_bytes,
+            self.arena_reclaim_bytes,
+            self.stream_overhead_bytes,
+            self.safety_floor_bytes,
+            self.world_pool_bytes()
+        )
+    }
+}
+
+/// Pool for region pages, the design's `P_world`, before the skeleton:
+/// 331,676 - 4,281 + 93,808 - 35,436 - 16,384 = 369,383 B with today's RAM.
+/// [D from [`RAM_BUDGET`]]
+pub const P_WORLD_ESTIMATE_BYTES: u32 = RAM_BUDGET.world_pool_bytes();
+
+/// Bytes the resident skeleton of a streamed world occupies in RAM, from the
+/// wire sizes of `psx-bsp` (the streaming index, the top tree with its stub
+/// leaves and two clip hulls, and the visibility lists), for `regions`
+/// regions whose visibility lists hold `vis_entries` ids in all. The
+/// materials and entity lumps come on top and are only known from a cook. [D]
+pub fn skeleton_bytes(regions: usize, vis_entries: usize) -> u64 {
+    use psx_bsp::pxbsp_resident::stream::{REGION_ENTRY_BYTES, STREAMING_INDEX_HEADER_BYTES};
+    let r = regions as u64;
+    let top_nodes = r.saturating_sub(1);
+    let padded = r.div_ceil(8) * 8;
+    STREAMING_INDEX_HEADER_BYTES as u64
+        + r * REGION_ENTRY_BYTES as u64
+        + 2 * vis_entries as u64
+        + top_nodes * record::NODE as u64
+        + top_nodes * record::PLANE as u64
+        + (1 + padded) * record::LEAF as u64
+        + (1 + 2 * top_nodes) * record::CLIPNODE as u64
+}
 
 /// Wire sizes of the cooked records a region carries, from `psx-bsp`. [M]
 pub mod record {
@@ -147,6 +248,13 @@ pub struct PartitionParams {
     pub aperture_samples: usize,
     /// Re-split passes after the estimate-driven tree. [E]
     pub max_refine_passes: u32,
+    /// A cut that leaves a child thinner than this along its axis is a
+    /// sliver and ranks behind every cut that leaves none (see `cuts`). [E]
+    pub min_sliver_extent: f64,
+    /// Further cook passes after the measured drive gate has failed on rho:
+    /// three with another sliver extent, then cuts of the region the worst
+    /// window enters; the cook keeps the best tree. [E]
+    pub max_rho_passes: u32,
 
     // ---- visibility (design 3.4, estimated) -----------------------------
     /// Furthest anything is ever drawn, `D_vis`. [D, design 3.1]
@@ -211,6 +319,8 @@ impl Default for PartitionParams {
             max_cut_candidates: 32,
             aperture_samples: 144,
             max_refine_passes: 3,
+            min_sliver_extent: 256.0,
+            max_rho_passes: 5,
             vis_distance: 2860.0,
             viewer_samples: 6,
             target_samples: 8,
@@ -335,7 +445,63 @@ pub struct Partition {
     pub total_input_faces: u32,
 }
 
+/// What a finished streamed cook knows that the partitioner estimated: the
+/// real visibility lists, the real payload sizes and the real skeleton.
+#[derive(Clone, Debug)]
+pub struct CookMeasured {
+    /// `V(R)` per region from the clustered portal flow, sorted, R included.
+    pub visible: Vec<Vec<u32>>,
+    /// Encoded payload bytes per region.
+    pub payload_bytes: Vec<u32>,
+    /// Size of the resident container (the skeleton plus materials and
+    /// entities).
+    pub container_bytes: u64,
+    /// Leaf capacity of a slot in the rank rows.
+    pub leaf_cap: u32,
+}
+
 impl Partition {
+    /// The partition judged again with the cook's own numbers in place of the
+    /// estimates: the sampled closure becomes the portal-flow closure, the
+    /// estimated payloads become the encoded ones, and the skeleton is the
+    /// real container. The gates, `Need` sets and layout use these, so a
+    /// verdict from here no longer depends on a sampled line of sight.
+    pub fn with_measured(&self, input: &PartitionInput, measured: &CookMeasured) -> Partition {
+        let mut part = self.clone();
+        for (region, &bytes) in part.regions.iter_mut().zip(&measured.payload_bytes) {
+            region.counts.measured_bytes = Some(bytes);
+        }
+        let (need, hook_pulls) =
+            closure::needs_from_visible(input, &part.params, &part.regions, &measured.visible);
+        part.closure = Closure {
+            visible: measured.visible.clone(),
+            need,
+            viewers: self.closure.viewers.clone(),
+            hook_pulls,
+            rays_cast: 0,
+            regions: self.closure.regions,
+            source: ClosureSource::PortalFlow,
+        };
+        part.gate = gate::evaluate(
+            input,
+            &part.params,
+            &part.regions,
+            &part.graph,
+            &part.closure,
+            part.run_speed,
+            Some(gate::GateMeasured {
+                skeleton_bytes: measured.container_bytes,
+                leaf_cap: measured.leaf_cap,
+                median_region_bytes: {
+                    let mut sizes = measured.payload_bytes.clone();
+                    sizes.sort_unstable();
+                    sizes.get(sizes.len() / 2).copied().unwrap_or(0)
+                },
+            }),
+        );
+        part
+    }
+
     /// Region containing `point`, by walking the cut tree.
     pub fn region_at(&self, point: V3) -> u32 {
         self.tree.locate(point)
@@ -375,8 +541,18 @@ pub fn cook_stream_report(
 
 /// Partition `input` under `params`.
 pub fn partition(input: &PartitionInput, params: &PartitionParams) -> Partition {
+    partition_from(input, params, cuts::build_tree(input, params))
+}
+
+/// [`partition`] starting from a given cut tree, which the estimate-driven
+/// re-splits then refine as usual. The cook uses it to cut a region further
+/// once the measured drive gate has judged the tree.
+pub fn partition_from(
+    input: &PartitionInput,
+    params: &PartitionParams,
+    mut tree: CutTree,
+) -> Partition {
     let run_speed = input.run_speed.unwrap_or(params.default_run_speed);
-    let mut tree = cuts::build_tree(input, params);
     let mut cache = account::AccountCache::new();
     let mut passes = 0;
     loop {
@@ -437,7 +613,7 @@ fn finish(
     passes: u32,
 ) -> Partition {
     let layout = layout::compute_layout(params, &regions, &graph);
-    let gate = gate::evaluate(input, params, &regions, &graph, &closure, run_speed);
+    let gate = gate::evaluate(input, params, &regions, &graph, &closure, run_speed, None);
     let start_region = input.player_start.map(|p| tree.locate(p));
     let total_input_faces = input.render.len() as u32;
     Partition {

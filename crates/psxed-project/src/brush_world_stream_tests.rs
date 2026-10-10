@@ -19,7 +19,7 @@ use psx_bsp::render::{configure_projection, load_pxbsp_view, Camera, Renderer};
 use psx_bsp::{SliceReader, Vec3I32};
 
 use super::*;
-use super::{flatten_streamed as flatten, FlatWorld as Flat};
+use super::{flat_rd16 as rd16, flatten_streamed as flatten, FlatWorld as Flat};
 use crate::brush_region::PartitionParams;
 use crate::stream_world::{generate, load_donor, StreamWorldConfig};
 
@@ -266,7 +266,7 @@ fn graybox_reach_streamed_equals_whole_over_sampled_views() {
     let world = cook(&project, &root, &PartitionParams::default());
     assert!(world.index.regions.len() >= 2);
     let sampled = compare_views(&world, 400, 0xC0FFEE);
-    println!(
+    eprintln!(
         "graybox-reach: {} regions, {} views ({} closed samples skipped), {} pvs faces, {} frame faces, {} source ids",
         world.index.regions.len(),
         sampled.views,
@@ -276,6 +276,203 @@ fn graybox_reach_streamed_equals_whole_over_sampled_views() {
         sampled.source_ids_total
     );
     assert!(sampled.frame_faces_total > 0);
+}
+
+/// Face sets a streamed map draws at `camera`, as sorted stable source ids:
+/// the potentially visible set and the frame after the renderer's culling.
+fn drawn_source_ids(
+    world: &StreamedBrushWorld,
+    map: &PxbspResidentMap,
+    renderer: &mut Renderer,
+    camera: Camera,
+) -> (Vec<u32>, Vec<u32>) {
+    let view = load_pxbsp_view(camera);
+    let (pvs, frame) = renderer
+        .debug_world_selection(map, camera, view)
+        .expect("selection");
+    let faces = map.streaming().unwrap().index().caps.faces as usize;
+    let ids = |list: &[u16]| {
+        let mut ids: Vec<u32> = list
+            .iter()
+            .map(|&f| {
+                let slot = f as usize / faces;
+                let region = map
+                    .streaming()
+                    .unwrap()
+                    .region_in_slot(slot as u16)
+                    .unwrap();
+                world.debug.face_source[region as usize][f as usize % faces]
+            })
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    };
+    (ids(&pvs), ids(&frame))
+}
+
+/// Distance from `eye` (engine units) to the nearest vertex of the face with
+/// stable source id `id`.
+fn nearest_vertex_distance(world: &StreamedBrushWorld, id: u32, eye: [i32; 3]) -> Option<f64> {
+    for (r, sources) in world.debug.face_source.iter().enumerate() {
+        let Some(local) = sources.iter().position(|&s| s == id) else {
+            continue;
+        };
+        let build = &world.debug.regions[r];
+        let face = &build.faces[local * 10..local * 10 + 10];
+        let first = rd16(face, 2) as usize;
+        let count = face[7] as usize;
+        let mut best = f64::MAX;
+        for v in first..first + count {
+            let at = v * 12;
+            let p = [0, 2, 4]
+                .map(|o| i16::from_le_bytes([build.vertices[at + o], build.vertices[at + o + 1]]));
+            let d: f64 = (0..3)
+                .map(|a| f64::from(i32::from(p[a]) - eye[a]).powi(2))
+                .sum::<f64>()
+                .sqrt();
+            best = best.min(d);
+        }
+        return Some(best);
+    }
+    None
+}
+
+/// Every face `inner` selects from a sampled viewpoint within `reach` of the
+/// eye, `outer` selects too. (The renderer's frame selection keeps faces past
+/// the far reject until projection throws them out, so a face farther than
+/// `reach` is not a drawn face and may be absent.) A tighter PVS may select
+/// fewer faces than a looser one: a face only in a loose set is hidden behind
+/// something. Returns the totals selected by each, within reach.
+fn assert_frames_contained(
+    inner: &StreamedBrushWorld,
+    outer: &StreamedBrushWorld,
+    views: usize,
+    seed: u32,
+    reach: f64,
+) -> (usize, usize) {
+    configure_projection();
+    assert_eq!(inner.index.regions.len(), outer.index.regions.len());
+    let regions = inner.index.regions.len() as u16;
+    let mut map_a = load_streamed(inner, regions);
+    install_all(inner, &mut map_a);
+    let mut map_b = load_streamed(outer, regions);
+    install_all(outer, &mut map_b);
+    let mut renderer_a = Renderer::new_pxbsp_with_nodes(map_a.faces().len(), map_a.nodes().len());
+    let mut renderer_b = Renderer::new_pxbsp_with_nodes(map_b.faces().len(), map_b.nodes().len());
+    let (mins, maxs) = inner.debug.world_bounds;
+    let mut state = seed;
+    let (mut done, mut attempts, mut drawn_inner, mut drawn_outer) = (0, 0, 0, 0);
+    while done < views {
+        attempts += 1;
+        assert!(
+            attempts < views * 400,
+            "could not find {views} open positions"
+        );
+        let mut origin = [0i32; 3];
+        for axis in 0..3 {
+            let span = i32::from(maxs[axis]) - i32::from(mins[axis]);
+            origin[axis] =
+                (i32::from(mins[axis]) + (lcg(&mut state) as i32).rem_euclid(span.max(1))) << 12;
+        }
+        let camera = Camera {
+            origin: Vec3I32 {
+                x: origin[0],
+                y: origin[1],
+                z: origin[2],
+            },
+            angles: [
+                (lcg(&mut state) % 4096) as i16 - 2048,
+                (lcg(&mut state) % 4096) as i16,
+                0,
+            ],
+        };
+        let leaf = map_a.point_leaf_index(camera.origin).unwrap();
+        if leaf == 0 || map_a.leaves().get(leaf).unwrap().contents == CONTENTS_SOLID {
+            continue;
+        }
+        let (_, frame_a) = drawn_source_ids(inner, &map_a, &mut renderer_a, camera);
+        let (_, frame_b) = drawn_source_ids(outer, &map_b, &mut renderer_b, camera);
+        let eye = origin.map(|v| v >> 12);
+        let in_reach =
+            |id: &u32| nearest_vertex_distance(inner, *id, eye).is_some_and(|d| d <= reach);
+        let wanted: Vec<u32> = frame_a.iter().copied().filter(in_reach).collect();
+        let missing: Vec<_> = wanted.iter().filter(|id| !frame_b.contains(id)).collect();
+        assert!(
+            missing.is_empty(),
+            "faces {missing:?} are within reach of {origin:?} angles {:?} and selected by the inner cook, not the outer",
+            camera.angles,
+        );
+        drawn_inner += wanted.len();
+        drawn_outer += frame_b.iter().filter(|id| in_reach(id)).count();
+        done += 1;
+    }
+    (drawn_inner, drawn_outer)
+}
+
+fn cook_with(
+    project: &ProjectDocument,
+    root: &Path,
+    mode: BrushWorldCookMode,
+    pvs: StreamPvs,
+) -> StreamedBrushWorld {
+    match cook_project_gated(
+        project,
+        root,
+        mode,
+        [0; 3],
+        &PartitionParams::default(),
+        pvs,
+    )
+    .expect("cook")
+    .world
+    {
+        CookedWorld::Streamed(world) => *world,
+        CookedWorld::Whole(_) => panic!("expected more than one region"),
+    }
+}
+
+/// The far-reject bound must not lose a face: everything the exact
+/// whole-world flow draws is drawn by the clustered flow, and the clustered
+/// flow draws nothing the conservative `mightsee` rows would not.
+fn check_clustered_against_whole_world(
+    project: &ProjectDocument,
+    root: &Path,
+    name: &str,
+    seed: u32,
+) {
+    let reach = PartitionParams::default().vis_distance;
+    let clustered = cook_with(
+        project,
+        root,
+        BrushWorldCookMode::Draft,
+        StreamPvs::Clustered { reach },
+    );
+    let exact = cook_with(
+        project,
+        root,
+        BrushWorldCookMode::Release,
+        StreamPvs::Global,
+    );
+    let (exact_drawn, clustered_drawn) =
+        assert_frames_contained(&exact, &clustered, 400, seed, reach);
+    eprintln!(
+        "{name}: {exact_drawn} faces within reach selected by the whole-world exact flow, all selected by the clustered flow ({clustered_drawn} selected); widest |V| {} vs {}",
+        clustered.stats.max_vis_count, exact.stats.max_vis_count
+    );
+    assert!(exact_drawn > 0);
+}
+
+#[test]
+fn graybox_reach_clustered_visibility_loses_no_face_the_whole_world_flow_draws() {
+    let (project, root) = graybox();
+    check_clustered_against_whole_world(&project, &root, "graybox-reach", 0x5EED);
+}
+
+#[test]
+fn stress_world_small_variant_clustered_visibility_loses_no_face() {
+    let (project, root) = small_world();
+    check_clustered_against_whole_world(&project, &root, "stress-small", 0xFA57);
 }
 
 #[test]
@@ -327,7 +524,7 @@ fn stress_world_small_variant_streamed_equals_whole() {
     let (project, root) = small_world();
     let world = cook(&project, &root, &PartitionParams::default());
     let sampled = compare_views(&world, 400, 0xBADC0DE);
-    println!(
+    eprintln!(
         "stress-small: {} regions, {} views ({} skipped), {} frame faces",
         world.index.regions.len(),
         sampled.views,
@@ -335,6 +532,127 @@ fn stress_world_small_variant_streamed_equals_whole() {
         sampled.frame_faces_total
     );
     assert!(sampled.frame_faces_total > 0);
+}
+
+#[test]
+fn the_cook_judges_its_own_numbers_not_the_partitioners_estimates() {
+    use crate::brush_region::ClosureSource;
+
+    let (project, root) = graybox();
+    let params = PartitionParams::default();
+    let gated = cook_project_gated(
+        &project,
+        &root,
+        BrushWorldCookMode::Draft,
+        [0; 3],
+        &params,
+        StreamPvs::Clustered {
+            reach: params.vis_distance,
+        },
+    )
+    .expect("cook");
+    let CookedWorld::Streamed(world) = &gated.world else {
+        panic!("graybox-reach streams");
+    };
+    let measured = gated
+        .measured
+        .as_ref()
+        .expect("a streamed cook is re-gated");
+    assert_eq!(gated.estimated.closure.source, ClosureSource::Sampled);
+    assert_eq!(measured.closure.source, ClosureSource::PortalFlow);
+    // Closure, payload sizes and skeleton are the cook's.
+    for r in 0..world.index.regions.len() {
+        let list: Vec<u32> = world
+            .index
+            .vis_list(r)
+            .iter()
+            .map(|&q| u32::from(q))
+            .collect();
+        let mut sorted = list.clone();
+        sorted.sort_unstable();
+        assert_eq!(measured.closure.visible[r], sorted);
+        assert_eq!(
+            measured.regions[r].counts.bytes() as usize,
+            world.payloads[r].len()
+        );
+    }
+    assert!(measured.gate.skeleton_measured);
+    assert_eq!(measured.gate.skeleton_bytes, world.container.len() as u64);
+    assert_eq!(
+        measured.gate.row_leaf_cap,
+        u32::from(world.index.caps.leaves)
+    );
+    // The estimate is left as it was.
+    assert!(!gated.estimated.gate.skeleton_measured);
+    // A one-region project has nothing to re-judge.
+    let mut under = PartitionParams {
+        region_target_bytes: 64 * 1024 * 1024,
+        region_hard_cap_bytes: 64 * 1024 * 1024,
+        pool_bytes: u32::MAX,
+        ..PartitionParams::default()
+    };
+    under.caps = crate::brush_region::SlotCaps {
+        faces: u32::MAX,
+        vertices: u32::MAX,
+        nodes: u32::MAX,
+        leaves: u32::MAX,
+        mark_surfaces: u32::MAX,
+        clip_nodes: u32::MAX,
+    };
+    let whole = cook_project_gated(
+        &project,
+        &root,
+        BrushWorldCookMode::Draft,
+        [0; 3],
+        &under,
+        StreamPvs::Clustered { reach: 2860.0 },
+    )
+    .expect("cook");
+    assert!(whole.measured.is_none());
+}
+
+#[test]
+fn vestibules_keep_a_region_to_its_door_neighbours() {
+    // A row of rooms joined by centred doors, a baffle inside each: a region
+    // sees the rooms either side of it and nobody behind them.
+    let donor = load_donor(&projects_dir()).expect("donor");
+    let config = StreamWorldConfig {
+        grid: [6, 1],
+        corridor_pct: 0,
+        interior_pct: 0,
+        courtyard_pct: 0,
+        terrain_pct: 0,
+        max_hooks: 0,
+        enemy_pct: 0,
+        // Bare shells under a target no two of them fit in, so a cell is a
+        // room.
+        detail_bytes: 0,
+        region_target_bytes: 12_288,
+        ..StreamWorldConfig::default()
+    };
+    let world = generate(&config, &donor).expect("world");
+    assert_eq!(world.stats.over_budget_modules, 0);
+    let mut params = PartitionParams::default();
+    world.overrides.apply(&mut params);
+    let cooked = cook(
+        &world.project,
+        &projects_dir().join("graybox-reach"),
+        &params,
+    );
+    let regions = cooked.index.regions.len();
+    assert_eq!(regions, 6, "one region per room");
+    // Region ids run along x, so the neighbours of r are r - 1 and r + 1.
+    for r in 0..regions {
+        let mut seen: Vec<usize> = cooked
+            .index
+            .vis_list(r)
+            .iter()
+            .map(|&q| q as usize)
+            .collect();
+        seen.sort_unstable();
+        let expected: Vec<usize> = (r.saturating_sub(1)..=(r + 1).min(regions - 1)).collect();
+        assert_eq!(seen, expected, "region {r}");
+    }
 }
 
 // ---- gate (b): collision --------------------------------------------------
@@ -472,7 +790,7 @@ fn random_install_orders_on_a_cooked_world_never_dangle() {
             map.check_integrity().unwrap_or_else(|e| panic!("{e:?}"));
         }
     }
-    println!("random install/uninstall: {ops} operations, integrity checked after each");
+    eprintln!("random install/uninstall: {ops} operations, integrity checked after each");
 }
 
 // ---- format and cook properties -------------------------------------------
@@ -512,7 +830,7 @@ fn cook_is_deterministic_and_regions_fit_their_declared_shape() {
         // Every face of the region has a stable source id.
         assert_eq!(a.debug.face_source[r].len(), a.stats.regions[r].faces);
     }
-    println!("{:#?}", a.stats.regions);
+    eprintln!("{:#?}", a.stats.regions);
 }
 
 #[test]

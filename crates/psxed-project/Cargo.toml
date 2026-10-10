@@ -49,6 +49,10 @@ name = "stream-cook"
 path = "src/bin/stream_cook.rs"
 
 [[bin]]
+name = "stream-world-sweep"
+path = "src/bin/stream_world_sweep.rs"
+
+[[bin]]
 name = "stream-report"
 path = "src/bin/stream_report.rs"
 
