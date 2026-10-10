@@ -8,6 +8,9 @@ use crate::detect::MAGIC;
 use crate::listing::{load_address, word_at_offset, HEADER};
 use crate::text::strip;
 
+/// Bytes the kernel reads at a time: the header's payload size is a multiple.
+const SECTOR: i64 = 0x800;
+
 /// A map that cannot be read or does not describe the image.
 #[derive(Debug)]
 pub struct MapError(pub String);
@@ -40,7 +43,10 @@ pub struct LinkMap {
     path: String,
     /// `(__text_start, __text_end)`.
     pub text: (i64, i64),
-    bss: Option<i64>,
+    /// Where the data ends and `.bss` begins: `__data_end`, or `__bss_start`
+    /// for a map without it. The header's payload size is this rounded up to
+    /// whole sectors.
+    data_end: Option<i64>,
     /// `HAZARD_TRAMPOLINES` as `(start, end)`.
     pub trampolines: Option<(i64, i64)>,
     /// Symbols inside .text by address, in map order: `(size, name)`.
@@ -155,12 +161,13 @@ impl LinkMap {
             let name = strip(rest);
             if matches!(
                 name,
-                "__text_start = ." | "__text_end = ." | "__bss_start = ."
+                "__text_start = ." | "__text_end = ." | "__data_end = ." | "__bss_start = ."
             ) {
                 let key = name.split_whitespace().next().unwrap_or(name);
                 let key = match key {
                     "__text_start" => "__text_start",
                     "__text_end" => "__text_end",
+                    "__data_end" => "__data_end",
                     _ => "__bss_start",
                 };
                 text_marks.insert(key, address);
@@ -228,7 +235,10 @@ impl LinkMap {
         Ok(Self {
             path: path.to_string(),
             text: (lo, hi),
-            bss: text_marks.get("__bss_start").copied(),
+            data_end: text_marks
+                .get("__data_end")
+                .or_else(|| text_marks.get("__bss_start"))
+                .copied(),
             trampolines,
             names,
             bounds,
@@ -247,8 +257,9 @@ impl LinkMap {
     }
 
     /// Refuse a map from another link (a stale one, or another example's).
-    /// The header's payload size (__bss_start - __text_start) is 2 KiB
-    /// aligned, so a stale map of a relinked game can agree with it: one
+    /// The header's payload size (__data_end - __text_start, rounded up to
+    /// whole 2 KiB sectors) is coarse, so a stale map of a relinked game can
+    /// agree with it: one
     /// that put HAZARD_TRAMPOLINES 0x78 bytes early passed and cut 11 of
     /// Quake's jump tables short (2026-09-23). So also probe words every
     /// psoxide.ld guest has at an address only the right map knows: the
@@ -274,11 +285,11 @@ impl LinkMap {
             let field =
                 |at: usize| i64::from(u32::from_le_bytes(data[at..at + 4].try_into().unwrap()));
             let (pc, payload) = (field(0x10), field(0x1C));
-            if let Some(bss) = self.bss {
-                if payload != bss - lo || base != lo {
+            if let Some(data_end) = self.data_end {
+                let stored = (data_end - lo + SECTOR - 1) & !(SECTOR - 1);
+                if payload != stored || base != lo {
                     problems.push(format!(
-                        "payload {payload:#x} at {base:#x}, map says {:#x} at {lo:#x}",
-                        bss - lo
+                        "payload {payload:#x} at {base:#x}, map says {stored:#x} at {lo:#x}"
                     ));
                 }
             }
