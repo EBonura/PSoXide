@@ -337,6 +337,25 @@ mod tests {
     }
 
     #[test]
+    fn boots_an_exe_whose_last_sector_was_padded_after_the_link() {
+        // psoxide.ld starts .bss where .data ends: the linker's flat file ends
+        // mid-sector and `pad_to_payload` writes the zeros the header counts.
+        let mut exe = make_exe(0x8001_0000, 0x8001_0000, &[0x5A; 3000]);
+        exe[0x1C..0x20].copy_from_slice(&4096u32.to_le_bytes());
+        assert_eq!(crate::pad_to_payload(&mut exe), Ok(1096));
+        assert_eq!(exe.len(), EXE_HEADER_BYTES + 4096);
+        let mut builder = IsoBuilder::new();
+        builder.add_file("SYSTEM.CNF", b"BOOT = cdrom:\\PSX.EXE;1\r\n".to_vec());
+        builder.add_file("PSX.EXE", exe);
+
+        let disc = Disc::from_bin(builder.build_bin());
+        let boot = load_boot_exe_from_disc(&disc).unwrap();
+        assert_eq!(boot.exe.payload.len(), 4096);
+        assert!(boot.exe.payload[..3000].iter().all(|&b| b == 0x5A));
+        assert!(boot.exe.payload[3000..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
     fn reports_missing_boot_assignment() {
         let mut builder = IsoBuilder::new();
         builder.add_file("SYSTEM.CNF", b"TCB = 4\r\n".to_vec());
