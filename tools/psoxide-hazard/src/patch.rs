@@ -189,32 +189,17 @@ fn pass(
         return 2;
     }
     let path = Path::new(&paths[0]);
-    let mut data = match std::fs::read(path) {
+    let mut file = match std::fs::read(path) {
         Ok(data) => data,
         Err(error) => {
             let _ = writeln!(out, "{}", io_message(&error, path));
             return 1;
         }
     };
-    let link_map = match open_map(map_path.as_deref(), &data, out) {
-        Ok(map) => map,
-        Err(status) => return status,
-    };
-    if !check_only {
-        match pad_to_payload(&mut data) {
-            Ok(0) | Err(Padding::NotAnExe) => {}
-            Ok(added) => {
-                if let Err(error) = write_whole(path, &data) {
-                    let _ = writeln!(out, "{}", io_message(&error, path));
-                    return 1;
-                }
-                let _ = writeln!(
-                    out,
-                    "padded {} with {added} zero bytes to the {} bytes its header claims",
-                    path.display(),
-                    data.len() - HEADER as usize
-                );
-            }
+    let padding = if !check_only {
+        match pad_to_payload(&mut file) {
+            Ok(added) => added,
+            Err(Padding::NotAnExe) => 0,
             Err(Padding::Truncated { expected, actual }) => {
                 let _ = writeln!(
                     out,
@@ -225,8 +210,10 @@ fn pass(
                 return 1;
             }
         }
-    }
-    let base = load_address(&data);
+    } else {
+        0
+    };
+    let base = load_address(&file);
     // A code module sits in the file at one address and runs at another:
     // work on the image with it at its link address, and put it back.
     let modules = match modules(args) {
@@ -236,12 +223,30 @@ fn pass(
             return 2;
         }
     };
-    let overlay = match Overlay::new(modules, &data, base, text.unwrap_or(&[]), out) {
+    let overlay = match Overlay::new(modules, &file, base, text.unwrap_or(&[]), out) {
         Ok(overlay) => overlay,
         Err(status) => return status,
     };
-    let file_len = data.len();
-    let mut data = overlay.expand(&data, base);
+    let file_len = file.len();
+    let mut data = overlay.expand(&file, base);
+    // The map names module link addresses, not their compact placement in
+    // the file. Check its jump tables against the expanded image.
+    let link_map = match open_map(map_path.as_deref(), &data, out) {
+        Ok(map) => map,
+        Err(status) => return status,
+    };
+    if padding != 0 {
+        if let Err(error) = write_whole(path, &file) {
+            let _ = writeln!(out, "{}", io_message(&error, path));
+            return 1;
+        }
+        let _ = writeln!(
+            out,
+            "padded {} with {padding} zero bytes to the {} bytes its header claims",
+            path.display(),
+            file.len() - HEADER as usize
+        );
+    }
     let image_end = base + data.len() as i64 - HEADER;
     let listing = disassemble(&data, base);
     let hazards = {

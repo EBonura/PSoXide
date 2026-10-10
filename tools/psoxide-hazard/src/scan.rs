@@ -113,13 +113,13 @@ fn scan_in(
         let _ = writeln!(out, "{}", io_message(&error, path));
         ScanError::Failed(1)
     })?;
-    let link_map: Option<LinkMap> = open_map(map_path, &file, out).map_err(ScanError::Failed)?;
     let base = load_address(&file);
     // A code module sits in the file at one address and runs at another:
     // scan the image with it at its link address.
     let overlay = Overlay::new(modules.to_vec(), &file, base, text.unwrap_or(&[]), out)
         .map_err(ScanError::Failed)?;
     let data = overlay.expand(&file, base);
+    let link_map: Option<LinkMap> = open_map(map_path, &data, out).map_err(ScanError::Failed)?;
     let mut listing = Listing::new(&data, base);
     if let Some(ranges) = text {
         listing.retain_text(ranges);
