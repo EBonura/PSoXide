@@ -4,14 +4,12 @@
 use std::io::Write;
 use std::path::Path;
 
-use psx_iso::{pad_to_payload, ExeError};
-
 use crate::detect::{
     branch_sources, encode_j, every_word, is, load_destination, looks_like_code, reads, Detector,
     Hazard, Image, IsCode, COND, JUMPS, MAGIC,
 };
 use crate::linkmap::io_message;
-use crate::listing::{load_address, word_at_offset, Listing, HEADER};
+use crate::listing::{load_address, pad_to_payload, word_at_offset, Listing, Padding, HEADER};
 use crate::text::{fields, int_hex, strip, trailing_hex};
 use crate::{cli_args, open_map, report_unlisted, text_bounds, whole_image};
 
@@ -192,7 +190,7 @@ fn pass(
     };
     if !check_only {
         match pad_to_payload(&mut data) {
-            Ok(0) | Err(ExeError::TooShort | ExeError::BadMagic) => {}
+            Ok(0) | Err(Padding::NotAnExe) => {}
             Ok(added) => {
                 if let Err(error) = write_whole(path, &data) {
                     let _ = writeln!(out, "{}", io_message(&error, path));
@@ -205,7 +203,7 @@ fn pass(
                     data.len() - HEADER as usize
                 );
             }
-            Err(ExeError::TruncatedPayload { expected, actual }) => {
+            Err(Padding::Truncated { expected, actual }) => {
                 let _ = writeln!(
                     out,
                     "{} holds {actual} payload bytes and its header claims {expected}: truncated, \
