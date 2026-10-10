@@ -456,14 +456,27 @@ impl NearView {
             i32::from(position[1]),
             i32::from(position[2]),
         );
-        let dot = |row: &[i16; 3]| {
-            (i32::from(row[0]) * x + i32::from(row[1]) * y + i32::from(row[2]) * z) >> 12
-        };
-        let depth = dot(&self.rows[2]) + self.translation[2];
+        let row = &self.rows[2];
+        let depth = ((i32::from(row[0]) * x + i32::from(row[1]) * y + i32::from(row[2]) * z) >> 12)
+            + self.translation[2];
         if depth <= 0 {
             return None;
         }
-        let depth = depth.min(i32::from(u16::MAX)) as u32;
+        self.place(position, depth.min(i32::from(u16::MAX)) as u32)
+    }
+
+    /// [`Self::project`] for a position whose view depth is already known
+    /// (the GTE's `SZ`): `depth` is at least 1 and at most `u16::MAX`.
+    #[inline(always)]
+    fn place(&self, position: [i16; 3], depth: u32) -> Option<[i16; 2]> {
+        let (x, y, z) = (
+            i32::from(position[0]),
+            i32::from(position[1]),
+            i32::from(position[2]),
+        );
+        let dot = |row: &[i16; 3]| {
+            (i32::from(row[0]) * x + i32::from(row[1]) * y + i32::from(row[2]) * z) >> 12
+        };
         // `H << 16 / depth`, rounded: `H` is a 16-bit register, so it fits.
         let divisor = (((self.focal_length as u32) << 16) + depth / 2) / depth;
         // `IR * divisor >> 16` as `IR * high + (IR * low >> 16)`, exact for
@@ -507,6 +520,10 @@ trait Reproject: Copy {
     /// unwritten and reported to the caller.
     const SCREENS: bool = false;
 
+    /// Whether the batch's vertices already carry the GTE's screen position
+    /// and depth, so the writer does not project them again.
+    const PROJECTED: bool = false;
+
     /// The end of the packet storage a clipped polygon may write up to.
     fn limit(self) -> *mut u32;
 
@@ -533,6 +550,7 @@ type NearBatch<'a> = (&'a NearView, *mut u32);
 
 impl Reproject for NearBatch<'_> {
     const CLIPS: bool = true;
+    const PROJECTED: bool = true;
 
     #[inline(always)]
     fn limit(self) -> *mut u32 {
@@ -544,8 +562,9 @@ impl Reproject for NearBatch<'_> {
         for index in 0..count {
             // SAFETY: `index < count`.
             let vertex = unsafe { &mut *vertices.add(index) };
-            if self.0.saturates(vertex.depth) {
-                if let Some(screen) = self.0.project(vertex.position) {
+            // A zero depth is a vertex behind the view: the GTE's answer stands.
+            if vertex.depth != 0 && self.0.saturates(vertex.depth) {
+                if let Some(screen) = self.0.place(vertex.position, vertex.depth) {
                     vertex.screen = screen;
                 }
             }
@@ -1299,11 +1318,14 @@ pub unsafe fn submit_surface_batch_screened(
     }
 }
 
-/// [`submit_surface_batch`] for surfaces already clipped to the screen:
-/// vertices the GTE divide saturates on are reprojected exactly from `view`.
+/// [`submit_surface_batch`] for surfaces the screened writer left: their
+/// vertices already carry the GTE's projection (the screened pass wrote it in
+/// place), so this does not project them again, and those the GTE divide
+/// saturates on are reprojected exactly from `view`.
 ///
 /// # Safety
-/// As [`submit_surface_batch`], with `output..end` the packet storage the
+/// As [`submit_surface_batch`], except the vertices are already projected,
+/// with `output..end` the packet storage the
 /// writer may fill: a polygon clipped to the GPU's window takes more packets
 /// than the batch reserved, and is dropped when `end` leaves no room. `view`
 /// must describe the view loaded in the GTE.
@@ -1360,7 +1382,9 @@ unsafe fn submit_surface_batch_with<R: Reproject>(
     }
     // SAFETY: `vertex_count` initialised records per the contract.
     let flagged = unsafe {
-        let flagged = if R::SCREENS {
+        let flagged = if R::PROJECTED {
+            0
+        } else if R::SCREENS {
             project_vertices_flagged(vertices, vertex_count)
         } else {
             project_vertices(vertices, vertex_count);

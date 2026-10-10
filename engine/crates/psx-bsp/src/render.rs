@@ -3310,11 +3310,17 @@ unsafe fn flush_pxbsp_batch_zone(
 
 /// Draw the surfaces of a flushed batch the writer left for the zone path.
 ///
+/// The flush already projected every vertex in place, so each surface is
+/// drawn from the batch itself, highest first: the splitter's scratch slots
+/// follow the surface's own vertices, and only surfaces after it (written
+/// already, or deferred and drawn before it) sit there.
+///
 /// # Safety
-/// As [`flush_pxbsp_batch_zone`]; `deferred` names surfaces of `surfaces`.
+/// As [`flush_pxbsp_batch_zone`]; `deferred` names surfaces of `surfaces`, and
+/// `vertices` holds the batch's scratch slots after its last vertex.
 #[inline(never)]
 unsafe fn draw_zone_surfaces(
-    vertices: &[AffineVertex],
+    vertices: &mut [AffineVertex],
     surfaces: &[AffineSurface],
     mut deferred: u32,
     mut submitted: SurfaceSubmit,
@@ -3322,22 +3328,22 @@ unsafe fn draw_zone_surfaces(
     view: &NearView,
 ) -> SurfaceSubmit {
     while deferred != 0 {
-        let index = deferred.trailing_zeros() as usize;
-        deferred &= deferred - 1;
+        let index = 31 - deferred.leading_zeros() as usize;
+        deferred &= !(1 << index);
         let surface = surfaces[index];
         let first = usize::from(surface.first_vertex);
         let count = usize::from(surface.vertex_count);
-        let mut zone_vertices = [AffineVertex::default(); PXBSP_AFFINE_BATCH_VERTEX_CAPACITY];
-        zone_vertices[..count].copy_from_slice(&vertices[first..first + count]);
+        let window = &mut vertices[first..first + count + SUBDIVISION_SCRATCH_VERTICES];
         let own = AffineSurface {
             first_vertex: 0,
             ..surface
         };
-        // SAFETY: the vertices are the surface's own, and `end` bounds the
-        // storage the batch reserved room in.
+        // SAFETY: the window is the surface's own projected vertices and the
+        // scratch after them, and `end` bounds the storage the batch reserved
+        // room in.
         let drawn = unsafe {
             submit_surface_batch_near(
-                zone_vertices.as_mut_ptr(),
+                window.as_mut_ptr(),
                 count,
                 &own,
                 1,
