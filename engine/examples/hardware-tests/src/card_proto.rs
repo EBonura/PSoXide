@@ -12,7 +12,7 @@
 //! are `FF`, the flag byte, `5A 5D`, a dummy, the MSB, `5C 5D`, the MSB and LSB
 //! again, 128 data bytes, the checksum and `47`. A write is 138 bytes: `81 57 00 00 MSB LSB`, 128 data
 //! bytes, the checksum and three zeros (`5C 5D`, then the status). For each
-//! slot with a card the read is done four times (of frame 40, see
+//! slot with a card the read is done four times (of frame 56, see
 //! `WRITE_FRAME`), every byte's `/ACK` rise, width and arrival kept; the writes happen
 //! only with L1 and R1 held at the start and only when every gate on the
 //! reads passes (see `slot`), and write back the same 128 bytes the read
@@ -63,15 +63,16 @@ const READ_ROUNDS: usize = 4;
 const WRITE_ROUNDS: usize = 2;
 const HEAD_READ: usize = 10;
 const HEAD_WRITE: usize = 6;
-/// The sector read four times and written back: frame 40, one of the unused
-/// frames of block 0. Block 0 is the card's own: frame 0 the header ("MC"),
-/// frames 1 to 15 the directory, 16 to 35 the broken-sector list and its
-/// replacements, 36 to 62 unused, 63 the BIOS's write-test frame (psx-spx,
-/// from memory, not re-checked here; the SDK's formatter, psx-mc `fs.rs`,
-/// likewise clears 36 to 63 as system frames with no content). A torn write
-/// here cannot make the BIOS see an unformatted card, which one to the header
-/// or the directory could. Frame 0 is never written.
-const WRITE_FRAME: u16 = 40;
+/// The sector read four times and written back: frame 56, one of the unused
+/// frames of block 0. Block 0 is the card's own (psx-spx, memory card data
+/// format): frame 0 the header ("MC"), frames 1 to 15 the directory, 16 to 35
+/// the broken-sector list, 36 to 55 the broken-sector replacement data, 56 to
+/// 62 unused, 63 the BIOS's write-test frame. Frames 36 to 55 can hold live
+/// replacement data on a card with bad sectors, so they are not used. A torn
+/// write to an unused frame cannot make the BIOS see an unformatted card, which
+/// one to the header or the directory could. Frames 0 to 55 and 63 are never
+/// written.
+const WRITE_FRAME: u16 = 56;
 
 static mut BYTES: [Byte; READ_LEN] = [Byte::none(); READ_LEN];
 static mut READS: [[Byte; READ_LEN]; READ_ROUNDS] = [[Byte::none(); READ_LEN]; READ_ROUNDS];
