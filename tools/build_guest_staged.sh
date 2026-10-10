@@ -203,25 +203,24 @@ done
 # every other line byte-identical, so the inherited [workspace.package],
 # [workspace.lints] and [workspace.dependencies] values cannot drift from the
 # real manifest the way a hand-copied stub would.
-python3 - "$ROOT/Cargo.toml" "$STAGE/Cargo.toml" <<'PY'
-import sys
-
-source, destination = sys.argv[1], sys.argv[2]
-text = open(source, encoding="utf-8").read()
-start = text.index("members = [")
-end = text.index("]", start) + 1
-staged = (
-    text[:start]
-    + 'members = [\n    "crates/psx-hw",\n    "crates/psxed-format",\n]'
-    + text[end:]
-)
-try:
-    if open(destination, encoding="utf-8").read() == staged:
-        sys.exit(0)
-except OSError:
-    pass
-open(destination, "w", encoding="utf-8").write(staged)
-PY
+staged_manifest="$(mktemp)"
+awk '
+    !done && /^members = \[/ {
+        print "members = ["
+        print "    \"crates/psx-hw\","
+        print "    \"crates/psxed-format\","
+        skipping = 1
+    }
+    skipping {
+        if ($0 ~ /\]/) { print "]"; skipping = 0; done = 1 }
+        next
+    }
+    { print }
+' "$ROOT/Cargo.toml" > "$staged_manifest"
+if ! cmp -s "$staged_manifest" "$STAGE/Cargo.toml"; then
+    cp "$staged_manifest" "$STAGE/Cargo.toml"
+fi
+rm -f "$staged_manifest"
 
 mkdir -p "$GUEST_CARGO_HOME"
 cd "$STAGE/$GUEST_DIR"

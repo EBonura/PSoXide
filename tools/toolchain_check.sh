@@ -48,7 +48,7 @@ rm -rf "$OUT"
 mkdir -p "$OUT"
 (
     cd "$ROOT/emu"
-    cargo run -q -p frontend --release -- launch --path "$EXE" \
+    cargo run -q -p frontend --features editor --release -- launch --path "$EXE" \
         --steps 1500000000 --route-screenshot-dir "$OUT" \
         --route-screenshot-interval 500 >/dev/null 2>&1
 )
