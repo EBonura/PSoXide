@@ -33,6 +33,12 @@ shipped without either, which is why no machine-code baseline exists for them.
 
 ## History
 
+### v2.5 (2026-10-11, schema PX8)
+
+MINOR: twelve cached-RAM store/load timing rows and one address readback row were added to `EXTENDED PROBES AND SHAPES`. Existing rows, step order and capture format are unchanged. Records `0x8D0`-`0x8DB` are the four T00/T10/T01/T11 shapes at literal gaps of 0, 2 and 6 nops, with sixteen successive A/B word pairs per row. Each has eight trailing nops and a pointer advance. The warm harness masks IRQs, times the second pass and records min/median/max of five samples. `0x8DC` records zeroed A count, unchanged sentinel B count and whether the last load returned the final B sentinel: 16, 16, 1 on a clean run. The load witness is copied after the timer read, outside the measured interval. Linked instruction markers `0x220`-`0x22B` audit the exact opcodes and spans. The interaction per pair is `(T11 - T10 - T01 + T00) / 16`, calculated separately at each gap from unrounded clocks. These measurements distinguish a store-to-different-address-load interaction from ordinary store and load cost; they do not assume a bus delay constant.
+
+The 0/2/6 rows answer an open question raised by v2.4's mixed CPU calibration `0x8C1`. No v2.5 silicon result is claimed by this source addition. The disc must be run on hardware and in the emulator using the same BIN/EXE before changing the CPU timing model.
+
 ### v2.4 (2026-10-09, schema PX8)
 
 MINOR: five new measurements the emulator work asked for, a pad question, and a self-check on the record list. No existing record changes what it means. The SDK pin is now `1832928d0` (the pad integration branch with the five review fixes); the emulator pin is `af6747947`. Steps: 66 (61 before), records: about 1,000 (788), `TIMING_RECORD_COUNT` 1,100.

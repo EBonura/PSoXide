@@ -46,6 +46,10 @@ const SPU_SPARE: u32 = 0x1F80_1DBC;
 /// 16 words so the sequential-address probe has somewhere to walk, plus slack
 /// for the unaligned store pair, which writes one byte past a word.
 static mut PERF_WORDS: [u32; 18] = [0; 18];
+/// Sixteen different cached-RAM A/B pairs for the store-to-load timing rows.
+/// The timed code walks forward, so a queued store cannot merge with the next.
+static mut STORE_LOAD_WORDS: [u32; 32] = [0; 32];
+static mut STORE_LOAD_WITNESS: u32 = 0;
 
 /// A probe argument that is only known at run time.
 #[derive(Copy, Clone)]
@@ -57,6 +61,7 @@ enum Arg {
     RamUnaligned,
     /// The same word through KSEG1.
     RamWordKseg1,
+    StoreLoadPairs,
     /// 4 KiB of `lw; nop` pairs covering every I-cache line.
     IcacheLoadBlock,
     /// Leaf at line 0 of a 4 KiB page.
@@ -81,6 +86,7 @@ impl Arg {
             Self::RamWord => (&raw const PERF_WORDS) as u32,
             Self::RamUnaligned => (&raw const PERF_WORDS) as u32 + 1,
             Self::RamWordKseg1 => ((&raw const PERF_WORDS) as u32 & 0x1FFF_FFFF) | 0xA000_0000,
+            Self::StoreLoadPairs => (&raw const STORE_LOAD_WORDS) as u32,
             Self::IcacheLoadBlock => __hwtest_icache_load_block as *const () as u32,
             Self::EntryW0 => __hwtest_icache_entry_w0 as *const () as u32,
             Self::EntryW1 => __hwtest_icache_entry_w1 as *const () as u32,
@@ -305,6 +311,97 @@ const SHAPES: [Probe; 22] = [
     // cached landing costs the same.
     probe(0x135, 32, cached_call_pairs, Arg::EntryW0, Arg::AliasB),
     probe(0x136, 32, cached_call_pairs, Arg::EntryW0, Arg::EntryW1),
+];
+
+/// v2.5: four controlled shapes at each of three literal gaps. For each gap,
+/// T00/T10/T01/T11 separate an ordinary store and load from any extra cost
+/// of a store immediately preceding a load of a different RAM word. The
+/// linked instructions are bracketed by separate markers 0x220..0x22B.
+const STORE_LOAD: [Probe; 12] = [
+    probe(
+        0x8D0,
+        16,
+        store_load_00_g0,
+        Arg::StoreLoadPairs,
+        Arg::StoreLoadPairs,
+    ),
+    probe(
+        0x8D1,
+        16,
+        store_load_10_g0,
+        Arg::StoreLoadPairs,
+        Arg::StoreLoadPairs,
+    ),
+    probe(
+        0x8D2,
+        16,
+        store_load_01_g0,
+        Arg::StoreLoadPairs,
+        Arg::StoreLoadPairs,
+    ),
+    probe(
+        0x8D3,
+        16,
+        store_load_11_g0,
+        Arg::StoreLoadPairs,
+        Arg::StoreLoadPairs,
+    ),
+    probe(
+        0x8D4,
+        16,
+        store_load_00_g2,
+        Arg::StoreLoadPairs,
+        Arg::StoreLoadPairs,
+    ),
+    probe(
+        0x8D5,
+        16,
+        store_load_10_g2,
+        Arg::StoreLoadPairs,
+        Arg::StoreLoadPairs,
+    ),
+    probe(
+        0x8D6,
+        16,
+        store_load_01_g2,
+        Arg::StoreLoadPairs,
+        Arg::StoreLoadPairs,
+    ),
+    probe(
+        0x8D7,
+        16,
+        store_load_11_g2,
+        Arg::StoreLoadPairs,
+        Arg::StoreLoadPairs,
+    ),
+    probe(
+        0x8D8,
+        16,
+        store_load_00_g6,
+        Arg::StoreLoadPairs,
+        Arg::StoreLoadPairs,
+    ),
+    probe(
+        0x8D9,
+        16,
+        store_load_10_g6,
+        Arg::StoreLoadPairs,
+        Arg::StoreLoadPairs,
+    ),
+    probe(
+        0x8DA,
+        16,
+        store_load_01_g6,
+        Arg::StoreLoadPairs,
+        Arg::StoreLoadPairs,
+    ),
+    probe(
+        0x8DB,
+        16,
+        store_load_11_g6,
+        Arg::StoreLoadPairs,
+        Arg::StoreLoadPairs,
+    ),
 ];
 
 /// v1.24: the scratchpad-stack lever (lever_probes.rs). One call of
@@ -663,6 +760,39 @@ pub(crate) fn push_safe(records: &mut Records, next: &mut usize) {
 pub(crate) fn push_extended(records: &mut Records, next: &mut usize) {
     push_probes(&EXTENDED, records, next);
     push_probes(&SHAPES, records, next);
+    // Volatile setup and readback are outside every timed interval. A stays
+    // writable, B stays distinct and nonzero; the machine-code audit proves
+    // each load instruction targets B rather than A.
+    let words = (&raw mut STORE_LOAD_WORDS) as *mut u32;
+    for i in 0..16 {
+        unsafe {
+            core::ptr::write_volatile(words.add(i * 2), 0x1357_0000 | i as u32);
+            core::ptr::write_volatile(words.add(i * 2 + 1), 0xA5A5_0000 | i as u32);
+        }
+    }
+    push_probes(&STORE_LOAD, records, next);
+    let mut a_zero = 0;
+    let mut b_unchanged = 0;
+    for i in 0..16 {
+        unsafe {
+            a_zero += (core::ptr::read_volatile(words.add(i * 2)) == 0) as u16;
+            b_unchanged +=
+                (core::ptr::read_volatile(words.add(i * 2 + 1)) == (0xA5A5_0000 | i as u32)) as u16;
+        }
+    }
+    let witness_ok =
+        unsafe { (core::ptr::read_volatile(&raw const STORE_LOAD_WITNESS) == 0xA5A5_000F) as u16 };
+    push_timing_record(
+        records,
+        next,
+        TimingRecord {
+            id: 0x8DC,
+            work: 16,
+            min: a_zero,
+            med: b_unchanged,
+            max: witness_ok,
+        },
+    );
     push_dma(records, next);
 }
 
@@ -1089,6 +1219,94 @@ macro_rules! warm_probe {
         }
     };
 }
+
+/// Sixteen adjacent A/B pairs. Each timed pass resets the pointer from `$9`;
+/// the first pass warms the I-cache and the second is the recorded one.
+/// Eight tail nops let the previous store drain before the next pair. The
+/// omitted operation is a literal nop, so each shape has equal instruction
+/// count at a fixed gap. The 0/2/6 gap itself is also literal nops.
+macro_rules! store_load_pair_probe {
+    ($name:ident, $marker:literal, $first:literal, $second:literal, $gap:literal) => {
+        #[inline(never)]
+        fn $name(a: u32, b: u32) -> u16 {
+            let elapsed: u32;
+            let last_load: u32;
+            unsafe {
+                core::arch::asm!(
+                    concat!(
+                        ".set noreorder\n",
+                        ".balign 16\n",
+                        ".word 0x34000000 | (", stringify!($marker), " << 1)\n",
+                        "lui $11, 0x1F80\n",
+                        "ori $11, $11, 0x1120\n",
+                        "addiu $13, $zero, 2\n",
+                        "2:\n",
+                        "sw $zero, 4($11)\n",
+                        "sw $zero, 0($11)\n",
+                        "addu $8, $9, $zero\n",
+                        ".rept 16\n",
+                        $first, "\n",
+                        ".rept ", stringify!($gap), "\n",
+                        "nop\n",
+                        ".endr\n",
+                        $second, "\n",
+                        ".rept 8\n",
+                        "nop\n",
+                        ".endr\n",
+                        "addiu $8, $8, 8\n",
+                        ".endr\n",
+                        "lw $12, 0($11)\n",
+                        "addiu $13, $13, -1\n",
+                        "bnez $13, 2b\n",
+                        "nop\n",
+                        ".word 0x34000001 | (", stringify!($marker), " << 1)\n",
+                        ".set reorder"
+                    ),
+                    inout("$8") a => _,
+                    inout("$9") b => _,
+                    inout("$10") 0u32 => last_load,
+                    lateout("$11") _,
+                    lateout("$12") elapsed,
+                    lateout("$13") _,
+                    options(nostack)
+                );
+                core::ptr::write_volatile(&raw mut STORE_LOAD_WITNESS, last_load);
+            }
+            elapsed as u16
+        }
+    };
+}
+
+store_load_pair_probe!(store_load_00_g0, 0x220, "nop", "nop", 0);
+store_load_pair_probe!(store_load_10_g0, 0x221, "sw $zero, 0($8)", "nop", 0);
+store_load_pair_probe!(store_load_01_g0, 0x222, "nop", "lw $10, 4($8)", 0);
+store_load_pair_probe!(
+    store_load_11_g0,
+    0x223,
+    "sw $zero, 0($8)",
+    "lw $10, 4($8)",
+    0
+);
+store_load_pair_probe!(store_load_00_g2, 0x224, "nop", "nop", 2);
+store_load_pair_probe!(store_load_10_g2, 0x225, "sw $zero, 0($8)", "nop", 2);
+store_load_pair_probe!(store_load_01_g2, 0x226, "nop", "lw $10, 4($8)", 2);
+store_load_pair_probe!(
+    store_load_11_g2,
+    0x227,
+    "sw $zero, 0($8)",
+    "lw $10, 4($8)",
+    2
+);
+store_load_pair_probe!(store_load_00_g6, 0x228, "nop", "nop", 6);
+store_load_pair_probe!(store_load_10_g6, 0x229, "sw $zero, 0($8)", "nop", 6);
+store_load_pair_probe!(store_load_01_g6, 0x22A, "nop", "lw $10, 4($8)", 6);
+store_load_pair_probe!(
+    store_load_11_g6,
+    0x22B,
+    "sw $zero, 0($8)",
+    "lw $10, 4($8)",
+    6
+);
 
 /// `$count` x (`$op` $8,$9; `$gap` nops; mflo $10).
 macro_rules! muldiv_gap_probe {
