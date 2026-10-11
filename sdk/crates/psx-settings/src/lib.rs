@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //! Shared, allocator-free game preferences.
 //!
-//! The record intentionally contains only settings that recur across PSoXide
-//! games. Games remain free to keep simulation or renderer-specific options in
-//! their own save data. The byte format is explicit and checksummed so a newer
-//! executable can reject a torn or incompatible card write and fall back to
-//! its shipped defaults.
+//! The record holds settings that recur across PSoXide games plus seven
+//! game-owned flag bits. Games remain free to keep larger simulation or
+//! renderer-specific data in their own saves. The byte format is explicit and
+//! checksummed so a newer executable can reject a torn or incompatible card
+//! write and fall back to its shipped defaults.
 
 #![no_std]
 #![warn(missing_docs)]
