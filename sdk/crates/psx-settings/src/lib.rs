@@ -39,6 +39,12 @@ pub const MAX_RECORD_LEN: usize = 128;
 
 /// Settings flag: invert vertical look.
 pub const FLAG_INVERT_Y: u8 = 1 << 0;
+/// Bits in the existing settings flag byte owned by each game. Bit 0 stays
+/// reserved for [`FLAG_INVERT_Y`], and no future shared setting may use these
+/// seven bits. Unknown game bits survive loading, sanitizing and saving with
+/// this SDK. Older executables masked these bits on load and may erase them on
+/// a later save, so rolling back a game build cannot preserve their meaning.
+pub const GAME_FLAGS_MASK: u8 = !FLAG_INVERT_Y;
 
 /// A game profile shared by menus, input and memory-card persistence.
 ///
@@ -62,7 +68,8 @@ pub struct Profile<const ACTIONS: usize, const SCORES: usize> {
     pub look_speed_percent: u8,
     /// Game-selected difficulty index.
     pub difficulty: u8,
-    /// Bit flags such as [`FLAG_INVERT_Y`].
+    /// Bit flags: bit 0 is [`FLAG_INVERT_Y`], bits 1 through 7 belong to the
+    /// game. Prefer [`Self::set_game_flag`] so unrelated bits survive edits.
     pub flags: u8,
     /// Logical action bindings.
     pub actions: ActionMap<ACTIONS>,
@@ -94,7 +101,8 @@ impl<const ACTIONS: usize, const SCORES: usize> Profile<ACTIONS, SCORES> {
         HEADER_LEN + ACTIONS * BINDING_LEN + SCORES * SCORE_LEN
     }
 
-    /// Clamp user-controlled values to safe shared ranges.
+    /// Clamp user-controlled values to safe shared ranges. Flag bits are
+    /// preserved because the game owns bits 1 through 7.
     pub fn sanitize(&mut self) {
         // `Brightness` and `ScreenOffset` clamp in their constructors, so any
         // value a profile holds is already inside -5..=5 and -16..=16.
@@ -103,7 +111,6 @@ impl<const ACTIONS: usize, const SCORES: usize> Profile<ACTIONS, SCORES> {
         self.move_deadzone = self.move_deadzone.clamp(0, 64);
         self.look_deadzone = self.look_deadzone.clamp(0, 64);
         self.look_speed_percent = self.look_speed_percent.clamp(25, 200);
-        self.flags &= FLAG_INVERT_Y;
     }
 
     /// Whether vertical look is inverted.
@@ -117,6 +124,22 @@ impl<const ACTIONS: usize, const SCORES: usize> Profile<ACTIONS, SCORES> {
             self.flags |= FLAG_INVERT_Y;
         } else {
             self.flags &= !FLAG_INVERT_Y;
+        }
+    }
+
+    /// Return the raw game-owned bits in the settings flag byte.
+    pub const fn game_flags(&self) -> u8 {
+        self.flags & GAME_FLAGS_MASK
+    }
+
+    /// Set or clear the selected game-owned bits without changing any other
+    /// bits. Bit 0 is ignored even if it appears in `mask`.
+    pub fn set_game_flag(&mut self, mask: u8, enabled: bool) {
+        let mask = mask & GAME_FLAGS_MASK;
+        if enabled {
+            self.flags |= mask;
+        } else {
+            self.flags &= !mask;
         }
     }
 
@@ -551,6 +574,60 @@ mod tests {
         assert_eq!(reloaded, loaded);
         assert_eq!(reloaded.brightness.level(), 2);
         assert_eq!(reloaded.high_scores, [7, 42, 9]);
+    }
+
+    #[test]
+    fn game_bits_survive_both_record_versions_and_sanitize() {
+        let (mut old, old_len) = version_one_record(75);
+        old[7] = 0xA7;
+        old[15] = checksum(&old[..15], &old[HEADER_LEN_V1..old_len]);
+        let mut profile = Profile::<2, 3>::decode(&old[..old_len]).unwrap();
+        assert_eq!(profile.flags, 0xA7);
+        assert_eq!(profile.game_flags(), 0xA6);
+        assert!(profile.invert_y());
+        profile.sanitize();
+        assert_eq!(profile.flags, 0xA7);
+
+        let mut bytes = [0u8; MAX_RECORD_LEN];
+        let len = profile.encode(&mut bytes).unwrap();
+        assert_eq!(VERSION, 2);
+        assert_eq!(len, old_len + 2);
+        assert_eq!(bytes[7], 0xA7);
+        assert_eq!(Profile::<2, 3>::decode(&bytes[..len]).unwrap(), profile);
+    }
+
+    #[test]
+    fn game_flag_edits_preserve_other_bits_and_cannot_change_invert_y() {
+        let mut profile = Profile::<2, 1>::new(ACTIONS);
+        profile.flags = 0xA7;
+        profile.set_game_flag(0x02, false);
+        assert_eq!(profile.flags, 0xA5);
+        profile.set_game_flag(0x03, true);
+        assert_eq!(profile.flags, 0xA7);
+        profile.set_game_flag(FLAG_INVERT_Y, false);
+        assert_eq!(profile.flags, 0xA7);
+        profile.set_invert_y(false);
+        assert_eq!(profile.flags, 0xA6);
+        profile.set_game_flag(0x02, false);
+        assert_eq!(profile.flags, 0xA4);
+        profile.set_invert_y(true);
+        assert_eq!(profile.flags, 0xA5);
+    }
+
+    #[test]
+    fn game_bits_keep_the_version_two_length_and_checksum() {
+        let mut profile = Profile::<5, 0>::new(ActionMap::new([ActionBinding::UNBOUND; 5]));
+        profile.set_game_flag(0x80, true);
+        let mut bytes = [0u8; MAX_RECORD_LEN];
+        let len = profile.encode(&mut bytes).unwrap();
+        assert_eq!(len, 38);
+        assert_eq!(bytes[4], 2);
+        assert_eq!(bytes[7], 0x80);
+        bytes[7] ^= 0x40;
+        assert_eq!(
+            Profile::<5, 0>::decode(&bytes[..len]),
+            Err(CodecError::BadChecksum)
+        );
     }
 
     #[test]
