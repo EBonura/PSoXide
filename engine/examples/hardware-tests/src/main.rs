@@ -10,6 +10,7 @@
 #![no_std]
 #![no_main]
 #![allow(static_mut_refs)]
+#![cfg_attr(feature = "clut-preview", allow(dead_code, unused_imports))]
 // The probes drive the pad, SPU and CD-ROM registers directly and on purpose,
 // the way the BIOS and the first-party games of the era did, so the free
 // functions that predate the SDK's ownership tokens stay in use here. The
@@ -51,6 +52,7 @@ mod card_proto;
 mod cd_chain_probe;
 mod cd_route;
 mod cdstream_cases;
+mod clut_rewrite;
 mod console_tests;
 mod controller_test;
 mod cpu_tests;

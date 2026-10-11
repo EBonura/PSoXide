@@ -16,6 +16,8 @@ license = "GPL-2.0-or-later"
 # of the write (the changed byte shows where it landed).
 gate-test-bad-checksum = []
 gate-test-marker = []
+# Headless renderer comparison only. The burn artifact uses no features.
+clut-preview = []
 
 [[bin]]
 name = "hardware-tests"

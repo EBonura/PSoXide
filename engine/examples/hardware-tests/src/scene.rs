@@ -462,6 +462,7 @@ fn enable_cop2_for_diagnostics() {
 fn enable_cop2_for_diagnostics() {}
 
 #[no_mangle]
+#[cfg(not(feature = "clut-preview"))]
 fn main() -> ! {
     // Capture the BIOS-owned state (exception vector, SPU reverb) before any
     // SDK or engine path can initialise anything.
@@ -478,4 +479,10 @@ fn main() -> ! {
         ..Config::default()
     };
     App::run(config, &mut suite);
+}
+
+#[no_mangle]
+#[cfg(feature = "clut-preview")]
+fn main() -> ! {
+    clut_rewrite::preview()
 }

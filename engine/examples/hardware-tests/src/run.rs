@@ -655,6 +655,7 @@ records_step!(records_spu, records::push_spu_records);
 records_step!(records_cd, records::push_cd_records);
 records_step!(records_sio, records::push_sio_records);
 records_step!(records_gpu_batches, gpu_probes::push);
+records_step!(records_clut_rewrite, clut_rewrite::run);
 records_step!(records_perf_safe, perf_probes::push_safe);
 records_step!(records_perf_extended, perf_probes::push_extended);
 records_step!(records_risky_ab, perf_probes::push_risky);
@@ -828,6 +829,7 @@ const STEPS: &[Step] = &[
     step(Area::Gpu, "GPU CASES", tests_gpu),
     step(Area::Gpu, "GPU TIMING AND MDEC", records_gpu),
     step(Area::Gpu, "GPU BATCHES", records_gpu_batches),
+    step(Area::Gpu, "CLUT ADDRESS REWRITE", records_clut_rewrite),
     step(Area::Gpu, "MDEC DECODE", step_mdec),
     step(Area::Gpu, "GPU PRECISION", precision_gpu_step),
     step(Area::Gpu, "RASTER HASHES", precision_identity_step),
