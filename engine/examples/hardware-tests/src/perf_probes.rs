@@ -1222,9 +1222,10 @@ macro_rules! warm_probe {
 
 /// Sixteen adjacent A/B pairs. Each timed pass resets the pointer from `$9`;
 /// the first pass warms the I-cache and the second is the recorded one.
-/// Eight tail nops let the previous store drain before the next pair. The
-/// omitted operation is a literal nop, so each shape has equal instruction
-/// count at a fixed gap. The 0/2/6 gap itself is also literal nops.
+/// Eight tail nops give successive pairs the same fixed separation without
+/// assuming a store has drained on silicon. The omitted operation is a
+/// literal nop, so each shape has equal instruction count at a fixed gap.
+/// The 0/2/6 gap itself is also literal nops.
 macro_rules! store_load_pair_probe {
     ($name:ident, $marker:literal, $first:literal, $second:literal, $gap:literal) => {
         #[inline(never)]
