@@ -18,6 +18,7 @@ members = [
     "crates/psx-asset",
     "crates/psx-mc",
     "crates/psx-settings",
+    "crates/psx-segments",
     "crates/psx-display",
     "crates/psx-pack",
     "crates/psx-osk",
@@ -68,6 +69,7 @@ psx-fx   = { path = "crates/psx-fx" }
 psx-asset = { path = "crates/psx-asset" }
 psx-mc  = { path = "crates/psx-mc" }
 psx-settings = { path = "crates/psx-settings" }
+psx-segments = { path = "crates/psx-segments" }
 psx-display = { path = "crates/psx-display" }
 psx-pack = { path = "crates/psx-pack" }
 psx-fmv  = { path = "crates/psx-fmv" }
