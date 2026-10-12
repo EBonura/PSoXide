@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+[package]
+name = "hello-overlay"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+
+[workspace]
+
+[[bin]]
+name = "hello-overlay"
+path = "src/main.rs"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+
+[dependencies]
+psx-residency = { path = "../../crates/psx-residency" }
+psx-rt = { path = "../../crates/psx-rt" }
