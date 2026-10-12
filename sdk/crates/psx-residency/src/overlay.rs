@@ -154,13 +154,23 @@ impl<'a, const E: usize, const S: usize, const C: usize> Admission<'a, E, S, C> 
         })
     }
 
-    /// Resolve current pages, never a static slice or an unguarded cached entry.
-    pub fn run(&self, index: usize) -> Option<crate::PageRun> {
+    /// Borrow current bytes for no longer than this executing admission and its
+    /// backing buffer. No copyable run or static slice escapes the lease.
+    pub fn bytes<'b, const P: usize>(
+        &'b self,
+        buffer: &'b crate::PageBuffer<P>,
+        index: usize,
+        len: usize,
+    ) -> Option<&'b [u8]> {
         let dependency = self.dependencies.get(index)?;
         if self.residency.resident_handle(dependency.key) != Some(dependency.handle) {
             return None;
         }
-        self.residency.try_run(dependency.handle)
+        let run = self.residency.try_run(dependency.handle)?;
+        if len > self.residency.payload_bytes(dependency.key) {
+            return None;
+        }
+        buffer.bytes(run, len)
     }
 }
 
@@ -184,6 +194,89 @@ pub fn direct(word: u32, kind: u32, target: u32, site: u32) -> Result<u32, Error
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct Disc;
+    impl crate::Host for Disc {
+        fn extent(&self, _: crate::ResourceKey) -> Option<crate::Extent> {
+            Some(crate::Extent {
+                lba: 1,
+                sectors: 1,
+                pages: 1,
+                bytes: 4,
+            })
+        }
+        fn walk_distance(&self, _: crate::ResourceKey) -> u32 {
+            0
+        }
+        fn submit(&mut self, _: &crate::ReadRequest) -> crate::Submit {
+            crate::Submit::Accepted
+        }
+        fn cancel(&mut self, _: crate::RequestId) {}
+    }
+
+    #[test]
+    fn admission_requires_entire_current_installed_dependency_set() {
+        use crate::*;
+        let mut config = Config::<1>::new();
+        config.pools[0] = PoolConfig {
+            capacity_pages: 4,
+            placement: Placement::FirstFit,
+        };
+        config.categories[0] = CategoryConfig {
+            pool: 0,
+            max_pages: 4,
+            max_entries: 4,
+            movable: true,
+            installs: true,
+            keep_radius: 0,
+        };
+        let mut engine = Residency::<4, 4, 1>::new(config);
+        let first = ResourceKey::new(Category::WORLD_REGION, 0).unwrap();
+        let second = ResourceKey::new(Category::WORLD_REGION, 1).unwrap();
+        let mut disc = Disc;
+        let mut evictions = [];
+        engine.step(
+            &[
+                Wanted::new(first, Class::Demand, 0),
+                Wanted::new(second, Class::Demand, 0),
+            ],
+            &mut disc,
+            &mut evictions,
+        );
+        engine.complete_read(engine.request_of(first).unwrap(), ReadOutcome::Done);
+        engine.complete_read(engine.request_of(second).unwrap(), ReadOutcome::Done);
+        let one = Dependency {
+            key: first,
+            handle: engine.begin_install(first).unwrap(),
+        };
+        let two = Dependency {
+            key: second,
+            handle: engine.begin_install(second).unwrap(),
+        };
+        assert!(engine.finish_install(first));
+        let dependencies = [one, two];
+        assert!(Admission::new(&mut engine, &dependencies).is_none());
+        assert!(engine.finish_install(second));
+        let buffer = PageBuffer::<4>::new();
+        {
+            let admitted = Admission::new(&mut engine, &dependencies).unwrap();
+            assert_eq!(admitted.bytes(&buffer, 0, 4), Some(&[0u8; 4][..]));
+            assert!(admitted.bytes(&buffer, 0, 5).is_none());
+        }
+        let mut evictions = [Eviction::NONE; 4];
+        assert_eq!(engine.evict_unlisted(&[], &mut evictions), 2);
+        assert!(Admission::new(&mut engine, &dependencies).is_none());
+        engine.step(
+            &[Wanted::new(first, Class::Demand, 0)],
+            &mut disc,
+            &mut evictions,
+        );
+        engine.complete_read(engine.request_of(first).unwrap(), ReadOutcome::Done);
+        engine.begin_install(first).unwrap();
+        assert!(engine.finish_install(first));
+        assert_ne!(engine.resident_handle(first), Some(one.handle));
+        assert!(Admission::new(&mut engine, &[one]).is_none());
+    }
 
     #[test]
     fn packages_reject_outside_and_unknown_fixups() {
