@@ -16,5 +16,6 @@ codegen-units = 1
 lto = true
 
 [dependencies]
+psx-hw   = { path = "../../../crates/psx-hw" }
 psx-pad  = { path = "../../crates/psx-pad" }
 psx-rt   = { path = "../../crates/psx-rt" }
