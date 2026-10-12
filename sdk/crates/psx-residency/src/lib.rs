@@ -132,6 +132,7 @@ mod host;
 mod key;
 mod pool;
 pub mod slots;
+pub mod overlay;
 #[cfg(test)]
 mod tests;
 
