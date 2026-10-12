@@ -208,8 +208,25 @@ impl<const SLOTS: usize> PagePool<SLOTS> {
         if page_count == 0 {
             return None;
         }
-        let slot = self.runs.iter().position(|run| run.count == 0)?;
         let first = self.find_fit(page_count)?;
+        self.allocate_at(first, page_count)
+    }
+
+    /// Allocate an exact contiguous range without moving existing allocations.
+    /// This supports consumers whose code windows constrain placement.
+    pub fn allocate_at(&mut self, first: u32, page_count: u32) -> Option<(Handle, PageRun)> {
+        let end = first.checked_add(page_count)?;
+        if page_count == 0 || end > self.capacity_pages {
+            return None;
+        }
+        if self
+            .runs
+            .iter()
+            .any(|run| run.count != 0 && first < run.first + run.count && run.first < end)
+        {
+            return None;
+        }
+        let slot = self.runs.iter().position(|run| run.count == 0)?;
         let generation = self.runs[slot].generation.wrapping_add(1);
         self.runs[slot] = Run {
             first,
@@ -298,6 +315,17 @@ impl<const SLOTS: usize> PagePool<SLOTS> {
         Some(PageRun {
             first_page: run.first,
             page_count: run.count,
+        })
+    }
+
+    /// Current handle of an occupied allocation slot, for owner bookkeeping.
+    /// This does not revive any previously issued handle.
+    pub fn handle_for_slot(&self, slot: u16) -> Option<Handle> {
+        let run = self.runs.get(slot as usize)?;
+        (run.count != 0).then_some(Handle {
+            pool: self.pool,
+            slot,
+            generation: run.generation,
         })
     }
 

@@ -120,10 +120,12 @@
 //! assert!(residency.is_resident(region));
 //! ```
 #![no_std]
+#![cfg_attr(target_arch = "mips", feature(asm_experimental_arch))]
 
 #[cfg(test)]
 extern crate std;
 
+pub mod arena;
 mod backoff;
 mod buffer;
 mod config;
