@@ -44,8 +44,12 @@ pub struct Section<'a> {
     pub name: &'a str,
     /// ELF section type.
     pub kind: u32,
+    /// ELF allocation/write/execute section flags.
+    pub flags: u32,
     /// Linked virtual address.
     pub address: u32,
+    /// Declared byte size, including NOBITS resident storage.
+    pub size: u32,
     /// Associated table index.
     pub link: u32,
     /// Relocation target section index.
@@ -90,6 +94,10 @@ pub struct Symbol<'a> {
 }
 
 impl<'a> Elf<'a> {
+    /// Every checked section with its original ownership index.
+    pub fn sections(&self) -> impl Iterator<Item = (usize, &Section<'a>)> {
+        self.sections.iter().enumerate()
+    }
     /// Read only ELF32 little-endian MIPS executables with ELF REL tables.
     pub fn parse(bytes: &'a [u8]) -> Result<Self, String> {
         if bytes.get(..7) != Some(&b"\x7fELF\x01\x01\x01"[..]) || u16_at(bytes, 18)? != 8 {
@@ -130,7 +138,9 @@ impl<'a> Elf<'a> {
             sections.push(Section {
                 name: string(names, u32_at(bytes, at)?)?,
                 kind,
+                flags: u32_at(bytes, at + 8)?,
                 address: u32_at(bytes, at + 12)?,
+                size: u32_at(bytes, at + 20)?,
                 link: u32_at(bytes, at + 24)?,
                 info: u32_at(bytes, at + 28)?,
                 stride: u32_at(bytes, at + 36)?,

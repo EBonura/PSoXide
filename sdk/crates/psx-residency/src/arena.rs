@@ -64,6 +64,35 @@ pub struct Descriptor {
     /// Checksum over all package words, before relocation.
     pub checksum: u32,
 }
+
+/// Final-link-patched resident metadata; keep initialized storage in `.data`.
+/// This fixed layout avoids a second compilation moving typed callsites.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct PackedDescriptor {
+    /// Complete package word count, excluding CD sector padding.
+    pub words: u32,
+    /// Module identity.
+    pub id: u32,
+    /// Original linked image address.
+    pub linked: u32,
+    /// Complete package checksum before relocation.
+    pub checksum: u32,
+    /// Number of live records in the fixed-capacity resident call table.
+    pub calls: u32,
+}
+
+/// Final-link-patched typed callsite; selector is the declared call-pair index.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct PackedCall {
+    /// Stable caller/export pair index from packaging arguments.
+    pub selector: u32,
+    /// Resident J/JAL instruction address.
+    pub site: u32,
+    /// Cold export byte offset.
+    pub offset: u32,
+}
 /// Word checksum matching the existing HK module transport.
 pub fn checksum(words: &[u32]) -> u32 {
     words.iter().fold(0x811c9dc5, |hash, word| {
@@ -372,6 +401,13 @@ fn flush() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn final_link_metadata_has_the_fixed_patch_layout() {
+        assert_eq!(core::mem::size_of::<PackedDescriptor>(), 20);
+        assert_eq!(core::mem::offset_of!(PackedDescriptor, checksum), 12);
+        assert_eq!(core::mem::size_of::<PackedCall>(), 12);
+        assert_eq!(core::mem::offset_of!(PackedCall, offset), 8);
+    }
     fn package(id: u32) -> [u32; 7] {
         [overlay::MAGIC, id, 2, 0, 8, 0x03e00008, 0]
     }

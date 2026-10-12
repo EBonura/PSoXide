@@ -20,6 +20,7 @@ pub mod linkmap;
 pub mod listing;
 pub mod module;
 pub mod overlay_elf;
+pub mod overlay_pack;
 pub mod patch;
 pub mod scan;
 pub mod stack_guard;
