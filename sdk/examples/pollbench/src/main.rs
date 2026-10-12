@@ -22,8 +22,8 @@ use psx_rt::tty;
 const POLLS: u32 = 200;
 
 /// Root counter 2: current value, mode.
-const T2_COUNTER: *const u32 = 0x1F80_1120 as *const u32;
-const T2_MODE: *mut u32 = 0x1F80_1124 as *mut u32;
+const T2_COUNTER: *const u32 = (psx_hw::timers::block(2) + psx_hw::timers::COUNTER) as *const u32;
+const T2_MODE: *mut u32 = (psx_hw::timers::block(2) + psx_hw::timers::MODE) as *mut u32;
 /// Mode bit 9 selects system clock / 8 for counter 2.
 const T2_SYSCLK_DIV8: u32 = 1 << 9;
 
