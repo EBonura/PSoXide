@@ -8,6 +8,7 @@ repository.workspace = true
 description  = "Residency policy for streamed data: contiguous page pools with generation handles, priority classes, pinning, distance-then-LRU eviction with hysteresis, retry backoff, and a transport-agnostic request interface. Host-testable, no heap."
 
 [dependencies]
+psx-rt = { path = "../psx-rt" }
 
 [lints]
 workspace = true
