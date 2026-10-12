@@ -114,6 +114,9 @@ pub fn references(
         }
     }
     for relocation in relocations {
+        if relocation.kind == 10 && relocation.target_section != module.section {
+            return Err(Error::Kind);
+        }
         let site = relocation
             .address
             .checked_sub(module.address)
@@ -279,6 +282,23 @@ mod tests {
         let mut malformed = image;
         malformed[2] = 0x2421_8010;
         assert!(references(0, &malformed, &[0..4], &relocations, &modules).is_err());
+        let pc_relative = crate::overlay_elf::Relocation {
+            address: 0x8040_8000,
+            kind: 10,
+            target_section: 3,
+            target_address: 0x8041_8000,
+        };
+        assert!(references(0, &image, &[], &[pc_relative], &modules).is_err());
+        let resident_relative = crate::overlay_elf::Relocation {
+            target_section: 1,
+            ..pc_relative
+        };
+        assert!(references(0, &image, &[], &[resident_relative], &modules).is_err());
+        let self_relative = crate::overlay_elf::Relocation {
+            target_section: 2,
+            ..pc_relative
+        };
+        assert!(references(0, &image, &[], &[self_relative], &modules).is_ok());
     }
 
     #[test]
