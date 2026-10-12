@@ -97,6 +97,7 @@ name = "psoxide-hazard"
 version = "0.1.0"
 dependencies = [
  "psx-disasm",
+ "psx-residency",
  "regex",
 ]
 
@@ -183,6 +184,10 @@ version = "0.1.0"
 
 [[package]]
 name = "psx-math"
+version = "0.1.0"
+
+[[package]]
+name = "psx-residency"
 version = "0.1.0"
 
 [[package]]
