@@ -10,6 +10,7 @@ description = "Post-link guest checks for PS1 executables: the R3000 load-delay 
 [dependencies]
 psx-disasm = { path = "../../crates/psx-disasm" }
 regex = "1"
+psx-residency = { path = "../../sdk/crates/psx-residency" }
 
 [[bin]]
 name = "hazard-patch"

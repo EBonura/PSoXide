@@ -97,6 +97,7 @@ name = "psoxide-hazard"
 version = "0.1.0"
 dependencies = [
  "psx-disasm",
+ "psx-residency",
  "regex",
 ]
 
@@ -178,12 +179,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "psx-io"
+version = "0.1.0"
+dependencies = [
+ "psx-hw",
+]
+
+[[package]]
 name = "psx-iso"
 version = "0.1.0"
 
 [[package]]
 name = "psx-math"
 version = "0.1.0"
+
+[[package]]
+name = "psx-residency"
+version = "0.1.0"
+dependencies = [
+ "psx-rt",
+]
+
+[[package]]
+name = "psx-rt"
+version = "0.1.0"
+dependencies = [
+ "psx-hw",
+ "psx-io",
+]
 
 [[package]]
 name = "psx-trace"

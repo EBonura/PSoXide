@@ -75,6 +75,7 @@ Build and run them via the top-level `Makefile` (see the
 | `hello-cdstream` | `psx-cdstream` on a disc: single, chained, prioritised, aborted-and-resumed and sustained reads of a known file checked byte for byte, an audio lease taken mid-read, and the foreground cost of a long read (`make hello-cdstream-disc`, `make hello-cdstream-gate`). |
 | `hello-i64probe` | Runs software 64-bit multiply/divide/modulo on the target and checks the results; covers psx-rt's `__divdi3`/`__moddi3` overrides. |
 | `hello-icache` | Rewrites a function in cached RAM and checks that `psx_rt::cache::flush_instruction_cache` makes the CPU run the new code; prints `ICACHE PASS`, `INCONCLUSIVE` (nothing was stale) or `FAIL`. |
+| `hello-overlay` | Same-compilation Rust cold entry and resident service, caller-owned arena, scoped static-call binding and unload/re-admit generation checks. Uses its own checked packaging recipe; see [the example](examples/hello-overlay/README.md). |
 | `cdda-read-contention` | CD-ROM conformance probe: issues a data read while CD-DA is playing and records which IRQ the drive raises. |
 
 ## See also
