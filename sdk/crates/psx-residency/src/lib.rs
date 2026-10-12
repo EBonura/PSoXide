@@ -130,6 +130,7 @@ mod config;
 mod engine;
 mod host;
 mod key;
+pub mod overlay;
 mod pool;
 pub mod slots;
 #[cfg(test)]
