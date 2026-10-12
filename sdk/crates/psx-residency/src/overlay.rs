@@ -122,6 +122,10 @@ impl<'a> Package<'a> {
             target: record[2],
         })
     }
+    /// Borrow raw import records for a bounded incremental installer.
+    pub fn import_words(&self) -> &'a [u32] {
+        self.imports
+    }
 }
 
 /// Centre used by signed MIPS low halves.

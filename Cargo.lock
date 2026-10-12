@@ -99,6 +99,7 @@ dependencies = [
  "psx-disasm",
  "psx-residency",
  "regex",
+ "serde_json",
 ]
 
 [[package]]
