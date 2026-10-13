@@ -80,8 +80,9 @@ resident bytes. Identities, section ownership, metadata ranges and call sites
 must be distinct across images. Independently linked addresses are supported;
 references between cold images remain rejected.
 
-Harden and check the single composite `raw-generation/guard.exe` with all emitted
-ranges. Repeat the complete batch command using a new destination directory and
+Harden and scan the single composite `raw-generation/guard.exe` with all emitted
+`--module` and `--code` ranges. For stack-guard, pass every `--module` range and
+the exact map, without `--code`; retain `--forbid __psx_rt_flush_i_cache`. Repeat the complete batch command using a new destination directory and
 `--final-guard raw-generation/guard.exe`. Check the resulting final composite
 again, then ship its runtime executable and all matching packages as one bound
 generation. The finalizer refreshes every payload, relocation list, checksum and

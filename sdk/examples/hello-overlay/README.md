@@ -70,9 +70,10 @@ overlay-compose game.elf raw --header .ps_exe_head \
 ```
 
 Add further images to the same command; never merge game-local EXE patches.
-Run hazard-patch, hazard-scan and stack-guard against `raw/guard.exe`, passing
-**all** generated module ranges and code ranges from `raw/guard-args`. Retain
-`--forbid __psx_rt_flush_i_cache` for stack-guard. Then repeat the identical
+Run hazard-patch and hazard-scan against `raw/guard.exe`, passing **all**
+generated `--module` and `--code` ranges from `raw/guard-args`. Run stack-guard
+with every generated `--module` range and the exact map; it does not accept
+`--code`. Retain `--forbid __psx_rt_flush_i_cache` for stack-guard. Then repeat the identical
 composition command with a new output directory and
 `--final-guard hardened-guard.exe`. Repeat check/scan/stack on its final guard.
 Ship only that generation's `runtime.exe` and packages: their metadata and
