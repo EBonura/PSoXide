@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-//! Digital / DualShock pad polling via SIO0.
+//! Digital, DualShock and neGcon pad polling via SIO0.
 //!
 //! Talks directly to the SIO0 hardware (no BIOS syscalls) so the
 //! same code works whether we side-load a homebrew (HLE BIOS) or
@@ -161,6 +161,8 @@ pub enum PadMode {
     Digital,
     /// DualShock analog shape: ID `0x73`, buttons plus stick bytes.
     Analog,
+    /// neGcon-compatible racing controller: ID `0x23`, twist and three pressures.
+    Negcon,
     /// DualShock config/escape shape: ID `0xF3`.
     Config,
     /// A controller answered with an ID this SDK does not classify yet.
@@ -179,6 +181,26 @@ impl PadMode {
     pub const fn has_sticks(self) -> bool {
         matches!(self, Self::Analog | Self::Config)
     }
+
+    const fn has_axes(self) -> bool {
+        self.has_sticks() || matches!(self, Self::Negcon)
+    }
+}
+
+/// Read-only neGcon wire inputs. No calibration, thresholds or button synthesis
+/// are applied. Compatible wheels sharing ID `0x23` have the same packet shape.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct NegconState {
+    /// Active-high digital switches: START, directions, R1 (R), TRIANGLE (B), CIRCLE (A).
+    pub buttons: ButtonState,
+    /// Raw steering/twist axis; nominal center is `0x80`.
+    pub twist: u8,
+    /// Analog I button, `0` released through `255` fully pressed.
+    pub i: u8,
+    /// Analog II button, `0` released through `255` fully pressed.
+    pub ii: u8,
+    /// Analog left shoulder, `0` released through `255` fully pressed.
+    pub left_shoulder: u8,
 }
 
 /// Raw DualShock stick bytes from one poll.
@@ -413,6 +435,8 @@ pub struct PadState {
     pub sticks: AnalogSticks,
     /// Raw low ID byte returned by the controller.
     pub id_low: u8,
+    /// Typed neGcon input from a complete packet, absent for every other device.
+    pub negcon: Option<NegconState>,
 }
 
 impl PadState {
@@ -422,6 +446,7 @@ impl PadState {
         mode: PadMode::Disconnected,
         sticks: AnalogSticks::CENTERED,
         id_low: 0xFF,
+        negcon: None,
     };
 
     /// `true` when a controller answered the poll.
@@ -573,7 +598,8 @@ pub struct RawPoll {
     pub buttons_low: u8,
     /// Second button byte, raw active-low wire value.
     pub buttons_high: u8,
-    /// Raw stick bytes (centre 0x80) when the controller reports them.
+    /// Raw four-axis bytes. For neGcon these contain twist/I/II/L in wire order;
+    /// use [`RawPoll::negcon`] for the typed view. These are not DualShock sticks.
     pub sticks: AnalogSticks,
     /// Mode inferred from the ID bytes (`Unknown` when the 0x5A magic is wrong).
     pub mode: PadMode,
@@ -618,12 +644,43 @@ impl RawPoll {
 
     /// Convert to the cleaned [`PadState`] used by game code.
     pub fn to_state(self) -> PadState {
+        let negcon = self.negcon();
+        if self.mode == PadMode::Negcon && negcon.is_none() {
+            return PadState {
+                mode: PadMode::Unknown,
+                ..PadState::NONE
+            };
+        }
         PadState {
             buttons: decode_buttons(self.buttons_low, self.buttons_high),
             mode: self.mode,
-            sticks: self.sticks,
+            sticks: if self.mode == PadMode::Negcon {
+                AnalogSticks::CENTERED
+            } else {
+                self.sticks
+            },
             id_low: self.id_low,
+            negcon,
         }
+    }
+
+    /// Decode only a complete neGcon packet, including its ID and response length.
+    /// Production pollers additionally reject byte/ACK timeouts before publishing.
+    pub fn negcon(self) -> Option<NegconState> {
+        if self.mode != PadMode::Negcon
+            || self.id_low != 0x23
+            || self.id_high != 0x5A
+            || self.exchanges != 9
+        {
+            return None;
+        }
+        Some(NegconState {
+            buttons: decode_buttons(self.buttons_low, self.buttons_high),
+            twist: self.sticks.right_x,
+            i: self.sticks.right_y,
+            ii: self.sticks.left_x,
+            left_shoulder: self.sticks.left_y,
+        })
     }
 }
 
@@ -763,7 +820,7 @@ impl AnalogRequirement {
     pub const fn from_mode(mode: PadMode) -> Self {
         match mode {
             PadMode::Analog => Self::Analog,
-            PadMode::Digital | PadMode::Config => Self::DigitalOnly,
+            PadMode::Digital | PadMode::Config | PadMode::Negcon => Self::DigitalOnly,
             PadMode::Disconnected | PadMode::Unknown => Self::Absent,
         }
     }
@@ -861,7 +918,10 @@ fn poll_state<T: Transport>(bus: &mut T, socket: Port) -> PadState {
     let mut tries = 0;
     while tries < 4 {
         let s = poll_once(bus, socket).to_state();
-        if matches!(s.mode, PadMode::Digital | PadMode::Analog | PadMode::Config) {
+        if matches!(
+            s.mode,
+            PadMode::Digital | PadMode::Analog | PadMode::Config | PadMode::Negcon
+        ) {
             return s;
         }
         all_absent &= s.mode == PadMode::Disconnected;
@@ -899,7 +959,7 @@ fn poll_once_raw<T: Transport>(bus: &mut T, socket: Port, pacing: Pacing) -> Raw
         };
     }
 
-    let analog = mode.has_sticks();
+    let analog = mode.has_axes();
     let id_high = ex(bus, socket, pacing, 0x00, false, &mut ack, &mut i);
     if id_high != 0x5A {
         // Garbled handshake -- treat as Unknown and stop after the two
@@ -1011,7 +1071,7 @@ fn poll_selected<T: Transport>(bus: &mut T) -> Option<RawPoll> {
     if id_high != 0x5A {
         return None;
     }
-    let analog = mode.has_sticks();
+    let analog = mode.has_axes();
     let buttons_low = bus.exchange(0x00, false, Timing::PAD).ok()?;
     let buttons_high = bus.exchange(0x00, !analog, Timing::PAD).ok()?;
     let sticks = if analog {
@@ -1066,7 +1126,7 @@ fn poll_once_timed<T: Transport>(
         };
     }
 
-    let analog = mode.has_sticks();
+    let analog = mode.has_axes();
     let id_high = exchange_delayed(bus, 0x00, interbyte_spins);
     i += 1;
     if id_high != 0x5A {
@@ -1185,6 +1245,7 @@ fn request_analog<T: Transport>(bus: &mut T, socket: Port, gap: u32) -> PadState
 fn mode_from_id_low(id_low: u8) -> PadMode {
     match id_low {
         0x41 => PadMode::Digital,
+        0x23 => PadMode::Negcon,
         0x73 => PadMode::Analog,
         0xF3 => PadMode::Config,
         0xFF => PadMode::Disconnected,
@@ -1514,6 +1575,7 @@ mod tests {
             mode: PadMode::Digital,
             sticks: AnalogSticks::CENTERED,
             id_low: 0x41,
+            negcon: None,
         };
         let current = PadState {
             buttons: ButtonState::from_bits(button::CIRCLE | button::START),
@@ -1538,6 +1600,7 @@ mod tests {
                 PadMode::Config => 0xF3,
                 _ => 0xFF,
             },
+            negcon: None,
         }
     }
 

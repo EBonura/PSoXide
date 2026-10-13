@@ -54,6 +54,7 @@ pub struct Model {
     pub id: u8,
     /// Active-high buttons the pad reports.
     pub buttons: u16,
+    pub axes: [u8; 4],
     /// Honors the DualShock configuration commands (0x43, 0x44).
     pub dualshock: bool,
     /// Analog requested by a 0x44 command, applied when config mode exits.
@@ -117,6 +118,7 @@ impl Default for Model {
             pending: Vec::new(),
             id: 0x73,
             buttons: 0,
+            axes: [0x80; 4],
             dualshock: true,
             analog_requested: false,
             locked: false,
@@ -300,7 +302,7 @@ fn reply(m: &Model, index: usize) -> u8 {
         2 => 0x5A,
         3 if m.cmd == 0x42 => !(m.buttons as u8),
         4 if m.cmd == 0x42 => !((m.buttons >> 8) as u8),
-        _ if m.cmd == 0x42 => 0x80,
+        5..=8 if m.cmd == 0x42 => m.axes[index - 5],
         _ => 0x00,
     }
 }
