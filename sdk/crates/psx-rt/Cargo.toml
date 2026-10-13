@@ -18,6 +18,9 @@ default = []
 alloc = []
 # Emit coarse boot breadcrumbs over the BIOS TTY channel.
 boot-trace = []
+# Reserve 192 trampoline words instead of 96 (+384 bytes of `.data`).
+# The 256-word option takes precedence if both features are enabled.
+hazard-trampolines-192 = []
 # Reserve 256 trampoline words for the post-link load-delay hazard patcher
 # instead of 96 (+640 bytes of `.data`). Opt in only when a guest's linked
 # exe reports "trampoline array full".

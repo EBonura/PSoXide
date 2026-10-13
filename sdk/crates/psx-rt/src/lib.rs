@@ -95,7 +95,8 @@ mod critical_section_impl {
 /// capacity, then code words), which the staged guest build runs and verifies
 /// instead of disabling the filler's backward search at a cost of tens of
 /// kilobytes of nops. Every guest that links psx-rt therefore carries this
-/// 392-byte array in `.data` (1,032 bytes with `hazard-trampolines-256`); nothing reads it at runtime except the CPU.
+/// 392-byte array in `.data` (776 bytes with `hazard-trampolines-192`,
+/// 1,032 bytes with `hazard-trampolines-256`); nothing reads it at runtime except the CPU.
 #[no_mangle]
 #[used]
 static mut HAZARD_TRAMPOLINES: [u32; 2 + HAZARD_TRAMPOLINE_WORDS] = {
@@ -104,12 +105,17 @@ static mut HAZARD_TRAMPOLINES: [u32; 2 + HAZARD_TRAMPOLINE_WORDS] = {
     words[1] = HAZARD_TRAMPOLINE_WORDS as u32;
     words
 };
-// Code words available to the patcher. The default suits every shipped
-// guest; a large exe whose link reports "trampoline array full" enables the
-// `hazard-trampolines-256` feature and pays 640 more bytes of `.data`.
+// Code words available to the patcher. A guest whose link reports
+// "trampoline array full" opts into 192 (+384 bytes) or 256 (+640 bytes).
+// Cargo feature unification selects the larger capacity when both are enabled.
 #[cfg(feature = "hazard-trampolines-256")]
 const HAZARD_TRAMPOLINE_WORDS: usize = 256;
-#[cfg(not(feature = "hazard-trampolines-256"))]
+#[cfg(all(
+    not(feature = "hazard-trampolines-256"),
+    feature = "hazard-trampolines-192"
+))]
+const HAZARD_TRAMPOLINE_WORDS: usize = 192;
+#[cfg(not(any(feature = "hazard-trampolines-256", feature = "hazard-trampolines-192")))]
 const HAZARD_TRAMPOLINE_WORDS: usize = 96;
 
 // Symbols emitted by `psoxide.ld`.
@@ -306,4 +312,30 @@ extern "C" fn report_panic(info: *const u8) -> ! {
         tty::print("\n");
     }
     halt()
+}
+
+#[cfg(test)]
+mod trampoline_capacity_tests {
+    #[test]
+    fn selected_header_and_exact_storage_match_feature_precedence() {
+        let expected = if cfg!(feature = "hazard-trampolines-256") {
+            256
+        } else if cfg!(feature = "hazard-trampolines-192") {
+            192
+        } else {
+            96
+        };
+        assert_eq!(super::HAZARD_TRAMPOLINE_WORDS, expected);
+        assert_eq!(
+            core::mem::size_of::<[u32; 2 + super::HAZARD_TRAMPOLINE_WORDS]>(),
+            (expected + 2) * 4
+        );
+        // SAFETY: the host unit test only reads this initialized array; no
+        // runtime post-link patcher or guest CPU mutates it in this process.
+        let header = unsafe {
+            let words = (&raw const super::HAZARD_TRAMPOLINES).cast::<u32>();
+            [words.read(), words.add(1).read()]
+        };
+        assert_eq!(header, [0x4841_5a54, expected as u32]);
+    }
 }
