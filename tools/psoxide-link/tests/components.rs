@@ -75,6 +75,58 @@ impl Fixture {
         let sources = BTreeMap::from([("sdk".to_string(), self.source.clone())]);
         materialize(&self.root, &sources, check, None)
     }
+
+    fn compound(name: &str, missing_registry: bool) -> Self {
+        let mut fixture = Self::new(name);
+        for package in ["app", "local"] {
+            fs::create_dir_all(fixture.source.join(package).join("src")).unwrap();
+            fs::write(
+                fixture.source.join(package).join("src/lib.rs"),
+                "pub fn value() {}\n",
+            )
+            .unwrap();
+            let dependency = if package == "app" {
+                if missing_registry {
+                    "[dependencies]\npsoxide_compound_missing_registry_fixture = \"=0.0.917\"\n"
+                } else {
+                    "[dependencies]\nlocal = { path = \"../local\" }\n"
+                }
+            } else {
+                ""
+            };
+            fs::write(fixture.source.join(package).join("Cargo.toml"), format!(
+                "[package]\nname = \"{package}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n{dependency}"
+            )).unwrap();
+        }
+        fs::write(
+            fixture.source.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\", \"local\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        fs::write(
+            fixture.source.join("Cargo.lock"),
+            "version = 4\n[[package]]\nname = \"app\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        git(&fixture.source, &["add", "."]);
+        git(
+            &fixture.source,
+            &[
+                "-c",
+                "user.name=Component test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-qm",
+                "Compound fixture",
+            ],
+        );
+        fixture.revision = git(&fixture.source, &["rev-parse", "HEAD"])
+            .trim()
+            .to_owned();
+        fixture.write_lock("example/sdk", &["Cargo.toml", "Cargo.lock", "app", "local"]);
+        fixture
+    }
 }
 
 impl Drop for Fixture {
@@ -106,6 +158,108 @@ fn refuses_modified_imports() {
         fs::read_to_string(fixture.root.join("sdk/input.rs")).unwrap(),
         "local edits"
     );
+}
+
+#[test]
+fn fresh_compound_resolution_is_sealed_and_idempotent() {
+    let fixture = Fixture::compound("compound", false);
+    fixture.bootstrap(false).unwrap();
+    let first = fs::read(fixture.root.join("Cargo.lock")).unwrap();
+    assert!(String::from_utf8_lossy(&first).contains("name = \"local\""));
+    assert_eq!(fixture.bootstrap(false).unwrap(), Outcome::Current);
+    assert_eq!(fixture.bootstrap(true).unwrap(), Outcome::Current);
+    let output = Command::new("cargo")
+        .current_dir(&fixture.root)
+        .args([
+            "metadata",
+            "--locked",
+            "--offline",
+            "--no-deps",
+            "--format-version",
+            "1",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fs::read(fixture.root.join("Cargo.lock")).unwrap(), first);
+    fs::write(fixture.root.join("Cargo.lock"), b"edited after sealing\n").unwrap();
+    assert!(fixture
+        .bootstrap(false)
+        .unwrap_err()
+        .to_string()
+        .contains("Imported file changed"));
+    assert_eq!(
+        fs::read(fixture.root.join("Cargo.lock")).unwrap(),
+        b"edited after sealing\n"
+    );
+}
+
+#[test]
+fn missing_offline_dependency_publishes_no_imports_or_receipt() {
+    let fixture = Fixture::compound("compound-offline", true);
+    let error = fixture.bootstrap(false).unwrap_err().to_string();
+    assert!(error.contains("resolution failed offline"), "{error}");
+    for name in [
+        "Cargo.toml",
+        "Cargo.lock",
+        "app",
+        ".components-receipt.json",
+    ] {
+        assert!(
+            !fixture.root.join(name).exists(),
+            "partial publication: {name}"
+        );
+    }
+    assert!(!fs::read_dir(&fixture.root).unwrap().any(|entry| entry
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .starts_with(".components-resolve-")));
+}
+
+#[test]
+fn missing_toolchain_cannot_trigger_installation_or_publication() {
+    let mut fixture = Fixture::compound("compound-toolchain", false);
+    fs::write(
+        fixture.source.join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"nightly-2099-12-31\"\n",
+    )
+    .unwrap();
+    git(&fixture.source, &["add", "."]);
+    git(
+        &fixture.source,
+        &[
+            "-c",
+            "user.name=Component test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "Missing toolchain",
+        ],
+    );
+    fixture.revision = git(&fixture.source, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+    fixture.write_lock(
+        "example/sdk",
+        &[
+            "Cargo.toml",
+            "Cargo.lock",
+            "app",
+            "local",
+            "rust-toolchain.toml",
+        ],
+    );
+    let error = fixture.bootstrap(false).unwrap_err().to_string();
+    assert!(error.contains("resolution failed offline"), "{error}");
+    assert!(error.contains("not installed"), "{error}");
+    assert!(!fixture.root.join("Cargo.lock").exists());
+    assert!(!fixture.root.join(".components-receipt.json").exists());
 }
 
 #[test]

@@ -8,3 +8,4 @@ description  = "Hydrate a pinned PSoXide source tree into a game repository, so 
 
 [dependencies]
 serde_json = { workspace = true }
+toml = "=1.1.6"

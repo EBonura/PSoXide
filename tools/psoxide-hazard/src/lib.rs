@@ -19,6 +19,7 @@ pub mod detect;
 pub mod linkmap;
 pub mod listing;
 pub mod module;
+pub mod overlay_composition;
 pub mod overlay_elf;
 pub mod overlay_pack;
 pub mod patch;

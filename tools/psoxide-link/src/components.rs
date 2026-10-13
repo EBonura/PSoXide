@@ -9,6 +9,12 @@
 //! refresh instead of being overwritten. Local sources export the locked
 //! commit with `git archive`, never the working tree.
 //!
+//! A compound workspace's root Cargo.lock is resolved offline in a fresh
+//! staging export before publication. This can add local path packages and
+//! update their dependency edges, but never change a sourced package's locked
+//! identity, checksum or dependency table. The resulting lock is sealed in
+//! the same content receipt and subsequent local edits still stop refresh.
+//!
 //! This replaces `tools/bootstrap-components.py`. Given the same lock and
 //! sources it writes byte-identical files, modes and receipt. Every write is a
 //! new file, so imported files always carry a fresh mtime and a repin cannot
@@ -406,6 +412,195 @@ fn replace(path: &Path, data: &[u8], mode: Option<u32>) -> Result<()> {
     Ok(())
 }
 
+/// Cargo may add local packages when independently pinned components form a
+/// new workspace. Existing sourced packages must retain their complete lock
+/// tables, including checksums and resolved dependency identities.
+fn validate_compound_lock(before: &[u8], after: &[u8]) -> Result<()> {
+    let parse =
+        |bytes: &[u8]| -> Result<toml::Value> { Ok(toml::from_str(std::str::from_utf8(bytes)?)?) };
+    let original = parse(before)?;
+    let resolved = parse(after)?;
+    let mut original_header = original.clone();
+    let mut resolved_header = resolved.clone();
+    original_header
+        .as_table_mut()
+        .ok_or("invalid Cargo.lock header")?
+        .remove("package");
+    resolved_header
+        .as_table_mut()
+        .ok_or("invalid Cargo.lock header")?
+        .remove("package");
+    if original_header != resolved_header {
+        return Err("compound resolution changed the lock format or metadata".into());
+    }
+    let packages = |value: &toml::Value| -> Result<Vec<toml::Value>> {
+        Ok(value
+            .get("package")
+            .and_then(toml::Value::as_array)
+            .ok_or("compound Cargo.lock has no package tables")?
+            .clone())
+    };
+    let original_packages = packages(&original)?;
+    let resolved_packages = packages(&resolved)?;
+    let identity = |package: &toml::Value| {
+        (
+            package.get("name").cloned(),
+            package.get("version").cloned(),
+            package.get("source").cloned(),
+        )
+    };
+    for package in &original_packages {
+        let found = resolved_packages
+            .iter()
+            .find(|candidate| identity(candidate) == identity(package))
+            .ok_or("compound resolution removed or changed a pinned package")?;
+        if package.get("source").is_some() {
+            if found != package {
+                return Err("compound resolution changed a sourced package table".into());
+            }
+        } else {
+            let mut old = package.clone();
+            let mut new = found.clone();
+            old.as_table_mut()
+                .ok_or("invalid local package table")?
+                .remove("dependencies");
+            new.as_table_mut()
+                .ok_or("invalid local package table")?
+                .remove("dependencies");
+            if old != new {
+                return Err("compound resolution changed a local package identity".into());
+            }
+        }
+    }
+    for package in &resolved_packages {
+        if package.get("source").is_some()
+            && !original_packages
+                .iter()
+                .any(|old| identity(old) == identity(package))
+        {
+            return Err("compound resolution introduced an unpinned sourced package".into());
+        }
+    }
+    Ok(())
+}
+
+/// Read the imported Rustup TOML or supported single-channel legacy file.
+fn imported_toolchain(incoming: &BTreeMap<String, (Vec<u8>, u32)>) -> Result<Option<String>> {
+    let modern = incoming.get("rust-toolchain.toml");
+    let legacy = incoming.get("rust-toolchain");
+    if modern.is_some() && legacy.is_some() {
+        return Err("compound workspace has ambiguous toolchain files".into());
+    }
+    let Some((bytes, _)) = modern.or(legacy) else {
+        return Ok(None);
+    };
+    let text = std::str::from_utf8(bytes)?.trim();
+    let channel = if legacy.is_some() && !text.starts_with('[') {
+        if text.is_empty() || text.chars().any(char::is_whitespace) {
+            return Err("legacy toolchain file must contain one channel".into());
+        }
+        text.to_owned()
+    } else {
+        let value: toml::Value = toml::from_str(text)?;
+        value
+            .get("toolchain")
+            .and_then(|table| table.get("channel"))
+            .and_then(toml::Value::as_str)
+            .filter(|channel| !channel.is_empty())
+            .ok_or("compound workspace must name an installed toolchain channel")?
+            .to_owned()
+    };
+    Ok(Some(channel))
+}
+
+/// Resolve a fresh compound workspace in an isolated export before any
+/// consumer files or receipt are published. No existing hydration is edited.
+fn resolve_compound_workspace(
+    root: &Path,
+    incoming: &mut BTreeMap<String, (Vec<u8>, u32)>,
+) -> Result<()> {
+    if !incoming.contains_key("Cargo.toml") || !incoming.contains_key("Cargo.lock") {
+        return Ok(());
+    }
+    let toolchain = imported_toolchain(incoming)?;
+    struct Stage(PathBuf);
+    impl Drop for Stage {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let stage = root.join(format!(
+        ".components-resolve-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    fs::create_dir(&stage)?;
+    let stage = Stage(stage);
+    for (name, (bytes, mode)) in incoming.iter() {
+        let path = stage.0.join(name);
+        fs::create_dir_all(path.parent().ok_or("staged component has no parent")?)?;
+        replace(&path, bytes, Some(*mode))?;
+    }
+    // Cargo-launched callers inherit a direct Cargo path and toolchain
+    // override. Use the pinned channel explicitly; rustup run never installs
+    // a missing channel unless --install is requested.
+    let mut command = if let Some(channel) = toolchain {
+        let mut command = Command::new("rustup");
+        command.args(["run", &channel, "cargo"]);
+        command.env_remove("RUSTUP_TOOLCHAIN");
+        command
+    } else {
+        Command::new("cargo")
+    };
+    let output = command
+        .current_dir(&stage.0)
+        .env("RUSTUP_AUTO_INSTALL", "0")
+        .args([
+            "metadata",
+            "--offline",
+            "--format-version",
+            "1",
+            "--manifest-path",
+            "Cargo.toml",
+        ])
+        .output()?;
+    if !output.status.success() {
+        return Err(format!("Fresh compound workspace resolution failed offline; no files or receipt were published: {}",
+            String::from_utf8_lossy(&output.stderr)).into());
+    }
+    let metadata: Value = serde_json::from_slice(&output.stdout)?;
+    let stage_root = stage.0.canonicalize()?;
+    for package in metadata["packages"]
+        .as_array()
+        .ok_or("compound metadata has no packages")?
+    {
+        if !package["source"].is_null() {
+            continue;
+        }
+        for path in package["manifest_path"].as_str().into_iter().chain(
+            package["dependencies"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|dependency| dependency["path"].as_str()),
+        ) {
+            if !Path::new(path).canonicalize()?.starts_with(&stage_root) {
+                return Err(
+                    "compound workspace references a path outside the pinned exports".into(),
+                );
+            }
+        }
+    }
+    let resolved = fs::read(stage.0.join("Cargo.lock"))?;
+    let (original, mode) = incoming
+        .get("Cargo.lock")
+        .ok_or("missing imported Cargo.lock")?;
+    validate_compound_lock(original, &resolved)?;
+    incoming.insert("Cargo.lock".into(), (resolved, *mode));
+    Ok(())
+}
+
 /// Bring `root` to the lock: verify the previous receipt, export every
 /// component path at its locked revision (from `sources[name]` when given,
 /// else from GitHub), refuse to replace files the consumer owns, write the
@@ -553,6 +748,7 @@ pub fn materialize(
             parent = directory.parent();
         }
     }
+    resolve_compound_workspace(&root, &mut incoming)?;
     let mut files = serde_json::Map::new();
     for (name, (data, mode)) in &incoming {
         let path = root.join(name);
@@ -582,6 +778,71 @@ pub fn materialize(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compound_toolchain_parser_handles_toml_and_legacy_without_guessing() {
+        let input = |name: &str, contents: &str| {
+            BTreeMap::from([(name.to_owned(), (contents.as_bytes().to_vec(), 0o644))])
+        };
+        for (name, text) in [
+            (
+                "rust-toolchain.toml",
+                "[toolchain]\nchannel = \"nightly-2026-03-25\"\nprofile = \"minimal\"\n",
+            ),
+            ("rust-toolchain", "nightly-2026-03-25\n"),
+            (
+                "rust-toolchain",
+                "[toolchain]\nchannel = \"nightly-2026-03-25\"\n",
+            ),
+        ] {
+            assert_eq!(
+                imported_toolchain(&input(name, text)).unwrap().as_deref(),
+                Some("nightly-2026-03-25")
+            );
+        }
+        assert!(imported_toolchain(&input("rust-toolchain", "nightly\nextra")).is_err());
+        assert!(imported_toolchain(&input("rust-toolchain.toml", "[toolchain")).is_err());
+        assert!(imported_toolchain(&input(
+            "rust-toolchain.toml",
+            "[toolchain]\npath = \"/outside\"\n"
+        ))
+        .is_err());
+        let mut both = input("rust-toolchain", "nightly");
+        both.extend(input(
+            "rust-toolchain.toml",
+            "[toolchain]\nchannel = \"nightly\"\n",
+        ));
+        assert!(imported_toolchain(&both).is_err());
+    }
+
+    #[test]
+    fn compound_resolution_rejects_sourced_drift_and_unpinned_additions() {
+        let original = b"version = 4\n[[package]]\nname = \"locked\"\nversion = \"1.0.0\"\nsource = \"registry+https://example.invalid/index\"\nchecksum = \"abc\"\ndependencies = [\"dep\"]\n";
+        assert!(validate_compound_lock(original, original).is_ok());
+        let text = std::str::from_utf8(original).unwrap();
+        for changed in [text.replace("1.0.0", "1.0.1"),
+            text.replace("abc", "def"), text.replace("[\"dep\"]", "[\"other\"]"),
+            format!("{text}\n[[package]]\nname = \"new\"\nversion = \"1.0.0\"\nsource = \"git+https://example.invalid/repo#123\"\n")] {
+            assert!(validate_compound_lock(original, changed.as_bytes()).is_err());
+        }
+    }
+
+    #[test]
+    fn compound_resolution_only_changes_local_dependency_tables() {
+        let original = b"version = 4\n[[package]]\nname = \"app\"\nversion = \"1.0.0\"\n";
+        let resolved = b"version = 4\n[[package]]\nname = \"app\"\nversion = \"1.0.0\"\ndependencies = [\"local\"]\n[[package]]\nname = \"local\"\nversion = \"0.1.0\"\n";
+        assert!(validate_compound_lock(original, resolved).is_ok());
+        assert!(validate_compound_lock(
+            original,
+            b"version = 4\n[[package]]\nname = \"app\"\nversion = \"2.0.0\"\n"
+        )
+        .is_err());
+        assert!(validate_compound_lock(
+            original,
+            b"version = 3\n[[package]]\nname = \"app\"\nversion = \"1.0.0\"\n"
+        )
+        .is_err());
+    }
 
     #[test]
     fn paths_normalize_like_pure_posix_path() {

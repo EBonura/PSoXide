@@ -31,6 +31,8 @@ pub struct PackedImage<'a> {
 /// One direct import emitted by the same compilation as its cold Rust entry.
 #[derive(Clone, Debug)]
 pub struct IncomingCall<'a> {
+    /// 1 direct J26; 2/3/4 are explicitly declared legacy pinned HI/LO/W32.
+    pub kind: u32,
     /// Declared caller/export pair index.
     pub selector: u32,
     /// Stable caller symbol selected by the application.
@@ -43,6 +45,19 @@ pub struct IncomingCall<'a> {
     pub offset: u32,
     /// Original linked J/JAL used by the guard dependency closure.
     pub instruction: u32,
+}
+
+/// A pre-existing pinned binding, outside the ordinary leased callable API.
+/// The consumer must retain its original loaded/pinned lifetime discipline.
+pub struct PinnedImport<'a> {
+    /// Exact initialized resident function/object symbol containing the site.
+    pub owner: &'a str,
+    /// Word-aligned site offset within that symbol.
+    pub site_offset: u32,
+    /// Existing compact import kind: HI16=2, LO16=3, W32 callback=4.
+    pub kind: u32,
+    /// Exact original linked destination offset within this image.
+    pub target_offset: u32,
 }
 
 fn range(address: u32, bytes: u32) -> Result<Range<u32>, String> {
@@ -78,6 +93,20 @@ pub fn pack<'a>(
     data: &[&str],
     resident: &[&str],
     calls: &[(&str, &str)],
+) -> Result<PackedImage<'a>, String> {
+    pack_pinned(elf, id, code, data, resident, calls, &[])
+}
+
+/// Legacy-only extraction with explicit pinned bindings. Ordinary `pack` still
+/// rejects every address escape; this does not grant a new lifetime guarantee.
+pub fn pack_pinned<'a>(
+    elf: &Elf<'a>,
+    id: u32,
+    code: &str,
+    data: &[&str],
+    resident: &[&str],
+    calls: &[(&str, &str)],
+    pinned: &[PinnedImport<'_>],
 ) -> Result<PackedImage<'a>, String> {
     let (code_index, text) = elf.section(code)?;
     for (index, pair) in calls.iter().enumerate() {
@@ -201,7 +230,7 @@ pub fn pack<'a>(
             &selected_ranges,
             &relocations,
         )?;
-        for relocation in relocations {
+        for relocation in &relocations {
             if !selected
                 .iter()
                 .any(|(i, _)| *i == relocation.target_section as usize)
@@ -209,7 +238,85 @@ pub fn pack<'a>(
                 continue;
             }
             if relocation.kind != 4 || section.flags & 4 == 0 {
-                return Err("cold address escapes a typed direct call".into());
+                let mut matches = pinned.iter().filter(|p| {
+                    symbols.iter().any(|s| {
+                        s.name == p.owner
+                            && s.section as usize == index
+                            && s.bytes != 0
+                            && s.address.checked_add(p.site_offset) == Some(relocation.address)
+                            && p.site_offset
+                                .checked_add(4)
+                                .is_some_and(|end| end <= s.bytes)
+                    })
+                });
+                let declaration = matches
+                    .next()
+                    .ok_or("cold address escapes a typed direct call")?;
+                if matches.next().is_some() {
+                    return Err("ambiguous pinned import".into());
+                }
+                let owner = unique_symbol(&symbols, declaration.owner)?;
+                let offset = relocation
+                    .address
+                    .checked_sub(section.address)
+                    .ok_or("pinned site offset")? as usize;
+                let word = u32::from_le_bytes(
+                    section
+                        .bytes
+                        .get(offset..offset.checked_add(4).ok_or("pinned site overflow")?)
+                        .ok_or("pinned site bounds")?
+                        .try_into()
+                        .unwrap(),
+                );
+                let target = text
+                    .address
+                    .checked_add(declaration.target_offset)
+                    .ok_or("pinned target overflow")?;
+                let target_section = selected
+                    .iter()
+                    .find(|(i, _)| *i == relocation.target_section as usize)
+                    .ok_or("pinned target owner")?
+                    .1;
+                let actual = match declaration.kind {
+                    2 | 3
+                        if owner.kind == 2
+                            && section.flags & 4 != 0
+                            && relocation.kind == if declaration.kind == 2 { 5 } else { 6 }
+                            && target_section.flags & 4 == 0 =>
+                    {
+                        let resident_words = section
+                            .bytes
+                            .chunks_exact(4)
+                            .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+                            .collect::<Vec<_>>();
+                        hi_lo_address(section.address, &resident_words, relocation, &relocations)?
+                    }
+                    4 if owner.kind == 1
+                        && section.flags & 4 == 0
+                        && relocation.kind == 2
+                        && executable(&cold_code, target) =>
+                    {
+                        word
+                    }
+                    _ => return Err("unsupported pinned import form".into()),
+                };
+                if actual != target
+                    || target < target_section.address
+                    || target >= target_section.address.saturating_add(target_section.size)
+                    || !incoming_sites.insert(relocation.address)
+                {
+                    return Err("pinned target binding or duplicate site".into());
+                }
+                incoming.push(IncomingCall {
+                    kind: declaration.kind,
+                    selector: u32::MAX,
+                    caller: owner.name,
+                    export: target_section.name,
+                    site: relocation.address,
+                    offset: declaration.target_offset,
+                    instruction: word,
+                });
+                continue;
             }
             let offset = relocation
                 .address
@@ -250,6 +357,7 @@ pub fn pack<'a>(
                 return Err("duplicate incoming callsite".into());
             }
             incoming.push(IncomingCall {
+                kind: 1,
                 selector: u32::try_from(selector).map_err(|_| "call selector overflow")?,
                 caller: caller.name,
                 export: export.name,
@@ -258,6 +366,9 @@ pub fn pack<'a>(
                 instruction: word,
             });
         }
+    }
+    if pinned.len() != incoming.iter().filter(|c| c.kind != 1).count() {
+        return Err("unused or duplicate pinned declaration".into());
     }
     for &(caller, export) in calls {
         if incoming
@@ -284,10 +395,7 @@ pub fn pack<'a>(
         code_end: text.size,
         words,
         exports,
-        code_ranges: vec![
-            code_range,
-            text.address + bytes + 8..text.address + full_bytes,
-        ],
+        code_ranges: vec![code_range, text.address + bytes..text.address + full_bytes],
         incoming,
         sections: selected.iter().map(|(i, _)| *i as u16).collect(),
     })
@@ -336,6 +444,17 @@ pub fn executable_images(
     sites: &str,
     trap: &str,
 ) -> Result<ExecutableImages, String> {
+    let image = resident_image(elf, &package.sections, resident, header)?;
+    publish_image(elf, package, resident, descriptor, sites, trap, image)
+}
+
+/// Extract resident bytes once after excluding the complete cold ownership set.
+pub(crate) fn resident_image(
+    elf: &Elf<'_>,
+    cold_sections: &[u16],
+    resident: &[&str],
+    header: &str,
+) -> Result<Vec<u8>, String> {
     let (header_index, head) = elf.section(header)?;
     if head.bytes.len() != 2048 || !head.bytes.starts_with(b"PS-X EXE") {
         return Err("complete PS-X EXE header required".into());
@@ -353,7 +472,7 @@ pub fn executable_images(
         .sections()
         .filter(|(_, s)| s.flags & 2 != 0 && s.size != 0)
     {
-        if index == header_index || package.sections.contains(&(index as u16)) {
+        if index == header_index || cold_sections.contains(&(index as u16)) {
             continue;
         }
         if !selected.iter().any(|(i, _)| *i == index) {
@@ -396,10 +515,10 @@ pub fn executable_images(
             .ok_or("resident copy bounds")?
             .copy_from_slice(section.bytes);
     }
-    publish_image(elf, package, resident, descriptor, sites, trap, image)
+    Ok(image)
 }
 
-fn publish_image(
+pub(crate) fn publish_image(
     elf: &Elf<'_>,
     package: &PackedImage<'_>,
     resident: &[&str],
@@ -408,6 +527,9 @@ fn publish_image(
     trap: &str,
     mut image: Vec<u8>,
 ) -> Result<ExecutableImages, String> {
+    if package.incoming.iter().any(|call| call.kind != 1) {
+        return Err("legacy pinned imports cannot use leased publication".into());
+    }
     let base = u32::from_le_bytes(
         image
             .get(24..28)
@@ -519,6 +641,27 @@ pub fn finalize_guard<'a>(
     sites: &str,
     trap: &str,
 ) -> Result<(PackedImage<'a>, ExecutableImages), String> {
+    let result = finalize_payload(elf, original, initial, hardened, resident)?;
+    let published = publish_image(
+        elf,
+        &result,
+        resident,
+        descriptor,
+        sites,
+        trap,
+        hardened[..initial.resident.len()].to_vec(),
+    )?;
+    Ok((result, published))
+}
+
+/// Shared hardened-payload validation independent of resident table layout.
+pub(crate) fn finalize_payload<'a>(
+    elf: &Elf<'a>,
+    original: &PackedImage<'a>,
+    initial: &ExecutableImages,
+    hardened: &[u8],
+    resident: &[&str],
+) -> Result<PackedImage<'a>, String> {
     let (checked, rest) =
         overlay::Package::parse(&original.words).map_err(|e| format!("original package: {e:?}"))?;
     if !rest.is_empty()
@@ -582,16 +725,7 @@ pub fn finalize_guard<'a>(
     result.words.extend(final_image);
     result.words.extend(final_fixups);
     overlay::Package::parse(&result.words).map_err(|e| format!("final package: {e:?}"))?;
-    let published = publish_image(
-        elf,
-        &result,
-        resident,
-        descriptor,
-        sites,
-        trap,
-        hardened[..initial.resident.len()].to_vec(),
-    )?;
-    Ok((result, published))
+    Ok(result)
 }
 
 fn hardened_fixups(
@@ -706,7 +840,13 @@ fn references(
                 4
             }
             5 => {
-                let address = hi_lo_address(linked, image, relocation, relocations)?;
+                let address =
+                    hi_lo_address(linked, image, relocation, relocations).map_err(|e| {
+                        format!(
+                            "{e} at {:#010x} target {:#010x}",
+                            relocation.address, relocation.target_address
+                        )
+                    })?;
                 if address < target.1.start || address > target.1.end {
                     return Err("HI16 target bounds".into());
                 }
@@ -716,7 +856,13 @@ fn references(
                 2
             }
             6 => {
-                let address = hi_lo_address(linked, image, relocation, relocations)?;
+                let address =
+                    hi_lo_address(linked, image, relocation, relocations).map_err(|e| {
+                        format!(
+                            "{e} at {:#010x} target {:#010x}",
+                            relocation.address, relocation.target_address
+                        )
+                    })?;
                 if address < target.1.start || address > target.1.end {
                     return Err("LO16 target bounds".into());
                 }
@@ -770,7 +916,7 @@ fn hi_lo_address(
             .iter()
             .filter(compatible)
             .filter(|r| r.kind == 6 && r.address > relocation.address)
-            .filter(|r| at(r).is_ok_and(|word| (word >> 21) & 31 == (current >> 16) & 31))
+            .filter(|r| base_reaches_low(linked, image, relocation, r))
             .min_by_key(|r| r.address)
             .ok_or("HI16 missing matching LO16 register")?;
         (current, at(low)?)
@@ -780,8 +926,8 @@ fn hi_lo_address(
             .filter(compatible)
             .filter(|r| r.kind == 5 && r.address < relocation.address)
             .filter(|r| {
-                at(r)
-                    .is_ok_and(|word| word >> 26 == 15 && (word >> 16) & 31 == (current >> 21) & 31)
+                at(r).is_ok_and(|word| word >> 26 == 15)
+                    && base_reaches_low(linked, image, r, relocation)
             })
             .max_by_key(|r| r.address)
             .ok_or("LO16 missing matching HI16 register")?;
@@ -790,9 +936,154 @@ fn hi_lo_address(
     Ok(((high & 0xffff) << 16).wrapping_add(low as u16 as i16 as i32 as u32))
 }
 
+// A compiler jump-table address can add its runtime index before the LO16
+// load. Prove the LUI contribution survives that straight-line affine path;
+// never pair unrelated registers merely because their relocation symbols match.
+fn base_reaches_low(linked: u32, image: &[u32], high: &Relocation, low: &Relocation) -> bool {
+    let Some(start) = high.address.checked_sub(linked).map(|v| v as usize / 4) else {
+        return false;
+    };
+    let Some(end) = low.address.checked_sub(linked).map(|v| v as usize / 4) else {
+        return false;
+    };
+    let (Some(&lui), Some(&lo)) = (image.get(start), image.get(end)) else {
+        return false;
+    };
+    if end <= start || lui >> 26 != 15 {
+        return false;
+    }
+    let origin = ((lui >> 16) & 31) as usize;
+    let target = ((lo >> 21) & 31) as usize;
+    if origin == 0 || target == 0 {
+        return false;
+    }
+    // Preserve the existing direct-base form; the additional indexed form is
+    // bounded and rejects any control transfer or lost register contribution.
+    if origin == target {
+        return true;
+    }
+    if end - start > 16 {
+        return false;
+    }
+    // 0 independent, 1 exactly one contribution, 2 unsupported/multiple.
+    // Unsupported dependence must never become an independent index again.
+    let mut carries = [0u8; 32];
+    carries[origin] = 1;
+    let mut special = [0u8; 2];
+    for &instruction in &image[start + 1..end] {
+        let op = instruction >> 26;
+        let rs = ((instruction >> 21) & 31) as usize;
+        let rt = ((instruction >> 16) & 31) as usize;
+        let rd = ((instruction >> 11) & 31) as usize;
+        if (1..=7).contains(&op) {
+            return false;
+        }
+        if op == 0 {
+            let function = instruction & 63;
+            if function == 8 || function == 9 {
+                return false;
+            }
+            let contribution = if function == 33 {
+                if carries[rs] == 0 {
+                    carries[rt]
+                } else if carries[rt] == 0 {
+                    carries[rs]
+                } else {
+                    2
+                }
+            } else if function == 37 && (rs == 0 || rt == 0) {
+                carries[rs].max(carries[rt])
+            } else if function == 16 || function == 18 {
+                special[(function == 18) as usize]
+            } else {
+                let source = if function <= 7 {
+                    carries[rt]
+                } else {
+                    carries[rs].max(carries[rt])
+                };
+                if source == 0 {
+                    0
+                } else {
+                    2
+                }
+            };
+            if function == 17 || function == 19 {
+                special[(function == 19) as usize] = carries[rs];
+            }
+            if [24, 25, 26, 27].contains(&function) {
+                special = [if carries[rs].max(carries[rt]) == 0 {
+                    0
+                } else {
+                    2
+                }; 2];
+            }
+            if ![17, 19, 24, 25, 26, 27].contains(&function) && rd != 0 {
+                carries[rd] = contribution
+            }
+        } else if (8..=15).contains(&op) || (32..=38).contains(&op) {
+            if rt != 0 {
+                carries[rt] = if op == 15 || carries[rs] == 0 { 0 } else { 2 }
+            }
+        } else if !(40..=46).contains(&op) {
+            return false;
+        }
+    }
+    carries[target] == 1
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn indexed_resident_jump_table_retains_its_proven_lui_base() {
+        // Exact instruction shape from the CS title consumer's 0x8040a834
+        // LUI through 0x8040a850 LO16 load. No retail content is involved.
+        let base = 0x8040a834;
+        let image = [
+            0x3c02800a, 0x32560040, 0x32530010, 0x32512001, 0x325e4008, 0x00010880, 0x00220821,
+            0x8c211cd0,
+        ];
+        let relocations = [
+            Relocation {
+                address: base,
+                kind: 5,
+                target_section: 3,
+                target_address: 0x8009ac90,
+            },
+            Relocation {
+                address: base + 28,
+                kind: 6,
+                target_section: 3,
+                target_address: 0x8009ac90,
+            },
+        ];
+        for relocation in &relocations {
+            assert_eq!(
+                hi_lo_address(base, &image, relocation, &relocations).unwrap(),
+                0x800a1cd0
+            );
+        }
+        assert!(references(
+            base,
+            &image,
+            std::slice::from_ref(&(base..base + 32)),
+            &[],
+            &[(1, base..base + 32)],
+            &[(3, 0x8009ac90..0x800a8728)],
+            &relocations
+        )
+        .unwrap()
+        .is_empty());
+        for (index, word) in [(6, 0x00230821), (2, 0x24020009), (2, 0x10000000)] {
+            let mut invalid = image;
+            invalid[index] = word;
+            assert!(hi_lo_address(base, &invalid, &relocations[0], &relocations).is_err());
+        }
+        let mut triple = image;
+        triple[5] = 0x00421821; // addu r3,r2,r2
+        triple[6] = 0x00620821; // addu r1,r3,r2
+        assert!(hi_lo_address(base, &triple, &relocations[0], &relocations).is_err());
+    }
     fn hardening_fixture() -> PackedImage<'static> {
         let base = 0x80408000;
         let jump = 0x08000000 | ((base >> 2) & 0x03ffffff);
