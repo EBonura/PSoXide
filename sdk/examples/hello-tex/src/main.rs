@@ -35,7 +35,7 @@ use psx_gpu::Gpu;
 use psx_hw::gpu::{pack_color, pack_texcoord, pack_vertex, pack_xy};
 use psx_io::gpu::{wait_command_ready, write_command};
 use psx_math::sincos;
-use psx_vram::{upload_bytes, Clut, TextureDepth, TexturePage, VramRect};
+use psx_vram::{upload_bytes, Clut, TextureDepth, TexturePage, TextureWindowAtlas, VramRect};
 
 /// Wall (brick) -- cooked by `make assets` from
 /// `vendor/brick-wall.jpg`.
@@ -63,8 +63,6 @@ const FLOOR_CLUT: Clut = Clut::new(0, 481);
 /// tpage, offset from the brick at U=0.
 const TEX_W: u16 = 64;
 const TEX_H: u16 = 64;
-const BRICK_U: u8 = 0;
-const FLOOR_U: u8 = 64;
 
 #[no_mangle]
 fn main() {
@@ -82,13 +80,22 @@ fn main() {
     // --- Parse + upload both cooked textures ---
     let brick = Texture::from_bytes(BRICK_BLOB).expect("brick.psxt");
     let floor = Texture::from_bytes(FLOOR_BLOB).expect("floor.psxt");
+    // Restrict allocations to the first 224 texel rows. A page at Y=256
+    // can use this same bound to leave physical rows 480..512 for CLUTs.
+    let mut atlas = TextureWindowAtlas::<1>::new();
+    let brick_slot = atlas
+        .allocate_with_usable_rows(TEX_W, TEX_H, 224)
+        .expect("brick slot");
+    let floor_slot = atlas
+        .allocate_with_usable_rows(TEX_W, TEX_H, 224)
+        .expect("floor slot");
 
     // Brick occupies the left 16 halfwords of the tpage (U 0..64).
     // VRAM rect width is in HALFWORDS -- 4 texels per halfword at
     // 4bpp -- so 64 texels wide = 16 halfwords wide.
     let brick_pix_rect = VramRect::new(
-        SHARED_TPAGE.x(),
-        SHARED_TPAGE.y(),
+        SHARED_TPAGE.x() + u16::from(brick_slot.origin_u()) / 4,
+        SHARED_TPAGE.y() + u16::from(brick_slot.origin_v()),
         brick.halfwords_per_row(),
         brick.height(),
     );
@@ -99,8 +106,8 @@ fn main() {
     // Floor slotted right next to the brick, still in the same
     // tpage. X offset = brick's halfword count.
     let floor_pix_rect = VramRect::new(
-        SHARED_TPAGE.x() + brick.halfwords_per_row(),
-        SHARED_TPAGE.y(),
+        SHARED_TPAGE.x() + u16::from(floor_slot.origin_u()) / 4,
+        SHARED_TPAGE.y() + u16::from(floor_slot.origin_v()),
         floor.halfwords_per_row(),
         floor.height(),
     );
@@ -128,7 +135,14 @@ fn main() {
         let brick_phase_y = (frame.wrapping_mul(64) & 0xFFF) as u16;
         let bx = 100 + drift(brick_phase_x, 80);
         let by = 40 + drift(brick_phase_y, 20);
-        draw_sprite(bx, by, TEX_W, TEX_H, (BRICK_U, 0), brick_clut_word);
+        draw_sprite(
+            bx,
+            by,
+            TEX_W,
+            TEX_H,
+            (brick_slot.origin_u(), brick_slot.origin_v()),
+            brick_clut_word,
+        );
 
         // Floor in the lower half: faster, opposite phase, so the
         // two sprites cross each other without colliding.
@@ -136,7 +150,14 @@ fn main() {
         let floor_phase_y = (frame.wrapping_mul(56).wrapping_add(1024) & 0xFFF) as u16;
         let fx = 160 + drift(floor_phase_x, 80);
         let fy = 140 + drift(floor_phase_y, 20);
-        draw_sprite(fx, fy, TEX_W, TEX_H, (FLOOR_U, 0), floor_clut_word);
+        draw_sprite(
+            fx,
+            fy,
+            TEX_W,
+            TEX_H,
+            (floor_slot.origin_u(), floor_slot.origin_v()),
+            floor_clut_word,
+        );
 
         gpu.wait_idle();
         psx_rt::interrupts::wait_vblank();

@@ -355,9 +355,32 @@ impl<const PAGE_COUNT: usize> TextureWindowAtlas<PAGE_COUNT> {
     /// power-of-two, and no larger than 128 texels, matching the
     /// hardware texture-window range.
     pub fn allocate(&mut self, width: u16, height: u16) -> Option<TextureWindowPlacement> {
+        self.allocate_with_usable_rows(width, height, 256)
+    }
+
+    /// Allocate within the first `usable_rows` texel rows of each page.
+    ///
+    /// The row bound must be a multiple of 8 in `8..=256`. Dimensions and
+    /// placement alignment follow [`Self::allocate`]. Invalid bounds or a
+    /// rectangle taller than the bound return `None` without changing the atlas.
+    /// This per-call bound does not reserve excluded rows: callers sharing a
+    /// page band must consistently apply their ownership limit.
+    pub fn allocate_with_usable_rows(
+        &mut self,
+        width: u16,
+        height: u16,
+        usable_rows: u16,
+    ) -> Option<TextureWindowPlacement> {
+        if usable_rows == 0
+            || usable_rows > 256
+            || !usable_rows.is_multiple_of(TEXTURE_WINDOW_UNIT_TEXELS)
+        {
+            return None;
+        }
         let width_units = texture_window_units(width)?;
         let height_units = texture_window_units(height)?;
-        let max_y = TEXTURE_PAGE_UNITS.checked_sub(height_units)?;
+        let row_units = (usable_rows / TEXTURE_WINDOW_UNIT_TEXELS) as usize;
+        let max_y = row_units.checked_sub(height_units)?;
         let max_x = TEXTURE_PAGE_UNITS.checked_sub(width_units)?;
 
         for page_index in 0..PAGE_COUNT {
@@ -1589,6 +1612,57 @@ mod tests {
     #[should_panic = "overflows VRAM width"]
     fn vram_rect_new_rejects_horizontal_overflow() {
         let _ = VramRect::new(1000, 0, 100, 10);
+    }
+
+    #[test]
+    fn texture_window_row_bound_preserves_scan_order_and_palette_rows() {
+        let mut atlas = TextureWindowAtlas::<2>::new();
+        for index in 0..24 {
+            let placement = atlas.allocate_with_usable_rows(64, 64, 224).unwrap();
+            assert_eq!(placement.page_index(), index / 12);
+            assert_eq!(u16::from(placement.origin_u()), (index % 4) * 64);
+            assert_eq!(u16::from(placement.origin_v()), ((index % 12) / 4) * 64);
+            assert!(u16::from(placement.origin_v()) + u16::from(placement.height()) <= 224);
+        }
+        assert!(atlas.allocate_with_usable_rows(64, 64, 224).is_none());
+        // The remaining aligned 32-high strip still fits below the limit.
+        let strip = atlas.allocate_with_usable_rows(32, 32, 224).unwrap();
+        assert_eq!(
+            (strip.page_index(), strip.origin_u(), strip.origin_v()),
+            (0, 0, 192)
+        );
+        assert_eq!(core::mem::size_of_val(&atlas), 2 * 32 * 4);
+    }
+
+    #[test]
+    fn texture_window_row_bound_rejects_invalid_input_without_mutation() {
+        let mut atlas = TextureWindowAtlas::<1>::new();
+        atlas.allocate(32, 32).unwrap();
+        let before = atlas;
+        for rows in [0, 1, 7, 9, 223, 255, 257, 264, u16::MAX] {
+            assert!(atlas.allocate_with_usable_rows(8, 8, rows).is_none());
+            assert_eq!(atlas, before);
+        }
+        assert!(atlas.allocate_with_usable_rows(64, 64, 56).is_none());
+        assert_eq!(atlas, before);
+        assert!(atlas.allocate_with_usable_rows(48, 32, 224).is_none());
+        assert_eq!(atlas, before);
+        let edge = atlas.allocate_with_usable_rows(8, 8, 8).unwrap();
+        assert_eq!((edge.origin_u(), edge.origin_v()), (32, 0));
+    }
+
+    #[test]
+    fn texture_window_full_row_bound_matches_default_allocator() {
+        let mut default = TextureWindowAtlas::<2>::new();
+        let mut bounded = default;
+        for index in 0..160 {
+            let (width, height) = [(32, 32), (64, 16), (8, 128), (128, 8)][index % 4];
+            assert_eq!(
+                default.allocate(width, height),
+                bounded.allocate_with_usable_rows(width, height, 256)
+            );
+            assert_eq!(default, bounded);
+        }
     }
 
     #[test]
