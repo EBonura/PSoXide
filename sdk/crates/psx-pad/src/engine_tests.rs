@@ -967,3 +967,34 @@ fn the_snapshot_sequence_counts_publications_and_always_reads_the_latest() {
         last = snap.seq;
     }
 }
+
+#[test]
+fn irq_negcon_preserves_typed_pressure_without_aliasing_sticks() {
+    let mut rig = Rig::new(Config::DEFAULT);
+    rig.plug(
+        Port::One,
+        Pad {
+            id: 0x23,
+            dualshock: false,
+            buttons: button::START | button::TRIANGLE,
+            sticks: [0x81, 0xFE, 0x02, 0x7F],
+            ..Pad::dualshock_analog()
+        },
+    );
+    rig.frame();
+    let snap = rig.snap();
+    let pad = snap.port(Port::One).pad;
+    assert_eq!(pad.mode, PadMode::Negcon);
+    assert_eq!(pad.sticks, crate::AnalogSticks::CENTERED);
+    assert_eq!(
+        pad.negcon,
+        Some(crate::NegconState {
+            buttons: crate::ButtonState::from_bits(button::START | button::TRIANGLE),
+            twist: 0x81,
+            i: 0xFE,
+            ii: 2,
+            left_shoulder: 0x7F,
+        })
+    );
+    assert_eq!(snap.port(Port::One).health, Health::Present);
+}

@@ -31,7 +31,7 @@
 //! exception wrapper, the timer, the registers) is in `console.rs`.
 //! `sdk/docs/PAD-IRQ-ENGINE.md` is the design.
 
-use crate::{decode_buttons, mode_from_id_low, AnalogRequirement, AnalogSticks, PadMode, PadState};
+use crate::{mode_from_id_low, AnalogRequirement, AnalogSticks, PadMode, PadState};
 use core::cell::UnsafeCell;
 use core::ptr::{read_volatile, write_volatile};
 use psx_hw::sio::sio0::stat;
@@ -651,7 +651,7 @@ impl<'p, H: Hw> Engine<'p, H> {
         match (idx, reply) {
             (1, id) => match mode_from_id_low(id) {
                 PadMode::Digital => self.txn.len = 5,
-                PadMode::Analog | PadMode::Config => self.txn.len = 9,
+                PadMode::Analog | PadMode::Config | PadMode::Negcon => self.txn.len = 9,
                 PadMode::Disconnected => return self.finish(Outcome::Absent),
                 PadMode::Unknown => return self.fail(Fault::BadId),
             },
@@ -683,12 +683,17 @@ impl<'p, H: Hw> Engine<'p, H> {
         } else {
             AnalogSticks::CENTERED
         };
-        PadState {
-            buttons: decode_buttons(rx[3], rx[4]),
+        crate::RawPoll {
+            id_low: rx[1],
+            id_high: rx[2],
+            buttons_low: rx[3],
+            buttons_high: rx[4],
             mode,
             sticks,
-            id_low: rx[1],
+            exchanges: self.txn.len,
+            ack_seen: 0,
         }
+        .to_state()
     }
 
     fn fail(&mut self, why: Fault) {

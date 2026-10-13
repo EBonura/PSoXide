@@ -177,6 +177,7 @@ fn draw_pad_status(font: &FontAtlas, state: PadState) {
     let (mode, tint) = match state.mode {
         PadMode::Disconnected => ("NO PAD", (0xE0, 0x50, 0x50)),
         PadMode::Digital => ("DIGITAL", (0xE0, 0x90, 0x40)),
+        PadMode::Negcon => ("NEGCON", (0x60, 0xC0, 0xE0)),
         PadMode::Analog => ("ANALOG", (0x60, 0xE0, 0x80)),
         PadMode::Config => ("CONFIG", (0x90, 0xA0, 0xE0)),
         PadMode::Unknown => ("UNKNOWN", (0xE0, 0xE0, 0x60)),
@@ -202,6 +203,15 @@ fn draw_pad_status(font: &FontAtlas, state: PadState) {
         font.draw_text(4, 224, "R:", (0x80, 0x80, 0x80));
         font.draw_text(28, 224, &rx, (0xC0, 0x90, 0xE0));
         font.draw_text(68, 224, &ry, (0xC0, 0x90, 0xE0));
+    } else if let Some(negcon) = state.negcon {
+        font.draw_text(68, 200, "TWIST", (0x60, 0xC0, 0xE0));
+        font.draw_text(124, 200, &hex_u8(negcon.twist), (0x70, 0xC0, 0xE0));
+        font.draw_text(4, 212, "I:", (0x80, 0x80, 0x80));
+        font.draw_text(28, 212, &hex_u8(negcon.i), (0x70, 0xC0, 0xE0));
+        font.draw_text(76, 212, "II:", (0x80, 0x80, 0x80));
+        font.draw_text(108, 212, &hex_u8(negcon.ii), (0x70, 0xC0, 0xE0));
+        font.draw_text(4, 224, "L:", (0x80, 0x80, 0x80));
+        font.draw_text(28, 224, &hex_u8(negcon.left_shoulder), (0x70, 0xC0, 0xE0));
     } else if state.is_connected() {
         font.draw_text(68, 200, "OFF", (0xE0, 0x90, 0x40));
         font.draw_text(4, 212, "PRESS ANALOG BUTTON", (0x90, 0x90, 0x90));

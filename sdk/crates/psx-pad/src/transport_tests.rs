@@ -328,3 +328,94 @@ fn the_token_is_accepted(port: &mut psx_io::periph::ControllerPort) {
     let _ = PadReader::port2().poll_on(port);
     let _ = crate::require_analog_on(port, Port::Two);
 }
+
+#[test]
+fn negcon_has_typed_inputs_and_never_reports_dualshock_sticks() {
+    let held = button::START | button::LEFT | button::R1 | button::CIRCLE;
+    let pad = poll_with(Model {
+        id: 0x23,
+        dualshock: false,
+        buttons: held,
+        axes: [0, 0xFF, 0x24, 0x81],
+        ..Model::default()
+    });
+    assert_eq!(pad.mode, PadMode::Negcon);
+    assert!(!pad.is_analog() && !pad.mode.has_sticks());
+    assert_eq!(pad.sticks, crate::AnalogSticks::CENTERED);
+    assert_eq!(
+        pad.negcon,
+        Some(crate::NegconState {
+            buttons: crate::ButtonState::from_bits(held),
+            twist: 0,
+            i: 255,
+            ii: 0x24,
+            left_shoulder: 0x81,
+        })
+    );
+    mock::with(|m| assert_eq!((m.sends, m.attempts, m.early, m.tx_errors), (9, 1, 0, 0)));
+    assert_eq!(
+        AnalogRequirement::from_mode(pad.mode),
+        AnalogRequirement::DigitalOnly
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "bounded transport timeout sweep")]
+fn incomplete_negcon_packets_never_publish_pressure_or_release_cached_input() {
+    let mut reader = PadReader::port1();
+    start(Model {
+        id: 0x23,
+        dualshock: false,
+        axes: [255, 0, 127, 255],
+        ..Model::default()
+    });
+    let clean = reader.poll_on(&mut MockBus);
+    assert_eq!(clean.negcon.unwrap().twist, 255);
+    for fault in [Fault::Tx, Fault::Rx, Fault::Ack] {
+        for byte in 1..9 {
+            if fault == Fault::Ack && byte == 8 {
+                continue;
+            }
+            start(fault_model(0x23, fault, byte, false));
+            let failed = poll_on(&mut MockBus, Port::One);
+            assert_eq!(failed.mode, PadMode::Unknown, "{fault:?} byte{byte}");
+            assert!(failed.negcon.is_none());
+            assert_eq!(reader.accept(failed), clean);
+        }
+    }
+    let digital = poll_with(Model {
+        id: 0x41,
+        ..Model::default()
+    });
+    assert!(reader.accept(digital).negcon.is_none());
+}
+
+#[test]
+fn raw_negcon_requires_exact_id_magic_and_length() {
+    let raw = crate::RawPoll {
+        id_low: 0x23,
+        id_high: 0x5A,
+        mode: PadMode::Negcon,
+        exchanges: 9,
+        ..crate::RawPoll::NONE
+    };
+    assert!(raw.negcon().is_some());
+    for exchanges in [0, 5, 8, 10, 255] {
+        let bad = crate::RawPoll { exchanges, ..raw };
+        assert!(bad.negcon().is_none());
+        assert_eq!(bad.to_state().mode, PadMode::Unknown);
+    }
+    assert!(crate::RawPoll {
+        id_low: 0x73,
+        ..raw
+    }
+    .negcon()
+    .is_none());
+    assert!(crate::RawPoll { id_high: 0, ..raw }.negcon().is_none());
+    assert!(crate::RawPoll {
+        mode: PadMode::Analog,
+        ..raw
+    }
+    .negcon()
+    .is_none());
+}
