@@ -840,13 +840,16 @@ fn references(
                 4
             }
             5 => {
-                let address =
+                let address = if self_target.is_some() {
+                    self_window_address(linked, word, relocation.kind, &target.1)?
+                } else {
                     hi_lo_address(linked, image, relocation, relocations).map_err(|e| {
                         format!(
                             "{e} at {:#010x} target {:#010x}",
                             relocation.address, relocation.target_address
                         )
-                    })?;
+                    })?
+                };
                 if address < target.1.start || address > target.1.end {
                     return Err("HI16 target bounds".into());
                 }
@@ -856,13 +859,16 @@ fn references(
                 2
             }
             6 => {
-                let address =
+                let address = if self_target.is_some() {
+                    self_window_address(linked, word, relocation.kind, &target.1)?
+                } else {
                     hi_lo_address(linked, image, relocation, relocations).map_err(|e| {
                         format!(
                             "{e} at {:#010x} target {:#010x}",
                             relocation.address, relocation.target_address
                         )
-                    })?;
+                    })?
+                };
                 if address < target.1.start || address > target.1.end {
                     return Err("LO16 target bounds".into());
                 }
@@ -888,6 +894,37 @@ fn references(
         }
     }
     Ok(fixups.into_iter().collect())
+}
+
+// A selected self image is admitted wholly inside one signed-low window.
+// Every HI therefore carries that same window; each signed LO identifies its
+// exact owned address independently, including across compiler loop scheduling.
+fn self_window_address(
+    linked: u32,
+    word: u32,
+    kind: u8,
+    owner: &Range<u32>,
+) -> Result<u32, String> {
+    let window = overlay::window(linked);
+    if owner.is_empty()
+        || overlay::window(owner.start) != window
+        || overlay::window(owner.end - 1) != window
+    {
+        return Err("self owner crosses signed-low window".into());
+    }
+    match kind {
+        5 if word >> 26 == 15 && (word >> 16) & 31 != 0 && word & 0xffff == window >> 16 => {
+            Ok(owner.start)
+        }
+        6 if matches!(word>>26,8|9|32..=38|40..=43|46) && (word >> 21) & 31 != 0 => {
+            let address = window.wrapping_add_signed(word as u16 as i16 as i32);
+            if address < owner.start || address > owner.end {
+                return Err("self LO16 target bounds".into());
+            }
+            Ok(address)
+        }
+        _ => Err("unsupported self HI16/LO16 instruction or window".into()),
+    }
 }
 
 fn hi_lo_address(
@@ -962,7 +999,7 @@ fn base_reaches_low(linked: u32, image: &[u32], high: &Relocation, low: &Relocat
     if origin == target {
         return true;
     }
-    if end - start > 16 {
+    if end - start > 32 {
         return false;
     }
     // 0 independent, 1 exactly one contribution, 2 unsupported/multiple.
@@ -1083,6 +1120,140 @@ mod tests {
         triple[5] = 0x00421821; // addu r3,r2,r2
         triple[6] = 0x00620821; // addu r1,r3,r2
         assert!(hi_lo_address(base, &triple, &relocations[0], &relocations).is_err());
+    }
+    #[test]
+    fn indexed_cold_table_seventeen_instruction_path() {
+        // Compiler-emitted HK False Knight path, not an original game method.
+        let base = 0x8040bc4c;
+        let image = [
+            0x3c028041, 0x0140a025, 0x0100f025, 0xafa10028, 0x96210020, 0, 0xafa1002c, 0x24010a0a,
+            0xa7a1005c, 0x3c010a0a, 0xa3a0005e, 0x34210a0a, 0xafa10058, 0x92a10044, 0, 0x00010880,
+            0x00220821, 0x8c21d6ac,
+        ];
+        let relocations = [
+            Relocation {
+                address: base,
+                kind: 5,
+                target_section: 3,
+                target_address: 0x8040d480,
+            },
+            Relocation {
+                address: base + 68,
+                kind: 6,
+                target_section: 3,
+                target_address: 0x8040d480,
+            },
+        ];
+        for relocation in &relocations {
+            assert_eq!(
+                hi_lo_address(base, &image, relocation, &relocations).unwrap(),
+                0x8040d6ac
+            );
+        }
+        for (index, word) in [(8, 0x10000000), (8, 0x24020009)] {
+            let mut invalid = image;
+            invalid[index] = word;
+            assert!(hi_lo_address(base, &invalid, &relocations[0], &relocations).is_err());
+        }
+        let mut triple = image;
+        triple[15] = 0x00421821;
+        triple[16] = 0x00620821;
+        assert!(hi_lo_address(base, &triple, &relocations[0], &relocations).is_err());
+        let mut too_long = vec![0; 34];
+        too_long[0] = image[0];
+        too_long[32] = image[16];
+        too_long[33] = image[17];
+        let mut distant = relocations;
+        distant[1].address = base + 132;
+        assert!(hi_lo_address(base, &too_long, &distant[0], &distant).is_err());
+    }
+    #[test]
+    fn self_window_relocations_survive_scheduling_and_loaded_low_sign_change() {
+        let linked = 0x80408000;
+        let owner = linked + 0x100..linked + 0x200;
+        let mut image = vec![0; 128];
+        image[0] = 0x3c158041;
+        image[19] = 0x08000000 | ((linked + 100) >> 2) & 0x03ffffff;
+        image[21] = 0x10400002;
+        image[30] = 0x8c638110;
+        image[31] = 0x8c6481e0;
+        let relocations = [
+            Relocation {
+                address: linked,
+                kind: 5,
+                target_section: 3,
+                target_address: owner.start,
+            },
+            Relocation {
+                address: linked + 120,
+                kind: 6,
+                target_section: 3,
+                target_address: owner.start,
+            },
+            Relocation {
+                address: linked + 124,
+                kind: 6,
+                target_section: 3,
+                target_address: owner.start,
+            },
+        ];
+        let code = linked..linked + 128;
+        let cold = [(1, code.clone()), (3, owner.clone())];
+        let fixups = references(
+            linked,
+            &image,
+            std::slice::from_ref(&code),
+            &[],
+            &cold,
+            &[],
+            &relocations,
+        )
+        .unwrap();
+        assert!(fixups.contains(&0x20000000));
+        assert!(fixups.contains(&0x30000078));
+        assert!(fixups.contains(&0x3000007c));
+        for loaded in [0x801d7d00, 0x801d9000] {
+            overlay::placement(loaded, 0x200 + 136, true).unwrap();
+            let high = overlay::relocate(image[0], 2, linked, loaded, 0).unwrap();
+            for (index, offset) in [(30, 0x110), (31, 0x1e0)] {
+                let low =
+                    overlay::relocate(image[index], 3, linked, loaded, (index * 4) as u32).unwrap();
+                let address = ((high & 0xffff) << 16).wrapping_add_signed(low as u16 as i16 as i32);
+                assert_eq!(address, loaded + offset);
+            }
+        }
+        for (index, word) in [
+            (0, 0x3c158040),
+            (0, 0x26b58041),
+            (30, 0x34638110),
+            (30, 0x8c638300),
+        ] {
+            let mut invalid = image.clone();
+            invalid[index] = word;
+            assert!(references(
+                linked,
+                &invalid,
+                std::slice::from_ref(&code),
+                &[],
+                &cold,
+                &[],
+                &relocations
+            )
+            .is_err());
+        }
+        assert!(self_window_address(linked, image[0], 5, &(0x80418000..0x80418004)).is_err());
+        let mut escaped = relocations;
+        escaped[1].target_section = 99;
+        assert!(references(
+            linked,
+            &image,
+            std::slice::from_ref(&code),
+            &[],
+            &cold,
+            &[],
+            &escaped
+        )
+        .is_err());
     }
     fn hardening_fixture() -> PackedImage<'static> {
         let base = 0x80408000;
