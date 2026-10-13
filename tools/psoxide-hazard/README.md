@@ -52,3 +52,59 @@ its admission. Consumer production linking, RAM/residency, stack and focused
 gameplay qualification remain required. The embedded `hello-overlay` example
 qualifies the callable ABI and resident-service import, not CD transport or net
 resident memory savings.
+
+## Independent images from one final link
+
+`overlay-compose` owns the complete publication when two or more independently
+admitted images share one resident executable. Do not merge outputs from separate
+`overlay-package` invocations. All images still use one source-matched ELF and
+map, and each image owns its code, tables, descriptor and call array.
+
+```sh
+overlay-compose game.elf raw-generation \
+  --header .ps_exe_head --resident .text --resident .data --resident .bss \
+  --image forest --id 1 --code .overlay.forest.text \
+  --data .overlay.forest.rodata --descriptor FOREST_DESCRIPTOR \
+  --sites FOREST_CALLS --trap overlay_unloaded \
+  --call forest_wrapper:forest_entry \
+  --image shop --id 2 --code .overlay.shop.text \
+  --data .overlay.shop.rodata --descriptor SHOP_DESCRIPTOR \
+  --sites SHOP_CALLS --trap overlay_unloaded \
+  --call shop_wrapper:shop_entry
+```
+
+The new generation directory contains `runtime.exe`, one `NAME.pak` per image,
+`guard.exe`, `guard-args` with every module/code range, and `manifest.txt` with
+all call sites and final checksums. Its union of cold sections is excluded from
+resident bytes. Identities, section ownership, metadata ranges and call sites
+must be distinct across images. Independently linked addresses are supported;
+references between cold images remain rejected.
+
+Harden and check the single composite `raw-generation/guard.exe` with all emitted
+ranges. Repeat the complete batch command using a new destination directory and
+`--final-guard raw-generation/guard.exe`. Check the resulting final composite
+again, then ship its runtime executable and all matching packages as one bound
+generation. The finalizer refreshes every payload, relocation list, checksum and
+metadata table before publishing any output. It preserves typed guard calls and
+traps every shipped resident call site. An existing destination is rejected;
+incomplete I/O staging is retained separately and never becomes the published
+generation. There is no second source link or consumer-side checksum/byte merge.
+
+### Existing pinned compact consumers
+
+Legacy consumers with an existing eight-byte import table may use
+`--compact-sites SYMBOL --compact-ranges SYMBOL --compact-trap SYMBOL` instead
+of per-image descriptor/site/trap tables. Each image may additionally declare
+`--pinned OWNER:SITE_OFFSET:KIND:TARGET_OFFSET`; offsets accept decimal or `0x`
+notation. Kinds 2/3 are the exact resident HI16/LO16 pair addressing cold data,
+and kind 4 is an exact initialized resident callback word addressing cold code.
+The packer verifies the original symbol, relocation, instruction and destination;
+unused, ambiguous or changed declarations fail. These bindings retain the
+consumer's pre-existing pinned lifetime discipline. They provide no new lease
+or callback lifetime guarantee. The ordinary descriptor/leased API rejects them.
+Finalization preserves these bindings and traps them in the runtime image while
+restoring their original values in the complete guard image.
+
+Module guard ranges include the complete 136-byte trampoline reserve, beginning
+at its eight-byte magic/count header. This is required for hazard-tool discovery;
+the reserved size and executable entry offsets do not change.
