@@ -209,6 +209,8 @@ struct Engine {
     looping: bool,
     /// A pause was refused; try again at the next poll.
     pause_pending: bool,
+    suspended: bool,
+    suspend_pending: bool,
     start_lba: u32,
     head_lba: u32,
 }
@@ -220,12 +222,16 @@ impl Engine {
             song: None,
             looping: false,
             pause_pending: false,
+            suspended: false,
+            suspend_pending: false,
             start_lba: 0,
             head_lba: 0,
         }
     }
 
     fn start(&mut self, drive: &mut impl Drive, song: Song, looping: bool) -> Result<(), Error> {
+        self.suspended = false;
+        self.suspend_pending = false;
         let file = song.file;
         let result = (|| {
             if !drive.unmute() {
@@ -268,11 +274,38 @@ impl Engine {
     /// Pause a running drive. The drive refuses a pause during the seek that
     /// starts a read, so a refused pause is retried by [`Self::poll`].
     fn stop(&mut self, drive: &mut impl Drive) {
+        self.suspended = false;
+        self.suspend_pending = false;
         if self.state != State::Idle {
             self.pause_pending = !drive.pause();
         }
         self.state = State::Idle;
         self.song = None;
+    }
+
+    fn suspend(&mut self, drive: &mut impl Drive) -> bool {
+        if self.state == State::Idle || self.suspended {
+            return true;
+        }
+        self.suspended = drive.pause();
+        self.suspend_pending = !self.suspended;
+        self.suspended
+    }
+
+    fn resume(&mut self, drive: &mut impl Drive) -> Result<(), Error> {
+        if self.suspended {
+            // No Setloc: ReadS resumes at the controller's paused position.
+            // The controller can repeat its last sector; this is not a
+            // sample-exact audio cursor. Keep the state on a refused ReadS.
+            if !drive.start_streaming() {
+                return Err(Error::Read);
+            }
+            self.suspended = false;
+        }
+        // A refused Pause left the original read active. Cancel its retry
+        // without starting another read or changing the pending seek.
+        self.suspend_pending = false;
+        Ok(())
     }
 
     fn poll(&mut self, drive: &mut impl Drive) -> Event {
@@ -282,6 +315,12 @@ impl Engine {
             }
             return Event::Idle;
         };
+        if self.suspend_pending {
+            self.suspend(drive);
+        }
+        if self.suspended || self.suspend_pending {
+            return Event::Playing;
+        }
         let end = self.start_lba + song.file.span_sector_count();
         if let Some(head) = drive.head_lba() {
             if self.state == State::Seeking && (self.start_lba..end).contains(&head) {
@@ -298,7 +337,7 @@ impl Engine {
     }
 
     fn is_streaming(&self) -> bool {
-        self.state == State::Streaming
+        self.state == State::Streaming && !self.suspended && !self.suspend_pending
     }
 
     fn elapsed_millis(&self) -> u32 {
@@ -354,8 +393,32 @@ impl Player {
         self.engine.stop(&mut self.cd);
     }
 
+    /// Suspend the current song without releasing the CD token or forgetting
+    /// its filter, looping policy or elapsed position. Returns false when the
+    /// drive refuses Pause during a seek; keep polling to retry it.
+    /// An idle player or an already suspended song returns true.
+    pub fn suspend(&mut self) -> bool {
+        self.engine.suspend(&mut self.cd)
+    }
+
+    /// Continue a suspended read at the drive's current position, without
+    /// Setloc or a seek to the beginning. Hardware may repeat the last sector;
+    /// this does not promise sample-exact audio continuation. A refused ReadS
+    /// returns an error and leaves the song suspended for an explicit retry.
+    /// Cancels a still-pending suspension; idle and running players are no-ops.
+    pub fn resume(&mut self) -> Result<(), Error> {
+        self.engine.resume(&mut self.cd)
+    }
+
+    /// Whether the drive has acknowledged suspension. False while Pause is
+    /// still being retried. The retained song still counts as `is_playing`.
+    pub fn is_suspended(&self) -> bool {
+        self.engine.suspended
+    }
+
     /// Call about once per frame: notices the end of the song and loops or
-    /// stops. Costs one drive command.
+    /// stops, or retries a pending suspension. A suspended song returns
+    /// `Event::Playing` without querying or advancing the head.
     pub fn poll(&mut self) -> Event {
         self.engine.poll(&mut self.cd)
     }
@@ -466,6 +529,125 @@ mod tests {
     /// 100 sectors of songs plus the guard, at LBA 1000.
     fn song(speed: DriveSpeed) -> Song {
         File::new(1000, 100 + END_GUARD_SECTORS, 3, speed).song(2)
+    }
+
+    #[test]
+    fn suspension_retains_song_and_resumes_without_seek() {
+        let mut drive = Fake::default();
+        let mut engine = Engine::new();
+        let original = song(DriveSpeed::Single);
+        engine.start(&mut drive, original, true).unwrap();
+        drive.heads = vec![Some(1040)];
+        engine.poll(&mut drive);
+        let elapsed = engine.elapsed_millis();
+        drive.log.clear();
+        assert!(engine.suspend(&mut drive));
+        assert!(!engine.is_streaming());
+        drive.heads = vec![Some(1105)];
+        assert_eq!(engine.poll(&mut drive), Event::Playing);
+        assert_eq!(engine.elapsed_millis(), elapsed);
+        assert_eq!(
+            drive.heads.len(),
+            1,
+            "suspended polls must not read the head"
+        );
+        assert!(engine.looping);
+        assert_eq!(engine.song, Some(original));
+        assert!(engine.suspend(&mut drive));
+        engine.resume(&mut drive).unwrap();
+        assert_eq!(drive.log, ["pause", "read"]);
+        assert!(engine.is_streaming());
+        assert_eq!(engine.poll(&mut drive), Event::Looped);
+    }
+
+    #[test]
+    fn refused_suspend_retries_without_advancing_or_looping() {
+        let mut drive = Fake {
+            pause_refusals: 2,
+            ..Fake::default()
+        };
+        let mut engine = Engine::new();
+        engine
+            .start(&mut drive, song(DriveSpeed::Double), true)
+            .unwrap();
+        drive.log.clear();
+        assert!(!engine.suspend(&mut drive));
+        assert_eq!(engine.poll(&mut drive), Event::Playing);
+        assert!(!engine.suspended);
+        assert_eq!(engine.poll(&mut drive), Event::Playing);
+        assert!(engine.suspended);
+        assert_eq!(drive.log, ["pause", "pause", "pause"]);
+        engine.resume(&mut drive).unwrap();
+        assert_eq!(engine.state, State::Seeking);
+        drive.heads = vec![Some(2000), Some(1010)];
+        assert_eq!(engine.poll(&mut drive), Event::Playing);
+        assert!(!engine.is_streaming());
+        assert_eq!(engine.poll(&mut drive), Event::Playing);
+        assert!(engine.is_streaming());
+    }
+
+    #[test]
+    fn resume_cancels_refused_pause_without_duplicate_read() {
+        let mut drive = Fake {
+            pause_refusals: 1,
+            ..Fake::default()
+        };
+        let mut engine = Engine::new();
+        engine
+            .start(&mut drive, song(DriveSpeed::Single), false)
+            .unwrap();
+        drive.log.clear();
+        assert!(!engine.suspend(&mut drive));
+        engine.resume(&mut drive).unwrap();
+        engine.poll(&mut drive);
+        assert_eq!(drive.log, ["pause"]);
+        assert!(!engine.suspend_pending);
+    }
+
+    #[test]
+    fn refused_resume_keeps_suspension_for_explicit_retry() {
+        let mut drive = Fake::default();
+        let mut engine = Engine::new();
+        engine
+            .start(&mut drive, song(DriveSpeed::Single), false)
+            .unwrap();
+        assert!(engine.suspend(&mut drive));
+        drive.fail_at = Some("read");
+        assert_eq!(engine.resume(&mut drive), Err(Error::Read));
+        assert!(engine.suspended);
+        drive.log.clear();
+        assert_eq!(engine.poll(&mut drive), Event::Playing);
+        assert!(drive.log.is_empty());
+        drive.fail_at = None;
+        engine.resume(&mut drive).unwrap();
+        assert!(!engine.suspended);
+    }
+
+    #[test]
+    fn replacement_song_and_stop_cancel_old_suspension() {
+        for pending in [false, true] {
+            let mut drive = Fake::default();
+            let mut engine = Engine::new();
+            engine
+                .start(&mut drive, song(DriveSpeed::Single), true)
+                .unwrap();
+            drive.pause_refusals = u32::from(pending);
+            engine.suspend(&mut drive);
+            let replacement = song(DriveSpeed::Double);
+            engine.start(&mut drive, replacement, false).unwrap();
+            drive.log.clear();
+            engine.resume(&mut drive).unwrap();
+            assert_eq!(engine.song, Some(replacement));
+            assert!(!engine.looping);
+            assert!(drive.log.is_empty());
+            engine.suspend(&mut drive);
+            engine.stop(&mut drive);
+            drive.log.clear();
+            engine.resume(&mut drive).unwrap();
+            assert_eq!(engine.poll(&mut drive), Event::Idle);
+            assert!(engine.song.is_none());
+            assert!(drive.log.is_empty());
+        }
     }
 
     #[test]
