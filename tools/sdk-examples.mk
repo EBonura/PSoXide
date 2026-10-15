@@ -67,7 +67,7 @@ hello-xa-disc:
 hello-xa-gate: hello-xa-disc
 	@test -n "$(FRONTEND)" || (echo "Set FRONTEND to the PSoXide-emulator executable"; exit 1)
 	cargo build -q --release --locked -p psx-audio-cook
-	sh tools/xa_gate.sh "$(FRONTEND)" "$(BUILD)/$(TARGET)/release/hello-xa.cue" target/release/psx-audio-cook
+	sh tools/xa_gate.sh "$(FRONTEND)" "$(BUILD)/$(TARGET)/release/hello-xa.cue" $(or $(CARGO_TARGET_DIR),target)/release/psx-audio-cook
 # hello-xa-resume plays one song, reads data sectors while it is suspended,
 # resumes it and checks the player, the song clock, the drive command log and
 # the audio capture. The songs run 24 s so the pause and the resume both land
@@ -85,7 +85,7 @@ hello-xa-resume-disc:
 hello-xa-resume-gate: hello-xa-resume-disc
 	@test -n "$(FRONTEND)" || (echo "Set FRONTEND to the PSoXide-emulator executable"; exit 1)
 	cargo build -q --release --locked -p psx-audio-cook
-	sh tools/xa_resume_gate.sh "$(FRONTEND)" "$(BUILD)/$(TARGET)/release/hello-xa-resume.cue" target/release/psx-audio-cook
+	sh tools/xa_resume_gate.sh "$(FRONTEND)" "$(BUILD)/$(TARGET)/release/hello-xa-resume.cue" $(or $(CARGO_TARGET_DIR),target)/release/psx-audio-cook
 # hello-cdstream streams CDTEST.BIN, the deterministic file mkisopsx writes with
 # --cdtest-sectors, through psx-cdstream and checks every byte. 960 sectors is
 # nearly all the boot area has room for after the executable.
