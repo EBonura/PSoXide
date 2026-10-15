@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //! Shared, allocator-free game preferences.
 //!
-//! The record holds settings that recur across PSoXide games plus seven
-//! game-owned flag bits. Games remain free to keep larger simulation or
-//! renderer-specific data in their own saves. The byte format is explicit and
-//! checksummed so a newer executable can reject a torn or incompatible card
-//! write and fall back to its shipped defaults.
+//! The record holds settings that recur across PSoXide games, seven
+//! game-owned flag bits and [`GAME_BYTES_LEN`] game-owned bytes. Games remain
+//! free to keep larger simulation or renderer-specific data in their own saves.
+//! The byte format is explicit and checksummed so a newer executable can reject
+//! a torn or incompatible card write and fall back to its shipped defaults.
 
 #![no_std]
 #![warn(missing_docs)]
@@ -18,18 +18,39 @@ pub const MAGIC: [u8; 4] = *b"PSST";
 /// Current record format version.
 ///
 /// Version 1 held a 0..=100 brightness percentage that no game used. Version 2
-/// replaces it with the [`Brightness`] step (the save byte of
-/// [`Brightness::to_byte`]) and adds the [`ScreenOffset`] bytes after the
-/// checksum. [`Profile::decode`] still reads version 1 records and gives the
-/// two picture options their defaults; [`Profile::encode`] writes version 2.
-pub const VERSION: u8 = 2;
+/// replaced it with the [`Brightness`] step (the save byte of
+/// [`Brightness::to_byte`]) and added the [`ScreenOffset`] bytes after the
+/// checksum. Version 3 adds [`GAME_BYTES_LEN`] game-owned bytes after the
+/// screen offset and brings those two offset bytes under the checksum.
+/// [`Profile::decode`] reads versions 1 and 2 and gives every field they lack
+/// its default (the picture options for version 1, zeroed game bytes for both);
+/// [`Profile::encode`] writes version 3.
+///
+/// An executable built before version 3 refuses a version 3 record with
+/// [`CodecError::UnsupportedVersion`] and falls back to its shipped defaults,
+/// exactly as it does for a torn record. A record carries no way for older code
+/// to skip a layout it does not know, so there is no partial load: keep a game
+/// and its save on the same SDK, or accept a settings reset on rollback.
+pub const VERSION: u8 = 3;
 /// The oldest record version [`Profile::decode`] reads.
 const OLDEST_VERSION: u8 = 1;
 /// Header bytes before action bindings and scores, in a version 1 record.
 const HEADER_LEN_V1: usize = 16;
 /// Header bytes before action bindings and scores, in a version 2 record:
 /// the version 1 header plus the screen X and Y bytes.
-const HEADER_LEN: usize = 18;
+const HEADER_LEN_V2: usize = 18;
+/// Number of game-defined bytes in a [`Profile`] (version 3 onward).
+///
+/// Eight bytes keep every record far inside [`MAX_RECORD_LEN`] (the largest
+/// shipping shape, 9 actions and no scores, grows from 54 to 62 bytes) and a
+/// settings file is one 8 KiB memory-card block whatever its length, so the
+/// card footprint does not change.
+pub const GAME_BYTES_LEN: usize = 8;
+/// Header bytes before action bindings and scores, in a version 3 record:
+/// the version 2 header plus [`GAME_BYTES_LEN`] game bytes.
+const HEADER_LEN: usize = HEADER_LEN_V2 + GAME_BYTES_LEN;
+/// Offset of the checksum byte in every version.
+const CHECKSUM_AT: usize = 15;
 /// Bytes occupied by one action binding.
 const BINDING_LEN: usize = 4;
 /// Bytes occupied by one high score.
@@ -71,6 +92,13 @@ pub struct Profile<const ACTIONS: usize, const SCORES: usize> {
     /// Bit flags: bit 0 is [`FLAG_INVERT_Y`], bits 1 through 7 belong to the
     /// game. Prefer [`Self::set_game_flag`] so unrelated bits survive edits.
     pub flags: u8,
+    /// Bytes reserved for the game's own settings, zero by default and stored
+    /// verbatim (version 3 onward). The SDK never reads, clamps or interprets
+    /// them, so a game must range-check what it loads from its own slots.
+    /// Name each slot with a `const` index in the game, for example
+    /// `const FOV_BYTE: usize = 0;`. A slot a game has not written reads as 0,
+    /// including from a version 1 or 2 record, so make 0 mean "default".
+    pub game_bytes: [u8; GAME_BYTES_LEN],
     /// Logical action bindings.
     pub actions: ActionMap<ACTIONS>,
     /// Persistent high-score slots.
@@ -91,6 +119,7 @@ impl<const ACTIONS: usize, const SCORES: usize> Profile<ACTIONS, SCORES> {
             look_speed_percent: 100,
             difficulty: 1,
             flags: 0,
+            game_bytes: [0; GAME_BYTES_LEN],
             actions,
             high_scores: [0; SCORES],
         }
@@ -156,7 +185,7 @@ impl<const ACTIONS: usize, const SCORES: usize> Profile<ACTIONS, SCORES> {
         true
     }
 
-    /// Encode into `out`, returning the bytes used.
+    /// Encode into `out` as a version 3 record, returning the bytes used.
     pub fn encode(&self, out: &mut [u8]) -> Result<usize, CodecError> {
         let len = Self::encoded_len();
         if len > MAX_RECORD_LEN || out.len() < len {
@@ -175,6 +204,10 @@ impl<const ACTIONS: usize, const SCORES: usize> Profile<ACTIONS, SCORES> {
         out[12] = self.look_deadzone;
         out[13] = self.look_speed_percent;
         out[14] = self.difficulty;
+        let [screen_x, screen_y] = self.screen_offset.to_bytes();
+        out[16] = screen_x;
+        out[17] = screen_y;
+        out[HEADER_LEN_V2..HEADER_LEN].copy_from_slice(&self.game_bytes);
         let mut cursor = HEADER_LEN;
         for binding in self.actions.bindings() {
             put_u16(out, cursor, binding.primary);
@@ -185,16 +218,16 @@ impl<const ACTIONS: usize, const SCORES: usize> Profile<ACTIONS, SCORES> {
             put_u32(out, cursor, score);
             cursor += SCORE_LEN;
         }
-        let [screen_x, screen_y] = self.screen_offset.to_bytes();
-        out[16] = screen_x;
-        out[17] = screen_y;
-        out[15] = checksum(&out[..15], &out[HEADER_LEN..len]);
+        // Version 3 seals every byte but the checksum itself.
+        out[CHECKSUM_AT] = checksum(&out[..CHECKSUM_AT], &out[CHECKSUM_AT + 1..len]);
         Ok(len)
     }
 
     /// Decode a profile of this exact action/score shape, from a record of
-    /// the current version or of version 1 (which carries no picture options,
-    /// so those read as their defaults).
+    /// the current version or of version 1 or 2. A version 1 record carries no
+    /// picture options, so those read as their defaults; a record older than
+    /// version 3 carries no game bytes, so those read as zero. Every other
+    /// field is preserved.
     pub fn decode(bytes: &[u8]) -> Result<Self, CodecError> {
         if bytes.len() < HEADER_LEN_V1 {
             return Err(CodecError::BufferTooSmall);
@@ -206,10 +239,10 @@ impl<const ACTIONS: usize, const SCORES: usize> Profile<ACTIONS, SCORES> {
         if !(OLDEST_VERSION..=VERSION).contains(&version) {
             return Err(CodecError::UnsupportedVersion);
         }
-        let header_len = if version == 1 {
-            HEADER_LEN_V1
-        } else {
-            HEADER_LEN
+        let header_len = match version {
+            1 => HEADER_LEN_V1,
+            2 => HEADER_LEN_V2,
+            _ => HEADER_LEN,
         };
         let len = header_len + ACTIONS * BINDING_LEN + SCORES * SCORE_LEN;
         if len > MAX_RECORD_LEN || bytes.len() < len {
@@ -218,7 +251,15 @@ impl<const ACTIONS: usize, const SCORES: usize> Profile<ACTIONS, SCORES> {
         if bytes[5] as usize != ACTIONS || bytes[6] as usize != SCORES {
             return Err(CodecError::WrongShape);
         }
-        if bytes[15] != checksum(&bytes[..15], &bytes[header_len..len]) {
+        // Versions 1 and 2 sealed the first 15 bytes and the payload after
+        // the header, leaving the version 2 screen offset bytes unprotected;
+        // version 3 seals everything but the checksum.
+        let sealed = if version >= 3 {
+            checksum(&bytes[..CHECKSUM_AT], &bytes[CHECKSUM_AT + 1..len])
+        } else {
+            checksum(&bytes[..CHECKSUM_AT], &bytes[header_len..len])
+        };
+        if bytes[CHECKSUM_AT] != sealed {
             return Err(CodecError::BadChecksum);
         }
         let (brightness, screen_offset) = if version == 1 {
@@ -229,6 +270,10 @@ impl<const ACTIONS: usize, const SCORES: usize> Profile<ACTIONS, SCORES> {
                 ScreenOffset::from_bytes([bytes[16], bytes[17]]),
             )
         };
+        let mut game_bytes = [0; GAME_BYTES_LEN];
+        if version >= 3 {
+            game_bytes.copy_from_slice(&bytes[HEADER_LEN_V2..HEADER_LEN]);
+        }
         let mut cursor = header_len;
         let mut bindings = [psx_pad::ActionBinding::UNBOUND; ACTIONS];
         for binding in &mut bindings {
@@ -251,6 +296,7 @@ impl<const ACTIONS: usize, const SCORES: usize> Profile<ACTIONS, SCORES> {
             look_speed_percent: bytes[13],
             difficulty: bytes[14],
             flags: bytes[7],
+            game_bytes,
             actions: ActionMap::new(bindings),
             high_scores,
         };
@@ -475,6 +521,39 @@ mod tests {
         (out, len)
     }
 
+    /// A version 2 record exactly as the previous release wrote it: an 18
+    /// byte header, no game bytes, and a checksum that leaves the two screen
+    /// offset bytes unsealed.
+    fn version_two_record(flags: u8) -> ([u8; MAX_RECORD_LEN], usize) {
+        let mut out = [0u8; MAX_RECORD_LEN];
+        let len = HEADER_LEN_V2 + 2 * BINDING_LEN + 3 * SCORE_LEN;
+        out[..4].copy_from_slice(&MAGIC);
+        out[4] = 2;
+        out[5] = 2;
+        out[6] = 3;
+        out[7] = flags;
+        out[8] = Brightness::new(-3).to_byte();
+        out[9] = 80;
+        out[10] = 60;
+        out[11] = 20;
+        out[12] = 14;
+        out[13] = 120;
+        // Version 2 shipped games stored their own value here.
+        out[14] = 3;
+        let [x, y] = ScreenOffset::<16>::new(5, -7).to_bytes();
+        out[16] = x;
+        out[17] = y;
+        put_u16(&mut out, 18, button::CROSS);
+        put_u16(&mut out, 20, button::CIRCLE);
+        put_u16(&mut out, 22, button::START);
+        put_u16(&mut out, 24, 0);
+        put_u32(&mut out, 26, 7);
+        put_u32(&mut out, 30, 42);
+        put_u32(&mut out, 34, 9);
+        out[15] = checksum(&out[..15], &out[HEADER_LEN_V2..len]);
+        (out, len)
+    }
+
     #[test]
     fn profile_round_trips_and_sanitizes() {
         let mut original = Profile::<2, 3>::new(ACTIONS);
@@ -533,7 +612,7 @@ mod tests {
             bytes[8] = byte;
             bytes[16] = 0x7F;
             bytes[17] = 0x80;
-            bytes[15] = checksum(&bytes[..15], &bytes[HEADER_LEN..len]);
+            bytes[15] = checksum(&bytes[..15], &bytes[16..len]);
             profile = Profile::<2, 1>::decode(&bytes[..len]).unwrap();
             assert_eq!(profile.brightness.level(), level);
             assert_eq!(profile.screen_offset.pixels(), (16, -16));
@@ -562,14 +641,14 @@ mod tests {
     }
 
     #[test]
-    fn a_version_one_record_is_rewritten_as_version_two() {
+    fn a_version_one_record_is_rewritten_as_the_current_version() {
         let (old, old_len) = version_one_record(75);
         let mut loaded = Profile::<2, 3>::decode(&old[..old_len]).unwrap();
         loaded.brightness = loaded.brightness.stepped(2);
         let mut bytes = [0u8; MAX_RECORD_LEN];
         let len = loaded.encode(&mut bytes).unwrap();
-        assert_eq!(len, old_len + 2);
-        assert_eq!(bytes[4], 2);
+        assert_eq!(len, old_len + 2 + GAME_BYTES_LEN);
+        assert_eq!(bytes[4], VERSION);
         let reloaded = Profile::<2, 3>::decode(&bytes[..len]).unwrap();
         assert_eq!(reloaded, loaded);
         assert_eq!(reloaded.brightness.level(), 2);
@@ -577,7 +656,7 @@ mod tests {
     }
 
     #[test]
-    fn game_bits_survive_both_record_versions_and_sanitize() {
+    fn game_bits_survive_every_record_version_and_sanitize() {
         let (mut old, old_len) = version_one_record(75);
         old[7] = 0xA7;
         old[15] = checksum(&old[..15], &old[HEADER_LEN_V1..old_len]);
@@ -590,10 +669,19 @@ mod tests {
 
         let mut bytes = [0u8; MAX_RECORD_LEN];
         let len = profile.encode(&mut bytes).unwrap();
-        assert_eq!(VERSION, 2);
-        assert_eq!(len, old_len + 2);
+        assert_eq!(VERSION, 3);
+        assert_eq!(len, old_len + 2 + GAME_BYTES_LEN);
         assert_eq!(bytes[7], 0xA7);
         assert_eq!(Profile::<2, 3>::decode(&bytes[..len]).unwrap(), profile);
+
+        let (mut v2, v2_len) = version_two_record(0xA7);
+        let loaded = Profile::<2, 3>::decode(&v2[..v2_len]).unwrap();
+        assert_eq!(loaded.game_flags(), 0xA6);
+        v2[7] ^= 0x40;
+        assert_eq!(
+            Profile::<2, 3>::decode(&v2[..v2_len]),
+            Err(CodecError::BadChecksum)
+        );
     }
 
     #[test]
@@ -615,13 +703,14 @@ mod tests {
     }
 
     #[test]
-    fn game_bits_keep_the_version_two_length_and_checksum() {
+    fn game_bits_keep_the_current_length_and_checksum() {
         let mut profile = Profile::<5, 0>::new(ActionMap::new([ActionBinding::UNBOUND; 5]));
         profile.set_game_flag(0x80, true);
         let mut bytes = [0u8; MAX_RECORD_LEN];
         let len = profile.encode(&mut bytes).unwrap();
-        assert_eq!(len, 38);
-        assert_eq!(bytes[4], 2);
+        assert_eq!(len, 18 + GAME_BYTES_LEN + 5 * BINDING_LEN);
+        assert_eq!(len, 46);
+        assert_eq!(bytes[4], 3);
         assert_eq!(bytes[7], 0x80);
         bytes[7] ^= 0x40;
         assert_eq!(
@@ -666,7 +755,7 @@ mod tests {
 
     #[cfg(feature = "card")]
     #[test]
-    fn a_version_one_card_file_loads_and_is_replaced_by_version_two() {
+    fn a_version_one_card_file_loads_and_is_replaced_by_the_current_version() {
         let (old, old_len) = version_one_record(75);
         let mut card = psx_mc::Card::new(psx_mc::RamCard::new());
         card.format().unwrap();
@@ -678,6 +767,152 @@ mod tests {
         save(&mut card, "BESLES-00000SETTEST1", "SETTINGS TEST", &profile).unwrap();
         let reloaded = load::<_, 2, 3>(&mut card, "BESLES-00000SETTEST1").unwrap();
         assert_eq!(reloaded, profile);
+    }
+
+    #[test]
+    fn game_bytes_default_to_zero_and_round_trip_verbatim() {
+        let mut profile = Profile::<2, 3>::new(ACTIONS);
+        assert_eq!(profile.game_bytes, [0; GAME_BYTES_LEN]);
+        profile.game_bytes = [0, 255, 1, 128, 7, 0, 9, 200];
+        profile.difficulty = 2;
+        profile.high_scores = [7, 42, 9];
+        let mut bytes = [0u8; MAX_RECORD_LEN];
+        let len = profile.encode(&mut bytes).unwrap();
+        assert_eq!(&bytes[18..26], &[0, 255, 1, 128, 7, 0, 9, 200]);
+        let loaded = Profile::<2, 3>::decode(&bytes[..len]).unwrap();
+        // sanitize() must not touch them, and nothing else moves.
+        assert_eq!(loaded, profile);
+        assert_eq!(loaded.difficulty, 2);
+    }
+
+    #[test]
+    fn a_version_two_record_loads_with_zero_game_bytes_and_every_field_kept() {
+        let (bytes, len) = version_two_record(FLAG_INVERT_Y | 0x40);
+        let loaded = Profile::<2, 3>::decode(&bytes[..len]).unwrap();
+        assert_eq!(loaded.game_bytes, [0; GAME_BYTES_LEN]);
+        assert_eq!(loaded.brightness.level(), -3);
+        assert_eq!(loaded.screen_offset.pixels(), (5, -7));
+        assert_eq!(loaded.sfx_volume, 80);
+        assert_eq!(loaded.music_volume, 60);
+        assert_eq!(loaded.move_deadzone, 20);
+        assert_eq!(loaded.look_deadzone, 14);
+        assert_eq!(loaded.look_speed_percent, 120);
+        assert_eq!(loaded.difficulty, 3);
+        assert_eq!(loaded.flags, FLAG_INVERT_Y | 0x40);
+        assert_eq!(loaded.actions, ACTIONS);
+        assert_eq!(loaded.high_scores, [7, 42, 9]);
+    }
+
+    #[test]
+    fn a_version_one_record_also_loads_with_zero_game_bytes() {
+        let (bytes, len) = version_one_record(75);
+        let loaded = Profile::<2, 3>::decode(&bytes[..len]).unwrap();
+        assert_eq!(loaded.game_bytes, [0; GAME_BYTES_LEN]);
+    }
+
+    #[test]
+    fn a_version_two_record_is_rewritten_as_version_three_keeping_its_fields() {
+        let (old, old_len) = version_two_record(FLAG_INVERT_Y);
+        let mut loaded = Profile::<2, 3>::decode(&old[..old_len]).unwrap();
+        loaded.game_bytes[3] = 41;
+        let mut bytes = [0u8; MAX_RECORD_LEN];
+        let len = loaded.encode(&mut bytes).unwrap();
+        assert_eq!(len, old_len + GAME_BYTES_LEN);
+        assert_eq!(bytes[4], 3);
+        let reloaded = Profile::<2, 3>::decode(&bytes[..len]).unwrap();
+        assert_eq!(reloaded, loaded);
+        assert_eq!(reloaded.game_bytes[3], 41);
+        assert_eq!(reloaded.screen_offset.pixels(), (5, -7));
+        assert_eq!(reloaded.difficulty, 3);
+        assert_eq!(reloaded.high_scores, [7, 42, 9]);
+    }
+
+    #[test]
+    fn the_version_three_checksum_seals_the_game_bytes_and_screen_offset() {
+        let mut profile = Profile::<2, 3>::new(ACTIONS);
+        profile.game_bytes[0] = 5;
+        let mut bytes = [0u8; MAX_RECORD_LEN];
+        let len = profile.encode(&mut bytes).unwrap();
+        // Every byte but the checksum itself is covered: flipping any one
+        // is caught.
+        for at in (0..len).filter(|at| *at != 15 && *at != 4) {
+            let mut torn = bytes;
+            torn[at] ^= 0x01;
+            let result = Profile::<2, 3>::decode(&torn[..len]);
+            let expected = match at {
+                0..=3 => Err(CodecError::BadMagic),
+                5 | 6 => Err(CodecError::WrongShape),
+                _ => Err(CodecError::BadChecksum),
+            };
+            assert_eq!(result, expected, "byte {at}");
+        }
+    }
+
+    #[test]
+    fn a_version_four_record_and_a_cut_short_version_three_record_are_rejected() {
+        let profile = Profile::<2, 3>::new(ACTIONS);
+        let mut bytes = [0u8; MAX_RECORD_LEN];
+        let len = profile.encode(&mut bytes).unwrap();
+        // A reader never guesses the layout of a version it does not know.
+        let mut future = bytes;
+        future[4] = VERSION + 1;
+        assert_eq!(
+            Profile::<2, 3>::decode(&future[..len]),
+            Err(CodecError::UnsupportedVersion)
+        );
+        assert_eq!(
+            Profile::<2, 3>::decode(&bytes[..len - 1]),
+            Err(CodecError::BufferTooSmall)
+        );
+        // Another shape is refused.
+        assert_eq!(
+            Profile::<2, 2>::decode(&bytes[..len]),
+            Err(CodecError::WrongShape)
+        );
+    }
+
+    #[test]
+    fn the_record_size_limit_is_checked_for_the_version_three_header() {
+        // 18 + 8 + 4 * (actions + scores) must stay within MAX_RECORD_LEN.
+        let fits = Profile::<20, 5>::new(ActionMap::new([ActionBinding::UNBOUND; 20]));
+        assert_eq!(Profile::<20, 5>::encoded_len(), 126);
+        let mut bytes = [0u8; MAX_RECORD_LEN];
+        let len = fits.encode(&mut bytes).unwrap();
+        assert_eq!(Profile::<20, 5>::decode(&bytes[..len]).unwrap(), fits);
+
+        let too_big = Profile::<20, 6>::new(ActionMap::new([ActionBinding::UNBOUND; 20]));
+        assert_eq!(Profile::<20, 6>::encoded_len(), 130);
+        assert_eq!(too_big.encode(&mut bytes), Err(CodecError::BufferTooSmall));
+        // A caller buffer shorter than the record is refused too.
+        let small = Profile::<2, 1>::new(ACTIONS);
+        let mut short = [0u8; 20];
+        assert_eq!(small.encode(&mut short), Err(CodecError::BufferTooSmall));
+    }
+
+    #[test]
+    fn every_shipping_shape_still_fits_in_one_card_block() {
+        // NitroXide 9/0, VoXide 5/0 and the arcade microgames 0/3.
+        assert_eq!(Profile::<9, 0>::encoded_len(), 62);
+        assert_eq!(Profile::<5, 0>::encoded_len(), 46);
+        assert_eq!(Profile::<0, 3>::encoded_len(), 38);
+        assert!(Profile::<9, 0>::encoded_len() <= MAX_RECORD_LEN);
+    }
+
+    #[cfg(feature = "card")]
+    #[test]
+    fn a_version_two_card_file_loads_and_is_replaced_by_version_three() {
+        let (old, old_len) = version_two_record(0);
+        let mut card = psx_mc::Card::new(psx_mc::RamCard::new());
+        card.format().unwrap();
+        card.write("BESLES-00000SETTEST1", "SETTINGS TEST", &old[..old_len])
+            .unwrap();
+        let mut profile = load::<_, 2, 3>(&mut card, "BESLES-00000SETTEST1").unwrap();
+        assert_eq!(profile.game_bytes, [0; GAME_BYTES_LEN]);
+        profile.game_bytes[1] = 9;
+        save(&mut card, "BESLES-00000SETTEST1", "SETTINGS TEST", &profile).unwrap();
+        let reloaded = load::<_, 2, 3>(&mut card, "BESLES-00000SETTEST1").unwrap();
+        assert_eq!(reloaded, profile);
+        assert_eq!(reloaded.game_bytes[1], 9);
     }
 
     #[test]

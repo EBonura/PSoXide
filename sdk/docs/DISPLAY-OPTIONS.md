@@ -195,3 +195,12 @@ version 2, so the first save after an update upgrades the file. A build that
 only knows version 1 refuses a version 2 record (`UnsupportedVersion`) and
 falls back to its defaults, so keep the game and its save on the same SDK.
 Host tests pin both versions, every step, and out-of-range bytes clamping.
+
+Version 3 added eight game-owned bytes (`Profile::game_bytes`, header bytes 18
+to 25) so a game with a setting of its own no longer borrows a named field, and
+moved the checksum to cover every byte but itself (versions 1 and 2 left the
+screen offset bytes outside it). `decode` still reads versions 1 and 2 with the
+game bytes zeroed and every other field kept; `encode` writes version 3. A
+build that only knows version 2 refuses a version 3 record exactly as described
+above, which resets that game's settings (and any high scores in the record)
+on a rollback.
