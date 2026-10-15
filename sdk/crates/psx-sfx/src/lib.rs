@@ -31,11 +31,46 @@
 //! ```
 //!
 //! Map ambience whose ADPCM carries loop flags uses [`LoopingSample`].
+//!
+//! # Above the plumbing
+//!
+//! Everything above is hardware plumbing: no policy, one decision per call. The
+//! modules below add the policy that ten programs each wrote for themselves, as
+//! `no_std`, heap-free, `i32`-only bookkeeping that never touches a register and
+//! so runs, and is tested, on the host:
+//!
+//! * [`mixer`]: the 24 voices split into lanes, with priority classes, `Smart`
+//!   and `StrictRetail` stealing policies, generation-checked handles for
+//!   one-shots and loops, and wrap-safe lifetimes.
+//! * [`vloop`]: more loops than voices, with the voices going to the loudest.
+//! * [`space`]: distance curves (including the Quake and GoldSrc laws), pan
+//!   laws and the split-screen listener rules, turning positions into ear levels.
+//! * [`master`]: the effects and music master volumes and the music duck.
+//! * [`hw`]: the [`Hw`](hw::Hw) trait through which the bookkeeping drives the
+//!   chip, and a [`Recorder`](hw::Recorder) that logs the calls instead.
+//! * [`retail`]: WipEout's retail note owner, as the reference for the
+//!   `StrictRetail` policy.
 
 #![no_std]
 
+#[cfg(test)]
+extern crate std;
+
+pub mod hw;
+pub mod master;
+pub mod mixer;
+pub mod retail;
+pub mod space;
+pub mod vloop;
+
 use psx_asset::Audio;
 use psx_spu::{Adsr, Pitch, Spu, SpuAddr, Voice, Volume};
+
+/// Highest level the SPU accepts in a volume register.
+pub(crate) const SPU_LEVEL_MAX: i16 = 0x3FFF;
+
+/// Lowest level the SPU accepts in a volume register (phase inverted).
+pub(crate) const SPU_LEVEL_MIN: i16 = -0x4000;
 
 /// Decoded samples in one ADPCM block. Fourteen data bytes, two nibbles each.
 const SAMPLES_PER_BLOCK: u32 = 28;
