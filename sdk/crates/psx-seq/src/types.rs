@@ -356,6 +356,8 @@ impl Adsr {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Vibrato {
     pub active: bool,
+    /// Driven by the game (a live note), not by a channel's targets.
+    pub live: bool,
     pub time: u32,
     /// Q8.
     pub depth: u32,
@@ -371,6 +373,7 @@ pub(crate) struct Vibrato {
 impl Vibrato {
     pub const INIT: Self = Self {
         active: false,
+        live: false,
         time: 0,
         depth: 0,
         rate: 0,
@@ -394,6 +397,12 @@ pub(crate) enum NoteList {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Note {
     pub list: NoteList,
+    /// Started by the game through `note_on`, not by a layer.
+    pub live: bool,
+    /// Bumped each time a live note starts, so a stale handle is harmless.
+    pub live_gen: u8,
+    /// Release rate index of a live note's instrument.
+    pub live_decay: u8,
     /// 0 normal, 1 decaying, 2 releasing.
     pub phase: u8,
     pub priority: u8,
@@ -431,6 +440,9 @@ pub(crate) struct Note {
 impl Note {
     pub const INIT: Self = Self {
         list: NoteList::Disabled,
+        live: false,
+        live_gen: 0,
+        live_decay: 0,
         phase: 0,
         priority: 0,
         parent: NO_OWNER,

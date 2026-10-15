@@ -164,17 +164,17 @@ impl Hw for Renderer {
 
 /// Run `seq` for `seconds` and render it; returns stereo samples at
 /// [`OUT_RATE`]. `each_update` runs before every update with the update
-/// number, so a script can write IO ports on a timeline.
+/// number, so a script can write IO ports or play live notes on a timeline.
 pub fn render<const P: usize, const N: usize>(
     seq: &mut Sequencer<'_, P, N>,
     r: &mut Renderer,
     seconds: f64,
-    mut each_update: impl FnMut(u32, &mut Sequencer<'_, P, N>),
+    mut each_update: impl FnMut(u32, &mut Sequencer<'_, P, N>, &mut Renderer),
 ) {
     let updates = (seconds * UPDATE_HZ as f64) as u32;
     let per = (OUT_RATE / UPDATE_HZ) as usize;
     for u in 0..updates {
-        each_update(u, seq);
+        each_update(u, seq, r);
         seq.update(r);
         r.mix(per);
     }

@@ -650,3 +650,96 @@ fn a_song_that_patches_itself_plays_the_patched_note() {
     // key 12 is 27 semitones below the unison key: 4096 * 2^(-27/12)
     assert!((850..875).contains(&p), "{p}");
 }
+
+fn live_bank_seq<'a, const N: usize>(bank: &'a [u8], voices: u32) -> Sequencer<'a, 1, N> {
+    let mut seq: Sequencer<'_, 1, N> = Sequencer::new(voices);
+    seq.set_bank(Bank::parse(bank).unwrap(), 0x1000);
+    seq
+}
+
+#[test]
+fn a_live_note_plays_bends_and_releases() {
+    let bank = test_bank();
+    let mut seq = live_bank_seq::<4>(&bank, 0b1111);
+    let mut hw = Recorder::<512>::new();
+    let h = seq.note_on(&mut hw, 0, 0, 39, 127, 64, 9).expect("a voice");
+    seq.update(&mut hw);
+    assert_eq!(keyons(&hw), 1);
+    assert_eq!(pitches(&hw)[0], 4096, "key 39 at tuning 1.0");
+    assert!(seq.note_alive(h));
+    // bend an octave up: the voice is re-pitched on the next update
+    assert!(seq.note_bend(h, 2 << 16));
+    seq.update(&mut hw);
+    assert_eq!(*pitches(&hw).last().unwrap(), 8192);
+    // release: the envelope decays to nothing and the voice is keyed off
+    assert!(seq.note_off(h));
+    for _ in 0..600 {
+        seq.update(&mut hw);
+    }
+    assert!(!seq.note_alive(h));
+    assert_ne!(hw.keyed_off(), 0);
+    assert!(!seq.note_bend(h, 1 << 16), "a stale handle does nothing");
+}
+
+#[test]
+fn live_vibrato_wobbles_the_pitch() {
+    let bank = test_bank();
+    let mut seq = live_bank_seq::<4>(&bank, 0b1111);
+    let mut hw = Recorder::<512>::new();
+    let h = seq.note_on(&mut hw, 0, 0, 39, 127, 64, 9).unwrap();
+    assert!(seq.note_vibrato(h, 40, 30));
+    for _ in 0..100 {
+        seq.update(&mut hw);
+    }
+    let p = pitches(&hw);
+    assert!(
+        p.iter().min().unwrap() < &4096 && p.iter().max().unwrap() > &4096,
+        "{p:?}"
+    );
+}
+
+#[test]
+fn a_live_note_sounds_over_a_song_on_its_own_voice() {
+    let bank = test_bank();
+    let mut code = song(&one_note_song(&[0x27, 0x7F, 100, 0x00, 0xFF]));
+    let mut seq = live_bank_seq::<4>(&bank, 0b1111);
+    let mut hw = Recorder::<512>::new();
+    seq.start(0, &mut code).unwrap();
+    run(&mut seq, &mut hw, 10);
+    let before = seq.voices_in_use();
+    let _h = seq.note_on(&mut hw, 0, 0, 51, 100, 64, 9).unwrap();
+    run(&mut seq, &mut hw, 3);
+    assert_eq!(seq.voices_in_use(), before + 1);
+    assert_eq!(keyons(&hw), 2);
+}
+
+#[test]
+fn a_live_note_of_high_priority_takes_a_busy_voice() {
+    // one voice, a song note of priority 3 already sounding
+    let bank = test_bank();
+    let mut code = song(&one_note_song(&[0x27, 0x7F, 100, 0x00, 0xFF]));
+    let mut seq = live_bank_seq::<1>(&bank, 0b1);
+    let mut hw = Recorder::<512>::new();
+    seq.start(0, &mut code).unwrap();
+    run(&mut seq, &mut hw, 10);
+    assert_eq!(seq.voices_in_use(), 1);
+    assert!(
+        seq.note_on(&mut hw, 0, 0, 51, 100, 64, 2).is_none(),
+        "priority 2 cannot take it"
+    );
+    assert!(
+        seq.note_on(&mut hw, 0, 0, 51, 100, 64, 9).is_some(),
+        "priority 9 can"
+    );
+    run(&mut seq, &mut hw, 2);
+    assert_eq!(keyons(&hw), 2);
+}
+
+#[test]
+fn an_unknown_instrument_or_font_gives_no_note() {
+    let bank = test_bank();
+    let mut seq = live_bank_seq::<4>(&bank, 0b1111);
+    let mut hw = Recorder::<8>::new();
+    assert!(seq.note_on(&mut hw, 9, 0, 39, 100, 64, 9).is_none());
+    assert!(seq.note_on(&mut hw, 0, 77, 39, 100, 64, 9).is_none());
+}

@@ -194,6 +194,12 @@ pub fn cook_song(data: &AudioData, seq_id: usize, opts: &Options) -> Result<Cook
         sc.dynamic_targets
     )
     .ok();
+    writeln!(
+        report,
+        "instruments used (font slot, id): {:?}",
+        sc.instruments
+    )
+    .ok();
 
     // samples, deduplicated by audiotable offset
     let mut samples: Vec<CookedSample> = Vec::new();

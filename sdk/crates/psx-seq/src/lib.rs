@@ -51,11 +51,13 @@
 
 mod engine;
 pub mod format;
+mod live;
 mod note;
 mod script;
 pub mod tables;
 mod types;
 
+pub use live::NoteHandle;
 pub use types::{CHANNELS, IO_NONE, IO_PORTS, LAYERS};
 
 use format::{Bank, FormatError, SongHeader, NONE16};
