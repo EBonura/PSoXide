@@ -1435,14 +1435,14 @@ pub(crate) fn cook_cdda_track_number(
         .unwrap_or(false)
     {
         report.warn(format!(
-            "CD-DA music source '{trimmed}' is not a .wav file and was skipped"
+            "Music source '{trimmed}' is not a .wav file and was skipped"
         ));
         return psx_level::UI_OPTION_NONE;
     }
     let abs = resolve_path(trimmed, project_root);
     if !abs.is_file() {
         report.warn(format!(
-            "CD-DA music source '{}' does not exist and was skipped",
+            "Music source '{}' does not exist and was skipped",
             abs.display()
         ));
         return psx_level::UI_OPTION_NONE;
@@ -1454,14 +1454,29 @@ pub(crate) fn cook_cdda_track_number(
         return u16::from(*track);
     }
     if cdda_tracks.len() >= 98 {
-        report.warn("CD-DA music track limit reached; extra music sources were skipped");
+        report.warn("Music track limit reached; extra music sources were skipped");
         return psx_level::UI_OPTION_NONE;
     }
+    // The manifest lays the XA files out from this length alone.
+    let xa_frames = match std::fs::read(&abs)
+        .map_err(|e| e.to_string())
+        .and_then(|bytes| psx_audio_cook::wav::read(&bytes).map_err(|e| e.to_string()))
+    {
+        Ok(wav) => super::xa_music::frames_at_xa_rate(wav.samples.len(), wav.rate, speed) as u32,
+        Err(error) => {
+            report.warn(format!(
+                "Music source '{}' could not be read ({error}) and was skipped",
+                abs.display()
+            ));
+            return psx_level::UI_OPTION_NONE;
+        }
+    };
     let track = (cdda_tracks.len() + 2) as u8;
     cdda_tracks.push(PlaytestCddaTrack {
         track,
         wav_path: abs.to_string_lossy().into_owned(),
         playback_speed_q12: speed,
+        xa_frames,
     });
     cdda_track_for_wav.insert(key, track);
     u16::from(track)

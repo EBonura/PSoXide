@@ -70,6 +70,7 @@ pub use cook_entities::{
 };
 mod cook_props_lights;
 pub(crate) use cook_props_lights::*;
+mod xa_music;
 
 use assets::{
     expect_room_material_depth, find_resource, load_psxt_bytes, material_texture_bytes,
