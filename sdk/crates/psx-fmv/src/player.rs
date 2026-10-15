@@ -12,9 +12,11 @@
 //! 2. [`crate::bitstream::decode_frame`] turns the next frame's bitstream into one
 //!    of two run-length buffers while the MDEC decodes the previous frame
 //!    from the other.
-//! 3. Decoded 16-pixel columns come back over DMA1 into one of two column
-//!    buffers and go to a free display buffer over DMA2 while DMA1 fills
-//!    the other.
+//! 3. The whole decoded frame comes back over one DMA1 transfer into one of
+//!    two RAM frame buffers, so the MDEC's output never waits for the CPU to
+//!    start the next column. Its 16-pixel columns then go to a free display
+//!    buffer over DMA2 while the MDEC decodes the next frame into the other
+//!    RAM buffer.
 //! 4. The flip is queued to the VBlank handler. There are three display
 //!    buffers, so the MDEC can start the next frame while the last one
 //!    waits for its flip.
@@ -26,6 +28,15 @@
 //! PAL movie plays at 25 fps on a 60 Hz display. A frame completed while an
 //! older one still waits for the decoder replaces it (counted in
 //! [`Outcome::skipped`]).
+//!
+//! Why whole frames: at 24 bits a 320x192 frame is 46,080 words and the
+//! console MDEC returns a word every 24 cycles, 1,106,000 cycles, which is
+//! nearly all of the 1,130,000 that two VBlanks give a 30 fps movie. Fetching a
+//! column at a time left the MDEC idle until the CPU noticed each column had
+//! arrived (about 7,500 cycles a column, 150,000 a frame), so the player fell
+//! behind and dropped a tenth of the frames. One transfer per frame leaves the
+//! MDEC no gap; the price is two RAM frame buffers (about 360 KB at 320x192 and
+//! 24 bits) instead of two column buffers.
 //!
 //! Memory comes from the caller ([`memory_words`] says how much), so a
 //! game lends a buffer that is idle while the movie plays, such as a level
@@ -219,9 +230,14 @@ fn column_words(m: &Movie, depth: Depth) -> usize {
     4 * halfwords_x2(depth) as usize * m.height as usize
 }
 
+/// One decoded frame: every column, in the order the MDEC returns them.
+fn frame_words(m: &Movie, depth: Depth) -> usize {
+    (m.width as usize / 16) * column_words(m, depth)
+}
+
 /// Words of memory [`play`] needs for `movie` at `depth`.
 pub fn memory_words(movie: &Movie, depth: Depth) -> usize {
-    SLOTS * slot_words(movie) + 2 * rle_words(movie) + 2 * column_words(movie, depth)
+    SLOTS * slot_words(movie) + 2 * rle_words(movie) + 2 * frame_words(movie, depth)
 }
 
 /// Root counter 2 (system clock / 8) accounting of where the time goes.
@@ -252,8 +268,9 @@ struct Buffers {
     slot_words: usize,
     rle: *mut u32,
     rle_words: usize,
-    columns: *mut u32,
+    frames: *mut u32,
     column_words: usize,
+    frame_words: usize,
 }
 
 impl Buffers {
@@ -277,9 +294,13 @@ impl Buffers {
         // SAFETY: the same buffer as halfwords.
         unsafe { core::slice::from_raw_parts_mut(words.as_mut_ptr() as *mut u16, words.len() * 2) }
     }
-    fn column(&self, i: usize) -> *mut u32 {
-        // SAFETY: column `i` lies inside the caller's buffer.
-        unsafe { self.columns.add(i * self.column_words) }
+    fn frame(&self, i: usize) -> *mut u32 {
+        // SAFETY: frame buffer `i` lies inside the caller's buffer.
+        unsafe { self.frames.add(i * self.frame_words) }
+    }
+    fn column(&self, frame: usize, c: u16) -> *mut u32 {
+        // SAFETY: column `c` of frame buffer `frame` lies inside it.
+        unsafe { self.frame(frame).add(c as usize * self.column_words) }
     }
 }
 
@@ -414,8 +435,8 @@ impl Stream {
     }
 }
 
-/// The MDEC's current frame, one column at a time: DMA1 into a column
-/// buffer, then DMA2 into the back buffer while DMA1 fills the other.
+/// A decoded frame's trip from its RAM buffer to a display buffer, one
+/// column at a time over DMA2.
 struct Columns {
     /// Left edge and column width, in VRAM halfwords.
     x: u16,
@@ -423,79 +444,50 @@ struct Columns {
     y: u16,
     count: u16,
     next: u16,
-    reading: Option<(u16, usize)>,
-    filled: Option<(u16, usize)>,
-    uploading: Option<usize>,
+    /// The RAM frame buffer the columns come from.
+    frame: usize,
+    /// A column copy is in flight on channel 2.
+    uploading: bool,
     started: u32,
-    /// DMA1 refused a column: the frame cannot complete.
-    broken: bool,
 }
 
 impl Columns {
-    fn start(x: u16, step: u16, y: u16, count: u16) -> Self {
+    fn start(x: u16, step: u16, y: u16, count: u16, frame: usize) -> Self {
         Columns {
             x,
             step,
             y,
             count,
             next: 0,
-            reading: None,
-            filled: None,
-            uploading: None,
+            frame,
+            uploading: false,
             started: interrupts::vblank_count(),
-            broken: false,
         }
     }
 
-    /// Move the transfers along; `true` once every column is in VRAM.
+    /// Move the copies along; `true` once every column is in VRAM.
     fn service(&mut self, dma: &mut GpuDma, buf: &Buffers, height: u16) -> bool {
-        if let Some(done) = self.reading {
-            if mdec().column_done() {
-                self.reading = None;
-                self.filled = Some(done);
+        if self.uploading && psx_vram::dma_copy_to_vram_done() {
+            self.uploading = false;
+        }
+        if !self.uploading && self.next < self.count {
+            let c = self.next;
+            let rect = VramRect::new(self.x + c * self.step, self.y, self.step, height);
+            let src = buf.column(self.frame, c);
+            // SAFETY: the column's words lie in RAM frame buffer `frame`,
+            // which the MDEC does not write while this frame uploads. Nothing
+            // else uses GP0 or channel 2 while a frame uploads: the player
+            // only draws between frames, after `uploading` is clear.
+            if unsafe { psx_vram::dma_copy_to_vram_start(dma, rect, src) } {
+                self.uploading = true;
+            } else {
+                // SAFETY: the column holds `column_words` words.
+                let words = unsafe { core::slice::from_raw_parts(src, buf.column_words) };
+                psx_vram::upload_words(rect, words);
             }
+            self.next += 1;
         }
-        if self.uploading.is_some() && psx_vram::dma_copy_to_vram_done() {
-            self.uploading = None;
-        }
-        if self.uploading.is_none() {
-            if let Some((c, b)) = self.filled.take() {
-                let rect = VramRect::new(self.x + c * self.step, self.y, self.step, height);
-                // SAFETY: column buffer `b` holds the rectangle's words, and
-                // DMA1 does not refill it until this upload is done. Nothing
-                // else uses GP0 or channel 2 while a frame decodes: the
-                // player only draws between frames, after `uploading` is
-                // clear.
-                if unsafe { psx_vram::dma_copy_to_vram_start(dma, rect, buf.column(b)) } {
-                    self.uploading = Some(b);
-                } else {
-                    // SAFETY: the column buffer holds `column_words` words.
-                    let words =
-                        unsafe { core::slice::from_raw_parts(buf.column(b), buf.column_words) };
-                    psx_vram::upload_words(rect, words);
-                }
-            }
-        }
-        if self.reading.is_none() && self.next < self.count {
-            let held = |b: usize| self.filled.map(|f| f.1) == Some(b) || self.uploading == Some(b);
-            if let Some(b) = (0..2).find(|&b| !held(b)) {
-                // SAFETY: buffer `b` is free (see `held`) and holds
-                // `column_words` words.
-                if unsafe { mdec().read_column_start(buf.column(b), buf.column_words) } {
-                    self.reading = Some((self.next, b));
-                    self.next += 1;
-                } else {
-                    // A column the MDEC channel cannot express: abandon the
-                    // frame as a decode error rather than spin on it.
-                    self.next = self.count;
-                    self.broken = true;
-                }
-            }
-        }
-        self.next == self.count
-            && self.reading.is_none()
-            && self.filled.is_none()
-            && self.uploading.is_none()
+        self.next == self.count && !self.uploading
     }
 }
 
@@ -517,6 +509,14 @@ struct Player {
     front: usize,
     /// The MDEC's frame: (RLE buffer, display buffer, due VBlank).
     decoding: Option<(usize, usize, u32)>,
+    /// The RAM frame buffer the MDEC is writing, and the VBlank it began.
+    mdec_frame: usize,
+    mdec_started: u32,
+    /// A decoded frame in RAM waiting for the copy to VRAM:
+    /// (RAM frame buffer, display buffer, due VBlank).
+    to_upload: Option<(usize, usize, u32)>,
+    /// The frame being copied to its display buffer, and its copy.
+    upload: Option<(usize, usize, u32)>,
     cols: Columns,
     /// Decoded frames waiting for their flip, oldest first: (display
     /// buffer, due VBlank).
@@ -545,19 +545,33 @@ impl Player {
     }
 
     /// A display buffer that is neither shown, nor waiting for or queued to
-    /// its flip, nor being decoded into.
+    /// its flip, nor being decoded or copied into.
     fn free_buffer(&self) -> Option<usize> {
         (0..BUFFERS).find(|&b| {
             b != self.front
                 && self.queued != Some(b)
                 && self.decoding.map(|d| d.1) != Some(b)
+                && self.to_upload.map(|d| d.1) != Some(b)
+                && self.upload.map(|d| d.1) != Some(b)
                 && self.waiting.iter().all(|w| w.map(|w| w.0) != Some(b))
+        })
+    }
+
+    /// A RAM frame buffer the MDEC may write: not the one it is writing, and
+    /// not one still waiting for or in the middle of its copy.
+    fn free_frame(&self) -> Option<usize> {
+        (0..2).find(|&f| {
+            (self.decoding.is_none() || self.mdec_frame != f)
+                && self.to_upload.map(|u| u.0) != Some(f)
+                && self.upload.map(|u| u.0) != Some(f)
         })
     }
 
     /// Nothing decoded, decoding or waiting to be shown.
     fn drained(&self) -> bool {
         self.decoding.is_none()
+            && self.to_upload.is_none()
+            && self.upload.is_none()
             && self.pending.is_none()
             && self.waiting[0].is_none()
             && self.queued.is_none()
@@ -578,29 +592,53 @@ impl Player {
             }
         }
         if let Some((_, b, due)) = self.decoding {
-            if self
-                .cols
-                .service(&mut self.dma, &self.buf, self.movie.height)
-                && !self.cols.broken
-            {
+            // The whole frame is in RAM once DMA1 has drained the MDEC.
+            if mdec().column_done() {
                 self.decoding = None;
                 if mdec().decode_finish() {
                     self.in_a_row = 0;
-                    let slot = if self.waiting[0].is_none() { 0 } else { 1 };
-                    self.waiting[slot] = Some((b, due));
+                    self.to_upload = Some((self.mdec_frame, b, due));
                 } else {
                     self.decode_failed();
                 }
-            } else if self.cols.broken
-                || interrupts::vblank_count().wrapping_sub(self.cols.started)
-                    > DECODE_TIMEOUT_VBLANKS
+            } else if interrupts::vblank_count().wrapping_sub(self.mdec_started)
+                > DECODE_TIMEOUT_VBLANKS
             {
                 mdec().abort_decode();
+                self.decoding = None;
+                self.decode_failed();
+            }
+        }
+        if self.upload.is_none() {
+            if let Some((f, b, due)) = self.to_upload.take() {
+                let (x, y) = self.origins[b];
+                self.cols = Columns::start(
+                    x + self.x,
+                    self.step,
+                    y + self.y_offset,
+                    self.movie.width / 16,
+                    f,
+                );
+                self.upload = Some((f, b, due));
+            }
+        }
+        if let Some((_, b, due)) = self.upload {
+            if self
+                .cols
+                .service(&mut self.dma, &self.buf, self.movie.height)
+            {
+                self.upload = None;
+                let slot = if self.waiting[0].is_none() { 0 } else { 1 };
+                self.waiting[slot] = Some((b, due));
+            } else if interrupts::vblank_count().wrapping_sub(self.cols.started)
+                > DECODE_TIMEOUT_VBLANKS
+            {
                 psx_io::dma::abort(psx_io::dma::Channel::Gpu);
                 // GP1(01h): drop a VRAM copy the abort left waiting for
                 // pixels.
                 psx_io::gpu::write_display_control(gp1::RESET_CMD_BUFFER);
-                self.decoding = None;
+                self.cols.uploading = false;
+                self.upload = None;
                 self.decode_failed();
             }
         }
@@ -613,8 +651,8 @@ impl Player {
                 // later.
                 let behind = self.waiting[1].is_some()
                     || (self.pending.is_some() && self.st.ready.is_some());
-                // GP0 is free only between column uploads.
-                let gp0_free = self.cols.uploading.is_none() && psx_vram::dma_copy_to_vram_done();
+                // GP0 is free only between column copies.
+                let gp0_free = !self.cols.uploading && psx_vram::dma_copy_to_vram_done();
                 if gp0_free && (behind || edge.wrapping_sub(due) as i32 >= 0) {
                     // The VBlank handler flips only once GPUSTAT bit 24 says
                     // the GPU got past this frame's uploads: GP0(1Fh) after
@@ -720,8 +758,9 @@ pub fn play(
         rle: unsafe { base.add(SLOTS * sw) },
         rle_words: rw,
         // SAFETY: as above.
-        columns: unsafe { base.add(SLOTS * sw + 2 * rw) },
+        frames: unsafe { base.add(SLOTS * sw + 2 * rw) },
         column_words: column_words(movie, config.depth),
+        frame_words: frame_words(movie, config.depth),
     };
 
     // SAFETY: the player takes over the drive, the MDEC and the GPU's DMA
@@ -796,7 +835,11 @@ pub fn play(
         origins: config.buffers,
         front: 0,
         decoding: None,
-        cols: Columns::start(0, 0, 0, 0),
+        mdec_frame: 0,
+        mdec_started: 0,
+        to_upload: None,
+        upload: None,
+        cols: Columns::start(0, 0, 0, 0, 0),
         waiting: [None, None],
         queued: None,
         pending: None,
@@ -858,7 +901,7 @@ pub fn play(
             }
         }
         if p.decoding.is_none() && p.pending.is_some() {
-            if let Some(b) = p.free_buffer() {
+            if let (Some(b), Some(f)) = (p.free_buffer(), p.free_frame()) {
                 let Some((rle, words, due)) = p.pending.take() else {
                     continue;
                 };
@@ -875,9 +918,19 @@ pub fn play(
                     p.errors += 1;
                     continue;
                 }
-                let (x, y) = p.origins[b];
-                p.cols = Columns::start(x + p.x, p.step, y + p.y_offset, movie.width / 16);
-                p.decoding = Some((rle, b, due));
+                // SAFETY: frame buffer `f` is free (see `free_frame`) and holds
+                // `frame_words` words; it stays untouched until DMA1 finishes
+                // or is aborted.
+                if unsafe { mdec().read_column_start(p.buf.frame(f), p.buf.frame_words) } {
+                    p.mdec_frame = f;
+                    p.mdec_started = interrupts::vblank_count();
+                    p.decoding = Some((rle, b, due));
+                } else {
+                    // A frame the MDEC channel cannot express: abandon it as
+                    // a decode error rather than spin on it.
+                    mdec().abort_decode();
+                    p.decode_failed();
+                }
                 continue;
             }
         }
@@ -892,7 +945,7 @@ pub fn play(
     let _ = interrupts::take_queued_display_control();
     mdec().abort_decode();
     psx_io::dma::abort(psx_io::dma::Channel::Gpu);
-    if p.cols.uploading.is_some() {
+    if p.cols.uploading {
         // The abort cut a VRAM copy short: drop the transfer the GPU still
         // waits to receive.
         psx_io::gpu::write_display_control(gp1::RESET_CMD_BUFFER);
