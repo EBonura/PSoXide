@@ -855,6 +855,7 @@ const STEPS: &[Step] = &[
     step(Area::Cd, "CD DATA VERSUS AUDIO ROUTE", step_cd_route),
     step(Area::Cd, "CD READ MECHANISMS", step_cl2),
     step(Area::Cd, "XA MUSIC LOOP", step_xa),
+    step(Area::Cd, "XA LATENCY, SWITCH, CLOCK", step_xa_measure),
     step(Area::Cd, "STREAM COST", step_stream_cost),
     step(Area::Cd, "CD-DA HANDOFF", step_stream_handoff),
     // 7
@@ -962,6 +963,12 @@ fn step_cl2(run: &mut Run) {
 fn step_xa(run: &mut Run) {
     let result = xa_loop::run();
     run.push_all(&xa_loop::records(&result));
+}
+
+fn step_xa_measure(run: &mut Run) {
+    let font = run.font.take().expect("font uploaded by reset_area");
+    run.push_all(&xa_measure::run(&font));
+    run.font = Some(font);
 }
 
 fn step_stream_cost(run: &mut Run) {

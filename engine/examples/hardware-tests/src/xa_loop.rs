@@ -29,7 +29,7 @@ use psx_spu::{self as spu, CdVolume, Volume};
 
 /// The song file's name, and the numbers `xa-encode` printed in its manifest.
 pub(crate) const SONG_FILE: &str = "HWSONGS.XA";
-const FILE_NUMBER: u8 = 1;
+pub(crate) const FILE_NUMBER: u8 = 1;
 const CHANNEL: u8 = 0;
 const SECTORS_PER_SECOND: u32 = 75;
 
@@ -54,23 +54,30 @@ fn read_one(lba: u32) -> Option<&'static [u8]> {
 /// The song file's place on the disc, looked up by name.
 #[inline(never)]
 fn find_song_file() -> Option<File> {
+    find_file(SONG_FILE, FILE_NUMBER)
+}
+
+/// A single-speed XA file by its name in the root directory, with the file
+/// number its encoder put in the subheaders.
+#[inline(never)]
+pub(crate) fn find_file(name: &str, number: u8) -> Option<File> {
     // SAFETY: nothing else drives the controller yet.
     if !unsafe { (*addr_of_mut!(READER)).prepare() } {
         return None;
     }
     let (root, _) = iso::root_directory(read_one(iso::PVD_LBA)?)?;
-    let (lba, size) = iso::find_in_directory(read_one(root)?, SONG_FILE)?;
+    let (lba, size) = iso::find_in_directory(read_one(root)?, name)?;
     Some(File::from_directory_entry(
         lba,
         size,
-        FILE_NUMBER,
+        number,
         DriveSpeed::Single,
     ))
 }
 
 /// Root counter 1 counting HBlanks, unwrapped to 32 bits. Wraps every four
 /// seconds, so it needs a read at least that often.
-struct Clock {
+pub(crate) struct Clock {
     last: u16,
     high: u32,
 }
@@ -79,13 +86,13 @@ struct Clock {
 const HBLANKS_PER_SECOND: u32 = 15_734;
 
 impl Clock {
-    fn start() -> Self {
+    pub(crate) fn start() -> Self {
         timers::set_mode(timers::Timer::Timer1, 1 << 8);
         timers::set_counter(timers::Timer::Timer1, 0);
         Self { last: 0, high: 0 }
     }
 
-    fn ticks(&mut self) -> u32 {
+    pub(crate) fn ticks(&mut self) -> u32 {
         let now = timers::counter(timers::Timer::Timer1);
         if now < self.last {
             self.high += 1;

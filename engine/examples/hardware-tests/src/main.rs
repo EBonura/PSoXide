@@ -86,6 +86,7 @@ mod ui;
 mod v24;
 mod workload;
 mod xa_loop;
+mod xa_measure;
 use cpu_tests::*;
 use payload::fnv32_words;
 use regs::SPU_DELAY;
@@ -219,9 +220,9 @@ unsafe extern "C" {
 //
 // History, one entry per version: docs/hardware-test-versions.md.
 const SUITE_VERSION_MAJOR: u8 = 2;
-const SUITE_VERSION_MINOR: u8 = 5;
+const SUITE_VERSION_MINOR: u8 = 6;
 /// Display form. Keep in step with the two constants above.
-const SUITE_VERSION: &str = "HWTEST v2.5";
+const SUITE_VERSION: &str = "HWTEST v2.6";
 const SCREEN_W: i16 = 320;
 const SCREEN_H: i16 = 240;
 const FONT_TPAGE: TexturePage = TexturePage::new(320, 0, TextureDepth::Bit4);

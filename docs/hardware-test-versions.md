@@ -33,6 +33,19 @@ shipped without either, which is why no machine-code baseline exists for them.
 
 ## History
 
+### v2.6 (2026-10-15, schema PX8)
+
+MINOR: one step added, `XA LATENCY, SWITCH, CLOCK`, right after `XA MUSIC LOOP` in the CD area, with records `0x320`-`0x32E` (`src/xa_measure.rs`, layouts in its header and in `hwtest-report.py` `xa_measure_rows`). Nothing existing changes meaning. The SDK pin stays `1832928d0`: a bump to the XA clock and resume branch (`feat/xa-clock-resume-2026-10-15`) breaks `rumble.rs` and `controller_test.rs` (the pad API moved), so the XA resume is sent by hand with the same commands as `Player::resume` there, and the song clock is not run; move to the real calls when the pin moves. Every wait counts loop iterations (SELECT skips), never a timer.
+
+What it measures, all heard through the SPU CD capture buffer (the pad song, channel 0, and the whistle, channel 3, tell themselves apart by zero crossings), so nobody has to listen:
+
+- XA start latency: `Player::play` from a paused drive to the head seen in the file and to sound, five times (`0x320`-`0x322`).
+- XA channel switch: a Setfilter alone, mid-stream, to the other song, six times, and the same switch by starting the other song from the top, three times (`0x323`-`0x325`).
+- After a 64-sector data read at double speed: XA resume (Demute, Setmode, Setfilter, Setloc to the head GetlocP gave at the pause, ReadS), a fresh XA start and CD-DA Play, each three times, timed from the last data sector to sound, with the read's own time and where the resumed song continued (`0x326`-`0x32B`).
+- XA clock drift: `HWCLOCK.XA`, one 190 s song (new, 14,250 sectors, 33 MB, file number 2), plays for 180 s at a low volume while the head is polled twice a second. Head progress minus system-clock time at 60, 120 and 180 s (Timer 2 read in a tight loop, wraps placed by Timer 1) says how far the drive's sector clock and the console's clock drift apart; also the head positions seen, the longest stall and the system clocks per HBlank line over the run (`0x32C`-`0x32E`). The step adds about four minutes to the run.
+
+The disc build gains `HWCLOCK.XA` (`make hardware-tests-disc`, `PSOXIDE_SDK` as for `HWSONGS.XA`). `TIMING_RECORD_COUNT` is unchanged.
+
 ### v2.5 (2026-10-11, schema PX8)
 
 MINOR: twelve cached-RAM store/load timing rows and one address readback row were added to `EXTENDED PROBES AND SHAPES`. Existing rows, step order and capture format are unchanged. Records `0x8D0`-`0x8DB` are the four T00/T10/T01/T11 shapes at literal gaps of 0, 2 and 6 nops, with sixteen successive A/B word pairs per row. Each has eight trailing nops and a pointer advance. The warm harness masks IRQs, times the second pass and records min/median/max of five samples. `0x8DC` records zeroed A count, unchanged sentinel B count and whether the last load returned the final B sentinel: 16, 16, 1 on a clean run. The load witness is copied after the timer read, outside the measured interval. Linked instruction markers `0x220`-`0x22B` audit the exact opcodes and spans. The interaction per pair is `(T11 - T10 - T01 + T00) / 16`, calculated separately at each gap from unrounded clocks. These measurements distinguish a store-to-different-address-load interaction from ordinary store and load cost; they do not assume a bus delay constant.

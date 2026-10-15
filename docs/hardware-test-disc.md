@@ -379,6 +379,8 @@ it on the disc after `MOVIE.STR` with `mkisopsx --xa-file`. A program
 chain-loaded from another disc needs `HWSONGS.XA` in its own part of the image,
 found by name.
 
+**XA LATENCY, SWITCH, CLOCK (v2.6).** The step after XA MUSIC LOOP in the linear run. It starts the pad song five times from a paused drive, switches between the pad and the whistle with a Setfilter alone six times and by restarting three times, interrupts a song with a 64-sector data read three times and times three ways back (XA resume, a fresh XA start, CD-DA Play), then plays `HWCLOCK.XA` (190 s, file 2) for 180 s and compares the head with the system clock at 60, 120 and 180 s. Sound is detected in the SPU CD capture buffer, so every number is the time to something audible. The run shows `XA` and the trial in progress on the detail line and the bar fills with the three minutes. `HWCLOCK.XA` comes from `make hardware-tests-disc` the same way as `HWSONGS.XA`. Records `0x320`-`0x32E`; their layout is in `src/xa_measure.rs`.
+
 ## CD stream cases (v1.28)
 
 Three more cases on the `CONSOLE TESTS` page, plus `CD STREAM, ALL THREE` that
