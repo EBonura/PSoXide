@@ -49,9 +49,10 @@ pub const MANIFEST_FILENAME: &str = "level_manifest.rs";
 /// Ignored cooked Rust-source manifest written by editor Play /
 /// `make cook-playtest`.
 pub const COOKED_MANIFEST_FILENAME: &str = "level_manifest.cooked.rs";
-/// Generated raw CD-DA payload list for mixed-mode playtest discs.
-/// Tracks are listed in disc order (`track 2`, `track 3`, ...).
-pub const CDDA_TRACKS_FILENAME: &str = "cdda_tracks.txt";
+/// Generated list of the XA music files the playtest disc carries after its
+/// packs. One line per file in disc order: its path, a tab, and the sector it
+/// must land on (the cooked `MUSIC_TRACKS` table bakes that sector in).
+pub const XA_MUSIC_FILENAME: &str = "xa_music.txt";
 
 /// Cooked WORLD.PAK room ordering hint consumed by disc builders.
 pub const WORLD_PACK_ORDER_FILENAME: &str = "world_pack_order.txt";
@@ -88,9 +89,9 @@ pub const MODELS_DIRNAME: &str = "models";
 /// blobs selected by button/slider cue pools.
 pub const UI_SFX_DIRNAME: &str = "ui_sfx";
 
-/// Subdirectory inside `generated/` that holds cooked raw CD-DA
-/// track payloads selected by menu music nodes.
-pub const CDDA_TRACKS_DIRNAME: &str = "cdda_tracks";
+/// Subdirectory inside `generated/` that holds the cooked XA music files
+/// selected by Music nodes.
+pub const XA_MUSIC_DIRNAME: &str = "xa_music";
 
 /// Coarse asset class -- mirrors [`psx_level::AssetKind`] but
 /// stays host-side `String`/`Vec` friendly. Converted to the
@@ -983,16 +984,20 @@ pub struct PlaytestUiScene {
     pub focus_style: crate::ui_types::UiFocusStyle,
 }
 
-/// One WAV source assigned to a cooked CD-DA track number.
+/// One WAV source assigned to a cooked music track number.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlaytestCddaTrack {
-    /// 1-based disc track number. Track 1 is the data track, so CD-DA starts
-    /// at track 2.
+    /// Music-node track number. Numbering keeps the CD-DA convention (track 1
+    /// is the data track), so the first song is track 2; the song is entry
+    /// `track - 2` of the cooked `MUSIC_TRACKS` table.
     pub track: u8,
-    /// Source WAV path used to cook the generated raw CD-DA payload.
+    /// Source WAV path the XA song is encoded from.
     pub wav_path: String,
     /// Baked playback-speed multiplier in Q12 (`4096` = 1.0x).
     pub playback_speed_q12: u16,
+    /// Samples per channel of the song at the XA rate, speed baked in. The
+    /// manifest's music table is laid out from this alone, without encoding.
+    pub xa_frames: u32,
 }
 
 /// One cooked project option, ready for manifest emission. Mirrors
@@ -1832,7 +1837,7 @@ pub struct PlaytestPackage {
     /// Cooked project options, flattened to bounded integer ranges.
     /// Sliders and `SetOption` actions reference these by id.
     pub options: Vec<PlaytestOption>,
-    /// WAV sources baked as CD-DA tracks in the playtest/export disc image.
+    /// WAV sources baked as XA songs in the playtest/export disc image.
     pub cdda_tracks: Vec<PlaytestCddaTrack>,
     /// Compact rig-attached hurtboxes and action-gated hitboxes.
     pub combat_capsules: Vec<PlaytestCombatCapsule>,

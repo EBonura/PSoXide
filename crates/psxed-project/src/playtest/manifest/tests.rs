@@ -139,34 +139,88 @@ fn model_atlas_vram_bytes_match_runtime_atlas_upload() {
 }
 
 #[test]
-fn write_cdda_tracks_cooks_sector_aligned_payloads_and_lists_paths() {
+fn write_xa_music_cooks_files_and_lists_paths_with_their_sectors() {
     let dir = std::env::temp_dir().join(format!(
         "psxed-project-test-{}-{}",
         std::process::id(),
-        "cdda-tracks"
+        "xa-music"
     ));
     let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-
+    let xa_dir = dir.join(XA_MUSIC_DIRNAME);
+    std::fs::create_dir_all(&xa_dir).unwrap();
     let source = dir.join("menu music.wav");
     std::fs::write(&source, test_wav_mono_44k(&[0, 1200, -1200, 0])).unwrap();
-    let cdda_dir = dir.join(CDDA_TRACKS_DIRNAME);
-    std::fs::create_dir_all(&cdda_dir).unwrap();
 
     let mut package = PlaytestPackage::default();
     package.cdda_tracks.push(PlaytestCddaTrack {
         track: 2,
         wav_path: source.to_string_lossy().into_owned(),
         playback_speed_q12: crate::UI_MUSIC_PLAYBACK_SPEED_UNITY_Q12,
+        xa_frames: super::xa_music::frames_at_xa_rate(
+            4,
+            44_100,
+            crate::UI_MUSIC_PLAYBACK_SPEED_UNITY_Q12,
+        ) as u32,
     });
 
-    let list = write_cdda_tracks(&package, &cdda_dir).unwrap();
-    let target = cdda_dir.join("track02.cdda");
+    let list = write_xa_music(&package, &xa_dir).unwrap();
+    let target = xa_dir.join("MUSIC1.XA");
     let cooked_len = std::fs::metadata(&target).unwrap().len();
-    assert!(list.contains(&target.canonicalize().unwrap().display().to_string()));
-    assert_eq!(cooked_len % psx_iso::SECTOR_BYTES as u64, 0);
-    assert!(cooked_len > 0);
+    // One four-sample song is one sector at the stride of four, plus the
+    // 16-sector end guard, in raw 2336-byte XA sectors.
+    assert_eq!(cooked_len, (4 + 16) * 2336);
+    let expected_lba = music_first_lba(&package);
+    assert!(
+        list.contains(&format!(
+            "{}\t{expected_lba}",
+            target.canonicalize().unwrap().display()
+        )),
+        "{list}"
+    );
+    // The file starts where the cooked table says: after UI.PAK.
+    let manifest = render_manifest_source(&package);
+    assert!(
+        manifest.contains(&format!(
+            "psx_level::LevelMusicTrack {{ file_lba: {expected_lba}, span_sectors: 4, file_number: 1, channel: 0 }}"
+        )),
+        "{manifest}"
+    );
 
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn music_files_follow_ui_pack_in_the_shared_disc_layout() {
+    // WORLD.PAK starts at the fixed boot-area sector, UI.PAK follows it, and
+    // the music follows UI.PAK.
+    let package = PlaytestPackage::default();
+    let world_sectors = world_pack_layout(&package).total_sectors;
+    let ui_sectors = if ui_pack_chunks(&package).is_empty() {
+        0
+    } else {
+        psx_iso::build_world_pack_layout(&ui_pack_chunks(&package)).total_sectors
+    };
+    assert_eq!(
+        music_first_lba(&package),
+        psx_iso::WORLD_PACK_DEFAULT_START_LBA + world_sectors + ui_sectors
+    );
+}
+
+#[test]
+fn a_package_without_music_cooks_no_xa_files_and_an_empty_table() {
+    let package = PlaytestPackage::default();
+    let manifest = render_manifest_source(&package);
+    assert!(manifest.contains("pub static MUSIC_TRACKS: &[psx_level::LevelMusicTrack] = &[\n];"));
+    let dir = std::env::temp_dir().join(format!(
+        "psxed-project-test-{}-{}",
+        std::process::id(),
+        "no-xa-music"
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let list = write_xa_music(&package, &dir).unwrap();
+    assert!(list.lines().all(|line| line.starts_with('#')));
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
     std::fs::remove_dir_all(dir).unwrap();
 }
 

@@ -67,18 +67,18 @@ pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io
     let textures_dir = generated_dir.join(TEXTURES_DIRNAME);
     let models_dir = generated_dir.join(MODELS_DIRNAME);
     let ui_sfx_dir = generated_dir.join(UI_SFX_DIRNAME);
-    let cdda_tracks_dir = generated_dir.join(CDDA_TRACKS_DIRNAME);
+    let xa_music_dir = generated_dir.join(XA_MUSIC_DIRNAME);
     std::fs::create_dir_all(&stream_chunks_dir)?;
     std::fs::create_dir_all(&ui_stream_chunks_dir)?;
     std::fs::create_dir_all(&textures_dir)?;
     std::fs::create_dir_all(&models_dir)?;
     std::fs::create_dir_all(&ui_sfx_dir)?;
-    std::fs::create_dir_all(&cdda_tracks_dir)?;
+    std::fs::create_dir_all(&xa_music_dir)?;
     purge_directory_files(&stream_chunks_dir, "psxc")?;
     purge_directory_files(&ui_stream_chunks_dir, "psxt")?;
     purge_directory_files(&textures_dir, "psxt")?;
     purge_directory_files(&ui_sfx_dir, "psau")?;
-    purge_directory_files(&cdda_tracks_dir, "cdda")?;
+    purge_directory_files(&xa_music_dir, "XA")?;
     // Models live in per-model subfolders so the recursive
     // purge needs to traverse one level deeper than rooms /
     // textures.
@@ -168,8 +168,8 @@ pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io
         render_ui_pack_order(package),
     )?;
     std::fs::write(
-        generated_dir.join(CDDA_TRACKS_FILENAME),
-        write_cdda_tracks(package, &cdda_tracks_dir)?,
+        generated_dir.join(XA_MUSIC_FILENAME),
+        write_xa_music(package, &xa_music_dir)?,
     )?;
     Ok(())
 }
@@ -647,6 +647,9 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         out,
         "pub const UI_PACK_START_LBA: u32 = {ui_pack_start_lba};"
     );
+    out.push('\n');
+
+    out.push_str(&music_layout(package).render_tracks(music_first_lba(package)));
     out.push('\n');
 
     out.push_str("/// Largest streamed UI image chunk in bytes (UI image staging buffer size).\n");
@@ -1857,27 +1860,72 @@ fn render_world_pack_order() -> String {
     )
 }
 
-fn write_cdda_tracks(package: &PlaytestPackage, cdda_tracks_dir: &Path) -> std::io::Result<String> {
+/// Where the music files go on the disc: they follow UI.PAK, the last file of
+/// the shared playtest layout (see `psx_iso::add_playtest_files`), so the
+/// manifest knows their sectors before the image exists.
+fn music_first_lba(package: &PlaytestPackage) -> u32 {
+    let ui_chunks = ui_pack_chunks(package);
+    let ui_pack_sectors = if ui_chunks.is_empty() {
+        0
+    } else {
+        psx_iso::build_world_pack_layout(&ui_chunks).total_sectors
+    };
+    psx_iso::WORLD_PACK_DEFAULT_START_LBA
+        + world_pack_layout(package).total_sectors
+        + ui_pack_sectors
+}
+
+fn music_layout(package: &PlaytestPackage) -> super::xa_music::Layout {
+    let frames: Vec<usize> = package
+        .cdda_tracks
+        .iter()
+        .map(|track| track.xa_frames as usize)
+        .collect();
+    super::xa_music::layout(&frames)
+}
+
+/// Encode the Music-node songs to XA files in `xa_music_dir` and list them for
+/// the disc builders (path, tab, sector).
+fn write_xa_music(package: &PlaytestPackage, xa_music_dir: &Path) -> std::io::Result<String> {
     let mut out = String::from(
-        "# PSoXide cooked CD-DA raw track payloads\n\
-         # One path per line. Track 2 is the first line, track 3 the second, etc.\n",
+        "# PSoXide cooked XA music files\n\
+         # One per line, in disc order: path, a tab, and the sector it must land on.\n",
     );
-    for track in &package.cdda_tracks {
-        let source = Path::new(&track.wav_path);
-        let bytes = std::fs::read(source)?;
-        let cooked =
-            psxed_audio::cook_cdda_track_from_wav_at_speed(&bytes, track.playback_speed_q12)
-                .map_err(|e| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!("cook CD-DA track {}: {e}", source.display()),
-                    )
-                })?;
-        let filename = format!("track{:02}.cdda", track.track);
-        let target = cdda_tracks_dir.join(filename);
-        std::fs::write(&target, cooked)?;
+    if package.cdda_tracks.is_empty() {
+        return Ok(out);
+    }
+    let wavs = package
+        .cdda_tracks
+        .iter()
+        .map(|track| std::fs::read(&track.wav_path))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    let sources: Vec<_> = wavs
+        .iter()
+        .zip(&package.cdda_tracks)
+        .map(|(wav, track)| super::xa_music::Source {
+            wav,
+            playback_speed_q12: track.playback_speed_q12,
+        })
+        .collect();
+    let layout = music_layout(package);
+    let files = super::xa_music::encode(&sources, &layout).map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("cook XA music: {e}"),
+        )
+    })?;
+    let mut lba = music_first_lba(package);
+    for ((name, bytes), sectors) in layout
+        .file_names()
+        .iter()
+        .zip(files)
+        .zip(&layout.file_sectors)
+    {
+        let target = xa_music_dir.join(name);
+        std::fs::write(&target, bytes)?;
         let listed = target.canonicalize().unwrap_or(target);
-        let _ = writeln!(out, "{}", listed.display());
+        let _ = writeln!(out, "{}\t{lba}", listed.display());
+        lba += sectors;
     }
     Ok(out)
 }
