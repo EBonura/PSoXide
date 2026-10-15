@@ -200,6 +200,14 @@ name = "psx-segments"
 version = "0.1.0"
 
 [[package]]
+name = "psx-seq"
+version = "0.1.0"
+dependencies = [
+ "psx-sfx",
+ "psx-spu",
+]
+
+[[package]]
 name = "psx-settings"
 version = "0.1.0"
 dependencies = [
