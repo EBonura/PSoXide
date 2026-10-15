@@ -302,6 +302,28 @@ impl PieceEnd {
     }
 }
 
+/// Which halves intersect this nonempty parameter interval: near=1, far=2.
+/// Compare each original bound once; constructing min/max bounds and then
+/// comparing them again repeats expensive exact rational products on MIPS.
+#[inline(always)]
+fn crossing_sides(
+    lower: PieceEnd,
+    upper: PieceEnd,
+    cross: SegmentParam,
+    start_in_front: bool,
+) -> u8 {
+    match upper.at.order(cross) {
+        Ordering::Less => return 1,
+        Ordering::Equal if upper.open || start_in_front => return 1,
+        _ => {}
+    }
+    match lower.at.order(cross) {
+        Ordering::Greater => 2,
+        Ordering::Equal if lower.open || !start_in_front => 2,
+        _ => 3,
+    }
+}
+
 /// No entry plane: the piece starts at the segment start.
 const NO_ENTRY_PLANE: u16 = u16::MAX;
 
@@ -317,6 +339,7 @@ struct PendingPiece {
     entry_side: u8,
     /// Bit 0: the lower end is excluded. Bit 1: the upper end is excluded.
     open_ends: u8,
+    entered_edge: u16,
 }
 
 impl PendingPiece {
@@ -507,6 +530,23 @@ trait PlaneSource: Copy {
     /// # Safety
     /// `index < self.len()`.
     unsafe fn distances_unchecked(self, index: usize, a: &[i32; 3], b: &[i32; 3]) -> (i32, i32);
+    /// Distances for points already divided by 4096, known integral in Q12.
+    /// The default reconstructs the exact original inputs for packed sources.
+    #[inline(always)]
+    unsafe fn integral_distances_unchecked(
+        self,
+        index: usize,
+        a: &[i32; 3],
+        b: &[i32; 3],
+    ) -> (i32, i32) {
+        unsafe {
+            self.distances_unchecked(
+                index,
+                &a.map(|v| v.wrapping_shl(12)),
+                &b.map(|v| v.wrapping_shl(12)),
+            )
+        }
+    }
     fn get(self, index: usize) -> Option<Plane>;
 }
 
@@ -570,6 +610,16 @@ impl PlaneSource for &[CompactPlane] {
             a,
             b,
         )
+    }
+
+    #[inline(always)]
+    unsafe fn integral_distances_unchecked(
+        self,
+        index: usize,
+        a: &[i32; 3],
+        b: &[i32; 3],
+    ) -> (i32, i32) {
+        integral_plane_distances(unsafe { self.get_unchecked(index) }, a, b)
     }
 
     #[inline(always)]
@@ -762,7 +812,7 @@ impl<'a> CollisionHull<'a> {
         scratch: &mut TraceScratch,
         output: &mut Trace,
     ) -> bool {
-        with_sources!(self, |planes, nodes| trace_segment(
+        with_sources!(self, |planes, nodes| trace_segment::<_, _, false, false>(
             planes,
             nodes,
             self.head_node,
@@ -771,6 +821,348 @@ impl<'a> CollisionHull<'a> {
             scratch,
             output
         ))
+    }
+
+    /// Whether a point segment touches solid contents. Uses the same exact
+    /// BSP interval traversal as `trace_into`, but needs neither a contact
+    /// position nor its normal. `None` reports malformed data or scratch
+    /// overflow; visibility callers must fail closed on it.
+    pub fn segment_obstructed(
+        &self,
+        start: &Vec3I32,
+        end: &Vec3I32,
+        scratch: &mut TraceScratch,
+    ) -> Option<bool> {
+        let mut result = Trace::default();
+        with_sources!(self, |planes, nodes| trace_segment::<_, _, true, false>(
+            planes,
+            nodes,
+            self.head_node,
+            start,
+            end,
+            scratch,
+            &mut result
+        ))
+        .then_some(result.fraction < Q12_ONE)
+    }
+
+    /// Fill one parent directed-edge index per render node. The root uses
+    /// MAX; reject oversized, shared-child, cyclic, disconnected or non-render
+    /// graphs so callers can keep ordinary tracing as the fallback.
+    pub fn build_solid_cell_parents(&self, parents: &mut [u16]) -> bool {
+        let HullNodes::Render { nodes, .. } = self.nodes else {
+            return false;
+        };
+        let count = nodes.len();
+        if count == 0 || count > 32767 || parents.len() != count || self.head_node < 0 {
+            return false;
+        }
+        let root = self.head_node as usize;
+        if root >= count {
+            return false;
+        }
+        parents.fill(u16::MAX - 1);
+        parents[root] = u16::MAX;
+        for index in 0..count {
+            let Some(node) = nodes.get(index) else {
+                return false;
+            };
+            for (side, child) in node.children.into_iter().enumerate() {
+                if child < 0 {
+                    continue;
+                }
+                let child = child as usize;
+                if child >= count || parents[child] != u16::MAX - 1 {
+                    return false;
+                }
+                parents[child] = (index * 2 + side) as u16;
+            }
+        }
+        for index in 0..count {
+            let mut current = index;
+            let mut reached = false;
+            for _ in 0..count {
+                if current == root {
+                    reached = true;
+                    break;
+                }
+                let edge = parents[current];
+                if edge >= u16::MAX - 1 {
+                    return false;
+                }
+                current = usize::from(edge) / 2;
+            }
+            if !reached {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Original exact obstruction result plus the directed edge entering a
+    /// solid cell. MAX means no reusable witness (for example a solid root).
+    pub fn segment_obstruction_witness(
+        &self,
+        start: &Vec3I32,
+        end: &Vec3I32,
+        scratch: &mut TraceScratch,
+    ) -> Option<(bool, u16)> {
+        let mut result = Trace::default();
+        with_sources!(self, |planes, nodes| trace_segment::<_, _, true, true>(
+            planes,
+            nodes,
+            self.head_node,
+            start,
+            end,
+            scratch,
+            &mut result
+        ))
+        .then_some((
+            result.fraction < Q12_ONE,
+            if result.fraction < Q12_ONE {
+                result.plane_distance as u16
+            } else {
+                u16::MAX
+            },
+        ))
+    }
+
+    /// Prove that the segment intersects the complete ancestor halfspace
+    /// intersection ending at this solid edge. Every parent edge is checked
+    /// against the current tree and the chain must reach this hull's root.
+    /// False means no certificate, never a clear-ray answer: trace normally.
+    pub fn certifies_solid_cell(
+        &self,
+        parents: &[u16],
+        edge: u16,
+        start: &Vec3I32,
+        end: &Vec3I32,
+    ) -> bool {
+        // For integral Q12 points, shifting the product back by twelve is
+        // exactly multiplication of the integral coordinate, modulo i32.
+        // Fractional points (including positive saturation) retain wide arithmetic.
+        if (start.x | start.y | start.z | end.x | end.y | end.z) & 4095 == 0 {
+            self.certifies_solid_cell_inner::<true>(parents, edge, start, end)
+        } else {
+            self.certifies_solid_cell_inner::<false>(parents, edge, start, end)
+        }
+    }
+
+    fn certifies_solid_cell_inner<const INTEGRAL: bool>(
+        &self,
+        parents: &[u16],
+        mut edge: u16,
+        start: &Vec3I32,
+        end: &Vec3I32,
+    ) -> bool {
+        let (PlaneRecords::Compact(planes), HullNodes::Render { nodes, leaves }) =
+            (self.planes, self.nodes)
+        else {
+            return false;
+        };
+        if parents.len() != nodes.len() || edge == u16::MAX || self.head_node < 0 {
+            return false;
+        }
+        let source = RenderNodes { nodes, leaves };
+        let first = usize::from(edge) / 2;
+        let Some(first_node) = nodes.get(first) else {
+            return false;
+        };
+        let child = first_node.children[usize::from(edge) & 1];
+        if child >= 0 || source.contents(child) != Some(CONTENTS_SOLID) {
+            return false;
+        }
+        let from = array(*start).map(|v| if INTEGRAL { v >> 12 } else { v });
+        let to = array(*end).map(|v| if INTEGRAL { v >> 12 } else { v });
+        let mut lower = PieceEnd {
+            at: SegmentParam::START,
+            open: false,
+        };
+        let mut upper = PieceEnd {
+            at: SegmentParam::END,
+            open: false,
+        };
+        for _ in 0..nodes.len() {
+            let index = usize::from(edge) / 2;
+            let side = usize::from(edge) & 1;
+            let Some(node) = nodes.get(index) else {
+                return false;
+            };
+            let plane = usize::from(node.plane);
+            if plane >= planes.len() {
+                return false;
+            }
+            let (ds, de) = if INTEGRAL {
+                integral_plane_distances(&planes[plane], &from, &to)
+            } else {
+                unsafe { planes.distances_unchecked(plane, &from, &to) }
+            };
+            let start_front = ds >= 0;
+            let wanted_front = side == 0;
+            if start_front == (de >= 0) {
+                if start_front != wanted_front {
+                    return false;
+                }
+            } else {
+                let cross = PieceEnd {
+                    at: SegmentParam::crossing(ds, de),
+                    open: !wanted_front,
+                };
+                if start_front == wanted_front {
+                    upper = upper.earlier(cross);
+                } else {
+                    lower = lower.later(cross);
+                }
+                if lower.empty_up_to(upper) {
+                    return false;
+                }
+            }
+            let parent = parents[index];
+            if parent == u16::MAX {
+                return index == self.head_node as usize;
+            }
+            let Some(parent_node) = nodes.get(usize::from(parent) / 2) else {
+                return false;
+            };
+            if parent_node.children[usize::from(parent) & 1] != index as i16 {
+                return false;
+            }
+            edge = parent;
+        }
+        false
+    }
+
+    /// Copy every halfspace in a fully validated solid-cell ancestor chain,
+    /// in the same leaf-to-root order as `certifies_solid_cell`. An incomplete,
+    /// malformed or over-capacity chain returns None; partial output is invalid.
+    /// The result describes this immutable hull only, not future tree mutations.
+    pub fn solid_cell_constraints_into(
+        &self,
+        parents: &[u16],
+        mut edge: u16,
+        output: &mut [u16],
+    ) -> Option<usize> {
+        let (PlaneRecords::Compact(planes), HullNodes::Render { nodes, leaves }) =
+            (self.planes, self.nodes)
+        else {
+            return None;
+        };
+        if parents.len() != nodes.len() || edge == u16::MAX || self.head_node < 0 {
+            return None;
+        }
+        let source = RenderNodes { nodes, leaves };
+        let first = nodes.get(usize::from(edge) / 2)?;
+        let child = first.children[usize::from(edge) & 1];
+        if child >= 0 || source.contents(child) != Some(CONTENTS_SOLID) {
+            return None;
+        }
+        for depth in 0..nodes.len() {
+            let index = usize::from(edge) / 2;
+            let node = nodes.get(index)?;
+            let plane = usize::from(node.plane);
+            if plane >= planes.len() || plane > 32767 {
+                return None;
+            }
+            *output.get_mut(depth)? = ((plane as u16) << 1) | (edge & 1);
+            let parent = parents[index];
+            if parent == u16::MAX {
+                return (index == self.head_node as usize).then_some(depth + 1);
+            }
+            let parent_node = nodes.get(usize::from(parent) / 2)?;
+            if parent_node.children[usize::from(parent) & 1] != index as i16 {
+                return None;
+            }
+            edge = parent;
+        }
+        None
+    }
+
+    /// Verify a cooked redundancy proposal against this live compact hull.
+    /// The caller supplies a complete validated path and enforces the returned
+    /// reduction's integral endpoint/domain gate on every subsequent query.
+    pub fn reduce_solid_cell_constraints(
+        &self,
+        path: &mut [u16],
+        domain: &crate::solid_cell_proof::Domain,
+        proof: &[u8],
+    ) -> Option<usize> {
+        let PlaneRecords::Compact(planes) = self.planes else {
+            return None;
+        };
+        crate::solid_cell_proof::reduce_live(planes, path, domain, proof)
+    }
+
+    /// Intersect a segment with an explicit sequence of plane/side halfspaces.
+    /// This proves only intersection, not that arbitrary supplied halfspaces
+    /// are solid. A caller using it for occlusion must own a list produced by
+    /// `solid_cell_constraints_into` on the same unchanged hull.
+    pub fn segment_intersects_halfspaces(
+        &self,
+        constraints: &[u16],
+        start: &Vec3I32,
+        end: &Vec3I32,
+    ) -> bool {
+        if (start.x | start.y | start.z | end.x | end.y | end.z) & 4095 == 0 {
+            self.segment_intersects_halfspaces_inner::<true>(constraints, start, end)
+        } else {
+            self.segment_intersects_halfspaces_inner::<false>(constraints, start, end)
+        }
+    }
+
+    fn segment_intersects_halfspaces_inner<const INTEGRAL: bool>(
+        &self,
+        constraints: &[u16],
+        start: &Vec3I32,
+        end: &Vec3I32,
+    ) -> bool {
+        let PlaneRecords::Compact(planes) = self.planes else {
+            return false;
+        };
+        if constraints.is_empty() {
+            return false;
+        }
+        let from = array(*start).map(|v| if INTEGRAL { v >> 12 } else { v });
+        let to = array(*end).map(|v| if INTEGRAL { v >> 12 } else { v });
+        let mut lower = PieceEnd {
+            at: SegmentParam::START,
+            open: false,
+        };
+        let mut upper = PieceEnd {
+            at: SegmentParam::END,
+            open: false,
+        };
+        for &constraint in constraints {
+            let plane = usize::from(constraint) / 2;
+            if plane >= planes.len() {
+                return false;
+            }
+            let (ds, de) = if INTEGRAL {
+                integral_plane_distances(&planes[plane], &from, &to)
+            } else {
+                unsafe { planes.distances_unchecked(plane, &from, &to) }
+            };
+            let start_front = ds >= 0;
+            let wanted_front = constraint & 1 == 0;
+            if start_front == (de >= 0) {
+                if start_front != wanted_front {
+                    return false;
+                }
+            } else {
+                let cross = PieceEnd {
+                    at: SegmentParam::crossing(ds, de),
+                    open: !wanted_front,
+                };
+                if start_front == wanted_front {
+                    upper = upper.earlier(cross);
+                } else {
+                    lower = lower.later(cross);
+                }
+                if lower.empty_up_to(upper) {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     /// Apply one mover transform while retaining this model-local hull.
@@ -789,6 +1181,25 @@ impl<'a> CollisionHull<'a> {
             &array(*point)
         ))
     }
+}
+
+/// Exact compact-plane distances for coordinates already divided by Q12_ONE.
+/// For x divisible by 4096: ((i64(x) * n) >> 12) as i32 equals
+/// (x >> 12).wrapping_mul(n), including negative x and overflowing products.
+#[inline(always)]
+fn integral_plane_distances(plane: &CompactPlane, a: &[i32; 3], b: &[i32; 3]) -> (i32, i32) {
+    let distance = |point: &[i32; 3]| {
+        let dot = if plane.kind < 3 {
+            point[plane.kind as usize].wrapping_shl(12)
+        } else {
+            point[0]
+                .wrapping_mul(i32::from(plane.normal.x))
+                .wrapping_add(point[1].wrapping_mul(i32::from(plane.normal.y)))
+                .wrapping_add(point[2].wrapping_mul(i32::from(plane.normal.z)))
+        };
+        dot.wrapping_sub(plane.distance)
+    };
+    (distance(a), distance(b))
 }
 
 /// Descend from `node` to the leaf holding `point` and return its contents.
@@ -838,7 +1249,7 @@ fn point_contents_walk<P: PlaneSource, N: NodeSource>(
 /// Returns `false`, leaving `output` untouched, on malformed hull data or
 /// when more than [`TRACE_STACK_CAPACITY`] pieces are deferred at once.
 #[inline(never)]
-fn trace_segment<P: PlaneSource, N: NodeSource>(
+fn trace_segment<P: PlaneSource, N: NodeSource, const OCCLUSION_ONLY: bool, const WITNESS: bool>(
     planes: P,
     nodes: N,
     head_node: i16,
@@ -847,8 +1258,38 @@ fn trace_segment<P: PlaneSource, N: NodeSource>(
     scratch: &mut TraceScratch,
     output: &mut Trace,
 ) -> bool {
-    let from = array(*start);
-    let to = array(*end);
+    // Every descent evaluates the original endpoints; only rational parameter
+    // intervals are split. Thus one check covers the entire walk. Local mover
+    // transforms with fractional coordinates retain the original wide path.
+    if !P::CHECKED && (start.x | start.y | start.z | end.x | end.y | end.z) & 4095 == 0 {
+        trace_segment_inner::<P, N, OCCLUSION_ONLY, WITNESS, true>(
+            planes, nodes, head_node, start, end, scratch, output,
+        )
+    } else {
+        trace_segment_inner::<P, N, OCCLUSION_ONLY, WITNESS, false>(
+            planes, nodes, head_node, start, end, scratch, output,
+        )
+    }
+}
+
+#[inline(never)]
+fn trace_segment_inner<
+    P: PlaneSource,
+    N: NodeSource,
+    const OCCLUSION_ONLY: bool,
+    const WITNESS: bool,
+    const INTEGRAL: bool,
+>(
+    planes: P,
+    nodes: N,
+    head_node: i16,
+    start: &Vec3I32,
+    end: &Vec3I32,
+    scratch: &mut TraceScratch,
+    output: &mut Trace,
+) -> bool {
+    let from = array(*start).map(|v| if INTEGRAL { v >> 12 } else { v });
+    let to = array(*end).map(|v| if INTEGRAL { v >> 12 } else { v });
     let node_count = nodes.len();
     let mut result = Trace::reaching(*end);
     // `None` until the first leaf; then whether the last leaf was solid.
@@ -861,6 +1302,7 @@ fn trace_segment<P: PlaneSource, N: NodeSource>(
         node: head_node,
         entry_side: 0,
         open_ends: 0,
+        entered_edge: u16::MAX,
     };
     loop {
         let mut visited = 0usize;
@@ -875,10 +1317,17 @@ fn trace_segment<P: PlaneSource, N: NodeSource>(
             if P::CHECKED && plane >= planes.len() {
                 return false;
             }
-            let (ds, de) = unsafe { planes.distances_unchecked(plane, &from, &to) };
+            let (ds, de) = if INTEGRAL {
+                unsafe { planes.integral_distances_unchecked(plane, &from, &to) }
+            } else {
+                unsafe { planes.distances_unchecked(plane, &from, &to) }
+            };
             let start_in_front = ds >= 0;
             let near = usize::from(!start_in_front);
             if start_in_front == (de >= 0) {
+                if WITNESS {
+                    piece.entered_edge = (index * 2 + near) as u16;
+                }
                 piece.node = unsafe { nodes.child_unchecked(index, near) };
                 continue;
             }
@@ -888,22 +1337,34 @@ fn trace_segment<P: PlaneSource, N: NodeSource>(
             // `cross`, and a start behind keeps it up to just short of it.
             let cross = SegmentParam::crossing(ds, de);
             let (lower, upper) = (piece.lower_end(), piece.upper_end());
-            let near_upper = upper.earlier(PieceEnd {
+            match crossing_sides(lower, upper, cross, start_in_front) {
+                1 => {
+                    if WITNESS {
+                        piece.entered_edge = (index * 2 + near) as u16;
+                    }
+                    piece.node = unsafe { nodes.child_unchecked(index, near) };
+                    continue;
+                }
+                2 => {
+                    if WITNESS {
+                        piece.entered_edge = (index * 2 + (near ^ 1)) as u16;
+                    }
+                    piece.node = unsafe { nodes.child_unchecked(index, near ^ 1) };
+                    continue;
+                }
+                _ => {}
+            }
+            // Both halves are nonempty. The crossing lies within the piece;
+            // a coincident inherited bound must be closed on its retained
+            // half, otherwise crossing_sides would have selected one child.
+            let near_upper = PieceEnd {
                 at: cross,
                 open: !start_in_front,
-            });
-            let far_lower = lower.later(PieceEnd {
+            };
+            let far_lower = PieceEnd {
                 at: cross,
                 open: start_in_front,
-            });
-            if far_lower.empty_up_to(upper) {
-                piece.node = unsafe { nodes.child_unchecked(index, near) };
-                continue;
-            }
-            if lower.empty_up_to(near_upper) {
-                piece.node = unsafe { nodes.child_unchecked(index, near ^ 1) };
-                continue;
-            }
+            };
             if deferred == TRACE_STACK_CAPACITY {
                 return false;
             }
@@ -914,11 +1375,19 @@ fn trace_segment<P: PlaneSource, N: NodeSource>(
                 node: unsafe { nodes.child_unchecked(index, near ^ 1) },
                 entry_side: near as u8,
                 open_ends: 0,
+                entered_edge: if WITNESS {
+                    (index * 2 + (near ^ 1)) as u16
+                } else {
+                    u16::MAX
+                },
             };
             far.set_ends(far_lower, upper);
             scratch.pieces[deferred].write(far);
             deferred += 1;
             piece.set_ends(lower, near_upper);
+            if WITNESS {
+                piece.entered_edge = (index * 2 + near) as u16;
+            }
             piece.node = unsafe { nodes.child_unchecked(index, near) };
         }
 
@@ -927,6 +1396,16 @@ fn trace_segment<P: PlaneSource, N: NodeSource>(
         };
         let solid = contents == CONTENTS_SOLID;
         if solid {
+            if OCCLUSION_ONLY {
+                if WITNESS {
+                    result.plane_distance = i32::from(piece.entered_edge);
+                }
+                // No contact reconstruction or continued walk out of an
+                // initially solid leaf is needed to prove obstruction.
+                result.fraction = 0;
+                *output = result;
+                return true;
+            }
             match last_solid {
                 None => result.start_solid = TraceFlag::SET,
                 Some(false) => {
@@ -955,7 +1434,7 @@ fn trace_segment<P: PlaneSource, N: NodeSource>(
                 }
                 Some(true) => {}
             }
-        } else {
+        } else if !OCCLUSION_ONLY {
             result.all_solid = TraceFlag::CLEAR;
             if contents == CONTENTS_EMPTY {
                 result.in_open = TraceFlag::SET;
@@ -963,7 +1442,9 @@ fn trace_segment<P: PlaneSource, N: NodeSource>(
                 result.in_water = TraceFlag::SET;
             }
         }
-        last_solid = Some(solid);
+        if !OCCLUSION_ONLY {
+            last_solid = Some(solid);
+        }
 
         if deferred == 0 {
             break;
@@ -1266,6 +1747,76 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn crossing_interval_matches_original_exact_clipping() {
+        let mut params = Vec::new();
+        for den in 1..=9 {
+            for num in 0..=den {
+                params.push(SegmentParam { num, den });
+            }
+        }
+        params.extend([
+            SegmentParam {
+                num: 1,
+                den: u32::MAX,
+            },
+            SegmentParam {
+                num: u32::MAX - 1,
+                den: u32::MAX,
+            },
+            SegmentParam {
+                num: 0x80000000,
+                den: u32::MAX,
+            },
+        ]);
+        let mut checked = 0;
+        for &lo in &params {
+            for &hi in &params {
+                for flags in 0..4 {
+                    let lower = PieceEnd {
+                        at: lo,
+                        open: flags & 1 != 0,
+                    };
+                    let upper = PieceEnd {
+                        at: hi,
+                        open: flags & 2 != 0,
+                    };
+                    if lower.empty_up_to(upper) {
+                        continue;
+                    }
+                    for &cross in &params {
+                        for start_in_front in [false, true] {
+                            let near_upper = upper.earlier(PieceEnd {
+                                at: cross,
+                                open: !start_in_front,
+                            });
+                            let far_lower = lower.later(PieceEnd {
+                                at: cross,
+                                open: start_in_front,
+                            });
+                            let old = if far_lower.empty_up_to(upper) {
+                                1
+                            } else if lower.empty_up_to(near_upper) {
+                                2
+                            } else {
+                                3
+                            };
+                            assert_eq!(crossing_sides(lower, upper, cross, start_in_front), old);
+                            if old == 3 {
+                                assert_eq!(near_upper.at.order(cross), Ordering::Equal);
+                                assert_eq!(far_lower.at.order(cross), Ordering::Equal);
+                                assert_eq!(near_upper.open, !start_in_front);
+                                assert_eq!(far_lower.open, start_in_front);
+                            }
+                            checked += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(checked > 500_000);
+    }
+
     use crate::CookedRecord;
     use alloc::vec::Vec;
 
@@ -1566,7 +2117,258 @@ mod tests {
     ) -> Trace {
         let mut output = Trace::default();
         assert!(hull.trace_into(&start, &end, scratch, &mut output));
+        assert_eq!(
+            hull.segment_obstructed(&start, &end, scratch),
+            Some(output.start_solid.is_set() || output.fraction < Q12_ONE),
+            "boolean/full trace parity: {start:?} -> {end:?}"
+        );
         output
+    }
+
+    #[test]
+    fn integral_certificate_distances_match_wide_arithmetic() {
+        let mut rng = 0xb8f1_36a9u32;
+        let mut next = || {
+            rng = rng.wrapping_mul(1664525).wrapping_add(1013904223);
+            rng as i32
+        };
+        for index in 0..60000 {
+            let point = |v: i32| v & !4095;
+            let a = [point(next()), point(next()), point(next())];
+            let b = [point(next()), point(next()), point(next())];
+            let plane = CompactPlane {
+                normal: Vec3I16 {
+                    x: next() as i16,
+                    y: next() as i16,
+                    z: next() as i16,
+                },
+                kind: (index % 4) as u8,
+                sign_bits: 0,
+                distance: next(),
+            };
+            let expected = unsafe { [plane].as_slice().distances_unchecked(0, &a, &b) };
+            assert_eq!(
+                integral_plane_distances(&plane, &a.map(|v| v >> 12), &b.map(|v| v >> 12)),
+                expected
+            );
+        }
+        for x in [i32::MIN, -4096, 0, 4096, i32::MAX & !4095] {
+            for n in [i16::MIN, -4096, -1, 0, 1, 4096, i16::MAX] {
+                let plane = CompactPlane {
+                    normal: Vec3I16 { x: n, y: n, z: n },
+                    kind: 3,
+                    sign_bits: 0,
+                    distance: i32::MAX,
+                };
+                let p = [x; 3];
+                let expected = unsafe { [plane].as_slice().distances_unchecked(0, &p, &p) };
+                assert_eq!(
+                    integral_plane_distances(&plane, &p.map(|v| v >> 12), &p.map(|v| v >> 12)),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn solid_cell_certificates_preserve_ancestor_planes_and_boundary_ties() {
+        #[repr(align(4))]
+        struct Aligned([u8; 48]);
+        let mut bytes = Aligned([0; 48]);
+        for (i, (plane, children)) in [(0u16, [1i16, 2]), (1, [-1, -2]), (2, [-2, -1])]
+            .into_iter()
+            .enumerate()
+        {
+            bytes.0[i * 16..i * 16 + 2].copy_from_slice(&plane.to_le_bytes());
+            for side in 0..2 {
+                bytes.0[i * 16 + 2 + side * 2..i * 16 + 4 + side * 2]
+                    .copy_from_slice(&children[side].to_le_bytes());
+            }
+        }
+        let mut leaves = [0u8; 28];
+        leaves[0] = CONTENTS_SOLID as u8;
+        leaves[14] = CONTENTS_EMPTY as u8;
+        let planes = [
+            CompactPlane {
+                normal: Vec3I16 {
+                    x: 4096,
+                    y: 0,
+                    z: 0,
+                },
+                kind: 0,
+                sign_bits: 0,
+                distance: 0,
+            },
+            CompactPlane {
+                normal: Vec3I16 {
+                    x: 2896,
+                    y: 0,
+                    z: 2896,
+                },
+                kind: 3,
+                sign_bits: 0,
+                distance: 0,
+            },
+            CompactPlane {
+                normal: Vec3I16 {
+                    x: 0,
+                    y: 0,
+                    z: 4096,
+                },
+                kind: 2,
+                sign_bits: 0,
+                distance: -4096,
+            },
+        ];
+        fn make_hull<'a>(
+            data: &'a Aligned,
+            planes: &'a [CompactPlane],
+            leaves: &'a [u8],
+        ) -> CollisionHull<'a> {
+            unsafe {
+                CollisionHull::from_render_bsp(
+                    planes,
+                    RecordSlice::new(&data.0).unwrap(),
+                    RecordSlice::new(leaves).unwrap(),
+                    0,
+                )
+            }
+        }
+        let hull = make_hull(&bytes, &planes, &leaves);
+        let mut parents = [0u16; 3];
+        assert!(hull.build_solid_cell_parents(&mut parents));
+        assert_eq!(parents, [u16::MAX, 0, 1]);
+        let values = [-8192, -4096, -1, 0, 1, 4096, 8192];
+        let mut scratch = TraceScratch::new();
+        for x in values {
+            for z in values {
+                for ex in values {
+                    for ez in values {
+                        let start = Vec3I32 { x, y: 0, z };
+                        let end = Vec3I32 { x: ex, y: 0, z: ez };
+                        let expected = hull.segment_obstructed(&start, &end, &mut scratch).unwrap();
+                        let (blocked, witness) = hull
+                            .segment_obstruction_witness(&start, &end, &mut scratch)
+                            .unwrap();
+                        assert_eq!(blocked, expected);
+                        if blocked {
+                            assert!(hull.certifies_solid_cell(&parents, witness, &start, &end));
+                        }
+                        // The shared solid leaf cannot substitute one occurrence for the other.
+                        for edge in [2, 5] {
+                            let mut constraints = [0u16; 3];
+                            let count = hull
+                                .solid_cell_constraints_into(&parents, edge, &mut constraints)
+                                .unwrap();
+                            assert_eq!(count, 2);
+                            assert_eq!(
+                                hull.segment_intersects_halfspaces(
+                                    &constraints[..count],
+                                    &start,
+                                    &end
+                                ),
+                                hull.certifies_solid_cell(&parents, edge, &start, &end)
+                            );
+                            assert_eq!(
+                                hull.solid_cell_constraints_into(&parents, edge, &mut [0u16; 1]),
+                                None
+                            );
+                            assert_eq!(
+                                hull.solid_cell_constraints_into(&[], edge, &mut constraints),
+                                None
+                            );
+                            assert_eq!(
+                                hull.solid_cell_constraints_into(
+                                    &[u16::MAX; 3],
+                                    edge,
+                                    &mut constraints
+                                ),
+                                None
+                            );
+                            assert!(!hull.segment_intersects_halfspaces(&[u16::MAX], &start, &end));
+                            assert!(!hull.segment_intersects_halfspaces(&[], &start, &end));
+                            assert_eq!(
+                                hull.certifies_solid_cell(&parents, edge, &start, &end),
+                                hull.certifies_solid_cell_inner::<false>(
+                                    &parents, edge, &start, &end
+                                )
+                            );
+                            if hull.certifies_solid_cell(&parents, edge, &start, &end) {
+                                assert!(expected);
+                            }
+                        }
+                        assert!(!hull.certifies_solid_cell(&[u16::MAX; 3], 2, &start, &end));
+                        assert!(!hull.certifies_solid_cell(&[], 2, &start, &end));
+                    }
+                }
+            }
+        }
+        // Root children shared, cyclic, or disconnected must disable generation.
+        for replacement in [1i16, 0, -2] {
+            bytes.0[4..6].copy_from_slice(&replacement.to_le_bytes());
+            assert!(!make_hull(&bytes, &planes, &leaves).build_solid_cell_parents(&mut parents));
+        }
+    }
+
+    #[test]
+    fn obstruction_matches_full_trace_for_slanted_and_thin_solids() {
+        let mut planes = plane(
+            Vec3I16 {
+                x: 2896,
+                y: 2896,
+                z: 0,
+            },
+            0,
+            3,
+        )
+        .to_vec();
+        planes.extend_from_slice(&plane(
+            Vec3I16 {
+                x: 2896,
+                y: 2896,
+                z: 0,
+            },
+            16,
+            3,
+        ));
+        let mut nodes = node(0, 1, CONTENTS_EMPTY).to_vec();
+        nodes.extend_from_slice(&node(1, CONTENTS_EMPTY, CONTENTS_SOLID));
+        let hull = hull(&planes, &nodes);
+        let mut scratch = TraceScratch::new();
+        let mut rng = 0x1345abcu32;
+        for _ in 0..5000 {
+            let mut coordinate = || {
+                rng = rng.wrapping_mul(1664525).wrapping_add(1013904223);
+                (rng % 32769) as i32 - 16384
+            };
+            let start = Vec3I32 {
+                x: coordinate(),
+                y: coordinate(),
+                z: coordinate(),
+            };
+            let end = Vec3I32 {
+                x: coordinate(),
+                y: coordinate(),
+                z: coordinate(),
+            };
+            trace(&hull, start, end, &mut scratch);
+        }
+    }
+
+    #[test]
+    fn obstruction_fails_closed_for_cyclic_hull() {
+        let planes = axial_x_plane();
+        let nodes = node(0, 0, CONTENTS_SOLID);
+        let hull = hull(&planes, &nodes);
+        let start = Vec3I32 {
+            x: Q12_ONE,
+            y: 0,
+            z: 0,
+        };
+        assert_eq!(
+            hull.segment_obstructed(&start, &start, &mut TraceScratch::new()),
+            None
+        );
     }
 
     /// A trace whose every byte, flag slots and padding included, is the
@@ -2266,6 +3068,10 @@ mod tests {
         assert!(!boundary.all_solid.is_set());
 
         let (overflow_planes, overflow_nodes) = deep_crossing_hull(TRACE_STACK_CAPACITY + 1);
+        assert_eq!(
+            hull(&overflow_planes, &overflow_nodes).segment_obstructed(&start, &end, &mut scratch),
+            None
+        );
         let mut output = sentinel_trace(0x3c);
         let before = trace_bytes(&output);
         assert!(!hull(&overflow_planes, &overflow_nodes).trace_into(

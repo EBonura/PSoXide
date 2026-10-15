@@ -8,7 +8,7 @@ use core::fmt;
 use core::mem::MaybeUninit;
 
 use psx_asset::Texture;
-use psx_bsp::collision::{LiquidContentsSample, TraceScratch};
+use psx_bsp::collision::{CollisionHull, LiquidContentsSample, TraceScratch};
 use psx_bsp::collision_provider::{
     select_body_hull, valid_pxbsp_body_hulls, PxbspCollisionModel, PxbspCollisionProvider,
 };
@@ -45,7 +45,8 @@ use psx_math::{cos_q12, sin_q12};
 
 use crate::generated::{
     ASSETS, DESTRUCTIBLES, PXBSP_BODY_HULLS, PXBSP_MOVER_MODEL_INDICES, PXBSP_MOVER_NODE_IDS,
-    PXBSP_STREAMED, PXBSP_WORLD, ROOMS, WORLD_OBJECTS,
+    PXBSP_STREAMED, PXBSP_WORLD, ROOMS, SOLID_CELL_PARENTS, WORLD_OBJECTS,
+    WORLD_OBJECT_LEAF_RANGES, WORLD_OBJECT_LEAVES,
 };
 use crate::world_objects_runtime::WorldObjectVisibility;
 use crate::{
@@ -351,6 +352,188 @@ impl fmt::Display for BspRuntimeInitError {
     }
 }
 
+/// Exact strict-occlusion memoization for immutable BSP geometry. Frustum
+/// rejection remains outside this cache, so rotating the camera cannot reuse
+/// an old view mask. A moved eye invalidates every ray result. Keys index the
+/// immutable generated WORLD_OBJECTS registry, including its conservative
+/// bounds for rotating props; gameplay-mutated bounds never enter this cache.
+struct StaticObjectOcclusionCache {
+    observer: Option<RoomPoint>,
+    known: WorldObjectVisibility,
+    visible: WorldObjectVisibility,
+}
+impl StaticObjectOcclusionCache {
+    const EMPTY: Self = Self {
+        observer: None,
+        known: WorldObjectVisibility::NONE,
+        visible: WorldObjectVisibility::NONE,
+    };
+    fn prepare(&mut self, observer: RoomPoint, immutable: bool) {
+        let next = immutable.then_some(observer);
+        if next.is_none() || self.observer != next {
+            self.observer = next;
+            self.known = WorldObjectVisibility::NONE;
+            self.visible = WorldObjectVisibility::NONE;
+        }
+    }
+    fn get(&self, index: usize) -> Option<bool> {
+        (self.observer.is_some() && self.known.contains(index))
+            .then(|| self.visible.contains(index))
+    }
+    fn insert(&mut self, index: usize, visible: bool) {
+        if self.observer.is_some() {
+            self.known.set(index);
+            if visible {
+                self.visible.set(index);
+            }
+        }
+    }
+}
+
+/// Full ancestor lists, owned by one resident immutable BspRuntime generation.
+/// Reductions require a live exact proof and a per-query domain gate.
+/// Keys are exact terminal directed edges and a
+/// non-repeating owner generation. Entries publish after full root validation.
+/// Storage lives in RuntimeArenas BSS to avoid copying 4.7KB on the startup stack.
+/// The resident owner never reloads or mutates its map/parent table in place.
+pub(super) struct SolidCellConstraintCache {
+    planes: [[u16; 72]; 32],
+    keys: [u16; 32],
+    lengths: [u8; 32],
+    reduced: [bool; 32],
+    next: u8,
+    generation: u32,
+}
+impl SolidCellConstraintCache {
+    pub(super) const ZEROED: Self = Self {
+        planes: [[0; 72]; 32],
+        keys: [0; 32],
+        lengths: [0; 32],
+        reduced: [false; 32],
+        next: 0,
+        generation: 0,
+    };
+    fn start_generation(&mut self) -> u32 {
+        self.invalidate();
+        let Some(next) = self.generation.checked_add(1) else {
+            return 0;
+        };
+        self.generation = next;
+        next
+    }
+    fn invalidate(&mut self) {
+        self.keys.fill(u16::MAX);
+        self.next = 0;
+    }
+    fn certifies(
+        &mut self,
+        generation: u32,
+        hull: CollisionHull<'_>,
+        parents: &[u16],
+        edge: u16,
+        start: &Vec3I32,
+        end: &Vec3I32,
+        proof_domain: &psx_bsp::solid_cell_proof::Domain,
+        proof_index: &[[u16; 3]],
+        proof_data: &[u8],
+    ) -> bool {
+        if generation == 0 || generation != self.generation {
+            return hull.certifies_solid_cell(parents, edge, start, end);
+        }
+        if edge == u16::MAX {
+            return false;
+        }
+        let slot = if let Some(slot) = self.keys.iter().position(|&key| key == edge) {
+            slot
+        } else {
+            let slot = usize::from(self.next);
+            self.keys[slot] = u16::MAX;
+            let Some(count) =
+                hull.solid_cell_constraints_into(parents, edge, &mut self.planes[slot])
+            else {
+                return hull.certifies_solid_cell(parents, edge, start, end);
+            };
+            self.reduced[slot] = false;
+            let reduced_count = psx_bsp::solid_cell_proof::entry(proof_index, proof_data, edge)
+                .and_then(|proof| {
+                    hull.reduce_solid_cell_constraints(
+                        &mut self.planes[slot][..count],
+                        proof_domain,
+                        proof,
+                    )
+                });
+            if let Some(reduced_count) = reduced_count {
+                self.lengths[slot] = reduced_count as u8;
+                self.reduced[slot] = true;
+            } else {
+                self.lengths[slot] = count as u8;
+            }
+            self.keys[slot] = edge;
+            self.next = ((slot + 1) & 31) as u8;
+            slot
+        };
+        if self.reduced[slot]
+            && !psx_bsp::solid_cell_proof::contains_integral_segment(proof_domain, start, end)
+        {
+            return hull.certifies_solid_cell(parents, edge, start, end);
+        }
+        hull.segment_intersects_halfspaces(
+            &self.planes[slot][..usize::from(self.lengths[slot])],
+            start,
+            end,
+        )
+    }
+}
+
+/// Leaf lookup for the seven fixed registry bounds samples. Insetting toward
+/// the eye changes a sample by at most one unit per axis, but that can cross a
+/// wall plane: each cached result is keyed by the exact three-axis inset.
+struct ObjectSampleLeaves {
+    directions: [[u8; 7]; psx_level::MAX_WORLD_OBJECTS],
+    leaves: [[u16; 7]; psx_level::MAX_WORLD_OBJECTS],
+}
+impl ObjectSampleLeaves {
+    const EMPTY: Self = Self {
+        directions: [[u8::MAX; 7]; psx_level::MAX_WORLD_OBJECTS],
+        leaves: [[u16::MAX; 7]; psx_level::MAX_WORLD_OBJECTS],
+    };
+    fn get(&self, object: usize, sample: usize, direction: u8) -> Option<Option<usize>> {
+        (self.directions[object][sample] == direction).then(|| {
+            let leaf = self.leaves[object][sample];
+            (leaf != u16::MAX).then_some(usize::from(leaf))
+        })
+    }
+    fn insert(&mut self, object: usize, sample: usize, direction: u8, leaf: Option<usize>) {
+        self.directions[object][sample] = direction;
+        self.leaves[object][sample] = leaf
+            .map(|i| u16::try_from(i).expect("validated leaf index"))
+            .unwrap_or(u16::MAX);
+    }
+}
+
+/// Intersect an exact cooked object leaf list with the observer PVS. Unknown
+/// tables and explicit fallback markers defer to the original AABB query.
+fn linked_world_object_pvs(
+    index: usize,
+    ranges: &[[u16; 2]],
+    leaves: &[u16],
+    visibility: &[u8],
+    visible_leaves: usize,
+) -> Option<bool> {
+    let &[first, count] = ranges.get(index)?;
+    if count == u16::MAX || visible_leaves > visibility.len().saturating_mul(8) {
+        return None;
+    }
+    let first = usize::from(first);
+    let linked = leaves.get(first..first.checked_add(usize::from(count))?)?;
+    Some(linked.iter().any(|&leaf| {
+        let leaf = usize::from(leaf);
+        leaf != 0
+            && leaf <= visible_leaves
+            && visibility[(leaf - 1) >> 3] & (1 << ((leaf - 1) & 7)) != 0
+    }))
+}
+
 /// Resident brush world embedded in the ordinary [`crate::Playtest`] scene.
 /// Counts the traces a camera update asks of its provider.
 struct CountingTraceProvider<'a, P: ?Sized> {
@@ -463,6 +646,10 @@ pub(super) struct BspRuntime {
     /// Static registry PVS results, valid for the observer leaf only.
     world_object_pvs_leaf: Option<usize>,
     world_object_pvs: WorldObjectVisibility,
+    static_object_occlusion: StaticObjectOcclusionCache,
+    object_sample_leaves: ObjectSampleLeaves,
+    solid_cell_witnesses: [[u16; 7]; psx_level::MAX_WORLD_OBJECTS],
+    solid_cell_constraint_generation: u32,
     fragment_events: [BspDestructibleFragmentEvent; MAX_BSP_DESTRUCTIBLES],
     /// Packet words the world (plus its brush models) used last frame: the
     /// prediction [`Self::draw`] fences against before drawing.
@@ -660,6 +847,11 @@ impl BspRuntime {
                 BSP_BOUNDS_VISIBILITY_CACHE_SIZE],
             world_object_pvs_leaf: None,
             world_object_pvs: WorldObjectVisibility::NONE,
+            static_object_occlusion: StaticObjectOcclusionCache::EMPTY,
+            object_sample_leaves: ObjectSampleLeaves::EMPTY,
+            solid_cell_witnesses: [[u16::MAX; 7]; psx_level::MAX_WORLD_OBJECTS],
+            solid_cell_constraint_generation: crate::runtime_arenas::solid_cell_constraint_arena()
+                .start_generation(),
             fragment_events: [BspDestructibleFragmentEvent::EMPTY; MAX_BSP_DESTRUCTIBLES],
             last_world_packet_words: 0,
             camera_traces: 0,
@@ -841,6 +1033,13 @@ impl BspRuntime {
                 },
             )
         };
+        self.static_object_occlusion.prepare(
+            observer,
+            self.doors.is_empty() && self.destructible_targets.len() == 0,
+        );
+        if !self.doors.is_empty() || self.destructible_targets.len() != 0 {
+            crate::runtime_arenas::solid_cell_constraint_arena().invalidate();
+        }
         let mut visibility = WorldObjectVisibility::NONE;
         let count = objects.len().min(psx_level::MAX_WORLD_OBJECTS);
         for index in 0..count {
@@ -858,15 +1057,24 @@ impl BspRuntime {
             {
                 continue;
             }
-            if object.flags & world_object_flags::DIRECT_BRUSH_OCCLUSION != 0
-                && !self.world_object_directly_visible(
-                    observer,
-                    object.bounds_min,
-                    object.bounds_max,
-                    destructibles,
-                )
-            {
-                continue;
+            if object.flags & world_object_flags::DIRECT_BRUSH_OCCLUSION != 0 {
+                let directly_visible = match self.static_object_occlusion.get(index) {
+                    Some(visible) => visible,
+                    None => {
+                        let visible = self.world_object_directly_visible(
+                            Some(index),
+                            observer,
+                            object.bounds_min,
+                            object.bounds_max,
+                            destructibles,
+                        );
+                        self.static_object_occlusion.insert(index, visible);
+                        visible
+                    }
+                };
+                if !directly_visible {
+                    continue;
+                }
             }
             visibility.set(index);
         }
@@ -881,23 +1089,28 @@ impl BspRuntime {
     fn refresh_world_object_pvs(&mut self, observer: RoomPoint, leaf: usize) {
         let count = WORLD_OBJECTS.len().min(psx_level::MAX_WORLD_OBJECTS);
         let mut visibility = WorldObjectVisibility::NONE;
-        let mut first = 0;
-        while first < count {
-            // One `visible_bounds_mask` call answers this many bounds.
-            const MASK_BITS: usize = 64;
-            let chunk_count = (count - first).min(MASK_BITS);
-            let mut bounds = [BspVisibilityBounds::EMPTY; MASK_BITS];
-            for local in 0..chunk_count {
-                let object = &WORLD_OBJECTS[first + local];
-                bounds[local] = BspVisibilityBounds::aabb(object.bounds_min, object.bounds_max);
+        for (index, object) in WORLD_OBJECTS.iter().enumerate().take(count) {
+            let visible = linked_world_object_pvs(
+                index,
+                WORLD_OBJECT_LEAF_RANGES,
+                WORLD_OBJECT_LEAVES,
+                &self.activation_visibility,
+                self.activation_visible_leaves,
+            )
+            .unwrap_or_else(|| {
+                // Missing, oversized, or stack-limited cooked links retain
+                // the original conservative bounds traversal.
+                self.visible_bounds_mask(
+                    observer,
+                    &[BspVisibilityBounds::aabb(
+                        object.bounds_min,
+                        object.bounds_max,
+                    )],
+                ) != 0
+            });
+            if visible {
+                visibility.set(index);
             }
-            let pvs = self.visible_bounds_mask(observer, &bounds[..chunk_count]);
-            for local in 0..chunk_count {
-                if pvs & (1u64 << local) != 0 {
-                    visibility.set(first + local);
-                }
-            }
-            first += chunk_count;
         }
         self.world_object_pvs = visibility;
         self.world_object_pvs_leaf = Some(leaf);
@@ -928,6 +1141,7 @@ impl BspRuntime {
             return false;
         }
         self.world_object_directly_visible(
+            None,
             observer,
             object.bounds_min,
             object.bounds_max,
@@ -937,6 +1151,7 @@ impl BspRuntime {
 
     fn world_object_directly_visible(
         &mut self,
+        registry_index: Option<usize>,
         observer: RoomPoint,
         min: [i32; 3],
         max: [i32; 3],
@@ -969,9 +1184,11 @@ impl BspRuntime {
         // of true visibility, so it is not worth a trace across the level.
         // The observer's row is normally already resolved by the visibility
         // pass; a gameplay caller with another observer resolves it here.
-        let pvs_ready = self.activation_row(observer).is_some();
+        let observer_leaf = self.activation_row(observer);
+        let pvs_ready = observer_leaf.is_some();
+        let immutable = self.doors.is_empty() && self.destructible_targets.len() == 0;
         let visible_leaves = self.activation_visible_leaves;
-        for sample in samples {
+        for (sample_index, sample) in samples.into_iter().enumerate() {
             let endpoint = RoomPoint::new(
                 inset_toward(sample[0], observer.x),
                 inset_toward(sample[1], observer.y),
@@ -979,11 +1196,33 @@ impl BspRuntime {
             );
             if pvs_ready {
                 let q12 = |value: i32| value.saturating_mul(4096);
-                let leaf = self.map.point_leaf_index(Vec3I32 {
-                    x: q12(endpoint.x),
-                    y: q12(endpoint.y),
-                    z: q12(endpoint.z),
+                let direction = ((endpoint.x - sample[0]) + 1) as u8
+                    + 3 * ((endpoint.y - sample[1]) + 1) as u8
+                    + 9 * ((endpoint.z - sample[2]) + 1) as u8;
+                let cached = registry_index.and_then(|index| {
+                    self.object_sample_leaves
+                        .get(index, sample_index, direction)
                 });
+                let leaf = cached.unwrap_or_else(|| {
+                    let leaf = self.map.point_leaf_index(Vec3I32 {
+                        x: q12(endpoint.x),
+                        y: q12(endpoint.y),
+                        z: q12(endpoint.z),
+                    });
+                    if let Some(index) = registry_index {
+                        self.object_sample_leaves
+                            .insert(index, sample_index, direction, leaf);
+                    }
+                    leaf
+                });
+                // A render-BSP leaf is a convex intersection of plane halfspaces.
+                // collision_models() adds only doors and destructible brush
+                // models. With both sets empty, the original point trace has
+                // no other blockers: two points in this same non-solid leaf
+                // therefore have exactly the same clear-ray result.
+                if immutable && leaf.is_some_and(|value| value != 0) && leaf == observer_leaf {
+                    return true;
+                }
                 let potentially_visible = match leaf {
                     Some(leaf) if leaf != 0 && leaf <= visible_leaves => {
                         let visible_index = leaf - 1;
@@ -998,10 +1237,57 @@ impl BspRuntime {
                     continue;
                 }
             }
-            if self
-                .trace_point_segment(observer, endpoint, &[], destructibles)
-                .is_ok_and(|trace| !trace.hit())
-            {
+            let clear = if immutable {
+                // Static visibility needs only obstruction. Bypass contact
+                // reconstruction and engine-space contact quantisation.
+                let q12 = |point: RoomPoint| Vec3I32 {
+                    x: point.x.saturating_mul(4096),
+                    y: point.y.saturating_mul(4096),
+                    z: point.z.saturating_mul(4096),
+                };
+                let from = q12(observer);
+                let to = q12(endpoint);
+                self.map
+                    .model_collision_hull(0, BSP_POINT_HULL_INDEX)
+                    .is_some_and(|hull| {
+                        let slot = registry_index
+                            .and_then(|index| self.solid_cell_witnesses.get_mut(index))
+                            .filter(|_| !SOLID_CELL_PARENTS.is_empty());
+                        if let Some(witnesses) = slot {
+                            if crate::runtime_arenas::solid_cell_constraint_arena().certifies(
+                                self.solid_cell_constraint_generation,
+                                hull,
+                                SOLID_CELL_PARENTS,
+                                witnesses[sample_index],
+                                &from,
+                                &to,
+                                &crate::generated::SOLID_CELL_PROOF_DOMAIN,
+                                crate::generated::SOLID_CELL_PROOF_INDEX,
+                                crate::generated::SOLID_CELL_PROOF_DATA,
+                            ) {
+                                return false;
+                            }
+                            match hull.segment_obstruction_witness(
+                                &from,
+                                &to,
+                                &mut self.trace_scratch,
+                            ) {
+                                Some((blocked, witness)) => {
+                                    witnesses[sample_index] = witness;
+                                    !blocked
+                                }
+                                None => false,
+                            }
+                        } else {
+                            hull.segment_obstructed(&from, &to, &mut self.trace_scratch)
+                                == Some(false)
+                        }
+                    })
+            } else {
+                self.trace_point_segment(observer, endpoint, &[], destructibles)
+                    .is_ok_and(|trace| !trace.hit())
+            };
+            if clear {
                 return true;
             }
         }
@@ -1727,6 +2013,7 @@ impl BspRuntime {
         // characters near the camera grow the in-flight frame enough to force
         // that on every frame, doubling the room stage. The retry below stays
         // as the safety net for a world that outgrows the prediction.
+        primitive_packets.try_fence_completed();
         if !self.fits_before_fence(primitive_packets) {
             primitive_packets.fence();
         }
@@ -2073,6 +2360,296 @@ fn sphere_outside_view_frustum(view: ViewVertex, radius: i32, projection: WorldP
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn solid_cell_constraint_cache_checks_keys_and_invalidates() {
+        use psx_bsp::{CompactPlane, Node, RecordSlice, Vec3I16};
+        #[repr(align(4))]
+        struct Bytes([u8; 16]);
+        let mut raw = Bytes([0; 16]);
+        raw.0[2..4].copy_from_slice(&(-1i16).to_le_bytes());
+        raw.0[4..6].copy_from_slice(&(-2i16).to_le_bytes());
+        let mut leaves = [0u8; 28];
+        leaves[0] = (-2i8) as u8;
+        leaves[14] = (-1i8) as u8;
+        let planes = [CompactPlane {
+            normal: Vec3I16 {
+                x: 4096,
+                y: 0,
+                z: 0,
+            },
+            kind: 0,
+            sign_bits: 0,
+            distance: 0,
+        }];
+        let hull = unsafe {
+            CollisionHull::from_render_bsp(
+                &planes,
+                RecordSlice::<Node>::new(&raw.0).unwrap(),
+                RecordSlice::new(&leaves).unwrap(),
+                0,
+            )
+        };
+        let mut cache = SolidCellConstraintCache::ZEROED;
+        let generation = cache.start_generation();
+        let a = Vec3I32 {
+            x: -4096,
+            y: 0,
+            z: 0,
+        };
+        let b = Vec3I32 {
+            x: 4096,
+            y: 0,
+            z: 0,
+        };
+        assert!(cache.certifies(
+            generation,
+            hull,
+            &[u16::MAX],
+            0,
+            &a,
+            &b,
+            &[[0; 3]; 2],
+            &[],
+            &[]
+        ));
+        assert_eq!(cache.keys[0], 0);
+        assert_eq!(cache.lengths[0], 1);
+        assert!(cache.certifies(
+            generation,
+            hull,
+            &[u16::MAX],
+            0,
+            &b,
+            &a,
+            &[[0; 3]; 2],
+            &[],
+            &[]
+        ));
+        assert_eq!(cache.next, 1); // Same complete key reuses the same slot.
+        assert!(!cache.certifies(
+            generation,
+            hull,
+            &[u16::MAX],
+            1,
+            &a,
+            &b,
+            &[[0; 3]; 2],
+            &[],
+            &[]
+        )); // Empty edge differs by one bit.
+        assert!(!cache.certifies(
+            generation,
+            hull,
+            &[u16::MAX],
+            u16::MAX,
+            &a,
+            &b,
+            &[[0; 3]; 2],
+            &[],
+            &[]
+        ));
+        cache.invalidate();
+        assert!(cache.keys.iter().all(|&x| x == u16::MAX));
+        assert_eq!(cache.next, 0);
+        assert!(!cache.certifies(generation, hull, &[], 0, &a, &b, &[[0; 3]; 2], &[], &[])); // Invalid rebuild cannot publish a key.
+        assert!(cache.keys.iter().all(|&x| x == u16::MAX));
+        assert_eq!(core::mem::size_of::<SolidCellConstraintCache>(), 4744);
+        let later = cache.start_generation();
+        assert_ne!(generation, later);
+        assert!(cache.certifies(
+            generation,
+            hull,
+            &[u16::MAX],
+            0,
+            &a,
+            &b,
+            &[[0; 3]; 2],
+            &[],
+            &[]
+        ));
+        assert!(cache.keys.iter().all(|&x| x == u16::MAX)); // stale owner falls back without insertion.
+        cache.generation = u32::MAX;
+        assert_eq!(cache.start_generation(), 0);
+        assert_eq!(cache.start_generation(), 0); // Never wrap to an older owner.
+        assert!(cache.certifies(0, hull, &[u16::MAX], 0, &a, &b, &[[0; 3]; 2], &[], &[]));
+        assert!(cache.keys.iter().all(|&x| x == u16::MAX));
+    }
+
+    #[test]
+    fn reduced_cache_gates_each_query_and_binds_live_planes() {
+        use psx_bsp::{CompactPlane, Node, RecordSlice, Vec3I16};
+        #[repr(align(4))]
+        struct Bytes([u8; 32]);
+        let mut raw = Bytes([0; 32]);
+        raw.0[2..4].copy_from_slice(&1i16.to_le_bytes());
+        raw.0[4..6].copy_from_slice(&(-2i16).to_le_bytes());
+        raw.0[16..18].copy_from_slice(&1u16.to_le_bytes());
+        raw.0[18..20].copy_from_slice(&(-1i16).to_le_bytes());
+        raw.0[20..22].copy_from_slice(&(-2i16).to_le_bytes());
+        let mut leaves = [0u8; 28];
+        leaves[0] = (-2i8) as u8;
+        leaves[14] = (-1i8) as u8;
+        let planes = [
+            CompactPlane {
+                normal: Vec3I16 {
+                    x: 0,
+                    y: 4096,
+                    z: 0,
+                },
+                kind: 1,
+                sign_bits: 0,
+                distance: 0,
+            },
+            CompactPlane {
+                normal: Vec3I16 {
+                    x: 4096,
+                    y: 0,
+                    z: 0,
+                },
+                kind: 0,
+                sign_bits: 0,
+                distance: -8192,
+            },
+        ];
+        let make_hull = |p| unsafe {
+            CollisionHull::from_render_bsp(
+                p,
+                RecordSlice::<Node>::new(&raw.0).unwrap(),
+                RecordSlice::new(&leaves).unwrap(),
+                0,
+            )
+        };
+        let hull = make_hull(&planes);
+        let parents = [u16::MAX, 0];
+        let domain = [[-1; 3], [1; 3]];
+        let index = [[2, 0, 3]];
+        let data = [2, 1, 131];
+        let mut cache = SolidCellConstraintCache::ZEROED;
+        let g = cache.start_generation();
+        let point = Vec3I32 {
+            x: 0,
+            y: 4096,
+            z: 0,
+        };
+        assert!(cache.certifies(g, hull, &parents, 2, &point, &point, &domain, &index, &data));
+        assert!(cache.reduced[0]);
+        assert_eq!(cache.lengths[0], 1);
+        for x in [-12288, -1, 1, i32::MIN, i32::MAX] {
+            let p = Vec3I32 { x, ..point };
+            assert_eq!(
+                cache.certifies(g, hull, &parents, 2, &p, &p, &domain, &index, &data),
+                hull.certifies_solid_cell(&parents, 2, &p, &p)
+            );
+        }
+        // Same ordinals on a changed hull cannot authorize the old proof.
+        let mut changed = planes;
+        changed[1].distance = 8192;
+        let changed_hull = make_hull(&changed);
+        let next = cache.start_generation();
+        assert!(!cache.certifies(
+            next,
+            changed_hull,
+            &parents,
+            2,
+            &point,
+            &point,
+            &domain,
+            &index,
+            &data
+        ));
+        assert!(!cache.reduced[0]);
+        assert_eq!(cache.lengths[0], 2);
+        assert_eq!(
+            cache.certifies(
+                g,
+                changed_hull,
+                &parents,
+                2,
+                &point,
+                &point,
+                &domain,
+                &index,
+                &data
+            ),
+            changed_hull.certifies_solid_cell(&parents, 2, &point, &point)
+        );
+        cache.invalidate(); // Production dynamic-world transition uses this same invalidation.
+        assert!(cache.keys.iter().all(|&k| k == u16::MAX));
+    }
+
+    #[test]
+    fn cooked_leaf_links_preserve_straddling_bounds_and_fallbacks() {
+        let ranges = [[0, 3], [3, 0], [0, u16::MAX], [3, 2]];
+        let leaves = [1, 8, 9];
+        assert_eq!(
+            linked_world_object_pvs(0, &ranges, &leaves, &[0, 1], 9),
+            Some(true)
+        );
+        assert_eq!(
+            linked_world_object_pvs(0, &ranges, &leaves, &[2, 0], 9),
+            Some(false)
+        );
+        assert_eq!(
+            linked_world_object_pvs(1, &ranges, &leaves, &[255, 255], 9),
+            Some(false)
+        );
+        assert_eq!(
+            linked_world_object_pvs(2, &ranges, &leaves, &[0, 0], 9),
+            None
+        );
+        assert_eq!(
+            linked_world_object_pvs(3, &ranges, &leaves, &[255, 255], 9),
+            None
+        );
+        assert_eq!(
+            linked_world_object_pvs(4, &ranges, &leaves, &[255, 255], 9),
+            None
+        );
+        assert_eq!(
+            linked_world_object_pvs(0, &ranges, &leaves, &[255], 9),
+            None
+        );
+    }
+
+    #[test]
+    fn sample_leaf_cache_requires_the_exact_inset_and_registry_sample() {
+        let mut cache = ObjectSampleLeaves::EMPTY;
+        for direction in 0..27 {
+            assert_eq!(cache.get(0, 0, direction), None);
+            cache.insert(0, 0, direction, Some(17));
+            assert_eq!(cache.get(0, 0, direction), Some(Some(17)));
+            assert_eq!(cache.get(1, 0, direction), None);
+            assert_eq!(cache.get(0, 1, direction), None);
+            assert_eq!(cache.get(0, 0, (direction + 1) % 27), None);
+        }
+        cache.insert(0, 0, 13, None);
+        assert_eq!(cache.get(0, 0, 13), Some(None));
+        cache.insert(0, 0, 13, Some(0));
+        assert_eq!(cache.get(0, 0, 13), Some(Some(0)));
+    }
+
+    #[test]
+    fn static_object_occlusion_cache_invalidates_on_motion_and_dynamic_geometry() {
+        let mut cache = StaticObjectOcclusionCache::EMPTY;
+        let eye = RoomPoint::new(10, 20, 30);
+        cache.prepare(eye, true);
+        assert_eq!(cache.get(0), None);
+        cache.insert(0, false);
+        cache.insert(1, true);
+        cache.prepare(eye, true);
+        assert_eq!(cache.get(0), Some(false));
+        assert_eq!(cache.get(1), Some(true));
+        assert_eq!(cache.get(2), None); // Rotation can expose an untested object.
+        cache.prepare(RoomPoint::new(11, 20, 30), true);
+        assert_eq!(cache.get(0), None);
+        cache.insert(0, true);
+        cache.prepare(RoomPoint::new(11, 20, 30), false);
+        assert_eq!(cache.get(0), None);
+        cache.insert(0, true);
+        assert_eq!(cache.get(0), None); // Doors/destructibles always trace afresh.
+    }
+
     use psx_engine::Q12;
 
     #[test]

@@ -22,6 +22,7 @@ pub mod pxbsp_resident;
 pub mod render;
 pub mod resident;
 pub mod sky;
+pub mod solid_cell_proof;
 pub mod toolchain_probe;
 pub mod visibility;
 
