@@ -10,7 +10,7 @@ The pieces, all in this repository:
 
 | What | Where |
 | --- | --- |
-| Encoder, reference decoder, interleaver | `psx-audio-cook xa-encode`, `xa-decode`, `xa-score` (`crates/psx-audio-cook/src/xa.rs`) |
+| Encoder, reference decoder, interleaver | `psx-audio-cook xa-encode`, `xa-pack`, `xa-decode`, `xa-score` (`crates/psx-audio-cook/src/xa.rs`, `xa_pack.rs`) |
 | Disc builder | `mkisopsx --xa-file` (`crates/psx-iso`) |
 | Player | `psx_io::cd::xa` (`Player`) |
 | Example | `sdk/examples/hello-xa`, built by `make hello-xa-disc` |
@@ -41,6 +41,32 @@ and the file shows up in the root directory like any other. Options of
 | `--file N` | 1 | File number in every subheader (the player filters on it). |
 | `--peak F` | off | Scale the loudest sample to this fraction of full scale. |
 | `--manifest PATH` | none | JSON with the file number, speed, stride and each song's channel and length. The same JSON goes to stdout. |
+
+### Packing a whole soundtrack
+
+A game with more songs than one file holds should not hand-write the rule
+that decides which songs share a file. `xa-pack` takes every song, groups
+them by length (longest first, `stride` to a file, so each file's padding is
+as small as the lengths allow), encodes and interleaves each group, and
+writes `NAME1.XA`, `NAME2.XA`, ... with a manifest and, if asked, the
+constants a guest includes:
+
+```sh
+psx-audio-cook xa-pack build/music MUSIC title.wav level1.wav level2.wav boss.wav \
+    credits.wav --first-file 2 --manifest music.json --rust music_map.rs
+mkisopsx --exe game.exe --out game.bin \
+    --xa-file build/music/MUSIC1.XA --xa-file build/music/MUSIC2.XA
+```
+
+`NAME` is 1 to 6 upper-case letters or digits, so `NAME` + file index + `.XA`
+is an 8.3 name. File `i` carries file number `--first-file + i` (default 1).
+`music_map.rs` holds `XA_FILE_NAMES`, `XA_FILE_NUMBERS`, `XA_FILE_SECTORS`,
+`XA_SPEED_DOUBLE` and `XA_SONGS`, one `(file index, channel, milliseconds)` per
+song in the order given; the guest finds each file by name in the root
+directory and builds a `psx_io::cd::xa::File` from the directory entry and
+those numbers. The encoder prints how many interleave slots carry no song:
+each costs disc space like music, so a pack of five songs at 37.8 kHz stereo
+leaves three empty slots.
 
 Check what you encoded before burning it:
 
