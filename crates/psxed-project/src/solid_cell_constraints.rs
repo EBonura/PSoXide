@@ -57,14 +57,14 @@ pub fn verify(terms: &[Halfspace], active: &[usize], proof: &Implication) -> boo
         let Some(term) = terms.get(index) else {
             return false;
         };
-        for axis in 0..3 {
+        for (acc, &component) in normal.iter_mut().zip(&term.normal) {
             let Some(v) = weight
-                .checked_mul(i128::from(term.normal[axis]))
-                .and_then(|v| normal[axis].checked_add(v))
+                .checked_mul(i128::from(component))
+                .and_then(|v| acc.checked_add(v))
             else {
                 return false;
             };
-            normal[axis] = v;
+            *acc = v;
         }
         let Some(v) = weight
             .checked_mul(i128::from(term.bound))
@@ -75,8 +75,8 @@ pub fn verify(terms: &[Halfspace], active: &[usize], proof: &Implication) -> boo
         bound = v;
         strict |= weight > 0 && term.strict;
     }
-    for axis in 0..3 {
-        if i128::from(target.normal[axis]).checked_mul(proof.denominator) != Some(normal[axis]) {
+    for (&expected, &have) in target.normal.iter().zip(&normal) {
+        if i128::from(expected).checked_mul(proof.denominator) != Some(have) {
             return false;
         }
     }

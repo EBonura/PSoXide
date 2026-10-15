@@ -2,10 +2,14 @@
 use super::*;
 use psx_bsp::{pxbsp_resident::PxbspResidentMap, SliceReader, Vec3I32};
 
+/// Per-object (first, count) ranges, the packed leaf list and the certified
+/// solid-cell parents.
+pub(super) type WorldObjectLeafLinks = (Vec<[u16; 2]>, Vec<u16>, Vec<u16>);
+
 pub(super) fn cook_world_object_leaf_links(
     world: &PlaytestPxbspWorld,
     objects: &[PlaytestWorldObject],
-) -> Result<(Vec<[u16; 2]>, Vec<u16>, Vec<u16>), String> {
+) -> Result<WorldObjectLeafLinks, String> {
     let mut map = PxbspResidentMap::default();
     map.load(0, &mut SliceReader::new(&world.bytes))
         .map_err(|error| format!("static object leaf links: {error:?}"))?;

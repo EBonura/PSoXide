@@ -17,7 +17,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .split_whitespace()
             .map(str::parse)
             .collect::<Result<_, _>>()?;
-        if coordinates.len() < 6 || coordinates.len() % 3 != 0 {
+        if coordinates.len() < 6 || !coordinates.len().is_multiple_of(3) {
             return Err(format!("invalid path {index}").into());
         }
         let points: Vec<[i32; 3]> = coordinates
