@@ -1,3 +1,5 @@
+//! Parity of the unsplit affine surface path against a frozen copy of the
+//! previous implementation.
 #[allow(dead_code)]
 #[path = "fixtures/affine_surface_before.rs"]
 mod before;

@@ -2180,9 +2180,9 @@ mod tests {
             .enumerate()
         {
             bytes.0[i * 16..i * 16 + 2].copy_from_slice(&plane.to_le_bytes());
-            for side in 0..2 {
+            for (side, child) in children.iter().enumerate() {
                 bytes.0[i * 16 + 2 + side * 2..i * 16 + 4 + side * 2]
-                    .copy_from_slice(&children[side].to_le_bytes());
+                    .copy_from_slice(&child.to_le_bytes());
             }
         }
         let mut leaves = [0u8; 28];

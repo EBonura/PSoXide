@@ -166,8 +166,8 @@ fn implication(target: Term, supports: &[Term]) -> Option<bool> {
     let mut b = 0i128;
     let mut strict = false;
     for (support, &weight) in supports.iter().zip(&w) {
-        for i in 0..3 {
-            n[i] += i128::from(weight) * i128::from(support.n[i]);
+        for (acc, &component) in n.iter_mut().zip(&support.n) {
+            *acc += i128::from(weight) * i128::from(component);
         }
         b += i128::from(weight) * i128::from(support.b);
         strict |= weight > 0 && support.strict;
@@ -201,7 +201,7 @@ pub fn reduce_live(
             return None;
         }
     }
-    let bitmap_len = (count + 7) / 8;
+    let bitmap_len = count.div_ceil(8);
     let bitmap = bytes.get(1..1 + bitmap_len)?;
     if count & 7 != 0 && bitmap[bitmap_len - 1] >> (count & 7) != 0 {
         return None;

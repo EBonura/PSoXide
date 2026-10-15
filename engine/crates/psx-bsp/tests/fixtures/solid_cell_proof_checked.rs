@@ -1,6 +1,8 @@
 //! Allocation-free verification of cooked solid-cell redundancy certificates.
 //! Metadata is only a proposal: coefficients and strictness come from the live
 //! validated ancestor path. Failure leaves the caller's full list untouched.
+// Frozen copy used as a test oracle; kept as written.
+#![allow(clippy::needless_range_loop, clippy::manual_div_ceil)]
 use crate::{CompactPlane, Vec3I32};
 
 pub type Domain = [[i32; 3]; 2];

@@ -1,3 +1,5 @@
+//! Compare the cooked collision blob walker against the reference hull tracer
+//! on a cooked map.
 use psx_bsp::collision::{CollisionHull, Trace, TraceScratch};
 use psx_bsp::{ClipNode, Plane, RecordSlice, Vec3I32};
 fn hull(x: &(Vec<u8>, Vec<u8>, i16)) -> CollisionHull<'_> {
