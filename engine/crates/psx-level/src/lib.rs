@@ -2291,6 +2291,32 @@ pub struct LevelGameplaySfxCueRecord {
     pub flags: u16,
 }
 
+/// Disc track number of the first entry of the music table. Cooked Music nodes
+/// keep the numbering CD-DA gave them (track 1 is the data track, so the first
+/// song is track 2); entry `n` of the table is track `n + 2`, and track `0`
+/// means no music.
+pub const MUSIC_FIRST_TRACK: u8 = 2;
+
+/// One song of the project's XA music: where its file sits on the disc and
+/// which channel of it is the song. The cook writes the table; the engine plays
+/// entry `track - MUSIC_FIRST_TRACK` for a Music node.
+///
+/// Every file is single speed. Songs that share a file are interleaved on
+/// separate channels; the drive's decoder hands the CPU only the one the
+/// player filters on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelMusicTrack {
+    /// First sector of the song's XA file, relative to the game's own image.
+    pub file_lba: u32,
+    /// Sectors the song spans from `file_lba`, without the file's end guard.
+    /// A song shorter than the file it shares ends at its own length.
+    pub span_sectors: u32,
+    /// Subheader file number the drive filters on.
+    pub file_number: u8,
+    /// Channel of the file that carries this song.
+    pub channel: u8,
+}
+
 /// Action a [`LevelUiNodeKind::Button`] fires when activated. Plain
 /// `Copy` data carrying compact ids so it lives in a generated
 /// `static`. Activation/navigation is wired in a later step.
