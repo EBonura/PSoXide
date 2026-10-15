@@ -68,6 +68,7 @@ pub mod game_app;
 pub mod lighting;
 pub mod microgame;
 pub mod movement;
+mod music;
 mod present_queue;
 pub mod projection;
 pub mod render;

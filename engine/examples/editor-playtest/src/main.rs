@@ -1035,6 +1035,7 @@ fn main() -> ! {
             .with_max_fixed_ticks_before_visual(RUNTIME_SCHEDULE.max_fixed_ticks_before_visual)
             .with_visual_lockstep(cfg!(feature = "lockstep-visuals")),
         loading_ui_scene: generated::LOADING_UI_SCENE,
+        music_tracks: generated::MUSIC_TRACKS,
         ..Config::default()
     };
     // Drive the cooked game flow (front-end UI scenes + gameplay) rather than

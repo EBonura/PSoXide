@@ -85,6 +85,7 @@ pub static UI_NODES: &[LevelUiNodeRecord] = &[];
 pub static UI_SFX_SAMPLES: &[LevelUiSfxSampleRecord] = &[];
 pub static UI_SFX_CUES: &[LevelUiSfxCueRecord] = &[];
 pub static GAMEPLAY_SFX_CUES: &[LevelGameplaySfxCueRecord] = &[];
+pub static MUSIC_TRACKS: &[psx_level::LevelMusicTrack] = &[];
 pub static VITALITY_CIRCLES: &[LevelVitalityCircleRecord] = &[];
 pub static UI_SCENES: &[LevelUiScene] = &[];
 pub static SCENE_STATES: &[LevelSceneState] = &[];
