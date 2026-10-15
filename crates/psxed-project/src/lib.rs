@@ -38,6 +38,8 @@ mod brush_vis;
 pub mod brush_walk;
 pub mod brush_world;
 pub mod clip_window;
+mod solid_cell_constraints;
+pub mod solid_cell_proofs;
 pub use animation_pose_correction::*;
 mod import_util;
 pub mod model_import;

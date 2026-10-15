@@ -441,7 +441,13 @@ pub fn cooked_playtest_budgets(
         .filter(|asset| asset.kind != PlaytestAssetKind::Texture)
         .map(|asset| asset.bytes.len())
         .sum::<usize>();
-    let ram_bytes = bsp_bytes.saturating_add(non_texture_bytes);
+    let proof_bytes = package.world_geometry.solid_cell_proofs.resident_bytes();
+    let ram_bytes = bsp_bytes
+        .saturating_add(proof_bytes)
+        .saturating_add(non_texture_bytes)
+        .saturating_add(package.world_object_leaf_ranges.len() * 4)
+        .saturating_add(package.world_object_leaves.len() * 2)
+        .saturating_add(package.solid_cell_parents.len() * 2);
     let ram_asset_slots = package
         .assets
         .iter()

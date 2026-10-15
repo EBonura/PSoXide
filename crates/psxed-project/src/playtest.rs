@@ -60,6 +60,7 @@ mod cook_ui;
 mod manifest;
 mod performance;
 mod schema;
+mod world_object_leaf_links;
 pub(crate) use cook_ui::*;
 mod cook_entities;
 pub(crate) use cook_entities::*;
@@ -730,7 +731,13 @@ pub fn build_package(
         .sky
         .cloud_layer
         .texture_asset_index = sky_texture_asset_index;
+    let solid_cell_proofs = if project.bsp_solid_cell_proofs && compiled.movers.is_empty() {
+        crate::solid_cell_proofs::cook(&compiled.pxbsp.bytes)
+    } else {
+        crate::solid_cell_proofs::SolidCellProofs::default()
+    };
     let world_geometry = PlaytestPxbspWorld {
+        solid_cell_proofs,
         bytes: compiled.pxbsp.bytes,
         max_visible_faces: compiled.pxbsp.max_visible_faces,
         body_hulls: compiled.body_hulls,
@@ -1942,6 +1949,16 @@ pub fn build_package(
         &mut report,
     );
 
+    let (world_object_leaf_ranges, world_object_leaves, solid_cell_parents) =
+        match world_object_leaf_links::cook_world_object_leaf_links(&world_geometry, &world_objects)
+        {
+            Ok(links) => links,
+            Err(error) => {
+                report.error(error);
+                return (None, report);
+            }
+        };
+
     // Door links resolve now that every Box Prop has cooked: an
     // unresolved or ambiguous box name is a hard cook error.
     if !resolve_door_links(
@@ -2404,6 +2421,9 @@ pub fn build_package(
             model_instances,
             destructibles,
             world_objects,
+            solid_cell_parents,
+            world_object_leaf_ranges,
+            world_object_leaves,
             image_props,
             box_props,
             box_prop_surfaces,

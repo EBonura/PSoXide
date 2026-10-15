@@ -312,6 +312,22 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     out.push_str("}\n\n");
 
     let world = &package.world_geometry;
+    let proofs = &world.solid_cell_proofs;
+    let _ = writeln!(
+        out,
+        "pub const SOLID_CELL_PROOF_DOMAIN: [[i32; 3]; 2] = {:?};",
+        proofs.domain
+    );
+    let _ = writeln!(
+        out,
+        "pub static SOLID_CELL_PROOF_INDEX: &[[u16; 3]] = &{:?};",
+        proofs.index
+    );
+    let _ = writeln!(
+        out,
+        "pub static SOLID_CELL_PROOF_DATA: &[u8] = &{:?};",
+        proofs.data
+    );
     out.push_str("pub const PLAYTEST_USES_PXBSP: bool = true;\n");
     // Keep actor/prop lighting on the same ambient contract used by the
     // brush light bake. PXBSP surfaces carry baked vertex light; dynamic
@@ -876,6 +892,23 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         );
     }
     out.push_str("];\n\n");
+
+    let _ = writeln!(
+        out,
+        "pub static WORLD_OBJECT_LEAF_RANGES: &[[u16; 2]] = &{:?};",
+        package.world_object_leaf_ranges,
+    );
+    let _ = writeln!(
+        out,
+        "pub static WORLD_OBJECT_LEAVES: &[u16] = &{:?};\n",
+        package.world_object_leaves,
+    );
+
+    let _ = writeln!(
+        out,
+        "pub static SOLID_CELL_PARENTS: &[u16] = &{:?};\n",
+        package.solid_cell_parents
+    );
 
     out.push_str("/// Placed flat image props, room-local coordinates.\n");
     out.push_str("pub static IMAGE_PROPS: &[LevelImagePropRecord] = &[\n");

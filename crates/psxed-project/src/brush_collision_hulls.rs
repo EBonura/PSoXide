@@ -8,7 +8,30 @@ pub(crate) const HULL_EPSILON: f64 = 1.0 / 1024.0;
 // E1M1's authored brush hull stays below the signed 16-bit clipnode ceiling
 // at 48 while cutting the worst moving-player leaf walks substantially. A
 // 32-brush leaf crosses 32,768 clipnodes and is therefore not representable.
+// Smaller leaves are an explicit per-project opt-in (`CollisionLeafTarget`).
 const SPATIAL_LEAF_BRUSHES: usize = 48;
+
+/// Maximum brush target per spatial collision leaf. Smaller leaves trade
+/// additional cooked collision RAM for shorter traversal chains. Both policies
+/// retain the depth cap, unique-node limit and exact ordered brush decisions.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub enum CollisionLeafTarget {
+    /// Legacy policy, used when older project files omit the setting.
+    #[default]
+    Brushes48,
+    /// Shorter chains with a potentially larger collision table.
+    Brushes32,
+}
+impl CollisionLeafTarget {
+    fn brushes(self) -> usize {
+        match self {
+            Self::Brushes48 => 48,
+            Self::Brushes32 => 32,
+        }
+    }
+}
 const MAX_SPATIAL_DEPTH: usize = 12;
 pub const MAX_MAP_HULLS: usize = 4;
 
@@ -103,17 +126,38 @@ pub fn compile_collision_hulls_with(
     compile_collision_hulls_inner(brushes, hulls, strategy)
 }
 
+/// Compile collision hulls using an explicit strategy and leaf-size policy.
+/// The leaf target applies wherever spatial chains are built, including the
+/// fallback for a hull BSP that does not fit the clipnode limits.
+pub fn compile_collision_hulls_with_target(
+    brushes: &[Brush],
+    hulls: &[CollisionHullBounds],
+    strategy: CollisionHullStrategy,
+    target: CollisionLeafTarget,
+) -> Result<CompiledCollisionHulls, CollisionHullCompileError> {
+    compile_collision_hulls_with_leaf_size(brushes, hulls, strategy, target.brushes())
+}
+
 fn compile_collision_hulls_inner(
     brushes: &[Brush],
     hulls: &[CollisionHullBounds],
     strategy: CollisionHullStrategy,
+) -> Result<CompiledCollisionHulls, CollisionHullCompileError> {
+    compile_collision_hulls_with_leaf_size(brushes, hulls, strategy, SPATIAL_LEAF_BRUSHES)
+}
+
+fn compile_collision_hulls_with_leaf_size(
+    brushes: &[Brush],
+    hulls: &[CollisionHullBounds],
+    strategy: CollisionHullStrategy,
+    leaf_size: usize,
 ) -> Result<CompiledCollisionHulls, CollisionHullCompileError> {
     limit("collision hulls", hulls.len(), MAX_MAP_HULLS)?;
     let mut ordered: Vec<_> = brushes.iter().enumerate().collect();
     ordered.sort_by_key(|(index, brush)| (core::cmp::Reverse(brush.contents.precedence()), *index));
     let solved: Vec<_> = ordered.iter().map(|(_, brush)| brush.solve()).collect();
     let mut plane_records = Vec::new();
-    let mut nodes: Vec<[i16; 3]> = Vec::new();
+    let mut nodes = NodeBuilder::default();
     let mut head_nodes = Vec::with_capacity(hulls.len());
 
     for (hull_index, hull) in hulls.iter().copied().enumerate() {
@@ -174,25 +218,33 @@ fn compile_collision_hulls_inner(
         prepared.reverse();
         let brushes: Vec<_> = (0..prepared.len()).collect();
         head_nodes.push(match strategy {
-            CollisionHullStrategy::SpatialChains => {
-                build_spatial_hull(&prepared, &brushes, 0, &mut plane_records, &mut nodes)?
-            }
+            CollisionHullStrategy::SpatialChains => build_spatial_hull(
+                &prepared,
+                &brushes,
+                0,
+                leaf_size,
+                &mut plane_records,
+                &mut nodes,
+            )?,
             CollisionHullStrategy::LinearChains => {
                 build_brush_chain(&prepared, &brushes, &mut nodes)?
             }
             CollisionHullStrategy::HullBsp => {
                 let plane_mark = plane_records.len();
-                let node_mark = nodes.len();
+                let node_mark = nodes.records.len();
+                // The hull BSP appends raw records. They bypass the interning
+                // table, which stays valid because it only refers to earlier
+                // slots; the final identical-subtree pass still merges them.
                 match crate::brush_region_hulls::build_hull_bsp(
                     &prepared,
                     &mut plane_records,
-                    &mut nodes,
+                    &mut nodes.records,
                 ) {
                     Ok(head) => head,
                     Err(CollisionHullCompileError::LimitExceeded { .. }) => {
                         // Roll back and keep the proven chain tree for this hull.
                         plane_records.truncate(plane_mark);
-                        nodes.truncate(node_mark);
+                        nodes.records.truncate(node_mark);
                         for brush in &mut prepared {
                             brush.planes.clear();
                             for &(record, flipped) in &brush.records {
@@ -200,7 +252,14 @@ fn compile_collision_hulls_inner(
                                 brush.planes.push((plane, flipped));
                             }
                         }
-                        build_spatial_hull(&prepared, &brushes, 0, &mut plane_records, &mut nodes)?
+                        build_spatial_hull(
+                            &prepared,
+                            &brushes,
+                            0,
+                            leaf_size,
+                            &mut plane_records,
+                            &mut nodes,
+                        )?
                     }
                     Err(other) => return Err(other),
                 }
@@ -208,6 +267,7 @@ fn compile_collision_hulls_inner(
         });
     }
 
+    let nodes = intern_identical_nodes(&nodes.records, &mut head_nodes);
     let mut clipnodes = Vec::with_capacity(nodes.len() * 6);
     for node in nodes {
         for value in node {
@@ -221,22 +281,80 @@ fn compile_collision_hulls_inner(
     })
 }
 
-fn spatial_leaf_brushes() -> usize {
-    #[cfg(test)]
-    if let Some(value) = std::env::var("HULL_LEAF").ok().and_then(|v| v.parse().ok()) {
-        return value;
+/// Merge only recursively identical node triples. Plane and contents labels,
+/// branch order and every root's decision tree remain unchanged. The input is
+/// the acyclic graph constructed above, not an untrusted serialized node table.
+fn intern_identical_nodes(nodes: &[[i16; 3]], heads: &mut [i16]) -> Vec<[i16; 3]> {
+    let mut remap = vec![None; nodes.len()];
+    let mut interned = std::collections::HashMap::new();
+    let mut output = Vec::new();
+    let mut pending = Vec::new();
+    for root in 0..nodes.len() {
+        pending.push((root, false));
+        while let Some((index, expanded)) = pending.pop() {
+            if remap[index].is_some() {
+                continue;
+            }
+            let mut node = nodes[index];
+            if !expanded {
+                pending.push((index, true));
+                for &child in node[1..].iter().rev() {
+                    if child >= 0 && remap[child as usize].is_none() {
+                        pending.push((child as usize, false));
+                    }
+                }
+                continue;
+            }
+            for child in &mut node[1..] {
+                if *child >= 0 {
+                    *child = remap[*child as usize].expect("child completed before parent");
+                }
+            }
+            let canonical = *interned.entry(node).or_insert_with(|| {
+                // Output never exceeds the already range-checked input count.
+                let canonical = output.len() as i16;
+                output.push(node);
+                canonical
+            });
+            remap[index] = Some(canonical);
+        }
     }
-    SPATIAL_LEAF_BRUSHES
+    for head in heads {
+        if *head >= 0 {
+            *head = remap[*head as usize].expect("root completed");
+        }
+    }
+    output
+}
+
+/// Only complete nodes enter the table; all children already have canonical IDs.
+#[derive(Default)]
+struct NodeBuilder {
+    records: Vec<[i16; 3]>,
+    indices: std::collections::HashMap<[i16; 3], i16>,
+}
+impl NodeBuilder {
+    fn intern(&mut self, node: [i16; 3]) -> Result<i16, CollisionHullCompileError> {
+        if let Some(&index) = self.indices.get(&node) {
+            return Ok(index);
+        }
+        limit("clipnodes", self.records.len() + 1, i16::MAX as usize + 1)?;
+        let index = self.records.len() as i16;
+        self.records.push(node);
+        self.indices.insert(node, index);
+        Ok(index)
+    }
 }
 
 fn build_spatial_hull(
     brushes: &[PreparedHullBrush],
     active: &[usize],
     depth: usize,
+    leaf_size: usize,
     planes: &mut Vec<[u8; 14]>,
-    nodes: &mut Vec<[i16; 3]>,
+    nodes: &mut NodeBuilder,
 ) -> Result<i16, CollisionHullCompileError> {
-    if active.len() <= spatial_leaf_brushes() || depth == MAX_SPATIAL_DEPTH {
+    if active.len() <= leaf_size || depth == MAX_SPATIAL_DEPTH {
         return build_brush_chain(brushes, active, nodes);
     }
     let Some(split) = choose_spatial_split(brushes, active) else {
@@ -255,19 +373,15 @@ fn build_spatial_hull(
         .ok_or(CollisionHullCompileError::InvalidPlane(None))?;
     debug_assert!(!flipped, "positive axial spatial plane cannot flip");
     let plane = intern_plane(planes, record)?;
-    limit("clipnodes", nodes.len() + 1, i16::MAX as usize + 1)?;
-    let node = nodes.len();
-    nodes.push([plane, CONTENTS_EMPTY, CONTENTS_EMPTY]);
-    let front = build_spatial_hull(brushes, &front, depth + 1, planes, nodes)?;
-    let back = build_spatial_hull(brushes, &back, depth + 1, planes, nodes)?;
-    nodes[node] = [plane, front, back];
-    Ok(node as i16)
+    let front = build_spatial_hull(brushes, &front, depth + 1, leaf_size, planes, nodes)?;
+    let back = build_spatial_hull(brushes, &back, depth + 1, leaf_size, planes, nodes)?;
+    nodes.intern([plane, front, back])
 }
 
 fn build_brush_chain(
     brushes: &[PreparedHullBrush],
     active: &[usize],
-    nodes: &mut Vec<[i16; 3]>,
+    nodes: &mut NodeBuilder,
 ) -> Result<i16, CollisionHullCompileError> {
     let mut escape = CONTENTS_EMPTY;
     // `active` retains high-to-low precedence. Wrap low first so the
@@ -276,14 +390,12 @@ fn build_brush_chain(
         let brush = &brushes[brush];
         let mut inside = brush.contents;
         for &(plane, flipped) in brush.planes.iter().rev() {
-            limit("clipnodes", nodes.len() + 1, i16::MAX as usize + 1)?;
             let (front, back) = if flipped {
                 (inside, escape)
             } else {
                 (escape, inside)
             };
-            nodes.push([plane, front, back]);
-            inside = (nodes.len() - 1) as i16;
+            inside = nodes.intern([plane, front, back])?;
         }
         escape = inside;
     }
@@ -628,6 +740,128 @@ mod tests {
         CONTENTS_WATER, Q12_ONE,
     };
     use psx_bsp::{ClipNode, Plane as BspPlane, RecordSlice, Vec3I32};
+
+    #[test]
+    fn smaller_leaf_preserves_mixed_contents_and_corner_contacts() {
+        let mut brushes = Vec::new();
+        for z in 0..9 {
+            for x in 0..9 {
+                let mut b = Brush::cuboid([x * 128, 0, z * 128], [x * 128 + 48, 64, z * 128 + 48]);
+                b.contents = match (x + z) % 3 {
+                    0 => BrushContents::Water,
+                    1 => BrushContents::Lava,
+                    _ => BrushContents::Solid,
+                };
+                brushes.push(b);
+            }
+        }
+        let mut pool = Brush::cuboid([128, -32, 128], [896, 32, 896]);
+        pool.contents = BrushContents::Water;
+        brushes.push(pool);
+        brushes.push(Brush::cuboid([448, -16, 448], [576, 80, 576]));
+        let a = compile_collision_hulls_with_leaf_size(
+            &brushes,
+            &[CollisionHullBounds::POINT, PLAYER],
+            CollisionHullStrategy::SpatialChains,
+            48,
+        )
+        .unwrap();
+        let b = compile_collision_hulls_with_leaf_size(
+            &brushes,
+            &[CollisionHullBounds::POINT, PLAYER],
+            CollisionHullStrategy::SpatialChains,
+            32,
+        )
+        .unwrap();
+        for h in 0..2 {
+            let a = hull(&a, h);
+            let b = hull(&b, h);
+            for x in 0..9 {
+                for z in 0..9 {
+                    for d in [-1, 0, 1] {
+                        for (start, end) in [
+                            (
+                                at(x * 128 - 32, 0, z * 128 - 32),
+                                at(x * 128 + 80, 0, z * 128 + 80),
+                            ),
+                            (
+                                at(x * 128 + 24, 96, z * 128 + 24),
+                                at(x * 128 + 24, -64, z * 128 + 24),
+                            ),
+                            (
+                                at(x * 128 + 24, 0, z * 128 + 24),
+                                at(x * 128 + 80, 0, z * 128 + 80),
+                            ),
+                        ] {
+                            let start = Vec3I32 {
+                                x: start.x + d,
+                                y: start.y + d,
+                                z: start.z + d,
+                            };
+                            assert_eq!(a.point_contents(start), b.point_contents(start));
+                            assert_eq!(
+                                trace(&a, start, end),
+                                trace(&b, start, end),
+                                "h{h} x{x} z{z} d{d}"
+                            );
+                            assert_eq!(
+                                trace(&a, end, start),
+                                trace(&b, end, start),
+                                "reverse h{h} x{x} z{z} d{d}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn construction_interning_checks_unique_capacity_after_lookup() {
+        let mut builder = NodeBuilder::default();
+        for plane in 0..=i16::MAX {
+            assert_eq!(builder.intern([plane, -1, -2]).unwrap(), plane);
+        }
+        assert_eq!(builder.intern([0, -1, -2]).unwrap(), 0);
+        assert!(matches!(
+            builder.intern([0, -2, -1]),
+            Err(CollisionHullCompileError::LimitExceeded {
+                kind: "clipnodes",
+                count: 32769,
+                max: 32768
+            })
+        ));
+        assert_eq!(builder.records.len(), 32768);
+    }
+
+    #[test]
+    fn node_interning_preserves_order_contents_and_all_roots() {
+        let nodes = [
+            [1, -1, -2],
+            [1, -1, -2],
+            [2, 0, 1],
+            [2, 1, 0],
+            [1, -2, -1],
+            [7, 4, -3],
+        ];
+        let mut heads = [-1, 2, 3, 5];
+        let result = intern_identical_nodes(&nodes, &mut heads);
+        assert_eq!(result, [[1, -1, -2], [2, 0, 0], [1, -2, -1], [7, 2, -3]]);
+        assert_eq!(heads, [-1, 1, 1, 3]);
+        let mut again = [-1, 2, 3, 5];
+        assert_eq!(intern_identical_nodes(&nodes, &mut again), result);
+        assert_eq!(again, heads);
+    }
+
+    #[test]
+    fn identical_body_hulls_share_the_complete_tree() {
+        let brushes = [Brush::cuboid([0; 3], [64; 3])];
+        let one = compile_collision_hulls(&brushes, &[PLAYER]).unwrap();
+        let two = compile_collision_hulls(&brushes, &[PLAYER, PLAYER]).unwrap();
+        assert_eq!(two.head_nodes, [one.head_nodes[0], one.head_nodes[0]]);
+        assert_eq!(two.clipnodes, one.clipnodes);
+        assert_eq!(two.planes, one.planes);
+    }
 
     fn hull(compiled: &CompiledCollisionHulls, hull: usize) -> CollisionHull<'_> {
         CollisionHull::new(

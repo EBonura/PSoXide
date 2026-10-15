@@ -297,6 +297,17 @@ pub struct ProjectDocument {
     /// back to the chain compiler.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub collision_hull_bsp: bool,
+    /// Optional render T-junction repair. Disabled for older projects to
+    /// preserve their geometry and packet budgets; preview and cook agree.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub bsp_render_edge_repair: crate::brush_compile::SurfaceEdgeRepair,
+    /// Collision partition target shared by editor Build/Play and CLI cooks.
+    /// Legacy projects default to 48; 32 trades collision RAM for shorter walks.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub bsp_collision_leaf_target: crate::brush_collision_hulls::CollisionLeafTarget,
+    /// Optional exact solid-cell proof metadata. Legacy projects keep full paths.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub bsp_solid_cell_proofs: bool,
     /// Worst-case joint rotation error, in whole degrees, that the cook may
     /// introduce by resampling animation clips to a lower rate. `0` disables
     /// resampling and cooks every clip at its authored rate.
@@ -378,6 +389,10 @@ fn default_true() -> bool {
     true
 }
 
+fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    *value == T::default()
+}
+
 fn is_true(value: &bool) -> bool {
     *value
 }
@@ -398,6 +413,9 @@ impl ProjectDocument {
             animation_track_budget_units: 0,
             bsp_cook_mode: crate::brush_world::BrushWorldCookMode::default(),
             collision_hull_bsp: true,
+            bsp_render_edge_repair: crate::brush_compile::SurfaceEdgeRepair::default(),
+            bsp_collision_leaf_target: crate::brush_collision_hulls::CollisionLeafTarget::default(),
+            bsp_solid_cell_proofs: false,
             scenes: vec![Scene::new("Main")],
             ui_scenes,
             scene_states,
