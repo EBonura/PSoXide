@@ -80,8 +80,9 @@ mod tests {
         // classified render BSP instead of storing a second point clip tree.
         // The body hulls are solid-leaf hull BSPs (the default), which are
         // 264 bytes smaller than the 4,192 the chain compiler needed here.
-        // Conforming T-junctions adds 16 vertices (192 bytes) to this world.
-        assert_eq!(world.bytes.len(), 4_120);
+        // Conforming T-junctions adds 16 vertices (192 bytes) to this world,
+        // and identical collision-node subtrees share their wire records.
+        assert_eq!(world.bytes.len(), 4_092);
         assert_eq!(world.movers.len(), 1);
         assert_eq!(world.movers[0].model_index, 1);
         assert_eq!(package.rooms.len(), 1);

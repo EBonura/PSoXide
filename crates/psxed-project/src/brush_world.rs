@@ -5,8 +5,8 @@ use std::path::Path;
 
 use crate::brush::{paraxial_uv, rebase_texel_uvs, Brush, BrushContents};
 use crate::brush_collision_hulls::{
-    compile_collision_hulls_with, CollisionHullBounds, CollisionHullCompileError,
-    CollisionHullStrategy, CompiledCollisionHulls,
+    compile_collision_hulls_with_target, CollisionHullBounds, CollisionHullCompileError,
+    CollisionHullStrategy, CollisionLeafTarget, CompiledCollisionHulls,
 };
 use crate::brush_compile::{
     build_surface_bsp, compile_authored_surfaces, compile_csg_surfaces, pack_normalized_plane,
@@ -561,6 +561,8 @@ pub fn compile_brush_world(
         &uv_window_skip,
         patch_extent,
         options.mode,
+        project.bsp_render_edge_repair,
+        project.bsp_collision_leaf_target,
         options.ambient,
         &collision_hulls,
         options.collision_hulls,
@@ -650,6 +652,8 @@ pub fn compile_brush_world(
             &uv_window_skip,
             patch_extent,
             options.mode,
+            project.bsp_render_edge_repair,
+            project.bsp_collision_leaf_target,
             options.ambient,
             &collision_hulls,
             options.collision_hulls,
@@ -870,17 +874,25 @@ fn sky_aperture_materials(
 /// Whether every packed texel coordinate of `surface` lands inside the u8
 /// window, computed exactly as `brush_pack::pack_bsp_geometry` will. `None`
 /// dimensions mean the packer keeps the historic wrap for this material.
+#[cfg(test)]
 fn surface_fits_uv_window(surface: &CompiledSurface, dims: Option<&[u16; 2]>) -> Option<bool> {
+    surface_fits_uv_window_in_units(surface, dims, ENGINE_UV_UNITS_PER_TEXEL)
+}
+
+fn surface_fits_uv_window_in_units(
+    surface: &CompiledSurface,
+    dims: Option<&[u16; 2]>,
+    units_per_texel: f64,
+) -> Option<bool> {
     let dims = dims?;
     let mut uvs: Vec<[f64; 2]> = surface
         .vertices
         .iter()
         .map(|&vertex| {
             let raw_uv = paraxial_uv(&surface.plane, vertex);
-            surface.uv.apply([
-                raw_uv[0] / ENGINE_UV_UNITS_PER_TEXEL,
-                raw_uv[1] / ENGINE_UV_UNITS_PER_TEXEL,
-            ])
+            surface
+                .uv
+                .apply([raw_uv[0] / units_per_texel, raw_uv[1] / units_per_texel])
         })
         .collect();
     rebase_texel_uvs(
@@ -902,6 +914,35 @@ fn fit_surfaces_to_uv_window(
     texture_dims: &std::collections::HashMap<Option<ResourceId>, [u16; 2]>,
     skip_materials: &std::collections::HashSet<Option<ResourceId>>,
 ) -> (Vec<CompiledSurface>, UvWindowStats) {
+    fit_surfaces_to_uv_window_in_units(
+        surfaces,
+        texture_dims,
+        skip_materials,
+        ENGINE_UV_UNITS_PER_TEXEL,
+    )
+}
+
+/// Apply the cooker's exact UV-window subdivision to editor-space CSG patches.
+/// The editor uses sixteen world units per texel; the cooked world uses one.
+/// Split before baking vertex colors so new corners receive normal lighting.
+pub fn fit_preview_surfaces_to_uv_window(
+    surfaces: Vec<CompiledSurface>,
+    texture_dims: &std::collections::HashMap<Option<ResourceId>, [u16; 2]>,
+) -> (Vec<CompiledSurface>, UvWindowStats) {
+    fit_surfaces_to_uv_window_in_units(
+        surfaces,
+        texture_dims,
+        &Default::default(),
+        crate::brush::BRUSH_UV_UNITS_PER_TEXEL,
+    )
+}
+
+fn fit_surfaces_to_uv_window_in_units(
+    surfaces: Vec<CompiledSurface>,
+    texture_dims: &std::collections::HashMap<Option<ResourceId>, [u16; 2]>,
+    skip_materials: &std::collections::HashSet<Option<ResourceId>>,
+    units_per_texel: f64,
+) -> (Vec<CompiledSurface>, UvWindowStats) {
     let mut stats = UvWindowStats::default();
     let mut out = Vec::with_capacity(surfaces.len());
     let always_lit = [([0.0; 3], f64::INFINITY)];
@@ -913,7 +954,7 @@ fn fit_surfaces_to_uv_window(
             continue;
         }
         let dims = texture_dims.get(&surface.material);
-        match surface_fits_uv_window(&surface, dims) {
+        match surface_fits_uv_window_in_units(&surface, dims, units_per_texel) {
             Some(true) => {
                 out.push(surface);
                 continue;
@@ -933,7 +974,7 @@ fn fit_surfaces_to_uv_window(
                 overflow = true;
                 break;
             }
-            if surface_fits_uv_window(&piece, dims) == Some(true) {
+            if surface_fits_uv_window_in_units(&piece, dims, units_per_texel) == Some(true) {
                 out.push(piece);
                 continue;
             }
@@ -946,7 +987,7 @@ fn fit_surfaces_to_uv_window(
                 }
             }
             let widest = (0..3).map(|axis| max[axis] - min[axis]).fold(0.0, f64::max);
-            if widest < UV_WINDOW_MIN_SPLIT_UNITS {
+            if widest < UV_WINDOW_MIN_SPLIT_UNITS * units_per_texel / ENGINE_UV_UNITS_PER_TEXEL {
                 overflow = true;
                 break;
             }
@@ -1168,6 +1209,7 @@ fn merge_render_rectangles(surfaces: Vec<CompiledSurface>) -> Vec<CompiledSurfac
             surface.uv.rotation_deg,
             surface.uv.scale_q8,
             surface.contents as u8,
+            surface.edge_repair.map(|policy| policy as u8),
         );
         groups
             .entry(key)
@@ -1259,6 +1301,8 @@ fn compile_model(
     uv_window_skip: &std::collections::HashSet<Option<ResourceId>>,
     patch_extent: f64,
     mode: BrushWorldCookMode,
+    edge_repair: crate::brush_compile::SurfaceEdgeRepair,
+    collision_leaf_target: CollisionLeafTarget,
     ambient: [u8; 3],
     collision_hulls: &[CollisionHullBounds; 3],
     hull_strategy: CollisionHullStrategy,
@@ -1319,8 +1363,10 @@ fn compile_model(
     let (render_surfaces, light_edges) = make_surfaces_watertight(render_surfaces, uv_window_skip);
     // The runtime draws a face only up to its batch bound; split wider ones
     // into same-triangle fans rather than let the packer refuse the level.
-    let render_surfaces =
-        split_wide_surfaces(render_surfaces, psx_bsp::render::PXBSP_MAX_FACE_VERTICES);
+    let render_surfaces = split_wide_surfaces(
+        crate::brush_compile::repair_surface_edges(render_surfaces, edge_repair, 1.0),
+        psx_bsp::render::PXBSP_MAX_FACE_VERTICES,
+    );
     replace_bsp_render_surfaces(&mut bsp, render_surfaces);
     // Small editor BSPs can afford the same separator-flow VIS used by a
     // release cook. Larger interactive cooks retain Quake's conservative
@@ -1382,7 +1428,12 @@ fn compile_model(
             texture_dims,
         )?
     };
-    let collision = compile_runtime_collision_hulls(brushes, collision_hulls, hull_strategy)?;
+    let collision = compile_runtime_collision_hulls(
+        brushes,
+        collision_hulls,
+        hull_strategy,
+        collision_leaf_target,
+    )?;
     Ok((geometry, collision, leak_diagnostic.path, uv_window))
 }
 
@@ -1823,13 +1874,15 @@ fn compile_runtime_collision_hulls(
     brushes: &[Brush],
     hulls: &[CollisionHullBounds; 3],
     strategy: CollisionHullStrategy,
+    target: CollisionLeafTarget,
 ) -> Result<CompiledCollisionHulls, CollisionHullCompileError> {
     // Quake hull 0 is the classified render BSP itself. Do not duplicate the
     // entire point tree in clipnodes merely to satisfy the four-head model
     // record: the runtime never reads collision head zero. Keep one valid
     // empty sentinel head for format validation, followed by the two actual
     // box-expanded body hulls.
-    let mut collision = compile_collision_hulls_with(brushes, &hulls[1..], strategy)?;
+    let mut collision =
+        compile_collision_hulls_with_target(brushes, &hulls[1..], strategy, target)?;
     let plane = if collision.planes.is_empty() {
         let (record, _) = pack_normalized_plane([1.0, 0.0, 0.0], 0.0)
             .ok_or(CollisionHullCompileError::InvalidPlane(None))?;
@@ -2696,6 +2749,7 @@ mod tests {
             ],
             material: None,
             uv: crate::brush::FaceUv::default(),
+            edge_repair: None,
             contents: BrushContents::Solid,
             source_brush: 0,
             source_face: 0,
@@ -2814,6 +2868,101 @@ mod tests {
         );
         assert_eq!(stats.unfixable_surfaces, 1);
         assert_eq!(stats.split_surfaces, 0);
+    }
+
+    fn assert_preview_uv_split_matches_cook(surface: CompiledSurface) {
+        let dimensions = std::collections::HashMap::from([(None, [128, 32])]);
+        assert_eq!(
+            surface_fits_uv_window_in_units(&surface, Some(&[128, 32]), 16.0),
+            Some(false)
+        );
+        let (preview, stats) =
+            fit_preview_surfaces_to_uv_window(vec![surface.clone()], &dimensions);
+        assert_eq!(stats.split_surfaces, 1);
+        assert_eq!(stats.unfixable_surfaces, 0);
+        assert!(preview.len() > 1);
+        let mut cooked_source = surface.clone();
+        for vertex in &mut cooked_source.vertices {
+            for component in vertex {
+                *component /= 16.0;
+            }
+        }
+        let (cooked, cooked_stats) =
+            fit_surfaces_to_uv_window(vec![cooked_source], &dimensions, &Default::default());
+        assert_eq!(stats, cooked_stats);
+        // Final shared-edge repair must retain UV-window validity and the
+        // authored/runtime scale parity after both independent cut stages.
+        let preview = crate::brush_compile::repair_surface_edges(
+            preview,
+            crate::brush_compile::SurfaceEdgeRepair::All,
+            16.0,
+        );
+        let cooked = crate::brush_compile::repair_surface_edges(
+            cooked,
+            crate::brush_compile::SurfaceEdgeRepair::All,
+            1.0,
+        );
+        assert_eq!(preview.len(), cooked.len());
+        let area_xz = |vertices: &[[f64; 3]]| {
+            (0..vertices.len())
+                .map(|i| {
+                    let a = vertices[i];
+                    let b = vertices[(i + 1) % vertices.len()];
+                    a[0] * b[2] - b[0] * a[2]
+                })
+                .sum::<f64>()
+                .abs()
+                * 0.5
+        };
+        let actual_area: f64 = preview.iter().map(|piece| area_xz(&piece.vertices)).sum();
+        assert!((actual_area - area_xz(&surface.vertices)).abs() < 1e-5);
+        for (piece, cooked_piece) in preview.iter().zip(&cooked) {
+            assert_eq!(
+                surface_fits_uv_window_in_units(piece, Some(&[128, 32]), 16.0),
+                Some(true)
+            );
+            assert_eq!(piece.material, surface.material);
+            assert_eq!(piece.uv, surface.uv);
+            assert_eq!(piece.plane, surface.plane);
+            assert_eq!(piece.vertices.len(), cooked_piece.vertices.len());
+            for (a, b) in piece.vertices.iter().zip(&cooked_piece.vertices) {
+                for axis in 0..3 {
+                    assert!((a[axis] / 16.0 - b[axis]).abs() < 1e-7);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn preview_uv_window_splits_180_texel_span_with_128_period() {
+        // U110..290 spans only180, but aligned128-period rebasing cannot
+        // fit it into a single u8 window. Casting290 to34 reverses gradients.
+        let mut surface = floor_surface(64);
+        surface.vertices = vec![
+            [1760.0, 0.0, 0.0],
+            [4640.0, 0.0, 0.0],
+            [4640.0, 0.0, 256.0],
+            [1760.0, 0.0, 256.0],
+        ];
+        assert_preview_uv_split_matches_cook(surface);
+    }
+
+    #[test]
+    fn preview_uv_window_splits_actual_road_shoulder() {
+        let points = [
+            [-14912, 320, 9536],
+            [-11392, 448, 8384],
+            [-11712, 384, 8000],
+        ];
+        let mut surface = floor_surface(64);
+        surface.plane = crate::brush::Plane::from_points(points).unwrap();
+        surface.vertices = points.map(|point| point.map(f64::from)).to_vec();
+        surface.uv = crate::brush::FaceUv {
+            offset_texels: [0, 26],
+            rotation_deg: 17,
+            scale_q8: [292, 292],
+        };
+        assert_preview_uv_split_matches_cook(surface);
     }
 
     #[test]

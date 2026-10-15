@@ -319,6 +319,7 @@ mod tests {
             ],
             material: None,
             uv: FaceUv::default(),
+            edge_repair: None,
             contents: BrushContents::Solid,
             source_brush: 0,
             source_face: 0,

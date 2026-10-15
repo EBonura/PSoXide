@@ -45,6 +45,8 @@ pub struct CompiledSurface {
     pub material: Option<ResourceId>,
     /// Texture transform inherited from the authored face.
     pub uv: FaceUv,
+    /// Authored face override, retained through CSG and final patch cuts.
+    pub edge_repair: Option<SurfaceEdgeRepair>,
     /// Contents of the authored volume that owns this boundary.
     pub contents: BrushContents,
     /// Source brush index for diagnostics and deterministic coplanar ties.
@@ -179,6 +181,274 @@ pub fn subdivide_surfaces_to_budget(
         }
         coarse_extent *= 2.0;
     }
+}
+
+/// Make final render-patch boundaries conform before integer packing. Run after
+/// lighting/UV cuts: rounding a midpoint independently of an unsplit neighbour
+/// makes a real hole, even when both floating-point edges are collinear.
+/// Positions are borrowed from existing corners (no centroid or texture changes).
+/// Call separately for independently moving brush models.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub enum SurfaceEdgeRepair {
+    #[default]
+    None,
+    /// Repair upward terrain patches; wall T junctions remain unchanged.
+    Upward,
+    /// Repair upward edges only when packing moves an existing split corner
+    /// off the unsplit segment. Projection can still expose collinear T joints.
+    UpwardQuantized,
+    All,
+}
+
+pub fn stitch_surface_edges(surfaces: Vec<CompiledSurface>) -> Vec<CompiledSurface> {
+    repair_surface_edges(surfaces, SurfaceEdgeRepair::All, 1.0)
+}
+
+/// `quantum` is one packed position unit in the supplied coordinate system:
+/// 1 for the cooker, WORLD_UNIT_DIVISOR for authored editor coordinates.
+pub fn repair_surface_edges(
+    surfaces: Vec<CompiledSurface>,
+    policy: SurfaceEdgeRepair,
+    quantum: f64,
+) -> Vec<CompiledSurface> {
+    if surfaces
+        .iter()
+        .all(|s| s.edge_repair.unwrap_or(policy) == SurfaceEdgeRepair::None)
+    {
+        return surfaces;
+    }
+    assert!(quantum.is_finite() && quantum > 0.0);
+    let epsilon = CSG_EPSILON * quantum;
+    // Untouched neighbors keep their exact packed endpoints. A selective
+    // repair may weld float noise only within one packed-position bin;
+    // otherwise it could move one side of an existing shared endpoint.
+    let preserve_packed_endpoints = surfaces
+        .iter()
+        .any(|s| s.edge_repair.unwrap_or(policy) == SurfaceEdgeRepair::None);
+
+    // An explicit repair selection supplies its own corner cloud. Untouched
+    // surfaces neither move nor supply cuts. Selected corners can still split an
+    // outer edge: authors must include both sides wherever conformance is needed.
+    let mut points: Vec<_> = surfaces
+        .iter()
+        .filter(|s| s.edge_repair.unwrap_or(policy) != SurfaceEdgeRepair::None)
+        .flat_map(|s| s.vertices.iter().copied())
+        .collect();
+    points.sort_by(|a, b| {
+        a[0].total_cmp(&b[0])
+            .then(a[1].total_cmp(&b[1]))
+            .then(a[2].total_cmp(&b[2]))
+    });
+    points.dedup();
+    // Search the tightest axis interval for each edge, avoiding an all-pairs
+    // scan on large maps while retaining points at axis-aligned boundaries.
+    let axes: [Vec<usize>; 3] = std::array::from_fn(|axis| {
+        let mut ids: Vec<_> = (0..points.len()).collect();
+        ids.sort_by(|&a, &b| points[a][axis].total_cmp(&points[b][axis]));
+        ids
+    });
+    // Independently reconstructed brush planes can differ by a few ulps at
+    // an existing endpoint. Canonicalize those too: values on opposite sides
+    // of an integer half-unit otherwise round to different packed corners.
+    let mut canonical = std::collections::HashMap::new();
+    for &p in &points {
+        let (axis, start, end) = (0..3)
+            .map(|axis| {
+                let start = axes[axis].partition_point(|&i| points[i][axis] < p[axis] - epsilon);
+                let end = axes[axis].partition_point(|&i| points[i][axis] <= p[axis] + epsilon);
+                (axis, start, end)
+            })
+            .min_by_key(|&(_, start, end)| end - start)
+            .unwrap();
+        let id = axes[axis][start..end]
+            .iter()
+            .copied()
+            .filter(|&i| {
+                let d = std::array::from_fn(|j| points[i][j] - p[j]);
+                dot(d, d) <= epsilon * epsilon
+                    && (!preserve_packed_endpoints
+                        || (0..3)
+                            .all(|j| (points[i][j] / quantum).round() == (p[j] / quantum).round()))
+            })
+            .min()
+            .unwrap();
+        canonical.insert(
+            p.map(|v| if v == 0.0 { 0 } else { v.to_bits() }),
+            points[id],
+        );
+    }
+    let mut output = Vec::with_capacity(surfaces.len());
+    for mut surface in surfaces {
+        let policy = surface.edge_repair.unwrap_or(policy);
+        if policy == SurfaceEdgeRepair::None {
+            output.push(surface);
+            continue;
+        }
+        for p in &mut surface.vertices {
+            *p = canonical[&p.map(|v| if v == 0.0 { 0 } else { v.to_bits() })];
+        }
+        if matches!(
+            policy,
+            SurfaceEdgeRepair::Upward | SurfaceEdgeRepair::UpwardQuantized
+        ) && normalized_plane(surface.plane).0[1] <= 0.8
+        {
+            output.push(surface);
+            continue;
+        }
+        let mut vertices = Vec::with_capacity(surface.vertices.len());
+        for i in 0..surface.vertices.len() {
+            let a = surface.vertices[i];
+            let b = surface.vertices[(i + 1) % surface.vertices.len()];
+            vertices.push(a);
+            let delta = std::array::from_fn::<_, 3, _>(|j| b[j] - a[j]);
+            let length2 = dot(delta, delta);
+            if length2 <= epsilon * epsilon {
+                continue;
+            }
+            let (axis, start, end) = (0..3)
+                .map(|axis| {
+                    let lo = a[axis].min(b[axis]) - epsilon;
+                    let hi = a[axis].max(b[axis]) + epsilon;
+                    let start = axes[axis].partition_point(|&p| points[p][axis] < lo);
+                    let end = axes[axis].partition_point(|&p| points[p][axis] <= hi);
+                    (axis, start, end)
+                })
+                .min_by_key(|&(_, start, end)| end - start)
+                .unwrap();
+            let mut cuts = Vec::new();
+            for &id in &axes[axis][start..end] {
+                let p = points[id];
+                let offset = std::array::from_fn(|j| p[j] - a[j]);
+                let t = dot(offset, delta) / length2;
+                if t <= 0.0 || t >= 1.0 {
+                    continue;
+                }
+                let error = std::array::from_fn(|j| offset[j] - t * delta[j]);
+                if dot(error, error) <= epsilon * epsilon
+                    && t * t * length2 > epsilon * epsilon
+                    && (1.0 - t).powi(2) * length2 > epsilon * epsilon
+                {
+                    cuts.push((t, p));
+                }
+            }
+            cuts.sort_by(|a, b| a.0.total_cmp(&b.0));
+            cuts.dedup_by(|a, b| {
+                (a.0 - b.0).abs() * length2.sqrt() <= epsilon
+                    && (!preserve_packed_endpoints
+                        || (0..3).all(|j| (a.1[j] / quantum).round() == (b.1[j] / quantum).round()))
+            });
+            for (_, p) in &mut cuts {
+                *p = canonical[&p.map(|v| if v == 0.0 { 0 } else { v.to_bits() })];
+            }
+            if policy == SurfaceEdgeRepair::UpwardQuantized {
+                // Simplify the resulting packed chain, not the original long
+                // segment: a retained bent corner can make another cut vital.
+                let mut i = 0;
+                while i < cuts.len() {
+                    let previous = if i == 0 { a } else { cuts[i - 1].1 };
+                    let next = if i + 1 == cuts.len() {
+                        b
+                    } else {
+                        cuts[i + 1].1
+                    };
+                    if packed_collinear_between(previous, cuts[i].1, next, quantum) {
+                        cuts.remove(i);
+                        i = i.saturating_sub(1);
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+            vertices.extend(cuts.into_iter().map(|(_, p)| p));
+        }
+        if vertices.len() == surface.vertices.len() {
+            output.push(surface);
+            continue;
+        }
+        surface.vertices = vertices;
+        // A fan rooted on a subdivided boundary can contain a collinear
+        // triangle, which may flip after packing and lose that segment to
+        // backface culling. Keep a safe fan when possible; otherwise peel
+        // convex ears until one exists, retaining all boundary segments.
+        while surface.vertices.len() > 3 {
+            let n = surface.vertices.len();
+            let safe_root = (0..n).find(|&root| {
+                (1..n - 1).all(|i| {
+                    stitch_triangle_is_safe(
+                        surface.vertices[root],
+                        surface.vertices[(root + i) % n],
+                        surface.vertices[(root + i + 1) % n],
+                        quantum,
+                    )
+                })
+            });
+            if let Some(root) = safe_root {
+                surface.vertices.rotate_left(root);
+                break;
+            }
+            let Some(ear) = (0..n).find(|&i| {
+                stitch_triangle_is_safe(
+                    surface.vertices[(i + n - 1) % n],
+                    surface.vertices[i],
+                    surface.vertices[(i + 1) % n],
+                    quantum,
+                )
+            }) else {
+                break;
+            };
+            let mut piece = surface.clone();
+            piece.vertices = vec![
+                surface.vertices[(ear + n - 1) % n],
+                surface.vertices[ear],
+                surface.vertices[(ear + 1) % n],
+            ];
+            output.push(piece);
+            surface.vertices.remove(ear);
+        }
+        output.push(surface);
+    }
+    output
+}
+
+fn packed_collinear_between(a: [f64; 3], p: [f64; 3], b: [f64; 3], quantum: f64) -> bool {
+    let q = |p: [f64; 3]| p.map(|v| (v / quantum).round() as i64);
+    let a = q(a);
+    let b = q(b);
+    let p = q(p);
+    let d: [i64; 3] = std::array::from_fn(|i| b[i] - a[i]);
+    let v: [i64; 3] = std::array::from_fn(|i| p[i] - a[i]);
+    let length2 = d.iter().map(|v| v * v).sum::<i64>();
+    if length2 == 0 {
+        return v == [0; 3];
+    }
+    let along = (0..3).map(|i| v[i] * d[i]).sum::<i64>();
+    d[1] * v[2] - d[2] * v[1] == 0
+        && d[2] * v[0] - d[0] * v[2] == 0
+        && d[0] * v[1] - d[1] * v[0] == 0
+        && along >= 0
+        && along <= length2
+}
+
+fn stitch_triangle_is_safe(a: [f64; 3], b: [f64; 3], c: [f64; 3], quantum: f64) -> bool {
+    let cross = |u: [f64; 3], v: [f64; 3]| {
+        [
+            u[1] * v[2] - u[2] * v[1],
+            u[2] * v[0] - u[0] * v[2],
+            u[0] * v[1] - u[1] * v[0],
+        ]
+    };
+    let u = std::array::from_fn(|i| b[i] - a[i]);
+    let v = std::array::from_fn(|i| c[i] - a[i]);
+    let normal = cross(u, v);
+    let longest2 = dot(u, u).max(dot(v, v));
+    // Reject numerical sliver ears by perpendicular distance, not absolute
+    // area: CSG's near-collinear corners must survive as boundary segments.
+    if dot(normal, normal) <= (CSG_EPSILON * quantum).powi(2) * longest2 {
+        return false;
+    }
+    true
 }
 
 /// Fan-split every surface wider than `max_vertices` into pieces that share
@@ -472,6 +742,7 @@ pub fn compile_csg_surfaces(brushes: &[Brush]) -> Vec<CompiledSurface> {
                 vertices,
                 material: face.material,
                 uv: face.uv,
+                edge_repair: face.edge_repair,
                 contents: brush.contents,
                 source_brush: brush_index,
                 source_face: face_index,
@@ -523,6 +794,7 @@ pub fn compile_authored_surfaces(brushes: &[Brush]) -> Vec<CompiledSurface> {
                 vertices: polygon.verts.clone(),
                 material: face.material,
                 uv: face.uv,
+                edge_repair: face.edge_repair,
                 contents: brush.contents,
                 source_brush: brush_index,
                 source_face: face_index,
@@ -1030,6 +1302,319 @@ pub(crate) fn pack_normalized_plane(unit: [f64; 3], dist_world: f64) -> Option<(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn selective_repair_preserves_fixed_neighbor_half_grid_endpoints_at_both_scales() {
+        for quantum in [1.0, 16.0] {
+            let scale = |p: [f64; 3]| p.map(|v| v * quantum);
+            let shared = scale([0.500005, 0.0, 0.0]);
+            let nearby = scale([0.499995, 0.0, 0.0]);
+            let mut selected =
+                compile_csg_surfaces(&[crate::brush::Brush::cuboid([0; 3], [64; 3])]).remove(0);
+            selected.vertices = vec![shared, scale([2.0, 0.0, 0.0]), scale([0.0, 0.0, 2.0])];
+            selected.edge_repair = Some(SurfaceEdgeRepair::All);
+            let mut fixed = selected.clone();
+            fixed.source_brush = 98;
+            fixed.edge_repair = None;
+            fixed.vertices = vec![shared, scale([0.0, 0.0, -2.0]), scale([2.0, 0.0, 0.0])];
+            let mut third = fixed.clone();
+            third.source_brush = 99;
+            third.edge_repair = Some(SurfaceEdgeRepair::All);
+            third.vertices[0] = nearby;
+            let output = repair_surface_edges(
+                vec![selected.clone(), fixed.clone(), third.clone()],
+                SurfaceEdgeRepair::None,
+                quantum,
+            );
+            assert_eq!(output.iter().find(|s| s.source_brush == 98), Some(&fixed));
+            assert!(output
+                .iter()
+                .filter(|s| s.source_brush == 99)
+                .any(|s| s.vertices.contains(&nearby)));
+            assert!(output
+                .iter()
+                .filter(|s| s.source_brush == selected.source_brush)
+                .any(|s| s.vertices.contains(&shared)));
+            assert_eq!((shared[0] / quantum).round(), 1.0);
+        }
+    }
+
+    #[test]
+    fn face_override_repairs_selected_patches_and_preserves_inheriting_neighbors() {
+        let mut a = compile_csg_surfaces(&[crate::brush::Brush::cuboid([0; 3], [64; 3])]).remove(0);
+        a.vertices = vec![[0.0, 0.0, 0.0], [8.0, 0.0, 0.0], [0.0, 0.0, 8.0]];
+        a.edge_repair = Some(SurfaceEdgeRepair::All);
+        let mut b = a.clone();
+        b.source_brush = 99;
+        b.edge_repair = Some(SurfaceEdgeRepair::All);
+        b.vertices = vec![[4.0, 0.0, 0.0], [4.0, 0.0, -4.0], [8.0, 0.0, 0.0]];
+        let mut fixed = b.clone();
+        fixed.source_brush = 100;
+        fixed.edge_repair = None;
+        fixed.vertices = vec![[2.0, 0.0, 0.0], [2.0, 0.0, -4.0], [4.0, 0.0, 0.0]];
+        let output = repair_surface_edges(
+            vec![a.clone(), b.clone(), fixed.clone()],
+            SurfaceEdgeRepair::None,
+            1.0,
+        );
+        assert!(output
+            .iter()
+            .filter(|s| s.source_brush == a.source_brush)
+            .any(|s| s.vertices.contains(&[4.0, 0.0, 0.0])));
+        assert_eq!(output.iter().find(|s| s.source_brush == 100), Some(&fixed));
+        assert!(!output
+            .iter()
+            .filter(|s| s.source_brush == a.source_brush)
+            .any(|s| s.vertices.contains(&[2.0, 0.0, 0.0])));
+        a.edge_repair = Some(SurfaceEdgeRepair::None);
+        assert_eq!(
+            repair_surface_edges(vec![a.clone()], SurfaceEdgeRepair::All, 1.0),
+            vec![a]
+        );
+    }
+
+    #[test]
+    fn authored_face_repair_survives_csg_and_patch_subdivision() {
+        let mut brush = crate::brush::Brush::cuboid([0; 3], [256; 3]);
+        brush.faces[0].edge_repair = Some(SurfaceEdgeRepair::All);
+        let surfaces = subdivide_surfaces_to_extent(compile_csg_surfaces(&[brush]), 64.0);
+        assert!(surfaces.iter().filter(|s| s.source_face == 0).count() > 1);
+        for surface in surfaces {
+            assert_eq!(
+                surface.edge_repair,
+                (surface.source_face == 0).then_some(SurfaceEdgeRepair::All)
+            );
+        }
+    }
+
+    #[test]
+    fn cuts_are_canonicalized_once_even_for_close_point_chains_and_signed_zero() {
+        let mut original =
+            compile_csg_surfaces(&[crate::brush::Brush::cuboid([0; 3], [64; 3])]).remove(0);
+        original.vertices = vec![[0.0, 0.0, 0.0], [1.0, -0.0, 0.0], [0.0, 1.0, 0.0]];
+        let p1 = [0.5 - 0.000010, 0.0, 0.0];
+        let p2 = [0.5 + 0.000001, 0.0, 0.0];
+        let p3 = [0.5 + 0.000012, 0.0, 0.0];
+        let mut a = original.clone();
+        a.source_brush = 98;
+        a.vertices = vec![p1, p2, [0.0, -1.0, 0.0]];
+        let mut b = original.clone();
+        b.source_brush = 99;
+        b.vertices = vec![p3, [1.0, 0.0, 0.0], [1.0, -1.0, 0.0]];
+        let repaired = stitch_surface_edges(vec![original.clone(), a, b]);
+        assert!(
+            repaired
+                .iter()
+                .filter(|s| s.source_brush == original.source_brush)
+                .any(|s| s.vertices.contains(&p2)),
+            "p3 maps once to p2, never twice to p1"
+        );
+        assert!(repaired
+            .iter()
+            .filter(|s| s.source_brush == 99)
+            .any(|s| s.vertices.contains(&p2)));
+    }
+
+    #[test]
+    fn selective_stitch_retains_cuts_required_by_a_bent_packed_chain() {
+        let mut original =
+            compile_csg_surfaces(&[crate::brush::Brush::cuboid([0; 3], [64; 3])]).remove(0);
+        original.plane = Plane {
+            normal: [0, 1, 0],
+            dist: 0,
+        };
+        let a = [0.0, 0.0, 0.0];
+        let b = [12.0, 0.0, 4.0];
+        let p = [1.5, 0.0, 0.5];
+        let q = [6.0, 0.0, 2.0];
+        original.vertices = vec![a, b, [0.0, 0.0, 8.0]];
+        let mut adjacent = original.clone();
+        adjacent.source_brush = 99;
+        adjacent.vertices = vec![b, q, p, a, [12.0, 0.0, -4.0]];
+        let repaired = repair_surface_edges(
+            vec![original.clone(), adjacent],
+            SurfaceEdgeRepair::UpwardQuantized,
+            1.0,
+        );
+        let vertices: Vec<_> = repaired
+            .iter()
+            .filter(|s| s.source_brush == original.source_brush)
+            .flat_map(|s| s.vertices.iter().copied())
+            .collect();
+        assert!(vertices.contains(&p));
+        assert!(vertices.contains(&q));
+        assert!(packed_collinear_between(a, q, b, 1.0));
+        assert!(!packed_collinear_between(p, q, b, 1.0));
+    }
+
+    #[test]
+    fn repair_tolerance_scales_between_cooked_and_authored_coordinates() {
+        let mut a = compile_csg_surfaces(&[crate::brush::Brush::cuboid([0; 3], [64; 3])]).remove(0);
+        a.vertices = vec![[0.0, 0.0, 0.499995], [4.0, 0.0, 0.499995], [0.0, 4.0, 0.0]];
+        let mut b = a.clone();
+        b.vertices = vec![[4.0, 0.0, 0.500005], [0.0, 0.0, 0.500005], [4.0, -4.0, 0.0]];
+        let source = vec![a, b];
+        let cooked = repair_surface_edges(source.clone(), SurfaceEdgeRepair::All, 1.0);
+        let mut authored = source;
+        for s in &mut authored {
+            for p in &mut s.vertices {
+                for v in p {
+                    *v *= 16.0;
+                }
+            }
+        }
+        let mut preview = repair_surface_edges(authored, SurfaceEdgeRepair::All, 16.0);
+        for s in &mut preview {
+            for p in &mut s.vertices {
+                for v in p {
+                    *v /= 16.0;
+                }
+            }
+        }
+        assert_eq!(cooked, preview);
+        assert_eq!(cooked[0].vertices[0], cooked[1].vertices[1]);
+    }
+
+    #[test]
+    fn repair_policy_defaults_off_and_roundtrips_explicitly() {
+        let mut project = crate::ProjectDocument::from_ron_str(include_str!(
+            "../../../archive/fixtures/brush-first-playable/project.ron"
+        ))
+        .unwrap();
+        assert_eq!(project.bsp_render_edge_repair, SurfaceEdgeRepair::None);
+        project.bsp_render_edge_repair = SurfaceEdgeRepair::UpwardQuantized;
+        let restored =
+            crate::ProjectDocument::from_ron_str(&project.to_ron_string().unwrap()).unwrap();
+        assert_eq!(
+            restored.bsp_render_edge_repair,
+            SurfaceEdgeRepair::UpwardQuantized
+        );
+    }
+
+    #[test]
+    fn stitching_rejects_numerical_sliver_fans_that_collapse_when_packed() {
+        let mut original =
+            compile_csg_surfaces(&[crate::brush::Brush::cuboid([0; 3], [64; 3])]).remove(0);
+        original.vertices = vec![[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [0.0, 10.0, 0.0]];
+        let mut adjacent = original.clone();
+        adjacent.source_brush = 99;
+        adjacent.vertices = vec![[10.0, 0.0, 0.0], [5.0, 1e-9, 0.0], [0.0, 0.0, 0.0]];
+        for piece in stitch_surface_edges(vec![original.clone(), adjacent])
+            .into_iter()
+            .filter(|p| p.source_brush == original.source_brush)
+        {
+            for i in 1..piece.vertices.len() - 1 {
+                let [a, b, c] = [piece.vertices[0], piece.vertices[i], piece.vertices[i + 1]]
+                    .map(|p| p.map(f64::round));
+                assert!((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]) > 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn stitching_welds_reconstructed_endpoints_before_half_unit_rounding() {
+        let mut a = compile_csg_surfaces(&[crate::brush::Brush::cuboid([0; 3], [64; 3])]).remove(0);
+        a.vertices = vec![
+            [0.0, 0.0, 0.499999999],
+            [4.0, 0.0, 0.499999999],
+            [0.0, 4.0, 0.0],
+        ];
+        let mut b = a.clone();
+        b.vertices = vec![
+            [4.0, 0.0, 0.500000001],
+            [0.0, 0.0, 0.500000001],
+            [4.0, -4.0, 0.0],
+        ];
+        let repaired = stitch_surface_edges(vec![a, b]);
+        assert_eq!(repaired[0].vertices[0], repaired[1].vertices[1]);
+        assert_eq!(repaired[0].vertices[1], repaired[1].vertices[0]);
+        assert_eq!(
+            repaired[0].vertices[0].map(|v| v.round() as i32),
+            repaired[1].vertices[1].map(|v| v.round() as i32)
+        );
+    }
+
+    #[test]
+    fn stitching_quantized_t_junction_retains_the_same_two_boundary_segments() {
+        let a = [-583.0, 30.0, 200.0];
+        let b = [-596.0, 32.0, 276.0];
+        let c = std::array::from_fn(|i| a[i] + (b[i] - a[i]) * (14.0 / 76.0));
+        let mut template =
+            compile_csg_surfaces(&[crate::brush::Brush::cuboid([0; 3], [64; 3])]).remove(0);
+        template.vertices = vec![a, b, [-650.0, 32.0, 200.0]];
+        let mut adjacent = template.clone();
+        adjacent.source_face += 1;
+        adjacent.vertices = vec![b, c, a, [-550.0, 30.0, 240.0]];
+        let repaired = stitch_surface_edges(vec![template.clone(), adjacent]);
+        let q = |p: [f64; 3]| p.map(|v| v.round() as i32);
+        let edges: Vec<_> = repaired
+            .iter()
+            .filter(|s| s.source_face == template.source_face)
+            .flat_map(|s| {
+                (0..s.vertices.len())
+                    .map(|i| (q(s.vertices[i]), q(s.vertices[(i + 1) % s.vertices.len()])))
+            })
+            .collect();
+        assert!(edges.contains(&(q(a), q(c))));
+        assert!(edges.contains(&(q(c), q(b))));
+        assert!(!edges.contains(&(q(a), q(b))));
+        assert_eq!(q(c), [-585, 30, 214]);
+        assert_eq!(
+            stitch_surface_edges(repaired.clone()),
+            repaired,
+            "idempotent"
+        );
+    }
+
+    #[test]
+    fn stitching_preserves_area_winding_attributes_and_every_split_edge() {
+        for all_edges in [false, true] {
+            let mut original =
+                compile_csg_surfaces(&[crate::brush::Brush::cuboid([0; 3], [64; 3])]).remove(0);
+            original.vertices = vec![[0.0, 0.0, 0.0], [9.0, 0.0, 0.0], [0.0, 9.0, 0.0]];
+            let mut inputs = vec![original.clone()];
+            for edge in 0..if all_edges { 3 } else { 1 } {
+                let a = original.vertices[edge];
+                let b = original.vertices[(edge + 1) % 3];
+                let middle = std::array::from_fn(|i| (a[i] + b[i]) * 0.5);
+                let mut adjacent = original.clone();
+                adjacent.source_brush = 99;
+                adjacent.vertices = vec![b, middle, a];
+                inputs.push(adjacent);
+            }
+            let repaired = stitch_surface_edges(inputs);
+            let pieces: Vec<_> = repaired
+                .iter()
+                .filter(|s| s.source_brush == original.source_brush)
+                .collect();
+            let mut area = 0.0;
+            for piece in &pieces {
+                assert_eq!(piece.uv, original.uv);
+                assert_eq!(piece.plane, original.plane);
+                assert_eq!(piece.contents, original.contents);
+                assert_eq!(piece.material, original.material);
+                assert_eq!(piece.source_face, original.source_face);
+                for i in 1..piece.vertices.len() - 1 {
+                    let [a, b, c] = [piece.vertices[0], piece.vertices[i], piece.vertices[i + 1]];
+                    let cross = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+                    assert!(cross > 0.0, "no degenerate or reversed fan triangles");
+                    area += cross * 0.5;
+                }
+            }
+            assert!((area - 40.5).abs() < 1e-9);
+            for edge in 0..if all_edges { 3 } else { 1 } {
+                let a = original.vertices[edge];
+                let b = original.vertices[(edge + 1) % 3];
+                let middle = std::array::from_fn(|i| (a[i] + b[i]) * 0.5);
+                for segment in [(a, middle), (middle, b)] {
+                    assert!(pieces
+                        .iter()
+                        .any(|p| (0..p.vertices.len())
+                            .any(|i| (p.vertices[i], p.vertices[(i + 1) % p.vertices.len()])
+                                == segment)));
+                }
+            }
+        }
+    }
 
     #[test]
     fn wide_surfaces_split_into_fans_that_draw_the_same_triangles() {
@@ -1322,6 +1907,7 @@ mod tests {
             ],
             material: None,
             uv: FaceUv::default(),
+            edge_repair: None,
             contents: BrushContents::Solid,
             source_brush: 0,
             source_face: 0,
@@ -1337,6 +1923,7 @@ mod tests {
             ],
             material: None,
             uv: FaceUv::default(),
+            edge_repair: None,
             contents: BrushContents::Solid,
             source_brush: 1,
             source_face: 0,
@@ -1412,6 +1999,7 @@ mod tests {
                     ],
                     material: None,
                     uv: FaceUv::default(),
+                    edge_repair: None,
                     contents: BrushContents::Solid,
                     source_brush: index,
                     source_face: 0,

@@ -155,6 +155,7 @@ pub fn import_quake_map_geometry_scaled(
                     points: [points[0], points[1], points[2]],
                     material,
                     uv: Default::default(),
+                    edge_repair: None,
                 });
             }
             let brush = Brush {

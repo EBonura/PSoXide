@@ -152,6 +152,13 @@ pub struct BrushFace {
     /// Texture placement over the paraxial projection.
     #[serde(default)]
     pub uv: FaceUv,
+    /// Optional final render-edge repair. Omission inherits the project policy.
+    /// Geometry and collision planes are unchanged; only render cuts conform.
+    /// Active patches borrow corners only from other active patches. Include
+    /// both sides of a boundary where conformance is needed; a local selection
+    /// does not promise to repair its boundary against untouched patches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edge_repair: Option<crate::brush_compile::SurfaceEdgeRepair>,
 }
 
 impl BrushFace {
@@ -161,6 +168,7 @@ impl BrushFace {
             points,
             material: None,
             uv: FaceUv::default(),
+            edge_repair: None,
         }
     }
 }
@@ -679,11 +687,13 @@ impl Brush {
                 ],
                 material: cutter_face.material,
                 uv: cutter_face.uv,
+                edge_repair: cutter_face.edge_repair,
             };
             let inside_cap = BrushFace {
                 points: cutter_face.points,
                 material: cutter_face.material,
                 uv: cutter_face.uv,
+                edge_repair: cutter_face.edge_repair,
             };
             let outside = remainder.with_cap(outside_cap);
             match (remainder.with_cap(inside_cap), outside) {
@@ -1022,6 +1032,7 @@ impl Brush {
                 ],
                 material: source.material,
                 uv: source.uv,
+                edge_repair: source.edge_repair,
             };
             // Keep the authored outward winding: the rebuilt plane must
             // face the same way as the source plane.
@@ -1133,12 +1144,14 @@ impl Brush {
                 points: wind(base[0], base[2], base[1]),
                 material: side_material,
                 uv: FaceUv::default(),
+                edge_repair: None,
             });
             // Cap: the moved copy of the source face, same appearance.
             let mut cap_face = BrushFace {
                 points: wind(cap[0], cap[1], cap[2]),
                 material: source.material,
                 uv: source.uv,
+                edge_repair: source.edge_repair,
             };
             let raw = paraxial_uv(
                 &plane,
@@ -1160,6 +1173,7 @@ impl Brush {
                     points: wind(a, b, c),
                     material: side_material,
                     uv: FaceUv::default(),
+                    edge_repair: None,
                 });
             }
             Brush {
