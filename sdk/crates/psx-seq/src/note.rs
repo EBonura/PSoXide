@@ -38,7 +38,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
         self.rng >> 8
     }
 
-    fn move_front(&mut self, n: usize) {
+    pub(crate) fn move_front(&mut self, n: usize) {
         self.pos_min -= 1;
         self.notes[n].pos = self.pos_min;
     }
@@ -49,7 +49,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
     }
 
     /// The note on `list` that is last in line (`back`) or first.
-    fn edge(&self, list: NoteList, back: bool) -> Option<usize> {
+    pub(crate) fn edge(&self, list: NoteList, back: bool) -> Option<usize> {
         let mut best: Option<usize> = None;
         for (i, n) in self.notes.iter().enumerate() {
             if n.list != list {
@@ -71,7 +71,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
 
     /// The lowest-priority note on `list`, later ones winning ties, if its
     /// priority is below `limit`.
-    fn lowest_below(&self, list: NoteList, limit: u8) -> Option<usize> {
+    pub(crate) fn lowest_below(&self, list: NoteList, limit: u8) -> Option<usize> {
         let mut idx: [usize; N] = [0; N];
         let mut cnt = 0;
         for (i, n) in self.notes.iter().enumerate() {
@@ -240,6 +240,12 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
                 let old = self.notes[n].parent;
                 if old != NO_OWNER {
                     self.note_release(old);
+                } else {
+                    // a note the game started: cut it off the same way
+                    let nt = &mut self.notes[n];
+                    nt.adsr.want_release = true;
+                    nt.adsr.fade_out = FAST_RELEASE_Q24;
+                    nt.phase = 2;
                 }
                 self.notes[n].wanted = o;
                 self.notes[n].list = NoteList::Releasing;
@@ -282,6 +288,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
         nt.adsr.env = env;
         nt.adsr.state = EnvState::Initial;
         nt.phase = 0;
+        nt.live = false;
         nt.tuned = ly.tuned;
         nt.font = font;
         nt.reverb = reverb;
@@ -315,7 +322,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
         ly.note_vel_q15 = 0;
     }
 
-    fn note_disable(&mut self, n: usize, hw: &mut impl Hw) {
+    pub(crate) fn note_disable(&mut self, n: usize, hw: &mut impl Hw) {
         let v = self.voice_of[n];
         let nt = &mut self.notes[n];
         if nt.keyed {
@@ -326,6 +333,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
         nt.needs_key_on = false;
         nt.priority = 0;
         nt.phase = 0;
+        nt.live = false;
         nt.finished = false;
         nt.parent = NO_OWNER;
         nt.prev_parent = NO_OWNER;
@@ -372,7 +380,8 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
             (self.notes[n].vib.chan >> 4) as usize,
             (self.notes[n].vib.chan & 15) as usize,
         );
-        let ch = &self.players[cp].channels[cc];
+        let live = self.notes[n].vib.live;
+        let ch = &self.players[cp.min(P - 1)].channels[cc];
         let (dt, rt, dd, rd) = (
             ch.vib_depth_target as u32 * 256,
             ch.vib_rate_target as u32 * 256,
@@ -384,8 +393,10 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
             v.delay -= 1;
             return 1 << 16;
         }
-        ramp(&mut v.depth, &mut v.depth_timer, dt, dd);
-        ramp(&mut v.rate, &mut v.rate_timer, rt, rd);
+        if !live {
+            ramp(&mut v.depth, &mut v.depth_timer, dt, dd);
+            ramp(&mut v.rate, &mut v.rate_timer, rt, rd);
+        }
         if v.depth == 0 {
             return 1 << 16;
         }
@@ -651,7 +662,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
                     self.notes[n].priority = 1;
                     self.notes[n].phase = 2;
                 }
-            } else if nt.phase == 0 && nt.priority >= 1 {
+            } else if nt.phase == 0 && nt.priority >= 1 && !nt.live {
                 run = false;
             }
             if !run || self.notes[n].priority == 0 {
@@ -713,7 +724,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
             self.notes[n].vib_freq_q16 = f;
         }
         let nt = self.notes[n];
-        let (mut freq, mut vel, pan) = if nt.phase >= 1 {
+        let (mut freq, mut vel, pan) = if nt.phase >= 1 || nt.live {
             (nt.saved_freq_q16, nt.saved_vel_q15 as u32, nt.saved_pan)
         } else {
             let (p, c, l) = unpack(nt.parent);

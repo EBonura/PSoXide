@@ -61,12 +61,17 @@ fn main() {
                     .map_err(|e| psx_seq_cook::Error::Io(e.to_string()))?;
                 let bank = psx_seq::format::Bank::parse(&bank_bytes)
                     .map_err(|e| psx_seq_cook::Error::Format(format!("{e:?}")))?;
+                let live: Option<(u8, u8)> = arg(&args, "--live").and_then(|v| {
+                    let (f, i) = v.split_once(':')?;
+                    Some((f.parse().ok()?, i.parse().ok()?))
+                });
                 let voices: usize = arg(&args, "--voices")
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(24);
                 let mut r = psx_seq_cook::render::Renderer::new(&bank, 0x1010);
                 if let Some(m) = arg(&args, "--main") {
-                    r.main_volume = i32::from_str_radix(m.trim_start_matches("0x"), 16).unwrap_or(r.main_volume);
+                    r.main_volume = i32::from_str_radix(m.trim_start_matches("0x"), 16)
+                        .unwrap_or(r.main_volume);
                 }
                 let mask: u32 = (1u32 << voices) - 1;
                 macro_rules! go {
@@ -75,7 +80,34 @@ fn main() {
                         seq.set_bank(bank, 0x1010);
                         seq.start(0, &mut song)
                             .map_err(|e| psx_seq_cook::Error::Format(format!("{e:?}")))?;
-                        psx_seq_cook::render::render(&mut seq, &mut r, secs, |_, _| {});
+                        let mut held: Option<psx_seq::NoteHandle> = None;
+                        psx_seq_cook::render::render(&mut seq, &mut r, secs, |u, seq, r| {
+                            let Some((font, inst)) = live else { return };
+                            // a short ocarina-like phrase from 10 s: a note every 0.4 s, a little
+                            // vibrato, a glide on the last one
+                            const PHRASE: [u8; 6] = [57, 60, 64, 57, 60, 64];
+                            let start = 10 * psx_seq::UPDATE_HZ;
+                            let step = psx_seq::UPDATE_HZ * 2 / 5;
+                            if u >= start
+                                && (u - start) % step == 0
+                                && ((u - start) / step) < PHRASE.len() as u32
+                            {
+                                if let Some(h) = held.take() {
+                                    seq.note_off(h);
+                                }
+                                let k = PHRASE[((u - start) / step) as usize];
+                                held = seq.note_on(r, font, inst, k, 110, 64, 12);
+                                if let Some(h) = held {
+                                    seq.note_vibrato(h, 12, 24);
+                                }
+                            }
+                            if let Some(h) = held {
+                                if u >= start + 5 * step {
+                                    let t = (u - start - 5 * step) as u32;
+                                    seq.note_bend(h, 65536 + t.min(60) * 120);
+                                }
+                            }
+                        });
                         seq.unsupported_ops()
                     }};
                 }
