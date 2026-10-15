@@ -287,9 +287,15 @@ impl PlaybackClock {
     /// Call once CD-DA playback has actually started (e.g. on the tick
     /// [`PlaybackStarter::tick`] returns true).
     pub fn start(&mut self, now_tick: u32) {
-        self.anchor_ms = 0;
+        self.start_at(now_tick, 0);
+    }
+
+    /// [`start`](Self::start) when the song is already `ms` in at `now_tick`
+    /// (the first drive reading of a stream that began earlier).
+    pub(crate) fn start_at(&mut self, now_tick: u32, ms: u32) {
+        self.anchor_ms = ms;
         self.anchor_tick = now_tick;
-        self.last_now_ms = 0;
+        self.last_now_ms = ms;
         self.last_poll_tick = now_tick;
         self.pending_spike_ms = None;
         self.playing = true;
@@ -306,11 +312,20 @@ impl PlaybackClock {
         if !self.playing {
             return 0;
         }
+        let mut reading = None;
         if now_tick.wrapping_sub(self.last_poll_tick) >= RESYNC_TICKS {
             self.last_poll_tick = now_tick;
-            if let Some(drive_ms) = poll_drive_ms(cd) {
-                self.consider_anchor(now_tick, drive_ms);
-            }
+            reading = poll_drive_ms(cd);
+        }
+        self.observe(now_tick, reading)
+    }
+
+    /// The clock's policy without the drive: weigh `drive_ms`, a reading
+    /// taken at `now_tick` (if there is one), and return the song time at
+    /// `now_tick`.
+    pub(crate) fn observe(&mut self, now_tick: u32, drive_ms: Option<u32>) -> u32 {
+        if let Some(drive_ms) = drive_ms {
+            self.consider_anchor(now_tick, drive_ms);
         }
         let now = self.predict(now_tick);
         if now > self.last_now_ms {

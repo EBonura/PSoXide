@@ -13,7 +13,8 @@ The pieces, all in this repository:
 | Encoder, reference decoder, interleaver | `psx-audio-cook xa-encode`, `xa-pack`, `xa-decode`, `xa-score` (`crates/psx-audio-cook/src/xa.rs`, `xa_pack.rs`) |
 | Disc builder | `mkisopsx --xa-file` (`crates/psx-iso`) |
 | Player | `psx_io::cd::xa` (`Player`) |
-| Example | `sdk/examples/hello-xa`, built by `make hello-xa-disc` |
+| Song clock | `psx_io::cd::xa_clock` (`SongClock`) |
+| Examples | `sdk/examples/hello-xa` (`make hello-xa-disc`), `sdk/examples/hello-xa-resume` (`make hello-xa-resume-disc`) |
 
 ## Converting CD-DA tracks
 
@@ -68,6 +69,21 @@ those numbers. The encoder prints how many interleave slots carry no song:
 each costs disc space like music, so a pack of five songs at 37.8 kHz stereo
 leaves three empty slots.
 
+### Songs mixed offline
+
+`xa-encode` and `xa-pack` take finished mixes: a song that a build step
+rendered from loops and crossfaded into one WAV is just another song. Any
+sample rate, mono or stereo, 8, 16, 24 or 32-bit integer or 32 or 64-bit float
+PCM (a `WAVE_FORMAT_EXTENSIBLE` header is fine) is accepted, and the level is
+kept as rendered unless `--peak` is given. Two things to watch with a mix:
+
+* A float mix that goes past full scale (loops summed in a crossfade can)
+  clips in the encoder. Both commands print a warning with the overshoot;
+  render lower, or pass `--peak 0.95` to scale the loudest sample.
+* A file's songs all run to the longest song's length, so end a loop-friendly
+  mix on the sample the loop returns to, and let the player's `looping` flag
+  (or the guest, with the song's own span from the manifest) do the restart.
+
 Check what you encoded before burning it:
 
 ```sh
@@ -82,7 +98,10 @@ dense modern mixes land lower, as any 4-bit codec does.
 To hear it without a console, `make hello-xa-disc` builds a disc with four
 generated songs, and `make hello-xa-gate FRONTEND=<headless emulator>` plays
 it, presses CROSS three times and checks the emulator's audio capture and
-drive command log (`tools/xa_gate.sh`).
+drive command log (`tools/xa_gate.sh`). `make hello-xa-resume-gate
+FRONTEND=...` plays a song, reads data sectors while it is suspended, resumes
+it and checks the player, the song clock, the command log and the audio
+(`tools/xa_resume_gate.sh`).
 
 ## Choosing a format
 
@@ -155,6 +174,53 @@ head is, and at the end of the song file it restarts (looping) or pauses the
 drive. `elapsed_millis` reports the head's position since the start, a sector
 or two ahead of the sound.
 
+### Pausing for a data read
+
+`suspend` pauses the drive and keeps the song; `resume` carries on. Between the
+two the drive can be lent out for a data read, which is what a level load is:
+
+```rust
+let loaded = player.with_cd_suspended(|cd| {
+    let mut reader = SectorReader::with_cd(cd);
+    let ok = load_level(&mut reader);
+    (reader.release(), ok)
+})?;                          // Err(PauseRefused): keep polling, try again
+player.resume()?;             // or play() another song
+```
+
+A data read leaves the drive in data mode (no XA bits), possibly at double
+speed, with its head at the data. `resume` therefore sends everything again,
+in the order `play` does: Demute, Setmode (XA, filter, the file's speed),
+Setfilter (file and channel) and Setloc to the position the pause left, then
+ReadS. It costs a seek. The position is the head read back from the drive
+right after the pause, so the song continues within about one sector of where
+it stopped. A channel of a four-song 37.8 kHz stereo file owns one sector in
+four, 53 ms of sound each, so the first sector after a resume can repeat or
+skip up to that much; it is not a sample-exact cursor. A refused step returns
+its error and leaves the song suspended for a retry, and `play` or `stop`
+cancels the suspended song as before. `tools/xa_resume_gate.sh` checks this in
+the emulator: before the fix a bare ReadS after a data read left the drive in
+data mode at the data and the song went silent.
+
+### Where in the song
+
+`SongClock` (`psx_io::cd::xa_clock`) turns the head readings into a time that
+advances every frame, for beat sync and rhythm games:
+
+```rust
+let mut clock = SongClock::new(60);       // the tick counter's rate
+// each tick, after player.poll() (which may run every 15 to 30 ticks):
+if let Some(ms) = clock.update(&player, tick) {
+    /* milliseconds into the song file; None while seeking or suspended */
+}
+```
+
+The module documentation lists the precision honestly: half a sector (6.7 ms)
+of quantisation either way, up to one tick early, no drift, never backwards
+inside one run of the song, and an unmeasured lead of the head over the sound
+that `with_head_lead_ms` takes once the hardware tests have measured it. The
+emulator does not model that lead, so a headless run cannot calibrate it.
+
 `LBA`s are relative to the program's own disc image, so a program chain-loaded
 from a multi-program disc finds its music through `psx_io::disc_base` as it
 does its other data.
@@ -163,8 +229,9 @@ does its other data.
 
 **The drive is busy while music plays.** XA music is a read: the laser follows
 the music file, so the CPU cannot read other data from the disc meanwhile,
-not even at the same speed. Load first and then start the song, or stop the
-music for a load and `play` it again afterwards (it restarts from the top).
+not even at the same speed. Load first and then start the song, or suspend the
+music for a load and `resume` it afterwards (or `stop` it and `play` it again,
+which restarts from the top).
 Games that stream levels from the disc cannot use XA music for the stream's
 duration. Streaming data and music together needs the data interleaved into
 the filler slots, which neither the encoder nor the player does. CD-DA has
