@@ -1039,6 +1039,44 @@ impl<'a> PrimitivePacketArena<'a> {
         self.fence_at = self.storage.len();
     }
 
+    /// Reclaim a completed paired frame without waiting for queued or busy DMA.
+    /// The present handler starts DMA before clearing its slot. Check the slot
+    /// first: while render builds this frame, no new chain can be published.
+    /// Retain the normal fence's completion read and buffer-reuse barrier.
+    #[inline]
+    pub fn try_fence_completed(&mut self) -> bool {
+        self.try_fence_completed_with(
+            || {
+                #[cfg(all(target_arch = "mips", feature = "present-queue"))]
+                return psx_rt::present::is_slot_full();
+                #[cfg(not(all(target_arch = "mips", feature = "present-queue")))]
+                false
+            },
+            || {
+                #[cfg(target_arch = "mips")]
+                return psx_io::dma::is_busy(psx_io::dma::Channel::Gpu);
+                #[cfg(not(target_arch = "mips"))]
+                false
+            },
+        )
+    }
+
+    #[inline]
+    fn try_fence_completed_with(
+        &mut self,
+        slot_full: impl FnOnce() -> bool,
+        dma_busy: impl FnOnce() -> bool,
+    ) -> bool {
+        if !self.fence_pending {
+            return true;
+        }
+        if slot_full() || dma_busy() {
+            return false;
+        }
+        self.fence();
+        true
+    }
+
     /// True while a paired arena has not yet waited for the in-flight frame.
     pub const fn fence_pending(&self) -> bool {
         self.fence_pending
@@ -1467,6 +1505,25 @@ mod tests {
         let arena = PrimitivePacketArena::new_paired(&mut scratch, &mut pair);
         assert!(arena.fence_pending());
         assert_eq!(arena.remaining_before_fence(), 0);
+        let mut arena = arena;
+        let before_reclaim = fences();
+        // A queued chain must not reclaim even if DMA is currently idle.
+        // Short-circuiting also preserves the required slot-before-DMA order.
+        assert!(!arena.try_fence_completed_with(|| true, || panic!("queued")));
+        assert!(arena.fence_pending());
+        assert_eq!(arena.remaining_before_fence(), 0);
+        // Once kicked, the still-running walk continues to own its packets.
+        assert!(!arena.try_fence_completed_with(|| false, || true));
+        assert!(arena.fence_pending());
+        assert_eq!(fences(), before_reclaim);
+        // Only empty-slot plus idle-DMA permits the ordinary fence/barrier.
+        assert!(arena.try_fence_completed_with(|| false, || false));
+        assert!(!arena.fence_pending());
+        assert_eq!(arena.remaining_before_fence(), 8);
+        assert_eq!(fences(), before_reclaim + 1);
+        // An already-reclaimed arena does not poll hardware or fence again.
+        assert!(arena.try_fence_completed_with(|| panic!("reclaimed"), || panic!("reclaimed")));
+        assert_eq!(fences(), before_reclaim + 1);
     }
 
     #[test]

@@ -225,6 +225,36 @@ pub unsafe fn materialize_baked_surface_vertices(
     destination: *mut AffineVertex,
     uv_offset: [u8; 2],
 ) {
+    // Both record prefixes are three aligned words; projection fields follow.
+    const _: () = {
+        assert!(core::mem::size_of::<SurfaceSourceVertex>() == 12);
+        assert!(core::mem::size_of::<AffineVertex>() == 20);
+        assert!(core::mem::align_of::<SurfaceSourceVertex>() == 4);
+        assert!(core::mem::align_of::<AffineVertex>() == 4);
+        assert!(core::mem::offset_of!(SurfaceSourceVertex, uv) == 6);
+        assert!(core::mem::offset_of!(SurfaceSourceVertex, light) == 8);
+        assert!(core::mem::offset_of!(AffineVertex, uv) == 6);
+        assert!(core::mem::offset_of!(AffineVertex, color) == 8);
+        assert!(core::mem::offset_of!(AffineVertex, screen) == 12);
+    };
+    #[cfg(target_endian = "little")]
+    for index in 0..count {
+        // SAFETY: aligned, nonoverlapping record ranges are required above.
+        // Only the initialized 12-byte prefix is read/written.
+        unsafe {
+            let input = source.add(index).cast::<u32>();
+            let output = destination.add(index).cast::<u32>();
+            let xy = input.read();
+            let z_uv = input.add(1).read();
+            let color = input.add(2).read();
+            let u = ((z_uv >> 16).wrapping_add(u32::from(uv_offset[0]))) & 0xff;
+            let v = ((z_uv >> 24).wrapping_add(u32::from(uv_offset[1]))) & 0xff;
+            output.write(xy);
+            output.add(1).write((z_uv & 0xffff) | (u << 16) | (v << 24));
+            output.add(2).write(color);
+        }
+    }
+    #[cfg(not(target_endian = "little"))]
     for index in 0..count {
         // SAFETY: as above.
         let input = unsafe { &*source.add(index) };
@@ -1174,6 +1204,15 @@ impl<R: Reproject> Splitter<'_, R> {
             unsafe { self.emit_triangle(triangle) };
             return;
         }
+        // Keep subdivision scratch and its register pressure off the common
+        // unsplit path. Both branches preserve the original emission order.
+        unsafe { self.refine_second_split(triangle, mask) };
+    }
+
+    /// # Safety
+    /// As `refine_second`; `mask` is its nonzero second-level split mask.
+    #[inline(never)]
+    unsafe fn refine_second_split(&mut self, triangle: [usize; 3], mask: u8) {
         let first = self.scratch + 3;
         // SAFETY: slots `first..first + 3` are free per the contract.
         let mid = unsafe { self.midpoints(triangle, mask, first) };
@@ -1454,6 +1493,113 @@ mod tests {
     extern crate std;
     use super::*;
     use std::vec::Vec;
+
+    #[test]
+    fn baked_materialization_matches_frozen_scalar() {
+        // Original field-wise implementation, frozen before packed loads.
+        let mut seed = 0x194efaceu32;
+        let mut fingerprint = 0xcbf29ce484222325u64;
+        for offset_u in 0..=255u8 {
+            for offset_v in 0..=255u8 {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                let source = SurfaceSourceVertex {
+                    position: [seed as i16, (seed >> 16) as i16, (!seed) as i16],
+                    uv: [offset_v, offset_u],
+                    light: seed,
+                };
+                let sentinel = AffineVertex {
+                    position: [-1; 3],
+                    uv: [99; 2],
+                    color: 0xff00abcd,
+                    screen: [-32768, 32767],
+                    depth: 0xdeadbeef,
+                };
+                let mut actual = [sentinel; 3];
+                let mut expected = sentinel;
+                expected.position = source.position;
+                expected.uv = [
+                    source.uv[0].wrapping_add(offset_u),
+                    source.uv[1].wrapping_add(offset_v),
+                ];
+                expected.color = source.light;
+                unsafe {
+                    materialize_baked_surface_vertices(
+                        &source,
+                        1,
+                        actual.as_mut_ptr().add(1),
+                        [offset_u, offset_v],
+                    );
+                }
+                assert_eq!(actual, [sentinel, expected, sentinel]);
+                for value in [
+                    actual[1].position[0] as u16 as u32,
+                    actual[1].position[1] as u16 as u32,
+                    actual[1].position[2] as u16 as u32,
+                    actual[1].uv[0] as u32,
+                    actual[1].uv[1] as u32,
+                    actual[1].color,
+                    actual[1].screen[0] as u16 as u32,
+                    actual[1].screen[1] as u16 as u32,
+                    actual[1].depth,
+                ] {
+                    fingerprint = (fingerprint ^ value as u64).wrapping_mul(0x100000001b3);
+                }
+                unsafe {
+                    materialize_baked_surface_vertices(
+                        &source,
+                        0,
+                        actual.as_mut_ptr(),
+                        [offset_u, offset_v],
+                    );
+                }
+                assert_eq!(actual, [sentinel, expected, sentinel]);
+            }
+        }
+        assert_eq!(fingerprint, 0x07ba2d198c0356ab);
+    }
+
+    #[test]
+    fn baked_materialization_preserves_strides_and_independent_uv_bytes() {
+        let sentinel = AffineVertex {
+            position: [i16::MIN, 0, i16::MAX],
+            uv: [33, 222],
+            color: 0xff012345,
+            screen: [123, -456],
+            depth: 0x89abcdef,
+        };
+        for offset in [[0, 0], [1, 255], [127, 128], [128, 127], [255, 1]] {
+            for input_u in 0..=255u8 {
+                let source: Vec<_> = (0..=255u8)
+                    .map(|v| SurfaceSourceVertex {
+                        position: [i16::MIN, i16::MAX, (v as i16).wrapping_mul(-129)],
+                        uv: [input_u, v],
+                        light: 0xff000000 | ((input_u as u32) << 16) | v as u32,
+                    })
+                    .collect();
+                for count in [0, 1, 2, 17, 256] {
+                    let mut actual = [sentinel; 258];
+                    let mut expected = actual;
+                    for i in 0..count {
+                        expected[i + 1].position = source[i].position;
+                        expected[i + 1].uv = [
+                            source[i].uv[0].wrapping_add(offset[0]),
+                            source[i].uv[1].wrapping_add(offset[1]),
+                        ];
+                        expected[i + 1].color = source[i].light;
+                    }
+                    unsafe {
+                        materialize_baked_surface_vertices(
+                            source.as_ptr(),
+                            count,
+                            actual.as_mut_ptr().add(1),
+                            offset,
+                        );
+                    }
+                    assert_eq!(actual, expected);
+                }
+            }
+        }
+    }
 
     /// Identity view: positions are camera space, +Z forward, 320x240.
     fn configure() {
