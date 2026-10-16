@@ -102,6 +102,7 @@ fn parse(bytes: &[u8]) -> Result<(Wav, Vec<Vec<f64>>), Error> {
         (1, 16) => 2,
         (1, 24) => 3,
         (1, 32) | (3, 32) => 4,
+        (3, 64) => 8,
         _ => {
             return Err(Error::Wav(format!(
                 "unsupported WAV encoding {format} at {bits} bits"
@@ -119,6 +120,9 @@ fn parse(bytes: &[u8]) -> Result<(Wav, Vec<Vec<f64>>), Error> {
                 (1, 2) => i16::from_le_bytes([c[0], c[1]]) as f64,
                 (1, 3) => (i32::from_le_bytes([0, c[0], c[1], c[2]]) >> 8) as f64 / 256.0,
                 (1, 4) => i32::from_le_bytes([c[0], c[1], c[2], c[3]]) as f64 / 65536.0,
+                (_, 8) => {
+                    f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]) * 32768.0
+                }
                 _ => f32::from_le_bytes([c[0], c[1], c[2], c[3]]) as f64 * 32768.0,
             };
             plane.push(value);

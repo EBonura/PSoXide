@@ -456,3 +456,108 @@ fn xa_pack_writes_files_manifest_and_constants_from_wavs() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A WAV file with `planes` interleaved as `tag` (1 integer PCM, 3 float) at
+/// `bits`, values in 16-bit units (the scale `wav::read_channels` returns).
+fn wav_bytes(tag: u16, bits: u16, rate: u32, planes: &[Vec<f64>]) -> Vec<u8> {
+    let width = (bits / 8) as usize;
+    let frames = planes[0].len();
+    let mut data = Vec::new();
+    for i in 0..frames {
+        for plane in planes {
+            let v = plane[i];
+            match (tag, bits) {
+                (1, 16) => data.extend((v.round() as i16).to_le_bytes()),
+                (1, 24) => data.extend(&((v * 256.0).round() as i32).to_le_bytes()[..3]),
+                (3, 32) => data.extend(((v / 32768.0) as f32).to_le_bytes()),
+                (3, 64) => data.extend((v / 32768.0).to_le_bytes()),
+                _ => unreachable!(),
+            }
+        }
+    }
+    let block = (width * planes.len()) as u16;
+    let mut out = Vec::new();
+    out.extend(b"RIFF");
+    out.extend((36 + data.len() as u32).to_le_bytes());
+    out.extend(b"WAVEfmt ");
+    out.extend(16u32.to_le_bytes());
+    out.extend(tag.to_le_bytes());
+    out.extend((planes.len() as u16).to_le_bytes());
+    out.extend(rate.to_le_bytes());
+    out.extend((rate * block as u32).to_le_bytes());
+    out.extend(block.to_le_bytes());
+    out.extend(bits.to_le_bytes());
+    out.extend(b"data");
+    out.extend((data.len() as u32).to_le_bytes());
+    out.extend(data);
+    out
+}
+
+/// Two loops of different tones crossfaded into one 48 kHz stereo piece, the
+/// way a build step renders a menu song offline: the mix is the finished song.
+fn crossfaded_mix(rate: u32, secs: f64) -> Vec<Vec<f64>> {
+    let a = tone(rate, secs, &[220.0, 330.0]);
+    let b = tone(rate, secs, &[262.0, 392.0]);
+    let n = a.len();
+    let mix: Vec<f64> = (0..n)
+        .map(|i| {
+            let x = i as f64 / n as f64;
+            a[i] * (1.0 - x) + b[i] * x
+        })
+        .collect();
+    let right: Vec<f64> = mix.iter().map(|v| v * 0.8).collect();
+    vec![mix, right]
+}
+
+#[test]
+fn xa_pack_takes_premixed_wavs_in_every_common_encoding() {
+    let dir = std::env::temp_dir().join(format!("xa-mixed-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mix = crossfaded_mix(48_000, 1.0);
+    let mut args: Vec<String> = vec![
+        "xa-pack".into(),
+        dir.join("out").to_string_lossy().into_owned(),
+        "MIX".into(),
+    ];
+    let encodings = [(1u16, 24u16), (3, 32), (3, 64), (1, 16)];
+    for (i, (tag, bits)) in encodings.into_iter().enumerate() {
+        let path = dir.join(format!("mix{i}.wav"));
+        std::fs::write(&path, wav_bytes(tag, bits, 48_000, &mix)).unwrap();
+        args.push(path.to_string_lossy().into_owned());
+    }
+    let status = psx_audio_cook::cli::run(&args);
+    assert_eq!(
+        format!("{status:?}"),
+        format!("{:?}", std::process::ExitCode::SUCCESS)
+    );
+    // Four stereo songs share one file; each decodes back to the source
+    // resampled to the file's rate, at the level it was rendered.
+    let file = std::fs::read(dir.join("out/MIX1.XA")).unwrap();
+    let format = psx_audio_cook::xa::Format {
+        stereo: true,
+        rate: psx_audio_cook::xa::SampleRate::Hz37800,
+    };
+    let reference = psx_audio_cook::xa::prepare_pcm(format, 48_000, &mix, None);
+    for channel in 0..4 {
+        let (_, decoded) = psx_audio_cook::xa::decode_channel(&file, channel).unwrap();
+        for (r, d) in reference.iter().zip(&decoded) {
+            let n = r.len().min(d.len());
+            let snr = metrics::snr_db(&resample::to_i16(&r[..n]), &d[..n]);
+            assert!(snr > 20.0, "song {channel}: {snr:.1} dB");
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_mix_past_full_scale_is_reported_by_over_range() {
+    let hot: Vec<Vec<f64>> = vec![vec![0.0, 20_000.0, 40_000.0, -50_000.0]];
+    let (count, top) = psx_audio_cook::xa::over_range(&hot);
+    assert_eq!(count, 2);
+    assert!((top - 50_000.0 / 32_767.0).abs() < 1e-9);
+    assert_eq!(
+        psx_audio_cook::xa::over_range(&[vec![32_767.0, -32_768.0]]).0,
+        1
+    );
+}

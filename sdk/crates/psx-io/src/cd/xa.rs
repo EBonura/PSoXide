@@ -14,8 +14,10 @@
 //! Music is a read: the drive streams the file continuously, so the CPU
 //! cannot read data from the disc meanwhile, not even at the same time at the
 //! same speed (the laser follows the file, not the data). Load first, then
-//! start the song, or stop it for the load and start it again afterwards (it
-//! restarts from the top). Streaming data and music together needs the data
+//! start the song, or lend the drive for the load with
+//! [`Player::with_cd_suspended`] and [`Player::resume`] afterwards (a seek
+//! back to where the song was), or stop it and start it again (it restarts
+//! from the top). Streaming data and music together needs the data
 //! interleaved into the filler slots of the song file, which this player does
 //! not do.
 //!
@@ -136,6 +138,11 @@ pub enum Error {
     Read,
 }
 
+/// The drive refused Pause, as it does during the seek at the start of a
+/// read. Keep polling and try again.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct PauseRefused;
+
 /// What [`Player::poll`] saw.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Event {
@@ -147,6 +154,35 @@ pub enum Event {
     Looped,
     /// The song reached its end and the drive was paused.
     Finished,
+}
+
+/// One reading of the drive head inside the playing song, taken by
+/// [`Player::poll`].
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct HeadSample {
+    /// Changes whenever a read starts (a start, a loop or a resume): readings
+    /// of different epochs do not belong to one run of the song.
+    pub epoch: u32,
+    /// Changes with every new reading in the same epoch.
+    pub serial: u32,
+    /// The sector the head was in, counted from the top of the song file.
+    pub sector: u32,
+    /// Sectors the drive reads per second at the file's speed (75 or 150).
+    pub sectors_per_second: u32,
+}
+
+impl HeadSample {
+    /// Start of the head's sector, in milliseconds since the top of the file.
+    pub const fn millis(self) -> u32 {
+        (self.sector as u64 * 1000 / self.sectors_per_second as u64) as u32
+    }
+
+    /// Middle of the head's sector, in milliseconds: the head was somewhere
+    /// in the sector, so this is the reading with the least expected error
+    /// (half a sector, 6.7 ms at single speed).
+    pub const fn centre_millis(self) -> u32 {
+        ((2 * self.sector as u64 + 1) * 500 / self.sectors_per_second as u64) as u32
+    }
 }
 
 /// The drive commands the player needs, so the state machine can run against
@@ -211,8 +247,20 @@ struct Engine {
     pause_pending: bool,
     suspended: bool,
     suspend_pending: bool,
+    /// Absolute LBA of the top of the song file.
     start_lba: u32,
+    /// Where the last read was aimed: the top of the file for a start or a
+    /// loop, the saved position for a resume.
+    target_lba: u32,
     head_lba: u32,
+    /// Where a suspended song continues, fixed when the pause is accepted.
+    resume_lba: u32,
+    /// Counts reads started (start, loop, resume): a new epoch means the
+    /// head readings before it say nothing about the ones after.
+    epoch: u32,
+    /// Counts head readings taken while streaming, so a clock can tell a
+    /// fresh reading from the one it already used.
+    head_serial: u32,
 }
 
 impl Engine {
@@ -225,7 +273,11 @@ impl Engine {
             suspended: false,
             suspend_pending: false,
             start_lba: 0,
+            target_lba: 0,
             head_lba: 0,
+            resume_lba: 0,
+            epoch: 0,
+            head_serial: 0,
         }
     }
 
@@ -257,17 +309,25 @@ impl Engine {
 
     /// Seek to the top of the file and start streaming.
     fn begin_read(&mut self, drive: &mut impl Drive, song: Song) -> Result<(), Error> {
-        let start = shift_lba(song.file.lba);
-        if !drive.set_target(start) {
+        let top = shift_lba(song.file.lba);
+        self.begin_read_at(drive, top, top)
+    }
+
+    /// Seek to `at` (an absolute LBA inside the song file whose top is `top`)
+    /// and start streaming.
+    fn begin_read_at(&mut self, drive: &mut impl Drive, top: u32, at: u32) -> Result<(), Error> {
+        if !drive.set_target(at) {
             return Err(Error::Seek);
         }
         if !drive.start_streaming() {
             return Err(Error::Read);
         }
-        self.start_lba = start;
-        self.head_lba = start;
+        self.start_lba = top;
+        self.target_lba = at;
+        self.head_lba = at;
         self.pause_pending = false;
         self.state = State::Seeking;
+        self.epoch = self.epoch.wrapping_add(1);
         Ok(())
     }
 
@@ -289,16 +349,56 @@ impl Engine {
         }
         self.suspended = drive.pause();
         self.suspend_pending = !self.suspended;
+        if self.suspended {
+            self.note_resume_position(drive);
+        }
         self.suspended
     }
 
+    /// Fix where a resume continues, now that the pause is accepted and the
+    /// head holds still. A poll may be a long time old (a game that polls
+    /// only near the end of a song never refreshed it), so ask the drive
+    /// once more; if it does not answer, fall back to the last position the
+    /// poll saw, or to the seek target when no poll ever saw the head.
+    fn note_resume_position(&mut self, drive: &mut impl Drive) {
+        let Some(song) = self.song else {
+            return;
+        };
+        let end = self.start_lba + song.file.span_sector_count();
+        if let Some(head) = drive.head_lba() {
+            if (self.target_lba..end).contains(&head) {
+                self.state = State::Streaming;
+                self.head_lba = head;
+                self.resume_lba = head;
+                return;
+            }
+        }
+        self.resume_lba = if self.state == State::Streaming {
+            self.head_lba
+        } else {
+            self.target_lba
+        };
+    }
+
+    /// Continue a suspended song. Anything may have happened to the drive
+    /// since the pause (a data read rewrites the mode, the head sits at the
+    /// data), so every setting is sent again, in the order a start sends
+    /// them, and the read is aimed at the saved position, not left to wherever
+    /// the controller stopped. A refused step leaves the song suspended.
     fn resume(&mut self, drive: &mut impl Drive) -> Result<(), Error> {
         if self.suspended {
-            // No Setloc: ReadS resumes at the controller's paused position.
-            // The controller can repeat its last sector; this is not a
-            // sample-exact audio cursor. Keep the state on a refused ReadS.
-            if !drive.start_streaming() {
-                return Err(Error::Read);
+            if let Some(song) = self.song {
+                let file = song.file;
+                if !drive.unmute() {
+                    return Err(Error::Unmute);
+                }
+                if !drive.set_mode(file.speed.mode()) {
+                    return Err(Error::SetMode);
+                }
+                if !drive.set_filter(file.number, song.channel) {
+                    return Err(Error::SetFilter);
+                }
+                self.begin_read_at(drive, self.start_lba, self.resume_lba)?;
             }
             self.suspended = false;
         }
@@ -323,11 +423,12 @@ impl Engine {
         }
         let end = self.start_lba + song.file.span_sector_count();
         if let Some(head) = drive.head_lba() {
-            if self.state == State::Seeking && (self.start_lba..end).contains(&head) {
+            if self.state == State::Seeking && (self.target_lba..end).contains(&head) {
                 self.state = State::Streaming;
             }
             if self.state == State::Streaming {
                 self.head_lba = head;
+                self.head_serial = self.head_serial.wrapping_add(1);
             }
             if self.state == State::Streaming && head >= end {
                 return self.reach_end(drive, song);
@@ -346,6 +447,18 @@ impl Engine {
         };
         let sectors = self.head_lba.saturating_sub(self.start_lba);
         sectors * 1000 / song.file.speed.sectors_per_second()
+    }
+
+    fn head_sample(&self) -> Option<HeadSample> {
+        if !self.is_streaming() {
+            return None;
+        }
+        Some(HeadSample {
+            epoch: self.epoch,
+            serial: self.head_serial,
+            sector: self.head_lba.saturating_sub(self.start_lba),
+            sectors_per_second: self.song?.file.speed.sectors_per_second(),
+        })
     }
 
     fn reach_end(&mut self, drive: &mut impl Drive, song: Song) -> Event {
@@ -401,13 +514,59 @@ impl Player {
         self.engine.suspend(&mut self.cd)
     }
 
-    /// Continue a suspended read at the drive's current position, without
-    /// Setloc or a seek to the beginning. Hardware may repeat the last sector;
-    /// this does not promise sample-exact audio continuation. A refused ReadS
-    /// returns an error and leaves the song suspended for an explicit retry.
-    /// Cancels a still-pending suspension; idle and running players are no-ops.
+    /// Continue a suspended song where it stopped. Safe after the drive was
+    /// used for something else in between (see
+    /// [`with_cd_suspended`](Self::with_cd_suspended)): it sends Demute,
+    /// Setmode (XA, filter and the file's speed), Setfilter (the file and
+    /// channel) and Setloc to the position the pause left, then ReadS, the
+    /// same steps [`play`](Self::play) takes except that it aims at the saved
+    /// position and not at the top. Costs a short seek.
+    ///
+    /// The position is the head at the pause, read back from the drive, so
+    /// the music continues within about one sector of where it stopped. A
+    /// channel gets one of its sectors every few sectors of the file (every
+    /// fourth for four 37.8 kHz stereo songs, 53 ms of sound each), so the
+    /// first sector after a resume can repeat or skip up to that much sound.
+    /// This is not a sample-exact cursor.
+    ///
+    /// A refused step returns its [`Error`] and leaves the song suspended for
+    /// an explicit retry. Cancels a still-pending suspension; idle and
+    /// running players are no-ops.
     pub fn resume(&mut self) -> Result<(), Error> {
         self.engine.resume(&mut self.cd)
+    }
+
+    /// Lend the drive to `f` while the song is suspended, for a data read
+    /// (a level load) that must not run on top of the music. Suspends the
+    /// song first; if the drive refuses the pause (it does during the seek
+    /// at the start of a read), `f` is not called and the error says to keep
+    /// calling [`poll`](Self::poll) and try again. `f` gets the token and
+    /// hands it back with its result. Afterwards call
+    /// [`resume`](Self::resume) to continue the song, or [`play`](Self::play)
+    /// to start another.
+    ///
+    /// ```ignore
+    /// let loaded = player.with_cd_suspended(|cd| {
+    ///     let mut reader = SectorReader::with_cd(cd);
+    ///     let ok = load_level(&mut reader);
+    ///     (reader.release(), ok)
+    /// })?;
+    /// player.resume()?;
+    /// ```
+    pub fn with_cd_suspended<R>(
+        &mut self,
+        f: impl FnOnce(Cd) -> (Cd, R),
+    ) -> Result<R, PauseRefused> {
+        if !self.engine.suspend(&mut self.cd) {
+            return Err(PauseRefused);
+        }
+        // SAFETY: a token is a logic guard, not a memory-safety one (see
+        // `crate::periph`). The stand-in sits in the player for the length of
+        // `f` and nothing can reach it: the player is mutably borrowed.
+        let cd = core::mem::replace(&mut self.cd, unsafe { Cd::steal() });
+        let (cd, result) = f(cd);
+        self.cd = cd;
+        Ok(result)
     }
 
     /// Whether the drive has acknowledged suspension. False while Pause is
@@ -440,9 +599,18 @@ impl Player {
     }
 
     /// Time since the start of the song file at the last poll, in
-    /// milliseconds (the head runs a sector or two ahead of the sound).
+    /// milliseconds (the head runs a sector or two ahead of the sound). The
+    /// value only moves when [`poll`](Self::poll) reads the head; for a time
+    /// that advances every frame see [`SongClock`](super::xa_clock::SongClock).
     pub fn elapsed_millis(&self) -> u32 {
         self.engine.elapsed_millis()
+    }
+
+    /// The newest head reading, while the song is streaming (`None` while
+    /// it seeks, is suspended or is not playing). The input of
+    /// [`SongClock`](super::xa_clock::SongClock).
+    pub fn head_sample(&self) -> Option<HeadSample> {
+        self.engine.head_sample()
     }
 
     /// Set the level of the drive's audio output (CD-DA too). `0x80` is
@@ -555,7 +723,23 @@ mod tests {
         assert_eq!(engine.song, Some(original));
         assert!(engine.suspend(&mut drive));
         engine.resume(&mut drive).unwrap();
-        assert_eq!(drive.log, ["pause", "read"]);
+        // Every setting again, aimed at the head the pause left (1040), not
+        // the top of the file and not wherever the controller happens to be.
+        assert_eq!(
+            drive.log,
+            [
+                "pause",
+                "unmute",
+                "mode 0x48",
+                "filter 3 2",
+                "target 1040",
+                "read"
+            ]
+        );
+        assert_eq!(engine.elapsed_millis(), elapsed);
+        assert_eq!(engine.state, State::Seeking);
+        drive.heads = vec![Some(1050), Some(1100)];
+        assert_eq!(engine.poll(&mut drive), Event::Playing);
         assert!(engine.is_streaming());
         assert_eq!(engine.poll(&mut drive), Event::Looped);
     }
@@ -812,6 +996,148 @@ mod tests {
         assert_eq!(engine.poll(&mut drive), Event::Playing);
         assert_eq!(engine.poll(&mut drive), Event::Finished);
         assert_eq!(drive.log.last().unwrap(), "pause");
+    }
+
+    /// The head the drive reports after the pause wins over a poll that is
+    /// long out of date; without an answer the last poll does; a song that
+    /// never got past the seek resumes at its seek target.
+    #[test]
+    fn resume_aims_at_the_best_position_known() {
+        // The pause-time reading beats a stale poll.
+        let mut drive = Fake::default();
+        let mut engine = Engine::new();
+        engine
+            .start(&mut drive, song(DriveSpeed::Single), false)
+            .unwrap();
+        drive.heads = vec![Some(1010)];
+        engine.poll(&mut drive);
+        drive.heads = vec![Some(1070)];
+        assert!(engine.suspend(&mut drive));
+        drive.log.clear();
+        engine.resume(&mut drive).unwrap();
+        assert_eq!(drive.log.last().unwrap(), "read");
+        assert_eq!(drive.log[drive.log.len() - 2], "target 1070");
+        assert_eq!(engine.elapsed_millis(), 70 * 1000 / 75);
+
+        // No answer after the pause: the last poll.
+        let mut drive = Fake::default();
+        let mut engine = Engine::new();
+        engine
+            .start(&mut drive, song(DriveSpeed::Single), false)
+            .unwrap();
+        drive.heads = vec![Some(1010)];
+        engine.poll(&mut drive);
+        assert!(engine.suspend(&mut drive));
+        drive.log.clear();
+        engine.resume(&mut drive).unwrap();
+        assert!(drive.log.contains(&"target 1010".to_string()));
+
+        // Never seen streaming and no answer: the seek target (the top). A
+        // reading outside the file (the old position) is not believed.
+        let mut drive = Fake::default();
+        let mut engine = Engine::new();
+        engine
+            .start(&mut drive, song(DriveSpeed::Single), false)
+            .unwrap();
+        drive.heads = vec![Some(9000)];
+        assert!(engine.suspend(&mut drive));
+        drive.log.clear();
+        engine.resume(&mut drive).unwrap();
+        assert!(drive.log.contains(&"target 1000".to_string()));
+        assert_eq!(engine.state, State::Seeking);
+    }
+
+    /// The data read that motivated the rework: a reader leaves the mode with
+    /// no XA bits, the filter maybe elsewhere and the head at the data. The
+    /// resume must send all of it again, in the order a start does, aimed at
+    /// the song, and the first stale head readings must not look like music.
+    #[test]
+    fn resume_after_a_data_read_restores_mode_filter_and_position() {
+        let mut drive = Fake::default();
+        let mut engine = Engine::new();
+        engine
+            .start(&mut drive, song(DriveSpeed::Double), true)
+            .unwrap();
+        drive.heads = vec![Some(1030)];
+        engine.poll(&mut drive);
+        assert!(engine.suspend(&mut drive));
+        // ... a data read happens here; the fake does not model it ...
+        drive.log.clear();
+        engine.resume(&mut drive).unwrap();
+        assert_eq!(
+            drive.log,
+            ["unmute", "mode 0xc8", "filter 3 2", "target 1030", "read"]
+        );
+        // The head is still at the data (LBA 300), then lands on the song.
+        drive.heads = vec![Some(300), Some(1031)];
+        assert_eq!(engine.poll(&mut drive), Event::Playing);
+        assert!(!engine.is_streaming());
+        assert_eq!(engine.poll(&mut drive), Event::Playing);
+        assert!(engine.is_streaming());
+        assert_eq!(engine.elapsed_millis(), 31 * 1000 / 150);
+    }
+
+    #[test]
+    fn each_refused_resume_step_is_reported_and_keeps_the_suspension() {
+        for (at, error) in [
+            ("unmute", Error::Unmute),
+            ("mode", Error::SetMode),
+            ("filter", Error::SetFilter),
+            ("target", Error::Seek),
+            ("read", Error::Read),
+        ] {
+            let mut drive = Fake::default();
+            let mut engine = Engine::new();
+            engine
+                .start(&mut drive, song(DriveSpeed::Single), false)
+                .unwrap();
+            assert!(engine.suspend(&mut drive));
+            drive.fail_at = Some(at);
+            assert_eq!(engine.resume(&mut drive), Err(error), "{at}");
+            assert!(engine.suspended, "{at}");
+            drive.fail_at = None;
+            engine.resume(&mut drive).unwrap();
+            assert!(!engine.suspended);
+        }
+    }
+
+    #[test]
+    fn the_epoch_changes_with_every_read_and_the_serial_with_every_reading() {
+        let mut drive = Fake::default();
+        let mut engine = Engine::new();
+        let looped = song(DriveSpeed::Single);
+        engine.start(&mut drive, looped, true).unwrap();
+        assert!(engine.head_sample().is_none(), "not streaming yet");
+        let first = engine.epoch;
+        drive.heads = vec![Some(1010), Some(1020)];
+        engine.poll(&mut drive);
+        let a = engine.head_sample().unwrap();
+        engine.poll(&mut drive);
+        let b = engine.head_sample().unwrap();
+        assert_eq!((a.epoch, b.epoch), (first, first));
+        assert_ne!(a.serial, b.serial);
+        assert_eq!((a.sector, b.sector), (10, 20));
+        assert_eq!(b.sectors_per_second, 75);
+        // A loop, a resume and a restart each start a new epoch, and a
+        // suspended song has no sample.
+        drive.heads = vec![Some(1100)];
+        assert_eq!(engine.poll(&mut drive), Event::Looped);
+        assert_ne!(engine.epoch, first);
+        let looped_epoch = engine.epoch;
+        assert!(engine.suspend(&mut drive));
+        assert!(engine.head_sample().is_none());
+        engine.resume(&mut drive).unwrap();
+        assert_ne!(engine.epoch, looped_epoch);
+    }
+
+    #[test]
+    fn the_drive_lent_for_a_read_comes_back_and_the_song_resumes() {
+        // SAFETY: a test-local token on the host; the closure sends nothing.
+        let mut player = Player::new(unsafe { Cd::steal() });
+        // Idle: lending still works, nothing to suspend.
+        let seen = player.with_cd_suspended(|cd| (cd, 7)).unwrap();
+        assert_eq!(seen, 7);
+        assert!(!player.is_suspended());
     }
 
     #[test]
