@@ -387,7 +387,16 @@ fn spawn_point(world: &GridWorld, spawn: SpawnRequest) -> Option<[i32; 3]> {
     ])
 }
 
-fn place_actors(project: &mut ProjectDocument, at: [i32; 3], yaw: f32, step: i32) {
+/// How far above the spawn an actor may still be dropped onto a floor.
+const ACTOR_FLOOR_REACH: i32 = 512;
+
+fn place_actors(
+    project: &mut ProjectDocument,
+    world: &GridWorld,
+    at: [i32; 3],
+    yaw: f32,
+    step: i32,
+) {
     let scene = project.active_scene_mut();
     let mut actors: Vec<(bool, NodeId)> = scene
         .node(NodeId::ROOT)
@@ -415,11 +424,19 @@ fn place_actors(project: &mut ProjectDocument, at: [i32; 3], yaw: f32, step: i32
         let side = if index == 2 { -1.5 } else { 1.5 }
             * step as f32
             * (index.min(1) as f32 + (index / 2) as f32);
-        let position = [
-            at[0] + (forward_x * ahead + forward_z * side) as i32,
-            at[1],
-            at[2] + (forward_z * ahead - forward_x * side) as i32,
-        ];
+        // Stand each actor on a floor: if the spot has none (past the edge of
+        // the level), pull it back towards the spawn until it does.
+        let mut pull = 1.0f32;
+        let (x, y, z) = loop {
+            let x = at[0] + ((forward_x * ahead + forward_z * side) * pull) as i32;
+            let z = at[2] + ((forward_z * ahead - forward_x * side) * pull) as i32;
+            match world.floor_height_at(x, z, at[1] + ACTOR_FLOOR_REACH) {
+                Some(floor) => break (x, floor + SPAWN_LIFT, z),
+                None if pull > 0.1 => pull *= 0.5,
+                None => break (at[0], at[1], at[2]),
+            }
+        };
+        let position = [x, y, z];
         if let Some(node) = scene.node_mut(*id) {
             node.transform.translation = position.map(|v| v as f32);
             node.transform.rotation_degrees = [0.0, yaw, 0.0];
@@ -546,7 +563,13 @@ pub fn import_project(
     let faces = super::faces::face_count(&converted.world);
     let step = scale.sector_editor_units();
     add_lights(&mut project, &converted);
-    place_actors(&mut project, spawn_at, options.yaw_degrees, step);
+    place_actors(
+        &mut project,
+        &converted.world,
+        spawn_at,
+        options.yaw_degrees,
+        step,
+    );
     project.active_scene_mut().world = SceneWorld::Grid(converted.world);
     // Drop the base project's authored views: the editor frames the whole
     // world, in 3D and in the Top view, the first time the project opens.

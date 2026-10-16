@@ -54,6 +54,54 @@ impl GridWorld {
         self.rooms.iter().map(GridRoom::sector_count).sum()
     }
 
+    /// Height of the highest floor at editor position `(x, z)` that is not
+    /// above `y_limit` (editor units), interpolated over the surface's
+    /// triangles. `None` where no room has a floor there. The limit picks
+    /// the right floor where rooms stack.
+    pub fn floor_height_at(&self, x: i32, z: i32, y_limit: i32) -> Option<i32> {
+        let (gx, gz) = (self.scale.to_grid(x), self.scale.to_grid(z));
+        let mut best: Option<i32> = None;
+        for room in &self.rooms {
+            let cell = [gx.div_euclid(SECTOR_UNITS), gz.div_euclid(SECTOR_UNITS)];
+            let Some([lx, lz]) = room.local(cell) else {
+                continue;
+            };
+            let Some(floor) = room.sector(lx, lz).and_then(|s| s.floor.as_ref()) else {
+                continue;
+            };
+            let p = [
+                i64::from(gx.rem_euclid(SECTOR_UNITS)),
+                i64::from(gz.rem_euclid(SECTOR_UNITS)),
+            ];
+            let s = i64::from(SECTOR_UNITS);
+            let corners = [[0, 0], [s, 0], [s, s], [0, s]];
+            // The triangle containing `p`: the split diagonal decides.
+            let on_first = match floor.split {
+                super::surface::GridSplit::NwSe => p[0] >= p[1],
+                super::surface::GridSplit::NeSw => p[0] + p[1] <= s,
+            };
+            let index = usize::from(!on_first);
+            let heights = floor.heights_for(index);
+            let [a, b, c] = floor.split.triangle(index);
+            let (pa, pb, pc) = (corners[a], corners[b], corners[c]);
+            let det = (pb[0] - pa[0]) * (pc[1] - pa[1]) - (pc[0] - pa[0]) * (pb[1] - pa[1]);
+            if det == 0 {
+                continue;
+            }
+            let wb = (p[0] - pa[0]) * (pc[1] - pa[1]) - (pc[0] - pa[0]) * (p[1] - pa[1]);
+            let wc = (pb[0] - pa[0]) * (p[1] - pa[1]) - (p[0] - pa[0]) * (pb[1] - pa[1]);
+            let h = i64::from(heights[a])
+                + ((i64::from(heights[b]) - i64::from(heights[a])) * wb
+                    + (i64::from(heights[c]) - i64::from(heights[a])) * wc)
+                    / det;
+            let y = self.scale.to_editor(room.y_offset + h as i32);
+            if y <= y_limit && best.is_none_or(|b| y > b) {
+                best = Some(y);
+            }
+        }
+        best
+    }
+
     /// Bounding box of every surface in editor units, or `None` for a world
     /// with no geometry. Used to frame the camera and size the depth range.
     pub fn editor_bounds(&self) -> Option<EditorBounds> {
@@ -157,6 +205,29 @@ mod tests {
         assert_eq!(b.min, [2688, 1008, -1344]);
         assert_eq!(b.max, [4032, 3360, 0]);
         assert_eq!(GridWorld::new().editor_bounds(), None);
+    }
+
+    #[test]
+    fn floor_height_interpolates_both_triangles_and_respects_the_limit() {
+        use crate::grid::surface::GridSplit;
+        let mut room = GridRoom::new("a", 1, 1);
+        let mut slope = GridSurface::flat(0, None);
+        slope.heights = [0, 0, 1024, 1024]; // rises towards +z
+        slope.split = GridSplit::NwSe;
+        room.sector_or_insert(0, 0).unwrap().floor = Some(slope);
+        let mut upper = GridRoom::new("b", 1, 1);
+        upper.y_offset = 2048;
+        upper.sector_or_insert(0, 0).unwrap().floor = Some(GridSurface::flat(0, None));
+        let world = GridWorld {
+            scale: GridScale { num: 1, den: 1 },
+            rooms: vec![room, upper],
+        };
+        // (512, 256) lies in the first triangle, (100, 900) in the second.
+        assert_eq!(world.floor_height_at(512, 256, 10_000), Some(2048));
+        assert_eq!(world.floor_height_at(512, 256, 1000), Some(256));
+        assert_eq!(world.floor_height_at(100, 900, 1000), Some(900));
+        assert_eq!(world.floor_height_at(5000, 0, 1000), None);
+        assert_eq!(world.floor_height_at(512, 256, -5), None);
     }
 
     #[test]
