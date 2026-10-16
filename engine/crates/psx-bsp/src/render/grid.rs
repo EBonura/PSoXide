@@ -46,6 +46,12 @@ const HEADER_WORDS: usize = 16;
 
 /// Quad flag: three corners, the fourth index repeats the third.
 pub const GRID_QUAD_TRIANGLE: u8 = 1;
+/// Quad flag: the plane is axis aligned. `GridQuad::d` is then the signed plane
+/// coordinate, bits 2 and 3 of the flags name the axis and bit 4 marks a
+/// negative-facing plane, so the side test needs no multiplies.
+pub const GRID_QUAD_AXIS: u8 = 2;
+pub const GRID_QUAD_AXIS_SHIFT: u32 = 2;
+pub const GRID_QUAD_AXIS_NEGATIVE: u8 = 0x10;
 
 const _: () = assert!(cfg!(target_endian = "little"));
 
@@ -129,6 +135,31 @@ pub struct GridPack<'a> {
     pub macro_w: usize,
     pub macro_d: usize,
     pub macro_shift: u32,
+    /// Lowest and highest corner height in the pack, for the row-span cull.
+    pub min_y: i32,
+    pub max_y: i32,
+    /// Whether any macro block holds an open sector.
+    pub has_open_blocks: bool,
+}
+
+/// Floor of `a / b` for a non-zero `b` of either sign.
+fn div_floor_i32(a: i32, b: i32) -> i32 {
+    let q = a / b;
+    if a % b != 0 && ((a < 0) != (b < 0)) {
+        q - 1
+    } else {
+        q
+    }
+}
+
+/// Ceiling of `a / b` for a non-zero `b` of either sign.
+fn div_ceil_i32(a: i32, b: i32) -> i32 {
+    let q = a / b;
+    if a % b != 0 && ((a < 0) == (b < 0)) {
+        q + 1
+    } else {
+        q
+    }
 }
 
 fn word(bytes: &[u8], index: usize) -> u32 {
@@ -199,10 +230,25 @@ impl<'a> GridPack<'a> {
         }
         for quad in quads {
             if quad.v.iter().any(|&v| usize::from(v) >= vertex_count)
+                || (quad.flags & GRID_QUAD_AXIS != 0 && (quad.flags >> GRID_QUAD_AXIS_SHIFT) & 3 > 2)
                 || usize::from(quad.material) >= material_count
             {
                 return Err(GridPackError::Inconsistent);
             }
+        }
+        let mut min_y = i32::MAX;
+        let mut max_y = i32::MIN;
+        let mut has_open_blocks = false;
+        for block in macros {
+            if block.min_y <= block.max_y {
+                min_y = min_y.min(i32::from(block.min_y));
+                max_y = max_y.max(i32::from(block.max_y));
+            }
+            has_open_blocks |= block.flags & 1 != 0;
+        }
+        if min_y > max_y {
+            min_y = 0;
+            max_y = 0;
         }
         Ok(Self {
             materials,
@@ -218,6 +264,9 @@ impl<'a> GridPack<'a> {
             macro_w,
             macro_d,
             macro_shift,
+            min_y,
+            max_y,
+            has_open_blocks,
         })
     }
 }
@@ -247,6 +296,15 @@ pub struct GridFrame {
     pub quads_visible: u16,
     pub vertices_projected: u16,
     pub robust_quads: u16,
+}
+
+/// The phases of one grid frame, for timing marks.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum GridPhase {
+    Cells,
+    Quads,
+    Project,
+    Emit,
 }
 
 /// Projected corner: packed screen word, GTE depth and an outcode.
@@ -305,6 +363,7 @@ impl GridRenderer {
     ///
     /// The GTE must already hold the view (`view`), screen offset, projection
     /// plane and Z weights. `camera` is the eye in world units.
+    #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &mut self,
         pack: &GridPack<'_>,
@@ -316,6 +375,24 @@ impl GridRenderer {
         materials: &[GridMaterial],
         out: &mut [u32],
     ) -> GridFrame {
+        self.draw_with_marks(pack, frustum, view, camera, screen, focal_length, materials, out, &mut |_, _| {})
+    }
+
+    /// Like [`Self::draw`], calling `mark(phase, true)` before and
+    /// `mark(phase, false)` after each phase so a caller can time them.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_with_marks(
+        &mut self,
+        pack: &GridPack<'_>,
+        frustum: &FrustumPlanes,
+        view: &ViewTransform,
+        camera: [i32; 3],
+        screen: [i32; 2],
+        focal_length: i32,
+        materials: &[GridMaterial],
+        out: &mut [u32],
+        mark: &mut dyn FnMut(GridPhase, bool),
+    ) -> GridFrame {
         let mut frame = GridFrame::default();
         self.frame = self.frame.wrapping_add(1);
         if self.frame == 0 {
@@ -325,86 +402,124 @@ impl GridRenderer {
         #[cfg(target_arch = "mips")]
         super::load_gte_clip_planes(&frustum.planes);
 
+        mark(GridPhase::Cells, true);
         self.select_cells(pack, frustum, &mut frame);
+        mark(GridPhase::Cells, false);
+        mark(GridPhase::Quads, true);
         self.select_quads(pack, camera, &mut frame);
+        mark(GridPhase::Quads, false);
         let near_sz = (focal_length / 2 + 2).clamp(1, i32::from(u16::MAX)) as u16;
+        mark(GridPhase::Project, true);
         self.project_corners(pack, screen, near_sz, &mut frame);
+        mark(GridPhase::Project, false);
+        mark(GridPhase::Emit, true);
         self.emit(pack, frustum, view, screen, focal_length, materials, out, &mut frame);
+        mark(GridPhase::Emit, false);
         frame
     }
 
-    /// Hierarchical frustum cull: macro cells, then the sectors of those that
-    /// straddle a plane. Also decides whether any open sector's lid shows.
+    /// Frustum cull by row spans. For each grid row, the near, left and right
+    /// planes bound an interval of x; the columns inside it are queued. The
+    /// vertical planes are not tested here: a column is floor to ceiling, so
+    /// few are ever wholly above or below the view, and the per-corner
+    /// outcodes reject what is off screen. Also decides whether any open
+    /// sector's lid shows.
+    #[inline(never)]
     fn select_cells(&mut self, pack: &GridPack<'_>, frustum: &FrustumPlanes, frame: &mut GridFrame) {
-        self.cells.clear();
-        let shift = pack.macro_shift;
-        let span = 1usize << shift;
         let size = pack.cell_size;
         let clamp = |v: i32| v.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
-        for mz in 0..pack.macro_d {
-            for mx in 0..pack.macro_w {
-                // SAFETY: parse proved macros.len() == macro_w * macro_d.
-                let block = unsafe { pack.macros.get_unchecked(mz * pack.macro_w + mx) };
-                let x0 = pack.origin[0] + ((mx << shift) as i32) * size;
-                let z0 = pack.origin[1] + ((mz << shift) as i32) * size;
-                let x1 = x0 + (span as i32) * size;
-                let z1 = z0 + (span as i32) * size;
-                if !frame.sky_visible && block.flags & 1 != 0 {
+        // Sky: only the macro blocks that hold an open sector need a test.
+        if pack.has_open_blocks {
+            let shift = pack.macro_shift;
+            let span = (1i32 << shift) * size;
+            'sky: for mz in 0..pack.macro_d {
+                for mx in 0..pack.macro_w {
+                    // SAFETY: parse proved macros.len() == macro_w * macro_d.
+                    let block = unsafe { pack.macros.get_unchecked(mz * pack.macro_w + mx) };
+                    if block.flags & 1 == 0 {
+                        continue;
+                    }
+                    let x0 = pack.origin[0] + ((mx << shift) as i32) * size;
+                    let z0 = pack.origin[1] + ((mz << shift) as i32) * size;
                     let lid_min = Vec3I16 { x: clamp(x0), y: clamp(pack.lid_y), z: clamp(z0) };
-                    let lid_max = Vec3I16 { x: clamp(x1), y: clamp(pack.lid_y + 1), z: clamp(z1) };
+                    let lid_max = Vec3I16 { x: clamp(x0 + span), y: clamp(pack.lid_y + 1), z: clamp(z0 + span) };
                     if frustum.cull_aabb(lid_min, lid_max, PXBSP_CLIP_ALL_PLANES).is_some() {
                         frame.sky_visible = true;
-                    }
-                }
-                if block.min_y > block.max_y {
-                    continue;
-                }
-                let min = Vec3I16 { x: clamp(x0), y: block.min_y, z: clamp(z0) };
-                let max = Vec3I16 { x: clamp(x1), y: block.max_y, z: clamp(z1) };
-                let Some(residual) = frustum.cull_aabb(min, max, PXBSP_CLIP_ALL_PLANES) else {
-                    continue;
-                };
-                for dz in 0..span {
-                    let cz = (mz << shift) + dz;
-                    if cz >= pack.grid_d {
-                        break;
-                    }
-                    for dx in 0..span {
-                        let cx = (mx << shift) + dx;
-                        if cx >= pack.grid_w {
-                            break;
-                        }
-                        let index = cz * pack.grid_w + cx;
-                        // SAFETY: cx < grid_w and cz < grid_d.
-                        let cell = unsafe { pack.cells.get_unchecked(index) };
-                        if cell.count == 0 {
-                            continue;
-                        }
-                        if residual != 0 {
-                            let cx0 = pack.origin[0] + (cx as i32) * size;
-                            let cz0 = pack.origin[1] + (cz as i32) * size;
-                            let lo = Vec3I16 { x: clamp(cx0), y: cell.min_y, z: clamp(cz0) };
-                            let hi = Vec3I16 { x: clamp(cx0 + size), y: cell.max_y, z: clamp(cz0 + size) };
-                            if frustum.cull_aabb(lo, hi, residual).is_none() {
-                                continue;
-                            }
-                        }
-                        self.cells.push(index as u16);
+                        break 'sky;
                     }
                 }
             }
         }
-        frame.cells_visible = self.cells.len() as u16;
+        let out = self.cells.as_mut_ptr();
+        let mut count = 0usize;
+        let planes = &frustum.planes;
+        let (y_lo, y_hi) = (pack.min_y, pack.max_y);
+        let grid_w = pack.grid_w as i32;
+        for cz in 0..pack.grid_d {
+            let z0 = pack.origin[1] + (cz as i32) * size;
+            let z1 = z0 + size;
+            let mut lo = -(1 << 20);
+            let mut hi = 1 << 20;
+            let mut empty = false;
+            for (index, (normal, constant)) in planes.iter().take(3).enumerate() {
+                let error = if index == 0 { 0 } else { frustum.side_error };
+                // The point of the row slab that maximises the plane distance
+                // apart from x.
+                let y = if normal[1] > 0 { y_hi } else { y_lo };
+                let z = if normal[2] > 0 { z1 } else { z0 };
+                let rest = normal[1]
+                    .wrapping_mul(y)
+                    .wrapping_add(normal[2].wrapping_mul(z))
+                    .wrapping_add(*constant)
+                    .wrapping_add(error);
+                // Visible needs `normal.x * x + rest >= 0`.
+                let need = rest.wrapping_neg();
+                let nx = normal[0];
+                if nx > 0 {
+                    lo = lo.max(div_ceil_i32(need, nx));
+                } else if nx < 0 {
+                    hi = hi.min(div_floor_i32(need, nx));
+                } else if need > 0 {
+                    empty = true;
+                    break;
+                }
+            }
+            if empty || lo > hi {
+                continue;
+            }
+            let first = div_floor_i32(lo - pack.origin[0], size).max(0);
+            let last = div_floor_i32(hi - pack.origin[0], size).min(grid_w - 1);
+            let row = cz * pack.grid_w;
+            let mut cx = first;
+            while cx <= last {
+                let index = row + cx as usize;
+                // SAFETY: 0 <= cx < grid_w and cz < grid_d.
+                if unsafe { pack.cells.get_unchecked(index) }.count != 0 {
+                    // SAFETY: at most one entry per cell, and `cells` holds
+                    // capacity for every cell in the pack.
+                    unsafe { *out.add(count) = index as u16 };
+                    count += 1;
+                }
+                cx += 1;
+            }
+        }
+        // SAFETY: `count` never exceeds the capacity.
+        unsafe { self.cells.set_len(count) };
+        frame.cells_visible = count as u16;
     }
 
     /// Drop quads facing away from the camera and queue the corners of the
     /// rest.
+    #[inline(never)]
     fn select_quads(&mut self, pack: &GridPack<'_>, camera: [i32; 3], frame: &mut GridFrame) {
-        self.quads.clear();
-        self.work.clear();
         let [cx, cy, cz] = camera;
+        let cam = [cx, cy, cz];
         let frame_stamp = self.frame;
         let stamp = self.stamp.as_mut_ptr();
+        let quads_out = self.quads.as_mut_ptr();
+        let work_out = self.work.as_mut_ptr();
+        let mut quad_count = 0usize;
+        let mut work_count = 0usize;
         for &cell_index in &self.cells {
             // SAFETY: cell indices were produced from valid grid coordinates.
             let cell = unsafe { pack.cells.get_unchecked(usize::from(cell_index)) };
@@ -412,30 +527,58 @@ impl GridRenderer {
             for q in first..first + usize::from(cell.count) {
                 // SAFETY: parse proved first + count <= quads.len().
                 let quad = unsafe { pack.quads.get_unchecked(q) };
-                let side = i32::from(quad.normal[0]) * cx
-                    + i32::from(quad.normal[1]) * cy
-                    + i32::from(quad.normal[2]) * cz;
-                if side <= quad.d {
+                let flags = quad.flags;
+                let front = if flags & GRID_QUAD_AXIS != 0 {
+                    // Axis-aligned plane: the camera coordinate against the
+                    // plane coordinate, no multiplies.
+                    let axis = usize::from((flags >> GRID_QUAD_AXIS_SHIFT) & 3);
+                    // SAFETY: the cooker emits axis 0..=2 only (parse checks it).
+                    let c = unsafe { *cam.get_unchecked(axis) };
+                    (if flags & GRID_QUAD_AXIS_NEGATIVE != 0 { -c } else { c }) > quad.d
+                } else {
+                    i32::from(quad.normal[0]) * cx
+                        + i32::from(quad.normal[1]) * cy
+                        + i32::from(quad.normal[2]) * cz
+                        > quad.d
+                };
+                if !front {
                     continue;
                 }
-                self.quads.push(q as u16);
-                for &v in &quad.v {
-                    // SAFETY: parse proved every index is below the vertex
-                    // count, which sized the stamp table.
-                    unsafe {
+                // SAFETY: at most one entry per quad, and `quads` holds
+                // capacity for every quad in the pack.
+                unsafe {
+                    *quads_out.add(quad_count) = q as u16;
+                }
+                quad_count += 1;
+                // SAFETY: parse proved every index is below the vertex count,
+                // which sized the stamp table and the work queue (each vertex
+                // is queued at most once per frame).
+                unsafe {
+                    let mut corner = |v: u16| {
                         let slot = stamp.add(usize::from(v));
                         if *slot != frame_stamp {
                             *slot = frame_stamp;
-                            self.work.push(v);
+                            *work_out.add(work_count) = v;
+                            work_count += 1;
                         }
-                    }
+                    };
+                    corner(quad.v[0]);
+                    corner(quad.v[1]);
+                    corner(quad.v[2]);
+                    corner(quad.v[3]);
                 }
             }
         }
-        frame.quads_visible = self.quads.len() as u16;
+        // SAFETY: the counts above never exceed the capacities.
+        unsafe {
+            self.quads.set_len(quad_count);
+            self.work.set_len(work_count);
+        }
+        frame.quads_visible = quad_count as u16;
     }
 
     /// Project every queued corner, three per GTE command.
+    #[inline(never)]
     fn project_corners(
         &mut self,
         pack: &GridPack<'_>,
@@ -497,8 +640,8 @@ impl GridRenderer {
             i += 1;
         }
     }
-
     #[allow(clippy::too_many_arguments)]
+    #[inline(never)]
     fn emit(
         &mut self,
         pack: &GridPack<'_>,
@@ -521,18 +664,17 @@ impl GridRenderer {
         for &q in &self.quads {
             // SAFETY: queued from valid quad indices.
             let quad = unsafe { pack.quads.get_unchecked(usize::from(q)) };
-            // SAFETY: parse proved every corner index is in range.
+            // SAFETY: parse proved every corner index is in range. A triangle
+            // repeats its third corner, so the fourth lookup is harmless.
             let (s0, s1, s2, s3) = unsafe {
                 (
-                    *cache.add(usize::from(quad.v[0])),
-                    *cache.add(usize::from(quad.v[1])),
-                    *cache.add(usize::from(quad.v[2])),
-                    *cache.add(usize::from(quad.v[3])),
+                    &*cache.add(usize::from(quad.v[0])),
+                    &*cache.add(usize::from(quad.v[1])),
+                    &*cache.add(usize::from(quad.v[2])),
+                    &*cache.add(usize::from(quad.v[3])),
                 )
             };
-            let triangle = quad.flags & GRID_QUAD_TRIANGLE != 0;
-            let all = s0.code & s1.code & s2.code & if triangle { OFF_ANY } else { s3.code };
-            if all & OFF_ANY != 0 {
+            if s0.code & s1.code & s2.code & s3.code & OFF_ANY != 0 {
                 continue;
             }
             let Some(material) = materials.get(usize::from(quad.material)) else {
@@ -541,19 +683,22 @@ impl GridRenderer {
             if !material.resident {
                 continue;
             }
-            let any = s0.code | s1.code | s2.code | if triangle { 0 } else { s3.code };
-            let words = if triangle { QUAD_PACKET_WORDS - 3 } else { QUAD_PACKET_WORDS };
-            let sum = u32::from(s0.sz) + u32::from(s1.sz) + u32::from(s2.sz);
-            let otz = if triangle {
-                ((sum * 0x155) >> 12) as usize
-            } else {
-                ((sum + u32::from(s3.sz)) >> 4) as usize
-            };
-            let fast = any & NEAR == 0 && gpu_safe(&[s0, s1, s2, s3], triangle);
+            let any = s0.code | s1.code | s2.code | s3.code;
+            let triangle = quad.flags & GRID_QUAD_TRIANGLE != 0;
+            // Every corner on screen and in front of the near plane: nothing
+            // else to prove. Otherwise the corners must still fit the GPU.
+            let fast = any == 0 || (any & NEAR == 0 && gpu_safe(&[s0, s1, s2, s3], triangle));
             if fast {
+                let sum = u32::from(s0.sz) + u32::from(s1.sz) + u32::from(s2.sz);
+                let otz = if triangle {
+                    (sum * 0x155) >> 12
+                } else {
+                    (sum + u32::from(s3.sz)) >> 4
+                };
                 if otz == 0 || otz >= 2048 {
                     continue;
                 }
+                let words = if triangle { QUAD_PACKET_WORDS - 3 } else { QUAD_PACKET_WORDS };
                 // SAFETY: both pointers lie in the packet storage.
                 if unsafe { end.offset_from(next) } < words as isize {
                     frame.overflowed = true;
@@ -561,14 +706,11 @@ impl GridRenderer {
                 }
                 // SAFETY: room for `words` was just checked.
                 unsafe {
-                    next = write_packet(
-                        next,
-                        quad,
-                        material,
-                        [s0, s1, s2, s3],
-                        otz as u32,
-                        window_reset,
-                    );
+                    next = if triangle {
+                        write_triangle(next, quad, material, [s0, s1, s2], otz, window_reset)
+                    } else {
+                        write_quad(next, quad, material, [s0, s1, s2, s3], otz, window_reset)
+                    };
                 }
                 packets += 1;
                 continue;
@@ -598,7 +740,7 @@ impl GridRenderer {
 /// corner inside its 11-bit coordinates and the polygon under the 1024 by 512
 /// span limit.
 #[inline(always)]
-fn gpu_safe(corners: &[GridScreen; 4], triangle: bool) -> bool {
+fn gpu_safe(corners: &[&GridScreen; 4], triangle: bool) -> bool {
     let count = if triangle { 3 } else { 4 };
     let mut left = i32::MAX;
     let mut right = i32::MIN;
@@ -615,52 +757,79 @@ fn gpu_safe(corners: &[GridScreen; 4], triangle: bool) -> bool {
     left > -1000 && right < 1000 && top > -1000 && bottom < 1000 && right - left <= 1023 && bottom - top <= 511
 }
 
-/// Write one fast-path packet; returns the next free word.
+/// Write one textured Gouraud quad packet; returns the next free word.
+///
+/// The GPU splits a quad `(a, b, c, d)` along `b-c`, so the corners go out as
+/// `(1, 0, 2, 3)` to split along the 0-2 diagonal like the BSP writer does.
 ///
 /// # Safety
-/// `next` must have room for the packet.
+/// `next` must have room for [`QUAD_PACKET_WORDS`].
 #[inline(always)]
-unsafe fn write_packet(
+unsafe fn write_quad(
     next: *mut u32,
     quad: &GridQuad,
     material: &GridMaterial,
-    s: [GridScreen; 4],
+    s: [&GridScreen; 4],
     otz: u32,
     window_reset: u32,
 ) -> *mut u32 {
-    let triangle = quad.flags & GRID_QUAD_TRIANGLE != 0;
     let origin = u32::from(material.uv_origin);
     let clut = u32::from(material.clut) << 16;
     let tpage = u32::from(material.tpage) << 16;
-    // GPU order: the BSP writer sends a fan quad as (1, 0, 2, 3), which splits
-    // along the 0-2 diagonal.
-    let order: [usize; 4] = if triangle { [0, 1, 2, 2] } else { [1, 0, 2, 3] };
-    let count = if triangle { 3 } else { 4 };
-    let command = TEXTURED_GOURAUD_COMMAND | if triangle { 0 } else { 0x0800_0000 };
-    let mut w = next;
+    let command = TEXTURED_GOURAUD_COMMAND | 0x0800_0000;
+    let uv = |k: usize| (u32::from(quad.uv[k]).wrapping_add(origin)) & 0xffff;
     // SAFETY: the caller reserved room for the whole packet.
     unsafe {
-        w.write(((count as u32 * 3 + 1) << 24) | otz);
-        w = w.add(1);
-        w.write(window_reset);
-        w = w.add(1);
-        for (slot, &corner) in order.iter().take(count).enumerate() {
-            let color = quad.color[corner];
-            w.write(if slot == 0 { command | color } else { color });
-            w = w.add(1);
-            w.write(s[corner].sxy);
-            w = w.add(1);
-            let uv = u32::from(quad.uv[corner]).wrapping_add(origin) & 0xffff;
-            let attribute = match slot {
-                0 => clut,
-                1 => tpage,
-                _ => 0,
-            };
-            w.write(uv | attribute);
-            w = w.add(1);
-        }
+        next.write((13 << 24) | otz);
+        next.add(1).write(window_reset);
+        next.add(2).write(command | quad.color[1]);
+        next.add(3).write(s[1].sxy);
+        next.add(4).write(uv(1) | clut);
+        next.add(5).write(quad.color[0]);
+        next.add(6).write(s[0].sxy);
+        next.add(7).write(uv(0) | tpage);
+        next.add(8).write(quad.color[2]);
+        next.add(9).write(s[2].sxy);
+        next.add(10).write(uv(2));
+        next.add(11).write(quad.color[3]);
+        next.add(12).write(s[3].sxy);
+        next.add(13).write(uv(3));
+        next.add(14)
     }
-    w
+}
+
+/// Write one textured Gouraud triangle packet; returns the next free word.
+///
+/// # Safety
+/// `next` must have room for `QUAD_PACKET_WORDS - 3`.
+#[inline(always)]
+unsafe fn write_triangle(
+    next: *mut u32,
+    quad: &GridQuad,
+    material: &GridMaterial,
+    s: [&GridScreen; 3],
+    otz: u32,
+    window_reset: u32,
+) -> *mut u32 {
+    let origin = u32::from(material.uv_origin);
+    let clut = u32::from(material.clut) << 16;
+    let tpage = u32::from(material.tpage) << 16;
+    let uv = |k: usize| (u32::from(quad.uv[k]).wrapping_add(origin)) & 0xffff;
+    // SAFETY: the caller reserved room for the whole packet.
+    unsafe {
+        next.write((10 << 24) | otz);
+        next.add(1).write(window_reset);
+        next.add(2).write(TEXTURED_GOURAUD_COMMAND | quad.color[0]);
+        next.add(3).write(s[0].sxy);
+        next.add(4).write(uv(0) | clut);
+        next.add(5).write(quad.color[1]);
+        next.add(6).write(s[1].sxy);
+        next.add(7).write(uv(1) | tpage);
+        next.add(8).write(quad.color[2]);
+        next.add(9).write(s[2].sxy);
+        next.add(10).write(uv(2));
+        next.add(11)
+    }
 }
 
 /// The shared path: clip against the near plane in world space, project the

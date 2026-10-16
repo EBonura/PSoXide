@@ -6,7 +6,8 @@ use psx_level::MAX_ROOM_MATERIALS;
 
 use psx_bsp::pxbsp::{material_flags, PxbspMaterial};
 use psx_bsp::RecordSlice;
-use psx_bsp::render::grid::{GridFrame, GridMaterial, GridPack, GridRenderer};
+use psx_bsp::render::grid::{GridFrame, GridMaterial, GridPack, GridPhase, GridRenderer};
+use crate::telemetry;
 use psx_bsp::render::{FrustumPlanes, PxbspTextureBinding, ViewTransform};
 
 #[repr(C)]
@@ -107,7 +108,7 @@ impl GridWorld {
         if !self.bound {
             self.bind(pxbsp_materials, bindings);
         }
-        self.renderer.draw(
+        self.renderer.draw_with_marks(
             &self.pack,
             frustum,
             view,
@@ -116,6 +117,19 @@ impl GridWorld {
             focal_length,
             &self.materials[..self.pack.materials.len()],
             packets,
+            &mut |phase, begin| {
+                let id = match phase {
+                    GridPhase::Cells => telemetry::stage::ROOM_CELL_SELECT,
+                    GridPhase::Quads => telemetry::stage::ROOM_VISIBLE_LIST,
+                    GridPhase::Project => telemetry::stage::ROOM_PROJECT,
+                    GridPhase::Emit => telemetry::stage::ROOM_SURFACE_DRAW,
+                };
+                if begin {
+                    telemetry::stage_begin(id);
+                } else {
+                    telemetry::stage_end(id);
+                }
+            },
         )
     }
 }
