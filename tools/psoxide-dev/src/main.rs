@@ -259,6 +259,10 @@ fn runtime_numeric_guard() -> Result<(), String> {
         root.join("engine/crates/psx-level/src"),
     ];
     push_child_src_dirs(&mut runtime_roots, &root.join("engine/examples"))?;
+    // Every other engine crate is guest-linked too (psx-bsp's collision and
+    // frustum kernels once linked `__udivdi3` unseen because only the three
+    // roots above were scanned). `collect_rs_files` de-duplicates.
+    push_child_src_dirs(&mut runtime_roots, &root.join("engine/crates"))?;
     for entry in sorted_dirs(&root.join("sdk/crates"))? {
         // psx-gte-core is the host GTE model; psx-residency-sim replays a route
         // against the real residency policy on the host and never links into a
@@ -546,9 +550,14 @@ fn blank_test_items(code: &str) -> String {
         // a `;` for brace-less items like `#[cfg(test)] use super::*;`.
         let mut cursor = start;
         let mut depth = 0usize;
+        // A `;` inside `(..)` or `[..]` belongs to an array type such as
+        // `[i16; 3]` in a signature, not to the end of a brace-less item.
+        let mut nesting = 0usize;
         let mut end = bytes.len();
         while cursor < bytes.len() {
             match bytes[cursor] {
+                b'(' | b'[' => nesting += 1,
+                b')' | b']' => nesting = nesting.saturating_sub(1),
                 b'{' => depth += 1,
                 b'}' => {
                     depth = depth.saturating_sub(1);
@@ -557,7 +566,7 @@ fn blank_test_items(code: &str) -> String {
                         break;
                     }
                 }
-                b';' if depth == 0 => {
+                b';' if depth == 0 && nesting == 0 => {
                     end = cursor + 1;
                     break;
                 }
@@ -2610,6 +2619,9 @@ fn gated() -> f64 { 1.0 }
 use core::f64::consts::PI;
 #[cfg(any(target_arch = \"mips\", test))]
 fn also_ships() -> u64 { 2 }
+#[cfg(test)]
+#[inline(always)]
+fn array_arg(position: [i16; 3]) -> u8 { let wide: i64 = 1; wide as u8 }
 ";
         let out = blank_test_items(src);
 
@@ -2621,6 +2633,9 @@ fn also_ships() -> u64 { 2 }
         assert!(!out.contains("oracle"));
         assert!(!out.contains("gated"));
         assert!(!out.contains("PI"));
+        // A `;` inside an array type in the signature must not end the item.
+        assert!(!out.contains("array_arg"));
+        assert!(!out.contains("wide"));
         // Offsets must survive, or reported line numbers drift.
         assert_eq!(out.len(), src.len());
         assert_eq!(out.lines().count(), src.lines().count());
