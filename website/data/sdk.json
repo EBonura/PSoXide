@@ -164,6 +164,11 @@
       "shows": "XA-ADPCM music: four generated songs interleaved in one file, played through `psx_io::cd::xa` with a pad-driven switch (`make hello-xa-disc`)."
     },
     {
+      "name": "hello-xa-resume",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/hello-xa-resume",
+      "shows": "An XA song surviving a data read: suspends it, reads sectors through the polled reader, resumes, and checks the head, the song clock, the drive command log and the audio (`make hello-xa-resume-gate`)."
+    },
+    {
       "name": "hello-spstack",
       "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/hello-spstack",
       "shows": "A call tree run on a scratchpad stack under VBlank IRQs, checked against the RAM stack; `stack-guard` (`tools/psoxide-hazard`) proves it fits."

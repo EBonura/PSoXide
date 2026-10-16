@@ -71,6 +71,17 @@ fn parse(flags: &[String]) -> Result<Options, String> {
     Ok(o)
 }
 
+/// Say so when a source goes past full scale: the encoder clips it, which
+/// sounds like crackle, and `--peak` is the fix.
+fn warn_if_clipping(path: &str, pcm: &[Vec<f64>], peak: Option<f64>) {
+    let (count, top) = xa::over_range(pcm);
+    if count > 0 && peak.is_none() {
+        eprintln!(
+            "warning: {path}: {count} samples go past full scale (peak {top:.2}x); they will clip. Re-render lower or pass --peak 0.95"
+        );
+    }
+}
+
 fn stem(path: &str) -> String {
     Path::new(path)
         .file_stem()
@@ -93,7 +104,11 @@ pub fn encode(output: &str, flags: &[String]) -> ExitCode {
             Err(e) => return fail(format!("{path}: {e}")),
         };
         match wav::read_channels(&bytes) {
-            Ok((rate, channels)) => pcm.push(xa::prepare_pcm(o.format, rate, &channels, o.peak)),
+            Ok((rate, channels)) => {
+                let shaped = xa::prepare_pcm(o.format, rate, &channels, o.peak);
+                warn_if_clipping(path, &shaped, o.peak);
+                pcm.push(shaped);
+            }
             Err(e) => return fail(format!("{path}: {e}")),
         }
     }
@@ -147,10 +162,14 @@ pub fn pack(out_dir: &str, name: &str, flags: &[String]) -> ExitCode {
             Err(e) => return fail(format!("{path}: {e}")),
         };
         match wav::read_channels(&bytes) {
-            Ok((rate, channels)) => songs.push(xa_pack::Song {
-                name: stem(path),
-                pcm: xa::prepare_pcm(o.format, rate, &channels, o.peak),
-            }),
+            Ok((rate, channels)) => {
+                let shaped = xa::prepare_pcm(o.format, rate, &channels, o.peak);
+                warn_if_clipping(path, &shaped, o.peak);
+                songs.push(xa_pack::Song {
+                    name: stem(path),
+                    pcm: shaped,
+                });
+            }
             Err(e) => return fail(format!("{path}: {e}")),
         }
     }

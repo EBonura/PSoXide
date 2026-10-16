@@ -477,6 +477,23 @@ pub fn prepare_pcm(
     out
 }
 
+/// How many samples of `pcm` lie beyond 16-bit full scale, and the largest
+/// magnitude relative to full scale. A source mixed offline in floating point
+/// (loops summed in a crossfade) can exceed 1.0; the encoder clips such
+/// samples, so callers warn.
+pub fn over_range(pcm: &[Vec<f64>]) -> (usize, f64) {
+    let mut count = 0;
+    let mut top = 0.0f64;
+    for v in pcm.iter().flatten() {
+        let a = v.abs();
+        top = top.max(a);
+        if a > 32767.0 {
+            count += 1;
+        }
+    }
+    (count, top / 32767.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

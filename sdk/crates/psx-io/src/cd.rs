@@ -15,6 +15,7 @@
 pub mod audio;
 pub mod reader;
 pub mod xa;
+pub mod xa_clock;
 
 use crate::periph::Cd;
 use crate::{irq, read_u8, write_u8};
