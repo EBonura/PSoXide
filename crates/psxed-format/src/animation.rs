@@ -134,7 +134,9 @@ pub mod tracks {
     /// Dequantisation multiplier, `COMPONENT_LIMIT_Q12 << 14` over the largest
     /// code, rounded. A component is `(code * mul + (1 << 13)) >> 14`.
     pub const fn component_mul(size_code: u8) -> i32 {
+        // psx-numeric-allow-next-line: evaluated at compile time for the dequantisation tables (psx-asset tracks.rs); never called at runtime
         let levels = (1i64 << (rotation_bits(size_code) - 1)) - 1;
+        // psx-numeric-allow-next-line: const evaluation only, see above
         ((((COMPONENT_LIMIT_Q12 as i64) << 14) + levels / 2) / levels) as i32
     }
     /// Largest quaternion component code for a rotation size code.
