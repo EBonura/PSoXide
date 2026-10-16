@@ -46,6 +46,11 @@ struct Recording {
     end: *mut u32,
 }
 
+// The recording state is in `.data`, not `.bss`, so a bare chain-loader image
+// that nothing zeroes a `.bss` for (it still writes the GPU ports with this
+// feature on) starts with no open recording and the guard disarmed. See
+// `irq::POLLING_KEEP`; guest-only for the same reason.
+#[cfg_attr(target_arch = "mips", link_section = ".data")]
 static mut RECORDING: Recording = Recording {
     open: false,
     active: false,
@@ -60,8 +65,11 @@ static mut RECORDING: Recording = Recording {
 
 /// Set while recording or while the guard is armed: the rare state the port
 /// writes test with one load before their plain store.
+#[cfg_attr(target_arch = "mips", link_section = ".data")]
 static mut SLOW: bool = false;
+#[cfg_attr(target_arch = "mips", link_section = ".data")]
 static mut GUARD_ARMED: bool = false;
+#[cfg_attr(target_arch = "mips", link_section = ".data")]
 static mut GUARD: Option<fn()> = None;
 
 #[inline(always)]
