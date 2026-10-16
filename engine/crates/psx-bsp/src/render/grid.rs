@@ -34,10 +34,22 @@ use psx_gpu::material::TextureWindow;
 use psx_gte::math::Vec3I16 as GteVec3I16;
 use psx_gte::scene;
 
+use psx_engine::SurfaceProfile;
+
 use super::{
-    clip_polygon_plane, FrustumPlanes, ViewTransform, PXBSP_CLIP_ALL_PLANES, PXBSP_RENDER_PROFILE,
+    clip_polygon_plane, open_hall_bands, FrustumPlanes, ViewTransform, PXBSP_CLIP_ALL_PLANES,
     TEXTURED_GOURAUD_COMMAND,
 };
+
+/// Depth-band profile of the near-plane path. A tile is small, so the warp a
+/// near tile shows is bounded by its own size: one split inside 170 depth
+/// units and none beyond, against the BSP profile's 340 and 170 for big
+/// patches. `OPEN_HALL_SPLIT_BANDS` still overrides it at build time.
+const GRID_RENDER_PROFILE: SurfaceProfile = open_hall_bands(SurfaceProfile {
+    split_once_below: 170,
+    split_twice_below: 0,
+    ..SurfaceProfile::PXBSP_THIRD_PERSON
+});
 use crate::Vec3I16;
 
 const MAGIC: u32 = 0x3144_5247;
@@ -935,7 +947,7 @@ unsafe fn robust_quad(
             1,
             next,
             end,
-            PXBSP_RENDER_PROFILE,
+            GRID_RENDER_PROFILE,
             &near_view,
         )
     };

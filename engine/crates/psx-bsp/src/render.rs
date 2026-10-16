@@ -246,7 +246,7 @@ const PXBSP_RENDER_PROFILE: SurfaceProfile = open_hall_bands(SurfaceProfile::PXB
 
 /// Open-hall fork knob: `OPEN_HALL_SPLIT_BANDS="once,twice"` at build time
 /// replaces the subdivision bands (ordering-table depth units).
-const fn open_hall_bands(mut profile: SurfaceProfile) -> SurfaceProfile {
+pub(super) const fn open_hall_bands(mut profile: SurfaceProfile) -> SurfaceProfile {
     let Some(value) = option_env!("OPEN_HALL_SPLIT_BANDS") else {
         return profile;
     };
