@@ -57,6 +57,7 @@ mod assets;
 mod budget;
 pub use budget::*;
 mod cook_ui;
+mod grid_world;
 mod manifest;
 mod performance;
 mod schema;
@@ -254,46 +255,6 @@ fn open_hall_ambient(project_root: &Path) -> [u8; 3] {
         .ok()
         .and_then(|text| text.trim().parse::<u8>().ok())
         .map_or([32; 3], |level| [level; 3])
-}
-
-/// Open-hall experiment: cook the grid render pack for the level named by
-/// `OPEN_HALL_GRID_LEVEL`. Empty when the variable is unset or the cook
-/// fails (the failure is a cook error).
-fn cook_grid_pack_if_requested(
-    project: &ProjectDocument,
-    compiled: &crate::brush_world::CompiledBrushWorld,
-    ambient: [u8; 3],
-    report: &mut PlaytestValidationReport,
-) -> Vec<u8> {
-    let Some(level) = std::env::var_os("OPEN_HALL_GRID_LEVEL") else {
-        return Vec::new();
-    };
-    let scene = project.active_scene();
-    let (lights, _) = crate::brush_world::scene_lights(scene);
-    let tints = crate::brush_world::material_tints(project);
-    let texture_assets: Vec<(String, u16)> = compiled
-        .textures
-        .iter()
-        .map(|texture| (texture.key.clone(), texture.asset_id))
-        .collect();
-    let input = crate::brush_grid::GridCookInput {
-        project,
-        level_path: Path::new(&level),
-        ambient,
-        lights: &lights,
-        tints: &tints,
-        texture_assets: &texture_assets,
-    };
-    match crate::brush_grid::cook_grid_pack(&input) {
-        Ok((bytes, stats)) => {
-            report.warn(stats.summary());
-            bytes
-        }
-        Err(error) => {
-            report.error(format!("grid pack cook failed: {error}"));
-            Vec::new()
-        }
-    }
 }
 
 fn runtime_sky_flags(sky: crate::ResolvedSkySettings) -> u16 {
@@ -513,6 +474,12 @@ pub fn build_package(
     // length by WORLD_UNIT_DIVISOR on an in-memory clone. Authored
     // files and the editor's preview stay at the historical scale.
     let mut scaled_project = project.clone();
+    let mut report = PlaytestValidationReport::default();
+    // A grid world cooks from its document: validate it and derive the
+    // collision brushes the PXBSP needs, at authored scale like any brush.
+    if !grid_world::prepare(&mut scaled_project, &mut report) {
+        return (None, report);
+    }
     crate::units::scale_project_to_engine_units(&mut scaled_project);
     // Trim every clip to the frames the project still references, and move the
     // authored frame indices into the trimmed clips' space on the same clone.
@@ -522,7 +489,6 @@ pub fn build_package(
     let clip_trim = crate::clip_window::ClipTrim::for_project(&scaled_project);
     let scaled_project = clip_trim.rebase_project(&scaled_project);
     let project = &scaled_project;
-    let mut report = PlaytestValidationReport::default();
     let scene = project.active_scene();
 
     let uses_pxbsp = true;
@@ -787,8 +753,10 @@ pub fn build_package(
     } else {
         crate::solid_cell_proofs::SolidCellProofs::default()
     };
-    let grid_pack = cook_grid_pack_if_requested(project, &compiled, world_options.ambient, &mut report);
+    let (render, grid_pack) =
+        grid_world::cook_pack(project, &compiled, world_options.ambient, &mut report);
     let world_geometry = PlaytestPxbspWorld {
+        render,
         grid_pack,
         solid_cell_proofs,
         bytes: compiled.pxbsp.bytes,

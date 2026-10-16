@@ -261,7 +261,7 @@ fn refine_rows_by_sampled_rays(
         })
         .collect();
 
-    fn clear(bsp: &CompiledSurfaceBsp, child: BspChild, a: [f64; 3], b: [f64; 3], depth: u32) -> bool {
+    fn clear(bsp: &CompiledSurfaceBsp, child: BspChild, a: [f64; 3], b: [f64; 3]) -> bool {
         match child {
             BspChild::Leaf(index) => !matches!(bsp.leaves[index].contents, BspLeafContents::Solid),
             BspChild::Node(index) => {
@@ -273,23 +273,36 @@ fn refine_rows_by_sampled_rays(
                 let (da, db) = (side(a), side(b));
                 const ON: f64 = 0.25;
                 if da >= -ON && db >= -ON {
-                    return clear(bsp, node.front, a, b, depth + 1);
+                    return clear(bsp, node.front, a, b);
                 }
                 if da < ON && db < ON {
-                    return clear(bsp, node.back, a, b, depth + 1);
+                    return clear(bsp, node.back, a, b);
                 }
                 let t = da / (da - db);
-                let mid = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
-                let (first, second) = if da >= 0.0 { (node.front, node.back) } else { (node.back, node.front) };
-                clear(bsp, first, a, mid, depth + 1) && clear(bsp, second, mid, b, depth + 1)
+                let mid = [
+                    a[0] + (b[0] - a[0]) * t,
+                    a[1] + (b[1] - a[1]) * t,
+                    a[2] + (b[2] - a[2]) * t,
+                ];
+                let (first, second) = if da >= 0.0 {
+                    (node.front, node.back)
+                } else {
+                    (node.back, node.front)
+                };
+                clear(bsp, first, a, mid) && clear(bsp, second, mid, b)
             }
         }
     }
 
-    let before: usize = rows.iter().map(|r| r.iter().map(|w| w.count_ones() as usize).sum::<usize>()).sum();
+    let before: usize = rows
+        .iter()
+        .map(|r| r.iter().map(|w| w.count_ones() as usize).sum::<usize>())
+        .sum();
     let snapshot: Vec<Vec<u64>> = rows.to_vec();
     let next = AtomicUsize::new(0);
-    let workers = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get).clamp(1, 8);
+    let workers = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .clamp(1, 8);
     let refined: Vec<OnceLock<Vec<u64>>> = (0..visible).map(|_| OnceLock::new()).collect();
     std::thread::scope(|scope| {
         for _ in 0..workers {
@@ -305,9 +318,9 @@ fn refine_rows_by_sampled_rays(
                         if to == from || !bit_is_set(&row, to) || samples[to].is_empty() {
                             continue;
                         }
-                        let seen = samples[from].iter().any(|a| {
-                            samples[to].iter().any(|b| clear(bsp, bsp.root, *a, *b, 0))
-                        });
+                        let seen = samples[from]
+                            .iter()
+                            .any(|a| samples[to].iter().any(|b| clear(bsp, bsp.root, *a, *b)));
                         if !seen {
                             row[to >> 6] &= !(1u64 << (to & 63));
                         }
@@ -321,7 +334,10 @@ fn refine_rows_by_sampled_rays(
         *row = refined.into_inner().expect("every leaf refined");
     }
     close_reciprocal_visibility(rows);
-    let after: usize = rows.iter().map(|r| r.iter().map(|w| w.count_ones() as usize).sum::<usize>()).sum();
+    let after: usize = rows
+        .iter()
+        .map(|r| r.iter().map(|w| w.count_ones() as usize).sum::<usize>())
+        .sum();
     crate::playtest::emit_cook_output(format_args!(
         "[brush-vis] sampled-ray refinement: {before} -> {after} visible leaf pairs ({:.0}% kept)",
         after as f64 * 100.0 / before.max(1) as f64

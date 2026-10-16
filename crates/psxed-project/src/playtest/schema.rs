@@ -106,10 +106,23 @@ pub enum PlaytestAssetKind {
     ModelAnimation,
 }
 
+/// Which renderer draws the world. Collision, activation and entities come
+/// from the PXBSP either way.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PlaytestWorldRender {
+    /// The PXBSP face pass (brush worlds).
+    #[default]
+    Pxbsp,
+    /// The sector-grid renderer reading [`PlaytestPxbspWorld::grid_pack`].
+    Grid,
+}
+
 /// Resident PXBSP payload and the deterministic authored mover mapping needed
 /// by normal gameplay logic.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlaytestPxbspWorld {
+    /// The world kind the guest builds its renderer for.
+    pub render: PlaytestWorldRender,
     /// Optional exact solid-cell implication certificates; absent cells use full paths.
     pub solid_cell_proofs: crate::solid_cell_proofs::SolidCellProofs,
     /// Complete PXBSP file emitted by the brush compiler.
@@ -131,9 +144,10 @@ pub struct PlaytestPxbspWorld {
     /// whole-map container of the same geometry, which the budget and
     /// analysis passes read; the guest loads `stream.container` instead.
     pub stream: Option<PlaytestStreamedWorld>,
-    /// Open-hall experiment: the grid render pack for the same level, cooked
-    /// when `OPEN_HALL_GRID_LEVEL` names a bonnie-32 level file; empty
-    /// otherwise.
+    /// The grid render pack (`GRD1`) of a grid world, cooked from the
+    /// project's grid document; empty for brush worlds. The open-hall bench
+    /// scripts can still cook one from a raw bonnie-32 level named by
+    /// `OPEN_HALL_GRID_LEVEL`.
     pub grid_pack: Vec<u8>,
 }
 
@@ -152,6 +166,7 @@ pub struct PlaytestStreamedWorld {
 impl Default for PlaytestPxbspWorld {
     fn default() -> Self {
         Self {
+            render: PlaytestWorldRender::Pxbsp,
             solid_cell_proofs: Default::default(),
             bytes: Vec::new(),
             max_visible_faces: 0,

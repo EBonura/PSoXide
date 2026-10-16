@@ -49,6 +49,33 @@ impl GridWorld {
         ]
     }
 
+    /// Every material the world's surfaces and walls use, once each, in
+    /// first-use order.
+    pub fn material_ids(&self) -> Vec<crate::ResourceId> {
+        let mut ids = Vec::new();
+        let mut note = |id: Option<crate::ResourceId>| {
+            if let Some(id) = id {
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+        };
+        for room in &self.rooms {
+            for (_, _, sector) in room.iter() {
+                for surface in [&sector.floor, &sector.ceiling].into_iter().flatten() {
+                    note(surface.tri(0).material);
+                    note(surface.tri(1).material);
+                }
+                for edge in super::sector::WallEdge::ALL {
+                    for wall in sector.walls(edge) {
+                        note(wall.material);
+                    }
+                }
+            }
+        }
+        ids
+    }
+
     /// Number of sectors over all rooms.
     pub fn sector_count(&self) -> usize {
         self.rooms.iter().map(GridRoom::sector_count).sum()

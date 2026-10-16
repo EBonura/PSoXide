@@ -22,12 +22,11 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use psxed_project::brush::{Brush, BrushContents, BrushFace, FaceUv, Plane};
+use psxed_project::brush_grid::{texture_key, FALLBACK_TEXTURE};
 use psxed_project::{
-    MaterialResource, NodeId, NodeKind, ProjectDocument, ResourceData, ResourceId,
-    SceneWorldLayer,
+    MaterialResource, NodeId, NodeKind, ProjectDocument, ResourceData, ResourceId, SceneWorldLayer,
 };
 use psxed_tex::{convert, Config, CropMode, PsxtDepth, Resampler};
-use psxed_project::brush_grid::{texture_key, FALLBACK_TEXTURE};
 use serde::Deserialize;
 
 const SECTOR: i32 = 1024;
@@ -277,7 +276,9 @@ fn main() {
         let (forward_x, forward_z) = (yaw.to_radians().sin(), yaw.to_radians().cos());
         for (index, id) in actors.iter().enumerate() {
             let ahead = index as f32 * 4.0 * step as f32;
-            let side = if index == 2 { -1.5 } else { 1.5 } * step as f32 * (index.min(1) as f32 + (index / 2) as f32);
+            let side = if index == 2 { -1.5 } else { 1.5 }
+                * step as f32
+                * (index.min(1) as f32 + (index / 2) as f32);
             let at = [
                 sx + (forward_x * ahead + forward_z * side) as i32,
                 spawn_floor + 64,
@@ -298,7 +299,12 @@ fn main() {
     }
 
     if args.base.is_some() {
-        place_arch_perches(project.active_scene_mut(), &level, &args.perches, args.yaw - 180.0);
+        place_arch_perches(
+            project.active_scene_mut(),
+            &level,
+            &args.perches,
+            args.yaw - 180.0,
+        );
     }
     let lighting = if name == "Cathedral" {
         place_cathedral_lights(project.active_scene_mut(), room, &level);
@@ -350,7 +356,11 @@ fn sky_lid(project: &ProjectDocument, brushes: &[Brush]) -> Option<Brush> {
     let top = max[1].ceil() as i32;
     let mut lid = Brush::cuboid(
         [min[0].floor() as i32, top, min[2].floor() as i32],
-        [max[0].ceil() as i32, top + SLAB_THICKNESS, max[2].ceil() as i32],
+        [
+            max[0].ceil() as i32,
+            top + SLAB_THICKNESS,
+            max[2].ceil() as i32,
+        ],
     );
     for face in &mut lid.faces {
         face.material = Some(sky);
@@ -378,18 +388,54 @@ fn place_cathedral_lights(scene: &mut psxed_project::Scene, room: &Room, _level:
     let mut spots = Vec::new();
     for gx in [3, 9, 15, 21] {
         for gz in [8, 16] {
-            spots.push(LightSpot { cell: (gx, gz), above_floor: 2816, color: WARM, intensity: 1.25, radius: 6.0 });
+            spots.push(LightSpot {
+                cell: (gx, gz),
+                above_floor: 2816,
+                color: WARM,
+                intensity: 1.25,
+                radius: 6.0,
+            });
         }
     }
     for gx in [4, 10, 16] {
         for gz in [2, 23] {
-            spots.push(LightSpot { cell: (gx, gz), above_floor: 2048, color: EMBER, intensity: 1.3, radius: 4.0 });
+            spots.push(LightSpot {
+                cell: (gx, gz),
+                above_floor: 2048,
+                color: EMBER,
+                intensity: 1.3,
+                radius: 4.0,
+            });
         }
     }
-    spots.push(LightSpot { cell: (27, 12), above_floor: 3072, color: COOL, intensity: 2.0, radius: 7.0 });
-    spots.push(LightSpot { cell: (30, 8), above_floor: 2048, color: COOL, intensity: 1.4, radius: 4.0 });
-    spots.push(LightSpot { cell: (30, 16), above_floor: 2048, color: COOL, intensity: 1.4, radius: 4.0 });
-    spots.push(LightSpot { cell: (1, 12), above_floor: 2048, color: WARM, intensity: 1.2, radius: 4.0 });
+    spots.push(LightSpot {
+        cell: (27, 12),
+        above_floor: 3072,
+        color: COOL,
+        intensity: 2.0,
+        radius: 7.0,
+    });
+    spots.push(LightSpot {
+        cell: (30, 8),
+        above_floor: 2048,
+        color: COOL,
+        intensity: 1.4,
+        radius: 4.0,
+    });
+    spots.push(LightSpot {
+        cell: (30, 16),
+        above_floor: 2048,
+        color: COOL,
+        intensity: 1.4,
+        radius: 4.0,
+    });
+    spots.push(LightSpot {
+        cell: (1, 12),
+        above_floor: 2048,
+        color: WARM,
+        intensity: 1.2,
+        radius: 4.0,
+    });
 
     let step = SECTOR * SCALE_NUM / SCALE_DEN;
     for (index, spot) in spots.iter().enumerate() {
@@ -416,7 +462,11 @@ fn place_cathedral_lights(scene: &mut psxed_project::Scene, room: &Room, _level:
                 radius: spot.radius,
             },
         );
-        scene.node_mut(id).expect("light node").transform.translation = at.map(|v| v as f32);
+        scene
+            .node_mut(id)
+            .expect("light node")
+            .transform
+            .translation = at.map(|v| v as f32);
     }
 }
 
@@ -446,13 +496,25 @@ fn place_level_lights(scene: &mut psxed_project::Scene, level: &Level, out: &Pat
 
     let step = SECTOR * SCALE_NUM / SCALE_DEN;
     let mut count = 0usize;
-    let mut add = |scene: &mut psxed_project::Scene, at: [i32; 3], color: [u8; 3], intensity: f32, radius: f32| {
+    let mut add = |scene: &mut psxed_project::Scene,
+                   at: [i32; 3],
+                   color: [u8; 3],
+                   intensity: f32,
+                   radius: f32| {
         let id = scene.add_node(
             NodeId::ROOT,
             format!("Level Light {count}"),
-            NodeKind::PointLight { color, intensity, radius },
+            NodeKind::PointLight {
+                color,
+                intensity,
+                radius,
+            },
         );
-        scene.node_mut(id).expect("light node").transform.translation = at.map(|v| v as f32);
+        scene
+            .node_mut(id)
+            .expect("light node")
+            .transform
+            .translation = at.map(|v| v as f32);
         count += 1;
     };
     let cell_floor = |room: &Room, gx: usize, gz: usize| -> Option<f32> {
@@ -460,14 +522,20 @@ fn place_level_lights(scene: &mut psxed_project::Scene, level: &Level, out: &Pat
         Some(average(&sector.floor.as_ref()?.heights))
     };
 
-    let authored = level
-        .rooms
-        .iter()
-        .any(|r| r.objects.iter().any(|o| matches!(o.object_type, ObjectType::Light { .. })));
+    let authored = level.rooms.iter().any(|r| {
+        r.objects
+            .iter()
+            .any(|o| matches!(o.object_type, ObjectType::Light { .. }))
+    });
     if authored {
         for room in &level.rooms {
             for object in &room.objects {
-                let ObjectType::Light { color, intensity, radius } = &object.object_type else {
+                let ObjectType::Light {
+                    color,
+                    intensity,
+                    radius,
+                } = &object.object_type
+                else {
                     continue;
                 };
                 let floor = cell_floor(room, object.sector_x, object.sector_z).unwrap_or(0.0);
@@ -476,7 +544,13 @@ fn place_level_lights(scene: &mut psxed_project::Scene, level: &Level, out: &Pat
                     scale(room.position.y) + scale(floor.round()) + scale(object.height.round()),
                     scale(room.position.z) + object.sector_z as i32 * step + step / 2,
                 ];
-                add(scene, at, [color.r, color.g, color.b], *intensity, radius / SECTOR as f32);
+                add(
+                    scene,
+                    at,
+                    [color.r, color.g, color.b],
+                    *intensity,
+                    radius / SECTOR as f32,
+                );
             }
         }
         return format!("ambient {ambient}, {count} authored lights");
@@ -521,7 +595,8 @@ fn place_level_lights(scene: &mut psxed_project::Scene, level: &Level, out: &Pat
             let mut height = LATTICE_HEIGHT;
             if let Some(ceiling) = &sector.ceiling {
                 let lowest = ceiling.heights.iter().cloned().fold(f32::MAX, f32::min);
-                height = height.min((lowest - floor - LATTICE_CEILING_GAP).max(LATTICE_CEILING_GAP));
+                height =
+                    height.min((lowest - floor - LATTICE_CEILING_GAP).max(LATTICE_CEILING_GAP));
             }
             let at = [
                 scale(room.position.x) + gx as i32 * step + step / 2,
@@ -565,7 +640,11 @@ fn place_arch_perches(
             scale(room.position.y) + scale(top) + PERCH_HEIGHT,
             scale(room.position.z) + gz as i32 * step + step / 2,
         ];
-        let id = scene.add_node(NodeId::ROOT, format!("Arch Perch {}", index + 1), NodeKind::HookPoint);
+        let id = scene.add_node(
+            NodeId::ROOT,
+            format!("Arch Perch {}", index + 1),
+            NodeKind::HookPoint,
+        );
         let node = scene.node_mut(id).expect("perch node");
         node.transform.translation = at.map(|v| v as f32);
         node.transform.rotation_degrees = [0.0, yaw, 0.0];
@@ -609,13 +688,15 @@ fn base_project(base: &Path, enemies: usize) -> ProjectDocument {
 /// for anything else.
 fn entity_role(scene: &psxed_project::Scene, id: NodeId) -> Option<bool> {
     let node = scene.node(id)?;
-    if !matches!(node.kind, NodeKind::Entity { .. }) {
+    if !matches!(node.kind, NodeKind::Entity) {
         return None;
     }
-    node.children.iter().find_map(|child| match &scene.node(*child)?.kind {
-        NodeKind::CharacterController { player, .. } => Some(*player),
-        _ => None,
-    })
+    node.children
+        .iter()
+        .find_map(|child| match &scene.node(*child)?.kind {
+            NodeKind::CharacterController { player, .. } => Some(*player),
+            _ => None,
+        })
 }
 
 /// Player first, then enemies, in storage order.
@@ -640,7 +721,7 @@ fn characterless_project(out: &Path, name: &str) -> ProjectDocument {
         )
         .expect("copy sky texture");
     }
-    let mut project = ProjectDocument::new(&format!("bonnie-32 {name}"));
+    let mut project = ProjectDocument::new(format!("bonnie-32 {name}"));
     let hud = ProjectDocument::starter()
         .ui_scenes
         .into_iter()
@@ -704,7 +785,10 @@ fn find_texture(root: &Path, pack: &str, name: &str) -> PathBuf {
             return candidate;
         }
     }
-    panic!("texture {pack}/{name}.png not found under {}", root.display());
+    panic!(
+        "texture {pack}/{name}.png not found under {}",
+        root.display()
+    );
 }
 
 /// bonnie's own stand-in for a missing texture is a checkerboard; a
@@ -771,6 +855,9 @@ impl MaterialTable {
     }
 }
 
+/// The walls on one sector edge with the edge's ends and its front normal.
+type WallRun<'a> = (&'a Vec<VFace>, [i32; 2], [i32; 2], [f64; 3]);
+
 fn import_room(
     room: &Room,
     project: &mut ProjectDocument,
@@ -813,7 +900,11 @@ fn import_room(
                     .as_ref()
                     .map(|t| materials.get(project, t))
                     .unwrap_or(m1);
-                let normal = if up { [0.0, 1.0, 0.0] } else { [0.0, -1.0, 0.0] };
+                let normal = if up {
+                    [0.0, 1.0, 0.0]
+                } else {
+                    [0.0, -1.0, 0.0]
+                };
                 let planar = face.heights_2.is_none() && m1 == m2 && coplanar(&c1);
                 if planar {
                     push(brushes, stats, slab(&c1, normal, SLAB_THICKNESS, m1));
@@ -823,14 +914,22 @@ fn import_room(
                         SplitDirection::NwSe => ([0, 1, 2], [0, 2, 3]),
                         SplitDirection::NeSw => ([0, 1, 3], [1, 2, 3]),
                     };
-                    push(brushes, stats, slab(&t1.map(|i| c1[i]), normal, SLAB_THICKNESS, m1));
-                    push(brushes, stats, slab(&t2.map(|i| c2[i]), normal, SLAB_THICKNESS, m2));
+                    push(
+                        brushes,
+                        stats,
+                        slab(&t1.map(|i| c1[i]), normal, SLAB_THICKNESS, m1),
+                    );
+                    push(
+                        brushes,
+                        stats,
+                        slab(&t2.map(|i| c2[i]), normal, SLAB_THICKNESS, m2),
+                    );
                 }
             }
             // Edge endpoints in bonnie's [bottom-left, bottom-right] order and
             // the normal of its Front side (pointing into the owning sector).
             let s = std::f64::consts::FRAC_1_SQRT_2;
-            let edges: [(&Vec<VFace>, [i32; 2], [i32; 2], [f64; 3]); 6] = [
+            let edges: [WallRun<'_>; 6] = [
                 (&sector.walls_north, [x0, z0], [x1, z0], [0.0, 0.0, 1.0]),
                 (&sector.walls_east, [x1, z0], [x1, z1], [-1.0, 0.0, 0.0]),
                 (&sector.walls_south, [x1, z1], [x0, z1], [0.0, 0.0, -1.0]),
@@ -853,7 +952,11 @@ fn import_room(
                         NormalMode::Front | NormalMode::Both => front,
                     };
                     let material = materials.get(project, &wall.texture);
-                    push(brushes, stats, slab(&quad, visible, WALL_THICKNESS, material));
+                    push(
+                        brushes,
+                        stats,
+                        slab(&quad, visible, WALL_THICKNESS, material),
+                    );
                 }
             }
         }
@@ -876,7 +979,12 @@ fn coplanar(c: &[[i32; 3]; 4]) -> bool {
 
 /// Thicken a planar convex polygon into a brush that lies behind its visible
 /// side. Degenerate input (zero-height walls, collinear points) returns None.
-fn slab(poly: &[[i32; 3]], visible: [f64; 3], thickness: i32, material: ResourceId) -> Option<Brush> {
+fn slab(
+    poly: &[[i32; 3]],
+    visible: [f64; 3],
+    thickness: i32,
+    material: ResourceId,
+) -> Option<Brush> {
     let mut front: Vec<[i32; 3]> = Vec::with_capacity(poly.len());
     for p in poly {
         if front.last() != Some(p) && front.first() != Some(p) {
@@ -967,7 +1075,7 @@ fn pick_spawn(level: &Level, requested: Option<(usize, usize)>) -> ((usize, usiz
         for gz in 0..room.depth {
             if let Some(y) = floor_at(gx, gz) {
                 let d = (gx as f64 - cx).powi(2) + (gz as f64 - cz).powi(2);
-                if best.map_or(true, |(bd, _, _)| d < bd) {
+                if best.is_none_or(|(bd, _, _)| d < bd) {
                     best = Some((d, (gx, gz), y));
                 }
             }
@@ -987,7 +1095,12 @@ fn print_map(level: &Level, spawn: (usize, usize)) {
                 if (gx, gz) == spawn {
                     return '@';
                 }
-                match room.sectors.get(gx).and_then(|c| c.get(gz)).and_then(|s| s.as_ref()) {
+                match room
+                    .sectors
+                    .get(gx)
+                    .and_then(|c| c.get(gz))
+                    .and_then(|s| s.as_ref())
+                {
                     Some(Sector {
                         floor: Some(floor), ..
                     }) => {

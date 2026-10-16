@@ -805,7 +805,17 @@ pub fn compile_brush_world(
         });
     }
 
-    let slots = pxbsp_material_slots(&world_geometry, &submodels);
+    let mut slots = pxbsp_material_slots(&world_geometry, &submodels);
+    // A grid world draws from its own pack, but the pack binds textures
+    // through the PXBSP material table: register every material the grid
+    // uses even when no collision brush shows it.
+    if let Some(grid) = scene.world.grid() {
+        for id in grid.material_ids() {
+            if !slots.contains(&Some(id)) {
+                slots.push(Some(id));
+            }
+        }
+    }
     let page_texture_dims = page_local_texture_dims(
         project,
         &slots,

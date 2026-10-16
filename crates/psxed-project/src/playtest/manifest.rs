@@ -96,7 +96,7 @@ pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io
             .as_ref()
             .map_or(&world.bytes, |stream| &stream.container),
     )?;
-    // Open-hall experiment: the grid render pack, empty unless cooked.
+    // The grid render pack; empty for brush worlds.
     std::fs::write(generated_dir.join("grid_world.bin"), &world.grid_pack)?;
     if world.leak_path.is_empty() {
         remove_optional_file(&brush_leak_path)?;
@@ -331,6 +331,12 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         proofs.data
     );
     out.push_str("pub const PLAYTEST_USES_PXBSP: bool = true;\n");
+    // The guest build reads this line (build.rs) to pick the grid renderer.
+    let _ = writeln!(
+        out,
+        "pub const PLAYTEST_WORLD_GRID: bool = {};",
+        world.render == PlaytestWorldRender::Grid
+    );
     // Keep actor/prop lighting on the same ambient contract used by the
     // brush light bake. PXBSP surfaces carry baked vertex light; dynamic
     // world content consumes this generated constant.
