@@ -44,6 +44,12 @@ const HEADER_WORDS: usize = 16;
 const QUAD_BYTES: usize = 44;
 
 pub const QUAD_TRIANGLE: u8 = 1;
+/// The plane is axis aligned: `d` holds the signed plane coordinate and the
+/// side test needs no multiplies. Bits 2 and 3 name the axis, bit 4 flags a
+/// negative-facing plane.
+pub const QUAD_AXIS: u8 = 2;
+const QUAD_AXIS_SHIFT: u32 = 2;
+const QUAD_AXIS_NEGATIVE: u8 = 0x10;
 
 #[derive(Deserialize, Clone, Copy)]
 struct V3 {
@@ -327,6 +333,58 @@ fn collect_faces(level: &Level) -> (Vec<Face>, (i32, i32), (usize, usize)) {
                         };
                         push_face(&mut faces, &t1.map(|i| c1[i]), toward, name1, cell);
                         push_face(&mut faces, &t2.map(|i| c2[i]), toward, name2, cell);
+                    }
+                }
+                // Risers: where this floor stands above a neighbouring floor and no
+                // authored wall covers the edge, the importer's floor slab leaves its
+                // side exposed in the BSP world. Draw the same face here so both
+                // renderers show the same step.
+                if let Some(floor) = &sector.floor {
+                    let height = |h: f32| oy + scale(h);
+                    // (dx, dz, this floor corners on the edge, neighbour corners on it, edge points)
+                    let sides: [(i32, i32, [usize; 2], [usize; 2], [[i32; 2]; 2]); 4] = [
+                        (0, -1, [0, 1], [3, 2], [[x0, z0], [x1, z0]]),
+                        (1, 0, [1, 2], [0, 3], [[x1, z0], [x1, z1]]),
+                        (0, 1, [3, 2], [0, 1], [[x0, z1], [x1, z1]]),
+                        (-1, 0, [0, 3], [1, 2], [[x0, z0], [x0, z1]]),
+                    ];
+                    for (side, (dx, dz, mine, theirs, points)) in sides.into_iter().enumerate() {
+                        let (nx, nz) = (gx as i32 + dx, gz as i32 + dz);
+                        if nx < 0 || nz < 0 {
+                            continue;
+                        }
+                        let Some(Some(neighbour)) = room.sectors.get(nx as usize).and_then(|c| c.get(nz as usize)) else {
+                            continue;
+                        };
+                        let Some(other) = &neighbour.floor else { continue };
+                        let (mine_walls, their_walls) = match side {
+                            0 => (&sector.walls_north, &neighbour.walls_south),
+                            1 => (&sector.walls_east, &neighbour.walls_west),
+                            2 => (&sector.walls_south, &neighbour.walls_north),
+                            _ => (&sector.walls_west, &neighbour.walls_east),
+                        };
+                        if !mine_walls.is_empty() || !their_walls.is_empty() {
+                            continue;
+                        }
+                        let a = mine.map(|k| height(floor.heights[k]));
+                        let b = theirs.map(|k| height(other.heights[k]));
+                        if a[0] < b[0] || a[1] < b[1] || (a[0] == b[0] && a[1] == b[1]) {
+                            continue;
+                        }
+                        let bottom = |a: i32, b: i32| b.max(a - SLAB_THICKNESS as i32);
+                        let ring = [
+                            [points[0][0], a[0], points[0][1]],
+                            [points[1][0], a[1], points[1][1]],
+                            [points[1][0], bottom(a[1], b[1]), points[1][1]],
+                            [points[0][0], bottom(a[0], b[0]), points[0][1]],
+                        ];
+                        push_face(
+                            &mut faces,
+                            &ring,
+                            [f64::from(dx), 0.0, f64::from(dz)],
+                            &floor.texture.name,
+                            cell,
+                        );
                     }
                 }
                 let edges: [(&Vec<VFace>, [i32; 2], [i32; 2], [f64; 3]); 6] = [
@@ -650,6 +708,29 @@ pub fn cook_grid_pack(input: &GridCookInput<'_>) -> Result<(Vec<u8>, GridPackSta
             let d = i32::from(n8[0]) * i32::from(p0[0])
                 + i32::from(n8[1]) * i32::from(p0[1])
                 + i32::from(n8[2]) * i32::from(p0[2]);
+            // Exactly axis-aligned planes (floors, ceilings, straight walls) get a
+            // multiply-free side test: the camera coordinate against the plane
+            // coordinate.
+            let axis_flags = {
+                let zero = normal.map(|v| v == 0.0);
+                match zero {
+                    [true, false, true] | [false, true, true] | [true, true, false] => {
+                        let axis = normal.iter().position(|v| *v != 0.0).unwrap();
+                        let negative = normal[axis] < 0.0;
+                        QUAD_AXIS
+                            | ((axis as u8) << QUAD_AXIS_SHIFT)
+                            | if negative { QUAD_AXIS_NEGATIVE } else { 0 }
+                    }
+                    _ => 0,
+                }
+            };
+            let d = if axis_flags != 0 {
+                let axis = usize::from((axis_flags >> QUAD_AXIS_SHIFT) & 3);
+                let coordinate = i32::from(p0[axis]);
+                if axis_flags & QUAD_AXIS_NEGATIVE != 0 { -coordinate } else { coordinate }
+            } else {
+                d
+            };
 
             let uvs_all = face_uv(&face.ring, &mut stats.uv_overflow);
             let slot = {
@@ -671,7 +752,7 @@ pub fn cook_grid_pack(input: &GridCookInput<'_>) -> Result<(Vec<u8>, GridPackSta
                 d,
                 normal: n8,
                 material: slot,
-                flags: if count == 3 { QUAD_TRIANGLE } else { 0 },
+                flags: axis_flags | if count == 3 { QUAD_TRIANGLE } else { 0 },
             };
             for k in 0..count {
                 let p = distinct[k];
