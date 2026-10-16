@@ -53,7 +53,7 @@ Examples that use CD audio or WORLD.PAK need their own pack inputs; the generic
   any other checkout. `order` and the `+order` variants link functions in an
   I-cache-aware order from exact per-word counts, gated per game by `choose`.
 - `tools/psoxide-hazard` (`hazard-patch`, `hazard-scan`, `stack-guard`) and
-  `guest_symbol_gate.sh` (a link-map grep for 64-bit helpers): guest checks.
+  `guest_symbol_gate.sh` (a link-map grep for 64-bit and soft-float helpers): guest checks.
   psoxide-hazard decodes the image with `crates/psx-disasm`, no objdump. The
   patcher and scanner share one detector; given the link's `-Map` (`--map`),
   both bound each switch's jump table to its own function and read, and
