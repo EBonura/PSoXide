@@ -238,8 +238,16 @@ impl SectorReader {
     }
 
     fn wait_irq(&mut self, expected: u8, limit: u32) -> Wait {
+        self.wait_irq_with(expected, limit, &mut || {})
+    }
+
+    /// [`wait_irq`](Self::wait_irq) calling `idle` once per spin, before the
+    /// controller is looked at again, so a caller can keep servicing something
+    /// else (the pad) through a wait that runs longer than a frame.
+    fn wait_irq_with(&mut self, expected: u8, limit: u32, idle: &mut dyn FnMut()) -> Wait {
         let mut spins = 0;
         while spins < limit {
+            idle();
             let flag = self.cd.irq_flag_value();
             if flag == expected {
                 return Wait::Matched;
@@ -452,6 +460,19 @@ impl SectorReader {
     /// settling; the same console that corrupts our sustained implicit-seek
     /// streams loads 1.4 MB EXEs through the BIOS bracket without fault.
     pub fn start_read_seek_first(&mut self, lba: u32, seek_poll: u32) -> bool {
+        self.start_read_seek_first_with(lba, seek_poll, &mut || {})
+    }
+
+    /// [`start_read_seek_first`](Self::start_read_seek_first) calling `idle`
+    /// while it waits for the seek to complete. A long seek (the head crossing
+    /// the disc) takes several frames, and the command sequence is otherwise
+    /// the same, in the same order; `idle` must not touch the CD controller.
+    pub fn start_read_seek_first_with(
+        &mut self,
+        lba: u32,
+        seek_poll: u32,
+        idle: &mut dyn FnMut(),
+    ) -> bool {
         self.enter_polling_mask();
         if !self.set_location(lba) {
             return false;
@@ -462,7 +483,7 @@ impl SectorReader {
         if !self.send_command(CMD_SEEKL, &[], IRQ_ACK, ACK_POLL) {
             return false;
         }
-        match self.wait_irq(IRQ_COMPLETE, seek_poll) {
+        match self.wait_irq_with(IRQ_COMPLETE, seek_poll, idle) {
             Wait::Matched => {}
             Wait::CdError | Wait::Timeout => return false,
         }
