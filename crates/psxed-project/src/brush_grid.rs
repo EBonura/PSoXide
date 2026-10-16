@@ -145,12 +145,15 @@ pub struct GridPackStats {
     pub dropped_unmapped: usize,
     pub uv_overflow: usize,
     pub bytes: usize,
+    pub lights: usize,
+    pub lit_corners: usize,
+    pub lit_corners_unshadowed: usize,
 }
 
 impl GridPackStats {
     pub fn summary(&self) -> String {
         format!(
-            "grid pack: {} faces -> {} quads + {} triangles, {} shared vertices, {} cells, {} materials, {} bytes ({} faces unmapped, {} uv spans over 63 texels)",
+            "grid pack: {} faces -> {} quads + {} triangles, {} shared vertices, {} cells, {} materials, {} bytes ({} faces unmapped, {} uv spans over 63 texels), {} lights, {} corners lit ({} without shadows)",
             self.faces,
             self.quads,
             self.triangles,
@@ -159,7 +162,10 @@ impl GridPackStats {
             self.materials,
             self.bytes,
             self.dropped_unmapped,
-            self.uv_overflow
+            self.uv_overflow,
+            self.lights,
+            self.lit_corners,
+            self.lit_corners_unshadowed
         )
     }
 }
@@ -533,8 +539,11 @@ pub fn cook_grid_pack(input: &GridCookInput<'_>) -> Result<(Vec<u8>, GridPackSta
     let surfaces: Vec<CompiledSurface> = kept
         .iter()
         .map(|face| {
-            let points: Vec<[i32; 3]> = face
-                .ring
+            // The playtest project is already at engine scale: lights, occluders
+            // and ambient live in world units, so bake the ring there too.
+            let ring_world_f64: Vec<[f64; 3]> =
+                face.ring.iter().map(|p| p.map(|v| v / WORLD_DIVISOR)).collect();
+            let points: Vec<[i32; 3]> = ring_world_f64
                 .iter()
                 .map(|p| p.map(|v| v.round() as i32))
                 .collect();
@@ -545,7 +554,7 @@ pub fn cook_grid_pack(input: &GridCookInput<'_>) -> Result<(Vec<u8>, GridPackSta
                 .expect("oriented ring has a plane");
             CompiledSurface {
                 plane,
-                vertices: face.ring.clone(),
+                vertices: ring_world_f64,
                 material: Some(material_of[&face.texture].0),
                 uv: FaceUv::default(),
                 edge_repair: None,
@@ -563,6 +572,12 @@ pub fn cook_grid_pack(input: &GridCookInput<'_>) -> Result<(Vec<u8>, GridPackSta
         input.tints,
     )
     .map_err(|error| format!("grid light bake: {error:?}"))?;
+    let ambient_packed = u32::from(input.ambient[0]) | (u32::from(input.ambient[1]) << 8) | (u32::from(input.ambient[2]) << 16);
+    stats.lights = input.lights.len();
+    stats.lit_corners = baked.iter().flatten().filter(|c| (**c & 0xff_ffff) != ambient_packed).count();
+    let unshadowed = bake_brush_vertex_lighting(&surfaces, &[], input.ambient, input.lights, input.tints)
+        .map_err(|error| format!("grid light bake: {error:?}"))?;
+    stats.lit_corners_unshadowed = unshadowed.iter().flatten().filter(|c| (**c & 0xff_ffff) != ambient_packed).count();
 
     // Dense material numbering in first-seen order.
     let mut material_slots: Vec<u16> = Vec::new();
