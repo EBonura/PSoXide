@@ -911,6 +911,12 @@ pub struct Scene {
     /// brushes need hierarchy/visibility.
     #[serde(default)]
     pub brushes: Vec<crate::brush::Brush>,
+    /// Which kind of world this scene holds. The default, brushes, is not
+    /// written to disk, so scenes saved before the grid world existed load
+    /// and save unchanged. A grid scene keeps its sectors here and may still
+    /// hold `brushes` for props and blockers.
+    #[serde(default, skip_serializing_if = "crate::grid::SceneWorld::is_brushes")]
+    pub world: crate::grid::SceneWorld,
 }
 
 impl Scene {
@@ -923,6 +929,7 @@ impl Scene {
             next_node_id: NodeId::ROOT.raw() + 1,
             nodes: vec![root],
             brushes: Vec::new(),
+            world: crate::grid::SceneWorld::default(),
         }
     }
 

@@ -25,6 +25,7 @@ flate2 = "1.1"
 image.workspace = true
 ron = "0.8"
 serde = { version = "1.0", features = ["derive"] }
+brotli-decompressor = "6.1.0"
 
 [[bin]]
 name = "reimport-model-probe"
@@ -81,3 +82,7 @@ path = "src/bin/import_locomotion.rs"
 [[bin]]
 name = "audit-animations"
 path = "src/bin/audit_animations.rs"
+
+[[bin]]
+name = "import-bonnie32-grid"
+path = "src/bin/import_bonnie32_grid.rs"

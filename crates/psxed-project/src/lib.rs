@@ -38,6 +38,7 @@ mod brush_vis;
 pub mod brush_walk;
 pub mod brush_world;
 pub mod clip_window;
+pub mod grid;
 mod solid_cell_constraints;
 pub mod solid_cell_proofs;
 pub use animation_pose_correction::*;
