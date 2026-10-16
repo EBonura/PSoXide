@@ -33,6 +33,8 @@
 //! * [`light`]: the per-corner light bake of those faces.
 //! * [`edit`]: the editing operations the grid tools call.
 //! * [`bonnie`] and [`bonnie_project`]: the bonnie-32 level importer.
+//! * [`starter`]: the starter room of File > New Grid Project.
+//! * [`palette`]: which project materials a grid world's palette offers.
 
 pub mod bonnie;
 pub mod bonnie_project;
@@ -40,8 +42,10 @@ pub mod edit;
 pub mod faces;
 pub mod light;
 pub mod limits;
+pub mod palette;
 pub mod room;
 pub mod sector;
+pub mod starter;
 pub mod surface;
 pub mod units;
 pub mod world;

@@ -304,7 +304,7 @@ fn entity_role(scene: &Scene, id: NodeId) -> Option<bool> {
 /// The base project minus its level: brushes, lights, props and pickups go;
 /// the player and the first `enemies` enemies stay so frame costs match a
 /// real playthrough. The once-per-launch world message is dropped.
-fn strip_base(project: &mut ProjectDocument, enemies: usize) {
+pub(super) fn strip_base(project: &mut ProjectDocument, enemies: usize) {
     let scene = project.active_scene_mut();
     scene.brushes.clear();
     let top: Vec<NodeId> = scene
@@ -372,7 +372,7 @@ fn central_floor_cell(world: &GridWorld) -> Option<SpawnRequest> {
 
 /// Editor-space spawn point for a sector: its centre, just above the
 /// highest floor corner.
-fn spawn_point(world: &GridWorld, spawn: SpawnRequest) -> Option<[i32; 3]> {
+pub(super) fn spawn_point(world: &GridWorld, spawn: SpawnRequest) -> Option<[i32; 3]> {
     let room = world.rooms.get(spawn.room)?;
     let top = floor_top(world, spawn.room, spawn.cell)?;
     let half = SECTOR_UNITS / 2;
@@ -390,7 +390,7 @@ fn spawn_point(world: &GridWorld, spawn: SpawnRequest) -> Option<[i32; 3]> {
 /// How far above the spawn an actor may still be dropped onto a floor.
 const ACTOR_FLOOR_REACH: i32 = 512;
 
-fn place_actors(
+pub(super) fn place_actors(
     project: &mut ProjectDocument,
     world: &GridWorld,
     at: [i32; 3],
@@ -477,7 +477,7 @@ fn add_lights(project: &mut ProjectDocument, converted: &ConvertedLevel) {
 }
 
 #[cfg(unix)]
-fn link_assets(base: &Path, out: &Path) -> std::io::Result<()> {
+pub(super) fn link_assets(base: &Path, out: &Path) -> std::io::Result<()> {
     let link = out.join("assets");
     if link.symlink_metadata().is_ok() {
         std::fs::remove_file(&link)?;
@@ -496,7 +496,7 @@ fn link_assets(base: &Path, out: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(not(unix))]
-fn link_assets(base: &Path, out: &Path) -> std::io::Result<()> {
+pub(super) fn link_assets(base: &Path, out: &Path) -> std::io::Result<()> {
     // No symlinks here: copy the shared assets instead.
     let _ = (base, out);
     Err(std::io::Error::other(
