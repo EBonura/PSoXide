@@ -132,6 +132,16 @@ flight (under two milliseconds on the wire) and abandons it only after three
 VBlanks. Keep a lease to one card transaction; `CardJob` already advances one per
 step.
 
+A card arms the SIO ACK interrupt itself (`begin_card` and `exchange_card` in
+`psx-io`: its ACK pulse can be short enough to fall inside an unrelated CPU
+interrupt, so the driver waits on the `STAT.IRQ` latch rather than the live
+level). With the engine's sources enabled each of those pulses also raises IRQ7
+into the engine's handler, which therefore does nothing while a lease is out:
+clearing the latch there would erase the acknowledgement the card driver is
+waiting for. `pad-engine-check` reads eight card frames through the lease and
+fails the run if any read fails (0 of 8 read without this rule, 8 of 8 with it);
+the host test is `a_card_ack_interrupt_during_a_lease_leaves_the_latch_to_the_card_driver`.
+
 This is arbitration by exclusion, not interleaving: a sector transfer is about
 as long as a frame, and a pad packet cannot be inserted into the middle of a
 card packet on the same wires.

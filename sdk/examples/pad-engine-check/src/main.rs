@@ -169,6 +169,32 @@ fn main() {
     let updates_after_lease = console::snapshot().port(Port::One).updates;
     line("updates_after_lease", updates_after_lease);
 
+    // A memory card's turn for real: read frames through the lease while the
+    // engine runs and the card raises IRQ7 with every ACK. The engine must
+    // leave the ACK latch the card driver waits on alone (before it did, the
+    // first byte timed out and the card read as absent). Needs a card in port
+    // 1, which the headless frontend provides (`--memcard`).
+    let mut card_ok = 0u32;
+    let mut card_failed = 0u32;
+    let updates_before_card = console::snapshot().port(Port::One).updates;
+    for frame in 0..8u16 {
+        {
+            let mut lease = console::lease();
+            let mut card = psx_mc::HardwareCard::on_port(&mut *lease, psx_mc::Slot::One);
+            let mut out = [0u8; psx_mc::FRAME_SIZE];
+            match psx_mc::Block::read_frame(&mut card, frame, &mut out) {
+                Ok(()) => card_ok += 1,
+                Err(_) => card_failed += 1,
+            }
+        }
+        spin_to_next_vblank();
+        spin_to_next_vblank();
+    }
+    let card_pad_updates = console::snapshot().port(Port::One).updates - updates_before_card;
+    line("card_reads_ok", card_ok);
+    line("card_reads_failed", card_failed);
+    line("card_pad_updates", card_pad_updates);
+
     // A polled CD read, as the SDK's pack loader and FMV streamer do it, holds
     // I_MASK at VBlank for its whole stream. The engine must keep running
     // through it: before the mask kept its sources, every transaction stalled
@@ -324,6 +350,8 @@ fn main() {
     check(stats.stalls == 0 && stats.spurious == 0, "no stalls or spurious interrupts");
     check(console::handler_stack_unused_bytes() >= 256, "the handler stack has room");
     check(updates_after_lease > snap.port(Port::One).updates, "polling resumes after the lease");
+    check(card_ok == 8 && card_failed == 0, "a memory card cannot be read through the lease");
+    check(card_pad_updates >= 8, "the pad is not read between card transactions");
     if cd_ran {
         check(cd_stalls == 0 && cd_faults == 0, "the engine stalls or faults during a polled CD read");
         check(cd_updates >= 45, "the pad is still read during a polled CD read");
