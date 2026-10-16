@@ -511,26 +511,42 @@ impl<'a, T: CookedRecord> RecordSlice<'a, T> {
         RecordIter {
             records: self,
             index: 0,
+            len: self.len(),
         }
     }
 }
 
+/// Walks a [`RecordSlice`] front to back.
+///
+/// The record count is fixed once, when the iterator is made: one 32-bit
+/// `divu`. Recomputing it per step from `bytes.len() / T::SIZE` plus a
+/// `checked_mul` bounds check let LLVM widen the loop's trip-count formula
+/// (`(len - SIZE) / SIZE + 1`) to 64 bits and link `__udivdi3` into every
+/// guest that collects a record iterator into a `Vec`.
 pub struct RecordIter<'a, T> {
     records: RecordSlice<'a, T>,
     index: usize,
+    len: usize,
 }
 
 impl<T: CookedRecord> Iterator for RecordIter<'_, T> {
     type Item = T;
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        let value = self.records.get(self.index)?;
+        if self.index >= self.len {
+            return None;
+        }
+        // SAFETY: `index < len == records.len()`, so the record is in bounds
+        // (`RecordSlice::new` only accepts whole multiples of `T::SIZE`).
+        let value = unsafe { self.records.get_unchecked(self.index) };
         self.index += 1;
         Some(value)
     }
 
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = self.records.len().saturating_sub(self.index);
+        let remaining = self.len - self.index;
         (remaining, Some(remaining))
     }
 }
