@@ -15,6 +15,9 @@
 //!                [--play OUT.wav] [--original OUT.wav]
 //! psx-audio-cook xa-encode OUT.XA SONG.wav... [--rate 37800|18900] [--mono]
 //!                [--speed 1|2] [--file N] [--peak F] [--manifest OUT.json]
+//! psx-audio-cook xa-pack OUT_DIR NAME SONG.wav... [--rate 37800|18900] [--mono]
+//!                [--speed 1|2] [--first-file N] [--peak F] [--manifest OUT.json]
+//!                [--rust OUT.rs]
 //! psx-audio-cook xa-decode IN.XA CHANNEL OUT.wav
 //! psx-audio-cook xa-score SRC.wav IN.XA CHANNEL
 //! psx-audio-cook xa-peaks CAPTURE.wav
@@ -50,6 +53,7 @@ pub fn run(args: &[String]) -> ExitCode {
         Some("rates") if args.len() == 2 => rates(&args[1]),
         Some("score") if args.len() >= 3 => score_cmd(&args[1], &args[2], &args[3..]),
         Some("xa-encode") if args.len() >= 3 => xa_cli::encode(&args[1], &args[2..]),
+        Some("xa-pack") if args.len() >= 4 => xa_cli::pack(&args[1], &args[2], &args[3..]),
         Some("xa-decode") if args.len() == 4 => xa_cli::decode(&args[1], &args[2], &args[3]),
         Some("xa-score") if args.len() == 4 => xa_cli::score(&args[1], &args[2], &args[3]),
         Some("xa-peaks") if args.len() == 2 => xa_cli::peaks(&args[1]),

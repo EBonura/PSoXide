@@ -403,3 +403,56 @@ fn restart_keeps_the_length_and_starts_history_free() {
     assert_eq!(c.loop_block, None);
     assert_eq!(c.adpcm[c.adpcm.len() - 15], adpcm::FLAG_END);
 }
+
+#[test]
+fn xa_pack_writes_files_manifest_and_constants_from_wavs() {
+    let dir = std::env::temp_dir().join(format!("xa-pack-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut args: Vec<String> = vec![
+        "xa-pack".into(),
+        dir.join("out").to_string_lossy().into_owned(),
+        "TEST".into(),
+    ];
+    // Five songs of different lengths: four share TEST1.XA, the shortest TEST2.XA.
+    for (i, secs) in [0.30, 0.10, 0.25, 0.20, 0.28].into_iter().enumerate() {
+        let plane = tone(44_100, secs, &[300.0 + 110.0 * i as f64]);
+        let pcm: Vec<i16> = plane.iter().map(|v| v.round() as i16).collect();
+        let path = dir.join(format!("song{i}.wav"));
+        std::fs::write(&path, wav::write_pcm16(44_100, &[&pcm, &pcm])).unwrap();
+        args.push(path.to_string_lossy().into_owned());
+    }
+    let manifest = dir.join("pack.json");
+    let rust = dir.join("pack.rs");
+    args.extend([
+        "--first-file".into(),
+        "2".into(),
+        "--manifest".into(),
+        manifest.to_string_lossy().into_owned(),
+        "--rust".into(),
+        rust.to_string_lossy().into_owned(),
+    ]);
+    let status = psx_audio_cook::cli::run(&args);
+    assert_eq!(
+        format!("{status:?}"),
+        format!("{:?}", std::process::ExitCode::SUCCESS)
+    );
+    let first = std::fs::read(dir.join("out/TEST1.XA")).unwrap();
+    let second = std::fs::read(dir.join("out/TEST2.XA")).unwrap();
+    assert_eq!(first.len() % 2336, 0);
+    assert!(
+        second.len() < first.len(),
+        "the short song's file is shorter"
+    );
+    let json = std::fs::read_to_string(&manifest).unwrap();
+    assert!(
+        json.contains("\"name\":\"song1\",\"file\":1,\"channel\":0"),
+        "{json}"
+    );
+    let source = std::fs::read_to_string(&rust).unwrap();
+    assert!(
+        source.contains("XA_FILE_NUMBERS: [u8; 2] = [2, 3]"),
+        "{source}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
