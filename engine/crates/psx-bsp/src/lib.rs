@@ -1605,6 +1605,42 @@ mod tests {
     use super::*;
     use std::vec::Vec;
 
+    /// A record whose size is not a power of two, like the cooked planes.
+    #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+    struct Fourteen([u8; 14]);
+
+    impl CookedRecord for Fourteen {
+        const SIZE: usize = 14;
+
+        fn decode(bytes: &[u8]) -> Self {
+            let mut record = [0; 14];
+            record.copy_from_slice(&bytes[..14]);
+            Self(record)
+        }
+    }
+
+    #[test]
+    fn record_iterator_yields_exactly_what_indexing_does() {
+        for count in [0usize, 1, 2, 3, 7, 64, 257] {
+            let bytes: Vec<u8> = (0..count * 14).map(|i| (i * 31 + 7) as u8).collect();
+            let records = RecordSlice::<Fourteen>::new(&bytes).expect("whole records");
+            assert_eq!(records.len(), count);
+            let mut iter = records.iter();
+            assert_eq!(iter.len(), count);
+            for index in 0..count {
+                assert_eq!(iter.size_hint(), (count - index, Some(count - index)));
+                assert_eq!(iter.next(), records.get(index), "record {index}/{count}");
+            }
+            assert_eq!(iter.size_hint(), (0, Some(0)));
+            assert_eq!(iter.next(), None);
+            assert_eq!(iter.next(), None, "a finished iterator stays finished");
+            let collected: Vec<Fourteen> = records.iter().collect();
+            assert_eq!(collected.len(), count);
+        }
+        assert!(RecordSlice::<Fourteen>::new(&[0; 13]).is_none());
+        assert!(RecordSlice::<Fourteen>::new(&[0; 15]).is_none());
+    }
+
     struct Bytes(Vec<u8>);
 
     impl ReadAt for Bytes {
