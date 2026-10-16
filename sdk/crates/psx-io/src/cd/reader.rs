@@ -26,8 +26,9 @@
 //! keeps CD-ROM interrupts away from the CPU for the length of a stream:
 //!
 //! * `I_MASK` is set to VBlank-only (by `prepare`, and again by each
-//!   `start_read`) until [`SectorReader::stop`] puts the previous value back. Every other source stops reaching the CPU in
-//!   between: a CD-ROM IRQ with no handler would otherwise be an unhandled-IRQ
+//!   `start_read`) until [`SectorReader::stop`] puts the previous value back,
+//!   plus whatever [`irq::keep_enabled_while_polling`] holds. Every other
+//!   source stops reaching the CPU in between: a CD-ROM IRQ with no handler would otherwise be an unhandled-IRQ
 //!   storm.
 //! * The latched CD-ROM `I_STAT` bit is acked and the controller's five IRQ
 //!   enables are switched on, then every pending controller IRQ is acked.
@@ -315,15 +316,16 @@ impl SectorReader {
     }
 
     /// Set `I_MASK` to VBlank-only, keeping the caller's mask for
-    /// [`stop`](Self::stop). Idempotent within a stream.
+    /// [`stop`](Self::stop), plus the sources [`irq::keep_enabled_while_polling`]
+    /// holds (the pad engine's). Idempotent within a stream.
     fn enter_polling_mask(&mut self) {
         self.saved_mask.keep(irq::mask());
-        irq::set_mask(1 << psx_hw::irq::source::VBLANK);
+        irq::set_mask((1 << psx_hw::irq::source::VBLANK) | irq::polling_keep());
     }
 
     fn restore_irq_mask(&mut self) {
         if let Some(mask) = self.saved_mask.take() {
-            irq::set_mask(mask);
+            irq::set_mask(mask_after_stream(mask, irq::polling_keep()));
         }
     }
 
@@ -567,9 +569,25 @@ impl Default for SectorReader {
     }
 }
 
+/// The `I_MASK` to put back when a polled stream ends: the one it found, plus
+/// the sources a driver installed meanwhile asked to keep
+/// ([`irq::keep_enabled_while_polling`]). Restoring the saved word alone would
+/// drop a source (the pad engine's) that was switched on during the stream.
+const fn mask_after_stream(saved: u32, keep: u32) -> u32 {
+    saved | keep
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_source_kept_during_the_stream_survives_its_end() {
+        // The pad engine installed mid-stream: its bits were not in the mask
+        // the reader saved, and must not be dropped when it is put back.
+        assert_eq!(mask_after_stream(0b0101, 0b1000_0000), 0b1000_0101);
+        assert_eq!(mask_after_stream(0b0101, 0), 0b0101);
+    }
 
     #[test]
     fn the_reader_owns_the_token_and_hands_it_back() {

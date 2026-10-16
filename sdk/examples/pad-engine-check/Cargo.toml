@@ -18,3 +18,13 @@ lto = true
 [dependencies]
 psx-pad  = { path = "../../crates/psx-pad", features = ["irq-engine"] }
 psx-rt   = { path = "../../crates/psx-rt" }
+psx-cdstream = { path = "../../crates/psx-cdstream" }
+psx-io      = { path = "../../crates/psx-io" }
+psx-mc      = { path = "../../crates/psx-mc" }
+
+[features]
+# The polled CD read phase. Needs a disc (`frontend launch --disc`): without one
+# the reader waits out its drive timeouts.
+cd-read = []
+# Reads sectors through psx-cdstream while the engine polls both ports. Needs a disc.
+cd-stream = []
