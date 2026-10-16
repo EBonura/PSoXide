@@ -983,6 +983,33 @@ fn a_lease_is_refused_mid_packet_and_holds_the_engine_off_the_port() {
     assert_eq!(rig.snap().port(Port::One).pad.buttons.bits(), button::L1);
 }
 
+#[test]
+fn a_card_ack_interrupt_during_a_lease_leaves_the_latch_to_the_card_driver() {
+    // A memory card arms the ACK interrupt and waits on STAT.IRQ, so each of
+    // its pulses also reaches the engine's handler as IRQ7. The engine must
+    // not clear the latch or the select there: the card driver's own wait
+    // would then never see its acknowledgement (the settings save reported no
+    // card the moment the engine was on).
+    let mut rig = Rig::new(Config::PORT1_ONLY);
+    rig.plug(Port::One, analog_with(button::L1));
+    rig.frame();
+    assert!(rig.engine.try_lease());
+    let accesses = rig.sim().accesses;
+    let events = rig.engine.stats().events;
+    for _ in 0..4 {
+        rig.engine.on_ack();
+    }
+    assert_eq!(
+        rig.sim().accesses,
+        accesses,
+        "the engine touched the port while a card held it"
+    );
+    assert_eq!(rig.engine.stats().events, events);
+    rig.engine.release_lease();
+    rig.frame();
+    assert_eq!(rig.snap().port(Port::One).pad.buttons.bits(), button::L1);
+}
+
 // ------------------------------------------------------------ snapshots
 
 #[test]
