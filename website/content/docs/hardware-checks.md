@@ -38,7 +38,7 @@ The R3000 has no data cache. Its 1 KiB scratchpad is the only data memory that l
 
 ### 64-bit arithmetic
 
-The PS1 has no 64-bit ALU, so `i64` and `u64` divides call compiler helpers that cost hundreds of cycles. [`guest_symbol_gate.sh`](https://github.com/EBonura/PSoXide/blob/main/tools/guest_symbol_gate.sh) fails when a link map contains those helpers. It isn't part of the SDK example build; the editor repository runs it (`make guest-symbol-gate`) and its Cortex Ignition benchmark does too.
+The PS1 has no 64-bit ALU and no FPU, so `i64` and `u64` divides and every `f32` and `f64` operation call compiler helpers that cost hundreds of cycles. [`guest_symbol_gate.sh`](https://github.com/EBonura/PSoXide/blob/main/tools/guest_symbol_gate.sh) fails when a link map contains those helpers. It isn't part of the SDK example build; the editor repository runs it (`make guest-symbol-gate`) and its Cortex Ignition benchmark does too.
 
 ## Profile-guided builds
 
