@@ -816,7 +816,7 @@ impl BspRuntime {
         // whole Cortex level. Measured on the whole-level tape over the
         // 32-unit node grid: 1200 units -1.3% cycles, 800 -3.8%, 500 -6.4%,
         // all with visible pops since the level has no fog.
-        const FAR_CULL_WORLD: Option<i32> = None;
+        const FAR_CULL_WORLD: Option<i32> = parse_far_cull(option_env!("OPEN_HALL_FAR_WORLD"));
         renderer.set_view_projection(psx_bsp::render::ViewProjection {
             focal_length: PROJECTION.focal_length,
             half_width: i32::from(PROJECTION.screen_x),
@@ -2842,4 +2842,24 @@ mod tests {
             }
         }
     }
+}
+
+/// Build-time far cull for the open-hall fork, in PXBSP world units.
+const fn parse_far_cull(value: Option<&str>) -> Option<i32> {
+    let Some(value) = value else { return None };
+    let bytes = value.as_bytes();
+    if bytes.is_empty() {
+        return None;
+    }
+    let mut out = 0i32;
+    let mut i = 0;
+    while i < bytes.len() {
+        let digit = bytes[i];
+        if digit < b'0' || digit > b'9' {
+            return None;
+        }
+        out = out * 10 + (digit - b'0') as i32;
+        i += 1;
+    }
+    if out == 0 { None } else { Some(out) }
 }

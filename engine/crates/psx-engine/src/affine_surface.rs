@@ -50,6 +50,41 @@ use psx_gpu::material::TextureWindow;
 use psx_gte::math::{Mat3I16, Vec3I16, Vec3I32};
 use psx_gte::scene;
 
+/// Depth fade (Tomb Raider-style darkness): packet colours scale toward black
+/// between `DEPTH_FADE_START` and the far end. `u32::MAX` disables it. The
+/// rate is Q16 fade-units (0..=128) per SZ unit past the start.
+// The console is single-core and the fade is written between frames by the
+// world renderer, so plain statics are enough; the target has no atomics.
+static mut DEPTH_FADE_START: u32 = u32::MAX;
+static mut DEPTH_FADE_RATE_Q16: u32 = 0;
+
+/// Fade packet colours to black from `start_sz` to `end_sz` (GTE SZ units).
+pub fn set_depth_fade(start_sz: u32, end_sz: u32) {
+    let span = end_sz.saturating_sub(start_sz).max(1);
+    // SAFETY: single-core guest; no other access is live during this store.
+    unsafe {
+        DEPTH_FADE_RATE_Q16 = (128u32 << 16) / span;
+        DEPTH_FADE_START = start_sz;
+    }
+}
+
+/// Turn the depth fade off.
+pub fn clear_depth_fade() {
+    // SAFETY: as in `set_depth_fade`.
+    unsafe { DEPTH_FADE_START = u32::MAX };
+}
+
+#[inline(always)]
+fn faded(color: u32, depth: u32, start: u32, rate_q16: u32) -> u32 {
+    if depth <= start {
+        return color;
+    }
+    let fade = (((depth - start) * rate_q16) >> 16).min(128);
+    let keep = 128 - fade;
+    let channel = |shift: u32| (((color >> shift) & 0xff) * keep) >> 7;
+    channel(0) | (channel(8) << 8) | (channel(16) << 16)
+}
+
 /// Staged-tag bit marking a polygon wrapped in its own texture-window
 /// selector. It is this module's marker alone: tagged-stream insertion keeps
 /// only the word count and the slot from a staged tag and ignores it.
@@ -723,8 +758,13 @@ impl PacketSink {
             put(((polygon_words + 1) << 24) | u32::from(otz));
             put(TextureWindow::NONE.word());
         }
+        // SAFETY: as in `set_depth_fade`.
+        let (fade_start, fade_rate) = unsafe { (DEPTH_FADE_START, DEPTH_FADE_RATE_Q16) };
         for (index, corner) in corners.iter().enumerate() {
-            let color = corner.color & 0x00ff_ffff;
+            let mut color = corner.color & 0x00ff_ffff;
+            if fade_start != u32::MAX {
+                color = faded(color, corner.depth, fade_start, fade_rate);
+            }
             put(if index == 0 { command | color } else { color });
             put(screen_word(corner));
             let attribute = match index {

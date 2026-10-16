@@ -240,7 +240,38 @@ const SEMI_TRANSPARENT_COMMAND_BIT: u32 = 0x0200_0000;
 /// from the near plane than a first-person view does. Keep one profile
 /// authority for every world, special-surface and model submission so their
 /// shared edges cross subdivision bands together.
-const PXBSP_RENDER_PROFILE: SurfaceProfile = SurfaceProfile::PXBSP_THIRD_PERSON;
+const PXBSP_RENDER_PROFILE: SurfaceProfile = open_hall_bands(SurfaceProfile::PXBSP_THIRD_PERSON);
+
+/// Open-hall fork knob: `OPEN_HALL_SPLIT_BANDS="once,twice"` at build time
+/// replaces the subdivision bands (ordering-table depth units).
+const fn open_hall_bands(mut profile: SurfaceProfile) -> SurfaceProfile {
+    let Some(value) = option_env!("OPEN_HALL_SPLIT_BANDS") else {
+        return profile;
+    };
+    let bytes = value.as_bytes();
+    let mut numbers = [0u16; 2];
+    let mut slot = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        let byte = bytes[i];
+        if byte == b',' {
+            slot += 1;
+            if slot > 1 {
+                return profile;
+            }
+        } else if byte >= b'0' && byte <= b'9' {
+            numbers[slot] = numbers[slot] * 10 + (byte - b'0') as u16;
+        } else {
+            return profile;
+        }
+        i += 1;
+    }
+    if slot == 1 && numbers[1] <= numbers[0] {
+        profile.split_once_below = numbers[0];
+        profile.split_twice_below = numbers[1];
+    }
+    profile
+}
 
 /// Q20.12 world camera and Q0.12 turn angles.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -580,6 +611,14 @@ impl FrustumPlanes {
         } else {
             projection.far_world.saturating_mul(scale_q12) >> 12
         };
+        // A finite far cull fades colours to black over its last 3/8, so
+        // node boxes popping out at the cull are already dark.
+        if far_view == i32::MAX {
+            psx_engine::affine_surface::clear_depth_fade();
+        } else {
+            let far = far_view.max(1) as u32;
+            psx_engine::affine_surface::set_depth_fade(far * 5 / 8, far);
+        }
         // The view translation is the rotated, negated camera origin in world
         // units, so `T.z << 12` is `-forward . camera` and every distance is
         // camera-relative: a Q12 row against an `i16` position stays under
@@ -4671,7 +4710,9 @@ mod frustum_tests {
 
     #[test]
     fn pxbsp_renderer_uses_the_third_person_affine_profile() {
-        assert_eq!(PXBSP_RENDER_PROFILE, SurfaceProfile::PXBSP_THIRD_PERSON);
+        if option_env!("OPEN_HALL_SPLIT_BANDS").is_none() {
+            assert_eq!(PXBSP_RENDER_PROFILE, SurfaceProfile::PXBSP_THIRD_PERSON);
+        }
         assert_eq!(PXBSP_RENDER_PROFILE.split_once_below, 340);
         assert_eq!(PXBSP_RENDER_PROFILE.split_twice_below, 170);
         assert_eq!(PXBSP_RENDER_PROFILE.ot_depth, 2048);
