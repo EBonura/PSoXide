@@ -296,6 +296,12 @@ pub struct GridFrame {
     pub quads_visible: u16,
     pub vertices_projected: u16,
     pub robust_quads: u16,
+    /// Quads tested for facing, dropped as back-facing, rejected off screen,
+    /// skipped for a missing material, skipped for an OT depth out of range.
+    pub backface_culled: u16,
+    pub screen_culled: u16,
+    pub material_missing: u16,
+    pub depth_skipped: u16,
 }
 
 /// The phases of one grid frame, for timing marks.
@@ -519,6 +525,7 @@ impl GridRenderer {
         let quads_out = self.quads.as_mut_ptr();
         let work_out = self.work.as_mut_ptr();
         let mut quad_count = 0usize;
+        let mut tested = 0usize;
         let mut work_count = 0usize;
         for &cell_index in &self.cells {
             // SAFETY: cell indices were produced from valid grid coordinates.
@@ -527,6 +534,7 @@ impl GridRenderer {
             for q in first..first + usize::from(cell.count) {
                 // SAFETY: parse proved first + count <= quads.len().
                 let quad = unsafe { pack.quads.get_unchecked(q) };
+                tested += 1;
                 let flags = quad.flags;
                 let front = if flags & GRID_QUAD_AXIS != 0 {
                     // Axis-aligned plane: the camera coordinate against the
@@ -575,6 +583,7 @@ impl GridRenderer {
             self.work.set_len(work_count);
         }
         frame.quads_visible = quad_count as u16;
+        frame.backface_culled = (tested - quad_count) as u16;
     }
 
     /// Project every queued corner, three per GTE command.
@@ -598,21 +607,26 @@ impl GridRenderer {
         let store = |index: u16, p: scene::Projected| {
             let sx = i32::from(p.sx);
             let sy = i32::from(p.sy);
+            // A corner at or behind the near plane has no meaningful screen
+            // position (the GTE saturates the divide), so it carries only the
+            // NEAR bit and the quad takes the clipping path instead of being
+            // rejected on garbage coordinates.
             let mut code = 0u16;
-            if sx < 0 {
-                code |= OFF_LEFT;
-            }
-            if sx >= screen[0] {
-                code |= OFF_RIGHT;
-            }
-            if sy < 0 {
-                code |= OFF_TOP;
-            }
-            if sy >= screen[1] {
-                code |= OFF_BOTTOM;
-            }
             if p.sz < near_sz {
-                code |= NEAR;
+                code = NEAR;
+            } else {
+                if sx < 0 {
+                    code |= OFF_LEFT;
+                }
+                if sx >= screen[0] {
+                    code |= OFF_RIGHT;
+                }
+                if sy < 0 {
+                    code |= OFF_TOP;
+                }
+                if sy >= screen[1] {
+                    code |= OFF_BOTTOM;
+                }
             }
             // SAFETY: as above.
             unsafe {
@@ -675,12 +689,15 @@ impl GridRenderer {
                 )
             };
             if s0.code & s1.code & s2.code & s3.code & OFF_ANY != 0 {
+                frame.screen_culled += 1;
                 continue;
             }
             let Some(material) = materials.get(usize::from(quad.material)) else {
+                frame.material_missing += 1;
                 continue;
             };
             if !material.resident {
+                frame.material_missing += 1;
                 continue;
             }
             let any = s0.code | s1.code | s2.code | s3.code;
@@ -696,6 +713,7 @@ impl GridRenderer {
                     (sum + u32::from(s3.sz)) >> 4
                 };
                 if otz == 0 || otz >= 2048 {
+                    frame.depth_skipped += 1;
                     continue;
                 }
                 let words = if triangle { QUAD_PACKET_WORDS - 3 } else { QUAD_PACKET_WORDS };

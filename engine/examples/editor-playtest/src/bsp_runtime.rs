@@ -2083,6 +2083,10 @@ impl BspRuntime {
                     telemetry::counter(telemetry::counter::ROOM_PROJECTED_VERTICES, u32::from(world.vertices_projected));
                     telemetry::counter(telemetry::counter::ROOM_SURF_SPLIT_TRIS, u32::from(world.robust_quads));
                     telemetry::counter(telemetry::counter::ROOM_SURFACE_COMMANDS, u32::from(world.cells_visible));
+                    telemetry::counter(telemetry::counter::ROOM_SURF_BACKFACE_CULLED, u32::from(world.backface_culled));
+                    telemetry::counter(telemetry::counter::ROOM_SURF_SCREEN_CULLED, u32::from(world.screen_culled));
+                    telemetry::counter(telemetry::counter::ROOM_SUBMIT_FALLBACK_CALLS, u32::from(world.material_missing));
+                    telemetry::counter(telemetry::counter::ROOM_SURF_TR_SUBDIVISION_CANDIDATES, u32::from(world.depth_skipped));
                     (
                         world.packet_words,
                         world.packets as usize,
