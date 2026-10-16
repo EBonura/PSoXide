@@ -2031,7 +2031,7 @@ fn translate_brushes(brushes: &[Brush], origin: [i32; 3]) -> Vec<Brush> {
 
 /// Point lights in scene order, paired with the authoring node each came
 /// from so a bake failure can name the light the author has to fix.
-fn scene_lights(scene: &Scene) -> (Vec<BrushPointLight>, Vec<NodeId>) {
+pub(crate) fn scene_lights(scene: &Scene) -> (Vec<BrushPointLight>, Vec<NodeId>) {
     // Radius is authored in sector units. Use the scene's World sector size
     // so the bake agrees with the runtime PlaytestLight records, which scale
     // by the same value (cook_props_lights::push_point_light).
@@ -2079,7 +2079,7 @@ fn translate_lights(lights: &[BrushPointLight], origin: [i32; 3]) -> Vec<BrushPo
         .collect()
 }
 
-fn material_tints(project: &ProjectDocument) -> Vec<BrushMaterialTint> {
+pub(crate) fn material_tints(project: &ProjectDocument) -> Vec<BrushMaterialTint> {
     let mut tints = vec![BrushMaterialTint {
         material: None,
         color: [128; 3],

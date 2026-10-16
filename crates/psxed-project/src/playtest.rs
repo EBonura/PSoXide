@@ -246,6 +246,46 @@ pub use manifest::{
 pub use performance::{playtest_performance_envelope, PlaytestPerformanceEnvelope};
 pub use schema::*;
 
+/// Open-hall experiment: cook the grid render pack for the level named by
+/// `OPEN_HALL_GRID_LEVEL`. Empty when the variable is unset or the cook
+/// fails (the failure is a cook error).
+fn cook_grid_pack_if_requested(
+    project: &ProjectDocument,
+    compiled: &crate::brush_world::CompiledBrushWorld,
+    ambient: [u8; 3],
+    report: &mut PlaytestValidationReport,
+) -> Vec<u8> {
+    let Some(level) = std::env::var_os("OPEN_HALL_GRID_LEVEL") else {
+        return Vec::new();
+    };
+    let scene = project.active_scene();
+    let (lights, _) = crate::brush_world::scene_lights(scene);
+    let tints = crate::brush_world::material_tints(project);
+    let texture_assets: Vec<(String, u16)> = compiled
+        .textures
+        .iter()
+        .map(|texture| (texture.key.clone(), texture.asset_id))
+        .collect();
+    let input = crate::brush_grid::GridCookInput {
+        project,
+        level_path: Path::new(&level),
+        ambient,
+        lights: &lights,
+        tints: &tints,
+        texture_assets: &texture_assets,
+    };
+    match crate::brush_grid::cook_grid_pack(&input) {
+        Ok((bytes, stats)) => {
+            report.warn(stats.summary());
+            bytes
+        }
+        Err(error) => {
+            report.error(format!("grid pack cook failed: {error}"));
+            Vec::new()
+        }
+    }
+}
+
 fn runtime_sky_flags(sky: crate::ResolvedSkySettings) -> u16 {
     if !sky.sky_enabled() {
         return 0;
@@ -737,7 +777,9 @@ pub fn build_package(
     } else {
         crate::solid_cell_proofs::SolidCellProofs::default()
     };
+    let grid_pack = cook_grid_pack_if_requested(project, &compiled, world_options.ambient, &mut report);
     let world_geometry = PlaytestPxbspWorld {
+        grid_pack,
         solid_cell_proofs,
         bytes: compiled.pxbsp.bytes,
         max_visible_faces: compiled.pxbsp.max_visible_faces,

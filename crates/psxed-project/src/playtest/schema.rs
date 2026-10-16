@@ -131,6 +131,10 @@ pub struct PlaytestPxbspWorld {
     /// whole-map container of the same geometry, which the budget and
     /// analysis passes read; the guest loads `stream.container` instead.
     pub stream: Option<PlaytestStreamedWorld>,
+    /// Open-hall experiment: the grid render pack for the same level, cooked
+    /// when `OPEN_HALL_GRID_LEVEL` names a bonnie-32 level file; empty
+    /// otherwise.
+    pub grid_pack: Vec<u8>,
 }
 
 /// A world cooked as a resident top container plus a region pack on disc.
@@ -156,6 +160,7 @@ impl Default for PlaytestPxbspWorld {
             movers: Vec::new(),
             leak_path: Vec::new(),
             stream: None,
+            grid_pack: Vec::new(),
         }
     }
 }
