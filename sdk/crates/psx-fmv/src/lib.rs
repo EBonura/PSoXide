@@ -11,7 +11,7 @@
 //! 2. [`bitstream::decode_frame`] runs the variable-length decode on the CPU,
 //!    turning the bitstream into the MDEC's run-length halfwords.
 //! 3. [`mdec::Mdec`], the driver that owns the MDEC's DMA channels, feeds
-//!    those to the MDEC over DMA0 and pulls decoded 16-pixel-wide columns back
+//!    those to the MDEC over DMA0 and pulls the decoded frame back
 //!    over DMA1 for upload to VRAM.
 //!
 //! Everything but [`mdec`] is plain logic, built and tested on the host; the
