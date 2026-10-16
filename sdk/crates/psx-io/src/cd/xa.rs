@@ -173,15 +173,32 @@ pub struct HeadSample {
 
 impl HeadSample {
     /// Start of the head's sector, in milliseconds since the top of the file.
+    ///
+    /// `floor(sector * 1000 / sectors_per_second)`, wrapped to `u32` exactly
+    /// as the former `u64` expression was, in 32-bit operations: the sector
+    /// splits into whole seconds of sectors and a remainder below
+    /// `sectors_per_second`, so the remainder term is at most 150 * 1000.
     pub const fn millis(self) -> u32 {
-        (self.sector as u64 * 1000 / self.sectors_per_second as u64) as u32
+        let whole = self.sector / self.sectors_per_second;
+        let part = self.sector % self.sectors_per_second;
+        whole
+            .wrapping_mul(1000)
+            .wrapping_add(part * 1000 / self.sectors_per_second)
     }
 
     /// Middle of the head's sector, in milliseconds: the head was somewhere
     /// in the sector, so this is the reading with the least expected error
     /// (half a sector, 6.7 ms at single speed).
+    ///
+    /// `floor((2 * sector + 1) * 500 / sectors_per_second)`, which is
+    /// `floor((sector * 1000 + 500) / sectors_per_second)`, split like
+    /// [`Self::millis`] so no product exceeds 32 bits.
     pub const fn centre_millis(self) -> u32 {
-        ((2 * self.sector as u64 + 1) * 500 / self.sectors_per_second as u64) as u32
+        let whole = self.sector / self.sectors_per_second;
+        let part = self.sector % self.sectors_per_second;
+        whole
+            .wrapping_mul(1000)
+            .wrapping_add((part * 1000 + 500) / self.sectors_per_second)
     }
 }
 
@@ -628,6 +645,48 @@ mod tests {
     use std::string::{String, ToString};
     use std::vec::Vec;
     use std::{format, vec};
+
+    #[test]
+    fn head_sample_milliseconds_match_the_wide_form_for_every_sector() {
+        let wide_start =
+            |sector: u32, rate: u32| (u64::from(sector) * 1000 / u64::from(rate)) as u32;
+        let wide_centre =
+            |sector: u32, rate: u32| ((2 * u64::from(sector) + 1) * 500 / u64::from(rate)) as u32;
+        let check = |sector: u32, rate: u32| {
+            let head = HeadSample {
+                epoch: 0,
+                serial: 0,
+                sector,
+                sectors_per_second: rate,
+            };
+            assert_eq!(
+                head.millis(),
+                wide_start(sector, rate),
+                "{sector} at {rate}"
+            );
+            assert_eq!(
+                head.centre_millis(),
+                wide_centre(sector, rate),
+                "{sector} at {rate}"
+            );
+        };
+        for rate in [75, 150] {
+            // Every sector of an 80-minute disc, then the u32 edges.
+            for sector in 0..400_000 {
+                check(sector, rate);
+            }
+            for sector in [u32::MAX, u32::MAX - 1, u32::MAX / 2, 1 << 31, (1 << 31) - 1] {
+                check(sector, rate);
+            }
+            let mut state = 0x9e37_79b9u32;
+            for _ in 0..200_000 {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                check(state, rate);
+            }
+        }
+    }
 
     #[test]
     fn an_idle_player_owns_the_token_and_hands_it_back() {
