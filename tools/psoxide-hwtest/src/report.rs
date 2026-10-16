@@ -12,6 +12,7 @@ use crate::tables::{LABELS, LAYOUT_IMMUNE_RECORDS, WORK_BY_ID};
 use crate::util::{
     base64_decode, crc32, parse_hex, split_words, splitlines, Error, Reader, Result,
 };
+use crate::v2::{v2_entry, v2_rows};
 
 // PX7: explicit per-record ids and a median column. The slot count comes from
 // the header: early v1.5 captures carried 144 slots, later ones 176.
@@ -89,57 +90,6 @@ pub fn list_busy_labels() -> Vec<String> {
     labels
 }
 
-// v1.25 FMV STREAM TEST records: (min, median, max) field names per record.
-pub const FMV_FIRST_RECORD: u32 = 0x1F0;
-pub const FMV_FIELDS: [[&str; 3]; 6] = [
-    ["pass", "good_sectors", "total_sectors"],
-    ["lost_sectors", "bad_sectors", "dropped_frames"],
-    ["cd_errors", "decode_errors", "first_error_lba"],
-    ["frames_shown", "frames_late", "vblanks"],
-    ["kcyc_vlc", "kcyc_mdec_upload", "kcyc_wait"],
-    ["last_good_lba", "runs", "setup_error"],
-];
-/// first_error_lba when nothing went wrong.
-const FMV_NO_ERROR_LBA: i64 = 0xFFFF;
-pub const FMV_SETUP_ERRORS: [&str; 6] = [
-    "none",
-    "cd prepare",
-    "MOVIE.STR not found",
-    "cd xa mode",
-    "mdec tables",
-    "cd start",
-];
-
-// v1.26 MDEC DIAGNOSTIC (src/fmv_diag.rs, `records` documents the layout).
-const MDEC_SEQUENCES: [&str; 6] = [
-    "A control v1.25",
-    "B settle then enable",
-    "C fixed delay",
-    "D cpu tables",
-    "E psn00bsdk order",
-    "F sdk driver",
-];
-const MDEC_STEPS: [&str; 7] = [
-    "none",
-    "reset settle",
-    "quant upload",
-    "scale upload",
-    "idle after tables",
-    "probe dma0 in",
-    "probe dma1 out",
-];
-const MDEC_SNAPSHOTS: [&str; 6] = [
-    "before_reset",
-    "after_reset",
-    "after_enable",
-    "after_command",
-    "after_tables",
-    "after_probe",
-];
-const MDEC_STOPS: [&str; 5] = ["end", "stall", "wedged", "cd error", "setup"];
-const MDEC_TRACES: [&str; 3] = ["from_idle", "from_busy", "from_busy_with_enable"];
-const MDEC_NEVER: i64 = 0xFFFF;
-
 // v1.27 CONSOLE TESTS (src/console_tests.rs): the field names of each record.
 pub const CONSOLE_KERNEL_FIRST: u32 = 0x2C0;
 pub const CONSOLE_KERNEL: [[&str; 3]; 6] = [
@@ -148,7 +98,11 @@ pub const CONSOLE_KERNEL: [[&str; 3]; 6] = [
     ["empty_call_min", "empty_call_med", "empty_call_max"],
     ["bios_vblank_min", "bios_vblank_med", "bios_vblank_max"],
     ["bios_vblank_gaps", "bios_vblank_events_ready", "flags"],
-    ["runtime_vblank_min", "runtime_vblank_med", "runtime_vblank_max"],
+    [
+        "runtime_vblank_min",
+        "runtime_vblank_med",
+        "runtime_vblank_max",
+    ],
 ];
 pub const CONSOLE_WIDTHS: [u32; 6] = [256, 320, 368, 384, 512, 640];
 
@@ -169,6 +123,8 @@ pub struct CapturePage {
     pub total: u32,
     pub chunk: String,
     pub crc: u32,
+    /// v2.0 pages carry the run id after the page numbers (`PPTTRRRR`).
+    pub run_id: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -192,6 +148,8 @@ pub struct Failure {
 pub struct Capture {
     pub schema: String,
     pub version: u8,
+    /// The run id the pages carried (v2.0 and later).
+    pub run_id: Option<u32>,
     /// Which blocks the capture carried. Older schemas always carried them all.
     pub flags: u8,
     pub failures: Vec<Failure>,
@@ -229,6 +187,27 @@ pub fn work(record_id: u32) -> Option<u32> {
         .map(|at| WORK_BY_ID[at].1)
 }
 
+/// v2.0 and later: the 16-bit run id (also in every page). Before: the timing
+/// run counter.
+pub fn run_id_text(capture: &Capture) -> String {
+    if capture.suite_major >= 2 {
+        format!(
+            "{:04X}",
+            u32::from(capture.conformance_run) | u32::from(capture.timing_run) << 8
+        )
+    } else {
+        format!("{:02X}", capture.timing_run)
+    }
+}
+
+/// The name a record prints under: the v2 table first, then the older labels.
+pub fn record_label(record_id: u32) -> String {
+    match v2_entry(record_id) {
+        Some(entry) => entry.label.clone(),
+        None => label(record_id).unwrap_or("unlabelled").to_string(),
+    }
+}
+
 fn layout_immune(record_id: u32) -> bool {
     LAYOUT_IMMUNE_RECORDS.contains(&(record_id as u16))
 }
@@ -260,11 +239,17 @@ pub fn parse_capture_page(payload: &str) -> Result<CapturePage> {
         (Some(marker), Some(page_field), Some(chunk)) => (marker, page_field, chunk),
         _ => return Err(malformed()),
     };
+    // v2.0 pages carry the run id after the page numbers: PPTTRRRR.
     ensure!(
-        SCHEMAS.contains(&marker) && page_field.len() == 4 && !chunk.is_empty(),
+        SCHEMAS.contains(&marker)
+            && (page_field.len() == 4 || page_field.len() == 8)
+            && !chunk.is_empty(),
         "malformed capture page header"
     );
-    ensure!(chunk.is_ascii(), "non-ASCII capture page");
+    ensure!(
+        chunk.is_ascii() && page_field.is_ascii(),
+        "non-ASCII capture page"
+    );
     let actual_crc = crc32(chunk.as_bytes());
     ensure!(
         parse_hex(claimed_crc)? == u64::from(actual_crc),
@@ -273,9 +258,14 @@ pub fn parse_capture_page(payload: &str) -> Result<CapturePage> {
     Ok(CapturePage {
         schema: marker.to_string(),
         number: parse_hex(&page_field[..2])? as u32,
-        total: parse_hex(&page_field[2..])? as u32,
+        total: parse_hex(&page_field[2..4])? as u32,
         chunk: chunk.to_string(),
         crc: actual_crc,
+        run_id: if page_field.len() == 8 {
+            Some(parse_hex(&page_field[4..])? as u32)
+        } else {
+            None
+        },
     })
 }
 
@@ -307,6 +297,7 @@ pub fn parse_capture(payloads: &[String]) -> Result<Capture> {
     for page in &pages {
         by_number.insert(page.number, page);
     }
+    let run_id = by_number.get(&1).and_then(|page| page.run_id);
     let missing: Vec<String> = (1..=page_count)
         .filter(|number| !by_number.contains_key(number))
         .map(|number| number.to_string())
@@ -320,7 +311,8 @@ pub fn parse_capture(payloads: &[String]) -> Result<Capture> {
     let encoded: String = (1..=page_count)
         .map(|number| by_number[&number].chunk.as_str())
         .collect();
-    let binary = base64_decode(&encoded).map_err(|e| Error(format!("invalid {schema} Base64: {e}")))?;
+    let binary =
+        base64_decode(&encoded).map_err(|e| Error(format!("invalid {schema} Base64: {e}")))?;
     ensure!(binary.len() >= 4, "{schema} binary is truncated");
     let claimed_binary_crc = u32::from_le_bytes(binary[binary.len() - 4..].try_into().expect("4"));
     let actual_binary_crc = crc32(&binary[..binary.len() - 4]);
@@ -350,7 +342,15 @@ pub fn parse_capture(payloads: &[String]) -> Result<Capture> {
     let mut header = Reader::new(&binary, 5);
     let suite_major = header.u8()?;
     let suite_minor = header.u8()?;
-    let (conformance_run, timing_run, test_count, timing_count, memory_count, status_bits, scan_count);
+    let (
+        conformance_run,
+        timing_run,
+        test_count,
+        timing_count,
+        memory_count,
+        status_bits,
+        scan_count,
+    );
     let mut precision_count = 0usize;
     let digest_offset;
     if schema == "PX8" {
@@ -440,21 +440,25 @@ pub fn parse_capture(payloads: &[String]) -> Result<Capture> {
                 window |= u32::from(packed_statuses[bit / 8 + 1]) << 8;
             }
             let status = ((window >> (bit % 8)) & 0x7) as u8;
-            ensure!(status <= 4, "invalid {schema} status {status} for case {index}");
+            ensure!(
+                status <= 4,
+                "invalid {schema} status {status} for case {index}"
+            );
             statuses.push(status);
         }
     }
 
     let mut records: Vec<Record> = Vec::new();
-    let push_record = |records: &mut Vec<Record>, record_id: u32, minimum: u16, median: u16, maximum: u16| {
-        records.push(Record {
-            record_id,
-            work: work(record_id).unwrap_or(0),
-            minimum: i64::from(minimum),
-            maximum: i64::from(maximum),
-            median: i64::from(median),
-        });
-    };
+    let push_record =
+        |records: &mut Vec<Record>, record_id: u32, minimum: u16, median: u16, maximum: u16| {
+            records.push(Record {
+                record_id,
+                work: work(record_id).unwrap_or(0),
+                minimum: i64::from(minimum),
+                maximum: i64::from(maximum),
+                median: i64::from(median),
+            });
+        };
     if flags & PX8_BLOCK_TIMING != 0 {
         // Ids are explicit, so an unfilled slot is skipped rather than shifting
         // every later record's meaning.
@@ -500,6 +504,7 @@ pub fn parse_capture(payloads: &[String]) -> Result<Capture> {
     Ok(Capture {
         schema,
         version,
+        run_id,
         flags,
         failures,
         page_count,
@@ -524,7 +529,10 @@ pub fn parse_capture(payloads: &[String]) -> Result<Capture> {
 fn payloads_from_text(text: &str) -> Vec<String> {
     let mut found = Vec::new();
     for line in splitlines(text) {
-        let position = SCHEMAS.iter().filter_map(|name| line.find(&format!("{name}/"))).min();
+        let position = SCHEMAS
+            .iter()
+            .filter_map(|name| line.find(&format!("{name}/")))
+            .min();
         if let Some(position) = position {
             if let Some(word) = split_words(&line[position..]).first() {
                 found.push(word.to_string());
@@ -567,10 +575,19 @@ pub fn list_busy_rows(capture: &Capture) -> Vec<String> {
         let value = capture.observations[index];
         if label == "packed_list_pixels_match" {
             let status = capture.statuses.get(index).copied().unwrap_or(0);
-            rows.push(format!("{index},{label},{}", STATUS_LABELS[usize::from(status)]));
+            rows.push(format!(
+                "{index},{label},{}",
+                STATUS_LABELS[usize::from(status)]
+            ));
         } else if let Some(loop_name) = label.strip_suffix("_iterations") {
-            rows.push(format!("{index},{loop_name}_walk_iterations,{}", value & 0xFFFF));
-            rows.push(format!("{index},{loop_name}_idle_clocks_per_256,{}", value >> 16));
+            rows.push(format!(
+                "{index},{loop_name}_walk_iterations,{}",
+                value & 0xFFFF
+            ));
+            rows.push(format!(
+                "{index},{loop_name}_idle_clocks_per_256,{}",
+                value >> 16
+            ));
         } else if value == LIST_BUSY_NOT_SEEN {
             rows.push(format!("{index},{label},never"));
         } else {
@@ -581,262 +598,65 @@ pub fn list_busy_rows(capture: &Capture) -> Vec<String> {
 }
 
 fn by_id(records: &[Record]) -> HashMap<u32, &Record> {
-    records.iter().map(|record| (record.record_id, record)).collect()
+    records
+        .iter()
+        .map(|record| (record.record_id, record))
+        .collect()
 }
 
 fn triple(record: &Record) -> (i64, i64, i64) {
     (record.minimum, record.median, record.maximum)
 }
 
-/// MDEC1 status decoded per psx-spx.
-fn mdec_status_text(value: u64) -> String {
-    let flags: Vec<&str> = [
-        (31, "out_empty"),
-        (30, "in_full"),
-        (29, "busy"),
-        (28, "in_req"),
-        (27, "out_req"),
-    ]
-    .iter()
-    .filter(|(bit, _)| value >> bit & 1 != 0)
-    .map(|(_, name)| *name)
-    .collect();
-    let block = value >> 16 & 7;
-    let remaining = value & 0xFFFF;
-    let flags = if flags.is_empty() { "-".to_string() } else { flags.join(" ") };
-    format!("0x{value:08X} [{flags} block={block} words-1={remaining:#06x}]")
-}
+type ById<'a> = HashMap<u32, &'a Record>;
 
-fn mdec_stream(by_id: &HashMap<u32, &Record>, first: u32, records: u32) -> Vec<i64> {
-    let mut halves = Vec::new();
-    for k in 0..records {
-        let Some(record) = by_id.get(&(first + k)) else {
-            break;
-        };
-        halves.extend([record.minimum, record.median, record.maximum]);
+/// Python's `format(value, "g")`: six significant digits, trailing zeros
+/// dropped, an exponent only when the value is very large or very small.
+pub fn fmt_g(value: f64) -> String {
+    fn trim(text: &str) -> String {
+        if text.contains('.') {
+            text.trim_end_matches('0').trim_end_matches('.').to_string()
+        } else {
+            text.to_string()
+        }
     }
-    halves
-}
-
-fn shr(value: u64, count: u64) -> u64 {
-    if count >= 64 {
-        0
+    if value == 0.0 {
+        return "0".to_string();
+    }
+    if !value.is_finite() {
+        return if value.is_nan() {
+            "nan".to_string()
+        } else if value > 0.0 {
+            "inf".to_string()
+        } else {
+            "-inf".to_string()
+        };
+    }
+    let scientific = format!("{value:.5e}");
+    let (mantissa, exponent) = scientific.split_once('e').expect("exponent");
+    let exponent: i32 = exponent.parse().expect("exponent digits");
+    if !(-4..6).contains(&exponent) {
+        let sign = if exponent < 0 { '-' } else { '+' };
+        format!("{}e{sign}{:02}", trim(mantissa), exponent.abs())
     } else {
-        value >> count
+        let decimals = (5 - exponent) as usize;
+        trim(&format!("{value:.decimals$}"))
     }
 }
 
-/// The v1.26 MDEC DIAGNOSTIC and its playbacks, unpacked. Empty unless the
-/// capture carries them.
-pub fn mdec_diag_rows(records: &[Record]) -> Vec<String> {
-    let by_id = by_id(records);
-    let Some(overview) = by_id.get(&0x260) else {
-        return Vec::new();
-    };
-    let mut rows = Vec::new();
-    let chosen = overview.minimum;
-    rows.push(format!(
-        "# mdec_diag chosen={} runs={} batteries={}",
-        if chosen == 0xFFFF {
-            "none".to_string()
-        } else {
-            MDEC_SEQUENCES.get(chosen as usize).map_or_else(|| "?".to_string(), |s| s.to_string())
-        },
-        overview.median,
-        overview.maximum
-    ));
-    rows.push("mdec_diag,sequence,field,value".to_string());
-    let clocks = |v: i64| if v == MDEC_NEVER { "never".to_string() } else { v.to_string() };
-    for (v, name) in MDEC_SEQUENCES.iter().enumerate() {
-        let h = mdec_stream(&by_id, 0x200 + 0x10 * v as u32, 14);
-        if h.len() < 27 {
-            rows.push(format!("mdec_diag,{name},missing,{} halfwords", h.len()));
-            continue;
-        }
-        let word = |i: usize| (h[i] | h[i + 1] << 16) as u64;
-        let (mask, runs) = ((h[0] & 0xFF) as u64, (h[0] >> 8) as u64);
-        let run_fails = word(9);
-        let fails: Vec<&str> = (0..runs)
-            .map(|r| MDEC_STEPS[(shr(run_fails, 4 * r) & 0xF).min(MDEC_STEPS.len() as u64 - 1) as usize])
-            .collect();
-        rows.push(format!(
-            "mdec_diag,{name},worked,{}/{runs} runs_1_to_8={}",
-            mask.count_ones(),
-            format!("{mask:08b}").chars().rev().collect::<String>()
-        ));
-        rows.push(format!("mdec_diag,{name},per_run_fail,{}", fails.join(" | ")));
-        rows.push(format!(
-            "mdec_diag,{name},detail_run,{} fail={}",
-            (h[1] >> 8) + 1,
-            MDEC_STEPS[((h[1] & 0xFF) as usize).min(MDEC_STEPS.len() - 1)]
-        ));
-        rows.push(format!("mdec_diag,{name},settle_clocks,{}", clocks(h[2])));
-        rows.push(format!("mdec_diag,{name},request_clocks,{}", clocks(h[3])));
-        rows.push(format!("mdec_diag,{name},probe_request_clocks,{}", clocks(h[4])));
-        if v == 5 {
-            rows.push(format!(
-                "mdec_diag,{name},sdk_driver,enable_writes={} cpu_uploads={} reset_settled={}",
-                h[5] & 0xFF,
-                h[5] >> 8 & 0x7F,
-                h[5] >> 15
-            ));
-        }
-        let (taken, rescue) = (h[6] & 0xFF, h[6] >> 8);
-        for (slot, snapshot) in MDEC_SNAPSHOTS.iter().enumerate() {
-            let value = word(11 + 2 * slot);
-            let text = if taken >> slot & 1 != 0 {
-                mdec_status_text(value)
-            } else {
-                "not read".to_string()
-            };
-            rows.push(format!("mdec_diag,{name},status_{snapshot},{text}"));
-        }
-        rows.push(format!(
-            "mdec_diag,{name},probe,words={}/128 flat={} first=0x{:08X}",
-            h[7] & 0x7FFF,
-            h[7] >> 15,
-            word(23)
-        ));
-        if v == 0 {
-            let how = match rescue {
-                0 => "not tried (no timeout)".to_string(),
-                1 => "freed the stuck DMA".to_string(),
-                2 => "did not free it".to_string(),
-                other => other.to_string(),
-            };
-            let status = if rescue != 0 {
-                format!(" status={}", mdec_status_text(word(25)))
-            } else {
-                String::new()
-            };
-            rows.push(format!("mdec_diag,{name},late_enable,{how}{status}"));
-        }
-        if h[8] != 0 && h.len() >= 39 {
-            let w: Vec<u64> = (0..6).map(|i| word(27 + 2 * i)).collect();
-            let (chcr, bcr, madr, dpcr, dicr, kick) = (w[0], w[1], w[2], w[3], w[4], w[5]);
-            let moved = ((madr & 0xFF_FFFF) as i64 - (kick & 0xFF_FFFF) as i64).div_euclid(4);
-            rows.push(format!(
-                "mdec_diag,{name},dma_timeout,chcr=0x{chcr:08X} bcr=0x{bcr:08X} madr=0x{madr:08X} kick_madr=0x{kick:08X} words_moved={moved} blocks_left={} dpcr=0x{dpcr:08X} dicr=0x{dicr:08X}",
-                bcr >> 16
-            ));
-        }
+/// A 16-bit field read as signed.
+fn signed16(value: i64) -> i64 {
+    if value >= 0x8000 {
+        value - 0x10000
+    } else {
+        value
     }
-    for (v, name) in MDEC_SEQUENCES.iter().enumerate() {
-        let h = mdec_stream(&by_id, 0x270 + 4 * v as u32, 4);
-        if h.len() < 12 {
-            continue;
-        }
-        let (stop, passed, setup) = (h[0] & 0xF, h[0] >> 4 & 1, h[0] >> 8);
-        let setup_text = match FMV_SETUP_ERRORS.get(setup as usize) {
-            Some(text) => text.to_string(),
-            None => setup.to_string(),
-        };
-        rows.push(format!(
-            "mdec_play,{name},{},stop={} setup_error={setup_text} sectors={}/{} lost={} bad={} dropped={} decode_errors={} cd_errors={} first_error_lba={} last_good_lba={} shown={} late={}",
-            if passed != 0 { "PASS" } else { "FAIL" },
-            MDEC_STOPS[(stop as usize).min(4)],
-            h[3],
-            h[4],
-            h[5],
-            h[6],
-            h[7],
-            h[8],
-            h[9],
-            if h[10] == 0xFFFF { "none".to_string() } else { h[10].to_string() },
-            h[11],
-            h[1],
-            h[2]
-        ));
-    }
-    for (t, name) in MDEC_TRACES.iter().enumerate() {
-        let h = mdec_stream(&by_id, 0x290 + 5 * t as u32, 5);
-        if h.len() < 13 {
-            continue;
-        }
-        let samples: Vec<String> = (0..(h[0].min(4) as usize))
-            .map(|i| {
-                format!(
-                    "{}clk:{}",
-                    h[1 + 3 * i],
-                    mdec_status_text((h[2 + 3 * i] | h[3 + 3 * i] << 16) as u64)
-                )
-            })
-            .collect();
-        rows.push(format!("mdec_reset_trace,{name},{}", samples.join(" -> ")));
-    }
-    let h = mdec_stream(&by_id, 0x2A0, 3);
-    if h.len() >= 9 {
-        let (cpu_sum, dma_sum) = ((h[5] | h[6] << 16) as u64, (h[7] | h[8] << 16) as u64);
-        rows.push(format!(
-            "mdec_frame_control,read={} cpu_ok={} dma_ok={} sums_equal={} rle_words={} expected={} cpu_words={} dma_words={} cpu_sum=0x{cpu_sum:08X} dma_sum=0x{dma_sum:08X}",
-            h[0] & 1,
-            h[0] >> 1 & 1,
-            h[0] >> 2 & 1,
-            h[0] >> 3 & 1,
-            h[1],
-            h[2],
-            h[3],
-            h[4]
-        ));
-    }
-    rows
 }
 
-/// The FMV STREAM TEST result, unpacked, with its verdict re-derived from the
-/// pass criteria. Empty unless the test ran before the capture encoded.
-pub fn fmv_rows(records: &[Record]) -> Vec<String> {
-    let by_id = by_id(records);
-    let ids = FMV_FIRST_RECORD..FMV_FIRST_RECORD + FMV_FIELDS.len() as u32;
-    if !ids.clone().all(|id| by_id.contains_key(&id)) {
-        return Vec::new();
-    }
-    let mut fields: Vec<(&str, i64)> = Vec::new();
-    for (id, names) in ids.zip(FMV_FIELDS.iter()) {
-        let record = by_id[&id];
-        for (name, value) in names.iter().zip([record.minimum, record.median, record.maximum]) {
-            fields.push((name, value));
-        }
-    }
-    let get = |name: &str| fields.iter().find(|(n, _)| *n == name).map(|(_, v)| *v).unwrap_or(0);
-    let host_pass = get("total_sectors") > 0
-        && get("good_sectors") == get("total_sectors")
-        && get("lost_sectors") == 0
-        && get("bad_sectors") == 0
-        && get("dropped_frames") == 0
-        && get("cd_errors") == 0
-        && get("decode_errors") == 0
-        && get("setup_error") == 0;
-    let verdict = if get("pass") != 0 { "PASS" } else { "FAIL" };
-    let mut rows = vec![format!(
-        "# fmv={verdict} criteria={}",
-        if host_pass { "PASS" } else { "FAIL" }
-    )];
-    if (get("pass") != 0) != host_pass {
-        rows.push("# fmv verdict disagrees with its own counters".to_string());
-    }
-    rows.push("fmv,field,value".to_string());
-    for (name, value) in &fields {
-        if *name == "pass" {
-            continue;
-        }
-        let text = if *name == "first_error_lba" && *value == FMV_NO_ERROR_LBA {
-            "none".to_string()
-        } else if *name == "setup_error" {
-            match FMV_SETUP_ERRORS.get(*value as usize) {
-                Some(text) if *value >= 0 => text.to_string(),
-                _ => format!("code {value}"),
-            }
-        } else {
-            value.to_string()
-        };
-        rows.push(format!("fmv,{name},{text}"));
-    }
-    rows
-}
-
-/// The v1.27 CONSOLE TESTS results, unpacked. Empty unless a case ran before
-/// the capture encoded. Nothing here is a verdict: each case is read off the
-/// screen (and the film of it), and these are the numbers behind it.
+/// The v1.27 CONSOLE TESTS results, unpacked, with the v2.6 XA MEASURE and the
+/// v1.28 CD STREAM cases. Empty unless a case ran before the capture encoded.
+/// Nothing here is a verdict: each case is read off the screen (and the film
+/// of it), and these are the numbers behind it.
 pub fn console_rows(records: &[Record]) -> Vec<String> {
     let by_id = by_id(records);
     let mut rows: Vec<String> = Vec::new();
@@ -850,34 +670,55 @@ pub fn console_rows(records: &[Record]) -> Vec<String> {
                 fields.push((name, value));
             }
         }
-        let flags_at = fields.iter().position(|(n, _)| *n == "flags").expect("flags field");
+        let flags_at = fields
+            .iter()
+            .position(|(n, _)| *n == "flags")
+            .expect("flags field");
         let flags = fields.remove(flags_at).1;
-        let get = |name: &str| fields.iter().find(|(n, _)| *n == name).map(|(_, v)| *v).unwrap_or(0);
+        let get = |name: &str| {
+            fields
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, v)| *v)
+                .unwrap_or(0)
+        };
         let harness = get("empty_call_med");
         rows.push("console_kernel,field,value".to_string());
         for (name, value) in &fields {
             rows.push(format!("console_kernel,{name},{value}"));
         }
-        rows.push(format!("console_kernel,enter_cs_net,{}", (get("enter_cs_med") - harness).max(0)));
-        rows.push(format!("console_kernel,exit_cs_net,{}", (get("exit_cs_med") - harness).max(0)));
+        rows.push(format!(
+            "console_kernel,enter_cs_net,{}",
+            (get("enter_cs_med") - harness).max(0)
+        ));
+        rows.push(format!(
+            "console_kernel,exit_cs_net,{}",
+            (get("exit_cs_med") - harness).max(0)
+        ));
         rows.push(format!("console_kernel,standard_vector,{}", flags & 1));
         rows.push(format!("console_kernel,event_opened,{}", (flags >> 1) & 1));
-        rows.push(format!("console_kernel,bios_loop_finished,{}", (flags >> 2) & 1));
+        rows.push(format!(
+            "console_kernel,bios_loop_finished,{}",
+            (flags >> 2) & 1
+        ));
         rows.push(format!("console_kernel,runtime_vblank_gaps,{}", flags >> 8));
     }
     for (k, width) in CONSOLE_WIDTHS.iter().enumerate() {
         let id = 0x2D0 + k as u32;
         if by_id.contains_key(&id) {
-            let (status, x1, x2) = triple_of(id);
-            if rows.last().is_none_or(|row| !row.starts_with("console_width")) {
-                rows.push("console_width,pixels,gpustat_high16,gp1_06_x1,gp1_06_x2".to_string());
+            let (status, dots, span) = triple_of(id);
+            if rows
+                .last()
+                .is_none_or(|row| !row.starts_with("console_width"))
+            {
+                rows.push(
+                    "console_width,pixels,gpustat_high16,dot_ticks_in_64_lines,window_span_gpu_clocks"
+                        .to_string(),
+                );
             }
-            let shown = if status == 0xFFFF {
-                "not shown".to_string()
-            } else {
-                format!("0x{status:04X},{x1},{x2}")
-            };
-            rows.push(format!("console_width,{width},{shown}"));
+            rows.push(format!(
+                "console_width,{width},0x{status:04X},{dots},{span}"
+            ));
         }
     }
     if by_id.contains_key(&0x2D6) && by_id.contains_key(&0x2D7) {
@@ -887,7 +728,9 @@ pub fn console_rows(records: &[Record]) -> Vec<String> {
         rows.push(format!("console_interlace,gpustat,0x{status:04X}{low:04X}"));
         rows.push(format!("console_interlace,field_parity_changes,{flips}"));
         rows.push(format!("console_interlace,frames_sampled,{frames}"));
-        rows.push(format!("console_interlace,frames_with_interlace_bit,{interlaced}"));
+        rows.push(format!(
+            "console_interlace,frames_with_interlace_bit,{interlaced}"
+        ));
         rows.push(format!("console_interlace,frames_with_480_bit,{tall}"));
     }
     if (0..4).all(|k| by_id.contains_key(&(0x2E0 + k))) {
@@ -919,6 +762,485 @@ pub fn console_rows(records: &[Record]) -> Vec<String> {
         rows.push(format!("console_xa,first_start_ms,{first}"));
         rows.push(format!("console_xa,head_positions_seen,{positions}"));
         rows.push(format!("console_xa,longest_unchanged_head_ms,{stall}"));
+    }
+    rows.extend(xa_measure_rows(&by_id));
+    rows.extend(cdstream_rows(&by_id));
+    rows
+}
+
+/// The v2.6 XA MEASURE case, unpacked. The sound times come from the SPU CD
+/// capture buffer, not from the drive's status, so they are what a player
+/// would hear; the emulator's values only show that the case runs.
+fn xa_measure_rows(by_id: &ById) -> Vec<String> {
+    let mut rows = Vec::new();
+    if !(0..15).any(|k| by_id.contains_key(&(0x320 + k))) {
+        return rows;
+    }
+    let spread = |id: u32, scale: f64, is_signed: bool| -> String {
+        let Some(record) = by_id.get(&id) else {
+            return "missing".to_string();
+        };
+        let mut values = [record.minimum, record.median, record.maximum];
+        if values[0] == 0xFFFF && !is_signed {
+            return "none".to_string();
+        }
+        if is_signed {
+            values = values.map(signed16);
+        }
+        let [low, med, high] = values.map(|v| v as f64 / scale);
+        format!("min={} med={} max={}", fmt_g(low), fmt_g(med), fmt_g(high))
+    };
+    rows.push("console_xa_measure,field,value".to_string());
+    for (name, id, scale, is_signed) in [
+        ("start_to_sound_ms", 0x320, 1.0, false),
+        ("start_to_head_ms", 0x321, 1.0, false),
+        ("play_call_ms", 0x322, 10.0, false),
+        ("setfilter_switch_to_sound_ms", 0x323, 1.0, false),
+        ("setfilter_ack_ms", 0x324, 10.0, false),
+        ("restart_switch_to_sound_ms", 0x325, 1.0, false),
+        ("xa_resume_after_read_to_sound_ms", 0x326, 1.0, false),
+        ("xa_restart_after_read_to_sound_ms", 0x327, 1.0, false),
+        ("cdda_play_after_read_to_sound_ms", 0x328, 1.0, false),
+        ("data_read_64_sectors_ms", 0x329, 1.0, false),
+        ("resume_head_moved_ms", 0x32A, 1.0, true),
+    ] {
+        rows.push(format!(
+            "console_xa_measure,{name},{}",
+            spread(id, scale, is_signed)
+        ));
+    }
+    if let Some(r) = by_id.get(&0x32B) {
+        rows.push(format!("console_xa_measure,starts_ok_of_5,{}", r.minimum));
+        rows.push(format!(
+            "console_xa_measure,filter_switches_ok_of_6,{}",
+            r.median
+        ));
+        rows.push(format!(
+            "console_xa_measure,xa_resumes_ok_of_3,{}",
+            r.maximum
+        ));
+    }
+    if let Some(r) = by_id.get(&0x32C) {
+        for (label, value) in ["60s", "120s", "180s"]
+            .iter()
+            .zip([r.minimum, r.median, r.maximum])
+        {
+            let text = if value == 0xFFFF {
+                "none".to_string()
+            } else {
+                signed16(value).to_string()
+            };
+            rows.push(format!(
+                "console_xa_measure,head_minus_sysclk_ms_at_{label},{text}"
+            ));
+        }
+    }
+    if let Some(r) = by_id.get(&0x32D) {
+        let names = [
+            "clock_file_found",
+            "play_refused",
+            "head_in_song",
+            "ran_180s",
+            "songs_file_missing",
+        ];
+        for (bit, name) in names.iter().enumerate() {
+            rows.push(format!(
+                "console_xa_measure,{name},{}",
+                (r.minimum >> bit) & 1
+            ));
+        }
+        rows.push(format!("console_xa_measure,clock_seconds_run,{}", r.median));
+        rows.push(format!("console_xa_measure,clock_polls,{}", r.maximum));
+    }
+    if let Some(r) = by_id.get(&0x32E) {
+        rows.push(format!(
+            "console_xa_measure,head_positions_seen,{}",
+            r.minimum
+        ));
+        rows.push(format!(
+            "console_xa_measure,longest_unchanged_head_ms,{}",
+            r.median
+        ));
+        rows.push(format!(
+            "console_xa_measure,sysclocks_per_hblank_line,{}",
+            fmt_g((r.maximum + 200_000) as f64 / 100.0)
+        ));
+    }
+    rows
+}
+
+const CDDA_AUDIO_FLAGS: [&str; 8] = [
+    "playing_before",
+    "getlocp_advancing_before",
+    "capture_signal_before",
+    "playing_after",
+    "getlocp_advancing_after",
+    "capture_signal_after",
+    "read_intact",
+    "ran",
+];
+
+/// The v1.28 CD STREAM cases, unpacked. Nothing here is a verdict about a
+/// console unless the capture came from one: the emulator has no laser, so its
+/// CD-DA readings only show the suite runs.
+fn cdstream_rows(by_id: &ById) -> Vec<String> {
+    let mut rows = Vec::new();
+    let triple_of = |id: u32| triple(by_id[&id]);
+    let spread = |id: u32, scale: f64| -> String {
+        let (low, med, high) = triple_of(id);
+        format!(
+            "min={} med={} max={}",
+            fmt_g(low as f64 / scale),
+            fmt_g(med as f64 / scale),
+            fmt_g(high as f64 / scale)
+        )
+    };
+    let g = |value: i64, scale: f64| fmt_g(value as f64 / scale);
+
+    if (0..8).all(|k| by_id.contains_key(&(0x2F0 + k))) {
+        rows.push("cdstream_cost,field,value".to_string());
+        for (speed, first) in [("2x", 0x2F0), ("1x", 0x2F1)] {
+            rows.push(format!(
+                "cdstream_cost,sectors_per_second_{speed},{}",
+                spread(first, 10.0)
+            ));
+        }
+        for (speed, first) in [("2x", 0x2F2), ("1x", 0x2F3)] {
+            rows.push(format!(
+                "cdstream_cost,pio_us_per_sector_{speed},{}",
+                spread(first, 1.0)
+            ));
+        }
+        let (lost_2x, lost_1x, irq) = triple_of(0x2F4);
+        rows.push(format!(
+            "cdstream_cost,cpu_lost_percent_2x,{}",
+            g(lost_2x, 10.0)
+        ));
+        rows.push(format!(
+            "cdstream_cost,cpu_lost_percent_1x,{}",
+            g(lost_1x, 10.0)
+        ));
+        rows.push(format!("cdstream_cost,irq_per_sector_2x,{}", g(irq, 100.0)));
+        let (h2, h1, unused) = triple_of(0x2F5);
+        rows.push(format!("cdstream_cost,handler_peak_us_2x,{h2}"));
+        rows.push(format!("cdstream_cost,handler_peak_us_1x,{h1}"));
+        rows.push(format!("cdstream_cost,handler_stack_unused_bytes,{unused}"));
+        let (f2, f1, discarded) = triple_of(0x2F6);
+        rows.push(format!("cdstream_cost,first_sector_ms_2x,{f2}"));
+        rows.push(format!("cdstream_cost,first_sector_ms_1x,{f1}"));
+        rows.push(format!("cdstream_cost,discarded_sectors,{discarded}"));
+        let (flags, chained_2x, chained_1x) = triple_of(0x2F7);
+        rows.push(format!("cdstream_cost,installed,{}", flags & 1));
+        rows.push(format!("cdstream_cost,intact_2x,{}", (flags >> 1) & 1));
+        rows.push(format!("cdstream_cost,intact_1x,{}", (flags >> 2) & 1));
+        rows.push(format!("cdstream_cost,chained_2x,{chained_2x}"));
+        rows.push(format!("cdstream_cost,chained_1x,{chained_1x}"));
+    }
+    if (0..12).all(|k| by_id.contains_key(&(0x300 + k))) {
+        rows.push("cdstream_cdda,field,value".to_string());
+        rows.push(format!(
+            "cdstream_cdda,lease_stops_read_ms,{}",
+            spread(0x300, 1.0)
+        ));
+        rows.push(format!("cdstream_cdda,t_pause_ms,{}", spread(0x301, 10.0)));
+        let (ack, stat, still) = triple_of(0x302);
+        rows.push(format!("cdstream_cdda,pause_ack_ms,{}", g(ack, 10.0)));
+        rows.push(format!("cdstream_cdda,status_after_pause,0x{stat:02X}"));
+        rows.push(format!(
+            "cdstream_cdda,getlocp_held_still_after_pause,{still}"
+        ));
+        rows.push(format!(
+            "cdstream_cdda,first_sector_after_audio_ms,{}",
+            spread(0x303, 1.0)
+        ));
+        rows.push(format!(
+            "cdstream_cdda,sectors_after_audio_ms,{}",
+            spread(0x304, 1.0)
+        ));
+        rows.push(format!(
+            "cdstream_cdda,resume_to_playing_ms,{}",
+            spread(0x305, 1.0)
+        ));
+        let (moved, in_place, playing) = triple_of(0x306);
+        rows.push(format!(
+            "cdstream_cdda,resume_moved_frames_median,{}",
+            signed16(moved)
+        ));
+        rows.push(format!("cdstream_cdda,resume_in_place_of_3,{in_place}"));
+        rows.push(format!(
+            "cdstream_cdda,resume_reported_playing_of_3,{playing}"
+        ));
+        for (name, first, flags_id) in
+            [("recovery_pause", 0x307, 0x308), ("no_pause", 0x309, 0x30A)]
+        {
+            let (first_ms, done_ms, code) = triple_of(first);
+            let (flags, signal, quiet) = triple_of(flags_id);
+            rows.push(format!("cdstream_cdda,{name}_first_sector_ms,{first_ms}"));
+            rows.push(format!("cdstream_cdda,{name}_sectors_ms,{done_ms}"));
+            rows.push(format!("cdstream_cdda,{name}_read_failure_code,{code}"));
+            for (bit, label) in CDDA_AUDIO_FLAGS.iter().enumerate() {
+                rows.push(format!(
+                    "cdstream_cdda,{name}_{label},{}",
+                    (flags >> bit) & 1
+                ));
+            }
+            rows.push(format!(
+                "cdstream_cdda,{name}_signal_during_read_percent,{}",
+                g(signal, 10.0)
+            ));
+            let quiet_text = if quiet == 0xFFFF {
+                "never".to_string()
+            } else {
+                quiet.to_string()
+            };
+            rows.push(format!(
+                "cdstream_cdda,{name}_first_quiet_sample_ms,{quiet_text}"
+            ));
+        }
+        let (signal, samples, flags) = triple_of(0x30B);
+        rows.push(format!(
+            "cdstream_cdda,paused_signal_during_read_percent,{}",
+            g(signal, 10.0)
+        ));
+        rows.push(format!("cdstream_cdda,paused_capture_samples,{samples}"));
+        for (bit, label) in [
+            "playing_before_pause",
+            "getlocp_advancing",
+            "capture_signal_before",
+            "playing_after_pause",
+        ]
+        .iter()
+        .enumerate()
+        {
+            rows.push(format!(
+                "cdstream_cdda,control_{label},{}",
+                (flags >> bit) & 1
+            ));
+        }
+    }
+    if (0..6).all(|k| by_id.contains_key(&(0x310 + k))) {
+        rows.push("cdstream_motor,field,value".to_string());
+        for (k, wait) in [0, 5, 15].iter().enumerate() {
+            let (first, done, code) = triple_of(0x310 + k as u32);
+            rows.push(format!(
+                "cdstream_motor,pause_wait_{wait}s_first_sector_ms,{first}"
+            ));
+            rows.push(format!(
+                "cdstream_motor,pause_wait_{wait}s_sectors_ms,{done}"
+            ));
+            rows.push(format!(
+                "cdstream_motor,pause_wait_{wait}s_failure_code,{code}"
+            ));
+        }
+        let (ack, done, code) = triple_of(0x313);
+        rows.push(format!("cdstream_motor,stop_ack_ms,{ack}"));
+        rows.push(format!(
+            "cdstream_motor,read_at_once_after_stop_sectors_ms,{}",
+            if done == 0xFFFF {
+                "failed".to_string()
+            } else {
+                done.to_string()
+            }
+        ));
+        rows.push(format!(
+            "cdstream_motor,read_at_once_after_stop_failure_code,{code}"
+        ));
+        let (complete, off, settled) = triple_of(0x314);
+        rows.push(format!("cdstream_motor,stop_complete_ms,{complete}"));
+        rows.push(format!(
+            "cdstream_motor,motor_off_after_ms,{}",
+            if off == 0xFFFF {
+                "never".to_string()
+            } else {
+                off.to_string()
+            }
+        ));
+        rows.push(format!(
+            "cdstream_motor,settled_read_sectors_ms,{}",
+            if settled == 0xFFFF {
+                "failed".to_string()
+            } else {
+                settled.to_string()
+            }
+        ));
+        let (flags, _recovered, at_once_first) = triple_of(0x315);
+        rows.push(format!(
+            "cdstream_motor,read_at_once_after_stop_intact,{}",
+            flags & 1
+        ));
+        rows.push(format!(
+            "cdstream_motor,settled_read_intact,{}",
+            (flags >> 1) & 1
+        ));
+        rows.push(format!(
+            "cdstream_motor,transport_read_afterwards_intact,{}",
+            (flags >> 2) & 1
+        ));
+        rows.push(format!(
+            "cdstream_motor,read_at_once_after_stop_first_sector_ms,{at_once_first}"
+        ));
+    }
+    rows
+}
+
+/// Speeds, states and watch schedules of the CD PAUSE step, in record order.
+const CD_PAUSE_SPEEDS: [&str; 2] = ["1x", "2x"];
+const CD_PAUSE_STATES: [&str; 5] = ["IDLE", "SETTLED", "FIRST", "SEEK", "FAR"];
+const CD_PAUSE_SCHEDULES: [&str; 2] = ["SPACED", "EARLY"];
+const CD_PAUSE_OUTCOMES: [&str; 4] = [
+    "completed",
+    "no INT2 within the limit",
+    "drive error",
+    "no acknowledge",
+];
+/// System clocks per millisecond (33.8688 MHz).
+const CLOCKS_PER_MS: f64 = 33_868.8;
+pub const CD_PAUSE_META_FIRST: u32 = 0x340;
+pub const CD_PAUSE_TRIAL_FIRST: u32 = 0x350;
+pub const CD_PAUSE_WATCH_FIRST: u32 = 0x380;
+
+fn flag_name(flag: i64) -> String {
+    match flag {
+        1 => "sector".to_string(),
+        2 => "complete_int2".to_string(),
+        3 => "acknowledge_int3".to_string(),
+        5 => "error".to_string(),
+        7 => "gave_up_at_limit".to_string(),
+        other => format!("flag_{other}"),
+    }
+}
+
+/// The CD PAUSE step (src/cd_pause.rs, whose header documents the layout):
+/// how long Pause's second response takes, per speed and head state, and what
+/// the controller shows while a GetStat is sent between the two responses.
+/// Clocks are system clocks. Empty unless the step ran.
+pub fn cd_pause_rows(records: &[Record]) -> Vec<String> {
+    let by_id = by_id(records);
+    let mut rows = Vec::new();
+    let ms = |clocks: i64| format!("{:.3}", clocks as f64 / CLOCKS_PER_MS);
+
+    if let Some(r) = by_id.get(&CD_PAUSE_META_FIRST) {
+        rows.push("cd_pause,field,value".to_string());
+        rows.push(format!(
+            "cd_pause,loop_pass_clocks,min={} med={} max={}",
+            r.minimum, r.median, r.maximum
+        ));
+        if let Some(r) = by_id.get(&(CD_PAUSE_META_FIRST + 1)) {
+            rows.push(format!(
+                "cd_pause,int2_limit_clocks_about,{}",
+                r.minimum * 1024
+            ));
+            rows.push(format!(
+                "cd_pause,int3_limit_clocks_about,{}",
+                r.median * 1024
+            ));
+            rows.push(format!("cd_pause,trials_run,{}", r.maximum));
+        }
+        if let Some(r) = by_id.get(&(CD_PAUSE_META_FIRST + 2)) {
+            rows.push(format!("cd_pause,setup_failures,{}", r.minimum));
+            rows.push(format!("cd_pause,cleanup_failures,{}", r.median));
+        }
+    }
+
+    let mut header = false;
+    let mut ack_rows = Vec::new();
+    for (speed, speed_name) in CD_PAUSE_SPEEDS.iter().enumerate() {
+        for (state, state_name) in CD_PAUSE_STATES.iter().enumerate() {
+            let cell = (speed * CD_PAUSE_STATES.len() + state) as u32;
+            let base = CD_PAUSE_TRIAL_FIRST + 4 * cell;
+            for trial in 0..3 {
+                let Some(r) = by_id.get(&(base + trial)) else {
+                    continue;
+                };
+                if !header {
+                    rows.push(
+                        "cd_pause_trial,speed,state,trial,clocks_to_int2,ms,outcome,sectors_after_pause,int2_status"
+                            .to_string(),
+                    );
+                    header = true;
+                }
+                let (clocks, shown_ms) = if r.minimum == 0xFFFF && r.median == 0xFFFF {
+                    ("never".to_string(), "never".to_string())
+                } else {
+                    let clocks = r.median * 65536 + r.minimum;
+                    (clocks.to_string(), ms(clocks))
+                };
+                let outcome = CD_PAUSE_OUTCOMES[(r.maximum & 3) as usize];
+                let sectors = (r.maximum >> 2) & 15;
+                let status = (r.maximum >> 8) & 0xFF;
+                rows.push(format!(
+                    "cd_pause_trial,{speed_name},{state_name},{trial},{clocks},{shown_ms},{outcome},{sectors},0x{status:02X}"
+                ));
+            }
+            if let Some(r) = by_id.get(&(base + 3)) {
+                let text = if r.minimum == 0xFFFF && r.median == 0xFFFF && r.maximum == 0xFFFF {
+                    "none,none,none,none".to_string()
+                } else {
+                    format!(
+                        "{},{},{},{}",
+                        r.minimum * 32,
+                        r.median * 32,
+                        r.maximum * 32,
+                        ms(r.median * 32)
+                    )
+                };
+                ack_rows.push(format!("cd_pause_ack,{speed_name},{state_name},{text}"));
+            }
+        }
+    }
+    if !ack_rows.is_empty() {
+        rows.push(
+            "cd_pause_ack,speed,state,min_clocks,median_clocks,max_clocks,median_ms".to_string(),
+        );
+        rows.extend(ack_rows);
+    }
+
+    let mut header = false;
+    let mut summaries = Vec::new();
+    for (speed, speed_name) in CD_PAUSE_SPEEDS.iter().enumerate() {
+        for (schedule, schedule_name) in CD_PAUSE_SCHEDULES.iter().enumerate() {
+            let watch = (speed * 2 + schedule) as u32;
+            let base = CD_PAUSE_WATCH_FIRST + 16 * watch;
+            for event in 0..8 {
+                let Some(r) = by_id.get(&(base + event)) else {
+                    continue;
+                };
+                let flag = (r.median >> 8) & 7;
+                if flag == 0 {
+                    // An unused slot.
+                    continue;
+                }
+                if !header {
+                    rows.push(
+                        "cd_pause_watch,speed,schedule,event,offset_clocks,offset_ms,flag,status,getstats_sent"
+                            .to_string(),
+                    );
+                    header = true;
+                }
+                let offset = r.minimum * 128;
+                rows.push(format!(
+                    "cd_pause_watch,{speed_name},{schedule_name},{event},{offset},{},{},0x{:02X},{}",
+                    ms(offset),
+                    flag_name(flag),
+                    r.median & 0xFF,
+                    r.maximum
+                ));
+            }
+            if let Some(r) = by_id.get(&(base + 8)) {
+                summaries.push(format!(
+                    "cd_pause_watch_summary,{speed_name},{schedule_name},{},{},{}",
+                    r.minimum,
+                    r.median,
+                    if r.maximum != 0 { "yes" } else { "no" }
+                ));
+            }
+        }
+    }
+    if !summaries.is_empty() {
+        rows.push(
+            "cd_pause_watch_summary,speed,schedule,flags_seen,getstats_sent,int2_came".to_string(),
+        );
+        rows.extend(summaries);
     }
     rows
 }
@@ -1020,19 +1342,21 @@ pub fn print_report(
     let mut drift: Vec<String> = Vec::new();
     let mut layout_drift = 0;
     say!(
-        "# schema={} suite=v{}.{} pages={} run={:02X} digest={:08X} records={} binary_crc={:08X}",
+        "# schema={} suite=v{}.{} pages={} run={} digest={:08X} records={} binary_crc={:08X}",
         capture.schema,
         capture.suite_major,
         capture.suite_minor,
         capture.page_count,
-        capture.timing_run,
+        run_id_text(capture),
         capture.timing_digest,
         capture.records.len(),
         capture.binary_crc
     );
     let mut tallies: BTreeMap<&str, usize> = BTreeMap::new();
     for &status in &capture.statuses {
-        *tallies.entry(STATUS_LABELS[usize::from(status)]).or_insert(0) += 1;
+        *tallies
+            .entry(STATUS_LABELS[usize::from(status)])
+            .or_insert(0) += 1;
     }
     let tally_text: Vec<String> = tallies
         .iter()
@@ -1073,7 +1397,10 @@ pub fn print_report(
     if let Some(baseline) = baseline {
         for failure in &baseline.failures {
             if !capture.failures.contains(failure) {
-                drift.push(format!("failure {:#06x} no longer reproduces", failure.test_id));
+                drift.push(format!(
+                    "failure {:#06x} no longer reproduces",
+                    failure.test_id
+                ));
             }
         }
     }
@@ -1083,8 +1410,16 @@ pub fn print_report(
         case_columns += ",baseline_observed,changed";
     }
     say!("{case_columns}");
-    for (index, (&status, &observed)) in capture.statuses.iter().zip(&capture.observations).enumerate() {
-        let mut row = format!("{index},{},0x{observed:08X}", STATUS_LABELS[usize::from(status)]);
+    for (index, (&status, &observed)) in capture
+        .statuses
+        .iter()
+        .zip(&capture.observations)
+        .enumerate()
+    {
+        let mut row = format!(
+            "{index},{},0x{observed:08X}",
+            STATUS_LABELS[usize::from(status)]
+        );
         if let Some(baseline) = baseline {
             let Some(&prior) = baseline.observations.get(index) else {
                 // A MINOR bump appends cases; the baseline has nothing to say
@@ -1113,7 +1448,7 @@ pub fn print_report(
     let baseline_records: Option<HashMap<u32, &Record>> =
         baseline.map(|baseline| by_id(&baseline.records));
     for record in &capture.records {
-        let name = label(record.record_id).unwrap_or("unlabelled");
+        let name = record_label(record.record_id);
         let mut row = format!(
             "{:02X},{name},{},{},{},{}",
             record.record_id,
@@ -1177,7 +1512,11 @@ pub fn print_report(
         let baseline_precision: &[u32] = baseline.map_or(&[], |baseline| &baseline.precision);
         say!(
             "precision,label,value{}",
-            if baseline_precision.is_empty() { "" } else { ",baseline_value,changed" }
+            if baseline_precision.is_empty() {
+                ""
+            } else {
+                ",baseline_value,changed"
+            }
         );
         for (index, &value) in capture.precision.iter().enumerate() {
             let name = precision_label(index)?;
@@ -1188,7 +1527,9 @@ pub fn print_report(
                 };
                 row += &format!(",0x{prior:08X},{}", i32::from(prior != value));
                 if prior != value {
-                    drift.push(format!("precision {index:03} ({name}): 0x{prior:08X} -> 0x{value:08X}"));
+                    drift.push(format!(
+                        "precision {index:03} ({name}): 0x{prior:08X} -> 0x{value:08X}"
+                    ));
                 }
             }
             say!("{row}");
@@ -1197,13 +1538,13 @@ pub fn print_report(
     for row in list_busy_rows(capture) {
         say!("{row}");
     }
-    for row in fmv_rows(&capture.records) {
-        say!("{row}");
-    }
-    for row in mdec_diag_rows(&capture.records) {
+    for row in v2_rows(capture) {
         say!("{row}");
     }
     for row in console_rows(&capture.records) {
+        say!("{row}");
+    }
+    for row in cd_pause_rows(&capture.records) {
         say!("{row}");
     }
     let slice = |values: &[u32]| -> Vec<u32> {
@@ -1231,7 +1572,11 @@ pub fn print_report(
             .zip(&baseline_settle)
             .enumerate()
             .map(|(offset, (&value, &prior))| {
-                format!("{}:{:+}", GTE_SETTLE_FIRST_CASE + offset, i64::from(value) - i64::from(prior))
+                format!(
+                    "{}:{:+}",
+                    GTE_SETTLE_FIRST_CASE + offset,
+                    i64::from(value) - i64::from(prior)
+                )
             })
             .collect();
         say!("# gte_settle_delta={}", delta.join(","));

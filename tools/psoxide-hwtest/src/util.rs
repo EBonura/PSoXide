@@ -234,7 +234,14 @@ mod tests {
 
     #[test]
     fn base64_round_trips_and_rejects_malformed_text() {
-        for data in [&b""[..], b"a", b"ab", b"abc", b"abcd", &[0xFF, 0xFE, 0xFD, 0x00]] {
+        for data in [
+            &b""[..],
+            b"a",
+            b"ab",
+            b"abc",
+            b"abcd",
+            &[0xFF, 0xFE, 0xFD, 0x00],
+        ] {
             assert_eq!(base64_decode(&base64_encode(data)).unwrap(), data);
         }
         assert_eq!(base64_encode(b"Ma"), "TWE=");

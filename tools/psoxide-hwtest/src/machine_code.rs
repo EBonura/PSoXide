@@ -124,7 +124,8 @@ pub fn parse_baseline(text: &str) -> Result<Vec<(String, (String, String))>> {
             continue;
         }
         let mut parts = line.splitn(3, ',');
-        let (Some(key), Some(name), Some(pinned)) = (parts.next(), parts.next(), parts.next()) else {
+        let (Some(key), Some(name), Some(pinned)) = (parts.next(), parts.next(), parts.next())
+        else {
             bail!("not enough values to unpack (expected 3)");
         };
         let value = (name.to_string(), pinned.to_string());
@@ -185,7 +186,13 @@ pub fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> Result<
         let name = lookup(&key)
             .map(|(name, _)| name.clone())
             .unwrap_or_else(|| format!("probe_{key}"));
-        current.push((key, (name, format!("{},{:#010x}", measured.len(), digest(measured)))));
+        current.push((
+            key,
+            (
+                name,
+                format!("{},{:#010x}", measured.len(), digest(measured)),
+            ),
+        ));
     }
     for (tag, &index) in &layout {
         let key = format!("L{tag}");
@@ -205,7 +212,11 @@ pub fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> Result<
     writeln!(
         out,
         "id,name,words,digest{}",
-        if baseline_path.is_some() { ",changed" } else { "" }
+        if baseline_path.is_some() {
+            ",changed"
+        } else {
+            ""
+        }
     )?;
     let mut drift: Vec<String> = Vec::new();
     for (key, (name, value)) in &current {
@@ -219,7 +230,10 @@ pub fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> Result<
                 }
                 _ => {}
             }
-            row += &format!(",{}", i32::from(prior.is_none_or(|(_, pinned)| pinned != value)));
+            row += &format!(
+                ",{}",
+                i32::from(prior.is_none_or(|(_, pinned)| pinned != value))
+            );
         }
         writeln!(out, "{row}")?;
     }
@@ -270,9 +284,14 @@ mod tests {
 
     #[test]
     fn baseline_rows_keep_first_position_and_last_value() {
-        let rows = parse_baseline("# c\nid,name,words,digest\n07,a,1,0x1\n08,b,2,0x2\n07,c,3,0x3\n").unwrap();
+        let rows =
+            parse_baseline("# c\nid,name,words,digest\n07,a,1,0x1\n08,b,2,0x2\n07,c,3,0x3\n")
+                .unwrap();
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0], ("07".to_string(), ("c".to_string(), "3,0x3".to_string())));
+        assert_eq!(
+            rows[0],
+            ("07".to_string(), ("c".to_string(), "3,0x3".to_string()))
+        );
         assert!(parse_baseline("bad line\n").is_err());
     }
 

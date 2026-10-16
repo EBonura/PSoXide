@@ -78,7 +78,8 @@ pub fn probe_binary(payload: &str, name: &str, expected_len: usize) -> Result<(V
     let (encoded, suffix_crc) = rest
         .rsplit_once("/C:")
         .ok_or_else(|| Error("not enough values to unpack (expected 2, got 1)".into()))?;
-    let binary = base64_decode(encoded).map_err(|e| Error(format!("invalid {name} Base64: {e}")))?;
+    let binary =
+        base64_decode(encoded).map_err(|e| Error(format!("invalid {name} Base64: {e}")))?;
     ensure!(
         binary.len() == expected_len,
         "{name} binary length {} != {expected_len}",
@@ -98,11 +99,7 @@ pub fn probe_binary(payload: &str, name: &str, expected_len: usize) -> Result<(V
 /// One decoded stage: the ten words of a stage record.
 type Stage = [u32; FIELD_COUNT];
 
-fn stage_words(
-    reader: &mut Reader,
-    schema: &str,
-    labels: &[&str],
-) -> Result<Vec<Stage>> {
+fn stage_words(reader: &mut Reader, schema: &str, labels: &[&str]) -> Result<Vec<Stage>> {
     let mut stages = Vec::new();
     for expected in 0..labels.len() {
         let mut words = [0u32; FIELD_COUNT];
@@ -119,12 +116,7 @@ fn stage_words(
     Ok(stages)
 }
 
-fn check_dimensions(
-    schema: &str,
-    labels: &[&str],
-    stage_count: u8,
-    field_count: u8,
-) -> Result<()> {
+fn check_dimensions(schema: &str, labels: &[&str], stage_count: u8, field_count: u8) -> Result<()> {
     ensure!(
         usize::from(stage_count) == labels.len() && usize::from(field_count) == FIELD_COUNT,
         "unexpected {schema} dimensions: stages={stage_count} fields={field_count}"
@@ -341,7 +333,10 @@ fn detail(words: &Stage, final_stage: bool, clock: bool) -> String {
     if clock && !final_stage {
         format!("CLOCK {a:08X}->{b:08X}")
     } else {
-        format!("{} {a:08X}/{b:08X}", if a == b { "MATCH" } else { "MISMATCH" })
+        format!(
+            "{} {a:08X}/{b:08X}",
+            if a == b { "MATCH" } else { "MISMATCH" }
+        )
     }
 }
 
@@ -354,7 +349,10 @@ pub fn print_report(report: &Report, out: &mut dyn Write) -> Result<()> {
             crc,
             stages,
         } => {
-            writeln!(out, "# PA1 run={run} lba={lba} stage_frames={stage_frames} crc={crc:08X}")?;
+            writeln!(
+                out,
+                "# PA1 run={run} lba={lba} stage_frames={stage_frames} crc={crc:08X}"
+            )?;
             writeln!(
                 out,
                 "stage                         tick SPUCNT SPUSTAT CDVOL_L CDVOL_R CDSTAT IRQ CMD SECT  NZ_L NZ_R PEAK_L PEAK_R ENERGY_L ENERGY_R HASH_L   HASH_R"

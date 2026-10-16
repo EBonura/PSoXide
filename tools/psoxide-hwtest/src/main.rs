@@ -4,13 +4,22 @@ use std::io::Write;
 
 use psoxide_hwtest::report::{parse_capture, payloads_from_paths, print_report, ReportOptions};
 use psoxide_hwtest::util::{Error, Result};
-use psoxide_hwtest::{audio_chain, audio_decode, audio_report, machine_code, sb4};
+use psoxide_hwtest::{audio_chain, audio_decode, audio_report, compare, machine_code, sb4, v24};
 
 const HELP: &str = "usage: psoxide-hwtest <command> [args]\n\
 commands:\n\
   report [--baseline FILE] [--allow-suite-mismatch] [--fail-on-change]\n\
          [--layout-immune-timing-only] [PAYLOAD_OR_FILE ...]\n\
       validate and assemble PX7/PX8 hardware-test photo payloads\n\
+  compare INPUT [--report] [--no-fail]\n\
+      decode a page file and diff it against the silicon baselines under\n\
+      docs/hardware-refs: regressions (exit 1) and mismatches\n\
+  check-silence WAV [--tail-seconds S]\n\
+      check that the audio the emulator dumped ends in silence\n\
+  emulator-baseline LOG [--git X] [--exe-sha X] [--steps N]\n\
+      print an emulator baseline file made from a run log\n\
+  v24-report PAYLOAD_OR_FILE ...\n\
+      print the v2.4 measurements and check the harness (exit 1 on a fault)\n\
   sb4-report CAPTURE [--baseline FILE] [--fail-on-change]\n\
       decode and diff SB4 capture-ring payloads\n\
   verify-machine-code EXE [--baseline FILE] [--fail-on-change]\n\
@@ -96,6 +105,10 @@ fn run() -> i32 {
     // uncaught error (status 1).
     let (result, failure_code) = match command.as_str() {
         "report" => (report_command(rest, &mut out, &mut err), 2),
+        "compare" => (compare::compare_command(rest, &mut out, &mut err), 2),
+        "check-silence" => (compare::check_silence_command(rest, &mut out, &mut err), 2),
+        "emulator-baseline" => (compare::emulator_baseline_command(rest, &mut out), 2),
+        "v24-report" => (v24::run(rest, &mut out), 2),
         "sb4-report" => (sb4::run(rest, &mut out), 1),
         "verify-machine-code" => (machine_code::run(rest, &mut out, &mut err), 1),
         "audio-report" => (audio_report::run(rest, &mut out), 2),
@@ -115,7 +128,9 @@ fn run() -> i32 {
         Err(error) => {
             let _ = out.flush();
             let name = match command.as_str() {
-                "report" => "hwtest-report",
+                "report" | "compare" | "check-silence" | "emulator-baseline" | "v24-report" => {
+                    "hwtest-report"
+                }
                 "audio-report" => "hwtest-audio-report",
                 other => other,
             };
