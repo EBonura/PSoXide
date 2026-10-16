@@ -156,13 +156,6 @@ fn rounded_magnitude(n: WideU, d: WideU, negative: bool, round: Rounding) -> Wid
     }
 }
 
-/// The magnitude of `x` as an unsigned value (`Wide::MIN` gives `2^63`).
-#[inline(always)]
-fn magnitude(x: Wide) -> WideU {
-    let a = x.abs();
-    WideU::from_parts(a.high() as u32, a.low_u32())
-}
-
 impl WideU {
     /// `(self / d, self % d)`: the exact 64-bit quotient and the remainder.
     ///
@@ -267,7 +260,7 @@ impl Wide {
     pub fn div_i32_wrap(self, d: i32, round: Rounding) -> i32 {
         let negative = self.is_negative() != (d < 0);
         let q = rounded_magnitude(
-            magnitude(self),
+            self.unsigned_abs(),
             WideU::of(d.unsigned_abs()),
             negative,
             round,
@@ -285,7 +278,7 @@ impl Wide {
     pub fn div_i32_sat(self, d: i32, round: Rounding) -> i32 {
         let negative = self.is_negative() != (d < 0);
         let q = rounded_magnitude(
-            magnitude(self),
+            self.unsigned_abs(),
             WideU::of(d.unsigned_abs()),
             negative,
             round,
@@ -298,7 +291,7 @@ impl Wide {
     #[inline]
     pub fn div_wide_sat(self, d: Wide, round: Rounding) -> i32 {
         let negative = self.is_negative() != d.is_negative();
-        let q = rounded_magnitude(magnitude(self), magnitude(d), negative, round);
+        let q = rounded_magnitude(self.unsigned_abs(), d.unsigned_abs(), negative, round);
         clamp_signed(negative, q)
     }
 }
@@ -523,7 +516,7 @@ mod tests {
                 continue;
             }
             // Bias toward quotients that fit, the case that matters.
-            let n = if r.next() % 2 == 0 {
+            let n = if r.next().is_multiple_of(2) {
                 r.signed()
             } else {
                 let q = i64::from(r.word() as i32);

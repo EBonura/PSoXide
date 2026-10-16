@@ -186,6 +186,20 @@ impl Wide {
         Wide(self.0.wrapping_abs())
     }
 
+    /// `|self|` as an unsigned value: exact for every input, `Wide::MIN` included
+    /// (`2^63`).
+    #[inline(always)]
+    pub const fn unsigned_abs(self) -> WideU {
+        WideU(self.0.unsigned_abs())
+    }
+
+    /// The same 64 bits read as unsigned, like `as u64`: a negative value becomes
+    /// `2^64 - |self|`.
+    #[inline(always)]
+    pub const fn cast_unsigned(self) -> WideU {
+        WideU(unsigned(self.0))
+    }
+
     /// The dot product of two 3-vectors, three `mult`s and two 64-bit adds.
     /// With `a == b` it is the squared length.
     #[inline(always)]
@@ -496,6 +510,13 @@ impl WideU {
         }
     }
 
+    /// The same 64 bits read as signed, like `as i64`: a value from `2^63` up becomes
+    /// negative.
+    #[inline(always)]
+    pub const fn cast_signed(self) -> Wide {
+        Wide(signed(self.0))
+    }
+
     /// Is the value zero?
     #[inline(always)]
     pub const fn is_zero(self) -> bool {
@@ -585,6 +606,73 @@ impl Mask64 {
     #[inline(always)]
     pub fn test(&self, bit: usize) -> bool {
         bit < 64 && self.0[bit >> 5] >> (bit & 31) & 1 != 0
+    }
+
+    /// The set with bits `low` (0..32) and `high` (32..64) as given: the two words of
+    /// a stored or transmitted mask.
+    #[inline(always)]
+    pub const fn from_words(low: u32, high: u32) -> Mask64 {
+        Mask64([low, high])
+    }
+
+    /// Bits 0..32.
+    #[inline(always)]
+    pub const fn low(self) -> u32 {
+        self.0[0]
+    }
+
+    /// Bits 32..64.
+    #[inline(always)]
+    pub const fn high(self) -> u32 {
+        self.0[1]
+    }
+
+    /// The set holding only `bit` (empty for a bit past 63).
+    #[inline(always)]
+    pub const fn bit(bit: usize) -> Mask64 {
+        if bit >= 64 {
+            Mask64::EMPTY
+        } else if bit < 32 {
+            Mask64([1 << bit, 0])
+        } else {
+            Mask64([0, 1 << (bit - 32)])
+        }
+    }
+
+    /// The set of the lowest `count` bits (all 64 for a count of 64 or more).
+    #[inline(always)]
+    pub const fn first(count: usize) -> Mask64 {
+        if count >= 64 {
+            Mask64([u32::MAX; 2])
+        } else if count >= 32 {
+            Mask64([u32::MAX, (1u32 << (count - 32)) - 1])
+        } else {
+            Mask64([(1u32 << count) - 1, 0])
+        }
+    }
+
+    /// Is no bit set?
+    #[inline(always)]
+    pub const fn is_empty(self) -> bool {
+        self.0[0] | self.0[1] == 0
+    }
+
+    /// The bits set in either.
+    #[inline(always)]
+    pub const fn or(self, o: Mask64) -> Mask64 {
+        Mask64([self.0[0] | o.0[0], self.0[1] | o.0[1]])
+    }
+
+    /// The bits set in both.
+    #[inline(always)]
+    pub const fn and(self, o: Mask64) -> Mask64 {
+        Mask64([self.0[0] & o.0[0], self.0[1] & o.0[1]])
+    }
+
+    /// The bits set in `self` and not in `o`.
+    #[inline(always)]
+    pub const fn and_not(self, o: Mask64) -> Mask64 {
+        Mask64([self.0[0] & !o.0[0], self.0[1] & !o.0[1]])
     }
 }
 
@@ -847,6 +935,21 @@ mod tests {
     }
 
     #[test]
+    fn unsigned_views_match_the_oracle() {
+        for &a in &wide_edges() {
+            let (wa, a64) = (wrap(a), wrap_i64(a));
+            assert_eq!(valu(wa.unsigned_abs()), a64.unsigned_abs(), "|{a}|");
+            assert_eq!(
+                valu(wa.cast_unsigned()),
+                wrap_u64(a64 as u128),
+                "{a} as u64"
+            );
+            assert_eq!(val(wa.cast_unsigned().cast_signed()), a64);
+        }
+        assert_eq!(valu(Wide::MIN.unsigned_abs()), 1 << 63);
+    }
+
+    #[test]
     fn small_operand_forms_match_the_oracle() {
         for &a in &wide_edges() {
             let (wa, a64) = (wrap(a), wrap_i64(a));
@@ -1058,6 +1161,31 @@ mod tests {
             val(sum),
             2 * (15 - 77) + (-4) * (-15) + (i32::MAX as i128).pow(2)
         );
+    }
+
+    #[test]
+    fn mask64_set_algebra_matches_the_oracle() {
+        let mut rng = Rng(0x0123_4567_89ab_cdef);
+        let m = |v: u128| Mask64::from_words(v as u32, (v >> 32) as u32);
+        let v = |m: Mask64| (m.low() as u128) | ((m.high() as u128) << 32);
+        for count in 0..=70usize {
+            let want = if count >= 64 {
+                u64::MAX as u128
+            } else {
+                (1u128 << count) - 1
+            };
+            assert_eq!(v(Mask64::first(count)), want, "first({count})");
+            let single = if count >= 64 { 0 } else { 1u128 << count };
+            assert_eq!(v(Mask64::bit(count)), single, "bit({count})");
+        }
+        for _ in 0..10_000 {
+            let (a, b) = (rng.next() as u128, rng.next() as u128);
+            assert_eq!(v(m(a).or(m(b))), a | b);
+            assert_eq!(v(m(a).and(m(b))), a & b);
+            assert_eq!(v(m(a).and_not(m(b))), a & !b & (u64::MAX as u128));
+            assert_eq!(m(a).is_empty(), a & (u64::MAX as u128) == 0);
+        }
+        assert!(Mask64::EMPTY.is_empty());
     }
 
     #[test]
