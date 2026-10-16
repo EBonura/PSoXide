@@ -27,6 +27,7 @@ use psxed_project::{
     SceneWorldLayer,
 };
 use psxed_tex::{convert, Config, CropMode, PsxtDepth, Resampler};
+use psxed_project::brush_grid::{texture_key, FALLBACK_TEXTURE};
 use serde::Deserialize;
 
 const SECTOR: i32 = 1024;
@@ -49,6 +50,8 @@ struct V3 {
 
 #[derive(Deserialize)]
 struct TexRef {
+    #[serde(default)]
+    pack: String,
     name: String,
 }
 
@@ -106,11 +109,44 @@ struct Sector {
 }
 
 #[derive(Deserialize)]
+struct Rgb {
+    r: u8,
+    g: u8,
+    b: u8,
+}
+
+#[derive(Deserialize)]
+enum ObjectType {
+    Light {
+        color: Rgb,
+        intensity: f32,
+        radius: f32,
+    },
+    /// Anything else (player starts, ...): ignored.
+    Spawn(serde::de::IgnoredAny),
+}
+
+/// One placed object. Mesh instances carry an `asset_id` instead of an
+/// `object_type`; both are tolerated and only lights are used.
+#[derive(Deserialize)]
+struct Object {
+    sector_x: usize,
+    sector_z: usize,
+    height: f32,
+    #[serde(default)]
+    object_type: Option<ObjectType>,
+}
+
+#[derive(Deserialize)]
 struct Room {
     position: V3,
     width: usize,
     depth: usize,
     sectors: Vec<Vec<Option<Sector>>>,
+    #[serde(default)]
+    ambient: f32,
+    #[serde(default)]
+    objects: Vec<Object>,
 }
 
 #[derive(Deserialize)]
@@ -202,6 +238,7 @@ fn main() {
         textures: args.textures.clone(),
         out: args.out.clone(),
         ids: BTreeMap::new(),
+        packs: BTreeMap::new(),
     };
     let mut brushes = Vec::new();
     let mut stats = Stats::default();
@@ -260,9 +297,13 @@ fn main() {
     if args.base.is_some() {
         place_arch_perches(project.active_scene_mut(), &level, &args.perches, args.yaw - 180.0);
     }
-    if name == "Cathedral" {
+    let lighting = if name == "Cathedral" {
         place_cathedral_lights(project.active_scene_mut(), room, &level);
-    }
+        "cathedral lamps".to_string()
+    } else {
+        place_level_lights(project.active_scene_mut(), &level, &args.out)
+    };
+    println!("lighting: {lighting}");
     project.editor_camera.orbit_target = spawn;
     project.editor_camera.orbit_radius = 12_000;
     let project_path = args.out.join("project.ron");
@@ -374,6 +415,120 @@ fn place_cathedral_lights(scene: &mut psxed_project::Scene, room: &Room, _level:
         );
         scene.node_mut(id).expect("light node").transform.translation = at.map(|v| v as f32);
     }
+}
+
+/// Sectors per generated light when a level carries none (about one lamp
+/// per 36 floor cells, the Cathedral nave's density).
+const LATTICE_CELLS: usize = 6;
+const LATTICE_WARM: [u8; 3] = [255, 176, 104];
+const LATTICE_INTENSITY: f32 = 1.25;
+const LATTICE_RADIUS: f32 = 6.0;
+/// Lamp height above the cell floor, bonnie units, and the clearance kept
+/// under a ceiling.
+const LATTICE_HEIGHT: f32 = 2048.0;
+const LATTICE_CEILING_GAP: f32 = 256.0;
+
+fn average(h: &[f32; 4]) -> f32 {
+    h.iter().sum::<f32>() / 4.0
+}
+
+/// Generic lighting for a level that is not the Cathedral: the ambient from
+/// the rooms (written next to the project, where the playtest cook reads it),
+/// the level's own lights when it has any, otherwise warm lamps on a lattice.
+/// Returns a one-line description for the import log.
+fn place_level_lights(scene: &mut psxed_project::Scene, level: &Level, out: &Path) -> String {
+    let ambient = level.rooms.iter().map(|r| r.ambient).sum::<f32>() / level.rooms.len() as f32;
+    let ambient = (ambient * 255.0).round().clamp(0.0, 255.0) as u8;
+    std::fs::write(out.join("ambient.txt"), format!("{ambient}\n")).expect("write ambient");
+
+    let step = SECTOR * SCALE_NUM / SCALE_DEN;
+    let mut count = 0usize;
+    let mut add = |scene: &mut psxed_project::Scene, at: [i32; 3], color: [u8; 3], intensity: f32, radius: f32| {
+        let id = scene.add_node(
+            NodeId::ROOT,
+            format!("Level Light {count}"),
+            NodeKind::PointLight { color, intensity, radius },
+        );
+        scene.node_mut(id).expect("light node").transform.translation = at.map(|v| v as f32);
+        count += 1;
+    };
+    let cell_floor = |room: &Room, gx: usize, gz: usize| -> Option<f32> {
+        let sector = room.sectors.get(gx)?.get(gz)?.as_ref()?;
+        Some(average(&sector.floor.as_ref()?.heights))
+    };
+
+    let authored = level
+        .rooms
+        .iter()
+        .any(|r| r.objects.iter().any(|o| matches!(o.object_type, Some(ObjectType::Light { .. }))));
+    if authored {
+        for room in &level.rooms {
+            for object in &room.objects {
+                let Some(ObjectType::Light { color, intensity, radius }) = &object.object_type else {
+                    continue;
+                };
+                let floor = cell_floor(room, object.sector_x, object.sector_z).unwrap_or(0.0);
+                let at = [
+                    scale(room.position.x) + object.sector_x as i32 * step + step / 2,
+                    scale(room.position.y) + scale(floor.round()) + scale(object.height.round()),
+                    scale(room.position.z) + object.sector_z as i32 * step + step / 2,
+                ];
+                add(scene, at, [color.r, color.g, color.b], *intensity, radius / SECTOR as f32);
+            }
+        }
+        return format!("ambient {ambient}, {count} authored lights");
+    }
+
+    for room in &level.rooms {
+        let floor_cells: Vec<(usize, usize)> = (0..room.width)
+            .flat_map(|gx| (0..room.depth).map(move |gz| (gx, gz)))
+            .filter(|&(gx, gz)| cell_floor(room, gx, gz).is_some())
+            .collect();
+        if floor_cells.is_empty() {
+            continue;
+        }
+        let half = LATTICE_CELLS / 2;
+        let mut chosen: Vec<(usize, usize)> = Vec::new();
+        for lz in (half..room.depth + half).step_by(LATTICE_CELLS) {
+            for lx in (half..room.width + half).step_by(LATTICE_CELLS) {
+                let best = floor_cells
+                    .iter()
+                    .map(|&(gx, gz)| (gx.abs_diff(lx).max(gz.abs_diff(lz)), gx, gz))
+                    .min();
+                if let Some((distance, gx, gz)) = best {
+                    if distance <= half && !chosen.contains(&(gx, gz)) {
+                        chosen.push((gx, gz));
+                    }
+                }
+            }
+        }
+        if chosen.is_empty() {
+            // No lattice point landed near a floor: light the cell nearest the centre.
+            let (cx, cz) = (room.width / 2, room.depth / 2);
+            let best = floor_cells
+                .iter()
+                .min_by_key(|&&(gx, gz)| gx.abs_diff(cx).pow(2) + gz.abs_diff(cz).pow(2))
+                .copied()
+                .expect("room has floor cells");
+            chosen.push(best);
+        }
+        for (gx, gz) in chosen {
+            let sector = room.sectors[gx][gz].as_ref().expect("lit cell exists");
+            let floor = average(&sector.floor.as_ref().expect("lit cell has a floor").heights);
+            let mut height = LATTICE_HEIGHT;
+            if let Some(ceiling) = &sector.ceiling {
+                let lowest = ceiling.heights.iter().cloned().fold(f32::MAX, f32::min);
+                height = height.min((lowest - floor - LATTICE_CEILING_GAP).max(LATTICE_CEILING_GAP));
+            }
+            let at = [
+                scale(room.position.x) + gx as i32 * step + step / 2,
+                scale(room.position.y) + scale(floor.round()) + scale(height.round()),
+                scale(room.position.z) + gz as i32 * step + step / 2,
+            ];
+            add(scene, at, LATTICE_WARM, LATTICE_INTENSITY, LATTICE_RADIUS);
+        }
+    }
+    format!("ambient {ambient}, {count} lattice lights")
 }
 
 /// Height of a hook point above the floor under it, authored units. Graybox
@@ -521,18 +676,74 @@ struct Stats {
 }
 
 struct MaterialTable {
+    /// Either a texture-packs root holding one directory per pack, or (the
+    /// Cathedral invocation) a single pack directory holding the PNGs.
     textures: PathBuf,
     out: PathBuf,
     ids: BTreeMap<String, ResourceId>,
+    /// Pack each material key came from, to catch two packs sharing a name
+    /// (the cook finds materials by name alone).
+    packs: BTreeMap<String, String>,
+}
+
+/// `<root>/<pack>/<name>.png`, else `<root>/<name>.png`, the extension in
+/// any case (the retro pack ships `.PNG`).
+fn find_texture(root: &Path, pack: &str, name: &str) -> PathBuf {
+    let pack_dir = root.join(pack);
+    let dir = if !pack.is_empty() && pack_dir.is_dir() {
+        pack_dir
+    } else {
+        root.to_path_buf()
+    };
+    for ext in ["png", "PNG"] {
+        let candidate = dir.join(format!("{name}.{ext}"));
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    panic!("texture {pack}/{name}.png not found under {}", root.display());
+}
+
+/// bonnie's own stand-in for a missing texture is a checkerboard; a
+/// 64x64 grey-and-magenta one is generated here so those faces still draw.
+fn fallback_png() -> Vec<u8> {
+    let mut image = image::RgbaImage::new(64, 64);
+    for (x, y, pixel) in image.enumerate_pixels_mut() {
+        let on = (x / 8 + y / 8) % 2 == 0;
+        *pixel = if on {
+            image::Rgba([168, 56, 168, 255])
+        } else {
+            image::Rgba([48, 48, 56, 255])
+        };
+    }
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image
+        .write_to(&mut bytes, image::ImageFormat::Png)
+        .expect("encode fallback png");
+    bytes.into_inner()
 }
 
 impl MaterialTable {
-    fn get(&mut self, project: &mut ProjectDocument, name: &str) -> ResourceId {
+    fn get(&mut self, project: &mut ProjectDocument, texture: &TexRef) -> ResourceId {
+        let name = texture_key(&texture.pack, &texture.name);
+        let name = name.as_str();
         if let Some(id) = self.ids.get(name) {
+            if name != FALLBACK_TEXTURE {
+                assert_eq!(
+                    self.packs.get(name).map(String::as_str),
+                    Some(texture.pack.as_str()),
+                    "texture {name} appears in two packs; the grid cook keys materials by name"
+                );
+            }
             return *id;
         }
-        let png = self.textures.join(format!("{name}.png"));
-        let bytes = std::fs::read(&png).unwrap_or_else(|e| panic!("{}: {e}", png.display()));
+        let bytes = if name == FALLBACK_TEXTURE {
+            fallback_png()
+        } else {
+            let png = find_texture(&self.textures, &texture.pack, name);
+            std::fs::read(&png).unwrap_or_else(|e| panic!("{}: {e}", png.display()))
+        };
+        self.packs.insert(name.to_string(), texture.pack.clone());
         let psxt = convert(
             &bytes,
             &Config {
@@ -593,11 +804,11 @@ fn import_room(
                 };
                 let c1 = corners(face.heights);
                 let c2 = corners(face.heights_2.unwrap_or(face.heights));
-                let m1 = materials.get(project, &face.texture.name);
+                let m1 = materials.get(project, &face.texture);
                 let m2 = face
                     .texture_2
                     .as_ref()
-                    .map(|t| materials.get(project, &t.name))
+                    .map(|t| materials.get(project, t))
                     .unwrap_or(m1);
                 let normal = if up { [0.0, 1.0, 0.0] } else { [0.0, -1.0, 0.0] };
                 let planar = face.heights_2.is_none() && m1 == m2 && coplanar(&c1);
@@ -638,7 +849,7 @@ fn import_room(
                         NormalMode::Back => front.map(|v| -v),
                         NormalMode::Front | NormalMode::Both => front,
                     };
-                    let material = materials.get(project, &wall.texture.name);
+                    let material = materials.get(project, &wall.texture);
                     push(brushes, stats, slab(&quad, visible, WALL_THICKNESS, material));
                 }
             }

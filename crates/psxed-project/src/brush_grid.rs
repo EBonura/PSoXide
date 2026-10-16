@@ -60,7 +60,31 @@ struct V3 {
 
 #[derive(Deserialize)]
 struct TexRef {
+    #[serde(default)]
+    pack: String,
     name: String,
+}
+
+/// Material name for a texture nothing else can supply: bonnie draws a
+/// checkerboard for an empty reference, and `_USER` textures are embedded
+/// indexed images the importer does not decode.
+pub const FALLBACK_TEXTURE: &str = "__fallback";
+
+/// Material resource name for a bonnie texture reference. Shared by the
+/// importer (which registers the material) and the grid cook (which finds
+/// it again), so the two cannot drift.
+pub fn texture_key(pack: &str, name: &str) -> String {
+    if name.is_empty() || pack == "_USER" {
+        FALLBACK_TEXTURE.to_string()
+    } else {
+        name.to_string()
+    }
+}
+
+impl TexRef {
+    fn key(&self) -> String {
+        texture_key(&self.pack, &self.name)
+    }
 }
 
 #[derive(Deserialize, Clone, Copy, PartialEq, Default)]
@@ -264,6 +288,63 @@ fn push_face(
     }
 }
 
+/// Clip a convex ring to the slab `lo <= y <= hi`, rounding cut points to whole
+/// editor units, and return the result as pieces of at most four corners
+/// (a longer ring is fanned into quads and triangles).
+fn clip_band(ring: &[[i32; 3]], lo: i32, hi: i32) -> Vec<Vec<[i32; 3]>> {
+    let clip = |input: Vec<[i32; 3]>, keep: &dyn Fn(i32) -> bool, plane: i32| -> Vec<[i32; 3]> {
+        let mut output = Vec::new();
+        for i in 0..input.len() {
+            let (p, q) = (input[i], input[(i + 1) % input.len()]);
+            let (p_in, q_in) = (keep(p[1]), keep(q[1]));
+            if p_in {
+                output.push(p);
+            }
+            if p_in != q_in {
+                let t = f64::from(plane - p[1]) / f64::from(q[1] - p[1]);
+                let at = |axis: usize| (f64::from(p[axis]) + t * f64::from(q[axis] - p[axis])).round() as i32;
+                output.push([at(0), plane, at(2)]);
+            }
+        }
+        output
+    };
+    let ring = clip(ring.to_vec(), &|y| y >= lo, lo);
+    let ring = if ring.is_empty() { ring } else { clip(ring, &|y| y <= hi, hi) };
+    let ring = dedupe(&ring);
+    let mut pieces = Vec::new();
+    let mut first = 1;
+    while first + 1 < ring.len() {
+        let last = (first + 2).min(ring.len() - 1);
+        let mut piece = vec![ring[0]];
+        piece.extend_from_slice(&ring[first..=last]);
+        pieces.push(piece);
+        first = last;
+    }
+    pieces
+}
+
+/// `push_face`, but a ring taller than the 64 texel texture, or straddling a
+/// 64 texel repeat in y, would clamp its v coordinate and smear: cut it on
+/// the same absolute sector bands the rectangular walls use.
+fn push_banded(faces: &mut Vec<Face>, ring: &[[i32; 3]], toward: [f64; 3], texture: &str, cell: (usize, usize)) {
+    let low = ring.iter().map(|p| p[1]).min().expect("ring has points");
+    let high = ring.iter().map(|p| p[1]).max().expect("ring has points");
+    let period = (64.0 * TEXEL_EDITOR) as i32;
+    let crosses = low.div_euclid(period) != (high - 1).div_euclid(period);
+    if !(crosses || f64::from(high - low) > 63.0 * TEXEL_EDITOR) {
+        push_face(faces, ring, toward, texture, cell);
+        return;
+    }
+    let mut start = low.div_euclid(CELL_EDITOR) * CELL_EDITOR;
+    while start < high {
+        let next = start + CELL_EDITOR;
+        for piece in clip_band(ring, start, next) {
+            push_face(faces, &piece, toward, texture, cell);
+        }
+        start = next;
+    }
+}
+
 fn collect_faces(level: &Level) -> (Vec<Face>, (i32, i32), (usize, usize)) {
     // Global cell origin: the lowest room corner, so rooms placed apart share
     // one lattice.
@@ -314,12 +395,9 @@ fn collect_faces(level: &Level) -> (Vec<Face>, (i32, i32), (usize, usize)) {
                     let toward = if up { [0.0, 1.0, 0.0] } else { [0.0, -1.0, 0.0] };
                     let c1 = corners(face.heights);
                     let c2 = corners(face.heights_2.unwrap_or(face.heights));
-                    let name1 = &face.texture.name;
-                    let name2 = face
-                        .texture_2
-                        .as_ref()
-                        .map(|t| &t.name)
-                        .unwrap_or(name1);
+                    let name1 = &face.texture.key();
+                    let key2 = face.texture_2.as_ref().map(TexRef::key);
+                    let name2 = key2.as_ref().unwrap_or(name1);
                     let planar = face.heights_2.is_none()
                         && name1 == name2
                         && Plane::from_points([c1[0], c1[1], c1[2]])
@@ -391,11 +469,11 @@ fn collect_faces(level: &Level) -> (Vec<Face>, (i32, i32), (usize, usize)) {
                             [points[1][0], bottom(a[1], b[1]), points[1][1]],
                             [points[0][0], bottom(a[0], b[0]), points[0][1]],
                         ];
-                        push_face(
+                        push_banded(
                             &mut faces,
                             &ring,
                             [f64::from(dx), 0.0, f64::from(dz)],
-                            &floor.texture.name,
+                            &floor.texture.key(),
                             cell,
                         );
                     }
@@ -415,7 +493,7 @@ fn collect_faces(level: &Level) -> (Vec<Face>, (i32, i32), (usize, usize)) {
                             NormalMode::Back => front.map(|v| -v),
                             NormalMode::Front | NormalMode::Both => front,
                         };
-                        let name = &wall.texture.name;
+                        let name = &wall.texture.key();
                         let (y0, y1, y2, y3) = (
                             oy + scale(h[0]),
                             oy + scale(h[1]),
@@ -445,18 +523,14 @@ fn collect_faces(level: &Level) -> (Vec<Face>, (i32, i32), (usize, usize)) {
                                 start = next;
                             }
                         } else {
-                            push_face(
-                                &mut faces,
-                                &[
-                                    [a[0], y0, a[1]],
-                                    [b[0], y1, b[1]],
-                                    [b[0], y2, b[1]],
-                                    [a[0], y3, a[1]],
-                                ],
-                                visible,
-                                name,
-                                cell,
-                            );
+                            let ring = [
+                                [a[0], y0, a[1]],
+                                [b[0], y1, b[1]],
+                                [b[0], y2, b[1]],
+                                [a[0], y3, a[1]],
+                            ];
+                            // A wall with a sloped base or top is not banded above.
+                            push_banded(&mut faces, &ring, visible, name, cell);
                         }
                     }
                 }

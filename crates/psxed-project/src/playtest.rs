@@ -246,6 +246,16 @@ pub use manifest::{
 pub use performance::{playtest_performance_envelope, PlaytestPerformanceEnvelope};
 pub use schema::*;
 
+/// Open-hall experiment: the bonnie importer writes the level's ambient
+/// level (0 to 255) to `ambient.txt` beside the project; projects without
+/// one keep the engine default of 32.
+fn open_hall_ambient(project_root: &Path) -> [u8; 3] {
+    std::fs::read_to_string(project_root.join("ambient.txt"))
+        .ok()
+        .and_then(|text| text.trim().parse::<u8>().ok())
+        .map_or([32; 3], |level| [level; 3])
+}
+
 /// Open-hall experiment: cook the grid render pack for the level named by
 /// `OPEN_HALL_GRID_LEVEL`. Empty when the variable is unset or the cook
 /// fails (the failure is a cook error).
@@ -671,7 +681,7 @@ pub fn build_package(
     let world_options = crate::brush_world::BrushWorldCookOptions {
         project_root,
         mode: project.bsp_cook_mode,
-        ambient: [32; 3],
+        ambient: open_hall_ambient(project_root),
         texture_asset_base,
         collision_hulls: if project.collision_hull_bsp {
             crate::brush_collision_hulls::CollisionHullStrategy::HullBsp
