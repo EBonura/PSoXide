@@ -34,6 +34,32 @@ fn hardware_imports(s: &str) -> String {
         .replace("psx_sfx::", "crate::sfx::")
 }
 
+/// psx-sfx source as a module of the scratch crate: its own `crate::` paths
+/// become `crate::sfx::`, then the SDK crate paths are pointed at the scratch
+/// crate as everywhere else.
+fn sfx_paths(source: &str) -> String {
+    hardware_imports(&source.replace("crate::", "crate::sfx::"))
+}
+
+/// Copy every `.rs` under `from` except the crate root `lib.rs` into `to`,
+/// keeping the directory structure, with inner attributes dropped and the SDK
+/// crate paths pointed at the scratch crate's own modules.
+fn copy_module_tree(from: &std::path::Path, to: &std::path::Path, inner_attributes: &Regex) {
+    std::fs::create_dir_all(to).expect("module directory");
+    for entry in std::fs::read_dir(from).unwrap_or_else(|e| panic!("{}: {e}", from.display())) {
+        let path = entry.expect("directory entry").path();
+        let name = path.file_name().expect("file name").to_owned();
+        if path.is_dir() {
+            copy_module_tree(&path, &to.join(&name), inner_attributes);
+        } else if path.extension().is_some_and(|e| e == "rs")
+            && !(from.ends_with("src") && name == "lib.rs")
+        {
+            let text = inner_attributes.replace_all(&read(&path), "").into_owned();
+            std::fs::write(to.join(&name), sfx_paths(&text)).expect("write module");
+        }
+    }
+}
+
 const SNAPSHOT_IMPL: &str = r#"
 impl<const N:usize,const H:u8,const S:u8> Hsfx<N,H,S> {
  pub fn snapshot(&self)->Vec<u64> {
@@ -56,7 +82,7 @@ fn frozen_hsfx_matches_shared_source() {
     let here = here();
     let root = root();
     let scratch = Scratch::new("hsfx-oracle-");
-    let deps = ["psx-asset", "psx-io"]
+    let deps = ["psx-asset", "psx-io", "psx-math"]
         .iter()
         .map(|name| {
             format!(
@@ -120,7 +146,14 @@ fn frozen_hsfx_matches_shared_source() {
     let sfx = inner_attributes
         .replace_all(&read(&sfx_path), "")
         .into_owned();
-    scratch.write("src/sfx.rs", &hardware_imports(&sfx));
+    scratch.write("src/sfx.rs", &sfx_paths(&sfx));
+    // psx-sfx is a tree of modules (`pub mod hw;` ...): bring the rest of its
+    // source along whatever its layout is, rewritten the same way.
+    copy_module_tree(
+        &sfx_path.parent().expect("psx-sfx src"),
+        &scratch.0.join("src/sfx"),
+        &inner_attributes,
+    );
 
     let shared_path = here.parent().unwrap().join("src/hsfx.rs");
     let shared = hardware_imports(&read(&shared_path)) + SNAPSHOT_IMPL;
