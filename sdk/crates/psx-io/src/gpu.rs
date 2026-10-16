@@ -163,6 +163,10 @@ fn wait_ready(flag: GpuStat) {
 
 /// GP1(01h) resets [`wait_command_ready`] and [`wait_dma_ready`] have issued
 /// after a ready bit stayed low for [`READY_SPINS`] polls.
+///
+/// In `.data`, not `.bss`, so a bare chain-loader image that nothing zeroes a
+/// `.bss` for counts from zero (see `irq::POLLING_KEEP`).
+#[cfg_attr(target_arch = "mips", link_section = ".data")]
 static mut COMMAND_RESETS: u32 = 0;
 
 #[cold]

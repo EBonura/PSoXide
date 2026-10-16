@@ -43,6 +43,12 @@ pub fn set_mask(bits: u32) {
 
 /// Sources a polled driver must leave enabled in `I_MASK` (see
 /// [`keep_enabled_while_polling`]).
+///
+/// Forced into `.data` rather than left in `.bss`: a chain-loader blob is a
+/// bare image that nothing zeroes a `.bss` for, yet it reads the disc through
+/// the polled reader, which consults this word. Guest-only: the host builds
+/// this crate too, and mach-o spells section names differently.
+#[cfg_attr(target_arch = "mips", link_section = ".data")]
 static mut POLLING_KEEP: u32 = 0;
 
 /// Ask the polled drivers that cut `I_MASK` down to VBlank for the length of a
