@@ -32,7 +32,7 @@ the run are the two that need a person or touch the operator's card:
 **CONTROLLER TEST (P1 + P2)** and **MEMORY CARD (AT OWN RISK)**; the menu also
 has **VIEW LAST CAPTURE**.
 
-The run is ten areas, 66 steps, in this order (`src/run.rs`):
+The run is ten areas, 69 steps, in this order (`src/run.rs`):
 
 | # | Area | Steps |
 |---|---|---|
@@ -40,11 +40,11 @@ The run is ten areas, 66 steps, in this order (`src/run.rs`):
 | 1 | CPU AND RAM | cases, `CPU SWEEP`, `CPU AND BUS TIMING` |
 | 2 | IRQ, DMA, TIMERS | cases, timing, `TIMER PRECISION`, `TIMER 1 HBLANK RATE`, `POLLED TIMER TICK LOSS` |
 | 3 | GTE | cases, `GTE SWEEP`, `GTE TIMING`, `GTE COMMAND LATENCY`, `GTE PRECISION` |
-| 4 | GPU, MDEC, DISPLAY | cases, timing and MDEC, `GPU BATCHES`, `MDEC DECODE`, precision, `RASTER HASHES`, `DISPLAY WIDTHS`, `480I INTERLACE`, `GPU DMA EDGE CASES`, `WORKLOAD CALIBRATION`, `TEXTURE UV WINDOWS` (the last four are v2.4, described under "v2.4 measurements") |
+| 4 | GPU, MDEC, DISPLAY | cases, timing and MDEC, `GPU BATCHES`, `CLUT ADDRESS REWRITE` (v2.6, [clut-rewrite-probe.md](clut-rewrite-probe.md)), `MDEC DECODE`, precision, `RASTER HASHES`, `DISPLAY WIDTHS`, `480I INTERLACE`, `GPU DMA EDGE CASES`, `WORKLOAD CALIBRATION`, `TEXTURE UV WINDOWS` (the last four are v2.4, described under "v2.4 measurements") |
 | 5 | SPU | `SPU INIT STATE`, precision, cases, `SPU MAP`, `SPU DMA TIMING`, `UI SAMPLE END AND LOOP` (SB1), `SPU RAM AND VOICES` (SB2), `CAPTURE RINGS` (SB4), `BANK HANDOFF` (PA4) |
-| 6 | CD, XA, CD-DA, STREAM | cases, `CD POLLED TIMING`, `CD DATA VERSUS AUDIO ROUTE` (PA1), `CD READ MECHANISMS` (CL2), `XA MUSIC LOOP`, `STREAM COST`, `CD-DA HANDOFF` |
+| 6 | CD, XA, CD-DA, STREAM | cases, `CD POLLED TIMING`, `CD DATA VERSUS AUDIO ROUTE` (PA1), `CD READ MECHANISMS` (CL2), `XA MUSIC LOOP`, `XA LATENCY, SWITCH, CLOCK` (v2.6), `STREAM COST`, `CD-DA HANDOFF`, `CD PAUSE SECOND RESPONSE` (v2.7) |
 | 7 | SIO | cases, `SIO TIMING`, then the controller-port and pad-engine measurements described under "SIO measurements" below (select delay, pad and card `/ACK` timing, `CARD SECTOR PROTOCOL` (v2.4), pad and card together, the engine's sweep, pacings, card lease and load, the DualShock motors, hot-plug) |
-| 8 | PERFORMANCE | stack and lever cases, `WARM PROBES`, `EXTENDED PROBES AND SHAPES`, `DMA VERSUS CPU LOADS`, `MDEC DMA VERSUS CPU`, `AUDIT PROBES` |
+| 8 | PERFORMANCE | stack and lever cases, `WARM PROBES`, `EXTENDED PROBES AND SHAPES` (with the v2.5 cached store and load rows), `DMA VERSUS CPU LOADS`, `MDEC DMA VERSUS CPU`, `AUDIT PROBES` |
 | 9 | DRIVE AND BUS STRESS | `CD DMA VERSUS CPU`, `CD MOTOR` (waits up to 20 s), `480I DRAW RULE` (v2.4, last of the safe steps), then `REGISTER A/B (CAN HANG)` |
 
 **A reset between areas.** Each area starts with `reset_area`: the GPU reset
@@ -380,6 +380,12 @@ chain-loaded from another disc needs `HWSONGS.XA` in its own part of the image,
 found by name.
 
 **XA LATENCY, SWITCH, CLOCK (v2.6).** The step after XA MUSIC LOOP in the linear run. It starts the pad song five times from a paused drive, switches between the pad and the whistle with a Setfilter alone six times and by restarting three times, interrupts a song with a 64-sector data read three times and times three ways back (XA resume, a fresh XA start, CD-DA Play), then plays `HWCLOCK.XA` (190 s, file 2) for 180 s and compares the head with the system clock at 60, 120 and 180 s. Sound is detected in the SPU CD capture buffer, so every number is the time to something audible. The run shows `XA` and the trial in progress on the detail line and the bar fills with the three minutes. `HWCLOCK.XA` comes from `make hardware-tests-disc` the same way as `HWSONGS.XA`. Records `0x320`-`0x32E`; their layout is in `src/xa_measure.rs`.
+
+**CD PAUSE SECOND RESPONSE (v2.7).** The last step of the CD area (`src/cd_pause.rs`, records `0x340`-`0x3B8`). Pause answers twice, an acknowledge (INT3) at once and a completion (INT2) when the drive has stopped; a loader that pauses between chunks waits for INT2. PSX-SPX puts it near 1,096,083 system clocks at double speed, the emulator branch `fix/cd-pause-late-land-2026-10-16` uses an estimate of 120,000 clocks, chosen between bounds, and nothing had timed it on a console for a data read or an idle drive. The step times it from the Pause command byte to the interrupt flag changing, in system clocks (Timer 2 at system clock / 8, widened to 32 bits, so a clock is eight system clocks of resolution before the loop's own pass time, which `0x340` records). The wait for INT2 is bounded at 8,000,000 clocks (a quarter of a second, 7.3 times the PSX-SPX figure and about twice the longest the console has shown, the 123 ms after CD-DA in v1.28) and by a pass count the SELECT skip key shrinks to one; a Pause that does not complete in time is recorded as a timeout, not waited for. The data the drive reads is never fetched: each sector's INT1 is acknowledged and counted, which is all the controller needs.
+
+The matrix is single and double speed by five head states, three trials each: IDLE (drive paused and spinning), SETTLED (Pause after 12 sectors of a read at LBA 564), FIRST (Pause right after the read's first sector), SEEK (a read aimed at LBA 15,000, Pause the moment ReadN is acknowledged, while the head travels) and FAR (the same read, Pause after its first sector; each far trial first brings the head back to LBA 564 so the seek is long). Four WATCH trials on the settled read send GetStat commands after the Pause and log every flag with its time and the status byte: EARLY sends the first GetStat the moment the Pause is acknowledged and then one every 150,000 clocks, SPACED waits 400,000 clocks for the first and sends one every 400,000. They show whether a command between Pause's two responses cancels the second, and what the status byte says while the drive spins down.
+
+Records: `0x340` clocks per pass of the wait loop (min, median, max); `0x341` the INT2 and INT3 limits in units of 1024 clocks and the trials run; `0x342` setup steps the drive refused and cleanup pauses that never settled; `0x350 + 4 * cell + trial` (cell = speed * 5 + state, trial 0 to 2) the clocks from Pause to INT2 split over two fields (`lo`, `hi`, so `hi * 65536 + lo`, both `0xFFFF` for none) and a packed field (outcome in bits 0 and 1: 0 completed, 1 no INT2 in time, 2 drive error, 3 no acknowledge; sectors that arrived after the Pause in bits 2 to 5; the INT2 status byte in bits 8 to 15); `0x350 + 4 * cell + 3` the acknowledge time min, median and max in units of 32 clocks; `0x380 + 16 * watch + event` (watch = speed * 2 + 0 SPACED or 1 EARLY, events 0 to 7) the offset from the Pause in units of 128 clocks, the flag (bits 8 to 10: 1 sector, 2 complete, 3 acknowledge, 5 error, 7 the limit ended the watch) with the status byte, and the GetStats sent so far; `0x388 + 16 * watch` flags seen, GetStats sent and whether INT2 came. `psoxide-hwtest report` prints them as `cd_pause` rows in clocks and milliseconds. The step takes about a minute on a console (far seeks dominate); hold SELECT to skip it.
 
 ## CD stream cases (v1.28)
 

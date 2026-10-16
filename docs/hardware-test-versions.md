@@ -33,6 +33,12 @@ shipped without either, which is why no machine-code baseline exists for them.
 
 ## History
 
+### v2.7 (2026-10-16, schema PX8)
+
+MINOR: one step added, `CD PAUSE SECOND RESPONSE`, the last step of the CD area, records `0x340`-`0x3B8` (`src/cd_pause.rs`, layout in its header and in [hardware-test-disc.md](hardware-test-disc.md)). It times the CD controller's second response (INT2) to Pause, in system clocks from the command byte, for an idle drive and for a data read at single and double speed, with the head settled in a read, at its first sector, mid-seek and after a long seek (three trials each), then watches GetStat commands sent between Pause's two responses. The wait is bounded at 8,000,000 clocks. Nothing existing changes meaning. `TIMING_RECORD_COUNT` rises from 1100 to 1300: the v2.6 run takes about 1,090 records, this step adds 79, and 1100 dropped 68 of them (the third field of `0x41E`) in the first headless run.
+
+This version also consolidates the suite's history onto one branch. v1.28 (CD STREAM), v2.0 to v2.4 (the single ordered run, rumble, 480i, FIFO and card steps), v2.5 (cached store and load rows), the CLUT address rewrite (`CLUT ADDRESS REWRITE`, GPU area) and v2.6 (XA) had only ever lived on separate branches and were never on main, which still said v1.27. Record ids are unchanged from those builds, so the silicon captures taken on them (v1.28, v2.1, v2.2, v2.4) stay comparable record for record. Pins: SDK `bbddb44b` (`feat/pad-engine-land-2026-10-16`, SDK main plus the pad engine and DualShock motors; v2.2 to v2.6 were built against `integ/pad-2026-10-08`, which this branch contains plus the card-lease ACK-latch fix) and the emulator `6edde550` (editor main's). The host tools are the Rust `psoxide-hwtest`; the Python report, silence check, baseline writer and machine-code verifier of those branches are not restored.
+
 ### v2.6 (2026-10-15, schema PX8)
 
 MINOR: one step added, `XA LATENCY, SWITCH, CLOCK`, right after `XA MUSIC LOOP` in the CD area, with records `0x320`-`0x32E` (`src/xa_measure.rs`, layouts in its header and in `hwtest-report.py` `xa_measure_rows`). Nothing existing changes meaning. The SDK pin stays `1832928d0`: a bump to the XA clock and resume branch (`feat/xa-clock-resume-2026-10-15`) breaks `rumble.rs` and `controller_test.rs` (the pad API moved), so the XA resume is sent by hand with the same commands as `Player::resume` there, and the song clock is not run; move to the real calls when the pin moves. Every wait counts loop iterations (SELECT skips), never a timer.

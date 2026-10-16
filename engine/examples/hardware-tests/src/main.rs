@@ -50,6 +50,7 @@ mod boot;
 mod bounds;
 mod card_proto;
 mod cd_chain_probe;
+mod cd_pause;
 mod cd_route;
 mod cdstream_cases;
 mod clut_rewrite;
@@ -220,9 +221,9 @@ unsafe extern "C" {
 //
 // History, one entry per version: docs/hardware-test-versions.md.
 const SUITE_VERSION_MAJOR: u8 = 2;
-const SUITE_VERSION_MINOR: u8 = 6;
+const SUITE_VERSION_MINOR: u8 = 7;
 /// Display form. Keep in step with the two constants above.
-const SUITE_VERSION: &str = "HWTEST v2.6";
+const SUITE_VERSION: &str = "HWTEST v2.7";
 const SCREEN_W: i16 = 320;
 const SCREEN_H: i16 = 240;
 const FONT_TPAGE: TexturePage = TexturePage::new(320, 0, TextureDepth::Bit4);
@@ -411,7 +412,7 @@ struct ScanReport {
 }
 
 /// Slots in the timing report. `run::tests` asserts the largest run fits.
-const TIMING_RECORD_COUNT: usize = 1100;
+const TIMING_RECORD_COUNT: usize = 1300;
 const MEMORY_CONTROL_REGISTER_COUNT: usize = MEMORY_CONTROL_REGISTERS.len();
 /// Captured with the timing block, in this order (the host names them by
 /// position). The first nine are the bus configuration the BIOS left.

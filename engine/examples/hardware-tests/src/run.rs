@@ -858,6 +858,7 @@ const STEPS: &[Step] = &[
     step(Area::Cd, "XA LATENCY, SWITCH, CLOCK", step_xa_measure),
     step(Area::Cd, "STREAM COST", step_stream_cost),
     step(Area::Cd, "CD-DA HANDOFF", step_stream_handoff),
+    step(Area::Cd, "CD PAUSE SECOND RESPONSE", step_cd_pause),
     // 7
     step(Area::Sio, "SIO CASES", tests_sio),
     step(Area::Sio, "SIO TIMING", records_sio),
@@ -983,6 +984,12 @@ fn step_stream_handoff(run: &mut Run) {
     let font = ui::upload_font();
     let mut screen = console_tests::Screen::new(gpu);
     run.push_all(&cdstream_cases::run_handoff(&mut screen, &font));
+}
+
+fn step_cd_pause(run: &mut Run) {
+    let font = run.font.take().expect("font uploaded by reset_area");
+    run.push_all(&cd_pause::run(&font));
+    run.font = Some(font);
 }
 
 fn step_stream_motor(run: &mut Run) {
