@@ -50,10 +50,14 @@ let along = Wide::dot3(v, unit).shr_i32(12);
 | To 32 bits, truncating | `low`, `low_u32`, `high`, `shr_i32(n)` (shift, then truncate) | `low`, `high`, `shr_u32(n)` |
 | To 32 bits, checked | `to_i32`, `to_u32` (`Option`) | `to_u32` |
 | To 32 bits, saturating | `saturate_i32`, `saturate_u32` | `saturate_u32` |
+| Reinterpret | `unsigned_abs` (exact, `MIN` gives 2^63), `cast_unsigned` (like `as u64`) | `cast_signed` (like `as i64`) |
 | Root | `isqrt` (0 for a negative value) | `isqrt` |
 
-`Mask64` is a set of up to 64 flags in two `u32` words (`set`, `clear`,
-`assign`, `test`), for what used to be a `u64` bit mask. It does no arithmetic.
+`Mask64` is a set of up to 64 flags in two `u32` words, for what used to be a
+`u64` bit mask: `set`, `clear`, `assign`, `test`, the set algebra `or`, `and`,
+`and_not`, `is_empty`, the constructors `bit(n)`, `first(n)` (lowest `n` bits)
+and `from_words(low, high)`, and `low` / `high` to store it. It does no
+arithmetic.
 
 ### Division (`psx_math::wide_div`)
 
