@@ -470,7 +470,7 @@ impl WorldCullingSettings {
     /// Clamp authored values to runtime-safe ranges.
     pub fn normalized(self) -> Self {
         Self {
-            bsp_patch_extent: self.bsp_patch_extent.clamp(1024, 4096),
+            bsp_patch_extent: self.bsp_patch_extent.clamp(576, 4096),
             draw_distance: self
                 .draw_distance
                 .clamp(MIN_WORLD_DRAW_DISTANCE, MAX_WORLD_DRAW_DISTANCE),

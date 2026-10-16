@@ -546,7 +546,7 @@ pub fn compile_brush_world(
     let texture_dims = brush_texture_dims(project, scene, &options);
     let uv_window_skip = sky_aperture_materials(project);
     let patch_extent = match &scene.node(NodeId::ROOT).unwrap().kind {
-        NodeKind::World { culling, .. } => culling.bsp_patch_extent.clamp(64, 256) as f64,
+        NodeKind::World { culling, .. } => culling.bsp_patch_extent.clamp(32, 256) as f64,
         _ => ENGINE_SURFACE_EXTENT_UNITS,
     };
     let occupant_points = player_occupant_points(scene);
@@ -2705,7 +2705,7 @@ pub(crate) fn partition_front_end(
     let texture_dims = brush_texture_dims(project, scene, &options);
     let uv_window_skip = sky_aperture_materials(project);
     let patch_extent = match &scene.node(NodeId::ROOT).unwrap().kind {
-        NodeKind::World { culling, .. } => culling.bsp_patch_extent.clamp(64, 256) as f64,
+        NodeKind::World { culling, .. } => culling.bsp_patch_extent.clamp(32, 256) as f64,
         _ => ENGINE_SURFACE_EXTENT_UNITS,
     };
     let (topology, render) = compile_model_surfaces(&brushes);
