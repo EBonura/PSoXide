@@ -310,6 +310,7 @@ const fn pad_kind(mode: PadMode) -> &'static str {
         PadMode::Analog => "DUALSHOCK",
         PadMode::Config => "CONFIG",
         PadMode::Unknown => "UNKNOWN",
+        PadMode::Negcon => "NEGCON",
     }
 }
 
