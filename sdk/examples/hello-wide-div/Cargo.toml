@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+[package]
+name    = "hello-wide-div"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+
+[workspace]
+
+[[bin]]
+name = "hello-wide-div"
+path = "src/main.rs"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+
+[dependencies]
+psx-rt   = { path = "../../crates/psx-rt" }
+psx-math = { path = "../../crates/psx-math" }
+psx-hw   = { path = "../../../crates/psx-hw" }

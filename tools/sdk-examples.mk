@@ -98,8 +98,8 @@ hello-cdstream-disc:
 hello-cdstream-gate: hello-cdstream-disc
 	@test -n "$(FRONTEND)" || (echo "Set FRONTEND to the PSoXide-emulator executable"; exit 1)
 	sh tools/cdstream_gate.sh "$(FRONTEND)" "$(BUILD)/$(TARGET)/release/hello-cdstream.cue"
-# hello-wide runs every psx_math::Wide operation against a 32-bit reference and
-# its link map must pass the symbol gate: make hello-wide-gate [FRONTEND=/path/to/frontend]
+# hello-wide and hello-wide-div run every psx_math::Wide / WideU operation and every
+# division of them against a 32-bit reference; their link maps must pass the symbol gate: make hello-wide-gate [FRONTEND=/path/to/frontend]
 hello-wide-gate:
 	sh tools/wide_gate.sh "$(FRONTEND)"
 hello-tri:
