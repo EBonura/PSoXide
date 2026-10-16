@@ -34,11 +34,12 @@
 //! - a square root ([`Wide::isqrt`], [`WideU::isqrt`]), which is
 //!   [`crate::int32::isqrt_u64`] and uses `multu` only.
 //!
-//! There is **no division and no remainder** on a wide value, and no way to
-//! ask for one. To divide a product by a 32-bit value use
-//! [`crate::int32::mul_div_i32`] / [`crate::int32::mul_div_u32`] (a native
-//! `multu` then `divu`), or restructure so that the divide happens on 32
-//! bits.
+//! This module has **no division and no remainder**, and no way to ask for
+//! one. Dividing a wide value is [`crate::wide_div`]: exact, in 32-bit
+//! instructions only, with explicit rounding and clamping. To divide a product
+//! of two words by a word use [`crate::int32::mul_div_i32`] /
+//! [`crate::int32::mul_div_u32`] (a native `multu` then `divu`), which is
+//! cheaper than building the `Wide` first.
 //!
 //! Arithmetic wraps like the release-mode `i64` / `u64` it stands in for.
 //! Every function is `#[inline(always)]` (or `const`), so a call site
@@ -379,7 +380,7 @@ impl fmt::Debug for Wide {
 
 /// An unsigned 64-bit value: a `u32 * u32` product needs all 64 bits.
 ///
-/// Same rules as [`Wide`]: native operations only, no division.
+/// Same rules as [`Wide`]: native operations only; division is in [`crate::wide_div`].
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub struct WideU(
     // psx-numeric-allow-next-line: the one unsigned wide word; every method is a native HI:LO operation

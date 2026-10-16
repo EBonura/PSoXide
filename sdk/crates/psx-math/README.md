@@ -55,15 +55,61 @@ let along = Wide::dot3(v, unit).shr_i32(12);
 `Mask64` is a set of up to 64 flags in two `u32` words (`set`, `clear`,
 `assign`, `test`), for what used to be a `u64` bit mask. It does no arithmetic.
 
+### Division (`psx_math::wide_div`)
+
+Dividing a wide value is its own module so the cost is visible at the call
+site. Every operation is exact, uses only `multu`, 64-bit add / subtract /
+compare / shift and 32-bit `divu`, and links no compiler helper (the guest
+symbol gate passes with no opt-out). A zero divisor panics, like `/`. The
+bodies are `#[inline(never)]`: one shared copy per image.
+
+| Operation | Divisor | Result |
+| --- | --- | --- |
+| `WideU::div_rem_u32` | `u32` | full 64-bit quotient and the remainder |
+| `WideU::quotient` | `WideU` | `floor(n / d)`, clamped to `u32` |
+| `Wide::div_i32_wrap(d, Rounding)` | `i32` | the quotient as its low 32 bits, like `(n / d) as i32` |
+| `Wide::div_i32_sat(d, Rounding)` | `i32` | the quotient clamped to the `i32` range |
+| `Wide::div_wide_sat(d, Rounding)` | `Wide` | the same for a wide divisor |
+| `WideU::mul_full` | `WideU` | the exact 128-bit product, `(high, low)` |
+| `WideU::cmp_ratio(a, b, c, d)` | | order of `a / b` against `c / d` by comparing `a * d` with `c * b` |
+| `WideU::scale_by_ratio(a, den)` | `WideU` | `floor(a * self / den)` for `self <= den` |
+| `Wide::div_pow2(shift)` | `2^shift` | quotient truncated toward zero, still wide |
+
+`Rounding` is `TowardZero` (Rust's `/`), `Floor` (toward negative infinity) or
+`Nearest` (an exact half goes away from zero).
+
+Cost on the R3000A (CPU cycles per call including the call and return, random
+operands of every magnitude, measured by `sdk/examples/hello-wide-div` on the
+emulator; the numerator "fits a word" rows take the single-`divu` path):
+
+| Operation | Cycles |
+| --- | ---: |
+| `div_pow2` | 14 |
+| `div_rem_u32`, numerator fits a word | 89 |
+| `div_i32_wrap` / `div_i32_sat`, numerator fits a word | 153 to 167 |
+| `mul_full` | 138 |
+| `div_rem_u32`, 64-bit numerator | 300 |
+| `quotient`, word or wide divisor | 310 to 322 |
+| `div_i32_wrap` / `div_i32_sat`, 64-bit numerator | 421 to 430 |
+| `cmp_ratio` | 441 |
+| `div_wide_sat`, wide divisor | 476 |
+| `scale_by_ratio`, wide denominator | 528 |
+
+A 64-bit numerator over a word divisor is one `divu` for the high word plus the
+two-digit `div_u64_by_u32` (about 180 cycles). A divisor wider than 32 bits adds
+one `div_u64_by_u32` for the estimate (taken from the top 32 bits of the divisor)
+and a 96-bit product to settle it; the estimate is never below the true quotient
+and is one too high about one time in eight, so the settle loop runs at most
+twice.
+
 ### What is deliberately missing
 
-There is no division and no remainder on a `Wide`, no 128-bit anything and no
-conversion to a float, and there will not be: each would link a software
-routine the gate rejects. To divide a wide product by a 32-bit value use
-`psx_math::int32::mul_div_i32` / `mul_div_u32` (a native `multu`, then `divu`
-or the helper-free `div_u64_by_u32`). To scale a product by a power of two use
-`mul_shr_i32` or `Wide::shr_i32`. If a quantity needs more than that,
-restructure it into 32-bit steps.
+There is no 128-bit type and no conversion to a float, and there will not
+be: each would link a software routine the gate rejects. To divide a product
+of two words by a word use `psx_math::int32::mul_div_i32` / `mul_div_u32` (a
+native `multu`, then `divu` or the helper-free `div_u64_by_u32`), which is
+cheaper than going through a `Wide`. To scale a product by a power of two use
+`mul_shr_i32` or `Wide::shr_i32`.
 
 Arithmetic wraps like the release-mode `i64` / `u64` it replaces; shift counts
 are taken modulo 64 (a count of 64 shifts by zero). `Debug` prints the two
@@ -76,9 +122,15 @@ words in hex, because decimal formatting of 64 bits would link `__udivdi3`.
   every shift count 0..63 and past it, and each extraction flavour.
 - `sdk/examples/hello-wide` runs every operation on the target (or the
   emulator) against a reference written in 32-bit arithmetic only, and prints
-  `WIDE PASS`. `make hello-wide-gate [FRONTEND=...]` builds it, runs
-  `tools/guest_symbol_gate.sh` on its link map, and with a frontend runs the
-  guest and checks the verdict.
+  `WIDE PASS`. `sdk/examples/hello-wide-div` does the same for the division
+  operations (a bit-by-bit restoring division over 32-bit words is the
+  reference), prints `WIDEDIV PASS`, and times each operation.
+  `make hello-wide-gate [FRONTEND=...]` builds both, runs
+  `tools/guest_symbol_gate.sh` on their link maps, and with a frontend runs the
+  guests and checks the verdicts.
+- Host tests (`cargo test -p psx-math wide_div`): 1.5 million random cases per
+  division operation against `i128` / `u128` oracles, every rounding mode, and
+  the edge values around every word boundary, plus a bound on the settle loop.
 - The internal value is a plain `i64` / `u64` and every method is
   `#[inline(always)]` or `const`, so a call compiles to the same instructions
   as the bare expression. Games that migrated from per-game copies measured
@@ -90,6 +142,7 @@ words in hex, because decimal formatting of 64 bits would link `__udivdi3`.
   `sin_q12` / `cos_q12`, and the octant-linear `atan2_q12`.
 - `int32`: saturating 32-bit helpers and the helper-free wide forms
   (`mul_div_i32`, `mul_shr_i32`, `mul_div_u32`, `isqrt_u64`, `div_u64_by_u32`).
+- `wide_div`: exact `Wide` / `WideU` division, 128-bit product and ratio compare.
 - `fmt`: integer-to-decimal ASCII without `core::fmt`.
 - `color`, `clip_lanes`, `attributed_clip`: color helpers and clipping kernels.
 - Feature `asm-kernels`: hand-scheduled R3000 versions of `clip_lanes8_plane`,
