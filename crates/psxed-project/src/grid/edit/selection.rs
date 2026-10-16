@@ -324,6 +324,9 @@ pub fn cells_in_rect(world: &GridWorld, room: usize, rect: CellRect) -> Vec<Grid
     let Some(r) = world.rooms.get(room) else {
         return Vec::new();
     };
+    let Some(rect) = rect.clipped_to(r) else {
+        return Vec::new();
+    };
     rect.cells()
         .filter(|cell| {
             r.local(*cell)

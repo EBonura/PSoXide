@@ -52,6 +52,23 @@ impl CellRect {
             && (self.min[1]..=self.max[1]).contains(&cell[1])
     }
 
+    /// The part of the rectangle inside `room`, or `None` when they do not
+    /// overlap. Lets a huge drag be walked cell by cell safely.
+    pub fn clipped_to(&self, room: &GridRoom) -> Option<Self> {
+        let max = [
+            room.origin[0] + room.width as i32 - 1,
+            room.origin[1] + room.depth as i32 - 1,
+        ];
+        let clipped = Self {
+            min: [
+                self.min[0].max(room.origin[0]),
+                self.min[1].max(room.origin[1]),
+            ],
+            max: [self.max[0].min(max[0]), self.max[1].min(max[1])],
+        };
+        (clipped.min[0] <= clipped.max[0] && clipped.min[1] <= clipped.max[1]).then_some(clipped)
+    }
+
     /// Every cell, `z` major.
     pub fn cells(&self) -> impl Iterator<Item = [i32; 2]> + '_ {
         (self.min[1]..=self.max[1]).flat_map(|z| (self.min[0]..=self.max[0]).map(move |x| [x, z]))
@@ -177,6 +194,11 @@ pub fn delete_surfaces(
     };
     let before = (target.width, target.depth, target.origin);
     let mut outcome = RectOutcome::default();
+    // Only the part over the room can hold anything; a rectangle dragged
+    // across the whole world must not be walked cell by cell.
+    let Some(rect) = rect.clipped_to(target) else {
+        return outcome;
+    };
     for cell in rect.cells() {
         let Some([x, z]) = target.local(cell) else {
             outcome.skipped += 1;
@@ -315,14 +337,14 @@ mod tests {
         assert_eq!(room.origin, [0, 2]);
         assert_eq!((room.width, room.depth), (4, 2));
         assert!(has(&world, [3, 3], SurfaceKind::Floor));
-        // Deleting where nothing is skips.
+        // Deleting where there is no room at all changes and counts nothing.
         let out = delete_surfaces(
             &mut world,
             0,
             SurfaceKind::Floor,
             CellRect::from_corners([0, 0], [1, 0]),
         );
-        assert_eq!((out.changed, out.skipped), (0, 2));
+        assert_eq!((out.changed, out.skipped), (0, 0));
     }
 
     #[test]
@@ -343,6 +365,30 @@ mod tests {
             create_surfaces(&mut world, 0, SurfaceKind::Floor, ok, 0, None)
                 .refused
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn deleting_over_a_world_sized_rectangle_only_walks_the_room() {
+        let mut world = world();
+        create_surfaces(
+            &mut world,
+            0,
+            SurfaceKind::Floor,
+            CellRect::from_corners([0, 0], [1, 1]),
+            0,
+            None,
+        );
+        let huge = CellRect::from_corners(
+            [-2_000_000_000, -2_000_000_000],
+            [2_000_000_000, 2_000_000_000],
+        );
+        let out = delete_surfaces(&mut world, 0, SurfaceKind::Floor, huge);
+        assert_eq!(out.changed, 4);
+        let away = CellRect::from_corners([1000, 1000], [2_000_000_000, 2_000_000_000]);
+        assert_eq!(
+            delete_surfaces(&mut world, 0, SurfaceKind::Floor, away),
+            RectOutcome::default()
         );
     }
 
