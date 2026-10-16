@@ -150,7 +150,7 @@ fn frozen_hsfx_matches_shared_source() {
     // psx-sfx is a tree of modules (`pub mod hw;` ...): bring the rest of its
     // source along whatever its layout is, rewritten the same way.
     copy_module_tree(
-        &sfx_path.parent().expect("psx-sfx src"),
+        sfx_path.parent().expect("psx-sfx src"),
         &scratch.0.join("src/sfx"),
         &inner_attributes,
     );
