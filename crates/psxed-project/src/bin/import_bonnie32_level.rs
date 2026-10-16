@@ -2,12 +2,13 @@
 //!
 //! Usage:
 //!   import-bonnie32-level <level.ron> <texture-pack-dir> <out-dir> [--spawn X,Z] [--yaw DEG]
-//!                         [--base <project-dir>] [--enemies N]
+//!                         [--base <project-dir>] [--enemies N] [--perch X,Z]...
 //!
 //! With `--base`, the base project supplies characters, camera, sky and UI:
 //! its world brushes and every top-level node except the player and the
 //! first two enemies are dropped, and `<out-dir>/assets` must already link
-//! to the base project's assets. Without it, the level gets the characterless
+//! to the base project's assets. Each `--perch X,Z` adds a Graybox Reach arch
+//! perch (a `HookPoint`) over that sector. Without it, the level gets the characterless
 //! debug controller.
 //!
 //! The level must be plain RON (bonnie-32 saves brotli; decompress first).
@@ -125,6 +126,7 @@ struct Args {
     yaw: f32,
     base: Option<PathBuf>,
     enemies: usize,
+    perches: Vec<(usize, usize)>,
 }
 
 fn parse_args() -> Args {
@@ -133,6 +135,7 @@ fn parse_args() -> Args {
     let mut yaw = 0.0;
     let mut base = None;
     let mut enemies = 2;
+    let mut perches = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -143,6 +146,11 @@ fn parse_args() -> Args {
             }
             "--yaw" => yaw = args.next().expect("--yaw DEG").parse().expect("yaw"),
             "--base" => base = Some(PathBuf::from(args.next().expect("--base DIR"))),
+            "--perch" => {
+                let value = args.next().expect("--perch X,Z");
+                let (x, z) = value.split_once(',').expect("--perch X,Z");
+                perches.push((x.parse().expect("perch x"), z.parse().expect("perch z")));
+            }
             "--enemies" => enemies = args.next().expect("--enemies N").parse().expect("enemies"),
             _ => positional.push(PathBuf::from(arg)),
         }
@@ -161,6 +169,7 @@ fn parse_args() -> Args {
         yaw,
         base,
         enemies,
+        perches,
     }
 }
 
@@ -248,6 +257,9 @@ fn main() {
         place(scene, spawn_node, spawn);
     }
 
+    if args.base.is_some() {
+        place_arch_perches(project.active_scene_mut(), &level, &args.perches, args.yaw - 180.0);
+    }
     if name == "Cathedral" {
         place_cathedral_lights(project.active_scene_mut(), room, &level);
     }
@@ -361,6 +373,45 @@ fn place_cathedral_lights(scene: &mut psxed_project::Scene, room: &Room, _level:
             },
         );
         scene.node_mut(id).expect("light node").transform.translation = at.map(|v| v as f32);
+    }
+}
+
+/// Height of a hook point above the floor under it, authored units. Graybox
+/// Reach authors its one arch perch (`Archlight / Fractured ruin`) 1792 above
+/// the floor, a jump and a half over the 1024 unit character.
+const PERCH_HEIGHT: i32 = 1792;
+
+/// One `HookPoint` per requested sector, at the cell centre over its floor.
+/// A hook point is Graybox Reach's whole arch mechanic: the runtime draws the
+/// beacon, validates range and clearance, and flies the player to it. `yaw`
+/// keeps the base relation between the player's heading and the hook's.
+fn place_arch_perches(
+    scene: &mut psxed_project::Scene,
+    level: &Level,
+    cells: &[(usize, usize)],
+    yaw: f32,
+) {
+    let room = &level.rooms[0];
+    let step = SECTOR * SCALE_NUM / SCALE_DEN;
+    for (index, &(gx, gz)) in cells.iter().enumerate() {
+        let sector = room
+            .sectors
+            .get(gx)
+            .and_then(|c| c.get(gz))
+            .and_then(|s| s.as_ref())
+            .and_then(|s| s.floor.as_ref())
+            .unwrap_or_else(|| panic!("no floor at perch cell {gx},{gz}"));
+        let top = sector.heights.iter().cloned().fold(f32::MIN, f32::max);
+        let at = [
+            scale(room.position.x) + gx as i32 * step + step / 2,
+            scale(room.position.y) + scale(top) + PERCH_HEIGHT,
+            scale(room.position.z) + gz as i32 * step + step / 2,
+        ];
+        let id = scene.add_node(NodeId::ROOT, format!("Arch Perch {}", index + 1), NodeKind::HookPoint);
+        let node = scene.node_mut(id).expect("perch node");
+        node.transform.translation = at.map(|v| v as f32);
+        node.transform.rotation_degrees = [0.0, yaw, 0.0];
+        println!("arch perch {} at cell ({gx},{gz}) -> {at:?}", index + 1);
     }
 }
 
