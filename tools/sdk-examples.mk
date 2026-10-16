@@ -31,7 +31,7 @@ PGO_ARGS ?=
 PGO_VARIANTS ?= --variant off --variant default --variant hot=500 --variant hot=500+profi
 GATE ?=
 
-.PHONY: example disc hello-tri hello-tri-disc run-tri examples pgo-collect pgo-choose hello-xa-disc hello-xa-gate hello-xa-resume-disc hello-xa-resume-gate hello-cdstream-disc hello-cdstream-gate
+.PHONY: example disc hello-tri hello-tri-disc run-tri examples pgo-collect pgo-choose hello-xa-disc hello-xa-gate hello-xa-resume-disc hello-xa-resume-gate hello-cdstream-disc hello-cdstream-gate hello-wide-gate
 examples:
 	@set -e; for example in hello-tri hello-input hello-ot hello-gte hello-tex hello-memcard hello-spstack hello-gteirq hello-present hello-present-queue hello-asmprobe; do $(MAKE) -f tools/sdk-examples.mk disc EXAMPLE=$$example; done
 
@@ -98,6 +98,10 @@ hello-cdstream-disc:
 hello-cdstream-gate: hello-cdstream-disc
 	@test -n "$(FRONTEND)" || (echo "Set FRONTEND to the PSoXide-emulator executable"; exit 1)
 	sh tools/cdstream_gate.sh "$(FRONTEND)" "$(BUILD)/$(TARGET)/release/hello-cdstream.cue"
+# hello-wide runs every psx_math::Wide operation against a 32-bit reference and
+# its link map must pass the symbol gate: make hello-wide-gate [FRONTEND=/path/to/frontend]
+hello-wide-gate:
+	sh tools/wide_gate.sh "$(FRONTEND)"
 hello-tri:
 	$(MAKE) example EXAMPLE=hello-tri
 hello-tri-disc:
