@@ -62,6 +62,10 @@ pub struct GridFace {
     pub kind: GridFaceKind,
     /// Corners in editor units, clockwise seen from the visible side.
     pub points: Vec<[i32; 3]>,
+    /// The same corners in grid units with the room's vertical offset
+    /// applied, `[x, y, z]`. The cook maps these to runtime units in one
+    /// step so what is drawn and what is stood on round identically.
+    pub grid: Vec<[i32; 3]>,
     /// Texel coordinates per corner, before any wrap into the texture.
     pub texels: Vec<[f64; 2]>,
     /// Unit normal of the visible side.
@@ -75,6 +79,7 @@ pub struct GridFace {
 #[derive(Clone, Copy)]
 struct Corner {
     p: [i32; 3],
+    g: [i32; 3],
     uv: [f64; 2],
 }
 
@@ -172,6 +177,7 @@ impl Builder<'_> {
             cell: self.cell,
             kind,
             points: deduped.iter().map(|c| c.p).collect(),
+            grid: deduped.iter().map(|c| c.g).collect(),
             texels: deduped.iter().map(|c| c.uv).collect(),
             normal,
             material,
@@ -203,6 +209,7 @@ impl Builder<'_> {
         };
         let corner = |h: &[i32; 4], i: usize, uv: &FaceUv| Corner {
             p: editor_point(scale, y_offset, xz[i][0], h[i], xz[i][1]),
+            g: [xz[i][0], y_offset + h[i], xz[i][1]],
             uv: place(
                 uv,
                 centre,
@@ -291,6 +298,7 @@ impl Builder<'_> {
             let [px, pz] = if end == 0 { a } else { b };
             Corner {
                 p: editor_point(scale, y_offset, px, gy, pz),
+                g: [px, y_offset + gy, pz],
                 uv: place(&wall.uv, centre, [u_at(end), v_of(gy)]),
             }
         };

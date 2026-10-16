@@ -38,6 +38,7 @@
 
 pub mod bonnie;
 pub mod bonnie_project;
+pub mod cook;
 pub mod edit;
 pub mod faces;
 pub mod light;
