@@ -21,6 +21,10 @@ use super::world::{GridWorld, SceneWorld};
 pub const STARTER_SIDE: usize = 6;
 /// Height of the starter ceiling above its floor, grid units.
 pub const STARTER_HEIGHT: i32 = 2 * SECTOR_UNITS;
+/// Grid to editor scale of a new grid project: 5/4, a sector of 1280 editor
+/// units (the design docs' default for new worlds; `GridScale::DEFAULT`, which
+/// imports and empty worlds still use, moves with the next phase).
+pub const STARTER_SCALE: GridScale = GridScale { num: 5, den: 4 };
 /// The base project the starter borrows its player, camera and sky from.
 pub const STARTER_BASE: &str = "graybox-reach";
 /// Light intensity and radius (in World sectors) of the starter lamp.
@@ -96,7 +100,7 @@ pub fn starter_world(
         }
     }
     GridWorld {
-        scale: GridScale::DEFAULT,
+        scale: STARTER_SCALE,
         rooms: vec![room],
     }
 }
