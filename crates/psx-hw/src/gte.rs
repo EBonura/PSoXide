@@ -176,6 +176,13 @@ pub mod command {
         super::Vector::V0,
         super::Translation::Fc,
     ) | SF;
+    /// Rotate V0 by the rotation matrix with no translation and no fraction
+    /// shift: MAC1..MAC3 are the exact row products.
+    pub const ROTATE_V0_UNSHIFTED: u32 = super::mvmva(
+        super::Matrix::Rotation,
+        super::Vector::V0,
+        super::Translation::None,
+    );
 }
 
 #[cfg(test)]
@@ -211,6 +218,7 @@ mod tests {
         assert_eq!(command::NCCT, 0x4A08_003F);
         assert_eq!(command::ROTATE_TRANSLATE_V0, 0x4A08_0012);
         assert_eq!(command::ROTATE_V0_FAR_COLOR, 0x4A08_4012);
+        assert_eq!(command::ROTATE_V0_UNSHIFTED, 0x4A00_6012);
     }
 
     #[test]
