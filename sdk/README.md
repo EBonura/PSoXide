@@ -18,7 +18,8 @@ the editor and emulator share one simulation.
 | [`psx-gpu`](crates/psx-gpu) | High-level GPU API: init, primitives, framebuffers, display-window shifting. |
 | [`psx-vram`](crates/psx-vram) | Typed VRAM layout primitives: color, rect, tpage, CLUT, upload helpers. |
 | [`psx-spu`](crates/psx-spu) | High-level SPU API: typed voices, volume, pitch, ADSR, ADPCM upload, key-on/off, loop chaining, noise. |
-| [`psx-sfx`](crates/psx-sfx) | One-shot sample banks, voice allocation and playback cutoff for SPU effects. |
+| [`psx-sfx`](crates/psx-sfx) | SPU effects: sample banks, the length-based one-shot cutoff, a host-testable voice mixer (lanes, priorities, handles, virtual loops), spatial gains and master volumes. |
+| [`psx-seq`](crates/psx-seq) | Sequenced music on the SPU: a script interpreter (sequence, channel, layer), software envelopes, vibrato and portamento, and a note allocator over `psx-sfx`'s hardware seam. |
 | [`psx-settings`](crates/psx-settings) | Versioned game preferences with optional memory-card persistence. |
 | [`psx-segments`](crates/psx-segments) | Bounded segment selection and launch requests using game-owned state and controls. |
 | [`psx-display`](crates/psx-display) | Picture options: the BRIGHTNESS stepper (`DEFAULT`, `DARKER n`, `BRIGHTER n`) with its one-packet GPU overlay, and the SCREEN X/Y stepper, each with row text and a save byte. Host-tested, no heap ([adoption guide](docs/DISPLAY-OPTIONS.md)). |
@@ -57,6 +58,8 @@ Build and run them via the top-level `Makefile` (see the
 | `hello-tex` | Textured primitives + CLUT upload. |
 | `hello-ot` | Ordering-table depth sorting. |
 | `hello-input` | Controller polling via `psx-pad`. |
+| `sfxbench` | Cycles the `psx-sfx` bookkeeping costs: placement gains, the mixer's level update, an idle tick and a stealing `play`. |
+| `hello-seq` | Plays a song cooked by `psx-seq-cook` from the player's own cartridge through `psx-seq` and reports what the sequencer costs. |
 | `pollbench` | Cycles one synchronous controller poll costs: port 1, an empty port 2, both. |
 | `pad-engine-check` | The interrupt-driven pad engine against the synchronous driver: CPU left to the game, snapshot, lease. |
 | `hello-gte` | GTE-accelerated transforms. |

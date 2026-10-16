@@ -9,6 +9,7 @@ runtime; they are the lowest common layer the rest of the repo builds on.
 | [`psx-anim-cook`](psx-anim-cook) | Host-side HMA1 animation encoder: local-space quaternion tracks with per-bone key rates, chosen against a vertex-space error bound. Decoded on the PS1 by `psx_asset::hma1`. |
 | [`psx-anim-tracks`](psx-anim-tracks) | Host encoder for keyed animation tracks, fitted against the runtime decoder and a vertex-space error bound. |
 | [`psx-audio-cook`](psx-audio-cook) | Host-side SPU-ADPCM cooker for every game: band-limited resampling, Gaussian-interpolation pre-compensation, a trellis encoder evaluated against the exact SPU decoder, seamless block-aligned loops, and a distortion-aware rate allocator for SPU RAM budgets. Also encodes CD-ROM XA-ADPCM music (`xa-encode`, interleaved channels per file). |
+| [`psx-seq-cook`](psx-seq-cook) | Host-side cook for `psx-seq` music: imports N64 libultra sequence and soundfont data from a ROM the player owns, converts samples to SPU-ADPCM, writes the song and bank containers, and renders a cooked song to WAV. |
 | [`psx-disasm`](psx-disasm) | R3000 (MIPS I) decoder that prints GNU objdump's `mips:3000` syntax, so the post-link hazard checks (`tools/psoxide-hazard`) read an image without objdump. |
 | [`psx-hw`](psx-hw) | PlayStation 1 hardware model: register addresses, bitfield layouts, and command packet formats. Shared by emulator and SDK. |
 | [`psx-iso`](psx-iso) | BIN/CUE and ISO9660 parsing for PS1 disc images. Shared by emulator, SDK, and disc-builder. |
