@@ -18,7 +18,41 @@ const UNIT_TEST_PRELUDE: &str = "use super::*;
     use crate::new::{project_soft,close_inv_q12,set_projection_h,projection_h,visible_clip,guard_clip,on_visible_boundary,quad_outside_vertical};
     const OFY:i32=120;
     fn ofy()->i32{120}
-    fn view_plane_distance(v:&SVert,p:ViewPlane)->i32 {super::view_plane_distance(&FullView::new(),v,p)}
+    // Reference plane helpers the legacy unit tests call. They live here, not in
+    // the shipped renderer, because only these tests use them.
+    fn view_plane_distance(v:&SVert,plane:ViewPlane)->i32 {
+        let view=FullView::new();
+        let h=view.projection_h();
+        match plane {
+            ViewPlane::Near => v.z - NEAR_Z,
+            ViewPlane::Left => h * v.x + (view.ofx() - view.vx0()) * v.z,
+            ViewPlane::Right => (view.vx1() - view.ofx()) * v.z - h * v.x,
+            ViewPlane::Top => h * v.y + (view.ofy() - view.vy0()) * v.z,
+            ViewPlane::Bottom => (view.vy1() - view.ofy()) * v.z - h * v.y,
+        }
+    }
+    // The crossing of an edge with a view plane as the generic clip computes it:
+    // the lane kernel must reproduce it bit for bit from either end of the edge.
+    fn lerp_view_plane(a:&SVert,b:&SVert,mut da:i32,mut db:i32,plane:ViewPlane)->SVert {
+        let (a,b)=if (b.x,b.y,b.z)<(a.x,a.y,a.z) {
+            core::mem::swap(&mut da,&mut db);
+            (b,a)
+        } else {
+            (a,b)
+        };
+        let t=t_q12(da,da-db);
+        let mut v=SVert {
+            x:mix(a.x,b.x,t),
+            y:mix(a.y,b.y,t),
+            z:mix(a.z,b.z,t),
+            rgb:(mix(a.rgb.0,b.rgb.0,t),mix(a.rgb.1,b.rgb.1,t),mix(a.rgb.2,b.rgb.2,t)),
+            uv:(mix(a.uv.0,b.uv.0,t),mix(a.uv.1,b.uv.1,t)),
+        };
+        if matches!(plane,ViewPlane::Near) {
+            v.z=NEAR_Z;
+        }
+        v
+    }
 ";
 
 #[test]
