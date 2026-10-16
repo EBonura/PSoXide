@@ -126,7 +126,7 @@ pub struct ImportReport {
     pub stats: ImportStats,
     /// Scale the world uses.
     pub scale: GridScale,
-    /// Materials created, fallback included.
+    /// Materials the import added to the project, fallback included.
     pub materials: usize,
     /// Texture references whose file was not found.
     pub missing_textures: Vec<TextureRef>,
@@ -147,6 +147,8 @@ struct MaterialTable<'a> {
     by_ref: BTreeMap<TextureRef, ResourceId>,
     names: BTreeMap<String, TextureRef>,
     fallback: Option<ResourceId>,
+    /// Materials this table added to the project.
+    created: usize,
     missing: Vec<TextureRef>,
     substituted: Vec<TextureRef>,
     error: Option<ImportError>,
@@ -237,6 +239,7 @@ impl MaterialTable<'_> {
             ResourceData::Material(MaterialResource::opaque(path)),
         );
         self.fallback = Some(id);
+        self.created += 1;
         id
     }
 
@@ -277,6 +280,7 @@ impl MaterialTable<'_> {
                 texture.name.clone()
             }
         };
+        self.created += 1;
         project.add_resource(
             name,
             ResourceData::Material(MaterialResource::opaque(Some(relative))),
@@ -509,6 +513,7 @@ pub fn import_project(
         by_ref: BTreeMap::new(),
         names: BTreeMap::new(),
         fallback: None,
+        created: 0,
         missing: Vec::new(),
         substituted: Vec::new(),
         error: None,
@@ -539,32 +544,25 @@ pub fn import_project(
 
     let scale = converted.world.scale;
     let faces = super::faces::face_count(&converted.world);
-    let bounds = converted.world.editor_bounds();
     let step = scale.sector_editor_units();
     add_lights(&mut project, &converted);
     place_actors(&mut project, spawn_at, options.yaw_degrees, step);
     project.active_scene_mut().world = SceneWorld::Grid(converted.world);
-    project.editor_camera.orbit_target = spawn_at;
-    if let Some(b) = bounds {
-        let span = (0..3).map(|i| b.max[i] - b.min[i]).max().unwrap_or(0);
-        project.editor_camera.orbit_radius = span.clamp(4096, 65_536);
-    }
+    // Drop the base project's authored views: the editor frames the whole
+    // world, in 3D and in the Top view, the first time the project opens.
+    project.editor_camera = crate::EditorCameraState::default();
+    project.editor_viewport = crate::EditorViewportState::default();
 
     let project_path = options.out_dir.join("project.ron");
     project
         .save_to_path(&project_path)
         .map_err(|e| ImportError::Base(e.to_string()))?;
 
-    let materials = project
-        .resources
-        .iter()
-        .filter(|r| matches!(r.data, ResourceData::Material(_)))
-        .count();
     Ok(ImportReport {
         project_path,
         stats: converted.stats,
         scale,
-        materials,
+        materials: table.created,
         missing_textures: table.missing,
         substituted_textures: table.substituted,
         spawn: spawn_at,

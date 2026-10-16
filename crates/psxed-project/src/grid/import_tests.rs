@@ -132,9 +132,11 @@ fn a_level_becomes_a_loadable_grid_project() {
     assert!((2688..=5376).contains(&(spawn.transform.translation[0] as i32)));
     assert_eq!(spawn.transform.translation[1] as i32, 64);
     assert_eq!(spawn.transform.rotation_degrees[1], 90.0);
+    // The base's authored views are dropped so the editor frames the world.
+    assert_eq!(project.editor_camera, crate::EditorCameraState::default());
     assert_eq!(
-        project.editor_camera.orbit_target, report.spawn,
-        "the editor camera starts at the spawn"
+        project.editor_viewport,
+        crate::EditorViewportState::default()
     );
 }
 

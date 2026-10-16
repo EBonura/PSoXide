@@ -17,7 +17,9 @@
 //! * Default mapping is world aligned at [`TEXELS_PER_SECTOR`] texels per
 //!   sector, so adjacent faces continue each other. A face's offset, rotation
 //!   and scale apply about the face's own centre.
-//! * Polygons are wound counter-clockwise seen from their visible side.
+//! * Polygons are wound clockwise seen from their visible side, the engine's
+//!   front-face convention, so the right-handed cross product of a ring points
+//!   away from the viewer. [`GridFace::normal`] is the visible-side normal.
 
 use crate::brush::FaceUv;
 use crate::ResourceId;
@@ -58,7 +60,7 @@ pub struct GridFace {
     pub cell: [i32; 2],
     /// Source of the face.
     pub kind: GridFaceKind,
-    /// Corners in editor units, counter-clockwise seen from the visible side.
+    /// Corners in editor units, clockwise seen from the visible side.
     pub points: Vec<[i32; 3]>,
     /// Texel coordinates per corner, before any wrap into the texture.
     pub texels: Vec<[f64; 2]>,
@@ -154,12 +156,17 @@ impl Builder<'_> {
         if length == 0.0 {
             return;
         }
-        let mut normal = normal.map(|v| v / length);
+        let normal = normal.map(|v| v / length);
         let facing = normal[0] * toward[0] + normal[1] * toward[1] + normal[2] * toward[2];
-        if facing < 0.0 {
+        // The engine's front face is the clockwise one on screen, which is
+        // the ring whose right-handed normal points away from the viewer.
+        // `normal` below is the visible-side normal, the opposite of it.
+        let normal = if facing > 0.0 {
             deduped.reverse();
-            normal = normal.map(|v| -v);
-        }
+            normal
+        } else {
+            normal.map(|v| -v)
+        };
         self.out.push(GridFace {
             room: self.room,
             cell: self.cell,
@@ -402,6 +409,22 @@ mod tests {
         assert_eq!(faces[0].points.len(), 4);
         assert!(facing(&faces[0], [0.0, 1.0, 0.0]));
         assert_eq!(faces[0].kind, GridFaceKind::Floor { triangle: None });
+    }
+
+    #[test]
+    fn rings_wind_clockwise_seen_from_the_visible_side() {
+        // Right-handed cross product of the first two edges points away from
+        // the visible side: down for a floor, up for a ceiling.
+        let cross_y = |face: &GridFace| {
+            let p = |i: usize| face.points[i].map(f64::from);
+            let (a, b, c) = (p(0), p(1), p(2));
+            (b[2] - a[2]) * (c[0] - a[0]) - (b[0] - a[0]) * (c[2] - a[2])
+        };
+        let floor = one_cell(|s| s.floor = Some(GridSurface::flat(0, None)));
+        let ceiling = one_cell(|s| s.ceiling = Some(GridSurface::flat(1024, None)));
+        // y component of (b - a) x (c - a) is dz1*dx2 - dx1*dz2.
+        assert!(cross_y(&all_faces(&floor)[0]) < 0.0);
+        assert!(cross_y(&all_faces(&ceiling)[0]) > 0.0);
     }
 
     #[test]

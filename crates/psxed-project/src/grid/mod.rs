@@ -45,6 +45,8 @@ pub mod units;
 pub mod world;
 
 #[cfg(test)]
+mod bonnie_tests;
+#[cfg(test)]
 mod import_tests;
 #[cfg(test)]
 mod tests;
