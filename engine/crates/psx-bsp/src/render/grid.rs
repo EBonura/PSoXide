@@ -484,9 +484,12 @@ impl GridRenderer {
                     }
                     let x0 = pack.origin[0] + ((mx << shift) as i32) * size;
                     let z0 = pack.origin[1] + ((mz << shift) as i32) * size;
+                    // The open column, from the lowest geometry in the block up
+                    // to the lid: the sky shows wherever such a column is in
+                    // view, not only when the thin lid itself is.
                     let lid_min = Vec3I16 {
                         x: clamp(x0),
-                        y: clamp(pack.lid_y),
+                        y: block.min_y,
                         z: clamp(z0),
                     };
                     let lid_max = Vec3I16 {
