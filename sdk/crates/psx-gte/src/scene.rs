@@ -355,6 +355,64 @@ pub fn transform_vertex_scheduled(v: Vec3I16) -> Vec3I32 {
     }
 }
 
+/// Rotate one vector by the loaded RT with no translation and no fraction
+/// shift, using the same console-confirmed MTC2/MVMVA/MFC2 schedule as
+/// [`transform_vertex_scheduled`].
+///
+/// The result is the exact row products `RT * v` (MAC1..MAC3 of an `sf = 0`
+/// MVMVA), so a caller replacing a CPU matrix-vector product gets identical
+/// integers. It reads RT only; TR is not added.
+#[inline(always)]
+pub fn rotate_vector_unshifted_scheduled(v: Vec3I16) -> Vec3I32 {
+    #[cfg(target_arch = "mips")]
+    {
+        let xy = v.xy_packed();
+        let z = v.z_packed();
+        let mac1: u32;
+        let mac2: u32;
+        let mac3: u32;
+        // SAFETY: the same register use as `transform_vertex_mips`: MTC2
+        // $8/$9 into V0, two buffer NOPs (the HWB-010/011 commit gap), the
+        // MVMVA, then MFC2 MAC1..MAC3 into $8..$10 and a final load-delay
+        // NOP. Only $8..$10 are written and all are declared outputs.
+        unsafe {
+            asm!(
+                ".word {w0}",
+                ".word {w1}",
+                ".word 0",
+                ".word 0",
+                ".word {w2}",
+                ".word {w3}",
+                ".word {w4}",
+                ".word {w5}",
+                ".word 0",
+                w0 = const psx_hw::gte::mtc2(8, 0),
+                w1 = const psx_hw::gte::mtc2(9, 1),
+                w2 = const psx_hw::gte::command::ROTATE_V0_UNSHIFTED,
+                w3 = const psx_hw::gte::mfc2(8, 25),
+                w4 = const psx_hw::gte::mfc2(9, 26),
+                w5 = const psx_hw::gte::mfc2(10, 27),
+                inlateout("$8") xy => mac1,
+                inlateout("$9") z => mac2,
+                lateout("$10") mac3,
+                options(nostack, nomem, preserves_flags),
+            );
+        }
+        Vec3I32::new(mac1 as i32, mac2 as i32, mac3 as i32)
+    }
+    #[cfg(not(target_arch = "mips"))]
+    {
+        write_data!(0, v.xy_packed());
+        write_data!(1, v.z_packed());
+        crate::host::execute(psx_hw::gte::command::ROTATE_V0_UNSHIFTED);
+        Vec3I32::new(
+            read_data!(25) as i32,
+            read_data!(26) as i32,
+            read_data!(27) as i32,
+        )
+    }
+}
+
 /// Compose two Q12 rotation/scale matrices with the GTE's scheduled MVMVA
 /// path.
 ///
@@ -1851,6 +1909,29 @@ mod host_smoke {
         2165, 2160, 2155, 2151, 2146, 2142, 2137, 2133, 2128, 2124, 2119, 2115, 2110, 2106, 2102,
         2097, 2093, 2089, 2084, 2080, 2076, 2072, 2068, 2064, 2060, 2056, 2052,
     ];
+
+    #[test]
+    fn unshifted_rotation_is_the_exact_row_product() {
+        let m = Mat3I16 {
+            m: [[4096, -1200, 33], [-7, 3900, -2048], [1500, 2, -4000]],
+        };
+        host::reset();
+        load_rotation(&m);
+        for v in [
+            Vec3I16::new(127, -128, 5),
+            Vec3I16::new(-1, 0, 127),
+            Vec3I16::new(0, 0, 0),
+            Vec3I16::new(-128, -128, -128),
+        ] {
+            let got = rotate_vector_unshifted_scheduled(v);
+            let dot = |r: usize| {
+                i32::from(m.m[r][0]) * i32::from(v.x)
+                    + i32::from(m.m[r][1]) * i32::from(v.y)
+                    + i32::from(m.m[r][2]) * i32::from(v.z)
+            };
+            assert_eq!([got.x, got.y, got.z], [dot(0), dot(1), dot(2)]);
+        }
+    }
 
     #[test]
     fn generated_rsqrt_table_matches_the_previous_table() {
