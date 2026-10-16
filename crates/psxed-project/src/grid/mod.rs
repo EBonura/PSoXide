@@ -31,10 +31,12 @@
 //! * [`limits`]: caps, validation and the budget readout.
 //! * [`faces`]: the drawable faces derived from the document.
 //! * [`light`]: the per-corner light bake of those faces.
+//! * [`edit`]: the editing operations the grid tools call.
 //! * [`bonnie`] and [`bonnie_project`]: the bonnie-32 level importer.
 
 pub mod bonnie;
 pub mod bonnie_project;
+pub mod edit;
 pub mod faces;
 pub mod light;
 pub mod limits;
