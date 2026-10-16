@@ -115,8 +115,11 @@ struct Rgb {
     b: u8,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 enum ObjectType {
+    /// Mesh instances have no `object_type` at all.
+    #[default]
+    Unset,
     Light {
         color: Rgb,
         intensity: f32,
@@ -134,7 +137,7 @@ struct Object {
     sector_z: usize,
     height: f32,
     #[serde(default)]
-    object_type: Option<ObjectType>,
+    object_type: ObjectType,
 }
 
 #[derive(Deserialize)]
@@ -460,11 +463,11 @@ fn place_level_lights(scene: &mut psxed_project::Scene, level: &Level, out: &Pat
     let authored = level
         .rooms
         .iter()
-        .any(|r| r.objects.iter().any(|o| matches!(o.object_type, Some(ObjectType::Light { .. }))));
+        .any(|r| r.objects.iter().any(|o| matches!(o.object_type, ObjectType::Light { .. })));
     if authored {
         for room in &level.rooms {
             for object in &room.objects {
-                let Some(ObjectType::Light { color, intensity, radius }) = &object.object_type else {
+                let ObjectType::Light { color, intensity, radius } = &object.object_type else {
                     continue;
                 };
                 let floor = cell_floor(room, object.sector_x, object.sector_z).unwrap_or(0.0);
