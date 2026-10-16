@@ -606,6 +606,13 @@ impl<'p, H: Hw> Engine<'p, H> {
 
     /// The device's `/ACK` pulse raised IRQ7.
     pub fn on_ack(&mut self) {
+        // A card driver holding the lease arms the same interrupt (its ACK
+        // latch is how it sees a pulse a CPU interrupt would hide) and waits
+        // on STAT.IRQ. Clearing the latch, or the select, here would erase the
+        // acknowledgement it is waiting for and fail the transaction.
+        if self.owner == Owner::Lease {
+            return;
+        }
         self.note_event();
         let acking = self.txn.pacing == BytePacing::Ack;
         if !acking || self.phase != Phase::Byte {
