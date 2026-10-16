@@ -210,6 +210,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "psx-seq"
+version = "0.1.0"
+dependencies = [
+ "psx-sfx",
+ "psx-spu",
+]
+
+[[package]]
+name = "psx-seq-cook"
+version = "0.1.0"
+dependencies = [
+ "psx-audio-cook",
+ "psx-seq",
+ "psx-sfx",
+]
+
+[[package]]
+name = "psx-sfx"
+version = "0.2.0"
+dependencies = [
+ "psx-asset",
+ "psx-math",
+ "psx-spu",
+]
+
+[[package]]
+name = "psx-spu"
+version = "0.1.0"
+dependencies = [
+ "psx-hw",
+ "psx-io",
+]
+
+[[package]]
 name = "psx-trace"
 version = "0.1.0"
 dependencies = [

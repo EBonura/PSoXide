@@ -13,6 +13,7 @@ members = [
     "crates/psx-math",
     "crates/psx-spu",
     "crates/psx-sfx",
+    "crates/psx-seq",
     "crates/psx-telemetry",
     "crates/psx-fx",
     "crates/psx-asset",
