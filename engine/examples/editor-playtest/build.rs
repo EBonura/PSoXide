@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
 const PXBSP_MANIFEST_FLAG: &str = "pub const PLAYTEST_USES_PXBSP: bool = true;";
+/// Written by the cook when the project's world is a sector grid.
+const GRID_MANIFEST_FLAG: &str = "pub const PLAYTEST_WORLD_GRID: bool = true;";
 
 fn main() {
     let manifest_dir = PathBuf::from(
@@ -20,6 +22,7 @@ fn main() {
         placeholder_manifest
     };
     println!("cargo:rustc-check-cfg=cfg(playtest_pxbsp)");
+    println!("cargo:rustc-check-cfg=cfg(playtest_grid_world)");
     let manifest = std::fs::read_to_string(&selected).unwrap_or_else(|error| {
         panic!(
             "failed to read selected playtest manifest {}: {error}",
@@ -31,6 +34,16 @@ fn main() {
         .any(|line| line.trim() == PXBSP_MANIFEST_FLAG)
     {
         println!("cargo:rustc-cfg=playtest_pxbsp");
+    }
+    // The grid renderer is chosen by the project's world kind, which the cook
+    // writes into the manifest. The `grid-world` feature forces it for bench
+    // builds that cook a raw level.
+    if manifest
+        .lines()
+        .any(|line| line.trim() == GRID_MANIFEST_FLAG)
+        || std::env::var_os("CARGO_FEATURE_GRID_WORLD").is_some()
+    {
+        println!("cargo:rustc-cfg=playtest_grid_world");
     }
     println!(
         "cargo:rustc-env=PSXED_PLAYTEST_MANIFEST={}",

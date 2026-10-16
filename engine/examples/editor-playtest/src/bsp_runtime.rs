@@ -57,7 +57,7 @@ use crate::{
 #[cfg(feature = "world-stream")]
 mod world_stream;
 
-#[cfg(feature = "grid-world")]
+#[cfg(playtest_grid_world)]
 mod grid_world;
 
 pub(super) const MAX_BSP_DOORS: usize = 16;
@@ -662,7 +662,7 @@ pub(super) struct BspRuntime {
     #[cfg(feature = "world-stream")]
     stream: world_stream::WorldStream,
     /// Open-hall experiment: the grid renderer that replaces the PXBSP face pass.
-    #[cfg(feature = "grid-world")]
+    #[cfg(playtest_grid_world)]
     grid: grid_world::GridWorld,
 }
 
@@ -863,7 +863,7 @@ impl BspRuntime {
             camera_traces: 0,
             #[cfg(feature = "world-stream")]
             stream,
-            #[cfg(feature = "grid-world")]
+            #[cfg(playtest_grid_world)]
             grid: grid_world::GridWorld::load(),
         })
     }
@@ -1377,7 +1377,7 @@ impl BspRuntime {
     /// it. Call whenever the gameplay VRAM those bindings point at is released.
     pub(super) fn invalidate_materials(&mut self) {
         self.materials_latched = false;
-        #[cfg(feature = "grid-world")]
+        #[cfg(playtest_grid_world)]
         self.grid.unbind();
         for binding in self.materials.iter_mut() {
             *binding = None;
@@ -2039,7 +2039,7 @@ impl BspRuntime {
             };
             let (used_words, packet_count, visible_sky_apertures, overflowed) = {
                 let packets = reservation.words_mut();
-                #[cfg(not(feature = "grid-world"))]
+                #[cfg(not(playtest_grid_world))]
                 let (mut used_words, mut packet_count, mut visible_sky_apertures, mut overflowed) = {
                     let world = self.renderer.draw_pxbsp_world_from_visibility_origin(
                         &self.map,
@@ -2050,9 +2050,18 @@ impl BspRuntime {
                         material_tick,
                         packets,
                     );
-                    telemetry::counter(telemetry::counter::ROOM_SURFACES_CONSIDERED, u32::from(world.stats.visible_faces));
-                    telemetry::counter(telemetry::counter::ROOM_SURFACE_PACKETS, world.stats.packets);
-                    telemetry::counter(telemetry::counter::ROOM_SURFACE_COMMANDS, world.stats.hardware_triangles);
+                    telemetry::counter(
+                        telemetry::counter::ROOM_SURFACES_CONSIDERED,
+                        u32::from(world.stats.visible_faces),
+                    );
+                    telemetry::counter(
+                        telemetry::counter::ROOM_SURFACE_PACKETS,
+                        world.stats.packets,
+                    );
+                    telemetry::counter(
+                        telemetry::counter::ROOM_SURFACE_COMMANDS,
+                        world.stats.hardware_triangles,
+                    );
                     (
                         world.packet_words,
                         world.stats.packets as usize,
@@ -2060,12 +2069,19 @@ impl BspRuntime {
                         world.stats.packet_overflow_avoided,
                     )
                 };
-                #[cfg(feature = "grid-world")]
+                // The grid pack has no portal visibility to seed.
+                #[cfg(playtest_grid_world)]
+                let _ = visibility_origin;
+                #[cfg(playtest_grid_world)]
                 let (mut used_words, mut packet_count, mut visible_sky_apertures, mut overflowed) = {
                     let frustum = FrustumPlanes::from_view(
                         &view.rotation,
                         view.translation,
-                        [camera.origin.x >> 12, camera.origin.y >> 12, camera.origin.z >> 12],
+                        [
+                            camera.origin.x >> 12,
+                            camera.origin.y >> 12,
+                            camera.origin.z >> 12,
+                        ],
                         self.renderer.view_projection(),
                     );
                     let world = self.grid.draw(
@@ -2073,20 +2089,48 @@ impl BspRuntime {
                         &self.materials,
                         &frustum,
                         &view,
-                        [camera.origin.x >> 12, camera.origin.y >> 12, camera.origin.z >> 12],
+                        [
+                            camera.origin.x >> 12,
+                            camera.origin.y >> 12,
+                            camera.origin.z >> 12,
+                        ],
                         [projection.half_width * 2, projection.half_height * 2],
                         projection.focal_length,
                         packets,
                     );
-                    telemetry::counter(telemetry::counter::ROOM_SURFACES_CONSIDERED, u32::from(world.quads_visible));
+                    telemetry::counter(
+                        telemetry::counter::ROOM_SURFACES_CONSIDERED,
+                        u32::from(world.quads_visible),
+                    );
                     telemetry::counter(telemetry::counter::ROOM_SURFACE_PACKETS, world.packets);
-                    telemetry::counter(telemetry::counter::ROOM_PROJECTED_VERTICES, u32::from(world.vertices_projected));
-                    telemetry::counter(telemetry::counter::ROOM_SURF_SPLIT_TRIS, u32::from(world.robust_quads));
-                    telemetry::counter(telemetry::counter::ROOM_SURFACE_COMMANDS, u32::from(world.cells_visible));
-                    telemetry::counter(telemetry::counter::ROOM_SURF_BACKFACE_CULLED, u32::from(world.backface_culled));
-                    telemetry::counter(telemetry::counter::ROOM_SURF_SCREEN_CULLED, u32::from(world.screen_culled));
-                    telemetry::counter(telemetry::counter::ROOM_SUBMIT_FALLBACK_CALLS, u32::from(world.material_missing));
-                    telemetry::counter(telemetry::counter::ROOM_SURF_TR_SUBDIVISION_CANDIDATES, u32::from(world.depth_skipped));
+                    telemetry::counter(
+                        telemetry::counter::ROOM_PROJECTED_VERTICES,
+                        u32::from(world.vertices_projected),
+                    );
+                    telemetry::counter(
+                        telemetry::counter::ROOM_SURF_SPLIT_TRIS,
+                        u32::from(world.robust_quads),
+                    );
+                    telemetry::counter(
+                        telemetry::counter::ROOM_SURFACE_COMMANDS,
+                        u32::from(world.cells_visible),
+                    );
+                    telemetry::counter(
+                        telemetry::counter::ROOM_SURF_BACKFACE_CULLED,
+                        u32::from(world.backface_culled),
+                    );
+                    telemetry::counter(
+                        telemetry::counter::ROOM_SURF_SCREEN_CULLED,
+                        u32::from(world.screen_culled),
+                    );
+                    telemetry::counter(
+                        telemetry::counter::ROOM_SUBMIT_FALLBACK_CALLS,
+                        u32::from(world.material_missing),
+                    );
+                    telemetry::counter(
+                        telemetry::counter::ROOM_SURF_TR_SUBDIVISION_CANDIDATES,
+                        u32::from(world.depth_skipped),
+                    );
                     (
                         world.packet_words,
                         world.packets as usize,
@@ -2913,5 +2957,9 @@ const fn parse_far_cull(value: Option<&str>) -> Option<i32> {
         out = out * 10 + (digit - b'0') as i32;
         i += 1;
     }
-    if out == 0 { None } else { Some(out) }
+    if out == 0 {
+        None
+    } else {
+        Some(out)
+    }
 }

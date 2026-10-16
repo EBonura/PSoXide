@@ -1,14 +1,14 @@
 //! Open-hall experiment: draw the world from a grid render pack instead of
 //! the PXBSP face pass. Collision, visibility queries, entities and the UI
-//! keep using the PXBSP; only world rendering changes (`grid-world` feature).
+//! keep using the PXBSP; only world rendering changes (`playtest_grid_world` cfg).
 
 use psx_level::MAX_ROOM_MATERIALS;
 
-use psx_bsp::pxbsp::{material_flags, PxbspMaterial};
-use psx_bsp::RecordSlice;
-use psx_bsp::render::grid::{GridFrame, GridMaterial, GridPack, GridPhase, GridRenderer};
 use crate::telemetry;
+use psx_bsp::pxbsp::{material_flags, PxbspMaterial};
+use psx_bsp::render::grid::{GridFrame, GridMaterial, GridPack, GridPhase, GridRenderer};
 use psx_bsp::render::{FrustumPlanes, PxbspTextureBinding, ViewTransform};
+use psx_bsp::RecordSlice;
 
 #[repr(C)]
 struct Aligned<Bytes: ?Sized> {
@@ -34,10 +34,14 @@ pub(super) struct GridWorld {
 
 impl GridWorld {
     pub(super) fn load() -> Self {
-        let pack = GridPack::parse(GRID_WORLD)
-            .unwrap_or_else(|error| panic!("grid pack refused: {error:?} ({} bytes)", GRID_WORLD.len()));
+        let pack = GridPack::parse(GRID_WORLD).unwrap_or_else(|error| {
+            panic!("grid pack refused: {error:?} ({} bytes)", GRID_WORLD.len())
+        });
         let renderer = GridRenderer::new(&pack);
-        assert!(pack.materials.len() <= MAX_ROOM_MATERIALS, "grid pack has too many materials");
+        assert!(
+            pack.materials.len() <= MAX_ROOM_MATERIALS,
+            "grid pack has too many materials"
+        );
         let materials = [GridMaterial::default(); MAX_ROOM_MATERIALS];
         Self {
             pack,
@@ -56,16 +60,25 @@ impl GridWorld {
 
     /// Resolve every grid material to the VRAM binding the PXBSP already made
     /// for the same texture asset.
-    fn bind(&mut self, pxbsp_materials: RecordSlice<'_, PxbspMaterial>, bindings: &[Option<PxbspTextureBinding>]) {
+    fn bind(
+        &mut self,
+        pxbsp_materials: RecordSlice<'_, PxbspMaterial>,
+        bindings: &[Option<PxbspTextureBinding>],
+    ) {
         for (slot, &asset) in self.pack.materials.iter().enumerate() {
-            let found = pxbsp_materials.iter().enumerate().find_map(|(index, material)| {
-                if material.flags & (material_flags::SKY_APERTURE | material_flags::DIRECTIONAL_SKY) != 0
-                    || material.texture_asset != asset
-                {
-                    return None;
-                }
-                bindings.get(index).copied().flatten()
-            });
+            let found = pxbsp_materials
+                .iter()
+                .enumerate()
+                .find_map(|(index, material)| {
+                    if material.flags
+                        & (material_flags::SKY_APERTURE | material_flags::DIRECTIONAL_SKY)
+                        != 0
+                        || material.texture_asset != asset
+                    {
+                        return None;
+                    }
+                    bindings.get(index).copied().flatten()
+                });
             self.materials[slot] = match found {
                 Some(binding) => {
                     let [u, v] = binding.page_uv_origin;
@@ -83,14 +96,6 @@ impl GridWorld {
             };
         }
         self.bound = true;
-    }
-
-    pub(super) fn pack_bytes(&self) -> usize {
-        GRID_WORLD.len()
-    }
-
-    pub(super) fn working_bytes(&self) -> usize {
-        self.renderer.working_bytes() + core::mem::size_of::<[GridMaterial; MAX_ROOM_MATERIALS]>()
     }
 
     #[allow(clippy::too_many_arguments)]

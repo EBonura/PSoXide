@@ -191,7 +191,7 @@ fn table<'a, T: Copy>(
         return Err(GridPackError::Truncated);
     }
     let pointer = bytes[*offset..].as_ptr();
-    if pointer as usize % core::mem::align_of::<T>() != 0 {
+    if !(pointer as usize).is_multiple_of(core::mem::align_of::<T>()) {
         return Err(GridPackError::Misaligned);
     }
     *offset = end;
@@ -242,7 +242,8 @@ impl<'a> GridPack<'a> {
         }
         for quad in quads {
             if quad.v.iter().any(|&v| usize::from(v) >= vertex_count)
-                || (quad.flags & GRID_QUAD_AXIS != 0 && (quad.flags >> GRID_QUAD_AXIS_SHIFT) & 3 > 2)
+                || (quad.flags & GRID_QUAD_AXIS != 0
+                    && (quad.flags >> GRID_QUAD_AXIS_SHIFT) & 3 > 2)
                 || usize::from(quad.material) >= material_count
             {
                 return Err(GridPackError::Inconsistent);
@@ -393,7 +394,17 @@ impl GridRenderer {
         materials: &[GridMaterial],
         out: &mut [u32],
     ) -> GridFrame {
-        self.draw_with_marks(pack, frustum, view, camera, screen, focal_length, materials, out, &mut |_, _| {})
+        self.draw_with_marks(
+            pack,
+            frustum,
+            view,
+            camera,
+            screen,
+            focal_length,
+            materials,
+            out,
+            &mut |_, _| {},
+        )
     }
 
     /// Like [`Self::draw`], calling `mark(phase, true)` before and
@@ -431,7 +442,16 @@ impl GridRenderer {
         self.project_corners(pack, screen, near_sz, &mut frame);
         mark(GridPhase::Project, false);
         mark(GridPhase::Emit, true);
-        self.emit(pack, frustum, view, screen, focal_length, materials, out, &mut frame);
+        self.emit(
+            pack,
+            frustum,
+            view,
+            screen,
+            focal_length,
+            materials,
+            out,
+            &mut frame,
+        );
         mark(GridPhase::Emit, false);
         frame
     }
@@ -443,7 +463,12 @@ impl GridRenderer {
     /// outcodes reject what is off screen. Also decides whether any open
     /// sector's lid shows.
     #[inline(never)]
-    fn select_cells(&mut self, pack: &GridPack<'_>, frustum: &FrustumPlanes, frame: &mut GridFrame) {
+    fn select_cells(
+        &mut self,
+        pack: &GridPack<'_>,
+        frustum: &FrustumPlanes,
+        frame: &mut GridFrame,
+    ) {
         let size = pack.cell_size;
         let clamp = |v: i32| v.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
         // Sky: only the macro blocks that hold an open sector need a test.
@@ -459,9 +484,20 @@ impl GridRenderer {
                     }
                     let x0 = pack.origin[0] + ((mx << shift) as i32) * size;
                     let z0 = pack.origin[1] + ((mz << shift) as i32) * size;
-                    let lid_min = Vec3I16 { x: clamp(x0), y: clamp(pack.lid_y), z: clamp(z0) };
-                    let lid_max = Vec3I16 { x: clamp(x0 + span), y: clamp(pack.lid_y + 1), z: clamp(z0 + span) };
-                    if frustum.cull_aabb(lid_min, lid_max, PXBSP_CLIP_ALL_PLANES).is_some() {
+                    let lid_min = Vec3I16 {
+                        x: clamp(x0),
+                        y: clamp(pack.lid_y),
+                        z: clamp(z0),
+                    };
+                    let lid_max = Vec3I16 {
+                        x: clamp(x0 + span),
+                        y: clamp(pack.lid_y + 1),
+                        z: clamp(z0 + span),
+                    };
+                    if frustum
+                        .cull_aabb(lid_min, lid_max, PXBSP_CLIP_ALL_PLANES)
+                        .is_some()
+                    {
                         frame.sky_visible = true;
                         break 'sky;
                     }
@@ -554,7 +590,11 @@ impl GridRenderer {
                     let axis = usize::from((flags >> GRID_QUAD_AXIS_SHIFT) & 3);
                     // SAFETY: the cooker emits axis 0..=2 only (parse checks it).
                     let c = unsafe { *cam.get_unchecked(axis) };
-                    (if flags & GRID_QUAD_AXIS_NEGATIVE != 0 { -c } else { c }) > quad.d
+                    (if flags & GRID_QUAD_AXIS_NEGATIVE != 0 {
+                        -c
+                    } else {
+                        c
+                    }) > quad.d
                 } else {
                     i32::from(quad.normal[0]) * cx
                         + i32::from(quad.normal[1]) * cy
@@ -728,7 +768,11 @@ impl GridRenderer {
                     frame.depth_skipped += 1;
                     continue;
                 }
-                let words = if triangle { QUAD_PACKET_WORDS - 3 } else { QUAD_PACKET_WORDS };
+                let words = if triangle {
+                    QUAD_PACKET_WORDS - 3
+                } else {
+                    QUAD_PACKET_WORDS
+                };
                 // SAFETY: both pointers lie in the packet storage.
                 if unsafe { end.offset_from(next) } < words as isize {
                     frame.overflowed = true;
@@ -755,7 +799,16 @@ impl GridRenderer {
             // SAFETY: room for the worst case was just checked.
             unsafe {
                 next = robust_quad(
-                    next, end, pack, frustum, view, screen, focal_length, quad, material, &mut packets,
+                    next,
+                    end,
+                    pack,
+                    frustum,
+                    view,
+                    screen,
+                    focal_length,
+                    quad,
+                    material,
+                    &mut packets,
                 );
             }
         }
@@ -784,7 +837,12 @@ fn gpu_safe(corners: &[&GridScreen; 4], triangle: bool) -> bool {
         top = top.min(y);
         bottom = bottom.max(y);
     }
-    left > -1000 && right < 1000 && top > -1000 && bottom < 1000 && right - left <= 1023 && bottom - top <= 511
+    left > -1000
+        && right < 1000
+        && top > -1000
+        && bottom < 1000
+        && right - left <= 1023
+        && bottom - top <= 511
 }
 
 /// Write one textured Gouraud quad packet; returns the next free word.
@@ -882,8 +940,15 @@ unsafe fn robust_quad(
     material: &GridMaterial,
     packets: &mut u32,
 ) -> *mut u32 {
-    let count = if quad.flags & GRID_QUAD_TRIANGLE != 0 { 3 } else { 4 };
+    let count = if quad.flags & GRID_QUAD_TRIANGLE != 0 {
+        3
+    } else {
+        4
+    };
     let mut source = [AffineVertex::default(); 4];
+    // One index walks four parallel tables; the indexed form keeps the loop
+    // a counted one on the guest.
+    #[allow(clippy::needless_range_loop)]
     for k in 0..count {
         // SAFETY: parse proved the index.
         let v = unsafe { pack.vertices.get_unchecked(usize::from(quad.v[k])) };
@@ -963,7 +1028,22 @@ mod tests {
     fn pack_bytes() -> Vec<u8> {
         let mut out = Vec::new();
         let header = [
-            MAGIC, VERSION, 1 | (1 << 16), 0, 0, 36 | (100 << 16), 4, 1, 1, 1, 1, 1 | (1 << 16), 2, 0, 0, 0,
+            MAGIC,
+            VERSION,
+            1 | (1 << 16),
+            0,
+            0,
+            36 | (100 << 16),
+            4,
+            1,
+            1,
+            1,
+            1,
+            1 | (1 << 16),
+            2,
+            0,
+            0,
+            0,
         ];
         for w in header {
             out.extend_from_slice(&w.to_le_bytes());
@@ -1007,9 +1087,17 @@ mod tests {
         let bytes = pack_bytes();
         let aligned: Vec<u32> = bytes
             .chunks(4)
-            .map(|c| u32::from_le_bytes([c[0], c.get(1).copied().unwrap_or(0), c.get(2).copied().unwrap_or(0), c.get(3).copied().unwrap_or(0)]))
+            .map(|c| {
+                u32::from_le_bytes([
+                    c[0],
+                    c.get(1).copied().unwrap_or(0),
+                    c.get(2).copied().unwrap_or(0),
+                    c.get(3).copied().unwrap_or(0),
+                ])
+            })
             .collect();
-        let slice = unsafe { core::slice::from_raw_parts(aligned.as_ptr().cast::<u8>(), bytes.len()) };
+        let slice =
+            unsafe { core::slice::from_raw_parts(aligned.as_ptr().cast::<u8>(), bytes.len()) };
         let pack = GridPack::parse(slice).expect("parses");
         assert_eq!(pack.vertices.len(), 4);
         assert_eq!(pack.quads.len(), 1);
