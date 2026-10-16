@@ -108,6 +108,19 @@ again up to three times. `console::analog_outcome(port)` reports
 answer before it starts (a launcher) keeps calling `require_analog_on` before
 `install`, as it does today.
 
+## Polled CD reads
+
+`SectorReader` (the pack loader, the FMV streamer) holds `I_MASK` at VBlank for
+a whole stream, which silences the engine's two sources: IRQ7 and counter 0.
+The first headless run with a polled read going showed it: every transaction
+stalled and faulted, one per VBlank (60 stalls and 60 faults for 60 kicks in 120
+frames, since an abandoned round skips the next kick). The engine now registers
+its sources with `psx_io::irq::keep_enabled_while_polling` and the reader
+leaves them on; `uninstall` releases them. A source with its own handler that
+works through interrupts alone should do the same. `pad-engine-check` with
+feature `cd-read` and a disc reproduces it (33 stalls and 33 faults without the
+registration, none with it).
+
 ## Memory cards
 
 A card transaction needs the port for its whole length, so the engine hands the
@@ -119,9 +132,31 @@ flight (under two milliseconds on the wire) and abandons it only after three
 VBlanks. Keep a lease to one card transaction; `CardJob` already advances one per
 step.
 
+A card arms the SIO ACK interrupt itself (`begin_card` and `exchange_card` in
+`psx-io`: its ACK pulse can be short enough to fall inside an unrelated CPU
+interrupt, so the driver waits on the `STAT.IRQ` latch rather than the live
+level). With the engine's sources enabled each of those pulses also raises IRQ7
+into the engine's handler, which therefore does nothing while a lease is out:
+clearing the latch there would erase the acknowledgement the card driver is
+waiting for. `pad-engine-check` reads eight card frames through the lease and
+fails the run if any read fails (0 of 8 read without this rule, 8 of 8 with it);
+the host test is `a_card_ack_interrupt_during_a_lease_leaves_the_latch_to_the_card_driver`.
+
 This is arbitration by exclusion, not interleaving: a sector transfer is about
 as long as a frame, and a pad packet cannot be inserted into the middle of a
 card packet on the same wires.
+
+## Uninstall and install again
+
+`uninstall` waits for the transaction in flight (it abandons it after the same
+patience as `lease`), closes the engine's sources and returns the port token;
+it returns `None` only when the engine is not installed or a `Lease` holds the
+port. The wrapper stays in the vector, chained. `install` finds it there, resets
+the engine and the snapshot, and takes the port again, so a program that hands
+the port to a synchronous driver for a while needs no workaround. (Before the
+chain change `install` refused while the wrapper was still first in the vector,
+and `uninstall` returned `None` for as long as a round was in flight, which is
+nearly always right after a VBlank.)
 
 ## Installing
 
@@ -138,8 +173,10 @@ let pad = psx_pad::console::pad(Port::One);
 The wrapper sits in the exception vector like psx-cdstream's: it saves the
 interrupted context, switches to its own 768-byte stack, runs the engine, restores
 the context and jumps to the handler that was in the vector before it
-(psx-rt's, or a cdstream wrapper that leads there). Install it last; a wrapper
-installed afterwards replaces it (`console::is_installed()` tells). It owns
+(psx-rt's, or a cdstream wrapper that leads there). psx-cdstream's wrapper
+chains the same way, so the two install in either order (before this change a
+cdstream installed after the engine replaced it and the pad went dead:
+`console::is_installed()` tells). It owns
 root counter 0 and takes the `ControllerPort` token, so nothing can poll the
 port synchronously while it runs, which `Lease` is for.
 
@@ -227,8 +264,8 @@ separate disc.
   supersedes: the timer interrupt is the setup wait, so there is nothing to
   prepare).
 * A game with its own exception handler in front of psx-rt's must chain to the
-  engine's wrapper for IRQ7 and counter 0 as well as VBlank, or install the
-  engine last.
+  engine's wrapper for IRQ7 and counter 0 as well as VBlank, or install it
+  before the engine (the engine chains to what it finds).
 * Port 2 hot-plug of a DualShock starts in digital mode; the game calls
   `request_analog` on the `Absent`-to-`Present` edge, as the engine runner does.
 * The synchronous driver keeps its cost. Its `PadReader::prepare_on` branch

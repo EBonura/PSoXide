@@ -262,6 +262,15 @@ __psx_rt_exception_handler:
     lw    $26, {i_mask}($26)
     nop
     and   $27, $27, $26
+    # A source a wrapper in front of this handler has claimed is not a stray
+    # even though it is pending here: it arrived while another wrapper's handler
+    # ran, or while the claimant's own handler held interrupts off, and the
+    # claimant will take it as soon as this returns. Leave it pending.
+    lui   $26, %hi(__psx_rt_claimed_irq)
+    lw    $26, %lo(__psx_rt_claimed_irq)($26)
+    nop
+    nor   $26, $26, $zero
+    and   $27, $27, $26
     beqz  $27, 1b
     nop
     lui   $26, %hi(__psx_rt_stray_irq_last)
@@ -414,6 +423,55 @@ static mut __psx_rt_stray_irq_count: u32 = 0;
 #[no_mangle]
 static mut __psx_rt_stray_irq_last: u32 = 0;
 
+/// Sources that wrappers in front of this handler own (see
+/// [`claim_interrupt_sources`]): never acknowledged as strays.
+#[no_mangle]
+static mut __psx_rt_claimed_irq: u32 = 0;
+
+/// Declare that a handler in front of psx-rt's owns the `I_STAT` sources in
+/// `bits` (a mask of [`psx_hw::irq::source`] positions).
+///
+/// psx-rt's handler acknowledges an enabled source that is pending when no
+/// VBlank is, because nothing it knows owns it. A wrapper chained in front
+/// (psx-cdstream's for the CD controller, the pad engine's for the controller
+/// port and root counter 0) does own its sources, but an interrupt can arrive
+/// while another wrapper's handler runs, or while its own runs with interrupts
+/// off, and so reach psx-rt's handler pending, where the acknowledge loses it:
+/// a CD sector, a pad byte. A claimed source is left pending, and the exception
+/// is taken again at once, into the owner. Call from foreground code when the
+/// wrapper is installed; [`release_interrupt_sources`] undoes it.
+pub fn claim_interrupt_sources(bits: u32) {
+    // The CD wrapper's engine opens and closes its source, and so claims and
+    // releases it, from its interrupt handler too; with interrupts on, that
+    // could land between this read and write and be overwritten.
+    psx_io::irq::without_interrupts(|| {
+        // SAFETY: the read-modify-write runs with CPU interrupts off, so no
+        // handler writes the word meanwhile; the exception handler only reads
+        // it, and an aligned word store cannot tear.
+        unsafe {
+            let claimed = core::ptr::read_volatile(&raw const __psx_rt_claimed_irq);
+            core::ptr::write_volatile(&raw mut __psx_rt_claimed_irq, claimed | bits);
+        }
+    });
+}
+
+/// Undo [`claim_interrupt_sources`] for `bits`.
+pub fn release_interrupt_sources(bits: u32) {
+    psx_io::irq::without_interrupts(|| {
+        // SAFETY: as in `claim_interrupt_sources`.
+        unsafe {
+            let claimed = core::ptr::read_volatile(&raw const __psx_rt_claimed_irq);
+            core::ptr::write_volatile(&raw mut __psx_rt_claimed_irq, claimed & !bits);
+        }
+    });
+}
+
+/// The sources currently claimed.
+pub fn claimed_interrupt_sources() -> u32 {
+    // SAFETY: a volatile aligned read.
+    unsafe { core::ptr::read_volatile(&raw const __psx_rt_claimed_irq) }
+}
+
 /// Stray interrupts acknowledged so far. psx-rt's handler owns VBlank only;
 /// any other source enabled in `I_MASK` that fires while no VBlank is
 /// pending, and that no handler in front of this one claimed, is
@@ -443,7 +501,13 @@ pub fn last_stray_interrupt_sources() -> u32 {
 /// source of its own still waiting for it, which must stay in `I_STAT`. The
 /// handler's assembly makes exactly this decision.
 pub const fn stray_interrupt_sources(status: u32, mask: u32, cause: u32) -> u32 {
-    let pending = status & mask;
+    stray_unclaimed(status, mask, cause, 0)
+}
+
+/// [`stray_interrupt_sources`] with the sources wrappers have claimed
+/// ([`claim_interrupt_sources`]) left out.
+pub const fn stray_unclaimed(status: u32, mask: u32, cause: u32, claimed: u32) -> u32 {
+    let pending = status & mask & !claimed;
     let is_interrupt = (cause >> 2) & 0x1F == 0;
     if is_interrupt && pending & (1 << psx_hw::irq::source::VBLANK) == 0 {
         pending
@@ -528,6 +592,15 @@ pub fn install_vblank_counter() {
         core::ptr::write_volatile(EXCEPTION_VECTOR.add(1), 0);
         crate::cache::flush_instruction_cache();
 
+        // Whatever wrapper was in front of the old handler is gone: a wrapper
+        // that kept its own record of being installed can tell by the epoch,
+        // and no source is claimed any more.
+        core::ptr::write_volatile(
+            &raw mut VECTOR_EPOCH,
+            core::ptr::read_volatile(&raw const VECTOR_EPOCH).wrapping_add(1),
+        );
+        core::ptr::write_volatile(&raw mut __psx_rt_claimed_irq, 0);
+
         core::ptr::write_volatile(&raw mut __psx_rt_vblank_count, 0);
         irq::acknowledge(1 << psx_hw::irq::source::VBLANK);
         // This handler services VBlank only. After a BIOS disc boot, do not
@@ -541,6 +614,24 @@ pub fn install_vblank_counter() {
 /// Install and enable the VBlank counter interrupt path.
 #[cfg(not(target_arch = "mips"))]
 pub fn install_vblank_counter() {}
+
+/// How many times [`install_vblank_counter`] has put psx-rt's handler in the
+/// vector. That drops every wrapper chained in front of it, so a wrapper
+/// (psx-cdstream's, the pad engine's) that remembers installing itself is
+/// still in the chain only while this reads what it read then.
+#[cfg(target_arch = "mips")]
+static mut VECTOR_EPOCH: u32 = 0;
+
+/// See [`VECTOR_EPOCH`]; zero off-target.
+pub fn vector_epoch() -> u32 {
+    #[cfg(target_arch = "mips")]
+    // SAFETY: a volatile aligned read of a word only this module writes.
+    unsafe {
+        core::ptr::read_volatile(&raw const VECTOR_EPOCH)
+    }
+    #[cfg(not(target_arch = "mips"))]
+    0
+}
 
 /// Unexpected exceptions survived so far. Non-zero means some access
 /// faulted and was stepped over; the value it read or wrote is garbage.
@@ -1156,6 +1247,37 @@ mod tests {
             GPU_BIT
         );
         assert_eq!(stray_interrupt_sources(CDROM_BIT, VBLANK_BIT, INTERRUPT), 0);
+    }
+
+    #[test]
+    fn claims_add_and_release_independently() {
+        // Nothing else in the host tests touches the claim word.
+        assert_eq!(claimed_interrupt_sources(), 0);
+        claim_interrupt_sources(0x80 | 0x10);
+        claim_interrupt_sources(0x01);
+        assert_eq!(claimed_interrupt_sources(), 0x91);
+        release_interrupt_sources(0x10);
+        assert_eq!(claimed_interrupt_sources(), 0x81);
+        release_interrupt_sources(0x81);
+        assert_eq!(claimed_interrupt_sources(), 0);
+    }
+
+    #[test]
+    fn a_claimed_source_is_left_pending_for_its_wrapper() {
+        // A CD interrupt that arrived while the pad wrapper's handler ran, and
+        // a pad interrupt that arrived while the CD handler held interrupts
+        // off, are not strays: their wrappers take them on the retry.
+        let mask = VBLANK_BIT | CDROM_BIT | GPU_BIT;
+        assert_eq!(stray_unclaimed(CDROM_BIT, mask, INTERRUPT, CDROM_BIT), 0);
+        // Only the claimed ones; an unowned source beside them is still one.
+        assert_eq!(
+            stray_unclaimed(CDROM_BIT | GPU_BIT, mask, INTERRUPT, CDROM_BIT),
+            GPU_BIT
+        );
+        assert_eq!(
+            stray_unclaimed(CDROM_BIT, mask, INTERRUPT, 0),
+            stray_interrupt_sources(CDROM_BIT, mask, INTERRUPT)
+        );
     }
 
     #[test]
