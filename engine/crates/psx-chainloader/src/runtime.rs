@@ -21,16 +21,16 @@ pub trait Presentation {
 
 impl Reader for SectorReader {
     unsafe fn prepare(&mut self) -> bool {
-        unsafe { SectorReader::prepare(self) }
+        SectorReader::prepare(self)
     }
     unsafe fn start_read_seek_first(&mut self, lba: u32, limit: u32) -> bool {
-        unsafe { SectorReader::start_read_seek_first(self, lba, limit) }
+        SectorReader::start_read_seek_first(self, lba, limit)
     }
     unsafe fn read_sector(&mut self, out: &mut [u32; SECTOR_WORDS]) -> bool {
-        unsafe { SectorReader::read_sector(self, out) }
+        SectorReader::read_sector(self, out)
     }
     unsafe fn stop(&mut self) {
-        unsafe { SectorReader::stop(self) }
+        SectorReader::stop(self)
     }
 }
 struct DirectMemory;
@@ -138,7 +138,9 @@ pub unsafe fn run<P: Presentation>(
         // drain after the first prepare(), but a failed attempt leaves the
         // drive mid-stream -- the 2026-08-01 console panels showed retry 2
         // reading an all-ones header straight from a poisoned FIFO.
-        let mut reader = SectorReader::new();
+        // SAFETY: `run` owns the drive from here to the jump, as its contract
+        // says; no other `Cd` token is in use.
+        let mut reader = SectorReader::with_cd(unsafe { psx_io::periph::Cd::steal() });
         match unsafe {
             crate::try_load(
                 &mut reader,
