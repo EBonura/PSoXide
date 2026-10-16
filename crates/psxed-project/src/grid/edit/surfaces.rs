@@ -4,7 +4,7 @@
 //! applies to both, `Some(0)` or `Some(1)` to just that triangle (which
 //! gives the surface its own second-triangle record when it had none).
 
-use crate::brush::FaceUv;
+use crate::face_uv::FaceUv;
 use crate::ResourceId;
 
 use super::super::surface::{GridSurface, GridTri, WallFacing};

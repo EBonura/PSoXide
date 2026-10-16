@@ -16,9 +16,13 @@ pub const UNITS_PER_TEXEL: i32 = SECTOR_UNITS / TEXELS_PER_SECTOR;
 
 /// Rational scale from grid units to editor units: `editor = grid * num / den`.
 ///
-/// New worlds use 21/16, which makes a sector 1344 editor units and gives the
-/// 1024 unit Cortex character Tomb Raider proportions. The bonnie importer
-/// picks the scale from the level's own player height.
+/// New worlds use 5/4, which makes a sector 1280 editor units (80 runtime
+/// units) so every snap, 256 click and 64 fine step alike, lands on a whole
+/// runtime unit, and the 1024 unit Cortex character stands 0.8 of a sector
+/// tall. Earlier worlds used 21/16 (1344 editor units, 84 runtime units per
+/// sector, a fractional fine snap); a stored world keeps whatever scale it was
+/// saved with. The bonnie importer picks the scale from the level's own
+/// player height.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct GridScale {
     /// Numerator.
@@ -29,7 +33,7 @@ pub struct GridScale {
 
 impl GridScale {
     /// Default scale for new worlds.
-    pub const DEFAULT: Self = Self { num: 21, den: 16 };
+    pub const DEFAULT: Self = Self { num: 5, den: 4 };
 
     /// A scale, or `None` unless both terms are positive.
     pub const fn new(num: i32, den: i32) -> Option<Self> {
@@ -101,10 +105,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_scale_gives_1344_unit_sectors() {
-        assert_eq!(GridScale::DEFAULT.sector_editor_units(), 1344);
-        assert_eq!(GridScale::DEFAULT.to_editor(CLICK_UNITS), 336);
-        assert_eq!(GridScale::DEFAULT.to_editor(FINE_UNITS), 84);
+    fn default_scale_gives_1280_unit_sectors() {
+        assert_eq!(GridScale::DEFAULT.sector_editor_units(), 1280);
+        assert_eq!(GridScale::DEFAULT.to_editor(CLICK_UNITS), 320);
+        assert_eq!(GridScale::DEFAULT.to_editor(FINE_UNITS), 80);
+        // Every snap is a whole number of runtime units (editor / 16).
+        for step in [CLICK_UNITS, FINE_UNITS] {
+            assert_eq!(GridScale::DEFAULT.to_editor(step) % 16, 0);
+        }
+    }
+
+    #[test]
+    fn the_21_16_scale_stays_supported() {
+        let scale = GridScale { num: 21, den: 16 };
+        assert_eq!(scale.sector_editor_units(), 1344);
+        assert_eq!(scale.to_editor(CLICK_UNITS), 336);
+        assert_eq!(scale.to_editor(FINE_UNITS), 84);
     }
 
     #[test]

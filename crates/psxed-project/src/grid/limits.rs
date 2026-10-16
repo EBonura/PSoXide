@@ -455,7 +455,7 @@ mod tests {
     #[test]
     fn extent_beyond_the_pack_range_is_an_error() {
         let mut room = GridRoom::new("far", 1, 1);
-        room.origin = [MAX_EDITOR_COORD / 1344 + 8, 0];
+        room.origin = [MAX_EDITOR_COORD / 1280 + 8, 0];
         room.sector_or_insert(0, 0).unwrap().floor = Some(GridSurface::flat(0, None));
         let found = kinds(&world_with_room(room));
         assert!(found

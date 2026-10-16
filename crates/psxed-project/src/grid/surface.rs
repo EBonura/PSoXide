@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::brush::FaceUv;
+use crate::face_uv::FaceUv;
 use crate::ResourceId;
 
 /// Which diagonal cuts a floor or ceiling quad into its two triangles.

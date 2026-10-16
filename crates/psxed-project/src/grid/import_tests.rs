@@ -194,7 +194,7 @@ fn an_explicit_spawn_overrides_the_default_and_must_have_a_floor() {
         cell: [5, 4],
     });
     let report = import_project(level_text().as_bytes(), &options).unwrap();
-    assert_eq!(report.spawn, [5 * 1344 + 672, 64, 4 * 1344 + 672]);
+    assert_eq!(report.spawn, [5 * 1280 + 640, 64, 4 * 1280 + 640]);
 
     options.spawn = Some(super::bonnie_project::SpawnRequest {
         room: 3,

@@ -21,7 +21,7 @@
 //!   front-face convention, so the right-handed cross product of a ring points
 //!   away from the viewer. [`GridFace::normal`] is the visible-side normal.
 
-use crate::brush::FaceUv;
+use crate::face_uv::FaceUv;
 use crate::ResourceId;
 
 use super::sector::{GridSector, WallEdge};
@@ -607,13 +607,13 @@ mod tests {
             .points
             .iter()
             .copied()
-            .filter(|p| p[0] == 1344)
+            .filter(|p| p[0] == 1280)
             .collect();
         let west_of_second: Vec<[i32; 3]> = faces[1]
             .points
             .iter()
             .copied()
-            .filter(|p| p[0] == 1344)
+            .filter(|p| p[0] == 1280)
             .collect();
         assert_eq!(east_of_first.len(), 2);
         let mut a = east_of_first;
@@ -642,10 +642,10 @@ mod tests {
                 .map(|(_, t)| t[0])
                 .collect()
         };
-        assert!(u_at(&faces[0], 1344)
+        assert!(u_at(&faces[0], 1280)
             .iter()
             .all(|u| (*u - 32.0).abs() < 1e-9));
-        assert!(u_at(&faces[1], 1344)
+        assert!(u_at(&faces[1], 1280)
             .iter()
             .all(|u| (*u - 32.0).abs() < 1e-9));
     }

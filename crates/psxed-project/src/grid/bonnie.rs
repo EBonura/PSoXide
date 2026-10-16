@@ -20,7 +20,7 @@ use std::io::Read;
 
 use serde::Deserialize;
 
-use crate::brush::FaceUv;
+use crate::face_uv::FaceUv;
 use crate::ResourceId;
 
 use super::room::{GridFog, GridRoom};

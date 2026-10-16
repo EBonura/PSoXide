@@ -227,10 +227,10 @@ mod tests {
             .push(GridWall::span(256, 2048, None));
         world.rooms.push(room);
         let b = world.editor_bounds().unwrap();
-        // x: sector 2..3 at 1344 per sector; y: (512 + 256)..(512 + 2048)
-        // scaled by 21/16; z: sector -1..0.
-        assert_eq!(b.min, [2688, 1008, -1344]);
-        assert_eq!(b.max, [4032, 3360, 0]);
+        // x: sector 2..3 at 1280 per sector; y: (512 + 256)..(512 + 2048)
+        // scaled by 5/4; z: sector -1..0.
+        assert_eq!(b.min, [2560, 960, -1280]);
+        assert_eq!(b.max, [3840, 3200, 0]);
         assert_eq!(GridWorld::new().editor_bounds(), None);
     }
 
@@ -263,7 +263,7 @@ mod tests {
         let mut room = GridRoom::new("a", 1, 1);
         room.origin = [-2, 3];
         room.y_offset = 1024;
-        assert_eq!(world.room_origin_editor(&room), [-2688, 1344, 4032]);
+        assert_eq!(world.room_origin_editor(&room), [-2560, 1280, 3840]);
         world.scale = GridScale { num: 9, den: 16 };
         assert_eq!(world.room_origin_editor(&room), [-1152, 576, 1728]);
     }
