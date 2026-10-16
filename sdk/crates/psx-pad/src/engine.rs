@@ -32,8 +32,7 @@
 //! `sdk/docs/PAD-IRQ-ENGINE.md` is the design.
 
 use crate::{
-    mode_from_id_low, AnalogRequirement, AnalogSticks, PadMode, PadState, Rumble,
-    MOTOR_MAP_PACKET,
+    mode_from_id_low, AnalogRequirement, AnalogSticks, PadMode, PadState, Rumble, MOTOR_MAP_PACKET,
 };
 use core::cell::UnsafeCell;
 use core::ptr::{read_volatile, write_volatile};
