@@ -96,6 +96,8 @@ pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io
             .as_ref()
             .map_or(&world.bytes, |stream| &stream.container),
     )?;
+    // Open-hall experiment: the grid render pack, empty unless cooked.
+    std::fs::write(generated_dir.join("grid_world.bin"), &world.grid_pack)?;
     if world.leak_path.is_empty() {
         remove_optional_file(&brush_leak_path)?;
     } else {

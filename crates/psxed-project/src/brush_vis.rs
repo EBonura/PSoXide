@@ -184,7 +184,148 @@ pub(crate) fn quake_portal_flow_rows(
     // arrive at that result independently; explicitly closing the relation
     // prevents floating-point tie direction from creating a false negative.
     close_reciprocal_visibility(&mut rows);
+    if std::env::var_os("OPEN_HALL_SAMPLED_VIS").is_some() {
+        refine_rows_by_sampled_rays(bsp, portals, leaf_mapping, &mut rows);
+    }
     runtime_visibility_rows(&rows, leaf_mapping, visible_leaves)
+}
+
+/// Open-hall experiment: drop leaf pairs that portal flow keeps but no line of
+/// sight joins. Each empty leaf is sampled at its portal corners and centres
+/// (pulled slightly inward) plus its centroid; a pair survives when any
+/// sample segment between the two leaves crosses no solid leaf. Portal flow
+/// is conservative per portal sequence, and in one open hall every sequence
+/// sees through, so its rows fill up; rays see the pillars and walls that
+/// actually block. Sampling can miss a sliver of visibility, so the result is
+/// not provably conservative.
+fn refine_rows_by_sampled_rays(
+    bsp: &CompiledSurfaceBsp,
+    portals: &[CompiledPortal],
+    leaf_mapping: &[i16],
+    rows: &mut [Vec<u64>],
+) {
+    use crate::brush_compile::{BspChild, BspLeafContents};
+    let visible = rows.len();
+    let mut host_of = vec![usize::MAX; visible];
+    for (host, &runtime) in leaf_mapping.iter().enumerate() {
+        if runtime > 0 {
+            host_of[runtime as usize - 1] = host;
+        }
+    }
+    // Raw boundary points per host leaf.
+    let mut raw: Vec<Vec<[f64; 3]>> = vec![Vec::new(); bsp.leaves.len()];
+    for portal in portals {
+        if portal.vertices.is_empty() {
+            continue;
+        }
+        let n = portal.vertices.len() as f64;
+        let mut centre = [0.0; 3];
+        for v in &portal.vertices {
+            for axis in 0..3 {
+                centre[axis] += v[axis] / n;
+            }
+        }
+        for leaf in [portal.front_leaf, portal.back_leaf] {
+            if let Some(points) = raw.get_mut(leaf) {
+                points.push(centre);
+                points.extend(portal.vertices.iter().copied());
+            }
+        }
+    }
+    let samples: Vec<Vec<[f64; 3]>> = (0..visible)
+        .map(|vis| {
+            let Some(points) = raw.get(host_of[vis]) else {
+                return Vec::new();
+            };
+            if points.is_empty() {
+                return Vec::new();
+            }
+            let n = points.len() as f64;
+            let mut centroid = [0.0; 3];
+            for p in points {
+                for axis in 0..3 {
+                    centroid[axis] += p[axis] / n;
+                }
+            }
+            let mut out = vec![centroid];
+            for p in points {
+                // 10% toward the centroid keeps samples off shared walls.
+                out.push([
+                    p[0] + (centroid[0] - p[0]) * 0.1,
+                    p[1] + (centroid[1] - p[1]) * 0.1,
+                    p[2] + (centroid[2] - p[2]) * 0.1,
+                ]);
+            }
+            out.dedup_by(|a, b| (0..3).all(|axis| (a[axis] - b[axis]).abs() < 0.5));
+            out
+        })
+        .collect();
+
+    fn clear(bsp: &CompiledSurfaceBsp, child: BspChild, a: [f64; 3], b: [f64; 3], depth: u32) -> bool {
+        match child {
+            BspChild::Leaf(index) => !matches!(bsp.leaves[index].contents, BspLeafContents::Solid),
+            BspChild::Node(index) => {
+                let node = &bsp.nodes[index];
+                let n = node.plane.normal.map(|v| v as f64);
+                let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+                let dist = node.plane.dist as f64 / len;
+                let side = |p: [f64; 3]| (n[0] * p[0] + n[1] * p[1] + n[2] * p[2]) / len - dist;
+                let (da, db) = (side(a), side(b));
+                const ON: f64 = 0.25;
+                if da >= -ON && db >= -ON {
+                    return clear(bsp, node.front, a, b, depth + 1);
+                }
+                if da < ON && db < ON {
+                    return clear(bsp, node.back, a, b, depth + 1);
+                }
+                let t = da / (da - db);
+                let mid = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+                let (first, second) = if da >= 0.0 { (node.front, node.back) } else { (node.back, node.front) };
+                clear(bsp, first, a, mid, depth + 1) && clear(bsp, second, mid, b, depth + 1)
+            }
+        }
+    }
+
+    let before: usize = rows.iter().map(|r| r.iter().map(|w| w.count_ones() as usize).sum::<usize>()).sum();
+    let snapshot: Vec<Vec<u64>> = rows.to_vec();
+    let next = AtomicUsize::new(0);
+    let workers = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get).clamp(1, 8);
+    let refined: Vec<OnceLock<Vec<u64>>> = (0..visible).map(|_| OnceLock::new()).collect();
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            let (snapshot, samples, refined, next) = (&snapshot, &samples, &refined, &next);
+            scope.spawn(move || loop {
+                let from = next.fetch_add(1, Ordering::Relaxed);
+                if from >= visible {
+                    break;
+                }
+                let mut row = snapshot[from].clone();
+                if !samples[from].is_empty() {
+                    for to in 0..visible {
+                        if to == from || !bit_is_set(&row, to) || samples[to].is_empty() {
+                            continue;
+                        }
+                        let seen = samples[from].iter().any(|a| {
+                            samples[to].iter().any(|b| clear(bsp, bsp.root, *a, *b, 0))
+                        });
+                        if !seen {
+                            row[to >> 6] &= !(1u64 << (to & 63));
+                        }
+                    }
+                }
+                refined[from].set(row).expect("one refinement per leaf");
+            });
+        }
+    });
+    for (row, refined) in rows.iter_mut().zip(refined) {
+        *row = refined.into_inner().expect("every leaf refined");
+    }
+    close_reciprocal_visibility(rows);
+    let after: usize = rows.iter().map(|r| r.iter().map(|w| w.count_ones() as usize).sum::<usize>()).sum();
+    crate::playtest::emit_cook_output(format_args!(
+        "[brush-vis] sampled-ray refinement: {before} -> {after} visible leaf pairs ({:.0}% kept)",
+        after as f64 * 100.0 / before.max(1) as f64
+    ));
 }
 
 /// Build Quake's conservative `mightsee`/fast-vis rows without the expensive

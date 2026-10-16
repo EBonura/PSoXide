@@ -1009,7 +1009,7 @@ pub fn compile_brush_world_streamed(
     let texture_dims = brush_texture_dims(project, scene, &options);
     let uv_skip = sky_aperture_materials(project);
     let patch_extent = match &scene.node(crate::NodeId::ROOT).unwrap().kind {
-        NodeKind::World { culling, .. } => culling.bsp_patch_extent.clamp(64, 256) as f64,
+        NodeKind::World { culling, .. } => culling.bsp_patch_extent.clamp(32, 256) as f64,
         _ => crate::units::ENGINE_SURFACE_EXTENT_UNITS,
     };
     let occupant_points = player_occupant_points(scene);

@@ -23,6 +23,7 @@ pub mod brush;
 pub mod brush_collision_hulls;
 pub mod brush_compile;
 pub mod brush_convex;
+pub mod brush_grid;
 pub mod brush_light;
 pub mod brush_overlap;
 pub mod brush_pack;

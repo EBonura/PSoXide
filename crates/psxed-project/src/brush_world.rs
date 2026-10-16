@@ -546,7 +546,7 @@ pub fn compile_brush_world(
     let texture_dims = brush_texture_dims(project, scene, &options);
     let uv_window_skip = sky_aperture_materials(project);
     let patch_extent = match &scene.node(NodeId::ROOT).unwrap().kind {
-        NodeKind::World { culling, .. } => culling.bsp_patch_extent.clamp(64, 256) as f64,
+        NodeKind::World { culling, .. } => culling.bsp_patch_extent.clamp(32, 256) as f64,
         _ => ENGINE_SURFACE_EXTENT_UNITS,
     };
     let occupant_points = player_occupant_points(scene);
@@ -2031,7 +2031,7 @@ fn translate_brushes(brushes: &[Brush], origin: [i32; 3]) -> Vec<Brush> {
 
 /// Point lights in scene order, paired with the authoring node each came
 /// from so a bake failure can name the light the author has to fix.
-fn scene_lights(scene: &Scene) -> (Vec<BrushPointLight>, Vec<NodeId>) {
+pub(crate) fn scene_lights(scene: &Scene) -> (Vec<BrushPointLight>, Vec<NodeId>) {
     // Radius is authored in sector units. Use the scene's World sector size
     // so the bake agrees with the runtime PlaytestLight records, which scale
     // by the same value (cook_props_lights::push_point_light).
@@ -2079,7 +2079,7 @@ fn translate_lights(lights: &[BrushPointLight], origin: [i32; 3]) -> Vec<BrushPo
         .collect()
 }
 
-fn material_tints(project: &ProjectDocument) -> Vec<BrushMaterialTint> {
+pub(crate) fn material_tints(project: &ProjectDocument) -> Vec<BrushMaterialTint> {
     let mut tints = vec![BrushMaterialTint {
         material: None,
         color: [128; 3],
@@ -2705,7 +2705,7 @@ pub(crate) fn partition_front_end(
     let texture_dims = brush_texture_dims(project, scene, &options);
     let uv_window_skip = sky_aperture_materials(project);
     let patch_extent = match &scene.node(NodeId::ROOT).unwrap().kind {
-        NodeKind::World { culling, .. } => culling.bsp_patch_extent.clamp(64, 256) as f64,
+        NodeKind::World { culling, .. } => culling.bsp_patch_extent.clamp(32, 256) as f64,
         _ => ENGINE_SURFACE_EXTENT_UNITS,
     };
     let (topology, render) = compile_model_surfaces(&brushes);
