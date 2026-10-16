@@ -1,12 +1,13 @@
 //! The `xa-encode`, `xa-decode` and `xa-score` subcommands of `psx-audio-cook`.
 
 use crate::xa::{self, DriveSpeed, Format, SampleRate};
+use crate::xa_pack;
 use crate::{metrics, wav};
 use std::path::Path;
 use std::process::ExitCode;
 
 /// Usage text of the XA subcommands.
-pub const USAGE: &str = "  psx-audio-cook xa-encode OUT.XA SONG.wav... [--rate 37800|18900] [--mono] [--speed 1|2] [--file N] [--peak F] [--manifest OUT.json]\n  psx-audio-cook xa-decode IN.XA CHANNEL OUT.wav\n  psx-audio-cook xa-score SRC.wav IN.XA CHANNEL\n  psx-audio-cook xa-peaks CAPTURE.wav";
+pub const USAGE: &str = "  psx-audio-cook xa-encode OUT.XA SONG.wav... [--rate 37800|18900] [--mono] [--speed 1|2] [--file N] [--peak F] [--manifest OUT.json]\n  psx-audio-cook xa-pack OUT_DIR NAME SONG.wav... [--rate 37800|18900] [--mono] [--speed 1|2] [--first-file N] [--peak F] [--manifest OUT.json] [--rust OUT.rs]\n  psx-audio-cook xa-decode IN.XA CHANNEL OUT.wav\n  psx-audio-cook xa-score SRC.wav IN.XA CHANNEL\n  psx-audio-cook xa-peaks CAPTURE.wav";
 
 fn fail(message: impl std::fmt::Display) -> ExitCode {
     eprintln!("{message}");
@@ -19,6 +20,7 @@ struct Options {
     file: u8,
     peak: Option<f64>,
     manifest: Option<String>,
+    rust: Option<String>,
     songs: Vec<String>,
 }
 
@@ -32,6 +34,7 @@ fn parse(flags: &[String]) -> Result<Options, String> {
         file: 1,
         peak: None,
         manifest: None,
+        rust: None,
         songs: Vec::new(),
     };
     let mut i = 0;
@@ -42,7 +45,10 @@ fn parse(flags: &[String]) -> Result<Options, String> {
             ("--rate", Some("18900")) => o.format.rate = SampleRate::Hz18900,
             ("--speed", Some("1")) => o.speed = DriveSpeed::Single,
             ("--speed", Some("2")) => o.speed = DriveSpeed::Double,
-            ("--file", Some(v)) => o.file = v.parse().map_err(|_| format!("bad --file {v}"))?,
+            ("--file" | "--first-file", Some(v)) => {
+                o.file = v.parse().map_err(|_| format!("bad {} {v}", flags[i]))?
+            }
+            ("--rust", Some(v)) => o.rust = Some(v.to_string()),
             ("--peak", Some(v)) => o.peak = Some(v.parse().map_err(|_| format!("bad --peak {v}"))?),
             ("--manifest", Some(v)) => o.manifest = Some(v.to_string()),
             ("--mono", _) => {
@@ -77,6 +83,9 @@ pub fn encode(output: &str, flags: &[String]) -> ExitCode {
         Ok(o) => o,
         Err(e) => return fail(e),
     };
+    if o.rust.is_some() {
+        return fail("--rust belongs to xa-pack");
+    }
     let mut pcm = Vec::new();
     for path in &o.songs {
         let bytes = match std::fs::read(path) {
@@ -117,6 +126,63 @@ pub fn encode(output: &str, flags: &[String]) -> ExitCode {
             "note: {} of {} interleave slots used; the rest is filler that still takes disc space",
             o.songs.len(),
             file.stride
+        );
+    }
+    ExitCode::SUCCESS
+}
+
+/// `xa-pack OUT_DIR NAME SONG.wav... [options]`: every song into as few
+/// interleaved files as the format allows (`NAME1.XA`, `NAME2.XA`, ... in
+/// `OUT_DIR`), longest songs sharing a file. Prints the manifest; `--rust`
+/// also writes the constants a guest includes.
+pub fn pack(out_dir: &str, name: &str, flags: &[String]) -> ExitCode {
+    let o = match parse(flags) {
+        Ok(o) => o,
+        Err(e) => return fail(e),
+    };
+    let mut songs = Vec::new();
+    for path in &o.songs {
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) => return fail(format!("{path}: {e}")),
+        };
+        match wav::read_channels(&bytes) {
+            Ok((rate, channels)) => songs.push(xa_pack::Song {
+                name: stem(path),
+                pcm: xa::prepare_pcm(o.format, rate, &channels, o.peak),
+            }),
+            Err(e) => return fail(format!("{path}: {e}")),
+        }
+    }
+    let packed = match xa_pack::pack(name, o.format, o.speed, o.file, &songs) {
+        Ok(p) => p,
+        Err(e) => return fail(e),
+    };
+    if let Err(e) = std::fs::create_dir_all(out_dir) {
+        return fail(format!("{out_dir}: {e}"));
+    }
+    for file in &packed.files {
+        let path = Path::new(out_dir).join(&file.name);
+        if let Err(e) = std::fs::write(&path, &file.data.bytes) {
+            return fail(format!("{}: {e}", path.display()));
+        }
+    }
+    let manifest = xa_pack::manifest_json(&packed);
+    if let Some(path) = &o.manifest {
+        if let Err(e) = std::fs::write(path, &manifest) {
+            return fail(format!("{path}: {e}"));
+        }
+    }
+    if let Some(path) = &o.rust {
+        if let Err(e) = std::fs::write(path, xa_pack::rust_source(&packed)) {
+            return fail(format!("{path}: {e}"));
+        }
+    }
+    println!("{manifest}");
+    let empty = packed.empty_slots();
+    if empty > 0 {
+        eprintln!(
+            "note: {empty} interleave slots carry no song; they are filler that still takes disc space"
         );
     }
     ExitCode::SUCCESS
