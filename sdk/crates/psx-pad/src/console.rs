@@ -29,7 +29,7 @@
 //! which keeps the engine off the port until it is dropped.
 
 use crate::engine::{Config, Engine, Hw, Owner, PortReading, Published, Snapshot, Stats};
-use crate::{AnalogRequirement, PadState};
+use crate::{AnalogRequirement, PadState, Rumble};
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
 use psx_hw::irq::source;
@@ -192,6 +192,11 @@ static mut PSX_PAD_IRQ_CONTEXT: [u32; 34] = [0; 34];
 /// led to when [`install`] ran.
 #[no_mangle]
 static mut PSX_PAD_NEXT_HANDLER: u32 = 0;
+/// `psx_rt::interrupts::vector_epoch` when the wrapper was put in the vector.
+#[cfg(target_arch = "mips")]
+static mut PSX_PAD_EPOCH: u32 = 0;
+/// Set by [`install`], cleared by [`uninstall`].
+static mut INSTALLED: bool = false;
 
 /// Run `f` on the engine with CPU interrupts off.
 #[inline(always)]
@@ -376,15 +381,22 @@ fn install_vector() -> bool {
     // fetches the new words, and the wrapper is declared stack-safe so
     // scratchpad stacks stay allowed.
     unsafe {
+        // Installed before (and uninstalled since): already in the chain,
+        // unless psx-rt's handler went back into the vector since, which
+        // drops every wrapper in front of it (the epoch counts those).
+        let epoch = psx_rt::interrupts::vector_epoch();
+        if core::ptr::read_volatile(&raw const PSX_PAD_NEXT_HANDLER) != 0
+            && core::ptr::read_volatile(&raw const PSX_PAD_EPOCH) == epoch
+        {
+            return true;
+        }
         let current = core::ptr::read_volatile(EXCEPTION_VECTOR);
         if current & J_MASK != J_OPCODE {
             return false;
         }
         let next = ((current & !J_MASK) << 2) | 0x8000_0000;
         let wrapper = psx_pad_exception_wrapper as *const () as usize as u32;
-        if next == wrapper {
-            return false;
-        }
+        core::ptr::write_volatile(&raw mut PSX_PAD_EPOCH, epoch);
         core::ptr::write_volatile(&raw mut PSX_PAD_NEXT_HANDLER, next);
         core::ptr::write_volatile(EXCEPTION_VECTOR, J_OPCODE | ((wrapper >> 2) & !J_MASK));
         core::ptr::write_volatile(EXCEPTION_VECTOR.add(1), 0);
@@ -414,10 +426,9 @@ fn paint_stack() {
 /// handler the vector leads to and start polling on every VBlank.
 ///
 /// From here the port belongs to the engine, so nothing may poll it
-/// synchronously; a memory card borrows it through [`lease`]. Put the
-/// program's other exception wrappers (psx-cdstream's) in the vector first and
-/// install this last, so it chains to them: a wrapper installed afterwards
-/// replaces this one. Ask for analog mode with the synchronous
+/// synchronously; a memory card borrows it through [`lease`]. It chains to
+/// whatever the vector led to, and psx-cdstream's wrapper does the same, so
+/// the two can be installed in either order. Ask for analog mode with the synchronous
 /// `require_analog_on` before installing, or with [`request_analog`] after.
 ///
 /// If psx-rt's handler is not in the vector yet this installs it first
@@ -450,39 +461,93 @@ pub fn install(port: ControllerPort, config: Config) -> Result<(), ControllerPor
     irq::acknowledge(SIO_BIT | TIMER_BIT);
     with_engine(|engine| {
         *engine = Engine::new(Mmio::new(), &PUBLISHED, config);
+        engine.publish_readings();
     });
     irq::set_mask(irq::mask() | SIO_BIT | TIMER_BIT | VBLANK_BIT);
+    // A polled CD read cuts `I_MASK` down to VBlank for its whole stream; the
+    // engine runs on these two sources alone, so it asks to keep them.
+    irq::keep_enabled_while_polling(SIO_BIT | TIMER_BIT);
+    // psx-rt's handler would acknowledge these as strays if they reach it
+    // pending, behind another wrapper's handler or this one's.
+    psx_rt::interrupts::claim_interrupt_sources(SIO_BIT | TIMER_BIT);
+    // SAFETY: foreground; written here and in `uninstall` only.
+    unsafe { core::ptr::write_volatile(&raw mut INSTALLED, true) };
     Ok(())
 }
 
-/// Give the port back to synchronous code. Succeeds only when no transaction
-/// is on the wire and no lease is out. The wrapper stays in the exception
-/// vector (a few instructions per exception) but the controller and counter 0
-/// sources are closed.
+/// Give the port back to synchronous code. Waits for the transaction in
+/// flight, as [`lease`] does (and abandons it after the same patience), then
+/// closes the controller and counter 0 sources. The wrapper stays in the
+/// exception vector, chained, a few instructions per exception; [`install`]
+/// finds it there and takes the port again.
+///
+/// `None` when the engine is not installed or a [`Lease`] holds the port: a
+/// card transaction is not the engine's to cut short.
 pub fn uninstall() -> Option<ControllerPort> {
-    let idle = with_engine(Engine::try_lease);
-    if !idle {
+    if !installed_flag() {
         return None;
     }
+    // Leave nothing spinning in a pad that is about to be polled by something
+    // that does not know about it.
+    if with_engine(|engine| engine.motors_requested()) {
+        stop_motors();
+    }
+    let start = psx_rt::interrupts::vblank_count();
+    let mut attempts = 0u32;
+    loop {
+        let claimed = with_engine(|engine| {
+            if engine.owner() == Owner::Lease {
+                None
+            } else {
+                Some(engine.try_lease())
+            }
+        })?;
+        if claimed {
+            break;
+        }
+        attempts += 1;
+        let waited = psx_rt::interrupts::vblank_count().wrapping_sub(start);
+        if waited >= LEASE_PATIENCE_VBLANKS || attempts >= LEASE_PATIENCE_ATTEMPTS {
+            with_engine(Engine::force_lease);
+            break;
+        }
+    }
     irq::set_mask(irq::mask() & !(SIO_BIT | TIMER_BIT));
+    irq::release_polling_keep(SIO_BIT | TIMER_BIT);
+    psx_rt::interrupts::release_interrupt_sources(SIO_BIT | TIMER_BIT);
     timers::set_mode(Timer::Timer0, 0);
     irq::acknowledge(SIO_BIT | TIMER_BIT);
+    // SAFETY: foreground; written here and in `install` only.
+    unsafe { core::ptr::write_volatile(&raw mut INSTALLED, false) };
     // SAFETY: foreground; the engine is leased to this call, so nothing else
     // takes the token.
     unsafe { (*TOKEN.0.get()).take() }
 }
 
-/// Whether the wrapper is the exception vector's handler now.
+/// Whether [`install`] has run, [`uninstall`] has not, and psx-rt's handler has
+/// not been put back in the vector since (which drops the wrapper from the
+/// exception chain: `false` then, and the engine no longer runs). Otherwise
+/// the wrapper is in the chain, first in the vector or behind psx-cdstream's,
+/// which chains to it.
 pub fn is_installed() -> bool {
     #[cfg(target_arch = "mips")]
     {
-        // SAFETY: a read of the kernel's vector word.
-        let word = unsafe { core::ptr::read_volatile(EXCEPTION_VECTOR) };
-        let wrapper = psx_pad_exception_wrapper as *const () as usize as u32;
-        word == (J_OPCODE | ((wrapper >> 2) & !J_MASK))
+        // psx-rt's handler going back into the vector drops the wrapper from
+        // the chain without telling it; the epoch says whether that happened.
+        // SAFETY: a volatile read of a word the foreground writes.
+        let epoch = unsafe { core::ptr::read_volatile(&raw const PSX_PAD_EPOCH) };
+        installed_flag() && epoch == psx_rt::interrupts::vector_epoch()
     }
     #[cfg(not(target_arch = "mips"))]
-    false
+    installed_flag()
+}
+
+/// Whether [`install`] ran and [`uninstall`] has not, whether or not the
+/// wrapper is still in the vector. [`uninstall`] goes by this: it must still be
+/// able to give the port back when the wrapper was dropped from under it.
+fn installed_flag() -> bool {
+    // SAFETY: a volatile read of a flag the foreground writes.
+    unsafe { core::ptr::read_volatile(&raw const INSTALLED) }
 }
 
 // ------------------------------------------------------------ the foreground
@@ -523,6 +588,59 @@ pub fn request_analog(port: Port) {
 /// What the pad settled on after [`request_analog`]; `None` while pending.
 pub fn analog_outcome(port: Port) -> Option<AnalogRequirement> {
     with_engine(|engine| engine.analog_outcome(port))
+}
+
+/// Put the motors of the pad on `port` under the poll. The engine maps them
+/// (command 0x4D, in the same visit to configuration mode as an analog request
+/// if one is pending) whenever an analog DualShock is there and again each time
+/// one is plugged in, then sends [`set_rumble`]'s request with every poll.
+/// [`rumble_mapped`] says whether the pad took it.
+pub fn enable_rumble(port: Port) {
+    with_engine(|engine| engine.enable_rumble(port));
+}
+
+/// Stop wanting the motors on `port`. They are told to stop on the next poll.
+pub fn disable_rumble(port: Port) {
+    with_engine(|engine| engine.disable_rumble(port));
+}
+
+/// What the motors on `port` are asked to do on every poll. Takes effect on a
+/// pad that has been mapped; a digital pad ignores it.
+pub fn set_rumble(port: Port, rumble: Rumble) {
+    with_engine(|engine| engine.set_rumble(port, rumble));
+}
+
+/// Whether the pad on `port` took the motor mapping.
+pub fn rumble_mapped(port: Port) -> bool {
+    with_engine(|engine| engine.rumble_mapped(port))
+}
+
+/// Stop every motor now and return once a poll with the motors off has gone
+/// out on each port, so a program can pause, open a menu, or hand the port over
+/// knowing nothing is still spinning. Waits as [`lease`] does, three VBlanks at
+/// most; a port a [`Lease`] holds is not polled meanwhile. An unplugged pad has
+/// nothing to stop.
+pub fn stop_motors() {
+    let (start, idle) = with_engine(|engine| {
+        engine.stop_motors();
+        (engine.stats().kicks, engine.is_idle())
+    });
+    // A round already on the wire took its motor bytes when it started; the
+    // next round is the first to send zeros.
+    let target = start.wrapping_add(if idle { 1 } else { 2 });
+    let first = psx_rt::interrupts::vblank_count();
+    let mut attempts = 0u32;
+    loop {
+        let done = with_engine(|engine| {
+            let kicks = engine.stats().kicks;
+            kicks.wrapping_sub(target) < 0x8000_0000 && engine.is_idle()
+        });
+        attempts += 1;
+        let waited = psx_rt::interrupts::vblank_count().wrapping_sub(first);
+        if done || waited >= LEASE_PATIENCE_VBLANKS || attempts >= LEASE_PATIENCE_ATTEMPTS {
+            return;
+        }
+    }
 }
 
 /// Who may use the port now.

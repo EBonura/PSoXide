@@ -124,9 +124,54 @@ fn a_stuck_acknowledge_on_select_recovers_on_the_next_attempt() {
 }
 
 #[test]
-fn only_four_empty_replies_mean_no_pad() {
+fn an_empty_socket_is_told_at_once_and_cheaply() {
+    let absent = poll_with(Model {
+        id: 0xFF,
+        ..Model::default()
+    });
+    assert_eq!(absent.mode, PadMode::Disconnected);
+    // One attempt: the setup delay and the address byte's short wait, not
+    // four attempts of the long one (about 12,000 reads).
+    mock::with(|m| {
+        assert_eq!((m.attempts, m.sends), (1, 1));
+        assert!(m.now < 3_000, "{} register accesses", m.now);
+    });
+    // A reader that never saw a pad is told the same, once.
+    start(Model {
+        id: 0xFF,
+        ..Model::default()
+    });
+    let mut reader = PadReader::port1();
+    assert_eq!(reader.poll_on(&mut MockBus).mode, PadMode::Disconnected);
+    mock::with(|m| assert_eq!(m.attempts, 1));
+    // And it is found when the pad is plugged in.
+    mock::with(|m| m.id = 0x73);
+    let back = reader.poll_on(&mut MockBus);
+    assert_eq!((back.mode, back.buttons.bits()), (PadMode::Analog, 0));
+}
+
+#[test]
+fn a_pad_that_was_there_has_its_absence_confirmed_four_times() {
+    // Four empty replies in a row: gone.
     start(Model {
         sequence: vec![
+            (0x73, Fault::None, 0),
+            (0xFF, Fault::None, 0),
+            (0xFF, Fault::None, 0),
+            (0xFF, Fault::None, 0),
+            (0xFF, Fault::None, 0),
+        ],
+        ..Model::default()
+    });
+    let mut reader = PadReader::port1();
+    assert_eq!(reader.poll_on(&mut MockBus).mode, PadMode::Analog);
+    assert_eq!(reader.poll_on(&mut MockBus).mode, PadMode::Disconnected);
+    mock::with(|m| assert_eq!(m.attempts, 5));
+    // One of the four is a garbled packet: not proof of absence, so the reader
+    // keeps what it last read cleanly.
+    start(Model {
+        sequence: vec![
+            (0x73, Fault::None, 0),
             (0xFF, Fault::None, 0),
             (0x73, Fault::Rx, 3),
             (0xFF, Fault::None, 0),
@@ -134,15 +179,21 @@ fn only_four_empty_replies_mean_no_pad() {
         ],
         ..Model::default()
     });
-    assert_eq!(poll_on(&mut MockBus, Port::One).mode, PadMode::Unknown);
-    let absent = poll_with(Model {
-        id: 0xFF,
+    let mut reader = PadReader::port1();
+    let held = reader.poll_on(&mut MockBus);
+    assert_eq!(reader.poll_on(&mut MockBus), held);
+    mock::with(|m| assert_eq!(m.attempts, 5));
+}
+
+#[test]
+fn a_slow_address_acknowledgement_inside_the_bios_limit_still_reads() {
+    // The address byte's wait is shortened to the BIOS's own limit; a pad that
+    // answers inside it is unaffected.
+    let pad = poll_with(Model {
+        slow_ack: Some((0, 400)),
         ..Model::default()
     });
-    assert_eq!(absent.mode, PadMode::Disconnected);
-    mock::with(|m| m.id = 0x73);
-    let back = poll_on(&mut MockBus, Port::One);
-    assert_eq!((back.mode, back.buttons.bits()), (PadMode::Analog, 0));
+    assert_eq!(pad.mode, PadMode::Analog);
 }
 
 #[test]
@@ -327,6 +378,172 @@ fn the_token_is_accepted(port: &mut psx_io::periph::ControllerPort) {
     let _ = poll_on(port, Port::One);
     let _ = PadReader::port2().poll_on(port);
     let _ = crate::require_analog_on(port, Port::Two);
+}
+
+// ------------------------------------------------------------------ rumble
+
+use crate::{enable_rumble_on, poll_rumble_on, Rumble};
+
+fn analog_dualshock() -> Model {
+    Model {
+        id: 0x73,
+        analog_requested: true,
+        ..Model::default()
+    }
+}
+
+#[test]
+fn enabling_rumble_enters_config_maps_the_motors_and_leaves() {
+    start(analog_dualshock());
+    assert!(enable_rumble_on(&mut MockBus, Port::One));
+    mock::with(|m| {
+        // Enter, map, exit, then the poll that reads what the pad settled on.
+        assert_eq!(m.cmd_log, [0x43, 0x4D, 0x43, 0x42]);
+        // Small motor on the first motor byte, large on the second, the rest
+        // unused.
+        assert_eq!(m.map_params, [[0x00, 0x01, 0xFF, 0xFF, 0xFF, 0xFF]]);
+        assert!(m.rumble_mapped);
+        assert_eq!(m.id, 0x73, "analog mode is left as it was");
+        assert!(!m.is_selected());
+    });
+}
+
+#[test]
+fn a_poll_sends_the_motor_bytes_to_a_mapped_dualshock() {
+    start(analog_dualshock());
+    assert!(enable_rumble_on(&mut MockBus, Port::One));
+    mock::with(|m| m.motor_tx.clear());
+    let pad = poll_rumble_on(&mut MockBus, Port::One, Rumble::new(true, 200));
+    assert_eq!(pad.mode, PadMode::Analog);
+    mock::with(|m| {
+        assert_eq!(m.motor_tx, [(0x73, 0x01, 200)]);
+        assert_eq!(m.motors, (true, 200));
+    });
+    poll_rumble_on(&mut MockBus, Port::One, Rumble::new(false, 0x40));
+    mock::with(|m| assert_eq!(m.motors, (false, 0x40)));
+    // A plain poll asks for none.
+    poll_on(&mut MockBus, Port::One);
+    mock::with(|m| assert_eq!(m.motors, (false, 0)));
+}
+
+#[test]
+fn only_a_dualshock_in_analog_mode_is_sent_motor_bytes() {
+    // A digital pad, and a pad parked in configuration mode, hear zeros.
+    for id in [0x41, 0xF3] {
+        start(Model {
+            id,
+            dualshock: false,
+            ..Model::default()
+        });
+        poll_rumble_on(&mut MockBus, Port::One, Rumble::new(true, 255));
+        mock::with(|m| assert_eq!(m.motor_tx, [(id, 0, 0)], "id {id:02x}"));
+    }
+}
+
+#[test]
+fn a_reader_asks_for_its_rumble_on_every_poll_and_stops_the_motors_on_request() {
+    start(analog_dualshock());
+    let mut reader = PadReader::port1();
+    assert!(reader.enable_rumble_on(&mut MockBus));
+    reader.set_rumble(Rumble::new(true, 90));
+    reader.poll_on(&mut MockBus);
+    reader.poll_on(&mut MockBus);
+    mock::with(|m| {
+        assert_eq!(m.motors, (true, 90));
+        let rumbles: vec::Vec<_> = m.motor_tx.iter().rev().take(2).collect();
+        assert!(rumbles.iter().all(|&&(_, s, l)| (s, l) == (1, 90)));
+    });
+    let pad = reader.stop_motors_on(&mut MockBus);
+    assert!(pad.is_analog());
+    assert!(reader.rumble().is_off());
+    mock::with(|m| assert_eq!(m.motors, (false, 0)));
+}
+
+#[test]
+fn a_pad_that_refuses_configuration_mode_is_not_mapped() {
+    // It reports analog and ignores every configuration command: no mapping
+    // happens, and the driver says so.
+    start(Model {
+        id: 0x73,
+        dualshock: false,
+        ..Model::default()
+    });
+    assert!(!enable_rumble_on(&mut MockBus, Port::One));
+    mock::with(|m| assert!(!m.rumble_mapped));
+    // Polls still read it, motor bytes and all.
+    let pad = poll_rumble_on(&mut MockBus, Port::One, Rumble::new(true, 255));
+    assert_eq!(pad.mode, PadMode::Analog);
+    mock::with(|m| assert_eq!(m.motors, (false, 0), "an unmapped pad does not spin"));
+}
+
+#[test]
+fn a_pad_that_drops_out_part_way_through_the_mapping_is_not_mapped() {
+    // Attempt 2 is the mapping packet: the pad is gone for it.
+    start(Model {
+        sequence: vec![
+            (0x73, Fault::None, 0),
+            (0xFF, Fault::None, 0),
+            (0x73, Fault::None, 0),
+            (0x73, Fault::None, 0),
+        ],
+        ..Model::default()
+    });
+    assert!(!enable_rumble_on(&mut MockBus, Port::One));
+    mock::with(|m| assert!(!m.rumble_mapped));
+    // The same, with the reply to the mapping packet lost.
+    start(Model {
+        sequence: vec![
+            (0x73, Fault::None, 0),
+            (0x73, Fault::Rx, 1),
+            (0x73, Fault::None, 0),
+            (0x73, Fault::None, 0),
+        ],
+        ..Model::default()
+    });
+    assert!(!enable_rumble_on(&mut MockBus, Port::One));
+}
+
+#[test]
+fn a_pad_that_ignores_the_exit_is_sent_it_again_and_still_ends_mapped() {
+    start(Model {
+        ignore_exits: 1,
+        ..analog_dualshock()
+    });
+    assert!(enable_rumble_on(&mut MockBus, Port::One));
+    mock::with(|m| {
+        assert!(m.rumble_mapped);
+        assert_eq!(m.id, 0x73);
+    });
+}
+
+#[test]
+fn rumble_is_off_by_default_and_the_plain_poll_is_unchanged() {
+    assert!(Rumble::default().is_off());
+    assert_eq!(Rumble::OFF, Rumble::new(false, 0));
+    assert!(!Rumble::new(true, 0).is_off());
+    assert!(!Rumble::new(false, 1).is_off());
+    start(analog_dualshock());
+    poll_on(&mut MockBus, Port::One);
+    mock::with(|m| assert_eq!(m.motor_tx, [(0x73, 0, 0)]));
+}
+
+#[test]
+fn one_empty_reply_right_after_the_exit_does_not_make_a_requested_pad_absent() {
+    // The pad was just configured, so it is there: a single unanswered address
+    // byte on the verifying poll is retried like any glitch on a pad that was
+    // seen, not taken for an unplug.
+    start(Model {
+        sequence: vec![
+            (0x41, Fault::None, 0),
+            (0xF3, Fault::None, 0),
+            (0xF3, Fault::None, 0),
+            (0xFF, Fault::None, 0),
+            (0x73, Fault::None, 0),
+        ],
+        ..digital_dualshock()
+    });
+    assert_eq!(require_quickly(), AnalogRequirement::Analog);
+    mock::with(|m| assert_eq!(m.attempts, 5));
 }
 
 #[test]
