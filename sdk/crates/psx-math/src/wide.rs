@@ -798,6 +798,30 @@ mod tests {
         }
     }
 
+    /// The product of two `u32` needs all 64 unsigned bits (up to
+    /// `2^64 - 2^33 + 1`, past `i64::MAX`). A signed holder overflows there:
+    /// the private copy `mul_u` in the games did, and failed in a debug build.
+    /// `WideU::mul` has to be exact over the whole range, with the checks on.
+    #[test]
+    fn unsigned_product_is_exact_over_the_whole_u32_range() {
+        assert_eq!(valu(WideU::mul(u32::MAX, u32::MAX)), 0xffff_fffe_0000_0001);
+        assert!(valu(WideU::mul(u32::MAX, u32::MAX)) > I64_MAX as u128);
+        assert_eq!(WideU::mul(u32::MAX, u32::MAX).high(), u32::MAX - 1);
+        assert_eq!(WideU::mul(u32::MAX, u32::MAX).low(), 1);
+        // The smallest pair whose product passes i64::MAX, and its neighbours.
+        let (a, b) = (3_037_000_500u32, 3_037_000_500u32);
+        assert!(valu(WideU::mul(a, b)) > I64_MAX as u128);
+        assert!(valu(WideU::mul(a - 1, b - 1)) <= I64_MAX as u128);
+        let mut rng = Rng(0x00c0_ffee_1234_5678);
+        for _ in 0..100_000 {
+            let (a, b) = (
+                rng.next() as u32 | 0x8000_0000,
+                rng.next() as u32 | 0x8000_0000,
+            );
+            assert_eq!(valu(WideU::mul(a, b)), a as u128 * b as u128, "{a} * {b}");
+        }
+    }
+
     #[test]
     fn add_sub_neg_abs_match_the_oracle() {
         let edges = wide_edges();
