@@ -129,6 +129,9 @@ fps-overlay = []
 # Opt-in actor collision-cylinder tuning overlay (L3). The complete input,
 # scene-state and renderer path is absent from normal/shipping playtests.
 collision-debug-overlay = ["psx-game-runtime/collision-debug-overlay"]
+# Open-hall experiment: render the world from the grid pack that a cook run
+# with OPEN_HALL_GRID_LEVEL writes to generated/grid_world.bin.
+grid-world = []
 ot-1024 = []
 ot-2048 = []
 

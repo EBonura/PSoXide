@@ -33,6 +33,8 @@ use crate::{
     FACE_PAGE_LOCAL_UV, FACE_TWO_SIDED,
 };
 
+pub mod grid;
+
 /// Packet storage used by the original renderer's double-buffered arenas.
 pub const DEFAULT_PACKET_WORDS: usize = 0x30000 / core::mem::size_of::<u32>();
 /// Initial PXBSP face-chain storage. Typical leaf PVS sets are far smaller

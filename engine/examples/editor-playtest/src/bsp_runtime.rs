@@ -57,6 +57,9 @@ use crate::{
 #[cfg(feature = "world-stream")]
 mod world_stream;
 
+#[cfg(feature = "grid-world")]
+mod grid_world;
+
 pub(super) const MAX_BSP_DOORS: usize = 16;
 pub(super) const MAX_BSP_DESTRUCTIBLES: usize = psx_level::MAX_DESTRUCTIBLES;
 pub(super) const MAX_BSP_DYNAMIC_MODELS: usize = MAX_BSP_DOORS + MAX_BSP_DESTRUCTIBLES;
@@ -658,6 +661,9 @@ pub(super) struct BspRuntime {
     /// The region streamer and its bookkeeping (streamed worlds only).
     #[cfg(feature = "world-stream")]
     stream: world_stream::WorldStream,
+    /// Open-hall experiment: the grid renderer that replaces the PXBSP face pass.
+    #[cfg(feature = "grid-world")]
+    grid: grid_world::GridWorld,
 }
 
 impl BspRuntime {
@@ -857,6 +863,8 @@ impl BspRuntime {
             camera_traces: 0,
             #[cfg(feature = "world-stream")]
             stream,
+            #[cfg(feature = "grid-world")]
+            grid: grid_world::GridWorld::load(),
         })
     }
 
@@ -1369,6 +1377,8 @@ impl BspRuntime {
     /// it. Call whenever the gameplay VRAM those bindings point at is released.
     pub(super) fn invalidate_materials(&mut self) {
         self.materials_latched = false;
+        #[cfg(feature = "grid-world")]
+        self.grid.unbind();
         for binding in self.materials.iter_mut() {
             *binding = None;
         }
@@ -2029,19 +2039,49 @@ impl BspRuntime {
             };
             let (used_words, packet_count, visible_sky_apertures, overflowed) = {
                 let packets = reservation.words_mut();
-                let world = self.renderer.draw_pxbsp_world_from_visibility_origin(
-                    &self.map,
-                    camera,
-                    visibility_origin,
-                    view,
-                    &self.materials,
-                    material_tick,
-                    packets,
-                );
-                let mut used_words = world.packet_words;
-                let mut packet_count = world.stats.packets as usize;
-                let mut visible_sky_apertures = world.stats.visible_sky_apertures;
-                let mut overflowed = world.stats.packet_overflow_avoided;
+                #[cfg(not(feature = "grid-world"))]
+                let (mut used_words, mut packet_count, mut visible_sky_apertures, mut overflowed) = {
+                    let world = self.renderer.draw_pxbsp_world_from_visibility_origin(
+                        &self.map,
+                        camera,
+                        visibility_origin,
+                        view,
+                        &self.materials,
+                        material_tick,
+                        packets,
+                    );
+                    (
+                        world.packet_words,
+                        world.stats.packets as usize,
+                        world.stats.visible_sky_apertures,
+                        world.stats.packet_overflow_avoided,
+                    )
+                };
+                #[cfg(feature = "grid-world")]
+                let (mut used_words, mut packet_count, mut visible_sky_apertures, mut overflowed) = {
+                    let frustum = FrustumPlanes::from_view(
+                        &view.rotation,
+                        view.translation,
+                        [camera.origin.x >> 12, camera.origin.y >> 12, camera.origin.z >> 12],
+                        self.renderer.view_projection(),
+                    );
+                    let world = self.grid.draw(
+                        self.map.materials(),
+                        &self.materials,
+                        &frustum,
+                        &view,
+                        [camera.origin.x >> 12, camera.origin.y >> 12, camera.origin.z >> 12],
+                        [projection.half_width * 2, projection.half_height * 2],
+                        projection.focal_length,
+                        packets,
+                    );
+                    (
+                        world.packet_words,
+                        world.packets as usize,
+                        u16::from(world.sky_visible),
+                        world.overflowed,
+                    )
+                };
 
                 for door in self.doors.iter() {
                     let Some(frame) = self.renderer.draw_pxbsp_model(
