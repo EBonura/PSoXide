@@ -76,7 +76,8 @@ fn sliding_magnitudes(samples: &[f64], span: usize) -> (Vec<f64>, Vec<f64>) {
             // NumPy divides the complex angle by the integer span with Smith's
             // algorithm, which multiplies by the reciprocal; the same rounding
             // keeps the tie-breaks between equally good phases identical.
-            let angle = (-2.0 * std::f64::consts::PI * bin_index * index as f64) * (1.0 / span as f64);
+            let angle =
+                (-2.0 * std::f64::consts::PI * bin_index * index as f64) * (1.0 / span as f64);
             re += sample * angle.cos();
             im += sample * angle.sin();
             cumulative.push((re, im));
@@ -258,10 +259,7 @@ fn find_frames(decoder: &RateDecoder, limit: usize) -> Vec<usize> {
 }
 
 fn frame_length(decoder: &RateDecoder, start: usize) -> Option<usize> {
-    let bits = decoder.read(
-        (start + decoder.span * (PREAMBLE_BITS + 16)) as i64,
-        16,
-    );
+    let bits = decoder.read((start + decoder.span * (PREAMBLE_BITS + 16)) as i64, 16);
     if bits.contains(&-1) {
         return None;
     }
@@ -339,8 +337,8 @@ fn transmission_groups(decoder: &RateDecoder, starts: &[usize]) -> Vec<(usize, V
     let mut groups: Vec<(usize, Vec<usize>)> = Vec::new();
     for (length, offsets) in &by_length {
         // Total framed bits for this payload, hence the repetition period.
-        let period = (decoder.span
-            * (CALIBRATION_BITS + PREAMBLE_BITS + 16 + 16 + length * 8 + 32)) as i64;
+        let period =
+            (decoder.span * (CALIBRATION_BITS + PREAMBLE_BITS + 16 + 16 + length * 8 + 32)) as i64;
         let mut buckets: Vec<(i64, Vec<usize>)> = Vec::new();
         for &offset in offsets {
             let phase = offset as i64 % period;
@@ -541,7 +539,11 @@ pub fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> Result<
         writeln!(out, "# resampling {rate} Hz -> {LINK_RATE} Hz")?;
         samples = resample(&samples, rate, LINK_RATE);
     }
-    writeln!(out, "# samples={} rate={rate} ({duration:.1}s)", samples.len())?;
+    writeln!(
+        out,
+        "# samples={} rate={rate} ({duration:.1}s)",
+        samples.len()
+    )?;
 
     for span in RATE_SAMPLES_PER_BIT {
         let decoder = RateDecoder::new(&samples, span);

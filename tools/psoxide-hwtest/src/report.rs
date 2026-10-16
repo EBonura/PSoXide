@@ -148,7 +148,11 @@ pub const CONSOLE_KERNEL: [[&str; 3]; 6] = [
     ["empty_call_min", "empty_call_med", "empty_call_max"],
     ["bios_vblank_min", "bios_vblank_med", "bios_vblank_max"],
     ["bios_vblank_gaps", "bios_vblank_events_ready", "flags"],
-    ["runtime_vblank_min", "runtime_vblank_med", "runtime_vblank_max"],
+    [
+        "runtime_vblank_min",
+        "runtime_vblank_med",
+        "runtime_vblank_max",
+    ],
 ];
 pub const CONSOLE_WIDTHS: [u32; 6] = [256, 320, 368, 384, 512, 640];
 
@@ -320,7 +324,8 @@ pub fn parse_capture(payloads: &[String]) -> Result<Capture> {
     let encoded: String = (1..=page_count)
         .map(|number| by_number[&number].chunk.as_str())
         .collect();
-    let binary = base64_decode(&encoded).map_err(|e| Error(format!("invalid {schema} Base64: {e}")))?;
+    let binary =
+        base64_decode(&encoded).map_err(|e| Error(format!("invalid {schema} Base64: {e}")))?;
     ensure!(binary.len() >= 4, "{schema} binary is truncated");
     let claimed_binary_crc = u32::from_le_bytes(binary[binary.len() - 4..].try_into().expect("4"));
     let actual_binary_crc = crc32(&binary[..binary.len() - 4]);
@@ -350,7 +355,15 @@ pub fn parse_capture(payloads: &[String]) -> Result<Capture> {
     let mut header = Reader::new(&binary, 5);
     let suite_major = header.u8()?;
     let suite_minor = header.u8()?;
-    let (conformance_run, timing_run, test_count, timing_count, memory_count, status_bits, scan_count);
+    let (
+        conformance_run,
+        timing_run,
+        test_count,
+        timing_count,
+        memory_count,
+        status_bits,
+        scan_count,
+    );
     let mut precision_count = 0usize;
     let digest_offset;
     if schema == "PX8" {
@@ -440,21 +453,25 @@ pub fn parse_capture(payloads: &[String]) -> Result<Capture> {
                 window |= u32::from(packed_statuses[bit / 8 + 1]) << 8;
             }
             let status = ((window >> (bit % 8)) & 0x7) as u8;
-            ensure!(status <= 4, "invalid {schema} status {status} for case {index}");
+            ensure!(
+                status <= 4,
+                "invalid {schema} status {status} for case {index}"
+            );
             statuses.push(status);
         }
     }
 
     let mut records: Vec<Record> = Vec::new();
-    let push_record = |records: &mut Vec<Record>, record_id: u32, minimum: u16, median: u16, maximum: u16| {
-        records.push(Record {
-            record_id,
-            work: work(record_id).unwrap_or(0),
-            minimum: i64::from(minimum),
-            maximum: i64::from(maximum),
-            median: i64::from(median),
-        });
-    };
+    let push_record =
+        |records: &mut Vec<Record>, record_id: u32, minimum: u16, median: u16, maximum: u16| {
+            records.push(Record {
+                record_id,
+                work: work(record_id).unwrap_or(0),
+                minimum: i64::from(minimum),
+                maximum: i64::from(maximum),
+                median: i64::from(median),
+            });
+        };
     if flags & PX8_BLOCK_TIMING != 0 {
         // Ids are explicit, so an unfilled slot is skipped rather than shifting
         // every later record's meaning.
@@ -524,7 +541,10 @@ pub fn parse_capture(payloads: &[String]) -> Result<Capture> {
 fn payloads_from_text(text: &str) -> Vec<String> {
     let mut found = Vec::new();
     for line in splitlines(text) {
-        let position = SCHEMAS.iter().filter_map(|name| line.find(&format!("{name}/"))).min();
+        let position = SCHEMAS
+            .iter()
+            .filter_map(|name| line.find(&format!("{name}/")))
+            .min();
         if let Some(position) = position {
             if let Some(word) = split_words(&line[position..]).first() {
                 found.push(word.to_string());
@@ -567,10 +587,19 @@ pub fn list_busy_rows(capture: &Capture) -> Vec<String> {
         let value = capture.observations[index];
         if label == "packed_list_pixels_match" {
             let status = capture.statuses.get(index).copied().unwrap_or(0);
-            rows.push(format!("{index},{label},{}", STATUS_LABELS[usize::from(status)]));
+            rows.push(format!(
+                "{index},{label},{}",
+                STATUS_LABELS[usize::from(status)]
+            ));
         } else if let Some(loop_name) = label.strip_suffix("_iterations") {
-            rows.push(format!("{index},{loop_name}_walk_iterations,{}", value & 0xFFFF));
-            rows.push(format!("{index},{loop_name}_idle_clocks_per_256,{}", value >> 16));
+            rows.push(format!(
+                "{index},{loop_name}_walk_iterations,{}",
+                value & 0xFFFF
+            ));
+            rows.push(format!(
+                "{index},{loop_name}_idle_clocks_per_256,{}",
+                value >> 16
+            ));
         } else if value == LIST_BUSY_NOT_SEEN {
             rows.push(format!("{index},{label},never"));
         } else {
@@ -581,7 +610,10 @@ pub fn list_busy_rows(capture: &Capture) -> Vec<String> {
 }
 
 fn by_id(records: &[Record]) -> HashMap<u32, &Record> {
-    records.iter().map(|record| (record.record_id, record)).collect()
+    records
+        .iter()
+        .map(|record| (record.record_id, record))
+        .collect()
 }
 
 fn triple(record: &Record) -> (i64, i64, i64) {
@@ -603,7 +635,11 @@ fn mdec_status_text(value: u64) -> String {
     .collect();
     let block = value >> 16 & 7;
     let remaining = value & 0xFFFF;
-    let flags = if flags.is_empty() { "-".to_string() } else { flags.join(" ") };
+    let flags = if flags.is_empty() {
+        "-".to_string()
+    } else {
+        flags.join(" ")
+    };
     format!("0x{value:08X} [{flags} block={block} words-1={remaining:#06x}]")
 }
 
@@ -640,13 +676,21 @@ pub fn mdec_diag_rows(records: &[Record]) -> Vec<String> {
         if chosen == 0xFFFF {
             "none".to_string()
         } else {
-            MDEC_SEQUENCES.get(chosen as usize).map_or_else(|| "?".to_string(), |s| s.to_string())
+            MDEC_SEQUENCES
+                .get(chosen as usize)
+                .map_or_else(|| "?".to_string(), |s| s.to_string())
         },
         overview.median,
         overview.maximum
     ));
     rows.push("mdec_diag,sequence,field,value".to_string());
-    let clocks = |v: i64| if v == MDEC_NEVER { "never".to_string() } else { v.to_string() };
+    let clocks = |v: i64| {
+        if v == MDEC_NEVER {
+            "never".to_string()
+        } else {
+            v.to_string()
+        }
+    };
     for (v, name) in MDEC_SEQUENCES.iter().enumerate() {
         let h = mdec_stream(&by_id, 0x200 + 0x10 * v as u32, 14);
         if h.len() < 27 {
@@ -657,14 +701,19 @@ pub fn mdec_diag_rows(records: &[Record]) -> Vec<String> {
         let (mask, runs) = ((h[0] & 0xFF) as u64, (h[0] >> 8) as u64);
         let run_fails = word(9);
         let fails: Vec<&str> = (0..runs)
-            .map(|r| MDEC_STEPS[(shr(run_fails, 4 * r) & 0xF).min(MDEC_STEPS.len() as u64 - 1) as usize])
+            .map(|r| {
+                MDEC_STEPS[(shr(run_fails, 4 * r) & 0xF).min(MDEC_STEPS.len() as u64 - 1) as usize]
+            })
             .collect();
         rows.push(format!(
             "mdec_diag,{name},worked,{}/{runs} runs_1_to_8={}",
             mask.count_ones(),
             format!("{mask:08b}").chars().rev().collect::<String>()
         ));
-        rows.push(format!("mdec_diag,{name},per_run_fail,{}", fails.join(" | ")));
+        rows.push(format!(
+            "mdec_diag,{name},per_run_fail,{}",
+            fails.join(" | ")
+        ));
         rows.push(format!(
             "mdec_diag,{name},detail_run,{} fail={}",
             (h[1] >> 8) + 1,
@@ -672,7 +721,10 @@ pub fn mdec_diag_rows(records: &[Record]) -> Vec<String> {
         ));
         rows.push(format!("mdec_diag,{name},settle_clocks,{}", clocks(h[2])));
         rows.push(format!("mdec_diag,{name},request_clocks,{}", clocks(h[3])));
-        rows.push(format!("mdec_diag,{name},probe_request_clocks,{}", clocks(h[4])));
+        rows.push(format!(
+            "mdec_diag,{name},probe_request_clocks,{}",
+            clocks(h[4])
+        ));
         if v == 5 {
             rows.push(format!(
                 "mdec_diag,{name},sdk_driver,enable_writes={} cpu_uploads={} reset_settled={}",
@@ -793,11 +845,20 @@ pub fn fmv_rows(records: &[Record]) -> Vec<String> {
     let mut fields: Vec<(&str, i64)> = Vec::new();
     for (id, names) in ids.zip(FMV_FIELDS.iter()) {
         let record = by_id[&id];
-        for (name, value) in names.iter().zip([record.minimum, record.median, record.maximum]) {
+        for (name, value) in names
+            .iter()
+            .zip([record.minimum, record.median, record.maximum])
+        {
             fields.push((name, value));
         }
     }
-    let get = |name: &str| fields.iter().find(|(n, _)| *n == name).map(|(_, v)| *v).unwrap_or(0);
+    let get = |name: &str| {
+        fields
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, v)| *v)
+            .unwrap_or(0)
+    };
     let host_pass = get("total_sectors") > 0
         && get("good_sectors") == get("total_sectors")
         && get("lost_sectors") == 0
@@ -850,26 +911,47 @@ pub fn console_rows(records: &[Record]) -> Vec<String> {
                 fields.push((name, value));
             }
         }
-        let flags_at = fields.iter().position(|(n, _)| *n == "flags").expect("flags field");
+        let flags_at = fields
+            .iter()
+            .position(|(n, _)| *n == "flags")
+            .expect("flags field");
         let flags = fields.remove(flags_at).1;
-        let get = |name: &str| fields.iter().find(|(n, _)| *n == name).map(|(_, v)| *v).unwrap_or(0);
+        let get = |name: &str| {
+            fields
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, v)| *v)
+                .unwrap_or(0)
+        };
         let harness = get("empty_call_med");
         rows.push("console_kernel,field,value".to_string());
         for (name, value) in &fields {
             rows.push(format!("console_kernel,{name},{value}"));
         }
-        rows.push(format!("console_kernel,enter_cs_net,{}", (get("enter_cs_med") - harness).max(0)));
-        rows.push(format!("console_kernel,exit_cs_net,{}", (get("exit_cs_med") - harness).max(0)));
+        rows.push(format!(
+            "console_kernel,enter_cs_net,{}",
+            (get("enter_cs_med") - harness).max(0)
+        ));
+        rows.push(format!(
+            "console_kernel,exit_cs_net,{}",
+            (get("exit_cs_med") - harness).max(0)
+        ));
         rows.push(format!("console_kernel,standard_vector,{}", flags & 1));
         rows.push(format!("console_kernel,event_opened,{}", (flags >> 1) & 1));
-        rows.push(format!("console_kernel,bios_loop_finished,{}", (flags >> 2) & 1));
+        rows.push(format!(
+            "console_kernel,bios_loop_finished,{}",
+            (flags >> 2) & 1
+        ));
         rows.push(format!("console_kernel,runtime_vblank_gaps,{}", flags >> 8));
     }
     for (k, width) in CONSOLE_WIDTHS.iter().enumerate() {
         let id = 0x2D0 + k as u32;
         if by_id.contains_key(&id) {
             let (status, x1, x2) = triple_of(id);
-            if rows.last().is_none_or(|row| !row.starts_with("console_width")) {
+            if rows
+                .last()
+                .is_none_or(|row| !row.starts_with("console_width"))
+            {
                 rows.push("console_width,pixels,gpustat_high16,gp1_06_x1,gp1_06_x2".to_string());
             }
             let shown = if status == 0xFFFF {
@@ -887,7 +969,9 @@ pub fn console_rows(records: &[Record]) -> Vec<String> {
         rows.push(format!("console_interlace,gpustat,0x{status:04X}{low:04X}"));
         rows.push(format!("console_interlace,field_parity_changes,{flips}"));
         rows.push(format!("console_interlace,frames_sampled,{frames}"));
-        rows.push(format!("console_interlace,frames_with_interlace_bit,{interlaced}"));
+        rows.push(format!(
+            "console_interlace,frames_with_interlace_bit,{interlaced}"
+        ));
         rows.push(format!("console_interlace,frames_with_480_bit,{tall}"));
     }
     if (0..4).all(|k| by_id.contains_key(&(0x2E0 + k))) {
@@ -1032,7 +1116,9 @@ pub fn print_report(
     );
     let mut tallies: BTreeMap<&str, usize> = BTreeMap::new();
     for &status in &capture.statuses {
-        *tallies.entry(STATUS_LABELS[usize::from(status)]).or_insert(0) += 1;
+        *tallies
+            .entry(STATUS_LABELS[usize::from(status)])
+            .or_insert(0) += 1;
     }
     let tally_text: Vec<String> = tallies
         .iter()
@@ -1073,7 +1159,10 @@ pub fn print_report(
     if let Some(baseline) = baseline {
         for failure in &baseline.failures {
             if !capture.failures.contains(failure) {
-                drift.push(format!("failure {:#06x} no longer reproduces", failure.test_id));
+                drift.push(format!(
+                    "failure {:#06x} no longer reproduces",
+                    failure.test_id
+                ));
             }
         }
     }
@@ -1083,8 +1172,16 @@ pub fn print_report(
         case_columns += ",baseline_observed,changed";
     }
     say!("{case_columns}");
-    for (index, (&status, &observed)) in capture.statuses.iter().zip(&capture.observations).enumerate() {
-        let mut row = format!("{index},{},0x{observed:08X}", STATUS_LABELS[usize::from(status)]);
+    for (index, (&status, &observed)) in capture
+        .statuses
+        .iter()
+        .zip(&capture.observations)
+        .enumerate()
+    {
+        let mut row = format!(
+            "{index},{},0x{observed:08X}",
+            STATUS_LABELS[usize::from(status)]
+        );
         if let Some(baseline) = baseline {
             let Some(&prior) = baseline.observations.get(index) else {
                 // A MINOR bump appends cases; the baseline has nothing to say
@@ -1177,7 +1274,11 @@ pub fn print_report(
         let baseline_precision: &[u32] = baseline.map_or(&[], |baseline| &baseline.precision);
         say!(
             "precision,label,value{}",
-            if baseline_precision.is_empty() { "" } else { ",baseline_value,changed" }
+            if baseline_precision.is_empty() {
+                ""
+            } else {
+                ",baseline_value,changed"
+            }
         );
         for (index, &value) in capture.precision.iter().enumerate() {
             let name = precision_label(index)?;
@@ -1188,7 +1289,9 @@ pub fn print_report(
                 };
                 row += &format!(",0x{prior:08X},{}", i32::from(prior != value));
                 if prior != value {
-                    drift.push(format!("precision {index:03} ({name}): 0x{prior:08X} -> 0x{value:08X}"));
+                    drift.push(format!(
+                        "precision {index:03} ({name}): 0x{prior:08X} -> 0x{value:08X}"
+                    ));
                 }
             }
             say!("{row}");
@@ -1231,7 +1334,11 @@ pub fn print_report(
             .zip(&baseline_settle)
             .enumerate()
             .map(|(offset, (&value, &prior))| {
-                format!("{}:{:+}", GTE_SETTLE_FIRST_CASE + offset, i64::from(value) - i64::from(prior))
+                format!(
+                    "{}:{:+}",
+                    GTE_SETTLE_FIRST_CASE + offset,
+                    i64::from(value) - i64::from(prior)
+                )
             })
             .collect();
         say!("# gte_settle_delta={}", delta.join(","));
