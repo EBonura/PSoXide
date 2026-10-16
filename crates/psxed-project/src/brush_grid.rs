@@ -335,10 +335,11 @@ fn collect_faces(level: &Level) -> (Vec<Face>, (i32, i32), (usize, usize)) {
                         push_face(&mut faces, &t2.map(|i| c2[i]), toward, name2, cell);
                     }
                 }
-                // Risers: where this floor stands above a neighbouring floor and no
-                // authored wall covers the edge, the importer's floor slab leaves its
-                // side exposed in the BSP world. Draw the same face here so both
-                // renderers show the same step.
+                // Risers and skirts: where this floor stands above a neighbouring floor,
+                // or borders no floor at all, and no authored wall covers the edge, the
+                // importer's floor slab leaves its side exposed in the BSP world. Draw
+                // the same face here so both renderers show the same step and the same
+                // platform edge.
                 if let Some(floor) = &sector.floor {
                     let height = |h: f32| oy + scale(h);
                     // (dx, dz, this floor corners on the edge, neighbour corners on it, edge points)
@@ -350,24 +351,36 @@ fn collect_faces(level: &Level) -> (Vec<Face>, (i32, i32), (usize, usize)) {
                     ];
                     for (side, (dx, dz, mine, theirs, points)) in sides.into_iter().enumerate() {
                         let (nx, nz) = (gx as i32 + dx, gz as i32 + dz);
-                        if nx < 0 || nz < 0 {
-                            continue;
-                        }
-                        let Some(Some(neighbour)) = room.sectors.get(nx as usize).and_then(|c| c.get(nz as usize)) else {
-                            continue;
+                        // The neighbouring sector, when the lattice has one there.
+                        let neighbour = if nx < 0 || nz < 0 {
+                            None
+                        } else {
+                            room.sectors
+                                .get(nx as usize)
+                                .and_then(|c| c.get(nz as usize))
+                                .and_then(|s| s.as_ref())
                         };
-                        let Some(other) = &neighbour.floor else { continue };
-                        let (mine_walls, their_walls) = match side {
-                            0 => (&sector.walls_north, &neighbour.walls_south),
-                            1 => (&sector.walls_east, &neighbour.walls_west),
-                            2 => (&sector.walls_south, &neighbour.walls_north),
-                            _ => (&sector.walls_west, &neighbour.walls_east),
+                        let mine_walls = match side {
+                            0 => &sector.walls_north,
+                            1 => &sector.walls_east,
+                            2 => &sector.walls_south,
+                            _ => &sector.walls_west,
                         };
-                        if !mine_walls.is_empty() || !their_walls.is_empty() {
+                        let their_walls = neighbour.map(|n| match side {
+                            0 => &n.walls_south,
+                            1 => &n.walls_west,
+                            2 => &n.walls_north,
+                            _ => &n.walls_east,
+                        });
+                        if !mine_walls.is_empty() || their_walls.is_some_and(|w| !w.is_empty()) {
                             continue;
                         }
                         let a = mine.map(|k| height(floor.heights[k]));
-                        let b = theirs.map(|k| height(other.heights[k]));
+                        // No floor next door: the slab side drops its full depth (a skirt).
+                        let b = match neighbour.and_then(|n| n.floor.as_ref()) {
+                            Some(other) => theirs.map(|k| height(other.heights[k])),
+                            None => a.map(|h| h - SLAB_THICKNESS as i32),
+                        };
                         if a[0] < b[0] || a[1] < b[1] || (a[0] == b[0] && a[1] == b[1]) {
                             continue;
                         }
