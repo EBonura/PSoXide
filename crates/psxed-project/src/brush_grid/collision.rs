@@ -1,4 +1,7 @@
-//! Collision, activation and camera geometry derived from a grid document.
+//! TRANSITIONAL: collision, activation and camera geometry derived from a grid
+//! document as PXBSP brushes. This module and `playtest/grid_world.rs` are the
+//! whole bridge between the grid document and the BSP cook; both go when grid
+//! worlds get their own level format and native grid collision.
 //!
 //! The PXBSP stays the source of collision while the grid renderer draws the
 //! world (plan decision D3), so the cook derives it from the document and
@@ -179,6 +182,46 @@ fn sky_lid(brushes: &[Brush], material: Option<ResourceId>) -> Option<Brush> {
     (solved.is_valid() && solved.within_extent(BRUSH_EDIT_EXTENT_LIMIT)).then_some(lid)
 }
 
+/// Tiny solid cubes far below the world that carry the materials no slab
+/// shows (faces with collision off, hidden slab sides). The grid pack binds
+/// its textures through the PXBSP material table, which lists only the
+/// materials some brush face shows.
+fn material_anchors(world: &GridWorld, brushes: &[Brush]) -> Vec<Brush> {
+    let used: Vec<Option<ResourceId>> = brushes
+        .iter()
+        .flat_map(|b| b.faces.iter().map(|f| f.material))
+        .collect();
+    let missing: Vec<ResourceId> = world
+        .material_ids()
+        .into_iter()
+        .filter(|id| !used.contains(&Some(*id)))
+        .collect();
+    let mut low = i32::MAX;
+    let (mut x0, mut z0) = (i32::MAX, i32::MAX);
+    for brush in brushes {
+        let solved = brush.solve();
+        low = low.min(solved.min[1].floor() as i32);
+        x0 = x0.min(solved.min[0].floor() as i32);
+        z0 = z0.min(solved.min[2].floor() as i32);
+    }
+    if missing.is_empty() || low == i32::MAX {
+        return Vec::new();
+    }
+    let top = low - 1024;
+    missing
+        .into_iter()
+        .enumerate()
+        .map(|(i, id)| {
+            let x = x0 + 64 * i as i32;
+            let mut cube = Brush::cuboid([x, top - 32, z0], [x + 32, top, z0 + 32]);
+            for face in &mut cube.faces {
+                face.material = Some(id);
+            }
+            cube
+        })
+        .collect()
+}
+
 /// Derive the collision brushes of `world`. `sky` is the material of the lid
 /// (a sky aperture material when the project has one).
 pub fn derive(world: &GridWorld, sky: Option<ResourceId>) -> DerivedCollision {
@@ -219,6 +262,8 @@ pub fn derive(world: &GridWorld, sky: Option<ResourceId>) -> DerivedCollision {
     }
     out.brushes = floors;
     out.brushes.append(&mut walls);
+    let anchors = material_anchors(world, &out.brushes);
+    out.brushes.extend(anchors);
     out.lid = sky_lid(&out.brushes, sky);
     out
 }
@@ -291,6 +336,33 @@ mod tests {
             r.sector_or_insert(0, 0).unwrap().floor = Some(floor);
         });
         assert_eq!(derive(&w, None).brushes.len(), 2);
+    }
+
+    #[test]
+    fn a_material_no_slab_shows_gets_an_anchor_below_the_world() {
+        let mut project = crate::ProjectDocument::new("t");
+        let mut add = |name: &str| {
+            project.add_resource(
+                name,
+                crate::ResourceData::Material(crate::MaterialResource::opaque(None)),
+            )
+        };
+        let (shown, hidden) = (add("shown"), add("hidden"));
+        let w = world(|r| {
+            let sector = r.sector_or_insert(0, 0).unwrap();
+            sector.floor = Some(GridSurface::flat(0, Some(shown)));
+            let mut ghost = GridWall::span(0, 1024, Some(hidden));
+            ghost.solid = false;
+            sector.east.push(ghost);
+        });
+        let derived = derive(&w, None);
+        assert_eq!(derived.brushes.len(), 2, "the floor slab and one anchor");
+        let anchor = derived.brushes[1].solve();
+        assert!(anchor.max[1] < -144.0, "below the floor slab");
+        assert!(derived.brushes[1]
+            .faces
+            .iter()
+            .all(|f| f.material == Some(hidden)));
     }
 
     #[test]

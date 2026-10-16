@@ -566,6 +566,7 @@ pub fn compile_brush_world(
         options.ambient,
         &collision_hulls,
         options.collision_hulls,
+        scene.world.grid().is_some(),
     )?;
     let collision_planes = RecordSlice::<Plane>::new(&world_collision.planes)
         .ok_or(BrushWorldCookError::InvalidWorldTree)?;
@@ -657,6 +658,7 @@ pub fn compile_brush_world(
             options.ambient,
             &collision_hulls,
             options.collision_hulls,
+            false,
         )?;
         uv_window.add(submodel_uv_window);
         let model_index = u16::try_from(submodels.len() + 1)
@@ -805,17 +807,7 @@ pub fn compile_brush_world(
         });
     }
 
-    let mut slots = pxbsp_material_slots(&world_geometry, &submodels);
-    // A grid world draws from its own pack, but the pack binds textures
-    // through the PXBSP material table: register every material the grid
-    // uses even when no collision brush shows it.
-    if let Some(grid) = scene.world.grid() {
-        for id in grid.material_ids() {
-            if !slots.contains(&Some(id)) {
-                slots.push(Some(id));
-            }
-        }
-    }
+    let slots = pxbsp_material_slots(&world_geometry, &submodels);
     let page_texture_dims = page_local_texture_dims(
         project,
         &slots,
@@ -1316,8 +1308,24 @@ fn compile_model(
     ambient: [u8; 3],
     collision_hulls: &[CollisionHullBounds; 3],
     hull_strategy: CollisionHullStrategy,
+    // TRANSITIONAL (grid worlds on PXBSP): the grid renderer has no portal
+    // visibility, so one all-connected row per region is all that is needed.
+    components_only_visibility: bool,
 ) -> Result<CompiledModel, BrushWorldCookError> {
     let (topology_surfaces, render_surfaces) = compile_model_surfaces(brushes);
+    // A grid world is drawn from its own pack: the PXBSP keeps its leaves and
+    // collision but only one drawable face per material (the pack binds its
+    // textures through the PXBSP material table). The rest cost most of a
+    // level's static RAM otherwise.
+    let render_surfaces = if components_only_visibility {
+        let mut seen = std::collections::HashSet::new();
+        render_surfaces
+            .into_iter()
+            .filter(|surface| seen.insert(surface.material))
+            .collect()
+    } else {
+        render_surfaces
+    };
     let (mut bsp, portals, leak_diagnostic) =
         compile_model_topology(&topology_surfaces, brushes, occupant_points, true);
     // Every drawable face is capped to SURFACE_EXTENT_UNITS,
@@ -1390,6 +1398,7 @@ fn compile_model(
         .filter(|leaf| leaf.contents.is_visible())
         .count();
     let visibility = match mode {
+        _ if components_only_visibility => BspVisibility::PortalComponents,
         BrushWorldCookMode::Draft if visible_leaf_count <= 512 && portals.len() <= 10_000 => {
             BspVisibility::PortalFlow
         }
