@@ -26,6 +26,20 @@ use super::world::GridCollision;
 use crate::format::*;
 use psx_math::int32::{isqrt_i32, mul_div_i32};
 
+/// [`platform_top`] result for a point outside the footprint.
+const NO_TOP: i32 = i32::MIN;
+
+/// Surface height of a platform at room-local `(x, z)`, or [`NO_TOP`] outside
+/// its footprint. A leaf, so the deep scan chain pays for it only briefly.
+#[inline(never)]
+fn platform_top(plane: &ColPlane, x: i32, z: i32) -> i32 {
+    if in_footprint(plane, x, z) {
+        platform_y(plane, x, z)
+    } else {
+        NO_TOP
+    }
+}
+
 /// Surface height of a platform at room-local `(x, z)`.
 #[inline(always)]
 pub(crate) fn platform_y(plane: &ColPlane, x: i32, z: i32) -> i32 {
@@ -34,8 +48,8 @@ pub(crate) fn platform_y(plane: &ColPlane, x: i32, z: i32) -> i32 {
     i32::from(plane.y0) + ((i32::from(plane.sx_q12) * dx + i32::from(plane.sz_q12) * dz) >> 12)
 }
 
-/// Twice the signed area of a footprint edge test: positive when `(x, z)`
-/// is to the left of edge `i` (a to b).
+/// Cross product of footprint edge `i` (a to b) with the vector to `(x, z)`:
+/// not negative when the point is on the inside of it.
 #[inline(always)]
 fn edge_side(plane: &ColPlane, i: usize, x: i32, z: i32) -> i32 {
     let a = plane.xz[i];
@@ -44,25 +58,11 @@ fn edge_side(plane: &ColPlane, i: usize, x: i32, z: i32) -> i32 {
         - (i32::from(b[1]) - i32::from(a[1])) * (x - i32::from(a[0]))
 }
 
-/// Orientation of a footprint: `1` when its ring runs counter-clockwise in
-/// the `(x, z)` cross-product sense, `-1` otherwise.
-#[inline(always)]
-fn orientation(plane: &ColPlane) -> i32 {
-    let o = |i: usize| (i32::from(plane.xz[i][0]), i32::from(plane.xz[i][1]));
-    let (a, b, c) = (o(0), o(1), o(2));
-    let cross = (b.0 - a.0) * (c.1 - b.1) - (b.1 - a.1) * (c.0 - b.0);
-    if cross >= 0 {
-        1
-    } else {
-        -1
-    }
-}
-
-/// Whether `(x, z)` is inside or on the edge of a platform's footprint.
+/// Whether `(x, z)` is inside or on the edge of a platform's footprint. The
+/// cook writes the ring so that every edge test is `>= 0` inside.
 #[inline(always)]
 pub(crate) fn in_footprint(plane: &ColPlane, x: i32, z: i32) -> bool {
-    let sign = orientation(plane);
-    (0..4).all(|i| edge_side(plane, i, x, z) * sign >= 0)
+    (0..4).all(|i| edge_side(plane, i, x, z) >= 0)
 }
 
 /// Whether the wall segment is closer than `r` to `(x, z)` (strict).
@@ -186,7 +186,8 @@ impl<'a> GridCollision<'a> {
         let cell = |v: i32, n: i32| recip.cell(v.max(0).min(n * s - 1) as u32) as usize;
         let (cx0, cx1) = (cell(lx - r, w), cell(lx + r, w));
         let (cz0, cz1) = (cell(lz - r, d), cell(lz + r, d));
-        let oy = rec.origin[1];
+        scan.oy = rec.origin[1];
+        scan.room = room as u16;
         for cz in cz0..=cz1 {
             for cx in cx0..=cx1 {
                 let Some(sector) = view.sectors.get(cz * w as usize + cx) else {
@@ -197,47 +198,50 @@ impl<'a> GridCollision<'a> {
                 };
                 let first = usize::from(ext.plane_first);
                 for (k, plane) in view.sector_planes(ext).iter().enumerate() {
-                    self.offer_plane(room, first + k, plane, oy, (lx, lz), scan);
+                    Self::offer_plane(plane, first + k, lx, lz, scan);
                 }
             }
         }
     }
 
+    /// Offer one plane's interval. Associated, with the room and height
+    /// offset read back from the scan: the motor runs this on a 1 KiB stack
+    /// and every argument spilled here is stack on the deepest path.
     #[inline(never)]
-    fn offer_plane(
-        &self,
-        room: usize,
-        index: usize,
-        plane: &ColPlane,
-        oy: i32,
-        (lx, lz): (i32, i32),
-        scan: &mut Scan,
-    ) {
-        let (h, r) = (scan.h, scan.r);
-        let src = plane_src(room, index, plane.kind, 0);
-        let bottom = oy + i32::from(plane.y0);
+    fn offer_plane(plane: &ColPlane, index: usize, lx: i32, lz: i32, scan: &mut Scan) {
+        let src = plane_src(usize::from(scan.room), index, plane.kind, 0);
         match plane.kind {
-            plane_kind::PLATFORM => {
-                let thickness = i32::from(plane.extent);
-                let (ox, oz) = (scan.x - lx, scan.z - lz);
-                for i in 0..if r > 0 { 5 } else { 1 } {
-                    let (sx, sz) = scan.sample(i);
-                    let (x, z) = (sx - ox, sz - oz);
-                    if in_footprint(plane, x, z) {
-                        let top = oy + platform_y(plane, x, z);
-                        scan.offer(top - thickness - h, top, src);
-                    }
-                }
-            }
+            plane_kind::PLATFORM => Self::offer_platform(plane, src, lx, lz, scan),
             plane_kind::WALL => {
-                if r > 0 && wall_within(plane, lx, lz, r) {
-                    scan.offer(bottom - h, bottom + i32::from(plane.extent), src);
+                if scan.r > 0 && wall_within(plane, lx, lz, scan.r) {
+                    Self::offer_span(plane, src, scan);
                 }
             }
             _ => {
-                if box_within(plane, lx, lz, r) {
-                    scan.offer(bottom - h, bottom + i32::from(plane.extent), src);
+                if box_within(plane, lx, lz, scan.r) {
+                    Self::offer_span(plane, src, scan);
                 }
+            }
+        }
+    }
+
+    /// The vertical extent of a wall or blocker as a forbidden interval.
+    #[inline(never)]
+    fn offer_span(plane: &ColPlane, src: Src, scan: &mut Scan) {
+        let bottom = scan.oy + i32::from(plane.y0);
+        scan.offer(bottom - scan.h, bottom + i32::from(plane.extent), src);
+    }
+
+    /// A platform's slab under each footprint sample inside it.
+    #[inline(never)]
+    fn offer_platform(plane: &ColPlane, src: Src, lx: i32, lz: i32, scan: &mut Scan) {
+        let (ox, oz) = (scan.x - lx, scan.z - lz);
+        for i in 0..if scan.r > 0 { 5 } else { 1 } {
+            let (sx, sz) = scan.sample(i);
+            let top = platform_top(plane, sx - ox, sz - oz);
+            if top != NO_TOP {
+                let top = scan.oy + top;
+                scan.offer(top - i32::from(plane.extent) - scan.h, top, src);
             }
         }
     }
@@ -347,13 +351,12 @@ impl<'a> GridCollision<'a> {
         q: &Query,
         hit: &mut Raw,
     ) {
-        let sign = orientation(plane);
         let mut prism = Prism::new();
         for i in 0..4 {
             // The footprint is closed (`in_footprint`): inside is `>= 0`.
             prism.limit(
-                edge_side(plane, i, a[0], a[2]) * sign + 1,
-                edge_side(plane, i, b[0], b[2]) * sign + 1,
+                edge_side(plane, i, a[0], a[2]) + 1,
+                edge_side(plane, i, b[0], b[2]) + 1,
                 8,
             );
         }
