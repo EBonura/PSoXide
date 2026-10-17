@@ -15,6 +15,7 @@
 //!   derived risers against the floor.
 //! * `bands`: a far wall with a trim, a main body and a frieze in three
 //!   materials (T4).
+//! * `hall`: a plain derived room, flat, to raise and ramp in the editor (T5).
 //!
 //! `SHADE=off` leaves the facing shade off in the world; every scenario
 //! otherwise uses the new-world default.
@@ -196,6 +197,7 @@ fn main() {
         "tiling" => tiling(&m),
         "platform" => platform(&m),
         "bands" => bands(&m),
+        "hall" => room(&m, 9, 8, 3 * SECTOR_UNITS),
         "bench-plain" => bench(&m, false),
         "bench-repeat" => bench(&m, true),
         other => panic!("unknown scenario {other:?}"),

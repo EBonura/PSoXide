@@ -68,6 +68,10 @@ fn is_true(value: &bool) -> bool {
     *value
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// A floor or ceiling: four corner heights, a diagonal split and a material
 /// per triangle.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,6 +96,17 @@ pub struct GridSurface {
     /// Whether characters may stand on it. Persisted for the collision pass.
     #[serde(default = "yes", skip_serializing_if = "is_true")]
     pub walkable: bool,
+    /// Whether the diagonal follows the corner heights: the editor picks the
+    /// split that fits the surface best whenever the heights change (see
+    /// [`super::auto_split`]). Off for every surface made before it existed
+    /// (a legacy split is deliberate) and for one whose diagonal was flipped
+    /// by hand with the Split tool.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub auto_split: bool,
+    /// Whether the material was chosen by hand, which keeps the smart paint
+    /// rules of the level verbs from overwriting it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub paint_locked: bool,
 }
 
 impl GridSurface {
@@ -104,6 +119,17 @@ impl GridSurface {
             tri_a: GridTri::with_material(material),
             tri_b: None,
             walkable: true,
+            auto_split: false,
+            paint_locked: false,
+        }
+    }
+
+    /// [`Self::flat`] with the diagonal chosen from the heights from now on:
+    /// what a verb or a new floor makes.
+    pub fn flat_auto(height: i32, material: Option<ResourceId>) -> Self {
+        Self {
+            auto_split: true,
+            ..Self::flat(height, material)
         }
     }
 

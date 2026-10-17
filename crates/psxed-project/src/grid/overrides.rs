@@ -16,6 +16,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use crate::face_uv::FaceUv;
 use crate::ResourceId;
 
+use super::paint_rules::PaintRules;
+
 /// How a room's walls come to exist.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum WallMode {
@@ -188,6 +190,9 @@ pub struct RoomDefaults {
     /// units. 0 leaves such edges open (the legacy outdoor look).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub open_wall: i32,
+    /// What the level verbs paint when they shape the ground.
+    #[serde(default, skip_serializing_if = "PaintRules::is_default")]
+    pub rules: PaintRules,
 }
 
 fn is_zero(value: &i32) -> bool {

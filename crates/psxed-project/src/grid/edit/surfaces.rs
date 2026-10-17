@@ -116,6 +116,10 @@ pub fn set_material(
                 changed |= t.material != material;
                 t.material = material;
             });
+            // A material chosen by hand is not the smart paint rules' to
+            // change.
+            changed |= !surface.paint_locked;
+            surface.paint_locked = true;
             changed
         }
         FaceTarget::Wall { .. } => {
@@ -184,6 +188,8 @@ pub fn toggle_split(world: &mut GridWorld, face: FaceRef) -> bool {
     match face.surface_mut(world) {
         Some(surface) => {
             surface.split = surface.split.flipped();
+            // A diagonal chosen by hand stays where it is put.
+            surface.auto_split = false;
             true
         }
         None => false,

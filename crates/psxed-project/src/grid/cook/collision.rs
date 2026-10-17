@@ -24,8 +24,9 @@ use crate::grid::sector::WallEdge;
 use crate::grid::surface::{GridSplit, GridSurface};
 
 /// The smallest upward normal component, Q12, a triangle may have and still
-/// be stood on. The character motor uses the same number (0.7 in Q12).
-pub const MIN_WALKABLE_NORMAL_Y_Q12: i16 = 2867;
+/// be stood on. It is the character motor's own limit, read from the one
+/// shared [`psx_engine::WalkLimits`].
+pub const MIN_WALKABLE_NORMAL_Y_Q12: i16 = psx_engine::WalkLimits::DEFAULT.min_floor_normal_y_q12;
 
 /// Corner height differences above this (runtime units) make the integer
 /// height function lose precision; the cook refuses them.
