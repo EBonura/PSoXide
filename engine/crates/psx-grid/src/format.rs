@@ -25,10 +25,13 @@ pub const LEVEL_MAGIC: [u8; 4] = *b"PGL1";
 pub const ROOM_MAGIC: [u8; 4] = *b"PGRM";
 /// Layout version written by this crate. Version 2 gave [`PlaneRef`] a quad
 /// count (a plane is a run of quads, tiled one per sector) in place of the
-/// collision index nothing read.
-pub const VERSION: u16 = 2;
+/// collision index nothing read. Version 3 gave [`Material`] its texture
+/// shape and [`Quad`] a second flag byte whose `REPEAT` bit makes a primitive
+/// repeat its texture through the GPU texture window (up to four tiles per
+/// axis). A version 2 file is refused: cook and guest ship together.
+pub const VERSION: u16 = 3;
 /// Oldest reader that still understands what this crate writes.
-pub const MIN_READER: u16 = 2;
+pub const MIN_READER: u16 = 3;
 /// Bytes per CD sector; chunks are padded to it.
 pub const SECTOR_BYTES: usize = 2048;
 
@@ -135,7 +138,34 @@ pub struct Material {
     pub blend: u8,
     /// Index into the manifest's UV-motion table, 0 none.
     pub uv_motion: u8,
-    pub reserved: u16,
+    /// Texture size, see [`tex_shape`]. 0 is unknown (an untextured stand-in):
+    /// such a material never carries `REPEAT` quads.
+    pub tex_shape: u16,
+}
+
+/// Pack a texture size into [`Material::tex_shape`]: bits 0 to 3 hold
+/// `log2(width)` and bits 4 to 7 `log2(height)`. Only powers of two from 8
+/// to 128 texels (the limits of a GP0(E2) texture window) pack; anything
+/// else gives 0, "unknown".
+pub const fn tex_shape(width: u16, height: u16) -> u16 {
+    if !window_size_ok(width) || !window_size_ok(height) {
+        return 0;
+    }
+    (width.trailing_zeros() as u16) | ((height.trailing_zeros() as u16) << 4)
+}
+
+const fn window_size_ok(size: u16) -> bool {
+    size >= 8 && size <= 128 && size.is_power_of_two()
+}
+
+/// Width and height in texels a [`tex_shape`] stands for, or `None` for 0
+/// and for a shape outside the window range.
+pub const fn tex_size(shape: u16) -> Option<[u16; 2]> {
+    let (lw, lh) = ((shape & 15) as u32, ((shape >> 4) & 15) as u32);
+    if shape >> 8 != 0 || lw < 3 || lw > 7 || lh < 3 || lh > 7 {
+        return None;
+    }
+    Some([1 << lw, 1 << lh])
 }
 
 /// Room chunk flag: carries distance-LOD quads.
@@ -468,6 +498,16 @@ pub const QUAD_PLANE: u8 = 1 << 6;
 /// Quad flag: a merged LOD quad stands in for this quad at far range.
 pub const QUAD_LOD_COVERED: u8 = 1 << 7;
 
+/// [`Quad::flags2`] bit: the primitive repeats its texture through the
+/// material's GP0(E2) window. Its UVs are raw texture coordinates (the
+/// material's page-local origin is not added), up to four tiles per axis.
+pub const QUAD2_REPEAT: u8 = 1;
+/// [`Quad::flags2`] bit: listed in several cells (reserved for the cook
+/// merge; no writer sets it yet).
+pub const QUAD2_MULTI: u8 = 1 << 1;
+/// Every [`Quad::flags2`] bit this reader knows.
+pub const QUAD2_KNOWN: u8 = QUAD2_REPEAT | QUAD2_MULTI;
+
 /// One drawn quad or triangle, 40 bytes.
 ///
 /// Front-facing when `(n . camera) >> 7 > d` with `n` the Q7 normal and
@@ -488,7 +528,8 @@ pub struct Quad {
     /// Level-global material index.
     pub material: u8,
     pub flags: u8,
-    pub reserved: u8,
+    /// [`QUAD2_REPEAT`] and [`QUAD2_MULTI`]; other bits are zero.
+    pub flags2: u8,
 }
 
 /// Render cell flag: open to the sky.
@@ -612,6 +653,7 @@ const fn layout_hash() -> u32 {
     h = mix(h, size_of::<Portal>());
     h = mix(h, offset_of!(Portal, normal));
     h = mix(h, size_of::<Material>());
+    h = mix(h, offset_of!(Material, tex_shape));
     h = mix(h, size_of::<RoomHeader>());
     h = mix(h, offset_of!(RoomHeader, sections));
     h = mix(h, size_of::<Sector>());
@@ -631,6 +673,7 @@ const fn layout_hash() -> u32 {
     h = mix(h, offset_of!(Quad, uv));
     h = mix(h, offset_of!(Quad, d));
     h = mix(h, offset_of!(Quad, flags));
+    h = mix(h, offset_of!(Quad, flags2));
     h = mix(h, size_of::<RCell>());
     h = mix(h, size_of::<LodBlock>());
     h = mix(h, size_of::<PlaneRef>());

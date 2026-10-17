@@ -88,6 +88,10 @@ impl GridRenderer {
                 frame.material_missing += 1;
                 continue;
             }
+            let Some((origin, window)) = material.addressing(quad, window_reset) else {
+                frame.material_missing += 1;
+                continue;
+            };
             let any = s0.code | s1.code | s2.code | s3.code;
             let triangle = quad.flags & QUAD_TRI != 0;
             // Every corner on screen and in front of the near plane: nothing
@@ -127,9 +131,9 @@ impl GridRenderer {
                         next = next.sub(words);
                     }
                     let after = if triangle {
-                        write_triangle(next, quad, material, [s0, s1, s2], otz, window_reset)
+                        write_triangle(next, quad, material, [s0, s1, s2], otz, origin, window)
                     } else {
-                        write_quad(next, quad, material, [s0, s1, s2, s3], otz, window_reset)
+                        write_quad(next, quad, material, [s0, s1, s2, s3], otz, origin, window)
                     };
                     if !REVERSE {
                         next = after;
@@ -209,6 +213,8 @@ fn gpu_safe(corners: &[&GridScreen; 4], triangle: bool) -> bool {
 }
 
 /// Write one textured Gouraud quad packet; returns the next free word.
+/// `origin` is the UV offset added to every corner and `window` the GP0(E2)
+/// word the packet carries (see [`GridMaterial::addressing`]).
 ///
 /// The GPU splits a quad `(a, b, c, d)` along `b-c`, so the corners go out as
 /// `(1, 0, 2, 3)` to split along the 0-2 diagonal.
@@ -222,9 +228,9 @@ unsafe fn write_quad(
     material: &GridMaterial,
     s: [&GridScreen; 4],
     otz: u32,
-    window_reset: u32,
+    origin: u32,
+    window: u32,
 ) -> *mut u32 {
-    let origin = u32::from(material.uv_origin);
     let clut = u32::from(material.clut) << 16;
     let tpage = u32::from(material.tpage) << 16;
     let command = TEXTURED_GOURAUD_COMMAND | 0x0800_0000 | material.command_bits;
@@ -232,7 +238,7 @@ unsafe fn write_quad(
     // SAFETY: the caller reserved room for the whole packet.
     unsafe {
         next.write((13 << 24) | otz);
-        next.add(1).write(window_reset);
+        next.add(1).write(window);
         next.add(2).write(command | quad.color[1]);
         next.add(3).write(s[1].sxy);
         next.add(4).write(uv(1) | clut);
@@ -260,9 +266,9 @@ unsafe fn write_triangle(
     material: &GridMaterial,
     s: [&GridScreen; 3],
     otz: u32,
-    window_reset: u32,
+    origin: u32,
+    window: u32,
 ) -> *mut u32 {
-    let origin = u32::from(material.uv_origin);
     let clut = u32::from(material.clut) << 16;
     let tpage = u32::from(material.tpage) << 16;
     let command = TEXTURED_GOURAUD_COMMAND | material.command_bits;
@@ -270,7 +276,7 @@ unsafe fn write_triangle(
     // SAFETY: the caller reserved room for the whole packet.
     unsafe {
         next.write((10 << 24) | otz);
-        next.add(1).write(window_reset);
+        next.add(1).write(window);
         next.add(2).write(command | quad.color[0]);
         next.add(3).write(s[0].sxy);
         next.add(4).write(uv(0) | clut);
@@ -301,6 +307,10 @@ unsafe fn robust_quad(
     packets: &mut u32,
 ) -> *mut u32 {
     let count = if quad.flags & QUAD_TRI != 0 { 3 } else { 4 };
+    let Some((origin, window)) = material.addressing(quad, TextureWindow::NONE.word()) else {
+        return next;
+    };
+    let repeat = quad.flags2 & QUAD2_REPEAT != 0;
     let mut source = [AffineVertex::default(); 4];
     // One index walks four parallel tables; the indexed form keeps the loop
     // a counted one on the guest.
@@ -308,7 +318,7 @@ unsafe fn robust_quad(
     for k in 0..count {
         // SAFETY: validation proved the index.
         let v = unsafe { room.render.vertices.get_unchecked(usize::from(quad.v[k])) };
-        let uv = quad.uv[k].wrapping_add(material.uv_origin);
+        let uv = quad.uv[k].wrapping_add(origin as u16);
         source[k] = AffineVertex {
             position: [v.x, v.y, v.z],
             uv: [uv as u8, (uv >> 8) as u8],
@@ -361,8 +371,10 @@ unsafe fn robust_quad(
         tpage: material.tpage,
         clut: material.clut,
         uv_offset: [0; 2],
-        compact: 1,
-        texture_window_word: 0,
+        // A repeating quad takes the windowed packet shape: its own window
+        // word in front and a reset behind, with raw UVs.
+        compact: u8::from(!repeat),
+        texture_window_word: if repeat { window } else { 0 },
         color_command_word: TEXTURED_GOURAUD_COMMAND | material.command_bits,
     };
     let near_view = NearView {
@@ -392,3 +404,6 @@ unsafe fn robust_quad(
     *packets += drawn.packets;
     drawn.next_packet
 }
+
+#[cfg(test)]
+mod tests;

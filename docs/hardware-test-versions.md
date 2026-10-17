@@ -33,6 +33,10 @@ shipped without either, which is why no machine-code baseline exists for them.
 
 ## History
 
+### v1.28 (2026-10-17, schema PX8)
+
+Six GPU batches price GP0(E2), the texture window the grid renderer repeats textures through (`0x140`-`0x145`, `src/gpu_probes.rs`). Every grid packet carries its own E2 word in front of the polygon, so the cases read in pairs: a reset window carried in each packet against none (`0x140` against `0x103`), an active 64 texel window against none at the same UV span (`0x141` against `0x10D`), one 32 texel window every packet against two alternating (`0x142` against `0x143`, the cost of changing window between neighbours, a possible texture-cache flush), a reset alternating with a window (`0x144`, the stream a level of plain and repeating quads makes) and a window repeated four times across a primitive (`0x145`). No surviving record changed meaning. The timing capacity grows by six slots. Not run on a console yet; the machine-code baseline for v1.28 is regenerated with `make hwtest-verify-code` on the first run.
+
 ### v1.27 (2026-10-04, schema PX8)
 
 `CONSOLE TESTS (V1.27)` joins the main menu, after TARGETED PROBES, as a page of four cases for one console session (`src/console_tests.rs`, `kernel_timing.rs`, `display_widths.rs`, `xa_loop.rs`; details in [hardware-test-disc.md](hardware-test-disc.md)):

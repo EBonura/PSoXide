@@ -27,5 +27,8 @@ pub mod toolchain_probe;
 pub mod view;
 pub mod write;
 
+#[cfg(test)]
+mod format_tests;
+
 pub use format::*;
 pub use view::{CollisionView, FormatError, LevelView, RenderView, RoomView};

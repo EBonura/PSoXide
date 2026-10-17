@@ -74,6 +74,29 @@ pub struct GridMaterial {
     /// materials), zero for opaque.
     pub command_bits: u32,
     pub resident: bool,
+    /// The encoded GP0(E2) texture-window command that repeats this
+    /// material's texture, or 0 when the texture has no window placement.
+    /// Quads flagged [`QUAD2_REPEAT`] draw through it with raw UVs.
+    pub window_word: u32,
+}
+
+impl GridMaterial {
+    /// The UV origin to add and the GP0(E2) word a packet of `quad` carries.
+    ///
+    /// An ordinary quad adds the texture's page-local origin and resets the
+    /// window. A `REPEAT` quad keeps its UVs raw and selects the material's
+    /// window, whose offset puts them back on the texture; `None` when the
+    /// material has no window to repeat through.
+    #[inline(always)]
+    pub(crate) fn addressing(&self, quad: &Quad, window_reset: u32) -> Option<(u32, u32)> {
+        if quad.flags2 & QUAD2_REPEAT == 0 {
+            Some((u32::from(self.uv_origin), window_reset))
+        } else if self.window_word != 0 {
+            Some((0, self.window_word))
+        } else {
+            None
+        }
+    }
 }
 
 /// What one frame produced. Counters add up across rooms.

@@ -18,6 +18,7 @@ use psx_engine::{
     ThirdPersonCameraInput, ThirdPersonCameraState, ThirdPersonCameraTarget, WorldCamera,
 };
 use psx_game_runtime::destructibles::RuntimeDestructibles;
+use psx_gpu::material::TextureWindow;
 use psx_grid::collision::{GridCollision, GridTraceProvider};
 use psx_grid::contents::{contents_of_liquid_kind, LiquidContentsSample, CONTENTS_EMPTY};
 #[cfg(target_arch = "mips")]
@@ -100,8 +101,8 @@ impl fmt::Display for GridRuntimeInitError {
             Self::EmptyWorld => {
                 formatter.write_str("manifest selected a grid world but embedded none")
             }
-            Self::Level(e) => write!(formatter, "grid level core refused: {e:?}"),
-            Self::Room { room, error } => write!(formatter, "grid room {room} refused: {error:?}"),
+            Self::Level(e) => write!(formatter, "grid level core refused: {e}"),
+            Self::Room { room, error } => write!(formatter, "grid room {room} refused: {error}"),
             Self::TooManyRooms(n) => {
                 write!(formatter, "{n} grid rooms, at most {}", ROOM_SET_WORDS * 32)
             }
@@ -157,6 +158,14 @@ fn resolve_material(material: &psx_grid::Material) -> Option<GridMaterial> {
         // A tile spans 64 page-local texels; the packed add in the packet
         // writer must not carry between bytes.
         resident: u16::from(u) + 64 <= 256 && u16::from(v) + 64 <= 256,
+        // The window that wraps raw UVs back onto this texture. A texture
+        // without a window placement (a whole page) cannot repeat; its
+        // `REPEAT` quads are skipped, not drawn wrong.
+        window_word: if slot.texture_window == TextureWindow::NONE {
+            0
+        } else {
+            slot.texture_window.word()
+        },
     })
 }
 

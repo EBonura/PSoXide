@@ -15,6 +15,18 @@
 //! drawing, so GPUSTAT bit 24 going high means the last primitive has been
 //! drawn. Textures are opaque.
 //!
+//! The window family (`0x140` and up) prices GP0(E2), the texture window the
+//! grid renderer uses to repeat a texture inside one primitive. Every grid
+//! packet carries its own E2 word in front of the polygon, so the questions
+//! are what that word costs by itself, what an active window costs, and what
+//! it costs to change window between neighbouring primitives (the texture
+//! cache may flush). Cases: carrying a reset window against carrying none
+//! (`0x140` against `0x103`), an active 64 texel window against none at the
+//! same span (`0x141` against `0x10D`), and the same window every time against
+//! two alternating (`0x142` against `0x143`). `0x144` alternates a reset with
+//! a window, the stream a level of plain and repeating quads makes, and
+//! `0x145` repeats the texture four times across a primitive.
+//!
 //! Timer 2 runs from the DMA kick to the interrupt flag. The poll loop costs
 //! about a dozen cycles a turn, which is the resolution. Everything draws into
 //! off-screen VRAM. Ids are `0x100` and up (the extended timing block).
@@ -43,6 +55,28 @@ const CLUT_B: u32 = ((CLUT_Y as u32 + 1) << 6) | (CLUT_X as u32 / 16);
 const DEPTH_4BPP: u32 = 0;
 const DEPTH_8BPP: u32 = 1 << 7;
 const BLEND_AVERAGE: u32 = 0;
+
+/// GP0(E2) words. A window of 2^n texels masks the top bits of the
+/// coordinate: mask = (256 - size) / 8 in the 8 texel units the command uses.
+const WINDOW_NONE: u32 = 0xE200_0000;
+/// 64 by 64 at the page origin: the grid renderer's window for a 64 texel tile.
+const WINDOW_64: u32 = 0xE200_0000 | 24 | (24 << 5);
+/// 32 by 32 at the page origin, and at 32 texels across.
+const WINDOW_32_A: u32 = 0xE200_0000 | 28 | (28 << 5);
+const WINDOW_32_B: u32 = WINDOW_32_A | (4 << 10);
+
+/// What GP0(E2) the packets of a textured case carry.
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum Window {
+    /// None: a plain textured batch.
+    Absent,
+    /// Every packet starts with the reset window, as every grid packet does.
+    Reset,
+    /// Every packet starts with this window.
+    Same(u32),
+    /// Packets alternate between two windows.
+    Alternate(u32, u32),
+}
 
 const MAX_PRIMS: usize = 64;
 /// Header plus up to nine words a primitive, then the interrupt request.
@@ -77,6 +111,7 @@ struct Case {
     dither: bool,
     clipped: bool,
     letterboxed: bool,
+    window: Window,
 }
 
 const fn case(id: u16, count: u16, size: u32, shape: Shape) -> Case {
@@ -93,6 +128,7 @@ const fn case(id: u16, count: u16, size: u32, shape: Shape) -> Case {
         dither: false,
         clipped: false,
         letterboxed: false,
+        window: Window::Absent,
     }
 }
 
@@ -129,12 +165,16 @@ impl Case {
         self.letterboxed = true;
         self
     }
+    const fn window(mut self, window: Window) -> Self {
+        self.window = window;
+        self
+    }
 }
 
 const RAW: u32 = 1 << 24;
 const TRANSLUCENT: u32 = 1 << 25;
 
-const CASES: [Case; 21] = [
+const CASES: [Case; 27] = [
     // Sixteen 32x32 primitives each (512 pixels a triangle, 1024 a rect).
     case(0x100, 16, 32, Shape::FlatTri),
     case(0x101, 16, 32, Shape::GouraudTri),
@@ -162,6 +202,24 @@ const CASES: [Case; 21] = [
     case(0x112, 64, 2, Shape::FlatTri),
     case(0x113, 64, 2, Shape::TexTri).span(2),
     case(0x114, 64, 2, Shape::GouraudTexTri).span(2),
+    // The texture window (GP0(E2)) as the grid renderer uses it: see the
+    // module note for which pairs to read against each other.
+    case(0x140, 16, 32, Shape::TexTri).window(Window::Reset),
+    case(0x141, 16, 32, Shape::TexTri)
+        .span(63)
+        .window(Window::Same(WINDOW_64)),
+    case(0x142, 16, 32, Shape::TexTri)
+        .span(31)
+        .window(Window::Same(WINDOW_32_A)),
+    case(0x143, 16, 32, Shape::TexTri)
+        .span(31)
+        .window(Window::Alternate(WINDOW_32_A, WINDOW_32_B)),
+    case(0x144, 16, 32, Shape::TexTri)
+        .span(63)
+        .window(Window::Alternate(WINDOW_NONE, WINDOW_64)),
+    case(0x145, 16, 32, Shape::TexTri)
+        .span(255)
+        .window(Window::Same(WINDOW_64)),
     // Last on purpose: it leaves a lit, textured triangle in off-screen VRAM,
     // so a VRAM dump shows at a glance that packets, texture and CLUT are sane.
     case(0x106, 16, 32, Shape::GouraudTexTri),
@@ -298,8 +356,8 @@ fn build_list(entry: &Case) -> u32 {
                 ],
                 false,
             ),
-            Shape::TexTri => emit(
-                &[
+            Shape::TexTri => {
+                let polygon = [
                     0x2480_8080 | bits,
                     xy(x, y),
                     clut << 16,
@@ -307,9 +365,29 @@ fn build_list(entry: &Case) -> u32 {
                     ((page | depth) << 16) | span,
                     xy(x, y1),
                     span << 8,
-                ],
-                false,
-            ),
+                ];
+                let prefix = match entry.window {
+                    Window::Absent => None,
+                    Window::Reset => Some(WINDOW_NONE),
+                    Window::Same(word) => Some(word),
+                    Window::Alternate(a, b) => Some(if index & 1 == 0 { a } else { b }),
+                };
+                // The window word leads the polygon in the same node, the way
+                // every grid packet is built.
+                let mut words = [0u32; 8];
+                let length = match prefix {
+                    Some(window) => {
+                        words[0] = window;
+                        words[1..8].copy_from_slice(&polygon);
+                        8
+                    }
+                    None => {
+                        words[..7].copy_from_slice(&polygon);
+                        7
+                    }
+                };
+                emit(&words[..length], false)
+            }
             Shape::GouraudTexTri => emit(
                 &[
                     0x3480_8080 | bits,

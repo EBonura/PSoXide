@@ -26,6 +26,31 @@ pub enum FormatError {
     IndexRange,
 }
 
+impl FormatError {
+    /// A sentence saying what is wrong and what to do about it.
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::Truncated => "the file is shorter than its own tables",
+            Self::BadMagic => "not a PGL level file",
+            Self::BadVersion => {
+                "the level was cooked with another format version; this reader reads only version 3 (texture-window repeat), so cook the level again with the current editor"
+            }
+            Self::BadLayout => {
+                "the level was written against another record layout; cook it again with the current editor"
+            }
+            Self::Misaligned => "a table does not start on a word boundary",
+            Self::Inconsistent => "a count or section disagrees with the header",
+            Self::IndexRange => "an index points outside its table",
+        }
+    }
+}
+
+impl core::fmt::Display for FormatError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str(self.message())
+    }
+}
+
 /// Cast `count` records of `T` at `offset`, checking bounds and alignment.
 fn table<T: Copy>(bytes: &[u8], offset: usize, count: usize) -> Result<&[T], FormatError> {
     let size = core::mem::size_of::<T>();
@@ -319,6 +344,22 @@ impl<'a> RoomView<'a> {
         Ok(Self { col, render })
     }
 
+    /// Check that every `REPEAT` quad names a material that has a texture
+    /// shape (the GP0(E2) window needs one). Host and debug use.
+    pub fn validate_repeat(&self, materials: &[Material]) -> Result<(), FormatError> {
+        let r = &self.render;
+        for quad in r.quads.iter().chain(r.lod_quads) {
+            if quad.flags2 & QUAD2_REPEAT != 0
+                && materials
+                    .get(usize::from(quad.material))
+                    .is_none_or(|m| tex_size(m.tex_shape).is_none())
+            {
+                return Err(FormatError::Inconsistent);
+            }
+        }
+        Ok(())
+    }
+
     /// Walk every index in both blocks. `material_count` is the level's.
     pub fn validate_full(&self, material_count: usize) -> Result<(), FormatError> {
         self.col.validate_full()?;
@@ -332,6 +373,7 @@ impl<'a> RoomView<'a> {
             if quad.v.iter().any(|&v| usize::from(v) >= r.vertices.len())
                 || usize::from(quad.material) >= material_count
                 || (quad.flags & QUAD_AXIS != 0 && (quad.flags >> QUAD_AXIS_SHIFT) & 3 > 2)
+                || quad.flags2 & !QUAD2_KNOWN != 0
             {
                 return Err(FormatError::IndexRange);
             }
