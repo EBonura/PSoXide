@@ -330,55 +330,59 @@ fn vertices(cx: &Ctx<'_>, floors: &BTreeSet<[i32; 2]>, out: &mut Vec<Plan>) {
         }
     }
     for at in lattice {
-        let ring = around(at);
-        let inside: Vec<[i32; 2]> = ring
-            .iter()
-            .copied()
-            .filter(|c| floors.contains(c))
+        // Every floor that touches the vertex, with its corner height there.
+        let around: Vec<([i32; 2], i32)> = around(at)
+            .into_iter()
+            .filter_map(|c| Some((c, cx.floor(c)?.heights[corner_at(c, at)])))
             .collect();
-        let outside: Vec<[i32; 2]> = ring
-            .iter()
-            .copied()
-            .filter(|c| !floors.contains(c) && cx.floor(*c).is_some())
-            .collect();
-        let height = |c: [i32; 2]| cx.floor(c).map(|f| f.heights[corner_at(c, at)]);
-        if inside.len() == 4 {
-            if t.floor && chance(cx.seed, Op::Vertex, at, scaled(RATE_TILT, cx.intensity)) {
-                out.push(Plan::Vertex {
-                    at,
-                    surf: Surf::Floor,
-                    delta: cx.sign(Op::VertexDelta, at) * cx.amount(Op::VertexDelta, at, 0),
-                    lip: false,
-                    cells: inside,
-                });
-            }
-            continue;
-        }
-        if !t.walls || inside.is_empty() || outside.is_empty() {
-            continue;
-        }
-        let low = inside.iter().filter_map(|c| height(*c)).min();
-        let high_out = outside.iter().filter_map(|c| height(*c)).max();
-        let (Some(low), Some(high_out)) = (low, high_out) else {
+        let Some(top) = around.iter().map(|(_, h)| *h).max() else {
             continue;
         };
-        // A plateau lip: every floor outside is lower than every one inside.
-        if low - high_out >= FINE_UNITS
-            && chance(cx.seed, Op::Lip, at, scaled(RATE_LIP, cx.intensity))
-        {
-            let step = cx.params.snap.step();
-            let drop = cx
-                .amount(Op::VertexDelta, at, 1)
-                .min((low - high_out) / step * step);
-            if drop > 0 {
-                out.push(Plan::Vertex {
-                    at,
-                    surf: Surf::Floor,
-                    delta: -drop,
-                    lip: true,
-                    cells: inside,
-                });
+        // The cells on the high side that the break may move.
+        let movers: Vec<[i32; 2]> = around
+            .iter()
+            .filter(|(c, h)| *h == top && floors.contains(c))
+            .map(|(c, _)| *c)
+            .collect();
+        if movers.is_empty() {
+            continue;
+        }
+        let below = around
+            .iter()
+            .filter(|(_, h)| *h <= top - FINE_UNITS)
+            .map(|(_, h)| *h)
+            .max();
+        if let Some(below) = below {
+            // A plateau lip: the highest corner drops by up to the step to the
+            // next level, so the riser's top follows and its height shrinks.
+            if t.walls && chance(cx.seed, Op::Lip, at, scaled(RATE_LIP, cx.intensity)) {
+                let step = cx.params.snap.step();
+                let drop = cx
+                    .amount(Op::VertexDelta, at, 1)
+                    .min((top - below) / step * step);
+                if drop > 0 {
+                    out.push(Plan::Vertex {
+                        at,
+                        surf: Surf::Floor,
+                        delta: -drop,
+                        lip: true,
+                        cells: movers,
+                    });
+                }
             }
+            continue;
+        }
+        // Level all round: an interior vertex of the region tilts.
+        let all_inside = around.len() == 4 && around.iter().all(|(c, _)| floors.contains(c));
+        if t.floor && all_inside && chance(cx.seed, Op::Vertex, at, scaled(RATE_TILT, cx.intensity))
+        {
+            out.push(Plan::Vertex {
+                at,
+                surf: Surf::Floor,
+                delta: cx.sign(Op::VertexDelta, at) * cx.amount(Op::VertexDelta, at, 0),
+                lip: false,
+                cells: movers,
+            });
         }
     }
 }
