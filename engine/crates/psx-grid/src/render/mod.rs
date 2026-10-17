@@ -168,6 +168,7 @@ pub struct GridRenderer {
     pub(crate) quads: Vec<u16>,
     /// Frame stamp per LOD block, so each block's merged quads queue once.
     pub(crate) block_stamp: Vec<u16>,
+    pub(crate) sky_stamp: Vec<u16>,
     pub(crate) lod_queue: Vec<u16>,
 }
 
@@ -190,6 +191,7 @@ impl GridRenderer {
             far: Vec::with_capacity(max_cells),
             quads: Vec::with_capacity(max_quads + max_lod_quads),
             block_stamp: vec![0; max_blocks],
+            sky_stamp: vec![0; max_blocks],
             lod_queue: Vec::with_capacity(max_lod_quads),
         }
     }
@@ -214,7 +216,7 @@ impl GridRenderer {
             + self.work.capacity() * 2
             + self.cells.capacity() * 3
             + self.quads.capacity() * 2
-            + self.block_stamp.capacity() * 2
+            + self.block_stamp.capacity() * 4
             + self.lod_queue.capacity() * 2
     }
 
@@ -246,6 +248,7 @@ impl GridRenderer {
         if self.frame == 0 {
             self.stamp.fill(0);
             self.block_stamp.fill(0);
+            self.sky_stamp.fill(0);
             self.frame = 1;
         }
         #[cfg(target_arch = "mips")]

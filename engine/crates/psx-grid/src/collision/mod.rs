@@ -16,9 +16,14 @@
 //! arithmetic. Queries reject (provider) or clamp (line of sight) coordinates
 //! beyond [`COORD_LIMIT`] so every Q12 product stays inside `i32`.
 
+// `clamp` carries a panic path (and its stack frame) in every caller; the
+// motor runs these functions on a 1 KiB stack, so `max(..).min(..)` is used.
+#![allow(clippy::manual_clamp)]
+
 mod body;
 mod provider;
 mod ray;
+mod scan;
 mod world;
 
 #[cfg(test)]

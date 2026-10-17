@@ -1,5 +1,4 @@
-//! World queries over the resident rooms: locate, heights, contents, and the
-//! "blocks" every trace is built from.
+//! World queries over the resident rooms: locate, heights and contents.
 
 use crate::format::*;
 use crate::height::{height_at, in_first_triangle, triangle_normal_q12, weight_recip, Recip};
@@ -11,6 +10,24 @@ pub const SLAB_THICKNESS: i32 = 16;
 /// product inside `i32`.
 pub const COORD_LIMIT: i32 = 1 << 16;
 
+/// The record `rec` falls back to.
+static NO_ROOM: RoomRecord = RoomRecord {
+    pack_sector: 0,
+    pack_sectors: 0,
+    flags: 0,
+    origin: [0; 3],
+    width: 0,
+    depth: 0,
+    portal_first: 0,
+    portal_count: 0,
+    min_y: 0,
+    max_y: 0,
+    fog_near: 0,
+    fog_far: 0,
+    fog_rgb: [0; 3],
+    reserved: [0; 3],
+};
+
 /// A world point resolved to a room and sector.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Located {
@@ -21,34 +38,6 @@ pub struct Located {
     pub lx: u32,
     /// Offset inside the sector along Z, `0..S`.
     pub lz: u32,
-}
-
-/// What a blocking interval came from, for contact normals.
-#[derive(Copy, Clone, Debug)]
-pub(crate) enum Source {
-    Floor {
-        room: usize,
-        cx: usize,
-        cz: usize,
-        second: bool,
-    },
-    Ceil,
-    /// Wall on `edge` of the sector whose world-plan origin is `(ox, oz)`.
-    Wall {
-        edge: u8,
-        ox: i32,
-        oz: i32,
-    },
-    /// A room whose collision block is not resident.
-    Foreign,
-}
-
-/// A forbidden feet-height interval `(lo, hi)` (open) at a column.
-#[derive(Copy, Clone, Debug)]
-pub(crate) struct Block {
-    pub lo: i32,
-    pub hi: i32,
-    pub src: Source,
 }
 
 /// The collision world: the level core plus the resident room collision
@@ -84,6 +73,13 @@ impl<'a> GridCollision<'a> {
     /// Sector edge in runtime units.
     pub fn sector_units(&self) -> i32 {
         self.s
+    }
+
+    /// Room record, or an empty one for an out-of-range index (a panic path
+    /// would cost every caller a stack frame).
+    #[inline(always)]
+    pub(crate) fn rec(&self, room: usize) -> &RoomRecord {
+        self.level.rooms.get(room).unwrap_or(&NO_ROOM)
     }
 
     #[inline]
@@ -146,6 +142,10 @@ impl<'a> GridCollision<'a> {
         if sector.flags & SECTOR_HAS_FLOOR == 0 {
             return None;
         }
+        if sector.flags & SECTOR_SPLIT_LEVEL == 0 && is_flat(sector.floor) {
+            // Both triangles share the plane; the triangle flag is moot.
+            return Some((i32::from(sector.floor[0]), false));
+        }
         let nesw = sector.flags & SECTOR_FLOOR_NESW != 0;
         let second = !in_first_triangle(nesw, lx, lz, self.s as u32);
         let corners = Self::floor_corners(view, sector, second);
@@ -168,10 +168,38 @@ impl<'a> GridCollision<'a> {
         if sector.flags & SECTOR_HAS_CEIL == 0 {
             return None;
         }
+        if sector.flags & SECTOR_SPLIT_LEVEL == 0 && is_flat(sector.ceil) {
+            return Some(i32::from(sector.ceil[0]));
+        }
         let nesw = sector.flags & SECTOR_CEIL_NESW != 0;
         let second = !in_first_triangle(nesw, lx, lz, self.s as u32);
         let corners = Self::ceil_corners(view, sector, second);
         Some(height_at(corners, nesw, lx, lz, self.s as u32, self.inv24))
+    }
+
+    /// Lowest and highest room-local floor corner of a sector (both triangles
+    /// of a split-level sector). Every interpolated height lies between them.
+    #[inline]
+    pub(crate) fn floor_range(&self, view: &CollisionView<'a>, sector: &Sector) -> (i32, i32) {
+        let (mut lo, mut hi) = corner_range(sector.floor);
+        if sector.flags & SECTOR_SPLIT_LEVEL != 0 {
+            let (l, h) = corner_range(Self::floor_corners(view, sector, true));
+            lo = lo.min(l);
+            hi = hi.max(h);
+        }
+        (lo, hi)
+    }
+
+    /// Lowest and highest room-local ceiling corner of a sector.
+    #[inline]
+    pub(crate) fn ceil_range(&self, view: &CollisionView<'a>, sector: &Sector) -> (i32, i32) {
+        let (mut lo, mut hi) = corner_range(sector.ceil);
+        if sector.flags & SECTOR_SPLIT_LEVEL != 0 {
+            let (l, h) = corner_range(Self::ceil_corners(view, sector, true));
+            lo = lo.min(l);
+            hi = hi.max(h);
+        }
+        (lo, hi)
     }
 
     /// World floor height at `(lx, lz)` inside a sector of a room.
@@ -315,192 +343,20 @@ impl<'a> GridCollision<'a> {
         }
         0
     }
+}
 
-    /// Visit every forbidden feet-height interval for a cylinder of `radius`
-    /// and `height` centred at world `(x, z)`. `visit` returns true to stop;
-    /// the result says whether it stopped.
-    ///
-    /// Slabs are sampled at the centre and, for `radius > 0`, four compass
-    /// points; walls are tested against the circle. `foreign` includes rooms
-    /// that are not resident.
-    #[inline(never)]
-    pub(crate) fn visit_blocks(
-        &self,
-        x: i32,
-        z: i32,
-        radius: i32,
-        height: i32,
-        foreign: bool,
-        visit: &mut impl FnMut(Block) -> bool,
-    ) -> bool {
-        let samples = [
-            (x, z),
-            (x + radius, z),
-            (x - radius, z),
-            (x, z + radius),
-            (x, z - radius),
-        ];
-        let count = if radius > 0 { 5 } else { 1 };
-        let t = SLAB_THICKNESS;
-        for (room, rec) in self.level.rooms.iter().enumerate() {
-            let (ox, oy, oz) = (rec.origin[0], rec.origin[1], rec.origin[2]);
-            let width = usize::from(rec.width);
-            let depth = usize::from(rec.depth);
-            let Some(view) = self.view(room) else {
-                if foreign {
-                    for &(sx, sz) in &samples[..count] {
-                        if self.cell_of(sx - ox, sz - oz, width, depth).is_some() {
-                            let block = Block {
-                                lo: oy + i32::from(rec.min_y) - height,
-                                hi: oy + i32::from(rec.max_y),
-                                src: Source::Foreign,
-                            };
-                            if block.hi > block.lo + height && visit(block) {
-                                return true;
-                            }
-                            break;
-                        }
-                    }
-                }
-                continue;
-            };
-            let (vw, vd) = (view.width(), view.depth());
-            for &(sx, sz) in &samples[..count] {
-                let Some((cx, cz, lx, lz)) = self.cell_of(sx - ox, sz - oz, vw, vd) else {
-                    continue;
-                };
-                let Some(sector) = view.sectors.get(cz * vw + cx) else {
-                    continue;
-                };
-                if let Some((f, second)) = self.sector_floor(view, sector, lx, lz) {
-                    let top = oy + f;
-                    let block = Block {
-                        lo: top - t - height,
-                        hi: top,
-                        src: Source::Floor {
-                            room,
-                            cx,
-                            cz,
-                            second,
-                        },
-                    };
-                    if visit(block) {
-                        return true;
-                    }
-                }
-                if sector.flags & SECTOR_CEIL_SOLID != 0 {
-                    if let Some(c) = self.sector_ceil(view, sector, lx, lz) {
-                        let bottom = oy + c;
-                        let block = Block {
-                            lo: bottom - height,
-                            hi: bottom + t,
-                            src: Source::Ceil,
-                        };
-                        if visit(block) {
-                            return true;
-                        }
-                    }
-                }
-            }
-            if radius > 0 && self.visit_walls(view, rec, x, z, radius, height, visit) {
-                return true;
-            }
-        }
-        false
-    }
+/// Four equal corner heights.
+#[inline(always)]
+fn is_flat(h: [i16; 4]) -> bool {
+    h[0] == h[1] && h[1] == h[2] && h[2] == h[3]
+}
 
-    #[allow(clippy::too_many_arguments)]
-    #[inline(never)]
-    fn visit_walls(
-        &self,
-        view: &CollisionView<'a>,
-        rec: &RoomRecord,
-        x: i32,
-        z: i32,
-        radius: i32,
-        height: i32,
-        visit: &mut impl FnMut(Block) -> bool,
-    ) -> bool {
-        let s = self.s;
-        let (ox, oy, oz) = (rec.origin[0], rec.origin[1], rec.origin[2]);
-        let (vw, vd) = (view.width() as i32, view.depth() as i32);
-        let (lx, lz) = (x - ox, z - oz);
-        if lx + radius < 0 || lz + radius < 0 || lx - radius >= vw * s || lz - radius >= vd * s {
-            return false;
-        }
-        let cell = |v: i32, n: i32| -> usize {
-            let v = v.clamp(0, n * s - 1) as u32;
-            self.recip.cell(v) as usize
-        };
-        let (cx0, cx1) = (cell(lx - radius, vw), cell(lx + radius, vw));
-        let (cz0, cz1) = (cell(lz - radius, vd), cell(lz + radius, vd));
-        for cz in cz0..=cz1 {
-            for cx in cx0..=cx1 {
-                let Some(sector) = view.sectors.get(cz * vw as usize + cx) else {
-                    continue;
-                };
-                let Some(ext) = view.ext(sector) else {
-                    continue;
-                };
-                let (cell_x, cell_z) = (cx as i32 * s, cz as i32 * s);
-                let (px, pz) = (lx - cell_x, lz - cell_z);
-                for wall in view.sector_walls(ext) {
-                    if !circle_hits_wall(wall.edge, s, px, pz, radius) {
-                        continue;
-                    }
-                    let (lo, hi) = wall_span(wall);
-                    if hi <= lo {
-                        continue;
-                    }
-                    let block = Block {
-                        lo: oy + lo - height,
-                        hi: oy + hi,
-                        src: Source::Wall {
-                            edge: wall.edge,
-                            ox: ox + cell_x,
-                            oz: oz + cell_z,
-                        },
-                    };
-                    if visit(block) {
-                        return true;
-                    }
-                }
-            }
-        }
-        false
-    }
-
-    /// First block containing feet height `y` at the column, if any.
-    #[inline(never)]
-    pub(crate) fn blocking_at(
-        &self,
-        p: [i32; 3],
-        radius: i32,
-        height: i32,
-        foreign: bool,
-    ) -> Option<Block> {
-        let mut found = None;
-        self.visit_blocks(p[0], p[2], radius, height, foreign, &mut |b| {
-            if b.lo < p[1] && p[1] < b.hi {
-                found = Some(b);
-                true
-            } else {
-                false
-            }
-        });
-        found
-    }
-
-    /// True when a cylinder with feet at `p` overlaps solid.
-    pub fn body_blocked(&self, p: [i32; 3], radius: i32, height: i32) -> bool {
-        self.blocking_at(p, radius, height, true).is_some()
-    }
-
-    /// True when the point is strictly inside a floor or ceiling slab of a
-    /// resident room.
-    pub fn point_in_solid(&self, p: [i32; 3]) -> bool {
-        self.blocking_at(p, 0, 0, false).is_some()
-    }
+/// Lowest and highest of four corner heights.
+#[inline(always)]
+fn corner_range(h: [i16; 4]) -> (i32, i32) {
+    let lo = h[0].min(h[1]).min(h[2]).min(h[3]);
+    let hi = h[0].max(h[1]).max(h[2]).max(h[3]);
+    (i32::from(lo), i32::from(hi))
 }
 
 /// Lowest bottom and highest top of a wall piece, room-local.
@@ -512,74 +368,86 @@ pub(crate) fn wall_span(wall: &ColWall) -> (i32, i32) {
 
 /// Strict circle-against-wall-segment test in sector-local plan coordinates:
 /// the segment is closer than `r` to `(px, pz)` (touching is clear).
+#[inline(always)]
 pub(crate) fn circle_hits_wall(edge: u8, s: i32, px: i32, pz: i32, r: i32) -> bool {
     let r2 = r * r;
-    match edge {
-        edge::NORTH | edge::SOUTH => {
-            let line = if edge == edge::NORTH { 0 } else { s };
-            let cx = px.clamp(0, s);
-            let (dx, dz) = (px - cx, pz - line);
-            dx * dx + dz * dz < r2
-        }
-        edge::EAST | edge::WEST => {
-            let line = if edge == edge::WEST { 0 } else { s };
-            let cz = pz.clamp(0, s);
-            let (dx, dz) = (px - line, pz - cz);
-            dx * dx + dz * dz < r2
-        }
-        edge::NWSE => {
-            // (0,0)->(s,s); projection along (1,1) in 0..=2s, distance q/sqrt2.
-            let proj = px + pz;
-            if proj < 0 {
-                px * px + pz * pz < r2
-            } else if proj > 2 * s {
-                let (dx, dz) = (px - s, pz - s);
-                dx * dx + dz * dz < r2
-            } else {
-                let q = px - pz;
-                q * q < 2 * r2
-            }
-        }
-        edge::NESW => {
-            // (s,0)->(0,s); projection along (-1,1) maps to pz - px in -s..=s.
-            let proj = pz - px;
-            if proj < -s {
-                let (dx, dz) = (px - s, pz);
-                dx * dx + dz * dz < r2
-            } else if proj > s {
-                let (dx, dz) = (px, pz - s);
-                dx * dx + dz * dz < r2
-            } else {
-                let q = px + pz - s;
-                q * q < 2 * r2
-            }
-        }
-        _ => false,
+    if edge < edge::NWSE {
+        // Axis edges: N/S run along X at z = 0/s, E/W along Z at x = s/0.
+        let along_x = edge & 1 == 0;
+        let (u, v) = if along_x { (px, pz) } else { (pz, px) };
+        let line = if edge == edge::NORTH || edge == edge::WEST {
+            0
+        } else {
+            s
+        };
+        let du = u - u.max(0).min(s);
+        let dv = v - line;
+        return du * du + dv * dv < r2;
+    }
+    // Diagonals: `t` runs along the segment, `q` is sqrt(2) times the
+    // distance from its line.
+    let (t, q, end0, end1) = if edge == edge::NWSE {
+        (px + pz, px - pz, (0, 0), (s, s))
+    } else {
+        (pz - px + s, px + pz - s, (s, 0), (0, s))
+    };
+    if t < 0 {
+        let (dx, dz) = (px - end0.0, pz - end0.1);
+        dx * dx + dz * dz < r2
+    } else if t > 2 * s {
+        let (dx, dz) = (px - end1.0, pz - end1.1);
+        dx * dx + dz * dz < r2
+    } else {
+        q * q < 2 * r2
     }
 }
 
-/// Wall unit normal (Q12) flipped toward the plan point `(px, pz)` given
+/// Normal code of a wall flipped toward the plan point `(px, pz)` given
 /// relative to the sector origin.
-pub(crate) fn wall_normal_toward(edge: u8, s: i32, px: i32, pz: i32) -> [i16; 3] {
-    const D: i16 = 2896;
+pub(crate) fn wall_code(edge: u8, s: i32, px: i32, pz: i32) -> u8 {
+    use super::scan::nc;
     let pos = |v: i32| v >= 0;
     match edge {
-        edge::NORTH => [0, 0, if pos(pz) { 4096 } else { -4096 }],
-        edge::SOUTH => [0, 0, if pos(pz - s) { 4096 } else { -4096 }],
-        edge::EAST => [if pos(px - s) { 4096 } else { -4096 }, 0, 0],
-        edge::WEST => [if pos(px) { 4096 } else { -4096 }, 0, 0],
+        edge::NORTH => {
+            if pos(pz) {
+                nc::PZ
+            } else {
+                nc::NZ
+            }
+        }
+        edge::SOUTH => {
+            if pos(pz - s) {
+                nc::PZ
+            } else {
+                nc::NZ
+            }
+        }
+        edge::EAST => {
+            if pos(px - s) {
+                nc::PX
+            } else {
+                nc::NX
+            }
+        }
+        edge::WEST => {
+            if pos(px) {
+                nc::PX
+            } else {
+                nc::NX
+            }
+        }
         edge::NWSE => {
             if pos(px - pz) {
-                [D, 0, -D]
+                nc::PN
             } else {
-                [-D, 0, D]
+                nc::NP
             }
         }
         _ => {
             if pos(px + pz - s) {
-                [D, 0, D]
+                nc::PP
             } else {
-                [-D, 0, -D]
+                nc::NN
             }
         }
     }

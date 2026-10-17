@@ -460,7 +460,12 @@ pub struct RCell {
     pub max_y: i16,
 }
 
-/// A LOD block of cells, 8 bytes.
+/// LOD block flag: some cell of the block is open to the sky.
+pub const BLOCK_OPEN_SKY: u8 = 1;
+
+/// A block of cells (`2^lod_shift` square), 8 bytes: its merged far quads,
+/// its vertical extent and whether any cell is open to the sky. Every room
+/// carries the table; `count` is zero where nothing merged.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct LodBlock {

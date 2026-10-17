@@ -1,6 +1,10 @@
 //! Cell cull, facing test and corner projection of one room.
 
-use psx_bsp::render::FrustumPlanes;
+use psx_bsp::render::{FrustumPlanes, PXBSP_CLIP_ALL_PLANES};
+use psx_bsp::Vec3I16;
+
+/// Height of the lid slab the open columns are bounded by, runtime units.
+const SKY_LID: i32 = 9;
 use psx_gte::math::Vec3I16 as GteVec3I16;
 use psx_gte::scene;
 
@@ -60,6 +64,11 @@ impl GridRenderer {
             div_floor_i32(camera[2], size),
         );
         let frame_stamp = self.frame;
+        // Sky: the first queued open cell whose block column (from the block's
+        // lowest geometry up to the room's top plus a lid slab) is inside the
+        // whole frustum shows the sky. Each block is tested once.
+        let have_blocks = !room.render.lod_blocks.is_empty();
+        let mut sky_seen = false;
         let planes = &frustum.planes;
         let (y_lo, y_hi) = (i32::from(head.min_y), i32::from(head.max_y));
         let width = grid_w as i32;
@@ -134,6 +143,43 @@ impl GridRenderer {
                     // SAFETY: parallel to `cells`, same capacity.
                     unsafe { *far_out.add(count) = far };
                     count += 1;
+                    if cell.flags & CELL_OPEN_SKY != 0 && !sky_seen {
+                        if have_blocks {
+                            let (bx, bz) = ((cx >> shift) as usize, cz >> shift);
+                            let block = bz * blocks_w + bx;
+                            // SAFETY: the cook writes one block per (bw * bd).
+                            let stamp = unsafe { self.sky_stamp.get_unchecked_mut(block) };
+                            if *stamp != frame_stamp {
+                                *stamp = frame_stamp;
+                                // SAFETY: as above.
+                                let b = unsafe { room.render.lod_blocks.get_unchecked(block) };
+                                if b.flags & BLOCK_OPEN_SKY != 0 {
+                                    let edge = 1i32 << shift;
+                                    let x0 = (bx as i32) * edge * size;
+                                    let z0 = (bz as i32) * edge * size;
+                                    let x1 = (x0 + edge * size).min(width * size);
+                                    let z1 = (z0 + edge * size).min((grid_d as i32) * size);
+                                    let c = |v: i32| {
+                                        v.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
+                                    };
+                                    let lo = Vec3I16 {
+                                        x: c(x0),
+                                        y: b.min_y,
+                                        z: c(z0),
+                                    };
+                                    let hi = Vec3I16 {
+                                        x: c(x1),
+                                        y: c(y_hi + SKY_LID),
+                                        z: c(z1),
+                                    };
+                                    sky_seen =
+                                        frustum.cull_aabb(lo, hi, PXBSP_CLIP_ALL_PLANES).is_some();
+                                }
+                            }
+                        } else {
+                            sky_seen = true;
+                        }
+                    }
                     sky |= cell.flags;
                 }
                 cx += 1;
@@ -146,7 +192,8 @@ impl GridRenderer {
         }
         frame.lod_quads = self.lod_queue.len() as u16;
         frame.cells_visible = count as u16;
-        frame.sky_visible = sky & CELL_OPEN_SKY != 0;
+        let _ = sky;
+        frame.sky_visible = sky_seen;
     }
 
     /// Drop quads facing away from the camera and queue the corners of the
