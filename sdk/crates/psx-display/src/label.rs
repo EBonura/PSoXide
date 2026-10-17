@@ -73,7 +73,14 @@ impl Label {
     /// The label as text. A label is always ASCII, so this never comes back
     /// empty for a built label.
     pub fn as_str(&self) -> &str {
-        core::str::from_utf8(self.as_bytes()).unwrap_or("")
+        let bytes = self.as_bytes();
+        if bytes.is_ascii() {
+            // SAFETY: ASCII is valid UTF-8. The check is one byte loop, where `from_utf8` keeps the
+            // whole validator (about 1 KB of the image) resident for text that is ASCII by construction.
+            unsafe { core::str::from_utf8_unchecked(bytes) }
+        } else {
+            ""
+        }
     }
 
     /// Length in bytes.
