@@ -7,14 +7,6 @@ use crate::{UiFontChoice, UiGradientDirection, UiImageEffect, UiNodeKind, UiValu
 
 const CD_SECTOR_BYTES: usize = 2048;
 
-fn remove_optional_file(path: &std::path::Path) -> std::io::Result<()> {
-    match std::fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error),
-    }
-}
-
 /// `LevelModelFrameBoundsRecord` stores its sphere as `i16` to halve the
 /// per-frame table; refuse a cook whose bounds would not survive that.
 fn validate_model_frame_bounds(package: &PlaytestPackage) -> std::io::Result<()> {
@@ -84,34 +76,10 @@ pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io
     // textures.
     purge_models_dir(&models_dir)?;
 
-    let pxbsp_path = generated_dir.join(crate::brush_playtest::BRUSH_WORLD_FILENAME);
-    let brush_leak_path = generated_dir.join(crate::brush_playtest::BRUSH_LEAK_FILENAME);
+    // The grid level core and the room chunks the guest embeds.
     let world = &package.world_geometry;
-    // A streamed build ships the resident top container; the region payloads
-    // ride in UI.PAK (see `region_pack_chunk`).
-    std::fs::write(
-        &pxbsp_path,
-        world
-            .stream
-            .as_ref()
-            .map_or(&world.bytes, |stream| &stream.container),
-    )?;
-    // The grid level core and the room chunks; empty for brush worlds. The
-    // guest embeds them only when the manifest says the world is a grid.
-    let (grid_core, grid_rooms) = world.grid.as_ref().map_or((&[][..], &[][..]), |g| {
-        (g.core.as_slice(), g.rooms.as_slice())
-    });
-    std::fs::write(generated_dir.join("grid_level.pgl"), grid_core)?;
-    std::fs::write(generated_dir.join("grid_rooms.pgr"), grid_rooms)?;
-    if world.leak_path.is_empty() {
-        remove_optional_file(&brush_leak_path)?;
-    } else {
-        let mut pointfile = String::new();
-        for &[x, y, z] in &world.leak_path {
-            writeln!(pointfile, "{x} {y} {z}").expect("writing to String cannot fail");
-        }
-        std::fs::write(&brush_leak_path, pointfile)?;
-    }
+    std::fs::write(generated_dir.join("grid_level.pgl"), &world.core)?;
+    std::fs::write(generated_dir.join("grid_rooms.pgr"), &world.rooms)?;
 
     for asset in &package.assets {
         // ModelMesh / ModelAnimation / model-folder Texture
@@ -153,12 +121,6 @@ pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io
     // it off the disc instead of linking a copy that is dead after boot. The
     // `ui_sfx/` files above still back the linked (non-streaming) build.
     for (chunk_id, bytes) in ui_sfx_pack_chunks(package) {
-        std::fs::write(
-            ui_stream_chunks_dir.join(format!("ui_{chunk_id:03}.psxt")),
-            bytes,
-        )?;
-    }
-    if let Some((chunk_id, bytes)) = region_pack_chunk(package) {
         std::fs::write(
             ui_stream_chunks_dir.join(format!("ui_{chunk_id:03}.psxt")),
             bytes,
@@ -237,14 +199,6 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     }
     let _ = writeln!(
         out,
-        "pub const BSP_COOK_IS_RELEASE: bool = {};\n",
-        matches!(
-            package.bsp_cook_mode,
-            crate::brush_world::BrushWorldCookMode::Release
-        )
-    );
-    let _ = writeln!(
-        out,
         "pub const PLAYTEST_PACKET_CAPACITY: usize = {};\n",
         super::budget::cooked_manifest_packet_capacity(package)
     );
@@ -318,92 +272,10 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     out.push_str("    bytes: Bytes,\n");
     out.push_str("}\n\n");
 
-    let world = &package.world_geometry;
-    let proofs = &world.solid_cell_proofs;
-    let _ = writeln!(
-        out,
-        "pub const SOLID_CELL_PROOF_DOMAIN: [[i32; 3]; 2] = {:?};",
-        proofs.domain
-    );
-    let _ = writeln!(
-        out,
-        "pub static SOLID_CELL_PROOF_INDEX: &[[u16; 3]] = &{:?};",
-        proofs.index
-    );
-    let _ = writeln!(
-        out,
-        "pub static SOLID_CELL_PROOF_DATA: &[u8] = &{:?};",
-        proofs.data
-    );
-    out.push_str("pub const PLAYTEST_USES_PXBSP: bool = true;\n");
-    // The guest build reads this line (build.rs) to pick the grid renderer.
-    let _ = writeln!(
-        out,
-        "pub const PLAYTEST_WORLD_GRID: bool = {};",
-        world.render == PlaytestWorldRender::Grid
-    );
-    // Keep actor/prop lighting on the same ambient contract used by the
-    // brush light bake. PXBSP surfaces carry baked vertex light; dynamic
-    // world content consumes this generated constant.
-    out.push_str("pub const PXBSP_AMBIENT_RGB: [u8; 3] = [32; 3];\n");
-    let _ = writeln!(
-        out,
-        "pub const PXBSP_FACE_CHAIN_CAPACITY: usize = {};",
-        world.max_visible_faces,
-    );
-    write_aligned_asset_bytes_static(
-        &mut out,
-        "PXBSP_WORLD",
-        crate::brush_playtest::BRUSH_WORLD_FILENAME,
-    );
-    // Streamed world (design 2026-10-08, M7): `PXBSP_WORLD` is then the
-    // resident top container and the regions live in this UI.PAK chunk.
-    let _ = writeln!(
-        out,
-        "pub const PXBSP_STREAMED: bool = {};",
-        world.stream.is_some(),
-    );
-    let _ = writeln!(
-        out,
-        "pub const PXBSP_STREAM_PACK_CHUNK: u32 = {};",
-        region_pack_chunk_id(package),
-    );
-    let _ = writeln!(
-        out,
-        "pub const PXBSP_STREAM_REGIONS: usize = {};",
-        world.stream.as_ref().map_or(0, |stream| stream.regions),
-    );
-    let node_ids = world
-        .movers
-        .iter()
-        .map(|mover| mover.node.to_string())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let model_indices = world
-        .movers
-        .iter()
-        .map(|mover| mover.model_index.to_string())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let _ = writeln!(
-        out,
-        "pub static PXBSP_MOVER_NODE_IDS: &[u32] = &[{node_ids}];"
-    );
-    let _ = writeln!(
-        out,
-        "pub static PXBSP_MOVER_MODEL_INDICES: &[u16] = &[{model_indices}];"
-    );
-    out.push_str(
-        "pub static PXBSP_BODY_HULLS: &[psx_bsp::collision_provider::CookedBodyHull] = &[\n",
-    );
-    for hull in world.body_hulls {
-        let _ = writeln!(
-            out,
-            "    psx_bsp::collision_provider::CookedBodyHull::new({}, {}, {}),",
-            hull.hull_index, hull.radius, hull.height,
-        );
-    }
-    out.push_str("];\n\n");
+    out.push_str("pub const PLAYTEST_HAS_WORLD: bool = true;\n");
+    // Actor and prop lighting outside the baked world uses this ambient;
+    // the world itself carries per-corner baked light.
+    out.push_str("pub const WORLD_AMBIENT_RGB: [u8; 3] = [32; 3];\n\n");
 
     // Emit one named static per asset so the include_bytes! call
     // sites are easy to grep for. Asset records reference these
@@ -908,23 +780,6 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         );
     }
     out.push_str("];\n\n");
-
-    let _ = writeln!(
-        out,
-        "pub static WORLD_OBJECT_LEAF_RANGES: &[[u16; 2]] = &{:?};",
-        package.world_object_leaf_ranges,
-    );
-    let _ = writeln!(
-        out,
-        "pub static WORLD_OBJECT_LEAVES: &[u16] = &{:?};\n",
-        package.world_object_leaves,
-    );
-
-    let _ = writeln!(
-        out,
-        "pub static SOLID_CELL_PARENTS: &[u16] = &{:?};\n",
-        package.solid_cell_parents
-    );
 
     out.push_str("/// Placed flat image props, room-local coordinates.\n");
     out.push_str("pub static IMAGE_PROPS: &[LevelImagePropRecord] = &[\n");
@@ -1996,23 +1851,7 @@ fn ui_pack_chunks(package: &PlaytestPackage) -> Vec<(u32, &[u8])> {
         .filter(|(_, asset)| asset.is_streamed())
         .map(|(index, asset)| (index as u32, asset.bytes.as_slice()))
         .chain(ui_sfx_pack_chunks(package))
-        .chain(region_pack_chunk(package))
         .collect()
-}
-
-/// UI.PAK chunk id of the streamed world's region pack: the first id past
-/// every asset index and UI SFX sample.
-fn region_pack_chunk_id(package: &PlaytestPackage) -> u32 {
-    ui_sfx_pack_first_chunk(package) + package.ui_sfx_samples.len() as u32
-}
-
-/// The region pack as a UI.PAK chunk, when the world is streamed.
-fn region_pack_chunk(package: &PlaytestPackage) -> Option<(u32, &[u8])> {
-    package
-        .world_geometry
-        .stream
-        .as_ref()
-        .map(|stream| (region_pack_chunk_id(package), stream.region_pack.as_slice()))
 }
 
 /// UI.PAK chunk id of the first UI SFX sample: the first id past every asset

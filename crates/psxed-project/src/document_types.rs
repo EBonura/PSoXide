@@ -111,9 +111,10 @@ pub(crate) fn clamp_q12_pitch(value: u16) -> u16 {
 pub struct EditorVisibilityState {
     #[serde(default = "default_true")]
     pub show_grid: bool,
-    /// Project the active world grid over visible BSP brush faces while
-    /// leaving the ordinary background grid independently controllable.
-    #[serde(default = "default_true")]
+    /// Always false and never saved. The pinned emulator frontend still reads
+    /// this field when it composites a brush surface grid; the grid world has
+    /// no such overlay. Remove when the frontend drops the read.
+    #[serde(skip)]
     pub show_brush_surface_grid: bool,
     #[serde(default = "default_true")]
     pub show_lights: bool,
@@ -121,21 +122,16 @@ pub struct EditorVisibilityState {
     pub preview_bounds: bool,
     #[serde(default = "default_true")]
     pub show_play_debug_overlays: bool,
-    /// Wireframe outlines for UNSELECTED brushes. Off by default: selected
-    /// brushes always outline, the full cage is an opt-in alignment view.
-    #[serde(default)]
-    pub show_brush_wireframes: bool,
 }
 
 impl Default for EditorVisibilityState {
     fn default() -> Self {
         Self {
             show_grid: true,
-            show_brush_surface_grid: true,
+            show_brush_surface_grid: false,
             show_lights: true,
             preview_bounds: true,
             show_play_debug_overlays: true,
-            show_brush_wireframes: false,
         }
     }
 }
@@ -164,16 +160,14 @@ pub struct EditorWorkspaceState {
     pub active: EditorWorkspaceView,
 }
 
-/// Which orthographic projection the 2D viewport shows.
+/// Which orthographic projection the 2D viewport shows. Only the plan view
+/// is left; files that saved a Front or Side view read back as it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EditorOrthographicView {
     /// XZ plane, looking down -Y.
     #[default]
+    #[serde(alias = "Front", alias = "Side")]
     Top,
-    /// XY plane, looking down +Z.
-    Front,
-    /// ZY plane, looking down -X.
-    Side,
 }
 
 /// Editor-only viewport layout persisted with a project: whether the
@@ -286,28 +280,6 @@ pub struct ProjectDocument {
     /// Starting 2D/orthographic layout, see [`Self::editor_camera`].
     #[serde(default)]
     pub editor_viewport: EditorViewportState,
-    /// BSP compiler quality used by Build, Play, and Rebuild. Persisting this
-    /// in the project keeps GUI and CLI cooks on one deterministic policy.
-    #[serde(default)]
-    pub bsp_cook_mode: crate::brush_world::BrushWorldCookMode,
-    /// Build the body-hull collision trees as solid-leaf hull BSPs
-    /// (`brush_region_hulls`) instead of per-brush plane chains. The output
-    /// format is identical; the tree is far shallower on dense geometry.
-    /// On by default; a project can write `collision_hull_bsp: false` to fall
-    /// back to the chain compiler.
-    #[serde(default = "default_true", skip_serializing_if = "is_true")]
-    pub collision_hull_bsp: bool,
-    /// Optional render T-junction repair. Disabled for older projects to
-    /// preserve their geometry and packet budgets; preview and cook agree.
-    #[serde(default, skip_serializing_if = "is_default")]
-    pub bsp_render_edge_repair: crate::brush_compile::SurfaceEdgeRepair,
-    /// Collision partition target shared by editor Build/Play and CLI cooks.
-    /// Legacy projects default to 48; 32 trades collision RAM for shorter walks.
-    #[serde(default, skip_serializing_if = "is_default")]
-    pub bsp_collision_leaf_target: crate::brush_collision_hulls::CollisionLeafTarget,
-    /// Optional exact solid-cell proof metadata. Legacy projects keep full paths.
-    #[serde(default, skip_serializing_if = "is_default")]
-    pub bsp_solid_cell_proofs: bool,
     /// Worst-case joint rotation error, in whole degrees, that the cook may
     /// introduce by resampling animation clips to a lower rate. `0` disables
     /// resampling and cooks every clip at its authored rate.
@@ -389,14 +361,6 @@ fn default_true() -> bool {
     true
 }
 
-fn is_default<T: Default + PartialEq>(value: &T) -> bool {
-    *value == T::default()
-}
-
-fn is_true(value: &bool) -> bool {
-    *value
-}
-
 impl ProjectDocument {
     /// Create an empty project with one scene.
     pub fn new(name: impl Into<String>) -> Self {
@@ -411,11 +375,6 @@ impl ProjectDocument {
             animation_error_budget_degrees: 0,
             animation_trim_still_percent: 0,
             animation_track_budget_units: 0,
-            bsp_cook_mode: crate::brush_world::BrushWorldCookMode::default(),
-            collision_hull_bsp: true,
-            bsp_render_edge_repair: crate::brush_compile::SurfaceEdgeRepair::default(),
-            bsp_collision_leaf_target: crate::brush_collision_hulls::CollisionLeafTarget::default(),
-            bsp_solid_cell_proofs: false,
             scenes: vec![Scene::new("Main")],
             ui_scenes,
             scene_states,
@@ -427,18 +386,20 @@ impl ProjectDocument {
         }
     }
 
-    /// Deserialize the default project shipped at
-    /// `editor/projects/default/project.ron`. The on-disk RON file
-    /// is the single source of truth -- the editor reads the exact
-    /// same bytes a `cargo run` would, so changes to the default
-    /// project are git-trackable and don't require a rebuild.
+    /// The default project shipped at `editor/projects/default/project.ron`
+    /// (its characters, animations, audio and UI), with the grid starter room
+    /// as its world so it cooks and plays. The on-disk RON file is the single
+    /// source of truth for everything but the world.
     ///
     /// Panics only if the embedded RON drifts out of sync with the
     /// `ProjectDocument` schema; the `embedded_default_project_ron_deserializes`
     /// test guards the build-time invariant.
     pub fn starter() -> Self {
-        Self::from_ron_str(DEFAULT_PROJECT_RON)
-            .expect("editor/projects/default/project.ron is malformed")
+        let mut project = Self::from_ron_str(DEFAULT_PROJECT_RON)
+            .expect("editor/projects/default/project.ron is malformed");
+        crate::grid::starter::into_starter(&mut project)
+            .expect("the default project has a floor to stand on");
+        project
     }
 
     /// Active scene.
@@ -1260,57 +1221,9 @@ impl ProjectDocument {
             .retain(|resource| !matches!(resource.data, ResourceData::Texture { .. }));
     }
 
-    /// Fold the former material-owned sky projection choices into the World
-    /// node. The material keeps only the aperture role; one World now owns the
-    /// projection, source texture and visibility policy.
+    /// Fold the former material-owned sky flags into the aperture role. The
+    /// World node owns the projection, source texture and visibility policy.
     fn migrate_legacy_material_skies(&mut self) {
-        let legacy_skies: Vec<(ResourceId, SkyMode)> = self
-            .resources
-            .iter()
-            .filter_map(|resource| {
-                let ResourceData::Material(material) = &resource.data else {
-                    return None;
-                };
-                if material.directional_sky {
-                    Some((resource.id, SkyMode::Cube))
-                } else if material.layered_sky {
-                    Some((resource.id, SkyMode::QuakeLayered))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        for scene in &mut self.scenes {
-            let selected = legacy_skies
-                .iter()
-                .copied()
-                .filter(|(material, _)| {
-                    scene.brushes.iter().any(|brush| {
-                        brush
-                            .faces
-                            .iter()
-                            .any(|face| face.material == Some(*material))
-                    })
-                })
-                // The old renderer gave the cube pass priority if both were
-                // visible, so preserve that deterministic result.
-                .max_by_key(|(_, mode)| usize::from(*mode == SkyMode::Cube));
-            let Some((texture, mode)) = selected else {
-                continue;
-            };
-            let root = scene.root;
-            let Some(world) = scene.node_mut(root) else {
-                continue;
-            };
-            let NodeKind::World { sky, .. } = &mut world.kind else {
-                continue;
-            };
-            sky.mode = mode;
-            sky.visibility = SkyVisibility::ThroughSkySurfaces;
-            sky.texture = Some(texture);
-        }
-
         for resource in &mut self.resources {
             let ResourceData::Material(material) = &mut resource.data else {
                 continue;
@@ -1341,7 +1254,6 @@ impl ProjectDocument {
         self.normalize_scene_states();
         for scene in &mut self.scenes {
             scene.normalize_world_root();
-            scene.normalize_brush_groups();
             // CharacterController owns the runtime body dimensions. Older
             // projects also created a sibling capsule Collider, producing two
             // conflicting capsule editors even though the generic Collider is

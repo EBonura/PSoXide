@@ -436,8 +436,6 @@ pub fn cook_level(
 }
 
 #[cfg(test)]
-mod legacy_slabs;
-#[cfg(test)]
-mod parity;
+mod spawn_tests;
 #[cfg(test)]
 mod tests;

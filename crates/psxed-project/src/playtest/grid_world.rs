@@ -23,8 +23,7 @@ use crate::{
 };
 
 use super::{
-    PlaytestAsset, PlaytestAssetKind, PlaytestGridWorld, PlaytestPxbspWorld,
-    PlaytestValidationReport, PlaytestWorldRender, StreamedClass,
+    PlaytestAsset, PlaytestAssetKind, PlaytestGridWorld, PlaytestValidationReport, StreamedClass,
 };
 
 /// Texel size of the tile the grid renderer maps one material onto.
@@ -34,7 +33,7 @@ const DEFAULT_LIGHT_RADIUS_UNITS: f64 = 1024.0;
 
 /// Check a grid scene against the shared caps and the runtime lattice.
 /// Returns `false` when the world cannot be cooked; the reasons are in
-/// `report`. Brush scenes return `true`.
+/// `report`. A scene without a grid world is refused later, by the cook.
 pub(super) fn validate(project: &ProjectDocument, report: &mut PlaytestValidationReport) -> bool {
     let Some(world) = project.active_scene().world.grid() else {
         return true;
@@ -87,6 +86,19 @@ fn scene_lights(scene: &Scene) -> Vec<GridLight> {
         .collect()
 }
 
+/// The 8 by 8 white texture a face without a material is drawn with.
+fn flat_white_psxt() -> Vec<u8> {
+    psxed_tex::encode_indexed_psxt(
+        8,
+        8,
+        psxed_format::texture::Depth::Bit4,
+        &[1; 64],
+        &[[0, 0, 0], [255, 255, 255]],
+        false,
+    )
+    .expect("fixed fallback texture is valid")
+}
+
 /// Binds document materials to texture assets in the package.
 struct Binder<'a> {
     project: &'a ProjectDocument,
@@ -104,8 +116,8 @@ impl MaterialBinder for Binder<'_> {
         let mut blend = PsxBlendMode::Opaque;
         let mut sided = MaterialFaceSidedness::Front;
         let mut textured = false;
-        let mut key = "@brush-flat-white".to_string();
-        let mut bytes = crate::brush_world::flat_white_psxt();
+        let mut key = "@flat-white".to_string();
+        let mut bytes = flat_white_psxt();
         if let Some(id) = material {
             let resource = self
                 .project
@@ -218,7 +230,7 @@ pub(super) fn cook(
     assets: &mut Vec<PlaytestAsset>,
     texture_asset_for_path: &mut HashMap<String, usize>,
     report: &mut PlaytestValidationReport,
-) -> Option<PlaytestPxbspWorld> {
+) -> Option<PlaytestGridWorld> {
     let lights = scene_lights(project.active_scene());
     let mut binder = Binder {
         project,
@@ -261,16 +273,20 @@ pub(super) fn cook(
     }
     let summary = cooked.report.summary();
     report.warn(summary.trim_end().to_string());
-    Some(PlaytestPxbspWorld {
-        render: PlaytestWorldRender::Grid,
-        texture_asset_indices: used.clone(),
-        grid: Some(PlaytestGridWorld {
-            core: cooked.core,
-            rooms,
-            texture_asset_indices: used,
-            summary,
-        }),
-        ..PlaytestPxbspWorld::default()
+    let surfaces = |room: &cook::RoomReport| room.quads + room.triangles;
+    Some(PlaytestGridWorld {
+        core: cooked.core,
+        rooms,
+        texture_asset_indices: used,
+        faces: cooked.report.rooms.iter().map(surfaces).sum(),
+        triangles: cooked
+            .report
+            .rooms
+            .iter()
+            .map(|room| room.quads * 2 + room.triangles)
+            .sum(),
+        max_room_surfaces: cooked.report.rooms.iter().map(surfaces).max().unwrap_or(0),
+        summary,
     })
 }
 
@@ -298,13 +314,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         assert!(report.is_ok(), "{:?}", report.error_messages());
         let package = package.expect("a package");
-        let world = &package.world_geometry;
-        assert_eq!(world.render, PlaytestWorldRender::Grid);
-        assert!(world.bytes.is_empty(), "no PXBSP bytes for a grid world");
-        let grid = world.grid.as_ref().expect("a grid level");
+        let grid = &package.world_geometry;
         assert!(grid.core.starts_with(b"PGL1"));
         assert!(grid.rooms.starts_with(b"PGRM"));
         assert_eq!(grid.rooms.len() % SECTOR_BYTES, 0);
+        assert!(grid.faces > 0 && grid.max_room_surfaces <= grid.faces);
     }
 
     #[test]

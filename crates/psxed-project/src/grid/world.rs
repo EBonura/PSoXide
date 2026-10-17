@@ -163,33 +163,33 @@ impl GridWorld {
     }
 }
 
-/// What kind of world a scene holds.
+/// What a scene's world holds.
 ///
-/// `Brushes` is the BSP brush world every existing project has, stored in
-/// [`Scene::brushes`](crate::Scene::brushes). `Grid` is the sector-grid
-/// world. The default, and the only value that is never written to disk, is
-/// `Brushes`, so a project saved before this field existed loads and saves
-/// exactly as it did.
+/// `Empty` is the default and the only value never written to disk, so a
+/// scene with no sectors saves as it always has. `Grid` is the sector grid.
+/// Files from the removed brush world carried `Brushes` here (it was never
+/// written either), which the alias still reads as `Empty`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SceneWorld {
-    /// Convex brush (BSP) world.
+    /// No world authored yet.
     #[default]
-    Brushes,
+    #[serde(alias = "Brushes")]
+    Empty,
     /// Sector-grid world.
     Grid(GridWorld),
 }
 
 impl SceneWorld {
-    /// Whether this is the default brush world.
-    pub fn is_brushes(&self) -> bool {
-        matches!(self, Self::Brushes)
+    /// Whether this is the default empty world.
+    pub fn is_empty(&self) -> bool {
+        matches!(self, Self::Empty)
     }
 
     /// The grid world, if this is one.
     pub fn grid(&self) -> Option<&GridWorld> {
         match self {
             Self::Grid(grid) => Some(grid),
-            Self::Brushes => None,
+            Self::Empty => None,
         }
     }
 
@@ -197,7 +197,7 @@ impl SceneWorld {
     pub fn grid_mut(&mut self) -> Option<&mut GridWorld> {
         match self {
             Self::Grid(grid) => Some(grid),
-            Self::Brushes => None,
+            Self::Empty => None,
         }
     }
 }
@@ -262,9 +262,9 @@ mod tests {
     }
 
     #[test]
-    fn only_the_brush_default_skips_serialisation() {
-        assert!(SceneWorld::default().is_brushes());
-        assert!(!SceneWorld::Grid(GridWorld::new()).is_brushes());
-        assert!(SceneWorld::Brushes.grid().is_none());
+    fn only_the_empty_default_skips_serialisation() {
+        assert!(SceneWorld::default().is_empty());
+        assert!(!SceneWorld::Grid(GridWorld::new()).is_empty());
+        assert!(SceneWorld::Empty.grid().is_none());
     }
 }

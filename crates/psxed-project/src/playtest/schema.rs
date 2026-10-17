@@ -106,18 +106,8 @@ pub enum PlaytestAssetKind {
     ModelAnimation,
 }
 
-/// Which runtime owns the world: rendering, collision, activation, sky.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum PlaytestWorldRender {
-    /// The PXBSP runtime (brush worlds).
-    #[default]
-    Pxbsp,
-    /// The sector-grid runtime reading [`PlaytestPxbspWorld::grid`].
-    Grid,
-}
-
 /// A cooked grid world: the resident level core and the room chunks.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PlaytestGridWorld {
     /// Level core file (`PGL1`).
     pub core: Vec<u8>,
@@ -127,77 +117,14 @@ pub struct PlaytestGridWorld {
     pub rooms: Vec<u8>,
     /// Texture assets the level's materials use.
     pub texture_asset_indices: Vec<usize>,
+    /// Cooked surfaces (quads and triangles) over all rooms.
+    pub faces: usize,
+    /// Triangles the cooked surfaces amount to (a quad is two).
+    pub triangles: usize,
+    /// Cooked surfaces of the largest room.
+    pub max_room_surfaces: usize,
     /// One block of text with the cook's sizes, for the build log.
     pub summary: String,
-}
-
-/// Resident PXBSP payload and the deterministic authored mover mapping needed
-/// by normal gameplay logic.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlaytestPxbspWorld {
-    /// The world kind the guest builds its renderer for.
-    pub render: PlaytestWorldRender,
-    /// Optional exact solid-cell implication certificates; absent cells use full paths.
-    pub solid_cell_proofs: crate::solid_cell_proofs::SolidCellProofs,
-    /// Complete PXBSP file emitted by the brush compiler.
-    pub bytes: Vec<u8>,
-    /// Cooker-proven upper bound for both runtime PVS face chains.
-    pub max_visible_faces: usize,
-    /// Exact authored body envelopes used for collision hulls one and two.
-    pub body_hulls: [psx_bsp::collision_provider::CookedBodyHull; 2],
-    /// Texture assets referenced by the resident world's material table.
-    /// These stay in the ordinary room-residency contract so the shared VRAM
-    /// owner cannot evict them while the BSP world is active.
-    pub texture_asset_indices: Vec<usize>,
-    /// Brush submodels in authored-node order.
-    pub movers: Vec<PlaytestPxbspMover>,
-    /// Quake-style pointfile path; empty when the world is sealed.
-    pub leak_path: Vec<[i32; 3]>,
-    /// The streamed form of the world (design 2026-10-08, M7), present only
-    /// when the cook ran with `PSXED_STREAM_WORLD=stream`. `bytes` stays the
-    /// whole-map container of the same geometry, which the budget and
-    /// analysis passes read; the guest loads `stream.container` instead.
-    pub stream: Option<PlaytestStreamedWorld>,
-    /// The cooked grid level of a grid world; `None` for brush worlds.
-    pub grid: Option<PlaytestGridWorld>,
-}
-
-/// A world cooked as a resident top container plus a region pack on disc.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlaytestStreamedWorld {
-    /// PXBSP v6 top container with a non-empty StreamingIndex; becomes the
-    /// guest's `PXBSP_WORLD`.
-    pub container: Vec<u8>,
-    /// Sector-aligned region payloads in disc order; one UI.PAK chunk.
-    pub region_pack: Vec<u8>,
-    /// Number of regions in the pack.
-    pub regions: usize,
-}
-
-impl Default for PlaytestPxbspWorld {
-    fn default() -> Self {
-        Self {
-            render: PlaytestWorldRender::Pxbsp,
-            solid_cell_proofs: Default::default(),
-            bytes: Vec::new(),
-            max_visible_faces: 0,
-            body_hulls: [psx_bsp::collision_provider::CookedBodyHull::new(0, 0, 0); 2],
-            texture_asset_indices: Vec::new(),
-            movers: Vec::new(),
-            leak_path: Vec::new(),
-            stream: None,
-            grid: None,
-        }
-    }
-}
-
-/// Link from an authored Door logic node to its PXBSP brush submodel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PlaytestPxbspMover {
-    /// Stable authored [`crate::NodeId`] value.
-    pub node: u32,
-    /// Model zero is the static world; mover models start at one.
-    pub model_index: u16,
 }
 
 /// Streaming class of a [`PlaytestAsset`]. A streamed asset's baked
@@ -1789,10 +1716,8 @@ pub struct PlaytestPackage {
     pub save_name: String,
     /// Human-readable ASCII memory-card title.
     pub save_title: String,
-    /// Project-authoritative BSP compiler quality used for this package.
-    pub bsp_cook_mode: crate::brush_world::BrushWorldCookMode,
-    /// The resident PXBSP static world.
-    pub world_geometry: PlaytestPxbspWorld,
+    /// The cooked grid world.
+    pub world_geometry: PlaytestGridWorld,
     /// Project-relative paths of every source texture the cook actually
     /// reached, deduplicated.
     ///
@@ -1833,14 +1758,8 @@ pub struct PlaytestPackage {
     /// Shared destructible states; targets refer to these indices.
     pub destructibles: Vec<PlaytestDestructible>,
     /// Shared spatial registry for every specialized static prop and beacon.
-    /// Structural brush geometry lives directly in PXBSP; model instances
-    /// already use the same PVS authority through their animated bounds.
+    /// The grid's structural geometry lives in the level core and room chunks.
     pub world_objects: Vec<PlaytestWorldObject>,
-    /// Static registry leaf slices: [first, count]; count MAX retains AABB fallback.
-    pub world_object_leaf_ranges: Vec<[u16; 2]>,
-    pub world_object_leaves: Vec<u16>,
-    /// Verified directed parent edge per render BSP node; empty disables certificates.
-    pub solid_cell_parents: Vec<u16>,
     /// Placed flat image props, room-local coordinates.
     pub image_props: Vec<PlaytestImageProp>,
     /// Placed editable box props, room-local coordinates.
@@ -1962,8 +1881,6 @@ impl PlaytestPackage {
 /// cooking; warnings are surfaced but not fatal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlaytestValidationTarget {
-    /// Brush and optional authored face index in the active scene.
-    Brush { brush: usize, face: Option<usize> },
     /// Scene-tree node responsible for the failure.
     Node(NodeId),
     /// Project resource responsible for the failure.
@@ -1973,7 +1890,7 @@ pub enum PlaytestValidationTarget {
 /// One hard error, with the authoring object responsible when the cook can
 /// derive one. Per-error rather than per-report: the diagnostics panel lists
 /// every failure, and an author who reads row four wants to jump to row four's
-/// brush, not to whatever row one happened to blame.
+/// node, not to whatever row one happened to blame.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlaytestValidationError {
     pub message: String,

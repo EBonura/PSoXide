@@ -586,44 +586,6 @@ fn material_versions_preserve_complete_recipes_and_stable_identity() {
 }
 
 #[test]
-fn legacy_material_sky_migrates_to_one_world_sky_and_one_aperture_flag() {
-    let mut project = ProjectDocument::new("legacy directional sky");
-    let mut material = MaterialResource::opaque(Some("assets/sky.psxt".to_string()));
-    material.directional_sky = true;
-    let sky_material = project.add_resource("Legacy Sky", ResourceData::Material(material));
-    let mut brush = crate::brush::Brush::cuboid([0, 0, 0], [128, 128, 128]);
-    for face in &mut brush.faces {
-        face.material = Some(sky_material);
-    }
-    project.active_scene_mut().brushes.push(brush);
-    let root = project.active_scene().root;
-    let NodeKind::World { sky, .. } = &mut project
-        .active_scene_mut()
-        .node_mut(root)
-        .expect("world")
-        .kind
-    else {
-        panic!("root is not a World");
-    };
-    sky.mode = SkyMode::Off;
-
-    project.normalize_loaded();
-
-    let ResourceData::Material(material) = &project.resource(sky_material).unwrap().data else {
-        panic!("resource changed kind");
-    };
-    assert!(material.sky_aperture);
-    assert!(!material.layered_sky);
-    assert!(!material.directional_sky);
-    let NodeKind::World { sky, .. } = &project.active_scene().node(root).unwrap().kind else {
-        panic!("root is not a World");
-    };
-    assert_eq!(sky.mode, SkyMode::Cube);
-    assert_eq!(sky.visibility, SkyVisibility::ThroughSkySurfaces);
-    assert_eq!(sky.texture, Some(sky_material));
-}
-
-#[test]
 fn material_versions_round_trip_and_legacy_materials_become_original() {
     let legacy = r#"(
         texture_mode: SimpleImage,
@@ -1004,6 +966,8 @@ fn default_project_instantiates_the_single_animated_heavy_enemy() {
         );
     }
 
+    let mut project = project;
+    crate::grid::starter::attach_starter_world(&mut project);
     let (package, report) = playtest::build_package(&project, &default_project_dir());
     assert!(
         report.is_ok(),
@@ -1436,6 +1400,8 @@ fn cortex_v04b_light_enemy_attack_ladder_uses_named_attack_clips() {
         }
     )));
 
+    let mut project = project;
+    crate::grid::starter::attach_starter_world(&mut project);
     let (package, report) = playtest::build_package(&project, &root);
     assert!(report.is_ok(), "Cortex 0.3 must cook: {:?}", report.errors);
     let package = package.expect("Cortex 0.3 package");
@@ -1517,10 +1483,10 @@ fn starter_project_has_scene_tree_and_resources() {
     let project = ProjectDocument::starter();
 
     assert_eq!(project.scenes.len(), 1);
-    // Starter includes BSP geometry plus gameplay resources for the animated
-    // character and weapon path.
+    // Starter includes the starter room plus gameplay resources for the
+    // animated character and weapon path.
     assert!(project.resources.len() >= 10);
-    assert!(!project.active_scene().brushes.is_empty());
+    assert!(project.active_scene().world.grid().is_some());
 
     let aletha = project
         .resources
@@ -1647,34 +1613,6 @@ fn removing_node_removes_descendants() {
     assert!(scene
         .node(scene.root)
         .is_some_and(|root| root.children.is_empty()));
-}
-
-#[test]
-fn brush_groups_normalize_and_remove_with_their_subtree() {
-    let mut scene = Scene::new("Test");
-    let group = scene.add_node(scene.root, "Architecture", NodeKind::Group);
-    let nested = scene.add_node(group, "Stairs", NodeKind::Group);
-    let not_a_group = scene.add_node(scene.root, "Entity", NodeKind::Entity);
-    for owner in [
-        Some(group),
-        Some(nested),
-        Some(not_a_group),
-        Some(NodeId(99_999)),
-    ] {
-        let mut brush = brush::Brush::cuboid([0, 0, 0], [128, 128, 128]);
-        brush.group = owner;
-        scene.brushes.push(brush);
-    }
-
-    scene.normalize_brush_groups();
-    assert_eq!(scene.brushes[0].group, Some(group));
-    assert_eq!(scene.brushes[1].group, Some(nested));
-    assert_eq!(scene.brushes[2].group, None);
-    assert_eq!(scene.brushes[3].group, None);
-    assert_eq!(scene.brush_indices_in_group(group, true), vec![0, 1]);
-
-    assert!(scene.remove_node(group));
-    assert!(scene.brushes.iter().all(|brush| brush.group.is_none()));
 }
 
 #[test]
@@ -2603,7 +2541,6 @@ fn editor_visibility_roundtrips_through_ron_string() {
         show_lights: false,
         preview_bounds: false,
         show_play_debug_overlays: false,
-        show_brush_wireframes: true,
     };
     let ron = project.to_ron_string().unwrap();
 
@@ -2628,7 +2565,7 @@ fn editor_viewport_roundtrips_and_defaults_for_legacy_projects() {
     let mut project = ProjectDocument::new("viewport");
     project.editor_viewport = EditorViewportState {
         view_2d: true,
-        orthographic_view: EditorOrthographicView::Front,
+        orthographic_view: EditorOrthographicView::Top,
         orthographic_focus: [128.0, 256.0, -64.0],
         viewport_zoom: 48.0,
         snap_units: 32,
@@ -2642,6 +2579,12 @@ fn editor_viewport_roundtrips_and_defaults_for_legacy_projects() {
     // the ProjectDocument field itself is #[serde(default)].
     let legacy: EditorViewportState = ron::from_str("()").unwrap();
     assert_eq!(legacy, EditorViewportState::default());
+
+    // The removed Front and Side views read back as the plan view.
+    let front: EditorViewportState = ron::from_str("(orthographic_view: Front)").unwrap();
+    let side: EditorViewportState = ron::from_str("(orthographic_view: Side)").unwrap();
+    assert_eq!(front.orthographic_view, EditorOrthographicView::Top);
+    assert_eq!(side.orthographic_view, EditorOrthographicView::Top);
 }
 
 #[test]
@@ -3863,7 +3806,8 @@ fn action_chains_default_empty_for_legacy_sets() {
 #[test]
 fn action_chains_cook_and_reject_missing_targets_bad_windows_and_duplicates() {
     let root = default_project_dir();
-    let project = ProjectDocument::load_from_path(root.join("project.ron")).unwrap();
+    let mut project = ProjectDocument::load_from_path(root.join("project.ron")).unwrap();
+    crate::grid::starter::attach_starter_world(&mut project);
     let set_id = project
         .resources
         .iter()
@@ -3963,7 +3907,8 @@ fn camera_profiles_normalize_extremes_and_preserve_legacy_lens() {
 fn graybox_single_enemy_tactical_encounter_cooks_with_approved_walk() {
     let root = projects_dir().join("graybox-reach");
     let source = std::fs::read_to_string(root.join("project.ron")).unwrap();
-    let project = ProjectDocument::from_ron_str(&source).unwrap();
+    let mut project = ProjectDocument::from_ron_str(&source).unwrap();
+    crate::grid::starter::attach_starter_world(&mut project);
     let (package, report) = playtest::build_package(&project, &root);
     assert!(report.is_ok(), "{:?}", report.errors);
     let package = package.unwrap();
@@ -3993,6 +3938,7 @@ fn graybox_ranged_weapon_cooks_without_a_melee_arc_but_melee_still_requires_one(
     let root = projects_dir().join("graybox-reach");
     let source = std::fs::read_to_string(root.join("project.ron")).unwrap();
     let mut project = ProjectDocument::from_ron_str(&source).unwrap();
+    crate::grid::starter::attach_starter_world(&mut project);
     let (package, report) = playtest::build_package(&project, &root);
     assert!(report.is_ok(), "{:?}", report.errors);
     let package = package.unwrap();
@@ -4035,6 +3981,7 @@ fn combat_windows_default_empty_and_cook_validate_the_authored_contract() {
         .unwrap()
         .join("graybox-reach");
     let mut project = ProjectDocument::load_from_path(root.join("project.ron")).unwrap();
+    crate::grid::starter::attach_starter_world(&mut project);
     let id = project
         .resources
         .iter()
@@ -4168,7 +4115,7 @@ fn fractional_world_gravity_survives_authoring_units_and_legacy_defaults() {
 
 #[test]
 fn legacy_scene_nodes_with_a_floor_field_still_load() {
-    let project = ProjectDocument::starter();
+    let project = ProjectDocument::from_ron_str(DEFAULT_PROJECT_RON).unwrap();
     let ron = project.to_ron_string().unwrap();
     assert!(!ron.contains("floor:"), "SceneNode no longer writes floor");
 
@@ -4176,85 +4123,4 @@ fn legacy_scene_nodes_with_a_floor_field_still_load() {
     let legacy = ron.replace("parent:", "floor: 2,\n parent:");
     assert!(legacy.contains("floor: 2,"), "the fixture must hit a node");
     assert_eq!(ProjectDocument::from_ron_str(&legacy).unwrap(), project);
-}
-
-#[test]
-fn collision_leaf_policy_defaults_and_roundtrips() {
-    use crate::brush_collision_hulls::CollisionLeafTarget;
-    let mut project = ProjectDocument::new("collision policy");
-    assert_eq!(
-        project.bsp_collision_leaf_target,
-        CollisionLeafTarget::Brushes48
-    );
-    let serialized = project.to_ron_string().unwrap();
-    let legacy = serialized
-        .lines()
-        .filter(|line| !line.contains("bsp_collision_leaf_target:"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert_eq!(
-        ProjectDocument::from_ron_str(&legacy)
-            .unwrap()
-            .bsp_collision_leaf_target,
-        CollisionLeafTarget::Brushes48
-    );
-    project.bsp_collision_leaf_target = CollisionLeafTarget::Brushes32;
-    let serialized = project.to_ron_string().unwrap();
-    assert_eq!(
-        ProjectDocument::from_ron_str(&serialized)
-            .unwrap()
-            .bsp_collision_leaf_target,
-        CollisionLeafTarget::Brushes32
-    );
-    assert!(ProjectDocument::from_ron_str(&serialized.replace("Brushes32", "Brushes0")).is_err());
-}
-
-#[test]
-fn local_face_repair_defaults_and_roundtrips() {
-    use crate::brush::BrushFace;
-    use crate::brush_compile::SurfaceEdgeRepair;
-    let mut face = BrushFace::from_points([[0, 0, 0], [16, 0, 0], [0, 0, 16]]);
-    let legacy = ron::ser::to_string(&face).unwrap();
-    assert!(!legacy.contains("edge_repair"));
-    assert_eq!(
-        ron::from_str::<BrushFace>(&legacy).unwrap().edge_repair,
-        None
-    );
-    for policy in [SurfaceEdgeRepair::All, SurfaceEdgeRepair::None] {
-        face.edge_repair = Some(policy);
-        let local = ron::ser::to_string(&face).unwrap();
-        assert_eq!(ron::from_str::<BrushFace>(&local).unwrap(), face);
-    }
-}
-
-#[test]
-fn solid_cell_proofs_are_explicit_opt_in_for_legacy_and_new_projects() {
-    let mut project = ProjectDocument::new("proof policy");
-    assert!(!project.bsp_solid_cell_proofs);
-    let serialized = project.to_ron_string().unwrap();
-    let legacy = serialized
-        .lines()
-        .filter(|line| !line.contains("bsp_solid_cell_proofs:"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(
-        !ProjectDocument::from_ron_str(&legacy)
-            .unwrap()
-            .bsp_solid_cell_proofs
-    );
-    project.bsp_solid_cell_proofs = true;
-    let serialized = project.to_ron_string().unwrap();
-    assert!(
-        ProjectDocument::from_ron_str(&serialized)
-            .unwrap()
-            .bsp_solid_cell_proofs
-    );
-    assert!(ProjectDocument::from_ron_str(
-        &serialized.replace("bsp_solid_cell_proofs: true", "bsp_solid_cell_proofs: 1")
-    )
-    .is_err());
-    assert_eq!(
-        crate::solid_cell_proofs::SolidCellProofs::default().resident_bytes(),
-        0
-    );
 }

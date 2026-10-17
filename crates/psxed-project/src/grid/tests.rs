@@ -60,7 +60,7 @@ fn shipped_projects_are_brush_worlds_and_round_trip() {
             .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
         for scene in &project.scenes {
             assert!(
-                scene.world.is_brushes(),
+                scene.world.is_empty(),
                 "{} scene {:?} did not load as a brush world",
                 path.display(),
                 scene.name
@@ -96,7 +96,7 @@ fn a_scene_without_the_field_loads_as_brushes() {
     let text = project.to_ron_string().unwrap();
     assert!(!text.contains("world: Brushes") && !text.contains("world: Grid"));
     let loaded = ProjectDocument::from_ron_str(&text).unwrap();
-    assert!(loaded.active_scene().world.is_brushes());
+    assert!(loaded.active_scene().world.is_empty());
 }
 
 #[test]

@@ -19,30 +19,32 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 mod animation_pose_correction;
 pub mod animation_resample;
 pub(crate) mod animation_tracks;
-pub mod brush;
-pub mod brush_collision_hulls;
-pub mod brush_compile;
-pub mod brush_convex;
-pub mod brush_grid;
-pub mod brush_light;
-pub mod brush_overlap;
-pub mod brush_pack;
-pub mod brush_playtest;
-pub mod brush_portal;
-pub mod brush_primitives;
-pub mod brush_pxbsp;
-pub mod brush_region;
-pub mod brush_region_hulls;
-pub mod brush_seams;
-pub mod brush_transform;
-mod brush_vis;
-pub mod brush_walk;
-pub mod brush_world;
 pub mod clip_window;
+/// Compatibility shim for the pinned emulator frontend, whose `cli.rs` still
+/// asks for a brush world leak diagnostic when it dumps an editor frame. A grid
+/// world has no leaks, so the answer is always an empty path. Remove this
+/// module when the frontend drops the call.
+pub mod brush_world {
+    use crate::ProjectDocument;
+
+    /// An empty leak report.
+    #[derive(Debug, Clone, Default)]
+    pub struct BrushWorldLeakDiagnostic {
+        /// Pointfile route; always empty.
+        pub path: Vec<[i32; 3]>,
+        /// Likely opening region; always empty.
+        pub likely_opening: Vec<[i32; 3]>,
+    }
+
+    /// Always reports a sealed world.
+    pub fn diagnose_brush_world_leak(
+        _project: ProjectDocument,
+    ) -> Result<BrushWorldLeakDiagnostic, String> {
+        Ok(BrushWorldLeakDiagnostic::default())
+    }
+}
 pub mod face_uv;
 pub mod grid;
-mod solid_cell_constraints;
-pub mod solid_cell_proofs;
 pub use animation_pose_correction::*;
 mod import_util;
 pub mod model_import;
@@ -54,7 +56,6 @@ pub mod resolve;
 pub mod sky_texture;
 pub mod spatial;
 pub mod streaming;
-pub mod terrain;
 pub mod texture_import;
 mod ui_types;
 pub mod units;
@@ -274,108 +275,28 @@ mod projects_dir_tests {
     }
 
     #[test]
-    fn new_project_template_is_a_buildable_pxbsp_level() {
+    fn new_project_template_is_a_buildable_grid_level() {
         let root = new_project_template_dir();
-        assert!(root.ends_with("brush-open-courtyard"));
+        assert!(root.ends_with("grid-starter"));
         let project = ProjectDocument::load_from_path(root.join("project.ron"))
-            .expect("load BSP-first project template");
-        assert_eq!(project.active_scene().brushes.len(), 5);
-        let solved = project
+            .expect("load the grid project template");
+        let world = project
             .active_scene()
-            .brushes
-            .iter()
-            .map(crate::brush::Brush::solve)
-            .collect::<Vec<_>>();
-        assert!(solved.iter().all(crate::brush::SolvedBrush::is_valid));
-        let world_min: [f64; 3] = std::array::from_fn(|axis| {
-            solved
-                .iter()
-                .map(|brush| brush.min[axis])
-                .fold(f64::INFINITY, f64::min)
-        });
-        let world_max: [f64; 3] = std::array::from_fn(|axis| {
-            solved
-                .iter()
-                .map(|brush| brush.max[axis])
-                .fold(f64::NEG_INFINITY, f64::max)
-        });
-        assert!(world_max[0] - world_min[0] >= f64::from(NEW_PROJECT_COURTYARD_OUTER_SIZE));
-        assert!(world_max[2] - world_min[2] >= f64::from(NEW_PROJECT_COURTYARD_OUTER_SIZE));
-
-        let spawn = project
-            .active_scene()
-            .nodes()
-            .iter()
-            .find(|node| matches!(node.kind, NodeKind::SpawnPoint { player: true, .. }))
-            .expect("one player spawn")
-            .transform
-            .translation;
-        assert_eq!(spawn, [8256.0, 65.0, 12352.0]);
-        const INTERIOR_MIN: f64 = NEW_PROJECT_COURTYARD_WALL_THICKNESS as f64;
-        const INTERIOR_MAX: f64 =
-            (NEW_PROJECT_COURTYARD_WALL_THICKNESS + NEW_PROJECT_COURTYARD_INTERIOR_SIZE) as f64;
-        const FLOOR_TOP: f64 = 64.0;
-        assert_eq!(
-            INTERIOR_MAX - INTERIOR_MIN,
-            f64::from(NEW_PROJECT_COURTYARD_INTERIOR_SIZE)
-        );
-        for brush in &solved {
-            let overlaps_interior_xz = brush.min[0] < INTERIOR_MAX
-                && brush.max[0] > INTERIOR_MIN
-                && brush.min[2] < INTERIOR_MAX
-                && brush.max[2] > INTERIOR_MIN;
-            assert!(
-                !(overlaps_interior_xz && brush.min[1] > FLOOR_TOP),
-                "starter has an overhead brush covering part of the 16384x16384 interior"
-            );
-        }
-        let material_paths = project
-            .resources
-            .iter()
-            .filter_map(|resource| match &resource.data {
-                ResourceData::Material(material) => material.psxt_path.as_deref(),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            material_paths,
-            [
-                "assets/textures/courtyard_cobbles.psxt",
-                "assets/textures/courtyard_brick.psxt",
-                "assets/textures/sky/quake_layered_sunset_4bpp.psxt",
-                "assets/textures/sky/directional_sunset_cube_4bpp.psxt",
-            ]
-        );
-        assert!(material_paths
-            .iter()
-            .all(|path| !path.contains("delven") && !path.contains("aletha")));
-
+            .world
+            .grid()
+            .expect("the template is a grid project");
+        assert_eq!(world.rooms.len(), 1);
+        assert!(project.active_scene().nodes().iter().any(|node| matches!(
+            node.kind,
+            NodeKind::SpawnPoint { player: true, .. }
+        ) || matches!(
+            node.kind,
+            NodeKind::CharacterController { player: true, .. }
+        )));
         let (package, report) = playtest::build_package(&project, &root);
-        assert!(report.is_ok(), "BSP starter cook: {:?}", report.errors);
-        let package = package.expect("BSP starter package");
-        let world = package.world_geometry;
-        let mut map = psx_bsp::pxbsp_resident::PxbspResidentMap::with_capacity(world.bytes.len());
-        map.load(0, &mut psx_bsp::SliceReader::new(&world.bytes))
-            .expect("load open courtyard PXBSP");
-        let origin = psx_bsp::Vec3I32 {
-            x: spawn[0] as i32 * 4096,
-            y: spawn[1] as i32 * 4096,
-            z: spawn[2] as i32 * 4096,
-        };
-        let mut trace = psx_bsp::collision::Trace::default();
-        assert!(map
-            .model_collision_hull(0, 1)
-            .expect("player hull")
-            .trace_into(
-                &origin,
-                &origin,
-                &mut psx_bsp::collision::TraceScratch::new(),
-                &mut trace,
-            ));
-        assert!(
-            !trace.start_solid.is_set() && !trace.all_solid.is_set(),
-            "spawn is solid: {trace:?}"
-        );
+        assert!(report.is_ok(), "grid starter cook: {:?}", report.errors);
+        let package = package.expect("grid starter package");
+        assert!(package.world_geometry.core.starts_with(b"PGL1"));
     }
 
     /// Seeding must respect a deletion. Re-creating the sample every launch
@@ -437,23 +358,10 @@ pub fn default_project_dir() -> PathBuf {
     projects_dir().join("default")
 }
 
-/// Exact usable width and depth of the New Project courtyard.
-pub const NEW_PROJECT_COURTYARD_INTERIOR_SIZE: i32 = 16_384;
-/// Thickness of the starter's floor and perimeter walls.
-pub const NEW_PROJECT_COURTYARD_WALL_THICKNESS: i32 = 64;
-/// Full floor footprint including both perimeter walls.
-pub const NEW_PROJECT_COURTYARD_OUTER_SIZE: i32 =
-    NEW_PROJECT_COURTYARD_INTERIOR_SIZE + 2 * NEW_PROJECT_COURTYARD_WALL_THICKNESS;
-/// World coordinate of the interior's centre on X and Z.
-pub const NEW_PROJECT_COURTYARD_CENTER: i32 = NEW_PROJECT_COURTYARD_OUTER_SIZE / 2;
-
-/// BSP-first template copied by the editor's New Project flow.
-///
-/// This is deliberately separate from the closed two-room door regression:
-/// authors start in a large roofless courtyard, while replay evidence keeps its
-/// frozen fixture and hashes. Both use the same normal PXBSP cook path.
+/// Grid project copied by the editor's New Project flow: one walled room with
+/// a lamp and the Graybox Reach player (see `grid::starter`).
 pub fn new_project_template_dir() -> PathBuf {
-    fixtures_dir().join("brush-open-courtyard")
+    projects_dir().join("grid-starter")
 }
 
 /// Enumerate every directory under [`projects_dir`] that contains a

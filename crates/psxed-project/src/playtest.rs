@@ -32,7 +32,6 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use psx_bsp::collision_provider::select_body_hull;
 use psx_level::{
     box_prop_flags, character_action_flags, cloud_layer_flags, image_prop_flags, model_clip_flags,
     particle_emitter_flags, sky_flags,
@@ -61,7 +60,6 @@ mod grid_world;
 mod manifest;
 mod performance;
 mod schema;
-mod world_object_leaf_links;
 pub(crate) use cook_ui::*;
 mod cook_entities;
 pub(crate) use cook_entities::*;
@@ -247,16 +245,6 @@ pub use manifest::{
 pub use performance::{playtest_performance_envelope, PlaytestPerformanceEnvelope};
 pub use schema::*;
 
-/// Open-hall experiment: the bonnie importer writes the level's ambient
-/// level (0 to 255) to `ambient.txt` beside the project; projects without
-/// one keep the engine default of 32.
-fn open_hall_ambient(project_root: &Path) -> [u8; 3] {
-    std::fs::read_to_string(project_root.join("ambient.txt"))
-        .ok()
-        .and_then(|text| text.trim().parse::<u8>().ok())
-        .map_or([32; 3], |level| [level; 3])
-}
-
 fn runtime_sky_flags(sky: crate::ResolvedSkySettings) -> u16 {
     if !sky.sky_enabled() {
         return 0;
@@ -278,133 +266,6 @@ fn runtime_sky_flags(sky: crate::ResolvedSkySettings) -> u16 {
 
 const UI_LARGE_IMAGE_STRIP_WIDTH: u16 = 160;
 const UI_LARGE_IMAGE_MAX_DIMENSION: u16 = 256;
-
-fn validate_pxbsp_body_hulls(
-    project: &ProjectDocument,
-    body_hulls: &[psx_bsp::collision_provider::CookedBodyHull],
-    characters: &[PlaytestCharacter],
-    game_entities: &[PlaytestGameEntity],
-    report: &mut PlaytestValidationReport,
-) {
-    let largest_radius = body_hulls.iter().map(|hull| hull.radius).max().unwrap_or(0);
-    let largest_height = body_hulls.iter().map(|hull| hull.height).max().unwrap_or(0);
-    for character in characters {
-        if select_body_hull(
-            body_hulls,
-            i32::from(character.radius),
-            i32::from(character.height),
-        )
-        .is_none()
-        {
-            let name = project
-                .resource(character.source_resource)
-                .map(|resource| resource.name.as_str())
-                .unwrap_or("<missing Character>");
-            report.error(format!(
-                "Character '{name}' body {}x{} exceeds every cooked PXBSP hull (largest is {}x{})",
-                character.radius, character.height, largest_radius, largest_height,
-            ));
-        }
-    }
-    for (index, entity) in game_entities.iter().enumerate() {
-        if select_body_hull(
-            body_hulls,
-            i32::from(entity.radius),
-            i32::from(entity.height),
-        )
-        .is_none()
-        {
-            report.error(format!(
-                "Game entity {index} body {}x{} exceeds every cooked PXBSP hull (largest is {}x{})",
-                entity.radius, entity.height, largest_radius, largest_height,
-            ));
-        }
-    }
-}
-
-fn brush_world_validation_target(
-    error: &crate::brush_world::BrushWorldCookError,
-) -> Option<PlaytestValidationTarget> {
-    use crate::brush_world::BrushWorldCookError;
-
-    match error {
-        // Budget overflow is a level-wide condition, not one node's fault.
-        BrushWorldCookError::UvWindowFaceBudget { .. } => None,
-        BrushWorldCookError::InvalidBrush { brush, face } => {
-            Some(PlaytestValidationTarget::Brush {
-                brush: *brush,
-                face: *face,
-            })
-        }
-        BrushWorldCookError::MissingMover { brush, .. }
-        | BrushWorldCookError::BrushOwnerIsNotDoor { brush, .. }
-        | BrushWorldCookError::LiquidMover { brush, .. } => Some(PlaytestValidationTarget::Brush {
-            brush: *brush,
-            face: None,
-        }),
-        BrushWorldCookError::UnsupportedMoverTransform(node)
-        | BrushWorldCookError::MoverOriginOutOfRange(node)
-        | BrushWorldCookError::MoverOriginInSolid(node)
-        | BrushWorldCookError::InvalidPlayerSpawnTransform(node)
-        | BrushWorldCookError::PlayerSpawnInSolid(node)
-        | BrushWorldCookError::InvalidDestructibleHealth(node)
-        | BrushWorldCookError::InvalidDoorMotion { node, .. } => {
-            Some(PlaytestValidationTarget::Node(*node))
-        }
-        BrushWorldCookError::MissingMaterial(resource)
-        | BrushWorldCookError::ResourceIsNotMaterial(resource)
-        | BrushWorldCookError::MaterialTexture {
-            material: resource, ..
-        }
-        | BrushWorldCookError::InvalidTexture {
-            material: Some(resource),
-            ..
-        } => Some(PlaytestValidationTarget::Resource(*resource)),
-        // Capacity overflows blame the object being compiled when it ran out
-        // of room, not the map as a whole.
-        BrushWorldCookError::ModelIndexOverflow(node) => {
-            Some(PlaytestValidationTarget::Node(*node))
-        }
-        BrushWorldCookError::TextureAssetOverflow {
-            material: Some(resource),
-        } => Some(PlaytestValidationTarget::Resource(*resource)),
-        BrushWorldCookError::Light {
-            node: Some(node), ..
-        } => Some(PlaytestValidationTarget::Node(*node)),
-        BrushWorldCookError::Collision(
-            crate::brush_collision_hulls::CollisionHullCompileError::InvalidPlane(Some(brush)),
-        ) => Some(PlaytestValidationTarget::Brush {
-            brush: *brush,
-            face: None,
-        }),
-        // Genuinely underivable, each for its own reason:
-        // - EmptyStaticWorld / InvalidWorldTree: whole-map conditions.
-        // - InvalidTexture{material: None}: the built-in default brush
-        //   texture, which is not a project resource.
-        // - TextureAssetOverflow{material: None}: same, the default texture.
-        // - Pack: BrushPackError indexes SURFACES, leaves and planes of the
-        //   compiled BSP. CSG splitting means one authored brush becomes many
-        //   surfaces and one surface can come from several brushes, and no
-        //   surface-to-brush provenance table is kept, so a surface index
-        //   cannot be honestly resolved back to a brush the author can select.
-        // - Collision other arms: InvalidBounds indexes the requested hull
-        //   size list (a cook constant, not authored content) and
-        //   LimitExceeded is a whole-map cap.
-        // - Light without a node: the reported light index fell outside the
-        //   light list the cook built, so no PointLight node matches it.
-        // - Pxbsp: whole-map record counts, alignment and reference checks.
-        //   Its InvalidMaterial names a compiled material SLOT, which is a
-        //   cook-side index into the merged slot table rather than a resource.
-        BrushWorldCookError::EmptyStaticWorld
-        | BrushWorldCookError::InvalidWorldTree
-        | BrushWorldCookError::InvalidTexture { material: None, .. }
-        | BrushWorldCookError::TextureAssetOverflow { material: None }
-        | BrushWorldCookError::Pack(_)
-        | BrushWorldCookError::Collision(_)
-        | BrushWorldCookError::Light { node: None, .. }
-        | BrushWorldCookError::Pxbsp(_) => None,
-    }
-}
 
 #[derive(Clone)]
 pub(crate) struct CookedUiImageTexture {
@@ -467,16 +328,13 @@ pub fn build_package(
     project: &ProjectDocument,
     project_root: &Path,
 ) -> (Option<PlaytestPackage>, PlaytestValidationReport) {
-    // The streamed world cook (PSXED_STREAM_WORLD) partitions the authored
-    // document itself and scales its own clone.
-    let authored_project = project;
-    // BSP projects cook at engine (Quake) scale: divide every authored
-    // length by WORLD_UNIT_DIVISOR on an in-memory clone. Authored
-    // files and the editor's preview stay at the historical scale.
+    // Cook at runtime scale: divide every authored length by
+    // WORLD_UNIT_DIVISOR on an in-memory clone. Authored files and the
+    // editor's preview stay at the historical scale.
     let mut scaled_project = project.clone();
     let mut report = PlaytestValidationReport::default();
-    // A grid world cooks from its document alone: check it against the shared
-    // caps before anything else runs.
+    // The world cooks from the grid document alone: check it against the
+    // shared caps before anything else runs.
     if !grid_world::validate(&scaled_project, &mut report) {
         return (None, report);
     }
@@ -491,11 +349,10 @@ pub fn build_package(
     let project = &scaled_project;
     let scene = project.active_scene();
 
-    let uses_pxbsp = true;
-    if scene.world.grid().is_none() && scene.brushes.is_empty() {
-        report.error("the active scene holds no world: add brushes, or make a grid project");
+    let Some(grid_doc) = scene.world.grid() else {
+        report.error("the active scene holds no grid world: make a grid project");
         return (None, report);
-    }
+    };
 
     // Pass 2: cook each Room. We need the `CookedWorldGrid` for
     // material slot info; encode straight from it so we don't
@@ -531,10 +388,8 @@ pub fn build_package(
     }
 
     // The singleton record retains shared world/camera/sky settings for
-    // the ordinary gameplay pipeline. Geometry, collision, visibility,
-    // and spatial activation come exclusively from resident PXBSP; there
-    // is deliberately no synthetic WorldGrid, PSXW asset, room chunk, or
-    // grid-PVS bake hiding behind this metadata anchor.
+    // the ordinary gameplay pipeline. Geometry, collision and spatial
+    // activation come from the cooked PGL level, not from this record.
     let world_sector_size = scene
         .world_sector_size_for_node(scene.root)
         .unwrap_or(1024)
@@ -560,7 +415,7 @@ pub fn build_package(
         .unwrap_or_default()
         .resolved_for_room(false, [0; 3]);
     rooms.push(PlaytestRoom {
-        name: "PXBSP World".to_string(),
+        name: "World".to_string(),
         reflection_probe_asset_index: None,
         sector_size: world_sector_size,
         draw_distance: resolved_culling.draw_distance,
@@ -637,144 +492,20 @@ pub fn build_package(
         flags: 0,
     });
 
-    let world_geometry = if let Some(grid_doc) = scene.world.grid() {
-        match grid_world::cook(
-            project,
-            grid_doc,
-            project_root,
-            &mut assets,
-            &mut texture_asset_for_path,
-            &mut report,
-        ) {
-            Some(world) => world,
-            None => return (None, report),
-        }
-    } else {
-        let texture_asset_base = match u16::try_from(assets.len()) {
-            Ok(base) => base,
-            Err(_) => {
-                report.error("PXBSP texture asset base exceeds u16");
-                return (None, report);
-            }
-        };
-        let world_options = crate::brush_world::BrushWorldCookOptions {
-            project_root,
-            mode: project.bsp_cook_mode,
-            ambient: open_hall_ambient(project_root),
-            texture_asset_base,
-            collision_hulls: if project.collision_hull_bsp {
-                crate::brush_collision_hulls::CollisionHullStrategy::HullBsp
-            } else {
-                crate::brush_collision_hulls::CollisionHullStrategy::SpatialChains
-            },
-        };
-        let stream_mode = crate::brush_world::stream_cook::StreamWorldMode::from_env();
-        let (compiled, streamed_parts) =
-            if stream_mode == crate::brush_world::stream_cook::StreamWorldMode::Off {
-                match crate::brush_world::compile_brush_world(project, world_options) {
-                    Ok(compiled) => (compiled, None),
-                    Err(error) => {
-                        report.error_maybe_at(
-                            brush_world_validation_target(&error),
-                            format!("brush world compile failed: {error}"),
-                        );
-                        return (None, report);
-                    }
-                }
-            } else {
-                match crate::brush_world::stream_cook::cook_playtest_world(
-                    authored_project,
-                    world_options,
-                    stream_mode,
-                ) {
-                    Ok(cooked) => cooked,
-                    Err(error) => {
-                        report.error(format!("streamed brush world compile failed: {error}"));
-                        return (None, report);
-                    }
-                }
-            };
-        for texture in &compiled.textures {
-            let expected = assets.len();
-            if usize::from(texture.asset_id) != expected {
-                report.error(format!(
-                    "PXBSP texture asset {} does not match master asset slot {expected}",
-                    texture.asset_id
-                ));
-                return (None, report);
-            }
-            texture_asset_for_path.insert(texture.key.clone(), expected);
-            assets.push(PlaytestAsset {
-                kind: PlaytestAssetKind::Texture,
-                bytes: texture.bytes.clone(),
-                filename: format!("texture_{:03}.psxt", texture.asset_id),
-                source_label: texture.key.clone(),
-                streamed_class: StreamedClass::None,
-            });
-        }
-        if !compiled.leak_path.is_empty() {
-            report.warn(format!(
-                    "BSP leak reaches the infinite exterior through {} pointfile points; portal PVS includes the opening and writes {}",
-                    compiled.leak_path.len(),
-                    crate::brush_playtest::BRUSH_LEAK_FILENAME,
-                ));
-        }
-        if compiled.uv_window.split_surfaces > 0 {
-            report.warn(format!(
-                "{} brush surfaces exceeded the 255-texel UV window and were split into {} extra faces (in-game UVs would otherwise wrap)",
-                compiled.uv_window.split_surfaces, compiled.uv_window.added_faces,
-            ));
-        }
-        if compiled.uv_window.unfixable_surfaces > 0 {
-            report.warn(format!(
-                "{} brush surfaces still exceed the 255-texel UV window (no texture dimensions or below the split floor); their textures wrap in-game",
-                compiled.uv_window.unfixable_surfaces,
-            ));
-        }
-        let authored_leak_path: Vec<_> = compiled
-            .leak_path
-            .iter()
-            .map(|point| {
-                point.map(|coordinate| coordinate.saturating_mul(crate::units::WORLD_UNIT_DIVISOR))
-            })
-            .collect();
-        let solid_cell_proofs = if project.bsp_solid_cell_proofs && compiled.movers.is_empty() {
-            crate::solid_cell_proofs::cook(&compiled.pxbsp.bytes)
-        } else {
-            crate::solid_cell_proofs::SolidCellProofs::default()
-        };
-        PlaytestPxbspWorld {
-            render: PlaytestWorldRender::Pxbsp,
-            grid: None,
-            solid_cell_proofs,
-            bytes: compiled.pxbsp.bytes,
-            max_visible_faces: compiled.pxbsp.max_visible_faces,
-            body_hulls: compiled.body_hulls,
-            texture_asset_indices: compiled
-                .textures
-                .iter()
-                .map(|texture| usize::from(texture.asset_id))
-                .collect(),
-            movers: compiled
-                .movers
-                .iter()
-                .map(|mover| PlaytestPxbspMover {
-                    node: mover.node.raw() as u32,
-                    model_index: mover.model_index,
-                })
-                .collect(),
-            leak_path: authored_leak_path,
-            stream: streamed_parts.map(|parts| PlaytestStreamedWorld {
-                container: parts.container,
-                region_pack: parts.region_pack,
-                regions: parts.regions,
-            }),
-        }
+    let world_geometry = match grid_world::cook(
+        project,
+        grid_doc,
+        project_root,
+        &mut assets,
+        &mut texture_asset_for_path,
+        &mut report,
+    ) {
+        Some(world) => world,
+        None => return (None, report),
     };
-    // PXBSP rooms use the same authored panorama and gameplay-transient
-    // lifetime as grid rooms. Register it after the brush textures so
-    // enabling or disabling a sky cannot renumber PXBSP material assets
-    // or perturb the resident world bytes.
+    // The authored panorama has gameplay-transient lifetime. Register it
+    // after the world's textures so enabling or disabling a sky cannot
+    // renumber material assets or perturb the resident world bytes.
     let sky_texture_asset_index = cook_scene_sky_texture_asset(
         project,
         project_root,
@@ -785,17 +516,17 @@ pub fn build_package(
     );
     rooms
         .last_mut()
-        .expect("PXBSP metadata room was just appended")
+        .expect("world metadata room was just appended")
         .sky
         .texture_asset_index = sky_texture_asset_index;
     rooms
         .last_mut()
-        .expect("PXBSP metadata room was just appended")
+        .expect("world metadata room was just appended")
         .sky
         .cloud_layer
         .texture_asset_index = sky_texture_asset_index;
     if rooms.is_empty() {
-        report.error("BSP cook did not produce its world metadata record");
+        report.error("the cook did not produce its world metadata record");
         return (None, report);
     }
 
@@ -949,8 +680,6 @@ pub fn build_package(
         }
         _ => None,
     };
-
-    // Water is authored as BSP liquid brushes and is compiled with the world geometry.
 
     for node in scene.nodes() {
         if node.id == scene.root {
@@ -1882,11 +1611,6 @@ pub fn build_package(
                 wait_ticks,
                 enabled,
             } => {
-                let bsp_door_link = world_geometry
-                    .movers
-                    .iter()
-                    .position(|mover| mover.node == node.id.raw() as u32)
-                    .and_then(|index| u16::try_from(index).ok());
                 let ok = report.blaming(PlaytestValidationTarget::Node(node.id), |report| {
                     push_logic_node(
                         node.name.as_str(),
@@ -1899,7 +1623,6 @@ pub fn build_package(
                         *delay_ticks,
                         *wait_ticks,
                         *enabled,
-                        bsp_door_link,
                         &mut names,
                         &mut logic,
                         &mut pending_door_links,
@@ -1980,23 +1703,6 @@ pub fn build_package(
         &interactables,
         &mut report,
     );
-
-    let (world_object_leaf_ranges, world_object_leaves, solid_cell_parents) = if world_geometry
-        .grid
-        .is_some()
-    {
-        // A grid world has no leaves: objects are activated by room.
-        (Vec::new(), Vec::new(), Vec::new())
-    } else {
-        match world_object_leaf_links::cook_world_object_leaf_links(&world_geometry, &world_objects)
-        {
-            Ok(links) => links,
-            Err(error) => {
-                report.error(error);
-                return (None, report);
-            }
-        }
-    };
 
     // Door links resolve now that every Box Prop has cooked: an
     // unresolved or ambiguous box name is a hard cook error.
@@ -2143,17 +1849,10 @@ pub fn build_package(
                         None
                     }
                     Err(crate::resolve::SpawnCharacterResolutionError::NoCharacters) => {
-                        if uses_pxbsp {
-                            report.warn(format!(
-                                "Player source '{}' has no Character; using the BSP debug controller",
-                                spawn_node.name
-                            ));
-                        } else {
-                            report.error(format!(
-                                "Player source '{}' has no Character assigned and no Character resources exist",
-                                spawn_node.name
-                            ));
-                        }
+                        report.warn(format!(
+                            "Player source '{}' has no Character; using the debug controller",
+                            spawn_node.name
+                        ));
                         None
                     }
                     Err(crate::resolve::SpawnCharacterResolutionError::AmbiguousCharacters {
@@ -2167,7 +1866,7 @@ pub fn build_package(
                     }
                 }
             };
-            if uses_pxbsp && resolved.is_none() && renderer_model.is_none() {
+            if resolved.is_none() && renderer_model.is_none() {
                 None
             } else {
                 let profile_material = resolved.and_then(|character_id| {
@@ -2349,16 +2048,6 @@ pub fn build_package(
         &mut report,
     );
 
-    if world_geometry.grid.is_none() {
-        validate_pxbsp_body_hulls(
-            project,
-            &world_geometry.body_hulls,
-            &characters,
-            &game_entities,
-            &mut report,
-        );
-    }
-
     if !report.is_ok() {
         return (None, report);
     }
@@ -2405,7 +2094,6 @@ pub fn build_package(
         Some(PlaytestPackage {
             save_name,
             save_title,
-            bsp_cook_mode: project.bsp_cook_mode,
             world_geometry,
             // Same map the cook uses to dedupe texture references, so the
             // reachable set cannot drift from what was actually cooked.
@@ -2462,9 +2150,6 @@ pub fn build_package(
             model_instances,
             destructibles,
             world_objects,
-            solid_cell_parents,
-            world_object_leaf_ranges,
-            world_object_leaves,
             image_props,
             box_props,
             box_prop_surfaces,

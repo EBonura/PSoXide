@@ -171,6 +171,7 @@ mod tests {
     fn cook(budget: u16) -> PlaytestPackage {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/graybox-reach");
         let mut project = ProjectDocument::load_from_path(root.join("project.ron")).unwrap();
+        crate::grid::starter::attach_starter_world(&mut project);
         project.animation_track_budget_units = budget;
         let (package, report) = build_package(&project, &root);
         package.unwrap_or_else(|| panic!("graybox reach cooks: {:?}", report.errors))

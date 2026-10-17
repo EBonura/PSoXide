@@ -1753,7 +1753,6 @@ pub(crate) fn push_logic_node(
     delay_ticks: u16,
     wait_ticks: i16,
     enabled: bool,
-    door_link_override: Option<u16>,
     names: &mut NameInterner,
     logic: &mut Vec<PlaytestLogic>,
     pending_door_links: &mut Vec<PendingDoorLink>,
@@ -1842,7 +1841,7 @@ pub(crate) fn push_logic_node(
             start_open,
             ..
         } => {
-            if door_link_override.is_none() && box_prop.trim().is_empty() {
+            if box_prop.trim().is_empty() {
                 report.error(format!(
                     "Door '{node_name}' names no Box Prop - the door's link \
                      is the box it opens"
@@ -1853,15 +1852,11 @@ pub(crate) fn push_logic_node(
             if *start_open {
                 record.flags |= psx_level::logic_flags::START_ON;
             }
-            if let Some(link) = door_link_override {
-                record.link = link;
-            } else {
-                pending_door_links.push(PendingDoorLink {
-                    logic_index: logic.len(),
-                    box_prop: box_prop.clone(),
-                    node_name: node_name.to_string(),
-                });
-            }
+            pending_door_links.push(PendingDoorLink {
+                logic_index: logic.len(),
+                box_prop: box_prop.clone(),
+                node_name: node_name.to_string(),
+            });
         }
     }
     logic.push(record);

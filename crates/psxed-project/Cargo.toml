@@ -13,7 +13,6 @@ psxed-gltf   = { path = "../psxed-gltf" }
 psxed-tex    = { path = "../psxed-tex" }
 psx-asset    = { path = "../../../sdk/crates/psx-asset" }
 psx-anim-tracks = { path = "../../../crates/psx-anim-tracks" }
-psx-bsp      = { path = "../../../engine/crates/psx-bsp", features = ["streaming"] }
 psx-engine   = { path = "../../../engine/crates/psx-engine" }
 psx-grid     = { path = "../../../engine/crates/psx-grid" }
 psx-font     = { path = "../../../sdk/crates/psx-font" }
@@ -26,7 +25,6 @@ flate2 = "1.1"
 image.workspace = true
 ron = "0.8"
 serde = { version = "1.0", features = ["derive"] }
-brotli-decompressor = "6.1.0"
 
 [[bin]]
 name = "reimport-model-probe"
@@ -47,7 +45,3 @@ path = "src/bin/import_locomotion.rs"
 [[bin]]
 name = "audit-animations"
 path = "src/bin/audit_animations.rs"
-
-[[bin]]
-name = "import-bonnie32-grid"
-path = "src/bin/import_bonnie32_grid.rs"

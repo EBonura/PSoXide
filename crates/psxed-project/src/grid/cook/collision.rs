@@ -235,11 +235,7 @@ pub fn build(units: &RuntimeUnits, room: &GridRoom, room_index: usize) -> Result
     // Derived summary bits (flat floor, flat ceiling, clear neighbourhood) the
     // runtime collision uses to skip work. They only hold once every sector's
     // wall and split-level state is final, so they come last.
-    summarize_sectors(
-        &mut tables.sectors,
-        room.width,
-        room.depth,
-    );
+    summarize_sectors(&mut tables.sectors, room.width, room.depth);
     tables.range = range;
     Ok(tables)
 }

@@ -121,3 +121,26 @@ fn clamp_offset_texels(value: f64) -> i16 {
         .round()
         .clamp(f64::from(i16::MIN), f64::from(i16::MAX)) as i16
 }
+
+/// Shift a face's applied texel UVs by whole texture repeats so the
+/// whole set fits the GPU's u8 window without straddling a 256 wrap.
+/// A straddling polygon packs per-vertex wrapped coordinates and
+/// rasterizes a backwards texture gradient; power-of-two repeat sizes
+/// make the shift sampling-identical. Axes whose span cannot fit the
+/// window are left alone (the historic wrap behaviour).
+pub fn rebase_texel_uvs(uvs: &mut [[f64; 2]], repeat: [f64; 2]) {
+    for axis in 0..2 {
+        let repeat = repeat[axis].max(1.0);
+        let min = uvs.iter().map(|uv| uv[axis]).fold(f64::MAX, f64::min);
+        let max = uvs.iter().map(|uv| uv[axis]).fold(f64::MIN, f64::max);
+        if !min.is_finite() || !max.is_finite() {
+            continue;
+        }
+        let shift = (min / repeat).floor() * repeat;
+        if max - shift <= 255.0 {
+            for uv in uvs.iter_mut() {
+                uv[axis] -= shift;
+            }
+        }
+    }
+}

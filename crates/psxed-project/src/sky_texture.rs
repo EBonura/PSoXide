@@ -8,10 +8,10 @@
 use image::RgbImage;
 use psxed_format::texture::Depth;
 
-const FACE_WIDTH: usize = psx_bsp::sky::CUBE_SKY_FACE_WIDTH as usize;
-const FACE_HEIGHT: usize = psx_bsp::sky::CUBE_SKY_FACE_HEIGHT as usize;
-const ATLAS_WIDTH: usize = psx_bsp::sky::CUBE_SKY_ATLAS_SIZE[0] as usize;
-const ATLAS_HEIGHT: usize = psx_bsp::sky::CUBE_SKY_ATLAS_SIZE[1] as usize;
+const FACE_WIDTH: usize = psx_engine::sky::CUBE_SKY_FACE_WIDTH as usize;
+const FACE_HEIGHT: usize = psx_engine::sky::CUBE_SKY_FACE_HEIGHT as usize;
+const ATLAS_WIDTH: usize = psx_engine::sky::CUBE_SKY_ATLAS_SIZE[0] as usize;
+const ATLAS_HEIGHT: usize = psx_engine::sky::CUBE_SKY_ATLAS_SIZE[1] as usize;
 const FACE_COUNT: usize = 6;
 const FACE_PALETTE_COLORS: usize = 16;
 

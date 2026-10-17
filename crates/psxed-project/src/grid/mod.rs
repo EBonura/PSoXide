@@ -32,12 +32,11 @@
 //! * [`faces`]: the drawable faces derived from the document.
 //! * [`light`]: the per-corner light bake of those faces.
 //! * [`edit`]: the editing operations the grid tools call.
-//! * [`bonnie`] and [`bonnie_project`]: the bonnie-32 level importer.
+//! * [`base_project`]: the base project a new grid project starts from.
 //! * [`starter`]: the starter room of File > New Grid Project.
 //! * [`palette`]: which project materials a grid world's palette offers.
 
-pub mod bonnie;
-pub mod bonnie_project;
+pub mod base_project;
 pub mod cook;
 pub mod edit;
 pub mod faces;
@@ -51,10 +50,6 @@ pub mod surface;
 pub mod units;
 pub mod world;
 
-#[cfg(test)]
-mod bonnie_tests;
-#[cfg(test)]
-mod import_tests;
 #[cfg(test)]
 mod tests;
 

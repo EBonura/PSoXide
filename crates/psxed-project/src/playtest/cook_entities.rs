@@ -81,8 +81,9 @@ pub(crate) fn cook_scene_sky_texture_asset(
                 }
                 crate::SkyMode::Cube => {
                     texture.depth() == TextureDepth::Bit4
-                        && [texture.width(), texture.height()] == psx_bsp::sky::CUBE_SKY_ATLAS_SIZE
-                        && texture.clut_entries() == psx_bsp::sky::CUBE_SKY_CLUT_ENTRIES
+                        && [texture.width(), texture.height()]
+                            == psx_engine::sky::CUBE_SKY_ATLAS_SIZE
+                        && texture.clut_entries() == psx_engine::sky::CUBE_SKY_CLUT_ENTRIES
                 }
                 _ => false,
             };

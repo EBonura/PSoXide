@@ -1,4 +1,4 @@
-//! Authored-to-engine unit normalization for BSP projects.
+//! Authored-to-engine unit normalization for the cook.
 //!
 //! Authored PSoXide content runs ~16x Quake's unit scale (Aletha is
 //! 1024 units tall; Quake's player is 56). The runtime engine shares
@@ -25,21 +25,12 @@
 //! 3), which nudges movement feel by a few percent; that is the
 //! accepted cost until the sim adopts quake-core's Q20.12 coordinates.
 
-use crate::brush::Brush;
 use crate::{
     ColliderShape, LogicNodeKind, NodeKind, ProjectDocument, ResourceData, Scene, SceneNode,
 };
 
 /// Authored units per engine (Quake-scale) unit.
 pub const WORLD_UNIT_DIVISOR: i32 = 16;
-
-/// [`crate::brush_compile::SURFACE_EXTENT_UNITS`] expressed in engine
-/// units: the extent cap the cook applies to pre-scaled BSP geometry.
-/// 128 engine units sits between Quake's 240-unit qbsp splits and its
-/// 64-ish structural faces; the editor preview keeps subdividing at
-/// the authored-scale constant so preview==cook holds patch for patch.
-pub const ENGINE_SURFACE_EXTENT_UNITS: f64 =
-    crate::brush_compile::SURFACE_EXTENT_UNITS / WORLD_UNIT_DIVISOR as f64;
 
 #[inline]
 fn div_i32(value: i32) -> i32 {
@@ -127,28 +118,6 @@ fn div_i16(value: i16) -> i16 {
 #[inline]
 fn div_f32(value: f32) -> f32 {
     value / WORLD_UNIT_DIVISOR as f32
-}
-
-/// Paraxial units per texel for brush geometry at engine scale. The cook
-/// divides brush points by [`WORLD_UNIT_DIVISOR`] and keeps every face's
-/// authored UV scale, so the texture projection divides by this instead of
-/// [`crate::brush::BRUSH_UV_UNITS_PER_TEXEL`]: the same texels land on the
-/// same surface, and the authored scale stays exact. (Dividing the Q8 scale
-/// by 16 instead rounded it to 6.25% steps: 110% cooked as 112.5%.)
-pub const ENGINE_UV_UNITS_PER_TEXEL: f64 =
-    crate::brush::BRUSH_UV_UNITS_PER_TEXEL / WORLD_UNIT_DIVISOR as f64;
-
-/// Scale one authored brush: plane points divide by [`WORLD_UNIT_DIVISOR`].
-/// Face UV mappings stay as authored; the cook projects them with
-/// [`ENGINE_UV_UNITS_PER_TEXEL`].
-fn scale_brush(brush: &mut Brush) {
-    for face in &mut brush.faces {
-        for point in &mut face.points {
-            for axis in point.iter_mut() {
-                *axis = div_i32(*axis);
-            }
-        }
-    }
 }
 
 fn scale_node(node: &mut SceneNode) {
@@ -331,9 +300,6 @@ fn scale_enemy_behavior(behavior: &mut crate::EnemyBehaviorSettings) {
 }
 
 fn scale_scene(scene: &mut Scene) {
-    for brush in &mut scene.brushes {
-        scale_brush(brush);
-    }
     for node in &mut scene.nodes {
         scale_node(node);
     }
@@ -699,87 +665,6 @@ mod tests {
             checked += 1;
         }
         assert!(checked > 0);
-    }
-
-    #[test]
-    fn scaled_world_sector_preserves_point_light_reach() {
-        use crate::{
-            brush_light::{lit_point_color, BrushPointLight},
-            NodeId,
-        };
-        let mut project = ProjectDocument::starter();
-        let scene = project.active_scene_mut();
-        scene
-            .brushes
-            .push(Brush::cuboid([0, -128, 0], [4096, 0, 4096]));
-        if let NodeKind::World { sector_size, .. } = &mut scene.node_mut(NodeId::ROOT).unwrap().kind
-        {
-            *sector_size = 1024;
-        }
-        let sector = scene.world_sector_size_for_node(NodeId::ROOT).unwrap();
-        let authored = BrushPointLight {
-            position: [0., 1024., 0.],
-            radius: sector as f64 * 2.,
-            intensity_q8: 256,
-            color: [58, 177, 167],
-        };
-        scale_project_to_engine_units(&mut project);
-        let cooked_sector = project
-            .active_scene()
-            .world_sector_size_for_node(NodeId::ROOT)
-            .unwrap();
-        assert_eq!(cooked_sector, 64);
-        let cooked = BrushPointLight {
-            position: authored.position.map(|x| x / 16.),
-            radius: cooked_sector as f64 * 2.,
-            ..authored
-        };
-        for point in [[0., 0., 0.], [1500., 0., 0.], [2500., 0., 0.]] {
-            assert_eq!(
-                lit_point_color(point, [0., 1., 0.], [128; 3], [32; 3], &[authored], &[]),
-                lit_point_color(
-                    point.map(|x| x / 16.),
-                    [0., 1., 0.],
-                    [128; 3],
-                    [32; 3],
-                    &[cooked],
-                    &[]
-                ),
-                "light reach must survive authored-to-engine normalization"
-            );
-        }
-    }
-
-    #[test]
-    fn brush_uv_scale_cooks_exactly_and_keeps_the_flip_sign() {
-        use crate::brush::{paraxial_uv, BRUSH_UV_UNITS_PER_TEXEL};
-        // Flip H/V negate `scale_q8`; the cook must mirror the texture
-        // exactly as the editor preview does. A 110% scale used to cook
-        // as 112.5% (the Q8 scale divided by 16 rounds to 1/16 steps).
-        let mut brush = Brush::cuboid([0, 0, 0], [1024, 1024, 1024]);
-        brush.faces[0].uv.scale_q8 = [-256, 256];
-        brush.faces[1].uv.scale_q8 = [282, -282];
-        brush.faces[2].uv.scale_q8 = [-4, 4];
-        let authored = brush.clone();
-        scale_brush(&mut brush);
-        for (cooked, authored) in brush.faces.iter().zip(&authored.faces) {
-            assert_eq!(cooked.uv, authored.uv, "face UV mappings cook as authored");
-        }
-        // Same texel at the same surface point, authored vs engine scale.
-        let plane = crate::brush::Plane::from_points(authored.faces[1].points).unwrap();
-        let engine_plane = crate::brush::Plane::from_points(brush.faces[1].points).unwrap();
-        let point = [1024.0, 512.0, 320.0];
-        let raw = paraxial_uv(&plane, point);
-        let engine_raw = paraxial_uv(&engine_plane, point.map(|v| v / WORLD_UNIT_DIVISOR as f64));
-        let preview = authored.faces[1].uv.apply([
-            raw[0] / BRUSH_UV_UNITS_PER_TEXEL,
-            raw[1] / BRUSH_UV_UNITS_PER_TEXEL,
-        ]);
-        let cooked = brush.faces[1].uv.apply([
-            engine_raw[0] / ENGINE_UV_UNITS_PER_TEXEL,
-            engine_raw[1] / ENGINE_UV_UNITS_PER_TEXEL,
-        ]);
-        assert!((preview[0] - cooked[0]).abs() < 1e-9 && (preview[1] - cooked[1]).abs() < 1e-9);
     }
 
     #[test]

@@ -3,23 +3,14 @@ use std::mem::size_of;
 use std::path::Path;
 
 #[cfg(test)]
-use psx_bsp::pxbsp::PxbspVersion;
-use psx_bsp::pxbsp::{material_flags, PxbspIndex, PxbspLumpKind};
-use psx_bsp::sky::{VIEW_RAY_CUBE_SKY_PACKET_WORDS, VIEW_RAY_SKY_PACKET_WORDS};
-#[cfg(test)]
-use psx_bsp::RecordSlice;
-use psx_bsp::{BrushModel, ClipNode, CookedRecord, Face, Leaf, Node, Plane, SliceReader, Vertex};
 use psx_engine::PRIMITIVE_PACKET_SLOT_WORDS;
 
 use super::{
     playtest_performance_envelope, PlaytestAssetKind, PlaytestInteractableKind, PlaytestPackage,
     PlaytestValidationTarget, StreamedClass,
 };
-use crate::brush_world::BrushWorldCookMode;
 use crate::{NodeKind, ProjectDocument, ResourceData};
 
-/// Fixed renderer visibility scratch. One decompressed PVS row must fit.
-pub const PLAYTEST_PVS_ROW_LIMIT_BYTES: usize = 1024;
 /// Baseline primitive packet arena of the normal editor-playtest runtime.
 /// The cooked manifest derives the actual per-project capacity from the
 /// conservative packet envelope, between this floor and
@@ -28,21 +19,11 @@ pub const PLAYTEST_PACKET_LIMIT: usize = 1536;
 /// Largest packet arena the runtime may be asked to instantiate. Content
 /// whose envelope exceeds this must be restructured, not silently degraded.
 pub const PLAYTEST_PACKET_CAPACITY_CEILING: usize = 4096;
-/// Resident PXBSP shares RAM with the complete topology and collision image.
-/// Its renderer writes tagged packets directly and therefore cannot afford the
-/// grid renderer's 4K packet scratch on a 2 MB machine. The worst-view cook
-/// estimate remains visible as a warning, while the runtime keeps a bounded
-/// arena and degrades by dropping over-cap geometry instead of failing to link.
-pub const PLAYTEST_PXBSP_PACKET_CAPACITY_CEILING: usize = PLAYTEST_PACKET_LIMIT;
-
-/// Primitive-arena slots reserved when any Quake layered-sky aperture is
-/// visible. The retained renderer emits one tightly packed, constant-cost
-/// view-ray background instead of drawing the source sky polygons.
-const VIEW_RAY_SKY_PACKET_SLOTS: usize =
-    VIEW_RAY_SKY_PACKET_WORDS.div_ceil(PRIMITIVE_PACKET_SLOT_WORDS);
-/// Primitive-arena slots reserved by the one-pass scenic cube background.
-const VIEW_RAY_CUBE_SKY_PACKET_SLOTS: usize =
-    VIEW_RAY_CUBE_SKY_PACKET_WORDS.div_ceil(PRIMITIVE_PACKET_SLOT_WORDS);
+/// The runtime keeps a bounded packet arena at this size. The world renderer
+/// writes its packets straight into it and, with the whole topology and
+/// collision image resident, cannot afford a larger scratch on a 2 MB machine;
+/// it degrades by dropping over-cap geometry instead of failing to link.
+pub const PLAYTEST_WORLD_PACKET_CAPACITY_CEILING: usize = PLAYTEST_PACKET_LIMIT;
 
 /// Per-project primitive arena capacity for a cooked packet envelope:
 /// the envelope rounded up to a 64-packet step, floored at the baseline
@@ -125,9 +106,6 @@ pub enum PlaytestBudgetStage {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlaytestBudgetKind {
-    Bsp,
-    Pvs,
-    Lighting,
     Textures,
     Ram,
     Vram,
@@ -138,9 +116,6 @@ pub enum PlaytestBudgetKind {
 impl PlaytestBudgetKind {
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Bsp => "BSP",
-            Self::Pvs => "PVS",
-            Self::Lighting => "Lighting",
             Self::Textures => "Textures",
             Self::Ram => "RAM",
             Self::Vram => "VRAM",
@@ -181,10 +156,11 @@ impl PlaytestBudgetIssue {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlaytestBudgetReport {
     pub stage: PlaytestBudgetStage,
-    pub mode: BrushWorldCookMode,
-    pub bsp_bytes: usize,
-    pub pvs_bytes: usize,
-    pub pvs_row_bytes: usize,
+    /// Faces in the grid world (authored count before a cook, cooked quads
+    /// and triangles after).
+    pub world_faces: usize,
+    /// Cooked level core plus room chunks; zero before a cook.
+    pub world_bytes: usize,
     pub light_bytes: usize,
     pub texture_bytes: usize,
     pub ram_bytes: usize,
@@ -202,72 +178,6 @@ pub struct PlaytestBudgetReport {
     pub issues: Vec<PlaytestBudgetIssue>,
 }
 
-/// Draw cost of one non-solid PXBSP leaf's decompressed visibility set.
-///
-/// `base_triangle_count` and `base_packet_slots` describe the renderer's
-/// emitted triangle fans before runtime near-plane clipping or perspective
-/// subdivision. They are therefore useful for comparing BSP locations and
-/// sizing the baseline packet arena, but are not a claim about final GPU
-/// packets for an arbitrary camera pose.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PxbspLeafDrawCost {
-    /// Index in the cooked PXBSP leaf lump. Leaf zero is solid and omitted.
-    pub leaf_index: usize,
-    /// Number of non-solid leaves selected by this leaf's decompressed PVS.
-    pub visible_leaf_count: usize,
-    /// Unique marked faces selected by the PVS, including sky apertures.
-    pub visible_face_count: usize,
-    /// Visible sky-aperture faces, which trigger the projected sky but do not
-    /// themselves emit ordinary face triangles.
-    pub visible_sky_aperture_face_count: usize,
-    /// Unique visible face triangles after excluding sky apertures.
-    pub base_triangle_count: usize,
-    /// Fixed packet slots for the projected sky pass in this leaf.
-    pub projected_sky_packet_slots: usize,
-    /// Baseline world packet slots: face triangles plus projected sky.
-    pub base_packet_slots: usize,
-    /// Approximate authored-space location derived from the bounds of faces
-    /// directly marked by this leaf. Compact PXBSP leaves deliberately omit
-    /// their old bounds, so this is a navigation aid rather than a BSP bound.
-    pub authored_surface_anchor: Option<[i32; 3]>,
-    pub authored_surface_bounds_min: Option<[i32; 3]>,
-    pub authored_surface_bounds_max: Option<[i32; 3]>,
-}
-
-/// Per-leaf draw-cost analysis of the exact cooked PXBSP/PVS representation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PxbspDrawCostReport {
-    pub world_face_count: usize,
-    pub world_base_triangle_count: usize,
-    /// All-face fallback including a projected sky pass when applicable.
-    pub world_base_packet_slots: usize,
-    pub non_solid_leaf_count: usize,
-    /// Leaves whose visibility row could not be decoded. A valid current cook
-    /// should report zero; these leaves are omitted from [`Self::leaves`].
-    pub unreadable_pvs_leaf_count: usize,
-    pub leaves: Vec<PxbspLeafDrawCost>,
-}
-
-impl PxbspDrawCostReport {
-    /// Return the most expensive leaves, with deterministic leaf-index ties.
-    pub fn heaviest_leaves(&self, limit: usize) -> Vec<&PxbspLeafDrawCost> {
-        let mut leaves = self.leaves.iter().collect::<Vec<_>>();
-        leaves.sort_by(|left, right| {
-            right
-                .base_packet_slots
-                .cmp(&left.base_packet_slots)
-                .then_with(|| right.visible_face_count.cmp(&left.visible_face_count))
-                .then_with(|| left.leaf_index.cmp(&right.leaf_index))
-        });
-        leaves.truncate(limit);
-        leaves
-    }
-
-    pub fn worst_leaf(&self) -> Option<&PxbspLeafDrawCost> {
-        self.heaviest_leaves(1).into_iter().next()
-    }
-}
-
 impl PlaytestBudgetReport {
     pub fn first_actionable_issue(&self) -> Option<&PlaytestBudgetIssue> {
         self.issues.iter().find(|issue| issue.target.is_some())
@@ -275,12 +185,9 @@ impl PlaytestBudgetReport {
 
     pub fn concise_summary(&self) -> String {
         format!(
-            "{}: BSP {}B, PVS {}B (row {}/{}B), light {}B, textures {}B, RAM {}/{}B ({} slots), VRAM {}/{}B ({} slots), packets {}/{}, resident {}/{}B",
-            self.mode.label(),
-            self.bsp_bytes,
-            self.pvs_bytes,
-            self.pvs_row_bytes,
-            PLAYTEST_PVS_ROW_LIMIT_BYTES,
+            "World {} faces {}B, light {}B, textures {}B, RAM {}/{}B ({} slots), VRAM {}/{}B ({} slots), packets {}/{}, resident {}/{}B",
+            self.world_faces,
+            self.world_bytes,
             self.light_bytes,
             self.texture_bytes,
             self.ram_bytes,
@@ -298,55 +205,23 @@ impl PlaytestBudgetReport {
 }
 
 /// Cheap, deterministic authoring estimate used in the Play menu before a
-/// compile. It does not claim to predict CSG splitting; the cooked report
-/// replaces it after Play with exact emitted-lump and asset figures.
+/// cook. It counts authored faces and reachable textures; the cooked report
+/// replaces it after Play with exact emitted sizes and asset figures.
 pub fn estimate_playtest_budgets(
     project: &ProjectDocument,
     project_root: &Path,
 ) -> PlaytestBudgetReport {
     let scene = project.active_scene();
-    let solved = scene
-        .brushes
-        .iter()
-        .map(|brush| brush.solve())
-        .collect::<Vec<_>>();
-    let face_count = solved
-        .iter()
-        .map(|brush| brush.polygons.iter().flatten().count())
-        .sum::<usize>();
-    let vertex_count = solved
-        .iter()
-        .flat_map(|brush| brush.polygons.iter().flatten())
-        .map(|polygon| polygon.verts.len())
-        .sum::<usize>();
-    let packet_count = solved
-        .iter()
-        .flat_map(|brush| brush.polygons.iter().flatten())
-        .map(|polygon| polygon.verts.len().saturating_sub(2))
-        .sum::<usize>();
-    let leaf_count = face_count.saturating_add(1);
-    let pvs_row_bytes = leaf_count.saturating_sub(1).div_ceil(8);
-    let pvs_bytes = leaf_count.saturating_mul(pvs_row_bytes);
-    let directory_bytes = 8usize.saturating_add(16 * 12);
-    let bsp_bytes = directory_bytes
-        .saturating_add(vertex_count.saturating_mul(Vertex::SIZE))
-        .saturating_add(face_count.saturating_mul(
-            Plane::SIZE + Face::SIZE + size_of::<u16>() + Node::SIZE + ClipNode::SIZE,
-        ))
-        .saturating_add(leaf_count.saturating_mul(Leaf::SIZE))
-        .saturating_add(pvs_bytes)
-        .saturating_add(BrushModel::SIZE);
+    let world_faces = scene
+        .world
+        .grid()
+        .map_or(0, |world| crate::grid::faces::all_faces(world).len());
     let light_count = scene
         .nodes()
         .iter()
         .filter(|node| matches!(node.kind, NodeKind::PointLight { .. }))
         .count();
-    let light_bytes = light_count
-        .saturating_mul(size_of::<super::PlaytestLight>())
-        .saturating_add(match project.bsp_cook_mode {
-            BrushWorldCookMode::Draft => 0,
-            BrushWorldCookMode::Release => vertex_count.saturating_mul(3),
-        });
+    let light_bytes = light_count.saturating_mul(size_of::<super::PlaytestLight>());
     let texture_paths = authored_texture_paths(project);
     let texture_bytes = texture_paths
         .iter()
@@ -362,21 +237,18 @@ pub fn estimate_playtest_budgets(
                 .map(|metadata| metadata.len() as usize)
         })
         .sum();
-    let ram_asset_slots = usize::from(!scene.brushes.is_empty());
     let vram_asset_slots = texture_paths.len();
     let mut report = PlaytestBudgetReport {
         stage: PlaytestBudgetStage::AuthoredEstimate,
-        mode: project.bsp_cook_mode,
-        bsp_bytes,
-        pvs_bytes,
-        pvs_row_bytes,
+        world_faces,
+        world_bytes: 0,
         light_bytes,
         texture_bytes,
-        ram_bytes: bsp_bytes,
-        ram_asset_slots,
+        ram_bytes: 0,
+        ram_asset_slots: 0,
         vram_bytes: texture_bytes,
         vram_asset_slots,
-        packet_count,
+        packet_count: 0,
         // Nothing to measure yet: clips are only word-padded and classified
         // during the cook, and guessing from the authored resources would put
         // a number here that the cook then contradicts.
@@ -390,36 +262,15 @@ pub fn estimate_playtest_budgets(
     report
 }
 
-/// Exact post-cook envelope derived from emitted PXBSP lumps, reachable assets,
-/// streamed-room residency, and the conservative renderer packet planner.
+/// Exact post-cook envelope derived from the emitted level, reachable assets
+/// and the conservative packet planner.
 pub fn cooked_playtest_budgets(
     project: &ProjectDocument,
     package: &PlaytestPackage,
 ) -> PlaytestBudgetReport {
-    let mut pvs_bytes = 0usize;
-    let mut pvs_row_bytes = 0usize;
-    let mut light_bytes = package.lights.len() * size_of::<super::PlaytestLight>();
-    let mut bsp_packets = 0usize;
-
-    let bsp_bytes = package.world_geometry.bytes.len();
-    {
-        let world = &package.world_geometry;
-        if let Ok(index) = PxbspIndex::read(&mut SliceReader::new(&world.bytes)) {
-            let visibility = index.lump(PxbspLumpKind::Visibility);
-            let vertices = index.lump(PxbspLumpKind::Vertices);
-            let leaves = index.lump(PxbspLumpKind::Leaves);
-            pvs_bytes = visibility.len as usize;
-            let leaf_size = PxbspLumpKind::Leaves
-                .record_size(index.version())
-                .expect("PXBSP leaves are fixed records") as usize;
-            pvs_row_bytes = (leaves.len as usize / leaf_size)
-                .saturating_sub(1)
-                .div_ceil(8);
-            let vertex_count = vertices.len as usize / Vertex::SIZE;
-            light_bytes = light_bytes.saturating_add(vertex_count * 3);
-            bsp_packets = cooked_bsp_packets(package);
-        }
-    }
+    let light_bytes = package.lights.len() * size_of::<super::PlaytestLight>();
+    let world = &package.world_geometry;
+    let world_bytes = world.core.len() + world.rooms.len();
 
     let texture_assets = package
         .assets
@@ -441,29 +292,21 @@ pub fn cooked_playtest_budgets(
         .filter(|asset| asset.kind != PlaytestAssetKind::Texture)
         .map(|asset| asset.bytes.len())
         .sum::<usize>();
-    let proof_bytes = package.world_geometry.solid_cell_proofs.resident_bytes();
-    let ram_bytes = bsp_bytes
-        .saturating_add(proof_bytes)
-        .saturating_add(non_texture_bytes)
-        .saturating_add(package.world_object_leaf_ranges.len() * 4)
-        .saturating_add(package.world_object_leaves.len() * 2)
-        .saturating_add(package.solid_cell_parents.len() * 2);
+    let ram_bytes = world_bytes.saturating_add(non_texture_bytes);
     let ram_asset_slots = package
         .assets
         .iter()
         .filter(|asset| asset.kind != PlaytestAssetKind::Texture)
         .count()
-        .saturating_add(usize::from(bsp_bytes != 0));
+        .saturating_add(usize::from(world_bytes != 0));
     let vram_asset_slots = texture_assets.len();
-    let packet_count = cooked_packet_count(package, bsp_packets);
+    let packet_count = cooked_packet_count(package);
     let packet_limit =
-        derived_packet_capacity(packet_count).min(PLAYTEST_PXBSP_PACKET_CAPACITY_CEILING);
+        derived_packet_capacity(packet_count).min(PLAYTEST_WORLD_PACKET_CAPACITY_CEILING);
     let mut report = PlaytestBudgetReport {
         stage: PlaytestBudgetStage::Cooked,
-        mode: package.bsp_cook_mode,
-        bsp_bytes,
-        pvs_bytes,
-        pvs_row_bytes,
+        world_faces: world.faces,
+        world_bytes,
         light_bytes,
         texture_bytes,
         ram_bytes,
@@ -479,243 +322,8 @@ pub fn cooked_playtest_budgets(
     report
 }
 
-/// Analyze the exact resident PXBSP structures used by the runtime.
-///
-/// Each PVS row is decompressed, its visible leaves are expanded through the
-/// mark-surface lump, and face indices are deduplicated before triangle costs
-/// are accumulated. This intentionally does not consult the removed world-grid
-/// cells: PXBSP leaves and their PVS are the current spatial authority.
-pub fn analyze_pxbsp_draw_cost(
-    package: &PlaytestPackage,
-) -> Result<Option<PxbspDrawCostReport>, String> {
-    let world = &package.world_geometry;
-    let mut map = psx_bsp::pxbsp_resident::PxbspResidentMap::with_capacity(world.bytes.len());
-    map.load(0, &mut SliceReader::new(&world.bytes))
-        .map_err(|error| format!("could not load cooked PXBSP for draw-cost analysis: {error}"))?;
-    let faces = map.faces();
-    let materials = map.materials();
-    let is_sky_aperture = |surface: usize| -> bool {
-        faces
-            .get(surface)
-            .and_then(|face| materials.get(face.texture as usize))
-            .is_some_and(|material| {
-                material.flags & (material_flags::SKY_APERTURE | material_flags::DIRECTIONAL_SKY)
-                    != 0
-            })
-    };
-    let sky_flags = package.rooms.first().map_or(0, |room| room.sky.flags);
-    let projected_sky_slots = if sky_flags & psx_level::sky_flags::CUBE != 0 {
-        VIEW_RAY_CUBE_SKY_PACKET_SLOTS
-    } else if sky_flags & psx_level::sky_flags::QUAKE_LAYERED != 0 {
-        VIEW_RAY_SKY_PACKET_SLOTS
-    } else {
-        0
-    };
-    let sky_is_always = sky_flags & psx_level::sky_flags::THROUGH_SKY_SURFACES == 0;
-    let packet_slots_of = |surface: usize| -> usize {
-        if is_sky_aperture(surface) {
-            0
-        } else {
-            faces.get(surface).map_or(0, |face| {
-                (face.vertex_count.max(0) as usize).saturating_sub(2)
-            })
-        }
-    };
-    let world_base_triangle_count: usize = (0..faces.len()).map(packet_slots_of).sum();
-    let world_base_packet_slots = world_base_triangle_count.saturating_add(
-        if projected_sky_slots != 0 && (sky_is_always || (0..faces.len()).any(is_sky_aperture)) {
-            projected_sky_slots
-        } else {
-            0
-        },
-    );
-    let leaves = map.leaves();
-    let marks = map.mark_surfaces();
-    let vertices = map.vertices();
-    let leaf_count = leaves.len();
-    let mut row = vec![0u8; leaf_count / 8 + 16];
-    let mut seen = vec![false; faces.len()];
-    let mut costs = Vec::with_capacity(leaf_count.saturating_sub(1));
-    let mut unreadable_pvs_leaf_count = 0usize;
-    for leaf_index in 1..leaf_count {
-        row.fill(0);
-        let Some(visible_leaves) = map.leaf_visibility_into(leaf_index, &mut row) else {
-            unreadable_pvs_leaf_count += 1;
-            continue;
-        };
-        seen.fill(false);
-        let mut visible_leaf_count = 0usize;
-        let mut visible_face_count = 0usize;
-        let mut visible_sky_aperture_face_count = 0usize;
-        let mut base_triangle_count = 0usize;
-        for bit in 0..visible_leaves {
-            if row[bit / 8] & (1 << (bit % 8)) == 0 {
-                continue;
-            }
-            let Some(visible) = leaves.get(bit + 1) else {
-                continue;
-            };
-            visible_leaf_count += 1;
-            let first = usize::from(visible.first_mark_surface);
-            for mark in first..first.saturating_add(usize::from(visible.mark_surface_count)) {
-                let Some(surface) = marks.get(mark).map(usize::from) else {
-                    continue;
-                };
-                if surface < seen.len() && !seen[surface] {
-                    seen[surface] = true;
-                    visible_face_count += 1;
-                    if is_sky_aperture(surface) {
-                        visible_sky_aperture_face_count += 1;
-                    } else {
-                        base_triangle_count =
-                            base_triangle_count.saturating_add(packet_slots_of(surface));
-                    }
-                }
-            }
-        }
-        let leaf_sky_packet_slots = if projected_sky_slots != 0
-            && (sky_is_always || visible_sky_aperture_face_count != 0)
-        {
-            projected_sky_slots
-        } else {
-            0
-        };
-        let (authored_surface_bounds_min, authored_surface_bounds_max) = leaves
-            .get(leaf_index)
-            .and_then(|leaf| pxbsp_leaf_authored_surface_bounds(leaf, marks, faces, vertices))
-            .map_or((None, None), |(min, max)| (Some(min), Some(max)));
-        let authored_surface_anchor = authored_surface_bounds_min
-            .zip(authored_surface_bounds_max)
-            .map(|(min, max)| std::array::from_fn(|axis| min[axis].saturating_add(max[axis]) / 2));
-        costs.push(PxbspLeafDrawCost {
-            leaf_index,
-            visible_leaf_count,
-            visible_face_count,
-            visible_sky_aperture_face_count,
-            base_triangle_count,
-            projected_sky_packet_slots: leaf_sky_packet_slots,
-            base_packet_slots: base_triangle_count.saturating_add(leaf_sky_packet_slots),
-            authored_surface_anchor,
-            authored_surface_bounds_min,
-            authored_surface_bounds_max,
-        });
-    }
-    Ok(Some(PxbspDrawCostReport {
-        world_face_count: faces.len(),
-        world_base_triangle_count,
-        world_base_packet_slots,
-        non_solid_leaf_count: leaf_count.saturating_sub(1),
-        unreadable_pvs_leaf_count,
-        leaves: costs,
-    }))
-}
-
-/// Resolve camera samples using the exact cooked BSP, not approximate surface bounds.
-/// Coordinates are authored editor units; conversion preserves sub-engine-unit precision.
-/// Leaf zero is solid/exterior and must never be treated as a cheap playable area.
-pub fn pxbsp_leaves_at_authored_points(
-    package: &PlaytestPackage,
-    points: &[[i32; 3]],
-) -> Result<Vec<Option<usize>>, String> {
-    let world = &package.world_geometry;
-    let mut map = psx_bsp::pxbsp_resident::PxbspResidentMap::with_capacity(world.bytes.len());
-    map.load(0, &mut SliceReader::new(&world.bytes))
-        .map_err(|error| format!("could not load cooked PXBSP: {error}"))?;
-    points
-        .iter()
-        .map(|point| {
-            let q12 = |v: i32| {
-                v.checked_mul(4096 / crate::units::WORLD_UNIT_DIVISOR)
-                    .ok_or_else(|| {
-                        format!("authored point {point:?} exceeds the BSP coordinate range")
-                    })
-            };
-            Ok(map.point_leaf_index(psx_bsp::Vec3I32 {
-                x: q12(point[0])?,
-                y: q12(point[1])?,
-                z: q12(point[2])?,
-            }))
-        })
-        .collect()
-}
-
-fn pxbsp_leaf_authored_surface_bounds(
-    leaf: Leaf,
-    marks: psx_bsp::RecordSlice<'_, u16>,
-    faces: psx_bsp::RecordSlice<'_, Face>,
-    vertices: psx_bsp::RecordSlice<'_, Vertex>,
-) -> Option<([i32; 3], [i32; 3])> {
-    let mut min = [i32::MAX; 3];
-    let mut max = [i32::MIN; 3];
-    let first_mark = usize::from(leaf.first_mark_surface);
-    for mark in first_mark..first_mark.saturating_add(usize::from(leaf.mark_surface_count)) {
-        let surface = marks.get(mark).map(usize::from)?;
-        let face = faces.get(surface)?;
-        let first_vertex = usize::try_from(face.first_vertex).ok()?;
-        let vertex_count = usize::try_from(face.vertex_count).ok()?;
-        for vertex_index in first_vertex..first_vertex.checked_add(vertex_count)? {
-            let vertex = vertices.get(vertex_index)?;
-            let position = [
-                i32::from(vertex.position.x),
-                i32::from(vertex.position.y),
-                i32::from(vertex.position.z),
-            ];
-            for axis in 0..3 {
-                min[axis] = min[axis].min(position[axis]);
-                max[axis] = max[axis].max(position[axis]);
-            }
-        }
-    }
-    if min[0] == i32::MAX {
-        return None;
-    }
-    let scale = crate::units::WORLD_UNIT_DIVISOR;
-    Some((
-        min.map(|coordinate| coordinate.saturating_mul(scale)),
-        max.map(|coordinate| coordinate.saturating_mul(scale)),
-    ))
-}
-
-/// Emitted-face PXBSP packet count, or zero when the package is not PXBSP or
-/// the world bytes fail to parse.
-fn cooked_bsp_packets(package: &PlaytestPackage) -> usize {
-    analyze_pxbsp_draw_cost(package)
-        .ok()
-        .flatten()
-        .map(|report| {
-            report
-                .worst_leaf()
-                .map_or(report.world_base_packet_slots, |leaf| {
-                    leaf.base_packet_slots
-                })
-        })
-        .unwrap_or(0)
-}
-
-#[cfg(test)]
-fn pxbsp_face_packets(version: PxbspVersion, bytes: &[u8]) -> Option<usize> {
-    match version {
-        PxbspVersion::V4 | PxbspVersion::V5 | PxbspVersion::V6 => RecordSlice::<Face>::new(bytes)?
-            .iter()
-            .try_fold(0usize, |total, face| {
-                let vertex_count = usize::try_from(face.vertex_count).ok()?;
-                total.checked_add(vertex_count.saturating_sub(2))
-            }),
-        PxbspVersion::V1 => {
-            let mut faces = bytes.chunks_exact(14);
-            if !faces.remainder().is_empty() {
-                return None;
-            }
-            faces.try_fold(0usize, |total, face| {
-                let vertex_count = usize::try_from(i16::from_le_bytes([face[8], face[9]])).ok()?;
-                total.checked_add(vertex_count.saturating_sub(2))
-            })
-        }
-    }
-}
-
-fn cooked_packet_count(package: &PlaytestPackage, bsp_packets: usize) -> usize {
-    let envelope = playtest_performance_envelope(package).unwrap_or_default();
+fn cooked_packet_count(package: &PlaytestPackage) -> usize {
+    let envelope = playtest_performance_envelope(package);
     // Each physical Archive Beacon submits 24 Gouraud triangles (one visible
     // shell face, six extrusion sides, and four pivot sides) plus six perimeter
     // lines. Count every cooked POI conservatively because a
@@ -726,21 +334,14 @@ fn cooked_packet_count(package: &PlaytestPackage, bsp_packets: usize) -> usize {
         .filter(|record| record.kind == PlaytestInteractableKind::PointOfInterest)
         .count()
         .saturating_mul(30);
-    let world_packets = if bsp_packets == 0 {
-        envelope
-            .tr_packets_before_hw_split
-            .saturating_add(envelope.prop_surfaces)
-    } else {
-        bsp_packets.saturating_add(envelope.prop_surfaces)
-    };
-    world_packets.saturating_add(poi_marker_packets)
+    envelope.prop_surfaces.saturating_add(poi_marker_packets)
 }
 
 /// Per-project primitive arena capacity the generated manifest publishes for
 /// this cooked package.
 pub fn cooked_manifest_packet_capacity(package: &PlaytestPackage) -> usize {
-    derived_packet_capacity(cooked_packet_count(package, cooked_bsp_packets(package)))
-        .min(PLAYTEST_PXBSP_PACKET_CAPACITY_CEILING)
+    derived_packet_capacity(cooked_packet_count(package))
+        .min(PLAYTEST_WORLD_PACKET_CAPACITY_CEILING)
 }
 
 fn authored_texture_paths(project: &ProjectDocument) -> BTreeSet<String> {
@@ -774,13 +375,9 @@ fn authored_texture_paths(project: &ProjectDocument) -> BTreeSet<String> {
 }
 
 fn attach_budget_issues(project: &ProjectDocument, report: &mut PlaytestBudgetReport) {
-    let geometry_target = project
-        .active_scene()
-        .brushes
-        .iter()
-        .enumerate()
-        .max_by_key(|(_, brush)| brush.faces.len())
-        .map(|(brush, _)| PlaytestValidationTarget::Brush { brush, face: None });
+    // The grid is one document, not a node, so a world-level overflow has no
+    // single scene object to select.
+    let geometry_target: Option<PlaytestValidationTarget> = None;
     let texture_target = project
         .resources
         .iter()
@@ -798,16 +395,6 @@ fn attach_budget_issues(project: &ProjectDocument, report: &mut PlaytestBudgetRe
         .map(|resource| PlaytestValidationTarget::Resource(resource.id))
         .or(geometry_target);
 
-    if report.pvs_row_bytes > PLAYTEST_PVS_ROW_LIMIT_BYTES {
-        report.issues.push(PlaytestBudgetIssue {
-            kind: PlaytestBudgetKind::Pvs,
-            used: report.pvs_row_bytes,
-            limit: PLAYTEST_PVS_ROW_LIMIT_BYTES,
-            unit: "B/row",
-            target: geometry_target,
-            action: "split visibility with portals or simplify the focused world geometry",
-        });
-    }
     if report.ram_asset_slots > PLAYTEST_RAM_ASSET_SLOT_LIMIT {
         report.issues.push(PlaytestBudgetIssue {
             kind: PlaytestBudgetKind::Ram,
@@ -855,7 +442,7 @@ fn attach_budget_issues(project: &ProjectDocument, report: &mut PlaytestBudgetRe
             limit: report.packet_limit,
             unit: " packets",
             target: geometry_target,
-            action: "split visibility or simplify the focused brush/room",
+            action: "simplify the focused room or split it with portals",
         });
     }
     if report.resident_asset_bytes > PLAYTEST_RESIDENT_ASSET_BYTES {
@@ -1055,36 +642,7 @@ pub fn validate_resident_assets(package: &PlaytestPackage) -> Result<ResidentAss
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::brush::Brush;
     use crate::playtest::build_package;
-
-    #[test]
-    fn estimated_packet_overflow_points_at_largest_brush() {
-        let mut project = ProjectDocument::new("budget focus");
-        // Enough cuboids to overflow even the derivation ceiling: only
-        // content the runtime arena cannot grow to cover is an issue.
-        for index in 0..400 {
-            project
-                .active_scene_mut()
-                .brushes
-                .push(Brush::cuboid([index * 4, 0, 0], [index * 4 + 2, 2, 2]));
-        }
-        let report = estimate_playtest_budgets(&project, Path::new("."));
-        assert_eq!(report.packet_limit, PLAYTEST_PACKET_CAPACITY_CEILING);
-        let issue = report
-            .issues
-            .iter()
-            .find(|issue| issue.kind == PlaytestBudgetKind::Packets)
-            .expect("packet issue");
-        assert_eq!(
-            issue.target,
-            Some(PlaytestValidationTarget::Brush {
-                brush: 399,
-                face: None,
-            })
-        );
-        assert!(issue.message().contains("simplify the focused brush/room"));
-    }
 
     #[test]
     fn derived_packet_capacity_clamps_and_rounds() {
@@ -1097,8 +655,6 @@ mod tests {
             PLAYTEST_PACKET_CAPACITY_CEILING
         );
         assert_eq!(PRIMITIVE_PACKET_SLOT_WORDS, 14);
-        assert_eq!(VIEW_RAY_SKY_PACKET_SLOTS, 172);
-        assert_eq!(VIEW_RAY_CUBE_SKY_PACKET_SLOTS, 165);
     }
 
     /// A resident payload as the cook emits it: model clips carry
@@ -1121,12 +677,9 @@ mod tests {
     /// The audit only reads `package.assets`, so cook the tracked fixture for
     /// a valid package and swap its asset table for the case under test.
     fn package_with_assets(assets: Vec<super::super::PlaytestAsset>) -> PlaytestPackage {
-        let project = ProjectDocument::from_ron_str(include_str!(
-            "../../../../archive/fixtures/brush-open-courtyard/project.ron"
-        ))
-        .expect("tracked project");
-        let fixture_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../archive/fixtures/brush-open-courtyard");
+        let fixture_dir = crate::projects_dir().join("grid-cave");
+        let project = ProjectDocument::load_from_path(fixture_dir.join("project.ron"))
+            .expect("tracked project");
         let (package, report) = build_package(&project, &fixture_dir);
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         let mut package = package.expect("fixture cooks");
@@ -1254,73 +807,5 @@ mod tests {
         let audit = validate_resident_assets(&package).expect("under the ceiling");
         assert!(audit.near_cap(), "{}", audit.summary());
         assert!(!audit.over_cap(), "{}", audit.summary());
-    }
-
-    #[test]
-    fn current_pxbsp_budget_decodes_face_counts_and_leaf_stride() {
-        let project = ProjectDocument::from_ron_str(include_str!(
-            "../../../../archive/fixtures/brush-open-courtyard/project.ron"
-        ))
-        .expect("tracked PXBSP project");
-        let fixture_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../archive/fixtures/brush-open-courtyard");
-        let (package, report) = build_package(&project, &fixture_dir);
-        assert!(report.errors.is_empty(), "{:?}", report.errors);
-        let package = package.expect("cooked PXBSP package");
-        let world = &package.world_geometry;
-        let index = PxbspIndex::read(&mut SliceReader::new(&world.bytes)).expect("PXBSP index");
-        assert_eq!(index.version(), PxbspVersion::V6);
-        let faces = index.lump(PxbspLumpKind::Faces);
-        assert_eq!(faces.len % Face::SIZE as u32, 0);
-        let face_bytes = &world.bytes[faces.offset as usize..faces.end() as usize];
-        let face_count = face_bytes.len() / Face::SIZE;
-        assert!(face_count > 0);
-        // The compact face parser counts vertex_count - 2 packets per face
-        // (a legacy 14-byte parse of these records read light-style bytes as
-        // the count and inflated wildly); every packet total stays bounded
-        // by three triangles per face and the worst-leaf sizing never
-        // exceeds the map total.
-        let total = pxbsp_face_packets(index.version(), face_bytes).expect("compact faces");
-        assert!(
-            total >= face_count && total <= face_count * 3,
-            "{total} for {face_count} faces"
-        );
-        let leaves = index.lump(PxbspLumpKind::Leaves).len as usize
-            / PxbspLumpKind::Leaves.record_size(index.version()).unwrap() as usize;
-        let worst_leaf = cooked_bsp_packets(&package);
-        assert!(
-            worst_leaf > 0 && worst_leaf <= total,
-            "{worst_leaf} vs {total}"
-        );
-        let draw_cost = analyze_pxbsp_draw_cost(&package)
-            .expect("valid PXBSP analysis")
-            .expect("PXBSP report");
-        assert_eq!(draw_cost.world_face_count, face_count);
-        assert_eq!(draw_cost.world_base_triangle_count, total);
-        assert_eq!(draw_cost.world_base_packet_slots, total);
-        assert_eq!(draw_cost.non_solid_leaf_count, leaves.saturating_sub(1));
-        assert_eq!(draw_cost.unreadable_pvs_leaf_count, 0);
-        assert_eq!(draw_cost.leaves.len(), leaves.saturating_sub(1));
-        assert_eq!(
-            draw_cost.worst_leaf().map(|leaf| leaf.base_packet_slots),
-            Some(worst_leaf)
-        );
-        assert!(draw_cost.leaves.iter().all(|leaf| {
-            leaf.visible_face_count <= world.max_visible_faces
-                && leaf.base_triangle_count <= total
-                && leaf.authored_surface_anchor.is_some()
-        }));
-        let sampled =
-            pxbsp_leaves_at_authored_points(&package, &[[8256, 65, 12352], [8256, 32, 12352]])
-                .expect("authored camera samples");
-        assert!(sampled[0].is_some_and(|leaf| leaf > 0));
-        assert_eq!(sampled[1], Some(0));
-        assert!(pxbsp_leaves_at_authored_points(&package, &[[i32::MAX, 0, 0]]).is_err());
-        let budget = cooked_playtest_budgets(&project, &package);
-        assert_eq!(
-            budget.packet_count,
-            cooked_packet_count(&package, worst_leaf)
-        );
-        assert_eq!(budget.pvs_row_bytes, leaves.saturating_sub(1).div_ceil(8));
     }
 }

@@ -1,5 +1,4 @@
 use super::*;
-use std::collections::HashMap;
 
 /// Largest point-light radius representable by the cooked runtime record.
 /// Authoring stores radius in sectors, while editors present this world-unit
@@ -893,8 +892,6 @@ pub struct NodeRow {
     pub kind: &'static str,
     /// Number of direct children.
     pub child_count: usize,
-    /// Number of BSP brushes directly owned by this authoring group.
-    pub brush_count: usize,
 }
 
 /// One editor scene.
@@ -906,16 +903,9 @@ pub struct Scene {
     pub root: NodeId,
     next_node_id: u64,
     pub(crate) nodes: Vec<SceneNode>,
-    /// World-space convex brushes (docs/brush-editor-integration.md).
-    /// A parallel collection for now; folds into the node tree when
-    /// brushes need hierarchy/visibility.
-    #[serde(default)]
-    pub brushes: Vec<crate::brush::Brush>,
-    /// Which kind of world this scene holds. The default, brushes, is not
-    /// written to disk, so scenes saved before the grid world existed load
-    /// and save unchanged. A grid scene keeps its sectors here and may still
-    /// hold `brushes` for props and blockers.
-    #[serde(default, skip_serializing_if = "crate::grid::SceneWorld::is_brushes")]
+    /// The scene's world. The empty default is not written to disk; a grid
+    /// scene keeps its sectors here.
+    #[serde(default, skip_serializing_if = "crate::grid::SceneWorld::is_empty")]
     pub world: crate::grid::SceneWorld,
 }
 
@@ -928,7 +918,6 @@ impl Scene {
             root: NodeId::ROOT,
             next_node_id: NodeId::ROOT.raw() + 1,
             nodes: vec![root],
-            brushes: Vec::new(),
             world: crate::grid::SceneWorld::default(),
         }
     }
@@ -1050,42 +1039,7 @@ impl Scene {
             node.children.retain(|child| !doomed.contains(child));
         }
         self.nodes.retain(|node| !doomed.contains(&node.id));
-        // Brushes owned by a deleted group subtree are part of that subtree.
-        // Ungrouping reparents them explicitly before removing the now-empty
-        // group, so it does not pass through this destructive path.
-        self.brushes
-            .retain(|brush| brush.group.is_none_or(|group| !doomed.contains(&group)));
         true
-    }
-
-    /// Repair stale or hand-authored brush group references after loading.
-    /// Only real Group nodes may own brushes; legacy projects simply have
-    /// `None` for every brush and therefore remain unchanged.
-    pub fn normalize_brush_groups(&mut self) {
-        let groups: std::collections::HashSet<NodeId> = self
-            .nodes
-            .iter()
-            .filter(|node| matches!(node.kind, NodeKind::Group))
-            .map(|node| node.id)
-            .collect();
-        for brush in &mut self.brushes {
-            if brush.group.is_some_and(|group| !groups.contains(&group)) {
-                brush.group = None;
-            }
-        }
-    }
-
-    /// Brush indices directly or recursively owned by `group`.
-    pub fn brush_indices_in_group(&self, group: NodeId, recursive: bool) -> Vec<usize> {
-        self.brushes
-            .iter()
-            .enumerate()
-            .filter_map(|(index, brush)| {
-                let owner = brush.group?;
-                (owner == group || (recursive && self.is_descendant_of(owner, group)))
-                    .then_some(index)
-            })
-            .collect()
     }
 
     /// `true` when `ancestor` appears anywhere on the parent chain of
@@ -1239,21 +1193,11 @@ impl Scene {
     /// Rows in root-first depth-first order.
     pub fn hierarchy_rows(&self) -> Vec<NodeRow> {
         let mut rows = Vec::new();
-        let mut brush_counts = HashMap::new();
-        for group in self.brushes.iter().filter_map(|brush| brush.group) {
-            *brush_counts.entry(group).or_insert(0) += 1;
-        }
-        self.push_hierarchy_row(self.root, 0, &brush_counts, &mut rows);
+        self.push_hierarchy_row(self.root, 0, &mut rows);
         rows
     }
 
-    fn push_hierarchy_row(
-        &self,
-        id: NodeId,
-        depth: usize,
-        brush_counts: &HashMap<NodeId, usize>,
-        rows: &mut Vec<NodeRow>,
-    ) {
+    fn push_hierarchy_row(&self, id: NodeId, depth: usize, rows: &mut Vec<NodeRow>) {
         let Some(node) = self.node(id) else {
             return;
         };
@@ -1269,10 +1213,9 @@ impl Scene {
             name: node.name.clone(),
             kind: node.kind.label(),
             child_count: node.children.len(),
-            brush_count: brush_counts.get(&id).copied().unwrap_or(0),
         });
         for child in &node.children {
-            self.push_hierarchy_row(*child, depth + 1, brush_counts, rows);
+            self.push_hierarchy_row(*child, depth + 1, rows);
         }
     }
 }

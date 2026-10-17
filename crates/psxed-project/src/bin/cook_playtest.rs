@@ -18,10 +18,7 @@ use std::process::ExitCode;
 
 use psxed_project::{
     default_project_dir,
-    playtest::{
-        analyze_pxbsp_draw_cost, build_package, cook_to_dir, default_generated_dir,
-        playtest_performance_envelope,
-    },
+    playtest::{build_package, cook_to_dir, default_generated_dir, playtest_performance_envelope},
     ProjectDocument,
 };
 
@@ -54,46 +51,6 @@ fn main() -> ExitCode {
     };
 
     let dir = default_generated_dir();
-    // World-streaming partition report (design 2026-10-08, M4). Host only and
-    // run first, so a world too large for one resident map still gets its
-    // verdict. Gate failures are advisory until the runtime consumes regions;
-    // PSXED_STREAM_GATE=enforce makes them fail the cook.
-    {
-        let mut params = psxed_project::brush_region::PartitionParams::default();
-        if let Ok(path) = std::env::var("PSXED_STREAM_PARAMS") {
-            match std::fs::read_to_string(&path)
-                .map_err(|e| e.to_string())
-                .and_then(|t| psxed_project::brush_region::CookOverrides::from_ron_str(&t))
-            {
-                Ok(overrides) => overrides.apply(&mut params),
-                Err(e) => eprintln!("[cook-playtest] warning: PSXED_STREAM_PARAMS {path}: {e}"),
-            }
-        }
-        match psxed_project::brush_region::cook_stream_report(
-            &project,
-            &project_root,
-            &dir,
-            &params,
-        ) {
-            Ok(report) => {
-                for line in report.text.lines().take(8) {
-                    println!("[cook-playtest] stream: {line}");
-                }
-                println!(
-                    "[cook-playtest] stream: full report in {}/stream_report.txt and stream_report.json",
-                    dir.display()
-                );
-                if !report.passed && std::env::var("PSXED_STREAM_GATE").as_deref() == Ok("enforce")
-                {
-                    eprintln!(
-                        "[cook-playtest] error: stream gate failed (PSXED_STREAM_GATE=enforce)"
-                    );
-                    return ExitCode::from(1);
-                }
-            }
-            Err(error) => eprintln!("[cook-playtest] warning: stream report skipped: {error}"),
-        }
-    }
     match cook_to_dir(&project, &project_root, &dir) {
         Ok(report) => {
             for warn in &report.warnings {
@@ -119,42 +76,17 @@ fn main() -> ExitCode {
                     psxed_project::playtest::cooked_playtest_budgets(&project, &package)
                         .concise_summary()
                 );
+                let world = &package.world_geometry;
                 println!(
-                    "[cook-playtest] PXBSP: {} bytes  Movers: {}",
-                    package.world_geometry.bytes.len(),
-                    package.world_geometry.movers.len(),
+                    "[cook-playtest] World: {} faces  {} B level core  {} B room chunks",
+                    world.faces,
+                    world.core.len(),
+                    world.rooms.len(),
                 );
-                match analyze_pxbsp_draw_cost(&package) {
-                    Ok(Some(draw_cost)) => {
-                        println!(
-                            "[cook-playtest] PXBSP draw cost: {} faces  {} base triangles  {} non-solid leaves  {} unreadable PVS rows",
-                            draw_cost.world_face_count,
-                            draw_cost.world_base_triangle_count,
-                            draw_cost.non_solid_leaf_count,
-                            draw_cost.unreadable_pvs_leaf_count,
-                        );
-                        for leaf in draw_cost.heaviest_leaves(8) {
-                            let location = leaf.authored_surface_anchor.map_or_else(
-                                || "anchor unavailable".to_string(),
-                                |[x, y, z]| format!("authored anchor ({x}, {y}, {z})"),
-                            );
-                            println!(
-                                "[cook-playtest]   hot leaf {}: {} PVS leaves  {} unique faces ({} sky)  {} base triangles  {} base packet slots  {}",
-                                leaf.leaf_index,
-                                leaf.visible_leaf_count,
-                                leaf.visible_face_count,
-                                leaf.visible_sky_aperture_face_count,
-                                leaf.base_triangle_count,
-                                leaf.base_packet_slots,
-                                location,
-                            );
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        eprintln!("[cook-playtest] warning: {error}");
-                    }
-                }
+                println!(
+                    "[cook-playtest] {}",
+                    world.summary.trim_end().replace('\n', "\n[cook-playtest] ")
+                );
                 // Per-room residency counts: deduped texture assets (world
                 // textures + model atlases) are VRAM-required; model meshes
                 // + clips bump RAM.
@@ -234,33 +166,21 @@ fn main() -> ExitCode {
                         .map(|(owner, bytes)| format!(" [{owner} {bytes}B]"))
                         .collect::<String>(),
                 );
-                match playtest_performance_envelope(&package) {
-                    Ok(envelope) => {
-                        let packet_capacity =
-                            psxed_project::playtest::cooked_manifest_packet_capacity(&package);
-                        let pre_hw_packets = envelope
-                            .tr_packets_before_hw_split
-                            .saturating_add(envelope.prop_surfaces);
-                        println!(
-                            "[cook-playtest] 30 FPS envelope: single-room-PVS-surfaces<={} room-surfaces<={} authored-tris<={} TR+prop-packets-before-HW-split<={} packet-capacity={}",
-                            envelope.max_single_room_pvs_surfaces,
-                            envelope.room_surfaces,
-                            envelope.authored_triangles,
-                            pre_hw_packets,
-                            packet_capacity,
-                        );
-                        if pre_hw_packets > packet_capacity {
-                            eprintln!(
-                                "[cook-playtest] warning: conservative TR+prop packet envelope {} exceeds even the derived runtime capacity {}; recorded-view validation is required",
-                                pre_hw_packets, packet_capacity,
-                            );
-                        }
-                    }
-                    Err(error) => {
-                        eprintln!(
-                            "[cook-playtest] warning: could not build 30 FPS envelope: {error}"
-                        );
-                    }
+                let envelope = playtest_performance_envelope(&package);
+                let packet_capacity =
+                    psxed_project::playtest::cooked_manifest_packet_capacity(&package);
+                println!(
+                    "[cook-playtest] 30 FPS envelope: largest-room-surfaces<={} authored-tris<={} prop-surfaces<={} packet-capacity={}",
+                    envelope.room_surfaces,
+                    envelope.authored_triangles,
+                    envelope.prop_surfaces,
+                    packet_capacity,
+                );
+                if envelope.prop_surfaces > packet_capacity {
+                    eprintln!(
+                        "[cook-playtest] warning: prop surfaces {} exceed the runtime packet capacity {}; recorded-view validation is required",
+                        envelope.prop_surfaces, packet_capacity,
+                    );
                 }
             }
             println!("[cook-playtest] wrote → {}", dir.display());

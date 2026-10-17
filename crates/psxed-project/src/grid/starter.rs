@@ -1,8 +1,8 @@
 //! The starter room of File > New Grid Project.
 //!
-//! A new grid project is the Graybox Reach project minus its level (the same
-//! base the bonnie importer uses, so it carries the Cortex player, camera,
-//! sky and UI) with a small walled room as the world: a floor, a ceiling,
+//! A new grid project is the Graybox Reach project minus its level (so it
+//! carries the Cortex player, camera, sky and UI) with a small walled room as
+//! the world: a floor, a ceiling,
 //! walls on every edge of the outline, one point light, and the player
 //! standing in the middle. It Plays as soon as it is created.
 
@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use crate::{NodeId, NodeKind, ProjectDocument, ResourceData, ResourceId};
 
-use super::bonnie_project::{link_assets, place_actors, spawn_point, strip_base, SpawnRequest};
+use super::base_project::{link_assets, place_actors, spawn_point, strip_base, SpawnRequest};
 use super::room::GridRoom;
 use super::sector::WallEdge;
 use super::surface::{GridSurface, GridWall};
@@ -105,26 +105,28 @@ pub fn starter_world(
     }
 }
 
-/// Create the starter project at `out_dir` from the base project in
-/// `base_dir`, named `name`. Returns the written `project.ron`.
-pub fn create_project(
-    base_dir: &Path,
-    out_dir: &Path,
-    name: &str,
-) -> Result<PathBuf, StarterError> {
-    let mut project = ProjectDocument::load_from_path(base_dir.join("project.ron"))
-        .map_err(|e| StarterError::Base(e.to_string()))?;
-    strip_base(&mut project, 0);
-    project.name = name.to_string();
-    std::fs::create_dir_all(out_dir)
-        .map_err(|e| StarterError::Io(format!("create {}: {e}", out_dir.display())))?;
-    link_assets(base_dir, out_dir)
-        .map_err(|e| StarterError::Io(format!("link the base assets: {e}")))?;
-
+/// Give `project` the starter room as its world and leave every node where it
+/// is. For content that was authored against another world and only needs a
+/// floor to cook and play on.
+pub fn attach_starter_world(project: &mut ProjectDocument) {
     let ground =
-        find_material(&project, &["Graybox / Ground 64"]).or_else(|| any_world_material(&project));
-    let walls = find_material(&project, &["Graybox / Original 64"]).or(ground);
-    let roof = find_material(&project, &["Graybox / Cliff 64"]).or(ground);
+        find_material(project, &["Graybox / Ground 64"]).or_else(|| any_world_material(project));
+    let walls = find_material(project, &["Graybox / Original 64"]).or(ground);
+    let roof = find_material(project, &["Graybox / Cliff 64"]).or(ground);
+    let scene = project.active_scene_mut();
+    scene.world = SceneWorld::Grid(starter_world(ground, walls, roof));
+}
+
+/// Turn `project` into a starter project in place: its level goes, its player
+/// (and everything else the project carries: characters, camera, sky, UI)
+/// stays, and the world becomes the starter room with one lamp above the
+/// player. The caller names the project and writes it.
+pub fn into_starter(project: &mut ProjectDocument) -> Result<(), StarterError> {
+    strip_base(project, 0);
+    let ground =
+        find_material(project, &["Graybox / Ground 64"]).or_else(|| any_world_material(project));
+    let walls = find_material(project, &["Graybox / Original 64"]).or(ground);
+    let roof = find_material(project, &["Graybox / Cliff 64"]).or(ground);
     let world = starter_world(ground, walls, roof);
 
     let centre = SpawnRequest {
@@ -134,7 +136,7 @@ pub fn create_project(
     let at = spawn_point(&world, centre)
         .ok_or_else(|| StarterError::Io("the starter room has no floor".to_string()))?;
     let step = world.scale.sector_editor_units();
-    place_actors(&mut project, &world, at, 0.0, step);
+    place_actors(project, &world, at, 0.0, step);
 
     // One lamp above the player, scaled to the World node's sector size.
     let scene = project.active_scene_mut();
@@ -158,6 +160,24 @@ pub fn create_project(
     scene.world = SceneWorld::Grid(world);
     project.editor_camera = crate::EditorCameraState::default();
     project.editor_viewport = crate::EditorViewportState::default();
+    Ok(())
+}
+
+/// Create the starter project at `out_dir` from the base project in
+/// `base_dir`, named `name`. Returns the written `project.ron`.
+pub fn create_project(
+    base_dir: &Path,
+    out_dir: &Path,
+    name: &str,
+) -> Result<PathBuf, StarterError> {
+    let mut project = ProjectDocument::load_from_path(base_dir.join("project.ron"))
+        .map_err(|e| StarterError::Base(e.to_string()))?;
+    into_starter(&mut project)?;
+    project.name = name.to_string();
+    std::fs::create_dir_all(out_dir)
+        .map_err(|e| StarterError::Io(format!("create {}: {e}", out_dir.display())))?;
+    link_assets(base_dir, out_dir)
+        .map_err(|e| StarterError::Io(format!("link the base assets: {e}")))?;
 
     let path = out_dir.join("project.ron");
     project
