@@ -56,7 +56,7 @@ pub(super) fn push_hook_entities(
                     z: units.rt(g[2]),
                     yaw: crate::spatial::euler_degrees_to_q12(heading) as i16,
                     resource_slot: 0,
-                    flags: 0,
+                    flags: psx_level::entity_flags::HOOK_BARE,
                 });
             }
         }

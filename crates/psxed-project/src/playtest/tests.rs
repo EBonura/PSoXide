@@ -293,3 +293,53 @@ fn hook_point_cap_is_reported_instead_of_silently_ignoring_landings() {
     assert!(package.is_none());
     assert!(report.errors.iter().any(|e| e.contains("32 hook points")));
 }
+
+/// Audit for `docs/grid/meshes.md`: the older ArchProp node does cook in a grid
+/// world (the cook reads scene nodes whatever the world is), with its
+/// per-segment collision boxes. Nothing in the grid MCP can create one (a node
+/// is only cloned there and `set_node` keeps its variant), which is why arches
+/// are meshes now.
+#[test]
+fn an_arch_prop_node_cooks_in_a_grid_world_with_segment_boxes() {
+    use crate::{
+        ArchPropGeometry, NodeKind, ResourceData, UvTransform, ARCH_PROP_MATERIAL_COUNT,
+    };
+    let mut project = ProjectDocument::starter();
+    // A room material of the starter (a 4bpp one), on every slot.
+    let material = project
+        .resources
+        .iter()
+        .find(|r| {
+            r.name == "DP City / Deck Plate"
+                && matches!(&r.data, ResourceData::Material(m) if m.psxt_path.is_some())
+        })
+        .map(|r| r.id)
+        .unwrap_or_else(|| {
+            let names: Vec<&str> = project
+                .resources
+                .iter()
+                .filter(|r| matches!(&r.data, ResourceData::Material(_)))
+                .map(|r| r.name.as_str())
+                .collect();
+            panic!("no Graybox material in {names:?}")
+        });
+    let scene = project.active_scene_mut();
+    let id = scene.add_node(
+        scene.root,
+        "Old arch",
+        NodeKind::ArchProp {
+            materials: [Some(material); ARCH_PROP_MATERIAL_COUNT],
+            uvs: [UvTransform::IDENTITY; ARCH_PROP_MATERIAL_COUNT],
+            geometry: ArchPropGeometry::default(),
+            collision_enabled: true,
+        },
+    );
+    scene.node_mut(id).unwrap().transform.translation = [1280.0, 0.0, 1280.0];
+    let (package, report) = build_package(&project, &crate::default_project_dir());
+    assert!(report.is_ok(), "{:?}", report.errors);
+    let package = package.unwrap();
+    assert_eq!(package.arch_props.len(), 1, "{:?}", report.warnings);
+    assert!(!package.arch_prop_surfaces.is_empty());
+    // One conservative box per profile segment, plus the legs.
+    assert!(package.arch_prop_collisions.len() >= 6);
+}

@@ -305,6 +305,7 @@ fn the_crown_socket_hook_point_is_96_under_the_grip() {
     // (2528 gu = 197.5, rounded to 198 runtime units); the record sits 96
     // below the grip, at the arch's centre.
     assert_eq!((hooks[0].x, hooks[0].y, hooks[0].z), (480, 198 - 96, 320));
+    assert_eq!(hooks[0].flags, psx_level::entity_flags::HOOK_BARE);
     let mut turned = world.clone();
     turned.rooms[0].meshes[0].rotation = [90, 0, 0];
     let hook = mesh_sockets_for_test(&turned)[0];
@@ -322,4 +323,49 @@ fn the_crown_socket_hook_point_is_96_under_the_grip() {
         }),
     );
     assert_eq!(mesh_sockets_for_test(&pointed)[0].y, 238 - 96); // (3072 - 32) gu is 237.5, rounded away from zero
+}
+
+/// What each reference asset adds to a room chunk, the figure the design
+/// document reports (`docs/grid/meshes.md`, "Cost"). Printed with
+/// `--nocapture`, asserted loosely so a generator change that doubles a cost
+/// shows up here.
+#[test]
+fn what_a_mesh_costs_in_the_chunk() {
+    let bare = cook(&hall()).unwrap();
+    let base = bare.report.rooms[0].section_bytes;
+    let base_total: usize = base.iter().sum();
+    let obj = "v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nv 0 0 1\nv 1 0 1\nv 1 1 1\nv 0 1 1\n\
+               f 5 6 7 8\nf 2 1 4 3\nf 1 5 8 4\nf 6 2 3 7\nf 8 7 3 4\nf 1 2 6 5\n";
+    let cases: [(&str, MeshKind, usize); 4] = [
+        ("arch", MeshKind::Arch(ArchSpec::default()), 3_200),
+        ("column", MeshKind::Column(ColumnSpec::default()), 1_800),
+        ("rubble", MeshKind::Rubble(RubbleSpec::default()), 2_200),
+        (
+            "crate",
+            MeshKind::Imported(
+                ImportedMesh::from_obj(obj, 512.0, "crate.obj", ImportProxy::BoxTop).unwrap(),
+            ),
+            800,
+        ),
+    ];
+    for (name, kind, ceiling) in cases {
+        let mut world = hall();
+        world.mesh_assets.push(MeshAsset::new(name, kind));
+        let mut mesh = GridMesh::new(1, 0, [6 * SECTOR_UNITS, 0, 4 * SECTOR_UNITS]);
+        mesh.set_material(0, Some(rid(8)));
+        world.rooms[0].meshes.push(mesh);
+        let cooked = cook(&world).unwrap();
+        let now = cooked.report.rooms[0].section_bytes;
+        let total: usize = now.iter().sum();
+        let grew: Vec<String> = now
+            .iter()
+            .zip(&base)
+            .enumerate()
+            .filter(|(_, (a, b))| a != b)
+            .map(|(i, (a, b))| format!("section {i}: +{}", a - b))
+            .collect();
+        let added = total - base_total;
+        println!("mesh cost {name}: +{added} B ({})", grew.join(", "));
+        assert!(added > 0 && added <= ceiling, "{name}: +{added} B");
+    }
 }
