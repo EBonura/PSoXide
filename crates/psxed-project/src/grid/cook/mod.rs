@@ -12,6 +12,7 @@
 pub mod collision;
 pub mod lod;
 pub mod mesh;
+pub mod mesh_collision;
 pub mod plane_collision;
 pub mod portals;
 pub mod render;
@@ -232,11 +233,17 @@ pub fn cook_level(
             room.origin[1] * s as i32,
         ]);
         let binder = &*input.binder;
-        cols.push(collision::build_with(&units, room, index, &mut |plane| {
-            plane
-                .camera_pass
-                .unwrap_or_else(|| binder.see_through(plane.material))
-        })?);
+        cols.push(collision::build_with_meshes(
+            &units,
+            room,
+            &world.mesh_assets,
+            index,
+            &mut |plane| {
+                plane
+                    .camera_pass
+                    .unwrap_or_else(|| binder.see_through(plane.material))
+            },
+        )?);
     }
     let probe_core = LevelCore {
         sector_units: s as u16,
@@ -521,6 +528,8 @@ mod convert_tests;
 mod derived_tests;
 #[cfg(test)]
 mod gap_tests;
+#[cfg(test)]
+mod mesh_tests;
 #[cfg(test)]
 mod motor_harness;
 #[cfg(test)]

@@ -58,6 +58,15 @@ pub use budget::*;
 mod cook_ui;
 mod grid_world;
 mod manifest;
+mod mesh_sockets;
+/// The hook entities a world's mesh sockets cook to (for the grid tests).
+#[cfg(test)]
+pub(crate) fn mesh_sockets_for_test(world: &crate::grid::GridWorld) -> Vec<PlaytestEntity> {
+    let mut entities = Vec::new();
+    let mut report = PlaytestValidationReport::default();
+    mesh_sockets::push_hook_entities(world, &mut entities, &mut report);
+    entities
+}
 mod performance;
 mod schema;
 pub(crate) use cook_ui::*;
@@ -1332,6 +1341,16 @@ pub fn build_package(
                     return (None, report);
                 }
                 let pos = floor_pos;
+                // The prototype moving perches of Graybox Reach are the second
+                // and fourth hook point of a project. The runtime used to pick
+                // them by that slot number; the record now says so itself, so a
+                // hook point from anywhere else (a mesh socket) never moves.
+                let hooks_before = entities
+                    .iter()
+                    .filter(|e| e.kind == PlaytestEntityKind::HookPoint)
+                    .count();
+                let sways = matches!(node.kind, NodeKind::HookPoint)
+                    && (hooks_before == 1 || hooks_before == 3);
                 entities.push(PlaytestEntity {
                     room: room_index,
                     kind: if matches!(node.kind, NodeKind::HookPoint) {
@@ -1344,7 +1363,11 @@ pub fn build_package(
                     z: pos[2],
                     yaw,
                     resource_slot: 0,
-                    flags: 0,
+                    flags: if sways {
+                        psx_level::entity_flags::HOOK_SWAY
+                    } else {
+                        0
+                    },
                 });
             }
             NodeKind::MeshInstance {
@@ -1704,6 +1727,10 @@ pub fn build_package(
             ));
         }
     }
+
+    // Hook sockets of placed meshes, after the node-authored hook points so
+    // those keep their slots.
+    mesh_sockets::push_hook_entities(grid_doc, &mut entities, &mut report);
 
     if let Some(previous) = previous_node {
         sync_stable_ids(&mut game_entity_ids, game_entities.len(), previous);

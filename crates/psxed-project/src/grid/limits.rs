@@ -174,6 +174,46 @@ pub enum GridIssueKind {
         /// Index in the room's plane list.
         index: usize,
     },
+    /// More than [`super::mesh::MAX_MESHES_PER_ROOM`] mesh instances in a room.
+    TooManyMeshes {
+        /// Instances present.
+        count: usize,
+    },
+    /// An instance naming a mesh asset that does not exist.
+    MeshAssetMissing {
+        /// Instance id.
+        id: u16,
+        /// The asset index named.
+        asset: u16,
+    },
+    /// Two instances with the same id.
+    MeshIdDuplicate {
+        /// The id.
+        id: u16,
+    },
+    /// An instance whose asset does not build (the recipe is out of range).
+    MeshUnbuildable {
+        /// Instance id.
+        id: u16,
+        /// Why.
+        why: String,
+    },
+    /// An instance whose scale is outside the allowed range.
+    MeshScale {
+        /// Instance id.
+        id: u16,
+    },
+    /// An instance whose position is beyond [`MAX_COORD_UNITS`].
+    MeshCoordinate {
+        /// Instance id.
+        id: u16,
+    },
+    /// An instance that reaches outside its room's sector rectangle, where the
+    /// render box and the collision table cannot hold all of it.
+    MeshOutsideRoom {
+        /// Instance id.
+        id: u16,
+    },
     /// Rough jitter larger than a third of the character's radius: the rock
     /// can clip the model and the camera, and an outward offset is an
     /// invisible wall that size.
@@ -193,6 +233,7 @@ impl GridIssueKind {
             | Self::BadBandSet { .. }
             | Self::BandSetMissing { .. }
             | Self::PlaneTooSteep { .. }
+            | Self::MeshOutsideRoom { .. }
             | Self::RoughTooLarge { .. } => Severity::Warning,
             _ => Severity::Error,
         }
@@ -282,6 +323,26 @@ impl GridIssue {
             GridIssueKind::PlaneTooSteep { index } => {
                 format!("plane {index} is walkable but too steep to stand on; it blocks instead")
             }
+            GridIssueKind::TooManyMeshes { count } => format!(
+                "{count} meshes, at most {}",
+                super::mesh::MAX_MESHES_PER_ROOM
+            ),
+            GridIssueKind::MeshAssetMissing { id, asset } => {
+                format!("mesh {id} names asset {asset}, which does not exist")
+            }
+            GridIssueKind::MeshIdDuplicate { id } => format!("mesh id {id} is used twice"),
+            GridIssueKind::MeshUnbuildable { id, why } => format!("mesh {id}: {why}"),
+            GridIssueKind::MeshScale { id } => format!(
+                "mesh {id} scale is outside {}..={} (Q8, 256 is 1.0)",
+                super::mesh::SCALE_RANGE.0,
+                super::mesh::SCALE_RANGE.1
+            ),
+            GridIssueKind::MeshCoordinate { id } => {
+                format!("mesh {id} is beyond +/-{MAX_COORD_UNITS} grid units")
+            }
+            GridIssueKind::MeshOutsideRoom { id } => format!(
+                "mesh {id} reaches outside the room; move it in or grow the room (the part outside is culled with the room's box and does not collide)"
+            ),
             GridIssueKind::RoughTooLarge { amp_ru } => format!(
                 "rough jitter of up to {amp_ru} runtime units is more than a third of the character's radius ({}); the rock can clip the model and the camera",
                 super::rough::MAX_AMP_RU
@@ -311,6 +372,8 @@ pub struct GridBudget {
     pub walls: usize,
     /// Free planes.
     pub planes: usize,
+    /// Placed meshes.
+    pub meshes: usize,
     /// Drawable faces after triangulation and wall banding, all rooms.
     pub faces: usize,
     /// Faces of the busiest room, the figure [`MAX_ROOM_FACES`] caps.
@@ -329,6 +392,7 @@ impl GridBudget {
         };
         for room in &world.rooms {
             budget.planes += room.planes.len();
+            budget.meshes += room.meshes.len();
             for (_, _, sector) in room.iter() {
                 budget.sectors += 1;
                 budget.floors += usize::from(sector.floor.is_some());
@@ -386,6 +450,67 @@ fn check_planes(room_index: usize, room: &GridRoom, issues: &mut Vec<GridIssue>)
         }
         if plane.collision == PlaneCollision::Walkable && plane.shape() != PlaneShape::Platform {
             issues.push(at_room(GridIssueKind::PlaneTooSteep { index }));
+        }
+    }
+}
+
+fn check_meshes(world: &GridWorld, room_index: usize, issues: &mut Vec<GridIssue>) {
+    use super::mesh::{MAX_MESHES_PER_ROOM, SCALE_RANGE};
+    let room = &world.rooms[room_index];
+    let at_room = |kind| GridIssue {
+        kind,
+        room: Some(room_index),
+        cell: None,
+    };
+    if room.meshes.len() > MAX_MESHES_PER_ROOM {
+        issues.push(at_room(GridIssueKind::TooManyMeshes {
+            count: room.meshes.len(),
+        }));
+    }
+    for (index, mesh) in room.meshes.iter().enumerate() {
+        let id = mesh.id;
+        if room.meshes[..index].iter().any(|m| m.id == id)
+            || world.rooms[..room_index]
+                .iter()
+                .any(|r| r.meshes.iter().any(|m| m.id == id))
+        {
+            issues.push(at_room(GridIssueKind::MeshIdDuplicate { id }));
+        }
+        if mesh
+            .scale
+            .iter()
+            .any(|s| !(SCALE_RANGE.0..=SCALE_RANGE.1).contains(s))
+        {
+            issues.push(at_room(GridIssueKind::MeshScale { id }));
+            continue;
+        }
+        if mesh
+            .position
+            .iter()
+            .any(|v| v.unsigned_abs() > MAX_COORD_UNITS as u32)
+        {
+            issues.push(at_room(GridIssueKind::MeshCoordinate { id }));
+            continue;
+        }
+        let Some(asset) = world.mesh_assets.get(usize::from(mesh.asset)) else {
+            issues.push(at_room(GridIssueKind::MeshAssetMissing {
+                id,
+                asset: mesh.asset,
+            }));
+            continue;
+        };
+        let built = match asset.build() {
+            Ok(built) => built,
+            Err(why) => {
+                issues.push(at_room(GridIssueKind::MeshUnbuildable { id, why }));
+                continue;
+            }
+        };
+        if mesh.enabled {
+            let (lo, hi) = mesh.cell_span(&built);
+            if room.local(lo).is_none() || room.local(hi).is_none() {
+                issues.push(at_room(GridIssueKind::MeshOutsideRoom { id }));
+            }
         }
     }
 }
@@ -521,6 +646,7 @@ pub fn validate(world: &GridWorld) -> Vec<GridIssue> {
     }
     for (index, room) in world.rooms.iter().enumerate() {
         check_room(index, room, &mut issues);
+        check_meshes(world, index, &mut issues);
         if world.scale.is_valid() && room.rough.jitters() {
             // One runtime unit is 16 editor units; an editor unit is
             // `den / num` grid units.

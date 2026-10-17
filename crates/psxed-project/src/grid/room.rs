@@ -83,6 +83,10 @@ pub struct GridRoom {
     /// must lie inside its footprint to collide (editing grows the room).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub planes: Vec<GridPlane>,
+    /// Static meshes placed in the room (instances of the world's mesh
+    /// assets). They draw and collide with the room; see [`super::mesh`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub meshes: Vec<super::mesh::GridMesh>,
     /// How walls come to exist: only as records (legacy) or derived from
     /// height differences.
     #[serde(default, skip_serializing_if = "WallMode::is_authored")]
@@ -115,6 +119,7 @@ impl GridRoom {
             fog: GridFog::default(),
             sectors: vec![None; width * depth],
             planes: Vec::new(),
+            meshes: Vec::new(),
             wall_mode: WallMode::Authored,
             defaults: RoomDefaults::default(),
             edge_overrides: EdgeOverrides::default(),
@@ -248,6 +253,23 @@ impl GridRoom {
             max = [
                 max[0].max(clamp(hi[0], 0, self.width)),
                 max[1].max(clamp(hi[1], 1, self.depth)),
+            ];
+        }
+        for mesh in &self.meshes {
+            let [cx, cz] = mesh.center_cell();
+            let clamp = |world: i32, axis: usize, limit: usize| {
+                usize::try_from(world - self.origin[axis])
+                    .unwrap_or(0)
+                    .min(limit.saturating_sub(1))
+            };
+            any = true;
+            min = [
+                min[0].min(clamp(cx, 0, self.width)),
+                min[1].min(clamp(cz, 1, self.depth)),
+            ];
+            max = [
+                max[0].max(clamp(cx, 0, self.width)),
+                max[1].max(clamp(cz, 1, self.depth)),
             ];
         }
         if !any {

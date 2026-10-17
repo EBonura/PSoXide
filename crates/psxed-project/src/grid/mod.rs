@@ -37,6 +37,8 @@
 //! * [`limits`]: caps, validation and the budget readout.
 //! * [`plane`]: free planes placed off the lattice, and [`plane_faces`]
 //!   their drawable faces.
+//! * [`mesh`]: static meshes (assets, generators, placed instances), and
+//!   [`mesh_faces`] their drawable faces.
 //! * [`faces`]: the drawable faces derived from the document.
 //! * [`light`]: the per-corner light bake of those faces.
 //! * [`edit`]: the editing operations the grid tools call.
@@ -58,6 +60,11 @@ mod faces_derived;
 pub mod heat;
 pub mod light;
 pub mod limits;
+pub mod mesh;
+mod mesh_arch;
+mod mesh_column;
+pub mod mesh_faces;
+mod mesh_obj;
 pub mod overrides;
 pub mod paint_rules;
 pub mod palette;
@@ -93,6 +100,9 @@ pub use derive::{DerivedKind, DerivedWall};
 pub use faces::{GridFace, GridFaceKind, UvDefaults};
 pub use light::FacingShade;
 pub use limits::{GridBudget, GridIssue, GridIssueKind, Severity};
+pub use mesh::{
+    ArchProfile, ArchSpec, ColumnSpec, GridMesh, ImportedMesh, MeshAsset, MeshKind, RubbleSpec,
+};
 pub use overrides::{Axis, EdgeKey, EdgeOverride, EdgeOverrides, RoomDefaults, WallMode};
 pub use paint_rules::PaintRules;
 pub use plane::{GridPlane, PlaneCollision, PlaneShape, PlaneUvMode};

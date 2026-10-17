@@ -112,6 +112,7 @@ fn main() {
         rooms: vec![hall(ground, walls, cliff)],
         shading: psxed_project::grid::FacingShade::SUBTLE,
         stream: psxed_project::grid::StreamRadii::DEFAULT,
+        mesh_assets: Vec::new(),
     };
     // Ramp up: rises 18 degrees along +x from the floor to the deck.
     let mut ramp_up = plane([4352, 262, 3584], [1024, 1615], [-90, 72, 0]);

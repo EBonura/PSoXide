@@ -69,6 +69,11 @@ pub enum GridFaceKind {
         /// Index in the room's plane list.
         index: usize,
     },
+    /// A face of a placed static mesh.
+    Mesh {
+        /// Index in the room's mesh list.
+        index: usize,
+    },
 }
 
 /// One drawable polygon of 3 or 4 corners.
@@ -579,6 +584,9 @@ pub fn all_faces_with(world: &GridWorld, defaults: &dyn UvDefaults) -> Vec<GridF
         for index in 0..room.planes.len() {
             super::plane_faces::plane_faces_with(world, defaults, room_index, index, &mut out);
         }
+        for index in 0..room.meshes.len() {
+            super::mesh_faces::mesh_faces_with(world, defaults, room_index, index, &mut out);
+        }
     }
     out
 }
@@ -602,6 +610,11 @@ pub fn room_face_counts(world: &GridWorld) -> Vec<usize> {
         for index in 0..room.planes.len() {
             scratch.clear();
             super::plane_faces::plane_faces(world, room_index, index, &mut scratch);
+            count += scratch.len();
+        }
+        for index in 0..room.meshes.len() {
+            scratch.clear();
+            super::mesh_faces::mesh_faces_with(world, &(), room_index, index, &mut scratch);
             count += scratch.len();
         }
         counts.push(count);

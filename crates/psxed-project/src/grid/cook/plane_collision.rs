@@ -75,7 +75,7 @@ fn local_corners(
     })
 }
 
-fn platform(c: &[P3; 4], id: u8) -> Result<ColPlane, String> {
+pub(super) fn platform(c: &[P3; 4], id: u8, thickness: i16) -> Result<ColPlane, String> {
     let e1 = [c[1][0] - c[0][0], c[1][1] - c[0][1], c[1][2] - c[0][2]].map(f64::from);
     let e3 = [c[3][0] - c[0][0], c[3][1] - c[0][1], c[3][2] - c[0][2]].map(f64::from);
     let det = e1[0] * e3[2] - e1[2] * e3[0];
@@ -121,11 +121,11 @@ fn platform(c: &[P3; 4], id: u8) -> Result<ColPlane, String> {
         y0: to_i16(y0, "platform height")?,
         sx_q12: sxq,
         sz_q12: szq,
-        extent: PLATFORM_THICKNESS,
+        extent: thickness,
     })
 }
 
-fn wall(c: &[P3; 4], id: u8) -> Result<Option<ColPlane>, String> {
+pub(super) fn wall(c: &[P3; 4], id: u8) -> Result<Option<ColPlane>, String> {
     // The pair of opposite edges with the larger plan separation between
     // their midpoints gives the wall's line (a plane rolled on its side has
     // its width axis upright).
@@ -162,7 +162,7 @@ fn wall(c: &[P3; 4], id: u8) -> Result<Option<ColPlane>, String> {
     }))
 }
 
-fn blocker(c: &[P3; 4], id: u8) -> Result<ColPlane, String> {
+pub(super) fn blocker(c: &[P3; 4], id: u8) -> Result<ColPlane, String> {
     let lo = |i: usize| c.iter().map(|p| p[i]).min().unwrap_or(0);
     let hi = |i: usize| c.iter().map(|p| p[i]).max().unwrap_or(0);
     Ok(ColPlane {
@@ -250,7 +250,30 @@ pub fn build(
     origin: [i32; 3],
     camera_pass: &mut dyn FnMut(&GridPlane) -> bool,
 ) -> Result<PlaneTables, String> {
-    let s = f64::from(units.sector());
+    build_with_extra(units, room, room_index, origin, camera_pass, Vec::new())
+}
+
+/// A collision record made outside the room's plane list (a mesh proxy). Its
+/// `id` is set by the build: the ids after the room's planes.
+pub struct ExtraRecord {
+    /// The record, `id` unset.
+    pub record: ColPlane,
+    /// Lowest and highest local height the record covers.
+    pub range: (i32, i32),
+    /// What to call it in errors.
+    pub label: String,
+}
+
+/// [`build`], then the `extra` records after the planes (ids continue from the
+/// room's plane count, so planes and proxies never share an id).
+pub fn build_with_extra(
+    units: &RuntimeUnits,
+    room: &GridRoom,
+    room_index: usize,
+    origin: [i32; 3],
+    camera_pass: &mut dyn FnMut(&GridPlane) -> bool,
+    extra: Vec<ExtraRecord>,
+) -> Result<PlaneTables, String> {
     let mut tables = PlaneTables {
         per_cell: vec![Vec::new(); room.width * room.depth],
         ..PlaneTables::default()
@@ -270,7 +293,7 @@ pub fn build(
             ));
         }
         let mut record = if shape == PlaneShape::Platform {
-            platform(&corners, id).map_err(|e| at(&e))?
+            platform(&corners, id, PLATFORM_THICKNESS).map_err(|e| at(&e))?
         } else if shape == PlaneShape::Wall {
             match wall(&corners, id).map_err(|e| at(&e))? {
                 Some(record) => record,
@@ -291,26 +314,7 @@ pub fn build(
         if camera_pass(plane) {
             record.flags |= COLPLANE_CAMERA_PASS;
         }
-        let polygon = plan_polygon(&record);
-        let mut placed = 0usize;
-        for cz in 0..room.depth {
-            for cx in 0..room.width {
-                let rect = [
-                    cx as f64 * s,
-                    cz as f64 * s,
-                    (cx + 1) as f64 * s,
-                    (cz + 1) as f64 * s,
-                ];
-                if polygon_hits_rect(&polygon, rect, 1.0) {
-                    tables.per_cell[cz * room.width + cx].push(tables.records.len());
-                    placed += 1;
-                }
-            }
-        }
-        if placed == 0 {
-            return Err(at("lies outside the room"));
-        }
-        let (lo, hi) = match record.kind {
+        let range = match record.kind {
             plane_kind::PLATFORM => {
                 let ys = corners.iter().map(|c| c[1]);
                 (
@@ -323,11 +327,16 @@ pub fn build(
                 i32::from(record.y0) + i32::from(record.extent),
             ),
         };
-        tables.range = Some(match tables.range {
-            Some((a, b)) => (a.min(lo), b.max(hi)),
-            None => (lo, hi),
-        });
-        tables.records.push(record);
+        place_record(&mut tables, units, room, record, range, &at)?;
+    }
+    let first_extra = room.planes.len();
+    for (k, item) in extra.into_iter().enumerate() {
+        let at = |what: &str| format!("room {room_index} {}: {what}", item.label);
+        let id = u8::try_from(first_extra + k)
+            .map_err(|_| at("more than 255 collision records in the room"))?;
+        let mut record = item.record;
+        record.id = id;
+        place_record(&mut tables, units, room, record, item.range, &at)?;
     }
     for cell in &tables.per_cell {
         if cell.len() > usize::from(u8::MAX) {
@@ -338,6 +347,44 @@ pub fn build(
         }
     }
     Ok(tables)
+}
+
+/// Add `record` to `tables`: into every sector its footprint touches, and
+/// into the height range.
+fn place_record(
+    tables: &mut PlaneTables,
+    units: &RuntimeUnits,
+    room: &GridRoom,
+    record: ColPlane,
+    (lo, hi): (i32, i32),
+    at: &dyn Fn(&str) -> String,
+) -> Result<(), String> {
+    let s = f64::from(units.sector());
+    let polygon = plan_polygon(&record);
+    let mut placed = 0usize;
+    for cz in 0..room.depth {
+        for cx in 0..room.width {
+            let rect = [
+                cx as f64 * s,
+                cz as f64 * s,
+                (cx + 1) as f64 * s,
+                (cz + 1) as f64 * s,
+            ];
+            if polygon_hits_rect(&polygon, rect, 1.0) {
+                tables.per_cell[cz * room.width + cx].push(tables.records.len());
+                placed += 1;
+            }
+        }
+    }
+    if placed == 0 {
+        return Err(at("lies outside the room"));
+    }
+    tables.range = Some(match tables.range {
+        Some((a, b)) => (a.min(lo), b.max(hi)),
+        None => (lo, hi),
+    });
+    tables.records.push(record);
+    Ok(())
 }
 
 #[cfg(test)]

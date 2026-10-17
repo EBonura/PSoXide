@@ -208,8 +208,8 @@ pub fn lit_corner_nudged(
 /// ignores it.
 pub const PLANE_SHADOW_NUDGE: f64 = 2.0;
 
-/// Lit colour of one corner of `face`. Planes add two things the sector
-/// faces do not have: a plane in `fullbright` shows its tint unlit, and a
+/// Lit colour of one corner of `face`. Planes and mesh faces add two things
+/// the sector faces do not have: a plane in `fullbright` shows its tint unlit, and a
 /// double-sided plane is lit from whichever side the light is on.
 pub fn lit_face_corner(
     face: &GridFace,
@@ -220,7 +220,10 @@ pub fn lit_face_corner(
     occluded: &dyn Fn([f64; 3], [f64; 3]) -> bool,
     shade: FacingShade,
 ) -> [u8; 3] {
-    let plane = matches!(face.kind, GridFaceKind::Plane { .. });
+    let plane = matches!(
+        face.kind,
+        GridFaceKind::Plane { .. } | GridFaceKind::Mesh { .. }
+    );
     if !plane {
         let lit = lit_corner(point, face.normal, tint, ambient, lights, occluded);
         return shade.apply(lit, face.normal);

@@ -18,6 +18,7 @@ use super::units::RuntimeUnits;
 use crate::face_uv::UvMode;
 use crate::grid::faces::{cell_faces_with, GridFace, UvDefaults};
 use crate::grid::light::{lit_face_corner, noise_tint, GridLight};
+use crate::grid::mesh_faces::{mesh_faces_with, placed as placed_mesh};
 use crate::grid::plane_faces::plane_faces_with;
 use crate::grid::uv_split;
 use crate::grid::world::GridWorld;
@@ -553,6 +554,44 @@ pub fn build(
         let reference = plane_ref(cx, room, index, origin, first as u16, count, build.range)?;
         build.tables.plane_refs.push(reference);
     }
+    // Static meshes follow the planes: an instance is one more run of quads
+    // with a box for the renderer's frustum test, drawn through the same
+    // plane list, so the runtime needs nothing of its own for them.
+    for index in 0..room.meshes.len() {
+        faces.clear();
+        let made = mesh_faces_with(
+            cx.world,
+            &BinderDefaults(&*cx.binder),
+            room_index,
+            index,
+            &mut faces,
+        );
+        if made == 0 {
+            continue;
+        }
+        let id = room.meshes[index].id;
+        let first = build.tables.quads.len();
+        build.range = (i32::MAX, i32::MIN);
+        for face in &faces {
+            let place = || format!("mesh {id}");
+            build.add_face(cx, face, room_index, origin, ambient, &place, QUAD_PLANE)?;
+        }
+        let count = build.tables.quads.len() - first;
+        if count == 0 {
+            continue;
+        }
+        if build.tables.quads.len() > usize::from(u16::MAX) {
+            return Err(format!("room {room_index} has more than 65535 quads"));
+        }
+        let count = u8::try_from(count)
+            .map_err(|_| format!("room {room_index} mesh {id}: {count} quads, at most 255"))?;
+        let span = placed_mesh(cx.world, room_index, index)
+            .map_or(([0; 2], [0; 2]), |p| p.mesh.cell_span(&p.built));
+        build
+            .tables
+            .plane_refs
+            .push(run_ref(room, span, first as u16, count, build.range));
+    }
     build.tables.material_use = (0..=255u8)
         .filter(|m| build.used[usize::from(*m)])
         .collect();
@@ -568,15 +607,27 @@ fn plane_ref(
     origin: [i32; 3],
     first: u16,
     count: u8,
-    (lo, hi): (i32, i32),
+    range: (i32, i32),
 ) -> Result<PlaneRef, String> {
-    let (cells_lo, cells_hi) = room.planes[index].cell_span();
+    let _ = (cx, origin);
+    Ok(run_ref(room, room.planes[index].cell_span(), first, count, range))
+}
+
+/// The render reference of a run of `count` quads from `first` whose box
+/// covers the world sectors `(cells_lo, cells_hi)` (clamped to the room) and
+/// the local heights `(lo, hi)`.
+fn run_ref(
+    room: &crate::grid::room::GridRoom,
+    (cells_lo, cells_hi): ([i32; 2], [i32; 2]),
+    first: u16,
+    count: u8,
+    (lo, hi): (i32, i32),
+) -> PlaneRef {
     let local = |world: i32, axis: usize, limit: usize| -> u8 {
         let c = (world - room.origin[axis]).clamp(0, limit as i32 - 1);
         c as u8
     };
-    let _ = (cx, origin);
-    Ok(PlaneRef {
+    PlaneRef {
         quad: first,
         count,
         flags: 0,
@@ -586,5 +637,5 @@ fn plane_ref(
         z1: local(cells_hi[1], 1, room.depth),
         min_y: lo as i16,
         max_y: hi as i16,
-    })
+    }
 }

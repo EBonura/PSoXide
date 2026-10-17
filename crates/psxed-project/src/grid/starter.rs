@@ -94,6 +94,7 @@ pub fn starter_world(
         // platform reads even under one lamp.
         shading: super::light::FacingShade::SUBTLE,
         stream: super::world::StreamRadii::DEFAULT,
+        mesh_assets: Vec::new(),
     }
 }
 

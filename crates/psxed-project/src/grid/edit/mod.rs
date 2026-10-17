@@ -21,6 +21,7 @@
 //! * [`surfaces`]: material, texture placement, split and flags.
 //! * [`clipboard`]: copy, flip, turn and paste.
 //! * [`planes`]: free planes: add, edit, remove, copy and paste.
+//! * [`meshes`]: static meshes: assets, instances and the arch between two points.
 
 pub mod bands;
 pub mod clipboard;
@@ -28,6 +29,7 @@ pub mod convert;
 pub mod delete;
 pub mod derived;
 pub mod heights;
+pub mod meshes;
 pub mod natural;
 pub mod outline;
 pub mod planes;
@@ -47,6 +49,10 @@ pub use derived::{
     clean_overrides, derived_solid, is_derived_hidden, reset_derived, set_derived_hidden,
 };
 pub use heights::{nudge, HeightDrag, WeldIndex};
+pub use meshes::{
+    add_asset, arch_span, delete_meshes, place_mesh, remove_asset, set_asset, set_mesh_material,
+    solve_arch_span, update_mesh, ArchPlacement, MeshRefusal,
+};
 pub use planes::{
     add_plane, edit_plane_uv, fit_room, remove_planes, set_plane_material, set_plane_uv,
     update_plane, PlaneClipboard, PlaneId, PlaneRefusal,

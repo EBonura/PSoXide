@@ -24,6 +24,9 @@ pub struct GridWorld {
     /// level core.
     #[serde(default, skip_serializing_if = "StreamRadii::is_default")]
     pub stream: StreamRadii,
+    /// The mesh assets rooms place instances of (`docs/grid/meshes.md`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mesh_assets: Vec<super::mesh::MeshAsset>,
 }
 
 /// Radii in sectors, walked over the portal graph, that decide which rooms
@@ -132,6 +135,11 @@ impl GridWorld {
             for plane in &room.planes {
                 note(plane.material);
             }
+            for mesh in room.meshes.iter().filter(|m| m.enabled) {
+                for slot in &mesh.materials {
+                    note(*slot);
+                }
+            }
             // What derived walls and bands wear.
             note(room.defaults.wall_material);
             for (_, o) in room.edge_overrides.iter() {
@@ -196,7 +204,7 @@ impl GridWorld {
     /// with no geometry. Used to frame the camera and size the depth range.
     pub fn editor_bounds(&self) -> Option<EditorBounds> {
         let mut bounds: Option<EditorBounds> = None;
-        for room in &self.rooms {
+        for (room_index, room) in self.rooms.iter().enumerate() {
             let origin = self.room_origin_editor(room);
             for (x, z, sector) in room.iter() {
                 let Some((low, high)) = sector.height_range() else {
@@ -239,8 +247,47 @@ impl GridWorld {
                     },
                 ));
             }
+            for mesh_index in 0..room.meshes.len() {
+                let Some(placed) = super::mesh_faces::placed(self, room_index, mesh_index) else {
+                    continue;
+                };
+                let Some((lo, hi)) = placed.mesh.bounds(&placed.built) else {
+                    continue;
+                };
+                let point = |v: [i32; 3]| {
+                    [
+                        self.scale.to_editor(v[0]),
+                        origin[1] + self.scale.to_editor(v[1]),
+                        self.scale.to_editor(v[2]),
+                    ]
+                };
+                bounds = Some(merge(
+                    bounds,
+                    EditorBounds {
+                        min: point(lo),
+                        max: point(hi),
+                    },
+                ));
+            }
         }
         bounds
+    }
+
+    /// The id the next placed mesh takes: one above the highest in the world,
+    /// so an id is never reused while its instance lives.
+    pub fn next_mesh_id(&self) -> u16 {
+        self.rooms
+            .iter()
+            .flat_map(|r| r.meshes.iter().map(|m| m.id))
+            .max()
+            .map_or(1, |id| id.saturating_add(1))
+    }
+
+    /// Room and index of the mesh instance with `id`.
+    pub fn find_mesh(&self, id: u16) -> Option<(usize, usize)> {
+        self.rooms.iter().enumerate().find_map(|(r, room)| {
+            room.meshes.iter().position(|m| m.id == id).map(|i| (r, i))
+        })
     }
 }
 
