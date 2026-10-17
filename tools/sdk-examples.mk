@@ -14,11 +14,21 @@ FRONTEND ?=
 # map it has the link write, so every jump table is proven from the map and
 # every scratchpad stack call tree is proven to fit its region.
 PSX_DELAY_SLOT_FLAGS := "-Cllvm-args=-disable-mips-df-succbb-search=false","-Cllvm-args=-disable-mips-df-forward-search=false"
+# Panics are a bare `break` at the faulting instruction (-Cpanic=immediate-abort),
+# the shared policy of tools/psoxide-size (policy.rs): core::fmt, the panic
+# locations and their file names stay out of the image, and psx-rt records
+# Cause/EPC/BadVAddr for `psoxide-size faults`. PSOXIDE_PANIC_MESSAGES=1 builds
+# with the formatted panic instead.
+ifneq ($(filter-out 0,$(PSOXIDE_PANIC_MESSAGES)),)
+PSX_PANIC_FLAGS :=
+else
+PSX_PANIC_FLAGS := "-Zunstable-options","-Cpanic=immediate-abort",
+endif
 # The example's cargo invocation. Flags go in through --config rather than
 # RUSTFLAGS so the PGO driver can append its own (RUSTFLAGS would replace them).
 EXAMPLE_CARGO = build --release --target $(TARGET) -Zbuild-std=core -Zbuild-std-features=compiler-builtins-mem \
 	--target-dir "$(BUILD)" \
-	--config 'target.$(TARGET).rustflags=[$(PSX_DELAY_SLOT_FLAGS),"-Clink-arg=-T../../psoxide.ld","-Clink-arg=--oformat=binary"]'
+	--config 'target.$(TARGET).rustflags=[$(PSX_PANIC_FLAGS)$(PSX_DELAY_SLOT_FLAGS),"-Clink-arg=-T../../psoxide.ld","-Clink-arg=--oformat=binary"]'
 # Profile-guided builds (tools/psoxide-pgo/README.md). `example` applies
 # PGO_PROFILE when it exists, as variant PGO_VARIANT, and builds plainly
 # otherwise; either way the driver runs the patcher, scanner and stack guard.

@@ -122,6 +122,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "psoxide-size"
+version = "0.1.0"
+dependencies = [
+ "rustc-demangle",
+]
+
+[[package]]
 name = "psx-anim-cook"
 version = "0.1.0"
 dependencies = [
