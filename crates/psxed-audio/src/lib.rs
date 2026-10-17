@@ -6,12 +6,14 @@
 
 use psxed_format::audio::{self, AudioHeader, CODEC_SPU_ADPCM};
 use psxed_format::AssetHeader;
-use serde::{Deserialize, Serialize};
+#[cfg(feature = "pack")]
+use serde::Deserialize;
+use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 
 const SPU_SAMPLE_RATE_HZ: u32 = 44_100;
+const DEFAULT_NORMALIZE_PEAK: f32 = 0.9;
 /// One-shot effects do not need CD-quality bandwidth, and their cooked ADPCM
 /// bytes remain resident in main RAM after the identical copy reaches SPU
 /// RAM. Preserve already-lower-rate sources and cap higher-rate WAVs at the
@@ -107,8 +109,10 @@ pub enum Error {
     /// Manifest JSON could not be parsed or written.
     Json(serde_json::Error),
     /// Zip archive container could not be read.
+    #[cfg(feature = "pack")]
     Zip(zip::result::ZipError),
     /// Required zip entry was not present.
+    #[cfg(feature = "pack")]
     ZipEntry {
         /// Entry path from the manifest.
         path: String,
@@ -137,7 +141,9 @@ impl std::fmt::Display for Error {
         match self {
             Error::Io { path, source } => write!(f, "{}: {source}", path.display()),
             Error::Json(e) => write!(f, "json: {e}"),
+            #[cfg(feature = "pack")]
             Error::Zip(e) => write!(f, "zip: {e}"),
+            #[cfg(feature = "pack")]
             Error::ZipEntry { path, source } => write!(f, "zip entry {path}: {source}"),
             Error::ArchiveHashMismatch { expected, actual } => {
                 write!(
@@ -161,12 +167,14 @@ impl From<serde_json::Error> for Error {
     }
 }
 
+#[cfg(feature = "pack")]
 impl From<zip::result::ZipError> for Error {
     fn from(value: zip::result::ZipError) -> Self {
         Self::Zip(value)
     }
 }
 
+#[cfg(feature = "pack")]
 #[derive(Clone, Debug, Deserialize)]
 struct PackManifest {
     source: SourceManifest,
@@ -175,6 +183,7 @@ struct PackManifest {
     sounds: Vec<SoundManifest>,
 }
 
+#[cfg(feature = "pack")]
 #[derive(Clone, Debug, Deserialize)]
 struct SourceManifest {
     name: String,
@@ -183,6 +192,7 @@ struct SourceManifest {
     archive_sha256: String,
 }
 
+#[cfg(feature = "pack")]
 #[derive(Clone, Debug, Deserialize)]
 struct SoundManifest {
     id: String,
@@ -193,6 +203,24 @@ struct SoundManifest {
 struct CookConfig {
     sample_rate_hz: u32,
     normalize_peak: f32,
+}
+
+impl CookConfig {
+    /// Apply the manifest defaults and validation to optional settings.
+    fn new(sample_rate_hz: Option<u32>, normalize_peak: Option<f32>) -> Result<Self, Error> {
+        let sample_rate_hz = sample_rate_hz.unwrap_or(SPU_SAMPLE_RATE_HZ);
+        if sample_rate_hz == 0 {
+            return Err(Error::InvalidManifest(
+                "target_sample_rate_hz must be non-zero".to_string(),
+            ));
+        }
+        Ok(Self {
+            sample_rate_hz,
+            normalize_peak: normalize_peak
+                .unwrap_or(DEFAULT_NORMALIZE_PEAK)
+                .clamp(0.0, 1.0),
+        })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -241,12 +269,19 @@ pub struct SpuAdpcmCook {
 }
 
 /// Import a source zip using a checked-in JSON manifest.
+///
+/// Meant for downloaded sound packs. Callers that already hold the WAVs
+/// should use [`cook_sounds`] or [`import_files`] instead of building an
+/// archive just to have it opened again.
+#[cfg(feature = "pack")]
 pub fn import_pack(
     manifest_path: &Path,
     archive_path: &Path,
     out_dir: &Path,
     options: &PackOptions,
 ) -> Result<PackReport, Error> {
+    use std::io::Cursor;
+
     let manifest_bytes = read_file(manifest_path)?;
     let archive_bytes = read_file(archive_path)?;
     let manifest: PackManifest = serde_json::from_slice(&manifest_bytes)?;
@@ -260,65 +295,18 @@ pub fn import_pack(
         });
     }
 
-    let sample_rate_hz = manifest.target_sample_rate_hz.unwrap_or(SPU_SAMPLE_RATE_HZ);
-    if sample_rate_hz == 0 {
-        return Err(Error::InvalidManifest(
-            "target_sample_rate_hz must be non-zero".to_string(),
-        ));
-    }
-    let normalize_peak = manifest.normalize_peak.unwrap_or(0.9).clamp(0.0, 1.0);
-    let cfg = CookConfig {
-        sample_rate_hz,
-        normalize_peak,
-    };
-
-    let psau_dir = out_dir.join("psau");
-    let preview_dir = out_dir.join("preview");
-    create_dir(&psau_dir)?;
-    if options.write_preview_wav {
-        create_dir(&preview_dir)?;
-    }
-
+    let cfg = CookConfig::new(manifest.target_sample_rate_hz, manifest.normalize_peak)?;
     let mut archive = zip::ZipArchive::new(Cursor::new(archive_bytes.as_slice()))?;
-    let mut reports = Vec::with_capacity(manifest.sounds.len());
-
+    let mut sounds = Vec::with_capacity(manifest.sounds.len());
     for sound in &manifest.sounds {
-        let id = checked_asset_id(&sound.id)?;
-        let wav_bytes = read_zip_entry(&mut archive, &sound.path)?;
-        let cooked = cook_wav(&wav_bytes, &cfg)?;
-
-        let psau_rel = format!("psau/{id}.psau");
-        let psau_path = out_dir.join(&psau_rel);
-        write_file(&psau_path, &cooked.psau)?;
-
-        let preview_rel = if options.write_preview_wav {
-            let rel = format!("preview/{id}.wav");
-            let wav = write_wav_mono_i16(cfg.sample_rate_hz, &cooked.decoded_preview);
-            write_file(&out_dir.join(&rel), &wav)?;
-            Some(rel)
-        } else {
-            None
-        };
-
-        reports.push(SoundReport {
-            id,
+        sounds.push(LoadedSound {
+            id: checked_asset_id(&sound.id)?,
             source_path: sound.path.clone(),
-            output_psau: psau_rel,
-            preview_wav: preview_rel,
-            source_sha256: sha256_hex(&wav_bytes),
-            cooked_sha256: sha256_hex(&cooked.psau),
-            original_sample_rate_hz: cooked.report.original_sample_rate_hz,
-            original_channels: cooked.report.original_channels,
-            input_sample_frames: cooked.report.input_sample_frames,
-            cooked_sample_count: cooked.report.cooked_sample_count,
-            adpcm_blocks: cooked.report.adpcm_blocks,
-            psau_bytes: cooked.psau.len(),
-            peak_before: cooked.report.peak_before,
-            peak_after: cooked.report.peak_after,
-            decoded_rms_error: cooked.report.decoded_rms_error,
+            wav: read_zip_entry(&mut archive, &sound.path)?,
         });
     }
 
+    let reports = write_sounds(&sounds, &cfg, out_dir, options)?;
     let report = PackReport {
         source_name: manifest.source.name,
         source_url: manifest.source.url,
@@ -331,6 +319,159 @@ pub fn import_pack(
     let report_json = serde_json::to_vec_pretty(&report)?;
     write_file(&out_dir.join("report.json"), &report_json)?;
     Ok(report)
+}
+
+/// Where one sound's source WAV comes from.
+#[derive(Clone, Debug)]
+pub enum WavSource {
+    /// Read the WAV from this file.
+    File(PathBuf),
+    /// WAV file bytes the caller already holds.
+    Bytes(Vec<u8>),
+}
+
+/// One sound to cook directly, without a manifest or archive.
+#[derive(Clone, Debug)]
+pub struct SoundInput {
+    /// Stable asset id: ASCII letters, digits, `_` or `-`.
+    pub id: String,
+    /// The source WAV.
+    pub wav: WavSource,
+}
+
+/// Rate and level shared by every sound in one [`cook_sounds`] or
+/// [`import_files`] call.
+#[derive(Copy, Clone, Debug)]
+pub struct CookSettings {
+    /// Output sample rate for every sound. Must be non-zero.
+    pub target_sample_rate_hz: u32,
+    /// Peak normalization target, clamped to `0.0..=1.0`.
+    pub normalize_peak: f32,
+}
+
+impl Default for CookSettings {
+    /// The same defaults a manifest gets when it omits both fields.
+    fn default() -> Self {
+        Self {
+            target_sample_rate_hz: SPU_SAMPLE_RATE_HZ,
+            normalize_peak: DEFAULT_NORMALIZE_PEAK,
+        }
+    }
+}
+
+/// Cook sounds straight from WAV files or bytes and return each PSAU blob,
+/// in input order.
+///
+/// Runs the same decode, resample, normalize and encode path as
+/// [`import_pack`], so the bytes are identical for identical WAVs and
+/// settings.
+pub fn cook_sounds(sounds: &[SoundInput], settings: &CookSettings) -> Result<Vec<Vec<u8>>, Error> {
+    let cfg = CookConfig::new(
+        Some(settings.target_sample_rate_hz),
+        Some(settings.normalize_peak),
+    )?;
+    sounds
+        .iter()
+        .map(|sound| {
+            checked_asset_id(&sound.id)?;
+            Ok(cook_wav(&load_wav(&sound.wav)?, &cfg)?.psau)
+        })
+        .collect()
+}
+
+/// Cook sounds straight from WAV files or bytes and write
+/// `psau/<id>.psau` (plus `preview/<id>.wav` when requested) under `out_dir`,
+/// exactly as [`import_pack`] lays them out. No `report.json` is written;
+/// the per-sound reports are returned.
+pub fn import_files(
+    sounds: &[SoundInput],
+    settings: &CookSettings,
+    out_dir: &Path,
+    options: &PackOptions,
+) -> Result<Vec<SoundReport>, Error> {
+    let cfg = CookConfig::new(
+        Some(settings.target_sample_rate_hz),
+        Some(settings.normalize_peak),
+    )?;
+    let mut loaded = Vec::with_capacity(sounds.len());
+    for sound in sounds {
+        let source_path = match &sound.wav {
+            WavSource::File(path) => path.display().to_string(),
+            WavSource::Bytes(_) => String::new(),
+        };
+        loaded.push(LoadedSound {
+            id: checked_asset_id(&sound.id)?,
+            source_path,
+            wav: load_wav(&sound.wav)?,
+        });
+    }
+    write_sounds(&loaded, &cfg, out_dir, options)
+}
+
+struct LoadedSound {
+    id: String,
+    source_path: String,
+    wav: Vec<u8>,
+}
+
+fn load_wav(source: &WavSource) -> Result<Vec<u8>, Error> {
+    match source {
+        WavSource::File(path) => read_file(path),
+        WavSource::Bytes(bytes) => Ok(bytes.clone()),
+    }
+}
+
+/// Cook and write every sound under `out_dir`. Shared by [`import_pack`] and
+/// [`import_files`] so both emit identical files.
+fn write_sounds(
+    sounds: &[LoadedSound],
+    cfg: &CookConfig,
+    out_dir: &Path,
+    options: &PackOptions,
+) -> Result<Vec<SoundReport>, Error> {
+    let psau_dir = out_dir.join("psau");
+    let preview_dir = out_dir.join("preview");
+    create_dir(&psau_dir)?;
+    if options.write_preview_wav {
+        create_dir(&preview_dir)?;
+    }
+
+    let mut reports = Vec::with_capacity(sounds.len());
+    for sound in sounds {
+        let id = &sound.id;
+        let cooked = cook_wav(&sound.wav, cfg)?;
+
+        let psau_rel = format!("psau/{id}.psau");
+        write_file(&out_dir.join(&psau_rel), &cooked.psau)?;
+
+        let preview_rel = if options.write_preview_wav {
+            let rel = format!("preview/{id}.wav");
+            let wav = write_wav_mono_i16(cfg.sample_rate_hz, &cooked.decoded_preview);
+            write_file(&out_dir.join(&rel), &wav)?;
+            Some(rel)
+        } else {
+            None
+        };
+
+        reports.push(SoundReport {
+            id: id.clone(),
+            source_path: sound.source_path.clone(),
+            output_psau: psau_rel,
+            preview_wav: preview_rel,
+            source_sha256: sha256_hex(&sound.wav),
+            cooked_sha256: sha256_hex(&cooked.psau),
+            original_sample_rate_hz: cooked.report.original_sample_rate_hz,
+            original_channels: cooked.report.original_channels,
+            input_sample_frames: cooked.report.input_sample_frames,
+            cooked_sample_count: cooked.report.cooked_sample_count,
+            adpcm_blocks: cooked.report.adpcm_blocks,
+            psau_bytes: cooked.psau.len(),
+            peak_before: cooked.report.peak_before,
+            peak_after: cooked.report.peak_after,
+            decoded_rms_error: cooked.report.decoded_rms_error,
+        });
+    }
+    Ok(reports)
 }
 
 /// Convert a source WAV into a raw CD-DA track payload.
@@ -444,6 +585,7 @@ fn apply_spu_loop_flags(adpcm: &mut [u8], loop_start: Option<u32>) {
     adpcm[(blocks - 1) * ADPCM_BLOCK_BYTES + 1] = last_flags;
 }
 
+#[cfg(feature = "pack")]
 fn validate_manifest(manifest: &PackManifest) -> Result<(), Error> {
     if manifest.sounds.is_empty() {
         return Err(Error::InvalidManifest(
@@ -887,10 +1029,13 @@ fn checked_asset_id(id: &str) -> Result<String, Error> {
     Ok(id.to_string())
 }
 
-fn read_zip_entry<R: Read + std::io::Seek>(
+#[cfg(feature = "pack")]
+fn read_zip_entry<R: std::io::Read + std::io::Seek>(
     archive: &mut zip::ZipArchive<R>,
     path: &str,
 ) -> Result<Vec<u8>, Error> {
+    use std::io::Read;
+
     let mut file = archive.by_name(path).map_err(|source| Error::ZipEntry {
         path: path.to_string(),
         source,
@@ -1122,5 +1267,229 @@ mod tests {
 
         assert_eq!(one_shot.adpcm[1], 0x05);
         assert_eq!(looping.adpcm[1], 0x07);
+    }
+
+    fn stereo_wav_i16(rate: u32, frames: &[(i16, i16)]) -> Vec<u8> {
+        let data_len = frames.len() * 4;
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + data_len as u32).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&rate.to_le_bytes());
+        wav.extend_from_slice(&(rate * 4).to_le_bytes());
+        wav.extend_from_slice(&4u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(data_len as u32).to_le_bytes());
+        for (l, r) in frames {
+            wav.extend_from_slice(&l.to_le_bytes());
+            wav.extend_from_slice(&r.to_le_bytes());
+        }
+        wav
+    }
+
+    /// A small mixed set: two mono rates, one stereo, one silent.
+    fn sample_wavs() -> Vec<(String, Vec<u8>)> {
+        let saw: Vec<i16> = (0..900).map(|i| (((i % 64) - 32) * 600) as i16).collect();
+        let tone: Vec<i16> = (0..1500)
+            .map(|i| ((i as f32 * 0.07).sin() * 9_000.0) as i16)
+            .collect();
+        let stereo: Vec<(i16, i16)> = (0..700)
+            .map(|i| (((i % 50) * 300 - 7_000) as i16, ((i % 31) * 200) as i16))
+            .collect();
+        vec![
+            ("saw_22k".to_string(), write_wav_mono_i16(22_050, &saw)),
+            ("tone_11k".to_string(), write_wav_mono_i16(11_025, &tone)),
+            ("pan_44k".to_string(), stereo_wav_i16(44_100, &stereo)),
+            ("silence".to_string(), write_wav_mono_i16(22_050, &[0; 300])),
+        ]
+    }
+
+    #[cfg(feature = "pack")]
+    struct TempDir(PathBuf);
+
+    #[cfg(feature = "pack")]
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "psxed-audio-{tag}-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    #[cfg(feature = "pack")]
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn cook_sounds_matches_direct_cook_wav() {
+        let settings = CookSettings {
+            target_sample_rate_hz: 11_025,
+            normalize_peak: 0.8,
+        };
+        let cfg = CookConfig::new(Some(11_025), Some(0.8)).unwrap();
+        let wavs = sample_wavs();
+        let inputs: Vec<SoundInput> = wavs
+            .iter()
+            .map(|(id, wav)| SoundInput {
+                id: id.clone(),
+                wav: WavSource::Bytes(wav.clone()),
+            })
+            .collect();
+
+        let cooked = cook_sounds(&inputs, &settings).unwrap();
+
+        assert_eq!(cooked.len(), wavs.len());
+        for ((_, wav), psau) in wavs.iter().zip(&cooked) {
+            assert_eq!(&cook_wav(wav, &cfg).unwrap().psau, psau);
+        }
+    }
+
+    #[test]
+    fn default_settings_match_manifest_defaults() {
+        let wavs = sample_wavs();
+        let wav = WavSource::Bytes(wavs[0].1.clone());
+        let input = |wav: &WavSource| {
+            vec![SoundInput {
+                id: "x".to_string(),
+                wav: wav.clone(),
+            }]
+        };
+
+        let defaults = cook_sounds(&input(&wav), &CookSettings::default()).unwrap();
+        let explicit = cook_sounds(
+            &input(&wav),
+            &CookSettings {
+                target_sample_rate_hz: 44_100,
+                normalize_peak: 0.9,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(defaults, explicit);
+    }
+
+    #[test]
+    fn cook_sounds_rejects_bad_ids_and_rates() {
+        let wav = WavSource::Bytes(write_wav_mono_i16(22_050, &[0; 64]));
+        let bad_id = SoundInput {
+            id: "../escape".to_string(),
+            wav: wav.clone(),
+        };
+        let ok = SoundInput {
+            id: "ok".to_string(),
+            wav,
+        };
+
+        assert!(cook_sounds(&[bad_id], &CookSettings::default()).is_err());
+        assert!(cook_sounds(
+            &[ok],
+            &CookSettings {
+                target_sample_rate_hz: 0,
+                normalize_peak: 0.9
+            }
+        )
+        .is_err());
+    }
+
+    /// `import_files` from paths and from bytes, and `import_pack` over a zip
+    /// of the same WAVs, must write byte-identical `.psau` and preview files.
+    #[cfg(feature = "pack")]
+    #[test]
+    fn import_files_and_import_pack_write_identical_outputs() {
+        use std::io::Write;
+
+        let rate = 22_050;
+        let peak = 0.9;
+        let wavs = sample_wavs();
+        let root = TempDir::new("identical");
+        let src = root.0.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+
+        // Source WAVs on disk, plus a Stored zip and a manifest for import_pack.
+        let zip_path = root.0.join("pack.zip");
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&zip_path).unwrap());
+        let stored = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        for (id, wav) in &wavs {
+            std::fs::write(src.join(format!("{id}.wav")), wav).unwrap();
+            zip.start_file(format!("{id}.wav"), stored).unwrap();
+            zip.write_all(wav).unwrap();
+        }
+        zip.finish().unwrap();
+        let manifest = serde_json::json!({
+            "source": {
+                "name": "test", "url": "", "license": "test",
+                "archive_sha256": sha256_hex(&std::fs::read(&zip_path).unwrap()),
+            },
+            "target_sample_rate_hz": rate,
+            "normalize_peak": peak,
+            "sounds": wavs.iter()
+                .map(|(id, _)| serde_json::json!({"id": id, "path": format!("{id}.wav")}))
+                .collect::<Vec<_>>(),
+        });
+        let manifest_path = root.0.join("pack.json");
+        std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+        let options = PackOptions {
+            write_preview_wav: true,
+        };
+        let settings = CookSettings {
+            target_sample_rate_hz: rate,
+            normalize_peak: peak,
+        };
+        let pack_out = root.0.join("pack-out");
+        let file_out = root.0.join("file-out");
+        let byte_out = root.0.join("byte-out");
+
+        let pack = import_pack(&manifest_path, &zip_path, &pack_out, &options).unwrap();
+        let by_path: Vec<SoundInput> = wavs
+            .iter()
+            .map(|(id, _)| SoundInput {
+                id: id.clone(),
+                wav: WavSource::File(src.join(format!("{id}.wav"))),
+            })
+            .collect();
+        let by_bytes: Vec<SoundInput> = wavs
+            .iter()
+            .map(|(id, wav)| SoundInput {
+                id: id.clone(),
+                wav: WavSource::Bytes(wav.clone()),
+            })
+            .collect();
+        let from_paths = import_files(&by_path, &settings, &file_out, &options).unwrap();
+        let from_bytes = import_files(&by_bytes, &settings, &byte_out, &options).unwrap();
+        let in_memory = cook_sounds(&by_bytes, &settings).unwrap();
+
+        assert_eq!(pack.sounds.len(), wavs.len());
+        for (i, (id, _)) in wavs.iter().enumerate() {
+            let psau = format!("psau/{id}.psau");
+            let preview = format!("preview/{id}.wav");
+            let expected = std::fs::read(pack_out.join(&psau)).unwrap();
+            assert_eq!(&expected[0..4], b"PSAU");
+            for out in [&file_out, &byte_out] {
+                assert_eq!(std::fs::read(out.join(&psau)).unwrap(), expected, "{id}");
+                assert_eq!(
+                    std::fs::read(out.join(&preview)).unwrap(),
+                    std::fs::read(pack_out.join(&preview)).unwrap(),
+                    "{id} preview"
+                );
+            }
+            assert_eq!(in_memory[i], expected, "{id} in memory");
+            assert_eq!(from_paths[i].cooked_sha256, pack.sounds[i].cooked_sha256);
+            assert_eq!(from_bytes[i].cooked_sha256, pack.sounds[i].cooked_sha256);
+            assert_eq!(from_paths[i].source_sha256, pack.sounds[i].source_sha256);
+        }
     }
 }
