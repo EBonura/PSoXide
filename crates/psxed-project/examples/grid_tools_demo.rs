@@ -43,6 +43,7 @@ struct Materials {
     cliff: Option<ResourceId>,
     beam: Option<ResourceId>,
     signal: Option<ResourceId>,
+    green: Option<ResourceId>,
 }
 
 fn materials(project: &ProjectDocument) -> Materials {
@@ -52,6 +53,7 @@ fn materials(project: &ProjectDocument) -> Materials {
         cliff: material(project, "Graybox / Cliff 64"),
         beam: material(project, "DP City / Structural Beam"),
         signal: material(project, "DP City / Bright Blue Signal"),
+        green: material(project, "DP City / Bright Green Signal"),
     }
 }
 
@@ -141,6 +143,40 @@ fn bench(m: &Materials, repeat: bool) -> GridRoom {
     room
 }
 
+/// The far (north) wall in three bands: a trim at the base, the main body
+/// and a frieze hung from the top. The middle segment has a set of its own
+/// with different cut heights, so the neighbours across its vertical edges
+/// are cut at other heights and the stitching shows.
+fn bands(m: &Materials) -> GridRoom {
+    use psxed_project::grid::{Anchor, BandSet, BandV};
+    let mut room = room(m, 7, 6, 2 * SECTOR_UNITS);
+    let set = |trim: i32, frieze: i32| {
+        let mut set = BandSet::single("wall", m.wall);
+        set.insert_line(0, Anchor::Bottom(trim));
+        set.insert_line(1, Anchor::Top(frieze));
+        set.set_band_material(0, m.beam);
+        set.set_band_material(2, m.green);
+        set.bands[0].v = BandV::FromBottom;
+        set.bands[2].v = BandV::FromTop;
+        // One tile per sector across the whole run, one tile high.
+        set.bands[2].uv = FaceUv {
+            mode: UvMode::fit(7, 1),
+            ..FaceUv::default()
+        };
+        set
+    };
+    room.band_sets.push(set(SECTOR_UNITS / 4, SECTOR_UNITS / 2));
+    room.band_sets.push(set(SECTOR_UNITS / 2, SECTOR_UNITS / 4));
+    for x in 0..7 {
+        let index = u8::from(x == 3);
+        room.edge_overrides
+            .edit(edge_key([x, 0], WallEdge::North), |o| {
+                o.band_set = Some(index)
+            });
+    }
+    room
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let scenario = args
@@ -159,6 +195,7 @@ fn main() {
     let room = match scenario.as_str() {
         "tiling" => tiling(&m),
         "platform" => platform(&m),
+        "bands" => bands(&m),
         "bench-plain" => bench(&m, false),
         "bench-repeat" => bench(&m, true),
         other => panic!("unknown scenario {other:?}"),

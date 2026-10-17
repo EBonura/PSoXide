@@ -482,6 +482,8 @@ pub fn cook_level(
 }
 
 #[cfg(test)]
+mod band_cook_tests;
+#[cfg(test)]
 mod convert_tests;
 #[cfg(test)]
 mod derived_tests;

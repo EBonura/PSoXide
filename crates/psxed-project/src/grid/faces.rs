@@ -24,7 +24,11 @@
 use crate::face_uv::UvMode;
 use crate::ResourceId;
 
+use super::band_geom::{self, Span};
+use super::bands;
+use super::faces_bands::{neighbour_heights, stitched_rings, BandedWall};
 use super::overrides::WallMode;
+use super::room::GridRoom;
 use super::sector::{GridSector, WallEdge};
 use super::surface::{GridSurface, GridTri, GridWall, WallFacing};
 use super::units::{GridScale, SECTOR_UNITS, TEXELS_PER_SECTOR};
@@ -154,10 +158,22 @@ pub(super) struct Builder<'a> {
     pub legacy_uv: bool,
     /// The frame of the faces pushed next.
     pub frame: Frame,
+    /// The room the faces belong to, when they are walls that can be banded
+    /// or cut into courses (`None` for planes).
+    pub room_ref: Option<&'a GridRoom>,
     pub out: &'a mut Vec<GridFace>,
 }
 
 impl Builder<'_> {
+    /// Whether a rectangular wall is cut into courses at absolute multiples
+    /// of one sector in height: only rooms made before derived walls and
+    /// bands (legacy walls, byte identical output). Everything else is one
+    /// face, cut by the texture splitter and the band lines alone.
+    pub(super) fn cut_courses(&self) -> bool {
+        self.room_ref
+            .is_none_or(|room| room.wall_mode == WallMode::Authored && room.band_sets.is_empty())
+    }
+
     /// The tiling default of `material`.
     pub(super) fn default_uv(&self, material: Option<ResourceId>) -> Option<UvMode> {
         material.and_then(|id| self.defaults.default_uv(id))
@@ -368,18 +384,77 @@ impl Builder<'_> {
             }
         };
         let kind = GridFaceKind::Wall { edge, index };
-        let rectangle = h[0] == h[1] && h[3] == h[2] && h[3] > h[0];
-        if !rectangle {
-            let ring = vec![
-                corner(0, h[0]),
-                corner(1, h[1]),
-                corner(1, h[2]),
-                corner(0, h[3]),
-            ];
-            self.push(kind, ring, toward, wall.material, double_sided);
+        if let Some((room, set)) = self
+            .room_ref
+            .and_then(|room| bands::resolve(room, wall.band_set).map(|(_, set)| (room, set)))
+            .filter(|_| !wall.is_degenerate())
+        {
+            let length = if edge.is_diagonal() {
+                (diagonal_length.round()) as i32
+            } else {
+                SECTOR_UNITS
+            };
+            let span = Span::from_heights(h, length);
+            // Anchors measure against the whole stack on this edge, so one
+            // trim runs at the base of every segment stacked there.
+            let reference = room
+                .local(self.cell)
+                .and_then(|[x, z]| room.sector(x, z))
+                .and_then(|sector| band_geom::stack_reference(sector.walls(edge), length))
+                .unwrap_or(span);
+            let (u0, u1) = (u_grid(0), u_grid(1));
+            let u_at = |u: i32| u0 + (u1 - u0) * f64::from(u) / f64::from(length);
+            let point = |u: i32| -> [i32; 2] {
+                let k = f64::from(u) / f64::from(length);
+                [
+                    a[0] + (f64::from(b[0] - a[0]) * k).round() as i32,
+                    a[1] + (f64::from(b[1] - a[1]) * k).round() as i32,
+                ]
+            };
+            self.banded(&BandedWall {
+                kind,
+                span,
+                reference,
+                set,
+                material: wall.material,
+                toward,
+                double_sided,
+                neighbours: neighbour_heights(room, self.cell, edge),
+                run: [u0.min(u1), u0.max(u1)],
+                u_grid: &u_at,
+                point: &point,
+            });
             return;
         }
-        // Bands on absolute multiples of one sector in world height.
+        let rectangle = h[0] == h[1] && h[3] == h[2] && h[3] > h[0];
+        let length = if edge.is_diagonal() {
+            diagonal_length.round() as i32
+        } else {
+            SECTOR_UNITS
+        };
+        // The cut heights of a banded neighbour go into the vertical edges
+        // of a plain wall too (nothing is inserted in a room without bands).
+        let neighbours = self
+            .room_ref
+            .map(|room| neighbour_heights(room, self.cell, edge))
+            .unwrap_or_default();
+        let plain = |this: &mut Self, outline: Vec<[i32; 2]>| {
+            for ring in stitched_rings(outline, [0, length], &neighbours) {
+                let corners: Vec<Corner> = ring
+                    .iter()
+                    .map(|p| corner(usize::from(p[0] != 0), p[1]))
+                    .collect();
+                this.push(kind, corners, toward, wall.material, double_sided);
+            }
+        };
+        if !rectangle || !self.cut_courses() {
+            plain(
+                self,
+                vec![[0, h[0]], [length, h[1]], [length, h[2]], [0, h[3]]],
+            );
+            return;
+        }
+        // Courses on absolute multiples of one sector in world height.
         let (bottom, top) = (y_offset + h[0], y_offset + h[3]);
         let mut start = bottom;
         while start < top {
@@ -437,6 +512,7 @@ pub fn cell_faces_with(
         defaults,
         legacy_uv: true,
         frame: Frame::around([[0.0, 0.0]]),
+        room_ref: Some(r),
         out,
     };
     builder.sector(sector);

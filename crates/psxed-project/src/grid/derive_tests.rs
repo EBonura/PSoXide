@@ -56,9 +56,10 @@ fn a_closed_hall_gets_only_closure_walls_around_its_outline() {
     let faces = all_faces(&world(hall(3)));
     assert!(derived(&faces, DerivedKind::Riser).is_empty());
     assert!(derived(&faces, DerivedKind::Drop).is_empty());
-    // 12 outline edges, each 2048 tall: two courses of one sector.
+    // 12 outline edges, each one face however tall (derived walls are not
+    // cut into courses).
     let closure = derived(&faces, DerivedKind::Closure);
-    assert_eq!(closure.len(), 12 * 2);
+    assert_eq!(closure.len(), 12);
     for face in closure {
         // Seen from inside: the normal points towards the room centre
         // (1.5 sectors, 1.5 sectors).

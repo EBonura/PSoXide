@@ -88,6 +88,10 @@ pub struct EdgeOverride {
     /// `Some(false)` makes a ghost wall.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub solid: Option<bool>,
+    /// The band set of this segment: an index into the room's sets, or
+    /// [`super::bands::NO_BANDS`] for none; `None` follows the room default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub band_set: Option<u8>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -141,6 +145,16 @@ impl EdgeOverrides {
         self.0.iter()
     }
 
+    /// Renumber the band sets the overrides name: `map` gets each index and
+    /// returns the new one (`None` drops the assignment). Overrides this
+    /// leaves empty are removed.
+    pub fn map_band_sets(&mut self, map: impl Fn(u8) -> Option<u8>) {
+        for o in self.0.values_mut() {
+            o.band_set = o.band_set.and_then(&map);
+        }
+        self.0.retain(|_, o| !o.is_empty());
+    }
+
     /// Keep only the overrides `keep` accepts.
     pub fn retain(&mut self, mut keep: impl FnMut(&EdgeKey) -> bool) {
         self.0.retain(|k, _| keep(k));
@@ -166,6 +180,10 @@ pub struct RoomDefaults {
     /// Wall material when nothing more specific is set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wall_material: Option<ResourceId>,
+    /// The band set every wall of the room uses unless it names another (or
+    /// none): an index into the room's sets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bands: Option<u8>,
     /// Height of the closure wall around a floor that has no ceiling, grid
     /// units. 0 leaves such edges open (the legacy outdoor look).
     #[serde(default, skip_serializing_if = "is_zero")]

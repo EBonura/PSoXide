@@ -7,8 +7,11 @@
 //! its host sector, so its texture reads the same way an authored front-facing
 //! wall of that sector would.
 
+use super::band_geom::Span;
+use super::bands;
 use super::derive::{self, DerivedWall};
 use super::faces::{editor_point, Builder, Corner, GridFaceKind};
+use super::faces_bands::{neighbour_heights, stitched_rings, BandedWall};
 use super::room::GridRoom;
 use super::sector::WallEdge;
 use super::units::{SECTOR_UNITS, TEXELS_PER_SECTOR};
@@ -88,36 +91,42 @@ impl Builder<'_> {
             edge: wall.edge,
             kind: wall.kind,
         };
-        let rectangle = wall
-            .heights
-            .filter(|h| h[0] == h[1] && h[3] == h[2] && h[3] > h[0]);
-        let Some(h) = rectangle else {
-            let ring: Vec<Corner> = match wall.heights {
-                Some(h) => vec![
-                    corner(0, h[0]),
-                    corner(SECTOR_UNITS, h[1]),
-                    corner(SECTOR_UNITS, h[2]),
-                    corner(0, h[3]),
-                ],
-                None => wall.ring.iter().map(|p| corner(p[0], p[1])).collect(),
-            };
-            self.push(kind, ring, toward, wall.material, false);
-            return;
+        if let Some((_, set)) = bands::resolve(room, wall.band_set) {
+            if let Some(span) = Span::from_ring(&wall.ring) {
+                let u_at = |u: i32| u_grid(u);
+                let point_at = |u: i32| point(u);
+                self.banded(&BandedWall {
+                    kind,
+                    span,
+                    reference: span,
+                    set,
+                    material: wall.material,
+                    toward,
+                    double_sided: false,
+                    neighbours: neighbour_heights(room, wall.host, wall.edge),
+                    run: [run.u[0], run.u[1]],
+                    u_grid: &u_at,
+                    point: &point_at,
+                });
+                return;
+            }
+        }
+        // One face, cut only by the texture splitter (a tall wall is not
+        // cut into courses), with the cut heights of a banded neighbour put
+        // into its vertical edges.
+        let outline: Vec<[i32; 2]> = match wall.heights {
+            Some(h) => vec![
+                [0, h[0]],
+                [SECTOR_UNITS, h[1]],
+                [SECTOR_UNITS, h[2]],
+                [0, h[3]],
+            ],
+            None => wall.ring.clone(),
         };
-        // Bands on absolute multiples of one sector in world height.
-        let (bottom, top) = (y_offset + h[0], y_offset + h[3]);
-        let mut start = bottom;
-        while start < top {
-            let next = ((start.div_euclid(SECTOR_UNITS) + 1) * SECTOR_UNITS).min(top);
-            let (lo, hi) = (start - y_offset, next - y_offset);
-            let ring = vec![
-                corner(0, lo),
-                corner(SECTOR_UNITS, lo),
-                corner(SECTOR_UNITS, hi),
-                corner(0, hi),
-            ];
-            self.push(kind, ring, toward, wall.material, false);
-            start = next;
+        let neighbours = neighbour_heights(room, wall.host, wall.edge);
+        for ring in stitched_rings(outline, [0, SECTOR_UNITS], &neighbours) {
+            let corners: Vec<Corner> = ring.iter().map(|p| corner(p[0], p[1])).collect();
+            self.push(kind, corners, toward, wall.material, false);
         }
     }
 }

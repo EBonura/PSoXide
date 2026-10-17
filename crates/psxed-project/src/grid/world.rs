@@ -77,6 +77,7 @@ impl GridWorld {
         };
         for room in &self.rooms {
             for (_, _, sector) in room.iter() {
+                note(sector.wall_material);
                 for surface in [&sector.floor, &sector.ceiling].into_iter().flatten() {
                     note(surface.tri(0).material);
                     note(surface.tri(1).material);
@@ -89,6 +90,16 @@ impl GridWorld {
             }
             for plane in &room.planes {
                 note(plane.material);
+            }
+            // What derived walls and bands wear.
+            note(room.defaults.wall_material);
+            for (_, o) in room.edge_overrides.iter() {
+                note(o.material);
+            }
+            for set in &room.band_sets {
+                for band in &set.bands {
+                    note(band.material);
+                }
             }
         }
         ids

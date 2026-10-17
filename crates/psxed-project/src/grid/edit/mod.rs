@@ -11,11 +11,13 @@
 //! * [`selection`]: the selection set and range rules.
 //! * [`convert`]: converting a legacy room to derived walls.
 //! * [`delete`]: deleting faces and sectors.
+//! * [`bands`]: horizontal wall bands: sets, runs and the copy-on-write edits.
 //! * [`derived`]: material, texture, solidity and visibility of derived walls.
 //! * [`surfaces`]: material, texture placement, split and flags.
 //! * [`clipboard`]: copy, flip, turn and paste.
 //! * [`planes`]: free planes: add, edit, remove, copy and paste.
 
+pub mod bands;
 pub mod clipboard;
 pub mod convert;
 pub mod delete;

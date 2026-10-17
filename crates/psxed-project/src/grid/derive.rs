@@ -86,6 +86,8 @@ pub struct DerivedWall {
     pub uv: Option<FaceUv>,
     /// Collision override.
     pub solid: Option<bool>,
+    /// Band set assignment from the override.
+    pub band_set: Option<u8>,
 }
 
 impl DerivedWall {
@@ -325,6 +327,7 @@ impl Edge<'_> {
             hidden: ovr.is_some_and(|o| o.hidden),
             uv: ovr.and_then(|o| o.uv),
             solid: ovr.and_then(|o| o.solid),
+            band_set: ovr.and_then(|o| o.band_set),
         }
     }
 }
@@ -457,10 +460,10 @@ pub struct RunExtent {
     pub cells: usize,
 }
 
-/// The run `wall` belongs to: the maximal chain of collinear faces on the
-/// same side with the same kind, material and texture override, which a fit
-/// mapping treats as one face.
-pub fn run_extent(room: &GridRoom, wall: &DerivedWall) -> RunExtent {
+/// The faces of the run `wall` belongs to, `wall` included: the maximal
+/// chain of collinear faces on the same side with the same kind, material
+/// and texture override, which a fit mapping treats as one face.
+pub fn run_members(room: &GridRoom, wall: &DerivedWall) -> Vec<DerivedWall> {
     let along = match wall.edge {
         WallEdge::North | WallEdge::South => [1, 0],
         _ => [0, 1],
@@ -481,6 +484,17 @@ pub fn run_extent(room: &GridRoom, wall: &DerivedWall) -> RunExtent {
             }
         }
     }
+    members
+}
+
+/// The run `wall` belongs to, as the frame its texture is measured against
+/// (see [`run_members`]).
+pub fn run_extent(room: &GridRoom, wall: &DerivedWall) -> RunExtent {
+    let along = match wall.edge {
+        WallEdge::North | WallEdge::South => [1, 0],
+        _ => [0, 1],
+    };
+    let members = run_members(room, wall);
     let line = |w: &DerivedWall| i64::from(if along[0] == 1 { w.host[0] } else { w.host[1] });
     let (lo, hi) = (
         members.iter().map(line).min().unwrap_or(0),

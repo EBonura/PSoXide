@@ -180,6 +180,7 @@ pub fn create_project(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::grid::course_merge::merge_courses;
     use crate::grid::edit::{convert_to_derived, ConvertMode};
     use crate::grid::faces::all_faces;
     use crate::grid::limits;
@@ -226,11 +227,10 @@ mod tests {
         let walls: usize = room.iter().map(|(_, _, s)| s.wall_count()).sum();
         assert_eq!(walls, 0);
         // A floor and a ceiling per sector, one closure wall per outline
-        // edge (4 sides of STARTER_SIDE sectors, 2 sectors tall gives 2
-        // courses).
+        // edge (a derived wall is one face however tall).
         assert_eq!(
             all_faces(&world).len(),
-            2 * STARTER_SIDE * STARTER_SIDE + 4 * STARTER_SIDE * 2
+            2 * STARTER_SIDE * STARTER_SIDE + 4 * STARTER_SIDE
         );
     }
 
@@ -239,8 +239,10 @@ mod tests {
         let wall: ResourceId = ron::from_str("(7)").unwrap();
         let derived = starter_world(None, Some(wall), None);
         let mut legacy = authored_starter(Some(wall));
+        // The walled room is cut into courses, the derived one is not; the
+        // look is the same once the courses are joined.
         let key = |world: &GridWorld| {
-            let mut faces: Vec<String> = all_faces(world)
+            let mut faces: Vec<String> = merge_courses(all_faces(world))
                 .iter()
                 .map(|f| format!("{:?} {:?} {:?}", f.points, f.texels, f.material))
                 .collect();

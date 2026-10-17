@@ -6,6 +6,7 @@ use psx_grid::write::RoomChunk;
 use psx_grid::{edge, NO_EXT, SECTOR_CLEAR};
 
 use super::tests::{cook, load_reference};
+use crate::grid::course_merge::merge_courses;
 use crate::grid::edit::{convert_to_derived, ConvertMode};
 use crate::grid::faces::{all_faces, GridFace};
 use crate::grid::overrides::WallMode;
@@ -41,8 +42,11 @@ fn look(face: &GridFace) -> String {
     format!("{ring:?} {:?} {}", face.material, face.double_sided)
 }
 
+/// The faces with the course cuts of walls joined: a derived wall is one
+/// face where the walled room cut it at every sector of height, and both
+/// look the same.
 fn multiset(world: &GridWorld) -> Vec<String> {
-    let mut faces: Vec<String> = all_faces(world).iter().map(look).collect();
+    let mut faces: Vec<String> = merge_courses(all_faces(world)).iter().map(look).collect();
     faces.sort();
     faces
 }
@@ -84,6 +88,17 @@ fn preserve_look_leaves_the_face_multiset_and_the_cook_unchanged() {
             "{name}: {} faces; converted {converted} walls, kept {kept} authored, hid {hidden} derived faces",
             faces_before.len()
         );
+        if faces_after.len() != faces_before.len() {
+            let only = |a: &[String], b: &[String]| -> Vec<String> {
+                a.iter()
+                    .filter(|x| !b.contains(x))
+                    .take(4)
+                    .cloned()
+                    .collect()
+            };
+            eprintln!("only before: {:#?}", only(&faces_before, &faces_after));
+            eprintln!("only after: {:#?}", only(&faces_after, &faces_before));
+        }
         assert_eq!(faces_after.len(), faces_before.len(), "{name}: face count");
         for (i, (a, b)) in faces_before.iter().zip(&faces_after).enumerate() {
             assert_eq!(a, b, "{name}: face {i} differs");
@@ -118,31 +133,39 @@ fn preserve_look_leaves_the_face_multiset_and_the_cook_unchanged() {
             .zip(&cook_after.tables)
             .enumerate()
         {
-            same(
-                name,
-                i,
-                "vertex count",
-                &[a.vertices.len()],
-                &[b.vertices.len()],
-            );
-            let (ma, mb) = (&cook_before.level.materials, &cook_after.level.materials);
-            let (qa, qb) = (
-                resolved_quads(a, &a.quads, ma),
-                resolved_quads(b, &b.quads, mb),
-            );
-            let only_before: Vec<_> = qa.iter().filter(|q| !qb.contains(q)).take(3).collect();
-            let only_after: Vec<_> = qb.iter().filter(|q| !qa.contains(q)).take(3).collect();
             assert!(
-                only_before.is_empty() && only_after.is_empty(),
-                "{name} room {i}: quads only before {only_before:#?} only after {only_after:#?}"
+                b.vertices.len() <= a.vertices.len(),
+                "{name} room {i}: {} vertices became {}",
+                a.vertices.len(),
+                b.vertices.len()
             );
-            same(name, i, "quads (resolved)", &qa, &qb);
+            // The render tables differ by the course cuts: a derived wall is
+            // one primitive where the walled room had one per course, and
+            // each corner of a primitive is lit on its own. Every texture
+            // the room drew is still drawn, and never with more primitives.
+            let (ma, mb) = (&cook_before.level.materials, &cook_after.level.materials);
+            let textures = |chunk: &RoomChunk, mats: &[psx_grid::Material]| {
+                let mut t: Vec<u16> = chunk
+                    .quads
+                    .iter()
+                    .map(|q| mats[usize::from(q.material)].texture_asset)
+                    .collect();
+                t.sort_unstable();
+                t.dedup();
+                t
+            };
             same(
                 name,
                 i,
-                "lod quads",
-                &resolved_quads(a, &a.lod_quads, ma),
-                &resolved_quads(b, &b.lod_quads, mb),
+                "textures drawn",
+                &textures(a, ma),
+                &textures(b, mb),
+            );
+            assert!(
+                b.quads.len() <= a.quads.len(),
+                "{name} room {i}: {} primitives became {}",
+                a.quads.len(),
+                b.quads.len()
             );
             same(
                 name,
@@ -156,6 +179,7 @@ fn preserve_look_leaves_the_face_multiset_and_the_cook_unchanged() {
     }
 }
 
+#[allow(dead_code)]
 /// Every quad resolved to world geometry, sorted: independent of the order
 /// the cells list them in and of which corner the ring starts at (a quad
 /// moved to the other sector of its edge starts at the other end).

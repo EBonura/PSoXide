@@ -80,6 +80,7 @@ pub fn plane_faces_with(
         y_offset: r.y_offset,
         defaults,
         legacy_uv: false,
+        room_ref: None,
         frame: Frame::around([[0.0, 0.0]]),
         out,
     };

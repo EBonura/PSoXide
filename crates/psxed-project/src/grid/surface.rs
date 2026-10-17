@@ -187,6 +187,10 @@ pub struct GridWall {
     /// Whether it blocks movement. Persisted for the collision pass.
     #[serde(default = "yes", skip_serializing_if = "is_true")]
     pub solid: bool,
+    /// The wall's band set: an index into the room's sets, or
+    /// [`super::bands::NO_BANDS`] for none; `None` follows the room default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub band_set: Option<u8>,
 }
 
 impl GridWall {
@@ -198,6 +202,7 @@ impl GridWall {
             uv: FaceUv::default(),
             facing: WallFacing::Front,
             solid: true,
+            band_set: None,
         }
     }
 

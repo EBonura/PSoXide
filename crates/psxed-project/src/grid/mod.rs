@@ -38,11 +38,14 @@
 //! * [`starter`]: the starter room of File > New Grid Project.
 //! * [`palette`]: which project materials a grid world's palette offers.
 
+pub mod band_geom;
+pub mod bands;
 pub mod base_project;
 pub mod cook;
 pub mod derive;
 pub mod edit;
 pub mod faces;
+mod faces_bands;
 mod faces_derived;
 pub mod light;
 pub mod limits;
@@ -60,12 +63,17 @@ pub mod uv_split;
 pub mod world;
 
 #[cfg(test)]
+mod band_tests;
+#[cfg(test)]
+mod course_merge;
+#[cfg(test)]
 mod derive_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod uv_golden;
 
+pub use bands::{Anchor, Band, BandSet, BandV};
 pub use derive::{DerivedKind, DerivedWall};
 pub use faces::{GridFace, GridFaceKind, UvDefaults};
 pub use light::FacingShade;

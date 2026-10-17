@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::bands::BandSet;
 use super::overrides::{EdgeOverrides, RoomDefaults, WallMode};
 use super::plane::GridPlane;
 use super::sector::GridSector;
@@ -91,6 +92,10 @@ pub struct GridRoom {
     /// What the user changed on individual derived wall segments.
     #[serde(default, skip_serializing_if = "EdgeOverrides::is_empty")]
     pub edge_overrides: EdgeOverrides,
+    /// Horizontal wall band sets, referenced by index from the room
+    /// default, derived overrides and authored walls.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub band_sets: Vec<BandSet>,
 }
 
 impl GridRoom {
@@ -109,6 +114,7 @@ impl GridRoom {
             wall_mode: WallMode::Authored,
             defaults: RoomDefaults::default(),
             edge_overrides: EdgeOverrides::default(),
+            band_sets: Vec::new(),
         }
     }
 

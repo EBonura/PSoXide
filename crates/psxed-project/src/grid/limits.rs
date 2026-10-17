@@ -12,6 +12,7 @@
 //! 16 from editor to engine units). The cook phase replaces the face cap with
 //! an exact vertex count; until then the conservative bound below stands.
 
+use super::bands::{MAX_BAND_LINES, MAX_BAND_SETS};
 use super::overrides::WallMode;
 use super::plane::{PlaneCollision, PlaneShape, MAX_PLANE_SIZE, MIN_PLANE_SIZE};
 use super::room::GridRoom;
@@ -119,6 +120,23 @@ pub enum GridIssueKind {
         /// Index in the edge's stack.
         index: usize,
     },
+    /// More than [`MAX_BAND_SETS`] band sets in a room.
+    TooManyBandSets {
+        /// Sets present.
+        count: usize,
+    },
+    /// A band set that is not one more band than lines, or has more than
+    /// [`MAX_BAND_LINES`] lines. Its walls draw plain.
+    BadBandSet {
+        /// Index in the room's set list.
+        index: usize,
+    },
+    /// A wall, override or room default naming a band set that does not
+    /// exist. The wall draws plain.
+    BandSetMissing {
+        /// The index named.
+        index: u8,
+    },
     /// More than [`MAX_PLANES_PER_ROOM`] free planes in a room.
     TooManyPlanes {
         /// Planes present.
@@ -159,6 +177,8 @@ impl GridIssueKind {
             Self::DegenerateWall { .. }
             | Self::DuplicateWall { .. }
             | Self::AuthoredDuplicatesDerived { .. }
+            | Self::BadBandSet { .. }
+            | Self::BandSetMissing { .. }
             | Self::PlaneTooSteep { .. } => Severity::Warning,
             _ => Severity::Error,
         }
@@ -223,6 +243,15 @@ impl GridIssue {
                 "{} wall {index} lies inside a derived wall and would draw on top of it",
                 edge.label()
             ),
+            GridIssueKind::TooManyBandSets { count } => {
+                format!("{count} band sets, at most {MAX_BAND_SETS}")
+            }
+            GridIssueKind::BadBandSet { index } => format!(
+                "band set {index} needs one more band than lines and at most {MAX_BAND_LINES} lines; its walls draw plain"
+            ),
+            GridIssueKind::BandSetMissing { index } => {
+                format!("a wall names band set {index}, which does not exist; it draws plain")
+            }
             GridIssueKind::TooManyPlanes { count } => {
                 format!("{count} planes, at most {MAX_PLANES_PER_ROOM}")
             }
@@ -339,6 +368,38 @@ fn check_planes(room_index: usize, room: &GridRoom, issues: &mut Vec<GridIssue>)
     }
 }
 
+fn check_bands(room_index: usize, room: &GridRoom, issues: &mut Vec<GridIssue>) {
+    let at_room = |kind| GridIssue {
+        kind,
+        room: Some(room_index),
+        cell: None,
+    };
+    if room.band_sets.len() > MAX_BAND_SETS {
+        issues.push(at_room(GridIssueKind::TooManyBandSets {
+            count: room.band_sets.len(),
+        }));
+    }
+    for (index, set) in room.band_sets.iter().enumerate() {
+        if !set.is_valid() {
+            issues.push(at_room(GridIssueKind::BadBandSet { index }));
+        }
+    }
+    let mut named: Vec<u8> = room.defaults.bands.into_iter().collect();
+    named.extend(room.edge_overrides.iter().filter_map(|(_, o)| o.band_set));
+    for (_, _, sector) in room.iter() {
+        for edge in WallEdge::ALL {
+            named.extend(sector.walls(edge).iter().filter_map(|w| w.band_set));
+        }
+    }
+    named.sort_unstable();
+    named.dedup();
+    for index in named {
+        if index != super::bands::NO_BANDS && usize::from(index) >= room.band_sets.len() {
+            issues.push(at_room(GridIssueKind::BandSetMissing { index }));
+        }
+    }
+}
+
 fn check_room(room_index: usize, room: &GridRoom, issues: &mut Vec<GridIssue>) {
     let at_room = |kind| GridIssue {
         kind,
@@ -368,6 +429,7 @@ fn check_room(room_index: usize, room: &GridRoom, issues: &mut Vec<GridIssue>) {
         }
     }
     check_planes(room_index, room, issues);
+    check_bands(room_index, room, issues);
     for (x, z, sector) in room.iter() {
         let at = |kind| GridIssue {
             kind,
