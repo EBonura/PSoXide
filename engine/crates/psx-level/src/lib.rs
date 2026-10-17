@@ -755,6 +755,10 @@ pub mod entity_flags {
     /// moving perches of Graybox Reach). Hook points without it, including
     /// every one a mesh socket spawns, hold still.
     pub const HOOK_SWAY: u16 = 1;
+    /// A hook point whose perch is real masonry (a mesh socket under the crown
+    /// of an arch): draw only the crystal and the brackets, not the floating
+    /// ruin the beacon draws where nothing stands.
+    pub const HOOK_BARE: u16 = 2;
 }
 
 /// One non-spawn entity. Same room-local coordinate convention

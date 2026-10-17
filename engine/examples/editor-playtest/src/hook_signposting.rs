@@ -86,6 +86,8 @@ impl Playtest {
                     world,
                 );
             }
+            // A socket under a real arch needs no ruin of its own.
+            let bare = h.flags & psx_level::entity_flags::HOOK_BARE != 0;
             // One grounded-in-place contact slab and an incomplete crown of
             // independent broken stones. Nothing closes the far side of the arch.
             let point = |x: i32, y: i32, depth: i32| {
@@ -121,7 +123,7 @@ impl Playtest {
                 &[(45, 130), (54, 108), (99, 102), (112, 127), (87, 145)],
                 &[(143, 112), (165, 99), (185, 110), (171, 141), (152, 145)],
             ];
-            for (stone, profile) in STONES.iter().enumerate() {
+            for (stone, profile) in STONES.iter().enumerate().filter(|_| !bare) {
                 let n = profile.len();
                 let cx = profile.iter().map(|p| p.0).sum::<i32>() / n as i32;
                 let cy = profile.iter().map(|p| p.1).sum::<i32>() / n as i32;
@@ -207,6 +209,7 @@ impl Playtest {
             for (i, (x, y, r)) in [(30, 142, 5), (125, 161, 7), (204, 137, 4)]
                 .into_iter()
                 .enumerate()
+                .filter(|_| !bare)
             {
                 let phase = (((tick % 1800) * 4096 / 1800) as u16).wrapping_add(i as u16 * 1313);
                 let x = x + psx_math::cos_q12(phase) * 4 / 4096;
