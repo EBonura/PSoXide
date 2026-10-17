@@ -10,8 +10,8 @@
 use std::collections::HashMap;
 
 use psx_grid::{
-    PlaneRef, Quad, RCell, Vtx, CELL_OPEN_SKY, QUAD_AXIS, QUAD_AXIS_NEG, QUAD_AXIS_SHIFT,
-    QUAD_DOUBLE, QUAD_PLANE, QUAD_TRI,
+    PlaneRef, Quad, RCell, Vtx, CELL_OPEN_SKY, QUAD2_REPEAT, QUAD_AXIS, QUAD_AXIS_NEG,
+    QUAD_AXIS_SHIFT, QUAD_DOUBLE, QUAD_PLANE, QUAD_TRI,
 };
 
 use super::units::RuntimeUnits;
@@ -43,6 +43,26 @@ pub struct BoundMaterial {
     /// False for the flat-white stand-in of an untextured face; its UVs are
     /// pinned to the first texel.
     pub textured: bool,
+    /// Texture width and height in texels. Powers of two from 8 to 128 can
+    /// repeat through the GPU texture window, see [`Self::tex_shape`].
+    pub texels: [u16; 2],
+}
+
+impl BoundMaterial {
+    /// `Material::tex_shape` of this material: 0 for an untextured stand-in
+    /// or a size the texture window cannot repeat.
+    pub fn tex_shape(&self) -> u16 {
+        if self.textured {
+            psx_grid::tex_shape(self.texels[0], self.texels[1])
+        } else {
+            0
+        }
+    }
+
+    /// Whether a primitive of this material may carry the `REPEAT` flag.
+    pub fn can_repeat(&self) -> bool {
+        self.tex_shape() != 0
+    }
 }
 
 /// Binds document materials to level-global material slots.
@@ -108,6 +128,8 @@ pub struct RenderStats {
     /// Primitives added by cutting faces at texture tile boundaries.
     pub uv_split_quads: usize,
     pub lit_corners: usize,
+    /// Primitives that repeat their texture through the texture window.
+    pub repeat_quads: usize,
 }
 
 /// Render tables of one room.
@@ -135,36 +157,53 @@ pub struct Context<'a> {
     /// Whether the segment between two world points (runtime units) is
     /// blocked by solid world.
     pub occluded: &'a dyn Fn([f64; 3], [f64; 3]) -> bool,
+    /// Whether primitives may repeat their texture through the GPU texture
+    /// window (up to four tiles per axis). Off, every primitive holds one
+    /// tile, which is how format version 2 levels were cooked.
+    pub repeat: bool,
 }
 
-/// Texel coordinates rebased so each axis' minimum lands in one repeat, then
-/// clamped so a tile never reaches the far edge of its texture. Returns the
-/// packed bytes and whether the span passed one repeat.
-fn rebase_texels(texels: &[[f64; 2]]) -> (Vec<[u8; 2]>, bool) {
+/// Packed UVs of a primitive and how it addresses its texture.
+struct Rebased {
+    uv: Vec<[u8; 2]>,
+    /// The texels pass what the primitive can hold.
+    overflow: bool,
+    /// The UVs are raw and the primitive needs the texture window: some axis
+    /// holds more than one tile.
+    repeat: bool,
+}
+
+/// Texel coordinates rebased so each axis' minimum lands in the first tile,
+/// then clamped so the last tile an axis touches never reaches the first
+/// texel of the next one. With `repeat` an axis may touch up to four tiles
+/// (`REPEAT` primitive, raw UVs); otherwise one, as before.
+fn rebase_texels(texels: &[[f64; 2]], repeat: bool) -> Rebased {
+    let limit = uv_split::tiles_per_primitive(repeat);
     let mut uvs = texels.to_vec();
-    let mut over = false;
+    let mut overflow = false;
+    let mut tiles = [1i64; 2];
     for axis in 0..2 {
         let min = uvs.iter().map(|uv| uv[axis]).fold(f64::MAX, f64::min);
+        let max = uvs.iter().map(|uv| uv[axis]).fold(f64::MIN, f64::max);
+        let touched = uv_split::tiles_touched(min, max);
+        if touched > limit {
+            overflow = true;
+        }
+        tiles[axis] = touched.min(limit);
+        let top = tiles[axis] as f64 * TILE_TEXELS - 1.0;
         let shift = (min / TILE_TEXELS).floor() * TILE_TEXELS;
         for uv in &mut uvs {
-            uv[axis] -= shift;
-            if uv[axis] > TILE_TEXELS - 1.0 {
-                if uv[axis] > TILE_TEXELS + 0.5 {
-                    over = true;
-                }
-                uv[axis] = TILE_TEXELS - 1.0;
-            }
-            if uv[axis] < 0.0 {
-                uv[axis] = 0.0;
-            }
+            uv[axis] = (uv[axis] - shift).clamp(0.0, top);
         }
     }
-    (
-        uvs.iter()
+    Rebased {
+        uv: uvs
+            .iter()
             .map(|uv| [uv[0].round() as u8, uv[1].round() as u8])
             .collect(),
-        over,
-    )
+        overflow,
+        repeat: tiles.iter().any(|&t| t > 1),
+    }
 }
 
 fn sub(a: [i32; 3], b: [i32; 3]) -> [i32; 3] {
@@ -244,16 +283,17 @@ impl RoomBuild {
         place: &dyn Fn() -> String,
         extra_flags: u8,
     ) -> Result<(), String> {
-        let textured = if uv_split::wants_split(face) {
-            let slot = cx.materials.slot(cx.binder, face.material)?;
-            cx.materials.slots[usize::from(slot)].1.textured
-        } else {
-            false
-        };
-        if !textured {
+        // A face inside one tile is the common case and needs no material
+        // lookup to say so.
+        if uv_split::fits(&face.texels, 1) {
             return self.add_piece(cx, face, room_index, origin, ambient, place, extra_flags);
         }
-        let pieces = uv_split::split(face, cx.world.scale);
+        let slot = cx.materials.slot(cx.binder, face.material)?;
+        let bound = cx.materials.slots[usize::from(slot)].1;
+        if !bound.textured {
+            return self.add_piece(cx, face, room_index, origin, ambient, place, extra_flags);
+        }
+        let pieces = uv_split::split(face, cx.world.scale, cx.repeat && bound.can_repeat());
         self.tables.stats.uv_split_quads += pieces.len() - 1;
         // The face counts once, however many primitives it became.
         let faces_before = self.tables.stats.faces;
@@ -358,19 +398,28 @@ impl RoomBuild {
         }
         // UVs per kept corner.
         let texels: Vec<[f64; 2]> = keep.iter().map(|&i| face.texels[i]).collect();
-        let (packed_uv, over) = if bound.textured {
-            rebase_texels(&texels)
+        let rebased = if bound.textured {
+            rebase_texels(&texels, cx.repeat && bound.can_repeat())
         } else {
-            (vec![[0, 0]; texels.len()], false)
+            Rebased {
+                uv: vec![[0, 0]; texels.len()],
+                overflow: false,
+                repeat: false,
+            }
         };
-        if over {
+        let packed_uv = &rebased.uv;
+        if rebased.overflow {
             self.tables.stats.uv_overflow += 1;
+        }
+        if rebased.repeat {
+            self.tables.stats.repeat_quads += 1;
         }
         let mut quad = Quad {
             d,
             n: n8,
             material: slot,
             flags,
+            flags2: if rebased.repeat { QUAD2_REPEAT } else { 0 },
             ..Quad::default()
         };
         for (k, &i) in keep.iter().enumerate() {
@@ -393,6 +442,7 @@ impl RoomBuild {
                 ambient,
                 cx.lights,
                 cx.occluded,
+                cx.world.shading,
             );
             quad.color[k] =
                 u32::from(colour[0]) | (u32::from(colour[1]) << 8) | (u32::from(colour[2]) << 16);

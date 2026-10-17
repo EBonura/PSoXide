@@ -27,11 +27,17 @@ impl MaterialBinder for TestBinder {
             uv_motion: 0,
             tint: [128; 3],
             textured: material.is_some(),
+            texels: [64, 64],
         })
     }
 }
 
 pub(super) fn cook(world: &GridWorld) -> Result<CookedLevel, String> {
+    cook_with(world, true)
+}
+
+/// [`cook`] with the texture-window repeat on or off.
+pub(super) fn cook_with(world: &GridWorld, texture_repeat: bool) -> Result<CookedLevel, String> {
     cook_level(
         CookInput {
             world,
@@ -39,6 +45,7 @@ pub(super) fn cook(world: &GridWorld) -> Result<CookedLevel, String> {
             lights: &[],
             first_pack_sector: 100,
             lod_far_cells: lod::LOD_FAR_CELLS,
+            texture_repeat,
         },
         None,
     )
@@ -63,6 +70,7 @@ fn box_room() -> GridWorld {
     GridWorld {
         scale: GridScale::DEFAULT,
         rooms: vec![room],
+        ..GridWorld::default()
     }
 }
 
@@ -173,6 +181,7 @@ fn a_long_shared_wall_is_one_portal_not_one_per_cell() {
     let world = GridWorld {
         scale: GridScale::DEFAULT,
         rooms: vec![make("west", [0, 0]), make("east", [4, 0])],
+        ..GridWorld::default()
     };
     let cooked = cook(&world).unwrap();
     for (room, dest) in [(0usize, 1u16), (1, 0)] {

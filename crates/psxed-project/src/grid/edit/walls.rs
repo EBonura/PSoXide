@@ -575,6 +575,7 @@ mod tests {
         GridWorld {
             scale: GridScale { num: 1, den: 1 },
             rooms: vec![room],
+            ..GridWorld::default()
         }
     }
 
@@ -657,6 +658,7 @@ mod tests {
         let mut world = GridWorld {
             scale: GridScale { num: 1, den: 1 },
             rooms: vec![room],
+            ..GridWorld::default()
         };
         place_wall(&mut world, 0, [2, 0], WallEdge::North, None, SPEC).unwrap();
         let cells = wall_run_cells([0, 0], [3, 0], WallEdge::North);
@@ -717,6 +719,7 @@ mod tests {
         let mut world = GridWorld {
             scale: GridScale { num: 1, den: 1 },
             rooms: vec![room],
+            ..GridWorld::default()
         };
         // The outline is already closed by the room itself.
         assert_eq!(

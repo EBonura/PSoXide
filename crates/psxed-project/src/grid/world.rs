@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::light::FacingShade;
 use super::room::GridRoom;
 use super::units::{GridScale, SECTOR_UNITS};
 
@@ -15,6 +16,10 @@ pub struct GridWorld {
     /// Rooms, in authoring order.
     #[serde(default)]
     pub rooms: Vec<GridRoom>,
+    /// How much darker faces are by the way they face, in the editor
+    /// preview and the cook alike. Off for a world made before the setting.
+    #[serde(default, skip_serializing_if = "FacingShade::is_off")]
+    pub shading: FacingShade,
 }
 
 /// Axis-aligned box in editor units.
@@ -265,6 +270,7 @@ mod tests {
         let world = GridWorld {
             scale: GridScale { num: 1, den: 1 },
             rooms: vec![room, upper],
+            ..GridWorld::default()
         };
         // (512, 256) lies in the first triangle, (100, 900) in the second.
         assert_eq!(world.floor_height_at(512, 256, 10_000), Some(2048));

@@ -92,9 +92,9 @@ pub struct GridFace {
     /// Drawn at the material tint with no light baked in.
     pub unlit: bool,
     /// The texels come from the plain legacy mapping (world aligned at 32
-    /// texels per sector). The cook keeps its original one-tile clamp for
-    /// such faces instead of cutting them, so levels made before the UV
-    /// model cook exactly as they did (see [`super::uv_split::SPLIT_LEGACY`]).
+    /// texels per sector, no turn or flip). Informational: the cook cuts
+    /// such a face like any other when it spans more tiles than a primitive
+    /// holds.
     pub legacy_uv: bool,
     /// The rectangle (grid units, in the face's own texture axes) its
     /// texture is measured against: the sector square of a floor, the record
@@ -497,6 +497,7 @@ mod tests {
         GridWorld {
             scale: GridScale { num: 1, den: 1 },
             rooms: vec![room],
+            ..GridWorld::default()
         }
     }
 
@@ -680,6 +681,7 @@ mod tests {
         let world = GridWorld {
             scale: GridScale { num: 1, den: 1 },
             rooms: vec![room],
+            ..GridWorld::default()
         };
         assert_eq!(all_faces(&world).len(), 2);
     }
@@ -709,6 +711,7 @@ mod tests {
         let world = GridWorld {
             scale: GridScale::DEFAULT,
             rooms: vec![room],
+            ..GridWorld::default()
         };
         let faces = all_faces(&world);
         let east_of_first: Vec<[i32; 3]> = faces[0]
@@ -740,6 +743,7 @@ mod tests {
         let world = GridWorld {
             scale: GridScale::DEFAULT,
             rooms: vec![room],
+            ..GridWorld::default()
         };
         let faces = all_faces(&world);
         let u_at = |f: &GridFace, x: i32| -> Vec<f64> {

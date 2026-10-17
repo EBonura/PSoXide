@@ -232,6 +232,7 @@ impl MaterialBinder for Binder<'_> {
             uv_motion: 0,
             tint,
             textured,
+            texels: [width, height],
         })
     }
 }
@@ -275,6 +276,7 @@ pub(super) fn cook(
             lights: &lights,
             first_pack_sector: 0,
             lod_far_cells: lod_far_cells(),
+            texture_repeat: cook::texture_repeat_default(),
         },
         None,
     );

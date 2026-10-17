@@ -197,8 +197,11 @@ fn clamp_offset_texels(value: f64) -> i16 {
 /// whole set fits the GPU's u8 window without straddling a 256 wrap.
 /// A straddling polygon packs per-vertex wrapped coordinates and
 /// rasterizes a backwards texture gradient; power-of-two repeat sizes
-/// make the shift sampling-identical. Axes whose span cannot fit the
-/// window are left alone (the historic wrap behaviour).
+/// make the shift sampling-identical. A span of a whole 256 texels (four
+/// 64 texel tiles, what a repeating primitive of the cook holds) would end
+/// on a byte that wraps back to 0, so its far edge is held at 255, as the
+/// cook does. Axes whose span cannot fit the window are left alone (the
+/// historic wrap behaviour).
 pub fn rebase_texel_uvs(uvs: &mut [[f64; 2]], repeat: [f64; 2]) {
     for axis in 0..2 {
         let repeat = repeat[axis].max(1.0);
@@ -208,10 +211,34 @@ pub fn rebase_texel_uvs(uvs: &mut [[f64; 2]], repeat: [f64; 2]) {
             continue;
         }
         let shift = (min / repeat).floor() * repeat;
-        if max - shift <= 255.0 {
+        if max - shift <= 256.5 {
             for uv in uvs.iter_mut() {
-                uv[axis] -= shift;
+                uv[axis] = (uv[axis] - shift).min(255.0);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod rebase_tests {
+    use super::*;
+
+    #[test]
+    fn a_span_of_four_tiles_holds_its_far_edge_below_the_byte_wrap() {
+        // Four 64 texel tiles starting on a tile line: 128..384 shifts to
+        // 0..256, whose last byte would wrap to 0.
+        let mut uvs = vec![[128.0, 0.0], [384.0, 0.0], [384.0, 64.0], [128.0, 64.0]];
+        rebase_texel_uvs(&mut uvs, [64.0, 64.0]);
+        assert_eq!(uvs[0], [0.0, 0.0]);
+        assert_eq!(uvs[1], [255.0, 0.0]);
+        assert_eq!(uvs[2], [255.0, 64.0]);
+        // A span that still fits is only shifted.
+        let mut uvs = vec![[70.0, 3.0], [130.0, 3.0]];
+        rebase_texel_uvs(&mut uvs, [64.0, 64.0]);
+        assert_eq!(uvs, vec![[6.0, 3.0], [66.0, 3.0]]);
+        // Beyond four tiles the axis is left alone.
+        let mut uvs = vec![[0.0, 0.0], [300.0, 0.0]];
+        rebase_texel_uvs(&mut uvs, [64.0, 64.0]);
+        assert_eq!(uvs[1][0], 300.0);
     }
 }

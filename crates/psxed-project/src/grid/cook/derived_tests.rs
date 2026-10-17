@@ -21,6 +21,7 @@ fn hall() -> GridWorld {
     GridWorld {
         scale: GridScale::DEFAULT,
         rooms: vec![room],
+        ..GridWorld::default()
     }
 }
 

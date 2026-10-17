@@ -365,6 +365,7 @@ mod tests {
         GridWorld {
             scale: GridScale { num: 1, den: 1 },
             rooms: vec![room],
+            ..GridWorld::default()
         }
     }
 

@@ -17,7 +17,8 @@
 use std::collections::HashMap;
 
 use psx_grid::{
-    LodBlock, Quad, QUAD_AXIS, QUAD_AXIS_SHIFT, QUAD_DOUBLE, QUAD_LOD_COVERED, QUAD_TRI,
+    LodBlock, Quad, QUAD2_REPEAT, QUAD_AXIS, QUAD_AXIS_SHIFT, QUAD_DOUBLE, QUAD_LOD_COVERED,
+    QUAD_TRI,
 };
 
 use super::render::{Tables, TILE_TEXELS};
@@ -63,6 +64,7 @@ fn candidate(tables: &Tables, q: usize, cell: [i32; 2], s: i32) -> Option<Candid
     if quad.flags & QUAD_AXIS == 0
         || (quad.flags >> QUAD_AXIS_SHIFT) & 3 != 1
         || quad.flags & (QUAD_TRI | QUAD_DOUBLE | QUAD_LOD_COVERED) != 0
+        || quad.flags2 & QUAD2_REPEAT != 0
     {
         return None;
     }

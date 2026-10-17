@@ -51,6 +51,17 @@ pub struct CookInput<'a> {
     /// Distance in sectors beyond which blocks draw merged far quads; 0
     /// writes no LOD.
     pub lod_far_cells: u8,
+    /// Whether primitives may repeat their texture through the GPU texture
+    /// window, up to four tiles per axis ([`texture_repeat_default`]).
+    pub texture_repeat: bool,
+}
+
+/// Whether the cook lets primitives repeat their texture through the GPU
+/// texture window. On by default; `PSXED_GRID_NO_REPEAT=1` cooks every
+/// primitive at one tile, the way format version 2 levels were cooked, for
+/// A/B measurements.
+pub fn texture_repeat_default() -> bool {
+    !std::env::var("PSXED_GRID_NO_REPEAT").is_ok_and(|v| !v.is_empty() && v != "0")
 }
 
 /// Size and census report of one cook.
@@ -86,6 +97,8 @@ pub struct RoomReport {
     pub uv_overflow: usize,
     /// Primitives added by cutting faces at texture tile boundaries.
     pub uv_split_quads: usize,
+    /// Primitives that repeat their texture through the texture window.
+    pub repeat_quads: usize,
     /// Merged far quads and the cell quads they stand in for.
     pub lod_quads: usize,
     pub lod_covered: usize,
@@ -123,10 +136,19 @@ impl CookReport {
                 r.faces,
                 r.quads,
                 r.triangles,
-                if r.uv_split_quads > 0 {
-                    format!(" ({} from texture tile cuts)", r.uv_split_quads)
-                } else {
-                    String::new()
+                {
+                    let mut notes = Vec::new();
+                    if r.uv_split_quads > 0 {
+                        notes.push(format!("{} from texture tile cuts", r.uv_split_quads));
+                    }
+                    if r.repeat_quads > 0 {
+                        notes.push(format!("{} repeating through the texture window", r.repeat_quads));
+                    }
+                    if notes.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({})", notes.join(", "))
+                    }
                 },
                 r.vertices,
                 r.lod_quads,
@@ -291,6 +313,7 @@ pub fn cook_level(
             binder: &mut *input.binder,
             materials: &mut materials,
             occluded,
+            repeat: input.texture_repeat,
         };
         let ambient = room.ambient;
         let mut ren = render::build(&mut cx, index, origin, ambient)?;
@@ -356,6 +379,7 @@ pub fn cook_level(
             collapsed: ren.stats.collapsed,
             uv_overflow: ren.stats.uv_overflow,
             uv_split_quads: ren.stats.uv_split_quads,
+            repeat_quads: ren.stats.repeat_quads,
             lod_quads: chunk.lod_quads.len(),
             lod_covered: chunk
                 .quads
@@ -438,7 +462,7 @@ pub fn cook_level(
                 flags: m.flags,
                 blend: m.blend,
                 uv_motion: m.uv_motion,
-                reserved: 0,
+                tex_shape: m.tex_shape(),
             })
             .collect(),
     };

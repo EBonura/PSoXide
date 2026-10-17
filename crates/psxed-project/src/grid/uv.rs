@@ -21,7 +21,7 @@
 //!
 //! [`report`] describes the result in the terms the Inspector prints and the
 //! cook acts on: how many tiles land on the face and how many primitives the
-//! one-tile-per-primitive limit cuts it into.
+//! four-tiles-per-primitive limit cuts it into.
 
 use crate::face_uv::{FaceUv, UvMode};
 
@@ -31,9 +31,9 @@ use super::units::SECTOR_UNITS;
 /// textures; the cook warns for other sizes).
 pub const TILE_TEXELS: f64 = 64.0;
 
-/// Most tiles per primitive the packet UVs can hold until the texture window
-/// carries repeats.
-pub const MAX_TILES_PER_PRIMITIVE: u32 = 1;
+/// Most tiles per axis one primitive holds when it repeats its texture
+/// through the GPU texture window (see [`super::uv_split`]).
+pub const MAX_TILES_PER_PRIMITIVE: u32 = super::uv_split::MAX_TILES_PER_PRIMITIVE as u32;
 
 /// The rectangle of grid units a face's texture is measured against.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -260,7 +260,7 @@ impl UvReport {
     pub fn split_warning(&self) -> Option<String> {
         (self.quads_added > 0).then(|| {
             format!(
-                "the cook cuts this face into {} primitives (+{}): at most {} tile per primitive",
+                "the cook cuts this face into {} primitives (+{}): a primitive holds at most {} tiles per axis",
                 self.quads_added + 1,
                 self.quads_added,
                 MAX_TILES_PER_PRIMITIVE
@@ -327,6 +327,8 @@ pub fn report(
         start[0] / scale(0) + f64::from(uv.offset_texels[0]),
         start[1] / scale(1) + f64::from(uv.offset_texels[1]),
     ];
+    // Primitives along one axis: the tiles the span touches (counted from
+    // the tile its start lies in), in groups of the per-primitive limit.
     let piece = |s: f64, b: f64| -> u32 {
         if s <= 0.0 {
             return 1;
@@ -334,16 +336,10 @@ pub fn report(
         let phase = b.rem_euclid(TILE_TEXELS);
         let reach = phase + s;
         // A tiny tolerance so an exact tile does not count as one more.
-        ((reach - 0.5) / TILE_TEXELS).ceil().max(1.0) as u32
+        let touched = ((reach - 0.5) / TILE_TEXELS).ceil().max(1.0) as u32;
+        touched.div_ceil(MAX_TILES_PER_PRIMITIVE)
     };
-    // The cook leaves the plain legacy mapping whole (see
-    // `uv_split::SPLIT_LEGACY`).
-    let legacy = mode == UvMode::LEGACY && uv.turns & 3 == 0 && uv.flip == [false; 2];
-    let pieces = if legacy && !super::uv_split::SPLIT_LEGACY {
-        [1, 1]
-    } else {
-        [piece(span[0], begin[0]), piece(span[1], begin[1])]
-    };
+    let pieces = [piece(span[0], begin[0]), piece(span[1], begin[1])];
     UvReport {
         mode,
         from_material,
@@ -558,11 +554,16 @@ mod tests {
         };
         assert_eq!((fit(1, 1).pieces, fit(1, 1).quads_added), ([1, 1], 0));
         assert!(fit(1, 1).split_warning().is_none());
-        assert_eq!((fit(2, 2).pieces, fit(2, 2).quads_added), ([2, 2], 3));
-        assert_eq!(fit(4, 4).quads_added, 15);
-        assert_eq!(fit(8, 1).quads_added, 7);
+        // A primitive holds four tiles per axis through the texture window.
+        assert_eq!((fit(2, 2).pieces, fit(2, 2).quads_added), ([1, 1], 0));
+        assert_eq!(fit(4, 4).quads_added, 0);
+        assert!(fit(4, 4).split_warning().is_none());
+        assert_eq!(fit(5, 1).quads_added, 1);
+        assert_eq!(fit(8, 1).quads_added, 1);
+        assert_eq!(fit(8, 8).quads_added, 3);
+        assert_eq!(fit(16, 1).quads_added, 3);
         assert_eq!(fit(2, 2).effective_text(), "2 x 2 on this face");
-        assert!(fit(2, 2)
+        assert!(fit(8, 8)
             .split_warning()
             .unwrap()
             .contains("4 primitives (+3)"));
@@ -582,8 +583,9 @@ mod tests {
             [0.0; 2],
             size,
         );
-        assert_eq!(dense.pieces, [2, 2]);
-        // An offset of half a tile makes a one-tile face straddle a boundary.
+        assert_eq!(dense.pieces, [1, 1]);
+        // An offset of half a tile makes a one-tile face touch two tiles,
+        // which a repeating primitive still holds.
         let shifted = report(
             &FaceUv {
                 mode: UvMode::fit(1, 1),
@@ -594,7 +596,19 @@ mod tests {
             [0.0; 2],
             size,
         );
-        assert_eq!(shifted.pieces, [2, 1]);
+        assert_eq!(shifted.pieces, [1, 1]);
         assert!(!shifted.phase_ok);
+        // Four tiles from a half tile phase touch five: two primitives.
+        let late = report(
+            &FaceUv {
+                mode: UvMode::fit(4, 1),
+                offset_texels: [32, 0],
+                ..FaceUv::default()
+            },
+            None,
+            [0.0; 2],
+            size,
+        );
+        assert_eq!(late.pieces, [2, 1]);
     }
 }

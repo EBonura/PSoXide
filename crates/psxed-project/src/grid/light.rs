@@ -7,6 +7,8 @@
 //! agree about what is solid. Lights and points share one unit (editor units
 //! for the editor preview, runtime units for the cook).
 
+use serde::{Deserialize, Serialize};
+
 use super::faces::{GridFace, GridFaceKind};
 
 /// Offset of a shadow ray's start along the surface normal, so a corner does
@@ -36,6 +38,92 @@ impl GridLight {
         self.position.into_iter().all(f64::is_finite)
             && self.radius.is_finite()
             && self.radius > 0.0
+    }
+}
+
+/// Brightness the lit colour of a face is scaled to by the way it faces, a
+/// fixed multiplier per facing as Tomb Raider shaded its rooms, so a step, a
+/// platform or a corner reads even where one lamp lights every surface alike.
+///
+/// Each field is a Q8 factor (256 leaves the colour as it is). A face takes
+/// the blend of the four by the squares of its normal's components, so an
+/// axis-aligned face gets exactly one factor and a slope or a diagonal wall
+/// something between. The same function runs in the editor preview and the
+/// cook, so Play shows what the editor shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FacingShade {
+    /// Faces looking up (floors).
+    pub up: u16,
+    /// Faces looking down (ceilings).
+    pub down: u16,
+    /// Faces looking along the X axis (east or west).
+    pub side_x: u16,
+    /// Faces looking along the Z axis (north or south).
+    pub side_z: u16,
+}
+
+impl FacingShade {
+    /// No shading: every face keeps its lit colour. What a world made before
+    /// this setting has, so levels never change behind their author's back.
+    pub const OFF: Self = Self {
+        up: 256,
+        down: 256,
+        side_x: 256,
+        side_z: 256,
+    };
+
+    /// Subtle but visible: floors as lit, ceilings and walls a little
+    /// darker, the two wall directions apart from each other. What a new
+    /// world gets.
+    pub const SUBTLE: Self = Self {
+        up: 256,
+        down: 200,
+        side_x: 212,
+        side_z: 168,
+    };
+
+    /// A stronger version for dim levels that need more contrast.
+    pub const STRONG: Self = Self {
+        up: 256,
+        down: 168,
+        side_x: 180,
+        side_z: 124,
+    };
+
+    /// Whether this leaves every colour alone.
+    pub fn is_off(&self) -> bool {
+        *self == Self::OFF
+    }
+
+    /// The factor (0..=1) for a face looking along the unit `normal`.
+    pub fn factor(&self, normal: [f64; 3]) -> f64 {
+        if self.is_off() {
+            return 1.0;
+        }
+        let vertical = if normal[1] >= 0.0 { self.up } else { self.down };
+        let weighted = normal[0] * normal[0] * f64::from(self.side_x)
+            + normal[2] * normal[2] * f64::from(self.side_z)
+            + normal[1] * normal[1] * f64::from(vertical);
+        let total = normal.iter().map(|v| v * v).sum::<f64>();
+        if total <= 0.0 {
+            return 1.0;
+        }
+        (weighted / total / 256.0).clamp(0.0, 1.0)
+    }
+
+    /// `colour` scaled by the factor for `normal`.
+    pub fn apply(&self, colour: [u8; 3], normal: [f64; 3]) -> [u8; 3] {
+        if self.is_off() {
+            return colour;
+        }
+        let k = self.factor(normal);
+        colour.map(|c| (f64::from(c) * k).round().clamp(0.0, 255.0) as u8)
+    }
+}
+
+impl Default for FacingShade {
+    fn default() -> Self {
+        Self::OFF
     }
 }
 
@@ -130,10 +218,12 @@ pub fn lit_face_corner(
     ambient: [u8; 3],
     lights: &[GridLight],
     occluded: &dyn Fn([f64; 3], [f64; 3]) -> bool,
+    shade: FacingShade,
 ) -> [u8; 3] {
     let plane = matches!(face.kind, GridFaceKind::Plane { .. });
     if !plane {
-        return lit_corner(point, face.normal, tint, ambient, lights, occluded);
+        let lit = lit_corner(point, face.normal, tint, ambient, lights, occluded);
+        return shade.apply(lit, face.normal);
     }
     if face.unlit {
         return lit_corner(
@@ -155,7 +245,7 @@ pub fn lit_face_corner(
         PLANE_SHADOW_NUDGE,
     );
     if !face.double_sided {
-        return front;
+        return shade.apply(front, face.normal);
     }
     let back = lit_corner_nudged(
         point,
@@ -166,10 +256,14 @@ pub fn lit_face_corner(
         occluded,
         PLANE_SHADOW_NUDGE,
     );
-    core::array::from_fn(|i| front[i].max(back[i]))
+    // A both-sided plane shows whichever side is brighter; shade it by the
+    // side that is.
+    let lit = core::array::from_fn(|i| front[i].max(back[i]));
+    shade.apply(lit, face.normal)
 }
 
-/// Lit colour of every corner of `face` in editor units, without shadows.
+/// Lit colour of every corner of `face` in editor units, without shadows,
+/// scaled by the world's facing shade.
 ///
 /// `tint` is the material's modulation colour (`[128; 3]` leaves the texture
 /// as authored) and `ambient` the room's ambient light.
@@ -178,10 +272,21 @@ pub fn bake_face_corners(
     tint: [u8; 3],
     ambient: [u8; 3],
     lights: &[GridLight],
+    shade: FacingShade,
 ) -> Vec<[u8; 3]> {
     face.points
         .iter()
-        .map(|p| lit_face_corner(face, p.map(f64::from), tint, ambient, lights, &|_, _| false))
+        .map(|p| {
+            lit_face_corner(
+                face,
+                p.map(f64::from),
+                tint,
+                ambient,
+                lights,
+                &|_, _| false,
+                shade,
+            )
+        })
         .collect()
 }
 
@@ -200,6 +305,7 @@ mod tests {
         let world = GridWorld {
             scale: GridScale { num: 1, den: 1 },
             rooms: vec![room],
+            ..GridWorld::default()
         };
         all_faces(&world).remove(0)
     }
@@ -207,9 +313,9 @@ mod tests {
     #[test]
     fn unlit_faces_show_ambient_modulated_by_tint() {
         let face = floor_face();
-        let colors = bake_face_corners(&face, [128; 3], [64; 3], &[]);
+        let colors = bake_face_corners(&face, [128; 3], [64; 3], &[], FacingShade::OFF);
         assert_eq!(colors, vec![[64; 3]; 4]);
-        let tinted = bake_face_corners(&face, [255, 128, 0], [128; 3], &[]);
+        let tinted = bake_face_corners(&face, [255, 128, 0], [128; 3], &[], FacingShade::OFF);
         assert_eq!(tinted[0], [255, 128, 0]);
     }
 
@@ -222,7 +328,7 @@ mod tests {
             intensity_q8: 256,
             color: [255, 255, 255],
         };
-        let colors = bake_face_corners(&face, [128; 3], [32; 3], &[lamp]);
+        let colors = bake_face_corners(&face, [128; 3], [32; 3], &[lamp], FacingShade::OFF);
         let by_point = |x: i32, z: i32| {
             let i = face
                 .points
@@ -244,8 +350,63 @@ mod tests {
             intensity_q8: 256,
             color: [255, 255, 255],
         };
-        let colors = bake_face_corners(&face, [128; 3], [32; 3], &[below]);
+        let colors = bake_face_corners(&face, [128; 3], [32; 3], &[below], FacingShade::OFF);
         assert!(colors.iter().all(|c| *c == [32; 3]));
+    }
+
+    #[test]
+    fn facing_shade_scales_by_the_way_a_face_looks() {
+        let shade = FacingShade::SUBTLE;
+        let white = [200u8; 3];
+        let k = |n: [f64; 3]| shade.apply(white, n)[0];
+        assert_eq!(k([0.0, 1.0, 0.0]), 200, "floors keep their light");
+        assert_eq!(
+            k([0.0, -1.0, 0.0]),
+            (200.0_f64 * 200.0 / 256.0).round() as u8
+        );
+        assert_eq!(
+            k([1.0, 0.0, 0.0]),
+            (200.0_f64 * 212.0 / 256.0).round() as u8
+        );
+        assert_eq!(k([-1.0, 0.0, 0.0]), k([1.0, 0.0, 0.0]));
+        assert_eq!(
+            k([0.0, 0.0, 1.0]),
+            (200.0_f64 * 168.0 / 256.0).round() as u8
+        );
+        // Walls facing the two axes differ, and a diagonal sits between.
+        let h = core::f64::consts::FRAC_1_SQRT_2;
+        assert!(k([0.0, 0.0, 1.0]) < k([h, 0.0, h]) && k([h, 0.0, h]) < k([1.0, 0.0, 0.0]));
+        // Off leaves the colour alone, bit for bit.
+        assert_eq!(
+            FacingShade::OFF.apply([1, 2, 3], [0.3, 0.5, 0.8]),
+            [1, 2, 3]
+        );
+        assert!(FacingShade::default().is_off());
+    }
+
+    #[test]
+    fn the_bake_applies_the_shade_to_walls_but_not_to_lit_floors() {
+        let mut room = GridRoom::new("r", 1, 1);
+        let sector = room.sector_or_insert(0, 0).unwrap();
+        sector.floor = Some(GridSurface::flat(0, None));
+        sector
+            .north
+            .push(crate::grid::surface::GridWall::span(0, 1024, None));
+        let world = GridWorld {
+            scale: GridScale { num: 1, den: 1 },
+            rooms: vec![room],
+            ..GridWorld::default()
+        };
+        let faces = all_faces(&world);
+        let bake = |face: &GridFace, shade| bake_face_corners(face, [128; 3], [128; 3], &[], shade);
+        let (floor, wall) = (&faces[0], &faces[1]);
+        assert_eq!(
+            bake(floor, FacingShade::SUBTLE),
+            bake(floor, FacingShade::OFF)
+        );
+        let off = bake(wall, FacingShade::OFF)[0][0];
+        let on = bake(wall, FacingShade::SUBTLE)[0][0];
+        assert!(on < off, "{on} against {off}");
     }
 
     #[test]
@@ -257,7 +418,7 @@ mod tests {
             intensity_q8: 256,
             color: [255, 255, 255],
         };
-        let lit = bake_face_corners(&face, [128; 3], [32; 3], &[lamp]);
+        let lit = bake_face_corners(&face, [128; 3], [32; 3], &[lamp], FacingShade::OFF);
         let shadowed: Vec<[u8; 3]> = face
             .points
             .iter()

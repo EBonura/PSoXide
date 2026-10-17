@@ -44,6 +44,7 @@ fn ditch_world() -> GridWorld {
     GridWorld {
         scale: GridScale::DEFAULT,
         rooms: vec![room],
+        ..GridWorld::default()
     }
 }
 
@@ -256,6 +257,7 @@ fn the_camera_passes_through_see_through_planes_by_default_and_the_flag_override
                 lights: &[],
                 first_pack_sector: 100,
                 lod_far_cells: 0,
+                texture_repeat: true,
             },
             None,
         )
