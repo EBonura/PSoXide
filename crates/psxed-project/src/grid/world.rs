@@ -85,43 +85,36 @@ impl GridWorld {
     /// above `y_limit` (editor units), interpolated over the surface's
     /// triangles. `None` where no room has a floor there. The limit picks
     /// the right floor where rooms stack.
+    ///
+    /// The interpolation is [`psx_grid::height::height_at_i32`], the same
+    /// function the runtime collision uses (there in runtime units), so the
+    /// editor and the game stand on the same surface.
     pub fn floor_height_at(&self, x: i32, z: i32, y_limit: i32) -> Option<i32> {
         let (gx, gz) = (self.scale.to_grid(x), self.scale.to_grid(z));
+        let cell = [gx.div_euclid(SECTOR_UNITS), gz.div_euclid(SECTOR_UNITS)];
+        let edge = self.scale.sector_editor_units().max(1);
+        let inv24 = psx_grid::height::weight_recip(edge as u32);
         let mut best: Option<i32> = None;
         for room in &self.rooms {
-            let cell = [gx.div_euclid(SECTOR_UNITS), gz.div_euclid(SECTOR_UNITS)];
             let Some([lx, lz]) = room.local(cell) else {
                 continue;
             };
             let Some(floor) = room.sector(lx, lz).and_then(|s| s.floor.as_ref()) else {
                 continue;
             };
-            let p = [
-                i64::from(gx.rem_euclid(SECTOR_UNITS)),
-                i64::from(gz.rem_euclid(SECTOR_UNITS)),
+            // Offsets inside the sector, in editor units.
+            let origin = [
+                self.scale.to_editor(cell[0].saturating_mul(SECTOR_UNITS)),
+                self.scale.to_editor(cell[1].saturating_mul(SECTOR_UNITS)),
             ];
-            let s = i64::from(SECTOR_UNITS);
-            let corners = [[0, 0], [s, 0], [s, s], [0, s]];
-            // The triangle containing `p`: the split diagonal decides.
-            let on_first = match floor.split {
-                super::surface::GridSplit::NwSe => p[0] >= p[1],
-                super::surface::GridSplit::NeSw => p[0] + p[1] <= s,
-            };
-            let index = usize::from(!on_first);
-            let heights = floor.heights_for(index);
-            let [a, b, c] = floor.split.triangle(index);
-            let (pa, pb, pc) = (corners[a], corners[b], corners[c]);
-            let det = (pb[0] - pa[0]) * (pc[1] - pa[1]) - (pc[0] - pa[0]) * (pb[1] - pa[1]);
-            if det == 0 {
-                continue;
-            }
-            let wb = (p[0] - pa[0]) * (pc[1] - pa[1]) - (pc[0] - pa[0]) * (p[1] - pa[1]);
-            let wc = (pb[0] - pa[0]) * (p[1] - pa[1]) - (p[0] - pa[0]) * (pb[1] - pa[1]);
-            let h = i64::from(heights[a])
-                + ((i64::from(heights[b]) - i64::from(heights[a])) * wb
-                    + (i64::from(heights[c]) - i64::from(heights[a])) * wc)
-                    / det;
-            let y = self.scale.to_editor(room.y_offset + h as i32);
+            let off = |v: i32, o: i32| (v - o).clamp(0, edge) as u32;
+            let (ox, oz) = (off(x, origin[0]), off(z, origin[1]));
+            let nesw = matches!(floor.split, super::surface::GridSplit::NeSw);
+            let second = !psx_grid::height::in_first_triangle(nesw, ox, oz, edge as u32);
+            let corners = floor
+                .heights_for(usize::from(second))
+                .map(|h| self.scale.to_editor(room.y_offset + h));
+            let y = psx_grid::height::height_at_i32(corners, nesw, ox, oz, edge as u32, inv24);
             if y <= y_limit && best.is_none_or(|b| y > b) {
                 best = Some(y);
             }

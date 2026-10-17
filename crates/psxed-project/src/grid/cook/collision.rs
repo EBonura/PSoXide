@@ -117,7 +117,8 @@ pub fn build(units: &RuntimeUnits, room: &GridRoom, room_index: usize) -> Result
                 splitb: NO_EXT,
                 ..SectorExt::default()
             };
-            let mut splitb: Option<SplitB> = None;
+            let mut floor_b: Option<[i16; 4]> = None;
+            let mut ceil_b: Option<[i16; 4]> = None;
             let mut walls: Vec<ColWall> = Vec::new();
             if let Some(doc) = room.sector(x, z) {
                 if let Some(floor) = &doc.floor {
@@ -150,9 +151,7 @@ pub fn build(units: &RuntimeUnits, room: &GridRoom, room_index: usize) -> Result
                         sector.flags |= walkable_bit(second, nesw, true, s, SECTOR_FLOOR_WALK_B);
                         if let Some(b) = b {
                             sector.flags |= SECTOR_SPLIT_LEVEL;
-                            let mut sb = splitb.unwrap_or_default();
-                            sb.floor_b = b;
-                            splitb = Some(sb);
+                            floor_b = Some(b);
                         }
                     }
                 }
@@ -184,9 +183,7 @@ pub fn build(units: &RuntimeUnits, room: &GridRoom, room_index: usize) -> Result
                     sector.ceil = a;
                     if let Some(b) = b {
                         sector.flags |= SECTOR_SPLIT_LEVEL;
-                        let mut sb = splitb.unwrap_or_default();
-                        sb.ceil_b = b;
-                        splitb = Some(sb);
+                        ceil_b = Some(b);
                     }
                 } else if doc.floor.is_some() {
                     sector.flags |= SECTOR_OPEN_SKY;
@@ -212,14 +209,10 @@ pub fn build(units: &RuntimeUnits, room: &GridRoom, room_index: usize) -> Result
             }
             // A split-level sector needs both halves filled: the half the
             // document did not override repeats the surface.
-            if let Some(sb) = splitb.as_mut() {
-                if sector.flags & SECTOR_HAS_FLOOR != 0 && sb.floor_b == [0; 4] {
-                    sb.floor_b = sector.floor;
-                }
-                if sector.flags & SECTOR_HAS_CEIL != 0 && sb.ceil_b == [0; 4] {
-                    sb.ceil_b = sector.ceil;
-                }
-            }
+            let splitb = (floor_b.is_some() || ceil_b.is_some()).then(|| SplitB {
+                floor_b: floor_b.unwrap_or(sector.floor),
+                ceil_b: ceil_b.unwrap_or(sector.ceil),
+            });
             if !walls.is_empty() || splitb.is_some() {
                 ext.wall_first = u16::try_from(tables.walls.len())
                     .map_err(|_| format!("room {room_index} has more than 65535 solid walls"))?;

@@ -91,6 +91,9 @@ pub struct Tables {
     pub quads: Vec<Quad>,
     pub cells: Vec<RCell>,
     pub material_use: Vec<u8>,
+    /// Continuous texel coordinates per quad corner before they were rebased
+    /// into one repeat, parallel to `quads`. The LOD merge needs them.
+    pub texels: Vec<[[f64; 2]; 4]>,
     pub stats: RenderStats,
 }
 
@@ -332,6 +335,16 @@ pub fn build(
                 } else {
                     tables.stats.quads += 1;
                 }
+                let mut kept_texels = [[0.0; 2]; 4];
+                if bound.textured {
+                    for (k, t) in texels.iter().enumerate() {
+                        kept_texels[k] = *t;
+                    }
+                    if keep.len() == 3 {
+                        kept_texels[3] = kept_texels[2];
+                    }
+                }
+                tables.texels.push(kept_texels);
                 tables.quads.push(quad);
             }
             let count = tables.quads.len() - first;

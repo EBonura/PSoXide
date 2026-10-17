@@ -1,4 +1,6 @@
-//! TRANSITIONAL: collision, activation and camera geometry derived from a grid
+//! TEST ORACLE: the retired transitional collision, kept only so the native
+//! provider can be compared against what Play used before. Delete with the
+//! PXBSP. Collision, activation and camera geometry derived from a grid
 //! document as PXBSP brushes. This module and `playtest/grid_world.rs` are the
 //! whole bridge between the grid document and the BSP cook; both go when grid
 //! worlds get their own level format and native grid collision.
@@ -19,7 +21,8 @@ use crate::grid::faces::{all_faces, GridFace, GridFaceKind};
 use crate::grid::GridWorld;
 use crate::ResourceId;
 
-use super::SLAB_THICKNESS;
+/// Thickness of a floor or ceiling collision slab, editor units.
+const SLAB_THICKNESS: f64 = 144.0;
 
 /// Thickness of a wall slab, editor units.
 const WALL_THICKNESS: i32 = 72;
@@ -266,108 +269,4 @@ pub fn derive(world: &GridWorld, sky: Option<ResourceId>) -> DerivedCollision {
     out.brushes.extend(anchors);
     out.lid = sky_lid(&out.brushes, sky);
     out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::grid::room::GridRoom;
-    use crate::grid::surface::{GridSurface, GridWall};
-    use crate::grid::units::GridScale;
-
-    fn world(configure: impl FnOnce(&mut GridRoom)) -> GridWorld {
-        let mut room = GridRoom::new("r", 2, 2);
-        configure(&mut room);
-        GridWorld {
-            scale: GridScale { num: 21, den: 16 },
-            rooms: vec![room],
-        }
-    }
-
-    #[test]
-    fn a_floor_and_a_tall_wall_become_one_brush_each() {
-        let w = world(|r| {
-            let sector = r.sector_or_insert(0, 0).unwrap();
-            sector.floor = Some(GridSurface::flat(0, None));
-            // Three sectors tall: three bands as faces, one slab here.
-            sector.north.push(GridWall::span(0, 3072, None));
-        });
-        let derived = derive(&w, None);
-        assert_eq!(derived.brushes.len(), 2);
-        assert_eq!(derived.rejected, 0);
-        assert!(derived.lid.is_some());
-        let wall = derived.brushes[1].solve();
-        // 3 sectors at 1344 / 1024 per grid unit = 4032 high.
-        assert_eq!(wall.max[1] - wall.min[1], 4032.0);
-    }
-
-    #[test]
-    fn a_floor_slab_sits_below_its_surface() {
-        let w = world(|r| {
-            r.sector_or_insert(0, 0).unwrap().floor = Some(GridSurface::flat(0, None));
-        });
-        let solid = derive(&w, None).brushes[0].solve();
-        assert_eq!(solid.max[1], 0.0);
-        assert_eq!(solid.min[1], -144.0);
-    }
-
-    #[test]
-    fn collision_flags_leave_passable_surfaces_out() {
-        let w = world(|r| {
-            let sector = r.sector_or_insert(0, 0).unwrap();
-            let mut floor = GridSurface::flat(0, None);
-            floor.walkable = false;
-            sector.floor = Some(floor);
-            let mut wall = GridWall::span(0, 1024, None);
-            wall.solid = false;
-            sector.east.push(wall);
-            sector.west.push(GridWall::span(0, 1024, None));
-        });
-        let derived = derive(&w, None);
-        assert_eq!(derived.brushes.len(), 1, "only the solid west wall");
-        assert_eq!(derived.passable, 2);
-    }
-
-    #[test]
-    fn a_split_floor_gets_one_slab_per_triangle() {
-        let w = world(|r| {
-            let mut floor = GridSurface::flat(0, None);
-            floor.heights = [0, 0, 0, 256];
-            r.sector_or_insert(0, 0).unwrap().floor = Some(floor);
-        });
-        assert_eq!(derive(&w, None).brushes.len(), 2);
-    }
-
-    #[test]
-    fn a_material_no_slab_shows_gets_an_anchor_below_the_world() {
-        let mut project = crate::ProjectDocument::new("t");
-        let mut add = |name: &str| {
-            project.add_resource(
-                name,
-                crate::ResourceData::Material(crate::MaterialResource::opaque(None)),
-            )
-        };
-        let (shown, hidden) = (add("shown"), add("hidden"));
-        let w = world(|r| {
-            let sector = r.sector_or_insert(0, 0).unwrap();
-            sector.floor = Some(GridSurface::flat(0, Some(shown)));
-            let mut ghost = GridWall::span(0, 1024, Some(hidden));
-            ghost.solid = false;
-            sector.east.push(ghost);
-        });
-        let derived = derive(&w, None);
-        assert_eq!(derived.brushes.len(), 2, "the floor slab and one anchor");
-        let anchor = derived.brushes[1].solve();
-        assert!(anchor.max[1] < -144.0, "below the floor slab");
-        assert!(derived.brushes[1]
-            .faces
-            .iter()
-            .all(|f| f.material == Some(hidden)));
-    }
-
-    #[test]
-    fn an_empty_world_has_no_lid() {
-        let derived = derive(&GridWorld::new(), None);
-        assert!(derived.brushes.is_empty() && derived.lid.is_none());
-    }
 }

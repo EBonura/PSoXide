@@ -2662,7 +2662,7 @@ fn pack_material(
     })
 }
 
-fn flat_white_psxt() -> Vec<u8> {
+pub(crate) fn flat_white_psxt() -> Vec<u8> {
     psxed_tex::encode_indexed_psxt(
         8,
         8,

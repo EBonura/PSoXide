@@ -106,15 +106,29 @@ pub enum PlaytestAssetKind {
     ModelAnimation,
 }
 
-/// Which renderer draws the world. Collision, activation and entities come
-/// from the PXBSP either way.
+/// Which runtime owns the world: rendering, collision, activation, sky.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum PlaytestWorldRender {
-    /// The PXBSP face pass (brush worlds).
+    /// The PXBSP runtime (brush worlds).
     #[default]
     Pxbsp,
-    /// The sector-grid renderer reading [`PlaytestPxbspWorld::grid_pack`].
+    /// The sector-grid runtime reading [`PlaytestPxbspWorld::grid`].
     Grid,
+}
+
+/// A cooked grid world: the resident level core and the room chunks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaytestGridWorld {
+    /// Level core file (`PGL1`).
+    pub core: Vec<u8>,
+    /// Room chunks (`PGRM`) laid end to end, each starting on a 2048-byte
+    /// boundary, so a room record's `pack_sector` is the sector offset of its
+    /// chunk in this blob and, later, in `WORLD.PAK`.
+    pub rooms: Vec<u8>,
+    /// Texture assets the level's materials use.
+    pub texture_asset_indices: Vec<usize>,
+    /// One block of text with the cook's sizes, for the build log.
+    pub summary: String,
 }
 
 /// Resident PXBSP payload and the deterministic authored mover mapping needed
@@ -144,11 +158,8 @@ pub struct PlaytestPxbspWorld {
     /// whole-map container of the same geometry, which the budget and
     /// analysis passes read; the guest loads `stream.container` instead.
     pub stream: Option<PlaytestStreamedWorld>,
-    /// The grid render pack (`GRD1`) of a grid world, cooked from the
-    /// project's grid document; empty for brush worlds. The open-hall bench
-    /// scripts can still cook one from a raw bonnie-32 level named by
-    /// `OPEN_HALL_GRID_LEVEL`.
-    pub grid_pack: Vec<u8>,
+    /// The cooked grid level of a grid world; `None` for brush worlds.
+    pub grid: Option<PlaytestGridWorld>,
 }
 
 /// A world cooked as a resident top container plus a region pack on disc.
@@ -175,7 +186,7 @@ impl Default for PlaytestPxbspWorld {
             movers: Vec::new(),
             leak_path: Vec::new(),
             stream: None,
-            grid_pack: Vec::new(),
+            grid: None,
         }
     }
 }

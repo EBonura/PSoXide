@@ -1,38 +1,41 @@
 //! Cooking a grid world for Play.
 //!
-//! TRANSITIONAL: this and `brush_grid::collision` bridge the grid document to
-//! the PXBSP cook (collision, activation, camera) until grid worlds have their
-//! own level format. Nothing else should build on that path.
-//!
 //! A grid project's world is its grid document and nothing else (plan
-//! decision D2). Play derives everything the runtime needs from it:
-//!
-//! * [`prepare`] validates the document against the shared caps, then adds
-//!   the thin collision brushes (and the sky lid) the PXBSP cook turns into
-//!   collision, activation and camera geometry.
-//! * [`cook_pack`] runs after the PXBSP cook and writes the render pack the
-//!   grid renderer draws, with per-corner light baked against the same
-//!   lights and the derived brushes as occluders.
-//!
-//! Brush projects pass through both untouched.
+//! decision D2). Play cooks the document straight into the PGL level format
+//! ([`crate::grid::cook`]): no brushes, no BSP, no derived collision. This
+//! module is the glue to the playtest package: the cap check, the material
+//! binder that turns document materials into texture assets, the scene's
+//! point lights, and the package record the manifest writer emits.
 
-use crate::brush_grid::{self, collision, GridCookInput, GridSource};
+use std::collections::HashMap;
+use std::path::Path;
+
+use psx_asset::Texture;
+use psx_grid::{MATERIAL_CUTOUT, SECTOR_BYTES};
+
+use crate::grid::cook::{self, BoundMaterial, CookInput, MaterialBinder, RuntimeUnits};
+use crate::grid::light::GridLight;
 use crate::grid::limits::{self, Severity};
-use crate::{ProjectDocument, ResourceData};
+use crate::grid::GridWorld;
+use crate::{
+    MaterialAnimationMode, MaterialFaceSidedness, NodeKind, ProjectDocument, PsxBlendMode,
+    ResourceData, ResourceId, Scene,
+};
 
-use super::{PlaytestValidationReport, PlaytestWorldRender};
+use super::{
+    PlaytestAsset, PlaytestAssetKind, PlaytestGridWorld, PlaytestPxbspWorld,
+    PlaytestValidationReport, PlaytestWorldRender, StreamedClass,
+};
 
 /// Texel size of the tile the grid renderer maps one material onto.
 const TILE_TEXELS: u16 = 64;
+/// Light reach for a scene with no World node, runtime units.
+const DEFAULT_LIGHT_RADIUS_UNITS: f64 = 1024.0;
 
-/// Validate a grid scene and add its derived collision to `project`, which
-/// must still be at authored (editor) scale. Returns `false` when the world
-/// cannot be cooked; the reasons are in `report`. Brush scenes return `true`
-/// and are left alone.
-pub(super) fn prepare(
-    project: &mut ProjectDocument,
-    report: &mut PlaytestValidationReport,
-) -> bool {
+/// Check a grid scene against the shared caps and the runtime lattice.
+/// Returns `false` when the world cannot be cooked; the reasons are in
+/// `report`. Brush scenes return `true`.
+pub(super) fn validate(project: &ProjectDocument, report: &mut PlaytestValidationReport) -> bool {
     let Some(world) = project.active_scene().world.grid() else {
         return true;
     };
@@ -46,115 +49,226 @@ pub(super) fn prepare(
     if limits::has_errors(&issues) {
         return false;
     }
-    if let Err(error) = brush_grid::document::check_lattice(world) {
+    if let Err(error) = RuntimeUnits::new(world.scale) {
         report.error(format!("grid world: {error}"));
         return false;
     }
-    let sky = project.resources.iter().find_map(|resource| {
-        matches!(&resource.data, ResourceData::Material(m) if m.sky_aperture).then_some(resource.id)
-    });
-    let derived = collision::derive(world, sky);
-    if derived.brushes.is_empty() {
-        report.error(
-            "grid world: nothing to stand on or bump into; add a floor or a wall with collision on",
-        );
-        return false;
-    }
-    if derived.rejected > 0 {
-        report.warn(format!(
-            "grid world: {} faces gave no valid collision slab and are walk-through",
-            derived.rejected
-        ));
-    }
-    if derived.passable > 0 {
-        report.warn(format!(
-            "grid world: {} faces have collision turned off and are walk-through",
-            derived.passable
-        ));
-    }
-    // The grid renderer has no portal visibility, so the PXBSP only serves
-    // collision and activation: the cheap connected-region visibility is
-    // enough. (The portal flow over a level's worth of thin slabs ran for
-    // more than a quarter of an hour on one of the imported levels.)
-    project.bsp_cook_mode = crate::brush_world::BrushWorldCookMode::Draft;
-    let scene = project.active_scene_mut();
-    scene.brushes.extend(derived.brushes);
-    scene.brushes.extend(derived.lid);
     true
 }
 
-/// Cook the render pack for the active scene. Grid scenes cook their
-/// document; brush scenes get an empty pack unless the open-hall bench
-/// variable `OPEN_HALL_GRID_LEVEL` names a raw bonnie-32 level.
-pub(super) fn cook_pack(
-    project: &ProjectDocument,
-    compiled: &crate::brush_world::CompiledBrushWorld,
-    ambient: [u8; 3],
-    report: &mut PlaytestValidationReport,
-) -> (PlaytestWorldRender, Vec<u8>) {
-    let scene = project.active_scene();
-    let raw = std::env::var_os("OPEN_HALL_GRID_LEVEL");
-    let (source, ambient) = match (scene.world.grid(), raw.as_deref()) {
-        (Some(world), _) => {
-            let ambient = world.rooms.first().map_or(ambient, |room| room.ambient);
-            warn_tile_sizes(compiled, report);
-            (GridSource::Document(world), ambient)
-        }
-        (None, Some(path)) => (GridSource::RawLevel(std::path::Path::new(path)), ambient),
-        (None, None) => return (PlaytestWorldRender::Pxbsp, Vec::new()),
-    };
-    let (lights, _) = crate::brush_world::scene_lights(scene);
-    let tints = crate::brush_world::material_tints(project);
-    let texture_assets: Vec<(String, u16)> = compiled
-        .textures
+/// Point lights of the scene in the scaled (runtime) project.
+fn scene_lights(scene: &Scene) -> Vec<GridLight> {
+    let radius_units = scene
+        .world_sector_size_for_node(scene.root)
+        .map(f64::from)
+        .unwrap_or(DEFAULT_LIGHT_RADIUS_UNITS);
+    scene
+        .nodes()
         .iter()
-        .map(|texture| (texture.key.clone(), texture.asset_id))
-        .collect();
-    let input = GridCookInput {
-        project,
-        source,
-        ambient,
-        lights: &lights,
-        tints: &tints,
-        texture_assets: &texture_assets,
-    };
-    match brush_grid::cook_grid_pack(&input) {
-        Ok((bytes, stats)) => {
-            report.warn(stats.summary());
-            if stats.dropped_unmapped > 0 {
-                report.warn(format!(
-                    "grid world: {} faces have no material the cook could bind and are not drawn",
-                    stats.dropped_unmapped
+        .filter_map(|node| {
+            let NodeKind::PointLight {
+                color,
+                intensity,
+                radius,
+            } = &node.kind
+            else {
+                return None;
+            };
+            Some(GridLight {
+                position: node.transform.translation.map(f64::from),
+                radius: f64::from(*radius) * radius_units,
+                intensity_q8: (f64::from(*intensity) * 256.0)
+                    .round()
+                    .clamp(0.0, f64::from(u16::MAX)) as u16,
+                color: *color,
+            })
+        })
+        .filter(GridLight::is_valid)
+        .collect()
+}
+
+/// Binds document materials to texture assets in the package.
+struct Binder<'a> {
+    project: &'a ProjectDocument,
+    root: &'a Path,
+    assets: &'a mut Vec<PlaytestAsset>,
+    by_path: &'a mut HashMap<String, usize>,
+    /// Asset indices the level's materials use, in first-use order.
+    used: Vec<usize>,
+    warnings: Vec<String>,
+}
+
+impl MaterialBinder for Binder<'_> {
+    fn bind(&mut self, material: Option<ResourceId>) -> Result<BoundMaterial, String> {
+        let mut tint = [128; 3];
+        let mut blend = PsxBlendMode::Opaque;
+        let mut sided = MaterialFaceSidedness::Front;
+        let mut textured = false;
+        let mut key = "@brush-flat-white".to_string();
+        let mut bytes = crate::brush_world::flat_white_psxt();
+        if let Some(id) = material {
+            let resource = self
+                .project
+                .resource(id)
+                .ok_or_else(|| format!("material #{} does not exist", id.raw()))?;
+            let ResourceData::Material(data) = &resource.data else {
+                return Err(format!("resource #{} is not a material", id.raw()));
+            };
+            tint = data.tint;
+            blend = data.blend_mode;
+            sided = data.sidedness();
+            if data.animation.mode != MaterialAnimationMode::Static {
+                self.warnings.push(format!(
+                    "material {:?} is animated; the grid renderer draws it still",
+                    resource.name
                 ));
             }
-            (PlaytestWorldRender::Grid, bytes)
+            if !data.sky_aperture {
+                if let Some((found_key, found)) =
+                    crate::resolve_material_texture_psxt(self.project, id, self.root)
+                        .map_err(|e| format!("material {:?}: {e}", resource.name))?
+                {
+                    key = found_key;
+                    bytes = found;
+                    textured = true;
+                }
+            }
         }
-        Err(error) => {
-            report.error(format!("grid pack cook failed: {error}"));
-            (PlaytestWorldRender::Pxbsp, Vec::new())
+        let texture =
+            Texture::from_bytes(&bytes).map_err(|e| format!("invalid PSXT {key}: {e:?}"))?;
+        let (width, height) = (texture.width(), texture.height());
+        let valid = (8..=128).contains(&width)
+            && (8..=128).contains(&height)
+            && width.is_power_of_two()
+            && height.is_power_of_two();
+        if texture.depth() != psxed_format::texture::Depth::Bit4 || !valid {
+            return Err(format!(
+                "texture {key} must be 4bpp power-of-two 8..128, got {width}x{height}"
+            ));
         }
+        if textured && !key.contains("#page") && (width, height) != (TILE_TEXELS, TILE_TEXELS) {
+            let note = format!(
+                "texture {key} is {width}x{height}; the grid renderer tiles 64x64 textures"
+            );
+            if !self.warnings.contains(&note) {
+                self.warnings.push(note);
+            }
+        }
+        let cutout = texture.is_index_zero_transparent();
+        let index = match self.by_path.get(&key) {
+            Some(&existing) => existing,
+            None => {
+                let index = self.assets.len();
+                self.assets.push(PlaytestAsset {
+                    kind: PlaytestAssetKind::Texture,
+                    bytes,
+                    filename: format!("texture_{index:03}.psxt"),
+                    source_label: key.clone(),
+                    streamed_class: StreamedClass::None,
+                });
+                self.by_path.insert(key, index);
+                index
+            }
+        };
+        if !self.used.contains(&index) {
+            self.used.push(index);
+        }
+        let asset =
+            u16::try_from(index).map_err(|_| "texture asset index exceeds u16".to_string())?;
+        Ok(BoundMaterial {
+            asset,
+            flags: match sided {
+                MaterialFaceSidedness::Front => 0,
+                MaterialFaceSidedness::Back => 1,
+                MaterialFaceSidedness::Both => 2,
+            } | if cutout { MATERIAL_CUTOUT } else { 0 },
+            blend: match blend {
+                PsxBlendMode::Opaque => 0,
+                PsxBlendMode::Average => 1,
+                PsxBlendMode::Add => 2,
+                PsxBlendMode::Subtract => 3,
+                PsxBlendMode::AddQuarter => 4,
+            },
+            uv_motion: 0,
+            tint,
+            textured,
+        })
     }
 }
 
-/// The grid renderer maps a material onto a 64 by 64 texel tile; any other
-/// texture size would draw stretched or cropped, so say so.
-fn warn_tile_sizes(
-    compiled: &crate::brush_world::CompiledBrushWorld,
+/// Distance LOD for far floors. `PSXED_GRID_LOD_FAR` overrides the sector
+/// distance (0 turns the merged quads off) for measurements.
+fn lod_far_cells() -> u8 {
+    std::env::var("PSXED_GRID_LOD_FAR")
+        .ok()
+        .and_then(|v| v.trim().parse::<u8>().ok())
+        .unwrap_or(cook::lod::LOD_FAR_CELLS)
+}
+
+/// Cook the active scene's grid world into a package record, registering the
+/// textures it uses in `assets`. `project` is the scaled project (lights and
+/// nodes at runtime scale); the document is read as authored.
+pub(super) fn cook(
+    project: &ProjectDocument,
+    world: &GridWorld,
+    project_root: &Path,
+    assets: &mut Vec<PlaytestAsset>,
+    texture_asset_for_path: &mut HashMap<String, usize>,
     report: &mut PlaytestValidationReport,
-) {
-    for texture in &compiled.textures {
-        // `@` textures are the cook's built-ins; `#page` ones were tiled up by
-        // the cook from a smaller source and still show their first 64x64.
-        if texture.key.starts_with('@') || texture.key.contains("#page") {
-            continue;
+) -> Option<PlaytestPxbspWorld> {
+    let lights = scene_lights(project.active_scene());
+    let mut binder = Binder {
+        project,
+        root: project_root,
+        assets,
+        by_path: texture_asset_for_path,
+        used: Vec::new(),
+        warnings: Vec::new(),
+    };
+    let cooked = cook::cook_level(
+        CookInput {
+            world,
+            binder: &mut binder,
+            lights: &lights,
+            first_pack_sector: 0,
+            lod_far_cells: lod_far_cells(),
+        },
+        None,
+    );
+    let used = std::mem::take(&mut binder.used);
+    for warning in std::mem::take(&mut binder.warnings) {
+        report.warn(format!("grid world: {warning}"));
+    }
+    let cooked = match cooked {
+        Ok(cooked) => cooked,
+        Err(error) => {
+            report.error(format!("grid world: {error}"));
+            return None;
         }
-        if texture.size != [TILE_TEXELS, TILE_TEXELS] {
-            report.warn(format!(
-                "grid world: texture {} is {}x{}; the grid renderer tiles 64x64 textures",
-                texture.key, texture.size[0], texture.size[1]
-            ));
+    };
+    for warning in &cooked.report.warnings {
+        report.warn(warning.clone());
+    }
+    let mut rooms = Vec::new();
+    for chunk in &cooked.chunks {
+        rooms.extend_from_slice(chunk);
+        while !rooms.len().is_multiple_of(SECTOR_BYTES) {
+            rooms.push(0);
         }
     }
+    let summary = cooked.report.summary();
+    report.warn(summary.trim_end().to_string());
+    Some(PlaytestPxbspWorld {
+        render: PlaytestWorldRender::Grid,
+        texture_asset_indices: used.clone(),
+        grid: Some(PlaytestGridWorld {
+            core: cooked.core,
+            rooms,
+            texture_asset_indices: used,
+            summary,
+        }),
+        ..PlaytestPxbspWorld::default()
+    })
 }
 
 #[cfg(test)]
@@ -175,7 +289,7 @@ mod tests {
     }
 
     #[test]
-    fn the_starter_room_cooks_for_play_with_a_grid_pack() {
+    fn the_starter_room_cooks_for_play_as_a_grid_level() {
         let (dir, project) = starter_project("cook");
         let (package, report) = super::super::build_package(&project, &dir);
         let _ = std::fs::remove_dir_all(&dir);
@@ -183,15 +297,11 @@ mod tests {
         let package = package.expect("a package");
         let world = &package.world_geometry;
         assert_eq!(world.render, PlaytestWorldRender::Grid);
-        // The reader needs a word-aligned buffer (the guest image provides
-        // one); check the header the cook wrote instead.
-        let pack = &world.grid_pack;
-        assert!(pack.starts_with(b"GRD1"));
-        let word = |i: usize| u32::from_le_bytes(pack[i * 4..i * 4 + 4].try_into().unwrap());
-        let side = crate::grid::starter::STARTER_SIDE as u32;
-        assert_eq!(word(2), side | (side << 16), "cell grid");
-        // 36 floor and 36 ceiling tiles, 24 wall segments of two bands.
-        assert_eq!(word(7), 2 * side * side + 4 * side * 2, "quads");
+        assert!(world.bytes.is_empty(), "no PXBSP bytes for a grid world");
+        let grid = world.grid.as_ref().expect("a grid level");
+        assert!(grid.core.starts_with(b"PGL1"));
+        assert!(grid.rooms.starts_with(b"PGRM"));
+        assert_eq!(grid.rooms.len() % SECTOR_BYTES, 0);
     }
 
     #[test]
@@ -206,20 +316,5 @@ mod tests {
         let message = report.error_messages().join("; ");
         assert!(message.contains("grid world: room 0"), "{message}");
         assert!(message.contains("sector slots stored"), "{message}");
-    }
-
-    #[test]
-    fn a_world_with_no_collision_is_refused() {
-        let mut project = ProjectDocument::new("t");
-        let mut world = crate::grid::GridWorld::new();
-        let mut room = crate::grid::GridRoom::new("r", 1, 1);
-        let mut floor = crate::grid::GridSurface::flat(0, None);
-        floor.walkable = false;
-        room.sector_or_insert(0, 0).unwrap().floor = Some(floor);
-        world.rooms.push(room);
-        project.active_scene_mut().world = crate::grid::SceneWorld::Grid(world);
-        let mut report = PlaytestValidationReport::default();
-        assert!(!prepare(&mut project, &mut report));
-        assert!(report.error_messages()[0].contains("nothing to stand on"));
     }
 }

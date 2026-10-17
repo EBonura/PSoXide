@@ -10,6 +10,7 @@
 //! and `psx_grid::format`.
 
 pub mod collision;
+pub mod lod;
 pub mod portals;
 pub mod render;
 pub mod units;
@@ -46,6 +47,9 @@ pub struct CookInput<'a> {
     pub lights: &'a [GridLight],
     /// First `WORLD.PAK` sector of the first room chunk.
     pub first_pack_sector: u32,
+    /// Distance in sectors beyond which blocks draw merged far quads; 0
+    /// writes no LOD.
+    pub lod_far_cells: u8,
 }
 
 /// Size and census report of one cook.
@@ -79,6 +83,9 @@ pub struct RoomReport {
     pub vertices: usize,
     pub collapsed: usize,
     pub uv_overflow: usize,
+    /// Merged far quads and the cell quads they stand in for.
+    pub lod_quads: usize,
+    pub lod_covered: usize,
     /// Unpadded chunk bytes.
     pub bytes: usize,
     /// Bytes per section, in `psx_grid::section` order.
@@ -106,7 +113,7 @@ impl CookReport {
         for (i, r) in self.rooms.iter().enumerate() {
             let c = |ids: &[usize]| ids.iter().map(|&k| r.section_bytes[k]).sum::<usize>();
             text.push_str(&format!(
-                "  room {i} {:?} {}x{}: {} faces -> {} quads + {} tris, {} verts, {} B (collision {} B, vertices {} B, quads {} B, cells {} B)\n",
+                "  room {i} {:?} {}x{}: {} faces -> {} quads + {} tris, {} verts, {} lod quads over {}, {} B (collision {} B, vertices {} B, quads {} B, cells {} B)\n",
                 r.name,
                 r.width,
                 r.depth,
@@ -114,6 +121,8 @@ impl CookReport {
                 r.quads,
                 r.triangles,
                 r.vertices,
+                r.lod_quads,
+                r.lod_covered,
                 r.bytes,
                 c(&[0, 1, 2, 3, 4, 5, 6, 7]),
                 c(&[9]),
@@ -198,7 +207,12 @@ pub fn cook_level(
             occluded,
         };
         let ambient = room.ambient;
-        let ren = render::build(&mut cx, index, origin, ambient)?;
+        let mut ren = render::build(&mut cx, index, origin, ambient)?;
+        let lod = if input.lod_far_cells > 0 {
+            lod::build(room.width, room.depth, s as i32, &mut ren)
+        } else {
+            lod::Lod::default()
+        };
         let (mut lo, mut hi) = col.range.unwrap_or((0, 0));
         for v in &ren.vertices {
             lo = lo.min(i32::from(v.y));
@@ -211,13 +225,21 @@ pub fn cook_level(
         any_sky |= outdoor;
         let chunk = RoomChunk {
             room_id: index as u16,
-            flags: 0,
+            flags: if lod.quads.is_empty() {
+                0
+            } else {
+                CHUNK_HAS_LOD
+            },
             width: u8::try_from(room.width).map_err(|_| "room wider than 255".to_string())?,
             depth: u8::try_from(room.depth).map_err(|_| "room deeper than 255".to_string())?,
             min_y: lo as i16,
             max_y: hi as i16,
-            lod_far_cells: 0,
-            lod_shift: 0,
+            lod_far_cells: if lod.quads.is_empty() {
+                0
+            } else {
+                input.lod_far_cells
+            },
+            lod_shift: lod::LOD_SHIFT,
             sectors: col.sectors,
             exts: col.exts,
             walls: col.walls,
@@ -226,6 +248,12 @@ pub fn cook_level(
             quads: ren.quads,
             cells: ren.cells,
             material_use: ren.material_use,
+            lod_blocks: if lod.quads.is_empty() {
+                Vec::new()
+            } else {
+                lod.blocks
+            },
+            lod_quads: lod.quads,
             ..RoomChunk::default()
         };
         report.rooms.push(RoomReport {
@@ -238,6 +266,12 @@ pub fn cook_level(
             vertices: chunk.vertices.len(),
             collapsed: ren.stats.collapsed,
             uv_overflow: ren.stats.uv_overflow,
+            lod_quads: chunk.lod_quads.len(),
+            lod_covered: chunk
+                .quads
+                .iter()
+                .filter(|q| q.flags & psx_grid::QUAD_LOD_COVERED != 0)
+                .count(),
             bytes: 0,
             section_bytes: chunk.section_bytes(),
         });
@@ -322,7 +356,6 @@ pub fn cook_level(
     report.materials = materials.slots.len();
     report.portals = level.portals.len();
     report.pool_pages = total_pages;
-    let _ = CHUNK_HAS_LOD;
     Ok(CookedLevel {
         core,
         chunks,
@@ -333,5 +366,9 @@ pub fn cook_level(
     })
 }
 
+#[cfg(test)]
+mod legacy_slabs;
+#[cfg(test)]
+mod parity;
 #[cfg(test)]
 mod tests;

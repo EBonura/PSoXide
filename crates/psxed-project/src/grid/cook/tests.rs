@@ -16,7 +16,7 @@ fn rid(n: u64) -> ResourceId {
     ron::from_str(&format!("({n})")).expect("a resource id")
 }
 
-struct TestBinder;
+pub(super) struct TestBinder;
 
 impl MaterialBinder for TestBinder {
     fn bind(&mut self, material: Option<ResourceId>) -> Result<BoundMaterial, String> {
@@ -31,13 +31,14 @@ impl MaterialBinder for TestBinder {
     }
 }
 
-fn cook(world: &GridWorld) -> Result<CookedLevel, String> {
+pub(super) fn cook(world: &GridWorld) -> Result<CookedLevel, String> {
     cook_level(
         CookInput {
             world,
             binder: &mut TestBinder,
             lights: &[],
             first_pack_sector: 100,
+            lod_far_cells: lod::LOD_FAR_CELLS,
         },
         None,
     )
@@ -154,7 +155,7 @@ fn rooms_get_portals_to_their_neighbours() {
     assert_eq!(cooked.level.rooms[1].portal_count, 1);
 }
 
-fn load_reference(name: &str) -> Option<crate::ProjectDocument> {
+pub(super) fn load_reference(name: &str) -> Option<crate::ProjectDocument> {
     let path = crate::projects_dir().join(name).join("project.ron");
     path.is_file()
         .then(|| crate::ProjectDocument::load_from_path(path).expect("the reference project loads"))
@@ -186,5 +187,77 @@ fn the_reference_projects_cook_and_validate() {
                 .unwrap_or_else(|e| panic!("{name} room {i}: {e:?}"));
         }
         eprintln!("{name}: {}", cooked.report.summary());
+    }
+}
+
+/// The editor's `floor_height_at` and the runtime height function are one
+/// function; this checks the two agree on every floor cell of a reference
+/// level, on corners, edges and the centre, within the rounding of the
+/// grid to runtime mapping (one runtime unit).
+#[test]
+fn editor_floor_height_agrees_with_the_runtime_height_function() {
+    use psx_grid::height::{height_at, weight_recip};
+    for name in ["grid-cathedral", "grid-level008", "grid-dungeon"] {
+        let Some(project) = load_reference(name) else {
+            eprintln!("skipping {name}: not present");
+            continue;
+        };
+        let world = project.active_scene().world.grid().expect("a grid project");
+        let cooked = cook(world).unwrap();
+        let units = RuntimeUnits::new(world.scale).unwrap();
+        let s = units.sector();
+        let inv24 = weight_recip(s);
+        let edge_editor = world.scale.sector_editor_units();
+        let mut checked = 0usize;
+        for (ri, room) in world.rooms.iter().enumerate() {
+            let record = cooked.level.rooms[ri];
+            let chunk = &cooked.tables[ri];
+            for (x, z, sector) in room.iter() {
+                let Some(floor) = &sector.floor else { continue };
+                if !floor.walkable {
+                    continue;
+                }
+                let flags = chunk.sectors[z * room.width + x].flags;
+                let nesw = flags & psx_grid::SECTOR_FLOOR_NESW != 0;
+                // Probe points in runtime units inside the sector.
+                for (px, pz) in [
+                    (2, 1),
+                    (s / 2 - 3, s / 2 - 5),
+                    (s - 3, 1),
+                    (1, s - 3),
+                    (s / 3, 2 * s / 3 + 2),
+                ] {
+                    // Skip points whose floor is shadowed by a higher floor of a
+                    // stacked room: the editor takes the highest one.
+                    let world_x = room.world_cell(x, z)[0] * s as i32 + px as i32;
+                    let world_z = room.world_cell(x, z)[1] * s as i32 + pz as i32;
+                    let editor_x = world_x * 16 + 8;
+                    let editor_z = world_z * 16 + 8;
+                    let Some(editor_h) = world.floor_height_at(editor_x, editor_z, i32::MAX) else {
+                        continue;
+                    };
+                    let second = !psx_grid::height::in_first_triangle(nesw, px, pz, s);
+                    let corners = if second && flags & psx_grid::SECTOR_SPLIT_LEVEL != 0 {
+                        let ext = chunk.exts[usize::from(chunk.sectors[z * room.width + x].ext)];
+                        chunk.splitbs[usize::from(ext.splitb)].floor_b
+                    } else {
+                        chunk.sectors[z * room.width + x].floor
+                    };
+                    let local = height_at(corners, nesw, px, pz, s, inv24);
+                    let runtime_h = local + record.origin[1];
+                    // Only compare when this room owns the highest floor there.
+                    // Steep ramps move up to two runtime units over the half-unit
+                    // probe offset and the rounding of each mapping.
+                    if (runtime_h * 16 - editor_h).abs() > 48 {
+                        // A different room's floor won; fine for stacked rooms.
+                        assert!(world.rooms.len() > 1, "{name} room {ri} sector {x},{z} at ({px},{pz}) nesw={nesw} second={second}: runtime {runtime_h} (local {local}, corners {corners:?}, origin {}) editor {editor_h} (doc {:?} split-level {:?})", record.origin[1], floor.heights, floor.heights_b);
+                        continue;
+                    }
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 20, "{name}: only {checked} probes compared");
+        let _ = edge_editor;
     }
 }

@@ -96,8 +96,13 @@ pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io
             .as_ref()
             .map_or(&world.bytes, |stream| &stream.container),
     )?;
-    // The grid render pack; empty for brush worlds.
-    std::fs::write(generated_dir.join("grid_world.bin"), &world.grid_pack)?;
+    // The grid level core and the room chunks; empty for brush worlds. The
+    // guest embeds them only when the manifest says the world is a grid.
+    let (grid_core, grid_rooms) = world.grid.as_ref().map_or((&[][..], &[][..]), |g| {
+        (g.core.as_slice(), g.rooms.as_slice())
+    });
+    std::fs::write(generated_dir.join("grid_level.pgl"), grid_core)?;
+    std::fs::write(generated_dir.join("grid_rooms.pgr"), grid_rooms)?;
     if world.leak_path.is_empty() {
         remove_optional_file(&brush_leak_path)?;
     } else {
