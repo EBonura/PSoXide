@@ -2251,7 +2251,9 @@ pub fn build_package(
 fn sync_stable_ids(ids: &mut Vec<u32>, len: usize, node: crate::NodeId) {
     let mut part = 0u8;
     while ids.len() < len {
-        ids.push(psx_level::StableId::of_node_part(node.raw(), part).raw());
+        let raw = node.raw();
+        let words = [raw as u32, (raw >> 32) as u32];
+        ids.push(psx_level::StableId::of_node_part(words, part).raw());
         part = part.saturating_add(1);
     }
 }
