@@ -426,6 +426,36 @@ impl GridMesh {
         Some([at(lo[0], lo[1]), at(hi[0], lo[1]), at(hi[0], hi[1]), at(lo[0], hi[1])])
     }
 
+    /// The eight corners of the asset's bounding box, placed: the four at the
+    /// bottom (`y` lowest) then the four at the top, each ring in the same
+    /// order. For overlays and picking; `None` for an asset with no faces.
+    pub fn oriented_box(&self, built: &BuiltMesh) -> Option<[[i32; 3]; 8]> {
+        let mut lo = [i32::MAX; 3];
+        let mut hi = [i32::MIN; 3];
+        for face in &built.faces {
+            for p in face.ring() {
+                for i in 0..3 {
+                    lo[i] = lo[i].min(p[i]);
+                    hi[i] = hi[i].max(p[i]);
+                }
+            }
+        }
+        if lo[0] == i32::MAX {
+            return None;
+        }
+        let at = |x: i32, y: i32, z: i32| self.place([x, y, z]);
+        Some([
+            at(lo[0], lo[1], lo[2]),
+            at(hi[0], lo[1], lo[2]),
+            at(hi[0], lo[1], hi[2]),
+            at(lo[0], lo[1], hi[2]),
+            at(lo[0], hi[1], lo[2]),
+            at(hi[0], hi[1], lo[2]),
+            at(hi[0], hi[1], hi[2]),
+            at(lo[0], hi[1], hi[2]),
+        ])
+    }
+
     /// World sector rectangle `(min, max)`, inclusive, the instance's box
     /// overlaps (a box ending exactly on a sector edge does not reach the
     /// next sector).

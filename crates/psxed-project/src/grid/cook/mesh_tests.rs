@@ -301,9 +301,10 @@ fn the_crown_socket_hook_point_is_96_under_the_grip() {
     let world = arch_hall();
     let hooks = mesh_sockets_for_test(&world);
     assert_eq!(hooks.len(), 1);
-    // Crown intrados: spring 1536 + rise 1024 = 2560 gu = 200 runtime units;
-    // the record sits 96 below it, at the arch's centre.
-    assert_eq!((hooks[0].x, hooks[0].y, hooks[0].z), (480, 200 - 96, 320));
+    // Crown intrados: spring 1536 + rise 1024 = 2560 gu, the grip 32 under it
+    // (2528 gu = 197.5, rounded to 198 runtime units); the record sits 96
+    // below the grip, at the arch's centre.
+    assert_eq!((hooks[0].x, hooks[0].y, hooks[0].z), (480, 198 - 96, 320));
     let mut turned = world.clone();
     turned.rooms[0].meshes[0].rotation = [90, 0, 0];
     let hook = mesh_sockets_for_test(&turned)[0];
@@ -320,5 +321,5 @@ fn the_crown_socket_hook_point_is_96_under_the_grip() {
             ..ArchSpec::default()
         }),
     );
-    assert_eq!(mesh_sockets_for_test(&pointed)[0].y, (1536 + 1536) * 5 / 64 - 96);
+    assert_eq!(mesh_sockets_for_test(&pointed)[0].y, 238 - 96); // (3072 - 32) gu is 237.5, rounded away from zero
 }

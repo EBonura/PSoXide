@@ -105,6 +105,9 @@ pub const THICKNESS_RANGE: (i32, i32) = (64, 2048);
 pub const DEPTH_RANGE: (i32, i32) = (64, 4096);
 /// Most pieces per half.
 pub const MAX_SEGMENTS: u8 = 8;
+/// How far under the crown of the soffit the hook socket sits, grid units
+/// (2.5 runtime units at the default scale).
+pub const HOOK_SINK: i32 = 32;
 
 impl Default for ArchSpec {
     fn default() -> Self {
@@ -377,7 +380,10 @@ impl ArchSpec {
                 });
             }
         }
-        let anchor = [0, self.crown(), 0];
+        // The grip sits a little under the soffit, not on it: the hook runtime
+        // traces the view to the grip and the body to its landing, and a point
+        // on the face of the crown slab counts as inside it.
+        let anchor = [0, self.crown() - HOOK_SINK, 0];
         Ok(BuiltMesh {
             faces,
             proxies,
@@ -447,7 +453,7 @@ mod tests {
             assert!(!built.faces.is_empty());
             assert_eq!(built.sockets.len(), 1);
             let Socket::Hook { anchor, .. } = built.sockets[0];
-            assert_eq!(anchor, [0, spec.crown(), 0], "{profile:?}");
+            assert_eq!(anchor, [0, spec.crown() - HOOK_SINK, 0], "{profile:?}");
             // The highest intrados point is the crown.
             let top = built
                 .faces
