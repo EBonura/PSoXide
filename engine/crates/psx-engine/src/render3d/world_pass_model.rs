@@ -350,6 +350,11 @@ fn facet_reflection_words(
         return [word; 3];
     }
     let band = (gradient >> 12) & 7;
+    let (wmax, hmax) = (i32::from(width.max(1)) - 1, i32::from(height.max(1)) - 1);
+    // Gradient offsets are at most 12 texels either way, so a lookup at
+    // least 12 texels inside the map on both axes can skip every clamp.
+    let inside = u >= 12 && v >= 12 && u + 12 <= wmax && v + 12 <= hmax;
+    let strip = (1..=4).contains(&band) && width >= 4;
     let mut out = [0u16; 3];
     for (k, word) in out.iter_mut().enumerate() {
         let (du, dv) = if gradient & 0x8000 != 0 {
@@ -361,11 +366,16 @@ fn facet_reflection_words(
         } else {
             (0, 0)
         };
-        let mut mapped_u = (u + du).clamp(0, i32::from(width.max(1)) - 1) as u16;
-        if (1..=4).contains(&band) && width >= 4 {
+        let (cu, cv) = if inside {
+            (u + du, v + dv)
+        } else {
+            ((u + du).clamp(0, wmax), (v + dv).clamp(0, hmax))
+        };
+        let mut mapped_u = cu as u16;
+        if strip {
             mapped_u = ((band - 1) * u16::from(width) + mapped_u) >> 2;
         }
-        *word = mapped_u | (((v + dv).clamp(0, i32::from(height.max(1)) - 1) as u16) << 8);
+        *word = mapped_u | ((cv as u16) << 8);
     }
     out
 }
