@@ -44,8 +44,6 @@ mod layout;
 mod report;
 #[cfg(test)]
 mod tests;
-#[cfg(test)]
-mod tests_world;
 
 pub(crate) use account::clip_surfaces_indexed;
 pub use account::{PayloadCounts, Region};

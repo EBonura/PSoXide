@@ -37,46 +37,6 @@ name = "cook-playtest"
 path = "src/bin/cook_playtest.rs"
 
 [[bin]]
-name = "pxbsp-draw-cost"
-path = "src/bin/pxbsp_draw_cost.rs"
-
-[[bin]]
-name = "pxbsp-seam-audit"
-path = "src/bin/pxbsp_seam_audit.rs"
-
-[[bin]]
-name = "gen-stream-world"
-path = "src/bin/gen_stream_world.rs"
-
-[[bin]]
-name = "stream-cook"
-path = "src/bin/stream_cook.rs"
-
-[[bin]]
-name = "stream-world-sweep"
-path = "src/bin/stream_world_sweep.rs"
-
-[[bin]]
-name = "stream-report"
-path = "src/bin/stream_report.rs"
-
-[[bin]]
-name = "gen-brush-first-playable"
-path = "src/bin/gen_brush_first_playable.rs"
-
-[[bin]]
-name = "import-bonnie32-level"
-path = "src/bin/import_bonnie32_level.rs"
-
-[[bin]]
-name = "gen-brush-open-courtyard"
-path = "src/bin/gen_brush_open_courtyard.rs"
-
-[[bin]]
-name = "gen-brush-liquid-runtime"
-path = "src/bin/gen_brush_liquid_runtime.rs"
-
-[[bin]]
 name = "miniaturise-project"
 path = "src/bin/miniaturise_project.rs"
 

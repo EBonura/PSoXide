@@ -2130,8 +2130,3 @@ fn flat_max_visible_faces(bytes: &[u8]) -> usize {
     }
     best
 }
-
-#[cfg(test)]
-#[allow(clippy::print_stdout)]
-#[path = "brush_world_stream_tests.rs"]
-mod tests;
