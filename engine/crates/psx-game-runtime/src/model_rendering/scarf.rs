@@ -426,6 +426,11 @@ impl PlayerScarf {
                 }
             }
         }
+        // One set of packet words for all of the cloth's triangles.
+        let packet = crystal.map_or_else(
+            || TextureMaterial::new(0, 0).textured_packet_material(),
+            TextureMaterial::textured_packet_material,
+        );
         let mut views = [ViewVertex::new(0, 0, 0); 32];
         let mut cpu_projected = [None; 32];
         if cached {
@@ -508,13 +513,14 @@ impl PlayerScarf {
                                 // No corner is behind the near plane, so the
                                 // clipper would hand these three back as they are.
                                 submitted += world
-                                    .submit_textured_triangle(
+                                    .submit_textured_triangle_prepared(
                                         triangles,
                                         [a, b, c],
                                         uvs.map(|(u, v)| {
                                             (u.clamp(0, 127) as u8, v.clamp(0, 127) as u8)
                                         }),
                                         material,
+                                        packet,
                                         layer_options,
                                     )
                                     .submitted_triangles;

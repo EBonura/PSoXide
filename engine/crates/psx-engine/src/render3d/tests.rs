@@ -1549,3 +1549,86 @@ fn grounding_probe_player_lowest_vertex_matches_reference() {
         "GTE sx drifted from the reference"
     );
 }
+
+#[test]
+fn prepared_textured_triangle_matches_the_general_path() {
+    const ZERO: TriTextured = TriTextured::new(
+        [(0, 0), (0, 0), (0, 0)],
+        [(0, 0), (0, 0), (0, 0)],
+        0,
+        0,
+        (0, 0, 0),
+    );
+    let materials = [
+        TextureMaterial::opaque(3, 9, (128, 96, 160)),
+        TextureMaterial::blended(5, 2, (128, 128, 128), BlendMode::Add),
+    ];
+    let cases = [
+        // Small, inside the screen.
+        [(0, 0, 100), (16, 0, 120), (0, 16, 90)],
+        // Large: needs subdividing, so the prepared path hands over.
+        [(0, 0, 100), (0, 700, 100), (128, 0, 100)],
+        // Off the vertex range.
+        [(-2000, 10, 50), (20, 4000, 60), (3000, -3000, 70)],
+        // Far and flat.
+        [(100, 100, 5000), (110, 100, 5000), (100, 110, 5000)],
+    ];
+    for split in [false, true] {
+        for material in materials {
+            for case in cases {
+                let verts = case.map(|(x, y, z)| ProjectedVertex::new(x, y, z));
+                let uvs = [(0, 0), (63, 5), (7, 127)];
+                let options =
+                    WorldSurfaceOptions::new(DepthBand::whole(), DepthRange::new(0, 8000))
+                        .with_cull_mode(CullMode::None)
+                        .with_textured_triangle_splitting(split);
+                let mut results = [(0u16, 0u16, 0u16, 0u16, [ZERO; 16], [(0u32, 0u8); 16]); 2];
+                for prepared in [false, true] {
+                    let mut ot_storage = OrderingTable::<8>::new();
+                    let mut ot = OtFrame::begin(&mut ot_storage);
+                    let mut triangle_storage = [const { ZERO }; 16];
+                    let mut triangles = PrimitiveArena::new(&mut triangle_storage);
+                    let mut commands = [WorldTriCommand::EMPTY; 16];
+                    let stats = {
+                        let mut pass = WorldRenderPass::new(&mut ot, &mut commands);
+                        if prepared {
+                            pass.submit_textured_triangle_prepared(
+                                &mut triangles,
+                                verts,
+                                uvs,
+                                material,
+                                material.textured_packet_material(),
+                                options,
+                            )
+                        } else {
+                            pass.submit_textured_triangle(
+                                &mut triangles,
+                                verts,
+                                uvs,
+                                material,
+                                options,
+                            )
+                        }
+                    };
+                    let used = stats.submitted_triangles as usize;
+                    let mut meta = [(0u32, 0u8); 16];
+                    for (slot, c) in meta.iter_mut().zip(commands[..used].iter()) {
+                        *slot = (c.depth as u32, c.render_layer);
+                    }
+                    // Only the packets this submit wrote are meaningful.
+                    let mut packets = [ZERO; 16];
+                    packets[..used].copy_from_slice(&triangle_storage[..used]);
+                    results[usize::from(prepared)] = (
+                        stats.submitted_triangles,
+                        stats.dropped_triangles,
+                        stats.split_triangles,
+                        stats.culled_triangles,
+                        packets,
+                        meta,
+                    );
+                }
+                assert_eq!(results[0], results[1], "split {split} case {case:?}");
+            }
+        }
+    }
+}
