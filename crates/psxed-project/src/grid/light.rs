@@ -262,6 +262,20 @@ pub fn lit_face_corner(
     shade.apply(lit, face.normal)
 }
 
+/// `colour`, the lit colour of corner `corner` of `face`, with the room's
+/// noise tint applied (see [`super::rough`]): a brightness factor from a hash
+/// of the corner's plan position, so the preview and the cook agree.
+pub fn noise_tint(face: &GridFace, corner: usize, colour: [u8; 3]) -> [u8; 3] {
+    let Some((seed, pct)) = face.tint_noise else {
+        return colour;
+    };
+    let Some(g) = face.grid.get(corner) else {
+        return colour;
+    };
+    let k = super::rough::tint_q8(seed, pct, g[0], g[2]);
+    colour.map(|c| ((i32::from(c) * k + 128) >> 8).clamp(0, 255) as u8)
+}
+
 /// Lit colour of every corner of `face` in editor units, without shadows,
 /// scaled by the world's facing shade.
 ///
@@ -276,8 +290,9 @@ pub fn bake_face_corners(
 ) -> Vec<[u8; 3]> {
     face.points
         .iter()
-        .map(|p| {
-            lit_face_corner(
+        .enumerate()
+        .map(|(i, p)| {
+            let lit = lit_face_corner(
                 face,
                 p.map(f64::from),
                 tint,
@@ -285,7 +300,8 @@ pub fn bake_face_corners(
                 lights,
                 &|_, _| false,
                 shade,
-            )
+            );
+            noise_tint(face, i, lit)
         })
         .collect()
 }

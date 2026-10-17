@@ -319,6 +319,12 @@ pub(super) fn run(
         }
     }
     report.touched = touched.len();
+    if !touched.is_empty() {
+        super::super::rules::ensure_strata(&mut world.rooms[room]);
+    }
+    if params.jitter > 0 {
+        crate::grid::edit::rough::raise_level(world, room, &touched, params.jitter);
+    }
     report.walk = match (before, count(world, params)) {
         (Some(b), Some(a)) => Some([b, a]),
         _ => None,

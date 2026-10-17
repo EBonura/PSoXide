@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use super::bands::BandSet;
 use super::overrides::{EdgeOverrides, RoomDefaults, WallMode};
 use super::plane::GridPlane;
+use super::rough::Rough;
 use super::sector::GridSector;
 
 /// Distance fog for a room, in grid units.
@@ -96,6 +97,9 @@ pub struct GridRoom {
     /// default, derived overrides and authored walls.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub band_sets: Vec<BandSet>,
+    /// The render-only jitter and tint of rough sectors.
+    #[serde(default, skip_serializing_if = "Rough::is_default")]
+    pub rough: Rough,
 }
 
 impl GridRoom {
@@ -115,6 +119,7 @@ impl GridRoom {
             defaults: RoomDefaults::default(),
             edge_overrides: EdgeOverrides::default(),
             band_sets: Vec::new(),
+            rough: Rough::default(),
         }
     }
 

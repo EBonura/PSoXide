@@ -12,15 +12,28 @@ use crate::grid::units::CLICK_UNITS;
 use crate::ResourceId;
 use psx_engine::WalkLimits;
 
-/// The slope class of a sector's floor, or `None` without a floor or a
-/// cookable scale.
-pub fn floor_class(
-    units: Option<&RuntimeUnits>,
-    y_offset: i32,
-    sector: &GridSector,
-) -> Option<SlopeClass> {
-    let floor = sector.floor.as_ref()?;
-    Some(surface_class(units?, y_offset, floor, &WalkLimits::DEFAULT))
+/// What a floor was before a verb moved it, for the rules: its slope class
+/// and the height of its middle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FloorState {
+    /// The slope class, `None` without a floor or a cookable scale.
+    pub class: Option<SlopeClass>,
+    /// Mean of the first triangle's corner heights, room-relative grid units.
+    pub height: i32,
+}
+
+/// The state of a sector's floor.
+pub fn floor_class(units: Option<&RuntimeUnits>, y_offset: i32, sector: &GridSector) -> FloorState {
+    let Some(floor) = sector.floor.as_ref() else {
+        return FloorState {
+            class: None,
+            height: 0,
+        };
+    };
+    FloorState {
+        class: units.map(|u| surface_class(u, y_offset, floor, &WalkLimits::DEFAULT)),
+        height: floor.heights.iter().sum::<i32>() / 4,
+    }
 }
 
 /// Set the material of both triangles of `surface`.
@@ -31,28 +44,70 @@ pub fn paint_surface(surface: &mut GridSurface, material: ResourceId) {
     }
 }
 
-/// Apply the floor rule to a sector the verb shaped, when its slope class
-/// changed (`before`) and its floor was not painted by hand.
+/// Apply the floor rules to a sector the verb shaped: the class rule when
+/// its slope class changed (`before`), the height rule when its class or
+/// height did, unless it was painted by hand.
 pub fn apply_floor_rule(
     rules: &PaintRules,
     units: Option<&RuntimeUnits>,
     y_offset: i32,
-    before: Option<SlopeClass>,
+    before: FloorState,
     sector: &mut GridSector,
 ) {
     let after = floor_class(units, y_offset, sector);
     if before == after {
         return;
     }
-    let (Some(class), Some(floor)) = (after, sector.floor.as_mut()) else {
+    let (Some(class), Some(floor)) = (after.class, sector.floor.as_mut()) else {
         return;
     };
     if floor.paint_locked {
         return;
     }
-    if let Some(material) = rules.floor_for(class) {
+    let by_class = (before.class != after.class)
+        .then(|| rules.floor_for(class))
+        .flatten();
+    if let Some(material) = rules.floor_for_height(class, after.height).or(by_class) {
         paint_surface(floor, material);
     }
+}
+
+/// Apply the floor rules to `cells` regardless of what changed: the
+/// "reapply" of the paint rules setter. Skips floors painted by hand.
+/// Returns how many floors were painted.
+pub fn reapply_floor_rules(
+    world: &mut crate::grid::world::GridWorld,
+    room: usize,
+    cells: &[[i32; 2]],
+) -> usize {
+    let units = RuntimeUnits::new(world.scale).ok();
+    let Some(r) = world.rooms.get_mut(room) else {
+        return 0;
+    };
+    let rules = r.defaults.rules;
+    let y_offset = r.y_offset;
+    let mut painted = 0;
+    for &cell in cells {
+        let Some(sector) = r.local(cell).and_then(|[x, z]| r.sector_mut(x, z)) else {
+            continue;
+        };
+        let state = floor_class(units.as_ref(), y_offset, sector);
+        let (Some(class), Some(floor)) = (state.class, sector.floor.as_mut()) else {
+            continue;
+        };
+        if floor.paint_locked {
+            continue;
+        }
+        let material = rules
+            .floor_for_height(class, state.height)
+            .or_else(|| rules.floor_for(class));
+        if let Some(material) = material {
+            let before = floor.clone();
+            paint_surface(floor, material);
+            painted += usize::from(*floor != before);
+        }
+    }
+    painted
 }
 
 /// Give a shaped sector its derived-wall material: the palette choice, else
@@ -65,6 +120,56 @@ pub fn stamp_wall_material(
     if let Some(material) = palette.or(rules.wall) {
         sector.wall_material = Some(material);
     }
+}
+
+/// The strata rule: a room with a wall-by-height rule gets a default band
+/// set "Strata" with an absolute cut line at each threshold and the rule's
+/// materials as its bands (a band that names none keeps the wall's own). An
+/// existing "Strata" set is updated in place, so running a verb again never
+/// piles up sets; a room whose default set is another one is left alone.
+/// Returns whether the room changed.
+pub fn ensure_strata(room: &mut GridRoom) -> bool {
+    let rule = room.defaults.rules.wall_by_height;
+    if rule.bands() < 2 {
+        return false;
+    }
+    let strata = room.band_sets.iter().position(|s| s.name == "Strata");
+    if let (Some(default), Some(strata)) = (room.defaults.bands, strata) {
+        if usize::from(default) != strata {
+            return false;
+        }
+    } else if room.defaults.bands.is_some() {
+        return false;
+    }
+    let set = BandSet {
+        name: "Strata".to_string(),
+        lines: rule.lines().into_iter().map(Anchor::Abs).collect(),
+        bands: (0..rule.bands())
+            .map(|i| Band {
+                material: rule.materials[i],
+                ..Band::default()
+            })
+            .collect(),
+    };
+    let index = match strata {
+        Some(i) => {
+            let changed = room.band_sets[i] != set;
+            room.band_sets[i] = set;
+            if room.defaults.bands == Some(i as u8) {
+                return changed;
+            }
+            i
+        }
+        None => {
+            if room.band_sets.len() >= crate::grid::bands::MAX_BAND_SETS {
+                return false;
+            }
+            room.band_sets.push(set);
+            room.band_sets.len() - 1
+        }
+    };
+    room.defaults.bands = Some(index as u8);
+    true
 }
 
 /// The trim rule: a room with no default band set gets one whose first band,

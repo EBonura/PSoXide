@@ -136,6 +136,14 @@ pub struct GridSector {
     /// a closure wall). `None` falls through to the room default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wall_material: Option<ResourceId>,
+    /// How rough the rock around this sector looks, 0 (none) to 3: the
+    /// render-only jitter and tint of [`super::rough`]. Two bits.
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub rough: u8,
+}
+
+fn is_zero_u8(value: &u8) -> bool {
+    *value == 0
 }
 
 impl GridSector {

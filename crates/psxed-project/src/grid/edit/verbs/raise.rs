@@ -21,8 +21,8 @@ use crate::ResourceId;
 
 use super::super::region::Region;
 use super::rules::{
-    apply_floor_rule, ceiling_corners, clamp_under_ceiling, ensure_trim, floor_class,
-    floor_corners, move_ceiling_with_floor, set_floor_corners, stamp_wall_material,
+    apply_floor_rule, ceiling_corners, clamp_under_ceiling, ensure_strata, ensure_trim,
+    floor_class, floor_corners, move_ceiling_with_floor, set_floor_corners, stamp_wall_material,
 };
 use super::{Applied, Snapshot};
 
@@ -219,6 +219,7 @@ impl RaiseDrag {
             applied.clamped += usize::from(held);
         }
         if amount != 0 {
+            ensure_strata(room);
             ensure_trim(room);
         }
         applied

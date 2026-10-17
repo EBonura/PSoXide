@@ -17,7 +17,7 @@ use psx_grid::{
 use super::units::RuntimeUnits;
 use crate::face_uv::UvMode;
 use crate::grid::faces::{cell_faces_with, GridFace, UvDefaults};
-use crate::grid::light::{lit_face_corner, GridLight};
+use crate::grid::light::{lit_face_corner, noise_tint, GridLight};
 use crate::grid::plane_faces::plane_faces_with;
 use crate::grid::uv_split;
 use crate::grid::world::GridWorld;
@@ -444,6 +444,7 @@ impl RoomBuild {
                 cx.occluded,
                 cx.world.shading,
             );
+            let colour = noise_tint(face, i, colour);
             quad.color[k] =
                 u32::from(colour[0]) | (u32::from(colour[1]) << 8) | (u32::from(colour[2]) << 16);
             quad.uv[k] = u16::from(packed_uv[k][0]) | (u16::from(packed_uv[k][1]) << 8);

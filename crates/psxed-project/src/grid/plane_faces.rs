@@ -82,6 +82,8 @@ pub fn plane_faces_with(
         legacy_uv: false,
         room_ref: None,
         frame: Frame::around([[0.0, 0.0]]),
+        jitter: None,
+        tint: None,
         out,
     };
     let (scale, y_offset) = (builder.scale, builder.y_offset);

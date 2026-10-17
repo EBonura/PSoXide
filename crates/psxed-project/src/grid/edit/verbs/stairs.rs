@@ -36,8 +36,8 @@ use crate::ResourceId;
 
 use super::super::region::Region;
 use super::rules::{
-    apply_floor_rule, ceiling_corners, clamp_under_ceiling, ensure_trim, floor_class,
-    floor_corners, move_ceiling_with_floor, set_floor_corners, stamp_wall_material,
+    apply_floor_rule, ceiling_corners, clamp_under_ceiling, ensure_strata, ensure_trim,
+    floor_class, floor_corners, move_ceiling_with_floor, set_floor_corners, stamp_wall_material,
 };
 use super::{Applied, Snapshot};
 
@@ -368,6 +368,7 @@ impl StairsDrag {
             stamp_wall_material(sector, params.wall_material, &rules);
             flight.applied.moved += usize::from(wanted != old || !existed);
         }
+        ensure_strata(room);
         ensure_trim(room);
         flight
     }

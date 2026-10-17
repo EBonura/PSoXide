@@ -168,6 +168,13 @@ pub enum GridIssueKind {
         /// Index in the room's plane list.
         index: usize,
     },
+    /// Rough jitter larger than a third of the character's radius: the rock
+    /// can clip the model and the camera, and an outward offset is an
+    /// invisible wall that size.
+    RoughTooLarge {
+        /// The largest amplitude, runtime units, rounded up.
+        amp_ru: i32,
+    },
 }
 
 impl GridIssueKind {
@@ -179,7 +186,8 @@ impl GridIssueKind {
             | Self::AuthoredDuplicatesDerived { .. }
             | Self::BadBandSet { .. }
             | Self::BandSetMissing { .. }
-            | Self::PlaneTooSteep { .. } => Severity::Warning,
+            | Self::PlaneTooSteep { .. }
+            | Self::RoughTooLarge { .. } => Severity::Warning,
             _ => Severity::Error,
         }
     }
@@ -268,6 +276,10 @@ impl GridIssue {
             GridIssueKind::PlaneTooSteep { index } => {
                 format!("plane {index} is walkable but too steep to stand on; it blocks instead")
             }
+            GridIssueKind::RoughTooLarge { amp_ru } => format!(
+                "rough jitter of up to {amp_ru} runtime units is more than a third of the character's radius ({}); the rock can clip the model and the camera",
+                super::rough::MAX_AMP_RU
+            ),
         };
         format!("{place}{text}")
     }
@@ -499,6 +511,20 @@ pub fn validate(world: &GridWorld) -> Vec<GridIssue> {
     }
     for (index, room) in world.rooms.iter().enumerate() {
         check_room(index, room, &mut issues);
+        if world.scale.is_valid() && room.rough.jitters() {
+            // One runtime unit is 16 editor units; an editor unit is
+            // `den / num` grid units.
+            let largest = i64::from(room.rough.amp.iter().copied().max().unwrap_or(0));
+            let ru = (largest * i64::from(world.scale.num) + 16 * i64::from(world.scale.den) - 1)
+                / (16 * i64::from(world.scale.den));
+            if ru > i64::from(super::rough::MAX_AMP_RU) {
+                issues.push(GridIssue {
+                    kind: GridIssueKind::RoughTooLarge { amp_ru: ru as i32 },
+                    room: Some(index),
+                    cell: None,
+                });
+            }
+        }
     }
     // Everything below needs sane storage and scale to compute.
     if !has_errors(&issues) {

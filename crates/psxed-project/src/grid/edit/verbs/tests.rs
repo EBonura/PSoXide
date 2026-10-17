@@ -252,6 +252,7 @@ fn rules_paint_a_floor_whose_class_changed_unless_it_was_painted_by_hand() {
         floor_by_class: [Some(flat_mat), Some(slope_mat), None],
         trim: None,
         wall: Some(wall_mat),
+        ..PaintRules::default()
     };
     world.rooms[0]
         .sector_mut(1, 0)
@@ -642,4 +643,54 @@ mod stairs {
         drag.apply(&mut world, 0);
         assert_eq!(world, original);
     }
+}
+
+#[test]
+fn height_rules_paint_floors_by_height_and_make_a_strata_band_set() {
+    use crate::grid::paint_rules::HeightRule;
+    let mut world = hall(6, 6);
+    let (scree, rock, snow, strata_a, strata_b) = (rid(21), rid(22), rid(23), rid(24), rid(25));
+    world.rooms[0].defaults.rules = PaintRules {
+        floor_by_height: HeightRule {
+            at: [4, 12, 0],
+            materials: [Some(scree), Some(rock), Some(snow), None],
+        },
+        wall_by_height: HeightRule {
+            at: [8, 0, 0],
+            materials: [Some(strata_a), Some(strata_b), None, None],
+        },
+        ..PaintRules::default()
+    };
+    let region = square([1, 1], [2, 2]);
+    // One click (256) is below the first threshold (4 * 64 = 256 is the
+    // threshold itself, so band 1): raise by half a click first.
+    raise_region(&mut world, &region, params(RaiseMode::Offset), 128).unwrap();
+    assert_eq!(floor(&world, [1, 1]).tri_a.material, Some(scree));
+    raise_region(&mut world, &region, params(RaiseMode::Level), 512).unwrap();
+    assert_eq!(floor(&world, [1, 1]).tri_a.material, Some(rock));
+    raise_region(&mut world, &region, params(RaiseMode::Level), 1024).unwrap();
+    assert_eq!(floor(&world, [2, 2]).tri_a.material, Some(snow));
+    // A floor painted by hand keeps its material.
+    world.rooms[0]
+        .sector_mut(1, 1)
+        .unwrap()
+        .floor
+        .as_mut()
+        .unwrap()
+        .paint_locked = true;
+    raise_region(&mut world, &region, params(RaiseMode::Level), 0).unwrap();
+    assert_eq!(floor(&world, [1, 1]).tri_a.material, Some(snow));
+    assert_eq!(floor(&world, [2, 2]).tri_a.material, Some(scree));
+    // The verbs made the room's strata: one set, an absolute line at 8 * 64.
+    let room = &world.rooms[0];
+    assert_eq!(room.band_sets.len(), 1);
+    assert_eq!(room.band_sets[0].name, "Strata");
+    assert_eq!(
+        room.band_sets[0].lines,
+        vec![crate::grid::bands::Anchor::Abs(512)]
+    );
+    assert_eq!(room.defaults.bands, Some(0));
+    // Running a verb again updates it in place.
+    raise_region(&mut world, &region, params(RaiseMode::Level), 256).unwrap();
+    assert_eq!(world.rooms[0].band_sets.len(), 1);
 }

@@ -31,6 +31,7 @@
 //! * [`slope`] and [`paint_rules`]: slope classes read as the motor reads them,
 //!   and the smart paint rules the level verbs apply.
 //! * [`sector`]: one sector and its six wall edges.
+//! * [`rough`]: the render-only jitter and noise tint of rough rock.
 //! * [`room`]: one room, its sector storage and its growth operations.
 //! * [`world`]: the document root and the [`SceneWorld`] discriminator.
 //! * [`limits`]: caps, validation and the budget readout.
@@ -63,6 +64,7 @@ pub mod palette;
 pub mod plane;
 pub mod plane_faces;
 pub mod room;
+pub mod rough;
 pub mod sector;
 pub mod slope;
 pub mod starter;
