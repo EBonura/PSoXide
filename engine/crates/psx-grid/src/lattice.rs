@@ -87,9 +87,13 @@ impl LatticeTables {
         let mut shift = MAX_SHIFT;
         let mut cells = [1usize; 2];
         for candidate in MIN_SHIFT..=MAX_SHIFT {
-            let edge = 1i64 << candidate;
-            let dim =
-                |axis: usize| (((hi[axis] - lo[axis]) as i64 + edge - 1) / edge).max(1) as usize;
+            let edge = 1u32 << candidate;
+            // `hi >= lo` on both axes, so the extent is a plain u32; round
+            // up without forming `extent + edge`, which could wrap.
+            let dim = |axis: usize| {
+                let extent = (hi[axis] - lo[axis]) as u32;
+                (extent / edge + u32::from(extent % edge != 0)).max(1) as usize
+            };
             let (cx, cz) = (dim(0), dim(1));
             if cx * cz <= budget && cx <= usize::from(u16::MAX) && cz <= usize::from(u16::MAX) {
                 shift = candidate;

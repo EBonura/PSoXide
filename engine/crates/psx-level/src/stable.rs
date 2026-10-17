@@ -22,16 +22,19 @@ impl StableId {
         Self::of_bytes(name.as_bytes())
     }
 
-    /// The id of an authored node, from its raw node id.
-    pub const fn of_node(raw_node_id: u64) -> Self {
+    /// The id of an authored node, from its raw node id given as its
+    /// `[low, high]` 32-bit words (the runtime has no 64-bit integers; the
+    /// host splits the id).
+    pub const fn of_node(raw_node_id: [u32; 2]) -> Self {
         Self::of_node_part(raw_node_id, 0)
     }
 
     /// The id of the `part`-th record one authored node cooks to (an
     /// interactable cooks a placed record and a paired logic record).
-    pub const fn of_node_part(raw_node_id: u64, part: u8) -> Self {
-        let id = raw_node_id.to_le_bytes();
-        Self::of_bytes(&[id[0], id[1], id[2], id[3], id[4], id[5], id[6], id[7], part])
+    pub const fn of_node_part(raw_node_id: [u32; 2], part: u8) -> Self {
+        let lo = raw_node_id[0].to_le_bytes();
+        let hi = raw_node_id[1].to_le_bytes();
+        Self::of_bytes(&[lo[0], lo[1], lo[2], lo[3], hi[0], hi[1], hi[2], hi[3], part])
     }
 
     const fn of_bytes(bytes: &[u8]) -> Self {
@@ -73,13 +76,22 @@ mod tests {
     fn ids_come_from_the_authored_identity_not_the_order() {
         assert_eq!(StableId::of_name("altar"), StableId::of_name("altar"));
         assert_ne!(StableId::of_name("altar"), StableId::of_name("altar2"));
-        assert_ne!(StableId::of_node(7), StableId::of_node(8));
-        assert_ne!(StableId::of_node_part(7, 0), StableId::of_node_part(7, 1));
-        assert_eq!(StableId::of_node(7), StableId::of_node_part(7, 0));
-        assert!(!StableId::of_node(0).is_none());
-        let ids = [StableId::of_node(3), StableId::of_node(9)];
-        assert_eq!(position_of(&ids, StableId::of_node(9)), Some(1));
+        assert_ne!(StableId::of_node([7, 0]), StableId::of_node([8, 0]));
+        assert_ne!(
+            StableId::of_node_part([7, 0], 0),
+            StableId::of_node_part([7, 0], 1)
+        );
+        assert_eq!(StableId::of_node([7, 0]), StableId::of_node_part([7, 0], 0));
+        assert!(!StableId::of_node([0, 0]).is_none());
+        let ids = [StableId::of_node([3, 0]), StableId::of_node([9, 0])];
+        assert_eq!(position_of(&ids, StableId::of_node([9, 0])), Some(1));
         assert_eq!(position_of(&ids, StableId::NONE), None);
+        // The two 32-bit words hash as the little-endian bytes of the old
+        // 64-bit id, so every id cooked before the split is unchanged.
+        assert_eq!(
+            StableId::of_node_part([0x0403_0201, 0x0807_0605], 9),
+            StableId::of_bytes(&[1, 2, 3, 4, 5, 6, 7, 8, 9])
+        );
         // The hash is FNV-1a: a pinned value so a change cannot slip by.
         assert_eq!(StableId::of_name("").raw(), 0x811c_9dc5);
         assert_eq!(StableId::of_name("a").raw(), 0xe40c_292c);
