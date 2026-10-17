@@ -12,7 +12,7 @@
 //! 16 from editor to engine units). The cook phase replaces the face cap with
 //! an exact vertex count; until then the conservative bound below stands.
 
-use super::plane::{PlaneCollision, MAX_PLANE_SIZE, MIN_PLANE_SIZE};
+use super::plane::{PlaneCollision, PlaneShape, MAX_PLANE_SIZE, MIN_PLANE_SIZE};
 use super::room::GridRoom;
 use super::sector::WallEdge;
 use super::units::GridScale;
@@ -280,10 +280,6 @@ impl GridBudget {
     }
 }
 
-/// The upward-normal limit of a walkable plane: the character motor's walk
-/// slope (a Q12 normal of 2867, 0.7), as a plane normal's `y` component.
-pub const MIN_WALKABLE_NORMAL_Y: f64 = 2867.0 / 4096.0;
-
 fn check_planes(room_index: usize, room: &GridRoom, issues: &mut Vec<GridIssue>) {
     let at_room = |kind| GridIssue {
         kind,
@@ -323,9 +319,7 @@ fn check_planes(room_index: usize, room: &GridRoom, issues: &mut Vec<GridIssue>)
         if !inside {
             issues.push(at_room(GridIssueKind::PlaneOutsideRoom { index }));
         }
-        if plane.collision == PlaneCollision::Walkable
-            && plane.normal_y().abs() < MIN_WALKABLE_NORMAL_Y
-        {
+        if plane.collision == PlaneCollision::Walkable && plane.shape() != PlaneShape::Platform {
             issues.push(at_room(GridIssueKind::PlaneTooSteep { index }));
         }
     }

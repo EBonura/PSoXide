@@ -21,17 +21,12 @@
 
 use psx_grid::{plane_kind, ColPlane};
 
-use super::collision::MIN_WALKABLE_NORMAL_Y_Q12;
 use super::units::RuntimeUnits;
-use crate::grid::plane::{GridPlane, PlaneCollision};
+use crate::grid::plane::{GridPlane, PlaneCollision, PlaneShape};
 use crate::grid::room::GridRoom;
 
 /// Thickness below a platform's surface, runtime units: one floor slab.
 pub const PLATFORM_THICKNESS: i16 = 16;
-/// Normal `y` at or above which a plane is a platform.
-const PLATFORM_NORMAL_Y: f64 = MIN_WALKABLE_NORMAL_Y_Q12 as f64 / 4096.0;
-/// Normal `y` at or below which a plane is a wall.
-const WALL_NORMAL_Y: f64 = 0.35;
 
 /// The collision of one room's planes.
 #[derive(Default)]
@@ -244,23 +239,22 @@ pub fn build(
         ..PlaneTables::default()
     };
     for (index, plane) in room.planes.iter().enumerate() {
-        if !plane.enabled || plane.collision == PlaneCollision::Decor {
+        let shape = plane.shape();
+        if shape == PlaneShape::None {
             continue;
         }
         let at = |what: &str| format!("room {room_index} plane {index}: {what}");
         let id = u8::try_from(index).map_err(|_| at("more than 255 planes"))?;
         let corners = local_corners(units, plane, room, origin);
-        let ny = plane.normal_y();
-        let walkable_flat = ny.abs() >= PLATFORM_NORMAL_Y;
-        if plane.collision == PlaneCollision::Walkable && !walkable_flat {
+        if plane.collision == PlaneCollision::Walkable && shape != PlaneShape::Platform {
             tables.warnings.push(format!(
                 "grid world: {}",
                 at("walkable but too steep to stand on, it blocks instead")
             ));
         }
-        let record = if walkable_flat {
+        let record = if shape == PlaneShape::Platform {
             platform(&corners, id).map_err(|e| at(&e))?
-        } else if ny.abs() <= WALL_NORMAL_Y {
+        } else if shape == PlaneShape::Wall {
             match wall(&corners, id).map_err(|e| at(&e))? {
                 Some(record) => record,
                 None => {

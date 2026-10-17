@@ -76,6 +76,25 @@ impl PlaneCollision {
     }
 }
 
+/// The smallest upward normal component a platform plane may have: the
+/// character motor's walk slope, a Q12 normal of 2867 (0.7).
+pub const PLATFORM_NORMAL_Y: f64 = 2867.0 / 4096.0;
+/// The largest normal `y` component, in magnitude, of a wall plane.
+pub const WALL_NORMAL_Y: f64 = 0.35;
+
+/// The collision shape a plane cooks to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlaneShape {
+    /// No collision record.
+    None,
+    /// A slab under a sloped surface; bodies stand on it.
+    Platform,
+    /// A vertical segment of zero thickness.
+    Wall,
+    /// A box around the plane, for the leans in between.
+    Blocker,
+}
+
 fn yes() -> bool {
     true
 }
@@ -221,6 +240,23 @@ impl GridPlane {
     /// unit normal. `1.0` faces up, `0.0` stands upright, `-1.0` faces down.
     pub fn normal_y(&self) -> f64 {
         self.normal()[1]
+    }
+
+    /// What this plane cooks to for collision: nothing for decor and hidden
+    /// planes, otherwise by how far the normal leans from upright. The
+    /// walkable class only changes whether a steep plane is reported.
+    pub fn shape(&self) -> PlaneShape {
+        if !self.enabled || self.collision == PlaneCollision::Decor {
+            return PlaneShape::None;
+        }
+        let lean = self.normal_y().abs();
+        if lean >= PLATFORM_NORMAL_Y {
+            PlaneShape::Platform
+        } else if lean <= WALL_NORMAL_Y {
+            PlaneShape::Wall
+        } else {
+            PlaneShape::Blocker
+        }
     }
 
     /// Clamp the size and the angles into the document's ranges and wrap the

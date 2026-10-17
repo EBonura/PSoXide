@@ -59,7 +59,7 @@ mod tests;
 
 pub use faces::{GridFace, GridFaceKind};
 pub use limits::{GridBudget, GridIssue, GridIssueKind, Severity};
-pub use plane::{GridPlane, PlaneCollision, PlaneUvMode};
+pub use plane::{GridPlane, PlaneCollision, PlaneShape, PlaneUvMode};
 pub use room::{GridFog, GridRoom};
 pub use sector::{GridSector, WallEdge};
 pub use surface::{GridSplit, GridSurface, GridTri, GridWall, WallFacing};
