@@ -22,7 +22,6 @@ use psx_grid::{CollisionView, LevelView, SECTOR_FLOOR_WALK_A, SECTOR_HAS_FLOOR};
 
 use super::legacy_slabs;
 use super::tests::{cook, load_reference, TestBinder};
-use super::*;
 use crate::brush_world::{compile_brush_world, BrushWorldCookMode, BrushWorldCookOptions};
 use crate::ProjectDocument;
 

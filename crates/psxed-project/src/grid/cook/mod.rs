@@ -184,20 +184,91 @@ pub fn cook_level(
             .warnings
             .push(format!("grid world: {}", issue.describe()));
     }
-    let none = |_: [f64; 3], _: [f64; 3]| false;
-    let occluded: &dyn Fn([f64; 3], [f64; 3]) -> bool = occluded.unwrap_or(&none);
+    // Collision first, for every room: the light bake shadows through the
+    // same line of sight the game uses, which needs the whole world's solid
+    // tables (stacked rooms shadow each other).
+    let mut origins: Vec<[i32; 3]> = Vec::new();
+    let mut cols: Vec<collision::Tables> = Vec::new();
+    for (index, room) in world.rooms.iter().enumerate() {
+        origins.push([
+            room.origin[0] * s as i32,
+            units.rt(room.y_offset),
+            room.origin[1] * s as i32,
+        ]);
+        cols.push(collision::build(&units, room, index)?);
+    }
+    let probe_core = LevelCore {
+        sector_units: s as u16,
+        rooms: world
+            .rooms
+            .iter()
+            .zip(&cols)
+            .zip(&origins)
+            .map(|((room, col), origin)| {
+                let (lo, hi) = col.range.unwrap_or((0, 0));
+                RoomRecord {
+                    origin: *origin,
+                    width: room.width as u8,
+                    depth: room.depth as u8,
+                    min_y: lo as i16,
+                    max_y: hi as i16,
+                    ..RoomRecord::default()
+                }
+            })
+            .collect(),
+        ..LevelCore::default()
+    };
+    let probe_chunks: Vec<Vec<u32>> = world
+        .rooms
+        .iter()
+        .zip(&cols)
+        .enumerate()
+        .map(|(index, (room, col))| {
+            let (lo, hi) = col.range.unwrap_or((0, 0));
+            let chunk = RoomChunk {
+                room_id: index as u16,
+                width: room.width as u8,
+                depth: room.depth as u8,
+                min_y: lo as i16,
+                max_y: hi as i16,
+                sectors: col.sectors.clone(),
+                exts: col.exts.clone(),
+                walls: col.walls.clone(),
+                splitbs: col.splitbs.clone(),
+                ..RoomChunk::default()
+            };
+            psx_grid::write::aligned_copy(&chunk.to_bytes())
+        })
+        .collect();
+    let probe_core_bytes = psx_grid::write::aligned_copy(&probe_core.to_bytes());
+    let probe_len = probe_core.to_bytes().len();
+    let probe_level = psx_grid::LevelView::parse(psx_grid::write::words_as_bytes(
+        &probe_core_bytes,
+        probe_len,
+    ))
+    .map_err(|e| format!("collision probe core: {e:?}"))?;
+    let probe_views: Vec<Option<psx_grid::CollisionView<'_>>> = probe_chunks
+        .iter()
+        .map(|words| {
+            psx_grid::CollisionView::parse(psx_grid::write::words_as_bytes(words, words.len() * 4))
+                .ok()
+        })
+        .collect();
+    let world_collision = psx_grid::collision::GridCollision::new(probe_level, &probe_views)
+        .ok_or_else(|| "collision world could not be built".to_string())?;
+    let own_los = |from: [f64; 3], to: [f64; 3]| {
+        let r = |p: [f64; 3]| p.map(|v| v.round() as i32);
+        !world_collision.line_of_sight(r(from), r(to))
+    };
+    let occluded: &dyn Fn([f64; 3], [f64; 3]) -> bool = occluded.unwrap_or(&own_los);
 
     let mut materials = render::MaterialSet::default();
     let mut tables: Vec<RoomChunk> = Vec::new();
     let mut records: Vec<RoomRecord> = Vec::new();
     let mut any_sky = false;
     for (index, room) in world.rooms.iter().enumerate() {
-        let origin = [
-            i32::from(0) + room.origin[0] * s as i32,
-            units.rt(room.y_offset),
-            room.origin[1] * s as i32,
-        ];
-        let col = collision::build(&units, room, index)?;
+        let origin = origins[index];
+        let col = std::mem::take(&mut cols[index]);
         let mut cx = render::Context {
             world,
             units,
@@ -208,11 +279,13 @@ pub fn cook_level(
         };
         let ambient = room.ambient;
         let mut ren = render::build(&mut cx, index, origin, ambient)?;
-        let lod = if input.lod_far_cells > 0 {
-            lod::build(room.width, room.depth, s as i32, &mut ren)
-        } else {
-            lod::Lod::default()
-        };
+        let lod = lod::build(
+            room.width,
+            room.depth,
+            s as i32,
+            input.lod_far_cells > 0,
+            &mut ren,
+        );
         let (mut lo, mut hi) = col.range.unwrap_or((0, 0));
         for v in &ren.vertices {
             lo = lo.min(i32::from(v.y));
@@ -248,11 +321,7 @@ pub fn cook_level(
             quads: ren.quads,
             cells: ren.cells,
             material_use: ren.material_use,
-            lod_blocks: if lod.quads.is_empty() {
-                Vec::new()
-            } else {
-                lod.blocks
-            },
+            lod_blocks: lod.blocks,
             lod_quads: lod.quads,
             ..RoomChunk::default()
         };

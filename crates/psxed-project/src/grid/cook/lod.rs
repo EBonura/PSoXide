@@ -80,7 +80,7 @@ fn candidate(tables: &Tables, q: usize, cell: [i32; 2], s: i32) -> Option<Candid
 }
 
 /// Build the LOD tables of a room and flag the covered cell quads in place.
-pub fn build(width: usize, depth: usize, s: i32, tables: &mut Tables) -> Lod {
+pub fn build(width: usize, depth: usize, s: i32, merge_far: bool, tables: &mut Tables) -> Lod {
     let block = 1usize << LOD_SHIFT;
     let (bw, bd) = (width.div_ceil(block), depth.div_ceil(block));
     let by_position: HashMap<[i16; 3], u16> = tables
@@ -106,7 +106,7 @@ pub fn build(width: usize, depth: usize, s: i32, tables: &mut Tables) -> Lod {
                     let rcell = tables.cells[cz * width + cx];
                     let range = usize::from(rcell.first)
                         ..usize::from(rcell.first) + usize::from(rcell.count);
-                    for q in range {
+                    for q in range.filter(|_| merge_far) {
                         let Some(c) = candidate(tables, q, [cx as i32, cz as i32], s) else {
                             continue;
                         };
@@ -192,19 +192,32 @@ pub fn build(width: usize, depth: usize, s: i32, tables: &mut Tables) -> Lod {
                 }
             }
             let count = lod.quads.len() - first;
+            // The block's vertical extent and sky flag come from its cells:
+            // the sky test of the renderer uses them.
             let (mut lo, mut hi) = (i16::MAX, i16::MIN);
-            for q in &lod.quads[first..] {
-                for &v in &q.v {
-                    lo = lo.min(tables.vertices[usize::from(v)].y);
-                    hi = hi.max(tables.vertices[usize::from(v)].y);
+            let mut flags = 0u8;
+            for dz in 0..block {
+                for dx in 0..block {
+                    let (cx, cz) = (bx * block + dx, bz * block + dz);
+                    if cx >= width || cz >= depth {
+                        continue;
+                    }
+                    let cell = tables.cells[cz * width + cx];
+                    if cell.count > 0 {
+                        lo = lo.min(cell.min_y);
+                        hi = hi.max(cell.max_y);
+                        if cell.flags & psx_grid::CELL_OPEN_SKY != 0 {
+                            flags |= psx_grid::BLOCK_OPEN_SKY;
+                        }
+                    }
                 }
             }
             lod.blocks.push(LodBlock {
                 first: first as u16,
                 count: count.min(255) as u8,
-                flags: 0,
-                min_y: if count == 0 { 0 } else { lo },
-                max_y: if count == 0 { 0 } else { hi },
+                flags,
+                min_y: if lo > hi { 0 } else { lo },
+                max_y: if lo > hi { 0 } else { hi },
             });
         }
     }
