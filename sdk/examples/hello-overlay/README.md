@@ -38,7 +38,7 @@ The recipe excludes `.overlay` from the resident executable and traps its typed
 callsite until admission. The `.guard` file contains identical cold image bytes
 after the resident payload, with the original typed call restored for static
 dependency analysis. This validates caller, module and resident service together;
-the guard file is never booted. The 136-byte module trampoline reservation is
+the guard file is never booted. The module trampoline reservation (`overlay_pack::TRAMPOLINE_WORDS`, 96 words and a 2-word header) is
 retained even when the scanner reports zero hazards. The runtime package and
 guard copies must remain identical; a future hazard patch must be repackaged and
 checksummed before use, rather than patching only one copy.
