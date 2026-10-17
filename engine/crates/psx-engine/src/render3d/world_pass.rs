@@ -228,6 +228,66 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         stats
     }
 
+    /// One already projected effect triangle from prepacked packet words.
+    ///
+    /// The cull test, packet words, depth and ordering command are those of
+    /// [`Self::submit_textured_triangle`] with splitting off, for effect pieces
+    /// whose corners were displaced after projection (so their winding can
+    /// have flipped) and whose material the caller prepared once. Taking the
+    /// options by reference keeps the per-piece cost to the packet itself.
+    #[inline(always)]
+    pub fn submit_projected_culled_packed_triangle(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        verts: [ProjectedVertex; 3],
+        uv_words: [u16; 3],
+        packet: TexturedPacketMaterial,
+        options: &WorldSurfaceOptions,
+    ) -> WorldRenderStats {
+        let mut stats = WorldRenderStats::default();
+        if projected_culled(verts, options.cull_mode) {
+            stats.culled_triangles = 1;
+            return stats;
+        }
+        if self.command_len >= self.commands.len() {
+            stats.command_overflow = true;
+            return stats;
+        }
+        let Some(tri) = triangles.push(TriTextured::with_packet_material_packed_uv_words(
+            [
+                (verts[0].sx, verts[0].sy),
+                (verts[1].sx, verts[1].sy),
+                (verts[2].sx, verts[2].sy),
+            ],
+            uv_words,
+            packet,
+        )) else {
+            stats.primitive_overflow = true;
+            return stats;
+        };
+        let depth = CameraDepth::new(
+            options
+                .depth_policy
+                .depth_values(verts[0].sz, verts[1].sz, verts[2].sz)
+                .saturating_add(options.depth_bias),
+        );
+        self.push_command(
+            options
+                .depth_band
+                .slot_depth::<OT_DEPTH>(options.depth_range, depth),
+            depth.raw(),
+            if packet.is_translucent() {
+                WorldRenderLayer::Transparent
+            } else {
+                options.render_layer
+            },
+            tri as *mut TriTextured as *mut u32,
+            TriTextured::WORDS,
+        );
+        stats.submitted_triangles = 1;
+        stats
+    }
+
     /// Submit a textured triangle whose vertices are already projected.
     ///
     /// This is the common packet path for pre-projected surfaces and

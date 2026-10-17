@@ -573,6 +573,25 @@ impl TexturedModelRenderFace {
         }
     }
 
+    /// Build a face from vertex indices, packed packet UV words and a
+    /// two-bit 4bpp CLUT-bank selector: [`Self::new_with_palette_bank`] for
+    /// callers that already hold the UVs as words.
+    pub const fn from_packed_uvs(
+        vertex_indices: [u16; 3],
+        uv_words: [u16; 3],
+        palette_bank: u8,
+    ) -> Self {
+        let first = (vertex_indices[0] & MODEL_RENDER_VERTEX_INDEX_MASK)
+            | (((palette_bank as u16) & 3) << MODEL_RENDER_PALETTE_BANK_SHIFT);
+        Self {
+            corner_words: [
+                (first as u32) | ((uv_words[0] as u32) << 16),
+                (vertex_indices[1] as u32) | ((uv_words[1] as u32) << 16),
+                (vertex_indices[2] as u32) | ((uv_words[2] as u32) << 16),
+            ],
+        }
+    }
+
     /// Projected-vertex indices for the triangle corners.
     pub const fn vertex_indices(self) -> [u16; 3] {
         [
