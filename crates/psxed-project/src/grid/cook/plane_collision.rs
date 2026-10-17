@@ -93,15 +93,29 @@ fn platform(c: &[P3; 4], id: u8) -> Result<ColPlane, String> {
         fit += f64::from(corner[1]) - (f64::from(sxq) * dx + f64::from(szq) * dz) / 4096.0;
     }
     let y0 = (fit / 4.0).round() as i32;
+    // The runtime tests every footprint edge for `>= 0`, which holds inside
+    // when the ring runs the way the cross product of its first two edges
+    // turns positive. Reverse it (keeping the first corner, where `y0` is
+    // measured) otherwise.
+    let ring = {
+        let xz = |i: usize| [i64::from(c[i][0]), i64::from(c[i][2])];
+        let (a, b, d) = (xz(0), xz(1), xz(2));
+        let cross = (b[0] - a[0]) * (d[1] - b[1]) - (b[1] - a[1]) * (d[0] - b[0]);
+        if cross >= 0 {
+            [0, 1, 2, 3]
+        } else {
+            [0, 3, 2, 1]
+        }
+    };
     Ok(ColPlane {
         kind: plane_kind::PLATFORM,
         flags: 0,
         id,
         reserved: 0,
-        xz: c.map(|p| {
+        xz: ring.map(|i| {
             [
-                p[0].clamp(-32768, 32767) as i16,
-                p[2].clamp(-32768, 32767) as i16,
+                c[i][0].clamp(-32768, 32767) as i16,
+                c[i][2].clamp(-32768, 32767) as i16,
             ]
         }),
         y0: to_i16(y0, "platform height")?,
