@@ -215,12 +215,14 @@ impl Entry {
     ///
     /// Names this crate writes are ASCII, but a listing reads whatever bytes
     /// the card holds, so a corrupt or foreign card can carry anything. Such
-    /// a name, or a `name_len` past the buffer, reads as `"?"`.
+    /// a name (anything that is not ASCII), or a `name_len` past the buffer, reads as `"?"`.
     pub fn name(&self) -> &str {
-        self.name
-            .get(..self.name_len as usize)
-            .and_then(|bytes| core::str::from_utf8(bytes).ok())
-            .unwrap_or("?")
+        match self.name.get(..self.name_len as usize) {
+            // SAFETY: ASCII is valid UTF-8. Checking byte-wise keeps `from_utf8` and its validator
+            // (about 1 KB) out of the image; a name that is not ASCII reads as "?".
+            Some(bytes) if bytes.is_ascii() => unsafe { core::str::from_utf8_unchecked(bytes) },
+            _ => "?",
+        }
     }
 }
 

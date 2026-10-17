@@ -337,7 +337,12 @@ impl Default for Keyboard {
 
 fn str_of(b: &[u8]) -> &str {
     // Labels are ASCII (the key tables + the function-key words).
-    core::str::from_utf8(b).unwrap_or("?")
+    if b.is_ascii() {
+        // SAFETY: ASCII is valid UTF-8; `from_utf8` would keep the whole validator resident.
+        unsafe { core::str::from_utf8_unchecked(b) }
+    } else {
+        "?"
+    }
 }
 
 #[cfg(test)]
