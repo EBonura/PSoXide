@@ -13,7 +13,8 @@ use psx_grid::height::triangle_normal_q12;
 use psx_grid::{
     edge, ColPlane, ColWall, Sector, SectorExt, SplitB, COLPLANE_PRIMARY, NO_EXT, SECTOR_CEIL_NESW,
     SECTOR_CEIL_SOLID, SECTOR_FLOOR_NESW, SECTOR_FLOOR_WALK_A, SECTOR_FLOOR_WALK_B,
-    SECTOR_HAS_CEIL, SECTOR_HAS_FLOOR, SECTOR_OPEN_SKY, SECTOR_SPLIT_LEVEL,
+    SECTOR_HAS_CEIL, SECTOR_HAS_FLOOR, SECTOR_OPEN_SKY, SECTOR_SPLIT_LEVEL, WALL_BACK_ONLY,
+    WALL_FRONT_ONLY,
 };
 
 use super::units::RuntimeUnits;
@@ -97,6 +98,16 @@ fn walkable_bit(heights: [i16; 4], nesw: bool, second: bool, s: u32, bit: u16) -
     } else {
         0
     }
+}
+
+/// Whether a derived riser is a cliff: taller than the character steps up
+/// at either end, and not made a ghost by its override.
+fn cliff(wall: &derive::DerivedWall, y: &[i16; 4]) -> bool {
+    let step = psx_engine::WalkLimits::DEFAULT.step_up;
+    wall.kind == derive::DerivedKind::Riser
+        && wall.solid != Some(false)
+        && !wall.hidden
+        && (i32::from(y[3]) - i32::from(y[0]) > step || i32::from(y[2]) - i32::from(y[1]) > step)
 }
 
 fn surface_flags(surface: &GridSurface) -> bool {
@@ -231,21 +242,35 @@ pub fn build_with(
                         });
                     }
                     // Derived walls that block: the closure around a
-                    // derived room, and any face the user made solid.
+                    // derived room, any face the user made solid, and the
+                    // one-sided cliff face of a riser taller than a body
+                    // steps up (so rays, the camera arm and shadow rays
+                    // cannot pass under it).
                     if room.wall_mode == WallMode::Derived {
                         let cell = room.world_cell(x, z);
                         for wall in derive::edge_walls(room, cell, wall_edge) {
-                            let Some(heights) = wall.heights.filter(|_| wall.blocks()) else {
+                            let Some(heights) = wall.edge_heights() else {
                                 continue;
                             };
                             let y = corners(units, room.y_offset, heights, &at("derived wall"))?;
+                            let flags = if wall.blocks() {
+                                0
+                            } else if cliff(&wall, &y) {
+                                if wall.back {
+                                    WALL_BACK_ONLY
+                                } else {
+                                    WALL_FRONT_ONLY
+                                }
+                            } else {
+                                continue;
+                            };
                             note(
                                 y.iter().copied().min().unwrap_or(0),
                                 y.iter().copied().max().unwrap_or(0),
                             );
                             walls.push(ColWall {
                                 edge: edge_id(wall_edge),
-                                flags: 0,
+                                flags,
                                 y,
                                 reserved: 0,
                             });

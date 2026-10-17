@@ -292,8 +292,10 @@ impl Builder<'_> {
                 GridFaceKind::Floor { triangle }
             }
         };
-        let merged =
-            surface.heights_b.is_none() && surface.tri(1) == surface.tri(0) && surface.is_planar();
+        let merged = surface.heights_b.is_none()
+            && surface.void == 0
+            && surface.tri(1) == surface.tri(0)
+            && surface.is_planar();
         if merged {
             let tri = surface.tri(0);
             let m = mapper(tri);
@@ -304,6 +306,9 @@ impl Builder<'_> {
             return;
         }
         for index in 0..2 {
+            if surface.is_void(index) {
+                continue;
+            }
             let tri = surface.tri(index);
             let heights = surface.heights_for(index);
             let m = mapper(tri);

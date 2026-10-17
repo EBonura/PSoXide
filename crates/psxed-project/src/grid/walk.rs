@@ -254,6 +254,29 @@ pub fn analyse(world: &GridWorld, spawns: &[Spawn], limits: &WalkLimits) -> Opti
     Some(analysis)
 }
 
+/// The height step, runtime units, between the two triangles of a split-level
+/// floor along its fold diagonal, when it is more than the body climbs.
+fn fold_step(
+    units: &RuntimeUnits,
+    limits: &WalkLimits,
+    y_offset: i32,
+    floor: &GridSurface,
+) -> Option<i32> {
+    floor.heights_b?;
+    if floor.void != 0 {
+        return None;
+    }
+    let [a, b] =
+        super::edit::walls::edge_corner_indices(super::derive_diag::fold_edge(floor.split));
+    let ru = |tri: usize| {
+        let h = floor.heights_for(tri);
+        [h[a], h[b]].map(|h| units.rt(y_offset.saturating_add(h)))
+    };
+    let (front, back) = (ru(0), ru(1));
+    let delta = (front[0] - back[0]).abs().max((front[1] - back[1]).abs());
+    (delta > limits.step_up).then_some(delta)
+}
+
 fn flag_edges(
     units: &RuntimeUnits,
     limits: &WalkLimits,
@@ -270,6 +293,15 @@ fn flag_edges(
         let Some(floor) = &sector.floor else { continue };
         if here.steep || here.ghost {
             continue;
+        }
+        if let Some(delta) = fold_step(units, limits, room.y_offset, floor) {
+            out.push(EdgeFlag {
+                room: ri,
+                cell,
+                edge: super::derive_diag::fold_edge(floor.split),
+                kind: EdgeKind::StepTooTall,
+                delta_ru: delta,
+            });
         }
         for edge in CARDINAL {
             let offset = match edge {

@@ -84,16 +84,22 @@ pub fn triangle_class(
     }
 }
 
-/// The class of a whole surface: the worse of its two triangles.
+/// The class of a whole surface: the worse of its two triangles. A void
+/// triangle is not there, so it does not count.
 pub fn surface_class(
     units: &RuntimeUnits,
     y_offset: i32,
     surface: &GridSurface,
     limits: &WalkLimits,
 ) -> SlopeClass {
-    let a = triangle_class(units, y_offset, surface, 0, limits);
-    let b = triangle_class(units, y_offset, surface, 1, limits);
-    a.max(b)
+    let class = |t: usize| {
+        if surface.is_void(t) {
+            SlopeClass::Flat
+        } else {
+            triangle_class(units, y_offset, surface, t, limits)
+        }
+    };
+    class(0).max(class(1))
 }
 
 #[cfg(test)]

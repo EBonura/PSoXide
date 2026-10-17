@@ -49,6 +49,7 @@ pub mod bands;
 pub mod base_project;
 pub mod cook;
 pub mod derive;
+mod derive_diag;
 pub mod edit;
 pub mod faces;
 mod faces_bands;
@@ -76,6 +77,8 @@ pub mod world;
 mod band_tests;
 #[cfg(test)]
 mod course_merge;
+#[cfg(test)]
+mod derive_diag_tests;
 #[cfg(test)]
 mod derive_tests;
 #[cfg(test)]

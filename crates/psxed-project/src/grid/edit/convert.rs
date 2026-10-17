@@ -84,15 +84,26 @@ fn centre_u(cell: [i32; 2], edge: WallEdge) -> f64 {
 /// The authored wall that is exactly `wall` seen from its host, if any.
 fn find_match(room: &GridRoom, wall: &DerivedWall) -> Option<Match> {
     let heights = wall.heights?;
-    let candidates = [(wall.host, wall.edge, WallFacing::Front, false), {
+    let candidates: Vec<([i32; 2], WallEdge, WallFacing, bool)> = if wall.edge.is_diagonal() {
+        // A diagonal has no far side. Only a face seen from the front of
+        // the edge reads the same texels as the authored wall on it; one
+        // seen from the back stays as it is (the face is hidden instead).
+        if wall.back {
+            return None;
+        }
+        vec![(wall.host, wall.edge, WallFacing::Front, false)]
+    } else {
         let (opposite, offset) = wall.edge.opposite()?;
-        (
-            [wall.host[0] + offset[0], wall.host[1] + offset[1]],
-            opposite,
-            WallFacing::Back,
-            true,
-        )
-    }];
+        vec![
+            (wall.host, wall.edge, WallFacing::Front, false),
+            (
+                [wall.host[0] + offset[0], wall.host[1] + offset[1]],
+                opposite,
+                WallFacing::Back,
+                true,
+            ),
+        ]
+    };
     for (cell, edge, facing, mirrored) in candidates {
         let [x, z] = room.local(cell)?;
         let Some(sector) = room.sector(x, z) else {

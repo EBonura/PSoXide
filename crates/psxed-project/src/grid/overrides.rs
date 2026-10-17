@@ -51,6 +51,17 @@ pub enum Axis {
     X,
     /// Along +Z (an east or west edge).
     Z,
+    /// Along the NW-SE diagonal of one sector, from its NW corner.
+    NwSe,
+    /// Along the NE-SW diagonal of one sector, from its NE corner.
+    NeSw,
+}
+
+impl Axis {
+    /// Whether this is one of the two diagonals.
+    pub const fn is_diagonal(self) -> bool {
+        matches!(self, Self::NwSe | Self::NeSw)
+    }
 }
 
 /// Clicks in one sector edge, the length of every segment while the
@@ -59,7 +70,9 @@ pub const SEGMENT_CLICKS: u8 = 4;
 
 /// Geometry address of one wall segment: where it starts in world clicks
 /// (256 grid units), the axis it runs along and its length in clicks. Both
-/// sectors that share the edge produce the same key.
+/// sectors that share the edge produce the same key. A diagonal segment is
+/// addressed by the sector's own origin (north-west corner) and the diagonal
+/// axis; its length is the sector's edge length in clicks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct EdgeKey {
     /// World click of the segment start, X.
@@ -94,6 +107,16 @@ pub struct EdgeOverride {
     /// [`super::bands::NO_BANDS`] for none; `None` follows the room default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub band_set: Option<u8>,
+    /// Signed offset, grid units, added to the top of a closure wall that
+    /// takes its height from the room's `open_wall` (a floor with no
+    /// ceiling) at the two ends of the segment, in the key's direction: the
+    /// crumbled top of an open-topped rock wall. `[0, 0]` is no change.
+    #[serde(default, skip_serializing_if = "is_zero_pair")]
+    pub top_delta: [i16; 2],
+}
+
+fn is_zero_pair(value: &[i16; 2]) -> bool {
+    *value == [0, 0]
 }
 
 fn is_false(value: &bool) -> bool {

@@ -26,6 +26,8 @@ impl Builder<'_> {
         let [cx, cz] = self.cell;
         let (scale, y_offset) = (self.scale, self.y_offset);
         let (ea, eb) = wall.edge.endpoints();
+        // A face seen from the back of a diagonal walks it the other way.
+        let (ea, eb) = if wall.back { (eb, ea) } else { (ea, eb) };
         let at = |e: [i32; 2]| {
             [
                 cx.saturating_mul(SECTOR_UNITS) + e[0] * SECTOR_UNITS,
@@ -48,7 +50,10 @@ impl Builder<'_> {
                 WallEdge::North => f64::from(px),
                 WallEdge::East => f64::from(pz),
                 WallEdge::South => -f64::from(px),
-                _ => -f64::from(pz),
+                WallEdge::West => -f64::from(pz),
+                // `u` is the projected position, the diagonal is root two
+                // longer; a diagonal face measures its own length from 0.
+                WallEdge::Nwse | WallEdge::Nesw => f64::from(u) * core::f64::consts::SQRT_2,
             }
         };
         let t_of = |gy: i32| -f64::from(y_offset + gy);
@@ -67,7 +72,8 @@ impl Builder<'_> {
             }
         };
         let front = wall.edge.front_direction();
-        let toward = [f64::from(front[0]), 0.0, f64::from(front[1])];
+        let sign = if wall.back { -1.0 } else { 1.0 };
+        let toward = [sign * f64::from(front[0]), 0.0, sign * f64::from(front[1])];
         // The frame of a derived wall is its whole run, so a fit mapping
         // repeats along the run and not per sector.
         let run = derive::run_extent(room, wall);

@@ -72,6 +72,15 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+fn is_zero_u8(value: &u8) -> bool {
+    *value == 0
+}
+
+/// [`GridSurface::void`] bit of triangle A (the first triangle).
+pub const VOID_A: u8 = 1;
+/// [`GridSurface::void`] bit of triangle B (the second triangle).
+pub const VOID_B: u8 = 2;
+
 /// A floor or ceiling: four corner heights, a diagonal split and a material
 /// per triangle.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,6 +116,13 @@ pub struct GridSurface {
     /// rules of the level verbs from overwriting it.
     #[serde(default, skip_serializing_if = "is_false")]
     pub paint_locked: bool,
+    /// Triangles that are not there: bit 0 ([`VOID_A`]) the first triangle,
+    /// bit 1 ([`VOID_B`]) the second. A void triangle draws no face and the
+    /// derived walls treat it as empty space, so the sector closes itself
+    /// along the diagonal (the half-cell void of a chamfer). Collision keeps
+    /// the floor under it: the closure wall is what stops a body.
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub void: u8,
 }
 
 impl GridSurface {
@@ -121,6 +137,7 @@ impl GridSurface {
             walkable: true,
             auto_split: false,
             paint_locked: false,
+            void: 0,
         }
     }
 
@@ -158,6 +175,21 @@ impl GridSurface {
             self.heights
         } else {
             self.heights_b.unwrap_or(self.heights)
+        }
+    }
+
+    /// Whether triangle `index` (`0` or `1`) is void.
+    pub fn is_void(&self, index: usize) -> bool {
+        self.void & (VOID_A << index.min(1)) != 0
+    }
+
+    /// Set or clear the void bit of triangle `index`.
+    pub fn set_void(&mut self, index: usize, void: bool) {
+        let bit = VOID_A << index.min(1);
+        if void {
+            self.void |= bit;
+        } else {
+            self.void &= !bit;
         }
     }
 

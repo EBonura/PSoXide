@@ -17,6 +17,13 @@
 //!   when it has no ceiling.
 //! * Anything else (a floorless neighbour, equal profiles) makes no wall.
 //!
+//! The same three rules run along the **diagonal** of one sector (see
+//! [`super::derive_diag`]): the two triangles of a split-level surface are the
+//! two sides (R1d riser, R2d drop), and a void triangle ([`GridSurface::void`])
+//! is a side with no space, so its neighbour triangle closes itself along the
+//! diagonal (R3d). A void triangle is also empty space across a cardinal
+//! edge, so the sector next to it closes with an ordinary R3.
+//!
 //! Profiles that cross inside the edge (a bow tie) are cut at the crossing
 //! into two triangles with opposite owners. Equal profiles make nothing,
 //! which is the point: a continuous floor never grows a wall.
@@ -65,8 +72,14 @@ pub struct DerivedWall {
     pub kind: DerivedKind,
     /// World sector it is seen from and listed under.
     pub host: [i32; 2],
-    /// The host's edge it lies on (always a cardinal edge).
+    /// The host's edge it lies on: a cardinal edge, or the sector's own
+    /// diagonal (see [`Self::back`]).
     pub edge: WallEdge,
+    /// Only for a diagonal: the face is seen from the BACK of the edge (the
+    /// side its [`WallEdge::front_direction`] points away from), so its
+    /// walking direction and `ring` run from the edge's `b` end to its `a`
+    /// end. Always false for a cardinal edge.
+    pub back: bool,
     /// World sector the step belongs to.
     pub owner: [i32; 2],
     /// Address of the physical segment, shared by both sectors.
@@ -102,18 +115,38 @@ impl DerivedWall {
             }
     }
 
+    /// [`Self::heights`] in the walking direction of the edge itself, which
+    /// is the order a collision wall record holds them in (a diagonal face
+    /// seen from the back walks the other way).
+    pub fn edge_heights(&self) -> Option<[i32; 4]> {
+        let [ba, bb, tb, ta] = self.heights?;
+        Some(if self.back {
+            [bb, ba, ta, tb]
+        } else {
+            [ba, bb, tb, ta]
+        })
+    }
+
     /// The face as the `GridWall` of the same look on `edge`'s stack of
     /// `cell`, for the wall tool's gap logic. `None` for triangles.
     pub fn as_wall_of(&self, cell: [i32; 2], edge: WallEdge) -> Option<GridWall> {
         let [ba, bb, tb, ta] = self.heights?;
-        let same = cell == self.host && edge == self.edge;
-        let heights = if same {
-            [ba, bb, tb, ta]
-        } else {
+        // `heights` run along the host's walking direction; a wall of
+        // `edge` runs a -> b of the edge itself.
+        let same = cell == self.host && edge == self.edge && !self.back;
+        let reversed = if edge.is_diagonal() { self.back } else { !same };
+        let heights = if reversed {
             [bb, ba, ta, tb]
+        } else {
+            [ba, bb, tb, ta]
         };
         Some(GridWall {
             heights,
+            facing: if self.back {
+                super::surface::WallFacing::Back
+            } else {
+                super::surface::WallFacing::Front
+            },
             ..GridWall::span(0, 0, self.material)
         })
     }
@@ -134,11 +167,15 @@ const fn physical(cell: [i32; 2], edge: WallEdge) -> ([i32; 2], Axis) {
         WallEdge::North => (cell, Axis::X),
         WallEdge::West => (cell, Axis::Z),
         WallEdge::South => ([cell[0], cell[1] + 1], Axis::X),
-        _ => ([cell[0] + 1, cell[1]], Axis::Z),
+        WallEdge::East => ([cell[0] + 1, cell[1]], Axis::Z),
+        // A diagonal belongs to its own sector alone.
+        WallEdge::Nwse => (cell, Axis::NwSe),
+        WallEdge::Nesw => (cell, Axis::NeSw),
     }
 }
 
-/// Key of the segment on `edge` of world sector `cell`.
+/// Key of the segment on `edge` of world sector `cell`. A diagonal is keyed by
+/// its own sector.
 pub fn edge_key(cell: [i32; 2], edge: WallEdge) -> EdgeKey {
     let (hi, axis) = physical(cell, edge);
     EdgeKey {
@@ -186,20 +223,23 @@ fn side_of(sector: Option<&GridSector>, edge: WallEdge) -> Side {
     let Some(s) = sector else {
         return Side::default();
     };
+    // A void triangle is no space: the edge it holds offers nothing.
     let profile = |surface: &GridSurface| {
-        let ([a, b], _) = edge_profile(surface, edge);
-        Profile {
+        let ([a, b], tri) = edge_profile(surface, edge);
+        (!surface.is_void(tri)).then_some(Profile {
             h: if forward(edge) { [a, b] } else { [b, a] },
-        }
+        })
     };
+    let floor = s.floor.as_ref().and_then(profile);
+    let ceil = s.ceiling.as_ref().and_then(profile);
     Side {
-        space: s.floor.is_some() || s.ceiling.is_some(),
-        floor: s.floor.as_ref().map(profile),
-        ceil: s.ceiling.as_ref().map(profile),
+        space: floor.is_some() || ceil.is_some(),
+        floor,
+        ceil,
     }
 }
 
-fn sector_at(room: &GridRoom, cell: [i32; 2]) -> Option<&GridSector> {
+pub(super) fn sector_at(room: &GridRoom, cell: [i32; 2]) -> Option<&GridSector> {
     let [x, z] = room.local(cell)?;
     room.sector(x, z)
 }
@@ -216,7 +256,7 @@ fn round_div(num: i64, den: i64) -> i64 {
 /// The polygon(s) where `upper` is above `lower` along an edge of length
 /// [`SECTOR_UNITS`], in canonical `[u, y]`. `anchor` is the profile the
 /// crossing height is read from, so both owners of a bow tie agree on it.
-fn between(lower: [i32; 2], upper: [i32; 2], anchor: [i32; 2]) -> Option<Vec<[i32; 2]>> {
+pub(super) fn between(lower: [i32; 2], upper: [i32; 2], anchor: [i32; 2]) -> Option<Vec<[i32; 2]>> {
     let len = SECTOR_UNITS;
     let (d0, d1) = (upper[0] - lower[0], upper[1] - lower[1]);
     if d0 >= 0 && d1 >= 0 {
@@ -284,8 +324,54 @@ impl Edge<'_> {
     /// Build the face for `ring` (canonical) hosted by `host`, owned by
     /// `owner`.
     fn wall(&self, kind: DerivedKind, host: Pick, owner: Pick, ring: &[[i32; 2]]) -> DerivedWall {
+        let owner_sector = sector_at(self.room, self.cell(owner));
+        let surface = {
+            let sector = owner_sector;
+            let surface = sector.and_then(|s| {
+                if kind == DerivedKind::Drop {
+                    s.ceiling.as_ref()
+                } else {
+                    s.floor.as_ref()
+                }
+            });
+            surface.and_then(|surface| {
+                let ([_, _], tri) = edge_profile(surface, self.edge(owner));
+                surface.tri(tri).material
+            })
+        };
         let host_edge = self.edge(host);
-        let flip = !forward(host_edge);
+        Face {
+            room: self.room,
+            kind,
+            host: self.cell(host),
+            edge: host_edge,
+            back: false,
+            owner: self.cell(owner),
+            key: self.key,
+            surface,
+        }
+        .build(ring, !forward(host_edge))
+    }
+}
+
+/// What every derived face needs to know besides its outline.
+pub(super) struct Face<'a> {
+    pub room: &'a GridRoom,
+    pub kind: DerivedKind,
+    pub host: [i32; 2],
+    pub edge: WallEdge,
+    pub back: bool,
+    pub owner: [i32; 2],
+    pub key: EdgeKey,
+    /// Material of the owner's surface triangle, the last link of the
+    /// material chain.
+    pub surface: Option<ResourceId>,
+}
+
+impl Face<'_> {
+    /// The face for `ring` (canonical `[u, y]`, `u` along the key's
+    /// direction); `flip` reverses `u` into the host's walking direction.
+    pub(super) fn build(&self, ring: &[[i32; 2]], flip: bool) -> DerivedWall {
         let len = SECTOR_UNITS;
         let ring: Vec<[i32; 2]> = ring
             .iter()
@@ -296,31 +382,21 @@ impl Edge<'_> {
         let at_end = |u: i32| ring.iter().filter(|p| p[0] == u).count();
         let heights =
             (ring.len() == 4 && at_end(0) == 2 && at_end(len) == 2).then(|| quad_heights(&ring));
-        let key = self.key;
-        let ovr = self.room.edge_overrides.get(&key);
-        let owner_sector = sector_at(self.room, self.cell(owner));
-        let host_sector = sector_at(self.room, self.cell(host));
-        let own_surface = |ceiling: bool| {
-            let sector = owner_sector?;
-            let surface = if ceiling {
-                sector.ceiling.as_ref()
-            } else {
-                sector.floor.as_ref()
-            }?;
-            let ([_, _], tri) = edge_profile(surface, self.edge(owner));
-            surface.tri(tri).material
-        };
+        let ovr = self.room.edge_overrides.get(&self.key);
+        let owner_sector = sector_at(self.room, self.owner);
+        let host_sector = sector_at(self.room, self.host);
         let chained = owner_sector
             .and_then(|s| s.wall_material)
             .or_else(|| host_sector.and_then(|s| s.wall_material))
             .or(self.room.defaults.wall_material)
-            .or_else(|| own_surface(kind == DerivedKind::Drop));
+            .or(self.surface);
         DerivedWall {
-            kind,
-            host: self.cell(host),
-            edge: host_edge,
-            owner: self.cell(owner),
-            key,
+            kind: self.kind,
+            host: self.host,
+            edge: self.edge,
+            back: self.back,
+            owner: self.owner,
+            key: self.key,
             ring,
             heights,
             material: ovr.and_then(|o| o.material).or(chained),
@@ -334,7 +410,7 @@ impl Edge<'_> {
 
 /// `[bottom a, bottom b, top b, top a]` of a four-corner outline whose ends
 /// are vertical, in the direction of increasing `u`.
-fn quad_heights(ring: &[[i32; 2]]) -> [i32; 4] {
+pub(super) fn quad_heights(ring: &[[i32; 2]]) -> [i32; 4] {
     let at = |u: i32, top: bool| {
         let ys = ring.iter().filter(|p| p[0] == u).map(|p| p[1]);
         if top {
@@ -355,7 +431,9 @@ fn quad_heights(ring: &[[i32; 2]]) -> [i32; 4] {
 /// sector hosts it. Empty for the diagonals.
 pub fn physical_edge_walls(room: &GridRoom, cell: [i32; 2], edge: WallEdge) -> Vec<DerivedWall> {
     if edge.is_diagonal() {
-        return Vec::new();
+        let mut walls = super::derive_diag::diagonal_walls(room, cell);
+        walls.retain(|w| w.edge == edge);
+        return walls;
     }
     let (hi_cell, axis) = physical(cell, edge);
     let (lo_cell, lo_edge, hi_edge) = match axis {
@@ -364,7 +442,7 @@ pub fn physical_edge_walls(room: &GridRoom, cell: [i32; 2], edge: WallEdge) -> V
             WallEdge::South,
             WallEdge::North,
         ),
-        Axis::Z => ([hi_cell[0] - 1, hi_cell[1]], WallEdge::East, WallEdge::West),
+        _ => ([hi_cell[0] - 1, hi_cell[1]], WallEdge::East, WallEdge::West),
     };
     let e = Edge {
         room,
@@ -403,10 +481,7 @@ pub fn physical_edge_walls(room: &GridRoom, cell: [i32; 2], edge: WallEdge) -> V
         let Some(floor) = near.floor else { continue };
         let top = match near.ceil {
             Some(ceil) => ceil.h,
-            None if room.defaults.open_wall > 0 => [
-                floor.h[0] + room.defaults.open_wall,
-                floor.h[1] + room.defaults.open_wall,
-            ],
+            None if room.defaults.open_wall > 0 => open_top(room, e.key, floor.h),
             None => continue,
         };
         if let Some(ring) = between(floor.h, top, floor.h) {
@@ -414,6 +489,18 @@ pub fn physical_edge_walls(room: &GridRoom, cell: [i32; 2], edge: WallEdge) -> V
         }
     }
     out
+}
+
+/// The top of a closure wall with no ceiling: `open_wall` over the floor
+/// profile (in the key's direction), plus the override's crumbled-top
+/// offsets.
+pub(super) fn open_top(room: &GridRoom, key: EdgeKey, floor: [i32; 2]) -> [i32; 2] {
+    let delta = room
+        .edge_overrides
+        .get(&key)
+        .map_or([0, 0], |o| o.top_delta.map(i32::from));
+    let wall = room.defaults.open_wall;
+    [floor[0] + wall + delta[0], floor[1] + wall + delta[1]]
 }
 
 /// Derived walls hosted by `edge` of `cell`, hidden ones included.
@@ -425,10 +512,12 @@ pub fn edge_walls(room: &GridRoom, cell: [i32; 2], edge: WallEdge) -> Vec<Derive
 
 /// Derived walls hosted by `cell`, in edge order, hidden ones included.
 pub fn cell_walls(room: &GridRoom, cell: [i32; 2]) -> Vec<DerivedWall> {
-    CARDINAL
+    let mut walls: Vec<DerivedWall> = CARDINAL
         .into_iter()
         .flat_map(|edge| edge_walls(room, cell, edge))
-        .collect()
+        .collect();
+    walls.extend(super::derive_diag::diagonal_walls(room, cell));
+    walls
 }
 
 /// Lowest and highest height of the visible derived walls hosted by `cell`
@@ -464,6 +553,10 @@ pub struct RunExtent {
 /// chain of collinear faces on the same side with the same kind, material
 /// and texture override, which a fit mapping treats as one face.
 pub fn run_members(room: &GridRoom, wall: &DerivedWall) -> Vec<DerivedWall> {
+    // A diagonal face is one segment: nothing is collinear with it.
+    if wall.edge.is_diagonal() {
+        return vec![wall.clone()];
+    }
     let along = match wall.edge {
         WallEdge::North | WallEdge::South => [1, 0],
         _ => [0, 1],
@@ -490,6 +583,14 @@ pub fn run_members(room: &GridRoom, wall: &DerivedWall) -> Vec<DerivedWall> {
 /// The run `wall` belongs to, as the frame its texture is measured against
 /// (see [`run_members`]).
 pub fn run_extent(room: &GridRoom, wall: &DerivedWall) -> RunExtent {
+    if wall.edge.is_diagonal() {
+        let ys = wall.ring.iter().map(|p| p[1]);
+        return RunExtent {
+            u: [0.0, f64::from(SECTOR_UNITS) * core::f64::consts::SQRT_2],
+            y: [ys.clone().min().unwrap_or(0), ys.max().unwrap_or(0)],
+            cells: 1,
+        };
+    }
     let along = match wall.edge {
         WallEdge::North | WallEdge::South => [1, 0],
         _ => [0, 1],
@@ -545,9 +646,10 @@ pub fn duplicates_derived(
         .iter()
         .filter(|d| !d.hidden)
         .any(|d| {
+            let from_front = d.host == cell && d.edge == edge && !d.back;
             let seen_by_wall = match wall.facing {
-                WallFacing::Front => d.host == cell && d.edge == edge,
-                WallFacing::Back => d.host != cell || d.edge != edge,
+                WallFacing::Front => from_front,
+                WallFacing::Back => !from_front,
                 WallFacing::Both => true,
             };
             let Some(dh) = d.as_wall_of(cell, edge).map(|w| w.heights) else {
