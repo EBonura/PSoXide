@@ -116,19 +116,23 @@ impl ImportedMesh {
                     let mut ts = Vec::new();
                     for word in words {
                         let mut parts = word.split('/');
-                        let resolve = |s: Option<&str>, len: usize| -> Result<Option<usize>, String> {
+                        let resolve = |s: Option<&str>,
+                                       len: usize|
+                         -> Result<Option<usize>, String> {
                             match s.filter(|s| !s.is_empty()) {
                                 None => Ok(None),
                                 Some(s) => {
-                                    let i: i64 = s
-                                        .parse()
-                                        .map_err(|_| format!("line {}: bad index {s:?}", number + 1))?;
+                                    let i: i64 = s.parse().map_err(|_| {
+                                        format!("line {}: bad index {s:?}", number + 1)
+                                    })?;
                                     let i = if i < 0 { len as i64 + i } else { i - 1 };
                                     usize::try_from(i)
                                         .ok()
                                         .filter(|i| *i < len)
                                         .map(Some)
-                                        .ok_or_else(|| format!("line {}: index {s} out of range", number + 1))
+                                        .ok_or_else(|| {
+                                            format!("line {}: index {s} out of range", number + 1)
+                                        })
                                 }
                             }
                         };
@@ -153,9 +157,14 @@ impl ImportedMesh {
             .map(|p| [p[0] * scale, p[1] * scale, p[2] * scale])
             .collect();
         // Re-centre: x and z on the middle of the bounds, y on the floor.
-        let used: Vec<usize> = polygons.iter().flat_map(|(vs, ..)| vs.iter().copied()).collect();
-        let lo: [f64; 3] = core::array::from_fn(|i| used.iter().map(|&k| scaled[k][i]).fold(f64::MAX, f64::min));
-        let hi: [f64; 3] = core::array::from_fn(|i| used.iter().map(|&k| scaled[k][i]).fold(f64::MIN, f64::max));
+        let used: Vec<usize> = polygons
+            .iter()
+            .flat_map(|(vs, ..)| vs.iter().copied())
+            .collect();
+        let lo: [f64; 3] =
+            core::array::from_fn(|i| used.iter().map(|&k| scaled[k][i]).fold(f64::MAX, f64::min));
+        let hi: [f64; 3] =
+            core::array::from_fn(|i| used.iter().map(|&k| scaled[k][i]).fold(f64::MIN, f64::max));
         let shift = [(lo[0] + hi[0]) / 2.0, lo[1], (lo[2] + hi[2]) / 2.0];
         let mut points: Vec<[i16; 3]> = Vec::new();
         let mut remap = vec![u16::MAX; scaled.len()];
@@ -168,12 +177,17 @@ impl ImportedMesh {
                 let mut out = [0i16; 3];
                 for i in 0..3 {
                     let v = (p[i] - shift[i]).round();
-                    out[i] = i16::try_from(v as i64)
-                        .map_err(|_| format!("the mesh is larger than {} grid units at this scale", i16::MAX))?;
+                    out[i] = i16::try_from(v as i64).map_err(|_| {
+                        format!(
+                            "the mesh is larger than {} grid units at this scale",
+                            i16::MAX
+                        )
+                    })?;
                 }
                 out
             };
-            let id = u16::try_from(points.len()).map_err(|_| "more than 65535 points".to_string())?;
+            let id =
+                u16::try_from(points.len()).map_err(|_| "more than 65535 points".to_string())?;
             points.push(q);
             remap[k] = id;
             Ok(id)
@@ -217,8 +231,20 @@ impl ImportedMesh {
 
     /// Bounds of the points, `(min, max)`.
     pub fn bounds(&self) -> ([i32; 3], [i32; 3]) {
-        let lo = core::array::from_fn(|i| self.points.iter().map(|p| i32::from(p[i])).min().unwrap_or(0));
-        let hi = core::array::from_fn(|i| self.points.iter().map(|p| i32::from(p[i])).max().unwrap_or(0));
+        let lo = core::array::from_fn(|i| {
+            self.points
+                .iter()
+                .map(|p| i32::from(p[i]))
+                .min()
+                .unwrap_or(0)
+        });
+        let hi = core::array::from_fn(|i| {
+            self.points
+                .iter()
+                .map(|p| i32::from(p[i]))
+                .max()
+                .unwrap_or(0)
+        });
         (lo, hi)
     }
 
@@ -247,8 +273,16 @@ impl ImportedMesh {
         let (min, max) = self.bounds();
         let proxies = match self.proxy {
             ImportProxy::None => Vec::new(),
-            ImportProxy::Box => vec![Proxy::Box { min, max, top: false }],
-            ImportProxy::BoxTop => vec![Proxy::Box { min, max, top: true }],
+            ImportProxy::Box => vec![Proxy::Box {
+                min,
+                max,
+                top: false,
+            }],
+            ImportProxy::BoxTop => vec![Proxy::Box {
+                min,
+                max,
+                top: true,
+            }],
         };
         let slots = if self.slot_names.is_empty() {
             vec!["surface".to_string()]
@@ -319,15 +353,21 @@ f 2 3 7 6
 
     #[test]
     fn bad_files_say_where() {
-        assert!(ImportedMesh::from_obj("v 1 2\n", 1.0, "", ImportProxy::None)
-            .unwrap_err()
-            .contains("line 1"));
-        assert!(ImportedMesh::from_obj("v 0 0 0\nf 1 2 3\n", 1.0, "", ImportProxy::None)
-            .unwrap_err()
-            .contains("out of range"));
-        assert!(ImportedMesh::from_obj("v 0 0 0\n", 1.0, "", ImportProxy::None)
-            .unwrap_err()
-            .contains("no faces"));
+        assert!(
+            ImportedMesh::from_obj("v 1 2\n", 1.0, "", ImportProxy::None)
+                .unwrap_err()
+                .contains("line 1")
+        );
+        assert!(
+            ImportedMesh::from_obj("v 0 0 0\nf 1 2 3\n", 1.0, "", ImportProxy::None)
+                .unwrap_err()
+                .contains("out of range")
+        );
+        assert!(
+            ImportedMesh::from_obj("v 0 0 0\n", 1.0, "", ImportProxy::None)
+                .unwrap_err()
+                .contains("no faces")
+        );
         assert!(ImportedMesh::from_obj("v 0 0 0\n", 0.0, "", ImportProxy::None).is_err());
     }
 

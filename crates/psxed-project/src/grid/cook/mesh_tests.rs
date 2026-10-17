@@ -7,9 +7,7 @@ use psx_engine::{
 };
 use psx_grid::collision::{GridCollision, GridTraceProvider};
 use psx_grid::write::aligned_copy;
-use psx_grid::{
-    plane_kind, CollisionView, LevelView, RoomView, CHUNK_HAS_PLANES, QUAD_PLANE,
-};
+use psx_grid::{plane_kind, CollisionView, LevelView, RoomView, CHUNK_HAS_PLANES, QUAD_PLANE};
 
 use super::tests::cook;
 use crate::grid::mesh::{
@@ -57,7 +55,9 @@ fn arch_spec() -> ArchSpec {
 /// along x at yaw 0, so the walkers go along z through it).
 fn arch_hall() -> GridWorld {
     let mut world = hall();
-    world.mesh_assets.push(MeshAsset::new("arch", MeshKind::Arch(arch_spec())));
+    world
+        .mesh_assets
+        .push(MeshAsset::new("arch", MeshKind::Arch(arch_spec())));
     let mut mesh = GridMesh::new(1, 0, [6 * SECTOR_UNITS, 0, 4 * SECTOR_UNITS]);
     mesh.set_material(0, Some(rid(8)));
     mesh.set_material(1, Some(rid(9)));
@@ -84,7 +84,13 @@ fn native(world: &GridWorld) -> (Native, crate::grid::cook::CookedLevel) {
     (Native { collision }, cooked)
 }
 
-fn walk(world: &Native, from: RoomPoint, move_x: i32, move_z: i32, ticks: u32) -> CharacterMotorState {
+fn walk(
+    world: &Native,
+    from: RoomPoint,
+    move_x: i32,
+    move_z: i32,
+    ticks: u32,
+) -> CharacterMotorState {
     let config =
         CharacterMotorConfig::character_with_body(12, 48, 8 << 8, 8 << 8, Angle::from_q12(1024));
     let mut motor = CharacterMotorState::new(from, Angle::ZERO);
@@ -121,7 +127,11 @@ fn a_mesh_cooks_to_one_plane_run_and_validates() {
     assert!(run.len() >= built.faces.len());
     // The run's box sits over the arch's sectors: 4 across (the opening and
     // both piers), one deep... a sector either side of the centre.
-    assert!(refs[0].x0 <= 5 && refs[0].x1 >= 6, "{:?}", (refs[0].x0, refs[0].x1));
+    assert!(
+        refs[0].x0 <= 5 && refs[0].x1 >= 6,
+        "{:?}",
+        (refs[0].x0, refs[0].x1)
+    );
     assert!(refs[0].z0 >= 3 && refs[0].z1 <= 4);
     // Two materials were used by the instance, so the room draws three
     // (the floor's and the arch's two).
@@ -169,7 +179,12 @@ fn a_body_walks_through_the_opening_and_stops_at_a_pier() {
     let blocked = walk(&native, RoomPoint::new(700, 0, 320), -4096, 0, 200).position();
     assert!(blocked.x > 580 && blocked.x < 580 + 12 + 14, "{blocked:?}");
     // The only complaint: the haunch pieces block as boxes (one line).
-    assert_eq!(cooked.report.warnings.len(), 1, "{:?}", cooked.report.warnings);
+    assert_eq!(
+        cooked.report.warnings.len(),
+        1,
+        "{:?}",
+        cooked.report.warnings
+    );
     assert!(cooked.report.warnings[0].contains("over-blocks"));
 }
 
@@ -204,7 +219,10 @@ fn a_turned_arch_collides_where_it_is_drawn() {
 #[test]
 fn a_column_blocks_and_has_a_standable_capital() {
     let mut world = hall();
-    world.mesh_assets.push(MeshAsset::new("column", MeshKind::Column(ColumnSpec::default())));
+    world.mesh_assets.push(MeshAsset::new(
+        "column",
+        MeshKind::Column(ColumnSpec::default()),
+    ));
     world.rooms[0]
         .meshes
         .push(GridMesh::new(1, 0, [6 * SECTOR_UNITS, 0, 4 * SECTOR_UNITS]));
@@ -215,13 +233,20 @@ fn a_column_blocks_and_has_a_standable_capital() {
     assert!(blocked.x < 480 - 20, "{blocked:?}");
     // A body dropped over the capital stands on it: height 2560 grid = 200.
     let on_top = walk(&native, RoomPoint::new(480, 260, 320), 0, 0, 60);
-    assert!((on_top.position().y - 200).abs() <= 2, "{:?}", on_top.position());
+    assert!(
+        (on_top.position().y - 200).abs() <= 2,
+        "{:?}",
+        on_top.position()
+    );
 }
 
 #[test]
 fn rubble_draws_and_does_not_collide() {
     let mut world = hall();
-    world.mesh_assets.push(MeshAsset::new("rubble", MeshKind::Rubble(RubbleSpec::default())));
+    world.mesh_assets.push(MeshAsset::new(
+        "rubble",
+        MeshKind::Rubble(RubbleSpec::default()),
+    ));
     world.rooms[0]
         .meshes
         .push(GridMesh::new(1, 0, [6 * SECTOR_UNITS, 0, 4 * SECTOR_UNITS]));
@@ -239,7 +264,9 @@ fn an_imported_mesh_and_a_decor_only_instance_cook() {
                f 5 6 7 8\nf 2 1 4 3\nf 1 5 8 4\nf 6 2 3 7\nf 8 7 3 4\nf 1 2 6 5\n";
     let crate_mesh = ImportedMesh::from_obj(obj, 512.0, "crate.obj", ImportProxy::BoxTop).unwrap();
     let mut world = hall();
-    world.mesh_assets.push(MeshAsset::new("crate", MeshKind::Imported(crate_mesh)));
+    world
+        .mesh_assets
+        .push(MeshAsset::new("crate", MeshKind::Imported(crate_mesh)));
     world.rooms[0]
         .meshes
         .push(GridMesh::new(1, 0, [3 * SECTOR_UNITS, 0, 3 * SECTOR_UNITS]));
@@ -262,12 +289,19 @@ fn an_imported_mesh_and_a_decor_only_instance_cook() {
 #[test]
 fn a_mesh_turned_off_a_quarter_still_blocks_exactly_and_warns_when_pitched() {
     let mut world = hall();
-    world.mesh_assets.push(MeshAsset::new("column", MeshKind::Column(ColumnSpec::default())));
+    world.mesh_assets.push(MeshAsset::new(
+        "column",
+        MeshKind::Column(ColumnSpec::default()),
+    ));
     let mut m = GridMesh::new(1, 0, [6 * SECTOR_UNITS, 0, 4 * SECTOR_UNITS]);
     m.rotation = [30, 0, 0];
     world.rooms[0].meshes.push(m);
     let cooked = cook(&world).unwrap();
-    assert!(cooked.report.warnings.is_empty(), "{:?}", cooked.report.warnings);
+    assert!(
+        cooked.report.warnings.is_empty(),
+        "{:?}",
+        cooked.report.warnings
+    );
     world.rooms[0].meshes[0].rotation = [30, 10, 0];
     let cooked = cook(&world).unwrap();
     assert!(cooked
@@ -365,7 +399,7 @@ fn what_a_mesh_costs_in_the_chunk() {
             .map(|(i, (a, b))| format!("section {i}: +{}", a - b))
             .collect();
         let added = total - base_total;
-        println!("mesh cost {name}: +{added} B ({})", grew.join(", "));
+        eprintln!("mesh cost {name}: +{added} B ({})", grew.join(", "));
         assert!(added > 0 && added <= ceiling, "{name}: +{added} B");
     }
 }

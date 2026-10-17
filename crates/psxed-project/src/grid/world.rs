@@ -285,9 +285,10 @@ impl GridWorld {
 
     /// Room and index of the mesh instance with `id`.
     pub fn find_mesh(&self, id: u16) -> Option<(usize, usize)> {
-        self.rooms.iter().enumerate().find_map(|(r, room)| {
-            room.meshes.iter().position(|m| m.id == id).map(|i| (r, i))
-        })
+        self.rooms
+            .iter()
+            .enumerate()
+            .find_map(|(r, room)| room.meshes.iter().position(|m| m.id == id).map(|i| (r, i)))
     }
 }
 

@@ -407,10 +407,22 @@ impl ArchSpec {
         let tz = |p: [i32; 3]| [p[2] / UNITS_PER_TEXEL, -p[1] / UNITS_PER_TEXEL];
         // Counter-clockwise seen from outside each side.
         let sides: [([[i32; 3]; 4], bool); 4] = [
-            ([[lo, 0, z1], [hi, 0, z1], [hi, top, z1], [lo, top, z1]], true),
-            ([[hi, 0, z0], [lo, 0, z0], [lo, top, z0], [hi, top, z0]], true),
-            ([[lo, 0, z0], [lo, 0, z1], [lo, top, z1], [lo, top, z0]], false),
-            ([[hi, 0, z1], [hi, 0, z0], [hi, top, z0], [hi, top, z1]], false),
+            (
+                [[lo, 0, z1], [hi, 0, z1], [hi, top, z1], [lo, top, z1]],
+                true,
+            ),
+            (
+                [[hi, 0, z0], [lo, 0, z0], [lo, top, z0], [hi, top, z0]],
+                true,
+            ),
+            (
+                [[lo, 0, z0], [lo, 0, z1], [lo, top, z1], [lo, top, z0]],
+                false,
+            ),
+            (
+                [[hi, 0, z1], [hi, 0, z0], [hi, top, z0], [hi, top, z1]],
+                false,
+            ),
         ];
         for (ring, across_x) in sides {
             if across_x {
@@ -530,10 +542,7 @@ mod tests {
             .count();
         assert_eq!(slabs, 2 * usize::from(spec.segments));
         assert_eq!(boxes, 2);
-        let flat = ArchSpec {
-            spring: 0,
-            ..spec
-        };
+        let flat = ArchSpec { spring: 0, ..spec };
         assert_eq!(
             flat.build()
                 .unwrap()
@@ -561,7 +570,12 @@ mod tests {
         };
         assert!(segmental.build().unwrap_err().contains("less than half"));
         assert!(ArchSpec { span: 10, ..base }.build().is_err());
-        assert!(ArchSpec { segments: 0, ..base }.build().is_err());
+        assert!(ArchSpec {
+            segments: 0,
+            ..base
+        }
+        .build()
+        .is_err());
     }
 
     #[test]

@@ -23,8 +23,17 @@ pub struct Placed<'a> {
 /// The instance `index` of `room`, with its asset built. `None` for a
 /// missing, hidden or unbuildable instance (validation reports the last).
 pub fn placed(world: &GridWorld, room: usize, index: usize) -> Option<Placed<'_>> {
-    let mesh = world.rooms.get(room)?.meshes.get(index).filter(|m| m.enabled)?;
-    let built = world.mesh_assets.get(usize::from(mesh.asset))?.build().ok()?;
+    let mesh = world
+        .rooms
+        .get(room)?
+        .meshes
+        .get(index)
+        .filter(|m| m.enabled)?;
+    let built = world
+        .mesh_assets
+        .get(usize::from(mesh.asset))?
+        .build()
+        .ok()?;
     Some(Placed { mesh, built })
 }
 
@@ -139,11 +148,20 @@ mod tests {
         let built = world.mesh_assets[0].build().unwrap();
         let faces = faces_of(&world);
         assert_eq!(faces.len(), built.faces.len());
-        assert!(faces.iter().all(|f| matches!(f.kind, GridFaceKind::Mesh { index: 0 })));
+        assert!(faces
+            .iter()
+            .all(|f| matches!(f.kind, GridFaceKind::Mesh { index: 0 })));
         // The base of the piers stands on the floor at the instance position.
-        let low = faces.iter().flat_map(|f| f.grid.iter().map(|g| g[1])).min().unwrap();
+        let low = faces
+            .iter()
+            .flat_map(|f| f.grid.iter().map(|g| g[1]))
+            .min()
+            .unwrap();
         assert_eq!(low, 0);
-        let xs: Vec<i32> = faces.iter().flat_map(|f| f.grid.iter().map(|g| g[0])).collect();
+        let xs: Vec<i32> = faces
+            .iter()
+            .flat_map(|f| f.grid.iter().map(|g| g[0]))
+            .collect();
         let mid = (xs.iter().min().unwrap() + xs.iter().max().unwrap()) / 2;
         assert_eq!(mid, 3072);
     }

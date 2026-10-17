@@ -610,7 +610,13 @@ fn plane_ref(
     range: (i32, i32),
 ) -> Result<PlaneRef, String> {
     let _ = (cx, origin);
-    Ok(run_ref(room, room.planes[index].cell_span(), first, count, range))
+    Ok(run_ref(
+        room,
+        room.planes[index].cell_span(),
+        first,
+        count,
+        range,
+    ))
 }
 
 /// The render reference of a run of `count` quads from `first` whose box

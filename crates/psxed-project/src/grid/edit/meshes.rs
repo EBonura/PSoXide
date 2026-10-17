@@ -72,11 +72,7 @@ pub fn add_asset(world: &mut GridWorld, asset: MeshAsset) -> Result<u16, MeshRef
 /// Replace the recipe of asset `index`; every instance follows (and their rooms
 /// grow to hold the new shape). Refused, with nothing changed, when the recipe
 /// does not build or a room would pass the size cap.
-pub fn set_asset(
-    world: &mut GridWorld,
-    index: usize,
-    kind: MeshKind,
-) -> Result<(), MeshRefusal> {
+pub fn set_asset(world: &mut GridWorld, index: usize, kind: MeshKind) -> Result<(), MeshRefusal> {
     let old = world
         .mesh_assets
         .get(index)
@@ -91,8 +87,7 @@ pub fn set_asset(
     world.mesh_assets[index] = new;
     for room in 0..world.rooms.len() {
         for i in 0..world.rooms[room].meshes.len() {
-            if usize::from(world.rooms[room].meshes[i].asset) == index
-                && !fit_room(world, room, i)
+            if usize::from(world.rooms[room].meshes[i].asset) == index && !fit_room(world, room, i)
             {
                 world.mesh_assets[index] = old;
                 world.rooms = before;
@@ -345,8 +340,16 @@ mod tests {
     #[test]
     fn equal_recipes_share_one_asset() {
         let mut w = world();
-        let a = add_asset(&mut w, MeshAsset::new("a", MeshKind::Column(ColumnSpec::default()))).unwrap();
-        let b = add_asset(&mut w, MeshAsset::new("b", MeshKind::Column(ColumnSpec::default()))).unwrap();
+        let a = add_asset(
+            &mut w,
+            MeshAsset::new("a", MeshKind::Column(ColumnSpec::default())),
+        )
+        .unwrap();
+        let b = add_asset(
+            &mut w,
+            MeshAsset::new("b", MeshKind::Column(ColumnSpec::default())),
+        )
+        .unwrap();
         assert_eq!(a, b);
         assert_eq!(w.mesh_assets.len(), 1);
         let bad = MeshAsset::new(
@@ -356,16 +359,33 @@ mod tests {
                 ..ColumnSpec::default()
             }),
         );
-        assert!(matches!(add_asset(&mut w, bad), Err(MeshRefusal::Unbuildable(_))));
+        assert!(matches!(
+            add_asset(&mut w, bad),
+            Err(MeshRefusal::Unbuildable(_))
+        ));
     }
 
     #[test]
     fn placing_grows_the_room_and_gives_each_instance_its_own_id() {
         let mut w = world();
-        let rubble = add_asset(&mut w, MeshAsset::new("r", MeshKind::Rubble(RubbleSpec::default()))).unwrap();
-        let first = place_mesh(&mut w, 0, GridMesh::new(0, rubble, [SECTOR_UNITS * 2, 0, SECTOR_UNITS * 2])).unwrap();
+        let rubble = add_asset(
+            &mut w,
+            MeshAsset::new("r", MeshKind::Rubble(RubbleSpec::default())),
+        )
+        .unwrap();
+        let first = place_mesh(
+            &mut w,
+            0,
+            GridMesh::new(0, rubble, [SECTOR_UNITS * 2, 0, SECTOR_UNITS * 2]),
+        )
+        .unwrap();
         // Far outside the 4 x 4 room: it grows to hold the footprint.
-        let second = place_mesh(&mut w, 0, GridMesh::new(0, rubble, [SECTOR_UNITS * 9 + 500, 0, 500])).unwrap();
+        let second = place_mesh(
+            &mut w,
+            0,
+            GridMesh::new(0, rubble, [SECTOR_UNITS * 9 + 500, 0, 500]),
+        )
+        .unwrap();
         assert_ne!(first, second);
         assert_eq!(w.find_mesh(second), Some((0, 1)));
         let room = &w.rooms[0];
@@ -379,7 +399,11 @@ mod tests {
     #[test]
     fn an_edit_that_would_overgrow_the_room_is_undone() {
         let mut w = world();
-        let rubble = add_asset(&mut w, MeshAsset::new("r", MeshKind::Rubble(RubbleSpec::default()))).unwrap();
+        let rubble = add_asset(
+            &mut w,
+            MeshAsset::new("r", MeshKind::Rubble(RubbleSpec::default())),
+        )
+        .unwrap();
         let id = place_mesh(&mut w, 0, GridMesh::new(0, rubble, [1024, 0, 1024])).unwrap();
         let before = w.clone();
         let far = SECTOR_UNITS * (MAX_ROOM_SIDE as i32 + 40);
@@ -394,10 +418,21 @@ mod tests {
     #[test]
     fn an_asset_in_use_cannot_be_removed_and_removal_renumbers() {
         let mut w = world();
-        let a = add_asset(&mut w, MeshAsset::new("a", MeshKind::Column(ColumnSpec::default()))).unwrap();
-        let b = add_asset(&mut w, MeshAsset::new("b", MeshKind::Rubble(RubbleSpec::default()))).unwrap();
+        let a = add_asset(
+            &mut w,
+            MeshAsset::new("a", MeshKind::Column(ColumnSpec::default())),
+        )
+        .unwrap();
+        let b = add_asset(
+            &mut w,
+            MeshAsset::new("b", MeshKind::Rubble(RubbleSpec::default())),
+        )
+        .unwrap();
         let id = place_mesh(&mut w, 0, GridMesh::new(0, b, [1024, 0, 1024])).unwrap();
-        assert_eq!(remove_asset(&mut w, usize::from(b)), Err(MeshRefusal::InUse(1)));
+        assert_eq!(
+            remove_asset(&mut w, usize::from(b)),
+            Err(MeshRefusal::InUse(1))
+        );
         remove_asset(&mut w, usize::from(a)).unwrap();
         let (room, i) = w.find_mesh(id).unwrap();
         assert_eq!(w.rooms[room].meshes[i].asset, 0);
@@ -413,7 +448,8 @@ mod tests {
         assert_eq!(placed.position, [2048, 0, 2048]);
         assert_eq!(placed.yaw, 0);
         // The same span along +z: +x of the asset turns to +z, which is yaw -90.
-        let along_z = solve_arch_span([2048, 0, 1024], [2048, 0, 3072], ArchSpec::default()).unwrap();
+        let along_z =
+            solve_arch_span([2048, 0, 1024], [2048, 0, 3072], ArchSpec::default()).unwrap();
         assert_eq!(along_z.yaw, -90);
         // And the endpoints land where asked after placing.
         let mut mesh = GridMesh::new(1, 0, along_z.position);
@@ -442,7 +478,15 @@ mod tests {
         assert_eq!(w.find_mesh(id), Some((0, 0)));
         assert!(w.mesh_assets[0].name.contains("arch"));
         // The same arch again reuses the asset.
-        let (again, ..) = arch_span(&mut w, 0, [1024, 0, 1024], [3072, 0, 1024], ArchSpec::default(), None).unwrap();
+        let (again, ..) = arch_span(
+            &mut w,
+            0,
+            [1024, 0, 1024],
+            [3072, 0, 1024],
+            ArchSpec::default(),
+            None,
+        )
+        .unwrap();
         assert_eq!(again, 0);
         assert_eq!(w.mesh_assets.len(), 1);
     }

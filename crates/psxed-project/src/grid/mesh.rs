@@ -423,7 +423,12 @@ impl GridMesh {
             let g = self.place([x, 0, z]);
             [g[0], g[2]]
         };
-        Some([at(lo[0], lo[1]), at(hi[0], lo[1]), at(hi[0], hi[1]), at(lo[0], hi[1])])
+        Some([
+            at(lo[0], lo[1]),
+            at(hi[0], lo[1]),
+            at(hi[0], hi[1]),
+            at(lo[0], hi[1]),
+        ])
     }
 
     /// The eight corners of the asset's bounding box, placed: the four at the
@@ -536,7 +541,10 @@ mod tests {
     fn the_document_form_round_trips_and_omits_defaults() {
         let m = GridMesh::new(3, 1, [1024, 0, 2048]);
         let text = ron::to_string(&m).unwrap();
-        assert!(!text.contains("rotation") && !text.contains("scale"), "{text}");
+        assert!(
+            !text.contains("rotation") && !text.contains("scale"),
+            "{text}"
+        );
         assert_eq!(ron::from_str::<GridMesh>(&text).unwrap(), m);
     }
 }

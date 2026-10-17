@@ -301,9 +301,7 @@ fn hook_point_cap_is_reported_instead_of_silently_ignoring_landings() {
 /// are meshes now.
 #[test]
 fn an_arch_prop_node_cooks_in_a_grid_world_with_segment_boxes() {
-    use crate::{
-        ArchPropGeometry, NodeKind, ResourceData, UvTransform, ARCH_PROP_MATERIAL_COUNT,
-    };
+    use crate::{ArchPropGeometry, NodeKind, ResourceData, UvTransform, ARCH_PROP_MATERIAL_COUNT};
     let mut project = ProjectDocument::starter();
     // A room material of the starter (a 4bpp one), on every slot.
     let material = project

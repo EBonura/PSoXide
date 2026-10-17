@@ -28,7 +28,8 @@ pub(super) fn outward(mut ring: Vec<[i32; 3]>, centre: [f64; 3]) -> Vec<[i32; 3]
         n[1] += a[2] * b[0] - a[0] * b[2];
         n[2] += a[0] * b[1] - a[1] * b[0];
     }
-    let mid: [f64; 3] = core::array::from_fn(|i| ring.iter().map(|p| f64::from(p[i])).sum::<f64>() / len as f64);
+    let mid: [f64; 3] =
+        core::array::from_fn(|i| ring.iter().map(|p| f64::from(p[i])).sum::<f64>() / len as f64);
     let away = [mid[0] - centre[0], mid[1] - centre[1], mid[2] - centre[2]];
     if n[0] * away[0] + n[1] * away[1] + n[2] * away[2] < 0.0 {
         ring.reverse();
@@ -72,7 +73,10 @@ impl ColumnSpec {
     /// Check the numbers.
     pub fn check(&self) -> Result<(), String> {
         if !(64..=1024).contains(&self.radius) {
-            return Err(format!("column radius {} is outside 64..=1024", self.radius));
+            return Err(format!(
+                "column radius {} is outside 64..=1024",
+                self.radius
+            ));
         }
         if !(3..=12).contains(&self.sides) {
             return Err("column sides must be 3 to 12".to_string());
@@ -104,13 +108,27 @@ impl ColumnSpec {
         let mut faces = Vec::new();
         let ring_pt = |k: usize, y: i32| {
             let a = TAU * (k as f64 + 0.5) / n as f64;
-            [(r * a.cos()).round() as i32, y, (r * a.sin()).round() as i32]
+            [
+                (r * a.cos()).round() as i32,
+                y,
+                (r * a.sin()).round() as i32,
+            ]
         };
         let axis = [0.0, f64::from(self.height) / 2.0, 0.0];
         for k in 0..n {
-            let ring = vec![ring_pt(k, lo), ring_pt(k + 1, lo), ring_pt(k + 1, hi), ring_pt(k, hi)];
+            let ring = vec![
+                ring_pt(k, lo),
+                ring_pt(k + 1, lo),
+                ring_pt(k + 1, hi),
+                ring_pt(k, hi),
+            ];
             let centre = [0.0, f64::from(lo + hi) / 2.0, 0.0];
-            faces.push(MeshFace::new(&outward(ring, centre), SLOT_STONE, texel, false));
+            faces.push(MeshFace::new(
+                &outward(ring, centre),
+                SLOT_STONE,
+                texel,
+                false,
+            ));
         }
         let mut block = |y0: i32, y1: i32, centre_y: f64| {
             if y1 <= y0 {
@@ -124,7 +142,12 @@ impl ColumnSpec {
                 [[w, y0, w], [w, y0, -w], [w, y1, -w], [w, y1, w]],
             ];
             for ring in sides {
-                faces.push(MeshFace::new(&outward(ring.to_vec(), centre), SLOT_TRIM, texel, false));
+                faces.push(MeshFace::new(
+                    &outward(ring.to_vec(), centre),
+                    SLOT_TRIM,
+                    texel,
+                    false,
+                ));
             }
         };
         block(0, lo, f64::from(lo) / 2.0);
@@ -132,7 +155,15 @@ impl ColumnSpec {
         // Plinth top and capital underside and top.
         let flat = |y: i32, up: bool| {
             let ring = vec![[-w, y, -w], [-w, y, w], [w, y, w], [w, y, -w]];
-            let centre = [0.0, if up { f64::from(y) - 1.0 } else { f64::from(y) + 1.0 }, 0.0];
+            let centre = [
+                0.0,
+                if up {
+                    f64::from(y) - 1.0
+                } else {
+                    f64::from(y) + 1.0
+                },
+                0.0,
+            ];
             MeshFace::new(&outward(ring, centre), SLOT_TRIM, texel, false)
         };
         if lo > 0 {
@@ -239,7 +270,11 @@ impl RubbleSpec {
         for piece in 0..n {
             // Spread the stones round a ring so they do not pile up.
             let around = TAU * piece as f64 / n as f64 + f64::from(rng.range(-20, 20)) / 100.0;
-            let from_centre = if n == 1 { 0 } else { rng.range(spread / 3, spread * 3 / 4) };
+            let from_centre = if n == 1 {
+                0
+            } else {
+                rng.range(spread / 3, spread * 3 / 4)
+            };
             let cx = (f64::from(from_centre) * around.cos()).round() as i32;
             let cz = (f64::from(from_centre) * around.sin()).round() as i32;
             let radius = rng.range(self.size / 8, self.size / 4).max(48);
@@ -252,10 +287,22 @@ impl RubbleSpec {
                 let rb = f64::from(radius) * f64::from(rng.range(85, 115)) / 100.0;
                 let rm = rb * f64::from(rng.range(65, 90)) / 100.0;
                 let lift = rng.range(height * 35 / 100, height * 60 / 100);
-                base.push([cx + (rb * a.cos()).round() as i32, 0, cz + (rb * a.sin()).round() as i32]);
-                mid.push([cx + (rm * a.cos()).round() as i32, lift, cz + (rm * a.sin()).round() as i32]);
+                base.push([
+                    cx + (rb * a.cos()).round() as i32,
+                    0,
+                    cz + (rb * a.sin()).round() as i32,
+                ]);
+                mid.push([
+                    cx + (rm * a.cos()).round() as i32,
+                    lift,
+                    cz + (rm * a.sin()).round() as i32,
+                ]);
             }
-            let apex = [cx + rng.range(-radius / 6, radius / 6), height, cz + rng.range(-radius / 6, radius / 6)];
+            let apex = [
+                cx + rng.range(-radius / 6, radius / 6),
+                height,
+                cz + rng.range(-radius / 6, radius / 6),
+            ];
             let centre = [f64::from(cx), f64::from(height) * 0.4, f64::from(cz)];
             for k in 0..sides {
                 let j = (k + 1) % sides;

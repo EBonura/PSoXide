@@ -160,9 +160,15 @@ pub fn build_with_meshes(
         room.origin[1] * s as i32,
     ];
     let mut mesh_warnings = Vec::new();
-    let extra = super::mesh_collision::extra_records(units, room, assets, origin, &mut mesh_warnings)?;
+    let extra =
+        super::mesh_collision::extra_records(units, room, assets, origin, &mut mesh_warnings)?;
     let planes = super::plane_collision::build_with_extra(
-        units, room, room_index, origin, camera_pass, extra,
+        units,
+        room,
+        room_index,
+        origin,
+        camera_pass,
+        extra,
     )?;
     let mut range: Option<(i32, i32)> = planes.range;
     let mut note = |lo: i16, hi: i16| {
