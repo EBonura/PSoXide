@@ -23,6 +23,7 @@ pub mod contents;
 pub mod format;
 pub mod height;
 pub mod render;
+pub mod toolchain_probe;
 pub mod view;
 pub mod write;
 
