@@ -1,8 +1,7 @@
 //! Surface material and lighting vocabulary shared by every world renderer.
 //!
-//! The grid room drawing helpers that used to live here are gone with the
-//! grid world; what remains is the material, sample and lighting contract
-//! the BSP renderer, props and actors shade through.
+//! The material, sample and lighting contract the world renderer, props and
+//! actors shade through.
 
 use psx_gpu::material::{TextureMaterial, TexturedGouraudPacketMaterial};
 

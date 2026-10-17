@@ -55,7 +55,7 @@ impl Playtest {
         );
     }
 
-    /// Checked no-clear collection for resident BSP collision scratch.
+    /// Checked no-clear collection for resident collision scratch.
     pub(super) fn collect_static_prop_aabb_blockers_checked_into<
         S: BoundedSink<CharacterCollisionAabb>,
     >(

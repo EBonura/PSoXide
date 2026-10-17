@@ -290,7 +290,7 @@ impl PlayerScarf {
     }
 
     fn collide_body(&mut self, i: usize, floor_y: i32) {
-        // Upright torso capsule, deliberately cheaper than sixteen BSP traces.
+        // Upright torso capsule, deliberately cheaper than sixteen world traces.
         let p = self.points[i];
         let center_y = p[1].clamp(-self.height * Q / 3, -self.height * Q / 8);
         let d = [p[0], p[1] - center_y, p[2]];

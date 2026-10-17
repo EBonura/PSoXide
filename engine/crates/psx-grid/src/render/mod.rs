@@ -53,12 +53,12 @@ pub const TEXTURED_GOURAUD_COMMAND: u32 = 0x3400_0000;
 
 /// Depth-band profile of the near-plane path. A tile is small, so the warp a
 /// near tile shows is bounded by its own size: one split inside 170 depth
-/// units and none beyond, against the BSP profile's 340 and 170 for big
-/// patches.
+/// units and none beyond, against the third-person profile's 340 and 170
+/// for big patches.
 pub(crate) const GRID_RENDER_PROFILE: SurfaceProfile = SurfaceProfile {
     split_once_below: 170,
     split_twice_below: 0,
-    ..SurfaceProfile::PXBSP_THIRD_PERSON
+    ..SurfaceProfile::THIRD_PERSON
 };
 
 /// A material slot as the runtime resolved it: page words and the texture's

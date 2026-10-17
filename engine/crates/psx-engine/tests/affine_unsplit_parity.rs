@@ -93,7 +93,7 @@ fn packets_match_frozen_renderer_across_split_cull_and_depth_boundaries() {
                 &surface_new,
                 1,
                 b.as_mut_ptr(),
-                after::SurfaceProfile::PXBSP_THIRD_PERSON,
+                after::SurfaceProfile::THIRD_PERSON,
             )
         };
         assert_eq!(ar.packets, br.packets, "case {case}");

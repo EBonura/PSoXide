@@ -70,10 +70,10 @@ fn poi_persistent_flags(
 
 fn apply_debug_body_fallback(
     config: &mut CharacterMotorConfig,
-    uses_bsp: bool,
+    has_world: bool,
     has_character: bool,
 ) {
-    if uses_bsp && !has_character {
+    if has_world && !has_character {
         config.radius = WORLD_PLAYER_RADIUS;
         config.height = WORLD_PLAYER_HEIGHT;
         config.walk_speed = WORLD_FALLBACK_PLAYER_SPEED;
@@ -87,7 +87,7 @@ fn apply_debug_body_fallback(
 /// it independent of how fast frames are actually presented.
 pub(super) const POI_PRESENTATION_TICKS_PER_STEP: u8 = 2;
 
-/// Deterministic damage cadence for shared PXBSP hazard contents. Water is
+/// Deterministic damage cadence for shared hazard contents. Water is
 /// non-damaging; slime deals four health twice per second, lava deals ten
 /// health four times per second at the 60 Hz simulation rate.
 pub(super) const fn hazard_damage(contents: i16, tick: u32) -> u16 {
@@ -150,8 +150,8 @@ fn player_anim_is_stop(anim: PlayerAnim) -> bool {
 }
 
 impl Playtest {
-    /// Depth range for effects in `room`: they sort against the resident
-    /// PXBSP renderer, see [`CLASSIC_DEPTH_RANGE`].
+    /// Depth range for effects in `room`: they sort against the grid
+    /// renderer, see [`CLASSIC_DEPTH_RANGE`].
     pub(super) fn effect_depth_range(&self, room: RoomIndex) -> DepthRange {
         if ROOMS.get(room.to_usize()).is_some() {
             CLASSIC_DEPTH_RANGE
@@ -717,7 +717,7 @@ impl Playtest {
     /// Arm the shared player death sequence: `delay_ticks` of locked
     /// Death animation, then [`Self::respawn_after_death`] when the
     /// countdown in `update_gameplay` reaches zero. One arming point
-    /// for every cause (combat damage, BSP liquid hazards, lethal
+    /// for every cause (combat damage, liquid hazards, lethal
     /// water); callers floor health themselves. PLAYER_DEATHS counts
     /// here so the death event is recorded even if a run ends before
     /// the respawn completes.
@@ -1327,10 +1327,9 @@ impl Playtest {
         if let Some(room) = ROOMS.get(self.room_index.to_usize()) {
             config.gravity_per_tick_q8 = room.gravity_per_tick_q8;
         }
-        // Characterless brush projects use the cooker's matching debug body.
-        // Authored characters keep their Character-bound radius and height so
-        // `BspRuntime::update_motor` can select the exact cooked containing
-        // hull instead of silently shrinking the player.
+        // Characterless projects use the cooker's matching debug body.
+        // Authored characters keep their Character-bound radius and height
+        // instead of silently shrinking the player.
         apply_debug_body_fallback(
             &mut config,
             self.world_rt.is_some(),
@@ -1720,7 +1719,7 @@ impl Playtest {
         config.min_floor_clearance = camera.min_floor_clearance;
         if self.world_rt.is_some() {
             // Keep a small authored gap between the point-traced camera and
-            // brush walls. The renderer clips any remaining near-plane
+            // walls. The renderer clips any remaining near-plane
             // intersection exactly.
             config.collision_margin = WORLD_CAMERA_WALL_MARGIN;
         }
@@ -2021,7 +2020,7 @@ impl Playtest {
                 prop_blockers.as_slice(),
                 &self.destructibles,
             )
-            .expect("PXBSP camera trace failed")
+            .expect("grid camera trace failed")
             .camera
     }
 
@@ -2273,7 +2272,7 @@ impl Playtest {
         let range_sq = square_i32_saturating(range);
         let mut best: Option<(usize, i32)> = None;
         for (index, _) in MODEL_INSTANCES.iter().enumerate() {
-            // Use the same cooked BSP visibility set that gates instance
+            // Use the same cooked visibility set that gates instance
             // rendering. A longer lock range must not make actors behind a
             // wall targetable merely because they share the active room.
             if index >= u16::BITS as usize || self.instance_visible_mask & (1u16 << index) == 0 {

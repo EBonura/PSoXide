@@ -5,7 +5,7 @@
 //!   [`contents_at`](GridCollision::contents_at), floor and ceiling heights.
 //! * [`GridTraceProvider`] adapts it to `psx_engine::CollisionTraceProvider`.
 //!
-//! Solid model (matches the transitional PXBSP slabs the motor was tuned on):
+//! Solid model (the slabs the character motor was tuned on):
 //! a floor is a slab of [`SLAB_THICKNESS`] below its surface, a solid ceiling a
 //! slab above its surface, wall pieces are zero-thickness vertical quads that
 //! block from both sides. A sector without a floor is void: nothing is solid

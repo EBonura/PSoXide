@@ -4,7 +4,7 @@
 //! the souls state grammar (Idle / Patrol / Aggro / Windup / Attack /
 //! Recover / Staggered / Dead), adopted from hl-psx's prop AI shape
 //! with two deliberate differences: thinking gates on the
-//! portal-expanded ACTIVE ROOM set instead of BSP PVS, and melee
+//! portal-expanded ACTIVE ROOM set instead of PVS, and melee
 //! windup/commit/punish is the first-class attack grammar.
 //!
 //! Movement is Character-bound and motor-honest (the phase-3 seam
@@ -16,7 +16,7 @@
 //! movement steers on eight compass headings: keep a working heading,
 //! re-aim at the goal on a per-entity countdown, and when blocked rank
 //! the headings by how directly they close on the goal, with the reverse
-//! last. This gives BSP-aware local routing without a navmesh, heap
+//! last. This gives collision-aware local routing without a navmesh, heap
 //! allocation, or an unbounded search. Attack CONTACT resolution is the
 //! combat slice (see [`crate::combat`]). Games with retained actor poses
 //! use [`Self::tick_delta_deferred`] to freeze each active
@@ -236,7 +236,7 @@ pub trait GameEntityMover {
 
     /// Attempt one authored chase direction without inventing a second
     /// direction through axis sliding. The default preserves existing movers;
-    /// BSP backends override this with an exact-direction hull step.
+    /// a backend can override this with an exact-direction step.
     fn step_direction(
         &mut self,
         entity: usize,
@@ -251,8 +251,8 @@ pub trait GameEntityMover {
     }
 
     /// Whether a point segment from an NPC's eye to the player's eye is clear
-    /// of world geometry. Games without a BSP visibility provider retain the
-    /// previous behavior; BSP-backed games override this and fail closed.
+    /// of world geometry. Games without a visibility provider retain the
+    /// previous behavior; a backend with one overrides this and fails closed.
     fn line_of_sight(&mut self, _room: RoomIndex, _from: [i32; 3], _to: [i32; 3]) -> bool {
         true
     }
@@ -620,7 +620,7 @@ pub struct GameEntities<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: b
     /// Wrapping identity of the latest tick/tick-delta call. Deferred contact
     /// tokens are deliberately one-call capabilities.
     attack_tick_generation: u16,
-    /// Owner-supplied per-record activation (BSP PVS/area residency).
+    /// Owner-supplied per-record activation (area residency).
     // psx-numeric-allow-next-line: fixed 64-record activation mask; bit ops only, two-word on R3000
     spatial_active_mask: u64,
 }
@@ -2917,7 +2917,7 @@ mod tests {
 
     /// Test collision with one finite wall. It rejects a candidate whose
     /// endpoint enters the wall and otherwise commits it, matching the
-    /// accept/hold contract the real BSP-backed mover exposes.
+    /// accept/hold contract the real mover exposes.
     #[derive(Default)]
     struct FiniteWallMover {
         calls: usize,
@@ -4150,7 +4150,7 @@ mod tests {
         let mut sight = SightMover::default();
 
         entities.tick(&IDLE_ENEMY, far_input(), &mut sight);
-        assert_eq!(sight.queries, 0, "distance rejects before the BSP trace");
+        assert_eq!(sight.queries, 0, "distance rejects before the trace");
 
         entities.tick(&IDLE_ENEMY, near_input(), &mut sight);
         assert_eq!(entities.state(0), GameEntityState::Idle);

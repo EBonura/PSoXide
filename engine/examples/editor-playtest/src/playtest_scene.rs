@@ -274,7 +274,7 @@ mod target_ui_tests {
 }
 
 impl Playtest {
-    /// The cooked BSP world, then the sky that shares its farthest OT slot.
+    /// The cooked grid world, then the sky that shares its farthest OT slot.
     fn draw_world_and_sky(
         &mut self,
         camera: WorldCamera,
@@ -304,8 +304,8 @@ impl Playtest {
             telemetry::stage_end(telemetry::stage::ROOM);
         }
 
-        // Sky shares the farthest OT slot with the maximum-depth PXBSP packet.
-        // OT insertion prepends, so inserting the sky after PXBSP makes DMA
+        // Sky shares the farthest OT slot with the maximum-depth world packet.
+        // OT insertion prepends, so inserting the sky after the world makes DMA
         // execute the sky first and keeps even a slot-2047 wall in front.
         if let Some(room_record) = room_record {
             telemetry::stage_begin(telemetry::stage::SKY);
@@ -337,7 +337,7 @@ const PRESENT_OVERLAY_WORDS: usize = 1024;
 /// frame did not, so they are added as a queued frame would take them).
 /// `world_words` is the world pass's packet words. The successor draws the
 /// world first when it fits in the slots this frame leaves free, with the
-/// same eighth to spare as `BspRuntime::fits_before_fence`; otherwise it
+/// same eighth to spare as `GridRuntime::fits_before_fence`; otherwise it
 /// draws everything else first, and the fence lands late only if that fits.
 fn queued_successor_fences_late(
     capacity: usize,
@@ -945,7 +945,7 @@ impl Scene for Playtest {
             self.gameplay_epoch_set = false;
             self.clear_actor_pose_snapshots();
             release_gameplay_vram();
-            // The BSP material table caches VRAM slot words and is latched once
+            // The grid material table caches VRAM slot words and is latched once
             // resolved. `Scene::init` runs at boot, not per gameplay entry, so
             // this runtime survives the release above; drop the bindings with
             // the slots they name.
@@ -1185,14 +1185,14 @@ impl Scene for Playtest {
         }
 
         let room_record = ROOMS.get(self.room_index.to_usize());
-        // Which world objects the cooked BSP lets the passes below draw.
+        // Which world objects the cooked level lets the passes below draw.
         let mut world_object_visibility = WorldObjectVisibility::ALL;
         if let Some(world_rt) = self.world_rt.as_mut() {
             telemetry::stage_begin(telemetry::stage::ROOM);
             world_object_visibility = world_rt.visible_world_objects(camera, &self.destructibles);
             telemetry::stage_end(telemetry::stage::ROOM);
         }
-        // The cooked BSP world is the frame's largest block of packets and
+        // The cooked grid world is the frame's largest block of packets and
         // needs it contiguous. When it fits beside the frame the GPU may still
         // be reading, it goes first and nothing waits. When it does not, it
         // goes last, so the paired-arena fence (the wait for that frame's
@@ -1238,8 +1238,8 @@ impl Scene for Playtest {
             let entity_poses = entity_poses.as_slice();
 
             // Draw the singleton metadata room's ordinary gameplay content
-            // directly in world space while the BSP renderer above owns only
-            // static brush surfaces.
+            // directly in world space while the grid renderer above owns only
+            // static surfaces.
             if let (Some(room_record), Some(lighting)) =
                 (room_record, self.current_room_lighting(camera))
             {
@@ -2097,16 +2097,6 @@ impl Playtest {
             world,
         );
         box_prop_profile_end(telemetry::stage::BOX_PROP_SHARDS);
-        if room == self.room_index {
-            if let Some(world_rt) = self.world_rt.as_ref() {
-                world_rt.draw_destructible_fragments(
-                    camera,
-                    actor_options,
-                    primitive_packets,
-                    world,
-                );
-            }
-        }
         box_prop_profile_begin(telemetry::stage::IMAGE_CARDS);
         draw_image_props(
             IMAGE_PROPS,

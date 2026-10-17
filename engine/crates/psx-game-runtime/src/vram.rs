@@ -2084,7 +2084,7 @@ impl<
 
     /// Release every gameplay-scoped texture before the front end becomes the
     /// active resource set. Menu images and fonts are re-acquired separately;
-    /// no model, brush, sky, shadow, or particle allocation crosses this edge.
+    /// no model, sky, shadow, or particle allocation crosses this edge.
     pub fn release_gameplay_vram(&mut self) {
         self.release_streamed_sky();
         // Scene transitions happen after the loader has drained uploads. Reset

@@ -28,7 +28,6 @@ pub(super) const WORLD_FALLBACK_CAMERA_CLEARANCE: i32 = 8;
 /// Boom-to-wall margin for the point-traced follow camera.
 pub(super) const WORLD_CAMERA_WALL_MARGIN: i32 = 16;
 pub(super) const WORLD_FALLBACK_CAMERA_MARGIN: i32 = 4;
-pub(super) const WORLD_USE_DISTANCE: i32 = 256;
 
 /// Dynamic world bounds used to activate actors and instances by room.
 /// Coordinates use the playtest's integer engine-unit convention.
@@ -117,8 +116,8 @@ impl<P: psx_engine::CollisionTraceProvider + ?Sized> psx_engine::CollisionTraceP
 }
 
 /// The world pass view rotation from the camera's exact Q12 trig, in the
-/// PXBSP convention [`view_camera`] derives its angles in: PXBSP yaw is
-/// the orbit yaw plus a quarter turn and PXBSP pitch the negated look
+/// grid world's convention [`view_camera`] derives its angles in: world yaw is
+/// the orbit yaw plus a quarter turn and world pitch the negated look
 /// pitch, so `sin(yaw + 90) = cos(yaw)`, `cos(yaw + 90) = -sin(yaw)`,
 /// `sin(-pitch) = -sin(pitch)`. No table, no angle recovery: the world
 /// rotates by exactly the camera the model pass renders with.
@@ -136,9 +135,8 @@ pub(super) fn view_camera(camera: WorldCamera) -> Camera {
     let orbit_yaw = angle_q12_from_basis(camera.sin_yaw.raw(), camera.cos_yaw.raw());
     // WorldCamera stores the target-to-camera orbit angle with the engine's
     // `x = sin(yaw), z = cos(yaw)` convention; the view direction is the
-    // opposite. PXBSP zero yaw looks along +X and its yaw turns the same way
-    // as the engine's now that `load_pxbsp_view` is a proper rotation (the
-    // old `3072 - yaw` compensated its mirrored remap).
+    // opposite. World zero yaw looks along +X and its yaw turns the same way
+    // as the engine's.
     let yaw = orbit_yaw.wrapping_add(1024) & 0x0fff;
     let look_pitch = signed_quarter_angle_q12(camera.sin_pitch.raw(), camera.cos_pitch.raw());
     let pitch = (-look_pitch) as u16 & 0x0fff;
@@ -200,9 +198,9 @@ mod tests {
     use psx_engine::Q12;
 
     #[test]
-    fn engine_view_cardinals_map_to_pxbsp_yaw() {
+    fn engine_view_cardinals_map_to_world_yaw() {
         let projection = WorldProjection::new(160, 120, 320, 64);
-        // Camera at -X (looks +X) -> pxbsp 0; at -Z (looks +Z) -> 3072;
+        // Camera at -X (looks +X) -> world yaw 0; at -Z (looks +Z) -> 3072;
         // at +X (looks -X) -> 2048; at +Z (looks -Z) -> 1024.
         for (sin_yaw, cos_yaw, expected) in [
             (Q12::NEG_ONE, Q12::ZERO, 0),
@@ -223,7 +221,7 @@ mod tests {
     }
 
     #[test]
-    fn engine_view_pitch_keeps_pxbsp_up_and_down_orientation() {
+    fn engine_view_pitch_keeps_world_up_and_down_orientation() {
         let projection = WorldProjection::new(160, 120, 320, 64);
         for (sin_pitch, expected) in [(Q12::NEG_ONE, 1024), (Q12::ONE, 3072)] {
             let camera = WorldCamera::from_basis(

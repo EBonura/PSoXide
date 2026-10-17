@@ -3,9 +3,7 @@
 //! crate's `GameEntities`/`LogicRuntime` leave to the owning game.
 //!
 //! - [`SceneEntityMover`] backs entity Patrol/Aggro steps with the active
-//!   world's movement solver. Grid projects retain `commit_body_step`; BSP
-//!   projects use the same caller-owned static-world + transformed-mover +
-//!   dynamic-cylinder trace stack as the player. A grid room whose collision
+//!   world's movement solver (`commit_body_step`). A grid room whose collision
 //!   is not resident refuses movement (the entity keeps thinking; it walks
 //!   again when the room streams in).
 //! - Effect dispatch drains `LogicRuntime::take_fired` marks into the
@@ -112,9 +110,7 @@ impl ProjectileWorldTracer for SceneProjectileWorldTracer<'_> {
             return ProjectileWorldTrace::Failed;
         }
         let Some(world_rt) = self.world_rt.as_deref_mut() else {
-            // Legacy grid projects have no arbitrary 3D segment provider. The
-            // current editor authors BSP worlds; keep old projects playable
-            // while actor collision remains fully swept and deterministic.
+            // No world is loaded, so there is nothing for a projectile to hit.
             return ProjectileWorldTrace::Clear { end };
         };
         match world_rt.trace_point_segment(
@@ -186,10 +182,8 @@ impl ActivePlayerCapsule {
     }
 }
 
-/// Movement backend for game entities. Both world backends compose other
-/// entities' pre-tick bodies and the player; grid projects additionally use
-/// active-room and prop collision, while BSP projects use resident hulls and
-/// transformed brush movers.
+/// Movement backend for game entities. It composes other entities' pre-tick
+/// bodies and the player, plus active-room and prop collision.
 pub(super) struct SceneEntityMover<'a> {
     pub(super) world_rt: Option<&'a mut WorldRuntime>,
     pub(super) destructibles: &'a RuntimeDestructibles<{ psx_level::MAX_DESTRUCTIBLES }>,
@@ -343,7 +337,7 @@ impl SceneEntityMover<'_> {
                     aabbs.as_slice(),
                 )
             }
-            .expect("PXBSP entity trace failed");
+            .expect("grid entity trace failed");
             [step.position.x, step.position.y, step.position.z]
         }
     }
@@ -1185,7 +1179,7 @@ impl Playtest {
         };
         // Same world-occlusion authority as the enemy side: the legacy arc
         // has no blade geometry, so a closed door inside its reach must
-        // still block the connection on BSP worlds.
+        // still block the connection.
         let player_eye = melee_eye_point([player.x, player.y, player.z]);
         let vitality_channel = Self::player_attack_channel(self.anim_state);
         self.vitality_circles.claim_struck(
@@ -1350,8 +1344,7 @@ impl Playtest {
         self.damage_world_destructibles_with_capsule(start, end, radius, channel, damage);
     }
 
-    /// Damage every brush/card target through the one backend-independent
-    /// shared-state owner.
+    /// Damage every image-card target through the shared destructible state.
     fn damage_world_destructibles_with_capsule(
         &mut self,
         start: [i32; 3],
@@ -1367,16 +1360,6 @@ impl Playtest {
             }
         }
         let mut result = DamageOutcome::default();
-        if let Some(world_rt) = self.world_rt.as_ref() {
-            result = world_rt.damage_brush_destructibles_with_capsule(
-                start,
-                end,
-                radius,
-                channel,
-                damage,
-                &mut self.destructibles,
-            );
-        }
         let radius = i32::from(radius);
         let capsule_min = core::array::from_fn::<_, 3, _>(|axis| {
             start[axis].min(end[axis]).saturating_sub(radius)
@@ -1384,9 +1367,7 @@ impl Playtest {
         let capsule_max = core::array::from_fn::<_, 3, _>(|axis| {
             start[axis].max(end[axis]).saturating_add(radius)
         });
-        // Image cards use their cooked visual/collision AABB and the exact
-        // same state owner as brush submodels. This path is world-backend
-        // agnostic, so legacy grid scenes do not silently lose breakability.
+        // Image cards use their cooked visual/collision AABB.
         for object in WORLD_OBJECTS {
             if object.kind != psx_level::world_object_kind::IMAGE_PROP
                 || object.destructible == psx_level::WORLD_OBJECT_DESTRUCTIBLE_NONE
@@ -1416,9 +1397,6 @@ impl Playtest {
                 if alive_before & (1u32 << index) != 0 && !self.destructibles.alive(index) {
                     telemetry::debug_log("DESTRUCTIBLE BREAK");
                     self.mark_destructible_broken(index);
-                    if let Some(world_rt) = self.world_rt.as_mut() {
-                        world_rt.spawn_destructible_fragments(index);
-                    }
                     self.spawn_destructible_break_effect(index);
                 }
             }
@@ -1449,12 +1427,7 @@ impl Playtest {
                     .unwrap_or(256);
                 (center, object.room, largest_extent.clamp(192, 768) as u16)
             });
-        let brush_origin = self
-            .world_rt
-            .as_ref()
-            .and_then(|world_rt| world_rt.destructible_effect_origin(index))
-            .map(|(center, radius)| (center, self.room_index, radius));
-        let Some((position, room, radius)) = object_origin.or(brush_origin) else {
+        let Some((position, room, radius)) = object_origin else {
             return;
         };
         let (core_rgb, glow_rgb, impact_rgb) = match record.damage_affinity {
@@ -1480,9 +1453,7 @@ impl Playtest {
                 trail_spacing_ticks: 1,
                 impact_lifetime_ticks: 32,
                 crystal: false,
-                // The brush runtime now fractures the actual textured face.
-                // Keep this burst for the emissive impact flare, without the
-                // old screen-space diamonds that pretended to be debris.
+                // Only the emissive impact flare, no debris.
                 break_fragment_count: 0,
             },
         );
@@ -1842,11 +1813,7 @@ impl Playtest {
                     telemetry::counter(telemetry::counter::LOGIC_DOOR_ACTIVATIONS, 1);
                     if record.link != psx_level::LOGIC_LINK_NONE {
                         let open = self.logic.door_open(index);
-                        if let Some(world_rt) = self.world_rt.as_mut() {
-                            world_rt.set_door_open(usize::from(record.link), open);
-                        } else {
-                            self.box_props.set_door_open(usize::from(record.link), open);
-                        }
+                        self.box_props.set_door_open(usize::from(record.link), open);
                     }
                 }
                 psx_level::logic_kind::MESSAGE => {
@@ -1907,42 +1874,9 @@ impl Playtest {
                 && record.link != psx_level::LOGIC_LINK_NONE
             {
                 let open = self.logic.door_open(index);
-                if let Some(world_rt) = self.world_rt.as_mut() {
-                    world_rt.set_door_open(usize::from(record.link), open);
-                } else {
-                    self.box_props.set_door_open(usize::from(record.link), open);
-                }
+                self.box_props.set_door_open(usize::from(record.link), open);
             }
         }
-    }
-
-    /// First-playable proximity use routed through the normal logic runtime.
-    /// The brush cook stores each door's mover ordinal in `LevelLogicRecord::link`;
-    /// firing the record keeps relays/masters/state semantics authoritative.
-    pub(super) fn activate_nearest_door(
-        &mut self,
-        now: u32,
-        port: &mut psx_engine::ControllerPort,
-    ) -> bool {
-        let Some(mover) = self
-            .world_rt
-            .as_ref()
-            .and_then(|world_rt| world_rt.nearest_door(self.motor.position(), WORLD_USE_DISTANCE))
-        else {
-            return false;
-        };
-        let Some(index) = LOGIC.iter().position(|record| {
-            record.kind == psx_level::logic_kind::DOOR && usize::from(record.link) == mover
-        }) else {
-            panic!("PXBSP mover {mover} has no cooked Door logic record");
-        };
-        let fired =
-            self.logic
-                .fire_index(LOGIC, index, psx_game_runtime::logic::UseCode::Toggle, now);
-        if fired {
-            self.dispatch_logic_effects(port);
-        }
-        fired
     }
 }
 

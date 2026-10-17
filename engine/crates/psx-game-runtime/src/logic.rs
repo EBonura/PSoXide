@@ -12,9 +12,9 @@
 //! point returns immediately (the phase-3 budget's <1k idle rule).
 //!
 //! Visibility policy: the per-tick player-touch scan gates on the owner's
-//! spatial mask (the PXBSP PVS row); the delay queue and re-arm timers
+//! spatial mask (the active room set); the delay queue and re-arm timers
 //! process globally so a timed chain never freezes when the player
-//! looks away (hl parity: PVS gates monster thinking, not logic).
+//! looks away (hl parity: visibility gates monster thinking, not logic).
 //!
 //! Crate rules hold: no statics, no unsafe, `const N` capacities,
 //! `&'static` cooked records, all-zero [`LogicRuntime::EMPTY`].

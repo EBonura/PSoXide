@@ -1993,7 +1993,7 @@ mod tests {
     ///
     /// This drives the real [`FrameScheduler`] (the same one `App::run` uses)
     /// at several render costs and compares the tick sets. It is the unit-level
-    /// form of the cross-layout stage in `tools/editor_souls_bsp_check.sh`:
+    /// form of the cross-layout stage the old souls slice gate ran:
     /// before 2026-08-11 that gate scored melee 4 on one guest build and melee
     /// 3 on another, and the shape of the bug it was blamed on would show up
     /// here as an active window that shrinks when rendering gets slower.

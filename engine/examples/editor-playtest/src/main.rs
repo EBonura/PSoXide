@@ -246,8 +246,8 @@ mod opening_sequence;
 struct Playtest {
     duel: duel::Duel,
     opening: opening_sequence::OpeningSequence,
-    /// Explicit resident BSP backend selected by the cooked manifest. Invalid
-    /// BSP data fails initialization instead of falling back to another world
+    /// The resident grid world loaded from the cooked manifest. Invalid grid
+    /// data fails initialization instead of falling back to another world
     /// representation.
     world_rt: Option<WorldRuntime>,
     /// Ambient RGB for the room containing the player.
@@ -290,8 +290,7 @@ struct Playtest {
     /// break bursts), owned by `psx_game_runtime::box_props` since the
     /// phase-2 carve.
     box_props: RuntimeBoxProps,
-    /// One health/affinity owner shared by brush submodels and typed world
-    /// objects.
+    /// One health/affinity owner shared by typed world objects.
     destructibles: RuntimeDestructibles<{ psx_level::MAX_DESTRUCTIBLES }>,
     /// Souls-like game-entity SoA state over the cooked
     /// `GAME_ENTITIES` records (phase 3; empty for record-free
@@ -367,7 +366,7 @@ struct Playtest {
     /// screen; the inventory has its own socket presentation.
     inventory_overlay_active: bool,
     /// Remaining death-sequence ticks, shared by every death cause
-    /// (combat damage, BSP liquid hazards, lethal water). Non-zero locks
+    /// (combat damage, liquid hazards, lethal water). Non-zero locks
     /// player input until the shared checkpoint/spawn respawn completes.
     hazard_death_ticks_remaining: u8,
     /// Whether the running death sequence was armed by combat damage
@@ -404,7 +403,7 @@ struct Playtest {
     instance_actor_poses: [Option<InstanceActorPoseSnapshot>; MAX_MODEL_INSTANCES],
     /// Previous retained instance poses, used only for consecutive melee sweeps.
     previous_instance_actor_poses: [Option<InstanceActorPoseSnapshot>; MAX_MODEL_INSTANCES],
-    /// PXBSP PVS result for cooked model instances. Grid worlds leave this at
+    /// Visibility result for cooked model instances. Grid worlds leave this at
     /// all-visible and continue using their room window.
     instance_visible_mask: u16,
     /// Circle is shared by tap-evade and hold-sprint. We delay
@@ -507,7 +506,7 @@ struct Playtest {
     /// it never pauses gameplay and only Cross can advance it.
     poi_messages: MessageController,
     /// Floor height under each Point of Interest, resolved once by a
-    /// downward BSP trace so the beacon stands on the floor whatever height
+    /// downward trace so the beacon stands on the floor whatever height
     /// the point was authored at. `i32::MIN` until resolved.
     poi_floor_y: [i32; INTERACTABLES.len()],
     /// Presentation-step progress for the active POI panel and page type-on,

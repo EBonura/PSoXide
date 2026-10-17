@@ -163,10 +163,10 @@ fn archive_beacon_surface_options(record: &LevelRoomRecord) -> WorldSurfaceOptio
 
 impl Playtest {
     /// Submit every visible Archive Beacon in the current room into the same
-    /// world ordering table as BSP/grid surfaces and actors. Unlike the former
+    /// world ordering table as grid surfaces and actors. Unlike the former
     /// overlay marker, walls and props can now correctly occlude the beacon.
     /// Resolve the floor under every Point of Interest in the current room
-    /// once the BSP is resident: trace straight down from a little above the
+    /// once the grid world is resident: trace straight down from a little above the
     /// point. The beacon panel hangs down from its base point, so a point
     /// authored at floor height would otherwise sit inside the floor.
     pub(super) fn resolve_poi_floors(&mut self) {

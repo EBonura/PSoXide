@@ -3,7 +3,7 @@
 //! The engine owns the coordinate- and failure-semantics contract while world
 //! implementations own their traversal scratch. This keeps character and
 //! camera code independent of any one world format; in particular,
-//! `psx-engine` never needs to depend on `psx-bsp`.
+//! `psx-engine` never needs to depend on a world crate such as `psx-grid`.
 
 use crate::RoomPoint;
 
@@ -17,8 +17,8 @@ pub enum CollisionTraceShape {
     Point,
     /// Upright body rooted at its bottom centre.
     ///
-    /// BSP implementations may conservatively back this with a cooked box
-    /// hull whose horizontal half-width is `radius`.
+    /// Implementations may conservatively back this with a box whose
+    /// horizontal half-width is `radius`.
     Body {
         /// Horizontal half-width/radius in engine world units.
         radius: i32,

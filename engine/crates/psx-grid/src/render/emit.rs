@@ -211,7 +211,7 @@ fn gpu_safe(corners: &[&GridScreen; 4], triangle: bool) -> bool {
 /// Write one textured Gouraud quad packet; returns the next free word.
 ///
 /// The GPU splits a quad `(a, b, c, d)` along `b-c`, so the corners go out as
-/// `(1, 0, 2, 3)` to split along the 0-2 diagonal like the BSP writer does.
+/// `(1, 0, 2, 3)` to split along the 0-2 diagonal.
 ///
 /// # Safety
 /// `next` must have room for [`QUAD_PACKET_WORDS`].
@@ -286,7 +286,7 @@ unsafe fn write_triangle(
 
 /// The shared path: clip against the near plane in room space, project the
 /// result, and hand it to the depth-band splitter with the exact reprojection
-/// and window clip the BSP uses.
+/// and window clip.
 ///
 /// # Safety
 /// `next..end` must have room for [`ROBUST_WORST_WORDS`].

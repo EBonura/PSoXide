@@ -110,7 +110,7 @@ pub(super) const MAX_CAMERA_ORBIT_SPEED_LEVEL: u8 = 7;
 pub(super) const CAMERA_SOFT_LOCK_BREAK_STICK: i16 = 72;
 pub(super) const LOCK_SWITCH_STICK_THRESHOLD: i16 = 72;
 pub(super) const LOCK_SWITCH_STICK_RELEASE: i16 = 36;
-/// Hard-lock acquisition distance. Runtime BSP units are 1/16 of authored
+/// Hard-lock acquisition distance. Runtime units are 1/16 of authored
 /// scene units, so 1024 is roughly sixteen standing character heights: far
 /// enough to acquire an enemy when it first reads clearly down a corridor.
 pub(super) const LOCK_RANGE: i32 = 1024;
@@ -128,7 +128,7 @@ pub(super) const SOFT_LOCK_ENABLED: bool = false;
 /// Quanta-per-frame turn rate when the runtime can't resolve a Character.
 /// The debug body has no turn animation to preserve, so it turns promptly;
 /// the old 32-Q12 step drew a 128-unit U-turn and made otherwise-valid narrow
-/// BSP corridors impossible to enter with camera-relative controls.
+/// corridors impossible to enter with camera-relative controls.
 pub(super) const FALLBACK_PLAYER_YAW_STEP: Angle = Angle::from_q12(256);
 pub(super) const FALLBACK_PLAYER_SPEED: i32 = 2 << 8;
 pub(super) const PLAYER_SPEED_SCALE_NUM: i32 = 3;
@@ -150,7 +150,7 @@ pub(super) const ACTIVE_HEAVY_ATTACK_BUTTON: u16 = button::R2;
 /// field yet; authoring it is a future editor slice). Death/respawn
 /// handling is phase 4 (checkpoint loops): health floors at 0.
 pub(super) const PLAYER_MAX_HEALTH: u16 = 100;
-/// Delay between fatal BSP hazard contact and checkpoint/spawn reset.
+/// Delay between fatal hazard contact and checkpoint/spawn reset.
 pub(super) const HAZARD_DEATH_TICKS: u8 = 30;
 
 #[cfg(feature = "ot-2048")]
@@ -163,22 +163,22 @@ pub(super) const OT_DEPTH: usize = 512;
 /// correctly overpaint the hidden parts of characters in the PS1
 /// painter's algorithm.
 // The ordinary world pass spans 0..=OT_DEPTH-2 so it stays in front of the
-// sky. PXBSP's classic packet stream may also use the farthest slot; the scene
+// sky. The grid renderer's packet stream may also use the farthest slot; the scene
 // therefore inserts the sky after that stream so same-slot OT prepend order
 // still executes the sky first.
 pub(super) const WORLD_BAND: DepthBand = DepthBand::new(0, OT_DEPTH - 2);
 pub(super) const WORLD_DEPTH_RANGE: DepthRange = DepthRange::new(NEAR_Z, FAR_Z);
 /// Camera-depth range that maps ordinary world-pass packets onto the classic
-/// affine PXBSP renderer's staged OTZ convention.
+/// affine grid renderer's staged OTZ convention.
 ///
-/// PXBSP installs ZSF3=0x155 and ZSF4=0x100, so a flat triangle/quad lands at
+/// The grid renderer installs ZSF3=0x155 and ZSF4=0x100, so a flat triangle/quad lands at
 /// `SZ / 4`, and its view transform carries a uniform 3.0 scale
 /// (`psx_grid::render::VIEW_SCALE_Q12`), so `SZ` is three times the true
 /// view depth: the world keys at `3 z / 4` and fills the 2,048-slot table by
 /// `z = 2731`. Mapping `0..=2731` onto the 2,046-slot world band reproduces
 /// the triangle formula to within a slot for equal-depth vertices. Models,
-/// beacons, effects and every other runtime draw must use this range when the
-/// resident BSP owns the static world; the previous `0..8192` keyed them at
+/// beacons, effects and every other runtime draw must use this range while the
+/// grid renderer owns the static world; the previous `0..8192` keyed them at
 /// `z / 4`, one third of the world's key, so an actor at depth `z` sorted in
 /// front of every wall farther than `z / 3`.
 pub(super) const CLASSIC_DEPTH_RANGE: DepthRange =
@@ -201,11 +201,11 @@ pub(super) const ROOM_ADAPTIVE_SUBDIVISION_KINDS: AdaptiveSubdivisionKindMask =
     AdaptiveSubdivisionKindMask::FLOOR_WALL;
 
 /// Room surface options whose OT slots are directly comparable with resident
-/// PXBSP classic-affine packets already linked into the same ordering table.
+/// grid classic-affine packets already linked into the same ordering table.
 ///
 /// This is the one place that decides how runtime geometry (actors, props,
 /// beacons, decals, particles, projectiles) is keyed against the world it
-/// sorts with. A resident PXBSP keys its classic packets at `3 z / 4` (see
+/// sorts with. The grid renderer keys its classic packets at `3 z / 4` (see
 /// [`CLASSIC_DEPTH_RANGE`]), so everything else must map through that
 /// same range or it sorts against walls at the wrong depth.
 pub(super) fn room_surface_options(record: &LevelRoomRecord) -> WorldSurfaceOptions {
@@ -250,9 +250,9 @@ pub(super) fn current_actor_surface_options(room_index: RoomIndex) -> WorldSurfa
 /// two material passes; overflow beyond the derived capacity still degrades
 /// safely and is reported by telemetry.
 pub(super) const MAX_TEXTURED_TRIS: usize = PLAYTEST_PACKET_CAPACITY;
-/// PXBSP writes the static world straight into the packet arena. The generic
+/// The grid renderer writes the static world straight into the packet arena. The generic
 /// command list is only needed for actors, props, particles, and overlays, so
-/// retaining one command for every possible BSP packet wastes scarce PS1 RAM.
+/// retaining one command for every possible world packet wastes scarce PS1 RAM.
 pub(super) const MAX_WORLD_COMMANDS: usize = if MAX_TEXTURED_TRIS < 1024 {
     MAX_TEXTURED_TRIS
 } else {
@@ -472,11 +472,11 @@ pub(super) type RuntimeLogic =
     psx_game_runtime::logic::LogicRuntime<MAX_LOGIC_RECORDS, LOGIC_FIRED_WORDS, MAX_LOGIC_EVENTS>;
 
 #[cfg(test)]
-mod pxbsp_depth_order_tests {
+mod depth_order_tests {
     use super::*;
 
     /// The classic path projects through a view scaled by
-    /// `PXBSP_VIEW_SCALE_Q12`, so its `SZ` for a vertex at true view depth
+    /// `VIEW_SCALE_Q12`, so its `SZ` for a vertex at true view depth
     /// `z` is `z * scale`; the runtime range must reproduce the OTZ that
     /// follows from that, not from `z` itself.
     #[cfg(feature = "ot-2048")]

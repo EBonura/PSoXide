@@ -1,4 +1,4 @@
-//! Shared destructible health state for brush and typed world-object targets.
+//! Shared destructible health state for typed world-object targets.
 
 use psx_level::{destructible_affinity, destructible_flags, LevelDestructibleRecord};
 

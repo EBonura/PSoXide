@@ -4,8 +4,8 @@
 //! is represented by the same [`WorldCombatCapsule`] primitive as authored
 //! melee hitboxes and hurtboxes, so fast bolts cannot tunnel through an actor
 //! and the forthcoming unified combat-volume system has one narrow phase.
-//! World geometry is supplied through [`ProjectileWorldTracer`]: BSP, grid,
-//! and game-specific collision stay outside this policy crate while failures
+//! World geometry is supplied through [`ProjectileWorldTracer`]: grid and
+//! game-specific collision stay outside this policy crate while failures
 //! fail closed. Storage is all-zero-valid and heap-free for PS1 BSS use.
 
 use psx_level::RoomIndex;

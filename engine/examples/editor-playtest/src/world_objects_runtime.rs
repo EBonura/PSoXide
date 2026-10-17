@@ -1,9 +1,8 @@
 //! Shared runtime visibility over the cooker's typed world-object registry.
 //!
 //! Geometry remains in compact specialist tables, but those renderers must
-//! ask this mask before submitting packets. PXBSP fills it from leaf PVS plus
-//! direct brush traces; grid worlds use the all-visible value and retain their
-//! room/portal filtering.
+//! ask this mask before submitting packets. The grid runtime fills it from its
+//! room windows and direct line-of-sight traces.
 
 use psx_game_runtime::destructibles::RuntimeDestructibles;
 use psx_level::{LevelWorldObjectRecord, MAX_WORLD_OBJECTS};
@@ -40,8 +39,7 @@ impl WorldObjectVisibility {
     }
 
     /// Resolve a typed payload through the shared registry. A missing record
-    /// fails closed in BSP play: malformed cooking must not re-open the old
-    /// renderer-specific visibility bypass.
+    /// fails closed: malformed cooking must not re-open a visibility bypass.
     pub(super) fn typed_visible(
         self,
         objects: &[LevelWorldObjectRecord],
@@ -66,7 +64,7 @@ impl WorldObjectVisibility {
 const _: () = assert!(core::mem::size_of::<WorldObjectVisibility>() == 16);
 
 /// Whether one typed payload remains live according to the same shared state
-/// used by brush submodels. Works for BSP and legacy-grid scenes alike.
+/// used by every destructible.
 pub(super) fn typed_world_object_active(
     objects: &[LevelWorldObjectRecord],
     destructibles: &RuntimeDestructibles<{ psx_level::MAX_DESTRUCTIBLES }>,

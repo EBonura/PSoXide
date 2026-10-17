@@ -512,7 +512,7 @@ pub(super) fn instance_actor_pose_from_components(
     // (default) clip from its cooked posed floor, then reconcile every live
     // clip to that reference through `pose_translation`. Using only the mesh
     // bind-pose lift here leaves animated entities a few world units below
-    // the BSP floor; painter ordering then clips their feet and makes them
+    // the floor; painter ordering then clips their feet and makes them
     // appear to hover even though their gameplay anchor is correct.
     let origin = visual_model_origin(
         x,

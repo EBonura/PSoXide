@@ -107,7 +107,7 @@ pub mod sky_flags {
     pub const QUAKE_LAYERED: u16 = 1 << 2;
     /// Six-face directional cube projection.
     pub const CUBE: u16 = 1 << 3;
-    /// Draw only if the BSP reported at least one visible sky aperture.
+    /// Draw only if the world reported at least one visible sky aperture.
     pub const THROUGH_SKY_SURFACES: u16 = 1 << 4;
     /// Mutually exclusive projection bits.
     pub const PROJECTION_MASK: u16 = PANORAMA | QUAKE_LAYERED | CUBE;
@@ -1549,9 +1549,9 @@ pub const MODEL_CLIP_INHERIT: OptionalModelClipIndex = OptionalModelClipIndex::I
 /// "advance the clip normally" (no static freeze).
 pub const MODEL_INSTANCE_POSE_ANIMATE: u16 = 0xFFFF;
 
-/// Maximum number of non-BSP world objects in one cooked level.
+/// Maximum number of typed world objects in one cooked level.
 ///
-/// Structural brush geometry remains in PXBSP, but every typed world payload
+/// Structural geometry lives in the room tables, but every typed world payload
 /// (flat cards, generated props, and interaction beacons) is registered here
 /// so room ownership, conservative bounds, occlusion, collision policy, and
 /// future destructible state share one cook/runtime contract.
@@ -1577,8 +1577,8 @@ pub mod destructible_flags {
 }
 
 /// Shared health/configuration for any number of cooked world-object targets.
-/// A brush submodel and an image card can therefore use the exact same damage
-/// state instead of maintaining renderer-specific breakable implementations.
+/// Every destructible shares the same damage state instead of maintaining
+/// renderer-specific breakable implementations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LevelDestructibleRecord {
     /// Damage required to break the object.
@@ -1611,10 +1611,10 @@ pub mod world_object_flags {
     pub const RENDERED: u8 = 1 << 0;
     /// The typed payload contributes gameplay collision.
     pub const COLLIDABLE: u8 = 1 << 1;
-    /// PXBSP worlds must confirm direct brush line-of-sight after the cheap
-    /// leaf-PVS bounds test. This closes the painter-ordering hole where a
+    /// The runtime must confirm direct line-of-sight after the cheap
+    /// room-window bounds test. This closes the painter-ordering hole where a
     /// card or marker could sort in front of a wall despite living behind it.
-    pub const DIRECT_BRUSH_OCCLUSION: u8 = 1 << 2;
+    pub const DIRECT_OCCLUSION: u8 = 1 << 2;
     /// The object can move or change presentation state at runtime, so its
     /// authored bounds are a conservative spatial envelope rather than an
     /// immutable geometry promise.
@@ -1640,8 +1640,7 @@ pub struct LevelWorldObjectRecord {
     pub flags: u8,
     /// Index in the typed table selected by [`Self::kind`].
     pub source_index: u16,
-    /// Optional shared destructible-state index. Image props and brush
-    /// submodels can point at the same record; non-destructible objects use
+    /// Optional shared destructible-state index. Several objects can point at the same record; non-destructible objects use
     /// [`WORLD_OBJECT_DESTRUCTIBLE_NONE`].
     pub destructible: u16,
     /// Conservative room-local AABB minimum.

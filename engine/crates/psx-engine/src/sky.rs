@@ -606,7 +606,7 @@ pub const fn cube_face_clut(base_clut: u16, face: CubeFace) -> u16 {
 
 /// Convert a PSoXide Y-up world vector back to Quake's Z-up sky basis.
 ///
-/// The brush importer maps `(quake_x, quake_y, quake_z)` to
+/// Quake coordinates `(quake_x, quake_y, quake_z)` correspond to
 /// `(world_x, world_y, world_z) = (quake_x, quake_z, -quake_y)`.
 #[inline]
 pub const fn quake_direction_from_y_up(direction: [i32; 3]) -> [i32; 3] {
@@ -686,7 +686,7 @@ pub fn directional_uv(
 
 /// Draw Quake's two sky layers as a bounded view-ray background.
 ///
-/// Visible sky brushes select this material but emit no geometry. The caller
+/// The sky is a view-ray background and emits no world geometry. The caller
 /// appends the returned tagged packets after world geometry so prepend-only OT
 /// insertion executes the sky first, behind opaque world surfaces.
 ///

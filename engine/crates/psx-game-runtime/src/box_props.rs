@@ -629,8 +629,8 @@ impl<
     ///
     /// `None` means the output capacity was exceeded, a live prop has no
     /// matching runtime slot, or its cooked bounds are not canonical. This is
-    /// the fail-closed path used by resident BSP playtests; the legacy method
-    /// above retains the grid backend's historical filtering behavior.
+    /// the fail-closed path used by resident playtests; the legacy method
+    /// above retains the historical filtering behavior.
     pub fn collect_collision_blockers_checked(
         &self,
         props: &'static [LevelBoxPropRecord],
@@ -672,7 +672,7 @@ impl<
     }
 
     /// Current world-space physical bounds for one box, including its
-    /// transient falling offset. Rendering, checked BSP collision, and break
+    /// transient falling offset. Rendering, checked collision, and break
     /// probes all consume this single position authority.
     fn live_collision_aabb(&self, index: usize) -> Option<(RoomPoint, RoomPoint)> {
         let runtime = self.runtime.get(index)?;

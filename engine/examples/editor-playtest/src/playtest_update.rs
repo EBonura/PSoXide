@@ -503,7 +503,7 @@ impl Playtest {
         self.spawn = RoomPoint::new(spawn.x, spawn.y, spawn.z);
         self.character = character;
         let spawn_camera_yaw = Angle::from_q12(spawn.yaw as u16);
-        // A characterless BSP project has no model-authored forward-axis
+        // A characterless project has no model-authored forward-axis
         // correction. Its lightweight debug motor should therefore face the
         // camera's view direction, not the orbit direction from player to
         // camera; otherwise the first forward input performs a 180-degree
@@ -534,7 +534,7 @@ impl Playtest {
         cd_stream::run_benchmark(cd_arena());
     }
 
-    /// `BspRuntime::player_contents` at the motor's current position,
+    /// `GridRuntime::player_contents` at the motor's current position,
     /// answered from the memo when neither position nor height moved since
     /// the last sample. Byte-identical to sampling every time: a moved player
     /// always resamples, and a failed sample is never memoised.
@@ -647,9 +647,6 @@ impl Playtest {
             return;
         }
         self.tick_gameplay_layer(ctx);
-        if let Some(world_rt) = self.world_rt.as_mut() {
-            world_rt.tick_doors();
-        }
         {
             use psx_game_runtime::entities::GameEntityState;
             let count = self.game_entities.count().min(GAME_ENTITIES.len());
@@ -760,9 +757,6 @@ impl Playtest {
         telemetry::stage_begin(telemetry::stage::UPDATE_ACTOR);
         self.advance_box_prop_break_events(delta_vblanks);
         self.advance_box_prop_falls(delta_vblanks);
-        if let Some(world_rt) = self.world_rt.as_mut() {
-            world_rt.advance_destructible_fragments(delta_vblanks);
-        }
         if CAMERA_SWEEP_ENABLED {
             telemetry::stage_end(telemetry::stage::UPDATE_ACTOR);
             self.update_camera_sweep(delta_vblanks);
@@ -784,14 +778,6 @@ impl Playtest {
                     telemetry::stage_end(telemetry::stage::UPDATE_ACTOR);
                     return;
                 }
-            } else if ctx.just_pressed(INTERACT_BUTTON)
-                && self.activate_nearest_door(now.as_u32(), ctx.controller_port())
-            {
-                self.evade_run_hold_ticks = 0;
-                self.evade_run_hold_consumed = false;
-                self.camera_turning_last_tick = false;
-                telemetry::stage_end(telemetry::stage::UPDATE_ACTOR);
-                return;
             }
         }
         let circle = self.update_evade_run_button(ctx, delta_vblanks);
@@ -923,11 +909,11 @@ impl Playtest {
             }
             input
         };
-        // Route-capture instrumentation for a model-less BSP debug body:
+        // Route-capture instrumentation for a model-less debug body:
         // Square+D-pad supplies exact world-cardinal intent. Ordinary editor
         // play remains camera-relative, while a deterministic tape can cover
         // narrow multi-turn levels without accumulating camera-yaw drift. The
-        // input still goes through the real motor and BSP collision backend.
+        // input still goes through the real motor and grid collision.
         if self.character.is_none() && ctx.is_held(button::SQUARE) {
             let x = i32::from(ctx.is_held(button::RIGHT)) - i32::from(ctx.is_held(button::LEFT));
             let z = i32::from(ctx.is_held(button::UP)) - i32::from(ctx.is_held(button::DOWN));
@@ -935,10 +921,10 @@ impl Playtest {
             input.move_z = Q12::from_raw(z * Q12::SCALE);
             input.walk = z.signum() as i8;
         }
-        // A model-less BSP debug body has no foot-turn animation to preserve.
+        // A model-less debug body has no foot-turn animation to preserve.
         // Bind its facing to the requested world vector so the motor uses the
         // vector directly instead of drawing a large animation-style turn arc;
-        // this keeps camera-relative cardinal input viable in narrow brush
+        // this keeps camera-relative cardinal input viable in narrow
         // corridors while authored Characters retain their normal locomotion.
         if self.character.is_none() && (input.move_x.raw() != 0 || input.move_z.raw() != 0) {
             input.facing_yaw = psx_engine::yaw_to_point(
@@ -976,9 +962,8 @@ impl Playtest {
         }
         let liquid_contents = self.player_contents_memo(config.height);
         if liquid_contents.is_some_and(|sample| sample.water_level > 0) {
-            // Shared BSP liquids retain 60 percent locomotion. The same
-            // contents query feeds Quake's richer swim rules; the general
-            // editor playtest has no vertical swim input contract yet.
+            // Liquids retain 60 percent locomotion; the editor playtest has
+            // no vertical swim input contract yet.
             config.walk_speed = config.walk_speed.saturating_mul(60) / 100;
             config.run_speed = config.run_speed.saturating_mul(60) / 100;
         }
@@ -1017,7 +1002,7 @@ impl Playtest {
             .collect_static_prop_aabb_blockers_checked_into(&mut aabb_blockers)
             .is_none()
         {
-            // Cooked BSP collision state is authoritative. A malformed or
+            // Cooked collision state is authoritative. A malformed or
             // overflowing prop table freezes this frame instead of
             // allowing movement through a silently omitted blocker.
             telemetry::stage_end(telemetry::stage::SIM_COLLISION);
@@ -1046,7 +1031,7 @@ impl Playtest {
                     blockers.as_slice(),
                     aabb_blockers.as_slice(),
                 )
-                .expect("PXBSP player trace failed")
+                .expect("grid player trace failed")
         };
         telemetry::stage_end(telemetry::stage::SIM_SOLVE);
         self.player_moved_last_tick = motor_frame.moved;

@@ -1,4 +1,4 @@
-//! Depth-banded affine surface submission for brush worlds.
+//! Depth-banded affine surface submission for world surfaces.
 //!
 //! The PS1 GPU interpolates texture coordinates linearly in screen space, so a
 //! large polygon close to the camera visibly swims as the view turns. This
@@ -121,7 +121,7 @@ pub struct AffineVertex {
     pub depth: u32,
 }
 
-/// Cooked brush-world vertex: position, UV, and either two light-style
+/// Cooked world-surface vertex: position, UV, and either two light-style
 /// levels in its low bytes or a baked RGB word.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
@@ -173,12 +173,12 @@ pub struct SurfaceProfile {
 }
 
 impl SurfaceProfile {
-    /// Brush-world profile for the third-person camera, 320x240 with a
+    /// Large-polygon profile for the third-person camera, 320x240 with a
     /// 2048-slot table. The camera looks down at large floor polygons from a
     /// few dozen units up, so the bands reach well out: measured on the
     /// Cortex whole-level tape, these keep textured warp low for a few
     /// percent of frame rate.
-    pub const PXBSP_THIRD_PERSON: Self = Self {
+    pub const THIRD_PERSON: Self = Self {
         screen_width: 320,
         screen_height: 240,
         ot_depth: 2048,
@@ -1691,7 +1691,7 @@ mod tests {
                 surfaces.as_ptr(),
                 surfaces.len(),
                 words.as_mut_ptr(),
-                SurfaceProfile::PXBSP_THIRD_PERSON,
+                SurfaceProfile::THIRD_PERSON,
             )
         };
         let used = unsafe { result.next_packet.offset_from(words.as_ptr()) } as usize;
@@ -1748,7 +1748,7 @@ mod tests {
                 surfaces.as_ptr(),
                 surfaces.len(),
                 words.as_mut_ptr(),
-                &SurfaceProfile::PXBSP_THIRD_PERSON,
+                &SurfaceProfile::THIRD_PERSON,
             )
         };
         assert_eq!(deferred, 0b10, "only the near surface is left");
@@ -1764,7 +1764,7 @@ mod tests {
                 surfaces.as_ptr(),
                 1,
                 words.as_mut_ptr(),
-                &SurfaceProfile::PXBSP_THIRD_PERSON,
+                &SurfaceProfile::THIRD_PERSON,
             )
         };
         assert_eq!(none, 0);
@@ -1910,7 +1910,7 @@ mod tests {
                 &windowed,
                 1,
                 words.as_mut_ptr(),
-                SurfaceProfile::PXBSP_THIRD_PERSON,
+                SurfaceProfile::THIRD_PERSON,
             )
         };
         assert_eq!(result.packets, 1);
@@ -1941,7 +1941,7 @@ mod tests {
                 &compact,
                 1,
                 words.as_mut_ptr(),
-                SurfaceProfile::PXBSP_THIRD_PERSON,
+                SurfaceProfile::THIRD_PERSON,
             )
         };
         assert_eq!(result.packets, 1);
@@ -2040,7 +2040,7 @@ mod tests {
 
     #[test]
     fn exact_projection_agrees_with_the_gte_where_it_does_not_saturate() {
-        // The PXBSP view: rotation scaled by 3, H = 320.
+        // The world view: rotation scaled by 3, H = 320.
         let scale = 0x3000;
         scene::set_screen_offset(160 << 16, 120 << 16);
         scene::set_projection_plane(320);

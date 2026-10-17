@@ -14,12 +14,10 @@ use psx_engine::{
     trace_collision, BodyStep, CharacterBlockerTraceProvider, CharacterCollisionAabb,
     CharacterCollisionCylinder, CharacterMotorConfig, CharacterMotorFrame, CharacterMotorInput,
     CharacterMotorState, CollisionQueryError, CollisionTrace, CollisionTraceQuery, OtFrame,
-    PrimitivePacketArena, PrimitiveSink, RoomPoint, ThirdPersonCameraConfig,
-    ThirdPersonCameraFrame, ThirdPersonCameraInput, ThirdPersonCameraState,
-    ThirdPersonCameraTarget, WorldCamera, WorldRenderPass, WorldSurfaceOptions,
+    PrimitivePacketArena, RoomPoint, ThirdPersonCameraConfig, ThirdPersonCameraFrame,
+    ThirdPersonCameraInput, ThirdPersonCameraState, ThirdPersonCameraTarget, WorldCamera,
 };
-use psx_game_runtime::destructibles::{DamageChannel, DamageOutcome, RuntimeDestructibles};
-use psx_gpu::prim::TriTextured;
+use psx_game_runtime::destructibles::RuntimeDestructibles;
 use psx_grid::collision::{GridCollision, GridTraceProvider};
 use psx_grid::contents::{contents_of_liquid_kind, LiquidContentsSample, CONTENTS_EMPTY};
 #[cfg(target_arch = "mips")]
@@ -465,7 +463,7 @@ impl GridRuntime {
             if !self.bounds_active(object.bounds_min, object.bounds_max) {
                 continue;
             }
-            if object.flags & world_object_flags::DIRECT_BRUSH_OCCLUSION != 0
+            if object.flags & world_object_flags::DIRECT_OCCLUSION != 0
                 && !self.box_clear_from(eye, object.bounds_min, object.bounds_max)
             {
                 continue;
@@ -569,50 +567,6 @@ impl GridRuntime {
 
     pub(super) fn materials_ready(&self) -> bool {
         self.materials_latched
-    }
-
-    // ------------------------------------------------------------------
-    // Doors and destructibles: grid documents define none yet
-    // ------------------------------------------------------------------
-
-    pub(super) fn tick_doors(&mut self) {}
-
-    pub(super) fn damage_brush_destructibles_with_capsule(
-        &self,
-        _start: [i32; 3],
-        _end: [i32; 3],
-        _radius: u16,
-        _channel: DamageChannel,
-        _damage: u16,
-        _destructibles: &mut RuntimeDestructibles<{ psx_level::MAX_DESTRUCTIBLES }>,
-    ) -> DamageOutcome {
-        DamageOutcome::default()
-    }
-
-    pub(super) fn destructible_effect_origin(
-        &self,
-        _state_index: usize,
-    ) -> Option<([i32; 3], u16)> {
-        None
-    }
-
-    pub(super) fn spawn_destructible_fragments(&mut self, _state_index: usize) {}
-
-    pub(super) fn advance_destructible_fragments(&mut self, _delta_vblanks: u16) {}
-
-    pub(super) fn draw_destructible_fragments<const OT_DEPTH: usize>(
-        &self,
-        _camera: &WorldCamera,
-        _options: WorldSurfaceOptions,
-        _triangles: &mut impl PrimitiveSink<TriTextured>,
-        _world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
-    ) {
-    }
-
-    pub(super) fn set_door_open(&mut self, _mover: usize, _open: bool) {}
-
-    pub(super) fn nearest_door(&self, _player: RoomPoint, _distance: i32) -> Option<usize> {
-        None
     }
 
     // ------------------------------------------------------------------
