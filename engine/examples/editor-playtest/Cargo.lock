@@ -18,6 +18,7 @@ dependencies = [
  "psx-font",
  "psx-game-runtime",
  "psx-gpu",
+ "psx-grid",
  "psx-gte",
  "psx-io",
  "psx-level",
@@ -129,6 +130,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "psx-grid"
+version = "0.1.0"
+dependencies = [
+ "psx-bsp",
+ "psx-engine",
+ "psx-gpu",
+ "psx-gte",
+ "psx-math",
+]
+
+[[package]]
 name = "psx-gte"
 version = "0.1.0"
 dependencies = [
@@ -190,6 +202,7 @@ dependencies = [
  "psx-hw",
  "psx-io",
  "psx-math",
+ "psx-rt",
 ]
 
 [[package]]
