@@ -3,6 +3,7 @@
 
 use super::*;
 use psx_engine::{LoadedAnchoredCameraGte, Vec3I16, ViewVertex, WorldRenderLayer};
+use psx_gpu::material::TexturedPacketMaterial;
 use psx_math::int32::isqrt_i32;
 
 const ROWS: usize = 8;
@@ -537,11 +538,12 @@ impl PlayerScarf {
                             );
                             continue;
                         }
-                        submitted += submit_crystal_cloth(
+                        submitted += submit_crystal_cloth_views(
                             fragment.map(|v| camera.view_vertex(v)),
                             uvs,
                             camera,
                             material,
+                            packet,
                             layer_options,
                             triangles,
                             world,
@@ -689,6 +691,40 @@ fn submit_clipped_cloth<const N: usize>(
         }
     }
     submitted
+}
+
+/// [`submit_crystal_cloth`] for a caller that also holds the material's prepacked
+/// packet words. With every corner in front of the near plane the clipper
+/// returns the three corners unchanged, so the packet goes out directly, as it
+/// does for the cached strip corners; anything crossing the plane is clipped.
+#[allow(clippy::too_many_arguments)]
+fn submit_crystal_cloth_views<const N: usize>(
+    input: [ViewVertex; 3],
+    uvs: [(i32, i32); 3],
+    camera: WorldCamera,
+    material: TextureMaterial,
+    packet: TexturedPacketMaterial,
+    options: WorldSurfaceOptions,
+    arena: &mut PrimitivePacketArena<'_>,
+    world: &mut WorldRenderPass<'_, '_, N>,
+) -> u16 {
+    let near = camera.projection.near_z.max(1);
+    if input.iter().any(|v| v.z < near) {
+        return submit_crystal_cloth(input, uvs, camera, material, options, arena, world);
+    }
+    let [Some(a), Some(b), Some(c)] = input.map(|v| camera.projection.project_view(v)) else {
+        return 0;
+    };
+    world
+        .submit_textured_triangle_prepared(
+            arena,
+            [a, b, c],
+            uvs.map(|(u, v)| (u.clamp(0, 127) as u8, v.clamp(0, 127) as u8)),
+            material,
+            packet,
+            options,
+        )
+        .submitted_triangles
 }
 
 /// Clip position and UV together at the near plane, then submit native FT3s.
@@ -1036,6 +1072,89 @@ mod tests {
             }
             assert_eq!(count, 30);
             assert_eq!(s.points, before);
+        }
+    }
+    #[test]
+    fn crystal_cloth_direct_path_matches_the_clipper_for_corners_in_front() {
+        let projection = WorldProjection::new(160, 120, 256, 32);
+        let camera = WorldCamera::orbit(
+            projection,
+            WorldVertex::ZERO,
+            1800,
+            Angle::from_q12(0),
+            Angle::from_q12(0),
+        );
+        let mut seed = 0x2545_f491u32;
+        let mut next = |range: i32| {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            (seed % (range as u32 * 2 + 1)) as i32 - range
+        };
+        let words = |arena: &mut PrimitivePacketArena<'_>| {
+            let end = arena.used_slots();
+            let mut out = [[0u32; 9]; 4];
+            let mut n = 0;
+            unsafe {
+                arena.mutate_typed_slots::<TriTextured>(0, end, |t| {
+                    out[n] = [
+                        t.tag,
+                        t.tex_window,
+                        t.color_cmd,
+                        t.v0,
+                        t.v1,
+                        t.v2,
+                        t.uv0_clut,
+                        t.uv1_tpage,
+                        t.uv2,
+                    ];
+                    n += 1;
+                });
+            }
+            (n, out)
+        };
+        let materials = [
+            TextureMaterial::opaque(42, 5, (128, 128, 128)),
+            TextureMaterial::opaque(7, 9, (90, 200, 40)).with_blend_mode(BlendMode::Average),
+        ];
+        for cull in [CullMode::None, CullMode::Back, CullMode::Front] {
+            for split in [false, true] {
+                for material in materials {
+                    let packet = material.textured_packet_material();
+                    let options =
+                        WorldSurfaceOptions::new(DepthBand::whole(), DepthRange::new(0, 8192))
+                            .with_cull_mode(cull)
+                            .with_textured_triangle_splitting(split)
+                            .with_material_layer(material);
+                    for _ in 0..400 {
+                        let input = core::array::from_fn(|_| {
+                            ViewVertex::new(next(1600), next(1600), 20 + next(1500).abs())
+                        });
+                        let uvs = core::array::from_fn(|_| (next(160) + 20, next(160) + 20));
+                        let mut got = [(0u16, (0usize, [[0u32; 9]; 4])); 2];
+                        for (k, direct) in [false, true].into_iter().enumerate() {
+                            let mut storage = OrderingTable::<64>::new();
+                            let mut ot = OtFrame::begin(&mut storage);
+                            let mut commands = [WorldTriCommand::EMPTY; 64];
+                            let mut slots = psx_engine::PrimitivePacketScratch::<4>::ZERO;
+                            let mut arena = PrimitivePacketArena::new(&mut slots);
+                            let mut world = WorldRenderPass::new_bucketed(&mut ot, &mut commands);
+                            let submitted = if direct {
+                                submit_crystal_cloth_views(
+                                    input, uvs, camera, material, packet, options, &mut arena,
+                                    &mut world,
+                                )
+                            } else {
+                                submit_crystal_cloth(
+                                    input, uvs, camera, material, options, &mut arena, &mut world,
+                                )
+                            };
+                            got[k] = (submitted, words(&mut arena));
+                        }
+                        assert_eq!(got[0], got[1], "{input:?} {uvs:?} {cull:?} {split}");
+                    }
+                }
+            }
         }
     }
 }
