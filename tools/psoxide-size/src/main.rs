@@ -188,7 +188,7 @@ fn report(map: &LinkMap, image: Option<&Image>, top: usize, json: bool) -> (Stri
         class_total(&m, Class::Str)
     );
     let _ = writeln!(s, "\n== alignment padding between input sections");
-    for (name, (bytes, n)) in &pad {
+    for (name, (bytes, n)) in pad.iter().filter(|(_, (bytes, _))| *bytes > 0) {
         let _ = writeln!(s, "{name:<16}{bytes:>8} B in {n} gaps");
     }
 
@@ -399,12 +399,11 @@ fn run() -> Result<ExitCode, String> {
                 rows.sort_by_key(|it| std::cmp::Reverse(it.sec.size));
                 println!("\n== {class}: {} sections", rows.len());
                 for it in rows {
-                    println!(
-                        "{:>8}  {:<6} {}",
-                        it.sec.size,
-                        it.kind.name(),
-                        clip(&it.name, 120)
-                    );
+                    let shown = it
+                        .text
+                        .as_deref()
+                        .map_or_else(|| clip(&it.name, 120), |t| format!("{t:?}"));
+                    println!("{:>8}  {:<6} {}", it.sec.size, it.kind.name(), shown);
                 }
             }
             let mut failed = false;
