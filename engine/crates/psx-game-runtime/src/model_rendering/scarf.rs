@@ -398,25 +398,42 @@ impl PlayerScarf {
                 self.anchor.z + self.points[i][2] / Q,
             );
         }
-        let gte = LoadedAnchoredCameraGte::load(camera, self.anchor);
+        let assembly = assembly.filter(|effect| !effect.is_assembled());
+        // Textured cloth in its solid state reads neither the GTE projection
+        // below (only the wire and flat-colour paths do) nor a per-triangle
+        // view transform: each strip corner is shared by up to six triangles,
+        // so it is transformed and divided once here and the triangle loop
+        // reuses it. The values are the ones the per-triangle path computed.
+        let cached =
+            crystal.is_some() && assembly.is_none() && matches!(dash, DashWireVisual::Solid);
         let mut projected = [ProjectedVertex::INVALID; 32];
-        for start in (0..32).step_by(3) {
-            let local = core::array::from_fn(|k| {
-                let p = vertices[(start + k).min(31)];
-                Vec3I16::new(
-                    (p.x - self.anchor.x) as i16,
-                    (p.y - self.anchor.y) as i16,
-                    (p.z - self.anchor.z) as i16,
-                )
-            });
-            let out = gte.project_points(local);
-            for k in 0..3 {
-                if start + k < 32 {
-                    projected[start + k] = out[k];
+        if !cached {
+            let gte = LoadedAnchoredCameraGte::load(camera, self.anchor);
+            for start in (0..32).step_by(3) {
+                let local = core::array::from_fn(|k| {
+                    let p = vertices[(start + k).min(31)];
+                    Vec3I16::new(
+                        (p.x - self.anchor.x) as i16,
+                        (p.y - self.anchor.y) as i16,
+                        (p.z - self.anchor.z) as i16,
+                    )
+                });
+                let out = gte.project_points(local);
+                for k in 0..3 {
+                    if start + k < 32 {
+                        projected[start + k] = out[k];
+                    }
                 }
             }
         }
-        let assembly = assembly.filter(|effect| !effect.is_assembled());
+        let mut views = [ViewVertex::new(0, 0, 0); 32];
+        let mut cpu_projected = [None; 32];
+        if cached {
+            for i in 0..32 {
+                views[i] = camera.view_vertex(vertices[i]);
+                cpu_projected[i] = camera.projection.project_view(views[i]);
+            }
+        }
         let options = options
             .with_cull_mode(CullMode::None)
             .with_render_layer(WorldRenderLayer::Opaque);
@@ -484,12 +501,42 @@ impl PlayerScarf {
                         } else {
                             [(108, v0), (20, v1), (108, v1)]
                         };
+                        let layer_options = options.with_material_layer(material);
+                        if cached {
+                            let corners = indices.map(|i| cpu_projected[i]);
+                            if let [Some(a), Some(b), Some(c)] = corners {
+                                // No corner is behind the near plane, so the
+                                // clipper would hand these three back as they are.
+                                submitted += world
+                                    .submit_textured_triangle(
+                                        triangles,
+                                        [a, b, c],
+                                        uvs.map(|(u, v)| {
+                                            (u.clamp(0, 127) as u8, v.clamp(0, 127) as u8)
+                                        }),
+                                        material,
+                                        layer_options,
+                                    )
+                                    .submitted_triangles;
+                                continue;
+                            }
+                            submitted += submit_crystal_cloth(
+                                indices.map(|i| views[i]),
+                                uvs,
+                                camera,
+                                material,
+                                layer_options,
+                                triangles,
+                                world,
+                            );
+                            continue;
+                        }
                         submitted += submit_crystal_cloth(
                             fragment.map(|v| camera.view_vertex(v)),
                             uvs,
                             camera,
                             material,
-                            options.with_material_layer(material),
+                            layer_options,
                             triangles,
                             world,
                         );
