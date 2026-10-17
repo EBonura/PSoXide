@@ -196,13 +196,16 @@ impl MaterialBinder for Binder<'_> {
     }
 }
 
-/// Distance LOD for far floors. `PSXED_GRID_LOD_FAR` overrides the sector
-/// distance (0 turns the merged quads off) for measurements.
+/// Distance LOD for far floors, off by default: `PSXED_GRID_LOD_FAR=<sectors>`
+/// turns the merged far quads on beyond that distance (`cook::lod::LOD_FAR_CELLS`
+/// is the measured setting). Merged quads cut the Cathedral route's world cost
+/// at the tail (p99 and worst frame) but leave one-pixel gaps along some merged
+/// edges, so they wait for a crack-free stitch before becoming the default.
 fn lod_far_cells() -> u8 {
     std::env::var("PSXED_GRID_LOD_FAR")
         .ok()
         .and_then(|v| v.trim().parse::<u8>().ok())
-        .unwrap_or(cook::lod::LOD_FAR_CELLS)
+        .unwrap_or(0)
 }
 
 /// Cook the active scene's grid world into a package record, registering the

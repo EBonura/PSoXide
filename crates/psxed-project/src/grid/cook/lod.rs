@@ -11,9 +11,8 @@
 //! `QUAD_LOD_COVERED`; at runtime a block beyond `lod_far_cells` draws the
 //! merged quads instead of the covered ones.
 //!
-//! Merged UVs run up to 4 cells, 128 texels, so they are written relative to
-//! one whole texture period and the runtime draws them under the material's
-//! texture window, which wraps the texture exactly as separate cells would.
+//! A merged quad spans at most two cells (64 texels), so its UVs stay inside
+//! one texture repeat and it draws with the same packet as a cell quad.
 
 use std::collections::HashMap;
 
@@ -25,8 +24,12 @@ use super::render::{Tables, TILE_TEXELS};
 
 /// Cells per block edge, as a shift.
 pub const LOD_SHIFT: u8 = 2;
+/// Most cells a merged quad spans along one edge. Two cells are 64 texels:
+/// the span stays inside one texture repeat.
+pub const MAX_SPAN: usize = 2;
 /// Distance in sectors beyond which a block draws its merged quads.
 pub const LOD_FAR_CELLS: u8 = 6;
+// The cook tests pass this explicitly; Play leaves LOD off by default.
 
 /// Merged output of one room.
 #[derive(Default)]
@@ -140,11 +143,11 @@ pub fn build(width: usize, depth: usize, s: i32, merge_far: bool, tables: &mut T
                                     && grid[z * block + x].is_some()
                             };
                         let mut w = 1;
-                        while free(dx + w, dz, &claimed, grid) {
+                        while w < MAX_SPAN && free(dx + w, dz, &claimed, grid) {
                             w += 1;
                         }
                         let mut h = 1;
-                        'rows: loop {
+                        'rows: while h < MAX_SPAN {
                             for x in dx..dx + w {
                                 if !free(x, dz + h, &claimed, grid) {
                                     break 'rows;
@@ -303,18 +306,19 @@ fn merge(
             let _ = q;
         }
     }
-    // One whole-period shift for the rectangle; the span must fit the u8
-    // packet window.
+    // One whole-period shift for the rectangle. The span stays inside one
+    // 64 texel repeat (two cells), so merged quads need no texture window and
+    // use the same packet as a cell; the far edge clamps to 63 like a cell's.
     let mut uv = [[0u8; 2]; 4];
     for axis in 0..2 {
         let min = texel.iter().map(|t| t[axis]).fold(f64::MAX, f64::min);
         let shift = (min / TILE_TEXELS).floor() * TILE_TEXELS;
         for k in 0..4 {
             let value = (texel[k][axis] - shift).round();
-            if !(0.0..=255.0).contains(&value) {
+            if !(0.0..=TILE_TEXELS + 0.5).contains(&value) {
                 return None;
             }
-            uv[k][axis] = value as u8;
+            uv[k][axis] = value.min(TILE_TEXELS - 1.0) as u8;
         }
     }
     // Ring order of the prototype: the cell quad's corners walk NW,NE,SE,SW
