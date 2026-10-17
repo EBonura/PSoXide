@@ -52,6 +52,13 @@ const STEP: u32 = 4;
 /// profile binds 94.4% onto its monster-route feature build.
 pub const MIN_BOUND: f64 = 0.98;
 
+/// The largest share of a layout profile's instructions one function may
+/// have and still not bind. The total above would let a hot function slip
+/// through: one `play` loop at 1.5% of the profile is placed as cold code, in
+/// a gap among the hot functions, and the build is slower with no message. So
+/// every function this hot that fails to bind is an error by itself.
+pub const MAX_UNBOUND_HOT: f64 = 0.01;
+
 /// Input-section name prefixes in front of a function's symbol.
 const PREFIXES: [&str; 5] = [
     ".text.hot.",
@@ -613,6 +620,16 @@ impl Layout {
     }
 }
 
+/// A function of a layout profile that did not bind, and why.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Unbound {
+    pub key: String,
+    pub instructions: u64,
+    /// The name is in the build but its code differs; otherwise the build has
+    /// no function of that name (or two share it).
+    pub changed: bool,
+}
+
 /// How much of a layout profile bound onto a build.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Coverage {
@@ -623,6 +640,8 @@ pub struct Coverage {
     pub missing: usize,
     pub instructions: u64,
     pub bound_instructions: u64,
+    /// Every function that did not bind, hottest first.
+    pub unbound: Vec<Unbound>,
 }
 
 impl Coverage {
@@ -633,19 +652,78 @@ impl Coverage {
         self.bound_instructions as f64 / self.instructions as f64
     }
 
+    /// The `limit` hottest functions that did not bind, as `name (share of
+    /// the profile, why)`.
+    pub fn worst(&self, limit: usize) -> String {
+        let total = self.instructions.max(1) as f64;
+        self.unbound
+            .iter()
+            .take(limit)
+            .map(|function| {
+                format!(
+                    "{} ({:.2}%, {})",
+                    function.key,
+                    100.0 * function.instructions as f64 / total,
+                    if function.changed {
+                        "code changed"
+                    } else {
+                        "not in this build"
+                    }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
     /// Refuse a profile that binds less than `minimum` of its instructions.
     pub fn check(&self, minimum: f64) -> Result<()> {
         if self.share() < minimum {
             return Err(format!(
                 "the layout profile binds {:.1}% of its instructions onto this build, under \
-                 the {:.0}% it needs ({self}); regenerate it with `order` on this code, \
-                 features and variant",
+                 the {:.0}% it needs ({self}); unbound, hottest first: {}; regenerate it with \
+                 `order` on this code, features and variant",
                 100.0 * self.share(),
-                100.0 * minimum
+                100.0 * minimum,
+                self.worst(5)
             )
             .into());
         }
         Ok(())
+    }
+
+    /// Refuse a profile with a function of more than `maximum` of its
+    /// instructions that did not bind, however well the rest does.
+    pub fn check_hot(&self, maximum: f64) -> Result<()> {
+        let total = self.instructions.max(1) as f64;
+        let hot: Vec<&Unbound> = self
+            .unbound
+            .iter()
+            .filter(|function| function.instructions as f64 / total > maximum)
+            .collect();
+        if hot.is_empty() {
+            return Ok(());
+        }
+        Err(format!(
+            "{} hot function(s) of the layout profile did not bind onto this build and would be \
+             placed as cold code: {}; regenerate it with `order` on this code, features and \
+             variant",
+            hot.len(),
+            Coverage {
+                unbound: hot.into_iter().cloned().collect(),
+                instructions: self.instructions,
+                ..Coverage::default()
+            }
+            .worst(8)
+        )
+        .into())
+    }
+
+    /// The gate every user of a layout runs before placing anything: enough
+    /// of the profile binds ([`MIN_BOUND`]) and no hot function is left out
+    /// ([`MAX_UNBOUND_HOT`]).
+    pub fn gate(&self) -> Result<()> {
+        self.check(MIN_BOUND)?;
+        self.check_hot(MAX_UNBOUND_HOT)
     }
 }
 
@@ -696,6 +774,11 @@ pub fn bind(layout: &Layout, sections: &[Section], image: &Image) -> Bound {
         coverage.instructions += instructions;
         let Some(&at) = index.get(function.key.as_str()) else {
             coverage.missing += 1;
+            coverage.unbound.push(Unbound {
+                key: function.key.clone(),
+                instructions,
+                changed: false,
+            });
             continue;
         };
         let same = sections[at].size / 4 == function.words
@@ -704,6 +787,11 @@ pub fn bind(layout: &Layout, sections: &[Section], image: &Image) -> Bound {
             });
         if !same {
             coverage.changed += 1;
+            coverage.unbound.push(Unbound {
+                key: function.key.clone(),
+                instructions,
+                changed: true,
+            });
             continue;
         }
         coverage.bound += 1;
@@ -728,6 +816,10 @@ pub fn bind(layout: &Layout, sections: &[Section], image: &Image) -> Bound {
         }
     }
     bound.calls.sort_by_key(|call| (call.0, call.1));
+    bound
+        .coverage
+        .unbound
+        .sort_by_key(|function| std::cmp::Reverse(function.instructions));
     bound
 }
 
@@ -1433,6 +1525,39 @@ mod tests {
         assert!((bound.coverage.share() - 800.0 / 1410.0).abs() < 1e-9);
         assert!(bound.coverage.check(MIN_BOUND).is_err());
         assert!(bound.coverage.check(0.5).is_ok());
+        // The gate names the function that fell out, hottest first.
+        let message = bound.coverage.gate().unwrap_err().to_string();
+        assert!(message.contains("main (43.26%, code changed)"), "{message}");
+    }
+
+    #[test]
+    fn one_hot_function_failing_to_bind_fails_the_gate_alone() {
+        let hot = |key: &str, instructions| Unbound {
+            key: key.into(),
+            instructions,
+            changed: true,
+        };
+        // 99.0% bound overall, but `play` is 1.5% of the profile and not bound.
+        let coverage = Coverage {
+            functions: 3,
+            bound: 2,
+            changed: 1,
+            instructions: 1000,
+            bound_instructions: 985,
+            unbound: vec![hot("play", 15)],
+            ..Coverage::default()
+        };
+        assert!(coverage.check(MIN_BOUND).is_ok());
+        let message = coverage.gate().unwrap_err().to_string();
+        assert!(message.contains("play (1.50%, code changed)"), "{message}");
+        // A cold straggler (0.5%) is fine.
+        let cold = Coverage {
+            instructions: 1000,
+            bound_instructions: 995,
+            unbound: vec![hot("cold", 5)],
+            ..Coverage::default()
+        };
+        assert!(cold.gate().is_ok());
     }
 
     #[test]
