@@ -336,6 +336,11 @@ pub mod plane_kind {
     pub const BLOCKER: u8 = 3;
 }
 
+/// [`ColPlane::flags`] bit: the first copy of its plane in the table. Every
+/// plane is copied into each sector it touches; the per-sector scans want
+/// all copies, point rays want each plane once and skip the rest.
+pub const COLPLANE_PRIMARY: u8 = 1;
+
 /// A collidable free plane, 28 bytes.
 ///
 /// Per kind, all coordinates room-local runtime units:
@@ -354,7 +359,7 @@ pub mod plane_kind {
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct ColPlane {
     pub kind: u8,
-    /// Reserved, zero.
+    /// [`COLPLANE_PRIMARY`], other bits reserved zero.
     pub flags: u8,
     /// Index of the plane in the room, so a trace counts it once.
     pub id: u8,

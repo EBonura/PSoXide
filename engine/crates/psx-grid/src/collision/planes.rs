@@ -300,6 +300,9 @@ impl<'a> GridCollision<'a> {
         ];
         let b = [a[0] + q.d[0], a[1] + q.d[1], a[2] + q.d[2]];
         for (index, plane) in view.col_planes.iter().enumerate() {
+            if plane.flags & COLPLANE_PRIMARY == 0 {
+                continue;
+            }
             match plane.kind {
                 plane_kind::WALL => self.ray_wall(room, index, plane, &a, &b, q, hit),
                 plane_kind::PLATFORM => self.ray_platform(room, index, plane, &a, &b, q, hit),
