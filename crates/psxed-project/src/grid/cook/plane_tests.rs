@@ -230,3 +230,50 @@ fn planes_outside_the_room_or_steep_walkables_are_reported() {
             && i.severity() == Severity::Warning));
     assert!(cook(&world).is_ok());
 }
+
+/// A binder for which material 9 is see-through (a banner or a grate).
+struct SeeThrough;
+
+impl super::MaterialBinder for SeeThrough {
+    fn bind(&mut self, material: Option<ResourceId>) -> Result<super::BoundMaterial, String> {
+        super::tests::TestBinder.bind(material)
+    }
+
+    fn see_through(&self, material: Option<ResourceId>) -> bool {
+        material == Some(rid(9))
+    }
+}
+
+#[test]
+fn the_camera_passes_through_see_through_planes_by_default_and_the_flag_overrides() {
+    let flagged = |plane: GridPlane| -> bool {
+        let mut world = ditch_world();
+        world.rooms[0].planes.push(plane);
+        let cooked = super::cook_level(
+            super::CookInput {
+                world: &world,
+                binder: &mut SeeThrough,
+                lights: &[],
+                first_pack_sector: 100,
+                lod_far_cells: 0,
+            },
+            None,
+        )
+        .unwrap();
+        let record = cooked.tables[0].col_planes[0];
+        record.flags & psx_grid::COLPLANE_CAMERA_PASS != 0
+    };
+    let wall = |material, pass| {
+        let mut plane = GridPlane::new([2048, 256, 1536], [2048, 512]);
+        plane.collision = PlaneCollision::Solid;
+        plane.material = material;
+        plane.camera_pass = pass;
+        plane
+    };
+    // Automatic: a see-through material passes, an opaque one does not.
+    assert!(flagged(wall(Some(rid(9)), None)));
+    assert!(!flagged(wall(Some(rid(8)), None)));
+    // The flag wins either way.
+    assert!(!flagged(wall(Some(rid(9)), Some(false))));
+    assert!(flagged(wall(Some(rid(8)), Some(true))));
+}

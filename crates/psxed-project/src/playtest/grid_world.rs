@@ -111,6 +111,34 @@ struct Binder<'a> {
 }
 
 impl MaterialBinder for Binder<'_> {
+    fn see_through(&self, material: Option<ResourceId>) -> bool {
+        let Some(id) = material else {
+            return false;
+        };
+        let Some(ResourceData::Material(data)) = self.project.resource(id).map(|r| &r.data) else {
+            return false;
+        };
+        if data.blend_mode != PsxBlendMode::Opaque {
+            return true;
+        }
+        if data.sky_aperture {
+            return false;
+        }
+        crate::resolve_material_texture_psxt(self.project, id, self.root)
+            .ok()
+            .flatten()
+            .is_some_and(|(_, bytes)| {
+                Texture::from_bytes(&bytes).is_ok_and(|t| t.is_index_zero_transparent())
+            })
+    }
+
+    fn uv_default(&self, material: ResourceId) -> Option<crate::face_uv::UvMode> {
+        crate::grid::UvDefaults::default_uv(
+            &crate::grid::uv::ProjectUvDefaults(self.project),
+            material,
+        )
+    }
+
     fn bind(&mut self, material: Option<ResourceId>) -> Result<BoundMaterial, String> {
         let mut tint = [128; 3];
         let mut blend = PsxBlendMode::Opaque;

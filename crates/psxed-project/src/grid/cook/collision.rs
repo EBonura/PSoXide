@@ -104,6 +104,17 @@ fn surface_flags(surface: &GridSurface) -> bool {
 
 /// Build the collision tables of `room`. `sector` is S.
 pub fn build(units: &RuntimeUnits, room: &GridRoom, room_index: usize) -> Result<Tables, String> {
+    build_with(units, room, room_index, &mut |_| false)
+}
+
+/// [`build`], with `camera_pass` deciding which planes the camera arm passes
+/// through.
+pub fn build_with(
+    units: &RuntimeUnits,
+    room: &GridRoom,
+    room_index: usize,
+    camera_pass: &mut dyn FnMut(&crate::grid::plane::GridPlane) -> bool,
+) -> Result<Tables, String> {
     let s = units.sector();
     let mut tables = Tables::default();
     let origin = [
@@ -111,7 +122,7 @@ pub fn build(units: &RuntimeUnits, room: &GridRoom, room_index: usize) -> Result
         units.rt(room.y_offset),
         room.origin[1] * s as i32,
     ];
-    let planes = super::plane_collision::build(units, room, room_index, origin)?;
+    let planes = super::plane_collision::build(units, room, room_index, origin, camera_pass)?;
     let mut range: Option<(i32, i32)> = planes.range;
     let mut note = |lo: i16, hi: i16| {
         range = Some(match range {

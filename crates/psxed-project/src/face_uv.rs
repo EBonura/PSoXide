@@ -2,7 +2,60 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Per-face texture placement over the paraxial projection:
+/// How a face's texture is laid over it. Every face kind (floor, ceiling,
+/// authored and derived wall, plane) uses this one model; see
+/// `grid::uv` for the frames it is measured against.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UvMode {
+    /// Use the material's grid tiling default, else world aligned at 32
+    /// texels per sector (the mapping every older face has).
+    #[default]
+    Inherit,
+    /// Texel = world position times a density, so neighbouring faces line
+    /// up and a bigger face tiles more instead of stretching.
+    World {
+        /// Texels per sector along the frame's two axes. 32 is the legacy
+        /// density: half a 64 texel tile per sector.
+        texels_per_sector: [u16; 2],
+    },
+    /// The texture repeats a fixed number of times across the whole face
+    /// (its frame), whatever its size.
+    Fit {
+        /// Repeats along the frame's two axes in 1/16 steps: 16 is one
+        /// tile, 32 is 2x2.
+        repeats_q4: [u16; 2],
+    },
+}
+
+impl UvMode {
+    /// The legacy mapping: world aligned, 32 texels per sector.
+    pub const LEGACY: Self = Self::World {
+        texels_per_sector: [32, 32],
+    };
+
+    /// FIT with whole-tile repeats `h` by `v`.
+    pub const fn fit(h: u16, v: u16) -> Self {
+        Self::Fit {
+            repeats_q4: [h * 16, v * 16],
+        }
+    }
+
+    /// Whether this is `Inherit`.
+    pub fn is_inherit(&self) -> bool {
+        matches!(self, Self::Inherit)
+    }
+}
+
+fn zero_u8(value: &u8) -> bool {
+    *value == 0
+}
+
+fn no_flip(flip: &[bool; 2]) -> bool {
+    !flip[0] && !flip[1]
+}
+
+/// Per-face texture placement. The mode, quarter turns and flips lay the
+/// texture over the face's frame; the fine controls then adjust it:
 /// `uv' = rotate(rotation_deg, uv * 256 / scale_q8) + offset_texels`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FaceUv {
@@ -12,6 +65,15 @@ pub struct FaceUv {
     pub rotation_deg: i16,
     /// Per-axis scale, Q8 (256 = 1.0). Larger = texture appears bigger.
     pub scale_q8: [i16; 2],
+    /// How the texture is laid over the face's frame.
+    #[serde(default, skip_serializing_if = "UvMode::is_inherit")]
+    pub mode: UvMode,
+    /// Quarter turns of the texture on the face, clockwise, `0..=3`.
+    #[serde(default, skip_serializing_if = "zero_u8")]
+    pub turns: u8,
+    /// Mirror the texture horizontally / vertically on the face.
+    #[serde(default, skip_serializing_if = "no_flip")]
+    pub flip: [bool; 2],
 }
 
 impl Default for FaceUv {
@@ -20,6 +82,9 @@ impl Default for FaceUv {
             offset_texels: [0, 0],
             rotation_deg: 0,
             scale_q8: [256, 256],
+            mode: UvMode::Inherit,
+            turns: 0,
+            flip: [false, false],
         }
     }
 }
@@ -28,6 +93,12 @@ impl FaceUv {
     /// Whether this is the identity placement.
     pub fn is_identity(&self) -> bool {
         *self == Self::default()
+    }
+
+    /// Whether the fine controls (offset, free rotation, scale) are at their
+    /// defaults, whatever the mode, turns and flips are.
+    pub fn fine_is_identity(&self) -> bool {
+        self.offset_texels == [0, 0] && self.rotation_deg == 0 && self.scale_q8 == [256, 256]
     }
 
     /// Compensate the offset so a raw-texel shift of the underlying

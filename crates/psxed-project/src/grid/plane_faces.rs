@@ -10,21 +10,37 @@
 //! neighbouring pieces of one plane share corners exactly and the cook welds
 //! them like any other vertex.
 
-use crate::face_uv::FaceUv;
+use crate::face_uv::{FaceUv, UvMode};
 
-use super::faces::{editor_point, place, Builder, Corner, GridFace, GridFaceKind};
+use super::faces::{editor_point, Builder, Corner, GridFace, GridFaceKind, UvDefaults};
 use super::plane::{GridPlane, PlaneUvMode};
 use super::units::{SECTOR_UNITS, TEXELS_PER_SECTOR};
+use super::uv::{Frame, Mapper};
 use super::world::GridWorld;
 
 /// Texels one whole texture spans in [`PlaneUvMode::Stretch`] (the grid
 /// renderer tiles 64 by 64 textures).
 pub const STRETCH_TEXELS: f64 = 64.0;
 
-/// Cut positions along an axis of `length` grid units, from 0 to `length`.
-fn cuts(length: i32, mode: PlaneUvMode) -> Vec<f64> {
+/// The tiling mode a plane uses: its own shared-model mode when set, else
+/// the legacy Tile (world aligned at its top-left corner) or Stretch (one
+/// whole texture across).
+pub fn effective_mode(plane: &GridPlane) -> UvMode {
+    match plane.uv.mode {
+        UvMode::Inherit => match plane.uv_mode {
+            PlaneUvMode::Tile => UvMode::LEGACY,
+            PlaneUvMode::Stretch => UvMode::fit(1, 1),
+        },
+        own => own,
+    }
+}
+
+/// Cut positions along an axis of `length` grid units, from 0 to `length`:
+/// at every sector for a world mapping, so each piece stays inside one
+/// texture repeat and the light bake has corners to work with.
+fn cuts(length: i32, mode: UvMode) -> Vec<f64> {
     let mut out = vec![0.0];
-    if mode == PlaneUvMode::Tile {
+    if matches!(mode, UvMode::World { .. }) {
         let mut at = SECTOR_UNITS;
         while at < length {
             out.push(f64::from(at));
@@ -35,33 +51,21 @@ fn cuts(length: i32, mode: PlaneUvMode) -> Vec<f64> {
     out
 }
 
-/// Texel coordinates of the point `(s, t)` grid units from the top-left
-/// corner, before the plane's own [`FaceUv`].
-fn raw_texels(plane: &GridPlane, s: f64, t: f64) -> [f64; 2] {
-    match plane.uv_mode {
-        PlaneUvMode::Tile => {
-            let texel = f64::from(TEXELS_PER_SECTOR) / f64::from(SECTOR_UNITS);
-            [s * texel, t * texel]
-        }
-        PlaneUvMode::Stretch => [
-            s / f64::from(plane.size[0].max(1)) * STRETCH_TEXELS,
-            t / f64::from(plane.size[1].max(1)) * STRETCH_TEXELS,
-        ],
-    }
-}
-
-/// Centre the texture transform turns about, in raw texels.
-fn texel_centre(plane: &GridPlane) -> [f64; 2] {
-    raw_texels(
-        plane,
-        f64::from(plane.size[0]) / 2.0,
-        f64::from(plane.size[1]) / 2.0,
-    )
-}
-
 /// Append the faces of plane `index` of `room`. A missing or disabled plane
 /// appends nothing.
 pub fn plane_faces(world: &GridWorld, room: usize, index: usize, out: &mut Vec<GridFace>) {
+    plane_faces_with(world, &(), room, index, out);
+}
+
+/// [`plane_faces`] with the materials' tiling defaults (planes name their
+/// mode, so they never take one; kept for one signature across face kinds).
+pub fn plane_faces_with(
+    world: &GridWorld,
+    defaults: &dyn UvDefaults,
+    room: usize,
+    index: usize,
+    out: &mut Vec<GridFace>,
+) {
     let Some(r) = world.rooms.get(room) else {
         return;
     };
@@ -74,23 +78,38 @@ pub fn plane_faces(world: &GridWorld, room: usize, index: usize, out: &mut Vec<G
         room,
         cell: plane.center_cell(),
         y_offset: r.y_offset,
+        defaults,
+        legacy_uv: false,
+        frame: Frame::around([[0.0, 0.0]]),
         out,
     };
     let (scale, y_offset) = (builder.scale, builder.y_offset);
-    let centre = texel_centre(plane);
-    let uv: FaceUv = plane.uv;
+    let mode = effective_mode(plane);
+    // The frame is the plane rectangle, measured from its top-left corner.
+    let frame = Frame {
+        min: [0.0, 0.0],
+        max: [f64::from(plane.size[0]), f64::from(plane.size[1])],
+    };
+    // Legacy centre of a world mapping: half the plane at the default
+    // density.
+    let texel = f64::from(TEXELS_PER_SECTOR) / f64::from(SECTOR_UNITS);
+    let legacy_centre = [
+        f64::from(plane.size[0]) / 2.0 * texel,
+        f64::from(plane.size[1]) / 2.0 * texel,
+    ];
+    let uv = FaceUv { mode, ..plane.uv };
+    let mapper = Mapper::new(&uv, None, frame, legacy_centre);
+    builder.legacy_uv = mapper.is_legacy();
+    builder.frame = frame;
     let corner = |s: f64, t: f64| {
         let g = plane.point_grid(s, t);
         Corner {
             p: editor_point(scale, y_offset, g[0], g[1], g[2]),
             g: [g[0], y_offset + g[1], g[2]],
-            uv: place(&uv, centre, raw_texels(plane, s, t)),
+            uv: mapper.texel([s, t]),
         }
     };
-    let (us, vs) = (
-        cuts(plane.size[0], plane.uv_mode),
-        cuts(plane.size[1], plane.uv_mode),
-    );
+    let (us, vs) = (cuts(plane.size[0], mode), cuts(plane.size[1], mode));
     let toward = plane.normal();
     for v in vs.windows(2) {
         for u in us.windows(2) {

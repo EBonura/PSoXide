@@ -15,9 +15,11 @@ use psx_grid::{
 };
 
 use super::units::RuntimeUnits;
-use crate::grid::faces::{cell_faces, GridFace};
+use crate::face_uv::UvMode;
+use crate::grid::faces::{cell_faces_with, GridFace, UvDefaults};
 use crate::grid::light::{lit_face_corner, GridLight};
-use crate::grid::plane_faces::plane_faces;
+use crate::grid::plane_faces::plane_faces_with;
+use crate::grid::uv_split;
 use crate::grid::world::GridWorld;
 use crate::ResourceId;
 
@@ -47,6 +49,27 @@ pub struct BoundMaterial {
 pub trait MaterialBinder {
     /// The binding of `material`, or why it cannot be bound.
     fn bind(&mut self, material: Option<ResourceId>) -> Result<BoundMaterial, String>;
+
+    /// The grid tiling default of `material`, for faces that do not name a
+    /// mode. Binders without a project have none.
+    fn uv_default(&self, _material: ResourceId) -> Option<UvMode> {
+        None
+    }
+
+    /// Whether `material` is see-through (translucent or alpha-cut), which
+    /// decides whether the camera passes through a plane wearing it.
+    fn see_through(&self, _material: Option<ResourceId>) -> bool {
+        false
+    }
+}
+
+/// A binder's tiling defaults, as the face builder wants them.
+struct BinderDefaults<'a>(&'a dyn MaterialBinder);
+
+impl UvDefaults for BinderDefaults<'_> {
+    fn default_uv(&self, material: ResourceId) -> Option<UvMode> {
+        self.0.uv_default(material)
+    }
 }
 
 /// The level's material table, grown in first-use order.
@@ -82,6 +105,8 @@ pub struct RenderStats {
     pub triangles: usize,
     pub collapsed: usize,
     pub uv_overflow: usize,
+    /// Primitives added by cutting faces at texture tile boundaries.
+    pub uv_split_quads: usize,
     pub lit_corners: usize,
 }
 
@@ -204,10 +229,44 @@ impl RoomBuild {
         Ok(id)
     }
 
-    /// Cook one face into the tables. `place` names the face for errors and
-    /// `extra_flags` is OR-ed into the quad flags (the plane marker).
+    /// Cook one face, cut at the texture tile boundaries first when its
+    /// texels run across more than one tile. `place` names the face for
+    /// errors and `extra_flags` is OR-ed into the quad flags (the plane
+    /// marker).
     #[allow(clippy::too_many_arguments)]
     fn add_face(
+        &mut self,
+        cx: &mut Context<'_>,
+        face: &GridFace,
+        room_index: usize,
+        origin: [i32; 3],
+        ambient: [u8; 3],
+        place: &dyn Fn() -> String,
+        extra_flags: u8,
+    ) -> Result<(), String> {
+        let textured = if uv_split::wants_split(face) {
+            let slot = cx.materials.slot(cx.binder, face.material)?;
+            cx.materials.slots[usize::from(slot)].1.textured
+        } else {
+            false
+        };
+        if !textured {
+            return self.add_piece(cx, face, room_index, origin, ambient, place, extra_flags);
+        }
+        let pieces = uv_split::split(face, cx.world.scale);
+        self.tables.stats.uv_split_quads += pieces.len() - 1;
+        // The face counts once, however many primitives it became.
+        let faces_before = self.tables.stats.faces;
+        for piece in &pieces {
+            self.add_piece(cx, piece, room_index, origin, ambient, place, extra_flags)?;
+        }
+        self.tables.stats.faces = faces_before + 1;
+        Ok(())
+    }
+
+    /// Cook one face that fits one tile into the tables.
+    #[allow(clippy::too_many_arguments)]
+    fn add_piece(
         &mut self,
         cx: &mut Context<'_>,
         face: &GridFace,
@@ -378,7 +437,14 @@ pub fn build(
     for z in 0..room.depth {
         for x in 0..room.width {
             faces.clear();
-            cell_faces(cx.world, room_index, x, z, &mut faces);
+            cell_faces_with(
+                cx.world,
+                &BinderDefaults(&*cx.binder),
+                room_index,
+                x,
+                z,
+                &mut faces,
+            );
             let first = build.tables.quads.len();
             build.range = (i32::MAX, i32::MIN);
             for face in &faces {
@@ -408,7 +474,13 @@ pub fn build(
     // for the renderer's per-frame frustum test.
     for index in 0..room.planes.len() {
         faces.clear();
-        plane_faces(cx.world, room_index, index, &mut faces);
+        plane_faces_with(
+            cx.world,
+            &BinderDefaults(&*cx.binder),
+            room_index,
+            index,
+            &mut faces,
+        );
         if faces.is_empty() {
             continue;
         }

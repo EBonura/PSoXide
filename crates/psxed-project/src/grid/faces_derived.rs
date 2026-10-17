@@ -7,16 +7,16 @@
 //! its host sector, so its texture reads the same way an authored front-facing
 //! wall of that sector would.
 
-use crate::face_uv::FaceUv;
-
-use super::derive::DerivedWall;
-use super::faces::{editor_point, place, Builder, Corner, GridFaceKind};
+use super::derive::{self, DerivedWall};
+use super::faces::{editor_point, Builder, Corner, GridFaceKind};
+use super::room::GridRoom;
 use super::sector::WallEdge;
 use super::units::{SECTOR_UNITS, TEXELS_PER_SECTOR};
+use super::uv::{Frame, Mapper};
 
 impl Builder<'_> {
     /// The faces of one derived wall hosted by the builder's cell.
-    pub(super) fn derived_wall(&mut self, wall: &DerivedWall) {
+    pub(super) fn derived_wall(&mut self, room: &GridRoom, wall: &DerivedWall) {
         if wall.hidden {
             return;
         }
@@ -38,38 +38,50 @@ impl Builder<'_> {
                 a[1] + (b[1] - a[1]) / SECTOR_UNITS * u,
             ]
         };
-        let u_of = |u: i32| -> f64 {
+        // Position along the host edge's walking direction, in grid units.
+        let u_grid = |u: i32| -> f64 {
             let [px, pz] = point(u);
             match wall.edge {
-                WallEdge::North => f64::from(px) * texel,
-                WallEdge::East => f64::from(pz) * texel,
-                WallEdge::South => -f64::from(px) * texel,
-                _ => -f64::from(pz) * texel,
+                WallEdge::North => f64::from(px),
+                WallEdge::East => f64::from(pz),
+                WallEdge::South => -f64::from(px),
+                _ => -f64::from(pz),
             }
         };
-        let v_of = |gy: i32| -f64::from(y_offset + gy) * texel;
+        let t_of = |gy: i32| -f64::from(y_offset + gy);
         let centre = match wall.heights {
             Some(h) => [
-                (u_of(0) + u_of(SECTOR_UNITS)) / 2.0,
-                (v_of(h[0]) + v_of(h[1]) + v_of(h[2]) + v_of(h[3])) / 4.0,
+                (u_grid(0) * texel + u_grid(SECTOR_UNITS) * texel) / 2.0,
+                (t_of(h[0]) * texel + t_of(h[1]) * texel + t_of(h[2]) * texel + t_of(h[3]) * texel)
+                    / 4.0,
             ],
             None => {
                 let n = wall.ring.len() as f64;
                 [
-                    wall.ring.iter().map(|p| u_of(p[0])).sum::<f64>() / n,
-                    wall.ring.iter().map(|p| v_of(p[1])).sum::<f64>() / n,
+                    wall.ring.iter().map(|p| u_grid(p[0]) * texel).sum::<f64>() / n,
+                    wall.ring.iter().map(|p| t_of(p[1]) * texel).sum::<f64>() / n,
                 ]
             }
         };
         let front = wall.edge.front_direction();
         let toward = [f64::from(front[0]), 0.0, f64::from(front[1])];
-        let uv: FaceUv = wall.uv.unwrap_or_default();
+        // The frame of a derived wall is its whole run, so a fit mapping
+        // repeats along the run and not per sector.
+        let run = derive::run_extent(room, wall);
+        let frame = Frame {
+            min: [run.u[0], t_of(run.y[1])],
+            max: [run.u[1], t_of(run.y[0])],
+        };
+        let uv = wall.uv.unwrap_or_default();
+        let mapper = Mapper::new(&uv, self.default_uv(wall.material), frame, centre);
+        self.legacy_uv = mapper.is_legacy();
+        self.frame = frame;
         let corner = |u: i32, gy: i32| {
             let [px, pz] = point(u);
             Corner {
                 p: editor_point(scale, y_offset, px, gy, pz),
                 g: [px, y_offset + gy, pz],
-                uv: place(&uv, centre, [u_of(u), v_of(gy)]),
+                uv: mapper.texel([u_grid(u), t_of(gy)]),
             }
         };
         let kind = GridFaceKind::Derived {

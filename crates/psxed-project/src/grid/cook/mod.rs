@@ -84,6 +84,8 @@ pub struct RoomReport {
     pub vertices: usize,
     pub collapsed: usize,
     pub uv_overflow: usize,
+    /// Primitives added by cutting faces at texture tile boundaries.
+    pub uv_split_quads: usize,
     /// Merged far quads and the cell quads they stand in for.
     pub lod_quads: usize,
     pub lod_covered: usize,
@@ -114,13 +116,18 @@ impl CookReport {
         for (i, r) in self.rooms.iter().enumerate() {
             let c = |ids: &[usize]| ids.iter().map(|&k| r.section_bytes[k]).sum::<usize>();
             text.push_str(&format!(
-                "  room {i} {:?} {}x{}: {} faces -> {} quads + {} tris, {} verts, {} lod quads over {}, {} B (collision {} B, vertices {} B, quads {} B, cells {} B)\n",
+                "  room {i} {:?} {}x{}: {} faces -> {} quads + {} tris{}, {} verts, {} lod quads over {}, {} B (collision {} B, vertices {} B, quads {} B, cells {} B)\n",
                 r.name,
                 r.width,
                 r.depth,
                 r.faces,
                 r.quads,
                 r.triangles,
+                if r.uv_split_quads > 0 {
+                    format!(" ({} from texture tile cuts)", r.uv_split_quads)
+                } else {
+                    String::new()
+                },
                 r.vertices,
                 r.lod_quads,
                 r.lod_covered,
@@ -196,7 +203,12 @@ pub fn cook_level(
             units.rt(room.y_offset),
             room.origin[1] * s as i32,
         ]);
-        cols.push(collision::build(&units, room, index)?);
+        let binder = &*input.binder;
+        cols.push(collision::build_with(&units, room, index, &mut |plane| {
+            plane
+                .camera_pass
+                .unwrap_or_else(|| binder.see_through(plane.material))
+        })?);
     }
     let probe_core = LevelCore {
         sector_units: s as u16,
@@ -343,6 +355,7 @@ pub fn cook_level(
             vertices: chunk.vertices.len(),
             collapsed: ren.stats.collapsed,
             uv_overflow: ren.stats.uv_overflow,
+            uv_split_quads: ren.stats.uv_split_quads,
             lod_quads: chunk.lod_quads.len(),
             lod_covered: chunk
                 .quads
@@ -454,3 +467,5 @@ mod plane_tests;
 mod spawn_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod uv_tests;

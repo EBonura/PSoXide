@@ -443,6 +443,66 @@ pub fn derived_range(room: &GridRoom, cell: [i32; 2]) -> Option<(i32, i32)> {
     range
 }
 
+/// Where a run of derived walls extends: the frame its texture is measured
+/// against.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RunExtent {
+    /// Smallest and largest position along the host edge's walking
+    /// direction, grid units (the same signed coordinate texels use: `x`
+    /// for a north edge, minus `x` for a south edge, and so on).
+    pub u: [f64; 2],
+    /// Lowest and highest room-relative height.
+    pub y: [i32; 2],
+    /// Sectors in the run.
+    pub cells: usize,
+}
+
+/// The run `wall` belongs to: the maximal chain of collinear faces on the
+/// same side with the same kind, material and texture override, which a fit
+/// mapping treats as one face.
+pub fn run_extent(room: &GridRoom, wall: &DerivedWall) -> RunExtent {
+    let along = match wall.edge {
+        WallEdge::North | WallEdge::South => [1, 0],
+        _ => [0, 1],
+    };
+    let same = |cell: [i32; 2]| {
+        edge_walls(room, cell, wall.edge).into_iter().find(|w| {
+            w.kind == wall.kind && !w.hidden && w.material == wall.material && w.uv == wall.uv
+        })
+    };
+    let mut members = vec![wall.clone()];
+    for sign in [-1, 1] {
+        let mut cell = wall.host;
+        loop {
+            cell = [cell[0] + along[0] * sign, cell[1] + along[1] * sign];
+            match same(cell) {
+                Some(next) => members.push(next),
+                None => break,
+            }
+        }
+    }
+    let line = |w: &DerivedWall| i64::from(if along[0] == 1 { w.host[0] } else { w.host[1] });
+    let (lo, hi) = (
+        members.iter().map(line).min().unwrap_or(0),
+        members.iter().map(line).max().unwrap_or(0),
+    );
+    let (start, end) = (
+        (lo * i64::from(SECTOR_UNITS)) as f64,
+        ((hi + 1) * i64::from(SECTOR_UNITS)) as f64,
+    );
+    let u = match wall.edge {
+        WallEdge::North | WallEdge::East => [start, end],
+        _ => [-end, -start],
+    };
+    let ys = members.iter().flat_map(|w| w.ring.iter().map(|p| p[1]));
+    let y = [ys.clone().min().unwrap_or(0), ys.max().unwrap_or(0)];
+    RunExtent {
+        u,
+        y,
+        cells: members.len(),
+    }
+}
+
 /// The derived faces on `cell`'s `edge` (from either side) as authored
 /// walls of that stack, so the wall tool sees them as already placed.
 pub fn virtual_walls(room: &GridRoom, cell: [i32; 2], edge: WallEdge) -> Vec<GridWall> {

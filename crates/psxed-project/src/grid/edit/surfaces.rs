@@ -4,7 +4,7 @@
 //! applies to both, `Some(0)` or `Some(1)` to just that triangle (which
 //! gives the surface its own second-triangle record when it had none).
 
-use crate::face_uv::FaceUv;
+use crate::face_uv::{FaceUv, UvMode};
 use crate::ResourceId;
 
 use super::super::surface::{GridSurface, GridTri, WallFacing};
@@ -30,6 +30,13 @@ pub enum UvOp {
     SetScale([i16; 2]),
     /// Set the rotation in degrees.
     SetRotation(i16),
+    /// Set how the texture is laid over the face's frame.
+    SetMode(UvMode),
+    /// Turn the texture a quarter, clockwise when `true`.
+    Turn(bool),
+    /// Mirror the texture horizontally (`0`) or vertically (`1`) on the
+    /// face.
+    ToggleFlip(usize),
 }
 
 impl UvOp {
@@ -47,6 +54,19 @@ impl UvOp {
             Self::SetOffset(o) => uv.offset_texels = o,
             Self::SetScale(s) => uv.scale_q8 = s,
             Self::SetRotation(r) => uv.rotation_deg = r,
+            Self::SetMode(mode) => uv.mode = mode,
+            Self::Turn(clockwise) => {
+                uv.turns = if clockwise {
+                    (uv.turns + 1) & 3
+                } else {
+                    (uv.turns + 3) & 3
+                };
+            }
+            Self::ToggleFlip(axis) => {
+                if let Some(flip) = uv.flip.get_mut(axis) {
+                    *flip = !*flip;
+                }
+            }
         }
     }
 }
@@ -293,6 +313,27 @@ mod tests {
         assert!(edit_uv(&mut w, wall, None, UvOp::Reset));
         assert!(uv_of(&w, wall, None).unwrap().is_identity());
         assert!(!edit_uv(&mut w, wall, None, UvOp::Reset));
+    }
+
+    #[test]
+    fn mode_turn_and_flip_ops_edit_the_model_fields() {
+        let mut uv = FaceUv::default();
+        UvOp::SetMode(UvMode::fit(2, 2)).apply(&mut uv);
+        UvOp::Turn(true).apply(&mut uv);
+        UvOp::Turn(true).apply(&mut uv);
+        UvOp::Turn(false).apply(&mut uv);
+        UvOp::ToggleFlip(1).apply(&mut uv);
+        assert_eq!(
+            (uv.mode, uv.turns, uv.flip),
+            (UvMode::fit(2, 2), 1, [false, true])
+        );
+        UvOp::Turn(false).apply(&mut uv);
+        UvOp::Turn(false).apply(&mut uv);
+        assert_eq!(uv.turns, 3);
+        UvOp::ToggleFlip(1).apply(&mut uv);
+        UvOp::SetMode(UvMode::Inherit).apply(&mut uv);
+        UvOp::Turn(true).apply(&mut uv);
+        assert!(uv.is_identity());
     }
 
     #[test]

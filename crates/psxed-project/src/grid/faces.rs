@@ -21,13 +21,14 @@
 //!   front-face convention, so the right-handed cross product of a ring points
 //!   away from the viewer. [`GridFace::normal`] is the visible-side normal.
 
-use crate::face_uv::FaceUv;
+use crate::face_uv::UvMode;
 use crate::ResourceId;
 
 use super::overrides::WallMode;
 use super::sector::{GridSector, WallEdge};
-use super::surface::{GridSurface, GridWall, WallFacing};
+use super::surface::{GridSurface, GridTri, GridWall, WallFacing};
 use super::units::{GridScale, SECTOR_UNITS, TEXELS_PER_SECTOR};
+use super::uv::{Frame, Mapper};
 use super::world::GridWorld;
 
 /// What a face was made from.
@@ -90,6 +91,16 @@ pub struct GridFace {
     pub double_sided: bool,
     /// Drawn at the material tint with no light baked in.
     pub unlit: bool,
+    /// The texels come from the plain legacy mapping (world aligned at 32
+    /// texels per sector). The cook keeps its original one-tile clamp for
+    /// such faces instead of cutting them, so levels made before the UV
+    /// model cook exactly as they did (see [`super::uv_split::SPLIT_LEGACY`]).
+    pub legacy_uv: bool,
+    /// The rectangle (grid units, in the face's own texture axes) its
+    /// texture is measured against: the sector square of a floor, the record
+    /// of an authored wall, the whole run of a derived wall, the plane
+    /// rectangle. See [`super::uv`].
+    pub frame: Frame,
 }
 
 #[derive(Clone, Copy)]
@@ -119,17 +130,18 @@ fn ring_normal(ring: &[Corner]) -> [f64; 3] {
     n
 }
 
-/// Apply a per-face UV transform about `centre`.
-pub(super) fn place(uv: &FaceUv, centre: [f64; 2], raw: [f64; 2]) -> [f64; 2] {
-    if uv.is_identity() {
-        return raw;
+/// Where a material's grid tiling default comes from. Faces take the
+/// default only when their own mode is `Inherit`.
+pub trait UvDefaults {
+    /// The tiling default of `material`, if it has one.
+    fn default_uv(&self, material: ResourceId) -> Option<UvMode>;
+}
+
+/// No material has a tiling default.
+impl UvDefaults for () {
+    fn default_uv(&self, _material: ResourceId) -> Option<UvMode> {
+        None
     }
-    let local = [raw[0] - centre[0], raw[1] - centre[1]];
-    let linear = uv.apply_linear(local);
-    [
-        linear[0] + centre[0] + f64::from(uv.offset_texels[0]),
-        linear[1] + centre[1] + f64::from(uv.offset_texels[1]),
-    ]
 }
 
 pub(super) struct Builder<'a> {
@@ -137,7 +149,19 @@ pub(super) struct Builder<'a> {
     pub room: usize,
     pub cell: [i32; 2],
     pub y_offset: i32,
+    pub defaults: &'a dyn UvDefaults,
+    /// Whether the faces pushed next use the plain legacy mapping.
+    pub legacy_uv: bool,
+    /// The frame of the faces pushed next.
+    pub frame: Frame,
     pub out: &'a mut Vec<GridFace>,
+}
+
+impl Builder<'_> {
+    /// The tiling default of `material`.
+    pub(super) fn default_uv(&self, material: Option<ResourceId>) -> Option<UvMode> {
+        material.and_then(|id| self.defaults.default_uv(id))
+    }
 }
 
 /// Editor-space point of a grid coordinate in a room lifted by `y_offset`.
@@ -199,6 +223,8 @@ impl Builder<'_> {
             material,
             double_sided,
             unlit: false,
+            legacy_uv: self.legacy_uv,
+            frame: self.frame,
         });
     }
 
@@ -219,19 +245,29 @@ impl Builder<'_> {
             (f64::from(x0) + f64::from(SECTOR_UNITS) / 2.0) * texel,
             (f64::from(z0) + f64::from(SECTOR_UNITS) / 2.0) * texel,
         ];
+        // The frame of a floor or ceiling is its sector square, shared by
+        // both triangles so repeats continue across the diagonal.
+        let frame = Frame {
+            min: [f64::from(x0), f64::from(z0)],
+            max: [
+                f64::from(x0) + f64::from(SECTOR_UNITS),
+                f64::from(z0) + f64::from(SECTOR_UNITS),
+            ],
+        };
         let toward = if ceiling {
             [0.0, -1.0, 0.0]
         } else {
             [0.0, 1.0, 0.0]
         };
-        let corner = |h: &[i32; 4], i: usize, uv: &FaceUv| Corner {
+        let defaults = self.defaults;
+        let mapper = |tri: &GridTri| {
+            let default = tri.material.and_then(|id| defaults.default_uv(id));
+            Mapper::new(&tri.uv, default, frame, centre)
+        };
+        let corner = |h: &[i32; 4], i: usize, mapper: &Mapper| Corner {
             p: editor_point(scale, y_offset, xz[i][0], h[i], xz[i][1]),
             g: [xz[i][0], y_offset + h[i], xz[i][1]],
-            uv: place(
-                uv,
-                centre,
-                [f64::from(xz[i][0]) * texel, f64::from(xz[i][1]) * texel],
-            ),
+            uv: mapper.texel([f64::from(xz[i][0]), f64::from(xz[i][1])]),
         };
         let kind = |triangle| {
             if ceiling {
@@ -244,21 +280,25 @@ impl Builder<'_> {
             surface.heights_b.is_none() && surface.tri(1) == surface.tri(0) && surface.is_planar();
         if merged {
             let tri = surface.tri(0);
-            let ring: Vec<Corner> = (0..4)
-                .map(|i| corner(&surface.heights, i, &tri.uv))
-                .collect();
+            let m = mapper(tri);
+            let ring: Vec<Corner> = (0..4).map(|i| corner(&surface.heights, i, &m)).collect();
+            self.legacy_uv = m.is_legacy();
+            self.frame = frame;
             self.push(kind(None), ring, toward, tri.material, false);
             return;
         }
         for index in 0..2 {
             let tri = surface.tri(index);
             let heights = surface.heights_for(index);
+            let m = mapper(tri);
             let ring: Vec<Corner> = surface
                 .split
                 .triangle(index)
                 .into_iter()
-                .map(|i| corner(&heights, i, &tri.uv))
+                .map(|i| corner(&heights, i, &m))
                 .collect();
+            self.legacy_uv = m.is_legacy();
+            self.frame = frame;
             self.push(kind(Some(index as u8)), ring, toward, tri.material, false);
         }
     }
@@ -276,30 +316,38 @@ impl Builder<'_> {
         };
         let (a, b) = (at(ea), at(eb));
         let texel = f64::from(TEXELS_PER_SECTOR) / f64::from(SECTOR_UNITS);
-        // Texel u along the walking direction a -> b.
+        // Position `u` along the walking direction a -> b, in grid units.
         let diagonal_length = f64::from(SECTOR_UNITS) * core::f64::consts::SQRT_2;
-        let u_at = |end: usize| -> f64 {
+        let u_grid = |end: usize| -> f64 {
             let [px, pz] = if end == 0 { a } else { b };
             match edge {
-                WallEdge::North => f64::from(px) * texel,
-                WallEdge::East => f64::from(pz) * texel,
-                WallEdge::South => -f64::from(px) * texel,
-                WallEdge::West => -f64::from(pz) * texel,
+                WallEdge::North => f64::from(px),
+                WallEdge::East => f64::from(pz),
+                WallEdge::South => -f64::from(px),
+                WallEdge::West => -f64::from(pz),
                 WallEdge::Nwse | WallEdge::Nesw => {
                     if end == 0 {
                         0.0
                     } else {
-                        diagonal_length * texel
+                        diagonal_length
                     }
                 }
             }
         };
-        let v_of = |gy: i32| -f64::from(y_offset + gy) * texel;
+        let t_of = |gy: i32| -f64::from(y_offset + gy);
         let h = wall.heights;
         let centre = [
-            (u_at(0) + u_at(1)) / 2.0,
-            (v_of(h[0]) + v_of(h[1]) + v_of(h[2]) + v_of(h[3])) / 4.0,
+            (u_grid(0) * texel + u_grid(1) * texel) / 2.0,
+            (t_of(h[0]) * texel + t_of(h[1]) * texel + t_of(h[2]) * texel + t_of(h[3]) * texel)
+                / 4.0,
         ];
+        // The frame of an authored wall is the record itself.
+        let frame = Frame::around(
+            [(0, h[0]), (1, h[1]), (1, h[2]), (0, h[3])].map(|(end, gy)| [u_grid(end), t_of(gy)]),
+        );
+        let mapper = Mapper::new(&wall.uv, self.default_uv(wall.material), frame, centre);
+        self.legacy_uv = mapper.is_legacy();
+        self.frame = frame;
         let front = edge.front_direction();
         let length = f64::from(front[0] * front[0] + front[1] * front[1]).sqrt();
         let mut toward = [
@@ -316,7 +364,7 @@ impl Builder<'_> {
             Corner {
                 p: editor_point(scale, y_offset, px, gy, pz),
                 g: [px, y_offset + gy, pz],
-                uv: place(&wall.uv, centre, [u_at(end), v_of(gy)]),
+                uv: mapper.texel([u_grid(end), t_of(gy)]),
             }
         };
         let kind = GridFaceKind::Wall { edge, index };
@@ -359,8 +407,21 @@ impl Builder<'_> {
 }
 
 /// Append the faces of local sector `(x, z)` in room `room` to `out`.
-/// Missing rooms and sectors append nothing.
+/// Missing rooms and sectors append nothing. Materials have no tiling
+/// default; use [`cell_faces_with`] to supply them.
 pub fn cell_faces(world: &GridWorld, room: usize, x: usize, z: usize, out: &mut Vec<GridFace>) {
+    cell_faces_with(world, &(), room, x, z, out);
+}
+
+/// [`cell_faces`] with the materials' tiling defaults.
+pub fn cell_faces_with(
+    world: &GridWorld,
+    defaults: &dyn UvDefaults,
+    room: usize,
+    x: usize,
+    z: usize,
+    out: &mut Vec<GridFace>,
+) {
     let Some(r) = world.rooms.get(room) else {
         return;
     };
@@ -373,25 +434,33 @@ pub fn cell_faces(world: &GridWorld, room: usize, x: usize, z: usize, out: &mut 
         room,
         cell,
         y_offset: r.y_offset,
+        defaults,
+        legacy_uv: true,
+        frame: Frame::around([[0.0, 0.0]]),
         out,
     };
     builder.sector(sector);
     if r.wall_mode == WallMode::Derived {
         for wall in super::derive::cell_walls(r, cell) {
-            builder.derived_wall(&wall);
+            builder.derived_wall(r, &wall);
         }
     }
 }
 
 /// Every face of the world, room by room, `z` major within a room.
 pub fn all_faces(world: &GridWorld) -> Vec<GridFace> {
+    all_faces_with(world, &())
+}
+
+/// [`all_faces`] with the materials' tiling defaults.
+pub fn all_faces_with(world: &GridWorld, defaults: &dyn UvDefaults) -> Vec<GridFace> {
     let mut out = Vec::new();
     for (room_index, room) in world.rooms.iter().enumerate() {
         for (x, z, _) in room.iter() {
-            cell_faces(world, room_index, x, z, &mut out);
+            cell_faces_with(world, defaults, room_index, x, z, &mut out);
         }
         for index in 0..room.planes.len() {
-            super::plane_faces::plane_faces(world, room_index, index, &mut out);
+            super::plane_faces::plane_faces_with(world, defaults, room_index, index, &mut out);
         }
     }
     out

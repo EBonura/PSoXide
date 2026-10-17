@@ -139,6 +139,12 @@ pub struct GridPlane {
     /// Hidden planes stay in the document but draw and collide with nothing.
     #[serde(default = "yes", skip_serializing_if = "is_true")]
     pub enabled: bool,
+    /// Whether the camera arm passes through the plane. `None` is automatic:
+    /// on for a translucent or alpha-cut material (banners, grates), off
+    /// otherwise. The character still collides with the plane per its
+    /// collision class either way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera_pass: Option<bool>,
 }
 
 impl GridPlane {
@@ -155,6 +161,7 @@ impl GridPlane {
             collision: PlaneCollision::Decor,
             fullbright: false,
             enabled: true,
+            camera_pass: None,
         }
     }
 

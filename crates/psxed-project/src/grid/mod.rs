@@ -55,15 +55,19 @@ pub mod sector;
 pub mod starter;
 pub mod surface;
 pub mod units;
+pub mod uv;
+pub mod uv_split;
 pub mod world;
 
 #[cfg(test)]
 mod derive_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod uv_golden;
 
 pub use derive::{DerivedKind, DerivedWall};
-pub use faces::{GridFace, GridFaceKind};
+pub use faces::{GridFace, GridFaceKind, UvDefaults};
 pub use limits::{GridBudget, GridIssue, GridIssueKind, Severity};
 pub use overrides::{Axis, EdgeKey, EdgeOverride, EdgeOverrides, RoomDefaults, WallMode};
 pub use plane::{GridPlane, PlaneCollision, PlaneShape, PlaneUvMode};

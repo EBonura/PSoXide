@@ -890,6 +890,11 @@ pub struct MaterialResource {
     /// `.ron` projects migrate without losing their two-sided setting.
     #[serde(default)]
     pub double_sided: bool,
+    /// How grid faces tile this material when they do not say themselves:
+    /// world aligned at a density, or a fixed number of repeats across the
+    /// face. `Inherit` is the legacy 32 texels per sector.
+    #[serde(default, skip_serializing_if = "crate::face_uv::UvMode::is_inherit")]
+    pub grid_uv: crate::face_uv::UvMode,
 }
 
 /// Stable identity for one named recipe inside a [`MaterialResource`].
@@ -1110,6 +1115,7 @@ impl MaterialResource {
             versions: Vec::new(),
             legacy_texture: None,
             double_sided: false,
+            grid_uv: crate::face_uv::UvMode::Inherit,
         }
     }
 
@@ -1176,6 +1182,7 @@ impl MaterialResource {
             versions: Vec::new(),
             legacy_texture: None,
             double_sided: false,
+            grid_uv: crate::face_uv::UvMode::Inherit,
         }
     }
 

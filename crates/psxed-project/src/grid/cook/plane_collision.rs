@@ -19,7 +19,7 @@
 //! All geometry is computed from the same rounded runtime corners the render
 //! quads use, so what is drawn is what is stood on.
 
-use psx_grid::{plane_kind, ColPlane};
+use psx_grid::{plane_kind, ColPlane, COLPLANE_CAMERA_PASS};
 
 use super::units::RuntimeUnits;
 use crate::grid::plane::{GridPlane, PlaneCollision, PlaneShape};
@@ -241,11 +241,14 @@ fn plan_polygon(record: &ColPlane) -> Vec<[f64; 2]> {
 }
 
 /// Classify every collidable plane of `room` and place it in its sectors.
+///
+/// `camera_pass` says whether the camera arm passes through a plane.
 pub fn build(
     units: &RuntimeUnits,
     room: &GridRoom,
     room_index: usize,
     origin: [i32; 3],
+    camera_pass: &mut dyn FnMut(&GridPlane) -> bool,
 ) -> Result<PlaneTables, String> {
     let s = f64::from(units.sector());
     let mut tables = PlaneTables {
@@ -266,7 +269,7 @@ pub fn build(
                 at("walkable but too steep to stand on, it blocks instead")
             ));
         }
-        let record = if shape == PlaneShape::Platform {
+        let mut record = if shape == PlaneShape::Platform {
             platform(&corners, id).map_err(|e| at(&e))?
         } else if shape == PlaneShape::Wall {
             match wall(&corners, id).map_err(|e| at(&e))? {
@@ -285,6 +288,9 @@ pub fn build(
             ));
             blocker(&corners, id).map_err(|e| at(&e))?
         };
+        if camera_pass(plane) {
+            record.flags |= COLPLANE_CAMERA_PASS;
+        }
         let polygon = plan_polygon(&record);
         let mut placed = 0usize;
         for cz in 0..room.depth {
@@ -346,7 +352,10 @@ mod tests {
     fn cooked(plane: GridPlane) -> PlaneTables {
         let mut room = GridRoom::new("r", 8, 8);
         room.planes.push(plane);
-        build(&units(), &room, 0, [0; 3]).unwrap()
+        build(&units(), &room, 0, [0; 3], &mut |p| {
+            p.camera_pass == Some(true)
+        })
+        .unwrap()
     }
 
     fn walkable(center: [i32; 3], size: [i32; 2], rotation: [i32; 3]) -> GridPlane {

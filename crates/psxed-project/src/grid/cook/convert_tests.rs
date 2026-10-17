@@ -89,6 +89,24 @@ fn preserve_look_leaves_the_face_multiset_and_the_cook_unchanged() {
             assert_eq!(a, b, "{name}: face {i} differs");
         }
         let cook_after = cook(&world).unwrap();
+        let quads = |c: &super::CookedLevel| {
+            c.report
+                .rooms
+                .iter()
+                .map(|r| r.quads + r.triangles)
+                .sum::<usize>()
+        };
+        eprintln!(
+            "{name}: all_faces {} -> {}; cook chunks {} -> {} B; core {} -> {} B; primitives {} -> {}",
+            faces_before.len(),
+            faces_after.len(),
+            cook_before.report.chunk_bytes(),
+            cook_after.report.chunk_bytes(),
+            cook_before.report.core_bytes,
+            cook_after.report.core_bytes,
+            quads(&cook_before),
+            quads(&cook_after),
+        );
         assert_eq!(
             cook_before.core.len(),
             cook_after.core.len(),
