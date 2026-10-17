@@ -1,0 +1,17 @@
+[package]
+name    = "psoxide-size"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+description = "Classify the bytes of a PS1 guest image from its lld link map: panic and fmt machinery, Debug impls, strings, tables, padding, duplicated generics"
+
+[dependencies]
+rustc-demangle = "0.1"
+
+[lib]
+name = "psoxide_size"
+path = "src/lib.rs"
+
+[[bin]]
+name = "psoxide-size"
+path = "src/main.rs"
