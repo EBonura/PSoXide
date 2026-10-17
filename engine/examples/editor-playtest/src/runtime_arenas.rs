@@ -46,6 +46,7 @@ const PANORAMA_CACHE_COUNT: usize = {
 /// zero-initialize cheaply or that outlives scene borrows).
 pub(super) struct RuntimeArenas {
     /// Generation-keyed full BSP certificates; exclusive query-time borrowing.
+    #[cfg(not(playtest_grid_world))]
     pub(super) solid_cell_constraints: crate::bsp_runtime::SolidCellConstraintCache,
     /// VRAM slot table, unified allocator, residency tracker, and
     /// upload queue (see `psx_game_runtime::vram::VramRuntime`).
@@ -153,6 +154,7 @@ impl RuntimeArenas {
     /// so the static lands in `.bss` instead of storing ~430 KB in the
     /// flat PSX-EXE. NOT ready for use until [`Self::init`] runs.
     const ZEROED: Self = Self {
+        #[cfg(not(playtest_grid_world))]
         solid_cell_constraints: crate::bsp_runtime::SolidCellConstraintCache::ZEROED,
         vram: RuntimeVram::zeroed(),
         // These three are zero-init types: their `new()` state IS the
@@ -209,6 +211,7 @@ pub(super) fn init_runtime_arenas() {
 /// generation reset. These paths do not invoke user callbacks or recurse into
 /// visibility, and interrupt handlers never access this arena field. No caller
 /// may retain this borrow across another access to this same field.
+#[cfg(not(playtest_grid_world))]
 pub(super) fn solid_cell_constraint_arena(
 ) -> &'static mut crate::bsp_runtime::SolidCellConstraintCache {
     // SAFETY: single-threaded scene owner, short-lived disjoint-field borrow.

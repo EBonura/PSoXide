@@ -18,8 +18,10 @@
 
 extern crate alloc;
 
+pub mod collision;
 pub mod format;
 pub mod height;
+pub mod render;
 pub mod view;
 pub mod write;
 

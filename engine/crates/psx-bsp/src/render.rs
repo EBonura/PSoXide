@@ -47,7 +47,7 @@ const PXBSP_NODE_POSTORDER: u32 = 1 << 31;
 const PXBSP_NODE_STACK_INDEX: u32 = 0xffff;
 const PXBSP_NODE_STACK_MASK_SHIFT: u32 = 16;
 /// All five clip planes still need testing.
-const PXBSP_CLIP_ALL_PLANES: u8 = 0x1f;
+pub const PXBSP_CLIP_ALL_PLANES: u8 = 0x1f;
 /// Index of the near plane in [`FrustumPlanes::planes`]. It is the only plane
 /// whose per-face answer is "does any vertex fail it", rather than "do all".
 const PXBSP_CLIP_NEAR_PLANE: usize = 0;
@@ -236,7 +236,7 @@ const WORST_PAGE_LOCAL_PACKET_WORDS_PER_TRIANGLE: usize =
 const WORST_WINDOWED_PACKET_WORDS_PER_TRIANGLE: usize =
     psx_engine::AFFINE_PACKETS_PER_TRIANGLE * 15;
 const PXBSP_MATERIAL_TICKS_PER_SECOND: u16 = 60;
-const TEXTURED_GOURAUD_COMMAND: u32 = 0x3400_0000;
+pub const TEXTURED_GOURAUD_COMMAND: u32 = 0x3400_0000;
 const SEMI_TRANSPARENT_COMMAND_BIT: u32 = 0x0200_0000;
 /// The third-person camera exposes large, oblique floor polygons much farther
 /// from the near plane than a first-person view does. Keep one profile
@@ -246,7 +246,7 @@ const PXBSP_RENDER_PROFILE: SurfaceProfile = open_hall_bands(SurfaceProfile::PXB
 
 /// Open-hall fork knob: `OPEN_HALL_SPLIT_BANDS="once,twice"` at build time
 /// replaces the subdivision bands (ordering-table depth units).
-pub(super) const fn open_hall_bands(mut profile: SurfaceProfile) -> SurfaceProfile {
+pub const fn open_hall_bands(mut profile: SurfaceProfile) -> SurfaceProfile {
     let Some(value) = option_env!("OPEN_HALL_SPLIT_BANDS") else {
         return profile;
     };
@@ -564,9 +564,9 @@ pub struct FrustumPlanes {
     /// rounding error of any side distance and every classification below
     /// treats that band as "undecided" so a rounded plane can neither reject
     /// a visible polygon nor vouch for a box it does not contain.
-    planes: [([i32; 3], i32); 5],
+    pub planes: [([i32; 3], i32); 5],
     /// Worst-case rounding error of a side-plane distance (zero for near).
-    side_error: i32,
+    pub side_error: i32,
     view_rows: [[i16; 3]; 3],
     view_translation: [i32; 3],
     side_scale: [i32; 2],
@@ -787,7 +787,7 @@ impl FrustumPlanes {
         }
     }
     #[inline(always)]
-    fn distance(plane: &([i32; 3], i32), position: [i16; 3]) -> i32 {
+    pub fn distance(plane: &([i32; 3], i32), position: [i16; 3]) -> i32 {
         plane.0[0]
             .wrapping_mul(position[0] as i32)
             .wrapping_add(plane.0[1].wrapping_mul(position[1] as i32))
@@ -989,7 +989,7 @@ impl FrustumPlanes {
     /// loop form dispatched the GTE read through a jump table and reloaded
     /// three normal components from RAM for each corner, per plane, per
     /// node. The corner selectors come from [`Self::outer_bits`].
-    fn cull_aabb(&self, mins: Vec3I16, maxs: Vec3I16, mask: u8) -> Option<u8> {
+    pub fn cull_aabb(&self, mins: Vec3I16, maxs: Vec3I16, mask: u8) -> Option<u8> {
         let lo = [mins.x, mins.y, mins.z];
         let hi = [maxs.x, maxs.y, maxs.z];
         let bits = self.outer_bits;
@@ -1294,7 +1294,7 @@ impl AttributedClipPlane<AffineVertex> for PxbspClipPlane<'_> {
 }
 
 #[inline(never)]
-fn clip_polygon_plane(
+pub fn clip_polygon_plane(
     plane: &([i32; 3], i32),
     source: &[AffineVertex],
     destination: &mut [AffineVertex],
@@ -3419,7 +3419,7 @@ const MVMVA_LCM_V0_SF0: u32 = 0x4A04_6012;
 /// submission reloads them.
 #[cfg(target_arch = "mips")]
 #[inline(never)]
-fn load_gte_clip_planes(planes: &[([i32; 3], i32); 5]) {
+pub fn load_gte_clip_planes(planes: &[([i32; 3], i32); 5]) {
     #[inline(always)]
     fn row(plane: &([i32; 3], i32)) -> [i16; 3] {
         // Near rows are Q12 view rows, side rows are rounded to an L1 norm

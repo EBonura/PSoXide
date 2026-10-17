@@ -306,7 +306,9 @@ impl<'a> RoomView<'a> {
             lod_quads: section(bytes, head, section::LOD_QUADS)?,
             plane_refs: section(bytes, head, section::PLANE_REFS)?,
         };
-        if render.cells.len() != col.sectors.len() {
+        if render.cells.len() != col.sectors.len()
+            || render.quads.len() + render.lod_quads.len() > usize::from(u16::MAX)
+        {
             return Err(FormatError::Inconsistent);
         }
         Ok(Self { col, render })

@@ -426,8 +426,8 @@ impl Playtest {
             .init(DESTRUCTIBLES)
             .unwrap_or_else(|error| panic!("cooked destructible initialization failed: {error:?}"));
         self.bsp = if generated::PLAYTEST_USES_PXBSP {
-            let mut bsp = BspRuntime::load_manifest()
-                .unwrap_or_else(|error| panic!("cooked PXBSP initialization failed: {error}"));
+            let mut bsp = WorldRuntime::load_manifest()
+                .unwrap_or_else(|error| panic!("cooked world initialization failed: {error}"));
             let _ = bsp.refresh_materials();
             Some(bsp)
         } else {
