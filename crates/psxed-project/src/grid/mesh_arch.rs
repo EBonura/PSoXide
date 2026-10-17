@@ -78,6 +78,14 @@ pub struct ArchSpec {
     pub depth: i32,
     /// Pieces per half of the curve, 1 to 8.
     pub segments: u8,
+    /// Whether the crown carries a hook socket, so the player can hang from
+    /// it (the cook spawns a hook point per instance).
+    #[serde(default = "perch_default")]
+    pub perch: bool,
+}
+
+fn perch_default() -> bool {
+    true
 }
 
 /// Material slots of an arch.
@@ -108,6 +116,7 @@ impl Default for ArchSpec {
             thickness: 256,
             depth: 1024,
             segments: 4,
+            perch: true,
         }
     }
 }
@@ -372,7 +381,11 @@ impl ArchSpec {
         Ok(BuiltMesh {
             faces,
             proxies,
-            sockets: vec![Socket::Hook { anchor, yaw: 0 }],
+            sockets: if self.perch {
+                vec![Socket::Hook { anchor, yaw: 0 }]
+            } else {
+                Vec::new()
+            },
             slots: vec![
                 "fascia".to_string(),
                 "soffit".to_string(),
@@ -567,6 +580,7 @@ mod tests {
             thickness: 256,
             depth: 512,
             segments: 8,
+            perch: false,
         };
         let curves = spec.curves();
         for p in &curves.p {

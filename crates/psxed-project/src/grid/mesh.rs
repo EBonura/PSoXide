@@ -210,14 +210,15 @@ impl MeshAsset {
     pub fn describe(&self) -> String {
         match &self.kind {
             MeshKind::Arch(s) => format!(
-                "arch {}: span {}, rise {}, spring {}, thickness {}, depth {}, {} segment(s) per half",
+                "arch {}: span {}, rise {}, spring {}, thickness {}, depth {}, {} segment(s) per half{}",
                 s.profile.label(),
                 s.span,
                 s.rise,
                 s.spring,
                 s.thickness,
                 s.depth,
-                s.segments
+                s.segments,
+                if s.perch { ", perch socket at the crown" } else { "" }
             ),
             MeshKind::Column(s) => format!(
                 "column: radius {}, height {}, {} sides, plinth {}, capital {}",
@@ -401,6 +402,28 @@ impl GridMesh {
             }
         }
         (lo[0] != i32::MAX).then_some((lo, hi))
+    }
+
+    /// The placed footprint: the asset's plan bounds, turned and moved, as four
+    /// `[x, z]` corners in order (grid units). The Top view and `grid_plan`
+    /// draw it; `None` for an asset with no faces.
+    pub fn footprint(&self, built: &BuiltMesh) -> Option<[[i32; 2]; 4]> {
+        let mut lo = [i32::MAX; 2];
+        let mut hi = [i32::MIN; 2];
+        for face in &built.faces {
+            for p in face.ring() {
+                lo = [lo[0].min(p[0]), lo[1].min(p[2])];
+                hi = [hi[0].max(p[0]), hi[1].max(p[2])];
+            }
+        }
+        if lo[0] == i32::MAX {
+            return None;
+        }
+        let at = |x: i32, z: i32| {
+            let g = self.place([x, 0, z]);
+            [g[0], g[2]]
+        };
+        Some([at(lo[0], lo[1]), at(hi[0], lo[1]), at(hi[0], hi[1]), at(lo[0], hi[1])])
     }
 
     /// World sector rectangle `(min, max)`, inclusive, the instance's box
