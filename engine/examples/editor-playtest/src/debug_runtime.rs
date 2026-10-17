@@ -189,3 +189,73 @@ pub(super) fn debug_log_enemy_shot(values: [i32; 17]) {
     }
     line.emit();
 }
+
+/// Per-tick simulation state for the sim-state gate: values that depend only on
+/// the input tape and the simulation, never on frame pacing or cycle counts.
+/// The entity fields fold every cooked entity slot into one FNV-1a hash plus
+/// the first three raw positions for human diffing.
+#[cfg(feature = "sim-trace")]
+pub(super) fn debug_log_sim_state(values: &[i32]) {
+    let mut line = DebugLogLine::new("sim-state,");
+    for &value in values {
+        line.push_i32(value);
+        line.push_byte(b',');
+    }
+    line.emit();
+}
+
+#[cfg(feature = "sim-trace")]
+impl Playtest {
+    /// Emit this tick's `sim-state` line (see [`debug_log_sim_state`]).
+    pub(super) fn trace_sim_state(&self, ctx: &Ctx) {
+        let player = self.motor.position();
+        let eye = self.render_camera.position;
+        let count = self.game_entities.count();
+        let mut hash: u32 = 0x811c_9dc5;
+        let mut fold = |value: i32| {
+            for byte in value.to_le_bytes() {
+                hash = (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193);
+            }
+        };
+        let mut first = [0i32; 9];
+        for index in 0..count {
+            let position = self.game_entities.position(index);
+            let state = self.game_entities.state(index) as i32;
+            fold(position[0]);
+            fold(position[1]);
+            fold(position[2]);
+            fold(state);
+            if index < 3 {
+                first[index * 3] = position[0];
+                first[index * 3 + 1] = position[1];
+                first[index * 3 + 2] = position[2];
+            }
+        }
+        debug_log_sim_state(&[
+            ctx.sim_tick.as_u32() as i32,
+            player.x,
+            player.y,
+            player.z,
+            i32::from(self.motor.yaw().as_q12()),
+            self.motor.vertical_speed_q8(),
+            i32::from(self.motor.grounded()),
+            i32::from(self.room_index.raw()),
+            eye.x,
+            eye.y,
+            eye.z,
+            i32::from(self.camera.yaw().as_q12()),
+            i32::from(self.camera.pitch_q12()),
+            count as i32,
+            hash as i32,
+            first[0],
+            first[1],
+            first[2],
+            first[3],
+            first[4],
+            first[5],
+            first[6],
+            first[7],
+            first[8],
+        ]);
+    }
+}

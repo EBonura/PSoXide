@@ -1135,6 +1135,8 @@ impl Scene for Playtest {
             self.resolve_player_melee(ctx);
         }
         self.duel_observe(ctx);
+        #[cfg(feature = "sim-trace")]
+        self.trace_sim_state(ctx);
         ctx.pad = physical.0;
         ctx.pad_prev = physical.1;
     }

@@ -71,6 +71,10 @@ pad-irq = ["psx-engine/pad-irq"]
 # Per-update `camera-pose` debug lines only; fits builds that overflow RAM with
 # the full emulator-telemetry feature (Graybox Reach).
 camera-pose-log = ["psx-engine/debug-log"]
+# One `sim-state` line per fixed tick (player, camera, entities) for the
+# cycle-independent sim-state gate (tools/grid_simgate.sh). Implies the
+# `camera-pose-log` line.
+sim-trace = ["camera-pose-log"]
 hardware-boot-visual = ["psx-engine/hardware-boot-visual"]
 # The HWB explosion-hunt live-capture overlay (4 cycling pages + the
 # engine-side per-vertex capture). NOT a default: it costs real cycles
