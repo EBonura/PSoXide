@@ -61,6 +61,9 @@ pub struct GridCollision<'a> {
     /// Validate analytic point-trace results against the discrete slab
     /// predicate even when every room is resident (tests compare both).
     pub(crate) validate: bool,
+    /// The trace is the camera arm: planes flagged
+    /// [`crate::COLPLANE_CAMERA_PASS`] are not there.
+    pub(crate) camera_pass: bool,
 }
 
 impl<'a> GridCollision<'a> {
@@ -78,6 +81,7 @@ impl<'a> GridCollision<'a> {
             foreign: rooms.iter().any(Option::is_none) || rooms.len() < level.rooms.len(),
             planes: rooms.iter().flatten().any(|v| !v.col_planes.is_empty()),
             validate: false,
+            camera_pass: false,
         })
     }
 

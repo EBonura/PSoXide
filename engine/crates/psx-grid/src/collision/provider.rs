@@ -14,11 +14,31 @@ use psx_engine::{
 /// [`COORD_LIMIT`] return `false` and leave the output untouched.
 pub struct GridTraceProvider<'a, 'b> {
     world: &'b GridCollision<'a>,
+    /// The world with its camera flag set, copied at construction so a trace
+    /// carries no copy on the (scratchpad) stack.
+    camera_world: Option<GridCollision<'a>>,
 }
 
 impl<'a, 'b> GridTraceProvider<'a, 'b> {
     pub fn new(world: &'b GridCollision<'a>) -> Self {
-        Self { world }
+        Self {
+            world,
+            camera_world: None,
+        }
+    }
+
+    /// The provider of the camera arm: free planes flagged
+    /// `COLPLANE_CAMERA_PASS` (translucent banners, grates) are not there for
+    /// it. The motor and every other trace use [`Self::new`] and still
+    /// collide with them.
+    pub fn for_camera(world: &'b GridCollision<'a>) -> Self {
+        Self {
+            world,
+            camera_world: Some(GridCollision {
+                camera_pass: true,
+                ..*world
+            }),
+        }
     }
 }
 
@@ -83,7 +103,10 @@ impl CollisionTraceProvider for GridTraceProvider<'_, '_> {
         {
             return false;
         }
-        let world = self.world;
+        let world = match &self.camera_world {
+            Some(camera) => camera,
+            None => self.world,
+        };
         let (r, h, body) = match query.shape {
             CollisionTraceShape::Point => (0, 0, false),
             CollisionTraceShape::Body { radius, height } => {

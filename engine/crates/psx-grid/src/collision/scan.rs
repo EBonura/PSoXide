@@ -446,7 +446,9 @@ impl<'a> GridCollision<'a> {
                     }
                 }
             }
-            if self.planes && Self::plane_blocks_point(view, sector, oy, (lx, lz), y, h) {
+            if self.planes
+                && Self::plane_blocks_point(view, sector, oy, (lx, lz), y, h, self.camera_pass)
+            {
                 return true;
             }
         }

@@ -124,11 +124,9 @@ impl Room {
             for i in planes {
                 let mut copy = self.planes[i];
                 copy.id = i as u8;
-                copy.flags = if col_planes.iter().any(|p| p.id == copy.id) {
-                    0
-                } else {
-                    COLPLANE_PRIMARY
-                };
+                let first = !col_planes.iter().any(|p| p.id == copy.id);
+                copy.flags =
+                    (copy.flags & !COLPLANE_PRIMARY) | if first { COLPLANE_PRIMARY } else { 0 };
                 col_planes.push(copy);
             }
             walls.extend(mine);

@@ -281,3 +281,36 @@ fn a_level_without_planes_keeps_the_plane_paths_off() {
     let built = build(&[Room::flat([0, 0, 0], 3, 3, 0)]);
     built.run(|w| assert!(!w.planes));
 }
+
+#[test]
+fn the_camera_arm_passes_through_flagged_planes_and_everything_else_still_collides() {
+    use super::provider::GridTraceProvider;
+    use psx_engine::trace_collision;
+    let mut screen = wall([160, 20], [160, 300], 0, 120);
+    let blocker_box = blocker([300, 100], [340, 140], 0, 100);
+    // Only the wall is flagged; the box is not.
+    screen.flags |= COLPLANE_CAMERA_PASS;
+    let mut room = Room::flat([0, 0, 0], 8, 4, 0);
+    room.planes.push(screen);
+    room.planes.push(blocker_box);
+    let built = build(&[room]);
+    built.run(|w| {
+        let across = point([100, 30, 150], [220, 30, 150]);
+        let into_box = point([260, 30, 120], [400, 30, 120]);
+        // An ordinary provider (the motor, sight checks) hits both.
+        let mut normal = GridTraceProvider::new(w);
+        assert!(trace_collision(&mut normal, across).unwrap().fraction_q12 < 4096);
+        assert!(trace_collision(&mut normal, into_box).unwrap().fraction_q12 < 4096);
+        // The camera arm goes through the flagged wall and stops at the box.
+        let mut camera = GridTraceProvider::for_camera(w);
+        assert_eq!(
+            trace_collision(&mut camera, across).unwrap().fraction_q12,
+            4096
+        );
+        assert!(trace_collision(&mut camera, into_box).unwrap().fraction_q12 < 4096);
+        // The body of the character still collides with the flagged wall.
+        let mut body_trace = GridTraceProvider::new(w);
+        let t = trace_collision(&mut body_trace, body([100, 0, 150], [300, 0, 150])).unwrap();
+        assert!(t.fraction_q12 < 4096, "{t:?}");
+    });
+}

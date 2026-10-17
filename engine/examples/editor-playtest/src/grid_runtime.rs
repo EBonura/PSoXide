@@ -677,7 +677,8 @@ impl GridRuntime {
         aabb_blockers: &[CharacterCollisionAabb],
         _destructibles: &RuntimeDestructibles<{ psx_level::MAX_DESTRUCTIBLES }>,
     ) -> Result<ThirdPersonCameraFrame, CollisionQueryError> {
-        let mut provider = GridTraceProvider::new(&self.world);
+        // The camera arm passes through translucent and alpha-cut planes.
+        let mut provider = GridTraceProvider::for_camera(&self.world);
         let mut provider =
             CharacterBlockerTraceProvider::new_with_aabbs(&mut provider, &[], aabb_blockers);
         let mut counting = CountingTraceProvider::new(&mut provider);

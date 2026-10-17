@@ -198,6 +198,9 @@ impl<'a> GridCollision<'a> {
                 };
                 let first = usize::from(ext.plane_first);
                 for (k, plane) in view.sector_planes(ext).iter().enumerate() {
+                    if self.camera_pass && plane.flags & COLPLANE_CAMERA_PASS != 0 {
+                        continue;
+                    }
                     Self::offer_plane(plane, first + k, lx, lz, scan);
                 }
             }
@@ -257,11 +260,15 @@ impl<'a> GridCollision<'a> {
         (lx, lz): (i32, i32),
         y: i32,
         h: i32,
+        camera_pass: bool,
     ) -> bool {
         let Some(ext) = view.ext(sector) else {
             return false;
         };
         for plane in view.sector_planes(ext) {
+            if camera_pass && plane.flags & COLPLANE_CAMERA_PASS != 0 {
+                continue;
+            }
             let bottom = oy + i32::from(plane.y0);
             let blocked = match plane.kind {
                 plane_kind::PLATFORM => {
@@ -301,6 +308,9 @@ impl<'a> GridCollision<'a> {
         let b = [a[0] + q.d[0], a[1] + q.d[1], a[2] + q.d[2]];
         for (index, plane) in view.col_planes.iter().enumerate() {
             if plane.flags & COLPLANE_PRIMARY == 0 {
+                continue;
+            }
+            if self.camera_pass && plane.flags & COLPLANE_CAMERA_PASS != 0 {
                 continue;
             }
             match plane.kind {

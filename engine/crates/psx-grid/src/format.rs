@@ -341,6 +341,12 @@ pub mod plane_kind {
 /// all copies, point rays want each plane once and skip the rest.
 pub const COLPLANE_PRIMARY: u8 = 1;
 
+/// [`ColPlane::flags`] bit: the camera arm passes through this plane
+/// (a translucent or alpha-cut banner, grate or foliage). Bodies and every
+/// other trace still collide with it per its kind; only a provider made with
+/// `GridTraceProvider::for_camera` ignores it.
+pub const COLPLANE_CAMERA_PASS: u8 = 2;
+
 /// A collidable free plane, 28 bytes.
 ///
 /// Per kind, all coordinates room-local runtime units:
@@ -359,7 +365,8 @@ pub const COLPLANE_PRIMARY: u8 = 1;
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct ColPlane {
     pub kind: u8,
-    /// [`COLPLANE_PRIMARY`], other bits reserved zero.
+    /// [`COLPLANE_PRIMARY`] and [`COLPLANE_CAMERA_PASS`], other bits reserved
+    /// zero.
     pub flags: u8,
     /// Index of the plane in the room, so a trace counts it once.
     pub id: u8,
