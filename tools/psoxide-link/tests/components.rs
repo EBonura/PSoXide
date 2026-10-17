@@ -62,6 +62,14 @@ impl Fixture {
             revision,
         };
         fixture.write_lock("example/sdk", &["sdk"]);
+        // Keep cargo off the network: a cold registry must fail the same way
+        // on every machine instead of priming from crates.io.
+        fs::create_dir(fixture.root.join(".cargo")).unwrap();
+        fs::write(
+            fixture.root.join(".cargo/config.toml"),
+            "[net]\noffline = true\n",
+        )
+        .unwrap();
         fixture
     }
 
@@ -202,7 +210,7 @@ fn fresh_compound_resolution_is_sealed_and_idempotent() {
 fn missing_offline_dependency_publishes_no_imports_or_receipt() {
     let fixture = Fixture::compound("compound-offline", true);
     let error = fixture.bootstrap(false).unwrap_err().to_string();
-    assert!(error.contains("resolution failed offline"), "{error}");
+    assert!(error.contains("resolution failed"), "{error}");
     for name in [
         "Cargo.toml",
         "Cargo.lock",
@@ -256,7 +264,7 @@ fn missing_toolchain_cannot_trigger_installation_or_publication() {
         ],
     );
     let error = fixture.bootstrap(false).unwrap_err().to_string();
-    assert!(error.contains("resolution failed offline"), "{error}");
+    assert!(error.contains("resolution failed"), "{error}");
     assert!(error.contains("not installed"), "{error}");
     assert!(!fixture.root.join("Cargo.lock").exists());
     assert!(!fixture.root.join(".components-receipt.json").exists());

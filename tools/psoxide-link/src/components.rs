@@ -15,6 +15,12 @@
 //! identity, checksum or dependency table. The resulting lock is sealed in
 //! the same content receipt and subsequent local edits still stop refresh.
 //!
+//! Resolution never touches the network when the cargo registry cache already
+//! holds the locked crates. On a cold cache (fresh CI runner) the staging
+//! export is first primed with `cargo fetch --locked` against the same lock,
+//! so the fetched versions are exactly what the offline resolve asks for;
+//! with no network and no cache it stops with an actionable error.
+//!
 //! This replaces `tools/bootstrap-components.py`. Given the same lock and
 //! sources it writes byte-identical files, modes and receipt. Every write is a
 //! new file, so imported files always carry a fresh mtime and a repin cannot
@@ -545,26 +551,59 @@ fn resolve_compound_workspace(
     // Cargo-launched callers inherit a direct Cargo path and toolchain
     // override. Use the pinned channel explicitly; rustup run never installs
     // a missing channel unless --install is requested.
-    let mut command = if let Some(channel) = toolchain {
-        let mut command = Command::new("rustup");
-        command.args(["run", &channel, "cargo"]);
-        command.env_remove("RUSTUP_TOOLCHAIN");
+    let cargo = |args: &[&str]| -> std::io::Result<std::process::Output> {
+        let mut command = if let Some(channel) = &toolchain {
+            let mut command = Command::new("rustup");
+            command.args(["run", channel, "cargo"]);
+            command.env_remove("RUSTUP_TOOLCHAIN");
+            command
+        } else {
+            Command::new("cargo")
+        };
         command
-    } else {
-        Command::new("cargo")
+            .current_dir(&stage.0)
+            .env("RUSTUP_AUTO_INSTALL", "0")
+            .args(args)
+            .output()
     };
-    let output = command
-        .current_dir(&stage.0)
-        .env("RUSTUP_AUTO_INSTALL", "0")
-        .args([
-            "metadata",
-            "--offline",
-            "--format-version",
-            "1",
-            "--manifest-path",
-            "Cargo.toml",
-        ])
-        .output()?;
+    let resolve = [
+        "metadata",
+        "--offline",
+        "--format-version",
+        "1",
+        "--manifest-path",
+        "Cargo.toml",
+    ];
+    // Resolution stays offline so it is reproducible, which needs every
+    // locked crate in the local registry cache. A warm cache resolves with no
+    // network. A cold one (fresh CI runner, empty CARGO_HOME) is primed once
+    // from the locked file, then resolved offline again.
+    let mut output = cargo(&resolve)?;
+    if !output.status.success() {
+        let offline_error = String::from_utf8_lossy(&output.stderr).into_owned();
+        let mut primed = cargo(&["fetch", "--locked", "--manifest-path", "Cargo.toml"])?;
+        // The imported lock may still lack the local path packages that
+        // joining components adds, which `--locked` refuses. Plain fetch
+        // keeps every pinned entry; a newly pulled sourced package is
+        // rejected after resolution by `validate_compound_lock`.
+        if !primed.status.success()
+            && String::from_utf8_lossy(&primed.stderr).contains("needs to be updated")
+        {
+            primed = cargo(&["fetch", "--manifest-path", "Cargo.toml"])?;
+        }
+        if !primed.status.success() {
+            return Err(format!(
+                "Fresh compound workspace resolution failed: the local cargo registry cache lacks the \
+                 crates the compound Cargo.lock pins, and priming it with `cargo fetch --locked` failed \
+                 (no network?). Run once on a connected machine, or restore CARGO_HOME, then retry. \
+                 No files or receipt were published.\n\
+                 offline resolve: {offline_error}\ncargo fetch: {}",
+                String::from_utf8_lossy(&primed.stderr)
+            )
+            .into());
+        }
+        output = cargo(&resolve)?;
+    }
     if !output.status.success() {
         return Err(format!("Fresh compound workspace resolution failed offline; no files or receipt were published: {}",
             String::from_utf8_lossy(&output.stderr)).into());
