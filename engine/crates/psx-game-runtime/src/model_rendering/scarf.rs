@@ -440,7 +440,11 @@ impl PlayerScarf {
                 cpu_projected[i] = camera.projection.project_view(views[i]);
             }
         }
-
+        // While the dash rebuilds the cloth, its textured triangles are the
+        // intact mesh, so a corner shared by up to six of them is transformed
+        // and divided once, on first use, rather than once per triangle.
+        let lazy = crystal.is_some() && assembly.is_none() && !cached;
+        let mut seen = 0u32;
         let options = options
             .with_cull_mode(CullMode::None)
             .with_render_layer(WorldRenderLayer::Opaque);
@@ -516,7 +520,16 @@ impl PlayerScarf {
                             [(108, v0), (20, v1), (108, v1)]
                         };
                         let layer_options = options.with_material_layer(material);
-                        if cached {
+                        if lazy {
+                            for i in indices {
+                                if seen & (1 << i) == 0 {
+                                    seen |= 1 << i;
+                                    views[i] = camera.view_vertex(vertices[i]);
+                                    cpu_projected[i] = camera.projection.project_view(views[i]);
+                                }
+                            }
+                        }
+                        if cached || lazy {
                             let corners = indices.map(|i| cpu_projected[i]);
                             if let [Some(a), Some(b), Some(c)] = corners {
                                 // No corner is behind the near plane, so the
