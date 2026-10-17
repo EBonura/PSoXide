@@ -16,7 +16,7 @@ pub enum NodeKind {
     /// Plain organisational node.
     Node,
     /// Named authoring group. Groups are editor-only hierarchy objects: they
-    /// can contain scene nodes, nested groups, and world-space BSP brushes.
+    /// can contain scene nodes and nested groups.
     /// Cooking deliberately flattens them away.
     Group,
     /// Spatial transform node.
@@ -417,12 +417,10 @@ pub enum NodeKind {
         #[serde(default = "default_true")]
         enabled: bool,
     },
-    /// Runtime-breakable brush submodel. Solid brushes assigned to this node
-    /// are excluded from the static BSP and cooked together as one damageable
-    /// object. The node transform supplies the submodel origin; authored brush
-    /// points remain world-space in the editor just like brush doors.
+    /// Shared health and damage state for one breakable object. Image props
+    /// point at it through their `destructible` field.
     Destructible {
-        /// Damage required before the complete brush submodel breaks.
+        /// Damage required before the object breaks.
         #[serde(default = "default_destructible_max_health")]
         max_health: u16,
         /// Which of the player's two attack channels can damage this object.
@@ -679,7 +677,7 @@ pub(crate) fn default_interactable_checkpoint_body() -> String {
     "Relay synchronized.".to_string()
 }
 
-/// Attack channels accepted by one authored destructible brush module.
+/// Attack channels accepted by one authored destructible.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DestructibleDamageAffinity {
     Horizon,
@@ -729,8 +727,7 @@ pub enum LogicNodeKind {
         required: u16,
     },
     /// Toggles the named Box Prop between closed (drawn + solid) and
-    /// open (hidden + passable) in frozen grid projects. A brush-bound
-    /// door instead translates its compiled submodel to `open_offset`.
+    /// open (hidden + passable).
     Door {
         /// Name of the Box Prop node this door drives. Must resolve
         /// to exactly one placed Box Prop at cook time.
@@ -739,12 +736,6 @@ pub enum LogicNodeKind {
         /// Whether the door starts open.
         #[serde(default)]
         start_open: bool,
-        /// World-space translation from closed to open, in engine units.
-        #[serde(default = "default_brush_door_open_offset")]
-        open_offset: [i16; 3],
-        /// Fixed 60 Hz simulation ticks between endpoints.
-        #[serde(default = "default_brush_door_travel_ticks")]
-        travel_ticks: u16,
     },
 }
 
@@ -762,14 +753,6 @@ pub(crate) const fn default_logic_trigger_size() -> [u16; 3] {
 
 pub(crate) const fn default_logic_multisource_required() -> u16 {
     1
-}
-
-pub const fn default_brush_door_open_offset() -> [i16; 3] {
-    [0, 128, 0]
-}
-
-pub const fn default_brush_door_travel_ticks() -> u16 {
-    60
 }
 
 /// Authored collision shape for component-node entities.

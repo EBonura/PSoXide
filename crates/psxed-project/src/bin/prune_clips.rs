@@ -6,7 +6,7 @@
 //! ```
 //!
 //! Round-tripping through `ProjectDocument` rather than editing the RON text
-//! keeps every untouched field, including the level's brushes, exactly as the
+//! keeps every untouched field, including the level's world, exactly as the
 //! editor wrote it.
 use psxed_project::{ProjectDocument, ResourceData};
 

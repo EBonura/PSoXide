@@ -155,6 +155,38 @@ fn rooms_get_portals_to_their_neighbours() {
     assert_eq!(cooked.level.rooms[1].portal_count, 1);
 }
 
+#[test]
+fn a_long_shared_wall_is_one_portal_not_one_per_cell() {
+    // Two rooms side by side, four cells wide, sharing a four cell edge.
+    let make = |name: &str, origin: [i32; 2]| {
+        let mut room = GridRoom::new(name, 4, 4);
+        room.origin = origin;
+        for z in 0..4 {
+            for x in 0..4 {
+                let sector = room.sector_or_insert(x, z).unwrap();
+                sector.floor = Some(GridSurface::flat(0, Some(rid(7))));
+                sector.ceiling = Some(GridSurface::flat(1024, Some(rid(9))));
+            }
+        }
+        room
+    };
+    let world = GridWorld {
+        scale: GridScale::DEFAULT,
+        rooms: vec![make("west", [0, 0]), make("east", [4, 0])],
+    };
+    let cooked = cook(&world).unwrap();
+    for (room, dest) in [(0usize, 1u16), (1, 0)] {
+        let record = &cooked.level.rooms[room];
+        let first = usize::from(record.portal_first);
+        let portals = &cooked.level.portals[first..first + usize::from(record.portal_count)];
+        assert_eq!(portals.len(), 1, "room {room} has {portals:?}");
+        assert_eq!(portals[0].dest, dest);
+        let z: Vec<i16> = portals[0].v.iter().map(|v| v[2]).collect();
+        let span = i32::from(*z.iter().max().unwrap()) - i32::from(*z.iter().min().unwrap());
+        assert_eq!(span, 4 * cooked.report.sector_units as i32);
+    }
+}
+
 /// One of the tracked grid reference projects. They are permanent fixtures, so
 /// a missing one is a failure, not a skip.
 pub(super) fn load_reference(name: &str) -> Option<crate::ProjectDocument> {

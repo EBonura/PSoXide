@@ -797,19 +797,6 @@ impl MaterialFaceSidedness {
         }
     }
 
-    /// The side a BSP brush face actually draws in game. The PXBSP runtime
-    /// draws brush faces front only even for `Both`: a brush is closed, so
-    /// the back of a two-sided face is another face of the same brush with
-    /// its own bake, and drawing both tied a dark and a lit face in the
-    /// ordering table (`psx-bsp` `pxbsp_policy_face_draws`). `Both` still
-    /// applies to model material overrides.
-    pub const fn brush_face_drawn(self) -> Self {
-        match self {
-            Self::Back => Self::Back,
-            Self::Front | Self::Both => Self::Front,
-        }
-    }
-
     /// Convert the old checkbox value into the new enum.
     pub const fn from_double_sided(double_sided: bool) -> Self {
         if double_sided {
@@ -863,7 +850,7 @@ pub struct MaterialResource {
     /// Which side(s) of faces using this material should render.
     #[serde(default)]
     pub face_sidedness: MaterialFaceSidedness,
-    /// Brush faces using this material reveal the World node's scene-level
+    /// Faces using this material reveal the World node's scene-level
     /// sky instead of drawing their authored polygons.
     #[serde(default)]
     pub sky_aperture: bool,
@@ -960,7 +947,7 @@ pub struct MaterialVersionRecipe {
     pub secondary_layer: Option<ModelSecondaryLayer>,
     #[serde(default)]
     pub face_sidedness: MaterialFaceSidedness,
-    /// Whether brush faces using this recipe reveal the World sky.
+    /// Whether faces using this recipe reveal the World sky.
     #[serde(default)]
     pub sky_aperture: bool,
     /// Parse-only compatibility with old version recipes.
@@ -1990,18 +1977,5 @@ mod material_uv_motion_tests {
         assert_eq!(layer.texture_mode, MaterialTextureMode::Generated);
         assert_eq!(layer.generated.noise, noise);
         assert!(layer.legacy_texture.is_none());
-    }
-}
-
-#[cfg(test)]
-mod sidedness_tests {
-    use super::MaterialFaceSidedness;
-
-    #[test]
-    fn brush_faces_draw_front_for_both_like_the_pxbsp_runtime() {
-        use MaterialFaceSidedness::*;
-        assert_eq!(Front.brush_face_drawn(), Front);
-        assert_eq!(Both.brush_face_drawn(), Front);
-        assert_eq!(Back.brush_face_drawn(), Back);
     }
 }

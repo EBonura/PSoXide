@@ -221,12 +221,9 @@ fn scale_node(node: &mut SceneNode) {
                     *axis = div_u16_min1(*axis);
                 }
             }
-            LogicNodeKind::Door { open_offset, .. } => {
-                for axis in open_offset.iter_mut() {
-                    *axis = div_i16(*axis);
-                }
-            }
-            LogicNodeKind::Relay | LogicNodeKind::Multisource { .. } => {}
+            LogicNodeKind::Door { .. }
+            | LogicNodeKind::Relay
+            | LogicNodeKind::Multisource { .. } => {}
         },
         NodeKind::Animator { action_clips, .. } => {
             for clip in action_clips.iter_mut() {
@@ -414,7 +411,7 @@ pub fn scale_default_character_to_engine_units(character: &mut crate::CharacterR
 
 /// Divide every length-typed authored quantity by
 /// [`WORLD_UNIT_DIVISOR`], in place. Call once, on a clone, at cook
-/// entry, for BSP-format projects only.
+/// entry.
 pub fn scale_project_to_engine_units(project: &mut ProjectDocument) {
     for scene in &mut project.scenes {
         scale_scene(scene);

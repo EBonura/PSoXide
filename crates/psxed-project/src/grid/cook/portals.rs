@@ -8,6 +8,10 @@
 //! * Stacked: the rooms overlap in plan and one of the two cells has no
 //!   floor or no ceiling, so there is a vertical opening between them.
 //!
+//! Cells that share an edge with the same neighbour, open span and normal are
+//! merged into one longer portal, so a long shared wall costs one portal
+//! instead of one per cell.
+//!
 //! The runtime uses the graph for activation (which rooms are near enough to
 //! simulate) and room visibility; both only need which rooms connect.
 
@@ -186,8 +190,63 @@ pub fn derive(world: &GridWorld, units: &RuntimeUnits) -> Result<Vec<Vec<Portal>
                 });
             }
         }
+        merge_runs(&mut out[ra]);
     }
     Ok(out)
+}
+
+/// Join portals that continue each other into longer ones, until none do.
+///
+/// Two portals continue each other when they open into the same room, carry
+/// the same flags and normal, and one's far edge is the other's near edge
+/// (the quads share both end vertices of that edge). That holds for side
+/// portals that meet along a wall at the same open span, and for vertical
+/// openings that touch along either plan axis.
+fn merge_runs(portals: &mut Vec<Portal>) {
+    let mut index = 0;
+    while index < portals.len() {
+        let mut merged = false;
+        let mut other = index + 1;
+        while other < portals.len() {
+            if let Some(joined) = join(&portals[index], &portals[other])
+                .or_else(|| join(&portals[other], &portals[index]))
+            {
+                portals[index] = joined;
+                portals.remove(other);
+                merged = true;
+            } else {
+                other += 1;
+            }
+        }
+        // A grown portal may now meet one that was already passed over.
+        if !merged {
+            index += 1;
+        }
+    }
+}
+
+/// `a` followed by `b` as one quad, if `b` continues `a`.
+fn join(a: &Portal, b: &Portal) -> Option<Portal> {
+    if a.dest != b.dest || a.flags != b.flags || a.normal != b.normal || a.reserved != b.reserved {
+        return None;
+    }
+    let [a0, a1, a2, a3] = a.v;
+    let [b0, b1, b2, b3] = b.v;
+    // Along the first edge direction (v0 -> v1).
+    if a1 == b0 && a2 == b3 {
+        return Some(Portal {
+            v: [a0, b1, b2, a3],
+            ..*a
+        });
+    }
+    // Along the other direction (v0 -> v3), for vertical openings.
+    if a.flags & PORTAL_VERTICAL != 0 && a3 == b0 && a2 == b1 {
+        return Some(Portal {
+            v: [a0, a1, b2, b3],
+            ..*a
+        });
+    }
+    None
 }
 
 /// Rooms reachable from `from` within `hops` portal hops, nearest first.

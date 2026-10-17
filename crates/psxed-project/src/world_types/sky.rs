@@ -36,10 +36,10 @@ impl SkyMode {
 /// Where the scene sky is allowed to appear.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum SkyVisibility {
-    /// Draw the sky as the scene background even without aperture brushes.
+    /// Draw the sky as the scene background even without aperture surfaces.
     #[default]
     Always,
-    /// Reveal the sky only where a visible brush material is marked as a sky
+    /// Reveal the sky only where a visible material is marked as a sky
     /// aperture.
     ThroughSkySurfaces,
 }
@@ -61,7 +61,7 @@ pub struct SkySettings {
     /// Which single scene-level sky renderer this World uses.
     #[serde(default)]
     pub mode: SkyMode,
-    /// Whether the sky is a full background or appears only through brush
+    /// Whether the sky is a full background or appears only through sky
     /// apertures.
     #[serde(default)]
     pub visibility: SkyVisibility,

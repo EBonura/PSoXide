@@ -38,7 +38,7 @@ fn entity_role(scene: &Scene, id: NodeId) -> Option<bool> {
         })
 }
 
-/// The base project minus its level: brushes, lights, props and pickups go;
+/// The base project minus its level: world, lights, props and pickups go;
 /// the player and the first `enemies` enemies stay so frame costs match a
 /// real playthrough. The once-per-launch world message is dropped.
 pub(super) fn strip_base(project: &mut ProjectDocument, enemies: usize) {

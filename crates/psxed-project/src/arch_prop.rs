@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::{ResourceId, UvTransform, HEIGHT_QUANTUM};
 
 /// Authored-scale wrappers: the editor preview and inspector expand at
-/// the historical 64-unit quantum; the scaled BSP cook passes its own.
+/// the historical 64-unit quantum; the scaled cook passes its own.
 pub fn generate_arch_prop_surfaces(
     geometry: ArchPropGeometry,
     sector_size: i32,

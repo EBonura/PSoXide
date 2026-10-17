@@ -18,8 +18,8 @@
 //!   with an explicit visible side, never one shared record.
 //! * Every cap lives in [`limits`], checked by [`limits::validate`] and
 //!   read by the editor budget readout, the cook and the runtime alike.
-//! * The world lives in [`SceneWorld`] on the scene, defaulting to brushes so
-//!   every existing project loads exactly as before.
+//! * The world lives in [`SceneWorld`] on the scene, defaulting to empty so
+//!   a project with no world loads exactly as before.
 //!
 //! Layout of the module:
 //!

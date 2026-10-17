@@ -1567,16 +1567,16 @@ fn project_missing_point_light_color_uses_default() {
 }
 
 #[test]
-fn legacy_door_motion_uses_brush_defaults() {
-    let door: LogicNodeKind = ron::from_str("Door(box_prop: \"Legacy Box\", start_open: true)")
+fn legacy_door_motion_fields_are_ignored() {
+    let door: LogicNodeKind = ron::from_str(
+        "Door(box_prop: \"Legacy Box\", start_open: true, open_offset: (0, 128, 0), travel_ticks: 60)",
+    )
         .expect("legacy door parses");
     assert_eq!(
         door,
         LogicNodeKind::Door {
             box_prop: "Legacy Box".to_string(),
             start_open: true,
-            open_offset: default_brush_door_open_offset(),
-            travel_ticks: default_brush_door_travel_ticks(),
         }
     );
 }

@@ -1,4 +1,4 @@
-//! Per-face texture placement shared by brush faces and grid surfaces.
+//! Per-face texture placement for grid surfaces.
 
 use serde::{Deserialize, Serialize};
 

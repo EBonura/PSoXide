@@ -545,7 +545,7 @@ pub const MODEL_CLIP_INHERIT: u16 = 0xFFFF;
 /// clip" -- same value as [`psx_level::MODEL_INSTANCE_POSE_ANIMATE`].
 pub const MODEL_INSTANCE_POSE_ANIMATE: u16 = 0xFFFF;
 
-/// Shared spatial registration for one cooked non-BSP world object.
+/// Shared spatial registration for one cooked world object.
 /// `kind`/`source_index` select the compact typed payload while this record
 /// owns room membership, conservative bounds, and runtime spatial policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -559,7 +559,7 @@ pub struct PlaytestWorldObject {
     pub bounds_max: [i32; 3],
 }
 
-/// Shared damage state referenced by brush submodels and typed world objects.
+/// Shared damage state referenced by typed world objects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlaytestDestructible {
     pub max_health: u16,

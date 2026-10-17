@@ -94,7 +94,7 @@ impl Drop for CookOutputCaptureGuard {
 
 /// Run one cook operation while mirroring its terminal progress lines.
 ///
-/// Brush compilation uses worker threads, so the temporary sink is
+/// The cook may use worker threads, so the temporary sink is
 /// process-wide rather than thread-local. Captures are serialized and the
 /// sink is removed by an RAII guard even if the cook unwinds.
 pub fn capture_cook_output<T>(work: impl FnOnce() -> T) -> (T, Vec<String>) {
@@ -688,7 +688,7 @@ pub fn build_package(
         if node.kind.is_component() {
             continue;
         }
-        // BSP point entities author transforms directly in world units.
+        // Point entities author transforms directly in world units.
         let pos = node.transform.translation.map(|value| value.round() as i32);
         let (room_index, raw_pos, floor_pos, placement_sector_size) = (
             0,
@@ -2080,7 +2080,7 @@ pub fn build_package(
 
     if rooms.len() != 1 {
         report.error(format!(
-            "BSP project cooked {} room records; exactly one non-spatial \
+            "project cooked {} room records; exactly one non-spatial \
              metadata room is expected",
             rooms.len()
         ));

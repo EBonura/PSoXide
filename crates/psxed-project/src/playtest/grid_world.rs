@@ -2,7 +2,7 @@
 //!
 //! A grid project's world is its grid document and nothing else (plan
 //! decision D2). Play cooks the document straight into the PGL level format
-//! ([`crate::grid::cook`]): no brushes, no BSP, no derived collision. This
+//! ([`crate::grid::cook`]), with no derived geometry. This
 //! module is the glue to the playtest package: the cap check, the material
 //! binder that turns document materials into texture assets, the scene's
 //! point lights, and the package record the manifest writer emits.

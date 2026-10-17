@@ -391,7 +391,7 @@ pub(crate) fn image_prop_collision_aabb(
     (min, max)
 }
 
-/// Build the shared spatial registry consumed by both grid and PXBSP play.
+/// Build the shared spatial registry consumed by play.
 /// Specialized payload tables stay compact, but no prop/marker is allowed to
 /// bypass this room/bounds/policy contract.
 pub(crate) fn cook_world_objects(
@@ -482,7 +482,7 @@ pub(crate) fn cook_world_objects(
             kind::IMAGE_PROP,
             index,
             flags::RENDERED
-                | flags::DIRECT_BRUSH_OCCLUSION
+                | flags::DIRECT_OCCLUSION
                 | if collidable { flags::COLLIDABLE } else { 0 },
             prop.destructible,
             bounds_min,
@@ -497,7 +497,7 @@ pub(crate) fn cook_world_objects(
             kind::BOX_PROP,
             index,
             flags::RENDERED
-                | flags::DIRECT_BRUSH_OCCLUSION
+                | flags::DIRECT_OCCLUSION
                 | flags::DYNAMIC
                 | if collidable { flags::COLLIDABLE } else { 0 },
             psx_level::WORLD_OBJECT_DESTRUCTIBLE_NONE,
@@ -513,7 +513,7 @@ pub(crate) fn cook_world_objects(
             kind::CYLINDER_PROP,
             index,
             flags::RENDERED
-                | flags::DIRECT_BRUSH_OCCLUSION
+                | flags::DIRECT_OCCLUSION
                 | if collidable { flags::COLLIDABLE } else { 0 },
             psx_level::WORLD_OBJECT_DESTRUCTIBLE_NONE,
             prop.bounds_min,
@@ -547,7 +547,7 @@ pub(crate) fn cook_world_objects(
             kind::ARCH_PROP,
             index,
             flags::RENDERED
-                | flags::DIRECT_BRUSH_OCCLUSION
+                | flags::DIRECT_OCCLUSION
                 | if collidable { flags::COLLIDABLE } else { 0 },
             psx_level::WORLD_OBJECT_DESTRUCTIBLE_NONE,
             bounds_min,
@@ -571,7 +571,7 @@ pub(crate) fn cook_world_objects(
             interactable.room,
             kind::POINT_OF_INTEREST_BEACON,
             index,
-            flags::RENDERED | flags::DIRECT_BRUSH_OCCLUSION | flags::DYNAMIC,
+            flags::RENDERED | flags::DIRECT_OCCLUSION | flags::DYNAMIC,
             psx_level::WORLD_OBJECT_DESTRUCTIBLE_NONE,
             [
                 interactable.x.saturating_sub(radial),

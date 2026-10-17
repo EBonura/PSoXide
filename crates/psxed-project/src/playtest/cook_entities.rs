@@ -2087,7 +2087,7 @@ pub(crate) fn register_model_for_instance(
 }
 
 /// Culling-radius pad added to baked model frame bounds, in AUTHORED
-/// world units; the cook divides it for engine-unit (BSP) projects.
+/// world units; the cook divides it for engine units.
 pub const MODEL_FRAME_BOUNDS_PAD_UNITS: i32 = 64;
 
 /// Drop the still head and tail of a one-shot clip. Returns the input

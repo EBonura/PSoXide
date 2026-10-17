@@ -391,7 +391,7 @@ impl std::fmt::Display for ProjectIoError {
                 f,
                 "this project holds {nodes} legacy grid-world node(s) (Section, Room, Map, \
                  Water Volume or Portal). Grid worlds were removed from the editor and \
-                 nothing was loaded or modified. Re-author the level as brushes, or open \
+                 nothing was loaded or modified. Re-author the level with the grid tools, or open \
                  the project with an earlier editor build to convert it first."
             ),
         }

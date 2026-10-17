@@ -2474,12 +2474,6 @@ pub fn write_cook_result(
     if cooked_manifest.exists() {
         std::fs::remove_file(&cooked_manifest)?;
     }
-    // Remove the pre-unification brush-only manifest if an older checkout
-    // generated one. New cooks always select `level_manifest.cooked.rs`.
-    let brush_manifest = generated_dir.join("brush_manifest.cooked.rs");
-    if brush_manifest.exists() {
-        std::fs::remove_file(&brush_manifest)?;
-    }
     if let Some(package) = package {
         write_package(package, generated_dir)?;
     }
