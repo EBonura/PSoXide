@@ -1835,6 +1835,11 @@ impl Playtest {
     }
 
     pub(super) fn update_follow_camera(&mut self, ctx: &Ctx) -> WorldCamera {
+        #[cfg(feature = "sim-trace")]
+        self.camera.pin_throttle_phase(
+            ctx.sim_tick.as_u32(),
+            self.camera_config().collision_solve_interval,
+        );
         let mut camera = self.solve_follow_camera(ctx);
         let age = self
             .hook_travel

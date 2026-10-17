@@ -363,6 +363,19 @@ impl ThirdPersonCameraState {
         }
     }
 
+    /// Pin the two throttle phases (the spring-arm solve interval and the idle
+    /// lift check period) to an absolute simulation tick instead of the count of
+    /// updates since the camera was snapped. Both builds of a determinism
+    /// comparison then solve on the same ticks even when their loading took a
+    /// different number of ticks, which is the only thing the unpinned phases
+    /// depend on. Diagnostic use only (the `sim-trace` guest feature): shipping
+    /// builds keep the start-relative phases.
+    pub fn pin_throttle_phase(&mut self, tick: u32, solve_interval: u8) {
+        let interval = u32::from(solve_interval.clamp(1, 4));
+        self.solve_phase = (tick % interval) as u8;
+        self.lift_check_phase = (tick % u32::from(LIFT_IDLE_CHECK_PERIOD)) as u8;
+    }
+
     /// Reset the camera immediately behind a player position.
     pub fn snap_to_player(
         &mut self,
@@ -2526,6 +2539,31 @@ mod tests {
             frame.camera.position
         );
         assert!(frame.camera.position.x < 60);
+    }
+
+    #[test]
+    fn pinned_throttle_phase_depends_on_the_absolute_tick_only() {
+        let mut a = ThirdPersonCameraState::new(Angle::HALF);
+        let mut b = ThirdPersonCameraState::new(Angle::HALF);
+        // Cameras snapped at different ticks (different load times) agree on
+        // their phases once pinned to the same absolute tick.
+        a.solve_phase = 1;
+        a.lift_check_phase = 3;
+        b.solve_phase = 0;
+        b.lift_check_phase = 0;
+        for tick in [0u32, 1, 2, 3, 7, 1_000_001] {
+            a.pin_throttle_phase(tick, 2);
+            b.pin_throttle_phase(tick, 2);
+            assert_eq!(a.solve_phase, (tick % 2) as u8);
+            assert_eq!(a.solve_phase, b.solve_phase);
+            assert_eq!(a.lift_check_phase, (tick % 4) as u8);
+            assert_eq!(a.lift_check_phase, b.lift_check_phase);
+        }
+        // The interval is clamped like the solve's own clamp.
+        a.pin_throttle_phase(9, 0);
+        assert_eq!(a.solve_phase, 0);
+        a.pin_throttle_phase(9, 200);
+        assert_eq!(a.solve_phase, (9 % 4) as u8);
     }
 
     #[test]
