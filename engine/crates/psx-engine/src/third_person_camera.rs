@@ -391,12 +391,12 @@ impl ThirdPersonCameraState {
         self.distance = config
             .distance
             .clamp(config.min_distance, config.max_distance);
-        self.pitch_q12 = default_pitch_q12(config);
+        self.pitch_q12 = default_pitch_q12(&config);
         self.frame_pitch_q12 = self.pitch_q12;
         self.lock_height_offset = 0;
         self.lock_pitch_offset_q12 = 0;
         self.focus = player_focus(target.player, config.target_height);
-        self.base_position_y = camera_height_goal(target.player, self.pitch_q12, config);
+        self.base_position_y = camera_height_goal(target.player, self.pitch_q12, &config);
         self.position = camera_position_at_height(
             self.focus,
             self.distance,
@@ -477,7 +477,7 @@ impl ThirdPersonCameraState {
             &mut collision,
             target,
             input,
-            config,
+            &config,
             delta_vblanks,
         ) {
             Ok(frame) => frame,
@@ -507,7 +507,7 @@ impl ThirdPersonCameraState {
             &mut collision,
             target,
             input,
-            config,
+            &config,
             delta_vblanks,
         ) {
             Ok(frame) => Ok(frame),
@@ -524,12 +524,12 @@ impl ThirdPersonCameraState {
         collision: &mut C,
         target: ThirdPersonCameraTarget,
         input: ThirdPersonCameraInput,
-        config: ThirdPersonCameraConfig,
+        config: &ThirdPersonCameraConfig,
         delta_vblanks: u16,
     ) -> Result<ThirdPersonCameraFrame, CollisionQueryError> {
         self.profile.set_base_projection(projection);
         let steps = delta_vblanks.clamp(1, MAX_CAMERA_CATCHUP_VBLANKS);
-        let config = normalize_config(config);
+        let config = normalize_config(*config);
         let mut i = 0;
         while i < steps {
             self.advance_one_vblank(
@@ -539,7 +539,7 @@ impl ThirdPersonCameraState {
                     recenter: input.recenter && i == 0,
                     ..input
                 },
-                config,
+                &config,
             )?;
             i += 1;
         }
@@ -551,15 +551,15 @@ impl ThirdPersonCameraState {
         collision: &mut C,
         target: ThirdPersonCameraTarget,
         input: ThirdPersonCameraInput,
-        config: ThirdPersonCameraConfig,
+        config: &ThirdPersonCameraConfig,
     ) -> Result<(), CollisionQueryError> {
         if !self.initialized {
-            self.snap_to_player(target, config);
+            self.snap_to_player(target, *config);
         }
 
-        let previous_default_pitch = default_pitch_q12(self.profile.apply(config));
-        self.profile.advance(config, target.lock_target.is_some());
-        let mut config = self.profile.apply(config);
+        let previous_default_pitch = default_pitch_q12(&self.profile.apply(*config));
+        self.profile.advance(*config, target.lock_target.is_some());
+        let mut config = self.profile.apply(*config);
         if config.lock_target_framing && config.fov_y_degrees == 0 {
             config.fov_y_degrees = self.profile.vertical_fov_degrees();
         }
@@ -569,7 +569,7 @@ impl ThirdPersonCameraState {
         {
             self.pitch_q12 = self
                 .pitch_q12
-                .saturating_add(default_pitch_q12(config).saturating_sub(previous_default_pitch))
+                .saturating_add(default_pitch_q12(&config).saturating_sub(previous_default_pitch))
                 .clamp(config.pitch_min_q12, config.pitch_max_q12);
         }
         if config.lock_target_framing && target.lock_target.is_some() {
@@ -581,7 +581,7 @@ impl ThirdPersonCameraState {
                     .min(3),
             );
         }
-        let mut focus_goal = camera_focus_goal(target, config, self.distance);
+        let mut focus_goal = camera_focus_goal(target, &config, self.distance);
         // The orbit the previous frame settled on, before input and steering.
         let previous_yaw = self.yaw;
 
@@ -690,7 +690,7 @@ impl ThirdPersonCameraState {
             let recenter_pitch = if config.recenter_preserves_pitch {
                 self.pitch_q12
             } else {
-                default_pitch_q12(config)
+                default_pitch_q12(&config)
             };
             self.pitch_q12 = approach_i16(
                 self.pitch_q12,
@@ -734,7 +734,7 @@ impl ThirdPersonCameraState {
         self.focus = collision.constrain_segment(
             player_focus(target.player, anchor_height),
             proposed_focus,
-            config,
+            &config,
         )?;
         // Translation follows the focus; lag smooths changes to the orbit.
         // Otherwise a slow camera can remain behind a moving player while
@@ -770,8 +770,8 @@ impl ThirdPersonCameraState {
             .pitch_q12
             .saturating_add(self.lock_pitch_offset_q12)
             .clamp(config.pitch_min_q12, config.pitch_max_q12);
-        let lift_ceiling = lift_pitch_ceiling(config).max(pitch_base);
-        self.advance_escape(collision, target, config, pitch_base, lift_ceiling)?;
+        let lift_ceiling = lift_pitch_ceiling(&config).max(pitch_base);
+        self.advance_escape(collision, target, &config, pitch_base, lift_ceiling)?;
         let orbit_pitch = pitch_base
             .saturating_add(self.lift_pitch_q12)
             .min(lift_ceiling);
@@ -789,7 +789,7 @@ impl ThirdPersonCameraState {
             config.focus_lag_shift.saturating_add(2),
         )
         .clamp(0, config.lock_height_boost);
-        let base_camera_y_goal = camera_height_goal(target.player, orbit_pitch, config);
+        let base_camera_y_goal = camera_height_goal(target.player, orbit_pitch, &config);
         let locked_camera_y_goal = base_camera_y_goal.saturating_add(self.lock_height_offset);
 
         // Spring-arm sweep throttle: the sweep dominates the camera's
@@ -821,9 +821,9 @@ impl ThirdPersonCameraState {
                 self.eye_yaw(),
                 orbit_pitch,
                 locked_camera_y_goal,
-                config,
+                &config,
             )?;
-            let wanted = clear_orbit_distance(config);
+            let wanted = clear_orbit_distance(&config);
             if input.yaw_delta_q12 != 0 || target.lock_target.is_none() {
                 self.clear_orbit_hold = false;
             } else if self.clear_orbit_hold {
@@ -838,7 +838,7 @@ impl ThirdPersonCameraState {
                         desired_yaw,
                         orbit_pitch,
                         locked_camera_y_goal,
-                        config,
+                        &config,
                     )?
                 };
                 if desired.distance >= wanted {
@@ -850,12 +850,12 @@ impl ThirdPersonCameraState {
                         previous_yaw,
                         orbit_pitch,
                         locked_camera_y_goal,
-                        config,
+                        &config,
                     )?;
                 }
             }
             if target.lock_target.is_some()
-                && solve.distance < clear_orbit_trigger(config, self.clear_orbit_hold)
+                && solve.distance < clear_orbit_trigger(&config, self.clear_orbit_hold)
             {
                 // Locked on, with the arm blocked at the player's own body
                 // (back to a wall or pillar): the eye would sit in or against
@@ -873,7 +873,7 @@ impl ThirdPersonCameraState {
                     solve.distance,
                     orbit_pitch,
                     locked_camera_y_goal,
-                    config,
+                    &config,
                 )? {
                     swung = true;
                     self.yaw = yaw;
@@ -966,7 +966,7 @@ impl ThirdPersonCameraState {
             // Easing between two clear orbit endpoints can cut through their
             // shared corner. A cached shortened boom also needs validation
             // after the player moves. Validate the rendered position.
-            let safe = collision.constrain_segment(self.focus, self.position, config)?;
+            let safe = collision.constrain_segment(self.focus, self.position, &config)?;
             if safe != self.position {
                 self.position = safe;
                 self.base_position_y = safe.y.saturating_sub(lock_lift);
@@ -984,9 +984,9 @@ impl ThirdPersonCameraState {
                 endpoint_clamped = true;
             }
         }
-        self.check_sight_to_player(collision, target, config, pitch_base, lift_ceiling)?;
+        self.check_sight_to_player(collision, target, &config, pitch_base, lift_ceiling)?;
         self.frame_pitch_q12 =
-            orbit_pitch.saturating_add(lock_pitch_offset_q12(config, self.lock_height_offset));
+            orbit_pitch.saturating_add(lock_pitch_offset_q12(&config, self.lock_height_offset));
 
         self.last_pull_in = collision_solve.pull_in || endpoint_clamped;
         self.last_rotated = false;
@@ -997,7 +997,7 @@ impl ThirdPersonCameraState {
     /// or easing, so the squeeze and sight checks have work to do. Otherwise
     /// they run on a slow period: open ground pays for one extra trace every
     /// few ticks.
-    fn escape_checks_due(&self, config: ThirdPersonCameraConfig) -> bool {
+    fn escape_checks_due(&self, config: &ThirdPersonCameraConfig) -> bool {
         self.last_pull_in
             || self.distance < config.distance
             || self.lift_pitch_q12 != 0
@@ -1031,7 +1031,7 @@ impl ThirdPersonCameraState {
         &mut self,
         collision: &mut C,
         target: ThirdPersonCameraTarget,
-        config: ThirdPersonCameraConfig,
+        config: &ThirdPersonCameraConfig,
         pitch_base: i16,
         ceiling: i16,
     ) -> Result<(), CollisionQueryError> {
@@ -1147,7 +1147,7 @@ impl ThirdPersonCameraState {
         &mut self,
         collision: &mut C,
         target: ThirdPersonCameraTarget,
-        config: ThirdPersonCameraConfig,
+        config: &ThirdPersonCameraConfig,
         pitch_base: i16,
         ceiling: i16,
     ) -> Result<(), CollisionQueryError> {
@@ -1274,7 +1274,7 @@ fn lift_probe<C: CameraCollisionBackend>(
     yaw: Angle,
     ceiling: i16,
     camera_y: i32,
-    config: ThirdPersonCameraConfig,
+    config: &ThirdPersonCameraConfig,
 ) -> Result<(CollisionSolve, i32), CollisionQueryError> {
     let probe = collision.solve(focus, yaw, ceiling, camera_y, config)?;
     let desired = camera_position_at_height(focus, config.distance, yaw, ceiling, camera_y);
@@ -1292,13 +1292,13 @@ fn lift_probe<C: CameraCollisionBackend>(
 
 /// Boom length the lift-over aims for when collision squeezes the arm: the
 /// same body-clearing length the wall escape settles on, twice `min_distance`.
-fn lift_comfort_distance(config: ThirdPersonCameraConfig) -> i32 {
+fn lift_comfort_distance(config: &ThirdPersonCameraConfig) -> i32 {
     clear_orbit_trigger(config, true)
 }
 
 /// Highest pitch the lift reaches. The authored orbit limit is higher, but
 /// the lift alone never goes past the cap (a stick pitch above it is kept).
-fn lift_pitch_ceiling(_config: ThirdPersonCameraConfig) -> i16 {
+fn lift_pitch_ceiling(_config: &ThirdPersonCameraConfig) -> i16 {
     LIFT_PITCH_CAP_Q12
 }
 
@@ -1315,7 +1315,7 @@ fn slide_offset_q12(
     stick_yaw: Angle,
     hit: CollisionSolve,
     pitch_q12: i16,
-    config: ThirdPersonCameraConfig,
+    config: &ThirdPersonCameraConfig,
     held_slide_q12: i16,
 ) -> i32 {
     let nx = i32::from(hit.normal_q12[0]);
@@ -1373,7 +1373,7 @@ const CLEAR_ORBIT_STEPS: i16 = 8;
 /// spring arm and the stick directions it gives. Once swung, the camera keeps
 /// looking while its arm is under twice that, so it settles on a view of the
 /// whole body rather than the first spot that clears her head.
-fn clear_orbit_trigger(config: ThirdPersonCameraConfig, swung: bool) -> i32 {
+fn clear_orbit_trigger(config: &ThirdPersonCameraConfig, swung: bool) -> i32 {
     if swung {
         config.min_distance.saturating_mul(2)
     } else {
@@ -1383,7 +1383,7 @@ fn clear_orbit_trigger(config: ThirdPersonCameraConfig, swung: bool) -> i32 {
 
 /// Arm length an orbit swung off a wall should reach: half the preferred
 /// distance, and at least twice `min_distance`.
-fn clear_orbit_distance(config: ThirdPersonCameraConfig) -> i32 {
+fn clear_orbit_distance(config: &ThirdPersonCameraConfig) -> i32 {
     (config.distance / 2)
         .max(config.min_distance.saturating_mul(2))
         .min(config.distance)
@@ -1403,7 +1403,7 @@ fn clear_orbit_yaw<C: CameraCollisionBackend>(
     current_distance: i32,
     pitch_q12: i16,
     camera_y: i32,
-    config: ThirdPersonCameraConfig,
+    config: &ThirdPersonCameraConfig,
 ) -> Result<Option<(Angle, CollisionSolve)>, CollisionQueryError> {
     let wanted = clear_orbit_distance(config);
     let minimum = current_distance
@@ -1463,7 +1463,7 @@ trait CameraCollisionBackend {
         &mut self,
         start: RoomPoint,
         end: RoomPoint,
-        config: ThirdPersonCameraConfig,
+        config: &ThirdPersonCameraConfig,
     ) -> Result<RoomPoint, CollisionQueryError>;
 
     fn solve(
@@ -1472,7 +1472,7 @@ trait CameraCollisionBackend {
         yaw: Angle,
         pitch_q12: i16,
         camera_y: i32,
-        config: ThirdPersonCameraConfig,
+        config: &ThirdPersonCameraConfig,
     ) -> Result<CollisionSolve, CollisionQueryError>;
 
     fn clamp_to_floor(
@@ -1486,11 +1486,11 @@ trait CameraCollisionBackend {
         &mut self,
         from: RoomPoint,
         to: RoomPoint,
-        config: ThirdPersonCameraConfig,
+        config: &ThirdPersonCameraConfig,
     ) -> Result<bool, CollisionQueryError> {
-        let mut config = config;
+        let mut config = *config;
         config.collision_margin = 0;
-        Ok(self.constrain_segment(from, to, config)? == to)
+        Ok(self.constrain_segment(from, to, &config)? == to)
     }
 }
 
@@ -1502,7 +1502,7 @@ impl CameraCollisionBackend for OpenCameraCollision {
         &mut self,
         _start: RoomPoint,
         end: RoomPoint,
-        _config: ThirdPersonCameraConfig,
+        _config: &ThirdPersonCameraConfig,
     ) -> Result<RoomPoint, CollisionQueryError> {
         Ok(end)
     }
@@ -1513,7 +1513,7 @@ impl CameraCollisionBackend for OpenCameraCollision {
         _yaw: Angle,
         _pitch_q12: i16,
         _camera_y: i32,
-        config: ThirdPersonCameraConfig,
+        config: &ThirdPersonCameraConfig,
     ) -> Result<CollisionSolve, CollisionQueryError> {
         Ok(CollisionSolve::plain(config.distance, false))
     }
@@ -1536,7 +1536,7 @@ impl<P: CollisionTraceProvider + ?Sized> CameraCollisionBackend for TraceCameraC
         &mut self,
         start: RoomPoint,
         end: RoomPoint,
-        config: ThirdPersonCameraConfig,
+        config: &ThirdPersonCameraConfig,
     ) -> Result<RoomPoint, CollisionQueryError> {
         let span = segment_span(start, end);
         if span == 0 {
@@ -1570,7 +1570,7 @@ impl<P: CollisionTraceProvider + ?Sized> CameraCollisionBackend for TraceCameraC
         yaw: Angle,
         pitch_q12: i16,
         camera_y: i32,
-        config: ThirdPersonCameraConfig,
+        config: &ThirdPersonCameraConfig,
     ) -> Result<CollisionSolve, CollisionQueryError> {
         solve_camera_collision_trace(self.provider, focus, yaw, pitch_q12, camera_y, config)
     }
@@ -1587,7 +1587,7 @@ impl<P: CollisionTraceProvider + ?Sized> CameraCollisionBackend for TraceCameraC
         &mut self,
         from: RoomPoint,
         to: RoomPoint,
-        _config: ThirdPersonCameraConfig,
+        _config: &ThirdPersonCameraConfig,
     ) -> Result<bool, CollisionQueryError> {
         if segment_span(from, to) == 0 {
             return Ok(true);
@@ -1659,7 +1659,7 @@ fn segment_span(start: RoomPoint, end: RoomPoint) -> i32 {
 
 fn camera_focus_goal(
     target: ThirdPersonCameraTarget,
-    config: ThirdPersonCameraConfig,
+    config: &ThirdPersonCameraConfig,
     arm_distance: i32,
 ) -> RoomPoint {
     let player = player_focus(target.player, config.target_height);
@@ -1761,7 +1761,7 @@ fn solve_camera_collision_trace<P: CollisionTraceProvider + ?Sized>(
     yaw: Angle,
     pitch_q12: i16,
     camera_y: i32,
-    config: ThirdPersonCameraConfig,
+    config: &ThirdPersonCameraConfig,
 ) -> Result<CollisionSolve, CollisionQueryError> {
     let desired = camera_position_at_height(focus, config.distance, yaw, pitch_q12, camera_y);
     let trace = trace_collision(provider, CollisionTraceQuery::point(focus, desired))?;
@@ -1834,7 +1834,7 @@ fn camera_position_at_height(
     RoomPoint::new(orbit.x, camera_y, orbit.z)
 }
 
-fn camera_height_goal(player: RoomPoint, pitch_q12: i16, config: ThirdPersonCameraConfig) -> i32 {
+fn camera_height_goal(player: RoomPoint, pitch_q12: i16, config: &ThirdPersonCameraConfig) -> i32 {
     let authored_pitch = default_pitch_q12(config);
     let manual_height_delta = pitch_vertical_offset(config.distance, pitch_q12)
         .saturating_sub(pitch_vertical_offset(config.distance, authored_pitch));
@@ -1881,7 +1881,7 @@ fn camera_from_position_focus(
     }
 }
 
-fn default_pitch_q12(config: ThirdPersonCameraConfig) -> i16 {
+fn default_pitch_q12(config: &ThirdPersonCameraConfig) -> i16 {
     let vertical = config.height.saturating_sub(config.target_height);
     let pitch = if config.lock_target_framing {
         framing::pitch_from_height_offset(vertical, config.distance)
@@ -1891,7 +1891,7 @@ fn default_pitch_q12(config: ThirdPersonCameraConfig) -> i16 {
     pitch.clamp(config.pitch_min_q12, config.pitch_max_q12)
 }
 
-fn lock_pitch_offset_q12(config: ThirdPersonCameraConfig, height_offset: i32) -> i16 {
+fn lock_pitch_offset_q12(config: &ThirdPersonCameraConfig, height_offset: i32) -> i16 {
     let base = default_pitch_q12(config);
     let raised = pitch_from_vertical_distance(
         config
@@ -2112,7 +2112,7 @@ mod tests {
             behind,
             0,
             100,
-            config,
+            &config,
         )
         .unwrap();
         assert!(blocked.distance < config.min_distance, "{blocked:?}");
@@ -2188,7 +2188,7 @@ mod tests {
             &mut self,
             _start: RoomPoint,
             end: RoomPoint,
-            _config: ThirdPersonCameraConfig,
+            _config: &ThirdPersonCameraConfig,
         ) -> Result<RoomPoint, CollisionQueryError> {
             Ok(end)
         }
@@ -2205,7 +2205,7 @@ mod tests {
             yaw: Angle,
             _pitch: i16,
             _height: i32,
-            config: ThirdPersonCameraConfig,
+            config: &ThirdPersonCameraConfig,
         ) -> Result<CollisionSolve, CollisionQueryError> {
             let distance = if !self.blocked {
                 config.distance
@@ -2239,7 +2239,7 @@ mod tests {
                     &mut backend,
                     target,
                     ThirdPersonCameraInput::default(),
-                    config,
+                    &config,
                     1,
                 )
                 .unwrap();
@@ -2251,7 +2251,7 @@ mod tests {
                         &mut backend,
                         target,
                         ThirdPersonCameraInput::default(),
-                        config,
+                        &config,
                         1,
                     )
                     .unwrap();
@@ -2270,7 +2270,7 @@ mod tests {
                         &mut backend,
                         target,
                         ThirdPersonCameraInput::default(),
-                        config,
+                        &config,
                         1,
                     )
                     .unwrap();
@@ -2303,7 +2303,7 @@ mod tests {
             Angle::HALF,
             0,
             700,
-            config,
+            &config,
         )
         .unwrap();
         assert_eq!(solve.distance, 1400);
@@ -2983,7 +2983,7 @@ mod tests {
                         config,
                     );
                 }
-                assert_eq!(camera.pitch_q12, default_pitch_q12(config));
+                assert_eq!(camera.pitch_q12, default_pitch_q12(&config));
             }
         }
     }
@@ -3575,7 +3575,7 @@ mod tests {
 
         assert_eq!(camera.focus.y, target.player.y + config.target_height);
         assert_eq!(camera.position.y, target.player.y + config.height);
-        assert_eq!(camera.pitch_q12, default_pitch_q12(config));
+        assert_eq!(camera.pitch_q12, default_pitch_q12(&config));
     }
 
     #[test]
@@ -4053,7 +4053,7 @@ mod tests {
         let player = player_focus(target.player, config.target_height);
         assert_eq!(
             frame.focus,
-            camera_focus_goal(target, config, config.distance)
+            camera_focus_goal(target, &config, config.distance)
         );
         assert_ne!(frame.focus, player);
         assert!(frame.focus.x > player.x);
@@ -4083,7 +4083,7 @@ mod tests {
             config,
         );
         assert_eq!(frame.yaw, Angle::HALF.add_signed_q12(128));
-        assert_eq!(frame.pitch_q12, default_pitch_q12(config));
+        assert_eq!(frame.pitch_q12, default_pitch_q12(&config));
         let frame = camera.update(
             WorldProjection::new(160, 120, 320, 64),
             target,
@@ -4682,7 +4682,7 @@ mod tests {
         let focus = RoomPoint::new(0, 80, 0);
         // yaw 1024 is +x; a few q12 units toward -z gives the grazing ray.
         let yaw = Angle::from_q12(1024 + 68);
-        let solve = solve_camera_collision_trace(&mut world, focus, yaw, 0, 80, config).unwrap();
+        let solve = solve_camera_collision_trace(&mut world, focus, yaw, 0, 80, &config).unwrap();
         assert!(solve.pull_in);
         let eye = camera_position_at_height(focus, solve.distance, yaw, 0, 80);
         let gap = eye.z + PINNED_GAP;
