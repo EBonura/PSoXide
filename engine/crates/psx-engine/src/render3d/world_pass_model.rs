@@ -258,6 +258,118 @@ fn facet_reflection_face(
     face
 }
 
+/// Joint rotation currently loaded into the GTE for [`facet_reflection_plain_words`].
+///
+/// Faces are cooked part by part, so consecutive faces nearly always name the
+/// same joint and the five-register matrix load happens once per run instead
+/// of nine matrix loads from RAM per face. The matrix the GTE held before the
+/// first borrow is kept and handed back by [`ReflectionJoint::restore`]: the
+/// walker used to leave RT alone and code after it (projectors built before
+/// the model draw) may rely on that.
+struct ReflectionJoint {
+    joint: usize,
+    loaded: bool,
+    saved: Option<Mat3I16>,
+}
+
+impl ReflectionJoint {
+    const fn new() -> Self {
+        Self {
+            joint: usize::MAX,
+            loaded: false,
+            saved: None,
+        }
+    }
+
+    #[inline(always)]
+    fn restore(self) {
+        if let Some(matrix) = self.saved {
+            psx_gte::scene::load_rotation(&matrix);
+        }
+    }
+}
+
+/// The three UV words of a facet-reflection face, identical to
+/// [`facet_reflection_face`] for every face with a joint in `joints`.
+///
+/// The nine CPU products become one GTE MVMVA with `sf = 0` (the exact row
+/// products) against the joint rotation loaded once per run of faces. With no
+/// gradient or strip bits (cooked final word `0`) the per-corner offsets and
+/// clamps drop out, because the lookup is already inside the map (`len >=
+/// |n|`, so `0 <= u <= width - 1`); with them the corner loop below is the
+/// general routine's, line for line.
+#[inline(always)]
+fn facet_reflection_words(
+    words: [u16; 3],
+    joints: &[JointViewTransform],
+    rotation: &mut ReflectionJoint,
+    width: u8,
+    height: u8,
+    roughness: u8,
+) -> [u16; 3] {
+    let joint = usize::from(words[1] >> 8);
+    if joint != rotation.joint {
+        rotation.joint = joint;
+        rotation.loaded = match joints.get(joint) {
+            Some(transform) => {
+                if rotation.saved.is_none() {
+                    rotation.saved = Some(psx_gte::scene::read_rotation());
+                }
+                psx_gte::scene::load_rotation(&transform.rotation);
+                true
+            }
+            None => false,
+        };
+    }
+    if !rotation.loaded {
+        return [0; 3];
+    }
+    let n = Vec3I16::new(
+        words[0] as u8 as i8 as i16,
+        (words[0] >> 8) as u8 as i8 as i16,
+        words[1] as u8 as i8 as i16,
+    );
+    let d = psx_gte::scene::rotate_vector_unshifted_scheduled(n);
+    // Projection scales X/Y by four to improve GTE precision; undo that
+    // anisotropy before normal lookup. Uniform model scale cancels in L1.
+    let nx = d.x / (MODEL_GTE_XY_SCALE * 8);
+    let ny = d.y / (MODEL_GTE_XY_SCALE * 8);
+    let nz = d.z / 8;
+    let len = (nx.abs() + ny.abs() + nz.abs()).max(1);
+    let quantum_mask = !((1u32 << roughness.min(3)) - 1);
+    let coord = |n: i32, size: u8| {
+        let max = u32::from(size.max(1)) - 1;
+        let x = (len + n) as u32 * max / (2 * len) as u32;
+        (x & quantum_mask) as u16
+    };
+    let u = i32::from(coord(nx, width));
+    let v = i32::from(coord(ny, height));
+    let gradient = words[2];
+    if gradient & 0xf000 == 0 {
+        let word = (u as u16) | ((v as u16) << 8);
+        return [word; 3];
+    }
+    let band = (gradient >> 12) & 7;
+    let mut out = [0u16; 3];
+    for (k, word) in out.iter_mut().enumerate() {
+        let (du, dv) = if gradient & 0x8000 != 0 {
+            let bits = gradient >> (k * 4);
+            (
+                (i32::from(bits & 3) * 2 - 3) * 4,
+                (i32::from((bits >> 2) & 3) * 2 - 3) * 4,
+            )
+        } else {
+            (0, 0)
+        };
+        let mut mapped_u = (u + du).clamp(0, i32::from(width.max(1)) - 1) as u16;
+        if (1..=4).contains(&band) && width >= 4 {
+            mapped_u = ((band - 1) * u16::from(width) + mapped_u) >> 2;
+        }
+        *word = mapped_u | (((v + dv).clamp(0, i32::from(height.max(1)) - 1) as u16) << 8);
+    }
+    out
+}
+
 fn model_face_with_uv_mapping(
     mut face: TexturedModelRenderFace,
     projected_vertices: &[ProjectedVertex],
@@ -2007,6 +2119,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         let depth_slots = PreparedModelDepthSlots::new::<OT_DEPTH>(options);
         let mut culled = 0u16;
         let mut submitted = 0usize;
+        let mut rotation = ReflectionJoint::new();
         for source in faces {
             // SAFETY: the caller validated all indices and projected all
             // vertices, and preflighted a packet/command for every face.
@@ -2019,11 +2132,18 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 culled = culled.wrapping_add(1);
                 continue;
             }
-            let mapped = facet_reflection_face(face, joints, width, height, roughness);
+            let uv_words = facet_reflection_words(
+                face.uv_words(),
+                joints,
+                &mut rotation,
+                width,
+                height,
+                roughness,
+            );
             let triangle = unsafe {
                 triangles.push_unchecked(TriTextured::with_packet_material_packed_uv_words(
                     xy,
-                    mapped.uv_words(),
+                    uv_words,
                     packet.with_clut_bank(face.palette_bank()),
                 ))
             } as *mut TriTextured as *mut u32;
@@ -2039,6 +2159,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             }
             submitted += 1;
         }
+        rotation.restore();
         self.command_len = command_start + submitted;
         let processed = faces.len().min(u16::MAX as usize) as u16;
         *considered = considered.wrapping_add(u32::from(processed));
@@ -4459,5 +4580,62 @@ mod facet_reflection_tests {
             facet_reflection_face(face([0, 0, -127], 255), &[], 128, 128, 0).uvs(),
             [(0, 0); 3]
         );
+    }
+}
+
+#[cfg(test)]
+mod facet_reflection_words_tests {
+    use super::*;
+
+    fn next(seed: &mut u32) -> u32 {
+        *seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        *seed >> 8
+    }
+
+    /// The GTE-backed path must give exactly the words the general
+    /// per-corner routine gives, gradient and strip bits included.
+    #[test]
+    fn words_match_the_general_routine() {
+        let mut seed = 0x1234_5678;
+        let mut joints = [JointViewTransform::ZERO; 5];
+        for joint in joints.iter_mut() {
+            for row in 0..3 {
+                for col in 0..3 {
+                    joint.rotation.m[row][col] = (next(&mut seed) % 8193) as i16 - 4096;
+                }
+            }
+        }
+        let mut rotation = ReflectionJoint::new();
+        for case in 0..8000u32 {
+            let nx = (next(&mut seed) & 0xff) as u8;
+            let ny = (next(&mut seed) & 0xff) as u8;
+            let nz = (next(&mut seed) & 0xff) as u8;
+            // Joints 5 and 6 do not exist: the general routine zeroes the words.
+            let joint = (next(&mut seed) % 7) as u16;
+            let gradient = match case % 3 {
+                0 => 0,
+                1 => (next(&mut seed) & 0xffff) as u16,
+                _ => (next(&mut seed) & 0x0fff) as u16 | 0x8000,
+            };
+            let words = [
+                u16::from(nx) | u16::from(ny) << 8,
+                u16::from(nz) | joint << 8,
+                gradient,
+            ];
+            let (width, height) =
+                [(64u8, 64u8), (128, 64), (32, 96), (1, 1), (4, 8)][(case % 5) as usize];
+            let roughness = ((case / 5) % 4) as u8;
+            let face = TexturedModelRenderFace {
+                corner_words: [
+                    u32::from(words[0]) << 16,
+                    u32::from(words[1]) << 16 | 1,
+                    u32::from(words[2]) << 16 | 2,
+                ],
+            };
+            let general = facet_reflection_face(face, &joints, width, height, roughness).uv_words();
+            let fast =
+                facet_reflection_words(words, &joints, &mut rotation, width, height, roughness);
+            assert_eq!(fast, general, "case {case}");
+        }
     }
 }
