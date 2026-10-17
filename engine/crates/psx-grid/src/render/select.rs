@@ -1,8 +1,5 @@
 //! Cell cull, facing test and corner projection of one room.
 
-use psx_bsp::render::{FrustumPlanes, PXBSP_CLIP_ALL_PLANES};
-use psx_bsp::Vec3I16;
-
 /// Height of the lid slab the open columns are bounded by, runtime units.
 const SKY_LID: i32 = 9;
 use psx_gte::math::Vec3I16 as GteVec3I16;
@@ -162,18 +159,17 @@ impl GridRenderer {
                                     let c = |v: i32| {
                                         v.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
                                     };
-                                    let lo = Vec3I16 {
+                                    let lo = GteVec3I16 {
                                         x: c(x0),
                                         y: b.min_y,
                                         z: c(z0),
                                     };
-                                    let hi = Vec3I16 {
+                                    let hi = GteVec3I16 {
                                         x: c(x1),
                                         y: c(y_hi + SKY_LID),
                                         z: c(z1),
                                     };
-                                    sky_seen =
-                                        frustum.cull_aabb(lo, hi, PXBSP_CLIP_ALL_PLANES).is_some();
+                                    sky_seen = frustum.cull_aabb(lo, hi, CLIP_ALL_PLANES).is_some();
                                 }
                             }
                         } else {

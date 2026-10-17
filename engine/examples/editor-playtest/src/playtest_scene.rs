@@ -285,7 +285,7 @@ impl Playtest {
     ) {
         let material_tick = self.gameplay_tick(sim_tick).as_u32();
         let mut visible_sky_aperture = false;
-        if let Some(bsp) = self.bsp.as_mut() {
+        if let Some(world_rt) = self.world_rt.as_mut() {
             telemetry::stage_begin(telemetry::stage::ROOM);
             sort_probe_class(SORT_CLASS_WORLD);
             let cinematic_visibility = (self.opening.active() && !self.opening.gameplay_camera())
@@ -293,7 +293,7 @@ impl Playtest {
                     let player = self.motor.position();
                     RoomPoint::new(player.x, player.y + 32, player.z)
                 });
-            visible_sky_aperture = bsp.draw(
+            visible_sky_aperture = world_rt.draw(
                 camera,
                 cinematic_visibility,
                 material_tick,
@@ -949,8 +949,8 @@ impl Scene for Playtest {
             // resolved. `Scene::init` runs at boot, not per gameplay entry, so
             // this runtime survives the release above; drop the bindings with
             // the slots they name.
-            if let Some(bsp) = self.bsp.as_mut() {
-                bsp.invalidate_materials();
+            if let Some(world_rt) = self.world_rt.as_mut() {
+                world_rt.invalidate_materials();
             }
             #[cfg(feature = "cd-stream-bench")]
             {
@@ -1187,9 +1187,9 @@ impl Scene for Playtest {
         let room_record = ROOMS.get(self.room_index.to_usize());
         // Which world objects the cooked BSP lets the passes below draw.
         let mut world_object_visibility = WorldObjectVisibility::ALL;
-        if let Some(bsp) = self.bsp.as_mut() {
+        if let Some(world_rt) = self.world_rt.as_mut() {
             telemetry::stage_begin(telemetry::stage::ROOM);
-            world_object_visibility = bsp.visible_world_objects(camera, &self.destructibles);
+            world_object_visibility = world_rt.visible_world_objects(camera, &self.destructibles);
             telemetry::stage_end(telemetry::stage::ROOM);
         }
         // The cooked BSP world is the frame's largest block of packets and
@@ -1200,9 +1200,9 @@ impl Scene for Playtest {
         // instead of costing most of a draw up front. Characters and props
         // emit their packets too quickly to push the fence back themselves.
         let world_first = self
-            .bsp
+            .world_rt
             .as_ref()
-            .is_none_or(|bsp| bsp.fits_before_fence(&primitive_packets));
+            .is_none_or(|world_rt| world_rt.fits_before_fence(&primitive_packets));
         if world_first {
             self.draw_world_and_sky(
                 camera,
@@ -1227,7 +1227,7 @@ impl Scene for Playtest {
             telemetry::stage_end(telemetry::stage::FAR_VISTA);
         }
 
-        if USES_PXBSP {
+        if HAS_WORLD {
             let mut total_instance_stats = ModelInstanceDrawStats::default();
 
             // Live entity poses: instances bound to game entities
@@ -1243,11 +1243,10 @@ impl Scene for Playtest {
             if let (Some(room_record), Some(lighting)) =
                 (room_record, self.current_room_lighting(camera))
             {
-                let actor_options = pxbsp_actor_surface_options(room_record)
-                    .with_material_animation(
-                        self.gameplay_tick(ctx.sim_tick).as_u32(),
-                        ctx.video_hz.as_u16(),
-                    );
+                let actor_options = actor_surface_options(room_record).with_material_animation(
+                    self.gameplay_tick(ctx.sim_tick).as_u32(),
+                    ctx.video_hz.as_u16(),
+                );
                 let instance_stats = self.draw_room_world_content(
                     self.room_index,
                     &camera,
@@ -1458,11 +1457,10 @@ impl Scene for Playtest {
                 if let (Some(room_record), Some(lighting)) =
                     (room_record, self.current_room_lighting(camera))
                 {
-                    let actor_options = pxbsp_actor_surface_options(room_record)
-                        .with_material_animation(
-                            self.gameplay_tick(ctx.sim_tick).as_u32(),
-                            ctx.video_hz.as_u16(),
-                        );
+                    let actor_options = actor_surface_options(room_record).with_material_animation(
+                        self.gameplay_tick(ctx.sim_tick).as_u32(),
+                        ctx.video_hz.as_u16(),
+                    );
                     telemetry::stage_begin(telemetry::stage::EQUIPMENT);
                     let _ = draw_instance_equipment(
                         self.room_index,
@@ -1616,9 +1614,9 @@ impl Scene for Playtest {
             }
         }
         let world_words = self
-            .bsp
+            .world_rt
             .as_ref()
-            .map_or(0, |bsp| bsp.last_world_packet_words());
+            .map_or(0, |world_rt| world_rt.last_world_packet_words());
         self.choose_present_queue(queued_successor_fences_late(
             primitive_packets.capacity(),
             primitive_packets.used_slots(),
@@ -2100,8 +2098,13 @@ impl Playtest {
         );
         box_prop_profile_end(telemetry::stage::BOX_PROP_SHARDS);
         if room == self.room_index {
-            if let Some(bsp) = self.bsp.as_ref() {
-                bsp.draw_destructible_fragments(camera, actor_options, primitive_packets, world);
+            if let Some(world_rt) = self.world_rt.as_ref() {
+                world_rt.draw_destructible_fragments(
+                    camera,
+                    actor_options,
+                    primitive_packets,
+                    world,
+                );
             }
         }
         box_prop_profile_begin(telemetry::stage::IMAGE_CARDS);
@@ -2132,9 +2135,9 @@ impl Playtest {
                 &self.instance_actor_poses,
                 camera,
                 actor_options,
-                if USES_PXBSP {
+                if HAS_WORLD {
                     // psx-numeric-allow-next-line: per-instance visibility bitmask, see the parameter
-                    u64::from(self.bsp_instance_visible_mask)
+                    u64::from(self.instance_visible_mask)
                 } else {
                     // psx-numeric-allow-next-line: per-instance visibility bitmask, all instances visible
                     u64::MAX
@@ -2157,9 +2160,9 @@ impl Playtest {
                     &self.models,
                     entity_poses,
                     &self.instance_actor_poses,
-                    if USES_PXBSP {
+                    if HAS_WORLD {
                         // psx-numeric-allow-next-line: per-instance visibility bitmask, see the parameter
-                        u64::from(self.bsp_instance_visible_mask)
+                        u64::from(self.instance_visible_mask)
                     } else {
                         // psx-numeric-allow-next-line: per-instance visibility bitmask, all instances visible
                         u64::MAX

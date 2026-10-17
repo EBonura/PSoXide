@@ -135,7 +135,7 @@ impl Playtest {
         if !self.ranged_ready.aiming()
             || self.hook_travel.is_some()
             || self.hook_attached.is_some()
-            || self.bsp.is_none()
+            || self.world_rt.is_none()
         {
             return;
         }
@@ -180,8 +180,8 @@ impl Playtest {
             {
                 continue;
             }
-            let bsp = self.bsp.as_mut().unwrap();
-            if !bsp
+            let world_rt = self.world_rt.as_mut().unwrap();
+            if !world_rt
                 .trace_point_segment(
                     camera.position,
                     marker,
@@ -228,7 +228,7 @@ impl Playtest {
         }
         let landing = self.arch_perch(index, self.hook_overlay_absolute_tick());
         let start = self.motor.position();
-        let Some(bsp) = self.bsp.as_mut() else {
+        let Some(world_rt) = self.world_rt.as_mut() else {
             return false;
         };
         // The perch is deliberately unsupported. Sweep the full upright body,
@@ -236,15 +236,16 @@ impl Playtest {
         [(start, landing), (landing, landing)]
             .into_iter()
             .all(|(from, to)| {
-                bsp.trace_hook_body(
-                    from,
-                    to,
-                    config,
-                    &self.destructibles,
-                    bodies.as_slice(),
-                    aabbs.as_slice(),
-                )
-                .is_ok_and(|t| !t.hit() && !t.start_solid)
+                world_rt
+                    .trace_hook_body(
+                        from,
+                        to,
+                        config,
+                        &self.destructibles,
+                        bodies.as_slice(),
+                        aabbs.as_slice(),
+                    )
+                    .is_ok_and(|t| !t.hit() && !t.start_solid)
             })
     }
 
@@ -355,16 +356,17 @@ impl Playtest {
         {
             return false;
         }
-        if !self.bsp.as_mut().is_some_and(|bsp| {
-            bsp.trace_hook_body(
-                self.motor.position(),
-                next,
-                config,
-                &self.destructibles,
-                bodies.as_slice(),
-                aabbs.as_slice(),
-            )
-            .is_ok_and(|t| !t.hit() && !t.start_solid)
+        if !self.world_rt.as_mut().is_some_and(|world_rt| {
+            world_rt
+                .trace_hook_body(
+                    self.motor.position(),
+                    next,
+                    config,
+                    &self.destructibles,
+                    bodies.as_slice(),
+                    aabbs.as_slice(),
+                )
+                .is_ok_and(|t| !t.hit() && !t.start_solid)
         }) {
             return false;
         }

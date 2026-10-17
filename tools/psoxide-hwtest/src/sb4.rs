@@ -138,19 +138,35 @@ pub fn diff(current: &Capture, baseline: &Capture, out: &mut dyn Write) -> Resul
     for (seg, base) in current.segments.iter().zip(&baseline.segments) {
         let label = &seg.label;
         if seg.stat != base.stat {
-            writeln!(out, "DRIFT {label}.stat: {:04X} was {:04X}", seg.stat, base.stat)?;
+            writeln!(
+                out,
+                "DRIFT {label}.stat: {:04X} was {:04X}",
+                seg.stat, base.stat
+            )?;
             drift += 1;
         }
         if seg.envx != base.envx {
-            writeln!(out, "DRIFT {label}.envx: {:04X} was {:04X}", seg.envx, base.envx)?;
+            writeln!(
+                out,
+                "DRIFT {label}.envx: {:04X} was {:04X}",
+                seg.envx, base.envx
+            )?;
             drift += 1;
         }
         if seg.first != base.first {
-            writeln!(out, "DRIFT {label}.first: {:04X} was {:04X}", seg.first, base.first)?;
+            writeln!(
+                out,
+                "DRIFT {label}.first: {:04X} was {:04X}",
+                seg.first, base.first
+            )?;
             drift += 1;
         }
         if seg.hash != base.hash {
-            writeln!(out, "DRIFT {label}.hash: {:08X} was {:08X}", seg.hash, base.hash)?;
+            writeln!(
+                out,
+                "DRIFT {label}.hash: {:08X} was {:08X}",
+                seg.hash, base.hash
+            )?;
             drift += 1;
         }
         if seg.raw != base.raw {
@@ -238,7 +254,10 @@ mod tests {
     #[test]
     fn a_capture_round_trips_and_reports() {
         let text = payload(
-            &[(0x8001, 2, 3, 0xDEAD_BEEF, vec![1, -2, 3]), (0, 0, 0, 7, vec![0, 0, 0])],
+            &[
+                (0x8001, 2, 3, 0xDEAD_BEEF, vec![1, -2, 3]),
+                (0, 0, 0, 7, vec![0, 0, 0]),
+            ],
             9,
         );
         let capture = parse(&text).unwrap();

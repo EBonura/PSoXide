@@ -15,12 +15,9 @@
 //! DISTINCT fields never overlap in memory, so holding one while
 //! minting another mirrors the old disjoint-statics aliasing exactly;
 //! the pre-existing rule is unchanged: never hold two borrows of the
-//! SAME field at once. The frame-backend overlay below is the deliberate
-//! exception: PXBSP frame-face collection finishes before model projection
-//! starts, and its accessors document that shorter per-frame handoff.
+//! SAME field at once.
 
 use super::*;
-use crate::generated::PXBSP_FACE_CHAIN_CAPACITY;
 
 // A cube-only project never draws a panorama. Keep its unused packet cache
 // out of PS1 RAM; mixed-sky projects still retain the ordinary panorama path.
@@ -45,9 +42,6 @@ const PANORAMA_CACHE_COUNT: usize = {
 /// lives on [`Playtest`]; this is the part its `const fn new` cannot
 /// zero-initialize cheaply or that outlives scene borrows).
 pub(super) struct RuntimeArenas {
-    /// Generation-keyed full BSP certificates; exclusive query-time borrowing.
-    #[cfg(not(playtest_grid_world))]
-    pub(super) solid_cell_constraints: crate::bsp_runtime::SolidCellConstraintCache,
     /// VRAM slot table, unified allocator, residency tracker, and
     /// upload queue (see `psx_game_runtime::vram::VramRuntime`).
     pub(super) vram: RuntimeVram,
@@ -57,13 +51,10 @@ pub(super) struct RuntimeArenas {
     /// Front-end/gameplay RAM overlay (see [`FrontEndGameplayOverlay`]).
     #[cfg(feature = "cd-stream-bench")]
     pub(super) overlay: FrontEndGameplayOverlay,
-    /// The resident PXBSP renderer's session-lifetime visibility face chain.
-    pub(super) pxbsp_visible_faces: [u16; PXBSP_FACE_CHAIN_CAPACITY],
     /// Rotation-keyed sky-cyclorama packet cache (phase-2 sky carve).
     pub(super) sky: [psx_game_runtime::sky::SkyCyclorama; PANORAMA_CACHE_COUNT],
-    /// Per-frame scratch shared by the PXBSP face filter and model submits.
-    /// BSP static-world/mover drawing completes before any model path runs.
-    pub(super) frame_backend: FrameWorldBackendOverlay,
+    /// Per-frame model draw scratch.
+    pub(super) model_scratch: core::mem::MaybeUninit<RuntimeModelDrawScratch>,
     /// Break-time box-prop floor-debris cache (phase-2 box-prop carve).
     pub(super) debris_cache: RuntimeDebrisCache,
     /// Owned CD controller driver state (phase-2 retirement of the
@@ -71,34 +62,6 @@ pub(super) struct RuntimeArenas {
     #[cfg(feature = "cd-stream-bench")]
     pub(super) cd: psx_game_runtime::cd_stream::CdController,
 }
-
-/// Frame-lifetime overlay between BSP face filtering and model projection.
-pub(super) union FrameWorldBackendOverlay {
-    pub(super) model: core::mem::ManuallyDrop<RuntimeModelDrawScratch>,
-    pub(super) pxbsp_frame_faces: core::mem::ManuallyDrop<[u16; PXBSP_FACE_CHAIN_CAPACITY]>,
-}
-
-// Keep the overlay honest as generated project capacities change. Rust
-// unions use the largest variant (rounded to their common alignment); the
-// model variant is 32-bit aligned and larger than the u16 chain, so the
-// assertion failing means this carve no longer has the promised
-// zero-static-RAM cost and must be reviewed at cook/runtime together.
-const PXBSP_FACE_CHAIN_BYTES: usize = core::mem::size_of::<[u16; PXBSP_FACE_CHAIN_CAPACITY]>();
-const FRAME_WORLD_OVERLAY_PAYLOAD_BYTES: usize =
-    if core::mem::size_of::<RuntimeModelDrawScratch>() > PXBSP_FACE_CHAIN_BYTES {
-        core::mem::size_of::<RuntimeModelDrawScratch>()
-    } else {
-        PXBSP_FACE_CHAIN_BYTES
-    };
-const fn aligned_union_bytes(payload: usize, alignment: usize) -> usize {
-    ((payload + alignment - 1) / alignment) * alignment
-}
-const FRAME_WORLD_OVERLAY_BYTES: usize = aligned_union_bytes(
-    FRAME_WORLD_OVERLAY_PAYLOAD_BYTES,
-    core::mem::align_of::<FrameWorldBackendOverlay>(),
-);
-const _: () =
-    assert!(core::mem::size_of::<FrameWorldBackendOverlay>() == FRAME_WORLD_OVERLAY_BYTES);
 
 /// Scratch used only while rendering a frame.
 pub(super) struct FrameRenderScratch {
@@ -154,8 +117,6 @@ impl RuntimeArenas {
     /// so the static lands in `.bss` instead of storing ~430 KB in the
     /// flat PSX-EXE. NOT ready for use until [`Self::init`] runs.
     const ZEROED: Self = Self {
-        #[cfg(not(playtest_grid_world))]
-        solid_cell_constraints: crate::bsp_runtime::SolidCellConstraintCache::ZEROED,
         vram: RuntimeVram::zeroed(),
         // These three are zero-init types: their `new()` state IS the
         // all-zero pattern, so they need no later stamping.
@@ -170,13 +131,10 @@ impl RuntimeArenas {
                 persistent_assets: RuntimePersistentAssetStreamer::zeroed(),
             }),
         },
-        pxbsp_visible_faces: [0; PXBSP_FACE_CHAIN_CAPACITY],
         // Zero state = invalid cache key, so the first draw rebuilds;
         // no init stamping needed.
         sky: [const { psx_game_runtime::sky::SkyCyclorama::zeroed() }; PANORAMA_CACHE_COUNT],
-        frame_backend: FrameWorldBackendOverlay {
-            pxbsp_frame_faces: core::mem::ManuallyDrop::new([0; PXBSP_FACE_CHAIN_CAPACITY]),
-        },
+        model_scratch: core::mem::MaybeUninit::zeroed(),
         debris_cache: RuntimeDebrisCache::zeroed(),
         #[cfg(feature = "cd-stream-bench")]
         cd: psx_game_runtime::cd_stream::CdController::zeroed(),
@@ -205,17 +163,6 @@ fn arenas_ptr() -> *mut RuntimeArenas {
 pub(super) fn init_runtime_arenas() {
     // SAFETY: single-threaded boot path; no other arena borrow exists yet.
     unsafe { (*arenas_ptr()).init() }
-}
-
-/// Borrow the certificate cache only for one synchronous visibility query or
-/// generation reset. These paths do not invoke user callbacks or recurse into
-/// visibility, and interrupt handlers never access this arena field. No caller
-/// may retain this borrow across another access to this same field.
-#[cfg(not(playtest_grid_world))]
-pub(super) fn solid_cell_constraint_arena(
-) -> &'static mut crate::bsp_runtime::SolidCellConstraintCache {
-    // SAFETY: single-threaded scene owner, short-lived disjoint-field borrow.
-    unsafe { &mut (*arenas_ptr()).solid_cell_constraints }
 }
 
 /// One short-lived exclusive borrow of the VRAM runtime per glue call,
@@ -297,30 +244,10 @@ pub(super) fn sky_arena() -> Option<&'static mut psx_game_runtime::sky::SkyCyclo
 
 /// Exclusive borrow of the model draw scratch.
 pub(super) fn model_scratch_arena() -> &'static mut RuntimeModelDrawScratch {
-    // SAFETY: PXBSP face filtering/mover drawing happens before all model
-    // paths in `Playtest::render`; `draw_pxbsp_world` clears the frame-chain
-    // length and marks before the model side may overwrite these bytes.
-    unsafe {
-        &mut *core::ptr::addr_of_mut!((*arenas_ptr()).frame_backend.model)
-            .cast::<RuntimeModelDrawScratch>()
-    }
-}
-
-/// Session-lifetime PXBSP visible-face chain.
-pub(super) fn pxbsp_visible_face_chain_arena() -> &'static mut [u16; PXBSP_FACE_CHAIN_CAPACITY] {
-    // SAFETY: see `vram_arena`.
-    unsafe { &mut (*arenas_ptr()).pxbsp_visible_faces }
-}
-
-/// Per-frame PXBSP face-filter chain, live only until BSP drawing returns.
-pub(super) fn pxbsp_frame_face_chain_arena() -> &'static mut [u16; PXBSP_FACE_CHAIN_CAPACITY] {
-    // SAFETY: the BSP pass precedes every `model_scratch_arena` borrow and
-    // retires this chain before returning. The model pass may then overwrite
-    // the backing bytes while the retained Vec facade has length zero.
-    unsafe {
-        &mut *core::ptr::addr_of_mut!((*arenas_ptr()).frame_backend.pxbsp_frame_faces)
-            .cast::<[u16; PXBSP_FACE_CHAIN_CAPACITY]>()
-    }
+    // SAFETY: the scratch is all-zero bytes from link time, and the model draw
+    // scratch is plain data for which that is a valid state; the world pass
+    // does not use it, so the one short-lived borrow per call cannot alias.
+    unsafe { (*core::ptr::addr_of_mut!((*arenas_ptr()).model_scratch)).assume_init_mut() }
 }
 
 /// Exclusive borrow of the box-prop floor-debris cache.

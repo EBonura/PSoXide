@@ -55,16 +55,6 @@ lto           = true
 sort-probe = []
 default = [
     "cd-stream-bench",
-    # Alternate-frame world selection reuse (see the feature below): -6.7%
-    # bus cycles on the 0.4 whole-level tape, poll-bound frames identical to
-    # the per-frame selection at four of six sampled polls and cadence-offset
-    # at the other two. Remove this line to select every frame again.
-    "world-selection-reuse",
-    # Bucketed = OT-as-radix-sort, no per-frame comparison sort. The exact
-    # intra-slot ordering modes (slot/global/linked) cost 122k-313k extra
-    # cycles per render vblank for no observed visual difference; see
-    # docs/perf-30fps.md experiment 2.
-    "world-order-bucketed",
     "ot-2048",
     # VBlank-kicked presentation: +26% fps with one enemy on screen (19.8 to
     # 25.0). Frames that would fence early beside a queued frame, such as
@@ -74,11 +64,6 @@ default = [
 ]
 cd-stream-bench = ["dep:psx-io", "psx-game-runtime/cd-stream-bench"]
 cd-stream-benchmark = ["cd-stream-bench", "psx-game-runtime/cd-stream-benchmark"]
-# Streamed world (design 2026-10-08, M7): a world cooked with
-# PSXED_STREAM_WORLD=stream is a resident top container plus a region pack on
-# disc, read and installed while the loading screen runs. Off by default; the
-# whole-map build stays the default until the M7 gates pass.
-world-stream = ["cd-stream-bench", "psx-game-runtime/world-stream", "psx-bsp/streaming"]
 boot-trace = ["psx-engine/boot-trace", "psx-rt/boot-trace"]
 emulator-telemetry = ["psx-engine/emulator-telemetry"]
 # Per-update `camera-pose` debug lines only; fits builds that overflow RAM with
@@ -93,52 +78,30 @@ vert-debug-overlay = ["psx-engine/vert-debug"]
 # Hand every gameplay frame to psx-rt's VBlank-kicked present queue
 # (RenderSubmission::PresentQueue) instead of kicking it from the runner.
 present-queue = ["psx-engine/present-queue"]
-world-order-global = []
-world-order-slot = []
-world-order-linked = []
-world-order-bucketed = []
 room-surface-profile = ["psx-engine/room-surface-profile"]
 # Diagnostic-only cadence for semantic A/B comparisons. Render exactly once
 # per two fixed simulation ticks even when wall-clock VBlanks have accumulated,
 # so faster and slower builds present the same guest states.
 lockstep-visuals = []
-# Opt-in for projects whose close, strongly patterned ceilings visibly need
-# affine correction. The measured default spends subdivision on floors/walls.
-tr-subdivision-ceilings = []
-# Experiment-only stress profile that expands the distance band fourfold so
-# the upward-camera tape exercises ceiling subdivision even in tall rooms.
-tr-subdivision-wide-band = []
 # Experiment-only reference cadence for measuring the existing 30 Hz NPC
 # schedule against collision/decision work on every 60 Hz simulation tick.
 npc-think-60hz = []
-# Draw every other frame from the previous frame's selected world chain on
-# the exact clip path, halving the PVS mark and node walk. Experiment: a face
-# entering the frustum on a reuse frame appears one frame late.
-world-selection-reuse = []
 # Reference build for measuring the cost of the existing single-quad actor
 # shadow implementation.
 actor-shadows-off = []
 # Projected (flattened-geometry) actor shadows instead of the blob decal.
 actor-shadows-projected = []
-# High-contrast TR subdivision colors for emulator wireframe captures.
-# Diagnostic only: normal builds retain authored Gouraud lighting.
-tessellation-debug = []
 # On-screen presented-fps + worst-frame-gap counter for hardware
 # ratification burns. Off by default: shipping builds must not carry it.
 fps-overlay = []
 # Opt-in actor collision-cylinder tuning overlay (L3). The complete input,
 # scene-state and renderer path is absent from normal/shipping playtests.
 collision-debug-overlay = ["psx-game-runtime/collision-debug-overlay"]
-# Force the sector-grid world renderer. Normally not needed: the cook writes
-# PLAYTEST_WORLD_GRID into the manifest for a grid project and build.rs picks
-# the renderer from that. Bench builds that cook a raw level use this.
-grid-world = []
 ot-1024 = []
 ot-2048 = []
 
 [dependencies]
 psx-asset  = { path = "../../../sdk/crates/psx-asset" }
-psx-bsp    = { path = "../../crates/psx-bsp" }
 psx-engine = { path = "../../crates/psx-engine" }
 psx-game-runtime = { path = "../../crates/psx-game-runtime" }
 psx-grid   = { path = "../../crates/psx-grid" }

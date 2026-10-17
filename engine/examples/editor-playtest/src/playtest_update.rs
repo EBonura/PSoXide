@@ -1,5 +1,5 @@
 use super::*;
-use crate::playtest_runtime::bsp_hazard_damage;
+use crate::playtest_runtime::hazard_damage;
 
 /// Borrow the initialized prefix of a `MaybeUninit` scratch array.
 ///
@@ -98,7 +98,7 @@ impl Playtest {
         let player_pos = [player.x, player.y, player.z];
         let (player_radius, player_height) = match &self.character {
             Some(character) => (character.radius, character.height),
-            None if self.bsp.is_some() => (BSP_PLAYER_RADIUS, BSP_PLAYER_HEIGHT),
+            None if self.world_rt.is_some() => (WORLD_PLAYER_RADIUS, WORLD_PLAYER_HEIGHT),
             None => (0, 0),
         };
         let now = ctx.sim_tick.as_u32();
@@ -131,7 +131,7 @@ impl Playtest {
         // SAFETY: both prefixes were initialized in the loop above.
         let entity_dead = unsafe { initialized_prefix(&entity_dead, entity_count) };
         let eye = self.camera.position();
-        let spatial_masks = self.bsp.as_mut().map(|bsp| {
+        let spatial_masks = self.world_rt.as_mut().map(|world_rt| {
             // The observer stays inside the player's body rather than on the
             // floor seam. Actors and model instances are linked by complete
             // dynamic bounds below, matching Quake's multi-leaf entity rule.
@@ -141,16 +141,15 @@ impl Playtest {
                 player.z,
             );
             let mut entity_activation_bounds =
-                [const { core::mem::MaybeUninit::<BspVisibilityBounds>::uninit() };
-                    MAX_GAME_ENTITIES];
+                [const { core::mem::MaybeUninit::<VisibilityBounds>::uninit() }; MAX_GAME_ENTITIES];
             for index in 0..entity_count {
                 let Some(record) = GAME_ENTITIES.get(index) else {
                     // Preserve initialization even if a malformed runtime table
                     // violates the cook's one-to-one entity contract.
-                    entity_activation_bounds[index].write(BspVisibilityBounds::EMPTY);
+                    entity_activation_bounds[index].write(VisibilityBounds::EMPTY);
                     continue;
                 };
-                entity_activation_bounds[index].write(BspVisibilityBounds::cylinder(
+                entity_activation_bounds[index].write(VisibilityBounds::cylinder(
                     entity_positions[index],
                     i32::from(record.radius),
                     i32::from(record.height),
@@ -159,10 +158,10 @@ impl Playtest {
             // SAFETY: every branch above writes the complete prefix.
             let entity_activation_bounds =
                 unsafe { initialized_prefix(&entity_activation_bounds, entity_count) };
-            let entity_mask = bsp.visible_bounds_mask(observer, entity_activation_bounds);
+            let entity_mask = world_rt.visible_bounds_mask(observer, entity_activation_bounds);
             let instance_count = MODEL_INSTANCES.len().min(MAX_MODEL_INSTANCES);
             let mut instance_activation_bounds =
-                [const { core::mem::MaybeUninit::<BspVisibilityBounds>::uninit() };
+                [const { core::mem::MaybeUninit::<VisibilityBounds>::uninit() };
                     MAX_MODEL_INSTANCES];
             for index in 0..instance_count {
                 let instance = &MODEL_INSTANCES[index];
@@ -173,7 +172,7 @@ impl Playtest {
                     .flatten();
                 let radius = model.map_or(0, |model| i32::from(model.collision_radius));
                 let height = model.map_or(1, |model| i32::from(model.world_height));
-                instance_activation_bounds[index].write(BspVisibilityBounds::cylinder(
+                instance_activation_bounds[index].write(VisibilityBounds::cylinder(
                     [instance.x, instance.y, instance.z],
                     radius,
                     height,
@@ -195,13 +194,13 @@ impl Playtest {
                 if instance < 64 {
                     actor_instances |= 1u64 << instance;
                 }
-                *bounds = BspVisibilityBounds::cylinder(
+                *bounds = VisibilityBounds::cylinder(
                     entity_positions[entity],
                     i32::from(record.radius),
                     i32::from(record.height),
                 );
             }
-            let instance_mask = bsp.visible_view_bounds_mask(
+            let instance_mask = world_rt.visible_view_bounds_mask(
                 observer,
                 eye,
                 instance_activation_bounds,
@@ -215,7 +214,7 @@ impl Playtest {
             }
             // SAFETY: the complete `logic_count` prefix was initialized above.
             let logic_positions = unsafe { initialized_prefix(&logic_positions, logic_count) };
-            let mut logic_mask = bsp.visible_points_mask(observer, logic_positions);
+            let mut logic_mask = world_rt.visible_points_mask(observer, logic_positions);
             // A volume may span several leaves while its representative
             // origin lies in only one. Never suppress a touch that already
             // contains the player; the logic runtime repeats this inclusive
@@ -238,7 +237,7 @@ impl Playtest {
             .set_spatial_active_mask(spatial_masks.map_or(0, |masks| masks.0));
         self.logic
             .set_spatial_active_mask(spatial_masks.map_or(0, |masks| masks.1));
-        self.bsp_instance_visible_mask = spatial_masks.map_or(u16::MAX, |masks| masks.2 as u16);
+        self.instance_visible_mask = spatial_masks.map_or(u16::MAX, |masks| masks.2 as u16);
         if let Some((entity_mask, _, _)) = spatial_masks {
             // Live entities whose leaf sits outside the player's PVS row
             // this tick: their idle/patrol AI is gated and their
@@ -266,7 +265,7 @@ impl Playtest {
             self.game_entities
                 .observe_projectiles(GAME_ENTITIES, &self.combat_projectiles);
             let mut mover = SceneEntityMover {
-                bsp: self.bsp.as_mut(),
+                world_rt: self.world_rt.as_mut(),
                 destructibles: &self.destructibles,
                 box_props: &self.box_props,
                 models: &self.models,
@@ -438,18 +437,18 @@ impl Playtest {
         self.destructibles
             .init(DESTRUCTIBLES)
             .unwrap_or_else(|error| panic!("cooked destructible initialization failed: {error:?}"));
-        self.bsp = if generated::PLAYTEST_USES_PXBSP {
-            let mut bsp = WorldRuntime::load_manifest()
+        self.world_rt = if generated::PLAYTEST_HAS_WORLD {
+            let mut world_rt = WorldRuntime::load_manifest()
                 .unwrap_or_else(|error| panic!("cooked world initialization failed: {error}"));
-            let _ = bsp.refresh_materials();
-            Some(bsp)
+            let _ = world_rt.refresh_materials();
+            Some(world_rt)
         } else {
             None
         };
-        if self.bsp.is_some() {
-            self.current_ambient_rgb = PXBSP_AMBIENT_RGB;
+        if self.world_rt.is_some() {
+            self.current_ambient_rgb = WORLD_AMBIENT_RGB;
         }
-        crate::game_trace("editor-playtest: gameplay bsp ok");
+        crate::game_trace("editor-playtest: gameplay world ok");
 
         // Empty manifest? Boot to a clear-coloured screen.
         if ROOMS.is_empty() {
@@ -542,7 +541,7 @@ impl Playtest {
     fn player_contents_memo(
         &mut self,
         height: i32,
-    ) -> Option<psx_bsp::collision::LiquidContentsSample> {
+    ) -> Option<psx_grid::contents::LiquidContentsSample> {
         let position = self.motor.position();
         if let Some((at, at_height, sample)) = self.player_contents_memo {
             if at == position && at_height == height {
@@ -550,9 +549,9 @@ impl Playtest {
             }
         }
         let sample = self
-            .bsp
+            .world_rt
             .as_ref()
-            .and_then(|bsp| bsp.player_contents(position, height));
+            .and_then(|world_rt| world_rt.player_contents(position, height));
         self.player_contents_memo = sample.map(|sample| (position, height, sample));
         sample
     }
@@ -648,8 +647,8 @@ impl Playtest {
             return;
         }
         self.tick_gameplay_layer(ctx);
-        if let Some(bsp) = self.bsp.as_mut() {
-            bsp.tick_doors();
+        if let Some(world_rt) = self.world_rt.as_mut() {
+            world_rt.tick_doors();
         }
         {
             use psx_game_runtime::entities::GameEntityState;
@@ -761,8 +760,8 @@ impl Playtest {
         telemetry::stage_begin(telemetry::stage::UPDATE_ACTOR);
         self.advance_box_prop_break_events(delta_vblanks);
         self.advance_box_prop_falls(delta_vblanks);
-        if let Some(bsp) = self.bsp.as_mut() {
-            bsp.advance_destructible_fragments(delta_vblanks);
+        if let Some(world_rt) = self.world_rt.as_mut() {
+            world_rt.advance_destructible_fragments(delta_vblanks);
         }
         if CAMERA_SWEEP_ENABLED {
             telemetry::stage_end(telemetry::stage::UPDATE_ACTOR);
@@ -786,7 +785,7 @@ impl Playtest {
                     return;
                 }
             } else if ctx.just_pressed(INTERACT_BUTTON)
-                && self.activate_nearest_bsp_door(now.as_u32(), ctx.controller_port())
+                && self.activate_nearest_door(now.as_u32(), ctx.controller_port())
             {
                 self.evade_run_hold_ticks = 0;
                 self.evade_run_hold_consumed = false;
@@ -975,8 +974,8 @@ impl Playtest {
         if self.ranged_ready.ready(now.as_u32()) {
             config.walk_speed = (config.walk_speed * 3 / 4).max(1);
         }
-        let bsp_contents = self.player_contents_memo(config.height);
-        if bsp_contents.is_some_and(|sample| sample.water_level > 0) {
+        let liquid_contents = self.player_contents_memo(config.height);
+        if liquid_contents.is_some_and(|sample| sample.water_level > 0) {
             // Shared BSP liquids retain 60 percent locomotion. The same
             // contents query feeds Quake's richer swim rules; the general
             // editor playtest has no vertical swim input contract yet.
@@ -1033,20 +1032,21 @@ impl Playtest {
             // compose over that provider in stable cooked/live order.
             telemetry::stage_end(telemetry::stage::SIM_COLLISION);
             telemetry::stage_begin(telemetry::stage::SIM_SOLVE);
-            let Some(bsp) = self.bsp.as_mut() else {
+            let Some(world_rt) = self.world_rt.as_mut() else {
                 // No world cooked yet (the placeholder manifest).
                 return;
             };
-            bsp.update_motor(
-                &mut self.motor,
-                input,
-                config,
-                delta_vblanks,
-                &self.destructibles,
-                blockers.as_slice(),
-                aabb_blockers.as_slice(),
-            )
-            .expect("PXBSP player trace failed")
+            world_rt
+                .update_motor(
+                    &mut self.motor,
+                    input,
+                    config,
+                    delta_vblanks,
+                    &self.destructibles,
+                    blockers.as_slice(),
+                    aabb_blockers.as_slice(),
+                )
+                .expect("PXBSP player trace failed")
         };
         telemetry::stage_end(telemetry::stage::SIM_SOLVE);
         self.player_moved_last_tick = motor_frame.moved;
@@ -1054,17 +1054,17 @@ impl Playtest {
         let hazard_countdown_was_active = self.hazard_death_ticks_remaining > 0;
         if !hazard_countdown_was_active {
             if let Some(sample) = self.player_contents_memo(config.height) {
-                let damage = bsp_hazard_damage(sample.contents, now.as_u32());
+                let damage = hazard_damage(sample.contents, now.as_u32());
                 if damage > 0 {
                     let died = self.apply_untyped_player_damage(damage);
                     telemetry::counter(telemetry::counter::PLAYER_LIQUID_DAMAGE_EVENTS, 1);
                     telemetry::debug_log(match sample.contents {
-                        psx_bsp::collision::CONTENTS_LAVA => "player bsp:lava",
-                        psx_bsp::collision::CONTENTS_SLIME => "player bsp:slime",
-                        _ => "player bsp:liquid",
+                        psx_grid::contents::CONTENTS_LAVA => "player hazard:lava",
+                        psx_grid::contents::CONTENTS_SLIME => "player hazard:slime",
+                        _ => "player hazard:liquid",
                     });
                     if died {
-                        self.arm_player_death(false, BSP_HAZARD_DEATH_TICKS, now, ctx.video_hz);
+                        self.arm_player_death(false, HAZARD_DEATH_TICKS, now, ctx.video_hz);
                     }
                 }
             }

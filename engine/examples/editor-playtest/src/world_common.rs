@@ -1,40 +1,39 @@
 //! Pieces of the world runtime shared by every world kind.
 //!
-//! Both [`crate::WorldRuntime`] implementations (the PXBSP runtime for brush
-//! worlds, the grid runtime for grid worlds) take the same camera
-//! conventions, constants, visibility bounds and trace counter from here.
+//! The camera conventions, constants, visibility bounds and trace counter
+//! the grid runtime ([`crate::WorldRuntime`]) and the rest of the playtest
+//! share.
 
-use psx_bsp::render::Camera;
-use psx_bsp::Vec3I32;
 use psx_engine::Mat3I16;
 use psx_engine::WorldCamera;
+use psx_grid::render::Camera;
+use psx_gte::math::Vec3I32;
 
-/// Body baked by `compile_brush_world` into hull one.
-pub(super) const BSP_PLAYER_RADIUS: i32 = 1;
-/// Body baked by `compile_brush_world` into hull one.
-pub(super) const BSP_PLAYER_HEIGHT: i32 = 4;
-/// Preserve the first-playable fixture's authored walking cadence when it has
-/// no Character resource. Character-backed projects keep their authored speed.
-pub(super) const BSP_FALLBACK_PLAYER_SPEED: i32 = 4 << 8;
-/// Compact third-person rig for the characterless BSP debug controller. The
+/// Collision body of a Character-less player, runtime units.
+pub(super) const WORLD_PLAYER_RADIUS: i32 = 1;
+/// Collision body height of a Character-less player, runtime units.
+pub(super) const WORLD_PLAYER_HEIGHT: i32 = 4;
+/// Walking speed of the Character-less debug body. Character-backed projects
+/// keep their authored speed.
+pub(super) const WORLD_FALLBACK_PLAYER_SPEED: i32 = 4 << 8;
+/// Compact third-person rig for the Character-less debug controller. The
 /// ordinary authored camera remains authoritative once a Character is bound.
 /// Keep the boom close to the invisible debug body while it turns; this reads
 /// as a player-height exploration camera and prevents annex columns from
 /// filling the frame while the collision-driven route rounds a doorway.
-pub(super) const BSP_FALLBACK_CAMERA_DISTANCE: i32 = 24;
-pub(super) const BSP_FALLBACK_CAMERA_HEIGHT: i32 = 40;
-pub(super) const BSP_FALLBACK_CAMERA_TARGET_HEIGHT: i32 = 32;
-pub(super) const BSP_FALLBACK_CAMERA_CLEARANCE: i32 = 8;
-/// Boom-to-wall margin for the point-traced follow camera in brush worlds.
-pub(super) const BSP_CAMERA_WALL_MARGIN: i32 = 16;
-pub(super) const BSP_FALLBACK_CAMERA_MARGIN: i32 = 4;
-pub(super) const BSP_USE_DISTANCE: i32 = 256;
+pub(super) const WORLD_FALLBACK_CAMERA_DISTANCE: i32 = 24;
+pub(super) const WORLD_FALLBACK_CAMERA_HEIGHT: i32 = 40;
+pub(super) const WORLD_FALLBACK_CAMERA_TARGET_HEIGHT: i32 = 32;
+pub(super) const WORLD_FALLBACK_CAMERA_CLEARANCE: i32 = 8;
+/// Boom-to-wall margin for the point-traced follow camera.
+pub(super) const WORLD_CAMERA_WALL_MARGIN: i32 = 16;
+pub(super) const WORLD_FALLBACK_CAMERA_MARGIN: i32 = 4;
+pub(super) const WORLD_USE_DISTANCE: i32 = 256;
 
-/// Dynamic world bounds used to link actors/instances to every BSP leaf they
-/// touch. Coordinates use the playtest's integer engine-unit convention; the
-/// BSP runtime converts them to Q20.12 only at the tree boundary.
+/// Dynamic world bounds used to activate actors and instances by room.
+/// Coordinates use the playtest's integer engine-unit convention.
 #[derive(Copy, Clone, Debug, Default, Eq)]
-pub(super) struct BspVisibilityBounds {
+pub(super) struct VisibilityBounds {
     min: [i32; 3],
     max: [i32; 3],
 }
@@ -43,7 +42,7 @@ pub(super) struct BspVisibilityBounds {
 // memcmp on MIPS, and the visibility cache compares bounds for every
 // linked actor and instance each frame (about 2.3M instructions over the
 // Cortex whole-level route, all inside memcmp).
-impl PartialEq for BspVisibilityBounds {
+impl PartialEq for VisibilityBounds {
     #[inline]
     fn eq(&self, other: &Self) -> bool {
         (self.min[0] ^ other.min[0])
@@ -56,7 +55,7 @@ impl PartialEq for BspVisibilityBounds {
     }
 }
 
-impl BspVisibilityBounds {
+impl VisibilityBounds {
     pub(super) const fn min(&self) -> [i32; 3] {
         self.min
     }
@@ -85,10 +84,6 @@ impl BspVisibilityBounds {
                 position[2].saturating_add(radius),
             ],
         }
-    }
-
-    pub(super) const fn aabb(min: [i32; 3], max: [i32; 3]) -> Self {
-        Self { min, max }
     }
 }
 
@@ -122,14 +117,14 @@ impl<P: psx_engine::CollisionTraceProvider + ?Sized> psx_engine::CollisionTraceP
 }
 
 /// The world pass view rotation from the camera's exact Q12 trig, in the
-/// PXBSP convention [`pxbsp_camera`] derives its angles in: PXBSP yaw is
+/// PXBSP convention [`view_camera`] derives its angles in: PXBSP yaw is
 /// the orbit yaw plus a quarter turn and PXBSP pitch the negated look
 /// pitch, so `sin(yaw + 90) = cos(yaw)`, `cos(yaw + 90) = -sin(yaw)`,
 /// `sin(-pitch) = -sin(pitch)`. No table, no angle recovery: the world
 /// rotates by exactly the camera the model pass renders with.
-pub(super) fn pxbsp_view_rotation(camera: WorldCamera) -> Mat3I16 {
+pub(super) fn world_view_rotation(camera: WorldCamera) -> Mat3I16 {
     let q12 = |value: i32| value.clamp(-0x1000, 0x1000) as i16;
-    psx_bsp::render::pxbsp_view_rotation(
+    psx_grid::render::view_rotation(
         q12(-camera.sin_pitch.raw()),
         q12(camera.cos_pitch.raw()),
         q12(camera.cos_yaw.raw()),
@@ -137,7 +132,7 @@ pub(super) fn pxbsp_view_rotation(camera: WorldCamera) -> Mat3I16 {
     )
 }
 
-pub(super) fn pxbsp_camera(camera: WorldCamera) -> Camera {
+pub(super) fn view_camera(camera: WorldCamera) -> Camera {
     let orbit_yaw = angle_q12_from_basis(camera.sin_yaw.raw(), camera.cos_yaw.raw());
     // WorldCamera stores the target-to-camera orbit angle with the engine's
     // `x = sin(yaw), z = cos(yaw)` convention; the view direction is the
@@ -223,7 +218,7 @@ mod tests {
                 Q12::ZERO,
                 Q12::ONE,
             );
-            assert_eq!(pxbsp_camera(camera).angles[1], expected);
+            assert_eq!(view_camera(camera).angles[1], expected);
         }
     }
 
@@ -239,7 +234,7 @@ mod tests {
                 sin_pitch,
                 Q12::ZERO,
             );
-            assert_eq!(pxbsp_camera(camera).angles[0], expected);
+            assert_eq!(view_camera(camera).angles[0], expected);
         }
     }
 }

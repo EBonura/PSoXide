@@ -167,8 +167,9 @@ impl Playtest {
                     .collect_static_prop_aabb_blockers_checked_into(&mut blockers)
                     .is_some();
                 valid
-                    && self.bsp.as_mut().is_none_or(|bsp| {
-                        bsp.trace_point_segment(from, to, blockers.as_slice(), &self.destructibles)
+                    && self.world_rt.as_mut().is_none_or(|world_rt| {
+                        world_rt
+                            .trace_point_segment(from, to, blockers.as_slice(), &self.destructibles)
                             .is_ok_and(|t| !t.hit())
                     })
             };
@@ -475,7 +476,7 @@ impl Playtest {
         let valid = self
             .collect_static_prop_aabb_blockers_checked_into(&mut blockers)
             .is_some();
-        let bsp = &mut self.bsp;
+        let world_rt = &mut self.world_rt;
         let destructibles = &self.destructibles;
         self.duel.exchange.decide(
             from,
@@ -487,14 +488,15 @@ impl Playtest {
             threat,
             &mut |a, b| {
                 valid
-                    && bsp.as_mut().is_none_or(|bsp| {
-                        bsp.trace_point_segment(
-                            RoomPoint::new(a[0], a[1], a[2]),
-                            RoomPoint::new(b[0], b[1], b[2]),
-                            blockers.as_slice(),
-                            destructibles,
-                        )
-                        .is_ok_and(|trace| !trace.hit())
+                    && world_rt.as_mut().is_none_or(|world_rt| {
+                        world_rt
+                            .trace_point_segment(
+                                RoomPoint::new(a[0], a[1], a[2]),
+                                RoomPoint::new(b[0], b[1], b[2]),
+                                blockers.as_slice(),
+                                destructibles,
+                            )
+                            .is_ok_and(|trace| !trace.hit())
                     })
             },
         )
@@ -543,7 +545,7 @@ impl Playtest {
             let step = [v[0] * 160 / len, v[1] * 160 / len];
             let radius = self.character.map_or(12, |c| c.radius) + 8;
             let side = [-v[1] * radius / len, v[0] * radius / len];
-            let clear = self.bsp.as_mut().is_none_or(|bsp| {
+            let clear = self.world_rt.as_mut().is_none_or(|world_rt| {
                 [-1, 0, 1].into_iter().all(|offset| {
                     let from = RoomPoint::new(
                         p.x + side[0] * offset,
@@ -551,7 +553,8 @@ impl Playtest {
                         p.z + side[1] * offset,
                     );
                     let to = RoomPoint::new(from.x + step[0], from.y, from.z + step[1]);
-                    bsp.trace_point_segment(from, to, blockers.as_slice(), &self.destructibles)
+                    world_rt
+                        .trace_point_segment(from, to, blockers.as_slice(), &self.destructibles)
                         .is_ok_and(|trace| !trace.hit())
                 })
             });

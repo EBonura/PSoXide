@@ -8,7 +8,7 @@
 //! * [`height`] and [`collision`]: integer height functions and an O(1)
 //!   per-sector collision provider behind `psx_engine::CollisionTraceProvider`.
 //! * [`render`]: the row-span cull, shared-vertex projection and packet
-//!   writer.
+//!   writer, with the camera, frustum and polygon clip it draws through.
 //!
 //! Docs: `docs/grid/level-format-and-runtime.md`.
 #![cfg_attr(target_arch = "mips", feature(asm_experimental_arch))]
@@ -19,6 +19,7 @@
 extern crate alloc;
 
 pub mod collision;
+pub mod contents;
 pub mod format;
 pub mod height;
 pub mod render;

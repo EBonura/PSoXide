@@ -1,21 +1,14 @@
 //! Normal-playtest ownership of one cooked sector-grid world.
 //!
-//! The grid counterpart of `bsp_runtime::BspRuntime`: same method shapes, so
-//! the playtest's callers do not change, but no PXBSP data or code is
-//! involved. Rooms are `psx-grid` chunks, collision is the native per-sector
-//! provider, activation walks the portal graph, the sky gate is a per-cell
-//! flag, and drawing is the row-span grid renderer.
+//! Rooms are `psx-grid` chunks, collision is the native per-sector provider,
+//! activation walks the portal graph, the sky gate is a per-cell flag, and
+//! drawing is the row-span grid renderer.
 
 use core::fmt;
 
 use alloc::vec::Vec;
 
 use psx_asset::Texture;
-use psx_bsp::collision::{LiquidContentsSample, CONTENTS_EMPTY};
-use psx_bsp::render::{
-    load_pxbsp_view_rotation, FrustumPlanes, ViewProjection, ViewTransform, PXBSP_CLIP_ALL_PLANES,
-};
-use psx_bsp::Vec3I16 as BspVec3I16;
 use psx_engine::{
     commit_body_direction_with_trace_provider, commit_body_step_with_trace_provider,
     trace_collision, BodyStep, CharacterBlockerTraceProvider, CharacterCollisionAabb,
@@ -28,15 +21,21 @@ use psx_engine::{
 use psx_game_runtime::destructibles::{DamageChannel, DamageOutcome, RuntimeDestructibles};
 use psx_gpu::prim::TriTextured;
 use psx_grid::collision::{GridCollision, GridTraceProvider};
-use psx_grid::render::{GridFrame, GridMaterial, GridPhase, GridRenderer, RoomCamera};
+use psx_grid::contents::{contents_of_liquid_kind, LiquidContentsSample, CONTENTS_EMPTY};
+#[cfg(target_arch = "mips")]
+use psx_grid::render::load_gte_clip_planes;
+use psx_grid::render::{
+    load_view_rotation, FrustumPlanes, GridFrame, GridMaterial, GridPhase, GridRenderer,
+    RoomCamera, ViewProjection, ViewTransform, CLIP_ALL_PLANES,
+};
 use psx_grid::{CollisionView, FormatError, LevelView, RoomView, LEVEL_HAS_LIQUIDS, SECTOR_BYTES};
-use psx_gte::math::Vec3I32 as GteVec3I32;
+use psx_gte::math::{Vec3I16 as GteVec3I16, Vec3I32 as GteVec3I32};
 use psx_gte::scene;
 use psx_level::{find_asset_of_kind, world_object_flags, AssetId, AssetKind};
 
 use crate::generated::{ASSETS, WORLD_OBJECTS};
 use crate::world_common::{
-    pxbsp_camera, pxbsp_view_rotation, BspVisibilityBounds, CountingTraceProvider,
+    view_camera, world_view_rotation, CountingTraceProvider, VisibilityBounds,
 };
 use crate::world_objects_runtime::WorldObjectVisibility;
 use crate::{ensure_room_texture_uploaded, ensure_texture_uploaded, telemetry, PROJECTION};
@@ -344,7 +343,7 @@ impl GridRuntime {
     pub(super) fn visible_bounds_mask(
         &mut self,
         observer: RoomPoint,
-        bounds: &[BspVisibilityBounds],
+        bounds: &[VisibilityBounds],
         // psx-numeric-allow-next-line: one bit per queried bounds; return width is the caller's fixed capacity
     ) -> u64 {
         if !self.activate(observer) {
@@ -367,7 +366,7 @@ impl GridRuntime {
         &mut self,
         observer: RoomPoint,
         eye: RoomPoint,
-        bounds: &[BspVisibilityBounds],
+        bounds: &[VisibilityBounds],
         // psx-numeric-allow-next-line: bit per bounds that gets a sight-line test; the others are visible in an active room
         sight_tested: u64,
         // psx-numeric-allow-next-line: one bit per queried bounds; return width is the caller's fixed capacity
@@ -523,7 +522,7 @@ impl GridRuntime {
         for (i, y) in samples.into_iter().enumerate() {
             let code = self.world.contents_at([position.x, y, position.z]);
             if code != 0 {
-                let contents = -i16::from(code);
+                let contents = contents_of_liquid_kind(code);
                 if out.contents == CONTENTS_EMPTY || contents < out.contents {
                     out.contents = contents;
                 }
@@ -557,10 +556,6 @@ impl GridRuntime {
         }
         self.materials_latched = ready;
         ready
-    }
-
-    pub(crate) fn world_stream_ready(&self) -> bool {
-        true
     }
 
     /// Drop the resolved material table so the next `refresh_materials`
@@ -776,17 +771,17 @@ impl GridRuntime {
         let clamp = |v: i32| v.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
         for room in ring {
             let (min, max) = self.room_bounds(room);
-            let lo = BspVec3I16 {
+            let lo = GteVec3I16 {
                 x: clamp(min[0]),
                 y: clamp(min[1]),
                 z: clamp(min[2]),
             };
-            let hi = BspVec3I16 {
+            let hi = GteVec3I16 {
                 x: clamp(max[0]),
                 y: clamp(max[1]),
                 z: clamp(max[2]),
             };
-            if frustum.cull_aabb(lo, hi, PXBSP_CLIP_ALL_PLANES).is_some() {
+            if frustum.cull_aabb(lo, hi, CLIP_ALL_PLANES).is_some() {
                 out.push(room);
             }
         }
@@ -820,16 +815,16 @@ impl GridRuntime {
         self.projection.focal_length = camera.projection.focal_length;
         self.projection.half_width = i32::from(camera.projection.screen_x);
         self.projection.half_height = i32::from(camera.projection.screen_y);
-        let view_rotation = pxbsp_view_rotation(camera);
-        let cam = pxbsp_camera(camera);
-        let view = load_pxbsp_view_rotation(cam.origin, view_rotation);
+        let view_rotation = world_view_rotation(camera);
+        let cam = view_camera(camera);
+        let view = load_view_rotation(cam.origin, view_rotation);
         let eye = [cam.origin.x >> 12, cam.origin.y >> 12, cam.origin.z >> 12];
         let world_frustum =
-            FrustumPlanes::from_view(&view.rotation, view.translation, eye, self.projection);
+            FrustumPlanes::from_view(&view.rotation, view.translation, self.projection);
         // The box tests below read the plane dots from the GTE on the guest,
         // so the world frustum has to be loaded first.
         #[cfg(target_arch = "mips")]
-        psx_bsp::render::load_gte_clip_planes(&world_frustum.planes);
+        load_gte_clip_planes(&world_frustum.planes);
         let mut rooms: Vec<usize> = Vec::new();
         self.visible_rooms(eye, &world_frustum, &mut rooms);
         let screen = [
@@ -886,12 +881,8 @@ impl GridRuntime {
                         translation,
                     };
                     let local_eye = [-d[0], -d[1], -d[2]];
-                    let frustum = FrustumPlanes::from_view(
-                        &view.rotation,
-                        translation,
-                        local_eye,
-                        self.projection,
-                    );
+                    let frustum =
+                        FrustumPlanes::from_view(&view.rotation, translation, self.projection);
                     let eye_view = RoomCamera {
                         frustum: &frustum,
                         view: &local_view,

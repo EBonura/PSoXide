@@ -6,21 +6,14 @@
 # stays as a buildable placeholder with no references to these
 # ignored files.
 level_manifest.cooked.rs
-brush_manifest.cooked.rs
-brush_world.pxbsp
-brush_world.pts
-brush_textures/*.psxt
 xa_music.txt
 world_pack_order.txt
 ui_pack_order.txt
-rooms/*.psxw
-stream_chunks/*.psxc
 ui_stream_chunks/*.psxt
 textures/*.psxt
 sky/*.psxt
 ui_sfx/*.psau
 xa_music/*.XA
 models/
-stream_report.txt
-stream_report.json
-grid_world.bin
+grid_level.pgl
+grid_rooms.pgr

@@ -21,9 +21,6 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use psx_bsp::render::{
-    clip_polygon_plane, open_hall_bands, FrustumPlanes, ViewTransform, TEXTURED_GOURAUD_COMMAND,
-};
 use psx_engine::{
     submit_surface_batch_near, AffineSurface, AffineVertex, NearView, SurfaceProfile,
     AFFINE_PACKETS_PER_TRIANGLE,
@@ -35,18 +32,34 @@ use psx_gte::scene;
 use crate::format::*;
 use crate::view::RoomView;
 
+mod clip;
 mod emit;
+mod frustum;
+mod projection;
 mod select;
+
+pub use clip::clip_polygon_plane;
+#[cfg(target_arch = "mips")]
+pub use frustum::load_gte_clip_planes;
+pub use frustum::{FrustumPlanes, CLIP_ALL_PLANES};
+pub use projection::{
+    classic_far_depth, load_view_rotation, view_rotation, Camera, ViewProjection, ViewTransform,
+    VIEW_SCALE_Q12,
+};
+
+/// GP0 command byte of a textured Gouraud polygon, before the size and blend
+/// bits.
+pub const TEXTURED_GOURAUD_COMMAND: u32 = 0x3400_0000;
 
 /// Depth-band profile of the near-plane path. A tile is small, so the warp a
 /// near tile shows is bounded by its own size: one split inside 170 depth
 /// units and none beyond, against the BSP profile's 340 and 170 for big
-/// patches. `OPEN_HALL_SPLIT_BANDS` still overrides it at build time.
-pub(crate) const GRID_RENDER_PROFILE: SurfaceProfile = open_hall_bands(SurfaceProfile {
+/// patches.
+pub(crate) const GRID_RENDER_PROFILE: SurfaceProfile = SurfaceProfile {
     split_once_below: 170,
     split_twice_below: 0,
     ..SurfaceProfile::PXBSP_THIRD_PERSON
-});
+};
 
 /// A material slot as the runtime resolved it: page words and the texture's
 /// page-local origin, or not resident while its texture is not uploaded.
@@ -255,7 +268,7 @@ impl GridRenderer {
             self.frame = 1;
         }
         #[cfg(target_arch = "mips")]
-        psx_bsp::render::load_gte_clip_planes(&eye.frustum.planes);
+        load_gte_clip_planes(&eye.frustum.planes);
 
         mark(GridPhase::Cells, true);
         self.select_cells(room, eye.frustum, eye.sector, eye.camera, &mut frame);

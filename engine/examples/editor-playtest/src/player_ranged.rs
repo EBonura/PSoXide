@@ -142,7 +142,7 @@ impl Playtest {
             self.ranged_ready.released,
             (phase >> 12).min(u32::from(u16::MAX)) as u16,
         ) {
-            if let Some(bsp) = self.bsp.as_mut() {
+            if let Some(world_rt) = self.world_rt.as_mut() {
                 let p = self.motor.position();
                 let origin = RoomPoint::new(p.x, p.y + c.height * 3 / 4, p.z);
                 let muzzle = RoomPoint::new(
@@ -150,7 +150,7 @@ impl Playtest {
                     release.position[1],
                     release.position[2],
                 );
-                if !bsp.melee_segment_clear(origin, muzzle, &[], &self.destructibles) {
+                if !world_rt.melee_segment_clear(origin, muzzle, &[], &self.destructibles) {
                     self.ranged_ready.released |= 1u16 << emitter;
                     telemetry::debug_log("player projectile:muzzle-blocked");
                     continue;

@@ -158,7 +158,7 @@ where
 }
 
 fn archive_beacon_surface_options(record: &LevelRoomRecord) -> WorldSurfaceOptions {
-    pxbsp_actor_surface_options(record)
+    actor_surface_options(record)
 }
 
 impl Playtest {
@@ -170,7 +170,7 @@ impl Playtest {
     /// point. The beacon panel hangs down from its base point, so a point
     /// authored at floor height would otherwise sit inside the floor.
     pub(super) fn resolve_poi_floors(&mut self) {
-        let Some(bsp) = self.bsp.as_mut() else {
+        let Some(world_rt) = self.world_rt.as_mut() else {
             return;
         };
         for (index, interactable) in INTERACTABLES.iter().enumerate() {
@@ -183,7 +183,7 @@ impl Playtest {
             let height = archive_beacon_world_height(interactable.marker_height);
             let from = RoomPoint::new(interactable.x, interactable.y + height, interactable.z);
             let to = RoomPoint::new(interactable.x, interactable.y - height * 4, interactable.z);
-            let floor = match bsp.trace_point_segment(from, to, &[], &self.destructibles) {
+            let floor = match world_rt.trace_point_segment(from, to, &[], &self.destructibles) {
                 Ok(trace) if trace.hit() && !trace.start_solid => trace.end.y + height,
                 _ => interactable.y,
             };
@@ -1007,7 +1007,7 @@ mod depth_tests {
     fn beacon_behind_actor_stays_behind() {
         let mut record = ROOMS[0];
         record.sector_size = 64;
-        let actor = pxbsp_actor_surface_options(&record);
+        let actor = actor_surface_options(&record);
         let beacon = archive_beacon_surface_options(&record);
         // At a 16-unit separation the old 2-sector marker clearance
         // overtook the actor's half-sector clearance by 80 units.

@@ -356,8 +356,8 @@ impl Playtest {
         let from = self.motor.position();
         let depth = self.character.map_or(64, |character| character.height) * 4;
         let to = RoomPoint::new(from.x, from.y - depth, from.z);
-        if let Some(bsp) = self.bsp.as_mut() {
-            if let Ok(trace) = bsp.trace_point_segment(from, to, &[], &self.destructibles) {
+        if let Some(world_rt) = self.world_rt.as_mut() {
+            if let Ok(trace) = world_rt.trace_point_segment(from, to, &[], &self.destructibles) {
                 if trace.hit() && !trace.start_solid && trace.normal_q12[1] >= 2048 {
                     self.motor.snap_to(trace.end, self.motor.yaw());
                 }

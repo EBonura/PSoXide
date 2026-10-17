@@ -13,11 +13,11 @@ name = "editor-playtest"
 version = "0.1.0"
 dependencies = [
  "psx-asset",
- "psx-bsp",
  "psx-engine",
  "psx-font",
  "psx-game-runtime",
  "psx-gpu",
+ "psx-grid",
  "psx-gte",
  "psx-io",
  "psx-level",
@@ -37,17 +37,6 @@ dependencies = [
  "psx-gte",
  "psx-hw",
  "psxed-format",
-]
-
-[[package]]
-name = "psx-bsp"
-version = "0.1.0"
-dependencies = [
- "psx-engine",
- "psx-gpu",
- "psx-gte",
- "psx-math",
- "psx-pack",
 ]
 
 [[package]]
@@ -106,7 +95,6 @@ name = "psx-game-runtime"
 version = "0.1.0"
 dependencies = [
  "psx-asset",
- "psx-bsp",
  "psx-cdstream",
  "psx-engine",
  "psx-font",
@@ -126,6 +114,16 @@ dependencies = [
  "bitflags",
  "psx-hw",
  "psx-io",
+]
+
+[[package]]
+name = "psx-grid"
+version = "0.1.0"
+dependencies = [
+ "psx-engine",
+ "psx-gpu",
+ "psx-gte",
+ "psx-math",
 ]
 
 [[package]]
@@ -173,13 +171,6 @@ name = "psx-mc"
 version = "0.1.0"
 dependencies = [
  "psx-hw",
- "psx-io",
-]
-
-[[package]]
-name = "psx-pack"
-version = "0.1.0"
-dependencies = [
  "psx-io",
 ]
 

@@ -94,7 +94,7 @@ impl CombatMusicState {
 }
 
 struct SceneProjectileWorldTracer<'a> {
-    bsp: Option<&'a mut WorldRuntime>,
+    world_rt: Option<&'a mut WorldRuntime>,
     destructibles: &'a RuntimeDestructibles<{ psx_level::MAX_DESTRUCTIBLES }>,
     prop_blockers: &'a [CharacterCollisionAabb],
     valid: bool,
@@ -111,13 +111,13 @@ impl ProjectileWorldTracer for SceneProjectileWorldTracer<'_> {
         if !self.valid {
             return ProjectileWorldTrace::Failed;
         }
-        let Some(bsp) = self.bsp.as_deref_mut() else {
+        let Some(world_rt) = self.world_rt.as_deref_mut() else {
             // Legacy grid projects have no arbitrary 3D segment provider. The
             // current editor authors BSP worlds; keep old projects playable
             // while actor collision remains fully swept and deterministic.
             return ProjectileWorldTrace::Clear { end };
         };
-        match bsp.trace_point_segment(
+        match world_rt.trace_point_segment(
             RoomPoint::new(start[0], start[1], start[2]),
             RoomPoint::new(end[0], end[1], end[2]),
             self.prop_blockers,
@@ -191,7 +191,7 @@ impl ActivePlayerCapsule {
 /// active-room and prop collision, while BSP projects use resident hulls and
 /// transformed brush movers.
 pub(super) struct SceneEntityMover<'a> {
-    pub(super) bsp: Option<&'a mut WorldRuntime>,
+    pub(super) world_rt: Option<&'a mut WorldRuntime>,
     pub(super) destructibles: &'a RuntimeDestructibles<{ psx_level::MAX_DESTRUCTIBLES }>,
     pub(super) box_props: &'a RuntimeBoxProps,
     pub(super) models: &'a [Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
@@ -283,7 +283,7 @@ impl SceneEntityMover<'_> {
             psx_engine::FixedScratch::<CharacterCollisionAabb, MAX_STATIC_PROP_AABB_BLOCKERS>::new(
             );
         {
-            let Some(bsp) = self.bsp.as_deref_mut() else {
+            let Some(world_rt) = self.world_rt.as_deref_mut() else {
                 // No world cooked yet (the placeholder manifest).
                 return position;
             };
@@ -321,7 +321,7 @@ impl SceneEntityMover<'_> {
                 return position;
             };
             let step = if exact_direction {
-                bsp.commit_body_direction(
+                world_rt.commit_body_direction(
                     start,
                     dx,
                     dz,
@@ -332,7 +332,7 @@ impl SceneEntityMover<'_> {
                     aabbs.as_slice(),
                 )
             } else {
-                bsp.commit_body_step(
+                world_rt.commit_body_step(
                     start,
                     dx,
                     dz,
@@ -413,16 +413,17 @@ impl psx_game_runtime::entities::GameEntityMover for SceneEntityMover<'_> {
         else {
             return false;
         };
-        let Some(bsp) = self.bsp.as_deref_mut() else {
+        let Some(world_rt) = self.world_rt.as_deref_mut() else {
             return true;
         };
-        bsp.trace_point_segment(
-            RoomPoint::new(from[0], from[1], from[2]),
-            RoomPoint::new(to[0], to[1], to[2]),
-            aabbs.as_slice(),
-            self.destructibles,
-        )
-        .is_ok_and(|trace| !trace.hit())
+        world_rt
+            .trace_point_segment(
+                RoomPoint::new(from[0], from[1], from[2]),
+                RoomPoint::new(to[0], to[1], to[2]),
+                aabbs.as_slice(),
+                self.destructibles,
+            )
+            .is_ok_and(|trace| !trace.hit())
     }
 }
 
@@ -455,7 +456,7 @@ impl Playtest {
         // legacy fallback arc keeps its Character-derived reach.
         let (player_radius, player_height) = match &self.character {
             Some(character) => (character.radius, character.height),
-            None if self.bsp.is_some() => (BSP_PLAYER_RADIUS, BSP_PLAYER_HEIGHT),
+            None if self.world_rt.is_some() => (WORLD_PLAYER_RADIUS, WORLD_PLAYER_HEIGHT),
             None => (0, 0),
         };
         let player_invulnerable = self.player_invulnerable(ctx);
@@ -472,7 +473,7 @@ impl Playtest {
         let mut prop_blockers =
             psx_engine::FixedScratch::<CharacterCollisionAabb, MAX_STATIC_PROP_AABB_BLOCKERS>::new(
             );
-        let prop_blockers_valid = self.bsp.is_none()
+        let prop_blockers_valid = self.world_rt.is_none()
             || self
                 .collect_static_prop_aabb_blockers_checked_into(&mut prop_blockers)
                 .is_some();
@@ -655,8 +656,8 @@ impl Playtest {
             if !prop_blockers_valid {
                 continue;
             }
-            if let Some(bsp) = self.bsp.as_mut() {
-                if !bsp.melee_segment_clear(
+            if let Some(world_rt) = self.world_rt.as_mut() {
+                if !world_rt.melee_segment_clear(
                     melee_eye_point(attacker),
                     melee_eye_point(player_position),
                     prop_blockers.as_slice(),
@@ -776,7 +777,7 @@ impl Playtest {
         let mut projectile_impacts = ProjectileImpacts::<MAX_PROJECTILE_IMPACTS>::new();
         {
             let mut tracer = SceneProjectileWorldTracer {
-                bsp: self.bsp.as_mut(),
+                world_rt: self.world_rt.as_mut(),
                 destructibles: &self.destructibles,
                 prop_blockers: prop_blockers.as_slice(),
                 valid: prop_blockers_valid,
@@ -897,7 +898,7 @@ impl Playtest {
                 gameplay_now,
             );
             if died {
-                self.arm_player_death(true, BSP_HAZARD_DEATH_TICKS, ctx.sim_tick, ctx.video_hz);
+                self.arm_player_death(true, HAZARD_DEATH_TICKS, ctx.sim_tick, ctx.video_hz);
             }
         }
         for (channel, damage) in [
@@ -932,7 +933,7 @@ impl Playtest {
                 gameplay_now,
             );
             if died {
-                self.arm_player_death(true, BSP_HAZARD_DEATH_TICKS, ctx.sim_tick, ctx.video_hz);
+                self.arm_player_death(true, HAZARD_DEATH_TICKS, ctx.sim_tick, ctx.video_hz);
             }
         }
         if hits > 0 {
@@ -1033,7 +1034,7 @@ impl Playtest {
             let height = self
                 .character
                 .as_ref()
-                .map_or(BSP_PLAYER_HEIGHT, |character| character.height);
+                .map_or(WORLD_PLAYER_HEIGHT, |character| character.height);
             self.game_entities.track_authored_ranged_charge(
                 index,
                 [player.x, player.y, player.z],
@@ -1137,7 +1138,7 @@ impl Playtest {
         let mut prop_blockers =
             psx_engine::FixedScratch::<CharacterCollisionAabb, MAX_STATIC_PROP_AABB_BLOCKERS>::new(
             );
-        if self.bsp.is_some()
+        if self.world_rt.is_some()
             && self
                 .collect_static_prop_aabb_blockers_checked_into(&mut prop_blockers)
                 .is_none()
@@ -1210,7 +1211,7 @@ impl Playtest {
         // only presentation wants.
         let swing_mask_before = self.swing_hit_mask;
         let entities = &mut self.game_entities;
-        let mut bsp = self.bsp.as_mut();
+        let mut world_rt = self.world_rt.as_mut();
         let stats = entities.apply_melee_arc_occluded(
             GAME_ENTITIES,
             &arc,
@@ -1218,8 +1219,8 @@ impl Playtest {
             outgoing_damage,
             spec.poise_damage,
             &mut self.swing_hit_mask,
-            |_, target| match bsp.as_deref_mut() {
-                Some(bsp) => !bsp.melee_segment_clear(
+            |_, target| match world_rt.as_deref_mut() {
+                Some(world_rt) => !world_rt.melee_segment_clear(
                     player_eye,
                     melee_eye_point(target),
                     prop_blockers.as_slice(),
@@ -1330,7 +1331,7 @@ impl Playtest {
         let radius = self
             .character
             .map(|character| character.radius)
-            .unwrap_or(BSP_PLAYER_RADIUS)
+            .unwrap_or(WORLD_PLAYER_RADIUS)
             .clamp(1, i32::from(u16::MAX)) as u16;
         let start = [
             player.x,
@@ -1366,8 +1367,8 @@ impl Playtest {
             }
         }
         let mut result = DamageOutcome::default();
-        if let Some(bsp) = self.bsp.as_ref() {
-            result = bsp.damage_brush_destructibles_with_capsule(
+        if let Some(world_rt) = self.world_rt.as_ref() {
+            result = world_rt.damage_brush_destructibles_with_capsule(
                 start,
                 end,
                 radius,
@@ -1415,8 +1416,8 @@ impl Playtest {
                 if alive_before & (1u32 << index) != 0 && !self.destructibles.alive(index) {
                     telemetry::debug_log("DESTRUCTIBLE BREAK");
                     self.mark_destructible_broken(index);
-                    if let Some(bsp) = self.bsp.as_mut() {
-                        bsp.spawn_destructible_fragments(index);
+                    if let Some(world_rt) = self.world_rt.as_mut() {
+                        world_rt.spawn_destructible_fragments(index);
                     }
                     self.spawn_destructible_break_effect(index);
                 }
@@ -1449,9 +1450,9 @@ impl Playtest {
                 (center, object.room, largest_extent.clamp(192, 768) as u16)
             });
         let brush_origin = self
-            .bsp
+            .world_rt
             .as_ref()
-            .and_then(|bsp| bsp.destructible_effect_origin(index))
+            .and_then(|world_rt| world_rt.destructible_effect_origin(index))
             .map(|(center, radius)| (center, self.room_index, radius));
         let Some((position, room, radius)) = object_origin.or(brush_origin) else {
             return;
@@ -1635,8 +1636,8 @@ impl Playtest {
                 // the swing bit, so the same swing can still land once the
                 // door finishes opening inside the active window.
                 let player = self.motor.position();
-                if let Some(bsp) = self.bsp.as_mut() {
-                    if !bsp.melee_segment_clear(
+                if let Some(world_rt) = self.world_rt.as_mut() {
+                    if !world_rt.melee_segment_clear(
                         melee_eye_point([player.x, player.y, player.z]),
                         melee_eye_point(position),
                         prop_blockers,
@@ -1841,8 +1842,8 @@ impl Playtest {
                     telemetry::counter(telemetry::counter::LOGIC_DOOR_ACTIVATIONS, 1);
                     if record.link != psx_level::LOGIC_LINK_NONE {
                         let open = self.logic.door_open(index);
-                        if let Some(bsp) = self.bsp.as_mut() {
-                            bsp.set_door_open(usize::from(record.link), open);
+                        if let Some(world_rt) = self.world_rt.as_mut() {
+                            world_rt.set_door_open(usize::from(record.link), open);
                         } else {
                             self.box_props.set_door_open(usize::from(record.link), open);
                         }
@@ -1906,8 +1907,8 @@ impl Playtest {
                 && record.link != psx_level::LOGIC_LINK_NONE
             {
                 let open = self.logic.door_open(index);
-                if let Some(bsp) = self.bsp.as_mut() {
-                    bsp.set_door_open(usize::from(record.link), open);
+                if let Some(world_rt) = self.world_rt.as_mut() {
+                    world_rt.set_door_open(usize::from(record.link), open);
                 } else {
                     self.box_props.set_door_open(usize::from(record.link), open);
                 }
@@ -1918,15 +1919,15 @@ impl Playtest {
     /// First-playable proximity use routed through the normal logic runtime.
     /// The brush cook stores each door's mover ordinal in `LevelLogicRecord::link`;
     /// firing the record keeps relays/masters/state semantics authoritative.
-    pub(super) fn activate_nearest_bsp_door(
+    pub(super) fn activate_nearest_door(
         &mut self,
         now: u32,
         port: &mut psx_engine::ControllerPort,
     ) -> bool {
         let Some(mover) = self
-            .bsp
+            .world_rt
             .as_ref()
-            .and_then(|bsp| bsp.nearest_door(self.motor.position(), BSP_USE_DISTANCE))
+            .and_then(|world_rt| world_rt.nearest_door(self.motor.position(), WORLD_USE_DISTANCE))
         else {
             return false;
         };

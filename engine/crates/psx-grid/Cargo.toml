@@ -20,7 +20,3 @@ psx-engine = { path = "../psx-engine" }
 psx-gpu    = { path = "../../../sdk/crates/psx-gpu" }
 psx-gte    = { path = "../../../sdk/crates/psx-gte" }
 psx-math   = { path = "../../../sdk/crates/psx-math" }
-# Transitional: the renderer borrows the frustum planes, view transform and
-# near-plane clip helpers that still live in the PXBSP renderer. They leave
-# with the BSP deletion phase.
-psx-bsp    = { path = "../psx-bsp" }

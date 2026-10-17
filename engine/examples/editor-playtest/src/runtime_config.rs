@@ -151,7 +151,7 @@ pub(super) const ACTIVE_HEAVY_ATTACK_BUTTON: u16 = button::R2;
 /// handling is phase 4 (checkpoint loops): health floors at 0.
 pub(super) const PLAYER_MAX_HEALTH: u16 = 100;
 /// Delay between fatal BSP hazard contact and checkpoint/spawn reset.
-pub(super) const BSP_HAZARD_DEATH_TICKS: u8 = 30;
+pub(super) const HAZARD_DEATH_TICKS: u8 = 30;
 
 #[cfg(feature = "ot-2048")]
 pub(super) const OT_DEPTH: usize = 2048;
@@ -173,7 +173,7 @@ pub(super) const WORLD_DEPTH_RANGE: DepthRange = DepthRange::new(NEAR_Z, FAR_Z);
 ///
 /// PXBSP installs ZSF3=0x155 and ZSF4=0x100, so a flat triangle/quad lands at
 /// `SZ / 4`, and its view transform carries a uniform 3.0 scale
-/// (`psx_bsp::render::PXBSP_VIEW_SCALE_Q12`), so `SZ` is three times the true
+/// (`psx_grid::render::VIEW_SCALE_Q12`), so `SZ` is three times the true
 /// view depth: the world keys at `3 z / 4` and fills the 2,048-slot table by
 /// `z = 2731`. Mapping `0..=2731` onto the 2,046-slot world band reproduces
 /// the triangle formula to within a slot for equal-depth vertices. Models,
@@ -181,8 +181,8 @@ pub(super) const WORLD_DEPTH_RANGE: DepthRange = DepthRange::new(NEAR_Z, FAR_Z);
 /// resident BSP owns the static world; the previous `0..8192` keyed them at
 /// `z / 4`, one third of the world's key, so an actor at depth `z` sorted in
 /// front of every wall farther than `z / 3`.
-pub(super) const PXBSP_CLASSIC_DEPTH_RANGE: DepthRange =
-    DepthRange::new(0, psx_bsp::render::pxbsp_classic_far_depth(OT_DEPTH as u16));
+pub(super) const CLASSIC_DEPTH_RANGE: DepthRange =
+    DepthRange::new(0, psx_grid::render::classic_far_depth(OT_DEPTH as u16));
 /// Project-option ids cooked from demo10's screen-position settings. Applied
 /// through [`Scene::apply_options`] when front-end menus publish new values and
 /// again on gameplay entry, using the authentic GP1 display-window registers:
@@ -198,11 +198,7 @@ pub(super) const BRIGHTNESS_OPTION_ID: u16 = 6;
 /// the desired affine correction without paying for the 16-leaf near band.
 pub(super) const ROOM_ADAPTIVE_SUBDIVISION_LEVELS: u8 = 1;
 pub(super) const ROOM_ADAPTIVE_SUBDIVISION_KINDS: AdaptiveSubdivisionKindMask =
-    if cfg!(feature = "tr-subdivision-ceilings") {
-        AdaptiveSubdivisionKindMask::ALL
-    } else {
-        AdaptiveSubdivisionKindMask::FLOOR_WALL
-    };
+    AdaptiveSubdivisionKindMask::FLOOR_WALL;
 
 /// Room surface options whose OT slots are directly comparable with resident
 /// PXBSP classic-affine packets already linked into the same ordering table.
@@ -210,19 +206,13 @@ pub(super) const ROOM_ADAPTIVE_SUBDIVISION_KINDS: AdaptiveSubdivisionKindMask =
 /// This is the one place that decides how runtime geometry (actors, props,
 /// beacons, decals, particles, projectiles) is keyed against the world it
 /// sorts with. A resident PXBSP keys its classic packets at `3 z / 4` (see
-/// [`PXBSP_CLASSIC_DEPTH_RANGE`]), so everything else must map through that
+/// [`CLASSIC_DEPTH_RANGE`]), so everything else must map through that
 /// same range or it sorts against walls at the wrong depth.
 pub(super) fn room_surface_options(record: &LevelRoomRecord) -> WorldSurfaceOptions {
-    let subdivision_sector_size = if cfg!(feature = "tr-subdivision-wide-band") {
-        record.sector_size.saturating_mul(4)
-    } else {
-        record.sector_size
-    };
-    WorldSurfaceOptions::new(WORLD_BAND, PXBSP_CLASSIC_DEPTH_RANGE)
-        .with_adaptive_subdivision_sector_size(subdivision_sector_size)
+    WorldSurfaceOptions::new(WORLD_BAND, CLASSIC_DEPTH_RANGE)
+        .with_adaptive_subdivision_sector_size(record.sector_size)
         .with_adaptive_subdivision_max_levels(ROOM_ADAPTIVE_SUBDIVISION_LEVELS)
         .with_adaptive_subdivision_kinds(ROOM_ADAPTIVE_SUBDIVISION_KINDS)
-        .with_adaptive_subdivision_debug_levels(cfg!(feature = "tessellation-debug"))
         .with_textured_triangle_max_edge(ROOM_TEXTURE_SPLIT_MAX_EDGE)
 }
 
@@ -239,16 +229,16 @@ pub(super) fn fallback_surface_options() -> WorldSurfaceOptions {
 /// its feet. Painter's algorithm cannot resolve an actor standing ON a
 /// surface; the clearance is derived from the room's own sector size so it
 /// scales with the geometry instead of being tuned.
-pub(super) fn pxbsp_actor_surface_options(record: &LevelRoomRecord) -> WorldSurfaceOptions {
+pub(super) fn actor_surface_options(record: &LevelRoomRecord) -> WorldSurfaceOptions {
     let clearance = i32::from(record.sector_size) / 2;
     room_surface_options(record).with_depth_bias(-clearance)
 }
 
-/// [`pxbsp_actor_surface_options`] for the room an actor currently occupies.
+/// [`actor_surface_options`] for the room an actor currently occupies.
 pub(super) fn current_actor_surface_options(room_index: RoomIndex) -> WorldSurfaceOptions {
     ROOMS
         .get(room_index.to_usize())
-        .map(pxbsp_actor_surface_options)
+        .map(actor_surface_options)
         .unwrap_or_else(fallback_surface_options)
 }
 
@@ -493,11 +483,11 @@ mod pxbsp_depth_order_tests {
     #[test]
     fn dynamic_world_range_matches_classic_affine_triangle_otz() {
         assert_eq!(OT_DEPTH, 2048);
-        assert_eq!(PXBSP_CLASSIC_DEPTH_RANGE.far(), 2731);
-        let scale = psx_bsp::render::PXBSP_VIEW_SCALE_Q12;
+        assert_eq!(CLASSIC_DEPTH_RANGE.far(), 2731);
+        let scale = psx_grid::render::VIEW_SCALE_Q12;
         for depth in [0, 4, 32, 127, 256, 512, 1024, 2048, 2730, 2731] {
             let dynamic_slot = WORLD_BAND
-                .slot::<OT_DEPTH>(PXBSP_CLASSIC_DEPTH_RANGE, depth)
+                .slot::<OT_DEPTH>(CLASSIC_DEPTH_RANGE, depth)
                 .index();
             let sz = (depth * scale) >> 12;
             let classic_slot = usize::from(psx_gte::scene::classic_ordering_depth3_from_sum(
@@ -511,7 +501,7 @@ mod pxbsp_depth_order_tests {
         assert!(psx_gte::scene::classic_ordering_depth3_from_sum((sz as u32) * 3) >= 2048);
         assert_eq!(
             WORLD_BAND
-                .slot::<OT_DEPTH>(PXBSP_CLASSIC_DEPTH_RANGE, 2734)
+                .slot::<OT_DEPTH>(CLASSIC_DEPTH_RANGE, 2734)
                 .index(),
             WORLD_BAND.back()
         );

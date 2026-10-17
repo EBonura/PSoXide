@@ -33,13 +33,12 @@
 // attributes apply exactly as they always have -- the MIPS artifact is
 // unchanged by construction, not by measurement. Under `cargo test` on the
 // host the crate picks up `std` and lets libtest supply its own `main`, which
-// is what lets `bsp_runtime`'s pure-function tests actually run.
+// is what lets the runtime modules' pure-function tests actually run.
 #![cfg_attr(target_arch = "mips", feature(optimize_attribute))]
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(not(test), no_main)]
 #![allow(static_mut_refs)]
 
-#[cfg(any(test, playtest_grid_world))]
 extern crate alloc;
 extern crate psx_rt;
 
@@ -95,9 +94,6 @@ use psx_level::{
 use psx_vram::{TextureDepth, TexturePage};
 
 mod box_props;
-#[cfg(not(playtest_grid_world))]
-mod bsp_runtime;
-#[cfg(playtest_grid_world)]
 mod grid_runtime;
 mod world_common;
 #[cfg(feature = "cd-stream-benchmark")]
@@ -136,20 +132,11 @@ mod vram_runtime;
 mod world_objects_runtime;
 
 use box_props::*;
-#[cfg(not(playtest_grid_world))]
-use bsp_runtime::*;
-#[cfg(playtest_grid_world)]
-use grid_runtime::*;
 use world_common::*;
 
 /// The runtime that owns the cooked world: rendering, collision, activation,
-/// sky gating. One type per world kind, selected by the cooked manifest.
-#[cfg(playtest_grid_world)]
+/// sky gating.
 pub(crate) type WorldRuntime = grid_runtime::GridRuntime;
-/// The runtime that owns the cooked world: rendering, collision, activation,
-/// sky gating. One type per world kind, selected by the cooked manifest.
-#[cfg(not(playtest_grid_world))]
-pub(crate) type WorldRuntime = BspRuntime;
 use character_runtime::*;
 use damage_numbers::*;
 use game_logic_runtime::*;
@@ -181,14 +168,9 @@ mod generated {
     include!("../test-fixtures/level_manifest.rs");
 }
 
-/// The cooked project's world format, known at build time.
-///
-/// `psx-bsp` is the only spatial authority when this is true. The grid room
-/// window, room parsing, residency, and streaming paths are unreachable in
-/// that build, and they assert it rather than relying on the cooked tables
-/// happening to be empty: a silent grid fallback in a BSP level renders and
-/// collides nothing, which is the hardest failure of all to diagnose.
-pub(crate) const USES_PXBSP: bool = generated::PLAYTEST_USES_PXBSP;
+/// True when the manifest carries a cooked grid world; the placeholder
+/// manifest does not, and that build boots to a clear screen.
+pub(crate) const HAS_WORLD: bool = generated::PLAYTEST_HAS_WORLD;
 
 use generated::{
     ARCH_PROPS, ARCH_PROP_COLLISIONS, ARCH_PROP_SURFACES, ASSETS, BOOST_MODULES, BOX_PROPS,
@@ -197,9 +179,9 @@ use generated::{
     IMAGE_PROPS, INTERACTABLES, INTERACTABLE_MESSAGES, LIGHTS, LOGIC, MODELS, MODEL_CLIPS,
     MODEL_CLIP_BOUNDS, MODEL_FRAME_BOUNDS, MODEL_INSTANCES, MODEL_SOCKETS, PARTICLE_EMITTERS,
     PERSISTENT_FLAG_COUNT, PLAYER_CONTROLLER, PLAYER_SPAWN, PLAYTEST_PACKET_CAPACITY,
-    PROJECT_SAVE_NAME, PROJECT_SAVE_TITLE, PXBSP_AMBIENT_RGB, ROOMS, ROOM_REFLECTION_PROBES,
-    UI_FONTS, UI_NODES, UI_PAINTS, UI_SFX_CUES, UI_SFX_SAMPLES, VITALITY_CIRCLES, WEAPONS,
-    WEAPON_APPEARANCES, WEAPON_HITBOXES, WORLD_MESSAGE, WORLD_OBJECTS,
+    PROJECT_SAVE_NAME, PROJECT_SAVE_TITLE, ROOMS, ROOM_REFLECTION_PROBES, UI_FONTS, UI_NODES,
+    UI_PAINTS, UI_SFX_CUES, UI_SFX_SAMPLES, VITALITY_CIRCLES, WEAPONS, WEAPON_APPEARANCES,
+    WEAPON_HITBOXES, WORLD_AMBIENT_RGB, WORLD_MESSAGE, WORLD_OBJECTS,
 };
 #[cfg(feature = "cd-stream-bench")]
 use generated::{
@@ -267,7 +249,7 @@ struct Playtest {
     /// Explicit resident BSP backend selected by the cooked manifest. Invalid
     /// BSP data fails initialization instead of falling back to another world
     /// representation.
-    bsp: Option<WorldRuntime>,
+    world_rt: Option<WorldRuntime>,
     /// Ambient RGB for the room containing the player.
     current_ambient_rgb: [u8; 3],
     /// Index in ROOMS the player is currently in. Used to scope
@@ -405,7 +387,7 @@ struct Playtest {
     /// hazard after it); while the player stands still both answers are the
     /// same three point-hull descents, ~3.6% of an idle vblank. Zero-initialised
     /// to `None` with the rest of the scene; cleared on gameplay entry.
-    player_contents_memo: Option<(RoomPoint, i32, psx_bsp::collision::LiquidContentsSample)>,
+    player_contents_memo: Option<(RoomPoint, i32, psx_grid::contents::LiquidContentsSample)>,
     /// Player skeleton/presentation state frozen after the latest fixed update.
     /// Body rendering, equipment sockets, and authored combat capsules all
     /// consume this same snapshot until the next simulation tick.
@@ -424,7 +406,7 @@ struct Playtest {
     previous_instance_actor_poses: [Option<InstanceActorPoseSnapshot>; MAX_MODEL_INSTANCES],
     /// PXBSP PVS result for cooked model instances. Grid worlds leave this at
     /// all-visible and continue using their room window.
-    bsp_instance_visible_mask: u16,
+    instance_visible_mask: u16,
     /// Circle is shared by tap-evade and hold-sprint. We delay
     /// either decision for a few simulation ticks: release before
     /// the threshold becomes evade; holding past it becomes sprint.
@@ -649,7 +631,7 @@ impl Playtest {
         // compiler picked for each `None` encoding (empirically, the
         // room/model/font/material `Option`s niche into a payload
         // bool/enum byte, making their `None` a NON-zero byte).
-        addr_of_mut!((*scene).bsp).write(None);
+        addr_of_mut!((*scene).world_rt).write(None);
         addr_of_mut!((*scene).character).write(None);
         addr_of_mut!((*scene).player_actor_pose).write(None);
         addr_of_mut!((*scene).player_dash_assembly)
@@ -764,7 +746,7 @@ impl Playtest {
         self.streaming_jobs = RuntimeStreamingJobs::new();
         self.analog_deadzone = ANALOG_DEADZONE_DEFAULT;
         self.brightness_level = BRIGHTNESS_DEFAULT;
-        self.bsp_instance_visible_mask = u16::MAX;
+        self.instance_visible_mask = u16::MAX;
     }
 
     fn step_streaming_jobs(&mut self, ctx: &mut Ctx) {
@@ -778,19 +760,13 @@ impl Playtest {
             // session-lifetime read finishes.
             return;
         }
-        // A streamed world reads its regions off the disc next, with the
-        // controller to itself; the loading screen holds until it is done.
-        #[cfg(feature = "world-stream")]
-        if let Some(bsp) = self.bsp.as_mut() {
-            let _ = bsp.step_world_stream(cd_arena());
-        }
-        // Resident PXBSP owns world geometry, PVS, and collision; only shared
-        // VRAM uploads and BSP material resolution remain after persistent
-        // models are ready.
-        if self.bsp.is_some() && background_tick {
+        // The resident grid world owns geometry, activation and collision;
+        // only shared VRAM uploads and material resolution remain after
+        // persistent models are ready.
+        if self.world_rt.is_some() && background_tick {
             let _ = self.streaming_jobs.step_vram_uploads();
-            if let Some(bsp) = self.bsp.as_mut() {
-                let _ = bsp.refresh_materials();
+            if let Some(world_rt) = self.world_rt.as_mut() {
+                let _ = world_rt.refresh_materials();
             }
         }
     }
@@ -798,9 +774,9 @@ impl Playtest {
     fn initial_world_ready(&mut self) -> bool {
         #[cfg(not(feature = "cd-stream-bench"))]
         {
-            self.bsp
+            self.world_rt
                 .as_ref()
-                .is_none_or(|bsp| bsp.world_stream_ready() && bsp.materials_ready())
+                .is_none_or(|world_rt| world_rt.materials_ready())
         }
         #[cfg(feature = "cd-stream-bench")]
         {
@@ -847,9 +823,9 @@ impl Playtest {
                 ]);
                 return false;
             }
-            self.bsp
+            self.world_rt
                 .as_ref()
-                .is_none_or(|bsp| bsp.world_stream_ready() && bsp.materials_ready())
+                .is_none_or(|world_rt| world_rt.materials_ready())
         }
     }
 
@@ -941,52 +917,13 @@ fn interactable_message_text(interactable: &InteractableRecord) -> (&'static str
         })
 }
 
-#[cfg(all(
-    feature = "world-order-global",
-    any(
-        feature = "world-order-slot",
-        feature = "world-order-linked",
-        feature = "world-order-bucketed"
-    )
-))]
-compile_error!("choose only one world-order-* feature");
-#[cfg(all(
-    feature = "world-order-slot",
-    any(feature = "world-order-linked", feature = "world-order-bucketed")
-))]
-compile_error!("choose only one world-order-* feature");
-#[cfg(all(feature = "world-order-linked", feature = "world-order-bucketed"))]
-compile_error!("choose only one world-order-* feature");
-
 fn begin_world_render_pass<'a, 'ot>(
     ot: &'a mut OtFrame<'ot, OT_DEPTH>,
     commands: &'a mut [WorldTriCommand],
 ) -> WorldRenderPass<'a, 'ot, OT_DEPTH> {
-    #[cfg(feature = "world-order-global")]
-    {
-        return WorldRenderPass::new_deferred_sorted(ot, commands);
-    }
-    #[cfg(feature = "world-order-slot")]
-    {
-        return WorldRenderPass::new_deferred_slot_sorted(ot, commands);
-    }
-    #[cfg(feature = "world-order-linked")]
-    {
-        return WorldRenderPass::new(ot, commands);
-    }
-    #[cfg(feature = "world-order-bucketed")]
-    {
-        return WorldRenderPass::new_bucketed(ot, commands);
-    }
-    #[cfg(not(any(
-        feature = "world-order-global",
-        feature = "world-order-slot",
-        feature = "world-order-linked",
-        feature = "world-order-bucketed"
-    )))]
-    {
-        WorldRenderPass::new_deferred_sorted(ot, commands)
-    }
+    // Bucketed: the ordering table is the radix sort, no per-frame comparison
+    // sort (docs/perf-30fps.md, experiment 2).
+    WorldRenderPass::new_bucketed(ot, commands)
 }
 
 fn playtest_visual_pacing(video_mode: VideoMode) -> VisualPacing {

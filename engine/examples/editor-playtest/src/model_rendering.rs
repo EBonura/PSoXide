@@ -919,7 +919,7 @@ impl Playtest {
         let overrides = overrides.as_slice();
         let elapsed_tick = self.gameplay_tick(ctx.sim_tick);
         let count = MODEL_INSTANCES.len().min(self.instance_actor_poses.len());
-        let bsp_resident = self.bsp.is_some();
+        let world_resident = self.world_rt.is_some();
         let mut index = 0usize;
         while index < count {
             // The visibility mask discards the pose after resolving it, so
@@ -955,8 +955,7 @@ impl Playtest {
                         })
                         .is_some_and(|effect| effect.finished())
                 });
-            if corpse_gone
-                || (bsp_resident && self.bsp_instance_visible_mask & (1u16 << index) == 0)
+            if corpse_gone || (world_resident && self.instance_visible_mask & (1u16 << index) == 0)
             {
                 self.instance_actor_poses[index] = None;
                 self.previous_instance_actor_poses[index] = None;

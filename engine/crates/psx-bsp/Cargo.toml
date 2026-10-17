@@ -4,29 +4,7 @@ version     = "0.1.0"
 edition.workspace     = true
 license.workspace     = true
 repository.workspace  = true
-description = "Checked, allocation-free XBSP/PXBSP map readers. Shared by the guest runtime, the editor cook and quake-psx; keeping the wire format here prevents the Rust implementations from drifting."
+description = "Empty placeholder. The BSP map readers were removed with the brush world; the pinned emulator frontend still lists this crate as an optional dependency, so the name has to stay resolvable."
 
 [lints]
 workspace = true
-
-[features]
-# World streaming (design 2026-10-08, M6): the PXBSP region format, the
-# slotted resident map and the canonical-rank PVS decode. Off by default so
-# every consumer that does not stream (quake-psx, HL, CS) compiles exactly
-# the code it did before this feature existed.
-streaming = []
-
-[dependencies]
-psx-pack = { path = "../../../sdk/crates/psx-pack" }
-# Explicit paths (not `workspace = true`): psx-bsp is consumed from the
-# editor and quake-psx too, and workspace inheritance only resolves
-# against the engine workspace root.
-psx-engine = { path = "../psx-engine" }
-psx-gpu = { path = "../../../sdk/crates/psx-gpu" }
-psx-gte = { path = "../../../sdk/crates/psx-gte" }
-psx-math = { path = "../../../sdk/crates/psx-math" }
-
-[dev-dependencies]
-# Examples only: the lib stays dependency-free. Explicit path (not
-# `workspace = true`) for the same cross-workspace reason as psx-level.
-psx-pack = { path = "../../../sdk/crates/psx-pack" }

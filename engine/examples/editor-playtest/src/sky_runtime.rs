@@ -4,7 +4,7 @@
 //! the old call-site signatures.
 
 use super::*;
-use psx_bsp::sky::{
+use psx_engine::sky::{
     submit_view_ray_cube_sky, submit_view_ray_layered_sky, VIEW_RAY_CUBE_SKY_PACKET_WORDS,
     VIEW_RAY_SKY_PACKET_WORDS,
 };
@@ -113,9 +113,9 @@ pub(super) fn draw_scene_sky(
     let Some(mut reservation) = primitive_packets.reserve_packet_words(word_capacity) else {
         return;
     };
-    let view = psx_bsp::render::load_pxbsp_view_rotation(
-        crate::world_common::pxbsp_camera(camera).origin,
-        crate::world_common::pxbsp_view_rotation(camera),
+    let view = psx_grid::render::load_view_rotation(
+        crate::world_common::view_camera(camera).origin,
+        crate::world_common::world_view_rotation(camera),
     );
     let submitted = unsafe {
         let output = reservation.words_mut().as_mut_ptr();

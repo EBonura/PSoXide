@@ -1,14 +1,17 @@
 //! View-direction sky projection: the two-layer scrolling sky and the cube
 //! sky.
 //!
-//! Sky brush polygons define only the aperture through which the sky is seen.
+//! Open-sky cells define only the aperture through which the sky is seen.
 //! Their authored surface UVs must not make the sky appear attached to nearby
-//! geometry. This module is kept renderer-neutral so every runtime uses one
-//! integer projection and one seam-safe packet UV policy.
+//! geometry. This module is renderer-neutral so every runtime (the playtest
+//! guest and the editor preview) uses one integer projection and one
+//! seam-safe packet UV policy.
+// ponytail: field and constant docs land as the sky settles, then this allow goes away.
+#![allow(missing_docs)]
 
 use psx_math::int32::isqrt_i32;
 
-use psx_engine::SurfaceSubmit;
+use crate::SurfaceSubmit;
 use psx_gpu::material::TextureWindow;
 use psx_gpu::prim::{ClassicTriTextured, QuadTextured};
 use psx_gte::math::Mat3I16;
@@ -1219,6 +1222,8 @@ pub unsafe fn submit_view_ray_cube_sky_to_slot(
 
 #[cfg(test)]
 mod tests {
+    extern crate alloc;
+
     use alloc::vec;
 
     use super::{

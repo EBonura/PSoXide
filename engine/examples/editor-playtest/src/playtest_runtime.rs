@@ -68,16 +68,16 @@ fn poi_persistent_flags(
     }
 }
 
-fn apply_bsp_debug_body_fallback(
+fn apply_debug_body_fallback(
     config: &mut CharacterMotorConfig,
     uses_bsp: bool,
     has_character: bool,
 ) {
     if uses_bsp && !has_character {
-        config.radius = BSP_PLAYER_RADIUS;
-        config.height = BSP_PLAYER_HEIGHT;
-        config.walk_speed = BSP_FALLBACK_PLAYER_SPEED;
-        config.run_speed = BSP_FALLBACK_PLAYER_SPEED;
+        config.radius = WORLD_PLAYER_RADIUS;
+        config.height = WORLD_PLAYER_HEIGHT;
+        config.walk_speed = WORLD_FALLBACK_PLAYER_SPEED;
+        config.run_speed = WORLD_FALLBACK_PLAYER_SPEED;
     }
 }
 
@@ -90,20 +90,20 @@ pub(super) const POI_PRESENTATION_TICKS_PER_STEP: u8 = 2;
 /// Deterministic damage cadence for shared PXBSP hazard contents. Water is
 /// non-damaging; slime deals four health twice per second, lava deals ten
 /// health four times per second at the 60 Hz simulation rate.
-pub(super) const fn bsp_hazard_damage(contents: i16, tick: u32) -> u16 {
+pub(super) const fn hazard_damage(contents: i16, tick: u32) -> u16 {
     match contents {
-        psx_bsp::collision::CONTENTS_SLIME if tick % 30 == 0 => 4,
-        psx_bsp::collision::CONTENTS_LAVA if tick % 15 == 0 => 10,
+        psx_grid::contents::CONTENTS_SLIME if tick % 30 == 0 => 4,
+        psx_grid::contents::CONTENTS_LAVA if tick % 15 == 0 => 10,
         _ => 0,
     }
 }
 
 const _: () = {
-    assert!(bsp_hazard_damage(psx_bsp::collision::CONTENTS_WATER, 30) == 0);
-    assert!(bsp_hazard_damage(psx_bsp::collision::CONTENTS_SLIME, 29) == 0);
-    assert!(bsp_hazard_damage(psx_bsp::collision::CONTENTS_SLIME, 30) == 4);
-    assert!(bsp_hazard_damage(psx_bsp::collision::CONTENTS_LAVA, 14) == 0);
-    assert!(bsp_hazard_damage(psx_bsp::collision::CONTENTS_LAVA, 15) == 10);
+    assert!(hazard_damage(psx_grid::contents::CONTENTS_WATER, 30) == 0);
+    assert!(hazard_damage(psx_grid::contents::CONTENTS_SLIME, 29) == 0);
+    assert!(hazard_damage(psx_grid::contents::CONTENTS_SLIME, 30) == 4);
+    assert!(hazard_damage(psx_grid::contents::CONTENTS_LAVA, 14) == 0);
+    assert!(hazard_damage(psx_grid::contents::CONTENTS_LAVA, 15) == 10);
 };
 
 /// Crossfade length for a specific transition, rather than one number for
@@ -151,10 +151,10 @@ fn player_anim_is_stop(anim: PlayerAnim) -> bool {
 
 impl Playtest {
     /// Depth range for effects in `room`: they sort against the resident
-    /// PXBSP renderer, see [`PXBSP_CLASSIC_DEPTH_RANGE`].
+    /// PXBSP renderer, see [`CLASSIC_DEPTH_RANGE`].
     pub(super) fn effect_depth_range(&self, room: RoomIndex) -> DepthRange {
         if ROOMS.get(room.to_usize()).is_some() {
-            PXBSP_CLASSIC_DEPTH_RANGE
+            CLASSIC_DEPTH_RANGE
         } else {
             WORLD_DEPTH_RANGE
         }
@@ -939,7 +939,7 @@ impl Playtest {
             self.camera.focus(),
         );
         #[cfg(not(feature = "cd-stream-bench"))]
-        if self.bsp.is_none() {
+        if self.world_rt.is_none() {
             self.load_active_room_window();
         }
         telemetry::debug_log(if self.death_by_combat {
@@ -1331,7 +1331,11 @@ impl Playtest {
         // Authored characters keep their Character-bound radius and height so
         // `BspRuntime::update_motor` can select the exact cooked containing
         // hull instead of silently shrinking the player.
-        apply_bsp_debug_body_fallback(&mut config, self.bsp.is_some(), self.character.is_some());
+        apply_debug_body_fallback(
+            &mut config,
+            self.world_rt.is_some(),
+            self.character.is_some(),
+        );
         let modifiers = self.vitality_modifiers();
         config.walk_speed = modifiers.movement_speed(config.walk_speed);
         config.run_speed = modifiers.movement_speed(config.run_speed);
@@ -1408,7 +1412,7 @@ impl Playtest {
             );
         }
 
-        if self.bsp.is_some() {
+        if self.world_rt.is_some() {
             for inst in MODEL_INSTANCES {
                 if inst.room != self.room_index {
                     continue;
@@ -1683,14 +1687,14 @@ impl Playtest {
     }
 
     pub(super) fn camera_config(&self) -> ThirdPersonCameraConfig {
-        if self.bsp.is_some() && self.character.is_none() {
+        if self.world_rt.is_some() && self.character.is_none() {
             let mut config = ThirdPersonCameraConfig::character(
-                BSP_FALLBACK_CAMERA_DISTANCE,
-                BSP_FALLBACK_CAMERA_HEIGHT,
-                BSP_FALLBACK_CAMERA_TARGET_HEIGHT,
+                WORLD_FALLBACK_CAMERA_DISTANCE,
+                WORLD_FALLBACK_CAMERA_HEIGHT,
+                WORLD_FALLBACK_CAMERA_TARGET_HEIGHT,
             );
-            config.min_floor_clearance = BSP_FALLBACK_CAMERA_CLEARANCE;
-            config.collision_margin = BSP_FALLBACK_CAMERA_MARGIN;
+            config.min_floor_clearance = WORLD_FALLBACK_CAMERA_CLEARANCE;
+            config.collision_margin = WORLD_FALLBACK_CAMERA_MARGIN;
             // The debug body has no visible turn animation to protect. Follow
             // its cardinal route promptly so a 90-degree doorway turn shows
             // the next room instead of holding a side wall in frame.
@@ -1714,11 +1718,11 @@ impl Playtest {
             / 100;
         config.height = config.height.max(16);
         config.min_floor_clearance = camera.min_floor_clearance;
-        if self.bsp.is_some() {
+        if self.world_rt.is_some() {
             // Keep a small authored gap between the point-traced camera and
             // brush walls. The renderer clips any remaining near-plane
             // intersection exactly.
-            config.collision_margin = BSP_CAMERA_WALL_MARGIN;
+            config.collision_margin = WORLD_CAMERA_WALL_MARGIN;
         }
         config.recenter_preserves_pitch = camera.recenter_preserves_pitch;
         config.fov_y_degrees = camera.fov_y_degrees;
@@ -1793,7 +1797,7 @@ impl Playtest {
     }
 
     pub(super) fn current_room_lighting(&self, camera: WorldCamera) -> Option<RuntimeRoomLighting> {
-        self.bsp.as_ref()?;
+        self.world_rt.as_ref()?;
         let room_record = ROOMS.get(self.room_index.to_usize())?;
         Some(RuntimeRoomLighting {
             room_index: self.room_index,
@@ -1889,9 +1893,9 @@ impl Playtest {
                 i32::from(self.camera.lift_goals_q12().0),
                 i32::from(self.camera.lift_goals_q12().1),
                 i32::from(self.camera.slide_yaw_q12()),
-                self.bsp
+                self.world_rt
                     .as_ref()
-                    .map_or(0, |bsp| bsp.camera_traces() as i32),
+                    .map_or(0, |world_rt| world_rt.camera_traces() as i32),
                 i32::from(self.camera.escape_goal_q12()),
             ]);
         }
@@ -1985,7 +1989,7 @@ impl Playtest {
         let mut prop_blockers =
             psx_engine::FixedScratch::<CharacterCollisionAabb, MAX_STATIC_PROP_AABB_BLOCKERS>::new(
             );
-        if self.bsp.is_some()
+        if self.world_rt.is_some()
             && self
                 .collect_static_prop_aabb_blockers_checked_into(&mut prop_blockers)
                 .is_none()
@@ -1998,7 +2002,7 @@ impl Playtest {
                 self.camera.focus(),
             );
         }
-        let Some(bsp) = self.bsp.as_mut() else {
+        let Some(world_rt) = self.world_rt.as_mut() else {
             // No world cooked yet (the placeholder manifest): nothing to
             // collide with, so hold the current view.
             return world_camera_from_position_focus(
@@ -2007,17 +2011,18 @@ impl Playtest {
                 self.camera.focus(),
             );
         };
-        bsp.update_camera(
-            &mut self.camera,
-            target,
-            input,
-            config,
-            1,
-            prop_blockers.as_slice(),
-            &self.destructibles,
-        )
-        .expect("PXBSP camera trace failed")
-        .camera
+        world_rt
+            .update_camera(
+                &mut self.camera,
+                target,
+                input,
+                config,
+                1,
+                prop_blockers.as_slice(),
+                &self.destructibles,
+            )
+            .expect("PXBSP camera trace failed")
+            .camera
     }
 
     pub(super) fn lock_target_position(&self) -> Option<RoomPoint> {
@@ -2091,8 +2096,8 @@ impl Playtest {
             ) else {
                 continue;
             };
-            if let Some(bsp) = self.bsp.as_mut() {
-                if !bsp.typed_world_object_directly_visible(
+            if let Some(world_rt) = self.world_rt.as_mut() {
+                if !world_rt.typed_world_object_directly_visible(
                     player,
                     psx_level::world_object_kind::POINT_OF_INTEREST_BEACON,
                     index,
@@ -2271,8 +2276,7 @@ impl Playtest {
             // Use the same cooked BSP visibility set that gates instance
             // rendering. A longer lock range must not make actors behind a
             // wall targetable merely because they share the active room.
-            if index >= u16::BITS as usize || self.bsp_instance_visible_mask & (1u16 << index) == 0
-            {
+            if index >= u16::BITS as usize || self.instance_visible_mask & (1u16 << index) == 0 {
                 continue;
             }
             let Some(point) = self.target_position(index) else {
@@ -2385,8 +2389,7 @@ impl Playtest {
             if index == current_index {
                 continue;
             }
-            if index >= u16::BITS as usize || self.bsp_instance_visible_mask & (1u16 << index) == 0
-            {
+            if index >= u16::BITS as usize || self.instance_visible_mask & (1u16 << index) == 0 {
                 continue;
             }
             let Some(target) = self.target_position(index) else {
