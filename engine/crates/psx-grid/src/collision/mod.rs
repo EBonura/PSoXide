@@ -21,12 +21,15 @@
 #![allow(clippy::manual_clamp)]
 
 mod body;
+mod planes;
 mod provider;
 mod ray;
 mod scan;
 mod summary;
 mod world;
 
+#[cfg(test)]
+mod plane_tests;
 #[cfg(test)]
 mod tests;
 

@@ -274,7 +274,7 @@ impl GridRenderer {
         self.select_cells(room, eye.frustum, eye.sector, eye.camera, &mut frame);
         mark(GridPhase::Cells, false);
         mark(GridPhase::Quads, true);
-        self.select_quads(room, eye.camera, &mut frame);
+        self.select_quads(room, eye.frustum, eye.sector, eye.camera, &mut frame);
         mark(GridPhase::Quads, false);
         let near_sz = (eye.focal_length / 2 + 2).clamp(1, i32::from(u16::MAX)) as u16;
         mark(GridPhase::Project, true);

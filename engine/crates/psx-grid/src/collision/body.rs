@@ -162,6 +162,11 @@ impl<'a> GridCollision<'a> {
             if scan.src.kind == kind::FLOOR {
                 raw.normal = nc::FLOOR;
                 raw.src = scan.src;
+            } else if scan.src.kind == kind::PLANE
+                && scan.src.aux == crate::format::plane_kind::PLATFORM
+            {
+                raw.normal = nc::PLATFORM_TOP;
+                raw.src = scan.src;
             } else {
                 raw.normal = nc::UP;
             }
@@ -277,6 +282,7 @@ impl<'a> GridCollision<'a> {
                     };
                 }
             }
+            kind::PLANE => self.classify_plane(q, lo, scan, raw),
             _ => {
                 raw.normal = if d[1] > 0 {
                     nc::DOWN

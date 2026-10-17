@@ -30,7 +30,7 @@ const START_IN: i32 = 1 << 18;
 
 /// Record a hit in the accumulator if it is earlier than the current one.
 #[inline(always)]
-fn consider(raw: &mut Raw, q: i32, code: u8, src: Src) {
+pub(super) fn consider(raw: &mut Raw, q: i32, code: u8, src: Src) {
     if q < raw.fraction {
         raw.fraction = q;
         raw.normal = code;
@@ -156,6 +156,9 @@ impl<'a> GridCollision<'a> {
         raw.fraction = 4097;
         for room in 0..self.level.rooms.len() {
             self.ray_walk(room, q, raw);
+            if self.planes {
+                self.ray_planes(room, q, raw);
+            }
         }
         if raw.start_solid {
             // The walk found the start inside a slab.
@@ -166,7 +169,7 @@ impl<'a> GridCollision<'a> {
         }
         let found = raw.fraction <= 4096;
         let t = if found { raw.fraction } else { 4096 };
-        if (self.foreign || self.validate) && self.blocked_t(q, t) {
+        if (self.foreign || self.validate || self.planes) && self.blocked_t(q, t) {
             // The analytic hit and the discrete predicate disagree by a
             // rounding sliver (or a foreign room): settle on a clear sample.
             let (mut lo, mut hi) = (0, t);
@@ -207,6 +210,9 @@ impl<'a> GridCollision<'a> {
         raw.fraction = 4097;
         for room in 0..self.level.rooms.len() {
             self.ray_walk(room, &q, &mut raw);
+            if self.planes {
+                self.ray_planes(room, &q, &mut raw);
+            }
         }
         raw.fraction > 4096 && !raw.start_solid
     }

@@ -200,6 +200,8 @@ impl GridRenderer {
     pub(super) fn select_quads(
         &mut self,
         room: &RoomView<'_>,
+        frustum: &FrustumPlanes,
+        size: i32,
         camera: [i32; 3],
         frame: &mut GridFrame,
     ) {
@@ -286,6 +288,30 @@ impl GridRenderer {
             // SAFETY: queued from valid LOD block ranges.
             let quad = unsafe { room.render.lod_quads.get_unchecked(usize::from(l)) };
             queue!(quad, quad_total + usize::from(l), no_skip);
+        }
+        // Free planes are not in any cell: each is frustum-tested as a box
+        // and its run of quads goes through the same facing test.
+        let clamp16 = |v: i32| v.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+        for plane in room.render.plane_refs {
+            let lo = GteVec3I16 {
+                x: clamp16(i32::from(plane.x0) * size),
+                y: plane.min_y,
+                z: clamp16(i32::from(plane.z0) * size),
+            };
+            let hi = GteVec3I16 {
+                x: clamp16((i32::from(plane.x1) + 1) * size),
+                y: plane.max_y,
+                z: clamp16((i32::from(plane.z1) + 1) * size),
+            };
+            if frustum.cull_aabb(lo, hi, CLIP_ALL_PLANES).is_none() {
+                continue;
+            }
+            let first = usize::from(plane.quad);
+            for q in first..first + usize::from(plane.count) {
+                // SAFETY: validation proved quad + count <= quads.len().
+                let quad = unsafe { room.render.quads.get_unchecked(q) };
+                queue!(quad, q, no_skip);
+            }
         }
         // SAFETY: the counts above never exceed the capacities.
         unsafe {

@@ -13,7 +13,7 @@ const S: i32 = 80;
 const FLAT: u16 = SECTOR_HAS_FLOOR | SECTOR_FLOOR_WALK_A | SECTOR_FLOOR_WALK_B;
 
 #[derive(Clone)]
-struct Room {
+pub(super) struct Room {
     origin: [i32; 3],
     w: u8,
     d: u8,
@@ -21,10 +21,12 @@ struct Room {
     walls: Vec<(usize, ColWall)>,
     splits: Vec<(usize, SplitB)>,
     liquids: Vec<Liquid>,
+    /// Free planes; each is copied into every cell its footprint box touches.
+    pub(super) planes: Vec<ColPlane>,
 }
 
 impl Room {
-    fn flat(origin: [i32; 3], w: u8, d: u8, floor: i16) -> Self {
+    pub(super) fn flat(origin: [i32; 3], w: u8, d: u8, floor: i16) -> Self {
         let cell = Sector {
             floor: [floor; 4],
             ceil: [0; 4],
@@ -39,19 +41,20 @@ impl Room {
             walls: Vec::new(),
             splits: Vec::new(),
             liquids: Vec::new(),
+            planes: Vec::new(),
         }
     }
 
-    fn cell(&mut self, cx: usize, cz: usize) -> &mut Sector {
+    pub(super) fn cell(&mut self, cx: usize, cz: usize) -> &mut Sector {
         let w = usize::from(self.w);
         &mut self.sectors[cz * w + cx]
     }
 
-    fn set_floor(&mut self, cx: usize, cz: usize, h: i16) {
+    pub(super) fn set_floor(&mut self, cx: usize, cz: usize, h: i16) {
         self.cell(cx, cz).floor = [h; 4];
     }
 
-    fn pit(&mut self, cx: usize, cz: usize) {
+    pub(super) fn pit(&mut self, cx: usize, cz: usize) {
         self.cell(cx, cz).flags &= !SECTOR_HAS_FLOOR;
     }
 
@@ -77,11 +80,28 @@ impl Room {
         ));
     }
 
+    /// Plane indices whose bounding box touches cell `index`.
+    fn planes_in(&self, index: usize) -> Vec<usize> {
+        let w = usize::from(self.w);
+        let (cx, cz) = ((index % w) as i32 * S, (index / w) as i32 * S);
+        (0..self.planes.len())
+            .filter(|&i| {
+                let p = &self.planes[i];
+                let xs = p.xz.map(|c| i32::from(c[0]));
+                let zs = p.xz.map(|c| i32::from(c[1]));
+                let (x0, x1) = (xs.iter().min().unwrap(), xs.iter().max().unwrap());
+                let (z0, z1) = (zs.iter().min().unwrap(), zs.iter().max().unwrap());
+                *x1 >= cx && *x0 <= cx + S && *z1 >= cz && *z0 <= cz + S
+            })
+            .collect()
+    }
+
     fn chunk(&self, summary: bool) -> RoomChunk {
         let mut sectors = self.sectors.clone();
         let mut exts: Vec<SectorExt> = Vec::new();
         let mut walls = Vec::new();
         let mut splitbs = Vec::new();
+        let mut col_planes: Vec<ColPlane> = Vec::new();
         for (index, sector) in sectors.iter_mut().enumerate() {
             let mine: Vec<ColWall> = self
                 .walls
@@ -90,16 +110,22 @@ impl Room {
                 .map(|(_, w)| *w)
                 .collect();
             let split = self.splits.iter().find(|(i, _)| *i == index);
-            if mine.is_empty() && split.is_none() {
+            let planes = self.planes_in(index);
+            if mine.is_empty() && split.is_none() && planes.is_empty() {
                 continue;
             }
             let mut ext = SectorExt {
                 wall_first: walls.len() as u16,
                 wall_count: mine.len() as u8,
-                plane_count: 0,
-                plane_first: 0,
+                plane_count: planes.len() as u8,
+                plane_first: col_planes.len() as u16,
                 splitb: NO_EXT,
             };
+            for i in planes {
+                let mut copy = self.planes[i];
+                copy.id = i as u8;
+                col_planes.push(copy);
+            }
             walls.extend(mine);
             if let Some((_, b)) = split {
                 ext.splitb = splitbs.len() as u16;
@@ -118,19 +144,20 @@ impl Room {
             exts,
             walls,
             splitbs,
+            col_planes,
             liquids: self.liquids.clone(),
             ..RoomChunk::default()
         }
     }
 }
 
-struct Built {
+pub(super) struct Built {
     level: Vec<u32>,
     level_len: usize,
     rooms: Vec<(Vec<u32>, usize)>,
 }
 
-fn build(rooms: &[Room]) -> Built {
+pub(super) fn build(rooms: &[Room]) -> Built {
     build_with(rooms, true)
 }
 
@@ -186,22 +213,22 @@ impl Built {
         f(&world)
     }
 
-    fn run<R>(&self, f: impl FnOnce(&GridCollision<'_>) -> R) -> R {
+    pub(super) fn run<R>(&self, f: impl FnOnce(&GridCollision<'_>) -> R) -> R {
         self.run_with(&[], f)
     }
 }
 
-fn trace(w: &GridCollision<'_>, q: CollisionTraceQuery) -> CollisionTrace {
+pub(super) fn trace(w: &GridCollision<'_>, q: CollisionTraceQuery) -> CollisionTrace {
     let mut out = CollisionTrace::default();
     assert!(GridTraceProvider::new(w).trace_into(q, &mut out));
     out
 }
 
-fn body(a: [i32; 3], b: [i32; 3]) -> CollisionTraceQuery {
+pub(super) fn body(a: [i32; 3], b: [i32; 3]) -> CollisionTraceQuery {
     CollisionTraceQuery::body(RoomPoint::from_array(a), RoomPoint::from_array(b), 12, 48)
 }
 
-fn point(a: [i32; 3], b: [i32; 3]) -> CollisionTraceQuery {
+pub(super) fn point(a: [i32; 3], b: [i32; 3]) -> CollisionTraceQuery {
     CollisionTraceQuery::point(RoomPoint::from_array(a), RoomPoint::from_array(b))
 }
 
@@ -448,15 +475,15 @@ fn non_resident_rooms_are_solid_for_bodies_and_invisible_to_sight() {
     });
 }
 
-struct Lcg(u32);
+pub(super) struct Lcg(pub(super) u32);
 
 impl Lcg {
-    fn next(&mut self) -> u32 {
+    pub(super) fn next(&mut self) -> u32 {
         self.0 = self.0.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
         self.0 >> 8
     }
 
-    fn range(&mut self, lo: i32, hi: i32) -> i32 {
+    pub(super) fn range(&mut self, lo: i32, hi: i32) -> i32 {
         lo + (self.next() % (hi - lo + 1) as u32) as i32
     }
 }
@@ -555,11 +582,11 @@ fn traces_never_end_inside_solid() {
     });
 }
 
-fn motor_config() -> CharacterMotorConfig {
+pub(super) fn motor_config() -> CharacterMotorConfig {
     CharacterMotorConfig::character_with_body(12, 48, 8 << 8, 8 << 8, Angle::from_q12(1024))
 }
 
-fn walk(
+pub(super) fn walk(
     world: &GridCollision<'_>,
     start: RoomPoint,
     move_x: i32,

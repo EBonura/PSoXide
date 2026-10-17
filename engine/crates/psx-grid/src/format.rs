@@ -23,10 +23,12 @@ const _: () = assert!(cfg!(target_endian = "little"));
 pub const LEVEL_MAGIC: [u8; 4] = *b"PGL1";
 /// Room chunk magic, `"PGRM"`.
 pub const ROOM_MAGIC: [u8; 4] = *b"PGRM";
-/// Layout version written by this crate.
-pub const VERSION: u16 = 1;
+/// Layout version written by this crate. Version 2 gave [`PlaneRef`] a quad
+/// count (a plane is a run of quads, tiled one per sector) in place of the
+/// collision index nothing read.
+pub const VERSION: u16 = 2;
 /// Oldest reader that still understands what this crate writes.
-pub const MIN_READER: u16 = 1;
+pub const MIN_READER: u16 = 2;
 /// Bytes per CD sector; chunks are padded to it.
 pub const SECTOR_BYTES: usize = 2048;
 
@@ -335,11 +337,24 @@ pub mod plane_kind {
 }
 
 /// A collidable free plane, 28 bytes.
+///
+/// Per kind, all coordinates room-local runtime units:
+///
+/// * [`plane_kind::PLATFORM`]: `xz` holds the four footprint corners in ring
+///   order, `y0` the surface height at `xz[0]`, `sx_q12` and `sz_q12` the
+///   surface slope (dy/dx and dy/dz) and `extent` the slab thickness below
+///   the surface. The surface is `y0 + (sx * dx + sz * dz) >> 12` for the
+///   offset `(dx, dz)` from `xz[0]`.
+/// * [`plane_kind::WALL`]: `xz[0]` and `xz[1]` are the segment ends, `y0` the
+///   bottom, `extent` the height and `sx_q12`, `sz_q12` the unit direction
+///   from end 0 to end 1 in Q12. Zero thickness, blocks from both sides.
+/// * [`plane_kind::BLOCKER`]: `xz[0]` is the minimum and `xz[1]` the maximum
+///   corner of an axis-aligned box from `y0` up by `extent`.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct ColPlane {
     pub kind: u8,
-    /// Bit 0: camera passes through. Bit 1: one sided.
+    /// Reserved, zero.
     pub flags: u8,
     /// Index of the plane in the room, so a trace counts it once.
     pub id: u8,
@@ -497,13 +512,19 @@ pub struct LodBlock {
     pub max_y: i16,
 }
 
-/// A free plane's render reference, 12 bytes.
+/// A free plane's render reference, 12 bytes: the run of quads it draws and
+/// a box around them for the per-frame frustum test.
+///
+/// The box is the cell rectangle `x0..=x1`, `z0..=z1` (room-local cells)
+/// between `min_y` and `max_y` (room-local runtime units).
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct PlaneRef {
+    /// First quad of the run in `QUADS`.
     pub quad: u16,
-    /// First `COL_PLANES` index or `0xFFFF`.
-    pub col: u16,
+    /// Quads in the run.
+    pub count: u8,
+    pub flags: u8,
     pub x0: u8,
     pub z0: u8,
     pub x1: u8,
@@ -601,6 +622,7 @@ const fn layout_hash() -> u32 {
     h = mix(h, size_of::<RCell>());
     h = mix(h, size_of::<LodBlock>());
     h = mix(h, size_of::<PlaneRef>());
+    h = mix(h, offset_of!(PlaneRef, count));
     h
 }
 

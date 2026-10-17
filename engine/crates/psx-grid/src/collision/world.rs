@@ -55,6 +55,9 @@ pub struct GridCollision<'a> {
     pub(crate) inv24: u32,
     /// Some room's collision block is not resident.
     pub(crate) foreign: bool,
+    /// Some resident room holds collidable free planes, so the plane scans
+    /// are worth running.
+    pub(crate) planes: bool,
     /// Validate analytic point-trace results against the discrete slab
     /// predicate even when every room is resident (tests compare both).
     pub(crate) validate: bool,
@@ -73,6 +76,7 @@ impl<'a> GridCollision<'a> {
             recip,
             inv24: weight_recip(s),
             foreign: rooms.iter().any(Option::is_none) || rooms.len() < level.rooms.len(),
+            planes: rooms.iter().flatten().any(|v| !v.col_planes.is_empty()),
             validate: false,
         })
     }

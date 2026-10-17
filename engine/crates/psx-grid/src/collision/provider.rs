@@ -46,6 +46,8 @@ impl<'a> GridCollision<'a> {
                 usize::from(raw.src.cz),
                 raw.src.aux != 0,
             ),
+            nc::PLATFORM_TOP => self.platform_normal(&raw.src),
+            nc::WALL_PLANE => self.wall_plane_normal(&raw.src),
             code => axis_normal(code),
         };
         output.plane_distance = 0;

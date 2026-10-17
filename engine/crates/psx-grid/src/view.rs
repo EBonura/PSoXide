@@ -276,6 +276,11 @@ impl<'a> CollisionView<'a> {
                 return Err(FormatError::IndexRange);
             }
         }
+        for plane in self.col_planes {
+            if !(plane_kind::PLATFORM..=plane_kind::BLOCKER).contains(&plane.kind) {
+                return Err(FormatError::IndexRange);
+            }
+        }
         for liquid in self.liquids {
             if usize::from(liquid.x1) >= self.width()
                 || usize::from(liquid.z1) >= self.depth()
@@ -337,7 +342,7 @@ impl<'a> RoomView<'a> {
             }
         }
         for reference in r.plane_refs {
-            if usize::from(reference.quad) >= r.quads.len() {
+            if usize::from(reference.quad) + usize::from(reference.count) > r.quads.len() {
                 return Err(FormatError::IndexRange);
             }
         }

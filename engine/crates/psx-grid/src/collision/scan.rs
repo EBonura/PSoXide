@@ -23,6 +23,11 @@ pub(crate) mod nc {
     pub const NN: u8 = 10;
     /// Upward triangle normal of the floor named by the hit's [`Src`].
     pub const FLOOR: u8 = 11;
+    /// Upward normal of the platform plane named by the hit's [`Src`].
+    pub const PLATFORM_TOP: u8 = 12;
+    /// Normal of the wall plane named by the hit's [`Src`], facing the side
+    /// its `aux` names.
+    pub const WALL_PLANE: u8 = 13;
 }
 
 /// Source kinds.
@@ -31,6 +36,10 @@ pub(crate) mod kind {
     pub const CEIL: u8 = 2;
     pub const WALL: u8 = 3;
     pub const FOREIGN: u8 = 4;
+    /// A free plane; `aux` is the plane kind, or 4/5 for the negative/positive
+    /// side of a wall plane a ray crossed, and `cx | cz << 8` the index in
+    /// the room's `COL_PLANES`.
+    pub const PLANE: u8 = 5;
 }
 
 /// What a blocking interval came from: a floor triangle (`aux` = second
@@ -120,7 +129,7 @@ impl Scan {
 
     /// Offer the open feet-height interval `(lo, hi)`.
     #[inline(never)]
-    fn offer(&mut self, lo: i32, hi: i32, src: Src) {
+    pub(crate) fn offer(&mut self, lo: i32, hi: i32, src: Src) {
         let (y0, y1) = (self.y0, self.y1);
         if self.mode == ANY {
             if lo < y0 && y0 < hi && !self.found {
@@ -143,7 +152,7 @@ impl Scan {
     /// `+x`, `-x`, `+z`, `-z` at radius `r`. Arithmetic rather than a `match`
     /// so no jump table has to be read from RAM.
     #[inline(always)]
-    fn sample(&self, i: i32) -> (i32, i32) {
+    pub(crate) fn sample(&self, i: i32) -> (i32, i32) {
         let r = self.r;
         let dx = if i == 1 {
             r
@@ -171,6 +180,9 @@ impl<'a> GridCollision<'a> {
             let walls = self.scan_slabs(room, scan);
             if walls && scan.r > 0 && !scan.done() {
                 self.scan_walls(room, scan);
+            }
+            if self.planes && !scan.done() {
+                self.scan_planes(room, scan);
             }
             if scan.done() {
                 break;
@@ -433,6 +445,9 @@ impl<'a> GridCollision<'a> {
                         return true;
                     }
                 }
+            }
+            if self.planes && Self::plane_blocks_point(view, sector, oy, (lx, lz), y, h) {
+                return true;
             }
         }
         false
