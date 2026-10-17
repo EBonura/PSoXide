@@ -82,6 +82,11 @@ pub struct RoomWalk {
 }
 
 impl RoomWalk {
+    /// How many sectors a body can stand in.
+    pub fn standable_count(&self) -> usize {
+        self.cells.iter().flatten().filter(|c| c.standable).count()
+    }
+
     /// The analysis of a world sector, `None` without a floor.
     pub fn cell(&self, world_cell: [i32; 2]) -> Option<CellWalk> {
         let x = usize::try_from(world_cell[0] - self.origin[0]).ok()?;
@@ -285,9 +290,25 @@ fn flag_edges(
     walk: &RoomWalk,
     out: &mut Vec<EdgeFlag>,
 ) {
-    for (x, z, sector) in room.iter() {
-        let cell = room.world_cell(x, z);
-        let Some(here) = walk.cell(cell) else {
+    let cells: Vec<[i32; 2]> = room.iter().map(|(x, z, _)| room.world_cell(x, z)).collect();
+    flag_edges_of(units, limits, ri, room, &cells, &|c| walk.cell(c), out);
+}
+
+/// [`flag_edges`] over some sectors, with `info` giving the per-sector result.
+fn flag_edges_of(
+    units: &RuntimeUnits,
+    limits: &WalkLimits,
+    ri: usize,
+    room: &GridRoom,
+    cells: &[[i32; 2]],
+    info: &dyn Fn([i32; 2]) -> Option<CellWalk>,
+    out: &mut Vec<EdgeFlag>,
+) {
+    for &cell in cells {
+        let Some(sector) = sector_of(room, cell) else {
+            continue;
+        };
+        let Some(here) = info(cell) else {
             continue;
         };
         let Some(floor) = &sector.floor else { continue };
@@ -329,7 +350,7 @@ fn flag_edges(
             if !matches!(edge, WallEdge::East | WallEdge::South) {
                 continue;
             }
-            let (Some(nf), Some(nw)) = (neighbour.floor.as_ref(), walk.cell(other)) else {
+            let (Some(nf), Some(nw)) = (neighbour.floor.as_ref(), info(other)) else {
                 continue;
             };
             if nw.steep || nw.ghost {
@@ -353,6 +374,64 @@ fn flag_edges(
             }
         }
     }
+}
+
+/// What the mask of a destructive verb counts around some sectors of a room:
+/// floors too steep to stand on, headroom lower than the body, and steps the
+/// body cannot climb (between sectors and across a split-level fold). The
+/// same predicates [`analyse`] flags with, for the sectors and the one-ring
+/// around them only.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LocalProblems {
+    /// Floors steeper than the motor stands on.
+    pub steep: usize,
+    /// Sectors with less headroom than the body.
+    pub low_headroom: usize,
+    /// Steps taller than the body climbs.
+    pub steps: usize,
+}
+
+impl LocalProblems {
+    /// Total.
+    pub const fn total(self) -> usize {
+        self.steep + self.low_headroom + self.steps
+    }
+}
+
+/// Count the problems in and around `cells` of `room` (see
+/// [`LocalProblems`]). `None` when the scale cannot be cooked.
+pub fn local_problems(
+    world: &GridWorld,
+    room: usize,
+    cells: &[[i32; 2]],
+    limits: &WalkLimits,
+) -> Option<LocalProblems> {
+    let units = RuntimeUnits::new(world.scale).ok()?;
+    let r = world.rooms.get(room)?;
+    let mut ring: std::collections::BTreeSet<[i32; 2]> = std::collections::BTreeSet::new();
+    for &c in cells {
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                ring.insert([c[0] + dx, c[1] + dz]);
+            }
+        }
+    }
+    let info = |c: [i32; 2]| sector_of(r, c).and_then(|s| cell_walk(&units, limits, r.y_offset, s));
+    let list: Vec<[i32; 2]> = ring.iter().copied().collect();
+    let mut out = LocalProblems::default();
+    for &c in &list {
+        if let Some(w) = info(c) {
+            out.steep += usize::from(w.steep);
+            out.low_headroom += usize::from(w.low_headroom);
+        }
+    }
+    let mut edges = Vec::new();
+    flag_edges_of(&units, limits, room, r, &list, &info, &mut edges);
+    out.steps = edges
+        .iter()
+        .filter(|e| e.kind == EdgeKind::StepTooTall)
+        .count();
+    Some(out)
 }
 
 /// Flood fill from the spawns. A body steps up at most the limit and falls

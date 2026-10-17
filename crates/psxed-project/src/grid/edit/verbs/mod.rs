@@ -1,4 +1,4 @@
-//! The level verbs: Raise/Lower, Ramp and Stairs.
+//! The level verbs: Raise/Lower, Ramp, Stairs and Break.
 //!
 //! Every verb is a pure function pair over a [`GridWorld`](super::super::GridWorld)
 //! with the contract `HeightDrag` already keeps: `begin` captures what the
@@ -9,11 +9,13 @@
 //! materials, floor materials); nothing records which verb made them, and the
 //! walls on the new edges are derived, so they show live.
 //!
+//! * [`break_verb`]: Break, seeded detail for walls, floors and ceilings.
 //! * [`raise`]: Raise and Lower, in Offset and Level modes.
 //! * [`ramp`]: a slope from one side of the region to the opposite side.
 //! * [`stairs`]: a flight of whole-sector treads along a path.
 //! * [`rules`]: the smart paint rules and the shared writing helpers.
 
+pub mod break_verb;
 pub mod raise;
 pub mod ramp;
 pub mod rules;
@@ -44,6 +46,7 @@ pub struct Snapshot {
     cells: Vec<([i32; 2], Option<GridSector>)>,
     band_sets: Vec<super::super::bands::BandSet>,
     defaults: super::super::overrides::RoomDefaults,
+    edge_overrides: super::super::overrides::EdgeOverrides,
 }
 
 impl Snapshot {
@@ -63,6 +66,7 @@ impl Snapshot {
             cells,
             band_sets: target.band_sets.clone(),
             defaults: target.defaults,
+            edge_overrides: target.edge_overrides.clone(),
         })
     }
 
@@ -90,6 +94,7 @@ impl Snapshot {
         }
         room.band_sets = self.band_sets.clone();
         room.defaults = self.defaults;
+        room.edge_overrides = self.edge_overrides.clone();
     }
 }
 
