@@ -97,6 +97,10 @@ SECTIONS {
         *(.text.*plane_contact*)
         *(.text.*model_collision_hull*)
         *(.text .text.*);
+        /* Code only an effect frame runs (a stance swap, a dodge) goes last,
+           by `#[link_section = ".fx.text"]`, so changing it cannot move the
+           steady-state code in front of it relative to the 4 KiB I-cache. */
+        *(.fx.text .fx.text.*);
         __text_end = .;
     } > IMAGE
 
