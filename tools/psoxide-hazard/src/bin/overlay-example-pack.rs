@@ -107,8 +107,8 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
     // Preserve the existing module hardening reservation even when this tiny
     // module needs no hazard patch. No guard or trampoline policy is relaxed.
-    image.extend([0x48415a54, 32]);
-    image.extend([0; 32]);
+    image.extend([0x48415a54, psoxide_hazard::overlay_pack::TRAMPOLINE_WORDS]);
+    image.extend([0; psoxide_hazard::overlay_pack::TRAMPOLINE_WORDS as usize]);
     let module_bytes = image.len() * 4;
     let mut package = vec![
         overlay::MAGIC,

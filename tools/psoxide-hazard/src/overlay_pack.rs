@@ -5,6 +5,12 @@ use crate::overlay_elf::{Elf, Relocation, Symbol};
 use psx_residency::overlay;
 use std::{collections::BTreeSet, ops::Range};
 
+/// Words in the hazard-trampoline array every packed module image carries (after a
+/// magic and a capacity word). panic=immediate-abort gives HK modules more load-delay
+/// hazards than the 32 words the format first reserved; a game's builder must reserve
+/// the same count (HK: host/code_modules.py TRAMP_WORDS).
+pub const TRAMPOLINE_WORDS: u32 = 96;
+
 #[cfg(test)]
 #[path = "overlay_pack_fixture.rs"]
 mod full_fixture;
@@ -148,7 +154,9 @@ pub fn pack_pinned<'a>(
         .and_then(|n| n.checked_add(3))
         .ok_or("image overflow")?
         & !3;
-    let full_bytes = bytes.checked_add(136).ok_or("trampoline overflow")?;
+    let full_bytes = bytes
+        .checked_add(4 * (TRAMPOLINE_WORDS + 2))
+        .ok_or("trampoline overflow")?;
     overlay::placement(text.address, full_bytes, true).map_err(|e| format!("placement: {e:?}"))?;
     let symbols = elf.symbols()?;
     let exports = symbols
@@ -199,7 +207,7 @@ pub fn pack_pinned<'a>(
         relocations.extend(elf.relocations(index)?);
     }
     image[bytes as usize / 4] = 0x48415a54;
-    image[bytes as usize / 4 + 1] = 32;
+    image[bytes as usize / 4 + 1] = TRAMPOLINE_WORDS;
     let selected_ranges = selected
         .iter()
         .map(|(i, s)| Ok((*i as u16, range(s.address, s.size)?)))
@@ -734,11 +742,11 @@ fn hardened_fixups(
     after: &[u32],
     resident_code: Vec<Range<u32>>,
 ) -> Result<Vec<u32>, String> {
-    if before.len() != after.len() || before.len() < 34 {
+    if before.len() != after.len() || before.len() < TRAMPOLINE_WORDS as usize + 2 {
         return Err("hardened image capacity changed".into());
     }
-    let tramp = before.len() - 34;
-    if after[tramp..tramp + 2] != [0x48415a54, 32] {
+    let tramp = before.len() - (TRAMPOLINE_WORDS as usize + 2);
+    if after[tramp..tramp + 2] != [0x48415a54, TRAMPOLINE_WORDS] {
         return Err("hardened trampoline header changed".into());
     }
     let old_fixups = &original.words[5 + before.len()..];
@@ -1032,7 +1040,7 @@ fn hi_lo_address_back_edge(
                     2 => Some((pc.wrapping_add(4) & 0xf000_0000) | ((word & 0x03ff_ffff) << 2)),
                     4..=7 | 1 => Some(
                         pc.wrapping_add(4)
-                            .wrapping_add_signed(((word as u16 as i16 as i32) << 2) as i32),
+                            .wrapping_add_signed((word as u16 as i16 as i32) << 2),
                     ),
                     _ => None,
                 };
@@ -1379,8 +1387,8 @@ mod tests {
     fn hardening_fixture() -> PackedImage<'static> {
         let base = 0x80408000;
         let jump = 0x08000000 | ((base >> 2) & 0x03ffffff);
-        let mut image = vec![jump, 0, base, 0x48415a54, 32];
-        image.extend([0; 32]);
+        let mut image = vec![jump, 0, base, 0x48415a54, TRAMPOLINE_WORDS];
+        image.extend([0; TRAMPOLINE_WORDS as usize]);
         let mut words = vec![overlay::MAGIC, 1, image.len() as u32, 2, 8];
         words.extend(image);
         words.extend([0x10000000, 0x40000008]);
@@ -1389,7 +1397,7 @@ mod tests {
             code_end: 8,
             words,
             exports: Vec::new(),
-            code_ranges: vec![base..base + 8, base + 20..base + 148],
+            code_ranges: vec![base..base + 8, base + 20..base + 20 + 4 * TRAMPOLINE_WORDS],
             incoming: Vec::new(),
             sections: vec![1, 2],
         }
@@ -1397,7 +1405,7 @@ mod tests {
     #[test]
     fn hardened_trampoline_jumps_and_jump_tables_get_final_self_fixups() {
         let original = hardening_fixture();
-        let before = &original.words[5..42];
+        let before = &original.words[5..10 + TRAMPOLINE_WORDS as usize];
         let mut after = before.to_vec();
         after[0] = 0x08000000 | (((original.linked + 20) >> 2) & 0x03ffffff);
         after[2] = original.linked + 20;
@@ -1411,9 +1419,9 @@ mod tests {
         original.words[5] = 0x3c028041;
         original.words[6] = 0x24428000;
         original.words[3] = 2;
-        original.words.truncate(42);
+        original.words.truncate(10 + TRAMPOLINE_WORDS as usize);
         original.words.extend([0x20000000, 0x30000004]);
-        let before = &original.words[5..42];
+        let before = &original.words[5..10 + TRAMPOLINE_WORDS as usize];
         let mut after = before.to_vec();
         after[1] = 0;
         after[5] = before[1];
