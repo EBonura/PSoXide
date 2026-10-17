@@ -828,6 +828,69 @@ impl PrimitivePacketWordReservation<'_, '_> {
         unsafe { core::slice::from_raw_parts_mut(first, self.capacity_words) }
     }
 
+    /// Whether the arena fills downward, so a committed stream sits against
+    /// the frame's packets at the high end of the scratch.
+    pub const fn is_descending(&self) -> bool {
+        self.arena.descending
+    }
+
+    /// The reserved slots as words, for a producer that writes its stream
+    /// against the high end of the slice and commits it with
+    /// [`commit_tail`](Self::commit_tail). Only a descending arena commits
+    /// that way; the slice is a whole number of slots, so it may be up to a
+    /// slot longer than [`capacity_words`](Self::capacity_words).
+    pub fn tail_words_mut(&mut self) -> &mut [u32] {
+        let words =
+            self.capacity_words.div_ceil(PRIMITIVE_PACKET_SLOT_WORDS) * PRIMITIVE_PACKET_SLOT_WORDS;
+        let first = unsafe {
+            self.arena
+                .storage
+                .as_mut_ptr()
+                .add(self.first_slot)
+                .cast::<u32>()
+        };
+        unsafe { core::slice::from_raw_parts_mut(first, words) }
+    }
+
+    /// Commit a stream the producer wrote against the high end of
+    /// [`tail_words_mut`](Self::tail_words_mut): the stream is already where
+    /// a descending frame wants it, so nothing moves.
+    ///
+    /// Returns `None` without advancing the arena for an ascending arena, a
+    /// word count beyond the tail slice, or when only one of `used_words` and
+    /// `packet_count` is zero.
+    pub fn commit_tail(
+        self,
+        used_words: usize,
+        packet_count: usize,
+    ) -> Option<PrimitivePacketStream> {
+        let tail_slots = self.capacity_words.div_ceil(PRIMITIVE_PACKET_SLOT_WORDS);
+        if !self.arena.descending
+            || crate::r3000_usize_gt(used_words, tail_slots * PRIMITIVE_PACKET_SLOT_WORDS)
+            || (used_words == 0) != (packet_count == 0)
+        {
+            return None;
+        }
+        let used_slots = used_words.div_ceil(PRIMITIVE_PACKET_SLOT_WORDS);
+        let next_used_slots = self.arena.used_slots.checked_add(used_slots)?;
+        let next_packet_count = self.arena.packet_count.checked_add(packet_count)?;
+        // The reservation's high end is the slot below the frame's packets.
+        let top_slot = self.first_slot + tail_slots;
+        let base = self.arena.storage.as_mut_ptr();
+        let end = unsafe { base.add(top_slot).cast::<u32>() };
+        let first = unsafe { end.sub(used_words) };
+        self.arena.used_slots = next_used_slots;
+        self.arena.packet_count = next_packet_count;
+        self.arena.cursor =
+            packet_cursor(self.arena.storage, self.arena.descending, next_used_slots);
+        Some(PrimitivePacketStream {
+            first,
+            end,
+            words: used_words,
+            packets: packet_count,
+        })
+    }
+
     /// Commit the exact prefix written by the producer.
     ///
     /// Returns `None` without advancing the arena if the word count exceeds
@@ -1567,6 +1630,50 @@ mod tests {
         assert_eq!(arena.used_slots(), 9);
         let next = arena.push(TestPacket { tag: 0, value: 4 }).unwrap() as *mut TestPacket;
         assert_eq!(next.cast::<u32>(), unsafe { base.add(54 * W) });
+    }
+
+    #[test]
+    fn descending_tail_commit_leaves_the_stream_where_it_was_written() {
+        const W: usize = PRIMITIVE_PACKET_SLOT_WORDS;
+        let mut scratch = PrimitivePacketScratch::<64>::ZERO;
+        let mut pair = PacketFramePair::new();
+        {
+            let mut arena = PrimitivePacketArena::new_paired(&mut scratch, &mut pair);
+            arena.push(TestPacket { tag: 0, value: 1 }).unwrap();
+            arena.finish_paired_frame();
+        }
+        let base = scratch.slots.as_mut_ptr().cast::<u32>();
+        let mut arena = PrimitivePacketArena::new_paired(&mut scratch, &mut pair);
+        arena.push(TestPacket { tag: 0, value: 2 }).unwrap();
+        let capacity = arena.remaining_words_before_fence();
+        let mut reservation = arena.reserve_packet_words(capacity).unwrap();
+        assert!(reservation.is_descending());
+        let tail = reservation.tail_words_mut();
+        let len = tail.len();
+        for (i, word) in tail[len - 20..].iter_mut().enumerate() {
+            *word = 100 + i as u32;
+        }
+        let stream = reservation.commit_tail(20, 2).unwrap();
+        // The stream ends against the typed packet and starts 20
+        // words before it, inside the two slots the commit claims.
+        let end = unsafe { base.add(63 * W) };
+        assert_eq!(stream.end_ptr(), end);
+        assert_eq!(stream.first_ptr(), unsafe { end.sub(20) });
+        let written = unsafe { core::slice::from_raw_parts(stream.first_ptr(), 20) };
+        assert!(written
+            .iter()
+            .enumerate()
+            .all(|(i, &w)| w == 100 + i as u32));
+        assert_eq!(arena.used_slots(), 3);
+        let next = arena.push(TestPacket { tag: 0, value: 3 }).unwrap() as *mut TestPacket;
+        assert_eq!(next.cast::<u32>(), unsafe { base.add(60 * W) });
+        // An ascending arena refuses a tail commit and does not advance.
+        let mut scratch = PrimitivePacketScratch::<16>::ZERO;
+        let mut arena = PrimitivePacketArena::new(&mut scratch);
+        let reservation = arena.reserve_packet_words(2 * W).unwrap();
+        assert!(!reservation.is_descending());
+        assert!(reservation.commit_tail(W, 1).is_none());
+        assert_eq!(arena.used_slots(), 0);
     }
 
     #[test]

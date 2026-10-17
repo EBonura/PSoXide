@@ -257,6 +257,7 @@ fn runtime_numeric_guard() -> Result<(), String> {
         root.join("engine/crates/psx-engine/src"),
         root.join("engine/crates/psx-game-runtime/src"),
         root.join("engine/crates/psx-level/src"),
+        root.join("engine/crates/psx-grid/src"),
     ];
     push_child_src_dirs(&mut runtime_roots, &root.join("engine/examples"))?;
     for entry in sorted_dirs(&root.join("sdk/crates"))? {

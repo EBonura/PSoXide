@@ -130,6 +130,7 @@ impl Playtest {
         let entity_positions = unsafe { initialized_prefix(&entity_positions, entity_count) };
         // SAFETY: both prefixes were initialized in the loop above.
         let entity_dead = unsafe { initialized_prefix(&entity_dead, entity_count) };
+        let eye = self.camera.position();
         let spatial_masks = self.bsp.as_mut().map(|bsp| {
             // The observer stays inside the player's body rather than on the
             // floor seam. Actors and model instances are linked by complete
@@ -182,18 +183,30 @@ impl Playtest {
             // initialized in the loop above.
             let instance_activation_bounds =
                 unsafe { initialized_prefix_mut(&mut instance_activation_bounds, instance_count) };
+            // Actors are the instances worth a sight-line test; props are
+            // cheaper to draw than to ask about.
+            // psx-numeric-allow-next-line: one bit per model instance, the mask width of the visibility query
+            let mut actor_instances = 0u64;
             for (entity, record) in GAME_ENTITIES.iter().enumerate() {
                 let instance = usize::from(record.model_instance);
                 let Some(bounds) = instance_activation_bounds.get_mut(instance) else {
                     continue;
                 };
+                if instance < 64 {
+                    actor_instances |= 1u64 << instance;
+                }
                 *bounds = BspVisibilityBounds::cylinder(
                     entity_positions[entity],
                     i32::from(record.radius),
                     i32::from(record.height),
                 );
             }
-            let instance_mask = bsp.visible_bounds_mask(observer, instance_activation_bounds);
+            let instance_mask = bsp.visible_view_bounds_mask(
+                observer,
+                eye,
+                instance_activation_bounds,
+                actor_instances,
+            );
             let logic_count = LOGIC.len().min(MAX_LOGIC_RECORDS);
             let mut logic_positions =
                 [const { core::mem::MaybeUninit::<[i32; 3]>::uninit() }; MAX_LOGIC_RECORDS];
@@ -426,8 +439,8 @@ impl Playtest {
             .init(DESTRUCTIBLES)
             .unwrap_or_else(|error| panic!("cooked destructible initialization failed: {error:?}"));
         self.bsp = if generated::PLAYTEST_USES_PXBSP {
-            let mut bsp = BspRuntime::load_manifest()
-                .unwrap_or_else(|error| panic!("cooked PXBSP initialization failed: {error}"));
+            let mut bsp = WorldRuntime::load_manifest()
+                .unwrap_or_else(|error| panic!("cooked world initialization failed: {error}"));
             let _ = bsp.refresh_materials();
             Some(bsp)
         } else {

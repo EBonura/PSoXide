@@ -39,7 +39,7 @@
 #![cfg_attr(not(test), no_main)]
 #![allow(static_mut_refs)]
 
-#[cfg(test)]
+#[cfg(any(test, playtest_grid_world))]
 extern crate alloc;
 extern crate psx_rt;
 
@@ -95,7 +95,11 @@ use psx_level::{
 use psx_vram::{TextureDepth, TexturePage};
 
 mod box_props;
+#[cfg(not(playtest_grid_world))]
 mod bsp_runtime;
+#[cfg(playtest_grid_world)]
+mod grid_runtime;
+mod world_common;
 #[cfg(feature = "cd-stream-benchmark")]
 use psx_game_runtime::cd_stream;
 mod aim_control;
@@ -132,7 +136,20 @@ mod vram_runtime;
 mod world_objects_runtime;
 
 use box_props::*;
+#[cfg(not(playtest_grid_world))]
 use bsp_runtime::*;
+#[cfg(playtest_grid_world)]
+use grid_runtime::*;
+use world_common::*;
+
+/// The runtime that owns the cooked world: rendering, collision, activation,
+/// sky gating. One type per world kind, selected by the cooked manifest.
+#[cfg(playtest_grid_world)]
+pub(crate) type WorldRuntime = grid_runtime::GridRuntime;
+/// The runtime that owns the cooked world: rendering, collision, activation,
+/// sky gating. One type per world kind, selected by the cooked manifest.
+#[cfg(not(playtest_grid_world))]
+pub(crate) type WorldRuntime = BspRuntime;
 use character_runtime::*;
 use damage_numbers::*;
 use game_logic_runtime::*;
@@ -250,7 +267,7 @@ struct Playtest {
     /// Explicit resident BSP backend selected by the cooked manifest. Invalid
     /// BSP data fails initialization instead of falling back to another world
     /// representation.
-    bsp: Option<BspRuntime>,
+    bsp: Option<WorldRuntime>,
     /// Ambient RGB for the room containing the player.
     current_ambient_rgb: [u8; 3],
     /// Index in ROOMS the player is currently in. Used to scope

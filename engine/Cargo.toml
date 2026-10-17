@@ -8,6 +8,7 @@ members = [
     "crates/psx-engine",
     "crates/psx-game-runtime",
     "crates/psx-goldsrc",
+    "crates/psx-grid",
     "crates/psx-level",
     "crates/psx-render-contract",
 ]

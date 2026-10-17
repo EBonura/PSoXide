@@ -48,6 +48,7 @@ use crate::generated::{
     PXBSP_STREAMED, PXBSP_WORLD, ROOMS, SOLID_CELL_PARENTS, WORLD_OBJECTS,
     WORLD_OBJECT_LEAF_RANGES, WORLD_OBJECT_LEAVES,
 };
+use crate::world_common::*;
 use crate::world_objects_runtime::WorldObjectVisibility;
 use crate::{
     ensure_room_texture_uploaded, ensure_texture_uploaded, pxbsp_frame_face_chain_arena,
@@ -57,34 +58,11 @@ use crate::{
 #[cfg(feature = "world-stream")]
 mod world_stream;
 
-#[cfg(playtest_grid_world)]
-mod grid_world;
-
 pub(super) const MAX_BSP_DOORS: usize = 16;
 pub(super) const MAX_BSP_DESTRUCTIBLES: usize = psx_level::MAX_DESTRUCTIBLES;
 pub(super) const MAX_BSP_DYNAMIC_MODELS: usize = MAX_BSP_DOORS + MAX_BSP_DESTRUCTIBLES;
 pub(super) const BSP_POINT_HULL_INDEX: usize = 0;
 
-/// Body baked by `compile_brush_world` into hull one.
-pub(super) const BSP_PLAYER_RADIUS: i32 = 1;
-/// Body baked by `compile_brush_world` into hull one.
-pub(super) const BSP_PLAYER_HEIGHT: i32 = 4;
-/// Preserve the first-playable fixture's authored walking cadence when it has
-/// no Character resource. Character-backed projects keep their authored speed.
-pub(super) const BSP_FALLBACK_PLAYER_SPEED: i32 = 4 << 8;
-/// Compact third-person rig for the characterless BSP debug controller. The
-/// ordinary authored camera remains authoritative once a Character is bound.
-/// Keep the boom close to the invisible debug body while it turns; this reads
-/// as a player-height exploration camera and prevents annex columns from
-/// filling the frame while the collision-driven route rounds a doorway.
-pub(super) const BSP_FALLBACK_CAMERA_DISTANCE: i32 = 24;
-pub(super) const BSP_FALLBACK_CAMERA_HEIGHT: i32 = 40;
-pub(super) const BSP_FALLBACK_CAMERA_TARGET_HEIGHT: i32 = 32;
-pub(super) const BSP_FALLBACK_CAMERA_CLEARANCE: i32 = 8;
-/// Boom-to-wall margin for the point-traced follow camera in brush worlds.
-pub(super) const BSP_CAMERA_WALL_MARGIN: i32 = 16;
-pub(super) const BSP_FALLBACK_CAMERA_MARGIN: i32 = 4;
-pub(super) const BSP_USE_DISTANCE: i32 = 256;
 const BSP_BOUNDS_VISIBILITY_CACHE_SIZE: usize = 16;
 const BSP_DESTRUCTIBLE_FRAGMENT_COLUMNS: usize = 4;
 const BSP_DESTRUCTIBLE_FRAGMENT_ROWS: usize = 4;
@@ -158,60 +136,6 @@ struct BspDestructibleFragmentEvent {
 
 impl BspDestructibleFragmentEvent {
     const EMPTY: Self = Self { age: 0 };
-}
-
-/// Dynamic world bounds used to link actors/instances to every BSP leaf they
-/// touch. Coordinates use the playtest's integer engine-unit convention; the
-/// BSP runtime converts them to Q20.12 only at the tree boundary.
-#[derive(Copy, Clone, Debug, Default, Eq)]
-pub(super) struct BspVisibilityBounds {
-    min: [i32; 3],
-    max: [i32; 3],
-}
-
-// Word by word: the derived `[i32; 3] == [i32; 3]` lowers to a call to
-// memcmp on MIPS, and the visibility cache compares bounds for every
-// linked actor and instance each frame (about 2.3M instructions over the
-// Cortex whole-level route, all inside memcmp).
-impl PartialEq for BspVisibilityBounds {
-    #[inline]
-    fn eq(&self, other: &Self) -> bool {
-        (self.min[0] ^ other.min[0])
-            | (self.min[1] ^ other.min[1])
-            | (self.min[2] ^ other.min[2])
-            | (self.max[0] ^ other.max[0])
-            | (self.max[1] ^ other.max[1])
-            | (self.max[2] ^ other.max[2])
-            == 0
-    }
-}
-
-impl BspVisibilityBounds {
-    pub(super) const EMPTY: Self = Self {
-        min: [0; 3],
-        max: [0; 3],
-    };
-
-    pub(super) fn cylinder(position: [i32; 3], radius: i32, height: i32) -> Self {
-        let radius = radius.max(0);
-        let height = height.max(1);
-        Self {
-            min: [
-                position[0].saturating_sub(radius),
-                position[1],
-                position[2].saturating_sub(radius),
-            ],
-            max: [
-                position[0].saturating_add(radius),
-                position[1].saturating_add(height),
-                position[2].saturating_add(radius),
-            ],
-        }
-    }
-
-    pub(super) const fn aabb(min: [i32; 3], max: [i32; 3]) -> Self {
-        Self { min, max }
-    }
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -538,25 +462,6 @@ fn linked_world_object_pvs(
 }
 
 /// Resident brush world embedded in the ordinary [`crate::Playtest`] scene.
-/// Counts the traces a camera update asks of its provider.
-struct CountingTraceProvider<'a, P: ?Sized> {
-    inner: &'a mut P,
-    traces: u32,
-}
-
-impl<P: psx_engine::CollisionTraceProvider + ?Sized> psx_engine::CollisionTraceProvider
-    for CountingTraceProvider<'_, P>
-{
-    fn trace_into(
-        &mut self,
-        query: psx_engine::CollisionTraceQuery,
-        output: &mut psx_engine::CollisionTrace,
-    ) -> bool {
-        self.traces += 1;
-        self.inner.trace_into(query, output)
-    }
-}
-
 /// Resolve one PXBSP material to its VRAM texture binding through the normal
 /// playtest VRAM owner. Returns `false` while the texture upload is still
 /// queued (the binding stays `None`); sky materials need no texture and
@@ -661,9 +566,6 @@ pub(super) struct BspRuntime {
     /// The region streamer and its bookkeeping (streamed worlds only).
     #[cfg(feature = "world-stream")]
     stream: world_stream::WorldStream,
-    /// Open-hall experiment: the grid renderer that replaces the PXBSP face pass.
-    #[cfg(playtest_grid_world)]
-    grid: grid_world::GridWorld,
 }
 
 impl BspRuntime {
@@ -863,8 +765,6 @@ impl BspRuntime {
             camera_traces: 0,
             #[cfg(feature = "world-stream")]
             stream,
-            #[cfg(playtest_grid_world)]
-            grid: grid_world::GridWorld::load(),
         })
     }
 
@@ -939,6 +839,22 @@ impl BspRuntime {
             }
         }
         mask
+    }
+
+    /// Render and targeting visibility for model instances. A PXBSP world
+    /// answers from the PVS row alone; the eye is for worlds that can also
+    /// test sight lines.
+    // psx-numeric-allow-next-line: one bit per queried bounds; the width IS the caller's capacity
+    pub(super) fn visible_view_bounds_mask(
+        &mut self,
+        observer: RoomPoint,
+        _eye: RoomPoint,
+        bounds: &[BspVisibilityBounds],
+        // psx-numeric-allow-next-line: one bit per queried bounds; the width IS the caller's capacity
+        _sight_tested: u64,
+        // psx-numeric-allow-next-line: one bit per queried bounds; return width is the caller's fixed capacity
+    ) -> u64 {
+        self.visible_bounds_mask(observer, bounds)
     }
 
     /// Return one bit per actor/instance whose complete bounds touch at least
@@ -1377,8 +1293,6 @@ impl BspRuntime {
     /// it. Call whenever the gameplay VRAM those bindings point at is released.
     pub(super) fn invalidate_materials(&mut self) {
         self.materials_latched = false;
-        #[cfg(playtest_grid_world)]
-        self.grid.unbind();
         for binding in self.materials.iter_mut() {
             *binding = None;
         }
@@ -2039,7 +1953,6 @@ impl BspRuntime {
             };
             let (used_words, packet_count, visible_sky_apertures, overflowed) = {
                 let packets = reservation.words_mut();
-                #[cfg(not(playtest_grid_world))]
                 let (mut used_words, mut packet_count, mut visible_sky_apertures, mut overflowed) = {
                     let world = self.renderer.draw_pxbsp_world_from_visibility_origin(
                         &self.map,
@@ -2070,75 +1983,6 @@ impl BspRuntime {
                     )
                 };
                 // The grid pack has no portal visibility to seed.
-                #[cfg(playtest_grid_world)]
-                let _ = visibility_origin;
-                #[cfg(playtest_grid_world)]
-                let (mut used_words, mut packet_count, mut visible_sky_apertures, mut overflowed) = {
-                    let frustum = FrustumPlanes::from_view(
-                        &view.rotation,
-                        view.translation,
-                        [
-                            camera.origin.x >> 12,
-                            camera.origin.y >> 12,
-                            camera.origin.z >> 12,
-                        ],
-                        self.renderer.view_projection(),
-                    );
-                    let world = self.grid.draw(
-                        self.map.materials(),
-                        &self.materials,
-                        &frustum,
-                        &view,
-                        [
-                            camera.origin.x >> 12,
-                            camera.origin.y >> 12,
-                            camera.origin.z >> 12,
-                        ],
-                        [projection.half_width * 2, projection.half_height * 2],
-                        projection.focal_length,
-                        packets,
-                    );
-                    telemetry::counter(
-                        telemetry::counter::ROOM_SURFACES_CONSIDERED,
-                        u32::from(world.quads_visible),
-                    );
-                    telemetry::counter(telemetry::counter::ROOM_SURFACE_PACKETS, world.packets);
-                    telemetry::counter(
-                        telemetry::counter::ROOM_PROJECTED_VERTICES,
-                        u32::from(world.vertices_projected),
-                    );
-                    telemetry::counter(
-                        telemetry::counter::ROOM_SURF_SPLIT_TRIS,
-                        u32::from(world.robust_quads),
-                    );
-                    telemetry::counter(
-                        telemetry::counter::ROOM_SURFACE_COMMANDS,
-                        u32::from(world.cells_visible),
-                    );
-                    telemetry::counter(
-                        telemetry::counter::ROOM_SURF_BACKFACE_CULLED,
-                        u32::from(world.backface_culled),
-                    );
-                    telemetry::counter(
-                        telemetry::counter::ROOM_SURF_SCREEN_CULLED,
-                        u32::from(world.screen_culled),
-                    );
-                    telemetry::counter(
-                        telemetry::counter::ROOM_SUBMIT_FALLBACK_CALLS,
-                        u32::from(world.material_missing),
-                    );
-                    telemetry::counter(
-                        telemetry::counter::ROOM_SURF_TR_SUBDIVISION_CANDIDATES,
-                        u32::from(world.depth_skipped),
-                    );
-                    (
-                        world.packet_words,
-                        world.packets as usize,
-                        u16::from(world.sky_visible),
-                        world.overflowed,
-                    )
-                };
-
                 for door in self.doors.iter() {
                     let Some(frame) = self.renderer.draw_pxbsp_model(
                         &self.map,
@@ -2343,82 +2187,6 @@ fn bsp_fragment_quad(
         }
     }
     quad
-}
-
-/// The world pass view rotation from the camera's exact Q12 trig, in the
-/// PXBSP convention [`pxbsp_camera`] derives its angles in: PXBSP yaw is
-/// the orbit yaw plus a quarter turn and PXBSP pitch the negated look
-/// pitch, so `sin(yaw + 90) = cos(yaw)`, `cos(yaw + 90) = -sin(yaw)`,
-/// `sin(-pitch) = -sin(pitch)`. No table, no angle recovery: the world
-/// rotates by exactly the camera the model pass renders with.
-pub(super) fn pxbsp_view_rotation(camera: WorldCamera) -> Mat3I16 {
-    let q12 = |value: i32| value.clamp(-0x1000, 0x1000) as i16;
-    psx_bsp::render::pxbsp_view_rotation(
-        q12(-camera.sin_pitch.raw()),
-        q12(camera.cos_pitch.raw()),
-        q12(camera.cos_yaw.raw()),
-        q12(-camera.sin_yaw.raw()),
-    )
-}
-
-pub(super) fn pxbsp_camera(camera: WorldCamera) -> Camera {
-    let orbit_yaw = angle_q12_from_basis(camera.sin_yaw.raw(), camera.cos_yaw.raw());
-    // WorldCamera stores the target-to-camera orbit angle with the engine's
-    // `x = sin(yaw), z = cos(yaw)` convention; the view direction is the
-    // opposite. PXBSP zero yaw looks along +X and its yaw turns the same way
-    // as the engine's now that `load_pxbsp_view` is a proper rotation (the
-    // old `3072 - yaw` compensated its mirrored remap).
-    let yaw = orbit_yaw.wrapping_add(1024) & 0x0fff;
-    let look_pitch = signed_quarter_angle_q12(camera.sin_pitch.raw(), camera.cos_pitch.raw());
-    let pitch = (-look_pitch) as u16 & 0x0fff;
-    Camera {
-        origin: Vec3I32 {
-            x: camera.position.x.saturating_mul(4096),
-            y: camera.position.y.saturating_mul(4096),
-            z: camera.position.z.saturating_mul(4096),
-        },
-        angles: [pitch as i16, yaw as i16, 0],
-    }
-}
-
-fn angle_q12_from_basis(sin: i32, cos: i32) -> u16 {
-    if sin == 0 && cos == 0 {
-        return 0;
-    }
-    let ax = sin.saturating_abs();
-    let az = cos.saturating_abs();
-    let base = if ax <= az {
-        ax.saturating_mul(512) / az.max(1)
-    } else {
-        1024 - az.saturating_mul(512) / ax.max(1)
-    };
-    let angle = if cos >= 0 {
-        if sin >= 0 {
-            base
-        } else {
-            4096 - base
-        }
-    } else if sin >= 0 {
-        2048 - base
-    } else {
-        2048 + base
-    };
-    (angle & 0x0fff) as u16
-}
-
-fn signed_quarter_angle_q12(sin: i32, cos: i32) -> i32 {
-    let sin_abs = sin.saturating_abs();
-    let cos_abs = cos.saturating_abs();
-    let angle = if sin_abs <= cos_abs {
-        sin_abs.saturating_mul(512) / cos_abs.max(1)
-    } else {
-        1024 - cos_abs.saturating_mul(512) / sin_abs.max(1)
-    };
-    if sin < 0 {
-        -angle
-    } else {
-        angle
-    }
 }
 
 /// Is this bounding sphere entirely outside the view frustum?
@@ -2744,47 +2512,6 @@ mod tests {
         assert_eq!(cache.get(0), None);
         cache.insert(0, true);
         assert_eq!(cache.get(0), None); // Doors/destructibles always trace afresh.
-    }
-
-    use psx_engine::Q12;
-
-    #[test]
-    fn engine_view_cardinals_map_to_pxbsp_yaw() {
-        let projection = WorldProjection::new(160, 120, 320, 64);
-        // Camera at -X (looks +X) -> pxbsp 0; at -Z (looks +Z) -> 3072;
-        // at +X (looks -X) -> 2048; at +Z (looks -Z) -> 1024.
-        for (sin_yaw, cos_yaw, expected) in [
-            (Q12::NEG_ONE, Q12::ZERO, 0),
-            (Q12::ZERO, Q12::NEG_ONE, 3072),
-            (Q12::ONE, Q12::ZERO, 2048),
-            (Q12::ZERO, Q12::ONE, 1024),
-        ] {
-            let camera = WorldCamera::from_basis(
-                projection,
-                psx_engine::WorldVertex::ZERO,
-                sin_yaw,
-                cos_yaw,
-                Q12::ZERO,
-                Q12::ONE,
-            );
-            assert_eq!(pxbsp_camera(camera).angles[1], expected);
-        }
-    }
-
-    #[test]
-    fn engine_view_pitch_keeps_pxbsp_up_and_down_orientation() {
-        let projection = WorldProjection::new(160, 120, 320, 64);
-        for (sin_pitch, expected) in [(Q12::NEG_ONE, 1024), (Q12::ONE, 3072)] {
-            let camera = WorldCamera::from_basis(
-                projection,
-                psx_engine::WorldVertex::ZERO,
-                Q12::NEG_ONE,
-                Q12::ZERO,
-                sin_pitch,
-                Q12::ZERO,
-            );
-            assert_eq!(pxbsp_camera(camera).angles[0], expected);
-        }
     }
 
     #[test]

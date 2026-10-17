@@ -114,8 +114,8 @@ pub(super) fn draw_scene_sky(
         return;
     };
     let view = psx_bsp::render::load_pxbsp_view_rotation(
-        crate::bsp_runtime::pxbsp_camera(camera).origin,
-        crate::bsp_runtime::pxbsp_view_rotation(camera),
+        crate::world_common::pxbsp_camera(camera).origin,
+        crate::world_common::pxbsp_view_rotation(camera),
     );
     let submitted = unsafe {
         let output = reservation.words_mut().as_mut_ptr();

@@ -94,7 +94,7 @@ impl CombatMusicState {
 }
 
 struct SceneProjectileWorldTracer<'a> {
-    bsp: Option<&'a mut BspRuntime>,
+    bsp: Option<&'a mut WorldRuntime>,
     destructibles: &'a RuntimeDestructibles<{ psx_level::MAX_DESTRUCTIBLES }>,
     prop_blockers: &'a [CharacterCollisionAabb],
     valid: bool,
@@ -191,7 +191,7 @@ impl ActivePlayerCapsule {
 /// active-room and prop collision, while BSP projects use resident hulls and
 /// transformed brush movers.
 pub(super) struct SceneEntityMover<'a> {
-    pub(super) bsp: Option<&'a mut BspRuntime>,
+    pub(super) bsp: Option<&'a mut WorldRuntime>,
     pub(super) destructibles: &'a RuntimeDestructibles<{ psx_level::MAX_DESTRUCTIBLES }>,
     pub(super) box_props: &'a RuntimeBoxProps,
     pub(super) models: &'a [Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
