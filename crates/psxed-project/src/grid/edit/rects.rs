@@ -174,7 +174,7 @@ pub fn create_surfaces(
         if slot.is_some() {
             outcome.skipped += 1;
         } else {
-            *slot = Some(GridSurface::flat(height, material));
+            *slot = Some(GridSurface::flat_auto(height, material));
             outcome.changed += 1;
         }
     }

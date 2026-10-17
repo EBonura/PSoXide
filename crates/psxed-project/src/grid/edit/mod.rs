@@ -9,6 +9,8 @@
 //! * [`rects`]: floors and ceilings over a rectangle, room auto-grow.
 //! * [`walls`]: gap-filling wall placement along edges.
 //! * [`selection`]: the selection set and range rules.
+//! * [`region`]: the set of sectors the level verbs act on.
+//! * [`verbs`]: the level verbs (Raise/Lower, Ramp, Stairs).
 //! * [`convert`]: converting a legacy room to derived walls.
 //! * [`delete`]: deleting faces and sectors.
 //! * [`bands`]: horizontal wall bands: sets, runs and the copy-on-write edits.
@@ -26,8 +28,10 @@ pub mod heights;
 pub mod planes;
 pub mod rects;
 pub mod refs;
+pub mod region;
 pub mod selection;
 pub mod surfaces;
+pub mod verbs;
 pub mod walls;
 
 pub use clipboard::{GridClipboard, PasteOutcome, Transform};
@@ -46,6 +50,7 @@ pub use refs::{
     corner_offsets, faces_of_cell, CornerRef, EdgeRef, FaceRef, FaceTarget, GridElement,
     SurfaceKind,
 };
+pub use region::Region;
 pub use selection::{
     all_faces_of_room, cells_in_rect, range_corners, range_surfaces, range_walls, GridSelection,
 };

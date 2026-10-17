@@ -25,6 +25,11 @@
 //!
 //! * [`units`]: constants and the grid-to-editor scale.
 //! * [`surface`]: floor and ceiling surfaces, walls, materials and UVs.
+//! * [`auto_split`]: choosing a surface's diagonal from its heights.
+//! * [`walk`] and [`heat`]: the walkability analysis and the performance
+//!   heatmap model behind the overlays.
+//! * [`slope`] and [`paint_rules`]: slope classes read as the motor reads them,
+//!   and the smart paint rules the level verbs apply.
 //! * [`sector`]: one sector and its six wall edges.
 //! * [`room`]: one room, its sector storage and its growth operations.
 //! * [`world`]: the document root and the [`SceneWorld`] discriminator.
@@ -38,6 +43,7 @@
 //! * [`starter`]: the starter room of File > New Grid Project.
 //! * [`palette`]: which project materials a grid world's palette offers.
 
+pub mod auto_split;
 pub mod band_geom;
 pub mod bands;
 pub mod base_project;
@@ -47,19 +53,23 @@ pub mod edit;
 pub mod faces;
 mod faces_bands;
 mod faces_derived;
+pub mod heat;
 pub mod light;
 pub mod limits;
 pub mod overrides;
+pub mod paint_rules;
 pub mod palette;
 pub mod plane;
 pub mod plane_faces;
 pub mod room;
 pub mod sector;
+pub mod slope;
 pub mod starter;
 pub mod surface;
 pub mod units;
 pub mod uv;
 pub mod uv_split;
+pub mod walk;
 pub mod world;
 
 #[cfg(test)]
@@ -79,9 +89,11 @@ pub use faces::{GridFace, GridFaceKind, UvDefaults};
 pub use light::FacingShade;
 pub use limits::{GridBudget, GridIssue, GridIssueKind, Severity};
 pub use overrides::{Axis, EdgeKey, EdgeOverride, EdgeOverrides, RoomDefaults, WallMode};
+pub use paint_rules::PaintRules;
 pub use plane::{GridPlane, PlaneCollision, PlaneShape, PlaneUvMode};
 pub use room::{GridFog, GridRoom};
 pub use sector::{GridSector, WallEdge};
+pub use slope::SlopeClass;
 pub use surface::{GridSplit, GridSurface, GridTri, GridWall, WallFacing};
 pub use units::{GridScale, CLICK_UNITS, FINE_UNITS, SECTOR_UNITS, TEXELS_PER_SECTOR};
 pub use world::{GridWorld, SceneWorld};

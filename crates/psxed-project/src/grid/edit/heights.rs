@@ -7,10 +7,12 @@
 //! when the gesture starts; every update then sets absolute heights from the
 //! start values, so a drag can be repeated, reversed or cancelled exactly.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use super::super::auto_split;
+use super::super::surface::GridSplit;
 use super::super::world::GridWorld;
-use super::refs::{faces_of_cell, CornerRef, FaceRef};
+use super::refs::{faces_of_cell, CornerRef, FaceRef, FaceTarget};
 
 /// Every corner of every face in the world, bucketed by grid position.
 pub struct WeldIndex {
@@ -46,10 +48,18 @@ impl WeldIndex {
     }
 }
 
+/// What an auto-split surface held when the drag began: diagonal and heights.
+type SurfaceStart = (GridSplit, [i32; 4], Option<[i32; 4]>);
+
 /// A started height gesture: the corners that move and where they began.
 #[derive(Clone, Debug, Default)]
 pub struct HeightDrag {
     targets: Vec<(CornerRef, i32)>,
+    /// The diagonal and heights each moving auto-split surface started with.
+    /// Every apply restores the diagonal before choosing again, so the
+    /// result depends only on the heights and a drag back to zero puts every
+    /// diagonal back too.
+    splits: BTreeMap<FaceRef, SurfaceStart>,
     /// Lowest and highest start height of the moving corners, world grid
     /// units, for the UI's hint of how far it may go.
     pub range: (i32, i32),
@@ -75,7 +85,25 @@ impl HeightDrag {
             .fold((i32::MAX, i32::MIN), |(lo, hi), (_, y)| {
                 (lo.min(*y), hi.max(*y))
             });
-        Self { targets, range }
+        let mut splits = BTreeMap::new();
+        for (corner, _) in &targets {
+            if !matches!(corner.face.target, FaceTarget::Surface(_)) {
+                continue;
+            }
+            if let Some(surface) = corner.face.surface(world) {
+                if surface.auto_split {
+                    splits.insert(
+                        corner.face,
+                        (surface.split, surface.heights, surface.heights_b),
+                    );
+                }
+            }
+        }
+        Self {
+            targets,
+            splits,
+            range,
+        }
     }
 
     /// Number of corners that will move.
@@ -94,6 +122,18 @@ impl HeightDrag {
         let mut changed = false;
         for (corner, start) in &self.targets {
             changed |= corner.set_world_height(world, start.saturating_add(delta));
+        }
+        // Surfaces that follow their heights choose their diagonal again,
+        // from where it started.
+        for (face, (split, heights, heights_b)) in &self.splits {
+            if let Some(surface) = face.surface_mut(world) {
+                surface.split = *split;
+                // Only a surface that moved chooses again, so a drag back to
+                // zero puts the diagonal back too.
+                if surface.heights != *heights || surface.heights_b != *heights_b {
+                    auto_split::resplit(surface);
+                }
+            }
         }
         changed
     }
@@ -242,5 +282,52 @@ mod tests {
         assert_eq!(height(&world, [0, 0], 0), 0);
         assert_eq!(height(&world, [2, 0], 0), 256);
         assert_eq!(height(&world, [2, 0], 1), 0);
+    }
+
+    #[test]
+    fn an_auto_split_floor_picks_its_diagonal_from_the_dragged_heights_and_goes_back() {
+        use crate::grid::surface::GridSplit;
+        let mut world = flat_world(1, 1);
+        world.rooms[0]
+            .sector_or_insert(0, 0)
+            .unwrap()
+            .floor
+            .as_mut()
+            .unwrap()
+            .auto_split = true;
+        let original = world.clone();
+        let drag = HeightDrag::begin(&world, &[corner([0, 0], 2)], false);
+        // Lifting the SE corner leaves NE-SW the level diagonal.
+        drag.apply(&mut world, 256);
+        let split = |w: &GridWorld| {
+            w.rooms[0]
+                .sector(0, 0)
+                .unwrap()
+                .floor
+                .as_ref()
+                .unwrap()
+                .split
+        };
+        assert_eq!(split(&world), GridSplit::NeSw);
+        drag.apply(&mut world, 512);
+        assert_eq!(
+            split(&world),
+            GridSplit::NeSw,
+            "same decision at any height"
+        );
+        // Back to zero: heights and diagonal are the document's again.
+        drag.apply(&mut world, 0);
+        assert_eq!(world, original);
+        // A legacy surface keeps its diagonal through the same drag.
+        let mut legacy = original.clone();
+        legacy.rooms[0]
+            .sector_mut(0, 0)
+            .unwrap()
+            .floor
+            .as_mut()
+            .unwrap()
+            .auto_split = false;
+        HeightDrag::begin(&legacy, &[corner([0, 0], 2)], false).apply(&mut legacy, 256);
+        assert_eq!(split(&legacy), GridSplit::NwSe);
     }
 }

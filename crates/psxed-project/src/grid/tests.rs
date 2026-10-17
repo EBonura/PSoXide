@@ -169,3 +169,30 @@ fn trimming_a_room_keeps_the_footprint_of_its_planes() {
     );
     assert_eq!((room.origin, room.width, room.depth), ([1, 1], 4, 5));
 }
+
+#[test]
+fn legacy_levels_load_with_every_diagonal_locked_and_no_rule_set() {
+    for name in [
+        "grid-cathedral",
+        "grid-level008",
+        "grid-dungeon",
+        "grid-cave",
+        "grid-sewers",
+        "grid-west",
+    ] {
+        let path = crate::projects_dir().join(name).join("project.ron");
+        let project = ProjectDocument::load_from_path(path).expect("a reference project loads");
+        let world = project.active_scene().world.grid().expect("a grid project");
+        for room in &world.rooms {
+            assert!(room.defaults.rules.is_default(), "{name}");
+            for (_, _, sector) in room.iter() {
+                for surface in [&sector.floor, &sector.ceiling].into_iter().flatten() {
+                    assert!(
+                        !surface.auto_split && !surface.paint_locked,
+                        "{name}: a legacy split is deliberate and stays"
+                    );
+                }
+            }
+        }
+    }
+}

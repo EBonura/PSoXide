@@ -488,7 +488,11 @@ mod convert_tests;
 #[cfg(test)]
 mod derived_tests;
 #[cfg(test)]
+mod motor_harness;
+#[cfg(test)]
 mod plane_tests;
+#[cfg(test)]
+mod ramp_tests;
 #[cfg(test)]
 mod spawn_tests;
 #[cfg(test)]

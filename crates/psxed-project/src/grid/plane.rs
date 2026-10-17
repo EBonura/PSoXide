@@ -78,7 +78,8 @@ impl PlaneCollision {
 
 /// The smallest upward normal component a platform plane may have: the
 /// character motor's walk slope, a Q12 normal of 2867 (0.7).
-pub const PLATFORM_NORMAL_Y: f64 = 2867.0 / 4096.0;
+pub const PLATFORM_NORMAL_Y: f64 =
+    psx_engine::WalkLimits::DEFAULT.min_floor_normal_y_q12 as f64 / 4096.0;
 /// The largest normal `y` component, in magnitude, of a wall plane.
 pub const WALL_NORMAL_Y: f64 = 0.35;
 
