@@ -178,7 +178,9 @@ impl<'a> GridCollision<'a> {
     /// Scan every room for intervals at the scan's column.
     #[inline(always)]
     pub(crate) fn scan_column(&self, scan: &mut Scan) {
-        for room in 0..self.level.rooms.len() {
+        let near = self.visit(scan.x, scan.z, scan.r);
+        for step in 0..near.len(self.rooms.len()) {
+            let room = near.room(step);
             let walls = self.scan_slabs(room, scan);
             if walls && scan.r > 0 && !scan.done() {
                 self.scan_walls(room, scan);
@@ -414,7 +416,10 @@ impl<'a> GridCollision<'a> {
     #[inline(never)]
     pub(crate) fn point_blocked(&self, p: &[i32; 3], h: i32, foreign: bool) -> bool {
         let (s, t, y) = (self.s, SLAB_THICKNESS, p[1]);
-        for (room, rec) in self.level.rooms.iter().enumerate() {
+        let near = self.visit(p[0], p[2], 0);
+        for step in 0..near.len(self.rooms.len()) {
+            let room = near.room(step);
+            let rec = self.rec(room);
             let (lx, lz) = (p[0] - rec.origin[0], p[2] - rec.origin[2]);
             if lx < 0 || lz < 0 || lx >= i32::from(rec.width) * s || lz >= i32::from(rec.depth) * s
             {

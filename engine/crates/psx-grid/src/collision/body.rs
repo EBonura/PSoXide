@@ -23,6 +23,26 @@ pub(crate) struct Query {
 }
 
 impl Query {
+    /// Lowest plan corner of the box the sweep can touch, world units.
+    #[inline(always)]
+    pub fn plan_lo(&self) -> (i32, i32) {
+        let r = self.r();
+        (
+            self.a[0].min(self.a[0] + self.d[0]) - r,
+            self.a[2].min(self.a[2] + self.d[2]) - r,
+        )
+    }
+
+    /// Highest plan corner of the box the sweep can touch, world units.
+    #[inline(always)]
+    pub fn plan_hi(&self) -> (i32, i32) {
+        let r = self.r();
+        (
+            self.a[0].max(self.a[0] + self.d[0]) + r,
+            self.a[2].max(self.a[2] + self.d[2]) + r,
+        )
+    }
+
     /// Radius, runtime units.
     #[inline(always)]
     pub fn r(&self) -> i32 {

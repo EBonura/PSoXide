@@ -33,8 +33,9 @@
 //! Run both sides and compare; `tools/toolchain_check.sh` does exactly that.
 //! Re-run after any toolchain bump, and after changing guest codegen flags.
 
-use crate::collision::{GridCollision, GridTraceProvider};
+use crate::collision::GridTraceProvider;
 use crate::format::SECTOR_BYTES;
+use crate::resident::ResidentRooms;
 use crate::view::{CollisionView, LevelView, RoomView};
 use alloc::vec::Vec;
 use psx_engine::{CollisionTrace, CollisionTraceProvider, CollisionTraceQuery, RoomPoint};
@@ -86,9 +87,10 @@ pub fn compute_hash(level: &[u8], rooms: &[u8]) -> u32 {
         };
         views.push(Some(view.col));
     }
-    let Some(world) = GridCollision::new(level, &views) else {
+    let Some(set) = ResidentRooms::from_collisions(level, &views) else {
         return LOAD_FAILED;
     };
+    let world = set.collision();
     let span = 24 * level.sector_units() as i32;
     let origin = level.rooms.first().map_or([0; 3], |room| room.origin);
     let mut provider = GridTraceProvider::new(&world);

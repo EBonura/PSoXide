@@ -121,6 +121,9 @@ pub struct GridFrame {
     /// Merged far quads queued, and cell quads they replaced.
     pub lod_quads: u16,
     pub lod_replaced: u16,
+    /// Rooms not drawn because their tables outgrow the scratch (the core's
+    /// maxima disagree with the chunk: a cook or version skew).
+    pub rooms_refused: u16,
 }
 
 impl GridFrame {
@@ -143,6 +146,7 @@ impl GridFrame {
         self.depth_skipped = self.depth_skipped.saturating_add(room.depth_skipped);
         self.lod_quads = self.lod_quads.saturating_add(room.lod_quads);
         self.lod_replaced = self.lod_replaced.saturating_add(room.lod_replaced);
+        self.rooms_refused = self.rooms_refused.saturating_add(room.rooms_refused);
     }
 }
 
@@ -231,6 +235,19 @@ impl GridRenderer {
         }
     }
 
+    /// Storage sized from the scratch maxima the level core carries, so it
+    /// is right before any room chunk is resident and for any room that
+    /// arrives later.
+    pub fn with_maxima(maxima: &RenderMaxima) -> Self {
+        Self::new(
+            usize::from(maxima.vertices),
+            usize::from(maxima.cells),
+            usize::from(maxima.quads),
+            usize::from(maxima.lod_blocks),
+            usize::from(maxima.lod_quads),
+        )
+    }
+
     /// Storage sized for the largest room among `rooms`.
     pub fn for_rooms<'a>(rooms: impl Iterator<Item = &'a RoomView<'a>>) -> Self {
         let (mut v, mut c, mut q, mut b, mut l) = (0, 0, 0, 0, 0);
@@ -242,6 +259,18 @@ impl GridRenderer {
             l = l.max(room.render.lod_quads.len());
         }
         Self::new(v, c, q, b, l)
+    }
+
+    /// Whether the scratch is big enough for `room`. It always is when the
+    /// scratch came from the core's maxima and the core matches its chunks.
+    #[inline]
+    fn fits(&self, room: &RoomView<'_>) -> bool {
+        let r = &room.render;
+        r.vertices.len() <= self.stamp.len()
+            && r.lod_blocks.len() <= self.block_stamp.len()
+            && r.cells.len() <= self.cells.capacity()
+            && r.quads.len() + r.lod_quads.len() <= self.quads.capacity()
+            && r.lod_quads.len() <= self.lod_queue.capacity()
     }
 
     /// Bytes of per-frame working storage this renderer holds.
@@ -283,6 +312,10 @@ impl GridRenderer {
         mark: &mut dyn FnMut(GridPhase, bool),
     ) -> GridFrame {
         let mut frame = GridFrame::default();
+        if !self.fits(room) {
+            frame.rooms_refused = 1;
+            return frame;
+        }
         self.frame = self.frame.wrapping_add(1);
         if self.frame == 0 {
             self.stamp.fill(0);

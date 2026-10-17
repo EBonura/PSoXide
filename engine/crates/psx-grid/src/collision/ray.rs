@@ -154,7 +154,7 @@ impl<'a> GridCollision<'a> {
             return;
         }
         raw.fraction = 4097;
-        for room in 0..self.level.rooms.len() {
+        for room in self.rooms_near(q.plan_lo(), q.plan_hi()) {
             self.ray_walk(room, q, raw);
             if self.planes {
                 self.ray_planes(room, q, raw);
@@ -208,7 +208,7 @@ impl<'a> GridCollision<'a> {
         };
         let mut raw = Raw::new();
         raw.fraction = 4097;
-        for room in 0..self.level.rooms.len() {
+        for room in self.rooms_near(q.plan_lo(), q.plan_hi()) {
             self.ray_walk(room, &q, &mut raw);
             if self.planes {
                 self.ray_planes(room, &q, &mut raw);

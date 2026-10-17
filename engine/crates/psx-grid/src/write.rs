@@ -9,6 +9,7 @@
 use alloc::vec::Vec;
 
 use crate::format::*;
+use crate::lattice::LatticeTables;
 
 /// Everything a room chunk holds, as plain tables.
 #[derive(Clone, Debug, Default)]
@@ -226,17 +227,65 @@ impl RoomChunk {
 pub struct LevelCore {
     pub flags: u32,
     pub sector_units: u16,
-    pub pool_pages: u16,
-    pub resident_hops: u8,
-    pub prefetch_hops: u8,
+    /// Pages (2 KiB) of the largest room chunk.
+    pub max_room_pages: u8,
+    /// Draw distance, sectors; 0 is unbounded.
+    pub draw_far: u8,
+    /// Entity activation radius, sectors.
+    pub active_radius: u8,
+    /// Prefetch radius beyond the draw distance, sectors.
+    pub lead_radius: u8,
+    pub maxima: RenderMaxima,
     pub rooms: Vec<RoomRecord>,
     pub portals: Vec<Portal>,
     pub materials: Vec<Material>,
 }
 
 impl LevelCore {
-    /// The core bytes.
+    /// Set the renderer scratch maxima and the largest chunk from the room
+    /// chunks, as the cook ships them.
+    pub fn measure_chunks(
+        &mut self,
+        chunks: &[RoomChunk],
+        chunk_pages: impl Iterator<Item = usize>,
+    ) {
+        let mut maxima = RenderMaxima::default();
+        for chunk in chunks {
+            maxima.include(
+                chunk.vertices.len(),
+                chunk.cells.len(),
+                chunk.quads.len(),
+                chunk.lod_blocks.len(),
+                chunk.lod_quads.len(),
+            );
+        }
+        self.maxima = maxima;
+        let pages = chunk_pages.max().unwrap_or(0);
+        self.max_room_pages = u8::try_from(pages).unwrap_or(u8::MAX);
+    }
+
+    /// The core bytes; panics on a level the format cannot hold (see
+    /// [`Self::try_to_bytes`]).
     pub fn to_bytes(&self) -> Vec<u8> {
+        self.try_to_bytes().expect("a level the core can hold")
+    }
+
+    /// The core bytes. The world lattice is built from the room records
+    /// here, so it can never disagree with them.
+    pub fn try_to_bytes(&self) -> Result<Vec<u8>, alloc::string::String> {
+        if self.rooms.len() > MAX_ROOMS {
+            return Err(alloc::format!(
+                "{} rooms, at most {MAX_ROOMS}",
+                self.rooms.len()
+            ));
+        }
+        if self.portals.len() > usize::from(u16::MAX) {
+            return Err(alloc::format!(
+                "{} portals, at most 65535",
+                self.portals.len()
+            ));
+        }
+        let lattice = LatticeTables::build(&self.rooms, u32::from(self.sector_units))?;
         let header = LevelHeader {
             magic: LEVEL_MAGIC,
             version: VERSION,
@@ -244,12 +293,22 @@ impl LevelCore {
             flags: self.flags,
             room_count: self.rooms.len() as u16,
             portal_count: self.portals.len() as u16,
-            material_count: self.materials.len() as u16,
-            sector_units: self.sector_units,
-            pool_pages: self.pool_pages,
-            resident_hops: self.resident_hops,
-            prefetch_hops: self.prefetch_hops,
+            sector_units: u8::try_from(self.sector_units).expect("sector size above 255"),
+            material_count: u8::try_from(self.materials.len()).expect("more than 255 materials"),
+            max_room_pages: self.max_room_pages,
+            draw_far: self.draw_far,
+            active_radius: self.active_radius,
+            lead_radius: self.lead_radius,
+            lattice_shift: lattice.shift,
             reserved: 0,
+            lattice_origin: lattice.origin,
+            lattice_cells: lattice.cells,
+            lattice_refs: lattice.rooms.len() as u16,
+            max_vertices: self.maxima.vertices,
+            max_cells: self.maxima.cells,
+            max_quads: self.maxima.quads,
+            max_lod_blocks: self.maxima.lod_blocks,
+            max_lod_quads: self.maxima.lod_quads,
             layout_hash: LAYOUT_HASH,
         };
         let mut out = Vec::new();
@@ -257,8 +316,10 @@ impl LevelCore {
         out.extend_from_slice(bytes_of(&self.rooms));
         out.extend_from_slice(bytes_of(&self.portals));
         out.extend_from_slice(bytes_of(&self.materials));
+        out.extend_from_slice(bytes_of(&lattice.start));
+        out.extend_from_slice(bytes_of(&lattice.rooms));
         align4(&mut out);
-        out
+        Ok(out)
     }
 }
 

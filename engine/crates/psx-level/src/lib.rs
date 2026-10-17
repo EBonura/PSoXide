@@ -28,6 +28,9 @@
 #![no_std]
 #![warn(missing_docs)]
 
+mod stable;
+pub use stable::{position_of, StableId};
+
 /// Stable identifier assigned to every level asset by the editor
 /// compiler. `AssetId` values are deterministic across runs:
 /// rooms first (in scene-tree order), then textures (ordered by

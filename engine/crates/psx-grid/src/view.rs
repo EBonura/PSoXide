@@ -6,6 +6,7 @@
 //! the cook proves the same facts when it writes.
 
 use crate::format::*;
+use crate::lattice::Lattice;
 
 /// Why a blob was refused.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -33,7 +34,7 @@ impl FormatError {
             Self::Truncated => "the file is shorter than its own tables",
             Self::BadMagic => "not a PGL level file",
             Self::BadVersion => {
-                "the level was cooked with another format version; this reader reads only version 3 (texture-window repeat), so cook the level again with the current editor"
+                "the level was cooked with another format version; this reader reads only version 4 (streaming-ready core), so cook the level again with the current editor"
             }
             Self::BadLayout => {
                 "the level was written against another record layout; cook it again with the current editor"
@@ -79,6 +80,9 @@ pub struct LevelView<'a> {
     pub rooms: &'a [RoomRecord],
     pub portals: &'a [Portal],
     pub materials: &'a [Material],
+    /// Row starts of the world lattice, then its room list.
+    pub lattice_start: &'a [u16],
+    pub lattice_rooms: &'a [u16],
 }
 
 impl<'a> LevelView<'a> {
@@ -95,7 +99,7 @@ impl<'a> LevelView<'a> {
         if head.layout_hash != LAYOUT_HASH {
             return Err(FormatError::BadLayout);
         }
-        if head.sector_units == 0 || head.sector_units > 255 {
+        if head.sector_units == 0 {
             return Err(FormatError::Inconsistent);
         }
         let mut offset = core::mem::size_of::<LevelHeader>();
@@ -104,17 +108,83 @@ impl<'a> LevelView<'a> {
         let portals = table::<Portal>(bytes, offset, usize::from(head.portal_count))?;
         offset += core::mem::size_of_val(portals);
         let materials = table::<Material>(bytes, offset, usize::from(head.material_count))?;
+        offset += core::mem::size_of_val(materials);
+        let cells = usize::from(head.lattice_cells[0]) * usize::from(head.lattice_cells[1]);
+        let lattice_start = table::<u16>(bytes, offset, cells + 1)?;
+        offset += core::mem::size_of_val(lattice_start);
+        let lattice_rooms = table::<u16>(bytes, offset, usize::from(head.lattice_refs))?;
         Ok(Self {
             header: head,
             rooms,
             portals,
             materials,
+            lattice_start,
+            lattice_rooms,
         })
+    }
+
+    /// Rooms listed in the lattice cell holding the world point `(x, z)`
+    /// (see [`Lattice::rooms_at`]), computed straight from the header so a
+    /// hot caller carries no copy of the lattice descriptor.
+    #[inline(always)]
+    pub fn lattice_rooms_at(&self, x: i32, z: i32) -> &'a [u16] {
+        let h = self.header;
+        let cx = x.wrapping_sub(h.lattice_origin[0]) >> h.lattice_shift;
+        let cz = z.wrapping_sub(h.lattice_origin[1]) >> h.lattice_shift;
+        if (cx as u32) >= u32::from(h.lattice_cells[0])
+            || (cz as u32) >= u32::from(h.lattice_cells[1])
+        {
+            return &[];
+        }
+        let i = cz as usize * usize::from(h.lattice_cells[0]) + cx as usize;
+        let (first, end) = (
+            usize::from(self.lattice_start[i]),
+            usize::from(self.lattice_start[i + 1]),
+        );
+        self.lattice_rooms.get(first..end).unwrap_or(&[])
+    }
+
+    /// The world lattice over the room footprints.
+    pub fn lattice(&self) -> Lattice<'a> {
+        self.header.lattice(self.lattice_start, self.lattice_rooms)
+    }
+
+    /// Renderer scratch maxima the core carries.
+    pub fn maxima(&self) -> RenderMaxima {
+        RenderMaxima {
+            vertices: self.header.max_vertices,
+            cells: self.header.max_cells,
+            quads: self.header.max_quads,
+            lod_blocks: self.header.max_lod_blocks,
+            lod_quads: self.header.max_lod_quads,
+        }
     }
 
     /// Runtime units per sector edge.
     pub fn sector_units(&self) -> u32 {
         u32::from(self.header.sector_units)
+    }
+
+    /// World-space bounds of `room`, vertical range included: the
+    /// footprint and `min_y..max_y` shifted by the room's origin. An index
+    /// out of range gives an empty box at the origin.
+    pub fn room_bounds(&self, room: usize) -> ([i32; 3], [i32; 3]) {
+        let Some(record) = self.rooms.get(room) else {
+            return ([0; 3], [0; 3]);
+        };
+        let s = self.sector_units() as i32;
+        (
+            [
+                record.origin[0],
+                record.origin[1] + i32::from(record.min_y),
+                record.origin[2],
+            ],
+            [
+                record.origin[0] + i32::from(record.width) * s,
+                record.origin[1] + i32::from(record.max_y),
+                record.origin[2] + i32::from(record.depth) * s,
+            ],
+        )
     }
 
     /// Portals leaving `room`.
@@ -129,6 +199,9 @@ impl<'a> LevelView<'a> {
 
     /// Walk every index. Host and debug use.
     pub fn validate_full(&self) -> Result<(), FormatError> {
+        if !self.lattice().consistent(self.rooms.len()) {
+            return Err(FormatError::IndexRange);
+        }
         for room in self.rooms {
             let end = usize::from(room.portal_first) + usize::from(room.portal_count);
             if end > self.portals.len() || room.width == 0 || room.depth == 0 {
@@ -344,14 +417,25 @@ impl<'a> RoomView<'a> {
         Ok(Self { col, render })
     }
 
+    /// The level material a quad draws: its room-local index through the
+    /// room's `MATERIAL_USE` table.
+    pub fn level_material<'m>(
+        &self,
+        quad: &Quad,
+        materials: &'m [Material],
+    ) -> Option<&'m Material> {
+        let id = *self.render.material_use.get(usize::from(quad.material))?;
+        materials.get(usize::from(id))
+    }
+
     /// Check that every `REPEAT` quad names a material that has a texture
     /// shape (the GP0(E2) window needs one). Host and debug use.
     pub fn validate_repeat(&self, materials: &[Material]) -> Result<(), FormatError> {
         let r = &self.render;
         for quad in r.quads.iter().chain(r.lod_quads) {
             if quad.flags2 & QUAD2_REPEAT != 0
-                && materials
-                    .get(usize::from(quad.material))
+                && self
+                    .level_material(quad, materials)
                     .is_none_or(|m| tex_size(m.tex_shape).is_none())
             {
                 return Err(FormatError::Inconsistent);
@@ -371,7 +455,7 @@ impl<'a> RoomView<'a> {
         }
         for quad in r.quads.iter().chain(r.lod_quads) {
             if quad.v.iter().any(|&v| usize::from(v) >= r.vertices.len())
-                || usize::from(quad.material) >= material_count
+                || usize::from(quad.material) >= r.material_use.len()
                 || (quad.flags & QUAD_AXIS != 0 && (quad.flags >> QUAD_AXIS_SHIFT) & 3 > 2)
                 || quad.flags2 & !QUAD2_KNOWN != 0
             {

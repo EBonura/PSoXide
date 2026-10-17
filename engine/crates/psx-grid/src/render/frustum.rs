@@ -157,6 +157,47 @@ impl FrustumPlanes {
             outer_bits,
         }
     }
+    /// Planes for a camera at the origin: build once per frame from the view
+    /// rotation and test world boxes with [`Self::cull_world_aabb`]. The
+    /// camera position never enters the planes, so nothing about them
+    /// depends on how far the eye is from the world origin.
+    pub fn at_eye(rotation: &Mat3I16, projection: ViewProjection) -> Self {
+        Self::from_view(rotation, GteVec3I32::ZERO, projection)
+    }
+
+    /// [`Self::cull_aabb`] for a world-space box, with `self` built by
+    /// [`Self::at_eye`]: the box is moved to be eye-relative before the
+    /// `i16` conversion, so worlds past 32767 units from the origin cull
+    /// exactly like worlds near it. A box more than 32767 units from the eye
+    /// along an axis is clamped to that distance, still far outside any
+    /// draw distance.
+    pub fn cull_world_aabb(
+        &self,
+        eye: [i32; 3],
+        min: [i32; 3],
+        max: [i32; 3],
+        mask: u8,
+    ) -> Option<u8> {
+        let rel = |v: i32, axis: usize| {
+            v.wrapping_sub(eye[axis])
+                .max(i32::from(i16::MIN))
+                .min(i32::from(i16::MAX)) as i16
+        };
+        self.cull_aabb(
+            Vec3I16 {
+                x: rel(min[0], 0),
+                y: rel(min[1], 1),
+                z: rel(min[2], 2),
+            },
+            Vec3I16 {
+                x: rel(max[0], 0),
+                y: rel(max[1], 1),
+                z: rel(max[2], 2),
+            },
+            mask,
+        )
+    }
+
     /// Distance of `position` from plane `index`: the dot on the GTE on the
     /// guest (the planes must be loaded by [`load_gte_clip_planes`]), the
     /// same wrapping `i32` products on the host.
@@ -383,6 +424,50 @@ mod tests {
                 if i & 4 == 0 { mins[2] } else { maxs[2] },
             ]
         })
+    }
+
+    /// A world far from the origin culls exactly like the same world near
+    /// it: only the eye-relative box matters.
+    #[test]
+    fn culling_is_camera_relative_and_world_offset_free() {
+        psx_gte::host::reset();
+        let view = Mat3I16::rotate_xyz(100 >> 4, 1024 >> 4, 0);
+        let projection = ViewProjection {
+            focal_length: 320,
+            half_width: 160,
+            half_height: 120,
+            ..ViewProjection::DEFAULT
+        };
+        let planes = FrustumPlanes::at_eye(&view, projection);
+        let mut state = 0x1357_9bdfu32;
+        let (mut kept, mut dropped) = (0, 0);
+        for _ in 0..3000 {
+            let mut axis = || (lcg(&mut state) % 1800) as i32 - 900;
+            let eye = [axis(), axis(), axis()];
+            let min = [eye[0] + axis(), eye[1] + axis(), eye[2] + axis()];
+            let size = (lcg(&mut state) % 400) as i32 + 1;
+            let max = [min[0] + size, min[1] + size / 2 + 1, min[2] + size];
+            let near = planes.cull_world_aabb(eye, min, max, CLIP_ALL_PLANES);
+            for offset in [
+                [100_000, 0, 0],
+                [0, 0, -250_000],
+                [70_000, -90_000, 400_000],
+            ] {
+                let shift = |p: [i32; 3]| core::array::from_fn::<i32, 3, _>(|i| p[i] + offset[i]);
+                let far =
+                    planes.cull_world_aabb(shift(eye), shift(min), shift(max), CLIP_ALL_PLANES);
+                assert_eq!(
+                    near, far,
+                    "box {min:?}..{max:?} from {eye:?} moved by {offset:?}"
+                );
+            }
+            if near.is_some() {
+                kept += 1;
+            } else {
+                dropped += 1;
+            }
+        }
+        assert!(kept > 100 && dropped > 100, "kept {kept} dropped {dropped}");
     }
 
     /// A rejected box has every corner outside one plane, and a plane the

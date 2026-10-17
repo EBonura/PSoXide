@@ -18,17 +18,29 @@
 
 extern crate alloc;
 
+pub mod activity;
 pub mod collision;
 pub mod contents;
 pub mod format;
 pub mod height;
+pub mod lattice;
 pub mod render;
+pub mod resident;
 pub mod toolchain_probe;
 pub mod view;
+pub mod walk;
 pub mod write;
 
 #[cfg(test)]
 mod format_tests;
+#[cfg(test)]
+mod stream_tests;
+#[cfg(test)]
+mod walk_tests;
 
+pub use activity::RoomActivity;
 pub use format::*;
+pub use lattice::{Lattice, LatticeTables, SMALL_WORLD_ROOMS};
+pub use resident::{ResidentError, ResidentRooms, RoomSlot, NO_SLOT};
 pub use view::{CollisionView, FormatError, LevelView, RenderView, RoomView};
+pub use walk::WalkSet;

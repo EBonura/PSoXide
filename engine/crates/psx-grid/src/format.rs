@@ -19,6 +19,13 @@
 
 const _: () = assert!(cfg!(target_endian = "little"));
 
+/// Most rooms a level may hold: room ids are `u16` and `u16::MAX` marks "no
+/// room" (a save with no pose, an empty resident slot). The core directory
+/// is the only table that grows with the whole world, 40 bytes a room plus
+/// 36 per directed portal (`docs/grid/streaming-design.md` section 3.6 puts
+/// the point where it needs paging itself at about 2000 rooms).
+pub const MAX_ROOMS: usize = u16::MAX as usize - 1;
+
 /// Level core magic, `"PGL1"`.
 pub const LEVEL_MAGIC: [u8; 4] = *b"PGL1";
 /// Room chunk magic, `"PGRM"`.
@@ -28,10 +35,16 @@ pub const ROOM_MAGIC: [u8; 4] = *b"PGRM";
 /// collision index nothing read. Version 3 gave [`Material`] its texture
 /// shape and [`Quad`] a second flag byte whose `REPEAT` bit makes a primitive
 /// repeat its texture through the GPU texture window (up to four tiles per
-/// axis). A version 2 file is refused: cook and guest ship together.
-pub const VERSION: u16 = 3;
+/// axis). Version 4 is the streaming-ready layout (`docs/grid/streaming-design.md`
+/// section 4): the core holds radii in sectors in place of portal hop counts,
+/// the renderer scratch maxima, a world lattice index over the room
+/// footprints and no whole-level page total; [`Quad::material`] indexes the
+/// room's own `MATERIAL_USE` table, which maps it to a level material; a
+/// [`Mover`] carries a stable id. Older files are refused: cook and guest
+/// ship together.
+pub const VERSION: u16 = 4;
 /// Oldest reader that still understands what this crate writes.
-pub const MIN_READER: u16 = 3;
+pub const MIN_READER: u16 = 4;
 /// Bytes per CD sector; chunks are padded to it.
 pub const SECTOR_BYTES: usize = 2048;
 
@@ -53,7 +66,12 @@ pub const ROOM_PINNED: u16 = 1 << 2;
 /// Room flag: holds a liquid volume.
 pub const ROOM_HAS_LIQUID: u16 = 1 << 3;
 
-/// Core file header, 32 bytes.
+/// Core file header, 52 bytes.
+///
+/// Every field is sized to the range it can hold (fewest-bits rule, see
+/// `docs/grid/compact-format.md` section 2): sector size and the radii are
+/// bytes, the scratch maxima are the `u16` ranges of the chunk tables they
+/// bound.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct LevelHeader {
@@ -63,17 +81,67 @@ pub struct LevelHeader {
     pub flags: u32,
     pub room_count: u16,
     pub portal_count: u16,
-    pub material_count: u16,
-    /// Runtime units per sector edge (S).
-    pub sector_units: u16,
-    /// Worst-case resident 2 KiB pages for the declared radius.
-    pub pool_pages: u16,
-    /// Rooms within this many portal hops of the player room stay pinned.
-    pub resident_hops: u8,
-    /// Additional hops prefetched, evictable.
-    pub prefetch_hops: u8,
-    pub reserved: u32,
+    /// Runtime units per sector edge (S), 1 to 255.
+    pub sector_units: u8,
+    /// Level materials, at most 255 (the `u8` ids of `MATERIAL_USE`).
+    pub material_count: u8,
+    /// Pages (2 KiB) of the largest room chunk: the biggest pool run one
+    /// unit can need. Replaces the whole-level page total of version 3.
+    pub max_room_pages: u8,
+    /// Draw distance in sectors: rooms whose walk distance from the camera
+    /// exceeds it are not drawn and need not be resident. 0 is unbounded.
+    pub draw_far: u8,
+    /// Entity activation radius in sectors, walked over the portal graph.
+    pub active_radius: u8,
+    /// Extra sectors beyond `draw_far` a streamer prefetches (evictable).
+    pub lead_radius: u8,
+    /// log2 of the world lattice cell edge, runtime units.
+    pub lattice_shift: u8,
+    pub reserved: u8,
+    /// World X and Z of lattice cell (0, 0)'s corner.
+    pub lattice_origin: [i32; 2],
+    /// Lattice cells along X and Z.
+    pub lattice_cells: [u16; 2],
+    /// Entries in the lattice room list.
+    pub lattice_refs: u16,
+    /// Renderer scratch maxima over every room, so the scratch is sized
+    /// before any room chunk is resident.
+    pub max_vertices: u16,
+    pub max_cells: u16,
+    pub max_quads: u16,
+    pub max_lod_blocks: u16,
+    pub max_lod_quads: u16,
     pub layout_hash: u32,
+}
+
+/// Renderer scratch maxima: the largest room's table lengths, written into the
+/// core so the scratch can be sized before any room chunk is resident.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct RenderMaxima {
+    pub vertices: u16,
+    pub cells: u16,
+    pub quads: u16,
+    pub lod_blocks: u16,
+    pub lod_quads: u16,
+}
+
+impl RenderMaxima {
+    /// Fold one room's table lengths in.
+    pub fn include(
+        &mut self,
+        vertices: usize,
+        cells: usize,
+        quads: usize,
+        blocks: usize,
+        lod: usize,
+    ) {
+        let cap = |v: usize| u16::try_from(v).unwrap_or(u16::MAX);
+        self.vertices = self.vertices.max(cap(vertices));
+        self.cells = self.cells.max(cap(cells));
+        self.quads = self.quads.max(cap(quads));
+        self.lod_blocks = self.lod_blocks.max(cap(blocks));
+        self.lod_quads = self.lod_quads.max(cap(lod));
+    }
 }
 
 /// One room in the directory, 40 bytes.
@@ -127,7 +195,8 @@ pub const MATERIAL_CUTOUT: u16 = 1 << 2;
 /// Material flag: liquid surface.
 pub const MATERIAL_LIQUID: u16 = 1 << 3;
 
-/// A level-global material, 8 bytes.
+/// A level material, 8 bytes. A room reaches it through its `MATERIAL_USE`
+/// table.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Material {
@@ -198,7 +267,8 @@ pub mod section {
     pub const MOVERS: usize = 6;
     /// Vertex indices owned by movers.
     pub const MOVER_VERTS: usize = 7;
-    /// Level-global material ids the room draws.
+    /// Level material ids the room draws; [`Quad::material`] indexes this
+    /// table.
     pub const MATERIAL_USE: usize = 8;
     /// Lattice vertices.
     pub const VERTICES: usize = 9;
@@ -477,7 +547,45 @@ pub struct Mover {
     pub travel_ticks: u16,
     /// Mutable state, zero at load.
     pub progress_ticks: u16,
-    pub reserved: [u8; 6],
+    /// Stable id as two halves, low then high ([`Mover::stable_id`]).
+    pub stable: [u16; 2],
+    pub reserved: u16,
+}
+
+impl Mover {
+    /// The mover's stable id: an authored identity that survives recooks and
+    /// does not depend on the room index or the order of the tables. State
+    /// that must outlive a chunk (an open door, a broken destructible) is
+    /// keyed by it. `id` stays the index inside the room.
+    pub const fn stable_id(&self) -> MoverId {
+        MoverId(self.stable[0] as u32 | (self.stable[1] as u32) << 16)
+    }
+
+    /// Set the stable id.
+    pub fn set_stable_id(&mut self, id: MoverId) {
+        self.stable = [id.0 as u16, (id.0 >> 16) as u16];
+    }
+}
+
+/// Stable global id of a mover: 32 bits, the FNV-1a hash of its authored
+/// name ([`MoverId::from_name`]). Not `room << 8 | local`: that packing
+/// breaks at 256 rooms and renumbers when rooms are cut or reordered.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MoverId(pub u32);
+
+impl MoverId {
+    /// Hash an authored name.
+    pub const fn from_name(name: &str) -> Self {
+        let bytes = name.as_bytes();
+        let mut h = 0x811c_9dc5u32;
+        let mut i = 0;
+        while i < bytes.len() {
+            h ^= bytes[i] as u32;
+            h = h.wrapping_mul(0x0100_0193);
+            i += 1;
+        }
+        Self(h)
+    }
 }
 
 /// A lattice vertex, 8 bytes. The pad keeps the GTE `VZ` word clean.
@@ -532,7 +640,8 @@ pub struct Quad {
     pub uv: [u16; 4],
     pub d: i16,
     pub n: [i8; 3],
-    /// Level-global material index.
+    /// Index into the room's `MATERIAL_USE` table, which names the level
+    /// material.
     pub material: u8,
     pub flags: u8,
     /// [`QUAD2_REPEAT`] and [`QUAD2_MULTI`]; other bits are zero.
@@ -600,7 +709,7 @@ macro_rules! sizes {
 }
 
 sizes! {
-    LevelHeader = 32,
+    LevelHeader = 52,
     RoomRecord = 40,
     Portal = 36,
     Material = 8,
@@ -654,6 +763,8 @@ const fn layout_hash() -> u32 {
     use core::mem::{offset_of, size_of};
     let mut h = 0x811c_9dc5u32;
     h = mix(h, size_of::<LevelHeader>());
+    h = mix(h, offset_of!(LevelHeader, lattice_origin));
+    h = mix(h, offset_of!(LevelHeader, max_vertices));
     h = mix(h, size_of::<RoomRecord>());
     h = mix(h, offset_of!(RoomRecord, origin));
     h = mix(h, offset_of!(RoomRecord, min_y));
@@ -674,6 +785,7 @@ const fn layout_hash() -> u32 {
     h = mix(h, size_of::<Liquid>());
     h = mix(h, size_of::<Mover>());
     h = mix(h, offset_of!(Mover, offset));
+    h = mix(h, offset_of!(Mover, stable));
     h = mix(h, size_of::<Vtx>());
     h = mix(h, size_of::<Quad>());
     h = mix(h, offset_of!(Quad, color));

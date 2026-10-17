@@ -1,5 +1,6 @@
 use super::*;
 use crate::format::*;
+use crate::resident::ResidentRooms;
 use crate::view::{CollisionView, LevelView};
 use crate::write::{aligned_copy, words_as_bytes, LevelCore, RoomChunk};
 use alloc::vec;
@@ -8,6 +9,8 @@ use psx_engine::{
     Angle, CharacterMotorConfig, CharacterMotorInput, CharacterMotorState, CollisionTrace,
     CollisionTraceProvider, CollisionTraceQuery, RoomPoint, Q12,
 };
+
+mod lattice;
 
 const S: i32 = 80;
 const FLAT: u16 = SECTOR_HAS_FLOOR | SECTOR_FLOOR_WALK_A | SECTOR_FLOOR_WALK_B;
@@ -216,7 +219,8 @@ impl Built {
                     .then(|| CollisionView::parse(words_as_bytes(w, *l)).unwrap())
             })
             .collect();
-        let world = GridCollision::new(level, &views).unwrap();
+        let set = ResidentRooms::from_collisions(level, &views).unwrap();
+        let world = set.collision();
         f(&world)
     }
 
@@ -715,16 +719,16 @@ fn sector_summary_bits_do_not_change_any_trace() {
     let without = summary_world(false);
     // The summary must actually mark clear sectors, or this proves nothing.
     with.run(|w| {
-        let clear = w.rooms[0]
-            .as_ref()
+        let clear = w
+            .view(0)
             .unwrap()
             .sectors
             .iter()
             .filter(|s| s.flags & SECTOR_CLEAR != 0)
             .count();
         assert!(clear >= 3, "clear sectors: {clear}");
-        let flat = w.rooms[0]
-            .as_ref()
+        let flat = w
+            .view(0)
             .unwrap()
             .sectors
             .iter()
@@ -733,8 +737,8 @@ fn sector_summary_bits_do_not_change_any_trace() {
         assert!(flat > 50);
     });
     without.run(|w| {
-        assert!(w.rooms[0]
-            .as_ref()
+        assert!(w
+            .view(0)
             .unwrap()
             .sectors
             .iter()

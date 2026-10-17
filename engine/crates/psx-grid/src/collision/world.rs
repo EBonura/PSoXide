@@ -1,7 +1,9 @@
 //! World queries over the resident rooms: locate, heights and contents.
 
 use crate::format::*;
-use crate::height::{height_at, in_first_triangle, triangle_normal_q12, weight_recip, Recip};
+use crate::height::{height_at, in_first_triangle, triangle_normal_q12, Recip};
+use crate::lattice::{RoomsNear, MARGIN_SECTORS, SMALL_WORLD_ROOMS};
+use crate::resident::ResidentRooms;
 use crate::view::{CollisionView, LevelView};
 
 /// Thickness of a floor or ceiling slab, runtime units.
@@ -40,16 +42,52 @@ pub struct Located {
     pub lz: u32,
 }
 
-/// The collision world: the level core plus the resident room collision
-/// blocks.
+/// Rooms to visit, see [`GridCollision::visit`]: a lattice cell's room list,
+/// or `None` for every room. One word and a length, because it is held across
+/// the calls of a collision scan on a 1 KiB stack.
+#[derive(Copy, Clone)]
+pub(crate) struct Visit<'a>(Option<&'a [u16]>);
+
+impl Visit<'_> {
+    /// Rooms to go through, in a level of `rooms` rooms.
+    #[inline(always)]
+    pub(crate) fn len(&self, rooms: usize) -> usize {
+        match self.0 {
+            Some(list) => list.len(),
+            None => rooms,
+        }
+    }
+
+    /// The room at `step`, `step < len()`.
+    #[inline(always)]
+    pub(crate) fn room(&self, step: usize) -> usize {
+        match self.0 {
+            Some(list) => usize::from(list[step]),
+            None => step,
+        }
+    }
+}
+
+/// The collision world: the level core plus the rooms resident right now
+/// (see [`ResidentRooms`]).
 ///
-/// `rooms[i]` is room `i`'s collision block, `None` when it is not resident.
-/// A missing room is treated as **solid over its footprint** for bodies and as
-/// non-blocking for line of sight.
+/// A room that is not resident is treated as **solid over its footprint** for
+/// bodies and as non-blocking for line of sight. No query loops over every
+/// room of the level: each asks the world lattice of the core for the rooms
+/// near the point, box or segment it concerns (a world of at most
+/// [`SMALL_WORLD_ROOMS`] rooms just walks them all).
+///
+/// The value is a handful of copied constants and a reference to the set;
+/// build it as often as needed with [`ResidentRooms::collision`].
 #[derive(Copy, Clone)]
 pub struct GridCollision<'a> {
-    pub(crate) level: LevelView<'a>,
-    pub(crate) rooms: &'a [Option<CollisionView<'a>>],
+    /// The resident set, which also holds the level core: the world keeps no
+    /// copy of the core's table descriptors, so it stays a few words wide.
+    pub(crate) set: &'a ResidentRooms<'a>,
+    /// The room directory and the per-room collision block pointers, held
+    /// here so the hot lookups cost what a plain slice index costs.
+    pub(crate) rooms: &'a [RoomRecord],
+    pub(crate) views: &'a [*const CollisionView<'a>],
     pub(crate) s: i32,
     pub(crate) recip: Recip,
     pub(crate) inv24: u32,
@@ -58,6 +96,9 @@ pub struct GridCollision<'a> {
     /// Some resident room holds collidable free planes, so the plane scans
     /// are worth running.
     pub(crate) planes: bool,
+    /// Find nearby rooms through the world lattice instead of walking every
+    /// room (set for worlds beyond [`SMALL_WORLD_ROOMS`]; tests force it).
+    pub(crate) lattice: bool,
     /// Validate analytic point-trace results against the discrete slab
     /// predicate even when every room is resident (tests compare both).
     pub(crate) validate: bool,
@@ -67,22 +108,60 @@ pub struct GridCollision<'a> {
 }
 
 impl<'a> GridCollision<'a> {
-    /// Build the world. `None` when no exact cell reciprocal exists for the
-    /// level's sector size.
-    pub fn new(level: LevelView<'a>, rooms: &'a [Option<CollisionView<'a>>]) -> Option<Self> {
-        let s = level.sector_units();
-        let recip = Recip::for_sector(s, 255 * s)?;
-        Some(Self {
-            level,
-            rooms,
-            s: s as i32,
-            recip,
-            inv24: weight_recip(s),
-            foreign: rooms.iter().any(Option::is_none) || rooms.len() < level.rooms.len(),
-            planes: rooms.iter().flatten().any(|v| !v.col_planes.is_empty()),
+    /// The world over the rooms resident in `set` now.
+    pub(crate) fn over(set: &'a ResidentRooms<'a>) -> Self {
+        let level = set.level();
+        Self {
+            set,
+            rooms: level.rooms,
+            views: set.view_table(),
+            s: set.s,
+            recip: set.recip,
+            inv24: set.inv24,
+            foreign: !set.is_complete(),
+            planes: set.has_planes(),
+            lattice: level.rooms.len() > SMALL_WORLD_ROOMS,
             validate: false,
             camera_pass: false,
-        })
+        }
+    }
+
+    /// The level core.
+    #[inline(always)]
+    pub(crate) fn level(&self) -> &'a LevelView<'a> {
+        self.set.level()
+    }
+
+    /// The same world with lattice lookups forced on or off, for tests that
+    /// prove both ways agree.
+    pub fn with_lattice(mut self, on: bool) -> Self {
+        self.lattice = on;
+        self
+    }
+
+    /// The rooms a query centred on `(x, z)` with half-extent `r` must
+    /// visit: the room list of the one lattice cell holding the centre when
+    /// that list is guaranteed to cover the box (`r` within the lattice
+    /// margin), every room otherwise (a world that skips the lattice, an
+    /// unusually wide body). Two words of state, no iterator.
+    #[inline(always)]
+    pub(crate) fn visit(&self, x: i32, z: i32, r: i32) -> Visit<'a> {
+        if self.lattice && r <= MARGIN_SECTORS * self.s {
+            Visit(Some(self.level().lattice_rooms_at(x, z)))
+        } else {
+            Visit(None)
+        }
+    }
+
+    /// Rooms whose footprint may touch the inclusive plan box
+    /// `[lo.0, hi.0] x [lo.1, hi.1]`, world runtime units.
+    #[inline(always)]
+    pub(crate) fn rooms_near(&self, lo: (i32, i32), hi: (i32, i32)) -> RoomsNear<'a> {
+        if self.lattice {
+            RoomsNear::Lattice(self.level().lattice().candidates(self.level(), lo, hi))
+        } else {
+            RoomsNear::All(0..self.rooms.len() as u32)
+        }
     }
 
     /// Sector edge in runtime units.
@@ -94,12 +173,15 @@ impl<'a> GridCollision<'a> {
     /// would cost every caller a stack frame).
     #[inline(always)]
     pub(crate) fn rec(&self, room: usize) -> &RoomRecord {
-        self.level.rooms.get(room).unwrap_or(&NO_ROOM)
+        self.rooms.get(room).unwrap_or(&NO_ROOM)
     }
 
     #[inline]
     pub(crate) fn view(&self, room: usize) -> Option<&CollisionView<'a>> {
-        self.rooms.get(room).and_then(|r| r.as_ref())
+        let view = *self.views.get(room)?;
+        // SAFETY: see `ResidentRooms::collision_of`; `views` is that table
+        // and the world's borrow of the set keeps it unchanged.
+        unsafe { view.as_ref() }
     }
 
     /// Plan cell of room-local `(x, z)`: `(cx, cz, lx, lz)`.
@@ -315,17 +397,16 @@ impl<'a> GridCollision<'a> {
     /// point just inside a floor or ceiling slab still has a room.
     #[inline(never)]
     pub fn locate(&self, hint_room: usize, p: [i32; 3]) -> Option<Located> {
-        let count = self.level.rooms.len();
+        let count = self.rooms.len();
         let mut best: Option<(i32, Located)> = None;
-        for step in 0..count {
+        let near = self.visit(p[0], p[2], 0);
+        for step in 0..=near.len(count) {
             let room = if step == 0 {
                 hint_room
-            } else if step - 1 < hint_room {
-                step - 1
             } else {
-                step
+                near.room(step - 1)
             };
-            if room >= count {
+            if room >= count || (step > 0 && room == hint_room) {
                 continue;
             }
             let rec = self.rec(room);
@@ -365,7 +446,10 @@ impl<'a> GridCollision<'a> {
 
     /// Liquid contents at a world point: 0 empty, else a `liquid_kind` code.
     pub fn contents_at(&self, p: [i32; 3]) -> u8 {
-        for (room, rec) in self.level.rooms.iter().enumerate() {
+        let near = self.visit(p[0], p[2], 0);
+        for step in 0..near.len(self.rooms.len()) {
+            let room = near.room(step);
+            let rec = self.rec(room);
             let Some(view) = self.view(room) else {
                 continue;
             };
