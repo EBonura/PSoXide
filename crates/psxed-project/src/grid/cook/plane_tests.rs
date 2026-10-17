@@ -139,6 +139,18 @@ fn a_world_with_planes_cooks_and_validates_end_to_end() {
     };
     assert_eq!(kinds, vec![plane_kind::PLATFORM, plane_kind::WALL]);
     assert!(room.col.col_planes.iter().all(|p| p.id == 0 || p.id == 1));
+    // Each plane has exactly one primary copy, the one point rays test.
+    for id in [0u8, 1] {
+        let copies: Vec<_> = room.col.col_planes.iter().filter(|p| p.id == id).collect();
+        assert!(copies.len() > 1, "plane {id} spans several sectors");
+        assert_eq!(
+            copies
+                .iter()
+                .filter(|p| p.flags & psx_grid::COLPLANE_PRIMARY != 0)
+                .count(),
+            1
+        );
+    }
     // The bytes are a pure function of the document.
     let again = cook(&world).unwrap();
     assert_eq!(again.chunks, cooked.chunks);

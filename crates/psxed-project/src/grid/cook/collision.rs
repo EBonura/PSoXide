@@ -11,7 +11,7 @@
 use psx_grid::collision::summarize_sectors;
 use psx_grid::height::triangle_normal_q12;
 use psx_grid::{
-    edge, ColPlane, ColWall, Sector, SectorExt, SplitB, NO_EXT, SECTOR_CEIL_NESW,
+    edge, ColPlane, ColWall, Sector, SectorExt, SplitB, COLPLANE_PRIMARY, NO_EXT, SECTOR_CEIL_NESW,
     SECTOR_CEIL_SOLID, SECTOR_FLOOR_NESW, SECTOR_FLOOR_WALK_A, SECTOR_FLOOR_WALK_B,
     SECTOR_HAS_CEIL, SECTOR_HAS_FLOOR, SECTOR_OPEN_SKY, SECTOR_SPLIT_LEVEL,
 };
@@ -229,9 +229,14 @@ pub fn build(units: &RuntimeUnits, room: &GridRoom, room_index: usize) -> Result
                 ext.plane_first = u16::try_from(tables.planes.len())
                     .map_err(|_| format!("room {room_index} has too many plane copies"))?;
                 ext.plane_count = here.len() as u8;
-                tables
-                    .planes
-                    .extend(here.iter().map(|&i| planes.records[i]));
+                for &i in here {
+                    let mut copy = planes.records[i];
+                    // The first copy of each plane is the one point rays test.
+                    if !tables.planes.iter().any(|p| p.id == copy.id) {
+                        copy.flags |= COLPLANE_PRIMARY;
+                    }
+                    tables.planes.push(copy);
+                }
                 ext.wall_first = u16::try_from(tables.walls.len())
                     .map_err(|_| format!("room {room_index} has more than 65535 solid walls"))?;
                 ext.wall_count =
