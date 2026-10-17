@@ -187,6 +187,15 @@ fn the_reference_projects_cook_and_validate() {
                 .unwrap_or_else(|e| panic!("{name} room {i}: {e:?}"));
         }
         eprintln!("{name}: {}", cooked.report.summary());
+        for (i, table) in cooked.tables.iter().enumerate() {
+            let count = |bit: u16| table.sectors.iter().filter(|s| s.flags & bit != 0).count();
+            eprintln!(
+                "  room {i}: {} sectors, {} flat floor, {} clear",
+                table.sectors.len(),
+                count(psx_grid::SECTOR_FLAT_FLOOR),
+                count(psx_grid::SECTOR_CLEAR)
+            );
+        }
     }
 }
 
@@ -259,5 +268,51 @@ fn editor_floor_height_agrees_with_the_runtime_height_function() {
         }
         assert!(checked > 20, "{name}: only {checked} probes compared");
         let _ = edge_editor;
+    }
+}
+
+/// Merged far quads cover exactly the cell quads they replace: the plan area
+/// of every merged quad equals the area of the cell quads flagged covered in
+/// its block, so the LOD swap leaves no hole.
+#[test]
+fn merged_quads_cover_exactly_what_they_replace() {
+    for name in [
+        "grid-level008",
+        "grid-cathedral",
+        "grid-dungeon",
+        "grid-cave",
+    ] {
+        let Some(project) = load_reference(name) else {
+            eprintln!("skipping {name}: not present");
+            continue;
+        };
+        let world = project.active_scene().world.grid().unwrap();
+        let cooked = cook(world).unwrap();
+        for (ri, chunk) in cooked.tables.iter().enumerate() {
+            let area = |q: &psx_grid::Quad| -> i64 {
+                let p = |k: usize| {
+                    let v = chunk.vertices[usize::from(q.v[k])];
+                    (i64::from(v.x), i64::from(v.z))
+                };
+                // Shoelace over the ring, doubled.
+                let mut sum = 0i64;
+                for k in 0..4 {
+                    let (a, b) = (p(k), p((k + 1) % 4));
+                    sum += a.0 * b.1 - b.0 * a.1;
+                }
+                sum.abs()
+            };
+            let covered: i64 = chunk
+                .quads
+                .iter()
+                .filter(|q| q.flags & psx_grid::QUAD_LOD_COVERED != 0)
+                .map(area)
+                .sum();
+            let merged: i64 = chunk.lod_quads.iter().map(area).sum();
+            assert_eq!(
+                covered, merged,
+                "{name} room {ri}: covered area {covered} vs merged {merged}"
+            );
+        }
     }
 }

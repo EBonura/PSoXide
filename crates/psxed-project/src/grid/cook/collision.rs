@@ -8,6 +8,7 @@
 //! with it off does not block the head, a wall with `solid` off is drawn and
 //! not cooked into the wall table.
 
+use psx_grid::collision::summarize_sectors;
 use psx_grid::height::triangle_normal_q12;
 use psx_grid::{
     edge, ColWall, Sector, SectorExt, SplitB, NO_EXT, SECTOR_CEIL_NESW, SECTOR_CEIL_SOLID,
@@ -231,6 +232,14 @@ pub fn build(units: &RuntimeUnits, room: &GridRoom, room_index: usize) -> Result
             tables.sectors.push(sector);
         }
     }
+    // Derived summary bits (flat floor, flat ceiling, clear neighbourhood) the
+    // runtime collision uses to skip work. They only hold once every sector's
+    // wall and split-level state is final, so they come last.
+    summarize_sectors(
+        &mut tables.sectors,
+        room.width,
+        room.depth,
+    );
     tables.range = range;
     Ok(tables)
 }
@@ -308,5 +317,49 @@ mod tests {
         let tables = build(&units(), &room, 0).unwrap();
         assert_ne!(tables.sectors[0].flags & SECTOR_SPLIT_LEVEL, 0);
         assert_eq!(tables.splitbs[0].floor_b, [20; 4]);
+    }
+
+    #[test]
+    fn summary_bits_mark_flat_and_clear_sectors() {
+        use psx_grid::{CLEAR_HEADROOM, SECTOR_CLEAR, SECTOR_FLAT_CEIL, SECTOR_FLAT_FLOOR};
+        let mut room = GridRoom::new("r", 5, 5);
+        for z in 0..5 {
+            for x in 0..5 {
+                let sector = room.sector_or_insert(x, z).unwrap();
+                sector.floor = Some(GridSurface::flat(0, None));
+                // 4096 grid units are 320 runtime units at 5/4: plenty of
+                // headroom for a clear neighbourhood.
+                sector.ceiling = Some(GridSurface::flat(4096, None));
+            }
+        }
+        // A wall spoils the neighbourhood of the sectors around it.
+        let mut wall = GridWall::span(0, 1024, None);
+        wall.solid = true;
+        room.sector_or_insert(3, 3)
+            .unwrap()
+            .walls_mut(WallEdge::North)
+            .push(wall);
+        let tables = build(&units(), &room, 0).unwrap();
+        let flags = |x: usize, z: usize| tables.sectors[z * 5 + x].flags;
+        assert_ne!(flags(0, 0) & SECTOR_FLAT_FLOOR, 0);
+        assert_ne!(flags(0, 0) & SECTOR_FLAT_CEIL, 0);
+        // Border sectors are never clear; the middle is, unless the wall is
+        // within one sector.
+        assert_eq!(flags(0, 2) & SECTOR_CLEAR, 0);
+        assert_ne!(flags(1, 1) & SECTOR_CLEAR, 0);
+        assert_eq!(flags(2, 2) & SECTOR_CLEAR, 0);
+        assert_eq!(flags(3, 3) & SECTOR_CLEAR, 0);
+        const { assert!(CLEAR_HEADROOM <= 320) };
+        // A low solid ceiling removes the clear bit; a sloped floor too.
+        let mut low = GridRoom::new("r", 3, 3);
+        for z in 0..3 {
+            for x in 0..3 {
+                let sector = low.sector_or_insert(x, z).unwrap();
+                sector.floor = Some(GridSurface::flat(0, None));
+                sector.ceiling = Some(GridSurface::flat(1024, None));
+            }
+        }
+        let tables = build(&units(), &low, 0).unwrap();
+        assert_eq!(tables.sectors[4].flags & SECTOR_CLEAR, 0);
     }
 }
