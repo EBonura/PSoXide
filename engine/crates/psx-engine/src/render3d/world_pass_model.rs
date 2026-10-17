@@ -3291,7 +3291,6 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         color: (u8, u8, u8),
         options: WorldSurfaceOptions,
     ) -> u16 {
-        use psx_gpu::prim::LineMono;
         let fast = matches!(self.ordering, WorldCommandOrdering::Bucketed)
             && edges.len() <= lines.remaining()
             && edges.len() <= self.commands.len().saturating_sub(self.command_len);
@@ -3311,27 +3310,60 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             }
             return count;
         }
+        // A reserved batch keeps the packet cursor and count in locals for
+        // the whole loop (no per-packet fence test, no counter stores), which
+        // is what lets the loop below hold its operands in registers.
+        if let Some(mut batch) = lines.reserve_batch(edges.len()) {
+            let count = self.emit_line_edges(&mut batch, projected, edges, color, options);
+            return count.min(u16::MAX as usize) as u16;
+        }
+        let count = self.emit_line_edges(lines, projected, edges, color, options);
+        count.min(u16::MAX as usize) as u16
+    }
+
+    /// The bucketed, capacity-proven half of [`Self::submit_projected_line_edges`].
+    ///
+    /// `lines` and the command storage must each have room for one entry per
+    /// edge.
+    #[inline(always)]
+    fn emit_line_edges(
+        &mut self,
+        lines: &mut impl PrimitiveSink<psx_gpu::prim::LineMono>,
+        projected: &[ProjectedVertex],
+        edges: &[[u16; 2]],
+        color: (u8, u8, u8),
+        options: WorldSurfaceOptions,
+    ) -> usize {
+        use psx_gpu::prim::LineMono;
         let depths = PreparedModelDepthSlots::new::<OT_DEPTH>(options);
+        let color_cmd = LineMono::new(0, 0, 0, 0, color.0, color.1, color.2).color_cmd;
+        let bias = options.depth_bias;
         let start = self.command_len;
         let commands = self.commands.as_mut_ptr().cast::<BucketedWorldCommand>();
+        let vertices = projected.as_ptr();
+        let vertex_count = projected.len();
         let mut count = 0usize;
         for &[a, b] in edges {
-            let (Some(&a), Some(&b)) =
-                (projected.get(usize::from(a)), projected.get(usize::from(b)))
-            else {
-                continue;
-            };
-            if a == ProjectedVertex::INVALID || b == ProjectedVertex::INVALID {
+            let (a, b) = (usize::from(a), usize::from(b));
+            if a >= vertex_count || b >= vertex_count {
                 continue;
             }
-            // SAFETY: one packet/command per input edge was reserved above.
-            // Skipped edges only reduce that bound; the bucketed constructor
-            // guarantees compatible command storage layout and alignment.
+            // SAFETY: both indices are below `vertex_count`.
+            let (a, b) = unsafe { (&*vertices.add(a), &*vertices.add(b)) };
+            if (a.sz == i32::MIN && a.sx == 0 && a.sy == 0)
+                || (b.sz == i32::MIN && b.sx == 0 && b.sy == 0)
+            {
+                continue;
+            }
+            // SAFETY: one packet/command per input edge was reserved by the
+            // caller. Skipped edges only reduce that bound; the bucketed
+            // constructor guarantees compatible command storage layout and
+            // alignment.
             unsafe {
-                let line = lines.push_unchecked(LineMono::new(
-                    a.sx, a.sy, b.sx, b.sy, color.0, color.1, color.2,
-                )) as *mut LineMono as *mut u32;
-                let depth = a.sz.min(b.sz).saturating_add(options.depth_bias);
+                let mut packet = LineMono::new(a.sx, a.sy, b.sx, b.sy, 0, 0, 0);
+                packet.color_cmd = color_cmd;
+                let line = lines.push_unchecked(packet) as *mut LineMono as *mut u32;
+                let depth = a.sz.min(b.sz).saturating_add(bias);
                 commands.add(start + count).write(BucketedWorldCommand::new(
                     line,
                     depths.slot(depth),
@@ -3341,7 +3373,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             count += 1;
         }
         self.command_len = start + count;
-        count.min(u16::MAX as usize) as u16
+        count
     }
 
     /// Submit indexed, solid-color Gouraud triangles with shared depth setup.
@@ -4309,6 +4341,98 @@ mod facet_reflection_tests {
                         assert_eq!(run(true), run(false));
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn packet_arena_line_batch_matches_individual_packets_and_slots() {
+        use psx_gpu::ot::OrderingTable;
+        extern crate std;
+        use std::vec::Vec;
+        let projected = [
+            ProjectedVertex::new(-70, 20, 200),
+            ProjectedVertex::new(33, -18, 800),
+            ProjectedVertex::new(10, 60, 1200),
+            ProjectedVertex::INVALID,
+            ProjectedVertex::new(5, 5, i32::MIN),
+        ];
+        let edges = [
+            [0, 1],
+            [1, 2],
+            [2, 0],
+            [0, 0],
+            [3, 1],
+            [9, 0],
+            [1, 0],
+            [4, 1],
+            [2, 4],
+        ];
+        for command_capacity in [3, 12] {
+            for bias in [-999, 0, 700] {
+                let run = |batch: bool| {
+                    let mut storage = OrderingTable::<8>::new();
+                    let mut ot = OtFrame::begin(&mut storage);
+                    let mut commands = [WorldTriCommand::EMPTY; 12];
+                    let mut scratch = crate::PrimitivePacketScratch::<12>::ZERO;
+                    let base = &scratch as *const _ as usize;
+                    let (count, used, packets, slots);
+                    {
+                        let mut arena = crate::PrimitivePacketArena::new(&mut scratch);
+                        let mut pass = WorldRenderPass::new_bucketed(
+                            &mut ot,
+                            &mut commands[..command_capacity],
+                        );
+                        let options =
+                            WorldSurfaceOptions::new(DepthBand::whole(), DepthRange::new(16, 2048))
+                                .with_depth_bias(bias);
+                        count = if batch {
+                            pass.submit_projected_line_edges(
+                                &mut arena,
+                                &projected,
+                                &edges,
+                                (12, 64, 200),
+                                options,
+                            )
+                        } else {
+                            let mut count = 0;
+                            for &[a, b] in &edges {
+                                let (Some(&a), Some(&b)) =
+                                    (projected.get(a as usize), projected.get(b as usize))
+                                else {
+                                    continue;
+                                };
+                                if a == ProjectedVertex::INVALID || b == ProjectedVertex::INVALID {
+                                    continue;
+                                }
+                                pass.submit_projected_line(
+                                    &mut arena,
+                                    [a, b],
+                                    (12, 64, 200),
+                                    options,
+                                );
+                                count += 1;
+                            }
+                            count
+                        };
+                        used = arena.used_slots();
+                        let commands_used = pass.command_len();
+                        let mut rows = [(0usize, 0usize); 12];
+                        for (i, row) in rows.iter_mut().enumerate().take(commands_used) {
+                            // SAFETY: the first `commands_used` compact entries were written.
+                            let command = unsafe {
+                                *pass.commands.as_ptr().cast::<BucketedWorldCommand>().add(i)
+                            };
+                            *row = (command.packet_ptr as usize - base, command.slot_words);
+                        }
+                        slots = rows;
+                        packets = commands_used;
+                    }
+                    let words: Vec<u32> =
+                        scratch.words_mut()[..used * crate::PRIMITIVE_PACKET_SLOT_WORDS].to_vec();
+                    (count, used, packets, slots, words)
+                };
+                assert_eq!(run(true), run(false));
             }
         }
     }
