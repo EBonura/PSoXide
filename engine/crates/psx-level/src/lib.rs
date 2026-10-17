@@ -749,6 +749,14 @@ pub enum EntityKind {
     StaticMesh,
 }
 
+/// Bits of [`EntityRecord::flags`].
+pub mod entity_flags {
+    /// A hook point that sways sideways over eight seconds (the prototype
+    /// moving perches of Graybox Reach). Hook points without it, including
+    /// every one a mesh socket spawns, hold still.
+    pub const HOOK_SWAY: u16 = 1;
+}
+
 /// One non-spawn entity. Same room-local coordinate convention
 /// as [`PlayerSpawnRecord`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -767,7 +775,7 @@ pub struct EntityRecord {
     pub yaw: i16,
     /// Resource slot (0 if unused -- e.g. for `Marker`).
     pub resource_slot: ResourceSlot,
-    /// Reserved.
+    /// [`entity_flags`] bits.
     pub flags: u16,
 }
 

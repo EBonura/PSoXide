@@ -13,12 +13,16 @@ impl Playtest {
 
     pub(super) fn arch_anchor(&self, index: usize, now: u32) -> RoomPoint {
         let hook = &ENTITIES[index];
+        let sway = if hook.flags & psx_level::entity_flags::HOOK_SWAY != 0 {
+            hooks::arch_offset(
+                Self::arch_slot(index),
+                now.wrapping_sub(self.gameplay_epoch.as_u32()),
+            )
+        } else {
+            0
+        };
         RoomPoint::new(
-            hook.x
-                + hooks::arch_offset(
-                    Self::arch_slot(index),
-                    now.wrapping_sub(self.gameplay_epoch.as_u32()),
-                ),
+            hook.x + sway,
             hook.y + hooks::MARKER_HEIGHT,
             hook.z,
         )

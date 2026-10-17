@@ -158,6 +158,12 @@ impl ArchCharge {
 mod tests {
     use super::*;
     #[test]
+    fn the_marker_height_is_the_one_mesh_sockets_assume() {
+        // `psxed_project::grid::mesh::HOOK_MARKER_HEIGHT_RU` places a socket's
+        // hook record this far under the grip point.
+        assert_eq!(MARKER_HEIGHT, 96);
+    }
+    #[test]
     fn perch_samples_stay_inside_their_rows_and_banks() {
         for recoil in [false, true] {
             for yaw in [-4096, -910, -455, 0, 455, 910, 4096] {
