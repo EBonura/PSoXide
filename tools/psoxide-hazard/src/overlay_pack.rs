@@ -843,12 +843,20 @@ fn references(
                 let address = if self_target.is_some() {
                     self_window_address(linked, word, relocation.kind, &target.1)?
                 } else {
-                    hi_lo_address(linked, image, relocation, relocations).map_err(|e| {
-                        format!(
-                            "{e} at {:#010x} target {:#010x}",
-                            relocation.address, relocation.target_address
-                        )
-                    })?
+                    hi_lo_address(linked, image, relocation, relocations)
+                        .or_else(|e| {
+                            if e == "HI16 missing matching LO16 register" {
+                                hi_lo_address_back_edge(linked, image, relocation, relocations)
+                            } else {
+                                Err(e)
+                            }
+                        })
+                        .map_err(|e| {
+                            format!(
+                                "{e} at {:#010x} target {:#010x}",
+                                relocation.address, relocation.target_address
+                            )
+                        })?
                 };
                 if address < target.1.start || address > target.1.end {
                     return Err("HI16 target bounds".into());
@@ -973,6 +981,71 @@ fn hi_lo_address(
     Ok(((high & 0xffff) << 16).wrapping_add(low as u16 as i16 as i32 as u32))
 }
 
+/// A HI16 whose paired LO16 lies EARLIER in the image: the loop shape the
+/// compiler emits when it hoists a `lui` to the end of a loop body (often into a
+/// branch delay slot) and the next iteration's `sw lo(reg)` sits at the loop head.
+/// `hi_lo_address` only pairs forward. This accepts the pairing when the LO16 is
+/// compatible (same relocation target), its base register is the `lui`'s
+/// destination, and a backward `j` or branch between the two lands at or before
+/// the LO16 (within 0x1000 bytes). It is only used to bound-check a non-self
+/// HI16; the straight-line forms keep the stricter forward proof.
+fn hi_lo_address_back_edge(
+    linked: u32,
+    image: &[u32],
+    high: &Relocation,
+    all: &[Relocation],
+) -> Result<u32, String> {
+    let index = |address: u32| {
+        address
+            .checked_sub(linked)
+            .map(|offset| offset as usize / 4)
+            .filter(|&i| i < image.len())
+    };
+    let hi_index = index(high.address).ok_or("HI/LO site bounds")?;
+    let lui = image[hi_index];
+    if high.kind != 5 || lui >> 26 != 15 {
+        return Err("HI16 is not LUI".into());
+    }
+    let register = (lui >> 16) & 31;
+    let found = all
+        .iter()
+        .filter(|r| {
+            r.kind == 6
+                && r.address < high.address
+                && r.target_section == high.target_section
+                && r.target_address == high.target_address
+                && high.address - r.address <= 0x1000
+        })
+        .filter_map(|r| index(r.address).map(|i| (r, i)))
+        .filter(|(_, i)| {
+            let word = image[*i];
+            matches!(word >> 26, 8 | 9 | 32..=38 | 40..=43 | 46)
+                && (word >> 21) & 31 == register
+                && register != 0
+        })
+        .filter(|(low, low_index)| {
+            let end = (hi_index + 16).min(image.len());
+            (*low_index..end).any(|k| {
+                let word = image[k];
+                let pc = linked + (k as u32) * 4;
+                let landing = match word >> 26 {
+                    2 => Some((pc.wrapping_add(4) & 0xf000_0000) | ((word & 0x03ff_ffff) << 2)),
+                    4..=7 | 1 => Some(
+                        pc.wrapping_add(4)
+                            .wrapping_add_signed(((word as u16 as i16 as i32) << 2) as i32),
+                    ),
+                    _ => None,
+                };
+                landing.is_some_and(|to| to <= low.address && low.address - to <= 0x1000)
+                    && k + 1 >= hi_index
+            })
+        })
+        .max_by_key(|(r, _)| r.address);
+    let (low, low_index) = found.ok_or("HI16 missing matching LO16 register")?;
+    let _ = low;
+    Ok(((lui & 0xffff) << 16).wrapping_add(image[low_index] as u16 as i16 as i32 as u32))
+}
+
 // A compiler jump-table address can add its runtime index before the LO16
 // load. Prove the LUI contribution survives that straight-line affine path;
 // never pair unrelated registers merely because their relocation symbols match.
@@ -1071,6 +1144,54 @@ fn base_reaches_low(linked: u32, image: &[u32], high: &Relocation, low: &Relocat
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn hi16_whose_lo16_is_behind_a_loop_back_edge_pairs() {
+        // The shape panic=immediate-abort gave an HK module: `lui $gp` in a branch delay slot at
+        // the end of a loop body, `sw $18, -0x31ec($gp)` at the loop head, a backward `j` between.
+        let base = 0x8050_8558;
+        let jump = 0x0800_0000 | ((base & 0x0fff_ffff) >> 2);
+        let image = [0xaf92_ce14, 0, 0x3c1c_801d, jump, 0];
+        let relocations = [
+            Relocation {
+                address: base,
+                kind: 6,
+                target_section: 3,
+                target_address: 0x8011_06e0,
+            },
+            Relocation {
+                address: base + 8,
+                kind: 5,
+                target_section: 3,
+                target_address: 0x8011_06e0,
+            },
+        ];
+        assert!(hi_lo_address(base, &image, &relocations[1], &relocations).is_err());
+        assert_eq!(
+            hi_lo_address_back_edge(base, &image, &relocations[1], &relocations).unwrap(),
+            0x801c_ce14
+        );
+        // The lui in the delay slot of the backward jump itself (hk mod_cornifer).
+        let slot = [0xaf92_ce14, 0, jump, 0x3c1c_801d];
+        let hi_in_slot = [
+            relocations[0],
+            Relocation {
+                address: base + 12,
+                ..relocations[1]
+            },
+        ];
+        assert_eq!(
+            hi_lo_address_back_edge(base, &slot, &hi_in_slot[1], &hi_in_slot).unwrap(),
+            0x801c_ce14
+        );
+        // No backward transfer: the LO16 is not reached from the LUI.
+        let mut straight = image;
+        straight[3] = 0;
+        assert!(hi_lo_address_back_edge(base, &straight, &relocations[1], &relocations).is_err());
+        // A different base register is not a pair.
+        let mut other = image;
+        other[0] = (0xaf92_ce14 & !(31 << 21)) | (29 << 21);
+        assert!(hi_lo_address_back_edge(base, &other, &relocations[1], &relocations).is_err());
+    }
     #[test]
     fn indexed_resident_jump_table_retains_its_proven_lui_base() {
         // Exact instruction shape from the CS title consumer's 0x8040a834

@@ -19,10 +19,11 @@ PSX_DELAY_SLOT_FLAGS := "-Cllvm-args=-disable-mips-df-succbb-search=false","-Cll
 # locations and their file names stay out of the image, and psx-rt records
 # Cause/EPC/BadVAddr for `psoxide-size faults`. PSOXIDE_PANIC_MESSAGES=1 builds
 # with the formatted panic instead.
+PSX_PANIC_ABORT_FLAGS := "-Zunstable-options","-Cpanic=immediate-abort"
 ifneq ($(filter-out 0,$(PSOXIDE_PANIC_MESSAGES)),)
 PSX_PANIC_FLAGS :=
 else
-PSX_PANIC_FLAGS := "-Zunstable-options","-Cpanic=immediate-abort",
+PSX_PANIC_FLAGS := $(PSX_PANIC_ABORT_FLAGS),
 endif
 # The example's cargo invocation. Flags go in through --config rather than
 # RUSTFLAGS so the PGO driver can append its own (RUSTFLAGS would replace them).
