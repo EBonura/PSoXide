@@ -6,6 +6,9 @@
 //! of rendering empty at runtime, which is what the deleted room streamer did
 //! when its cook and runtime caps drifted apart.
 //!
+//! Caps bind a room, never the world: rooms stream, so only the rooms near
+//! the player have to fit memory (`docs/grid/streaming-design.md` section 4).
+//!
 //! Where a number comes from is stated next to it. The face and extent caps
 //! are the limits of the grid pack the renderer prototype reads (`GRD1` v1:
 //! vertices indexed by `u16`, positions stored as `i16` after the divide by
@@ -20,8 +23,10 @@ use super::sector::WallEdge;
 use super::units::GridScale;
 use super::world::GridWorld;
 
-/// Most rooms in one world. Matches the bonnie-32 validator.
-pub const MAX_ROOMS: usize = 256;
+/// Most rooms in one world: the format's room id limit
+/// ([`psx_grid::MAX_ROOMS`]). A world is a directory of rooms and only the
+/// rooms near the player need to be resident, so the count is no budget.
+pub const MAX_ROOMS: usize = psx_grid::MAX_ROOMS;
 /// Most sectors along either side of a room. Matches the bonnie-32 validator.
 pub const MAX_ROOM_SIDE: usize = 128;
 /// Most wall segments stacked on one sector edge. Matches the bonnie-32
@@ -39,9 +44,10 @@ pub const EDITOR_UNITS_PER_ENGINE_UNIT: i32 = 16;
 /// Largest absolute coordinate in editor units that still fits the pack's
 /// `i16` positions after the divide by [`EDITOR_UNITS_PER_ENGINE_UNIT`].
 pub const MAX_EDITOR_COORD: i32 = i16::MAX as i32 * EDITOR_UNITS_PER_ENGINE_UNIT;
-/// Most drawable faces in one world: the pack indexes vertices with `u16` and
-/// a face has at most four, so this bound can never overflow the index.
-pub const MAX_WORLD_FACES: usize = u16::MAX as usize / 4;
+/// Most drawable faces in one room: a room chunk indexes its vertices and
+/// quads with `u16` and a face has at most four, so this bound can never
+/// overflow an index. It binds a room (one streamable unit), not the world.
+pub const MAX_ROOM_FACES: usize = u16::MAX as usize / 4;
 
 /// How serious an issue is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -93,7 +99,7 @@ pub enum GridIssueKind {
         /// Largest absolute coordinate, editor units.
         coordinate: i32,
     },
-    /// More than [`MAX_WORLD_FACES`] drawable faces.
+    /// More than [`MAX_ROOM_FACES`] drawable faces in one room.
     TooManyFaces {
         /// Faces present.
         count: usize,
@@ -239,7 +245,7 @@ impl GridIssue {
                 "coordinate {coordinate} editor units is beyond +/-{MAX_EDITOR_COORD}, the cooked pack range"
             ),
             GridIssueKind::TooManyFaces { count } => {
-                format!("{count} faces, at most {MAX_WORLD_FACES}")
+                format!("{count} faces, at most {MAX_ROOM_FACES} in one room; split the room")
             }
             GridIssueKind::DegenerateWall { edge, index } => {
                 format!("{} wall {index} has no height", edge.label())
@@ -305,16 +311,20 @@ pub struct GridBudget {
     pub walls: usize,
     /// Free planes.
     pub planes: usize,
-    /// Drawable faces after triangulation and wall banding.
+    /// Drawable faces after triangulation and wall banding, all rooms.
     pub faces: usize,
+    /// Faces of the busiest room, the figure [`MAX_ROOM_FACES`] caps.
+    pub largest_room_faces: usize,
 }
 
 impl GridBudget {
     /// Count a world.
     pub fn of(world: &GridWorld) -> Self {
+        let per_room = super::faces::room_face_counts(world);
         let mut budget = Self {
             rooms: world.rooms.len(),
-            faces: super::faces::face_count(world),
+            faces: per_room.iter().sum(),
+            largest_room_faces: per_room.iter().copied().max().unwrap_or(0),
             ..Self::default()
         };
         for room in &world.rooms {
@@ -329,9 +339,9 @@ impl GridBudget {
         budget
     }
 
-    /// Faces used as a fraction of [`MAX_WORLD_FACES`], percent.
+    /// The busiest room's faces as a fraction of [`MAX_ROOM_FACES`], percent.
     pub fn faces_percent(&self) -> usize {
-        self.faces * 100 / MAX_WORLD_FACES
+        self.largest_room_faces * 100 / MAX_ROOM_FACES
     }
 }
 
@@ -542,9 +552,17 @@ pub fn validate(world: &GridWorld) -> Vec<GridIssue> {
                 }));
             }
         }
-        let faces = super::faces::face_count(world);
-        if faces > MAX_WORLD_FACES {
-            issues.push(world_issue(GridIssueKind::TooManyFaces { count: faces }));
+        for (index, faces) in super::faces::room_face_counts(world)
+            .into_iter()
+            .enumerate()
+        {
+            if faces > MAX_ROOM_FACES {
+                issues.push(GridIssue {
+                    kind: GridIssueKind::TooManyFaces { count: faces },
+                    room: Some(index),
+                    cell: None,
+                });
+            }
         }
     }
     issues.sort_by_key(|i| core::cmp::Reverse(i.severity()));

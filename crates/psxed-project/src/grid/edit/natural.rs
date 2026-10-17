@@ -143,6 +143,9 @@ pub fn set_void(
     let before = surface.void;
     if void {
         surface.void |= which.bits();
+        // The void triangle is a half of the cell as cut by the diagonal, so
+        // voiding pins the diagonal: a later height change must not turn it.
+        surface.auto_split = false;
     } else {
         surface.void &= !which.bits();
     }

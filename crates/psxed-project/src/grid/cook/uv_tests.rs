@@ -113,7 +113,10 @@ fn with_the_window_fit_2x2_and_4x4_are_one_repeating_primitive() {
         assert_eq!(plan_area(t, q), 2 * 80 * 80);
         // The material carries a texture shape the window can use.
         assert_eq!(
-            psx_grid::tex_size(cooked.level.materials[usize::from(q.material)].tex_shape),
+            psx_grid::tex_size(
+                cooked.level.materials[usize::from(t.material_use[usize::from(q.material)])]
+                    .tex_shape
+            ),
             Some([64, 64])
         );
     }

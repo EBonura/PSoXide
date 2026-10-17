@@ -79,6 +79,57 @@ impl Default for BreakTargets {
     }
 }
 
+/// The intensity a break uses when none is given. The Cathedral's hand-made
+/// look measures at about 10 to 20 (`natural_tests`); 40, the first default,
+/// was too strong and read as rubble.
+pub const DEFAULT_INTENSITY: u32 = 15;
+
+/// A named look for a break: one click sets what the option row and the MCP
+/// tool otherwise take one field at a time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BreakStyle {
+    /// The Cathedral's sparse hand-made look: crumbled plateau lips and a
+    /// few cracked tiles, at the intensity the Cathedral measures at.
+    Cathedral,
+}
+
+impl BreakStyle {
+    /// Parse the name an MCP caller gives.
+    pub fn parse(name: &str) -> Option<Self> {
+        match name.to_ascii_lowercase().as_str() {
+            "cathedral" => Some(Self::Cathedral),
+            _ => None,
+        }
+    }
+
+    /// The intensity the look is made at.
+    pub const fn intensity(self) -> u32 {
+        match self {
+            Self::Cathedral => DEFAULT_INTENSITY,
+        }
+    }
+
+    /// The parameters the look is made with (everything but the walking
+    /// numbers and spawns, which the caller supplies).
+    pub fn params(self) -> BreakParams {
+        match self {
+            Self::Cathedral => BreakParams {
+                targets: BreakTargets {
+                    walls: true,
+                    floor: true,
+                    ceiling: false,
+                },
+                amplitude: 4,
+                snap: BreakSnap::Fine,
+                keep_walkable: true,
+                mix_materials: false,
+                jitter: 0,
+                ..BreakParams::default()
+            },
+        }
+    }
+}
+
 /// Parameters of a break (the editor's option row and the MCP tool).
 #[derive(Clone, Debug)]
 pub struct BreakParams {

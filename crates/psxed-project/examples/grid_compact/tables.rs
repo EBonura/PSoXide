@@ -50,10 +50,10 @@ impl Room {
             mover_verts: view.col.mover_verts.to_vec(),
             material_use: view.render.material_use.to_vec(),
             vertices: view.render.vertices.to_vec(),
-            quads: view.render.quads.to_vec(),
+            quads: level_ids(view.render.material_use, view.render.quads),
             cells: view.render.cells.to_vec(),
             lod_blocks: view.render.lod_blocks.to_vec(),
-            lod_quads: view.render.lod_quads.to_vec(),
+            lod_quads: level_ids(view.render.material_use, view.render.lod_quads),
             plane_refs: view.render.plane_refs.to_vec(),
             flags: h.flags,
             min_y: h.min_y,
@@ -84,4 +84,16 @@ impl Room {
         let c = self.cells[cell];
         usize::from(c.first)..usize::from(c.first) + usize::from(c.count)
     }
+}
+
+/// Quads with their room-local material index replaced by the level material
+/// id, the form the study codecs were written against.
+fn level_ids(material_use: &[u8], quads: &[psx_grid::Quad]) -> Vec<psx_grid::Quad> {
+    quads
+        .iter()
+        .map(|q| psx_grid::Quad {
+            material: material_use[usize::from(q.material)],
+            ..*q
+        })
+        .collect()
 }

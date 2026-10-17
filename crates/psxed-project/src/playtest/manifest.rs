@@ -1498,6 +1498,22 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     }
     out.push_str("];\n\n");
 
+    out.push_str(
+        "/// Stable id of each LOGIC record (a hash of the authored node), parallel to LOGIC.\n",
+    );
+    out.push_str("pub static LOGIC_IDS: &[psx_level::StableId] = &[\n");
+    for id in &package.logic_ids {
+        let _ = writeln!(out, "    psx_level::StableId({id:#010x}),");
+    }
+    out.push_str("];\n\n");
+
+    out.push_str("/// Stable spawn id of each GAME_ENTITIES record (a hash of the authored node), parallel to GAME_ENTITIES.\n");
+    out.push_str("pub static GAME_ENTITY_IDS: &[psx_level::StableId] = &[\n");
+    for id in &package.game_entity_ids {
+        let _ = writeln!(out, "    psx_level::StableId({id:#010x}),");
+    }
+    out.push_str("];\n\n");
+
     out.push_str("/// Placed souls-like game entities, room-local coordinates.\n");
     out.push_str("pub static GAME_ENTITIES: &[LevelGameEntityRecord] = &[\n");
     for entity in &package.game_entities {

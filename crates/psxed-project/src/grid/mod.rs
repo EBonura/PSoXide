@@ -101,4 +101,4 @@ pub use sector::{GridSector, WallEdge};
 pub use slope::SlopeClass;
 pub use surface::{GridSplit, GridSurface, GridTri, GridWall, WallFacing};
 pub use units::{GridScale, CLICK_UNITS, FINE_UNITS, SECTOR_UNITS, TEXELS_PER_SECTOR};
-pub use world::{GridWorld, SceneWorld};
+pub use world::{GridWorld, SceneWorld, StreamRadii};

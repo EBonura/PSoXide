@@ -70,7 +70,9 @@ fn native(world: &GridWorld) -> (Native, crate::grid::cook::CookedLevel) {
         .map(|c| Some(CollisionView::parse(leak(c)).unwrap()))
         .collect();
     let rooms: &'static [Option<CollisionView<'static>>] = rooms.leak();
-    let collision = GridCollision::new(level, rooms).expect("a collision world");
+    let collision = psx_grid::ResidentRooms::from_collisions(level, rooms)
+        .expect("a collision world")
+        .leak_collision();
     (Native { collision }, cooked)
 }
 

@@ -1835,6 +1835,12 @@ pub struct PlaytestPackage {
     pub logic: Vec<PlaytestLogic>,
     /// Placed souls-like game entities (enemies).
     pub game_entities: Vec<PlaytestGameEntity>,
+    /// Stable spawn id of each [`Self::game_entities`] record, parallel to
+    /// it: a hash of the authored node, so it survives a recook that reorders
+    /// or cuts the tables (`psx_level::StableId`).
+    pub game_entity_ids: Vec<u32>,
+    /// Stable id of each [`Self::logic`] record, parallel to it.
+    pub logic_ids: Vec<u32>,
     /// Single player spawn -- required.
     pub spawn: Option<PlaytestSpawn>,
     /// Cooked Character resources used by player / future

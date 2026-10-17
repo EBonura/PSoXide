@@ -571,6 +571,10 @@ pub fn build_package(
     let mut names = NameInterner::default();
     let mut logic: Vec<PlaytestLogic> = Vec::new();
     let mut game_entities: Vec<PlaytestGameEntity> = Vec::new();
+    // Stable ids parallel to `game_entities` and `logic`: hashes of the
+    // authored node, never table indices.
+    let mut game_entity_ids: Vec<u32> = Vec::new();
+    let mut logic_ids: Vec<u32> = Vec::new();
     let mut box_prop_indices_by_name: HashMap<String, Vec<u16>> = HashMap::new();
     let mut pending_door_links: Vec<PendingDoorLink> = Vec::new();
     // ResourceId → index into `models` for instance dedup.
@@ -681,7 +685,14 @@ pub fn build_package(
         _ => None,
     };
 
+    let mut previous_node: Option<crate::NodeId> = None;
     for node in scene.nodes() {
+        // The records the previous node cooked to get their stable ids.
+        if let Some(previous) = previous_node {
+            sync_stable_ids(&mut game_entity_ids, game_entities.len(), previous);
+            sync_stable_ids(&mut logic_ids, logic.len(), previous);
+        }
+        previous_node = Some(node.id);
         if node.id == scene.root {
             continue;
         }
@@ -1694,6 +1705,18 @@ pub fn build_package(
         }
     }
 
+    if let Some(previous) = previous_node {
+        sync_stable_ids(&mut game_entity_ids, game_entities.len(), previous);
+        sync_stable_ids(&mut logic_ids, logic.len(), previous);
+    }
+    for (what, ids) in [("game entity", &game_entity_ids), ("logic", &logic_ids)] {
+        let mut seen = std::collections::HashSet::new();
+        if let Some(duplicate) = ids.iter().find(|id| !seen.insert(**id)) {
+            report.error(format!(
+                "two {what} records share the stable id {duplicate:#010x}; recreate one of their nodes to give it a new id"
+            ));
+        }
+    }
     let world_objects = cook_world_objects(
         &image_props,
         &box_props,
@@ -2184,6 +2207,8 @@ pub fn build_package(
             vitality_circles,
             logic,
             game_entities,
+            game_entity_ids,
+            logic_ids,
             spawn,
             characters,
             player_controller,
@@ -2191,6 +2216,17 @@ pub fn build_package(
         }),
         report,
     )
+}
+
+/// Give every record cooked since the last call (up to `len`) a stable id from
+/// the authored node that made it: the hash of its node id and the record's
+/// ordinal within the node.
+fn sync_stable_ids(ids: &mut Vec<u32>, len: usize, node: crate::NodeId) {
+    let mut part = 0u8;
+    while ids.len() < len {
+        ids.push(psx_level::StableId::of_node_part(node.raw(), part).raw());
+        part = part.saturating_add(1);
+    }
 }
 
 fn collapse_exclusive_player_material(

@@ -148,7 +148,9 @@ fn preserve_look_leaves_the_face_multiset_and_the_cook_unchanged() {
                 let mut t: Vec<u16> = chunk
                     .quads
                     .iter()
-                    .map(|q| mats[usize::from(q.material)].texture_asset)
+                    .map(|q| {
+                        mats[usize::from(chunk.material_use[usize::from(q.material)])].texture_asset
+                    })
                     .collect();
                 t.sort_unstable();
                 t.dedup();
@@ -212,7 +214,7 @@ fn resolved_quads(
                 "{ring:?} d{} n{:?} tex{} f{}",
                 q.d,
                 q.n,
-                materials[usize::from(q.material)].texture_asset,
+                materials[usize::from(chunk.material_use[usize::from(q.material)])].texture_asset,
                 q.flags
             )
         })

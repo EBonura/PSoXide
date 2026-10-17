@@ -35,8 +35,17 @@ pub fn best_split(h: [i32; 4], current: GridSplit) -> GridSplit {
 
 /// Re-split `surface` when it follows its heights. Returns whether the
 /// diagonal changed.
+///
+/// A surface with a void triangle never re-splits: which half is void is
+/// defined by the diagonal, so turning it moves the void to the other half of
+/// the cell and the floor and ceiling (and the closure wall on the old
+/// diagonal) stop agreeing about where the opening is.
 pub fn resplit(surface: &mut GridSurface) -> bool {
-    if !surface.auto_split || surface.heights_b.is_some() || surface.is_planar() {
+    if !surface.auto_split
+        || surface.heights_b.is_some()
+        || surface.void != 0
+        || surface.is_planar()
+    {
         return false;
     }
     let split = best_split(surface.heights, surface.split);

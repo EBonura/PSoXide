@@ -34,7 +34,9 @@ pub(super) fn native(world: &GridWorld) -> Native {
         .collect();
     let rooms: &'static [Option<CollisionView<'static>>] = rooms.leak();
     Native {
-        collision: GridCollision::new(level, rooms).expect("a collision world"),
+        collision: psx_grid::ResidentRooms::from_collisions(level, rooms)
+            .expect("a collision world")
+            .leak_collision(),
     }
 }
 

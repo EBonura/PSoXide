@@ -585,9 +585,15 @@ pub fn all_faces_with(world: &GridWorld, defaults: &dyn UvDefaults) -> Vec<GridF
 
 /// Number of faces [`all_faces`] would return, without keeping them.
 pub fn face_count(world: &GridWorld) -> usize {
+    room_face_counts(world).iter().sum()
+}
+
+/// Faces of each room, in room order.
+pub fn room_face_counts(world: &GridWorld) -> Vec<usize> {
     let mut scratch = Vec::new();
-    let mut count = 0;
+    let mut counts = Vec::with_capacity(world.rooms.len());
     for (room_index, room) in world.rooms.iter().enumerate() {
+        let mut count = 0;
         for (x, z, _) in room.iter() {
             scratch.clear();
             cell_faces(world, room_index, x, z, &mut scratch);
@@ -598,8 +604,9 @@ pub fn face_count(world: &GridWorld) -> usize {
             super::plane_faces::plane_faces(world, room_index, index, &mut scratch);
             count += scratch.len();
         }
+        counts.push(count);
     }
-    count
+    counts
 }
 
 #[cfg(test)]

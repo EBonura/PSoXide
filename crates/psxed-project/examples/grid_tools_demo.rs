@@ -214,6 +214,7 @@ fn ramp(m: &Materials) -> GridRoom {
         scale: STARTER_SCALE,
         rooms: vec![room(m, 15, 5, 4 * SECTOR_UNITS)],
         shading: FacingShade::SUBTLE,
+        ..GridWorld::default()
     };
     let region = Region::from_rect(0, CellRect::from_corners([4, 0], [9, 4]));
     let params = RampParams {
@@ -236,6 +237,7 @@ fn stairs(m: &Materials) -> GridRoom {
         scale: STARTER_SCALE,
         rooms: vec![room(m, 15, 5, 4 * SECTOR_UNITS)],
         shading: FacingShade::SUBTLE,
+        ..GridWorld::default()
     };
     let params = StairsParams {
         width: 3,
@@ -350,6 +352,7 @@ fn main() {
         scale: STARTER_SCALE,
         rooms: vec![room],
         shading,
+        ..GridWorld::default()
     };
     // Where the player starts, by scenario: facing east along the ramp.
     let start = match scenario.as_str() {

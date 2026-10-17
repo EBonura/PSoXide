@@ -20,6 +20,47 @@ pub struct GridWorld {
     /// preview and the cook alike. Off for a world made before the setting.
     #[serde(default, skip_serializing_if = "FacingShade::is_off")]
     pub shading: FacingShade,
+    /// Draw, activation and prefetch radii, in sectors, written into the
+    /// level core.
+    #[serde(default, skip_serializing_if = "StreamRadii::is_default")]
+    pub stream: StreamRadii,
+}
+
+/// Radii in sectors, walked over the portal graph, that decide which rooms
+/// are drawn, hold active entities and (once rooms stream) are resident.
+/// They are the per-level knobs of `docs/grid/streaming-design.md` 3.4.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StreamRadii {
+    /// A room whose walk distance from the camera exceeds this is neither
+    /// drawn nor needed in memory. 0 draws every room that is reachable.
+    pub draw_far: u8,
+    /// Entities in rooms within this walk distance of the player think.
+    pub active_radius: u8,
+    /// Rooms between `draw_far` and `draw_far + lead_radius` are prefetched
+    /// by a streamer and evicted first.
+    pub lead_radius: u8,
+}
+
+impl StreamRadii {
+    /// Defaults. The draw distance is wider than any room of the reference
+    /// levels, so it only bounds a world made of many rooms.
+    pub const DEFAULT: Self = Self {
+        draw_far: 48,
+        active_radius: 32,
+        lead_radius: 8,
+    };
+
+    /// Whether these are the defaults (the document then omits them).
+    pub fn is_default(&self) -> bool {
+        *self == Self::DEFAULT
+    }
+}
+
+impl Default for StreamRadii {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
 }
 
 /// Axis-aligned box in editor units.

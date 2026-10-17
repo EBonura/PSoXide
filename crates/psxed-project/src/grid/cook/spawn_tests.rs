@@ -4,7 +4,7 @@
 use psx_engine::{
     Angle, CharacterMotorConfig, CharacterMotorInput, CharacterMotorState, RoomPoint,
 };
-use psx_grid::collision::{GridCollision, GridTraceProvider};
+use psx_grid::collision::GridTraceProvider;
 use psx_grid::write::aligned_copy;
 use psx_grid::{CollisionView, LevelView};
 
@@ -43,7 +43,9 @@ fn the_player_spawn_stands_on_the_native_floor() {
             .map(|c| Some(CollisionView::parse(leak_bytes(c)).unwrap()))
             .collect();
         let rooms: &'static [Option<CollisionView<'static>>] = rooms.leak();
-        let native = GridCollision::new(level, rooms).expect("a collision world");
+        let native = psx_grid::ResidentRooms::from_collisions(level, rooms)
+            .expect("a collision world")
+            .leak_collision();
         let scene = project.active_scene();
         let spawn = scene
             .nodes()

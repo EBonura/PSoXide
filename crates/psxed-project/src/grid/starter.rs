@@ -93,6 +93,7 @@ pub fn starter_world(
         // A new world shades faces by the way they face, so a step or a
         // platform reads even under one lamp.
         shading: super::light::FacingShade::SUBTLE,
+        stream: super::world::StreamRadii::DEFAULT,
     }
 }
 

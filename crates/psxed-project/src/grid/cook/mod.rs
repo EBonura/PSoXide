@@ -11,12 +11,14 @@
 
 pub mod collision;
 pub mod lod;
+pub mod mesh;
 pub mod plane_collision;
 pub mod portals;
 pub mod render;
 pub mod units;
 
 use psx_grid::write::{LevelCore, RoomChunk};
+use psx_grid::ResidentRooms;
 use psx_grid::{
     Material, RoomRecord, CHUNK_HAS_LOD, CHUNK_HAS_PLANES, LEVEL_HAS_PLANES, LEVEL_HAS_SKY,
     ROOM_FOG, ROOM_OUTDOOR, SECTION_COUNT, SECTOR_BYTES,
@@ -29,14 +31,15 @@ use crate::grid::light::GridLight;
 use crate::grid::limits;
 use crate::grid::world::GridWorld;
 
-/// Most pages (2 KiB) the cook lets the resident set of a level reach. A
-/// cook-time cap chosen to stay well inside the console's RAM; the runtime
-/// reads the same number from the core's `pool_pages`.
-pub const POOL_PAGE_CAP: usize = 512;
-/// Portal hops of rooms kept resident around the player room.
-pub const RESIDENT_HOPS: u8 = 2;
-/// Extra hops prefetched.
-pub const PREFETCH_HOPS: u8 = 1;
+/// Most pages (2 KiB) one room chunk may take: the core's `max_room_pages`
+/// is a byte, and a streamed unit must fit a pool run. This is a per-room
+/// cap. The level as a whole has none: only the rooms around the player are
+/// resident at once. Until a streamer loads rooms from the disc the guest
+/// still holds every chunk, so [`ALL_RESIDENT_ADVISORY_PAGES`] warns.
+pub const MAX_ROOM_PAGES: usize = 255;
+/// Total chunk pages above which the cook warns that the all-resident
+/// runtime (every chunk baked into the guest) may not link.
+pub const ALL_RESIDENT_ADVISORY_PAGES: usize = 512;
 
 /// Everything the cook needs besides the document.
 pub struct CookInput<'a> {
@@ -77,8 +80,11 @@ pub struct CookReport {
     pub materials: usize,
     /// Portals (directed).
     pub portals: usize,
-    /// Resident pages the level needs with everything loaded.
+    /// Pages (2 KiB) of every room chunk together, the footprint of an
+    /// all-resident run.
     pub pool_pages: usize,
+    /// Pages of the largest room chunk, the biggest pool run one room needs.
+    pub max_room_pages: usize,
     /// Non-fatal findings.
     pub warnings: Vec<String>,
 }
@@ -290,8 +296,9 @@ pub fn cook_level(
                 .ok()
         })
         .collect();
-    let world_collision = psx_grid::collision::GridCollision::new(probe_level, &probe_views)
+    let probe_set = ResidentRooms::from_collisions(probe_level, &probe_views)
         .ok_or_else(|| "collision world could not be built".to_string())?;
+    let world_collision = probe_set.collision();
     let own_los = |from: [f64; 3], to: [f64; 3]| {
         let r = |p: [f64; 3]| p.map(|v| v.round() as i32);
         !world_collision.line_of_sight(r(from), r(to))
@@ -317,13 +324,22 @@ pub fn cook_level(
         };
         let ambient = room.ambient;
         let mut ren = render::build(&mut cx, index, origin, ambient)?;
-        let lod = lod::build(
+        let mut lod = lod::build(
             room.width,
             room.depth,
             s as i32,
             input.lod_far_cells > 0,
             &mut ren,
         );
+        // The room's quads name its own material table (`MATERIAL_USE`), so a
+        // room can be bound, loaded and evicted without the rest of the level.
+        let mut local = [0u8; 256];
+        for (rank, &level_id) in ren.material_use.iter().enumerate() {
+            local[usize::from(level_id)] = rank as u8;
+        }
+        for quad in ren.quads.iter_mut().chain(lod.quads.iter_mut()) {
+            quad.material = local[usize::from(quad.material)];
+        }
         let (mut lo, mut hi) = col.range.unwrap_or((0, 0));
         for v in &ren.vertices {
             lo = lo.min(i32::from(v.y));
@@ -439,19 +455,32 @@ pub fn cook_level(
         report.rooms[i].bytes = bytes.len();
         chunks.push(bytes);
     }
-    if total_pages > POOL_PAGE_CAP {
+    let max_room_pages = chunks.iter().map(|c| pages(c.len())).max().unwrap_or(0);
+    if max_room_pages > MAX_ROOM_PAGES {
+        let (room, big) = chunks
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, c)| c.len())
+            .map_or((0, 0), |(i, c)| (i, c.len()));
         return Err(format!(
-            "the level needs {total_pages} pages ({} KiB) of room data resident, the cook cap is {POOL_PAGE_CAP}",
+            "room {room} cooks to {big} bytes ({max_room_pages} pages), at most {MAX_ROOM_PAGES} pages ({} KiB) per room; split the room",
+            MAX_ROOM_PAGES * 2
+        ));
+    }
+    if total_pages > ALL_RESIDENT_ADVISORY_PAGES {
+        report.warnings.push(format!(
+            "the rooms total {total_pages} pages ({} KiB); the runtime still loads every chunk at boot, so a level this big may not link",
             total_pages * 2
         ));
     }
-    let level = LevelCore {
+    let radii = world.stream;
+    let mut level = LevelCore {
         flags: (if any_sky { LEVEL_HAS_SKY } else { 0 })
             | (if any_planes { LEVEL_HAS_PLANES } else { 0 }),
         sector_units: s as u16,
-        pool_pages: total_pages as u16,
-        resident_hops: RESIDENT_HOPS,
-        prefetch_hops: PREFETCH_HOPS,
+        draw_far: radii.draw_far,
+        active_radius: radii.active_radius,
+        lead_radius: radii.lead_radius,
         rooms: records,
         portals: all_portals,
         materials: materials
@@ -465,12 +494,15 @@ pub fn cook_level(
                 tex_shape: m.tex_shape(),
             })
             .collect(),
+        ..LevelCore::default()
     };
+    level.measure_chunks(&tables, chunks.iter().map(|c| pages(c.len())));
     let core = level.to_bytes();
     report.core_bytes = core.len();
     report.materials = materials.slots.len();
     report.portals = level.portals.len();
     report.pool_pages = total_pages;
+    report.max_room_pages = max_room_pages;
     Ok(CookedLevel {
         core,
         chunks,
@@ -488,6 +520,8 @@ mod convert_tests;
 #[cfg(test)]
 mod derived_tests;
 #[cfg(test)]
+mod gap_tests;
+#[cfg(test)]
 mod motor_harness;
 #[cfg(test)]
 mod natural_tests;
@@ -499,6 +533,8 @@ mod ramp_tests;
 mod rough_tests;
 #[cfg(test)]
 mod spawn_tests;
+#[cfg(test)]
+mod stream_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
