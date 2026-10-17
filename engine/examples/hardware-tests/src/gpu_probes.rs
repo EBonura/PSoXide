@@ -15,8 +15,10 @@
 //! drawing, so GPUSTAT bit 24 going high means the last primitive has been
 //! drawn. Textures are opaque.
 //!
-//! The window family (`0x140` and up) prices GP0(E2), the texture window the
-//! grid renderer uses to repeat a texture inside one primitive. Every grid
+//! The window family (`0x140` and up) is the grid-line E2 probe, pending port
+//! to the consolidated suite (no suite version of its own). It prices GP0(E2),
+//! the texture window the grid renderer uses to repeat a texture inside one
+//! primitive. Every grid
 //! packet carries its own E2 word in front of the polygon, so the questions
 //! are what that word costs by itself, what an active window costs, and what
 //! it costs to change window between neighbouring primitives (the texture

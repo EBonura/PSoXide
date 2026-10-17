@@ -217,9 +217,9 @@ unsafe extern "C" {
 //
 // History, one entry per version: docs/hardware-test-versions.md.
 const SUITE_VERSION_MAJOR: u8 = 1;
-const SUITE_VERSION_MINOR: u8 = 28;
+const SUITE_VERSION_MINOR: u8 = 27;
 /// Display form. Keep in step with the two constants above.
-const SUITE_VERSION: &str = "HWTEST v1.28";
+const SUITE_VERSION: &str = "HWTEST v1.27";
 const SCREEN_W: i16 = 320;
 const SCREEN_H: i16 = 240;
 const FONT_TPAGE: TexturePage = TexturePage::new(320, 0, TextureDepth::Bit4);
@@ -695,8 +695,9 @@ struct ScanReport {
 
 /// v1.26 added up to 127 MDEC diagnostic records (fmv_diag.rs) on top of the
 /// 189 a characterisation plus an FMV run fills; v1.27 adds the console tests'
-/// 18 (console_tests.rs); v1.28 adds the six texture-window GPU cases
-/// (0x140-0x145, gpu_probes.rs).
+/// 18 (console_tests.rs). The grid-line E2 probe adds six texture-window GPU
+/// cases (0x140-0x145, gpu_probes.rs) without a version of its own: it is
+/// pending a port to the consolidated suite.
 const TIMING_RECORD_COUNT: usize = 360;
 const _: () = assert!(TIMING_RECORD_COUNT == 342 + console_tests::RECORD_SLOTS);
 
