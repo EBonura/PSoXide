@@ -285,7 +285,27 @@ impl ReflectionJoint {
     fn restore(self) {
         if let Some(matrix) = self.saved {
             psx_gte::scene::load_rotation(&matrix);
+            settle_gte_matrix_write();
         }
+    }
+}
+
+/// Three buffer NOPs after a matrix load. Every other matrix load in the
+/// engine reaches its first MVMVA at least seven instructions after the last
+/// control write (a translation load follows it); this walker has no
+/// translation load, so the distance is made up here rather than assumed to
+/// be enough on silicon (the CTC2 to MVMVA hazard window is not measured).
+#[inline(always)]
+fn settle_gte_matrix_write() {
+    #[cfg(target_arch = "mips")]
+    // SAFETY: three no-op instructions; no registers, memory or flags are touched.
+    unsafe {
+        core::arch::asm!(
+            ".word 0",
+            ".word 0",
+            ".word 0",
+            options(nostack, nomem, preserves_flags)
+        );
     }
 }
 
@@ -316,6 +336,7 @@ fn facet_reflection_words(
                     rotation.saved = Some(psx_gte::scene::read_rotation());
                 }
                 psx_gte::scene::load_rotation(&transform.rotation);
+                settle_gte_matrix_write();
                 true
             }
             None => false,
