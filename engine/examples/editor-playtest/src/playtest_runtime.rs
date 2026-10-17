@@ -217,7 +217,6 @@ impl Playtest {
         }
         let position = self.motor.position();
         let changed = self.poi_save.set_resume_position(SavedPlayerPosition {
-            room: self.room_index.raw(),
             x: position.x,
             y: position.y,
             z: position.z,
@@ -791,7 +790,8 @@ impl Playtest {
         // calls re-run on future checkpoint respawns), then push the
         // initial door states onto their box props (START_ON doors
         // begin open without a fire event).
-        self.game_entities.spawn_from_records(GAME_ENTITIES);
+        self.game_entities
+            .spawn_from_records_with_ids(GAME_ENTITIES, GAME_ENTITY_IDS);
         self.game_entities
             .enable_combat_flow(self.player_has_ranged_weapon());
         self.game_entities
@@ -911,7 +911,8 @@ impl Playtest {
         // New life: the next successful weapon socket resolution counts
         // as this life's PLAYER_WEAPON_ATTACHMENTS event.
         self.weapon_attach_reported = false;
-        self.game_entities.spawn_from_records(GAME_ENTITIES);
+        self.game_entities
+            .spawn_from_records_with_ids(GAME_ENTITIES, GAME_ENTITY_IDS);
         self.game_entities
             .enable_combat_flow(self.player_has_ranged_weapon());
         self.game_entities
@@ -2217,6 +2218,13 @@ impl Playtest {
             telemetry::counter(telemetry::counter::PLAYER_CHECKPOINT_ACTIVATIONS, 1);
         }
         self.checkpoint = Some(checkpoint);
+        // The save names the checkpoint by its stable id (the hash of its
+        // authored id), never by a table index.
+        let stable = psx_level::StableId::of_name(checkpoint.checkpoint_id).raw();
+        if self.poi_save.checkpoint_id != stable {
+            self.poi_save.checkpoint_id = stable;
+            self.poi_save_dirty = true;
+        }
         // Checkpoints are the genre-visible save boundary. POI interaction
         // stays smooth; its read/reward state reaches the card here instead.
         self.flush_poi_save(port);
@@ -2682,7 +2690,6 @@ mod life_reset_tests {
         let mut scene = unsafe { std::boxed::Box::from_raw(raw) };
         scene.poi_save.set_flag(0);
         scene.poi_save.set_resume_position(SavedPlayerPosition {
-            room: 0,
             x: 1,
             y: 2,
             z: 3,
@@ -2707,7 +2714,9 @@ mod life_reset_tests {
             checkpoint_id: "old run",
         });
         assert!(scene.power_up_inventory.add(BoostModuleId(1)));
-        scene.game_entities.spawn_from_records(GAME_ENTITIES);
+        scene
+            .game_entities
+            .spawn_from_records_with_ids(GAME_ENTITIES, GAME_ENTITY_IDS);
         let enemy = GAME_ENTITIES
             .iter()
             .position(|record| record.flags & psx_level::game_entity_flags::ENABLED != 0);

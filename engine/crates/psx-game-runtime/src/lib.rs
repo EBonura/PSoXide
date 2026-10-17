@@ -32,6 +32,7 @@ pub mod combat_policy;
 pub mod combat_timing;
 pub mod cylinder_props;
 pub mod destructibles;
+pub mod dormant;
 pub mod entities;
 pub mod image_props;
 pub mod logic;

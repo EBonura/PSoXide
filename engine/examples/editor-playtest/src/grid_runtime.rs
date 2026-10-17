@@ -1,14 +1,15 @@
 //! Normal-playtest ownership of one cooked sector-grid world.
 //!
-//! Rooms are `psx-grid` chunks, collision is the native per-sector provider,
-//! activation walks the portal graph, the sky gate is a per-cell flag, and
+//! Rooms are `psx-grid` chunks held in a resident set (rooms can be added and
+//! removed at any time, a missing room is a solid box), collision is the
+//! native per-sector provider, draw range and entity activation are walk
+//! distances over the portal graph, the sky gate is a per-cell flag, and
 //! drawing is the row-span grid renderer.
 
 use core::fmt;
 
 use alloc::vec::Vec;
 
-use psx_asset::Texture;
 use psx_engine::{
     commit_body_direction_with_trace_provider, commit_body_step_with_trace_provider,
     trace_collision, BodyStep, CharacterBlockerTraceProvider, CharacterCollisionAabb,
@@ -18,26 +19,29 @@ use psx_engine::{
     ThirdPersonCameraInput, ThirdPersonCameraState, ThirdPersonCameraTarget, WorldCamera,
 };
 use psx_game_runtime::destructibles::RuntimeDestructibles;
-use psx_gpu::material::TextureWindow;
-use psx_grid::collision::{GridCollision, GridTraceProvider};
+use psx_grid::collision::GridTraceProvider;
 use psx_grid::contents::{contents_of_liquid_kind, LiquidContentsSample, CONTENTS_EMPTY};
 #[cfg(target_arch = "mips")]
 use psx_grid::render::load_gte_clip_planes;
 use psx_grid::render::{
-    load_view_rotation, FrustumPlanes, GridFrame, GridMaterial, GridPhase, GridRenderer,
-    RoomCamera, ViewProjection, ViewTransform, CLIP_ALL_PLANES,
+    load_view_rotation, FrustumPlanes, GridFrame, GridPhase, GridRenderer, RoomCamera,
+    ViewProjection, ViewTransform, CLIP_ALL_PLANES,
 };
-use psx_grid::{CollisionView, FormatError, LevelView, RoomView, LEVEL_HAS_LIQUIDS, SECTOR_BYTES};
-use psx_gte::math::{Vec3I16 as GteVec3I16, Vec3I32 as GteVec3I32};
+use psx_grid::{
+    FormatError, LevelView, ResidentError, ResidentRooms, RoomActivity, RoomView,
+    LEVEL_HAS_LIQUIDS, SECTOR_BYTES,
+};
+use psx_gte::math::Vec3I32 as GteVec3I32;
 use psx_gte::scene;
-use psx_level::{find_asset_of_kind, world_object_flags, AssetId, AssetKind};
+use psx_level::world_object_flags;
 
-use crate::generated::{ASSETS, WORLD_OBJECTS};
+use crate::generated::WORLD_OBJECTS;
+use crate::grid_materials::{bind_pending, Pending};
 use crate::world_common::{
     view_camera, world_view_rotation, CountingTraceProvider, VisibilityBounds,
 };
 use crate::world_objects_runtime::WorldObjectVisibility;
-use crate::{ensure_room_texture_uploaded, ensure_texture_uploaded, telemetry, PROJECTION};
+use crate::{telemetry, PROJECTION};
 
 #[repr(C)]
 struct Aligned<Bytes: ?Sized> {
@@ -63,26 +67,11 @@ static GRID_ROOMS: &[u8] = {
     &ALIGNED.bytes
 };
 
-/// Portal hops around the player room that count as active.
-const ACTIVE_HOPS: usize = 2;
-/// Words in the room bitset; the format allows 256 rooms.
-const ROOM_SET_WORDS: usize = 8;
-
 /// Ticks between sight-line tests of one model instance.
 const VIEW_REFRESH_TICKS: u32 = 4;
 
-type RoomSet = [u32; ROOM_SET_WORDS];
-
 fn box_contains(min: [i32; 3], max: [i32; 3], point: [i32; 3]) -> bool {
     (0..3).all(|axis| point[axis] >= min[axis] && point[axis] <= max[axis])
-}
-
-fn set_has(set: &RoomSet, room: usize) -> bool {
-    set[room >> 5] & (1 << (room & 31)) != 0
-}
-
-fn set_add(set: &mut RoomSet, room: usize) {
-    set[room >> 5] |= 1 << (room & 31);
 }
 
 #[derive(Debug)]
@@ -90,7 +79,7 @@ pub(super) enum GridRuntimeInitError {
     EmptyWorld,
     Level(FormatError),
     Room { room: usize, error: FormatError },
-    TooManyRooms(usize),
+    Resident { room: usize, error: ResidentError },
     NoMaterials,
     Collision,
 }
@@ -103,8 +92,11 @@ impl fmt::Display for GridRuntimeInitError {
             }
             Self::Level(e) => write!(formatter, "grid level core refused: {e}"),
             Self::Room { room, error } => write!(formatter, "grid room {room} refused: {error}"),
-            Self::TooManyRooms(n) => {
-                write!(formatter, "{n} grid rooms, at most {}", ROOM_SET_WORDS * 32)
+            Self::Resident { room, error } => {
+                write!(
+                    formatter,
+                    "grid room {room} could not be made resident: {error:?}"
+                )
             }
             Self::NoMaterials => formatter.write_str("grid level has no materials"),
             Self::Collision => formatter.write_str("grid collision could not be built"),
@@ -112,76 +104,24 @@ impl fmt::Display for GridRuntimeInitError {
     }
 }
 
-/// Resolve one level material to its VRAM binding. Returns `None` while the
-/// texture upload is still queued.
-fn resolve_material(material: &psx_grid::Material) -> Option<GridMaterial> {
-    let asset_id = AssetId(material.texture_asset);
-    let asset = find_asset_of_kind(ASSETS, asset_id, AssetKind::Texture).unwrap_or_else(|| {
-        panic!(
-            "grid material references missing texture asset {}",
-            material.texture_asset
-        )
-    });
-    assert!(
-        !asset.bytes.is_empty(),
-        "grid texture asset {} has no baked bytes",
-        material.texture_asset
-    );
-    let texture = Texture::from_bytes(asset.bytes).unwrap_or_else(|_| {
-        panic!(
-            "grid texture asset {} is not a valid PSXT",
-            material.texture_asset
-        )
-    });
-    let slot = if texture.is_index_zero_transparent() || material.blend != 0 {
-        ensure_texture_uploaded(asset_id, asset.bytes)
-    } else {
-        ensure_room_texture_uploaded(asset_id, asset.bytes)
-    }?;
-    if !slot.ready {
-        return None;
-    }
-    let [u, v] = slot.texture_window.origin_texels();
-    // Blend code in tpage bits 5-6: average 0, add 1, subtract 2, add-quarter 3.
-    let (blend_bits, command_bits) = match material.blend {
-        1 => (0u16, 0x0200_0000u32),
-        2 => (1 << 5, 0x0200_0000),
-        3 => (2 << 5, 0x0200_0000),
-        4 => (3 << 5, 0x0200_0000),
-        _ => (0, 0),
-    };
-    Some(GridMaterial {
-        tpage: (slot.tpage_word & !0x0060) | blend_bits,
-        clut: slot.clut_word,
-        uv_origin: u16::from(u) | (u16::from(v) << 8),
-        command_bits,
-        // A tile spans 64 page-local texels; the packed add in the packet
-        // writer must not carry between bytes.
-        resident: u16::from(u) + 64 <= 256 && u16::from(v) + 64 <= 256,
-        // The window that wraps raw UVs back onto this texture. A texture
-        // without a window placement (a whole page) cannot repeat; its
-        // `REPEAT` quads are skipped, not drawn wrong.
-        window_word: if slot.texture_window == TextureWindow::NONE {
-            0
-        } else {
-            slot.texture_window.word()
-        },
-    })
-}
-
 pub(super) struct GridRuntime {
     level: LevelView<'static>,
-    rooms: &'static [RoomView<'static>],
-    world: GridCollision<'static>,
+    /// The rooms in memory right now. Every room is loaded at boot (the chunks
+    /// are baked into the guest) but nothing below assumes it.
+    resident: ResidentRooms<'static>,
+    activity: RoomActivity,
     renderer: GridRenderer,
-    materials: Vec<GridMaterial>,
-    materials_latched: bool,
+    /// Every resident room's materials were bound when the set last changed.
+    materials_epoch: Option<u32>,
+    /// Scratch of [`bind_pending`].
+    material_scratch: Vec<Pending>,
     projection: ViewProjection,
     /// Room the observer was last found in, the search hint.
     room_hint: usize,
-    /// Rooms within [`ACTIVE_HOPS`] of the last observer room.
-    active: RoomSet,
-    active_for: Option<usize>,
+    /// Scratch: rooms within the draw distance, then the ones that touch the
+    /// frustum.
+    draw_scratch: Vec<usize>,
+    visible_scratch: Vec<usize>,
     last_world_packet_words: usize,
     camera_traces: u32,
     /// Sight-line cache for [`Self::visible_view_bounds_mask`].
@@ -200,30 +140,13 @@ impl GridRuntime {
         }
         let level = LevelView::parse(GRID_LEVEL).map_err(GridRuntimeInitError::Level)?;
         level.validate_full().map_err(GridRuntimeInitError::Level)?;
-        if level.rooms.len() > ROOM_SET_WORDS * 32 {
-            return Err(GridRuntimeInitError::TooManyRooms(level.rooms.len()));
-        }
         if level.materials.is_empty() {
             return Err(GridRuntimeInitError::NoMaterials);
         }
-        let mut rooms: Vec<RoomView<'static>> = Vec::with_capacity(level.rooms.len());
-        let mut collisions: Vec<Option<CollisionView<'static>>> =
-            Vec::with_capacity(level.rooms.len());
-        for (index, record) in level.rooms.iter().enumerate() {
-            let start = usize::try_from(record.pack_sector).unwrap_or(usize::MAX) * SECTOR_BYTES;
-            let bytes = GRID_ROOMS.get(start..).ok_or(GridRuntimeInitError::Room {
-                room: index,
-                error: FormatError::Truncated,
-            })?;
-            let view = RoomView::parse(bytes)
-                .map_err(|error| GridRuntimeInitError::Room { room: index, error })?;
-            collisions.push(Some(view.col));
-            rooms.push(view);
-        }
-        let rooms: &'static [RoomView<'static>] = rooms.leak();
-        let collisions: &'static [Option<CollisionView<'static>>] = collisions.leak();
-        let world = GridCollision::new(level, collisions).ok_or(GridRuntimeInitError::Collision)?;
-        let renderer = GridRenderer::for_rooms(rooms.iter());
+        let resident = ResidentRooms::new(level).ok_or(GridRuntimeInitError::Collision)?;
+        // Scratch comes from the core's maxima, so it is right whichever
+        // rooms are resident.
+        let renderer = GridRenderer::with_maxima(&level.maxima());
         let projection = ViewProjection {
             focal_length: PROJECTION.focal_length,
             half_width: i32::from(PROJECTION.screen_x),
@@ -231,23 +154,74 @@ impl GridRuntime {
             ..ViewProjection::DEFAULT
         };
         crate::game_trace("editor-playtest: grid runtime assemble");
-        Ok(Self {
+        let mut runtime = Self {
             level,
-            rooms,
-            world,
+            resident,
+            activity: RoomActivity::new(&level),
             renderer,
-            materials: alloc::vec![GridMaterial::default(); level.materials.len()],
-            materials_latched: false,
+            materials_epoch: None,
+            material_scratch: Vec::new(),
             projection,
             room_hint: 0,
-            active: [0; ROOM_SET_WORDS],
-            active_for: None,
+            draw_scratch: Vec::new(),
+            visible_scratch: Vec::new(),
             last_world_packet_words: 0,
             camera_traces: 0,
             view_known: 0,
             view_seen: 0,
             view_phase: 0,
-        })
+        };
+        // Everything is loaded at boot: the disc streamer that would load and
+        // evict rooms on demand calls `add_room` and `remove_room` the same
+        // way.
+        for index in 0..level.rooms.len() {
+            let start = usize::try_from(level.rooms[index].pack_sector).unwrap_or(usize::MAX)
+                * SECTOR_BYTES;
+            let bytes = GRID_ROOMS.get(start..).ok_or(GridRuntimeInitError::Room {
+                room: index,
+                error: FormatError::Truncated,
+            })?;
+            runtime.add_room(index, bytes)?;
+        }
+        Ok(runtime)
+    }
+
+    // ------------------------------------------------------------------
+    // The resident set
+    // ------------------------------------------------------------------
+
+    /// Make room `room` resident from its chunk bytes (the first bytes of the
+    /// chunk's pack entry; `bytes` may run on into the next chunk). Its
+    /// materials are bound by the next [`Self::refresh_materials`] and it is
+    /// not drawn before that.
+    pub(super) fn add_room(
+        &mut self,
+        room: usize,
+        bytes: &'static [u8],
+    ) -> Result<(), GridRuntimeInitError> {
+        let view =
+            RoomView::parse(bytes).map_err(|error| GridRuntimeInitError::Room { room, error })?;
+        self.resident
+            .insert(room, view)
+            .map_err(|error| GridRuntimeInitError::Resident { room, error })?;
+        self.materials_epoch = None;
+        Ok(())
+    }
+
+    /// Drop room `room` from memory. Bodies and traces meet a solid box where
+    /// it was; nothing draws or activates in it.
+    // The disc streamer is not built: this build loads every room at boot and
+    // never evicts one, so only the test exercises the call.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn remove_room(&mut self, room: usize) -> bool {
+        self.materials_epoch = None;
+        self.resident.remove(room).is_some()
+    }
+
+    /// Rooms in memory.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn resident_rooms(&self) -> usize {
+        self.resident.len()
     }
 
     // ------------------------------------------------------------------
@@ -256,80 +230,56 @@ impl GridRuntime {
 
     /// Room containing `point`, updating the search hint.
     fn room_of(&mut self, point: [i32; 3]) -> Option<usize> {
-        let located = self.world.locate(self.room_hint, point)?;
+        let located = self.resident.collision().locate(self.room_hint, point)?;
         self.room_hint = located.room;
         Some(located.room)
     }
 
-    /// World-space bounds of room `index`.
-    fn room_bounds(&self, index: usize) -> ([i32; 3], [i32; 3]) {
-        let record = &self.level.rooms[index];
-        let s = self.level.sector_units() as i32;
-        let min = [
-            record.origin[0],
-            record.origin[1] + i32::from(record.min_y),
-            record.origin[2],
-        ];
-        let max = [
-            record.origin[0] + i32::from(record.width) * s,
-            record.origin[1] + i32::from(record.max_y),
-            record.origin[2] + i32::from(record.depth) * s,
-        ];
-        (min, max)
-    }
-
-    /// Rooms within [`ACTIVE_HOPS`] portal hops of `from`, nearest first.
-    fn ring(&self, from: usize, hops: usize, out: &mut Vec<usize>) {
-        out.clear();
-        out.push(from);
-        let mut frontier = 0usize;
-        for _ in 0..hops {
-            let end = out.len();
-            while frontier < end {
-                let room = out[frontier];
-                frontier += 1;
-                for portal in self.level.room_portals(room) {
-                    let dest = usize::from(portal.dest);
-                    if !out.contains(&dest) {
-                        out.push(dest);
-                    }
-                }
-            }
-        }
-    }
-
-    /// Refresh the active room set around `observer`. Returns whether the
+    /// Refresh the activation search around `observer`. Returns whether the
     /// observer is inside the world at all.
     fn activate(&mut self, observer: RoomPoint) -> bool {
-        let Some(room) = self.room_of([observer.x, observer.y, observer.z]) else {
+        let at = [observer.x, observer.y, observer.z];
+        let Some(room) = self.room_of(at) else {
             return false;
         };
-        if self.active_for != Some(room) {
-            let mut ring = Vec::new();
-            self.ring(room, ACTIVE_HOPS, &mut ring);
-            self.active = [0; ROOM_SET_WORDS];
-            for &r in &ring {
-                set_add(&mut self.active, r);
-            }
-            self.active_for = Some(room);
-        }
+        telemetry::stage_begin(telemetry::stage::SIM_ROOM_TRACK);
+        self.activity.track_player(&self.level, room, at);
+        telemetry::stage_end(telemetry::stage::SIM_ROOM_TRACK);
         true
     }
 
     fn point_active(&mut self, point: [i32; 3]) -> bool {
-        self.world
+        self.resident
+            .collision()
             .locate(self.room_hint, point)
-            .is_some_and(|l| set_has(&self.active, l.room))
+            .is_some_and(|l| self.activity.room_active(&self.resident, l.room))
     }
 
     fn bounds_active(&self, min: [i32; 3], max: [i32; 3]) -> bool {
-        (0..self.rooms.len()).any(|room| {
-            if !set_has(&self.active, room) {
-                return false;
-            }
-            let (rmin, rmax) = self.room_bounds(room);
+        self.activity.active_rooms(&self.resident).any(|room| {
+            let (rmin, rmax) = self.level.room_bounds(room);
             (0..3).all(|axis| min[axis] <= rmax[axis] && max[axis] >= rmin[axis])
         })
+    }
+
+    /// Like [`Self::activate`], for a camera position: the camera and the
+    /// player keep separate searches.
+    fn activate_camera(&mut self, observer: RoomPoint) -> bool {
+        let at = [observer.x, observer.y, observer.z];
+        let Some(room) = self.room_of(at) else {
+            return false;
+        };
+        self.activity.track_camera(&self.level, room, at);
+        true
+    }
+
+    fn camera_bounds_active(&self, min: [i32; 3], max: [i32; 3]) -> bool {
+        self.activity
+            .camera_active_rooms(&self.resident)
+            .any(|room| {
+                let (rmin, rmax) = self.level.room_bounds(room);
+                (0..3).all(|axis| min[axis] <= rmax[axis] && max[axis] >= rmin[axis])
+            })
     }
 
     // psx-numeric-allow-next-line: one bit per queried point; the width IS the caller's point capacity
@@ -424,9 +374,10 @@ impl GridRuntime {
         let cx = min[0].saturating_add(max[0].saturating_sub(min[0]) / 2);
         let cz = min[2].saturating_add(max[2].saturating_sub(min[2]) / 2);
         let height = max[1].saturating_sub(min[1]);
+        let world = self.resident.collision();
         [2, 1, 3].into_iter().any(|quarter_steps| {
             let y = min[1].saturating_add(height / 4 * quarter_steps);
-            self.world.line_of_sight(from, [cx, y, cz])
+            world.line_of_sight(from, [cx, y, cz])
         })
     }
 
@@ -445,9 +396,10 @@ impl GridRuntime {
             [center[0], center[1], min[2]],
             [center[0], center[1], max[2]],
         ];
+        let world = self.resident.collision();
         samples
             .into_iter()
-            .any(|sample| self.world.line_of_sight(from, sample))
+            .any(|sample| world.line_of_sight(from, sample))
     }
 
     pub(super) fn visible_world_objects(
@@ -456,7 +408,7 @@ impl GridRuntime {
         destructibles: &RuntimeDestructibles<{ psx_level::MAX_DESTRUCTIBLES }>,
     ) -> WorldObjectVisibility {
         let observer = RoomPoint::new(camera.position.x, camera.position.y, camera.position.z);
-        if !self.activate(observer) {
+        if !self.activate_camera(observer) {
             return WorldObjectVisibility::NONE;
         }
         let eye = [observer.x, observer.y, observer.z];
@@ -469,7 +421,7 @@ impl GridRuntime {
             {
                 continue;
             }
-            if !self.bounds_active(object.bounds_min, object.bounds_max) {
+            if !self.camera_bounds_active(object.bounds_min, object.bounds_max) {
                 continue;
             }
             if object.flags & world_object_flags::DIRECT_OCCLUSION != 0
@@ -527,7 +479,10 @@ impl GridRuntime {
         ];
         let mut out = LiquidContentsSample::default();
         for (i, y) in samples.into_iter().enumerate() {
-            let code = self.world.contents_at([position.x, y, position.z]);
+            let code = self
+                .resident
+                .collision()
+                .contents_at([position.x, y, position.z]);
             if code != 0 {
                 let contents = contents_of_liquid_kind(code);
                 if out.contents == CONTENTS_EMPTY || contents < out.contents {
@@ -545,37 +500,29 @@ impl GridRuntime {
     // Materials
     // ------------------------------------------------------------------
 
-    /// Resolve every level material through the playtest VRAM owner. Returns
-    /// `true` only when every queued upload is ready.
+    /// Bind the materials of every resident room that has none yet through
+    /// the playtest VRAM owner. Returns `true` only when every resident
+    /// room's queued uploads are ready.
     pub(super) fn refresh_materials(&mut self) -> bool {
-        if self.materials_latched {
+        if self.materials_epoch == Some(self.resident.epoch()) {
             return true;
         }
-        let mut ready = true;
-        for (slot, material) in self.level.materials.iter().enumerate() {
-            match resolve_material(material) {
-                Some(binding) => self.materials[slot] = binding,
-                None => {
-                    self.materials[slot] = GridMaterial::default();
-                    ready = false;
-                }
-            }
+        let ready = bind_pending(&self.level, &mut self.resident, &mut self.material_scratch);
+        if ready {
+            self.materials_epoch = Some(self.resident.epoch());
         }
-        self.materials_latched = ready;
         ready
     }
 
-    /// Drop the resolved material table so the next `refresh_materials`
-    /// rebuilds it.
+    /// Drop every room's resolved materials so the next `refresh_materials`
+    /// binds them again.
     pub(super) fn invalidate_materials(&mut self) {
-        self.materials_latched = false;
-        for material in &mut self.materials {
-            material.resident = false;
-        }
+        self.materials_epoch = None;
+        self.resident.invalidate_materials();
     }
 
     pub(super) fn materials_ready(&self) -> bool {
-        self.materials_latched
+        self.materials_epoch == Some(self.resident.epoch())
     }
 
     // ------------------------------------------------------------------
@@ -592,7 +539,8 @@ impl GridRuntime {
         blockers: &[CharacterCollisionCylinder],
         aabb_blockers: &[CharacterCollisionAabb],
     ) -> Result<CharacterMotorFrame, CollisionQueryError> {
-        let mut provider = GridTraceProvider::new(&self.world);
+        let world = self.resident.collision();
+        let mut provider = GridTraceProvider::new(&world);
         let mut provider =
             CharacterBlockerTraceProvider::new_with_aabbs(&mut provider, blockers, aabb_blockers);
         motor.update_vblanks_with_trace_provider(&mut provider, input, config, delta_vblanks)
@@ -607,7 +555,8 @@ impl GridRuntime {
         blockers: &[CharacterCollisionCylinder],
         aabb_blockers: &[CharacterCollisionAabb],
     ) -> Result<CollisionTrace, CollisionQueryError> {
-        let mut provider = GridTraceProvider::new(&self.world);
+        let world = self.resident.collision();
+        let mut provider = GridTraceProvider::new(&world);
         let mut provider =
             CharacterBlockerTraceProvider::new_with_aabbs(&mut provider, blockers, aabb_blockers);
         trace_collision(
@@ -628,7 +577,8 @@ impl GridRuntime {
         aabb_blockers: &[CharacterCollisionAabb],
     ) -> Result<BodyStep, CollisionQueryError> {
         let (radius, height) = (radius.max(0), height.max(1));
-        let mut provider = GridTraceProvider::new(&self.world);
+        let world = self.resident.collision();
+        let mut provider = GridTraceProvider::new(&world);
         let mut provider =
             CharacterBlockerTraceProvider::new_with_aabbs(&mut provider, blockers, aabb_blockers);
         commit_body_step_with_trace_provider(&mut provider, start, dx, dz, radius, height)
@@ -646,7 +596,8 @@ impl GridRuntime {
         aabb_blockers: &[CharacterCollisionAabb],
     ) -> Result<BodyStep, CollisionQueryError> {
         let (radius, height) = (radius.max(0), height.max(1));
-        let mut provider = GridTraceProvider::new(&self.world);
+        let world = self.resident.collision();
+        let mut provider = GridTraceProvider::new(&world);
         let mut provider =
             CharacterBlockerTraceProvider::new_with_aabbs(&mut provider, blockers, aabb_blockers);
         commit_body_direction_with_trace_provider(&mut provider, start, dx, dz, radius, height)
@@ -670,7 +621,8 @@ impl GridRuntime {
         aabb_blockers: &[CharacterCollisionAabb],
         _destructibles: &RuntimeDestructibles<{ psx_level::MAX_DESTRUCTIBLES }>,
     ) -> Result<CollisionTrace, CollisionQueryError> {
-        let mut provider = GridTraceProvider::new(&self.world);
+        let world = self.resident.collision();
+        let mut provider = GridTraceProvider::new(&world);
         let mut provider =
             CharacterBlockerTraceProvider::new_with_aabbs(&mut provider, &[], aabb_blockers);
         trace_collision(&mut provider, CollisionTraceQuery::point(from, to))
@@ -687,7 +639,8 @@ impl GridRuntime {
         _destructibles: &RuntimeDestructibles<{ psx_level::MAX_DESTRUCTIBLES }>,
     ) -> Result<ThirdPersonCameraFrame, CollisionQueryError> {
         // The camera arm passes through translucent and alpha-cut planes.
-        let mut provider = GridTraceProvider::for_camera(&self.world);
+        let world = self.resident.collision();
+        let mut provider = GridTraceProvider::for_camera(&world);
         let mut provider =
             CharacterBlockerTraceProvider::new_with_aabbs(&mut provider, &[], aabb_blockers);
         let mut counting = CountingTraceProvider::new(&mut provider);
@@ -723,32 +676,26 @@ impl GridRuntime {
             || primitive_packets.remaining_words_before_fence() >= predicted_words
     }
 
-    /// Rooms to draw: the camera room's neighbourhood that touches the
-    /// frustum, or every room that does when the camera is outside the world.
-    fn visible_rooms(&mut self, eye: [i32; 3], frustum: &FrustumPlanes, out: &mut Vec<usize>) {
-        out.clear();
-        let mut ring = Vec::new();
-        match self.room_of(eye) {
-            Some(room) => self.ring(room, ACTIVE_HOPS, &mut ring),
-            None => ring.extend(0..self.rooms.len()),
-        }
-        let clamp = |v: i32| v.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
-        for room in ring {
-            let (min, max) = self.room_bounds(room);
-            let lo = GteVec3I16 {
-                x: clamp(min[0]),
-                y: clamp(min[1]),
-                z: clamp(min[2]),
-            };
-            let hi = GteVec3I16 {
-                x: clamp(max[0]),
-                y: clamp(max[1]),
-                z: clamp(max[2]),
-            };
-            if frustum.cull_aabb(lo, hi, CLIP_ALL_PLANES).is_some() {
-                out.push(room);
+    /// Rooms to draw: resident rooms within the draw distance of the eye
+    /// that touch the frustum (the whole box test is camera-relative).
+    fn visible_rooms(&mut self, eye: [i32; 3], frustum: &FrustumPlanes) {
+        self.visible_scratch.clear();
+        let room = self.room_of(eye);
+        telemetry::stage_begin(telemetry::stage::PORTAL_VISIBILITY);
+        let mut candidates = core::mem::take(&mut self.draw_scratch);
+        self.activity
+            .draw_rooms(&self.level, &self.resident, room, eye, &mut candidates);
+        telemetry::stage_end(telemetry::stage::PORTAL_VISIBILITY);
+        for &room in &candidates {
+            let (min, max) = self.level.room_bounds(room);
+            if frustum
+                .cull_world_aabb(eye, min, max, CLIP_ALL_PLANES)
+                .is_some()
+            {
+                self.visible_scratch.push(room);
             }
         }
+        self.draw_scratch = candidates;
     }
 
     pub(super) fn draw<const DEPTH: usize>(
@@ -763,10 +710,6 @@ impl GridRuntime {
         assert_eq!(
             DEPTH, 2048,
             "grid packet tags require the canonical 2048-entry ordering table"
-        );
-        assert!(
-            self.materials_ready(),
-            "grid render started before texture residency"
         );
         scene::set_screen_offset(
             i32::from(PROJECTION.screen_x) << 16,
@@ -783,14 +726,15 @@ impl GridRuntime {
         let cam = view_camera(camera);
         let view = load_view_rotation(cam.origin, view_rotation);
         let eye = [cam.origin.x >> 12, cam.origin.y >> 12, cam.origin.z >> 12];
-        let world_frustum =
-            FrustumPlanes::from_view(&view.rotation, view.translation, self.projection);
+        // Planes for a camera at the origin: the room boxes below are made
+        // eye-relative, so nothing here depends on how far the world is from
+        // its origin.
+        let world_frustum = FrustumPlanes::at_eye(&view.rotation, self.projection);
         // The box tests below read the plane dots from the GTE on the guest,
         // so the world frustum has to be loaded first.
         #[cfg(target_arch = "mips")]
         load_gte_clip_planes(&world_frustum.planes);
-        let mut rooms: Vec<usize> = Vec::new();
-        self.visible_rooms(eye, &world_frustum, &mut rooms);
+        self.visible_rooms(eye, &world_frustum);
         let screen = [
             self.projection.half_width * 2,
             self.projection.half_height * 2,
@@ -812,6 +756,7 @@ impl GridRuntime {
                 return false;
             };
             let mut total = GridFrame::default();
+            let mut unready = 0u32;
             let reverse;
             {
                 // A descending arena takes the stream against the end of the
@@ -824,7 +769,18 @@ impl GridRuntime {
                     reservation.words_mut()
                 };
                 let packet_count = packets.len();
-                for &room_index in &rooms {
+                for &room_index in &self.visible_scratch {
+                    let Some(slot) = self.resident.get(room_index) else {
+                        continue;
+                    };
+                    let Some(room) = slot.view() else {
+                        continue;
+                    };
+                    if !slot.materials_ready {
+                        // Landed but not bound: not drawn until it is.
+                        unready += 1;
+                        continue;
+                    }
                     let record = &self.level.rooms[room_index];
                     let origin = record.origin;
                     // Room-local view: the rotated, camera-relative origin of
@@ -855,11 +811,10 @@ impl GridRuntime {
                         focal_length: self.projection.focal_length,
                         sector,
                     };
-                    let room = &self.rooms[room_index];
                     let frame = self.renderer.draw_room_with_marks(
-                        room,
+                        &room,
                         &eye_view,
-                        &self.materials,
+                        &slot.materials,
                         if reverse {
                             &mut packets[..packet_count - total.packet_words]
                         } else {
@@ -914,7 +869,7 @@ impl GridRuntime {
             );
             telemetry::counter(
                 telemetry::counter::ROOM_SUBMIT_FALLBACK_CALLS,
-                u32::from(total.material_missing),
+                u32::from(total.material_missing) + u32::from(total.rooms_refused) + unready,
             );
             telemetry::counter(
                 telemetry::counter::ROOM_SURF_TR_SUBDIVISION_CANDIDATES,
@@ -943,5 +898,46 @@ impl GridRuntime {
             }
             return total.sky_visible;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A point inside the plan footprint of room `room`.
+    fn inside(runtime: &GridRuntime, room: usize) -> [i32; 3] {
+        let (min, max) = runtime.level.room_bounds(room);
+        [(min[0] + max[0]) / 2, min[1] + 1, (min[2] + max[2]) / 2]
+    }
+
+    #[test]
+    fn rooms_leave_and_come_back_while_the_runtime_keeps_answering() {
+        let mut runtime = GridRuntime::load_manifest().expect("the baked level loads");
+        let all = runtime.resident_rooms();
+        assert_eq!(all, runtime.level.rooms.len());
+        let at = inside(&runtime, 0);
+        assert_eq!(runtime.room_of(at), Some(0));
+
+        // Evict room 0: nothing is found there and the world is a solid box.
+        assert!(runtime.remove_room(0));
+        assert!(!runtime.remove_room(0));
+        assert_eq!(runtime.resident_rooms(), all - 1);
+        assert_eq!(runtime.room_of(at), None);
+        assert!(runtime
+            .resident
+            .collision()
+            .body_blocked([at[0], at[1] + 8, at[2]], 12, 48));
+        assert!(!runtime.materials_ready());
+
+        // Load it again from the baked blob: it is a room once more.
+        let start = usize::try_from(runtime.level.rooms[0].pack_sector).unwrap() * SECTOR_BYTES;
+        runtime
+            .add_room(0, &GRID_ROOMS[start..])
+            .expect("room 0 reloads");
+        assert_eq!(runtime.resident_rooms(), all);
+        assert_eq!(runtime.room_of(at), Some(0));
+        // Loading a room that is already here is refused, not duplicated.
+        assert!(runtime.add_room(0, &GRID_ROOMS[start..]).is_err());
     }
 }

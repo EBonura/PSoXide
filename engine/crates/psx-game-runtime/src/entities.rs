@@ -36,6 +36,7 @@
 //! [`commit_body_step`]: psx_engine::character_motor::commit_body_step
 
 mod flow;
+mod spawn;
 mod tactics;
 pub use tactics::{EnemyGoal, EnemyGoalResult, EnemyTacticalSnapshot};
 
@@ -541,8 +542,13 @@ pub struct MeleeArcStats {
 }
 
 /// SoA runtime state for cooked game entities. Entity `i` mirrors
-/// `records[i]` (spawn is 1:1, clamped to `MAX_ENTITIES`), so links
-/// like `model_instance` stay index-stable.
+/// `records[i]` of the slot-indexed record slice the owner passes: the boot
+/// path ([`Self::spawn_from_records`]) fills slot `i` from global record `i`,
+/// so links like `model_instance` stay index-stable; a pool fills slots one
+/// at a time ([`Self::spawn_slot`]) with records of its own choosing and
+/// names each by a stable spawn id. At most `MAX_ENTITIES` slots are live at
+/// once: that is the size of the active set, not a limit on how many spawns a
+/// world has.
 /// `STANCE_BOUND_ATTACKS` selects stance-locked combat at compile time.
 /// The default retains the distance-only behavior for games without stances.
 pub struct GameEntities<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool = false> {
@@ -620,6 +626,9 @@ pub struct GameEntities<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: b
     /// Wrapping identity of the latest tick/tick-delta call. Deferred contact
     /// tokens are deliberately one-call capabilities.
     attack_tick_generation: u16,
+    /// Stable spawn id of the record in each slot, [`psx_level::StableId::NONE`]
+    /// (zero) for a slot spawned without one.
+    spawn_ids: [u32; MAX_ENTITIES],
     /// Owner-supplied per-record activation (area residency).
     // psx-numeric-allow-next-line: fixed 64-record activation mask; bit ops only, two-word on R3000
     spatial_active_mask: u64,
@@ -809,6 +818,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
         attack_owner_chase_ticks: 0,
         director_delay_ticks: 0,
         attack_tick_generation: 0,
+        spawn_ids: [0; MAX_ENTITIES],
         spatial_active_mask: 0,
     };
 
@@ -826,37 +836,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
         self.count = count as u16;
         self.overflow = (records.len() - count).min(u16::MAX as usize) as u16;
         for (index, record) in records.iter().enumerate().take(count) {
-            self.tactics[index].seed = 0x9e3779b9u32.wrapping_add(index as u32 * 97);
-            self.x[index] = record.x;
-            self.y[index] = record.y;
-            self.z[index] = record.z;
-            self.yaw[index] = record.yaw;
-            self.health[index] = record.max_health;
-            self.health_secondary[index] = record.max_health_secondary;
-            self.poise[index] = crate::poise::Poise::EMPTY;
-            self.flow[index] = crate::combat_flow::CombatFlow::FULL;
-            self.exchanges[index] = crate::ranged_tactics::RangedExchange::EMPTY;
-            self.projectile_threats[index] = None;
-            self.recoil[index] = [0; 3];
-            self.stance_pulse[index] = 0;
-            self.patrol_leg[index] = 0;
-            self.move_yaw[index] = 0;
-            self.move_yaw_valid[index] = 0;
-            self.move_tried[index] = 0;
-            self.state_ticks[index] = 0;
-            self.turn_ticks[index] = 0;
-            self.turn_phase_ticks[index] = 0;
-            self.intent[index] = GameEntityIntent::Hold as u8;
-            self.attack_cooldown[index] = 0;
-            self.attack_wait_ticks[index] = 0;
-            self.attack_mode[index] = GAME_ENTITY_ATTACK_LIGHT;
-            self.set_stance_swap_elapsed(index, GAME_ENTITY_STANCE_SWAP_DURATION_TICKS);
-            let enabled = record.flags & game_entity_flags::ENABLED != 0;
-            self.state[index] = if enabled {
-                GameEntityState::Idle as u8
-            } else {
-                GameEntityState::Dead as u8
-            };
+            self.init_slot(index, record, 0x9e3779b9u32.wrapping_add(index as u32 * 97));
         }
     }
 
@@ -5475,5 +5455,112 @@ mod tests {
         assert_eq!(later.swing_sequence, token.swing_sequence);
         assert!(!entities.deferred_attack_can_connect(later));
         assert!(!entities.connect_deferred_attack(later));
+    }
+
+    // ---- slot ownership and stable spawn ids ----------------------------
+
+    /// Records indexed by pool slot: the slot-indexed slice every method
+    /// takes. Slot 1 is never used by the pool tests below.
+    static POOL_RECORDS: [LevelGameEntityRecord; 3] = [
+        test_record(
+            1000,
+            1000,
+            0,
+            512,
+            game_entity_flags::ENABLED | game_entity_flags::CAN_RUN,
+        ),
+        test_record(0, 0, 0, 0, 0),
+        test_record(
+            4000,
+            1000,
+            0,
+            512,
+            game_entity_flags::ENABLED | game_entity_flags::CAN_RUN,
+        ),
+    ];
+
+    #[test]
+    fn a_pool_slot_is_named_by_a_stable_id_not_by_its_position() {
+        let (a, b) = (psx_level::StableId(0xA), psx_level::StableId(0xB));
+        let mut pool = GameEntities::<4>::EMPTY;
+        assert!(pool.spawn_slot(0, a, &POOL_RECORDS[0]));
+        assert!(pool.spawn_slot(2, b, &POOL_RECORDS[2]));
+        assert_eq!(pool.count(), 3);
+        assert_eq!((pool.slot_of(a), pool.slot_of(b)), (Some(0), Some(2)));
+        assert_eq!(pool.spawn_id(1), psx_level::StableId::NONE);
+        assert_eq!(pool.slot_of(psx_level::StableId(0xC)), None);
+        assert_eq!(pool.slot_of(psx_level::StableId::NONE), None);
+        // The pool is the active set: a slot past it is refused, not wrapped.
+        assert!(!pool.spawn_slot(4, a, &POOL_RECORDS[0]));
+        assert_eq!(pool.position(2)[0], 4000);
+    }
+
+    #[test]
+    fn a_killed_spawn_stays_dead_when_its_room_leaves_and_comes_back() {
+        use crate::dormant::{dormant_state, DormantStates};
+        let b = psx_level::StableId(0xB);
+        let mut pool = GameEntities::<4>::EMPTY;
+        let mut dormant = DormantStates::<8>::EMPTY;
+        pool.spawn_slot(2, b, &POOL_RECORDS[2]);
+        assert_ne!(pool.state(2), GameEntityState::Dead);
+        // Kill it.
+        let hit = pool.apply_hit(&POOL_RECORDS, 2, VitalityChannelId::One, 1000, 0);
+        assert!(hit.died);
+        assert_eq!(pool.state(2), GameEntityState::Dead);
+        // Its room leaves the active set: the slot empties, the table keeps it.
+        pool.release_slot(2, &mut dormant);
+        assert_eq!(pool.slot_of(b), None);
+        assert_eq!(dormant.get(b) & dormant_state::DEAD, dormant_state::DEAD);
+        // The room comes back and the spawn lands in a different slot: it
+        // spawns dead, it is not resurrected by streaming.
+        assert!(pool.spawn_slot_remembered(1, b, &POOL_RECORDS[2], &dormant));
+        assert_eq!(pool.state(1), GameEntityState::Dead);
+        assert_eq!(pool.health(1), 0);
+        // An entity that was merely alive when it left comes back alive.
+        let c = psx_level::StableId(0xC);
+        pool.spawn_slot(3, c, &POOL_RECORDS[0]);
+        pool.release_slot(3, &mut dormant);
+        assert_eq!(dormant.get(c), 0);
+        assert!(pool.spawn_slot_remembered(3, c, &POOL_RECORDS[0], &dormant));
+        assert_ne!(pool.state(3), GameEntityState::Dead);
+    }
+
+    #[test]
+    fn the_boot_path_names_every_slot_and_behaves_as_before() {
+        let ids = [psx_level::StableId(77)];
+        let mut named = GameEntities::<4>::EMPTY;
+        named.spawn_from_records_with_ids(&IDLE_ENEMY, &ids);
+        let mut plain = GameEntities::<4>::EMPTY;
+        plain.spawn_from_records(&IDLE_ENEMY);
+        assert_eq!(named.spawn_id(0), ids[0]);
+        assert_eq!(plain.spawn_id(0), psx_level::StableId::NONE);
+        // Naming a slot changes nothing about how its entity thinks.
+        for _ in 0..30 {
+            named.tick(&IDLE_ENEMY, near_input(), &mut NoClipMover);
+            plain.tick(&IDLE_ENEMY, near_input(), &mut NoClipMover);
+        }
+        assert_eq!(named.position(0), plain.position(0));
+        assert_eq!(named.state(0), plain.state(0));
+    }
+
+    #[test]
+    fn an_entity_thinks_the_same_in_whichever_slot_its_id_lands() {
+        let id = psx_level::StableId(0x1234);
+        let mut low = GameEntities::<4>::EMPTY;
+        low.spawn_slot(0, id, &POOL_RECORDS[0]);
+        let mut high = GameEntities::<4>::EMPTY;
+        // Same record, slot 2 of a records slice that holds it there.
+        high.spawn_slot(2, id, &POOL_RECORDS[0]);
+        static LOW: [LevelGameEntityRecord; 1] = [POOL_RECORDS[0]];
+        static HIGH: [LevelGameEntityRecord; 3] =
+            [POOL_RECORDS[1], POOL_RECORDS[1], POOL_RECORDS[0]];
+        low.set_spatial_active_mask(u64::MAX);
+        high.set_spatial_active_mask(u64::MAX);
+        for _ in 0..60 {
+            low.tick(&LOW, near_input(), &mut NoClipMover);
+            high.tick(&HIGH, near_input(), &mut NoClipMover);
+        }
+        assert_eq!(low.position(0), high.position(2));
+        assert_eq!(low.state(0), high.state(2));
     }
 }

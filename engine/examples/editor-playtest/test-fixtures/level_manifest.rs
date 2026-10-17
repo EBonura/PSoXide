@@ -115,6 +115,8 @@ pub static INTERACTABLE_MESSAGE_PAGES: &[&str] = &["First welcome page.", "Secon
 pub static INTERACTABLES: &[InteractableRecord] = &[];
 pub static BOOST_MODULES: &[BoostModuleRecord] = &[];
 pub static LOGIC: &[LevelLogicRecord] = &[];
+pub static LOGIC_IDS: &[psx_level::StableId] = &[];
+pub static GAME_ENTITY_IDS: &[psx_level::StableId] = &[psx_level::StableId(0x5eed_0001)];
 pub static GAME_ENTITIES: &[LevelGameEntityRecord] = &[LevelGameEntityRecord {
     room: RoomIndex(0),
     kind: 1,
