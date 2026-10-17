@@ -67,6 +67,13 @@ pub fn set_derived_solid(world: &mut GridWorld, face: FaceRef, solid: bool) -> b
     })
 }
 
+/// Offset the top of a closure wall that takes its height from the room's
+/// open wall height, at the two ends of its segment (see
+/// [`EdgeOverride::top_delta`]).
+pub fn set_top_delta(world: &mut GridWorld, face: FaceRef, delta: [i16; 2]) -> bool {
+    edit_override(world, face, |o| o.top_delta = delta)
+}
+
 /// Forget everything set on a derived face's segment.
 pub fn reset_derived(world: &mut GridWorld, face: FaceRef) -> bool {
     let Some((key, _)) = locate(world, face) else {

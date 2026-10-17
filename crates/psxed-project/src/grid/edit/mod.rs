@@ -13,6 +13,8 @@
 //! * [`verbs`]: the level verbs (Raise/Lower, Ramp, Stairs).
 //! * [`convert`]: converting a legacy room to derived walls.
 //! * [`delete`]: deleting faces and sectors.
+//! * [`natural`]: cracks, void triangles and direct wall heights.
+//! * [`outline`]: polygon and corridor footprints, 45 degree corner cuts.
 //! * [`bands`]: horizontal wall bands: sets, runs and the copy-on-write edits.
 //! * [`derived`]: material, texture, solidity and visibility of derived walls.
 //! * [`surfaces`]: material, texture placement, split and flags.
@@ -25,6 +27,8 @@ pub mod convert;
 pub mod delete;
 pub mod derived;
 pub mod heights;
+pub mod natural;
+pub mod outline;
 pub mod planes;
 pub mod rects;
 pub mod refs;

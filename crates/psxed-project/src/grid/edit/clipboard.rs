@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 
 use super::super::limits::MAX_WALLS_PER_EDGE;
 use super::super::sector::{GridSector, WallEdge};
-use super::super::surface::{GridSplit, GridSurface, GridWall, WallFacing};
+use super::super::surface::{GridSplit, GridSurface, GridWall, WallFacing, VOID_A};
 use super::super::world::GridWorld;
 use super::rects::{grow_room_to, CellRect, RectRefusal};
 use super::refs::{FaceRef, FaceTarget, SurfaceKind};
@@ -125,6 +125,10 @@ fn transform_surface(surface: &GridSurface, t: Transform) -> GridSurface {
     if out.tri_b == Some(out.tri_a) {
         out.tri_b = None;
     }
+    // A void triangle goes with its corners.
+    out.void = (0..2)
+        .filter(|old| surface.is_void(*old))
+        .fold(0, |bits, old| bits | (VOID_A << new_tri(old)));
     out
 }
 

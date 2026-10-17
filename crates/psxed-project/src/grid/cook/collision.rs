@@ -100,6 +100,19 @@ fn walkable_bit(heights: [i16; 4], nesw: bool, second: bool, s: u32, bit: u16) -
     }
 }
 
+/// Whether the cook writes a one-sided cliff wall for `wall` (and no solid
+/// one): a derived riser taller than the character steps up. For tools that
+/// report what the cook will do.
+pub fn is_cliff_wall(units: &RuntimeUnits, y_offset: i32, wall: &derive::DerivedWall) -> bool {
+    let Some(heights) = wall.edge_heights() else {
+        return false;
+    };
+    let Ok(y) = corners(units, y_offset, heights, "") else {
+        return false;
+    };
+    !wall.blocks() && cliff(wall, &y)
+}
+
 /// Whether a derived riser is a cliff: taller than the character steps up
 /// at either end, and not made a ghost by its override.
 fn cliff(wall: &derive::DerivedWall, y: &[i16; 4]) -> bool {
