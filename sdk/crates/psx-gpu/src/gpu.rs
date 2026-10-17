@@ -5,7 +5,7 @@ use crate::display::DisplayConfig;
 use crate::material::{TextureMaterial, TextureWindow};
 use crate::prim::GpuPacket;
 use psx_hw::gpu::{gp0, gp1, DmaDirection};
-use psx_io::gpu::{wait_command_ready, write_command, write_display_control};
+use psx_io::gpu::{wait_command_ready, write_command, write_commands, write_display_control};
 use psx_io::periph::GpuDma;
 
 bitflags::bitflags! {
@@ -231,8 +231,7 @@ pub(crate) fn set_draw_offset(offset: (i16, i16)) {
 
 pub(crate) fn set_draw_mode(material: TextureMaterial) {
     wait_command_ready();
-    write_command(material.draw_mode_word());
-    write_command(material.texture_window_word());
+    write_commands(&[material.draw_mode_word(), material.texture_window_word()]);
 }
 
 /// One ready-wait, then the packet's payload words, in order.
@@ -240,14 +239,11 @@ pub(crate) fn set_draw_mode(material: TextureMaterial) {
 pub(crate) fn draw<P: GpuPacket>(packet: &P) {
     let words = core::ptr::from_ref(packet).cast::<u32>();
     wait_command_ready();
-    let mut index = 1;
-    while index <= P::WORDS as usize {
-        // SAFETY: `GpuPacket` guarantees a `repr(C)` layout of a tag word and
-        // then at least `WORDS` initialised `u32`s, so words 1..=WORDS are
-        // inside `packet`, which the borrow keeps alive and unchanged.
-        write_command(unsafe { words.add(index).read() });
-        index += 1;
-    }
+    // SAFETY: `GpuPacket` guarantees a `repr(C)` layout of a tag word and
+    // then at least `WORDS` initialised `u32`s, so words 1..=WORDS are
+    // inside `packet`, which the borrow keeps alive and unchanged.
+    let payload = unsafe { core::slice::from_raw_parts(words.add(1), P::WORDS as usize) };
+    write_commands(payload);
 }
 
 /// Draw area and offset for a buffer at VRAM line `top`, written without a
