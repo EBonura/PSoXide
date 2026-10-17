@@ -693,8 +693,12 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         safe: bool,
     ) -> TexturedModelRenderStats {
         let mut stats = TexturedModelRenderStats::default();
+        // A bucketed pass keeps no render layer (slot and submission order are
+        // all it records), so a translucent material only needs the layer that
+        // the other orderings would have had to be told about.
         if safe
-            && !material.is_translucent()
+            && (!material.is_translucent()
+                || matches!(self.ordering, WorldCommandOrdering::Bucketed))
             && options.cull_mode == CullMode::Back
             && options.depth_policy == DepthPolicy::Average
         {
@@ -4341,6 +4345,105 @@ mod facet_reflection_tests {
                         assert_eq!(run(true), run(false));
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn translucent_projected_faces_take_the_packed_batch_with_identical_packets() {
+        use psx_gpu::{material::BlendMode, ot::OrderingTable, prim::TriTextured};
+        extern crate std;
+        use std::vec::Vec;
+        let mut state = 0x1357_9bdfu32;
+        let mut next = move |range: i32| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            (state % (range as u32 * 2 + 1)) as i32 - range
+        };
+        let mut projected = [ProjectedVertex::INVALID; 40];
+        for vertex in projected.iter_mut() {
+            *vertex = ProjectedVertex::new(
+                (160 + next(120)) as i16,
+                (120 + next(90)) as i16,
+                40 + next(900).abs(),
+            );
+        }
+        let mut faces = [TexturedModelRenderFace::ZERO; 60];
+        for face in faces.iter_mut() {
+            let indices = [0; 3].map(|_| (next(19) + 19) as u16);
+            let uvs = [0; 3].map(|_| ((next(60) + 60) as u8, (next(60) + 60) as u8));
+            *face = TexturedModelRenderFace::new_with_palette_bank(
+                indices,
+                uvs,
+                (next(2) + 2) as u8 & 3,
+            );
+        }
+        let materials = [
+            TextureMaterial::opaque(42, 5, (128, 128, 128)).with_blend_mode(BlendMode::Average),
+            TextureMaterial::opaque(7, 9, (90, 200, 40)).with_blend_mode(BlendMode::Add),
+            TextureMaterial::opaque(7, 9, (90, 200, 40)),
+        ];
+        for material in materials {
+            for bias in [0, 3] {
+                let run = |safe: bool| {
+                    let mut storage = OrderingTable::<64>::new();
+                    let mut ot = OtFrame::begin(&mut storage);
+                    let mut commands = [WorldTriCommand::EMPTY; 80];
+                    let mut packets = [TriTextured::with_material(
+                        [(0, 0); 3],
+                        [(0, 0); 3],
+                        TextureMaterial::new(0, 0),
+                    ); 80];
+                    let base = packets.as_ptr() as usize;
+                    let (stats, used, rows);
+                    {
+                        let mut arena = PrimitiveArena::new(&mut packets);
+                        let mut pass = WorldRenderPass::new_bucketed(&mut ot, &mut commands);
+                        let options =
+                            WorldSurfaceOptions::new(DepthBand::whole(), DepthRange::new(0, 1000))
+                                .with_cull_mode(CullMode::Back)
+                                .with_depth_policy(DepthPolicy::Average)
+                                .with_depth_bias(bias)
+                                .with_textured_triangle_splitting(false)
+                                .with_material_layer(material);
+                        let result = pass.submit_projected_model_faces_checked(
+                            &mut arena, &projected, &faces, material, options, safe,
+                        );
+                        stats = (
+                            result.submitted_triangles,
+                            result.culled_triangles,
+                            result.skipped_triangles,
+                        );
+                        used = arena.len();
+                        let mut r = [(0usize, 0usize); 80];
+                        for (i, row) in r.iter_mut().enumerate().take(pass.command_len()) {
+                            // SAFETY: the first `command_len` compact entries were written.
+                            let command = unsafe {
+                                *pass.commands.as_ptr().cast::<BucketedWorldCommand>().add(i)
+                            };
+                            *row = (command.packet_ptr as usize - base, command.slot_words);
+                        }
+                        rows = r;
+                    }
+                    let words: Vec<[u32; 8]> = packets[..used]
+                        .iter()
+                        .map(|p| {
+                            [
+                                p.tex_window,
+                                p.color_cmd,
+                                p.v0,
+                                p.v1,
+                                p.v2,
+                                p.uv0_clut,
+                                p.uv1_tpage,
+                                p.uv2,
+                            ]
+                        })
+                        .collect();
+                    (stats, used, rows, words)
+                };
+                assert_eq!(run(true), run(false), "{material:?} bias {bias}");
             }
         }
     }
