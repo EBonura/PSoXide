@@ -351,6 +351,7 @@ pub(super) fn draw<const OT_DEPTH: usize>(
     let options = options.with_textured_triangle_splitting(false);
     let wire_options = options.with_depth_bias(options.depth_bias.saturating_add(2));
     let wire_color = assembly.wire_color();
+    let wire_style = world.line_style(&wire_options, wire_color);
     let crystal = assembly.crystal_material;
     let material = crystal.unwrap_or(material);
     let tint = if crystal.is_some() {
@@ -445,7 +446,12 @@ pub(super) fn draw<const OT_DEPTH: usize>(
             if length(&c, &a) >= best {
                 edge = [c, a];
             }
-            let _ = world.submit_projected_line(triangles, edge, wire_color, wire_options);
+            match &wire_style {
+                Some(style) => world.emit_line(triangles, style, &edge[0], &edge[1]),
+                None => {
+                    let _ = world.submit_projected_line(triangles, edge, wire_color, wire_options);
+                }
+            }
         }
         // The intact body's wireframe remains visible before this piece starts.
         // A few larger travelling facets announce each band of the mesh;

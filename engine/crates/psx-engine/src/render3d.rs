@@ -34,6 +34,8 @@ mod world_pass;
 mod world_pass_gouraud;
 mod world_pass_model;
 
+pub use world_pass_model::LineStyle;
+
 const PSX_VERTEX_MIN: i16 = -1024;
 const PSX_VERTEX_MAX: i16 = 1023;
 const PSX_TRI_MAX_DX: i32 = 1023;

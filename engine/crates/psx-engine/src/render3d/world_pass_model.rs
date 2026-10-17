@@ -525,6 +525,19 @@ impl PreparedModelDepthSlots {
     }
 }
 
+/// Depth mapping and packet header for emitting many loose lines of one colour
+/// and depth bias through [`WorldRenderPass::emit_line`].
+///
+/// Built once per effect with [`WorldRenderPass::line_style`]: the depth-slot
+/// mapping is prepared here instead of being rebuilt, with a copy of the whole
+/// surface options, for every line.
+#[derive(Copy, Clone)]
+pub struct LineStyle {
+    slots: PreparedModelDepthSlots,
+    color_cmd: u32,
+    bias: i32,
+}
+
 // Outside the inexpensive proof rectangle, recover precisely the old bounds.
 // Walk authored part ranges, not unrelated or unprojected cache entries.
 #[inline(never)]
@@ -3205,6 +3218,65 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 stats,
             )
         }
+    }
+
+    /// Prepare [`Self::emit_line`] for lines of `color`, ordered by `options`
+    /// (depth band, range and bias). `None` unless this pass orders its commands
+    /// by slot bucket, the one mode `emit_line` writes; callers then keep to
+    /// [`Self::submit_projected_line`].
+    pub fn line_style(
+        &self,
+        options: &WorldSurfaceOptions,
+        color: (u8, u8, u8),
+    ) -> Option<LineStyle> {
+        if !matches!(self.ordering, WorldCommandOrdering::Bucketed) {
+            return None;
+        }
+        Some(LineStyle {
+            slots: PreparedModelDepthSlots::new::<OT_DEPTH>(*options),
+            color_cmd: psx_gpu::prim::LineMono::new(0, 0, 0, 0, color.0, color.1, color.2)
+                .color_cmd,
+            bias: options.depth_bias,
+        })
+    }
+
+    /// One monochrome line between two projected vertices: the packet and
+    /// ordering command [`Self::submit_projected_line`] writes for the same
+    /// colour and options, without rebuilding the depth mapping or copying the
+    /// options. Does nothing when either arena is full, as that call does.
+    #[inline(always)]
+    pub fn emit_line(
+        &mut self,
+        lines: &mut impl PrimitiveSink<psx_gpu::prim::LineMono>,
+        style: &LineStyle,
+        a: &ProjectedVertex,
+        b: &ProjectedVertex,
+    ) {
+        use psx_gpu::prim::LineMono;
+        if self.command_len >= self.commands.len() {
+            return;
+        }
+        let mut packet = LineMono::new(a.sx, a.sy, b.sx, b.sy, 0, 0, 0);
+        packet.color_cmd = style.color_cmd;
+        let Some(line) = lines.push(packet) else {
+            return;
+        };
+        let slot = style.slots.slot(a.sz.min(b.sz).saturating_add(style.bias));
+        // SAFETY: `line_style` only exists for a bucketed pass, whose
+        // constructor verified the command storage layout and alignment for
+        // `BucketedWorldCommand`, and the index was bounds-checked above.
+        unsafe {
+            self.commands
+                .as_mut_ptr()
+                .cast::<BucketedWorldCommand>()
+                .add(self.command_len)
+                .write(BucketedWorldCommand::new(
+                    line as *mut LineMono as *mut u32,
+                    slot,
+                    LineMono::WORDS,
+                ));
+        }
+        self.command_len += 1;
     }
 
     /// Submit fixed wireframe edges with the same packets and nearest-end

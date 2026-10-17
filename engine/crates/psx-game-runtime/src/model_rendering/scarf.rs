@@ -440,9 +440,11 @@ impl PlayerScarf {
                 cpu_projected[i] = camera.projection.project_view(views[i]);
             }
         }
+
         let options = options
             .with_cull_mode(CullMode::None)
             .with_render_layer(WorldRenderLayer::Opaque);
+        let wire_style = world.line_style(&options, DASH_WIRE_COLOR);
         let mut submitted = 0;
         let mut batch = [([0u16; 3], (0u8, 0u8, 0u8)); 30];
         let mut batch_len = 0;
@@ -469,12 +471,18 @@ impl PlayerScarf {
                         *p != ProjectedVertex::INVALID && p.sz > camera.projection.focal_length / 2
                     }) {
                         for edge in 0..3 {
-                            let _ = world.submit_projected_line(
-                                triangles,
-                                [p[edge], p[(edge + 1) % 3]],
-                                DASH_WIRE_COLOR,
-                                options,
-                            );
+                            let (a, b) = (&p[edge], &p[(edge + 1) % 3]);
+                            match &wire_style {
+                                Some(style) => world.emit_line(triangles, style, a, b),
+                                None => {
+                                    let _ = world.submit_projected_line(
+                                        triangles,
+                                        [*a, *b],
+                                        DASH_WIRE_COLOR,
+                                        options,
+                                    );
+                                }
+                            }
                         }
                     }
                     let show = match dash {

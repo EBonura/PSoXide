@@ -166,7 +166,7 @@ pub use render3d::{
     compute_joint_world_transform, project_model_vertex_with_joint_transforms,
     projected_model_face_batchable, projected_triangle_batchable, AdaptiveSubdivisionKindMask,
     AdaptiveSubdivisionProfile, CullMode, DepthPolicy, GouraudMeshOptions, GouraudRenderPass,
-    GouraudTriCommand, JointViewTransform, JointWorldTransform, LoadedAnchoredCameraGte,
+    GouraudTriCommand, JointViewTransform, JointWorldTransform, LineStyle, LoadedAnchoredCameraGte,
     LoadedWorldCameraGte, LocalToWorldScale, MeshRenderStats, ModelPoseTranslation, ModelUvMapping,
     ModelUvOffset, PredecodedModelInfo, ProjectedLit, ProjectedTexturedVertex, ProjectedVertex,
     SkyDirectionProjector, TexturedModelGeometry, TexturedModelLayer, TexturedModelRenderFace,
