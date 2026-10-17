@@ -43,7 +43,7 @@ fn small_world() -> GridWorld {
 }
 
 #[test]
-fn shipped_projects_are_brush_worlds_and_round_trip() {
+fn shipped_projects_are_grid_worlds_and_round_trip() {
     let files = project_files();
     assert!(
         files.len() >= 4,
@@ -51,27 +51,17 @@ fn shipped_projects_are_brush_worlds_and_round_trip() {
     );
     let mut checked = 0;
     for path in files {
-        let text = std::fs::read_to_string(&path).unwrap();
-        if text.contains("world: Grid") {
-            // A locally generated grid project, covered by its own tests.
-            continue;
-        }
         let project = ProjectDocument::load_from_path(&path)
             .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
         for scene in &project.scenes {
             assert!(
-                scene.world.is_empty(),
-                "{} scene {:?} did not load as a brush world",
+                scene.world.grid().is_some(),
+                "{} scene {:?} did not load as a grid world",
                 path.display(),
                 scene.name
             );
         }
         let saved = project.to_ron_string().unwrap();
-        assert!(
-            !saved.contains("world: Brushes"),
-            "{}: the brush default must not be written",
-            path.display()
-        );
         let reloaded = ProjectDocument::from_ron_str(&saved).unwrap();
         assert_eq!(
             reloaded,

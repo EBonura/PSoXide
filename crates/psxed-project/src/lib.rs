@@ -83,30 +83,6 @@ pub use document_types::*;
 /// of truth -- edits to the on-disk file propagate to `starter()` on
 /// the next build.
 const DEFAULT_PROJECT_RON: &str = include_str!("../../../projects/default/project.ron");
-/// Tracked reference projects that are not user projects: test fixtures,
-/// gate slices and the New Project template. They live outside
-/// [`projects_dir`] so the editor's project browser only lists real
-/// projects. Same precedence as [`projects_dir`]: an explicit override, then
-/// the source tree, then the per-user data directory (a shipped build must
-/// install them there).
-pub fn fixtures_dir() -> PathBuf {
-    if let Some(override_dir) = std::env::var_os("PSOXIDE_FIXTURES_DIR") {
-        return PathBuf::from(override_dir);
-    }
-    let source_tree = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .join("archive")
-        .join("fixtures");
-    if source_tree.is_dir() {
-        return source_tree;
-    }
-    user_projects_dir()
-        .parent()
-        .map(|root| root.join("fixtures"))
-        .unwrap_or_else(user_projects_dir)
-}
-
 /// Where user projects live, resolved for both the dev tree and a shipped
 /// binary.
 ///

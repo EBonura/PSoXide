@@ -4117,7 +4117,13 @@ fn fractional_world_gravity_survives_authoring_units_and_legacy_defaults() {
 fn legacy_scene_nodes_with_a_floor_field_still_load() {
     let project = ProjectDocument::from_ron_str(DEFAULT_PROJECT_RON).unwrap();
     let ron = project.to_ron_string().unwrap();
-    assert!(!ron.contains("floor:"), "SceneNode no longer writes floor");
+    let lines: Vec<_> = ron.lines().map(str::trim).collect();
+    assert!(
+        !lines
+            .windows(2)
+            .any(|pair| pair[0].starts_with("floor:") && pair[1].starts_with("parent:")),
+        "SceneNode no longer writes floor"
+    );
 
     // Projects saved while SceneNode carried `floor` have it on every node.
     let legacy = ron.replace("parent:", "floor: 2,\n parent:");

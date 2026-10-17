@@ -157,7 +157,6 @@ fn scale_node(node: &mut SceneNode) {
                 profile.target_height = div_i32(profile.target_height);
             }
             culling.draw_distance = div_i32_min1(culling.draw_distance);
-            culling.bsp_patch_extent = div_i32_min1(culling.bsp_patch_extent);
             physics.gravity_per_tick = div_i32_min1(physics.gravity_per_tick);
             physics.gravity_per_tick_q8 = physics.gravity_per_tick_q8.map(div_i32);
         }
