@@ -2,6 +2,7 @@
 
 use super::*;
 use psx_engine::{ViewVertex, WorldProjection, WorldRenderStats};
+use psx_gpu::material::TexturedPacketMaterial;
 
 const BURST_TICKS: u16 = 12;
 const FLIGHT_TICKS: u16 = 18;
@@ -256,18 +257,80 @@ fn burst_triangle(
     Some(points)
 }
 
-fn height_q12(
-    assembly: ModelPhaseAssembly,
-    points: [ProjectedVertex; 3],
-    camera: WorldCamera,
-) -> u16 {
-    let z = points.iter().map(|p| p.sz).sum::<i32>() / 3;
-    let sy = points.iter().map(|p| i32::from(p.sy)).sum::<i32>() / 3;
-    let view_y =
-        (i32::from(camera.projection.screen_y) - sy) * z / camera.projection.focal_length.max(1);
-    let y =
-        camera.position.y + ((view_y * camera.cos_pitch.raw() + z * camera.sin_pitch.raw()) >> 12);
-    ((y - assembly.floor_y).clamp(0, assembly.height) * 4096 / assembly.height) as u16
+/// Crystal-atlas UV words, by face index modulo four: corners `(s, 8)`,
+/// `(90 + s, 24)` and `(20 + s, 116)` with `s = index % 4 * 12`.
+const CRYSTAL_UV_WORDS: [[u16; 3]; 4] = {
+    let mut words = [[0u16; 3]; 4];
+    let mut k = 0;
+    while k < 4 {
+        let shift = (k * 12) as u16;
+        words[k] = [
+            shift | (8 << 8),
+            (90 + shift) | (24 << 8),
+            (20 + shift) | (116 << 8),
+        ];
+        k += 1;
+    }
+    words
+};
+
+/// Everything that decides which stage of the landing a face is in, with the
+/// camera and effect terms the per-face height estimate needs held as plain
+/// scalars so the face loop copies no camera or effect struct.
+struct FlightClock {
+    elapsed: u16,
+    arrival_span: u32,
+    screen_y: i32,
+    focal: i32,
+    camera_y: i32,
+    cos_pitch: i32,
+    sin_pitch: i32,
+    floor_y: i32,
+    height: i32,
+}
+
+impl FlightClock {
+    fn new(assembly: ModelPhaseAssembly, camera: &WorldCamera) -> Self {
+        Self {
+            elapsed: assembly.elapsed,
+            arrival_span: u32::from(assembly.duration - BURST_TICKS - FLIGHT_TICKS),
+            screen_y: i32::from(camera.projection.screen_y),
+            focal: camera.projection.focal_length.max(1),
+            camera_y: camera.position.y,
+            cos_pitch: camera.cos_pitch.raw(),
+            sin_pitch: camera.sin_pitch.raw(),
+            floor_y: assembly.floor_y,
+            height: assembly.height,
+        }
+    }
+
+    /// Age in flight ticks and the remaining distance, in Q8 squared easing,
+    /// of the piece whose projected corners are `p`.
+    #[inline(always)]
+    fn state(&self, p: &[ProjectedVertex; 3]) -> (u16, i32) {
+        let z = (p[0].sz + p[1].sz + p[2].sz) / 3;
+        let sy = (i32::from(p[0].sy) + i32::from(p[1].sy) + i32::from(p[2].sy)) / 3;
+        let view_y = (self.screen_y - sy) * z / self.focal;
+        let y = self.camera_y + ((view_y * self.cos_pitch + z * self.sin_pitch) >> 12);
+        let height_q12 = ((y - self.floor_y).clamp(0, self.height) * 4096 / self.height) as u16;
+        let arrival = BURST_TICKS
+            + FLIGHT_TICKS
+            + ((u32::from(height_q12.min(4096)) * self.arrival_span) >> 12) as u16;
+        let age = self
+            .elapsed
+            .saturating_sub(arrival - FLIGHT_TICKS)
+            .min(FLIGHT_TICKS);
+        let t = i32::from(age) * 256 / i32::from(FLIGHT_TICKS);
+        let remaining = 256 - t;
+        (age, (remaining * remaining) >> 8)
+    }
+}
+
+/// The projection of a vertex that was never projected: zero position, the
+/// minimum depth.
+#[inline(always)]
+fn is_invalid(p: &ProjectedVertex) -> bool {
+    p.sz == i32::MIN && p.sx == 0 && p.sy == 0
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -288,6 +351,7 @@ pub(super) fn draw<const OT_DEPTH: usize>(
     let options = options.with_textured_triangle_splitting(false);
     let wire_options = options.with_depth_bias(options.depth_bias.saturating_add(2));
     let wire_color = assembly.wire_color();
+    let wire_style = world.line_style(&wire_options, wire_color);
     let crystal = assembly.crystal_material;
     let material = crystal.unwrap_or(material);
     let tint = if crystal.is_some() {
@@ -330,25 +394,22 @@ pub(super) fn draw<const OT_DEPTH: usize>(
             *offset = ViewVertex::new(vector.x - zero.x, vector.y - zero.y, vector.z - zero.z);
         }
     }
+    // Flying crystal pieces share one material; only the tint changes, so its
+    // packet words are built once and the colour word patched per piece.
+    let crystal_packet = crystal.map(|m| m.textured_packet_material());
+    let fragment_options = crystal.map(|m| options.with_material_layer(m));
+    let assembled = assembly.elapsed >= assembly.duration;
+    let clock = FlightClock::new(assembly, &camera);
+    let projected_len = projected.len();
     let mut attached = [TexturedModelRenderFace::ZERO; 32];
     let mut attached_count = 0;
     for (index, original_face) in faces.iter().enumerate() {
-        let mapped_face = if crystal.is_some() {
-            let shift = (index % 4 * 12) as u8;
-            TexturedModelRenderFace::new(
-                original_face.vertex_indices(),
-                [(shift, 8), (90 + shift, 24), (20 + shift, 116)],
-            )
-        } else {
-            *original_face
-        };
-        let face = &mapped_face;
-        let indices = face.vertex_indices().map(usize::from);
-        if indices.iter().any(|&i| i >= projected.len()) {
+        let [ia, ib, ic] = original_face.vertex_indices().map(usize::from);
+        if ia >= projected_len || ib >= projected_len || ic >= projected_len {
             continue;
         }
-        let target = indices.map(|i| projected[i]);
-        if target.contains(&ProjectedVertex::INVALID) {
+        let target = [projected[ia], projected[ib], projected[ic]];
+        if is_invalid(&target[0]) || is_invalid(&target[1]) || is_invalid(&target[2]) {
             continue;
         }
         let [a, b, c] = target;
@@ -362,23 +423,35 @@ pub(super) fn draw<const OT_DEPTH: usize>(
         }
         let (age, remaining) = if bursting {
             (0, 256)
-        } else if assembly.elapsed >= assembly.duration {
+        } else if assembled {
             (FLIGHT_TICKS, 0)
         } else {
-            assembly.flight(height_q12(assembly, target, camera))
+            clock.state(&target)
         };
         if age < FLIGHT_TICKS && index & 1 == 0 {
             // Alternate long edges keep the cage legible. Filled
             // faces no longer need a wire pass underneath them.
-            let edge = [(a, b), (b, c), (c, a)]
-                .into_iter()
-                .max_by_key(|(a, b)| {
-                    (i32::from(a.sx) - i32::from(b.sx)).abs()
-                        + (i32::from(a.sy) - i32::from(b.sy)).abs()
-                })
-                .unwrap();
-            let _ =
-                world.submit_projected_line(triangles, [edge.0, edge.1], wire_color, wire_options);
+            // Ties go to the later edge, as `max_by_key` does.
+            let length = |p: &ProjectedVertex, q: &ProjectedVertex| {
+                (i32::from(p.sx) - i32::from(q.sx)).abs()
+                    + (i32::from(p.sy) - i32::from(q.sy)).abs()
+            };
+            let mut best = length(&a, &b);
+            let mut edge = [a, b];
+            let next = length(&b, &c);
+            if next >= best {
+                best = next;
+                edge = [b, c];
+            }
+            if length(&c, &a) >= best {
+                edge = [c, a];
+            }
+            match &wire_style {
+                Some(style) => world.emit_line(triangles, style, &edge[0], &edge[1]),
+                None => {
+                    let _ = world.submit_projected_line(triangles, edge, wire_color, wire_options);
+                }
+            }
         }
         // The intact body's wireframe remains visible before this piece starts.
         // A few larger travelling facets announce each band of the mesh;
@@ -387,6 +460,13 @@ pub(super) fn draw<const OT_DEPTH: usize>(
             continue;
         }
         if bursting || age == FLIGHT_TICKS {
+            // The face the batch submits: the crystal atlas replaces the
+            // authored UVs and palette bank.
+            let (uv_words, bank) = if crystal.is_some() {
+                (CRYSTAL_UV_WORDS[index & 3], 0)
+            } else {
+                (original_face.uv_words(), original_face.palette_bank())
+            };
             attached[attached_count] = if bursting {
                 let Some(points) = burst_triangle(
                     target,
@@ -397,14 +477,22 @@ pub(super) fn draw<const OT_DEPTH: usize>(
                     continue;
                 };
                 let base = attached_count * 3;
-                burst_vertices[base..base + 3].copy_from_slice(&points);
-                TexturedModelRenderFace::new_with_palette_bank(
+                burst_vertices[base] = points[0];
+                burst_vertices[base + 1] = points[1];
+                burst_vertices[base + 2] = points[2];
+                TexturedModelRenderFace::from_packed_uvs(
                     [base as u16, base as u16 + 1, base as u16 + 2],
-                    face.uvs(),
-                    face.palette_bank(),
+                    uv_words,
+                    bank,
+                )
+            } else if crystal.is_some() {
+                TexturedModelRenderFace::from_packed_uvs(
+                    original_face.vertex_indices(),
+                    uv_words,
+                    bank,
                 )
             } else {
-                *face
+                *original_face
             };
             attached_count += 1;
             if attached_count == attached.len() {
@@ -473,14 +561,24 @@ pub(super) fn draw<const OT_DEPTH: usize>(
             // A collapsed fourth corner uses the existing blended packet path
             // for one untextured facet. Its transparency is independent of the
             // model atlas's per-texel semi-transparency bits.
-            if let Some(crystal) = crystal {
-                let shift = (index % 4 * 12) as u8;
-                world.submit_textured_triangle(
+            if let (Some(packet), Some(fragment_options)) =
+                (crystal_packet, fragment_options.as_ref())
+            {
+                // Flying pieces are the first face of each group of four, so
+                // their atlas UVs carry no shift.
+                let packet = TexturedPacketMaterial {
+                    color_command_word: (packet.color_command_word & 0xff00_0000)
+                        | u32::from(tint.0)
+                        | (u32::from(tint.1) << 8)
+                        | (u32::from(tint.2) << 16),
+                    ..packet
+                };
+                world.submit_projected_culled_packed_triangle(
                     triangles,
                     points.map(ProjectedVertex::from),
-                    [(shift, 8), (90 + shift, 24), (20 + shift, 116)],
-                    crystal.with_tint(tint),
-                    options.with_material_layer(crystal),
+                    CRYSTAL_UV_WORDS[0],
+                    packet,
+                    fragment_options,
                 )
             } else {
                 world.submit_blended_gouraud_quad(
@@ -529,6 +627,279 @@ fn merge_attached(stats: &mut WorldRenderStats, next: TexturedModelRenderStats) 
         .saturating_add(next.dropped_triangles);
     stats.primitive_overflow |= next.primitive_overflow;
     stats.command_overflow |= next.command_overflow;
+}
+
+#[cfg(test)]
+mod reference {
+    use super::*;
+
+    fn height_q12(
+        assembly: ModelPhaseAssembly,
+        points: [ProjectedVertex; 3],
+        camera: WorldCamera,
+    ) -> u16 {
+        let z = points.iter().map(|p| p.sz).sum::<i32>() / 3;
+        let sy = points.iter().map(|p| i32::from(p.sy)).sum::<i32>() / 3;
+        let view_y = (i32::from(camera.projection.screen_y) - sy) * z
+            / camera.projection.focal_length.max(1);
+        let y = camera.position.y
+            + ((view_y * camera.cos_pitch.raw() + z * camera.sin_pitch.raw()) >> 12);
+        ((y - assembly.floor_y).clamp(0, assembly.height) * 4096 / assembly.height) as u16
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn draw<const OT_DEPTH: usize>(
+        assembly: ModelPhaseAssembly,
+        projected: &[ProjectedVertex],
+        faces: &[TexturedModelRenderFace],
+        camera: WorldCamera,
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+        triangles: &mut (impl PrimitiveSink<TriTextured>
+                  + PrimitiveSink<QuadGouraudBlended>
+                  + PrimitiveSink<LineMono>),
+        world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+    ) -> WorldRenderStats {
+        let mut stats = WorldRenderStats::default();
+        let zero = camera.view_vertex(WorldVertex::ZERO);
+        let options = options.with_textured_triangle_splitting(false);
+        let wire_options = options.with_depth_bias(options.depth_bias.saturating_add(2));
+        let wire_color = assembly.wire_color();
+        let crystal = assembly.crystal_material;
+        let material = crystal.unwrap_or(material);
+        let tint = if crystal.is_some() {
+            (128, 128, 128)
+        } else {
+            assembly.tint(material.tint())
+        };
+        let bursting = assembly.elapsed < BURST_TICKS;
+        let burst_progress =
+            i32::from(assembly.elapsed.min(BURST_TICKS)) * 256 / i32::from(BURST_TICKS);
+        let burst_fade = 256 - burst_progress;
+        let burst_material = material.with_raw_texture(false).with_tint((
+            ((i32::from(material.tint().0) * burst_fade) >> 8) as u8,
+            ((i32::from(material.tint().1) * burst_fade) >> 8) as u8,
+            ((i32::from(material.tint().2) * burst_fade) >> 8) as u8,
+        ));
+        let attached_material = if bursting {
+            burst_material
+        } else {
+            material
+                .with_raw_texture(false)
+                .with_tint(tint)
+                .with_blend_mode(if crystal.is_some() {
+                    BlendMode::Average
+                } else {
+                    BlendMode::Opaque
+                })
+        };
+        let mut burst_vertices = [ProjectedVertex::INVALID; 96];
+        let mut burst_offsets = [ViewVertex::ZERO; 8];
+        if bursting {
+            let radius = assembly.height * burst_progress / 384;
+            for (index, offset) in burst_offsets.iter_mut().enumerate() {
+                let angle = Angle::from_q12(index as u16 * 512);
+                let vector = camera.view_vertex(WorldVertex::new(
+                    (angle.sin_q12() * radius) >> 12,
+                    (index as i32 % 3 - 1) * radius / 2,
+                    (angle.cos_q12() * radius) >> 12,
+                ));
+                *offset = ViewVertex::new(vector.x - zero.x, vector.y - zero.y, vector.z - zero.z);
+            }
+        }
+        let mut attached = [TexturedModelRenderFace::ZERO; 32];
+        let mut attached_count = 0;
+        for (index, original_face) in faces.iter().enumerate() {
+            let mapped_face = if crystal.is_some() {
+                let shift = (index % 4 * 12) as u8;
+                TexturedModelRenderFace::new(
+                    original_face.vertex_indices(),
+                    [(shift, 8), (90 + shift, 24), (20 + shift, 116)],
+                )
+            } else {
+                *original_face
+            };
+            let face = &mapped_face;
+            let indices = face.vertex_indices().map(usize::from);
+            if indices.iter().any(|&i| i >= projected.len()) {
+                continue;
+            }
+            let target = indices.map(|i| projected[i]);
+            if target.contains(&ProjectedVertex::INVALID) {
+                continue;
+            }
+            let [a, b, c] = target;
+            let area = (i32::from(b.sx) - i32::from(a.sx)) * (i32::from(c.sy) - i32::from(a.sy))
+                - (i32::from(b.sy) - i32::from(a.sy)) * (i32::from(c.sx) - i32::from(a.sx));
+            if area == 0
+                || (options.cull_mode == CullMode::Back && area < 0)
+                || (options.cull_mode == CullMode::Front && area > 0)
+            {
+                continue;
+            }
+            let (age, remaining) = if bursting {
+                (0, 256)
+            } else if assembly.elapsed >= assembly.duration {
+                (FLIGHT_TICKS, 0)
+            } else {
+                assembly.flight(height_q12(assembly, target, camera))
+            };
+            if age < FLIGHT_TICKS && index & 1 == 0 {
+                // Alternate long edges keep the cage legible. Filled
+                // faces no longer need a wire pass underneath them.
+                let edge = [(a, b), (b, c), (c, a)]
+                    .into_iter()
+                    .max_by_key(|(a, b)| {
+                        (i32::from(a.sx) - i32::from(b.sx)).abs()
+                            + (i32::from(a.sy) - i32::from(b.sy)).abs()
+                    })
+                    .unwrap();
+                let _ = world.submit_projected_line(
+                    triangles,
+                    [edge.0, edge.1],
+                    wire_color,
+                    wire_options,
+                );
+            }
+            // The intact body's wireframe remains visible before this piece starts.
+            // A few larger travelling facets announce each band of the mesh;
+            // its remaining small faces fill in when the same band lands.
+            if !bursting && (age == 0 || (age < FLIGHT_TICKS && index & 3 != 0)) {
+                continue;
+            }
+            if bursting || age == FLIGHT_TICKS {
+                attached[attached_count] = if bursting {
+                    let Some(points) = burst_triangle(
+                        target,
+                        burst_offsets[index & 7],
+                        burst_progress,
+                        camera.projection,
+                    ) else {
+                        continue;
+                    };
+                    let base = attached_count * 3;
+                    burst_vertices[base..base + 3].copy_from_slice(&points);
+                    TexturedModelRenderFace::new_with_palette_bank(
+                        [base as u16, base as u16 + 1, base as u16 + 2],
+                        face.uvs(),
+                        face.palette_bank(),
+                    )
+                } else {
+                    *face
+                };
+                attached_count += 1;
+                if attached_count == attached.len() {
+                    merge_attached(
+                        &mut stats,
+                        world.submit_projected_model_faces(
+                            triangles,
+                            if bursting { &burst_vertices } else { projected },
+                            &attached,
+                            attached_material,
+                            options,
+                        ),
+                    );
+                    attached_count = 0;
+                    if stats.primitive_overflow || stats.command_overflow {
+                        break;
+                    }
+                }
+                continue;
+            }
+            let next = {
+                let angle = Angle::from_q12((index as u16).wrapping_mul(1567));
+                let radius = assembly.height * (65 + (index % 4) as i32 * 12) / 100;
+                let offset = camera.view_vertex(WorldVertex::new(
+                    (((angle.sin_q12() * radius) >> 12) * remaining) >> 8,
+                    ((((index % 7) as i32 - 3) * assembly.height / 16) * remaining) >> 8,
+                    (((angle.cos_q12() * radius) >> 12) * remaining) >> 8,
+                ));
+                let offset =
+                    ViewVertex::new(offset.x - zero.x, offset.y - zero.y, offset.z - zero.z);
+                let [Some(a), Some(b), Some(c)] =
+                    target.map(|p| displace(p, offset, camera.projection))
+                else {
+                    continue;
+                };
+                let strength = i32::from(age) * 256 / i32::from(FLIGHT_TICKS);
+                let tint = (
+                    ((i32::from(tint.0) * strength) >> 8) as u8,
+                    ((i32::from(tint.1) * strength) >> 8) as u8,
+                    ((i32::from(tint.2) * strength) >> 8) as u8,
+                );
+                let center_x = (i32::from(a.sx) + i32::from(b.sx) + i32::from(c.sx)) / 3;
+                let center_y = (i32::from(a.sy) + i32::from(b.sy) + i32::from(c.sy)) / 3;
+                let scale = 256 + remaining * 2;
+                let points = [a, b, c].map(|p| ProjectedLit {
+                    sx: clamp_i16(center_x + (((i32::from(p.sx) - center_x) * scale) >> 8)),
+                    sy: clamp_i16(center_y + (((i32::from(p.sy) - center_y) * scale) >> 8)),
+                    sz: p.sz.clamp(0, 65535) as u16,
+                    r: tint.0,
+                    g: tint.1,
+                    b: tint.2,
+                });
+                // A close wall camera can magnify an approaching facet beyond the
+                // GPU's polygon limits. Drop that facet rather than wrap its edges.
+                if points
+                    .iter()
+                    .any(|p| !(-1023..=1023).contains(&p.sx) || !(-1023..=1023).contains(&p.sy))
+                    || points.iter().map(|p| p.sx).max().unwrap()
+                        - points.iter().map(|p| p.sx).min().unwrap()
+                        > 1023
+                    || points.iter().map(|p| p.sy).max().unwrap()
+                        - points.iter().map(|p| p.sy).min().unwrap()
+                        > 511
+                {
+                    continue;
+                }
+                // A collapsed fourth corner uses the existing blended packet path
+                // for one untextured facet. Its transparency is independent of the
+                // model atlas's per-texel semi-transparency bits.
+                if let Some(crystal) = crystal {
+                    let shift = (index % 4 * 12) as u8;
+                    world.submit_textured_triangle(
+                        triangles,
+                        points.map(ProjectedVertex::from),
+                        [(shift, 8), (90 + shift, 24), (20 + shift, 116)],
+                        crystal.with_tint(tint),
+                        options.with_material_layer(crystal),
+                    )
+                } else {
+                    world.submit_blended_gouraud_quad(
+                        triangles,
+                        [points[0], points[1], points[2], points[2]],
+                        BlendMode::Add,
+                        options,
+                    )
+                }
+            };
+            stats.submitted_triangles = stats
+                .submitted_triangles
+                .saturating_add(next.submitted_triangles);
+            stats.culled_triangles = stats.culled_triangles.saturating_add(next.culled_triangles);
+            stats.dropped_triangles = stats
+                .dropped_triangles
+                .saturating_add(next.dropped_triangles);
+            stats.primitive_overflow |= next.primitive_overflow;
+            stats.command_overflow |= next.command_overflow;
+            if stats.primitive_overflow || stats.command_overflow {
+                break;
+            }
+        }
+        if attached_count > 0 && !stats.primitive_overflow && !stats.command_overflow {
+            merge_attached(
+                &mut stats,
+                world.submit_projected_model_faces(
+                    triangles,
+                    if bursting { &burst_vertices } else { projected },
+                    &attached[..attached_count],
+                    attached_material,
+                    options,
+                ),
+            );
+        }
+        stats
+    }
 }
 
 #[cfg(test)]
@@ -672,5 +1043,165 @@ mod tests {
             assert_eq!(displace(p, ViewVertex::ZERO, projection), Some(p));
             assert_eq!(displace(p, ViewVertex::new(0, 0, -p.sz), projection), None);
         }
+    }
+
+    /// Every packet word, ordering command, counter and return value the
+    /// reference draw produces must come out of the live draw unchanged.
+    #[test]
+    fn draw_matches_the_reference_for_every_stage_of_the_effect() {
+        use psx_engine::{
+            DepthBand, DepthRange, OtFrame, PrimitivePacketArena, PrimitivePacketScratch,
+            WorldCamera, WorldRenderPass, WorldTriCommand, PRIMITIVE_PACKET_SLOT_WORDS,
+        };
+        use psx_gpu::ot::OrderingTable;
+        const SLOTS: usize = 1024;
+        const FACES: usize = 300;
+        let mut seed = 0x9e37_79b9u32;
+        let mut next = move |range: i32| {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            (seed % (range as u32 * 2 + 1)) as i32 - range
+        };
+        let materials = [
+            TextureMaterial::opaque(42, 5, (128, 128, 128)).with_blend_mode(BlendMode::Average),
+            TextureMaterial::opaque(7, 9, (90, 200, 40)),
+        ];
+        let mut scenarios = 0;
+        for round in 0..24 {
+            // A body of scattered corners, a few never projected.
+            let vertex_count = 90 + round * 5;
+            let mut projected = [ProjectedVertex::INVALID; 220];
+            for vertex in projected.iter_mut().take(vertex_count) {
+                if next(40) != 0 {
+                    *vertex = ProjectedVertex::new(
+                        (160 + next(150)) as i16,
+                        (120 + next(110)) as i16,
+                        60 + next(900).abs(),
+                    );
+                }
+            }
+            let projected = &projected[..vertex_count];
+            let mut faces = [TexturedModelRenderFace::ZERO; FACES];
+            for face in faces.iter_mut() {
+                // An occasional index past the projected vertices.
+                let top = if next(60) == 0 {
+                    vertex_count as i32 + 3
+                } else {
+                    vertex_count as i32
+                };
+                let mut index = || (next(top / 2) + top / 2) as u16;
+                let (a, b, c) = (index(), index(), index());
+                let mut uv = || ((next(120) + 120) as u8, (next(120) + 120) as u8);
+                *face = TexturedModelRenderFace::new_with_palette_bank(
+                    [a, b, c],
+                    [uv(), uv(), uv()],
+                    (next(2) + 2) as u8 & 3,
+                );
+            }
+            for elapsed in [0u16, 1, 5, 11, 12, 13, 21, 30, 44, 61, 72, 73, 90, 107] {
+                for crystal in [None, Some(materials[0]), Some(materials[1])] {
+                    for cull in [CullMode::Back, CullMode::None, CullMode::Front] {
+                        let projection = WorldProjection::new(160, 120, 256, 32);
+                        let camera = WorldCamera::orbit(
+                            projection,
+                            WorldVertex::new(next(300), 500 + next(300), next(300)),
+                            400 + next(300).abs(),
+                            Angle::from_q12(next(2048) as u16),
+                            Angle::from_q12(next(700) as u16),
+                        );
+                        let assembly = ModelPhaseAssembly::new(
+                            elapsed,
+                            72,
+                            (108, 224, 198),
+                            next(40),
+                            300 + next(500).abs(),
+                        )
+                        .unwrap()
+                        .with_crystal_material(crystal);
+                        let options =
+                            WorldSurfaceOptions::new(DepthBand::whole(), DepthRange::new(0, 8192))
+                                .with_cull_mode(cull)
+                                .with_depth_policy(psx_engine::DepthPolicy::Average)
+                                .with_material_layer(materials[1]);
+                        let mut scratch_a = PrimitivePacketScratch::<SLOTS>::ZERO;
+                        let mut scratch_b = PrimitivePacketScratch::<SLOTS>::ZERO;
+                        let mut commands_a = [WorldTriCommand::EMPTY; 1024];
+                        let mut commands_b = [WorldTriCommand::EMPTY; 1024];
+                        let base_a = &scratch_a as *const _ as usize;
+                        let base_b = &scratch_b as *const _ as usize;
+                        let mut results = [((0, 0, 0, false, false), 0usize, 0usize); 2];
+                        for live in [false, true] {
+                            let mut storage = OrderingTable::<64>::new();
+                            let mut ot = OtFrame::begin(&mut storage);
+                            let (scratch, commands) = if live {
+                                (&mut scratch_b, &mut commands_b)
+                            } else {
+                                (&mut scratch_a, &mut commands_a)
+                            };
+                            let mut arena = PrimitivePacketArena::new(scratch);
+                            let mut world = WorldRenderPass::new_bucketed(&mut ot, commands);
+                            let stats = if live {
+                                draw(
+                                    assembly,
+                                    projected,
+                                    &faces,
+                                    camera,
+                                    materials[1],
+                                    options,
+                                    &mut arena,
+                                    &mut world,
+                                )
+                            } else {
+                                reference::draw(
+                                    assembly,
+                                    projected,
+                                    &faces,
+                                    camera,
+                                    materials[1],
+                                    options,
+                                    &mut arena,
+                                    &mut world,
+                                )
+                            };
+                            results[usize::from(live)] = (
+                                (
+                                    stats.submitted_triangles,
+                                    stats.culled_triangles,
+                                    stats.dropped_triangles,
+                                    stats.primitive_overflow,
+                                    stats.command_overflow,
+                                ),
+                                arena.used_slots(),
+                                world.command_len(),
+                            );
+                        }
+                        let what = (round, elapsed, crystal.is_some(), cull);
+                        assert_eq!(results[0], results[1], "{what:?}");
+                        let used = results[0].1 * PRIMITIVE_PACKET_SLOT_WORDS;
+                        assert_eq!(
+                            scratch_a.words_mut()[..used],
+                            scratch_b.words_mut()[..used],
+                            "{what:?}"
+                        );
+                        for k in 0..results[0].2 {
+                            // A bucketed command is a packet pointer and a slot/word-count word,
+                            // packed back to back over the command storage.
+                            let [pa, sa] =
+                                unsafe { *(commands_a.as_ptr() as *const [usize; 2]).add(k) };
+                            let [pb, sb] =
+                                unsafe { *(commands_b.as_ptr() as *const [usize; 2]).add(k) };
+                            assert_eq!(
+                                (pa.wrapping_sub(base_a), sa),
+                                (pb.wrapping_sub(base_b), sb),
+                                "{what:?} command {k}"
+                            );
+                        }
+                        scenarios += 1;
+                    }
+                }
+            }
+        }
+        assert!(scenarios > 1000);
     }
 }

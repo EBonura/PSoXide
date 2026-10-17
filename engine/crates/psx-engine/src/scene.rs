@@ -129,6 +129,8 @@ pub struct Ctx {
     runtime_requests: RuntimeRequests,
     gpu_dma: Option<GpuDma>,
     controller_port: Option<ControllerPort>,
+    #[cfg(all(feature = "pad-irq", target_arch = "mips"))]
+    controller_lease: Option<psx_pad::console::Lease>,
     present_queue_hook: Option<*const u32>,
 }
 
@@ -153,6 +155,8 @@ impl Ctx {
             runtime_requests: RuntimeRequests::default(),
             gpu_dma: None,
             controller_port: None,
+            #[cfg(all(feature = "pad-irq", target_arch = "mips"))]
+            controller_lease: None,
             present_queue_hook: None,
         }
     }
@@ -175,11 +179,39 @@ impl Ctx {
     /// # Panics
     ///
     /// Outside the app runner, which takes the token at boot.
+    #[cfg(not(all(feature = "pad-irq", target_arch = "mips")))]
     #[inline]
     pub fn controller_port(&mut self) -> &mut ControllerPort {
         self.controller_port
             .as_mut()
             .expect("the app runner holds the controller-port token")
+    }
+
+    /// With the interrupt-driven pad engine installed the engine owns the
+    /// port; this borrows it from the engine until the runner hands it back
+    /// at the end of the current scheduler step.
+    #[cfg(all(feature = "pad-irq", target_arch = "mips"))]
+    #[inline]
+    pub fn controller_port(&mut self) -> &mut ControllerPort {
+        if self.controller_port.is_some() {
+            return self.controller_port.as_mut().unwrap();
+        }
+        self.controller_lease
+            .get_or_insert_with(psx_pad::console::lease)
+    }
+
+    /// Hand the controller port to the pad engine for good, after the
+    /// runner's init.
+    #[cfg(all(feature = "pad-irq", target_arch = "mips"))]
+    pub(crate) fn take_controller_port(&mut self) -> Option<ControllerPort> {
+        self.controller_port.take()
+    }
+
+    /// Give a borrowed port back to the engine.
+    #[cfg(all(feature = "pad-irq", target_arch = "mips"))]
+    #[inline]
+    pub(crate) fn release_controller_port(&mut self) {
+        self.controller_lease = None;
     }
 
     /// The GPU DMA token, for [`OtFrame::submit`](crate::OtFrame::submit)

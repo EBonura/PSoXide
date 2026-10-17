@@ -3,6 +3,7 @@
 
 use super::*;
 use psx_engine::{LoadedAnchoredCameraGte, Vec3I16, ViewVertex, WorldRenderLayer};
+use psx_gpu::material::TexturedPacketMaterial;
 use psx_math::int32::isqrt_i32;
 
 const ROWS: usize = 8;
@@ -398,28 +399,56 @@ impl PlayerScarf {
                 self.anchor.z + self.points[i][2] / Q,
             );
         }
-        let gte = LoadedAnchoredCameraGte::load(camera, self.anchor);
+        let assembly = assembly.filter(|effect| !effect.is_assembled());
+        // Textured cloth in its solid state reads neither the GTE projection
+        // below (only the wire and flat-colour paths do) nor a per-triangle
+        // view transform: each strip corner is shared by up to six triangles,
+        // so it is transformed and divided once here and the triangle loop
+        // reuses it. The values are the ones the per-triangle path computed.
+        let cached =
+            crystal.is_some() && assembly.is_none() && matches!(dash, DashWireVisual::Solid);
         let mut projected = [ProjectedVertex::INVALID; 32];
-        for start in (0..32).step_by(3) {
-            let local = core::array::from_fn(|k| {
-                let p = vertices[(start + k).min(31)];
-                Vec3I16::new(
-                    (p.x - self.anchor.x) as i16,
-                    (p.y - self.anchor.y) as i16,
-                    (p.z - self.anchor.z) as i16,
-                )
-            });
-            let out = gte.project_points(local);
-            for k in 0..3 {
-                if start + k < 32 {
-                    projected[start + k] = out[k];
+        if !cached {
+            let gte = LoadedAnchoredCameraGte::load(camera, self.anchor);
+            for start in (0..32).step_by(3) {
+                let local = core::array::from_fn(|k| {
+                    let p = vertices[(start + k).min(31)];
+                    Vec3I16::new(
+                        (p.x - self.anchor.x) as i16,
+                        (p.y - self.anchor.y) as i16,
+                        (p.z - self.anchor.z) as i16,
+                    )
+                });
+                let out = gte.project_points(local);
+                for k in 0..3 {
+                    if start + k < 32 {
+                        projected[start + k] = out[k];
+                    }
                 }
             }
         }
-        let assembly = assembly.filter(|effect| !effect.is_assembled());
+        // One set of packet words for all of the cloth's triangles.
+        let packet = crystal.map_or_else(
+            || TextureMaterial::new(0, 0).textured_packet_material(),
+            TextureMaterial::textured_packet_material,
+        );
+        let mut views = [ViewVertex::new(0, 0, 0); 32];
+        let mut cpu_projected = [None; 32];
+        if cached {
+            for i in 0..32 {
+                views[i] = camera.view_vertex(vertices[i]);
+                cpu_projected[i] = camera.projection.project_view(views[i]);
+            }
+        }
+        // While the dash rebuilds the cloth, its textured triangles are the
+        // intact mesh, so a corner shared by up to six of them is transformed
+        // and divided once, on first use, rather than once per triangle.
+        let lazy = crystal.is_some() && assembly.is_none() && !cached;
+        let mut seen = 0u32;
         let options = options
             .with_cull_mode(CullMode::None)
             .with_render_layer(WorldRenderLayer::Opaque);
+        let wire_style = world.line_style(&options, DASH_WIRE_COLOR);
         let mut submitted = 0;
         let mut batch = [([0u16; 3], (0u8, 0u8, 0u8)); 30];
         let mut batch_len = 0;
@@ -446,12 +475,18 @@ impl PlayerScarf {
                         *p != ProjectedVertex::INVALID && p.sz > camera.projection.focal_length / 2
                     }) {
                         for edge in 0..3 {
-                            let _ = world.submit_projected_line(
-                                triangles,
-                                [p[edge], p[(edge + 1) % 3]],
-                                DASH_WIRE_COLOR,
-                                options,
-                            );
+                            let (a, b) = (&p[edge], &p[(edge + 1) % 3]);
+                            match &wire_style {
+                                Some(style) => world.emit_line(triangles, style, a, b),
+                                None => {
+                                    let _ = world.submit_projected_line(
+                                        triangles,
+                                        [*a, *b],
+                                        DASH_WIRE_COLOR,
+                                        options,
+                                    );
+                                }
+                            }
                         }
                     }
                     let show = match dash {
@@ -484,12 +519,53 @@ impl PlayerScarf {
                         } else {
                             [(108, v0), (20, v1), (108, v1)]
                         };
-                        submitted += submit_crystal_cloth(
+                        let layer_options = options.with_material_layer(material);
+                        if lazy {
+                            for i in indices {
+                                if seen & (1 << i) == 0 {
+                                    seen |= 1 << i;
+                                    views[i] = camera.view_vertex(vertices[i]);
+                                    cpu_projected[i] = camera.projection.project_view(views[i]);
+                                }
+                            }
+                        }
+                        if cached || lazy {
+                            let corners = indices.map(|i| cpu_projected[i]);
+                            if let [Some(a), Some(b), Some(c)] = corners {
+                                // No corner is behind the near plane, so the
+                                // clipper would hand these three back as they are.
+                                submitted += world
+                                    .submit_textured_triangle_prepared(
+                                        triangles,
+                                        [a, b, c],
+                                        uvs.map(|(u, v)| {
+                                            (u.clamp(0, 127) as u8, v.clamp(0, 127) as u8)
+                                        }),
+                                        material,
+                                        packet,
+                                        layer_options,
+                                    )
+                                    .submitted_triangles;
+                                continue;
+                            }
+                            submitted += submit_crystal_cloth(
+                                indices.map(|i| views[i]),
+                                uvs,
+                                camera,
+                                material,
+                                layer_options,
+                                triangles,
+                                world,
+                            );
+                            continue;
+                        }
+                        submitted += submit_crystal_cloth_views(
                             fragment.map(|v| camera.view_vertex(v)),
                             uvs,
                             camera,
                             material,
-                            options.with_material_layer(material),
+                            packet,
+                            layer_options,
                             triangles,
                             world,
                         );
@@ -636,6 +712,40 @@ fn submit_clipped_cloth<const N: usize>(
         }
     }
     submitted
+}
+
+/// [`submit_crystal_cloth`] for a caller that also holds the material's prepacked
+/// packet words. With every corner in front of the near plane the clipper
+/// returns the three corners unchanged, so the packet goes out directly, as it
+/// does for the cached strip corners; anything crossing the plane is clipped.
+#[allow(clippy::too_many_arguments)]
+fn submit_crystal_cloth_views<const N: usize>(
+    input: [ViewVertex; 3],
+    uvs: [(i32, i32); 3],
+    camera: WorldCamera,
+    material: TextureMaterial,
+    packet: TexturedPacketMaterial,
+    options: WorldSurfaceOptions,
+    arena: &mut PrimitivePacketArena<'_>,
+    world: &mut WorldRenderPass<'_, '_, N>,
+) -> u16 {
+    let near = camera.projection.near_z.max(1);
+    if input.iter().any(|v| v.z < near) {
+        return submit_crystal_cloth(input, uvs, camera, material, options, arena, world);
+    }
+    let [Some(a), Some(b), Some(c)] = input.map(|v| camera.projection.project_view(v)) else {
+        return 0;
+    };
+    world
+        .submit_textured_triangle_prepared(
+            arena,
+            [a, b, c],
+            uvs.map(|(u, v)| (u.clamp(0, 127) as u8, v.clamp(0, 127) as u8)),
+            material,
+            packet,
+            options,
+        )
+        .submitted_triangles
 }
 
 /// Clip position and UV together at the near plane, then submit native FT3s.
@@ -983,6 +1093,89 @@ mod tests {
             }
             assert_eq!(count, 30);
             assert_eq!(s.points, before);
+        }
+    }
+    #[test]
+    fn crystal_cloth_direct_path_matches_the_clipper_for_corners_in_front() {
+        let projection = WorldProjection::new(160, 120, 256, 32);
+        let camera = WorldCamera::orbit(
+            projection,
+            WorldVertex::ZERO,
+            1800,
+            Angle::from_q12(0),
+            Angle::from_q12(0),
+        );
+        let mut seed = 0x2545_f491u32;
+        let mut next = |range: i32| {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            (seed % (range as u32 * 2 + 1)) as i32 - range
+        };
+        let words = |arena: &mut PrimitivePacketArena<'_>| {
+            let end = arena.used_slots();
+            let mut out = [[0u32; 9]; 4];
+            let mut n = 0;
+            unsafe {
+                arena.mutate_typed_slots::<TriTextured>(0, end, |t| {
+                    out[n] = [
+                        t.tag,
+                        t.tex_window,
+                        t.color_cmd,
+                        t.v0,
+                        t.v1,
+                        t.v2,
+                        t.uv0_clut,
+                        t.uv1_tpage,
+                        t.uv2,
+                    ];
+                    n += 1;
+                });
+            }
+            (n, out)
+        };
+        let materials = [
+            TextureMaterial::opaque(42, 5, (128, 128, 128)),
+            TextureMaterial::opaque(7, 9, (90, 200, 40)).with_blend_mode(BlendMode::Average),
+        ];
+        for cull in [CullMode::None, CullMode::Back, CullMode::Front] {
+            for split in [false, true] {
+                for material in materials {
+                    let packet = material.textured_packet_material();
+                    let options =
+                        WorldSurfaceOptions::new(DepthBand::whole(), DepthRange::new(0, 8192))
+                            .with_cull_mode(cull)
+                            .with_textured_triangle_splitting(split)
+                            .with_material_layer(material);
+                    for _ in 0..400 {
+                        let input = core::array::from_fn(|_| {
+                            ViewVertex::new(next(1600), next(1600), 20 + next(1500).abs())
+                        });
+                        let uvs = core::array::from_fn(|_| (next(160) + 20, next(160) + 20));
+                        let mut got = [(0u16, (0usize, [[0u32; 9]; 4])); 2];
+                        for (k, direct) in [false, true].into_iter().enumerate() {
+                            let mut storage = OrderingTable::<64>::new();
+                            let mut ot = OtFrame::begin(&mut storage);
+                            let mut commands = [WorldTriCommand::EMPTY; 64];
+                            let mut slots = psx_engine::PrimitivePacketScratch::<4>::ZERO;
+                            let mut arena = PrimitivePacketArena::new(&mut slots);
+                            let mut world = WorldRenderPass::new_bucketed(&mut ot, &mut commands);
+                            let submitted = if direct {
+                                submit_crystal_cloth_views(
+                                    input, uvs, camera, material, packet, options, &mut arena,
+                                    &mut world,
+                                )
+                            } else {
+                                submit_crystal_cloth(
+                                    input, uvs, camera, material, options, &mut arena, &mut world,
+                                )
+                            };
+                            got[k] = (submitted, words(&mut arena));
+                        }
+                        assert_eq!(got[0], got[1], "{input:?} {uvs:?} {cull:?} {split}");
+                    }
+                }
+            }
         }
     }
 }

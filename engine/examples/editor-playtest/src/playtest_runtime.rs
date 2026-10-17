@@ -1867,7 +1867,7 @@ impl Playtest {
                 self.lock_target.map_or(-1, |index| index as i32),
             ]);
         }
-        #[cfg(any(feature = "emulator-telemetry", feature = "camera-pose-log"))]
+        #[cfg(feature = "camera-pose-log")]
         {
             let player = self.motor.position();
             let eye = self.camera.position();

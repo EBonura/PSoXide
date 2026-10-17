@@ -34,6 +34,8 @@ mod world_pass;
 mod world_pass_gouraud;
 mod world_pass_model;
 
+pub use world_pass_model::LineStyle;
+
 const PSX_VERTEX_MIN: i16 = -1024;
 const PSX_VERTEX_MAX: i16 = 1023;
 const PSX_TRI_MAX_DX: i32 = 1023;
@@ -569,6 +571,25 @@ impl TexturedModelRenderFace {
                 (first as u32) | ((model_uv_word(uvs[0]) as u32) << 16),
                 (vertex_indices[1] as u32) | ((model_uv_word(uvs[1]) as u32) << 16),
                 (vertex_indices[2] as u32) | ((model_uv_word(uvs[2]) as u32) << 16),
+            ],
+        }
+    }
+
+    /// Build a face from vertex indices, packed packet UV words and a
+    /// two-bit 4bpp CLUT-bank selector: [`Self::new_with_palette_bank`] for
+    /// callers that already hold the UVs as words.
+    pub const fn from_packed_uvs(
+        vertex_indices: [u16; 3],
+        uv_words: [u16; 3],
+        palette_bank: u8,
+    ) -> Self {
+        let first = (vertex_indices[0] & MODEL_RENDER_VERTEX_INDEX_MASK)
+            | (((palette_bank as u16) & 3) << MODEL_RENDER_PALETTE_BANK_SHIFT);
+        Self {
+            corner_words: [
+                (first as u32) | ((uv_words[0] as u32) << 16),
+                (vertex_indices[1] as u32) | ((uv_words[1] as u32) << 16),
+                (vertex_indices[2] as u32) | ((uv_words[2] as u32) << 16),
             ],
         }
     }

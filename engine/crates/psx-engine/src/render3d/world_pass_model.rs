@@ -258,6 +258,149 @@ fn facet_reflection_face(
     face
 }
 
+/// Joint rotation currently loaded into the GTE for [`facet_reflection_plain_words`].
+///
+/// Faces are cooked part by part, so consecutive faces nearly always name the
+/// same joint and the five-register matrix load happens once per run instead
+/// of nine matrix loads from RAM per face. The matrix the GTE held before the
+/// first borrow is kept and handed back by [`ReflectionJoint::restore`]: the
+/// walker used to leave RT alone and code after it (projectors built before
+/// the model draw) may rely on that.
+struct ReflectionJoint {
+    joint: usize,
+    loaded: bool,
+    saved: Option<Mat3I16>,
+}
+
+impl ReflectionJoint {
+    const fn new() -> Self {
+        Self {
+            joint: usize::MAX,
+            loaded: false,
+            saved: None,
+        }
+    }
+
+    #[inline(always)]
+    fn restore(self) {
+        if let Some(matrix) = self.saved {
+            psx_gte::scene::load_rotation(&matrix);
+            settle_gte_matrix_write();
+        }
+    }
+}
+
+/// Three buffer NOPs after a matrix load. Every other matrix load in the
+/// engine reaches its first MVMVA at least seven instructions after the last
+/// control write (a translation load follows it); this walker has no
+/// translation load, so the distance is made up here rather than assumed to
+/// be enough on silicon (the CTC2 to MVMVA hazard window is not measured).
+#[inline(always)]
+fn settle_gte_matrix_write() {
+    #[cfg(target_arch = "mips")]
+    // SAFETY: three no-op instructions; no registers, memory or flags are touched.
+    unsafe {
+        core::arch::asm!(
+            ".word 0",
+            ".word 0",
+            ".word 0",
+            options(nostack, nomem, preserves_flags)
+        );
+    }
+}
+
+/// The three UV words of a facet-reflection face, identical to
+/// [`facet_reflection_face`] for every face with a joint in `joints`.
+///
+/// The nine CPU products become one GTE MVMVA with `sf = 0` (the exact row
+/// products) against the joint rotation loaded once per run of faces. With no
+/// gradient or strip bits (cooked final word `0`) the per-corner offsets and
+/// clamps drop out, because the lookup is already inside the map (`len >=
+/// |n|`, so `0 <= u <= width - 1`); with them the corner loop below is the
+/// general routine's, line for line.
+#[inline(always)]
+fn facet_reflection_words(
+    words: [u16; 3],
+    joints: &[JointViewTransform],
+    rotation: &mut ReflectionJoint,
+    width: u8,
+    height: u8,
+    roughness: u8,
+) -> [u16; 3] {
+    let joint = usize::from(words[1] >> 8);
+    if joint != rotation.joint {
+        rotation.joint = joint;
+        rotation.loaded = match joints.get(joint) {
+            Some(transform) => {
+                if rotation.saved.is_none() {
+                    rotation.saved = Some(psx_gte::scene::read_rotation());
+                }
+                psx_gte::scene::load_rotation(&transform.rotation);
+                settle_gte_matrix_write();
+                true
+            }
+            None => false,
+        };
+    }
+    if !rotation.loaded {
+        return [0; 3];
+    }
+    let n = Vec3I16::new(
+        words[0] as u8 as i8 as i16,
+        (words[0] >> 8) as u8 as i8 as i16,
+        words[1] as u8 as i8 as i16,
+    );
+    let d = psx_gte::scene::rotate_vector_unshifted_scheduled(n);
+    // Projection scales X/Y by four to improve GTE precision; undo that
+    // anisotropy before normal lookup. Uniform model scale cancels in L1.
+    let nx = d.x / (MODEL_GTE_XY_SCALE * 8);
+    let ny = d.y / (MODEL_GTE_XY_SCALE * 8);
+    let nz = d.z / 8;
+    let len = (nx.abs() + ny.abs() + nz.abs()).max(1);
+    let quantum_mask = !((1u32 << roughness.min(3)) - 1);
+    let coord = |n: i32, size: u8| {
+        let max = u32::from(size.max(1)) - 1;
+        let x = (len + n) as u32 * max / (2 * len) as u32;
+        (x & quantum_mask) as u16
+    };
+    let u = i32::from(coord(nx, width));
+    let v = i32::from(coord(ny, height));
+    let gradient = words[2];
+    if gradient & 0xf000 == 0 {
+        let word = (u as u16) | ((v as u16) << 8);
+        return [word; 3];
+    }
+    let band = (gradient >> 12) & 7;
+    let (wmax, hmax) = (i32::from(width.max(1)) - 1, i32::from(height.max(1)) - 1);
+    // Gradient offsets are at most 12 texels either way, so a lookup at
+    // least 12 texels inside the map on both axes can skip every clamp.
+    let inside = u >= 12 && v >= 12 && u + 12 <= wmax && v + 12 <= hmax;
+    let strip = (1..=4).contains(&band) && width >= 4;
+    let mut out = [0u16; 3];
+    for (k, word) in out.iter_mut().enumerate() {
+        let (du, dv) = if gradient & 0x8000 != 0 {
+            let bits = gradient >> (k * 4);
+            (
+                (i32::from(bits & 3) * 2 - 3) * 4,
+                (i32::from((bits >> 2) & 3) * 2 - 3) * 4,
+            )
+        } else {
+            (0, 0)
+        };
+        let (cu, cv) = if inside {
+            (u + du, v + dv)
+        } else {
+            ((u + du).clamp(0, wmax), (v + dv).clamp(0, hmax))
+        };
+        let mut mapped_u = cu as u16;
+        if strip {
+            mapped_u = ((band - 1) * u16::from(width) + mapped_u) >> 2;
+        }
+        *word = mapped_u | ((cv as u16) << 8);
+    }
+    out
+}
+
 fn model_face_with_uv_mapping(
     mut face: TexturedModelRenderFace,
     projected_vertices: &[ProjectedVertex],
@@ -380,6 +523,19 @@ impl PreparedModelDepthSlots {
                 .span
                 .divide(offset.saturating_mul(self.band_slots) as u32) as usize
     }
+}
+
+/// Depth mapping and packet header for emitting many loose lines of one colour
+/// and depth bias through [`WorldRenderPass::emit_line`].
+///
+/// Built once per effect with [`WorldRenderPass::line_style`]: the depth-slot
+/// mapping is prepared here instead of being rebuilt, with a copy of the whole
+/// surface options, for every line.
+#[derive(Copy, Clone)]
+pub struct LineStyle {
+    slots: PreparedModelDepthSlots,
+    color_cmd: u32,
+    bias: i32,
 }
 
 // Outside the inexpensive proof rectangle, recover precisely the old bounds.
@@ -537,8 +693,12 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         safe: bool,
     ) -> TexturedModelRenderStats {
         let mut stats = TexturedModelRenderStats::default();
+        // A bucketed pass keeps no render layer (slot and submission order are
+        // all it records), so a translucent material only needs the layer that
+        // the other orderings would have had to be told about.
         if safe
-            && !material.is_translucent()
+            && (!material.is_translucent()
+                || matches!(self.ordering, WorldCommandOrdering::Bucketed))
             && options.cull_mode == CullMode::Back
             && options.depth_policy == DepthPolicy::Average
         {
@@ -2007,6 +2167,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         let depth_slots = PreparedModelDepthSlots::new::<OT_DEPTH>(options);
         let mut culled = 0u16;
         let mut submitted = 0usize;
+        let mut rotation = ReflectionJoint::new();
         for source in faces {
             // SAFETY: the caller validated all indices and projected all
             // vertices, and preflighted a packet/command for every face.
@@ -2019,11 +2180,18 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 culled = culled.wrapping_add(1);
                 continue;
             }
-            let mapped = facet_reflection_face(face, joints, width, height, roughness);
+            let uv_words = facet_reflection_words(
+                face.uv_words(),
+                joints,
+                &mut rotation,
+                width,
+                height,
+                roughness,
+            );
             let triangle = unsafe {
                 triangles.push_unchecked(TriTextured::with_packet_material_packed_uv_words(
                     xy,
-                    mapped.uv_words(),
+                    uv_words,
                     packet.with_clut_bank(face.palette_bank()),
                 ))
             } as *mut TriTextured as *mut u32;
@@ -2039,6 +2207,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             }
             submitted += 1;
         }
+        rotation.restore();
         self.command_len = command_start + submitted;
         let processed = faces.len().min(u16::MAX as usize) as u16;
         *considered = considered.wrapping_add(u32::from(processed));
@@ -3055,6 +3224,65 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         }
     }
 
+    /// Prepare [`Self::emit_line`] for lines of `color`, ordered by `options`
+    /// (depth band, range and bias). `None` unless this pass orders its commands
+    /// by slot bucket, the one mode `emit_line` writes; callers then keep to
+    /// [`Self::submit_projected_line`].
+    pub fn line_style(
+        &self,
+        options: &WorldSurfaceOptions,
+        color: (u8, u8, u8),
+    ) -> Option<LineStyle> {
+        if !matches!(self.ordering, WorldCommandOrdering::Bucketed) {
+            return None;
+        }
+        Some(LineStyle {
+            slots: PreparedModelDepthSlots::new::<OT_DEPTH>(*options),
+            color_cmd: psx_gpu::prim::LineMono::new(0, 0, 0, 0, color.0, color.1, color.2)
+                .color_cmd,
+            bias: options.depth_bias,
+        })
+    }
+
+    /// One monochrome line between two projected vertices: the packet and
+    /// ordering command [`Self::submit_projected_line`] writes for the same
+    /// colour and options, without rebuilding the depth mapping or copying the
+    /// options. Does nothing when either arena is full, as that call does.
+    #[inline(always)]
+    pub fn emit_line(
+        &mut self,
+        lines: &mut impl PrimitiveSink<psx_gpu::prim::LineMono>,
+        style: &LineStyle,
+        a: &ProjectedVertex,
+        b: &ProjectedVertex,
+    ) {
+        use psx_gpu::prim::LineMono;
+        if self.command_len >= self.commands.len() {
+            return;
+        }
+        let mut packet = LineMono::new(a.sx, a.sy, b.sx, b.sy, 0, 0, 0);
+        packet.color_cmd = style.color_cmd;
+        let Some(line) = lines.push(packet) else {
+            return;
+        };
+        let slot = style.slots.slot(a.sz.min(b.sz).saturating_add(style.bias));
+        // SAFETY: `line_style` only exists for a bucketed pass, whose
+        // constructor verified the command storage layout and alignment for
+        // `BucketedWorldCommand`, and the index was bounds-checked above.
+        unsafe {
+            self.commands
+                .as_mut_ptr()
+                .cast::<BucketedWorldCommand>()
+                .add(self.command_len)
+                .write(BucketedWorldCommand::new(
+                    line as *mut LineMono as *mut u32,
+                    slot,
+                    LineMono::WORDS,
+                ));
+        }
+        self.command_len += 1;
+    }
+
     /// Submit fixed wireframe edges with the same packets and nearest-end
     /// depth as `submit_projected_line`. Invalid endpoints are skipped.
     /// Returns the number of valid edges attempted, including arena exhaustion,
@@ -3067,7 +3295,6 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         color: (u8, u8, u8),
         options: WorldSurfaceOptions,
     ) -> u16 {
-        use psx_gpu::prim::LineMono;
         let fast = matches!(self.ordering, WorldCommandOrdering::Bucketed)
             && edges.len() <= lines.remaining()
             && edges.len() <= self.commands.len().saturating_sub(self.command_len);
@@ -3087,27 +3314,60 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             }
             return count;
         }
+        // A reserved batch keeps the packet cursor and count in locals for
+        // the whole loop (no per-packet fence test, no counter stores), which
+        // is what lets the loop below hold its operands in registers.
+        if let Some(mut batch) = lines.reserve_batch(edges.len()) {
+            let count = self.emit_line_edges(&mut batch, projected, edges, color, options);
+            return count.min(u16::MAX as usize) as u16;
+        }
+        let count = self.emit_line_edges(lines, projected, edges, color, options);
+        count.min(u16::MAX as usize) as u16
+    }
+
+    /// The bucketed, capacity-proven half of [`Self::submit_projected_line_edges`].
+    ///
+    /// `lines` and the command storage must each have room for one entry per
+    /// edge.
+    #[inline(always)]
+    fn emit_line_edges(
+        &mut self,
+        lines: &mut impl PrimitiveSink<psx_gpu::prim::LineMono>,
+        projected: &[ProjectedVertex],
+        edges: &[[u16; 2]],
+        color: (u8, u8, u8),
+        options: WorldSurfaceOptions,
+    ) -> usize {
+        use psx_gpu::prim::LineMono;
         let depths = PreparedModelDepthSlots::new::<OT_DEPTH>(options);
+        let color_cmd = LineMono::new(0, 0, 0, 0, color.0, color.1, color.2).color_cmd;
+        let bias = options.depth_bias;
         let start = self.command_len;
         let commands = self.commands.as_mut_ptr().cast::<BucketedWorldCommand>();
+        let vertices = projected.as_ptr();
+        let vertex_count = projected.len();
         let mut count = 0usize;
         for &[a, b] in edges {
-            let (Some(&a), Some(&b)) =
-                (projected.get(usize::from(a)), projected.get(usize::from(b)))
-            else {
-                continue;
-            };
-            if a == ProjectedVertex::INVALID || b == ProjectedVertex::INVALID {
+            let (a, b) = (usize::from(a), usize::from(b));
+            if a >= vertex_count || b >= vertex_count {
                 continue;
             }
-            // SAFETY: one packet/command per input edge was reserved above.
-            // Skipped edges only reduce that bound; the bucketed constructor
-            // guarantees compatible command storage layout and alignment.
+            // SAFETY: both indices are below `vertex_count`.
+            let (a, b) = unsafe { (&*vertices.add(a), &*vertices.add(b)) };
+            if (a.sz == i32::MIN && a.sx == 0 && a.sy == 0)
+                || (b.sz == i32::MIN && b.sx == 0 && b.sy == 0)
+            {
+                continue;
+            }
+            // SAFETY: one packet/command per input edge was reserved by the
+            // caller. Skipped edges only reduce that bound; the bucketed
+            // constructor guarantees compatible command storage layout and
+            // alignment.
             unsafe {
-                let line = lines.push_unchecked(LineMono::new(
-                    a.sx, a.sy, b.sx, b.sy, color.0, color.1, color.2,
-                )) as *mut LineMono as *mut u32;
-                let depth = a.sz.min(b.sz).saturating_add(options.depth_bias);
+                let mut packet = LineMono::new(a.sx, a.sy, b.sx, b.sy, 0, 0, 0);
+                packet.color_cmd = color_cmd;
+                let line = lines.push_unchecked(packet) as *mut LineMono as *mut u32;
+                let depth = a.sz.min(b.sz).saturating_add(bias);
                 commands.add(start + count).write(BucketedWorldCommand::new(
                     line,
                     depths.slot(depth),
@@ -3117,7 +3377,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             count += 1;
         }
         self.command_len = start + count;
-        count.min(u16::MAX as usize) as u16
+        count
     }
 
     /// Submit indexed, solid-color Gouraud triangles with shared depth setup.
@@ -4090,6 +4350,197 @@ mod facet_reflection_tests {
     }
 
     #[test]
+    fn translucent_projected_faces_take_the_packed_batch_with_identical_packets() {
+        use psx_gpu::{material::BlendMode, ot::OrderingTable, prim::TriTextured};
+        extern crate std;
+        use std::vec::Vec;
+        let mut state = 0x1357_9bdfu32;
+        let mut next = move |range: i32| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            (state % (range as u32 * 2 + 1)) as i32 - range
+        };
+        let mut projected = [ProjectedVertex::INVALID; 40];
+        for vertex in projected.iter_mut() {
+            *vertex = ProjectedVertex::new(
+                (160 + next(120)) as i16,
+                (120 + next(90)) as i16,
+                40 + next(900).abs(),
+            );
+        }
+        let mut faces = [TexturedModelRenderFace::ZERO; 60];
+        for face in faces.iter_mut() {
+            let indices = [0; 3].map(|_| (next(19) + 19) as u16);
+            let uvs = [0; 3].map(|_| ((next(60) + 60) as u8, (next(60) + 60) as u8));
+            *face = TexturedModelRenderFace::new_with_palette_bank(
+                indices,
+                uvs,
+                (next(2) + 2) as u8 & 3,
+            );
+        }
+        let materials = [
+            TextureMaterial::opaque(42, 5, (128, 128, 128)).with_blend_mode(BlendMode::Average),
+            TextureMaterial::opaque(7, 9, (90, 200, 40)).with_blend_mode(BlendMode::Add),
+            TextureMaterial::opaque(7, 9, (90, 200, 40)),
+        ];
+        for material in materials {
+            for bias in [0, 3] {
+                let run = |safe: bool| {
+                    let mut storage = OrderingTable::<64>::new();
+                    let mut ot = OtFrame::begin(&mut storage);
+                    let mut commands = [WorldTriCommand::EMPTY; 80];
+                    let mut packets = [TriTextured::with_material(
+                        [(0, 0); 3],
+                        [(0, 0); 3],
+                        TextureMaterial::new(0, 0),
+                    ); 80];
+                    let base = packets.as_ptr() as usize;
+                    let (stats, used, rows);
+                    {
+                        let mut arena = PrimitiveArena::new(&mut packets);
+                        let mut pass = WorldRenderPass::new_bucketed(&mut ot, &mut commands);
+                        let options =
+                            WorldSurfaceOptions::new(DepthBand::whole(), DepthRange::new(0, 1000))
+                                .with_cull_mode(CullMode::Back)
+                                .with_depth_policy(DepthPolicy::Average)
+                                .with_depth_bias(bias)
+                                .with_textured_triangle_splitting(false)
+                                .with_material_layer(material);
+                        let result = pass.submit_projected_model_faces_checked(
+                            &mut arena, &projected, &faces, material, options, safe,
+                        );
+                        stats = (
+                            result.submitted_triangles,
+                            result.culled_triangles,
+                            result.skipped_triangles,
+                        );
+                        used = arena.len();
+                        let mut r = [(0usize, 0usize); 80];
+                        for (i, row) in r.iter_mut().enumerate().take(pass.command_len()) {
+                            // SAFETY: the first `command_len` compact entries were written.
+                            let command = unsafe {
+                                *pass.commands.as_ptr().cast::<BucketedWorldCommand>().add(i)
+                            };
+                            *row = (command.packet_ptr as usize - base, command.slot_words);
+                        }
+                        rows = r;
+                    }
+                    let words: Vec<[u32; 8]> = packets[..used]
+                        .iter()
+                        .map(|p| {
+                            [
+                                p.tex_window,
+                                p.color_cmd,
+                                p.v0,
+                                p.v1,
+                                p.v2,
+                                p.uv0_clut,
+                                p.uv1_tpage,
+                                p.uv2,
+                            ]
+                        })
+                        .collect();
+                    (stats, used, rows, words)
+                };
+                assert_eq!(run(true), run(false), "{material:?} bias {bias}");
+            }
+        }
+    }
+
+    #[test]
+    fn packet_arena_line_batch_matches_individual_packets_and_slots() {
+        use psx_gpu::ot::OrderingTable;
+        extern crate std;
+        use std::vec::Vec;
+        let projected = [
+            ProjectedVertex::new(-70, 20, 200),
+            ProjectedVertex::new(33, -18, 800),
+            ProjectedVertex::new(10, 60, 1200),
+            ProjectedVertex::INVALID,
+            ProjectedVertex::new(5, 5, i32::MIN),
+        ];
+        let edges = [
+            [0, 1],
+            [1, 2],
+            [2, 0],
+            [0, 0],
+            [3, 1],
+            [9, 0],
+            [1, 0],
+            [4, 1],
+            [2, 4],
+        ];
+        for command_capacity in [3, 12] {
+            for bias in [-999, 0, 700] {
+                let run = |batch: bool| {
+                    let mut storage = OrderingTable::<8>::new();
+                    let mut ot = OtFrame::begin(&mut storage);
+                    let mut commands = [WorldTriCommand::EMPTY; 12];
+                    let mut scratch = crate::PrimitivePacketScratch::<12>::ZERO;
+                    let base = &scratch as *const _ as usize;
+                    let (count, used, packets, slots);
+                    {
+                        let mut arena = crate::PrimitivePacketArena::new(&mut scratch);
+                        let mut pass = WorldRenderPass::new_bucketed(
+                            &mut ot,
+                            &mut commands[..command_capacity],
+                        );
+                        let options =
+                            WorldSurfaceOptions::new(DepthBand::whole(), DepthRange::new(16, 2048))
+                                .with_depth_bias(bias);
+                        count = if batch {
+                            pass.submit_projected_line_edges(
+                                &mut arena,
+                                &projected,
+                                &edges,
+                                (12, 64, 200),
+                                options,
+                            )
+                        } else {
+                            let mut count = 0;
+                            for &[a, b] in &edges {
+                                let (Some(&a), Some(&b)) =
+                                    (projected.get(a as usize), projected.get(b as usize))
+                                else {
+                                    continue;
+                                };
+                                if a == ProjectedVertex::INVALID || b == ProjectedVertex::INVALID {
+                                    continue;
+                                }
+                                pass.submit_projected_line(
+                                    &mut arena,
+                                    [a, b],
+                                    (12, 64, 200),
+                                    options,
+                                );
+                                count += 1;
+                            }
+                            count
+                        };
+                        used = arena.used_slots();
+                        let commands_used = pass.command_len();
+                        let mut rows = [(0usize, 0usize); 12];
+                        for (i, row) in rows.iter_mut().enumerate().take(commands_used) {
+                            // SAFETY: the first `commands_used` compact entries were written.
+                            let command = unsafe {
+                                *pass.commands.as_ptr().cast::<BucketedWorldCommand>().add(i)
+                            };
+                            *row = (command.packet_ptr as usize - base, command.slot_words);
+                        }
+                        slots = rows;
+                        packets = commands_used;
+                    }
+                    let words: Vec<u32> =
+                        scratch.words_mut()[..used * crate::PRIMITIVE_PACKET_SLOT_WORDS].to_vec();
+                    (count, used, packets, slots, words)
+                };
+                assert_eq!(run(true), run(false));
+            }
+        }
+    }
+
+    #[test]
     fn solid_gouraud_batch_matches_scalar_packets_depths_culling_and_exhaustion() {
         use psx_gpu::{ot::OrderingTable, prim::TriGouraud};
         extern crate std;
@@ -4459,5 +4910,62 @@ mod facet_reflection_tests {
             facet_reflection_face(face([0, 0, -127], 255), &[], 128, 128, 0).uvs(),
             [(0, 0); 3]
         );
+    }
+}
+
+#[cfg(test)]
+mod facet_reflection_words_tests {
+    use super::*;
+
+    fn next(seed: &mut u32) -> u32 {
+        *seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        *seed >> 8
+    }
+
+    /// The GTE-backed path must give exactly the words the general
+    /// per-corner routine gives, gradient and strip bits included.
+    #[test]
+    fn words_match_the_general_routine() {
+        let mut seed = 0x1234_5678;
+        let mut joints = [JointViewTransform::ZERO; 5];
+        for joint in joints.iter_mut() {
+            for row in 0..3 {
+                for col in 0..3 {
+                    joint.rotation.m[row][col] = (next(&mut seed) % 8193) as i16 - 4096;
+                }
+            }
+        }
+        let mut rotation = ReflectionJoint::new();
+        for case in 0..8000u32 {
+            let nx = (next(&mut seed) & 0xff) as u8;
+            let ny = (next(&mut seed) & 0xff) as u8;
+            let nz = (next(&mut seed) & 0xff) as u8;
+            // Joints 5 and 6 do not exist: the general routine zeroes the words.
+            let joint = (next(&mut seed) % 7) as u16;
+            let gradient = match case % 3 {
+                0 => 0,
+                1 => (next(&mut seed) & 0xffff) as u16,
+                _ => (next(&mut seed) & 0x0fff) as u16 | 0x8000,
+            };
+            let words = [
+                u16::from(nx) | u16::from(ny) << 8,
+                u16::from(nz) | joint << 8,
+                gradient,
+            ];
+            let (width, height) =
+                [(64u8, 64u8), (128, 64), (32, 96), (1, 1), (4, 8)][(case % 5) as usize];
+            let roughness = ((case / 5) % 4) as u8;
+            let face = TexturedModelRenderFace {
+                corner_words: [
+                    u32::from(words[0]) << 16,
+                    u32::from(words[1]) << 16 | 1,
+                    u32::from(words[2]) << 16 | 2,
+                ],
+            };
+            let general = facet_reflection_face(face, &joints, width, height, roughness).uv_words();
+            let fast =
+                facet_reflection_words(words, &joints, &mut rotation, width, height, roughness);
+            assert_eq!(fast, general, "case {case}");
+        }
     }
 }

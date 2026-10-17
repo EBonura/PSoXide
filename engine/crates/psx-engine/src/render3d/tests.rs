@@ -1549,3 +1549,167 @@ fn grounding_probe_player_lowest_vertex_matches_reference() {
         "GTE sx drifted from the reference"
     );
 }
+
+#[test]
+fn prepared_textured_triangle_matches_the_general_path() {
+    const ZERO: TriTextured = TriTextured::new(
+        [(0, 0), (0, 0), (0, 0)],
+        [(0, 0), (0, 0), (0, 0)],
+        0,
+        0,
+        (0, 0, 0),
+    );
+    let materials = [
+        TextureMaterial::opaque(3, 9, (128, 96, 160)),
+        TextureMaterial::blended(5, 2, (128, 128, 128), BlendMode::Add),
+    ];
+    let cases = [
+        // Small, inside the screen.
+        [(0, 0, 100), (16, 0, 120), (0, 16, 90)],
+        // Large: needs subdividing, so the prepared path hands over.
+        [(0, 0, 100), (0, 700, 100), (128, 0, 100)],
+        // Off the vertex range.
+        [(-2000, 10, 50), (20, 4000, 60), (3000, -3000, 70)],
+        // Far and flat.
+        [(100, 100, 5000), (110, 100, 5000), (100, 110, 5000)],
+    ];
+    for split in [false, true] {
+        for material in materials {
+            for case in cases {
+                let verts = case.map(|(x, y, z)| ProjectedVertex::new(x, y, z));
+                let uvs = [(0, 0), (63, 5), (7, 127)];
+                let options =
+                    WorldSurfaceOptions::new(DepthBand::whole(), DepthRange::new(0, 8000))
+                        .with_cull_mode(CullMode::None)
+                        .with_textured_triangle_splitting(split);
+                let mut results = [(0u16, 0u16, 0u16, 0u16, [ZERO; 16], [(0u32, 0u8); 16]); 2];
+                for prepared in [false, true] {
+                    let mut ot_storage = OrderingTable::<8>::new();
+                    let mut ot = OtFrame::begin(&mut ot_storage);
+                    let mut triangle_storage = [const { ZERO }; 16];
+                    let mut triangles = PrimitiveArena::new(&mut triangle_storage);
+                    let mut commands = [WorldTriCommand::EMPTY; 16];
+                    let stats = {
+                        let mut pass = WorldRenderPass::new(&mut ot, &mut commands);
+                        if prepared {
+                            pass.submit_textured_triangle_prepared(
+                                &mut triangles,
+                                verts,
+                                uvs,
+                                material,
+                                material.textured_packet_material(),
+                                options,
+                            )
+                        } else {
+                            pass.submit_textured_triangle(
+                                &mut triangles,
+                                verts,
+                                uvs,
+                                material,
+                                options,
+                            )
+                        }
+                    };
+                    let used = stats.submitted_triangles as usize;
+                    let mut meta = [(0u32, 0u8); 16];
+                    for (slot, c) in meta.iter_mut().zip(commands[..used].iter()) {
+                        *slot = (c.depth as u32, c.render_layer);
+                    }
+                    // Only the packets this submit wrote are meaningful.
+                    let mut packets = [ZERO; 16];
+                    packets[..used].copy_from_slice(&triangle_storage[..used]);
+                    results[usize::from(prepared)] = (
+                        stats.submitted_triangles,
+                        stats.dropped_triangles,
+                        stats.split_triangles,
+                        stats.culled_triangles,
+                        packets,
+                        meta,
+                    );
+                }
+                assert_eq!(results[0], results[1], "split {split} case {case:?}");
+            }
+        }
+    }
+}
+
+/// `emit_line` must leave the packet words and the ordering command that
+/// `submit_projected_line` leaves for the same two vertices, colour and options.
+#[test]
+fn emit_line_matches_submit_projected_line() {
+    use psx_gpu::prim::LineMono;
+    let mut state = 0x6d2b_79f5u32;
+    let mut next = move |range: i32| {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        (state % (range as u32 * 2 + 1)) as i32 - range
+    };
+    let ranges = [
+        DepthRange::new(0, 8192),
+        DepthRange::new(0, 4096),
+        DepthRange::new(40, 1000),
+        DepthRange::new(100, 100),
+        DepthRange::new(0, 3000),
+    ];
+    let bands = [
+        DepthBand::whole(),
+        DepthBand::new(4, 2000),
+        DepthBand::new(10, 10),
+    ];
+    for range in ranges {
+        for band in bands {
+            for bias in [0, 2, -7, 64] {
+                let options = WorldSurfaceOptions::new(band, range).with_depth_bias(bias);
+                type Emitted = ([LineMono; 40], usize, [(usize, usize, u8); 40]);
+                let mut results: [Emitted; 2] =
+                    [([LineMono::new(0, 0, 0, 0, 0, 0, 0); 40], 0, [(0, 0, 0); 40]); 2];
+                let mut lines_input = [(ProjectedVertex::INVALID, ProjectedVertex::INVALID); 40];
+                for pair in lines_input.iter_mut() {
+                    let vertex = |n: &mut dyn FnMut(i32) -> i32| {
+                        ProjectedVertex::new(
+                            n(300) as i16,
+                            n(200) as i16,
+                            if n(8) == 0 { n(20000) } else { n(1200).abs() },
+                        )
+                    };
+                    *pair = (vertex(&mut next), vertex(&mut next));
+                }
+                for fast in [false, true] {
+                    let mut ot_storage = OrderingTable::<2048>::new();
+                    let mut ot = OtFrame::begin(&mut ot_storage);
+                    let mut commands = [WorldTriCommand::EMPTY; 40];
+                    let mut storage = [LineMono::new(0, 0, 0, 0, 0, 0, 0); 40];
+                    let base = storage.as_ptr() as usize;
+                    let mut arena = PrimitiveArena::new(&mut storage);
+                    let mut pass = WorldRenderPass::new_bucketed(&mut ot, &mut commands);
+                    let style = pass.line_style(&options, (30, 255, 128)).unwrap();
+                    for (a, b) in lines_input {
+                        if fast {
+                            pass.emit_line(&mut arena, &style, &a, &b);
+                        } else {
+                            pass.submit_projected_line(&mut arena, [a, b], (30, 255, 128), options);
+                        }
+                    }
+                    let count = pass.command_len();
+                    let compact = pass.commands.as_ptr().cast::<BucketedWorldCommand>();
+                    let mut rows = [(0usize, 0usize, 0u8); 40];
+                    for (index, row) in rows.iter_mut().enumerate().take(count) {
+                        // SAFETY: the first `count` compact entries were written above.
+                        let command = unsafe { *compact.add(index) };
+                        *row = (
+                            (command.packet_ptr as usize - base) / core::mem::size_of::<LineMono>(),
+                            command.slot(),
+                            command.words(),
+                        );
+                    }
+                    drop(pass);
+                    let len = arena.len();
+                    results[usize::from(fast)] = (storage, len, rows);
+                    assert_eq!(count, len);
+                }
+                assert_eq!(results[0], results[1], "{range:?} {band:?} bias {bias}");
+            }
+        }
+    }
+}

@@ -66,6 +66,8 @@ cd-stream-bench = ["dep:psx-io", "psx-game-runtime/cd-stream-bench"]
 cd-stream-benchmark = ["cd-stream-bench", "psx-game-runtime/cd-stream-benchmark"]
 boot-trace = ["psx-engine/boot-trace", "psx-rt/boot-trace"]
 emulator-telemetry = ["psx-engine/emulator-telemetry"]
+# Pad polled by the interrupt-driven engine (see psx-engine `pad-irq`).
+pad-irq = ["psx-engine/pad-irq"]
 # Per-update `camera-pose` debug lines only; fits builds that overflow RAM with
 # the full emulator-telemetry feature (Graybox Reach).
 camera-pose-log = ["psx-engine/debug-log"]

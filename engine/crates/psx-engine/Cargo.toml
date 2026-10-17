@@ -52,6 +52,10 @@ vert-debug = []
 # psx-rt's VBlank-kicked present queue. Without it those scenes present the
 # QueuedDoubleBuffered way, and no SDK code pays for the queue.
 present-queue = ["psx-rt/present-queue"]
+# Poll the pad from psx-pad's interrupt-driven engine instead of spinning on
+# the serial port every simulation tick (sdk/docs/PAD-IRQ-ENGINE.md). The
+# synchronous driver stays the default until a console confirms the engine.
+pad-irq = ["psx-pad/irq-engine"]
 
 [lints]
 workspace = true
