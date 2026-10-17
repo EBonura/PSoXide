@@ -68,12 +68,16 @@ impl Room {
     }
 
     fn wall(&mut self, cx: usize, cz: usize, edge: u8, bottom: i16, top: i16) {
+        self.wall_flagged(cx, cz, edge, bottom, top, 0);
+    }
+
+    fn wall_flagged(&mut self, cx: usize, cz: usize, edge: u8, bottom: i16, top: i16, flags: u8) {
         let index = cz * usize::from(self.w) + cx;
         self.walls.push((
             index,
             ColWall {
                 edge,
-                flags: 0,
+                flags,
                 y: [bottom, bottom, top, top],
                 reserved: 0,
             },
@@ -828,4 +832,121 @@ fn point_traces_need_no_discrete_validation() {
             assert!(hits > 1000, "{hits}");
         });
     }
+}
+
+/// A 10 by 1 strip: floor 0 for cells 0..3, a tall plateau (200 runtime
+/// units, far above the 40 the motor steps) from cell 3 on. `wall` adds the
+/// cliff face the cook writes for it: a one-sided wall on the low cell's east
+/// edge.
+fn cliff_strip(wall: Option<u8>) -> Built {
+    let mut room = Room::flat([0, 0, 0], 10, 1, 0);
+    for cx in 3..10 {
+        room.set_floor(cx, 0, 200);
+    }
+    if let Some(flags) = wall {
+        room.wall_flagged(2, 0, edge::EAST, 0, 200, flags);
+    }
+    build(&[room])
+}
+
+#[test]
+fn a_tall_riser_without_a_cliff_wall_lets_a_ray_pass_below_the_plateau() {
+    // The H1 experiment of the natural terrain audit: the floor slab is thin,
+    // so a ray (the camera arm, a shadow ray) through the rock below the high
+    // floor meets nothing at all.
+    let built = cliff_strip(None);
+    built.run(|w| {
+        let t = trace(w, point([20, 100, 40], [500, 100, 40]));
+        assert_eq!(t.fraction_q12, 4096, "{t:?}");
+    });
+}
+
+#[test]
+fn a_front_only_cliff_wall_stops_a_ray_from_below_and_lets_one_leave_the_rock() {
+    let built = cliff_strip(Some(WALL_FRONT_ONLY));
+    built.run(|w| {
+        // From the low side into the cliff: stopped at the face (x = 240).
+        let t = trace(w, point([20, 100, 40], [500, 100, 40]));
+        assert!(t.fraction_q12 < 4096, "{t:?}");
+        assert!(t.end.x <= 240 && t.end.x > 230, "{t:?}");
+        // A body below the plateau cannot walk into it either.
+        let end = walk(w, RoomPoint::new(100, 0, 40), 4096, 0, 200);
+        assert_eq!(end.y, 0, "{end:?}");
+        assert!(end.x <= 240 - 12 && end.x > 240 - 12 - 10, "{end:?}");
+        // From the plateau side the wall is not there: the ray travels on.
+        let t = trace(w, point([500, 100, 40], [20, 100, 40]));
+        assert_eq!(t.fraction_q12, 4096, "{t:?}");
+    });
+}
+
+#[test]
+fn a_ledge_can_be_walked_off_where_the_cliff_wall_is_one_sided() {
+    let built = cliff_strip(Some(WALL_FRONT_ONLY));
+    built.run(|w| {
+        let end = walk(w, RoomPoint::new(400, 200, 40), -4096, 0, 200);
+        assert!(end.x < 240, "must leave the plateau: {end:?}");
+        assert_eq!(end.y, 0, "and land on the low floor: {end:?}");
+    });
+}
+
+#[test]
+fn back_only_walls_mirror_front_only_ones() {
+    // The same strip with the plateau to the west: the diagonal-style flag.
+    let mut room = Room::flat([0, 0, 0], 10, 1, 0);
+    for cx in 0..3 {
+        room.set_floor(cx, 0, 200);
+    }
+    // The low side is east of cell 2's east edge: that is the BACK of the
+    // edge (the front is the cell interior), so the flag is back-only.
+    room.wall_flagged(2, 0, edge::EAST, 0, 200, WALL_BACK_ONLY);
+    let built = build(&[room]);
+    built.run(|w| {
+        let t = trace(w, point([500, 100, 40], [20, 100, 40]));
+        assert!(t.fraction_q12 < 4096, "{t:?}");
+        let t = trace(w, point([20, 100, 40], [500, 100, 40]));
+        assert_eq!(t.fraction_q12, 4096, "{t:?}");
+    });
+}
+
+/// One split-level cell in the middle of a flat strip: the NE half (first
+/// triangle of the NW-SE split) is a 200 unit plateau, the SW half is level
+/// with the rest. The cook's cliff wall for it is a back-only NW-SE wall.
+fn diagonal_cliff() -> Built {
+    let mut room = Room::flat([0, 0, 0], 3, 1, 0);
+    {
+        let c = room.cell(1, 0);
+        c.floor = [200; 4];
+        c.flags |= SECTOR_SPLIT_LEVEL;
+    }
+    room.splits.push((
+        1,
+        SplitB {
+            floor_b: [0; 4],
+            ceil_b: [0; 4],
+        },
+    ));
+    room.wall_flagged(1, 0, edge::NWSE, 0, 200, WALL_BACK_ONLY);
+    build(&[room])
+}
+
+#[test]
+fn a_diagonal_cliff_stops_the_body_below_and_lets_the_one_on_the_plateau_walk_off() {
+    let built = diagonal_cliff();
+    built.run(|w| {
+        // On the low (SW) half, walking east into the diagonal: stopped.
+        let end = walk(w, RoomPoint::new(S + 5, 0, 70), 4096, 0, 200);
+        assert_eq!(end.y, 0, "{end:?}");
+        assert!(end.x < S + 70, "must not climb the cliff: {end:?}");
+        // On the plateau, walking west off the diagonal: falls to the low floor.
+        let end = walk(w, RoomPoint::new(S + 70, 200, 5), -4096, 0, 200);
+        assert_eq!(end.y, 0, "{end:?}");
+        assert!(end.x < S + 40, "{end:?}");
+        // A ray from the low half into the rock under the plateau is stopped
+        // at the face. (One starting inside the rock is stopped too, by the
+        // split-level slab test: a ray never leaves rock sideways.)
+        let t = trace(w, point([S + 10, 100, 70], [S + 70, 100, 10]));
+        assert!(t.fraction_q12 < 4096, "{t:?}");
+        let t = trace(w, point([S + 70, 100, 10], [S + 10, 100, 70]));
+        assert!(t.fraction_q12 < 4096, "{t:?}");
+    });
 }

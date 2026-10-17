@@ -446,6 +446,30 @@ pub(crate) fn circle_hits_wall(edge: u8, s: i32, px: i32, pz: i32, r: i32) -> bo
     }
 }
 
+/// Whether the plan point `(px, pz)`, relative to the sector origin, is on the
+/// front side of a wall on `edge`: the interior of a cardinal edge, the NE
+/// side of the NW-SE diagonal, the NW side of the NE-SW diagonal. The wall's
+/// own line counts as the front.
+#[inline(always)]
+pub(crate) fn on_front(edge: u8, s: i32, px: i32, pz: i32) -> bool {
+    match edge {
+        edge::NORTH => pz >= 0,
+        edge::SOUTH => pz <= s,
+        edge::EAST => px <= s,
+        edge::WEST => px >= 0,
+        edge::NWSE => px >= pz,
+        _ => px + pz <= s,
+    }
+}
+
+/// Whether a wall's one-sided flags let a body or ray at `(px, pz)` be
+/// stopped by it.
+#[inline(always)]
+pub(crate) fn wall_applies(wall: &ColWall, s: i32, px: i32, pz: i32) -> bool {
+    let sided = wall.flags & (WALL_FRONT_ONLY | WALL_BACK_ONLY);
+    sided == 0 || on_front(wall.edge, s, px, pz) == (sided & WALL_FRONT_ONLY != 0)
+}
+
 /// Normal code of a wall flipped toward the plan point `(px, pz)` given
 /// relative to the sector origin.
 pub(crate) fn wall_code(edge: u8, s: i32, px: i32, pz: i32) -> u8 {

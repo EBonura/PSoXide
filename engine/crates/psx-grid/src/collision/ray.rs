@@ -487,6 +487,18 @@ impl<'a> GridCollision<'a> {
         if !((side0 > 0 && side1 < 0) || (side0 < 0 && side1 > 0)) {
             return -1;
         }
+        // One-sided walls (a cliff face) only stop a ray that starts on
+        // their solid side: the front is the positive side of north, west
+        // and the NW-SE diagonal, the negative side of the others.
+        let sided = wall.flags & (WALL_FRONT_ONLY | WALL_BACK_ONLY);
+        if sided != 0 {
+            let front_positive =
+                wall.edge == edge::NORTH || wall.edge == edge::WEST || wall.edge == edge::NWSE;
+            let from_front = (side0 > 0) == front_positive;
+            if from_front != (sided & WALL_FRONT_ONLY != 0) {
+                return -1;
+            }
+        }
         let (num, den) = (side0.abs(), ds.abs());
         let x = ax + mul_div_i32(d[0], num, den);
         let z = az + mul_div_i32(d[2], num, den);

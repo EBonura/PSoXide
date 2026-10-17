@@ -331,10 +331,17 @@ pub mod edge {
     pub const NESW: u8 = 5;
 }
 
-/// Wall flag: blocks only bodies coming from the front side.
+/// Wall flag: blocks only bodies and rays on the front side of the edge (the
+/// side `wall_code` calls positive for north, west and the NW-SE diagonal,
+/// negative for south, east and NE-SW: the sector interior for a cardinal
+/// edge). The cliff face of a tall derived riser, so a ledge can be walked
+/// off and a body below cannot walk into the rock.
 pub const WALL_FRONT_ONLY: u8 = 1;
 /// Wall flag: owned by a mover.
 pub const WALL_MOVER: u8 = 2;
+/// Wall flag: blocks only bodies and rays on the back side of the edge. Only
+/// the diagonals use it, for a derived riser seen from the back.
+pub const WALL_BACK_ONLY: u8 = 4;
 
 /// A solid wall piece, 12 bytes. Geometry follows from the owning sector and
 /// the edge id.

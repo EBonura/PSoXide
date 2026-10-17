@@ -5,7 +5,9 @@
 //! accumulator owned by the caller, so each function in the chain keeps a
 //! frame of a few dozen bytes (the motor runs the provider on a 1 KiB stack).
 
-use super::world::{cell_in, circle_hits_wall, wall_span, GridCollision, SLAB_THICKNESS};
+use super::world::{
+    cell_in, circle_hits_wall, wall_applies, wall_span, GridCollision, SLAB_THICKNESS,
+};
 use crate::format::*;
 
 /// Normal codes. Expanded to Q12 vectors only at the provider boundary.
@@ -386,7 +388,8 @@ impl<'a> GridCollision<'a> {
                 };
                 let (px, pz) = (lx - cx as i32 * s, lz - cz as i32 * s);
                 for wall in view.sector_walls(ext) {
-                    if !circle_hits_wall(wall.edge, s, px, pz, r) {
+                    if !circle_hits_wall(wall.edge, s, px, pz, r) || !wall_applies(wall, s, px, pz)
+                    {
                         continue;
                     }
                     let (lo, hi) = wall_span(wall);
