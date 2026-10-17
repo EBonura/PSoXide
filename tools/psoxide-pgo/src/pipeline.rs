@@ -1680,7 +1680,7 @@ fn place(guest: &Guest, linked: &Linked, layout: &Path, compile: &str) -> Result
         layout.display(),
         bound.coverage
     );
-    bound.coverage.check(layout::MIN_BOUND)?;
+    bound.coverage.gate()?;
     let fixed = layout::fixed_patterns(
         &fs::read_to_string(&guest.linker_script)
             .map_err(|error| format!("{}: {error}", guest.linker_script.display()))?,

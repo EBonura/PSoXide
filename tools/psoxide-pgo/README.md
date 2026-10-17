@@ -306,8 +306,12 @@ stopping it.
    and code hash, and prints how much bound. A function whose code differs
    gets no counts: they belong to other instructions. Below 98% of the
    profile's instructions the build stops, because a changed function is
-   placed as cold, anywhere, a gap in the hot code included. Regenerate the
-   profile with `order` after code, feature or variant changes.
+   placed as cold, anywhere, a gap in the hot code included. A single
+   function of more than 1% of the profile that does not bind stops the build
+   too, however well the rest does (a hot loop placed as cold code costs
+   speed with no other message). The error lists the functions that fell out,
+   hottest first, with the share each had and whether its code changed.
+   Regenerate the profile with `order` after code, feature or variant changes.
 2. Places the functions (see "order"), writes the ordering file to the work
    directory and relinks with it (`PSOXIDE_LINK_ORDER`, above).
 3. Reads the new map and stops unless every listed function is linked in the
@@ -621,6 +625,25 @@ A profile goes stale as code changes: renamed or removed functions show up as
 `missing` in `rebind`'s count, and LLVM ignores lines that moved. Regenerate
 after large changes, and whenever the game repins onto a different SDK.
 
+### Line shifts do not move the profile
+
+LLVM keys a profile line by `line - the function's declaration line`, so
+adding lines above a function changes no key, with one exception. When LLVM
+hoists or sinks the instructions of two call sites of one inlined function it
+gives the merged code a line-0 location, and the key it computes for that is
+`0 - declaration line` (mod 65536): a number that depends on where the
+function sits in its file, not on the code. The DWARF of such code says
+`DW_AT_call_line 0`. `collect` used to write that key. In hl-psx the function
+`play` had one such entry; seven blank lines at the top of `main.rs` made
+LLVM look up another key, find no weights for the inlined callee's blocks,
+and compile `play` 8 bytes smaller and different, which ran 1% to 5% slower on
+eight maps with no code change (the layout then bound 85% of its profile and
+the link fell back to the default order). `collect` now drops samples inside
+code inlined at a call site with no line (`inlined at no line` in the
+unmapped summary). Those blocks have no weights on any build, before or after
+an edit, so adding or removing lines elsewhere changes neither the profile nor
+the code. Only an edit inside a function changes that function's own keys.
+
 ## Profile quality notes
 
 - **Head samples** (a function's entry count) come from the samples at its
@@ -686,6 +709,10 @@ hot-callsite threshold down while it fails.
 
 `layout` reads `--pc-log-words --pc-line-log` logs of replays of that
 image; `place` binds, places and writes the ordering file without linking.
+`place` exits with status 1 and prints the functions that did not bind when the
+layout does not (see `apply` above); a driver that links by itself must fail on
+that status instead of falling back to the default order, or a stale layout
+ships silently.
 
 The same hl-psx commit built from two checkout paths differed by about 0.4%
 in FPS, because the path changes the code layout. Build every candidate from

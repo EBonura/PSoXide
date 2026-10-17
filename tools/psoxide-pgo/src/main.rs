@@ -379,6 +379,28 @@ fn row_at(rows: &[(u64, u64, u32, bool)], pc: u64) -> Option<(u64, u64, u32, boo
     Some(rows[index]).filter(|row| !row.3)
 }
 
+/// Whether `pc` sits in code inlined at a call site with no line.
+///
+/// LLVM merges the locations of instructions it hoists or sinks from two call
+/// sites of one inlined function into a line-0 location. The sample-profile
+/// key LLVM computes for it is `0 - the function's declaration line`, which is
+/// not a position in the source: it changes whenever the function moves down
+/// or up its file, with nothing else changed. A profile that kept it
+/// would describe other code after the next unrelated edit above the function
+/// (hl-psx `play`: seven blank lines at the top of `main.rs` took the
+/// inlined callee's block weights away, `play` came out different, and eight
+/// maps ran 1% to 5% slower). Such samples get no key, so no build has weights
+/// for that code, which is the same one before and after the edit.
+fn floats(mut children: &[Inlined], pc: u64) -> bool {
+    while let Some(hit) = children.iter().find(|child| contains(&child.ranges, pc)) {
+        if hit.call_line == 0 {
+            return true;
+        }
+        children = &hit.children;
+    }
+    false
+}
+
 /// Samples the profile cannot carry, by why. None of them can reach LLVM:
 ///
 /// - Line 0 marks code the compiler made up (a merged tail, a loop counter)
@@ -397,6 +419,8 @@ struct Unmapped {
     line_zero: HashMap<String, u64>,
     no_dwarf: HashMap<String, u64>,
     no_symbol: u64,
+    /// Inlined at a call site with no line (see [`floats`]).
+    floating: u64,
 }
 
 /// The largest few entries of a per-symbol count, as `name count, ...`.
@@ -434,7 +458,10 @@ impl Unmapped {
     }
 
     fn total(&self) -> u64 {
-        self.line_zero.values().sum::<u64>() + self.no_dwarf.values().sum::<u64>() + self.no_symbol
+        self.line_zero.values().sum::<u64>()
+            + self.no_dwarf.values().sum::<u64>()
+            + self.no_symbol
+            + self.floating
     }
 }
 
@@ -449,6 +476,7 @@ impl std::fmt::Display for Unmapped {
                 write!(f, " ({})", top_symbols(counts, limit))?;
             }
         }
+        write!(f, "  inlined at no line {}", self.floating)?;
         write!(f, "  outside any symbol {}", self.no_symbol)
     }
 }
@@ -568,6 +596,10 @@ fn convert(elf_path: &Path, pc_paths: &[PathBuf], out_path: &Path) -> Result<()>
             unmapped.add(true, &elf_symbols, pc, count);
             continue;
         };
+        if floats(&top.children, pc) {
+            unmapped.floating += count;
+            continue;
+        }
         mapped += count;
         if !profile.contains_key(name) {
             order.push(name.clone());
@@ -895,7 +927,7 @@ fn place_order(
     let image = layout::Image::parse(&fs::read(exe)?)?;
     let bound = layout::bind(&profile, &sections, &image);
     println!("{}", bound.coverage);
-    bound.coverage.check(layout::MIN_BOUND)?;
+    bound.coverage.gate()?;
     let fixed = layout::fixed_patterns(&fs::read_to_string(script)?);
     let placement = layout::place(&sections, &image, &bound, &fixed);
     println!(
@@ -1102,8 +1134,34 @@ mod tests {
         assert_eq!(unmapped.total(), 18);
         assert_eq!(
             unmapped.to_string(),
-            "line 0 5 (memcpy 5)  no DWARF 11 (memcpy 8, HAZARD_TRAMPOLINES 3)  outside any symbol 2"
+            "line 0 5 (memcpy 5)  no DWARF 11 (memcpy 8, HAZARD_TRAMPOLINES 3)  inlined at no line 0  outside any symbol 2"
         );
+    }
+
+    #[test]
+    fn code_inlined_at_no_line_has_no_key() {
+        let func = Func {
+            name: Some("callee".into()),
+            line: 10,
+        };
+        let at = |call_line, ranges, children| Inlined {
+            ranges,
+            func: func.clone(),
+            call_line,
+            call_discriminator: 0,
+            children,
+        };
+        // 0x100..0x140 inlined at line 7, and inside it 0x120..0x130 inlined
+        // at line 0 (a merged location).
+        let tree = vec![at(
+            7,
+            vec![(0x100, 0x140)],
+            vec![at(0, vec![(0x120, 0x130)], vec![])],
+        )];
+        assert!(!floats(&tree, 0x104));
+        assert!(floats(&tree, 0x124));
+        assert!(!floats(&tree, 0x130));
+        assert!(!floats(&tree, 0x200));
     }
 
     #[test]
