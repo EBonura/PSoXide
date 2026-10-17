@@ -153,6 +153,28 @@ pub struct AabbClipPlane {
     pub distance: i32,
 }
 
+/// Read the rotation matrix back from the GTE's RT control registers (0..=4).
+///
+/// The inverse of [`load_rotation`], for a caller that borrows the matrix and
+/// has to hand the GTE back exactly as it found it.
+#[doc(alias = "GetRotMatrix")]
+pub fn read_rotation() -> Mat3I16 {
+    let c0 = read_control!(0);
+    let c1 = read_control!(1);
+    let c2 = read_control!(2);
+    let c3 = read_control!(3);
+    let c4 = read_control!(4);
+    let lo = |v: u32| v as u16 as i16;
+    let hi = |v: u32| (v >> 16) as u16 as i16;
+    Mat3I16 {
+        m: [
+            [lo(c0), hi(c0), lo(c1)],
+            [hi(c1), lo(c2), hi(c2)],
+            [lo(c3), hi(c3), lo(c4)],
+        ],
+    }
+}
+
 /// Load the rotation matrix into the GTE's RT control registers (0..=4).
 #[doc(alias = "SetRotMatrix")]
 pub fn load_rotation(m: &Mat3I16) {
@@ -1931,6 +1953,7 @@ mod host_smoke {
             };
             assert_eq!([got.x, got.y, got.z], [dot(0), dot(1), dot(2)]);
         }
+        assert_eq!(read_rotation(), m);
     }
 
     #[test]
