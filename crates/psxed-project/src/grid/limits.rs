@@ -12,6 +12,7 @@
 //! 16 from editor to engine units). The cook phase replaces the face cap with
 //! an exact vertex count; until then the conservative bound below stands.
 
+use super::plane::{PlaneCollision, MAX_PLANE_SIZE, MIN_PLANE_SIZE};
 use super::room::GridRoom;
 use super::sector::WallEdge;
 use super::units::GridScale;
@@ -24,6 +25,10 @@ pub const MAX_ROOM_SIDE: usize = 128;
 /// Most wall segments stacked on one sector edge. Matches the bonnie-32
 /// validator (its wall tool stops at 3).
 pub const MAX_WALLS_PER_EDGE: usize = 16;
+/// Most free planes one room owns. Each collidable plane is addressed by a
+/// `u8` id in the collision table and the renderer tests every plane box of
+/// a room each frame, so the count is kept small on purpose.
+pub const MAX_PLANES_PER_ROOM: usize = 64;
 /// Largest absolute height or position, grid units. Matches bonnie-32's
 /// coordinate bound.
 pub const MAX_COORD_UNITS: i32 = 1_000_000;
@@ -105,13 +110,46 @@ pub enum GridIssueKind {
         /// Index of the second copy.
         index: usize,
     },
+    /// More than [`MAX_PLANES_PER_ROOM`] free planes in a room.
+    TooManyPlanes {
+        /// Planes present.
+        count: usize,
+    },
+    /// A plane whose width or height is outside the allowed range.
+    PlaneSize {
+        /// Index in the room's plane list.
+        index: usize,
+        /// Width and height present.
+        size: [i32; 2],
+    },
+    /// A plane centre beyond [`MAX_COORD_UNITS`].
+    PlaneCoordinate {
+        /// Index in the room's plane list.
+        index: usize,
+        /// The offending value, grid units.
+        value: i32,
+    },
+    /// A plane that reaches outside its room's sector rectangle, where the
+    /// render box and the collision table cannot hold it.
+    PlaneOutsideRoom {
+        /// Index in the room's plane list.
+        index: usize,
+    },
+    /// A walkable plane steeper than the character can stand on; it cooks
+    /// as solid.
+    PlaneTooSteep {
+        /// Index in the room's plane list.
+        index: usize,
+    },
 }
 
 impl GridIssueKind {
     /// Whether the issue blocks the cook.
     pub const fn severity(&self) -> Severity {
         match self {
-            Self::DegenerateWall { .. } | Self::DuplicateWall { .. } => Severity::Warning,
+            Self::DegenerateWall { .. }
+            | Self::DuplicateWall { .. }
+            | Self::PlaneTooSteep { .. } => Severity::Warning,
             _ => Severity::Error,
         }
     }
@@ -171,6 +209,22 @@ impl GridIssue {
             GridIssueKind::DuplicateWall { edge, index } => {
                 format!("{} wall {index} duplicates an earlier wall", edge.label())
             }
+            GridIssueKind::TooManyPlanes { count } => {
+                format!("{count} planes, at most {MAX_PLANES_PER_ROOM}")
+            }
+            GridIssueKind::PlaneSize { index, size } => format!(
+                "plane {index} is {}x{}, each side must be {MIN_PLANE_SIZE} to {MAX_PLANE_SIZE}",
+                size[0], size[1]
+            ),
+            GridIssueKind::PlaneCoordinate { index, value } => {
+                format!("plane {index} value {value} is beyond +/-{MAX_COORD_UNITS} grid units")
+            }
+            GridIssueKind::PlaneOutsideRoom { index } => format!(
+                "plane {index} reaches outside the room; move it in or grow the room"
+            ),
+            GridIssueKind::PlaneTooSteep { index } => {
+                format!("plane {index} is walkable but too steep to stand on; it blocks instead")
+            }
         };
         format!("{place}{text}")
     }
@@ -194,6 +248,8 @@ pub struct GridBudget {
     pub ceilings: usize,
     /// Wall segments.
     pub walls: usize,
+    /// Free planes.
+    pub planes: usize,
     /// Drawable faces after triangulation and wall banding.
     pub faces: usize,
 }
@@ -207,6 +263,7 @@ impl GridBudget {
             ..Self::default()
         };
         for room in &world.rooms {
+            budget.planes += room.planes.len();
             for (_, _, sector) in room.iter() {
                 budget.sectors += 1;
                 budget.floors += usize::from(sector.floor.is_some());
@@ -220,6 +277,57 @@ impl GridBudget {
     /// Faces used as a fraction of [`MAX_WORLD_FACES`], percent.
     pub fn faces_percent(&self) -> usize {
         self.faces * 100 / MAX_WORLD_FACES
+    }
+}
+
+/// The upward-normal limit of a walkable plane: the character motor's walk
+/// slope (a Q12 normal of 2867, 0.7), as a plane normal's `y` component.
+pub const MIN_WALKABLE_NORMAL_Y: f64 = 2867.0 / 4096.0;
+
+fn check_planes(room_index: usize, room: &GridRoom, issues: &mut Vec<GridIssue>) {
+    let at_room = |kind| GridIssue {
+        kind,
+        room: Some(room_index),
+        cell: None,
+    };
+    if room.planes.len() > MAX_PLANES_PER_ROOM {
+        issues.push(at_room(GridIssueKind::TooManyPlanes {
+            count: room.planes.len(),
+        }));
+    }
+    for (index, plane) in room.planes.iter().enumerate() {
+        if plane
+            .size
+            .iter()
+            .any(|s| !(MIN_PLANE_SIZE..=MAX_PLANE_SIZE).contains(s))
+        {
+            issues.push(at_room(GridIssueKind::PlaneSize {
+                index,
+                size: plane.size,
+            }));
+            continue;
+        }
+        if let Some(&value) = plane
+            .center
+            .iter()
+            .find(|v| v.unsigned_abs() > MAX_COORD_UNITS as u32)
+        {
+            issues.push(at_room(GridIssueKind::PlaneCoordinate { index, value }));
+            continue;
+        }
+        if !plane.enabled {
+            continue;
+        }
+        let (lo, hi) = plane.cell_span();
+        let inside = room.local(lo).is_some() && room.local(hi).is_some();
+        if !inside {
+            issues.push(at_room(GridIssueKind::PlaneOutsideRoom { index }));
+        }
+        if plane.collision == PlaneCollision::Walkable
+            && plane.normal_y().abs() < MIN_WALKABLE_NORMAL_Y
+        {
+            issues.push(at_room(GridIssueKind::PlaneTooSteep { index }));
+        }
     }
 }
 
@@ -251,6 +359,7 @@ fn check_room(room_index: usize, room: &GridRoom, issues: &mut Vec<GridIssue>) {
             issues.push(at_room(GridIssueKind::CoordinateRange { value }));
         }
     }
+    check_planes(room_index, room, issues);
     for (x, z, sector) in room.iter() {
         let at = |kind| GridIssue {
             kind,

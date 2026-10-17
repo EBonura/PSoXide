@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::plane::GridPlane;
 use super::sector::GridSector;
 
 /// Distance fog for a room, in grid units.
@@ -75,6 +76,10 @@ pub struct GridRoom {
     /// Sector storage, `sectors[z * width + x]`. Length is `width * depth`;
     /// [`super::limits::validate`] reports a mismatch.
     pub sectors: Vec<Option<GridSector>>,
+    /// Free planes the room owns. They draw and collide with the room and
+    /// must lie inside its footprint to collide (editing grows the room).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub planes: Vec<GridPlane>,
 }
 
 impl GridRoom {
@@ -89,6 +94,7 @@ impl GridRoom {
             ambient: DEFAULT_AMBIENT,
             fog: GridFog::default(),
             sectors: vec![None; width * depth],
+            planes: Vec::new(),
         }
     }
 
@@ -178,7 +184,7 @@ impl GridRoom {
 
     /// Drop empty sectors, then shrink the room to the bounding box of what
     /// is left (keeping at least one cell), moving `origin` so nothing
-    /// shifts in the world.
+    /// shifts in the world. The footprint of every plane counts as content.
     pub fn trim_empty(&mut self) {
         for slot in &mut self.sectors {
             if slot.as_ref().is_some_and(GridSector::is_empty) {
@@ -192,6 +198,23 @@ impl GridRoom {
             any = true;
             min = [min[0].min(x), min[1].min(z)];
             max = [max[0].max(x), max[1].max(z)];
+        }
+        for plane in &self.planes {
+            let (lo, hi) = plane.cell_span();
+            let clamp = |world: i32, axis: usize, limit: usize| {
+                usize::try_from(world - self.origin[axis])
+                    .unwrap_or(0)
+                    .min(limit.saturating_sub(1))
+            };
+            any = true;
+            min = [
+                min[0].min(clamp(lo[0], 0, self.width)),
+                min[1].min(clamp(lo[1], 1, self.depth)),
+            ];
+            max = [
+                max[0].max(clamp(hi[0], 0, self.width)),
+                max[1].max(clamp(hi[1], 1, self.depth)),
+            ];
         }
         if !any {
             self.width = 1.min(self.width);

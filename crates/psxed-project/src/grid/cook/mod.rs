@@ -11,14 +11,15 @@
 
 pub mod collision;
 pub mod lod;
+pub mod plane_collision;
 pub mod portals;
 pub mod render;
 pub mod units;
 
 use psx_grid::write::{LevelCore, RoomChunk};
 use psx_grid::{
-    Material, RoomRecord, CHUNK_HAS_LOD, LEVEL_HAS_SKY, ROOM_FOG, ROOM_OUTDOOR, SECTION_COUNT,
-    SECTOR_BYTES,
+    Material, RoomRecord, CHUNK_HAS_LOD, CHUNK_HAS_PLANES, LEVEL_HAS_PLANES, LEVEL_HAS_SKY,
+    ROOM_FOG, ROOM_OUTDOOR, SECTION_COUNT, SECTOR_BYTES,
 };
 
 pub use render::{BoundMaterial, MaterialBinder};
@@ -235,6 +236,7 @@ pub fn cook_level(
                 exts: col.exts.clone(),
                 walls: col.walls.clone(),
                 splitbs: col.splitbs.clone(),
+                col_planes: col.planes.clone(),
                 ..RoomChunk::default()
             };
             psx_grid::write::aligned_copy(&chunk.to_bytes())
@@ -266,6 +268,7 @@ pub fn cook_level(
     let mut tables: Vec<RoomChunk> = Vec::new();
     let mut records: Vec<RoomRecord> = Vec::new();
     let mut any_sky = false;
+    let mut any_planes = false;
     for (index, room) in world.rooms.iter().enumerate() {
         let origin = origins[index];
         let col = std::mem::take(&mut cols[index]);
@@ -296,13 +299,16 @@ pub fn cook_level(
             .iter()
             .any(|c| c.flags & psx_grid::CELL_OPEN_SKY != 0);
         any_sky |= outdoor;
+        let has_planes = !col.planes.is_empty() || !ren.plane_refs.is_empty();
+        any_planes |= has_planes;
+        report.warnings.extend(col.warnings.iter().cloned());
         let chunk = RoomChunk {
             room_id: index as u16,
-            flags: if lod.quads.is_empty() {
+            flags: (if lod.quads.is_empty() {
                 0
             } else {
                 CHUNK_HAS_LOD
-            },
+            }) | (if has_planes { CHUNK_HAS_PLANES } else { 0 }),
             width: u8::try_from(room.width).map_err(|_| "room wider than 255".to_string())?,
             depth: u8::try_from(room.depth).map_err(|_| "room deeper than 255".to_string())?,
             min_y: lo as i16,
@@ -317,6 +323,8 @@ pub fn cook_level(
             exts: col.exts,
             walls: col.walls,
             splitbs: col.splitbs,
+            col_planes: col.planes,
+            plane_refs: ren.plane_refs,
             vertices: ren.vertices,
             quads: ren.quads,
             cells: ren.cells,
@@ -401,7 +409,8 @@ pub fn cook_level(
         ));
     }
     let level = LevelCore {
-        flags: if any_sky { LEVEL_HAS_SKY } else { 0 },
+        flags: (if any_sky { LEVEL_HAS_SKY } else { 0 })
+            | (if any_planes { LEVEL_HAS_PLANES } else { 0 }),
         sector_units: s as u16,
         pool_pages: total_pages as u16,
         resident_hops: RESIDENT_HOPS,
@@ -435,6 +444,8 @@ pub fn cook_level(
     })
 }
 
+#[cfg(test)]
+mod plane_tests;
 #[cfg(test)]
 mod spawn_tests;
 #[cfg(test)]

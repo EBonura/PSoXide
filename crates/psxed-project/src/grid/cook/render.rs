@@ -10,13 +10,14 @@
 use std::collections::HashMap;
 
 use psx_grid::{
-    Quad, RCell, Vtx, CELL_OPEN_SKY, QUAD_AXIS, QUAD_AXIS_NEG, QUAD_AXIS_SHIFT, QUAD_DOUBLE,
-    QUAD_TRI,
+    PlaneRef, Quad, RCell, Vtx, CELL_OPEN_SKY, QUAD_AXIS, QUAD_AXIS_NEG, QUAD_AXIS_SHIFT,
+    QUAD_DOUBLE, QUAD_PLANE, QUAD_TRI,
 };
 
 use super::units::RuntimeUnits;
 use crate::grid::faces::{cell_faces, GridFace};
-use crate::grid::light::{lit_corner, GridLight};
+use crate::grid::light::{lit_face_corner, GridLight};
+use crate::grid::plane_faces::plane_faces;
 use crate::grid::world::GridWorld;
 use crate::ResourceId;
 
@@ -91,6 +92,8 @@ pub struct Tables {
     pub quads: Vec<Quad>,
     pub cells: Vec<RCell>,
     pub material_use: Vec<u8>,
+    /// One reference per free plane that produced quads.
+    pub plane_refs: Vec<PlaneRef>,
     /// Continuous texel coordinates per quad corner before they were rebased
     /// into one repeat, parallel to `quads`. The LOD merge needs them.
     pub texels: Vec<[[f64; 2]; 4]>,
@@ -163,6 +166,204 @@ fn ring_cross(ring: &[[i32; 3]]) -> Option<[i32; 3]> {
     })
 }
 
+/// Per-room working state of [`build`]: the tables, the vertex weld map and
+/// which materials the room draws.
+struct RoomBuild {
+    tables: Tables,
+    vertex_of: HashMap<[i16; 3], u16>,
+    used: [bool; 256],
+    /// Lowest and highest vertex height of the face run being built.
+    range: (i32, i32),
+}
+
+impl RoomBuild {
+    fn new() -> Self {
+        Self {
+            tables: Tables::default(),
+            vertex_of: HashMap::new(),
+            used: [false; 256],
+            range: (i32::MAX, i32::MIN),
+        }
+    }
+
+    /// Weld `key` into the vertex table.
+    fn vertex(&mut self, key: [i16; 3], room_index: usize) -> Result<u16, String> {
+        let next = self.tables.vertices.len();
+        let id = *self.vertex_of.entry(key).or_insert_with(|| {
+            self.tables.vertices.push(Vtx {
+                x: key[0],
+                y: key[1],
+                z: key[2],
+                pad: 0,
+            });
+            next as u16
+        });
+        if self.tables.vertices.len() > usize::from(u16::MAX) {
+            return Err(format!("room {room_index} has more than 65535 vertices"));
+        }
+        Ok(id)
+    }
+
+    /// Cook one face into the tables. `place` names the face for errors and
+    /// `extra_flags` is OR-ed into the quad flags (the plane marker).
+    #[allow(clippy::too_many_arguments)]
+    fn add_face(
+        &mut self,
+        cx: &mut Context<'_>,
+        face: &GridFace,
+        room_index: usize,
+        origin: [i32; 3],
+        ambient: [u8; 3],
+        place: &dyn Fn() -> String,
+        extra_flags: u8,
+    ) -> Result<(), String> {
+        self.tables.stats.faces += 1;
+        // Snap the corners.
+        let mut local: Vec<[i32; 3]> = Vec::with_capacity(face.grid.len());
+        for g in &face.grid {
+            local.push([
+                cx.units.rt(g[0]) - origin[0],
+                cx.units.rt(g[1]) - origin[1],
+                cx.units.rt(g[2]) - origin[2],
+            ]);
+        }
+        // The pack wants the ring's cross product to point at the visible
+        // side, the face ring reversed.
+        let ring: Vec<usize> = (0..local.len()).rev().collect();
+        // Distinct snapped corners; a face that collapses is dropped.
+        let mut keep: Vec<usize> = Vec::new();
+        for &i in &ring {
+            let p = local[i];
+            let last = keep.last().map(|&k| local[k]);
+            let first_p = keep.first().map(|&k| local[k]);
+            if last != Some(p) && first_p != Some(p) {
+                keep.push(i);
+            }
+        }
+        if keep.len() < 3 {
+            self.tables.stats.collapsed += 1;
+            return Ok(());
+        }
+        let mut snapped: Vec<[i32; 3]> = keep.iter().map(|&i| local[i]).collect();
+        let Some(mut normal) = ring_cross(&snapped) else {
+            self.tables.stats.collapsed += 1;
+            return Ok(());
+        };
+        // Keep the visible side the unsnapped ring chose.
+        if dot_f(face.normal, normal) < 0.0 {
+            keep.reverse();
+            snapped.reverse();
+            normal = normal.map(|v| -v);
+        }
+        if keep.len() > 4 {
+            return Err(format!(
+                "room {room_index} {}: a face with more than four corners",
+                place()
+            ));
+        }
+        let slot = cx.materials.slot(cx.binder, face.material)?;
+        let (_, bound) = cx.materials.slots[usize::from(slot)];
+        self.used[usize::from(slot)] = true;
+        // Plane.
+        let length = (f64::from(normal[0]).powi(2)
+            + f64::from(normal[1]).powi(2)
+            + f64::from(normal[2]).powi(2))
+        .sqrt();
+        let n8 = normal.map(|v| {
+            ((f64::from(v) / length) * 127.0)
+                .round()
+                .clamp(-127.0, 127.0) as i8
+        });
+        let p0 = snapped[0];
+        let dot_n = i32::from(n8[0]) * p0[0] + i32::from(n8[1]) * p0[1] + i32::from(n8[2]) * p0[2];
+        let mut flags = extra_flags;
+        let mut d = i16::try_from(dot_n >> 7)
+            .map_err(|_| format!("room {room_index} {}: plane constant out of range", place()))?;
+        let zeros = normal.map(|v| v == 0);
+        if zeros.iter().filter(|z| **z).count() == 2 {
+            let axis = normal.iter().position(|v| *v != 0).unwrap_or(0);
+            let negative = normal[axis] < 0;
+            flags |= QUAD_AXIS | ((axis as u8) << QUAD_AXIS_SHIFT);
+            if negative {
+                flags |= QUAD_AXIS_NEG;
+            }
+            let coordinate = i16::try_from(p0[axis])
+                .map_err(|_| format!("room {room_index}: coordinate out of range"))?;
+            d = if negative { -coordinate } else { coordinate };
+        }
+        if keep.len() == 3 {
+            flags |= QUAD_TRI;
+        }
+        if face.double_sided || bound.flags & 3 == 2 {
+            flags |= QUAD_DOUBLE;
+        }
+        // UVs per kept corner.
+        let texels: Vec<[f64; 2]> = keep.iter().map(|&i| face.texels[i]).collect();
+        let (packed_uv, over) = if bound.textured {
+            rebase_texels(&texels)
+        } else {
+            (vec![[0, 0]; texels.len()], false)
+        };
+        if over {
+            self.tables.stats.uv_overflow += 1;
+        }
+        let mut quad = Quad {
+            d,
+            n: n8,
+            material: slot,
+            flags,
+            ..Quad::default()
+        };
+        for (k, &i) in keep.iter().enumerate() {
+            let p = local[i];
+            let key = [
+                i16::try_from(p[0]).map_err(|_| format!("room {room_index}: x out of range"))?,
+                i16::try_from(p[1]).map_err(|_| format!("room {room_index}: y out of range"))?,
+                i16::try_from(p[2]).map_err(|_| format!("room {room_index}: z out of range"))?,
+            ];
+            quad.v[k] = self.vertex(key, room_index)?;
+            let world_point = [
+                f64::from(p[0] + origin[0]),
+                f64::from(p[1] + origin[1]),
+                f64::from(p[2] + origin[2]),
+            ];
+            let colour = lit_face_corner(
+                face,
+                world_point,
+                bound.tint,
+                ambient,
+                cx.lights,
+                cx.occluded,
+            );
+            quad.color[k] =
+                u32::from(colour[0]) | (u32::from(colour[1]) << 8) | (u32::from(colour[2]) << 16);
+            quad.uv[k] = u16::from(packed_uv[k][0]) | (u16::from(packed_uv[k][1]) << 8);
+            self.range = (self.range.0.min(p[1]), self.range.1.max(p[1]));
+        }
+        self.tables.stats.lit_corners += keep.len();
+        if keep.len() == 3 {
+            quad.v[3] = quad.v[2];
+            quad.color[3] = quad.color[2];
+            quad.uv[3] = quad.uv[2];
+            self.tables.stats.triangles += 1;
+        } else {
+            self.tables.stats.quads += 1;
+        }
+        let mut kept_texels = [[0.0; 2]; 4];
+        if bound.textured {
+            for (k, t) in texels.iter().enumerate() {
+                kept_texels[k] = *t;
+            }
+            if keep.len() == 3 {
+                kept_texels[3] = kept_texels[2];
+            }
+        }
+        self.tables.texels.push(kept_texels);
+        self.tables.quads.push(quad);
+        Ok(())
+    }
+}
+
 /// Build the render tables of room `room_index`. `origin` is the room's
 /// runtime origin `[x, y, z]`.
 pub fn build(
@@ -172,191 +373,29 @@ pub fn build(
     ambient: [u8; 3],
 ) -> Result<Tables, String> {
     let room = &cx.world.rooms[room_index];
-    let mut tables = Tables::default();
-    let mut vertex_of: HashMap<[i16; 3], u16> = HashMap::new();
+    let mut build = RoomBuild::new();
     let mut faces: Vec<GridFace> = Vec::new();
-    let mut used = [false; 256];
     for z in 0..room.depth {
         for x in 0..room.width {
             faces.clear();
             cell_faces(cx.world, room_index, x, z, &mut faces);
-            let first = tables.quads.len();
-            let (mut lo, mut hi) = (i32::MAX, i32::MIN);
+            let first = build.tables.quads.len();
+            build.range = (i32::MAX, i32::MIN);
             for face in &faces {
-                tables.stats.faces += 1;
-                // Snap the corners.
-                let mut local: Vec<[i32; 3]> = Vec::with_capacity(face.grid.len());
-                for g in &face.grid {
-                    local.push([
-                        cx.units.rt(g[0]) - origin[0],
-                        cx.units.rt(g[1]) - origin[1],
-                        cx.units.rt(g[2]) - origin[2],
-                    ]);
-                }
-                // The pack wants the ring's cross product to point at the
-                // visible side, the face ring reversed.
-                let mut ring: Vec<usize> = (0..local.len()).rev().collect();
-                // Distinct snapped corners; a face that collapses is dropped.
-                let mut keep: Vec<usize> = Vec::new();
-                for &i in &ring {
-                    let p = local[i];
-                    let last = keep.last().map(|&k| local[k]);
-                    let first_p = keep.first().map(|&k| local[k]);
-                    if last != Some(p) && first_p != Some(p) {
-                        keep.push(i);
-                    }
-                }
-                if keep.len() < 3 {
-                    tables.stats.collapsed += 1;
-                    continue;
-                }
-                let mut snapped: Vec<[i32; 3]> = keep.iter().map(|&i| local[i]).collect();
-                let Some(mut normal) = ring_cross(&snapped) else {
-                    tables.stats.collapsed += 1;
-                    continue;
-                };
-                // Keep the visible side the unsnapped ring chose.
-                if dot_f(face.normal, normal) < 0.0 {
-                    keep.reverse();
-                    snapped.reverse();
-                    normal = normal.map(|v| -v);
-                }
-                ring.clear();
-                if keep.len() > 4 {
-                    return Err(format!(
-                        "room {room_index} sector {x},{z}: a face with more than four corners"
-                    ));
-                }
-                let slot = cx.materials.slot(cx.binder, face.material)?;
-                let (_, bound) = cx.materials.slots[usize::from(slot)];
-                used[usize::from(slot)] = true;
-                // Plane.
-                let length = (f64::from(normal[0]).powi(2)
-                    + f64::from(normal[1]).powi(2)
-                    + f64::from(normal[2]).powi(2))
-                .sqrt();
-                let n8 = normal.map(|v| {
-                    ((f64::from(v) / length) * 127.0)
-                        .round()
-                        .clamp(-127.0, 127.0) as i8
-                });
-                let p0 = snapped[0];
-                let dot_n =
-                    i32::from(n8[0]) * p0[0] + i32::from(n8[1]) * p0[1] + i32::from(n8[2]) * p0[2];
-                let mut flags = 0u8;
-                let mut d = i16::try_from(dot_n >> 7).map_err(|_| {
-                    format!("room {room_index} sector {x},{z}: plane constant out of range")
-                })?;
-                let zeros = normal.map(|v| v == 0);
-                if zeros.iter().filter(|z| **z).count() == 2 {
-                    let axis = normal.iter().position(|v| *v != 0).unwrap_or(0);
-                    let negative = normal[axis] < 0;
-                    flags |= QUAD_AXIS | ((axis as u8) << QUAD_AXIS_SHIFT);
-                    if negative {
-                        flags |= QUAD_AXIS_NEG;
-                    }
-                    let coordinate = i16::try_from(p0[axis])
-                        .map_err(|_| format!("room {room_index}: coordinate out of range"))?;
-                    d = if negative { -coordinate } else { coordinate };
-                }
-                if keep.len() == 3 {
-                    flags |= QUAD_TRI;
-                }
-                if face.double_sided || bound.flags & 3 == 2 {
-                    flags |= QUAD_DOUBLE;
-                }
-                // UVs per kept corner.
-                let texels: Vec<[f64; 2]> = keep.iter().map(|&i| face.texels[i]).collect();
-                let (packed_uv, over) = if bound.textured {
-                    rebase_texels(&texels)
-                } else {
-                    (vec![[0, 0]; texels.len()], false)
-                };
-                if over {
-                    tables.stats.uv_overflow += 1;
-                }
-                let mut quad = Quad {
-                    d,
-                    n: n8,
-                    material: slot,
-                    flags,
-                    ..Quad::default()
-                };
-                for (k, &i) in keep.iter().enumerate() {
-                    let p = local[i];
-                    let key = [
-                        i16::try_from(p[0])
-                            .map_err(|_| format!("room {room_index}: x out of range"))?,
-                        i16::try_from(p[1])
-                            .map_err(|_| format!("room {room_index}: y out of range"))?,
-                        i16::try_from(p[2])
-                            .map_err(|_| format!("room {room_index}: z out of range"))?,
-                    ];
-                    let next = tables.vertices.len();
-                    let id = *vertex_of.entry(key).or_insert_with(|| {
-                        tables.vertices.push(Vtx {
-                            x: key[0],
-                            y: key[1],
-                            z: key[2],
-                            pad: 0,
-                        });
-                        next as u16
-                    });
-                    if tables.vertices.len() > usize::from(u16::MAX) {
-                        return Err(format!("room {room_index} has more than 65535 vertices"));
-                    }
-                    quad.v[k] = id;
-                    let world_point = [
-                        f64::from(p[0] + origin[0]),
-                        f64::from(p[1] + origin[1]),
-                        f64::from(p[2] + origin[2]),
-                    ];
-                    let colour = lit_corner(
-                        world_point,
-                        face.normal,
-                        bound.tint,
-                        ambient,
-                        cx.lights,
-                        cx.occluded,
-                    );
-                    quad.color[k] = u32::from(colour[0])
-                        | (u32::from(colour[1]) << 8)
-                        | (u32::from(colour[2]) << 16);
-                    quad.uv[k] = u16::from(packed_uv[k][0]) | (u16::from(packed_uv[k][1]) << 8);
-                    lo = lo.min(p[1]);
-                    hi = hi.max(p[1]);
-                }
-                tables.stats.lit_corners += keep.len();
-                if keep.len() == 3 {
-                    quad.v[3] = quad.v[2];
-                    quad.color[3] = quad.color[2];
-                    quad.uv[3] = quad.uv[2];
-                    tables.stats.triangles += 1;
-                } else {
-                    tables.stats.quads += 1;
-                }
-                let mut kept_texels = [[0.0; 2]; 4];
-                if bound.textured {
-                    for (k, t) in texels.iter().enumerate() {
-                        kept_texels[k] = *t;
-                    }
-                    if keep.len() == 3 {
-                        kept_texels[3] = kept_texels[2];
-                    }
-                }
-                tables.texels.push(kept_texels);
-                tables.quads.push(quad);
+                let place = || format!("sector {x},{z}");
+                build.add_face(cx, face, room_index, origin, ambient, &place, 0)?;
             }
-            let count = tables.quads.len() - first;
+            let count = build.tables.quads.len() - first;
             if first > usize::from(u16::MAX) {
                 return Err(format!("room {room_index} has more than 65535 quads"));
             }
             let count = u8::try_from(count).map_err(|_| {
                 format!("room {room_index} sector {x},{z}: {count} quads in one cell, at most 255")
             })?;
+            let (lo, hi) = build.range;
             let doc = room.sector(x, z);
             let open = doc.is_some_and(|s| s.floor.is_some() && s.ceiling.is_none());
-            tables.cells.push(RCell {
+            build.tables.cells.push(RCell {
                 first: first as u16,
                 count,
                 flags: if open { CELL_OPEN_SKY } else { 0 },
@@ -365,6 +404,64 @@ pub fn build(
             });
         }
     }
-    tables.material_use = (0..=255u8).filter(|m| used[usize::from(*m)]).collect();
-    Ok(tables)
+    // Free planes follow the cell quads; each is a run of quads with a box
+    // for the renderer's per-frame frustum test.
+    for index in 0..room.planes.len() {
+        faces.clear();
+        plane_faces(cx.world, room_index, index, &mut faces);
+        if faces.is_empty() {
+            continue;
+        }
+        let first = build.tables.quads.len();
+        build.range = (i32::MAX, i32::MIN);
+        for face in &faces {
+            let place = || format!("plane {index}");
+            build.add_face(cx, face, room_index, origin, ambient, &place, QUAD_PLANE)?;
+        }
+        let count = build.tables.quads.len() - first;
+        if count == 0 {
+            continue;
+        }
+        if build.tables.quads.len() > usize::from(u16::MAX) {
+            return Err(format!("room {room_index} has more than 65535 quads"));
+        }
+        let count = u8::try_from(count)
+            .map_err(|_| format!("room {room_index} plane {index}: {count} quads, at most 255"))?;
+        let reference = plane_ref(cx, room, index, origin, first as u16, count, build.range)?;
+        build.tables.plane_refs.push(reference);
+    }
+    build.tables.material_use = (0..=255u8)
+        .filter(|m| build.used[usize::from(*m)])
+        .collect();
+    Ok(build.tables)
+}
+
+/// The render reference of plane `index`: its quad run and the room-local
+/// cell rectangle and height range the frustum test uses.
+fn plane_ref(
+    cx: &Context<'_>,
+    room: &crate::grid::room::GridRoom,
+    index: usize,
+    origin: [i32; 3],
+    first: u16,
+    count: u8,
+    (lo, hi): (i32, i32),
+) -> Result<PlaneRef, String> {
+    let (cells_lo, cells_hi) = room.planes[index].cell_span();
+    let local = |world: i32, axis: usize, limit: usize| -> u8 {
+        let c = (world - room.origin[axis]).clamp(0, limit as i32 - 1);
+        c as u8
+    };
+    let _ = (cx, origin);
+    Ok(PlaneRef {
+        quad: first,
+        count,
+        flags: 0,
+        x0: local(cells_lo[0], 0, room.width),
+        z0: local(cells_lo[1], 1, room.depth),
+        x1: local(cells_hi[0], 0, room.width),
+        z1: local(cells_hi[1], 1, room.depth),
+        min_y: lo as i16,
+        max_y: hi as i16,
+    })
 }

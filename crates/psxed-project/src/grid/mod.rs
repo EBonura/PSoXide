@@ -29,6 +29,8 @@
 //! * [`room`]: one room, its sector storage and its growth operations.
 //! * [`world`]: the document root and the [`SceneWorld`] discriminator.
 //! * [`limits`]: caps, validation and the budget readout.
+//! * [`plane`]: free planes placed off the lattice, and [`plane_faces`]
+//!   their drawable faces.
 //! * [`faces`]: the drawable faces derived from the document.
 //! * [`light`]: the per-corner light bake of those faces.
 //! * [`edit`]: the editing operations the grid tools call.
@@ -43,6 +45,8 @@ pub mod faces;
 pub mod light;
 pub mod limits;
 pub mod palette;
+pub mod plane;
+pub mod plane_faces;
 pub mod room;
 pub mod sector;
 pub mod starter;
@@ -55,6 +59,7 @@ mod tests;
 
 pub use faces::{GridFace, GridFaceKind};
 pub use limits::{GridBudget, GridIssue, GridIssueKind, Severity};
+pub use plane::{GridPlane, PlaneCollision, PlaneUvMode};
 pub use room::{GridFog, GridRoom};
 pub use sector::{GridSector, WallEdge};
 pub use surface::{GridSplit, GridSurface, GridTri, GridWall, WallFacing};

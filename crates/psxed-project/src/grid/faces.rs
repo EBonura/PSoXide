@@ -49,6 +49,11 @@ pub enum GridFaceKind {
         /// Index in the edge's stack.
         index: usize,
     },
+    /// A free plane of the room, or one tile of it.
+    Plane {
+        /// Index in the room's plane list.
+        index: usize,
+    },
 }
 
 /// One drawable polygon of 3 or 4 corners.
@@ -74,13 +79,15 @@ pub struct GridFace {
     pub material: Option<ResourceId>,
     /// Whether the back side is drawn too.
     pub double_sided: bool,
+    /// Drawn at the material tint with no light baked in.
+    pub unlit: bool,
 }
 
 #[derive(Clone, Copy)]
-struct Corner {
-    p: [i32; 3],
-    g: [i32; 3],
-    uv: [f64; 2],
+pub(super) struct Corner {
+    pub p: [i32; 3],
+    pub g: [i32; 3],
+    pub uv: [f64; 2],
 }
 
 fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
@@ -104,7 +111,7 @@ fn ring_normal(ring: &[Corner]) -> [f64; 3] {
 }
 
 /// Apply a per-face UV transform about `centre`.
-fn place(uv: &FaceUv, centre: [f64; 2], raw: [f64; 2]) -> [f64; 2] {
+pub(super) fn place(uv: &FaceUv, centre: [f64; 2], raw: [f64; 2]) -> [f64; 2] {
     if uv.is_identity() {
         return raw;
     }
@@ -116,16 +123,16 @@ fn place(uv: &FaceUv, centre: [f64; 2], raw: [f64; 2]) -> [f64; 2] {
     ]
 }
 
-struct Builder<'a> {
-    scale: GridScale,
-    room: usize,
-    cell: [i32; 2],
-    y_offset: i32,
-    out: &'a mut Vec<GridFace>,
+pub(super) struct Builder<'a> {
+    pub scale: GridScale,
+    pub room: usize,
+    pub cell: [i32; 2],
+    pub y_offset: i32,
+    pub out: &'a mut Vec<GridFace>,
 }
 
 /// Editor-space point of a grid coordinate in a room lifted by `y_offset`.
-fn editor_point(scale: GridScale, y_offset: i32, gx: i32, gy: i32, gz: i32) -> [i32; 3] {
+pub(super) fn editor_point(scale: GridScale, y_offset: i32, gx: i32, gy: i32, gz: i32) -> [i32; 3] {
     [
         scale.to_editor(gx),
         scale.to_editor(y_offset + gy),
@@ -136,7 +143,7 @@ fn editor_point(scale: GridScale, y_offset: i32, gx: i32, gy: i32, gz: i32) -> [
 impl Builder<'_> {
     /// Finish a ring: drop repeated corners, wind it to face `toward` and
     /// push it. Rings that collapse to a line or point are dropped.
-    fn push(
+    pub(super) fn push(
         &mut self,
         kind: GridFaceKind,
         mut ring: Vec<Corner>,
@@ -182,6 +189,7 @@ impl Builder<'_> {
             normal,
             material,
             double_sided,
+            unlit: false,
         });
     }
 
@@ -367,6 +375,9 @@ pub fn all_faces(world: &GridWorld) -> Vec<GridFace> {
         for (x, z, _) in room.iter() {
             cell_faces(world, room_index, x, z, &mut out);
         }
+        for index in 0..room.planes.len() {
+            super::plane_faces::plane_faces(world, room_index, index, &mut out);
+        }
     }
     out
 }
@@ -379,6 +390,11 @@ pub fn face_count(world: &GridWorld) -> usize {
         for (x, z, _) in room.iter() {
             scratch.clear();
             cell_faces(world, room_index, x, z, &mut scratch);
+            count += scratch.len();
+        }
+        for index in 0..room.planes.len() {
+            scratch.clear();
+            super::plane_faces::plane_faces(world, room_index, index, &mut scratch);
             count += scratch.len();
         }
     }

@@ -26,6 +26,16 @@ pub struct EditorBounds {
     pub max: [i32; 3],
 }
 
+fn merge(bounds: Option<EditorBounds>, add: EditorBounds) -> EditorBounds {
+    match bounds {
+        None => add,
+        Some(b) => EditorBounds {
+            min: core::array::from_fn(|i| b.min[i].min(add.min[i])),
+            max: core::array::from_fn(|i| b.max[i].max(add.max[i])),
+        },
+    }
+}
+
 impl GridWorld {
     /// An empty world at the default scale.
     pub fn new() -> Self {
@@ -71,6 +81,9 @@ impl GridWorld {
                         note(wall.material);
                     }
                 }
+            }
+            for plane in &room.planes {
+                note(plane.material);
             }
         }
         ids
@@ -150,13 +163,24 @@ impl GridWorld {
                     min: [x0, y0, z0],
                     max: [x1, y1, z1],
                 };
-                bounds = Some(match bounds {
-                    None => cell,
-                    Some(b) => EditorBounds {
-                        min: core::array::from_fn(|i| b.min[i].min(cell.min[i])),
-                        max: core::array::from_fn(|i| b.max[i].max(cell.max[i])),
+                bounds = Some(merge(bounds, cell));
+            }
+            for plane in room.planes.iter().filter(|p| p.enabled) {
+                let (lo, hi) = plane.bounds();
+                let point = |v: [i32; 3]| {
+                    [
+                        self.scale.to_editor(v[0]),
+                        origin[1] + self.scale.to_editor(v[1]),
+                        self.scale.to_editor(v[2]),
+                    ]
+                };
+                bounds = Some(merge(
+                    bounds,
+                    EditorBounds {
+                        min: point(lo),
+                        max: point(hi),
                     },
-                });
+                ));
             }
         }
         bounds

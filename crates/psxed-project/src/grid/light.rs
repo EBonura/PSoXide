@@ -7,7 +7,7 @@
 //! agree about what is solid. Lights and points share one unit (editor units
 //! for the editor preview, runtime units for the cook).
 
-use super::faces::GridFace;
+use super::faces::{GridFace, GridFaceKind};
 
 /// Offset of a shadow ray's start along the surface normal, so a corner does
 /// not shadow itself.
@@ -61,11 +61,26 @@ pub fn lit_corner(
     lights: &[GridLight],
     occluded: &dyn Fn([f64; 3], [f64; 3]) -> bool,
 ) -> [u8; 3] {
+    lit_corner_nudged(point, normal, tint, ambient, lights, occluded, SHADOW_NUDGE)
+}
+
+/// [`lit_corner`] with an explicit start offset of the shadow ray along the
+/// normal. A free plane needs a larger one than a floor: its slab collision
+/// is cooked from rounded corners, so a corner can sit a unit inside it.
+pub fn lit_corner_nudged(
+    point: [f64; 3],
+    normal: [f64; 3],
+    tint: [u8; 3],
+    ambient: [u8; 3],
+    lights: &[GridLight],
+    occluded: &dyn Fn([f64; 3], [f64; 3]) -> bool,
+    nudge: f64,
+) -> [u8; 3] {
     let mut accumulated = ambient.map(f64::from);
     let start = [
-        point[0] + normal[0] * SHADOW_NUDGE,
-        point[1] + normal[1] * SHADOW_NUDGE,
-        point[2] + normal[2] * SHADOW_NUDGE,
+        point[0] + normal[0] * nudge,
+        point[1] + normal[1] * nudge,
+        point[2] + normal[2] * nudge,
     ];
     for light in lights {
         let to_light = [
@@ -100,6 +115,60 @@ pub fn lit_corner(
     ]
 }
 
+/// Shadow ray start offset of a free plane's corner, in the bake's unit when
+/// that is runtime units (the cook). The editor preview casts no shadows and
+/// ignores it.
+pub const PLANE_SHADOW_NUDGE: f64 = 2.0;
+
+/// Lit colour of one corner of `face`. Planes add two things the sector
+/// faces do not have: a plane in `fullbright` shows its tint unlit, and a
+/// double-sided plane is lit from whichever side the light is on.
+pub fn lit_face_corner(
+    face: &GridFace,
+    point: [f64; 3],
+    tint: [u8; 3],
+    ambient: [u8; 3],
+    lights: &[GridLight],
+    occluded: &dyn Fn([f64; 3], [f64; 3]) -> bool,
+) -> [u8; 3] {
+    let plane = matches!(face.kind, GridFaceKind::Plane { .. });
+    if !plane {
+        return lit_corner(point, face.normal, tint, ambient, lights, occluded);
+    }
+    if face.unlit {
+        return lit_corner(
+            point,
+            face.normal,
+            tint,
+            [NEUTRAL as u8; 3],
+            &[],
+            &|_, _| false,
+        );
+    }
+    let front = lit_corner_nudged(
+        point,
+        face.normal,
+        tint,
+        ambient,
+        lights,
+        occluded,
+        PLANE_SHADOW_NUDGE,
+    );
+    if !face.double_sided {
+        return front;
+    }
+    let back = lit_corner_nudged(
+        point,
+        face.normal.map(|v| -v),
+        tint,
+        ambient,
+        lights,
+        occluded,
+        PLANE_SHADOW_NUDGE,
+    );
+    core::array::from_fn(|i| front[i].max(back[i]))
+}
+
 /// Lit colour of every corner of `face` in editor units, without shadows.
 ///
 /// `tint` is the material's modulation colour (`[128; 3]` leaves the texture
@@ -112,16 +181,7 @@ pub fn bake_face_corners(
 ) -> Vec<[u8; 3]> {
     face.points
         .iter()
-        .map(|p| {
-            lit_corner(
-                p.map(f64::from),
-                face.normal,
-                tint,
-                ambient,
-                lights,
-                &|_, _| false,
-            )
-        })
+        .map(|p| lit_face_corner(face, p.map(f64::from), tint, ambient, lights, &|_, _| false))
         .collect()
 }
 

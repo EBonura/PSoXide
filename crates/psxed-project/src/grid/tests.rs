@@ -128,3 +128,44 @@ fn default_values_stay_out_of_the_file() {
     assert!(floor.walkable);
     assert_eq!(floor.tri(0).material, None);
 }
+
+#[test]
+fn planes_round_trip_in_a_project_and_old_rooms_load_without_them() {
+    use super::plane::{GridPlane, PlaneCollision, PlaneUvMode};
+    let mut world = small_world();
+    assert!(!ron::to_string(&world).unwrap().contains("planes"));
+    let mut plane = GridPlane::new([512, 256, 2048], [2048, 1024]);
+    plane.rotation = [30, 90, 0];
+    plane.collision = PlaneCollision::Walkable;
+    plane.uv_mode = PlaneUvMode::Stretch;
+    plane.double_sided = true;
+    plane.fullbright = true;
+    world.rooms[0].planes.push(plane.clone());
+    let mut project = ProjectDocument::new("planes");
+    project.active_scene_mut().world = SceneWorld::Grid(world);
+    let text = project.to_ron_string().unwrap();
+    let loaded = ProjectDocument::from_ron_str(&text).unwrap();
+    assert_eq!(loaded, project);
+    assert_eq!(
+        loaded.active_scene().world.grid().unwrap().rooms[0].planes,
+        vec![plane]
+    );
+    assert_eq!(loaded.to_ron_string().unwrap(), text);
+}
+
+#[test]
+fn trimming_a_room_keeps_the_footprint_of_its_planes() {
+    use super::plane::GridPlane;
+    let mut room = GridRoom::new("r", 6, 6);
+    room.sector_or_insert(1, 1).unwrap().floor = Some(GridSurface::flat(0, None));
+    // A plane over sectors 3 to 4, 4 to 5.
+    room.planes
+        .push(GridPlane::new([4096, 0, 5120], [2048, 2048]));
+    room.trim_empty();
+    let (lo, hi) = room.planes[0].cell_span();
+    assert!(
+        room.local(lo).is_some() && room.local(hi).is_some(),
+        "{room:?}"
+    );
+    assert_eq!((room.origin, room.width, room.depth), ([1, 1], 4, 5));
+}

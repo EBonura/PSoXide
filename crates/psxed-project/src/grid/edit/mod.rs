@@ -12,10 +12,12 @@
 //! * [`delete`]: deleting faces and sectors.
 //! * [`surfaces`]: material, texture placement, split and flags.
 //! * [`clipboard`]: copy, flip, turn and paste.
+//! * [`planes`]: free planes: add, edit, remove, copy and paste.
 
 pub mod clipboard;
 pub mod delete;
 pub mod heights;
+pub mod planes;
 pub mod rects;
 pub mod refs;
 pub mod selection;
@@ -25,6 +27,10 @@ pub mod walls;
 pub use clipboard::{GridClipboard, PasteOutcome, Transform};
 pub use delete::{clear_cells, delete_faces};
 pub use heights::{nudge, HeightDrag, WeldIndex};
+pub use planes::{
+    add_plane, edit_plane_uv, fit_room, remove_planes, set_plane_material, set_plane_uv,
+    update_plane, PlaneClipboard, PlaneId, PlaneRefusal,
+};
 pub use rects::{create_surfaces, delete_surfaces, CellRect, RectOutcome, RectRefusal};
 pub use refs::{
     corner_offsets, faces_of_cell, CornerRef, EdgeRef, FaceRef, FaceTarget, GridElement,

@@ -11,9 +11,9 @@
 use psx_grid::collision::summarize_sectors;
 use psx_grid::height::triangle_normal_q12;
 use psx_grid::{
-    edge, ColWall, Sector, SectorExt, SplitB, NO_EXT, SECTOR_CEIL_NESW, SECTOR_CEIL_SOLID,
-    SECTOR_FLOOR_NESW, SECTOR_FLOOR_WALK_A, SECTOR_FLOOR_WALK_B, SECTOR_HAS_CEIL, SECTOR_HAS_FLOOR,
-    SECTOR_OPEN_SKY, SECTOR_SPLIT_LEVEL,
+    edge, ColPlane, ColWall, Sector, SectorExt, SplitB, NO_EXT, SECTOR_CEIL_NESW,
+    SECTOR_CEIL_SOLID, SECTOR_FLOOR_NESW, SECTOR_FLOOR_WALK_A, SECTOR_FLOOR_WALK_B,
+    SECTOR_HAS_CEIL, SECTOR_HAS_FLOOR, SECTOR_OPEN_SKY, SECTOR_SPLIT_LEVEL,
 };
 
 use super::units::RuntimeUnits;
@@ -36,8 +36,12 @@ pub struct Tables {
     pub exts: Vec<SectorExt>,
     pub walls: Vec<ColWall>,
     pub splitbs: Vec<SplitB>,
+    /// Free-plane records, a copy per overlapped sector.
+    pub planes: Vec<ColPlane>,
     /// Lowest and highest local height over the room's geometry.
     pub range: Option<(i32, i32)>,
+    /// Findings about planes, for the cook report.
+    pub warnings: Vec<String>,
 }
 
 fn edge_id(edge: WallEdge) -> u8 {
@@ -100,7 +104,13 @@ fn surface_flags(surface: &GridSurface) -> bool {
 pub fn build(units: &RuntimeUnits, room: &GridRoom, room_index: usize) -> Result<Tables, String> {
     let s = units.sector();
     let mut tables = Tables::default();
-    let mut range: Option<(i32, i32)> = None;
+    let origin = [
+        room.origin[0] * s as i32,
+        units.rt(room.y_offset),
+        room.origin[1] * s as i32,
+    ];
+    let planes = super::plane_collision::build(units, room, room_index, origin)?;
+    let mut range: Option<(i32, i32)> = planes.range;
     let mut note = |lo: i16, hi: i16| {
         range = Some(match range {
             Some((a, b)) => (a.min(i32::from(lo)), b.max(i32::from(hi))),
@@ -214,7 +224,14 @@ pub fn build(units: &RuntimeUnits, room: &GridRoom, room_index: usize) -> Result
                 floor_b: floor_b.unwrap_or(sector.floor),
                 ceil_b: ceil_b.unwrap_or(sector.ceil),
             });
-            if !walls.is_empty() || splitb.is_some() {
+            let here = &planes.per_cell[z * room.width + x];
+            if !walls.is_empty() || splitb.is_some() || !here.is_empty() {
+                ext.plane_first = u16::try_from(tables.planes.len())
+                    .map_err(|_| format!("room {room_index} has too many plane copies"))?;
+                ext.plane_count = here.len() as u8;
+                tables
+                    .planes
+                    .extend(here.iter().map(|&i| planes.records[i]));
                 ext.wall_first = u16::try_from(tables.walls.len())
                     .map_err(|_| format!("room {room_index} has more than 65535 solid walls"))?;
                 ext.wall_count =
@@ -237,6 +254,7 @@ pub fn build(units: &RuntimeUnits, room: &GridRoom, room_index: usize) -> Result
     // wall and split-level state is final, so they come last.
     summarize_sectors(&mut tables.sectors, room.width, room.depth);
     tables.range = range;
+    tables.warnings = planes.warnings;
     Ok(tables)
 }
 
