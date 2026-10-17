@@ -13,8 +13,7 @@ use alloc::vec::Vec;
 use psx_asset::Texture;
 use psx_bsp::collision::{LiquidContentsSample, CONTENTS_EMPTY};
 use psx_bsp::render::{
-    load_pxbsp_view_rotation, FrustumPlanes, ViewProjection, ViewTransform,
-    PXBSP_CLIP_ALL_PLANES,
+    load_pxbsp_view_rotation, FrustumPlanes, ViewProjection, ViewTransform, PXBSP_CLIP_ALL_PLANES,
 };
 use psx_bsp::Vec3I16 as BspVec3I16;
 use psx_engine::{
@@ -35,14 +34,12 @@ use psx_gte::math::Vec3I32 as GteVec3I32;
 use psx_gte::scene;
 use psx_level::{find_asset_of_kind, world_object_flags, AssetId, AssetKind};
 
+use crate::generated::{ASSETS, WORLD_OBJECTS};
 use crate::world_common::{
     pxbsp_camera, pxbsp_view_rotation, BspVisibilityBounds, CountingTraceProvider,
 };
-use crate::generated::{ASSETS, WORLD_OBJECTS};
 use crate::world_objects_runtime::WorldObjectVisibility;
-use crate::{
-    ensure_room_texture_uploaded, ensure_texture_uploaded, telemetry, PROJECTION,
-};
+use crate::{ensure_room_texture_uploaded, ensure_texture_uploaded, telemetry, PROJECTION};
 
 #[repr(C)]
 struct Aligned<Bytes: ?Sized> {
@@ -73,7 +70,14 @@ const ACTIVE_HOPS: usize = 2;
 /// Words in the room bitset; the format allows 256 rooms.
 const ROOM_SET_WORDS: usize = 8;
 
+/// Ticks between sight-line tests of one model instance.
+const VIEW_REFRESH_TICKS: u32 = 4;
+
 type RoomSet = [u32; ROOM_SET_WORDS];
+
+fn box_contains(min: [i32; 3], max: [i32; 3], point: [i32; 3]) -> bool {
+    (0..3).all(|axis| point[axis] >= min[axis] && point[axis] <= max[axis])
+}
 
 fn set_has(set: &RoomSet, room: usize) -> bool {
     set[room >> 5] & (1 << (room & 31)) != 0
@@ -96,10 +100,14 @@ pub(super) enum GridRuntimeInitError {
 impl fmt::Display for GridRuntimeInitError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::EmptyWorld => formatter.write_str("manifest selected a grid world but embedded none"),
+            Self::EmptyWorld => {
+                formatter.write_str("manifest selected a grid world but embedded none")
+            }
             Self::Level(e) => write!(formatter, "grid level core refused: {e:?}"),
             Self::Room { room, error } => write!(formatter, "grid room {room} refused: {error:?}"),
-            Self::TooManyRooms(n) => write!(formatter, "{n} grid rooms, at most {}", ROOM_SET_WORDS * 32),
+            Self::TooManyRooms(n) => {
+                write!(formatter, "{n} grid rooms, at most {}", ROOM_SET_WORDS * 32)
+            }
             Self::NoMaterials => formatter.write_str("grid level has no materials"),
             Self::Collision => formatter.write_str("grid collision could not be built"),
         }
@@ -121,8 +129,12 @@ fn resolve_material(material: &psx_grid::Material) -> Option<GridMaterial> {
         "grid texture asset {} has no baked bytes",
         material.texture_asset
     );
-    let texture = Texture::from_bytes(asset.bytes)
-        .unwrap_or_else(|_| panic!("grid texture asset {} is not a valid PSXT", material.texture_asset));
+    let texture = Texture::from_bytes(asset.bytes).unwrap_or_else(|_| {
+        panic!(
+            "grid texture asset {} is not a valid PSXT",
+            material.texture_asset
+        )
+    });
     let slot = if texture.is_index_zero_transparent() || material.blend != 0 {
         ensure_texture_uploaded(asset_id, asset.bytes)
     } else {
@@ -145,7 +157,6 @@ fn resolve_material(material: &psx_grid::Material) -> Option<GridMaterial> {
         clut: slot.clut_word,
         uv_origin: u16::from(u) | (u16::from(v) << 8),
         command_bits,
-        window: slot.texture_window.word(),
         // A tile spans 64 page-local texels; the packed add in the packet
         // writer must not carry between bytes.
         resident: u16::from(u) + 64 <= 256 && u16::from(v) + 64 <= 256,
@@ -167,6 +178,12 @@ pub(super) struct GridRuntime {
     active_for: Option<usize>,
     last_world_packet_words: usize,
     camera_traces: u32,
+    /// Sight-line cache for [`Self::visible_view_bounds_mask`].
+    // psx-numeric-allow-next-line: one bit per model instance, the caller's mask width
+    view_known: u64,
+    // psx-numeric-allow-next-line: one bit per model instance, the caller's mask width
+    view_seen: u64,
+    view_phase: u32,
 }
 
 impl GridRuntime {
@@ -188,12 +205,10 @@ impl GridRuntime {
             Vec::with_capacity(level.rooms.len());
         for (index, record) in level.rooms.iter().enumerate() {
             let start = usize::try_from(record.pack_sector).unwrap_or(usize::MAX) * SECTOR_BYTES;
-            let bytes = GRID_ROOMS
-                .get(start..)
-                .ok_or(GridRuntimeInitError::Room {
-                    room: index,
-                    error: FormatError::Truncated,
-                })?;
+            let bytes = GRID_ROOMS.get(start..).ok_or(GridRuntimeInitError::Room {
+                room: index,
+                error: FormatError::Truncated,
+            })?;
             let view = RoomView::parse(bytes)
                 .map_err(|error| GridRuntimeInitError::Room { room: index, error })?;
             collisions.push(Some(view.col));
@@ -223,6 +238,9 @@ impl GridRuntime {
             active_for: None,
             last_world_packet_words: 0,
             camera_traces: 0,
+            view_known: 0,
+            view_seen: 0,
+            view_phase: 0,
         })
     }
 
@@ -341,6 +359,71 @@ impl GridRuntime {
         mask
     }
 
+    /// Render and targeting visibility for model instances: in an active room
+    /// and seen along a straight line from the player's body or from the
+    /// camera. An actor hidden behind a pillar costs nothing to draw.
+    // psx-numeric-allow-next-line: one bit per queried bounds; the width IS the caller's capacity
+    pub(super) fn visible_view_bounds_mask(
+        &mut self,
+        observer: RoomPoint,
+        eye: RoomPoint,
+        bounds: &[BspVisibilityBounds],
+        // psx-numeric-allow-next-line: bit per bounds that gets a sight-line test; the others are visible in an active room
+        sight_tested: u64,
+        // psx-numeric-allow-next-line: one bit per queried bounds; return width is the caller's fixed capacity
+    ) -> u64 {
+        if !self.activate(observer) {
+            return 0;
+        }
+        let from_body = [observer.x, observer.y, observer.z];
+        let from_eye = [eye.x, eye.y, eye.z];
+        let phase = self.view_phase;
+        self.view_phase = phase.wrapping_add(1);
+        let mut mask = 0u64;
+        for (index, b) in bounds.iter().enumerate().take(64) {
+            let (min, max) = (b.min(), b.max());
+            if !self.bounds_active(min, max) {
+                continue;
+            }
+            // psx-numeric-allow-next-line: one bit per model instance, the caller's mask width
+            let bit = 1u64 << index;
+            if sight_tested & bit == 0 {
+                mask |= bit;
+                continue;
+            }
+            // Sight lines are the expensive part: each instance is re-tested
+            // on its own turn and keeps the last answer in between, so an
+            // actor reappears within a few ticks of stepping out of cover.
+            let due = self.view_known & bit == 0
+                || (phase.wrapping_add(index as u32) % VIEW_REFRESH_TICKS == 0);
+            if due {
+                let seen = box_contains(min, max, from_body)
+                    || self.column_seen_from(from_eye, min, max)
+                    || self.column_seen_from(from_body, min, max);
+                self.view_known |= bit;
+                if seen {
+                    self.view_seen |= bit;
+                } else {
+                    self.view_seen &= !bit;
+                }
+            }
+            mask |= self.view_seen & bit;
+        }
+        mask
+    }
+
+    /// Whether the line from `from` to the box's centre column (a quarter,
+    /// half and three quarters of its height) is clear of solid world.
+    fn column_seen_from(&self, from: [i32; 3], min: [i32; 3], max: [i32; 3]) -> bool {
+        let cx = min[0].saturating_add(max[0].saturating_sub(min[0]) / 2);
+        let cz = min[2].saturating_add(max[2].saturating_sub(min[2]) / 2);
+        let height = max[1].saturating_sub(min[1]);
+        [2, 1, 3].into_iter().any(|quarter_steps| {
+            let y = min[1].saturating_add(height / 4 * quarter_steps);
+            self.world.line_of_sight(from, [cx, y, cz])
+        })
+    }
+
     /// Whether the straight line from `from` to a few points of the box is
     /// clear of solid world.
     fn box_clear_from(&self, from: [i32; 3], min: [i32; 3], max: [i32; 3]) -> bool {
@@ -415,7 +498,8 @@ impl GridRuntime {
             return false;
         }
         let from = [observer.x, observer.y, observer.z];
-        let inside = (0..3).all(|a| from[a] >= object.bounds_min[a] && from[a] <= object.bounds_max[a]);
+        let inside =
+            (0..3).all(|a| from[a] >= object.bounds_min[a] && from[a] <= object.bounds_max[a]);
         inside || self.box_clear_from(from, object.bounds_min, object.bounds_max)
     }
 
@@ -510,7 +594,10 @@ impl GridRuntime {
         DamageOutcome::default()
     }
 
-    pub(super) fn destructible_effect_origin(&self, _state_index: usize) -> Option<([i32; 3], u16)> {
+    pub(super) fn destructible_effect_origin(
+        &self,
+        _state_index: usize,
+    ) -> Option<([i32; 3], u16)> {
         None
     }
 
@@ -689,8 +776,16 @@ impl GridRuntime {
         let clamp = |v: i32| v.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
         for room in ring {
             let (min, max) = self.room_bounds(room);
-            let lo = BspVec3I16 { x: clamp(min[0]), y: clamp(min[1]), z: clamp(min[2]) };
-            let hi = BspVec3I16 { x: clamp(max[0]), y: clamp(max[1]), z: clamp(max[2]) };
+            let lo = BspVec3I16 {
+                x: clamp(min[0]),
+                y: clamp(min[1]),
+                z: clamp(min[2]),
+            };
+            let hi = BspVec3I16 {
+                x: clamp(max[0]),
+                y: clamp(max[1]),
+                z: clamp(max[2]),
+            };
             if frustum.cull_aabb(lo, hi, PXBSP_CLIP_ALL_PLANES).is_some() {
                 out.push(room);
             }
@@ -719,7 +814,7 @@ impl GridRuntime {
             i32::from(PROJECTION.screen_y) << 16,
         );
         scene::set_projection_plane(
-            camera.projection.focal_length.clamp(1, i32::from(u16::MAX)) as u16,
+            camera.projection.focal_length.clamp(1, i32::from(u16::MAX)) as u16
         );
         scene::set_average_z_weights(0x155, 0x100);
         self.projection.focal_length = camera.projection.focal_length;
@@ -729,10 +824,18 @@ impl GridRuntime {
         let cam = pxbsp_camera(camera);
         let view = load_pxbsp_view_rotation(cam.origin, view_rotation);
         let eye = [cam.origin.x >> 12, cam.origin.y >> 12, cam.origin.z >> 12];
-        let world_frustum = FrustumPlanes::from_view(&view.rotation, view.translation, eye, self.projection);
+        let world_frustum =
+            FrustumPlanes::from_view(&view.rotation, view.translation, eye, self.projection);
+        // The box tests below read the plane dots from the GTE on the guest,
+        // so the world frustum has to be loaded first.
+        #[cfg(target_arch = "mips")]
+        psx_bsp::render::load_gte_clip_planes(&world_frustum.planes);
         let mut rooms: Vec<usize> = Vec::new();
         self.visible_rooms(eye, &world_frustum, &mut rooms);
-        let screen = [self.projection.half_width * 2, self.projection.half_height * 2];
+        let screen = [
+            self.projection.half_width * 2,
+            self.projection.half_height * 2,
+        ];
         let sector = self.level.sector_units() as i32;
 
         primitive_packets.try_fence_completed();
@@ -750,8 +853,18 @@ impl GridRuntime {
                 return false;
             };
             let mut total = GridFrame::default();
+            let reverse;
             {
-                let packets = reservation.words_mut();
+                // A descending arena takes the stream against the end of the
+                // reservation, so rooms fill it back to front and nothing
+                // slides at the commit.
+                reverse = reservation.is_descending();
+                let packets = if reverse {
+                    reservation.tail_words_mut()
+                } else {
+                    reservation.words_mut()
+                };
+                let packet_count = packets.len();
                 for &room_index in &rooms {
                     let record = &self.level.rooms[room_index];
                     let origin = record.origin;
@@ -792,7 +905,12 @@ impl GridRuntime {
                         room,
                         &eye_view,
                         &self.materials,
-                        &mut packets[total.packet_words..],
+                        if reverse {
+                            &mut packets[..packet_count - total.packet_words]
+                        } else {
+                            &mut packets[total.packet_words..]
+                        },
+                        reverse,
                         &mut |phase, begin| {
                             let id = match phase {
                                 GridPhase::Cells => telemetry::stage::ROOM_CELL_SELECT,
@@ -847,6 +965,10 @@ impl GridRuntime {
                 telemetry::counter::ROOM_SURF_TR_SUBDIVISION_CANDIDATES,
                 u32::from(total.depth_skipped),
             );
+            telemetry::counter(
+                telemetry::counter::ROOM_SURF_TR_SUBDIVISION_SUBMITTED,
+                u32::from(total.robust_packets),
+            );
             if total.overflowed && can_grow {
                 // The uncommitted reservation is abandoned, not linked.
                 redraws += 1;
@@ -855,9 +977,12 @@ impl GridRuntime {
             }
             self.last_world_packet_words = total.packet_words;
             telemetry::counter(telemetry::counter::ROOM_SUBMIT_PRIMITIVE_OVERFLOWS, redraws);
-            let stream = reservation
-                .commit(total.packet_words, total.packets as usize)
-                .expect("grid renderer reported an invalid shared-arena stream");
+            let stream = if reverse {
+                reservation.commit_tail(total.packet_words, total.packets as usize)
+            } else {
+                reservation.commit(total.packet_words, total.packets as usize)
+            }
+            .expect("grid renderer reported an invalid shared-arena stream");
             unsafe {
                 ot.add_committed_tagged_packet_stream_unchecked(stream);
             }

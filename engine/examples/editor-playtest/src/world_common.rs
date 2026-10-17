@@ -92,7 +92,6 @@ impl BspVisibilityBounds {
     }
 }
 
-
 /// Counts the traces a camera update asks of its provider.
 pub(super) struct CountingTraceProvider<'a, P: ?Sized> {
     inner: &'a mut P,
@@ -121,7 +120,6 @@ impl<P: psx_engine::CollisionTraceProvider + ?Sized> psx_engine::CollisionTraceP
         self.inner.trace_into(query, output)
     }
 }
-
 
 /// The world pass view rotation from the camera's exact Q12 trig, in the
 /// PXBSP convention [`pxbsp_camera`] derives its angles in: PXBSP yaw is
@@ -199,7 +197,6 @@ fn signed_quarter_angle_q12(sin: i32, cos: i32) -> i32 {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,5 +242,4 @@ mod tests {
             assert_eq!(pxbsp_camera(camera).angles[0], expected);
         }
     }
-
 }

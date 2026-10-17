@@ -3,8 +3,31 @@
 use super::*;
 
 impl GridRenderer {
-    #[inline(never)]
+    /// Write the queued quads as one packet stream into `out`.
+    ///
+    /// Forward (`reverse` false) the stream starts at `out[0]`. Reverse it
+    /// ends at the end of `out`, written back to front, so a descending
+    /// arena takes it in place instead of sliding it against the frame's
+    /// packets; `GridFrame::packet_words` says how much of the tail is used.
+    /// Either way the stream holds the quads in queue order.
     pub(super) fn emit(
+        &mut self,
+        room: &RoomView<'_>,
+        eye: &RoomCamera<'_>,
+        materials: &[GridMaterial],
+        out: &mut [u32],
+        frame: &mut GridFrame,
+        reverse: bool,
+    ) {
+        if reverse {
+            self.emit_dir::<true>(room, eye, materials, out, frame);
+        } else {
+            self.emit_dir::<false>(room, eye, materials, out, frame);
+        }
+    }
+
+    #[inline(never)]
+    fn emit_dir<const REVERSE: bool>(
         &mut self,
         room: &RoomView<'_>,
         eye: &RoomCamera<'_>,
@@ -15,14 +38,23 @@ impl GridRenderer {
         let start = out.as_mut_ptr();
         // SAFETY: one past the end of the slice.
         let end = unsafe { start.add(out.len()) };
-        let mut next = start;
+        // Forward: the next word to write. Reverse: the first word written.
+        let mut next = if REVERSE { end } else { start };
         let mut packets = 0u32;
         let cache = self.screen.as_ptr();
         let window_reset = TextureWindow::NONE.word();
         let mut robust_quads = 0u16;
+        let mut robust_packets = 0u32;
         let quad_total = room.render.quads.len();
-        for &q in &self.quads {
-            let q = usize::from(q);
+        let queue = self.quads.as_slice();
+        let count = queue.len();
+        for position in 0..count {
+            // Reverse walks the queue backwards so the stream keeps its order.
+            let q = usize::from(if REVERSE {
+                queue[count - 1 - position]
+            } else {
+                queue[position]
+            });
             let merged = q >= quad_total;
             // SAFETY: queued from valid quad indices (cell quads below
             // `quad_total`, merged quads after).
@@ -58,32 +90,6 @@ impl GridRenderer {
             }
             let any = s0.code | s1.code | s2.code | s3.code;
             let triangle = quad.flags & QUAD_TRI != 0;
-            if merged {
-                // Merged far quads draw under the material's texture window
-                // so their wide UVs wrap; they are far from the near plane,
-                // and one the GPU cannot take is dropped (counted).
-                if material.window == 0 || any & NEAR != 0 || !gpu_safe(&[s0, s1, s2, s3], false) {
-                    frame.depth_skipped += 1;
-                    continue;
-                }
-                let sum = u32::from(s0.sz) + u32::from(s1.sz) + u32::from(s2.sz);
-                let otz = (sum + u32::from(s3.sz)) >> 4;
-                if otz == 0 || otz >= 2048 {
-                    frame.depth_skipped += 1;
-                    continue;
-                }
-                // SAFETY: both pointers lie in the packet storage.
-                if unsafe { end.offset_from(next) } < QUAD_PACKET_WORDS as isize {
-                    frame.overflowed = true;
-                    break;
-                }
-                // SAFETY: room for a whole packet was just checked.
-                unsafe {
-                    next = write_quad_wrapped(next, quad, material, [s0, s1, s2, s3], otz);
-                }
-                packets += 1;
-                continue;
-            }
             // Every corner on screen and in front of the near plane: nothing
             // else to prove. Otherwise the corners must still fit the GPU.
             let fast = any == 0 || (any & NEAR == 0 && gpu_safe(&[s0, s1, s2, s3], triangle));
@@ -104,37 +110,75 @@ impl GridRenderer {
                     QUAD_PACKET_WORDS
                 };
                 // SAFETY: both pointers lie in the packet storage.
-                if unsafe { end.offset_from(next) } < words as isize {
+                let room_left = unsafe {
+                    if REVERSE {
+                        next.offset_from(start)
+                    } else {
+                        end.offset_from(next)
+                    }
+                };
+                if room_left < words as isize {
                     frame.overflowed = true;
                     break;
                 }
                 // SAFETY: room for `words` was just checked.
                 unsafe {
-                    next = if triangle {
+                    if REVERSE {
+                        next = next.sub(words);
+                    }
+                    let after = if triangle {
                         write_triangle(next, quad, material, [s0, s1, s2], otz, window_reset)
                     } else {
                         write_quad(next, quad, material, [s0, s1, s2, s3], otz, window_reset)
                     };
+                    if !REVERSE {
+                        next = after;
+                    }
                 }
                 packets += 1;
                 continue;
             }
             // Near-plane, oversize and saturated quads share one path.
             // SAFETY: both pointers lie in the packet storage.
-            if unsafe { end.offset_from(next) } < ROBUST_WORST_WORDS as isize {
+            let room_left = unsafe {
+                if REVERSE {
+                    next.offset_from(start)
+                } else {
+                    end.offset_from(next)
+                }
+            };
+            if room_left < ROBUST_WORST_WORDS as isize {
                 frame.overflowed = true;
                 break;
             }
             robust_quads += 1;
-            // SAFETY: room for the worst case was just checked.
+            let before = packets;
+            // SAFETY: room for the worst case was just checked. In reverse
+            // the packets are built at the low end of the free space and then
+            // moved up against the stream written so far.
             unsafe {
-                next = robust_quad(next, end, room, eye, quad, material, &mut packets);
+                if REVERSE {
+                    let built = robust_quad(start, next, room, eye, quad, material, &mut packets);
+                    let words = built.offset_from(start) as usize;
+                    core::ptr::copy(start, next.sub(words), words);
+                    next = next.sub(words);
+                } else {
+                    next = robust_quad(next, end, room, eye, quad, material, &mut packets);
+                }
             }
+            robust_packets += packets - before;
         }
         frame.robust_quads = robust_quads;
+        frame.robust_packets = robust_packets.min(u32::from(u16::MAX)) as u16;
         frame.packets = packets;
         // SAFETY: both pointers lie in the packet storage.
-        frame.packet_words = unsafe { next.offset_from(start) } as usize;
+        frame.packet_words = unsafe {
+            if REVERSE {
+                end.offset_from(next)
+            } else {
+                next.offset_from(start)
+            }
+        } as usize;
     }
 }
 
@@ -189,51 +233,6 @@ unsafe fn write_quad(
     unsafe {
         next.write((13 << 24) | otz);
         next.add(1).write(window_reset);
-        next.add(2).write(command | quad.color[1]);
-        next.add(3).write(s[1].sxy);
-        next.add(4).write(uv(1) | clut);
-        next.add(5).write(quad.color[0]);
-        next.add(6).write(s[0].sxy);
-        next.add(7).write(uv(0) | tpage);
-        next.add(8).write(quad.color[2]);
-        next.add(9).write(s[2].sxy);
-        next.add(10).write(uv(2));
-        next.add(11).write(quad.color[3]);
-        next.add(12).write(s[3].sxy);
-        next.add(13).write(uv(3));
-        next.add(14)
-    }
-}
-
-/// A quad under the material's texture window: UVs wrap, so the packed add
-/// of the page origin is done per byte.
-///
-/// # Safety
-/// `next` must have room for [`QUAD_PACKET_WORDS`].
-#[inline(always)]
-unsafe fn write_quad_wrapped(
-    next: *mut u32,
-    quad: &Quad,
-    material: &GridMaterial,
-    s: [&GridScreen; 4],
-    otz: u32,
-) -> *mut u32 {
-    let (ou, ov) = (
-        u32::from(material.uv_origin & 0xff),
-        u32::from(material.uv_origin >> 8),
-    );
-    let clut = u32::from(material.clut) << 16;
-    let tpage = u32::from(material.tpage) << 16;
-    let command = TEXTURED_GOURAUD_COMMAND | 0x0800_0000 | material.command_bits;
-    let uv = |k: usize| {
-        let u = (u32::from(quad.uv[k]) & 0xff).wrapping_add(ou) & 0xff;
-        let v = (u32::from(quad.uv[k]) >> 8).wrapping_add(ov) & 0xff;
-        u | (v << 8)
-    };
-    // SAFETY: the caller reserved room for the whole packet.
-    unsafe {
-        next.write((13 << 24) | otz);
-        next.add(1).write(material.window);
         next.add(2).write(command | quad.color[1]);
         next.add(3).write(s[1].sxy);
         next.add(4).write(uv(1) | clut);
@@ -317,6 +316,19 @@ unsafe fn robust_quad(
             screen: [0, 0],
             depth: 0,
         };
+    }
+    // A polygon wholly outside one side plane draws nothing, whatever the
+    // near plane does to it. Nearly every near-plane quad in an open room is
+    // this kind, so the test comes before the clip, the projection and the
+    // splitter.
+    let error = eye.frustum.side_error;
+    for plane in &eye.frustum.planes[1..] {
+        if source[..count]
+            .iter()
+            .all(|v| FrustumPlanes::distance(plane, v.position) < -error)
+        {
+            return next;
+        }
     }
     // Room for the clipped polygon plus the splitter's scratch vertices.
     let mut clipped = [AffineVertex::default(); 6 + psx_engine::AFFINE_SPLIT_SCRATCH_VERTICES];

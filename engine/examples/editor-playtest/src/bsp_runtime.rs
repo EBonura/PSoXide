@@ -841,6 +841,22 @@ impl BspRuntime {
         mask
     }
 
+    /// Render and targeting visibility for model instances. A PXBSP world
+    /// answers from the PVS row alone; the eye is for worlds that can also
+    /// test sight lines.
+    // psx-numeric-allow-next-line: one bit per queried bounds; the width IS the caller's capacity
+    pub(super) fn visible_view_bounds_mask(
+        &mut self,
+        observer: RoomPoint,
+        _eye: RoomPoint,
+        bounds: &[BspVisibilityBounds],
+        // psx-numeric-allow-next-line: one bit per queried bounds; the width IS the caller's capacity
+        _sight_tested: u64,
+        // psx-numeric-allow-next-line: one bit per queried bounds; return width is the caller's fixed capacity
+    ) -> u64 {
+        self.visible_bounds_mask(observer, bounds)
+    }
+
     /// Return one bit per actor/instance whose complete bounds touch at least
     /// one visible BSP leaf. This mirrors Quake's multi-leaf entity linking;
     /// origin-only PVS tests incorrectly suppress large or doorway-straddling

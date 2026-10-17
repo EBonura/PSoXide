@@ -60,10 +60,6 @@ pub struct GridMaterial {
     /// Extra GP0 command bits (the semi-transparency bit for blended
     /// materials), zero for opaque.
     pub command_bits: u32,
-    /// GP0(E2) word that wraps this texture over the whole 256 texel UV
-    /// space; merged far quads draw under it. Zero when unknown, which turns
-    /// merged quads off for the material.
-    pub window: u32,
     pub resident: bool,
 }
 
@@ -80,6 +76,8 @@ pub struct GridFrame {
     pub quads_visible: u16,
     pub vertices_projected: u16,
     pub robust_quads: u16,
+    /// Packets the near-plane path produced.
+    pub robust_packets: u16,
     pub backface_culled: u16,
     pub screen_culled: u16,
     pub material_missing: u16,
@@ -102,6 +100,7 @@ impl GridFrame {
             .vertices_projected
             .saturating_add(room.vertices_projected);
         self.robust_quads = self.robust_quads.saturating_add(room.robust_quads);
+        self.robust_packets = self.robust_packets.saturating_add(room.robust_packets);
         self.backface_culled = self.backface_culled.saturating_add(room.backface_culled);
         self.screen_culled = self.screen_culled.saturating_add(room.screen_culled);
         self.material_missing = self.material_missing.saturating_add(room.material_missing);
@@ -222,6 +221,8 @@ impl GridRenderer {
 
     /// Draw one room into `out`. The GTE must already hold the view rotation,
     /// the room's translation, screen offset, projection plane and Z weights.
+    /// With `reverse` the stream is written against the end of `out`
+    /// instead of from its start (see `GridFrame::packet_words`).
     #[allow(clippy::too_many_arguments)]
     pub fn draw_room(
         &mut self,
@@ -229,8 +230,9 @@ impl GridRenderer {
         eye: &RoomCamera<'_>,
         materials: &[GridMaterial],
         out: &mut [u32],
+        reverse: bool,
     ) -> GridFrame {
-        self.draw_room_with_marks(room, eye, materials, out, &mut |_, _| {})
+        self.draw_room_with_marks(room, eye, materials, out, reverse, &mut |_, _| {})
     }
 
     /// Like [`Self::draw_room`], calling `mark(phase, true)` before and
@@ -241,6 +243,7 @@ impl GridRenderer {
         eye: &RoomCamera<'_>,
         materials: &[GridMaterial],
         out: &mut [u32],
+        reverse: bool,
         mark: &mut dyn FnMut(GridPhase, bool),
     ) -> GridFrame {
         let mut frame = GridFrame::default();
@@ -265,7 +268,7 @@ impl GridRenderer {
         self.project_corners(room, eye.screen, near_sz, &mut frame);
         mark(GridPhase::Project, false);
         mark(GridPhase::Emit, true);
-        self.emit(room, eye, materials, out, &mut frame);
+        self.emit(room, eye, materials, out, &mut frame, reverse);
         mark(GridPhase::Emit, false);
         frame
     }
