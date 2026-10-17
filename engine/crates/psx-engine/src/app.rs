@@ -43,7 +43,9 @@ use psx_level::{
     GameFlow, LevelGameplaySfxCueRecord, LevelOptionDef, LevelUiNodeRecord, LevelUiPaintRecord,
     LevelUiScene, LevelUiSfxCueRecord, LevelUiSfxSampleRecord,
 };
-use psx_pad::{enable_analog_on, require_analog_on, PadReader, Port};
+#[cfg_attr(all(feature = "pad-irq", target_arch = "mips"), allow(unused_imports))]
+use psx_pad::enable_analog_on;
+use psx_pad::{require_analog_on, PadReader, Port};
 
 use crate::game_app::{GameApp, GAMEPLAY_ONLY};
 use crate::present_queue::{PresentQueue, ENABLED as PRESENT_QUEUE_ENABLED};
@@ -592,6 +594,16 @@ impl App {
         boot_trace("psx-engine: scene init ok");
         clock.reset_origin();
 
+        // From here the pad is polled by psx-pad's interrupt engine. It goes in
+        // after init, which may have installed the CD transport's exception
+        // wrapper that the engine has to chain in front of.
+        #[cfg(all(feature = "pad-irq", target_arch = "mips"))]
+        if let Some(port) = ctx.take_controller_port() {
+            if psx_pad::console::install(port, psx_pad::engine::Config::PORT1_ONLY).is_err() {
+                boot_trace("psx-engine: pad engine refused");
+            }
+        }
+
         let visual_interval = config.visual_pacing.interval_vblanks();
         boot_trace("psx-engine: loop");
         Self::run_scheduled(config, &mut app, clock, ctx, pad_reader, visual_interval);
@@ -628,6 +640,10 @@ impl App {
         let mut present_queue = PresentQueue::new();
 
         loop {
+            // A scene that borrowed the port (a memory card) hands it back to
+            // the pad engine by the next step.
+            #[cfg(all(feature = "pad-irq", target_arch = "mips"))]
+            ctx.release_controller_port();
             // Resolve a queued flip as soon as the handler has taken the word,
             // or when the scheduler has nothing but a render or a wait left to
             // offer -- at which point blocking on the edge is all there is to
@@ -699,15 +715,25 @@ impl App {
                         boot_trace("psx-engine: pad poll begin");
                         boot_visual_checkpoint(&mut ctx, (220, 100, 0), "22 PAD POLL BEGIN");
                     }
-                    ctx.pad = pad_reader.poll_on(ctx.controller_port());
-                    if ctx.pad.is_connected() && !pad_was_connected {
-                        // A newly attached DualShock starts in digital mode.
-                        // Negotiate again on the connection edge so hot-plug
-                        // behaves the same as a controller present at boot.
-                        // The shorter-spaced request: this runs in the frame
-                        // loop, where `require_analog_on` would stall.
-                        let _ = enable_analog_on(ctx.controller_port(), Port::One);
+                    #[cfg(not(all(feature = "pad-irq", target_arch = "mips")))]
+                    {
                         ctx.pad = pad_reader.poll_on(ctx.controller_port());
+                        if ctx.pad.is_connected() && !pad_was_connected {
+                            // A newly attached DualShock starts in digital mode.
+                            // Negotiate again on the connection edge so hot-plug
+                            // behaves the same as a controller present at boot.
+                            // The shorter-spaced request: this runs in the frame
+                            // loop, where `require_analog_on` would stall.
+                            let _ = enable_analog_on(ctx.controller_port(), Port::One);
+                            ctx.pad = pad_reader.poll_on(ctx.controller_port());
+                        }
+                    }
+                    #[cfg(all(feature = "pad-irq", target_arch = "mips"))]
+                    {
+                        ctx.pad = psx_pad::console::pad(Port::One);
+                        if ctx.pad.is_connected() && !pad_was_connected {
+                            psx_pad::console::request_analog(Port::One);
+                        }
                     }
                     pad_was_connected = ctx.pad.is_connected();
                     if !traced_update {
