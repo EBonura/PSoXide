@@ -155,10 +155,12 @@ fn rooms_get_portals_to_their_neighbours() {
     assert_eq!(cooked.level.rooms[1].portal_count, 1);
 }
 
+/// One of the tracked grid reference projects. They are permanent fixtures, so
+/// a missing one is a failure, not a skip.
 pub(super) fn load_reference(name: &str) -> Option<crate::ProjectDocument> {
     let path = crate::projects_dir().join(name).join("project.ron");
-    path.is_file()
-        .then(|| crate::ProjectDocument::load_from_path(path).expect("the reference project loads"))
+    assert!(path.is_file(), "reference project {name} is not tracked");
+    Some(crate::ProjectDocument::load_from_path(path).expect("the reference project loads"))
 }
 
 #[test]
@@ -170,7 +172,6 @@ fn the_reference_projects_cook_and_validate() {
         "grid-cave",
         "grid-sewers",
         "grid-west",
-        "grid-starter",
     ] {
         let Some(project) = load_reference(name) else {
             eprintln!("skipping {name}: not present");

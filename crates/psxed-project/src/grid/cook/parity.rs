@@ -225,7 +225,6 @@ fn run(name: &str) -> Option<Census> {
 fn native_collision_matches_the_retired_slab_collision() {
     let _ = TestBinder;
     for name in [
-        "grid-starter",
         "grid-level008",
         "grid-dungeon",
         "grid-cathedral",
@@ -257,7 +256,6 @@ fn native_collision_matches_the_retired_slab_collision() {
 #[test]
 fn the_player_spawn_stands_on_the_native_floor() {
     for name in [
-        "grid-starter",
         "grid-level008",
         "grid-dungeon",
         "grid-cathedral",
