@@ -86,6 +86,7 @@ mod time;
 pub mod transform;
 mod transitions;
 pub mod ui;
+pub mod walk_limits;
 pub mod world_render;
 
 /// Compare two `usize` values without exposing an R3000A load-delay hazard.
@@ -192,6 +193,7 @@ pub use third_person_camera::{
 };
 pub use transform::{ActorTransform, RoomPoint, Vec3World, WorldVertex};
 pub use ui::{draw_scene, is_focusable, node_nav_rect, UiTextureSlot, UI_CANVAS_H, UI_CANVAS_W};
+pub use walk_limits::WalkLimits;
 pub use world_render::{
     NoWorldSurfaceLighting, SurfaceSidedness, WorldMaterialAnimation, WorldRenderMaterial,
     WorldSurfaceKind, WorldSurfaceLighting, WorldSurfaceSample,

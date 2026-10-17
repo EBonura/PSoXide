@@ -12,19 +12,20 @@ use crate::{
         CollisionTraceQuery, CollisionTraceShape, COLLISION_FRACTION_ONE_Q12,
     },
     fixed::div_q12_i32,
+    walk_limits::WalkLimits,
     Angle, RoomPoint, Q12,
 };
 use psx_math::int32::{abs_i32, isqrt_i32, square_i32_saturating};
 
 const DEFAULT_STAMINA_MAX_Q12: i32 = 4096;
-const DEFAULT_BODY_HEIGHT: i32 = 48;
+const DEFAULT_BODY_HEIGHT: i32 = WalkLimits::DEFAULT.body_height;
 /// Max height (engine units) of a wall the character steps over instead
 /// of being blocked by. A riser whose top is within this of the feet is
 /// treated as a step (the floor probe already found walkable floor on the
 /// far side, so the body simply rises onto it); taller walls still block.
 /// Sits in the gap between demo-scale steps (<=~576) and real walls
 /// (>=~1152).
-const STEP_UP_HEIGHT: i32 = 40;
+const STEP_UP_HEIGHT: i32 = WalkLimits::DEFAULT.step_up;
 /// Smallest upward normal component, Q12, that a surface may have and still be
 /// stood on.
 ///
@@ -35,13 +36,13 @@ const STEP_UP_HEIGHT: i32 = 40;
 /// as walkable floor and the body could ascend an almost sheer brush.
 ///
 /// 0.7 * 4096 = 2867.
-const MIN_WALKABLE_FLOOR_NORMAL_Y_Q12: i16 = 2867;
+const MIN_WALKABLE_FLOOR_NORMAL_Y_Q12: i16 = WalkLimits::DEFAULT.min_floor_normal_y_q12;
 /// Largest drop the feet snap straight down to (the descent counterpart of
 /// [`STEP_UP_HEIGHT`]): walking down demo-scale steps stays glued to the
 /// floor. A larger drop -- a ledge, or a hole over a lower floor -- leaves
 /// the body airborne instead, and [`CharacterMotorState::apply_vertical`]
 /// lets it fall.
-const STEP_DOWN_HEIGHT: i32 = 40;
+const STEP_DOWN_HEIGHT: i32 = WalkLimits::DEFAULT.step_down;
 /// Downward acceleration applied to an airborne body each fixed tick, in
 /// engine units per tick^2. Integer fixed-point (the PS1 has no FPU).
 const GRAVITY_PER_TICK: i32 = 6;
