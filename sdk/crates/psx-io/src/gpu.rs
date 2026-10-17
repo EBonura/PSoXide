@@ -60,6 +60,28 @@ pub fn write_command(word: u32) {
     unsafe { crate::write_u32(GP0, word) }
 }
 
+/// [`write_command`] for a run of words: the same words, in order, to the
+/// port or into the open recording.
+///
+/// A recording is walked once per run instead of once per word, which is
+/// what a HUD primitive of five to nine words wants: recording one word at
+/// a time costs a call, a flag test and a reload of the whole recording
+/// state for each of them.
+#[inline(always)]
+pub fn write_commands(words: &[u32]) {
+    #[cfg(any(feature = "present-queue", test))]
+    if handoff::is_slow() {
+        handoff::write_commands_slow(words);
+        return;
+    }
+    for &word in words {
+        // SAFETY: GP0 (`psx_hw::gpu::GP0`) is the GPU's aligned 32-bit command/data port on every PS1. Any
+        // word is a legal write: the GPU parses it as a command or parameter, with no effect on
+        // CPU-visible memory.
+        unsafe { crate::write_u32(GP0, word) }
+    }
+}
+
 /// [`write_command`] straight to the port: never recorded, never behind the
 /// direct-access guard. For code that has already made the port safe, such
 /// as the present queue's stall recovery, which the guard itself runs.

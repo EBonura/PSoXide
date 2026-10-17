@@ -90,7 +90,7 @@
 #![warn(missing_docs)]
 
 use psx_hw::gpu::{gp0, pack_color, pack_texcoord, pack_vertex, pack_xy, packet};
-use psx_io::gpu::{wait_command_ready, write_command};
+use psx_io::gpu::{wait_command_ready, write_command, write_commands};
 use psx_math::sincos;
 use psx_vram::{
     upload_16bpp, upload_clut, Clut, Color555, TextureDepth, TexturePage, VramHandle, VramRect,
@@ -388,15 +388,17 @@ fn write_textured_quad_packet(
     tpage_word: u16,
 ) {
     wait_command_ready();
-    write_command(color_cmd);
-    write_command(pack_vertex(verts[0].0, verts[0].1));
-    write_command(pack_uv_word(uvs[0].0, uvs[0].1, clut_word));
-    write_command(pack_vertex(verts[1].0, verts[1].1));
-    write_command(pack_uv_word(uvs[1].0, uvs[1].1, tpage_word));
-    write_command(pack_vertex(verts[2].0, verts[2].1));
-    write_command(pack_uv_word(uvs[2].0, uvs[2].1, 0));
-    write_command(pack_vertex(verts[3].0, verts[3].1));
-    write_command(pack_uv_word(uvs[3].0, uvs[3].1, 0));
+    write_commands(&[
+        color_cmd,
+        pack_vertex(verts[0].0, verts[0].1),
+        pack_uv_word(uvs[0].0, uvs[0].1, clut_word),
+        pack_vertex(verts[1].0, verts[1].1),
+        pack_uv_word(uvs[1].0, uvs[1].1, tpage_word),
+        pack_vertex(verts[2].0, verts[2].1),
+        pack_uv_word(uvs[2].0, uvs[2].1, 0),
+        pack_vertex(verts[3].0, verts[3].1),
+        pack_uv_word(uvs[3].0, uvs[3].1, 0),
+    ]);
 }
 
 #[inline]
@@ -409,18 +411,20 @@ fn write_textured_gouraud_quad_packet(
     tpage_word: u16,
 ) {
     wait_command_ready();
-    write_command(color0_cmd);
-    write_command(pack_vertex(verts[0].0, verts[0].1));
-    write_command(pack_uv_word(uvs[0].0, uvs[0].1, clut_word));
-    write_command(pack_color(colors[1].0, colors[1].1, colors[1].2));
-    write_command(pack_vertex(verts[1].0, verts[1].1));
-    write_command(pack_uv_word(uvs[1].0, uvs[1].1, tpage_word));
-    write_command(pack_color(colors[2].0, colors[2].1, colors[2].2));
-    write_command(pack_vertex(verts[2].0, verts[2].1));
-    write_command(pack_uv_word(uvs[2].0, uvs[2].1, 0));
-    write_command(pack_color(colors[3].0, colors[3].1, colors[3].2));
-    write_command(pack_vertex(verts[3].0, verts[3].1));
-    write_command(pack_uv_word(uvs[3].0, uvs[3].1, 0));
+    write_commands(&[
+        color0_cmd,
+        pack_vertex(verts[0].0, verts[0].1),
+        pack_uv_word(uvs[0].0, uvs[0].1, clut_word),
+        pack_color(colors[1].0, colors[1].1, colors[1].2),
+        pack_vertex(verts[1].0, verts[1].1),
+        pack_uv_word(uvs[1].0, uvs[1].1, tpage_word),
+        pack_color(colors[2].0, colors[2].1, colors[2].2),
+        pack_vertex(verts[2].0, verts[2].1),
+        pack_uv_word(uvs[2].0, uvs[2].1, 0),
+        pack_color(colors[3].0, colors[3].1, colors[3].2),
+        pack_vertex(verts[3].0, verts[3].1),
+        pack_uv_word(uvs[3].0, uvs[3].1, 0),
+    ]);
 }
 
 /// VRAM reservations backing a set of fonts uploaded together by
@@ -1044,15 +1048,12 @@ impl FontAtlas {
             // opaque. First word: 0x64_BB_GG_RR (color is the tint
             // multiplier -- NOT a fill colour: CLUT index 1's white
             // texel gets modulated by this).
-            write_command(color_cmd);
-            write_command(pack_vertex(cursor_x, y));
-            // Second word packs (U, V, CLUT) -- our `pack_texcoord`
-            // takes (u, v, extra) where `extra` is the CLUT field
-            // (high halfword). The tpage is implied by the current
-            // draw mode.
-            write_command(pack_texcoord(u, v, clut_word));
-            // Third word: rectangle size.
-            write_command(glyph_size);
+            write_commands(&[
+                color_cmd,
+                pack_vertex(cursor_x, y),
+                pack_texcoord(u, v, clut_word),
+                glyph_size,
+            ]);
 
             cursor_x = cursor_x
                 .wrapping_add(font.glyph_advance(ch) as i16)
@@ -1122,10 +1123,12 @@ impl FontAtlas {
             };
 
             wait_command_ready();
-            write_command(color_cmd);
-            write_command(pack_vertex(cursor_x, y));
-            write_command(pack_texcoord(u, v, clut_word));
-            write_command(glyph_size);
+            write_commands(&[
+                color_cmd,
+                pack_vertex(cursor_x, y),
+                pack_texcoord(u, v, clut_word),
+                glyph_size,
+            ]);
 
             cursor_x = cursor_x
                 .wrapping_add(font.glyph_advance(ch) as i16)

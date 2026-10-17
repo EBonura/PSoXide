@@ -110,6 +110,21 @@ pub(super) fn write_command_slow(word: u32) {
     super::write_command_unguarded(word);
 }
 
+/// The slow half of [`super::write_commands`]: [`write_command_slow`] for each
+/// word of the run, with the recording state read once.
+#[cold]
+#[inline(never)]
+pub(super) fn write_commands_slow(words: &[u32]) {
+    if is_recording() {
+        record_words(words);
+        return;
+    }
+    run_direct_access_guard();
+    for &word in words {
+        super::write_command_unguarded(word);
+    }
+}
+
 /// The slow half of [`super::write_display_control`]: run the guard unless a
 /// recording is open (display control is never recorded), then write the
 /// port.
@@ -374,6 +389,57 @@ fn record_word(word: u32) {
     }
 }
 
+/// [`record_word`] for a run of words: the same nodes and the same overflow
+/// behaviour, with the recording's cursor, node and count held in locals and
+/// stored back once.
+#[inline(never)]
+fn record_words(words: &[u32]) {
+    // SAFETY: exclusive access to this module's static. Every store lands at
+    // `next`, which the checks below keep below `end`, inside the buffer
+    // `begin_recording_raw`'s caller provided.
+    unsafe {
+        let recording = &mut *addr_of_mut!(RECORDING);
+        if recording.overflowed {
+            return;
+        }
+        let end = recording.end;
+        let mut head = recording.head;
+        let mut node = recording.node;
+        let mut node_words = recording.node_words;
+        let mut next = recording.next;
+        let mut overflowed = false;
+        for &word in words {
+            if node.is_null() || node_words == RECORDING_NODE_WORDS {
+                // A new node needs its tag plus at least this word.
+                if (end as usize).saturating_sub(next as usize) < 8 {
+                    overflowed = true;
+                    break;
+                }
+                let tag = next;
+                if node.is_null() {
+                    head = tag;
+                } else {
+                    *node = (node_words << 24) | (tag as u32 & 0x00FF_FFFF);
+                }
+                node = tag;
+                node_words = 0;
+                next = tag.add(1);
+            } else if next >= end {
+                overflowed = true;
+                break;
+            }
+            *next = word;
+            next = next.add(1);
+            node_words += 1;
+        }
+        recording.head = head;
+        recording.node = node;
+        recording.node_words = node_words;
+        recording.next = next;
+        recording.overflowed = overflowed;
+    }
+}
+
 /// Register the function that makes direct GPU access safe while a queued
 /// frame may be walking (`psx_rt::present` registers its `wait_idle`). It
 /// runs once, on the first direct command or display-control write or GPU
@@ -546,5 +612,63 @@ mod tests {
         assert_eq!(recording.len_words(), 2);
         assert_eq!(second[1], 0x55);
         assert!(!is_slow());
+    }
+
+    /// Recording a run of words lays out exactly the buffer, the list and the
+    /// overflow state that recording the same words one at a time does.
+    #[test]
+    fn a_run_of_words_records_like_the_same_words_one_by_one() {
+        use super::super::write_commands;
+        let _serial = serial();
+        let mut state = 0x1234_5678u32;
+        let mut next = move |bound: u32| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state % bound
+        };
+        for capacity in [8usize, 9, 20, 40, 64, 200] {
+            for _ in 0..40 {
+                let mut runs = [0u32; 24];
+                for run in runs.iter_mut() {
+                    *run = next(10);
+                }
+                // The tags hold buffer addresses, so both runs record into the
+                // same buffer, one after the other.
+                let mut kept = [[0u32; 200]; 2];
+                let mut tail = [None; 2];
+                let mut errors = [false; 2];
+                for k in 0..2 {
+                    let mut buffer = [0u32; 200];
+                    let base = buffer.as_mut_ptr();
+                    // SAFETY: the recording ends below, before `buffer` goes.
+                    let active = unsafe { start_recording_raw(base, capacity) };
+                    let mut value = 0x500u32;
+                    for &run in &runs {
+                        let words: [u32; 9] = core::array::from_fn(|i| value + i as u32);
+                        value += 16;
+                        if k == 0 {
+                            for &word in &words[..run as usize] {
+                                write_command(word);
+                            }
+                        } else {
+                            write_commands(&words[..run as usize]);
+                        }
+                    }
+                    match active.end() {
+                        Ok(recording) => {
+                            tail[k] = recording
+                                .map(|r| (r.head() as usize - base as usize, r.len_words()));
+                        }
+                        Err(_) => errors[k] = true,
+                    }
+                    kept[k] = buffer;
+                }
+                assert_eq!(errors[0], errors[1], "capacity {capacity}");
+                assert_eq!(tail[0], tail[1], "capacity {capacity}");
+                assert_eq!(kept[0], kept[1], "capacity {capacity}");
+                assert!(!is_slow());
+            }
+        }
     }
 }
