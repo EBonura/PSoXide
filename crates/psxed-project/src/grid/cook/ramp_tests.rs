@@ -4,7 +4,7 @@
 
 use psx_engine::RoomPoint;
 
-use super::motor_harness::{native, walk_path};
+use super::motor_harness::{native, reach_config, walk_path, walk_path_with};
 use crate::grid::edit::verbs::ramp::{ramp_region, RampDir, RampDrag, RampParams};
 use crate::grid::edit::{CellRect, Region};
 use crate::grid::room::GridRoom;
@@ -177,4 +177,25 @@ fn a_flight_of_stairs_is_climbed_tread_by_tread_by_the_real_motor() {
         assert!(end.x > 9 * 80, "past the flight: {end:?} ({flight:?})");
         assert_eq!(end.y, top, "stands on the landing, {top}: {end:?}");
     }
+}
+
+#[test]
+fn the_player_as_authored_climbs_the_steepest_ramp_too() {
+    // The Graybox Reach player: taller and slower than the test body.
+    let region = Region::from_rect(0, CellRect::from_corners([3, 0], [8, 2]));
+    let steepest = RampDrag::begin(&hall(12), &region, params())
+        .unwrap()
+        .max_walkable_rise();
+    let world = native(&ramp_world(steepest));
+    let path = walk_path_with(
+        reach_config(),
+        &world,
+        RoomPoint::new(100, 0, 120),
+        4096,
+        0,
+        1400,
+    );
+    let end = path.last().unwrap();
+    eprintln!("reach player on the steepest ramp: {end:?}");
+    assert!(end.x > 9 * 80, "{end:?}");
 }

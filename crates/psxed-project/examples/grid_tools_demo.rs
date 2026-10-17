@@ -353,7 +353,7 @@ fn main() {
     };
     // Where the player starts, by scenario: facing east along the ramp.
     let start = match scenario.as_str() {
-        "ramp" | "stairs" => Some(([1, 2], 90.0)),
+        "ramp" | "stairs" => Some(([1, 2], 270.0)),
         "walk" => Some(([0, 0], 90.0)),
         _ => None,
     };

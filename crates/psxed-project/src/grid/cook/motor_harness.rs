@@ -43,6 +43,13 @@ pub(super) fn config() -> CharacterMotorConfig {
     CharacterMotorConfig::character_with_body(12, 48, 8 << 8, 8 << 8, Angle::from_q12(1024))
 }
 
+/// The Graybox Reach player as the project authors it: radius 188 and height
+/// 1024 authored units (a sixteenth in runtime units), walking at a few units
+/// a tick.
+pub(super) fn reach_config() -> CharacterMotorConfig {
+    CharacterMotorConfig::character_with_body(12, 64, 3 << 8, 5 << 8, Angle::from_q12(1024))
+}
+
 /// Walk `ticks` fixed ticks with the stick held towards `(move_x, move_z)`
 /// (Q12), returning the position after every tick.
 pub(super) fn walk_path(
@@ -52,7 +59,18 @@ pub(super) fn walk_path(
     move_z: i32,
     ticks: u32,
 ) -> Vec<RoomPoint> {
-    let config = config();
+    walk_path_with(config(), world, from, move_x, move_z, ticks)
+}
+
+/// [`walk_path`] with a given motor configuration.
+pub(super) fn walk_path_with(
+    config: CharacterMotorConfig,
+    world: &Native,
+    from: RoomPoint,
+    move_x: i32,
+    move_z: i32,
+    ticks: u32,
+) -> Vec<RoomPoint> {
     let mut motor = CharacterMotorState::new(from, Angle::ZERO);
     let input = CharacterMotorInput {
         move_x: Q12::from_raw(move_x),
