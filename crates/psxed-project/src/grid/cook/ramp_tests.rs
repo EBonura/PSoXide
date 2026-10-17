@@ -147,3 +147,34 @@ fn the_walkability_analysis_and_the_motor_agree_on_a_step() {
         }
     }
 }
+
+#[test]
+fn a_flight_of_stairs_is_climbed_tread_by_tread_by_the_real_motor() {
+    use crate::grid::edit::verbs::stairs::{lay_stairs, RiserOption, StairsParams};
+    let units = super::RuntimeUnits::new(GridScale::DEFAULT).unwrap();
+    // One click risers (20 runtime units) and the tallest the motor steps
+    // up (40): both are climbed to the top.
+    for (riser, rise) in [(RiserOption::Click, 6 * 256), (RiserOption::Max, 6 * 512)] {
+        let mut world = hall(14);
+        let params = StairsParams {
+            riser,
+            width: 3,
+            ..StairsParams::default()
+        };
+        let flight = lay_stairs(&mut world, 0, &[[3, 1], [8, 1]], params, rise).unwrap();
+        assert!(flight.refusal.is_none(), "{flight:?}");
+        // The landing beyond the flight stands at its top.
+        let top = units.rt(flight.total);
+        for x in 9..14 {
+            for z in 0..3 {
+                let s = world.rooms[0].sector_mut(x, z).unwrap();
+                s.floor.as_mut().unwrap().heights = [flight.total; 4];
+                s.ceiling.as_mut().unwrap().heights = [6144 + flight.total; 4];
+            }
+        }
+        let path = walk_path(&native(&world), RoomPoint::new(120, 0, 120), 4096, 0, 600);
+        let end = path.last().unwrap();
+        assert!(end.x > 9 * 80, "past the flight: {end:?} ({flight:?})");
+        assert_eq!(end.y, top, "stands on the landing, {top}: {end:?}");
+    }
+}

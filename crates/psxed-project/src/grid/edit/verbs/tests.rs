@@ -485,3 +485,161 @@ mod ramp {
         assert_eq!(floor(&steep, [1, 3]).tri_a.material, Some(rid(32)));
     }
 }
+
+mod stairs {
+    use super::*;
+    use crate::grid::edit::verbs::stairs::{
+        lay_stairs, max_riser, Refusal, RiserOption, StairsDrag, StairsParams,
+    };
+
+    fn p() -> StairsParams {
+        StairsParams::default()
+    }
+
+    fn straight(n: i32) -> Vec<[i32; 2]> {
+        vec![[1, 2], [n, 2]]
+    }
+
+    #[test]
+    fn a_straight_flight_steps_up_one_riser_a_sector() {
+        let mut world = hall(9, 5);
+        let before = all_faces(&world).len();
+        let flight = lay_stairs(&mut world, 0, &straight(6), p(), 6 * CLICK_UNITS).unwrap();
+        assert_eq!((flight.steps, flight.riser, flight.total), (6, 256, 1536));
+        for (i, x) in (1..=6).enumerate() {
+            assert_eq!(
+                floor(&world, [x, 2]).heights,
+                [256 * (i as i32 + 1); 4],
+                "{x}"
+            );
+        }
+        assert_eq!(
+            floor(&world, [0, 2]).heights,
+            [0; 4],
+            "the bottom step is the floor before it"
+        );
+        assert_eq!(floor(&world, [7, 2]).heights, [0; 4]);
+        // The ceiling followed each tread.
+        assert_eq!(ceiling(&world, [3, 2]).heights, [3072 + 768; 4]);
+        // Derived risers: one between sectors 0|1 ... 5|6, plus the sides of
+        // the tall end against the unraised rows north and south (every
+        // tread has two) and the sector after the top.
+        assert!(all_faces(&world).len() > before + 6);
+    }
+
+    #[test]
+    fn the_max_riser_option_uses_taller_steps_and_a_landing_at_the_top() {
+        let mut world = hall(9, 5);
+        let units = crate::grid::cook::RuntimeUnits::new(world.scale).unwrap();
+        // 40 runtime units: two clicks at the default scale.
+        assert_eq!(max_riser(&units, &psx_engine::WalkLimits::DEFAULT), 512);
+        let mut params = p();
+        params.riser = RiserOption::Max;
+        let flight = lay_stairs(&mut world, 0, &straight(6), params, 1536).unwrap();
+        // 1536 / 512 = 3 steps, then a flat landing.
+        assert_eq!((flight.steps, flight.riser), (3, 512));
+        let tops: Vec<i32> = (1..=6).map(|x| floor(&world, [x, 2]).heights[0]).collect();
+        assert_eq!(tops, vec![512, 1024, 1536, 1536, 1536, 1536]);
+    }
+
+    #[test]
+    fn a_flight_that_would_need_a_riser_over_the_limit_is_refused_and_writes_nothing() {
+        let mut world = hall(9, 5);
+        let original = world.clone();
+        // Three treads, twelve clicks: four clicks a riser, over the two
+        // click limit.
+        let drag = StairsDrag::begin(&world, 0, &[[1, 2], [3, 2]], p()).unwrap();
+        let flight = drag.apply(&mut world, 12 * CLICK_UNITS);
+        assert_eq!(
+            flight.refusal,
+            Some(Refusal::TooSteep {
+                riser: 1024,
+                limit: 512
+            })
+        );
+        assert_eq!(world, original);
+        // The ramp option has no steps to limit.
+        let mut params = p();
+        params.ramp = true;
+        let mut with_ramp = original.clone();
+        let flight = lay_stairs(
+            &mut with_ramp,
+            0,
+            &[[1, 2], [3, 2]],
+            params,
+            12 * CLICK_UNITS,
+        )
+        .unwrap();
+        assert!(flight.refusal.is_none());
+    }
+
+    #[test]
+    fn a_turn_is_a_landing_and_the_flight_goes_on() {
+        let mut world = hall(9, 7);
+        // East along z = 1 then south along x = 5: the corner (5, 1) is a landing.
+        let path = [[1, 1], [5, 1], [5, 4]];
+        let flight = lay_stairs(&mut world, 0, &path, p(), 6 * CLICK_UNITS).unwrap();
+        // Seven path cells, one a landing: six treads.
+        assert_eq!(flight.steps, 6);
+        assert_eq!(floor(&world, [4, 1]).heights[0], 4 * 256);
+        assert_eq!(
+            floor(&world, [5, 1]).heights[0],
+            4 * 256,
+            "the landing repeats"
+        );
+        assert_eq!(floor(&world, [5, 2]).heights[0], 5 * 256);
+        assert_eq!(floor(&world, [5, 4]).heights[0], 6 * 256);
+    }
+
+    #[test]
+    fn a_wide_flight_steps_across_its_width_and_going_down_works() {
+        let mut world = hall(9, 7);
+        let mut params = p();
+        params.width = 3;
+        lay_stairs(&mut world, 0, &straight(4), params, -3 * CLICK_UNITS).unwrap();
+        for z in 1..=3 {
+            assert_eq!(floor(&world, [2, z]).heights[0], -512, "row {z}");
+        }
+        assert_eq!(floor(&world, [2, 0]).heights[0], 0);
+        assert_eq!(floor(&world, [4, 2]).heights[0], -768);
+    }
+
+    #[test]
+    fn floors_are_made_where_the_path_crosses_holes_and_the_room_never_grows() {
+        let mut world = hall(9, 5);
+        world.rooms[0].sector_mut(3, 2).unwrap().floor = None;
+        let flight = lay_stairs(&mut world, 0, &[[1, 2], [12, 2]], p(), 4 * CLICK_UNITS).unwrap();
+        assert_eq!(flight.applied.created, 1);
+        assert_eq!(
+            floor(&world, [3, 2]).heights[0],
+            3 * 256 + 256 * (flight.steps as i32 - 4).max(0)
+        );
+        assert!(
+            flight.applied.skipped > 0,
+            "sectors past the room are skipped"
+        );
+        assert_eq!(world.rooms[0].width, 9);
+    }
+
+    #[test]
+    fn the_ramp_option_slopes_each_tread_from_its_entry_to_its_exit() {
+        let mut world = hall(9, 5);
+        let mut params = p();
+        params.ramp = true;
+        lay_stairs(&mut world, 0, &straight(4), params, 4 * CLICK_UNITS).unwrap();
+        // Eastbound: west edge is the entry.
+        assert_eq!(floor(&world, [1, 2]).heights, [0, 256, 256, 0]);
+        assert_eq!(floor(&world, [3, 2]).heights, [512, 768, 768, 512]);
+    }
+
+    #[test]
+    fn a_drag_is_absolute_and_restores_exactly() {
+        let mut world = hall(9, 5);
+        let original = world.clone();
+        let drag = StairsDrag::begin(&world, 0, &straight(6), p()).unwrap();
+        drag.apply(&mut world, 1536);
+        drag.apply(&mut world, 512);
+        drag.apply(&mut world, 0);
+        assert_eq!(world, original);
+    }
+}

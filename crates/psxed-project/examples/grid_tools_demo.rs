@@ -19,6 +19,9 @@
 //! * `ramp`: a long room with a ramp at the steepest slope the character walks,
 //!   made with the Ramp verb, and a plateau at its top; the player stands at
 //!   its foot facing it (T6).
+//! * `stairs`: a long room with a flight of one click steps, three sectors
+//!   wide, made with the Stairs verb, and a landing at the top; the player
+//!   stands at its foot facing it (T7).
 //! * `walk`: a room that shows every walkability class: a steep floor, a low
 //!   ceiling, a tall step, a drop and an island (T6).
 //!
@@ -30,6 +33,7 @@ use std::path::PathBuf;
 use psxed_project::face_uv::{FaceUv, UvMode};
 use psxed_project::grid::derive::edge_key;
 use psxed_project::grid::edit::verbs::ramp::{RampDir, RampDrag, RampParams};
+use psxed_project::grid::edit::verbs::stairs::{StairsDrag, StairsParams};
 use psxed_project::grid::edit::{CellRect, Region};
 use psxed_project::grid::starter::{create_project, STARTER_BASE, STARTER_SCALE};
 use psxed_project::grid::{
@@ -225,6 +229,27 @@ fn ramp(m: &Materials) -> GridRoom {
     room
 }
 
+/// A room with a flight of one click steps over sectors 4 to 9, three wide,
+/// and a landing beyond.
+fn stairs(m: &Materials) -> GridRoom {
+    let mut world = GridWorld {
+        scale: STARTER_SCALE,
+        rooms: vec![room(m, 15, 5, 4 * SECTOR_UNITS)],
+        shading: FacingShade::SUBTLE,
+    };
+    let params = StairsParams {
+        width: 3,
+        wall_material: m.cliff,
+        ..StairsParams::default()
+    };
+    let drag = StairsDrag::begin(&world, 0, &[[4, 2], [9, 2]], params).expect("a path");
+    let flight = drag.apply(&mut world, 6 * 256);
+    assert!(flight.refusal.is_none());
+    let mut room = world.rooms.remove(0);
+    plateau(&mut room, 10, 15, flight.total);
+    room
+}
+
 /// Every class the walkability overlay tells apart.
 fn walk(m: &Materials) -> GridRoom {
     let mut room = room(m, 11, 7, 3 * SECTOR_UNITS);
@@ -310,6 +335,7 @@ fn main() {
         "bands" => bands(&m),
         "hall" => room(&m, 9, 8, 3 * SECTOR_UNITS),
         "ramp" => ramp(&m),
+        "stairs" => stairs(&m),
         "walk" => walk(&m),
         "bench-plain" => bench(&m, false),
         "bench-repeat" => bench(&m, true),
@@ -327,7 +353,7 @@ fn main() {
     };
     // Where the player starts, by scenario: facing east along the ramp.
     let start = match scenario.as_str() {
-        "ramp" => Some(([1, 2], 90.0)),
+        "ramp" | "stairs" => Some(([1, 2], 90.0)),
         "walk" => Some(([0, 0], 90.0)),
         _ => None,
     };

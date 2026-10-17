@@ -16,7 +16,7 @@
 
 use std::collections::VecDeque;
 
-use psx_engine::WalkLimits;
+pub use psx_engine::WalkLimits;
 
 use super::cook::RuntimeUnits;
 use super::derive::{physical_edge_walls, CARDINAL};
@@ -406,6 +406,29 @@ fn reach(
             }
         }
     }
+}
+
+/// The player spawns of the active scene as the sectors they stand over: a
+/// spawn point marked as the player's, or an entity with a player character
+/// controller.
+pub fn player_spawns(project: &crate::ProjectDocument, world: &GridWorld) -> Vec<Spawn> {
+    use crate::NodeKind;
+    let scene = project.active_scene();
+    let mut out = Vec::new();
+    for node in scene.nodes() {
+        let is_spawn = matches!(node.kind, NodeKind::SpawnPoint { player: true, .. })
+            || node.children.iter().any(|c| {
+                scene.node(*c).is_some_and(|k| {
+                    matches!(k.kind, NodeKind::CharacterController { player: true, .. })
+                })
+            });
+        if is_spawn {
+            if let Some(spawn) = locate_spawn(world, node.transform.translation) {
+                out.push(spawn);
+            }
+        }
+    }
+    out
 }
 
 /// The world sector under an editor-space point, as `(room, sector)`: the

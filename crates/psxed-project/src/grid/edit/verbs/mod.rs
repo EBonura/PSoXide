@@ -1,4 +1,4 @@
-//! The level verbs: Raise/Lower now, Ramp and Stairs as they land.
+//! The level verbs: Raise/Lower, Ramp and Stairs.
 //!
 //! Every verb is a pure function pair over a [`GridWorld`](super::super::GridWorld)
 //! with the contract `HeightDrag` already keeps: `begin` captures what the
@@ -11,11 +11,13 @@
 //!
 //! * [`raise`]: Raise and Lower, in Offset and Level modes.
 //! * [`ramp`]: a slope from one side of the region to the opposite side.
+//! * [`stairs`]: a flight of whole-sector treads along a path.
 //! * [`rules`]: the smart paint rules and the shared writing helpers.
 
 pub mod raise;
 pub mod ramp;
 pub mod rules;
+pub mod stairs;
 
 use super::super::sector::GridSector;
 use super::super::world::GridWorld;
