@@ -16,13 +16,25 @@ const BISECT: u32 = 12;
 pub(crate) struct Query {
     pub a: [i32; 3],
     pub d: [i32; 3],
-    pub r: i32,
-    pub h: i32,
+    pub r: i16,
+    pub h: i16,
     /// A `Shape::Body` request: non-resident rooms are solid.
     pub body: bool,
 }
 
 impl Query {
+    /// Radius, runtime units.
+    #[inline(always)]
+    pub fn r(&self) -> i32 {
+        i32::from(self.r)
+    }
+
+    /// Height, runtime units.
+    #[inline(always)]
+    pub fn h(&self) -> i32 {
+        i32::from(self.h)
+    }
+
     #[inline(always)]
     pub fn at(&self, q: i32) -> [i32; 3] {
         lerp(self.a, self.d, q)
@@ -49,7 +61,7 @@ pub(crate) const NO_Y: i32 = i32::MIN;
 pub(crate) struct Raw {
     pub fraction: i32,
     pub end_y: i32,
-    pub contact_hi: i32,
+    pub contact_hi: i16,
     pub start_solid: bool,
     pub all_solid: bool,
     pub normal: u8,
@@ -105,12 +117,12 @@ pub(crate) fn back_code(d: &[i32; 3]) -> u8 {
 }
 
 impl<'a> GridCollision<'a> {
-    /// Dispatch a trace. `q.r` must already be clamped to `0..=S`.
+    /// Dispatch a trace. `q.r()` must already be clamped to `0..=S`.
     #[inline(always)]
     pub(crate) fn trace(&self, q: &Query, raw: &mut Raw) {
         if q.d[0] == 0 && q.d[2] == 0 {
             self.vertical_trace(q, raw);
-        } else if q.r == 0 && q.h == 0 {
+        } else if q.r() == 0 && q.h() == 0 {
             self.point_trace(q, raw);
         } else {
             self.march_trace(q, raw);
@@ -120,10 +132,10 @@ impl<'a> GridCollision<'a> {
     /// Is the cylinder at `q.at(t)` inside solid?
     #[inline(never)]
     pub(crate) fn blocked_t(&self, q: &Query, t: i32) -> bool {
-        if q.r == 0 {
-            return self.point_blocked(&q.at(t), q.h, q.body);
+        if q.r() == 0 {
+            return self.point_blocked(&q.at(t), q.h(), q.body);
         }
-        let mut scan = Scan::any(q.at(t), q.r, q.h, q.body);
+        let mut scan = Scan::any(q.at(t), q.r(), q.h(), q.body);
         self.scan_column(&mut scan);
         scan.found
     }
@@ -134,7 +146,7 @@ impl<'a> GridCollision<'a> {
     pub(crate) fn vertical_trace(&self, q: &Query, raw: &mut Raw) {
         let a = q.a;
         let y1 = a[1] + q.d[1];
-        let mut scan = Scan::sweep(a, y1, q.r, q.h, q.body);
+        let mut scan = Scan::sweep(a, y1, q.r(), q.h(), q.body);
         self.scan_column(&mut scan);
         if scan.start_in {
             solid_start(raw, scan.end_in);
@@ -169,10 +181,11 @@ impl<'a> GridCollision<'a> {
             return;
         }
         let len = q.d[0].abs().max(q.d[1].abs()).max(q.d[2].abs());
-        let step =
-            q.r.max(2)
-                .min((self.s / 4).max(2).min(SLAB_THICKNESS))
-                .max(1);
+        let step = q
+            .r()
+            .max(2)
+            .min((self.s / 4).max(2).min(SLAB_THICKNESS))
+            .max(1);
         let n = ((len + step - 1) / step).max(1).min(MAX_STEPS);
         let mut lo = 0;
         let mut hi = 0;
@@ -201,13 +214,13 @@ impl<'a> GridCollision<'a> {
             }
         }
         raw.fraction = lo;
-        raw.contact_hi = hi;
+        raw.contact_hi = hi as i16;
     }
 
     /// Normal of the surface that blocked a cylinder moving `lo -> hi`.
     #[inline(never)]
     pub(crate) fn contact(&self, q: &Query, lo: i32, hi: i32, raw: &mut Raw) {
-        let mut scan = Scan::any(q.at(hi), q.r, q.h, q.body);
+        let mut scan = Scan::any(q.at(hi), q.r(), q.h(), q.body);
         self.scan_column(&mut scan);
         self.classify(q, lo, hi, &scan, raw);
     }
@@ -233,7 +246,7 @@ impl<'a> GridCollision<'a> {
                 if from[1] >= top {
                     raw.normal = nc::FLOOR;
                     raw.src = src;
-                } else if from[1] + q.h <= top - SLAB_THICKNESS {
+                } else if from[1] + q.h() <= top - SLAB_THICKNESS {
                     raw.normal = nc::DOWN;
                 } else {
                     let at = q.at(hi);

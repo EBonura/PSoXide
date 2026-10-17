@@ -236,6 +236,27 @@ pub const SECTOR_LIQUID: u16 = 1 << 8;
 /// Sector flag: the second triangle has its own heights ([`SplitB`]).
 pub const SECTOR_SPLIT_LEVEL: u16 = 1 << 9;
 
+// Summary bits (10 to 12) are derived by the writer
+// (`collision::summarize_sectors`) so the hot collision paths can skip work.
+// They were reserved before, readers that ignore them stay correct, and a
+// file without them is still correct, only slower.
+
+/// Summary flag: has a floor, its four corners are equal and the sector is
+/// not split level, so the floor height is `floor[0]` everywhere.
+pub const SECTOR_FLAT_FLOOR: u16 = 1 << 10;
+/// Summary flag: has a ceiling, its four corners are equal and the sector is
+/// not split level, so the ceiling height is `ceil[0]` everywhere.
+pub const SECTOR_FLAT_CEIL: u16 = 1 << 11;
+/// Summary flag: this sector and its eight plan neighbours (all inside the
+/// room) have no wall pieces, planes or split level, one shared flat floor
+/// height, and either no solid ceiling at all or one shared flat solid
+/// ceiling at least `CLEAR_HEADROOM` units above the floor. A body no wider
+/// than a sector centred here sees exactly one floor slab and at most one
+/// ceiling slab, and no walls.
+pub const SECTOR_CLEAR: u16 = 1 << 12;
+/// Headroom, runtime units, a shared solid ceiling needs for [`SECTOR_CLEAR`].
+pub const CLEAR_HEADROOM: i32 = 160;
+
 /// Marker for "no extension".
 pub const NO_EXT: u16 = 0xFFFF;
 

@@ -53,6 +53,11 @@ pub struct GridCollision<'a> {
     pub(crate) s: i32,
     pub(crate) recip: Recip,
     pub(crate) inv24: u32,
+    /// Some room's collision block is not resident.
+    pub(crate) foreign: bool,
+    /// Validate analytic point-trace results against the discrete slab
+    /// predicate even when every room is resident (tests compare both).
+    pub(crate) validate: bool,
 }
 
 impl<'a> GridCollision<'a> {
@@ -67,6 +72,8 @@ impl<'a> GridCollision<'a> {
             s: s as i32,
             recip,
             inv24: weight_recip(s),
+            foreign: rooms.iter().any(Option::is_none) || rooms.len() < level.rooms.len(),
+            validate: false,
         })
     }
 
@@ -110,9 +117,9 @@ impl<'a> GridCollision<'a> {
     }
 
     #[inline]
-    fn floor_corners(view: &CollisionView<'a>, sector: &Sector, second: bool) -> [i16; 4] {
+    fn floor_corners(view: Option<&CollisionView<'a>>, sector: &Sector, second: bool) -> [i16; 4] {
         if second && sector.flags & SECTOR_SPLIT_LEVEL != 0 {
-            if let Some(b) = view.ext(sector).and_then(|e| view.split_b(e)) {
+            if let Some(b) = view.and_then(|v| v.ext(sector).and_then(|e| v.split_b(e))) {
                 return b.floor_b;
             }
         }
@@ -120,9 +127,9 @@ impl<'a> GridCollision<'a> {
     }
 
     #[inline]
-    fn ceil_corners(view: &CollisionView<'a>, sector: &Sector, second: bool) -> [i16; 4] {
+    fn ceil_corners(view: Option<&CollisionView<'a>>, sector: &Sector, second: bool) -> [i16; 4] {
         if second && sector.flags & SECTOR_SPLIT_LEVEL != 0 {
-            if let Some(b) = view.ext(sector).and_then(|e| view.split_b(e)) {
+            if let Some(b) = view.and_then(|v| v.ext(sector).and_then(|e| v.split_b(e))) {
                 return b.ceil_b;
             }
         }
@@ -134,7 +141,7 @@ impl<'a> GridCollision<'a> {
     #[inline]
     pub(crate) fn sector_floor(
         &self,
-        view: &CollisionView<'a>,
+        view: Option<&CollisionView<'a>>,
         sector: &Sector,
         lx: u32,
         lz: u32,
@@ -142,7 +149,7 @@ impl<'a> GridCollision<'a> {
         if sector.flags & SECTOR_HAS_FLOOR == 0 {
             return None;
         }
-        if sector.flags & SECTOR_SPLIT_LEVEL == 0 && is_flat(sector.floor) {
+        if sector.flags & SECTOR_FLAT_FLOOR != 0 {
             // Both triangles share the plane; the triangle flag is moot.
             return Some((i32::from(sector.floor[0]), false));
         }
@@ -160,7 +167,7 @@ impl<'a> GridCollision<'a> {
     #[inline]
     pub(crate) fn sector_ceil(
         &self,
-        view: &CollisionView<'a>,
+        view: Option<&CollisionView<'a>>,
         sector: &Sector,
         lx: u32,
         lz: u32,
@@ -168,7 +175,7 @@ impl<'a> GridCollision<'a> {
         if sector.flags & SECTOR_HAS_CEIL == 0 {
             return None;
         }
-        if sector.flags & SECTOR_SPLIT_LEVEL == 0 && is_flat(sector.ceil) {
+        if sector.flags & SECTOR_FLAT_CEIL != 0 {
             return Some(i32::from(sector.ceil[0]));
         }
         let nesw = sector.flags & SECTOR_CEIL_NESW != 0;
@@ -180,7 +187,14 @@ impl<'a> GridCollision<'a> {
     /// Lowest and highest room-local floor corner of a sector (both triangles
     /// of a split-level sector). Every interpolated height lies between them.
     #[inline]
-    pub(crate) fn floor_range(&self, view: &CollisionView<'a>, sector: &Sector) -> (i32, i32) {
+    pub(crate) fn floor_range(
+        &self,
+        view: Option<&CollisionView<'a>>,
+        sector: &Sector,
+    ) -> (i32, i32) {
+        if sector.flags & SECTOR_FLAT_FLOOR != 0 {
+            return (i32::from(sector.floor[0]), i32::from(sector.floor[0]));
+        }
         let (mut lo, mut hi) = corner_range(sector.floor);
         if sector.flags & SECTOR_SPLIT_LEVEL != 0 {
             let (l, h) = corner_range(Self::floor_corners(view, sector, true));
@@ -192,7 +206,14 @@ impl<'a> GridCollision<'a> {
 
     /// Lowest and highest room-local ceiling corner of a sector.
     #[inline]
-    pub(crate) fn ceil_range(&self, view: &CollisionView<'a>, sector: &Sector) -> (i32, i32) {
+    pub(crate) fn ceil_range(
+        &self,
+        view: Option<&CollisionView<'a>>,
+        sector: &Sector,
+    ) -> (i32, i32) {
+        if sector.flags & SECTOR_FLAT_CEIL != 0 {
+            return (i32::from(sector.ceil[0]), i32::from(sector.ceil[0]));
+        }
         let (mut lo, mut hi) = corner_range(sector.ceil);
         if sector.flags & SECTOR_SPLIT_LEVEL != 0 {
             let (l, h) = corner_range(Self::ceil_corners(view, sector, true));
@@ -206,16 +227,24 @@ impl<'a> GridCollision<'a> {
     pub fn floor_at(&self, room: usize, cx: usize, cz: usize, lx: u32, lz: u32) -> Option<i32> {
         let view = self.view(room)?;
         let sector = view.sectors.get(cz * view.width() + cx)?;
-        let (h, _) = self.sector_floor(view, sector, lx, lz)?;
-        Some(h + self.level.rooms.get(room)?.origin[1])
+        let h = if sector.flags & SECTOR_FLAT_FLOOR != 0 {
+            i32::from(sector.floor[0])
+        } else {
+            self.sector_floor(Some(view), sector, lx, lz)?.0
+        };
+        Some(h + self.rec(room).origin[1])
     }
 
     /// World ceiling height at `(lx, lz)` inside a sector of a room.
     pub fn ceil_at(&self, room: usize, cx: usize, cz: usize, lx: u32, lz: u32) -> Option<i32> {
         let view = self.view(room)?;
         let sector = view.sectors.get(cz * view.width() + cx)?;
-        let h = self.sector_ceil(view, sector, lx, lz)?;
-        Some(h + self.level.rooms.get(room)?.origin[1])
+        let h = if sector.flags & SECTOR_FLAT_CEIL != 0 {
+            i32::from(sector.ceil[0])
+        } else {
+            self.sector_ceil(Some(view), sector, lx, lz)?
+        };
+        Some(h + self.rec(room).origin[1])
     }
 
     /// World floor height at the sector centre of a column, `None` for a pit.
@@ -234,7 +263,7 @@ impl<'a> GridCollision<'a> {
             return up;
         };
         let nesw = sector.flags & SECTOR_FLOOR_NESW != 0;
-        let corners = Self::floor_corners(view, sector, second);
+        let corners = Self::floor_corners(Some(view), sector, second);
         triangle_normal_q12(corners, nesw, second, self.s as u32)
     }
 
@@ -248,12 +277,23 @@ impl<'a> GridCollision<'a> {
         lz: u32,
         y: i32,
     ) -> i32 {
+        let flags = sector.flags;
         let mut gap = 0;
-        if let Some((f, _)) = self.sector_floor(view, sector, lx, lz) {
-            gap = gap.max(oy + f - y);
+        // Flat slabs (the common case) need no interpolation, and a missing
+        // slab needs no call at all.
+        if flags & SECTOR_HAS_FLOOR != 0 {
+            if flags & SECTOR_FLAT_FLOOR != 0 {
+                gap = gap.max(oy + i32::from(sector.floor[0]) - y);
+            } else if let Some((f, _)) = self.sector_floor(Some(view), sector, lx, lz) {
+                gap = gap.max(oy + f - y);
+            }
         }
-        if let Some(c) = self.sector_ceil(view, sector, lx, lz) {
-            gap = gap.max(y - (oy + c));
+        if flags & SECTOR_HAS_CEIL != 0 {
+            if flags & SECTOR_FLAT_CEIL != 0 {
+                gap = gap.max(y - (oy + i32::from(sector.ceil[0])));
+            } else if let Some(c) = self.sector_ceil(Some(view), sector, lx, lz) {
+                gap = gap.max(y - (oy + c));
+            }
         }
         gap
     }
@@ -280,19 +320,21 @@ impl<'a> GridCollision<'a> {
             if room >= count {
                 continue;
             }
-            let Some(view) = self.view(room) else {
-                continue;
-            };
-            let rec = &self.level.rooms[room];
+            let rec = self.rec(room);
+            let (w, d) = (usize::from(rec.width), usize::from(rec.depth));
+            // Footprint first: it needs only the room record.
             let Some((cx, cz, lx, lz)) = self.cell_of(
                 p[0].wrapping_sub(rec.origin[0]),
                 p[2].wrapping_sub(rec.origin[2]),
-                view.width(),
-                view.depth(),
+                w,
+                d,
             ) else {
                 continue;
             };
-            let Some(sector) = view.sectors.get(cz * view.width() + cx) else {
+            let Some(view) = self.view(room) else {
+                continue;
+            };
+            let Some(sector) = view.sectors.get(cz * w + cx) else {
                 continue;
             };
             let gap = self.column_gap(view, sector, rec.origin[1], lx, lz, p[1]);
@@ -343,12 +385,6 @@ impl<'a> GridCollision<'a> {
         }
         0
     }
-}
-
-/// Four equal corner heights.
-#[inline(always)]
-fn is_flat(h: [i16; 4]) -> bool {
-    h[0] == h[1] && h[1] == h[2] && h[2] == h[3]
 }
 
 /// Lowest and highest of four corner heights.
@@ -451,4 +487,26 @@ pub(crate) fn wall_code(edge: u8, s: i32, px: i32, pz: i32) -> u8 {
             }
         }
     }
+}
+
+/// [`GridCollision::cell_of`] over already-loaded constants (the reciprocal,
+/// `s`, and the room extent `ext_x`, `ext_z` in units), for loops that would
+/// otherwise reload them from RAM at every sample.
+#[inline(always)]
+pub(crate) fn cell_in(
+    recip: &Recip,
+    s: u32,
+    (x, z): (i32, i32),
+    (ext_x, ext_z): (u32, u32),
+) -> Option<(usize, usize, u32, u32)> {
+    if x < 0 || z < 0 {
+        return None;
+    }
+    let (ux, uz) = (x as u32, z as u32);
+    if ux >= ext_x || uz >= ext_z {
+        return None;
+    }
+    let cx = recip.cell(ux);
+    let cz = recip.cell(uz);
+    Some((cx as usize, cz as usize, ux - cx * s, uz - cz * s))
 }

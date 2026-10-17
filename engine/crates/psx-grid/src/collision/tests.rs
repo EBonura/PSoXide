@@ -77,7 +77,7 @@ impl Room {
         ));
     }
 
-    fn chunk(&self) -> RoomChunk {
+    fn chunk(&self, summary: bool) -> RoomChunk {
         let mut sectors = self.sectors.clone();
         let mut exts: Vec<SectorExt> = Vec::new();
         let mut walls = Vec::new();
@@ -108,6 +108,9 @@ impl Room {
             sector.ext = exts.len() as u16;
             exts.push(ext);
         }
+        if summary {
+            summarize_sectors(&mut sectors, usize::from(self.w), usize::from(self.d));
+        }
         RoomChunk {
             width: self.w,
             depth: self.d,
@@ -128,6 +131,12 @@ struct Built {
 }
 
 fn build(rooms: &[Room]) -> Built {
+    build_with(rooms, true)
+}
+
+/// Build with or without the derived sector summary bits: the two must trace
+/// identically.
+fn build_with(rooms: &[Room], summary: bool) -> Built {
     let core = LevelCore {
         sector_units: S as u16,
         rooms: rooms
@@ -147,7 +156,7 @@ fn build(rooms: &[Room]) -> Built {
     let chunks = rooms
         .iter()
         .map(|r| {
-            let b = r.chunk().to_bytes();
+            let b = r.chunk(summary).to_bytes();
             (aligned_copy(&b), b.len())
         })
         .collect();
@@ -643,4 +652,150 @@ fn motor_slides_along_walls_and_falls_off_ledges() {
             "must fall off the ledge onto the lower floor: {end:?}"
         );
     });
+}
+
+fn summary_world(summary: bool) -> Built {
+    let mut a = Room::flat([0, 0, 0], 8, 8, 0);
+    a.set_floor(1, 6, 25);
+    a.pit(6, 1);
+    a.wall(5, 5, edge::EAST, 0, 120);
+    a.wall(2, 2, edge::NWSE, 0, 120);
+    a.cell(3, 6).floor = [0, 10, 0, 10];
+    // A solid ceiling over a block of cells, high enough to keep sectors
+    // clear, plus a low one that spoils its neighbourhood.
+    for cz in 4..8 {
+        for cx in 0..3 {
+            a.ceiling(cx, cz, 220, true);
+        }
+    }
+    a.ceiling(6, 6, 90, true);
+    a.ceiling(7, 3, 300, false);
+    let mut b = Room::flat([0, 260, 0], 4, 4, 0);
+    b.pit(2, 2);
+    build_with(&[a, b], summary)
+}
+
+#[test]
+fn sector_summary_bits_do_not_change_any_trace() {
+    let with = summary_world(true);
+    let without = summary_world(false);
+    // The summary must actually mark clear sectors, or this proves nothing.
+    with.run(|w| {
+        let clear = w.rooms[0]
+            .as_ref()
+            .unwrap()
+            .sectors
+            .iter()
+            .filter(|s| s.flags & SECTOR_CLEAR != 0)
+            .count();
+        assert!(clear >= 3, "clear sectors: {clear}");
+        let flat = w.rooms[0]
+            .as_ref()
+            .unwrap()
+            .sectors
+            .iter()
+            .filter(|s| s.flags & SECTOR_FLAT_FLOOR != 0)
+            .count();
+        assert!(flat > 50);
+    });
+    without.run(|w| {
+        assert!(w.rooms[0]
+            .as_ref()
+            .unwrap()
+            .sectors
+            .iter()
+            .all(|s| s.flags & (SECTOR_CLEAR | SECTOR_FLAT_FLOOR | SECTOR_FLAT_CEIL) == 0));
+    });
+    let mut rng = Lcg(777);
+    let mut queries = Vec::new();
+    for i in 0..3000 {
+        let a = [
+            rng.range(-40, 680),
+            rng.range(-60, 360),
+            rng.range(-40, 680),
+        ];
+        let b = match i % 4 {
+            0 => [
+                rng.range(-40, 680),
+                rng.range(-60, 360),
+                rng.range(-40, 680),
+            ],
+            1 => [a[0], rng.range(-3000, 3000), a[2]],
+            2 => [rng.range(-40, 680), a[1], rng.range(-40, 680)],
+            _ => [
+                a[0] + rng.range(-30, 30),
+                a[1] + rng.range(-30, 30),
+                a[2] + rng.range(-30, 30),
+            ],
+        };
+        let q = match (i / 4) % 4 {
+            0 => point(a, b),
+            1 => CollisionTraceQuery::body(
+                RoomPoint::from_array(a),
+                RoomPoint::from_array(b),
+                12,
+                48,
+            ),
+            2 => CollisionTraceQuery::body(
+                RoomPoint::from_array(a),
+                RoomPoint::from_array(b),
+                40,
+                64,
+            ),
+            _ => {
+                CollisionTraceQuery::body(RoomPoint::from_array(a), RoomPoint::from_array(b), 0, 30)
+            }
+        };
+        queries.push(q);
+    }
+    let run = |built: &Built| -> Vec<CollisionTrace> {
+        built.run(|w| queries.iter().map(|q| trace(w, *q)).collect())
+    };
+    let (x, y) = (run(&with), run(&without));
+    for (i, (p, q)) in x.iter().zip(&y).enumerate() {
+        assert_eq!(p, q, "query {i}: {:?}", queries[i]);
+    }
+    assert!(x.iter().filter(|t| t.fraction_q12 < 4096).count() > 300);
+}
+
+#[test]
+fn point_traces_need_no_discrete_validation() {
+    // The walk alone must agree with the walk plus the validation pass.
+    for built in [property_world(), summary_world(true)] {
+        built.run(|w| {
+            let mut checked = *w;
+            checked.validate = true;
+            let mut rng = Lcg(4242);
+            let mut hits = 0;
+            for i in 0..40_000 {
+                let a = [
+                    rng.range(-40, 680),
+                    rng.range(-80, 420),
+                    rng.range(-40, 680),
+                ];
+                let b = match i % 3 {
+                    0 => [
+                        rng.range(-40, 680),
+                        rng.range(-80, 420),
+                        rng.range(-40, 680),
+                    ],
+                    1 => [
+                        a[0] + rng.range(-120, 120),
+                        a[1] + rng.range(-60, 60),
+                        a[2] + rng.range(-120, 120),
+                    ],
+                    _ => [
+                        a[0] + rng.range(-8, 8),
+                        a[1] + rng.range(-8, 8),
+                        a[2] + rng.range(-8, 8),
+                    ],
+                };
+                let q = point(a, b);
+                let (x, y) = (trace(w, q), trace(&checked, q));
+                assert_eq!(x, y, "query {i}: {q:?}");
+                hits += usize::from(x.fraction_q12 < 4096);
+            }
+            assert!(hits > 1000, "{hits}");
+        });
+    }
 }

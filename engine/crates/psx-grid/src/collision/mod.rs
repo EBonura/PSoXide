@@ -24,10 +24,12 @@ mod body;
 mod provider;
 mod ray;
 mod scan;
+mod summary;
 mod world;
 
 #[cfg(test)]
 mod tests;
 
 pub use provider::GridTraceProvider;
+pub use summary::summarize_sectors;
 pub use world::{GridCollision, Located, COORD_LIMIT, SLAB_THICKNESS};

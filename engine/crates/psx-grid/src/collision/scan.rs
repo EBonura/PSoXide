@@ -5,9 +5,8 @@
 //! accumulator owned by the caller, so each function in the chain keeps a
 //! frame of a few dozen bytes (the motor runs the provider on a 1 KiB stack).
 
-use super::world::{wall_span, GridCollision, SLAB_THICKNESS};
+use super::world::{cell_in, circle_hits_wall, wall_span, GridCollision, SLAB_THICKNESS};
 use crate::format::*;
-use crate::view::CollisionView;
 
 /// Normal codes. Expanded to Q12 vectors only at the provider boundary.
 pub(crate) mod nc {
@@ -71,14 +70,9 @@ pub(crate) struct Scan {
     pub start_in: bool,
     pub end_in: bool,
     pub found: bool,
-    /// Wall scan: the cell being tested and the circle centre relative to it.
-    pub wcx: u8,
-    pub wcz: u8,
-    pub wx0: u8,
-    pub wx1: u8,
-    pub wz1: u8,
-    pub px: i32,
-    pub pz: i32,
+    /// Origin height and index of the room being scanned.
+    pub oy: i32,
+    pub room: u16,
 }
 
 impl Scan {
@@ -98,13 +92,8 @@ impl Scan {
             start_in: false,
             end_in: false,
             found: false,
-            wcx: 0,
-            wcz: 0,
-            wx0: 0,
-            wx1: 0,
-            wz1: 0,
-            px: 0,
-            pz: 0,
+            oy: 0,
+            room: 0,
         }
     }
 
@@ -150,24 +139,27 @@ impl Scan {
         }
     }
 
-    /// Is the wall on `edge` of the current cell closer than `r` to the
-    /// circle centre (strictly; touching is clear)?
-    #[inline(never)]
-    pub fn hits_wall(&self, edge: u8, s: i32) -> bool {
-        super::world::circle_hits_wall(edge, s, self.px, self.pz, self.r)
-    }
-
-    /// Compass sample `i` of the cylinder footprint.
+    /// Compass sample `i` of the cylinder footprint: the centre, then
+    /// `+x`, `-x`, `+z`, `-z` at radius `r`. Arithmetic rather than a `match`
+    /// so no jump table has to be read from RAM.
     #[inline(always)]
     fn sample(&self, i: i32) -> (i32, i32) {
-        let (x, z, r) = (self.x, self.z, self.r);
-        match i {
-            0 => (x, z),
-            1 => (x + r, z),
-            2 => (x - r, z),
-            3 => (x, z + r),
-            _ => (x, z - r),
-        }
+        let r = self.r;
+        let dx = if i == 1 {
+            r
+        } else if i == 2 {
+            -r
+        } else {
+            0
+        };
+        let dz = if i == 3 {
+            r
+        } else if i == 4 {
+            -r
+        } else {
+            0
+        };
+        (self.x + dx, self.z + dz)
     }
 }
 
@@ -176,8 +168,8 @@ impl<'a> GridCollision<'a> {
     #[inline(always)]
     pub(crate) fn scan_column(&self, scan: &mut Scan) {
         for room in 0..self.level.rooms.len() {
-            self.scan_slabs(room, scan);
-            if scan.r > 0 && !scan.done() {
+            let walls = self.scan_slabs(room, scan);
+            if walls && scan.r > 0 && !scan.done() {
                 self.scan_walls(room, scan);
             }
             if scan.done() {
@@ -186,48 +178,105 @@ impl<'a> GridCollision<'a> {
         }
     }
 
-    /// Does the cylinder's bounding box touch the room footprint?
-    #[inline(always)]
-    fn touches(&self, room: usize, scan: &Scan) -> bool {
-        let rec = self.rec(room);
-        let (x, z, r) = (scan.x, scan.z, scan.r);
-        x + r >= rec.origin[0]
-            && z + r >= rec.origin[2]
-            && x - r < rec.origin[0] + i32::from(rec.width) * self.s
-            && z - r < rec.origin[2] + i32::from(rec.depth) * self.s
-    }
-
-    /// Floor and ceiling slabs of one room under the five samples.
+    /// Floor and ceiling slabs of one room under the five samples. False
+    /// when the room cannot contribute walls to this scan.
     ///
-    /// Samples that fall in the same flat cell as an earlier one would offer
-    /// the identical interval again, so they are skipped.
+    /// * A cylinder no wider than a sector centred on a [`SECTOR_CLEAR`]
+    ///   sector sees one floor slab, at most one ceiling slab and no walls.
+    /// * One that stays inside a sector with flat slabs sees only that
+    ///   sector's slabs, and walls only if the sector has any.
+    /// * Otherwise each distinct flat sector under a sample is offered once
+    ///   (the other samples in it would repeat the interval) and a sloped
+    ///   one is evaluated per sample.
     #[inline(never)]
-    fn scan_slabs(&self, room: usize, scan: &mut Scan) {
-        if !self.touches(room, scan) {
-            return;
+    fn scan_slabs(&self, room: usize, scan: &mut Scan) -> bool {
+        let rec = self.rec(room);
+        let (ox, oz) = (rec.origin[0], rec.origin[2]);
+        let (vw, vd) = (usize::from(rec.width), usize::from(rec.depth));
+        let (x, z, r) = (scan.x, scan.z, scan.r);
+        // Constants loaded once: the calls below would force reloads.
+        let (recip, s) = (self.recip, self.s);
+        let ext = (vw as u32 * s as u32, vd as u32 * s as u32);
+        if x + r < ox || z + r < oz || x - r >= ox + ext.0 as i32 || z - r >= oz + ext.1 as i32 {
+            return false;
         }
         let Some(view) = self.view(room) else {
             if scan.foreign {
                 self.scan_foreign(room, scan);
             }
-            return;
+            return false;
         };
-        let rec = self.rec(room);
-        let mut flat = u32::MAX;
+        scan.oy = rec.origin[1];
+        scan.room = room as u16;
+        let sectors = view.sectors;
+        // Sector keys already offered as flat.
+        let mut seen = [u32::MAX; 4];
+        let mut taken = 0;
         for i in 0..if scan.r > 0 { 5 } else { 1 } {
             let (sx, sz) = scan.sample(i);
-            let Some((cx, cz, lx, lz)) = self.cell_of(
-                sx - rec.origin[0],
-                sz - rec.origin[2],
-                view.width(),
-                view.depth(),
-            ) else {
+            let Some((cx, cz, lx, lz)) = cell_in(&recip, s as u32, (sx - ox, sz - oz), ext) else {
                 continue;
             };
             let key = cx as u32 | (cz as u32) << 8;
-            if key != flat && self.scan_sample(room, view, key | lx << 16 | lz << 24, scan) {
-                flat = key;
+            if seen.contains(&key) {
+                continue;
             }
+            let Some(sector) = sectors.get(cz * vw + cx) else {
+                continue;
+            };
+            let flat = Self::slabs_flat(sector);
+            if i == 0 && scan.r <= s {
+                let r = scan.r as u32;
+                let inside = lx >= r && lx + r < s as u32 && lz >= r && lz + r < s as u32;
+                if sector.flags & SECTOR_CLEAR != 0 {
+                    self.offer_flat(room, key, sector, scan);
+                    return false;
+                }
+                if inside && flat {
+                    self.offer_flat(room, key, sector, scan);
+                    return sector.ext != NO_EXT;
+                }
+            }
+            if flat {
+                self.offer_flat(room, key, sector, scan);
+                seen[taken & 3] = key;
+                taken += 1;
+            } else {
+                self.scan_sample(sector, key | lx << 16 | lz << 24, scan);
+            }
+        }
+        true
+    }
+
+    /// Flat floor (or none) and flat solid ceiling (or none): the sector's
+    /// slab intervals are the same everywhere in it.
+    #[inline(always)]
+    fn slabs_flat(sector: &Sector) -> bool {
+        let f = sector.flags;
+        (f & SECTOR_HAS_FLOOR == 0 || f & SECTOR_FLAT_FLOOR != 0)
+            && (f & SECTOR_CEIL_SOLID == 0 || f & SECTOR_HAS_CEIL == 0 || f & SECTOR_FLAT_CEIL != 0)
+    }
+
+    /// Offer the floor and solid-ceiling slabs of a [`Self::slabs_flat`]
+    /// sector (`key = cx | cz << 8`).
+    #[inline(never)]
+    fn offer_flat(&self, room: usize, key: u32, sector: &Sector, scan: &mut Scan) {
+        let (oy, h) = (scan.oy, scan.h);
+        let mut src = Src {
+            kind: kind::FLOOR,
+            aux: 0,
+            cx: (key & 255) as u8,
+            cz: ((key >> 8) & 255) as u8,
+            room: room as u16,
+        };
+        if sector.flags & SECTOR_HAS_FLOOR != 0 {
+            let top = oy + i32::from(sector.floor[0]);
+            scan.offer(top - SLAB_THICKNESS - h, top, src);
+        }
+        if sector.flags & SECTOR_CEIL_SOLID != 0 && sector.flags & SECTOR_HAS_CEIL != 0 {
+            src.kind = kind::CEIL;
+            let bottom = oy + i32::from(sector.ceil[0]);
+            scan.offer(bottom - h, bottom + SLAB_THICKNESS, src);
         }
     }
 
@@ -260,132 +309,87 @@ impl<'a> GridCollision<'a> {
         }
     }
 
-    /// Floor and ceiling slabs of the sector `cell = cx | cz << 8 | lx << 16
-    /// | lz << 24` (sector and in-sector offsets). True when the intervals
-    /// are the same anywhere in the sector (flat floor, flat or no solid
-    /// ceiling).
+    /// Floor and ceiling slabs of a sloped (or split) sector under one
+    /// sample; `cell = cx | cz << 8 | lx << 16 | lz << 24` (sector and
+    /// in-sector offsets).
     #[inline(never)]
-    fn scan_sample(
-        &self,
-        room: usize,
-        view: &CollisionView<'a>,
-        cell: u32,
-        scan: &mut Scan,
-    ) -> bool {
-        let (cx, cz) = (cell & 255, (cell >> 8) & 255);
+    fn scan_sample(&self, sector: &Sector, cell: u32, scan: &mut Scan) {
         let (lx, lz) = ((cell >> 16) & 255, cell >> 24);
-        let Some(sector) = view.sectors.get(cz as usize * view.width() + cx as usize) else {
-            return false;
+        let (oy, h) = (scan.oy, scan.h);
+        let flags = sector.flags;
+        // Only a split-level sector needs the view (its second triangle).
+        let view = if flags & SECTOR_SPLIT_LEVEL != 0 {
+            self.view(usize::from(scan.room))
+        } else {
+            None
         };
-        let (oy, h) = (self.rec(room).origin[1], scan.h);
         let mut src = Src {
             kind: kind::FLOOR,
             aux: 0,
-            cx: cx as u8,
-            cz: cz as u8,
-            room: room as u16,
+            cx: (cell & 255) as u8,
+            cz: ((cell >> 8) & 255) as u8,
+            room: scan.room,
         };
-        let mut flat = true;
         if let Some((f, second)) = self.sector_floor(view, sector, lx, lz) {
             src.aux = u8::from(second);
             let top = oy + f;
             scan.offer(top - SLAB_THICKNESS - h, top, src);
-            flat = sector.flags & SECTOR_SPLIT_LEVEL == 0
-                && sector.floor[0] == sector.floor[1]
-                && sector.floor[1] == sector.floor[2]
-                && sector.floor[2] == sector.floor[3];
         }
-        if sector.flags & SECTOR_CEIL_SOLID != 0 {
+        if flags & SECTOR_CEIL_SOLID != 0 {
             if let Some(c) = self.sector_ceil(view, sector, lx, lz) {
                 src.kind = kind::CEIL;
                 let bottom = oy + c;
                 scan.offer(bottom - h, bottom + SLAB_THICKNESS, src);
-                flat &= sector.flags & SECTOR_SPLIT_LEVEL == 0
-                    && sector.ceil[0] == sector.ceil[1]
-                    && sector.ceil[1] == sector.ceil[2]
-                    && sector.ceil[2] == sector.ceil[3];
             }
         }
-        flat
     }
 
-    /// Set up the cell range the circle overlaps in a resident room. False
-    /// when it misses the room.
-    #[inline(never)]
-    fn wall_begin(&self, room: usize, scan: &mut Scan) -> bool {
-        if !self.touches(room, scan) || self.view(room).is_none() {
-            return false;
-        }
-        let s = self.s;
-        let rec = self.rec(room);
-        let (w, d) = (i32::from(rec.width), i32::from(rec.depth));
-        let (lx, lz, r) = (scan.x - rec.origin[0], scan.z - rec.origin[2], scan.r);
-        let cell = |v: i32, n: i32| self.recip.cell(v.max(0).min(n * s - 1) as u32) as u8;
-        scan.wx0 = cell(lx - r, w);
-        scan.wx1 = cell(lx + r, w);
-        scan.wcx = scan.wx0;
-        scan.wcz = cell(lz - r, d);
-        scan.wz1 = cell(lz + r, d);
-        true
-    }
-
-    /// Walk the cells the circle overlaps.
+    /// Wall pieces closer than `r` to the circle centre, over the cells the
+    /// circle overlaps. Only called after [`Self::scan_slabs`] accepted the
+    /// room (so its footprint is touched and `scan.oy` is set).
     #[inline(never)]
     fn scan_walls(&self, room: usize, scan: &mut Scan) {
-        if !self.wall_begin(room, scan) {
-            return;
-        }
-        loop {
-            self.wall_cell(room, scan);
-            scan.wcx += 1;
-            if scan.wcx > scan.wx1 {
-                scan.wcx = scan.wx0;
-                scan.wcz += 1;
-                if scan.wcz > scan.wz1 {
-                    break;
-                }
-            }
-        }
-    }
-
-    /// Wall pieces of the scan's current cell against the circle.
-    #[inline(never)]
-    fn wall_cell(&self, room: usize, scan: &mut Scan) {
         let Some(view) = self.view(room) else {
             return;
         };
-        let Some(ext) = view
-            .sectors
-            .get(usize::from(scan.wcz) * view.width() + usize::from(scan.wcx))
-            .and_then(|sector| view.ext(sector))
-        else {
-            return;
-        };
         let rec = self.rec(room);
-        scan.px = scan.x - rec.origin[0] - i32::from(scan.wcx) * self.s;
-        scan.pz = scan.z - rec.origin[2] - i32::from(scan.wcz) * self.s;
-        for wall in view.sector_walls(ext) {
-            self.test_wall(wall, room, scan);
-        }
-    }
-
-    /// One wall piece against the circle.
-    #[inline(never)]
-    fn test_wall(&self, wall: &ColWall, room: usize, scan: &mut Scan) {
-        if !scan.hits_wall(wall.edge, self.s) {
-            return;
-        }
-        let (lo, hi) = wall_span(wall);
-        if hi > lo {
-            let src = Src {
-                kind: kind::WALL,
-                aux: wall.edge,
-                cx: scan.wcx,
-                cz: scan.wcz,
-                room: room as u16,
-            };
-            let oy = self.rec(room).origin[1];
-            scan.offer(oy + lo - scan.h, oy + hi, src);
+        let s = self.s;
+        let r = scan.r;
+        let (w, d) = (i32::from(rec.width), i32::from(rec.depth));
+        let (lx, lz) = (scan.x - rec.origin[0], scan.z - rec.origin[2]);
+        let recip = self.recip;
+        let cell = |v: i32, n: i32| recip.cell(v.max(0).min(n * s - 1) as u32) as usize;
+        let (cx0, cx1) = (cell(lx - r, w), cell(lx + r, w));
+        let (cz0, cz1) = (cell(lz - r, d), cell(lz + r, d));
+        for cz in cz0..=cz1 {
+            for cx in cx0..=cx1 {
+                let Some(sector) = view.sectors.get(cz * w as usize + cx) else {
+                    continue;
+                };
+                if sector.ext == NO_EXT {
+                    continue;
+                }
+                let Some(ext) = view.ext(sector) else {
+                    continue;
+                };
+                let (px, pz) = (lx - cx as i32 * s, lz - cz as i32 * s);
+                for wall in view.sector_walls(ext) {
+                    if !circle_hits_wall(wall.edge, s, px, pz, r) {
+                        continue;
+                    }
+                    let (lo, hi) = wall_span(wall);
+                    if hi > lo {
+                        let src = Src {
+                            kind: kind::WALL,
+                            aux: wall.edge,
+                            cx: cx as u8,
+                            cz: cz as u8,
+                            room: room as u16,
+                        };
+                        scan.offer(scan.oy + lo - scan.h, scan.oy + hi, src);
+                    }
+                }
+            }
         }
     }
 
@@ -418,13 +422,13 @@ impl<'a> GridCollision<'a> {
             let Some(sector) = view.sectors.get(cz * view.width() + cx) else {
                 continue;
             };
-            if let Some((f, _)) = self.sector_floor(view, sector, ox, oz) {
+            if let Some((f, _)) = self.sector_floor(Some(view), sector, ox, oz) {
                 if y > oy + f - t - h && y < oy + f {
                     return true;
                 }
             }
             if sector.flags & SECTOR_CEIL_SOLID != 0 {
-                if let Some(c) = self.sector_ceil(view, sector, ox, oz) {
+                if let Some(c) = self.sector_ceil(Some(view), sector, ox, oz) {
                     if y > oy + c - h && y < oy + c + t {
                         return true;
                     }

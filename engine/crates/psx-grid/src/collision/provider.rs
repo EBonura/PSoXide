@@ -1,7 +1,7 @@
 //! `psx_engine::CollisionTraceProvider` over the grid world.
 
 use super::body::{Query, Raw, NO_Y};
-use super::scan::{nc, Src};
+use super::scan::nc;
 use super::world::{GridCollision, COORD_LIMIT};
 use psx_engine::{
     CollisionTrace, CollisionTraceProvider, CollisionTraceQuery, CollisionTraceShape, RoomPoint,
@@ -26,42 +26,47 @@ impl<'a> GridCollision<'a> {
     /// Expand a raw result into the engine's trace.
     #[inline(never)]
     fn finish(&self, q: &Query, raw: &Raw, output: &mut CollisionTrace) {
-        let end = if raw.end_y == NO_Y {
-            q.at(raw.fraction)
-        } else {
-            [q.a[0], raw.end_y, q.a[2]]
-        };
         output.all_solid = raw.all_solid;
         output.start_solid = raw.start_solid;
         output.fraction_q12 = raw.fraction;
-        output.end = RoomPoint::from_array(end);
-        output.normal_q12 = self.normal_vec(raw.normal, &raw.src);
+        output.end = RoomPoint::from_array(if raw.end_y != NO_Y {
+            [q.a[0], raw.end_y, q.a[2]]
+        } else if raw.fraction == 4096 {
+            // The whole segment: no interpolation.
+            [q.a[0] + q.d[0], q.a[1] + q.d[1], q.a[2] + q.d[2]]
+        } else {
+            q.at(raw.fraction)
+        });
+        output.normal_q12 = match raw.normal {
+            nc::NONE => [0; 3],
+            nc::UP => [0, 4096, 0],
+            nc::FLOOR => self.floor_normal(
+                usize::from(raw.src.room),
+                usize::from(raw.src.cx),
+                usize::from(raw.src.cz),
+                raw.src.aux != 0,
+            ),
+            code => axis_normal(code),
+        };
         output.plane_distance = 0;
     }
+}
 
-    /// Expand a normal code to a Q12 vector.
-    #[inline(never)]
-    fn normal_vec(&self, code: u8, src: &Src) -> [i16; 3] {
-        const D: i16 = 2896;
-        match code {
-            nc::UP => [0, 4096, 0],
-            nc::DOWN => [0, -4096, 0],
-            nc::PX => [4096, 0, 0],
-            nc::NX => [-4096, 0, 0],
-            nc::PZ => [0, 0, 4096],
-            nc::NZ => [0, 0, -4096],
-            nc::PP => [D, 0, D],
-            nc::PN => [D, 0, -D],
-            nc::NP => [-D, 0, D],
-            nc::NN => [-D, 0, -D],
-            nc::FLOOR => self.floor_normal(
-                usize::from(src.room),
-                usize::from(src.cx),
-                usize::from(src.cz),
-                src.aux != 0,
-            ),
-            _ => [0; 3],
-        }
+/// Q12 vector of a non-floor normal code.
+#[inline(never)]
+fn axis_normal(code: u8) -> [i16; 3] {
+    const D: i16 = 2896;
+    match code {
+        nc::DOWN => [0, -4096, 0],
+        nc::PX => [4096, 0, 0],
+        nc::NX => [-4096, 0, 0],
+        nc::PZ => [0, 0, 4096],
+        nc::NZ => [0, 0, -4096],
+        nc::PP => [D, 0, D],
+        nc::PN => [D, 0, -D],
+        nc::NP => [-D, 0, D],
+        nc::NN => [-D, 0, -D],
+        _ => [0; 3],
     }
 }
 
@@ -70,7 +75,10 @@ impl CollisionTraceProvider for GridTraceProvider<'_, '_> {
     fn trace_into(&mut self, query: CollisionTraceQuery, output: &mut CollisionTrace) -> bool {
         let a = query.start.to_array();
         let b = query.end.to_array();
-        if a.iter().chain(b.iter()).any(|c| c.abs() > COORD_LIMIT) {
+        if a.iter()
+            .chain(b.iter())
+            .any(|&c| (c.wrapping_add(COORD_LIMIT) as u32) > 2 * COORD_LIMIT as u32)
+        {
             return false;
         }
         let world = self.world;
@@ -83,14 +91,14 @@ impl CollisionTraceProvider for GridTraceProvider<'_, '_> {
         let q = Query {
             a,
             d: [b[0] - a[0], b[1] - a[1], b[2] - a[2]],
-            r,
-            h,
+            r: r as i16,
+            h: h.min(30_000) as i16,
             body,
         };
         let mut raw = Raw::new();
         world.trace(&q, &mut raw);
         if raw.contact_hi != 0 {
-            world.contact(&q, raw.fraction, raw.contact_hi, &mut raw);
+            world.contact(&q, raw.fraction, i32::from(raw.contact_hi), &mut raw);
         }
         world.finish(&q, &raw, output);
         true
