@@ -10,9 +10,11 @@
 //! walls on the new edges are derived, so they show live.
 //!
 //! * [`raise`]: Raise and Lower, in Offset and Level modes.
+//! * [`ramp`]: a slope from one side of the region to the opposite side.
 //! * [`rules`]: the smart paint rules and the shared writing helpers.
 
 pub mod raise;
+pub mod ramp;
 pub mod rules;
 
 use super::super::sector::GridSector;

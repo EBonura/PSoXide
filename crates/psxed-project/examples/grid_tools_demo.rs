@@ -16,6 +16,11 @@
 //! * `bands`: a far wall with a trim, a main body and a frieze in three
 //!   materials (T4).
 //! * `hall`: a plain derived room, flat, to raise and ramp in the editor (T5).
+//! * `ramp`: a long room with a ramp at the steepest slope the character walks,
+//!   made with the Ramp verb, and a plateau at its top; the player stands at
+//!   its foot facing it (T6).
+//! * `walk`: a room that shows every walkability class: a steep floor, a low
+//!   ceiling, a tall step, a drop and an island (T6).
 //!
 //! `SHADE=off` leaves the facing shade off in the world; every scenario
 //! otherwise uses the new-world default.
@@ -24,6 +29,8 @@ use std::path::PathBuf;
 
 use psxed_project::face_uv::{FaceUv, UvMode};
 use psxed_project::grid::derive::edge_key;
+use psxed_project::grid::edit::verbs::ramp::{RampDir, RampDrag, RampParams};
+use psxed_project::grid::edit::{CellRect, Region};
 use psxed_project::grid::starter::{create_project, STARTER_BASE, STARTER_SCALE};
 use psxed_project::grid::{
     FacingShade, GridRoom, GridSurface, GridWall, GridWorld, SceneWorld, WallEdge, SECTOR_UNITS,
@@ -178,6 +185,110 @@ fn bands(m: &Materials) -> GridRoom {
     room
 }
 
+/// Raise sectors `x0..x1` (all rows) of `room` to a flat floor `height` with
+/// the ceiling the same distance above it as before.
+fn plateau(room: &mut GridRoom, x0: usize, x1: usize, height: i32) {
+    for z in 0..room.depth {
+        for x in x0..x1 {
+            let sector = room.sector_or_insert(x, z).expect("inside");
+            let floor = sector.floor.as_mut().expect("a floor");
+            let lift = height - floor.heights[0];
+            floor.heights = [height; 4];
+            if let Some(ceiling) = sector.ceiling.as_mut() {
+                for h in &mut ceiling.heights {
+                    *h += lift;
+                }
+            }
+        }
+    }
+}
+
+/// A room with a ramp at the steepest walkable slope, over sectors 4 to 9,
+/// and a plateau at its top.
+fn ramp(m: &Materials) -> GridRoom {
+    let mut world = GridWorld {
+        scale: STARTER_SCALE,
+        rooms: vec![room(m, 15, 5, 4 * SECTOR_UNITS)],
+        shading: FacingShade::SUBTLE,
+    };
+    let region = Region::from_rect(0, CellRect::from_corners([4, 0], [9, 4]));
+    let params = RampParams {
+        from: RampDir::West,
+        follow_ceiling: true,
+        wall_material: m.cliff,
+    };
+    let drag = RampDrag::begin(&world, &region, params).expect("the ramp region has floors");
+    let rise = drag.max_walkable_rise();
+    drag.apply(&mut world, rise);
+    let mut room = world.rooms.remove(0);
+    plateau(&mut room, 10, 15, rise);
+    room
+}
+
+/// Every class the walkability overlay tells apart.
+fn walk(m: &Materials) -> GridRoom {
+    let mut room = room(m, 11, 7, 3 * SECTOR_UNITS);
+    // A steep floor: 1.5 sectors of rise over one.
+    room.sector_or_insert(2, 1)
+        .unwrap()
+        .floor
+        .as_mut()
+        .unwrap()
+        .heights = [0, 0, 1536, 1536];
+    // A low ceiling, a quarter of the body above the floor.
+    room.sector_or_insert(4, 1)
+        .unwrap()
+        .ceiling
+        .as_mut()
+        .unwrap()
+        .heights = [560; 4];
+    // A tall step: three clicks, more than the body climbs.
+    for z in 3..7 {
+        room.sector_or_insert(7, z)
+            .unwrap()
+            .floor
+            .as_mut()
+            .unwrap()
+            .heights = [768; 4];
+    }
+    // A pit that is only a step down, and a cliff to nothing.
+    room.sector_or_insert(1, 5).unwrap().floor = None;
+    room.sector_or_insert(9, 1).unwrap().floor = None;
+    // An island behind a wall of void.
+    for z in 0..7 {
+        room.sector_or_insert(9, z).unwrap().floor = None;
+    }
+    room
+}
+
+/// Put the player at the middle of sector `cell` facing `yaw` degrees.
+fn place_player(project: &mut ProjectDocument, world: &GridWorld, cell: [i32; 2], yaw: f32) {
+    let scene = project.active_scene_mut();
+    let player = scene
+        .nodes()
+        .iter()
+        .find(|n| {
+            n.children.iter().any(|c| {
+                scene.node(*c).is_some_and(|k| {
+                    matches!(
+                        &k.kind,
+                        psxed_project::NodeKind::CharacterController { player: true, .. }
+                    )
+                })
+            })
+        })
+        .map(|n| n.id)
+        .expect("a player entity");
+    let half = SECTOR_UNITS / 2;
+    let x = world.scale.to_editor(cell[0] * SECTOR_UNITS + half) as f32;
+    let z = world.scale.to_editor(cell[1] * SECTOR_UNITS + half) as f32;
+    if let Some(node) = scene.node_mut(player) {
+        node.transform.translation[0] = x;
+        node.transform.translation[2] = z;
+        node.transform.rotation_degrees = [0.0, yaw, 0.0];
+    }
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let scenario = args
@@ -198,6 +309,8 @@ fn main() {
         "platform" => platform(&m),
         "bands" => bands(&m),
         "hall" => room(&m, 9, 8, 3 * SECTOR_UNITS),
+        "ramp" => ramp(&m),
+        "walk" => walk(&m),
         "bench-plain" => bench(&m, false),
         "bench-repeat" => bench(&m, true),
         other => panic!("unknown scenario {other:?}"),
@@ -212,6 +325,15 @@ fn main() {
         rooms: vec![room],
         shading,
     };
+    // Where the player starts, by scenario: facing east along the ramp.
+    let start = match scenario.as_str() {
+        "ramp" => Some(([1, 2], 90.0)),
+        "walk" => Some(([0, 0], 90.0)),
+        _ => None,
+    };
+    if let Some((cell, yaw)) = start {
+        place_player(&mut project, &world, cell, yaw);
+    }
     project.active_scene_mut().world = SceneWorld::Grid(world);
     project.save_to_path(&path).expect("the project saves");
     println!("wrote {}", path.display());

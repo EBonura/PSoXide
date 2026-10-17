@@ -344,3 +344,144 @@ fn the_palette_material_beats_the_wall_rule_and_trim_makes_one_default_set() {
     assert_eq!(world.rooms[0].band_sets.len(), 1);
     assert_eq!(world.rooms[0].wall_mode, WallMode::Derived);
 }
+
+mod ramp {
+    use super::*;
+    use crate::grid::edit::verbs::ramp::{ramp_region, RampDir, RampDrag, RampParams};
+    use crate::grid::slope::{surface_class, SlopeClass};
+    use crate::grid::units::FINE_UNITS;
+    use psx_engine::WalkLimits;
+
+    fn p(from: RampDir) -> RampParams {
+        RampParams {
+            from,
+            follow_ceiling: true,
+            wall_material: None,
+        }
+    }
+
+    #[test]
+    fn a_ramp_runs_from_the_a_edge_to_the_b_edge_in_even_rows() {
+        let mut world = hall(6, 6);
+        let region = square([1, 1], [2, 3]);
+        let applied = ramp_region(&mut world, &region, p(RampDir::North), 768).unwrap();
+        assert_eq!(applied.moved, 6);
+        // Three rows deep, 768 units over them: 256 a row.
+        assert_eq!(floor(&world, [1, 1]).heights, [0, 0, 256, 256]);
+        assert_eq!(floor(&world, [1, 2]).heights, [256, 256, 512, 512]);
+        assert_eq!(floor(&world, [2, 3]).heights, [512, 512, 768, 768]);
+        assert_eq!(
+            floor(&world, [0, 1]).heights,
+            [0; 4],
+            "outside is untouched"
+        );
+        // From the other side it climbs the other way.
+        let mut south = hall(6, 6);
+        ramp_region(&mut south, &region, p(RampDir::South), 768).unwrap();
+        assert_eq!(floor(&south, [1, 3]).heights, [256, 256, 0, 0]);
+        // East and west run along X.
+        let mut west = hall(6, 6);
+        ramp_region(&mut west, &square([1, 1], [3, 1]), p(RampDir::West), 768).unwrap();
+        assert_eq!(floor(&west, [3, 1]).heights, [512, 768, 768, 512]);
+        let mut east = hall(6, 6);
+        ramp_region(&mut east, &square([1, 1], [3, 1]), p(RampDir::East), 768).unwrap();
+        assert_eq!(floor(&east, [1, 1]).heights, [768, 512, 512, 768]);
+    }
+
+    #[test]
+    fn the_a_edge_keeps_its_height_and_the_ceiling_follows() {
+        let mut world = hall(4, 4);
+        for x in 0..4 {
+            world.rooms[0]
+                .sector_mut(x, 1)
+                .unwrap()
+                .floor
+                .as_mut()
+                .unwrap()
+                .heights = [512; 4];
+        }
+        let region = square([0, 1], [3, 2]);
+        ramp_region(&mut world, &region, p(RampDir::North), 512).unwrap();
+        // The A edge sits where the floor stood on it: 512.
+        assert_eq!(floor(&world, [0, 1]).heights, [512, 512, 768, 768]);
+        assert_eq!(floor(&world, [0, 2]).heights, [768, 768, 1024, 1024]);
+        // The ceiling moved by the floor's delta, corner by corner.
+        assert_eq!(ceiling(&world, [0, 1]).heights, [3072, 3072, 3328, 3328]);
+    }
+
+    #[test]
+    fn an_l_shaped_region_slopes_by_position() {
+        let mut world = hall(6, 6);
+        let region = crate::grid::edit::Region::from_cells(0, [[1, 1], [1, 2], [1, 3], [2, 3]]);
+        ramp_region(&mut world, &region, p(RampDir::North), 768).unwrap();
+        // The foot of the L is on the last row: every corner there is level
+        // with the row's position, not a plane of its own.
+        assert_eq!(floor(&world, [1, 1]).heights, [0, 0, 256, 256]);
+        assert_eq!(floor(&world, [2, 3]).heights, [512, 512, 768, 768]);
+    }
+
+    #[test]
+    fn a_drag_restores_exactly_and_the_steepest_rise_is_the_walkable_limit() {
+        let mut world = hall(8, 8);
+        let original = world.clone();
+        let region = square([1, 1], [6, 3]);
+        let drag = RampDrag::begin(&world, &region, p(RampDir::North)).unwrap();
+        drag.apply(&mut world, 768);
+        drag.apply(&mut world, -256);
+        drag.apply(&mut world, 0);
+        assert_eq!(world, original);
+        // The largest walkable rise: every floor of it can be stood on, and
+        // one fine step more leaves a floor too steep.
+        let max = drag.max_walkable_rise();
+        assert!(max > 0 && max % FINE_UNITS == 0, "{max}");
+        let units = crate::grid::cook::RuntimeUnits::new(world.scale).unwrap();
+        let class_after = |rise: i32| {
+            let mut w = original.clone();
+            drag.apply(&mut w, rise);
+            (1..=6)
+                .flat_map(|x| (1..=3).map(move |z| [x, z]))
+                .map(|cell| surface_class(&units, 0, &floor(&w, cell), &WalkLimits::DEFAULT))
+                .max()
+                .unwrap()
+        };
+        assert_ne!(class_after(max), SlopeClass::Steep, "{max}");
+        assert_eq!(class_after(max + FINE_UNITS), SlopeClass::Steep, "{max}");
+        // Lowering is the same slope the other way.
+        assert_ne!(class_after(-max), SlopeClass::Steep);
+        assert_eq!(class_after(-max - FINE_UNITS), SlopeClass::Steep);
+    }
+
+    #[test]
+    fn rules_paint_a_ramp_by_its_class_unless_painted_by_hand() {
+        let mut world = hall(4, 4);
+        world.rooms[0].defaults.rules = PaintRules {
+            floor_by_class: [None, Some(rid(31)), Some(rid(32))],
+            ..PaintRules::default()
+        };
+        world.rooms[0]
+            .sector_mut(1, 2)
+            .unwrap()
+            .floor
+            .as_mut()
+            .unwrap()
+            .paint_locked = true;
+        // Three rows of 256: a gentle slope.
+        ramp_region(&mut world, &square([1, 1], [1, 3]), p(RampDir::North), 768).unwrap();
+        assert_eq!(floor(&world, [1, 1]).tri_a.material, Some(rid(31)));
+        assert_eq!(
+            floor(&world, [1, 2]).tri_a.material,
+            Some(rid(1)),
+            "painted by hand"
+        );
+        // Far too steep: the steep rule.
+        let mut steep = world.clone();
+        ramp_region(
+            &mut steep,
+            &square([1, 1], [1, 3]),
+            p(RampDir::North),
+            12288,
+        )
+        .unwrap();
+        assert_eq!(floor(&steep, [1, 3]).tri_a.material, Some(rid(32)));
+    }
+}

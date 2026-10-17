@@ -26,6 +26,7 @@
 //! * [`units`]: constants and the grid-to-editor scale.
 //! * [`surface`]: floor and ceiling surfaces, walls, materials and UVs.
 //! * [`auto_split`]: choosing a surface's diagonal from its heights.
+//! * [`walk`]: the walkability analysis behind the overlay.
 //! * [`slope`] and [`paint_rules`]: slope classes read as the motor reads them,
 //!   and the smart paint rules the level verbs apply.
 //! * [`sector`]: one sector and its six wall edges.
@@ -66,6 +67,7 @@ pub mod surface;
 pub mod units;
 pub mod uv;
 pub mod uv_split;
+pub mod walk;
 pub mod world;
 
 #[cfg(test)]
