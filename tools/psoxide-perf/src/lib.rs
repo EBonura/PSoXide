@@ -5,7 +5,6 @@
 pub mod util;
 pub mod cortex_30fps_report;
 pub mod cortex_bench_report;
-pub mod engine_stress;
 pub mod instr_census;
 pub mod mcp_client;
 pub mod pc_line_attribution;
