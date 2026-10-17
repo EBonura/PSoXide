@@ -40,10 +40,13 @@
 
 pub mod base_project;
 pub mod cook;
+pub mod derive;
 pub mod edit;
 pub mod faces;
+mod faces_derived;
 pub mod light;
 pub mod limits;
+pub mod overrides;
 pub mod palette;
 pub mod plane;
 pub mod plane_faces;
@@ -55,10 +58,14 @@ pub mod units;
 pub mod world;
 
 #[cfg(test)]
+mod derive_tests;
+#[cfg(test)]
 mod tests;
 
+pub use derive::{DerivedKind, DerivedWall};
 pub use faces::{GridFace, GridFaceKind};
 pub use limits::{GridBudget, GridIssue, GridIssueKind, Severity};
+pub use overrides::{Axis, EdgeKey, EdgeOverride, EdgeOverrides, RoomDefaults, WallMode};
 pub use plane::{GridPlane, PlaneCollision, PlaneShape, PlaneUvMode};
 pub use room::{GridFog, GridRoom};
 pub use sector::{GridSector, WallEdge};

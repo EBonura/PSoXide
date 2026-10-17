@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::overrides::{EdgeOverrides, RoomDefaults, WallMode};
 use super::plane::GridPlane;
 use super::sector::GridSector;
 
@@ -80,6 +81,16 @@ pub struct GridRoom {
     /// must lie inside its footprint to collide (editing grows the room).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub planes: Vec<GridPlane>,
+    /// How walls come to exist: only as records (legacy) or derived from
+    /// height differences.
+    #[serde(default, skip_serializing_if = "WallMode::is_authored")]
+    pub wall_mode: WallMode,
+    /// Fallbacks for derived faces.
+    #[serde(default, skip_serializing_if = "RoomDefaults::is_default")]
+    pub defaults: RoomDefaults,
+    /// What the user changed on individual derived wall segments.
+    #[serde(default, skip_serializing_if = "EdgeOverrides::is_empty")]
+    pub edge_overrides: EdgeOverrides,
 }
 
 impl GridRoom {
@@ -95,6 +106,18 @@ impl GridRoom {
             fog: GridFog::default(),
             sectors: vec![None; width * depth],
             planes: Vec::new(),
+            wall_mode: WallMode::Authored,
+            defaults: RoomDefaults::default(),
+            edge_overrides: EdgeOverrides::default(),
+        }
+    }
+
+    /// An empty room whose walls are derived from height differences, the
+    /// way every new room is made.
+    pub fn new_derived(name: impl Into<String>, width: usize, depth: usize) -> Self {
+        Self {
+            wall_mode: WallMode::Derived,
+            ..Self::new(name, width, depth)
         }
     }
 

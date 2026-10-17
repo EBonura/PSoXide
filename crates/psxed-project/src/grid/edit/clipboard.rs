@@ -227,6 +227,8 @@ impl GridClipboard {
                         slot.walls_mut(edge).push(wall.clone());
                     }
                 }
+                // Derived faces come back from the copied floors.
+                FaceTarget::Derived { .. } => {}
             }
         }
         Some(Self {

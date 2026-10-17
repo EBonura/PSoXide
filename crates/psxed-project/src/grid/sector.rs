@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::ResourceId;
+
 use super::surface::{GridSurface, GridWall};
 
 /// One of the six places a wall can stand in a sector.
@@ -130,6 +132,10 @@ pub struct GridSector {
     /// Walls on the NE-SW diagonal.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub nesw: Vec<GridWall>,
+    /// Material of the derived walls this sector owns (a platform's sides,
+    /// a closure wall). `None` falls through to the room default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wall_material: Option<ResourceId>,
 }
 
 impl GridSector {

@@ -12,6 +12,7 @@
 //! 16 from editor to engine units). The cook phase replaces the face cap with
 //! an exact vertex count; until then the conservative bound below stands.
 
+use super::overrides::WallMode;
 use super::plane::{PlaneCollision, PlaneShape, MAX_PLANE_SIZE, MIN_PLANE_SIZE};
 use super::room::GridRoom;
 use super::sector::WallEdge;
@@ -110,6 +111,14 @@ pub enum GridIssueKind {
         /// Index of the second copy.
         index: usize,
     },
+    /// An authored wall inside a derived face on the same edge and side; the
+    /// two would draw on top of each other.
+    AuthoredDuplicatesDerived {
+        /// The edge.
+        edge: WallEdge,
+        /// Index in the edge's stack.
+        index: usize,
+    },
     /// More than [`MAX_PLANES_PER_ROOM`] free planes in a room.
     TooManyPlanes {
         /// Planes present.
@@ -149,6 +158,7 @@ impl GridIssueKind {
         match self {
             Self::DegenerateWall { .. }
             | Self::DuplicateWall { .. }
+            | Self::AuthoredDuplicatesDerived { .. }
             | Self::PlaneTooSteep { .. } => Severity::Warning,
             _ => Severity::Error,
         }
@@ -209,6 +219,10 @@ impl GridIssue {
             GridIssueKind::DuplicateWall { edge, index } => {
                 format!("{} wall {index} duplicates an earlier wall", edge.label())
             }
+            GridIssueKind::AuthoredDuplicatesDerived { edge, index } => format!(
+                "{} wall {index} lies inside a derived wall and would draw on top of it",
+                edge.label()
+            ),
             GridIssueKind::TooManyPlanes { count } => {
                 format!("{count} planes, at most {MAX_PLANES_PER_ROOM}")
             }
@@ -393,6 +407,12 @@ fn check_room(room_index: usize, room: &GridRoom, issues: &mut Vec<GridIssue>) {
                     .any(|e| e.heights == wall.heights && e.facing == wall.facing)
                 {
                     issues.push(at(GridIssueKind::DuplicateWall { edge, index }));
+                }
+                if room.wall_mode == WallMode::Derived
+                    && !edge.is_diagonal()
+                    && super::derive::duplicates_derived(room, room.world_cell(x, z), edge, wall)
+                {
+                    issues.push(at(GridIssueKind::AuthoredDuplicatesDerived { edge, index }));
                 }
             }
         }

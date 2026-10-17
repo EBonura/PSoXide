@@ -24,6 +24,7 @@
 use crate::face_uv::FaceUv;
 use crate::ResourceId;
 
+use super::overrides::WallMode;
 use super::sector::{GridSector, WallEdge};
 use super::surface::{GridSurface, GridWall, WallFacing};
 use super::units::{GridScale, SECTOR_UNITS, TEXELS_PER_SECTOR};
@@ -48,6 +49,14 @@ pub enum GridFaceKind {
         edge: WallEdge,
         /// Index in the edge's stack.
         index: usize,
+    },
+    /// A wall derived from a height difference (see [`super::derive`]),
+    /// listed under the sector that sees it.
+    Derived {
+        /// The host sector's edge it lies on.
+        edge: WallEdge,
+        /// Which rule made it.
+        kind: super::derive::DerivedKind,
     },
     /// A free plane of the room, or one tile of it.
     Plane {
@@ -358,14 +367,20 @@ pub fn cell_faces(world: &GridWorld, room: usize, x: usize, z: usize, out: &mut 
     let Some(sector) = r.sector(x, z) else {
         return;
     };
-    Builder {
+    let cell = r.world_cell(x, z);
+    let mut builder = Builder {
         scale: world.scale,
         room,
-        cell: r.world_cell(x, z),
+        cell,
         y_offset: r.y_offset,
         out,
+    };
+    builder.sector(sector);
+    if r.wall_mode == WallMode::Derived {
+        for wall in super::derive::cell_walls(r, cell) {
+            builder.derived_wall(&wall);
+        }
     }
-    .sector(sector);
 }
 
 /// Every face of the world, room by room, `z` major within a room.

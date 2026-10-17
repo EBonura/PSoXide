@@ -10,7 +10,9 @@
 
 use crate::ResourceId;
 
+use super::super::derive;
 use super::super::limits::MAX_WALLS_PER_EDGE;
+use super::super::overrides::WallMode;
 use super::super::room::GridRoom;
 use super::super::sector::{GridSector, WallEdge};
 use super::super::surface::{GridSurface, GridWall, WallFacing};
@@ -191,6 +193,30 @@ pub fn next_wall_heights(
     .map(|g| g.heights)
 }
 
+/// The wall that would be placed on `edge` of world sector `cell` of
+/// `room`: [`next_wall_heights`] on the sector as it is, with the faces a
+/// derived room already has on that edge counted as walls already standing
+/// there, so an edge a derived wall closes answers "covered" instead of
+/// getting a second wall drawn on top of it.
+pub fn wall_gap(
+    room: &GridRoom,
+    cell: [i32; 2],
+    edge: WallEdge,
+    pick_y: Option<i32>,
+) -> Option<[i32; 4]> {
+    let mut sector = room
+        .local(cell)
+        .and_then(|[x, z]| room.sector(x, z))
+        .cloned()
+        .unwrap_or_default();
+    if room.wall_mode == WallMode::Derived {
+        sector
+            .walls_mut(edge)
+            .extend(derive::virtual_walls(room, cell, edge));
+    }
+    next_wall_heights(&sector, edge, room_height_bounds(room), pick_y)
+}
+
 /// How a placed wall looks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WallSpec {
@@ -224,13 +250,7 @@ pub fn place_wall(
     let target = world.rooms.get_mut(room).ok_or(WallRefusal::NoSuchRoom)?;
     // Decide first on a sector that may not exist yet, so a covered edge
     // leaves the room exactly as it was.
-    let bounds = room_height_bounds(target);
-    let existing = target
-        .local(cell)
-        .and_then(|[x, z]| target.sector(x, z))
-        .cloned()
-        .unwrap_or_default();
-    let heights = next_wall_heights(&existing, edge, bounds, pick_y).ok_or(WallRefusal::Covered)?;
+    let heights = wall_gap(target, cell, edge, pick_y).ok_or(WallRefusal::Covered)?;
     match grow_room_to(target, CellRect::from_corners(cell, cell)) {
         Ok(_) => {}
         Err(RectRefusal::NoSuchRoom) => return Err(WallRefusal::NoSuchRoom),
@@ -679,5 +699,50 @@ mod tests {
         assert_eq!(s.south[0].heights[3], 512);
         assert!(remove_wall(&mut world, 0, [0, 0], WallEdge::South, None));
         assert!(!remove_wall(&mut world, 0, [0, 0], WallEdge::South, None));
+    }
+
+    #[test]
+    fn derived_faces_count_as_walls_already_standing() {
+        // A derived 3 x 3 hall, floors 0, ceilings 2048, a platform of 512
+        // in the middle.
+        let mut room = GridRoom::new_derived("hall", 3, 3);
+        for z in 0..3 {
+            for x in 0..3 {
+                let sector = room.sector_or_insert(x, z).unwrap();
+                sector.floor = Some(GridSurface::flat(0, None));
+                sector.ceiling = Some(GridSurface::flat(2048, None));
+            }
+        }
+        room.sector_or_insert(1, 1).unwrap().floor = Some(GridSurface::flat(512, None));
+        let mut world = GridWorld {
+            scale: GridScale { num: 1, den: 1 },
+            rooms: vec![room],
+        };
+        // The outline is already closed by the room itself.
+        assert_eq!(
+            wall_gap(&world.rooms[0], [0, 0], WallEdge::North, None),
+            None
+        );
+        assert_eq!(
+            place_wall(&mut world, 0, [0, 0], WallEdge::North, None, SPEC),
+            Err(WallRefusal::Covered)
+        );
+        // The riser fills the bottom of the lower sector's edge, so only the
+        // part above it is offered.
+        assert_eq!(
+            wall_gap(&world.rooms[0], [1, 0], WallEdge::South, None),
+            Some([512, 512, 2048, 2048])
+        );
+        // The platform side of that edge is not covered below its floor.
+        assert_eq!(
+            wall_gap(&world.rooms[0], [1, 1], WallEdge::North, None),
+            Some([512, 512, 2048, 2048])
+        );
+        // An authored room still offers the full gap.
+        world.rooms[0].wall_mode = WallMode::Authored;
+        assert_eq!(
+            wall_gap(&world.rooms[0], [0, 0], WallEdge::North, None),
+            Some([0, 0, 2048, 2048])
+        );
     }
 }

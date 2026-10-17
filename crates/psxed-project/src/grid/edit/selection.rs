@@ -231,7 +231,7 @@ pub fn range_walls(world: &GridWorld, from: FaceRef, to: FaceRef) -> Vec<FaceRef
         FaceTarget::Wall { edge, .. } => columns
             .iter()
             .position(|(key, _, _)| *key == (face.cell, edge)),
-        FaceTarget::Surface(_) => None,
+        FaceTarget::Surface(_) | FaceTarget::Derived { .. } => None,
     };
     let (Some(start), Some(goal)) = (column_of(&from), column_of(&to)) else {
         return vec![from, to];

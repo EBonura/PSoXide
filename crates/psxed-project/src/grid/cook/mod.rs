@@ -445,6 +445,10 @@ pub fn cook_level(
 }
 
 #[cfg(test)]
+mod convert_tests;
+#[cfg(test)]
+mod derived_tests;
+#[cfg(test)]
 mod plane_tests;
 #[cfg(test)]
 mod spawn_tests;

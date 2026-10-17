@@ -12,8 +12,7 @@ use crate::{NodeId, NodeKind, ProjectDocument, ResourceData, ResourceId};
 
 use super::base_project::{link_assets, place_actors, spawn_point, strip_base, SpawnRequest};
 use super::room::GridRoom;
-use super::sector::WallEdge;
-use super::surface::{GridSurface, GridWall};
+use super::surface::GridSurface;
 use super::units::{GridScale, SECTOR_UNITS};
 use super::world::{GridWorld, SceneWorld};
 
@@ -69,14 +68,16 @@ fn any_world_material(project: &ProjectDocument) -> Option<ResourceId> {
     })
 }
 
-/// The starter room: floor, ceiling and a wall on every outline edge.
+/// The starter room: a derived room of floor and ceiling. Its outline walls
+/// are the closure walls the room derives itself, in the wall material.
 pub fn starter_world(
     floor: Option<ResourceId>,
     wall: Option<ResourceId>,
     ceiling: Option<ResourceId>,
 ) -> GridWorld {
     let side = STARTER_SIDE;
-    let mut room = GridRoom::new("Starter room", side, side);
+    let mut room = GridRoom::new_derived("Starter room", side, side);
+    room.defaults.wall_material = wall;
     for z in 0..side {
         for x in 0..side {
             let Some(sector) = room.sector_or_insert(x, z) else {
@@ -84,19 +85,6 @@ pub fn starter_world(
             };
             sector.floor = Some(GridSurface::flat(0, floor));
             sector.ceiling = Some(GridSurface::flat(STARTER_HEIGHT, ceiling));
-            let outline = [
-                (z == 0, WallEdge::North),
-                (x == side - 1, WallEdge::East),
-                (z == side - 1, WallEdge::South),
-                (x == 0, WallEdge::West),
-            ];
-            for (on_edge, edge) in outline {
-                if on_edge {
-                    sector
-                        .walls_mut(edge)
-                        .push(GridWall::span(0, STARTER_HEIGHT, wall));
-                }
-            }
         }
     }
     GridWorld {
@@ -189,23 +177,80 @@ pub fn create_project(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::grid::edit::{convert_to_derived, ConvertMode};
     use crate::grid::faces::all_faces;
     use crate::grid::limits;
+    use crate::grid::sector::WallEdge;
+    use crate::grid::surface::GridWall;
+
+    /// The starter as it was before derived walls: an explicit wall on every
+    /// outline edge.
+    fn authored_starter(wall: Option<ResourceId>) -> GridWorld {
+        let mut world = starter_world(None, wall, None);
+        let room = &mut world.rooms[0];
+        room.wall_mode = crate::grid::overrides::WallMode::Authored;
+        room.defaults = Default::default();
+        let side = STARTER_SIDE;
+        for z in 0..side {
+            for x in 0..side {
+                let sector = room.sector_or_insert(x, z).unwrap();
+                let outline = [
+                    (z == 0, WallEdge::North),
+                    (x == side - 1, WallEdge::East),
+                    (z == side - 1, WallEdge::South),
+                    (x == 0, WallEdge::West),
+                ];
+                for (on_edge, edge) in outline {
+                    if on_edge {
+                        sector
+                            .walls_mut(edge)
+                            .push(GridWall::span(0, STARTER_HEIGHT, wall));
+                    }
+                }
+            }
+        }
+        world
+    }
 
     #[test]
-    fn the_starter_room_is_valid_and_closed() {
+    fn the_starter_room_is_valid_derived_and_closed() {
         let world = starter_world(None, None, None);
         assert!(!limits::has_errors(&limits::validate(&world)));
         let room = &world.rooms[0];
+        assert_eq!(room.wall_mode, crate::grid::overrides::WallMode::Derived);
         assert_eq!(room.sector_count(), STARTER_SIDE * STARTER_SIDE);
-        // Every outline edge has a wall: 4 sides of STARTER_SIDE sectors.
+        // No wall records at all: the outline walls are derived.
         let walls: usize = room.iter().map(|(_, _, s)| s.wall_count()).sum();
-        assert_eq!(walls, 4 * STARTER_SIDE);
-        // A floor and a ceiling per sector, one band per wall (2 sectors
-        // tall gives 2 bands).
+        assert_eq!(walls, 0);
+        // A floor and a ceiling per sector, one closure wall per outline
+        // edge (4 sides of STARTER_SIDE sectors, 2 sectors tall gives 2
+        // courses).
         assert_eq!(
             all_faces(&world).len(),
             2 * STARTER_SIDE * STARTER_SIDE + 4 * STARTER_SIDE * 2
         );
+    }
+
+    #[test]
+    fn the_derived_starter_looks_exactly_like_the_walled_one() {
+        let wall: ResourceId = ron::from_str("(7)").unwrap();
+        let derived = starter_world(None, Some(wall), None);
+        let mut legacy = authored_starter(Some(wall));
+        let key = |world: &GridWorld| {
+            let mut faces: Vec<String> = all_faces(world)
+                .iter()
+                .map(|f| format!("{:?} {:?} {:?}", f.points, f.texels, f.material))
+                .collect();
+            faces.sort();
+            faces
+        };
+        // The derived room draws exactly the faces of the walled one.
+        let b = key(&legacy);
+        assert_eq!(key(&derived), b);
+        // Converting the walled one lands on the derived one.
+        let report = convert_to_derived(&mut legacy, 0, ConvertMode::PreserveLook).unwrap();
+        assert_eq!(report.converted, 4 * STARTER_SIDE);
+        assert_eq!(report.kept_authored, 0);
+        assert_eq!(key(&legacy), b);
     }
 }

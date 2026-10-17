@@ -17,6 +17,8 @@ use psx_grid::{
 };
 
 use super::units::RuntimeUnits;
+use crate::grid::derive;
+use crate::grid::overrides::WallMode;
 use crate::grid::room::GridRoom;
 use crate::grid::sector::WallEdge;
 use crate::grid::surface::{GridSplit, GridSurface};
@@ -215,6 +217,27 @@ pub fn build(units: &RuntimeUnits, room: &GridRoom, room_index: usize) -> Result
                             y,
                             reserved: 0,
                         });
+                    }
+                    // Derived walls that block: the closure around a
+                    // derived room, and any face the user made solid.
+                    if room.wall_mode == WallMode::Derived {
+                        let cell = room.world_cell(x, z);
+                        for wall in derive::edge_walls(room, cell, wall_edge) {
+                            let Some(heights) = wall.heights.filter(|_| wall.blocks()) else {
+                                continue;
+                            };
+                            let y = corners(units, room.y_offset, heights, &at("derived wall"))?;
+                            note(
+                                y.iter().copied().min().unwrap_or(0),
+                                y.iter().copied().max().unwrap_or(0),
+                            );
+                            walls.push(ColWall {
+                                edge: edge_id(wall_edge),
+                                flags: 0,
+                                y,
+                                reserved: 0,
+                            });
+                        }
                     }
                 }
             }

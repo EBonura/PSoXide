@@ -34,6 +34,12 @@ pub fn delete_faces(world: &mut GridWorld, faces: &[FaceRef]) -> usize {
                     .or_default()
                     .push(index);
             }
+            // A derived wall cannot be removed, only hidden.
+            FaceTarget::Derived { .. } => {
+                if super::derived::set_derived_hidden(world, *face, true) {
+                    removed += 1;
+                }
+            }
         }
     }
     for ((room, cell, edge), mut indices) in walls {

@@ -106,6 +106,7 @@ pub fn set_material(
             wall.material = material;
             changed
         }
+        FaceTarget::Derived { .. } => super::derived::set_derived_material(world, face, material),
     }
 }
 
@@ -116,6 +117,7 @@ pub fn material_of(world: &GridWorld, face: FaceRef, tri: Option<u8>) -> Option<
             .surface(world)
             .and_then(|s| s.tri(usize::from(tri.unwrap_or(0))).material),
         FaceTarget::Wall { .. } => face.wall_of(world).and_then(|w| w.material),
+        FaceTarget::Derived { .. } => super::derived::derived_material(world, face),
     }
 }
 
@@ -126,6 +128,7 @@ pub fn uv_of(world: &GridWorld, face: FaceRef, tri: Option<u8>) -> Option<FaceUv
             .surface(world)
             .map(|s| s.tri(usize::from(tri.unwrap_or(0))).uv),
         FaceTarget::Wall { .. } => face.wall_of(world).map(|w| w.uv),
+        FaceTarget::Derived { .. } => super::derived::derived_uv(world, face),
     }
 }
 
@@ -152,6 +155,7 @@ pub fn edit_uv(world: &mut GridWorld, face: FaceRef, tri: Option<u8>, op: UvOp) 
             op.apply(&mut wall.uv);
             before != wall.uv
         }
+        FaceTarget::Derived { .. } => super::derived::edit_derived_uv(world, face, op),
     }
 }
 
@@ -197,6 +201,7 @@ pub fn set_solid(world: &mut GridWorld, face: FaceRef, value: bool) -> bool {
             }
             None => false,
         },
+        FaceTarget::Derived { .. } => super::derived::set_derived_solid(world, face, value),
     }
 }
 

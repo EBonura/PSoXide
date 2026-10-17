@@ -7,6 +7,8 @@
 //! the edge's stack, so deleting walls must go from the highest index down
 //! (see [`super::delete`]).
 
+use super::super::derive::{self, DerivedKind, DerivedWall};
+use super::super::overrides::WallMode;
 use super::super::room::GridRoom;
 use super::super::sector::{GridSector, WallEdge};
 use super::super::surface::{GridSurface, GridWall};
@@ -44,6 +46,16 @@ pub enum FaceTarget {
         /// Index in the stack.
         index: usize,
     },
+    /// A wall derived from a height difference, addressed by the sector
+    /// that sees it, its edge and the rule that made it. Not stored, so it
+    /// has no corners of its own; edits to it land in the room's
+    /// [`EdgeOverride`](super::super::overrides::EdgeOverride)s.
+    Derived {
+        /// The host's edge it lies on.
+        edge: WallEdge,
+        /// Which rule made it.
+        kind: DerivedKind,
+    },
 }
 
 /// One face of one sector.
@@ -63,7 +75,7 @@ pub struct FaceRef {
 pub fn corner_offsets(target: FaceTarget) -> [[i32; 2]; 4] {
     match target {
         FaceTarget::Surface(_) => [[0, 0], [1, 0], [1, 1], [0, 1]],
-        FaceTarget::Wall { edge, .. } => {
+        FaceTarget::Wall { edge, .. } | FaceTarget::Derived { edge, .. } => {
             let (a, b) = edge.endpoints();
             [a, b, b, a]
         }
@@ -87,6 +99,29 @@ impl FaceRef {
             cell,
             target: FaceTarget::Surface(SurfaceKind::Ceiling),
         }
+    }
+
+    /// The derived wall of `kind` on `edge` of `cell` in `room`.
+    pub fn derived(room: usize, cell: [i32; 2], edge: WallEdge, kind: DerivedKind) -> Self {
+        Self {
+            room,
+            cell,
+            target: FaceTarget::Derived { edge, kind },
+        }
+    }
+
+    /// The derived wall this face names, if it is one and still exists.
+    pub fn derived_wall(&self, world: &GridWorld) -> Option<DerivedWall> {
+        let FaceTarget::Derived { edge, kind } = self.target else {
+            return None;
+        };
+        let room = self.room_of(world)?;
+        if room.wall_mode != WallMode::Derived {
+            return None;
+        }
+        derive::edge_walls(room, self.cell, edge)
+            .into_iter()
+            .find(|w| w.kind == kind)
     }
 
     /// Wall `index` on `edge` of `cell` in `room`.
@@ -162,6 +197,7 @@ impl FaceRef {
         match self.target {
             FaceTarget::Surface(_) => self.surface(world).is_some(),
             FaceTarget::Wall { .. } => self.wall_of(world).is_some(),
+            FaceTarget::Derived { .. } => self.derived_wall(world).is_some(),
         }
     }
 
@@ -180,6 +216,7 @@ impl FaceRef {
             FaceTarget::Wall { .. } => (layer == 0)
                 .then(|| self.wall_of(world).map(|w| w.heights))
                 .flatten(),
+            FaceTarget::Derived { .. } => None,
         }
     }
 
@@ -195,6 +232,9 @@ impl FaceRef {
     /// The four corners of every layer of the face.
     pub fn corners(&self, world: &GridWorld) -> Vec<CornerRef> {
         let mut out = Vec::new();
+        if matches!(self.target, FaceTarget::Derived { .. }) {
+            return out;
+        }
         for layer in 0..self.layers(world) {
             for corner in 0..4 {
                 out.push(CornerRef {
@@ -288,6 +328,8 @@ impl CornerRef {
                 wall.heights[slot] = value;
                 changed
             }
+            // Derived faces follow the floors; they have no heights to set.
+            FaceTarget::Derived { .. } => false,
         }
     }
 }
