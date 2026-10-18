@@ -83,6 +83,7 @@ pub mod sector;
 pub mod sector_view;
 pub mod slope;
 pub mod starter;
+pub mod storeys;
 pub mod surface;
 pub mod tree;
 pub mod units;
@@ -104,6 +105,8 @@ mod derive_tests;
 mod leaf_face_tests;
 #[cfg(test)]
 mod leaf_tests;
+#[cfg(test)]
+mod storey_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

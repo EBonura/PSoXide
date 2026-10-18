@@ -40,6 +40,7 @@ pub mod refs;
 pub mod region;
 pub mod rough;
 pub mod selection;
+pub mod spans;
 pub mod surfaces;
 pub mod verbs;
 pub mod walls;
