@@ -134,6 +134,8 @@ pub unsafe fn publish_raw(head: *const u32, display: u32) {
                 addr_of_mut!(crate::interrupts::__psx_rt_present_display),
                 display,
             );
+            #[cfg(feature = "console-diag")]
+            psx_io::diag::ll_scan(head as u32);
             write_volatile(addr_of_mut!(__psx_rt_present_head), head as u32);
         }
     }

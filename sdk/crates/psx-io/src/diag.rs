@@ -75,10 +75,22 @@ pub struct Block {
     pub cd_sectors: u32,
     /// Last absolute LBA a read was started at (after the disc-base shift).
     pub cd_lba: u32,
+    /// Reads started (`start_read`): more than the chunks asked for means retries.
+    pub cd_starts: u32,
     /// `read_sector` calls that failed.
     pub cd_read_fail: u32,
     /// The reader's own failure snapshot at the last failure.
     pub cd_fail_word: u32,
+    /// Linked lists scanned at kick time.
+    pub ll_scans: u32,
+    /// Nodes seen in the last scan.
+    pub ll_nodes: u32,
+    /// Nodes over 16 payload words, all scans (silicon loses words from longer nodes).
+    pub ll_bad: u32,
+    /// Largest payload word count seen.
+    pub ll_max: u32,
+    /// Address of the first oversized node seen.
+    pub ll_bad_addr: u32,
     /// Free-form step id set by the program ([`step`]).
     pub step_id: u32,
     /// Free-form step text, NUL padded.
@@ -113,8 +125,14 @@ pub static mut PSX_DIAG: Block = Block {
     cd_timeout_info: 0,
     cd_sectors: 0,
     cd_lba: 0,
+    cd_starts: 0,
     cd_read_fail: 0,
     cd_fail_word: 0,
+    ll_scans: 0,
+    ll_nodes: 0,
+    ll_bad: 0,
+    ll_max: 0,
+    ll_bad_addr: 0,
     step_id: 0,
     step_text: [0; 24],
 };
@@ -287,7 +305,10 @@ pub fn cd_sector() {
 #[inline(always)]
 pub fn cd_start(lba: u32) {
     #[cfg(feature = "console-diag")]
-    set(field!(cd_lba), lba);
+    {
+        bump(field!(cd_starts));
+        set(field!(cd_lba), lba);
+    }
     #[cfg(not(feature = "console-diag"))]
     let _ = lba;
 }
@@ -324,4 +345,40 @@ pub fn step(id: u32, text: &str) {
     }
     #[cfg(not(feature = "console-diag"))]
     let _ = (id, text);
+}
+
+/// Walk the GPU linked list that starts at `head` (a physical or KSEG address) and record
+/// every node over 16 payload words. The walk is bounded and stays inside main RAM.
+#[inline(never)]
+pub fn ll_scan(head: u32) {
+    #[cfg(feature = "console-diag")]
+    {
+        const RAM_MASK: u32 = 0x001F_FFFC;
+        touch();
+        bump(field!(ll_scans));
+        let mut addr = head & RAM_MASK;
+        let mut nodes = 0u32;
+        while nodes < 200_000 {
+            // SAFETY: `addr` is masked into main RAM, 4-byte aligned; the tag word is plain memory.
+            let tag = unsafe { core::ptr::read_volatile((0x8000_0000 | addr) as *const u32) };
+            let words = tag >> 24;
+            if words > 16 {
+                if get(field!(ll_bad)) == 0 {
+                    set(field!(ll_bad_addr), addr);
+                }
+                bump(field!(ll_bad));
+            }
+            if words > get(field!(ll_max)) {
+                set(field!(ll_max), words);
+            }
+            nodes += 1;
+            if tag & 0x0080_0000 != 0 {
+                break;
+            }
+            addr = tag & RAM_MASK;
+        }
+        set(field!(ll_nodes), nodes);
+    }
+    #[cfg(not(feature = "console-diag"))]
+    let _ = head;
 }
