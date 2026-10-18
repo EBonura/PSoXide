@@ -193,8 +193,8 @@ pub fn merge(room: &mut GridRoom, parent: LeafKey) -> Result<(), MergeBlock> {
     Ok(())
 }
 
-/// Merge every group of four leaves inside `within` (or anywhere, for
-/// `None`) that the parent reproduces exactly, finest first and repeatedly,
+/// Merge every group of four leaves over the ground of `within` (or
+/// anywhere, for `None`) that the parent reproduces exactly, finest first and repeatedly,
 /// never above `top_level` (0 allows merging up to four sectors). Returns
 /// how many merges happened.
 pub fn merge_all(room: &mut GridRoom, within: Option<&[LeafKey]>, top_level: u8) -> usize {
@@ -203,7 +203,7 @@ pub fn merge_all(room: &mut GridRoom, within: Option<&[LeafKey]>, top_level: u8)
         let mut parents: Vec<LeafKey> = room
             .leaves()
             .filter(|(k, _)| k.level > top_level)
-            .filter(|(k, _)| within.is_none_or(|set| set.iter().any(|w| inside(*w, *k))))
+            .filter(|(k, _)| within.is_none_or(|set| set.iter().any(|w| overlaps(*w, *k))))
             .filter_map(|(k, _)| k.parent())
             .collect();
         parents.sort_by_key(|p| (core::cmp::Reverse(p.level), *p));
@@ -222,7 +222,8 @@ pub fn merge_all(room: &mut GridRoom, within: Option<&[LeafKey]>, top_level: u8)
     }
 }
 
-/// Whether `inner` lies inside `outer` (or equals it).
-fn inside(outer: LeafKey, inner: LeafKey) -> bool {
-    outer.level <= inner.level && outer.contains_click(inner.min_click())
+/// Whether two cells share ground: one lies inside the other (or they are
+/// the same). Aligned cells never cross.
+fn overlaps(a: LeafKey, b: LeafKey) -> bool {
+    a.contains_click(b.min_click()) || b.contains_click(a.min_click())
 }

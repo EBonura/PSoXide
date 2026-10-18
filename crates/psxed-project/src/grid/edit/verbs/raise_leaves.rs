@@ -68,47 +68,118 @@ impl LeafRaise {
             let Some(sector) = room.leaf_mut(key) else {
                 continue;
             };
-            let Some(old) = floor_corners(sector) else {
-                applied.skipped += 1;
-                continue;
-            };
-            let mut wanted = old;
-            for tri in &mut wanted {
-                for h in tri.iter_mut() {
-                    *h = match params.mode {
-                        RaiseMode::Offset => h.saturating_add(amount),
-                        RaiseMode::Level => params.reference.saturating_add(amount),
-                    };
-                }
-            }
-            let mut held = false;
-            if !params.follow_ceiling {
-                if let Some(ceiling) = ceiling_corners(sector) {
-                    let (clamped, was_held) = clamp_under_ceiling(ceiling, old, wanted);
-                    wanted = clamped;
-                    held = was_held;
-                }
-            }
-            if let Some(floor) = sector.ground_floor_mut() {
-                set_floor_corners(floor, wanted);
-                if wanted != old {
-                    auto_split::resplit(floor);
-                }
-            }
-            if params.follow_ceiling {
-                let deltas = [0, 1].map(|t| core::array::from_fn(|i| wanted[t][i] - old[t][i]));
-                move_ceiling_with_floor(sector, deltas);
-                if let Some(ceiling) = sector.ground_ceiling_mut() {
-                    if deltas != [[0; 4]; 2] {
-                        auto_split::resplit(ceiling);
-                    }
-                }
-            }
-            stamp_wall_material(sector, params.wall_material, &rules);
-            applied.moved += usize::from(wanted != old);
-            applied.clamped += usize::from(held);
+            raise_leaf(sector, &params, amount, &rules, &mut applied);
         }
         normalize(room);
         applied
     }
+}
+
+/// Move one leaf's floor (and, following it, its ceiling) by `amount`, the
+/// way Raise moves a sector.
+fn raise_leaf(
+    sector: &mut crate::grid::sector::GridSector,
+    params: &RaiseParams,
+    amount: i32,
+    rules: &crate::grid::paint_rules::PaintRules,
+    applied: &mut Applied,
+) {
+    let Some(old) = floor_corners(sector) else {
+        applied.skipped += 1;
+        return;
+    };
+    let mut wanted = old;
+    for tri in &mut wanted {
+        for h in tri.iter_mut() {
+            *h = match params.mode {
+                RaiseMode::Offset => h.saturating_add(amount),
+                RaiseMode::Level => params.reference.saturating_add(amount),
+            };
+        }
+    }
+    let mut held = false;
+    if !params.follow_ceiling {
+        if let Some(ceiling) = ceiling_corners(sector) {
+            let (clamped, was_held) = clamp_under_ceiling(ceiling, old, wanted);
+            wanted = clamped;
+            held = was_held;
+        }
+    }
+    if let Some(floor) = sector.ground_floor_mut() {
+        set_floor_corners(floor, wanted);
+        if wanted != old {
+            auto_split::resplit(floor);
+        }
+    }
+    if params.follow_ceiling {
+        let deltas = [0, 1].map(|t| core::array::from_fn(|i| wanted[t][i] - old[t][i]));
+        move_ceiling_with_floor(sector, deltas);
+        if let Some(ceiling) = sector.ground_ceiling_mut() {
+            if deltas != [[0; 4]; 2] {
+                auto_split::resplit(ceiling);
+            }
+        }
+    }
+    stamp_wall_material(sector, params.wall_material, rules);
+    applied.moved += usize::from(wanted != old);
+    applied.clamped += usize::from(held);
+}
+
+/// Raise the leaves inside a rectangle of clicks (quarter sectors, world
+/// coordinates, inclusive) by `amount`. A leaf the rectangle cuts through is
+/// subdivided to fit, down to a quarter sector; the rectangle should be
+/// aligned to the cells it means. `None` for a missing room or an empty
+/// rectangle.
+pub fn raise_click_rect(
+    world: &mut crate::grid::world::GridWorld,
+    room: usize,
+    lo: [i32; 2],
+    hi: [i32; 2],
+    params: RaiseParams,
+    amount: i32,
+) -> Option<Applied> {
+    let room = world.rooms.get_mut(room)?;
+    let inside = |k: LeafKey| {
+        let [x1, z1] = k.end_click();
+        k.x >= lo[0] && k.z >= lo[1] && x1 - 1 <= hi[0] && z1 - 1 <= hi[1]
+    };
+    let touches = |k: LeafKey| {
+        let [x1, z1] = k.end_click();
+        k.x <= hi[0] && k.z <= hi[1] && x1 > lo[0] && z1 > lo[1]
+    };
+    // Subdivide until every leaf the rectangle touches lies inside it.
+    loop {
+        let cut: Vec<LeafKey> = room
+            .leaves()
+            .map(|(k, _)| k)
+            .filter(|k| touches(*k) && !inside(*k))
+            .collect();
+        if cut.is_empty() {
+            break;
+        }
+        let mut progress = false;
+        for key in cut {
+            progress |= room.leaf(key).is_some() && crate::grid::tree::subdivide(room, key).is_ok();
+        }
+        if !progress {
+            break;
+        }
+    }
+    let units: Vec<LeafKey> = room
+        .leaves()
+        .map(|(k, _)| k)
+        .filter(|k| touches(*k) && inside(*k))
+        .collect();
+    if units.is_empty() {
+        return None;
+    }
+    let rules = room.defaults.rules;
+    let mut applied = Applied::default();
+    for key in units {
+        if let Some(sector) = room.leaf_mut(key) {
+            raise_leaf(sector, &params, amount, &rules, &mut applied);
+        }
+    }
+    normalize(room);
+    Some(applied)
 }
