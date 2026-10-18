@@ -94,6 +94,8 @@ mod derive_diag_tests;
 #[cfg(test)]
 mod derive_tests;
 #[cfg(test)]
+mod leaf_tests;
+#[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod uv_golden;

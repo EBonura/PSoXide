@@ -171,32 +171,43 @@ impl GridWorld {
     /// editor and the game stand on the same surface.
     pub fn floor_height_at(&self, x: i32, z: i32, y_limit: i32) -> Option<i32> {
         let (gx, gz) = (self.scale.to_grid(x), self.scale.to_grid(z));
-        let cell = [gx.div_euclid(SECTOR_UNITS), gz.div_euclid(SECTOR_UNITS)];
-        let edge = self.scale.sector_editor_units().max(1);
-        let inv24 = psx_grid::height::weight_recip(edge as u32);
+        let click = [
+            gx.div_euclid(super::units::CLICK_UNITS),
+            gz.div_euclid(super::units::CLICK_UNITS),
+        ];
+        let sector_edge = self.scale.sector_editor_units().max(1);
         let mut best: Option<i32> = None;
         for room in &self.rooms {
-            let Some([lx, lz]) = room.local(cell) else {
+            // The leaf under the point, of any level, and every span of its
+            // column: the highest floor not above the limit wins.
+            let Some((key, sector)) = room.leaf_at(click) else {
                 continue;
             };
-            let Some(floor) = room.sector(lx, lz).and_then(|s| s.floor()) else {
+            if !room.contains_leaf(key) {
                 continue;
-            };
-            // Offsets inside the sector, in editor units.
+            }
+            // A leaf's edge is `edge_clicks` quarters of a sector.
+            let edge = (sector_edge * key.edge_clicks() / super::leaf::CLICKS_PER_SECTOR).max(1);
+            let inv24 = psx_grid::height::weight_recip(edge as u32);
+            // Offsets inside the leaf, in editor units.
             let origin = [
-                self.scale.to_editor(cell[0].saturating_mul(SECTOR_UNITS)),
-                self.scale.to_editor(cell[1].saturating_mul(SECTOR_UNITS)),
+                self.scale
+                    .to_editor(key.x.saturating_mul(super::units::CLICK_UNITS)),
+                self.scale
+                    .to_editor(key.z.saturating_mul(super::units::CLICK_UNITS)),
             ];
             let off = |v: i32, o: i32| (v - o).clamp(0, edge) as u32;
             let (ox, oz) = (off(x, origin[0]), off(z, origin[1]));
-            let nesw = matches!(floor.split, super::surface::GridSplit::NeSw);
-            let second = !psx_grid::height::in_first_triangle(nesw, ox, oz, edge as u32);
-            let corners = floor
-                .heights_for(usize::from(second))
-                .map(|h| self.scale.to_editor(room.y_offset + h));
-            let y = psx_grid::height::height_at_i32(corners, nesw, ox, oz, edge as u32, inv24);
-            if y <= y_limit && best.is_none_or(|b| y > b) {
-                best = Some(y);
+            for floor in sector.spans().iter().filter_map(|s| s.floor.as_ref()) {
+                let nesw = matches!(floor.split, super::surface::GridSplit::NeSw);
+                let second = !psx_grid::height::in_first_triangle(nesw, ox, oz, edge as u32);
+                let corners = floor
+                    .heights_for(usize::from(second))
+                    .map(|h| self.scale.to_editor(room.y_offset + h));
+                let y = psx_grid::height::height_at_i32(corners, nesw, ox, oz, edge as u32, inv24);
+                if y <= y_limit && best.is_none_or(|b| y > b) {
+                    best = Some(y);
+                }
             }
         }
         best
