@@ -233,6 +233,13 @@ pub struct CollisionView<'a> {
     /// `SUBBLOCKS`, [`SUBBLOCK_ENTRIES`] entries a block: empty for a dense
     /// room.
     pub blocks: &'a [u16],
+    /// [`SpanExt::index`]: one entry per `sectors` record, empty when the
+    /// room has no extra spans.
+    pub span_index: &'a [u16],
+    /// [`SpanExt::runs`].
+    pub span_runs: &'a [SpanRun],
+    /// [`SpanExt::spans`]: the extra spans, bottom to top within a run.
+    pub span_recs: &'a [Sector],
     pub exts: &'a [SectorExt],
     pub walls: &'a [ColWall],
     pub splitbs: &'a [SplitB],
@@ -304,6 +311,35 @@ impl<'a> CollisionView<'a> {
         if bytes.len() < head.render_offset as usize {
             return Err(FormatError::Truncated);
         }
+        let (span_index, span_runs, span_recs): (&[u16], &[SpanRun], &[Sector]) =
+            if head.flags & ROOM_SPANS != 0 {
+                if !(head.tree_ext as usize).is_multiple_of(4) {
+                    return Err(FormatError::Misaligned);
+                }
+                let at = head.tree_ext as usize + core::mem::size_of::<TreeExt>();
+                let block = header_at::<SpanExt>(bytes, at)?;
+                if block.layout != SPAN_LAYOUT_HASH {
+                    return Err(FormatError::BadLayout);
+                }
+                if block.index.count as usize != sectors.len() {
+                    return Err(FormatError::Inconsistent);
+                }
+                (
+                    table::<u16>(
+                        bytes,
+                        block.index.offset as usize,
+                        block.index.count as usize,
+                    )?,
+                    table::<SpanRun>(bytes, block.runs.offset as usize, block.runs.count as usize)?,
+                    table::<Sector>(
+                        bytes,
+                        block.spans.offset as usize,
+                        block.spans.count as usize,
+                    )?,
+                )
+            } else {
+                (&[], &[], &[])
+            };
         let (index, blocks): (&[u16], &[u16]) = if tree {
             if !(head.tree_ext as usize).is_multiple_of(4) {
                 return Err(FormatError::Misaligned);
@@ -332,6 +368,9 @@ impl<'a> CollisionView<'a> {
             sectors,
             index,
             blocks,
+            span_index,
+            span_runs,
+            span_recs,
             exts: section(bytes, head, section::SECTOR_EXTS)?,
             walls: section(bytes, head, section::WALLS)?,
             splitbs: section(bytes, head, section::SPLITBS)?,
@@ -345,6 +384,26 @@ impl<'a> CollisionView<'a> {
     /// Sectors along X.
     pub fn width(&self) -> usize {
         usize::from(self.header.width)
+    }
+
+    /// The extra spans of record `record` (an index into `sectors`), bottom
+    /// to top above the record's own ground span. Empty for a single-span
+    /// column, and for every record of a room without [`ROOM_SPANS`].
+    #[inline(always)]
+    pub fn extra_spans(&self, record: usize) -> &'a [Sector] {
+        let Some(&run) = self.span_index.get(record) else {
+            return &[];
+        };
+        if run == NO_SPAN {
+            return &[];
+        }
+        let Some(run) = self.span_runs.get(usize::from(run)) else {
+            return &[];
+        };
+        let first = usize::from(run.first);
+        self.span_recs
+            .get(first..first + usize::from(run.count))
+            .unwrap_or(&[])
     }
 
     /// Sectors along Z.

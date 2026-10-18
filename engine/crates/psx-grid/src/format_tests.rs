@@ -348,3 +348,54 @@ fn leaf_sizes_and_world_aligned_origins() {
         assert_eq!(leaf_origin_sector(c, leaf_code::X4, 1), want, "c {c}");
     }
 }
+
+/// Two spans over one record: the ground span in the record, one extra span
+/// 80 units up in the span table.
+fn with_spans(mut chunk: RoomChunk) -> RoomChunk {
+    use crate::write::SpanTables;
+    let records = chunk.sectors.len();
+    let mut index = vec![NO_SPAN; records];
+    index[0] = 0;
+    chunk.flags |= ROOM_SPANS;
+    chunk.spans = Some(SpanTables {
+        index,
+        runs: vec![SpanRun { first: 0, count: 1 }],
+        spans: vec![Sector {
+            floor: [160; 4],
+            ceil: [240; 4],
+            flags: SECTOR_HAS_FLOOR | SECTOR_HAS_CEIL,
+            ext: NO_EXT,
+        }],
+    });
+    chunk
+}
+
+#[test]
+fn extra_spans_read_back_in_a_dense_and_a_tree_room() {
+    for chunk in [with_spans(room()), with_spans(tree_room())] {
+        let tree = chunk.tree.is_some();
+        let bytes = chunk.to_bytes();
+        let words = aligned_copy(&bytes);
+        let view = RoomView::parse(words_as_bytes(&words, bytes.len())).unwrap();
+        assert_eq!(view.col.is_tree(), tree);
+        assert_eq!(view.col.header.flags & ROOM_SPANS, ROOM_SPANS);
+        assert_eq!(view.col.extra_spans(0).len(), 1);
+        assert_eq!(view.col.extra_spans(0)[0].floor, [160; 4]);
+        assert!(view.col.extra_spans(1).is_empty());
+        // The span record sits right after the tree extension.
+        let at = view.col.header.tree_ext as usize + core::mem::size_of::<TreeExt>();
+        let layout = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+        assert_eq!(layout, SPAN_LAYOUT_HASH);
+        assert!(chunk.span_bytes() > 0);
+    }
+}
+
+#[test]
+fn a_room_without_spans_has_no_span_block() {
+    let bytes = room().to_bytes();
+    let words = aligned_copy(&bytes);
+    let view = RoomView::parse(words_as_bytes(&words, bytes.len())).unwrap();
+    assert_eq!(view.col.header.flags & ROOM_SPANS, 0);
+    assert!(view.col.span_index.is_empty());
+    assert!(view.col.extra_spans(0).is_empty());
+}

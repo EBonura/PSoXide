@@ -71,6 +71,12 @@ pub const ROOM_HAS_LIQUID: u16 = 1 << 3;
 /// chunk header.
 pub const ROOM_TREE: u16 = 1 << 4;
 
+/// Room flag: some column holds extra spans ([`SpanExt`]). `tree_ext` then
+/// locates a [`TreeExt`] (dense rooms have empty tree tables) followed by the
+/// `SpanExt`, 4 bytes after it. Rooms without extra spans never set it, so
+/// their bytes are unchanged.
+pub const ROOM_SPANS: u16 = 1 << 5;
+
 /// Core file header, 52 bytes.
 ///
 /// Every field is sized to the range it can hold (fewest-bits rule, see
@@ -461,6 +467,42 @@ pub struct TreeExt {
 
 /// Marker for "no extension".
 pub const NO_EXT: u16 = 0xFFFF;
+
+/// Marker for "no span run" in [`SpanExt::index`].
+pub const NO_SPAN: u16 = 0xFFFF;
+
+/// The extra spans of a room, located right after its [`TreeExt`] (see
+/// [`ROOM_SPANS`]), 28 bytes.
+///
+/// A column of several spans keeps its ground span in the room's
+/// `SECTORS` record (or leaf record) as always. Its spans above the ground
+/// one are `Sector` records in [`Self::spans`], bottom to top, which the
+/// collision reads as more records of the same cell or leaf: each offers its
+/// floor and its ceiling slabs. The ground record of such a column never has
+/// [`SECTOR_CLEAR`] or the flat-slab flags, so the fast paths give way to
+/// the per-span walk.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct SpanExt {
+    /// [`SPAN_LAYOUT_HASH`], checked by the reader.
+    pub layout: u32,
+    /// `u16` per `SECTORS` record (cell order for a dense room, leaf id for a
+    /// tree): an index into [`Self::runs`], or [`NO_SPAN`].
+    pub index: SectionRef,
+    /// [`SpanRun`] per record that has extra spans.
+    pub runs: SectionRef,
+    /// [`Sector`] per extra span.
+    pub spans: SectionRef,
+}
+
+/// The extra spans of one column: `count` records of [`SpanExt::spans`] from
+/// `first`, bottom to top. 4 bytes.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct SpanRun {
+    pub first: u16,
+    pub count: u16,
+}
 
 /// One collision sector, 20 bytes. Corners are `[NW, NE, SE, SW]`.
 #[repr(C)]
@@ -932,6 +974,22 @@ const fn tree_layout_hash() -> u32 {
 /// [`LAYOUT_HASH`] stays what it was, so dense levels are byte for byte
 /// unchanged).
 pub const TREE_LAYOUT_HASH: u32 = tree_layout_hash();
+
+const fn span_layout_hash() -> u32 {
+    use core::mem::{offset_of, size_of};
+    let mut h = 0x811c_9dc5u32;
+    h = mix(h, size_of::<SpanExt>());
+    h = mix(h, offset_of!(SpanExt, index));
+    h = mix(h, offset_of!(SpanExt, runs));
+    h = mix(h, offset_of!(SpanExt, spans));
+    h = mix(h, size_of::<SpanRun>());
+    h = mix(h, size_of::<Sector>());
+    h = mix(h, NO_SPAN as usize);
+    h
+}
+
+/// Hash of the span tables' layout, carried by [`SpanExt`].
+pub const SPAN_LAYOUT_HASH: u32 = span_layout_hash();
 
 /// Bytes of a table of plain records.
 ///

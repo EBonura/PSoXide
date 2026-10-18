@@ -23,6 +23,18 @@ pub struct TreeTables {
     pub blocks: Vec<u16>,
 }
 
+/// The extra spans of a room (see [`SpanExt`]): present when some column
+/// holds more than one span.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SpanTables {
+    /// One entry per `SECTORS` record: an index into `runs`, or [`NO_SPAN`].
+    pub index: Vec<u16>,
+    /// One run per record that has extra spans.
+    pub runs: Vec<SpanRun>,
+    /// The extra spans, bottom to top within each run.
+    pub spans: Vec<Sector>,
+}
+
 /// Everything a room chunk holds, as plain tables.
 #[derive(Clone, Debug, Default)]
 pub struct RoomChunk {
@@ -38,6 +50,9 @@ pub struct RoomChunk {
     pub sectors: Vec<Sector>,
     /// The leaf tree, `None` for a dense room.
     pub tree: Option<TreeTables>,
+    /// Extra spans of the columns that have them; `None` when every column
+    /// is a single span.
+    pub spans: Option<SpanTables>,
     pub exts: Vec<SectorExt>,
     pub walls: Vec<ColWall>,
     pub splitbs: Vec<SplitB>,
@@ -114,8 +129,26 @@ impl RoomChunk {
     /// Bytes of the leaf tree part (extension record, index and sub-blocks),
     /// zero for a dense room.
     pub fn tree_bytes(&self) -> usize {
-        self.tree.as_ref().map_or(0, |t| {
+        let tree = self.tree.as_ref().map_or(0, |t| {
             core::mem::size_of::<TreeExt>() + 2 * t.index.len() + 2 * t.blocks.len()
+        });
+        tree + self.span_bytes()
+    }
+
+    /// Bytes of the extra-span tables, zero without spans. A dense room with
+    /// spans also carries an empty [`TreeExt`], counted here.
+    pub fn span_bytes(&self) -> usize {
+        self.spans.as_ref().map_or(0, |s| {
+            let tree_ext = if self.tree.is_none() {
+                core::mem::size_of::<TreeExt>()
+            } else {
+                0
+            };
+            tree_ext
+                + core::mem::size_of::<SpanExt>()
+                + 2 * s.index.len()
+                + core::mem::size_of::<SpanRun>() * s.runs.len()
+                + core::mem::size_of::<Sector>() * s.spans.len()
         })
     }
 
@@ -181,28 +214,37 @@ impl RoomChunk {
         );
         let mut tree_ext = 0u32;
         let mut tree_flag = 0u16;
+        let mut span_flag = 0u16;
         let mut origin_mod = 0u8;
-        if let Some(tree) = &self.tree {
+        if self.tree.is_some() || self.spans.is_some() {
             align4(&mut out);
             tree_ext = out.len() as u32;
-            tree_flag = CHUNK_TREE;
-            origin_mod = tree.origin_mod;
-            // The extension record first, filled in once the two tables
-            // have their places.
+            // The extension record first, filled in once the tables have
+            // their places. A dense room with spans carries empty tree tables.
             out.extend_from_slice(&[0u8; core::mem::size_of::<TreeExt>()]);
+            // The span record sits right after it (`tree_ext` plus the size
+            // of `TreeExt`), reserved now and filled in last.
+            let span_at = self.spans.as_ref().map(|_| {
+                out.extend_from_slice(&[0u8; core::mem::size_of::<SpanExt>()]);
+                out.len() - core::mem::size_of::<SpanExt>()
+            });
             let mut refs2 = [SectionRef::default(); 2];
-            put_ref(
-                &mut out,
-                &mut refs2[0],
-                bytes_of(&tree.index),
-                tree.index.len(),
-            );
-            put_ref(
-                &mut out,
-                &mut refs2[1],
-                bytes_of(&tree.blocks),
-                tree.blocks.len() / SUBBLOCK_ENTRIES,
-            );
+            if let Some(tree) = &self.tree {
+                tree_flag = CHUNK_TREE;
+                origin_mod = tree.origin_mod;
+                put_ref(
+                    &mut out,
+                    &mut refs2[0],
+                    bytes_of(&tree.index),
+                    tree.index.len(),
+                );
+                put_ref(
+                    &mut out,
+                    &mut refs2[1],
+                    bytes_of(&tree.blocks),
+                    tree.blocks.len() / SUBBLOCK_ENTRIES,
+                );
+            }
             let ext = TreeExt {
                 layout: TREE_LAYOUT_HASH,
                 sector_index: refs2[0],
@@ -210,6 +252,36 @@ impl RoomChunk {
             };
             out[tree_ext as usize..tree_ext as usize + core::mem::size_of::<TreeExt>()]
                 .copy_from_slice(bytes_of(core::slice::from_ref(&ext)));
+            if let (Some(spans), Some(at)) = (&self.spans, span_at) {
+                span_flag = ROOM_SPANS;
+                let mut refs3 = [SectionRef::default(); 3];
+                put_ref(
+                    &mut out,
+                    &mut refs3[0],
+                    bytes_of(&spans.index),
+                    spans.index.len(),
+                );
+                put_ref(
+                    &mut out,
+                    &mut refs3[1],
+                    bytes_of(&spans.runs),
+                    spans.runs.len(),
+                );
+                put_ref(
+                    &mut out,
+                    &mut refs3[2],
+                    bytes_of(&spans.spans),
+                    spans.spans.len(),
+                );
+                let block = SpanExt {
+                    layout: SPAN_LAYOUT_HASH,
+                    index: refs3[0],
+                    runs: refs3[1],
+                    spans: refs3[2],
+                };
+                out[at..at + core::mem::size_of::<SpanExt>()]
+                    .copy_from_slice(bytes_of(core::slice::from_ref(&block)));
+            }
         }
         align4(&mut out);
         let render_offset = out.len() as u32;
@@ -266,7 +338,7 @@ impl RoomChunk {
         let header = RoomHeader {
             magic: ROOM_MAGIC,
             version: VERSION,
-            flags: self.flags | tree_flag,
+            flags: self.flags | tree_flag | span_flag,
             byte_len: out.len() as u32,
             render_offset,
             room_id: self.room_id,
