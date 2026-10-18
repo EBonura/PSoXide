@@ -89,6 +89,9 @@ pub struct GridFace {
     /// The leaf the face was made from: the whole sector for every room
     /// made before the quadtree, a smaller or larger leaf otherwise.
     pub leaf: LeafKey,
+    /// Which span of the leaf's column a floor or ceiling belongs to, from the
+    /// ground span (`0`) up; `0` for every other kind of face.
+    pub span: u8,
     /// Source of the face.
     pub kind: GridFaceKind,
     /// Corners in editor units, clockwise seen from the visible side.
@@ -207,6 +210,8 @@ pub(super) struct Builder<'a> {
     pub cell: [i32; 2],
     /// The leaf the next faces come from.
     pub leaf: LeafKey,
+    /// The span of the leaf's column the next floor or ceiling comes from.
+    pub span: u8,
     /// The square the next surface or walls cover.
     pub square: Square,
     pub y_offset: i32,
@@ -317,6 +322,7 @@ impl Builder<'_> {
             room: self.room,
             cell: self.cell,
             leaf: self.leaf,
+            span: self.span,
             kind,
             points: deduped.iter().map(|c| c.p).collect(),
             grid: deduped.iter().map(|c| c.g).collect(),
@@ -569,7 +575,8 @@ impl Builder<'_> {
 
     fn sector(&mut self, sector: &GridSector) {
         // Every span of the column: its floor, then its ceiling.
-        for span in sector.spans() {
+        for (index, span) in sector.spans().iter().enumerate() {
+            self.span = u8::try_from(index).unwrap_or(u8::MAX);
             if let Some(floor) = span.floor.as_ref() {
                 self.surface(floor, false);
             }
@@ -577,6 +584,7 @@ impl Builder<'_> {
                 self.surface(ceiling, true);
             }
         }
+        self.span = 0;
         for edge in WallEdge::ALL {
             for (index, wall) in sector.walls(edge).iter().enumerate() {
                 self.wall(edge, index, wall);
@@ -617,6 +625,7 @@ pub fn cell_faces_with(
         room,
         cell,
         leaf: LeafKey::sector(cell),
+        span: 0,
         square: Square::sector(cell),
         y_offset: r.y_offset,
         defaults,

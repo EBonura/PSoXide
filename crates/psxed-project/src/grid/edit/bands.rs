@@ -98,7 +98,7 @@ pub fn run_faces(world: &GridWorld, face: FaceRef) -> Vec<FaceRef> {
             out.sort();
             out
         }
-        FaceTarget::Surface(_) => Vec::new(),
+        FaceTarget::Surface { .. } => Vec::new(),
     }
 }
 
@@ -109,7 +109,7 @@ pub fn assignment(world: &GridWorld, face: FaceRef) -> Option<Option<u8>> {
     match face.target {
         FaceTarget::Derived { .. } => face.derived_wall(world).map(|w| w.band_set),
         FaceTarget::Wall { .. } => face.wall_of(world).map(|w| w.band_set),
-        FaceTarget::Surface(_) => None,
+        FaceTarget::Surface { .. } => None,
     }
 }
 
@@ -139,7 +139,7 @@ fn assign(world: &mut GridWorld, face: FaceRef, value: Option<u8>) -> bool {
             }
             _ => false,
         },
-        FaceTarget::Surface(_) => false,
+        FaceTarget::Surface { .. } => false,
     }
 }
 
@@ -219,7 +219,7 @@ fn wall_material(world: &GridWorld, face: FaceRef) -> Option<ResourceId> {
     match face.target {
         FaceTarget::Derived { .. } => face.derived_wall(world)?.material,
         FaceTarget::Wall { .. } => face.wall_of(world)?.material,
-        FaceTarget::Surface(_) => None,
+        FaceTarget::Surface { .. } => None,
     }
 }
 
@@ -409,7 +409,7 @@ pub fn wall_spans(world: &GridWorld, face: FaceRef) -> Option<(Span, Span)> {
                 .unwrap_or(span);
             Some((span, reference))
         }
-        FaceTarget::Surface(_) => None,
+        FaceTarget::Surface { .. } => None,
     }
 }
 
@@ -474,7 +474,7 @@ pub fn run_len(world: &GridWorld, face: FaceRef) -> usize {
 pub fn position_on_wall(face: FaceRef, xz: [i32; 2]) -> Option<i32> {
     let (cell, edge) = match face.target {
         FaceTarget::Derived { edge, .. } | FaceTarget::Wall { edge, .. } => (face.cell(), edge),
-        FaceTarget::Surface(_) => return None,
+        FaceTarget::Surface { .. } => return None,
     };
     let (ea, eb) = edge.endpoints();
     let at = |e: [i32; 2]| {

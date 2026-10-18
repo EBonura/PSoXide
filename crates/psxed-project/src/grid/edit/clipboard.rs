@@ -221,11 +221,15 @@ impl GridClipboard {
                 .entry([face.cell()[0] - min[0], face.cell()[1] - min[1]])
                 .or_default();
             match face.target {
-                FaceTarget::Surface(SurfaceKind::Floor) => {
-                    slot.set_ground_floor(source.ground_floor().cloned())
-                }
-                FaceTarget::Surface(SurfaceKind::Ceiling) => {
-                    slot.set_ground_ceiling(source.ground_ceiling().cloned());
+                FaceTarget::Surface {
+                    kind: SurfaceKind::Floor,
+                    ..
+                } => slot.set_ground_floor(face.surface(world).cloned()),
+                FaceTarget::Surface {
+                    kind: SurfaceKind::Ceiling,
+                    ..
+                } => {
+                    slot.set_ground_ceiling(face.surface(world).cloned());
                 }
                 FaceTarget::Wall { edge, index } => {
                     if let Some(wall) = source.walls(edge).get(index) {

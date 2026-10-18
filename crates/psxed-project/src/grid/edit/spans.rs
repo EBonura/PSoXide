@@ -50,7 +50,8 @@ pub struct SpanSkips {
 }
 
 impl SpanSkips {
-    fn add(&mut self, skip: SpanSkip) {
+    /// Count one more cell skipped for `skip`.
+    pub fn add(&mut self, skip: SpanSkip) {
         match skip {
             SpanSkip::NoSpanAtHeight => self.no_span += 1,
             SpanSkip::Sloped => self.sloped += 1,
@@ -266,9 +267,7 @@ pub fn cut_hole_column(
         let Some(index) = found else {
             break;
         };
-        let ceiling = sector.spans_mut()[index].ceiling.take();
-        sector.spans_mut()[index - 1].ceiling = ceiling;
-        sector.remove_span(index);
+        remove_boundary(sector, index);
         cut += 1;
         if scope != CutScope::AllAbove {
             break;
@@ -279,6 +278,21 @@ pub fn cut_hole_column(
     } else {
         Ok(cut)
     }
+}
+
+/// Remove the boundary between span `index - 1` and span `index`: the
+/// floor of the span above and the ceiling of the span below go, and the two
+/// merge into one open volume that takes the upper span's ceiling. This is
+/// the slab between them cut out, whatever its shape. Returns whether there
+/// was a boundary (`index` is a span above the ground span).
+pub fn remove_boundary(sector: &mut GridSector, index: usize) -> bool {
+    if index == 0 || index >= sector.span_count() {
+        return false;
+    }
+    let ceiling = sector.spans_mut()[index].ceiling.take();
+    sector.spans_mut()[index - 1].ceiling = ceiling;
+    sector.remove_span(index);
+    true
 }
 
 /// Add `delta` to every corner of `heights` at or above `y`.

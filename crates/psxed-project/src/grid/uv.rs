@@ -448,12 +448,20 @@ fn find_face(
     let mut faces = Vec::new();
     cell_faces_with(world, defaults, face.room, x, z, &mut faces);
     faces.into_iter().find(|f| match (face.target, f.kind) {
-        (FaceTarget::Surface(SurfaceKind::Floor), GridFaceKind::Floor { triangle }) => {
-            triangle.is_none() || triangle == Some(tri.unwrap_or(0))
-        }
-        (FaceTarget::Surface(SurfaceKind::Ceiling), GridFaceKind::Ceiling { triangle }) => {
-            triangle.is_none() || triangle == Some(tri.unwrap_or(0))
-        }
+        (
+            FaceTarget::Surface {
+                kind: SurfaceKind::Floor,
+                span,
+            },
+            GridFaceKind::Floor { triangle },
+        ) => f.span == span && (triangle.is_none() || triangle == Some(tri.unwrap_or(0))),
+        (
+            FaceTarget::Surface {
+                kind: SurfaceKind::Ceiling,
+                span,
+            },
+            GridFaceKind::Ceiling { triangle },
+        ) => f.span == span && (triangle.is_none() || triangle == Some(tri.unwrap_or(0))),
         (FaceTarget::Wall { edge, index }, GridFaceKind::Wall { edge: e, index: i }) => {
             edge == e && index == i
         }

@@ -13,6 +13,7 @@
 //! * [`raise`]: Raise and Lower, in Offset and Level modes.
 //! * [`ramp`]: a slope from one side of the region to the opposite side.
 //! * [`stairs`]: a flight of whole-sector treads along a path.
+//! * [`spiral`]: stairs winding round a ring of sectors, a slab per tread.
 //! * [`rules`]: the smart paint rules and the shared writing helpers.
 
 pub mod break_verb;
@@ -21,6 +22,7 @@ pub mod raise;
 pub mod raise_leaves;
 pub mod ramp;
 pub mod rules;
+pub mod spiral;
 pub mod stairs;
 
 use super::super::sector::GridSector;

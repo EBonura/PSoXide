@@ -116,7 +116,7 @@ pub fn set_material(
     material: Option<ResourceId>,
 ) -> bool {
     match face.target {
-        FaceTarget::Surface(_) => {
+        FaceTarget::Surface { .. } => {
             let Some(surface) = face.surface_mut(world) else {
                 return false;
             };
@@ -146,7 +146,7 @@ pub fn set_material(
 /// The material of `face`'s triangle (or of the wall).
 pub fn material_of(world: &GridWorld, face: FaceRef, tri: Option<u8>) -> Option<ResourceId> {
     match face.target {
-        FaceTarget::Surface(_) => face
+        FaceTarget::Surface { .. } => face
             .surface(world)
             .and_then(|s| s.tri(usize::from(tri.unwrap_or(0))).material),
         FaceTarget::Wall { .. } => face.wall_of(world).and_then(|w| w.material),
@@ -157,7 +157,7 @@ pub fn material_of(world: &GridWorld, face: FaceRef, tri: Option<u8>) -> Option<
 /// The placement of `face`'s triangle (or of the wall).
 pub fn uv_of(world: &GridWorld, face: FaceRef, tri: Option<u8>) -> Option<FaceUv> {
     match face.target {
-        FaceTarget::Surface(_) => face
+        FaceTarget::Surface { .. } => face
             .surface(world)
             .map(|s| s.tri(usize::from(tri.unwrap_or(0))).uv),
         FaceTarget::Wall { .. } => face.wall_of(world).map(|w| w.uv),
@@ -168,7 +168,7 @@ pub fn uv_of(world: &GridWorld, face: FaceRef, tri: Option<u8>) -> Option<FaceUv
 /// Edit the texture placement of `face`.
 pub fn edit_uv(world: &mut GridWorld, face: FaceRef, tri: Option<u8>, op: UvOp) -> bool {
     match face.target {
-        FaceTarget::Surface(_) => {
+        FaceTarget::Surface { .. } => {
             let Some(surface) = face.surface_mut(world) else {
                 return false;
             };
@@ -220,7 +220,7 @@ pub fn set_wall_facing(world: &mut GridWorld, face: FaceRef, facing: WallFacing)
 /// Set whether a wall blocks movement, or a surface can be walked on.
 pub fn set_solid(world: &mut GridWorld, face: FaceRef, value: bool) -> bool {
     match face.target {
-        FaceTarget::Surface(_) => match face.surface_mut(world) {
+        FaceTarget::Surface { .. } => match face.surface_mut(world) {
             Some(s) => {
                 let changed = s.walkable != value;
                 s.walkable = value;
@@ -272,7 +272,7 @@ mod tests {
     const FLOOR: FaceRef = FaceRef::new(
         0,
         crate::grid::leaf::LeafKey::sector([0, 0]),
-        FaceTarget::Surface(super::super::refs::SurfaceKind::Floor),
+        FaceTarget::ground(super::super::refs::SurfaceKind::Floor),
     );
 
     #[test]

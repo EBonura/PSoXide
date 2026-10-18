@@ -75,7 +75,7 @@ pub fn fit_across(
     let mut report = AcrossReport::default();
     let mut groups: BTreeMap<SurfaceKind, Vec<(FaceRef, Frame)>> = BTreeMap::new();
     for face in faces {
-        let FaceTarget::Surface(kind) = face.target else {
+        let FaceTarget::Surface { kind, .. } = face.target else {
             report.skipped += 1;
             continue;
         };

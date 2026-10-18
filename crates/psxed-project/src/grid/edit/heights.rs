@@ -61,7 +61,7 @@ const fn corner_child(corner: u8) -> usize {
 /// The corner of the leaf that exists now: a leaf that was subdivided since
 /// the corner was named is descended to the child that holds it.
 fn resolve(world: &GridWorld, corner: CornerRef) -> CornerRef {
-    if !matches!(corner.face.target, FaceTarget::Surface(_)) {
+    if !matches!(corner.face.target, FaceTarget::Surface { .. }) {
         return corner;
     }
     let Some(room) = world.rooms.get(corner.face.room) else {
@@ -90,7 +90,7 @@ fn bent_by(corners: &BTreeSet<CornerRef>) -> BTreeSet<(usize, crate::grid::leaf:
     let mut moved: BTreeMap<(usize, crate::grid::leaf::LeafKey), [i32; 2]> = BTreeMap::new();
     for c in corners {
         if c.face.leaf.level >= crate::grid::leaf::SECTOR_LEVEL
-            || !matches!(c.face.target, FaceTarget::Surface(_))
+            || !matches!(c.face.target, FaceTarget::Surface { .. })
         {
             continue;
         }
@@ -182,7 +182,7 @@ impl HeightDrag {
             });
         let mut splits = BTreeMap::new();
         for (corner, _) in &targets {
-            if !matches!(corner.face.target, FaceTarget::Surface(_)) {
+            if !matches!(corner.face.target, FaceTarget::Surface { .. }) {
                 continue;
             }
             if let Some(surface) = corner.face.surface(world) {

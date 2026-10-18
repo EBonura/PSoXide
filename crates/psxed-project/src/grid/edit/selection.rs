@@ -155,12 +155,14 @@ impl GridSelection {
     }
 }
 
-/// Floors or ceilings of `kind` in the bounding rectangle of `anchor` and
-/// `to` (cells in the same room), the Shift-click rule for surfaces.
+/// Floors or ceilings of `kind` of span `span` in the bounding rectangle of
+/// `anchor` and `to` (cells in the same room), the Shift-click rule for
+/// surfaces.
 pub fn range_surfaces(
     world: &GridWorld,
     room: usize,
     kind: SurfaceKind,
+    span: u8,
     anchor: &[[i32; 2]],
     to: [i32; 2],
 ) -> Vec<FaceRef> {
@@ -170,7 +172,13 @@ pub fn range_surfaces(
         rect.max = [rect.max[0].max(cell[0]), rect.max[1].max(cell[1])];
     }
     rect.cells()
-        .map(|cell| FaceRef::new(room, LeafKey::sector(cell), FaceTarget::Surface(kind)))
+        .map(|cell| {
+            FaceRef::new(
+                room,
+                LeafKey::sector(cell),
+                FaceTarget::Surface { kind, span },
+            )
+        })
         .filter(|f| f.exists(world))
         .collect()
 }
@@ -228,7 +236,7 @@ pub fn range_walls(world: &GridWorld, from: FaceRef, to: FaceRef) -> Vec<FaceRef
         FaceTarget::Wall { edge, .. } => columns
             .iter()
             .position(|(key, _, _)| *key == (face.cell(), edge)),
-        FaceTarget::Surface(_) | FaceTarget::Derived { .. } => None,
+        FaceTarget::Surface { .. } | FaceTarget::Derived { .. } => None,
     };
     let (Some(start), Some(goal)) = (column_of(&from), column_of(&to)) else {
         return vec![from, to];
@@ -439,10 +447,10 @@ mod tests {
     fn surface_range_is_the_bounding_rectangle() {
         let mut w = world(4, 4);
         w.rooms[0].sector_mut(2, 2).unwrap().set_ground_floor(None);
-        let faces = range_surfaces(&w, 0, SurfaceKind::Floor, &[[0, 0]], [2, 2]);
+        let faces = range_surfaces(&w, 0, SurfaceKind::Floor, 0, &[[0, 0]], [2, 2]);
         // 3x3 rectangle minus the missing floor.
         assert_eq!(faces.len(), 8);
-        let two = range_surfaces(&w, 0, SurfaceKind::Floor, &[[1, 1], [0, 3]], [3, 0]);
+        let two = range_surfaces(&w, 0, SurfaceKind::Floor, 0, &[[1, 1], [0, 3]], [3, 0]);
         assert_eq!(two.len(), 15, "{two:?}");
     }
 
@@ -531,9 +539,13 @@ mod tests {
             .map(|c| c.grid_pos(&w).unwrap()[0] / 1024)
             .collect();
         assert_eq!(xs, BTreeSet::from([0, 1, 2]));
-        assert!(line
-            .iter()
-            .all(|c| matches!(c.face.target, FaceTarget::Surface(SurfaceKind::Floor))));
+        assert!(line.iter().all(|c| matches!(
+            c.face.target,
+            FaceTarget::Surface {
+                kind: SurfaceKind::Floor,
+                ..
+            }
+        )));
         // An off-axis pair returns just the two.
         let off = CornerRef {
             face: FaceRef::floor(0, [1, 0]),

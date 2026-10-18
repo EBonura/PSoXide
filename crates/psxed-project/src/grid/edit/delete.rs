@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::super::world::GridWorld;
 use super::refs::{FaceRef, FaceTarget, SurfaceKind};
+use super::spans::remove_boundary;
 
 /// Delete `faces`. Walls go from the highest stack index down so the
 /// indices of the others stay valid while the batch runs. Rooms left with
@@ -13,15 +14,49 @@ pub fn delete_faces(world: &mut GridWorld, faces: &[FaceRef]) -> usize {
     let mut touched: BTreeSet<usize> = BTreeSet::new();
     let mut walls: BTreeMap<(usize, [i32; 2], super::super::sector::WallEdge), Vec<usize>> =
         BTreeMap::new();
-    for face in faces {
+    // Surfaces go from the highest boundary down, so removing a slab never
+    // shifts the span index of a face still to come.
+    let mut order: Vec<&FaceRef> = faces.iter().collect();
+    order.sort_by_key(|face| match face.target {
+        FaceTarget::Surface { kind, span } => {
+            core::cmp::Reverse(usize::from(span) + usize::from(kind == SurfaceKind::Ceiling))
+        }
+        _ => core::cmp::Reverse(0),
+    });
+    let mut merged: BTreeSet<(usize, super::super::leaf::LeafKey, usize)> = BTreeSet::new();
+    for face in order {
         match face.target {
-            FaceTarget::Surface(kind) => {
+            FaceTarget::Surface { kind, span } => {
                 let Some(sector) = face.sector_mut(world) else {
                     continue;
                 };
+                let index = usize::from(span);
+                // The surface of a slab (the floor of a span above the
+                // ground, the ceiling of a span with another over it) is
+                // taken out with the slab: the spans around it merge.
+                let boundary = match kind {
+                    SurfaceKind::Floor => index,
+                    SurfaceKind::Ceiling => index + 1,
+                };
+                // Both faces of one slab name the same boundary, and the faces
+                // are walked from the highest boundary down, so it goes once.
+                if merged.contains(&(face.room, face.leaf, boundary)) {
+                    continue;
+                }
+                if boundary > 0 && boundary < sector.span_count() {
+                    merged.insert((face.room, face.leaf, boundary));
+                    if remove_boundary(sector, boundary) {
+                        removed += 1;
+                        touched.insert(face.room);
+                    }
+                    continue;
+                }
+                let Some(slot) = sector.spans_mut().get_mut(index) else {
+                    continue;
+                };
                 let slot = match kind {
-                    SurfaceKind::Floor => sector.ground_floor_slot_mut(),
-                    SurfaceKind::Ceiling => sector.ground_ceiling_slot_mut(),
+                    SurfaceKind::Floor => &mut slot.floor,
+                    SurfaceKind::Ceiling => &mut slot.ceiling,
                 };
                 if slot.take().is_some() {
                     removed += 1;

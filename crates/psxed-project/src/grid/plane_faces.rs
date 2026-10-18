@@ -78,6 +78,7 @@ pub fn plane_faces_with(
         room,
         cell: plane.center_cell(),
         leaf: super::leaf::LeafKey::sector(plane.center_cell()),
+        span: 0,
         square: super::faces::Square::sector(plane.center_cell()),
         y_offset: r.y_offset,
         defaults,

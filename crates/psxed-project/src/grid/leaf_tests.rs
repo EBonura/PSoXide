@@ -263,7 +263,7 @@ fn a_face_ref_names_the_leaf_and_resolves_any_size() {
         ..GridWorld::default()
     };
     // The floor of the quarter-sector leaf resolves through its key.
-    let quarter = FaceRef::new(0, key(4, 0, 2), FaceTarget::Surface(SurfaceKind::Floor));
+    let quarter = FaceRef::new(0, key(4, 0, 2), FaceTarget::ground(SurfaceKind::Floor));
     assert_eq!(quarter.cell(), [0, 0]);
     assert_eq!(quarter.surface(&world).unwrap().heights, [768; 4]);
     quarter.surface_mut(&mut world).unwrap().heights = [1; 4];
@@ -277,7 +277,7 @@ fn a_face_ref_names_the_leaf_and_resolves_any_size() {
     let sector = FaceRef::floor(0, [1, 1]);
     assert_eq!(sector.corners(&world)[2].grid_pos(&world).unwrap()[0], 2048);
     // A reference to a leaf that is not there does not exist.
-    assert!(!FaceRef::new(0, key(4, 3, 3), FaceTarget::Surface(SurfaceKind::Floor)).exists(&world));
+    assert!(!FaceRef::new(0, key(4, 3, 3), FaceTarget::ground(SurfaceKind::Floor)).exists(&world));
 }
 
 #[test]

@@ -185,6 +185,7 @@ pub(super) fn cell_faces(
         room: room_index,
         cell,
         leaf: LeafKey::sector(cell),
+        span: 0,
         square: Square::sector(cell),
         y_offset: r.y_offset,
         defaults,

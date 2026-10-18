@@ -37,7 +37,7 @@ fn world(w: usize, d: usize) -> GridWorld {
 
 fn floor_corner(room: usize, leaf: LeafKey, corner: u8) -> CornerRef {
     CornerRef {
-        face: FaceRef::new(room, leaf, FaceTarget::Surface(SurfaceKind::Floor)),
+        face: FaceRef::new(room, leaf, FaceTarget::ground(SurfaceKind::Floor)),
         layer: 0,
         corner,
     }

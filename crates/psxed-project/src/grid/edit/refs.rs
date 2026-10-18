@@ -11,7 +11,7 @@ use super::super::derive::{self, DerivedKind, DerivedWall};
 use super::super::leaf::{LeafKey, CLICKS_PER_SECTOR};
 use super::super::overrides::WallMode;
 use super::super::room::GridRoom;
-use super::super::sector::{GridSector, WallEdge};
+use super::super::sector::{GridSector, GridSpan, WallEdge};
 use super::super::surface::{GridSurface, GridWall};
 use super::super::units::SECTOR_UNITS;
 use super::super::world::GridWorld;
@@ -38,8 +38,15 @@ impl SurfaceKind {
 /// What a face is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum FaceTarget {
-    /// A floor or ceiling.
-    Surface(SurfaceKind),
+    /// A floor or ceiling of one span of the leaf's column.
+    Surface {
+        /// Floor or ceiling.
+        kind: SurfaceKind,
+        /// Index of the span in the column, `0` the ground span. A selection
+        /// is transient, so an index that shifts when a slab is inserted
+        /// does no harm (`docs/grid/multi-storey.md`, 5.9).
+        span: u8,
+    },
     /// One wall in an edge's stack.
     Wall {
         /// Owning edge.
@@ -75,12 +82,43 @@ pub struct FaceRef {
     pub target: FaceTarget,
 }
 
+impl FaceTarget {
+    /// The floor of span `span`.
+    pub const fn floor(span: u8) -> Self {
+        Self::Surface {
+            kind: SurfaceKind::Floor,
+            span,
+        }
+    }
+
+    /// The ceiling of span `span`.
+    pub const fn ceiling(span: u8) -> Self {
+        Self::Surface {
+            kind: SurfaceKind::Ceiling,
+            span,
+        }
+    }
+
+    /// The floor or ceiling of the ground span.
+    pub const fn ground(kind: SurfaceKind) -> Self {
+        Self::Surface { kind, span: 0 }
+    }
+
+    /// The span a floor or ceiling belongs to; `None` for a wall.
+    pub const fn span(self) -> Option<u8> {
+        match self {
+            Self::Surface { span, .. } => Some(span),
+            _ => None,
+        }
+    }
+}
+
 /// Sector-local corner offsets `[x, z]` of corner `0..4` of a face. A
 /// surface runs `[NW, NE, SE, SW]`; a wall runs `[bottom a, bottom b, top
 /// b, top a]` along its edge's walking direction.
 pub fn corner_offsets(target: FaceTarget) -> [[i32; 2]; 4] {
     match target {
-        FaceTarget::Surface(_) => [[0, 0], [1, 0], [1, 1], [0, 1]],
+        FaceTarget::Surface { .. } => [[0, 0], [1, 0], [1, 1], [0, 1]],
         FaceTarget::Wall { edge, .. } | FaceTarget::Derived { edge, .. } => {
             let (a, b) = edge.endpoints();
             [a, b, b, a]
@@ -100,22 +138,24 @@ impl FaceRef {
         self.leaf.cell()
     }
 
-    /// The floor of `cell` in `room`.
+    /// The ground floor of `cell` in `room`.
     pub fn floor(room: usize, cell: [i32; 2]) -> Self {
-        Self {
-            room,
-            leaf: LeafKey::sector(cell),
-            target: FaceTarget::Surface(SurfaceKind::Floor),
-        }
+        Self::floor_in(room, cell, 0)
     }
 
-    /// The ceiling of `cell` in `room`.
+    /// The ground ceiling of `cell` in `room`.
     pub fn ceiling(room: usize, cell: [i32; 2]) -> Self {
-        Self {
-            room,
-            leaf: LeafKey::sector(cell),
-            target: FaceTarget::Surface(SurfaceKind::Ceiling),
-        }
+        Self::ceiling_in(room, cell, 0)
+    }
+
+    /// The floor of span `span` of `cell` in `room`.
+    pub fn floor_in(room: usize, cell: [i32; 2], span: u8) -> Self {
+        Self::new(room, LeafKey::sector(cell), FaceTarget::floor(span))
+    }
+
+    /// The ceiling of span `span` of `cell` in `room`.
+    pub fn ceiling_in(room: usize, cell: [i32; 2], span: u8) -> Self {
+        Self::new(room, LeafKey::sector(cell), FaceTarget::ceiling(span))
     }
 
     /// The derived wall of `kind` on `edge` of `cell` in `room`.
@@ -173,26 +213,35 @@ impl FaceRef {
 
     /// The surface, for floor and ceiling faces.
     pub fn surface<'a>(&self, world: &'a GridWorld) -> Option<&'a GridSurface> {
-        let FaceTarget::Surface(kind) = self.target else {
+        let FaceTarget::Surface { kind, span } = self.target else {
             return None;
         };
-        let sector = self.sector(world)?;
+        let span = self.sector(world)?.spans().get(usize::from(span))?;
         match kind {
-            SurfaceKind::Floor => sector.ground_floor(),
-            SurfaceKind::Ceiling => sector.ground_ceiling(),
+            SurfaceKind::Floor => span.floor.as_ref(),
+            SurfaceKind::Ceiling => span.ceiling.as_ref(),
         }
     }
 
     /// Mutable surface.
     pub fn surface_mut<'a>(&self, world: &'a mut GridWorld) -> Option<&'a mut GridSurface> {
-        let FaceTarget::Surface(kind) = self.target else {
+        let FaceTarget::Surface { kind, span } = self.target else {
             return None;
         };
-        let sector = self.sector_mut(world)?;
+        let span = self
+            .sector_mut(world)?
+            .spans_mut()
+            .get_mut(usize::from(span))?;
         match kind {
-            SurfaceKind::Floor => sector.ground_floor_mut(),
-            SurfaceKind::Ceiling => sector.ground_ceiling_mut(),
+            SurfaceKind::Floor => span.floor.as_mut(),
+            SurfaceKind::Ceiling => span.ceiling.as_mut(),
         }
+    }
+
+    /// The span of the leaf's column a floor or ceiling face belongs to.
+    pub fn span_of<'a>(&self, world: &'a GridWorld) -> Option<&'a GridSpan> {
+        let span = self.target.span()?;
+        self.sector(world)?.spans().get(usize::from(span))
     }
 
     /// The wall, for wall faces.
@@ -214,7 +263,7 @@ impl FaceRef {
     /// Whether the face still exists.
     pub fn exists(&self, world: &GridWorld) -> bool {
         match self.target {
-            FaceTarget::Surface(_) => self.surface(world).is_some(),
+            FaceTarget::Surface { .. } => self.surface(world).is_some(),
             FaceTarget::Wall { .. } => self.wall_of(world).is_some(),
             FaceTarget::Derived { .. } => self.derived_wall(world).is_some(),
         }
@@ -225,7 +274,7 @@ impl FaceRef {
     /// room's offset.
     pub fn heights(&self, world: &GridWorld, layer: u8) -> Option<[i32; 4]> {
         match self.target {
-            FaceTarget::Surface(_) => {
+            FaceTarget::Surface { .. } => {
                 let surface = self.surface(world)?;
                 match layer {
                     0 => Some(surface.heights),
@@ -326,7 +375,7 @@ impl CornerRef {
         let value = world_y - room.y_offset;
         let slot = usize::from(self.corner & 3);
         match self.face.target {
-            FaceTarget::Surface(_) => {
+            FaceTarget::Surface { .. } => {
                 let Some(surface) = self.face.surface_mut(world) else {
                     return false;
                 };
@@ -433,11 +482,14 @@ pub fn faces_of_leaf(world: &GridWorld, room: usize, leaf: LeafKey) -> Vec<FaceR
         return out;
     };
     let face = |target| FaceRef::new(room, leaf, target);
-    if sector.ground_floor().is_some() {
-        out.push(face(FaceTarget::Surface(SurfaceKind::Floor)));
-    }
-    if sector.ground_ceiling().is_some() {
-        out.push(face(FaceTarget::Surface(SurfaceKind::Ceiling)));
+    for (index, span) in sector.spans().iter().enumerate() {
+        let span_index = u8::try_from(index).unwrap_or(u8::MAX);
+        if span.floor.is_some() {
+            out.push(face(FaceTarget::floor(span_index)));
+        }
+        if span.ceiling.is_some() {
+            out.push(face(FaceTarget::ceiling(span_index)));
+        }
     }
     for edge in WallEdge::ALL {
         for index in 0..sector.walls(edge).len() {

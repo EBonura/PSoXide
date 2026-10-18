@@ -96,16 +96,36 @@ pub fn next_wall_heights(
     pick_y: Option<i32>,
 ) -> Option<[i32; 4]> {
     let (room_bottom, room_top) = room_bounds;
-    let [fa, fb] = sector
-        .ground_floor()
+    // A column of several spans has a gap per span: the one open at `pick_y`
+    // (the ground span without it).
+    let span = if sector.is_single_span() {
+        &sector.spans()[0]
+    } else {
+        let index = pick_y.and_then(|y| sector.span_at(y, 0)).unwrap_or(0);
+        &sector.spans()[index]
+    };
+    let [fa, fb] = span
+        .floor
+        .as_ref()
         .map_or([room_bottom; 2], |s| surface_edge_heights(s, edge));
-    let [ca, cb] = sector
-        .ground_ceiling()
+    let [ca, cb] = span
+        .ceiling
+        .as_ref()
         .map_or([room_top; 2], |s| surface_edge_heights(s, edge));
-    let walls = sector.walls(edge);
-    if walls.len() >= MAX_WALLS_PER_EDGE {
+    if sector.walls(edge).len() >= MAX_WALLS_PER_EDGE {
         return None;
     }
+    // Only the walls that stand in this span's volume count: a wall of the
+    // storey below or above is not a gap boundary here.
+    let walls: Vec<&GridWall> = sector
+        .walls(edge)
+        .iter()
+        .filter(|w| {
+            sector.is_single_span()
+                || (w.heights[2].max(w.heights[3]) > fa.min(fb)
+                    && w.heights[0].min(w.heights[1]) < ca.max(cb))
+        })
+        .collect();
 
     if walls.is_empty() {
         if (fa - fb).abs() > MIN_GAP || (ca - cb).abs() > MIN_GAP {
@@ -123,7 +143,7 @@ pub fn next_wall_heights(
         return Some([fa, fb, cb, ca]);
     }
 
-    let mut sorted: Vec<&GridWall> = walls.iter().collect();
+    let mut sorted: Vec<&GridWall> = walls;
     sorted.sort_by_key(|w| w.heights[0] + w.heights[1]);
     let mut gaps: Vec<Gap> = Vec::new();
 

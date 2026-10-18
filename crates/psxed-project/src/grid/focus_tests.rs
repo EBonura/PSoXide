@@ -59,7 +59,8 @@ fn the_span_open_at_the_height_stands_in_for_the_ground_span_during_the_edit() {
         sector.ground_floor_mut().unwrap().heights = [1792; 4];
         before
     })
-    .unwrap();
+    .unwrap()
+    .value;
     assert_eq!(seen, 1536, "the edit saw the upper span's floor");
     // The upper floor moved; the ground floor and the order are as they were.
     assert_eq!(floors(&world, 1), vec![0, 1792]);
@@ -130,7 +131,7 @@ fn single_span_columns_are_left_alone_and_a_missing_room_is_refused() {
     let mut world = world_with_slab();
     let row = CellRect::from_corners([0, 0], [0, 0]);
     // Height 100 is open in the single span of sector 0: nothing swaps.
-    let ran = with_span_at(&mut world, 0, row, 100, |_| 7).unwrap();
+    let ran = with_span_at(&mut world, 0, row, 100, |_| 7).unwrap().value;
     assert_eq!(ran, 7);
     assert_eq!(
         with_span_at(&mut world, 3, row, 0, |_| ()),
