@@ -46,6 +46,8 @@ pub enum BreakSnap {
     Fine,
     /// 256 grid units, one click.
     Click,
+    /// An exact step in grid units (what a lens makes of a fine step).
+    Units(i32),
 }
 
 impl BreakSnap {
@@ -54,6 +56,7 @@ impl BreakSnap {
         match self {
             Self::Fine => crate::grid::units::FINE_UNITS,
             Self::Click => crate::grid::units::CLICK_UNITS,
+            Self::Units(step) => if step > 0 { step } else { crate::grid::units::FINE_UNITS },
         }
     }
 }

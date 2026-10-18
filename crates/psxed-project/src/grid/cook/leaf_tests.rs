@@ -410,3 +410,44 @@ fn bands_and_rough_in_mixed_rooms_leave_no_hole() {
         assert_eq!(flat.tables[0].walls, rough.tables[0].walls);
     }
 }
+
+#[test]
+fn the_real_motor_climbs_fine_treads_one_step_at_a_time() {
+    use psx_engine::RoomPoint;
+    let mut room = big_hall();
+    let keys: Vec<LeafKey> = room.leaves.in_sector([1, 1]).iter().map(|(k, _)| *k).collect();
+    crate::grid::tree::subdivide_all_to(&mut room, &keys, 4);
+    // Four treads across sector (1,1): clicks x 4..7, 64 grid units each.
+    for i in 0..4 {
+        for z in 4..8 {
+            let key = LeafKey::new(4, 4 + i, z).unwrap();
+            room.leaf_mut(key)
+                .unwrap()
+                .ground_floor_mut()
+                .unwrap()
+                .heights = [64 * (i + 1); 4];
+        }
+    }
+    normalize(&mut room);
+    let world = world_of(room);
+    let native = super::motor_harness::native(&world);
+    let units = RuntimeUnits::new(GridScale::DEFAULT).unwrap();
+    let tops: Vec<i32> = (1..=4).map(|i| units.rt(64 * i)).collect();
+    // Start in the sector west of the treads, walking east.
+    let path = super::motor_harness::walk_path(&native, RoomPoint::new(50, 2, 120), 4096, 0, 160);
+    let ys: Vec<i32> = path.iter().map(|p| p.y).collect();
+    let xs: Vec<i32> = path.iter().map(|p| p.x).collect();
+    assert!(xs.last().unwrap() > &(80 + 4 * 20), "{xs:?}");
+    // Every tread height is stood on at some tick, exactly.
+    for (i, top) in tops.iter().enumerate() {
+        assert!(ys.contains(top), "tread {i} at {top} never stood on: {ys:?}");
+    }
+    // And the climb is monotone up to the top tread (past it the floor
+    // drops back to the hall).
+    let top = ys.iter().position(|y| *y == tops[3]).unwrap();
+    assert!(ys[..=top].windows(2).all(|w| w[1] >= w[0]), "{ys:?}");
+    // The heights on the way are the treads, not a ramp between them.
+    let mut seen: Vec<i32> = ys[..=top].to_vec();
+    seen.dedup();
+    assert_eq!(seen, vec![0, 5, 10, 15, 20], "{ys:?}");
+}

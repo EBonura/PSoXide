@@ -16,6 +16,7 @@
 //! * [`rules`]: the smart paint rules and the shared writing helpers.
 
 pub mod break_verb;
+pub mod fine;
 pub mod raise;
 pub mod raise_leaves;
 pub mod ramp;

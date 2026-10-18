@@ -161,3 +161,18 @@ pub(crate) fn leaf_diag_walls(room: &GridRoom, key: LeafKey, sector: &GridSector
         })
         .collect()
 }
+
+/// How many derived diagonal faces the leaf `key` has, of one rule or of
+/// all of them (for tools that report what an edit made).
+pub fn diagonal_face_count(
+    room: &GridRoom,
+    key: LeafKey,
+    kind: Option<super::derive::DerivedKind>,
+) -> usize {
+    room.leaf(key).map_or(0, |sector| {
+        leaf_diag_walls(room, key, sector)
+            .iter()
+            .filter(|w| kind.is_none_or(|k| w.wall.kind == k))
+            .count()
+    })
+}

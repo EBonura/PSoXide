@@ -27,8 +27,10 @@ pub mod bands;
 pub mod clipboard;
 pub mod convert;
 pub mod delete;
+pub mod fit;
 pub mod derived;
 pub mod heights;
+pub mod lens;
 pub mod meshes;
 pub mod natural;
 pub mod outline;
@@ -45,6 +47,7 @@ pub mod walls;
 pub use clipboard::{GridClipboard, PasteOutcome, Transform};
 pub use convert::{convert_to_derived, ConvertMode, ConvertReport};
 pub use delete::{clear_cells, delete_faces};
+pub use fit::{split_to_fit, ClickRect};
 pub use derived::{
     clean_overrides, derived_solid, is_derived_hidden, reset_derived, set_derived_hidden,
 };

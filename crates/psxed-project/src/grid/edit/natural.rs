@@ -5,6 +5,7 @@
 //! write with; each is a plain function over a [`GridWorld`] that changes
 //! ordinary document fields and nothing else.
 
+use super::super::leaf::LeafKey;
 use super::super::sector::{GridSector, WallEdge};
 use super::super::surface::{GridSurface, VOID_A, VOID_B};
 use super::super::world::GridWorld;
@@ -48,10 +49,8 @@ fn surface_mut(sector: &mut GridSector, kind: SurfaceKind) -> Option<&mut GridSu
     }
 }
 
-fn sector_mut(world: &mut GridWorld, room: usize, cell: [i32; 2]) -> Option<&mut GridSector> {
-    let r = world.rooms.get_mut(room)?;
-    let [x, z] = r.local(cell)?;
-    r.sector_mut(x, z)
+fn leaf_sector_mut(world: &mut GridWorld, room: usize, key: LeafKey) -> Option<&mut GridSector> {
+    world.rooms.get_mut(room)?.leaf_mut(key)
 }
 
 /// Make `surface` split-level: its second triangle gets its own heights,
@@ -77,7 +76,19 @@ pub fn crack(
     tri: usize,
     delta: i32,
 ) -> bool {
-    let Some(surface) = sector_mut(world, room, cell).and_then(|s| surface_mut(s, kind)) else {
+    crack_leaf(world, room, LeafKey::sector(cell), kind, tri, delta)
+}
+
+/// [`crack`] on any leaf (a half or quarter sector cell, or a sector).
+pub fn crack_leaf(
+    world: &mut GridWorld,
+    room: usize,
+    leaf: LeafKey,
+    kind: SurfaceKind,
+    tri: usize,
+    delta: i32,
+) -> bool {
+    let Some(surface) = leaf_sector_mut(world, room, leaf).and_then(|s| surface_mut(s, kind)) else {
         return false;
     };
     if delta == 0 {
@@ -105,7 +116,19 @@ pub fn set_triangle_heights(
     tri: usize,
     heights: [i32; 4],
 ) -> bool {
-    let Some(surface) = sector_mut(world, room, cell).and_then(|s| surface_mut(s, kind)) else {
+    set_triangle_heights_leaf(world, room, LeafKey::sector(cell), kind, tri, heights)
+}
+
+/// [`set_triangle_heights`] on any leaf.
+pub fn set_triangle_heights_leaf(
+    world: &mut GridWorld,
+    room: usize,
+    leaf: LeafKey,
+    kind: SurfaceKind,
+    tri: usize,
+    heights: [i32; 4],
+) -> bool {
+    let Some(surface) = leaf_sector_mut(world, room, leaf).and_then(|s| surface_mut(s, kind)) else {
         return false;
     };
     make_split_level(surface);
@@ -122,7 +145,12 @@ pub fn set_triangle_heights(
 /// Merge a split-level surface back into one plane (the first triangle's
 /// heights win). Returns whether it changed.
 pub fn heal(world: &mut GridWorld, room: usize, cell: [i32; 2], kind: SurfaceKind) -> bool {
-    let Some(surface) = sector_mut(world, room, cell).and_then(|s| surface_mut(s, kind)) else {
+    heal_leaf(world, room, LeafKey::sector(cell), kind)
+}
+
+/// [`heal`] on any leaf.
+pub fn heal_leaf(world: &mut GridWorld, room: usize, leaf: LeafKey, kind: SurfaceKind) -> bool {
+    let Some(surface) = leaf_sector_mut(world, room, leaf).and_then(|s| surface_mut(s, kind)) else {
         return false;
     };
     surface.heights_b.take().is_some()
@@ -137,7 +165,19 @@ pub fn set_void(
     which: Triangles,
     void: bool,
 ) -> bool {
-    let Some(surface) = sector_mut(world, room, cell).and_then(|s| surface_mut(s, kind)) else {
+    set_void_leaf(world, room, LeafKey::sector(cell), kind, which, void)
+}
+
+/// [`set_void`] on any leaf.
+pub fn set_void_leaf(
+    world: &mut GridWorld,
+    room: usize,
+    leaf: LeafKey,
+    kind: SurfaceKind,
+    which: Triangles,
+    void: bool,
+) -> bool {
+    let Some(surface) = leaf_sector_mut(world, room, leaf).and_then(|s| surface_mut(s, kind)) else {
         return false;
     };
     let before = surface.void;
@@ -162,7 +202,20 @@ pub fn set_wall_heights(
     index: usize,
     heights: [i32; 4],
 ) -> bool {
-    let Some(wall) = sector_mut(world, room, cell).and_then(|s| s.walls_mut(edge).get_mut(index))
+    set_wall_heights_leaf(world, room, LeafKey::sector(cell), edge, index, heights)
+}
+
+/// [`set_wall_heights`] on any leaf.
+pub fn set_wall_heights_leaf(
+    world: &mut GridWorld,
+    room: usize,
+    leaf: LeafKey,
+    edge: WallEdge,
+    index: usize,
+    heights: [i32; 4],
+) -> bool {
+    let Some(wall) =
+        leaf_sector_mut(world, room, leaf).and_then(|s| s.walls_mut(edge).get_mut(index))
     else {
         return false;
     };
