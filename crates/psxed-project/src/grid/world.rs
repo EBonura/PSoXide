@@ -120,7 +120,7 @@ impl GridWorld {
             }
         };
         for room in &self.rooms {
-            for (_, _, sector) in room.iter() {
+            for (_, sector) in room.leaves() {
                 for span in sector.spans() {
                     note(span.wall_material);
                 }
@@ -219,22 +219,16 @@ impl GridWorld {
         let mut bounds: Option<EditorBounds> = None;
         for (room_index, room) in self.rooms.iter().enumerate() {
             let origin = self.room_origin_editor(room);
-            for (x, z, sector) in room.iter() {
+            for (key, sector) in room.leaves() {
                 let Some((low, high)) = sector.height_range() else {
                     continue;
                 };
-                let x0 = self
-                    .scale
-                    .to_editor((room.origin[0] + x as i32) * SECTOR_UNITS);
-                let z0 = self
-                    .scale
-                    .to_editor((room.origin[1] + z as i32) * SECTOR_UNITS);
-                let x1 = self
-                    .scale
-                    .to_editor((room.origin[0] + x as i32 + 1) * SECTOR_UNITS);
-                let z1 = self
-                    .scale
-                    .to_editor((room.origin[1] + z as i32 + 1) * SECTOR_UNITS);
+                let click = super::units::CLICK_UNITS;
+                let n = key.edge_clicks();
+                let x0 = self.scale.to_editor(key.x.saturating_mul(click));
+                let z0 = self.scale.to_editor(key.z.saturating_mul(click));
+                let x1 = self.scale.to_editor((key.x + n).saturating_mul(click));
+                let z1 = self.scale.to_editor((key.z + n).saturating_mul(click));
                 let y0 = origin[1] + self.scale.to_editor(low);
                 let y1 = origin[1] + self.scale.to_editor(high);
                 let cell = EditorBounds {

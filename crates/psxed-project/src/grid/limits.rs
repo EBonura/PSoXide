@@ -655,7 +655,7 @@ fn check_bands(room_index: usize, room: &GridRoom, issues: &mut Vec<GridIssue>) 
     }
     let mut named: Vec<u8> = room.defaults.bands.into_iter().collect();
     named.extend(room.edge_overrides.iter().filter_map(|(_, o)| o.band_set));
-    for (_, _, sector) in room.iter() {
+    for (_, sector) in room.leaves() {
         for edge in WallEdge::ALL {
             named.extend(sector.walls(edge).iter().filter_map(|w| w.band_set));
         }

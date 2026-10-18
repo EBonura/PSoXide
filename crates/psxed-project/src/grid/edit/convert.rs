@@ -158,7 +158,8 @@ fn placement(
     Some((!uv.is_identity()).then_some(uv))
 }
 
-/// Convert `room` of `world` to derived walls.
+/// Convert `room` of `world` to derived walls. `None` for a missing room and
+/// for one with cells of other sizes (merge them back first).
 pub fn convert_to_derived(
     world: &mut GridWorld,
     room: usize,
@@ -167,6 +168,10 @@ pub fn convert_to_derived(
     let r = world.rooms.get(room)?;
     if r.wall_mode == WallMode::Derived {
         return Some(ConvertReport::default());
+    }
+    // The conversion reads whole sectors; merge the cells back first.
+    if !r.leaves.is_sectors_only() {
+        return None;
     }
     // Every derived face of the room, grouped by physical segment.
     let mut groups: BTreeMap<EdgeKey, Vec<DerivedWall>> = BTreeMap::new();

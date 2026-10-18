@@ -57,7 +57,7 @@ pub fn surface_edge_heights(surface: &GridSurface, edge: WallEdge) -> [i32; 2] {
 /// height above its bottom.
 pub fn room_height_bounds(room: &GridRoom) -> (i32, i32) {
     let mut range: Option<(i32, i32)> = None;
-    for (_, _, sector) in room.iter() {
+    for (_, sector) in room.leaves() {
         if let Some((lo, hi)) = sector.height_range() {
             range = Some(range.map_or((lo, hi), |(a, b)| (a.min(lo), b.max(hi))));
         }

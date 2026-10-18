@@ -376,6 +376,16 @@ pub fn heatmap(world: &GridWorld, options: HeatOptions) -> Result<HeatMap, Strin
         None,
     )?;
     let cook_ms = started.elapsed().as_secs_f32() * 1000.0;
+    // The cook drew the leaves; where the character can stand is read on
+    // whole sectors, the runtime's granularity.
+    let sector_view;
+    let world = match super::sector_view::sector_world(world) {
+        Some((view, _)) => {
+            sector_view = view;
+            &sector_view
+        }
+        None => world,
+    };
     let units = RuntimeUnits::new(world.scale)?;
     let size = units.sector() as i32;
     let standing = walk::analyse(world, &[], &psx_engine::WalkLimits::DEFAULT)

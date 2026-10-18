@@ -156,7 +156,7 @@ fn references(room: &GridRoom) -> Vec<u32> {
     for (_, o) in room.edge_overrides.iter() {
         note(o.band_set);
     }
-    for (_, _, sector) in room.iter() {
+    for (_, sector) in room.leaves() {
         for edge in WallEdge::ALL {
             for wall in sector.walls(edge) {
                 note(wall.band_set);

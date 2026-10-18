@@ -333,3 +333,23 @@ pub fn cell_wall_segments(room: &GridRoom, cell: [i32; 2]) -> Vec<WallSegment> {
         })
         .collect()
 }
+
+/// Lowest and highest room-relative height of the visible derived walls
+/// listed under `cell`, for culling bounds. Meant for rooms with leaves of
+/// several sizes.
+pub fn derived_range(room: &GridRoom, cell: [i32; 2]) -> Option<(i32, i32)> {
+    let leaves = room.leaves.in_sector(cell);
+    let mut range: Option<(i32, i32)> = None;
+    for w in cell_walls(room, cell, &leaves)
+        .iter()
+        .filter(|w| !w.wall.hidden)
+    {
+        for p in &w.wall.ring {
+            range = Some(match range {
+                Some((lo, hi)) => (lo.min(p[1]), hi.max(p[1])),
+                None => (p[1], p[1]),
+            });
+        }
+    }
+    range
+}

@@ -232,6 +232,11 @@ fn cell_walk(
 /// Analyse `world` against `limits`. `None` when the world's scale cannot be
 /// cooked (no runtime units to judge in).
 pub fn analyse(world: &GridWorld, spawns: &[Spawn], limits: &WalkLimits) -> Option<WalkAnalysis> {
+    // Walkability is judged where the runtime stands: on whole sectors. A
+    // room with cells of other sizes is read through its sector view.
+    if let Some((view, _)) = super::sector_view::sector_world(world) {
+        return analyse(&view, spawns, limits);
+    }
     let units = RuntimeUnits::new(world.scale).ok()?;
     let mut rooms = Vec::new();
     let mut edges = Vec::new();

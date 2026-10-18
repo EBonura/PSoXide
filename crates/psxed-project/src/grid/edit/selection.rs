@@ -295,7 +295,7 @@ pub fn range_corners(world: &GridWorld, a: CornerRef, b: CornerRef) -> Vec<Corne
         let within = |v: i32, lo: i32, hi: i32| v >= lo.min(hi) && v <= lo.max(hi);
         cross == 0 && within(p[0], pa[0], pb[0]) && within(p[2], pa[2], pb[2])
     };
-    for (x, z, _) in room.iter() {
+    for [x, z] in room.face_cells() {
         let cell = room.world_cell(x, z);
         for face in faces_of_cell(world, a.face.room, cell) {
             // Same kind of face as the anchor, so a floor range does not
