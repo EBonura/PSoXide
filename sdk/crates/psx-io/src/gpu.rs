@@ -85,6 +85,7 @@ pub fn write_display_control(word: u32) {
         handoff::write_display_control_slow(word);
         return;
     }
+    crate::diag::gp1_write();
     // SAFETY: GP1 (`psx_hw::gpu::GP1`) is the GPU's aligned 32-bit control port on every PS1; any word is
     // a legal write and only changes GPU state.
     unsafe { crate::write_u32(GP1, word) }
@@ -151,14 +152,22 @@ fn wait_ready(flag: GpuStat) {
         return;
     }
     let mut spins = 0u32;
+    let diag_site = if flag == GpuStat::READY_CMD {
+        crate::diag::site::GPU_READY_CMD
+    } else {
+        crate::diag::site::GPU_READY_DMA
+    };
+    crate::diag::wait_begin(diag_site, 0);
     while !status().contains(flag) {
         if spins >= READY_SPINS {
+            crate::diag::wait_timeout(diag_site, 0, READY_SPINS);
             count_command_reset();
             write_display_control(psx_hw::gpu::gp1::RESET_CMD_BUFFER);
             return;
         }
         spins += 1;
     }
+    crate::diag::wait_end();
 }
 
 /// GP1(01h) resets [`wait_command_ready`] and [`wait_dma_ready`] have issued

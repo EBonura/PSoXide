@@ -154,6 +154,7 @@ impl Cd {
             }
             write_byte(reg::PARAMETER, param);
         }
+        crate::diag::cd_command(command);
         write_byte(reg::COMMAND_RESPONSE, command);
         Some(irq_enable)
     }
@@ -472,6 +473,7 @@ impl Cd {
 
     /// Write the command byte, which starts the command.
     pub fn send_command_byte(&mut self, byte: u8) {
+        crate::diag::cd_command(byte);
         write_byte(reg::COMMAND_RESPONSE, byte);
     }
 
@@ -533,6 +535,7 @@ impl CommandIo for Mmio {
         write_byte(reg::PARAMETER, value);
     }
     fn write_command(&mut self, command: u8) {
+        crate::diag::cd_command(command);
         write_byte(reg::COMMAND_RESPONSE, command);
     }
     fn wait_irq(&mut self, expected: u8, spins: u32) -> Result<u8, CdError> {
@@ -776,6 +779,7 @@ fn try_command_until_complete_inner(command: u8, params: &[u8], spin_limit: u32)
         }
         write_byte(reg::PARAMETER, param);
     }
+    crate::diag::cd_command(command);
     write_byte(reg::COMMAND_RESPONSE, command);
 
     let ok = wait_ack_then_complete(spin_limit);
@@ -866,6 +870,7 @@ fn clear_parameter_fifo() {
 }
 
 fn ack_irq(bits: u8) {
+    crate::diag::cd_irq_acked(bits);
     select_index(1);
     write_byte(reg::REQUEST_IRQ, bits & code::ACK_ALL);
     irq::acknowledge(1 << psx_hw::irq::source::CDROM);
@@ -876,6 +881,7 @@ fn irq_flag() -> u8 {
     select_index(1);
     let flag = read_byte(reg::REQUEST_IRQ) & code::ACK_ALL;
     select_index(0);
+    crate::diag::cd_irq_seen(flag);
     flag
 }
 

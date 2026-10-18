@@ -39,6 +39,8 @@ mod mem;
 pub mod bios;
 pub mod cache;
 pub mod critical_section;
+#[cfg(all(feature = "console-diag", target_arch = "mips"))]
+pub mod diag;
 pub mod interrupts;
 mod peripherals;
 #[cfg(feature = "present-queue")]
@@ -284,6 +286,8 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
 extern "C" fn report_panic(info: *const u8) -> ! {
     // SAFETY: `panic` passes its `&PanicInfo`, alive for the whole panic.
     let info = unsafe { &*info.cast::<core::panic::PanicInfo<'_>>() };
+    #[cfg(feature = "console-diag")]
+    diag::panic_panel(info);
     tty::print("PANIC: ");
     if let Some(msg) = info.message().as_str() {
         tty::print(msg);

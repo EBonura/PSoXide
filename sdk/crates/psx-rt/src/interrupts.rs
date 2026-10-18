@@ -134,6 +134,16 @@ __psx_rt_exception_handler:
     addiu $27, $zero, {ack_vblank}
     sw    $27, {i_stat}($26)
 
+    # Console stop-panel watchdog (`diag`, feature `console-diag` only): save every
+    # register, run the watch on its own stack, put everything back.
+    .if {diag}
+    lui   $26, %hi(.Lpsx_diag_ret)
+    addiu $26, $26, %lo(.Lpsx_diag_ret)
+    j     __psx_diag_vblank_tramp
+    nop
+.Lpsx_diag_ret:
+    .endif
+
 1:
     mfc0  $27, $13
     nop
@@ -240,8 +250,13 @@ __psx_rt_exception_handler:
     jr    $26
     .word {rfe}
 3:
+    .if {diag}
+    j     __psx_diag_fault_tramp
+    nop
+    .else
     b     3b
     nop
+    .endif
 
     # No VBlank pending. An interrupt (ExcCode 0) with an enabled source
     # pending here is one nothing in this handler owns, and returning without
@@ -288,6 +303,7 @@ __psx_rt_exception_handler:
     "#,
     strict = const STRICT_FAULTS as u32,
     present = const PRESENT_QUEUE as u32,
+    diag = const CONSOLE_DIAG as u32,
     // Every register the handler touches is in the I/O window, so one `lui`
     // of the window's high half reaches them all and the offsets are the low
     // halves (checked by the assertions below the block).
@@ -328,6 +344,30 @@ const _: () = {
     // `ori` takes an unsigned 16-bit immediate.
     assert!(dma::dpcr_enable(dma::channel::GPU) <= 0xFFFF);
 };
+
+/// True when psx-rt was built with the `console-diag` feature: the VBlank handler
+/// runs the stall watch and a fatal fault shows the stop-panel (see `diag`).
+pub const CONSOLE_DIAG: bool = cfg!(feature = "console-diag");
+
+/// Chains the present queue has kicked (0 without the `present-queue` feature).
+#[cfg(feature = "console-diag")]
+pub(crate) fn present_kick_count() -> u32 {
+    #[cfg(feature = "present-queue")]
+    // SAFETY: a volatile aligned read of a counter only the handler writes.
+    return unsafe { core::ptr::addr_of!(__psx_rt_present_kick_count).read_volatile() };
+    #[cfg(not(feature = "present-queue"))]
+    0
+}
+
+/// Present-queue edges that found the previous chain undrawn (0 without the feature).
+#[cfg(feature = "console-diag")]
+pub(crate) fn present_skip_count() -> u32 {
+    #[cfg(feature = "present-queue")]
+    // SAFETY: a volatile aligned read of a counter only the handler writes.
+    return unsafe { core::ptr::addr_of!(__psx_rt_present_skip_count).read_volatile() };
+    #[cfg(not(feature = "present-queue"))]
+    0
+}
 
 /// True when psx-rt was built with the `present-queue` feature: the VBlank
 /// handler kicks frames published through [`crate::present`].

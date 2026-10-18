@@ -45,6 +45,10 @@ present-queue = ["psx-io/present-queue"]
 # `critical-section` crate's implementation (for dependencies that use that
 # crate). A program links at most one implementation, so this is opt-in.
 critical-section = ["dep:critical-section"]
+# Stop-panel for diagnostic discs: a fault, a panic or a stall puts the program counter,
+# stack, GPU/DMA/CD state and any panic message on screen. See `diag`. Never in a shipping
+# build. Also switches on psx-io's counters.
+console-diag = ["psx-io/console-diag"]
 
 [lints]
 workspace = true
