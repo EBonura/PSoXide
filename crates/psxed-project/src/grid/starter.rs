@@ -116,6 +116,8 @@ pub fn attach_starter_world(project: &mut ProjectDocument) {
 /// player. The caller names the project and writes it.
 pub fn into_starter(project: &mut ProjectDocument) -> Result<(), StarterError> {
     strip_base(project, 0);
+    // Six materials that read apart, beside the base's three blue-grey ones.
+    super::graybox_set::add_to(project);
     let ground =
         find_material(project, &["Graybox / Ground 64"]).or_else(|| any_world_material(project));
     let walls = find_material(project, &["Graybox / Original 64"]).or(ground);
