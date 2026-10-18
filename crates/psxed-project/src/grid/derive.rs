@@ -86,6 +86,10 @@ pub struct DerivedWall {
     pub back: bool,
     /// World sector the step belongs to.
     pub owner: [i32; 2],
+    /// Index of the span of the host column the face is seen from (`0` in
+    /// a column of one span): a column of several can hold faces of one rule
+    /// stacked on one edge.
+    pub span: u8,
     /// Address of the physical segment, shared by both sectors.
     pub key: EdgeKey,
     /// Outline `[u, y]`, `u` in grid units along the host edge's walking
@@ -356,6 +360,7 @@ impl Edge<'_> {
             edge: host_edge,
             back: false,
             owner: self.cell(owner),
+            span: 0,
             key: self.key,
             surface,
         }
@@ -371,6 +376,8 @@ pub(super) struct Face<'a> {
     pub edge: WallEdge,
     pub back: bool,
     pub owner: [i32; 2],
+    /// Index of the host column's span the face is seen from.
+    pub span: u8,
     pub key: EdgeKey,
     /// Material of the owner's surface triangle, the last link of the
     /// material chain.
@@ -418,6 +425,7 @@ impl Face<'_> {
             edge: self.edge,
             back: self.back,
             owner: self.owner,
+            span: self.span,
             key: self.key,
             ring,
             heights,

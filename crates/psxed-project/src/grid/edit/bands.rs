@@ -67,7 +67,7 @@ pub fn run_faces(world: &GridWorld, face: FaceRef) -> Vec<FaceRef> {
             };
             derive::run_members(room, &wall)
                 .into_iter()
-                .map(|w| FaceRef::derived(face.room, w.host, w.edge, w.kind))
+                .map(|w| FaceRef::of_derived(face.room, &w))
                 .collect()
         }
         FaceTarget::Wall { edge, index } => {

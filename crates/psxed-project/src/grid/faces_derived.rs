@@ -12,6 +12,7 @@ use super::bands;
 use super::derive::{self, DerivedWall};
 use super::faces::{editor_point, Builder, Corner, GridFaceKind};
 use super::faces_bands::{neighbour_heights, stitched_rings, BandedWall};
+use super::overrides::ClosureFacing;
 use super::room::GridRoom;
 use super::sector::WallEdge;
 use super::units::{SECTOR_UNITS, TEXELS_PER_SECTOR};
@@ -60,6 +61,14 @@ impl Builder<'_> {
         wall: &DerivedWall,
         geom: DerivedGeom,
     ) {
+        // The faces carry the span that sees them, so a pick can name one of
+        // several stacked on an edge.
+        let saved = std::mem::replace(&mut self.span, wall.span);
+        self.derived_wall_faces(room, wall, geom);
+        self.span = saved;
+    }
+
+    fn derived_wall_faces(&mut self, room: &GridRoom, wall: &DerivedWall, geom: DerivedGeom) {
         if wall.hidden {
             return;
         }
@@ -114,6 +123,9 @@ impl Builder<'_> {
                 ]
             }
         };
+        // A closure wall is also drawn from outside when the room says so.
+        let double_sided = wall.kind == derive::DerivedKind::Closure
+            && room.defaults.closure_facing == ClosureFacing::Both;
         let front = wall.edge.front_direction();
         let sign = if wall.back { -1.0 } else { 1.0 };
         let toward = [sign * f64::from(front[0]), 0.0, sign * f64::from(front[1])];
@@ -150,7 +162,7 @@ impl Builder<'_> {
                     set,
                     material: wall.material,
                     toward,
-                    double_sided: false,
+                    double_sided,
                     neighbours: geom.neighbours,
                     run: geom.run_u,
                     u_grid: &u_at,
@@ -168,7 +180,7 @@ impl Builder<'_> {
         };
         for ring in stitched_rings(outline, [0, len], &geom.neighbours) {
             let corners: Vec<Corner> = ring.iter().map(|p| corner(p[0], p[1])).collect();
-            self.push(kind, corners, toward, wall.material, false);
+            self.push(kind, corners, toward, wall.material, double_sided);
         }
     }
 }

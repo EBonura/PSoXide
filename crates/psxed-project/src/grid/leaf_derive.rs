@@ -316,6 +316,7 @@ fn segment_walls(
             edge: side,
             back: false,
             owner: owner_cell,
+            span: 0,
             key: seg_key,
             surface: surface_material(owner_sector, owner_edge, kind == DerivedKind::Drop),
         };

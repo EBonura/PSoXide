@@ -85,12 +85,11 @@ fn a_floor_or_ceiling_face_carries_the_span_it_comes_from() {
         vec![(true, 0), (false, 0), (true, 1), (false, 1)]
     );
     assert_eq!(of([2, 0]).len(), 6);
+    // An authored wall, a plane or a mesh belongs to no span in particular;
+    // a derived face carries the span of the column that sees it.
     assert!(faces
         .iter()
-        .filter(|f| !matches!(
-            f.kind,
-            GridFaceKind::Floor { .. } | GridFaceKind::Ceiling { .. }
-        ))
+        .filter(|f| matches!(f.kind, GridFaceKind::Wall { .. }))
         .all(|f| f.span == 0));
 }
 

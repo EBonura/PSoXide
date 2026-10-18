@@ -67,6 +67,10 @@ pub enum FaceTarget {
         /// lie along it: a cell with smaller neighbours across a side has
         /// two. Zero for a sector in a room of whole sectors.
         seg: u8,
+        /// Index of the span of the host column that sees the face (`0` for a
+        /// column of one span, and what [`FaceRef::derived`] makes): a column of
+        /// several spans can stack faces of one rule on one edge.
+        span: u8,
     },
 }
 
@@ -163,13 +167,38 @@ impl FaceRef {
         Self {
             room,
             leaf: LeafKey::sector(cell),
-            target: FaceTarget::Derived { edge, kind, seg: 0 },
+            target: FaceTarget::Derived {
+                edge,
+                kind,
+                seg: 0,
+                span: 0,
+            },
+        }
+    }
+
+    /// The face of the derived wall `wall` of `room`, span included.
+    pub fn of_derived(room: usize, wall: &DerivedWall) -> Self {
+        Self {
+            room,
+            leaf: LeafKey::sector(wall.host),
+            target: FaceTarget::Derived {
+                edge: wall.edge,
+                kind: wall.kind,
+                seg: 0,
+                span: wall.span,
+            },
         }
     }
 
     /// The derived wall this face names, if it is one and still exists.
     pub fn derived_wall(&self, world: &GridWorld) -> Option<DerivedWall> {
-        let FaceTarget::Derived { edge, kind, seg } = self.target else {
+        let FaceTarget::Derived {
+            edge,
+            kind,
+            seg,
+            span,
+        } = self.target
+        else {
             return None;
         };
         let room = self.room_of(world)?;
@@ -182,9 +211,18 @@ impl FaceRef {
                 .filter(|w| w.edge == edge && w.kind == kind)
                 .nth(usize::from(seg));
         }
-        derive::edge_walls(room, self.cell(), edge)
+        let mut of_kind: Vec<DerivedWall> = derive::edge_walls(room, self.cell(), edge)
             .into_iter()
-            .find(|w| w.kind == kind)
+            .filter(|w| w.kind == kind)
+            .collect();
+        // One face of the rule needs no span; several are told apart by the
+        // span that sees them, then by their order along the edge.
+        if of_kind.len() > 1 {
+            of_kind.retain(|w| w.span == span);
+        }
+        of_kind
+            .into_iter()
+            .nth(if seg == 0 { 0 } else { usize::from(seg) })
     }
 
     /// Wall `index` on `edge` of `cell` in `room`.

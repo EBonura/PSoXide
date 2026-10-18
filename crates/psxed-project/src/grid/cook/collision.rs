@@ -272,7 +272,7 @@ pub fn build_with_meshes(
     if !room.leaves.is_sectors_only() {
         if room.leaves.iter().any(|(_, leaf)| !leaf.is_single_span()) {
             return Err(format!(
-                "room {room_index}: a column of several spans in a room with leaves of several sizes is not cooked yet"
+                "room {room_index}: a column of several spans in a room with leaves of several sizes is not cooked: storeys are written per whole sector, so keep such a room to whole sectors (docs/grid/UX-NOTES.md)"
             ));
         }
         // Leaves of several sizes: one record per leaf and an index.

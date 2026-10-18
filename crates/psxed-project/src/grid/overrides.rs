@@ -199,6 +199,36 @@ impl<'de> Deserialize<'de> for EdgeOverrides {
     }
 }
 
+/// Which sides of a derived closure wall are drawn.
+///
+/// A closure wall stands where the room ends. Drawn from the inside only
+/// (the default, and what every level made before this setting has), a
+/// building seen from outside is hollow: the far inside walls show through
+/// the missing near ones. `Both` draws the closure walls from the outside too.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ClosureFacing {
+    /// Seen from inside the room only.
+    #[default]
+    Front,
+    /// Seen from inside and from outside.
+    Both,
+}
+
+impl ClosureFacing {
+    /// Whether this is the default, for `skip_serializing_if`.
+    pub fn is_front(&self) -> bool {
+        matches!(self, Self::Front)
+    }
+
+    /// Lower-case label for the UI.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Front => "inside only",
+            Self::Both => "inside and outside",
+        }
+    }
+}
+
 /// Room-wide fallbacks for derived faces.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoomDefaults {
@@ -216,6 +246,10 @@ pub struct RoomDefaults {
     /// What the level verbs paint when they shape the ground.
     #[serde(default, skip_serializing_if = "PaintRules::is_default")]
     pub rules: PaintRules,
+    /// Which sides of the closure walls are drawn: a building that is seen
+    /// from outside wants `Both`. Collision is unchanged.
+    #[serde(default, skip_serializing_if = "ClosureFacing::is_front")]
+    pub closure_facing: ClosureFacing,
 }
 
 fn is_zero(value: &i32) -> bool {

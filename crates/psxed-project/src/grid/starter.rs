@@ -95,6 +95,8 @@ pub fn starter_world(
         shading: super::light::FacingShade::SUBTLE,
         stream: super::world::StreamRadii::DEFAULT,
         mesh_assets: Vec::new(),
+        level_names: Default::default(),
+        palette_pins: Vec::new(),
     }
 }
 

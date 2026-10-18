@@ -137,6 +137,17 @@ pub enum GridIssueKind {
         /// World click of its minimum corner along Z.
         z: i32,
     },
+    /// A column of several spans in a room whose cells are not all whole
+    /// sectors: the cook writes the extra spans per sector, so the two do
+    /// not mix (`docs/grid/UX-NOTES.md`).
+    SpansInCellRoom {
+        /// Level of the leaf.
+        level: u8,
+        /// World click of its minimum corner along X.
+        x: i32,
+        /// World click of its minimum corner along Z.
+        z: i32,
+    },
     /// An edge holds more than [`MAX_WALLS_PER_EDGE`] walls.
     TooManyWalls {
         /// The edge.
@@ -345,6 +356,9 @@ impl GridIssue {
             ),
             GridIssueKind::TooManySpans { count, level, x, z } => format!(
                 "{count} spans in the column of the level {level} leaf at clicks ({x}, {z}), at most {MAX_SPANS_PER_CELL}"
+            ),
+            GridIssueKind::SpansInCellRoom { level, x, z } => format!(
+                "the level {level} leaf at clicks ({x}, {z}) holds several storeys in a room with cells of several sizes; keep a room with storeys to whole sectors (merge the cells back) or split the storeys into rooms"
             ),
             GridIssueKind::TooManyWalls { edge, count } => format!(
                 "{count} walls on the {} edge, at most {MAX_WALLS_PER_EDGE}",
@@ -663,6 +677,9 @@ fn check_room(room_index: usize, room: &GridRoom, issues: &mut Vec<GridIssue>) {
         if count > MAX_SPANS_PER_CELL {
             issues.push(at_room(GridIssueKind::TooManySpans { count, level, x, z }));
         }
+        if count > 1 && !room.leaves.is_sectors_only() {
+            issues.push(at_room(GridIssueKind::SpansInCellRoom { level, x, z }));
+        }
     }
     for issue in super::tree::check(room) {
         use super::tree::TreeIssue;
@@ -902,9 +919,21 @@ mod tests {
             );
         }
         tall.remove_span(2);
-        room.insert_leaf(LeafKey::sector([2, 2]), tall).unwrap();
-        // Several spans are cooked now, so the column is not an issue.
-        assert!(!has_errors(&validate(&world_with_room(room))));
+        room.insert_leaf(LeafKey::sector([2, 2]), tall.clone())
+            .unwrap();
+        // Several spans are cooked per whole sector, so a room that also has
+        // cells of other sizes is an error the editor reports before the cook.
+        let found = kinds(&world_with_room(room));
+        assert!(
+            found
+                .iter()
+                .any(|k| matches!(k, GridIssueKind::SpansInCellRoom { .. })),
+            "{found:?}"
+        );
+        // The same column in a room of whole sectors is fine.
+        let mut whole = GridRoom::new("r", 4, 4);
+        whole.insert_leaf(LeafKey::sector([2, 2]), tall).unwrap();
+        assert!(!has_errors(&validate(&world_with_room(whole))));
         assert!(has_errors(&validate(&world_with_room({
             let mut r = GridRoom::new("r", 1, 1);
             let mut many = GridSector::default();

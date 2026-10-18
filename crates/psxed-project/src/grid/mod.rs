@@ -105,6 +105,8 @@ mod derive_span_tests;
 #[cfg(test)]
 mod derive_tests;
 #[cfg(test)]
+mod exterior_tests;
+#[cfg(test)]
 mod focus_tests;
 #[cfg(test)]
 mod leaf_face_tests;
@@ -131,7 +133,9 @@ pub use limits::{GridBudget, GridIssue, GridIssueKind, Severity};
 pub use mesh::{
     ArchProfile, ArchSpec, ColumnSpec, GridMesh, ImportedMesh, MeshAsset, MeshKind, RubbleSpec,
 };
-pub use overrides::{Axis, EdgeKey, EdgeOverride, EdgeOverrides, RoomDefaults, WallMode};
+pub use overrides::{
+    Axis, ClosureFacing, EdgeKey, EdgeOverride, EdgeOverrides, RoomDefaults, WallMode,
+};
 pub use paint_rules::PaintRules;
 pub use plane::{GridPlane, PlaneCollision, PlaneShape, PlaneUvMode};
 pub use room::{GridFog, GridRoom};

@@ -29,14 +29,12 @@ pub fn is_world_material(name: &str, material: &MaterialResource) -> bool {
 }
 
 /// The palette entries: world materials plus any material the world already
-/// uses, or every material with `all`.
+/// uses or the author pinned (made or imported from the palette), or every
+/// material with `all`.
 pub fn palette_materials(project: &ProjectDocument, all: bool) -> Vec<(ResourceId, String)> {
-    let used = project
-        .active_scene()
-        .world
-        .grid()
-        .map(|w| w.material_ids())
-        .unwrap_or_default();
+    let world = project.active_scene().world.grid();
+    let mut used = world.map(|w| w.material_ids()).unwrap_or_default();
+    used.extend(world.map(|w| w.palette_pins.clone()).unwrap_or_default());
     project
         .material_options()
         .into_iter()

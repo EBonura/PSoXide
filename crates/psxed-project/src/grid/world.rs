@@ -27,6 +27,15 @@ pub struct GridWorld {
     /// The mesh assets rooms place instances of (`docs/grid/meshes.md`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mesh_assets: Vec<super::mesh::MeshAsset>,
+    /// Names the author gave storeys, by floor height in clicks (a storey
+    /// is derived, so its name is kept against its height). Editor-only: the
+    /// cook ignores it.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub level_names: std::collections::BTreeMap<i32, String>,
+    /// Materials the author added to the palette (created or imported from
+    /// it) that the world does not use yet. Editor-only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub palette_pins: Vec<crate::ResourceId>,
 }
 
 /// Radii in sectors, walked over the portal graph, that decide which rooms

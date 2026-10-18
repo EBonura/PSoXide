@@ -303,6 +303,7 @@ struct Emit {
     kind: DerivedKind,
     host: [i32; 2],
     owner: [i32; 2],
+    span: u8,
     ring: Vec<[i32; 2]>,
     chained: Option<ResourceId>,
 }
@@ -362,6 +363,7 @@ impl Pair<'_> {
                             kind: DerivedKind::Closure,
                             host: host_cell,
                             owner: host_cell,
+                            span: interval.span as u8,
                             ring,
                             chained,
                         };
@@ -433,6 +435,7 @@ impl Pair<'_> {
             kind,
             host: host_cell,
             owner: owner_cell,
+            span: interval.span as u8,
             ring: piece.ring,
             chained,
         }
@@ -456,6 +459,7 @@ impl Pair<'_> {
             edge: host_edge,
             back: false,
             owner: emit.owner,
+            span: emit.span,
             key: self.key,
             ring,
             heights,

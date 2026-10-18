@@ -20,6 +20,10 @@ pub enum SubdivideBlock {
     NoLeaf,
     /// The leaf is already the finest size, a quarter of a sector.
     Finest,
+    /// The column holds several storeys. The cook writes the extra spans
+    /// per whole sector, so a cell with storeys is never divided
+    /// (`docs/grid/UX-NOTES.md`).
+    Storeys,
 }
 
 impl SubdivideBlock {
@@ -28,6 +32,7 @@ impl SubdivideBlock {
         match self {
             Self::NoLeaf => "there is no cell there",
             Self::Finest => "the cell is already a quarter sector",
+            Self::Storeys => "the column has several storeys, which stay whole sectors",
         }
     }
 }
@@ -86,6 +91,9 @@ pub(super) fn subdivide_raw(
 /// as it did, then balance the tree (a neighbour more than one level
 /// coarser is subdivided too) and constrain the hanging corners.
 pub fn subdivide(room: &mut GridRoom, key: LeafKey) -> Result<[LeafKey; 4], SubdivideBlock> {
+    if room.leaf(key).is_some_and(|s| !s.is_single_span()) {
+        return Err(SubdivideBlock::Storeys);
+    }
     let keys = subdivide_raw(room, key)?;
     normalize(room);
     Ok(keys)
@@ -113,6 +121,10 @@ pub fn subdivide_all_to(room: &mut GridRoom, keys: &[LeafKey], level: u8) -> usi
     let mut count = 0;
     let mut work: Vec<LeafKey> = keys.to_vec();
     while let Some(key) = work.pop() {
+        // A column of storeys stays one cell.
+        if room.leaf(key).is_some_and(|s| !s.is_single_span()) {
+            continue;
+        }
         if key.level >= level || !room.contains_leaf(key) || room.leaf(key).is_none() {
             continue;
         }
