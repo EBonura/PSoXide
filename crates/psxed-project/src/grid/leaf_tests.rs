@@ -359,3 +359,52 @@ fn a_column_keeps_its_walls_beside_the_spans() {
     assert_eq!(back.sector(0, 0), Some(&sector));
     assert_eq!(back.sector(0, 0).unwrap().north.len(), 1);
 }
+
+/// `cargo test -p psxed-project --release --lib measure_leaf_storage -- --ignored --nocapture`.
+#[test]
+#[ignore = "a measurement, not a check"]
+fn measure_leaf_storage_on_the_cathedral() {
+    use std::time::Instant;
+    let project = load("grid-cathedral");
+    let world = project.active_scene().world.grid().unwrap();
+    let room = &world.rooms[0];
+    let (w, d) = (room.width, room.depth);
+    let rounds = 2000;
+    let t = Instant::now();
+    let mut hits = 0usize;
+    for _ in 0..rounds {
+        for z in 0..d {
+            for x in 0..w {
+                hits += usize::from(room.sector(x, z).is_some());
+            }
+        }
+    }
+    let per = t.elapsed().as_nanos() as f64 / (rounds * w * d) as f64;
+    eprintln!("sector lookup: {per:.1} ns each ({hits} hits, {w}x{d})");
+    let t = Instant::now();
+    let mut n = 0usize;
+    for _ in 0..rounds {
+        n += room.iter().count();
+    }
+    eprintln!(
+        "room.iter(): {:.1} us per call ({n} cells)",
+        t.elapsed().as_nanos() as f64 / rounds as f64 / 1000.0
+    );
+    let t = Instant::now();
+    let mut faces = 0usize;
+    for _ in 0..200 {
+        faces += super::faces::all_faces(world).len();
+    }
+    eprintln!(
+        "all_faces: {:.3} ms ({faces} faces over 200 runs)",
+        t.elapsed().as_secs_f64() * 1000.0 / 200.0
+    );
+    let t = Instant::now();
+    for _ in 0..200 {
+        std::hint::black_box(world.clone());
+    }
+    eprintln!(
+        "world clone: {:.3} ms",
+        t.elapsed().as_secs_f64() * 1000.0 / 200.0
+    );
+}
