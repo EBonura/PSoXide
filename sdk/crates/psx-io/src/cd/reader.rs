@@ -203,9 +203,16 @@ impl SectorReader {
         // The FIFO fills shortly after the request; the bound covers a slow
         // drive without letting a dead one hang the caller.
         let mut spins = 0;
+        crate::diag::wait_begin(crate::diag::site::CD_FIFO, 0);
         while !cd.is_data_fifo_ready() && spins < DATA_POLL {
             spins += 1;
         }
+        if spins >= DATA_POLL {
+            crate::diag::wait_timeout(crate::diag::site::CD_FIFO, 0, DATA_POLL);
+        } else {
+            crate::diag::wait_end();
+        }
+        crate::diag::cd_sector();
         for word in buffer.iter_mut() {
             let b0 = cd.read_data_byte() as u32;
             let b1 = cd.read_data_byte() as u32;
@@ -238,18 +245,27 @@ impl SectorReader {
     }
 
     fn wait_irq(&mut self, expected: u8, limit: u32) -> Wait {
+        let site = if expected == IRQ_DATA_READY {
+            crate::diag::site::CD_SECTOR
+        } else {
+            crate::diag::site::CD_RESPONSE
+        };
+        crate::diag::wait_begin(site, expected as u32);
         let mut spins = 0;
         while spins < limit {
             let flag = self.cd.irq_flag_value();
             if flag == expected {
+                crate::diag::wait_end();
                 return Wait::Matched;
             }
             // Some drives raise the data FIFO before (or without) latching the
             // DataReady flag; treat visible data as a match.
             if expected == IRQ_DATA_READY && self.cd.is_data_fifo_ready() {
+                crate::diag::wait_end();
                 return Wait::Matched;
             }
             if flag == IRQ_ERROR {
+                crate::diag::wait_end();
                 return Wait::CdError;
             }
             if flag != 0 {
@@ -257,6 +273,7 @@ impl SectorReader {
             }
             spins += 1;
         }
+        crate::diag::wait_timeout(site, expected as u32, limit);
         Wait::Timeout
     }
 
@@ -266,6 +283,7 @@ impl SectorReader {
         let status = self.cd.read_response_byte();
         let code = self.cd.read_response_byte();
         self.diag = [DIAG_CD_ERROR, status, command, code];
+        crate::diag::cd_error(status, code);
     }
 
     /// Record a wait that spun out.
@@ -273,6 +291,7 @@ impl SectorReader {
         let status = self.cd.status_register();
         let flag = self.cd.irq_flag_value();
         self.diag = [DIAG_TIMEOUT, status, command, flag];
+        crate::diag::cd_timeout(u32::from_be_bytes(self.diag));
     }
 
     /// Dispatch one command with controller IRQs masked and every FIFO in a
@@ -418,6 +437,7 @@ impl SectorReader {
     /// Setloc to a program-relative `lba`, shifted by [`crate::disc_base`]
     /// to where this program's image actually landed on a multi-program disc.
     fn set_location(&mut self, lba: u32) -> bool {
+        crate::diag::cd_start(crate::disc_base::shift_lba(lba));
         let [minute, second, frame] = lba_to_bcd_msf(crate::disc_base::shift_lba(lba));
         self.send_command(CMD_SETLOC, &[minute, second, frame], IRQ_ACK, ACK_POLL)
     }
@@ -490,12 +510,14 @@ impl SectorReader {
             Wait::Matched => {}
             Wait::CdError => {
                 self.note_drive_error(DIAG_SITE_READ);
+                crate::diag::cd_read_failed(self.diagnostics());
                 self.cd.drain_response_limited(DRAIN_LIMIT);
                 self.cd.acknowledge_all_and_reset_parameters();
                 return false;
             }
             Wait::Timeout => {
                 self.note_timeout(DIAG_SITE_READ);
+                crate::diag::cd_read_failed(self.diagnostics());
                 self.cd.drain_response_limited(DRAIN_LIMIT);
                 self.cd.acknowledge_all_and_reset_parameters();
                 return false;

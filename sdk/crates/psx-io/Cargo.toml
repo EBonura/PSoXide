@@ -19,3 +19,6 @@ default = []
 # one load and branch per command or display-control write and per GPU DMA
 # start; without it those compile to the plain stores.
 present-queue = []
+# Counters and wait-site records a stop-panel can print (see `diag`). Off in every
+# shipping build; every hook compiles to nothing without it.
+console-diag = []
