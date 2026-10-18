@@ -28,7 +28,7 @@ use psx_io::diag::{self, Block, PSX_DIAG};
 pub const STALL_VBLANKS: u32 = 900;
 
 const COLS: usize = 53;
-const ROWS: usize = 29;
+const ROWS: usize = 27;
 
 const BG: u16 = 0x1000;
 const WHITE: u16 = 0x7FFF;
@@ -43,7 +43,7 @@ static mut __psx_diag_regs: [u32; 40] = [0; 40];
 
 /// Stack the panel runs on, so it works however the program's own stack looks.
 #[no_mangle]
-static mut __psx_diag_stack: [u32; 4096] = [0; 4096];
+static mut __psx_diag_stack: [u32; 256] = [0; 256];
 
 #[repr(C)]
 struct Watch {
@@ -116,8 +116,28 @@ global_asm!(
     mflo  $26
     nop
     sw    $26, 132($27)
-    lui   $29, %hi(__psx_diag_stack + 16368)
-    addiu $29, $29, %lo(__psx_diag_stack + 16368)
+    # Run on the interrupted code's own stack, just below its stack pointer, when that is
+    # ordinary RAM; the fallback is the small static stack (a scratchpad stack, a wild $sp).
+    lw    $2, 116($27)
+    lui   $3, 0x8001
+    ori   $3, $3, 0x1000
+    sltu  $4, $2, $3
+    bnez  $4, 8f
+    nop
+    lui   $3, 0x8020
+    sltu  $4, $2, $3
+    beqz  $4, 8f
+    nop
+    andi  $4, $2, 3
+    bnez  $4, 8f
+    nop
+    addiu $29, $2, -256
+    b     9f
+    nop
+8:
+    lui   $29, %hi(__psx_diag_stack + 1008)
+    addiu $29, $29, %lo(__psx_diag_stack + 1008)
+9:
     move  $4, $27
     mfc0  $5, $14
     nop
@@ -192,17 +212,6 @@ __psx_diag_fault_tramp:
 1:  b     1b
     nop
 
-    # Panic path: `a0` = argument for `a1`, a function that never returns; runs it on
-    # the panel stack.
-    .globl __psx_diag_call_on_stack
-__psx_diag_call_on_stack:
-    lui   $29, %hi(__psx_diag_stack + 16368)
-    addiu $29, $29, %lo(__psx_diag_stack + 16368)
-    move  $25, $5
-    jalr  $25
-    nop
-2:  b     2b
-    nop
     .set reorder
     "#
 );
@@ -223,6 +232,7 @@ impl Line {
         }
     }
 
+    #[inline(never)]
     fn str(&mut self, s: &str) -> &mut Self {
         for &b in s.as_bytes() {
             self.byte(b);
@@ -230,6 +240,7 @@ impl Line {
         self
     }
 
+    #[inline(never)]
     fn byte(&mut self, b: u8) {
         if self.len < COLS {
             self.buf[self.len] = b;
@@ -237,6 +248,7 @@ impl Line {
         }
     }
 
+    #[inline(never)]
     fn hex(&mut self, v: u32, digits: usize) -> &mut Self {
         let mut i = digits;
         while i > 0 {
@@ -247,6 +259,7 @@ impl Line {
         self
     }
 
+    #[inline(never)]
     fn dec(&mut self, mut v: u32) -> &mut Self {
         let mut tmp = [0u8; 10];
         let mut n = 0;
@@ -266,6 +279,7 @@ impl Line {
         self
     }
 
+    #[inline(never)]
     fn sp(&mut self) -> &mut Self {
         self.byte(b' ');
         self
@@ -274,6 +288,7 @@ impl Line {
 
 /// The 5x7 glyph for an ASCII byte (lower case folds to upper), one byte a row,
 /// bit 4 the left pixel. Drawn by this crate; it covers `' '..='_'`.
+#[inline(never)]
 fn glyph(c: u8) -> [u8; 7] {
     let c = if c.is_ascii_lowercase() { c - 32 } else { c };
     if !(32..=95).contains(&c) {
@@ -373,6 +388,7 @@ fn gpu_ready() {
 
 /// Make the screen ours: stop the GPU DMA, reset the GPU, show 320x240 15-bit
 /// at the top of VRAM and clear it.
+#[inline(never)]
 fn take_screen() {
     // Channel 2 (GPU): drop START so nothing keeps feeding the GPU.
     wr(0x1F80_10A8, 0);
@@ -394,52 +410,32 @@ fn take_screen() {
     gpu_ready();
 }
 
-/// Draw one 8-pixel-tall text row at VRAM row `y`.
+/// Draw one 8-pixel-tall text row at VRAM row `y`, a pixel row at a time, computing each pair
+/// of pixels as it is written so no buffer is needed (the panel may run on a 1 KB stack).
 fn draw_line(y: u16, line: &Line, color: u16) {
-    // 320 x 8 pixels, two to a word.
-    let mut words = [0u32; 320 * 8 / 2];
     let mut row = 0usize;
     while row < 8 {
-        let mut col = 0usize;
-        while col < COLS {
-            let g = glyph(line.buf[col]);
-            let bits = if row < 7 { g[row] } else { 0 };
-            let mut px = 0usize;
-            while px < 6 {
-                let on = px < 5 && bits & (1 << (4 - px)) != 0;
-                let x = col * 6 + px;
-                let c = if on { color } else { BG } as u32;
-                let i = row * 320 + x;
-                let w = &mut words[i / 2];
-                if i & 1 == 0 {
-                    *w = (*w & 0xFFFF_0000) | c;
-                } else {
-                    *w = (*w & 0x0000_FFFF) | (c << 16);
-                }
-                px += 1;
-            }
-            col += 1;
-        }
-        // The two columns past the last glyph stay background.
-        let mut x = COLS * 6;
+        gpu_ready();
+        wr(GP0, 0xA000_0000);
+        wr(GP0, (y as u32 + row as u32) << 16);
+        wr(GP0, (1 << 16) | 320);
+        let mut x = 0usize;
         while x < 320 {
-            let i = row * 320 + x;
-            let w = &mut words[i / 2];
-            if i & 1 == 0 {
-                *w = (*w & 0xFFFF_0000) | BG as u32;
-            } else {
-                *w = (*w & 0x0000_FFFF) | ((BG as u32) << 16);
+            let mut pair = 0u32;
+            let mut k = 0;
+            while k < 2 {
+                let xx = x + k;
+                let col = xx / 6;
+                let px = xx % 6;
+                let on = col < COLS && px < 5 && row < 7 && glyph(line.buf[col])[row] & (1 << (4 - px)) != 0;
+                let c = if on { color } else { BG } as u32;
+                pair |= c << (16 * k);
+                k += 1;
             }
-            x += 1;
+            wr(GP0, pair);
+            x += 2;
         }
         row += 1;
-    }
-    gpu_ready();
-    wr(GP0, 0xA000_0000);
-    wr(GP0, (y as u32) << 16);
-    wr(GP0, (8 << 16) | 320);
-    for w in words.iter() {
-        wr(GP0, *w);
     }
 }
 
@@ -452,6 +448,7 @@ enum Reason {
     Panic,
 }
 
+#[inline(never)]
 fn is_return_address(w: u32) -> bool {
     if !(0x8001_0000..0x8020_0000).contains(&w) || w & 3 != 0 {
         return false;
@@ -461,13 +458,15 @@ fn is_return_address(w: u32) -> bool {
     call >> 26 == 3 || (call >> 26 == 0 && call & 0x3F == 9)
 }
 
+#[inline(never)]
 fn put_line(row: &mut usize, line: &Line, color: u16) {
     if *row < ROWS {
-        draw_line((*row * 8) as u16, line, color);
+        draw_line((*row * 8 + 16) as u16, line, color);
         *row += 1;
     }
 }
 
+#[inline(never)]
 fn panel(reason: Reason, regs: *const u32, epc: u32) {
     // SAFETY: `regs` is the register save area filled by the trampoline.
     let reg = |n: usize| unsafe { regs.add(n).read_volatile() };
@@ -692,6 +691,8 @@ fn panel(reason: Reason, regs: *const u32, epc: u32) {
     let mut l = Line::new();
     l.str("CD SEC ")
         .dec(f!(cd_sectors))
+        .str(" STARTS ")
+        .dec(f!(cd_starts))
         .str(" LBA ")
         .dec(f!(cd_lba))
         .str(" FAIL ")
@@ -703,6 +704,19 @@ fn panel(reason: Reason, regs: *const u32, epc: u32) {
         &l,
         if f!(cd_read_fail) != 0 { YELLOW } else { WHITE },
     );
+
+    let mut l = Line::new();
+    l.str("LL SCANS ")
+        .dec(f!(ll_scans))
+        .str(" NODES ")
+        .dec(f!(ll_nodes))
+        .str(" BAD ")
+        .dec(f!(ll_bad))
+        .str(" MAX ")
+        .dec(f!(ll_max))
+        .str(" AT ")
+        .hex(f!(ll_bad_addr), 6);
+    put_line(&mut row, &l, if f!(ll_bad) != 0 { RED } else { WHITE });
 
     let mut l = Line::new();
     l.str("PRESENT KICK ")
@@ -798,10 +812,6 @@ extern "C" fn __psx_diag_fault(regs: *const u32, epc: u32) -> ! {
     }
 }
 
-extern "C" {
-    fn __psx_diag_call_on_stack(arg: *const u8, f: extern "C" fn(*const u8) -> !) -> !;
-}
-
 /// Clear the CPU's interrupt-enable bit, so the VBlank handler cannot run on the panel's
 /// stack while it draws.
 fn interrupts_off() {
@@ -868,7 +878,7 @@ pub(crate) fn panic_panel(info: &core::panic::PanicInfo<'_>) -> ! {
         let regs = (&raw mut __psx_diag_regs).cast::<u32>();
         regs.add(29).write_volatile(sp);
         regs.add(31).write_volatile(ra);
-        __psx_diag_call_on_stack(core::ptr::null(), panic_entry)
+        panic_entry(core::ptr::null())
     }
 }
 
