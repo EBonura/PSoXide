@@ -389,3 +389,47 @@ pub fn derived_range(room: &GridRoom, cell: [i32; 2]) -> Option<(i32, i32)> {
     }
     range
 }
+
+/// Every derived wall hosted by leaf `key` (its four sides, then its
+/// diagonals), in a fixed order: for one side and rule the faces come in the
+/// order they lie along the side.
+pub fn derived_walls_of(room: &GridRoom, key: LeafKey) -> Vec<DerivedWall> {
+    let Some(sector) = room.leaf(key) else {
+        return Vec::new();
+    };
+    leaf_walls(room, key, sector)
+        .into_iter()
+        .chain(super::leaf_diag::leaf_diag_walls(room, key, sector))
+        .map(|w| w.wall)
+        .collect()
+}
+
+/// Which of the faces of `kind` on `edge` of leaf `key` (see
+/// [`derived_walls_of`]) lies at the grid point `at`: its index among them,
+/// 0 when there is only one or none matches.
+pub fn derived_segment(
+    room: &GridRoom,
+    key: LeafKey,
+    edge: WallEdge,
+    kind: DerivedKind,
+    at: [i32; 2],
+) -> u8 {
+    let Some(sector) = room.leaf(key) else {
+        return 0;
+    };
+    let walls: Vec<LeafWall> = leaf_walls(room, key, sector)
+        .into_iter()
+        .chain(super::leaf_diag::leaf_diag_walls(room, key, sector))
+        .filter(|w| w.wall.edge == edge && w.wall.kind == kind)
+        .collect();
+    walls
+        .iter()
+        .position(|w| {
+            let (lo, hi) = (
+                [w.geom.a[0].min(w.geom.b[0]), w.geom.a[1].min(w.geom.b[1])],
+                [w.geom.a[0].max(w.geom.b[0]), w.geom.a[1].max(w.geom.b[1])],
+            );
+            at[0] >= lo[0] && at[0] <= hi[0] && at[1] >= lo[1] && at[1] <= hi[1]
+        })
+        .unwrap_or(0) as u8
+}

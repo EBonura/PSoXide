@@ -233,6 +233,9 @@ pub enum WallRefusal {
     Covered,
     /// Placing it would grow the room past the size cap.
     RoomTooLarge,
+    /// The cell is larger than a sector, which carries no authored walls
+    /// (subdivide it first), or there is no cell there.
+    BigCell,
 }
 
 /// Place one wall on `edge` of `cell`, creating the sector (and growing the
@@ -246,6 +249,9 @@ pub fn place_wall(
     spec: WallSpec,
 ) -> Result<FaceRef, WallRefusal> {
     let target = world.rooms.get_mut(room).ok_or(WallRefusal::NoSuchRoom)?;
+    if !target.leaves.is_sectors_only() {
+        return place_wall_in_sector(world, room, cell, edge, pick_y, spec);
+    }
     // Decide first on a sector that may not exist yet, so a covered edge
     // leaves the room exactly as it was.
     let heights = wall_gap(target, cell, edge, pick_y).ok_or(WallRefusal::Covered)?;
@@ -266,6 +272,116 @@ pub fn place_wall(
     let index = stack.len() - 1;
     stack[index].heights = heights;
     Ok(FaceRef::wall(room, cell, edge, index))
+}
+
+/// The wall that would be placed on `edge` of the leaf `key` (any size up
+/// to a sector): [`next_wall_heights`] on the leaf as it is, with the derived
+/// faces already standing on that side counted as walls, as [`wall_gap`] does
+/// for a sector.
+pub fn leaf_wall_gap(
+    room: &GridRoom,
+    key: super::super::leaf::LeafKey,
+    edge: WallEdge,
+    pick_y: Option<i32>,
+) -> Option<[i32; 4]> {
+    let mut sector = room.leaf(key)?.clone();
+    if room.wall_mode == WallMode::Derived {
+        for wall in super::super::leaf_derive::derived_walls_of(room, key) {
+            if wall.edge == edge {
+                if let Some(w) = wall.as_wall_of(key.cell(), edge) {
+                    sector.walls_mut(edge).push(w);
+                }
+            }
+        }
+    }
+    next_wall_heights(&sector, edge, room_height_bounds(room), pick_y)
+}
+
+/// Place one wall on `edge` of the leaf `key` (a cell of a sector or
+/// smaller), filling the gap [`leaf_wall_gap`] finds.
+pub fn place_wall_leaf(
+    world: &mut GridWorld,
+    room: usize,
+    key: super::super::leaf::LeafKey,
+    edge: WallEdge,
+    pick_y: Option<i32>,
+    spec: WallSpec,
+) -> Result<FaceRef, WallRefusal> {
+    let target = world.rooms.get_mut(room).ok_or(WallRefusal::NoSuchRoom)?;
+    if key.level < super::super::leaf::SECTOR_LEVEL || target.leaf(key).is_none() {
+        return Err(WallRefusal::BigCell);
+    }
+    let heights = leaf_wall_gap(target, key, edge, pick_y).ok_or(WallRefusal::Covered)?;
+    let sector = target.leaf_mut(key).ok_or(WallRefusal::BigCell)?;
+    let stack = sector.walls_mut(edge);
+    stack.push(GridWall {
+        facing: spec.facing,
+        ..GridWall::span(0, 0, spec.material)
+    });
+    let index = stack.len() - 1;
+    stack[index].heights = heights;
+    Ok(FaceRef::new(
+        room,
+        key,
+        super::refs::FaceTarget::Wall { edge, index },
+    ))
+}
+
+/// [`place_wall`] in a room with cells of several sizes: the wall goes on the
+/// side of `edge` of world sector `cell` on every cell that touches that
+/// side (a whole sector, or the smaller cells along it). A cell larger than a
+/// sector is split to sectors first (lossless). Returns the first wall.
+fn place_wall_in_sector(
+    world: &mut GridWorld,
+    room: usize,
+    cell: [i32; 2],
+    edge: WallEdge,
+    pick_y: Option<i32>,
+    spec: WallSpec,
+) -> Result<FaceRef, WallRefusal> {
+    use super::super::leaf::{LeafKey, CLICKS_PER_SECTOR, SECTOR_LEVEL};
+    let target = world.rooms.get_mut(room).ok_or(WallRefusal::NoSuchRoom)?;
+    let base = [cell[0] * CLICKS_PER_SECTOR, cell[1] * CLICKS_PER_SECTOR];
+    if let Some((key, _)) = target.leaf_at([base[0] + 1, base[1] + 1]) {
+        if key.level < SECTOR_LEVEL {
+            super::super::tree::subdivide_all_to(target, &[key], SECTOR_LEVEL);
+        }
+    }
+    // The clicks of the sector along the side.
+    let n = CLICKS_PER_SECTOR;
+    let clicks: Vec<[i32; 2]> = (0..n)
+        .map(|i| match edge {
+            WallEdge::North => [base[0] + i, base[1]],
+            WallEdge::South => [base[0] + i, base[1] + n - 1],
+            WallEdge::West => [base[0], base[1] + i],
+            WallEdge::East => [base[0] + n - 1, base[1] + i],
+            _ => [base[0] + 1, base[1] + 1],
+        })
+        .collect();
+    let mut keys: Vec<LeafKey> = Vec::new();
+    for click in clicks {
+        if let Some((key, _)) = world.rooms[room].leaf_at(click) {
+            if !keys.contains(&key) {
+                keys.push(key);
+            }
+        }
+    }
+    let mut first = None;
+    let mut covered = false;
+    for key in keys {
+        match place_wall_leaf(world, room, key, edge, pick_y, spec) {
+            Ok(face) => {
+                first.get_or_insert(face);
+            }
+            Err(WallRefusal::Covered) => covered = true,
+            Err(other) => return Err(other),
+        }
+    }
+    first.ok_or(if covered {
+        WallRefusal::Covered
+    } else {
+        WallRefusal::BigCell
+    })
 }
 
 /// What a run of walls did.
@@ -295,6 +411,7 @@ pub fn place_wall_run(
             Err(WallRefusal::Covered) => out.covered += 1,
             Err(WallRefusal::RoomTooLarge) => out.too_large = true,
             Err(WallRefusal::NoSuchRoom) => break,
+            Err(WallRefusal::BigCell) => out.covered += 1,
         }
     }
     out

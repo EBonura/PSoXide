@@ -60,7 +60,8 @@ pub use planes::{
     add_plane, edit_plane_uv, fit_room, remove_planes, set_plane_material, set_plane_uv,
     update_plane, PlaneClipboard, PlaneId, PlaneRefusal,
 };
-pub use rects::{create_surfaces, delete_surfaces, CellRect, RectOutcome, RectRefusal};
+pub use rects::{
+    create_surfaces, create_surfaces_cells, delete_surfaces, delete_surfaces_cells, CellRect, RectOutcome, RectRefusal};
 pub use refs::{
     corner_offsets, faces_of_cell, faces_of_leaf, CornerRef, EdgeRef, FaceRef, FaceTarget,
     GridElement, SurfaceKind,
@@ -73,7 +74,7 @@ pub use surfaces::{
     edit_uv, material_of, set_material, set_solid, set_wall_facing, toggle_split, uv_of, UvOp,
 };
 pub use walls::{
-    facing_toward, next_wall_heights, place_wall, place_wall_run, remove_wall, wall_gap,
+    facing_toward, leaf_wall_gap, next_wall_heights, place_wall, place_wall_leaf, place_wall_run, remove_wall, wall_gap,
     wall_run_cells, WallRefusal, WallSpec,
 };
 

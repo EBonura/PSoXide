@@ -16,12 +16,22 @@ fn step(a: [i32; 2], b: [i32; 2]) -> bool {
     a[1] == b[1] && a[0] != b[0]
 }
 
-/// A set of world sectors in one room.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// A set of cells of one level in one room: world sectors (the default), or
+/// halves or quarters of a sector, each addressed by its cell coordinate at
+/// that level (`world click / edge`).
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Region {
-    /// The room the sectors belong to.
+    /// The room the cells belong to.
     pub room: usize,
     cells: BTreeSet<[i32; 2]>,
+    /// The cells' level: 2 sectors, 3 halves, 4 quarters.
+    level: u8,
+}
+
+impl Default for Region {
+    fn default() -> Self {
+        Self::new(0)
+    }
 }
 
 impl Region {
@@ -30,7 +40,39 @@ impl Region {
         Self {
             room,
             cells: BTreeSet::new(),
+            level: super::super::leaf::SECTOR_LEVEL,
         }
+    }
+
+    /// An empty region of cells of `level` (2 sectors, 3 halves, 4
+    /// quarters) in `room`.
+    pub fn new_at(room: usize, level: u8) -> Self {
+        Self {
+            level: level.clamp(super::super::leaf::SECTOR_LEVEL, super::super::leaf::FINEST_LEVEL),
+            ..Self::new(room)
+        }
+    }
+
+    /// The level of the cells: 2 sectors, 3 halves, 4 quarters.
+    pub fn level(&self) -> u8 {
+        self.level
+    }
+
+    /// The same cells read as cells of `level`.
+    pub fn at_level(mut self, level: u8) -> Self {
+        self.level = level.clamp(super::super::leaf::SECTOR_LEVEL, super::super::leaf::FINEST_LEVEL);
+        self
+    }
+
+    /// Whether the verbs must act on cells through the resolution lens: the
+    /// region's cells are smaller than a sector, or the room has cells of
+    /// several sizes.
+    pub fn is_fine(&self, world: &GridWorld) -> bool {
+        self.level != super::super::leaf::SECTOR_LEVEL
+            || world
+                .rooms
+                .get(self.room)
+                .is_some_and(|r| !r.leaves.is_sectors_only())
     }
 
     /// A region of the given cells.
@@ -38,6 +80,7 @@ impl Region {
         Self {
             room,
             cells: cells.into_iter().collect(),
+            level: super::super::leaf::SECTOR_LEVEL,
         }
     }
 
@@ -58,7 +101,11 @@ impl Region {
                 }
             }
         }
-        Self { room, cells }
+        Self {
+            room,
+            cells,
+            level: super::super::leaf::SECTOR_LEVEL,
+        }
     }
 
     /// The sectors a path through `waypoints` crosses, in order and four
@@ -123,7 +170,11 @@ impl Region {
                 }
             }
         }
-        Self { room, cells }
+        Self {
+            room,
+            cells,
+            level: super::super::leaf::SECTOR_LEVEL,
+        }
     }
 
     /// Add every sector of `other` (same room expected).

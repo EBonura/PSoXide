@@ -56,6 +56,10 @@ pub enum FaceTarget {
         edge: WallEdge,
         /// Which rule made it.
         kind: DerivedKind,
+        /// Which of the faces of that rule on that edge, in the order they
+        /// lie along it: a cell with smaller neighbours across a side has
+        /// two. Zero for a sector in a room of whole sectors.
+        seg: u8,
     },
 }
 
@@ -119,18 +123,24 @@ impl FaceRef {
         Self {
             room,
             leaf: LeafKey::sector(cell),
-            target: FaceTarget::Derived { edge, kind },
+            target: FaceTarget::Derived { edge, kind, seg: 0 },
         }
     }
 
     /// The derived wall this face names, if it is one and still exists.
     pub fn derived_wall(&self, world: &GridWorld) -> Option<DerivedWall> {
-        let FaceTarget::Derived { edge, kind } = self.target else {
+        let FaceTarget::Derived { edge, kind, seg } = self.target else {
             return None;
         };
         let room = self.room_of(world)?;
         if room.wall_mode != WallMode::Derived {
             return None;
+        }
+        if !room.leaves.is_sectors_only() {
+            return super::super::leaf_derive::derived_walls_of(room, self.leaf)
+                .into_iter()
+                .filter(|w| w.edge == edge && w.kind == kind)
+                .nth(usize::from(seg));
         }
         derive::edge_walls(room, self.cell(), edge)
             .into_iter()

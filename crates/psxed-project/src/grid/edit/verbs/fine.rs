@@ -184,6 +184,21 @@ impl FineDrag {
     }
 }
 
+impl FineDrag {
+    /// For a Ramp: the largest rise, grid units, that keeps every floor of
+    /// the footprint walkable, read through the lens. `None` for another verb.
+    pub fn max_walkable_rise(&self, world: &GridWorld) -> Option<i32> {
+        let FineVerb::Ramp(params) = &self.verb else {
+            return None;
+        };
+        let mut probe = world.clone();
+        *probe.rooms.get_mut(self.room)? = self.before.clone();
+        let (lens, virt, region) = Lens::open(&probe, self.room, self.level, &self.footprint)?;
+        let drag = super::ramp::RampDrag::begin(&virt, &region, *params)?;
+        Some(drag.max_walkable_rise() / lens.factor())
+    }
+}
+
 /// Run `verb` once on `footprint` (typed amounts, tests, the MCP).
 pub fn run_fine(
     world: &mut GridWorld,

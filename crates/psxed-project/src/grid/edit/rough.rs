@@ -39,6 +39,39 @@ pub fn set_level(world: &mut GridWorld, room: usize, cells: &[[i32; 2]], level: 
     changed
 }
 
+/// Set the rough level (0 to 3) of the cells of `cell_level` in `lo..=hi`
+/// (cell coordinates at that level), splitting larger leaves to fit. Returns
+/// how many leaves changed.
+pub fn set_level_cells(
+    world: &mut GridWorld,
+    room: usize,
+    cell_level: u8,
+    lo: [i32; 2],
+    hi: [i32; 2],
+    level: u8,
+) -> usize {
+    let level = level.min(MAX_LEVEL);
+    if level > 0 {
+        ensure_amp(world, room);
+    }
+    let Some(r) = world.rooms.get_mut(room) else {
+        return 0;
+    };
+    let rect = super::fit::ClickRect::of_cells(cell_level, lo, hi);
+    let keys = super::fit::split_to_fit(r, rect, cell_level);
+    let mut changed = 0;
+    for key in keys {
+        if let Some(leaf) = r.leaf_mut(key) {
+            if leaf.rough != level {
+                leaf.rough = level;
+                changed += 1;
+            }
+        }
+    }
+    super::super::tree::normalize(r);
+    changed
+}
+
 /// Raise the rough level of `cells` to at least `level` (what Break's jitter
 /// option does to the sectors it broke).
 pub fn raise_level(
@@ -131,6 +164,19 @@ mod tests {
         // Levels are two bits.
         set_level(&mut w, 0, &[[0, 1]], 9);
         assert_eq!(w.rooms[0].sector(0, 1).unwrap().rough, MAX_LEVEL);
+    }
+
+    #[test]
+    fn rough_cells_of_any_size_split_big_leaves_to_fit() {
+        let mut w = world();
+        crate::grid::tree::merge_all(&mut w.rooms[0], None, 1);
+        assert_eq!(w.rooms[0].leaf_count(), 1);
+        // One quarter cell (click 1, 1) of the two by two sector room.
+        assert_eq!(set_level_cells(&mut w, 0, 4, [1, 1], [1, 1], 3), 1);
+        let (key, leaf) = w.rooms[0].leaf_at([1, 1]).unwrap();
+        assert_eq!((key.level, leaf.rough), (4, 3));
+        assert_eq!(w.rooms[0].leaf_at([3, 3]).unwrap().1.rough, 0);
+        assert!(crate::grid::tree::check(&w.rooms[0]).is_empty());
     }
 
     #[test]

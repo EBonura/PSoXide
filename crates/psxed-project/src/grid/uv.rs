@@ -457,7 +457,7 @@ fn find_face(
         (FaceTarget::Wall { edge, index }, GridFaceKind::Wall { edge: e, index: i }) => {
             edge == e && index == i
         }
-        (FaceTarget::Derived { edge, kind }, GridFaceKind::Derived { edge: e, kind: k }) => {
+        (FaceTarget::Derived { edge, kind, .. }, GridFaceKind::Derived { edge: e, kind: k }) => {
             edge == e && kind == k
         }
         _ => false,

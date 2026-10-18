@@ -260,3 +260,55 @@ fn heights(chunk: &RoomChunk) -> Vec<([i16; 4], [i16; 4], u16)> {
         .map(|s| (s.floor, s.ceil, s.flags & !SECTOR_CLEAR))
         .collect()
 }
+
+/// A legacy (authored walls) room with a divided sector converts without
+/// changing what is drawn or collided.
+#[test]
+fn a_mixed_legacy_room_converts_without_changing_its_look_or_collision() {
+    use crate::grid::leaf::LeafKey;
+    use crate::grid::room::GridRoom;
+    use crate::grid::sector::WallEdge;
+    use crate::grid::surface::{GridSurface, GridWall};
+    use crate::grid::tree::subdivide_to;
+    use crate::grid::units::GridScale;
+    let mut room = GridRoom::new("legacy", 4, 4);
+    for z in 0..4 {
+        for x in 0..4 {
+            let s = room.sector_or_insert(x, z).unwrap();
+            s.set_ground_floor(Some(GridSurface::flat(0, None)));
+            s.set_ground_ceiling(Some(GridSurface::flat(2048, None)));
+            if x == 0 {
+                s.walls_mut(WallEdge::West).push(GridWall::span(0, 2048, None));
+            }
+            if z == 3 {
+                s.walls_mut(WallEdge::South).push(GridWall::span(0, 2048, None));
+            }
+        }
+    }
+    // Divide one inner sector, with a step inside it.
+    let sw = room.sector_or_insert(2, 1).unwrap();
+    sw.ground_floor_mut().unwrap().heights = [0; 4];
+    subdivide_to(&mut room, [9, 5], 4).unwrap();
+    let keys: Vec<LeafKey> = room.leaves.in_sector([2, 1]).iter().map(|(k, _)| *k).collect();
+    crate::grid::tree::subdivide_all_to(&mut room, &keys, 4);
+    room.leaf_mut(LeafKey::new(4, 9, 5).unwrap())
+        .unwrap()
+        .ground_floor_mut()
+        .unwrap()
+        .heights = [128; 4];
+    crate::grid::tree::normalize(&mut room);
+    assert!(!room.leaves.is_sectors_only());
+    let before = GridWorld {
+        scale: GridScale::DEFAULT,
+        rooms: vec![room],
+        ..GridWorld::default()
+    };
+    let mut after = before.clone();
+    let report = convert_to_derived(&mut after, 0, ConvertMode::PreserveLook).unwrap();
+    assert_eq!(after.rooms[0].wall_mode, WallMode::Derived);
+    assert!(report.converted + report.hidden > 0, "{report:?}");
+    assert_eq!(multiset(&before), multiset(&after));
+    let (a, b) = (cook(&before).unwrap(), cook(&after).unwrap());
+    assert_eq!(a.tables[0].sectors, b.tables[0].sectors);
+    assert_eq!(a.tables[0].walls, b.tables[0].walls);
+}
