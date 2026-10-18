@@ -486,7 +486,36 @@ pub fn remove_wall(
     let Some(sector) = target.sector_mut(x, z) else {
         return false;
     };
-    let stack = sector.walls_mut(edge);
+    if !remove_nearest_wall(sector.walls_mut(edge), pick_y) {
+        return false;
+    }
+    target.trim_empty();
+    true
+}
+
+/// [`remove_wall`] on the leaf `key`, a cell of a sector or smaller.
+pub fn remove_wall_leaf(
+    world: &mut GridWorld,
+    room: usize,
+    key: super::super::leaf::LeafKey,
+    edge: WallEdge,
+    pick_y: Option<i32>,
+) -> bool {
+    let Some(target) = world.rooms.get_mut(room) else {
+        return false;
+    };
+    let Some(sector) = target.leaf_mut(key) else {
+        return false;
+    };
+    if !remove_nearest_wall(sector.walls_mut(edge), pick_y) {
+        return false;
+    }
+    target.trim_empty();
+    true
+}
+
+/// Remove the wall of `stack` nearest `pick_y` (the highest one when `None`).
+fn remove_nearest_wall(stack: &mut Vec<GridWall>, pick_y: Option<i32>) -> bool {
     let middle = |w: &GridWall| (w.heights.iter().sum::<i32>()) / 4;
     let index = match pick_y {
         Some(y) => stack
@@ -500,12 +529,13 @@ pub fn remove_wall(
             .max_by_key(|(_, w)| middle(w))
             .map(|(i, _)| i),
     };
-    let Some(index) = index else {
-        return false;
-    };
-    stack.remove(index);
-    target.trim_empty();
-    true
+    match index {
+        Some(index) => {
+            stack.remove(index);
+            true
+        }
+        None => false,
+    }
 }
 
 #[cfg(test)]

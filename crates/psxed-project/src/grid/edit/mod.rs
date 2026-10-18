@@ -77,7 +77,7 @@ pub use surfaces::{
 };
 pub use walls::{
     facing_toward, leaf_wall_gap, next_wall_heights, place_wall, place_wall_leaf, place_wall_run,
-    remove_wall, wall_gap, wall_run_cells, WallRefusal, WallSpec,
+    remove_wall, remove_wall_leaf, wall_gap, wall_run_cells, WallRefusal, WallSpec,
 };
 
 #[cfg(test)]
