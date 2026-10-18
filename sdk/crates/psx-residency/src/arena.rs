@@ -363,7 +363,7 @@ impl<const SLOTS: usize> Admission<'_, '_, SLOTS> {
                 import.site,
             )?;
         }
-        flush();
+        flush_sites(imports);
         let guard = CallScope { imports, trap };
         let result = caller();
         drop(guard);
@@ -381,8 +381,26 @@ impl Drop for CallScope<'_, '_> {
             *import.word =
                 overlay::direct(*import.word, 1, self.trap, import.site).expect("validated trap");
         }
-        flush();
+        flush_sites(self.imports);
     }
+}
+/// Make the patched call-site words visible to instruction fetch: only the cache lines that hold
+/// them are invalidated (the rest of the cache keeps its working set; a full flush after every
+/// patch and every restore cost a cold cache twice per lease).
+fn flush_sites(imports: &[StaticImport<'_>]) {
+    for import in imports {
+        #[cfg(target_arch = "mips")]
+        psx_rt::cache::flush_instruction_cache_range(import.site, import.site + 4);
+        #[cfg(not(target_arch = "mips"))]
+        let _ = import;
+    }
+    #[cfg(target_arch = "mips")]
+    // SAFETY: empty asm only constrains compiler memory ordering.
+    unsafe {
+        core::arch::asm!("", options(nostack, preserves_flags));
+    }
+    #[cfg(not(target_arch = "mips"))]
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
 }
 fn flush() {
     #[cfg(target_arch = "mips")]
