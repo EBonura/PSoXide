@@ -347,6 +347,33 @@ pub fn step(id: u32, text: &str) {
     let _ = (id, text);
 }
 
+/// [`step`] with a tag and two numbers printed as hex: `"<tag> <a:8 hex> <b:8 hex>"`, the tag
+/// cut to 6 bytes, so a failure site can say which file/chunk and which result in 24 bytes.
+#[inline(never)]
+pub fn step_hex(id: u32, tag: &str, a: u32, b: u32) {
+    #[cfg(feature = "console-diag")]
+    {
+        let mut text = [b' '; 24];
+        let t = tag.as_bytes();
+        let mut i = 0;
+        while i < 6 && i < t.len() {
+            text[i] = t[i];
+            i += 1;
+        }
+        let digits = b"0123456789ABCDEF";
+        let mut n = 0;
+        while n < 8 {
+            text[7 + n] = digits[((a >> (28 - 4 * n)) & 15) as usize];
+            text[16 + n] = digits[((b >> (28 - 4 * n)) & 15) as usize];
+            n += 1;
+        }
+        // SAFETY: only ASCII bytes were written.
+        step(id, unsafe { core::str::from_utf8_unchecked(&text) });
+    }
+    #[cfg(not(feature = "console-diag"))]
+    let _ = (id, tag, a, b);
+}
+
 /// Walk the GPU linked list that starts at `head` (a physical or KSEG address) and record
 /// every node over 16 payload words. The walk is bounded and stays inside main RAM.
 #[inline(never)]
