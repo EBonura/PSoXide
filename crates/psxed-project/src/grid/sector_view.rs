@@ -24,7 +24,7 @@ use super::room::GridRoom;
 use super::sector::GridSector;
 use super::surface::{GridSplit, GridSurface};
 use super::tree::surface_split::height_in_leaf;
-use super::tree::{merge_all, MergeBlock};
+use super::tree::{merge_all_unbalanced, MergeBlock};
 
 /// The sector view of `room`: a room of whole sectors, and the world
 /// sectors whose collision it could not make exact.
@@ -34,7 +34,7 @@ pub fn sector_room(room: &GridRoom) -> (GridRoom, Vec<[i32; 2]>) {
     }
     // Merge everything that merges back into a sector, exactly.
     let mut work = room.clone();
-    merge_all(&mut work, None, SECTOR_LEVEL);
+    merge_all_unbalanced(&mut work, SECTOR_LEVEL);
     let mut out = work.clone();
     out.leaves.clear();
     let mut approximate: Vec<[i32; 2]> = Vec::new();
@@ -66,12 +66,14 @@ pub fn sector_room(room: &GridRoom) -> (GridRoom, Vec<[i32; 2]>) {
     (out, approximate)
 }
 
+/// A world made of whole sectors, and the `(room, world sector)` pairs whose
+/// collision it could not make exact.
+pub type SectorWorld = (super::world::GridWorld, Vec<(usize, [i32; 2])>);
+
 /// The world seen at sector granularity, with the sectors that could not be
 /// made exact: `None` when every room is already whole sectors (use the
 /// world as it is).
-pub fn sector_world(
-    world: &super::world::GridWorld,
-) -> Option<(super::world::GridWorld, Vec<(usize, [i32; 2])>)> {
+pub fn sector_world(world: &super::world::GridWorld) -> Option<SectorWorld> {
     let mut out: Option<super::world::GridWorld> = None;
     let mut approximate = Vec::new();
     for (index, room) in world.rooms.iter().enumerate() {

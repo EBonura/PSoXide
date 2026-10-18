@@ -26,8 +26,8 @@ pub use normalize::{
     NormalizeReport, TreeIssue,
 };
 pub use ops::{
-    can_merge, merge, merge_all, subdivide, subdivide_all_to, subdivide_to, MergeBlock,
-    SubdivideBlock,
+    can_merge, merge, merge_all, merge_all_unbalanced, subdivide, subdivide_all_to, subdivide_to,
+    MergeBlock, SubdivideBlock,
 };
 pub use sector_split::{join_sector, split_sector, JoinBlock};
 

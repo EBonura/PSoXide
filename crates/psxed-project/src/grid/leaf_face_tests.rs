@@ -39,7 +39,9 @@ impl Rng {
 }
 
 /// Every face as a comparable tuple, ignoring the fields the leaf path adds.
-fn shape(f: &GridFace) -> (usize, [i32; 2], String, Vec<[i32; 3]>, Vec<[i32; 3]>) {
+type Shape = (usize, [i32; 2], String, Vec<[i32; 3]>, Vec<[i32; 3]>);
+
+fn shape(f: &GridFace) -> Shape {
     (
         f.room,
         f.cell,
@@ -77,11 +79,7 @@ fn the_leaf_path_makes_the_faces_of_the_sector_path_for_whole_sectors() {
                     b.len()
                 );
                 let sorted = |mut v: Vec<_>| {
-                    v.sort_by(
-                        |p: &(usize, [i32; 2], String, Vec<[i32; 3]>, Vec<[i32; 3]>), q| {
-                            (&p.2, &p.4).cmp(&(&q.2, &q.4))
-                        },
-                    );
+                    v.sort_by(|p: &Shape, q| (&p.2, &p.4).cmp(&(&q.2, &q.4)));
                     v
                 };
                 assert_eq!(sorted(a), sorted(b), "{name} room {index} cell {x},{z}");

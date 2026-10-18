@@ -146,10 +146,10 @@ pub fn subdivide_all_to(room: &mut GridRoom, keys: &[LeafKey], level: u8) -> usi
 /// Check that the four children of `parent` can become one leaf, without
 /// changing anything.
 pub fn can_merge(room: &GridRoom, parent: LeafKey) -> Result<(), MergeBlock> {
-    merged(room, parent).map(|_| ())
+    merged(room, parent, true).map(|_| ())
 }
 
-fn merged(room: &GridRoom, parent: LeafKey) -> Result<GridSector, MergeBlock> {
+fn merged(room: &GridRoom, parent: LeafKey, balanced: bool) -> Result<GridSector, MergeBlock> {
     let keys = parent.children().ok_or(MergeBlock::NotLeaves)?;
     let cells: Vec<&GridSector> = keys.iter().filter_map(|k| room.leaf(*k)).collect();
     if cells.len() != 4 {
@@ -164,7 +164,7 @@ fn merged(room: &GridRoom, parent: LeafKey) -> Result<GridSector, MergeBlock> {
         return Err(MergeBlock::Overrides);
     }
     // The merged leaf must not leave a neighbour two levels finer than it.
-    for side in SIDES {
+    for side in SIDES.into_iter().filter(|_| balanced) {
         if across(&room.leaves, parent, side)
             .iter()
             .any(|n| n.level > parent.level + 1)
@@ -175,8 +175,8 @@ fn merged(room: &GridRoom, parent: LeafKey) -> Result<GridSector, MergeBlock> {
     Ok(sector)
 }
 
-fn merge_raw(room: &mut GridRoom, parent: LeafKey) -> Result<(), MergeBlock> {
-    let sector = merged(room, parent)?;
+fn merge_raw(room: &mut GridRoom, parent: LeafKey, balanced: bool) -> Result<(), MergeBlock> {
+    let sector = merged(room, parent, balanced)?;
     for key in parent.children().into_iter().flatten() {
         room.remove_leaf(key);
     }
@@ -188,7 +188,7 @@ fn merge_raw(room: &mut GridRoom, parent: LeafKey) -> Result<(), MergeBlock> {
 
 /// Merge the four children of `parent` into `parent`. Exact or refused.
 pub fn merge(room: &mut GridRoom, parent: LeafKey) -> Result<(), MergeBlock> {
-    merge_raw(room, parent)?;
+    merge_raw(room, parent, true)?;
     normalize(room);
     Ok(())
 }
@@ -198,6 +198,22 @@ pub fn merge(room: &mut GridRoom, parent: LeafKey) -> Result<(), MergeBlock> {
 /// never above `top_level` (0 allows merging up to four sectors). Returns
 /// how many merges happened.
 pub fn merge_all(room: &mut GridRoom, within: Option<&[LeafKey]>, top_level: u8) -> usize {
+    merge_all_with(room, within, top_level, true)
+}
+
+/// [`merge_all`] without the balance rule and without restoring it: every
+/// group that is exact joins. For reading a room at coarser granularity (the
+/// cook's sector view), never for a document the editor keeps.
+pub fn merge_all_unbalanced(room: &mut GridRoom, top_level: u8) -> usize {
+    merge_all_with(room, None, top_level, false)
+}
+
+fn merge_all_with(
+    room: &mut GridRoom,
+    within: Option<&[LeafKey]>,
+    top_level: u8,
+    balanced: bool,
+) -> usize {
     let mut total = 0;
     loop {
         let mut parents: Vec<LeafKey> = room
@@ -210,13 +226,15 @@ pub fn merge_all(room: &mut GridRoom, within: Option<&[LeafKey]>, top_level: u8)
         parents.dedup();
         let mut merged_any = false;
         for parent in parents {
-            if merge_raw(room, parent).is_ok() {
+            if merge_raw(room, parent, balanced).is_ok() {
                 merged_any = true;
                 total += 1;
             }
         }
         if !merged_any {
-            normalize(room);
+            if balanced {
+                normalize(room);
+            }
             return total;
         }
     }
