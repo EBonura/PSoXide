@@ -289,6 +289,48 @@ impl GridRoom {
             .all(|key| key.is_sector() && self.local(key.cell()).is_some())
     }
 
+    /// Move the whole room by `delta` sectors in the world: the origin and
+    /// every leaf move together, so nothing changes in the room's own
+    /// terms. (Assigning `origin` alone would leave the leaves where they
+    /// are, because they are keyed in the world.) Returns `false` and moves
+    /// nothing when a leaf larger than a sector would stop being aligned to
+    /// its own lattice: level-0 leaves need a multiple of 4 sectors, level-1
+    /// leaves a multiple of 2.
+    pub fn translate(&mut self, delta: [i32; 2]) -> bool {
+        if delta == [0, 0] {
+            return true;
+        }
+        let aligned = self.leaves.keys().all(|key| {
+            let clicks = delta.map(|d| d.saturating_mul(super::leaf::CLICKS_PER_SECTOR));
+            clicks.iter().all(|c| c & (key.edge_clicks() - 1) == 0)
+        });
+        if !aligned {
+            return false;
+        }
+        let moved: Vec<(LeafKey, GridSector)> = {
+            let keys: Vec<LeafKey> = self.leaves.keys().collect();
+            keys.into_iter()
+                .filter_map(|k| Some((k, self.leaves.remove(k)?)))
+                .collect()
+        };
+        for (key, sector) in moved {
+            let key = LeafKey {
+                level: key.level,
+                x: key
+                    .x
+                    .saturating_add(delta[0] * super::leaf::CLICKS_PER_SECTOR),
+                z: key
+                    .z
+                    .saturating_add(delta[1] * super::leaf::CLICKS_PER_SECTOR),
+            };
+            self.leaves
+                .insert(key, sector)
+                .expect("a rigid move keeps the leaves disjoint and aligned");
+        }
+        self.origin = [self.origin[0] + delta[0], self.origin[1] + delta[1]];
+        true
+    }
+
     /// Grow the room so that local `(x, z)` (possibly negative or past the
     /// edge) is inside it. Growing towards negative coordinates shifts
     /// `origin` so existing sectors keep their world position; the leaves

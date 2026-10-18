@@ -208,6 +208,34 @@ fn leaves_must_be_inside_the_room_and_disjoint() {
 }
 
 #[test]
+fn translating_a_room_moves_the_origin_and_every_leaf_together() {
+    let mut room = GridRoom::new("r", 3, 1);
+    room.origin = [2, 2];
+    room.sector_or_insert(1, 0)
+        .unwrap()
+        .set_floor(Some(GridSurface::flat(64, None)));
+    let before = room.sector(1, 0).cloned();
+    assert!(room.translate([5, -3]));
+    assert_eq!(room.origin, [7, -1]);
+    assert_eq!(
+        room.sector(1, 0).cloned(),
+        before,
+        "the same cell of the room"
+    );
+    assert_eq!(room.sector_key(1, 0), Some(LeafKey::sector([8, -1])));
+    // Assigning the origin alone does not carry the leaves.
+    let mut other = room.clone();
+    other.origin[0] += 1;
+    assert!(other.sector(1, 0).is_none());
+    // A block of four sectors only moves by whole blocks.
+    let mut mixed = mixed_room();
+    assert!(!mixed.translate([1, 0]));
+    assert_eq!(mixed, super::leaf_tests::mixed_room());
+    assert!(mixed.translate([4, 4]));
+    assert!(mixed.leaves().all(|(k, _)| mixed.contains_leaf(k)));
+}
+
+#[test]
 fn growing_and_trimming_never_move_a_leaf() {
     let mut room = mixed_room();
     let before: Vec<LeafKey> = room.leaves().map(|(k, _)| k).collect();

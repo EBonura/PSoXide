@@ -279,7 +279,7 @@ mod tests {
         assert_eq!(uv(&world, 2).grow, [[2048, 0], [0, 0]]);
         // Moving the room does not change a face's texel span.
         let before = extent(&texels_of(&world, [1, 0]), 0);
-        world.rooms[0].origin[0] += 5;
+        assert!(world.rooms[0].translate([5, 0]));
         let moved = all_faces(&world)
             .into_iter()
             .find(|f| f.cell == [6, 0])
@@ -287,7 +287,7 @@ mod tests {
             .texels;
         let after = extent(&moved, 0);
         assert!((after.1 - after.0 - (before.1 - before.0)).abs() < 1e-9);
-        world.rooms[0].origin[0] -= 5;
+        assert!(world.rooms[0].translate([-5, 0]));
         // A mode change on one face puts it back on its own frame.
         edit_uv(
             &mut world,
