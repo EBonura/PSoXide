@@ -69,6 +69,10 @@ pub(crate) struct LeafAt<'v> {
     /// quarter sector the lookup landed in), else 0. With the sector it
     /// names the leaf again ([`GridCollision::leaf_named`]).
     pub quarter: u8,
+    /// Index of the leaf's record in `SECTORS` ([`NO_LEAF`] for an empty
+    /// sector or quarter; the cell index of the record in a dense room): the
+    /// key of its extra spans ([`CollisionView::extra_spans`]).
+    pub id: u16,
 }
 
 impl<'a> GridCollision<'a> {
@@ -124,6 +128,7 @@ impl<'a> GridCollision<'a> {
                 oz: sz,
                 size: s,
                 quarter: 0,
+                id: NO_LEAF,
             };
         };
         let id = entry & INDEX_ID;
@@ -147,6 +152,7 @@ impl<'a> GridCollision<'a> {
                         oz: sz + hz * q,
                         size: 2 * q,
                         quarter,
+                        id: leaf,
                     }
                 }
                 Some(rec) => LeafAt {
@@ -155,6 +161,7 @@ impl<'a> GridCollision<'a> {
                     oz: sz + qz * q,
                     size: q,
                     quarter,
+                    id: leaf,
                 },
                 None => LeafAt {
                     rec: &EMPTY,
@@ -162,6 +169,7 @@ impl<'a> GridCollision<'a> {
                     oz: sz + qz * q,
                     size: q,
                     quarter,
+                    id: NO_LEAF,
                 },
             };
         }
@@ -192,6 +200,7 @@ impl<'a> GridCollision<'a> {
                 oz: cz as i32 * s,
                 size: s,
                 quarter: 0,
+                id: NO_LEAF,
             };
         };
         let code = rec.flags >> SECTOR_LEAF_SHIFT;
@@ -205,6 +214,7 @@ impl<'a> GridCollision<'a> {
                 oz: z0 * s,
                 size: self.leaf_size(code),
                 quarter: 0,
+                id,
             };
         }
         LeafAt {
@@ -213,6 +223,7 @@ impl<'a> GridCollision<'a> {
             oz: cz as i32 * s,
             size: s,
             quarter: 0,
+            id,
         }
     }
 
@@ -267,6 +278,7 @@ impl<'a> GridCollision<'a> {
                 oz: cz as i32 * s,
                 size: s,
                 quarter: 0,
+                id: (cz * view.width() + cx) as u16,
             });
         }
         let entry = *view.index.get(cz * view.width() + cx)?;
@@ -296,6 +308,7 @@ impl<'a> GridCollision<'a> {
                 oz: sz + qz * q,
                 size: 2 * q,
                 quarter: (1 + k) as u8,
+                id: leaf,
             });
         }
         Some(LeafAt {
@@ -304,6 +317,7 @@ impl<'a> GridCollision<'a> {
             oz: sz + qz * q,
             size: q,
             quarter: (1 + k) as u8,
+            id: leaf,
         })
     }
 

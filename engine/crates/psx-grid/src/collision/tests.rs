@@ -12,6 +12,7 @@ use psx_engine::{
 
 mod lattice;
 mod leaf;
+mod spans;
 
 const S: i32 = 80;
 const FLAT: u16 = SECTOR_HAS_FLOOR | SECTOR_FLOOR_WALK_A | SECTOR_FLOOR_WALK_B;

@@ -48,7 +48,8 @@ pub(crate) mod kind {
 /// triangle), a ceiling, a wall (`aux` bits 0 to 2 = edge) or a non-resident
 /// room. In a tree room `aux >> 3` is the quarter sector of a divided sector
 /// the leaf was reached through (0 otherwise), which with `cx`, `cz` names
-/// the leaf again.
+/// the leaf again. `span` says which span of that column a floor or ceiling
+/// slab belongs to.
 #[derive(Copy, Clone, Default)]
 pub(crate) struct Src {
     pub kind: u8,
@@ -56,6 +57,10 @@ pub(crate) struct Src {
     pub cx: u8,
     pub cz: u8,
     pub room: u16,
+    /// 0 for the column's ground span (the record itself), else the 1-based
+    /// position of the extra span in the column's run
+    /// ([`crate::view::CollisionView::extra_spans`]).
+    pub span: u8,
 }
 
 pub(crate) const ANY: u8 = 0;
@@ -87,6 +92,10 @@ pub(crate) struct Scan {
     /// Origin height and index of the room being scanned.
     pub oy: i32,
     pub room: u16,
+    /// [`Src::span`] given to the slabs offered now: 0 while the ground
+    /// span is offered, the extra span's 1-based position while a column's
+    /// extra spans are.
+    pub span: u8,
 }
 
 impl Scan {
@@ -108,6 +117,7 @@ impl Scan {
             found: false,
             oy: 0,
             room: 0,
+            span: 0,
         }
     }
 
@@ -216,6 +226,11 @@ impl<'a> GridCollision<'a> {
     /// * Otherwise each distinct flat sector under a sample is offered once
     ///   (the other samples in it would repeat the interval) and a sloped
     ///   one is evaluated per sample.
+    /// * A column of several spans (the record has extra spans in the room's
+    ///   span tables) offers every span's slabs by the same rules. It gives
+    ///   up both shortcuts above, and a room that has any such column gives
+    ///   up the clear-neighbourhood one everywhere. The ground record's
+    ///   flags are not trusted to say so: the span index is read.
     #[inline(never)]
     fn scan_slabs(&self, room: usize, scan: &mut Scan) -> bool {
         let rec = self.rec(room);
@@ -237,6 +252,11 @@ impl<'a> GridCollision<'a> {
         scan.oy = rec.origin[1];
         scan.room = room as u16;
         let sectors = view.sectors;
+        // A room with extra spans looks each column's run up and never takes
+        // the clear-neighbourhood shortcut (a promise about single-span
+        // cells, which a neighbour's extra span would break). A room without
+        // any pays for one empty-slice test per room.
+        let multi = !view.span_index.is_empty();
         // Sector keys already offered as flat.
         let mut seen = [u32::MAX; 4];
         let mut taken = 0;
@@ -252,11 +272,16 @@ impl<'a> GridCollision<'a> {
             let Some(sector) = sectors.get(cz * vw + cx) else {
                 continue;
             };
+            let extras = if multi {
+                view.extra_spans(cz * vw + cx)
+            } else {
+                &[]
+            };
             let flat = Self::slabs_flat(sector);
-            if i == 0 && scan.r <= s {
+            if i == 0 && scan.r <= s && extras.is_empty() {
                 let r = scan.r as u32;
                 let inside = lx >= r && lx + r < s as u32 && lz >= r && lz + r < s as u32;
-                if sector.flags & SECTOR_CLEAR != 0 {
+                if sector.flags & SECTOR_CLEAR != 0 && !multi {
                     self.offer_flat(room, key, sector, scan);
                     return false;
                 }
@@ -265,15 +290,68 @@ impl<'a> GridCollision<'a> {
                     return sector.ext != NO_EXT;
                 }
             }
+            let cell = key | lx << 16 | lz << 24;
             if flat {
                 self.offer_flat(room, key, sector, scan);
+            } else {
+                self.scan_sample(sector, cell, scan);
+            }
+            if !extras.is_empty() && !self.scan_extras(extras, cell, scan) {
+                // A sloped extra span differs per sample: offer it again.
+                continue;
+            }
+            if flat {
                 seen[taken & 3] = key;
                 taken += 1;
-            } else {
-                self.scan_sample(sector, key | lx << 16 | lz << 24, scan);
             }
         }
         true
+    }
+
+    /// Floor and ceiling slabs of a column's extra spans under one sample of
+    /// a dense room; `cell` is packed as for [`Self::scan_sample`]. Each span
+    /// is offered like a ground record (flat ones once, sloped ones
+    /// evaluated at the sample) with its own [`Src::span`]. True when every
+    /// span is flat, so the same intervals would repeat at the other samples
+    /// in the sector.
+    #[inline(never)]
+    fn scan_extras(&self, extras: &[Sector], cell: u32, scan: &mut Scan) -> bool {
+        let mut all_flat = true;
+        for (k, span) in extras.iter().enumerate() {
+            scan.span = (k + 1) as u8;
+            if Self::slabs_flat(span) {
+                self.offer_flat(usize::from(scan.room), cell & 0xFFFF, span, scan);
+            } else {
+                all_flat = false;
+                self.scan_sample(span, cell, scan);
+            }
+            if scan.done() {
+                break;
+            }
+        }
+        scan.span = 0;
+        all_flat
+    }
+
+    /// [`Self::scan_extras`] for a leaf of a tree room: `key` and `local`
+    /// are packed as for [`Self::scan_leaf_sample`].
+    #[inline(never)]
+    fn scan_extras_tree(&self, extras: &[Sector], key: u32, local: u32, scan: &mut Scan) -> bool {
+        let mut all_flat = true;
+        for (k, span) in extras.iter().enumerate() {
+            scan.span = (k + 1) as u8;
+            if Self::slabs_flat(span) {
+                self.offer_flat(usize::from(scan.room), key, span, scan);
+            } else {
+                all_flat = false;
+                self.scan_leaf_sample(span, key, local, scan);
+            }
+            if scan.done() {
+                break;
+            }
+        }
+        scan.span = 0;
+        all_flat
     }
 
     /// Flat floor (or none) and flat solid ceiling (or none): the sector's
@@ -296,6 +374,7 @@ impl<'a> GridCollision<'a> {
             cx: (key & 255) as u8,
             cz: ((key >> 8) & 255) as u8,
             room: room as u16,
+            span: scan.span,
         };
         if sector.flags & SECTOR_HAS_FLOOR != 0 {
             let top = oy + i32::from(sector.floor[0]);
@@ -357,6 +436,7 @@ impl<'a> GridCollision<'a> {
             cx: (cell & 255) as u8,
             cz: ((cell >> 8) & 255) as u8,
             room: scan.room,
+            span: scan.span,
         };
         if let Some((f, second)) = self.sector_floor(view, sector, lx, lz) {
             src.aux = u8::from(second);
@@ -415,6 +495,7 @@ impl<'a> GridCollision<'a> {
                             cx: cx as u8,
                             cz: cz as u8,
                             room: room as u16,
+                            span: 0,
                         };
                         scan.offer(scan.oy + lo - scan.h, scan.oy + hi, src);
                     }
@@ -448,6 +529,7 @@ impl<'a> GridCollision<'a> {
         };
         scan.oy = rec.origin[1];
         scan.room = room as u16;
+        let multi = !view.span_index.is_empty();
         let mut seen = [u32::MAX; 4];
         let mut taken = 0;
         for i in 0..if scan.r > 0 { 5 } else { 1 } {
@@ -462,8 +544,13 @@ impl<'a> GridCollision<'a> {
             }
             let (llx, llz) = (sx - ox - leaf.ox, sz - oz - leaf.oz);
             let sector = leaf.rec;
+            let extras = if multi {
+                view.extra_spans(usize::from(leaf.id))
+            } else {
+                &[]
+            };
             let flat = Self::slabs_flat(sector);
-            if i == 0 && scan.r <= leaf.size {
+            if i == 0 && scan.r <= leaf.size && extras.is_empty() {
                 let r = scan.r;
                 let inside = llx >= r && llx + r < leaf.size && llz >= r && llz + r < leaf.size;
                 if inside && flat {
@@ -471,12 +558,18 @@ impl<'a> GridCollision<'a> {
                     return sector.ext != NO_EXT;
                 }
             }
+            let local = (llx as u32) | (llz as u32) << 16;
             if flat {
                 self.offer_flat(room, key, sector, scan);
+            } else {
+                self.scan_leaf_sample(sector, key, local, scan);
+            }
+            if !extras.is_empty() && !self.scan_extras_tree(extras, key, local, scan) {
+                continue;
+            }
+            if flat {
                 seen[taken & 3] = key;
                 taken += 1;
-            } else {
-                self.scan_leaf_sample(sector, key, (llx as u32) | (llz as u32) << 16, scan);
             }
         }
         true
@@ -501,6 +594,7 @@ impl<'a> GridCollision<'a> {
             cx: (key & 255) as u8,
             cz: ((key >> 8) & 255) as u8,
             room: scan.room,
+            span: scan.span,
         };
         if let Some((f, second)) = self.sector_floor(view, sector, lx, lz) {
             src.aux = (src.aux & !1) | u8::from(second);
@@ -565,6 +659,7 @@ impl<'a> GridCollision<'a> {
                                 cx: cx as u8,
                                 cz: cz as u8,
                                 room: room as u16,
+                                span: 0,
                             };
                             scan.offer(scan.oy + lo - scan.h, scan.oy + hi, src);
                         }
@@ -603,7 +698,7 @@ impl<'a> GridCollision<'a> {
             let Some((cx, cz, ox, oz)) = self.cell_of(lx, lz, view.width(), view.depth()) else {
                 continue;
             };
-            let Some((sector, ox, oz)) = self.leaf_local(view, cx, cz, ox, oz) else {
+            let Some((sector, ox, oz, record)) = self.leaf_local(view, cx, cz, ox, oz) else {
                 continue;
             };
             if let Some((f, _)) = self.sector_floor(Some(view), sector, ox, oz) {
@@ -618,10 +713,47 @@ impl<'a> GridCollision<'a> {
                     }
                 }
             }
+            if !view.span_index.is_empty()
+                && self.extras_block_point(view.extra_spans(record), oy, (ox, oz), y, h)
+            {
+                return true;
+            }
             if self.planes
                 && Self::plane_blocks_point(view, sector, oy, (lx, lz), y, h, self.camera_pass)
             {
                 return true;
+            }
+        }
+        false
+    }
+
+    /// Is the point (or upright body of height `h`) at height `y` inside a
+    /// floor or solid-ceiling slab of one of a column's extra spans? `at` is
+    /// the point's offset in the ground record's frame, which the extra
+    /// spans share. The same two tests [`Self::point_blocked`] makes for the
+    /// ground span.
+    #[inline(never)]
+    fn extras_block_point(
+        &self,
+        extras: &[Sector],
+        oy: i32,
+        (ox, oz): (u32, u32),
+        y: i32,
+        h: i32,
+    ) -> bool {
+        let t = SLAB_THICKNESS;
+        for span in extras {
+            if let Some((f, _)) = self.sector_floor(None, span, ox, oz) {
+                if y > oy + f - t - h && y < oy + f {
+                    return true;
+                }
+            }
+            if span.flags & SECTOR_CEIL_SOLID != 0 {
+                if let Some(c) = self.sector_ceil(None, span, ox, oz) {
+                    if y > oy + c - h && y < oy + c + t {
+                        return true;
+                    }
+                }
             }
         }
         false

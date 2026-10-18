@@ -480,7 +480,14 @@ pub const NO_SPAN: u16 = 0xFFFF;
 /// collision reads as more records of the same cell or leaf: each offers its
 /// floor and its ceiling slabs. The ground record of such a column never has
 /// [`SECTOR_CLEAR`] or the flat-slab flags, so the fast paths give way to
-/// the per-span walk.
+/// the per-span walk. The reader does not rely on that: it reads the span
+/// index, and a room that has any extra span ignores [`SECTOR_CLEAR`]
+/// everywhere (a neighbour's extra span would break its promise).
+///
+/// An extra span has no [`Sector::ext`] (no walls or planes of its own: they
+/// belong to the ground record), and in a tree room carries the size code of
+/// its leaf in [`Sector::flags`] like the ground record, since its heights
+/// are interpolated over the leaf's edge.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct SpanExt {

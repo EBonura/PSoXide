@@ -318,10 +318,12 @@ impl<'a> GridCollision<'a> {
         (lo, hi)
     }
 
-    /// World floor height at `(lx, lz)` inside a sector of a room.
+    /// World floor height at `(lx, lz)` inside a sector of a room: the
+    /// column's ground span (its lowest). See [`Self::floor_below`] for a
+    /// column of several spans.
     pub fn floor_at(&self, room: usize, cx: usize, cz: usize, lx: u32, lz: u32) -> Option<i32> {
         let view = self.view(room)?;
-        let (sector, lx, lz) = self.leaf_local(view, cx, cz, lx, lz)?;
+        let (sector, lx, lz, _) = self.leaf_local(view, cx, cz, lx, lz)?;
         let h = if sector.flags & SECTOR_FLAT_FLOOR != 0 {
             i32::from(sector.floor[0])
         } else {
@@ -330,16 +332,73 @@ impl<'a> GridCollision<'a> {
         Some(h + self.rec(room).origin[1])
     }
 
-    /// World ceiling height at `(lx, lz)` inside a sector of a room.
+    /// World ceiling height at `(lx, lz)` inside a sector of a room: the
+    /// column's ground span (its lowest). See [`Self::ceil_above`] for a
+    /// column of several spans.
     pub fn ceil_at(&self, room: usize, cx: usize, cz: usize, lx: u32, lz: u32) -> Option<i32> {
         let view = self.view(room)?;
-        let (sector, lx, lz) = self.leaf_local(view, cx, cz, lx, lz)?;
+        let (sector, lx, lz, _) = self.leaf_local(view, cx, cz, lx, lz)?;
         let h = if sector.flags & SECTOR_FLAT_CEIL != 0 {
             i32::from(sector.ceil[0])
         } else {
             self.sector_ceil(Some(view), sector, lx, lz)?
         };
         Some(h + self.rec(room).origin[1])
+    }
+
+    /// World height of the highest floor of a column at `(lx, lz)` inside a
+    /// sector of a room that is at or below `y`: the floor a body at height
+    /// `y` stands on or falls onto, over every span of the column. `None`
+    /// when no span of the column has a floor that low. [`Self::floor_at`]
+    /// is the ground span's floor only.
+    pub fn floor_below(
+        &self,
+        room: usize,
+        (cx, cz): (usize, usize),
+        (lx, lz): (u32, u32),
+        y: i32,
+    ) -> Option<i32> {
+        let view = self.view(room)?;
+        let (sector, lx, lz, record) = self.leaf_local(view, cx, cz, lx, lz)?;
+        let oy = self.rec(room).origin[1];
+        let mut best: Option<i32> = None;
+        let extras = view.extra_spans(record);
+        for span in core::iter::once(sector).chain(extras) {
+            if let Some((f, _)) = self.sector_floor(Some(view), span, lx, lz) {
+                let h = oy + f;
+                if h <= y && best.is_none_or(|b| h > b) {
+                    best = Some(h);
+                }
+            }
+        }
+        best
+    }
+
+    /// World height of the lowest ceiling of a column at `(lx, lz)` inside a
+    /// sector of a room that is at or above `y`, over every span of the
+    /// column; `None` when none is. [`Self::ceil_at`] is the ground span's
+    /// ceiling only.
+    pub fn ceil_above(
+        &self,
+        room: usize,
+        (cx, cz): (usize, usize),
+        (lx, lz): (u32, u32),
+        y: i32,
+    ) -> Option<i32> {
+        let view = self.view(room)?;
+        let (sector, lx, lz, record) = self.leaf_local(view, cx, cz, lx, lz)?;
+        let oy = self.rec(room).origin[1];
+        let mut best: Option<i32> = None;
+        let extras = view.extra_spans(record);
+        for span in core::iter::once(sector).chain(extras) {
+            if let Some(c) = self.sector_ceil(Some(view), span, lx, lz) {
+                let h = oy + c;
+                if h >= y && best.is_none_or(|b| h < b) {
+                    best = Some(h);
+                }
+            }
+        }
+        best
     }
 
     /// World floor height at the sector centre of a column, `None` for a pit.
@@ -357,22 +416,32 @@ impl<'a> GridCollision<'a> {
             return up;
         };
         let (cx, cz) = (usize::from(src.cx), usize::from(src.cz));
-        let sector = if view.is_tree() {
-            self.leaf_named(view, cx, cz, src.aux >> 3).rec
+        let (mut sector, record) = if view.is_tree() {
+            let leaf = self.leaf_named(view, cx, cz, src.aux >> 3);
+            (leaf.rec, usize::from(leaf.id))
         } else {
-            let Some(sector) = view.sectors.get(cz * view.width() + cx) else {
+            let record = cz * view.width() + cx;
+            let Some(sector) = view.sectors.get(record) else {
                 return up;
             };
-            sector
+            (sector, record)
         };
+        if src.span != 0 {
+            // The hit is a slab of an extra span: its own triangle.
+            match view.extra_spans(record).get(usize::from(src.span) - 1) {
+                Some(span) => sector = span,
+                None => return up,
+            }
+        }
         let second = src.aux & 1 != 0;
         let nesw = sector.flags & SECTOR_FLOOR_NESW != 0;
         let corners = Self::floor_corners(Some(view), sector, second);
         triangle_normal_q12(corners, nesw, second, self.dims_of(sector.flags).0)
     }
 
-    /// The record that holds sector `(cx, cz)`'s offset `(lx, lz)` and the
-    /// offsets in that record's frame: the sector and the same offsets in a
+    /// The record that holds sector `(cx, cz)`'s offset `(lx, lz)`, the
+    /// offsets in that record's frame and the record's index in `SECTORS`
+    /// (the key of its extra spans): the sector and the same offsets in a
     /// dense room, the leaf and offsets from its origin in a tree room.
     #[inline(always)]
     pub(crate) fn leaf_local<'v>(
@@ -382,12 +451,10 @@ impl<'a> GridCollision<'a> {
         cz: usize,
         lx: u32,
         lz: u32,
-    ) -> Option<(&'v Sector, u32, u32)> {
+    ) -> Option<(&'v Sector, u32, u32, usize)> {
         if !view.is_tree() {
-            return view
-                .sectors
-                .get(cz * view.width() + cx)
-                .map(|s| (s, lx, lz));
+            let index = cz * view.width() + cx;
+            return view.sectors.get(index).map(|s| (s, lx, lz, index));
         }
         let leaf = self.leaf_in(view, cx, cz, lx as i32, lz as i32);
         let s = self.s;
@@ -395,6 +462,7 @@ impl<'a> GridCollision<'a> {
             leaf.rec,
             (lx as i32 + cx as i32 * s - leaf.ox).max(0) as u32,
             (lz as i32 + cz as i32 * s - leaf.oz).max(0) as u32,
+            usize::from(leaf.id),
         ))
     }
 
@@ -429,6 +497,32 @@ impl<'a> GridCollision<'a> {
         gap
     }
 
+    /// Vertical distance from `y` to the nearest span of a column: its ground
+    /// span (`sector`, record `record`) or any of its extra spans. Zero when
+    /// `y` is inside one of them.
+    #[inline(never)]
+    fn column_gap_all(
+        &self,
+        view: &CollisionView<'a>,
+        sector: &Sector,
+        record: usize,
+        oy: i32,
+        (lx, lz): (u32, u32),
+        y: i32,
+    ) -> i32 {
+        let mut gap = self.column_gap(view, sector, oy, lx, lz, y);
+        if gap == 0 || view.span_index.is_empty() {
+            return gap;
+        }
+        for span in view.extra_spans(record) {
+            gap = gap.min(self.column_gap(view, span, oy, lx, lz, y));
+            if gap == 0 {
+                break;
+            }
+        }
+        gap
+    }
+
     /// Resolve a world point to a room and sector.
     ///
     /// The hint room is tried first. A room fits when the point is inside its
@@ -436,6 +530,12 @@ impl<'a> GridCollision<'a> {
     /// Stacked rooms over one column are told apart that way. When no room
     /// fits, the footprint room whose column is vertically nearest wins, so a
     /// point just inside a floor or ceiling slab still has a room.
+    ///
+    /// A column of several spans fits when the point is inside any of its
+    /// spans, and its distance is that to the nearest span: the answer is
+    /// the same sector whichever span the point is in (the result names no
+    /// span; a caller that needs it asks [`Self::floor_below`] or
+    /// [`Self::ceil_above`] at the point's height).
     #[inline(never)]
     pub fn locate(&self, hint_room: usize, p: [i32; 3]) -> Option<Located> {
         let count = self.rooms.len();
@@ -464,10 +564,10 @@ impl<'a> GridCollision<'a> {
             let Some(view) = self.view(room) else {
                 continue;
             };
-            let Some((sector, llx, llz)) = self.leaf_local(view, cx, cz, lx, lz) else {
+            let Some((sector, llx, llz, record)) = self.leaf_local(view, cx, cz, lx, lz) else {
                 continue;
             };
-            let gap = self.column_gap(view, sector, rec.origin[1], llx, llz, p[1]);
+            let gap = self.column_gap_all(view, sector, record, rec.origin[1], (llx, llz), p[1]);
             let found = Located {
                 room,
                 cx,

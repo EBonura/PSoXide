@@ -113,6 +113,7 @@ fn plane_src(room: usize, index: usize, plane_kind: u8, aux: u8) -> Src {
         cx: index as u8,
         cz: (index >> 8) as u8,
         room: room as u16,
+        span: 0,
     }
 }
 

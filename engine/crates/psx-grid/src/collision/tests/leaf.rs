@@ -22,6 +22,9 @@ pub(super) struct TLeaf {
     pub sector: Sector,
     pub walls: Vec<ColWall>,
     pub split: Option<SplitB>,
+    /// Spans above the leaf's own (`sector`), bottom to top. They are given
+    /// without the leaf size code, which the chunk adds.
+    pub extras: Vec<Sector>,
 }
 
 impl TLeaf {
@@ -38,6 +41,7 @@ impl TLeaf {
             },
             walls: Vec::new(),
             split: None,
+            extras: Vec::new(),
         }
     }
 
@@ -95,7 +99,27 @@ impl TreeRoom {
         let mut exts: Vec<SectorExt> = Vec::new();
         let mut walls = Vec::new();
         let mut splitbs = Vec::new();
+        let mut span_index = Vec::new();
+        let mut span_runs: Vec<SpanRun> = Vec::new();
+        let mut span_recs: Vec<Sector> = Vec::new();
         for leaf in &self.leaves {
+            if leaf.extras.is_empty() {
+                span_index.push(NO_SPAN);
+            } else {
+                span_index.push(span_runs.len() as u16);
+                span_runs.push(SpanRun {
+                    first: span_recs.len() as u16,
+                    count: leaf.extras.len() as u16,
+                });
+                // An extra span carries its leaf's size code, like the
+                // ground record.
+                let mut extras = leaf.extras.clone();
+                for span in &mut extras {
+                    span.flags |= leaf.code << SECTOR_LEAF_SHIFT;
+                }
+                crate::collision::summarize_leaves(&mut extras);
+                span_recs.extend(extras);
+            }
             let mut rec = leaf.sector;
             rec.flags |= leaf.code << SECTOR_LEAF_SHIFT;
             if !leaf.walls.is_empty() || leaf.split.is_some() {
@@ -149,6 +173,11 @@ impl TreeRoom {
                 index,
                 blocks,
             }),
+            spans: (!span_runs.is_empty()).then_some(crate::write::SpanTables {
+                index: span_index,
+                runs: span_runs,
+                spans: span_recs,
+            }),
             exts,
             walls,
             splitbs,
@@ -191,7 +220,7 @@ pub(super) fn build_chunks(rooms: &[(Room, RoomChunk, bool)]) -> Built {
     }
 }
 
-fn tree_world(rooms: &[TreeRoom]) -> Built {
+pub(super) fn tree_world(rooms: &[TreeRoom]) -> Built {
     let items: Vec<(Room, RoomChunk, bool)> = rooms
         .iter()
         .map(|r| (Room::flat(r.origin, r.w, r.d, 0), r.chunk(), true))
@@ -242,7 +271,7 @@ fn reference_floor(leaf: &TLeaf, x: i32, z: i32) -> Option<i32> {
 
 /// A random tree over a `w` by `d` sector room: each 4 by 4 sector block is
 /// split at random into leaves of every size, with random corner heights.
-fn random_room(seed: u32, w: u8, d: u8, om: (i32, i32)) -> TreeRoom {
+pub(super) fn random_room(seed: u32, w: u8, d: u8, om: (i32, i32)) -> TreeRoom {
     let mut rng = Lcg(seed);
     let mut room = TreeRoom::new([0, 0, 0], w, d, om);
     // World-aligned blocks of 16 clicks, clipped to the room.

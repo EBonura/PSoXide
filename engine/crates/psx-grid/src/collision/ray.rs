@@ -49,7 +49,8 @@ pub(crate) struct Cell<'v> {
     /// the per-cell code reads only the sector itself from RAM.
     sectors: &'v [Sector],
     /// The leaf record under the ray in a tree room (`tree`), set per leaf
-    /// before its walls and slabs are tested.
+    /// before its walls and slabs are tested; while an extra span of a column
+    /// is tested (`span != 0`), that span, in either layout.
     rec: Option<&'v Sector>,
     /// Frame of that leaf: origin and reciprocal. A dense room derives its
     /// frame from the cell.
@@ -89,13 +90,23 @@ pub(crate) struct Cell<'v> {
     flags: u16,
     which: u8,
     entry: u8,
+    /// 0 while the ground span of the column is tested, else the 1-based
+    /// position of the extra span being tested ([`Src::span`]).
+    span: u8,
+    /// The room has extra spans somewhere ([`CollisionView::span_index`] is
+    /// not empty), so the cells' columns are looked up.
+    multi: bool,
+    /// Index in `SECTORS` of the leaf under the ray in a tree room (the key
+    /// of its extra spans); a dense room derives it from the cell.
+    id: u16,
 }
 
 impl<'v> Cell<'v> {
-    /// The sector (or, in a tree room, the leaf) the ray is in.
+    /// The sector (or, in a tree room, the leaf) the ray is in; the extra
+    /// span being tested, when one is.
     #[inline(always)]
     fn sector(&self) -> Option<&Sector> {
-        if self.tree {
+        if self.tree || self.span != 0 {
             return self.rec;
         }
         self.sectors
@@ -110,6 +121,15 @@ impl<'v> Cell<'v> {
             (self.ox, self.oz, i32::from(self.size), self.inv)
         } else {
             (self.cx() * s, self.cz() * s, s, inv24)
+        }
+    }
+    /// Index of the cell's or leaf's record in `SECTORS`.
+    #[inline(always)]
+    fn record(&self) -> usize {
+        if self.tree {
+            usize::from(self.id)
+        } else {
+            self.cz as usize * self.w as usize + self.cx as usize
         }
     }
     #[inline(always)]
@@ -320,6 +340,9 @@ impl<'a> GridCollision<'a> {
             flags: 0,
             which: 0,
             entry: back_code(d),
+            span: 0,
+            multi: !view.span_index.is_empty(),
+            id: 0,
         });
         true
     }
@@ -368,7 +391,7 @@ impl<'a> GridCollision<'a> {
                 if sector.ext != NO_EXT {
                     self.ray_walls(q, c, hit);
                 }
-                if self.slabs_matter(q, c, sector) {
+                if c.multi || self.slabs_matter(q, c, sector) {
                     self.ray_slabs(q, c, hit);
                 }
             }
@@ -436,20 +459,48 @@ impl<'a> GridCollision<'a> {
     /// Test one leaf (the cell's frame is set from it) against the piece
     /// `[c.q0, c.q1]`.
     #[inline(always)]
-    fn ray_leaf<'v>(&self, q: &Query, c: &mut Cell<'v>, hit: &mut Raw, leaf: &LeafAt<'v>) {
+    fn ray_leaf<'v>(&self, q: &Query, c: &mut Cell<'v>, hit: &mut Raw, leaf: &LeafAt<'v>)
+    where
+        'a: 'v,
+    {
         c.rec = Some(leaf.rec);
         c.ox = leaf.ox;
         c.oz = leaf.oz;
         c.size = leaf.size as i16;
         c.inv = self.dims_of(leaf.rec.flags).1;
         c.quarter = leaf.quarter;
+        c.id = leaf.id;
         let sector = leaf.rec;
         if sector.ext != NO_EXT {
             self.ray_walls(q, c, hit);
         }
-        if self.slabs_matter(q, c, sector) {
+        if c.multi || self.slabs_matter(q, c, sector) {
             self.ray_slabs(q, c, hit);
         }
+    }
+
+    /// Make the first extra span of the cell's (or leaf's) column at or after
+    /// position `*next` whose slabs could touch the piece the cell's current
+    /// record (see [`Cell::rec`]); false when there is none. `*next` is left
+    /// after it.
+    #[inline(never)]
+    fn next_extra<'v>(&self, q: &Query, c: &mut Cell<'v>, next: &mut usize) -> bool
+    where
+        'a: 'v,
+    {
+        let Some(view) = self.view(c.room()) else {
+            return false;
+        };
+        let extras = view.extra_spans(c.record());
+        while let Some(span) = extras.get(*next) {
+            *next += 1;
+            if self.slabs_matter(q, c, span) {
+                c.rec = Some(span);
+                c.span = *next as u8;
+                return true;
+            }
+        }
+        false
     }
 
     /// Step to the next cell along the ray, refreshing the crossing times of
@@ -495,6 +546,12 @@ impl<'a> GridCollision<'a> {
         let (w, dp, qb) = (i32::from(c.w), i32::from(c.dp), i32::from(c.qb));
         let (ylo, yhi) = (c.ylo, c.yhi);
         let sectors = c.sectors;
+        // Rooms without extra spans never look one up.
+        let spans: &[u16] = if c.multi {
+            self.view(c.room()).map_or(&[], |view| view.span_index)
+        } else {
+            &[]
+        };
         let (mut cx, mut cz, mut q0) = (c.cx(), c.cz(), c.q0());
         let (mut tx, mut tz) = (c.tx, c.tz);
         let mut entry = c.entry;
@@ -505,7 +562,13 @@ impl<'a> GridCollision<'a> {
             let q1 = (leave - 1).min(qb).max(q0);
             if let Some(sector) = sectors.get((cz * w + cx) as usize) {
                 let f = sector.flags;
-                let special = if sector.ext != NO_EXT {
+                // A column with extra spans is never skipped, whatever its
+                // ground record's flags say.
+                let special = if sector.ext != NO_EXT
+                    || spans
+                        .get((cz * w + cx) as usize)
+                        .is_some_and(|&run| run != NO_SPAN)
+                {
                     true
                 } else if f & (SECTOR_HAS_FLOOR | SECTOR_CEIL_SOLID) == 0 {
                     false
@@ -770,8 +833,35 @@ impl<'a> GridCollision<'a> {
     /// a margin for interpolation rounding) cannot touch it and is skipped
     /// before any height is evaluated. The remaining slabs are walked over
     /// their linear sub-pieces, evaluating each sub-piece end once.
+    ///
+    /// A column of several spans does this for each of its spans in turn,
+    /// the ground span first: the extra spans of the cell's record are
+    /// made the cell's current record one at a time (`Cell::rec`,
+    /// `Cell::span`), and the ground record is put back at the end. The
+    /// loop is in this function, not around it, so the slab test is not a
+    /// call deeper on the 1 KiB stack.
     #[inline(never)]
-    fn ray_slabs(&self, q: &Query, c: &mut Cell<'_>, hit: &mut Raw) {
+    fn ray_slabs<'v>(&self, q: &Query, c: &mut Cell<'v>, hit: &mut Raw)
+    where
+        'a: 'v,
+    {
+        let ground = c.rec;
+        let mut next = 0;
+        loop {
+            self.ray_span_slabs(q, c, hit);
+            if !c.multi || !self.next_extra(q, c, &mut next) {
+                break;
+            }
+        }
+        if next != 0 {
+            c.rec = ground;
+            c.span = 0;
+        }
+    }
+
+    /// The slabs of the cell's current record, see [`Self::ray_slabs`].
+    #[inline(always)]
+    fn ray_span_slabs(&self, q: &Query, c: &mut Cell<'_>, hit: &mut Raw) {
         let Some(sector) = c.sector() else {
             return;
         };
@@ -910,6 +1000,7 @@ impl<'a> GridCollision<'a> {
                 cx: c.cx as u8,
                 cz: c.cz as u8,
                 room: c.room,
+                span: c.span,
             };
             nc::FLOOR
         } else {
