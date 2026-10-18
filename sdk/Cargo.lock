@@ -134,6 +134,14 @@ name = "psx-iso"
 version = "0.1.0"
 
 [[package]]
+name = "psx-loading"
+version = "0.1.0"
+dependencies = [
+ "psx-font",
+ "psx-io",
+]
+
+[[package]]
 name = "psx-math"
 version = "0.1.0"
 
