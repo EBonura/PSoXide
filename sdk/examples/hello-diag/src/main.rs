@@ -85,6 +85,28 @@ fn main() {
                 psx_io::diag::step(4, "PANIC");
                 panic!("hello-diag test panic at frame {}", frame);
             }
+            if is("ll") {
+                psx_io::diag::step(7, "LL NODE 41");
+                // One node of 41 payload words (NOP commands): what WipEout's title emitted.
+                static mut NODE: [u32; 42] = [0; 42];
+                // SAFETY: a private static written once before the kick, as the DMA contract asks.
+                unsafe {
+                    let node = &raw mut NODE;
+                    (*node)[0] = (41 << 24) | 0x00FF_FFFF;
+                    psx_io::dma::wait_done(psx_io::dma::Channel::Gpu, 1_000_000);
+                    psx_io::dma::start(
+                        psx_io::dma::Channel::Gpu,
+                        psx_io::dma::Transfer {
+                            address: node as u32,
+                            size: psx_io::dma::size_words(0),
+                            control: psx_hw::dma::CHCR_LINKED_LIST_TO_DEVICE,
+                        },
+                    );
+                }
+                loop {
+                    core::hint::spin_loop();
+                }
+            }
             if is("cd") {
                 psx_io::diag::step(5, "CD READ");
                 // A sector far past the end of the image: the drive errors or never answers.
