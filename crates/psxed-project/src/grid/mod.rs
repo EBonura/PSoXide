@@ -80,6 +80,7 @@ pub mod sector;
 pub mod slope;
 pub mod starter;
 pub mod surface;
+pub mod tree;
 pub mod units;
 pub mod uv;
 pub mod uv_region;
