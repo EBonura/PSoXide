@@ -105,6 +105,8 @@ mod derive_span_tests;
 #[cfg(test)]
 mod derive_tests;
 #[cfg(test)]
+mod focus_tests;
+#[cfg(test)]
 mod leaf_face_tests;
 #[cfg(test)]
 mod leaf_tests;

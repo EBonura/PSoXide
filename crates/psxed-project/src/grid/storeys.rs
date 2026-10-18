@@ -78,6 +78,25 @@ pub fn storeys(world: &GridWorld) -> Vec<Storey> {
         .collect()
 }
 
+/// The lowest storey floor above `y`, grid units with room offsets included.
+pub fn storey_above(storeys: &[Storey], y: i32) -> Option<i32> {
+    storeys.iter().map(|s| s.height).find(|&h| h > y)
+}
+
+/// The highest storey floor below `y`.
+pub fn storey_below(storeys: &[Storey], y: i32) -> Option<i32> {
+    storeys.iter().rev().map(|s| s.height).find(|&h| h < y)
+}
+
+/// The storey a surface at `y` belongs to: the highest floor at or below
+/// `y + slack`. A little slack lets a surface just under a floor's height
+/// (a stair landing, a rounded hit point) count as on it, while a ceiling a
+/// click under the next floor still belongs to the storey below.
+pub fn storey_at(storeys: &[Storey], y: i32, slack: i32) -> Option<i32> {
+    let limit = y.saturating_add(slack);
+    storeys.iter().rev().map(|s| s.height).find(|&h| h <= limit)
+}
+
 /// Height rounded to the nearest click, as a click index.
 fn click_of(height: i32) -> i32 {
     (height + CLICK_UNITS / 2).div_euclid(CLICK_UNITS)

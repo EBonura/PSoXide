@@ -167,6 +167,9 @@ impl SpanOutcome {
 pub enum CutScope {
     /// The slab whose floor is at the height.
     One,
+    /// The first slab whose floor is above the height: the one over a body
+    /// standing at it.
+    Next,
     /// Every slab at or above the height.
     AllAbove,
 }
@@ -255,6 +258,7 @@ pub fn cut_hole_column(
                 low == high
                     && match scope {
                         CutScope::One => low == y,
+                        CutScope::Next => low > y,
                         CutScope::AllAbove => low >= y,
                     }
             })
@@ -266,7 +270,7 @@ pub fn cut_hole_column(
         sector.spans_mut()[index - 1].ceiling = ceiling;
         sector.remove_span(index);
         cut += 1;
-        if scope == CutScope::One {
+        if scope != CutScope::AllAbove {
             break;
         }
     }

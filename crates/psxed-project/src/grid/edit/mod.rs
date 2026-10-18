@@ -29,6 +29,7 @@ pub mod convert;
 pub mod delete;
 pub mod derived;
 pub mod fit;
+pub mod focus;
 pub mod heights;
 pub mod lens;
 pub mod meshes;
