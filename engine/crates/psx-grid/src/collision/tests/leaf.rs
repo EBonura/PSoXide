@@ -452,10 +452,7 @@ fn quarter_leaf_treads_collide_one_step_at_a_time() {
         // The floor is a staircase, not a ramp.
         for tread in 0..4 {
             let x = tread * Q + Q / 2;
-            assert_eq!(
-                w.floor_at(0, 0, 0, x as u32, 30),
-                Some(8 * (tread as i32 + 1))
-            );
+            assert_eq!(w.floor_at(0, 0, 0, x as u32, 30), Some(8 * (tread + 1)));
         }
         // A probe standing over each tread lands exactly on it.
         for tread in 0..4 {
