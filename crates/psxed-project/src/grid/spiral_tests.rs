@@ -138,7 +138,7 @@ fn a_tread_high_enough_leaves_a_walkable_undercroft_below_it() {
     // Tread 5 sits 5 clicks up: the span under it keeps its floor and the
     // slab underside four clicks up, headroom enough to stand in.
     let room = &world.rooms[0];
-    let [x, z] = room.local([5, 1]).map(|[x, z]| [x, z]).unwrap();
+    let [x, z] = room.local([5, 1]).unwrap();
     let column = room.sector(x, z).unwrap();
     let spans: Vec<(Option<i32>, Option<i32>)> = column
         .spans()
