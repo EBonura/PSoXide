@@ -135,7 +135,7 @@ pub fn capture_cook_output<T>(work: impl FnOnce() -> T) -> (T, Vec<String>) {
 
 /// Preserve a cooker diagnostic on stderr and forward it to the active host
 /// capture, when the editor launched the cook in-process.
-pub(crate) fn emit_cook_output(arguments: std::fmt::Arguments<'_>) {
+pub fn emit_cook_output(arguments: std::fmt::Arguments<'_>) {
     let line = arguments.to_string();
     eprintln!("{line}");
     let sink = COOK_OUTPUT_SINK

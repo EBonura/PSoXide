@@ -39,6 +39,7 @@ pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io
     // destroys the cooked manifest of whichever project was there before. The
     // oversized-chunk case is the one that actually fires, so check every room
     // up front and fail as a clean no-op.
+    let write_started = std::time::Instant::now();
     validate_model_frame_bounds(package)?;
     // Same discipline for the session-resident payloads. Without this the
     // ceiling is only reported by a MIPS link failure naming a section, long
@@ -136,10 +137,16 @@ pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io
         generated_dir.join(UI_PACK_ORDER_FILENAME),
         render_ui_pack_order(package),
     )?;
+    let xa_started = std::time::Instant::now();
     std::fs::write(
         generated_dir.join(XA_MUSIC_FILENAME),
         write_xa_music(package, &xa_music_dir)?,
     )?;
+    crate::playtest::emit_cook_output(format_args!(
+        "[cook] timing: write {} ms (XA music {} ms)",
+        write_started.elapsed().as_millis(),
+        xa_started.elapsed().as_millis(),
+    ));
     Ok(())
 }
 
@@ -1825,26 +1832,96 @@ fn write_xa_music(package: &PlaytestPackage, xa_music_dir: &Path) -> std::io::Re
         })
         .collect();
     let layout = music_layout(package);
-    let files = super::xa_music::encode(&sources, &layout).map_err(|e| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("cook XA music: {e}"),
-        )
-    })?;
+    let names = layout.file_names();
+    // Encoding the songs (resample, ADPCM) takes seconds and depends only on
+    // the WAV bytes, the baked speeds and the file layout, so a cook that did
+    // not touch the music reuses the last result.
+    let cache_dir = xa_music_dir.parent().map(|dir| dir.join(XA_CACHE_DIRNAME));
+    let key = xa_cache_key(&wavs, package, &layout);
+    let cached = cache_dir.as_ref().map(|dir| {
+        names
+            .iter()
+            .map(|name| dir.join(format!("{key:016x}-{name}")))
+            .collect::<Vec<_>>()
+    });
+    let cache_hit = cached
+        .as_ref()
+        .is_some_and(|paths| paths.iter().all(|path| path.is_file()));
+    let files: Vec<Option<Vec<u8>>> = if cache_hit {
+        names.iter().map(|_| None).collect()
+    } else {
+        super::xa_music::encode(&sources, &layout)
+            .map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("cook XA music: {e}"),
+                )
+            })?
+            .into_iter()
+            .map(Some)
+            .collect()
+    };
+    if let (Some(dir), Some(paths), false) = (cache_dir.as_ref(), cached.as_ref(), cache_hit) {
+        // One entry at a time: the files are megabytes each.
+        let _ = std::fs::remove_dir_all(dir);
+        if std::fs::create_dir_all(dir).is_ok() {
+            for (path, bytes) in paths.iter().zip(&files) {
+                if let Some(bytes) = bytes {
+                    let _ = std::fs::write(path, bytes);
+                }
+            }
+        }
+    }
     let mut lba = music_first_lba(package);
-    for ((name, bytes), sectors) in layout
-        .file_names()
-        .iter()
-        .zip(files)
-        .zip(&layout.file_sectors)
-    {
+    for (index, (name, sectors)) in names.iter().zip(&layout.file_sectors).enumerate() {
         let target = xa_music_dir.join(name);
-        std::fs::write(&target, bytes)?;
+        match (&files[index], cached.as_ref()) {
+            (Some(bytes), _) => std::fs::write(&target, bytes)?,
+            (None, Some(paths)) => {
+                let _ = std::fs::remove_file(&target);
+                if std::fs::hard_link(&paths[index], &target).is_err() {
+                    std::fs::copy(&paths[index], &target)?;
+                }
+            }
+            (None, None) => unreachable!("a cache hit needs a cache directory"),
+        }
         let listed = target.canonicalize().unwrap_or(target);
         let _ = writeln!(out, "{}\t{lba}", listed.display());
         lba += sectors;
     }
     Ok(out)
+}
+
+/// Directory under `generated/` holding the last encoded XA music files.
+const XA_CACHE_DIRNAME: &str = ".cook-cache";
+
+/// Bump when `psx-audio-cook` or `xa_music::encode` change what they emit for
+/// the same input, so a stale cache cannot outlive the encoder.
+const XA_COOK_REVISION: u32 = 1;
+
+/// FNV-1a over everything the encoded files are a function of.
+fn xa_cache_key(
+    wavs: &[Vec<u8>],
+    package: &PlaytestPackage,
+    layout: &super::xa_music::Layout,
+) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    let mut feed = |bytes: &[u8]| {
+        for &byte in bytes {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x100_0000_01b3);
+        }
+    };
+    feed(&XA_COOK_REVISION.to_le_bytes());
+    for (wav, track) in wavs.iter().zip(&package.cdda_tracks) {
+        feed(&(wav.len() as u64).to_le_bytes());
+        feed(wav);
+        feed(&track.playback_speed_q12.to_le_bytes());
+    }
+    for sectors in &layout.file_sectors {
+        feed(&sectors.to_le_bytes());
+    }
+    hash
 }
 
 /// WORLD.PAK is header-only: no world content streams off it, but the pack

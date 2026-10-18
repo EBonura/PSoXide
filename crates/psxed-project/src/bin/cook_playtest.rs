@@ -18,7 +18,9 @@ use std::process::ExitCode;
 
 use psxed_project::{
     default_project_dir,
-    playtest::{build_package, cook_to_dir, default_generated_dir, playtest_performance_envelope},
+    playtest::{
+        build_package, default_generated_dir, playtest_performance_envelope, write_cook_result,
+    },
     ProjectDocument,
 };
 
@@ -51,7 +53,15 @@ fn main() -> ExitCode {
     };
 
     let dir = default_generated_dir();
-    match cook_to_dir(&project, &project_root, &dir) {
+    // Build the package once and write that same package: cooking is the slow
+    // part, and the summary below needs the package too.
+    let started = std::time::Instant::now();
+    let (package, report) = build_package(&project, &project_root);
+    eprintln!(
+        "[cook-playtest] timing: package {} ms",
+        started.elapsed().as_millis()
+    );
+    match write_cook_result(package.as_ref(), &dir).map(|()| report) {
         Ok(report) => {
             for warn in &report.warnings {
                 eprintln!("[cook-playtest] warning: {warn}");
@@ -62,11 +72,9 @@ fn main() -> ExitCode {
                 }
                 return ExitCode::from(1);
             }
-            // Re-run build_package to surface package counts in
-            // the success line. Cheap (cooks already ran inside
-            // cook_to_dir) and gives operators a quick read on
+            // Surface package counts in the success line: a quick read on
             // what landed in generated/.
-            if let (Some(package), _) = build_package(&project, &project_root) {
+            if let Some(package) = package {
                 // The exact cooked resource envelope. The editor already shows
                 // this after Play; printing it here means a CLI cook, a gate
                 // log and a budget review all quote the same numbers instead
