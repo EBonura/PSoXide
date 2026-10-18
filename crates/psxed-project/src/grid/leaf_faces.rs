@@ -27,6 +27,7 @@ use super::leaf::{LeafKey, SECTOR_LEVEL};
 use super::leaf_derive;
 use super::leaf_diag;
 use super::overrides::WallMode;
+use super::rough::Jitter;
 use super::room::GridRoom;
 use super::sector::{GridSector, WallEdge};
 use super::surface::GridSurface;
@@ -69,7 +70,13 @@ fn hangs(room: &GridRoom, piece: LeafKey, square: Square) -> Vec<Hang> {
 /// Put the hanging vertices into the rings of `faces[from..]` that run
 /// along their side, and fan any ring that grew past four corners into
 /// triangles. Only floors and ceilings are stitched.
-fn stitch(faces: &mut Vec<GridFace>, from: usize, hangs: &[Hang], scale: GridScale) {
+fn stitch(
+    faces: &mut Vec<GridFace>,
+    from: usize,
+    hangs: &[Hang],
+    scale: GridScale,
+    jitter: Option<Jitter<'_>>,
+) {
     if hangs.is_empty() {
         return;
     }
@@ -85,26 +92,31 @@ fn stitch(faces: &mut Vec<GridFace>, from: usize, hangs: &[Hang], scale: GridSca
         let mut inserted: Vec<usize> = Vec::new();
         for hang in hangs {
             let n = face.grid.len();
+            // Where the rock puts the side's ends and its middle.
+            let moved = |p: [i32; 2]| {
+                let o = jitter.map_or([0, 0], |j| {
+                    let [vx, vz] = j.lattice(p);
+                    j.at(vx, vz)
+                });
+                [p[0] + o[0], p[1] + o[1]]
+            };
+            let (e0, e1, mid) = (moved(hang.ends[0]), moved(hang.ends[1]), moved(hang.mid));
             let edge = (0..n).find(|&i| {
                 let (p, q) = (face.grid[i], face.grid[(i + 1) % n]);
                 let ends = [[p[0], p[2]], [q[0], q[2]]];
-                (ends == hang.ends || ends == [hang.ends[1], hang.ends[0]])
-                    && !face.grid.iter().any(|g| [g[0], g[2]] == hang.mid)
+                (ends == [e0, e1] || ends == [e1, e0])
+                    && !face.grid.iter().any(|g| [g[0], g[2]] == mid)
             });
             let Some(i) = edge else { continue };
             let j = (i + 1) % n;
             let (p, q) = (face.grid[i], face.grid[j]);
             let y = half(p[1], q[1]);
             let at = i + 1;
-            face.grid.insert(at, [hang.mid[0], y, hang.mid[1]]);
-            face.points.insert(
-                at,
-                [
-                    scale.to_editor(hang.mid[0]),
-                    scale.to_editor(y),
-                    scale.to_editor(hang.mid[1]),
-                ],
-            );
+            // The hanging vertex moves with the rock like every other corner.
+            let (mx, mz) = (mid[0], mid[1]);
+            face.grid.insert(at, [mx, y, mz]);
+            face.points
+                .insert(at, [scale.to_editor(mx), scale.to_editor(y), scale.to_editor(mz)]);
             let (tu, tv) = (face.texels[i], face.texels[j]);
             face.texels
                 .insert(at, [(tu[0] + tv[0]) / 2.0, (tu[1] + tv[1]) / 2.0]);
@@ -177,10 +189,10 @@ pub(super) fn cell_faces(
         legacy_uv: true,
         frame: Frame::around([[0.0, 0.0]]),
         room_ref: Some(r),
-        // The rough jitter lives on the sector lattice; a finer leaf's
-        // vertices have no displacement there, so a mixed room does not
-        // jitter.
-        jitter: None,
+        // The jitter lattice of a mixed room is the click lattice (see
+        // `rough::Jitter`): a corner, a hanging vertex and a wall segment end
+        // all move by a function of their position alone.
+        jitter: Jitter::new(r),
         tint: None,
         out,
     };
@@ -254,7 +266,8 @@ fn leaf_faces(
         );
     }
     let scale = builder.scale;
-    stitch(builder.out, from, &hanging, scale);
+    let jitter = builder.jitter;
+    stitch(builder.out, from, &hanging, scale, jitter);
     if whole {
         for edge in WallEdge::ALL {
             for (index, wall) in sector.walls(edge).iter().enumerate() {

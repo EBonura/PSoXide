@@ -193,6 +193,12 @@ impl Rng {
 /// A random mixed room: an 8 by 8 derived hall of planar sectors, then
 /// random subdivisions, merges, lifts and (below a sector) cracks and voids.
 fn random_room(seed: u32, features: bool) -> GridRoom {
+    random_room_with(seed, features, false)
+}
+
+/// [`random_room`]; `calm` keeps every floor flat (no slopes, so no walls
+/// whose profiles cross) for the checks that cannot tolerate a bow tie.
+fn random_room_with(seed: u32, features: bool, calm: bool) -> GridRoom {
     use crate::grid::surface::{GridSplit, GridSurface};
     use crate::grid::tree::{merge, subdivide, subdivide_to};
     let mut rng = Rng(seed.wrapping_mul(7919).wrapping_add(13));
@@ -201,7 +207,11 @@ fn random_room(seed: u32, features: bool) -> GridRoom {
         for x in 0..8 {
             let base = 64 * rng.below(8) as i32;
             let mut floor = GridSurface::flat(base, Some(rid(1)));
-            let (a, b) = (rng.below(3) as i32 - 1, rng.below(3) as i32 - 1);
+            let (a, b) = if calm {
+                (0, 0)
+            } else {
+                (rng.below(3) as i32 - 1, rng.below(3) as i32 - 1)
+            };
             floor.heights = [base, base + 64 * a, base + 64 * (a + b), base + 64 * b];
             floor.split = if rng.below(2) == 0 {
                 GridSplit::NwSe
@@ -232,7 +242,11 @@ fn random_room(seed: u32, features: bool) -> GridRoom {
             _ => {
                 let corner = rng.below(4) as usize;
                 if let Some(s) = room.leaf_mut(key).and_then(|l| l.ground_floor_mut()) {
-                    s.heights[corner] += 64;
+                    if calm {
+                        s.heights = s.heights.map(|h| h + 64);
+                    } else {
+                        s.heights[corner] += 64;
+                    }
                     s.heights_b = None;
                 }
                 normalize(&mut room);
@@ -352,5 +366,47 @@ fn random_mixed_rooms_cook_to_what_the_document_says_at_every_point() {
             "seed {seed}: {:?}",
             lattice_holes(&world)
         );
+    }
+}
+
+/// Bands on every derived wall and rough rock on random leaves: faces stay
+/// watertight, every corner and every cut point moves by a function of its
+/// plan position alone.
+#[test]
+fn bands_and_rough_in_mixed_rooms_leave_no_hole() {
+    use crate::grid::bands::{Anchor, Band, BandSet};
+    use crate::grid::rough::Rough;
+    for seed in 0..16 {
+        let mut room = random_room_with(100 + seed, false, true);
+        room.band_sets = vec![BandSet {
+            name: "Trim".to_string(),
+            lines: vec![Anchor::Bottom(256), Anchor::Abs(1024)],
+            bands: vec![Band::default(), Band::default(), Band::default()],
+        }];
+        room.defaults.bands = Some(0);
+        let mut rng = Rng(seed + 5);
+        room.rough = Rough {
+            seed: seed as u16,
+            amp: Rough::default_amp(GridScale::DEFAULT),
+            tint: 20,
+        };
+        let keys: Vec<LeafKey> = room.leaves.keys().collect();
+        for key in keys {
+            room.leaf_mut(key).unwrap().rough = rng.below(4) as u8;
+        }
+        let world = world_of(room);
+        let found = holes(&world);
+        assert!(found.is_empty(), "seed {seed}: {found:?}");
+        // The jitter really moved something.
+        let flat = {
+            let mut r = world.rooms[0].clone();
+            r.rough = Rough::default();
+            cook(&world_of(r)).unwrap()
+        };
+        let rough = cook(&world).unwrap();
+        assert_ne!(flat.tables[0].vertices, rough.tables[0].vertices, "seed {seed}");
+        // Collision is cooked from the document, not the displaced faces.
+        assert_eq!(flat.tables[0].sectors, rough.tables[0].sectors);
+        assert_eq!(flat.tables[0].walls, rough.tables[0].walls);
     }
 }

@@ -107,10 +107,18 @@ fn spread(h: u32, amp: i32) -> i32 {
 }
 
 /// The jitter of one room, for the face builder.
+///
+/// The lattice is the sector corners in a room of whole sectors, and the
+/// **click** corners (quarter sectors) in a room with leaves of other sizes,
+/// where a leaf's corner, a hanging vertex and a wall segment's end all lie.
+/// A click point on the sector lattice hashes exactly as it did, so a room
+/// that gains a few small cells does not change the rock elsewhere.
 #[derive(Clone, Copy)]
 pub struct Jitter<'a> {
     room: &'a GridRoom,
     rough: Rough,
+    /// Grid units between lattice points: a sector, or a click.
+    unit: i32,
 }
 
 impl<'a> Jitter<'a> {
@@ -119,19 +127,35 @@ impl<'a> Jitter<'a> {
         room.rough.jitters().then_some(Self {
             room,
             rough: room.rough,
+            unit: if room.leaves.is_sectors_only() {
+                super::SECTOR_UNITS
+            } else {
+                super::SECTOR_UNITS / super::leaf::CLICKS_PER_SECTOR
+            },
         })
     }
 
-    /// The rough level at lattice point `[vx, vz]` (in sectors): the highest
-    /// among the sectors that touch it.
+    /// The lattice point (in this jitter's unit) of grid point `p`.
+    pub fn lattice(&self, p: [i32; 2]) -> [i32; 2] {
+        [p[0].div_euclid(self.unit), p[1].div_euclid(self.unit)]
+    }
+
+    /// The rough level at lattice point `[vx, vz]`: the highest among the
+    /// sectors (or, with leaves of several sizes, the leaves) that touch it.
     pub fn level_at(&self, vx: i32, vz: i32) -> u8 {
         let mut level = 0;
         for (dx, dz) in [(-1, -1), (0, -1), (-1, 0), (0, 0)] {
-            let sector = self
-                .room
-                .local([vx + dx, vz + dz])
-                .and_then(|[x, z]| self.room.sector(x, z));
-            level = level.max(sector.map_or(0, |s| s.rough & 3));
+            let rough = if self.unit == super::SECTOR_UNITS {
+                self.room
+                    .local([vx + dx, vz + dz])
+                    .and_then(|[x, z]| self.room.sector(x, z))
+                    .map(|s| s.rough)
+            } else {
+                self.room
+                    .leaf_at([vx + dx, vz + dz])
+                    .map(|(_, leaf)| leaf.rough)
+            };
+            level = level.max(rough.map_or(0, |r| r & 3));
         }
         level
     }
@@ -142,9 +166,20 @@ impl<'a> Jitter<'a> {
         if amp == 0 {
             return [0, 0];
         }
+        // A click on the sector lattice hashes as the sector corner does.
+        let per = super::leaf::CLICKS_PER_SECTOR;
+        let (hx, hz, salt) = if self.unit != super::SECTOR_UNITS {
+            if vx.rem_euclid(per) == 0 && vz.rem_euclid(per) == 0 {
+                (vx.div_euclid(per), vz.div_euclid(per), 0)
+            } else {
+                (vx, vz, 8)
+            }
+        } else {
+            (vx, vz, 0)
+        };
         [
-            spread(hash(self.rough.seed, vx, vz, 1), amp),
-            spread(hash(self.rough.seed, vx, vz, 2), amp),
+            spread(hash(self.rough.seed, hx, hz, 1 + salt), amp),
+            spread(hash(self.rough.seed, hx, hz, 2 + salt), amp),
         ]
     }
 
@@ -152,13 +187,7 @@ impl<'a> Jitter<'a> {
     /// grid point `b` along a segment between two lattice points (a wall, a
     /// diagonal): the two ends' offsets interpolated, rounded to the nearest.
     pub fn along(&self, a: [i32; 2], b: [i32; 2], num: i64, den: i64) -> [i32; 2] {
-        let lattice = |p: [i32; 2]| {
-            [
-                p[0].div_euclid(super::SECTOR_UNITS),
-                p[1].div_euclid(super::SECTOR_UNITS),
-            ]
-        };
-        let (la, lb) = (lattice(a), lattice(b));
+        let (la, lb) = (self.lattice(a), self.lattice(b));
         let (da, db) = (self.at(la[0], la[1]), self.at(lb[0], lb[1]));
         let den = den.max(1);
         let lerp = |x: i32, y: i32| -> i32 {

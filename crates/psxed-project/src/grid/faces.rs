@@ -256,7 +256,10 @@ impl Builder<'_> {
     /// Plan offset of the lattice corner at grid point `p`.
     pub(super) fn jitter_at(&self, p: [i32; 2]) -> [i32; 2] {
         match &self.jitter {
-            Some(j) => j.at(p[0].div_euclid(SECTOR_UNITS), p[1].div_euclid(SECTOR_UNITS)),
+            Some(j) => {
+                let [vx, vz] = j.lattice(p);
+                j.at(vx, vz)
+            }
             None => [0, 0],
         }
     }
