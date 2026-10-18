@@ -1282,3 +1282,23 @@ fn forbid_is_a_command_line_flag() {
     assert!(out.contains("1 scratchpad stack entries fail"), "{out}");
     assert_eq!(call(stack_guard::main, &[exe, map, "--forbid"]).0, 1);
 }
+
+#[test]
+fn forbidding_the_flush_forbids_the_range_flush_too() {
+    let mut fx = Fixture::new();
+    let flush = fx.leaf(3, "__psx_rt_flush_i_cache_range", 0);
+    let a = fx.caller(2, "t::a", 16, &[flush]);
+    fx.caller(1, &entry(0, 1024), 8, &[a]);
+    let (exe, map) = fx.write();
+    let (exe, map) = (exe.to_str().unwrap(), map.to_str().unwrap());
+    assert_eq!(call(stack_guard::main, &[exe, map]).0, 0);
+    let (status, out) = call(
+        stack_guard::main,
+        &[exe, map, "--forbid", "__psx_rt_flush_i_cache"],
+    );
+    assert_eq!(status, 1, "{out}");
+    assert!(
+        out.contains("reaches __psx_rt_flush_i_cache_range"),
+        "{out}"
+    );
+}

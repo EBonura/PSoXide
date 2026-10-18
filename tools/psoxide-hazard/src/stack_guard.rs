@@ -42,7 +42,7 @@ hazard-patched: calls rerouted through HAZARD_TRAMPOLINES are followed to
 their targets. `--root`/`--budget` check a game's own stack switch instead
 (an entry name regex and its byte budget). `--forbid SYMBOL` (repeatable)
 fails a tree that reaches the function named SYMBOL: psx-rt's I-cache flush,
-`__psx_rt_flush_i_cache`, runs with the scratchpad unmapped, so a frame on the
+`__psx_rt_flush_i_cache` (and, with it, the range flush `__psx_rt_flush_i_cache_range`), runs with the scratchpad unmapped, so a frame on the
 scratchpad stack would read the cache tags instead. A forbidden symbol that
 is not linked is reported but does not fail. Without a map, `--forbid` fails
 because symbol reachability cannot be proved; otherwise the tool only checks
@@ -604,7 +604,13 @@ pub fn main(args: &[String], out: &mut dyn Write) -> i32 {
                 }
             },
             "--forbid" => match it.next() {
-                Some(value) => forbidden.push(value.clone()),
+                Some(value) => {
+                    forbidden.push(value.clone());
+                    // The range flush isolates the cache the same way, so a game that forbids the whole flush forbids it too.
+                    if value == "__psx_rt_flush_i_cache" {
+                        forbidden.push("__psx_rt_flush_i_cache_range".into());
+                    }
+                }
                 None => {
                     let _ = writeln!(out, "stack guard: --forbid needs a symbol");
                     return 1;
