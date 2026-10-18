@@ -86,6 +86,20 @@ pub fn resolve(mode: UvMode, material_default: Option<UvMode>) -> UvMode {
     }
 }
 
+/// `frame` widened by a face's [`FaceUv::grow`].
+pub fn widen(frame: Frame, grow: [[i32; 2]; 2]) -> Frame {
+    Frame {
+        min: [
+            frame.min[0] - f64::from(grow[0][0]),
+            frame.min[1] - f64::from(grow[0][1]),
+        ],
+        max: [
+            frame.max[0] + f64::from(grow[1][0]),
+            frame.max[1] + f64::from(grow[1][1]),
+        ],
+    }
+}
+
 /// Texel density per grid unit of a world mode.
 fn density(texels_per_sector: [u16; 2]) -> [f64; 2] {
     texels_per_sector.map(|t| f64::from(t) / f64::from(SECTOR_UNITS))
@@ -116,7 +130,7 @@ impl Mapper {
             mode: resolve(uv.mode, material_default),
             turns: uv.turns & 3,
             flip: uv.flip,
-            frame,
+            frame: widen(frame, uv.grow),
             fine: *uv,
             legacy_centre,
         }
@@ -237,6 +251,9 @@ pub struct UvReport {
     /// The fine rotation is not a quarter turn, so the counts are an
     /// estimate (the cook counts exactly).
     pub approximate: bool,
+    /// For a fit whose frame was widened over a patch of faces: the repeats
+    /// across the whole patch, horizontal and vertical.
+    pub patch: Option<[f32; 2]>,
 }
 
 impl UvReport {
@@ -251,6 +268,16 @@ impl UvReport {
             }
         };
         match self.mode {
+            UvMode::Fit { .. } if self.patch.is_some() => {
+                let [ph, pv] = self.patch.unwrap_or([0.0; 2]);
+                format!(
+                    "{} x {} on this face, part of {} x {} across its patch",
+                    tiles(h),
+                    tiles(v),
+                    tiles(ph),
+                    tiles(pv)
+                )
+            }
             UvMode::Fit { .. } => format!("{} x {} on this face", tiles(h), tiles(v)),
             _ => format!("{} x {} tiles on this face", tiles(h), tiles(v)),
         }
@@ -289,12 +316,60 @@ pub fn report(
                 f64::from(repeats_q4[0]) / 16.0,
                 f64::from(repeats_q4[1]) / 16.0,
             );
-            let span = if turned {
-                [rv * TILE_TEXELS, rh * TILE_TEXELS]
-            } else {
-                [rh * TILE_TEXELS, rv * TILE_TEXELS]
+            // The face's share of the frame it is fitted to (all of it
+            // unless the frame was widened over a patch), per screen axis,
+            // with the flips applied.
+            let whole = Frame {
+                min: origin,
+                max: [origin[0] + size[0], origin[1] + size[1]],
             };
-            ([rh as f32, rv as f32], [0.0, 0.0], span)
+            let frame = widen(whole, uv.grow);
+            let frame_size = frame.size();
+            let share = |axis: usize| -> [f64; 2] {
+                if frame_size[axis] <= 0.0 {
+                    return [0.0, 1.0];
+                }
+                let lo = (whole.min[axis] - frame.min[axis]) / frame_size[axis];
+                let hi = (whole.max[axis] - frame.min[axis]) / frame_size[axis];
+                if uv.flip[axis] {
+                    [1.0 - hi, 1.0 - lo]
+                } else {
+                    [lo, hi]
+                }
+            };
+            let (a, b) = (share(0), share(1));
+            let reverse = |r: [f64; 2]| [1.0 - r[1], 1.0 - r[0]];
+            // Texel ranges (in tiles) along the texture's U and V.
+            let (u, v) = match uv.turns & 3 {
+                0 => ([a[0] * rh, a[1] * rh], [b[0] * rv, b[1] * rv]),
+                1 => ([b[0] * rv, b[1] * rv], {
+                    let r = reverse(a);
+                    [r[0] * rh, r[1] * rh]
+                }),
+                2 => (
+                    {
+                        let r = reverse(a);
+                        [r[0] * rh, r[1] * rh]
+                    },
+                    {
+                        let r = reverse(b);
+                        [r[0] * rv, r[1] * rv]
+                    },
+                ),
+                _ => (
+                    {
+                        let r = reverse(b);
+                        [r[0] * rv, r[1] * rv]
+                    },
+                    [a[0] * rh, a[1] * rh],
+                ),
+            };
+            let tiles = [(rh * (a[1] - a[0])) as f32, (rv * (b[1] - b[0])) as f32];
+            (
+                tiles,
+                [u[0] * TILE_TEXELS, v[0] * TILE_TEXELS],
+                [(u[1] - u[0]) * TILE_TEXELS, (v[1] - v[0]) * TILE_TEXELS],
+            )
         }
         UvMode::World { texels_per_sector } => {
             let k = density(texels_per_sector);
@@ -350,25 +425,29 @@ pub fn report(
             b.rem_euclid(TILE_TEXELS) < 1e-6 || (TILE_TEXELS - b.rem_euclid(TILE_TEXELS)) < 1e-6
         }),
         approximate,
+        patch: (matches!(mode, UvMode::Fit { .. }) && uv.grow != [[0; 2]; 2]).then(|| {
+            let UvMode::Fit { repeats_q4 } = mode else {
+                return [0.0; 2];
+            };
+            repeats_q4.map(|q| f32::from(q) / 16.0)
+        }),
     }
 }
 
-/// The tiling report of one face of the document, as the Inspector shows
-/// it. `tri` picks a triangle of a split surface (`None` the first). `None`
-/// when the face does not exist.
-pub fn report_for(
+/// The generated face of the document that `face` (and `tri`) names.
+fn find_face(
     world: &super::world::GridWorld,
     defaults: &dyn super::faces::UvDefaults,
     face: super::edit::FaceRef,
     tri: Option<u8>,
-) -> Option<UvReport> {
-    use super::edit::{material_of, uv_of, FaceTarget, SurfaceKind};
+) -> Option<super::faces::GridFace> {
+    use super::edit::{FaceTarget, SurfaceKind};
     use super::faces::{cell_faces_with, GridFaceKind};
     let room = world.rooms.get(face.room)?;
     let [x, z] = room.local(face.cell())?;
     let mut faces = Vec::new();
     cell_faces_with(world, defaults, face.room, x, z, &mut faces);
-    let found = faces.iter().find(|f| match (face.target, f.kind) {
+    faces.into_iter().find(|f| match (face.target, f.kind) {
         (FaceTarget::Surface(SurfaceKind::Floor), GridFaceKind::Floor { triangle }) => {
             triangle.is_none() || triangle == Some(tri.unwrap_or(0))
         }
@@ -382,7 +461,31 @@ pub fn report_for(
             edge == e && kind == k
         }
         _ => false,
-    })?;
+    })
+}
+
+/// The frame a face's texture is measured against before any widening: its
+/// own rectangle of grid units. `None` when the face does not exist.
+pub fn own_frame_of(
+    world: &super::world::GridWorld,
+    defaults: &dyn super::faces::UvDefaults,
+    face: super::edit::FaceRef,
+    tri: Option<u8>,
+) -> Option<Frame> {
+    find_face(world, defaults, face, tri).map(|f| f.frame)
+}
+
+/// The tiling report of one face of the document, as the Inspector shows
+/// it. `tri` picks a triangle of a split surface (`None` the first). `None`
+/// when the face does not exist.
+pub fn report_for(
+    world: &super::world::GridWorld,
+    defaults: &dyn super::faces::UvDefaults,
+    face: super::edit::FaceRef,
+    tri: Option<u8>,
+) -> Option<UvReport> {
+    use super::edit::{material_of, uv_of};
+    let found = find_face(world, defaults, face, tri)?;
     let uv = uv_of(world, face, tri)?;
     let default = material_of(world, face, tri).and_then(|id| defaults.default_uv(id));
     Some(report(&uv, default, found.frame.min, found.frame.size()))

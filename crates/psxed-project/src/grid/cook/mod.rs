@@ -529,6 +529,8 @@ mod derived_tests;
 #[cfg(test)]
 mod gap_tests;
 #[cfg(test)]
+mod light_tests;
+#[cfg(test)]
 mod mesh_tests;
 #[cfg(test)]
 mod motor_harness;

@@ -30,8 +30,13 @@ pub enum UvOp {
     SetScale([i16; 2]),
     /// Set the rotation in degrees.
     SetRotation(i16),
-    /// Set how the texture is laid over the face's frame.
+    /// Set how the texture is laid over the face's frame. The frame goes back
+    /// to the face's own (see [`Self::SetGrow`]).
     SetMode(UvMode),
+    /// Widen the face's frame by this many grid units on each side
+    /// (`[[s_min, t_min], [s_max, t_max]]`), so a fit mapping spans a patch
+    /// of faces. Set after the mode.
+    SetGrow([[i32; 2]; 2]),
     /// Turn the texture a quarter, clockwise when `true`.
     Turn(bool),
     /// Mirror the texture horizontally (`0`) or vertically (`1`) on the
@@ -54,7 +59,11 @@ impl UvOp {
             Self::SetOffset(o) => uv.offset_texels = o,
             Self::SetScale(s) => uv.scale_q8 = s,
             Self::SetRotation(r) => uv.rotation_deg = r,
-            Self::SetMode(mode) => uv.mode = mode,
+            Self::SetMode(mode) => {
+                uv.mode = mode;
+                uv.grow = [[0; 2]; 2];
+            }
+            Self::SetGrow(grow) => uv.grow = grow,
             Self::Turn(clockwise) => {
                 uv.turns = if clockwise {
                     (uv.turns + 1) & 3

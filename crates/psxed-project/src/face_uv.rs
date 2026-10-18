@@ -54,6 +54,10 @@ fn no_flip(flip: &[bool; 2]) -> bool {
     !flip[0] && !flip[1]
 }
 
+fn no_grow(grow: &[[i32; 2]; 2]) -> bool {
+    *grow == [[0; 2]; 2]
+}
+
 /// Per-face texture placement. The mode, quarter turns and flips lay the
 /// texture over the face's frame; the fine controls then adjust it:
 /// `uv' = rotate(rotation_deg, uv * 256 / scale_q8) + offset_texels`.
@@ -74,6 +78,16 @@ pub struct FaceUv {
     /// Mirror the texture horizontally / vertically on the face.
     #[serde(default, skip_serializing_if = "no_flip")]
     pub flip: [bool; 2],
+    /// Grid units the face's frame is widened by on each side, so the mode
+    /// is measured against a bigger rectangle than the face itself:
+    /// `[[s_min, t_min], [s_max, t_max]]` is how far the frame reaches past
+    /// the face's own frame towards smaller and larger `s` and `t`. A Fit
+    /// mapping then puts its repeats across that whole rectangle and each
+    /// face shows its own share: how "2 x 2 across this 4 x 2 patch" is
+    /// stored. Relative to the face, so moving it keeps the mapping. All
+    /// zero (the default) is the face's own frame.
+    #[serde(default, skip_serializing_if = "no_grow")]
+    pub grow: [[i32; 2]; 2],
 }
 
 impl Default for FaceUv {
@@ -85,6 +99,7 @@ impl Default for FaceUv {
             mode: UvMode::Inherit,
             turns: 0,
             flip: [false, false],
+            grow: [[0; 2]; 2],
         }
     }
 }
