@@ -27,8 +27,8 @@ use super::leaf::{LeafKey, SECTOR_LEVEL};
 use super::leaf_derive;
 use super::leaf_diag;
 use super::overrides::WallMode;
-use super::rough::Jitter;
 use super::room::GridRoom;
+use super::rough::Jitter;
 use super::sector::{GridSector, WallEdge};
 use super::surface::GridSurface;
 use super::tree::neighbours::{has_finer, SIDES};
@@ -115,8 +115,10 @@ fn stitch(
             // The hanging vertex moves with the rock like every other corner.
             let (mx, mz) = (mid[0], mid[1]);
             face.grid.insert(at, [mx, y, mz]);
-            face.points
-                .insert(at, [scale.to_editor(mx), scale.to_editor(y), scale.to_editor(mz)]);
+            face.points.insert(
+                at,
+                [scale.to_editor(mx), scale.to_editor(y), scale.to_editor(mz)],
+            );
             let (tu, tv) = (face.texels[i], face.texels[j]);
             face.texels
                 .insert(at, [(tu[0] + tv[0]) / 2.0, (tu[1] + tv[1]) / 2.0]);

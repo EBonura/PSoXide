@@ -7,15 +7,15 @@
 
 use crate::ResourceId;
 
+use super::super::leaf::{edge_clicks, LeafKey, CLICKS_PER_SECTOR, SECTOR_LEVEL};
 use super::super::limits::MAX_ROOM_SIDE;
 use super::super::room::GridRoom;
+use super::super::sector::GridSector;
 use super::super::surface::GridSurface;
+use super::super::tree::normalize;
 use super::super::world::GridWorld;
 use super::fit::{split_to_fit, ClickRect};
 use super::refs::SurfaceKind;
-use super::super::leaf::{edge_clicks, LeafKey, SECTOR_LEVEL, CLICKS_PER_SECTOR};
-use super::super::sector::GridSector;
-use super::super::tree::normalize;
 
 /// Inclusive rectangle of world sectors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -160,7 +160,16 @@ pub fn create_surfaces(
         return RectOutcome::refused(RectRefusal::NoSuchRoom);
     };
     if !target.leaves.is_sectors_only() {
-        return create_surfaces_cells(world, room, kind, SECTOR_LEVEL, rect.min, rect.max, height, material);
+        return create_surfaces_cells(
+            world,
+            room,
+            kind,
+            SECTOR_LEVEL,
+            rect.min,
+            rect.max,
+            height,
+            material,
+        );
     }
     let mut outcome = RectOutcome::default();
     match grow_room_to(target, rect) {
@@ -581,9 +590,27 @@ mod tests {
         assert!(key.level <= 2);
         assert_eq!(leaf.ground_floor().unwrap().heights, [0; 4]);
         // A second call changes nothing; a ceiling is independent.
-        let again = create_surfaces_cells(&mut world, 0, SurfaceKind::Floor, 4, [8, 0], [9, 3], 0, None);
+        let again = create_surfaces_cells(
+            &mut world,
+            0,
+            SurfaceKind::Floor,
+            4,
+            [8, 0],
+            [9, 3],
+            0,
+            None,
+        );
         assert_eq!((again.changed, again.skipped), (0, 8));
-        let roof = create_surfaces_cells(&mut world, 0, SurfaceKind::Ceiling, 4, [8, 0], [9, 3], 1024, None);
+        let roof = create_surfaces_cells(
+            &mut world,
+            0,
+            SurfaceKind::Ceiling,
+            4,
+            [8, 0],
+            [9, 3],
+            1024,
+            None,
+        );
         assert_eq!(roof.changed, 8);
         // Delete half of them.
         let gone = delete_surfaces_cells(&mut world, 0, SurfaceKind::Floor, 4, [8, 0], [8, 3]);
@@ -604,7 +631,16 @@ mod tests {
         );
         crate::grid::tree::merge_all(&mut world.rooms[0], None, 0);
         assert_eq!(world.rooms[0].leaf_count(), 1);
-        let out = create_surfaces_cells(&mut world, 0, SurfaceKind::Floor, 3, [2, 2], [3, 3], 0, None);
+        let out = create_surfaces_cells(
+            &mut world,
+            0,
+            SurfaceKind::Floor,
+            3,
+            [2, 2],
+            [3, 3],
+            0,
+            None,
+        );
         assert_eq!(out.changed, 4);
         // The ceiling over the other cells is unchanged, floor only inside.
         let room = &world.rooms[0];

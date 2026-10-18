@@ -27,8 +27,8 @@ pub mod bands;
 pub mod clipboard;
 pub mod convert;
 pub mod delete;
-pub mod fit;
 pub mod derived;
+pub mod fit;
 pub mod heights;
 pub mod lens;
 pub mod meshes;
@@ -47,10 +47,10 @@ pub mod walls;
 pub use clipboard::{GridClipboard, PasteOutcome, Transform};
 pub use convert::{convert_to_derived, ConvertMode, ConvertReport};
 pub use delete::{clear_cells, delete_faces};
-pub use fit::{split_to_fit, ClickRect};
 pub use derived::{
     clean_overrides, derived_solid, is_derived_hidden, reset_derived, set_derived_hidden,
 };
+pub use fit::{split_to_fit, ClickRect};
 pub use heights::{nudge, HeightDrag, WeldIndex};
 pub use meshes::{
     add_asset, arch_span, delete_meshes, place_mesh, remove_asset, set_asset, set_mesh_material,
@@ -61,7 +61,9 @@ pub use planes::{
     update_plane, PlaneClipboard, PlaneId, PlaneRefusal,
 };
 pub use rects::{
-    create_surfaces, create_surfaces_cells, delete_surfaces, delete_surfaces_cells, CellRect, RectOutcome, RectRefusal};
+    create_surfaces, create_surfaces_cells, delete_surfaces, delete_surfaces_cells, CellRect,
+    RectOutcome, RectRefusal,
+};
 pub use refs::{
     corner_offsets, faces_of_cell, faces_of_leaf, CornerRef, EdgeRef, FaceRef, FaceTarget,
     GridElement, SurfaceKind,
@@ -74,8 +76,8 @@ pub use surfaces::{
     edit_uv, material_of, set_material, set_solid, set_wall_facing, toggle_split, uv_of, UvOp,
 };
 pub use walls::{
-    facing_toward, leaf_wall_gap, next_wall_heights, place_wall, place_wall_leaf, place_wall_run, remove_wall, wall_gap,
-    wall_run_cells, WallRefusal, WallSpec,
+    facing_toward, leaf_wall_gap, next_wall_heights, place_wall, place_wall_leaf, place_wall_run,
+    remove_wall, wall_gap, wall_run_cells, WallRefusal, WallSpec,
 };
 
 #[cfg(test)]

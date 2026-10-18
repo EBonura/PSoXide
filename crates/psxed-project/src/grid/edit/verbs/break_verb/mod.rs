@@ -56,7 +56,13 @@ impl BreakSnap {
         match self {
             Self::Fine => crate::grid::units::FINE_UNITS,
             Self::Click => crate::grid::units::CLICK_UNITS,
-            Self::Units(step) => if step > 0 { step } else { crate::grid::units::FINE_UNITS },
+            Self::Units(step) => {
+                if step > 0 {
+                    step
+                } else {
+                    crate::grid::units::FINE_UNITS
+                }
+            }
         }
     }
 }

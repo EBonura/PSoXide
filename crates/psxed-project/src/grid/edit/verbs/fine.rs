@@ -237,7 +237,12 @@ mod tests {
     }
 
     fn floor_of(w: &GridWorld, key: LeafKey) -> [i32; 4] {
-        w.rooms[0].leaf(key).unwrap().ground_floor().unwrap().heights
+        w.rooms[0]
+            .leaf(key)
+            .unwrap()
+            .ground_floor()
+            .unwrap()
+            .heights
     }
 
     #[test]

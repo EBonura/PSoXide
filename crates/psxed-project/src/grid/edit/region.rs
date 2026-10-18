@@ -48,7 +48,10 @@ impl Region {
     /// quarters) in `room`.
     pub fn new_at(room: usize, level: u8) -> Self {
         Self {
-            level: level.clamp(super::super::leaf::SECTOR_LEVEL, super::super::leaf::FINEST_LEVEL),
+            level: level.clamp(
+                super::super::leaf::SECTOR_LEVEL,
+                super::super::leaf::FINEST_LEVEL,
+            ),
             ..Self::new(room)
         }
     }
@@ -60,7 +63,10 @@ impl Region {
 
     /// The same cells read as cells of `level`.
     pub fn at_level(mut self, level: u8) -> Self {
-        self.level = level.clamp(super::super::leaf::SECTOR_LEVEL, super::super::leaf::FINEST_LEVEL);
+        self.level = level.clamp(
+            super::super::leaf::SECTOR_LEVEL,
+            super::super::leaf::FINEST_LEVEL,
+        );
         self
     }
 

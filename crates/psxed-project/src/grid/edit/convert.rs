@@ -207,7 +207,11 @@ pub fn convert_to_derived(
         let matched = (walls.len() == 1)
             .then(|| {
                 let found = find_match(r, &walls[0], hosted[0].1)?;
-                let authored = r.leaf(found.leaf)?.walls(found.edge).get(found.index)?.clone();
+                let authored = r
+                    .leaf(found.leaf)?
+                    .walls(found.edge)
+                    .get(found.index)?
+                    .clone();
                 let uv = placement(&authored, (walls[0].host, walls[0].edge), found.mirrored)?;
                 Some((found, uv, authored))
             })

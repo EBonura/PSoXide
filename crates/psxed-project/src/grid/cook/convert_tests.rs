@@ -278,10 +278,12 @@ fn a_mixed_legacy_room_converts_without_changing_its_look_or_collision() {
             s.set_ground_floor(Some(GridSurface::flat(0, None)));
             s.set_ground_ceiling(Some(GridSurface::flat(2048, None)));
             if x == 0 {
-                s.walls_mut(WallEdge::West).push(GridWall::span(0, 2048, None));
+                s.walls_mut(WallEdge::West)
+                    .push(GridWall::span(0, 2048, None));
             }
             if z == 3 {
-                s.walls_mut(WallEdge::South).push(GridWall::span(0, 2048, None));
+                s.walls_mut(WallEdge::South)
+                    .push(GridWall::span(0, 2048, None));
             }
         }
     }
@@ -289,7 +291,12 @@ fn a_mixed_legacy_room_converts_without_changing_its_look_or_collision() {
     let sw = room.sector_or_insert(2, 1).unwrap();
     sw.ground_floor_mut().unwrap().heights = [0; 4];
     subdivide_to(&mut room, [9, 5], 4).unwrap();
-    let keys: Vec<LeafKey> = room.leaves.in_sector([2, 1]).iter().map(|(k, _)| *k).collect();
+    let keys: Vec<LeafKey> = room
+        .leaves
+        .in_sector([2, 1])
+        .iter()
+        .map(|(k, _)| *k)
+        .collect();
     crate::grid::tree::subdivide_all_to(&mut room, &keys, 4);
     room.leaf_mut(LeafKey::new(4, 9, 5).unwrap())
         .unwrap()

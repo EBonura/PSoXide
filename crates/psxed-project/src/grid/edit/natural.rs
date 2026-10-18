@@ -88,7 +88,8 @@ pub fn crack_leaf(
     tri: usize,
     delta: i32,
 ) -> bool {
-    let Some(surface) = leaf_sector_mut(world, room, leaf).and_then(|s| surface_mut(s, kind)) else {
+    let Some(surface) = leaf_sector_mut(world, room, leaf).and_then(|s| surface_mut(s, kind))
+    else {
         return false;
     };
     if delta == 0 {
@@ -128,7 +129,8 @@ pub fn set_triangle_heights_leaf(
     tri: usize,
     heights: [i32; 4],
 ) -> bool {
-    let Some(surface) = leaf_sector_mut(world, room, leaf).and_then(|s| surface_mut(s, kind)) else {
+    let Some(surface) = leaf_sector_mut(world, room, leaf).and_then(|s| surface_mut(s, kind))
+    else {
         return false;
     };
     make_split_level(surface);
@@ -150,7 +152,8 @@ pub fn heal(world: &mut GridWorld, room: usize, cell: [i32; 2], kind: SurfaceKin
 
 /// [`heal`] on any leaf.
 pub fn heal_leaf(world: &mut GridWorld, room: usize, leaf: LeafKey, kind: SurfaceKind) -> bool {
-    let Some(surface) = leaf_sector_mut(world, room, leaf).and_then(|s| surface_mut(s, kind)) else {
+    let Some(surface) = leaf_sector_mut(world, room, leaf).and_then(|s| surface_mut(s, kind))
+    else {
         return false;
     };
     surface.heights_b.take().is_some()
@@ -177,7 +180,8 @@ pub fn set_void_leaf(
     which: Triangles,
     void: bool,
 ) -> bool {
-    let Some(surface) = leaf_sector_mut(world, room, leaf).and_then(|s| surface_mut(s, kind)) else {
+    let Some(surface) = leaf_sector_mut(world, room, leaf).and_then(|s| surface_mut(s, kind))
+    else {
         return false;
     };
     let before = surface.void;

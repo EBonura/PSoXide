@@ -34,7 +34,10 @@ impl ClickRect {
     /// Whether the leaf lies wholly inside.
     pub fn holds(&self, key: LeafKey) -> bool {
         let [x1, z1] = key.end_click();
-        key.x >= self.min[0] && key.z >= self.min[1] && x1 - 1 <= self.max[0] && z1 - 1 <= self.max[1]
+        key.x >= self.min[0]
+            && key.z >= self.min[1]
+            && x1 - 1 <= self.max[0]
+            && z1 - 1 <= self.max[1]
     }
 
     /// Whether the leaf overlaps.

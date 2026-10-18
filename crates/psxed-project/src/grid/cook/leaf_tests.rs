@@ -404,7 +404,10 @@ fn bands_and_rough_in_mixed_rooms_leave_no_hole() {
             cook(&world_of(r)).unwrap()
         };
         let rough = cook(&world).unwrap();
-        assert_ne!(flat.tables[0].vertices, rough.tables[0].vertices, "seed {seed}");
+        assert_ne!(
+            flat.tables[0].vertices, rough.tables[0].vertices,
+            "seed {seed}"
+        );
         // Collision is cooked from the document, not the displaced faces.
         assert_eq!(flat.tables[0].sectors, rough.tables[0].sectors);
         assert_eq!(flat.tables[0].walls, rough.tables[0].walls);
@@ -415,7 +418,12 @@ fn bands_and_rough_in_mixed_rooms_leave_no_hole() {
 fn the_real_motor_climbs_fine_treads_one_step_at_a_time() {
     use psx_engine::RoomPoint;
     let mut room = big_hall();
-    let keys: Vec<LeafKey> = room.leaves.in_sector([1, 1]).iter().map(|(k, _)| *k).collect();
+    let keys: Vec<LeafKey> = room
+        .leaves
+        .in_sector([1, 1])
+        .iter()
+        .map(|(k, _)| *k)
+        .collect();
     crate::grid::tree::subdivide_all_to(&mut room, &keys, 4);
     // Four treads across sector (1,1): clicks x 4..7, 64 grid units each.
     for i in 0..4 {
@@ -440,7 +448,10 @@ fn the_real_motor_climbs_fine_treads_one_step_at_a_time() {
     assert!(xs.last().unwrap() > &(80 + 4 * 20), "{xs:?}");
     // Every tread height is stood on at some tick, exactly.
     for (i, top) in tops.iter().enumerate() {
-        assert!(ys.contains(top), "tread {i} at {top} never stood on: {ys:?}");
+        assert!(
+            ys.contains(top),
+            "tread {i} at {top} never stood on: {ys:?}"
+        );
     }
     // And the climb is monotone up to the top tread (past it the floor
     // drops back to the hall).

@@ -165,7 +165,9 @@ impl Lens {
         let tiles: Vec<[i32; 2]> = footprint
             .iter()
             .flat_map(|t| {
-                (0..ratio).flat_map(move |dz| (0..ratio).map(move |dx| [t[0] * ratio + dx, t[1] * ratio + dz]))
+                (0..ratio).flat_map(move |dz| {
+                    (0..ratio).map(move |dx| [t[0] * ratio + dx, t[1] * ratio + dz])
+                })
             })
             .collect();
         let mut work = real.clone();
@@ -179,8 +181,14 @@ impl Lens {
             tlo = [tlo[0].min(t[0]), tlo[1].min(t[1])];
             thi = [thi[0].max(t[0]), thi[1].max(t[1])];
         }
-        let (rlo, rhi) = ([tlo[0] - MARGIN, tlo[1] - MARGIN], [thi[0] + MARGIN, thi[1] + MARGIN]);
-        let (w, d) = ((rhi[0] - rlo[0] + 1) as usize, (rhi[1] - rlo[1] + 1) as usize);
+        let (rlo, rhi) = (
+            [tlo[0] - MARGIN, tlo[1] - MARGIN],
+            [thi[0] + MARGIN, thi[1] + MARGIN],
+        );
+        let (w, d) = (
+            (rhi[0] - rlo[0] + 1) as usize,
+            (rhi[1] - rlo[1] + 1) as usize,
+        );
         let mut virt = GridRoom::new(work.name.clone(), w, d);
         virt.origin = rlo;
         virt.y_offset = work.y_offset * f;
@@ -208,7 +216,11 @@ impl Lens {
                 if let Some(s) = sector.as_mut() {
                     scale_sector(s, f);
                 }
-                virt.set_sector((tx - rlo[0]) as usize, (tz - rlo[1]) as usize, sector.clone());
+                virt.set_sector(
+                    (tx - rlo[0]) as usize,
+                    (tz - rlo[1]) as usize,
+                    sector.clone(),
+                );
                 before.insert([tx, tz], sector);
             }
         }
@@ -367,7 +379,12 @@ mod tests {
     #[test]
     fn a_footprint_next_to_finer_cells_uses_their_level() {
         let mut w = world();
-        let keys: Vec<LeafKey> = w.rooms[0].leaves.in_sector([2, 2]).iter().map(|(k, _)| *k).collect();
+        let keys: Vec<LeafKey> = w.rooms[0]
+            .leaves
+            .in_sector([2, 2])
+            .iter()
+            .map(|(k, _)| *k)
+            .collect();
         crate::grid::tree::subdivide_all_to(&mut w.rooms[0], &keys, 4);
         let (lens, _, region) = Lens::open(&w, 0, 3, &[[3, 3]]).unwrap();
         // The half cell asked for is four quarter tiles of the copy.
