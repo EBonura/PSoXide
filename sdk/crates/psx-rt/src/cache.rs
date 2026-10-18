@@ -83,6 +83,72 @@ __psx_rt_flush_i_cache:
     running_lo = const cache_control::RUNNING & 0xFFFF,
 );
 
+// Same routine over a byte range: invalidates only the lines that map the addresses
+// `[start, end)` (`$a0`, `$a1`; at most 4 KiB are visited, the cache's size). A caller that
+// changed a few words (one patched call site) pays for their lines instead of the whole cache,
+// and keeps the rest of the working set warm. Uses `$t0-$t7`, no stack.
+#[cfg(target_arch = "mips")]
+core::arch::global_asm!(
+    r#"
+    .set noreorder
+    .section .text.__psx_rt_flush_i_cache_range,"ax",@progbits
+    .globl __psx_rt_flush_i_cache_range
+    .type __psx_rt_flush_i_cache_range,@function
+    .p2align 2
+__psx_rt_flush_i_cache_range:
+    lui   $t0, %hi(.Lpsx_rt_flush_range_uncached)
+    addiu $t0, $t0, %lo(.Lpsx_rt_flush_range_uncached)
+    lui   $t1, 0xA000
+    or    $t0, $t0, $t1
+    jr    $t0
+    nop
+.Lpsx_rt_flush_range_uncached:
+    mfc0  $t2, $12
+    lui   $t3, {port_hi}
+    mtc0  $zero, $12
+    lui   $t4, {flush_hi}
+    ori   $t4, $t4, {flush_lo}
+    sw    $t4, {port_lo}($t3)
+    lui   $t4, 0x0001
+    mtc0  $t4, $12
+    andi  $t5, $a0, 0x0FF0
+    addiu $t6, $a1, -1
+    srl   $t6, $t6, 4
+    srl   $t7, $a0, 4
+    subu  $t6, $t6, $t7
+    addiu $t6, $t6, 1
+.Lpsx_rt_flush_range_line:
+    sw    $zero, 0($t5)
+    addiu $t5, $t5, 16
+    addiu $t6, $t6, -1
+    bnez  $t6, .Lpsx_rt_flush_range_line
+    andi  $t5, $t5, 0x0FFF
+    mtc0  $zero, $12
+    nop
+    nop
+    lui   $t4, {running_hi}
+    ori   $t4, $t4, {running_lo}
+    sw    $t4, {port_lo}($t3)
+    mtc0  $t2, $12
+    nop
+    jr    $ra
+    nop
+    .size __psx_rt_flush_i_cache_range, . - __psx_rt_flush_i_cache_range
+    .set reorder
+    "#,
+    port_hi = const cache_control::ADDR >> 16,
+    port_lo = const cache_control::ADDR & 0xFFFF,
+    flush_hi = const cache_control::FLUSH >> 16,
+    flush_lo = const cache_control::FLUSH & 0xFFFF,
+    running_hi = const cache_control::RUNNING >> 16,
+    running_lo = const cache_control::RUNNING & 0xFFFF,
+);
+
+#[cfg(target_arch = "mips")]
+extern "C" {
+    fn __psx_rt_flush_i_cache_range(start: u32, end: u32);
+}
+
 #[cfg(target_arch = "mips")]
 extern "C" {
     fn __psx_rt_flush_i_cache();
@@ -104,6 +170,25 @@ pub fn flush_instruction_cache() {
     // tags or the cache control port, never on RAM.
     unsafe { __psx_rt_flush_i_cache() }
 }
+
+/// Invalidate the instruction-cache lines that hold the bytes `[start, end)`.
+///
+/// For a caller that rewrote a few words of code (a patched call site): the other lines, and the
+/// working set they hold, stay valid. A range of 4 KiB or more is the whole cache.
+#[cfg(target_arch = "mips")]
+#[inline(always)]
+pub fn flush_instruction_cache_range(start: u32, end: u32) {
+    if end.wrapping_sub(start) >= 0x1000 {
+        return flush_instruction_cache();
+    }
+    // SAFETY: the routine clobbers only O32 caller-saved registers ($t0-$t7), uses no stack, returns
+    // through $ra and leaves SR and the cache control register as `flush_instruction_cache` does.
+    unsafe { __psx_rt_flush_i_cache_range(start, end) }
+}
+
+/// Host no-op, so shared code can call it unconditionally.
+#[cfg(not(target_arch = "mips"))]
+pub fn flush_instruction_cache_range(_start: u32, _end: u32) {}
 
 /// Host no-op, so shared code can call it unconditionally.
 #[cfg(not(target_arch = "mips"))]
