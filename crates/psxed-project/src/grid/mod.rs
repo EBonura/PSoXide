@@ -54,6 +54,7 @@ pub mod base_project;
 pub mod cook;
 pub mod derive;
 mod derive_diag;
+mod derive_spans;
 pub mod edit;
 pub mod faces;
 mod faces_bands;
@@ -99,6 +100,8 @@ mod band_tests;
 mod course_merge;
 #[cfg(test)]
 mod derive_diag_tests;
+#[cfg(test)]
+mod derive_span_tests;
 #[cfg(test)]
 mod derive_tests;
 #[cfg(test)]

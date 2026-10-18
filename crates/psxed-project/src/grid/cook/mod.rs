@@ -23,7 +23,7 @@ use psx_grid::write::{LevelCore, RoomChunk};
 use psx_grid::ResidentRooms;
 use psx_grid::{
     Material, RoomRecord, CHUNK_HAS_LOD, CHUNK_HAS_PLANES, LEVEL_HAS_PLANES, LEVEL_HAS_SKY,
-    ROOM_FOG, ROOM_OUTDOOR, ROOM_TREE, SECTION_COUNT, SECTOR_BYTES,
+    ROOM_FOG, ROOM_OUTDOOR, ROOM_SPANS, ROOM_TREE, SECTION_COUNT, SECTOR_BYTES,
 };
 
 pub use render::{BoundMaterial, MaterialBinder};
@@ -266,7 +266,8 @@ pub fn cook_level(
                     depth: room.depth as u8,
                     min_y: lo as i16,
                     max_y: hi as i16,
-                    flags: if col.tree.is_some() { ROOM_TREE } else { 0 },
+                    flags: (if col.tree.is_some() { ROOM_TREE } else { 0 })
+                        | (if col.spans.is_some() { ROOM_SPANS } else { 0 }),
                     ..RoomRecord::default()
                 }
             })
@@ -288,6 +289,7 @@ pub fn cook_level(
                 max_y: hi as i16,
                 sectors: col.sectors.clone(),
                 tree: col.tree.clone(),
+                spans: col.spans.clone(),
                 exts: col.exts.clone(),
                 walls: col.walls.clone(),
                 splitbs: col.splitbs.clone(),
@@ -387,6 +389,7 @@ pub fn cook_level(
             lod_shift: lod::LOD_SHIFT,
             sectors: col.sectors,
             tree: col.tree,
+            spans: col.spans,
             exts: col.exts,
             walls: col.walls,
             splitbs: col.splitbs,
@@ -424,7 +427,8 @@ pub fn cook_level(
         let fog = &room.fog;
         let flags = (if outdoor { ROOM_OUTDOOR } else { 0 })
             | (if fog.enabled { ROOM_FOG } else { 0 })
-            | (if chunk.tree.is_some() { ROOM_TREE } else { 0 });
+            | (if chunk.tree.is_some() { ROOM_TREE } else { 0 })
+            | (if chunk.spans.is_some() { ROOM_SPANS } else { 0 });
         records.push(RoomRecord {
             pack_sector: 0,
             pack_sectors: 0,
@@ -554,6 +558,8 @@ mod plane_tests;
 mod ramp_tests;
 #[cfg(test)]
 mod rough_tests;
+#[cfg(test)]
+mod span_tests;
 #[cfg(test)]
 mod spawn_tests;
 #[cfg(test)]

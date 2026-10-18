@@ -568,11 +568,14 @@ impl Builder<'_> {
     }
 
     fn sector(&mut self, sector: &GridSector) {
-        if let Some(floor) = sector.ground_floor() {
-            self.surface(floor, false);
-        }
-        if let Some(ceiling) = sector.ground_ceiling() {
-            self.surface(ceiling, true);
+        // Every span of the column: its floor, then its ceiling.
+        for span in sector.spans() {
+            if let Some(floor) = span.floor.as_ref() {
+                self.surface(floor, false);
+            }
+            if let Some(ceiling) = span.ceiling.as_ref() {
+                self.surface(ceiling, true);
+            }
         }
         for edge in WallEdge::ALL {
             for (index, wall) in sector.walls(edge).iter().enumerate() {

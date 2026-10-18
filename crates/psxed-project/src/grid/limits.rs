@@ -137,20 +137,6 @@ pub enum GridIssueKind {
         /// World click of its minimum corner along Z.
         z: i32,
     },
-    /// A column of more than one span. It loads, saves and round trips,
-    /// but the tools, the derivation, the preview and the cook read the
-    /// ground span only until the storey phases land, so the world must not
-    /// cook.
-    ExtraSpansNotSupported {
-        /// Spans present.
-        count: usize,
-        /// Level of the leaf.
-        level: u8,
-        /// World click of its minimum corner along X.
-        x: i32,
-        /// World click of its minimum corner along Z.
-        z: i32,
-    },
     /// An edge holds more than [`MAX_WALLS_PER_EDGE`] walls.
     TooManyWalls {
         /// The edge.
@@ -359,9 +345,6 @@ impl GridIssue {
             ),
             GridIssueKind::TooManySpans { count, level, x, z } => format!(
                 "{count} spans in the column of the level {level} leaf at clicks ({x}, {z}), at most {MAX_SPANS_PER_CELL}"
-            ),
-            GridIssueKind::ExtraSpansNotSupported { count, level, x, z } => format!(
-                "{count} spans in the column of the level {level} leaf at clicks ({x}, {z}); only the ground span is read by the tools and the cook for now"
             ),
             GridIssueKind::TooManyWalls { edge, count } => format!(
                 "{count} walls on the {} edge, at most {MAX_WALLS_PER_EDGE}",
@@ -679,13 +662,6 @@ fn check_room(room_index: usize, room: &GridRoom, issues: &mut Vec<GridIssue>) {
         let count = sector.span_count();
         if count > MAX_SPANS_PER_CELL {
             issues.push(at_room(GridIssueKind::TooManySpans { count, level, x, z }));
-        } else if count > 1 {
-            issues.push(at_room(GridIssueKind::ExtraSpansNotSupported {
-                count,
-                level,
-                x,
-                z,
-            }));
         }
     }
     for issue in super::tree::check(room) {
@@ -927,13 +903,8 @@ mod tests {
         }
         tall.remove_span(2);
         room.insert_leaf(LeafKey::sector([2, 2]), tall).unwrap();
-        let found = kinds(&world_with_room(room));
-        assert!(found.contains(&GridIssueKind::ExtraSpansNotSupported {
-            count: 2,
-            level: 2,
-            x: 8,
-            z: 8
-        }));
+        // Several spans are cooked now, so the column is not an issue.
+        assert!(!has_errors(&validate(&world_with_room(room))));
         assert!(has_errors(&validate(&world_with_room({
             let mut r = GridRoom::new("r", 1, 1);
             let mut many = GridSector::default();

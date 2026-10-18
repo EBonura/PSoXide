@@ -52,6 +52,9 @@ pub enum DerivedKind {
     Drop,
     /// R3: the edge of the room.
     Closure,
+    /// R4: a slab seen from a taller neighbour, owned by the span above it
+    /// (see [`super::derive_spans`]).
+    Slab,
 }
 
 impl DerivedKind {
@@ -61,6 +64,7 @@ impl DerivedKind {
             Self::Riser => "riser",
             Self::Drop => "drop",
             Self::Closure => "closure",
+            Self::Slab => "slab",
         }
     }
 }
@@ -110,7 +114,7 @@ impl DerivedWall {
     pub fn blocks(&self) -> bool {
         self.heights.is_some()
             && match self.kind {
-                DerivedKind::Closure => self.solid != Some(false),
+                DerivedKind::Closure | DerivedKind::Slab => self.solid != Some(false),
                 _ => self.solid == Some(true),
             }
     }
@@ -463,6 +467,11 @@ pub fn physical_edge_walls(room: &GridRoom, cell: [i32; 2], edge: WallEdge) -> V
         ),
         _ => ([hi_cell[0] - 1, hi_cell[1]], WallEdge::East, WallEdge::West),
     };
+    // A column of several spans on either side: the open-set rule.
+    let multi = |c: [i32; 2]| sector_at(room, c).is_some_and(|s| !s.is_single_span());
+    if multi(lo_cell) || multi(hi_cell) {
+        return super::derive_spans::edge_walls(room, lo_cell, lo_edge, hi_cell, hi_edge);
+    }
     let e = Edge {
         room,
         lo_cell,

@@ -40,6 +40,9 @@ pub struct Tables {
     pub sectors: Vec<Sector>,
     /// The leaf tree tables of a room with leaves of several sizes.
     pub tree: Option<psx_grid::write::TreeTables>,
+    /// Extra spans of the room's columns (`docs/grid/multi-storey.md` 7.3);
+    /// `None` when every column is a single span.
+    pub spans: Option<psx_grid::write::SpanTables>,
     pub exts: Vec<SectorExt>,
     pub walls: Vec<ColWall>,
     pub splitbs: Vec<SplitB>,
@@ -267,6 +270,11 @@ pub fn build_with_meshes(
         extra,
     )?;
     if !room.leaves.is_sectors_only() {
+        if room.leaves.iter().any(|(_, leaf)| !leaf.is_single_span()) {
+            return Err(format!(
+                "room {room_index}: a column of several spans in a room with leaves of several sizes is not cooked yet"
+            ));
+        }
         // Leaves of several sizes: one record per leaf and an index.
         return super::leaf_collision::build(units, room, room_index, planes, mesh_warnings);
     }
@@ -387,6 +395,7 @@ pub fn build_with_meshes(
             tables.sectors.push(sector);
         }
     }
+    tables.spans = span_tables(units, room, room_index, &mut note)?;
     // Derived summary bits (flat floor, flat ceiling, clear neighbourhood) the
     // runtime collision uses to skip work. They only hold once every sector's
     // wall and split-level state is final, so they come last.
@@ -395,6 +404,63 @@ pub fn build_with_meshes(
     tables.warnings = planes.warnings;
     tables.warnings.extend(mesh_warnings);
     Ok(tables)
+}
+
+/// The extra spans of a dense room's columns as collision records, with the
+/// index and runs that find them (`psx_grid::SpanExt`). Each extra span is
+/// cooked like a ground record of its own: the same surface rules, its own
+/// extents noted for the room's vertical range. `None` when every column is
+/// a single span.
+fn span_tables(
+    units: &RuntimeUnits,
+    room: &GridRoom,
+    room_index: usize,
+    note: &mut dyn FnMut(i16, i16),
+) -> Result<Option<psx_grid::write::SpanTables>, String> {
+    use psx_grid::write::SpanTables;
+    use psx_grid::{SpanRun, NO_SPAN};
+    if room.leaves.iter().all(|(_, leaf)| leaf.is_single_span()) {
+        return Ok(None);
+    }
+    let s = units.sector();
+    let mut tables = SpanTables {
+        index: vec![NO_SPAN; room.width * room.depth],
+        ..SpanTables::default()
+    };
+    for z in 0..room.depth {
+        for x in 0..room.width {
+            let Some(doc) = room.sector(x, z) else {
+                continue;
+            };
+            if doc.is_single_span() {
+                continue;
+            }
+            let at = |what: &str| format!("room {room_index} sector {x},{z}: {what}");
+            let first = tables.spans.len();
+            for span in &doc.spans()[1..] {
+                let upper = crate::grid::sector::GridSector::with_surfaces(
+                    span.floor.clone(),
+                    span.ceiling.clone(),
+                );
+                let (record, floor_b, ceil_b) =
+                    surface_record(units, room.y_offset, &upper, s, &at, note)?;
+                if floor_b.is_some() || ceil_b.is_some() {
+                    return Err(at(
+                        "a split-level surface above the ground span is not cooked yet",
+                    ));
+                }
+                tables.spans.push(record);
+            }
+            let count = tables.spans.len() - first;
+            tables.index[z * room.width + x] = tables.runs.len() as u16;
+            tables.runs.push(SpanRun {
+                first: u16::try_from(first)
+                    .map_err(|_| format!("room {room_index} has too many extra spans"))?,
+                count: u16::try_from(count).map_err(|_| at("too many spans"))?,
+            });
+        }
+    }
+    Ok(Some(tables))
 }
 
 #[cfg(test)]
