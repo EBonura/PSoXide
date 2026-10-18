@@ -83,6 +83,36 @@ pub const DIAG_PARAM_STUCK: u8 = 0xFE;
 /// wait (ReadN is streaming; no command byte is in flight).
 pub const DIAG_SITE_READ: u8 = 0xD0;
 
+/// Called from every spin of every polled wait in this module, see [`set_idle_hook`].
+///
+/// In `.data`, not `.bss`: a chain-loader image has no `.bss` zeroed for it.
+#[cfg_attr(target_arch = "mips", link_section = ".data")]
+static mut IDLE_HOOK: Option<fn()> = None;
+
+/// Install (or with `None` remove) a function the polled reader calls from every
+/// spin of every wait it makes (a seek, the next sector of a read, a command's
+/// acknowledge) and so between the sectors of any load built on it.
+///
+/// It is how a program keeps something moving while it blocks on the disc: the
+/// `psx-loading` widget polls from here, so one hook animates every polled load
+/// the program does, whichever crate issues it (pack table scans and chunk reads
+/// included). The hook runs with the drive owned by the reader: it must not
+/// touch the CD controller, and it must return at once when there is nothing to
+/// do, because it runs thousands of times a second. It is global, one at a time.
+pub fn set_idle_hook(hook: Option<fn()>) {
+    // SAFETY: a plain store to a private static; the guest is single threaded and
+    // no interrupt handler reads it.
+    unsafe { IDLE_HOOK = hook };
+}
+
+#[inline]
+fn run_idle_hook() {
+    // SAFETY: as `set_idle_hook`.
+    if let Some(hook) = unsafe { IDLE_HOOK } {
+        hook();
+    }
+}
+
 enum Wait {
     Matched,
     CdError,
@@ -248,6 +278,7 @@ impl SectorReader {
         let mut spins = 0;
         while spins < limit {
             idle();
+            run_idle_hook();
             let flag = self.cd.irq_flag_value();
             if flag == expected {
                 return Wait::Matched;
@@ -634,6 +665,24 @@ mod tests {
         assert_eq!(saved.take(), None, "stop restores once");
         saved.keep(0x42);
         assert_eq!(saved.take(), Some(0x42), "a new stream saves afresh");
+    }
+
+    #[test]
+    fn the_idle_hook_runs_when_set_and_not_after_it_is_removed() {
+        use core::sync::atomic::{AtomicU32, Ordering};
+        static CALLS: AtomicU32 = AtomicU32::new(0);
+        fn count() {
+            CALLS.fetch_add(1, Ordering::Relaxed);
+        }
+        run_idle_hook();
+        assert_eq!(CALLS.load(Ordering::Relaxed), 0, "no hook, no call");
+        set_idle_hook(Some(count));
+        run_idle_hook();
+        run_idle_hook();
+        assert_eq!(CALLS.load(Ordering::Relaxed), 2);
+        set_idle_hook(None);
+        run_idle_hook();
+        assert_eq!(CALLS.load(Ordering::Relaxed), 2);
     }
 
     #[test]

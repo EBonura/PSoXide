@@ -23,6 +23,7 @@ the editor and emulator share one simulation.
 | [`psx-settings`](crates/psx-settings) | Versioned game preferences with optional memory-card persistence. |
 | [`psx-segments`](crates/psx-segments) | Bounded segment selection and launch requests using game-owned state and controls. |
 | [`psx-display`](crates/psx-display) | Picture options: the BRIGHTNESS stepper (`DEFAULT`, `DARKER n`, `BRIGHTER n`) with its one-packet GPU overlay, and the SCREEN X/Y stepper, each with row text and a save byte. Host-tested, no heap ([adoption guide](docs/DISPLAY-OPTIONS.md)). |
+| [`psx-loading`](crates/psx-loading) | An animated LOADING indicator for blocking loads: a label with stepping dots or a dot spinner and a breathing ink, drawn as plain GP0 rectangles from any `BitmapFont` (no VRAM, no atlas, no heap). Polled from a load loop, redraws only when the picture changes. Host-tested ([adoption guide](docs/LOADING-INDICATOR.md)). |
 | [`psx-gte`](crates/psx-gte) | GTE (COP2) wrappers. MIPS emits inline-asm coprocessor ops; host routes through `psx-gte-core`. |
 | [`psx-gte-core`](crates/psx-gte-core) | Pure-Rust GTE state machine and fixed-point math. Shared by `psx-gte` and the emulator; bit-exact against a real-console conformance corpus. |
 | [`psx-math`](crates/psx-math) | Fixed-point math: Q0.12 angles + sin/cos/atan2, int32 helpers, decimal text formatting. |
