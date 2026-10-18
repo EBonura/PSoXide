@@ -221,12 +221,31 @@ pub fn cook_level(
             .warnings
             .push(format!("grid world: {}", issue.describe()));
     }
+    // The runtime reads collision and portals per whole sector (the leaf
+    // format is phase T10), so a room with leaves of other sizes is
+    // collided and walked through as its sector view. Faces still come from
+    // the leaves.
+    let mut sector_world: Option<GridWorld> = None;
+    for (index, room) in world.rooms.iter().enumerate() {
+        if room.leaves.is_sectors_only() {
+            continue;
+        }
+        let (view, approximate) = crate::grid::sector_view::sector_room(room);
+        for cell in approximate {
+            report.warnings.push(format!(
+                "room {index} sector {},{}: collision stands on the sector's four corners; the fine leaves in it are drawn but not collided (leaf collision is phase T10)",
+                cell[0], cell[1]
+            ));
+        }
+        sector_world.get_or_insert_with(|| world.clone()).rooms[index] = view;
+    }
+    let collision_world: &GridWorld = sector_world.as_ref().unwrap_or(world);
     // Collision first, for every room: the light bake shadows through the
     // same line of sight the game uses, which needs the whole world's solid
     // tables (stacked rooms shadow each other).
     let mut origins: Vec<[i32; 3]> = Vec::new();
     let mut cols: Vec<collision::Tables> = Vec::new();
-    for (index, room) in world.rooms.iter().enumerate() {
+    for (index, room) in collision_world.rooms.iter().enumerate() {
         origins.push([
             room.origin[0] * s as i32,
             units.rt(room.y_offset),
@@ -437,7 +456,7 @@ pub fn cook_level(
     }
 
     // Portals, grouped per source room.
-    let derived = portals::derive(world, &units)?;
+    let derived = portals::derive(collision_world, &units)?;
     let mut all_portals = Vec::new();
     for (record, list) in records.iter_mut().zip(&derived) {
         record.portal_first =
@@ -528,6 +547,8 @@ mod convert_tests;
 mod derived_tests;
 #[cfg(test)]
 mod gap_tests;
+#[cfg(test)]
+mod leaf_tests;
 #[cfg(test)]
 mod light_tests;
 #[cfg(test)]

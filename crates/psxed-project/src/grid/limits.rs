@@ -87,17 +87,55 @@ pub enum GridIssueKind {
         /// World click of its minimum corner along Z.
         z: i32,
     },
-    /// A leaf that is not a whole sector. Such leaves load, save and round
-    /// trip, but the tools, the derivation, the preview and the cook read
-    /// whole sectors only until the quadtree phases land, so the world must
-    /// not cook.
-    LeafLevelNotSupported {
-        /// Level of the leaf, 0 to 4.
+    /// Two neighbouring leaves more than one level apart. The stitching
+    /// assumes at most one hanging vertex on a side; the editor's tree
+    /// operations keep this true.
+    LeafUnbalanced {
+        /// Level of the finer leaf, 0 to 4.
         level: u8,
         /// World click of its minimum corner along X.
         x: i32,
         /// World click of its minimum corner along Z.
         z: i32,
+    },
+    /// A leaf larger than a sector that is not one plane, or has a wall on
+    /// it. Big leaves are planar so that cutting them at sector borders is
+    /// exact.
+    BigLeafNotPlanar {
+        /// Level of the leaf, 0 or 1.
+        level: u8,
+        /// World click of its minimum corner along X.
+        x: i32,
+        /// World click of its minimum corner along Z.
+        z: i32,
+    },
+    /// A leaf smaller than a sector with a void triangle, a split-level
+    /// surface or a wall on a diagonal, which the derivation across leaf
+    /// sizes does not carry yet.
+    LeafFeatureNotSupported {
+        /// Level of the leaf, 3 or 4.
+        level: u8,
+        /// World click of its minimum corner along X.
+        x: i32,
+        /// World click of its minimum corner along Z.
+        z: i32,
+    },
+    /// A hanging corner that is not at the average of the coarse edge it
+    /// lies on, though the surface is continuous along that edge: a crack
+    /// the derived walls will not fill. `normalize` rewrites it.
+    HangingCornerOff {
+        /// Level of the finer leaf.
+        level: u8,
+        /// World click of its minimum corner along X.
+        x: i32,
+        /// World click of its minimum corner along Z.
+        z: i32,
+    },
+    /// A sector edge of this many runtime units cannot be divided into
+    /// quarters, so the world cannot hold leaves below a sector.
+    SectorNotQuartered {
+        /// Runtime units per sector edge.
+        sector: u32,
     },
     /// More than [`MAX_SPANS_PER_CELL`] spans in one column.
     TooManySpans {
@@ -276,6 +314,7 @@ impl GridIssueKind {
             | Self::BandSetMissing { .. }
             | Self::PlaneTooSteep { .. }
             | Self::MeshOutsideRoom { .. }
+            | Self::HangingCornerOff { .. }
             | Self::RoughTooLarge { .. } => Severity::Warning,
             _ => Severity::Error,
         }
@@ -317,8 +356,20 @@ impl GridIssue {
             GridIssueKind::LeafOutsideRoom { level, x, z } => format!(
                 "leaf of level {level} at clicks ({x}, {z}) lies outside the room rectangle"
             ),
-            GridIssueKind::LeafLevelNotSupported { level, x, z } => format!(
-                "leaf of level {level} at clicks ({x}, {z}) is not a whole sector; only whole sectors are read by the tools and the cook for now"
+            GridIssueKind::LeafUnbalanced { level, x, z } => format!(
+                "leaf of level {level} at clicks ({x}, {z}) lies beside a leaf more than one level coarser"
+            ),
+            GridIssueKind::BigLeafNotPlanar { level, x, z } => format!(
+                "leaf of level {level} at clicks ({x}, {z}) is larger than a sector and must be one plane with no walls"
+            ),
+            GridIssueKind::LeafFeatureNotSupported { level, x, z } => format!(
+                "leaf of level {level} at clicks ({x}, {z}) is smaller than a sector and has a void triangle, a split-level floor or a diagonal wall, which are not supported below a sector yet"
+            ),
+            GridIssueKind::HangingCornerOff { level, x, z } => format!(
+                "a corner of the level {level} leaf at clicks ({x}, {z}) hangs off the edge of a coarser leaf it should lie on"
+            ),
+            GridIssueKind::SectorNotQuartered { sector } => format!(
+                "a sector of {sector} runtime units cannot be divided into quarters, which leaves below a sector need"
             ),
             GridIssueKind::TooManySpans { count, level, x, z } => format!(
                 "{count} spans in the column of the level {level} leaf at clicks ({x}, {z}), at most {MAX_SPANS_PER_CELL}"
@@ -618,12 +669,6 @@ fn check_room(room_index: usize, room: &GridRoom, issues: &mut Vec<GridIssue>) {
         let (level, x, z) = (key.level, key.x, key.z);
         if !room.contains_leaf(key) {
             issues.push(at_room(GridIssueKind::LeafOutsideRoom { level, x, z }));
-        } else if !key.is_sector() {
-            issues.push(at_room(GridIssueKind::LeafLevelNotSupported {
-                level,
-                x,
-                z,
-            }));
         }
         let count = sector.span_count();
         if count > MAX_SPANS_PER_CELL {
@@ -637,6 +682,31 @@ fn check_room(room_index: usize, room: &GridRoom, issues: &mut Vec<GridIssue>) {
             }));
         }
     }
+    for issue in super::tree::check(room) {
+        use super::tree::TreeIssue;
+        issues.push(at_room(match issue {
+            TreeIssue::Unbalanced { a, .. } => GridIssueKind::LeafUnbalanced {
+                level: a.level,
+                x: a.x,
+                z: a.z,
+            },
+            TreeIssue::BigLeafNotPlanar(k) => GridIssueKind::BigLeafNotPlanar {
+                level: k.level,
+                x: k.x,
+                z: k.z,
+            },
+            TreeIssue::DiagonalBelowSector(k) => GridIssueKind::LeafFeatureNotSupported {
+                level: k.level,
+                x: k.x,
+                z: k.z,
+            },
+            TreeIssue::HangingCorner(h) => GridIssueKind::HangingCornerOff {
+                level: h.fine.level,
+                x: h.fine.x,
+                z: h.fine.z,
+            },
+        }));
+    }
     for value in [room.origin[0], room.origin[1], room.y_offset] {
         if value.unsigned_abs() > MAX_COORD_UNITS as u32 {
             issues.push(at_room(GridIssueKind::CoordinateRange { value }));
@@ -644,7 +714,10 @@ fn check_room(room_index: usize, room: &GridRoom, issues: &mut Vec<GridIssue>) {
     }
     check_planes(room_index, room, issues);
     check_bands(room_index, room, issues);
-    for (x, z, sector) in room.iter() {
+    for (key, sector) in room.leaves() {
+        let Some([x, z]) = room.local(key.cell()) else {
+            continue;
+        };
         let at = |kind| GridIssue {
             kind,
             room: Some(room_index),
@@ -686,6 +759,8 @@ fn check_room(room_index: usize, room: &GridRoom, issues: &mut Vec<GridIssue>) {
                 }
                 if room.wall_mode == WallMode::Derived
                     && !edge.is_diagonal()
+                    && key.is_sector()
+                    && room.leaves.is_sectors_only()
                     && super::derive::duplicates_derived(room, room.world_cell(x, z), edge, wall)
                 {
                     issues.push(at(GridIssueKind::AuthoredDuplicatesDerived { edge, index }));
@@ -710,6 +785,15 @@ pub fn validate(world: &GridWorld) -> Vec<GridIssue> {
         issues.push(world_issue(GridIssueKind::TooManyRooms {
             count: world.rooms.len(),
         }));
+    }
+    if world.scale.is_valid() && world.rooms.iter().any(|r| !r.leaves.is_sectors_only()) {
+        if let Ok(units) = super::cook::units::RuntimeUnits::new(world.scale) {
+            if units.sector() % 4 != 0 {
+                issues.push(world_issue(GridIssueKind::SectorNotQuartered {
+                    sector: units.sector(),
+                }));
+            }
+        }
     }
     for (index, room) in world.rooms.iter().enumerate() {
         check_room(index, room, &mut issues);
@@ -825,7 +909,7 @@ mod tests {
     }
 
     #[test]
-    fn leaves_that_are_not_sectors_and_extra_spans_block_the_cook_until_read() {
+    fn extra_spans_block_the_cook_until_read_and_a_big_leaf_must_be_planar() {
         let mut room = GridRoom::new("r", 4, 4);
         room.insert_leaf(LeafKey::new(1, 0, 0).unwrap(), GridSector::default())
             .unwrap();
@@ -843,11 +927,6 @@ mod tests {
         tall.remove_span(2);
         room.insert_leaf(LeafKey::sector([2, 2]), tall).unwrap();
         let found = kinds(&world_with_room(room));
-        assert!(found.contains(&GridIssueKind::LeafLevelNotSupported {
-            level: 1,
-            x: 0,
-            z: 0
-        }));
         assert!(found.contains(&GridIssueKind::ExtraSpansNotSupported {
             count: 2,
             level: 2,
