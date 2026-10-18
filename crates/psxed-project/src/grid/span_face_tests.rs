@@ -294,3 +294,42 @@ fn a_wall_fills_the_gap_of_the_span_at_the_height_and_ignores_the_others_walls()
         Some([0, 0, 3072, 3072])
     );
 }
+
+#[test]
+fn a_slab_over_a_half_cell_keeps_the_void_and_the_cell_closes_itself_on_each_storey() {
+    use super::derive::{cell_walls, DerivedKind};
+    use super::surface::VOID_A;
+    let mut w = world();
+    {
+        let sector = w.rooms[0].sector_mut(0, 0).unwrap();
+        sector.ground_floor_mut().unwrap().void = VOID_A;
+        sector.ground_ceiling_mut().unwrap().void = VOID_A;
+        insert_slab_column(sector, 1536, SLAB_THICKNESS, None).unwrap();
+        // Both new surfaces and the underside carry the void triangle.
+        assert!(sector
+            .spans()
+            .iter()
+            .flat_map(|s| s.floor.iter().chain(s.ceiling.iter()))
+            .all(|s| s.void == VOID_A));
+    }
+    // The diagonal closure of the empty half stands on both storeys.
+    let closures: Vec<[i32; 2]> = cell_walls(&w.rooms[0], [0, 0])
+        .into_iter()
+        .filter(|wall| wall.edge.is_diagonal() && wall.kind == DerivedKind::Closure)
+        .map(|wall| {
+            let lows = wall.ring.iter().map(|p| p[1]);
+            [lows.clone().min().unwrap(), lows.max().unwrap()]
+        })
+        .collect();
+    assert_eq!(closures, vec![[0, 1280], [1536, 3072]]);
+    // A column of one span is exactly the old answer.
+    let mut single = world();
+    let s = single.rooms[0].sector_mut(0, 0).unwrap();
+    s.ground_floor_mut().unwrap().void = VOID_A;
+    s.ground_ceiling_mut().unwrap().void = VOID_A;
+    let one = cell_walls(&single.rooms[0], [0, 0])
+        .into_iter()
+        .filter(|wall| wall.edge.is_diagonal())
+        .count();
+    assert_eq!(one, 1);
+}

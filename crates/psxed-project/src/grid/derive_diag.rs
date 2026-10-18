@@ -46,10 +46,36 @@ pub(super) fn diagonal_walls(room: &GridRoom, cell: [i32; 2]) -> Vec<DerivedWall
     };
     let split_level =
         |s: Option<&GridSurface>| s.is_some_and(|s| s.heights_b.is_some() || s.void != 0);
-    if !split_level(sector.ground_floor()) && !split_level(sector.ground_ceiling()) {
+    if !sector
+        .spans()
+        .iter()
+        .any(|span| split_level(span.floor.as_ref()) || split_level(span.ceiling.as_ref()))
+    {
         return Vec::new();
     }
     let mut out = Vec::new();
+    // Every span of the column has its own diagonal faces: a half cell
+    // closes itself on each storey.
+    for span in sector.spans() {
+        span_diagonal_walls(
+            room,
+            cell,
+            span.floor.as_ref(),
+            span.ceiling.as_ref(),
+            &mut out,
+        );
+    }
+    out
+}
+
+/// The diagonal faces of one span of the column at `cell`.
+fn span_diagonal_walls(
+    room: &GridRoom,
+    cell: [i32; 2],
+    ground_floor: Option<&GridSurface>,
+    ground_ceiling: Option<&GridSurface>,
+    out: &mut Vec<DerivedWall>,
+) {
     let face = |kind, edge: WallEdge, back, surface| Face {
         room,
         kind,
@@ -60,7 +86,7 @@ pub(super) fn diagonal_walls(room: &GridRoom, cell: [i32; 2]) -> Vec<DerivedWall
         key: super::derive::edge_key(cell, edge),
         surface,
     };
-    if let Some(floor) = sector.ground_floor() {
+    if let Some(floor) = ground_floor {
         let edge = fold_edge(floor.split);
         let (a, b) = (profile(floor, 0), profile(floor, 1));
         if floor.void == 0 && a != b {
@@ -87,7 +113,7 @@ pub(super) fn diagonal_walls(room: &GridRoom, cell: [i32; 2]) -> Vec<DerivedWall
         if let Some(near) = near {
             let key = super::derive::edge_key(cell, edge);
             let low = profile(floor, near);
-            let top = match sector.ground_ceiling() {
+            let top = match ground_ceiling {
                 Some(ceiling) if !ceiling.is_void(near) => {
                     let tri = if ceiling.split == floor.split {
                         near
@@ -108,7 +134,7 @@ pub(super) fn diagonal_walls(room: &GridRoom, cell: [i32; 2]) -> Vec<DerivedWall
             }
         }
     }
-    if let Some(ceiling) = sector.ground_ceiling() {
+    if let Some(ceiling) = ground_ceiling {
         let edge = fold_edge(ceiling.split);
         let (a, b) = (profile(ceiling, 0), profile(ceiling, 1));
         if ceiling.void == 0 && a != b {
@@ -126,5 +152,4 @@ pub(super) fn diagonal_walls(room: &GridRoom, cell: [i32; 2]) -> Vec<DerivedWall
             }
         }
     }
-    out
 }

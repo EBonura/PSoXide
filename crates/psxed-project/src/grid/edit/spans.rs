@@ -221,9 +221,22 @@ pub fn insert_slab_column(
     }
     let low = y - thickness;
     let lower_ok = floor_bounds(&span).is_none_or(|(_, high)| low - high >= MIN_HEADROOM);
+    // A slab keeps the diagonal and the void triangles of the span it splits:
+    // the half cell of a chamfer is empty above and below the slab too.
+    let surface_like = |height: i32, material: Option<ResourceId>, from: Option<&GridSurface>| {
+        let mut surface = GridSurface::flat_auto(height, material);
+        if let Some(from) = from.filter(|from| from.void != 0) {
+            surface.split = from.split;
+            surface.void = from.void;
+            surface.auto_split = false;
+        }
+        surface
+    };
+    let like_floor = span.floor.as_ref().or(span.ceiling.as_ref());
+    let like_ceiling = span.ceiling.as_ref().or(span.floor.as_ref());
     if !lower_ok {
         // The sliver rule: the floor rises to the slab top.
-        sector.spans_mut()[index].floor = Some(GridSurface::flat_auto(y, material));
+        sector.spans_mut()[index].floor = Some(surface_like(y, material, like_floor));
         return Ok(());
     }
     if sector.span_count() >= MAX_SPANS_PER_CELL {
@@ -235,11 +248,11 @@ pub fn insert_slab_column(
         .and_then(|ceiling| ceiling.tri(0).material)
         .or(material);
     let upper = GridSpan {
-        floor: Some(GridSurface::flat_auto(y, material)),
+        floor: Some(surface_like(y, material, like_floor)),
         ceiling: span.ceiling.clone(),
         wall_material: span.wall_material,
     };
-    sector.spans_mut()[index].ceiling = Some(GridSurface::flat_auto(low, underside));
+    sector.spans_mut()[index].ceiling = Some(surface_like(low, underside, like_ceiling));
     sector.insert_span(index + 1, upper);
     Ok(())
 }
