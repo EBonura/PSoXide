@@ -355,13 +355,21 @@ mod tests {
     fn a_grid_world_that_breaks_the_caps_fails_with_a_readable_reason() {
         let (dir, mut project) = starter_project("caps");
         if let Some(world) = project.active_scene_mut().world.grid_mut() {
-            world.rooms[0].sectors.truncate(3);
+            // A leaf outside the rectangle, which the document cannot hold.
+            let far = [world.rooms[0].origin[0] + 100, world.rooms[0].origin[1]];
+            world.rooms[0]
+                .leaves
+                .insert(
+                    crate::grid::leaf::LeafKey::sector(far),
+                    crate::grid::GridSector::default(),
+                )
+                .unwrap();
         }
         let (package, report) = super::super::build_package(&project, &dir);
         let _ = std::fs::remove_dir_all(&dir);
         assert!(package.is_none());
         let message = report.error_messages().join("; ");
         assert!(message.contains("grid world: room 0"), "{message}");
-        assert!(message.contains("sector slots stored"), "{message}");
+        assert!(message.contains("outside the room rectangle"), "{message}");
     }
 }

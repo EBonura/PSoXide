@@ -56,14 +56,14 @@ fn box_room() -> GridWorld {
     for z in 0..2 {
         for x in 0..3 {
             let sector = room.sector_or_insert(x, z).unwrap();
-            sector.floor = Some(GridSurface::flat(0, Some(rid(7))));
+            sector.set_floor(Some(GridSurface::flat(0, Some(rid(7)))));
             if x == 0 {
                 sector
                     .walls_mut(WallEdge::West)
                     .push(GridWall::span(0, 1024, Some(rid(8))));
             }
             if z == 1 {
-                sector.ceiling = Some(GridSurface::flat(1024, Some(rid(9))));
+                sector.set_ceiling(Some(GridSurface::flat(1024, Some(rid(9)))));
             }
         }
     }
@@ -117,8 +117,10 @@ fn cooking_twice_gives_identical_bytes() {
 fn heights_round_through_one_mapping_for_render_and_collision() {
     let mut world = box_room();
     // 13 grid units = 1.01 runtime units at 5/4.
-    world.rooms[0].sector_or_insert(0, 0).unwrap().floor =
-        Some(GridSurface::flat(13, Some(rid(7))));
+    world.rooms[0]
+        .sector_or_insert(0, 0)
+        .unwrap()
+        .set_floor(Some(GridSurface::flat(13, Some(rid(7)))));
     let cooked = cook(&world).unwrap();
     let chunk = &cooked.tables[0];
     assert_eq!(chunk.sectors[0].floor, [1; 4]);
@@ -147,10 +149,16 @@ fn rooms_get_portals_to_their_neighbours() {
     let mut world = box_room();
     let mut next = GridRoom::new("next", 1, 1);
     next.origin = [3, 0];
-    next.sector_or_insert(0, 0).unwrap().floor = Some(GridSurface::flat(0, Some(rid(7))));
-    next.sector_or_insert(0, 0).unwrap().ceiling = Some(GridSurface::flat(1024, Some(rid(9))));
-    world.rooms[0].sector_or_insert(2, 0).unwrap().ceiling =
-        Some(GridSurface::flat(1024, Some(rid(9))));
+    next.sector_or_insert(0, 0)
+        .unwrap()
+        .set_floor(Some(GridSurface::flat(0, Some(rid(7)))));
+    next.sector_or_insert(0, 0)
+        .unwrap()
+        .set_ceiling(Some(GridSurface::flat(1024, Some(rid(9)))));
+    world.rooms[0]
+        .sector_or_insert(2, 0)
+        .unwrap()
+        .set_ceiling(Some(GridSurface::flat(1024, Some(rid(9)))));
     world.rooms.push(next);
     let cooked = cook(&world).unwrap();
     let from_box: Vec<u16> = cooked.level.portals
@@ -172,8 +180,8 @@ fn a_long_shared_wall_is_one_portal_not_one_per_cell() {
         for z in 0..4 {
             for x in 0..4 {
                 let sector = room.sector_or_insert(x, z).unwrap();
-                sector.floor = Some(GridSurface::flat(0, Some(rid(7))));
-                sector.ceiling = Some(GridSurface::flat(1024, Some(rid(9))));
+                sector.set_floor(Some(GridSurface::flat(0, Some(rid(7)))));
+                sector.set_ceiling(Some(GridSurface::flat(1024, Some(rid(9)))));
             }
         }
         room
@@ -264,7 +272,9 @@ fn editor_floor_height_agrees_with_the_runtime_height_function() {
             let record = cooked.level.rooms[ri];
             let chunk = &cooked.tables[ri];
             for (x, z, sector) in room.iter() {
-                let Some(floor) = &sector.floor else { continue };
+                let Some(floor) = sector.floor() else {
+                    continue;
+                };
                 if !floor.walkable {
                     continue;
                 }

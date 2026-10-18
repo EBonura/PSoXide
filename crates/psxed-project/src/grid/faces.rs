@@ -511,10 +511,10 @@ impl Builder<'_> {
     }
 
     fn sector(&mut self, sector: &GridSector) {
-        if let Some(floor) = &sector.floor {
+        if let Some(floor) = sector.floor() {
             self.surface(floor, false);
         }
-        if let Some(ceiling) = &sector.ceiling {
+        if let Some(ceiling) = sector.ceiling() {
             self.surface(ceiling, true);
         }
         for edge in WallEdge::ALL {
@@ -649,7 +649,7 @@ mod tests {
 
     #[test]
     fn flat_floor_is_one_upward_quad() {
-        let world = one_cell(|s| s.floor = Some(GridSurface::flat(0, None)));
+        let world = one_cell(|s| s.set_floor(Some(GridSurface::flat(0, None))));
         let faces = all_faces(&world);
         assert_eq!(faces.len(), 1);
         assert_eq!(faces[0].points.len(), 4);
@@ -666,8 +666,8 @@ mod tests {
             let (a, b, c) = (p(0), p(1), p(2));
             (b[2] - a[2]) * (c[0] - a[0]) - (b[0] - a[0]) * (c[2] - a[2])
         };
-        let floor = one_cell(|s| s.floor = Some(GridSurface::flat(0, None)));
-        let ceiling = one_cell(|s| s.ceiling = Some(GridSurface::flat(1024, None)));
+        let floor = one_cell(|s| s.set_floor(Some(GridSurface::flat(0, None))));
+        let ceiling = one_cell(|s| s.set_ceiling(Some(GridSurface::flat(1024, None))));
         // y component of (b - a) x (c - a) is dz1*dx2 - dx1*dz2.
         assert!(cross_y(&all_faces(&floor)[0]) < 0.0);
         assert!(cross_y(&all_faces(&ceiling)[0]) > 0.0);
@@ -675,7 +675,7 @@ mod tests {
 
     #[test]
     fn ceiling_faces_down() {
-        let world = one_cell(|s| s.ceiling = Some(GridSurface::flat(1024, None)));
+        let world = one_cell(|s| s.set_ceiling(Some(GridSurface::flat(1024, None))));
         let faces = all_faces(&world);
         assert_eq!(faces.len(), 1);
         assert!(facing(&faces[0], [0.0, -1.0, 0.0]));
@@ -687,7 +687,7 @@ mod tests {
         let bent = one_cell(|s| {
             let mut floor = GridSurface::flat(0, None);
             floor.heights = [0, 0, 256, 0];
-            s.floor = Some(floor);
+            s.set_floor(Some(floor));
         });
         let faces = all_faces(&bent);
         assert_eq!(faces.len(), 2);
@@ -702,7 +702,7 @@ mod tests {
                 crate::ResourceData::Material(crate::MaterialResource::opaque(None)),
             );
             floor.tri_b = Some(GridTri::with_material(Some(id)));
-            s.floor = Some(floor);
+            s.set_floor(Some(floor));
         });
         assert_eq!(all_faces(&two_materials).len(), 2);
     }
@@ -714,7 +714,7 @@ mod tests {
                 let mut floor = GridSurface::flat(0, None);
                 floor.heights = [0, 0, 256, 0];
                 floor.split = split;
-                s.floor = Some(floor);
+                s.set_floor(Some(floor));
             });
             all_faces(&world)
                 .iter()
@@ -843,7 +843,9 @@ mod tests {
     fn neighbouring_faces_share_exact_corner_positions() {
         let mut room = GridRoom::new("r", 2, 1);
         for x in 0..2 {
-            room.sector_or_insert(x, 0).unwrap().floor = Some(GridSurface::flat(0, None));
+            room.sector_or_insert(x, 0)
+                .unwrap()
+                .set_floor(Some(GridSurface::flat(0, None)));
         }
         let world = GridWorld {
             scale: GridScale::DEFAULT,
@@ -875,7 +877,9 @@ mod tests {
     fn default_mapping_continues_across_cells() {
         let mut room = GridRoom::new("r", 2, 1);
         for x in 0..2 {
-            room.sector_or_insert(x, 0).unwrap().floor = Some(GridSurface::flat(0, None));
+            room.sector_or_insert(x, 0)
+                .unwrap()
+                .set_floor(Some(GridSurface::flat(0, None)));
         }
         let world = GridWorld {
             scale: GridScale::DEFAULT,
@@ -901,16 +905,16 @@ mod tests {
 
     #[test]
     fn uv_offset_and_rotation_apply_about_the_face_centre() {
-        let plain = one_cell(|s| s.floor = Some(GridSurface::flat(0, None)));
+        let plain = one_cell(|s| s.set_floor(Some(GridSurface::flat(0, None))));
         let turned = one_cell(|s| {
             let mut floor = GridSurface::flat(0, None);
             floor.tri_a.uv.rotation_deg = 90;
-            s.floor = Some(floor);
+            s.set_floor(Some(floor));
         });
         let shifted = one_cell(|s| {
             let mut floor = GridSurface::flat(0, None);
             floor.tri_a.uv.offset_texels = [3, -2];
-            s.floor = Some(floor);
+            s.set_floor(Some(floor));
         });
         let (p, t, o) = (
             &all_faces(&plain)[0],

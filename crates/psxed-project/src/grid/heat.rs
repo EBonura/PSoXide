@@ -392,7 +392,7 @@ pub fn heatmap(world: &GridWorld, options: HeatOptions) -> Result<HeatMap, Strin
         let has_floor: Vec<bool> = (0..tables.width * tables.depth)
             .map(|i| {
                 room.sector(i % tables.width, i / tables.width)
-                    .is_some_and(|s| s.floor.is_some())
+                    .is_some_and(|s| s.floor().is_some())
             })
             .collect();
         let stride = options.stride.max(1) as usize;
@@ -405,7 +405,9 @@ pub fn heatmap(world: &GridWorld, options: HeatOptions) -> Result<HeatMap, Strin
             if !w.standable {
                 continue;
             }
-            let Some(floor) = &sector.floor else { continue };
+            let Some(floor) = sector.floor() else {
+                continue;
+            };
             // Room-local height of the middle of the floor, plus the eye.
             let mean = floor.heights.iter().sum::<i32>() / 4;
             let y = cook::collision::local_height(&units, room.y_offset, mean) + options.eye;
@@ -467,7 +469,7 @@ pub fn spot_views(
     let [x, z] = r.local(cell).ok_or("the sector is outside the room")?;
     let floor = r
         .sector(x, z)
-        .and_then(|s| s.floor.as_ref())
+        .and_then(|s| s.floor())
         .ok_or("the sector has no floor")?;
     let mean = floor.heights.iter().sum::<i32>() / 4;
     let y = cook::collision::local_height(&units, r.y_offset, mean) + options.eye;
@@ -476,7 +478,7 @@ pub fn spot_views(
     let has_floor: Vec<bool> = (0..tables.width * tables.depth)
         .map(|i| {
             r.sector(i % tables.width, i / tables.width)
-                .is_some_and(|s| s.floor.is_some())
+                .is_some_and(|s| s.floor().is_some())
         })
         .collect();
     Ok((0..options.yaws.max(1))
@@ -500,8 +502,8 @@ mod tests {
         for z in 0..d {
             for x in 0..w {
                 let s = room.sector_or_insert(x, z).unwrap();
-                s.floor = Some(GridSurface::flat_auto(0, None));
-                s.ceiling = Some(GridSurface::flat_auto(3072, None));
+                s.set_floor(Some(GridSurface::flat_auto(0, None)));
+                s.set_ceiling(Some(GridSurface::flat_auto(3072, None)));
             }
         }
         GridWorld {
@@ -536,7 +538,7 @@ mod tests {
         let mut walled = hall(8, 8);
         for z in 0..8 {
             let s = walled.rooms[0].sector_mut(4, z).unwrap();
-            s.floor.as_mut().unwrap().heights = [2048; 4];
+            s.floor_mut().unwrap().heights = [2048; 4];
         }
         let b = heatmap(&walled, HeatOptions::default()).unwrap();
         // The step is taller than the body climbs: those sectors are still

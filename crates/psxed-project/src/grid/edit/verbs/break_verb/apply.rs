@@ -28,8 +28,8 @@ fn sector_mut(world: &mut GridWorld, room: usize, cell: [i32; 2]) -> Option<&mut
 
 fn surface_of(sector: &mut GridSector, surf: Surf) -> Option<&mut GridSurface> {
     match surf {
-        Surf::Floor => sector.floor.as_mut(),
-        Surf::Ceiling => sector.ceiling.as_mut(),
+        Surf::Floor => sector.floor_mut(),
+        Surf::Ceiling => sector.ceiling_mut(),
     }
 }
 
@@ -68,8 +68,8 @@ fn save(world: &GridWorld, room: usize, cells: &[[i32; 2]]) -> Saved {
 fn put_back(world: &mut GridWorld, room: usize, saved: Saved) {
     let r = &mut world.rooms[room];
     for (cell, sector) in saved.sectors {
-        if let Some(index) = r.local(cell).and_then(|[x, z]| r.index(x, z)) {
-            r.sectors[index] = sector;
+        if let Some([x, z]) = r.local(cell) {
+            r.set_sector(x, z, sector);
         }
     }
     r.edge_overrides = saved.overrides;
@@ -107,7 +107,7 @@ fn apply_one(
                 let r = &world.rooms[room];
                 r.local(o)
                     .and_then(|[x, z]| r.sector(x, z))
-                    .and_then(|s| s.floor.as_ref())
+                    .and_then(|s| s.floor())
                     .map(|f| f.tri_a.material)
             });
             let Some(sector) = sector_mut(world, room, *cell) else {
@@ -187,10 +187,8 @@ fn apply_one(
             let Some(sector) = sector_mut(world, room, *cell) else {
                 return false;
             };
-            for surface in [sector.floor.as_mut(), sector.ceiling.as_mut()]
-                .into_iter()
-                .flatten()
-            {
+            let (floor, ceiling) = sector.floor_and_ceiling_mut();
+            for surface in [floor, ceiling].into_iter().flatten() {
                 surface.void = VOID_A | VOID_B;
                 changed = true;
             }

@@ -25,8 +25,8 @@ pub(super) fn hall(w: usize) -> GridWorld {
     for z in 0..3 {
         for x in 0..w {
             let sector = room.sector_or_insert(x, z).unwrap();
-            sector.floor = Some(GridSurface::flat_auto(0, Some(rid(1))));
-            sector.ceiling = Some(GridSurface::flat_auto(6144, Some(rid(2))));
+            sector.set_floor(Some(GridSurface::flat_auto(0, Some(rid(1)))));
+            sector.set_ceiling(Some(GridSurface::flat_auto(6144, Some(rid(2)))));
         }
     }
     GridWorld {
@@ -55,15 +55,13 @@ fn ramp_world(rise: i32) -> GridWorld {
             world.rooms[0]
                 .sector_mut(x, z)
                 .unwrap()
-                .floor
-                .as_mut()
+                .floor_mut()
                 .unwrap()
                 .heights = [rise; 4];
             world.rooms[0]
                 .sector_mut(x, z)
                 .unwrap()
-                .ceiling
-                .as_mut()
+                .ceiling_mut()
                 .unwrap()
                 .heights = [6144 + rise; 4];
         }
@@ -120,8 +118,8 @@ fn riser_world(rise: i32) -> GridWorld {
     for x in 4..10 {
         for z in 0..3 {
             let sector = world.rooms[0].sector_mut(x, z).unwrap();
-            sector.floor.as_mut().unwrap().heights = [rise; 4];
-            sector.ceiling.as_mut().unwrap().heights = [6144 + rise; 4];
+            sector.floor_mut().unwrap().heights = [rise; 4];
+            sector.ceiling_mut().unwrap().heights = [6144 + rise; 4];
         }
     }
     world
@@ -168,8 +166,8 @@ fn a_flight_of_stairs_is_climbed_tread_by_tread_by_the_real_motor() {
         for x in 9..14 {
             for z in 0..3 {
                 let s = world.rooms[0].sector_mut(x, z).unwrap();
-                s.floor.as_mut().unwrap().heights = [flight.total; 4];
-                s.ceiling.as_mut().unwrap().heights = [6144 + flight.total; 4];
+                s.floor_mut().unwrap().heights = [flight.total; 4];
+                s.ceiling_mut().unwrap().heights = [6144 + flight.total; 4];
             }
         }
         let path = walk_path(&native(&world), RoomPoint::new(120, 0, 120), 4096, 0, 600);

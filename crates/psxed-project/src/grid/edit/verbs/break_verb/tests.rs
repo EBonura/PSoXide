@@ -22,8 +22,8 @@ fn plateau() -> (GridWorld, Region) {
     for z in 3..9 {
         for x in 3..9 {
             let s = room.sector_or_insert(x as usize, z as usize).unwrap();
-            s.floor.as_mut().unwrap().heights = [512; 4];
-            s.ceiling.as_mut().unwrap().heights = [3584; 4];
+            s.floor_mut().unwrap().heights = [512; 4];
+            s.ceiling_mut().unwrap().heights = [3584; 4];
         }
     }
     let region = Region::from_rect(0, CellRect::from_corners([3, 3], [8, 8]));
@@ -196,9 +196,9 @@ fn the_mask_refuses_what_would_make_a_floor_too_steep_and_says_why() {
     for z in 0..8usize {
         for x in 0..8usize {
             let s = world.rooms[0].sector_mut(x, z).unwrap();
-            s.ceiling = None;
+            s.set_ceiling(None);
             let n = z as i32 * 960;
-            s.floor.as_mut().unwrap().heights = [n, n, n + 960, n + 960];
+            s.floor_mut().unwrap().heights = [n, n, n + 960, n + 960];
         }
     }
     let spawns = vec![Spawn {
@@ -234,9 +234,9 @@ fn the_mask_refuses_what_would_make_a_floor_too_steep_and_says_why() {
         for z in 0..8usize {
             for x in 0..8usize {
                 let s = w.rooms[0].sector_mut(x, z).unwrap();
-                s.ceiling = None;
+                s.set_ceiling(None);
                 let n = z as i32 * 960;
-                s.floor.as_mut().unwrap().heights = [n, n, n + 960, n + 960];
+                s.floor_mut().unwrap().heights = [n, n, n + 960, n + 960];
             }
         }
         w
@@ -262,11 +262,11 @@ fn open_wall_tops_get_a_ragged_top_and_a_void_corner_keeps_its_diagonal_wall() {
         room.defaults.open_wall = 2048;
         for z in 0..8 {
             for x in 0..8 {
-                room.sector_mut(x, z).unwrap().ceiling = None;
+                room.sector_mut(x, z).unwrap().set_ceiling(None);
             }
         }
         let s = room.sector_mut(0, 0).unwrap();
-        s.floor.as_mut().unwrap().void = VOID_A;
+        s.floor_mut().unwrap().void = VOID_A;
     }
     let region = Region::from_rect(0, CellRect::from_corners([0, 0], [7, 7]));
     let p = BreakParams {

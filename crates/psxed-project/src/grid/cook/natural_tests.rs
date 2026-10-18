@@ -37,7 +37,7 @@ fn census(world: &GridWorld) -> Census {
     let units = super::RuntimeUnits::new(world.scale).unwrap();
     for room in &world.rooms {
         for (x, z, s) in room.iter() {
-            let Some(f) = &s.floor else { continue };
+            let Some(f) = s.floor() else { continue };
             c.floors += 1;
             c.bent += usize::from(!f.is_planar());
             if let Some(b) = f.heights_b {

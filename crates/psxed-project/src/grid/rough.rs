@@ -194,7 +194,7 @@ mod tests {
         for z in 0..3 {
             for x in 0..3 {
                 let s = room.sector_or_insert(x, z).unwrap();
-                s.floor = Some(GridSurface::flat(0, None));
+                s.set_floor(Some(GridSurface::flat(0, None)));
                 s.rough = level;
             }
         }

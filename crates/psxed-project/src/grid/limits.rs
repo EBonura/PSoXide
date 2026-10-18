@@ -20,6 +20,7 @@ use super::overrides::WallMode;
 use super::plane::{PlaneCollision, PlaneShape, MAX_PLANE_SIZE, MIN_PLANE_SIZE};
 use super::room::GridRoom;
 use super::sector::WallEdge;
+pub use super::sector::MAX_SPANS_PER_CELL;
 use super::units::GridScale;
 use super::world::GridWorld;
 
@@ -75,12 +76,53 @@ pub enum GridIssueKind {
         /// Declared depth.
         depth: usize,
     },
-    /// The sector list does not hold `width * depth` entries.
-    StorageMismatch {
-        /// Entries present.
-        stored: usize,
-        /// Entries expected.
-        expected: usize,
+    /// A leaf that is not wholly inside the room rectangle. Leaves are
+    /// keyed in the world, so this only happens to a document edited by
+    /// hand or cut short; trimming or growing the room fixes it.
+    LeafOutsideRoom {
+        /// Level of the leaf, 0 to 4.
+        level: u8,
+        /// World click of its minimum corner along X.
+        x: i32,
+        /// World click of its minimum corner along Z.
+        z: i32,
+    },
+    /// A leaf that is not a whole sector. Such leaves load, save and round
+    /// trip, but the tools, the derivation, the preview and the cook read
+    /// whole sectors only until the quadtree phases land, so the world must
+    /// not cook.
+    LeafLevelNotSupported {
+        /// Level of the leaf, 0 to 4.
+        level: u8,
+        /// World click of its minimum corner along X.
+        x: i32,
+        /// World click of its minimum corner along Z.
+        z: i32,
+    },
+    /// More than [`MAX_SPANS_PER_CELL`] spans in one column.
+    TooManySpans {
+        /// Spans present.
+        count: usize,
+        /// Level of the leaf.
+        level: u8,
+        /// World click of its minimum corner along X.
+        x: i32,
+        /// World click of its minimum corner along Z.
+        z: i32,
+    },
+    /// A column of more than one span. It loads, saves and round trips,
+    /// but the tools, the derivation, the preview and the cook read the
+    /// ground span only until the storey phases land, so the world must not
+    /// cook.
+    ExtraSpansNotSupported {
+        /// Spans present.
+        count: usize,
+        /// Level of the leaf.
+        level: u8,
+        /// World click of its minimum corner along X.
+        x: i32,
+        /// World click of its minimum corner along Z.
+        z: i32,
     },
     /// An edge holds more than [`MAX_WALLS_PER_EDGE`] walls.
     TooManyWalls {
@@ -272,9 +314,18 @@ impl GridIssue {
             GridIssueKind::RoomSize { width, depth } => {
                 format!("size {width}x{depth}, each side must be 1 to {MAX_ROOM_SIDE}")
             }
-            GridIssueKind::StorageMismatch { stored, expected } => {
-                format!("{stored} sector slots stored, {expected} expected")
-            }
+            GridIssueKind::LeafOutsideRoom { level, x, z } => format!(
+                "leaf of level {level} at clicks ({x}, {z}) lies outside the room rectangle"
+            ),
+            GridIssueKind::LeafLevelNotSupported { level, x, z } => format!(
+                "leaf of level {level} at clicks ({x}, {z}) is not a whole sector; only whole sectors are read by the tools and the cook for now"
+            ),
+            GridIssueKind::TooManySpans { count, level, x, z } => format!(
+                "{count} spans in the column of the level {level} leaf at clicks ({x}, {z}), at most {MAX_SPANS_PER_CELL}"
+            ),
+            GridIssueKind::ExtraSpansNotSupported { count, level, x, z } => format!(
+                "{count} spans in the column of the level {level} leaf at clicks ({x}, {z}); only the ground span is read by the tools and the cook for now"
+            ),
             GridIssueKind::TooManyWalls { edge, count } => format!(
                 "{count} walls on the {} edge, at most {MAX_WALLS_PER_EDGE}",
                 edge.label()
@@ -395,8 +446,8 @@ impl GridBudget {
             budget.meshes += room.meshes.len();
             for (_, _, sector) in room.iter() {
                 budget.sectors += 1;
-                budget.floors += usize::from(sector.floor.is_some());
-                budget.ceilings += usize::from(sector.ceiling.is_some());
+                budget.floors += usize::from(sector.floor().is_some());
+                budget.ceilings += usize::from(sector.ceiling().is_some());
                 budget.walls += sector.wall_count();
             }
         }
@@ -563,12 +614,28 @@ fn check_room(room_index: usize, room: &GridRoom, issues: &mut Vec<GridIssue>) {
             depth: room.depth,
         }));
     }
-    let expected = room.width.saturating_mul(room.depth);
-    if room.sectors.len() != expected {
-        issues.push(at_room(GridIssueKind::StorageMismatch {
-            stored: room.sectors.len(),
-            expected,
-        }));
+    for (key, sector) in room.leaves() {
+        let (level, x, z) = (key.level, key.x, key.z);
+        if !room.contains_leaf(key) {
+            issues.push(at_room(GridIssueKind::LeafOutsideRoom { level, x, z }));
+        } else if !key.is_sector() {
+            issues.push(at_room(GridIssueKind::LeafLevelNotSupported {
+                level,
+                x,
+                z,
+            }));
+        }
+        let count = sector.span_count();
+        if count > MAX_SPANS_PER_CELL {
+            issues.push(at_room(GridIssueKind::TooManySpans { count, level, x, z }));
+        } else if count > 1 {
+            issues.push(at_room(GridIssueKind::ExtraSpansNotSupported {
+                count,
+                level,
+                x,
+                z,
+            }));
+        }
     }
     for value in [room.origin[0], room.origin[1], room.y_offset] {
         if value.unsigned_abs() > MAX_COORD_UNITS as u32 {
@@ -583,7 +650,7 @@ fn check_room(room_index: usize, room: &GridRoom, issues: &mut Vec<GridIssue>) {
             room: Some(room_index),
             cell: Some([x, z]),
         };
-        for surface in [&sector.floor, &sector.ceiling].into_iter().flatten() {
+        for surface in sector.surfaces() {
             let heights = surface
                 .heights
                 .iter()
@@ -698,6 +765,8 @@ pub fn validate(world: &GridWorld) -> Vec<GridIssue> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::grid::leaf::LeafKey;
+    use crate::grid::sector::{GridSector, GridSpan};
     use crate::grid::surface::{GridSurface, GridWall};
 
     fn world_with_room(room: GridRoom) -> GridWorld {
@@ -715,7 +784,9 @@ mod tests {
     #[test]
     fn a_small_world_is_clean() {
         let mut room = GridRoom::new("r", 2, 2);
-        room.sector_or_insert(0, 0).unwrap().floor = Some(GridSurface::flat(0, None));
+        room.sector_or_insert(0, 0)
+            .unwrap()
+            .set_floor(Some(GridSurface::flat(0, None)));
         assert!(validate(&world_with_room(room)).is_empty());
     }
 
@@ -736,17 +807,62 @@ mod tests {
     }
 
     #[test]
-    fn storage_length_must_match_the_declared_size() {
+    fn a_leaf_outside_the_rectangle_is_an_error() {
         let mut room = GridRoom::new("r", 3, 3);
-        room.sectors.pop();
-        let found = kinds(&world_with_room(room));
+        // One sector east of the room: leaves are keyed in the world, so the
+        // map takes it, and validation reports it.
+        room.leaves
+            .insert(LeafKey::sector([3, 0]), GridSector::default())
+            .unwrap();
         assert_eq!(
-            found,
-            vec![GridIssueKind::StorageMismatch {
-                stored: 8,
-                expected: 9
+            kinds(&world_with_room(room)),
+            vec![GridIssueKind::LeafOutsideRoom {
+                level: 2,
+                x: 12,
+                z: 0
             }]
         );
+    }
+
+    #[test]
+    fn leaves_that_are_not_sectors_and_extra_spans_block_the_cook_until_read() {
+        let mut room = GridRoom::new("r", 4, 4);
+        room.insert_leaf(LeafKey::new(1, 0, 0).unwrap(), GridSector::default())
+            .unwrap();
+        let mut tall = GridSector::default();
+        for i in 0..2 {
+            tall.insert_span(
+                i,
+                GridSpan {
+                    floor: Some(GridSurface::flat(2048 * i as i32, None)),
+                    ceiling: Some(GridSurface::flat(2048 * i as i32 + 1024, None)),
+                    wall_material: None,
+                },
+            );
+        }
+        tall.remove_span(2);
+        room.insert_leaf(LeafKey::sector([2, 2]), tall).unwrap();
+        let found = kinds(&world_with_room(room));
+        assert!(found.contains(&GridIssueKind::LeafLevelNotSupported {
+            level: 1,
+            x: 0,
+            z: 0
+        }));
+        assert!(found.contains(&GridIssueKind::ExtraSpansNotSupported {
+            count: 2,
+            level: 2,
+            x: 8,
+            z: 8
+        }));
+        assert!(has_errors(&validate(&world_with_room({
+            let mut r = GridRoom::new("r", 1, 1);
+            let mut many = GridSector::default();
+            for i in 0..MAX_SPANS_PER_CELL {
+                many.insert_span(i, GridSpan::default());
+            }
+            r.set_sector(0, 0, Some(many));
+            r
+        }))));
     }
 
     #[test]
@@ -787,7 +903,7 @@ mod tests {
         let mut room = GridRoom::new("r", 1, 1);
         let sector = room.sector_or_insert(0, 0).unwrap();
         sector.south.push(GridWall::span(0, 0, None));
-        sector.floor = Some(GridSurface::flat(MAX_COORD_UNITS + 1, None));
+        sector.set_floor(Some(GridSurface::flat(MAX_COORD_UNITS + 1, None)));
         let issues = validate(&world_with_room(room));
         assert!(issues.len() >= 2);
         assert_eq!(issues[0].severity(), Severity::Error);
@@ -812,7 +928,9 @@ mod tests {
     fn extent_beyond_the_pack_range_is_an_error() {
         let mut room = GridRoom::new("far", 1, 1);
         room.origin = [MAX_EDITOR_COORD / 1280 + 8, 0];
-        room.sector_or_insert(0, 0).unwrap().floor = Some(GridSurface::flat(0, None));
+        room.sector_or_insert(0, 0)
+            .unwrap()
+            .set_floor(Some(GridSurface::flat(0, None)));
         let found = kinds(&world_with_room(room));
         assert!(found
             .iter()
@@ -822,10 +940,12 @@ mod tests {
     #[test]
     fn budget_counts_surfaces_and_faces() {
         let mut room = GridRoom::new("r", 2, 1);
-        room.sector_or_insert(0, 0).unwrap().floor = Some(GridSurface::flat(0, None));
+        room.sector_or_insert(0, 0)
+            .unwrap()
+            .set_floor(Some(GridSurface::flat(0, None)));
         let second = room.sector_or_insert(1, 0).unwrap();
-        second.floor = Some(GridSurface::flat(0, None));
-        second.ceiling = Some(GridSurface::flat(1024, None));
+        second.set_floor(Some(GridSurface::flat(0, None)));
+        second.set_ceiling(Some(GridSurface::flat(1024, None)));
         second.west.push(GridWall::span(0, 1024, None));
         let budget = GridBudget::of(&world_with_room(room));
         assert_eq!(budget.rooms, 1);

@@ -251,7 +251,7 @@ mod tests {
     fn world() -> GridWorld {
         let mut room = GridRoom::new("r", 1, 1);
         let s = room.sector_or_insert(0, 0).unwrap();
-        s.floor = Some(GridSurface::flat(0, None));
+        s.set_floor(Some(GridSurface::flat(0, None)));
         s.north.push(GridWall::span(0, 512, None));
         GridWorld {
             scale: GridScale { num: 1, den: 1 },
@@ -260,11 +260,11 @@ mod tests {
         }
     }
 
-    const FLOOR: FaceRef = FaceRef {
-        room: 0,
-        cell: [0, 0],
-        target: FaceTarget::Surface(super::super::refs::SurfaceKind::Floor),
-    };
+    const FLOOR: FaceRef = FaceRef::new(
+        0,
+        crate::grid::leaf::LeafKey::sector([0, 0]),
+        FaceTarget::Surface(super::super::refs::SurfaceKind::Floor),
+    );
 
     #[test]
     fn a_whole_face_material_keeps_a_merged_quad_merged() {

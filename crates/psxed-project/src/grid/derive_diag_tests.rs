@@ -26,8 +26,8 @@ fn hall(f: impl FnOnce(&mut super::sector::GridSector)) -> GridRoom {
     for z in 0..3 {
         for x in 0..3 {
             let s = room.sector_or_insert(x, z).unwrap();
-            s.floor = Some(GridSurface::flat(0, None));
-            s.ceiling = Some(GridSurface::flat(2048, None));
+            s.set_floor(Some(GridSurface::flat(0, None)));
+            s.set_ceiling(Some(GridSurface::flat(2048, None)));
         }
     }
     f(room.sector_or_insert(1, 1).unwrap());
@@ -49,7 +49,7 @@ fn a_split_level_floor_grows_a_diagonal_riser_seen_from_the_lower_triangle() {
     // NW-SE split: triangle 0 (NW, NE, SE) is the NE half, triangle 1 the
     // SW half. Triangle 1 sits two clicks up.
     let room = hall(|s| {
-        let floor = s.floor.as_mut().unwrap();
+        let floor = s.floor_mut().unwrap();
         floor.heights_b = Some([512; 4]);
     });
     let faces = all_faces(&world(room));
@@ -80,7 +80,7 @@ fn a_split_level_floor_grows_a_diagonal_riser_seen_from_the_lower_triangle() {
 #[test]
 fn the_riser_sits_exactly_on_the_edges_of_the_two_floor_triangles() {
     let room = hall(|s| {
-        let floor = s.floor.as_mut().unwrap();
+        let floor = s.floor_mut().unwrap();
         floor.heights = [0, 0, 0, 0];
         floor.heights_b = Some([256, 256, 256, 256]);
     });
@@ -103,7 +103,7 @@ fn the_riser_sits_exactly_on_the_edges_of_the_two_floor_triangles() {
 fn a_pure_fold_grows_no_diagonal_face() {
     // Both triangles meet at the same heights along the diagonal.
     let room = hall(|s| {
-        let floor = s.floor.as_mut().unwrap();
+        let floor = s.floor_mut().unwrap();
         floor.heights = [0, 0, 0, 256];
         floor.heights_b = Some([0, 256, 0, 256]);
     });
@@ -114,7 +114,7 @@ fn a_pure_fold_grows_no_diagonal_face() {
 #[test]
 fn the_other_split_puts_the_riser_on_the_other_diagonal() {
     let room = hall(|s| {
-        let floor = s.floor.as_mut().unwrap();
+        let floor = s.floor_mut().unwrap();
         floor.split = GridSplit::NeSw;
         floor.heights_b = Some([256; 4]);
     });
@@ -131,7 +131,7 @@ fn the_other_split_puts_the_riser_on_the_other_diagonal() {
 #[test]
 fn a_split_level_ceiling_grows_a_diagonal_drop() {
     let room = hall(|s| {
-        let ceiling = s.ceiling.as_mut().unwrap();
+        let ceiling = s.ceiling_mut().unwrap();
         ceiling.heights_b = Some([1536; 4]);
     });
     let faces = all_faces(&world(room));
@@ -145,7 +145,8 @@ fn a_split_level_ceiling_grows_a_diagonal_drop() {
 #[test]
 fn a_void_triangle_draws_no_floor_and_the_other_half_closes_along_the_diagonal() {
     let room = hall(|s| {
-        for surface in [s.floor.as_mut().unwrap(), s.ceiling.as_mut().unwrap()] {
+        let (floor, ceiling) = s.floor_and_ceiling_mut();
+        for surface in [floor.unwrap(), ceiling.unwrap()] {
             surface.void = VOID_A;
         }
     });
@@ -176,8 +177,8 @@ fn a_void_triangle_draws_no_floor_and_the_other_half_closes_along_the_diagonal()
 fn neighbours_of_a_void_triangle_close_themselves_across_the_cardinal_edge() {
     // Triangle A (NW, NE, SE) holds the north and east edges.
     let room = hall(|s| {
-        s.floor.as_mut().unwrap().void = VOID_A;
-        s.ceiling.as_mut().unwrap().void = VOID_A;
+        s.floor_mut().unwrap().void = VOID_A;
+        s.ceiling_mut().unwrap().void = VOID_A;
     });
     let w = world(room);
     let north_of_it = physical_edge_walls(&w.rooms[0], [1, 0], WallEdge::South);
@@ -197,8 +198,8 @@ fn neighbours_of_a_void_triangle_close_themselves_across_the_cardinal_edge() {
 #[test]
 fn a_fully_void_cell_is_empty_space() {
     let room = hall(|s| {
-        s.floor.as_mut().unwrap().void = VOID_A | VOID_B;
-        s.ceiling.as_mut().unwrap().void = VOID_A | VOID_B;
+        s.floor_mut().unwrap().void = VOID_A | VOID_B;
+        s.ceiling_mut().unwrap().void = VOID_A | VOID_B;
     });
     let w = world(room);
     let faces = all_faces(&w);
@@ -220,7 +221,7 @@ fn a_fully_void_cell_is_empty_space() {
 #[test]
 fn an_authored_room_draws_no_derived_diagonals() {
     let mut room = hall(|s| {
-        s.floor.as_mut().unwrap().heights_b = Some([512; 4]);
+        s.floor_mut().unwrap().heights_b = Some([512; 4]);
     });
     room.wall_mode = WallMode::Authored;
     let faces = all_faces(&world(room));
@@ -230,13 +231,13 @@ fn an_authored_room_draws_no_derived_diagonals() {
 #[test]
 fn an_open_top_void_closes_to_the_rooms_open_wall_height() {
     let mut room = hall(|s| {
-        s.ceiling = None;
-        s.floor.as_mut().unwrap().void = VOID_B;
+        s.set_ceiling(None);
+        s.floor_mut().unwrap().void = VOID_B;
     });
     for z in 0..3 {
         for x in 0..3 {
             if (x, z) != (1, 1) {
-                room.sector_or_insert(x, z).unwrap().ceiling = None;
+                room.sector_or_insert(x, z).unwrap().set_ceiling(None);
             }
         }
     }

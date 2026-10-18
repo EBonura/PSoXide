@@ -103,7 +103,9 @@ mod tests {
         let mut room = GridRoom::new_derived("r", 2, 2);
         for z in 0..2 {
             for x in 0..2 {
-                room.sector_or_insert(x, z).unwrap().floor = Some(GridSurface::flat(0, None));
+                room.sector_or_insert(x, z)
+                    .unwrap()
+                    .set_floor(Some(GridSurface::flat(0, None)));
             }
         }
         GridWorld {

@@ -365,7 +365,7 @@ pub fn report_for(
     use super::edit::{material_of, uv_of, FaceTarget, SurfaceKind};
     use super::faces::{cell_faces_with, GridFaceKind};
     let room = world.rooms.get(face.room)?;
-    let [x, z] = room.local(face.cell)?;
+    let [x, z] = room.local(face.cell())?;
     let mut faces = Vec::new();
     cell_faces_with(world, defaults, face.room, x, z, &mut faces);
     let found = faces.iter().find(|f| match (face.target, f.kind) {

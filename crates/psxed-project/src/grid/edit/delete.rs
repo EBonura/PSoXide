@@ -20,8 +20,8 @@ pub fn delete_faces(world: &mut GridWorld, faces: &[FaceRef]) -> usize {
                     continue;
                 };
                 let slot = match kind {
-                    SurfaceKind::Floor => &mut sector.floor,
-                    SurfaceKind::Ceiling => &mut sector.ceiling,
+                    SurfaceKind::Floor => sector.floor_slot_mut(),
+                    SurfaceKind::Ceiling => sector.ceiling_slot_mut(),
                 };
                 if slot.take().is_some() {
                     removed += 1;
@@ -30,7 +30,7 @@ pub fn delete_faces(world: &mut GridWorld, faces: &[FaceRef]) -> usize {
             }
             FaceTarget::Wall { edge, index } => {
                 walls
-                    .entry((face.room, face.cell, edge))
+                    .entry((face.room, face.cell(), edge))
                     .or_default()
                     .push(index);
             }
@@ -76,11 +76,9 @@ pub fn clear_cells(world: &mut GridWorld, cells: &[(usize, [i32; 2])]) -> usize 
         let Some([x, z]) = r.local(*cell) else {
             continue;
         };
-        if let Some(index) = r.index(x, z) {
-            if r.sectors[index].take().is_some_and(|s| !s.is_empty()) {
-                cleared += 1;
-                touched.insert(*room);
-            }
+        if r.take_sector(x, z).is_some_and(|s| !s.is_empty()) {
+            cleared += 1;
+            touched.insert(*room);
         }
     }
     for room in touched {
@@ -103,7 +101,7 @@ mod tests {
         let mut room = GridRoom::new("r", 3, 1);
         for x in 0..3 {
             let s = room.sector_or_insert(x, 0).unwrap();
-            s.floor = Some(GridSurface::flat(0, None));
+            s.set_floor(Some(GridSurface::flat(0, None)));
             for i in 0..3 {
                 s.north.push(GridWall::span(i * 256, i * 256 + 256, None));
             }
@@ -140,7 +138,7 @@ mod tests {
             ],
         );
         assert_eq!(removed, 1);
-        assert!(w.rooms[0].sector(0, 0).unwrap().floor.is_none());
+        assert!(w.rooms[0].sector(0, 0).unwrap().floor().is_none());
     }
 
     #[test]
@@ -148,7 +146,7 @@ mod tests {
         let mut w = world();
         let all: Vec<FaceRef> = super::super::selection::all_faces_of_room(&w, 0)
             .into_iter()
-            .filter(|f| f.cell[0] < 2)
+            .filter(|f| f.cell()[0] < 2)
             .collect();
         delete_faces(&mut w, &all);
         let room = &w.rooms[0];

@@ -30,9 +30,10 @@
 //!   heatmap model behind the overlays.
 //! * [`slope`] and [`paint_rules`]: slope classes read as the motor reads them,
 //!   and the smart paint rules the level verbs apply.
-//! * [`sector`]: one sector and its six wall edges.
+//! * [`leaf`] and [`leaf_map`]: the quadtree of leaves a room's cells are.
+//! * [`sector`]: one leaf, its column of spans and its six wall edges.
 //! * [`rough`]: the render-only jitter and noise tint of rough rock.
-//! * [`room`]: one room, its sector storage and its growth operations.
+//! * [`room`]: one room, its leaves and its growth operations.
 //! * [`world`]: the document root and the [`SceneWorld`] discriminator.
 //! * [`limits`]: caps, validation and the budget readout.
 //! * [`plane`]: free planes placed off the lattice, and [`plane_faces`]
@@ -58,6 +59,8 @@ pub mod faces;
 mod faces_bands;
 mod faces_derived;
 pub mod heat;
+pub mod leaf;
+pub mod leaf_map;
 pub mod light;
 pub mod limits;
 pub mod mesh;
@@ -98,6 +101,8 @@ mod uv_golden;
 pub use bands::{Anchor, Band, BandSet, BandV};
 pub use derive::{DerivedKind, DerivedWall};
 pub use faces::{GridFace, GridFaceKind, UvDefaults};
+pub use leaf::LeafKey;
+pub use leaf_map::LeafMap;
 pub use light::FacingShade;
 pub use limits::{GridBudget, GridIssue, GridIssueKind, Severity};
 pub use mesh::{
@@ -107,7 +112,7 @@ pub use overrides::{Axis, EdgeKey, EdgeOverride, EdgeOverrides, RoomDefaults, Wa
 pub use paint_rules::PaintRules;
 pub use plane::{GridPlane, PlaneCollision, PlaneShape, PlaneUvMode};
 pub use room::{GridFog, GridRoom};
-pub use sector::{GridSector, WallEdge};
+pub use sector::{GridSector, GridSpan, WallEdge};
 pub use slope::SlopeClass;
 pub use surface::{GridSplit, GridSurface, GridTri, GridWall, WallFacing};
 pub use units::{GridScale, CLICK_UNITS, FINE_UNITS, SECTOR_UNITS, TEXELS_PER_SECTOR};

@@ -1,13 +1,14 @@
 //! Stable references to the parts of a grid world.
 //!
 //! The editor selects, drags and edits faces, edges, vertices and whole
-//! cells. All of them are addressed by the room index and the *world*
-//! sector, never by local storage coordinates, so a reference survives the
-//! room growing or trimming around it. A wall is addressed by its index in
+//! cells. All of them are addressed by the room index and the leaf's
+//! [`LeafKey`] (world clicks), never by local storage coordinates, so a
+//! reference survives the room growing or trimming around it. A wall is addressed by its index in
 //! the edge's stack, so deleting walls must go from the highest index down
 //! (see [`super::delete`]).
 
 use super::super::derive::{self, DerivedKind, DerivedWall};
+use super::super::leaf::{LeafKey, CLICKS_PER_SECTOR};
 use super::super::overrides::WallMode;
 use super::super::room::GridRoom;
 use super::super::sector::{GridSector, WallEdge};
@@ -63,9 +64,10 @@ pub enum FaceTarget {
 pub struct FaceRef {
     /// Room index.
     pub room: usize,
-    /// World sector `[x, z]`.
-    pub cell: [i32; 2],
-    /// Which face of that sector.
+    /// The leaf that owns the face: its level and world click. A whole
+    /// sector is the level-2 leaf [`LeafKey::sector`].
+    pub leaf: LeafKey,
+    /// Which face of that leaf.
     pub target: FaceTarget,
 }
 
@@ -83,11 +85,22 @@ pub fn corner_offsets(target: FaceTarget) -> [[i32; 2]; 4] {
 }
 
 impl FaceRef {
+    /// A face of any leaf of `room`.
+    pub const fn new(room: usize, leaf: LeafKey, target: FaceTarget) -> Self {
+        Self { room, leaf, target }
+    }
+
+    /// The world sector `[x, z]` of a whole-sector leaf, or the sector that
+    /// holds the corner of any other leaf (see [`LeafKey::cell`]).
+    pub const fn cell(&self) -> [i32; 2] {
+        self.leaf.cell()
+    }
+
     /// The floor of `cell` in `room`.
     pub fn floor(room: usize, cell: [i32; 2]) -> Self {
         Self {
             room,
-            cell,
+            leaf: LeafKey::sector(cell),
             target: FaceTarget::Surface(SurfaceKind::Floor),
         }
     }
@@ -96,7 +109,7 @@ impl FaceRef {
     pub fn ceiling(room: usize, cell: [i32; 2]) -> Self {
         Self {
             room,
-            cell,
+            leaf: LeafKey::sector(cell),
             target: FaceTarget::Surface(SurfaceKind::Ceiling),
         }
     }
@@ -105,7 +118,7 @@ impl FaceRef {
     pub fn derived(room: usize, cell: [i32; 2], edge: WallEdge, kind: DerivedKind) -> Self {
         Self {
             room,
-            cell,
+            leaf: LeafKey::sector(cell),
             target: FaceTarget::Derived { edge, kind },
         }
     }
@@ -119,7 +132,7 @@ impl FaceRef {
         if room.wall_mode != WallMode::Derived {
             return None;
         }
-        derive::edge_walls(room, self.cell, edge)
+        derive::edge_walls(room, self.cell(), edge)
             .into_iter()
             .find(|w| w.kind == kind)
     }
@@ -128,7 +141,7 @@ impl FaceRef {
     pub fn wall(room: usize, cell: [i32; 2], edge: WallEdge, index: usize) -> Self {
         Self {
             room,
-            cell,
+            leaf: LeafKey::sector(cell),
             target: FaceTarget::Wall { edge, index },
         }
     }
@@ -140,16 +153,12 @@ impl FaceRef {
 
     /// The sector that owns the face.
     pub fn sector<'a>(&self, world: &'a GridWorld) -> Option<&'a GridSector> {
-        let room = self.room_of(world)?;
-        let [x, z] = room.local(self.cell)?;
-        room.sector(x, z)
+        self.room_of(world)?.leaf(self.leaf)
     }
 
     /// Mutable owning sector.
     pub fn sector_mut<'a>(&self, world: &'a mut GridWorld) -> Option<&'a mut GridSector> {
-        let room = world.rooms.get_mut(self.room)?;
-        let [x, z] = room.local(self.cell)?;
-        room.sector_mut(x, z)
+        world.rooms.get_mut(self.room)?.leaf_mut(self.leaf)
     }
 
     /// The surface, for floor and ceiling faces.
@@ -159,8 +168,8 @@ impl FaceRef {
         };
         let sector = self.sector(world)?;
         match kind {
-            SurfaceKind::Floor => sector.floor.as_ref(),
-            SurfaceKind::Ceiling => sector.ceiling.as_ref(),
+            SurfaceKind::Floor => sector.floor(),
+            SurfaceKind::Ceiling => sector.ceiling(),
         }
     }
 
@@ -171,8 +180,8 @@ impl FaceRef {
         };
         let sector = self.sector_mut(world)?;
         match kind {
-            SurfaceKind::Floor => sector.floor.as_mut(),
-            SurfaceKind::Ceiling => sector.ceiling.as_mut(),
+            SurfaceKind::Floor => sector.floor_mut(),
+            SurfaceKind::Ceiling => sector.ceiling_mut(),
         }
     }
 
@@ -288,11 +297,14 @@ impl CornerRef {
         let room = self.face.room_of(world)?;
         let height = self.height(world)?;
         let offset = corner_offsets(self.face.target)[usize::from(self.corner & 3)];
-        Some([
-            (self.face.cell[0] + offset[0]).saturating_mul(SECTOR_UNITS),
-            room.y_offset.saturating_add(height),
-            (self.face.cell[1] + offset[1]).saturating_mul(SECTOR_UNITS),
-        ])
+        // The leaf's corner in clicks plus the offset in leaf edges; for a
+        // whole sector this is the sector corner in sector units.
+        let edge = self.face.leaf.edge_clicks();
+        let at = |axis: usize| {
+            let click = self.face.leaf.min_click()[axis] + offset[axis] * edge;
+            click.saturating_mul(SECTOR_UNITS / CLICKS_PER_SECTOR)
+        };
+        Some([at(0), room.y_offset.saturating_add(height), at(1)])
     }
 
     /// Set the height so the corner sits at world grid height `world_y`.
@@ -397,9 +409,9 @@ impl GridElement {
     pub fn cell(&self) -> [i32; 2] {
         match self {
             Self::Cell { cell, .. } => *cell,
-            Self::Face(f) => f.cell,
-            Self::Edge(e) => e.face.cell,
-            Self::Vertex(v) => v.face.cell,
+            Self::Face(f) => f.cell(),
+            Self::Edge(e) => e.face.cell(),
+            Self::Vertex(v) => v.face.cell(),
         }
     }
 }
@@ -410,10 +422,10 @@ pub fn faces_of_cell(world: &GridWorld, room: usize, cell: [i32; 2]) -> Vec<Face
     let Some(sector) = FaceRef::floor(room, cell).sector(world) else {
         return out;
     };
-    if sector.floor.is_some() {
+    if sector.floor().is_some() {
         out.push(FaceRef::floor(room, cell));
     }
-    if sector.ceiling.is_some() {
+    if sector.ceiling().is_some() {
         out.push(FaceRef::ceiling(room, cell));
     }
     for edge in WallEdge::ALL {
@@ -444,7 +456,9 @@ mod tests {
     #[test]
     fn faces_resolve_through_world_cells() {
         let world = world_with(|r| {
-            r.sector_or_insert(1, 0).unwrap().floor = Some(GridSurface::flat(256, None));
+            r.sector_or_insert(1, 0)
+                .unwrap()
+                .set_floor(Some(GridSurface::flat(256, None)));
             r.sector_or_insert(1, 0)
                 .unwrap()
                 .east
@@ -467,7 +481,7 @@ mod tests {
             let sector = r.sector_or_insert(0, 0).unwrap();
             let mut floor = GridSurface::flat(0, None);
             floor.heights = [10, 20, 30, 40];
-            sector.floor = Some(floor);
+            sector.set_floor(Some(floor));
             sector.north.push(GridWall::span(0, 512, None));
         });
         let corner = |face, corner| CornerRef {
@@ -497,7 +511,9 @@ mod tests {
     fn setting_a_corner_uses_the_room_offset() {
         let mut world = world_with(|r| {
             r.y_offset = 100;
-            r.sector_or_insert(0, 0).unwrap().floor = Some(GridSurface::flat(0, None));
+            r.sector_or_insert(0, 0)
+                .unwrap()
+                .set_floor(Some(GridSurface::flat(0, None)));
         });
         let corner = CornerRef {
             face: FaceRef::floor(0, [4, -2]),
@@ -518,7 +534,7 @@ mod tests {
         let world = world_with(|r| {
             let mut floor = GridSurface::flat(0, None);
             floor.heights_b = Some([256; 4]);
-            r.sector_or_insert(0, 0).unwrap().floor = Some(floor);
+            r.sector_or_insert(0, 0).unwrap().set_floor(Some(floor));
         });
         let face = FaceRef::floor(0, [4, -2]);
         assert_eq!(face.layers(&world), 2);

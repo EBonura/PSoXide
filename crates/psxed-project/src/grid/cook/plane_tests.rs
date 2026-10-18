@@ -37,8 +37,9 @@ fn ditch_world() -> GridWorld {
     for z in 0..3 {
         for x in 0..9 {
             let height = if (3..6).contains(&x) { -2560 } else { 0 };
-            room.sector_or_insert(x, z).unwrap().floor =
-                Some(GridSurface::flat(height, Some(rid(7))));
+            room.sector_or_insert(x, z)
+                .unwrap()
+                .set_floor(Some(GridSurface::flat(height, Some(rid(7)))));
         }
     }
     GridWorld {

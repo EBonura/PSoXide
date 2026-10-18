@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
+use super::super::leaf::LeafKey;
 use super::super::sector::WallEdge;
 use super::super::units::SECTOR_UNITS;
 use super::super::world::GridWorld;
@@ -169,11 +170,7 @@ pub fn range_surfaces(
         rect.max = [rect.max[0].max(cell[0]), rect.max[1].max(cell[1])];
     }
     rect.cells()
-        .map(|cell| FaceRef {
-            room,
-            cell,
-            target: FaceTarget::Surface(kind),
-        })
+        .map(|cell| FaceRef::new(room, LeafKey::sector(cell), FaceTarget::Surface(kind)))
         .filter(|f| f.exists(world))
         .collect()
 }
@@ -187,8 +184,8 @@ fn wall_segment(face: &FaceRef) -> Option<Segment> {
     let (a, b) = edge.endpoints();
     let at = |e: [i32; 2]| {
         [
-            (face.cell[0] + e[0]).saturating_mul(SECTOR_UNITS),
-            (face.cell[1] + e[1]).saturating_mul(SECTOR_UNITS),
+            (face.cell()[0] + e[0]).saturating_mul(SECTOR_UNITS),
+            (face.cell()[1] + e[1]).saturating_mul(SECTOR_UNITS),
         ]
     };
     Some((at(a), at(b)))
@@ -230,7 +227,7 @@ pub fn range_walls(world: &GridWorld, from: FaceRef, to: FaceRef) -> Vec<FaceRef
     let column_of = |face: &FaceRef| match face.target {
         FaceTarget::Wall { edge, .. } => columns
             .iter()
-            .position(|(key, _, _)| *key == (face.cell, edge)),
+            .position(|(key, _, _)| *key == (face.cell(), edge)),
         FaceTarget::Surface(_) | FaceTarget::Derived { .. } => None,
     };
     let (Some(start), Some(goal)) = (column_of(&from), column_of(&to)) else {
@@ -359,7 +356,9 @@ mod tests {
         let mut room = GridRoom::new("r", width, depth);
         for z in 0..depth {
             for x in 0..width {
-                room.sector_or_insert(x, z).unwrap().floor = Some(GridSurface::flat(0, None));
+                room.sector_or_insert(x, z)
+                    .unwrap()
+                    .set_floor(Some(GridSurface::flat(0, None)));
             }
         }
         GridWorld {
@@ -430,7 +429,7 @@ mod tests {
         let mut sel = GridSelection::new();
         sel.extend([floor([0, 0]), floor([1, 0]), floor([5, 5])]);
         assert_eq!(sel.retain_valid(&w), 1);
-        w.rooms[0].sector_mut(0, 0).unwrap().floor = None;
+        w.rooms[0].sector_mut(0, 0).unwrap().set_floor(None);
         assert_eq!(sel.retain_valid(&w), 1);
         assert_eq!(sel.items(), &[floor([1, 0])]);
     }
@@ -438,7 +437,7 @@ mod tests {
     #[test]
     fn surface_range_is_the_bounding_rectangle() {
         let mut w = world(4, 4);
-        w.rooms[0].sector_mut(2, 2).unwrap().floor = None;
+        w.rooms[0].sector_mut(2, 2).unwrap().set_floor(None);
         let faces = range_surfaces(&w, 0, SurfaceKind::Floor, &[[0, 0]], [2, 2]);
         // 3x3 rectangle minus the missing floor.
         assert_eq!(faces.len(), 8);
@@ -548,7 +547,7 @@ mod tests {
     #[test]
     fn box_and_select_all_helpers() {
         let mut w = world(3, 3);
-        w.rooms[0].sector_mut(1, 1).unwrap().floor = None;
+        w.rooms[0].sector_mut(1, 1).unwrap().set_floor(None);
         let cells = cells_in_rect(&w, 0, CellRect::from_corners([0, 0], [1, 1]));
         assert_eq!(cells.len(), 3, "the emptied cell has nothing to select");
         w.rooms[0]

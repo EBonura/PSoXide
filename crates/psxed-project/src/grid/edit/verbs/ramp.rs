@@ -163,7 +163,7 @@ fn edge_height(
         let Some(floor) = r
             .local(cell)
             .and_then(|[x, z]| r.sector(x, z))
-            .and_then(|s| s.floor.as_ref())
+            .and_then(|s| s.floor())
         else {
             continue;
         };
@@ -248,7 +248,7 @@ impl RampDrag {
             let Some(original) = original else {
                 return true;
             };
-            let mut surface: GridSurface = match original.floor.clone() {
+            let mut surface: GridSurface = match original.floor().cloned() {
                 Some(f) => f,
                 None => return true,
             };
@@ -300,7 +300,7 @@ impl RampDrag {
             let before = floor_class(self.units.as_ref(), y_offset, original);
             let h = ramp_heights(params.from, self.bounds, self.base, rise, *cell);
             let wanted = [h, h];
-            if let Some(floor) = sector.floor.as_mut() {
+            if let Some(floor) = sector.floor_mut() {
                 set_floor_corners(floor, wanted);
                 // A split-level floor becomes one plane under a ramp.
                 floor.heights_b = None;
@@ -311,7 +311,7 @@ impl RampDrag {
             if params.follow_ceiling {
                 let deltas = [0, 1].map(|t| core::array::from_fn(|i| wanted[t][i] - old[t][i]));
                 move_ceiling_with_floor(sector, deltas);
-                if let Some(ceiling) = sector.ceiling.as_mut() {
+                if let Some(ceiling) = sector.ceiling_mut() {
                     if deltas != [[0; 4]; 2] {
                         auto_split::resplit(ceiling);
                     }
@@ -320,7 +320,7 @@ impl RampDrag {
                 // Hold a floor a click under the ceiling it keeps.
                 let (clamped, held) = super::rules::clamp_under_ceiling(ceiling, old, wanted);
                 if held {
-                    if let Some(floor) = sector.floor.as_mut() {
+                    if let Some(floor) = sector.floor_mut() {
                         set_floor_corners(floor, clamped);
                         auto_split::resplit(floor);
                     }

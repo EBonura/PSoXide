@@ -154,11 +154,13 @@ mod tests {
         for z in 0..3 {
             for x in 0..3 {
                 let s = room.sector_or_insert(x, z).unwrap();
-                s.floor = Some(GridSurface::flat(0, None));
-                s.ceiling = Some(GridSurface::flat(2048, None));
+                s.set_floor(Some(GridSurface::flat(0, None)));
+                s.set_ceiling(Some(GridSurface::flat(2048, None)));
             }
         }
-        room.sector_or_insert(1, 1).unwrap().floor = Some(GridSurface::flat(512, None));
+        room.sector_or_insert(1, 1)
+            .unwrap()
+            .set_floor(Some(GridSurface::flat(512, None)));
         GridWorld {
             scale: GridScale { num: 1, den: 1 },
             rooms: vec![room],
@@ -197,7 +199,10 @@ mod tests {
     fn lowering_the_platform_orphans_overrides_until_cleaned() {
         let mut w = platform();
         assert!(set_derived_hidden(&mut w, riser(), true));
-        w.rooms[0].sector_or_insert(1, 1).unwrap().floor = Some(GridSurface::flat(0, None));
+        w.rooms[0]
+            .sector_or_insert(1, 1)
+            .unwrap()
+            .set_floor(Some(GridSurface::flat(0, None)));
         assert!(!riser().exists(&w));
         assert_eq!(w.rooms[0].edge_overrides.len(), 1);
         assert_eq!(clean_overrides(&mut w, 0), 1);

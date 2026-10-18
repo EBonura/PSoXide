@@ -35,7 +35,9 @@ fn hall() -> GridWorld {
     let mut room = GridRoom::new("hall", 12, 8);
     for z in 0..8 {
         for x in 0..12 {
-            room.sector_or_insert(x, z).unwrap().floor = Some(GridSurface::flat(0, Some(rid(7))));
+            room.sector_or_insert(x, z)
+                .unwrap()
+                .set_floor(Some(GridSurface::flat(0, Some(rid(7)))));
         }
     }
     GridWorld {

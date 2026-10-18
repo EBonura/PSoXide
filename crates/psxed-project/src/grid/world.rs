@@ -121,8 +121,10 @@ impl GridWorld {
         };
         for room in &self.rooms {
             for (_, _, sector) in room.iter() {
-                note(sector.wall_material);
-                for surface in [&sector.floor, &sector.ceiling].into_iter().flatten() {
+                for span in sector.spans() {
+                    note(span.wall_material);
+                }
+                for surface in sector.surfaces() {
                     note(surface.tri(0).material);
                     note(surface.tri(1).material);
                 }
@@ -177,7 +179,7 @@ impl GridWorld {
             let Some([lx, lz]) = room.local(cell) else {
                 continue;
             };
-            let Some(floor) = room.sector(lx, lz).and_then(|s| s.floor.as_ref()) else {
+            let Some(floor) = room.sector(lx, lz).and_then(|s| s.floor()) else {
                 continue;
             };
             // Offsets inside the sector, in editor units.
@@ -342,7 +344,9 @@ mod tests {
         let mut room = GridRoom::new("a", 2, 1);
         room.origin = [1, -1];
         room.y_offset = 512;
-        room.sector_or_insert(1, 0).unwrap().floor = Some(GridSurface::flat(256, None));
+        room.sector_or_insert(1, 0)
+            .unwrap()
+            .set_floor(Some(GridSurface::flat(256, None)));
         room.sector_or_insert(1, 0)
             .unwrap()
             .north
@@ -363,10 +367,13 @@ mod tests {
         let mut slope = GridSurface::flat(0, None);
         slope.heights = [0, 0, 1024, 1024]; // rises towards +z
         slope.split = GridSplit::NwSe;
-        room.sector_or_insert(0, 0).unwrap().floor = Some(slope);
+        room.sector_or_insert(0, 0).unwrap().set_floor(Some(slope));
         let mut upper = GridRoom::new("b", 1, 1);
         upper.y_offset = 2048;
-        upper.sector_or_insert(0, 0).unwrap().floor = Some(GridSurface::flat(0, None));
+        upper
+            .sector_or_insert(0, 0)
+            .unwrap()
+            .set_floor(Some(GridSurface::flat(0, None)));
         let world = GridWorld {
             scale: GridScale { num: 1, den: 1 },
             rooms: vec![room, upper],

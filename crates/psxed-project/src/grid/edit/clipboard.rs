@@ -163,11 +163,10 @@ fn transform_wall(edge: WallEdge, wall: &GridWall, t: Transform) -> (WallEdge, G
 }
 
 fn transform_sector(sector: &GridSector, t: Transform) -> GridSector {
-    let mut out = GridSector {
-        floor: sector.floor.as_ref().map(|s| transform_surface(s, t)),
-        ceiling: sector.ceiling.as_ref().map(|s| transform_surface(s, t)),
-        ..GridSector::default()
-    };
+    let mut out = GridSector::with_surfaces(
+        sector.floor().map(|s| transform_surface(s, t)),
+        sector.ceiling().map(|s| transform_surface(s, t)),
+    );
     for edge in WallEdge::ALL {
         for wall in sector.walls(edge) {
             let (target, moved) = transform_wall(edge, wall, t);
@@ -205,12 +204,12 @@ impl GridClipboard {
             .filter(|f| f.room == room && f.exists(world))
             .collect();
         let min = [
-            faces.iter().map(|f| f.cell[0]).min()?,
-            faces.iter().map(|f| f.cell[1]).min()?,
+            faces.iter().map(|f| f.cell()[0]).min()?,
+            faces.iter().map(|f| f.cell()[1]).min()?,
         ];
         let max = [
-            faces.iter().map(|f| f.cell[0]).max()?,
-            faces.iter().map(|f| f.cell[1]).max()?,
+            faces.iter().map(|f| f.cell()[0]).max()?,
+            faces.iter().map(|f| f.cell()[1]).max()?,
         ];
         let mut items: BTreeMap<[i32; 2], GridSector> = BTreeMap::new();
         // Walls are copied in index order so a stack keeps its order.
@@ -219,12 +218,12 @@ impl GridClipboard {
         for face in ordered {
             let source = face.sector(world)?;
             let slot = items
-                .entry([face.cell[0] - min[0], face.cell[1] - min[1]])
+                .entry([face.cell()[0] - min[0], face.cell()[1] - min[1]])
                 .or_default();
             match face.target {
-                FaceTarget::Surface(SurfaceKind::Floor) => slot.floor = source.floor.clone(),
+                FaceTarget::Surface(SurfaceKind::Floor) => slot.set_floor(source.floor().cloned()),
                 FaceTarget::Surface(SurfaceKind::Ceiling) => {
-                    slot.ceiling = source.ceiling.clone();
+                    slot.set_ceiling(source.ceiling().cloned());
                 }
                 FaceTarget::Wall { edge, index } => {
                     if let Some(wall) = source.walls(edge).get(index) {
@@ -299,12 +298,12 @@ impl GridClipboard {
             let Some(sector) = target.sector_or_insert(x, z) else {
                 continue;
             };
-            if clip.floor.is_some() {
-                sector.floor = clip.floor.clone();
+            if clip.floor().is_some() {
+                sector.set_floor(clip.floor().cloned());
                 faces.push(FaceRef::floor(room, cell));
             }
-            if clip.ceiling.is_some() {
-                sector.ceiling = clip.ceiling.clone();
+            if clip.ceiling().is_some() {
+                sector.set_ceiling(clip.ceiling().cloned());
                 faces.push(FaceRef::ceiling(room, cell));
             }
             for edge in WallEdge::ALL {
@@ -357,8 +356,10 @@ mod tests {
     #[test]
     fn capture_records_offsets_from_the_smallest_corner() {
         let w = world_with(|r| {
-            r.sector_or_insert(1, 0).unwrap().floor = Some(sloped());
-            r.sector_or_insert(2, 1).unwrap().ceiling = Some(GridSurface::flat(1024, None));
+            r.sector_or_insert(1, 0).unwrap().set_floor(Some(sloped()));
+            r.sector_or_insert(2, 1)
+                .unwrap()
+                .set_ceiling(Some(GridSurface::flat(1024, None)));
         });
         let clip = clip_of(&w);
         assert_eq!(clip.size(), [2, 2]);
@@ -371,8 +372,8 @@ mod tests {
     fn selected_parts_only_are_copied() {
         let w = world_with(|r| {
             let s = r.sector_or_insert(0, 0).unwrap();
-            s.floor = Some(sloped());
-            s.ceiling = Some(GridSurface::flat(1024, None));
+            s.set_floor(Some(sloped()));
+            s.set_ceiling(Some(GridSurface::flat(1024, None)));
             s.north.push(GridWall::span(0, 256, None));
             s.north.push(GridWall::span(256, 512, None));
         });
@@ -385,7 +386,7 @@ mod tests {
         )
         .unwrap();
         let (_, sector) = clip.sectors().next().unwrap();
-        assert!(sector.floor.is_none() && sector.ceiling.is_some());
+        assert!(sector.floor().is_none() && sector.ceiling().is_some());
         assert_eq!(sector.north.len(), 1);
         assert_eq!(sector.north[0].heights[0], 256);
     }
@@ -394,12 +395,14 @@ mod tests {
     fn four_quarter_turns_and_double_flips_are_identity() {
         let w = world_with(|r| {
             let s = r.sector_or_insert(0, 0).unwrap();
-            s.floor = Some(sloped());
+            s.set_floor(Some(sloped()));
             let mut wall = GridWall::span(0, 512, None);
             wall.heights = [0, 128, 512, 384];
             s.east.push(wall);
             s.nwse.push(GridWall::span(0, 256, None));
-            r.sector_or_insert(2, 1).unwrap().floor = Some(GridSurface::flat(64, None));
+            r.sector_or_insert(2, 1)
+                .unwrap()
+                .set_floor(Some(GridSurface::flat(64, None)));
         });
         let original = clip_of(&w);
         let mut turned = original.clone();
@@ -430,7 +433,7 @@ mod tests {
             let s = r.sector_or_insert(0, 0).unwrap();
             let mut floor = sloped();
             floor.split = GridSplit::NwSe;
-            s.floor = Some(floor);
+            s.set_floor(Some(floor));
             let mut wall = GridWall::span(0, 512, None);
             wall.heights = [0, 128, 512, 384];
             s.east.push(wall);
@@ -438,7 +441,7 @@ mod tests {
         let mut clip = clip_of(&w);
         clip.transform(Transform::FlipH);
         let (_, s) = clip.sectors().next().unwrap();
-        let floor = s.floor.as_ref().unwrap();
+        let floor = s.floor().unwrap();
         // NW,NE,SE,SW = 0,100,200,300 becomes NE,NW,SW,SE.
         assert_eq!(floor.heights, [100, 0, 300, 200]);
         assert_eq!(floor.split, GridSplit::NeSw);
@@ -485,8 +488,12 @@ mod tests {
     #[test]
     fn turned_clips_swap_their_extent_and_offsets() {
         let w = world_with(|r| {
-            r.sector_or_insert(0, 0).unwrap().floor = Some(GridSurface::flat(0, None));
-            r.sector_or_insert(2, 0).unwrap().floor = Some(GridSurface::flat(256, None));
+            r.sector_or_insert(0, 0)
+                .unwrap()
+                .set_floor(Some(GridSurface::flat(0, None)));
+            r.sector_or_insert(2, 0)
+                .unwrap()
+                .set_floor(Some(GridSurface::flat(256, None)));
         });
         let mut clip = clip_of(&w);
         assert_eq!(clip.size(), [3, 1]);
@@ -497,7 +504,7 @@ mod tests {
         // The first cell (height 0) is now at the top after a clockwise turn.
         let heights: Vec<i32> = clip
             .sectors()
-            .map(|(_, s)| s.floor.as_ref().unwrap().heights[0])
+            .map(|(_, s)| s.floor().unwrap().heights[0])
             .collect();
         assert_eq!(heights, vec![0, 256]);
     }
@@ -506,7 +513,7 @@ mod tests {
     fn paste_replaces_surfaces_adds_walls_and_grows_the_room() {
         let mut w = world_with(|r| {
             let s = r.sector_or_insert(0, 0).unwrap();
-            s.floor = Some(sloped());
+            s.set_floor(Some(sloped()));
             s.north.push(GridWall::span(0, 512, None));
         });
         let clip = clip_of(&w);
@@ -532,7 +539,9 @@ mod tests {
     #[test]
     fn a_paste_that_would_overflow_the_room_changes_nothing() {
         let mut w = world_with(|r| {
-            r.sector_or_insert(0, 0).unwrap().floor = Some(GridSurface::flat(0, None));
+            r.sector_or_insert(0, 0)
+                .unwrap()
+                .set_floor(Some(GridSurface::flat(0, None)));
         });
         let clip = clip_of(&w);
         let before = w.clone();

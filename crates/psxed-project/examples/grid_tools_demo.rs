@@ -76,8 +76,8 @@ fn room(m: &Materials, width: usize, depth: usize, height: i32) -> GridRoom {
     for z in 0..depth {
         for x in 0..width {
             let sector = room.sector_or_insert(x, z).expect("inside the room");
-            sector.floor = Some(GridSurface::flat(0, m.ground));
-            sector.ceiling = Some(GridSurface::flat(height, m.cliff));
+            sector.set_floor(Some(GridSurface::flat(0, m.ground)));
+            sector.set_ceiling(Some(GridSurface::flat(height, m.cliff)));
         }
     }
     room
@@ -94,7 +94,7 @@ fn tiling(m: &Materials) -> GridRoom {
     let mut room = room(m, 7, 6, 3 * SECTOR_UNITS);
     // A fit 4x4 floor patch two sectors ahead of the player.
     let patch = room.sector_or_insert(3, 2).expect("inside");
-    if let Some(floor) = patch.floor.as_mut() {
+    if let Some(floor) = patch.floor_mut() {
         floor.tri_a.material = m.beam;
         floor.tri_a.uv = fit(4, 4);
     }
@@ -118,13 +118,13 @@ fn platform(m: &Materials) -> GridRoom {
     for z in 1..3 {
         for x in 2..4 {
             let sector = room.sector_or_insert(x, z).expect("inside");
-            sector.floor = Some(GridSurface::flat(SECTOR_UNITS / 2, m.ground));
-            sector.wall_material = m.cliff;
+            sector.set_floor(Some(GridSurface::flat(SECTOR_UNITS / 2, m.ground)));
+            sector.set_wall_material(m.cliff);
         }
     }
     for x in 4..6 {
         let sector = room.sector_or_insert(x, 2).expect("inside");
-        sector.floor = Some(GridSurface::flat(-SECTOR_UNITS / 2, m.ground));
+        sector.set_floor(Some(GridSurface::flat(-SECTOR_UNITS / 2, m.ground)));
     }
     room
 }
@@ -143,10 +143,8 @@ fn bench(m: &Materials, repeat: bool) -> GridRoom {
     for z in 0..6 {
         for x in 0..7 {
             let sector = room.sector_or_insert(x, z).expect("inside");
-            for surface in [sector.floor.as_mut(), sector.ceiling.as_mut()]
-                .into_iter()
-                .flatten()
-            {
+            let (floor, ceiling) = sector.floor_and_ceiling_mut();
+            for surface in [floor, ceiling].into_iter().flatten() {
                 surface.tri_a.material = m.beam;
                 surface.tri_a.uv = uv;
             }
@@ -195,10 +193,10 @@ fn plateau(room: &mut GridRoom, x0: usize, x1: usize, height: i32) {
     for z in 0..room.depth {
         for x in x0..x1 {
             let sector = room.sector_or_insert(x, z).expect("inside");
-            let floor = sector.floor.as_mut().expect("a floor");
+            let floor = sector.floor_mut().expect("a floor");
             let lift = height - floor.heights[0];
             floor.heights = [height; 4];
-            if let Some(ceiling) = sector.ceiling.as_mut() {
+            if let Some(ceiling) = sector.ceiling_mut() {
                 for h in &mut ceiling.heights {
                     *h += lift;
                 }
@@ -258,32 +256,29 @@ fn walk(m: &Materials) -> GridRoom {
     // A steep floor: 1.5 sectors of rise over one.
     room.sector_or_insert(2, 1)
         .unwrap()
-        .floor
-        .as_mut()
+        .floor_mut()
         .unwrap()
         .heights = [0, 0, 1536, 1536];
     // A low ceiling, a quarter of the body above the floor.
     room.sector_or_insert(4, 1)
         .unwrap()
-        .ceiling
-        .as_mut()
+        .ceiling_mut()
         .unwrap()
         .heights = [560; 4];
     // A tall step: three clicks, more than the body climbs.
     for z in 3..7 {
         room.sector_or_insert(7, z)
             .unwrap()
-            .floor
-            .as_mut()
+            .floor_mut()
             .unwrap()
             .heights = [768; 4];
     }
     // A pit that is only a step down, and a cliff to nothing.
-    room.sector_or_insert(1, 5).unwrap().floor = None;
-    room.sector_or_insert(9, 1).unwrap().floor = None;
+    room.sector_or_insert(1, 5).unwrap().set_floor(None);
+    room.sector_or_insert(9, 1).unwrap().set_floor(None);
     // An island behind a wall of void.
     for z in 0..7 {
-        room.sector_or_insert(9, z).unwrap().floor = None;
+        room.sector_or_insert(9, z).unwrap().set_floor(None);
     }
     room
 }

@@ -86,7 +86,7 @@ pub fn run_faces(world: &GridWorld, face: FaceRef) -> Vec<FaceRef> {
             };
             let mut out = vec![face];
             for sign in [-1, 1] {
-                let mut cell = face.cell;
+                let mut cell = face.cell();
                 while let Some(at) = {
                     cell = [cell[0] + step[0] * sign, cell[1] + step[1] * sign];
                     same(cell)
@@ -473,7 +473,7 @@ pub fn run_len(world: &GridWorld, face: FaceRef) -> usize {
 /// grid units. The faces' own `u` (0 at the walking start of the segment).
 pub fn position_on_wall(face: FaceRef, xz: [i32; 2]) -> Option<i32> {
     let (cell, edge) = match face.target {
-        FaceTarget::Derived { edge, .. } | FaceTarget::Wall { edge, .. } => (face.cell, edge),
+        FaceTarget::Derived { edge, .. } | FaceTarget::Wall { edge, .. } => (face.cell(), edge),
         FaceTarget::Surface(_) => return None,
     };
     let (ea, eb) = edge.endpoints();

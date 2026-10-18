@@ -160,7 +160,9 @@ mod tests {
         let mut room = GridRoom::new("r", width, depth);
         for z in 0..depth {
             for x in 0..width {
-                room.sector_or_insert(x, z).unwrap().floor = Some(GridSurface::flat(0, None));
+                room.sector_or_insert(x, z)
+                    .unwrap()
+                    .set_floor(Some(GridSurface::flat(0, None)));
             }
         }
         GridWorld {
@@ -227,7 +229,10 @@ mod tests {
         let mut world = flat_world(1, 1);
         let mut upper = GridRoom::new("upper", 1, 1);
         upper.y_offset = 512;
-        upper.sector_or_insert(0, 0).unwrap().floor = Some(GridSurface::flat(0, None));
+        upper
+            .sector_or_insert(0, 0)
+            .unwrap()
+            .set_floor(Some(GridSurface::flat(0, None)));
         world.rooms.push(upper);
         // The lower floor corner is at world y 0, the upper one at 512, so
         // they do not coincide...
@@ -243,8 +248,14 @@ mod tests {
         );
         // ...until a floor is raised to meet it: the upper room's offset is
         // 512, so a corner at room-relative 512 in room 0 is welded to it.
-        world.rooms[0].sector_or_insert(0, 0).unwrap().floor = Some(GridSurface::flat(512, None));
-        world.rooms[1].sector_or_insert(0, 0).unwrap().floor = Some(GridSurface::flat(0, None));
+        world.rooms[0]
+            .sector_or_insert(0, 0)
+            .unwrap()
+            .set_floor(Some(GridSurface::flat(512, None)));
+        world.rooms[1]
+            .sector_or_insert(0, 0)
+            .unwrap()
+            .set_floor(Some(GridSurface::flat(0, None)));
         nudge(&mut world, &[corner([0, 0], 0)], 256, true);
         let other = CornerRef {
             face: FaceRef::floor(1, [0, 0]),
@@ -291,23 +302,14 @@ mod tests {
         world.rooms[0]
             .sector_or_insert(0, 0)
             .unwrap()
-            .floor
-            .as_mut()
+            .floor_mut()
             .unwrap()
             .auto_split = true;
         let original = world.clone();
         let drag = HeightDrag::begin(&world, &[corner([0, 0], 2)], false);
         // Lifting the SE corner leaves NE-SW the level diagonal.
         drag.apply(&mut world, 256);
-        let split = |w: &GridWorld| {
-            w.rooms[0]
-                .sector(0, 0)
-                .unwrap()
-                .floor
-                .as_ref()
-                .unwrap()
-                .split
-        };
+        let split = |w: &GridWorld| w.rooms[0].sector(0, 0).unwrap().floor().unwrap().split;
         assert_eq!(split(&world), GridSplit::NeSw);
         drag.apply(&mut world, 512);
         assert_eq!(
@@ -323,8 +325,7 @@ mod tests {
         legacy.rooms[0]
             .sector_mut(0, 0)
             .unwrap()
-            .floor
-            .as_mut()
+            .floor_mut()
             .unwrap()
             .auto_split = false;
         HeightDrag::begin(&legacy, &[corner([0, 0], 2)], false).apply(&mut legacy, 256);

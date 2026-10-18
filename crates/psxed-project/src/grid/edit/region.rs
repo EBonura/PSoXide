@@ -177,7 +177,7 @@ impl Region {
             let has = room
                 .local(cell)
                 .and_then(|[x, z]| room.sector(x, z))
-                .is_some_and(|s| s.floor.is_some());
+                .is_some_and(|s| s.floor().is_some());
             if has {
                 kept.push(cell);
             } else {

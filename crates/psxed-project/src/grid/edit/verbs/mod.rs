@@ -89,9 +89,7 @@ impl Snapshot {
         };
         for (cell, sector) in &self.cells {
             if let Some([x, z]) = room.local(*cell) {
-                if let Some(index) = room.index(x, z) {
-                    room.sectors[index] = sector.clone();
-                }
+                room.set_sector(x, z, sector.clone());
             }
         }
         room.band_sets = self.band_sets.clone();

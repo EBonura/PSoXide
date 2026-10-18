@@ -32,14 +32,14 @@ fn open_span(
 ) -> Option<(i32, i32)> {
     let sector = room.sector(x, z)?;
     let h = |g: i32| units.rt(room.y_offset + g);
-    let lo = sector.floor.as_ref().map_or(i32::MIN, |f| {
+    let lo = sector.floor().map_or(i32::MIN, |f| {
         corners
             .iter()
             .map(|&c| h(f.heights[c]))
             .max()
             .unwrap_or(i32::MIN)
     });
-    let hi = sector.ceiling.as_ref().map_or(i32::MAX, |c| {
+    let hi = sector.ceiling().map_or(i32::MAX, |c| {
         corners
             .iter()
             .map(|&k| h(c.heights[k]))
@@ -163,15 +163,14 @@ pub fn derive(world: &GridWorld, units: &RuntimeUnits) -> Result<Vec<Vec<Portal>
                 let Some(neighbour) = other.sector(nx, nz) else {
                     continue;
                 };
-                let open_here = sector.floor.is_none() || sector.ceiling.is_none();
-                let open_there = neighbour.floor.is_none() || neighbour.ceiling.is_none();
+                let open_here = sector.floor().is_none() || sector.ceiling().is_none();
+                let open_there = neighbour.floor().is_none() || neighbour.ceiling().is_none();
                 if !(open_here || open_there) {
                     continue;
                 }
                 let y = sector
-                    .floor
-                    .as_ref()
-                    .or(sector.ceiling.as_ref())
+                    .floor()
+                    .or(sector.ceiling())
                     .map_or(0, |f| units.rt(room.y_offset + f.heights[0]) - origin_y);
                 let c = |v: i32| i16::try_from(v).map_err(|_| "portal out of range".to_string());
                 let (x0, z0) = (x as i32 * s, z as i32 * s);

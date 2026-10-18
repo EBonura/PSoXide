@@ -22,7 +22,7 @@ fn row(count: usize) -> GridWorld {
             let mut room = GridRoom::new(format!("r{i}"), 1, 1);
             room.origin = [(i % 25) as i32 * 3, (i / 25) as i32 * 3];
             let sector = room.sector_or_insert(0, 0).unwrap();
-            sector.floor = Some(GridSurface::flat(0, Some(rid(1 + (i as u64 % 3)))));
+            sector.set_floor(Some(GridSurface::flat(0, Some(rid(1 + (i as u64 % 3))))));
             room
         })
         .collect();

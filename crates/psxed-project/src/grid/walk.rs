@@ -200,12 +200,12 @@ fn cell_walk(
     y_offset: i32,
     sector: &GridSector,
 ) -> Option<CellWalk> {
-    let floor = sector.floor.as_ref()?;
+    let floor = sector.floor()?;
     let class = surface_class(units, y_offset, floor, limits);
     let steep = class == SlopeClass::Steep;
     let ghost = !floor.walkable;
     let mut low = false;
-    if let Some(ceiling) = &sector.ceiling {
+    if let Some(ceiling) = sector.ceiling() {
         let f = corners_ru(units, y_offset, floor.heights);
         let c = corners_ru(units, y_offset, ceiling.heights);
         let mid = |v: [i32; 4]| v.iter().sum::<i32>() / 4;
@@ -311,7 +311,9 @@ fn flag_edges_of(
         let Some(here) = info(cell) else {
             continue;
         };
-        let Some(floor) = &sector.floor else { continue };
+        let Some(floor) = sector.floor() else {
+            continue;
+        };
         if here.steep || here.ghost {
             continue;
         }
@@ -334,7 +336,7 @@ fn flag_edges_of(
                 _ => [-1, 0],
             };
             let other = [cell[0] + offset[0], cell[1] + offset[1]];
-            let neighbour = sector_of(room, other).filter(|s| s.floor.is_some());
+            let neighbour = sector_of(room, other).filter(|s| s.floor().is_some());
             let Some(neighbour) = neighbour else {
                 if !edge_blocked(room, cell, edge) {
                     out.push(EdgeFlag {
@@ -350,7 +352,7 @@ fn flag_edges_of(
             if !matches!(edge, WallEdge::East | WallEdge::South) {
                 continue;
             }
-            let (Some(nf), Some(nw)) = (neighbour.floor.as_ref(), info(other)) else {
+            let (Some(nf), Some(nw)) = (neighbour.floor(), info(other)) else {
                 continue;
             };
             if nw.steep || nw.ghost {
@@ -465,7 +467,7 @@ fn reach(
         let Some(room) = world.rooms.get(ri) else {
             continue;
         };
-        let Some(floor) = sector_of(room, cell).and_then(|s| s.floor.as_ref()) else {
+        let Some(floor) = sector_of(room, cell).and_then(|s| s.floor()) else {
             continue;
         };
         for edge in CARDINAL {
@@ -487,7 +489,7 @@ fn reach(
                 if seen.contains(&(rj, other)) || !standable(analysis, (rj, other)) {
                     continue;
                 }
-                let Some(nf) = sector_of(other_room, other).and_then(|s| s.floor.as_ref()) else {
+                let Some(nf) = sector_of(other_room, other).and_then(|s| s.floor()) else {
                     continue;
                 };
                 let opposite = edge.opposite().map_or(edge, |(e, _)| e);
@@ -552,7 +554,7 @@ pub fn locate_spawn(world: &GridWorld, position: [f32; 3]) -> Option<Spawn> {
     let cell = [gx.div_euclid(SECTOR_UNITS), gz.div_euclid(SECTOR_UNITS)];
     let mut best: Option<(f32, usize)> = None;
     for (ri, room) in world.rooms.iter().enumerate() {
-        let Some(floor) = sector_of(room, cell).and_then(|s| s.floor.as_ref()) else {
+        let Some(floor) = sector_of(room, cell).and_then(|s| s.floor()) else {
             continue;
         };
         let mean = floor.heights.iter().sum::<i32>() / 4;
@@ -582,8 +584,8 @@ mod tests {
         let mut room = GridRoom::new_derived("row", w, 1);
         for x in 0..w {
             let s = room.sector_or_insert(x, 0).unwrap();
-            s.floor = Some(GridSurface::flat(0, None));
-            s.ceiling = Some(GridSurface::flat(6144, None));
+            s.set_floor(Some(GridSurface::flat(0, None)));
+            s.set_ceiling(Some(GridSurface::flat(6144, None)));
         }
         GridWorld {
             scale: GridScale::DEFAULT,
@@ -596,8 +598,7 @@ mod tests {
         world.rooms[0]
             .sector_mut(x, 0)
             .unwrap()
-            .floor
-            .as_mut()
+            .floor_mut()
             .unwrap()
     }
 
@@ -636,15 +637,13 @@ mod tests {
         world.rooms[0]
             .sector_mut(1, 0)
             .unwrap()
-            .ceiling
-            .as_mut()
+            .ceiling_mut()
             .unwrap()
             .heights = [640; 4];
         world.rooms[0]
             .sector_mut(2, 0)
             .unwrap()
-            .ceiling
-            .as_mut()
+            .ceiling_mut()
             .unwrap()
             .heights = [576; 4];
         let a = analyse_row(&world, 0);
@@ -655,8 +654,7 @@ mod tests {
         world.rooms[0]
             .sector_mut(1, 0)
             .unwrap()
-            .ceiling
-            .as_mut()
+            .ceiling_mut()
             .unwrap()
             .heights = [640, 640, 640, 512];
         assert!(cell(&analyse_row(&world, 0), 1).low_headroom);
@@ -691,7 +689,7 @@ mod tests {
     #[test]
     fn a_walkable_floor_that_ends_in_nothing_is_a_drop_unless_a_wall_closes_it() {
         let mut world = row(3);
-        world.rooms[0].sector_mut(2, 0).unwrap().floor = None;
+        world.rooms[0].sector_mut(2, 0).unwrap().set_floor(None);
         let a = analyse_row(&world, 0);
         let drops: Vec<[i32; 2]> = a
             .edges
@@ -718,7 +716,7 @@ mod tests {
     fn reachability_hatches_a_walkable_island_and_follows_one_way_drops() {
         // Floors 0 to 2, a void at 3, floors 4 to 6: the far part is an island.
         let mut world = row(7);
-        world.rooms[0].sector_mut(3, 0).unwrap().floor = None;
+        world.rooms[0].sector_mut(3, 0).unwrap().set_floor(None);
         let a = analyse_row(&world, 0);
         assert!(a.reach_ran);
         for x in 0..3 {

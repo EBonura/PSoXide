@@ -22,8 +22,8 @@ fn hall(side: usize) -> GridRoom {
     for z in 0..side {
         for x in 0..side {
             let s = room.sector_or_insert(x, z).unwrap();
-            s.floor = Some(GridSurface::flat(0, Some(rid(1))));
-            s.ceiling = Some(GridSurface::flat(2048, Some(rid(2))));
+            s.set_floor(Some(GridSurface::flat(0, Some(rid(1)))));
+            s.set_ceiling(Some(GridSurface::flat(2048, Some(rid(2)))));
         }
     }
     room
@@ -74,7 +74,9 @@ fn a_closed_hall_gets_only_closure_walls_around_its_outline() {
 #[test]
 fn a_raised_platform_grows_four_risers_seen_from_the_lower_side() {
     let mut room = hall(3);
-    room.sector_or_insert(1, 1).unwrap().floor = Some(GridSurface::flat(512, Some(rid(3))));
+    room.sector_or_insert(1, 1)
+        .unwrap()
+        .set_floor(Some(GridSurface::flat(512, Some(rid(3)))));
     let faces = all_faces(&world(room));
     let risers = derived(&faces, DerivedKind::Riser);
     assert_eq!(risers.len(), 4);
@@ -99,7 +101,9 @@ fn a_raised_platform_grows_four_risers_seen_from_the_lower_side() {
 #[test]
 fn a_pit_grows_four_risers_seen_from_inside_it() {
     let mut room = hall(3);
-    room.sector_or_insert(1, 1).unwrap().floor = Some(GridSurface::flat(-512, Some(rid(3))));
+    room.sector_or_insert(1, 1)
+        .unwrap()
+        .set_floor(Some(GridSurface::flat(-512, Some(rid(3)))));
     let faces = all_faces(&world(room));
     let risers = derived(&faces, DerivedKind::Riser);
     assert_eq!(risers.len(), 4);
@@ -117,7 +121,9 @@ fn a_pit_grows_four_risers_seen_from_inside_it() {
 #[test]
 fn a_lower_ceiling_drops_towards_the_higher_side() {
     let mut room = hall(3);
-    room.sector_or_insert(1, 1).unwrap().ceiling = Some(GridSurface::flat(1024, None));
+    room.sector_or_insert(1, 1)
+        .unwrap()
+        .set_ceiling(Some(GridSurface::flat(1024, None)));
     let faces = all_faces(&world(room));
     let drops = derived(&faces, DerivedKind::Drop);
     assert_eq!(drops.len(), 4);
@@ -131,21 +137,21 @@ fn crossing_floors_cut_a_bow_tie_into_two_triangles_with_opposite_owners() {
     // 0 -> 512 and the right one 512 -> 0 (north to south).
     let mut room = GridRoom::new_derived("bow", 2, 1);
     for x in 0..2 {
-        room.sector_or_insert(x, 0).unwrap().floor = Some(GridSurface::flat(0, None));
+        room.sector_or_insert(x, 0)
+            .unwrap()
+            .set_floor(Some(GridSurface::flat(0, None)));
     }
     // East edge of cell 0 runs corners NE (1) -> SE (2).
     room.sector_or_insert(0, 0)
         .unwrap()
-        .floor
-        .as_mut()
+        .floor_mut()
         .unwrap()
         .heights = [0, 0, 512, 512];
     // West edge of cell 1 runs SW (3) -> NW (0): 0 in the south, 512 in the
     // north, so against cell 0 (0 in the north, 512 in the south) it crosses.
     room.sector_or_insert(1, 0)
         .unwrap()
-        .floor
-        .as_mut()
+        .floor_mut()
         .unwrap()
         .heights = [512, 0, 0, 0];
     let w = world(room);
@@ -178,25 +184,25 @@ fn crossing_floors_cut_a_bow_tie_into_two_triangles_with_opposite_owners() {
 fn equal_profiles_and_floorless_neighbours_make_no_wall() {
     let mut room = hall(2);
     // A pit with no floor at all: no riser, no closure.
-    room.sector_or_insert(1, 1).unwrap().floor = None;
+    room.sector_or_insert(1, 1).unwrap().set_floor(None);
     let faces = all_faces(&world(room));
     assert!(derived(&faces, DerivedKind::Riser).is_empty());
     // Sloped neighbours that meet at the same heights along the edge: a
     // ridge across two cells whose shared edge is level at 256.
     let mut room = GridRoom::new_derived("ridge", 2, 1);
     for x in 0..2 {
-        room.sector_or_insert(x, 0).unwrap().floor = Some(GridSurface::flat(0, None));
+        room.sector_or_insert(x, 0)
+            .unwrap()
+            .set_floor(Some(GridSurface::flat(0, None)));
     }
     room.sector_or_insert(0, 0)
         .unwrap()
-        .floor
-        .as_mut()
+        .floor_mut()
         .unwrap()
         .heights = [0, 256, 256, 0];
     room.sector_or_insert(1, 0)
         .unwrap()
-        .floor
-        .as_mut()
+        .floor_mut()
         .unwrap()
         .heights = [256, 0, 0, 256];
     let faces = all_faces(&world(room));
@@ -207,7 +213,9 @@ fn equal_profiles_and_floorless_neighbours_make_no_wall() {
 fn a_floor_without_a_ceiling_closes_only_when_the_room_asks() {
     let mut room = GridRoom::new_derived("yard", 2, 1);
     for x in 0..2 {
-        room.sector_or_insert(x, 0).unwrap().floor = Some(GridSurface::flat(0, None));
+        room.sector_or_insert(x, 0)
+            .unwrap()
+            .set_floor(Some(GridSurface::flat(0, None)));
     }
     assert!(derived(&all_faces(&world(room.clone())), DerivedKind::Closure).is_empty());
     room.defaults.open_wall = 512;
@@ -220,7 +228,9 @@ fn a_floor_without_a_ceiling_closes_only_when_the_room_asks() {
 #[test]
 fn the_material_chain_runs_override_owner_facing_room_then_surface() {
     let mut room = hall(3);
-    room.sector_or_insert(1, 1).unwrap().floor = Some(GridSurface::flat(512, Some(rid(3))));
+    room.sector_or_insert(1, 1)
+        .unwrap()
+        .set_floor(Some(GridSurface::flat(512, Some(rid(3)))));
     let host = [1, 0];
     let first = |room: &GridRoom| {
         cell_walls(room, host)
@@ -235,10 +245,14 @@ fn the_material_chain_runs_override_owner_facing_room_then_surface() {
     room.defaults.wall_material = Some(rid(4));
     assert_eq!(first(&room), Some(rid(4)));
     // 3: the facing sector's wall material.
-    room.sector_or_insert(1, 0).unwrap().wall_material = Some(rid(5));
+    room.sector_or_insert(1, 0)
+        .unwrap()
+        .set_wall_material(Some(rid(5)));
     assert_eq!(first(&room), Some(rid(5)));
     // 2: the owner's wall material.
-    room.sector_or_insert(1, 1).unwrap().wall_material = Some(rid(6));
+    room.sector_or_insert(1, 1)
+        .unwrap()
+        .set_wall_material(Some(rid(6)));
     assert_eq!(first(&room), Some(rid(6)));
     // 1: the override.
     let key = edge_key(host, WallEdge::South);
@@ -249,7 +263,9 @@ fn the_material_chain_runs_override_owner_facing_room_then_surface() {
 #[test]
 fn hidden_overrides_remove_the_face_and_authored_rooms_derive_nothing() {
     let mut room = hall(3);
-    room.sector_or_insert(1, 1).unwrap().floor = Some(GridSurface::flat(512, None));
+    room.sector_or_insert(1, 1)
+        .unwrap()
+        .set_floor(Some(GridSurface::flat(512, None)));
     let before = all_faces(&world(room.clone())).len();
     let key = edge_key([1, 0], WallEdge::South);
     room.edge_overrides.edit(key, |o| o.hidden = true);
@@ -265,7 +281,9 @@ fn hidden_overrides_remove_the_face_and_authored_rooms_derive_nothing() {
 #[test]
 fn both_sectors_of_an_edge_agree_on_its_key_and_faces() {
     let mut room = hall(2);
-    room.sector_or_insert(1, 0).unwrap().floor = Some(GridSurface::flat(256, None));
+    room.sector_or_insert(1, 0)
+        .unwrap()
+        .set_floor(Some(GridSurface::flat(256, None)));
     assert_eq!(
         edge_key([0, 0], WallEdge::East),
         edge_key([1, 0], WallEdge::West)
@@ -280,7 +298,9 @@ fn an_authored_wall_on_top_of_a_derived_face_is_flagged_but_still_cooks() {
     use super::limits::{validate, GridIssueKind};
     use super::surface::GridWall;
     let mut room = hall(3);
-    room.sector_or_insert(1, 1).unwrap().floor = Some(GridSurface::flat(512, None));
+    room.sector_or_insert(1, 1)
+        .unwrap()
+        .set_floor(Some(GridSurface::flat(512, None)));
     let w = world(room.clone());
     assert!(validate(&w)
         .iter()
@@ -297,7 +317,9 @@ fn an_authored_wall_on_top_of_a_derived_face_is_flagged_but_still_cooks() {
     assert!(!super::limits::has_errors(&issues));
     // A wall that rises above the riser is not a duplicate of it.
     let mut room = hall(3);
-    room.sector_or_insert(1, 1).unwrap().floor = Some(GridSurface::flat(512, None));
+    room.sector_or_insert(1, 1)
+        .unwrap()
+        .set_floor(Some(GridSurface::flat(512, None)));
     room.sector_or_insert(1, 0)
         .unwrap()
         .walls_mut(WallEdge::South)

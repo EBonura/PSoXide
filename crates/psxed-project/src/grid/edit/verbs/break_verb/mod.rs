@@ -235,7 +235,7 @@ impl BreakDrag {
             .filter(|&c| {
                 room.local(c)
                     .and_then(|[x, z]| room.sector(x, z))
-                    .is_some_and(|s| s.floor.is_some() || s.ceiling.is_some())
+                    .is_some_and(|s| s.floor().is_some() || s.ceiling().is_some())
             })
             .collect();
         if cells.is_empty() {

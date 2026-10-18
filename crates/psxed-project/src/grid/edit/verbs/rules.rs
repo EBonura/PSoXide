@@ -24,7 +24,7 @@ pub struct FloorState {
 
 /// The state of a sector's floor.
 pub fn floor_class(units: Option<&RuntimeUnits>, y_offset: i32, sector: &GridSector) -> FloorState {
-    let Some(floor) = sector.floor.as_ref() else {
+    let Some(floor) = sector.floor() else {
         return FloorState {
             class: None,
             height: 0,
@@ -58,7 +58,7 @@ pub fn apply_floor_rule(
     if before == after {
         return;
     }
-    let (Some(class), Some(floor)) = (after.class, sector.floor.as_mut()) else {
+    let (Some(class), Some(floor)) = (after.class, sector.floor_mut()) else {
         return;
     };
     if floor.paint_locked {
@@ -92,7 +92,7 @@ pub fn reapply_floor_rules(
             continue;
         };
         let state = floor_class(units.as_ref(), y_offset, sector);
-        let (Some(class), Some(floor)) = (state.class, sector.floor.as_mut()) else {
+        let (Some(class), Some(floor)) = (state.class, sector.floor_mut()) else {
             continue;
         };
         if floor.paint_locked {
@@ -118,7 +118,7 @@ pub fn stamp_wall_material(
     rules: &PaintRules,
 ) {
     if let Some(material) = palette.or(rules.wall) {
-        sector.wall_material = Some(material);
+        sector.set_wall_material(Some(material));
     }
 }
 
@@ -202,7 +202,7 @@ pub fn ensure_trim(room: &mut GridRoom) {
 /// moved (`deltas` per triangle, corner order `[NW, NE, SE, SW]`), keeping
 /// headroom constant.
 pub fn move_ceiling_with_floor(sector: &mut GridSector, deltas: [[i32; 4]; 2]) {
-    let Some(ceiling) = sector.ceiling.as_mut() else {
+    let Some(ceiling) = sector.ceiling_mut() else {
         return;
     };
     for (h, d) in ceiling.heights.iter_mut().zip(deltas[0]) {
@@ -218,7 +218,7 @@ pub fn move_ceiling_with_floor(sector: &mut GridSector, deltas: [[i32; 4]; 2]) {
 /// Ceiling corner heights `[triangle 0, triangle 1]` of a sector, `None`
 /// without a ceiling.
 pub fn ceiling_corners(sector: &GridSector) -> Option<[[i32; 4]; 2]> {
-    let c = sector.ceiling.as_ref()?;
+    let c = sector.ceiling()?;
     Some([c.heights_for(0), c.heights_for(1)])
 }
 
@@ -248,7 +248,7 @@ pub fn clamp_under_ceiling(
 
 /// Floor heights `[triangle 0, triangle 1]` of a sector.
 pub fn floor_corners(sector: &GridSector) -> Option<[[i32; 4]; 2]> {
-    let f = sector.floor.as_ref()?;
+    let f = sector.floor()?;
     Some([f.heights_for(0), f.heights_for(1)])
 }
 
