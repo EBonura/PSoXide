@@ -12,6 +12,7 @@
 //! reference and results come back as scalars or through `&mut Raw`.
 
 use super::body::{back_code, solid_start, Query, Raw};
+use super::leaf::LeafAt;
 use super::scan::{kind, nc, Src};
 use super::world::{wall_code, GridCollision, COORD_LIMIT, SLAB_THICKNESS};
 use crate::format::*;
@@ -47,6 +48,18 @@ pub(crate) struct Cell<'v> {
     /// The room's sector table, copied out of the (RAM resident) view once so
     /// the per-cell code reads only the sector itself from RAM.
     sectors: &'v [Sector],
+    /// The leaf record under the ray in a tree room (`tree`), set per leaf
+    /// before its walls and slabs are tested.
+    rec: Option<&'v Sector>,
+    /// Frame of that leaf: origin and reciprocal. A dense room derives its
+    /// frame from the cell.
+    ox: i32,
+    oz: i32,
+    inv: u32,
+    size: i16,
+    /// Quarter sector code of the leaf, see [`LeafAt::quarter`].
+    quarter: u8,
+    tree: bool,
     oy: i32,
     ax: i32,
     az: i32,
@@ -79,11 +92,25 @@ pub(crate) struct Cell<'v> {
 }
 
 impl<'v> Cell<'v> {
-    /// The sector the ray is in.
+    /// The sector (or, in a tree room, the leaf) the ray is in.
     #[inline(always)]
     fn sector(&self) -> Option<&Sector> {
+        if self.tree {
+            return self.rec;
+        }
         self.sectors
             .get(self.cz as usize * self.w as usize + self.cx as usize)
+    }
+
+    /// Origin, edge and weight reciprocal of the record in `sector()`, given
+    /// the level's sector edge and reciprocal.
+    #[inline(always)]
+    fn frame(&self, s: i32, inv24: u32) -> (i32, i32, i32, u32) {
+        if self.tree {
+            (self.ox, self.oz, i32::from(self.size), self.inv)
+        } else {
+            (self.cx() * s, self.cz() * s, s, inv24)
+        }
     }
     #[inline(always)]
     fn room(&self) -> usize {
@@ -262,6 +289,13 @@ impl<'a> GridCollision<'a> {
         let cell = |v: i32, n: i32| self.recip.cell(v.max(0).min(n * s - 1) as u32) as i16;
         c.write(Cell {
             sectors: view.sectors,
+            rec: None,
+            ox: 0,
+            oz: 0,
+            inv: 0,
+            size: 0,
+            quarter: 0,
+            tree: view.is_tree(),
             oy: rec.origin[1],
             ax,
             az,
@@ -310,6 +344,22 @@ impl<'a> GridCollision<'a> {
         } else {
             cross_time(c.az, c.cz(), d[2], s)
         };
+        if c.tree {
+            // A tree room is walked sector by sector with no skip routine:
+            // each sector resolves its leaf, or its leaves.
+            loop {
+                let leave = c.tx.min(c.tz);
+                c.q1 = (leave - 1).min(i32::from(c.qb)).max(c.q0()) as i16;
+                self.ray_tree_cell(q, c, hit);
+                if leave > i32::from(c.qb) || hit.fraction <= c.q1() {
+                    break;
+                }
+                if !self.ray_advance(q, c) {
+                    break;
+                }
+            }
+            return;
+        }
         // Cells with nothing to test are skipped by a leaf routine that
         // keeps its state in registers; it stops at the first cell that needs
         // a call.
@@ -328,6 +378,77 @@ impl<'a> GridCollision<'a> {
             if !self.ray_advance(q, c) {
                 break;
             }
+        }
+    }
+
+    /// The walls and slabs of one sector of a tree room: of its leaf, or, for
+    /// a divided sector, of each of its leaves against the part of the ray's
+    /// piece that lies inside that leaf.
+    #[inline(never)]
+    fn ray_tree_cell<'v>(&'v self, q: &Query, c: &mut Cell<'v>, hit: &mut Raw) {
+        let Some(view) = self.view(c.room()) else {
+            return;
+        };
+        let (cx, cz) = (c.cx as usize, c.cz as usize);
+        let slots = Self::cell_slots(view, cx, cz);
+        if slots == 1 {
+            if let Some(leaf) = self.cell_leaf(view, cx, cz, 0) {
+                self.ray_leaf(q, c, hit, &leaf);
+            }
+            return;
+        }
+        let (q0, q1, entry) = (c.q0, c.q1, c.entry);
+        for k in 0..slots {
+            let Some(leaf) = self.cell_leaf(view, cx, cz, k) else {
+                continue;
+            };
+            let (x0, x1) = axis_range(c.ax - leaf.ox, q.d[0], leaf.size);
+            let (z0, z1) = axis_range(c.az - leaf.oz, q.d[2], leaf.size);
+            let lo = x0.max(z0).max(i32::from(q0));
+            let hi = x1.min(z1).min(i32::from(q1));
+            if lo > hi {
+                continue;
+            }
+            c.q0 = lo as i16;
+            c.q1 = hi as i16;
+            // How the ray came into this leaf: from the previous cell, or
+            // across one of the leaf's own sides.
+            c.entry = if lo <= i32::from(q0) {
+                entry
+            } else if x0 >= z0 {
+                if q.d[0] > 0 {
+                    nc::NX
+                } else {
+                    nc::PX
+                }
+            } else if q.d[2] > 0 {
+                nc::NZ
+            } else {
+                nc::PZ
+            };
+            self.ray_leaf(q, c, hit, &leaf);
+        }
+        c.q0 = q0;
+        c.q1 = q1;
+        c.entry = entry;
+    }
+
+    /// Test one leaf (the cell's frame is set from it) against the piece
+    /// `[c.q0, c.q1]`.
+    #[inline(always)]
+    fn ray_leaf<'v>(&self, q: &Query, c: &mut Cell<'v>, hit: &mut Raw, leaf: &LeafAt<'v>) {
+        c.rec = Some(leaf.rec);
+        c.ox = leaf.ox;
+        c.oz = leaf.oz;
+        c.size = leaf.size as i16;
+        c.inv = self.dims_of(leaf.rec.flags).1;
+        c.quarter = leaf.quarter;
+        let sector = leaf.rec;
+        if sector.ext != NO_EXT {
+            self.ray_walls(q, c, hit);
+        }
+        if self.slabs_matter(q, c, sector) {
+            self.ray_slabs(q, c, hit);
         }
     }
 
@@ -468,9 +589,9 @@ impl<'a> GridCollision<'a> {
     /// -1. `q` is the last clear fraction.
     #[inline(never)]
     fn wall_cross(&self, wall: &ColWall, q: &Query, c: &Cell<'_>) -> i32 {
-        let s = self.s;
-        let ax = c.ax - c.cx() * s;
-        let az = c.az - c.cz() * s;
+        let (ox, oz, s, inv) = c.frame(self.s, self.inv24);
+        let ax = c.ax - ox;
+        let az = c.az - oz;
         let d = &q.d;
         let (nx, nz, k) = match wall.edge {
             edge::NORTH => (0, 1, 0),
@@ -509,10 +630,20 @@ impl<'a> GridCollision<'a> {
             edge::SOUTH | edge::NESW => s - x,
             _ => s - z,
         };
-        if !(0..=s).contains(&amount) {
+        // The part of the edge the wall covers, along its walking direction.
+        let (from, to) = match wall.flags & (WALL_HALF_FIRST | WALL_HALF_SECOND) {
+            WALL_HALF_FIRST => (0, s / 2),
+            WALL_HALF_SECOND => (s / 2, s),
+            _ => (0, s),
+        };
+        if !(from..=to).contains(&amount) {
             return -1;
         }
-        let w = weight_q12(amount as u32, self.inv24);
+        let w = if to - from == s {
+            weight_q12(amount as u32, inv)
+        } else {
+            weight_q12(((amount - from) * 2) as u32, inv)
+        };
         let [ba, bb, tb, ta] = wall.y.map(i32::from);
         if y < ba + (((bb - ba) * w) >> 12) || y > ta + (((tb - ta) * w) >> 12) {
             return -1;
@@ -533,10 +664,10 @@ impl<'a> GridCollision<'a> {
     /// Cell-local plan offset of the ray at `t`, clamped into the sector.
     #[inline(always)]
     fn cell_local(&self, q: &Query, c: &Cell<'_>, t: i32) -> (u32, u32) {
-        let s = self.s;
+        let (ox, oz, s, _) = c.frame(self.s, self.inv24);
         (
-            (c.ax + q.d[0] * t / 4096 - c.cx() * s).max(0).min(s) as u32,
-            (c.az + q.d[2] * t / 4096 - c.cz() * s).max(0).min(s) as u32,
+            (c.ax + q.d[0] * t / 4096 - ox).max(0).min(s) as u32,
+            (c.az + q.d[2] * t / 4096 - oz).max(0).min(s) as u32,
         )
     }
 
@@ -602,7 +733,7 @@ impl<'a> GridCollision<'a> {
     /// piece end when it does not), sorted: `(first, second)`.
     #[inline(never)]
     fn slab_breaks(&self, q: &Query, c: &Cell<'_>, flags: u16, want: [bool; 2]) -> (i32, i32) {
-        let s = self.s;
+        let s = c.frame(self.s, self.inv24).2;
         let (l0x, l0z) = self.cell_local(q, c, c.q0());
         let (l1x, l1z) = self.cell_local(q, c, c.q1());
         let brk = |nesw: bool| -> i32 {
@@ -772,9 +903,10 @@ impl<'a> GridCollision<'a> {
         } else if c.which == 0 {
             let (lx, lz) = self.cell_local(q, c, t);
             let nesw = c.flags & SECTOR_FLOOR_NESW != 0;
+            let size = c.frame(self.s, self.inv24).2;
             src = Src {
                 kind: kind::FLOOR,
-                aux: u8::from(!in_first_triangle(nesw, lx, lz, self.s as u32)),
+                aux: u8::from(!in_first_triangle(nesw, lx, lz, size as u32)) | c.quarter << 3,
                 cx: c.cx as u8,
                 cz: c.cz as u8,
                 room: c.room,

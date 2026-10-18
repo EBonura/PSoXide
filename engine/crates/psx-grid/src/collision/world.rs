@@ -1,5 +1,6 @@
 //! World queries over the resident rooms: locate, heights and contents.
 
+use super::leaf::LeafDims;
 use crate::format::*;
 use crate::height::{height_at, in_first_triangle, triangle_normal_q12, Recip};
 use crate::lattice::{RoomsNear, MARGIN_SECTORS, SMALL_WORLD_ROOMS};
@@ -91,6 +92,8 @@ pub struct GridCollision<'a> {
     pub(crate) s: i32,
     pub(crate) recip: Recip,
     pub(crate) inv24: u32,
+    /// Edge and weight reciprocal of every leaf size code (tree rooms).
+    pub(crate) leaf: &'a LeafDims,
     /// Some room's collision block is not resident.
     pub(crate) foreign: bool,
     /// Some resident room holds collidable free planes, so the plane scans
@@ -118,6 +121,7 @@ impl<'a> GridCollision<'a> {
             s: set.s,
             recip: set.recip,
             inv24: set.inv24,
+            leaf: &set.leaf,
             foreign: !set.is_complete(),
             planes: set.has_planes(),
             lattice: level.rooms.len() > SMALL_WORLD_ROOMS,
@@ -244,12 +248,12 @@ impl<'a> GridCollision<'a> {
             return Some((i32::from(sector.floor[0]), false));
         }
         let nesw = sector.flags & SECTOR_FLOOR_NESW != 0;
-        let second = !in_first_triangle(nesw, lx, lz, self.s as u32);
+        // A leaf of another size has its own edge and reciprocal; a whole
+        // sector (every record of a dense room) reads the level's.
+        let (s, inv) = self.dims_of(sector.flags);
+        let second = !in_first_triangle(nesw, lx, lz, s);
         let corners = Self::floor_corners(view, sector, second);
-        Some((
-            height_at(corners, nesw, lx, lz, self.s as u32, self.inv24),
-            second,
-        ))
+        Some((height_at(corners, nesw, lx, lz, s, inv), second))
     }
 
     /// Room-local ceiling height; `None` without a ceiling. Solidity is a
@@ -269,9 +273,10 @@ impl<'a> GridCollision<'a> {
             return Some(i32::from(sector.ceil[0]));
         }
         let nesw = sector.flags & SECTOR_CEIL_NESW != 0;
-        let second = !in_first_triangle(nesw, lx, lz, self.s as u32);
+        let (s, inv) = self.dims_of(sector.flags);
+        let second = !in_first_triangle(nesw, lx, lz, s);
         let corners = Self::ceil_corners(view, sector, second);
-        Some(height_at(corners, nesw, lx, lz, self.s as u32, self.inv24))
+        Some(height_at(corners, nesw, lx, lz, s, inv))
     }
 
     /// Lowest and highest room-local floor corner of a sector (both triangles
@@ -316,7 +321,7 @@ impl<'a> GridCollision<'a> {
     /// World floor height at `(lx, lz)` inside a sector of a room.
     pub fn floor_at(&self, room: usize, cx: usize, cz: usize, lx: u32, lz: u32) -> Option<i32> {
         let view = self.view(room)?;
-        let sector = view.sectors.get(cz * view.width() + cx)?;
+        let (sector, lx, lz) = self.leaf_local(view, cx, cz, lx, lz)?;
         let h = if sector.flags & SECTOR_FLAT_FLOOR != 0 {
             i32::from(sector.floor[0])
         } else {
@@ -328,7 +333,7 @@ impl<'a> GridCollision<'a> {
     /// World ceiling height at `(lx, lz)` inside a sector of a room.
     pub fn ceil_at(&self, room: usize, cx: usize, cz: usize, lx: u32, lz: u32) -> Option<i32> {
         let view = self.view(room)?;
-        let sector = view.sectors.get(cz * view.width() + cx)?;
+        let (sector, lx, lz) = self.leaf_local(view, cx, cz, lx, lz)?;
         let h = if sector.flags & SECTOR_FLAT_CEIL != 0 {
             i32::from(sector.ceil[0])
         } else {
@@ -343,18 +348,54 @@ impl<'a> GridCollision<'a> {
         self.floor_at(room, cx, cz, half, half)
     }
 
-    /// Upward-facing normal of the floor triangle a slab hit refers to.
-    pub(crate) fn floor_normal(&self, room: usize, cx: usize, cz: usize, second: bool) -> [i16; 3] {
+    /// Upward-facing normal of the floor triangle a slab hit refers to: the
+    /// source names the room, the sector (`cx`, `cz`), the quarter sector in
+    /// a divided one (`aux >> 3`) and the triangle (`aux & 1`).
+    pub(crate) fn floor_normal(&self, src: &super::scan::Src) -> [i16; 3] {
         let up = [0, 4096, 0];
-        let Some(view) = self.view(room) else {
+        let Some(view) = self.view(usize::from(src.room)) else {
             return up;
         };
-        let Some(sector) = view.sectors.get(cz * view.width() + cx) else {
-            return up;
+        let (cx, cz) = (usize::from(src.cx), usize::from(src.cz));
+        let sector = if view.is_tree() {
+            self.leaf_named(view, cx, cz, src.aux >> 3).rec
+        } else {
+            let Some(sector) = view.sectors.get(cz * view.width() + cx) else {
+                return up;
+            };
+            sector
         };
+        let second = src.aux & 1 != 0;
         let nesw = sector.flags & SECTOR_FLOOR_NESW != 0;
         let corners = Self::floor_corners(Some(view), sector, second);
-        triangle_normal_q12(corners, nesw, second, self.s as u32)
+        triangle_normal_q12(corners, nesw, second, self.dims_of(sector.flags).0)
+    }
+
+    /// The record that holds sector `(cx, cz)`'s offset `(lx, lz)` and the
+    /// offsets in that record's frame: the sector and the same offsets in a
+    /// dense room, the leaf and offsets from its origin in a tree room.
+    #[inline(always)]
+    pub(crate) fn leaf_local<'v>(
+        &self,
+        view: &'v CollisionView<'_>,
+        cx: usize,
+        cz: usize,
+        lx: u32,
+        lz: u32,
+    ) -> Option<(&'v Sector, u32, u32)> {
+        if !view.is_tree() {
+            return view
+                .sectors
+                .get(cz * view.width() + cx)
+                .map(|s| (s, lx, lz));
+        }
+        let leaf = self.leaf_in(view, cx, cz, lx as i32, lz as i32);
+        let s = self.s;
+        Some((
+            leaf.rec,
+            (lx as i32 + cx as i32 * s - leaf.ox).max(0) as u32,
+            (lz as i32 + cz as i32 * s - leaf.oz).max(0) as u32,
+        ))
     }
 
     /// Vertical distance from `y` to the span of a column, 0 when inside it.
@@ -423,10 +464,10 @@ impl<'a> GridCollision<'a> {
             let Some(view) = self.view(room) else {
                 continue;
             };
-            let Some(sector) = view.sectors.get(cz * w + cx) else {
+            let Some((sector, llx, llz)) = self.leaf_local(view, cx, cz, lx, lz) else {
                 continue;
             };
-            let gap = self.column_gap(view, sector, rec.origin[1], lx, lz, p[1]);
+            let gap = self.column_gap(view, sector, rec.origin[1], llx, llz, p[1]);
             let found = Located {
                 room,
                 cx,
@@ -494,10 +535,19 @@ pub(crate) fn wall_span(wall: &ColWall) -> (i32, i32) {
     (b0.min(b1), t0.max(t1))
 }
 
-/// Strict circle-against-wall-segment test in sector-local plan coordinates:
-/// the segment is closer than `r` to `(px, pz)` (touching is clear).
+/// Strict circle-against-wall-segment test in leaf-local plan coordinates:
+/// the segment is closer than `r` to `(px, pz)` (touching is clear). `s` is
+/// the edge of the leaf that owns the wall and `(lo, hi)` the part of a
+/// cardinal edge the wall covers along it (`(0, s)` for the whole edge).
 #[inline(always)]
-pub(crate) fn circle_hits_wall(edge: u8, s: i32, px: i32, pz: i32, r: i32) -> bool {
+pub(crate) fn circle_hits_wall(
+    edge: u8,
+    s: i32,
+    px: i32,
+    pz: i32,
+    r: i32,
+    (lo, hi): (i32, i32),
+) -> bool {
     let r2 = r * r;
     if edge < edge::NWSE {
         // Axis edges: N/S run along X at z = 0/s, E/W along Z at x = s/0.
@@ -508,7 +558,7 @@ pub(crate) fn circle_hits_wall(edge: u8, s: i32, px: i32, pz: i32, r: i32) -> bo
         } else {
             s
         };
-        let du = u - u.max(0).min(s);
+        let du = u - u.max(lo).min(hi);
         let dv = v - line;
         return du * du + dv * dv < r2;
     }
@@ -527,6 +577,26 @@ pub(crate) fn circle_hits_wall(edge: u8, s: i32, px: i32, pz: i32, r: i32) -> bo
         dx * dx + dz * dz < r2
     } else {
         q * q < 2 * r2
+    }
+}
+
+/// The part of its owner's edge a wall covers, in plan coordinates along the
+/// edge (increasing X for north and south, increasing Z for east and west):
+/// the whole `0..s`, or one half of it for a [`WALL_HALF_FIRST`] or
+/// [`WALL_HALF_SECOND`] wall (first means from the edge's start `a` in its
+/// walking direction, which is the upper half for south and west).
+#[inline(always)]
+pub(crate) fn wall_range(wall: &ColWall, s: i32) -> (i32, i32) {
+    let halves = wall.flags & (WALL_HALF_FIRST | WALL_HALF_SECOND);
+    if halves == 0 {
+        return (0, s);
+    }
+    let forward = wall.edge == edge::NORTH || wall.edge == edge::EAST;
+    let low = (halves == WALL_HALF_FIRST) == forward;
+    if low {
+        (0, s / 2)
+    } else {
+        (s / 2, s)
     }
 }
 

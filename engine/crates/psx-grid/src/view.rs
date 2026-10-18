@@ -70,7 +70,11 @@ fn table<T: Copy>(bytes: &[u8], offset: usize, count: usize) -> Result<&[T], For
 }
 
 fn header<T: Copy>(bytes: &[u8]) -> Result<&T, FormatError> {
-    Ok(&table::<T>(bytes, 0, 1)?[0])
+    header_at(bytes, 0)
+}
+
+fn header_at<T: Copy>(bytes: &[u8], offset: usize) -> Result<&T, FormatError> {
+    Ok(&table::<T>(bytes, offset, 1)?[0])
 }
 
 /// The level core: directory, portals and materials.
@@ -222,7 +226,13 @@ impl<'a> LevelView<'a> {
 #[derive(Copy, Clone)]
 pub struct CollisionView<'a> {
     pub header: &'a RoomHeader,
+    /// One record per sector (dense room), or per leaf ([`CHUNK_TREE`]).
     pub sectors: &'a [Sector],
+    /// `SECTOR_INDEX`, one entry per sector: empty for a dense room.
+    pub index: &'a [u16],
+    /// `SUBBLOCKS`, [`SUBBLOCK_ENTRIES`] entries a block: empty for a dense
+    /// room.
+    pub blocks: &'a [u16],
     pub exts: &'a [SectorExt],
     pub walls: &'a [ColWall],
     pub splitbs: &'a [SplitB],
@@ -284,7 +294,9 @@ impl<'a> CollisionView<'a> {
         let head = room_header(bytes)?;
         let cells = usize::from(head.width) * usize::from(head.depth);
         let sectors = section::<Sector>(bytes, head, section::SECTORS)?;
-        if sectors.len() != cells
+        let tree = head.flags & CHUNK_TREE != 0;
+        if (!tree && sectors.len() != cells)
+            || (tree && sectors.len() > MAX_LEAVES)
             || (head.render_offset as usize) < core::mem::size_of::<RoomHeader>()
         {
             return Err(FormatError::Inconsistent);
@@ -292,9 +304,34 @@ impl<'a> CollisionView<'a> {
         if bytes.len() < head.render_offset as usize {
             return Err(FormatError::Truncated);
         }
+        let (index, blocks): (&[u16], &[u16]) = if tree {
+            if !(head.tree_ext as usize).is_multiple_of(4) {
+                return Err(FormatError::Misaligned);
+            }
+            let ext = header_at::<TreeExt>(bytes, head.tree_ext as usize)?;
+            if ext.layout != TREE_LAYOUT_HASH {
+                return Err(FormatError::BadLayout);
+            }
+            let index = table::<u16>(bytes, ext.sector_index.offset as usize, cells)?;
+            if ext.sector_index.count as usize != cells
+                || ext.subblocks.count as usize > MAX_SUBBLOCKS
+            {
+                return Err(FormatError::Inconsistent);
+            }
+            let blocks = table::<u16>(
+                bytes,
+                ext.subblocks.offset as usize,
+                ext.subblocks.count as usize * SUBBLOCK_ENTRIES,
+            )?;
+            (index, blocks)
+        } else {
+            (&[], &[])
+        };
         Ok(Self {
             header: head,
             sectors,
+            index,
+            blocks,
             exts: section(bytes, head, section::SECTOR_EXTS)?,
             walls: section(bytes, head, section::WALLS)?,
             splitbs: section(bytes, head, section::SPLITBS)?,
@@ -353,12 +390,48 @@ impl<'a> CollisionView<'a> {
         }
     }
 
+    /// Whether the collision block is a leaf tree ([`CHUNK_TREE`]).
+    #[inline(always)]
+    pub fn is_tree(&self) -> bool {
+        !self.index.is_empty()
+    }
+
+    /// The room's world origin modulo four sectors along `x` and `z`
+    /// ([`RoomHeader::origin_mod`]).
+    #[inline(always)]
+    pub fn origin_mod(&self) -> (i32, i32) {
+        let m = i32::from(self.header.origin_mod);
+        (m & 3, (m >> 2) & 3)
+    }
+
     /// Walk every collision index.
     pub fn validate_full(&self) -> Result<(), FormatError> {
         for sector in self.sectors {
             if sector.ext != NO_EXT && usize::from(sector.ext) >= self.exts.len() {
                 return Err(FormatError::IndexRange);
             }
+            if self.is_tree() {
+                if sector.flags >> SECTOR_LEAF_SHIFT > leaf_code::QUARTER {
+                    return Err(FormatError::IndexRange);
+                }
+            } else if sector.flags >> SECTOR_LEAF_SHIFT != 0 {
+                return Err(FormatError::IndexRange);
+            }
+        }
+        let leaf_ok = |id: u16| id == NO_LEAF || usize::from(id) < self.sectors.len();
+        for &entry in self.index {
+            let id = entry & INDEX_ID;
+            let ok = if entry & INDEX_SUB != 0 {
+                usize::from(id) < self.blocks.len() / SUBBLOCK_ENTRIES
+            } else {
+                leaf_ok(id)
+            };
+            if !ok {
+                return Err(FormatError::IndexRange);
+            }
+        }
+        if self.blocks.iter().any(|&id| !leaf_ok(id)) {
+            return Err(FormatError::IndexRange);
         }
         for ext in self.exts {
             if usize::from(ext.wall_first) + usize::from(ext.wall_count) > self.walls.len()
@@ -409,7 +482,7 @@ impl<'a> RoomView<'a> {
             lod_quads: section(bytes, head, section::LOD_QUADS)?,
             plane_refs: section(bytes, head, section::PLANE_REFS)?,
         };
-        if render.cells.len() != col.sectors.len()
+        if render.cells.len() != col.width() * col.depth()
             || render.quads.len() + render.lod_quads.len() > usize::from(u16::MAX)
         {
             return Err(FormatError::Inconsistent);

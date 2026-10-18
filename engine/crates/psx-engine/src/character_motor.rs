@@ -1915,6 +1915,7 @@ fn merge_collision_trace(best: &mut CollisionTrace, candidate: CollisionTrace) {
 /// resolve the BSP floor rather than treating another actor's head as terrain.
 /// The closest-point interval is monotonic, so a 12-step Q0.12 binary search
 /// finds the first deterministic contact without floating point or allocation.
+#[inline(never)]
 fn trace_character_blocker(
     query: CollisionTraceQuery,
     blocker: CharacterCollisionCylinder,
@@ -2046,6 +2047,7 @@ fn blocker_overlap_at_fraction(
 /// backend has always treated these authored blockers as obstacles). Body
 /// candidate fractions cover every AABB side transition and every rounded
 /// cylinder/AABB corner; the final entry is refined at Q0.12 precision.
+#[inline(never)]
 fn trace_aabb_blocker(
     query: CollisionTraceQuery,
     blocker: CharacterCollisionAabb,

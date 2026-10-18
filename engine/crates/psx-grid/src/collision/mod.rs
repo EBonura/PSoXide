@@ -21,6 +21,7 @@
 #![allow(clippy::manual_clamp)]
 
 mod body;
+mod leaf;
 mod planes;
 mod provider;
 mod ray;
@@ -33,6 +34,7 @@ mod plane_tests;
 #[cfg(test)]
 mod tests;
 
+pub use leaf::LeafDims;
 pub use provider::GridTraceProvider;
-pub use summary::summarize_sectors;
+pub use summary::{summarize_leaves, summarize_sectors};
 pub use world::{GridCollision, Located, COORD_LIMIT, SLAB_THICKNESS};

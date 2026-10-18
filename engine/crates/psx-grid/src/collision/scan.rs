@@ -6,7 +6,7 @@
 //! frame of a few dozen bytes (the motor runs the provider on a 1 KiB stack).
 
 use super::world::{
-    cell_in, circle_hits_wall, wall_applies, wall_span, GridCollision, SLAB_THICKNESS,
+    cell_in, circle_hits_wall, wall_applies, wall_range, wall_span, GridCollision, SLAB_THICKNESS,
 };
 use crate::format::*;
 
@@ -44,8 +44,11 @@ pub(crate) mod kind {
     pub const PLANE: u8 = 5;
 }
 
-/// What a blocking interval came from: a floor triangle (`aux` = second
-/// triangle), a ceiling, a wall (`aux` = edge) or a non-resident room.
+/// What a blocking interval came from: a floor triangle (`aux` bit 0 = second
+/// triangle), a ceiling, a wall (`aux` bits 0 to 2 = edge) or a non-resident
+/// room. In a tree room `aux >> 3` is the quarter sector of a divided sector
+/// the leaf was reached through (0 otherwise), which with `cx`, `cz` names
+/// the leaf again.
 #[derive(Copy, Clone, Default)]
 pub(crate) struct Src {
     pub kind: u8,
@@ -181,9 +184,18 @@ impl<'a> GridCollision<'a> {
         let near = self.visit(scan.x, scan.z, scan.r);
         for step in 0..near.len(self.rooms.len()) {
             let room = near.room(step);
-            let walls = self.scan_slabs(room, scan);
+            let tree = self.rec(room).flags & ROOM_TREE != 0;
+            let walls = if tree {
+                self.scan_slabs_tree(room, scan)
+            } else {
+                self.scan_slabs(room, scan)
+            };
             if walls && scan.r > 0 && !scan.done() {
-                self.scan_walls(room, scan);
+                if tree {
+                    self.scan_walls_tree(room, scan);
+                } else {
+                    self.scan_walls(room, scan);
+                }
             }
             if self.planes && !scan.done() {
                 self.scan_planes(room, scan);
@@ -280,7 +292,7 @@ impl<'a> GridCollision<'a> {
         let (oy, h) = (scan.oy, scan.h);
         let mut src = Src {
             kind: kind::FLOOR,
-            aux: 0,
+            aux: ((key >> 16) as u8) << 3,
             cx: (key & 255) as u8,
             cz: ((key >> 8) & 255) as u8,
             room: room as u16,
@@ -390,7 +402,8 @@ impl<'a> GridCollision<'a> {
                 };
                 let (px, pz) = (lx - cx as i32 * s, lz - cz as i32 * s);
                 for wall in view.sector_walls(ext) {
-                    if !circle_hits_wall(wall.edge, s, px, pz, r) || !wall_applies(wall, s, px, pz)
+                    if !circle_hits_wall(wall.edge, s, px, pz, r, (0, s))
+                        || !wall_applies(wall, s, px, pz)
                     {
                         continue;
                     }
@@ -404,6 +417,157 @@ impl<'a> GridCollision<'a> {
                             room: room as u16,
                         };
                         scan.offer(scan.oy + lo - scan.h, scan.oy + hi, src);
+                    }
+                }
+            }
+        }
+    }
+
+    /// [`Self::scan_slabs`] for a tree room: each sample is resolved to the
+    /// leaf under it, and everything the dense version does per sector is
+    /// done per leaf, in the leaf's own frame (its edge, its origin). Leaves
+    /// repeat across samples only when they are bigger than a sector, and a
+    /// repeated interval is harmless, so the already-offered list is by leaf
+    /// key. No clear-neighbourhood shortcut: a tree room does not carry it.
+    #[inline(never)]
+    fn scan_slabs_tree(&self, room: usize, scan: &mut Scan) -> bool {
+        let rec = self.rec(room);
+        let (ox, oz) = (rec.origin[0], rec.origin[2]);
+        let (vw, vd) = (usize::from(rec.width), usize::from(rec.depth));
+        let (x, z, r) = (scan.x, scan.z, scan.r);
+        let (recip, s) = (self.recip, self.s);
+        let ext = (vw as u32 * s as u32, vd as u32 * s as u32);
+        if x + r < ox || z + r < oz || x - r >= ox + ext.0 as i32 || z - r >= oz + ext.1 as i32 {
+            return false;
+        }
+        let Some(view) = self.view(room) else {
+            if scan.foreign {
+                self.scan_foreign(room, scan);
+            }
+            return false;
+        };
+        scan.oy = rec.origin[1];
+        scan.room = room as u16;
+        let mut seen = [u32::MAX; 4];
+        let mut taken = 0;
+        for i in 0..if scan.r > 0 { 5 } else { 1 } {
+            let (sx, sz) = scan.sample(i);
+            let Some((cx, cz, lx, lz)) = cell_in(&recip, s as u32, (sx - ox, sz - oz), ext) else {
+                continue;
+            };
+            let leaf = self.leaf_in(view, cx, cz, lx as i32, lz as i32);
+            let key = cx as u32 | (cz as u32) << 8 | u32::from(leaf.quarter) << 16;
+            if seen.contains(&key) {
+                continue;
+            }
+            let (llx, llz) = (sx - ox - leaf.ox, sz - oz - leaf.oz);
+            let sector = leaf.rec;
+            let flat = Self::slabs_flat(sector);
+            if i == 0 && scan.r <= leaf.size {
+                let r = scan.r;
+                let inside = llx >= r && llx + r < leaf.size && llz >= r && llz + r < leaf.size;
+                if inside && flat {
+                    self.offer_flat(room, key, sector, scan);
+                    return sector.ext != NO_EXT;
+                }
+            }
+            if flat {
+                self.offer_flat(room, key, sector, scan);
+                seen[taken & 3] = key;
+                taken += 1;
+            } else {
+                self.scan_leaf_sample(sector, key, (llx as u32) | (llz as u32) << 16, scan);
+            }
+        }
+        true
+    }
+
+    /// Floor and ceiling slabs of a sloped (or split) leaf under one sample;
+    /// `key = cx | cz << 8 | quarter << 16` names the leaf for the source and
+    /// `local = lx | lz << 16` is the sample's offset in the leaf's frame.
+    #[inline(never)]
+    fn scan_leaf_sample(&self, sector: &Sector, key: u32, local: u32, scan: &mut Scan) {
+        let (lx, lz) = (local & 0xFFFF, local >> 16);
+        let (oy, h) = (scan.oy, scan.h);
+        let flags = sector.flags;
+        let view = if flags & SECTOR_SPLIT_LEVEL != 0 {
+            self.view(usize::from(scan.room))
+        } else {
+            None
+        };
+        let mut src = Src {
+            kind: kind::FLOOR,
+            aux: ((key >> 16) as u8) << 3,
+            cx: (key & 255) as u8,
+            cz: ((key >> 8) & 255) as u8,
+            room: scan.room,
+        };
+        if let Some((f, second)) = self.sector_floor(view, sector, lx, lz) {
+            src.aux = (src.aux & !1) | u8::from(second);
+            let top = oy + f;
+            scan.offer(top - SLAB_THICKNESS - h, top, src);
+        }
+        if flags & SECTOR_CEIL_SOLID != 0 {
+            if let Some(c) = self.sector_ceil(view, sector, lx, lz) {
+                src.kind = kind::CEIL;
+                let bottom = oy + c;
+                scan.offer(bottom - h, bottom + SLAB_THICKNESS, src);
+            }
+        }
+    }
+
+    /// [`Self::scan_walls`] for a tree room: the walls of every leaf in the
+    /// sectors the circle overlaps, each in its leaf's frame.
+    #[inline(never)]
+    fn scan_walls_tree(&self, room: usize, scan: &mut Scan) {
+        let Some(view) = self.view(room) else {
+            return;
+        };
+        let rec = self.rec(room);
+        let s = self.s;
+        let r = scan.r;
+        let (w, d) = (i32::from(rec.width), i32::from(rec.depth));
+        let (lx, lz) = (scan.x - rec.origin[0], scan.z - rec.origin[2]);
+        let recip = self.recip;
+        let cell = |v: i32, n: i32| recip.cell(v.max(0).min(n * s - 1) as u32) as usize;
+        let (cx0, cx1) = (cell(lx - r, w), cell(lx + r, w));
+        let (cz0, cz1) = (cell(lz - r, d), cell(lz + r, d));
+        for cz in cz0..=cz1 {
+            for cx in cx0..=cx1 {
+                for k in 0..Self::cell_slots(view, cx, cz) {
+                    let Some(leaf) = self.cell_leaf(view, cx, cz, k) else {
+                        continue;
+                    };
+                    if leaf.rec.ext == NO_EXT {
+                        continue;
+                    }
+                    let Some(ext) = view.ext(leaf.rec) else {
+                        continue;
+                    };
+                    let (px, pz) = (lx - leaf.ox, lz - leaf.oz);
+                    for wall in view.sector_walls(ext) {
+                        if !circle_hits_wall(
+                            wall.edge,
+                            leaf.size,
+                            px,
+                            pz,
+                            r,
+                            wall_range(wall, leaf.size),
+                        ) || !wall_applies(wall, leaf.size, px, pz)
+                        {
+                            continue;
+                        }
+                        let (lo, hi) = wall_span(wall);
+                        if hi > lo {
+                            let src = Src {
+                                kind: kind::WALL,
+                                aux: wall.edge | leaf.quarter << 3,
+                                cx: cx as u8,
+                                cz: cz as u8,
+                                room: room as u16,
+                            };
+                            scan.offer(scan.oy + lo - scan.h, scan.oy + hi, src);
+                        }
                     }
                 }
             }
@@ -439,7 +603,7 @@ impl<'a> GridCollision<'a> {
             let Some((cx, cz, ox, oz)) = self.cell_of(lx, lz, view.width(), view.depth()) else {
                 continue;
             };
-            let Some(sector) = view.sectors.get(cz * view.width() + cx) else {
+            let Some((sector, ox, oz)) = self.leaf_local(view, cx, cz, ox, oz) else {
                 continue;
             };
             if let Some((f, _)) = self.sector_floor(Some(view), sector, ox, oz) {

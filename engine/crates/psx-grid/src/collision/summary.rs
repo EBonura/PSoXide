@@ -12,18 +12,7 @@ fn equal(h: [i16; 4]) -> bool {
 /// A sector with an extension record (walls, planes or split level) is never
 /// part of a clear neighbourhood.
 pub fn summarize_sectors(sectors: &mut [Sector], width: usize, depth: usize) {
-    let summary = SECTOR_FLAT_FLOOR | SECTOR_FLAT_CEIL | SECTOR_CLEAR;
-    for sector in sectors.iter_mut() {
-        let split = sector.flags & SECTOR_SPLIT_LEVEL != 0;
-        let mut flags = sector.flags & !summary;
-        if flags & SECTOR_HAS_FLOOR != 0 && !split && equal(sector.floor) {
-            flags |= SECTOR_FLAT_FLOOR;
-        }
-        if flags & SECTOR_HAS_CEIL != 0 && !split && equal(sector.ceil) {
-            flags |= SECTOR_FLAT_CEIL;
-        }
-        sector.flags = flags;
-    }
+    summarize_leaves(sectors);
     if sectors.len() != width * depth {
         return;
     }
@@ -38,6 +27,25 @@ pub fn summarize_sectors(sectors: &mut [Sector], width: usize, depth: usize) {
         if clear {
             sector.flags |= SECTOR_CLEAR;
         }
+    }
+}
+
+/// Set the flat floor and flat ceiling bits of a table of leaf records (the
+/// records of a tree room, or of a dense room before its neighbourhood bit).
+/// A leaf's own corners decide, whatever its size. [`SECTOR_CLEAR`] is cleared:
+/// a tree room does not compute the neighbourhood summary.
+pub fn summarize_leaves(leaves: &mut [Sector]) {
+    let summary = SECTOR_FLAT_FLOOR | SECTOR_FLAT_CEIL | SECTOR_CLEAR;
+    for sector in leaves.iter_mut() {
+        let split = sector.flags & SECTOR_SPLIT_LEVEL != 0;
+        let mut flags = sector.flags & !summary;
+        if flags & SECTOR_HAS_FLOOR != 0 && !split && equal(sector.floor) {
+            flags |= SECTOR_FLAT_FLOOR;
+        }
+        if flags & SECTOR_HAS_CEIL != 0 && !split && equal(sector.ceil) {
+            flags |= SECTOR_FLAT_CEIL;
+        }
+        sector.flags = flags;
     }
 }
 

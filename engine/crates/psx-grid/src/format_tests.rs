@@ -15,6 +15,7 @@ use alloc::vec::Vec;
 
 const GOLDEN_CORE: &[u8] = include_bytes!("../tests/fixtures/pgl_v4_core.bin");
 const GOLDEN_ROOM: &[u8] = include_bytes!("../tests/fixtures/pgl_v4_room.bin");
+const GOLDEN_TREE_ROOM: &[u8] = include_bytes!("../tests/fixtures/pgl_v4_tree_room.bin");
 
 fn level() -> LevelCore {
     LevelCore {
@@ -236,4 +237,114 @@ fn a_mover_has_a_stable_id_that_is_neither_its_room_nor_its_index() {
     let bytes = words_as_bytes(&words, words.len() * 4);
     let view = RoomView::parse(bytes).unwrap();
     assert_eq!(view.col.movers[0].stable_id(), door);
+}
+
+/// A leaf tree room of two sectors by one: the west sector is divided into a
+/// half-sector leaf and quarter-sector leaves (one quarter empty), the east
+/// one is a whole-sector leaf. The room's world origin is one sector past a
+/// multiple of four.
+fn tree_room() -> RoomChunk {
+    use crate::write::TreeTables;
+    let leaf = |code: u16, h: i16| Sector {
+        floor: [h; 4],
+        ceil: [0; 4],
+        flags: SECTOR_HAS_FLOOR | (code << SECTOR_LEAF_SHIFT),
+        ext: NO_EXT,
+    };
+    let none = NO_LEAF;
+    // Block: the half leaf (id 0) covers the four north-west quarters, the
+    // quarter leaves 1 and 2 the next two, one quarter empty, the rest 3.
+    let block = [
+        0, 0, 1, 2, //
+        0, 0, 3, none, //
+        3, 3, 3, 3, //
+        3, 3, 3, 3,
+    ];
+    RoomChunk {
+        width: 2,
+        depth: 1,
+        min_y: 0,
+        max_y: 40,
+        sectors: vec![
+            leaf(leaf_code::HALF, 0),
+            leaf(leaf_code::QUARTER, 8),
+            leaf(leaf_code::QUARTER, 16),
+            leaf(leaf_code::QUARTER, 24),
+            leaf(leaf_code::SECTOR, 32),
+        ],
+        tree: Some(TreeTables {
+            origin_mod: 1,
+            index: vec![INDEX_SUB, 4],
+            blocks: block.to_vec(),
+        }),
+        cells: vec![RCell::default(); 2],
+        ..RoomChunk::default()
+    }
+}
+
+#[test]
+fn golden_v4_tree_room_bytes() {
+    let chunk = tree_room().to_bytes();
+    if std::env::var("PGL_REGENERATE_GOLDEN").is_ok() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        std::fs::write(dir.join("pgl_v4_tree_room.bin"), &chunk).unwrap();
+    }
+    assert_eq!(chunk, GOLDEN_TREE_ROOM, "tree room chunk bytes changed");
+}
+
+#[test]
+fn the_tree_room_reads_back_and_a_dense_room_has_no_tree() {
+    let words = aligned_copy(GOLDEN_TREE_ROOM);
+    let room = RoomView::parse(words_as_bytes(&words, GOLDEN_TREE_ROOM.len())).unwrap();
+    room.validate_full(0).unwrap();
+    assert!(room.col.is_tree());
+    assert_eq!(room.col.header.flags & CHUNK_TREE, CHUNK_TREE);
+    assert_eq!(room.col.origin_mod(), (1, 0));
+    assert_eq!(room.col.sectors.len(), 5);
+    assert_eq!(room.col.index, &[INDEX_SUB, 4]);
+    assert_eq!(room.col.blocks.len(), SUBBLOCK_ENTRIES);
+    assert_eq!(room.col.blocks[7], NO_LEAF);
+    // The extension record carries its own layout hash, the core's is
+    // untouched.
+    let ext_at = room.col.header.tree_ext as usize;
+    let hash = u32::from_le_bytes(GOLDEN_TREE_ROOM[ext_at..ext_at + 4].try_into().unwrap());
+    assert_eq!(hash, TREE_LAYOUT_HASH);
+    let dense = aligned_copy(GOLDEN_ROOM);
+    let dense = RoomView::parse(words_as_bytes(&dense, GOLDEN_ROOM.len())).unwrap();
+    assert!(!dense.col.is_tree());
+    assert_eq!(dense.col.header.tree_ext, 0);
+    assert_eq!(dense.col.header.origin_mod, 0);
+    // A stale tree layout is refused.
+    let mut bad = GOLDEN_TREE_ROOM.to_vec();
+    bad[ext_at] ^= 1;
+    let words = aligned_copy(&bad);
+    assert_eq!(
+        RoomView::parse(words_as_bytes(&words, bad.len())).err(),
+        Some(FormatError::BadLayout)
+    );
+    // An index entry past the leaves is refused by the full walk.
+    let mut chunk = tree_room();
+    chunk.tree.as_mut().unwrap().index[1] = 9;
+    let words = aligned_copy(&chunk.to_bytes());
+    let view = RoomView::parse(words_as_bytes(&words, words.len() * 4)).unwrap();
+    assert_eq!(view.validate_full(0), Err(FormatError::IndexRange));
+}
+
+#[test]
+fn leaf_sizes_and_world_aligned_origins() {
+    assert_eq!(leaf_edge(80, leaf_code::SECTOR), 80);
+    assert_eq!(leaf_edge(80, leaf_code::X2), 160);
+    assert_eq!(leaf_edge(80, leaf_code::X4), 320);
+    assert_eq!(leaf_edge(80, leaf_code::HALF), 40);
+    assert_eq!(leaf_edge(80, leaf_code::QUARTER), 20);
+    // A room whose origin is world sector 5 (5 mod 4 = 1): leaves of two
+    // sectors start at even world sectors, so at room sectors 1, 3, 5 (the
+    // room's sector 0 would belong to a leaf that starts outside the room).
+    for (c, want) in [(0, -1), (1, 1), (2, 1), (3, 3), (4, 3), (5, 5)] {
+        assert_eq!(leaf_origin_sector(c, leaf_code::X2, 1), want, "c {c}");
+    }
+    // Four sector leaves start at multiples of four in the world.
+    for (c, want) in [(0, -1), (2, -1), (3, 3), (6, 3), (7, 7)] {
+        assert_eq!(leaf_origin_sector(c, leaf_code::X4, 1), want, "c {c}");
+    }
 }

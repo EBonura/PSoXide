@@ -60,12 +60,7 @@ impl<'a> GridCollision<'a> {
         output.normal_q12 = match raw.normal {
             nc::NONE => [0; 3],
             nc::UP => [0, 4096, 0],
-            nc::FLOOR => self.floor_normal(
-                usize::from(raw.src.room),
-                usize::from(raw.src.cx),
-                usize::from(raw.src.cz),
-                raw.src.aux != 0,
-            ),
+            nc::FLOOR => self.floor_normal(&raw.src),
             nc::PLATFORM_TOP => self.platform_normal(&raw.src),
             nc::WALL_PLANE => self.wall_plane_normal(&raw.src),
             code => axis_normal(code),

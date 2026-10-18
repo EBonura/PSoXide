@@ -11,6 +11,18 @@ use alloc::vec::Vec;
 use crate::format::*;
 use crate::lattice::LatticeTables;
 
+/// The leaf tree's tables (see [`TreeExt`]): present when the room has a leaf
+/// that is not a whole sector.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TreeTables {
+    /// The room's world origin modulo four sectors, `x | z << 2`.
+    pub origin_mod: u8,
+    /// One entry per sector, `cz * width + cx`.
+    pub index: Vec<u16>,
+    /// 16 entries per block.
+    pub blocks: Vec<u16>,
+}
+
 /// Everything a room chunk holds, as plain tables.
 #[derive(Clone, Debug, Default)]
 pub struct RoomChunk {
@@ -22,7 +34,10 @@ pub struct RoomChunk {
     pub max_y: i16,
     pub lod_far_cells: u8,
     pub lod_shift: u8,
+    /// One record per sector, or per leaf when `tree` is set.
     pub sectors: Vec<Sector>,
+    /// The leaf tree, `None` for a dense room.
+    pub tree: Option<TreeTables>,
     pub exts: Vec<SectorExt>,
     pub walls: Vec<ColWall>,
     pub splitbs: Vec<SplitB>,
@@ -60,6 +75,15 @@ fn put(
     out.extend_from_slice(bytes);
 }
 
+fn put_ref(out: &mut Vec<u8>, slot: &mut SectionRef, bytes: &[u8], count: usize) {
+    align4(out);
+    *slot = SectionRef {
+        offset: out.len() as u32,
+        count: count as u32,
+    };
+    out.extend_from_slice(bytes);
+}
+
 impl RoomChunk {
     /// Size of each section's bytes, in section order, for reports.
     pub fn section_bytes(&self) -> [usize; SECTION_COUNT] {
@@ -85,6 +109,14 @@ impl RoomChunk {
             out[i] = counts[i] * SECTION_RECORD_BYTES[i];
         }
         out
+    }
+
+    /// Bytes of the leaf tree part (extension record, index and sub-blocks),
+    /// zero for a dense room.
+    pub fn tree_bytes(&self) -> usize {
+        self.tree.as_ref().map_or(0, |t| {
+            core::mem::size_of::<TreeExt>() + 2 * t.index.len() + 2 * t.blocks.len()
+        })
     }
 
     /// The chunk bytes, unpadded. The caller pads to a sector when it packs.
@@ -147,6 +179,38 @@ impl RoomChunk {
             bytes_of(&self.mover_verts),
             self.mover_verts.len(),
         );
+        let mut tree_ext = 0u32;
+        let mut tree_flag = 0u16;
+        let mut origin_mod = 0u8;
+        if let Some(tree) = &self.tree {
+            align4(&mut out);
+            tree_ext = out.len() as u32;
+            tree_flag = CHUNK_TREE;
+            origin_mod = tree.origin_mod;
+            // The extension record first, filled in once the two tables
+            // have their places.
+            out.extend_from_slice(&[0u8; core::mem::size_of::<TreeExt>()]);
+            let mut refs2 = [SectionRef::default(); 2];
+            put_ref(
+                &mut out,
+                &mut refs2[0],
+                bytes_of(&tree.index),
+                tree.index.len(),
+            );
+            put_ref(
+                &mut out,
+                &mut refs2[1],
+                bytes_of(&tree.blocks),
+                tree.blocks.len() / SUBBLOCK_ENTRIES,
+            );
+            let ext = TreeExt {
+                layout: TREE_LAYOUT_HASH,
+                sector_index: refs2[0],
+                subblocks: refs2[1],
+            };
+            out[tree_ext as usize..tree_ext as usize + core::mem::size_of::<TreeExt>()]
+                .copy_from_slice(bytes_of(core::slice::from_ref(&ext)));
+        }
         align4(&mut out);
         let render_offset = out.len() as u32;
         put(
@@ -202,7 +266,7 @@ impl RoomChunk {
         let header = RoomHeader {
             magic: ROOM_MAGIC,
             version: VERSION,
-            flags: self.flags,
+            flags: self.flags | tree_flag,
             byte_len: out.len() as u32,
             render_offset,
             room_id: self.room_id,
@@ -212,9 +276,10 @@ impl RoomChunk {
             max_y: self.max_y,
             lod_far_cells: self.lod_far_cells,
             lod_shift: self.lod_shift,
+            origin_mod,
             reserved: 0,
             sections: refs,
-            reserved2: 0,
+            tree_ext,
         };
         out[..core::mem::size_of::<RoomHeader>()]
             .copy_from_slice(bytes_of(core::slice::from_ref(&header)));

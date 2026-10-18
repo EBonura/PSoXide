@@ -22,7 +22,7 @@
 
 use alloc::vec::Vec;
 
-use crate::collision::GridCollision;
+use crate::collision::{GridCollision, LeafDims};
 use crate::format::{ROOM_MAGIC, VERSION};
 use crate::height::{weight_recip, Recip};
 use crate::render::GridMaterial;
@@ -86,6 +86,8 @@ pub struct ResidentRooms<'a> {
     pub(crate) s: i32,
     pub(crate) recip: Recip,
     pub(crate) inv24: u32,
+    /// Edge and weight reciprocal of every leaf size code.
+    pub(crate) leaf: LeafDims,
 }
 
 impl<'a> ResidentRooms<'a> {
@@ -113,6 +115,7 @@ impl<'a> ResidentRooms<'a> {
             s: s as i32,
             recip,
             inv24: weight_recip(s),
+            leaf: LeafDims::for_sector(s as i32),
         })
     }
 

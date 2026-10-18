@@ -5,6 +5,7 @@
 
 use super::scan::{kind, nc, Scan, Src};
 use super::world::{GridCollision, SLAB_THICKNESS};
+use crate::format::ROOM_TREE;
 
 /// Most marching samples one body trace may take. Longer sweeps widen the
 /// step instead (they are not issued by the motor).
@@ -250,6 +251,31 @@ impl<'a> GridCollision<'a> {
         self.classify(q, lo, hi, &scan, raw);
     }
 
+    /// Whether a move from `from` to `at` leaves the leaf it started in, per
+    /// axis, in a tree room: the leaf origin along the axis (or the leaf
+    /// size) differs. A point outside the room counts as a different leaf.
+    #[inline(never)]
+    fn crossed_leaf(&self, room: usize, from: &[i32; 3], at: &[i32; 3]) -> (bool, bool) {
+        let (Some(view), rec) = (self.view(room), self.rec(room)) else {
+            return (false, false);
+        };
+        let find = |p: &[i32; 3]| {
+            self.leaf_at_point(view, p[0] - rec.origin[0], p[2] - rec.origin[2])
+                .map(|l| (l.ox, l.oz, l.size))
+        };
+        match (find(from), find(at)) {
+            (Some(a), Some(b)) => (a.0 != b.0 || a.2 != b.2, a.1 != b.1 || a.2 != b.2),
+            _ => {
+                // Beyond the room: whole sectors, as in a dense room.
+                let cell = |v: i32, o: i32| (v - o).div_euclid(self.s.max(1));
+                (
+                    cell(from[0], rec.origin[0]) != cell(at[0], rec.origin[0]),
+                    cell(from[2], rec.origin[2]) != cell(at[2], rec.origin[2]),
+                )
+            }
+        }
+    }
+
     #[inline(never)]
     fn classify(&self, q: &Query, lo: i32, hi: i32, scan: &Scan, raw: &mut Raw) {
         let d = &q.d;
@@ -262,9 +288,30 @@ impl<'a> GridCollision<'a> {
         match src.kind {
             kind::WALL => {
                 let rec = self.rec(usize::from(src.room));
-                let ox = rec.origin[0] + i32::from(src.cx) * self.s;
-                let oz = rec.origin[2] + i32::from(src.cz) * self.s;
-                raw.normal = super::world::wall_code(src.aux, self.s, from[0] - ox, from[2] - oz);
+                // The wall's frame: its sector in a dense room, its leaf in
+                // a tree room (`aux >> 3` is the quarter sector).
+                let (mut ox, mut oz, mut size) = (
+                    i32::from(src.cx) * self.s,
+                    i32::from(src.cz) * self.s,
+                    self.s,
+                );
+                if rec.flags & ROOM_TREE != 0 {
+                    if let Some(view) = self.view(usize::from(src.room)) {
+                        let leaf = self.leaf_named(
+                            view,
+                            usize::from(src.cx),
+                            usize::from(src.cz),
+                            src.aux >> 3,
+                        );
+                        (ox, oz, size) = (leaf.ox, leaf.oz, leaf.size);
+                    }
+                }
+                raw.normal = super::world::wall_code(
+                    src.aux & 7,
+                    size,
+                    from[0] - rec.origin[0] - ox,
+                    from[2] - rec.origin[2] - oz,
+                );
             }
             kind::FLOOR => {
                 let top = scan.hi;
@@ -276,9 +323,15 @@ impl<'a> GridCollision<'a> {
                 } else {
                     let at = q.at(hi);
                     let rec = self.rec(usize::from(src.room));
-                    let cell = |v: i32, o: i32| (v - o).div_euclid(self.s.max(1));
-                    let cx = cell(from[0], rec.origin[0]) != cell(at[0], rec.origin[0]);
-                    let cz = cell(from[2], rec.origin[2]) != cell(at[2], rec.origin[2]);
+                    let (cx, cz) = if rec.flags & ROOM_TREE != 0 {
+                        self.crossed_leaf(usize::from(src.room), &from, &at)
+                    } else {
+                        let cell = |v: i32, o: i32| (v - o).div_euclid(self.s.max(1));
+                        (
+                            cell(from[0], rec.origin[0]) != cell(at[0], rec.origin[0]),
+                            cell(from[2], rec.origin[2]) != cell(at[2], rec.origin[2]),
+                        )
+                    };
                     raw.normal = match (cx, cz) {
                         (false, false) => {
                             raw.src = src;

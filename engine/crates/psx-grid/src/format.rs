@@ -65,6 +65,11 @@ pub const ROOM_FOG: u16 = 1 << 1;
 pub const ROOM_PINNED: u16 = 1 << 2;
 /// Room flag: holds a liquid volume.
 pub const ROOM_HAS_LIQUID: u16 = 1 << 3;
+/// Room flag: the collision block is a leaf tree ([`CHUNK_TREE`]), so the
+/// collision world resolves a sector through its index. Set by the cook in
+/// step with the chunk flag; it lets the hot paths choose without loading the
+/// chunk header.
+pub const ROOM_TREE: u16 = 1 << 4;
 
 /// Core file header, 52 bytes.
 ///
@@ -245,6 +250,13 @@ pub const CHUNK_HAS_PLANES: u16 = 1 << 1;
 pub const CHUNK_HAS_LIQUIDS: u16 = 1 << 2;
 /// Room chunk flag: carries movers.
 pub const CHUNK_HAS_MOVERS: u16 = 1 << 3;
+/// Room chunk flag: the collision block is a **leaf tree**. `SECTORS` holds
+/// one record per leaf (a leaf is a cell of 4, 2, 1, 1/2 or 1/4 sector
+/// edge) in place of one per sector, and a [`TreeExt`] at
+/// [`RoomHeader::tree_ext`] places the per-sector `SECTOR_INDEX` and the
+/// `SUBBLOCKS` table. A room whose leaves are all whole sectors never sets
+/// it: it keeps the dense layout byte for byte.
+pub const CHUNK_TREE: u16 = 1 << 4;
 
 /// Number of sections in a room chunk.
 pub const SECTION_COUNT: usize = 15;
@@ -312,9 +324,16 @@ pub struct RoomHeader {
     pub lod_far_cells: u8,
     /// log2 of the LOD block edge in cells.
     pub lod_shift: u8,
-    pub reserved: u16,
+    /// With [`CHUNK_TREE`]: the room's world origin modulo four sectors,
+    /// `x | z << 2` (four bits), so a leaf of 2 or 4 sectors, which is
+    /// aligned in the world, finds its own origin from a room-local sector
+    /// (see [`leaf_origin_sector`]). Zero otherwise.
+    pub origin_mod: u8,
+    pub reserved: u8,
     pub sections: [SectionRef; SECTION_COUNT],
-    pub reserved2: u32,
+    /// With [`CHUNK_TREE`]: chunk-relative byte offset of the [`TreeExt`].
+    /// Zero otherwise.
+    pub tree_ext: u32,
 }
 
 /// Sector flag: has a floor (clear is a pit).
@@ -358,6 +377,87 @@ pub const SECTOR_FLAT_CEIL: u16 = 1 << 11;
 pub const SECTOR_CLEAR: u16 = 1 << 12;
 /// Headroom, runtime units, a shared solid ceiling needs for [`SECTOR_CLEAR`].
 pub const CLEAR_HEADROOM: i32 = 160;
+
+/// Shift of the leaf size code in [`Sector::flags`] (bits 13 to 15). Only a
+/// [`CHUNK_TREE`] room writes it; in a dense room the bits are zero, which is
+/// the code of a whole sector.
+pub const SECTOR_LEAF_SHIFT: u32 = 13;
+
+/// Leaf size codes, the value of [`Sector::flags`] `>> 13`. Code 0 is a whole
+/// sector so a dense record reads as one without any change.
+pub mod leaf_code {
+    /// One sector (document level 2).
+    pub const SECTOR: u16 = 0;
+    /// Two sectors along an edge (level 1).
+    pub const X2: u16 = 1;
+    /// Four sectors along an edge (level 0).
+    pub const X4: u16 = 2;
+    /// Half a sector (level 3).
+    pub const HALF: u16 = 3;
+    /// A quarter of a sector (level 4).
+    pub const QUARTER: u16 = 4;
+}
+
+/// Edge of a leaf of size code `code` in a level whose sector edge is `s`,
+/// same unit as `s`. A code above [`leaf_code::QUARTER`] reads as a sector.
+pub const fn leaf_edge(s: i32, code: u16) -> i32 {
+    match code {
+        leaf_code::X2 => s * 2,
+        leaf_code::X4 => s * 4,
+        leaf_code::HALF => s / 2,
+        leaf_code::QUARTER => s / 4,
+        _ => s,
+    }
+}
+
+/// Sector (room-local) holding the minimum corner of the leaf of size code
+/// `code` (X2 or X4) that covers sector `c` along one axis, given the room's
+/// `origin_mod` for that axis. Leaves are aligned in the world, not in the
+/// room: this is one add, one and, one subtract.
+pub const fn leaf_origin_sector(c: i32, code: u16, origin_mod: i32) -> i32 {
+    let n = 1 << code;
+    ((c + origin_mod) & !(n - 1)) - origin_mod
+}
+
+/// [`SECTOR_INDEX`](TreeExt::sector_index) entry bit: the sector is divided
+/// into sub-sector leaves and the id names a 16 entry block of `SUBBLOCKS`.
+pub const INDEX_SUB: u16 = 1 << 15;
+/// Entry bit reserved for a per-sector clear-neighbourhood summary (the dense
+/// layout's [`SECTOR_CLEAR`], which a tree room does not compute yet; the
+/// cook writes zero).
+pub const INDEX_CLEAR: u16 = 1 << 14;
+/// Mask of the leaf or block id of an index entry (14 bits).
+pub const INDEX_ID: u16 = 0x3FFF;
+/// Id meaning "no leaf here" (an empty sector, or an empty quarter of a
+/// subdivided one). Real ids are `0..NO_LEAF`.
+pub const NO_LEAF: u16 = 0x3FFF;
+/// Entries of one `SUBBLOCKS` block: the 4 by 4 quarter sectors of a sector,
+/// row major (`z * 4 + x`).
+pub const SUBBLOCK_ENTRIES: usize = 16;
+/// Most leaves a room may have (14 bit ids, one reserved).
+pub const MAX_LEAVES: usize = NO_LEAF as usize;
+/// Most sub-block tables a room may have: one per subdivided sector, and the
+/// index holds the id in the same 14 bits.
+pub const MAX_SUBBLOCKS: usize = NO_LEAF as usize;
+
+/// The leaf tree's own tables, located by [`RoomHeader::tree_ext`], 20 bytes.
+///
+/// `layout` is [`TREE_LAYOUT_HASH`], checked by the reader, so the tree part
+/// carries its own version without changing the 15 entry section table every
+/// dense room shares. A section whose count is zero has no data.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct TreeExt {
+    pub layout: u32,
+    /// `u16` per sector, `cz * width + cx`: [`INDEX_SUB`], [`INDEX_CLEAR`]
+    /// and a 14 bit leaf or block id, [`NO_LEAF`] for none. Count `width *
+    /// depth`.
+    pub sector_index: SectionRef,
+    /// 16 `u16` per block ([`SUBBLOCK_ENTRIES`]): the leaf covering each
+    /// quarter sector, [`NO_LEAF`] for none. A half-sector leaf appears in
+    /// its four entries. Count is the number of blocks.
+    pub subblocks: SectionRef,
+}
 
 /// Marker for "no extension".
 pub const NO_EXT: u16 = 0xFFFF;
@@ -412,6 +512,14 @@ pub const WALL_MOVER: u8 = 2;
 /// Wall flag: blocks only bodies and rays on the back side of the edge. Only
 /// the diagonals use it, for a derived riser seen from the back.
 pub const WALL_BACK_ONLY: u8 = 4;
+/// Wall flag: the wall covers only the first half of the owning leaf's edge
+/// (the half at the start of the edge, `a` to the middle, in the edge's
+/// walking direction), with its four heights given at that half's ends. A
+/// derived wall hosted by a leaf next to two smaller ones, or beside a gap.
+/// Cardinal edges only. Neither half flag: the whole edge.
+pub const WALL_HALF_FIRST: u8 = 8;
+/// Wall flag: the second half of the edge, see [`WALL_HALF_FIRST`].
+pub const WALL_HALF_SECOND: u8 = 16;
 
 /// A solid wall piece, 12 bytes. Geometry follows from the owning sector and
 /// the edge id.
@@ -727,6 +835,7 @@ sizes! {
     RCell = 8,
     LodBlock = 8,
     PlaneRef = 12,
+    TreeExt = 20,
 }
 
 /// Size of one record of each section, in section order.
@@ -802,6 +911,27 @@ const fn layout_hash() -> u32 {
 
 /// Hash of the record sizes and key field offsets, carried by the level core.
 pub const LAYOUT_HASH: u32 = layout_hash();
+
+const fn tree_layout_hash() -> u32 {
+    use core::mem::{offset_of, size_of};
+    let mut h = 0x811c_9dc5u32;
+    h = mix(h, size_of::<TreeExt>());
+    h = mix(h, offset_of!(TreeExt, sector_index));
+    h = mix(h, offset_of!(TreeExt, subblocks));
+    h = mix(h, SECTOR_LEAF_SHIFT as usize);
+    h = mix(h, leaf_code::QUARTER as usize);
+    h = mix(h, INDEX_SUB as usize);
+    h = mix(h, NO_LEAF as usize);
+    h = mix(h, SUBBLOCK_ENTRIES);
+    h = mix(h, WALL_HALF_FIRST as usize);
+    h = mix(h, WALL_HALF_SECOND as usize);
+    h
+}
+
+/// Hash of the leaf tree's layout, carried by [`TreeExt`] (the core's
+/// [`LAYOUT_HASH`] stays what it was, so dense levels are byte for byte
+/// unchanged).
+pub const TREE_LAYOUT_HASH: u32 = tree_layout_hash();
 
 /// Bytes of a table of plain records.
 ///
