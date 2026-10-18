@@ -30,12 +30,12 @@ fn small_world() -> GridWorld {
     room.origin = [-1, 3];
     room.y_offset = 256;
     let a = room.sector_or_insert(0, 0).unwrap();
-    a.set_floor(Some(GridSurface::flat(0, None)));
+    a.set_ground_floor(Some(GridSurface::flat(0, None)));
     a.north.push(GridWall::span(0, 1024, None));
     let b = room.sector_or_insert(1, 1).unwrap();
     let mut slope = GridSurface::flat(0, None);
     slope.heights = [0, 0, 256, 256];
-    b.set_floor(Some(slope));
+    b.set_ground_floor(Some(slope));
     GridWorld {
         rooms: vec![room],
         ..GridWorld::new()
@@ -124,7 +124,7 @@ fn default_values_stay_out_of_the_file() {
     let sparse = r#"(rooms: [(width: 1, depth: 1, sectors: [Some((floor: Some((heights: (0, 0, 0, 0)))))])])"#;
     let world: GridWorld = ron::from_str(sparse).unwrap();
     assert_eq!(world.scale, super::units::GridScale::DEFAULT);
-    let floor = world.rooms[0].sector(0, 0).unwrap().floor().unwrap();
+    let floor = world.rooms[0].sector(0, 0).unwrap().ground_floor().unwrap();
     assert!(floor.walkable);
     assert_eq!(floor.tri(0).material, None);
 }
@@ -159,7 +159,7 @@ fn trimming_a_room_keeps_the_footprint_of_its_planes() {
     let mut room = GridRoom::new("r", 6, 6);
     room.sector_or_insert(1, 1)
         .unwrap()
-        .set_floor(Some(GridSurface::flat(0, None)));
+        .set_ground_floor(Some(GridSurface::flat(0, None)));
     // A plane over sectors 3 to 4, 4 to 5.
     room.planes
         .push(GridPlane::new([4096, 0, 5120], [2048, 2048]));
@@ -188,7 +188,10 @@ fn legacy_levels_load_with_every_diagonal_locked_and_no_rule_set() {
         for room in &world.rooms {
             assert!(room.defaults.rules.is_default(), "{name}");
             for (_, _, sector) in room.iter() {
-                for surface in [sector.floor(), sector.ceiling()].into_iter().flatten() {
+                for surface in [sector.ground_floor(), sector.ground_ceiling()]
+                    .into_iter()
+                    .flatten()
+                {
                     assert!(
                         !surface.auto_split && !surface.paint_locked,
                         "{name}: a legacy split is deliberate and stays"

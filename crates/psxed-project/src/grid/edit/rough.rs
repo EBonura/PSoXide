@@ -105,7 +105,7 @@ mod tests {
             for x in 0..2 {
                 room.sector_or_insert(x, z)
                     .unwrap()
-                    .set_floor(Some(GridSurface::flat(0, None)));
+                    .set_ground_floor(Some(GridSurface::flat(0, None)));
             }
         }
         GridWorld {

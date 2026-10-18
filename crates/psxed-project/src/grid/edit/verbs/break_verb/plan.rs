@@ -137,11 +137,11 @@ impl Ctx<'_> {
     }
 
     fn floor(&self, cell: [i32; 2]) -> Option<&GridSurface> {
-        sector_at(self.world, self.room, cell)?.floor()
+        sector_at(self.world, self.room, cell)?.ground_floor()
     }
 
     fn ceiling(&self, cell: [i32; 2]) -> Option<&GridSurface> {
-        sector_at(self.world, self.room, cell)?.ceiling()
+        sector_at(self.world, self.room, cell)?.ground_ceiling()
     }
 }
 
@@ -414,28 +414,28 @@ fn tops(cx: &Ctx<'_>, floors: &BTreeSet<[i32; 2]>, out: &mut Vec<Plan>) {
         let Some(sector) = sector_at(cx.world, cx.room, cell) else {
             continue;
         };
-        let Some(floor) = sector.floor() else {
+        let Some(floor) = sector.ground_floor() else {
             continue;
         };
         let mut edges: Vec<WallEdge> = Vec::new();
         for (edge, d) in CARDINALS {
             let other = [cell[0] + d[0], cell[1] + d[1]];
             let neighbour_empty = sector_at(cx.world, cx.room, other)
-                .is_none_or(|s| s.floor().is_none() && s.ceiling().is_none());
+                .is_none_or(|s| s.ground_floor().is_none() && s.ground_ceiling().is_none());
             // Closed walls take their top from the ceiling, not from here.
             let tri = bite_shapes(edge)
                 .iter()
                 .find(|(s, _)| *s == floor.split)
                 .map_or(0, |(_, t)| *t);
             let void_side = floor.is_void(tri);
-            if neighbour_empty && !void_side && sector.ceiling().is_none() {
+            if neighbour_empty && !void_side && sector.ground_ceiling().is_none() {
                 edges.push(edge);
             }
         }
         if floor.void & 3 == VOID_A || floor.void & 3 == VOID_B {
             // The diagonal closure of a chamfered corner.
             let near = if floor.void & 3 == VOID_A { 1 } else { 0 };
-            if sector.ceiling().is_none_or(|c| c.is_void(near)) {
+            if sector.ground_ceiling().is_none_or(|c| c.is_void(near)) {
                 edges.push(fold_edge(floor.split));
             }
         }

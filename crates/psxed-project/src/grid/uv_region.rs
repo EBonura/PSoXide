@@ -197,7 +197,7 @@ mod tests {
             for x in 0..w {
                 room.sector_or_insert(x, z)
                     .unwrap()
-                    .set_floor(Some(GridSurface::flat(0, Some(rid(7)))));
+                    .set_ground_floor(Some(GridSurface::flat(0, Some(rid(7)))));
             }
         }
         GridWorld {
@@ -272,8 +272,15 @@ mod tests {
         let mut world = patch_world(3, 1);
         fit_across(&mut world, &(), &floors(3, 1), None, [3.0, 1.0]).unwrap();
         // The widening is relative to each face.
-        let uv =
-            |w: &GridWorld, x: usize| w.rooms[0].sector(x, 0).unwrap().floor().unwrap().tri_a.uv;
+        let uv = |w: &GridWorld, x: usize| {
+            w.rooms[0]
+                .sector(x, 0)
+                .unwrap()
+                .ground_floor()
+                .unwrap()
+                .tri_a
+                .uv
+        };
         assert_eq!(uv(&world, 0).grow, [[0, 0], [2048, 0]]);
         assert_eq!(uv(&world, 1).grow, [[1024, 0], [1024, 0]]);
         assert_eq!(uv(&world, 2).grow, [[2048, 0], [0, 0]]);

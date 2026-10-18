@@ -357,7 +357,7 @@ mod tests {
         room.y_offset = 512;
         room.sector_or_insert(1, 0)
             .unwrap()
-            .set_floor(Some(GridSurface::flat(256, None)));
+            .set_ground_floor(Some(GridSurface::flat(256, None)));
         room.sector_or_insert(1, 0)
             .unwrap()
             .north
@@ -378,13 +378,15 @@ mod tests {
         let mut slope = GridSurface::flat(0, None);
         slope.heights = [0, 0, 1024, 1024]; // rises towards +z
         slope.split = GridSplit::NwSe;
-        room.sector_or_insert(0, 0).unwrap().set_floor(Some(slope));
+        room.sector_or_insert(0, 0)
+            .unwrap()
+            .set_ground_floor(Some(slope));
         let mut upper = GridRoom::new("b", 1, 1);
         upper.y_offset = 2048;
         upper
             .sector_or_insert(0, 0)
             .unwrap()
-            .set_floor(Some(GridSurface::flat(0, None)));
+            .set_ground_floor(Some(GridSurface::flat(0, None)));
         let world = GridWorld {
             scale: GridScale { num: 1, den: 1 },
             rooms: vec![room, upper],

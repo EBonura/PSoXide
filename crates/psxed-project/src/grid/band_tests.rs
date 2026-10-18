@@ -28,8 +28,8 @@ fn hall(width: usize, depth: usize) -> GridWorld {
     for z in 0..depth {
         for x in 0..width {
             let s = room.sector_or_insert(x, z).unwrap();
-            s.set_floor(Some(GridSurface::flat(0, Some(rid(1)))));
-            s.set_ceiling(Some(GridSurface::flat(2048, Some(rid(2)))));
+            s.set_ground_floor(Some(GridSurface::flat(0, Some(rid(1)))));
+            s.set_ground_ceiling(Some(GridSurface::flat(2048, Some(rid(2)))));
         }
     }
     GridWorld {
@@ -282,7 +282,7 @@ fn a_sloped_riser_gets_a_trim_that_follows_it_and_an_absolute_line_breaks_it() {
         let platform = room.sector_or_insert(1, 0).unwrap();
         let mut floor = GridSurface::flat(0, Some(rid(1)));
         floor.heights = [512, 512, 1024, 1024];
-        platform.set_floor(Some(floor));
+        platform.set_ground_floor(Some(floor));
     }
     let riser = FaceRef::derived(0, [0, 0], WallEdge::East, DerivedKind::Riser);
     assert!(riser.exists(&world));

@@ -446,8 +446,8 @@ impl GridBudget {
             budget.meshes += room.meshes.len();
             for (_, _, sector) in room.iter() {
                 budget.sectors += 1;
-                budget.floors += usize::from(sector.floor().is_some());
-                budget.ceilings += usize::from(sector.ceiling().is_some());
+                budget.floors += usize::from(sector.ground_floor().is_some());
+                budget.ceilings += usize::from(sector.ground_ceiling().is_some());
                 budget.walls += sector.wall_count();
             }
         }
@@ -786,7 +786,7 @@ mod tests {
         let mut room = GridRoom::new("r", 2, 2);
         room.sector_or_insert(0, 0)
             .unwrap()
-            .set_floor(Some(GridSurface::flat(0, None)));
+            .set_ground_floor(Some(GridSurface::flat(0, None)));
         assert!(validate(&world_with_room(room)).is_empty());
     }
 
@@ -903,7 +903,7 @@ mod tests {
         let mut room = GridRoom::new("r", 1, 1);
         let sector = room.sector_or_insert(0, 0).unwrap();
         sector.south.push(GridWall::span(0, 0, None));
-        sector.set_floor(Some(GridSurface::flat(MAX_COORD_UNITS + 1, None)));
+        sector.set_ground_floor(Some(GridSurface::flat(MAX_COORD_UNITS + 1, None)));
         let issues = validate(&world_with_room(room));
         assert!(issues.len() >= 2);
         assert_eq!(issues[0].severity(), Severity::Error);
@@ -930,7 +930,7 @@ mod tests {
         room.origin = [MAX_EDITOR_COORD / 1280 + 8, 0];
         room.sector_or_insert(0, 0)
             .unwrap()
-            .set_floor(Some(GridSurface::flat(0, None)));
+            .set_ground_floor(Some(GridSurface::flat(0, None)));
         let found = kinds(&world_with_room(room));
         assert!(found
             .iter()
@@ -942,10 +942,10 @@ mod tests {
         let mut room = GridRoom::new("r", 2, 1);
         room.sector_or_insert(0, 0)
             .unwrap()
-            .set_floor(Some(GridSurface::flat(0, None)));
+            .set_ground_floor(Some(GridSurface::flat(0, None)));
         let second = room.sector_or_insert(1, 0).unwrap();
-        second.set_floor(Some(GridSurface::flat(0, None)));
-        second.set_ceiling(Some(GridSurface::flat(1024, None)));
+        second.set_ground_floor(Some(GridSurface::flat(0, None)));
+        second.set_ground_ceiling(Some(GridSurface::flat(1024, None)));
         second.west.push(GridWall::span(0, 1024, None));
         let budget = GridBudget::of(&world_with_room(room));
         assert_eq!(budget.rooms, 1);

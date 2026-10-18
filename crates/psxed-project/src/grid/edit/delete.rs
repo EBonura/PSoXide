@@ -20,8 +20,8 @@ pub fn delete_faces(world: &mut GridWorld, faces: &[FaceRef]) -> usize {
                     continue;
                 };
                 let slot = match kind {
-                    SurfaceKind::Floor => sector.floor_slot_mut(),
-                    SurfaceKind::Ceiling => sector.ceiling_slot_mut(),
+                    SurfaceKind::Floor => sector.ground_floor_slot_mut(),
+                    SurfaceKind::Ceiling => sector.ground_ceiling_slot_mut(),
                 };
                 if slot.take().is_some() {
                     removed += 1;
@@ -101,7 +101,7 @@ mod tests {
         let mut room = GridRoom::new("r", 3, 1);
         for x in 0..3 {
             let s = room.sector_or_insert(x, 0).unwrap();
-            s.set_floor(Some(GridSurface::flat(0, None)));
+            s.set_ground_floor(Some(GridSurface::flat(0, None)));
             for i in 0..3 {
                 s.north.push(GridWall::span(i * 256, i * 256 + 256, None));
             }
@@ -138,7 +138,7 @@ mod tests {
             ],
         );
         assert_eq!(removed, 1);
-        assert!(w.rooms[0].sector(0, 0).unwrap().floor().is_none());
+        assert!(w.rooms[0].sector(0, 0).unwrap().ground_floor().is_none());
     }
 
     #[test]

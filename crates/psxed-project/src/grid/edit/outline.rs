@@ -108,7 +108,8 @@ fn has_space(world: &GridWorld, room: usize, cell: [i32; 2]) -> bool {
     r.local(cell)
         .and_then(|[x, z]| r.sector(x, z))
         .is_some_and(|s| {
-            s.floor().is_some_and(|f| f.void != VOID_A | VOID_B) || s.ceiling().is_some()
+            s.ground_floor().is_some_and(|f| f.void != VOID_A | VOID_B)
+                || s.ground_ceiling().is_some()
         })
 }
 
@@ -146,11 +147,11 @@ pub fn cut_corners(
         let mut surfaces: Vec<&mut GridSurface> = Vec::new();
         match cut {
             CornerCut::Void => {
-                let (floor, ceiling) = sector.floor_and_ceiling_mut();
+                let (floor, ceiling) = sector.ground_floor_and_ceiling_mut();
                 surfaces.extend(floor);
                 surfaces.extend(ceiling);
             }
-            CornerCut::Crack { .. } => surfaces.extend(sector.floor_mut()),
+            CornerCut::Crack { .. } => surfaces.extend(sector.ground_floor_mut()),
         }
         for surface in surfaces {
             // A split-level surface keeps the diagonal it has; the corner is
@@ -199,7 +200,7 @@ pub fn restore_voids(world: &mut GridWorld, room: usize, cells: &[[i32; 2]]) -> 
         let Some(sector) = r.local(cell).and_then(|[x, z]| r.sector_mut(x, z)) else {
             continue;
         };
-        let (floor, ceiling) = sector.floor_and_ceiling_mut();
+        let (floor, ceiling) = sector.ground_floor_and_ceiling_mut();
         for surface in [floor, ceiling].into_iter().flatten() {
             changed += usize::from(std::mem::take(&mut surface.void) != 0);
         }
@@ -389,7 +390,7 @@ pub fn fill_cells(
             let Some(sector) = r.local(cell).and_then(|[x, z]| r.sector_mut(x, z)) else {
                 continue;
             };
-            let (floor, ceiling) = sector.floor_and_ceiling_mut();
+            let (floor, ceiling) = sector.ground_floor_and_ceiling_mut();
             let heights = [(floor, spec.floor), (ceiling, spec.ceiling.unwrap_or(0))];
             for (i, (surface, h)) in heights.into_iter().enumerate() {
                 let Some(surface) = surface else { continue };
@@ -528,7 +529,7 @@ mod tests {
                 .local(*c)
                 .and_then(|[x, z]| w.rooms[0].sector(x, z))
                 .unwrap();
-            assert_eq!(s.floor().unwrap().void, 0);
+            assert_eq!(s.ground_floor().unwrap().void, 0);
         }
     }
 
@@ -576,7 +577,7 @@ mod tests {
                 .local(*c)
                 .and_then(|[x, z]| w.rooms[0].sector_mut(x, z))
                 .unwrap();
-            s.floor_mut().unwrap().heights = [512; 4];
+            s.ground_floor_mut().unwrap().heights = [512; 4];
         }
         let list: Vec<[i32; 2]> = plateau.iter().copied().collect();
         let cut = cut_corners(
@@ -589,7 +590,7 @@ mod tests {
         assert_eq!(cut.cut, 4);
         // The north-west plateau cell has its outer (NW) triangle at 0 and the
         // inner at 512, with a derived diagonal riser between.
-        let s = w.rooms[0].sector(1, 1).unwrap().floor().unwrap();
+        let s = w.rooms[0].sector(1, 1).unwrap().ground_floor().unwrap();
         assert_eq!(s.split, GridSplit::NeSw);
         assert_eq!(s.heights, [-0; 4].map(|_: i32| 0));
         assert_eq!(s.heights_b, Some([512; 4]));

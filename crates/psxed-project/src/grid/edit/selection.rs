@@ -358,7 +358,7 @@ mod tests {
             for x in 0..width {
                 room.sector_or_insert(x, z)
                     .unwrap()
-                    .set_floor(Some(GridSurface::flat(0, None)));
+                    .set_ground_floor(Some(GridSurface::flat(0, None)));
             }
         }
         GridWorld {
@@ -429,7 +429,7 @@ mod tests {
         let mut sel = GridSelection::new();
         sel.extend([floor([0, 0]), floor([1, 0]), floor([5, 5])]);
         assert_eq!(sel.retain_valid(&w), 1);
-        w.rooms[0].sector_mut(0, 0).unwrap().set_floor(None);
+        w.rooms[0].sector_mut(0, 0).unwrap().set_ground_floor(None);
         assert_eq!(sel.retain_valid(&w), 1);
         assert_eq!(sel.items(), &[floor([1, 0])]);
     }
@@ -437,7 +437,7 @@ mod tests {
     #[test]
     fn surface_range_is_the_bounding_rectangle() {
         let mut w = world(4, 4);
-        w.rooms[0].sector_mut(2, 2).unwrap().set_floor(None);
+        w.rooms[0].sector_mut(2, 2).unwrap().set_ground_floor(None);
         let faces = range_surfaces(&w, 0, SurfaceKind::Floor, &[[0, 0]], [2, 2]);
         // 3x3 rectangle minus the missing floor.
         assert_eq!(faces.len(), 8);
@@ -547,7 +547,7 @@ mod tests {
     #[test]
     fn box_and_select_all_helpers() {
         let mut w = world(3, 3);
-        w.rooms[0].sector_mut(1, 1).unwrap().set_floor(None);
+        w.rooms[0].sector_mut(1, 1).unwrap().set_ground_floor(None);
         let cells = cells_in_rect(&w, 0, CellRect::from_corners([0, 0], [1, 1]));
         assert_eq!(cells.len(), 3, "the emptied cell has nothing to select");
         w.rooms[0]

@@ -206,7 +206,7 @@ impl StairsDrag {
         // The start height: the first path sector that has a floor.
         let base = treads.iter().find_map(|t| {
             let [x, z] = target.local(t.cell)?;
-            let floor = target.sector(x, z)?.floor()?;
+            let floor = target.sector(x, z)?.ground_floor()?;
             Some(snap_to(floor.heights.iter().sum::<i32>() / 4, FINE_UNITS))
         });
         Some(Self {
@@ -324,7 +324,9 @@ impl StairsDrag {
             } else {
                 [top; 4]
             };
-            let existed = room.sector(x, z).is_some_and(|s| s.floor().is_some());
+            let existed = room
+                .sector(x, z)
+                .is_some_and(|s| s.ground_floor().is_some());
             let Some(sector) = room.sector_or_insert(x, z) else {
                 continue;
             };
@@ -335,12 +337,12 @@ impl StairsDrag {
             );
             let old = floor_corners(sector);
             if !existed {
-                sector.set_floor(Some(GridSurface::flat_auto(corners[0], None)));
+                sector.set_ground_floor(Some(GridSurface::flat_auto(corners[0], None)));
                 flight.applied.created += 1;
             }
             let old = old.unwrap_or([corners; 2]);
             let wanted = [corners, corners];
-            if let Some(floor) = sector.floor_mut() {
+            if let Some(floor) = sector.ground_floor_mut() {
                 set_floor_corners(floor, wanted);
                 floor.heights_b = None;
                 if wanted != old {
@@ -353,7 +355,7 @@ impl StairsDrag {
             } else if let Some(ceiling) = ceiling_corners(sector) {
                 let (clamped, held) = clamp_under_ceiling(ceiling, old, wanted);
                 if held {
-                    if let Some(floor) = sector.floor_mut() {
+                    if let Some(floor) = sector.ground_floor_mut() {
                         set_floor_corners(floor, clamped);
                     }
                     flight.applied.clamped += 1;

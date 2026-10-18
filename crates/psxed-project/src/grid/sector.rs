@@ -300,40 +300,40 @@ impl GridSector {
     // ---- the ground span ---------------------------------------------
 
     /// Floor of the ground span, `None` for a pit or open void.
-    pub fn floor(&self) -> Option<&GridSurface> {
+    pub fn ground_floor(&self) -> Option<&GridSurface> {
         self.spans[0].floor.as_ref()
     }
 
     /// Ceiling of the ground span, `None` for open sky.
-    pub fn ceiling(&self) -> Option<&GridSurface> {
+    pub fn ground_ceiling(&self) -> Option<&GridSurface> {
         self.spans[0].ceiling.as_ref()
     }
 
     /// Mutable floor of the ground span.
-    pub fn floor_mut(&mut self) -> Option<&mut GridSurface> {
+    pub fn ground_floor_mut(&mut self) -> Option<&mut GridSurface> {
         self.spans[0].floor.as_mut()
     }
 
     /// Mutable ceiling of the ground span.
-    pub fn ceiling_mut(&mut self) -> Option<&mut GridSurface> {
+    pub fn ground_ceiling_mut(&mut self) -> Option<&mut GridSurface> {
         self.spans[0].ceiling.as_mut()
     }
 
     /// The floor slot of the ground span itself, for code that treats floor
-    /// and ceiling alike (see [`Self::ceiling_slot_mut`]).
-    pub fn floor_slot_mut(&mut self) -> &mut Option<GridSurface> {
+    /// and ceiling alike (see [`Self::ground_ceiling_slot_mut`]).
+    pub fn ground_floor_slot_mut(&mut self) -> &mut Option<GridSurface> {
         &mut self.spans[0].floor
     }
 
     /// The ceiling slot of the ground span itself.
-    pub fn ceiling_slot_mut(&mut self) -> &mut Option<GridSurface> {
+    pub fn ground_ceiling_slot_mut(&mut self) -> &mut Option<GridSurface> {
         &mut self.spans[0].ceiling
     }
 
     /// The ground span's floor and ceiling at once, both mutable (two calls
-    /// to [`Self::floor_mut`] and [`Self::ceiling_mut`] would borrow the
+    /// to [`Self::ground_floor_mut`] and [`Self::ground_ceiling_mut`] would borrow the
     /// sector twice).
-    pub fn floor_and_ceiling_mut(
+    pub fn ground_floor_and_ceiling_mut(
         &mut self,
     ) -> (Option<&mut GridSurface>, Option<&mut GridSurface>) {
         let ground = &mut self.spans[0];
@@ -341,32 +341,32 @@ impl GridSector {
     }
 
     /// Replace the floor of the ground span.
-    pub fn set_floor(&mut self, floor: Option<GridSurface>) {
+    pub fn set_ground_floor(&mut self, floor: Option<GridSurface>) {
         self.spans[0].floor = floor;
     }
 
     /// Replace the ceiling of the ground span.
-    pub fn set_ceiling(&mut self, ceiling: Option<GridSurface>) {
+    pub fn set_ground_ceiling(&mut self, ceiling: Option<GridSurface>) {
         self.spans[0].ceiling = ceiling;
     }
 
     /// Take the floor of the ground span, leaving none.
-    pub fn take_floor(&mut self) -> Option<GridSurface> {
+    pub fn take_ground_floor(&mut self) -> Option<GridSurface> {
         self.spans[0].floor.take()
     }
 
     /// Take the ceiling of the ground span, leaving none.
-    pub fn take_ceiling(&mut self) -> Option<GridSurface> {
+    pub fn take_ground_ceiling(&mut self) -> Option<GridSurface> {
         self.spans[0].ceiling.take()
     }
 
     /// Material of the derived walls the ground span's solid owns.
-    pub fn wall_material(&self) -> Option<ResourceId> {
+    pub fn ground_wall_material(&self) -> Option<ResourceId> {
         self.spans[0].wall_material
     }
 
     /// Set the material of the derived walls the ground span's solid owns.
-    pub fn set_wall_material(&mut self, material: Option<ResourceId>) {
+    pub fn set_ground_wall_material(&mut self, material: Option<ResourceId>) {
         self.spans[0].wall_material = material;
     }
 

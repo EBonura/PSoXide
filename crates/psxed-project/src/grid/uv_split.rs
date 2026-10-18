@@ -244,7 +244,9 @@ mod tests {
         let mut room = GridRoom::new("r", 1, 1);
         let mut floor = GridSurface::flat(0, None);
         floor.tri_a.uv = uv;
-        room.sector_or_insert(0, 0).unwrap().set_floor(Some(floor));
+        room.sector_or_insert(0, 0)
+            .unwrap()
+            .set_ground_floor(Some(floor));
         GridWorld {
             scale: UNIT,
             rooms: vec![room],

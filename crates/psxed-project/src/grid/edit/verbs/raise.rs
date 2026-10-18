@@ -79,7 +79,7 @@ pub fn default_mode(world: &GridWorld, region: &Region) -> RaiseMode {
         let Some(floor) = room
             .local(cell)
             .and_then(|[x, z]| room.sector(x, z))
-            .and_then(|s| s.floor())
+            .and_then(|s| s.ground_floor())
         else {
             continue;
         };
@@ -103,7 +103,7 @@ pub fn default_mode(world: &GridWorld, region: &Region) -> RaiseMode {
 pub fn height_under(world: &GridWorld, room: usize, cell: [i32; 2]) -> Option<i32> {
     let room = world.rooms.get(room)?;
     let [x, z] = room.local(cell)?;
-    let floor = room.sector(x, z)?.floor()?;
+    let floor = room.sector(x, z)?.ground_floor()?;
     let sum: i32 = floor.heights.iter().sum();
     Some(crate::grid::units::snap_to(sum / 4, FINE_UNITS))
 }
@@ -196,7 +196,7 @@ impl RaiseDrag {
                     held = was_held;
                 }
             }
-            if let Some(floor) = sector.floor_mut() {
+            if let Some(floor) = sector.ground_floor_mut() {
                 set_floor_corners(floor, wanted);
                 // Only a floor that moved chooses its diagonal again, so an
                 // amount of zero leaves the document exactly as it was.
@@ -207,7 +207,7 @@ impl RaiseDrag {
             if params.follow_ceiling {
                 let deltas = [0, 1].map(|t| core::array::from_fn(|i| wanted[t][i] - old[t][i]));
                 move_ceiling_with_floor(sector, deltas);
-                if let Some(ceiling) = sector.ceiling_mut() {
+                if let Some(ceiling) = sector.ground_ceiling_mut() {
                     if deltas != [[0; 4]; 2] {
                         auto_split::resplit(ceiling);
                     }

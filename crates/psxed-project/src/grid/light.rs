@@ -322,7 +322,7 @@ mod tests {
         let mut room = GridRoom::new("r", 1, 1);
         room.sector_or_insert(0, 0)
             .unwrap()
-            .set_floor(Some(GridSurface::flat(0, None)));
+            .set_ground_floor(Some(GridSurface::flat(0, None)));
         let world = GridWorld {
             scale: GridScale { num: 1, den: 1 },
             rooms: vec![room],
@@ -409,7 +409,7 @@ mod tests {
     fn the_bake_applies_the_shade_to_walls_but_not_to_lit_floors() {
         let mut room = GridRoom::new("r", 1, 1);
         let sector = room.sector_or_insert(0, 0).unwrap();
-        sector.set_floor(Some(GridSurface::flat(0, None)));
+        sector.set_ground_floor(Some(GridSurface::flat(0, None)));
         sector
             .north
             .push(crate::grid::surface::GridWall::span(0, 1024, None));

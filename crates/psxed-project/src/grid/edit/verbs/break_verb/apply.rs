@@ -28,8 +28,8 @@ fn sector_mut(world: &mut GridWorld, room: usize, cell: [i32; 2]) -> Option<&mut
 
 fn surface_of(sector: &mut GridSector, surf: Surf) -> Option<&mut GridSurface> {
     match surf {
-        Surf::Floor => sector.floor_mut(),
-        Surf::Ceiling => sector.ceiling_mut(),
+        Surf::Floor => sector.ground_floor_mut(),
+        Surf::Ceiling => sector.ground_ceiling_mut(),
     }
 }
 
@@ -107,7 +107,7 @@ fn apply_one(
                 let r = &world.rooms[room];
                 r.local(o)
                     .and_then(|[x, z]| r.sector(x, z))
-                    .and_then(|s| s.floor())
+                    .and_then(|s| s.ground_floor())
                     .map(|f| f.tri_a.material)
             });
             let Some(sector) = sector_mut(world, room, *cell) else {
@@ -187,7 +187,7 @@ fn apply_one(
             let Some(sector) = sector_mut(world, room, *cell) else {
                 return false;
             };
-            let (floor, ceiling) = sector.floor_and_ceiling_mut();
+            let (floor, ceiling) = sector.ground_floor_and_ceiling_mut();
             for surface in [floor, ceiling].into_iter().flatten() {
                 surface.void = VOID_A | VOID_B;
                 changed = true;

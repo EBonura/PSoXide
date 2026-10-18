@@ -91,10 +91,10 @@ pub fn next_wall_heights(
 ) -> Option<[i32; 4]> {
     let (room_bottom, room_top) = room_bounds;
     let [fa, fb] = sector
-        .floor()
+        .ground_floor()
         .map_or([room_bottom; 2], |s| surface_edge_heights(s, edge));
     let [ca, cb] = sector
-        .ceiling()
+        .ground_ceiling()
         .map_or([room_top; 2], |s| surface_edge_heights(s, edge));
     let walls = sector.walls(edge);
     if walls.len() >= MAX_WALLS_PER_EDGE {
@@ -552,22 +552,22 @@ mod tests {
         let mut room = GridRoom::new("r", 1, 1);
         assert_eq!(room_height_bounds(&room), (0, 3072));
         let s = room.sector_or_insert(0, 0).unwrap();
-        s.set_floor(Some(GridSurface::flat(-256, None)));
-        s.set_ceiling(Some(GridSurface::flat(1024, None)));
+        s.set_ground_floor(Some(GridSurface::flat(-256, None)));
+        s.set_ground_ceiling(Some(GridSurface::flat(1024, None)));
         assert_eq!(room_height_bounds(&room), (-256, 1024));
         // A flat room still gets a default ceiling over its floor.
         let mut flat = GridRoom::new("f", 1, 1);
         flat.sector_or_insert(0, 0)
             .unwrap()
-            .set_floor(Some(GridSurface::flat(512, None)));
+            .set_ground_floor(Some(GridSurface::flat(512, None)));
         assert_eq!(room_height_bounds(&flat), (512, 512 + 3072));
     }
 
     fn world() -> GridWorld {
         let mut room = GridRoom::new("r", 1, 1);
         let s = room.sector_or_insert(0, 0).unwrap();
-        s.set_floor(Some(GridSurface::flat(0, None)));
-        s.set_ceiling(Some(GridSurface::flat(2048, None)));
+        s.set_ground_floor(Some(GridSurface::flat(0, None)));
+        s.set_ground_ceiling(Some(GridSurface::flat(2048, None)));
         GridWorld {
             scale: GridScale { num: 1, den: 1 },
             rooms: vec![room],
@@ -648,8 +648,8 @@ mod tests {
         let mut room = GridRoom::new("r", 4, 1);
         for x in 0..4 {
             let s = room.sector_or_insert(x, 0).unwrap();
-            s.set_floor(Some(GridSurface::flat(0, None)));
-            s.set_ceiling(Some(GridSurface::flat(1024, None)));
+            s.set_ground_floor(Some(GridSurface::flat(0, None)));
+            s.set_ground_ceiling(Some(GridSurface::flat(1024, None)));
         }
         let mut world = GridWorld {
             scale: GridScale { num: 1, den: 1 },
@@ -707,13 +707,13 @@ mod tests {
         for z in 0..3 {
             for x in 0..3 {
                 let sector = room.sector_or_insert(x, z).unwrap();
-                sector.set_floor(Some(GridSurface::flat(0, None)));
-                sector.set_ceiling(Some(GridSurface::flat(2048, None)));
+                sector.set_ground_floor(Some(GridSurface::flat(0, None)));
+                sector.set_ground_ceiling(Some(GridSurface::flat(2048, None)));
             }
         }
         room.sector_or_insert(1, 1)
             .unwrap()
-            .set_floor(Some(GridSurface::flat(512, None)));
+            .set_ground_floor(Some(GridSurface::flat(512, None)));
         let mut world = GridWorld {
             scale: GridScale { num: 1, den: 1 },
             rooms: vec![room],

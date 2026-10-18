@@ -260,7 +260,7 @@ mod tests {
     fn world() -> GridWorld {
         let mut room = GridRoom::new("r", 1, 1);
         let s = room.sector_or_insert(0, 0).unwrap();
-        s.set_floor(Some(GridSurface::flat(0, None)));
+        s.set_ground_floor(Some(GridSurface::flat(0, None)));
         s.north.push(GridWall::span(0, 512, None));
         GridWorld {
             scale: GridScale { num: 1, den: 1 },

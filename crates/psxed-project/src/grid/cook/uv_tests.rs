@@ -21,7 +21,9 @@ fn floor_world(uv: FaceUv) -> GridWorld {
     let mut room = GridRoom::new("r", 1, 1);
     let mut floor = GridSurface::flat(0, Some(rid(7)));
     floor.tri_a.uv = uv;
-    room.sector_or_insert(0, 0).unwrap().set_floor(Some(floor));
+    room.sector_or_insert(0, 0)
+        .unwrap()
+        .set_ground_floor(Some(floor));
     GridWorld {
         scale: GridScale::DEFAULT,
         rooms: vec![room],

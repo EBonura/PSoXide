@@ -37,7 +37,7 @@ fn hall() -> GridWorld {
         for x in 0..12 {
             room.sector_or_insert(x, z)
                 .unwrap()
-                .set_floor(Some(GridSurface::flat(0, Some(rid(7)))));
+                .set_ground_floor(Some(GridSurface::flat(0, Some(rid(7)))));
         }
     }
     GridWorld {

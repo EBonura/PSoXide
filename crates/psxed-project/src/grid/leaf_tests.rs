@@ -114,7 +114,7 @@ fn extra_spans_ride_the_dense_form_and_a_single_span_is_written_as_before() {
     let mut room = GridRoom::new("tall", 2, 1);
     room.sector_or_insert(0, 0)
         .unwrap()
-        .set_floor(Some(GridSurface::flat(0, None)));
+        .set_ground_floor(Some(GridSurface::flat(0, None)));
     let mut hall = GridSector::default();
     hall.insert_span(0, span(0, 2048));
     hall.insert_span(1, span(3072, 5120));
@@ -144,7 +144,7 @@ fn a_dense_list_of_the_wrong_length_reads_as_far_as_it_goes() {
     for (x, z) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
         room.sector_or_insert(x, z)
             .unwrap()
-            .set_floor(Some(GridSurface::flat(0, None)));
+            .set_ground_floor(Some(GridSurface::flat(0, None)));
     }
     let text = ron_of(&room);
     // Declare a deeper room than the list holds: the tail is empty sectors.
@@ -213,7 +213,7 @@ fn translating_a_room_moves_the_origin_and_every_leaf_together() {
     room.origin = [2, 2];
     room.sector_or_insert(1, 0)
         .unwrap()
-        .set_floor(Some(GridSurface::flat(64, None)));
+        .set_ground_floor(Some(GridSurface::flat(64, None)));
     let before = room.sector(1, 0).cloned();
     assert!(room.translate([5, -3]));
     assert_eq!(room.origin, [7, -1]);
@@ -310,7 +310,7 @@ fn the_span_resolver_picks_the_storey_a_height_is_in() {
         "the highest reachable floor wins"
     );
     // The ground span is what the single-span accessors read.
-    assert_eq!(column.floor().unwrap().heights[0], 0);
+    assert_eq!(column.ground_floor().unwrap().heights[0], 0);
     assert_eq!(column.surfaces().count(), 3);
     assert_eq!(column.height_range(), Some((0, 3072)));
     // A pit has no floor and always reaches; the last span cannot go.

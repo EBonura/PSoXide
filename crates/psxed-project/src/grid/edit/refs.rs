@@ -168,8 +168,8 @@ impl FaceRef {
         };
         let sector = self.sector(world)?;
         match kind {
-            SurfaceKind::Floor => sector.floor(),
-            SurfaceKind::Ceiling => sector.ceiling(),
+            SurfaceKind::Floor => sector.ground_floor(),
+            SurfaceKind::Ceiling => sector.ground_ceiling(),
         }
     }
 
@@ -180,8 +180,8 @@ impl FaceRef {
         };
         let sector = self.sector_mut(world)?;
         match kind {
-            SurfaceKind::Floor => sector.floor_mut(),
-            SurfaceKind::Ceiling => sector.ceiling_mut(),
+            SurfaceKind::Floor => sector.ground_floor_mut(),
+            SurfaceKind::Ceiling => sector.ground_ceiling_mut(),
         }
     }
 
@@ -422,10 +422,10 @@ pub fn faces_of_cell(world: &GridWorld, room: usize, cell: [i32; 2]) -> Vec<Face
     let Some(sector) = FaceRef::floor(room, cell).sector(world) else {
         return out;
     };
-    if sector.floor().is_some() {
+    if sector.ground_floor().is_some() {
         out.push(FaceRef::floor(room, cell));
     }
-    if sector.ceiling().is_some() {
+    if sector.ground_ceiling().is_some() {
         out.push(FaceRef::ceiling(room, cell));
     }
     for edge in WallEdge::ALL {
@@ -458,7 +458,7 @@ mod tests {
         let world = world_with(|r| {
             r.sector_or_insert(1, 0)
                 .unwrap()
-                .set_floor(Some(GridSurface::flat(256, None)));
+                .set_ground_floor(Some(GridSurface::flat(256, None)));
             r.sector_or_insert(1, 0)
                 .unwrap()
                 .east
@@ -481,7 +481,7 @@ mod tests {
             let sector = r.sector_or_insert(0, 0).unwrap();
             let mut floor = GridSurface::flat(0, None);
             floor.heights = [10, 20, 30, 40];
-            sector.set_floor(Some(floor));
+            sector.set_ground_floor(Some(floor));
             sector.north.push(GridWall::span(0, 512, None));
         });
         let corner = |face, corner| CornerRef {
@@ -513,7 +513,7 @@ mod tests {
             r.y_offset = 100;
             r.sector_or_insert(0, 0)
                 .unwrap()
-                .set_floor(Some(GridSurface::flat(0, None)));
+                .set_ground_floor(Some(GridSurface::flat(0, None)));
         });
         let corner = CornerRef {
             face: FaceRef::floor(0, [4, -2]),
@@ -534,7 +534,9 @@ mod tests {
         let world = world_with(|r| {
             let mut floor = GridSurface::flat(0, None);
             floor.heights_b = Some([256; 4]);
-            r.sector_or_insert(0, 0).unwrap().set_floor(Some(floor));
+            r.sector_or_insert(0, 0)
+                .unwrap()
+                .set_ground_floor(Some(floor));
         });
         let face = FaceRef::floor(0, [4, -2]);
         assert_eq!(face.layers(&world), 2);

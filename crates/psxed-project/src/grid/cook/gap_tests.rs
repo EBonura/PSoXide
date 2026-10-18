@@ -31,8 +31,8 @@ fn pillar_hall(pin: bool) -> GridWorld {
     for z in 0..12 {
         for x in 0..12 {
             let sector = room.sector_or_insert(x, z).unwrap();
-            sector.set_floor(Some(GridSurface::flat_auto(0, Some(rid(1)))));
-            sector.set_ceiling(Some(GridSurface::flat_auto(2560, Some(rid(2)))));
+            sector.set_ground_floor(Some(GridSurface::flat_auto(0, Some(rid(1)))));
+            sector.set_ground_ceiling(Some(GridSurface::flat_auto(2560, Some(rid(2)))));
         }
     }
     let mut world = GridWorld {
@@ -55,8 +55,8 @@ fn pillar_hall(pin: bool) -> GridWorld {
             let [x, z] = world.rooms[0].local(cell).unwrap();
             let sector = world.rooms[0].sector_mut(x, z).unwrap();
             let surface = match kind {
-                SurfaceKind::Floor => sector.floor_mut(),
-                SurfaceKind::Ceiling => sector.ceiling_mut(),
+                SurfaceKind::Floor => sector.ground_floor_mut(),
+                SurfaceKind::Ceiling => sector.ground_ceiling_mut(),
             }
             .unwrap();
             surface.split = split;
@@ -106,7 +106,7 @@ fn the_check_finds_a_floor_and_ceiling_that_disagree_about_the_void() {
     let floor = world.rooms[0]
         .sector_mut(x, z)
         .unwrap()
-        .floor_mut()
+        .ground_floor_mut()
         .unwrap();
     floor.split = GridSplit::NeSw;
     let found = holes(&world);

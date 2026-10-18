@@ -23,8 +23,8 @@ fn hall() -> GridWorld {
     for z in 0..2 {
         for x in 0..3 {
             let s = room.sector_or_insert(x, z).unwrap();
-            s.set_floor(Some(GridSurface::flat(0, Some(rid(1)))));
-            s.set_ceiling(Some(GridSurface::flat(2048, Some(rid(2)))));
+            s.set_ground_floor(Some(GridSurface::flat(0, Some(rid(1)))));
+            s.set_ground_ceiling(Some(GridSurface::flat(2048, Some(rid(2)))));
         }
     }
     GridWorld {

@@ -83,8 +83,8 @@ pub fn starter_world(
             let Some(sector) = room.sector_or_insert(x, z) else {
                 continue;
             };
-            sector.set_floor(Some(GridSurface::flat_auto(0, floor)));
-            sector.set_ceiling(Some(GridSurface::flat_auto(STARTER_HEIGHT, ceiling)));
+            sector.set_ground_floor(Some(GridSurface::flat_auto(0, floor)));
+            sector.set_ground_ceiling(Some(GridSurface::flat_auto(STARTER_HEIGHT, ceiling)));
         }
     }
     GridWorld {

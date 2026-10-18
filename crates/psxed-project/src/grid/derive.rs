@@ -230,8 +230,8 @@ fn side_of(sector: Option<&GridSector>, edge: WallEdge) -> Side {
             h: if forward(edge) { [a, b] } else { [b, a] },
         })
     };
-    let floor = s.floor().and_then(profile);
-    let ceil = s.ceiling().and_then(profile);
+    let floor = s.ground_floor().and_then(profile);
+    let ceil = s.ground_ceiling().and_then(profile);
     Side {
         space: floor.is_some() || ceil.is_some(),
         floor,
@@ -329,9 +329,9 @@ impl Edge<'_> {
             let sector = owner_sector;
             let surface = sector.and_then(|s| {
                 if kind == DerivedKind::Drop {
-                    s.ceiling()
+                    s.ground_ceiling()
                 } else {
-                    s.floor()
+                    s.ground_floor()
                 }
             });
             surface.and_then(|surface| {
@@ -386,8 +386,8 @@ impl Face<'_> {
         let owner_sector = sector_at(self.room, self.owner);
         let host_sector = sector_at(self.room, self.host);
         let chained = owner_sector
-            .and_then(|s| s.wall_material())
-            .or_else(|| host_sector.and_then(|s| s.wall_material()))
+            .and_then(|s| s.ground_wall_material())
+            .or_else(|| host_sector.and_then(|s| s.ground_wall_material()))
             .or(self.room.defaults.wall_material)
             .or(self.surface);
         DerivedWall {

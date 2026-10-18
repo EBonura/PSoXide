@@ -14,8 +14,8 @@ fn hall() -> GridWorld {
     for z in 0..3 {
         for x in 0..3 {
             let s = room.sector_or_insert(x, z).unwrap();
-            s.set_floor(Some(GridSurface::flat(0, None)));
-            s.set_ceiling(Some(GridSurface::flat(1024, None)));
+            s.set_ground_floor(Some(GridSurface::flat(0, None)));
+            s.set_ground_ceiling(Some(GridSurface::flat(1024, None)));
         }
     }
     GridWorld {
@@ -37,7 +37,7 @@ fn the_closure_of_a_derived_room_is_solid_and_a_platform_adds_no_wall_records() 
     world.rooms[0]
         .sector_or_insert(1, 1)
         .unwrap()
-        .set_floor(Some(GridSurface::flat(256, None)));
+        .set_ground_floor(Some(GridSurface::flat(256, None)));
     let with_platform = cook(&world).unwrap();
     assert_eq!(with_platform.tables[0].walls.len(), 12);
     assert_eq!(with_platform.tables[0].quads.len(), t.quads.len() + 4);
@@ -49,7 +49,7 @@ fn overrides_make_ghost_walls_and_solid_risers() {
     world.rooms[0]
         .sector_or_insert(1, 1)
         .unwrap()
-        .set_floor(Some(GridSurface::flat(256, None)));
+        .set_ground_floor(Some(GridSurface::flat(256, None)));
     // A ghost closure wall: still drawn, no record.
     let ghost = edge_key([0, 0], WallEdge::North);
     world.rooms[0]
@@ -89,14 +89,14 @@ fn a_riser_taller_than_a_step_gets_a_one_sided_cliff_wall_and_a_low_one_does_not
     world.rooms[0]
         .sector_or_insert(1, 1)
         .unwrap()
-        .set_floor(Some(GridSurface::flat(256, None)));
+        .set_ground_floor(Some(GridSurface::flat(256, None)));
     let low = cook(&world).unwrap();
     assert!(low.tables[0].walls.iter().all(|w| w.flags == 0));
     // 768 are 60 runtime units: more than the motor steps up.
     world.rooms[0]
         .sector_or_insert(1, 1)
         .unwrap()
-        .set_floor(Some(GridSurface::flat(768, None)));
+        .set_ground_floor(Some(GridSurface::flat(768, None)));
     let tall = cook(&world).unwrap();
     let cliffs: Vec<_> = tall.tables[0]
         .walls
@@ -133,8 +133,8 @@ fn diagonal_closures_and_cliffs_are_cooked_on_the_diagonal_edges() {
     let mut world = hall();
     {
         let s = world.rooms[0].sector_or_insert(1, 1).unwrap();
-        s.floor_mut().unwrap().void = VOID_A;
-        s.ceiling_mut().unwrap().void = VOID_A;
+        s.ground_floor_mut().unwrap().void = VOID_A;
+        s.ground_ceiling_mut().unwrap().void = VOID_A;
     }
     let cooked = cook(&world).unwrap();
     let diag: Vec<_> = cooked.tables[0]
@@ -153,7 +153,7 @@ fn diagonal_closures_and_cliffs_are_cooked_on_the_diagonal_edges() {
         let f = world.rooms[0]
             .sector_or_insert(1, 1)
             .unwrap()
-            .floor_mut()
+            .ground_floor_mut()
             .unwrap();
         // Triangle 0 (NE half, the front of NW-SE) high, triangle 1 low.
         f.heights = [1024; 4];

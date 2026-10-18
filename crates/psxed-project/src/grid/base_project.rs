@@ -70,7 +70,11 @@ pub(super) fn strip_base(project: &mut ProjectDocument, enemies: usize) {
 
 /// Highest floor corner of a sector, grid units.
 fn floor_top(world: &GridWorld, room: usize, cell: [usize; 2]) -> Option<i32> {
-    let floor = world.rooms.get(room)?.sector(cell[0], cell[1])?.floor()?;
+    let floor = world
+        .rooms
+        .get(room)?
+        .sector(cell[0], cell[1])?
+        .ground_floor()?;
     floor.heights.iter().copied().max()
 }
 

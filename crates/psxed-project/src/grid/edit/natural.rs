@@ -43,8 +43,8 @@ impl Triangles {
 
 fn surface_mut(sector: &mut GridSector, kind: SurfaceKind) -> Option<&mut GridSurface> {
     match kind {
-        SurfaceKind::Floor => sector.floor_mut(),
-        SurfaceKind::Ceiling => sector.ceiling_mut(),
+        SurfaceKind::Floor => sector.ground_floor_mut(),
+        SurfaceKind::Ceiling => sector.ground_ceiling_mut(),
     }
 }
 
@@ -182,8 +182,8 @@ mod tests {
         let mut room = GridRoom::new_derived("r", 2, 1);
         for x in 0..2 {
             let s = room.sector_or_insert(x, 0).unwrap();
-            s.set_floor(Some(GridSurface::flat_auto(0, None)));
-            s.set_ceiling(Some(GridSurface::flat_auto(1024, None)));
+            s.set_ground_floor(Some(GridSurface::flat_auto(0, None)));
+            s.set_ground_ceiling(Some(GridSurface::flat_auto(1024, None)));
         }
         room.sector_or_insert(0, 0)
             .unwrap()
@@ -197,7 +197,7 @@ mod tests {
     }
 
     fn floor(w: &GridWorld, x: usize) -> &GridSurface {
-        w.rooms[0].sector(x, 0).unwrap().floor().unwrap()
+        w.rooms[0].sector(x, 0).unwrap().ground_floor().unwrap()
     }
 
     #[test]

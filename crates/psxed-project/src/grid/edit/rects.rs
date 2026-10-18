@@ -168,8 +168,8 @@ pub fn create_surfaces(
             continue;
         };
         let slot = match kind {
-            SurfaceKind::Floor => sector.floor_slot_mut(),
-            SurfaceKind::Ceiling => sector.ceiling_slot_mut(),
+            SurfaceKind::Floor => sector.ground_floor_slot_mut(),
+            SurfaceKind::Ceiling => sector.ground_ceiling_slot_mut(),
         };
         if slot.is_some() {
             outcome.skipped += 1;
@@ -209,8 +209,8 @@ pub fn delete_surfaces(
             continue;
         };
         let slot = match kind {
-            SurfaceKind::Floor => sector.floor_slot_mut(),
-            SurfaceKind::Ceiling => sector.ceiling_slot_mut(),
+            SurfaceKind::Floor => sector.ground_floor_slot_mut(),
+            SurfaceKind::Ceiling => sector.ground_ceiling_slot_mut(),
         };
         if slot.take().is_some() {
             outcome.changed += 1;
@@ -244,8 +244,8 @@ mod tests {
             return false;
         };
         room.sector(x, z).is_some_and(|s| match kind {
-            SurfaceKind::Floor => s.floor().is_some(),
-            SurfaceKind::Ceiling => s.ceiling().is_some(),
+            SurfaceKind::Floor => s.ground_floor().is_some(),
+            SurfaceKind::Ceiling => s.ground_ceiling().is_some(),
         })
     }
 
@@ -265,7 +265,7 @@ mod tests {
         // The cell the room started with (0,0) is inside the rectangle too.
         let [x, z] = room.local([0, 0]).unwrap();
         assert_eq!(
-            room.sector(x, z).unwrap().floor().unwrap().heights,
+            room.sector(x, z).unwrap().ground_floor().unwrap().heights,
             [256; 4]
         );
     }
@@ -291,9 +291,12 @@ mod tests {
         );
         assert_eq!((out.changed, out.skipped), (1, 2));
         let room = &world.rooms[0];
-        assert_eq!(room.sector(0, 0).unwrap().floor().unwrap().heights, [0; 4]);
         assert_eq!(
-            room.sector(2, 0).unwrap().floor().unwrap().heights,
+            room.sector(0, 0).unwrap().ground_floor().unwrap().heights,
+            [0; 4]
+        );
+        assert_eq!(
+            room.sector(2, 0).unwrap().ground_floor().unwrap().heights,
             [512; 4]
         );
     }

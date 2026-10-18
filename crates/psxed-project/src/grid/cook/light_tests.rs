@@ -18,7 +18,7 @@ fn open_floor() -> GridWorld {
         for x in 0..4 {
             room.sector_or_insert(x, z)
                 .unwrap()
-                .set_floor(Some(GridSurface::flat(0, Some(rid(7)))));
+                .set_ground_floor(Some(GridSurface::flat(0, Some(rid(7)))));
         }
     }
     GridWorld {

@@ -24,17 +24,29 @@ fn rocky() -> GridWorld {
     for z in 0..6 {
         for x in 0..6 {
             let s = room.sector_or_insert(x, z).unwrap();
-            s.set_floor(Some(GridSurface::flat(0, Some(rid(1)))));
-            s.set_ceiling(Some(GridSurface::flat(3072, Some(rid(2)))));
+            s.set_ground_floor(Some(GridSurface::flat(0, Some(rid(1)))));
+            s.set_ground_ceiling(Some(GridSurface::flat(3072, Some(rid(2)))));
         }
     }
     for z in 2..4 {
         for x in 2..4 {
-            room.sector_mut(x, z).unwrap().floor_mut().unwrap().heights = [768; 4];
+            room.sector_mut(x, z)
+                .unwrap()
+                .ground_floor_mut()
+                .unwrap()
+                .heights = [768; 4];
         }
     }
-    room.sector_mut(0, 5).unwrap().floor_mut().unwrap().heights = [0, 0, 256, 256];
-    room.sector_mut(5, 5).unwrap().floor_mut().unwrap().void = VOID_A;
+    room.sector_mut(0, 5)
+        .unwrap()
+        .ground_floor_mut()
+        .unwrap()
+        .heights = [0, 0, 256, 256];
+    room.sector_mut(5, 5)
+        .unwrap()
+        .ground_floor_mut()
+        .unwrap()
+        .void = VOID_A;
     room.band_sets.push(BandSet {
         name: "Strata".into(),
         lines: vec![Anchor::Abs(256), Anchor::Abs(512)],

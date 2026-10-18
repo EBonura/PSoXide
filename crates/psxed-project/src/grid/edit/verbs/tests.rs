@@ -25,8 +25,8 @@ pub(super) fn hall(w: usize, d: usize) -> GridWorld {
     for z in 0..d {
         for x in 0..w {
             let sector = room.sector_or_insert(x, z).unwrap();
-            sector.set_floor(Some(GridSurface::flat_auto(0, Some(rid(1)))));
-            sector.set_ceiling(Some(GridSurface::flat_auto(3072, Some(rid(2)))));
+            sector.set_ground_floor(Some(GridSurface::flat_auto(0, Some(rid(1)))));
+            sector.set_ground_ceiling(Some(GridSurface::flat_auto(3072, Some(rid(2)))));
         }
     }
     GridWorld {
@@ -48,13 +48,17 @@ pub(super) fn params(mode: RaiseMode) -> RaiseParams {
 pub(super) fn floor(world: &GridWorld, cell: [i32; 2]) -> GridSurface {
     let room = &world.rooms[0];
     let [x, z] = room.local(cell).unwrap();
-    room.sector(x, z).unwrap().floor().cloned().unwrap()
+    room.sector(x, z).unwrap().ground_floor().cloned().unwrap()
 }
 
 pub(super) fn ceiling(world: &GridWorld, cell: [i32; 2]) -> GridSurface {
     let room = &world.rooms[0];
     let [x, z] = room.local(cell).unwrap();
-    room.sector(x, z).unwrap().ceiling().cloned().unwrap()
+    room.sector(x, z)
+        .unwrap()
+        .ground_ceiling()
+        .cloned()
+        .unwrap()
 }
 
 fn square(a: [i32; 2], b: [i32; 2]) -> Region {
@@ -106,8 +110,16 @@ fn level_mode_flattens_and_offset_keeps_the_shape() {
     let mut world = hall(4, 4);
     {
         let room = &mut world.rooms[0];
-        room.sector_mut(1, 1).unwrap().floor_mut().unwrap().heights = [0, 256, 512, 256];
-        room.sector_mut(2, 1).unwrap().floor_mut().unwrap().heights = [256; 4];
+        room.sector_mut(1, 1)
+            .unwrap()
+            .ground_floor_mut()
+            .unwrap()
+            .heights = [0, 256, 512, 256];
+        room.sector_mut(2, 1)
+            .unwrap()
+            .ground_floor_mut()
+            .unwrap()
+            .heights = [256; 4];
     }
     let region = square([1, 1], [2, 1]);
     assert_eq!(default_mode(&world, &region), RaiseMode::Offset);
@@ -134,7 +146,7 @@ fn a_drag_is_absolute_apply_zero_restores_the_document_byte_for_byte() {
     world.rooms[0]
         .sector_mut(2, 2)
         .unwrap()
-        .floor_mut()
+        .ground_floor_mut()
         .unwrap()
         .heights = [0, 0, 256, 0];
     let original = world.clone();
@@ -160,7 +172,10 @@ fn a_drag_is_absolute_apply_zero_restores_the_document_byte_for_byte() {
 #[test]
 fn sectors_without_a_floor_are_skipped_and_counted() {
     let mut world = hall(4, 4);
-    world.rooms[0].sector_mut(1, 1).unwrap().set_floor(None);
+    world.rooms[0]
+        .sector_mut(1, 1)
+        .unwrap()
+        .set_ground_floor(None);
     let applied = raise_region(
         &mut world,
         &square([0, 0], [1, 1]),
@@ -185,7 +200,7 @@ fn auto_split_surfaces_follow_their_heights_and_legacy_ones_do_not() {
     world.rooms[0]
         .sector_mut(1, 1)
         .unwrap()
-        .floor_mut()
+        .ground_floor_mut()
         .unwrap()
         .auto_split = false;
     // Raise one corner's worth: a ramp over the 1x1 region tilts it, which
@@ -201,7 +216,11 @@ fn auto_split_surfaces_follow_their_heights_and_legacy_ones_do_not() {
     // Direct check of the surface rule through a bent cell.
     let mut bent = hall(1, 1);
     {
-        let f = bent.rooms[0].sector_mut(0, 0).unwrap().floor_mut().unwrap();
+        let f = bent.rooms[0]
+            .sector_mut(0, 0)
+            .unwrap()
+            .ground_floor_mut()
+            .unwrap();
         f.heights = [0, 0, 256, 0];
         f.split = GridSplit::NwSe;
     }
@@ -218,7 +237,7 @@ fn auto_split_surfaces_follow_their_heights_and_legacy_ones_do_not() {
     bent.rooms[0]
         .sector_mut(0, 0)
         .unwrap()
-        .floor_mut()
+        .ground_floor_mut()
         .unwrap()
         .auto_split = false;
     let drag = RaiseDrag::begin(&bent, &square([0, 0], [0, 0]), params(RaiseMode::Offset)).unwrap();
@@ -239,7 +258,7 @@ fn rules_paint_a_floor_whose_class_changed_unless_it_was_painted_by_hand() {
     world.rooms[0]
         .sector_mut(1, 0)
         .unwrap()
-        .floor_mut()
+        .ground_floor_mut()
         .unwrap()
         .paint_locked = true;
     // Level the three cells to 512 at a reference, then tilt cell 0 by
@@ -249,7 +268,7 @@ fn rules_paint_a_floor_whose_class_changed_unless_it_was_painted_by_hand() {
             world.rooms[0]
                 .sector_mut(x, 0)
                 .unwrap()
-                .floor_mut()
+                .ground_floor_mut()
                 .unwrap()
                 .heights = [0, 0, 256, 256];
         }
@@ -273,9 +292,12 @@ fn rules_paint_a_floor_whose_class_changed_unless_it_was_painted_by_hand() {
     assert_eq!(floor(&world, [1, 0]).tri_a.material, Some(rid(1)));
     // Every shaped sector got the rule's wall material.
     let room = &world.rooms[0];
-    assert_eq!(room.sector(0, 0).unwrap().wall_material(), Some(wall_mat));
     assert_eq!(
-        room.sector(2, 0).unwrap().wall_material(),
+        room.sector(0, 0).unwrap().ground_wall_material(),
+        Some(wall_mat)
+    );
+    assert_eq!(
+        room.sector(2, 0).unwrap().ground_wall_material(),
         None,
         "outside the region"
     );
@@ -301,7 +323,10 @@ fn the_palette_material_beats_the_wall_rule_and_trim_makes_one_default_set() {
     drag.apply(&mut world, 256);
     drag.apply(&mut world, 512);
     let room = &world.rooms[0];
-    assert_eq!(room.sector(1, 1).unwrap().wall_material(), Some(rid(20)));
+    assert_eq!(
+        room.sector(1, 1).unwrap().ground_wall_material(),
+        Some(rid(20))
+    );
     assert_eq!(room.band_sets.len(), 1, "repeated applies add one set");
     assert_eq!(room.defaults.bands, Some(0));
     assert_eq!(room.band_sets[0].bands[0].material, Some(rid(14)));
@@ -376,7 +401,7 @@ mod ramp {
             world.rooms[0]
                 .sector_mut(x, 1)
                 .unwrap()
-                .floor_mut()
+                .ground_floor_mut()
                 .unwrap()
                 .heights = [512; 4];
         }
@@ -441,7 +466,7 @@ mod ramp {
         world.rooms[0]
             .sector_mut(1, 2)
             .unwrap()
-            .floor_mut()
+            .ground_floor_mut()
             .unwrap()
             .paint_locked = true;
         // Three rows of 256: a gentle slope.
@@ -586,7 +611,10 @@ mod stairs {
     #[test]
     fn floors_are_made_where_the_path_crosses_holes_and_the_room_never_grows() {
         let mut world = hall(9, 5);
-        world.rooms[0].sector_mut(3, 2).unwrap().set_floor(None);
+        world.rooms[0]
+            .sector_mut(3, 2)
+            .unwrap()
+            .set_ground_floor(None);
         let flight = lay_stairs(&mut world, 0, &[[1, 2], [12, 2]], p(), 4 * CLICK_UNITS).unwrap();
         assert_eq!(flight.applied.created, 1);
         assert_eq!(
@@ -652,7 +680,7 @@ fn height_rules_paint_floors_by_height_and_make_a_strata_band_set() {
     world.rooms[0]
         .sector_mut(1, 1)
         .unwrap()
-        .floor_mut()
+        .ground_floor_mut()
         .unwrap()
         .paint_locked = true;
     raise_region(&mut world, &region, params(RaiseMode::Level), 0).unwrap();

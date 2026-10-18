@@ -633,7 +633,7 @@ mod tests {
         for (x, z) in [(0, 0), (1, 1)] {
             room.sector_or_insert(x, z)
                 .unwrap()
-                .set_floor(Some(GridSurface::flat(256 * (x as i32 + 1), None)));
+                .set_ground_floor(Some(GridSurface::flat(256 * (x as i32 + 1), None)));
         }
         room
     }
@@ -667,7 +667,10 @@ mod tests {
         assert_eq!(room.origin, [8, 19]);
         // The sector that was at world [11, 21] is still there.
         let [x, z] = room.local([11, 21]).unwrap();
-        assert_eq!(room.sector(x, z).unwrap().floor().unwrap().heights[0], 512);
+        assert_eq!(
+            room.sector(x, z).unwrap().ground_floor().unwrap().heights[0],
+            512
+        );
         assert_eq!(room.sector_count(), 2);
     }
 
@@ -688,7 +691,10 @@ mod tests {
         room.trim_empty();
         assert_eq!((room.width, room.depth), (2, 2));
         assert_eq!(room.origin, [10, 20]);
-        assert_eq!(room.sector(1, 1).unwrap().floor().unwrap().heights[0], 512);
+        assert_eq!(
+            room.sector(1, 1).unwrap().ground_floor().unwrap().heights[0],
+            512
+        );
     }
 
     #[test]
@@ -697,7 +703,7 @@ mod tests {
         room.sector_or_insert(0, 0);
         room.sector_or_insert(2, 2)
             .unwrap()
-            .set_floor(Some(GridSurface::flat(0, None)));
+            .set_ground_floor(Some(GridSurface::flat(0, None)));
         room.trim_empty();
         assert_eq!((room.width, room.depth), (1, 1));
         assert_eq!(room.origin, [2, 2]);

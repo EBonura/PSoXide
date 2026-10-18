@@ -51,8 +51,8 @@ fn hall(
             let in_ditch = DITCH.contains(&x);
             let bottom = if in_ditch { DITCH_FLOOR } else { 0 };
             let sector = room.sector_or_insert(x, z).expect("inside the room");
-            sector.set_floor(Some(GridSurface::flat(bottom, floor)));
-            sector.set_ceiling(Some(GridSurface::flat(HEIGHT, ceiling)));
+            sector.set_ground_floor(Some(GridSurface::flat(bottom, floor)));
+            sector.set_ground_ceiling(Some(GridSurface::flat(HEIGHT, ceiling)));
             for (on_edge, edge) in [
                 (z == 0, WallEdge::North),
                 (x == WIDTH - 1, WallEdge::East),

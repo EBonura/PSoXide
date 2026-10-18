@@ -512,7 +512,8 @@ pub fn build(
             })?;
             let (lo, hi) = build.range;
             let doc = room.sector(x, z);
-            let open = doc.is_some_and(|s| s.floor().is_some() && s.ceiling().is_none());
+            let open =
+                doc.is_some_and(|s| s.ground_floor().is_some() && s.ground_ceiling().is_none());
             build.tables.cells.push(RCell {
                 first: first as u16,
                 count,

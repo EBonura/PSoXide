@@ -192,7 +192,7 @@ pub fn build_with_meshes(
             let mut ceil_b: Option<[i16; 4]> = None;
             let mut walls: Vec<ColWall> = Vec::new();
             if let Some(doc) = room.sector(x, z) {
-                if let Some(floor) = doc.floor() {
+                if let Some(floor) = doc.ground_floor() {
                     let a = corners(units, room.y_offset, floor.heights, &at("floor"))?;
                     let b = floor
                         .heights_b
@@ -226,7 +226,7 @@ pub fn build_with_meshes(
                         }
                     }
                 }
-                if let Some(ceiling) = doc.ceiling() {
+                if let Some(ceiling) = doc.ground_ceiling() {
                     let a = corners(units, room.y_offset, ceiling.heights, &at("ceiling"))?;
                     let b = ceiling
                         .heights_b
@@ -256,7 +256,7 @@ pub fn build_with_meshes(
                         sector.flags |= SECTOR_SPLIT_LEVEL;
                         ceil_b = Some(b);
                     }
-                } else if doc.floor().is_some() {
+                } else if doc.ground_floor().is_some() {
                     sector.flags |= SECTOR_OPEN_SKY;
                 }
                 for wall_edge in WallEdge::ALL {
@@ -374,7 +374,7 @@ mod tests {
         let mut room = GridRoom::new("r", 2, 1);
         {
             let sector = room.sector_or_insert(0, 0).unwrap();
-            sector.set_floor(Some(GridSurface::flat(256, None)));
+            sector.set_ground_floor(Some(GridSurface::flat(256, None)));
             let mut wall = GridWall::span(0, 1024, None);
             wall.solid = true;
             sector.walls_mut(WallEdge::East).push(wall);
@@ -383,8 +383,8 @@ mod tests {
             let sector = room.sector_or_insert(1, 0).unwrap();
             let mut floor = GridSurface::flat(0, None);
             floor.walkable = false;
-            sector.set_floor(Some(floor));
-            sector.set_ceiling(Some(GridSurface::flat(1024, None)));
+            sector.set_ground_floor(Some(floor));
+            sector.set_ground_ceiling(Some(GridSurface::flat(1024, None)));
         }
         let tables = build(&units(), &room, 0).unwrap();
         assert_eq!(tables.sectors.len(), 2);
@@ -411,7 +411,7 @@ mod tests {
         let sector = room.sector_or_insert(0, 0).unwrap();
         let mut floor = GridSurface::flat(0, None);
         floor.heights = [0, 0, 2048, 2048];
-        sector.set_floor(Some(floor));
+        sector.set_ground_floor(Some(floor));
         let mut passable = GridWall::span(0, 256, None);
         passable.solid = false;
         sector.walls_mut(WallEdge::North).push(passable);
@@ -428,7 +428,7 @@ mod tests {
         let sector = room.sector_or_insert(0, 0).unwrap();
         let mut floor = GridSurface::flat(0, None);
         floor.heights_b = Some([256; 4]);
-        sector.set_floor(Some(floor));
+        sector.set_ground_floor(Some(floor));
         let tables = build(&units(), &room, 0).unwrap();
         assert_ne!(tables.sectors[0].flags & SECTOR_SPLIT_LEVEL, 0);
         assert_eq!(tables.splitbs[0].floor_b, [20; 4]);
@@ -441,10 +441,10 @@ mod tests {
         for z in 0..5 {
             for x in 0..5 {
                 let sector = room.sector_or_insert(x, z).unwrap();
-                sector.set_floor(Some(GridSurface::flat(0, None)));
+                sector.set_ground_floor(Some(GridSurface::flat(0, None)));
                 // 4096 grid units are 320 runtime units at 5/4: plenty of
                 // headroom for a clear neighbourhood.
-                sector.set_ceiling(Some(GridSurface::flat(4096, None)));
+                sector.set_ground_ceiling(Some(GridSurface::flat(4096, None)));
             }
         }
         // A wall spoils the neighbourhood of the sectors around it.
@@ -470,8 +470,8 @@ mod tests {
         for z in 0..3 {
             for x in 0..3 {
                 let sector = low.sector_or_insert(x, z).unwrap();
-                sector.set_floor(Some(GridSurface::flat(0, None)));
-                sector.set_ceiling(Some(GridSurface::flat(1024, None)));
+                sector.set_ground_floor(Some(GridSurface::flat(0, None)));
+                sector.set_ground_ceiling(Some(GridSurface::flat(1024, None)));
             }
         }
         let tables = build(&units(), &low, 0).unwrap();
