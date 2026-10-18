@@ -10,6 +10,7 @@
 //! and `psx_grid::format`.
 
 pub mod collision;
+pub mod leaf_collision;
 pub mod lod;
 pub mod mesh;
 pub mod mesh_collision;
@@ -22,7 +23,7 @@ use psx_grid::write::{LevelCore, RoomChunk};
 use psx_grid::ResidentRooms;
 use psx_grid::{
     Material, RoomRecord, CHUNK_HAS_LOD, CHUNK_HAS_PLANES, LEVEL_HAS_PLANES, LEVEL_HAS_SKY,
-    ROOM_FOG, ROOM_OUTDOOR, SECTION_COUNT, SECTOR_BYTES,
+    ROOM_FOG, ROOM_OUTDOOR, ROOM_TREE, SECTION_COUNT, SECTOR_BYTES,
 };
 
 pub use render::{BoundMaterial, MaterialBinder};
@@ -221,27 +222,17 @@ pub fn cook_level(
             .warnings
             .push(format!("grid world: {}", issue.describe()));
     }
-    // The runtime reads collision and portals per whole sector (the leaf
-    // format is phase T10), so a room with leaves of other sizes is
-    // collided and walked through as its sector view. Faces still come from
-    // the leaves.
-    let sector_world = crate::grid::sector_view::sector_world(world);
-    if let Some((_, approximate)) = &sector_world {
-        for (index, cell) in approximate {
-            report.warnings.push(format!(
-                "room {index} sector {},{}: collision stands on the sector's four corners; the fine leaves in it are drawn but not collided (leaf collision is phase T10)",
-                cell[0], cell[1]
-            ));
-        }
-    }
-    let sector_world = sector_world.map(|(w, _)| w);
-    let collision_world: &GridWorld = sector_world.as_ref().unwrap_or(world);
+    // Collision is cooked from the real leaves. Portals are still derived per
+    // whole sector, so a room with leaves of other sizes is walked through
+    // as its sector view (faces and collision never go through it).
+    let sector_world = crate::grid::sector_view::sector_world(world).map(|(w, _)| w);
+    let portal_world: &GridWorld = sector_world.as_ref().unwrap_or(world);
     // Collision first, for every room: the light bake shadows through the
     // same line of sight the game uses, which needs the whole world's solid
     // tables (stacked rooms shadow each other).
     let mut origins: Vec<[i32; 3]> = Vec::new();
     let mut cols: Vec<collision::Tables> = Vec::new();
-    for (index, room) in collision_world.rooms.iter().enumerate() {
+    for (index, room) in world.rooms.iter().enumerate() {
         origins.push([
             room.origin[0] * s as i32,
             units.rt(room.y_offset),
@@ -275,6 +266,7 @@ pub fn cook_level(
                     depth: room.depth as u8,
                     min_y: lo as i16,
                     max_y: hi as i16,
+                    flags: if col.tree.is_some() { ROOM_TREE } else { 0 },
                     ..RoomRecord::default()
                 }
             })
@@ -295,6 +287,7 @@ pub fn cook_level(
                 min_y: lo as i16,
                 max_y: hi as i16,
                 sectors: col.sectors.clone(),
+                tree: col.tree.clone(),
                 exts: col.exts.clone(),
                 walls: col.walls.clone(),
                 splitbs: col.splitbs.clone(),
@@ -393,6 +386,7 @@ pub fn cook_level(
             },
             lod_shift: lod::LOD_SHIFT,
             sectors: col.sectors,
+            tree: col.tree,
             exts: col.exts,
             walls: col.walls,
             splitbs: col.splitbs,
@@ -428,8 +422,9 @@ pub fn cook_level(
             section_bytes: chunk.section_bytes(),
         });
         let fog = &room.fog;
-        let flags =
-            (if outdoor { ROOM_OUTDOOR } else { 0 }) | (if fog.enabled { ROOM_FOG } else { 0 });
+        let flags = (if outdoor { ROOM_OUTDOOR } else { 0 })
+            | (if fog.enabled { ROOM_FOG } else { 0 })
+            | (if chunk.tree.is_some() { ROOM_TREE } else { 0 });
         records.push(RoomRecord {
             pack_sector: 0,
             pack_sectors: 0,
@@ -452,7 +447,7 @@ pub fn cook_level(
     }
 
     // Portals, grouped per source room.
-    let derived = portals::derive(collision_world, &units)?;
+    let derived = portals::derive(portal_world, &units)?;
     let mut all_portals = Vec::new();
     for (record, list) in records.iter_mut().zip(&derived) {
         record.portal_first =

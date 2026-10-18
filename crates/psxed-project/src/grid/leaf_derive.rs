@@ -31,7 +31,7 @@ const CLICK: i32 = SECTOR_UNITS / CLICKS_PER_SECTOR;
 
 /// A derived wall of a leaf below or above a sector (or any leaf in a mixed
 /// room), with where it lies.
-pub(super) struct LeafWall {
+pub(crate) struct LeafWall {
     /// The leaf that hosts (sees) the face.
     pub host: LeafKey,
     pub wall: DerivedWall,
@@ -148,6 +148,42 @@ fn side_walls(
     if lo >= hi {
         return;
     }
+    side_segments(room, cell, key, sector, side, (lo, hi), out);
+}
+
+/// The derived walls hosted by `key` on every side, not cut at sector
+/// borders: the segments of the finest common subdivision of each side with
+/// its neighbours, which for a balanced tree are the whole side or one half.
+/// For collision, which holds one record per leaf edge segment.
+pub(crate) fn leaf_walls(room: &GridRoom, key: LeafKey, sector: &GridSector) -> Vec<LeafWall> {
+    let mut out = Vec::new();
+    for side in SIDES {
+        let (start, len) = along(key, side);
+        side_segments(
+            room,
+            key.cell(),
+            key,
+            sector,
+            side,
+            (start, start + len),
+            &mut out,
+        );
+    }
+    out
+}
+
+/// The walls on one side of `key` over the clicks `span` along it.
+fn side_segments(
+    room: &GridRoom,
+    cell: [i32; 2],
+    key: LeafKey,
+    sector: &GridSector,
+    side: WallEdge,
+    (lo, hi): (i32, i32),
+    out: &mut Vec<LeafWall>,
+) {
+    let n = key.edge_clicks();
+    let (start, _) = along(key, side);
     // Segment ends: the clipped ends and the neighbours' borders.
     let mut breaks = vec![lo, hi];
     for nb in across(&room.leaves, key, side) {

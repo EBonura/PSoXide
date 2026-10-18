@@ -36,7 +36,10 @@ pub const MAX_CORNER_DELTA: i32 = 4096;
 /// Collision tables of one room.
 #[derive(Default)]
 pub struct Tables {
+    /// One record per sector, or per leaf when `tree` is set.
     pub sectors: Vec<Sector>,
+    /// The leaf tree tables of a room with leaves of several sizes.
+    pub tree: Option<psx_grid::write::TreeTables>,
     pub exts: Vec<SectorExt>,
     pub walls: Vec<ColWall>,
     pub splitbs: Vec<SplitB>,
@@ -48,7 +51,7 @@ pub struct Tables {
     pub warnings: Vec<String>,
 }
 
-fn edge_id(edge: WallEdge) -> u8 {
+pub(super) fn edge_id(edge: WallEdge) -> u8 {
     match edge {
         WallEdge::North => edge::NORTH,
         WallEdge::East => edge::EAST,
@@ -68,7 +71,7 @@ fn to_i16(value: i32, what: &str) -> Result<i16, String> {
     i16::try_from(value).map_err(|_| format!("{what} {value} leaves the i16 range of a room"))
 }
 
-fn corners(
+pub(super) fn corners(
     units: &RuntimeUnits,
     y_offset: i32,
     heights: [i32; 4],
@@ -91,7 +94,7 @@ fn corners(
     Ok(out)
 }
 
-fn walkable_bit(heights: [i16; 4], nesw: bool, second: bool, s: u32, bit: u16) -> u16 {
+pub(super) fn walkable_bit(heights: [i16; 4], nesw: bool, second: bool, s: u32, bit: u16) -> u16 {
     let normal = triangle_normal_q12(heights, nesw, second, s);
     if normal[1] >= MIN_WALKABLE_NORMAL_Y_Q12 {
         bit
@@ -115,7 +118,7 @@ pub fn is_cliff_wall(units: &RuntimeUnits, y_offset: i32, wall: &derive::Derived
 
 /// Whether a derived riser is a cliff: taller than the character steps up
 /// at either end, and not made a ghost by its override.
-fn cliff(wall: &derive::DerivedWall, y: &[i16; 4]) -> bool {
+pub(super) fn cliff(wall: &derive::DerivedWall, y: &[i16; 4]) -> bool {
     let step = psx_engine::WalkLimits::DEFAULT.step_up;
     wall.kind == derive::DerivedKind::Riser
         && wall.solid != Some(false)
@@ -125,6 +128,95 @@ fn cliff(wall: &derive::DerivedWall, y: &[i16; 4]) -> bool {
 
 fn surface_flags(surface: &GridSurface) -> bool {
     matches!(surface.split, GridSplit::NeSw)
+}
+
+/// The floor and ceiling of one cell as a collision record (`flags` carry the
+/// floor/ceiling/walk/sky bits, the corners the heights) and the second
+/// triangle's corners of a split-level floor and ceiling. `edge` is the
+/// cell's edge in runtime units (a sector's `S`, a leaf's own edge), which the
+/// walkable-slope test needs. `note` is told the lowest and highest corner.
+pub(super) fn surface_record(
+    units: &RuntimeUnits,
+    y_offset: i32,
+    doc: &crate::grid::sector::GridSector,
+    edge: u32,
+    at: &dyn Fn(&str) -> String,
+    note: &mut dyn FnMut(i16, i16),
+) -> Result<(Sector, Option<[i16; 4]>, Option<[i16; 4]>), String> {
+    let mut sector = Sector {
+        ext: NO_EXT,
+        ..Sector::default()
+    };
+    let mut floor_b: Option<[i16; 4]> = None;
+    let mut ceil_b: Option<[i16; 4]> = None;
+    if let Some(floor) = doc.ground_floor() {
+        let a = corners(units, y_offset, floor.heights, &at("floor"))?;
+        let b = floor
+            .heights_b
+            .map(|h| corners(units, y_offset, h, &at("floor")))
+            .transpose()?;
+        note(
+            a.iter()
+                .chain(b.iter().flatten())
+                .copied()
+                .min()
+                .unwrap_or(0),
+            a.iter()
+                .chain(b.iter().flatten())
+                .copied()
+                .max()
+                .unwrap_or(0),
+        );
+        if floor.walkable {
+            let nesw = surface_flags(floor);
+            sector.flags |= SECTOR_HAS_FLOOR;
+            if nesw {
+                sector.flags |= SECTOR_FLOOR_NESW;
+            }
+            sector.floor = a;
+            sector.flags |= walkable_bit(a, nesw, false, edge, SECTOR_FLOOR_WALK_A);
+            let second = b.unwrap_or(a);
+            sector.flags |= walkable_bit(second, nesw, true, edge, SECTOR_FLOOR_WALK_B);
+            if let Some(b) = b {
+                sector.flags |= SECTOR_SPLIT_LEVEL;
+                floor_b = Some(b);
+            }
+        }
+    }
+    if let Some(ceiling) = doc.ground_ceiling() {
+        let a = corners(units, y_offset, ceiling.heights, &at("ceiling"))?;
+        let b = ceiling
+            .heights_b
+            .map(|h| corners(units, y_offset, h, &at("ceiling")))
+            .transpose()?;
+        note(
+            a.iter()
+                .chain(b.iter().flatten())
+                .copied()
+                .min()
+                .unwrap_or(0),
+            a.iter()
+                .chain(b.iter().flatten())
+                .copied()
+                .max()
+                .unwrap_or(0),
+        );
+        sector.flags |= SECTOR_HAS_CEIL;
+        if surface_flags(ceiling) {
+            sector.flags |= SECTOR_CEIL_NESW;
+        }
+        if ceiling.walkable {
+            sector.flags |= SECTOR_CEIL_SOLID;
+        }
+        sector.ceil = a;
+        if let Some(b) = b {
+            sector.flags |= SECTOR_SPLIT_LEVEL;
+            ceil_b = Some(b);
+        }
+    } else if doc.ground_floor().is_some() {
+        sector.flags |= SECTOR_OPEN_SKY;
+    }
+    Ok((sector, floor_b, ceil_b))
 }
 
 /// Build the collision tables of `room`. `sector` is S.
@@ -170,6 +262,10 @@ pub fn build_with_meshes(
         camera_pass,
         extra,
     )?;
+    if !room.leaves.is_sectors_only() {
+        // Leaves of several sizes: one record per leaf and an index.
+        return super::leaf_collision::build(units, room, room_index, planes, mesh_warnings);
+    }
     let mut range: Option<(i32, i32)> = planes.range;
     let mut note = |lo: i16, hi: i16| {
         range = Some(match range {
@@ -192,73 +288,11 @@ pub fn build_with_meshes(
             let mut ceil_b: Option<[i16; 4]> = None;
             let mut walls: Vec<ColWall> = Vec::new();
             if let Some(doc) = room.sector(x, z) {
-                if let Some(floor) = doc.ground_floor() {
-                    let a = corners(units, room.y_offset, floor.heights, &at("floor"))?;
-                    let b = floor
-                        .heights_b
-                        .map(|h| corners(units, room.y_offset, h, &at("floor")))
-                        .transpose()?;
-                    note(
-                        a.iter()
-                            .chain(b.iter().flatten())
-                            .copied()
-                            .min()
-                            .unwrap_or(0),
-                        a.iter()
-                            .chain(b.iter().flatten())
-                            .copied()
-                            .max()
-                            .unwrap_or(0),
-                    );
-                    if floor.walkable {
-                        let nesw = surface_flags(floor);
-                        sector.flags |= SECTOR_HAS_FLOOR;
-                        if nesw {
-                            sector.flags |= SECTOR_FLOOR_NESW;
-                        }
-                        sector.floor = a;
-                        sector.flags |= walkable_bit(a, nesw, false, s, SECTOR_FLOOR_WALK_A);
-                        let second = b.unwrap_or(a);
-                        sector.flags |= walkable_bit(second, nesw, true, s, SECTOR_FLOOR_WALK_B);
-                        if let Some(b) = b {
-                            sector.flags |= SECTOR_SPLIT_LEVEL;
-                            floor_b = Some(b);
-                        }
-                    }
-                }
-                if let Some(ceiling) = doc.ground_ceiling() {
-                    let a = corners(units, room.y_offset, ceiling.heights, &at("ceiling"))?;
-                    let b = ceiling
-                        .heights_b
-                        .map(|h| corners(units, room.y_offset, h, &at("ceiling")))
-                        .transpose()?;
-                    note(
-                        a.iter()
-                            .chain(b.iter().flatten())
-                            .copied()
-                            .min()
-                            .unwrap_or(0),
-                        a.iter()
-                            .chain(b.iter().flatten())
-                            .copied()
-                            .max()
-                            .unwrap_or(0),
-                    );
-                    sector.flags |= SECTOR_HAS_CEIL;
-                    if surface_flags(ceiling) {
-                        sector.flags |= SECTOR_CEIL_NESW;
-                    }
-                    if ceiling.walkable {
-                        sector.flags |= SECTOR_CEIL_SOLID;
-                    }
-                    sector.ceil = a;
-                    if let Some(b) = b {
-                        sector.flags |= SECTOR_SPLIT_LEVEL;
-                        ceil_b = Some(b);
-                    }
-                } else if doc.ground_floor().is_some() {
-                    sector.flags |= SECTOR_OPEN_SKY;
-                }
+                let (record, fb, cb) =
+                    surface_record(units, room.y_offset, doc, s, &at, &mut note)?;
+                sector = record;
+                floor_b = fb;
+                ceil_b = cb;
                 for wall_edge in WallEdge::ALL {
                     for wall in doc.walls(wall_edge) {
                         let y = corners(units, room.y_offset, wall.heights, &at("wall"))?;

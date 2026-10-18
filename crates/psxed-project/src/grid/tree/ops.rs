@@ -20,10 +20,6 @@ pub enum SubdivideBlock {
     NoLeaf,
     /// The leaf is already the finest size, a quarter of a sector.
     Finest,
-    /// The leaf has a void triangle, a split-level surface or a wall on a
-    /// diagonal. Those stay on whole sectors until the diagonal derivation
-    /// learns leaves.
-    Diagonal,
 }
 
 impl SubdivideBlock {
@@ -32,7 +28,6 @@ impl SubdivideBlock {
         match self {
             Self::NoLeaf => "there is no cell there",
             Self::Finest => "the cell is already a quarter sector",
-            Self::Diagonal => "a void triangle, split-level floor or diagonal wall stays whole",
         }
     }
 }
@@ -76,9 +71,6 @@ pub(super) fn subdivide_raw(
     if key.level >= FINEST_LEVEL {
         return Err(SubdivideBlock::Finest);
     }
-    if has_diagonal_features(sector) {
-        return Err(SubdivideBlock::Diagonal);
-    }
     let children = split_sector(sector);
     let keys = key.children().ok_or(SubdivideBlock::Finest)?;
     room.remove_leaf(key);
@@ -88,16 +80,6 @@ pub(super) fn subdivide_raw(
     }
     edge_overrides::split(room, key);
     Ok(keys)
-}
-
-/// Whether the leaf uses a feature the leaf derivation does not carry below
-/// a sector: a void or split-level triangle, or a wall on a diagonal.
-pub fn has_diagonal_features(sector: &GridSector) -> bool {
-    sector
-        .surfaces()
-        .any(|s| s.heights_b.is_some() || s.void != 0)
-        || !sector.nwse.is_empty()
-        || !sector.nesw.is_empty()
 }
 
 /// Subdivide the leaf `key` into four children that look and stand exactly

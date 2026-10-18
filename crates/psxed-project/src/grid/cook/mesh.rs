@@ -23,7 +23,7 @@ pub struct OpenEdge {
     /// Another vertex of the room lies strictly inside the segment: the
     /// neighbour was split there and this edge was not (a T-junction).
     pub t_junction: bool,
-    /// Part of the edge has no other open edge along it: the surface ends
+    /// Part of the edge has no other open or shared edge along it: the surface ends
     /// here with nothing beside it, a hole the GPU shows the void through.
     /// False when the open edges beside it cover all of it (a T-junction
     /// chain: no hole, at worst a sub-pixel seam).
@@ -101,7 +101,9 @@ pub fn open_edges(chunk: &RoomChunk) -> Vec<OpenEdge> {
         // Intervals of the edge (as dot products from `a`) another open
         // edge runs along.
         let mut spans: Vec<(i64, i64)> = Vec::new();
-        for &j in &boundary {
+        // Edges three or more quads share (the walls round a saddle corner
+        // all meet on one vertical edge) cover a boundary edge as well.
+        for j in 0..open.len() {
             if j == i {
                 continue;
             }

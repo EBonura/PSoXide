@@ -25,6 +25,7 @@ use super::derive_diag;
 use super::faces::{Builder, GridFace, GridFaceKind, Square, UvDefaults};
 use super::leaf::{LeafKey, SECTOR_LEVEL};
 use super::leaf_derive;
+use super::leaf_diag;
 use super::overrides::WallMode;
 use super::room::GridRoom;
 use super::sector::{GridSector, WallEdge};
@@ -197,6 +198,14 @@ pub(super) fn cell_faces(
             builder.square = Square::sector(cell);
             for wall in derive_diag::diagonal_walls(r, cell) {
                 builder.derived_wall(r, &wall);
+            }
+        }
+        // So does a leaf below a sector, along its own diagonal.
+        for &(key, sector) in leaves.iter().filter(|(k, _)| k.level > SECTOR_LEVEL) {
+            builder.leaf = key;
+            builder.square = Square::leaf(key);
+            for w in leaf_diag::leaf_diag_walls(r, key, sector) {
+                builder.derived_wall_in(r, &w.wall, w.geom);
             }
         }
     }

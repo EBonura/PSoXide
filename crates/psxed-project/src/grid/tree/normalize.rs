@@ -256,9 +256,6 @@ pub enum TreeIssue {
     },
     /// A leaf above a sector is not one plane without walls.
     BigLeafNotPlanar(LeafKey),
-    /// A leaf below a sector has a void, a split level or a diagonal wall,
-    /// which the leaf derivation does not carry.
-    DiagonalBelowSector(LeafKey),
     /// A constrained hanging corner is not at the average of its edge.
     HangingCorner(HangingCorner),
 }
@@ -270,9 +267,6 @@ pub fn check(room: &GridRoom) -> Vec<TreeIssue> {
     for (key, sector) in room.leaves() {
         if key.level < SECTOR_LEVEL && !big_leaf_ok(sector) {
             issues.push(TreeIssue::BigLeafNotPlanar(key));
-        }
-        if key.level > SECTOR_LEVEL && super::ops::has_diagonal_features(sector) {
-            issues.push(TreeIssue::DiagonalBelowSector(key));
         }
         for side in SIDES {
             for n in across(&room.leaves, key, side) {

@@ -18,7 +18,7 @@ use super::units::{SECTOR_UNITS, TEXELS_PER_SECTOR};
 use super::uv::{Frame, Mapper};
 
 /// Where a derived wall lies and what its texture is measured against.
-pub(super) struct DerivedGeom {
+pub(crate) struct DerivedGeom {
     /// Grid position of the face's start and end, in its walking direction.
     pub a: [i32; 2],
     pub b: [i32; 2],

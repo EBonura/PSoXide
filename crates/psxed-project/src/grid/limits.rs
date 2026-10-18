@@ -109,17 +109,6 @@ pub enum GridIssueKind {
         /// World click of its minimum corner along Z.
         z: i32,
     },
-    /// A leaf smaller than a sector with a void triangle, a split-level
-    /// surface or a wall on a diagonal, which the derivation across leaf
-    /// sizes does not carry yet.
-    LeafFeatureNotSupported {
-        /// Level of the leaf, 3 or 4.
-        level: u8,
-        /// World click of its minimum corner along X.
-        x: i32,
-        /// World click of its minimum corner along Z.
-        z: i32,
-    },
     /// A hanging corner that is not at the average of the coarse edge it
     /// lies on, though the surface is continuous along that edge: a crack
     /// the derived walls will not fill. `normalize` rewrites it.
@@ -361,9 +350,6 @@ impl GridIssue {
             ),
             GridIssueKind::BigLeafNotPlanar { level, x, z } => format!(
                 "leaf of level {level} at clicks ({x}, {z}) is larger than a sector and must be one plane with no walls"
-            ),
-            GridIssueKind::LeafFeatureNotSupported { level, x, z } => format!(
-                "leaf of level {level} at clicks ({x}, {z}) is smaller than a sector and has a void triangle, a split-level floor or a diagonal wall, which are not supported below a sector yet"
             ),
             GridIssueKind::HangingCornerOff { level, x, z } => format!(
                 "a corner of the level {level} leaf at clicks ({x}, {z}) hangs off the edge of a coarser leaf it should lie on"
@@ -711,11 +697,6 @@ fn check_room(room_index: usize, room: &GridRoom, issues: &mut Vec<GridIssue>) {
                 z: a.z,
             },
             TreeIssue::BigLeafNotPlanar(k) => GridIssueKind::BigLeafNotPlanar {
-                level: k.level,
-                x: k.x,
-                z: k.z,
-            },
-            TreeIssue::DiagonalBelowSector(k) => GridIssueKind::LeafFeatureNotSupported {
                 level: k.level,
                 x: k.x,
                 z: k.z,
