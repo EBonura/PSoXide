@@ -103,11 +103,11 @@ pub fn open_edges(chunk: &RoomChunk) -> Vec<OpenEdge> {
         let mut spans: Vec<(i64, i64)> = Vec::new();
         // Edges three or more quads share (the walls round a saddle corner
         // all meet on one vertical edge) cover a boundary edge as well.
-        for j in 0..open.len() {
+        for (j, other) in open.iter().enumerate() {
             if j == i {
                 continue;
             }
-            let (c, e) = (open[j].a.map(i64::from), open[j].b.map(i64::from));
+            let (c, e) = (other.a.map(i64::from), other.b.map(i64::from));
             // Within a runtime unit of the line counts as along it: a split
             // vertex rounded to the lattice is not exactly on the long edge
             // but nothing the GPU draws can open between them.

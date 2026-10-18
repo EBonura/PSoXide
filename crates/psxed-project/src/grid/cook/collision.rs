@@ -130,6 +130,10 @@ fn surface_flags(surface: &GridSurface) -> bool {
     matches!(surface.split, GridSplit::NeSw)
 }
 
+/// One cell's collision record and the optional second-triangle corners of a
+/// split floor and ceiling.
+pub(super) type SurfaceRecord = (Sector, Option<[i16; 4]>, Option<[i16; 4]>);
+
 /// The floor and ceiling of one cell as a collision record (`flags` carry the
 /// floor/ceiling/walk/sky bits, the corners the heights) and the second
 /// triangle's corners of a split-level floor and ceiling. `edge` is the
@@ -142,7 +146,7 @@ pub(super) fn surface_record(
     edge: u32,
     at: &dyn Fn(&str) -> String,
     note: &mut dyn FnMut(i16, i16),
-) -> Result<(Sector, Option<[i16; 4]>, Option<[i16; 4]>), String> {
+) -> Result<SurfaceRecord, String> {
     let mut sector = Sector {
         ext: NO_EXT,
         ..Sector::default()
