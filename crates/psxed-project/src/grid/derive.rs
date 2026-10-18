@@ -257,7 +257,17 @@ fn round_div(num: i64, den: i64) -> i64 {
 /// [`SECTOR_UNITS`], in canonical `[u, y]`. `anchor` is the profile the
 /// crossing height is read from, so both owners of a bow tie agree on it.
 pub(super) fn between(lower: [i32; 2], upper: [i32; 2], anchor: [i32; 2]) -> Option<Vec<[i32; 2]>> {
-    let len = SECTOR_UNITS;
+    between_len(lower, upper, anchor, SECTOR_UNITS)
+}
+
+/// [`between`] for an edge segment of `len` grid units (a leaf below a
+/// sector, or the part of an edge two different leaves share).
+pub(super) fn between_len(
+    lower: [i32; 2],
+    upper: [i32; 2],
+    anchor: [i32; 2],
+    len: i32,
+) -> Option<Vec<[i32; 2]>> {
     let (d0, d1) = (upper[0] - lower[0], upper[1] - lower[1]);
     if d0 >= 0 && d1 >= 0 {
         if d0 == 0 && d1 == 0 {
@@ -372,7 +382,22 @@ impl Face<'_> {
     /// The face for `ring` (canonical `[u, y]`, `u` along the key's
     /// direction); `flip` reverses `u` into the host's walking direction.
     pub(super) fn build(&self, ring: &[[i32; 2]], flip: bool) -> DerivedWall {
-        let len = SECTOR_UNITS;
+        let owner = sector_at(self.room, self.owner);
+        let host = sector_at(self.room, self.host);
+        self.build_with(ring, flip, SECTOR_UNITS, owner, host)
+    }
+
+    /// [`Self::build`] for a segment of `len` grid units whose owner and
+    /// host leaves are given (the material chain reads their wall
+    /// materials).
+    pub(super) fn build_with(
+        &self,
+        ring: &[[i32; 2]],
+        flip: bool,
+        len: i32,
+        owner_sector: Option<&GridSector>,
+        host_sector: Option<&GridSector>,
+    ) -> DerivedWall {
         let ring: Vec<[i32; 2]> = ring
             .iter()
             .map(|p| [if flip { len - p[0] } else { p[0] }, p[1]])
@@ -380,11 +405,9 @@ impl Face<'_> {
         // A quad is `[a bottom, b bottom, b top, a top]` in the host's own
         // direction.
         let at_end = |u: i32| ring.iter().filter(|p| p[0] == u).count();
-        let heights =
-            (ring.len() == 4 && at_end(0) == 2 && at_end(len) == 2).then(|| quad_heights(&ring));
+        let heights = (ring.len() == 4 && at_end(0) == 2 && at_end(len) == 2)
+            .then(|| quad_heights_len(&ring, len));
         let ovr = self.room.edge_overrides.get(&self.key);
-        let owner_sector = sector_at(self.room, self.owner);
-        let host_sector = sector_at(self.room, self.host);
         let chained = owner_sector
             .and_then(|s| s.ground_wall_material())
             .or_else(|| host_sector.and_then(|s| s.ground_wall_material()))
@@ -409,8 +432,9 @@ impl Face<'_> {
 }
 
 /// `[bottom a, bottom b, top b, top a]` of a four-corner outline whose ends
-/// are vertical, in the direction of increasing `u`.
-pub(super) fn quad_heights(ring: &[[i32; 2]]) -> [i32; 4] {
+/// are vertical, in the direction of increasing `u`, for a segment of `len`
+/// grid units.
+pub(super) fn quad_heights_len(ring: &[[i32; 2]], len: i32) -> [i32; 4] {
     let at = |u: i32, top: bool| {
         let ys = ring.iter().filter(|p| p[0] == u).map(|p| p[1]);
         if top {
@@ -419,12 +443,7 @@ pub(super) fn quad_heights(ring: &[[i32; 2]]) -> [i32; 4] {
             ys.min().unwrap_or(0)
         }
     };
-    [
-        at(0, false),
-        at(SECTOR_UNITS, false),
-        at(SECTOR_UNITS, true),
-        at(0, true),
-    ]
+    [at(0, false), at(len, false), at(len, true), at(0, true)]
 }
 
 /// Every derived wall on the physical edge of `cell`'s `edge`, whichever

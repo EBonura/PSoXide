@@ -27,6 +27,7 @@ use crate::ResourceId;
 use super::band_geom::{self, Span};
 use super::bands;
 use super::faces_bands::{neighbour_heights, stitched_rings, BandedWall};
+use super::leaf::{LeafKey, CLICKS_PER_SECTOR};
 use super::overrides::WallMode;
 use super::room::GridRoom;
 use super::rough::Jitter;
@@ -81,8 +82,13 @@ pub enum GridFaceKind {
 pub struct GridFace {
     /// Room index.
     pub room: usize,
-    /// World sector `[x, z]` that owns the face.
+    /// World sector `[x, z]` the face is listed under: the sector it lies
+    /// in (a face of a leaf above a sector is cut at sector borders and
+    /// each piece is listed under its own sector).
     pub cell: [i32; 2],
+    /// The leaf the face was made from: the whole sector for every room
+    /// made before the quadtree, a smaller or larger leaf otherwise.
+    pub leaf: LeafKey,
     /// Source of the face.
     pub kind: GridFaceKind,
     /// Corners in editor units, clockwise seen from the visible side.
@@ -157,10 +163,52 @@ impl UvDefaults for () {
     }
 }
 
+/// The square of ground a surface or the walls of a leaf cover: its minimum
+/// corner and edge in grid units.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Square {
+    pub min: [i32; 2],
+    pub size: i32,
+}
+
+impl Square {
+    /// The square of world sector `cell`.
+    pub(super) const fn sector(cell: [i32; 2]) -> Self {
+        Self {
+            min: [
+                cell[0].saturating_mul(SECTOR_UNITS),
+                cell[1].saturating_mul(SECTOR_UNITS),
+            ],
+            size: SECTOR_UNITS,
+        }
+    }
+
+    /// The square of leaf `key`.
+    pub(super) const fn leaf(key: LeafKey) -> Self {
+        let click = SECTOR_UNITS / CLICKS_PER_SECTOR;
+        Self {
+            min: [key.x.saturating_mul(click), key.z.saturating_mul(click)],
+            size: key.edge_clicks() * click,
+        }
+    }
+
+    /// Grid position of the sector-local offset `e` (each `0` or `1`).
+    pub(super) const fn at(self, e: [i32; 2]) -> [i32; 2] {
+        [
+            self.min[0] + e[0] * self.size,
+            self.min[1] + e[1] * self.size,
+        ]
+    }
+}
+
 pub(super) struct Builder<'a> {
     pub scale: GridScale,
     pub room: usize,
     pub cell: [i32; 2],
+    /// The leaf the next faces come from.
+    pub leaf: LeafKey,
+    /// The square the next surface or walls cover.
+    pub square: Square,
     pub y_offset: i32,
     pub defaults: &'a dyn UvDefaults,
     /// Whether the faces pushed next use the plain legacy mapping.
@@ -185,6 +233,17 @@ impl Builder<'_> {
     pub(super) fn cut_courses(&self) -> bool {
         self.room_ref
             .is_none_or(|room| room.wall_mode == WallMode::Authored && room.band_sets.is_empty())
+    }
+
+    /// The cut heights of the banded walls across the ends of a wall of the
+    /// builder's cell. Only whole sectors have them; a smaller or larger
+    /// leaf stitches nothing.
+    fn neighbour_heights(&self, room: &GridRoom, edge: WallEdge) -> [Vec<i32>; 2] {
+        if self.leaf.is_sector() {
+            neighbour_heights(room, self.cell, edge)
+        } else {
+            [Vec::new(), Vec::new()]
+        }
     }
 
     /// The tiling default of `material`.
@@ -254,6 +313,7 @@ impl Builder<'_> {
         self.out.push(GridFace {
             room: self.room,
             cell: self.cell,
+            leaf: self.leaf,
             kind,
             points: deduped.iter().map(|c| c.p).collect(),
             grid: deduped.iter().map(|c| c.g).collect(),
@@ -269,29 +329,30 @@ impl Builder<'_> {
     }
 
     /// Floor or ceiling faces for one surface.
-    fn surface(&mut self, surface: &GridSurface, ceiling: bool) {
-        let [cx, cz] = self.cell;
+    pub(super) fn surface(&mut self, surface: &GridSurface, ceiling: bool) {
         let (scale, y_offset) = (self.scale, self.y_offset);
-        let x0 = cx.saturating_mul(SECTOR_UNITS);
-        let z0 = cz.saturating_mul(SECTOR_UNITS);
+        let Square {
+            min: [x0, z0],
+            size,
+        } = self.square;
         let xz = [
             [x0, z0],
-            [x0 + SECTOR_UNITS, z0],
-            [x0 + SECTOR_UNITS, z0 + SECTOR_UNITS],
-            [x0, z0 + SECTOR_UNITS],
+            [x0 + size, z0],
+            [x0 + size, z0 + size],
+            [x0, z0 + size],
         ];
         let texel = f64::from(TEXELS_PER_SECTOR) / f64::from(SECTOR_UNITS);
         let centre = [
-            (f64::from(x0) + f64::from(SECTOR_UNITS) / 2.0) * texel,
-            (f64::from(z0) + f64::from(SECTOR_UNITS) / 2.0) * texel,
+            (f64::from(x0) + f64::from(size) / 2.0) * texel,
+            (f64::from(z0) + f64::from(size) / 2.0) * texel,
         ];
-        // The frame of a floor or ceiling is its sector square, shared by
-        // both triangles so repeats continue across the diagonal.
+        // The frame of a floor or ceiling is its square, shared by both
+        // triangles so repeats continue across the diagonal.
         let frame = Frame {
             min: [f64::from(x0), f64::from(z0)],
             max: [
-                f64::from(x0) + f64::from(SECTOR_UNITS),
-                f64::from(z0) + f64::from(SECTOR_UNITS),
+                f64::from(x0) + f64::from(size),
+                f64::from(z0) + f64::from(size),
             ],
         };
         let toward = if ceiling {
@@ -354,20 +415,14 @@ impl Builder<'_> {
     }
 
     /// Wall faces for one segment.
-    fn wall(&mut self, edge: WallEdge, index: usize, wall: &GridWall) {
-        let [cx, cz] = self.cell;
+    pub(super) fn wall(&mut self, edge: WallEdge, index: usize, wall: &GridWall) {
         let (scale, y_offset) = (self.scale, self.y_offset);
+        let size = self.square.size;
         let (ea, eb) = edge.endpoints();
-        let at = |e: [i32; 2]| {
-            [
-                cx.saturating_mul(SECTOR_UNITS) + e[0] * SECTOR_UNITS,
-                cz.saturating_mul(SECTOR_UNITS) + e[1] * SECTOR_UNITS,
-            ]
-        };
-        let (a, b) = (at(ea), at(eb));
+        let (a, b) = (self.square.at(ea), self.square.at(eb));
         let texel = f64::from(TEXELS_PER_SECTOR) / f64::from(SECTOR_UNITS);
         // Position `u` along the walking direction a -> b, in grid units.
-        let diagonal_length = f64::from(SECTOR_UNITS) * core::f64::consts::SQRT_2;
+        let diagonal_length = f64::from(size) * core::f64::consts::SQRT_2;
         let u_grid = |end: usize| -> f64 {
             let [px, pz] = if end == 0 { a } else { b };
             match edge {
@@ -428,14 +483,13 @@ impl Builder<'_> {
             let length = if edge.is_diagonal() {
                 (diagonal_length.round()) as i32
             } else {
-                SECTOR_UNITS
+                size
             };
             let span = Span::from_heights(h, length);
             // Anchors measure against the whole stack on this edge, so one
             // trim runs at the base of every segment stacked there.
             let reference = room
-                .local(self.cell)
-                .and_then(|[x, z]| room.sector(x, z))
+                .leaf(self.leaf)
                 .and_then(|sector| band_geom::stack_reference(sector.walls(edge), length))
                 .unwrap_or(span);
             let (u0, u1) = (u_grid(0), u_grid(1));
@@ -463,7 +517,7 @@ impl Builder<'_> {
                 material: wall.material,
                 toward,
                 double_sided,
-                neighbours: neighbour_heights(room, self.cell, edge),
+                neighbours: self.neighbour_heights(room, edge),
                 run: [u0.min(u1), u0.max(u1)],
                 u_grid: &u_at,
                 point: &point,
@@ -474,13 +528,13 @@ impl Builder<'_> {
         let length = if edge.is_diagonal() {
             diagonal_length.round() as i32
         } else {
-            SECTOR_UNITS
+            size
         };
         // The cut heights of a banded neighbour go into the vertical edges
         // of a plain wall too (nothing is inserted in a room without bands).
         let neighbours = self
             .room_ref
-            .map(|room| neighbour_heights(room, self.cell, edge))
+            .map(|room| self.neighbour_heights(room, edge))
             .unwrap_or_default();
         let plain = |this: &mut Self, outline: Vec<[i32; 2]>| {
             for ring in stitched_rings(outline, [0, length], &neighbours) {
@@ -544,6 +598,10 @@ pub fn cell_faces_with(
     let Some(r) = world.rooms.get(room) else {
         return;
     };
+    if !r.leaves.is_sectors_only() {
+        super::leaf_faces::cell_faces(world, defaults, room, x, z, out);
+        return;
+    }
     let Some(sector) = r.sector(x, z) else {
         return;
     };
@@ -552,6 +610,8 @@ pub fn cell_faces_with(
         scale: world.scale,
         room,
         cell,
+        leaf: LeafKey::sector(cell),
+        square: Square::sector(cell),
         y_offset: r.y_offset,
         defaults,
         legacy_uv: true,
@@ -578,7 +638,7 @@ pub fn all_faces(world: &GridWorld) -> Vec<GridFace> {
 pub fn all_faces_with(world: &GridWorld, defaults: &dyn UvDefaults) -> Vec<GridFace> {
     let mut out = Vec::new();
     for (room_index, room) in world.rooms.iter().enumerate() {
-        for (x, z, _) in room.iter() {
+        for [x, z] in room.face_cells() {
             cell_faces_with(world, defaults, room_index, x, z, &mut out);
         }
         for index in 0..room.planes.len() {
@@ -602,7 +662,7 @@ pub fn room_face_counts(world: &GridWorld) -> Vec<usize> {
     let mut counts = Vec::with_capacity(world.rooms.len());
     for (room_index, room) in world.rooms.iter().enumerate() {
         let mut count = 0;
-        for (x, z, _) in room.iter() {
+        for [x, z] in room.face_cells() {
             scratch.clear();
             cell_faces(world, room_index, x, z, &mut scratch);
             count += scratch.len();

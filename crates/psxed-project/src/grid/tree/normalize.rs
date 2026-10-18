@@ -99,7 +99,7 @@ pub const fn side_corners(side: WallEdge) -> [usize; 2] {
 }
 
 /// The triangle of `surface` that holds both corners of `side`.
-fn side_triangle(surface: &GridSurface, side: WallEdge) -> usize {
+pub fn side_triangle(surface: &GridSurface, side: WallEdge) -> usize {
     let [a, b] = side_corners(side);
     (0..2)
         .find(|t| {

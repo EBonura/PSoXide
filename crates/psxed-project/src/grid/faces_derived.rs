@@ -17,30 +17,60 @@ use super::sector::WallEdge;
 use super::units::{SECTOR_UNITS, TEXELS_PER_SECTOR};
 use super::uv::{Frame, Mapper};
 
+/// Where a derived wall lies and what its texture is measured against.
+pub(super) struct DerivedGeom {
+    /// Grid position of the face's start and end, in its walking direction.
+    pub a: [i32; 2],
+    pub b: [i32; 2],
+    /// Length of the segment along `u`, grid units.
+    pub len: i32,
+    /// Extent of the run the texture is measured against: `u` in the
+    /// signed coordinate texels use, `y` room relative.
+    pub run_u: [f64; 2],
+    pub run_y: [i32; 2],
+    /// Cut heights of the banded walls across the start and end.
+    pub neighbours: [Vec<i32>; 2],
+}
+
 impl Builder<'_> {
     /// The faces of one derived wall hosted by the builder's cell.
     pub(super) fn derived_wall(&mut self, room: &GridRoom, wall: &DerivedWall) {
         if wall.hidden {
             return;
         }
-        let [cx, cz] = self.cell;
-        let (scale, y_offset) = (self.scale, self.y_offset);
         let (ea, eb) = wall.edge.endpoints();
         // A face seen from the back of a diagonal walks it the other way.
         let (ea, eb) = if wall.back { (eb, ea) } else { (ea, eb) };
-        let at = |e: [i32; 2]| {
-            [
-                cx.saturating_mul(SECTOR_UNITS) + e[0] * SECTOR_UNITS,
-                cz.saturating_mul(SECTOR_UNITS) + e[1] * SECTOR_UNITS,
-            ]
+        let run = derive::run_extent(room, wall);
+        let geom = DerivedGeom {
+            a: self.square.at(ea),
+            b: self.square.at(eb),
+            len: SECTOR_UNITS,
+            run_u: run.u,
+            run_y: run.y,
+            neighbours: neighbour_heights(room, wall.host, wall.edge),
         };
-        let (a, b) = (at(ea), at(eb));
+        self.derived_wall_in(room, wall, geom);
+    }
+
+    /// The faces of one derived wall lying as `geom` says.
+    pub(super) fn derived_wall_in(
+        &mut self,
+        room: &GridRoom,
+        wall: &DerivedWall,
+        geom: DerivedGeom,
+    ) {
+        if wall.hidden {
+            return;
+        }
+        let (scale, y_offset) = (self.scale, self.y_offset);
+        let DerivedGeom { a, b, len, .. } = geom;
         let texel = f64::from(TEXELS_PER_SECTOR) / f64::from(SECTOR_UNITS);
         // World position along the edge at `u`.
         let plain = |u: i32| {
             [
-                a[0] + (b[0] - a[0]) / SECTOR_UNITS * u,
-                a[1] + (b[1] - a[1]) / SECTOR_UNITS * u,
+                a[0] + (b[0] - a[0]) / len * u,
+                a[1] + (b[1] - a[1]) / len * u,
             ]
         };
         // Where a position along the edge is drawn: displaced by the room's
@@ -50,7 +80,7 @@ impl Builder<'_> {
             let at = plain(u);
             match &jitter {
                 Some(j) => {
-                    let o = j.along(a, b, i64::from(u), i64::from(SECTOR_UNITS));
+                    let o = j.along(a, b, i64::from(u), i64::from(len));
                     [at[0] + o[0], at[1] + o[1]]
                 }
                 None => at,
@@ -72,7 +102,7 @@ impl Builder<'_> {
         let t_of = |gy: i32| -f64::from(y_offset + gy);
         let centre = match wall.heights {
             Some(h) => [
-                (u_grid(0) * texel + u_grid(SECTOR_UNITS) * texel) / 2.0,
+                (u_grid(0) * texel + u_grid(len) * texel) / 2.0,
                 (t_of(h[0]) * texel + t_of(h[1]) * texel + t_of(h[2]) * texel + t_of(h[3]) * texel)
                     / 4.0,
             ],
@@ -89,10 +119,9 @@ impl Builder<'_> {
         let toward = [sign * f64::from(front[0]), 0.0, sign * f64::from(front[1])];
         // The frame of a derived wall is its whole run, so a fit mapping
         // repeats along the run and not per sector.
-        let run = derive::run_extent(room, wall);
         let frame = Frame {
-            min: [run.u[0], t_of(run.y[1])],
-            max: [run.u[1], t_of(run.y[0])],
+            min: [geom.run_u[0], t_of(geom.run_y[1])],
+            max: [geom.run_u[1], t_of(geom.run_y[0])],
         };
         let uv = wall.uv.unwrap_or_default();
         let mapper = Mapper::new(&uv, self.default_uv(wall.material), frame, centre);
@@ -122,8 +151,8 @@ impl Builder<'_> {
                     material: wall.material,
                     toward,
                     double_sided: false,
-                    neighbours: neighbour_heights(room, wall.host, wall.edge),
-                    run: [run.u[0], run.u[1]],
+                    neighbours: geom.neighbours,
+                    run: geom.run_u,
                     u_grid: &u_at,
                     point: &point_at,
                 });
@@ -134,16 +163,10 @@ impl Builder<'_> {
         // cut into courses), with the cut heights of a banded neighbour put
         // into its vertical edges.
         let outline: Vec<[i32; 2]> = match wall.heights {
-            Some(h) => vec![
-                [0, h[0]],
-                [SECTOR_UNITS, h[1]],
-                [SECTOR_UNITS, h[2]],
-                [0, h[3]],
-            ],
+            Some(h) => vec![[0, h[0]], [len, h[1]], [len, h[2]], [0, h[3]]],
             None => wall.ring.clone(),
         };
-        let neighbours = neighbour_heights(room, wall.host, wall.edge);
-        for ring in stitched_rings(outline, [0, SECTOR_UNITS], &neighbours) {
+        for ring in stitched_rings(outline, [0, len], &geom.neighbours) {
             let corners: Vec<Corner> = ring.iter().map(|p| corner(p[0], p[1])).collect();
             self.push(kind, corners, toward, wall.material, false);
         }

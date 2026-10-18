@@ -511,9 +511,7 @@ pub fn build(
                 format!("room {room_index} sector {x},{z}: {count} quads in one cell, at most 255")
             })?;
             let (lo, hi) = build.range;
-            let doc = room.sector(x, z);
-            let open =
-                doc.is_some_and(|s| s.ground_floor().is_some() && s.ground_ceiling().is_none());
+            let open = room.cell_is_open(x, z);
             build.tables.cells.push(RCell {
                 first: first as u16,
                 count,

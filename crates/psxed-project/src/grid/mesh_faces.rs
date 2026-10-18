@@ -56,6 +56,8 @@ pub fn mesh_faces_with(
         scale: world.scale,
         room,
         cell: mesh.center_cell(),
+        leaf: super::leaf::LeafKey::sector(mesh.center_cell()),
+        square: super::faces::Square::sector(mesh.center_cell()),
         y_offset: r.y_offset,
         defaults,
         legacy_uv: false,

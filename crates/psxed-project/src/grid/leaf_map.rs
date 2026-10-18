@@ -57,6 +57,9 @@ impl std::error::Error for LeafError {}
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LeafMap {
     leaves: BTreeMap<LeafOrder, Leaf>,
+    /// How many leaves are not a whole sector, kept so that
+    /// [`Self::is_sectors_only`] is a field read.
+    other_levels: usize,
 }
 
 impl LeafMap {
@@ -78,6 +81,7 @@ impl LeafMap {
     /// Drop every leaf.
     pub fn clear(&mut self) {
         self.leaves.clear();
+        self.other_levels = 0;
     }
 
     /// The leaf stored under exactly `key`.
@@ -155,10 +159,11 @@ impl LeafMap {
                 return Err(LeafError::Overlaps(other));
             }
         }
-        Ok(self
-            .leaves
-            .insert(key.order(), Leaf { key, sector })
-            .map(|old| old.sector))
+        let old = self.leaves.insert(key.order(), Leaf { key, sector });
+        if old.is_none() && !key.is_sector() {
+            self.other_levels += 1;
+        }
+        Ok(old.map(|old| old.sector))
     }
 
     /// The leaf under `key`, created empty when absent. `Err` when `key` is
@@ -178,7 +183,11 @@ impl LeafMap {
 
     /// Remove and return the leaf stored under exactly `key`.
     pub fn remove(&mut self, key: LeafKey) -> Option<GridSector> {
-        self.leaves.remove(&key.order()).map(|leaf| leaf.sector)
+        let old = self.leaves.remove(&key.order())?;
+        if !key.is_sector() {
+            self.other_levels -= 1;
+        }
+        Some(old.sector)
     }
 
     /// Every leaf in Morton order.
@@ -211,10 +220,33 @@ impl LeafMap {
         })
     }
 
+    /// The leaves that touch world sector `cell`, in Morton order: a leaf
+    /// above a sector that covers it, the sector itself, or the leaves
+    /// below a sector inside it. Cheaper than [`Self::in_sectors`], which
+    /// walks every leaf.
+    pub fn in_sector(&self, cell: [i32; 2]) -> Vec<(LeafKey, &GridSector)> {
+        let sector = LeafKey::sector(cell);
+        let mut out = Vec::new();
+        for level in 0..SECTOR_LEVEL {
+            let key = LeafKey::containing(level, sector.min_click());
+            if let Some(leaf) = self.get(key) {
+                out.push((key, leaf));
+            }
+        }
+        let m = sector.morton();
+        out.extend(
+            self.leaves
+                .range((m, SECTOR_LEVEL)..(m + sector.morton_span(), 0))
+                .map(|(_, leaf)| (leaf.key, &leaf.sector)),
+        );
+        out
+    }
+
     /// Keep the leaves `keep` returns true for.
     pub fn retain(&mut self, mut keep: impl FnMut(LeafKey, &mut GridSector) -> bool) {
         self.leaves
             .retain(|_, leaf| keep(leaf.key, &mut leaf.sector));
+        self.other_levels = self.leaves.values().filter(|l| !l.key.is_sector()).count();
     }
 
     /// Inclusive bounds in world sectors of everything stored, `(min, max)`,
@@ -235,7 +267,7 @@ impl LeafMap {
     /// Whether every leaf is a whole sector. Such a map is the dense
     /// sector list of every level made before the quadtree.
     pub fn is_sectors_only(&self) -> bool {
-        self.keys().all(LeafKey::is_sector)
+        self.other_levels == 0
     }
 }
 

@@ -61,6 +61,8 @@ mod faces_derived;
 pub mod graybox_set;
 pub mod heat;
 pub mod leaf;
+mod leaf_derive;
+mod leaf_faces;
 pub mod leaf_map;
 pub mod light;
 pub mod limits;
@@ -96,6 +98,8 @@ mod course_merge;
 mod derive_diag_tests;
 #[cfg(test)]
 mod derive_tests;
+#[cfg(test)]
+mod leaf_face_tests;
 #[cfg(test)]
 mod leaf_tests;
 #[cfg(test)]

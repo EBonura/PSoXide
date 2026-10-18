@@ -229,6 +229,52 @@ impl GridRoom {
 
     // ---- leaves of any size -------------------------------------------
 
+    /// Every sector of the rectangle that any leaf covers, as local
+    /// `[x, z]`, `z` major then `x`: the cells the faces are listed under.
+    /// For a room of whole sectors this is [`Self::iter`]'s cells. A leaf
+    /// larger than a sector covers several, a smaller one shares its sector
+    /// with others.
+    pub fn covered_cells(&self) -> Vec<[usize; 2]> {
+        let mut cells = std::collections::BTreeSet::new();
+        for key in self.leaves.keys() {
+            let (lo, hi) = key.sector_range();
+            for z in lo[1]..=hi[1] {
+                for x in lo[0]..=hi[0] {
+                    if let Some([lx, lz]) = self.local([x, z]) {
+                        cells.insert((lz, lx));
+                    }
+                }
+            }
+        }
+        cells.into_iter().map(|(z, x)| [x, z]).collect()
+    }
+
+    /// The cells the faces are listed under, local `[x, z]`, `z` major: the
+    /// existing sectors of a room of whole sectors (the order the cook and
+    /// every golden hash depend on), the covered cells of a room with
+    /// leaves of other sizes.
+    pub fn face_cells(&self) -> Vec<[usize; 2]> {
+        if self.leaves.is_sectors_only() {
+            self.iter().map(|(x, z, _)| [x, z]).collect()
+        } else {
+            self.covered_cells()
+        }
+    }
+
+    /// Whether any leaf of local cell `[x, z]` has a floor and no ceiling:
+    /// the open sky the renderer flags.
+    pub fn cell_is_open(&self, x: usize, z: usize) -> bool {
+        self.leaves_in_cell(x, z)
+            .iter()
+            .any(|(_, s)| s.ground_floor().is_some() && s.ground_ceiling().is_none())
+    }
+
+    /// The sectors-and-leaves view of one cell for the faces: every leaf
+    /// that touches local cell `[x, z]`.
+    pub fn leaves_in_cell(&self, x: usize, z: usize) -> Vec<(LeafKey, &GridSector)> {
+        self.leaves.in_sector(self.world_cell(x, z))
+    }
+
     /// Every leaf in Morton order, of any level.
     pub fn leaves(&self) -> impl DoubleEndedIterator<Item = (LeafKey, &GridSector)> + '_ {
         self.leaves.iter()
