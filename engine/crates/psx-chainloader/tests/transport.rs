@@ -256,3 +256,129 @@ fn legacy_logical_bounds_are_not_misrepresented_as_arbitrary_header_validation()
         );
     }
 }
+
+/// A reader whose seek waits run `idle` three times, like a real one that spins.
+struct Idling(Cd);
+impl Reader for Idling {
+    unsafe fn prepare(&mut self) -> bool {
+        unsafe { self.0.prepare() }
+    }
+    unsafe fn start_read_seek_first(&mut self, lba: u32, limit: u32) -> bool {
+        unsafe { self.0.start_read_seek_first(lba, limit) }
+    }
+    unsafe fn start_read_seek_first_idle(
+        &mut self,
+        lba: u32,
+        limit: u32,
+        idle: &mut dyn FnMut(),
+    ) -> bool {
+        for _ in 0..3 {
+            idle();
+        }
+        unsafe { self.0.start_read_seek_first(lba, limit) }
+    }
+    unsafe fn read_sector(&mut self, out: &mut [u32; 512]) -> bool {
+        unsafe { self.0.read_sector(out) }
+    }
+    unsafe fn stop(&mut self) {
+        unsafe { self.0.stop() }
+    }
+}
+/// Counts ticks and logs them in the trace, in order with the other events.
+struct Ticking(Events, Rc<RefCell<usize>>);
+impl Observer for Ticking {
+    fn stage_ok(&mut self, s: u32) {
+        self.0.stage_ok(s);
+    }
+    fn progress(&mut self, n: u32, t: u32) {
+        self.0.progress(n, t);
+    }
+    fn finish(&mut self) {
+        self.0.finish();
+    }
+    fn tick(&mut self) {
+        *self.1.borrow_mut() += 1;
+        self.0 .0.borrow_mut().push("tick".into());
+    }
+}
+fn ticking_run(size: usize) -> (Result<LoadedExe, (u32, u32)>, Vec<String>, usize) {
+    let trace = Trace::default();
+    let count = size.div_ceil(2048);
+    let data: Vec<[u32; 512]> = (0..count)
+        .map(|s| std::array::from_fn(|i| ((s * 512 + i) as u32).wrapping_mul(0x719337b)))
+        .collect();
+    let checksum = hash(
+        data.iter()
+            .flat_map(|s| s.iter().flat_map(|w| w.to_le_bytes()))
+            .take(size),
+    );
+    let mut header = [0u32; 512];
+    header[0] = 0x582d5350;
+    header[1] = 0x45584520;
+    header[4] = 0x80010000;
+    header[5] = 0x80071234;
+    header[6] = 0x80010000;
+    header[7] = size as u32;
+    header[12] = 0xfffffff0;
+    header[13] = 0x30;
+    let mut cd = Idling(Cd {
+        trace: trace.clone(),
+        header,
+        data,
+        fault: Fault::None,
+        starts: 0,
+        reads: 0,
+        at: 0,
+    });
+    let mut ram = Ram(vec![[0xdeadbeef; 512]; count.max(1)]);
+    let ticks = Rc::new(RefCell::new(0));
+    let mut events = Ticking(Events(trace.clone()), ticks.clone());
+    let mut scratch = [u32::MAX; SECTOR_WORDS];
+    // SAFETY: as in `run`: stable host RAM, no MMIO.
+    let result = unsafe {
+        psx_chainloader::try_load(
+            &mut cd,
+            24,
+            &mut scratch,
+            checksum,
+            &mut ram,
+            &mut events,
+            0x801f0000,
+        )
+    };
+    let n = *ticks.borrow();
+    let lines = trace.borrow().clone();
+    (result, lines, n)
+}
+#[test]
+fn ticks_run_after_every_payload_sector_through_each_seek_and_the_checksum() {
+    let sectors = 130usize;
+    let (result, trace, ticks) = ticking_run(sectors * 2048);
+    assert!(result.is_ok());
+    // One tick per payload sector; three per seek (header seek plus one per
+    // 64-sector chunk: 1 + 3 seeks); one per 4 KiB of checksum, at least
+    // size / 4096 of them (the buffer's base alignment decides the exact count).
+    let per_sector = sectors;
+    let per_seek = 3 * 4;
+    let per_sum_min = sectors * 2048 / 4096;
+    assert!(
+        ticks >= per_sector + per_seek + per_sum_min,
+        "{ticks} ticks"
+    );
+    assert!(
+        ticks <= per_sector + per_seek + per_sum_min + 1,
+        "{ticks} ticks"
+    );
+    // The header read itself ticks nothing, and a tick follows each payload
+    // read before the next one starts.
+    let after_read: Vec<_> = trace
+        .windows(2)
+        .filter(|w| w[0].starts_with("read:") && w[0] != "read:24")
+        .collect();
+    assert_eq!(after_read.len(), sectors);
+    assert!(after_read.iter().all(|w| w[1] == "tick"));
+    // The tick must not disturb the transport: the same trace modulo ticks.
+    let quiet = pair(sectors * 2048, Fault::None).trace;
+    let without: Vec<_> = trace.into_iter().filter(|s| s != "tick").collect();
+    assert_eq!(without, quiet);
+}

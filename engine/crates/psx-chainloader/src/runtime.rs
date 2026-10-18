@@ -17,6 +17,11 @@ pub trait Presentation {
     fn diagnostic_mode(&mut self);
     /// Report dead scratchpad on an otherwise clean loading screen.
     fn no_scratchpad(&mut self);
+    /// Time passes during the load (see `Observer::tick`): animate the clean
+    /// loading screen here. Not called once the diagnostic checklist is up.
+    /// Callbacks must not issue CD commands or modify the payload. The default
+    /// does nothing.
+    fn tick(&mut self) {}
 }
 
 impl Reader for SectorReader {
@@ -25,6 +30,14 @@ impl Reader for SectorReader {
     }
     unsafe fn start_read_seek_first(&mut self, lba: u32, limit: u32) -> bool {
         SectorReader::start_read_seek_first(self, lba, limit)
+    }
+    unsafe fn start_read_seek_first_idle(
+        &mut self,
+        lba: u32,
+        limit: u32,
+        idle: &mut dyn FnMut(),
+    ) -> bool {
+        SectorReader::start_read_seek_first_with(self, lba, limit, idle)
     }
     unsafe fn read_sector(&mut self, out: &mut [u32; SECTOR_WORDS]) -> bool {
         SectorReader::read_sector(self, out)
@@ -62,6 +75,11 @@ impl<P: Presentation> Observer for Events<'_, P> {
     fn finish(&mut self) {
         if !paint::checklist_shown() {
             self.0.finish();
+        }
+    }
+    fn tick(&mut self) {
+        if !paint::checklist_shown() {
+            self.0.tick();
         }
     }
 }

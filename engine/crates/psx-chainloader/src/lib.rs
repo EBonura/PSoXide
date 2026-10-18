@@ -26,6 +26,20 @@ pub trait Reader {
     /// # Safety
     /// Same exclusive-device requirement as `prepare`.
     unsafe fn start_read_seek_first(&mut self, lba: u32, spin_limit: u32) -> bool;
+    /// [`start_read_seek_first`](Self::start_read_seek_first), calling `idle`
+    /// while it waits for the seek to finish (once per spin, so it must be
+    /// cheap). The default ignores `idle`; a reader that can run it between its
+    /// own polls overrides this. `idle` must not touch the CD controller.
+    /// # Safety
+    /// Same exclusive-device requirement as `prepare`.
+    unsafe fn start_read_seek_first_idle(
+        &mut self,
+        lba: u32,
+        spin_limit: u32,
+        _idle: &mut dyn FnMut(),
+    ) -> bool {
+        unsafe { self.start_read_seek_first(lba, spin_limit) }
+    }
     /// Read one complete user-data sector.
     /// # Safety
     /// The output must be writable and not overlap any live loader state.
@@ -56,6 +70,13 @@ pub trait Observer {
     fn progress(&mut self, complete: u32, total: u32);
     /// All payload sectors were read, before checksum validation.
     fn finish(&mut self);
+    /// Time passes during a load: called after every payload sector, once per
+    /// spin of a seek wait and every 4 KiB of the checksum pass, so a
+    /// presentation can keep a clean screen animated through the whole load.
+    /// It runs between CD steps, with the drive owned by the loader: it must
+    /// not touch the controller or the payload, and it must be cheap when
+    /// there is nothing to do. The default does nothing.
+    fn tick(&mut self) {}
 }
 
 /// Entry values copied verbatim from the accepted EXE header.
@@ -134,7 +155,7 @@ pub unsafe fn try_load<R: Reader, M: Memory, O: Observer>(
         // BIOS-style bracket: explicit SeekL waited to completion before
         // ReadN, for the header and every payload chunk alike. Seek poll
         // budget covers the measured worst case (~310 ms cross-disc).
-        if !reader.start_read_seek_first(exe_lba, SEEK_POLL) {
+        if !reader.start_read_seek_first_idle(exe_lba, SEEK_POLL, &mut || observer.tick()) {
             reader.stop();
             return Err((2, exe_lba));
         }
@@ -183,7 +204,9 @@ pub unsafe fn try_load<R: Reader, M: Memory, O: Observer>(
     let mut sector = 0u32;
     while sector < sectors {
         let chunk_lba = exe_lba + 1 + sector;
-        if !unsafe { reader.start_read_seek_first(chunk_lba, SEEK_POLL) } {
+        if !unsafe {
+            reader.start_read_seek_first_idle(chunk_lba, SEEK_POLL, &mut || observer.tick())
+        } {
             unsafe { reader.stop() };
             return Err((2, chunk_lba));
         }
@@ -195,6 +218,7 @@ pub unsafe fn try_load<R: Reader, M: Memory, O: Observer>(
                 return Err((6, sector + k));
             }
             dst = unsafe { dst.add(1) };
+            observer.tick();
             k += 1;
         }
         unsafe { reader.stop() };
@@ -212,6 +236,9 @@ pub unsafe fn try_load<R: Reader, M: Memory, O: Observer>(
     let mut at = unsafe { memory.payload(t_addr) } as *const u8;
     let end = unsafe { at.add(t_size as usize) };
     while at < end {
+        if at as usize & 0xFFF == 0 {
+            observer.tick();
+        }
         // Volatile: the buffer was just written by the sector reader.
         hash ^= unsafe { core::ptr::read_volatile(at) } as u32;
         hash = hash.wrapping_mul(0x0100_0193);
