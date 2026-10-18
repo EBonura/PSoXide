@@ -12,7 +12,7 @@ use crate::grid::surface::{GridSurface, GridWall};
 use crate::grid::units::GridScale;
 use crate::ResourceId;
 
-fn rid(n: u64) -> ResourceId {
+pub(super) fn rid(n: u64) -> ResourceId {
     ron::from_str(&format!("({n})")).expect("a resource id")
 }
 
@@ -37,6 +37,24 @@ pub(super) fn cook(world: &GridWorld) -> Result<CookedLevel, String> {
 }
 
 /// [`cook`] with the texture-window repeat on or off.
+/// [`cook`] with point lights in runtime units.
+pub(super) fn cook_with_lights(
+    world: &GridWorld,
+    lights: &[GridLight],
+) -> Result<CookedLevel, String> {
+    cook_level(
+        CookInput {
+            world,
+            binder: &mut TestBinder,
+            lights,
+            first_pack_sector: 100,
+            lod_far_cells: lod::LOD_FAR_CELLS,
+            texture_repeat: true,
+        },
+        None,
+    )
+}
+
 pub(super) fn cook_with(world: &GridWorld, texture_repeat: bool) -> Result<CookedLevel, String> {
     cook_level(
         CookInput {
