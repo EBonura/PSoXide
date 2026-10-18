@@ -480,6 +480,10 @@ pub struct GridBudget {
     pub faces: usize,
     /// Faces of the busiest room, the figure [`MAX_ROOM_FACES`] caps.
     pub largest_room_faces: usize,
+    /// Leaves of every size.
+    pub leaves: usize,
+    /// Leaves per level: 4 sectors across, 2, 1, 1/2, 1/4.
+    pub by_level: [usize; 5],
 }
 
 impl GridBudget {
@@ -495,14 +499,30 @@ impl GridBudget {
         for room in &world.rooms {
             budget.planes += room.planes.len();
             budget.meshes += room.meshes.len();
-            for (_, _, sector) in room.iter() {
-                budget.sectors += 1;
+            for (key, sector) in room.leaves() {
+                budget.leaves += 1;
+                budget.by_level[usize::from(key.level.min(4))] += 1;
+                budget.sectors += usize::from(key.is_sector());
                 budget.floors += usize::from(sector.ground_floor().is_some());
                 budget.ceilings += usize::from(sector.ground_ceiling().is_some());
                 budget.walls += sector.wall_count();
             }
         }
         budget
+    }
+
+    /// The cells by size for the status bar, or `None` when every cell is a
+    /// whole sector.
+    pub fn levels_text(&self) -> Option<String> {
+        if self.by_level[2] == self.leaves {
+            return None;
+        }
+        let names = ["4", "2", "1", "1/2", "1/4"];
+        let parts: Vec<String> = (0..5)
+            .filter(|i| self.by_level[*i] > 0)
+            .map(|i| format!("{}x{}", self.by_level[i], names[i]))
+            .collect();
+        Some(format!("cells {}", parts.join(" ")))
     }
 
     /// The busiest room's faces as a fraction of [`MAX_ROOM_FACES`], percent.

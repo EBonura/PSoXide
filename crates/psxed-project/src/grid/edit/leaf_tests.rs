@@ -169,3 +169,22 @@ fn raise_moves_every_leaf_in_a_region_and_splits_a_big_leaf_to_fit() {
     assert_eq!(height([9, 1]), 0, "the third sector of the leaf is outside");
     assert_eq!(height([21, 1]), 256, "a fine leaf in a region moves too");
 }
+
+#[test]
+fn lifting_every_corner_of_a_big_leaf_keeps_it_one_plane() {
+    let mut w = world(8, 8);
+    merge_all(&mut w.rooms[0], None, 0);
+    let big = w.rooms[0].leaf_at([0, 0]).unwrap().0;
+    let corners: Vec<CornerRef> = (0..4).map(|c| floor_corner(0, big, c)).collect();
+    // Unlinked: only the leaf's own four corners move, alike, so the leaf is
+    // still a plane and stays one leaf.
+    let drag = HeightDrag::begin_refining(&mut w, &corners, false);
+    drag.apply(&mut w, 256);
+    let room = &w.rooms[0];
+    assert_eq!(
+        room.leaf(big).unwrap().ground_floor().unwrap().heights,
+        [256; 4]
+    );
+    assert_eq!(room.leaf_count(), 4);
+    assert!(check(room).is_empty());
+}

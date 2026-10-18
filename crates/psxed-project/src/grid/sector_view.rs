@@ -66,6 +66,25 @@ pub fn sector_room(room: &GridRoom) -> (GridRoom, Vec<[i32; 2]>) {
     (out, approximate)
 }
 
+/// The world seen at sector granularity, with the sectors that could not be
+/// made exact: `None` when every room is already whole sectors (use the
+/// world as it is).
+pub fn sector_world(
+    world: &super::world::GridWorld,
+) -> Option<(super::world::GridWorld, Vec<(usize, [i32; 2])>)> {
+    let mut out: Option<super::world::GridWorld> = None;
+    let mut approximate = Vec::new();
+    for (index, room) in world.rooms.iter().enumerate() {
+        if room.leaves.is_sectors_only() {
+            continue;
+        }
+        let (view, cells) = sector_room(room);
+        approximate.extend(cells.into_iter().map(|c| (index, c)));
+        out.get_or_insert_with(|| world.clone()).rooms[index] = view;
+    }
+    out.map(|w| (w, approximate))
+}
+
 /// The part of a leaf above a sector over `cell`: its surfaces sampled at
 /// the cell's corners.
 fn clip_sector(sector: &GridSector, leaf: LeafKey, cell: LeafKey) -> GridSector {
@@ -83,6 +102,44 @@ fn clip_sector(sector: &GridSector, leaf: LeafKey, cell: LeafKey) -> GridSector 
         surface.heights_b = None;
     }
     out
+}
+
+/// The heights of the ground floor (or ceiling) at the four corners of world
+/// sector `cell`, `[NW, NE, SE, SW]`, read from whatever leaves lie there: a
+/// sector's own corners, a larger leaf's plane at the sector's corners, or
+/// the corner of each of the fine leaves in it.
+pub fn corner_heights(room: &GridRoom, cell: [i32; 2], ceiling: bool) -> Option<[i32; 4]> {
+    let pick = |s: &GridSector| -> Option<GridSurface> {
+        if ceiling {
+            s.ground_ceiling()
+        } else {
+            s.ground_floor()
+        }
+        .cloned()
+    };
+    let base = [cell[0] * CLICKS_PER_SECTOR, cell[1] * CLICKS_PER_SECTOR];
+    let s = CLICKS_PER_SECTOR;
+    // The click just inside each corner, and the leaf there.
+    let corners = [(0, 0), (s - 1, 0), (s - 1, s - 1), (0, s - 1)];
+    let mut heights = [0; 4];
+    let any = room
+        .leaves
+        .in_sector(cell)
+        .into_iter()
+        .find_map(|(_, l)| pick(l))?;
+    for (i, (ix, iz)) in corners.into_iter().enumerate() {
+        let click = [base[0] + ix, base[1] + iz];
+        let (key, leaf) = room.leaf_at(click)?;
+        let surface = pick(leaf).unwrap_or_else(|| any.clone());
+        let n = key.edge_clicks();
+        // Where this corner of the sector lies in the leaf, in clicks.
+        let (dx, dz) = (
+            base[0] + if i == 1 || i == 2 { s } else { 0 } - key.x,
+            base[1] + if i == 2 || i == 3 { s } else { 0 } - key.z,
+        );
+        heights[i] = height_in_leaf(&surface, dx, dz, n);
+    }
+    Some(heights)
 }
 
 /// A sector made from the fine leaves in it: the ground span's surfaces at
@@ -105,30 +162,15 @@ fn sample_sector(room: &GridRoom, cell: [i32; 2]) -> GridSector {
             .cloned()
         };
         let template = leaves.iter().find_map(|(_, s)| pick(s))?;
-        let base = [cell[0] * CLICKS_PER_SECTOR, cell[1] * CLICKS_PER_SECTOR];
-        let s = CLICKS_PER_SECTOR;
-        // The leaf at each corner, the click just inside it; the corner is
-        // that leaf's own.
-        let corners = [(0, 0), (s - 1, 0), (s - 1, s - 1), (0, s - 1)];
-        let mut heights = [0; 4];
-        for (i, (ix, iz)) in corners.into_iter().enumerate() {
-            let click = [base[0] + ix, base[1] + iz];
-            let (key, leaf) = room.leaf_at(click)?;
-            let surface = pick(leaf).or_else(|| leaves.iter().find_map(|(_, l)| pick(l)))?;
-            let n = key.edge_clicks();
-            let east = i == 1 || i == 2;
-            let south = i == 2 || i == 3;
-            let (dx, dz) = (if east { n } else { 0 }, if south { n } else { 0 });
-            heights[i] = height_in_leaf(&surface, dx, dz, n);
-        }
-        let mut out = GridSurface {
+        let heights = corner_heights(room, cell, ceiling)?;
+        let mut surface = GridSurface {
             heights,
             heights_b: None,
             void: 0,
             ..template
         };
-        out.split = best_split(heights, GridSplit::NwSe);
-        Some(out)
+        surface.split = best_split(heights, GridSplit::NwSe);
+        Some(surface)
     };
     out.set_ground_floor(sample(false));
     out.set_ground_ceiling(sample(true));

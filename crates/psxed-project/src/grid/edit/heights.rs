@@ -58,33 +58,66 @@ const fn corner_child(corner: u8) -> usize {
     }
 }
 
-/// Subdivide the leaf above a sector that `corner` belongs to and return the
-/// same corner of the child that holds it. `None` for a corner that is not on
-/// a surface of such a leaf.
-fn refine_one(world: &mut GridWorld, corner: CornerRef) -> Option<CornerRef> {
-    if corner.face.leaf.level >= crate::grid::leaf::SECTOR_LEVEL
-        || !matches!(corner.face.target, FaceTarget::Surface(_))
-    {
-        return None;
+/// The corner of the leaf that exists now: a leaf that was subdivided since
+/// the corner was named is descended to the child that holds it.
+fn resolve(world: &GridWorld, corner: CornerRef) -> CornerRef {
+    if !matches!(corner.face.target, FaceTarget::Surface(_)) {
+        return corner;
     }
-    let room = world.rooms.get_mut(corner.face.room)?;
-    let children = crate::grid::tree::subdivide(room, corner.face.leaf).ok()?;
-    Some(CornerRef {
+    let Some(room) = world.rooms.get(corner.face.room) else {
+        return corner;
+    };
+    let mut key = corner.face.leaf;
+    while room.leaf(key).is_none() {
+        match key.children() {
+            Some(children) => key = children[corner_child(corner.corner)],
+            None => return corner,
+        }
+    }
+    CornerRef {
         face: FaceRef {
-            leaf: children[corner_child(corner.corner)],
+            leaf: key,
             ..corner.face
         },
         ..corner
-    })
+    }
 }
 
-/// Make `corners` (and, with `link`, the corners welded to them) corners of
-/// leaves no larger than a sector, so each can move on its own: a leaf above
-/// a sector is one plane and would otherwise have to follow. Subdividing is
-/// lossless; the document looks the same afterwards. Returns the corners to
-/// move, on the refined leaves.
-pub fn refine_corners(world: &mut GridWorld, corners: &[CornerRef], link: bool) -> Vec<CornerRef> {
-    let mut set: BTreeSet<CornerRef> = corners.iter().copied().collect();
+/// The leaves above a sector whose moving corners would bend them: moving
+/// the same amount of a plane's corners keeps it a plane only when as many
+/// of the corners `NW, SE` move as of `NE, SW`.
+fn bent_by(corners: &BTreeSet<CornerRef>) -> BTreeSet<(usize, crate::grid::leaf::LeafKey)> {
+    let mut moved: BTreeMap<(usize, crate::grid::leaf::LeafKey), [i32; 2]> = BTreeMap::new();
+    for c in corners {
+        if c.face.leaf.level >= crate::grid::leaf::SECTOR_LEVEL
+            || !matches!(c.face.target, FaceTarget::Surface(_))
+        {
+            continue;
+        }
+        let entry = moved.entry((c.face.room, c.face.leaf)).or_default();
+        entry[usize::from(c.corner & 1)] += 1;
+    }
+    moved
+        .into_iter()
+        .filter(|(_, n)| n[0] != n[1])
+        .map(|(k, _)| k)
+        .collect()
+}
+
+/// Make `corners` (and, with `link`, the corners welded to them) corners that
+/// can move without bending a leaf above a sector: such a leaf is one plane,
+/// so one whose corners would not all move alike is subdivided first (down
+/// to sectors where a single corner is grabbed). Subdividing is lossless; the
+/// document looks the same afterwards. Returns the corners to move, and
+/// `corners` themselves on the refined leaves (same order), for a selection
+/// to follow.
+pub fn refine_corners(
+    world: &mut GridWorld,
+    corners: &[CornerRef],
+    link: bool,
+) -> (Vec<CornerRef>, Vec<CornerRef>) {
+    let mut inputs: Vec<CornerRef> = corners.to_vec();
+    let mut set: BTreeSet<CornerRef> = inputs.iter().copied().collect();
     loop {
         if link {
             let index = WeldIndex::build(world);
@@ -92,22 +125,20 @@ pub fn refine_corners(world: &mut GridWorld, corners: &[CornerRef], link: bool) 
                 set.extend(index.coincident(world, &corner));
             }
         }
-        let mut changed = false;
-        let mut next = BTreeSet::new();
-        for corner in set {
-            match refine_one(world, corner) {
-                Some(refined) => {
-                    changed = true;
-                    next.insert(refined);
-                }
-                None => {
-                    next.insert(corner);
+        let bent = bent_by(&set);
+        if bent.is_empty() {
+            return (set.into_iter().collect(), inputs);
+        }
+        for (room, key) in bent {
+            if let Some(room) = world.rooms.get_mut(room) {
+                if room.leaf(key).is_some() {
+                    let _ = crate::grid::tree::subdivide(room, key);
                 }
             }
         }
-        set = next;
-        if !changed {
-            return set.into_iter().collect();
+        set = set.into_iter().map(|c| resolve(world, c)).collect();
+        for input in &mut inputs {
+            *input = resolve(world, *input);
         }
     }
 }
@@ -174,9 +205,19 @@ impl HeightDrag {
     /// [`refine_corners`]); the world may gain leaves, none of which changes
     /// what it looks like.
     pub fn begin_refining(world: &mut GridWorld, corners: &[CornerRef], link: bool) -> Self {
-        let refined = refine_corners(world, corners, link);
+        Self::begin_following(world, corners, link).0
+    }
+
+    /// [`Self::begin_refining`], also returning `corners` on the refined
+    /// leaves so a selection can follow them.
+    pub fn begin_following(
+        world: &mut GridWorld,
+        corners: &[CornerRef],
+        link: bool,
+    ) -> (Self, Vec<CornerRef>) {
+        let (moving, followed) = refine_corners(world, corners, link);
         // Linking is done: the set is closed under coincidence already.
-        Self::begin(world, &refined, false)
+        (Self::begin(world, &moving, false), followed)
     }
 
     /// Number of corners that will move.

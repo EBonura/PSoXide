@@ -301,3 +301,35 @@ fn segment_walls(
         });
     }
 }
+
+/// One derived wall of a room with leaves of several sizes, for drawing in
+/// the plan: where it lies and what it is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WallSegment {
+    /// Start and end in grid units on the plan, in the host's walking
+    /// direction.
+    pub a: [i32; 2],
+    pub b: [i32; 2],
+    /// Which rule made it.
+    pub kind: DerivedKind,
+    /// The user hid it.
+    pub hidden: bool,
+    /// It has a collision record.
+    pub blocks: bool,
+}
+
+/// The derived walls of a room listed under world sector `cell`, as plan
+/// segments. Meant for rooms with leaves of several sizes.
+pub fn cell_wall_segments(room: &GridRoom, cell: [i32; 2]) -> Vec<WallSegment> {
+    let leaves = room.leaves.in_sector(cell);
+    cell_walls(room, cell, &leaves)
+        .into_iter()
+        .map(|w| WallSegment {
+            a: w.geom.a,
+            b: w.geom.b,
+            kind: w.wall.kind,
+            hidden: w.wall.hidden,
+            blocks: w.wall.blocks(),
+        })
+        .collect()
+}

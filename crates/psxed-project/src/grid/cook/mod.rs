@@ -225,20 +225,16 @@ pub fn cook_level(
     // format is phase T10), so a room with leaves of other sizes is
     // collided and walked through as its sector view. Faces still come from
     // the leaves.
-    let mut sector_world: Option<GridWorld> = None;
-    for (index, room) in world.rooms.iter().enumerate() {
-        if room.leaves.is_sectors_only() {
-            continue;
-        }
-        let (view, approximate) = crate::grid::sector_view::sector_room(room);
-        for cell in approximate {
+    let sector_world = crate::grid::sector_view::sector_world(world);
+    if let Some((_, approximate)) = &sector_world {
+        for (index, cell) in approximate {
             report.warnings.push(format!(
                 "room {index} sector {},{}: collision stands on the sector's four corners; the fine leaves in it are drawn but not collided (leaf collision is phase T10)",
                 cell[0], cell[1]
             ));
         }
-        sector_world.get_or_insert_with(|| world.clone()).rooms[index] = view;
     }
+    let sector_world = sector_world.map(|(w, _)| w);
     let collision_world: &GridWorld = sector_world.as_ref().unwrap_or(world);
     // Collision first, for every room: the light bake shadows through the
     // same line of sight the game uses, which needs the whole world's solid

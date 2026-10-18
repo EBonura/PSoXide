@@ -61,7 +61,7 @@ mod faces_derived;
 pub mod graybox_set;
 pub mod heat;
 pub mod leaf;
-mod leaf_derive;
+pub mod leaf_derive;
 mod leaf_faces;
 pub mod leaf_map;
 pub mod light;
