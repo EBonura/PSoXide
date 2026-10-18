@@ -329,7 +329,7 @@ mod tests {
         // that no further leaf can be added anywhere.
         fn split(map: &mut LeafMap, key: LeafKey, seed: &mut u32) {
             *seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-            let divide = key.level < 4 && (*seed >> 16) % 3 != 0;
+            let divide = key.level < 4 && !(*seed >> 16).is_multiple_of(3);
             match key.children().filter(|_| divide) {
                 Some(children) => children.into_iter().for_each(|c| split(map, c, seed)),
                 None => {
