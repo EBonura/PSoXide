@@ -194,12 +194,7 @@ pub fn edge_key(cell: [i32; 2], edge: WallEdge) -> EdgeKey {
 /// direction) and the triangle that holds the edge.
 fn edge_profile(surface: &GridSurface, edge: WallEdge) -> ([i32; 2], usize) {
     let [a, b] = super::edit::walls::edge_corner_indices(edge);
-    let tri = (0..2)
-        .find(|t| {
-            let corners = surface.split.triangle(*t);
-            corners.contains(&a) && corners.contains(&b)
-        })
-        .unwrap_or(0);
+    let tri = super::edit::walls::edge_triangle(surface, edge);
     let heights = surface.heights_for(tri);
     ([heights[a], heights[b]], tri)
 }

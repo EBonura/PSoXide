@@ -38,17 +38,23 @@ pub const fn edge_corner_indices(edge: WallEdge) -> [usize; 2] {
     }
 }
 
-/// Heights of a surface at the two ends `a`, `b` of `edge`. A split-level
-/// surface answers with the triangle that actually contains the edge.
-pub fn surface_edge_heights(surface: &GridSurface, edge: WallEdge) -> [i32; 2] {
+/// The triangle of `surface` that holds both ends of `edge` (the first one
+/// when the edge is a fold, which both hold).
+pub fn edge_triangle(surface: &GridSurface, edge: WallEdge) -> usize {
     let [a, b] = edge_corner_indices(edge);
-    let tri = (0..2)
+    (0..2)
         .find(|t| {
             let corners = surface.split.triangle(*t);
             corners.contains(&a) && corners.contains(&b)
         })
-        .unwrap_or(0);
-    let heights = surface.heights_for(tri);
+        .unwrap_or(0)
+}
+
+/// Heights of a surface at the two ends `a`, `b` of `edge`. A split-level
+/// surface answers with the triangle that actually contains the edge.
+pub fn surface_edge_heights(surface: &GridSurface, edge: WallEdge) -> [i32; 2] {
+    let [a, b] = edge_corner_indices(edge);
+    let heights = surface.heights_for(edge_triangle(surface, edge));
     [heights[a], heights[b]]
 }
 

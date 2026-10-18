@@ -16,8 +16,9 @@ use crate::ResourceId;
 
 use super::super::room::GridRoom;
 use super::super::sector::{GridSector, GridSpan, WallEdge, MAX_SPANS_PER_CELL};
-use super::super::storeys::{normalize_column, MIN_HEADROOM};
+use super::super::storeys::MIN_HEADROOM;
 use super::super::surface::GridSurface;
+use super::super::units::CLICK_UNITS;
 use super::super::world::GridWorld;
 use super::rects::CellRect;
 
@@ -59,9 +60,44 @@ impl SpanSkips {
         }
     }
 
+    fn merge(&mut self, other: Self) {
+        self.no_span += other.no_span;
+        self.sloped += other.sloped;
+        self.headroom += other.headroom;
+        self.span_cap += other.span_cap;
+        self.no_slab += other.no_slab;
+    }
+
     /// Cells skipped for any reason.
     pub fn total(&self) -> usize {
         self.no_span + self.sloped + self.headroom + self.span_cap + self.no_slab
+    }
+
+    /// The counts as words, for a reply: "4 with no span at that height, 2
+    /// at the span cap". "none" when nothing was skipped.
+    pub fn describe(&self) -> String {
+        let parts: Vec<String> = [
+            (self.no_span, "with no span at that height".to_string()),
+            (self.sloped, "where a sloped surface crosses it".to_string()),
+            (
+                self.headroom,
+                format!(
+                    "with less than {} clicks of headroom",
+                    MIN_HEADROOM / CLICK_UNITS
+                ),
+            ),
+            (self.span_cap, "at the span cap".to_string()),
+            (self.no_slab, "with no slab at that height".to_string()),
+        ]
+        .into_iter()
+        .filter(|(count, _)| *count > 0)
+        .map(|(count, what)| format!("{count} {what}"))
+        .collect();
+        if parts.is_empty() {
+            "none".to_string()
+        } else {
+            parts.join(", ")
+        }
     }
 }
 
@@ -76,6 +112,26 @@ pub enum SpanRefusal {
     BadThickness,
     /// The shifted columns would overlap at this cell.
     Interpenetrates { cell: [i32; 2] },
+}
+
+impl SpanRefusal {
+    /// The refusal as a sentence.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::NoSuchRoom => "no such room".to_string(),
+            Self::MixedCells => {
+                "the room has cells of several sizes: the storey verbs work on whole sectors"
+                    .to_string()
+            }
+            Self::BadThickness => format!(
+                "the slab thickness must be between 0 and the minimum headroom ({MIN_HEADROOM} grid units)"
+            ),
+            Self::Interpenetrates { cell } => format!(
+                "the shift would make the column at sector [{}, {}] overlap itself; nothing changed",
+                cell[0], cell[1]
+            ),
+        }
+    }
 }
 
 /// What a storey verb did.
@@ -95,6 +151,14 @@ impl SpanOutcome {
             refused: Some(reason),
             ..Self::default()
         }
+    }
+
+    /// Fold the outcome of another rectangle into this one. The first
+    /// refusal is kept.
+    pub fn merge(&mut self, other: Self) {
+        self.changed += other.changed;
+        self.skipped.merge(other.skipped);
+        self.refused = self.refused.or(other.refused);
     }
 }
 
@@ -271,19 +335,37 @@ pub fn column_is_ordered(sector: &GridSector) -> bool {
     true
 }
 
-fn with_room<T>(
-    world: &mut GridWorld,
-    room: usize,
-    refuse: impl FnOnce(SpanRefusal) -> T,
-    run: impl FnOnce(&mut GridRoom) -> T,
-) -> T {
-    let Some(target) = world.rooms.get_mut(room) else {
-        return refuse(SpanRefusal::NoSuchRoom);
-    };
-    if !target.leaves.is_sectors_only() {
-        return refuse(SpanRefusal::MixedCells);
+/// The room a verb works in: it must exist and hold whole-sector cells only.
+fn room_of(world: &mut GridWorld, room: usize) -> Result<&mut GridRoom, SpanRefusal> {
+    let target = world.rooms.get_mut(room).ok_or(SpanRefusal::NoSuchRoom)?;
+    if target.leaves.is_sectors_only() {
+        Ok(target)
+    } else {
+        Err(SpanRefusal::MixedCells)
     }
-    run(target)
+}
+
+/// Run `edit` on the column of every cell of `rect`. A cell outside the room
+/// or without a column is skipped for `missing`; a column `edit` leaves alone
+/// is skipped for the reason it gives.
+fn over_cells(
+    target: &mut GridRoom,
+    rect: CellRect,
+    missing: SpanSkip,
+    mut edit: impl FnMut(&mut GridSector) -> Result<(), SpanSkip>,
+) -> SpanOutcome {
+    let mut outcome = SpanOutcome::default();
+    for cell in rect.cells() {
+        let result = match target.local(cell) {
+            Some([x, z]) => target.sector_mut(x, z).map_or(Err(missing), &mut edit),
+            None => Err(missing),
+        };
+        match result {
+            Ok(()) => outcome.changed += 1,
+            Err(skip) => outcome.skipped.add(skip),
+        }
+    }
+    outcome
 }
 
 /// Insert a slab at `y` with `thickness` over the cells of `rect` (see
@@ -297,26 +379,15 @@ pub fn insert_slab(
     thickness: i32,
     material: Option<ResourceId>,
 ) -> SpanOutcome {
-    with_room(world, room, SpanOutcome::refused, |target| {
-        if !(0..=MIN_HEADROOM).contains(&thickness) {
-            return SpanOutcome::refused(SpanRefusal::BadThickness);
-        }
-        let mut outcome = SpanOutcome::default();
-        for cell in rect.cells() {
-            let Some([x, z]) = target.local(cell) else {
-                outcome.skipped.no_span += 1;
-                continue;
-            };
-            let Some(sector) = target.sector_mut(x, z) else {
-                outcome.skipped.no_span += 1;
-                continue;
-            };
-            match insert_slab_column(sector, y, thickness, material) {
-                Ok(()) => outcome.changed += 1,
-                Err(skip) => outcome.skipped.add(skip),
-            }
-        }
-        outcome
+    let target = match room_of(world, room) {
+        Ok(target) => target,
+        Err(reason) => return SpanOutcome::refused(reason),
+    };
+    if !(0..=MIN_HEADROOM).contains(&thickness) {
+        return SpanOutcome::refused(SpanRefusal::BadThickness);
+    }
+    over_cells(target, rect, SpanSkip::NoSpanAtHeight, |sector| {
+        insert_slab_column(sector, y, thickness, material)
     })
 }
 
@@ -329,23 +400,12 @@ pub fn cut_hole(
     y: i32,
     scope: CutScope,
 ) -> SpanOutcome {
-    with_room(world, room, SpanOutcome::refused, |target| {
-        let mut outcome = SpanOutcome::default();
-        for cell in rect.cells() {
-            let Some([x, z]) = target.local(cell) else {
-                outcome.skipped.no_slab += 1;
-                continue;
-            };
-            let Some(sector) = target.sector_mut(x, z) else {
-                outcome.skipped.no_slab += 1;
-                continue;
-            };
-            match cut_hole_column(sector, y, scope) {
-                Ok(_) => outcome.changed += 1,
-                Err(skip) => outcome.skipped.add(skip),
-            }
-        }
-        outcome
+    let target = match room_of(world, room) {
+        Ok(target) => target,
+        Err(reason) => return SpanOutcome::refused(reason),
+    };
+    over_cells(target, rect, SpanSkip::NoSlab, |sector| {
+        cut_hole_column(sector, y, scope).map(|_| ())
     })
 }
 
@@ -373,51 +433,32 @@ pub fn shift_above(
     y: i32,
     delta: i32,
 ) -> SpanOutcome {
-    with_room(world, room, SpanOutcome::refused, |target| {
-        let mut next: Vec<([usize; 2], GridSector)> = Vec::new();
-        let origin = target.origin;
-        for (x, z, sector) in target.iter() {
-            let cell = [origin[0] + x as i32, origin[1] + z as i32];
-            if rect.is_some_and(|rect| !rect.contains(cell)) {
-                continue;
-            }
-            let mut shifted = sector.clone();
-            shift_above_column(&mut shifted, y, delta);
-            if !column_is_ordered(&shifted) {
-                return SpanOutcome::refused(SpanRefusal::Interpenetrates { cell });
-            }
-            if shifted != *sector {
-                next.push(([x, z], shifted));
-            }
-        }
-        let mut outcome = SpanOutcome::default();
-        for ([x, z], sector) in next {
-            if let Some(slot) = target.sector_mut(x, z) {
-                *slot = sector;
-                outcome.changed += 1;
-            }
-        }
-        outcome
-    })
-}
-
-/// Remove the slivers of every column of `rect` (or of the room), see
-/// [`normalize_column`]. Returns how many spans went.
-pub fn normalize_room(world: &mut GridWorld, room: usize, rect: Option<CellRect>) -> usize {
-    let Some(target) = world.rooms.get_mut(room) else {
-        return 0;
+    let target = match room_of(world, room) {
+        Ok(target) => target,
+        Err(reason) => return SpanOutcome::refused(reason),
     };
+    let mut next: Vec<([usize; 2], GridSector)> = Vec::new();
     let origin = target.origin;
-    let cells: Vec<[usize; 2]> = target.iter().map(|(x, z, _)| [x, z]).collect();
-    let mut removed = 0;
-    for [x, z] in cells {
+    for (x, z, sector) in target.iter() {
         let cell = [origin[0] + x as i32, origin[1] + z as i32];
         if rect.is_some_and(|rect| !rect.contains(cell)) {
             continue;
         }
-        if let Some(sector) = target.sector_mut(x, z) {
-            removed += normalize_column(sector);
+        let mut shifted = sector.clone();
+        shift_above_column(&mut shifted, y, delta);
+        if !column_is_ordered(&shifted) {
+            return SpanOutcome::refused(SpanRefusal::Interpenetrates { cell });
+        }
+        if shifted != *sector {
+            next.push(([x, z], shifted));
         }
     }
-    removed
+    let mut outcome = SpanOutcome::default();
+    for ([x, z], sector) in next {
+        if let Some(slot) = target.sector_mut(x, z) {
+            *slot = sector;
+            outcome.changed += 1;
+        }
+    }
+    outcome
 }

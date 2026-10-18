@@ -30,6 +30,7 @@
 use crate::ResourceId;
 
 use super::derive::{edge_key, open_top, quad_heights_len, DerivedKind, DerivedWall};
+use super::edit::walls::{edge_corner_indices, edge_triangle};
 use super::overrides::EdgeKey;
 use super::room::GridRoom;
 use super::sector::{GridSector, WallEdge};
@@ -76,13 +77,8 @@ fn forward(edge: WallEdge) -> bool {
 }
 
 fn bound(surface: &GridSurface, edge: WallEdge, rim: Rim) -> Option<Bound> {
-    let [a, b] = super::edit::walls::edge_corner_indices(edge);
-    let tri = (0..2)
-        .find(|t| {
-            let corners = surface.split.triangle(*t);
-            corners.contains(&a) && corners.contains(&b)
-        })
-        .unwrap_or(0);
+    let [a, b] = edge_corner_indices(edge);
+    let tri = edge_triangle(surface, edge);
     if surface.is_void(tri) {
         return None;
     }
@@ -269,14 +265,7 @@ fn strip(open: Open, gap: Gap) -> Vec<Piece> {
 /// The material of the triangle of `surface` that holds `edge`.
 fn material_on(surface: Option<&GridSurface>, edge: WallEdge) -> Option<ResourceId> {
     let surface = surface?;
-    let [a, b] = super::edit::walls::edge_corner_indices(edge);
-    let tri = (0..2)
-        .find(|t| {
-            let corners = surface.split.triangle(*t);
-            corners.contains(&a) && corners.contains(&b)
-        })
-        .unwrap_or(0);
-    surface.tri(tri).material
+    surface.tri(edge_triangle(surface, edge)).material
 }
 
 /// The floor or ceiling of span `index` of a column.
