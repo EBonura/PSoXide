@@ -76,20 +76,18 @@ pub fn default_mode(world: &GridWorld, region: &Region) -> RaiseMode {
     };
     let mut level: Option<i32> = None;
     for cell in cells {
-        let Some(floor) = room
-            .local(cell)
-            .and_then(|[x, z]| room.sector(x, z))
-            .and_then(|s| s.ground_floor())
-        else {
-            continue;
-        };
-        let h = floor.heights[0];
-        let flat = floor.heights.iter().all(|v| *v == h)
-            && floor.heights_b.is_none_or(|b| b.iter().all(|v| *v == h));
-        if !flat || level.is_some_and(|l| l != h) {
-            return RaiseMode::Offset;
+        for (_, sector) in room.leaves.in_sector(cell) {
+            let Some(floor) = sector.ground_floor() else {
+                continue;
+            };
+            let h = floor.heights[0];
+            let flat = floor.heights.iter().all(|v| *v == h)
+                && floor.heights_b.is_none_or(|b| b.iter().all(|v| *v == h));
+            if !flat || level.is_some_and(|l| l != h) {
+                return RaiseMode::Offset;
+            }
+            level = Some(h);
         }
-        level = Some(h);
     }
     if level.is_some() {
         RaiseMode::Level
@@ -102,8 +100,14 @@ pub fn default_mode(world: &GridWorld, region: &Region) -> RaiseMode {
 /// the fine step: what "the height under the pointer" means for Level mode.
 pub fn height_under(world: &GridWorld, room: usize, cell: [i32; 2]) -> Option<i32> {
     let room = world.rooms.get(room)?;
-    let [x, z] = room.local(cell)?;
-    let floor = room.sector(x, z)?.ground_floor()?;
+    room.local(cell)?;
+    // The leaf at the middle of the sector.
+    let middle = [
+        cell[0] * crate::grid::leaf::CLICKS_PER_SECTOR + 2,
+        cell[1] * crate::grid::leaf::CLICKS_PER_SECTOR + 2,
+    ];
+    let (_, leaf) = room.leaf_at(middle)?;
+    let floor = leaf.ground_floor()?;
     let sum: i32 = floor.heights.iter().sum();
     Some(crate::grid::units::snap_to(sum / 4, FINE_UNITS))
 }
@@ -115,6 +119,9 @@ pub struct RaiseDrag {
     params: RaiseParams,
     skipped: usize,
     units: Option<RuntimeUnits>,
+    /// Set for a room with leaves of several sizes, which moves leaves and
+    /// not sectors.
+    leaves: Option<super::raise_leaves::LeafRaise>,
 }
 
 impl RaiseDrag {
@@ -125,11 +132,15 @@ impl RaiseDrag {
         if cells.is_empty() {
             return None;
         }
+        let room = world.rooms.get(region.room)?;
+        let leaves = (!room.leaves.is_sectors_only())
+            .then(|| super::raise_leaves::LeafRaise::capture(room, &cells));
         Some(Self {
             snapshot: Snapshot::capture(world, region.room, &cells)?,
             params,
             skipped,
             units: RuntimeUnits::new(world.scale).ok(),
+            leaves,
         })
     }
 
@@ -165,6 +176,13 @@ impl RaiseDrag {
         let Some(room) = world.rooms.get_mut(self.snapshot.room()) else {
             return applied;
         };
+        if let Some(leaves) = &self.leaves {
+            let done = leaves.apply(room, params, amount);
+            return Applied {
+                skipped: self.skipped + done.skipped,
+                ..done
+            };
+        }
         let rules = room.defaults.rules;
         let y_offset = room.y_offset;
         for (cell, original) in self.snapshot.cells() {

@@ -416,24 +416,42 @@ impl GridElement {
     }
 }
 
-/// Every face of a sector: floor, ceiling, then walls edge by edge.
-pub fn faces_of_cell(world: &GridWorld, room: usize, cell: [i32; 2]) -> Vec<FaceRef> {
+/// Every face of a leaf: floor, ceiling, then walls edge by edge.
+pub fn faces_of_leaf(world: &GridWorld, room: usize, leaf: LeafKey) -> Vec<FaceRef> {
     let mut out = Vec::new();
-    let Some(sector) = FaceRef::floor(room, cell).sector(world) else {
+    let Some(sector) = world.rooms.get(room).and_then(|r| r.leaf(leaf)) else {
         return out;
     };
+    let face = |target| FaceRef::new(room, leaf, target);
     if sector.ground_floor().is_some() {
-        out.push(FaceRef::floor(room, cell));
+        out.push(face(FaceTarget::Surface(SurfaceKind::Floor)));
     }
     if sector.ground_ceiling().is_some() {
-        out.push(FaceRef::ceiling(room, cell));
+        out.push(face(FaceTarget::Surface(SurfaceKind::Ceiling)));
     }
     for edge in WallEdge::ALL {
         for index in 0..sector.walls(edge).len() {
-            out.push(FaceRef::wall(room, cell, edge, index));
+            out.push(face(FaceTarget::Wall { edge, index }));
         }
     }
     out
+}
+
+/// Every face listed under a sector: those of the leaves whose minimum
+/// corner lies in it (the sector itself, or the leaves inside it, or a leaf
+/// above a sector that starts there), floor, ceiling, then walls edge by
+/// edge. A leaf above a sector is listed under its north-west sector only,
+/// so walking every cell of a room names each face once.
+pub fn faces_of_cell(world: &GridWorld, room: usize, cell: [i32; 2]) -> Vec<FaceRef> {
+    let Some(r) = world.rooms.get(room) else {
+        return Vec::new();
+    };
+    r.leaves
+        .in_sector(cell)
+        .into_iter()
+        .filter(|(key, _)| key.cell() == cell)
+        .flat_map(|(key, _)| faces_of_leaf(world, room, key))
+        .collect()
 }
 
 #[cfg(test)]

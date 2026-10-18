@@ -24,7 +24,7 @@ impl WeldIndex {
     pub fn build(world: &GridWorld) -> Self {
         let mut buckets: HashMap<[i32; 3], Vec<CornerRef>> = HashMap::new();
         for (room_index, room) in world.rooms.iter().enumerate() {
-            for (x, z, _) in room.iter() {
+            for [x, z] in room.face_cells() {
                 let cell = room.world_cell(x, z);
                 for face in faces_of_cell(world, room_index, cell) {
                     for corner in face.corners(world) {
@@ -45,6 +45,70 @@ impl WeldIndex {
             .and_then(|pos| self.buckets.get(&pos))
             .cloned()
             .unwrap_or_else(|| vec![*corner])
+    }
+}
+
+/// The child of a leaf that holds corner `corner` (`[NW, NE, SE, SW]`) of it.
+const fn corner_child(corner: u8) -> usize {
+    match corner & 3 {
+        0 => 0,
+        1 => 1,
+        2 => 3,
+        _ => 2,
+    }
+}
+
+/// Subdivide the leaf above a sector that `corner` belongs to and return the
+/// same corner of the child that holds it. `None` for a corner that is not on
+/// a surface of such a leaf.
+fn refine_one(world: &mut GridWorld, corner: CornerRef) -> Option<CornerRef> {
+    if corner.face.leaf.level >= crate::grid::leaf::SECTOR_LEVEL
+        || !matches!(corner.face.target, FaceTarget::Surface(_))
+    {
+        return None;
+    }
+    let room = world.rooms.get_mut(corner.face.room)?;
+    let children = crate::grid::tree::subdivide(room, corner.face.leaf).ok()?;
+    Some(CornerRef {
+        face: FaceRef {
+            leaf: children[corner_child(corner.corner)],
+            ..corner.face
+        },
+        ..corner
+    })
+}
+
+/// Make `corners` (and, with `link`, the corners welded to them) corners of
+/// leaves no larger than a sector, so each can move on its own: a leaf above
+/// a sector is one plane and would otherwise have to follow. Subdividing is
+/// lossless; the document looks the same afterwards. Returns the corners to
+/// move, on the refined leaves.
+pub fn refine_corners(world: &mut GridWorld, corners: &[CornerRef], link: bool) -> Vec<CornerRef> {
+    let mut set: BTreeSet<CornerRef> = corners.iter().copied().collect();
+    loop {
+        if link {
+            let index = WeldIndex::build(world);
+            for corner in set.clone() {
+                set.extend(index.coincident(world, &corner));
+            }
+        }
+        let mut changed = false;
+        let mut next = BTreeSet::new();
+        for corner in set {
+            match refine_one(world, corner) {
+                Some(refined) => {
+                    changed = true;
+                    next.insert(refined);
+                }
+                None => {
+                    next.insert(corner);
+                }
+            }
+        }
+        set = next;
+        if !changed {
+            return set.into_iter().collect();
+        }
     }
 }
 
@@ -106,6 +170,15 @@ impl HeightDrag {
         }
     }
 
+    /// [`Self::begin`] after making the corners ones that can move alone (see
+    /// [`refine_corners`]); the world may gain leaves, none of which changes
+    /// what it looks like.
+    pub fn begin_refining(world: &mut GridWorld, corners: &[CornerRef], link: bool) -> Self {
+        let refined = refine_corners(world, corners, link);
+        // Linking is done: the set is closed under coincidence already.
+        Self::begin(world, &refined, false)
+    }
+
     /// Number of corners that will move.
     pub fn len(&self) -> usize {
         self.targets.len()
@@ -122,6 +195,18 @@ impl HeightDrag {
         let mut changed = false;
         for (corner, start) in &self.targets {
             changed |= corner.set_world_height(world, start.saturating_add(delta));
+        }
+        // Where a corner moved, hanging corners of finer neighbours follow
+        // the coarse edge they lie on.
+        let mut rooms: Vec<usize> = self.targets.iter().map(|(c, _)| c.face.room).collect();
+        rooms.sort_unstable();
+        rooms.dedup();
+        for room in rooms {
+            if let Some(room) = world.rooms.get_mut(room) {
+                if !room.leaves.is_sectors_only() {
+                    crate::grid::tree::normalize(room);
+                }
+            }
         }
         // Surfaces that follow their heights choose their diagonal again,
         // from where it started.

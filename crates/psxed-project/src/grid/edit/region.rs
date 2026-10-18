@@ -174,10 +174,12 @@ impl Region {
         let mut kept = Vec::new();
         let mut skipped = 0;
         for cell in self.cells() {
-            let has = room
-                .local(cell)
-                .and_then(|[x, z]| room.sector(x, z))
-                .is_some_and(|s| s.ground_floor().is_some());
+            let has = room.local(cell).is_some()
+                && room
+                    .leaves
+                    .in_sector(cell)
+                    .iter()
+                    .any(|(_, s)| s.ground_floor().is_some());
             if has {
                 kept.push(cell);
             } else {

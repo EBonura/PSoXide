@@ -59,8 +59,8 @@ pub use planes::{
 };
 pub use rects::{create_surfaces, delete_surfaces, CellRect, RectOutcome, RectRefusal};
 pub use refs::{
-    corner_offsets, faces_of_cell, CornerRef, EdgeRef, FaceRef, FaceTarget, GridElement,
-    SurfaceKind,
+    corner_offsets, faces_of_cell, faces_of_leaf, CornerRef, EdgeRef, FaceRef, FaceTarget,
+    GridElement, SurfaceKind,
 };
 pub use region::Region;
 pub use selection::{
@@ -73,3 +73,6 @@ pub use walls::{
     facing_toward, next_wall_heights, place_wall, place_wall_run, remove_wall, wall_gap,
     wall_run_cells, WallRefusal, WallSpec,
 };
+
+#[cfg(test)]
+mod leaf_tests;

@@ -339,8 +339,9 @@ pub fn all_faces_of_room(world: &GridWorld, room: usize) -> Vec<FaceRef> {
     let Some(r) = world.rooms.get(room) else {
         return Vec::new();
     };
-    r.iter()
-        .flat_map(|(x, z, _)| faces_of_cell(world, room, r.world_cell(x, z)))
+    r.face_cells()
+        .into_iter()
+        .flat_map(|[x, z]| faces_of_cell(world, room, r.world_cell(x, z)))
         .collect()
 }
 
