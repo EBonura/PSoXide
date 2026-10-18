@@ -21,11 +21,7 @@ impl Playtest {
         } else {
             0
         };
-        RoomPoint::new(
-            hook.x + sway,
-            hook.y + hooks::MARKER_HEIGHT,
-            hook.z,
-        )
+        RoomPoint::new(hook.x + sway, hook.y + hooks::MARKER_HEIGHT, hook.z)
     }
 
     fn arch_perch(&self, index: usize, now: u32) -> RoomPoint {
