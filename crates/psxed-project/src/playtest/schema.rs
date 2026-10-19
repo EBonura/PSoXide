@@ -119,6 +119,10 @@ pub struct PlaytestGridWorld {
     /// The same chunks one by one, unpadded: `WORLD.PAK` chunk `i + 1` is
     /// `room_chunks[i]` (chunk 0 is [`Self::core`]).
     pub room_chunks: Vec<Vec<u8>>,
+    /// The records the level owns (`psx_level::wire`): `WORLD.PAK` chunk
+    /// `room_chunks.len() + 1`, after the last room. Filled once the package
+    /// is complete.
+    pub records: Vec<u8>,
     /// The room pool the guest reserves: sized from the wanted set at the
     /// busiest position of the level (see `psx_grid::stream::plan_pool`).
     pub pool: psx_grid::stream::PoolPlan,
@@ -613,7 +617,7 @@ pub struct PlaytestImageProp {
 }
 
 /// One material-backed editable box prop.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PlaytestBoxProp {
     /// Owning room index in [`PlaytestPackage::rooms`].
     pub room: u16,

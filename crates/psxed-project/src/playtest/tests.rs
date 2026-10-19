@@ -252,15 +252,35 @@ fn camera_controls_survive_cooking_and_manifest_export() {
             assert_eq!(room.camera.position_vertical_lag_shift, position);
             assert_eq!(room.camera.focus_vertical_lag_shift, focus);
         }
-        let source = super::manifest::render_manifest_source(&package);
-        assert!(source.contains(&format!("accelerated_orbit: {split}")));
-        assert!(source.contains(&format!("recenter_preserves_pitch: {split}")));
-        if split {
-            assert!(source.contains("Some(LevelCameraProfile { distance: 244, height: 119, target_height: 73, fov_y_degrees: 46, shoulder_offset: 24 })"));
+        // The records the guest reads off the disc carry the same camera.
+        let records = decode_level_records(&package);
+        assert_eq!(records.rooms.len(), package.rooms.len());
+        for room in records.rooms {
+            assert_eq!(room.camera.accelerated_orbit, split);
+            assert_eq!(room.camera.recenter_preserves_pitch, split);
+            assert_eq!(
+                room.camera.lock_profile,
+                split.then_some(psx_level::LevelCameraProfile {
+                    distance: 244,
+                    height: 119,
+                    target_height: 73,
+                    fov_y_degrees: 46,
+                    shoulder_offset: 24
+                })
+            );
+            assert_eq!(room.camera.position_vertical_lag_shift, position);
+            assert_eq!(room.camera.focus_vertical_lag_shift, focus);
         }
-        assert!(source.contains(&format!("position_vertical_lag_shift: {position}")));
-        assert!(source.contains(&format!("focus_vertical_lag_shift: {focus}")));
     }
+}
+
+/// The records a package's level chunk decodes to, as the guest reads them.
+pub(super) fn decode_level_records(
+    package: &PlaytestPackage,
+) -> psx_level::wire::LevelRecords<'static> {
+    let owned = level_records::OwnedLevelRecords::build(package);
+    let bytes: &'static [u8] = Box::leak(owned.records().encode().into_boxed_slice());
+    psx_level::wire::LevelRecords::decode(bytes).expect("the chunk decodes")
 }
 
 #[test]

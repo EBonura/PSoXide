@@ -270,14 +270,6 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         out,
         "pub const PERSISTENT_ASSET_PAGE_COUNT: usize = {persistent_asset_page_count};\n",
     );
-    // Box-prop runtime state is one slot per authored prop. Cooking the
-    // count keeps ~1.4 KB per unused slot out of the PS1's 2 MB.
-    let box_prop_state_count = package.box_props.len().max(1);
-    let _ = writeln!(
-        out,
-        "pub const BOX_PROP_STATE_COUNT: usize = {box_prop_state_count};\n",
-    );
-
     // Force 4-byte alignment on embedded asset blobs. A zero-size
     // `[u32; 0]` marker bumps the wrapper's alignment to a word; the
     // trailing unsized `bytes` field then starts word-aligned, which
@@ -289,10 +281,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     out.push_str("    bytes: Bytes,\n");
     out.push_str("}\n\n");
 
-    out.push_str("pub const PLAYTEST_HAS_WORLD: bool = true;\n");
-    // Actor and prop lighting outside the baked world uses this ambient;
-    // the world itself carries per-corner baked light.
-    out.push_str("pub const WORLD_AMBIENT_RGB: [u8; 3] = [32; 3];\n\n");
+    out.push_str("pub const PLAYTEST_HAS_WORLD: bool = true;\n\n");
 
     // Emit one named static per asset so the include_bytes! call
     // sites are easy to grep for. Asset records reference these
@@ -367,196 +356,6 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     }
     out.push_str("];\n\n");
 
-    for (room_index, room) in package.rooms.iter().enumerate() {
-        if room.far_vista.texture_asset_indices.is_empty() {
-            continue;
-        }
-        let assets = room
-            .far_vista
-            .texture_asset_indices
-            .iter()
-            .map(|index| {
-                index
-                    .map(|index| format!("AssetId({index})"))
-                    .unwrap_or_else(|| "AssetId(u16::MAX)".to_string())
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        let _ = writeln!(
-            out,
-            "static FAR_VISTA_TEXTURES_{room_index}: &[AssetId] = &[{assets}];"
-        );
-    }
-    if package
-        .rooms
-        .iter()
-        .any(|room| !room.far_vista.texture_asset_indices.is_empty())
-    {
-        out.push('\n');
-    }
-
-    let mut sky_cyclorama_defs: Vec<&[crate::SkyCycloramaQuad]> = Vec::new();
-    let mut sky_cyclorama_refs: Vec<String> = Vec::with_capacity(package.rooms.len());
-    for room in &package.rooms {
-        if room.sky.cyclorama_quads.is_empty() {
-            sky_cyclorama_refs.push("&[]".to_string());
-        } else if let Some(index) = sky_cyclorama_defs
-            .iter()
-            .position(|quads| *quads == room.sky.cyclorama_quads.as_slice())
-        {
-            sky_cyclorama_refs.push(format!("SKY_CYCLORAMA_QUADS_{index}"));
-        } else {
-            let index = sky_cyclorama_defs.len();
-            sky_cyclorama_defs.push(room.sky.cyclorama_quads.as_slice());
-            sky_cyclorama_refs.push(format!("SKY_CYCLORAMA_QUADS_{index}"));
-        }
-    }
-    for (cyclorama_index, quads) in sky_cyclorama_defs.iter().enumerate() {
-        let _ = writeln!(
-            out,
-            "static SKY_CYCLORAMA_QUADS_{cyclorama_index}: &[LevelCycloramaQuadRecord] = &["
-        );
-        for quad in *quads {
-            let _ = writeln!(
-                out,
-                "    LevelCycloramaQuadRecord {{ direction_q12: [[{}, {}, {}], [{}, {}, {}], [{}, {}, {}], [{}, {}, {}]], rgb: [[{}, {}, {}], [{}, {}, {}], [{}, {}, {}], [{}, {}, {}]], flags: 0 }},",
-                quad.direction_q12[0][0],
-                quad.direction_q12[0][1],
-                quad.direction_q12[0][2],
-                quad.direction_q12[1][0],
-                quad.direction_q12[1][1],
-                quad.direction_q12[1][2],
-                quad.direction_q12[2][0],
-                quad.direction_q12[2][1],
-                quad.direction_q12[2][2],
-                quad.direction_q12[3][0],
-                quad.direction_q12[3][1],
-                quad.direction_q12[3][2],
-                quad.rgb[0][0],
-                quad.rgb[0][1],
-                quad.rgb[0][2],
-                quad.rgb[1][0],
-                quad.rgb[1][1],
-                quad.rgb[1][2],
-                quad.rgb[2][0],
-                quad.rgb[2][1],
-                quad.rgb[2][2],
-                quad.rgb[3][0],
-                quad.rgb[3][1],
-                quad.rgb[3][2],
-            );
-        }
-        out.push_str("];\n");
-    }
-    if !sky_cyclorama_defs.is_empty() {
-        out.push('\n');
-    }
-
-    out.push_str("/// Rooms with material-slice metadata.\n");
-    out.push_str("pub static ROOMS: &[LevelRoomRecord] = &[\n");
-    for (room_index, room) in package.rooms.iter().enumerate() {
-        let far_vista_texture_assets = if room.far_vista.texture_asset_indices.is_empty() {
-            "&[]".to_string()
-        } else {
-            format!("FAR_VISTA_TEXTURES_{room_index}")
-        };
-        let sky_cyclorama_quads = &sky_cyclorama_refs[room_index];
-        let _ = writeln!(
-            out,
-            "    LevelRoomRecord {{ name: {:?}, sector_size: {}, draw_distance: {}, gravity_per_tick_q8: {}, fog_rgb: [{}, {}, {}], fog_near: {}, fog_far: {}, atmosphere_rgb: [{}, {}, {}], atmosphere_density: {}, atmosphere_fall_speed_q4: {}, atmosphere_wind_speed_q4: {}, sky: LevelSkyRecord {{ top_rgb: [{}, {}, {}], horizon_rgb: [{}, {}, {}], bottom_rgb: [{}, {}, {}], horizon_percent: {}, horizon_thickness_percent: {}, skybox_columns: {}, skybox_rows: {}, flags: {}, texture_asset: AssetId({}), cyclorama_quads: {}, cloud_layer: LevelCloudLayerRecord {{ texture_asset: AssetId({}), color_rgb: [{}, {}, {}], density: {}, altitude: {}, extent: {}, tile_count: {}, scroll_speed: [{}, {}], noise_seed: 0x{:08x}, flags: {} }} }}, far_vista: LevelFarVistaRecord {{ texture_assets: {}, radius: {}, height: {}, vertical_offset: {}, segments: {}, rotation_degrees: {}, tint_rgb: [{}, {}, {}], flags: {} }}, camera: LevelCameraRecord {{ distance: {}, height: {}, target_height: {}, lock_rise_percent: {}, min_floor_clearance: {}, orbit_speed_level: {}, accelerated_orbit: {}, recenter_preserves_pitch: {}, fov_y_degrees: {}, blend_profiles: {}, lock_target_framing: {}, lock_profile: {}, position_lag_shift: {}, position_vertical_lag_shift: {}, focus_lag_shift: {}, focus_vertical_lag_shift: {}, distance_lag_shift: {} }}, flags: {} }},",
-            room.name,
-            room.sector_size,
-            room.draw_distance,
-            room.gravity_per_tick_q8,
-            room.fog_rgb[0],
-            room.fog_rgb[1],
-            room.fog_rgb[2],
-            room.fog_near,
-            room.fog_far,
-            room.atmosphere_rgb[0],
-            room.atmosphere_rgb[1],
-            room.atmosphere_rgb[2],
-            room.atmosphere_density,
-            room.atmosphere_fall_speed_q4,
-            room.atmosphere_wind_speed_q4,
-            room.sky.top_rgb[0],
-            room.sky.top_rgb[1],
-            room.sky.top_rgb[2],
-            room.sky.horizon_rgb[0],
-            room.sky.horizon_rgb[1],
-            room.sky.horizon_rgb[2],
-            room.sky.bottom_rgb[0],
-            room.sky.bottom_rgb[1],
-            room.sky.bottom_rgb[2],
-            room.sky.horizon_percent,
-            room.sky.horizon_thickness_percent,
-            room.sky.skybox_columns,
-            room.sky.skybox_rows,
-            room.sky.flags,
-            room.sky
-                .texture_asset_index
-                .map(|index| index.to_string())
-                .unwrap_or_else(|| "u16::MAX".to_string()),
-            sky_cyclorama_quads,
-            room.sky
-                .cloud_layer
-                .texture_asset_index
-                .map(|index| index.to_string())
-                .unwrap_or_else(|| "u16::MAX".to_string()),
-            room.sky.cloud_layer.color_rgb[0],
-            room.sky.cloud_layer.color_rgb[1],
-            room.sky.cloud_layer.color_rgb[2],
-            room.sky.cloud_layer.density,
-            room.sky.cloud_layer.altitude,
-            room.sky.cloud_layer.extent,
-            room.sky.cloud_layer.tile_count,
-            room.sky.cloud_layer.scroll_speed[0],
-            room.sky.cloud_layer.scroll_speed[1],
-            room.sky.cloud_layer.noise_seed,
-            room.sky.cloud_layer.flags,
-            far_vista_texture_assets,
-            room.far_vista.radius,
-            room.far_vista.height,
-            room.far_vista.vertical_offset,
-            room.far_vista.segments,
-            room.far_vista.rotation_degrees,
-            room.far_vista.tint_rgb[0],
-            room.far_vista.tint_rgb[1],
-            room.far_vista.tint_rgb[2],
-            room.far_vista.flags,
-            room.camera.distance,
-            room.camera.height,
-            room.camera.target_height,
-            room.camera.lock_rise_percent,
-            room.camera.min_floor_clearance,
-            room.camera.orbit_speed_level,
-            room.camera.accelerated_orbit,
-            room.camera.recenter_preserves_pitch,
-            room.camera.fov_y_degrees,
-            room.camera.blend_profiles,
-            room.camera.lock_target_framing,
-            room.camera.lock_profile.map_or_else(|| "None".to_owned(), |p| format!("Some(LevelCameraProfile {{ distance: {}, height: {}, target_height: {}, fov_y_degrees: {}, shoulder_offset: {} }})", p.distance, p.height, p.target_height, p.fov_y_degrees, p.shoulder_offset)),
-            room.camera.position_lag_shift,
-            room.camera.position_vertical_lag_shift,
-            room.camera.focus_lag_shift,
-            room.camera.focus_vertical_lag_shift,
-            room.camera.distance_lag_shift,
-            room.flags,
-        );
-    }
-    out.push_str("];\n\n");
-
-    out.push_str("/// Per-runtime-room host-baked 4bpp reflection probes.\n");
-    out.push_str("pub static ROOM_REFLECTION_PROBES: &[Option<AssetId>] = &[\n");
-    for room in &package.rooms {
-        let literal = room
-            .reflection_probe_asset_index
-            .map(|index| format!("Some(AssetId({index}))"))
-            .unwrap_or_else(|| "None".to_string());
-        let _ = writeln!(out, "    {literal},");
-    }
-    out.push_str("];\n\n");
-
     out.push_str(
         "/// Absolute disc LBA where WORLD.PAK starts in the playtest ISO layout: chunk 0\n\
          /// is the grid level core, chunk `i + 1` is room `i`.\n",
@@ -572,7 +371,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     let pool = &package.world_geometry.pool;
     let _ = writeln!(
         out,
-        "/// Rooms in the level; room `i` is WORLD.PAK chunk `i + 1`.\n\
+        "/// Rooms in the level; room `i` is WORLD.PAK chunk `i + 2`.\n\
          pub const GRID_ROOM_COUNT: usize = {};\n\
          /// Pages (2 KiB) of the room pool. The level wants at most {} pages ({} rooms) at\n\
          /// once, of {} pages in all; the rest of the pool is room for fragmentation.\n\
@@ -659,21 +458,6 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     }
     out.push_str("];\n\n");
 
-    let spawn = package.spawn.unwrap_or(PlaytestSpawn {
-        room: 0,
-        x: 0,
-        y: 0,
-        z: 0,
-        yaw: 0,
-        flags: 0,
-    });
-    let _ = writeln!(
-        out,
-        "/// Player spawn.\npub static PLAYER_SPAWN: PlayerSpawnRecord = PlayerSpawnRecord {{ room: RoomIndex({}), x: {}, y: {}, z: {}, yaw: {}, flags: {} }};",
-        spawn.room, spawn.x, spawn.y, spawn.z, spawn.yaw, spawn.flags
-    );
-    out.push('\n');
-
     // MODELS / MODEL_CLIPS / MODEL_INSTANCES -- emitted as
     // empty slices when there are no model instances, so the
     // runtime always has something to walk.
@@ -756,241 +540,6 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             model.socket_count,
             model.world_height,
             model.collision_radius,
-        );
-    }
-    out.push_str("];\n\n");
-
-    out.push_str("/// Placed model instances, room-local coordinates.\n");
-    out.push_str("pub static MODEL_INSTANCES: &[LevelModelInstanceRecord] = &[\n");
-    for inst in &package.model_instances {
-        let clip = if inst.clip == MODEL_CLIP_INHERIT {
-            "MODEL_CLIP_INHERIT".to_string()
-        } else {
-            format!(
-                "OptionalModelClipIndex::some(ModelClipIndex({}))",
-                inst.clip
-            )
-        };
-        let _ = writeln!(
-            out,
-            "    LevelModelInstanceRecord {{ room: RoomIndex({}), model: ModelIndex({}), clip: {clip}, pose_frame: {}, x: {}, y: {}, z: {}, yaw: {}, visual_yaw: {}, pitch: {}, roll: {}, visual_offset: [{}, {}, {}], visual_scale_q8: {}, material_override: {}, flags: {} }},",
-            inst.room,
-            inst.model,
-            inst.pose_frame,
-            inst.x,
-            inst.y,
-            inst.z,
-            inst.yaw,
-            inst.visual_yaw,
-            inst.pitch,
-            inst.roll,
-            inst.visual_offset[0],
-            inst.visual_offset[1],
-            inst.visual_offset[2],
-            inst.visual_scale_q8,
-            model_material_override_literal(&inst.material_override),
-            inst.flags,
-        );
-    }
-    out.push_str("];\n\n");
-
-    out.push_str("/// Shared health/configuration for every destructible target.\n");
-    out.push_str("pub static DESTRUCTIBLES: &[LevelDestructibleRecord] = &[\n");
-    for destructible in &package.destructibles {
-        let _ = writeln!(
-            out,
-            "    LevelDestructibleRecord {{ max_health: {}, persistent_flag: {}, damage_affinity: {}, flags: {} }},",
-            destructible.max_health,
-            destructible.persistent_flag,
-            destructible.damage_affinity,
-            destructible.flags,
-        );
-    }
-    out.push_str("];\n\n");
-
-    out.push_str("/// Shared spatial registry for specialized world payloads.\n");
-    out.push_str("pub static WORLD_OBJECTS: &[LevelWorldObjectRecord] = &[\n");
-    for object in &package.world_objects {
-        let _ = writeln!(
-            out,
-            "    LevelWorldObjectRecord {{ room: RoomIndex({}), kind: {}, flags: {}, source_index: {}, destructible: {}, bounds_min: {:?}, bounds_max: {:?} }},",
-            object.room,
-            object.kind,
-            object.flags,
-            object.source_index,
-            object.destructible,
-            object.bounds_min,
-            object.bounds_max,
-        );
-    }
-    out.push_str("];\n\n");
-
-    out.push_str("/// Placed flat image props, room-local coordinates.\n");
-    out.push_str("pub static IMAGE_PROPS: &[LevelImagePropRecord] = &[\n");
-    for prop in &package.image_props {
-        let _ = writeln!(
-            out,
-            "    LevelImagePropRecord {{ room: RoomIndex({}), texture_asset: AssetId({}), x: {}, y: {}, z: {}, pitch: {}, yaw: {}, roll: {}, width: {}, height: {}, tint_rgb: [{}, {}, {}], baked_vertex_rgb: [({}, {}, {}), ({}, {}, {}), ({}, {}, {}), ({}, {}, {})], collision_min: {:?}, collision_max: {:?}, flags: {} }},",
-            prop.room,
-            prop.texture_asset_index,
-            prop.x,
-            prop.y,
-            prop.z,
-            prop.pitch,
-            prop.yaw,
-            prop.roll,
-            prop.width,
-            prop.height,
-            prop.tint_rgb[0],
-            prop.tint_rgb[1],
-            prop.tint_rgb[2],
-            prop.baked_vertex_rgb[0].0,
-            prop.baked_vertex_rgb[0].1,
-            prop.baked_vertex_rgb[0].2,
-            prop.baked_vertex_rgb[1].0,
-            prop.baked_vertex_rgb[1].1,
-            prop.baked_vertex_rgb[1].2,
-            prop.baked_vertex_rgb[2].0,
-            prop.baked_vertex_rgb[2].1,
-            prop.baked_vertex_rgb[2].2,
-            prop.baked_vertex_rgb[3].0,
-            prop.baked_vertex_rgb[3].1,
-            prop.baked_vertex_rgb[3].2,
-            prop.collision_min,
-            prop.collision_max,
-            prop.flags,
-        );
-    }
-    out.push_str("];\n\n");
-
-    out.push_str("/// Placed editable box props, room-local coordinates.\n");
-    out.push_str("pub static BOX_PROPS: &[LevelBoxPropRecord] = &[\n");
-    for prop in &package.box_props {
-        let texture_assets = render_box_prop_texture_assets(&prop.texture_asset_indices);
-        let vertices = render_box_prop_vertices(&prop.vertices);
-        let tint_rgb = render_box_prop_tint_rgb(&prop.tint_rgb);
-        let baked_vertex_rgb = render_box_prop_baked_vertex_rgb(&prop.baked_vertex_rgb);
-        let _ = writeln!(
-            out,
-            "    LevelBoxPropRecord {{ room: RoomIndex({}), texture_assets: {texture_assets}, blend_modes: {:?}, uvs: {:?}, x: {}, y: {}, z: {}, ground_y: {}, pitch: {}, yaw: {}, roll: {}, vertices: {vertices}, collision_min: {:?}, collision_max: {:?}, surface_first: {}, surface_count: {}, tint_rgb: {tint_rgb}, baked_vertex_rgb: {baked_vertex_rgb}, flags: {} }},",
-            prop.room,
-            prop.blend_modes,
-            prop.uvs,
-            prop.x,
-            prop.y,
-            prop.z,
-            prop.ground_y,
-            prop.pitch,
-            prop.yaw,
-            prop.roll,
-            prop.collision_min,
-            prop.collision_max,
-            prop.surface_first,
-            prop.surface_count,
-            prop.flags,
-        );
-    }
-    out.push_str("];\n\n");
-
-    out.push_str("/// Cook-generated directional erosion surfaces for BoxProps.\n");
-    out.push_str("pub static BOX_PROP_SURFACES: &[LevelBoxPropSurfaceRecord] = &[\n");
-    for surface in &package.box_prop_surfaces {
-        let _ = writeln!(
-            out,
-            "    LevelBoxPropSurfaceRecord {{ vertices: {:?}, center: {:?}, normal: {:?}, uv_q8: {:?}, baked_vertex_rgb: {:?}, source_face: {}, flags: {} }},",
-            surface.vertices,
-            surface.center,
-            surface.normal,
-            surface.uv_q8,
-            surface.baked_vertex_rgb,
-            surface.source_face,
-            surface.flags,
-        );
-    }
-    out.push_str("];\n\n");
-
-    out.push_str("/// Placed low-poly procedural radial props.\n");
-    out.push_str("pub static CYLINDER_PROPS: &[LevelCylinderPropRecord] = &[\n");
-    for prop in &package.cylinder_props {
-        let texture_assets = render_cylinder_prop_texture_assets(&prop.texture_asset_indices);
-        let _ = writeln!(
-            out,
-            "    LevelCylinderPropRecord {{ room: RoomIndex({}), texture_assets: {texture_assets}, blend_modes: {:?}, uvs: {:?}, surface_first: {}, surface_count: {}, center: {:?}, cull_radius: {}, bounds_min: {:?}, bounds_max: {:?}, flags: {} }},",
-            prop.room,
-            prop.blend_modes,
-            prop.uvs,
-            prop.surface_first,
-            prop.surface_count,
-            prop.center,
-            prop.cull_radius,
-            prop.bounds_min,
-            prop.bounds_max,
-            prop.flags,
-        );
-    }
-    out.push_str("];\n\n");
-
-    out.push_str("/// Cook-generated CylinderProp triangles and quads.\n");
-    out.push_str("pub static CYLINDER_PROP_SURFACES: &[LevelCylinderPropSurfaceRecord] = &[\n");
-    for surface in &package.cylinder_prop_surfaces {
-        let _ = writeln!(
-            out,
-            "    LevelCylinderPropSurfaceRecord {{ vertices: {:?}, center: {:?}, normal: {:?}, uv_q8: {:?}, baked_vertex_rgb: {:?}, material_slot: {}, vertex_count: {} }},",
-            surface.vertices,
-            surface.center,
-            surface.normal,
-            surface.uv_q8,
-            surface.baked_vertex_rgb,
-            surface.material_slot,
-            surface.vertex_count,
-        );
-    }
-    out.push_str("];\n\n");
-
-    out.push_str("/// Placed tile-native arches.\n");
-    out.push_str("pub static ARCH_PROPS: &[LevelArchPropRecord] = &[\n");
-    for prop in &package.arch_props {
-        let texture_assets = render_arch_prop_texture_assets(&prop.texture_asset_indices);
-        let _ = writeln!(
-            out,
-            "    LevelArchPropRecord {{ room: RoomIndex({}), texture_assets: {texture_assets}, blend_modes: {:?}, uvs: {:?}, surface_first: {}, surface_count: {}, collision_first: {}, collision_count: {}, center: {:?}, cull_radius: {}, flags: {} }},",
-            prop.room,
-            prop.blend_modes,
-            prop.uvs,
-            prop.surface_first,
-            prop.surface_count,
-            prop.collision_first,
-            prop.collision_count,
-            prop.center,
-            prop.cull_radius,
-            prop.flags,
-        );
-    }
-    out.push_str("];\n\n");
-
-    out.push_str("/// Cook-generated ArchProp quads.\n");
-    out.push_str("pub static ARCH_PROP_SURFACES: &[LevelArchPropSurfaceRecord] = &[\n");
-    for surface in &package.arch_prop_surfaces {
-        let _ = writeln!(
-            out,
-            "    LevelArchPropSurfaceRecord {{ vertices: {:?}, center: {:?}, normal: {:?}, uv_q8: {:?}, baked_vertex_rgb: {:?}, material_slot: {} }},",
-            surface.vertices,
-            surface.center,
-            surface.normal,
-            surface.uv_q8,
-            surface.baked_vertex_rgb,
-            surface.material_slot,
-        );
-    }
-    out.push_str("];\n\n");
-
-    out.push_str("/// Per-segment ArchProp collision approximation.\n");
-    out.push_str("pub static ARCH_PROP_COLLISIONS: &[LevelArchPropCollisionRecord] = &[\n");
-    for collision in &package.arch_prop_collisions {
-        let _ = writeln!(
-            out,
-            "    LevelArchPropCollisionRecord {{ min: {:?}, max: {:?} }},",
-            collision.min, collision.max,
         );
     }
     out.push_str("];\n\n");
@@ -1259,100 +808,6 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     }
     out.push_str("];\n\n");
 
-    out.push_str("/// Placed point lights, room-local coordinates.\n");
-    out.push_str("pub static LIGHTS: &[PointLightRecord] = &[\n");
-    for light in &package.lights {
-        let _ = writeln!(
-            out,
-            "    PointLightRecord {{ room: RoomIndex({}), x: {}, y: {}, z: {}, radius: {}, intensity_q8: {}, color: [{}, {}, {}], flags: 0 }},",
-            light.room,
-            light.x,
-            light.y,
-            light.z,
-            light.radius,
-            light.intensity_q8,
-            light.color[0],
-            light.color[1],
-            light.color[2],
-        );
-    }
-    out.push_str("];\n\n");
-
-    out.push_str("/// Placed point-projected particle emitters, room-local coordinates.\n");
-    out.push_str("pub static PARTICLE_EMITTERS: &[ParticleEmitterRecord] = &[\n");
-    for emitter in &package.particle_emitters {
-        let _ = writeln!(
-            out,
-            "    ParticleEmitterRecord {{ room: RoomIndex({}), x: {}, y: {}, z: {}, max_particles: {}, spawn_rate_q8: {}, lifetime_frames: {}, start_size: {}, end_size: {}, start_color: [{}, {}, {}], end_color: [{}, {}, {}], blend_mode: {}, base_velocity_q4: [{}, {}, {}], random_velocity_q4: [{}, {}, {}], acceleration_q4: [{}, {}, {}], spawn_radius: {}, flags: {} }},",
-            emitter.room,
-            emitter.x,
-            emitter.y,
-            emitter.z,
-            emitter.max_particles,
-            emitter.spawn_rate_q8,
-            emitter.lifetime_frames,
-            emitter.start_size,
-            emitter.end_size,
-            emitter.start_color[0],
-            emitter.start_color[1],
-            emitter.start_color[2],
-            emitter.end_color[0],
-            emitter.end_color[1],
-            emitter.end_color[2],
-            emitter.blend_mode,
-            emitter.base_velocity_q4[0],
-            emitter.base_velocity_q4[1],
-            emitter.base_velocity_q4[2],
-            emitter.random_velocity_q4[0],
-            emitter.random_velocity_q4[1],
-            emitter.random_velocity_q4[2],
-            emitter.acceleration_q4[0],
-            emitter.acceleration_q4[1],
-            emitter.acceleration_q4[2],
-            emitter.spawn_radius,
-            emitter.flags,
-        );
-    }
-    out.push_str("];\n\n");
-
-    out.push_str("/// Text payloads referenced by placed interactables.\n");
-    out.push_str("pub static INTERACTABLE_MESSAGES: &[InteractableMessageRecord] = &[\n");
-    for message in &package.interactable_messages {
-        let _ = writeln!(
-            out,
-            "    InteractableMessageRecord {{ title: {:?}, body: {:?}, page_first: {}, page_count: {} }},",
-            message.title, message.body, message.page_first, message.page_count,
-        );
-    }
-    out.push_str("];\n\n");
-
-    out.push_str("/// Flat body-page table shared by POI and world messages.\n");
-    out.push_str("pub static INTERACTABLE_MESSAGE_PAGES: &[&str] = &[\n");
-    for page in &package.interactable_message_pages {
-        let _ = writeln!(out, "    {:?},", page);
-    }
-    out.push_str("];\n\n");
-
-    out.push_str("/// Italian column of INTERACTABLE_MESSAGE_PAGES; \"\" falls back to English.\n");
-    out.push_str("pub static INTERACTABLE_MESSAGE_PAGES_IT: &[&str] = &[\n");
-    for page in &package.interactable_message_pages_it {
-        let _ = writeln!(out, "    {:?},", page);
-    }
-    out.push_str("];\n\n");
-
-    out.push_str("/// Optional per-scene message shown once per game launch.\n");
-    match &package.world_message {
-        Some(message) => {
-            let _ = writeln!(
-                out,
-                "pub static WORLD_MESSAGE: Option<InteractableMessageRecord> = Some(InteractableMessageRecord {{ title: {:?}, body: {:?}, page_first: {}, page_count: {} }});",
-                message.title, message.body, message.page_first, message.page_count,
-            );
-        }
-        None => {
-            out.push_str("pub static WORLD_MESSAGE: Option<InteractableMessageRecord> = None;\n")
-        }
-    }
     let _ = writeln!(
         out,
         "pub const PERSISTENT_FLAG_COUNT: u16 = {};\n",
@@ -1392,105 +847,6 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             out,
             "    ({:?}, {:?}),",
             module.name_it, module.description_it
-        );
-    }
-    out.push_str("];\n\n");
-
-    out.push_str("/// Placed gameplay interactables, room-local coordinates.\n");
-    out.push_str("pub static INTERACTABLES: &[InteractableRecord] = &[\n");
-    for interactable in &package.interactables {
-        let kind = match interactable.kind {
-            PlaytestInteractableKind::Message => "InteractableKind::Message",
-            PlaytestInteractableKind::Checkpoint => "InteractableKind::Checkpoint",
-            PlaytestInteractableKind::PointOfInterest => "InteractableKind::PointOfInterest",
-        };
-        let message = if interactable.message == psx_level::INTERACTABLE_MESSAGE_NONE {
-            "psx_level::INTERACTABLE_MESSAGE_NONE".to_string()
-        } else {
-            interactable.message.to_string()
-        };
-        let logic = if interactable.logic == psx_level::INTERACTABLE_LOGIC_NONE {
-            "psx_level::INTERACTABLE_LOGIC_NONE".to_string()
-        } else {
-            interactable.logic.to_string()
-        };
-        let _ = writeln!(
-            out,
-            "    InteractableRecord {{ room: RoomIndex({}), kind: {kind}, x: {}, y: {}, z: {}, yaw: {}, radius: {}, marker_height: {}, prompt: {:?}, message: {message}, logic: {logic}, checkpoint_id: {:?}, read_flag: {}, reward_flag: {}, reward_resource: {}, reward_quantity: {}, flags: {} }},",
-            interactable.room,
-            interactable.x,
-            interactable.y,
-            interactable.z,
-            interactable.yaw,
-            interactable.radius,
-            interactable.marker_height,
-            interactable.prompt,
-            interactable.checkpoint_id,
-            interactable.read_flag,
-            interactable.reward_flag,
-            interactable.reward_resource,
-            interactable.reward_quantity,
-            interactable.flags,
-        );
-    }
-    out.push_str("];\n\n");
-
-    out.push_str("/// Placed dual-vitality fields.\n");
-    out.push_str("pub static VITALITY_CIRCLES: &[LevelVitalityCircleRecord] = &[\n");
-    for circle in &package.vitality_circles {
-        let _ = writeln!(
-            out,
-            "    LevelVitalityCircleRecord {{ room: RoomIndex({}), x: {}, y: {}, z: {}, radius: {}, axis: {}, refill_per_second: {}, drain_per_second: {} }},",
-            circle.room,
-            circle.x,
-            circle.y,
-            circle.z,
-            circle.radius,
-            circle.axis,
-            circle.refill_per_second,
-            circle.drain_per_second,
-        );
-    }
-    out.push_str("];\n\n");
-
-    out.push_str("/// Cooked logic entities (phase-3 event graph), room-local coordinates.\n");
-    out.push_str("/// Authored names are interned to u16 ids; the strings died at cook.\n");
-    out.push_str("pub static LOGIC: &[LevelLogicRecord] = &[\n");
-    for logic in &package.logic {
-        let message = if logic.message == psx_level::INTERACTABLE_MESSAGE_NONE {
-            "psx_level::INTERACTABLE_MESSAGE_NONE".to_string()
-        } else {
-            logic.message.to_string()
-        };
-        let link = if logic.link == psx_level::LOGIC_LINK_NONE {
-            "psx_level::LOGIC_LINK_NONE".to_string()
-        } else {
-            logic.link.to_string()
-        };
-        let _ = writeln!(
-            out,
-            "    LevelLogicRecord {{ room: RoomIndex({}), kind: {}, spawnflags: {}, targetname: {}, target: {}, killtarget: {}, master: {}, delay_ticks: {}, wait_ticks: {}, arg0: {}, arg1: {}, link: {link}, message: {message}, x: {}, y: {}, z: {}, min: [{}, {}, {}], max: [{}, {}, {}], flags: {} }},",
-            logic.room,
-            logic.kind,
-            logic.spawnflags,
-            logic.targetname,
-            logic.target,
-            logic.killtarget,
-            logic.master,
-            logic.delay_ticks,
-            logic.wait_ticks,
-            logic.arg0,
-            logic.arg1,
-            logic.x,
-            logic.y,
-            logic.z,
-            logic.min[0],
-            logic.min[1],
-            logic.min[2],
-            logic.max[0],
-            logic.max[1],
-            logic.max[2],
-            logic.flags,
         );
     }
     out.push_str("];\n\n");
@@ -1538,105 +894,6 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             capsule.projectile_charge_start_frame,
             capsule.projectile_glow_scale_q8,
             capsule.projectile_impact_lifetime_ticks,
-        );
-    }
-    out.push_str("];\n\n");
-
-    out.push_str(
-        "/// Stable id of each LOGIC record (a hash of the authored node), parallel to LOGIC.\n",
-    );
-    out.push_str("pub static LOGIC_IDS: &[psx_level::StableId] = &[\n");
-    for id in &package.logic_ids {
-        let _ = writeln!(out, "    psx_level::StableId({id:#010x}),");
-    }
-    out.push_str("];\n\n");
-
-    out.push_str("/// Stable spawn id of each GAME_ENTITIES record (a hash of the authored node), parallel to GAME_ENTITIES.\n");
-    out.push_str("pub static GAME_ENTITY_IDS: &[psx_level::StableId] = &[\n");
-    for id in &package.game_entity_ids {
-        let _ = writeln!(out, "    psx_level::StableId({id:#010x}),");
-    }
-    out.push_str("];\n\n");
-
-    out.push_str("/// Placed souls-like game entities, room-local coordinates.\n");
-    out.push_str("pub static GAME_ENTITIES: &[LevelGameEntityRecord] = &[\n");
-    for entity in &package.game_entities {
-        let model_instance = if entity.model_instance == psx_level::GAME_ENTITY_MODEL_INSTANCE_NONE
-        {
-            "psx_level::GAME_ENTITY_MODEL_INSTANCE_NONE".to_string()
-        } else {
-            entity.model_instance.to_string()
-        };
-        let _ = writeln!(
-            out,
-            "    LevelGameEntityRecord {{ room: RoomIndex({}), kind: {}, targetname: {}, model_instance: {model_instance}, idle_clip: {}, alert_clip: {}, turn_clip: {}, walk_clip: {}, walk_backward_clip: {}, strafe_left_clip: {}, strafe_right_clip: {}, run_clip: {}, attack_clip: {}, attack_speed_q8: {}, attack_frame_range: CharacterActionFrameRange {{ start: {}, end: {} }}, heavy_attack_clip: {}, heavy_attack_speed_q8: {}, heavy_attack_frame_range: CharacterActionFrameRange {{ start: {}, end: {} }}, ranged_attack_clip: {}, ranged_attack_speed_q8: {}, ranged_attack_frame_range: CharacterActionFrameRange {{ start: {}, end: {} }}, stagger_clip: {}, stagger_speed_q8: {}, stagger_frame_range: CharacterActionFrameRange {{ start: {}, end: {} }}, stagger_ticks: {}, death_clip: {}, combat_capsule_first: CombatCapsuleIndex({}), combat_capsule_count: {}, ranged_attack_action: {}, x: {}, y: {}, z: {}, yaw: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, patrol_x: {}, patrol_y: {}, patrol_z: {}, patrol_wait_ticks: {}, aggro_radius: {}, reaction_ticks: {}, preferred_distance: {}, spacing_tolerance: {}, spacing_speed_percent: {}, decision_interval_ticks: {}, circle_chance: {}, attack_priority: {}, attack_cooldown_ticks: {}, group_attack_delay_ticks: {}, windup_ticks: {}, attack_active_ticks: {}, heavy_attack_active_ticks: {}, ranged_attack_active_ticks: {}, recovery_ticks: {}, attack_min_range: {}, attack_max_range: {}, poise: {}, touch_damage: {}, max_health: {}, max_health_secondary: {}, soul_value: {}, flags: {} }},",
-            entity.room,
-            entity.kind,
-            entity.targetname,
-            entity.idle_clip,
-            entity.alert_clip,
-            entity.turn_clip,
-            entity.walk_clip,
-            entity.walk_backward_clip,
-            entity.strafe_left_clip,
-            entity.strafe_right_clip,
-            entity.run_clip,
-            entity.attack_clip,
-            entity.attack_speed_q8,
-            entity.attack_frame_range.start,
-            entity.attack_frame_range.end,
-            entity.heavy_attack_clip,
-            entity.heavy_attack_speed_q8,
-            entity.heavy_attack_frame_range.start,
-            entity.heavy_attack_frame_range.end,
-            entity.ranged_attack_clip,
-            entity.ranged_attack_speed_q8,
-            entity.ranged_attack_frame_range.start,
-            entity.ranged_attack_frame_range.end,
-            entity.stagger_clip,
-            entity.stagger_speed_q8,
-            entity.stagger_frame_range.start,
-            entity.stagger_frame_range.end,
-            entity.stagger_ticks,
-            entity.death_clip,
-            entity.combat_capsule_first,
-            entity.combat_capsule_count,
-            entity.ranged_attack_action,
-            entity.x,
-            entity.y,
-            entity.z,
-            entity.yaw,
-            entity.radius,
-            entity.height,
-            entity.walk_speed,
-            entity.run_speed,
-            entity.patrol[0],
-            entity.patrol[1],
-            entity.patrol[2],
-            entity.patrol_wait_ticks,
-            entity.aggro_radius,
-            entity.reaction_ticks,
-            entity.preferred_distance,
-            entity.spacing_tolerance,
-            entity.spacing_speed_percent,
-            entity.decision_interval_ticks,
-            entity.circle_chance,
-            entity.attack_priority,
-            entity.attack_cooldown_ticks,
-            entity.group_attack_delay_ticks,
-            entity.windup_ticks,
-            entity.attack_active_ticks,
-            entity.heavy_attack_active_ticks,
-            entity.ranged_attack_active_ticks,
-            entity.recovery_ticks,
-            entity.attack_min_range,
-            entity.attack_max_range,
-            entity.poise,
-            entity.touch_damage,
-            entity.max_health,
-            entity.max_health_secondary,
-            entity.soul_value,
-            entity.flags,
         );
     }
     out.push_str("];\n\n");
@@ -1779,38 +1036,6 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     }
     out.push_str("];\n\n");
 
-    match package.player_controller {
-        Some(pc) => {
-            let _ = writeln!(
-                out,
-                "/// Player controller - spawn + Character that drives the player.\npub static PLAYER_CONTROLLER: Option<PlayerControllerRecord> = Some(PlayerControllerRecord {{ spawn: PlayerSpawnRecord {{ room: RoomIndex({}), x: {}, y: {}, z: {}, yaw: {}, flags: {} }}, character: CharacterIndex({}), flags: 0 }});",
-                pc.spawn.room, pc.spawn.x, pc.spawn.y, pc.spawn.z, pc.spawn.yaw, pc.spawn.flags, pc.character,
-            );
-        }
-        None => {
-            out.push_str(
-                "/// Player controller - `None` means no playable character was authored.\n\
-                pub static PLAYER_CONTROLLER: Option<PlayerControllerRecord> = None;\n",
-            );
-        }
-    }
-    out.push('\n');
-
-    out.push_str("/// Entity markers (legacy MeshInstance with no Model resource).\n");
-    out.push_str("pub static ENTITIES: &[EntityRecord] = &[\n");
-    for entity in &package.entities {
-        let kind = match entity.kind {
-            PlaytestEntityKind::HookPoint => "EntityKind::HookPoint",
-            PlaytestEntityKind::Marker => "EntityKind::Marker",
-            PlaytestEntityKind::StaticMesh => "EntityKind::StaticMesh",
-        };
-        let _ = writeln!(
-            out,
-            "    EntityRecord {{ room: RoomIndex({}), kind: {kind}, x: {}, y: {}, z: {}, yaw: {}, resource_slot: ResourceSlot({}), flags: {} }},",
-            entity.room, entity.x, entity.y, entity.z, entity.yaw, entity.resource_slot, entity.flags
-        );
-    }
-    out.push_str("];\n");
     out
 }
 
@@ -1965,8 +1190,9 @@ fn xa_cache_key(
     hash
 }
 
-/// What `WORLD.PAK` holds, in disc order: the grid level core as chunk 0, then
-/// room `i` as chunk `i + 1`. A package without a grid world (the placeholder
+/// What `WORLD.PAK` holds, in disc order: the grid level core as chunk 0, the
+/// level's own records as chunk 1, then room `i` as chunk `i + 2`. The three
+/// the guest needs first sit in the pack's first header sector. A package without a grid world (the placeholder
 /// manifest) has an empty pack, a header-only `WORLD.PAK`, which keeps
 /// `UI.PAK`'s start LBA and the loader contract stable.
 fn world_pack_chunks(package: &PlaytestPackage) -> Vec<(u32, &[u8])> {
@@ -1975,12 +1201,13 @@ fn world_pack_chunks(package: &PlaytestPackage) -> Vec<(u32, &[u8])> {
         return Vec::new();
     }
     std::iter::once((0, world.core.as_slice()))
+        .chain(std::iter::once((1, world.records.as_slice())))
         .chain(
             world
                 .room_chunks
                 .iter()
                 .enumerate()
-                .map(|(room, bytes)| (room as u32 + 1, bytes.as_slice())),
+                .map(|(room, bytes)| (room as u32 + 2, bytes.as_slice())),
         )
         .collect()
 }
@@ -2382,108 +1609,6 @@ fn render_ui_value_binding(binding: UiValueBinding) -> String {
     }
 }
 
-fn render_box_prop_texture_assets(
-    texture_assets: &[Option<usize>; psx_level::BOX_PROP_FACE_COUNT],
-) -> String {
-    let mut out = String::from("[");
-    for (index, texture_asset) in texture_assets.iter().enumerate() {
-        if index > 0 {
-            out.push_str(", ");
-        }
-        match texture_asset {
-            Some(asset) => {
-                let _ = write!(out, "Some(AssetId({asset}))");
-            }
-            None => out.push_str("None"),
-        }
-    }
-    out.push(']');
-    out
-}
-
-fn render_cylinder_prop_texture_assets(
-    texture_assets: &[Option<usize>; psx_level::CYLINDER_PROP_MATERIAL_COUNT],
-) -> String {
-    let mut out = String::from("[");
-    for (index, texture_asset) in texture_assets.iter().enumerate() {
-        if index > 0 {
-            out.push_str(", ");
-        }
-        match texture_asset {
-            Some(asset) => {
-                let _ = write!(out, "Some(AssetId({asset}))");
-            }
-            None => out.push_str("None"),
-        }
-    }
-    out.push(']');
-    out
-}
-
-fn render_arch_prop_texture_assets(
-    texture_assets: &[Option<usize>; psx_level::ARCH_PROP_MATERIAL_COUNT],
-) -> String {
-    let mut out = String::from("[");
-    for (index, texture_asset) in texture_assets.iter().enumerate() {
-        if index > 0 {
-            out.push_str(", ");
-        }
-        match texture_asset {
-            Some(asset) => {
-                let _ = write!(out, "Some(AssetId({asset}))");
-            }
-            None => out.push_str("None"),
-        }
-    }
-    out.push(']');
-    out
-}
-
-fn render_box_prop_vertices(vertices: &[[i16; 3]; psx_level::BOX_PROP_VERTEX_COUNT]) -> String {
-    let mut out = String::from("[");
-    for (index, vertex) in vertices.iter().enumerate() {
-        if index > 0 {
-            out.push_str(", ");
-        }
-        let _ = write!(out, "[{}, {}, {}]", vertex[0], vertex[1], vertex[2]);
-    }
-    out.push(']');
-    out
-}
-
-fn render_box_prop_tint_rgb(tint_rgb: &[[u8; 3]; psx_level::BOX_PROP_FACE_COUNT]) -> String {
-    let mut out = String::from("[");
-    for (index, tint) in tint_rgb.iter().enumerate() {
-        if index > 0 {
-            out.push_str(", ");
-        }
-        let _ = write!(out, "[{}, {}, {}]", tint[0], tint[1], tint[2]);
-    }
-    out.push(']');
-    out
-}
-
-fn render_box_prop_baked_vertex_rgb(
-    baked: &[[(u8, u8, u8); 4]; psx_level::BOX_PROP_FACE_COUNT],
-) -> String {
-    let mut out = String::from("[");
-    for (face_index, face) in baked.iter().enumerate() {
-        if face_index > 0 {
-            out.push_str(", ");
-        }
-        out.push('[');
-        for (vertex_index, rgb) in face.iter().enumerate() {
-            if vertex_index > 0 {
-                out.push_str(", ");
-            }
-            let _ = write!(out, "({}, {}, {})", rgb.0, rgb.1, rgb.2);
-        }
-        out.push(']');
-    }
-    out.push(']');
-    out
-}
-
 const fn material_flags_for_sidedness(sidedness: crate::MaterialFaceSidedness) -> u16 {
     match sidedness {
         crate::MaterialFaceSidedness::Front => 0,
@@ -2492,12 +1617,12 @@ const fn material_flags_for_sidedness(sidedness: crate::MaterialFaceSidedness) -
     }
 }
 
-fn model_material_flags(material: &PlaytestModelMaterialOverride) -> u16 {
+pub(super) fn model_material_flags(material: &PlaytestModelMaterialOverride) -> u16 {
     let flags = material_flags_for_sidedness(material.face_sidedness);
     flags | reflection_material_flags(material.reflection_probe)
 }
 
-fn reflection_material_flags(reflection: Option<crate::ReflectionProbeMaterial>) -> u16 {
+pub(super) fn reflection_material_flags(reflection: Option<crate::ReflectionProbeMaterial>) -> u16 {
     let mut flags = 0;
     if let Some(reflection) = reflection {
         let roughness_level = u16::from(reflection.roughness >> 6).min(3);

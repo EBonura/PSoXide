@@ -64,11 +64,22 @@ fn vitality_circles_emit_a_dedicated_manifest_table() {
         }],
         ..PlaytestPackage::default()
     };
-    let source = render_manifest_source(&package);
-    assert!(source.contains("pub static VITALITY_CIRCLES: &[LevelVitalityCircleRecord]"));
-    assert!(source.contains(
-        "room: RoomIndex(3), x: -40, y: 12, z: 90, radius: 256, axis: 1, refill_per_second: 14, drain_per_second: 9"
-    ));
+    // The circles are level records: they ride the level chunk, not the manifest.
+    assert!(!render_manifest_source(&package).contains("VITALITY_CIRCLES"));
+    let records = super::super::tests::decode_level_records(&package);
+    assert_eq!(
+        records.vitality_circles,
+        &[psx_level::LevelVitalityCircleRecord {
+            room: psx_level::RoomIndex(3),
+            x: -40,
+            y: 12,
+            z: 90,
+            radius: 256,
+            axis: 1,
+            refill_per_second: 14,
+            drain_per_second: 9,
+        }]
+    );
 }
 
 #[test]
@@ -541,7 +552,14 @@ fn test_texture_asset(index: usize) -> PlaytestAsset {
 fn manifest_marks_a_cooked_world_and_the_empty_package_has_none() {
     let source = render_manifest_source(&PlaytestPackage::default());
     assert!(source.contains("pub const PLAYTEST_HAS_WORLD: bool = true;"));
-    assert!(source.contains("pub const WORLD_AMBIENT_RGB: [u8; 3] = [32; 3];"));
+    assert!(
+        !source.contains("WORLD_AMBIENT_RGB"),
+        "level records are not in the manifest"
+    );
+    assert_eq!(
+        super::super::tests::decode_level_records(&PlaytestPackage::default()).world_ambient_rgb,
+        [32; 3]
+    );
     assert!(!source.contains("PXBSP"), "no PXBSP statics remain");
 }
 
@@ -568,18 +586,21 @@ fn a_grid_world_rides_world_pack_with_the_core_first_and_one_chunk_per_room() {
     let package = cooked_starter("layout");
     let world = &package.world_geometry;
     let chunks = world_pack_chunks(&package);
-    assert_eq!(chunks.len(), 1 + world.room_chunks.len());
+    assert_eq!(chunks.len(), 2 + world.room_chunks.len());
+    // The level's own records are chunk 1, ahead of the rooms.
+    assert_eq!((chunks[1].0, chunks[1].1), (1, world.records.as_slice()));
+    assert!(world.records.starts_with(b"PXLR"));
     assert_eq!((chunks[0].0, chunks[0].1), (0, world.core.as_slice()));
     let layout = world_pack_layout(&package);
     let words = psx_grid::write::aligned_copy(&world.core);
     let level =
         psx_grid::LevelView::parse(psx_grid::write::words_as_bytes(&words, world.core.len()))
             .expect("the core parses");
-    let base = layout.entries[1].sector_offset;
+    let base = layout.entries[2].sector_offset;
     assert!(base >= layout.header_sectors);
     for (room, record) in level.rooms.iter().enumerate() {
-        let entry = layout.entries[room + 1];
-        assert_eq!(entry.chunk_id, room as u32 + 1);
+        let entry = layout.entries[room + 2];
+        assert_eq!(entry.chunk_id, room as u32 + 2);
         // The guest finds a room at the sector of chunk 1 plus `pack_sector`,
         // so the rooms must keep the cook's contiguous order.
         assert_eq!(
@@ -620,16 +641,20 @@ fn the_world_chunks_land_in_stream_chunks_in_pack_order() {
     );
     for (room, bytes) in package.world_geometry.room_chunks.iter().enumerate() {
         assert_eq!(
-            &std::fs::read(chunk_dir.join(format!("room_{:03}.psxc", room + 1))).unwrap(),
+            &std::fs::read(chunk_dir.join(format!("room_{:03}.psxc", room + 2))).unwrap(),
             bytes
         );
     }
     let order = std::fs::read_to_string(dir.join(WORLD_PACK_ORDER_FILENAME)).unwrap();
     let ids: Vec<&str> = order.lines().filter(|l| !l.starts_with('#')).collect();
-    let expected: Vec<String> = (0..=package.world_geometry.room_chunks.len())
+    let expected: Vec<String> = (0..package.world_geometry.room_chunks.len() + 2)
         .map(|id| id.to_string())
         .collect();
     assert_eq!(ids, expected);
+    assert_eq!(
+        std::fs::read(chunk_dir.join("room_001.psxc")).unwrap(),
+        package.world_geometry.records
+    );
     // The two plain files for tools that read a level without a disc stay.
     assert_eq!(
         std::fs::read(dir.join("grid_level.pgl")).unwrap(),

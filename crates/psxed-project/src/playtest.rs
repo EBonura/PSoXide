@@ -57,6 +57,7 @@ mod budget;
 pub use budget::*;
 mod cook_ui;
 mod grid_world;
+mod level_records;
 mod manifest;
 mod mesh_sockets;
 /// The hook entities a world's mesh sockets cook to (for the grid tests).
@@ -2140,109 +2141,116 @@ pub fn build_package(
     }
 
     let (save_name, save_title) = project_save_identity(&project.name);
-    (
-        Some(PlaytestPackage {
-            save_name,
-            save_title,
-            world_geometry,
-            // Same map the cook uses to dedupe texture references, so the
-            // reachable set cannot drift from what was actually cooked.
-            used_texture_paths: {
-                let mut paths: Vec<String> = texture_asset_for_path.keys().cloned().collect();
-                paths.sort();
-                paths
-            },
-            // `model_for_resource` holds exactly the model resources that were
-            // registered, and `model_clip_remaps` records which of a model's
-            // clips survived the runtime-clip filter, so a clip the cook skipped
-            // is not shipped.
-            used_ui_paths: used_ui_source_paths,
-            used_model_paths: {
-                let mut paths: std::collections::BTreeSet<String> =
-                    std::collections::BTreeSet::new();
-                for resource_id in model_for_resource.keys() {
-                    let Some(resource) = project.resource(*resource_id) else {
-                        continue;
-                    };
-                    let crate::ResourceData::Model(model) = &resource.data else {
-                        continue;
-                    };
-                    paths.insert(model.model_path.clone());
-                    if let Some(atlas) = &model.texture_path {
-                        paths.insert(atlas.clone());
-                    }
-                    // Same accessor the cook uses to enumerate a model's clips,
-                    // filtered by the remap it produced, so a clip dropped by the
-                    // runtime-clip filter is not shipped either.
-                    let remap = model_clip_remaps.get(resource_id);
-                    for (index, clip) in project
-                        .resolved_model_animation_clips(*resource_id)
-                        .iter()
-                        .enumerate()
-                    {
-                        let kept = remap
-                            .map(|r| r.get(index).is_some_and(Option::is_some))
-                            .unwrap_or(true);
-                        if kept {
-                            paths.insert(clip.psxanim_path.clone());
-                        }
+    let mut package = PlaytestPackage {
+        save_name,
+        save_title,
+        world_geometry,
+        // Same map the cook uses to dedupe texture references, so the
+        // reachable set cannot drift from what was actually cooked.
+        used_texture_paths: {
+            let mut paths: Vec<String> = texture_asset_for_path.keys().cloned().collect();
+            paths.sort();
+            paths
+        },
+        // `model_for_resource` holds exactly the model resources that were
+        // registered, and `model_clip_remaps` records which of a model's
+        // clips survived the runtime-clip filter, so a clip the cook skipped
+        // is not shipped.
+        used_ui_paths: used_ui_source_paths,
+        used_model_paths: {
+            let mut paths: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+            for resource_id in model_for_resource.keys() {
+                let Some(resource) = project.resource(*resource_id) else {
+                    continue;
+                };
+                let crate::ResourceData::Model(model) = &resource.data else {
+                    continue;
+                };
+                paths.insert(model.model_path.clone());
+                if let Some(atlas) = &model.texture_path {
+                    paths.insert(atlas.clone());
+                }
+                // Same accessor the cook uses to enumerate a model's clips,
+                // filtered by the remap it produced, so a clip dropped by the
+                // runtime-clip filter is not shipped either.
+                let remap = model_clip_remaps.get(resource_id);
+                for (index, clip) in project
+                    .resolved_model_animation_clips(*resource_id)
+                    .iter()
+                    .enumerate()
+                {
+                    let kept = remap
+                        .map(|r| r.get(index).is_some_and(Option::is_some))
+                        .unwrap_or(true);
+                    if kept {
+                        paths.insert(clip.psxanim_path.clone());
                     }
                 }
-                paths.into_iter().collect()
-            },
-            assets,
-            rooms,
-            models,
-            model_clips,
-            model_clip_bounds,
-            model_frame_bounds,
-            model_sockets,
-            model_instances,
-            destructibles,
-            world_objects,
-            image_props,
-            box_props,
-            box_prop_surfaces,
-            cylinder_props,
-            cylinder_prop_surfaces,
-            arch_props,
-            arch_prop_surfaces,
-            arch_prop_collisions,
-            ui_nodes,
-            ui_paints,
-            ui_scenes,
-            ui_sfx_samples,
-            ui_sfx_cues,
-            gameplay_sfx_cues,
-            game_flow,
-            options,
-            cdda_tracks,
-            combat_capsules,
-            weapon_hitboxes,
-            weapons,
-            equipment,
-            weapon_appearances,
-            lights,
-            particle_emitters,
-            interactable_messages,
-            interactable_message_pages,
-            interactable_message_pages_it,
-            world_message,
-            persistent_flag_count,
-            boost_modules,
-            interactables,
-            vitality_circles,
-            logic,
-            game_entities,
-            game_entity_ids,
-            logic_ids,
-            spawn,
-            characters,
-            player_controller,
-            entities,
-        }),
-        report,
-    )
+            }
+            paths.into_iter().collect()
+        },
+        assets,
+        rooms,
+        models,
+        model_clips,
+        model_clip_bounds,
+        model_frame_bounds,
+        model_sockets,
+        model_instances,
+        destructibles,
+        world_objects,
+        image_props,
+        box_props,
+        box_prop_surfaces,
+        cylinder_props,
+        cylinder_prop_surfaces,
+        arch_props,
+        arch_prop_surfaces,
+        arch_prop_collisions,
+        ui_nodes,
+        ui_paints,
+        ui_scenes,
+        ui_sfx_samples,
+        ui_sfx_cues,
+        gameplay_sfx_cues,
+        game_flow,
+        options,
+        cdda_tracks,
+        combat_capsules,
+        weapon_hitboxes,
+        weapons,
+        equipment,
+        weapon_appearances,
+        lights,
+        particle_emitters,
+        interactable_messages,
+        interactable_message_pages,
+        interactable_message_pages_it,
+        world_message,
+        persistent_flag_count,
+        boost_modules,
+        interactables,
+        vitality_circles,
+        logic,
+        game_entities,
+        game_entity_ids,
+        logic_ids,
+        spawn,
+        characters,
+        player_controller,
+        entities,
+    };
+    // The records one level owns ride the disc, not the executable: encode
+    // them now and refuse a level that holds more than the runtime's pools.
+    let records = level_records::OwnedLevelRecords::build(&package);
+    for message in records.over_caps() {
+        report.error(format!("level: {message}"));
+    }
+    if !report.is_ok() {
+        return (None, report);
+    }
+    package.world_geometry.records = records.records().encode();
+    (Some(package), report)
 }
 
 /// Give every record cooked since the last call (up to `len`) a stable id from
