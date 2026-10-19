@@ -361,7 +361,7 @@ fn note_failure(tally: &mut Tally, diag: u32) {
 /// The controller's response bytes, status first, drained.
 fn take_response(cd: &mut Cd) -> (u8, u8) {
     let mut bytes = [0u8; 2];
-    for n in 0..16 {
+    #[allow(clippy::needless_range_loop)] for n in 0..16 {
         if cd.status_register() & psx_hw::cd::index_status::RESPONSE_NOT_EMPTY == 0 {
             break;
         }

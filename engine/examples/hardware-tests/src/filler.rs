@@ -13,7 +13,7 @@
 //! the sector's checksum, not only in a compare).
 
 /// 32-bit words in one data sector.
-pub const SECTOR_WORDS: u32 = 512;
+#[allow(dead_code)] pub const SECTOR_WORDS: u32 = 512;
 
 /// Word `index` of sector `sector` of the filler file.
 pub const fn word(sector: u32, index: u32) -> u32 {
@@ -34,7 +34,7 @@ pub const fn fnv_step(hash: u32, word: u32) -> u32 {
 }
 
 /// The checksum a correct read of sector `sector` has.
-pub const fn sector_checksum(sector: u32) -> u32 {
+#[allow(dead_code)] pub const fn sector_checksum(sector: u32) -> u32 {
     let mut hash = FNV_START;
     let mut index = 0;
     while index < SECTOR_WORDS {
