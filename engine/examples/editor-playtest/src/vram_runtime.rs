@@ -49,6 +49,16 @@ const _: () = assert!(
 fn upload_bytes_for(asset_id: AssetId) -> Option<&'static [u8]> {
     #[cfg(feature = "cd-stream-bench")]
     {
+        // A level texture streamed off the disc lives in the session-resident
+        // asset arena, which shares its RAM with the front end's image cache:
+        // ask the arena that owns the asset, never the other one. A queued
+        // upload exists only once those assets are ready (see
+        // `grid_materials`).
+        if let Some(asset) = psx_level::find_asset_of_kind(ASSETS, asset_id, AssetKind::Texture) {
+            if asset.flags & psx_level::asset_flags::STREAMED_GAMEPLAY_PERSISTENT != 0 {
+                return persistent_assets_arena().bytes_for(asset);
+            }
+        }
         psx_game_runtime::vram::resolve_upload_bytes(ASSETS, ui_images_arena(), asset_id)
     }
     #[cfg(not(feature = "cd-stream-bench"))]

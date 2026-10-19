@@ -12,9 +12,33 @@ use psx_level::{find_asset_of_kind, AssetId, AssetKind};
 use crate::generated::ASSETS;
 use crate::{ensure_room_texture_uploaded, ensure_texture_uploaded};
 
+/// The bytes of a level texture: baked into the executable (a build without
+/// the streaming feature) or, once the loading screen has read them off the
+/// disc, in the session-resident asset arena.
+///
+/// The arena shares RAM with the front end's image cache until the loading
+/// screen hands it over, so callers ask only after the persistent assets are
+/// ready (`textures_ready`).
+fn level_texture_bytes(
+    asset: &'static psx_level::LevelAssetRecord,
+    textures_ready: bool,
+) -> Option<&'static [u8]> {
+    if !asset.bytes.is_empty() {
+        return Some(asset.bytes);
+    }
+    #[cfg(feature = "cd-stream-bench")]
+    {
+        if textures_ready {
+            return crate::persistent_assets_arena().bytes_for(asset);
+        }
+    }
+    let _ = textures_ready;
+    None
+}
+
 /// Resolve one level material to its VRAM binding. Returns `None` while the
-/// texture upload is still queued.
-fn resolve_material(material: &psx_grid::Material) -> Option<GridMaterial> {
+/// texture is still to be read off the disc or its upload is still queued.
+fn resolve_material(material: &psx_grid::Material, textures_ready: bool) -> Option<GridMaterial> {
     let asset_id = AssetId(material.texture_asset);
     let asset = find_asset_of_kind(ASSETS, asset_id, AssetKind::Texture).unwrap_or_else(|| {
         panic!(
@@ -22,21 +46,17 @@ fn resolve_material(material: &psx_grid::Material) -> Option<GridMaterial> {
             material.texture_asset
         )
     });
-    assert!(
-        !asset.bytes.is_empty(),
-        "grid texture asset {} has no baked bytes",
-        material.texture_asset
-    );
-    let texture = Texture::from_bytes(asset.bytes).unwrap_or_else(|_| {
+    let bytes = level_texture_bytes(asset, textures_ready)?;
+    let texture = Texture::from_bytes(bytes).unwrap_or_else(|_| {
         panic!(
             "grid texture asset {} is not a valid PSXT",
             material.texture_asset
         )
     });
     let slot = if texture.is_index_zero_transparent() || material.blend != 0 {
-        ensure_texture_uploaded(asset_id, asset.bytes)
+        ensure_texture_uploaded(asset_id, bytes)
     } else {
-        ensure_room_texture_uploaded(asset_id, asset.bytes)
+        ensure_room_texture_uploaded(asset_id, bytes)
     }?;
     if !slot.ready {
         return None;
@@ -89,6 +109,7 @@ pub(super) fn bind_pending(
     level: &LevelView<'static>,
     resident: &mut ResidentRooms<'static>,
     scratch: &mut Vec<Pending>,
+    textures_ready: bool,
 ) -> bool {
     scratch.clear();
     scratch.resize(level.materials.len(), Pending::default());
@@ -106,7 +127,7 @@ pub(super) fn bind_pending(
     }
     for (material, entry) in level.materials.iter().zip(scratch.iter_mut()) {
         if entry.needed {
-            entry.binding = resolve_material(material);
+            entry.binding = resolve_material(material, textures_ready);
         }
     }
     let mut all_ready = true;

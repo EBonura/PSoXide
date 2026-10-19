@@ -776,7 +776,7 @@ impl Playtest {
         if self.world_rt.is_some() && background_tick {
             let _ = self.streaming_jobs.step_vram_uploads();
             if let Some(world_rt) = self.world_rt.as_mut() {
-                let _ = world_rt.refresh_materials();
+                let _ = world_rt.refresh_materials(true);
             }
         }
     }

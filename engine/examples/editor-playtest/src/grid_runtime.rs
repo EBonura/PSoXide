@@ -641,11 +641,16 @@ impl GridRuntime {
     /// Bind the materials of every resident room that has none yet through
     /// the playtest VRAM owner. Returns `true` only when every resident
     /// room's queued uploads are ready.
-    pub(super) fn refresh_materials(&mut self) -> bool {
+    pub(super) fn refresh_materials(&mut self, textures_ready: bool) -> bool {
         if self.materials_epoch == Some(self.resident.epoch()) {
             return true;
         }
-        let ready = bind_pending(&self.level, &mut self.resident, &mut self.material_scratch);
+        let ready = bind_pending(
+            &self.level,
+            &mut self.resident,
+            &mut self.material_scratch,
+            textures_ready,
+        );
         if ready {
             self.materials_epoch = Some(self.resident.epoch());
         }
