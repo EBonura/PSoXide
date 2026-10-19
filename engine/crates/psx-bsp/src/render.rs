@@ -1353,6 +1353,8 @@ pub struct Renderer {
     stream_row: [u8; PXBSP_MAX_VISIBILITY_BYTES],
     visible_leaf_count: usize,
     cached_pxbsp_visibility: Option<(u32, usize)>,
+    /// [`WorldHooks::visibility_epoch`] the cached chain was marked under.
+    cached_pxbsp_visibility_epoch: u32,
     light_styles: [u16; DUMMY_LIGHT_STYLE + 1],
     /// Projection the brush-face frustum clip assumes (see
     /// [`Renderer::set_view_projection`]).
@@ -1522,6 +1524,7 @@ impl Renderer {
             stream_row: [0; PXBSP_MAX_VISIBILITY_BYTES],
             visible_leaf_count: 0,
             cached_pxbsp_visibility: None,
+            cached_pxbsp_visibility_epoch: 0,
             view_projection: ViewProjection::DEFAULT,
             pxbsp_material_cache: [PxbspResolvedMaterial::default(); PXBSP_MATERIAL_CACHE_SLOTS],
             frame_plane_side: Vec::new(),
@@ -1826,6 +1829,9 @@ impl Renderer {
         let mut batch_vertex_count = 0usize;
         let mut batch_surface_count = 0usize;
         let mut batch_worst_words = 0usize;
+        // Ordering-table bias of the batch being built; only a game that
+        // biases depth ever sets it.
+        let mut batch_bias = 0i16;
 
         let faces = map.faces();
         // The vertex lump base, resolved once. `materialize_pxbsp_face` used
@@ -1890,7 +1896,27 @@ impl Renderer {
             }
             // Only the policy byte decides the three rejections below, so the
             // rest of the record is not loaded for a face that never draws.
-            let policy = unsafe { self.pxbsp_material_cache.get_unchecked(slot).policy };
+            let mut policy = unsafe { self.pxbsp_material_cache.get_unchecked(slot).policy };
+            let mut override_resolved = None;
+            if H::OVERRIDES_FACES {
+                match hooks.face_override(face_index, material_index) {
+                    FaceOverride::Default => {}
+                    FaceOverride::Skip => continue,
+                    FaceOverride::Bind(binding) => {
+                        let shown = Self::shown_material(map, hooks, material_index, material_tick);
+                        let material = unsafe { map.materials().get_unchecked(shown) };
+                        let resolved = Self::resolve_material(
+                            material,
+                            Some(binding),
+                            material_index,
+                            material_tick,
+                            epoch,
+                        );
+                        policy = resolved.policy;
+                        override_resolved = Some(resolved);
+                    }
+                }
+            }
             if policy & pxbsp_material_policy::SKY != 0 && !self.track_sky_apertures {
                 continue;
             }
@@ -1926,7 +1952,10 @@ impl Renderer {
                 stats.unresolved_material_faces = stats.unresolved_material_faces.saturating_add(1);
                 continue;
             }
-            let resolved = unsafe { *self.pxbsp_material_cache.get_unchecked(slot) };
+            let resolved = match override_resolved {
+                Some(resolved) => resolved,
+                None => unsafe { *self.pxbsp_material_cache.get_unchecked(slot) },
+            };
 
             let source_count = face.vertex_count();
             if source_count > PXBSP_BATCH_MAX_VERTICES {
@@ -2005,13 +2034,20 @@ impl Renderer {
                 } else {
                     WORST_WINDOWED_PACKET_WORDS_PER_TRIANGLE
                 };
+            let face_bias = if H::BIASES_DEPTH {
+                hooks.depth_bias(face_flags)
+            } else {
+                0
+            };
             if batch_vertex_count + vertex_count > PXBSP_BATCH_MAX_VERTICES
                 || batch_surface_count == PXBSP_BATCH_MAX_SURFACES
                 || !packet_capacity(next, end, batch_worst_words + face_worst_words)
+                || (H::BIASES_DEPTH && batch_surface_count != 0 && face_bias != batch_bias)
             {
                 if batch_surface_count != 0 {
                     stats.surface_batches = stats.surface_batches.saturating_add(1);
                 }
+                let flush_start = next;
                 let submitted = unsafe {
                     flush_pxbsp_batch_zone(
                         batch_vertices,
@@ -2024,6 +2060,9 @@ impl Renderer {
                     )
                 };
                 next = submitted.next_packet;
+                if H::BIASES_DEPTH && batch_bias != 0 {
+                    unsafe { bias_packet_slots(flush_start, next, batch_bias) };
+                }
                 stats.packets = stats.packets.wrapping_add(submitted.packets);
                 stats.hardware_triangles = stats
                     .hardware_triangles
@@ -2066,6 +2105,9 @@ impl Renderer {
             }
             batch_vertex_count += vertex_count;
             batch_surface_count += 1;
+            if H::BIASES_DEPTH {
+                batch_bias = face_bias;
+            }
             batch_worst_words += face_worst_words;
             stats.visible_faces = stats.visible_faces.saturating_add(1);
         }
@@ -2073,6 +2115,7 @@ impl Renderer {
         if batch_surface_count != 0 {
             stats.surface_batches = stats.surface_batches.saturating_add(1);
         }
+        let flush_start = next;
         let submitted = unsafe {
             flush_pxbsp_batch_zone(
                 batch_vertices,
@@ -2085,6 +2128,9 @@ impl Renderer {
             )
         };
         next = submitted.next_packet;
+        if H::BIASES_DEPTH && batch_bias != 0 {
+            unsafe { bias_packet_slots(flush_start, next, batch_bias) };
+        }
         stats.packets = stats.packets.wrapping_add(submitted.packets);
         stats.hardware_triangles = stats
             .hardware_triangles
@@ -2168,21 +2214,40 @@ impl Renderer {
         // vertices unless something actually changes a word.
         if color_scale_q7 == 128 {
             if baked_light && baked_overflow {
-                for vertex in output {
+                for vertex in output.iter_mut() {
                     if vertex.color & 0xff00_0000 != 0 {
                         vertex.color = 0x00ff_ffff;
                     }
                 }
             }
+            Self::light_corners(hooks, source_ptr, output);
             return;
         }
-        for vertex in output {
+        for vertex in output.iter_mut() {
             let color = if baked_light && baked_overflow {
                 normalize_baked_color(vertex.color)
             } else {
                 vertex.color
             };
             vertex.color = scale_baked_color_q7(color, color_scale_q7);
+        }
+        Self::light_corners(hooks, source_ptr, output);
+    }
+
+    /// Let the game's rules light each materialised corner (see
+    /// [`WorldHooks::light_corner`]); nothing at all without the seam.
+    #[inline(always)]
+    fn light_corners<H: WorldHooks>(
+        hooks: &H,
+        source: *const SurfaceSourceVertex,
+        output: &mut [AffineVertex],
+    ) {
+        if H::LIGHTS_CORNERS {
+            for (index, vertex) in output.iter_mut().enumerate() {
+                // SAFETY: `output` holds one materialised vertex per source corner.
+                let position = unsafe { (*source.add(index)).position };
+                vertex.color = hooks.light_corner(position, vertex.color);
+            }
         }
     }
 
@@ -2203,7 +2268,46 @@ impl Renderer {
         epoch: u32,
         hooks: &H,
     ) {
-        let material = unsafe { map.materials().get_unchecked(material_index) };
+        // The cache is keyed by the face's authored material; the frame a chain
+        // shows this tick supplies the record and the binding.
+        let shown = Self::shown_material(map, hooks, material_index, tick);
+        let material = unsafe { map.materials().get_unchecked(shown) };
+        let binding = materials.get(shown).copied().flatten();
+        self.pxbsp_material_cache[PxbspResolvedMaterial::slot(material_index)] =
+            Self::resolve_material(material, binding, material_index, tick, epoch);
+    }
+
+    /// The material record a face of authored material `material_index` shows
+    /// at `tick`: itself, unless the game's rules chain it to another frame.
+    #[inline(always)]
+    fn shown_material<H: WorldHooks>(
+        map: &PxbspResidentMap,
+        hooks: &H,
+        material_index: usize,
+        tick: u32,
+    ) -> usize {
+        if !H::CHAINS_MATERIALS {
+            return material_index;
+        }
+        let shown = hooks.chain_material(material_index, tick);
+        if shown < map.materials().len() {
+            shown
+        } else {
+            material_index
+        }
+    }
+
+    /// Everything the face loop reads about a material, derived from its record
+    /// and the caller's binding. `key` is the authored material index the
+    /// result answers to.
+    #[inline(always)]
+    fn resolve_material(
+        material: PxbspMaterial,
+        binding: Option<PxbspTextureBinding>,
+        key: usize,
+        tick: u32,
+        epoch: u32,
+    ) -> PxbspResolvedMaterial {
         let mut policy = (material.flags as u8) & pxbsp_material_policy::FACE_MASK;
         if material.flags
             & (crate::pxbsp::material_flags::SKY_APERTURE
@@ -2218,7 +2322,6 @@ impl Renderer {
         {
             policy |= pxbsp_material_policy::COMPACT;
         }
-        let binding = materials.get(material_index).copied().flatten();
         if binding.is_some() {
             policy |= pxbsp_material_policy::BOUND;
         }
@@ -2233,15 +2336,14 @@ impl Renderer {
             page_uv_origin: [0; 2],
             texture_size: [1; 2],
         });
-        self.pxbsp_material_cache[PxbspResolvedMaterial::slot(material_index)] =
-            PxbspResolvedMaterial {
-                state: pxbsp_material_state(material, binding, tick),
-                texture_window_word: binding.texture_window_word,
-                epoch,
-                clut: binding.clut,
-                material_index: material_index as u16,
-                policy,
-            };
+        PxbspResolvedMaterial {
+            state: pxbsp_material_state(material, binding, tick),
+            texture_window_word: binding.texture_window_word,
+            epoch,
+            clut: binding.clut,
+            material_index: key as u16,
+            policy,
+        }
     }
 
     /// [`Self::pxbsp_face_clip`] with the five plane dot products on the GTE.
@@ -2443,7 +2545,10 @@ impl Renderer {
             self.visible_leaf_count = 0;
             return false;
         };
-        if self.cached_pxbsp_visibility == Some((map.generation(), leaf_index)) {
+        if self.cached_pxbsp_visibility == Some((map.generation(), leaf_index))
+            && (!H::MERGES_VISIBILITY
+                || self.cached_pxbsp_visibility_epoch == hooks.visibility_epoch())
+        {
             return true;
         }
         let leaf = map.leaves().get(leaf_index).expect("validated leaf");
@@ -2484,6 +2589,9 @@ impl Renderer {
             self.visible_leaf_count = 0;
             return false;
         }
+        if H::MERGES_VISIBILITY {
+            hooks.merge_visibility(map, leaf_index, &mut self.visibility[..row_bytes]);
+        }
 
         let leaves = map.leaves();
         let marks = map.mark_surfaces_native();
@@ -2520,6 +2628,9 @@ impl Renderer {
         self.visible_leaf_count = visible_leaves;
         self.rebuild_pxbsp_node_visibility(map);
         self.cached_pxbsp_visibility = Some((map.generation(), leaf_index));
+        if H::MERGES_VISIBILITY {
+            self.cached_pxbsp_visibility_epoch = hooks.visibility_epoch();
+        }
         true
     }
 
@@ -3400,6 +3511,28 @@ unsafe fn flush_pxbsp_batch_zone(
         return submitted;
     }
     unsafe { draw_zone_surfaces(vertices, surfaces, deferred, submitted, end, view) }
+}
+
+/// Shift the ordering-table slot of every packet in `start..end` by `bias`
+/// (negative is nearer), keeping each inside the table.
+///
+/// A staged packet is a tag word (data-word count in bits 24..31, slot in
+/// bits 0..15) followed by its data words; see `affine_surface`.
+///
+/// # Safety
+/// `start..end` must be a whole staged packet stream.
+#[inline(never)]
+unsafe fn bias_packet_slots(start: *mut u32, end: *mut u32, bias: i16) {
+    let last = i32::from(PXBSP_RENDER_PROFILE.ot_depth) - 1;
+    let mut packet = start;
+    while packet < end {
+        // SAFETY: `packet` is a tag word inside the stream.
+        let tag = unsafe { packet.read() };
+        let slot = (tag & 0xffff) as i32;
+        let shifted = (slot + i32::from(bias)).clamp(1, last) as u32;
+        unsafe { packet.write((tag & !0xffff) | shifted) };
+        packet = unsafe { packet.add(1 + (tag >> 24) as usize) };
+    }
 }
 
 /// Draw the surfaces of a flushed batch the writer left for the zone path.
