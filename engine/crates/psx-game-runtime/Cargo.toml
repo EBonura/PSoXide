@@ -29,11 +29,13 @@ psx-asset     = { path = "../../../sdk/crates/psx-asset" }
 psx-cdstream  = { path = "../../../sdk/crates/psx-cdstream" }
 psx-engine    = { path = "../psx-engine" }
 psx-font      = { path = "../../../sdk/crates/psx-font" }
+psx-grid      = { path = "../psx-grid" }
 psx-gpu       = { path = "../../../sdk/crates/psx-gpu" }
 psx-level     = { path = "../psx-level" }
 psx-hw        = { path = "../../../crates/psx-hw" }
 psx-io        = { path = "../../../sdk/crates/psx-io" }
 psx-math      = { path = "../../../sdk/crates/psx-math" }
+psx-residency = { path = "../../../sdk/crates/psx-residency" }
 psx-telemetry = { path = "../../../sdk/crates/psx-telemetry" }
 psx-vram      = { path = "../../../sdk/crates/psx-vram" }
 

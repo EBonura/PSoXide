@@ -152,10 +152,12 @@ dependencies = [
  "psx-engine",
  "psx-font",
  "psx-gpu",
+ "psx-grid",
  "psx-hw",
  "psx-io",
  "psx-level",
  "psx-math",
+ "psx-residency",
  "psx-telemetry",
  "psx-vram",
 ]
@@ -238,6 +240,10 @@ dependencies = [
 
 [[package]]
 name = "psx-render-contract"
+version = "0.1.0"
+
+[[package]]
+name = "psx-residency"
 version = "0.1.0"
 
 [[package]]

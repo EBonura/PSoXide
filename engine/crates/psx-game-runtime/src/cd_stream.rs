@@ -18,11 +18,16 @@ use psx_engine::telemetry;
 use psx_level::LevelWorldPackEntryRecord;
 
 mod ring;
+mod world_pack;
 #[cfg(target_arch = "mips")]
 use self::ring::Hardware as Console;
 #[cfg(not(target_arch = "mips"))]
 use self::ring::Unavailable as Console;
 use self::ring::{CdRun, CdStage, Poll, Transport};
+pub use self::world_pack::{
+    parse_world_pack_entries, read_world_chunk_blocking, read_world_pack_entries_blocking,
+    STATUS_PACK_HEADER_INVALID,
+};
 
 #[cfg(feature = "cd-stream-benchmark")]
 const CD_STREAM_BENCH_LBA: u32 = 992;
