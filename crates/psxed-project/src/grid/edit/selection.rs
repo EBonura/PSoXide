@@ -97,6 +97,7 @@ impl GridSelection {
         self.items.retain(|element| match element {
             GridElement::Cell { room, cell } => !faces_of_cell(world, *room, *cell).is_empty(),
             GridElement::Face(face) => face.exists(world),
+            GridElement::Triangle { face, .. } => face.surface(world).is_some(),
             GridElement::Edge(edge) => edge.face.exists(world),
             GridElement::Vertex(corner) => corner.height(world).is_some(),
         });
@@ -115,6 +116,9 @@ impl GridSelection {
                 GridElement::Face(face) => {
                     set.insert(*face);
                 }
+                GridElement::Triangle { face, .. } => {
+                    set.insert(*face);
+                }
                 GridElement::Edge(edge) => {
                     set.insert(edge.face);
                 }
@@ -124,6 +128,38 @@ impl GridSelection {
             }
         }
         set.into_iter().filter(|f| f.exists(world)).collect()
+    }
+
+    /// The faces the selection names as a whole: [`Self::faces`] without
+    /// the faces that are only there because one of their triangles is
+    /// selected.
+    pub fn whole_faces(&self, world: &GridWorld) -> Vec<FaceRef> {
+        let mut whole = Self::new();
+        whole.items = self
+            .items
+            .iter()
+            .filter(|e| !matches!(e, GridElement::Triangle { .. }))
+            .copied()
+            .collect();
+        whole.faces(world)
+    }
+
+    /// The selected triangles as `(face, 0 or 1)`, those of a face that is
+    /// selected whole left out.
+    pub fn triangles(&self, world: &GridWorld) -> Vec<(FaceRef, u8)> {
+        let whole: BTreeSet<FaceRef> = self.whole_faces(world).into_iter().collect();
+        let mut out: Vec<(FaceRef, u8)> = Vec::new();
+        for element in &self.items {
+            if let GridElement::Triangle { face, tri } = element {
+                if !whole.contains(face)
+                    && face.surface(world).is_some()
+                    && !out.contains(&(*face, *tri))
+                {
+                    out.push((*face, *tri));
+                }
+            }
+        }
+        out
     }
 
     /// Corners that a height edit of this selection moves: a vertex is
@@ -137,6 +173,9 @@ impl GridSelection {
                 }
                 GridElement::Edge(edge) => set.extend(edge.corners()),
                 GridElement::Face(face) => set.extend(face.corners(world)),
+                GridElement::Triangle { face, tri } => {
+                    set.extend(face.triangle_corners(world, *tri));
+                }
                 GridElement::Cell { room, cell } => {
                     for face in faces_of_cell(world, *room, *cell) {
                         set.extend(face.corners(world));

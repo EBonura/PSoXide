@@ -353,6 +353,26 @@ impl FaceRef {
         out
     }
 
+    /// The three corners triangle `tri` of a floor or ceiling stands on: the
+    /// first height layer for triangle A (and for B unless the surface is
+    /// split-level), the second layer for a split-level triangle B.
+    pub fn triangle_corners(&self, world: &GridWorld, tri: u8) -> Vec<CornerRef> {
+        let Some(surface) = self.surface(world) else {
+            return Vec::new();
+        };
+        let layer = u8::from(tri != 0 && surface.heights_b.is_some());
+        surface
+            .split
+            .triangle(usize::from(tri.min(1)))
+            .into_iter()
+            .map(|corner| CornerRef {
+                face: *self,
+                layer,
+                corner: corner as u8,
+            })
+            .collect()
+    }
+
     /// Grid position `[x, y, z]` of the face's centre in world grid units.
     pub fn centre(&self, world: &GridWorld) -> Option<[i32; 3]> {
         let corners = self.corners(world);
@@ -485,6 +505,14 @@ pub enum GridElement {
     },
     /// One face.
     Face(FaceRef),
+    /// One triangle of a floor or ceiling: `tri` is `0` (A) or `1` (B), the
+    /// halves the diagonal cuts the quad into. A void triangle can be picked.
+    Triangle {
+        /// The floor or ceiling.
+        face: FaceRef,
+        /// Which half, `0` or `1`.
+        tri: u8,
+    },
     /// One edge of a face.
     Edge(EdgeRef),
     /// One corner of a face.
@@ -497,6 +525,7 @@ impl GridElement {
         match self {
             Self::Cell { room, .. } => *room,
             Self::Face(f) => f.room,
+            Self::Triangle { face, .. } => face.room,
             Self::Edge(e) => e.face.room,
             Self::Vertex(v) => v.face.room,
         }
@@ -507,6 +536,7 @@ impl GridElement {
         match self {
             Self::Cell { cell, .. } => *cell,
             Self::Face(f) => f.cell(),
+            Self::Triangle { face, .. } => face.cell(),
             Self::Edge(e) => e.face.cell(),
             Self::Vertex(v) => v.face.cell(),
         }
