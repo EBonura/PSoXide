@@ -760,9 +760,19 @@ impl Playtest {
             // session-lifetime read finishes.
             return;
         }
-        // The resident grid world owns geometry, activation and collision;
-        // only shared VRAM uploads and material resolution remain after
-        // persistent models are ready.
+        // The resident grid world owns geometry, activation and collision.
+        // Its rooms stream in around the player every tick; shared VRAM
+        // uploads and material resolution follow on background ticks.
+        let player = self.motor.position();
+        let eye = self.render_camera.position;
+        let demand_only = self.combat_music.engaged;
+        if let Some(world_rt) = self.world_rt.as_mut() {
+            world_rt.stream(
+                [player.x, player.y, player.z],
+                Some([eye.x, eye.y, eye.z]),
+                demand_only,
+            );
+        }
         if self.world_rt.is_some() && background_tick {
             let _ = self.streaming_jobs.step_vram_uploads();
             if let Some(world_rt) = self.world_rt.as_mut() {
@@ -776,7 +786,7 @@ impl Playtest {
         {
             self.world_rt
                 .as_ref()
-                .is_none_or(|world_rt| world_rt.materials_ready())
+                .is_none_or(|world_rt| world_rt.rooms_ready() && world_rt.materials_ready())
         }
         #[cfg(feature = "cd-stream-bench")]
         {
@@ -825,7 +835,7 @@ impl Playtest {
             }
             self.world_rt
                 .as_ref()
-                .is_none_or(|world_rt| world_rt.materials_ready())
+                .is_none_or(|world_rt| world_rt.rooms_ready() && world_rt.materials_ready())
         }
     }
 

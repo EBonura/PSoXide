@@ -289,3 +289,34 @@ pub fn plan_pool(level: &LevelView<'_>, room_pages: &[usize]) -> PoolPlan {
     plan.pool_pages = (peak.0 + peak.0 / 2 + max_room_pages).min(total_pages);
     plan
 }
+
+/// The room that contains `point`, from the level core alone (no chunk needs
+/// to be resident). Among rooms whose footprint holds the point, the one whose
+/// vertical range holds it, else the vertically nearest; `hint` wins a tie,
+/// then the lowest index. `None` outside every footprint.
+pub fn room_at(level: &LevelView<'_>, hint: usize, point: [i32; 3]) -> Option<usize> {
+    let mut best: Option<(i32, bool, usize)> = None;
+    for &room in level.lattice_rooms_at(point[0], point[2]) {
+        let room = usize::from(room);
+        let (min, max) = level.room_bounds(room);
+        if point[0] < min[0] || point[0] >= max[0] || point[2] < min[2] || point[2] >= max[2] {
+            continue;
+        }
+        let gap = (min[1] - point[1]).max(point[1] - max[1]).max(0);
+        let key = (gap, room != hint, room);
+        if best.is_none_or(|b| key < b) {
+            best = Some(key);
+        }
+    }
+    best.map(|(_, _, room)| room)
+}
+
+impl StreamWindow {
+    /// Walk distance, runtime units, from the player to `room` as of the last
+    /// [`Self::wanted`], or `u32::MAX` beyond the lead radius.
+    pub fn distance_of(&self, room: u16) -> u32 {
+        self.lead
+            .cost(usize::from(room))
+            .map_or(u32::MAX, |cost| cost.max(0) as u32)
+    }
+}

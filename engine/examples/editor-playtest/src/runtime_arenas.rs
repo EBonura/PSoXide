@@ -58,8 +58,8 @@ pub(super) struct RuntimeArenas {
     /// Break-time box-prop floor-debris cache (phase-2 box-prop carve).
     pub(super) debris_cache: RuntimeDebrisCache,
     /// Owned CD controller driver state (phase-2 retirement of the
-    /// crate's carried `cd_stream` statics).
-    #[cfg(feature = "cd-stream-bench")]
+    /// crate's carried `cd_stream` statics). The grid level core is read
+    /// through it at boot whatever the build shape.
     pub(super) cd: psx_game_runtime::cd_stream::CdController,
 }
 
@@ -136,7 +136,6 @@ impl RuntimeArenas {
         sky: [const { psx_game_runtime::sky::SkyCyclorama::zeroed() }; PANORAMA_CACHE_COUNT],
         model_scratch: core::mem::MaybeUninit::zeroed(),
         debris_cache: RuntimeDebrisCache::zeroed(),
-        #[cfg(feature = "cd-stream-bench")]
         cd: psx_game_runtime::cd_stream::CdController::zeroed(),
     };
 
@@ -257,7 +256,6 @@ pub(super) fn debris_cache_arena() -> &'static mut RuntimeDebrisCache {
 }
 
 /// Exclusive borrow of the CD controller driver state.
-#[cfg(feature = "cd-stream-bench")]
 pub(super) fn cd_arena() -> &'static mut psx_game_runtime::cd_stream::CdController {
     // SAFETY: see `vram_arena`.
     unsafe { &mut (*arenas_ptr()).cd }

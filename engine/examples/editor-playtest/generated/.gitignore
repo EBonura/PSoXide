@@ -18,3 +18,4 @@ models/
 grid_level.pgl
 grid_rooms.pgr
 .cook-cache/
+stream_chunks/

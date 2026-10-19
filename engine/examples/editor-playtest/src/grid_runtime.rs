@@ -1,13 +1,18 @@
 //! Normal-playtest ownership of one cooked sector-grid world.
 //!
-//! Rooms are `psx-grid` chunks held in a resident set (rooms can be added and
-//! removed at any time, a missing room is a solid box), collision is the
+//! The level core is read off the disc at boot and the room chunks are
+//! streamed off `WORLD.PAK` into a page pool as the player moves: the
+//! executable embeds no level data. Rooms are `psx-grid` chunks held in a
+//! resident set (rooms are added as they arrive and removed when evicted, a
+//! missing room is a solid box), collision is the
 //! native per-sector provider, draw range and entity activation are walk
 //! distances over the portal graph, the sky gate is a per-cell flag, and
 //! drawing is the row-span grid renderer.
 
 use core::fmt;
 
+use alloc::boxed::Box;
+use alloc::vec;
 use alloc::vec::Vec;
 
 use psx_engine::{
@@ -18,7 +23,12 @@ use psx_engine::{
     PrimitivePacketArena, RoomPoint, ThirdPersonCameraConfig, ThirdPersonCameraFrame,
     ThirdPersonCameraInput, ThirdPersonCameraState, ThirdPersonCameraTarget, WorldCamera,
 };
+use psx_game_runtime::cd_stream::{
+    read_world_chunk_blocking, read_world_pack_entries_blocking, CdController, WorldChunkInfo,
+    ROOM_CHUNK_STATUS_OK,
+};
 use psx_game_runtime::destructibles::RuntimeDestructibles;
+use psx_game_runtime::grid_stream::{wanted_room, DiscTransport, GridStreamer};
 use psx_grid::collision::GridTraceProvider;
 use psx_grid::contents::{contents_of_liquid_kind, LiquidContentsSample, CONTENTS_EMPTY};
 #[cfg(target_arch = "mips")]
@@ -27,15 +37,16 @@ use psx_grid::render::{
     load_view_rotation, FrustumPlanes, GridFrame, GridPhase, GridRenderer, RoomCamera,
     ViewProjection, ViewTransform, CLIP_ALL_PLANES,
 };
-use psx_grid::{
-    FormatError, LevelView, ResidentError, ResidentRooms, RoomActivity, RoomView,
-    LEVEL_HAS_LIQUIDS, SECTOR_BYTES,
-};
+use psx_grid::stream::{room_at, StreamWindow, Want, WantedRoom};
+use psx_grid::{FormatError, LevelView, ResidentRooms, RoomActivity, RoomView, LEVEL_HAS_LIQUIDS};
 use psx_gte::math::Vec3I32 as GteVec3I32;
 use psx_gte::scene;
 use psx_level::world_object_flags;
+use psx_residency::{CategoryConfig, Class, Wanted};
 
-use crate::generated::WORLD_OBJECTS;
+use crate::generated::{
+    GRID_ROOM_COUNT, GRID_ROOM_POOL_PAGES, WORLD_OBJECTS, WORLD_PACK_START_LBA,
+};
 use crate::grid_materials::{bind_pending, Pending};
 use crate::world_common::{
     view_camera, world_view_rotation, CountingTraceProvider, VisibilityBounds,
@@ -43,29 +54,24 @@ use crate::world_common::{
 use crate::world_objects_runtime::WorldObjectVisibility;
 use crate::{telemetry, PROJECTION};
 
-#[repr(C)]
-struct Aligned<Bytes: ?Sized> {
-    _align: [u32; 0],
-    bytes: Bytes,
-}
+/// Rooms the pool and the residency table can hold at once: never more rooms
+/// than pages, and never more than the level has, plus slack for a room backing
+/// off after a failed read.
+const ROOM_ENTRIES: usize = (if GRID_ROOM_COUNT < GRID_ROOM_POOL_PAGES {
+    GRID_ROOM_COUNT
+} else {
+    GRID_ROOM_POOL_PAGES
+}) + 2;
 
-/// The cooked level core, word aligned.
-static GRID_LEVEL: &[u8] = {
-    static ALIGNED: &Aligned<[u8]> = &Aligned {
-        _align: [],
-        bytes: *include_bytes!("../generated/grid_level.pgl"),
-    };
-    &ALIGNED.bytes
-};
+/// Words of the room pool, 512 to a 2 KiB page.
+const ROOM_POOL_WORDS: usize = GRID_ROOM_POOL_PAGES * 512;
 
-/// Every room chunk, each starting on a 2048-byte boundary.
-static GRID_ROOMS: &[u8] = {
-    static ALIGNED: &Aligned<[u8]> = &Aligned {
-        _align: [],
-        bytes: *include_bytes!("../generated/grid_rooms.pgr"),
-    };
-    &ALIGNED.bytes
-};
+/// The page memory room chunks are read into: all zero, so it costs the
+/// executable nothing.
+static mut ROOM_POOL: [u32; ROOM_POOL_WORDS] = [0; ROOM_POOL_WORDS];
+
+/// The residency state of the room pool.
+static mut ROOM_STREAMER: GridStreamer<ROOM_ENTRIES, DiscTransport> = GridStreamer::new();
 
 /// Ticks between sight-line tests of one model instance.
 const VIEW_REFRESH_TICKS: u32 = 4;
@@ -76,10 +82,10 @@ fn box_contains(min: [i32; 3], max: [i32; 3], point: [i32; 3]) -> bool {
 
 #[derive(Debug)]
 pub(super) enum GridRuntimeInitError {
-    EmptyWorld,
+    /// The core (chunk 0 of `WORLD.PAK`) could not be read; the status is a
+    /// `cd_stream` status code.
+    NoCore(u32),
     Level(FormatError),
-    Room { room: usize, error: FormatError },
-    Resident { room: usize, error: ResidentError },
     NoMaterials,
     Collision,
 }
@@ -87,17 +93,13 @@ pub(super) enum GridRuntimeInitError {
 impl fmt::Display for GridRuntimeInitError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::EmptyWorld => {
-                formatter.write_str("manifest selected a grid world but embedded none")
-            }
-            Self::Level(e) => write!(formatter, "grid level core refused: {e}"),
-            Self::Room { room, error } => write!(formatter, "grid room {room} refused: {error}"),
-            Self::Resident { room, error } => {
+            Self::NoCore(status) => {
                 write!(
                     formatter,
-                    "grid room {room} could not be made resident: {error:?}"
+                    "grid level core unreadable from the disc: status {status}"
                 )
             }
+            Self::Level(e) => write!(formatter, "grid level core refused: {e}"),
             Self::NoMaterials => formatter.write_str("grid level has no materials"),
             Self::Collision => formatter.write_str("grid collision could not be built"),
         }
@@ -106,10 +108,24 @@ impl fmt::Display for GridRuntimeInitError {
 
 pub(super) struct GridRuntime {
     level: LevelView<'static>,
-    /// The rooms in memory right now. Every room is loaded at boot (the chunks
-    /// are baked into the guest) but nothing below assumes it.
+    /// The rooms in memory right now: the ones the streamer has read off the
+    /// disc and installed, and not yet evicted.
     resident: ResidentRooms<'static>,
     activity: RoomActivity,
+    /// The rooms the level wants resident around the player and the camera.
+    window: StreamWindow,
+    /// Scratch of the streamer's wanted list.
+    wanted: Vec<WantedRoom>,
+    wanted_res: Vec<Wanted>,
+    /// Room the player was last found in by the core alone, the search hint.
+    stream_hint: usize,
+    /// Need rooms not resident when the last [`Self::stream`] ended.
+    need_missing: u32,
+    /// Windows in which a need room was missing after the world was first
+    /// ready: the player met a solid box where a room should be.
+    late_short_windows: u32,
+    /// Set once the first need set was resident.
+    streamed_once: bool,
     renderer: GridRenderer,
     /// Every resident room's materials were bound when the set last changed.
     materials_epoch: Option<u32>,
@@ -133,12 +149,39 @@ pub(super) struct GridRuntime {
 }
 
 impl GridRuntime {
-    pub(super) fn load_manifest() -> Result<Self, GridRuntimeInitError> {
+    /// Read the level core off the disc (chunk 0 of `WORLD.PAK`) and start the
+    /// room stream. No room is resident yet: [`Self::stream`] reads the ones
+    /// around the player, and the loading screen waits for them
+    /// ([`Self::rooms_ready`]).
+    pub(super) fn load_manifest(cd: &mut CdController) -> Result<Self, GridRuntimeInitError> {
         crate::game_trace("editor-playtest: grid manifest begin");
-        if GRID_LEVEL.is_empty() {
-            return Err(GridRuntimeInitError::EmptyWorld);
+        // The pack header names the core (chunk 0) and the first room chunk
+        // (chunk 1); room records count their sector from the latter.
+        let mut found = [WorldChunkInfo::EMPTY; 2];
+        let status =
+            read_world_pack_entries_blocking(cd, WORLD_PACK_START_LBA, &[0, 1], &mut found);
+        if status != ROOM_CHUNK_STATUS_OK {
+            return Err(GridRuntimeInitError::NoCore(status));
         }
-        let level = LevelView::parse(GRID_LEVEL).map_err(GridRuntimeInitError::Level)?;
+        let [core_info, first_room] = found;
+        let mut words = vec![0u32; core_info.byte_size.div_ceil(4)];
+        let read = read_world_chunk_blocking(cd, WORLD_PACK_START_LBA, core_info, &mut words);
+        if read.status != ROOM_CHUNK_STATUS_OK || read.bytes != core_info.byte_size {
+            return Err(GridRuntimeInitError::NoCore(read.status));
+        }
+        // The core lives for the whole run, like the static it replaces.
+        let words: &'static [u32] = Box::leak(words.into_boxed_slice());
+        // SAFETY: a `u32` slice is valid as bytes, `byte_size` is within it.
+        let core = unsafe {
+            core::slice::from_raw_parts(words.as_ptr().cast::<u8>(), core_info.byte_size)
+        };
+        Self::from_core(core, WORLD_PACK_START_LBA + first_room.sector_offset)
+    }
+
+    /// A runtime over the level core `core` (word aligned), with room records
+    /// read from `base_lba + pack_sector`.
+    fn from_core(core: &'static [u8], base_lba: u32) -> Result<Self, GridRuntimeInitError> {
+        let level = LevelView::parse(core).map_err(GridRuntimeInitError::Level)?;
         level.validate_full().map_err(GridRuntimeInitError::Level)?;
         if level.materials.is_empty() {
             return Err(GridRuntimeInitError::NoMaterials);
@@ -153,11 +196,33 @@ impl GridRuntime {
             half_height: i32::from(PROJECTION.screen_y),
             ..ViewProjection::DEFAULT
         };
+        let window = StreamWindow::new(&level);
+        // An unwanted room farther than the lead radius is a free victim; one
+        // inside the hysteresis band (a quarter of the radius, or eight
+        // sectors) goes last, so a doorway cannot make two rooms thrash.
+        let lead = u32::try_from(window.lead_radius().min(1 << 27)).unwrap_or(0);
+        let keep_radius = CategoryConfig::keep_radius_for(lead, level.sector_units() * 8);
+        // SAFETY: the pool is a static used only here, once; the streamer owns
+        // it from now on.
+        unsafe {
+            (*core::ptr::addr_of_mut!(ROOM_STREAMER)).start(
+                &mut *core::ptr::addr_of_mut!(ROOM_POOL),
+                base_lba,
+                keep_radius,
+            );
+        }
         crate::game_trace("editor-playtest: grid runtime assemble");
-        let mut runtime = Self {
+        Ok(Self {
             level,
             resident,
             activity: RoomActivity::new(&level),
+            window,
+            wanted: Vec::new(),
+            wanted_res: Vec::new(),
+            stream_hint: 0,
+            need_missing: u32::MAX,
+            late_short_windows: 0,
+            streamed_once: false,
             renderer,
             materials_epoch: None,
             material_scratch: Vec::new(),
@@ -170,56 +235,129 @@ impl GridRuntime {
             view_known: 0,
             view_seen: 0,
             view_phase: 0,
-        };
-        // Everything is loaded at boot: the disc streamer that would load and
-        // evict rooms on demand calls `add_room` and `remove_room` the same
-        // way.
-        for index in 0..level.rooms.len() {
-            let start = usize::try_from(level.rooms[index].pack_sector).unwrap_or(usize::MAX)
-                * SECTOR_BYTES;
-            let bytes = GRID_ROOMS.get(start..).ok_or(GridRuntimeInitError::Room {
-                room: index,
-                error: FormatError::Truncated,
-            })?;
-            runtime.add_room(index, bytes)?;
-        }
-        Ok(runtime)
+        })
     }
 
     // ------------------------------------------------------------------
     // The resident set
     // ------------------------------------------------------------------
 
-    /// Make room `room` resident from its chunk bytes (the first bytes of the
-    /// chunk's pack entry; `bytes` may run on into the next chunk). Its
-    /// materials are bound by the next [`Self::refresh_materials`] and it is
-    /// not drawn before that.
-    pub(super) fn add_room(
-        &mut self,
-        room: usize,
-        bytes: &'static [u8],
-    ) -> Result<(), GridRuntimeInitError> {
-        let view =
-            RoomView::parse(bytes).map_err(|error| GridRuntimeInitError::Room { room, error })?;
-        self.resident
-            .insert(room, view)
-            .map_err(|error| GridRuntimeInitError::Resident { room, error })?;
+    fn streamer() -> &'static mut GridStreamer<ROOM_ENTRIES, DiscTransport> {
+        // SAFETY: the guest is single threaded and no interrupt touches the
+        // streamer; each call site uses the borrow before the next call.
+        unsafe { &mut *core::ptr::addr_of_mut!(ROOM_STREAMER) }
+    }
+
+    /// Make room `room` resident from its chunk bytes. Its materials are
+    /// bound by the next [`Self::refresh_materials`] and it is not drawn
+    /// before that.
+    fn add_room(&mut self, room: usize, bytes: &'static [u8]) -> bool {
+        let Ok(view) = RoomView::parse(bytes) else {
+            return false;
+        };
+        if self.resident.insert(room, view).is_err() {
+            return false;
+        }
         self.materials_epoch = None;
-        Ok(())
+        true
     }
 
     /// Drop room `room` from memory. Bodies and traces meet a solid box where
     /// it was; nothing draws or activates in it.
-    // The disc streamer is not built: this build loads every room at boot and
-    // never evicts one, so only the test exercises the call.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(super) fn remove_room(&mut self, room: usize) -> bool {
+    fn remove_room(&mut self, room: usize) -> bool {
         self.materials_epoch = None;
         self.resident.remove(room).is_some()
     }
 
+    /// Keep the rooms around the player and the camera resident: ask the
+    /// streamer for the need set and the lead ring, evict what it gives up,
+    /// and install at most one landed room. Call once per fixed tick.
+    ///
+    /// `demand_only` holds the lead ring back (no read the player does not
+    /// need now), for the moments a read would cost something else: combat
+    /// music is playing and a read would pause it.
+    pub(super) fn stream(&mut self, player: [i32; 3], camera: Option<[i32; 3]>, demand_only: bool) {
+        let player_room = room_at(&self.level, self.stream_hint, player);
+        if let Some(room) = player_room {
+            self.stream_hint = room;
+        }
+        let camera_room = camera.and_then(|at| room_at(&self.level, self.stream_hint, at));
+        self.window.wanted(
+            &self.level,
+            player_room.map(|room| (room, player)),
+            camera.zip(camera_room).map(|(at, room)| (room, at)),
+            &mut self.wanted,
+        );
+        self.wanted_res.clear();
+        for wanted in &self.wanted {
+            if demand_only && wanted.want == Want::Lead {
+                continue;
+            }
+            if self.wanted_res.len() == ROOM_ENTRIES {
+                break;
+            }
+            let class = match wanted.want {
+                Want::Need => Class::Demand,
+                Want::Lead => Class::Lead,
+            };
+            self.wanted_res.push(wanted_room(
+                wanted.room,
+                class,
+                wanted.distance.max(0) as u32,
+            ));
+        }
+        let streamer = Self::streamer();
+        let window = &self.window;
+        let mut evicted = false;
+        let resident = &mut self.resident;
+        streamer.step(
+            &mut DiscTransport,
+            self.level.rooms,
+            &self.wanted_res,
+            &|room| window.distance_of(room),
+            &mut |room| {
+                evicted |= resident.remove(usize::from(room)).is_some();
+            },
+        );
+        let mut installed = false;
+        let resident = &mut self.resident;
+        streamer.install_next(&mut |room, bytes| {
+            let Ok(view) = RoomView::parse(bytes) else {
+                return false;
+            };
+            installed = resident.insert(usize::from(room), view).is_ok();
+            installed
+        });
+        if evicted || installed {
+            self.materials_epoch = None;
+        }
+        self.need_missing = self
+            .wanted
+            .iter()
+            .filter(|w| w.want == Want::Need && !self.resident.contains(usize::from(w.room)))
+            .count() as u32;
+        if self.need_missing == 0 {
+            self.streamed_once = true;
+        } else if self.streamed_once {
+            self.late_short_windows = self.late_short_windows.saturating_add(1);
+        }
+    }
+
+    /// Whether every room the level wants resident now is: the loading screen
+    /// waits for it, and nothing draws a hole while it holds.
+    pub(super) fn rooms_ready(&self) -> bool {
+        self.need_missing == 0
+    }
+
+    /// Windows, since the world was first ready, in which a need room was not
+    /// resident (the player met a solid box).
+    #[cfg_attr(not(feature = "sim-trace"), allow(dead_code))]
+    pub(super) fn late_short_windows(&self) -> u32 {
+        self.late_short_windows
+    }
+
     /// Rooms in memory.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg_attr(not(feature = "sim-trace"), allow(dead_code))]
     pub(super) fn resident_rooms(&self) -> usize {
         self.resident.len()
     }
@@ -904,6 +1042,84 @@ impl GridRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use psx_grid::write::{aligned_copy, LevelCore, RoomChunk};
+    use psx_grid::{
+        Material, Portal, RCell, RenderMaxima, RoomRecord, Sector, Vtx, NO_EXT, PORTAL_ALWAYS_OPEN,
+        SECTOR_FLAT_FLOOR, SECTOR_FLOOR_WALK_A, SECTOR_FLOOR_WALK_B, SECTOR_HAS_FLOOR,
+    };
+
+    const S: i32 = 80;
+
+    /// One floored sector with a ceiling at 80.
+    fn chunk() -> Vec<u8> {
+        RoomChunk {
+            width: 1,
+            depth: 1,
+            min_y: 0,
+            max_y: 80,
+            sectors: vec![Sector {
+                floor: [0; 4],
+                ceil: [80; 4],
+                flags: SECTOR_HAS_FLOOR
+                    | SECTOR_FLOOR_WALK_A
+                    | SECTOR_FLOOR_WALK_B
+                    | SECTOR_FLAT_FLOOR,
+                ext: NO_EXT,
+            }],
+            vertices: vec![Vtx::default(); 4],
+            cells: vec![RCell {
+                first: 0,
+                count: 0,
+                flags: 0,
+                min_y: 0,
+                max_y: 80,
+            }],
+            ..RoomChunk::default()
+        }
+        .to_bytes()
+    }
+
+    /// Two one-sector rooms side by side along X, joined by a portal.
+    fn core() -> Vec<u8> {
+        let wall = |at: i16, dest: u16| Portal {
+            dest,
+            flags: PORTAL_ALWAYS_OPEN,
+            v: [[at, 0, 0], [at, 0, 80], [at, 80, 80], [at, 80, 0]],
+            ..Portal::default()
+        };
+        let room = |i: i32, first: u16| RoomRecord {
+            origin: [i * S, 0, 0],
+            width: 1,
+            depth: 1,
+            portal_first: first,
+            portal_count: 1,
+            min_y: 0,
+            max_y: 80,
+            pack_sector: i as u32,
+            pack_sectors: 1,
+            ..RoomRecord::default()
+        };
+        LevelCore {
+            sector_units: S as u16,
+            rooms: vec![room(0, 0), room(1, 1)],
+            portals: vec![wall(80, 1), wall(0, 0)],
+            materials: vec![Material::default()],
+            maxima: RenderMaxima {
+                vertices: 4,
+                cells: 1,
+                quads: 1,
+                ..RenderMaxima::default()
+            },
+            ..LevelCore::default()
+        }
+        .to_bytes()
+    }
+
+    fn leak(bytes: &[u8]) -> &'static [u8] {
+        let words: &'static [u32] = Box::leak(aligned_copy(bytes).into_boxed_slice());
+        // SAFETY: a `u32` slice is valid as bytes.
+        unsafe { core::slice::from_raw_parts(words.as_ptr().cast::<u8>(), bytes.len()) }
+    }
 
     /// A point inside the plan footprint of room `room`.
     fn inside(runtime: &GridRuntime, room: usize) -> [i32; 3] {
@@ -913,16 +1129,21 @@ mod tests {
 
     #[test]
     fn rooms_leave_and_come_back_while_the_runtime_keeps_answering() {
-        let mut runtime = GridRuntime::load_manifest().expect("the baked level loads");
-        let all = runtime.resident_rooms();
-        assert_eq!(all, runtime.level.rooms.len());
+        let mut runtime = GridRuntime::from_core(leak(&core()), 1000).expect("the core loads");
+        // Nothing is resident until the stream brings rooms in.
+        assert_eq!(runtime.resident_rooms(), 0);
+        assert!(!runtime.rooms_ready());
+        let bytes = [leak(&chunk()), leak(&chunk())];
+        assert!(runtime.add_room(0, bytes[0]));
+        assert!(runtime.add_room(1, bytes[1]));
+        assert_eq!(runtime.resident_rooms(), 2);
         let at = inside(&runtime, 0);
         assert_eq!(runtime.room_of(at), Some(0));
 
         // Evict room 0: nothing is found there and the world is a solid box.
         assert!(runtime.remove_room(0));
         assert!(!runtime.remove_room(0));
-        assert_eq!(runtime.resident_rooms(), all - 1);
+        assert_eq!(runtime.resident_rooms(), 1);
         assert_eq!(runtime.room_of(at), None);
         assert!(runtime
             .resident
@@ -930,14 +1151,18 @@ mod tests {
             .body_blocked([at[0], at[1] + 8, at[2]], 12, 48));
         assert!(!runtime.materials_ready());
 
-        // Load it again from the baked blob: it is a room once more.
-        let start = usize::try_from(runtime.level.rooms[0].pack_sector).unwrap() * SECTOR_BYTES;
-        runtime
-            .add_room(0, &GRID_ROOMS[start..])
-            .expect("room 0 reloads");
-        assert_eq!(runtime.resident_rooms(), all);
+        // Load it again: it is a room once more.
+        assert!(runtime.add_room(0, bytes[0]));
+        assert_eq!(runtime.resident_rooms(), 2);
         assert_eq!(runtime.room_of(at), Some(0));
         // Loading a room that is already here is refused, not duplicated.
-        assert!(runtime.add_room(0, &GRID_ROOMS[start..]).is_err());
+        assert!(!runtime.add_room(0, bytes[0]));
+    }
+
+    #[test]
+    fn the_core_alone_says_where_the_player_is_before_any_room_is_here() {
+        let runtime = GridRuntime::from_core(leak(&core()), 1000).expect("the core loads");
+        assert_eq!(room_at(&runtime.level, 0, inside(&runtime, 1)), Some(1));
+        assert_eq!(room_at(&runtime.level, 0, [-5, 1, 1]), None);
     }
 }

@@ -438,7 +438,7 @@ impl Playtest {
             .init(DESTRUCTIBLES)
             .unwrap_or_else(|error| panic!("cooked destructible initialization failed: {error:?}"));
         self.world_rt = if generated::PLAYTEST_HAS_WORLD {
-            let mut world_rt = WorldRuntime::load_manifest()
+            let mut world_rt = WorldRuntime::load_manifest(cd_arena())
                 .unwrap_or_else(|error| panic!("cooked world initialization failed: {error}"));
             let _ = world_rt.refresh_materials();
             Some(world_rt)

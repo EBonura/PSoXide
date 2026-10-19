@@ -161,3 +161,33 @@ fn pages_round_up_to_whole_sectors() {
         distance: 0,
     };
 }
+
+#[test]
+fn a_point_is_located_from_the_core_alone() {
+    use crate::stream::room_at;
+    let words = corridor(4, 2, 3, 2, 2);
+    let level = level(&words);
+    // Room 2 spans x 320..480.
+    assert_eq!(room_at(&level, 0, [400, 50, 40]), Some(2));
+    assert_eq!(room_at(&level, 2, [400, 50, 40]), Some(2));
+    // The corridor is one sector deep: past it, or past the ends, is outside.
+    assert_eq!(room_at(&level, 0, [400, 50, S + 40]), None);
+    assert_eq!(room_at(&level, 0, [-1, 50, 40]), None);
+    assert_eq!(room_at(&level, 0, [4 * 160 + 1, 50, 40]), None);
+    // Above or below the room's vertical range it still belongs to it, the
+    // nearest room standing in for a body that jumped or fell.
+    assert_eq!(room_at(&level, 0, [400, 5_000, 40]), Some(2));
+    // The window reports distances for what it searched.
+    let mut window = StreamWindow::new(&level);
+    let mut wanted = Vec::new();
+    window.wanted(&level, Some((2, [400, 50, 40])), None, &mut wanted);
+    assert_eq!(window.distance_of(2), 0);
+    assert_eq!(window.distance_of(3), 80);
+    assert_eq!(window.distance_of(0), 240);
+    // Past the lead radius (400) a room has no distance.
+    let words = corridor(8, 2, 3, 2, 2);
+    let level = self::level(&words);
+    let mut window = StreamWindow::new(&level);
+    window.wanted(&level, Some((0, [40, 50, 40])), None, &mut wanted);
+    assert_eq!(window.distance_of(7), u32::MAX);
+}
