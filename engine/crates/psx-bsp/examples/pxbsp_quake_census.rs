@@ -23,6 +23,8 @@ use psx_gte::math::{Mat3I16, Vec3I32 as GteVec3I32};
 
 /// `PxbspEntity::class_id` of a Quake map entity (`quake_formats::quake_pxbsp`).
 const QUAKE_ENTITY_CLASS: u16 = 0x0100;
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 /// The renderer's view scale, 3.0 in Q12 (`PXBSP_VIEW_SCALE_Q12`).
 const VIEW_SCALE: f64 = 3.0;
 
@@ -133,6 +135,7 @@ fn main() {
     let mut csv = String::from(
         "camera,leaf,yaw,candidates,visible,batches,packets,triangles,words,overflow,unresolved\n",
     );
+    let mut packet_hash = FNV_OFFSET;
     let (mut candidates_sum, mut visible_sum, mut batches_sum) = (0u64, 0u64, 0u64);
     let (mut packets_sum, mut triangles_sum, mut frames) = (0u64, 0u64, 0u64);
     let (mut overflow, mut unresolved) = (0u64, 0u64);
@@ -169,6 +172,12 @@ fn main() {
             };
             let frame = renderer.draw_pxbsp_world(&map, camera, view, &bindings, 0, &mut packets);
             let stats = frame.stats;
+            for &word in &packets[..frame.packet_words] {
+                for byte in word.to_le_bytes() {
+                    packet_hash ^= u64::from(byte);
+                    packet_hash = packet_hash.wrapping_mul(FNV_PRIME);
+                }
+            }
             writeln!(
                 csv,
                 "{camera_index},{leaf},{yaw},{candidates},{},{},{},{},{},{},{}",
@@ -202,7 +211,7 @@ fn main() {
         }
     };
     println!(
-        "{path}: cameras={} frames={frames} mean candidates={:.1} visible={:.1} batches={:.1} packets={:.1} triangles={:.1} overflow_frames={overflow} unresolved_faces={unresolved}",
+        "{path}: cameras={} frames={frames} mean candidates={:.1} visible={:.1} batches={:.1} packets={:.1} triangles={:.1} overflow_frames={overflow} unresolved_faces={unresolved} packet_hash={packet_hash:016x}",
         eyes.len(),
         mean(candidates_sum),
         mean(visible_sum),
