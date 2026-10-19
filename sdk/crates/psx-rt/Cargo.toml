@@ -12,7 +12,7 @@ psx-io = { path = "../psx-io" }
 critical-section = { version = "1.2", optional = true, features = ["restore-state-bool"] }
 
 [features]
-default = []
+default = ["console-diag"]
 # Expose a bump allocator as the global allocator. Kept optional so a
 # minimal no-heap homebrew can opt out.
 alloc = []
