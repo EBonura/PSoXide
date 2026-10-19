@@ -238,8 +238,10 @@ pub(super) struct Run<const W: usize, const S: usize> {
     /// The sector the last `Poll::Sector` handed out: window and index.
     view_slot: u8,
     view_index: u32,
-    /// Restarts left (see [`RUN_RESTARTS`]); refilled by every sector handed out.
-    restarts: u8,
+    /// Restarts spent since the last sector was handed out; counted up from
+    /// zero so the all-zero image of a run is a valid fresh one and a static
+    /// holding it stays in `.bss`.
+    restarts_spent: u8,
 }
 
 impl<const W: usize, const S: usize> Run<W, S> {
@@ -255,7 +257,7 @@ impl<const W: usize, const S: usize> Run<W, S> {
         dirty: false,
         view_slot: 0,
         view_index: 0,
-        restarts: RUN_RESTARTS,
+        restarts_spent: 0,
     };
 
     /// Start reading `sectors` sectors from `lba` (program-relative). Anything
@@ -329,10 +331,10 @@ impl<const W: usize, const S: usize> Run<W, S> {
     /// staging windows are only rewritten by later requests). `false` when the
     /// budget is spent.
     fn restart<T: Transport>(&mut self, transport: &mut T, stage: &mut Stage<W, S>) -> bool {
-        if self.restarts == 0 {
+        if self.restarts_spent >= RUN_RESTARTS {
             return false;
         }
-        let restarts = self.restarts - 1;
+        let restarts_spent = self.restarts_spent + 1;
         let (view_slot, view_index) = (self.view_slot, self.view_index);
         self.dirty = true;
         self.quiesce(transport);
@@ -343,7 +345,7 @@ impl<const W: usize, const S: usize> Run<W, S> {
         self.head = 0;
         self.live = 0;
         self.windows = [Window::EMPTY; W];
-        self.restarts = restarts;
+        self.restarts_spent = restarts_spent;
         self.view_slot = view_slot;
         self.view_index = view_index;
         transport.begin_transfer();
@@ -404,7 +406,7 @@ impl<const W: usize, const S: usize> Run<W, S> {
                 // cannot see. The state read above is volatile; this barrier
                 // keeps the caller's loads of the sector behind it.
                 memory_barrier();
-                self.restarts = RUN_RESTARTS;
+                self.restarts_spent = 0;
                 self.view_slot = slot as u8;
                 self.view_index = window.taken;
                 self.windows[slot].taken += 1;

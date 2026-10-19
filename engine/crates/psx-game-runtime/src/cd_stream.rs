@@ -1564,3 +1564,25 @@ const fn expected_byte(index: usize, sectors: usize) -> u8 {
         mixed as u8
     }
 }
+
+#[cfg(test)]
+mod zero_image_tests {
+    use super::*;
+
+    /// The controller sits inside the guest's arena static. One non-zero byte
+    /// anywhere in that tree moves the whole static, hundreds of kilobytes,
+    /// from `.bss` into the flat executable (it did: the run's restart budget
+    /// was stored as a count left, 3, instead of a count spent).
+    #[test]
+    fn the_zeroed_controller_is_all_zero_bytes() {
+        let controller = CdController::zeroed();
+        // SAFETY: reading the object's own bytes.
+        let bytes = unsafe {
+            core::slice::from_raw_parts(
+                core::ptr::addr_of!(controller).cast::<u8>(),
+                core::mem::size_of::<CdController>(),
+            )
+        };
+        assert!(bytes.iter().all(|&b| b == 0));
+    }
+}

@@ -280,6 +280,12 @@ impl GridRuntime {
     /// need now), for the moments a read would cost something else: combat
     /// music is playing and a read would pause it.
     pub(super) fn stream(&mut self, player: [i32; 3], camera: Option<[i32; 3]>, demand_only: bool) {
+        telemetry::stage_begin(telemetry::stage::CD_ROOM_CHUNK_LOAD);
+        self.stream_inner(player, camera, demand_only);
+        telemetry::stage_end(telemetry::stage::CD_ROOM_CHUNK_LOAD);
+    }
+
+    fn stream_inner(&mut self, player: [i32; 3], camera: Option<[i32; 3]>, demand_only: bool) {
         let player_room = room_at(&self.level, self.stream_hint, player);
         if let Some(room) = player_room {
             self.stream_hint = room;
@@ -313,7 +319,7 @@ impl GridRuntime {
         let window = &self.window;
         let mut evicted = false;
         let resident = &mut self.resident;
-        streamer.step(
+        let summary = streamer.step(
             &mut DiscTransport,
             self.level.rooms,
             &self.wanted_res,
@@ -322,6 +328,7 @@ impl GridRuntime {
                 evicted |= resident.remove(usize::from(room)).is_some();
             },
         );
+        telemetry::counter(telemetry::counter::CD_ROOM_CHUNK_LOADS, summary.issued);
         let mut installed = false;
         let resident = &mut self.resident;
         streamer.install_next(&mut |room, bytes| {
@@ -333,6 +340,9 @@ impl GridRuntime {
         });
         if evicted || installed {
             self.materials_epoch = None;
+        }
+        if installed {
+            telemetry::counter(telemetry::counter::CD_ROOM_CHUNK_HITS, 1);
         }
         self.need_missing = self
             .wanted
