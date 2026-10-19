@@ -66,7 +66,7 @@ impl<T: 'static, const N: usize> Deref for LevelTable<T, N> {
     }
 }
 
-impl<'a, T: 'static, const N: usize> IntoIterator for &'a LevelTable<T, N> {
+impl<T: 'static, const N: usize> IntoIterator for &LevelTable<T, N> {
     type Item = &'static T;
     type IntoIter = core::slice::Iter<'static, T>;
 
