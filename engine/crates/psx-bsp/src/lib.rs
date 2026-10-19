@@ -24,6 +24,7 @@ pub mod resident;
 pub mod sky;
 pub mod toolchain_probe;
 pub mod visibility;
+pub mod world_hooks;
 
 use core::fmt;
 use core::marker::PhantomData;

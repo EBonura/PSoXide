@@ -28,6 +28,7 @@ use crate::pxbsp::{
     PXBSP_MAX_VISIBILITY_BYTES,
 };
 use crate::pxbsp_resident::{FaceRef, PxbspResidentMap};
+use crate::world_hooks::{FaceOverride, NoHooks, WorldHooks};
 use crate::{
     CompactPlane, Vec3I16, Vec3I32, FACE_BACKSIDE, FACE_BAKED_LIGHT, FACE_BAKED_UV,
     FACE_PAGE_LOCAL_UV, FACE_TWO_SIDED,
@@ -1547,7 +1548,31 @@ impl Renderer {
         material_tick: u32,
         packet_storage: &mut [u32],
     ) -> RenderFrame {
-        self.draw_pxbsp_world_from_visibility_origin(
+        self.draw_pxbsp_world_with(
+            map,
+            camera,
+            view,
+            materials,
+            material_tick,
+            packet_storage,
+            &mut NoHooks,
+        )
+    }
+
+    /// [`Self::draw_pxbsp_world`] with a game's rules plugged in (see
+    /// [`WorldHooks`]).
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_pxbsp_world_with<H: WorldHooks>(
+        &mut self,
+        map: &PxbspResidentMap,
+        camera: Camera,
+        view: ViewTransform,
+        materials: &[Option<PxbspTextureBinding>],
+        material_tick: u32,
+        packet_storage: &mut [u32],
+        hooks: &mut H,
+    ) -> RenderFrame {
+        self.draw_pxbsp_world_from_visibility_origin_with(
             map,
             camera,
             camera.origin,
@@ -1555,6 +1580,7 @@ impl Renderer {
             materials,
             material_tick,
             packet_storage,
+            hooks,
         )
     }
 
@@ -1569,6 +1595,32 @@ impl Renderer {
         materials: &[Option<PxbspTextureBinding>],
         material_tick: u32,
         packet_storage: &mut [u32],
+    ) -> RenderFrame {
+        self.draw_pxbsp_world_from_visibility_origin_with(
+            map,
+            camera,
+            visibility_origin,
+            view,
+            materials,
+            material_tick,
+            packet_storage,
+            &mut NoHooks,
+        )
+    }
+
+    /// [`Self::draw_pxbsp_world_from_visibility_origin`] with a game's rules
+    /// plugged in (see [`WorldHooks`]).
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_pxbsp_world_from_visibility_origin_with<H: WorldHooks>(
+        &mut self,
+        map: &PxbspResidentMap,
+        camera: Camera,
+        visibility_origin: Vec3I32,
+        view: ViewTransform,
+        materials: &[Option<PxbspTextureBinding>],
+        material_tick: u32,
+        packet_storage: &mut [u32],
+        hooks: &mut H,
     ) -> RenderFrame {
         self.attach_external_frame_pxbsp_faces();
         scene::load_rotation(&view.rotation);
@@ -1607,7 +1659,7 @@ impl Renderer {
             // SAFETY: no scratchpad bytes are live here (see
             // PxbspSelectionStack), selection installs no exception handler,
             // and tools/stack_guard.py proves its call tree fits.
-            let ok = self.mark_visible_pxbsp_faces(map, visibility_origin)
+            let ok = self.mark_visible_pxbsp_faces_with(map, visibility_origin, hooks)
                 && unsafe {
                     PxbspSelectionStack::run(|| {
                         self.select_frame_pxbsp_faces(map, camera.origin, &frustum)
@@ -1624,7 +1676,7 @@ impl Renderer {
             ok
         };
         let frame = if selected {
-            self.draw_pxbsp_faces(
+            self.draw_pxbsp_faces_with(
                 map,
                 camera.origin,
                 &frustum,
@@ -1632,6 +1684,7 @@ impl Renderer {
                 material_tick,
                 PxbspFaceSelection::VisibleWorld,
                 packet_storage,
+                hooks,
             )
         } else {
             RenderFrame::default()
@@ -1711,6 +1764,7 @@ impl Renderer {
         Some(frame)
     }
 
+    #[inline(always)]
     fn draw_pxbsp_faces(
         &mut self,
         map: &PxbspResidentMap,
@@ -1720,6 +1774,30 @@ impl Renderer {
         material_tick: u32,
         selection: PxbspFaceSelection,
         packet_storage: &mut [u32],
+    ) -> RenderFrame {
+        self.draw_pxbsp_faces_with(
+            map,
+            camera_origin,
+            frustum,
+            materials,
+            material_tick,
+            selection,
+            packet_storage,
+            &mut NoHooks,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_pxbsp_faces_with<H: WorldHooks>(
+        &mut self,
+        map: &PxbspResidentMap,
+        camera_origin: Vec3I32,
+        frustum: &FrustumPlanes,
+        materials: &[Option<PxbspTextureBinding>],
+        material_tick: u32,
+        selection: PxbspFaceSelection,
+        packet_storage: &mut [u32],
+        hooks: &mut H,
     ) -> RenderFrame {
         let start = packet_storage.as_mut_ptr();
         let end = unsafe { start.add(packet_storage.len()) };
@@ -1807,6 +1885,7 @@ impl Renderer {
                     material_index,
                     material_tick,
                     epoch,
+                    hooks,
                 );
             }
             // Only the policy byte decides the three rejections below, so the
@@ -1905,6 +1984,7 @@ impl Renderer {
                         state.color_scale_q7,
                         baked_overflow,
                         &mut face_vertices[..source_count],
+                        hooks,
                     );
                 }
                 let count = clip_polygon_plane(
@@ -1980,6 +2060,7 @@ impl Renderer {
                         state.color_scale_q7,
                         baked_overflow,
                         &mut batch_vertices[batch_vertex_count..batch_vertex_count + vertex_count],
+                        hooks,
                     );
                 }
             }
@@ -2040,7 +2121,7 @@ impl Renderer {
     /// face came from, so `face.first_vertex` indexes it in range. Deriving it
     /// here instead cost a lump-table lookup, a checked offset multiply and a
     /// slice bounds compare on every drawn face.
-    unsafe fn materialize_pxbsp_face(
+    unsafe fn materialize_pxbsp_face<H: WorldHooks>(
         &self,
         source_base: *const SurfaceSourceVertex,
         face: FaceRef,
@@ -2048,6 +2129,7 @@ impl Renderer {
         color_scale_q7: u8,
         baked_overflow: bool,
         output: &mut [AffineVertex],
+        hooks: &H,
     ) {
         let first = face.first_vertex();
         let flags = face.flags();
@@ -2112,13 +2194,14 @@ impl Renderer {
     /// would put the sixteen-byte record decode and the whole animation
     /// derivation back in the loop body's instruction footprint.
     #[inline(never)]
-    fn fill_pxbsp_material_cache(
+    fn fill_pxbsp_material_cache<H: WorldHooks>(
         &mut self,
         map: &PxbspResidentMap,
         materials: &[Option<PxbspTextureBinding>],
         material_index: usize,
         tick: u32,
         epoch: u32,
+        hooks: &H,
     ) {
         let material = unsafe { map.materials().get_unchecked(material_index) };
         let mut policy = (material.flags as u8) & pxbsp_material_policy::FACE_MASK;
@@ -2335,8 +2418,19 @@ impl Renderer {
     // stays continuous. With no earlier row there is nothing justified to
     // draw and the pass fails closed. A malformed tree or row fails closed
     // and forgets the cached row.
+    #[cfg(any(test, feature = "streaming"))]
     #[inline(never)]
     fn mark_visible_pxbsp_faces(&mut self, map: &PxbspResidentMap, point: Vec3I32) -> bool {
+        self.mark_visible_pxbsp_faces_with(map, point, &mut NoHooks)
+    }
+
+    #[inline(never)]
+    fn mark_visible_pxbsp_faces_with<H: WorldHooks>(
+        &mut self,
+        map: &PxbspResidentMap,
+        point: Vec3I32,
+        hooks: &mut H,
+    ) -> bool {
         let faces = map.faces();
         if faces.len() != self.pxbsp_face_count {
             self.cached_pxbsp_visibility = None;
