@@ -27,6 +27,19 @@ use psx_io::diag::{self, Block, PSX_DIAG};
 /// VBlanks without progress before the stall panel appears (15 seconds at 60 Hz).
 pub const STALL_VBLANKS: u32 = 900;
 
+/// The limit in force: [`STALL_VBLANKS`] unless [`set_stall_limit`] changed it.
+static mut STALL_LIMIT: u32 = STALL_VBLANKS;
+
+/// Change how many VBlanks without progress bring the stall panel up. A program
+/// with long steps that are legitimately silent (no GP1 write, GPU DMA kick or
+/// CD command for tens of seconds) raises it so the panel does not take the
+/// screen in the middle of a measurement; faults and panics are unaffected.
+pub fn set_stall_limit(vblanks: u32) {
+    // SAFETY: a plain word written before or between VBlanks on one thread; the
+    // watchdog only reads it.
+    unsafe { (&raw mut STALL_LIMIT).write_volatile(vblanks) };
+}
+
 const COLS: usize = 53;
 const ROWS: usize = 27;
 
@@ -788,7 +801,7 @@ extern "C" fn __psx_diag_tick(regs: *const u32, epc: u32) {
             return;
         }
         (*w).quiet = (*w).quiet.wrapping_add(1);
-        if (*w).quiet < STALL_VBLANKS {
+        if (*w).quiet < (&raw const STALL_LIMIT).read_volatile() {
             return;
         }
         // Once stalled, take the screen on the first frame, then refresh every fourth.
