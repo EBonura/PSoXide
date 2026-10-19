@@ -44,10 +44,22 @@ pub trait Reader {
     /// # Safety
     /// The output must be writable and not overlap any live loader state.
     unsafe fn read_sector(&mut self, out: &mut [u32; SECTOR_WORDS]) -> bool;
-    /// Stop a stream after a chunk or failure.
+    /// Stop a stream after a chunk or failure. Returns once the Pause is
+    /// acknowledged, not when the drive has stopped: the next command of a read
+    /// sequence cancels the Pause's second response, so this is right between
+    /// chunks.
     /// # Safety
     /// Same exclusive-device requirement as `prepare`.
     unsafe fn stop(&mut self);
+    /// Stop the stream and return only once the drive has really stopped, with
+    /// no Pause response still to come. The console answers a Pause twice and
+    /// the second response comes 1.2 to 3.9 million system clocks after the
+    /// first, so after a plain [`stop`](Self::stop) it lands inside whatever runs
+    /// next. The loader calls this after the last read, before the payload gets
+    /// the drive. `false` if the stop could not be proved.
+    /// # Safety
+    /// Same exclusive-device requirement as `prepare`.
+    unsafe fn stop_proved(&mut self) -> bool;
 }
 
 /// Address translation for payload storage and RAM checksum readback.
@@ -200,7 +212,14 @@ pub unsafe fn try_load<R: Reader, M: Memory, O: Observer>(
     const CHUNK_SECTORS: u32 = 64;
     let sectors = t_size.div_ceil(SECTOR_BYTES);
     let mut dst = unsafe { memory.payload(t_addr) };
-    unsafe { reader.stop() };
+    // With no payload sectors this is the last stop before the handoff.
+    if sectors == 0 {
+        if !unsafe { reader.stop_proved() } {
+            return Err((6, 0));
+        }
+    } else {
+        unsafe { reader.stop() };
+    }
     let mut sector = 0u32;
     while sector < sectors {
         let chunk_lba = exe_lba + 1 + sector;
@@ -221,7 +240,16 @@ pub unsafe fn try_load<R: Reader, M: Memory, O: Observer>(
             observer.tick();
             k += 1;
         }
-        unsafe { reader.stop() };
+        // The last chunk's stop is the one the payload inherits: prove it, so
+        // no Pause response arrives after the jump. Failing here retries the
+        // load; `Reader::stop_proved` leaves the cause in the reader's diag word.
+        if sector + n == sectors {
+            if !unsafe { reader.stop_proved() } {
+                return Err((6, sectors));
+            }
+        } else {
+            unsafe { reader.stop() };
+        }
         sector += n;
         observer.progress(sector, sectors);
     }

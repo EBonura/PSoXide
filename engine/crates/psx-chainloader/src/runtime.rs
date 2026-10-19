@@ -45,6 +45,9 @@ impl Reader for SectorReader {
     unsafe fn stop(&mut self) {
         SectorReader::stop(self)
     }
+    unsafe fn stop_proved(&mut self) -> bool {
+        SectorReader::stop_proved(self).is_ok()
+    }
 }
 struct DirectMemory;
 // SAFETY: `run` requires the packer-validated physical extent and live-memory separation.
@@ -186,6 +189,12 @@ pub unsafe fn run<P: Presentation>(
         }
     };
 
+    // The payload's last read ended in a proved Pause (`Reader::stop_proved`), so
+    // the drive is idle with no response on the way. Leave the controller the way
+    // a BIOS disc boot does: nothing latched, no data request, the CD source
+    // acknowledged and the CPU mask closed. SectorReader::prepare in the payload
+    // starts from exactly that state.
+    unsafe { leave_drive_clean() };
     unsafe { flush_cache() };
     // The JUMP row going green means the cache flush returned and the jump
     // is the very next thing: anything wrong past this point is the game's
@@ -363,6 +372,21 @@ unsafe fn quiesce() {
             options(nostack, preserves_flags),
         );
     }
+}
+
+/// Hand the CD controller over idle: every response flag acknowledged, the
+/// parameter FIFO reset, the data request dropped, and the CD source acknowledged
+/// in `I_STAT` with `I_MASK` closed. Runs after the proved stop, so nothing is
+/// still to arrive; a flag found here would be a response nobody collected.
+///
+/// # Safety
+/// `run` owns the drive; no other `Cd` token is in use.
+unsafe fn leave_drive_clean() {
+    let mut cd = unsafe { psx_io::periph::Cd::steal() };
+    cd.acknowledge_all_and_reset_parameters();
+    cd.clear_data_request();
+    psx_io::irq::set_mask(0);
+    psx_io::irq::acknowledge(1 << psx_hw::irq::source::CDROM);
 }
 
 // Direct instruction-cache invalidation, open-coded here so the blob does

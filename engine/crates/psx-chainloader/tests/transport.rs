@@ -15,6 +15,8 @@ enum Fault {
     Magic,
     Bounds,
     Checksum,
+    /// The drive cannot prove its last stop (new transport only).
+    Proof,
 }
 struct Cd {
     trace: Trace,
@@ -24,6 +26,8 @@ struct Cd {
     starts: usize,
     reads: usize,
     at: u32,
+    /// Trace length at each proved stop: where in the sequence it happened.
+    proofs: Vec<usize>,
 }
 impl Reader for Cd {
     unsafe fn prepare(&mut self) -> bool {
@@ -57,6 +61,13 @@ impl Reader for Cd {
     unsafe fn stop(&mut self) {
         self.trace.borrow_mut().push("stop".into());
     }
+    unsafe fn stop_proved(&mut self) -> bool {
+        // Traced as a stop, so the legacy oracle still compares; where it
+        // happened is recorded apart.
+        self.trace.borrow_mut().push("stop".into());
+        self.proofs.push(self.trace.borrow().len());
+        !matches!(self.fault, Fault::Proof)
+    }
 }
 struct Ram(Vec<[u32; 512]>);
 // SAFETY: stable backing vector, sized for every tested rounded extent, never resized.
@@ -77,11 +88,13 @@ impl Observer for Events {
         self.0.borrow_mut().push("finish".into());
     }
 }
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Outcome {
     result: Result<LoadedExe, (u32, u32)>,
     trace: Vec<String>,
     ram: Vec<[u32; 512]>,
+    /// Trace lengths at the proved stops. The legacy transport has none.
+    proofs: Vec<usize>,
 }
 fn hash(bytes: impl Iterator<Item = u8>) -> u32 {
     bytes.fold(0x811c9dc5u32, |h, b| {
@@ -125,6 +138,7 @@ fn run(old: bool, size: usize, fault: Fault, address: u32) -> Outcome {
         starts: 0,
         reads: 0,
         at: 0,
+        proofs: Vec::new(),
     };
     let mut ram = Ram(vec![[0xdeadbeef; 512]; count.max(1)]);
     let mut events = Events(trace.clone());
@@ -159,12 +173,20 @@ fn run(old: bool, size: usize, fault: Fault, address: u32) -> Outcome {
         result,
         trace,
         ram: ram.0,
+        proofs: cd.proofs,
     }
 }
+/// Both transports must agree on everything but the proved stop, which only the
+/// new one has: the result, the whole command trace and the RAM.
 fn pair(size: usize, fault: Fault) -> Outcome {
     let old = run(true, size, fault, 0x80010000);
     let new = run(false, size, fault, 0x80010000);
-    assert_eq!(old, new, "size={size} fault={fault:?}");
+    assert!(old.proofs.is_empty());
+    let same = Outcome {
+        proofs: Vec::new(),
+        ..new.clone()
+    };
+    assert_eq!(old, same, "size={size} fault={fault:?}");
     new
 }
 #[test]
@@ -249,7 +271,13 @@ fn legacy_logical_bounds_are_not_misrepresented_as_arbitrary_header_validation()
     for (address, size) in [(0x801f0000, 0), (0x801effff, 1), (0x80010001, 0)] {
         let a = run(true, size, Fault::None, address);
         let b = run(false, size, Fault::None, address);
-        assert_eq!(a, b);
+        assert_eq!(
+            a,
+            Outcome {
+                proofs: Vec::new(),
+                ..b.clone()
+            }
+        );
         assert!(
             b.result.is_ok(),
             "legacy accepts logical extent even without rounded/align gate"
@@ -282,6 +310,9 @@ impl Reader for Idling {
     }
     unsafe fn stop(&mut self) {
         unsafe { self.0.stop() }
+    }
+    unsafe fn stop_proved(&mut self) -> bool {
+        unsafe { self.0.stop_proved() }
     }
 }
 /// Counts ticks and logs them in the trace, in order with the other events.
@@ -329,6 +360,7 @@ fn ticking_run(size: usize) -> (Result<LoadedExe, (u32, u32)>, Vec<String>, usiz
         starts: 0,
         reads: 0,
         at: 0,
+        proofs: Vec::new(),
     });
     let mut ram = Ram(vec![[0xdeadbeef; 512]; count.max(1)]);
     let ticks = Rc::new(RefCell::new(0));
@@ -381,4 +413,50 @@ fn ticks_run_after_every_payload_sector_through_each_seek_and_the_checksum() {
     let quiet = pair(sectors * 2048, Fault::None).trace;
     let without: Vec<_> = trace.into_iter().filter(|s| s != "tick").collect();
     assert_eq!(without, quiet);
+}
+
+#[test]
+fn only_the_last_stop_is_proved_and_it_is_the_one_before_the_checksum() {
+    // 130 sectors = chunks of 64, 64 and 2: three chunk stops, one proof.
+    let x = pair(130 * 2048, Fault::None);
+    let stops: Vec<usize> = x
+        .trace
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| *s == "stop")
+        .map(|(i, _)| i + 1)
+        .collect();
+    assert_eq!(stops.len(), 4, "header stop plus one per chunk");
+    assert_eq!(
+        x.proofs,
+        [stops[3]],
+        "only the final chunk's stop is proved"
+    );
+    // Nothing touches the drive after the proof but observer events.
+    assert!(x.trace[x.proofs[0]..]
+        .iter()
+        .all(|s| s.starts_with("progress") || s == "finish" || s.starts_with("stage")));
+}
+
+#[test]
+fn a_payload_of_one_exact_chunk_is_proved_once() {
+    let x = pair(64 * 2048, Fault::None);
+    assert_eq!(x.proofs.len(), 1);
+    let x = pair(2048, Fault::None);
+    assert_eq!(x.proofs.len(), 1);
+}
+
+#[test]
+fn an_empty_payload_proves_the_stop_after_the_header() {
+    let x = pair(0, Fault::None);
+    assert_eq!(x.proofs.len(), 1, "the header stop is the last one");
+}
+
+#[test]
+fn an_unproved_stop_fails_the_payload_stage_without_checksumming() {
+    let x = run(false, 130 * 2048, Fault::Proof, 0x80010000);
+    assert_eq!(x.result, Err((6, 130)));
+    assert!(!x.trace.iter().any(|s| s == "finish" || s == "stage:6"));
+    let x = run(false, 0, Fault::Proof, 0x80010000);
+    assert_eq!(x.result, Err((6, 0)));
 }
