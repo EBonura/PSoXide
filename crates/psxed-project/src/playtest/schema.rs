@@ -113,8 +113,15 @@ pub struct PlaytestGridWorld {
     pub core: Vec<u8>,
     /// Room chunks (`PGRM`) laid end to end, each starting on a 2048-byte
     /// boundary, so a room record's `pack_sector` is the sector offset of its
-    /// chunk in this blob and, later, in `WORLD.PAK`.
+    /// chunk in this blob. In `WORLD.PAK` the chunks keep this relative layout:
+    /// room `i` is chunk `i + 1` and the guest adds the sector of chunk 1.
     pub rooms: Vec<u8>,
+    /// The same chunks one by one, unpadded: `WORLD.PAK` chunk `i + 1` is
+    /// `room_chunks[i]` (chunk 0 is [`Self::core`]).
+    pub room_chunks: Vec<Vec<u8>>,
+    /// The room pool the guest reserves: sized from the wanted set at the
+    /// busiest position of the level (see `psx_grid::stream::plan_pool`).
+    pub pool: psx_grid::stream::PoolPlan,
     /// Texture assets the level's materials use.
     pub texture_asset_indices: Vec<usize>,
     /// Cooked surfaces (quads and triangles) over all rooms.

@@ -301,12 +301,31 @@ pub(super) fn cook(
             rooms.push(0);
         }
     }
+    // The pool the guest reserves for the rooms streamed off the disc.
+    let chunk_pages: Vec<usize> = cooked
+        .chunks
+        .iter()
+        .map(|chunk| psx_grid::stream::pages_of(chunk.len()))
+        .collect();
+    let core_words = psx_grid::write::aligned_copy(&cooked.core);
+    let pool = match psx_grid::LevelView::parse(psx_grid::write::words_as_bytes(
+        &core_words,
+        cooked.core.len(),
+    )) {
+        Ok(level) => psx_grid::stream::plan_pool(&level, &chunk_pages),
+        Err(error) => {
+            report.error(format!("grid world: the cooked core does not parse: {error:?}"));
+            return None;
+        }
+    };
     let summary = cooked.report.summary();
     report.warn(summary.trim_end().to_string());
     let surfaces = |room: &cook::RoomReport| room.quads + room.triangles;
     Some(PlaytestGridWorld {
         core: cooked.core,
         rooms,
+        room_chunks: cooked.chunks,
+        pool,
         texture_asset_indices: used,
         faces: cooked.report.rooms.iter().map(surfaces).sum(),
         triangles: cooked

@@ -544,3 +544,96 @@ fn manifest_marks_a_cooked_world_and_the_empty_package_has_none() {
     assert!(source.contains("pub const WORLD_AMBIENT_RGB: [u8; 3] = [32; 3];"));
     assert!(!source.contains("PXBSP"), "no PXBSP statics remain");
 }
+
+/// A starter grid project cooked to a package, and the directory it was made in
+/// (removed by the caller).
+fn cooked_starter(tag: &str) -> PlaytestPackage {
+    let projects = crate::projects_dir();
+    let out = projects.join(format!("test-world-pack-{tag}-{}", std::process::id()));
+    let path = crate::grid::starter::create_project(
+        &projects.join(crate::grid::starter::STARTER_BASE),
+        &out,
+        "Test",
+    )
+    .expect("the starter project is created");
+    let project = crate::ProjectDocument::load_from_path(path).expect("the starter loads");
+    let (package, report) = super::build_package(&project, &out);
+    let _ = std::fs::remove_dir_all(&out);
+    assert!(report.is_ok(), "{:?}", report.error_messages());
+    package.expect("a package")
+}
+
+#[test]
+fn a_grid_world_rides_world_pack_with_the_core_first_and_one_chunk_per_room() {
+    let package = cooked_starter("layout");
+    let world = &package.world_geometry;
+    let chunks = world_pack_chunks(&package);
+    assert_eq!(chunks.len(), 1 + world.room_chunks.len());
+    assert_eq!((chunks[0].0, chunks[0].1), (0, world.core.as_slice()));
+    let layout = world_pack_layout(&package);
+    let words = psx_grid::write::aligned_copy(&world.core);
+    let level =
+        psx_grid::LevelView::parse(psx_grid::write::words_as_bytes(&words, world.core.len()))
+            .expect("the core parses");
+    let base = layout.entries[1].sector_offset;
+    assert!(base >= layout.header_sectors);
+    for (room, record) in level.rooms.iter().enumerate() {
+        let entry = layout.entries[room + 1];
+        assert_eq!(entry.chunk_id, room as u32 + 1);
+        // The guest finds a room at the sector of chunk 1 plus `pack_sector`,
+        // so the rooms must keep the cook's contiguous order.
+        assert_eq!(entry.sector_offset - base, record.pack_sector, "room {room}");
+        assert_eq!(entry.sector_count, u32::from(record.pack_sectors));
+    }
+    // The pack is as long as the manifest says: UI.PAK starts after it.
+    let source = render_manifest_source(&package);
+    assert!(source.contains(&format!(
+        "pub const WORLD_PACK_START_LBA: u32 = {};",
+        psx_iso::WORLD_PACK_DEFAULT_START_LBA
+    )));
+    assert!(source.contains(&format!(
+        "pub const GRID_ROOM_COUNT: usize = {};",
+        world.room_chunks.len()
+    )));
+    assert!(source.contains("pub const GRID_ROOM_POOL_PAGES: usize = "));
+    assert!(source.contains(&format!(
+        "pub const UI_PACK_START_LBA: u32 = {};",
+        psx_iso::WORLD_PACK_DEFAULT_START_LBA + layout.total_sectors
+    )));
+}
+
+#[test]
+fn the_world_chunks_land_in_stream_chunks_in_pack_order() {
+    let package = cooked_starter("files");
+    let dir = std::env::temp_dir().join(format!("psxed-project-test-{}-world", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    write_package(&package, &dir).expect("the package writes");
+    let chunk_dir = dir.join(STREAM_CHUNKS_DIRNAME);
+    assert_eq!(
+        std::fs::read(chunk_dir.join("room_000.psxc")).unwrap(),
+        package.world_geometry.core
+    );
+    for (room, bytes) in package.world_geometry.room_chunks.iter().enumerate() {
+        assert_eq!(
+            &std::fs::read(chunk_dir.join(format!("room_{:03}.psxc", room + 1))).unwrap(),
+            bytes
+        );
+    }
+    let order = std::fs::read_to_string(dir.join(WORLD_PACK_ORDER_FILENAME)).unwrap();
+    let ids: Vec<&str> = order.lines().filter(|l| !l.starts_with('#')).collect();
+    let expected: Vec<String> = (0..=package.world_geometry.room_chunks.len())
+        .map(|id| id.to_string())
+        .collect();
+    assert_eq!(ids, expected);
+    // The two plain files for tools that read a level without a disc stay.
+    assert_eq!(
+        std::fs::read(dir.join("grid_level.pgl")).unwrap(),
+        package.world_geometry.core
+    );
+    assert_eq!(
+        std::fs::read(dir.join("grid_rooms.pgr")).unwrap(),
+        package.world_geometry.rooms
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
