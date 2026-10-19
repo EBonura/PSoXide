@@ -66,7 +66,7 @@ inside the TV's safe area (12 pixels from each edge in the shipped look).
 | Program | Animation | Poll from |
 | --- | --- | --- |
 | HL (intro program, then the game) | The orange dot spinner (the HL menu's own), amber `lit`, dark `unlit`. The intro draws the widget from the end of the movie through the chain-load of `HLGAME.EXE`; the game carries on with the same widget through its boot reads, the menu-to-game load and every changelevel. The game's earlier text strip, its menu spinner and its black loading card are gone | The intro: `Presentation::tick`. The game: `set_idle_hook` |
-| WipEout | The same spinner in WipEout's red | `set_idle_hook`, from the end of the intro movie until the menus take the screen. In progress: the integration builds (EBonura/wipeout-psx `feat/boot-loading-2026-10-18`) but has not been seen working on screen yet |
+| WipEout | The same spinner in WipEout's red | `set_idle_hook`, from the end of the intro movie until the menus take the screen. The integration is EBonura/wipeout-psx `feat/boot-loading-2026-10-18`: the movie player leaves the display on one of its own buffers, so `begin` points the display at the first renderer buffer first. |
 | HK | not adopted yet. The intro program (`hk-polish`) chain-loads the game through `psx-chainloader`: implement `Presentation::tick` as the HL intro does (`intro/src/main.rs` in hl-psx), with HK's own colours or `Tail::Art` | |
 
 ## Notes for adopters
