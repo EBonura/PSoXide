@@ -728,6 +728,21 @@ mod tests {
         let package = package.expect("a package");
         let records = super::super::tests::decode_level_records(&package);
 
+        // The manifest keeps the shape of the level, and it matches the chunk.
+        let manifest = super::super::manifest::render_manifest_source(&package);
+        for (name, len) in psx_level::wire::TABLE_NAMES
+            .iter()
+            .zip(records.table_lens())
+        {
+            assert!(
+                manifest.contains(&format!(
+                    "pub const LEN_{}: usize = {len};",
+                    name.to_uppercase()
+                )),
+                "{name}: {len}"
+            );
+        }
+
         assert_eq!(records.rooms.len(), package.rooms.len());
         for (record, room) in records.rooms.iter().zip(&package.rooms) {
             assert_eq!(record.name, room.name);

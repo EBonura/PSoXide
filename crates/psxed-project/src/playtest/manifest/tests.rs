@@ -64,8 +64,10 @@ fn vitality_circles_emit_a_dedicated_manifest_table() {
         }],
         ..PlaytestPackage::default()
     };
-    // The circles are level records: they ride the level chunk, not the manifest.
-    assert!(!render_manifest_source(&package).contains("VITALITY_CIRCLES"));
+    // The circles are level records: they ride the level chunk, not the
+    // manifest, which keeps only how many of them there are.
+    assert!(!render_manifest_source(&package).contains("static VITALITY_CIRCLES"));
+    assert!(render_manifest_source(&package).contains("pub const LEN_VITALITY_CIRCLES: usize"));
     let records = super::super::tests::decode_level_records(&package);
     assert_eq!(
         records.vitality_circles,

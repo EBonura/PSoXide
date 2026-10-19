@@ -114,15 +114,18 @@ pub struct PlaytestGridWorld {
     /// Room chunks (`PGRM`) laid end to end, each starting on a 2048-byte
     /// boundary, so a room record's `pack_sector` is the sector offset of its
     /// chunk in this blob. In `WORLD.PAK` the chunks keep this relative layout:
-    /// room `i` is chunk `i + 1` and the guest adds the sector of chunk 1.
+    /// room `i` is chunk `i + 2` and the guest adds the sector of chunk 2.
     pub rooms: Vec<u8>,
-    /// The same chunks one by one, unpadded: `WORLD.PAK` chunk `i + 1` is
-    /// `room_chunks[i]` (chunk 0 is [`Self::core`]).
+    /// The same chunks one by one, unpadded: `WORLD.PAK` chunk `i + 2` is
+    /// `room_chunks[i]` (chunk 0 is [`Self::core`], chunk 1 the records).
     pub room_chunks: Vec<Vec<u8>>,
-    /// The records the level owns (`psx_level::wire`): `WORLD.PAK` chunk
-    /// `room_chunks.len() + 1`, after the last room. Filled once the package
-    /// is complete.
+    /// The records the level owns (`psx_level::wire`): `WORLD.PAK` chunk 1,
+    /// between the core and the rooms. Filled once the package is complete.
     pub records: Vec<u8>,
+    /// How many records each table of `records` holds, in
+    /// `psx_level::wire::TABLE_NAMES` order. The executable keeps these counts
+    /// (the shape of the level, not its contents) to size its arrays.
+    pub record_lens: Vec<usize>,
     /// The room pool the guest reserves: sized from the wanted set at the
     /// busiest position of the level (see `psx_grid::stream::plan_pool`).
     pub pool: psx_grid::stream::PoolPlan,

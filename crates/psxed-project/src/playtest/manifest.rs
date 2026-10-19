@@ -78,7 +78,7 @@ pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io
     purge_models_dir(&models_dir)?;
 
     // The grid level core and the room chunks ride `WORLD.PAK` and are read off
-    // the disc: chunk 0 is the core, chunk `i + 1` is room `i`. The guest
+    // the disc: chunk 0 is the core, chunk 1 the level's records, chunk `i + 2` is room `i`. The guest
     // embeds none of it.
     for (chunk_id, bytes) in world_pack_chunks(package) {
         std::fs::write(
@@ -358,7 +358,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
 
     out.push_str(
         "/// Absolute disc LBA where WORLD.PAK starts in the playtest ISO layout: chunk 0\n\
-         /// is the grid level core, chunk `i + 1` is room `i`.\n",
+         /// is the grid level core, chunk 1 the level's records, chunk `i + 2` is room `i`.\n",
     );
     let _ = writeln!(
         out,
@@ -382,6 +382,26 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         pool.total_pages,
         pool.pool_pages.max(1),
     );
+
+    // The shape of the level's own records: how many of each table chunk 1 of
+    // WORLD.PAK holds. The records ride the disc; the executable keeps only
+    // these counts, to size its arrays and to leave out code for tables the
+    // level does not have. The guest refuses a chunk that disagrees.
+    out.push_str("/// How many records of each table the level's record chunk holds.\n");
+    for (i, name) in psx_level::wire::TABLE_NAMES.iter().enumerate() {
+        let _ = writeln!(
+            out,
+            "pub const LEN_{}: usize = {};",
+            name.to_uppercase(),
+            package
+                .world_geometry
+                .record_lens
+                .get(i)
+                .copied()
+                .unwrap_or(0),
+        );
+    }
+    out.push('\n');
 
     out.push_str(
         "/// Absolute disc LBA where UI.PAK starts in the playtest ISO layout.\n\

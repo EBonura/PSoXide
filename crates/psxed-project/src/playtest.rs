@@ -2250,6 +2250,7 @@ pub fn build_package(
         return (None, report);
     }
     package.world_geometry.records = records.records().encode();
+    package.world_geometry.record_lens = records.records().table_lens();
     (Some(package), report)
 }
 

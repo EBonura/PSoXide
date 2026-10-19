@@ -332,6 +332,7 @@ pub(super) fn cook(
         rooms,
         room_chunks: cooked.chunks,
         records: Vec::new(),
+        record_lens: Vec::new(),
         pool,
         texture_asset_indices: used,
         faces: cooked.report.rooms.iter().map(surfaces).sum(),
