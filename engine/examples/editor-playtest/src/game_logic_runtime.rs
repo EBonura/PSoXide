@@ -267,7 +267,7 @@ impl SceneEntityMover<'_> {
             ));
         }
         psx_game_runtime::cylinder_props::collect_cylinder_prop_collision_blockers_into(
-            CYLINDER_PROPS,
+            CYLINDER_PROPS.as_slice(),
             room,
             &mut cylinders,
         );
@@ -281,16 +281,17 @@ impl SceneEntityMover<'_> {
                 // No world cooked yet (the placeholder manifest).
                 return position;
             };
-            let Some(_) = self
-                .box_props
-                .collect_collision_blockers_checked_into(BOX_PROPS, room, &mut aabbs)
-            else {
+            let Some(_) = self.box_props.collect_collision_blockers_checked_into(
+                BOX_PROPS.as_slice(),
+                room,
+                &mut aabbs,
+            ) else {
                 return position;
             };
             let Some(_) =
                 psx_game_runtime::arch_props::collect_arch_prop_collision_blockers_checked_into(
-                    ARCH_PROPS,
-                    ARCH_PROP_COLLISIONS,
+                    ARCH_PROPS.as_slice(),
+                    ARCH_PROP_COLLISIONS.as_slice(),
                     room,
                     &mut aabbs,
                 )
@@ -299,12 +300,12 @@ impl SceneEntityMover<'_> {
             };
             let Some(_) =
                 psx_game_runtime::image_props::collect_image_prop_collision_blockers_checked_into_filtered(
-                    IMAGE_PROPS,
+                    IMAGE_PROPS.as_slice(),
                     room,
                     &mut aabbs,
                     |index| {
                         typed_world_object_active(
-                            WORLD_OBJECTS,
+                            WORLD_OBJECTS.as_slice(),
                             self.destructibles,
                             psx_level::world_object_kind::IMAGE_PROP,
                             index,
@@ -374,16 +375,17 @@ impl psx_game_runtime::entities::GameEntityMover for SceneEntityMover<'_> {
         let mut aabbs =
             psx_engine::FixedScratch::<CharacterCollisionAabb, MAX_STATIC_PROP_AABB_BLOCKERS>::new(
             );
-        let Some(_) = self
-            .box_props
-            .collect_collision_blockers_checked_into(BOX_PROPS, room, &mut aabbs)
-        else {
+        let Some(_) = self.box_props.collect_collision_blockers_checked_into(
+            BOX_PROPS.as_slice(),
+            room,
+            &mut aabbs,
+        ) else {
             return false;
         };
         let Some(_) =
             psx_game_runtime::arch_props::collect_arch_prop_collision_blockers_checked_into(
-                ARCH_PROPS,
-                ARCH_PROP_COLLISIONS,
+                ARCH_PROPS.as_slice(),
+                ARCH_PROP_COLLISIONS.as_slice(),
                 room,
                 &mut aabbs,
             )
@@ -392,12 +394,12 @@ impl psx_game_runtime::entities::GameEntityMover for SceneEntityMover<'_> {
         };
         let Some(_) =
             psx_game_runtime::image_props::collect_image_prop_collision_blockers_checked_into_filtered(
-                IMAGE_PROPS,
+                IMAGE_PROPS.as_slice(),
                 room,
                 &mut aabbs,
                 |index| {
                     typed_world_object_active(
-                        WORLD_OBJECTS,
+                        WORLD_OBJECTS.as_slice(),
                         self.destructibles,
                         psx_level::world_object_kind::IMAGE_PROP,
                         index,
@@ -632,7 +634,7 @@ impl Playtest {
                 combat::AuthoredActorContact::FallbackRequired => self
                     .game_entities
                     .deferred_attack_legacy_arc_hits(
-                        GAME_ENTITIES,
+                        GAME_ENTITIES.as_slice(),
                         attack,
                         player_position,
                         player_radius,
@@ -801,9 +803,11 @@ impl Playtest {
                         let applied =
                             self.game_entities
                                 .scaled_stance_damage(index, channel, impact.damage);
-                        let opening = self.game_entities.shot_opening(GAME_ENTITIES, index);
+                        let opening = self
+                            .game_entities
+                            .shot_opening(GAME_ENTITIES.as_slice(), index);
                         let outcome = self.game_entities.apply_projectile_hit(
-                            GAME_ENTITIES,
+                            GAME_ENTITIES.as_slice(),
                             index,
                             channel,
                             impact.damage,
@@ -1183,7 +1187,7 @@ impl Playtest {
         let player_eye = melee_eye_point([player.x, player.y, player.z]);
         let vitality_channel = Self::player_attack_channel(self.anim_state);
         self.vitality_circles.claim_struck(
-            VITALITY_CIRCLES,
+            VITALITY_CIRCLES.as_slice(),
             self.room_index,
             player.x,
             player.z,
@@ -1207,7 +1211,7 @@ impl Playtest {
         let entities = &mut self.game_entities;
         let mut world_rt = self.world_rt.as_mut();
         let stats = entities.apply_melee_arc_occluded(
-            GAME_ENTITIES,
+            GAME_ENTITIES.as_slice(),
             &arc,
             vitality_channel,
             outgoing_damage,
@@ -1368,7 +1372,7 @@ impl Playtest {
             start[axis].max(end[axis]).saturating_add(radius)
         });
         // Image cards use their cooked visual/collision AABB.
-        for object in WORLD_OBJECTS {
+        for object in &WORLD_OBJECTS {
             if object.kind != psx_level::world_object_kind::IMAGE_PROP
                 || object.destructible == psx_level::WORLD_OBJECT_DESTRUCTIBLE_NONE
                 || self
@@ -1538,7 +1542,7 @@ impl Playtest {
         let vitality_channel = Self::player_attack_channel(self.anim_state);
         let player = self.motor.position();
         self.vitality_circles.claim_struck(
-            VITALITY_CIRCLES,
+            VITALITY_CIRCLES.as_slice(),
             self.room_index,
             player.x,
             player.z,
@@ -1623,7 +1627,7 @@ impl Playtest {
                     self.game_entities
                         .scaled_stance_damage(entity, vitality_channel, hit.damage);
                 let outcome = self.game_entities.apply_stance_hit(
-                    GAME_ENTITIES,
+                    GAME_ENTITIES.as_slice(),
                     entity,
                     vitality_channel,
                     hit.damage,
@@ -1755,6 +1759,7 @@ impl Playtest {
     /// cooks one entity into a 64-slot capacity, so a pre-splatted array would
     /// write 1,536 bytes per call to fill one 24-byte entry; `FixedScratch`
     /// leaves the unused slots untouched.
+    #[inline(never)]
     pub(super) fn game_entity_pose_overrides(
         &self,
         out: &mut psx_engine::FixedScratch<ModelInstancePoseOverride, MAX_GAME_ENTITIES>,
@@ -1777,7 +1782,10 @@ impl Playtest {
                 .copied()
                 .find(|attack| attack.entity() == index)
                 .map(|attack| attack.clip())
-                .unwrap_or_else(|| self.game_entities.clip_for_state(GAME_ENTITIES, index));
+                .unwrap_or_else(|| {
+                    self.game_entities
+                        .clip_for_state(GAME_ENTITIES.as_slice(), index)
+                });
             out.try_push(ModelInstancePoseOverride {
                 instance: record.model_instance,
                 x: position[0],

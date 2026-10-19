@@ -44,10 +44,9 @@ use psx_gte::scene;
 use psx_level::world_object_flags;
 use psx_residency::{CategoryConfig, Class, Wanted};
 
-use crate::generated::{
-    GRID_ROOM_COUNT, GRID_ROOM_POOL_PAGES, WORLD_OBJECTS, WORLD_PACK_START_LBA,
-};
+use crate::generated::{GRID_ROOM_COUNT, GRID_ROOM_POOL_PAGES, WORLD_PACK_START_LBA};
 use crate::grid_materials::{bind_pending, Pending};
+use crate::level_data::WORLD_OBJECTS;
 use crate::world_common::{
     view_camera, world_view_rotation, CountingTraceProvider, VisibilityBounds,
 };
@@ -85,6 +84,8 @@ pub(super) enum GridRuntimeInitError {
     /// The core (chunk 0 of `WORLD.PAK`) could not be read; the status is a
     /// `cd_stream` status code.
     NoCore(u32),
+    /// The level's records chunk did not decode (another version, or damage).
+    Records,
     Level(FormatError),
     NoMaterials,
     Collision,
@@ -100,6 +101,7 @@ impl fmt::Display for GridRuntimeInitError {
                 )
             }
             Self::Level(e) => write!(formatter, "grid level core refused: {e}"),
+            Self::Records => formatter.write_str("grid level records chunk refused"),
             Self::NoMaterials => formatter.write_str("grid level has no materials"),
             Self::Collision => formatter.write_str("grid collision could not be built"),
         }
@@ -155,27 +157,38 @@ impl GridRuntime {
     /// ([`Self::rooms_ready`]).
     pub(super) fn load_manifest(cd: &mut CdController) -> Result<Self, GridRuntimeInitError> {
         crate::game_trace("editor-playtest: grid manifest begin");
-        // The pack header names the core (chunk 0) and the first room chunk
-        // (chunk 1); room records count their sector from the latter.
-        let mut found = [WorldChunkInfo::EMPTY; 2];
+        // The pack header names the core (chunk 0), the level's own records
+        // (chunk 1) and the first room chunk (chunk 2); room records count
+        // their sector from the last.
+        let mut found = [WorldChunkInfo::EMPTY; 3];
         let status =
-            read_world_pack_entries_blocking(cd, WORLD_PACK_START_LBA, &[0, 1], &mut found);
+            read_world_pack_entries_blocking(cd, WORLD_PACK_START_LBA, &[0, 1, 2], &mut found);
         if status != ROOM_CHUNK_STATUS_OK {
             return Err(GridRuntimeInitError::NoCore(status));
         }
-        let [core_info, first_room] = found;
-        let mut words = vec![0u32; core_info.byte_size.div_ceil(4)];
-        let read = read_world_chunk_blocking(cd, WORLD_PACK_START_LBA, core_info, &mut words);
-        if read.status != ROOM_CHUNK_STATUS_OK || read.bytes != core_info.byte_size {
+        let [core_info, records_info, first_room] = found;
+        let core = Self::read_chunk(cd, core_info)?;
+        let records = Self::read_chunk(cd, records_info)?;
+        let records =
+            psx_level::wire::LevelRecords::decode(records).ok_or(GridRuntimeInitError::Records)?;
+        crate::level_data::install(records);
+        Self::from_core(core, WORLD_PACK_START_LBA + first_room.sector_offset)
+    }
+
+    /// Read one chunk of `WORLD.PAK` whole into memory that lives for the run,
+    /// word aligned.
+    fn read_chunk(
+        cd: &mut CdController,
+        info: WorldChunkInfo,
+    ) -> Result<&'static [u8], GridRuntimeInitError> {
+        let mut words = vec![0u32; info.byte_size.div_ceil(4)];
+        let read = read_world_chunk_blocking(cd, WORLD_PACK_START_LBA, info, &mut words);
+        if read.status != ROOM_CHUNK_STATUS_OK || read.bytes != info.byte_size {
             return Err(GridRuntimeInitError::NoCore(read.status));
         }
-        // The core lives for the whole run, like the static it replaces.
         let words: &'static [u32] = Box::leak(words.into_boxed_slice());
         // SAFETY: a `u32` slice is valid as bytes, `byte_size` is within it.
-        let core = unsafe {
-            core::slice::from_raw_parts(words.as_ptr().cast::<u8>(), core_info.byte_size)
-        };
-        Self::from_core(core, WORLD_PACK_START_LBA + first_room.sector_offset)
+        Ok(unsafe { core::slice::from_raw_parts(words.as_ptr().cast::<u8>(), info.byte_size) })
     }
 
     /// A runtime over the level core `core` (word aligned), with room records

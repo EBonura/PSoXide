@@ -15,6 +15,7 @@ impl Playtest {
     /// Draw each field as two machine-glyph decals plus a sparse moving line
     /// cage. The 64x64 texture carries the detail; the bounded line count only
     /// communicates activity and direction.
+    #[inline(never)]
     pub(super) fn draw_vitality_circles_world(
         &self,
         camera: WorldCamera,

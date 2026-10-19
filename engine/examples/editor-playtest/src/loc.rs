@@ -201,7 +201,7 @@ pub(crate) const DEMO_OUTRO_COUNT: u16 = 3;
 /// Cooked message page `index` in the live language: the Italian column when
 /// it was authored, the English page otherwise.
 pub(crate) fn page_text(index: usize) -> Option<&'static str> {
-    use crate::generated::{INTERACTABLE_MESSAGE_PAGES, INTERACTABLE_MESSAGE_PAGES_IT};
+    use crate::level_data::{INTERACTABLE_MESSAGE_PAGES, INTERACTABLE_MESSAGE_PAGES_IT};
     if index >= usize::from(DEMO_OUTRO_FIRST) {
         let page = index - usize::from(DEMO_OUTRO_FIRST);
         return match language() {

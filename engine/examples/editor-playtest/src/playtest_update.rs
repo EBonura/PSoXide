@@ -263,7 +263,7 @@ impl Playtest {
             self.game_entities
                 .set_player_attack_read(self.player_melee_read());
             self.game_entities
-                .observe_projectiles(GAME_ENTITIES, &self.combat_projectiles);
+                .observe_projectiles(GAME_ENTITIES.as_slice(), &self.combat_projectiles);
             let mut mover = SceneEntityMover {
                 world_rt: self.world_rt.as_mut(),
                 destructibles: &self.destructibles,
@@ -276,7 +276,7 @@ impl Playtest {
                 player_height,
             };
             self.game_entities.tick_delta_deferred(
-                GAME_ENTITIES,
+                GAME_ENTITIES.as_slice(),
                 psx_game_runtime::entities::GameEntityTickInput {
                     player: player_pos,
                     player_radius,
@@ -330,7 +330,9 @@ impl Playtest {
                             | psx_game_runtime::entities::GameEntityState::Aggro
                     )
                 {
-                    let clip = self.game_entities.clip_for_state(GAME_ENTITIES, index);
+                    let clip = self
+                        .game_entities
+                        .clip_for_state(GAME_ENTITIES.as_slice(), index);
                     let animation = MODEL_INSTANCES
                         .get(usize::from(record.model_instance))
                         .and_then(|instance| self.models.get(instance.model.to_usize()))
@@ -378,7 +380,7 @@ impl Playtest {
             }
         }
         self.logic.tick(
-            LOGIC,
+            LOGIC.as_slice(),
             psx_game_runtime::logic::LogicTickInput { player: player_pos },
             now,
         );
@@ -435,7 +437,7 @@ impl Playtest {
         self.vitality_circle_material = upload_vitality_circle_texture();
         self.particle_material = upload_particle_texture();
         self.destructibles
-            .init(DESTRUCTIBLES)
+            .init(DESTRUCTIBLES.as_slice())
             .unwrap_or_else(|error| panic!("cooked destructible initialization failed: {error:?}"));
         self.world_rt = if generated::PLAYTEST_HAS_WORLD {
             let world_rt = WorldRuntime::load_manifest(cd_arena())
@@ -445,7 +447,7 @@ impl Playtest {
             None
         };
         if self.world_rt.is_some() {
-            self.current_ambient_rgb = WORLD_AMBIENT_RGB;
+            self.current_ambient_rgb = WORLD_AMBIENT_RGB.get();
         }
         crate::game_trace("editor-playtest: gameplay world ok");
 
@@ -463,7 +465,7 @@ impl Playtest {
         // PLAYER_SPAWN for placeholder manifests. The spawn room
         // may be a manual portal room rather than room zero.
         self.player_stance_config = CombatStanceConfig::DEFAULT;
-        let (spawn, character) = match PLAYER_CONTROLLER {
+        let (spawn, character) = match PLAYER_CONTROLLER.get() {
             Some(pc) => {
                 let record = CHARACTERS.get(pc.character.to_usize());
                 // Authored stance tuning travels with the character record, so
@@ -484,7 +486,7 @@ impl Playtest {
                 }
                 (pc.spawn, record.map(runtime_character_from_record))
             }
-            None => (PLAYER_SPAWN, None),
+            None => (PLAYER_SPAWN.get(), None),
         };
         if ROOMS.get(spawn.room.to_usize()).is_none() {
             return;
@@ -575,7 +577,7 @@ impl Playtest {
                     .position(|r| r.flags & psx_level::game_entity_flags::TRAINING != 0)
                 {
                     self.game_entities.place_training_actor(
-                        GAME_ENTITIES,
+                        GAME_ENTITIES.as_slice(),
                         index,
                         [256, 0, -128],
                         1024,
@@ -677,7 +679,7 @@ impl Playtest {
         }
         let circle_position = self.motor.position();
         let circle_locks_stance = self.vitality_circles.tick(
-            VITALITY_CIRCLES,
+            VITALITY_CIRCLES.as_slice(),
             self.room_index,
             circle_position.x,
             circle_position.z,

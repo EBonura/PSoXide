@@ -30,48 +30,23 @@ pub const GRID_ROOM_POOL_PAGES: usize = 1;
 pub const UI_PACK_START_LBA: u32 = 1024;
 pub static UI_PACK_TOC: &[LevelWorldPackEntryRecord] = &[];
 
-pub const BOX_PROP_STATE_COUNT: usize = 1;
 pub const MODEL_PROJECTED_VERTEX_CAPACITY: usize = 1;
 pub const MODEL_FACE_CAPACITY: usize = 1;
 pub const MODEL_PART_CAPACITY: usize = 1;
 pub const MODEL_DECODED_VERTEX_CAPACITY: usize = 1;
-pub static INTERACTABLE_MESSAGE_PAGES_IT: &[&str] = &[];
 pub static BOOST_MODULES_IT: &[(&str, &str)] = &[];
 pub const PERSISTENT_ASSET_PAGE_COUNT: usize = 1;
 pub const CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE: u16 = 0;
 pub const PLAYTEST_HAS_WORLD: bool = false;
-pub const WORLD_AMBIENT_RGB: [u8; 3] = [0; 3];
 pub const PLAYTEST_PACKET_CAPACITY: usize = 1536;
 pub static ASSETS: &[LevelAssetRecord] = &[];
-pub static ROOMS: &[LevelRoomRecord] = &[];
-pub static ROOM_REFLECTION_PROBES: &[Option<AssetId>] = &[];
 
-pub static PLAYER_SPAWN: PlayerSpawnRecord = PlayerSpawnRecord {
-    room: RoomIndex(0),
-    x: 0,
-    y: 0,
-    z: 0,
-    yaw: 0,
-    flags: 0,
-};
 
 pub static MODEL_CLIPS: &[LevelModelClipRecord] = &[];
 pub static MODEL_CLIP_BOUNDS: &[LevelModelClipBoundsRecord] = &[];
 pub static MODEL_FRAME_BOUNDS: &[LevelModelFrameBoundsRecord] = &[];
 pub static MODEL_SOCKETS: &[LevelModelSocketRecord] = &[];
 pub static MODELS: &[LevelModelRecord] = &[];
-pub static MODEL_INSTANCES: &[LevelModelInstanceRecord] = &[];
-pub static DESTRUCTIBLES: &[LevelDestructibleRecord] = &[];
-pub static WORLD_OBJECTS: &[LevelWorldObjectRecord] = &[];
-pub static WORLD_OBJECT_LEAVES: &[u16] = &[];
-pub static IMAGE_PROPS: &[LevelImagePropRecord] = &[];
-pub static BOX_PROPS: &[LevelBoxPropRecord] = &[];
-pub static BOX_PROP_SURFACES: &[LevelBoxPropSurfaceRecord] = &[];
-pub static CYLINDER_PROPS: &[LevelCylinderPropRecord] = &[];
-pub static CYLINDER_PROP_SURFACES: &[LevelCylinderPropSurfaceRecord] = &[];
-pub static ARCH_PROPS: &[LevelArchPropRecord] = &[];
-pub static ARCH_PROP_SURFACES: &[LevelArchPropSurfaceRecord] = &[];
-pub static ARCH_PROP_COLLISIONS: &[LevelArchPropCollisionRecord] = &[];
 pub static UI_FONTS: &[&psx_font::BitmapFont] = &[&psx_font::fonts::BASIC];
 pub static UI_PAINTS: &[LevelUiPaintRecord] = &[];
 pub static UI_NODES: &[LevelUiNodeRecord] = &[];
@@ -79,7 +54,6 @@ pub static UI_SFX_SAMPLES: &[LevelUiSfxSampleRecord] = &[];
 pub static UI_SFX_CUES: &[LevelUiSfxCueRecord] = &[];
 pub static GAMEPLAY_SFX_CUES: &[LevelGameplaySfxCueRecord] = &[];
 pub static MUSIC_TRACKS: &[psx_level::LevelMusicTrack] = &[];
-pub static VITALITY_CIRCLES: &[LevelVitalityCircleRecord] = &[];
 pub static UI_SCENES: &[LevelUiScene] = &[];
 pub static SCENE_STATES: &[LevelSceneState] = &[];
 pub static GAME_FLOW: GameFlow = GameFlow {
@@ -93,19 +67,9 @@ pub static WEAPON_HITBOXES: &[WeaponHitboxRecord] = &[];
 pub static WEAPONS: &[LevelWeaponRecord] = &[];
 pub static EQUIPMENT: &[EquipmentRecord] = &[];
 pub static WEAPON_APPEARANCES: &[WeaponAppearanceRecord] = &[];
-pub static LIGHTS: &[PointLightRecord] = &[];
-pub static PARTICLE_EMITTERS: &[ParticleEmitterRecord] = &[];
-pub static INTERACTABLE_MESSAGES: &[InteractableMessageRecord] = &[];
-pub static INTERACTABLE_MESSAGE_PAGES: &[&str] = &[];
-pub static INTERACTABLES: &[InteractableRecord] = &[];
 pub static BOOST_MODULES: &[BoostModuleRecord] = &[];
-pub static LOGIC: &[LevelLogicRecord] = &[];
-pub static GAME_ENTITIES: &[LevelGameEntityRecord] = &[];
 pub static CHARACTERS: &[LevelCharacterRecord] = &[];
-pub static PLAYER_CONTROLLER: Option<PlayerControllerRecord> = None;
-pub static ENTITIES: &[EntityRecord] = &[];
 pub static COMBAT_CAPSULES: &[CombatCapsuleRecord] = &[];
-pub static WORLD_MESSAGE: Option<InteractableMessageRecord> = None;
 pub const PERSISTENT_FLAG_COUNT: u16 = 1;
 pub const PROJECT_SAVE_NAME: &str = "BESLES-PSOXIDE";
 pub const PROJECT_SAVE_TITLE: &str = "PSOXIDE PLAYTEST";

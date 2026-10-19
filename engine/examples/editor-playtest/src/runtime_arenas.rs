@@ -19,23 +19,9 @@
 
 use super::*;
 
-// A cube-only project never draws a panorama. Keep its unused packet cache
-// out of PS1 RAM; mixed-sky projects still retain the ordinary panorama path.
-const PANORAMA_CACHE_COUNT: usize = {
-    let mut index = 0;
-    let mut needed = 0;
-    while index < ROOMS.len() {
-        let flags = ROOMS[index].sky.flags;
-        let projection = flags & psx_level::sky_flags::PROJECTION_MASK;
-        if flags & psx_level::sky_flags::ENABLED != 0
-            && (projection == 0 || projection == psx_level::sky_flags::PANORAMA)
-        {
-            needed = 1;
-        }
-        index += 1;
-    }
-    needed
-};
+// The panorama packet cache is one slot: the level is not known when the
+// arenas are laid out, and a room that shows no panorama never touches it.
+const PANORAMA_CACHE_COUNT: usize = 1;
 
 /// Every mutable runtime arena, owned as one struct so the whole
 /// mutable-state budget reads in one place (the scene's other state

@@ -196,7 +196,7 @@ impl Playtest {
     pub(super) fn restore_claimed_poi_rewards(&mut self) {
         self.power_up_loadout = PowerUpLoadout::DEFAULT;
         self.power_up_inventory = BoostInventory::EMPTY;
-        for interactable in INTERACTABLES {
+        for interactable in &INTERACTABLES {
             if interactable.kind != InteractableKind::PointOfInterest
                 || !poi_persistent_flags(interactable).reward_claimed(&self.poi_save)
             {
@@ -559,7 +559,7 @@ impl Playtest {
                     == psx_game_runtime::entities::GameEntityState::Dead
                 && self
                     .game_entities
-                    .clip_for_state(GAME_ENTITIES, index)
+                    .clip_for_state(GAME_ENTITIES.as_slice(), index)
                     .phase_ticks
                     >= 90
         });
@@ -577,7 +577,8 @@ impl Playtest {
     }
 
     pub(super) fn initial_world_message_active(&self) -> bool {
-        let (Some(active), Some(welcome)) = (self.poi_messages.active(), WORLD_MESSAGE) else {
+        let (Some(active), Some(welcome)) = (self.poi_messages.active(), WORLD_MESSAGE.get())
+        else {
             return false;
         };
         active.source() == psx_game_runtime::poi::MessageSource::World
@@ -586,7 +587,7 @@ impl Playtest {
     }
 
     pub(super) fn open_world_message_once(&mut self) {
-        let Some(message) = WORLD_MESSAGE else {
+        let Some(message) = WORLD_MESSAGE.get() else {
             return;
         };
         if self.poi_messages.open_world(
@@ -791,7 +792,7 @@ impl Playtest {
         // initial door states onto their box props (START_ON doors
         // begin open without a fire event).
         self.game_entities
-            .spawn_from_records_with_ids(GAME_ENTITIES, GAME_ENTITY_IDS);
+            .spawn_from_records_with_ids(GAME_ENTITIES.as_slice(), GAME_ENTITY_IDS.as_slice());
         self.game_entities
             .enable_combat_flow(self.player_has_ranged_weapon());
         self.game_entities
@@ -803,7 +804,7 @@ impl Playtest {
         self.authored_attack.clear();
         self.authored_dodge.clear();
         self.attack_chain.clear();
-        self.logic.init_from_records(LOGIC);
+        self.logic.init_from_records(LOGIC.as_slice());
         self.logic_fired_reported = 0;
         self.player_vitality = DualVitality::equal(PLAYER_MAX_HEALTH);
         self.player_poise = psx_game_runtime::poise::Poise::EMPTY;
@@ -881,7 +882,9 @@ impl Playtest {
         let (room, position, yaw) = if let Some(checkpoint) = self.checkpoint {
             (checkpoint.room, checkpoint.position, checkpoint.yaw)
         } else {
-            let spawn = PLAYER_CONTROLLER.map_or(PLAYER_SPAWN, |controller| controller.spawn);
+            let spawn = PLAYER_CONTROLLER
+                .get()
+                .map_or(PLAYER_SPAWN.get(), |controller| controller.spawn);
             (
                 spawn.room,
                 RoomPoint::new(spawn.x, spawn.y, spawn.z),
@@ -912,12 +915,12 @@ impl Playtest {
         // as this life's PLAYER_WEAPON_ATTACHMENTS event.
         self.weapon_attach_reported = false;
         self.game_entities
-            .spawn_from_records_with_ids(GAME_ENTITIES, GAME_ENTITY_IDS);
+            .spawn_from_records_with_ids(GAME_ENTITIES.as_slice(), GAME_ENTITY_IDS.as_slice());
         self.game_entities
             .enable_combat_flow(self.player_has_ranged_weapon());
         self.game_entities
             .set_stance_swap_delay(self.player_stance_config.swap_cooldown_ticks);
-        self.logic.init_from_records(LOGIC);
+        self.logic.init_from_records(LOGIC.as_slice());
         // The logic runtime restarts its rolling fired total with the
         // records; restart the reported watermark with it or the
         // LOGIC_RECORDS_FIRED delta counter under-reports until the new
@@ -1393,7 +1396,7 @@ impl Playtest {
         }
         count
             + psx_game_runtime::cylinder_props::collect_cylinder_prop_collision_blockers_into(
-                CYLINDER_PROPS,
+                CYLINDER_PROPS.as_slice(),
                 self.room_index,
                 out,
             )
@@ -1432,6 +1435,7 @@ impl Playtest {
         }
     }
 
+    #[inline(never)]
     pub(super) fn draw_particle_emitters<'a>(
         &self,
         camera: WorldCamera,
@@ -1445,7 +1449,7 @@ impl Playtest {
         let mut submitted = 0usize;
         let depth_range = self.effect_depth_range(self.room_index);
         let mut projector = None;
-        for emitter in PARTICLE_EMITTERS {
+        for emitter in &PARTICLE_EMITTERS {
             if emitter.room != self.room_index {
                 continue;
             }
@@ -1477,6 +1481,7 @@ impl Playtest {
 
     /// Draw live combat bolts after world submission so their additive quads
     /// participate in the same depth table as authored particle effects.
+    #[inline(never)]
     pub(super) fn draw_combat_projectiles<'a>(
         &self,
         camera: WorldCamera,
@@ -1807,7 +1812,7 @@ impl Playtest {
             fog_rgb: Rgb8::from_array(room_record.fog_rgb),
             fog_near: room_record.fog_near,
             fog_far: room_record.fog_far,
-            lights: room_light_slice(LIGHTS, self.room_index),
+            lights: room_light_slice(LIGHTS.as_slice(), self.room_index),
         })
     }
 
@@ -2076,7 +2081,7 @@ impl Playtest {
         game_entity_for_instance(instance)?;
         let live = self
             .game_entities
-            .live_position_for_model_instance(GAME_ENTITIES, instance)?;
+            .live_position_for_model_instance(GAME_ENTITIES.as_slice(), instance)?;
         Some(RoomPoint::new(live[0], live[1], live[2]))
     }
 
@@ -2144,7 +2149,7 @@ impl Playtest {
         }
         if interactable.logic != psx_level::INTERACTABLE_LOGIC_NONE {
             let fired = self.logic.fire_index(
-                LOGIC,
+                LOGIC.as_slice(),
                 usize::from(interactable.logic),
                 psx_game_runtime::logic::UseCode::Toggle,
                 now,
@@ -2529,7 +2534,9 @@ mod life_reset_tests {
     fn only_initial_world_pages_lock_controls_through_the_closing_animation() {
         use psx_game_runtime::poi::MessagePageSpan;
         let mut scene = test_scene();
-        let welcome = WORLD_MESSAGE.expect("test project has a welcome message");
+        let welcome = WORLD_MESSAGE
+            .get()
+            .expect("test project has a welcome message");
         assert!(!scene.initial_world_message_active());
         scene.open_world_message_once();
         for page in 0..welcome.page_count {
@@ -2721,13 +2728,13 @@ mod life_reset_tests {
         assert!(scene.power_up_inventory.add(BoostModuleId(1)));
         scene
             .game_entities
-            .spawn_from_records_with_ids(GAME_ENTITIES, GAME_ENTITY_IDS);
+            .spawn_from_records_with_ids(GAME_ENTITIES.as_slice(), GAME_ENTITY_IDS.as_slice());
         let enemy = GAME_ENTITIES
             .iter()
             .position(|record| record.flags & psx_level::game_entity_flags::ENABLED != 0);
         if let Some(index) = enemy {
             scene.game_entities.apply_hit(
-                GAME_ENTITIES,
+                GAME_ENTITIES.as_slice(),
                 index,
                 VitalityChannelId::One,
                 u16::MAX,

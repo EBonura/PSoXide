@@ -14,7 +14,7 @@ pub(super) use psx_game_runtime::box_props::box_prop_movement_break_trigger;
 
 impl Playtest {
     pub(super) fn rebuild_box_prop_runtime(&mut self) {
-        self.box_props.rebuild(BOX_PROPS);
+        self.box_props.rebuild(BOX_PROPS.as_slice());
     }
 
     pub(super) fn advance_box_prop_break_events(&mut self, delta_vblanks: u16) {
@@ -23,7 +23,7 @@ impl Playtest {
 
     pub(super) fn advance_box_prop_falls(&mut self, delta_vblanks: u16) {
         self.box_props
-            .advance_falls(BOX_PROPS, self.room_index, delta_vblanks);
+            .advance_falls(BOX_PROPS.as_slice(), self.room_index, delta_vblanks);
     }
 
     pub(super) fn break_box_props_for_movement(
@@ -34,7 +34,7 @@ impl Playtest {
         delta_vblanks: u16,
     ) {
         self.box_props.break_for_movement(
-            BOX_PROPS,
+            BOX_PROPS.as_slice(),
             self.room_index,
             self.motor.position(),
             self.motor.yaw(),
@@ -47,7 +47,7 @@ impl Playtest {
 
     pub(super) fn break_box_props_for_attack(&mut self, config: CharacterMotorConfig) {
         self.box_props.break_for_attack(
-            BOX_PROPS,
+            BOX_PROPS.as_slice(),
             self.room_index,
             self.motor.position(),
             self.motor.yaw(),
@@ -63,23 +63,23 @@ impl Playtest {
         out: &mut S,
     ) -> Option<usize> {
         let mut count = self.box_props.collect_collision_blockers_checked_into(
-            BOX_PROPS,
+            BOX_PROPS.as_slice(),
             self.room_index,
             out,
         )?;
         count += psx_game_runtime::arch_props::collect_arch_prop_collision_blockers_checked_into(
-            ARCH_PROPS,
-            ARCH_PROP_COLLISIONS,
+            ARCH_PROPS.as_slice(),
+            ARCH_PROP_COLLISIONS.as_slice(),
             self.room_index,
             out,
         )?;
         count += psx_game_runtime::image_props::collect_image_prop_collision_blockers_checked_into_filtered(
-            IMAGE_PROPS,
+            IMAGE_PROPS.as_slice(),
             self.room_index,
             out,
             |index| {
                 typed_world_object_active(
-                    WORLD_OBJECTS,
+                    WORLD_OBJECTS.as_slice(),
                     &self.destructibles,
                     psx_level::world_object_kind::IMAGE_PROP,
                     index,

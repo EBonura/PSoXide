@@ -22,11 +22,11 @@ pub(super) fn model_tables() -> mr::ModelTables {
         model_clip_bounds: MODEL_CLIP_BOUNDS,
         model_frame_bounds: MODEL_FRAME_BOUNDS,
         model_sockets: MODEL_SOCKETS,
-        model_instances: MODEL_INSTANCES,
+        model_instances: MODEL_INSTANCES.as_slice(),
         equipment: EQUIPMENT,
         weapons: WEAPONS,
         weapon_hitboxes: WEAPON_HITBOXES,
-        entities: ENTITIES,
+        entities: ENTITIES.as_slice(),
     }
 }
 
@@ -297,7 +297,7 @@ const MODEL_DRAW_KNOBS: mr::ModelDrawKnobs = mr::ModelDrawKnobs {
 /// take this so a held weapon reads as the same energy lane the player
 /// swings on R1/R2, without a second authored copy of the colour to drift.
 fn horizon_skin() -> Option<mr::EquipmentMaterializationSkin> {
-    let controller = PLAYER_CONTROLLER?;
+    let controller = PLAYER_CONTROLLER.get()?;
     let [r, g, b] = WEAPON_APPEARANCES
         .iter()
         .find(|appearance| {
@@ -371,7 +371,7 @@ fn equipment_materialization_skins(
     anim: PlayerAnim,
 ) -> [Option<mr::EquipmentMaterializationSkin>; mr::MAX_PLAYER_EQUIPMENT] {
     let mut skins = [None; mr::MAX_PLAYER_EQUIPMENT];
-    let Some(controller) = PLAYER_CONTROLLER else {
+    let Some(controller) = PLAYER_CONTROLLER.get() else {
         return skins;
     };
     let action = anim.action();
@@ -454,7 +454,7 @@ pub(super) fn equipment_wire_q12(
     frame_count: u16,
 ) -> [u16; mr::MAX_PLAYER_EQUIPMENT] {
     let mut wire = [0u16; mr::MAX_PLAYER_EQUIPMENT];
-    let Some(controller) = PLAYER_CONTROLLER else {
+    let Some(controller) = PLAYER_CONTROLLER.get() else {
         return wire;
     };
     let action = anim.action();
@@ -1219,7 +1219,7 @@ pub(super) fn draw_player_equipment(
         triangles,
         world,
     );
-    if let Some(controller) = PLAYER_CONTROLLER {
+    if let Some(controller) = PLAYER_CONTROLLER.get() {
         let trail = mr::draw_player_weapon_trails_from_pose::<MAX_RUNTIME_MODELS, OT_DEPTH>(
             model_tables(),
             WEAPON_APPEARANCES,
@@ -1278,7 +1278,9 @@ fn enemy_death_dissolve(
         return None;
     }
     mr::ModelDeathDissolve::after_death(
-        entities.clip_for_state(GAME_ENTITIES, index).phase_ticks,
+        entities
+            .clip_for_state(GAME_ENTITIES.as_slice(), index)
+            .phase_ticks,
         animation.frame_count(),
         animation.sample_rate_hz(),
         video_hz,

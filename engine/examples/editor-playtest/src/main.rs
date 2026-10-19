@@ -112,6 +112,7 @@ mod hook_runtime;
 mod hook_signposting;
 mod image_props_runtime;
 mod input;
+mod level_data;
 mod loc;
 mod marker_runtime;
 mod model_rendering;
@@ -174,15 +175,10 @@ mod generated {
 pub(crate) const HAS_WORLD: bool = generated::PLAYTEST_HAS_WORLD;
 
 use generated::{
-    ARCH_PROPS, ARCH_PROP_COLLISIONS, ARCH_PROP_SURFACES, ASSETS, BOOST_MODULES, BOX_PROPS,
-    BOX_PROP_STATE_COUNT, BOX_PROP_SURFACES, CHARACTERS, COMBAT_CAPSULES, CYLINDER_PROPS,
-    CYLINDER_PROP_SURFACES, DESTRUCTIBLES, ENTITIES, EQUIPMENT, GAMEPLAY_SFX_CUES, GAME_ENTITIES,
-    GAME_ENTITY_IDS, IMAGE_PROPS, INTERACTABLES, INTERACTABLE_MESSAGES, LIGHTS, LOGIC, MODELS,
-    MODEL_CLIPS, MODEL_CLIP_BOUNDS, MODEL_FRAME_BOUNDS, MODEL_INSTANCES, MODEL_SOCKETS,
-    PARTICLE_EMITTERS, PERSISTENT_FLAG_COUNT, PLAYER_CONTROLLER, PLAYER_SPAWN,
-    PLAYTEST_PACKET_CAPACITY, PROJECT_SAVE_NAME, PROJECT_SAVE_TITLE, ROOMS, ROOM_REFLECTION_PROBES,
-    UI_FONTS, UI_NODES, UI_PAINTS, UI_SFX_CUES, UI_SFX_SAMPLES, VITALITY_CIRCLES, WEAPONS,
-    WEAPON_APPEARANCES, WEAPON_HITBOXES, WORLD_AMBIENT_RGB, WORLD_MESSAGE, WORLD_OBJECTS,
+    ASSETS, BOOST_MODULES, CHARACTERS, COMBAT_CAPSULES, EQUIPMENT, GAMEPLAY_SFX_CUES, MODELS,
+    MODEL_CLIPS, MODEL_CLIP_BOUNDS, MODEL_FRAME_BOUNDS, MODEL_SOCKETS, PERSISTENT_FLAG_COUNT,
+    PLAYTEST_PACKET_CAPACITY, PROJECT_SAVE_NAME, PROJECT_SAVE_TITLE, UI_FONTS, UI_NODES, UI_PAINTS,
+    UI_SFX_CUES, UI_SFX_SAMPLES, WEAPONS, WEAPON_APPEARANCES, WEAPON_HITBOXES,
 };
 #[cfg(feature = "cd-stream-bench")]
 use generated::{
@@ -191,6 +187,13 @@ use generated::{
     UI_SFX_MAX_SAMPLE_BYTES, UI_SFX_PACK_FIRST_CHUNK,
 };
 use generated::{GAME_FLOW, OPTIONS, UI_SCENES};
+use level_data::{
+    ARCH_PROPS, ARCH_PROP_COLLISIONS, ARCH_PROP_SURFACES, BOX_PROPS, BOX_PROP_SURFACES,
+    CYLINDER_PROPS, CYLINDER_PROP_SURFACES, DESTRUCTIBLES, ENTITIES, GAME_ENTITIES,
+    GAME_ENTITY_IDS, IMAGE_PROPS, INTERACTABLES, INTERACTABLE_MESSAGES, LIGHTS, LOGIC,
+    MODEL_INSTANCES, PARTICLE_EMITTERS, PLAYER_CONTROLLER, PLAYER_SPAWN, ROOMS,
+    ROOM_REFLECTION_PROBES, VITALITY_CIRCLES, WORLD_AMBIENT_RGB, WORLD_MESSAGE, WORLD_OBJECTS,
+};
 
 /// Two ordering tables, alternated with the packet scratch's frame pair: the
 /// runner starts building a frame while the GPU still walks the previous
@@ -509,7 +512,7 @@ struct Playtest {
     /// Floor height under each Point of Interest, resolved once by a
     /// downward trace so the beacon stands on the floor whatever height
     /// the point was authored at. `i32::MIN` until resolved.
-    poi_floor_y: [i32; INTERACTABLES.len()],
+    poi_floor_y: [i32; psx_level::wire::caps::INTERACTABLES],
     /// Presentation-step progress for the active POI panel and page type-on,
     /// advanced by the simulation (see `tick_poi_presentation`).
     /// Prepared/overlay copies keep deferred UI matched to its world frame.
@@ -701,7 +704,7 @@ impl Playtest {
         self.poi_save_loaded = false;
         self.poi_save_load_attempted = false;
         self.poi_save_dirty = false;
-        self.poi_floor_y = [i32::MIN; INTERACTABLES.len()];
+        self.poi_floor_y = [i32::MIN; psx_level::wire::caps::INTERACTABLES];
         self.poi_panel_frame = 0;
         self.poi_closing = false;
         self.poi_page_type_frame = 0;

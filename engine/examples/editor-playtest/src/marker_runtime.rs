@@ -169,6 +169,7 @@ impl Playtest {
     /// once the grid world is resident: trace straight down from a little above the
     /// point. The beacon panel hangs down from its base point, so a point
     /// authored at floor height would otherwise sit inside the floor.
+    #[inline(never)]
     pub(super) fn resolve_poi_floors(&mut self) {
         let Some(world_rt) = self.world_rt.as_mut() else {
             return;
@@ -191,6 +192,7 @@ impl Playtest {
         }
     }
 
+    #[inline(never)]
     pub(super) fn draw_archive_beacons_world<T>(
         &self,
         camera: WorldCamera,
@@ -224,7 +226,7 @@ impl Playtest {
                 || !interactable_is_active(interactable)
                 || open_poi == Some(index)
                 || !world_object_visibility.typed_visible(
-                    WORLD_OBJECTS,
+                    WORLD_OBJECTS.as_slice(),
                     psx_level::world_object_kind::POINT_OF_INTEREST_BEACON,
                     index,
                 )

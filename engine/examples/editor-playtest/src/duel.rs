@@ -98,8 +98,11 @@ impl Playtest {
             self.gameplay_epoch = ctx.sim_tick;
             self.gameplay_epoch_set = true;
             self.anim_start_tick = ctx.sim_tick;
-            self.game_entities
-                .seed_training_actor(GAME_ENTITIES, target, seed ^ 0x9e3779b9);
+            self.game_entities.seed_training_actor(
+                GAME_ENTITIES.as_slice(),
+                target,
+                seed ^ 0x9e3779b9,
+            );
             self.duel = Duel {
                 active: true,
                 finished: false,

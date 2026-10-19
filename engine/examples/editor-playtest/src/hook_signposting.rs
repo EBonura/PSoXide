@@ -5,6 +5,7 @@ use psx_gte::lighting::ProjectedLit;
 use psx_level::EntityKind;
 
 impl Playtest {
+    #[inline(never)]
     pub(super) fn draw_hook_beacons_world(
         &self,
         camera: WorldCamera,

@@ -87,7 +87,7 @@ pub(super) fn service_menu_ui_images(scene_id: u16) {
         UI_SCENES,
         UI_NODES,
         ASSETS,
-        ROOMS,
+        ROOMS.as_slice(),
         UI_PACK_START_LBA,
         UI_PACK_TOC,
     );
@@ -121,7 +121,7 @@ pub(super) fn load_ui_images_for_scene(scene_id: u16) -> bool {
         UI_SCENES,
         UI_NODES,
         ASSETS,
-        ROOMS,
+        ROOMS.as_slice(),
     )
 }
 
@@ -299,7 +299,7 @@ pub(super) fn load_streamed_sky_from_cd() {
         font_scratch_arena(),
         GAMEPLAY_PACK_MAX_CHUNK_BYTES,
         ASSETS,
-        ROOMS,
+        ROOMS.as_slice(),
         UI_PACK_START_LBA,
         UI_PACK_TOC,
     );

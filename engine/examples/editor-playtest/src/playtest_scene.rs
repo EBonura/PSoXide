@@ -239,7 +239,7 @@ mod target_ui_tests {
     fn target_bindings_resolve_live_pools_guard_and_absence() {
         assert!(!GAME_ENTITIES.is_empty(), "cortex fixture has an enemy");
         let mut entities = RuntimeGameEntities::EMPTY;
-        entities.spawn_from_records(GAME_ENTITIES);
+        entities.spawn_from_records(GAME_ENTITIES.as_slice());
         let record = &GAME_ENTITIES[0];
 
         assert_eq!(
@@ -259,7 +259,7 @@ mod target_ui_tests {
             Some(0)
         );
 
-        entities.apply_stance_hit(GAME_ENTITIES, 0, VitalityChannelId::One, 10, 0);
+        entities.apply_stance_hit(GAME_ENTITIES.as_slice(), 0, VitalityChannelId::One, 10, 0);
         let expected =
             (i32::from(entities.health(0)) * PLAYER_HEALTH_MAX_Q12) / i32::from(record.max_health);
         assert_eq!(
@@ -275,6 +275,7 @@ mod target_ui_tests {
 
 impl Playtest {
     /// The cooked grid world, then the sky that shares its farthest OT slot.
+    #[inline(never)]
     fn draw_world_and_sky(
         &mut self,
         camera: WorldCamera,
@@ -1987,6 +1988,10 @@ impl Scene for Playtest {
 }
 
 impl Playtest {
+    // Not inlined: with every prop pass compiled in (the level is not known at
+    // build time) this and the frame function around it together overflow the
+    // 16-bit branch range of one MIPS function.
+    #[inline(never)]
     #[allow(clippy::too_many_arguments)]
     fn draw_room_world_content(
         &self,
@@ -2003,13 +2008,13 @@ impl Playtest {
         telemetry::stage_begin(telemetry::stage::IMAGE_PROPS);
         box_prop_profile_begin(telemetry::stage::BOX_PROPS);
         draw_box_props(
-            BOX_PROPS,
-            BOX_PROP_SURFACES,
+            BOX_PROPS.as_slice(),
+            BOX_PROP_SURFACES.as_slice(),
             &self.box_props,
             room,
             |index| {
                 world_object_visibility.typed_visible(
-                    WORLD_OBJECTS,
+                    WORLD_OBJECTS.as_slice(),
                     psx_level::world_object_kind::BOX_PROP,
                     index,
                 )
@@ -2021,17 +2026,13 @@ impl Playtest {
             world,
         );
         box_prop_profile_end(telemetry::stage::BOX_PROPS);
-        psx_game_runtime::cylinder_props::draw_cylinder_props::<
-            _,
-            OT_DEPTH,
-            { !CYLINDER_PROPS.is_empty() },
-        >(
-            CYLINDER_PROPS,
-            CYLINDER_PROP_SURFACES,
+        psx_game_runtime::cylinder_props::draw_cylinder_props::<_, OT_DEPTH, false>(
+            CYLINDER_PROPS.as_slice(),
+            CYLINDER_PROP_SURFACES.as_slice(),
             room,
             |index| {
                 world_object_visibility.typed_visible(
-                    WORLD_OBJECTS,
+                    WORLD_OBJECTS.as_slice(),
                     psx_level::world_object_kind::CYLINDER_PROP,
                     index,
                 )
@@ -2044,12 +2045,12 @@ impl Playtest {
             world,
         );
         psx_game_runtime::arch_props::draw_arch_props(
-            ARCH_PROPS,
-            ARCH_PROP_SURFACES,
+            ARCH_PROPS.as_slice(),
+            ARCH_PROP_SURFACES.as_slice(),
             room,
             |index| {
                 world_object_visibility.typed_visible(
-                    WORLD_OBJECTS,
+                    WORLD_OBJECTS.as_slice(),
                     psx_level::world_object_kind::ARCH_PROP,
                     index,
                 )
@@ -2063,12 +2064,12 @@ impl Playtest {
         );
         box_prop_profile_begin(telemetry::stage::BOX_PROP_DEBRIS);
         draw_box_prop_floor_debris(
-            BOX_PROPS,
+            BOX_PROPS.as_slice(),
             &self.box_props,
             room,
             |index| {
                 world_object_visibility.typed_visible(
-                    WORLD_OBJECTS,
+                    WORLD_OBJECTS.as_slice(),
                     psx_level::world_object_kind::BOX_PROP,
                     index,
                 )
@@ -2082,12 +2083,12 @@ impl Playtest {
         box_prop_profile_end(telemetry::stage::BOX_PROP_DEBRIS);
         box_prop_profile_begin(telemetry::stage::BOX_PROP_SHARDS);
         draw_box_prop_break_events(
-            BOX_PROPS,
+            BOX_PROPS.as_slice(),
             &self.box_props,
             room,
             |index| {
                 world_object_visibility.typed_visible(
-                    WORLD_OBJECTS,
+                    WORLD_OBJECTS.as_slice(),
                     psx_level::world_object_kind::BOX_PROP,
                     index,
                 )
@@ -2101,11 +2102,11 @@ impl Playtest {
         box_prop_profile_end(telemetry::stage::BOX_PROP_SHARDS);
         box_prop_profile_begin(telemetry::stage::IMAGE_CARDS);
         draw_image_props(
-            IMAGE_PROPS,
+            IMAGE_PROPS.as_slice(),
             room,
             |index| {
                 world_object_visibility.typed_visible(
-                    WORLD_OBJECTS,
+                    WORLD_OBJECTS.as_slice(),
                     psx_level::world_object_kind::IMAGE_PROP,
                     index,
                 )
