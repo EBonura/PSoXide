@@ -374,7 +374,9 @@ impl Playtest {
                     self.game_entities.position(index),
                     self.game_entities.yaw(index),
                     self.game_entities.state(index) as u8,
-                    self.game_entities.clip_for_state(GAME_ENTITIES.as_slice(), index).clip,
+                    self.game_entities
+                        .clip_for_state(GAME_ENTITIES.as_slice(), index)
+                        .clip,
                     self.game_entities.tactical_snapshot(index),
                 );
             }
