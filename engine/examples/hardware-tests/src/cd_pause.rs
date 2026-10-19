@@ -124,7 +124,7 @@ const WATCH_COMMANDS: u32 = 5;
 
 /// The test region the disc build puts at LBA 564 (460 sectors), and a sector
 /// far from it inside the data track (the long XA file's area).
-const NEAR_LBA: u32 = 564;
+const NEAR_LBA: u32 = crate::CDTEST_LBA;
 const FAR_LBA: u32 = 15_000;
 const SETTLED_SECTORS: u32 = 12;
 

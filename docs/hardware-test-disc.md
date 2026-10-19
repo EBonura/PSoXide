@@ -318,6 +318,14 @@ Decode with one command:
 The run includes waits that are part of the measurement (the CD motor case waits up to
 20 s), and the six-second hot-plug window; the progress bar covers all of it.
 
+## Radius disc and list node sweep (v2.8, records `0xB00`-`0xBF7`, `0xC00`-`0xC47`)
+
+`make hwtest-radius-disc PSOXIDE_SDK=<PSoXide checkout>` builds `build/hwtest-radius/hardware-tests-radius.{bin,cue}`: the suite with the SDK stop panel, `CDTEST.BIN` at 400 sectors and `RADIUS.DAT` after the XA files, about 78 minutes in all (the recipe refuses an image over 359,844 blocks). Run it from MAIN MENU row 2 (`RADIUS + LIST NODE SWEEP ONLY`, about three minutes) or as part of the full run.
+
+Record layouts are in the headers of `src/radius.rs` and `src/ll_sweep.rs`; `psoxide-hwtest diag-report <pages>` decodes both. The radius table's state codes: OK all sectors and data right; RT right after a retry or an error on the way; XX sectors came with wrong data; TO fewer sectors than asked, last event a timeout; ER fewer sectors, last event INT5. The time includes the seek: the first method at a position (the SDK reader) pays the long seek from the previous position, the raw reads then read the same place again.
+
+The list node table reads: size in words, GPU state when the node arrived (BUSY: two large triangles still drawing), whether the closing GP0(1Fh) interrupt came (IRQ or NOIRQ), rectangles drawn of rectangles in the node, whether channel 2 finished (DMA or HUNG), GPU? when the GPU did not answer after recovery. `DATA OR IRQ LOST FROM n WORDS` names the smallest size that lost either.
+
 ## Console tests (v1.27)
 
 `MAIN MENU > CONSOLE TESTS (V1.27)` holds four cases. Each takes over the

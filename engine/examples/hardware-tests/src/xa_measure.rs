@@ -87,7 +87,7 @@ const SONGS_FILE: &str = "HWSONGS.XA";
 const LOW_CHANNEL: u8 = 0;
 const HIGH_CHANNEL: u8 = 3;
 /// `CDTEST.BIN`, the deterministic read region every hardware-test disc has.
-const CDTEST_LBA: u32 = 564;
+const CDTEST_LBA: u32 = crate::CDTEST_LBA;
 const DATA_SECTORS: u32 = 64;
 /// Per-command spin budget, as the rest of the suite uses.
 const SPINS: u32 = 200_000;

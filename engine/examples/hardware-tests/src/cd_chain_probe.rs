@@ -35,9 +35,9 @@ pub(crate) const CL2_RECORD: u16 = 0x500;
 /// First LBA of the CDTEST region on THIS disc (verified against the
 /// built image by scanning for the sector-aligned "PSOXSTRM" header; a
 /// drift reads BAD rather than lying, since the magic words are checked).
-const CDTEST_LBA: u32 = 564;
+const CDTEST_LBA: u32 = crate::CDTEST_LBA;
 /// Sector count the disc build bakes into the CDTEST header.
-const CDTEST_SECTORS: u32 = 460;
+const CDTEST_SECTORS: u32 = crate::CDTEST_SECTORS;
 const CD_SPINS: u32 = 0x10_0000;
 
 const VARIANT_COUNT: usize = 8;

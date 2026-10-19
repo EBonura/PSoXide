@@ -163,6 +163,22 @@ pub(crate) fn detail(font: &FontAtlas, group: &str, name: &str) {
     gpu.wait_idle();
 }
 
+/// Rows of the live results band under the banner, nine pixels apart (y 48 to
+/// 138, above the area line).
+pub(crate) const LIVE_ROWS: u32 = 10;
+
+/// Replace row `row` of the live results band with `s`. A step that produces a
+/// table row at a time draws each as it lands, so a photo of a stopped run
+/// shows the last rows it finished.
+pub(crate) fn live_line(font: &FontAtlas, row: u32, s: &str, colour: (u8, u8, u8)) {
+    probe_gpu!(gpu);
+    let y = 48 + row.min(LIVE_ROWS - 1) * 9;
+    gpu_io::wait_command_ready();
+    fill(y, 8, 304, 9, 0x0012_0806);
+    text(font, gpu, 8, y as i16, s, colour);
+    gpu.wait_idle();
+}
+
 /// Progress inside the current step (tests run, records taken).
 pub(crate) fn sub(done: usize, total: usize) {
     // SAFETY: single thread; plain statics.

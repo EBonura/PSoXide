@@ -52,8 +52,8 @@ use psx_spu::{self as spu, CdVolume, Volume};
 /// disc: `CDTEST.BIN`, 460 sectors of the `PSOXSTRM` pattern ending where the
 /// packs would start (LBA 1024). Every sector is checked against the pattern,
 /// so a layout that moved reads as failed data rather than as a measurement.
-const FILE_LBA: u32 = 564;
-const FILE_SECTORS: u32 = 460;
+const FILE_LBA: u32 = crate::CDTEST_LBA;
+const FILE_SECTORS: u32 = crate::CDTEST_SECTORS;
 const SECTOR_WORDS: usize = 512;
 /// Sectors in each request of a stream, and requests kept in flight.
 const PER: u32 = 4;

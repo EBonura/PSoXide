@@ -26,6 +26,7 @@ const POLL_SETUP_CYCLES: u16 = 8_000;
 
 /// A step is starting: forget a skip from the step before.
 pub(crate) fn begin_step() {
+    heartbeat();
     // SAFETY: single thread; plain statics.
     unsafe { SKIPPING = false };
 }
@@ -79,6 +80,16 @@ pub(crate) fn poll() {
 /// A record is about to run: put its id on the screen (a photo of a hang
 /// then names it) and look at the skip key.
 pub(crate) fn record_start(id: u16) {
+    heartbeat();
     ui::record_id(id);
     poll();
+}
+
+/// Tell the SDK stop panel's watchdog (a `console-diag` build) that the suite
+/// is alive: a step that only pokes registers for many seconds shows no GP1
+/// write, GPU DMA kick or CD command otherwise, and the panel would take the
+/// screen as a stall. Counts as a GP1 write; touches no hardware, and compiles
+/// to nothing without the feature.
+pub(crate) fn heartbeat() {
+    psx_io::diag::gp1_write();
 }

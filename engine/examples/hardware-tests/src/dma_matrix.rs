@@ -45,7 +45,7 @@ const CD_SPINS: u32 = 400_000;
 /// CD sector comes every 13 (1x) or 7 (2x), and a transfer here is 512 words.
 const WAIT_ITERATIONS: u32 = 50_000;
 /// The test region `cd_chain_probe.rs` and the stream cases read.
-const CDTEST_LBA: u32 = 564;
+const CDTEST_LBA: u32 = crate::CDTEST_LBA;
 const CD_WORDS_DATA: u16 = 512;
 const CD_WORDS_WHOLE: u16 = 585;
 const CD_KICK: u32 = psx_hw::dma::CHCR_START | psx_hw::dma::CHCR_TRIGGER;

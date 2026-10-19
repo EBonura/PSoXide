@@ -21,10 +21,11 @@ enum Mode {
     Capture,
 }
 
-const MENU: [&str; 4] = [
+const MENU: [&str; 5] = [
     // Row 0 is pinned: `make hwtest-run` selects it by firing CROSS at a fixed
     // tick with the cursor still at its boot position.
     "RUN HARDWARE TEST",
+    "RADIUS + LIST NODE SWEEP ONLY",
     "CONTROLLER TEST (P1 + P2)",
     "MEMORY CARD (AT OWN RISK)",
     "VIEW LAST CAPTURE",
@@ -91,7 +92,8 @@ impl HardwareTests {
     }
 
     /// The whole run, then the capture.
-    fn start_run(&mut self, ctx: &mut Ctx) {
+    fn start_run(&mut self, ctx: &mut Ctx, focus: bool) {
+        self.run.focus = focus;
         let skip_risky = ctx.is_held(button::L2);
         self.run.write_cards = ctx.is_held(button::L1) && ctx.is_held(button::R1);
         self.run.checkpoints = ctx.is_held(button::START) && ctx.is_held(button::R2);
@@ -121,7 +123,9 @@ impl HardwareTests {
             self.capture.print_page(page);
         }
         self.open_capture();
-        self.capture.render_page(0);
+        if table_pages() == 0 {
+            self.capture.render_page(0);
+        }
     }
 
     /// A 16-bit id for this run, so pages from different runs in one
@@ -163,12 +167,13 @@ impl Scene for HardwareTests {
                 }
                 if ctx.just_pressed(button::CROSS) {
                     match self.menu_cursor {
-                        0 => self.start_run(ctx),
-                        1 => {
+                        0 => self.start_run(ctx, false),
+                        1 => self.start_run(ctx, true),
+                        2 => {
                             self.controller_test.start();
                             self.mode = Mode::ControllerTest;
                         }
-                        2 => {
+                        3 => {
                             self.memory_card = MemoryCardDiagnostic::new();
                             self.memcard_armed = false;
                             self.mode = Mode::MemoryCard;
@@ -199,8 +204,10 @@ impl Scene for HardwareTests {
                 if self.view == 0 {
                     draw_test_pattern(ctx.sim_tick.as_u32());
                     self.draw_cover(font);
+                } else if self.view <= table_pages() {
+                    draw_table_page(font, self.view - 1);
                 } else {
-                    photo::draw_capture_page(font, &self.capture, self.view - 1);
+                    photo::draw_capture_page(font, &self.capture, self.view - 1 - table_pages());
                 }
             }
             Mode::ControllerTest => self.controller_test.draw(font),
@@ -257,7 +264,7 @@ impl HardwareTests {
             self.open_menu();
             return;
         }
-        let views = self.capture.page_count() + 1;
+        let views = self.capture.page_count() + 1 + table_pages();
         let mut turned = false;
         if ctx.just_pressed(button::LEFT) {
             self.view = (self.view + views - 1) % views;
@@ -279,8 +286,8 @@ impl HardwareTests {
                 turned = true;
             }
         }
-        if turned && self.view > 0 {
-            self.capture.render_page(self.view - 1);
+        if turned && self.view > table_pages() {
+            self.capture.render_page(self.view - 1 - table_pages());
         }
     }
 
@@ -305,7 +312,7 @@ impl HardwareTests {
                 (176, 190, 210)
             };
             font.draw_text(22, y, label, colour);
-            if row == 3 && !self.have_capture {
+            if row == 4 && !self.have_capture {
                 font.draw_text(22, y + 9, "NONE YET - RUN FIRST", (112, 136, 170));
             }
             y += MENU_ROW_PITCH;
@@ -325,7 +332,9 @@ impl HardwareTests {
     fn draw_cover(&self, font: &FontAtlas) {
         let pages = self.capture.page_count();
         let mut line = ui::Line::new();
-        line.s("FILM FROM HERE, ").u(pages as u32).s(" PAGES");
+        line.s("FILM FROM HERE, ")
+            .u((pages + table_pages()) as u32)
+            .s(" PAGES");
         font.draw_text(8, 56, line.as_str(), (255, 232, 128));
         let mut line = ui::Line::new();
         line.s("RUN ID ").s(hex4(self.capture_run_id).as_str());
@@ -380,6 +389,20 @@ impl HardwareTests {
                 Status::Warn.color(),
             );
         }
+    }
+}
+
+/// Result tables the run left (radius sweep, list node sizes): drawn as text
+/// pages between the cover and the QR pages.
+fn table_pages() -> usize {
+    radius::page_count() + ll_sweep::page_count()
+}
+
+fn draw_table_page(font: &FontAtlas, page: usize) {
+    if page < radius::page_count() {
+        radius::draw_page(font, page);
+    } else {
+        ll_sweep::draw_page(font);
     }
 }
 
@@ -467,6 +490,12 @@ fn main() -> ! {
     // Capture the BIOS-owned state (exception vector, SPU reverb) before any
     // SDK or engine path can initialise anything.
     boot::capture();
+    // The stop panel's stall watchdog (15 s by default) would take the screen
+    // in the middle of the suite's long silent steps (the 180 s XA clock case
+    // issues nothing the watchdog counts). Faults and panics still show at
+    // once; a true hang shows after about five and a half minutes.
+    #[cfg(feature = "console-diag")]
+    psx_rt::diag::set_stall_limit(20_000);
     // Before App::run: the engine's clock replaces the BIOS exception vector.
     kernel_timing::snapshot_vector();
     let mut suite = HardwareTests::new();

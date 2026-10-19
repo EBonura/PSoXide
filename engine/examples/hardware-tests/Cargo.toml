@@ -11,6 +11,9 @@ license = "GPL-2.0-or-later"
 [workspace]
 
 [features]
+# The SDK's console stop panel (registers, wait site, CD and GPU counters on a
+# fault, panic or 15 s stall). On for the radius disc, off for the plain suite.
+console-diag = ["psx-rt/console-diag", "psx-io/console-diag"]
 # Verification builds only, never shipped: the first makes the card-write gate
 # see a checksum mismatch (nothing may be written); the second changes one byte
 # of the write (the changed byte shows where it landed).

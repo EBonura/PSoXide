@@ -58,12 +58,14 @@ mod console_tests;
 mod controller_test;
 mod cpu_tests;
 mod display_widths;
+mod filler;
 mod dma_edge;
 mod dma_matrix;
 mod field_rule;
 mod gpu_probes;
 mod handoff_probe;
 mod kernel_timing;
+mod ll_sweep;
 mod lever_probes;
 mod list_busy_probes;
 mod mdec_check;
@@ -71,6 +73,7 @@ mod pad_engine;
 mod payload;
 mod perf_probes;
 mod photo;
+mod radius;
 mod records;
 mod regs;
 mod report;
@@ -221,9 +224,15 @@ unsafe extern "C" {
 //
 // History, one entry per version: docs/hardware-test-versions.md.
 const SUITE_VERSION_MAJOR: u8 = 2;
-const SUITE_VERSION_MINOR: u8 = 7;
+const SUITE_VERSION_MINOR: u8 = 8;
 /// Display form. Keep in step with the two constants above.
-const SUITE_VERSION: &str = "HWTEST v2.7";
+const SUITE_VERSION: &str = "HWTEST v2.8";
+/// `CDTEST.BIN`: the deterministic read region the CD probes use, placed so it
+/// ends at LBA 1024. The console-diag build's stop panel pushes the boot EXE
+/// past the 541 sectors the plain layout allows, so that build gives the
+/// region 60 sectors back (the Makefile passes the same count to mkisopsx).
+pub(crate) const CDTEST_SECTORS: u32 = if cfg!(feature = "console-diag") { 400 } else { 460 };
+pub(crate) const CDTEST_LBA: u32 = 1024 - CDTEST_SECTORS;
 const SCREEN_W: i16 = 320;
 const SCREEN_H: i16 = 240;
 const FONT_TPAGE: TexturePage = TexturePage::new(320, 0, TextureDepth::Bit4);
@@ -412,7 +421,7 @@ struct ScanReport {
 }
 
 /// Slots in the timing report. `run::tests` asserts the largest run fits.
-const TIMING_RECORD_COUNT: usize = 1300;
+const TIMING_RECORD_COUNT: usize = 1500;
 const MEMORY_CONTROL_REGISTER_COUNT: usize = MEMORY_CONTROL_REGISTERS.len();
 /// Captured with the timing block, in this order (the host names them by
 /// position). The first nine are the bus configuration the BIOS left.

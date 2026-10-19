@@ -146,6 +146,10 @@ pub(crate) struct Run {
     /// Show a QR checkpoint page set after each area: only when START and R2
     /// were held at the start, a chord apart from the card writes.
     pub(crate) checkpoints: bool,
+    /// Run only the steps marked for the focused sweep (menu row 2).
+    pub(crate) focus: bool,
+    /// Areas the run entered, for the clean check of a focused run.
+    visited: [bool; AREA_COUNT],
     /// An id for the checkpoint files of this run.
     pub(crate) checkpoint_id: u16,
     handoffs: [Handoff; AREA_COUNT],
@@ -176,6 +180,8 @@ impl Run {
             skip_risky: false,
             write_cards: false,
             checkpoints: false,
+            focus: false,
+            visited: [false; AREA_COUNT],
             checkpoint_id: 0,
             handoffs: [Handoff {
                 flags: 0,
@@ -601,6 +607,8 @@ struct Step {
     name: &'static str,
     /// Can hang a console or is hard on the drive; skipped on request.
     risky: bool,
+    /// Order in the focused sweep run (the menu's second row), 0 for not in it.
+    focus: u8,
     run: fn(&mut Run),
 }
 
@@ -609,6 +617,7 @@ const fn step(area: Area, name: &'static str, run: fn(&mut Run)) -> Step {
         area,
         name,
         risky: false,
+        focus: 0,
         run,
     }
 }
@@ -618,6 +627,18 @@ const fn risky(area: Area, name: &'static str, run: fn(&mut Run)) -> Step {
         area,
         name,
         risky: true,
+        focus: 0,
+        run,
+    }
+}
+
+/// A step that is also part of the focused sweep run, `order` first to last.
+const fn focused(area: Area, name: &'static str, order: u8, run: fn(&mut Run)) -> Step {
+    Step {
+        area,
+        name,
+        risky: false,
+        focus: order,
         run,
     }
 }
@@ -839,6 +860,7 @@ const STEPS: &[Step] = &[
     step(Area::Gpu, "TEXTURE UV WINDOWS", step_uv_windows),
     // After the two above: a wedged list or FIFO here cannot cost them.
     step(Area::Gpu, "GPU DMA EDGE CASES", step_dma_edge),
+    focused(Area::Gpu, "GPU LIST NODE SIZES", 2, step_ll_sweep),
     // 5
     step(Area::Spu, "SPU INIT STATE", step_spu_init),
     step(Area::Spu, "SPU PRECISION", precision_spu_step),
@@ -888,6 +910,7 @@ const STEPS: &[Step] = &[
     // 9: last, hardest on the machine
     step(Area::Drive, "CD DMA VERSUS CPU", records_cd_dma),
     step(Area::Drive, "CD MOTOR", step_stream_motor),
+    focused(Area::Drive, "CD RADIUS SWEEP", 1, step_radius),
     // Last of the safe steps: it changes the display mode, and a failure here
     // cannot stop anything before it (only the risky step after it).
     step(Area::Drive, "480I DRAW RULE", step_field_rule),
@@ -992,6 +1015,18 @@ fn step_cd_pause(run: &mut Run) {
     run.font = Some(font);
 }
 
+fn step_radius(run: &mut Run) {
+    let font = run.font.take().expect("font uploaded by reset_area");
+    run.push_all(radius::run(&font).as_slice());
+    run.font = Some(font);
+}
+
+fn step_ll_sweep(run: &mut Run) {
+    let font = run.font.take().expect("font uploaded by reset_area");
+    run.push_all(ll_sweep::run(&font).as_slice());
+    run.font = Some(font);
+}
+
 fn step_stream_motor(run: &mut Run) {
     probe_gpu!(gpu);
     let font = ui::upload_font();
@@ -1026,8 +1061,29 @@ pub(crate) fn execute(
     run.vector_ref = read_vector();
     irq::set_mask(run.irq_baseline);
 
+    // The order the steps run in: the table's, or for the focused sweep only
+    // the marked ones, by their order number.
+    let mut order = [0usize; STEPS.len()];
+    let mut count = 0;
+    if run.focus {
+        for rank in 1..=u8::MAX {
+            for (index, step) in STEPS.iter().enumerate() {
+                if step.focus == rank {
+                    order[count] = index;
+                    count += 1;
+                }
+            }
+        }
+    } else {
+        for (index, slot) in order.iter_mut().enumerate() {
+            *slot = index;
+        }
+        count = STEPS.len();
+    }
+    run.visited = [false; AREA_COUNT];
     let mut current: Option<Area> = None;
-    for (index, step) in STEPS.iter().enumerate() {
+    for &index in &order[..count] {
+        let step = &STEPS[index];
         if current != Some(step.area) {
             if let Some(previous) = current {
                 handoff(run, previous);
@@ -1037,6 +1093,7 @@ pub(crate) fn execute(
             }
             reset_area(run, ctx, step.area);
             current = Some(step.area);
+            run.visited[step.area.index()] = true;
         }
         if step.risky && run.skip_risky {
             tty::print("hardware-tests: skipped risky step ");
@@ -1055,6 +1112,7 @@ pub(crate) fn execute(
         tty_print_dec_u16(index as u16);
         tty::print(" ");
         tty::println(step.name);
+        psx_io::diag::step(index as u32, step.name);
         // Forget a skip from the step before; look at SELECT for this one.
         bounds::begin_step();
         bounds::poll();
@@ -1213,7 +1271,8 @@ fn show_checkpoint(run: &mut Run, capture: &mut crate::photo::PhotoCapture) {
 pub(crate) fn all_clean(run: &Run) -> bool {
     run.handoffs
         .iter()
-        .all(|h| h.flags == H_CLEAN && h.busy == 0)
+        .zip(run.visited.iter())
+        .all(|(h, visited)| !visited || (h.flags == H_CLEAN && h.busy == 0))
         && run.silence[0] == 0x7F
 }
 

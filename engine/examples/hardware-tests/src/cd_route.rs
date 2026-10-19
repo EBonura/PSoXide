@@ -27,7 +27,7 @@ const STAGE_COUNT: usize = 5;
 /// Frames a stage runs, and the frame its capture buffer is read.
 const STAGE_FRAMES: u16 = 40;
 const CAPTURE_FRAME: u16 = 30;
-const CDTEST_LBA: u32 = 564;
+const CDTEST_LBA: u32 = crate::CDTEST_LBA;
 const SECTOR_WORDS: usize = 2048 / 4;
 const CAPTURE_WORDS: usize = 0x800 / 4;
 const CAPTURE_HALF_WORDS: usize = 0x400 / 4;

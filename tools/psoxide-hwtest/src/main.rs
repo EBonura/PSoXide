@@ -4,7 +4,7 @@ use std::io::Write;
 
 use psoxide_hwtest::report::{parse_capture, payloads_from_paths, print_report, ReportOptions};
 use psoxide_hwtest::util::{Error, Result};
-use psoxide_hwtest::{audio_chain, audio_decode, audio_report, compare, machine_code, sb4, v24};
+use psoxide_hwtest::{audio_chain, audio_decode, audio_report, compare, diag28, machine_code, radius_fill, sb4, v24};
 
 const HELP: &str = "usage: psoxide-hwtest <command> [args]\n\
 commands:\n\
@@ -24,6 +24,10 @@ commands:\n\
       decode and diff SB4 capture-ring payloads\n\
   verify-machine-code EXE [--baseline FILE] [--fail-on-change]\n\
       audit the measured instruction blocks of the linked hardware-tests EXE\n\
+  diag-report PAYLOAD_OR_FILE ...\n\
+      print the v2.8 CD radius and GPU list node size tables (exit 1 on a fault)\n\
+  radius-fill OUT SECTORS\n\
+      write RADIUS.DAT, the deterministic filler of the radius disc\n\
   audio-report PAYLOAD_OR_FILE\n\
       decode PA1..PA5 audio-probe QR payloads\n\
   audio-decode WAV [--out FILE] [--emit-pages FILE] [--max-frames N]\n\
@@ -111,6 +115,8 @@ fn run() -> i32 {
         "v24-report" => (v24::run(rest, &mut out), 2),
         "sb4-report" => (sb4::run(rest, &mut out), 1),
         "verify-machine-code" => (machine_code::run(rest, &mut out, &mut err), 1),
+        "diag-report" => (diag28::run(rest, &mut out), 2),
+        "radius-fill" => (radius_fill::run(rest, &mut out), 1),
         "audio-report" => (audio_report::run(rest, &mut out), 2),
         "audio-decode" => (audio_decode::run(rest, &mut out, &mut err), 1),
         "audio-chaintest" => (audio_chain::run(rest, &mut out), 1),

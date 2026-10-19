@@ -75,6 +75,18 @@ pub(crate) fn find_file(name: &str, number: u8) -> Option<File> {
     ))
 }
 
+/// A file in the root directory: its first LBA and its size in bytes, as the
+/// directory records them (2048 times the sector count for a raw XA file).
+#[inline(never)]
+pub(crate) fn locate(name: &str) -> Option<(u32, u32)> {
+    // SAFETY: nothing else drives the controller yet.
+    if !unsafe { (*addr_of_mut!(READER)).prepare() } {
+        return None;
+    }
+    let (root, _) = iso::root_directory(read_one(iso::PVD_LBA)?)?;
+    iso::find_in_directory(read_one(root)?, name)
+}
+
 /// Root counter 1 counting HBlanks, unwrapped to 32 bits. Wraps every four
 /// seconds, so it needs a read at least that often.
 pub(crate) struct Clock {
