@@ -796,6 +796,34 @@ mod tests {
         assert_eq!(records.world_ambient_rgb, [32; 3]);
     }
 
+    /// Every reference project: the chunk decodes to exactly what the cook
+    /// built, table by table (the default project has no sky, far vista or
+    /// props to speak of, these do).
+    #[test]
+    fn every_reference_projects_records_survive_the_chunk() {
+        let mut seen = 0;
+        for entry in std::fs::read_dir(crate::projects_dir()).expect("projects dir") {
+            let root = entry.expect("entry").path();
+            let Ok(project) = ProjectDocument::load_from_path(root.join("project.ron")) else {
+                continue;
+            };
+            let (package, report) = super::super::build_package(&project, &root);
+            let Some(package) = package else {
+                continue;
+            };
+            assert!(report.is_ok(), "{root:?}: {:?}", report.error_messages());
+            let built = OwnedLevelRecords::build(&package);
+            let decoded = super::super::tests::decode_level_records(&package);
+            assert_eq!(
+                format!("{:#?}", built.records()),
+                format!("{decoded:#?}"),
+                "{root:?}"
+            );
+            seen += 1;
+        }
+        assert!(seen >= 8, "only {seen} reference projects cooked");
+    }
+
     #[test]
     fn a_level_over_a_pool_cap_names_the_cap() {
         let mut package = PlaytestPackage::default();
