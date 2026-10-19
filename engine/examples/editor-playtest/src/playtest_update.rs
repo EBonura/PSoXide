@@ -433,6 +433,12 @@ impl Playtest {
     #[cfg_attr(target_arch = "mips", optimize(size))]
     pub(super) fn init_gameplay(&mut self) {
         crate::game_trace("editor-playtest: gameplay init begin");
+        // The level's records first: everything below reads them. (Read
+        // already by the first `on_enter_state`; this is the same call.)
+        if generated::PLAYTEST_HAS_WORLD {
+            WorldRuntime::read_level(cd_arena())
+                .unwrap_or_else(|error| panic!("cooked world read failed: {error}"));
+        }
         self.shadow_material = upload_shadow_texture();
         self.vitality_circle_material = upload_vitality_circle_texture();
         self.particle_material = upload_particle_texture();
@@ -440,7 +446,7 @@ impl Playtest {
             .init(DESTRUCTIBLES.as_slice())
             .unwrap_or_else(|error| panic!("cooked destructible initialization failed: {error:?}"));
         self.world_rt = if generated::PLAYTEST_HAS_WORLD {
-            let world_rt = WorldRuntime::load_manifest(cd_arena())
+            let world_rt = WorldRuntime::load_manifest()
                 .unwrap_or_else(|error| panic!("cooked world initialization failed: {error}"));
             Some(world_rt)
         } else {

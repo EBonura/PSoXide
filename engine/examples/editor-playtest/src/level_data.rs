@@ -2,7 +2,7 @@
 //! props, interactables, logic, enemies, the player's spawn.
 //!
 //! They are not part of the executable. The cook writes them as chunk 1 of
-//! `WORLD.PAK`; `GridRuntime::load_manifest` reads and decodes the chunk at
+//! `WORLD.PAK`; `GridRuntime::read_level` reads and decodes the chunk at
 //! boot and [`install`]s the tables here, once, before anything reads them.
 //! The names are the ones the generated manifest used to define, so the code
 //! that reads a level's records reads them the way it always did; the runtime's
@@ -98,6 +98,31 @@ impl<T: Copy> LevelValue<T> {
         // SAFETY: as above.
         unsafe { *self.0.get() }
     }
+}
+
+/// The level core `GridRuntime::read_level` read, until the gameplay init
+/// takes it: the bytes and the LBA room records count their sector from.
+static CORE: LevelValue<Option<(&'static [u8], u32)>> = LevelValue::new(None);
+
+/// Keep the core read at boot for the gameplay init.
+pub fn keep_core(core: &'static [u8], base_lba: u32) {
+    CORE.set(Some((core, base_lba)));
+    READ.set(true);
+}
+
+/// Whether the level has been read (the core is kept until the gameplay init
+/// takes it, and the records stay installed for good).
+pub fn core_kept() -> bool {
+    READ.get()
+}
+
+static READ: LevelValue<bool> = LevelValue::new(false);
+
+/// Take the core kept at boot (once).
+pub fn take_core() -> Option<(&'static [u8], u32)> {
+    let core = CORE.get();
+    CORE.set(None);
+    core
 }
 
 macro_rules! level_statics {

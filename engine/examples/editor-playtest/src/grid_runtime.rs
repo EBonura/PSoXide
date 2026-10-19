@@ -151,12 +151,17 @@ pub(super) struct GridRuntime {
 }
 
 impl GridRuntime {
-    /// Read the level core off the disc (chunk 0 of `WORLD.PAK`) and start the
-    /// room stream. No room is resident yet: [`Self::stream`] reads the ones
-    /// around the player, and the loading screen waits for them
-    /// ([`Self::rooms_ready`]).
-    pub(super) fn load_manifest(cd: &mut CdController) -> Result<Self, GridRuntimeInitError> {
-        crate::game_trace("editor-playtest: grid manifest begin");
+    /// Read the level off the disc: the core (chunk 0 of `WORLD.PAK`) is kept
+    /// for [`Self::load_manifest`], the level's own records (chunk 1) are
+    /// decoded and installed (`level_data`). Idempotent; the first hook of the
+    /// scene calls it ([`Playtest::on_enter_state`]): the front end's resource
+    /// sets (the sky among them) run before the scene's own `init` and read
+    /// those tables.
+    pub(super) fn read_level(cd: &mut CdController) -> Result<(), GridRuntimeInitError> {
+        if crate::level_data::core_kept() {
+            return Ok(());
+        }
+        crate::game_trace("editor-playtest: level read begin");
         // The pack header names the core (chunk 0), the level's own records
         // (chunk 1) and the first room chunk (chunk 2); room records count
         // their sector from the last.
@@ -172,7 +177,18 @@ impl GridRuntime {
         let records =
             psx_level::wire::LevelRecords::decode(records).ok_or(GridRuntimeInitError::Records)?;
         crate::level_data::install(records);
-        Self::from_core(core, WORLD_PACK_START_LBA + first_room.sector_offset)
+        crate::level_data::keep_core(core, WORLD_PACK_START_LBA + first_room.sector_offset);
+        Ok(())
+    }
+
+    /// A runtime over the level core [`Self::read_level`] kept, with no room
+    /// resident yet: [`Self::stream`] reads the ones around the player, and the
+    /// loading screen waits for them ([`Self::rooms_ready`]).
+    pub(super) fn load_manifest() -> Result<Self, GridRuntimeInitError> {
+        crate::game_trace("editor-playtest: grid manifest begin");
+        let (core, base_lba) =
+            crate::level_data::take_core().ok_or(GridRuntimeInitError::NoCore(0))?;
+        Self::from_core(core, base_lba)
     }
 
     /// Read one chunk of `WORLD.PAK` whole into memory that lives for the run,

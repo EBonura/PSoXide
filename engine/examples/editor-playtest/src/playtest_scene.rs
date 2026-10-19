@@ -910,6 +910,12 @@ impl Scene for Playtest {
     /// front-end and gameplay-backed UI. The old HUD-only pack caused pause
     /// labels above slot one to fall back silently to the italic default face.
     fn on_enter_state(&mut self, state: SceneStateRef, _ctx: &mut Ctx) {
+        // The first hook the engine calls: the level's records (the sky's
+        // room table among them) must be installed before any state reads them.
+        if generated::PLAYTEST_HAS_WORLD {
+            WorldRuntime::read_level(cd_arena())
+                .unwrap_or_else(|error| panic!("cooked world read failed: {error}"));
+        }
         assert!(
             acquire_ui_fonts(UI_FONTS, &mut self.ui_fonts),
             "UI font VRAM pack failed"
