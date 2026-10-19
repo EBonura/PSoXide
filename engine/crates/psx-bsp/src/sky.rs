@@ -1924,3 +1924,198 @@ mod sample_emission_tests {
         }
     }
 }
+
+/// quake-psx draws its sky background from `quake-core/src/sky.rs`, whose two
+/// ray functions duplicate [`directional_texel`] and [`screen_view_ray`]. These
+/// tests keep the originals as oracles and pin exactly where the shared
+/// functions agree with them, so quake-psx can delete its copy.
+///
+/// The two differ only outside what a frame can reach: the shared view ray
+/// clamps its screen offsets to +-2048 and its projection plane to 1..=2048
+/// (quake wraps an i16 offset instead), and the shared direction function
+/// halves a ray from 2^14 where quake halves from 16,000.
+#[cfg(test)]
+mod quake_sky_parity {
+    use super::{directional_texel, screen_view_ray};
+    use psx_math::int32::isqrt_i32;
+
+    /// `quake_core::sky::directional_texel` as it stood in quake-psx.
+    fn quake_directional_texel(mut direction: [i32; 3], layer_width: u8) -> [i32; 2] {
+        direction[2] = direction[2].saturating_mul(3);
+        while direction[0]
+            .unsigned_abs()
+            .max(direction[1].unsigned_abs())
+            .max(direction[2].unsigned_abs())
+            > 16_000
+        {
+            direction[0] >>= 1;
+            direction[1] >>= 1;
+            direction[2] >>= 1;
+        }
+        let length_squared = direction[0]
+            .saturating_mul(direction[0])
+            .saturating_add(direction[1].saturating_mul(direction[1]))
+            .saturating_add(direction[2].saturating_mul(direction[2]));
+        let length = isqrt_i32(length_squared).max(1);
+        let denominator = length * 128;
+        let project = |component: i32| {
+            let numerator = component * 378 * i32::from(layer_width);
+            numerator / denominator
+        };
+        [project(direction[0]), project(direction[1])]
+    }
+
+    /// `quake_core::sky::screen_view_ray` as it stood in quake-psx.
+    fn quake_screen_view_ray(
+        screen: [i16; 2],
+        center: [i16; 2],
+        projection: i16,
+        world_to_view_q12: [[i16; 3]; 3],
+    ) -> [i32; 3] {
+        let camera = [
+            i32::from(screen[0].wrapping_sub(center[0])),
+            i32::from(screen[1].wrapping_sub(center[1])),
+            i32::from(projection),
+        ];
+        let mut world = [0i32; 3];
+        for axis in 0..3 {
+            let value = camera[0] * i32::from(world_to_view_q12[0][axis])
+                + camera[1] * i32::from(world_to_view_q12[1][axis])
+                + camera[2] * i32::from(world_to_view_q12[2][axis]);
+            world[axis] = value >> 12;
+        }
+        world
+    }
+
+    /// Rotations quake's view can load: the axis permutations and a spread of
+    /// yaw and pitch compositions at Q12.
+    fn rotations() -> alloc::vec::Vec<[[i16; 3]; 3]> {
+        let mut found = alloc::vec::Vec::new();
+        let unit = 4096i16;
+        for rows in [
+            [0usize, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ] {
+            for signs in 0..8 {
+                let mut matrix = [[0i16; 3]; 3];
+                for (row, &column) in rows.iter().enumerate() {
+                    matrix[row][column] = if signs >> row & 1 == 0 { unit } else { -unit };
+                }
+                found.push(matrix);
+            }
+        }
+        for yaw in 0..16 {
+            for pitch in 0..8 {
+                let angle = |step: i32, steps: i32| {
+                    let radians = core::f64::consts::TAU * f64::from(step) / f64::from(steps);
+                    (radians.sin(), radians.cos())
+                };
+                let (sy, cy) = angle(yaw, 16);
+                let (sp, cp) = angle(pitch - 4, 16);
+                let q = |value: f64| (value * 4096.0) as i16;
+                found.push([
+                    [q(cy), q(-sy * cp), q(sy * sp)],
+                    [q(sy), q(cy * cp), q(-cy * sp)],
+                    [0, q(sp), q(cp)],
+                ]);
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn screen_view_rays_agree_on_every_pixel_quake_samples() {
+        // The 320x240 screen, the centre quake passes and its projection
+        // plane, under every rotation above.
+        for rotation in rotations() {
+            for y in 0..=240i16 {
+                for x in 0..=320i16 {
+                    assert_eq!(
+                        screen_view_ray([x, y], [160, 120], 160, rotation),
+                        quake_screen_view_ray([x, y], [160, 120], 160, rotation),
+                        "pixel ({x}, {y})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn screen_view_rays_agree_across_the_clamp_range_and_differ_only_beyond_it() {
+        let rotation = rotations()[7];
+        // Inside the shared clamps (offsets within +-2048, plane 1..=2048):
+        for projection in [1i16, 80, 160, 320, 1024, 2048] {
+            for offset in [-2048i16, -1000, -161, 0, 119, 640, 2048] {
+                assert_eq!(
+                    screen_view_ray([offset, offset], [0, 0], projection, rotation),
+                    quake_screen_view_ray([offset, offset], [0, 0], projection, rotation)
+                );
+            }
+        }
+        // Beyond them quake wraps or extrapolates and the shared function
+        // clamps: no frame asks for these.
+        assert_ne!(
+            screen_view_ray([4000, 0], [0, 0], 160, rotation),
+            quake_screen_view_ray([4000, 0], [0, 0], 160, rotation)
+        );
+    }
+
+    #[test]
+    fn directional_texels_agree_for_every_ray_a_frame_can_make() {
+        // A frame's rays come from screen_view_ray: at most about 600 a
+        // component before the vertical weight of three. Sweep far beyond.
+        let widths = [8u8, 16, 32, 64, 128];
+        let steps = [
+            -16_000i32, -9_001, -4_096, -777, -33, -1, 0, 1, 33, 777, 4_096, 9_001, 16_000,
+        ];
+        for &width in &widths {
+            for &x in &steps {
+                for &y in &steps {
+                    for &z in &steps {
+                        // Quake weights z by three before its 16,000 test, the
+                        // shared function before its 2^14 test: compare where
+                        // the weighted ray is under both limits.
+                        if z.saturating_mul(3).unsigned_abs() > 16_000 {
+                            continue;
+                        }
+                        assert_eq!(
+                            directional_texel([x, y, z], width),
+                            quake_directional_texel([x, y, z], width),
+                            "ray ({x}, {y}, {z}) width {width}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn directional_texels_differ_by_a_texel_at_most_where_the_halving_limits_part() {
+        // Weighted components in (16000, 16384): quake halves the ray, the
+        // shared function keeps it at full precision. The direction is the
+        // same, so the texel moves by rounding only.
+        let mut worst = 0;
+        let mut differing = 0;
+        for &width in &[16u8, 64, 128] {
+            for x in (-16_383i32..=16_383).step_by(997) {
+                for y in (-16_383i32..=16_383).step_by(1_231) {
+                    for z in (5_334i32..=5_461).step_by(7) {
+                        let ours = directional_texel([x, y, z], width);
+                        let theirs = quake_directional_texel([x, y, z], width);
+                        let delta = (ours[0] - theirs[0]).abs().max((ours[1] - theirs[1]).abs());
+                        worst = worst.max(delta);
+                        differing += i32::from(delta != 0);
+                    }
+                }
+            }
+        }
+        assert!(
+            worst <= 1,
+            "worst difference {worst} texels over {differing} rays"
+        );
+    }
+}
