@@ -288,6 +288,7 @@ impl Line {
 
 /// The 5x7 glyph for an ASCII byte (lower case folds to upper), one byte a row,
 /// bit 4 the left pixel. Drawn by this crate; it covers `' '..='_'`.
+#[optimize(size)]
 #[inline(never)]
 fn glyph(c: u8) -> [u8; 7] {
     let c = if c.is_ascii_lowercase() { c - 32 } else { c };
@@ -388,6 +389,7 @@ fn gpu_ready() {
 
 /// Make the screen ours: stop the GPU DMA, reset the GPU, show 320x240 15-bit
 /// at the top of VRAM and clear it.
+#[optimize(size)]
 #[inline(never)]
 fn take_screen() {
     // Channel 2 (GPU): drop START so nothing keeps feeding the GPU.
@@ -412,6 +414,7 @@ fn take_screen() {
 
 /// Draw one 8-pixel-tall text row at VRAM row `y`, a pixel row at a time, computing each pair
 /// of pixels as it is written so no buffer is needed (the panel may run on a 1 KB stack).
+#[optimize(size)]
 fn draw_line(y: u16, line: &Line, color: u16) {
     let mut row = 0usize;
     while row < 8 {
@@ -458,6 +461,7 @@ fn is_return_address(w: u32) -> bool {
     call >> 26 == 3 || (call >> 26 == 0 && call & 0x3F == 9)
 }
 
+#[optimize(size)]
 #[inline(never)]
 fn put_line(row: &mut usize, line: &Line, color: u16) {
     if *row < ROWS {
@@ -466,6 +470,7 @@ fn put_line(row: &mut usize, line: &Line, color: u16) {
     }
 }
 
+#[optimize(size)]
 #[inline(never)]
 fn panel(reason: Reason, regs: *const u32, epc: u32) {
     // SAFETY: `regs` is the register save area filled by the trampoline.
