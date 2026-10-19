@@ -582,7 +582,11 @@ fn a_grid_world_rides_world_pack_with_the_core_first_and_one_chunk_per_room() {
         assert_eq!(entry.chunk_id, room as u32 + 1);
         // The guest finds a room at the sector of chunk 1 plus `pack_sector`,
         // so the rooms must keep the cook's contiguous order.
-        assert_eq!(entry.sector_offset - base, record.pack_sector, "room {room}");
+        assert_eq!(
+            entry.sector_offset - base,
+            record.pack_sector,
+            "room {room}"
+        );
         assert_eq!(entry.sector_count, u32::from(record.pack_sectors));
     }
     // The pack is as long as the manifest says: UI.PAK starts after it.

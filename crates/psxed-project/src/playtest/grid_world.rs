@@ -204,7 +204,11 @@ impl MaterialBinder for Binder<'_> {
                     bytes,
                     filename: format!("texture_{index:03}.psxt"),
                     source_label: key.clone(),
-                    streamed_class: StreamedClass::None,
+                    // Level textures are level data: the executable does not
+                    // embed them. They are read off the disc with the other
+                    // session-resident assets while the loading screen shows
+                    // and uploaded to VRAM from there.
+                    streamed_class: StreamedClass::PersistentGameplay,
                 });
                 self.by_path.insert(key, index);
                 index
@@ -314,7 +318,9 @@ pub(super) fn cook(
     )) {
         Ok(level) => psx_grid::stream::plan_pool(&level, &chunk_pages),
         Err(error) => {
-            report.error(format!("grid world: the cooked core does not parse: {error:?}"));
+            report.error(format!(
+                "grid world: the cooked core does not parse: {error:?}"
+            ));
             return None;
         }
     };
