@@ -187,6 +187,9 @@ use generated::{
     UI_SFX_MAX_SAMPLE_BYTES, UI_SFX_PACK_FIRST_CHUNK,
 };
 use generated::{GAME_FLOW, OPTIONS, UI_SCENES};
+use generated::{
+    LEN_BOX_PROPS, LEN_GAME_ENTITIES, LEN_INTERACTABLES, LEN_LOGIC, LEN_MODEL_INSTANCES,
+};
 use level_data::{
     ARCH_PROPS, ARCH_PROP_COLLISIONS, ARCH_PROP_SURFACES, BOX_PROPS, BOX_PROP_SURFACES,
     CYLINDER_PROPS, CYLINDER_PROP_SURFACES, DESTRUCTIBLES, ENTITIES, GAME_ENTITIES,
@@ -512,7 +515,7 @@ struct Playtest {
     /// Floor height under each Point of Interest, resolved once by a
     /// downward trace so the beacon stands on the floor whatever height
     /// the point was authored at. `i32::MIN` until resolved.
-    poi_floor_y: [i32; psx_level::wire::caps::INTERACTABLES],
+    poi_floor_y: [i32; LEN_INTERACTABLES],
     /// Presentation-step progress for the active POI panel and page type-on,
     /// advanced by the simulation (see `tick_poi_presentation`).
     /// Prepared/overlay copies keep deferred UI matched to its world frame.
@@ -704,7 +707,7 @@ impl Playtest {
         self.poi_save_loaded = false;
         self.poi_save_load_attempted = false;
         self.poi_save_dirty = false;
-        self.poi_floor_y = [i32::MIN; psx_level::wire::caps::INTERACTABLES];
+        self.poi_floor_y = [i32::MIN; LEN_INTERACTABLES];
         self.poi_panel_frame = 0;
         self.poi_closing = false;
         self.poi_page_type_frame = 0;

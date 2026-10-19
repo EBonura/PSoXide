@@ -278,10 +278,11 @@ pub(super) const MODEL_TEXTURE_SPLIT_MAX_EDGE: u16 = 0;
 /// Joint-transform scratch -- all biped rigs we currently cook
 /// fit comfortably in 32.
 pub(super) const JOINT_CAP: usize = 32;
-/// Placed model instances the runtime holds. A pool cap, not what the level
-/// holds: the executable is the same for every level and the cook refuses one
-/// over it (`psx_level::wire::caps::MODEL_INSTANCES`).
-pub(super) const MAX_MODEL_INSTANCES: usize = psx_level::wire::caps::MODEL_INSTANCES;
+/// Reserve only the cooked instances; unused worst-case slots consume PS1 RAM.
+/// The count is the level's shape (`LEN_MODEL_INSTANCES`); the instances come
+/// off the disc, and the cook refuses a level over
+/// `psx_level::wire::caps::MODEL_INSTANCES`.
+pub(super) const MAX_MODEL_INSTANCES: usize = cooked_capacity(LEN_MODEL_INSTANCES);
 /// Cap on cooked CylinderProps contributing one radial blocker apiece.
 pub(super) const MAX_CYLINDER_PROP_BLOCKERS: usize = 32;
 /// Shared fixed collision buffer for actor/model and CylinderProp blockers.
@@ -291,10 +292,13 @@ pub(super) const MAX_COLLISION_CYLINDERS: usize = MAX_MODEL_INSTANCES + MAX_CYLI
 /// A maximum-detail full arch contributes 14 entries, while the default
 /// contributes 8. The fixed cap keeps stack/RAM cost explicit on PS1.
 pub(super) const MAX_STATIC_PROP_AABB_BLOCKERS: usize = psx_level::MAX_STATIC_PROP_AABB_BLOCKERS;
-/// Box-prop state budget: a pool cap (`psx_level::wire::caps::BOX_PROPS`), the
-/// cook refuses a level with more props. Each slot costs about 1.4 KB, which
-/// is why the cap is small.
-pub(super) const MAX_BOX_PROP_STATE: usize = psx_level::wire::caps::BOX_PROPS;
+/// Authored box-prop state budget, from the level's own prop count
+/// (`LEN_BOX_PROPS`; the cook refuses a level over
+/// `psx_level::wire::caps::BOX_PROPS`). Each slot costs about 1.4 KB, so a
+/// fixed worst-case budget would spend a large share of the PS1's 2 MB on props
+/// that do not exist. Props beyond this still render as static props, but
+/// cannot be toggled broken in this no-heap runtime.
+pub(super) const MAX_BOX_PROP_STATE: usize = cooked_capacity(LEN_BOX_PROPS);
 pub(super) const BOX_PROP_BROKEN_WORDS: usize = (MAX_BOX_PROP_STATE + 31) / 32;
 /// A prop can break once; reserve no event slots for nonexistent props.
 pub(super) const MAX_BOX_PROP_BREAK_EVENTS: usize = if MAX_BOX_PROP_STATE < 16 {
@@ -429,18 +433,20 @@ pub(super) type RuntimeDebrisCache = psx_game_runtime::box_props::DebrisCache<DE
 pub(super) type RuntimeModelDrawScratch =
     psx_game_runtime::model_rendering::ModelDrawScratch<MODEL_VERTEX_CAP, JOINT_CAP>;
 
-/// Placed enemies the runtime holds: the cook<->runtime cap
-/// `psx_level::wire::caps::GAME_ENTITIES`, which the cook enforces.
-pub(super) const MAX_GAME_ENTITIES: usize = psx_level::wire::caps::GAME_ENTITIES;
-/// Logic records the runtime holds (`psx_level::wire::caps::LOGIC`).
-pub(super) const MAX_LOGIC_RECORDS: usize = psx_level::wire::caps::LOGIC;
+/// Runtime storage fits every authored entity (`LEN_GAME_ENTITIES`), without
+/// reserving state for actors absent from this level. The cook refuses a level
+/// over `psx_level::wire::caps::GAME_ENTITIES`.
+pub(super) const MAX_GAME_ENTITIES: usize = cooked_capacity(LEN_GAME_ENTITIES);
+/// Retain every cooked logic record, without unused worst-case state
+/// (`psx_level::wire::caps::LOGIC` is the cook's ceiling).
+pub(super) const MAX_LOGIC_RECORDS: usize = cooked_capacity(LEN_LOGIC);
 /// Fired-bitset words for the logic runtime (the BoxProps
 /// broken-words pattern).
 pub(super) const LOGIC_FIRED_WORDS: usize = MAX_LOGIC_RECORDS.div_ceil(32);
 /// In-flight delayed logic events (budget line: hl-psx ships 64 for
 /// full HL campaign maps; one 8-room cortex level gets 32 plus an
 /// overflow counter).
-pub(super) const MAX_LOGIC_EVENTS: usize = 32;
+pub(super) const MAX_LOGIC_EVENTS: usize = if LEN_LOGIC == 0 { 0 } else { 32 };
 
 /// The crate souls-like entity state instantiated with this example's
 /// entity cap.

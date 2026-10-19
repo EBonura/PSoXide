@@ -24,24 +24,33 @@ use psx_level::{
 };
 
 /// A table of records installed once at boot. Reads as the `&[T]` it holds.
-pub struct LevelTable<T: 'static>(UnsafeCell<&'static [T]>);
+pub struct LevelTable<T: 'static, const N: usize>(UnsafeCell<&'static [T]>);
 
 // SAFETY: the guest is single threaded and a table is written once, at boot,
 // before any reader runs. (Host tests install behind a `Once`.)
-unsafe impl<T> Sync for LevelTable<T> {}
+unsafe impl<T, const N: usize> Sync for LevelTable<T, N> {}
 
-impl<T: 'static> LevelTable<T> {
+impl<T: 'static, const N: usize> LevelTable<T, N> {
     const fn new() -> Self {
         Self(UnsafeCell::new(&[]))
     }
 
     fn set(&self, table: &'static [T]) {
+        assert!(
+            table.len() == N,
+            "the level's record chunk disagrees with the executable about its shape"
+        );
         // SAFETY: see the `Sync` impl.
         unsafe { *self.0.get() = table };
     }
 
     /// The table, for the code that wants the `&'static [T]` itself.
     pub fn as_slice(&self) -> &'static [T] {
+        // A table the level does not have is the empty slice, a constant, so
+        // the code that walks it is left out of the image.
+        if N == 0 {
+            return &[];
+        }
         #[cfg(test)]
         fixture::ensure();
         // SAFETY: see the `Sync` impl.
@@ -49,7 +58,7 @@ impl<T: 'static> LevelTable<T> {
     }
 }
 
-impl<T: 'static> Deref for LevelTable<T> {
+impl<T: 'static, const N: usize> Deref for LevelTable<T, N> {
     type Target = [T];
 
     fn deref(&self) -> &[T] {
@@ -57,7 +66,7 @@ impl<T: 'static> Deref for LevelTable<T> {
     }
 }
 
-impl<'a, T: 'static> IntoIterator for &'a LevelTable<T> {
+impl<'a, T: 'static, const N: usize> IntoIterator for &'a LevelTable<T, N> {
     type Item = &'static T;
     type IntoIter = core::slice::Iter<'static, T>;
 
@@ -92,10 +101,10 @@ impl<T: Copy> LevelValue<T> {
 }
 
 macro_rules! level_statics {
-    ($(table $name:ident: $field:ident: $ty:ty;)* $(value $vname:ident: $vfield:ident: $vty:ty = $init:expr;)*) => {
+    ($(table $name:ident: $field:ident: $ty:ty = $len:ident;)* $(value $vname:ident: $vfield:ident: $vty:ty = $init:expr;)*) => {
         $(
             #[doc = concat!("The level's `", stringify!($field), "` table.")]
-            pub static $name: LevelTable<$ty> = LevelTable::new();
+            pub static $name: LevelTable<$ty, { crate::generated::$len }> = LevelTable::new();
         )*
         $(
             #[doc = concat!("The level's `", stringify!($vfield), "`.")]
@@ -112,31 +121,31 @@ macro_rules! level_statics {
 }
 
 level_statics! {
-    table ROOMS: rooms: LevelRoomRecord;
-    table ROOM_REFLECTION_PROBES: room_reflection_probes: Option<AssetId>;
-    table LIGHTS: lights: PointLightRecord;
-    table PARTICLE_EMITTERS: particle_emitters: ParticleEmitterRecord;
-    table INTERACTABLE_MESSAGES: interactable_messages: InteractableMessageRecord;
-    table INTERACTABLE_MESSAGE_PAGES: interactable_message_pages: &'static str;
-    table INTERACTABLE_MESSAGE_PAGES_IT: interactable_message_pages_it: &'static str;
-    table INTERACTABLES: interactables: InteractableRecord;
-    table VITALITY_CIRCLES: vitality_circles: LevelVitalityCircleRecord;
-    table LOGIC: logic: LevelLogicRecord;
-    table LOGIC_IDS: logic_ids: StableId;
-    table GAME_ENTITIES: game_entities: LevelGameEntityRecord;
-    table GAME_ENTITY_IDS: game_entity_ids: StableId;
-    table ENTITIES: entities: EntityRecord;
-    table DESTRUCTIBLES: destructibles: LevelDestructibleRecord;
-    table WORLD_OBJECTS: world_objects: LevelWorldObjectRecord;
-    table IMAGE_PROPS: image_props: LevelImagePropRecord;
-    table BOX_PROPS: box_props: LevelBoxPropRecord;
-    table BOX_PROP_SURFACES: box_prop_surfaces: LevelBoxPropSurfaceRecord;
-    table CYLINDER_PROPS: cylinder_props: LevelCylinderPropRecord;
-    table CYLINDER_PROP_SURFACES: cylinder_prop_surfaces: LevelCylinderPropSurfaceRecord;
-    table ARCH_PROPS: arch_props: LevelArchPropRecord;
-    table ARCH_PROP_SURFACES: arch_prop_surfaces: LevelArchPropSurfaceRecord;
-    table ARCH_PROP_COLLISIONS: arch_prop_collisions: LevelArchPropCollisionRecord;
-    table MODEL_INSTANCES: model_instances: LevelModelInstanceRecord;
+    table ROOMS: rooms: LevelRoomRecord = LEN_ROOMS;
+    table ROOM_REFLECTION_PROBES: room_reflection_probes: Option<AssetId> = LEN_ROOM_REFLECTION_PROBES;
+    table LIGHTS: lights: PointLightRecord = LEN_LIGHTS;
+    table PARTICLE_EMITTERS: particle_emitters: ParticleEmitterRecord = LEN_PARTICLE_EMITTERS;
+    table INTERACTABLE_MESSAGES: interactable_messages: InteractableMessageRecord = LEN_INTERACTABLE_MESSAGES;
+    table INTERACTABLE_MESSAGE_PAGES: interactable_message_pages: &'static str = LEN_INTERACTABLE_MESSAGE_PAGES;
+    table INTERACTABLE_MESSAGE_PAGES_IT: interactable_message_pages_it: &'static str = LEN_INTERACTABLE_MESSAGE_PAGES_IT;
+    table INTERACTABLES: interactables: InteractableRecord = LEN_INTERACTABLES;
+    table VITALITY_CIRCLES: vitality_circles: LevelVitalityCircleRecord = LEN_VITALITY_CIRCLES;
+    table LOGIC: logic: LevelLogicRecord = LEN_LOGIC;
+    table LOGIC_IDS: logic_ids: StableId = LEN_LOGIC_IDS;
+    table GAME_ENTITIES: game_entities: LevelGameEntityRecord = LEN_GAME_ENTITIES;
+    table GAME_ENTITY_IDS: game_entity_ids: StableId = LEN_GAME_ENTITY_IDS;
+    table ENTITIES: entities: EntityRecord = LEN_ENTITIES;
+    table DESTRUCTIBLES: destructibles: LevelDestructibleRecord = LEN_DESTRUCTIBLES;
+    table WORLD_OBJECTS: world_objects: LevelWorldObjectRecord = LEN_WORLD_OBJECTS;
+    table IMAGE_PROPS: image_props: LevelImagePropRecord = LEN_IMAGE_PROPS;
+    table BOX_PROPS: box_props: LevelBoxPropRecord = LEN_BOX_PROPS;
+    table BOX_PROP_SURFACES: box_prop_surfaces: LevelBoxPropSurfaceRecord = LEN_BOX_PROP_SURFACES;
+    table CYLINDER_PROPS: cylinder_props: LevelCylinderPropRecord = LEN_CYLINDER_PROPS;
+    table CYLINDER_PROP_SURFACES: cylinder_prop_surfaces: LevelCylinderPropSurfaceRecord = LEN_CYLINDER_PROP_SURFACES;
+    table ARCH_PROPS: arch_props: LevelArchPropRecord = LEN_ARCH_PROPS;
+    table ARCH_PROP_SURFACES: arch_prop_surfaces: LevelArchPropSurfaceRecord = LEN_ARCH_PROP_SURFACES;
+    table ARCH_PROP_COLLISIONS: arch_prop_collisions: LevelArchPropCollisionRecord = LEN_ARCH_PROP_COLLISIONS;
+    table MODEL_INSTANCES: model_instances: LevelModelInstanceRecord = LEN_MODEL_INSTANCES;
     value PLAYER_SPAWN: player_spawn: PlayerSpawnRecord = PlayerSpawnRecord {
         room: psx_level::RoomIndex(0),
         x: 0,
