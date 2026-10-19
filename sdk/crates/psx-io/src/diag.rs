@@ -347,6 +347,17 @@ pub fn step(id: u32, text: &str) {
     let _ = (id, text);
 }
 
+/// Stop here on purpose: execute BREAK so the console-diag exception handler takes the screen
+/// and shows the panel (with the last [`step`]) instead of the program going on.
+#[inline(never)]
+pub fn stop() {
+    #[cfg(all(feature = "console-diag", target_arch = "mips"))]
+    // SAFETY: BREAK raises the exception the panel is built to catch.
+    unsafe {
+        core::arch::asm!("break 0");
+    }
+}
+
 /// [`step`] with a tag and two numbers printed as hex: `"<tag> <a:8 hex> <b:8 hex>"`, the tag
 /// cut to 6 bytes, so a failure site can say which file/chunk and which result in 24 bytes.
 #[inline(never)]
