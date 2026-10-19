@@ -42,6 +42,9 @@ pub trait WorldHooks {
     const LIGHTS_CORNERS: bool = false;
     /// [`Self::depth_bias`] shifts a face's ordering-table slots.
     const BIASES_DEPTH: bool = false;
+    /// Edges split by [`Self::tessellation_budget_q3`] instead of the profile's
+    /// depth bands.
+    const BOUNDS_TESSELLATION_ERROR: bool = false;
 
     /// Changes whenever [`Self::merge_visibility`] would produce a different
     /// row for the same camera leaf. The renderer keeps its marked face chain
@@ -76,6 +79,12 @@ pub trait WorldHooks {
     /// cooked flags; negative is nearer. Faces with different biases are
     /// never batched together.
     fn depth_bias(&self, _face_flags: u16) -> i16 {
+        0
+    }
+
+    /// Allowed affine texture displacement, in eighths of a pixel (see
+    /// [`psx_engine::ErrorBounded`]). A bound of 16 pixels is `128`.
+    fn tessellation_budget_q3(&self) -> u32 {
         0
     }
 }
@@ -563,5 +572,30 @@ mod tests {
             apart.stats.surface_batches, 2,
             "different biases split the batch"
         );
+    }
+    struct Bounded(u32);
+
+    impl WorldHooks for Bounded {
+        const BOUNDS_TESSELLATION_ERROR: bool = true;
+
+        fn tessellation_budget_q3(&self) -> u32 {
+            self.0
+        }
+    }
+
+    #[test]
+    fn an_error_bound_replaces_the_depth_bands_for_the_whole_draw() {
+        let map = two_room_map();
+        let bindings = [Some(binding(0x0105, 0x1234)); 2];
+        // The triangle is square to the view at a shallow depth: the bands
+        // split it, the affine error bound sees nothing to fix.
+        let banded = draw(&mut fresh(&map), &map, &bindings, 0, &mut NoHooks);
+        let bounded = draw(&mut fresh(&map), &map, &bindings, 0, &mut Bounded(128));
+        assert!(banded.stats.packets > 1);
+        assert_eq!(bounded.stats.packets, 1);
+        assert_eq!(bounded.stats.visible_faces, banded.stats.visible_faces);
+        // A zero budget demands every edge be as short as the pieces get.
+        let strict = draw(&mut fresh(&map), &map, &bindings, 0, &mut Bounded(0));
+        assert!(strict.stats.packets >= bounded.stats.packets);
     }
 }

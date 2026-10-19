@@ -14,8 +14,9 @@ use psx_engine::{
         AttributedClipPlane, ClipTraversal,
     },
     compose_model_view_transform, materialize_baked_surface_vertices, materialize_surface_vertices,
-    submit_surface_batch_near, submit_surface_batch_screened, AffineSurface, AffineVertex,
-    NearView, SurfaceProfile, SurfaceSourceVertex, SurfaceSubmit,
+    submit_surface_batch_near_with_rule, submit_surface_batch_screened_with_rule, AffineSurface,
+    AffineVertex, DepthBands, ErrorBounded, NearView, SplitRule, SurfaceProfile,
+    SurfaceSourceVertex, SurfaceSubmit,
 };
 use psx_gte::math::{Mat3I16, Vec3I16 as GteVec3I16, Vec3I32 as GteVec3I32};
 use psx_gte::scene;
@@ -2049,7 +2050,8 @@ impl Renderer {
                 }
                 let flush_start = next;
                 let submitted = unsafe {
-                    flush_pxbsp_batch_zone(
+                    flush_pxbsp_batch_for(
+                        &*hooks,
                         batch_vertices,
                         batch_vertex_count,
                         &batch_surfaces,
@@ -2117,7 +2119,8 @@ impl Renderer {
         }
         let flush_start = next;
         let submitted = unsafe {
-            flush_pxbsp_batch_zone(
+            flush_pxbsp_batch_for(
+                &*hooks,
                 batch_vertices,
                 batch_vertex_count,
                 &batch_surfaces,
@@ -3448,12 +3451,13 @@ struct FlushedBatch {
     deferred: u32,
 }
 
-unsafe fn flush_pxbsp_batch(
+unsafe fn flush_pxbsp_batch<S: SplitRule>(
     vertices: &mut [AffineVertex],
     vertex_count: usize,
     surfaces: &[AffineSurface],
     surface_count: usize,
     output: *mut u32,
+    rule: S,
 ) -> FlushedBatch {
     if vertex_count == 0 || surface_count == 0 {
         return FlushedBatch {
@@ -3470,13 +3474,14 @@ unsafe fn flush_pxbsp_batch(
     // exception handler, and tools/stack_guard.py proves its call tree fits.
     let (submitted, deferred) = unsafe {
         PxbspWriterStack::run(|| {
-            submit_surface_batch_screened(
+            submit_surface_batch_screened_with_rule(
                 vertices.as_mut_ptr(),
                 vertex_count,
                 surfaces.as_ptr(),
                 surface_count,
                 output,
                 &PXBSP_RENDER_PROFILE,
+                rule,
             )
         })
     };
@@ -3494,7 +3499,37 @@ unsafe fn flush_pxbsp_batch(
 /// As [`flush_pxbsp_batch`]; `end` is the end of the packet storage `output`
 /// lies in.
 #[inline(always)]
-unsafe fn flush_pxbsp_batch_zone(
+#[allow(clippy::too_many_arguments)]
+unsafe fn flush_pxbsp_batch_zone<S: SplitRule>(
+    vertices: &mut [AffineVertex],
+    vertex_count: usize,
+    surfaces: &[AffineSurface],
+    surface_count: usize,
+    output: *mut u32,
+    end: *mut u32,
+    view: &NearView,
+    rule: S,
+) -> SurfaceSubmit {
+    let FlushedBatch {
+        submitted,
+        deferred,
+    } = unsafe { flush_pxbsp_batch(vertices, vertex_count, surfaces, surface_count, output, rule) };
+    if deferred == 0 {
+        return submitted;
+    }
+    unsafe { draw_zone_surfaces(vertices, surfaces, deferred, submitted, end, view, rule) }
+}
+
+/// [`flush_pxbsp_batch_zone`] with the edge-split rule the game's hooks ask
+/// for: the profile's depth bands unless [`WorldHooks::BOUNDS_TESSELLATION_ERROR`]
+/// is set. The constant selects one instantiation at compile time.
+///
+/// # Safety
+/// As [`flush_pxbsp_batch_zone`].
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+unsafe fn flush_pxbsp_batch_for<H: WorldHooks>(
+    hooks: &H,
     vertices: &mut [AffineVertex],
     vertex_count: usize,
     surfaces: &[AffineSurface],
@@ -3503,14 +3538,37 @@ unsafe fn flush_pxbsp_batch_zone(
     end: *mut u32,
     view: &NearView,
 ) -> SurfaceSubmit {
-    let FlushedBatch {
-        submitted,
-        deferred,
-    } = unsafe { flush_pxbsp_batch(vertices, vertex_count, surfaces, surface_count, output) };
-    if deferred == 0 {
-        return submitted;
+    if H::BOUNDS_TESSELLATION_ERROR {
+        let rule = ErrorBounded {
+            budget_q3: hooks.tessellation_budget_q3(),
+        };
+        unsafe {
+            flush_pxbsp_batch_zone(
+                vertices,
+                vertex_count,
+                surfaces,
+                surface_count,
+                output,
+                end,
+                view,
+                rule,
+            )
+        }
+    } else {
+        let rule = DepthBands::from_profile(&PXBSP_RENDER_PROFILE);
+        unsafe {
+            flush_pxbsp_batch_zone(
+                vertices,
+                vertex_count,
+                surfaces,
+                surface_count,
+                output,
+                end,
+                view,
+                rule,
+            )
+        }
     }
-    unsafe { draw_zone_surfaces(vertices, surfaces, deferred, submitted, end, view) }
 }
 
 /// Shift the ordering-table slot of every packet in `start..end` by `bias`
@@ -3546,13 +3604,14 @@ unsafe fn bias_packet_slots(start: *mut u32, end: *mut u32, bias: i16) {
 /// As [`flush_pxbsp_batch_zone`]; `deferred` names surfaces of `surfaces`, and
 /// `vertices` holds the batch's scratch slots after its last vertex.
 #[inline(never)]
-unsafe fn draw_zone_surfaces(
+unsafe fn draw_zone_surfaces<S: SplitRule>(
     vertices: &mut [AffineVertex],
     surfaces: &[AffineSurface],
     mut deferred: u32,
     mut submitted: SurfaceSubmit,
     end: *mut u32,
     view: &NearView,
+    rule: S,
 ) -> SurfaceSubmit {
     while deferred != 0 {
         let index = 31 - deferred.leading_zeros() as usize;
@@ -3569,7 +3628,7 @@ unsafe fn draw_zone_surfaces(
         // scratch after them, and `end` bounds the storage the batch reserved
         // room in.
         let drawn = unsafe {
-            submit_surface_batch_near(
+            submit_surface_batch_near_with_rule(
                 window.as_mut_ptr(),
                 count,
                 &own,
@@ -3578,6 +3637,7 @@ unsafe fn draw_zone_surfaces(
                 end,
                 PXBSP_RENDER_PROFILE,
                 view,
+                rule,
             )
         };
         submitted = SurfaceSubmit {
