@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+[package]
+name    = "hello-cdpause"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+
+[workspace]
+
+[[bin]]
+name = "hello-cdpause"
+path = "src/main.rs"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+
+[dependencies]
+psx-fmv = { path = "../../crates/psx-fmv" }
+psx-hw  = { path = "../../../crates/psx-hw" }
+psx-io  = { path = "../../crates/psx-io" }
+psx-rt  = { path = "../../crates/psx-rt" }

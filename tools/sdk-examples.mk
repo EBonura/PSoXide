@@ -42,7 +42,7 @@ PGO_ARGS ?=
 PGO_VARIANTS ?= --variant off --variant default --variant hot=500 --variant hot=500+profi
 GATE ?=
 
-.PHONY: example disc hello-tri hello-tri-disc run-tri examples pgo-collect pgo-choose hello-xa-disc hello-xa-gate hello-xa-resume-disc hello-xa-resume-gate hello-cdstream-disc hello-cdstream-gate hello-wide-gate
+.PHONY: example disc hello-tri hello-tri-disc run-tri examples pgo-collect pgo-choose hello-xa-disc hello-xa-gate hello-xa-resume-disc hello-xa-resume-gate hello-cdstream-disc hello-cdstream-gate hello-cdpause-disc hello-cdpause-gate hello-wide-gate
 examples:
 	@set -e; for example in hello-tri hello-input hello-ot hello-gte hello-tex hello-memcard hello-spstack hello-gteirq hello-present hello-present-queue hello-asmprobe; do $(MAKE) -f tools/sdk-examples.mk disc EXAMPLE=$$example; done
 
@@ -109,6 +109,15 @@ hello-cdstream-disc:
 hello-cdstream-gate: hello-cdstream-disc
 	@test -n "$(FRONTEND)" || (echo "Set FRONTEND to the PSoXide-emulator executable"; exit 1)
 	sh tools/cdstream_gate.sh "$(FRONTEND)" "$(BUILD)/$(TARGET)/release/hello-cdstream.cue"
+# hello-cdpause plays the console's two-response Pause (second response 1.2 to 3.9 million clocks later,
+# refused during a seek) against psx_io::cd::reader::SectorReader::stop_proved on the emulator's model of it.
+hello-cdpause-disc:
+	$(MAKE) example EXAMPLE=hello-cdpause
+	cargo run --locked --release -p mkisopsx -- --exe "$(BUILD)/$(TARGET)/release/hello-cdpause.exe" \
+		--out "$(BUILD)/$(TARGET)/release/hello-cdpause.bin" --volume PSOXIDESDK --cdtest-sectors 960
+hello-cdpause-gate: hello-cdpause-disc
+	@test -n "$(FRONTEND)" || (echo "Set FRONTEND to the PSoXide-emulator executable"; exit 1)
+	sh tools/cdpause_gate.sh "$(FRONTEND)" "$(BUILD)/$(TARGET)/release/hello-cdpause.cue"
 # hello-wide and hello-wide-div run every psx_math::Wide / WideU operation and every
 # division of them against a 32-bit reference; their link maps must pass the symbol gate: make hello-wide-gate [FRONTEND=/path/to/frontend]
 hello-wide-gate:

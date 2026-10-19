@@ -40,6 +40,7 @@
 //! No DMA channel is enabled: nothing here uses one.
 
 use super::lba_to_bcd_msf;
+use super::pause::{self, Completion, PauseAnswer, PauseDrive, PauseFailure};
 use crate::irq;
 use crate::periph::Cd;
 use psx_hw::cd::irq::{
@@ -79,6 +80,10 @@ pub const DIAG_CD_ERROR: u8 = 0x05;
 pub const DIAG_TIMEOUT: u8 = 0xFF;
 /// [`SectorReader::diagnostics`] cause byte: the parameter FIFO never freed up.
 pub const DIAG_PARAM_STUCK: u8 = 0xFE;
+/// [`SectorReader::diagnostics`] cause byte: [`SectorReader::stop_proved`] could
+/// not prove the drive stopped; the snapshot's status byte is
+/// [`PauseFailure::code`] and the command byte is `CMD_PAUSE`.
+pub const DIAG_PAUSE: u8 = 0xFD;
 /// [`SectorReader::diagnostics`] command byte standing in for a `read_sector`
 /// wait (ReadN is streaming; no command byte is in flight).
 pub const DIAG_SITE_READ: u8 = 0xD0;
@@ -318,6 +323,21 @@ impl SectorReader {
     /// known state, then wait for `expected` and ack it. The mask/ack ordering
     /// is load-bearing on silicon; do not reorder.
     fn send_command(&mut self, command: u8, params: &[u8], expected: u8, limit: u32) -> bool {
+        matches!(
+            self.send_command_waiting(command, params, expected, limit),
+            Some(Wait::Matched)
+        )
+    }
+
+    /// [`send_command`](Self::send_command) saying how the wait ended; `None`
+    /// when the command never went out (the parameter FIFO stayed full).
+    fn send_command_waiting(
+        &mut self,
+        command: u8,
+        params: &[u8],
+        expected: u8,
+        limit: u32,
+    ) -> Option<Wait> {
         let saved = self.cd.irq_enable_mask();
         self.cd.set_irq_enable_mask(0);
         self.cd.acknowledge_all_and_reset_parameters();
@@ -328,30 +348,26 @@ impl SectorReader {
             if !self.cd.wait_parameter_room(PARAM_POLL) {
                 self.diag = [DIAG_PARAM_STUCK, self.cd.status_register(), command, 0];
                 self.cd.set_irq_enable_mask(saved);
-                return false;
+                return None;
             }
             self.cd.send_parameter_byte(param);
         }
         self.cd.send_command_byte(command);
-        let ok = match self.wait_irq(expected, limit) {
+        let outcome = self.wait_irq(expected, limit);
+        match outcome {
             Wait::Matched => {
                 self.cd.drain_response_limited(DRAIN_LIMIT);
                 self.cd.acknowledge_irq(expected);
-                true
             }
             Wait::CdError => {
                 self.note_drive_error(command);
                 self.cd.drain_response_limited(DRAIN_LIMIT);
                 self.cd.acknowledge_all_and_reset_parameters();
-                false
             }
-            Wait::Timeout => {
-                self.note_timeout(command);
-                false
-            }
-        };
+            Wait::Timeout => self.note_timeout(command),
+        }
         self.cd.set_irq_enable_mask(saved);
-        ok
+        Some(outcome)
     }
 
     /// Set `I_MASK` to VBlank-only, keeping the caller's mask for
@@ -598,6 +614,16 @@ impl SectorReader {
     /// Pause the ReadN stream (keeps the drive spun up), ack everything and
     /// put the interrupt mask [`prepare`](Self::prepare) replaced back.
     /// Safe to call after failures; it tolerates a drive with no active read.
+    ///
+    /// **This returns after the Pause is acknowledged, not when the drive has
+    /// stopped.** On the console the second response comes 1.2 to 3.9 million
+    /// system clocks later (see [`pause`](super::pause)); waiting here would
+    /// charge every chunk of a table scan that long. That is safe for the next
+    /// command of a read sequence (any command cancels the pending second
+    /// response, and a data sector still in flight is drained by the waits),
+    /// and wrong for a caller that then asks the drive for its state: a GetStat
+    /// right after still says "reading". Use [`stop_proved`](Self::stop_proved)
+    /// when the drive has to be quiet before anything else happens.
     pub fn stop(&mut self) {
         if self.send_command(CMD_PAUSE, &[], IRQ_ACK, CLEANUP_POLL) {
             let _ = self.wait_irq(IRQ_COMPLETE, CLEANUP_POLL);
@@ -608,6 +634,82 @@ impl SectorReader {
         // Last, so a CD-ROM IRQ still latched cannot reach the CPU through
         // the restored mask.
         self.restore_irq_mask();
+    }
+
+    /// [`stop`](Self::stop), then wait until the drive has really stopped, with
+    /// the protocol the console needs ([`pause::pause_until_stopped`]): wait for
+    /// the second response up to [`pause::COMPLETE_SPINS`], settle by status
+    /// when it never comes, and send the Pause again after a seek that refused
+    /// it. Takes up to about 60 ms of drive time after a long read at double
+    /// speed and 115 ms at single speed; in a failure it takes up to a second.
+    ///
+    /// On `Err` the interrupt mask is restored all the same and
+    /// [`diagnostics`](Self::diagnostics) carries [`DIAG_PAUSE`] with the
+    /// [`PauseFailure::code`]. The caller decides whether to retry or give up.
+    pub fn stop_proved(&mut self) -> Result<(), PauseFailure> {
+        let result = pause::pause_until_stopped(&mut ReaderPause(self));
+        if let Err(failure) = result {
+            self.diag = [DIAG_PAUSE, failure.code(), CMD_PAUSE, 0];
+        }
+        self.cd.acknowledge_all_and_reset_parameters();
+        self.restore_irq_mask();
+        result
+    }
+}
+
+/// [`SectorReader`] as the drive of [`pause::pause_until_stopped`].
+struct ReaderPause<'a>(&'a mut SectorReader);
+
+impl PauseDrive for ReaderPause<'_> {
+    fn send_pause(&mut self) -> PauseAnswer {
+        match self
+            .0
+            .send_command_waiting(CMD_PAUSE, &[], IRQ_ACK, CLEANUP_POLL)
+        {
+            Some(Wait::Matched) => PauseAnswer::Acknowledged,
+            Some(Wait::CdError) => PauseAnswer::Refused,
+            Some(Wait::Timeout) | None => PauseAnswer::Silent,
+        }
+    }
+
+    fn wait_completion(&mut self, spins: u32) -> Completion {
+        let reader = &mut *self.0;
+        match reader.wait_irq(IRQ_COMPLETE, spins) {
+            Wait::Matched => {
+                reader.cd.drain_response_limited(DRAIN_LIMIT);
+                reader.cd.acknowledge_irq(IRQ_COMPLETE);
+                Completion::Arrived
+            }
+            Wait::CdError => {
+                reader.note_drive_error(CMD_PAUSE);
+                reader.cd.drain_response_limited(DRAIN_LIMIT);
+                reader.cd.acknowledge_all_and_reset_parameters();
+                Completion::Error
+            }
+            Wait::Timeout => Completion::TimedOut,
+        }
+    }
+
+    fn status(&mut self) -> Option<u8> {
+        let response = self.0.cd.try_status(ACK_POLL)?;
+        response.bytes().first().copied()
+    }
+
+    fn wait_seek_end(&mut self, spins: u32) -> bool {
+        let reader = &mut *self.0;
+        match reader.wait_irq(IRQ_DATA_READY, spins) {
+            Wait::Matched => {
+                // wait_irq also matches on a ready FIFO with no flag; pop either way.
+                reader.ack_unexpected(IRQ_DATA_READY);
+                true
+            }
+            Wait::CdError => {
+                reader.cd.drain_response_limited(DRAIN_LIMIT);
+                reader.cd.acknowledge_all_and_reset_parameters();
+                false
+            }
+            Wait::Timeout => false,
+        }
     }
 }
 
