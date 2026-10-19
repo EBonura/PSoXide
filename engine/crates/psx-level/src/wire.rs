@@ -378,7 +378,15 @@ macro_rules! level_tables {
             $(#[doc = concat!("A `", stringify!($ot), "`.")] pub $of: $ot,)*
         }
 
+        /// The names of the tables, in chunk order.
+        pub const TABLE_NAMES: &[&str] = &[$(stringify!($tf)),*];
+
         impl LevelRecords<'_> {
+            /// How many records each table holds, by [`TABLE_NAMES`] order.
+            pub fn table_lens(&self) -> Vec<usize> {
+                alloc::vec![$(self.$tf.len()),*]
+            }
+
             /// The chunk bytes of these records.
             pub fn encode(&self) -> Vec<u8> {
                 let mut out = Vec::new();
