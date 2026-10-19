@@ -1416,7 +1416,7 @@ impl Playtest {
         }
 
         if self.world_rt.is_some() {
-            for inst in MODEL_INSTANCES {
+            for inst in MODEL_INSTANCES.iter() {
                 if inst.room != self.room_index {
                     continue;
                 }
