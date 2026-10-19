@@ -28,7 +28,10 @@
 #![no_std]
 #![warn(missing_docs)]
 
+extern crate alloc;
+
 mod stable;
+pub mod wire;
 pub use stable::{position_of, StableId};
 
 /// Stable identifier assigned to every level asset by the editor
