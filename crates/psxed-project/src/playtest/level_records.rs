@@ -826,8 +826,10 @@ mod tests {
 
     #[test]
     fn a_level_over_a_pool_cap_names_the_cap() {
-        let mut package = PlaytestPackage::default();
-        package.box_props = vec![Default::default(); caps::BOX_PROPS + 1];
+        let package = PlaytestPackage {
+            box_props: vec![Default::default(); caps::BOX_PROPS + 1],
+            ..PlaytestPackage::default()
+        };
         let over = OwnedLevelRecords::build(&package).over_caps();
         assert_eq!(over.len(), 1, "{over:?}");
         assert!(over[0].contains("box props") && over[0].contains("caps::BOX_PROPS"));
