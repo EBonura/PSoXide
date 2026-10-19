@@ -26,6 +26,7 @@ pub mod height;
 pub mod lattice;
 pub mod render;
 pub mod resident;
+pub mod stream;
 pub mod toolchain_probe;
 pub mod view;
 pub mod walk;
@@ -33,6 +34,8 @@ pub mod write;
 
 #[cfg(test)]
 mod format_tests;
+#[cfg(test)]
+mod stream_plan_tests;
 #[cfg(test)]
 mod stream_tests;
 #[cfg(test)]
