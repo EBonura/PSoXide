@@ -204,10 +204,37 @@ pub(super) fn debug_log_sim_state(values: &[i32]) {
     line.emit();
 }
 
+/// The room stream's state, written when it changes. It depends on load and
+/// disc timing, so it is not part of the `sim-state` line the gate compares.
+#[cfg(feature = "sim-trace")]
+pub(super) fn debug_log_stream_state(values: &[i32]) {
+    let mut line = DebugLogLine::new("stream-state,");
+    for &value in values {
+        line.push_i32(value);
+        line.push_byte(b',');
+    }
+    line.emit();
+}
+
 #[cfg(feature = "sim-trace")]
 impl Playtest {
-    /// Emit this tick's `sim-state` line (see [`debug_log_sim_state`]).
+    /// Emit this tick's `sim-state` line (see [`debug_log_sim_state`]), and a
+    /// `stream-state` line when the room stream moved.
     pub(super) fn trace_sim_state(&self, ctx: &Ctx) {
+        if let Some(world_rt) = self.world_rt.as_ref() {
+            static mut LAST: [i32; 9] = [-1; 9];
+            let snapshot = world_rt.stream_snapshot();
+            // SAFETY: single threaded; the only user of LAST.
+            let last = unsafe { &mut *core::ptr::addr_of_mut!(LAST) };
+            // In-flight reads and pages move constantly; the rest is the story.
+            if snapshot != *last {
+                *last = snapshot;
+                let mut values = [0i32; 10];
+                values[0] = ctx.sim_tick.as_u32() as i32;
+                values[1..].copy_from_slice(&snapshot);
+                debug_log_stream_state(&values);
+            }
+        }
         let player = self.motor.position();
         let eye = self.render_camera.position;
         let count = self.game_entities.count();

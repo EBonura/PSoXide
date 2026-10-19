@@ -250,7 +250,9 @@ impl GridRuntime {
 
     /// Make room `room` resident from its chunk bytes. Its materials are
     /// bound by the next [`Self::refresh_materials`] and it is not drawn
-    /// before that.
+    /// before that. (The stream inserts through its install callback; this is
+    /// the same step for the tests.)
+    #[cfg_attr(not(test), allow(dead_code))]
     fn add_room(&mut self, room: usize, bytes: &'static [u8]) -> bool {
         let Ok(view) = RoomView::parse(bytes) else {
             return false;
@@ -264,6 +266,7 @@ impl GridRuntime {
 
     /// Drop room `room` from memory. Bodies and traces meet a solid box where
     /// it was; nothing draws or activates in it.
+    #[cfg_attr(not(test), allow(dead_code))]
     fn remove_room(&mut self, room: usize) -> bool {
         self.materials_epoch = None;
         self.resident.remove(room).is_some()
@@ -349,17 +352,31 @@ impl GridRuntime {
         self.need_missing == 0
     }
 
-    /// Windows, since the world was first ready, in which a need room was not
-    /// resident (the player met a solid box).
-    #[cfg_attr(not(feature = "sim-trace"), allow(dead_code))]
-    pub(super) fn late_short_windows(&self) -> u32 {
-        self.late_short_windows
-    }
-
     /// Rooms in memory.
-    #[cfg_attr(not(feature = "sim-trace"), allow(dead_code))]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn resident_rooms(&self) -> usize {
         self.resident.len()
+    }
+
+    /// The stream's state as numbers, for the sim-trace log: rooms resident,
+    /// rooms installed so far, evicted, reads in flight, pages in use, need
+    /// rooms missing now, windows that were short after the first fill, reads
+    /// the transport lost, installs refused.
+    #[cfg(feature = "sim-trace")]
+    pub(super) fn stream_snapshot(&self) -> [i32; 9] {
+        let streamer = Self::streamer();
+        let counters = streamer.counters();
+        [
+            self.resident.len() as i32,
+            counters.installed as i32,
+            streamer.totals().evictions as i32,
+            streamer.in_flight() as i32,
+            streamer.pages_in_use() as i32,
+            self.need_missing.min(1 << 20) as i32,
+            self.late_short_windows as i32,
+            counters.failed_reads as i32,
+            counters.failed_installs as i32,
+        ]
     }
 
     // ------------------------------------------------------------------
