@@ -24,6 +24,9 @@ pub const UI_PACK_IMAGE_CACHE_SLOTS: usize = 1;
 pub const UI_SFX_PACK_FIRST_CHUNK: u32 = 0;
 pub const UI_SFX_MAX_SAMPLE_BYTES: usize = 0;
 pub const GAMEPLAY_PACK_MAX_CHUNK_BYTES: usize = 0;
+pub const WORLD_PACK_START_LBA: u32 = 1024;
+pub const GRID_ROOM_COUNT: usize = 0;
+pub const GRID_ROOM_POOL_PAGES: usize = 1;
 pub const UI_PACK_START_LBA: u32 = 1024;
 pub static UI_PACK_TOC: &[LevelWorldPackEntryRecord] = &[];
 
