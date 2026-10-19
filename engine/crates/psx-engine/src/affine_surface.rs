@@ -160,33 +160,24 @@ impl SurfaceProfile {
 pub trait SplitRule: Copy {
     /// Whether the edge from `a` to `b` is halved at `level` (0, then 1). Both
     /// vertices are projected: `screen` and `depth` (SZ) are valid.
-    fn splits(self, a: &AffineVertex, b: &AffineVertex, level: usize) -> bool;
+    ///
+    /// `bands` are the profile's depth bands, for the rule that uses them.
+    fn splits(self, bands: [u32; 2], a: &AffineVertex, b: &AffineVertex, level: usize) -> bool;
 }
 
 /// The depth-band rule of [`SurfaceProfile`]: an edge splits while the mean
 /// of its end depths, in ordering-table units (SZ / 4), is nearer than the
 /// level's band. Every brush-world draw before the error-bounded rule used
-/// this one, and the plain submit functions still do.
+/// this one, and the plain submit functions still do. It carries nothing: the
+/// splitter hands it the profile's bands, so choosing it adds no state to the
+/// writer.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct DepthBands {
-    bands: [u32; 2],
-}
-
-impl DepthBands {
-    /// The bands a profile names; the second never exceeds the first.
-    pub const fn from_profile(profile: &SurfaceProfile) -> Self {
-        let once = profile.split_once_below as u32;
-        let twice = profile.split_twice_below as u32;
-        Self {
-            bands: [once, if twice < once { twice } else { once }],
-        }
-    }
-}
+pub struct DepthBands;
 
 impl SplitRule for DepthBands {
     #[inline(always)]
-    fn splits(self, a: &AffineVertex, b: &AffineVertex, level: usize) -> bool {
-        (a.depth + b.depth) >> 3 < self.bands[level]
+    fn splits(self, bands: [u32; 2], a: &AffineVertex, b: &AffineVertex, level: usize) -> bool {
+        (a.depth + b.depth) >> 3 < bands[level]
     }
 }
 
@@ -203,7 +194,7 @@ pub struct ErrorBounded {
 
 impl SplitRule for ErrorBounded {
     #[inline(always)]
-    fn splits(self, a: &AffineVertex, b: &AffineVertex, level: usize) -> bool {
+    fn splits(self, _bands: [u32; 2], a: &AffineVertex, b: &AffineVertex, level: usize) -> bool {
         let point = |vertex: &AffineVertex| crate::tess::ScreenDepth {
             x: i32::from(vertex.screen[0]),
             y: i32::from(vertex.screen[1]),
@@ -1091,6 +1082,7 @@ struct Splitter<'a, R: Reproject, S: SplitRule> {
     scratch: usize,
     sink: &'a mut PacketSink,
     surface: AffineSurface,
+    bands: [u32; 2],
     rule: S,
     view: R,
 }
@@ -1107,7 +1099,8 @@ impl<R: Reproject, S: SplitRule> Splitter<'_, R, S> {
     /// than that level's band.
     #[inline(always)]
     fn splits(&self, a: usize, b: usize, level: usize) -> bool {
-        self.rule.splits(self.vertex(a), self.vertex(b), level)
+        self.rule
+            .splits(self.bands, self.vertex(a), self.vertex(b), level)
     }
 
     #[inline(always)]
@@ -1345,7 +1338,7 @@ pub unsafe fn submit_surface_batch(
             output,
             &profile,
             (),
-            DepthBands::from_profile(&profile),
+            DepthBands,
         )
         .0
     }
@@ -1376,7 +1369,7 @@ pub unsafe fn submit_surface_batch_screened(
             output,
             profile,
             Screened,
-            DepthBands::from_profile(profile),
+            DepthBands,
         )
     }
 }
@@ -1440,7 +1433,7 @@ pub unsafe fn submit_surface_batch_near(
             output,
             &profile,
             (view, end),
-            DepthBands::from_profile(&profile),
+            DepthBands,
         )
         .0
     }
@@ -1520,6 +1513,10 @@ unsafe fn submit_surface_batch_with<R: Reproject, S: SplitRule>(
         flagged
     };
     let mut deferred = 0u32;
+    let bands = [
+        u32::from(profile.split_once_below),
+        u32::from(profile.split_twice_below.min(profile.split_once_below)),
+    ];
     for index in 0..surface_count {
         // SAFETY: `surface_count` descriptors per the contract.
         let surface = unsafe { *surfaces.add(index) };
@@ -1542,6 +1539,7 @@ unsafe fn submit_surface_batch_with<R: Reproject, S: SplitRule>(
             scratch: vertex_count,
             sink: &mut sink,
             surface,
+            bands,
             rule,
             view,
         };
@@ -2104,11 +2102,7 @@ mod tests {
             vertex([0, 60, 200], [32, 64]),
         ];
         let (plain, _) = submit(&triangle, &[surface(0, 3, false)]);
-        let ruled = submit_with_rule(
-            &triangle,
-            &[surface(0, 3, false)],
-            DepthBands::from_profile(&SurfaceProfile::PXBSP_THIRD_PERSON),
-        );
+        let ruled = submit_with_rule(&triangle, &[surface(0, 3, false)], DepthBands);
         assert_eq!(ruled.packets, plain.packets);
         assert_eq!(ruled.hardware_triangles, plain.hardware_triangles);
     }
@@ -2125,11 +2119,7 @@ mod tests {
             vertex([60, 40, 800], [64, 64]),
             vertex([-60, 40, 800], [0, 64]),
         ];
-        let banded = submit_with_rule(
-            &wall,
-            &[surface(0, 4, true)],
-            DepthBands::from_profile(&SurfaceProfile::PXBSP_THIRD_PERSON),
-        );
+        let banded = submit_with_rule(&wall, &[surface(0, 4, true)], DepthBands);
         let bounded = submit_with_rule(&wall, &[surface(0, 4, true)], budget);
         assert!(banded.packets > 1, "the bands split a near wall");
         assert_eq!(bounded.packets, 1, "no depth change, no error");
@@ -2143,11 +2133,7 @@ mod tests {
             vertex([400, 200, 6000], [64, 255]),
             vertex([-400, 200, 6000], [0, 255]),
         ];
-        let banded = submit_with_rule(
-            &floor,
-            &[surface(0, 4, true)],
-            DepthBands::from_profile(&SurfaceProfile::PXBSP_THIRD_PERSON),
-        );
+        let banded = submit_with_rule(&floor, &[surface(0, 4, true)], DepthBands);
         let bounded = submit_with_rule(&floor, &[surface(0, 4, true)], budget);
         assert_eq!(banded.packets, 1, "the bands leave a far floor whole");
         assert!(bounded.packets > 1, "the bound splits where it swims");
@@ -2181,10 +2167,13 @@ mod tests {
         for a in &lattice {
             for b in &lattice {
                 for level in 0..2 {
-                    assert_eq!(budget.splits(a, b, level), budget.splits(b, a, level));
+                    assert_eq!(
+                        budget.splits([0; 2], a, b, level),
+                        budget.splits([0; 2], b, a, level)
+                    );
                 }
-                if budget.splits(a, b, 1) {
-                    assert!(budget.splits(a, b, 0), "level 1 implies level 0");
+                if budget.splits([0; 2], a, b, 1) {
+                    assert!(budget.splits([0; 2], a, b, 0), "level 1 implies level 0");
                 }
             }
         }
