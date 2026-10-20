@@ -90,7 +90,8 @@ impl ProbeTables {
 
     /// Bytes the tables take in a chunk, header included.
     pub fn bytes(&self) -> usize {
-        core::mem::size_of::<ProbeExt>() + core::mem::size_of::<Probe>() * (self.cells.len() + self.multi.len())
+        core::mem::size_of::<ProbeExt>()
+            + core::mem::size_of::<Probe>() * (self.cells.len() + self.multi.len())
     }
 }
 

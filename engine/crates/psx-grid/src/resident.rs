@@ -25,8 +25,8 @@ use alloc::vec::Vec;
 use crate::collision::{GridCollision, LeafDims};
 use crate::format::{ROOM_MAGIC, VERSION};
 use crate::height::{weight_recip, Recip};
-use crate::render::GridMaterial;
 use crate::probe::ProbeView;
+use crate::render::GridMaterial;
 use crate::view::{CollisionView, LevelView, RenderView, RoomView};
 
 /// Marker in the room to slot table: not resident.

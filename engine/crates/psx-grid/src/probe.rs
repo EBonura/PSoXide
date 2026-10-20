@@ -174,6 +174,9 @@ impl<'a> ResidentRooms<'a> {
         // of the sector size, so the sector lattice is the same in all rooms
         // and any room that holds the point gives its phase.
         let mut cell_at = None;
+        let mut holders = 0u32;
+        let mut anchor_room = 0usize;
+        let mut anchor_cell = (0u32, 0u32);
         for &room in self.level().lattice_rooms_at(p[0], p[2]) {
             let rec = &self.level().rooms[usize::from(room)];
             let (lx, lz) = (
@@ -188,13 +191,17 @@ impl<'a> ResidentRooms<'a> {
                 continue;
             }
             let (cx, cz) = (self.recip.cell(lx as u32), self.recip.cell(lz as u32));
-            cell_at = Some((
-                rec.origin[0] + (cx * u) as i32,
-                rec.origin[2] + (cz * u) as i32,
-                lx - (cx * u) as i32,
-                lz - (cz * u) as i32,
-            ));
-            break;
+            holders += 1;
+            if holders == 1 {
+                anchor_room = usize::from(room);
+                anchor_cell = (cx, cz);
+                cell_at = Some((
+                    rec.origin[0] + (cx * u) as i32,
+                    rec.origin[2] + (cz * u) as i32,
+                    lx - (cx * u) as i32,
+                    lz - (cz * u) as i32,
+                ));
+            }
         }
         let (bx, bz, lx, lz) = cell_at?;
         // The two sector middles on each axis and the weight of the second.
@@ -210,9 +217,43 @@ impl<'a> ResidentRooms<'a> {
         };
         let own = (usize::from(lx < half), usize::from(lz < half));
         let mut probes: [[Option<Found>; 2]; 2] = [[None; 2]; 2];
-        for (i, &x) in xs.iter().enumerate() {
-            for (j, &z) in zs.iter().enumerate() {
-                probes[i][j] = self.column_probe(x, z, p[1]);
+        // One room holds the point and the four sectors are all in it (the usual
+        // case): read them straight from its table, no world lattice lookups.
+        let (cx0, cz0) = (
+            anchor_cell.0 as i32 - i32::from(lx < half),
+            anchor_cell.1 as i32 - i32::from(lz < half),
+        );
+        let direct = if holders == 1 {
+            let rec = &self.level().rooms[anchor_room];
+            self.get(anchor_room)
+                .filter(|slot| {
+                    !slot.probes.is_empty()
+                        && cx0 >= 0
+                        && cz0 >= 0
+                        && cx0 + 1 < i32::from(rec.width)
+                        && cz0 + 1 < i32::from(rec.depth)
+                })
+                .map(|slot| (slot, rec))
+        } else {
+            None
+        };
+        if let Some((slot, rec)) = direct {
+            let local = p[1] - rec.origin[1];
+            let w = usize::from(rec.width);
+            for i in 0..2 {
+                for j in 0..2 {
+                    let cell = (cz0 as usize + j) * w + cx0 as usize + i;
+                    probes[i][j] = slot.probes.nearest(cell, local).map(|(py, rgb)| Found {
+                        y: py + rec.origin[1],
+                        rgb,
+                    });
+                }
+            }
+        } else {
+            for (i, &x) in xs.iter().enumerate() {
+                for (j, &z) in zs.iter().enumerate() {
+                    probes[i][j] = self.column_probe(x, z, p[1]);
+                }
             }
         }
         // The probe of the sector the point is in sets the floor; without one

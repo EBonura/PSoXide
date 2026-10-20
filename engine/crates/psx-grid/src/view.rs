@@ -54,7 +54,11 @@ impl core::fmt::Display for FormatError {
 }
 
 /// Cast `count` records of `T` at `offset`, checking bounds and alignment.
-pub(crate) fn table<T: Copy>(bytes: &[u8], offset: usize, count: usize) -> Result<&[T], FormatError> {
+pub(crate) fn table<T: Copy>(
+    bytes: &[u8],
+    offset: usize,
+    count: usize,
+) -> Result<&[T], FormatError> {
     let size = core::mem::size_of::<T>();
     let length = count.checked_mul(size).ok_or(FormatError::Truncated)?;
     let end = offset.checked_add(length).ok_or(FormatError::Truncated)?;

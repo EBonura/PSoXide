@@ -46,8 +46,8 @@ mod walk_tests;
 
 pub use activity::RoomActivity;
 pub use format::*;
-pub use probe::ProbeView;
 pub use lattice::{Lattice, LatticeTables, SMALL_WORLD_ROOMS};
+pub use probe::ProbeView;
 pub use resident::{ResidentError, ResidentRooms, RoomSlot, NO_SLOT};
 pub use view::{CollisionView, FormatError, LevelView, RenderView, RoomView};
 pub use walk::WalkSet;
