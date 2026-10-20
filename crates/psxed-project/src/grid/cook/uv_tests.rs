@@ -276,3 +276,40 @@ fn the_reference_levels_cut_far_fewer_faces_through_the_window() {
         assert_eq!(overflow, 0, "{name}");
     }
 }
+
+/// The ring's four texture corners as the cook wrote them.
+fn ring_uvs(uv: FaceUv) -> Vec<u16> {
+    let cooked = cook(&floor_world(uv)).unwrap();
+    let quads = &cooked.tables[0].quads;
+    assert_eq!(quads.len(), 1);
+    quads[0].uv.to_vec()
+}
+
+/// What the Paint tool stores on a face (a quarter turn, a flip) reaches the
+/// cooked quad: a turned face cooks with its texture corners turned.
+#[test]
+fn a_turned_or_flipped_face_cooks_turned_or_flipped() {
+    let plain = ring_uvs(fit(1));
+    let turned = ring_uvs(FaceUv { turns: 1, ..fit(1) });
+    let flipped = ring_uvs(FaceUv {
+        flip: [true, false],
+        ..fit(1)
+    });
+    assert_ne!(turned, plain);
+    assert_ne!(flipped, plain);
+    // A quarter turn moves each corner's texel to the next corner: the same
+    // four texels, cyclically shifted.
+    assert!(
+        (0..4).any(|k| (0..4).all(|i| turned[i] == plain[(i + k) % 4])) && turned != plain,
+        "{plain:?} -> {turned:?}"
+    );
+    // Four quarter turns are the face as it was.
+    assert_eq!(ring_uvs(FaceUv { turns: 4, ..fit(1) }), plain);
+    // The legacy world mapping turns too (the default a plain face has).
+    let world_plain = ring_uvs(FaceUv::default());
+    let world_turned = ring_uvs(FaceUv {
+        turns: 1,
+        ..FaceUv::default()
+    });
+    assert_ne!(world_plain, world_turned);
+}
