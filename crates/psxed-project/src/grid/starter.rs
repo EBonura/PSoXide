@@ -93,6 +93,8 @@ pub fn starter_world(
         // A new world shades faces by the way they face, so a step or a
         // platform reads even under one lamp.
         shading: super::light::FacingShade::SUBTLE,
+        // ...and gathers its light (ambient occlusion, sky and bounce).
+        global_light: super::lighting::GlobalLight::NEW_WORLD,
         stream: super::world::StreamRadii::DEFAULT,
         mesh_assets: Vec::new(),
         level_names: Default::default(),

@@ -17,7 +17,7 @@ use psx_grid::{
 use super::units::RuntimeUnits;
 use crate::face_uv::UvMode;
 use crate::grid::faces::{cell_faces_with, GridFace, UvDefaults};
-use crate::grid::light::{lit_face_corner, noise_tint, GridLight};
+use crate::grid::lighting::BakeRig;
 use crate::grid::mesh_faces::{mesh_faces_with, placed as placed_mesh};
 use crate::grid::plane_faces::plane_faces_with;
 use crate::grid::uv_split;
@@ -70,6 +70,14 @@ impl BoundMaterial {
 pub trait MaterialBinder {
     /// The binding of `material`, or why it cannot be bound.
     fn bind(&mut self, material: Option<ResourceId>) -> Result<BoundMaterial, String>;
+
+    /// How much of the light that lands on `material` it sends back, per
+    /// channel, for the bounce of a world that gathers its light: the
+    /// average colour of its texture times its tint. Binders with no texture
+    /// bytes use the mid-grey default.
+    fn albedo(&mut self, _material: Option<ResourceId>) -> [f32; 3] {
+        crate::grid::lighting::gather::FALLBACK_ALBEDO
+    }
 
     /// The grid tiling default of `material`, for faces that do not name a
     /// mode. Binders without a project have none.
@@ -152,12 +160,11 @@ pub struct Tables {
 pub struct Context<'a> {
     pub world: &'a GridWorld,
     pub units: RuntimeUnits,
-    pub lights: &'a [GridLight],
+    /// Bakes the corner colours: the point lights, the facing shade and the
+    /// shadow query, shared with the editor preview.
+    pub rig: BakeRig<'a>,
     pub binder: &'a mut dyn MaterialBinder,
     pub materials: &'a mut MaterialSet,
-    /// Whether the segment between two world points (runtime units) is
-    /// blocked by solid world.
-    pub occluded: &'a dyn Fn([f64; 3], [f64; 3]) -> bool,
     /// Whether primitives may repeat their texture through the GPU texture
     /// window (up to four tiles per axis). Off, every primitive holds one
     /// tile, which is how format version 2 levels were cooked.
@@ -287,19 +294,46 @@ impl RoomBuild {
         // A face inside one tile is the common case and needs no material
         // lookup to say so.
         if uv_split::fits(&face.texels, 1) {
-            return self.add_piece(cx, face, room_index, origin, ambient, place, extra_flags);
+            return self.add_piece(
+                cx,
+                face,
+                face,
+                room_index,
+                origin,
+                ambient,
+                place,
+                extra_flags,
+            );
         }
         let slot = cx.materials.slot(cx.binder, face.material)?;
         let bound = cx.materials.slots[usize::from(slot)].1;
         if !bound.textured {
-            return self.add_piece(cx, face, room_index, origin, ambient, place, extra_flags);
+            return self.add_piece(
+                cx,
+                face,
+                face,
+                room_index,
+                origin,
+                ambient,
+                place,
+                extra_flags,
+            );
         }
         let pieces = uv_split::split(face, cx.world.scale, cx.repeat && bound.can_repeat());
         self.tables.stats.uv_split_quads += pieces.len() - 1;
         // The face counts once, however many primitives it became.
         let faces_before = self.tables.stats.faces;
         for piece in &pieces {
-            self.add_piece(cx, piece, room_index, origin, ambient, place, extra_flags)?;
+            self.add_piece(
+                cx,
+                piece,
+                face,
+                room_index,
+                origin,
+                ambient,
+                place,
+                extra_flags,
+            )?;
         }
         self.tables.stats.faces = faces_before + 1;
         Ok(())
@@ -311,6 +345,7 @@ impl RoomBuild {
         &mut self,
         cx: &mut Context<'_>,
         face: &GridFace,
+        parent: &GridFace,
         room_index: usize,
         origin: [i32; 3],
         ambient: [u8; 3],
@@ -431,21 +466,7 @@ impl RoomBuild {
                 i16::try_from(p[2]).map_err(|_| format!("room {room_index}: z out of range"))?,
             ];
             quad.v[k] = self.vertex(key, room_index)?;
-            let world_point = [
-                f64::from(p[0] + origin[0]),
-                f64::from(p[1] + origin[1]),
-                f64::from(p[2] + origin[2]),
-            ];
-            let colour = lit_face_corner(
-                face,
-                world_point,
-                bound.tint,
-                ambient,
-                cx.lights,
-                cx.occluded,
-                cx.world.shading,
-            );
-            let colour = noise_tint(face, i, colour);
+            let colour = cx.rig.corner(face, i, Some(parent), bound.tint, ambient);
             quad.color[k] =
                 u32::from(colour[0]) | (u32::from(colour[1]) << 8) | (u32::from(colour[2]) << 16);
             quad.uv[k] = u16::from(packed_uv[k][0]) | (u16::from(packed_uv[k][1]) << 8);

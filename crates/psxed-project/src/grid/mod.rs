@@ -67,6 +67,7 @@ pub mod leaf_diag;
 mod leaf_faces;
 pub mod leaf_map;
 pub mod light;
+pub mod lighting;
 pub mod limits;
 pub mod mesh;
 mod mesh_arch;

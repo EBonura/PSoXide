@@ -12,7 +12,7 @@ use crate::grid::surface::{GridSurface, GridWall};
 use crate::grid::units::GridScale;
 use crate::ResourceId;
 
-pub(super) fn rid(n: u64) -> ResourceId {
+pub(crate) fn rid(n: u64) -> ResourceId {
     ron::from_str(&format!("({n})")).expect("a resource id")
 }
 
@@ -224,7 +224,7 @@ fn a_long_shared_wall_is_one_portal_not_one_per_cell() {
 
 /// One of the tracked grid reference projects. They are permanent fixtures, so
 /// a missing one is a failure, not a skip.
-pub(super) fn load_reference(name: &str) -> Option<crate::ProjectDocument> {
+pub(crate) fn load_reference(name: &str) -> Option<crate::ProjectDocument> {
     let path = crate::projects_dir().join(name).join("project.ron");
     assert!(path.is_file(), "reference project {name} is not tracked");
     Some(crate::ProjectDocument::load_from_path(path).expect("the reference project loads"))

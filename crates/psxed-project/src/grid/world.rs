@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::light::FacingShade;
+use super::lighting::GlobalLight;
 use super::room::GridRoom;
 use super::units::{GridScale, SECTOR_UNITS};
 
@@ -20,6 +21,10 @@ pub struct GridWorld {
     /// preview and the cook alike. Off for a world made before the setting.
     #[serde(default, skip_serializing_if = "FacingShade::is_off")]
     pub shading: FacingShade,
+    /// Ambient occlusion, sky light and bounced light gathered into the
+    /// corner colours. Off for a world made before the setting.
+    #[serde(default, skip_serializing_if = "GlobalLight::is_default")]
+    pub global_light: GlobalLight,
     /// Draw, activation and prefetch radii, in sectors, written into the
     /// level core.
     #[serde(default, skip_serializing_if = "StreamRadii::is_default")]

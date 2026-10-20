@@ -18,8 +18,8 @@ use crate::grid::light::GridLight;
 use crate::grid::limits::{self, Severity};
 use crate::grid::GridWorld;
 use crate::{
-    MaterialAnimationMode, MaterialFaceSidedness, NodeKind, ProjectDocument, PsxBlendMode,
-    ResourceData, ResourceId, Scene,
+    MaterialAnimationMode, MaterialFaceSidedness, ProjectDocument, PsxBlendMode, ResourceData,
+    ResourceId, Scene,
 };
 
 use super::{
@@ -28,8 +28,6 @@ use super::{
 
 /// Texel size of the tile the grid renderer maps one material onto.
 const TILE_TEXELS: u16 = 64;
-/// Light reach for a scene with no World node, runtime units.
-const DEFAULT_LIGHT_RADIUS_UNITS: f64 = 1024.0;
 
 /// Check a grid scene against the shared caps and the runtime lattice.
 /// Returns `false` when the world cannot be cooked; the reasons are in
@@ -57,33 +55,7 @@ pub(super) fn validate(project: &ProjectDocument, report: &mut PlaytestValidatio
 
 /// Point lights of the scene in the scaled (runtime) project.
 fn scene_lights(scene: &Scene) -> Vec<GridLight> {
-    let radius_units = scene
-        .world_sector_size_for_node(scene.root)
-        .map(f64::from)
-        .unwrap_or(DEFAULT_LIGHT_RADIUS_UNITS);
-    scene
-        .nodes()
-        .iter()
-        .filter_map(|node| {
-            let NodeKind::PointLight {
-                color,
-                intensity,
-                radius,
-            } = &node.kind
-            else {
-                return None;
-            };
-            Some(GridLight {
-                position: node.transform.translation.map(f64::from),
-                radius: f64::from(*radius) * radius_units,
-                intensity_q8: (f64::from(*intensity) * 256.0)
-                    .round()
-                    .clamp(0.0, f64::from(u16::MAX)) as u16,
-                color: *color,
-            })
-        })
-        .filter(GridLight::is_valid)
-        .collect()
+    crate::grid::lighting::scene_grid_lights(scene, 1.0)
 }
 
 /// The 8 by 8 white texture a face without a material is drawn with.
@@ -130,6 +102,12 @@ impl MaterialBinder for Binder<'_> {
             .is_some_and(|(_, bytes)| {
                 Texture::from_bytes(&bytes).is_ok_and(|t| t.is_index_zero_transparent())
             })
+    }
+
+    fn albedo(&mut self, material: Option<ResourceId>) -> [f32; 3] {
+        use crate::grid::lighting::BakeMaterials;
+        crate::grid::lighting::AlbedoTable::from_project(self.project, self.root, [material])
+            .albedo(material)
     }
 
     fn uv_default(&self, material: ResourceId) -> Option<crate::face_uv::UvMode> {

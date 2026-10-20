@@ -20,7 +20,6 @@ pub mod render;
 pub mod units;
 
 use psx_grid::write::{LevelCore, RoomChunk};
-use psx_grid::ResidentRooms;
 use psx_grid::{
     Material, RoomRecord, CHUNK_HAS_LOD, CHUNK_HAS_PLANES, LEVEL_HAS_PLANES, LEVEL_HAS_SKY,
     ROOM_FOG, ROOM_OUTDOOR, ROOM_SPANS, ROOM_TREE, SECTION_COUNT, SECTOR_BYTES,
@@ -197,7 +196,7 @@ fn pages(bytes: usize) -> usize {
 /// points (runtime units) is blocked, for the light bake; pass `None` for no
 /// shadows.
 pub fn cook_level(
-    input: CookInput<'_>,
+    mut input: CookInput<'_>,
     occluded: Option<&dyn Fn([f64; 3], [f64; 3]) -> bool>,
 ) -> Result<CookedLevel, String> {
     let world = input.world;
@@ -230,14 +229,9 @@ pub fn cook_level(
     // Collision first, for every room: the light bake shadows through the
     // same line of sight the game uses, which needs the whole world's solid
     // tables (stacked rooms shadow each other).
-    let mut origins: Vec<[i32; 3]> = Vec::new();
+    let origins = crate::grid::lighting::probe::room_origins(world, &units);
     let mut cols: Vec<collision::Tables> = Vec::new();
     for (index, room) in world.rooms.iter().enumerate() {
-        origins.push([
-            room.origin[0] * s as i32,
-            units.rt(room.y_offset),
-            room.origin[1] * s as i32,
-        ]);
         let binder = &*input.binder;
         cols.push(collision::build_with_meshes(
             &units,
@@ -251,77 +245,71 @@ pub fn cook_level(
             },
         )?);
     }
-    let probe_core = LevelCore {
-        sector_units: s as u16,
-        rooms: world
-            .rooms
-            .iter()
-            .zip(&cols)
-            .zip(&origins)
-            .map(|((room, col), origin)| {
-                let (lo, hi) = col.range.unwrap_or((0, 0));
-                RoomRecord {
-                    origin: *origin,
-                    width: room.width as u8,
-                    depth: room.depth as u8,
-                    min_y: lo as i16,
-                    max_y: hi as i16,
-                    flags: (if col.tree.is_some() { ROOM_TREE } else { 0 })
-                        | (if col.spans.is_some() { ROOM_SPANS } else { 0 }),
-                    ..RoomRecord::default()
-                }
-            })
-            .collect(),
-        ..LevelCore::default()
+    let probe = crate::grid::lighting::probe::CollisionProbe::new(world, &units, &origins, &cols)?;
+    // A world that gathers its light solves it before any quad is coloured.
+    let field = if world.global_light.enabled {
+        Some(gather_field(&mut input, &units, &probe)?)
+    } else {
+        None
     };
-    let probe_chunks: Vec<Vec<u32>> = world
-        .rooms
-        .iter()
-        .zip(&cols)
-        .enumerate()
-        .map(|(index, (room, col))| {
-            let (lo, hi) = col.range.unwrap_or((0, 0));
-            let chunk = RoomChunk {
-                room_id: index as u16,
-                width: room.width as u8,
-                depth: room.depth as u8,
-                min_y: lo as i16,
-                max_y: hi as i16,
-                sectors: col.sectors.clone(),
-                tree: col.tree.clone(),
-                spans: col.spans.clone(),
-                exts: col.exts.clone(),
-                walls: col.walls.clone(),
-                splitbs: col.splitbs.clone(),
-                col_planes: col.planes.clone(),
-                ..RoomChunk::default()
-            };
-            psx_grid::write::aligned_copy(&chunk.to_bytes())
-        })
-        .collect();
-    let probe_core_bytes = psx_grid::write::aligned_copy(&probe_core.to_bytes());
-    let probe_len = probe_core.to_bytes().len();
-    let probe_level = psx_grid::LevelView::parse(psx_grid::write::words_as_bytes(
-        &probe_core_bytes,
-        probe_len,
-    ))
-    .map_err(|e| format!("collision probe core: {e:?}"))?;
-    let probe_views: Vec<Option<psx_grid::CollisionView<'_>>> = probe_chunks
-        .iter()
-        .map(|words| {
-            psx_grid::CollisionView::parse(psx_grid::write::words_as_bytes(words, words.len() * 4))
-                .ok()
-        })
-        .collect();
-    let probe_set = ResidentRooms::from_collisions(probe_level, &probe_views)
-        .ok_or_else(|| "collision world could not be built".to_string())?;
-    let world_collision = probe_set.collision();
-    let own_los = |from: [f64; 3], to: [f64; 3]| {
-        let r = |p: [f64; 3]| p.map(|v| v.round() as i32);
-        !world_collision.line_of_sight(r(from), r(to))
-    };
-    let occluded: &dyn Fn([f64; 3], [f64; 3]) -> bool = occluded.unwrap_or(&own_los);
+    probe.with_occlusion(|own_los| {
+        cook_rooms(
+            input,
+            field.as_ref(),
+            occluded.unwrap_or(own_los),
+            world,
+            units,
+            s,
+            report,
+            origins,
+            cols,
+            portal_world,
+        )
+    })?
+}
 
+/// Solve the global light of `input.world` for the cook: the albedo of each
+/// material comes from the binder (the texture bytes the level carries), the
+/// shadows from the same collision the quads are coloured through.
+fn gather_field(
+    input: &mut CookInput<'_>,
+    units: &RuntimeUnits,
+    probe: &crate::grid::lighting::CollisionProbe,
+) -> Result<crate::grid::lighting::GiField, String> {
+    let world = input.world;
+    let mut table = crate::grid::lighting::AlbedoTable::default();
+    let mut seen = std::collections::HashSet::new();
+    for face in crate::grid::faces::all_faces_with(world, &()) {
+        if seen.insert(face.material) {
+            table.insert(face.material, input.binder.albedo(face.material));
+        }
+    }
+    crate::grid::lighting::gather::solve(&crate::grid::lighting::gather::GatherInput {
+        world,
+        units: *units,
+        lights: input.lights,
+        probe,
+        materials: &table,
+        cancel: None,
+    })
+    .ok_or_else(|| "the global light solve was cancelled".to_string())
+}
+
+/// The rest of [`cook_level`], once the collision tables and the shadow query
+/// exist.
+#[allow(clippy::too_many_arguments)]
+fn cook_rooms(
+    input: CookInput<'_>,
+    field: Option<&crate::grid::lighting::GiField>,
+    occluded: &dyn Fn([f64; 3], [f64; 3]) -> bool,
+    world: &GridWorld,
+    units: RuntimeUnits,
+    s: u32,
+    mut report: CookReport,
+    origins: Vec<[i32; 3]>,
+    mut cols: Vec<collision::Tables>,
+    portal_world: &GridWorld,
+) -> Result<CookedLevel, String> {
     let mut materials = render::MaterialSet::default();
     let mut tables: Vec<RoomChunk> = Vec::new();
     let mut records: Vec<RoomRecord> = Vec::new();
@@ -333,10 +321,18 @@ pub fn cook_level(
         let mut cx = render::Context {
             world,
             units,
-            lights: input.lights,
+            rig: crate::grid::lighting::BakeRig {
+                units,
+                lights: input.lights,
+                shade: world.shading,
+                occluded,
+                gather: world
+                    .global_light
+                    .enabled
+                    .then_some(crate::grid::lighting::Gather { field }),
+            },
             binder: &mut *input.binder,
             materials: &mut materials,
-            occluded,
             repeat: input.texture_repeat,
         };
         let ambient = room.ambient;
@@ -567,6 +563,6 @@ mod spawn_tests;
 #[cfg(test)]
 mod stream_tests;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 #[cfg(test)]
 mod uv_tests;

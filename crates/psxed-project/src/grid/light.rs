@@ -165,6 +165,25 @@ pub fn lit_corner_nudged(
     nudge: f64,
 ) -> [u8; 3] {
     let mut accumulated = ambient.map(f64::from);
+    accumulate_direct(&mut accumulated, point, normal, lights, occluded, nudge);
+    [
+        modulated(tint[0], accumulated[0]),
+        modulated(tint[1], accumulated[1]),
+        modulated(tint[2], accumulated[2]),
+    ]
+}
+
+/// Add the light of every lamp that reaches a point on a surface facing
+/// `normal` (unit length) to `accumulated`, in the bake's 128-neutral units.
+/// `nudge` is the start offset of the shadow ray along the normal.
+pub fn accumulate_direct(
+    accumulated: &mut [f64; 3],
+    point: [f64; 3],
+    normal: [f64; 3],
+    lights: &[GridLight],
+    occluded: &dyn Fn([f64; 3], [f64; 3]) -> bool,
+    nudge: f64,
+) {
     let start = [
         point[0] + normal[0] * nudge,
         point[1] + normal[1] * nudge,
@@ -196,11 +215,6 @@ pub fn lit_corner_nudged(
             *channel += f64::from(color) * weight;
         }
     }
-    [
-        modulated(tint[0], accumulated[0]),
-        modulated(tint[1], accumulated[1]),
-        modulated(tint[2], accumulated[2]),
-    ]
 }
 
 /// Shadow ray start offset of a free plane's corner, in the bake's unit when
@@ -262,6 +276,92 @@ pub fn lit_face_corner(
     // A both-sided plane shows whichever side is brighter; shade it by the
     // side that is.
     let lit = core::array::from_fn(|i| front[i].max(back[i]));
+    shade.apply(lit, face.normal)
+}
+
+/// The ambient a corner takes when the world gathers its light (see
+/// [`super::lighting::GlobalLight`]): what the corner's hemisphere brings
+/// in, on top of which the lamps add. In the bake's 128-neutral units and
+/// not yet clamped.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GatheredAmbient {
+    /// For the visible side of the face.
+    pub front: [f64; 3],
+    /// For the hidden side, used by a double-sided plane or mesh face.
+    pub back: [f64; 3],
+}
+
+/// Where the soft shoulder of the overbright range starts, in the bake's
+/// units. A corner's light is linear up to here.
+pub const SHOULDER_KNEE: f64 = 180.0;
+/// The vertex colour the shoulder approaches, 255 being twice the texture.
+pub const SHOULDER_TOP: f64 = 255.0;
+
+/// A light value kept inside the vertex colour range with a soft shoulder
+/// instead of a hard clip: linear up to [`SHOULDER_KNEE`], then bending
+/// toward [`SHOULDER_TOP`] without ever reaching past it. A gathered bake
+/// can sum to several times the neutral value near a lamp; clipping each
+/// channel on its own turns a warm hot spot white, bending them together-ish
+/// keeps the hue.
+pub fn shoulder(light: f64) -> f64 {
+    if light <= SHOULDER_KNEE {
+        return light.max(0.0);
+    }
+    let room = SHOULDER_TOP - SHOULDER_KNEE;
+    SHOULDER_KNEE + room * (1.0 - (-(light - SHOULDER_KNEE) / room).exp())
+}
+
+fn finish_gathered(tint: [u8; 3], light: [f64; 3]) -> [u8; 3] {
+    core::array::from_fn(|i| modulated(tint[i], shoulder(light[i])))
+}
+
+/// [`lit_face_corner`] for a world that gathers its light: the ambient is
+/// the given per-corner value instead of the room's flat colour, and the sum
+/// goes through the shoulder rather than a hard clip.
+pub fn lit_face_corner_gathered(
+    face: &GridFace,
+    point: [f64; 3],
+    tint: [u8; 3],
+    ambient: &GatheredAmbient,
+    lights: &[GridLight],
+    occluded: &dyn Fn([f64; 3], [f64; 3]) -> bool,
+    shade: FacingShade,
+) -> [u8; 3] {
+    let plane = matches!(
+        face.kind,
+        GridFaceKind::Plane { .. } | GridFaceKind::Mesh { .. }
+    );
+    if plane && face.unlit {
+        return lit_corner(
+            point,
+            face.normal,
+            tint,
+            [NEUTRAL as u8; 3],
+            &[],
+            &|_, _| false,
+        );
+    }
+    let nudge = if plane {
+        PLANE_SHADOW_NUDGE
+    } else {
+        SHADOW_NUDGE
+    };
+    let mut front = ambient.front;
+    accumulate_direct(&mut front, point, face.normal, lights, occluded, nudge);
+    let mut lit = finish_gathered(tint, front);
+    if plane && face.double_sided {
+        let mut back = ambient.back;
+        accumulate_direct(
+            &mut back,
+            point,
+            face.normal.map(|v| -v),
+            lights,
+            occluded,
+            nudge,
+        );
+        let back = finish_gathered(tint, back);
+        lit = core::array::from_fn(|i| lit[i].max(back[i]));
+    }
     shade.apply(lit, face.normal)
 }
 
