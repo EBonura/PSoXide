@@ -477,3 +477,243 @@ fn cooking_a_gathering_level_twice_gives_identical_bytes() {
         assert!(a.report.summary().contains("global light:"));
     }
 }
+
+// ---- tuning survey (ignored: prints, asserts nothing) ---------------------
+
+/// Binds every material as a textured 64 by 64 one and reads the albedo from
+/// the project's real textures.
+struct SurveyBinder {
+    albedo: crate::grid::lighting::AlbedoTable,
+}
+
+impl super::MaterialBinder for SurveyBinder {
+    fn bind(
+        &mut self,
+        material: Option<crate::ResourceId>,
+    ) -> Result<super::BoundMaterial, String> {
+        Ok(super::BoundMaterial {
+            asset: material.map_or(0, |m| m.raw() as u16),
+            flags: 0,
+            blend: 0,
+            uv_motion: 0,
+            tint: [128; 3],
+            textured: material.is_some(),
+            texels: [64, 64],
+        })
+    }
+
+    fn albedo(&mut self, material: Option<crate::ResourceId>) -> [f32; 3] {
+        use crate::grid::lighting::BakeMaterials;
+        self.albedo.albedo(material)
+    }
+}
+
+/// Mean of the red, green and blue of every cooked corner, 0..=255, and how
+/// many corners reach 250 or more.
+fn mean_corner(cooked: &super::CookedLevel) -> (f64, usize, usize) {
+    let (mut sum, mut n, mut hot) = (0.0, 0usize, 0usize);
+    for table in &cooked.tables {
+        for q in &table.quads {
+            for c in q.color {
+                let ch = [
+                    (c & 255) as f64,
+                    ((c >> 8) & 255) as f64,
+                    ((c >> 16) & 255) as f64,
+                ];
+                sum += (ch[0] + ch[1] + ch[2]) / 3.0;
+                hot += usize::from(ch.iter().any(|v| *v >= 250.0));
+                n += 1;
+            }
+        }
+    }
+    (sum / n.max(1) as f64, hot, n)
+}
+
+#[test]
+#[ignore = "prints the brightness of the reference levels under different settings"]
+fn tuning_survey() {
+    for name in [
+        "grid-starter",
+        "grid-cathedral",
+        "grid-dungeon",
+        "grid-cave",
+    ] {
+        let dir = crate::projects_dir().join(name);
+        let project = crate::ProjectDocument::load_from_path(dir.join("project.ron")).unwrap();
+        let scene = project.active_scene();
+        let lights = crate::grid::lighting::scene_grid_lights(scene, 16.0);
+        let world = scene.world.grid().unwrap().clone();
+        let faces = all_faces(&world);
+        let albedo = crate::grid::lighting::AlbedoTable::from_project(
+            &project,
+            &dir,
+            faces.iter().map(|f| f.material),
+        );
+        let cook = |light: GlobalLight| {
+            let mut w = world.clone();
+            w.global_light = light;
+            let mut binder = SurveyBinder {
+                albedo: crate::grid::lighting::AlbedoTable::from_project(
+                    &project,
+                    &dir,
+                    faces.iter().map(|f| f.material),
+                ),
+            };
+            super::cook_level(
+                super::CookInput {
+                    world: &w,
+                    binder: &mut binder,
+                    lights: &lights,
+                    first_pack_sector: 0,
+                    lod_far_cells: 0,
+                    texture_repeat: true,
+                },
+                None,
+            )
+            .unwrap()
+        };
+        let _ = &albedo;
+        let (flat, flat_hot, n) = mean_corner(&cook(GlobalLight::DEFAULT));
+        eprintln!("{name}: {n} corners, flat mean {flat:.1}, {flat_hot} hot");
+        for occlusion in [50u8, 60, 70] {
+            for gain in [100u8, 130, 150, 170] {
+                let light = GlobalLight {
+                    occlusion,
+                    bounce_gain: gain,
+                    ..GlobalLight::NEW_WORLD
+                };
+                let (mean, hot, _) = mean_corner(&cook(light));
+                eprintln!(
+                    "   occlusion {occlusion:3} gain {gain:3}: mean {mean:.1} ({:+.1}%), {hot} hot",
+                    (mean / flat - 1.0) * 100.0
+                );
+            }
+        }
+    }
+}
+
+// ---- the whole level: cook against the preview --------------------------------
+
+/// Every corner of every quad the cook writes for `world`, against the colour
+/// the editor preview's rig gives the same point on the same face: a face's
+/// corner, in runtime units, and the way the face looks. Returns `(corners,
+/// matched, differing)`.
+fn cook_against_preview(world: &GridWorld, lights: &[GridLight]) -> (usize, usize, usize) {
+    let cooked = cook_with_lights(world, lights).unwrap();
+    let scene = LightScene::new(world).unwrap();
+    let units = scene.units();
+    let field = world.global_light.enabled.then(|| {
+        solve(&GatherInput {
+            world,
+            units,
+            lights,
+            probe: scene.probe(),
+            materials: &FlatAlbedo(FALLBACK_ALBEDO),
+            cancel: None,
+        })
+        .expect("solved")
+    });
+    let faces = all_faces(world);
+    let gather = world.global_light.enabled.then_some(Gather {
+        field: field.as_ref(),
+    });
+    // Preview colour per (point, facing), as the preview would bake the face.
+    type Facing = ([i32; 3], [i8; 3]);
+    let mut preview: std::collections::HashMap<Facing, Vec<[u8; 3]>> = Default::default();
+    scene
+        .with_rig(lights, world.shading, gather, |rig| {
+            for face in &faces {
+                let tint = [128; 3];
+                let room = &world.rooms[face.room];
+                let colours = rig.corners(face, Some(face), tint, room.ambient);
+                for (corner, colour) in colours.into_iter().enumerate() {
+                    let point = face.grid[corner].map(|g| units.rt(g));
+                    let facing = face.normal.map(|v| (v * 127.0).round() as i8);
+                    preview.entry((point, facing)).or_default().push(colour);
+                }
+            }
+        })
+        .unwrap();
+    let (mut corners, mut matched, mut differing) = (0, 0, 0);
+    for (room, table) in cooked.tables.iter().enumerate() {
+        let origin = {
+            let r = &world.rooms[room];
+            [
+                r.origin[0] * units.sector() as i32,
+                units.rt(r.y_offset),
+                r.origin[1] * units.sector() as i32,
+            ]
+        };
+        for q in &table.quads {
+            for k in 0..4 {
+                corners += 1;
+                let v = table.vertices[usize::from(q.v[k])];
+                let point = [
+                    i32::from(v.x) + origin[0],
+                    i32::from(v.y) + origin[1],
+                    i32::from(v.z) + origin[2],
+                ];
+                let c = q.color[k];
+                let got = [
+                    (c & 255) as u8,
+                    ((c >> 8) & 255) as u8,
+                    ((c >> 16) & 255) as u8,
+                ];
+                // The facing the cook wrote, against the faces at the point.
+                let facing = q.n;
+                let candidates = preview
+                    .iter()
+                    .filter(|((p, n), _)| {
+                        *p == point
+                            && (0..3)
+                                .map(|a| i32::from(n[a]) * i32::from(facing[a]))
+                                .sum::<i32>()
+                                > 127 * 127 * 9 / 10
+                    })
+                    .flat_map(|(_, colours)| colours.iter());
+                let mut seen = false;
+                let mut equal = false;
+                for want in candidates {
+                    seen = true;
+                    equal |= *want == got;
+                }
+                if seen {
+                    matched += 1;
+                    differing += usize::from(!equal);
+                }
+            }
+        }
+    }
+    (corners, matched, differing)
+}
+
+#[test]
+fn every_corner_of_the_reference_levels_is_baked_alike_by_the_cook_and_the_preview() {
+    let mut report = String::new();
+    for name in [
+        "grid-starter",
+        "grid-cathedral",
+        "grid-dungeon",
+        "grid-cave",
+    ] {
+        let project = super::tests::load_reference(name).unwrap();
+        let scene = project.active_scene();
+        let lights = crate::grid::lighting::scene_grid_lights(scene, 16.0);
+        let flat_world = scene.world.grid().unwrap().clone();
+        let mut gathered_world = flat_world.clone();
+        gathered_world.global_light = GlobalLight::NEW_WORLD;
+        for (label, world) in [("flat", &flat_world), ("gathered", &gathered_world)] {
+            let (corners, matched, differing) = cook_against_preview(world, &lights);
+            report.push_str(&format!(
+                "{name} {label}: {corners} cooked corners, {matched} found in the preview, {differing} differ\n"
+            ));
+            assert!(
+                matched * 10 >= corners * 9,
+                "{name} {label}: only {matched} of {corners} corners matched a preview face\n{report}"
+            );
+            // Rounding of a lit corner never reaches a step.
+            assert_eq!(differing, 0, "{name} {label}\n{report}");
+        }
+    }
+    eprintln!("{report}");
+}

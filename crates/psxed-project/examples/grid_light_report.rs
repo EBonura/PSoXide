@@ -106,11 +106,22 @@ fn main() {
     let scene = LightScene::new(&on).expect("scene");
     println!("shadow scene (collision tables): {:.0} ms", ms(t));
     let t = Instant::now();
-    let caster = FaceCaster::build(&faces, &scene.units());
+    let caster = FaceCaster::build(&faces, &scene.units(), &|_| true);
     println!(
         "face caster: {:.0} ms, {} faces",
         ms(t),
         caster.face_count()
+    );
+    let t = Instant::now();
+    let calls = 2000;
+    for _ in 0..calls {
+        scene
+            .with_rig(&[], on.shading, None, |_| ())
+            .expect("a built scene parses");
+    }
+    println!(
+        "opening the shadow query (parse of the collision): {:.1} us per call",
+        t.elapsed().as_secs_f64() * 1e6 / f64::from(calls)
     );
     let lights = scene_grid_lights(project.active_scene(), 16.0);
     let albedo = AlbedoTable::from_project(&project, &root, faces.iter().map(|f| f.material));

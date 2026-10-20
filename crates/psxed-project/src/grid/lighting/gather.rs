@@ -153,7 +153,6 @@ impl GiField {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct GatherStats {
     pub faces: usize,
-    pub triangles: usize,
     pub samples: usize,
     pub rays: u64,
     /// Passes run (the first gather plus the bounces).
@@ -222,6 +221,12 @@ fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
         a[2] * b[0] - a[0] * b[2],
         a[0] * b[1] - a[1] * b[0],
     ]
+}
+
+fn add3(acc: &mut [f64; 3], v: [f64; 3]) {
+    for (a, b) in acc.iter_mut().zip(v) {
+        *a += b;
+    }
 }
 
 fn norm(a: [f64; 3]) -> [f64; 3] {
@@ -488,20 +493,10 @@ pub fn solve(input: &GatherInput<'_>) -> Option<GiField> {
                 let mut sum = [0.0f64; 3];
                 for ray in &rays[id * n_rays as usize..(id + 1) * n_rays as usize] {
                     match ray.face {
-                        OPEN => {
-                            for c in 0..3 {
-                                sum[c] += s.ambient[c];
-                            }
-                        }
-                        SKY => {
-                            for c in 0..3 {
-                                sum[c] += s.sky[c];
-                            }
-                        }
+                        OPEN => add3(&mut sum, s.ambient),
+                        SKY => add3(&mut sum, s.sky),
                         packed => {
-                            for c in 0..3 {
-                                sum[c] += (1.0 - occlusion) * s.ambient[c];
-                            }
+                            add3(&mut sum, s.ambient.map(|a| (1.0 - occlusion) * a));
                             if bounce && packed & BACK == 0 && occlusion > 0.0 {
                                 let f = (packed & !BACK) as usize;
                                 let w1 = f64::from(ray.w1) / 65535.0;
@@ -511,15 +506,21 @@ pub fn solve(input: &GatherInput<'_>) -> Option<GiField> {
                                 let mut e = [0.0f64; 3];
                                 for (wi, corner) in w.iter().zip(ray.corners) {
                                     let t = ids[usize::from(corner).min(3)] as usize;
-                                    for c in 0..3 {
-                                        e[c] += wi
-                                            * (f64::from(direct[t][c]) + f64::from(previous[t][c]));
-                                    }
+                                    add3(
+                                        &mut e,
+                                        core::array::from_fn(|c| {
+                                            wi * (f64::from(direct[t][c])
+                                                + f64::from(previous[t][c]))
+                                        }),
+                                    );
                                 }
                                 let rho = face_albedo[f];
-                                for c in 0..3 {
-                                    sum[c] += occlusion * gain * f64::from(rho[c]) * e[c];
-                                }
+                                add3(
+                                    &mut sum,
+                                    core::array::from_fn(|c| {
+                                        occlusion * gain * f64::from(rho[c]) * e[c]
+                                    }),
+                                );
                             }
                         }
                     }
@@ -535,7 +536,6 @@ pub fn solve(input: &GatherInput<'_>) -> Option<GiField> {
 
     let stats = GatherStats {
         faces: faces.len(),
-        triangles: 0,
         samples: count,
         rays: count as u64 * u64::from(n_rays),
         passes,

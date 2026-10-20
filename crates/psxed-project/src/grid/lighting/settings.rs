@@ -31,7 +31,11 @@ pub struct GlobalLight {
     /// Passes of bounced light after the first gather, 0 to 3.
     pub bounces: u8,
     /// Percent of the light a surface passes on when it bounces, 0 to 200;
-    /// 100 keeps the texture's average colour as it is.
+    /// 100 is the texture's average colour as it is. A new world starts at
+    /// 150: a PS1 surface shows its texture times a light value that can
+    /// reach twice neutral, so a lit wall hands on more than its plain
+    /// average, and with 150 the gathered levels keep close to the average
+    /// brightness of the flat ambient they replace.
     pub bounce_gain: u8,
     /// Rays per corner, 8 to 128. More is smoother and slower to bake.
     pub rays: u8,
@@ -44,10 +48,10 @@ impl GlobalLight {
     /// The values a new world starts from.
     pub const DEFAULT: Self = Self {
         enabled: false,
-        occlusion: 70,
+        occlusion: 60,
         reach: 4,
         bounces: 2,
-        bounce_gain: 100,
+        bounce_gain: 150,
         rays: 64,
         sky: None,
     };
