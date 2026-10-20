@@ -233,11 +233,39 @@ impl<'a> ResidentRooms<'a> {
             cx as i32 - i32::from(fx < half),
             cz as i32 - i32::from(fz < half),
         );
-        if cx0 < 0 || cz0 < 0 || cx0 + 1 >= i32::from(rec.width) || cz0 + 1 >= i32::from(rec.depth)
-        {
-            return None;
-        }
-        let probes = direct_block(slot, rec, cx0, cz0, p[1]);
+        let inside = cx0 >= 0
+            && cz0 >= 0
+            && cx0 + 1 < i32::from(rec.width)
+            && cz0 + 1 < i32::from(rec.depth);
+        let probes = if inside {
+            direct_block(slot, rec, cx0, cz0, p[1])
+        } else {
+            // On the edge of the room: its own sectors from its table, the
+            // ones beyond it (another room's, or none) by searching.
+            let local = p[1] - rec.origin[1];
+            let mut probes: [[Option<Found>; 2]; 2] = [[None; 2]; 2];
+            for (i, column) in probes.iter_mut().enumerate() {
+                for (j, entry) in column.iter_mut().enumerate() {
+                    let (x, z) = (cx0 + i as i32, cz0 + j as i32);
+                    *entry =
+                        if x >= 0 && z >= 0 && x < i32::from(rec.width) && z < i32::from(rec.depth)
+                        {
+                            let cell = z as usize * usize::from(rec.width) + x as usize;
+                            slot.probes.nearest(cell, local).map(|(py, rgb)| Found {
+                                y: py + rec.origin[1],
+                                rgb,
+                            })
+                        } else {
+                            self.column_probe(
+                                rec.origin[0] + x * s + s / 2,
+                                rec.origin[2] + z * s + s / 2,
+                                p[1],
+                            )
+                        };
+                }
+            }
+            probes
+        };
         self.blend(probes, (fx, fz))
     }
 
