@@ -436,3 +436,81 @@ fn the_real_motor_climbs_fine_treads_one_step_at_a_time() {
     seen.dedup();
     assert_eq!(seen, vec![0, 5, 10, 15, 20], "{ys:?}");
 }
+
+/// Sculpted terrain (a dune field and a valley in Auto detail, so the room
+/// has leaves of three sizes) cooks to valid geometry with no hole in the
+/// surface, and the cooked collision stands where the document says at every
+/// sampled point.
+#[test]
+fn sculpted_terrain_cooks_whole_and_stands_where_the_document_says() {
+    use crate::grid::edit::sculpt::{
+        sculpt_path, Detail, Falloff, SculptMode, SculptParams, Target,
+    };
+    let units = RuntimeUnits::new(GridScale::DEFAULT).unwrap();
+    let mut room = GridRoom::new_derived("field", 10, 10);
+    for z in 0..10 {
+        for x in 0..10 {
+            let s = room.sector_or_insert(x, z).unwrap();
+            s.set_ground_floor(Some(GridSurface::flat_auto(0, Some(rid(1)))));
+            s.set_ground_ceiling(Some(GridSurface::flat_auto(6144, Some(rid(2)))));
+        }
+    }
+    let mut world = world_of(room);
+    // Dunes across the west half, a valley (lowered, smoothed) through the
+    // east, both at Auto detail.
+    let dunes = SculptParams {
+        mode: SculptMode::Dunes,
+        radius: 8.0,
+        wavelength: 10.0,
+        dune_height: 256,
+        detail: Detail::Auto,
+        ..SculptParams::default()
+    };
+    sculpt_path(&mut world, 0, &[[4.0, 12.0], [20.0, 12.0]], dunes).unwrap();
+    let valley = SculptParams {
+        radius: 5.0,
+        strength: 1.0,
+        falloff: Falloff::Smooth,
+        invert: true,
+        detail: Detail::Auto,
+        target: Target::Floor,
+        ..SculptParams::default()
+    };
+    let path: Vec<[f64; 2]> = (0..8)
+        .map(|i| [28.0 + i as f64 * 1.5, 6.0 + i as f64 * 3.0])
+        .collect();
+    for _ in 0..3 {
+        sculpt_path(&mut world, 0, &path, valley.clone()).unwrap();
+    }
+    let room = &world.rooms[0];
+    assert!(crate::grid::tree::check(room).is_empty());
+    let levels: std::collections::BTreeSet<u8> = room.leaves().map(|(k, _)| k.level).collect();
+    assert!(levels.len() >= 2, "Auto made finer cells: {levels:?}");
+    let cooked = cook(&world).expect("sculpted terrain cooks");
+    assert!(
+        cooked.report.warnings.is_empty(),
+        "{:?}",
+        cooked.report.warnings
+    );
+    let found = holes(&world);
+    assert!(found.is_empty(), "{found:?}");
+    // The collision stands where the document says.
+    let native = super::motor_harness::native(&world);
+    let s = 80;
+    let mut stood = 0;
+    for z in (0..10 * s).step_by(3) {
+        for x in (0..10 * s).step_by(3) {
+            let want = document_floor(room, &units, x, z);
+            let got = native.collision.floor_at(
+                0,
+                (x / s) as usize,
+                (z / s) as usize,
+                (x % s) as u32,
+                (z % s) as u32,
+            );
+            assert_eq!(got, want, "at ({x}, {z})");
+            stood += usize::from(want.is_some());
+        }
+    }
+    assert!(stood > 1000);
+}

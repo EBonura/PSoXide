@@ -642,28 +642,34 @@ pub fn face_count(world: &GridWorld) -> usize {
 
 /// Faces of each room, in room order.
 pub fn room_face_counts(world: &GridWorld) -> Vec<usize> {
+    (0..world.rooms.len())
+        .map(|room| room_face_count(world, room))
+        .collect()
+}
+
+/// Faces of room `room_index` (0 for a room that does not exist).
+pub fn room_face_count(world: &GridWorld, room_index: usize) -> usize {
+    let Some(room) = world.rooms.get(room_index) else {
+        return 0;
+    };
     let mut scratch = Vec::new();
-    let mut counts = Vec::with_capacity(world.rooms.len());
-    for (room_index, room) in world.rooms.iter().enumerate() {
-        let mut count = 0;
-        for [x, z] in room.face_cells() {
-            scratch.clear();
-            cell_faces(world, room_index, x, z, &mut scratch);
-            count += scratch.len();
-        }
-        for index in 0..room.planes.len() {
-            scratch.clear();
-            super::plane_faces::plane_faces(world, room_index, index, &mut scratch);
-            count += scratch.len();
-        }
-        for index in 0..room.meshes.len() {
-            scratch.clear();
-            super::mesh_faces::mesh_faces_with(world, &(), room_index, index, &mut scratch);
-            count += scratch.len();
-        }
-        counts.push(count);
+    let mut count = 0;
+    for [x, z] in room.face_cells() {
+        scratch.clear();
+        cell_faces(world, room_index, x, z, &mut scratch);
+        count += scratch.len();
     }
-    counts
+    for index in 0..room.planes.len() {
+        scratch.clear();
+        super::plane_faces::plane_faces(world, room_index, index, &mut scratch);
+        count += scratch.len();
+    }
+    for index in 0..room.meshes.len() {
+        scratch.clear();
+        super::mesh_faces::mesh_faces_with(world, &(), room_index, index, &mut scratch);
+        count += scratch.len();
+    }
+    count
 }
 
 #[cfg(test)]

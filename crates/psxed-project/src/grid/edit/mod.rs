@@ -38,6 +38,7 @@ pub mod planes;
 pub mod rects;
 pub mod refs;
 pub mod region;
+pub mod sculpt;
 pub mod selection;
 pub mod spans;
 pub mod surfaces;
