@@ -200,35 +200,72 @@ pub fn create_surfaces(
 /// What joining new floor to its neighbours did, see [`join_fresh_floors`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct JoinOutcome {
-    /// Sector edges whose authored walls were removed.
-    pub opened_edges: usize,
-    /// Sector edges whose authored walls stay because the two floors meet
-    /// at different heights there.
+    /// Rooms that had walls opened, with how many sector edges, ascending by
+    /// room.
+    pub opened: Vec<(usize, usize)>,
+    /// Sector edges whose walls stay because the two floors meet at heights
+    /// further apart than a body steps.
     pub kept_edges: usize,
-    /// Other rooms with a floor beside the new cells, ascending. Their
-    /// walls are not touched.
-    pub touched_rooms: Vec<usize>,
 }
 
+/// The tallest step, editor units, between two floors that a wall between
+/// them is still opened for (what the player climbs: see the walk limits).
+pub const JOIN_MAX_STEP: i32 = psx_engine::WalkLimits::DEFAULT.step_up * 16;
+
 /// New floor was just made in `room` over the world cells `fresh` (the ones
-/// that had no floor before). Where a fresh cell lies beside a floor of the
-/// same room that was already there, drop the authored walls on the edge
-/// between them (on both sides) so the new floor connects, unless the two
-/// floors meet at different heights, where the wall is a real riser. Other
-/// rooms beside the fresh cells are listed and left alone: a room's walls
-/// are its own to change.
+/// that had no floor before). Where a fresh cell lies beside a floor, in the
+/// same room or in another, the walls on the edge between them are opened on
+/// both sides so the new floor connects:
+///
+/// * authored walls on either side are removed;
+/// * a derived closure wall of either side gets an override that hides it and
+///   makes it passable (a riser inside one room is a step, not a wall, and is
+///   left alone).
+///
+/// Where the two floors meet more than [`JOIN_MAX_STEP`] apart the wall stays
+/// and is counted in `kept_edges`.
 pub fn join_fresh_floors(world: &mut GridWorld, room: usize, fresh: &[[i32; 2]]) -> JoinOutcome {
+    use super::super::derive::DerivedKind;
+    use super::super::leaf_derive::derived_walls_of;
+    use super::super::overrides::WallMode;
     use super::super::sector::WallEdge;
     use super::walls::surface_edge_heights;
     let mut out = JoinOutcome::default();
-    let edges = [
+    let mut opened: std::collections::BTreeMap<usize, usize> = Default::default();
+    let sides = [
         (WallEdge::North, [0, -1]),
         (WallEdge::East, [1, 0]),
         (WallEdge::South, [0, 1]),
         (WallEdge::West, [-1, 0]),
     ];
+    // The floor of a cell, and its room's vertical offset.
+    let floor_at = |world: &GridWorld, r: usize, c: [i32; 2]| {
+        let room = world.rooms.get(r)?;
+        let [x, z] = room.local(c)?;
+        let floor = room.sector(x, z)?.ground_floor()?.clone();
+        Some((floor, room.y_offset))
+    };
+    // Whether the edge of a cell has something that closes it: authored walls
+    // or, in a derived room, a closure wall.
+    let closes = |world: &GridWorld, r: usize, c: [i32; 2], e: WallEdge| {
+        let Some(room) = world.rooms.get(r) else {
+            return false;
+        };
+        let authored = room
+            .local(c)
+            .and_then(|[x, z]| room.sector(x, z))
+            .is_some_and(|s| !s.walls(e).is_empty());
+        authored
+            || (room.wall_mode == WallMode::Derived
+                && derived_walls_of(room, LeafKey::sector(c))
+                    .iter()
+                    .any(|w| w.edge == e && w.kind == DerivedKind::Closure && !is_open(w)))
+    };
+    fn is_open(w: &super::super::derive::DerivedWall) -> bool {
+        w.hidden && w.solid == Some(false)
+    }
     for &cell in fresh {
-        for (edge, step) in edges {
+        for (edge, step) in sides {
             let beside = [cell[0] + step[0], cell[1] + step[1]];
             if fresh.contains(&beside) {
                 continue;
@@ -236,57 +273,66 @@ pub fn join_fresh_floors(world: &mut GridWorld, room: usize, fresh: &[[i32; 2]])
             let Some((back, _)) = edge.opposite() else {
                 continue;
             };
-            let floor_at = |r: &GridRoom, c: [i32; 2]| {
-                r.local(c)
-                    .and_then(|[x, z]| r.sector(x, z))
-                    .and_then(|s| s.ground_floor())
-                    .cloned()
+            let Some((new, new_offset)) = floor_at(world, room, cell) else {
+                continue;
             };
-            let Some(own) = world.rooms.get(room) else {
-                return out;
+            // The neighbouring floor: in this room first, else any other.
+            let Some((other, (old, old_offset))) = std::iter::once(room)
+                .chain((0..world.rooms.len()).filter(|r| *r != room))
+                .find_map(|r| floor_at(world, r, beside).map(|f| (r, f)))
+            else {
+                continue;
             };
-            if let Some(old) = floor_at(own, beside) {
-                let Some(new) = floor_at(own, cell) else {
-                    continue;
-                };
-                let mut a = surface_edge_heights(&new, edge);
-                let mut b = surface_edge_heights(&old, back);
-                a.sort_unstable();
-                b.sort_unstable();
-                let target = &mut world.rooms[room];
-                let had_walls = |r: &GridRoom, c: [i32; 2], e: WallEdge| {
-                    r.local(c)
-                        .and_then(|[x, z]| r.sector(x, z))
-                        .is_some_and(|s| !s.walls(e).is_empty())
-                };
-                if !had_walls(target, cell, edge) && !had_walls(target, beside, back) {
-                    continue;
-                }
-                if a != b {
-                    out.kept_edges += 1;
-                    continue;
-                }
-                for (c, e) in [(cell, edge), (beside, back)] {
-                    if let Some([x, z]) = target.local(c) {
-                        if let Some(sector) = target.sector_mut(x, z) {
-                            sector.walls_mut(e).clear();
-                        }
+            if !closes(world, room, cell, edge) && !closes(world, other, beside, back) {
+                continue;
+            }
+            let mut a = surface_edge_heights(&new, edge).map(|h| h + new_offset);
+            let mut b = surface_edge_heights(&old, back).map(|h| h + old_offset);
+            a.sort_unstable();
+            b.sort_unstable();
+            let step = (0..2)
+                .map(|i| world.scale.to_editor((a[i] - b[i]).abs()))
+                .max()
+                .unwrap_or(0);
+            if step > JOIN_MAX_STEP {
+                out.kept_edges += 1;
+                continue;
+            }
+            let mut done = std::collections::BTreeSet::new();
+            for (r, c, e) in [(room, cell, edge), (other, beside, back)] {
+                let mut did = false;
+                let target = &mut world.rooms[r];
+                if let Some([x, z]) = target.local(c) {
+                    if let Some(sector) = target.sector_mut(x, z) {
+                        did |= !sector.walls(e).is_empty();
+                        sector.walls_mut(e).clear();
                     }
                 }
-                out.opened_edges += 1;
-            } else {
-                for (index, other) in world.rooms.iter().enumerate() {
-                    if index != room
-                        && !out.touched_rooms.contains(&index)
-                        && floor_at(other, beside).is_some()
-                    {
-                        out.touched_rooms.push(index);
+                if target.wall_mode == WallMode::Derived {
+                    let keys: Vec<_> = derived_walls_of(target, LeafKey::sector(c))
+                        .into_iter()
+                        .filter(|w| w.edge == e && w.kind == DerivedKind::Closure && !is_open(w))
+                        .map(|w| w.key)
+                        .collect();
+                    for key in keys {
+                        target.edge_overrides.edit(key, |o| {
+                            o.hidden = true;
+                            o.solid = Some(false);
+                        });
+                        did = true;
                     }
                 }
+                if did {
+                    done.insert(r);
+                }
+            }
+            // One physical edge counts once for each room it was opened in.
+            for r in done {
+                *opened.entry(r).or_default() += 1;
             }
         }
     }
-    out.touched_rooms.sort_unstable();
+    out.opened = opened.into_iter().collect();
     out
 }
 
@@ -776,7 +822,7 @@ mod tests {
         use crate::grid::sector::WallEdge;
         let mut world = walled_pair(0);
         let out = join_fresh_floors(&mut world, 0, &[[1, 0]]);
-        assert_eq!((out.opened_edges, out.kept_edges), (1, 0));
+        assert_eq!((out.opened.clone(), out.kept_edges), (vec![(0, 1)], 0));
         assert!(world.rooms[0]
             .sector(0, 0)
             .unwrap()
@@ -787,9 +833,9 @@ mod tests {
     #[test]
     fn joining_keeps_a_wall_where_the_floors_meet_at_different_heights() {
         use crate::grid::sector::WallEdge;
-        let mut world = walled_pair(512);
+        let mut world = walled_pair(1024);
         let out = join_fresh_floors(&mut world, 0, &[[1, 0]]);
-        assert_eq!((out.opened_edges, out.kept_edges), (0, 1));
+        assert_eq!((out.opened.clone(), out.kept_edges), (vec![], 1));
         assert_eq!(
             world.rooms[0]
                 .sector(0, 0)
@@ -801,16 +847,22 @@ mod tests {
     }
 
     #[test]
-    fn joining_names_a_touched_room_and_leaves_it_alone() {
+    fn joining_opens_the_walls_of_a_room_the_floor_touches() {
+        use crate::grid::overrides::WallMode;
+        use crate::grid::sector::WallEdge;
         let mut world = world();
         let mut other = GridRoom::new("other", 1, 1);
         other.origin = [2, 0];
+        other.wall_mode = WallMode::Derived;
         world.rooms.push(other);
         world.rooms[1]
             .sector_or_insert(0, 0)
             .unwrap()
             .set_ground_floor(Some(GridSurface::flat(0, None)));
-        let snapshot = world.rooms[1].clone();
+        world.rooms[1]
+            .sector_mut(0, 0)
+            .unwrap()
+            .set_ground_ceiling(Some(GridSurface::flat(1024, None)));
         create_surfaces(
             &mut world,
             0,
@@ -820,7 +872,12 @@ mod tests {
             None,
         );
         let out = join_fresh_floors(&mut world, 0, &[[1, 0]]);
-        assert_eq!(out.touched_rooms, vec![1]);
-        assert_eq!(world.rooms[1], snapshot);
+        assert_eq!(out.opened, vec![(1, 1)]);
+        let key = crate::grid::derive::edge_key([2, 0], WallEdge::West);
+        let o = world.rooms[1].edge_overrides.get(&key).unwrap();
+        assert!(o.hidden && o.solid == Some(false));
+        // Doing it again changes nothing.
+        let again = join_fresh_floors(&mut world, 0, &[[1, 0]]);
+        assert!(again.opened.is_empty());
     }
 }
