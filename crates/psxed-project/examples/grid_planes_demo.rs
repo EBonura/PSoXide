@@ -111,6 +111,7 @@ fn main() {
         scale: psxed_project::grid::starter::STARTER_SCALE,
         rooms: vec![hall(ground, walls, cliff)],
         shading: psxed_project::grid::FacingShade::SUBTLE,
+        global_light: Default::default(),
         stream: psxed_project::grid::StreamRadii::DEFAULT,
         mesh_assets: Vec::new(),
         level_names: Default::default(),

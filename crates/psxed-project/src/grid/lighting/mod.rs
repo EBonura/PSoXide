@@ -19,6 +19,8 @@
 pub mod albedo;
 pub mod caster;
 pub mod gather;
+#[cfg(test)]
+mod gather_tests;
 pub mod probe;
 pub mod settings;
 
@@ -100,12 +102,41 @@ pub struct BakeRig<'a> {
     pub gather: Option<Gather<'a>>,
 }
 
-/// The point of a ring (runtime units) at the weights of the triangle fan
-/// that holds `point`: indices and weights.
-fn fan_weights(ring: &[[f64; 3]], point: [f64; 3]) -> Option<([usize; 3], [f64; 3])> {
+/// Weights of the ring corners at `point` of a face, runtime units.
+///
+/// A four-corner ring that is a parallelogram (a floor tile, a wall panel) is
+/// interpolated bilinearly, so the value at the middle is the mean of the four
+/// corners whichever diagonal the GPU later splits it along. Any other ring
+/// is interpolated over the triangle fan from corner 0 that holds the point.
+fn ring_weights(ring: &[[f64; 3]], point: [f64; 3]) -> Option<Vec<(usize, f64)>> {
     let sub = |a: [f64; 3], b: [f64; 3]| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
     let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-    let mut best: Option<(f64, [usize; 3], [f64; 3])> = None;
+    if ring.len() == 4 {
+        let sum =
+            |a: usize, b: usize| -> [f64; 3] { core::array::from_fn(|k| ring[a][k] + ring[b][k]) };
+        let (s02, s13) = (sum(0, 2), sum(1, 3));
+        if (0..3).all(|k| (s02[k] - s13[k]).abs() <= 1.0) {
+            let (e1, e3, q) = (
+                sub(ring[1], ring[0]),
+                sub(ring[3], ring[0]),
+                sub(point, ring[0]),
+            );
+            let (a, b, c) = (dot(e1, e1), dot(e1, e3), dot(e3, e3));
+            let det = a * c - b * b;
+            if det.abs() > 1e-12 {
+                let (r1, r3) = (dot(q, e1), dot(q, e3));
+                let u = ((r1 * c - r3 * b) / det).clamp(0.0, 1.0);
+                let v = ((r3 * a - r1 * b) / det).clamp(0.0, 1.0);
+                return Some(vec![
+                    (0, (1.0 - u) * (1.0 - v)),
+                    (1, u * (1.0 - v)),
+                    (2, u * v),
+                    (3, (1.0 - u) * v),
+                ]);
+            }
+        }
+    }
+    let mut best: Option<(f64, Vec<(usize, f64)>)> = None;
     for k in 1..ring.len().saturating_sub(1) {
         let (a, b, c) = (ring[0], ring[k], ring[k + 1]);
         let (v0, v1, v2) = (sub(b, a), sub(c, a), sub(point, a));
@@ -119,15 +150,23 @@ fn fan_weights(ring: &[[f64; 3]], point: [f64; 3]) -> Option<([usize; 3], [f64; 
         let w = (d00 * d21 - d01 * d20) / denom;
         let weights = [1.0 - v - w, v, w];
         let inside = weights.iter().copied().fold(f64::MAX, f64::min);
-        if best.is_none_or(|(b, _, _)| inside > b) {
-            best = Some((inside, [0, k, k + 1], weights));
+        if best.as_ref().is_none_or(|(b, _)| inside > *b) {
+            best = Some((
+                inside,
+                vec![(0, weights[0]), (k, weights[1]), (k + 1, weights[2])],
+            ));
         }
     }
-    let (_, ids, weights) = best?;
     // A point just outside (rounding) is pulled onto the triangle.
-    let clamped = weights.map(|w| w.max(0.0));
-    let total: f64 = clamped.iter().sum();
-    (total > 0.0).then(|| (ids, clamped.map(|w| w / total)))
+    let (_, mut picked) = best?;
+    for (_, w) in &mut picked {
+        *w = w.max(0.0);
+    }
+    let total: f64 = picked.iter().map(|(_, w)| w).sum();
+    (total > 0.0).then(|| {
+        picked.iter_mut().for_each(|(_, w)| *w /= total);
+        picked
+    })
 }
 
 impl BakeRig<'_> {
@@ -163,10 +202,10 @@ impl BakeRig<'_> {
                     let ring: Vec<[f64; 3]> = (0..parent.grid.len())
                         .map(|c| self.corner_point(parent, c))
                         .collect();
-                    let (ids, weights) = fan_weights(&ring, point)?;
+                    let weights = ring_weights(&ring, point)?;
                     let mut out = [0.0; 3];
-                    for (id, w) in ids.iter().zip(weights) {
-                        let v = field.get(&SampleKey::of_corner(parent, *id, back))?;
+                    for (id, w) in weights {
+                        let v = field.get(&SampleKey::of_corner(parent, id, back))?;
                         for c in 0..3 {
                             out[c] += w * v[c];
                         }
@@ -319,6 +358,32 @@ impl LightScene {
 mod tests {
     use super::*;
     use crate::grid::cook::tests::load_reference;
+
+    #[test]
+    fn a_parallelogram_interpolates_bilinearly_and_its_middle_is_the_mean() {
+        let ring = [
+            [0.0, 0.0, 0.0],
+            [10.0, 0.0, 0.0],
+            [10.0, 0.0, 10.0],
+            [0.0, 0.0, 10.0],
+        ];
+        let values = [1.0, 2.0, 4.0, 8.0];
+        let at = |p: [f64; 3]| -> f64 {
+            ring_weights(&ring, p)
+                .unwrap()
+                .iter()
+                .map(|(i, w)| values[*i] * w)
+                .sum()
+        };
+        assert!((at([5.0, 0.0, 5.0]) - 3.75).abs() < 1e-9);
+        assert!((at([0.0, 0.0, 0.0]) - 1.0).abs() < 1e-9);
+        assert!((at([10.0, 0.0, 10.0]) - 4.0).abs() < 1e-9);
+        assert!((at([5.0, 0.0, 0.0]) - 1.5).abs() < 1e-9);
+        // A triangle falls back to the fan.
+        let tri = [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [0.0, 0.0, 10.0]];
+        let w = ring_weights(&tri, [2.5, 0.0, 2.5]).unwrap();
+        assert!((w.iter().map(|(_, w)| w).sum::<f64>() - 1.0).abs() < 1e-9);
+    }
 
     #[test]
     fn the_preview_reads_the_scene_lights_the_cook_reads() {

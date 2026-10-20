@@ -137,6 +137,9 @@ pub struct RenderStats {
     /// Primitives added by cutting faces at texture tile boundaries.
     pub uv_split_quads: usize,
     pub lit_corners: usize,
+    /// Quads whose corner order was turned to put the GPU's split diagonal
+    /// where the baked light changes least.
+    pub flipped_diagonals: usize,
     /// Primitives that repeat their texture through the texture window.
     pub repeat_quads: usize,
 }
@@ -433,7 +436,7 @@ impl RoomBuild {
             flags |= QUAD_DOUBLE;
         }
         // UVs per kept corner.
-        let texels: Vec<[f64; 2]> = keep.iter().map(|&i| face.texels[i]).collect();
+        let mut texels: Vec<[f64; 2]> = keep.iter().map(|&i| face.texels[i]).collect();
         let rebased = if bound.textured {
             rebase_texels(&texels, cx.repeat && bound.can_repeat())
         } else {
@@ -458,6 +461,7 @@ impl RoomBuild {
             flags2: if rebased.repeat { QUAD2_REPEAT } else { 0 },
             ..Quad::default()
         };
+        let mut colours = [[0u8; 3]; 4];
         for (k, &i) in keep.iter().enumerate() {
             let p = local[i];
             let key = [
@@ -467,12 +471,28 @@ impl RoomBuild {
             ];
             quad.v[k] = self.vertex(key, room_index)?;
             let colour = cx.rig.corner(face, i, Some(parent), bound.tint, ambient);
+            colours[k] = colour;
             quad.color[k] =
                 u32::from(colour[0]) | (u32::from(colour[1]) << 8) | (u32::from(colour[2]) << 16);
             quad.uv[k] = u16::from(packed_uv[k][0]) | (u16::from(packed_uv[k][1]) << 8);
             self.range = (self.range.0.min(p[1]), self.range.1.max(p[1]));
         }
         self.tables.stats.lit_corners += keep.len();
+        // A world that gathers its light also lets the baked colours pick the
+        // diagonal the GPU splits a quad along.
+        if keep.len() == 4
+            && cx.rig.gather.is_some()
+            && face.tint_noise.is_none()
+            && flip_diagonal(
+                cx, face, parent, &snapped, origin, packed_uv, &colours, bound.tint, ambient,
+            )
+        {
+            quad.v.rotate_left(1);
+            quad.color.rotate_left(1);
+            quad.uv.rotate_left(1);
+            texels.rotate_left(1);
+            self.tables.stats.flipped_diagonals += 1;
+        }
         if keep.len() == 3 {
             quad.v[3] = quad.v[2];
             quad.color[3] = quad.color[2];
@@ -494,6 +514,62 @@ impl RoomBuild {
         self.tables.quads.push(quad);
         Ok(())
     }
+}
+
+/// Whether a quad of four corners should start one corner later, so the GPU
+/// splits it along the other diagonal. The GPU draws the corners
+/// `(v1, v0, v2, v3)` as two triangles sharing `v0-v2`, so the colour at the
+/// quad's centre is the mean of `v0` and `v2`; turning the ring makes it the
+/// mean of `v1` and `v3`. The diagonal whose mean lies nearer the true
+/// light at the centre wins.
+///
+/// Only a parallelogram in both position and texels may turn: there the
+/// affine texturing of the two diagonals is the same, so the picture keeps
+/// its texture and only the light changes.
+#[allow(clippy::too_many_arguments)]
+fn flip_diagonal(
+    cx: &Context<'_>,
+    face: &GridFace,
+    parent: &GridFace,
+    snapped: &[[i32; 3]],
+    origin: [i32; 3],
+    packed_uv: &[[u8; 2]],
+    colours: &[[u8; 3]; 4],
+    tint: [u8; 3],
+    ambient: [u8; 3],
+) -> bool {
+    let sum = |a: usize, b: usize| -> [i32; 3] {
+        core::array::from_fn(|k| snapped[a][k] + snapped[b][k])
+    };
+    let uv_sum = |a: usize, b: usize| -> [i32; 2] {
+        core::array::from_fn(|k| i32::from(packed_uv[a][k]) + i32::from(packed_uv[b][k]))
+    };
+    if snapped.len() != 4
+        || sum(0, 2) != sum(1, 3)
+        || (packed_uv.len() == 4 && uv_sum(0, 2) != uv_sum(1, 3))
+    {
+        return false;
+    }
+    let centre: [f64; 3] = core::array::from_fn(|k| {
+        (0..4)
+            .map(|c| f64::from(snapped[c][k] + origin[k]))
+            .sum::<f64>()
+            / 4.0
+    });
+    let truth = cx
+        .rig
+        .colour_at(face, None, Some(parent), centre, tint, ambient);
+    let error = |a: usize, b: usize| -> i32 {
+        (0..3)
+            .map(|ch| {
+                let guess = (i32::from(colours[a][ch]) + i32::from(colours[b][ch])) as f64 / 2.0;
+                let d = guess - f64::from(truth[ch]);
+                (d * d * 4.0) as i32
+            })
+            .sum()
+    };
+    // Turn only for a clear gain, so a flat light keeps the order it had.
+    error(1, 3) + 16 < error(0, 2)
 }
 
 /// Build the render tables of room `room_index`. `origin` is the room's

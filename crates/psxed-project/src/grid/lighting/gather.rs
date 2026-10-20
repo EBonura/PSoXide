@@ -35,6 +35,9 @@ use crate::ResourceId;
 
 /// Start offset of an occlusion ray along the surface normal, runtime units.
 const RAY_NUDGE: f64 = 0.5;
+/// How far a ray starts from its corner toward the middle of the face,
+/// runtime units.
+const INWARD_STEP: f64 = 1.0;
 /// Start offset of a shadow ray, matching [`crate::grid::light`].
 const SHADOW_NUDGE: f64 = 0.25;
 /// What a face that is drawn at its tint with no light reflects, in the
@@ -173,6 +176,9 @@ struct Sample {
     /// Ambient of the room the sample lies in, 128-neutral units.
     ambient: [f64; 3],
     sky: [f64; 3],
+    /// A step from the corner into its face, so a ray does not start on
+    /// the plane of the wall or floor next to it.
+    inward: [f64; 3],
     /// Drawn at its tint with no light; takes nothing from the gather.
     unlit: bool,
     seed: u32,
@@ -235,6 +241,28 @@ pub fn hemisphere_dir(normal: [f64; 3], i: u32, count: u32, turn: f64) -> [f64; 
     let r = u1.sqrt();
     let (x, y, z) = (r * phi.cos(), r * phi.sin(), (1.0 - u1).sqrt());
     core::array::from_fn(|k| t[k] * x + b[k] * y + normal[k] * z)
+}
+
+/// A step of [`INWARD_STEP`] from the corner `point` of the face with grid
+/// corners `ring` toward the middle of the face (never past a quarter of the
+/// way there). A corner sits on the plane of whatever walls or floors meet
+/// the face, and a ray that starts exactly on such a plane passes through it
+/// unseen.
+fn inward_step(ring: &[[i32; 3]], units: &RuntimeUnits, point: [f64; 3]) -> [f64; 3] {
+    let n = ring.len().max(1) as f64;
+    let mut centre = [0.0; 3];
+    for g in ring {
+        for a in 0..3 {
+            centre[a] += f64::from(units.rt(g[a])) / n;
+        }
+    }
+    let d: [f64; 3] = core::array::from_fn(|a| centre[a] - point[a]);
+    let length = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+    if length < 1e-9 {
+        return [0.0; 3];
+    }
+    let step = INWARD_STEP.min(length * 0.25);
+    d.map(|v| v / length * step)
 }
 
 fn threads() -> usize {
@@ -322,12 +350,14 @@ pub fn solve(input: &GatherInput<'_>) -> Option<GiField> {
                     } else {
                         face.normal
                     };
+                    let point = face.grid[corner].map(|g| f64::from(units.rt(g)));
                     samples.push(Sample {
-                        point: face.grid[corner].map(|g| f64::from(units.rt(g))),
+                        point,
                         normal,
                         nudge,
                         ambient,
                         sky,
+                        inward: inward_step(&face.grid, &units, point),
                         unlit,
                         seed: key.hash(),
                     });
@@ -389,11 +419,9 @@ pub fn solve(input: &GatherInput<'_>) -> Option<GiField> {
                 continue;
             }
             let turn = f64::from(s.seed) / 4_294_967_296.0;
-            let origin = [
-                s.point[0] + s.normal[0] * RAY_NUDGE.max(s.nudge),
-                s.point[1] + s.normal[1] * RAY_NUDGE.max(s.nudge),
-                s.point[2] + s.normal[2] * RAY_NUDGE.max(s.nudge),
-            ];
+            let lift = RAY_NUDGE.max(s.nudge);
+            let origin: [f64; 3] =
+                core::array::from_fn(|a| s.point[a] + s.normal[a] * lift + s.inward[a]);
             for (i, slot) in per.iter_mut().enumerate() {
                 let dir = hemisphere_dir(s.normal, i as u32, n_rays, turn);
                 *slot = match caster.cast(origin, dir, tmax) {
