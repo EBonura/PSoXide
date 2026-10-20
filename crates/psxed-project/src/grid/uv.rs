@@ -296,6 +296,24 @@ impl UvReport {
     }
 }
 
+/// Where the viewer's point `(a, b)` of a face (fractions `0..=1` across and
+/// down, as seen) lands in one tile of the texture (fractions of the tile)
+/// when the face is turned `turns` quarter turns clockwise and flipped. The
+/// one-tile case of a fit mapping: the picture a swatch has to show for a
+/// turn and a flip, and the check that it agrees with the real mapping.
+pub fn orient_unit(turns: u8, flip: [bool; 2], a: f64, b: f64) -> [f64; 2] {
+    let (a, b) = (
+        if flip[0] { 1.0 - a } else { a },
+        if flip[1] { 1.0 - b } else { b },
+    );
+    match turns & 3 {
+        0 => [a, b],
+        1 => [b, 1.0 - a],
+        2 => [1.0 - a, 1.0 - b],
+        _ => [1.0 - b, a],
+    }
+}
+
 /// Describe the tiling of a face with placement `uv` and a frame of `size`
 /// grid units whose lower corner sits at `origin`. `material_default` is the
 /// material's grid tiling.
@@ -524,6 +542,30 @@ mod tests {
 
     fn mapper(uv: FaceUv) -> Mapper {
         Mapper::new(&uv, None, frame(), [48.0 * 1.0 + 0.0, 80.0])
+    }
+
+    #[test]
+    fn a_swatch_turned_and_flipped_agrees_with_the_one_tile_fit_mapping() {
+        for turns in 0..4u8 {
+            for flip in [[false, false], [true, false], [false, true], [true, true]] {
+                let m = mapper(FaceUv {
+                    mode: UvMode::fit(1, 1),
+                    turns,
+                    flip,
+                    ..FaceUv::default()
+                });
+                for (a, b) in [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0), (0.25, 0.75)] {
+                    let at = [1024.0 + a * 1024.0, 2048.0 + b * 1024.0];
+                    let texel = m.texel(at);
+                    let unit = orient_unit(turns, flip, a, b);
+                    assert_eq!(
+                        [texel[0] / TILE_TEXELS, texel[1] / TILE_TEXELS],
+                        unit,
+                        "turns {turns} flip {flip:?} at ({a}, {b})"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

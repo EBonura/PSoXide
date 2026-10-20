@@ -42,6 +42,14 @@ pub enum UvOp {
     /// Mirror the texture horizontally (`0`) or vertically (`1`) on the
     /// face.
     ToggleFlip(usize),
+    /// Set the quarter turns (clockwise, any count, taken modulo four) and the
+    /// flips outright: what the Paint tool stores on the faces it paints.
+    SetOrientation {
+        /// Quarter turns clockwise.
+        turns: u8,
+        /// Mirror horizontally / vertically.
+        flip: [bool; 2],
+    },
 }
 
 impl UvOp {
@@ -75,6 +83,10 @@ impl UvOp {
                 if let Some(flip) = uv.flip.get_mut(axis) {
                     *flip = !*flip;
                 }
+            }
+            Self::SetOrientation { turns, flip } => {
+                uv.turns = turns & 3;
+                uv.flip = flip;
             }
         }
     }
