@@ -238,3 +238,129 @@ fn a_generated_mesh_follows_the_world_density() {
     assert!(legacy > 0.0);
     assert_eq!(new, legacy * 2.0, "an arch lays its texture on the world lattice");
 }
+
+mod switching {
+    use super::*;
+    use crate::grid::density::{set_texels_per_sector, KeepLook};
+    use crate::grid::uv::ProjectUvDefaults;
+    use crate::grid::world::SceneWorld;
+    use crate::{MaterialResource, ProjectDocument, ResourceData};
+
+    /// A project whose one room has a floor in a 32 wide material, a floor
+    /// in a 64 wide one, a tiled plane, and a closure-walled derived room.
+    fn project() -> (ProjectDocument, ResourceId, ResourceId) {
+        let mut project = ProjectDocument::new("t");
+        let mut add = |name: &str| {
+            project.add_resource(name, ResourceData::Material(MaterialResource::opaque(None)))
+        };
+        let small = add("small");
+        let big = add("big");
+        let mut room = GridRoom::new("r", 4, 4);
+        for (x, material) in [(0usize, small), (1, big)] {
+            room.sector_or_insert(x, 0)
+                .unwrap()
+                .set_ground_floor(Some(GridSurface::flat(0, Some(material))));
+        }
+        let mut plane = GridPlane::new([512, 512, 512], [1024, 1024]);
+        plane.material = Some(small);
+        room.planes.push(plane);
+        let mut world = GridWorld {
+            scale: GridScale::DEFAULT,
+            rooms: vec![room],
+            ..GridWorld::default()
+        };
+        world.texels_per_sector = SectorTexels::LEGACY;
+        project.active_scene_mut().world = SceneWorld::Grid(world);
+        (project, small, big)
+    }
+
+    fn width(small: ResourceId, big: ResourceId) -> impl Fn(&ProjectDocument, ResourceId) -> Option<u16> {
+        move |_, id| (id == small).then_some(32).or((id == big).then_some(64))
+    }
+
+    /// Every face as `(material, texels)`, in order.
+    fn look(project: &ProjectDocument) -> Vec<(Option<ResourceId>, Vec<[f64; 2]>)> {
+        let world = project.active_scene().world.grid().unwrap();
+        all_faces_with(world, &ProjectUvDefaults(project))
+            .into_iter()
+            .map(|f| (f.material, f.texels))
+            .collect()
+    }
+
+    #[test]
+    fn keeping_other_texture_sizes_leaves_a_32_wide_texture_as_it_was() {
+        let (mut project, small, big) = project();
+        let before = look(&project);
+        let change = set_texels_per_sector(
+            &mut project,
+            SectorTexels::DEFAULT,
+            KeepLook::OtherTextureSizes,
+            &width(small, big),
+        )
+        .unwrap();
+        assert_eq!(change.from, Some(SectorTexels::LEGACY));
+        assert_eq!((change.materials_pinned, change.planes_pinned), (1, 1));
+        let after = look(&project);
+        assert_eq!(before.len(), after.len());
+        for (b, a) in before.iter().zip(&after) {
+            if b.0 == Some(small) {
+                assert_eq!(b, a, "the 32 wide texture keeps its size");
+            } else {
+                // The 64 wide texture now spans a whole texture per sector.
+                let scaled: Vec<[f64; 2]> = b.1.iter().map(|t| [t[0] * 2.0, t[1] * 2.0]).collect();
+                assert_eq!(a.1, scaled);
+            }
+        }
+        assert_eq!(
+            project.active_scene().world.grid().unwrap().texels_per_sector,
+            SectorTexels::DEFAULT
+        );
+    }
+
+    #[test]
+    fn keeping_everything_changes_no_face() {
+        let (mut project, small, big) = project();
+        let before = look(&project);
+        set_texels_per_sector(
+            &mut project,
+            SectorTexels::DEFAULT,
+            KeepLook::Everything,
+            &width(small, big),
+        )
+        .unwrap();
+        assert_eq!(look(&project), before);
+    }
+
+    #[test]
+    fn keeping_nothing_moves_every_face_to_the_new_density() {
+        let (mut project, small, big) = project();
+        let before = look(&project);
+        let change = set_texels_per_sector(
+            &mut project,
+            SectorTexels::DEFAULT,
+            KeepLook::Nothing,
+            &width(small, big),
+        )
+        .unwrap();
+        assert_eq!((change.materials_pinned, change.planes_pinned), (0, 0));
+        for (b, a) in before.iter().zip(&look(&project)) {
+            let scaled: Vec<[f64; 2]> = b.1.iter().map(|t| [t[0] * 2.0, t[1] * 2.0]).collect();
+            assert_eq!(a.1, scaled);
+        }
+    }
+
+    #[test]
+    fn the_same_density_is_no_change() {
+        let (mut project, small, big) = project();
+        let before = project.clone();
+        let change = set_texels_per_sector(
+            &mut project,
+            SectorTexels::LEGACY,
+            KeepLook::Everything,
+            &width(small, big),
+        )
+        .unwrap();
+        assert_eq!((change.materials_pinned, change.planes_pinned), (0, 0));
+        assert_eq!(project, before);
+    }
+}

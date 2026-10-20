@@ -51,6 +51,7 @@ pub mod band_geom;
 pub mod bands;
 pub mod base_project;
 pub mod cook;
+pub mod density;
 pub mod derive;
 mod derive_diag;
 mod derive_spans;
