@@ -541,6 +541,8 @@ mod convert_tests;
 #[cfg(test)]
 mod derived_tests;
 #[cfg(test)]
+mod extrude_tests;
+#[cfg(test)]
 mod gap_tests;
 #[cfg(test)]
 mod leaf_tests;

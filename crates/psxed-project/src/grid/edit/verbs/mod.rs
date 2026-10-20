@@ -17,6 +17,7 @@
 //! * [`rules`]: the smart paint rules and the shared writing helpers.
 
 pub mod break_verb;
+pub mod extrude;
 pub mod fine;
 pub mod raise;
 pub mod raise_leaves;
@@ -103,5 +104,7 @@ impl Snapshot {
     }
 }
 
+#[cfg(test)]
+mod extrude_tests;
 #[cfg(test)]
 mod tests;
