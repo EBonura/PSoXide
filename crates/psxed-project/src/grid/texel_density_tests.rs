@@ -526,7 +526,7 @@ fn a_real_project_keeps_its_small_textures_through_the_switch() {
             None => flat += 1,
         }
     }
-    println!(
+    eprintln!(
         "DP_SWITCH from {from:?}: {change:?}; {kept} faces kept, {followed} followed (doubled), {offset} followed with an offset, {flat} untextured, of {}",
         before.len()
     );
