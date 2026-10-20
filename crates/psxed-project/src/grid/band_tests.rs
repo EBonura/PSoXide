@@ -646,3 +646,182 @@ fn band_set_problems_are_reported_without_blocking_the_cook() {
     // The wall draws plain meanwhile.
     assert_eq!(walls_on_north(&all_faces(&world), 0).len(), 1);
 }
+
+// ---- scope Piece: one wall segment of a run ----
+
+/// A 4 wide hall whose north wall run is cut at 1024 with one set.
+fn cut_run() -> GridWorld {
+    let mut world = hall(4, 2);
+    assert!(edit_bands(
+        &mut world,
+        north_wall(0),
+        BandScope::Run,
+        |set| set.insert_line(0, Anchor::Abs(1024))
+    ));
+    assert_eq!(world.rooms[0].band_sets.len(), 1);
+    world
+}
+
+fn band_material(world: &GridWorld, cell: i32, band: usize) -> Option<ResourceId> {
+    effective_set(world, north_wall(cell)).and_then(|(_, set)| set.bands[band].material)
+}
+
+fn materials(world: &GridWorld, band: usize) -> Vec<Option<ResourceId>> {
+    (0..4).map(|x| band_material(world, x, band)).collect()
+}
+
+#[test]
+fn a_piece_edit_leaves_the_rest_of_the_run_alone() {
+    let mut world = cut_run();
+    assert!(paint_band(
+        &mut world,
+        north_wall(1),
+        0,
+        Some(rid(5)),
+        BandScope::Piece
+    ));
+    assert_eq!(
+        materials(&world, 0),
+        vec![Some(rid(9)), Some(rid(5)), Some(rid(9)), Some(rid(9))]
+    );
+    assert_eq!(materials(&world, 1), vec![Some(rid(9)); 4]);
+    // The segment's own set is private now: painting again edits it in place.
+    assert_eq!(world.rooms[0].band_sets.len(), 2);
+    assert!(paint_band(
+        &mut world,
+        north_wall(1),
+        0,
+        Some(rid(6)),
+        BandScope::Piece
+    ));
+    assert_eq!(world.rooms[0].band_sets.len(), 2);
+    assert_eq!(band_material(&world, 1, 0), Some(rid(6)));
+    // A no-op leaves the document alone.
+    let before = world.clone();
+    assert!(!paint_band(
+        &mut world,
+        north_wall(1),
+        0,
+        Some(rid(6)),
+        BandScope::Piece
+    ));
+    assert_eq!(world, before);
+}
+
+#[test]
+fn pieces_that_end_up_looking_alike_share_one_set() {
+    let mut world = cut_run();
+    for cell in 0..4 {
+        assert!(paint_band(
+            &mut world,
+            north_wall(cell),
+            0,
+            Some(rid(5)),
+            BandScope::Piece
+        ));
+    }
+    // Four segments painted the same: one set for all of them, and the
+    // original (now unused) is gone.
+    assert_eq!(world.rooms[0].band_sets.len(), 1);
+    assert_eq!(materials(&world, 0), vec![Some(rid(5)); 4]);
+    // Painting one back to what the others are not splits it off again.
+    assert!(paint_band(
+        &mut world,
+        north_wall(2),
+        0,
+        Some(rid(7)),
+        BandScope::Piece
+    ));
+    assert_eq!(world.rooms[0].band_sets.len(), 2);
+    assert_eq!(
+        materials(&world, 0),
+        vec![Some(rid(5)), Some(rid(5)), Some(rid(7)), Some(rid(5))]
+    );
+}
+
+#[test]
+fn a_run_edit_after_piece_paint_keeps_each_segments_paint() {
+    let mut world = cut_run();
+    assert!(paint_band(
+        &mut world,
+        north_wall(2),
+        1,
+        Some(rid(5)),
+        BandScope::Piece
+    ));
+    // A second line over the whole run, below the first.
+    assert!(edit_bands(
+        &mut world,
+        north_wall(0),
+        BandScope::Run,
+        |set| set.insert_line(0, Anchor::Abs(512))
+    ));
+    for cell in 0..4 {
+        let set = effective_set(&world, north_wall(cell)).unwrap().1;
+        assert_eq!(set.lines.len(), 2, "cell {cell}");
+    }
+    // The painted band was band 1, now cut in two: both halves keep it, on
+    // that segment only.
+    assert_eq!(band_material(&world, 2, 2), Some(rid(5)));
+    assert_eq!(band_material(&world, 2, 1), Some(rid(9)));
+    assert_eq!(band_material(&world, 0, 2), Some(rid(9)));
+    // And removing the cut again keeps the paint too.
+    assert!(edit_bands(
+        &mut world,
+        north_wall(0),
+        BandScope::Run,
+        |set| set.remove_line(0)
+    ));
+    assert_eq!(band_material(&world, 2, 1), Some(rid(5)));
+    assert_eq!(band_material(&world, 1, 1), Some(rid(9)));
+}
+
+#[test]
+fn a_piece_edit_of_a_room_default_set_gives_the_segment_its_own() {
+    let mut world = hall(3, 2);
+    let mut set = BandSet::single("walls", None);
+    set.insert_line(0, Anchor::Abs(1024));
+    world.rooms[0].band_sets.push(set);
+    world.rooms[0].defaults.bands = Some(0);
+    assert!(paint_band(
+        &mut world,
+        north_wall(1),
+        0,
+        Some(rid(5)),
+        BandScope::Piece
+    ));
+    assert_eq!(world.rooms[0].defaults.bands, Some(0));
+    assert_eq!(world.rooms[0].band_sets[0].bands[0].material, None);
+    assert_eq!(band_material(&world, 1, 0), Some(rid(5)));
+    assert_eq!(band_material(&world, 0, 0), None);
+    assert_eq!(band_material(&world, 2, 0), None);
+}
+
+#[test]
+fn a_piece_edit_of_an_authored_run_reaches_one_wall_record() {
+    let mut room = GridRoom::new("hall", 3, 1);
+    for x in 0..3 {
+        let s = room.sector_or_insert(x, 0).unwrap();
+        s.set_ground_floor(Some(GridSurface::flat(0, None)));
+        s.walls_mut(WallEdge::North)
+            .push(GridWall::span(0, 1024, None));
+    }
+    let mut world = GridWorld {
+        scale: GridScale { num: 1, den: 1 },
+        rooms: vec![room],
+        ..GridWorld::default()
+    };
+    let wall = |x: i32| FaceRef::wall(0, [x, 0], WallEdge::North, 0);
+    assert_eq!(run_faces(&world, wall(0)).len(), 3);
+    assert!(paint_band(
+        &mut world,
+        wall(1),
+        0,
+        Some(rid(5)),
+        BandScope::Piece
+    ));
+    let got: Vec<_> = (0..3)
+        .map(|x| effective_set(&world, wall(x)).and_then(|(_, s)| s.bands[0].material))
+        .collect();
+    assert_eq!(got, vec![None, Some(rid(5)), None]);
+}

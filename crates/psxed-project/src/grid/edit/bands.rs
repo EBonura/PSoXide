@@ -26,6 +26,9 @@ pub enum BandScope {
     Run,
     /// The set the run uses, wherever it is used (the room default).
     Room,
+    /// One wall segment: it gets a set of its own, the rest of the run is
+    /// left as it was. What the Paint tool uses.
+    Piece,
 }
 
 /// Cells along a wall's walking direction.
@@ -223,25 +226,129 @@ fn wall_material(world: &GridWorld, face: FaceRef) -> Option<ResourceId> {
     }
 }
 
+/// Whether two sets look the same (the name aside).
+fn same_look(a: &BandSet, b: &BandSet) -> bool {
+    a.lines == b.lines && a.bands == b.bands
+}
+
 /// Apply `change` to the band set of `face`'s run. With no set yet the run
 /// gets a new one of a single band in the wall's own material (scope Room
 /// makes it the room's default). Returns whether anything changed; a change
 /// that does nothing leaves the document untouched.
+///
+/// Scope Piece reaches `face` alone: the one wall segment gets a set of its
+/// own (or joins one that already looks the same), and the rest of the run
+/// keeps what it had. `change` runs once for every distinct set the walls
+/// concerned are drawn with, so an edit of the run's lines keeps the paint
+/// each segment has been given.
 pub fn edit_bands(
     world: &mut GridWorld,
     face: FaceRef,
     scope: BandScope,
-    change: impl FnOnce(&mut BandSet) -> bool,
+    mut change: impl FnMut(&mut BandSet) -> bool,
 ) -> bool {
     if !is_bandable(&face) {
         return false;
     }
-    let faces = run_faces(world, face);
     let Some(assigned) = assignment(world, face) else {
         return false;
     };
+    if scope == BandScope::Room {
+        return edit_room_set(world, face, assigned, change);
+    }
+    let mut faces = match scope {
+        BandScope::Piece => vec![face],
+        _ => run_faces(world, face),
+    };
+    if faces.is_empty() {
+        faces.push(face);
+    }
+    // The walls of the run, grouped by the set they are drawn with: `None`
+    // is a wall with no bands.
+    let mut groups: Vec<(Option<u8>, Vec<FaceRef>)> = Vec::new();
+    for f in faces {
+        let set = effective_set(world, f).map(|(i, _)| i);
+        match groups.iter_mut().find(|(s, _)| *s == set) {
+            Some((_, members)) => members.push(f),
+            None => groups.push((set, vec![f])),
+        }
+    }
+    // Edit a copy of each set first so a no-op leaves nothing behind.
+    let mut edits: Vec<(Option<u8>, Vec<FaceRef>, BandSet)> = Vec::new();
+    for (set, members) in groups {
+        let mut edited = match set.and_then(|i| {
+            world
+                .rooms
+                .get(face.room)
+                .and_then(|r| r.band_sets.get(usize::from(i)))
+        }) {
+            Some(set) => set.clone(),
+            None => BandSet::single("Bands", wall_material(world, members[0])),
+        };
+        if change(&mut edited) && edited.is_valid() {
+            edits.push((set, members, edited));
+        }
+    }
+    let mut any = false;
+    for (set, members, edited) in edits {
+        let Some(room) = world.rooms.get(face.room) else {
+            return any;
+        };
+        // A piece joins a set that already looks like its new one.
+        let twin = (scope == BandScope::Piece)
+            .then(|| {
+                room.band_sets
+                    .iter()
+                    .position(|s| same_look(s, &edited))
+                    .map(|i| i as u8)
+            })
+            .flatten()
+            .filter(|i| Some(*i) != set);
+        // Private when every reference to the set is one of these walls.
+        let private = set.is_some_and(|i| {
+            let mine = members
+                .iter()
+                .filter(|f| assignment(world, **f) == Some(Some(i)))
+                .count() as u32;
+            references(room).get(usize::from(i)).copied() == Some(mine) && mine > 0
+        });
+        if let Some(i) = twin {
+            for f in &members {
+                assign(world, *f, Some(i));
+            }
+        } else if let (true, Some(i)) = (private, set) {
+            if let Some(room) = world.rooms.get_mut(face.room) {
+                room.band_sets[usize::from(i)] = edited;
+            }
+        } else {
+            if room.band_sets.len() >= MAX_BAND_SETS {
+                continue;
+            }
+            let Some(room) = world.rooms.get_mut(face.room) else {
+                return any;
+            };
+            room.band_sets.push(edited);
+            let new = (room.band_sets.len() - 1) as u8;
+            for f in &members {
+                assign(world, *f, Some(new));
+            }
+        }
+        any = true;
+    }
+    if let Some(room) = world.rooms.get_mut(face.room) {
+        prune_sets(room);
+    }
+    any
+}
+
+/// [`edit_bands`] with scope Room: the set `face` is drawn with, in place.
+fn edit_room_set(
+    world: &mut GridWorld,
+    face: FaceRef,
+    assigned: Option<u8>,
+    change: impl FnOnce(&mut BandSet) -> bool,
+) -> bool {
     let current = effective_set(world, face).map(|(i, s)| (i, s.clone()));
-    // Edit a copy first so a no-op leaves nothing behind.
     let (existing, mut edited) = match &current {
         Some((i, set)) => (Some(*i), set.clone()),
         None => (None, BandSet::single("Bands", wall_material(world, face))),
@@ -249,70 +356,22 @@ pub fn edit_bands(
     if !change(&mut edited) || !edited.is_valid() {
         return false;
     }
-    let Some(room) = world.rooms.get(face.room) else {
+    let Some(room) = world.rooms.get_mut(face.room) else {
         return false;
     };
-    let full = room.band_sets.len() >= MAX_BAND_SETS;
-    match (scope, existing) {
-        (BandScope::Room, Some(i)) => {
-            if let Some(room) = world.rooms.get_mut(face.room) {
-                room.band_sets[usize::from(i)] = edited;
-            }
-        }
-        (BandScope::Run, Some(i)) => {
-            // Private when every reference to the set is one of this run's
-            // own walls.
-            let counts = references(room);
-            let mine = faces
-                .iter()
-                .filter(|f| assignment(world, **f) == Some(Some(i)))
-                .count() as u32;
-            let private = counts.get(usize::from(i)).copied() == Some(mine) && mine > 0;
-            if private {
-                if let Some(room) = world.rooms.get_mut(face.room) {
-                    room.band_sets[usize::from(i)] = edited;
-                }
-            } else {
-                if full {
-                    return false;
-                }
-                let Some(room) = world.rooms.get_mut(face.room) else {
-                    return false;
-                };
-                room.band_sets.push(edited);
-                let new = (room.band_sets.len() - 1) as u8;
-                for f in &faces {
-                    assign(world, *f, Some(new));
-                }
-            }
-        }
-        (BandScope::Room, None) => {
-            if full {
+    match existing {
+        Some(i) => room.band_sets[usize::from(i)] = edited,
+        None => {
+            if room.band_sets.len() >= MAX_BAND_SETS {
                 return false;
             }
-            let Some(room) = world.rooms.get_mut(face.room) else {
-                return false;
-            };
             room.band_sets.push(edited);
             room.defaults.bands = Some((room.band_sets.len() - 1) as u8);
             // A run that opted out of bands joins the default.
             if assigned == Some(NO_BANDS) {
-                for f in &faces {
-                    assign(world, *f, None);
+                for f in run_faces(world, face) {
+                    assign(world, f, None);
                 }
-            }
-        }
-        (BandScope::Run, None) => {
-            if full {
-                return false;
-            }
-            let Some(room) = world.rooms.get_mut(face.room) else {
-                return false;
-            };
-            room.band_sets.push(edited);
-            let new = (room.band_sets.len() - 1) as u8;
-            for f in &faces {
-                assign(world, *f, Some(new));
             }
         }
     }
@@ -330,8 +389,11 @@ pub fn clear_bands(world: &mut GridWorld, face: FaceRef, scope: BandScope) -> bo
         return false;
     }
     let changed = match scope {
-        BandScope::Run => {
-            let faces = run_faces(world, face);
+        BandScope::Run | BandScope::Piece => {
+            let faces = match scope {
+                BandScope::Piece => vec![face],
+                _ => run_faces(world, face),
+            };
             let default = face
                 .room_of(world)
                 .is_some_and(|r| r.defaults.bands.is_some());

@@ -130,3 +130,58 @@ fn the_bands_of_one_wall_cook_with_their_own_materials() {
     assert!(used.contains(&rid(3)) && used.contains(&rid(5)), "{used:?}");
     assert!(!used.contains(&rid(4)), "{used:?}");
 }
+
+#[test]
+fn a_band_painted_on_one_segment_cooks_on_that_segment_only() {
+    use crate::grid::derive::DerivedKind;
+    use crate::grid::edit::bands::{edit_bands, paint_band, BandScope};
+    use crate::grid::edit::FaceRef;
+    // Only the north run has bands: bottom in 3, top in 4.
+    let mut world = hall();
+    let north = |x: i32| FaceRef::derived(0, [x, 0], WallEdge::North, DerivedKind::Closure);
+    assert!(edit_bands(&mut world, north(0), BandScope::Run, |set| {
+        set.insert_line(0, Anchor::Abs(1024))
+            && set.set_band_material(0, Some(rid(3)))
+            && set.set_band_material(1, Some(rid(4)))
+    }));
+    let used = |world: &GridWorld| -> Vec<ResourceId> {
+        cook(world)
+            .unwrap()
+            .materials
+            .iter()
+            .filter_map(|(id, _)| *id)
+            .collect()
+    };
+    let before = used(&world);
+    assert!(
+        before.contains(&rid(4)) && !before.contains(&rid(5)),
+        "{before:?}"
+    );
+    // The top band of the middle segment in 5: its neighbours still cook in
+    // 4 (a run-wide paint would leave 4 nowhere).
+    assert!(paint_band(
+        &mut world,
+        north(1),
+        1,
+        Some(rid(5)),
+        BandScope::Piece
+    ));
+    let after = used(&world);
+    assert!(
+        after.contains(&rid(5)) && after.contains(&rid(4)),
+        "{after:?}"
+    );
+    // Painting the neighbours too leaves nothing in 4.
+    for x in [0, 2] {
+        assert!(paint_band(
+            &mut world,
+            north(x),
+            1,
+            Some(rid(5)),
+            BandScope::Piece
+        ));
+    }
+    assert!(!used(&world).contains(&rid(4)));
+    // The cook of the three pieces has the same shape as the unpainted one.
+    primitives(&world);
+}
