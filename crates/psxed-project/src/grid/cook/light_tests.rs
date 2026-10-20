@@ -178,6 +178,20 @@ fn the_pillar_shadow_is_there_in_the_cook() {
 use crate::grid::lighting::gather::{solve, FlatAlbedo, GatherInput, FALLBACK_ALBEDO};
 use crate::grid::lighting::{Gather, GlobalLight};
 
+/// Every tracked grid reference level.
+const ALL_REFERENCE_LEVELS: [&str; 10] = [
+    "grid-starter",
+    "grid-cathedral",
+    "grid-dungeon",
+    "grid-cave",
+    "grid-level008",
+    "grid-sewers",
+    "grid-west",
+    "grid-tower",
+    "grid-gate",
+    "grid-corridor",
+];
+
 /// The pillar hall, gathering its light.
 fn gathering_hall() -> GridWorld {
     let mut world = hall_with_pillar();
@@ -315,12 +329,7 @@ fn turning_a_quads_diagonal_keeps_every_corner_with_its_texel() {
 fn the_reference_levels_cook_to_the_same_quads_and_vertices_with_the_gather_on() {
     let mut table =
         String::from("level: rooms, quads+tris, vertices (flat) | (gathered), turned\n");
-    for name in [
-        "grid-starter",
-        "grid-cathedral",
-        "grid-dungeon",
-        "grid-cave",
-    ] {
+    for name in ALL_REFERENCE_LEVELS {
         let project = super::tests::load_reference(name).unwrap();
         let flat_world = project.active_scene().world.grid().unwrap().clone();
         let mut gathered_world = flat_world.clone();
@@ -532,12 +541,7 @@ fn mean_corner(cooked: &super::CookedLevel) -> (f64, usize, usize) {
 #[test]
 #[ignore = "prints the brightness of the reference levels under different settings"]
 fn tuning_survey() {
-    for name in [
-        "grid-starter",
-        "grid-cathedral",
-        "grid-dungeon",
-        "grid-cave",
-    ] {
+    for name in ALL_REFERENCE_LEVELS {
         let dir = crate::projects_dir().join(name);
         let project = crate::ProjectDocument::load_from_path(dir.join("project.ron")).unwrap();
         let scene = project.active_scene();
@@ -690,12 +694,7 @@ fn cook_against_preview(world: &GridWorld, lights: &[GridLight]) -> (usize, usiz
 #[test]
 fn every_corner_of_the_reference_levels_is_baked_alike_by_the_cook_and_the_preview() {
     let mut report = String::new();
-    for name in [
-        "grid-starter",
-        "grid-cathedral",
-        "grid-dungeon",
-        "grid-cave",
-    ] {
+    for name in ALL_REFERENCE_LEVELS {
         let project = super::tests::load_reference(name).unwrap();
         let scene = project.active_scene();
         let lights = crate::grid::lighting::scene_grid_lights(scene, 16.0);
