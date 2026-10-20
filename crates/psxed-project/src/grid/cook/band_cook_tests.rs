@@ -104,3 +104,29 @@ fn a_banded_wall_next_to_a_different_one_cooks_without_overlong_rings() {
     let (primitives, _) = primitives(&world);
     assert!(primitives > 0);
 }
+
+#[test]
+fn the_bands_of_one_wall_cook_with_their_own_materials() {
+    // A two band set: the bottom band in material 3, the top in material 4.
+    // The wall's own material (9) is drawn nowhere.
+    let mut world = hall();
+    let mut set = BandSet::single("two", Some(rid(3)));
+    set.insert_line(0, Anchor::Abs(1024));
+    set.set_band_material(1, Some(rid(4)));
+    world.rooms[0].band_sets.push(set);
+    world.rooms[0].defaults.bands = Some(0);
+    let cooked = cook(&world).unwrap();
+    let used: Vec<_> = cooked.materials.iter().filter_map(|(id, _)| *id).collect();
+    assert!(used.contains(&rid(3)) && used.contains(&rid(4)), "{used:?}");
+    assert!(!used.contains(&rid(9)), "{used:?}");
+    // Painting only the top band changes only the top band's material.
+    world.rooms[0].band_sets[0].set_band_material(1, Some(rid(5)));
+    let used: Vec<_> = cook(&world)
+        .unwrap()
+        .materials
+        .iter()
+        .filter_map(|(id, _)| *id)
+        .collect();
+    assert!(used.contains(&rid(3)) && used.contains(&rid(5)), "{used:?}");
+    assert!(!used.contains(&rid(4)), "{used:?}");
+}

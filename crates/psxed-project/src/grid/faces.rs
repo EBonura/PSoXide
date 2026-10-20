@@ -123,6 +123,10 @@ pub struct GridFace {
     /// The room's noise tint for this face, `(seed, percent)`: set on the
     /// faces of rough sectors in a room with a tint (see [`super::rough`]).
     pub tint_noise: Option<(u16, u8)>,
+    /// Which band of its wall's band set this face is a piece of (`None`
+    /// for a face that is not cut into bands). Faces of one wall share a
+    /// kind; this tells them apart.
+    pub band: Option<u8>,
 }
 
 #[derive(Clone, Copy)]
@@ -334,6 +338,7 @@ impl Builder<'_> {
             legacy_uv: self.legacy_uv,
             frame: self.frame,
             tint_noise: self.tint,
+            band: None,
         });
     }
 

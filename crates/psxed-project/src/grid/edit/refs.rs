@@ -513,6 +513,14 @@ pub enum GridElement {
         /// Which half, `0` or `1`.
         tri: u8,
     },
+    /// One band of a banded wall: `band` indexes the wall's band set. The
+    /// band is a piece of the wall's face, picked and painted on its own.
+    Band {
+        /// The wall.
+        face: FaceRef,
+        /// Index of the band in the wall's set.
+        band: u8,
+    },
     /// One edge of a face.
     Edge(EdgeRef),
     /// One corner of a face.
@@ -525,7 +533,7 @@ impl GridElement {
         match self {
             Self::Cell { room, .. } => *room,
             Self::Face(f) => f.room,
-            Self::Triangle { face, .. } => face.room,
+            Self::Triangle { face, .. } | Self::Band { face, .. } => face.room,
             Self::Edge(e) => e.face.room,
             Self::Vertex(v) => v.face.room,
         }
@@ -536,7 +544,7 @@ impl GridElement {
         match self {
             Self::Cell { cell, .. } => *cell,
             Self::Face(f) => f.cell(),
-            Self::Triangle { face, .. } => face.cell(),
+            Self::Triangle { face, .. } | Self::Band { face, .. } => face.cell(),
             Self::Edge(e) => e.face.cell(),
             Self::Vertex(v) => v.face.cell(),
         }

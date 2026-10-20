@@ -6,6 +6,7 @@ use super::super::leaf::LeafKey;
 use super::super::sector::WallEdge;
 use super::super::units::SECTOR_UNITS;
 use super::super::world::GridWorld;
+use super::bands;
 use super::rects::CellRect;
 use super::refs::{faces_of_cell, CornerRef, FaceRef, FaceTarget, GridElement, SurfaceKind};
 
@@ -98,6 +99,8 @@ impl GridSelection {
             GridElement::Cell { room, cell } => !faces_of_cell(world, *room, *cell).is_empty(),
             GridElement::Face(face) => face.exists(world),
             GridElement::Triangle { face, .. } => face.surface(world).is_some(),
+            GridElement::Band { face, band } => bands::effective_set(world, *face)
+                .is_some_and(|(_, set)| usize::from(*band) < set.bands.len()),
             GridElement::Edge(edge) => edge.face.exists(world),
             GridElement::Vertex(corner) => corner.height(world).is_some(),
         });
@@ -116,7 +119,7 @@ impl GridSelection {
                 GridElement::Face(face) => {
                     set.insert(*face);
                 }
-                GridElement::Triangle { face, .. } => {
+                GridElement::Triangle { face, .. } | GridElement::Band { face, .. } => {
                     set.insert(*face);
                 }
                 GridElement::Edge(edge) => {
@@ -138,10 +141,26 @@ impl GridSelection {
         whole.items = self
             .items
             .iter()
-            .filter(|e| !matches!(e, GridElement::Triangle { .. }))
+            .filter(|e| !matches!(e, GridElement::Triangle { .. } | GridElement::Band { .. }))
             .copied()
             .collect();
         whole.faces(world)
+    }
+
+    /// The selected bands as `(wall, band index)`, those of a wall that is
+    /// selected whole left out.
+    pub fn bands(&self, world: &GridWorld) -> Vec<(FaceRef, usize)> {
+        let whole: BTreeSet<FaceRef> = self.whole_faces(world).into_iter().collect();
+        let mut out: Vec<(FaceRef, usize)> = Vec::new();
+        for element in &self.items {
+            if let GridElement::Band { face, band } = element {
+                let entry = (*face, usize::from(*band));
+                if !whole.contains(face) && face.exists(world) && !out.contains(&entry) {
+                    out.push(entry);
+                }
+            }
+        }
+        out
     }
 
     /// The selected triangles as `(face, 0 or 1)`, those of a face that is
@@ -172,7 +191,9 @@ impl GridSelection {
                     set.insert(*corner);
                 }
                 GridElement::Edge(edge) => set.extend(edge.corners()),
-                GridElement::Face(face) => set.extend(face.corners(world)),
+                GridElement::Face(face) | GridElement::Band { face, .. } => {
+                    set.extend(face.corners(world));
+                }
                 GridElement::Triangle { face, tri } => {
                     set.extend(face.triangle_corners(world, *tri));
                 }

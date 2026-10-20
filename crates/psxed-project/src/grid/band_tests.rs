@@ -120,6 +120,23 @@ fn a_room_default_set_cuts_every_derived_wall_into_three_materials() {
 }
 
 #[test]
+fn the_faces_of_a_banded_wall_say_which_band_they_are() {
+    let mut world = hall(3, 2);
+    world.rooms[0].band_sets.push(trim_body_frieze());
+    world.rooms[0].defaults.bands = Some(0);
+    let faces = all_faces(&world);
+    let mut wall: Vec<(i32, Option<u8>)> = walls_on_north(&faces, 1)
+        .iter()
+        .map(|f| (y_span(f).0, f.band))
+        .collect();
+    wall.sort();
+    assert_eq!(wall, vec![(0, Some(0)), (256, Some(1)), (1792, Some(2))]);
+    // A wall without bands, and the floors, name none.
+    let plain = all_faces(&hall(3, 2));
+    assert!(plain.iter().all(|f| f.band.is_none()));
+}
+
+#[test]
 fn a_band_without_a_material_keeps_the_walls_own() {
     let mut world = hall(1, 1);
     let mut set = BandSet::single("s", None);

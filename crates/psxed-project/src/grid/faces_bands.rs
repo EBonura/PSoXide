@@ -125,9 +125,14 @@ impl Builder<'_> {
                 uv: mapper.texel(point_of(c[0], c[1])),
             }
         };
+        let first = self.out.len();
         for ring in band_geom::fan(&piece.ring) {
             let corners: Vec<Corner> = ring.iter().map(|c| corner(*c)).collect();
             self.push(wall.kind, corners, wall.toward, material, wall.double_sided);
+        }
+        let band = u8::try_from(piece.band).ok();
+        for face in &mut self.out[first..] {
+            face.band = band;
         }
     }
 }
