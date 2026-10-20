@@ -82,19 +82,7 @@ impl Builder<'_> {
                 a[1] + (b[1] - a[1]) / len * u,
             ]
         };
-        // Where a position along the edge is drawn: displaced by the room's
-        // jitter. Texels stay on the plain position.
-        let jitter = self.jitter;
-        let point = |u: i32| {
-            let at = plain(u);
-            match &jitter {
-                Some(j) => {
-                    let o = j.along(a, b, i64::from(u), i64::from(len));
-                    [at[0] + o[0], at[1] + o[1]]
-                }
-                None => at,
-            }
-        };
+        let point = plain;
         // Position along the host edge's walking direction, in grid units.
         let u_grid = |u: i32| -> f64 {
             let [px, pz] = plain(u);

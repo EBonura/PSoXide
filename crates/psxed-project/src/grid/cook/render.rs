@@ -489,7 +489,6 @@ impl RoomBuild {
         // diagonal the GPU splits a quad along.
         if keep.len() == 4
             && cx.rig.gather.is_some()
-            && face.tint_noise.is_none()
             && flip_diagonal(
                 cx, face, parent, &snapped, origin, packed_uv, &colours, bound.tint, ambient,
             )

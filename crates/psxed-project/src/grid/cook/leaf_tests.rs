@@ -369,13 +369,11 @@ fn random_mixed_rooms_cook_to_what_the_document_says_at_every_point() {
     }
 }
 
-/// Bands on every derived wall and rough rock on random leaves: faces stay
-/// watertight, every corner and every cut point moves by a function of its
-/// plan position alone.
+/// Bands on every derived wall of a room of random leaves: faces stay
+/// watertight.
 #[test]
-fn bands_and_rough_in_mixed_rooms_leave_no_hole() {
+fn bands_in_mixed_rooms_leave_no_hole() {
     use crate::grid::bands::{Anchor, Band, BandSet};
-    use crate::grid::rough::Rough;
     for seed in 0..16 {
         let mut room = random_room_with(100 + seed, false, true);
         room.band_sets = vec![BandSet {
@@ -384,33 +382,9 @@ fn bands_and_rough_in_mixed_rooms_leave_no_hole() {
             bands: vec![Band::default(), Band::default(), Band::default()],
         }];
         room.defaults.bands = Some(0);
-        let mut rng = Rng(seed + 5);
-        room.rough = Rough {
-            seed: seed as u16,
-            amp: Rough::default_amp(GridScale::DEFAULT),
-            tint: 20,
-        };
-        let keys: Vec<LeafKey> = room.leaves.keys().collect();
-        for key in keys {
-            room.leaf_mut(key).unwrap().rough = rng.below(4) as u8;
-        }
         let world = world_of(room);
         let found = holes(&world);
         assert!(found.is_empty(), "seed {seed}: {found:?}");
-        // The jitter really moved something.
-        let flat = {
-            let mut r = world.rooms[0].clone();
-            r.rough = Rough::default();
-            cook(&world_of(r)).unwrap()
-        };
-        let rough = cook(&world).unwrap();
-        assert_ne!(
-            flat.tables[0].vertices, rough.tables[0].vertices,
-            "seed {seed}"
-        );
-        // Collision is cooked from the document, not the displaced faces.
-        assert_eq!(flat.tables[0].sectors, rough.tables[0].sectors);
-        assert_eq!(flat.tables[0].walls, rough.tables[0].walls);
     }
 }
 

@@ -207,8 +207,6 @@ impl Lens {
                 *line = line.with_value(line.value() * f);
             }
         }
-        virt.rough = work.rough;
-        virt.rough.amp = virt.rough.amp.map(|a| (i32::from(a) * f).min(255) as u8);
         let mut before = BTreeMap::new();
         for tz in rlo[1]..=rhi[1] {
             for tx in rlo[0]..=rhi[0] {

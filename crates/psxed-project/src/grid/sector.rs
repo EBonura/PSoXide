@@ -174,9 +174,6 @@ pub struct GridSector {
     pub nwse: Vec<GridWall>,
     /// Walls on the NE-SW diagonal.
     pub nesw: Vec<GridWall>,
-    /// How rough the rock around this sector looks, 0 (none) to 3: the
-    /// render-only jitter and tint of [`super::rough`]. Two bits.
-    pub rough: u8,
 }
 
 impl Default for GridSector {
@@ -189,7 +186,6 @@ impl Default for GridSector {
             west: Vec::new(),
             nwse: Vec::new(),
             nesw: Vec::new(),
-            rough: 0,
         }
     }
 }
@@ -451,8 +447,6 @@ struct SectorDoc {
     #[serde(default)]
     wall_material: Option<ResourceId>,
     #[serde(default)]
-    rough: u8,
-    #[serde(default)]
     above: Vec<GridSpan>,
 }
 
@@ -464,7 +458,6 @@ impl Serialize for GridSector {
         let fields = 2
             + walls.iter().filter(|w| !w.is_empty()).count()
             + usize::from(ground.wall_material.is_some())
-            + usize::from(self.rough != 0)
             + usize::from(self.spans.len() > 1);
         let mut out = serializer.serialize_struct("GridSector", fields)?;
         out.serialize_field("floor", &ground.floor)?;
@@ -481,9 +474,6 @@ impl Serialize for GridSector {
             // As the option it is read back as (`Some((n))`): the bare id
             // made a project saved after a Raise unreadable.
             out.serialize_field("wall_material", &ground.wall_material)?;
-        }
-        if self.rough != 0 {
-            out.serialize_field("rough", &self.rough)?;
         }
         if self.spans.len() > 1 {
             out.serialize_field("above", &self.spans[1..])?;
@@ -510,7 +500,6 @@ impl<'de> Deserialize<'de> for GridSector {
             west: doc.west,
             nwse: doc.nwse,
             nesw: doc.nesw,
-            rough: doc.rough,
         })
     }
 }

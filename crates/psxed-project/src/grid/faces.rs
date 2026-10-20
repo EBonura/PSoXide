@@ -30,7 +30,6 @@ use super::faces_bands::{neighbour_heights, stitched_rings, BandedWall};
 use super::leaf::{LeafKey, CLICKS_PER_SECTOR};
 use super::overrides::WallMode;
 use super::room::GridRoom;
-use super::rough::Jitter;
 use super::sector::{GridSector, WallEdge};
 use super::surface::{GridSurface, GridTri, GridWall, WallFacing};
 use super::units::{GridScale, SECTOR_UNITS, TEXELS_PER_SECTOR};
@@ -120,9 +119,6 @@ pub struct GridFace {
     /// of an authored wall, the whole run of a derived wall, the plane
     /// rectangle. See [`super::uv`].
     pub frame: Frame,
-    /// The room's noise tint for this face, `(seed, percent)`: set on the
-    /// faces of rough sectors in a room with a tint (see [`super::rough`]).
-    pub tint_noise: Option<(u16, u8)>,
     /// Which band of its wall's band set this face is a piece of (`None`
     /// for a face that is not cut into bands). Faces of one wall share a
     /// kind; this tells them apart.
@@ -227,10 +223,6 @@ pub(super) struct Builder<'a> {
     /// The room the faces belong to, when they are walls that can be banded
     /// or cut into courses (`None` for planes).
     pub room_ref: Option<&'a GridRoom>,
-    /// The room's render-only jitter, for rooms that have one.
-    pub jitter: Option<Jitter<'a>>,
-    /// The noise tint of the sector being built.
-    pub tint: Option<(u16, u8)>,
     pub out: &'a mut Vec<GridFace>,
 }
 
@@ -258,19 +250,6 @@ impl Builder<'_> {
     /// The tiling default of `material`.
     pub(super) fn default_uv(&self, material: Option<ResourceId>) -> Option<UvMode> {
         material.and_then(|id| self.defaults.default_uv(id))
-    }
-}
-
-impl Builder<'_> {
-    /// Plan offset of the lattice corner at grid point `p`.
-    pub(super) fn jitter_at(&self, p: [i32; 2]) -> [i32; 2] {
-        match &self.jitter {
-            Some(j) => {
-                let [vx, vz] = j.lattice(p);
-                j.at(vx, vz)
-            }
-            None => [0, 0],
-        }
     }
 }
 
@@ -337,7 +316,6 @@ impl Builder<'_> {
             unlit: false,
             legacy_uv: self.legacy_uv,
             frame: self.frame,
-            tint_noise: self.tint,
             band: None,
         });
     }
@@ -379,13 +357,11 @@ impl Builder<'_> {
             let default = tri.material.and_then(|id| defaults.default_uv(id));
             Mapper::new(&tri.uv, default, frame, centre)
         };
-        let offsets = xz.map(|p| self.jitter_at(p));
         let corner = |h: &[i32; 4], i: usize, mapper: &Mapper| {
-            let (x, z) = (xz[i][0] + offsets[i][0], xz[i][1] + offsets[i][1]);
+            let (x, z) = (xz[i][0], xz[i][1]);
             Corner {
                 p: editor_point(scale, y_offset, x, h[i], z),
                 g: [x, y_offset + h[i], z],
-                // The texture stays on the undisplaced lattice.
                 uv: mapper.texel([f64::from(xz[i][0]), f64::from(xz[i][1])]),
             }
         };
@@ -478,10 +454,8 @@ impl Builder<'_> {
             toward = toward.map(|v| -v);
         }
         let double_sided = wall.facing == WallFacing::Both;
-        let ends = [self.jitter_at(a), self.jitter_at(b)];
         let corner = |end: usize, gy: i32| {
             let [px, pz] = if end == 0 { a } else { b };
-            let (px, pz) = (px + ends[end][0], pz + ends[end][1]);
             Corner {
                 p: editor_point(scale, y_offset, px, gy, pz),
                 g: [px, y_offset + gy, pz],
@@ -508,20 +482,12 @@ impl Builder<'_> {
                 .unwrap_or(span);
             let (u0, u1) = (u_grid(0), u_grid(1));
             let u_at = |u: i32| u0 + (u1 - u0) * f64::from(u) / f64::from(length);
-            let jitter = self.jitter;
             let point = |u: i32| -> [i32; 2] {
                 let k = f64::from(u) / f64::from(length);
-                let at = [
+                [
                     a[0] + (f64::from(b[0] - a[0]) * k).round() as i32,
                     a[1] + (f64::from(b[1] - a[1]) * k).round() as i32,
-                ];
-                match &jitter {
-                    Some(j) => {
-                        let o = j.along(a, b, i64::from(u), i64::from(length));
-                        [at[0] + o[0], at[1] + o[1]]
-                    }
-                    None => at,
-                }
+                ]
             };
             self.banded(&BandedWall {
                 kind,
@@ -637,8 +603,6 @@ pub fn cell_faces_with(
         legacy_uv: true,
         frame: Frame::around([[0.0, 0.0]]),
         room_ref: Some(r),
-        jitter: Jitter::new(r),
-        tint: (r.rough.tint > 0 && sector.rough & 3 > 0).then_some((r.rough.seed, r.rough.tint)),
         out,
     };
     builder.sector(sector);

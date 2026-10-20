@@ -28,7 +28,6 @@ use super::leaf_derive;
 use super::leaf_diag;
 use super::overrides::WallMode;
 use super::room::GridRoom;
-use super::rough::Jitter;
 use super::sector::{GridSector, WallEdge};
 use super::surface::GridSurface;
 use super::tree::neighbours::{has_finer, SIDES};
@@ -70,13 +69,7 @@ fn hangs(room: &GridRoom, piece: LeafKey, square: Square) -> Vec<Hang> {
 /// Put the hanging vertices into the rings of `faces[from..]` that run
 /// along their side, and fan any ring that grew past four corners into
 /// triangles. Only floors and ceilings are stitched.
-fn stitch(
-    faces: &mut Vec<GridFace>,
-    from: usize,
-    hangs: &[Hang],
-    scale: GridScale,
-    jitter: Option<Jitter<'_>>,
-) {
+fn stitch(faces: &mut Vec<GridFace>, from: usize, hangs: &[Hang], scale: GridScale) {
     if hangs.is_empty() {
         return;
     }
@@ -92,15 +85,7 @@ fn stitch(
         let mut inserted: Vec<usize> = Vec::new();
         for hang in hangs {
             let n = face.grid.len();
-            // Where the rock puts the side's ends and its middle.
-            let moved = |p: [i32; 2]| {
-                let o = jitter.map_or([0, 0], |j| {
-                    let [vx, vz] = j.lattice(p);
-                    j.at(vx, vz)
-                });
-                [p[0] + o[0], p[1] + o[1]]
-            };
-            let (e0, e1, mid) = (moved(hang.ends[0]), moved(hang.ends[1]), moved(hang.mid));
+            let (e0, e1, mid) = (hang.ends[0], hang.ends[1], hang.mid);
             let edge = (0..n).find(|&i| {
                 let (p, q) = (face.grid[i], face.grid[(i + 1) % n]);
                 let ends = [[p[0], p[2]], [q[0], q[2]]];
@@ -192,11 +177,6 @@ pub(super) fn cell_faces(
         legacy_uv: true,
         frame: Frame::around([[0.0, 0.0]]),
         room_ref: Some(r),
-        // The jitter lattice of a mixed room is the click lattice (see
-        // `rough::Jitter`): a corner, a hanging vertex and a wall segment end
-        // all move by a function of their position alone.
-        jitter: Jitter::new(r),
-        tint: None,
         out,
     };
     for &(key, sector) in &leaves {
@@ -234,8 +214,6 @@ fn leaf_faces(
     sector: &GridSector,
 ) {
     builder.leaf = key;
-    builder.tint =
-        (room.rough.tint > 0 && sector.rough & 3 > 0).then_some((room.rough.seed, room.rough.tint));
     let whole = key.level >= SECTOR_LEVEL;
     // Above a sector the leaf is cut at the sector border; the piece over
     // this sector is what is drawn.
@@ -269,8 +247,7 @@ fn leaf_faces(
         );
     }
     let scale = builder.scale;
-    let jitter = builder.jitter;
-    stitch(builder.out, from, &hanging, scale, jitter);
+    stitch(builder.out, from, &hanging, scale);
     if whole {
         for edge in WallEdge::ALL {
             for (index, wall) in sector.walls(edge).iter().enumerate() {

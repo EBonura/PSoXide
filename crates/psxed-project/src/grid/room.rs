@@ -8,7 +8,6 @@ use super::leaf::LeafKey;
 use super::leaf_map::{LeafError, LeafMap};
 use super::overrides::{EdgeOverrides, RoomDefaults, WallMode};
 use super::plane::GridPlane;
-use super::rough::Rough;
 use super::sector::GridSector;
 
 /// Distance fog for a room, in grid units.
@@ -103,8 +102,6 @@ pub struct GridRoom {
     /// Horizontal wall band sets, referenced by index from the room
     /// default, derived overrides and authored walls.
     pub band_sets: Vec<BandSet>,
-    /// The render-only jitter and tint of rough sectors.
-    pub rough: Rough,
 }
 
 impl GridRoom {
@@ -125,7 +122,6 @@ impl GridRoom {
             defaults: RoomDefaults::default(),
             edge_overrides: EdgeOverrides::default(),
             band_sets: Vec::new(),
-            rough: Rough::default(),
         }
     }
 
@@ -560,8 +556,6 @@ struct RoomDoc {
     edge_overrides: EdgeOverrides,
     #[serde(default)]
     band_sets: Vec<BandSet>,
-    #[serde(default)]
-    rough: Rough,
 }
 
 impl Serialize for GridRoom {
@@ -576,8 +570,7 @@ impl Serialize for GridRoom {
             + usize::from(!self.wall_mode.is_authored())
             + usize::from(!self.defaults.is_default())
             + usize::from(!self.edge_overrides.is_empty())
-            + usize::from(!self.band_sets.is_empty())
-            + usize::from(!self.rough.is_default());
+            + usize::from(!self.band_sets.is_empty());
         let mut out = serializer.serialize_struct("GridRoom", fields)?;
         out.serialize_field("name", &self.name)?;
         out.serialize_field("origin", &self.origin)?;
@@ -611,9 +604,6 @@ impl Serialize for GridRoom {
         if !self.band_sets.is_empty() {
             out.serialize_field("band_sets", &self.band_sets)?;
         }
-        if !self.rough.is_default() {
-            out.serialize_field("rough", &self.rough)?;
-        }
         out.end()
     }
 }
@@ -637,7 +627,6 @@ impl<'de> Deserialize<'de> for GridRoom {
             defaults: doc.defaults,
             edge_overrides: doc.edge_overrides,
             band_sets: doc.band_sets,
-            rough: doc.rough,
         };
         // The dense list is `z` major over the declared size. A list of a
         // different length is read as far as it goes: an entry past the
@@ -753,5 +742,28 @@ mod tests {
         room.trim_empty();
         assert_eq!((room.width, room.depth), (1, 1));
         assert_eq!(room.origin, [2, 2]);
+    }
+
+    /// Rock roughness was removed from the editor. A project saved while it
+    /// existed carries `rough` on a room and on its sectors: it must still
+    /// load, and saving it again drops the data.
+    #[test]
+    fn an_old_room_with_rough_data_loads_and_saves_without_it() {
+        let room = floor_room();
+        let plain = ron::to_string(&room).unwrap();
+        assert!(!plain.contains("rough"), "{plain}");
+        let old = plain
+            .replacen("(name:", "(rough:(seed:7,amp:(10,20,40),tint:30),name:", 1)
+            .replacen("(floor:", "(rough:2,floor:", 1);
+        assert_ne!(old, plain, "the fixture must carry rough data");
+        assert!(
+            old.contains("rough:(seed") && old.contains("rough:2"),
+            "{old}"
+        );
+        let loaded: GridRoom = ron::from_str(&old).unwrap_or_else(|e| panic!("{old}: {e}"));
+        assert_eq!(loaded, room);
+        let saved = ron::to_string(&loaded).unwrap();
+        assert!(!saved.contains("rough"), "{saved}");
+        assert_eq!(saved, plain);
     }
 }

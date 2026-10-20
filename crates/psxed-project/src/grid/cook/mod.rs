@@ -594,8 +594,6 @@ mod plane_tests;
 #[cfg(test)]
 mod ramp_tests;
 #[cfg(test)]
-mod rough_tests;
-#[cfg(test)]
 mod span_tests;
 #[cfg(test)]
 mod spawn_tests;

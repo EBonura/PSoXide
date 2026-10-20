@@ -84,7 +84,6 @@ pub fn split_sector(sector: &GridSector) -> [GridSector; 4] {
                 child.insert_span(i, span);
             }
         }
-        child.rough = sector.rough;
         child
     });
     for edge in WallEdge::ALL {
@@ -109,8 +108,6 @@ pub enum JoinBlock {
     /// A wall on an edge between two children, or a wall that is not the
     /// two halves of one wall on the parent's edge.
     Wall,
-    /// The children differ in roughness.
-    Rough,
 }
 
 impl JoinBlock {
@@ -120,7 +117,6 @@ impl JoinBlock {
             Self::Spans => "the cells have different storeys",
             Self::Surface => "the surfaces are not one plane with one look",
             Self::Wall => "a wall splits the cells",
-            Self::Rough => "the cells differ in roughness",
         }
     }
 }
@@ -131,9 +127,6 @@ pub fn join_sector(children: [&GridSector; 4]) -> Result<GridSector, JoinBlock> 
     let count = children[0].span_count();
     if children.iter().any(|c| c.span_count() != count) {
         return Err(JoinBlock::Spans);
-    }
-    if children.iter().any(|c| c.rough != children[0].rough) {
-        return Err(JoinBlock::Rough);
     }
     let mut parent = GridSector::default();
     for i in 0..count {
@@ -167,7 +160,6 @@ pub fn join_sector(children: [&GridSector; 4]) -> Result<GridSector, JoinBlock> 
             parent.insert_span(i, span);
         }
     }
-    parent.rough = children[0].rough;
     // Walls: the two children on each parent edge must hold the two halves
     // of the same walls; every other edge must hold none.
     let mut used = [[false; 6]; 4];

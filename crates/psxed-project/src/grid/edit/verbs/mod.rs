@@ -52,7 +52,6 @@ pub struct Snapshot {
     band_sets: Vec<super::super::bands::BandSet>,
     defaults: super::super::overrides::RoomDefaults,
     edge_overrides: super::super::overrides::EdgeOverrides,
-    rough: super::super::rough::Rough,
 }
 
 impl Snapshot {
@@ -73,7 +72,6 @@ impl Snapshot {
             band_sets: target.band_sets.clone(),
             defaults: target.defaults,
             edge_overrides: target.edge_overrides.clone(),
-            rough: target.rough,
         })
     }
 
@@ -100,7 +98,6 @@ impl Snapshot {
         room.band_sets = self.band_sets.clone();
         room.defaults = self.defaults;
         room.edge_overrides = self.edge_overrides.clone();
-        room.rough = self.rough;
     }
 }
 

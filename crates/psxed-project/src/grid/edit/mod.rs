@@ -10,7 +10,6 @@
 //! * [`walls`]: gap-filling wall placement along edges.
 //! * [`selection`]: the selection set and range rules.
 //! * [`region`]: the set of sectors the level verbs act on.
-//! * [`rough`]: the rock level of sectors and the room's jitter settings.
 //! * [`verbs`]: the level verbs (Raise/Lower, Ramp, Stairs).
 //! * [`convert`]: converting a legacy room to derived walls.
 //! * [`delete`]: deleting faces and sectors.
@@ -39,7 +38,6 @@ pub mod planes;
 pub mod rects;
 pub mod refs;
 pub mod region;
-pub mod rough;
 pub mod selection;
 pub mod spans;
 pub mod surfaces;

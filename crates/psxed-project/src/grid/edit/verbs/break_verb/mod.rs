@@ -134,7 +134,6 @@ impl BreakStyle {
                 keep_walkable: true,
                 mix_materials: false,
                 gaps: false,
-                jitter: 0,
                 ..BreakParams::default()
             },
         }
@@ -161,8 +160,6 @@ pub struct BreakParams {
     /// intensity. Off unless asked for: a gap in the middle of a floor does
     /// not cut the route, so the walkability mask never refuses it.
     pub gaps: bool,
-    /// The rough level (0 to 3) to give the broken sectors, 0 for none.
-    pub jitter: u8,
     /// The character's walking numbers.
     pub limits: WalkLimits,
 }
@@ -177,7 +174,6 @@ impl Default for BreakParams {
             spawns: Vec::new(),
             mix_materials: false,
             gaps: false,
-            jitter: 0,
             limits: WalkLimits::DEFAULT,
         }
     }

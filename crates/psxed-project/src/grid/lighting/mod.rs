@@ -33,7 +33,7 @@ pub use settings::GlobalLight;
 use super::cook::units::RuntimeUnits;
 use super::faces::GridFace;
 use super::light::{
-    lit_face_corner, lit_face_corner_gathered, noise_tint, FacingShade, GatheredAmbient, GridLight,
+    lit_face_corner, lit_face_corner_gathered, FacingShade, GatheredAmbient, GridLight,
 };
 use crate::{NodeKind, Scene};
 use gather::SampleKey;
@@ -232,7 +232,7 @@ impl BakeRig<'_> {
         tint: [u8; 3],
         ambient: [u8; 3],
     ) -> [u8; 3] {
-        let lit = match self.gather {
+        match self.gather {
             None => lit_face_corner(
                 face,
                 point,
@@ -261,10 +261,6 @@ impl BakeRig<'_> {
                     self.shade,
                 )
             }
-        };
-        match corner {
-            Some(c) => noise_tint(face, c, lit),
-            None => lit,
         }
     }
 

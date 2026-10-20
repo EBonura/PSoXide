@@ -151,7 +151,6 @@ fn sample_sector(room: &GridRoom, cell: [i32; 2]) -> GridSector {
     let first = leaves.first().map(|(_, s)| *s);
     let mut out = GridSector::default();
     if let Some(first) = first {
-        out.rough = first.rough;
         out.set_ground_wall_material(first.ground_wall_material());
     }
     let sample = |ceiling: bool| -> Option<GridSurface> {

@@ -67,8 +67,6 @@ pub fn mesh_faces_with(
             min: [0.0, 0.0],
             max: [64.0, 64.0],
         },
-        jitter: None,
-        tint: None,
         out,
     };
     let (scale, y_offset) = (builder.scale, builder.y_offset);

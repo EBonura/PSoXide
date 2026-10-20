@@ -54,14 +54,14 @@ fn shape(f: &GridFace) -> Shape {
 #[test]
 fn the_leaf_path_makes_the_faces_of_the_sector_path_for_whole_sectors() {
     // Run the leaf path over every cell of every reference room. The only
-    // differences allowed are the ones the leaf path states: rough jitter
-    // (rooms with rough sectors) and banded wall stitching.
+    // differences allowed are the ones the leaf path states: banded wall
+    // stitching.
     let mut compared = 0;
     for name in PROJECTS {
         let project = load(name);
         let world = project.active_scene().world.grid().expect("a grid project");
         for (index, room) in world.rooms.iter().enumerate() {
-            if room.rough.jitters() || !room.band_sets.is_empty() {
+            if !room.band_sets.is_empty() {
                 continue;
             }
             for [x, z] in room.face_cells() {

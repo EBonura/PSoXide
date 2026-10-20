@@ -32,7 +32,6 @@
 //!   and the smart paint rules the level verbs apply.
 //! * [`leaf`] and [`leaf_map`]: the quadtree of leaves a room's cells are.
 //! * [`sector`]: one leaf, its column of spans and its six wall edges.
-//! * [`rough`]: the render-only jitter and noise tint of rough rock.
 //! * [`room`]: one room, its leaves and its growth operations.
 //! * [`world`]: the document root and the [`SceneWorld`] discriminator.
 //! * [`limits`]: caps, validation and the budget readout.
@@ -80,7 +79,6 @@ pub mod palette;
 pub mod plane;
 pub mod plane_faces;
 pub mod room;
-pub mod rough;
 pub mod sector;
 pub mod sector_view;
 pub mod slope;
