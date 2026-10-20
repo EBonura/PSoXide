@@ -525,6 +525,20 @@ pub fn paint_band(
     })
 }
 
+/// Join band `other` of `face`'s wall to the band `keep` beside it, taking the
+/// cut between them away (what splitting the wall did, undone). The joined
+/// band keeps `keep`'s material and rule. With scope Run the cut goes from
+/// the whole run, as it was made.
+pub fn merge_bands(
+    world: &mut GridWorld,
+    face: FaceRef,
+    keep: usize,
+    other: usize,
+    scope: BandScope,
+) -> bool {
+    edit_bands(world, face, scope, |set| set.merge_bands(keep, other))
+}
+
 /// How many wall faces the run of `face` has, for the "applies to N wall
 /// segments" line.
 pub fn run_len(world: &GridWorld, face: FaceRef) -> usize {

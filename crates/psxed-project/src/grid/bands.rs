@@ -178,6 +178,22 @@ impl BandSet {
         true
     }
 
+    /// Join band `other` to the band `keep` next to it, removing the cut
+    /// between them. The joined band is `keep`'s: its material and texture
+    /// rule stay. Returns false when the two are not neighbours.
+    pub fn merge_bands(&mut self, keep: usize, other: usize) -> bool {
+        if !self.is_valid() || keep.max(other) >= self.bands.len() || keep.abs_diff(other) != 1 {
+            return false;
+        }
+        let kept = self.bands[keep].clone();
+        let line = keep.min(other);
+        if !self.remove_line(line) {
+            return false;
+        }
+        self.bands[line] = kept;
+        true
+    }
+
     /// Replace the anchor of line `index`.
     pub fn set_line(&mut self, index: usize, anchor: Anchor) -> bool {
         match self.lines.get_mut(index) {

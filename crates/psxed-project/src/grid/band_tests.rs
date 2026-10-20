@@ -4,7 +4,7 @@
 use super::bands::{Anchor, BandSet, BandV, NO_BANDS};
 use super::derive::{edge_key, DerivedKind};
 use super::edit::bands::{
-    band_at, clear_bands, edit_bands, effective_set, paint_band, run_faces, BandScope,
+    band_at, clear_bands, edit_bands, effective_set, merge_bands, paint_band, run_faces, BandScope,
 };
 use super::edit::FaceRef;
 use super::faces::{all_faces, GridFace, GridFaceKind};
@@ -824,4 +824,102 @@ fn a_piece_edit_of_an_authored_run_reaches_one_wall_record() {
         .map(|x| effective_set(&world, wall(x)).and_then(|(_, s)| s.bands[0].material))
         .collect();
     assert_eq!(got, vec![None, Some(rid(5)), None]);
+}
+
+// ---- merging two bands back into one ----
+
+#[test]
+fn merging_two_bands_takes_the_cut_away_and_keeps_the_named_ones_look() {
+    let mut set = BandSet::single("walls", Some(rid(1)));
+    assert!(set.insert_line(0, Anchor::Abs(1024)));
+    assert!(set.insert_line(1, Anchor::Abs(1536)));
+    set.set_band_material(1, Some(rid(2)));
+    set.set_band_material(2, Some(rid(3)));
+    // Keep the upper of bands 1 and 2: the cut between them goes.
+    let mut up = set.clone();
+    assert!(up.merge_bands(2, 1));
+    assert_eq!(up.lines, vec![Anchor::Abs(1024)]);
+    assert_eq!(
+        up.bands.iter().map(|b| b.material).collect::<Vec<_>>(),
+        vec![Some(rid(1)), Some(rid(3))]
+    );
+    // And the lower.
+    let mut down = set.clone();
+    assert!(down.merge_bands(1, 2));
+    assert_eq!(down.lines, vec![Anchor::Abs(1024)]);
+    assert_eq!(down.bands[1].material, Some(rid(2)));
+    // Bands that are not neighbours, or that do not exist, do not merge.
+    let mut bad = set.clone();
+    assert!(!bad.merge_bands(0, 2));
+    assert!(!bad.merge_bands(1, 1));
+    assert!(!bad.merge_bands(2, 3));
+    assert_eq!(bad, set);
+}
+
+#[test]
+fn merging_a_run_takes_the_cut_from_every_segment_and_keeps_each_ones_paint() {
+    let mut world = cut_run();
+    // Segment 1 painted in 5 on its lower band, in 6 on its upper one.
+    assert!(paint_band(
+        &mut world,
+        north_wall(1),
+        0,
+        Some(rid(5)),
+        BandScope::Piece
+    ));
+    assert!(paint_band(
+        &mut world,
+        north_wall(1),
+        1,
+        Some(rid(6)),
+        BandScope::Piece
+    ));
+    // Keep the upper band.
+    assert!(merge_bands(&mut world, north_wall(1), 1, 0, BandScope::Run));
+    for cell in 0..4 {
+        let set = effective_set(&world, north_wall(cell)).unwrap().1;
+        assert!(set.lines.is_empty(), "cell {cell}");
+        assert_eq!(set.bands.len(), 1, "cell {cell}");
+    }
+    assert_eq!(band_material(&world, 1, 0), Some(rid(6)));
+    assert_eq!(band_material(&world, 0, 0), Some(rid(9)));
+    // Merged back to plain, the sets that look alike are one again at the
+    // next piece edit; none is left over for a wall nobody uses.
+    assert!(world.rooms[0].band_sets.len() <= 2);
+    // Nothing left to merge.
+    assert!(!merge_bands(
+        &mut world,
+        north_wall(1),
+        1,
+        0,
+        BandScope::Run
+    ));
+}
+
+#[test]
+fn merging_one_segment_leaves_the_rest_of_the_run_cut() {
+    let mut world = cut_run();
+    assert!(merge_bands(
+        &mut world,
+        north_wall(2),
+        0,
+        1,
+        BandScope::Piece
+    ));
+    assert!(effective_set(&world, north_wall(2))
+        .unwrap()
+        .1
+        .lines
+        .is_empty());
+    for cell in [0, 1, 3] {
+        assert_eq!(
+            effective_set(&world, north_wall(cell))
+                .unwrap()
+                .1
+                .lines
+                .len(),
+            1,
+            "cell {cell}"
+        );
+    }
 }
