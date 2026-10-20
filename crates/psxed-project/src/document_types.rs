@@ -221,7 +221,7 @@ pub const EDITOR_VIEW_STATE_FILE: &str = ".psxed-view.ron";
 /// Where the editor was looking: camera, overlay visibility, workspace and
 /// 2D layout. Kept in [`EDITOR_VIEW_STATE_FILE`] beside the project, so
 /// looking around never edits the project, marks it unsaved, or enters undo.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct EditorViewState {
     #[serde(default)]
     pub camera: EditorCameraState,
@@ -231,6 +231,29 @@ pub struct EditorViewState {
     pub workspace: EditorWorkspaceState,
     #[serde(default)]
     pub viewport: EditorViewportState,
+    /// Edge, in points, of the material swatches in the palette. The editor
+    /// snaps it to one of its sizes on load.
+    #[serde(default = "default_palette_swatch")]
+    pub palette_swatch: u16,
+}
+
+/// The palette swatch edge a view file without one reads back as.
+pub const DEFAULT_PALETTE_SWATCH: u16 = 44;
+
+fn default_palette_swatch() -> u16 {
+    DEFAULT_PALETTE_SWATCH
+}
+
+impl Default for EditorViewState {
+    fn default() -> Self {
+        Self {
+            camera: EditorCameraState::default(),
+            visibility: EditorVisibilityState::default(),
+            workspace: EditorWorkspaceState::default(),
+            viewport: EditorViewportState::default(),
+            palette_swatch: DEFAULT_PALETTE_SWATCH,
+        }
+    }
 }
 
 impl EditorViewState {
@@ -242,6 +265,7 @@ impl EditorViewState {
             visibility: project.editor_visibility,
             workspace: project.editor_workspace,
             viewport: project.editor_viewport,
+            palette_swatch: DEFAULT_PALETTE_SWATCH,
         }
     }
 
