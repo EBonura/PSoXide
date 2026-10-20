@@ -26,6 +26,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::caster::FaceCaster;
 use super::probe::CollisionProbe;
+use super::probes::{ProbePlan, ProbeSite};
 use super::settings::GlobalLight;
 use crate::grid::cook::units::RuntimeUnits;
 use crate::grid::faces::{all_faces_with, GridFace, GridFaceKind};
@@ -128,6 +129,11 @@ impl SampleKey {
 #[derive(Default)]
 pub struct GiField {
     map: HashMap<SampleKey, [f32; 3]>,
+    /// Where the world's light probes sit, and what the full sphere around
+    /// each brings in (occlusion, sky and bounce, before the lamps), parallel
+    /// to the plan's sites.
+    probes: ProbePlan,
+    probe_ambient: Vec<[f32; 3]>,
     /// What the solve did, for the log.
     pub stats: GatherStats,
 }
@@ -136,6 +142,17 @@ impl GiField {
     /// The gathered ambient of the sample `key`, if the solve had it.
     pub fn get(&self, key: &SampleKey) -> Option<[f64; 3]> {
         self.map.get(key).map(|v| v.map(f64::from))
+    }
+
+    /// The probe sites the solve planned.
+    pub fn probe_plan(&self) -> &ProbePlan {
+        &self.probes
+    }
+
+    /// The gathered ambient of probe site `index` of [`Self::probe_plan`], in
+    /// the bake's 128-neutral units.
+    pub fn probe_ambient(&self, index: usize) -> Option<[f64; 3]> {
+        self.probe_ambient.get(index).map(|v| v.map(f64::from))
     }
 
     /// Samples held.
@@ -253,6 +270,32 @@ pub fn hemisphere_dir(normal: [f64; 3], i: u32, count: u32, turn: f64) -> [f64; 
     let r = u1.sqrt();
     let (x, y, z) = (r * phi.cos(), r * phi.sin(), (1.0 - u1).sqrt());
     core::array::from_fn(|k| t[k] * x + b[k] * y + normal[k] * z)
+}
+
+/// The i-th of `count` directions spread evenly over the whole sphere, the
+/// pattern turned by `turn` (0..1 of a full circle).
+pub fn sphere_dir(i: u32, count: u32, turn: f64) -> [f64; 3] {
+    let z = 1.0 - 2.0 * (f64::from(i) + 0.5) / f64::from(count);
+    let r = (1.0 - z * z).max(0.0).sqrt();
+    let phi = TAU * (radical_inverse(i) + turn);
+    [r * phi.cos(), z, r * phi.sin()]
+}
+
+/// A hash of where a probe sits, to turn its ray pattern by.
+fn probe_seed(site: &ProbeSite) -> u32 {
+    let mut h = 0x811c_9dc5u32;
+    let mut feed = |bytes: &[u8]| {
+        for &b in bytes {
+            h ^= u32::from(b);
+            h = h.wrapping_mul(0x0100_0193);
+        }
+    };
+    feed(&site.room.to_le_bytes());
+    feed(&site.cell.to_le_bytes());
+    feed(&site.local_y.to_le_bytes());
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x85eb_ca6b);
+    h ^ (h >> 13)
 }
 
 /// A step of [`INWARD_STEP`] from the corner `point` of the face with grid
@@ -534,15 +577,70 @@ pub fn solve(input: &GatherInput<'_>) -> Option<GiField> {
         }
     }
 
+    // The light probes: the same rays over a full sphere about a point in
+    // open air, reading the lit walls the solve above ended with.
+    let plan = ProbePlan::build(world, &units, input.probe).unwrap_or_default();
+    let mut probe_ambient = vec![[0.0f32; 3]; plan.len()];
+    let bounce_on = settings.bounces > 0 && occlusion > 0.0;
+    let ok = par_chunks(&mut probe_ambient, 1, input.cancel, &|first, out| {
+        for (k, slot) in out.iter_mut().enumerate() {
+            let site = &plan.sites[first + k];
+            let ambient = ambient_of(usize::from(site.room));
+            let sky = settings.sky.map_or(ambient, |c| c.map(f64::from));
+            let turn = f64::from(probe_seed(site)) / 4_294_967_296.0;
+            let mut sum = [0.0f64; 3];
+            for i in 0..n_rays {
+                let dir = sphere_dir(i, n_rays, turn);
+                match caster.cast(site.point, dir, tmax) {
+                    None => add3(&mut sum, if sky_differs { sky } else { ambient }),
+                    Some(hit) if hit.t > reach => add3(&mut sum, ambient),
+                    Some(hit) => {
+                        add3(&mut sum, ambient.map(|a| (1.0 - occlusion) * a));
+                        if bounce_on && hit.front {
+                            let ids = corner_sample[hit.face];
+                            let mut e = [0.0f64; 3];
+                            for (wi, corner) in hit.weights.iter().zip(hit.corners) {
+                                let t = ids[usize::from(corner).min(3)] as usize;
+                                add3(
+                                    &mut e,
+                                    core::array::from_fn(|c| {
+                                        wi * (f64::from(direct[t][c]) + f64::from(gi[t][c]))
+                                    }),
+                                );
+                            }
+                            let rho = face_albedo[hit.face];
+                            add3(
+                                &mut sum,
+                                core::array::from_fn(|c| {
+                                    occlusion * gain * f64::from(rho[c]) * e[c]
+                                }),
+                            );
+                        }
+                    }
+                }
+            }
+            let inv = 1.0 / f64::from(n_rays);
+            *slot = sum.map(|v| (v * inv) as f32);
+        }
+    });
+    if !ok {
+        return None;
+    }
+
     let stats = GatherStats {
         faces: faces.len(),
         samples: count,
-        rays: count as u64 * u64::from(n_rays),
+        rays: count as u64 * u64::from(n_rays) + plan.len() as u64 * u64::from(n_rays),
         passes,
         threads: threads(),
     };
     let map = keys.into_iter().zip(gi).collect();
-    Some(GiField { map, stats })
+    Some(GiField {
+        map,
+        probes: plan,
+        probe_ambient,
+        stats,
+    })
 }
 
 #[cfg(test)]

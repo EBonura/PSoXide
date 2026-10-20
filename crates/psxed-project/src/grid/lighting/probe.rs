@@ -133,6 +133,14 @@ impl CollisionProbe {
         })
     }
 
+    /// Run `f` with the collision world.
+    pub fn with_collision<R>(
+        &self,
+        f: impl FnOnce(&psx_grid::collision::GridCollision<'_>) -> R,
+    ) -> Result<R, String> {
+        self.with_session(|set| f(&set.collision()))
+    }
+
     fn with_session<R>(&self, f: impl FnOnce(&ResidentRooms<'_>) -> R) -> Result<R, String> {
         let level = LevelView::parse(words_as_bytes(&self.core, self.core_len))
             .map_err(|e| format!("collision probe core: {e:?}"))?;

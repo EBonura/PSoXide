@@ -217,6 +217,36 @@ pub fn accumulate_direct(
     }
 }
 
+/// Add the light of every lamp that reaches the free point `point` to
+/// `accumulated`, in the bake's 128-neutral units: the linear falloff of
+/// [`accumulate_direct`] with no facing term, because a character is lit from
+/// every side at once. `occluded(from, to)` is the same shadow query, asked
+/// from the point itself (a character's chest is in open air, so there is no
+/// surface to nudge off).
+pub fn accumulate_omni(
+    accumulated: &mut [f64; 3],
+    point: [f64; 3],
+    lights: &[GridLight],
+    occluded: &dyn Fn([f64; 3], [f64; 3]) -> bool,
+) {
+    for light in lights {
+        let to_light = [
+            light.position[0] - point[0],
+            light.position[1] - point[1],
+            light.position[2] - point[2],
+        ];
+        let distance_squared = dot(to_light, to_light);
+        if distance_squared >= light.radius * light.radius || occluded(point, light.position) {
+            continue;
+        }
+        let attenuation = 1.0 - distance_squared.sqrt() / light.radius;
+        let weight = attenuation * f64::from(light.intensity_q8) / 256.0;
+        for (channel, color) in accumulated.iter_mut().zip(light.color) {
+            *channel += f64::from(color) * weight;
+        }
+    }
+}
+
 /// Shadow ray start offset of a free plane's corner, in the bake's unit when
 /// that is runtime units (the cook). The editor preview casts no shadows and
 /// ignores it.

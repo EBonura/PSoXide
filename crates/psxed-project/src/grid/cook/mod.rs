@@ -22,7 +22,7 @@ pub mod units;
 use psx_grid::write::{LevelCore, RoomChunk};
 use psx_grid::{
     Material, RoomRecord, CHUNK_HAS_LOD, CHUNK_HAS_PLANES, LEVEL_HAS_PLANES, LEVEL_HAS_SKY,
-    ROOM_FOG, ROOM_OUTDOOR, ROOM_SPANS, ROOM_TREE, SECTION_COUNT, SECTOR_BYTES,
+    ROOM_FOG, ROOM_OUTDOOR, ROOM_PROBES, ROOM_SPANS, ROOM_TREE, SECTION_COUNT, SECTOR_BYTES,
 };
 
 pub use render::{BoundMaterial, MaterialBinder};
@@ -131,6 +131,10 @@ pub struct RoomReport {
     pub bytes: usize,
     /// Bytes per section, in `psx_grid::section` order.
     pub section_bytes: [usize; SECTION_COUNT],
+    /// Bytes of the light probe block (record and tables), zero without one.
+    pub probe_bytes: usize,
+    /// Light probes (sectors with a floor, one more per extra floor).
+    pub probes: usize,
 }
 
 impl CookReport {
@@ -160,7 +164,7 @@ impl CookReport {
         for (i, r) in self.rooms.iter().enumerate() {
             let c = |ids: &[usize]| ids.iter().map(|&k| r.section_bytes[k]).sum::<usize>();
             text.push_str(&format!(
-                "  room {i} {:?} {}x{}: {} faces -> {} quads + {} tris{}, {} verts, {} lod quads over {}, {} B (collision {} B, vertices {} B, quads {} B, cells {} B)\n",
+                "  room {i} {:?} {}x{}: {} faces -> {} quads + {} tris{}, {} verts, {} lod quads over {}, {} B (collision {} B, vertices {} B, quads {} B, cells {} B, {} light probes {} B)\n",
                 r.name,
                 r.width,
                 r.depth,
@@ -192,6 +196,8 @@ impl CookReport {
                 c(&[9]),
                 c(&[10]),
                 c(&[11]),
+                r.probes,
+                r.probe_bytes,
             ));
         }
         text
@@ -287,10 +293,17 @@ pub fn cook_level(
     } else {
         None
     };
+    // The light probes sit at the floors the collision holds; a world that
+    // gathers its light already planned them for its solve.
+    let plan = match &field {
+        Some(field) => field.probe_plan().clone(),
+        None => crate::grid::lighting::ProbePlan::build(world, &units, &probe)?,
+    };
     probe.with_occlusion(|own_los| {
         cook_rooms(
             input,
             field.as_ref(),
+            &plan,
             occluded.unwrap_or(own_los),
             world,
             units,
@@ -339,6 +352,7 @@ fn gather_field(
 fn cook_rooms(
     input: CookInput<'_>,
     field: Option<&crate::grid::lighting::GiField>,
+    plan: &crate::grid::lighting::ProbePlan,
     occluded: &dyn Fn([f64; 3], [f64; 3]) -> bool,
     world: &GridWorld,
     units: RuntimeUnits,
@@ -353,6 +367,22 @@ fn cook_rooms(
     let mut records: Vec<RoomRecord> = Vec::new();
     let mut any_sky = false;
     let mut any_planes = false;
+    // The light probes, baked by the rig the quads are coloured with.
+    let mut probe_tables = {
+        let rig = crate::grid::lighting::BakeRig {
+            units,
+            lights: input.lights,
+            shade: world.shading,
+            occluded,
+            gather: world
+                .global_light
+                .enabled
+                .then_some(crate::grid::lighting::Gather { field }),
+        };
+        plan.tables(|index, site| {
+            rig.probe(index, site, world.rooms[usize::from(site.room)].ambient)
+        })
+    };
     for (index, room) in world.rooms.iter().enumerate() {
         let origin = origins[index];
         let col = std::mem::take(&mut cols[index]);
@@ -424,6 +454,7 @@ fn cook_rooms(
             sectors: col.sectors,
             tree: col.tree,
             spans: col.spans,
+            probes: probe_tables[index].take(),
             exts: col.exts,
             walls: col.walls,
             splitbs: col.splitbs,
@@ -458,12 +489,19 @@ fn cook_rooms(
                 .count(),
             bytes: 0,
             section_bytes: chunk.section_bytes(),
+            probe_bytes: chunk.probes.as_ref().map_or(0, |p| p.bytes()),
+            probes: plan
+                .sites
+                .iter()
+                .filter(|site| usize::from(site.room) == index)
+                .count(),
         });
         let fog = &room.fog;
         let flags = (if outdoor { ROOM_OUTDOOR } else { 0 })
             | (if fog.enabled { ROOM_FOG } else { 0 })
             | (if chunk.tree.is_some() { ROOM_TREE } else { 0 })
-            | (if chunk.spans.is_some() { ROOM_SPANS } else { 0 });
+            | (if chunk.spans.is_some() { ROOM_SPANS } else { 0 })
+            | (if chunk.probes.is_some() { ROOM_PROBES } else { 0 });
         records.push(RoomRecord {
             pack_sector: 0,
             pack_sectors: 0,
@@ -591,6 +629,8 @@ mod motor_harness;
 mod natural_tests;
 #[cfg(test)]
 mod plane_tests;
+#[cfg(test)]
+mod probe_tests;
 #[cfg(test)]
 mod ramp_tests;
 #[cfg(test)]

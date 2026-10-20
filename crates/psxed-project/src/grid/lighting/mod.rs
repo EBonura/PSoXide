@@ -22,18 +22,21 @@ pub mod gather;
 #[cfg(test)]
 mod gather_tests;
 pub mod probe;
+pub mod probes;
 pub mod settings;
 
 pub use albedo::AlbedoTable;
 pub use caster::{FaceCaster, RayHit};
 pub use gather::{BakeMaterials, GiField};
 pub use probe::CollisionProbe;
+pub use probes::{ProbePlan, ProbeSite, ProbeStore, CHEST_UNITS};
 pub use settings::GlobalLight;
 
 use super::cook::units::RuntimeUnits;
 use super::faces::GridFace;
 use super::light::{
-    lit_face_corner, lit_face_corner_gathered, FacingShade, GatheredAmbient, GridLight,
+    accumulate_omni, lit_face_corner, lit_face_corner_gathered, shoulder, FacingShade,
+    GatheredAmbient, GridLight,
 };
 use crate::{NodeKind, Scene};
 use gather::SampleKey;
@@ -285,6 +288,31 @@ impl BakeRig<'_> {
         )
     }
 
+    /// The light at probe site number `index` of the plan, `ambient` being
+    /// its room's ambient: what a character standing there is lit by, in the
+    /// bake's 128-neutral units.
+    ///
+    /// The lamps reach it from every side with the same falloff and the same
+    /// shadow query as a face corner, but no facing term (a character has no
+    /// side to turn to a lamp). The ambient is the room's, or in a world that
+    /// gathers its light what the full sphere around the point brings in
+    /// (the field's own probe pass), through the same soft shoulder the
+    /// corners take. There is no directional term on top: a model has one
+    /// tint for its whole mesh, so a direction could only brighten or darken
+    /// all of it and would count the lamp twice.
+    pub fn probe(&self, index: usize, site: &ProbeSite, ambient: [u8; 3]) -> [u8; 3] {
+        let flat = ambient.map(f64::from);
+        let mut light = match self.gather {
+            Some(Gather { field: Some(field) }) => field.probe_ambient(index).unwrap_or(flat),
+            _ => flat,
+        };
+        accumulate_omni(&mut light, site.point, self.lights, self.occluded);
+        match self.gather {
+            None => light.map(|v| v.round().clamp(0.0, 255.0) as u8),
+            Some(_) => light.map(|v| shoulder(v).round().clamp(0.0, 255.0) as u8),
+        }
+    }
+
     /// [`Self::corner`] for every corner of `face`, in order.
     pub fn corners(
         &self,
@@ -320,6 +348,32 @@ impl LightScene {
     /// The grid to runtime mapping of the world.
     pub fn units(&self) -> RuntimeUnits {
         self.units
+    }
+
+    /// The light probes of `world` baked with `lights` (runtime units) through
+    /// this scene's shadows, held the way a running game holds them. This is
+    /// the cook's probe bake over the same collision, for the editor preview
+    /// to light its models by.
+    ///
+    /// A gathered `field` that was solved for another version of the world
+    /// (its probe sites differ) is ignored: the probes take the flat room
+    /// ambient until the new solve lands.
+    pub fn bake_probes(
+        &self,
+        world: &super::world::GridWorld,
+        lights: &[GridLight],
+        gather: Option<Gather<'_>>,
+    ) -> Result<ProbeStore, String> {
+        let plan = ProbePlan::build(world, &self.units, &self.probe)?;
+        let gather = gather.map(|g| Gather {
+            field: g.field.filter(|f| f.probe_plan() == &plan),
+        });
+        let tables = self.with_rig(lights, world.shading, gather, |rig| {
+            plan.tables(|index, site| {
+                rig.probe(index, site, world.rooms[usize::from(site.room)].ambient)
+            })
+        })?;
+        ProbeStore::new(world, &self.units, &tables)
     }
 
     /// The collision the shadows are shot against.
