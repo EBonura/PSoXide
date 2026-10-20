@@ -63,8 +63,8 @@ pub use planes::{
     update_plane, PlaneClipboard, PlaneId, PlaneRefusal,
 };
 pub use rects::{
-    create_surfaces, create_surfaces_cells, delete_surfaces, delete_surfaces_cells, CellRect,
-    RectOutcome, RectRefusal,
+    create_surfaces, create_surfaces_cells, delete_surfaces, delete_surfaces_cells,
+    join_fresh_floors, CellRect, JoinOutcome, RectOutcome, RectRefusal,
 };
 pub use refs::{
     corner_offsets, faces_of_cell, faces_of_leaf, CornerRef, EdgeRef, FaceRef, FaceTarget,

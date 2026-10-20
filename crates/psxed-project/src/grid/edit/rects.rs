@@ -197,6 +197,99 @@ pub fn create_surfaces(
     outcome
 }
 
+/// What joining new floor to its neighbours did, see [`join_fresh_floors`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct JoinOutcome {
+    /// Sector edges whose authored walls were removed.
+    pub opened_edges: usize,
+    /// Sector edges whose authored walls stay because the two floors meet
+    /// at different heights there.
+    pub kept_edges: usize,
+    /// Other rooms with a floor beside the new cells, ascending. Their
+    /// walls are not touched.
+    pub touched_rooms: Vec<usize>,
+}
+
+/// New floor was just made in `room` over the world cells `fresh` (the ones
+/// that had no floor before). Where a fresh cell lies beside a floor of the
+/// same room that was already there, drop the authored walls on the edge
+/// between them (on both sides) so the new floor connects, unless the two
+/// floors meet at different heights, where the wall is a real riser. Other
+/// rooms beside the fresh cells are listed and left alone: a room's walls
+/// are its own to change.
+pub fn join_fresh_floors(world: &mut GridWorld, room: usize, fresh: &[[i32; 2]]) -> JoinOutcome {
+    use super::super::sector::WallEdge;
+    use super::walls::surface_edge_heights;
+    let mut out = JoinOutcome::default();
+    let edges = [
+        (WallEdge::North, [0, -1]),
+        (WallEdge::East, [1, 0]),
+        (WallEdge::South, [0, 1]),
+        (WallEdge::West, [-1, 0]),
+    ];
+    for &cell in fresh {
+        for (edge, step) in edges {
+            let beside = [cell[0] + step[0], cell[1] + step[1]];
+            if fresh.contains(&beside) {
+                continue;
+            }
+            let Some((back, _)) = edge.opposite() else {
+                continue;
+            };
+            let floor_at = |r: &GridRoom, c: [i32; 2]| {
+                r.local(c)
+                    .and_then(|[x, z]| r.sector(x, z))
+                    .and_then(|s| s.ground_floor())
+                    .cloned()
+            };
+            let Some(own) = world.rooms.get(room) else {
+                return out;
+            };
+            if let Some(old) = floor_at(own, beside) {
+                let Some(new) = floor_at(own, cell) else {
+                    continue;
+                };
+                let mut a = surface_edge_heights(&new, edge);
+                let mut b = surface_edge_heights(&old, back);
+                a.sort_unstable();
+                b.sort_unstable();
+                let target = &mut world.rooms[room];
+                let had_walls = |r: &GridRoom, c: [i32; 2], e: WallEdge| {
+                    r.local(c)
+                        .and_then(|[x, z]| r.sector(x, z))
+                        .is_some_and(|s| !s.walls(e).is_empty())
+                };
+                if !had_walls(target, cell, edge) && !had_walls(target, beside, back) {
+                    continue;
+                }
+                if a != b {
+                    out.kept_edges += 1;
+                    continue;
+                }
+                for (c, e) in [(cell, edge), (beside, back)] {
+                    if let Some([x, z]) = target.local(c) {
+                        if let Some(sector) = target.sector_mut(x, z) {
+                            sector.walls_mut(e).clear();
+                        }
+                    }
+                }
+                out.opened_edges += 1;
+            } else {
+                for (index, other) in world.rooms.iter().enumerate() {
+                    if index != room
+                        && !out.touched_rooms.contains(&index)
+                        && floor_at(other, beside).is_some()
+                    {
+                        out.touched_rooms.push(index);
+                    }
+                }
+            }
+        }
+    }
+    out.touched_rooms.sort_unstable();
+    out
+}
+
 /// Remove the `kind` surface from every sector of `rect`, then drop empty
 /// sectors and shrink the room around what is left.
 pub fn delete_surfaces(
@@ -647,5 +740,87 @@ mod tests {
         assert!(room.leaf_at([0, 0]).unwrap().1.ground_floor().is_none());
         assert!(room.leaf_at([4, 4]).unwrap().1.ground_floor().is_some());
         assert!(crate::grid::tree::check(room).is_empty());
+    }
+
+    fn walled_pair(second_floor: i32) -> GridWorld {
+        use crate::grid::sector::WallEdge;
+        use crate::grid::surface::GridWall;
+        let mut world = world();
+        create_surfaces(
+            &mut world,
+            0,
+            SurfaceKind::Floor,
+            CellRect::from_corners([0, 0], [0, 0]),
+            0,
+            None,
+        );
+        let wall = GridWall::span(0, 1024, None);
+        world.rooms[0]
+            .sector_mut(0, 0)
+            .unwrap()
+            .walls_mut(WallEdge::East)
+            .push(wall);
+        create_surfaces(
+            &mut world,
+            0,
+            SurfaceKind::Floor,
+            CellRect::from_corners([1, 0], [1, 0]),
+            second_floor,
+            None,
+        );
+        world
+    }
+
+    #[test]
+    fn joining_drops_the_wall_between_two_floors_at_one_height() {
+        use crate::grid::sector::WallEdge;
+        let mut world = walled_pair(0);
+        let out = join_fresh_floors(&mut world, 0, &[[1, 0]]);
+        assert_eq!((out.opened_edges, out.kept_edges), (1, 0));
+        assert!(world.rooms[0]
+            .sector(0, 0)
+            .unwrap()
+            .walls(WallEdge::East)
+            .is_empty());
+    }
+
+    #[test]
+    fn joining_keeps_a_wall_where_the_floors_meet_at_different_heights() {
+        use crate::grid::sector::WallEdge;
+        let mut world = walled_pair(512);
+        let out = join_fresh_floors(&mut world, 0, &[[1, 0]]);
+        assert_eq!((out.opened_edges, out.kept_edges), (0, 1));
+        assert_eq!(
+            world.rooms[0]
+                .sector(0, 0)
+                .unwrap()
+                .walls(WallEdge::East)
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn joining_names_a_touched_room_and_leaves_it_alone() {
+        let mut world = world();
+        let mut other = GridRoom::new("other", 1, 1);
+        other.origin = [2, 0];
+        world.rooms.push(other);
+        world.rooms[1]
+            .sector_or_insert(0, 0)
+            .unwrap()
+            .set_ground_floor(Some(GridSurface::flat(0, None)));
+        let snapshot = world.rooms[1].clone();
+        create_surfaces(
+            &mut world,
+            0,
+            SurfaceKind::Floor,
+            CellRect::from_corners([1, 0], [1, 0]),
+            0,
+            None,
+        );
+        let out = join_fresh_floors(&mut world, 0, &[[1, 0]]);
+        assert_eq!(out.touched_rooms, vec![1]);
+        assert_eq!(world.rooms[1], snapshot);
     }
 }
