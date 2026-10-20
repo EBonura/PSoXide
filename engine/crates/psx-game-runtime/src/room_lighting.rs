@@ -5,8 +5,8 @@
 //! `LIGHTS` table arrives as `&'static` psx-level records.
 
 use psx_engine::{
-    LightingRgb, MaterialTint, PointLightSample, Rgb8, RoomPoint, WorldCamera,
-    WorldRenderMaterial, WorldSurfaceLighting, WorldSurfaceSample, WorldVertex, Q8,
+    LightingRgb, MaterialTint, PointLightSample, Rgb8, RoomPoint, WorldCamera, WorldRenderMaterial,
+    WorldSurfaceLighting, WorldSurfaceSample, WorldVertex, Q8,
 };
 use psx_gpu::material::TextureMaterial;
 use psx_grid::ResidentRooms;
@@ -619,12 +619,14 @@ mod tests {
             [[200, 120, 56], [200, 120, 56], [24, 24, 40], [24, 24, 40]],
             |set| {
                 let lighting = lighting_over(Some(set), RECEIVER_LIGHTS);
-                let lit = lighting.shade_model_tint(WorldVertex::new(40, 32, 40), 0, (128, 128, 128));
+                let lit =
+                    lighting.shade_model_tint(WorldVertex::new(40, 32, 40), 0, (128, 128, 128));
                 assert_eq!(lit, (200, 120, 56));
                 // The base tint modulates the probe light like any light.
                 let half = lighting.shade_model_tint(WorldVertex::new(40, 32, 40), 0, (64, 64, 64));
                 assert_eq!(half, (100, 60, 28));
-                let dark = lighting.shade_model_tint(WorldVertex::new(280, 32, 40), 0, (128, 128, 128));
+                let dark =
+                    lighting.shade_model_tint(WorldVertex::new(280, 32, 40), 0, (128, 128, 128));
                 assert_eq!(dark, (24, 24, 40));
                 // The unshadowed cooked lamp (radius 100 at the origin) does
                 // not light the probe-lit model on top of the probe.
