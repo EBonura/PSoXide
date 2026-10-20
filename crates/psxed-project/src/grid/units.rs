@@ -8,11 +8,64 @@ pub const SECTOR_UNITS: i32 = 1024;
 pub const CLICK_UNITS: i32 = 256;
 /// Grid units in the fine snap (held with Alt in the editor).
 pub const FINE_UNITS: i32 = 64;
-/// Texels the default world-aligned mapping spends on one sector edge.
-/// Floors, ceilings and walls all use it, so adjacent faces tile.
-pub const TEXELS_PER_SECTOR: i32 = 32;
-/// Grid units per texel of the default mapping.
-pub const UNITS_PER_TEXEL: i32 = SECTOR_UNITS / TEXELS_PER_SECTOR;
+/// Grid units per texel of the original 32 texels per sector mapping. The
+/// generated mesh recipes (arches, columns, rubble) measure their own
+/// texture coordinates against it.
+pub const UNITS_PER_TEXEL: i32 = SECTOR_UNITS / SectorTexels::LEGACY.get() as i32;
+
+/// Texels the default world-aligned mapping spends on one sector edge, a
+/// setting of the world. Floors, ceilings and walls all use it, so adjacent
+/// faces tile.
+///
+/// The grid renderer tiles 64 by 64 textures, so a new world spends 64: one
+/// whole texture per sector. Worlds made before the setting existed spent
+/// 32 (half a texture per sector), which is what a stored world without the
+/// field reads as and keeps, so no existing face changes its texels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SectorTexels(u16);
+
+impl SectorTexels {
+    /// New worlds: one 64 texel texture per sector.
+    pub const DEFAULT: Self = Self(64);
+    /// What a world stored without the setting means.
+    pub const LEGACY: Self = Self(32);
+
+    /// A density, or `None` for zero (a sector with no texels).
+    pub const fn new(texels: u16) -> Option<Self> {
+        if texels > 0 {
+            Some(Self(texels))
+        } else {
+            None
+        }
+    }
+
+    /// The texel count, at least 1 so damaged data cannot collapse the
+    /// mapping.
+    pub const fn get(self) -> u16 {
+        if self.0 == 0 {
+            1
+        } else {
+            self.0
+        }
+    }
+
+    /// Whether this is the pre-setting density (the document then omits it).
+    pub fn is_legacy(&self) -> bool {
+        *self == Self::LEGACY
+    }
+
+    /// What a stored world without the setting reads as.
+    pub const fn legacy() -> Self {
+        Self::LEGACY
+    }
+}
+
+impl Default for SectorTexels {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
 
 /// Rational scale from grid units to editor units: `editor = grid * num / den`.
 ///

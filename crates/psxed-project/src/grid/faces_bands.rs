@@ -16,7 +16,7 @@ use super::derive;
 use super::faces::{editor_point, Builder, Corner, GridFaceKind};
 use super::room::GridRoom;
 use super::sector::{GridSector, WallEdge};
-use super::units::{SECTOR_UNITS, TEXELS_PER_SECTOR};
+use super::units::SECTOR_UNITS;
 use super::uv::{self, Frame, Mapper};
 
 /// A wall to cut into bands.
@@ -59,7 +59,7 @@ impl Builder<'_> {
         let band = &wall.set.bands[piece.band];
         let material = band.material.or(wall.material);
         let default = self.default_uv(material);
-        let mode = uv::resolve(band.uv.mode, default);
+        let mode = uv::resolve(band.uv.mode, default, self.world_uv);
         let (scale, y_offset) = (self.scale, self.y_offset);
         // The band's own lines at a position: its lowest and highest
         // corner there.
@@ -68,7 +68,6 @@ impl Builder<'_> {
             let (lo, hi) = ys.fold((i32::MAX, i32::MIN), |(lo, hi), y| (lo.min(y), hi.max(y)));
             (lo, hi)
         };
-        let texel = f64::from(TEXELS_PER_SECTOR) / f64::from(SECTOR_UNITS);
         // The frame a mapping measures against: a fit counts tiles across
         // the run and between the band's own lines (0 at the upper line to 1
         // at the lower); a world mapping works in the wall's own
@@ -88,11 +87,7 @@ impl Builder<'_> {
                 max: [wall.run[1], t_world(bottom)],
             },
         };
-        let centre = {
-            let c = frame.centre();
-            [c[0] * texel, c[1] * texel]
-        };
-        let mapper = Mapper::new(&band.uv, default, frame, centre);
+        let mapper = Mapper::new(&band.uv, default, self.world_uv, frame, frame.centre());
         self.legacy_uv = mapper.is_legacy();
         self.frame = frame;
         let point_of = |u: i32, y: i32| -> [f64; 2] {

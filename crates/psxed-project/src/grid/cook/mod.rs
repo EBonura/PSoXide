@@ -602,4 +602,6 @@ mod stream_tests;
 #[cfg(test)]
 pub(crate) mod tests;
 #[cfg(test)]
+mod uv_pin_tests;
+#[cfg(test)]
 mod uv_tests;

@@ -26,7 +26,7 @@ use super::super::overrides::{EdgeKey, EdgeOverride, WallMode};
 use super::super::room::GridRoom;
 use super::super::sector::WallEdge;
 use super::super::surface::{GridWall, WallFacing};
-use super::super::units::{SECTOR_UNITS, TEXELS_PER_SECTOR};
+use super::super::units::SECTOR_UNITS;
 use super::super::world::GridWorld;
 
 /// What to do with derived faces the room never had.
@@ -64,8 +64,8 @@ struct Match {
 }
 
 /// Texel `u` of the centre of an edge's face, for the mirror compensation.
-fn centre_u(cell: [i32; 2], edge: WallEdge) -> f64 {
-    let texel = f64::from(TEXELS_PER_SECTOR) / f64::from(SECTOR_UNITS);
+fn centre_u(cell: [i32; 2], edge: WallEdge, texels_per_sector: u16) -> f64 {
+    let texel = f64::from(texels_per_sector) / f64::from(SECTOR_UNITS);
     let (a, b) = edge.endpoints();
     let at = |e: [i32; 2]| {
         [
@@ -139,6 +139,7 @@ fn placement(
     authored: &GridWall,
     host: ([i32; 2], WallEdge),
     mirrored: bool,
+    texels_per_sector: u16,
 ) -> Option<Option<FaceUv>> {
     let mut uv = authored.uv;
     if mirrored {
@@ -146,7 +147,7 @@ fn placement(
         // about the opposite centre: mirror the axis and shift by twice the
         // centre. Exact while the centre is a whole texel, which it is for
         // whole-sector faces.
-        let shift = 2.0 * centre_u(host.0, host.1);
+        let shift = 2.0 * centre_u(host.0, host.1, texels_per_sector);
         if shift.fract() != 0.0 {
             return None;
         }
@@ -170,6 +171,7 @@ pub fn convert_to_derived(
     room: usize,
     mode: ConvertMode,
 ) -> Option<ConvertReport> {
+    let texels_per_sector = world.texels_per_sector.get();
     let r = world.rooms.get(room)?;
     if r.wall_mode == WallMode::Derived {
         return Some(ConvertReport::default());
@@ -212,7 +214,12 @@ pub fn convert_to_derived(
                     .walls(found.edge)
                     .get(found.index)?
                     .clone();
-                let uv = placement(&authored, (walls[0].host, walls[0].edge), found.mirrored)?;
+                let uv = placement(
+                    &authored,
+                    (walls[0].host, walls[0].edge),
+                    found.mirrored,
+                    texels_per_sector,
+                )?;
                 Some((found, uv, authored))
             })
             .flatten();

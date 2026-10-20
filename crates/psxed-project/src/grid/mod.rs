@@ -120,6 +120,8 @@ mod storey_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod texel_density_tests;
+#[cfg(test)]
 mod uv_golden;
 
 pub use bands::{Anchor, Band, BandSet, BandV};
@@ -142,5 +144,5 @@ pub use room::{GridFog, GridRoom};
 pub use sector::{GridSector, GridSpan, WallEdge};
 pub use slope::SlopeClass;
 pub use surface::{GridSplit, GridSurface, GridTri, GridWall, WallFacing};
-pub use units::{GridScale, CLICK_UNITS, FINE_UNITS, SECTOR_UNITS, TEXELS_PER_SECTOR};
+pub use units::{GridScale, SectorTexels, CLICK_UNITS, FINE_UNITS, SECTOR_UNITS};
 pub use world::{GridWorld, SceneWorld, StreamRadii};

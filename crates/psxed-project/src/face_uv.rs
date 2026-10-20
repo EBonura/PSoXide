@@ -7,15 +7,16 @@ use serde::{Deserialize, Serialize};
 /// `grid::uv` for the frames it is measured against.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UvMode {
-    /// Use the material's grid tiling default, else world aligned at 32
-    /// texels per sector (the mapping every older face has).
+    /// Use the material's grid tiling default, else the world's own
+    /// default: world aligned at the world's texels per sector (64 for a
+    /// new world, 32 for one made before the setting).
     #[default]
     Inherit,
     /// Texel = world position times a density, so neighbouring faces line
     /// up and a bigger face tiles more instead of stretching.
     World {
-        /// Texels per sector along the frame's two axes. 32 is the legacy
-        /// density: half a 64 texel tile per sector.
+        /// Texels per sector along the frame's two axes. 64 is one 64
+        /// texel tile per sector; 32 is the density older worlds had.
         texels_per_sector: [u16; 2],
     },
     /// The texture repeats a fixed number of times across the whole face
@@ -28,10 +29,15 @@ pub enum UvMode {
 }
 
 impl UvMode {
-    /// The legacy mapping: world aligned, 32 texels per sector.
-    pub const LEGACY: Self = Self::World {
-        texels_per_sector: [32, 32],
-    };
+    /// The mapping older worlds had: world aligned, 32 texels per sector.
+    pub const LEGACY: Self = Self::world(32);
+
+    /// World aligned at `texels` texels per sector on both axes.
+    pub const fn world(texels: u16) -> Self {
+        Self::World {
+            texels_per_sector: [texels, texels],
+        }
+    }
 
     /// FIT with whole-tile repeats `h` by `v`.
     pub const fn fit(h: u16, v: u16) -> Self {

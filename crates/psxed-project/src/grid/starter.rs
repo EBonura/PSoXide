@@ -89,6 +89,7 @@ pub fn starter_world(
     }
     GridWorld {
         scale: STARTER_SCALE,
+        texels_per_sector: super::units::SectorTexels::DEFAULT,
         rooms: vec![room],
         // A new world shades faces by the way they face, so a step or a
         // platform reads even under one lamp.

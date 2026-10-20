@@ -174,6 +174,7 @@ pub(super) fn cell_faces(
         square: Square::sector(cell),
         y_offset: r.y_offset,
         defaults,
+        world_uv: world.default_uv(),
         legacy_uv: true,
         frame: Frame::around([[0.0, 0.0]]),
         room_ref: Some(r),

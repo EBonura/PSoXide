@@ -4,8 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use super::light::FacingShade;
 use super::lighting::GlobalLight;
+use crate::face_uv::UvMode;
 use super::room::GridRoom;
-use super::units::{GridScale, SECTOR_UNITS};
+use super::units::{GridScale, SectorTexels, SECTOR_UNITS};
 
 /// A grid world: rooms on one shared sector lattice and the scale that maps
 /// it into the editor.
@@ -14,6 +15,14 @@ pub struct GridWorld {
     /// Grid units to editor units.
     #[serde(default)]
     pub scale: GridScale,
+    /// Texels one sector edge spans in the default mapping a face takes
+    /// when neither it nor its material says otherwise. A world stored
+    /// without the setting keeps the 32 it was made with.
+    #[serde(
+        default = "SectorTexels::legacy",
+        skip_serializing_if = "SectorTexels::is_legacy"
+    )]
+    pub texels_per_sector: SectorTexels,
     /// Rooms, in authoring order.
     #[serde(default)]
     pub rooms: Vec<GridRoom>,
@@ -103,6 +112,12 @@ impl GridWorld {
     /// An empty world at the default scale.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The mapping a face takes when neither it nor its material says
+    /// otherwise: world aligned at [`Self::texels_per_sector`].
+    pub fn default_uv(&self) -> UvMode {
+        UvMode::world(self.texels_per_sector.get())
     }
 
     /// Editor units in one sector edge.

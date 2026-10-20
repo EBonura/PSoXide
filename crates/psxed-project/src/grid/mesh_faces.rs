@@ -8,7 +8,8 @@
 //! list at cook time.
 
 use super::faces::{editor_point, Builder, Corner, GridFace, GridFaceKind, UvDefaults};
-use super::mesh::{BuiltMesh, GridMesh};
+use super::mesh::{BuiltMesh, GridMesh, MeshKind};
+use super::units::SectorTexels;
 use super::uv::Frame;
 use super::world::GridWorld;
 
@@ -61,6 +62,7 @@ pub fn mesh_faces_with(
         square: super::faces::Square::sector(mesh.center_cell()),
         y_offset: r.y_offset,
         defaults,
+        world_uv: world.default_uv(),
         legacy_uv: false,
         room_ref: None,
         frame: Frame {
@@ -70,6 +72,16 @@ pub fn mesh_faces_with(
         out,
     };
     let (scale, y_offset) = (builder.scale, builder.y_offset);
+    // The recipes (arch, column, rubble) lay their texture on the world
+    // lattice at the original 32 texels per sector; they follow the world's
+    // density so they continue the walls beside them. An imported mesh
+    // carries its own texture coordinates.
+    let lattice = match world.mesh_assets.get(usize::from(mesh.asset)).map(|a| &a.kind) {
+        Some(MeshKind::Imported(_)) | None => 1.0,
+        Some(_) => {
+            f64::from(world.texels_per_sector.get()) / f64::from(SectorTexels::LEGACY.get())
+        }
+    };
     for face in &built.faces {
         let placed: Vec<[i32; 3]> = face.ring().iter().map(|p| mesh.place(*p)).collect();
         let ring: Vec<Corner> = placed
@@ -78,7 +90,7 @@ pub fn mesh_faces_with(
             .map(|(g, t)| Corner {
                 p: editor_point(scale, y_offset, g[0], g[1], g[2]),
                 g: [g[0], y_offset + g[1], g[2]],
-                uv: [f64::from(t[0]), f64::from(t[1])],
+                uv: [f64::from(t[0]) * lattice, f64::from(t[1]) * lattice],
             })
             .collect();
         // The asset ring is counter-clockwise seen from the front, so its

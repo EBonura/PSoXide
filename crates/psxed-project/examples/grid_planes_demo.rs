@@ -109,6 +109,9 @@ fn main() {
 
     let mut world = psxed_project::grid::GridWorld {
         scale: psxed_project::grid::starter::STARTER_SCALE,
+        // The pinned texel hash of this reference level is the 32 texels
+        // per sector it was made with.
+        texels_per_sector: psxed_project::grid::SectorTexels::LEGACY,
         rooms: vec![hall(ground, walls, cliff)],
         shading: psxed_project::grid::FacingShade::SUBTLE,
         global_light: Default::default(),

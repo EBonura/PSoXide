@@ -5,9 +5,10 @@
 //! fine offset, free rotation and scale.
 //!
 //! * **World** gives a texel per world position, so neighbouring faces line up
-//!   and a bigger face tiles more. 32 texels per sector (half a 64 texel
-//!   tile) is the mapping every older face has and stays bit for bit what it
-//!   was.
+//!   and a bigger face tiles more. A face that says nothing takes the world's
+//!   own density (`GridWorld::texels_per_sector`: 64, one tile per sector,
+//!   for a new world; 32 for a world made before the setting, which stays bit
+//!   for bit what it was).
 //! * **Fit** puts a fixed number of tiles across the whole face: 2 by 2 is
 //!   "2x2 on this face", whatever its size.
 //!
@@ -75,11 +76,13 @@ impl Frame {
 }
 
 /// The mode a face actually uses: its own, else its material's default, else
-/// the legacy world mapping.
-pub fn resolve(mode: UvMode, material_default: Option<UvMode>) -> UvMode {
+/// `world_default`, the world's own mapping ([`GridWorld::default_uv`]).
+///
+/// [`GridWorld::default_uv`]: super::world::GridWorld::default_uv
+pub fn resolve(mode: UvMode, material_default: Option<UvMode>, world_default: UvMode) -> UvMode {
     match mode {
         UvMode::Inherit => match material_default {
-            Some(UvMode::Inherit) | None => UvMode::LEGACY,
+            Some(UvMode::Inherit) | None => world_default,
             Some(other) => other,
         },
         other => other,
@@ -109,37 +112,44 @@ fn density(texels_per_sector: [u16; 2]) -> [f64; 2] {
 #[derive(Clone, Copy, Debug)]
 pub struct Mapper {
     mode: UvMode,
+    /// The world's own mapping, for [`Self::is_legacy`].
+    world_default: UvMode,
     turns: u8,
     flip: [bool; 2],
     frame: Frame,
     fine: FaceUv,
-    legacy_centre: [f64; 2],
+    plain_centre: [f64; 2],
 }
 
 impl Mapper {
-    /// A mapper for a face with placement `uv` and `frame`. `legacy_centre`
-    /// is the texel the fine rotation and scale turn about for a plain world
-    /// mapping, which older faces computed their own way.
+    /// A mapper for a face with placement `uv` and `frame`. `world_default`
+    /// is the world's own mapping for a face that takes no other.
+    /// `plain_centre` is the point of the face, in grid units, the fine
+    /// rotation and scale turn about for a plain world mapping (older faces
+    /// computed it their own way: for a wall it is the mean of the four
+    /// corners, not the middle of the frame).
     pub fn new(
         uv: &FaceUv,
         material_default: Option<UvMode>,
+        world_default: UvMode,
         frame: Frame,
-        legacy_centre: [f64; 2],
+        plain_centre: [f64; 2],
     ) -> Self {
         Self {
-            mode: resolve(uv.mode, material_default),
+            mode: resolve(uv.mode, material_default, world_default),
+            world_default,
             turns: uv.turns & 3,
             flip: uv.flip,
             frame: widen(frame, uv.grow),
             fine: *uv,
-            legacy_centre,
+            plain_centre,
         }
     }
 
-    /// Whether this is the legacy mapping exactly: world aligned at 32
-    /// texels per sector with no turn and no flip.
+    /// Whether this is the world's own default mapping exactly, with no turn
+    /// and no flip.
     pub fn is_legacy(&self) -> bool {
-        self.mode == UvMode::LEGACY && self.turns == 0 && self.flip == [false; 2]
+        self.mode == self.world_default && self.turns == 0 && self.flip == [false; 2]
     }
 
     /// Whether this is the plain legacy mapping (world mode, no turn, no
@@ -210,8 +220,8 @@ impl Mapper {
 
     /// The texel the fine rotation and scale turn about.
     fn centre(&self) -> [f64; 2] {
-        if self.plain_world().is_some() {
-            return self.legacy_centre;
+        if let Some(k) = self.plain_world() {
+            return [self.plain_centre[0] * k[0], self.plain_centre[1] * k[1]];
         }
         self.base(self.frame.centre())
     }
@@ -316,14 +326,15 @@ pub fn orient_unit(turns: u8, flip: [bool; 2], a: f64, b: f64) -> [f64; 2] {
 
 /// Describe the tiling of a face with placement `uv` and a frame of `size`
 /// grid units whose lower corner sits at `origin`. `material_default` is the
-/// material's grid tiling.
+/// material's grid tiling and `world_default` the world's own mapping.
 pub fn report(
     uv: &FaceUv,
     material_default: Option<UvMode>,
+    world_default: UvMode,
     origin: [f64; 2],
     size: [f64; 2],
 ) -> UvReport {
-    let mode = resolve(uv.mode, material_default);
+    let mode = resolve(uv.mode, material_default, world_default);
     let from_material =
         uv.mode == UvMode::Inherit && matches!(material_default, Some(m) if m != UvMode::Inherit);
     let turned = uv.turns & 1 == 1;
@@ -514,7 +525,13 @@ pub fn report_for(
     let found = find_face(world, defaults, face, tri)?;
     let uv = uv_of(world, face, tri)?;
     let default = material_of(world, face, tri).and_then(|id| defaults.default_uv(id));
-    Some(report(&uv, default, found.frame.min, found.frame.size()))
+    Some(report(
+        &uv,
+        default,
+        world.default_uv(),
+        found.frame.min,
+        found.frame.size(),
+    ))
 }
 
 /// The tiling defaults of a project's materials.
@@ -541,7 +558,7 @@ mod tests {
     }
 
     fn mapper(uv: FaceUv) -> Mapper {
-        Mapper::new(&uv, None, frame(), [48.0 * 1.0 + 0.0, 80.0])
+        Mapper::new(&uv, None, UvMode::LEGACY, frame(), frame().centre())
     }
 
     #[test]
@@ -627,7 +644,7 @@ mod tests {
         assert_eq!(m.texel(bottom_left), [64.0, 128.0]);
         // Four quarter turns are the identity.
         let plain = mapper(uv(0));
-        let full = Mapper::new(&uv(4), None, frame(), [0.0; 2]);
+        let full = Mapper::new(&uv(4), None, UvMode::LEGACY, frame(), [0.0; 2]);
         for p in [top_left, top_right, bottom_left] {
             assert_eq!(plain.texel(p), full.texel(p));
         }
@@ -683,10 +700,10 @@ mod tests {
     #[test]
     fn the_material_default_fills_in_for_inherit_only() {
         let default = Some(UvMode::fit(2, 2));
-        assert_eq!(resolve(UvMode::Inherit, default), UvMode::fit(2, 2));
-        assert_eq!(resolve(UvMode::Inherit, None), UvMode::LEGACY);
-        assert_eq!(resolve(UvMode::LEGACY, default), UvMode::LEGACY);
-        let r = report(&FaceUv::default(), default, [0.0; 2], [1024.0; 2]);
+        assert_eq!(resolve(UvMode::Inherit, default, UvMode::LEGACY), UvMode::fit(2, 2));
+        assert_eq!(resolve(UvMode::Inherit, None, UvMode::LEGACY), UvMode::LEGACY);
+        assert_eq!(resolve(UvMode::LEGACY, default, UvMode::LEGACY), UvMode::LEGACY);
+        let r = report(&FaceUv::default(), default, UvMode::LEGACY, [0.0; 2], [1024.0; 2]);
         assert!(r.from_material);
         assert_eq!(r.effective_text(), "2 x 2 on this face");
     }
@@ -701,6 +718,7 @@ mod tests {
                     ..FaceUv::default()
                 },
                 None,
+                UvMode::LEGACY,
                 [0.0; 2],
                 size,
             )
@@ -721,7 +739,7 @@ mod tests {
             .unwrap()
             .contains("4 primitives (+3)"));
         // The legacy mapping: half a tile per sector, no cut.
-        let legacy = report(&FaceUv::default(), None, [0.0; 2], size);
+        let legacy = report(&FaceUv::default(), None, UvMode::LEGACY, [0.0; 2], size);
         assert_eq!(legacy.quads_added, 0);
         assert_eq!(legacy.effective_text(), "0.5 x 0.5 tiles on this face");
         // 128 texels per sector is two tiles per sector.
@@ -733,6 +751,7 @@ mod tests {
                 ..FaceUv::default()
             },
             None,
+            UvMode::LEGACY,
             [0.0; 2],
             size,
         );
@@ -746,6 +765,7 @@ mod tests {
                 ..FaceUv::default()
             },
             None,
+            UvMode::LEGACY,
             [0.0; 2],
             size,
         );
@@ -759,6 +779,7 @@ mod tests {
                 ..FaceUv::default()
             },
             None,
+            UvMode::LEGACY,
             [0.0; 2],
             size,
         );

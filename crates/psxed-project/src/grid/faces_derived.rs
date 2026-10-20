@@ -15,7 +15,7 @@ use super::faces_bands::{neighbour_heights, stitched_rings, BandedWall};
 use super::overrides::ClosureFacing;
 use super::room::GridRoom;
 use super::sector::WallEdge;
-use super::units::{SECTOR_UNITS, TEXELS_PER_SECTOR};
+use super::units::SECTOR_UNITS;
 use super::uv::{Frame, Mapper};
 
 /// Where a derived wall lies and what its texture is measured against.
@@ -74,7 +74,6 @@ impl Builder<'_> {
         }
         let (scale, y_offset) = (self.scale, self.y_offset);
         let DerivedGeom { a, b, len, .. } = geom;
-        let texel = f64::from(TEXELS_PER_SECTOR) / f64::from(SECTOR_UNITS);
         // World position along the edge at `u`.
         let plain = |u: i32| {
             [
@@ -99,15 +98,14 @@ impl Builder<'_> {
         let t_of = |gy: i32| -f64::from(y_offset + gy);
         let centre = match wall.heights {
             Some(h) => [
-                (u_grid(0) * texel + u_grid(len) * texel) / 2.0,
-                (t_of(h[0]) * texel + t_of(h[1]) * texel + t_of(h[2]) * texel + t_of(h[3]) * texel)
-                    / 4.0,
+                (u_grid(0) + u_grid(len)) / 2.0,
+                (t_of(h[0]) + t_of(h[1]) + t_of(h[2]) + t_of(h[3])) / 4.0,
             ],
             None => {
                 let n = wall.ring.len() as f64;
                 [
-                    wall.ring.iter().map(|p| u_grid(p[0]) * texel).sum::<f64>() / n,
-                    wall.ring.iter().map(|p| t_of(p[1]) * texel).sum::<f64>() / n,
+                    wall.ring.iter().map(|p| u_grid(p[0])).sum::<f64>() / n,
+                    wall.ring.iter().map(|p| t_of(p[1])).sum::<f64>() / n,
                 ]
             }
         };
@@ -124,7 +122,13 @@ impl Builder<'_> {
             max: [geom.run_u[1], t_of(geom.run_y[0])],
         };
         let uv = wall.uv.unwrap_or_default();
-        let mapper = Mapper::new(&uv, self.default_uv(wall.material), frame, centre);
+        let mapper = Mapper::new(
+            &uv,
+            self.default_uv(wall.material),
+            self.world_uv,
+            frame,
+            centre,
+        );
         self.legacy_uv = mapper.is_legacy();
         self.frame = frame;
         let corner = |u: i32, gy: i32| {

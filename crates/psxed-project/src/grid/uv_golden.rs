@@ -56,3 +56,18 @@ fn legacy_texels_are_bit_for_bit_what_they_were() {
     let got: Vec<u64> = PROJECTS.iter().map(|p| texel_hash(p)).collect();
     assert_eq!(got, GOLDEN.to_vec(), "texels of a legacy face changed");
 }
+
+/// The same pins for the levels that are tracked (`grid-planes` is not, so
+/// the test above cannot run on a clean checkout): the texels of every
+/// legacy face stay what they were whatever the world's default density is
+/// for a new world.
+#[test]
+fn the_tracked_reference_levels_keep_their_pinned_texels() {
+    for (name, golden) in PROJECTS.iter().zip(GOLDEN) {
+        if !crate::projects_dir().join(name).join("project.ron").is_file() {
+            eprintln!("skipping {name}: not present");
+            continue;
+        }
+        assert_eq!(texel_hash(name), golden, "{name}: texels of a legacy face changed");
+    }
+}

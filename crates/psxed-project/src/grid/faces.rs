@@ -13,9 +13,10 @@
 //!   else becomes two triangles.
 //! * A rectangular wall is cut into bands at absolute multiples of one
 //!   sector in height, so the world-aligned texture tiles and every band
-//!   spans at most [`TEXELS_PER_SECTOR`] texels vertically.
-//! * Default mapping is world aligned at [`TEXELS_PER_SECTOR`] texels per
-//!   sector, so adjacent faces continue each other. A face's offset, rotation
+//!   spans at most the world's texels per sector vertically.
+//! * Default mapping is world aligned at the world's texels per sector
+//!   (`GridWorld::texels_per_sector`), so adjacent faces continue each
+//!   other. A face's offset, rotation
 //!   and scale apply about the face's own centre.
 //! * Polygons are wound clockwise seen from their visible side, the engine's
 //!   front-face convention, so the right-handed cross product of a ring points
@@ -32,7 +33,7 @@ use super::overrides::WallMode;
 use super::room::GridRoom;
 use super::sector::{GridSector, WallEdge};
 use super::surface::{GridSurface, GridTri, GridWall, WallFacing};
-use super::units::{GridScale, SECTOR_UNITS, TEXELS_PER_SECTOR};
+use super::units::{GridScale, SECTOR_UNITS};
 use super::uv::{Frame, Mapper};
 use super::world::GridWorld;
 
@@ -216,7 +217,10 @@ pub(super) struct Builder<'a> {
     pub square: Square,
     pub y_offset: i32,
     pub defaults: &'a dyn UvDefaults,
-    /// Whether the faces pushed next use the plain legacy mapping.
+    /// The world's own mapping, for a face with no mapping of its own and
+    /// no material default.
+    pub world_uv: UvMode,
+    /// Whether the faces pushed next use the world's plain default mapping.
     pub legacy_uv: bool,
     /// The frame of the faces pushed next.
     pub frame: Frame,
@@ -333,10 +337,9 @@ impl Builder<'_> {
             [x0 + size, z0 + size],
             [x0, z0 + size],
         ];
-        let texel = f64::from(TEXELS_PER_SECTOR) / f64::from(SECTOR_UNITS);
         let centre = [
-            (f64::from(x0) + f64::from(size) / 2.0) * texel,
-            (f64::from(z0) + f64::from(size) / 2.0) * texel,
+            f64::from(x0) + f64::from(size) / 2.0,
+            f64::from(z0) + f64::from(size) / 2.0,
         ];
         // The frame of a floor or ceiling is its square, shared by both
         // triangles so repeats continue across the diagonal.
@@ -352,10 +355,10 @@ impl Builder<'_> {
         } else {
             [0.0, 1.0, 0.0]
         };
-        let defaults = self.defaults;
+        let (defaults, world_uv) = (self.defaults, self.world_uv);
         let mapper = |tri: &GridTri| {
             let default = tri.material.and_then(|id| defaults.default_uv(id));
-            Mapper::new(&tri.uv, default, frame, centre)
+            Mapper::new(&tri.uv, default, world_uv, frame, centre)
         };
         let corner = |h: &[i32; 4], i: usize, mapper: &Mapper| {
             let (x, z) = (xz[i][0], xz[i][1]);
@@ -410,7 +413,6 @@ impl Builder<'_> {
         let size = self.square.size;
         let (ea, eb) = edge.endpoints();
         let (a, b) = (self.square.at(ea), self.square.at(eb));
-        let texel = f64::from(TEXELS_PER_SECTOR) / f64::from(SECTOR_UNITS);
         // Position `u` along the walking direction a -> b, in grid units.
         let diagonal_length = f64::from(size) * core::f64::consts::SQRT_2;
         let u_grid = |end: usize| -> f64 {
@@ -432,15 +434,20 @@ impl Builder<'_> {
         let t_of = |gy: i32| -f64::from(y_offset + gy);
         let h = wall.heights;
         let centre = [
-            (u_grid(0) * texel + u_grid(1) * texel) / 2.0,
-            (t_of(h[0]) * texel + t_of(h[1]) * texel + t_of(h[2]) * texel + t_of(h[3]) * texel)
-                / 4.0,
+            (u_grid(0) + u_grid(1)) / 2.0,
+            (t_of(h[0]) + t_of(h[1]) + t_of(h[2]) + t_of(h[3])) / 4.0,
         ];
         // The frame of an authored wall is the record itself.
         let frame = Frame::around(
             [(0, h[0]), (1, h[1]), (1, h[2]), (0, h[3])].map(|(end, gy)| [u_grid(end), t_of(gy)]),
         );
-        let mapper = Mapper::new(&wall.uv, self.default_uv(wall.material), frame, centre);
+        let mapper = Mapper::new(
+            &wall.uv,
+            self.default_uv(wall.material),
+            self.world_uv,
+            frame,
+            centre,
+        );
         self.legacy_uv = mapper.is_legacy();
         self.frame = frame;
         let front = edge.front_direction();
@@ -600,6 +607,7 @@ pub fn cell_faces_with(
         square: Square::sector(cell),
         y_offset: r.y_offset,
         defaults,
+        world_uv: world.default_uv(),
         legacy_uv: true,
         frame: Frame::around([[0.0, 0.0]]),
         room_ref: Some(r),
@@ -848,11 +856,11 @@ mod tests {
             })
             .collect();
         assert_eq!(spans, vec![(256, 1024), (1024, 2048), (2048, 2560)]);
-        // Each full band spans exactly 32 texels vertically.
+        // Each full band spans exactly one sector of texels vertically.
         let v: Vec<f64> = faces[1].texels.iter().map(|t| t[1]).collect();
         let span =
             v.iter().cloned().fold(f64::MIN, f64::max) - v.iter().cloned().fold(f64::MAX, f64::min);
-        assert!((span - 32.0).abs() < 1e-9);
+        assert!((span - f64::from(world.texels_per_sector.get())).abs() < 1e-9);
     }
 
     #[test]
@@ -937,6 +945,8 @@ mod tests {
             ..GridWorld::default()
         };
         let faces = all_faces(&world);
+        // One sector along is the world's texels per sector.
+        let per_sector = f64::from(world.texels_per_sector.get());
         let u_at = |f: &GridFace, x: i32| -> Vec<f64> {
             f.points
                 .iter()
@@ -947,10 +957,10 @@ mod tests {
         };
         assert!(u_at(&faces[0], 1280)
             .iter()
-            .all(|u| (*u - 32.0).abs() < 1e-9));
+            .all(|u| (*u - per_sector).abs() < 1e-9));
         assert!(u_at(&faces[1], 1280)
             .iter()
-            .all(|u| (*u - 32.0).abs() < 1e-9));
+            .all(|u| (*u - per_sector).abs() < 1e-9));
     }
 
     #[test]

@@ -14,7 +14,7 @@ use crate::face_uv::{FaceUv, UvMode};
 
 use super::faces::{editor_point, Builder, Corner, GridFace, GridFaceKind, UvDefaults};
 use super::plane::{GridPlane, PlaneUvMode};
-use super::units::{SECTOR_UNITS, TEXELS_PER_SECTOR};
+use super::units::SECTOR_UNITS;
 use super::uv::{Frame, Mapper};
 use super::world::GridWorld;
 
@@ -25,10 +25,10 @@ pub const STRETCH_TEXELS: f64 = 64.0;
 /// The tiling mode a plane uses: its own shared-model mode when set, else
 /// the legacy Tile (world aligned at its top-left corner) or Stretch (one
 /// whole texture across).
-pub fn effective_mode(plane: &GridPlane) -> UvMode {
+pub fn effective_mode(plane: &GridPlane, world_uv: UvMode) -> UvMode {
     match plane.uv.mode {
         UvMode::Inherit => match plane.uv_mode {
-            PlaneUvMode::Tile => UvMode::LEGACY,
+            PlaneUvMode::Tile => world_uv,
             PlaneUvMode::Stretch => UvMode::fit(1, 1),
         },
         own => own,
@@ -82,27 +82,26 @@ pub fn plane_faces_with(
         square: super::faces::Square::sector(plane.center_cell()),
         y_offset: r.y_offset,
         defaults,
+        world_uv: world.default_uv(),
         legacy_uv: false,
         room_ref: None,
         frame: Frame::around([[0.0, 0.0]]),
         out,
     };
     let (scale, y_offset) = (builder.scale, builder.y_offset);
-    let mode = effective_mode(plane);
+    let mode = effective_mode(plane, builder.world_uv);
     // The frame is the plane rectangle, measured from its top-left corner.
     let frame = Frame {
         min: [0.0, 0.0],
         max: [f64::from(plane.size[0]), f64::from(plane.size[1])],
     };
-    // Legacy centre of a world mapping: half the plane at the default
-    // density.
-    let texel = f64::from(TEXELS_PER_SECTOR) / f64::from(SECTOR_UNITS);
-    let legacy_centre = [
-        f64::from(plane.size[0]) / 2.0 * texel,
-        f64::from(plane.size[1]) / 2.0 * texel,
+    // The centre of a world mapping: half the plane.
+    let plain_centre = [
+        f64::from(plane.size[0]) / 2.0,
+        f64::from(plane.size[1]) / 2.0,
     ];
     let uv = FaceUv { mode, ..plane.uv };
-    let mapper = Mapper::new(&uv, None, frame, legacy_centre);
+    let mapper = Mapper::new(&uv, None, builder.world_uv, frame, plain_centre);
     builder.legacy_uv = mapper.is_legacy();
     builder.frame = frame;
     let corner = |s: f64, t: f64| {
@@ -170,7 +169,7 @@ mod tests {
         corners.sort();
         corners.dedup();
         assert_eq!(corners.len(), 4 * 3);
-        // Texels run 32 per sector from the top-left corner.
+        // Texels run one world density per sector from the top-left corner.
         let top_left = out
             .iter()
             .find(|f| f.points.contains(&[0, 2048, 512]))
@@ -185,7 +184,7 @@ mod tests {
             .iter()
             .map(|t| t[0])
             .fold(f64::MIN, f64::max);
-        assert_eq!((min_u, max_u), (0.0, 32.0));
+        assert_eq!((min_u, max_u), (0.0, 64.0));
     }
 
     #[test]
