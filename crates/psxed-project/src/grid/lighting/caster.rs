@@ -96,8 +96,13 @@ fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
 
 impl FaceCaster {
     /// The target of `faces`, corners snapped to runtime units the way the
-    /// cook snaps them.
-    pub fn build(faces: &[GridFace], units: &RuntimeUnits) -> Self {
+    /// cook snaps them. A face `occludes` says is left out of the triangles
+    /// (it keeps its index), so a ray passes through it.
+    pub fn build(
+        faces: &[GridFace],
+        units: &RuntimeUnits,
+        occludes: &dyn Fn(&GridFace) -> bool,
+    ) -> Self {
         let mut verts: Vec<[f64; 3]> = Vec::new();
         let mut tris: Vec<Tri> = Vec::new();
         let mut recs: Vec<FaceRec> = Vec::with_capacity(faces.len());
@@ -112,6 +117,9 @@ impl FaceCaster {
                 verts.push(g.map(|v| f64::from(units.rt(v))));
             }
             // A ring of 3 or 4 corners; a fan from corner 0.
+            if !occludes(face) {
+                continue;
+            }
             for k in 1..n.saturating_sub(1) {
                 let (a, b, c) = (0, k, k + 1);
                 let area = cross(
@@ -451,7 +459,7 @@ mod tests {
     fn caster_of(world: &GridWorld) -> (FaceCaster, Vec<GridFace>, RuntimeUnits) {
         let units = RuntimeUnits::new(world.scale).unwrap();
         let faces = all_faces_with(world, &());
-        (FaceCaster::build(&faces, &units), faces, units)
+        (FaceCaster::build(&faces, &units, &|_| true), faces, units)
     }
 
     #[test]
@@ -554,7 +562,7 @@ mod tests {
         let cols = collision_tables(world, &units).unwrap();
         let probe = CollisionProbe::new(world, &units, &origins, &cols).unwrap();
         let faces = all_faces_with(world, &());
-        let caster = FaceCaster::build(&faces, &units);
+        let caster = FaceCaster::build(&faces, &units, &|_| true);
         let floors: Vec<[f64; 3]> = faces
             .iter()
             .filter(|f| f.normal[1] > 0.9 && f.grid.len() >= 3)

@@ -88,6 +88,21 @@ pub struct CookReport {
     pub max_room_pages: usize,
     /// Non-fatal findings.
     pub warnings: Vec<String>,
+    /// What the global light solve did, when the world gathers its light.
+    pub global_light: Option<GlobalLightNote>,
+}
+
+/// What the global light solve of one cook did.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GlobalLightNote {
+    /// Corner samples solved.
+    pub samples: usize,
+    /// Rays traced over all passes.
+    pub rays: u64,
+    /// Passes (the first gather plus the bounces).
+    pub passes: usize,
+    /// Wall time of the solve, milliseconds.
+    pub millis: f64,
 }
 
 /// Size and census report of one room chunk.
@@ -106,6 +121,9 @@ pub struct RoomReport {
     pub uv_split_quads: usize,
     /// Primitives that repeat their texture through the texture window.
     pub repeat_quads: usize,
+    /// Quads whose corner order was turned so the GPU splits them along the
+    /// diagonal that fits the baked light.
+    pub flipped_diagonals: usize,
     /// Merged far quads and the cell quads they stand in for.
     pub lod_quads: usize,
     pub lod_covered: usize,
@@ -133,6 +151,12 @@ impl CookReport {
             self.chunk_bytes(),
             self.pool_pages
         );
+        if let Some(g) = &self.global_light {
+            text.push_str(&format!(
+                "  global light: {} corner samples, {} rays over {} passes, {:.0} ms\n",
+                g.samples, g.rays, g.passes, g.millis
+            ));
+        }
         for (i, r) in self.rooms.iter().enumerate() {
             let c = |ids: &[usize]| ids.iter().map(|&k| r.section_bytes[k]).sum::<usize>();
             text.push_str(&format!(
@@ -150,6 +174,9 @@ impl CookReport {
                     }
                     if r.repeat_quads > 0 {
                         notes.push(format!("{} repeating through the texture window", r.repeat_quads));
+                    }
+                    if r.flipped_diagonals > 0 {
+                        notes.push(format!("{} diagonals turned to fit the light", r.flipped_diagonals));
                     }
                     if notes.is_empty() {
                         String::new()
@@ -248,7 +275,15 @@ pub fn cook_level(
     let probe = crate::grid::lighting::probe::CollisionProbe::new(world, &units, &origins, &cols)?;
     // A world that gathers its light solves it before any quad is coloured.
     let field = if world.global_light.enabled {
-        Some(gather_field(&mut input, &units, &probe)?)
+        let started = std::time::Instant::now();
+        let field = gather_field(&mut input, &units, &probe)?;
+        report.global_light = Some(GlobalLightNote {
+            samples: field.stats.samples,
+            rays: field.stats.rays,
+            passes: field.stats.passes,
+            millis: started.elapsed().as_secs_f64() * 1000.0,
+        });
+        Some(field)
     } else {
         None
     };
@@ -282,6 +317,9 @@ fn gather_field(
     for face in crate::grid::faces::all_faces_with(world, &()) {
         if seen.insert(face.material) {
             table.insert(face.material, input.binder.albedo(face.material));
+            if input.binder.light_passes(face.material) {
+                table.set_open(face.material);
+            }
         }
     }
     crate::grid::lighting::gather::solve(&crate::grid::lighting::gather::GatherInput {
@@ -411,6 +449,7 @@ fn cook_rooms(
             uv_overflow: ren.stats.uv_overflow,
             uv_split_quads: ren.stats.uv_split_quads,
             repeat_quads: ren.stats.repeat_quads,
+            flipped_diagonals: ren.stats.flipped_diagonals,
             lod_quads: chunk.lod_quads.len(),
             lod_covered: chunk
                 .quads

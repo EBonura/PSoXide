@@ -130,6 +130,7 @@ pub use faces::{GridFace, GridFaceKind, UvDefaults};
 pub use leaf::LeafKey;
 pub use leaf_map::LeafMap;
 pub use light::FacingShade;
+pub use lighting::GlobalLight;
 pub use limits::{GridBudget, GridIssue, GridIssueKind, Severity};
 pub use mesh::{
     ArchProfile, ArchSpec, ColumnSpec, GridMesh, ImportedMesh, MeshAsset, MeshKind, RubbleSpec,

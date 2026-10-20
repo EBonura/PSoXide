@@ -79,6 +79,13 @@ pub trait MaterialBinder {
         crate::grid::lighting::gather::FALLBACK_ALBEDO
     }
 
+    /// Whether light passes through faces of `material` (a sky aperture or a
+    /// translucent material) instead of being stopped by them, for the rays
+    /// of a world that gathers its light.
+    fn light_passes(&mut self, _material: Option<ResourceId>) -> bool {
+        false
+    }
+
     /// The grid tiling default of `material`, for faces that do not name a
     /// mode. Binders without a project have none.
     fn uv_default(&self, _material: ResourceId) -> Option<UvMode> {
@@ -569,7 +576,7 @@ fn flip_diagonal(
             .sum()
     };
     // Turn only for a clear gain, so a flat light keeps the order it had.
-    error(1, 3) + 16 < error(0, 2)
+    error(1, 3) + 64 < error(0, 2)
 }
 
 /// Build the render tables of room `room_index`. `origin` is the room's

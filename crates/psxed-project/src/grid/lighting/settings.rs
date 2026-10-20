@@ -48,7 +48,7 @@ impl GlobalLight {
         reach: 4,
         bounces: 2,
         bounce_gain: 100,
-        rays: 32,
+        rays: 64,
         sky: None,
     };
 

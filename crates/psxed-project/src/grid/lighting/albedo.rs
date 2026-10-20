@@ -81,6 +81,8 @@ pub fn reflectance(psxt: Option<&[u8]>, tint: [u8; 3]) -> [f32; 3] {
 #[derive(Default)]
 pub struct AlbedoTable {
     table: HashMap<Option<ResourceId>, [f32; 3]>,
+    /// Materials light passes through: sky apertures and translucent ones.
+    open: std::collections::HashSet<Option<ResourceId>>,
 }
 
 impl AlbedoTable {
@@ -92,7 +94,15 @@ impl AlbedoTable {
         materials: impl IntoIterator<Item = Option<ResourceId>>,
     ) -> Self {
         let mut table = HashMap::new();
+        let mut open = std::collections::HashSet::new();
         for id in materials {
+            if let Some(ResourceData::Material(data)) =
+                id.and_then(|id| project.resource(id)).map(|r| &r.data)
+            {
+                if data.sky_aperture || data.blend_mode != crate::PsxBlendMode::Opaque {
+                    open.insert(id);
+                }
+            }
             table.entry(id).or_insert_with(|| {
                 let Some(id) = id else {
                     return FALLBACK_ALBEDO;
@@ -112,7 +122,12 @@ impl AlbedoTable {
                 reflectance(bytes.as_deref(), data.tint)
             });
         }
-        Self { table }
+        Self { table, open }
+    }
+
+    /// Mark `material` as one light passes through.
+    pub fn set_open(&mut self, material: Option<ResourceId>) {
+        self.open.insert(material);
     }
 
     /// An entry added by hand, for tests and binders.
@@ -127,6 +142,10 @@ impl BakeMaterials for AlbedoTable {
             .get(&material)
             .copied()
             .unwrap_or(FALLBACK_ALBEDO)
+    }
+
+    fn occludes(&self, material: Option<ResourceId>) -> bool {
+        !self.open.contains(&material)
     }
 }
 

@@ -110,6 +110,16 @@ impl MaterialBinder for Binder<'_> {
             .albedo(material)
     }
 
+    fn light_passes(&mut self, material: Option<ResourceId>) -> bool {
+        let Some(id) = material else {
+            return false;
+        };
+        let Some(ResourceData::Material(data)) = self.project.resource(id).map(|r| &r.data) else {
+            return false;
+        };
+        data.sky_aperture || data.blend_mode != PsxBlendMode::Opaque
+    }
+
     fn uv_default(&self, material: ResourceId) -> Option<crate::face_uv::UvMode> {
         crate::grid::UvDefaults::default_uv(
             &crate::grid::uv::ProjectUvDefaults(self.project),

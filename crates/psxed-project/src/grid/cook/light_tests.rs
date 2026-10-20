@@ -461,3 +461,19 @@ fn the_chosen_diagonal_tracks_the_light_better_than_the_default_one() {
         "diagonal error {chosen:.1} against the default {default:.1}"
     );
 }
+
+#[test]
+fn cooking_a_gathering_level_twice_gives_identical_bytes() {
+    for name in ["grid-cathedral", "grid-dungeon"] {
+        let project = super::tests::load_reference(name).unwrap();
+        let mut world = project.active_scene().world.grid().unwrap().clone();
+        world.global_light = GlobalLight::NEW_WORLD;
+        let a = super::tests::cook(&world).unwrap();
+        let b = super::tests::cook(&world).unwrap();
+        assert_eq!(a.core, b.core, "{name}");
+        assert_eq!(a.chunks, b.chunks, "{name}");
+        let note = a.report.global_light.expect("the cook reports the solve");
+        assert!(note.samples > 500 && note.rays > 10_000, "{name}: {note:?}");
+        assert!(a.report.summary().contains("global light:"));
+    }
+}

@@ -51,6 +51,13 @@ pub const FALLBACK_ALBEDO: [f32; 3] = [0.5, 0.5, 0.5];
 pub trait BakeMaterials: Sync {
     /// The reflectance per channel of `material`.
     fn albedo(&self, material: Option<ResourceId>) -> [f32; 3];
+
+    /// Whether a face of `material` stops a ray. A sky aperture is a hole to
+    /// the sky and a translucent material lets light through, so rays pass
+    /// them; everything else blocks.
+    fn occludes(&self, _material: Option<ResourceId>) -> bool {
+        true
+    }
 }
 
 /// Materials that all reflect the same.
@@ -310,7 +317,9 @@ pub fn solve(input: &GatherInput<'_>) -> Option<GiField> {
     let settings: GlobalLight = world.global_light.clamped();
     let units = input.units;
     let faces = all_faces_with(world, &());
-    let caster = FaceCaster::build(&faces, &units);
+    let caster = FaceCaster::build(&faces, &units, &|face| {
+        input.materials.occludes(face.material)
+    });
 
     // Samples, shared by faces of one orientation at one corner.
     let mut index: HashMap<SampleKey, u32> = HashMap::new();

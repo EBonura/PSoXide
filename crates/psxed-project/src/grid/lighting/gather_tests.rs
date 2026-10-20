@@ -51,6 +51,14 @@ fn hall(pillar: i32, roof: bool, light: GlobalLight) -> GridWorld {
 }
 
 fn run(world: &GridWorld, lights: &[GridLight]) -> (GiField, Vec<GridFace>, RuntimeUnits) {
+    run_with(world, lights, &FlatAlbedo(FALLBACK_ALBEDO))
+}
+
+fn run_with(
+    world: &GridWorld,
+    lights: &[GridLight],
+    materials: &dyn super::gather::BakeMaterials,
+) -> (GiField, Vec<GridFace>, RuntimeUnits) {
     let units = RuntimeUnits::new(world.scale).unwrap();
     let origins = room_origins(world, &units);
     let cols = collision_tables(world, &units).unwrap();
@@ -60,7 +68,7 @@ fn run(world: &GridWorld, lights: &[GridLight]) -> (GiField, Vec<GridFace>, Runt
         units,
         lights,
         probe: &probe,
-        materials: &FlatAlbedo(FALLBACK_ALBEDO),
+        materials,
         cancel: None,
     })
     .expect("not cancelled");
@@ -203,4 +211,25 @@ fn a_world_with_the_gather_off_is_the_flat_ambient_it_was() {
     assert!(text.contains("global_light"));
     let back: GridWorld = ron::from_str(&text).unwrap();
     assert_eq!(back.global_light, GlobalLight::NEW_WORLD);
+}
+
+#[test]
+fn a_sky_aperture_ceiling_lets_the_sky_in() {
+    let sky = [40, 80, 200];
+    let light = GlobalLight {
+        sky: Some(sky),
+        ..settings(0)
+    };
+    let roofed = hall(0, true, light);
+    let (solid, faces, _) = run(&roofed, &[]);
+    let under_solid = floor_corner(&solid, &faces, [3, 3], [3072, 3072]);
+    // The roof's material (9) is a hole to the sky: rays pass through it.
+    let mut aperture = super::AlbedoTable::default();
+    aperture.set_open(Some(rid(9)));
+    let (open, faces, _) = run_with(&roofed, &[], &aperture);
+    let under_open = floor_corner(&open, &faces, [3, 3], [3072, 3072]);
+    assert!(
+        under_open < under_solid - 12.0,
+        "under a sky aperture {under_open}, under a roof {under_solid}"
+    );
 }
