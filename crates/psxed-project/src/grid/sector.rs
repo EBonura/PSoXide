@@ -477,8 +477,10 @@ impl Serialize for GridSector {
                 out.serialize_field(name, list)?;
             }
         }
-        if let Some(material) = &ground.wall_material {
-            out.serialize_field("wall_material", material)?;
+        if ground.wall_material.is_some() {
+            // As the option it is read back as (`Some((n))`): the bare id
+            // made a project saved after a Raise unreadable.
+            out.serialize_field("wall_material", &ground.wall_material)?;
         }
         if self.rough != 0 {
             out.serialize_field("rough", &self.rough)?;
@@ -516,6 +518,11 @@ impl<'de> Deserialize<'de> for GridSector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A resource id by its raw number (ids are only made by the project).
+    fn rid(raw: u64) -> ResourceId {
+        ron::from_str(&format!("({raw})")).expect("a resource id")
+    }
 
     #[test]
     fn opposite_is_an_involution() {
@@ -564,6 +571,21 @@ mod tests {
             let right = [-walk[1], walk[0]];
             assert_eq!(edge.front_direction(), right, "{edge:?}");
         }
+    }
+
+    /// The wall material of the ground span (a platform's sides take it from
+    /// the palette when Raise, Ramp or Stairs shapes a sector) is saved and
+    /// loaded: a project saved after such an edit must open again.
+    #[test]
+    fn a_ground_wall_material_survives_ron() {
+        let mut sector = GridSector::default();
+        sector.set_ground_wall_material(Some(rid(159)));
+        let text = ron::to_string(&sector).expect("serialize");
+        let back: GridSector = ron::from_str(&text).unwrap_or_else(|e| panic!("{text}: {e}"));
+        assert_eq!(back.ground_wall_material(), Some(rid(159)));
+        // None writes nothing and reads back as None.
+        let plain = ron::to_string(&GridSector::default()).expect("serialize");
+        assert!(!plain.contains("wall_material"), "{plain}");
     }
 
     #[test]
