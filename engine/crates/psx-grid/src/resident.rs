@@ -21,6 +21,7 @@
 //! cache of anything derived from the set knows to refresh.
 
 use alloc::vec::Vec;
+use core::cell::Cell;
 
 use crate::collision::{GridCollision, LeafDims};
 use crate::format::{ROOM_MAGIC, VERSION};
@@ -92,6 +93,11 @@ pub struct ResidentRooms<'a> {
     pub(crate) inv24: u32,
     /// Edge and weight reciprocal of every leaf size code.
     pub(crate) leaf: LeafDims,
+    /// Room that served the last light probe lookup.
+    pub(crate) probe_hint: Cell<u16>,
+    /// Per room, whether no other room overlaps it in plan: 0 not known yet,
+    /// 1 alone, 2 shared. Depends on the core alone, so never reset.
+    pub(crate) solo: Vec<Cell<u8>>,
 }
 
 impl<'a> ResidentRooms<'a> {
@@ -120,6 +126,8 @@ impl<'a> ResidentRooms<'a> {
             recip,
             inv24: weight_recip(s),
             leaf: LeafDims::for_sector(s as i32),
+            probe_hint: Cell::new(0),
+            solo: (0..level.rooms.len()).map(|_| Cell::new(0)).collect(),
         })
     }
 

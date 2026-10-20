@@ -167,7 +167,83 @@ impl<'a> ResidentRooms<'a> {
     /// A neighbour on another floor (more than a sector off the height of the
     /// probe of the sector the point is in) or with no floor counts as that
     /// probe, so a ledge does not borrow the light of the room below it.
+    #[inline]
     pub fn probe_light(&self, p: [i32; 3]) -> Option<[u8; 3]> {
+        // The room that lit the last point first: models move a little between
+        // draws, and a room that no other room overlaps in plan needs no
+        // search to be the right one.
+        if let Some(light) = self.probe_light_in_hint_room(p) {
+            return Some(light);
+        }
+        self.probe_light_searching(p)
+    }
+
+    /// Whether no other room of the level overlaps `room` in plan (cached).
+    fn plan_is_solo(&self, room: usize) -> bool {
+        match self.solo[room].get() {
+            1 => return true,
+            2 => return false,
+            _ => {}
+        }
+        let s = self.s;
+        let rooms = self.level().rooms;
+        let span = |r: &crate::format::RoomRecord| {
+            (
+                r.origin[0],
+                r.origin[2],
+                r.origin[0] + i32::from(r.width) * s,
+                r.origin[2] + i32::from(r.depth) * s,
+            )
+        };
+        let (x0, z0, x1, z1) = span(&rooms[room]);
+        let shared = rooms.iter().enumerate().any(|(i, r)| {
+            let (a0, b0, a1, b1) = span(r);
+            i != room && a0 < x1 && x0 < a1 && b0 < z1 && z0 < b1
+        });
+        self.solo[room].set(if shared { 2 } else { 1 });
+        !shared
+    }
+
+    /// [`Self::probe_light`] for a point in the room that served the last one,
+    /// when that room is alone over its footprint and all four sectors
+    /// around the point are in it.
+    fn probe_light_in_hint_room(&self, p: [i32; 3]) -> Option<[u8; 3]> {
+        let room = usize::from(self.probe_hint.get());
+        let rec = self.level().rooms.get(room)?;
+        let slot = self.get(room)?;
+        if slot.probes.is_empty() || !self.plan_is_solo(room) {
+            return None;
+        }
+        let (lx, lz) = (
+            p[0].wrapping_sub(rec.origin[0]),
+            p[2].wrapping_sub(rec.origin[2]),
+        );
+        if lx < 0 || lz < 0 {
+            return None;
+        }
+        let s = self.s;
+        let u = s as u32;
+        if lx as u32 >= u32::from(rec.width) * u || lz as u32 >= u32::from(rec.depth) * u {
+            return None;
+        }
+        let (cx, cz) = (self.recip.cell(lx as u32), self.recip.cell(lz as u32));
+        let (fx, fz) = (lx - (cx * u) as i32, lz - (cz * u) as i32);
+        let half = s / 2;
+        let (cx0, cz0) = (
+            cx as i32 - i32::from(fx < half),
+            cz as i32 - i32::from(fz < half),
+        );
+        if cx0 < 0 || cz0 < 0 || cx0 + 1 >= i32::from(rec.width) || cz0 + 1 >= i32::from(rec.depth)
+        {
+            return None;
+        }
+        let probes = direct_block(slot, rec, cx0, cz0, p[1]);
+        self.blend(probes, (fx, fz))
+    }
+
+    /// [`Self::probe_light`] by searching the world lattice for the rooms
+    /// that hold the point and its four sectors.
+    pub(crate) fn probe_light_searching(&self, p: [i32; 3]) -> Option<[u8; 3]> {
         let s = self.s;
         let half = s / 2;
         // Where the point lies in its sector. Every room origin is a multiple
@@ -204,21 +280,7 @@ impl<'a> ResidentRooms<'a> {
             }
         }
         let (bx, bz, lx, lz) = cell_at?;
-        // The two sector middles on each axis and the weight of the second.
-        let (xs, fx) = if lx >= half {
-            ([bx + half, bx + s + half], lx - half)
-        } else {
-            ([bx - s + half, bx + half], lx + half)
-        };
-        let (zs, fz) = if lz >= half {
-            ([bz + half, bz + s + half], lz - half)
-        } else {
-            ([bz - s + half, bz + half], lz + half)
-        };
-        let own = (usize::from(lx < half), usize::from(lz < half));
         let mut probes: [[Option<Found>; 2]; 2] = [[None; 2]; 2];
-        // One room holds the point and the four sectors are all in it (the usual
-        // case): read them straight from its table, no world lattice lookups.
         let (cx0, cz0) = (
             anchor_cell.0 as i32 - i32::from(lx < half),
             anchor_cell.1 as i32 - i32::from(lz < half),
@@ -238,24 +300,41 @@ impl<'a> ResidentRooms<'a> {
             None
         };
         if let Some((slot, rec)) = direct {
-            let local = p[1] - rec.origin[1];
-            let w = usize::from(rec.width);
-            for i in 0..2 {
-                for j in 0..2 {
-                    let cell = (cz0 as usize + j) * w + cx0 as usize + i;
-                    probes[i][j] = slot.probes.nearest(cell, local).map(|(py, rgb)| Found {
-                        y: py + rec.origin[1],
-                        rgb,
-                    });
-                }
-            }
+            probes = direct_block(slot, rec, cx0, cz0, p[1]);
         } else {
+            // The two sector middles on each axis.
+            let xs = if lx >= half {
+                [bx + half, bx + s + half]
+            } else {
+                [bx - s + half, bx + half]
+            };
+            let zs = if lz >= half {
+                [bz + half, bz + s + half]
+            } else {
+                [bz - s + half, bz + half]
+            };
             for (i, &x) in xs.iter().enumerate() {
                 for (j, &z) in zs.iter().enumerate() {
                     probes[i][j] = self.column_probe(x, z, p[1]);
                 }
             }
         }
+        let light = self.blend(probes, (lx, lz))?;
+        self.probe_hint.set(anchor_room as u16);
+        Some(light)
+    }
+
+    /// Blend the four probes around a point that lies `(lx, lz)` into its
+    /// sector (`probes[i][j]` is the `i`-th sector along X and `j`-th along Z).
+    #[inline]
+    fn blend(&self, probes: [[Option<Found>; 2]; 2], (lx, lz): (i32, i32)) -> Option<[u8; 3]> {
+        let s = self.s;
+        let half = s / 2;
+        let (fx, fz) = (
+            if lx >= half { lx - half } else { lx + half },
+            if lz >= half { lz - half } else { lz + half },
+        );
+        let own = (usize::from(lx < half), usize::from(lz < half));
         // The probe of the sector the point is in sets the floor; without one
         // the first neighbour that has a probe does.
         let reference = probes[own.0][own.1].or_else(|| {
@@ -292,4 +371,29 @@ impl<'a> ResidentRooms<'a> {
         };
         Some([mix(0), mix(1), mix(2)])
     }
+}
+
+/// The four probes of the 2 by 2 sectors from `(cx0, cz0)` of a room, nearest
+/// in height to the world height `y`.
+#[inline]
+fn direct_block(
+    slot: &crate::resident::RoomSlot<'_>,
+    rec: &crate::format::RoomRecord,
+    cx0: i32,
+    cz0: i32,
+    y: i32,
+) -> [[Option<Found>; 2]; 2] {
+    let local = y - rec.origin[1];
+    let w = usize::from(rec.width);
+    let mut probes: [[Option<Found>; 2]; 2] = [[None; 2]; 2];
+    for (i, column) in probes.iter_mut().enumerate() {
+        for (j, entry) in column.iter_mut().enumerate() {
+            let cell = (cz0 as usize + j) * w + cx0 as usize + i;
+            *entry = slot.probes.nearest(cell, local).map(|(py, rgb)| Found {
+                y: py + rec.origin[1],
+                rgb,
+            });
+        }
+    }
+    probes
 }

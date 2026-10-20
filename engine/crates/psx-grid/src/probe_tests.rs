@@ -426,3 +426,27 @@ fn the_resident_set_can_be_viewed_for_a_shorter_lifetime() {
     }
     let _ = shrink;
 }
+
+#[test]
+fn the_hint_room_shortcut_answers_like_the_search() {
+    // Walk a point through two rooms and over their seam: whichever room
+    // served the last lookup, the answer is the searched one.
+    let a = grid_room([0, 0], varied);
+    let b = grid_room([4, 0], |cx, cz| varied(3 - cx, 3 - cz));
+    with_rooms(&[a, b], |set| {
+        let mut checked = 0;
+        for x in (0..8 * S).step_by(9) {
+            for z in (0..4 * S).step_by(11) {
+                for y in [0, 32, 90] {
+                    assert_eq!(
+                        set.probe_light([x, y, z]),
+                        set.probe_light_searching([x, y, z]),
+                        "{x},{y},{z}"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 2000);
+    });
+}
