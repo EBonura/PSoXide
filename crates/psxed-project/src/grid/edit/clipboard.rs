@@ -7,7 +7,9 @@
 
 use std::collections::BTreeMap;
 
+use super::super::derive::edge_key;
 use super::super::limits::MAX_WALLS_PER_EDGE;
+use super::super::overrides::{Axis, EdgeKey, EdgeOverride, SEGMENT_CLICKS};
 use super::super::sector::{GridSector, WallEdge};
 use super::super::surface::{GridSplit, GridSurface, GridWall, WallFacing, VOID_A};
 use super::super::world::GridWorld;
@@ -184,6 +186,14 @@ pub struct GridClipboard {
     items: BTreeMap<[i32; 2], GridSector>,
     /// Extent in sectors, `[width, depth]`.
     size: [i32; 2],
+    /// What the user set on the derived wall segments of the copied sectors,
+    /// keyed in clicks from the clip's smallest corner. Turning and
+    /// mirroring move them with the sectors; a texture offset or turn inside
+    /// one is kept as authored.
+    overrides: Vec<(EdgeKey, EdgeOverride)>,
+    /// The room the clip was copied from: band set indices only mean the
+    /// same thing there.
+    room: usize,
 }
 
 /// What a paste did.
@@ -240,10 +250,58 @@ impl GridClipboard {
                 FaceTarget::Derived { .. } => {}
             }
         }
+        let mut overrides: BTreeMap<EdgeKey, EdgeOverride> = BTreeMap::new();
+        if let Some(source) = world.rooms.get(room) {
+            let clicks = i32::from(SEGMENT_CLICKS);
+            for offset in items.keys() {
+                let cell = [min[0] + offset[0], min[1] + offset[1]];
+                for edge in WallEdge::ALL {
+                    let key = edge_key(cell, edge);
+                    if let Some(found) = source.edge_overrides.get(&key) {
+                        let relative = EdgeKey {
+                            x: key.x - min[0] * clicks,
+                            z: key.z - min[1] * clicks,
+                            ..key
+                        };
+                        overrides.insert(relative, found.clone());
+                    }
+                }
+            }
+        }
         Some(Self {
             items,
             size: [max[0] - min[0] + 1, max[1] - min[1] + 1],
+            overrides: overrides.into_iter().collect(),
+            room,
         })
+    }
+
+    /// The clip with every height raised by `dy` grid units (surfaces and
+    /// walls; the heights are room-relative, so this stamps the copy higher
+    /// or lower than the original).
+    pub fn lifted(&self, dy: i32) -> Self {
+        let mut out = self.clone();
+        if dy == 0 {
+            return out;
+        }
+        let lift = |surface: &mut GridSurface| {
+            surface.heights = surface.heights.map(|h| h + dy);
+            surface.heights_b = surface.heights_b.map(|b| b.map(|h| h + dy));
+        };
+        for sector in out.items.values_mut() {
+            if let Some(floor) = sector.ground_floor_mut() {
+                lift(floor);
+            }
+            if let Some(ceiling) = sector.ground_ceiling_mut() {
+                lift(ceiling);
+            }
+            for edge in WallEdge::ALL {
+                for wall in sector.walls_mut(edge) {
+                    wall.heights = wall.heights.map(|h| h + dy);
+                }
+            }
+        }
+        out
     }
 
     /// Extent in sectors, `[width, depth]`.
@@ -264,6 +322,18 @@ impl GridClipboard {
     /// Mirror or turn the whole clip.
     pub fn transform(&mut self, t: Transform) {
         let size = self.size;
+        let clicks = [
+            size[0] * i32::from(SEGMENT_CLICKS),
+            size[1] * i32::from(SEGMENT_CLICKS),
+        ];
+        for (key, found) in &mut self.overrides {
+            let (moved, reversed) = transform_key(*key, t, clicks);
+            *key = moved;
+            if reversed {
+                found.top_delta.reverse();
+            }
+        }
+        self.overrides.sort_by_key(|(key, _)| *key);
         self.items = std::mem::take(&mut self.items)
             .into_iter()
             .map(|(offset, sector)| (t.cell(offset, size), transform_sector(&sector, t)))
@@ -325,11 +395,64 @@ impl GridClipboard {
                 }
             }
         }
+        let clicks = i32::from(SEGMENT_CLICKS);
+        for (key, found) in &self.overrides {
+            let mut found = found.clone();
+            if self.room != room {
+                found.band_set = None;
+            }
+            target.edge_overrides.edit(
+                EdgeKey {
+                    x: key.x + at[0] * clicks,
+                    z: key.z + at[1] * clicks,
+                    ..*key
+                },
+                |slot| *slot = found,
+            );
+        }
         PasteOutcome {
             faces,
             refused: None,
         }
     }
+}
+
+/// Where a wall segment key goes under `t` in a clip `size` clicks across,
+/// and whether the segment now runs the other way (so its end-to-end values
+/// swap).
+fn transform_key(key: EdgeKey, t: Transform, size: [i32; 2]) -> (EdgeKey, bool) {
+    let len = i32::from(key.len);
+    let (p, q) = match key.axis {
+        Axis::X => ([key.x, key.z], [key.x + len, key.z]),
+        Axis::Z => ([key.x, key.z], [key.x, key.z + len]),
+        Axis::NwSe => ([key.x, key.z], [key.x + len, key.z + len]),
+        Axis::NeSw => ([key.x + len, key.z], [key.x, key.z + len]),
+    };
+    let map = |p: [i32; 2]| match t {
+        Transform::FlipH => [size[0] - p[0], p[1]],
+        Transform::FlipV => [p[0], size[1] - p[1]],
+        Transform::RotateCw => [size[1] - p[1], p[0]],
+    };
+    let (p, q) = (map(p), map(q));
+    let low = [p[0].min(q[0]), p[1].min(q[1])];
+    let (axis, reversed) = match key.axis {
+        Axis::X | Axis::Z if p[1] == q[1] => (Axis::X, p[0] > q[0]),
+        Axis::X | Axis::Z => (Axis::Z, p[1] > q[1]),
+        // The diagonal that runs from the north-west corner stays one when
+        // its ends are still the low and high corners.
+        Axis::NwSe | Axis::NeSw if (p[0] < q[0]) == (p[1] < q[1]) => (Axis::NwSe, p[0] > q[0]),
+        // Otherwise it runs from the north-east corner to the south-west.
+        Axis::NwSe | Axis::NeSw => (Axis::NeSw, p[0] < q[0]),
+    };
+    (
+        EdgeKey {
+            x: low[0],
+            z: low[1],
+            axis,
+            len: key.len,
+        },
+        reversed,
+    )
 }
 
 #[cfg(test)]
@@ -563,5 +686,128 @@ mod tests {
             clip.paste(&mut w, 9, [0, 0]).refused,
             Some(RectRefusal::NoSuchRoom)
         );
+    }
+
+    fn hidden() -> EdgeOverride {
+        EdgeOverride {
+            hidden: true,
+            ..EdgeOverride::default()
+        }
+    }
+
+    #[test]
+    fn a_lifted_clip_raises_surfaces_and_walls_and_leaves_the_original() {
+        let w = world_with(|r| {
+            let s = r.sector_or_insert(0, 0).unwrap();
+            s.set_ground_floor(Some(sloped()));
+            s.set_ground_ceiling(Some(GridSurface::flat(1024, None)));
+            s.north.push(GridWall::span(0, 512, None));
+        });
+        let clip = clip_of(&w);
+        let up = clip.lifted(256);
+        let (_, s) = up.sectors().next().unwrap();
+        assert_eq!(s.ground_floor().unwrap().heights, [256, 356, 456, 556]);
+        assert_eq!(s.ground_ceiling().unwrap().heights, [1280; 4]);
+        assert_eq!(s.north[0].heights, [256, 256, 768, 768]);
+        let (_, s) = clip.sectors().next().unwrap();
+        assert_eq!(s.ground_floor().unwrap().heights, [0, 100, 200, 300]);
+        assert_eq!(clip.lifted(0), clip);
+    }
+
+    #[test]
+    fn wall_overrides_travel_with_a_copy_and_land_at_the_paste_point() {
+        let mut w = world_with(|r| {
+            r.sector_or_insert(0, 0)
+                .unwrap()
+                .set_ground_floor(Some(GridSurface::flat(0, None)));
+            let north = edge_key([0, 0], WallEdge::North);
+            r.edge_overrides.edit(north, |o| *o = hidden());
+        });
+        let clip = clip_of(&w);
+        let out = clip.paste(&mut w, 0, [2, 1]);
+        assert!(out.refused.is_none());
+        let landed = w.rooms[0]
+            .edge_overrides
+            .get(&edge_key([2, 1], WallEdge::North));
+        assert_eq!(landed, Some(&hidden()));
+        // The original keeps its own.
+        assert!(w.rooms[0]
+            .edge_overrides
+            .get(&edge_key([0, 0], WallEdge::North))
+            .is_some());
+    }
+
+    #[test]
+    fn overrides_follow_a_mirror_and_a_turn_and_swap_their_top_delta() {
+        let w = world_with(|r| {
+            r.sector_or_insert(0, 0)
+                .unwrap()
+                .set_ground_floor(Some(GridSurface::flat(0, None)));
+            r.sector_or_insert(1, 0)
+                .unwrap()
+                .set_ground_floor(Some(GridSurface::flat(0, None)));
+            let north = edge_key([0, 0], WallEdge::North);
+            r.edge_overrides.edit(north, |o| {
+                o.hidden = true;
+                o.top_delta = [4, 8];
+            });
+        });
+        // A two by one clip; the north wall of its west sector.
+        let mut flipped = clip_of(&w);
+        flipped.transform(Transform::FlipH);
+        let mut w2 = w.clone();
+        w2.rooms[0].edge_overrides.retain(|_| false);
+        flipped.paste(&mut w2, 0, [0, 0]);
+        // Mirrored east to west it sits on the east sector's north edge,
+        // running the other way.
+        let found = w2.rooms[0]
+            .edge_overrides
+            .get(&edge_key([1, 0], WallEdge::North))
+            .expect("moved to the east sector");
+        assert!(found.hidden);
+        assert_eq!(found.top_delta, [8, 4]);
+        // A quarter turn puts a north wall on the east edge.
+        let mut turned = clip_of(&w);
+        turned.transform(Transform::RotateCw);
+        let mut w3 = w.clone();
+        w3.rooms[0].edge_overrides.retain(|_| false);
+        turned.paste(&mut w3, 0, [0, 0]);
+        let east = w3.rooms[0]
+            .edge_overrides
+            .get(&edge_key([0, 0], WallEdge::East))
+            .expect("north became east");
+        assert!(east.hidden);
+        // Four turns bring everything home.
+        let mut round = clip_of(&w);
+        for _ in 0..4 {
+            round.transform(Transform::RotateCw);
+        }
+        assert_eq!(round, clip_of(&w));
+    }
+
+    #[test]
+    fn a_band_set_only_means_something_in_the_room_it_was_copied_from() {
+        let mut w = world_with(|r| {
+            r.sector_or_insert(0, 0)
+                .unwrap()
+                .set_ground_floor(Some(GridSurface::flat(0, None)));
+            r.edge_overrides
+                .edit(edge_key([0, 0], WallEdge::West), |o| o.band_set = Some(3));
+        });
+        w.rooms.push(GridRoom::new("other", 3, 2));
+        let clip = clip_of(&w);
+        clip.paste(&mut w, 0, [1, 1]);
+        assert_eq!(
+            w.rooms[0]
+                .edge_overrides
+                .get(&edge_key([1, 1], WallEdge::West))
+                .and_then(|o| o.band_set),
+            Some(3)
+        );
+        clip.paste(&mut w, 1, [1, 1]);
+        assert!(w.rooms[1]
+            .edge_overrides
+            .get(&edge_key([1, 1], WallEdge::West))
+            .is_none());
     }
 }
