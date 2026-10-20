@@ -264,7 +264,7 @@ impl ExtrudeDrag {
         let result = if steps > 0 {
             self.out(world, steps)
         } else {
-            self.into_the_room(world, -steps)
+            self.fill_in(world, -steps)
         };
         if result.is_err() {
             world.rooms[self.room] = self.before.clone();
@@ -319,7 +319,7 @@ impl ExtrudeDrag {
         Ok(done)
     }
 
-    fn into_the_room(&self, world: &mut GridWorld, steps: i32) -> Result<Extruded, ExtrudeRefusal> {
+    fn fill_in(&self, world: &mut GridWorld, steps: i32) -> Result<Extruded, ExtrudeRefusal> {
         let room = &mut world.rooms[self.room];
         let mut done = Extruded::default();
         for piece in &self.pieces {
