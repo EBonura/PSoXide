@@ -334,3 +334,64 @@ fn cooking_probes_twice_gives_identical_bytes() {
     let b = cook_with_lights(&world, &lights).unwrap();
     assert_eq!(a.chunks, b.chunks);
 }
+
+/// Every reference level plans, bakes and reads back its probes; packing the
+/// colours to five bits a channel moves none of them by more than the step of
+/// the packing, which the 15 bit framebuffer cannot show.
+#[test]
+fn the_reference_levels_bake_probes_and_five_bits_lose_nothing_the_framebuffer_keeps() {
+    use crate::grid::lighting::scene_grid_lights;
+    let mut total = 0usize;
+    let mut sum_error = 0u64;
+    let mut worst = 0i32;
+    for name in [
+        "grid-starter",
+        "grid-gate",
+        "grid-tower",
+        "grid-cave",
+        "grid-dungeon",
+        "grid-sewers",
+        "grid-west",
+        "grid-level008",
+        "grid-cathedral",
+        "grid-corridor",
+    ] {
+        let mut project = super::tests::load_reference(name).unwrap();
+        crate::units::scale_project_to_engine_units(&mut project);
+        let world = project.active_scene().world.grid().expect("a grid project");
+        let lights = scene_grid_lights(project.active_scene(), 1.0);
+        let scene = LightScene::new(world).unwrap();
+        let plan = crate::grid::lighting::ProbePlan::build(
+            world,
+            &scene.units(),
+            scene.probe(),
+        )
+        .unwrap();
+        assert!(!plan.is_empty(), "{name} has floors");
+        let raw: Vec<[u8; 3]> = scene
+            .with_rig(&lights, world.shading, None, |rig| {
+                plan.sites
+                    .iter()
+                    .enumerate()
+                    .map(|(i, site)| rig.probe(i, site, world.rooms[usize::from(site.room)].ambient))
+                    .collect()
+            })
+            .unwrap();
+        for packed in &raw {
+            let back = probe_unpack(probe_pack(*packed));
+            for k in 0..3 {
+                let e = (i32::from(back[k]) - i32::from(packed[k])).abs();
+                worst = worst.max(e);
+                sum_error += e as u64;
+                total += 1;
+            }
+        }
+        eprintln!("{name}: {} probes", plan.len());
+    }
+    eprintln!(
+        "probe packing: {total} channels, mean error {:.2}, worst {worst}",
+        sum_error as f64 / total as f64
+    );
+    // The step is eight, so half of it, except above 252 where it clips.
+    assert!(worst <= 7, "worst error {worst}");
+}
