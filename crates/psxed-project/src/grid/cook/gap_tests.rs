@@ -129,3 +129,59 @@ fn breaking_the_rock_around_a_pillar_never_opens_a_hole() {
         }
     }
 }
+
+#[test]
+fn a_default_break_cooks_a_whole_textured_floor() {
+    // Break's default look leaves no see-through hole and no untextured
+    // face: the cooked room has the floor's and the ceiling's material and
+    // nothing else, and stays watertight.
+    let mut room = GridRoom::new_derived("hall", 16, 16);
+    for z in 0..16 {
+        for x in 0..16 {
+            let sector = room.sector_or_insert(x, z).unwrap();
+            sector.set_ground_floor(Some(GridSurface::flat_auto(0, Some(rid(1)))));
+            sector.set_ground_ceiling(Some(GridSurface::flat_auto(3072, Some(rid(2)))));
+        }
+    }
+    let region = Region::from_rect(0, CellRect::from_corners([1, 1], [14, 14]));
+    for seed in 1..=6 {
+        let mut world = GridWorld {
+            scale: GridScale::DEFAULT,
+            rooms: vec![room.clone()],
+            ..GridWorld::default()
+        };
+        let params = BreakParams {
+            targets: BreakTargets {
+                walls: true,
+                floor: true,
+                ceiling: true,
+            },
+            spawns: vec![crate::grid::walk::Spawn {
+                room: 0,
+                cell: [0, 0],
+            }],
+            ..BreakParams::default()
+        };
+        let report = break_region(&mut world, &region, params, 100, seed).unwrap();
+        assert_eq!(report.gaps, 0);
+        let found = holes(&world);
+        assert!(found.is_empty(), "seed {seed}: {found:?}");
+        let cooked = cook(&world).unwrap();
+        let chunk = &cooked.tables[0];
+        assert_eq!(
+            chunk.material_use.len(),
+            2,
+            "seed {seed}: a face lost its material"
+        );
+        let floors = (0..16usize)
+            .flat_map(|z| (0..16usize).map(move |x| (x, z)))
+            .filter(|&(x, z)| {
+                world.rooms[0]
+                    .sector(x, z)
+                    .and_then(|s| s.ground_floor())
+                    .is_some_and(|f| f.void == 0)
+            })
+            .count();
+        assert_eq!(floors, 16 * 16, "seed {seed}: every cell keeps its floor");
+    }
+}

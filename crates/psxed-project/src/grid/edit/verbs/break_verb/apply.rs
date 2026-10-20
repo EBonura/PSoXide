@@ -108,7 +108,7 @@ fn apply_one(
                 r.local(o)
                     .and_then(|[x, z]| r.sector(x, z))
                     .and_then(|s| s.ground_floor())
-                    .map(|f| f.tri_a.material)
+                    .and_then(|f| f.tri_a.material)
             });
             let Some(sector) = sector_mut(world, room, *cell) else {
                 return false;
@@ -132,7 +132,7 @@ fn apply_one(
                 *h = h.saturating_add(delta);
             }
             if let (Some(m), Surf::Floor) = (material, surf) {
-                surface.tri_mut(*tri).material = m;
+                surface.tri_mut(*tri).material = Some(m);
             }
             changed = true;
             if *surf == Surf::Floor {

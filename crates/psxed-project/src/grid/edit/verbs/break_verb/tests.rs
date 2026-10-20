@@ -10,7 +10,7 @@ use crate::grid::surface::{GridSurface, VOID_A};
 use crate::grid::walk::{analyse, Spawn, WalkLimits};
 use crate::grid::world::GridWorld;
 
-use super::super::tests::{floor, hall};
+use super::super::tests::{floor, hall, rid};
 use super::*;
 
 /// A 12 by 12 derived hall (floor 0, ceiling 3072) with a plateau of 4 clicks
@@ -305,4 +305,249 @@ fn open_wall_tops_get_a_ragged_top_and_a_void_corner_keeps_its_diagonal_wall() {
         assert_eq!(a[2], b[3], "the walls meet at one height: {a:?} {b:?}");
     }
     let _ = GridSurface::flat(0, None);
+}
+
+/// A 16 by 16 hall with a textured floor (material 1) and ceiling
+/// (material 2), the way a real room is painted.
+fn painted_hall() -> (GridWorld, Region) {
+    let world = hall(16, 16);
+    let region = Region::from_rect(0, CellRect::from_corners([1, 1], [14, 14]));
+    (world, region)
+}
+
+fn voids(world: &GridWorld) -> Vec<[usize; 2]> {
+    let room = &world.rooms[0];
+    let mut out = Vec::new();
+    for z in 0..room.depth {
+        for x in 0..room.width {
+            let Some(s) = room.sector(x, z) else { continue };
+            let floor = s.ground_floor().is_some_and(|f| f.void != 0);
+            let ceiling = s.ground_ceiling().is_some_and(|c| c.void != 0);
+            if floor || ceiling {
+                out.push([x, z]);
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn a_break_does_not_punch_holes_in_a_floor_unless_asked_to() {
+    // Manny's dp-world floor: a break at high intensity left dozens of
+    // see-through squares because gaps were on by default and a gap in the
+    // middle of a big floor does not cut the route, so the mask let it be.
+    let (w0, region) = painted_hall();
+    let spawns = vec![Spawn {
+        room: 0,
+        cell: [0, 0],
+    }];
+    for seed in 1..=8 {
+        for keep_walkable in [true, false] {
+            let p = BreakParams {
+                targets: BreakTargets {
+                    walls: true,
+                    floor: true,
+                    ceiling: true,
+                },
+                keep_walkable,
+                spawns: spawns.clone(),
+                ..BreakParams::default()
+            };
+            let mut w = w0.clone();
+            let report = break_region(&mut w, &region, p, 100, seed).unwrap();
+            assert_eq!(report.gaps, 0, "seed {seed} keep {keep_walkable}");
+            assert!(
+                voids(&w).is_empty(),
+                "seed {seed} keep {keep_walkable}: {:?}",
+                voids(&w)
+            );
+        }
+    }
+}
+
+#[test]
+fn gaps_are_an_explicit_option_and_still_obey_the_mask() {
+    let (w0, region) = painted_hall();
+    let p = BreakParams {
+        targets: BreakTargets {
+            walls: false,
+            floor: true,
+            ceiling: false,
+        },
+        keep_walkable: false,
+        gaps: true,
+        ..BreakParams::default()
+    };
+    let mut w = w0.clone();
+    let report = break_region(&mut w, &region, p.clone(), 100, 1).unwrap();
+    assert!(report.gaps > 0, "{report:?}");
+    assert_eq!(voids(&w).len(), report.gaps);
+    // Below the gap threshold nothing opens even when asked.
+    let mut low = w0;
+    let report = break_region(&mut low, &region, p, 50, 1).unwrap();
+    assert_eq!(report.gaps, 0);
+}
+
+#[test]
+fn every_face_a_break_makes_keeps_the_material_it_came_from() {
+    // The floor is material 1 and the ceiling 2, no paint rules. Whatever a
+    // break splits, cracks or drops, no triangle may end up with another
+    // material or none, and every derived riser must still resolve to one.
+    let (w0, region) = painted_hall();
+    let p = BreakParams {
+        targets: BreakTargets {
+            walls: true,
+            floor: true,
+            ceiling: true,
+        },
+        keep_walkable: false,
+        ..BreakParams::default()
+    };
+    for seed in 1..=6 {
+        let mut w = w0.clone();
+        let report = break_region(&mut w, &region, p.clone(), 100, seed).unwrap();
+        assert!(
+            report.cracked + report.tilted + report.ceiling > 0,
+            "{report:?}"
+        );
+        for face in crate::grid::faces::all_faces(&w) {
+            assert!(
+                face.material.is_some(),
+                "seed {seed}: an untextured {:?} at {:?}",
+                face.kind,
+                face.cell
+            );
+            match face.kind {
+                crate::grid::faces::GridFaceKind::Floor { .. } => {
+                    assert_eq!(face.material, Some(rid(1)), "seed {seed} {:?}", face.cell)
+                }
+                crate::grid::faces::GridFaceKind::Ceiling { .. } => {
+                    assert_eq!(face.material, Some(rid(2)), "seed {seed} {:?}", face.cell)
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+#[test]
+fn mixing_materials_never_swaps_in_nothing() {
+    // The neighbour a cracked half borrows from has no material: the half
+    // keeps its own rather than turning untextured.
+    let (mut w0, region) = painted_hall();
+    // A plateau so the break has edges to bite; the low ring is unpainted.
+    for z in 0..16usize {
+        for x in 0..16usize {
+            let s = w0.rooms[0].sector_mut(x, z).unwrap();
+            let f = s.ground_floor_mut().unwrap();
+            if (4..12).contains(&x) && (4..12).contains(&z) {
+                f.heights = [512; 4];
+            } else {
+                f.tri_a.material = None;
+            }
+        }
+    }
+    let p = BreakParams {
+        targets: BreakTargets {
+            walls: true,
+            floor: false,
+            ceiling: false,
+        },
+        keep_walkable: false,
+        mix_materials: true,
+        ..BreakParams::default()
+    };
+    let mut cracked = 0;
+    for seed in 1..=8 {
+        let mut w = w0.clone();
+        let report = break_region(&mut w, &region, p.clone(), 100, seed).unwrap();
+        cracked += report.bites;
+        for z in 4..12 {
+            for x in 4..12 {
+                let f = floor(&w, [x, z]);
+                assert_eq!(f.tri_a.material, Some(rid(1)), "seed {seed} {x},{z}");
+                if let Some(b) = f.tri_b {
+                    assert_eq!(b.material, Some(rid(1)), "seed {seed} {x},{z}");
+                }
+            }
+        }
+    }
+    assert!(cracked > 0, "the break bit nothing");
+}
+
+/// Review capture: `PSXED_BREAK_PROJECT=<project.ron> PSXED_BREAK_OUT=<dir>`
+/// takes a project whose floors a break already pierced with gaps (Manny's
+/// dp-world), closes those gaps, breaks every room that had them again at
+/// intensity 100 with and without `gaps`, and writes the two projects for
+/// the editor preview to render. Without the variables this does nothing.
+#[test]
+fn break_captures() {
+    let (Some(src), Some(out)) = (
+        std::env::var_os("PSXED_BREAK_PROJECT"),
+        std::env::var_os("PSXED_BREAK_OUT"),
+    ) else {
+        return;
+    };
+    let out = std::path::PathBuf::from(out);
+    let mut project = crate::ProjectDocument::load_from_path(&src).expect("project loads");
+    let spawns;
+    let mut rooms: Vec<usize> = Vec::new();
+    {
+        let scene = project.active_scene_mut();
+        let world = scene.world.grid_mut().expect("a grid world");
+        for (index, room) in world.rooms.iter_mut().enumerate() {
+            let mut pierced = false;
+            for z in 0..room.depth {
+                for x in 0..room.width {
+                    let Some(s) = room.sector_mut(x, z) else {
+                        continue;
+                    };
+                    if let Some(f) = s.ground_floor_mut().filter(|f| f.void == 3) {
+                        f.void = 0;
+                        pierced = true;
+                    }
+                    if let Some(c) = s.ground_ceiling_mut().filter(|c| c.void == 3) {
+                        c.void = 0;
+                    }
+                }
+            }
+            if pierced {
+                rooms.push(index);
+            }
+        }
+    }
+    {
+        let scene = project.active_scene();
+        let world = scene.world.grid().unwrap();
+        spawns = crate::grid::walk::player_spawns(&project, world);
+    }
+    assert!(!rooms.is_empty(), "no room had a gap");
+    for gaps in [true, false] {
+        let mut p = project.clone();
+        let world = p.active_scene_mut().world.grid_mut().unwrap();
+        for &room in &rooms {
+            let r = &world.rooms[room];
+            let cells: Vec<[i32; 2]> = r
+                .face_cells()
+                .into_iter()
+                .map(|[x, z]| r.world_cell(x, z))
+                .collect();
+            let region = Region::from_cells(room, cells);
+            let params = BreakParams {
+                targets: BreakTargets {
+                    walls: true,
+                    floor: true,
+                    ceiling: false,
+                },
+                spawns: spawns.clone(),
+                gaps,
+                ..BreakParams::default()
+            };
+            let report = break_region(world, &region, params, 100, 1).expect("something to break");
+            eprintln!("room {room} gaps {gaps}: {report:?}");
+        }
+        let dir = out.join(if gaps { "gaps-on" } else { "gaps-off" });
+        std::fs::create_dir_all(&dir).unwrap();
+        p.save_to_path(dir.join("project.ron")).unwrap();
+    }
 }

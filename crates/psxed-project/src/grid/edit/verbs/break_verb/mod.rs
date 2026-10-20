@@ -15,9 +15,10 @@
 //!   derived riser's top follows), a plateau edge gets bites (the half of a
 //!   cell on the low side drops, a diagonal riser appears), and an open-topped
 //!   rock wall gets a ragged top (`top_delta`) with the odd stub.
-//! * **floor**: interior vertices tilt, tiles crack along a diagonal (the
-//!   Cathedral's broken tile), and at high intensity a cell may turn into a
-//!   gap.
+//! * **floor**: interior vertices tilt and tiles crack along a diagonal (the
+//!   Cathedral's broken tile). With `gaps` on, and only then, a cell may also
+//!   turn into a gap at high intensity; a break never punches see-through
+//!   holes on its own.
 //! * **ceiling**: the same for the roof, held above the body's headroom.
 //!
 //! With `keep_walkable` every operation is checked against the walkability
@@ -132,6 +133,7 @@ impl BreakStyle {
                 snap: BreakSnap::Fine,
                 keep_walkable: true,
                 mix_materials: false,
+                gaps: false,
                 jitter: 0,
                 ..BreakParams::default()
             },
@@ -155,6 +157,10 @@ pub struct BreakParams {
     pub spawns: Vec<Spawn>,
     /// Give a cracked triangle the material of the floor it now borders.
     pub mix_materials: bool,
+    /// Let a break turn whole cells into gaps (see-through holes) at high
+    /// intensity. Off unless asked for: a gap in the middle of a floor does
+    /// not cut the route, so the walkability mask never refuses it.
+    pub gaps: bool,
     /// The rough level (0 to 3) to give the broken sectors, 0 for none.
     pub jitter: u8,
     /// The character's walking numbers.
@@ -170,6 +176,7 @@ impl Default for BreakParams {
             keep_walkable: true,
             spawns: Vec::new(),
             mix_materials: false,
+            gaps: false,
             jitter: 0,
             limits: WalkLimits::DEFAULT,
         }

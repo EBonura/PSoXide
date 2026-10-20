@@ -197,7 +197,7 @@ pub(super) fn plan(
     if t.floor || t.walls {
         bites(&cx, &floors, &mut out);
     }
-    if t.floor {
+    if t.floor && params.gaps {
         gaps(&cx, &floors, &mut out);
     }
     if t.floor || t.walls {
