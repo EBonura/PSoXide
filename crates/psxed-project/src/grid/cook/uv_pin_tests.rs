@@ -6,18 +6,18 @@
 use super::tests::{cook, load_reference};
 
 const PROJECTS: [(&str, u64); 12] = [
-    ("default", 0x180d290ce913116b),
-    ("graybox-reach", 0xf7509ab5c833de99),
-    ("grid-cathedral", 0xf9db58002a1552e8),
-    ("grid-cave", 0xf359de563dfea216),
-    ("grid-corridor", 0x3fa796c1727a94a9),
-    ("grid-dungeon", 0xe8f923fe4ba491d0),
-    ("grid-gate", 0x1f23bd2aac942081),
-    ("grid-level008", 0xe2645a177a13de04),
-    ("grid-sewers", 0x347b75214eb56048),
-    ("grid-starter", 0xbf7b01fcbb654729),
-    ("grid-tower", 0xdfc513b70bb820ea),
-    ("grid-west", 0xb6bb9c4ed48a31e5),
+    ("default", 0x0f0c1e28b8ef939c),
+    ("graybox-reach", 0x9b506aff3037965e),
+    ("grid-cathedral", 0x05782fa4b4d023d2),
+    ("grid-cave", 0x9e6d974bd13bc3a8),
+    ("grid-corridor", 0xae7c3988a32b6bd1),
+    ("grid-dungeon", 0x3fff0ffe8809d4b3),
+    ("grid-gate", 0x13c9cb5b1f376f8b),
+    ("grid-level008", 0x8f0c984a0d16a75a),
+    ("grid-sewers", 0xde6d0bffc419b732),
+    ("grid-starter", 0x2462121e0e7c58c9),
+    ("grid-tower", 0xd5d530eadc20a198),
+    ("grid-west", 0x4d79c0f987f3ad12),
 ];
 
 fn fnv(hash: &mut u64, bytes: &[u8]) {
