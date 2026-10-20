@@ -81,10 +81,17 @@ fn with_cooked<R>(cooked: &CookedLevel, f: impl FnOnce(&ResidentRooms<'_>) -> R)
 
 /// The light of the probe of sector `(cx, cz)` of room `room`.
 fn probe_of(cooked: &CookedLevel, room: usize, cx: usize, cz: usize) -> [u8; 3] {
-    let tables = cooked.tables[room].probes.as_ref().expect("a room with probes");
+    let tables = cooked.tables[room]
+        .probes
+        .as_ref()
+        .expect("a room with probes");
     let width = usize::from(cooked.tables[room].width);
     let entry = tables.cells[cz * width + cx];
-    assert_eq!(entry.rgb & PROBE_MULTI, 0, "sector {cx},{cz} is a single floor");
+    assert_eq!(
+        entry.rgb & PROBE_MULTI,
+        0,
+        "sector {cx},{cz} is a single floor"
+    );
     probe_unpack(entry.rgb)
 }
 
@@ -92,7 +99,10 @@ fn probe_of(cooked: &CookedLevel, room: usize, cx: usize, cz: usize) -> [u8; 3] 
 fn every_sector_with_a_floor_gets_a_probe_a_chest_above_it() {
     let mut world = world_of(vec![hall("hall", 4, 3, 96)]);
     // A pit has no probe.
-    world.rooms[0].sector_mut(1, 1).unwrap().set_ground_floor(None);
+    world.rooms[0]
+        .sector_mut(1, 1)
+        .unwrap()
+        .set_ground_floor(None);
     let cooked = cook(&world).unwrap();
     let chunk = &cooked.tables[0];
     let probes = chunk.probes.as_ref().expect("the room has probes");
@@ -111,7 +121,10 @@ fn every_sector_with_a_floor_gets_a_probe_a_chest_above_it() {
     // The chunk and the room record say so.
     assert_eq!(cooked.level.rooms[0].flags & ROOM_PROBES, ROOM_PROBES);
     with_cooked(&cooked, |set| {
-        assert_eq!(set.get(0).unwrap().col.header.flags & ROOM_PROBES, ROOM_PROBES);
+        assert_eq!(
+            set.get(0).unwrap().col.header.flags & ROOM_PROBES,
+            ROOM_PROBES
+        );
         // Over the pit the neighbours light the character; far outside there
         // is nothing.
         assert_eq!(set.probe_light([S + S / 2, 32, S + S / 2]), Some([96; 3]));
@@ -317,11 +330,21 @@ fn a_world_that_gathers_its_light_bakes_the_occlusion_around_the_probe() {
         .unwrap()
     };
     let store = scene
-        .bake_probes(&world, &[], Some(Gather { field: Some(&field) }))
+        .bake_probes(
+            &world,
+            &[],
+            Some(Gather {
+                field: Some(&field),
+            }),
+        )
         .unwrap();
     with_cooked(&cooked, |set| {
         for (x, z) in [(40, 40), (10 * S + 3 * S + 40, 3 * S + 40), (11 * S, 2 * S)] {
-            assert_eq!(store.light_at([x, 32, z]), set.probe_light([x, 32, z]), "{x},{z}");
+            assert_eq!(
+                store.light_at([x, 32, z]),
+                set.probe_light([x, 32, z]),
+                "{x},{z}"
+            );
         }
     });
 }
@@ -361,19 +384,17 @@ fn the_reference_levels_bake_probes_and_five_bits_lose_nothing_the_framebuffer_k
         let world = project.active_scene().world.grid().expect("a grid project");
         let lights = scene_grid_lights(project.active_scene(), 1.0);
         let scene = LightScene::new(world).unwrap();
-        let plan = crate::grid::lighting::ProbePlan::build(
-            world,
-            &scene.units(),
-            scene.probe(),
-        )
-        .unwrap();
+        let plan =
+            crate::grid::lighting::ProbePlan::build(world, &scene.units(), scene.probe()).unwrap();
         assert!(!plan.is_empty(), "{name} has floors");
         let raw: Vec<[u8; 3]> = scene
             .with_rig(&lights, world.shading, None, |rig| {
                 plan.sites
                     .iter()
                     .enumerate()
-                    .map(|(i, site)| rig.probe(i, site, world.rooms[usize::from(site.room)].ambient))
+                    .map(|(i, site)| {
+                        rig.probe(i, site, world.rooms[usize::from(site.room)].ambient)
+                    })
                     .collect()
             })
             .unwrap();

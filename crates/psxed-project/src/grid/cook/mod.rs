@@ -501,7 +501,11 @@ fn cook_rooms(
             | (if fog.enabled { ROOM_FOG } else { 0 })
             | (if chunk.tree.is_some() { ROOM_TREE } else { 0 })
             | (if chunk.spans.is_some() { ROOM_SPANS } else { 0 })
-            | (if chunk.probes.is_some() { ROOM_PROBES } else { 0 });
+            | (if chunk.probes.is_some() {
+                ROOM_PROBES
+            } else {
+                0
+            });
         records.push(RoomRecord {
             pack_sector: 0,
             pack_sectors: 0,

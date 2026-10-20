@@ -223,11 +223,12 @@ impl ProbeStore {
     pub fn with_set<R>(&self, f: impl FnOnce(&ResidentRooms<'_>) -> R) -> Result<R, String> {
         let level = LevelView::parse(words_as_bytes(&self.core, self.core_len))
             .map_err(|e| format!("probe store core: {e:?}"))?;
-        let mut set =
-            ResidentRooms::new(level).ok_or_else(|| "probe store set could not be built".to_string())?;
+        let mut set = ResidentRooms::new(level)
+            .ok_or_else(|| "probe store set could not be built".to_string())?;
         for (room, words) in self.chunks.iter().enumerate() {
             let bytes = words_as_bytes(words, words.len() * 4);
-            let col = CollisionView::parse(bytes).map_err(|e| format!("probe store room {room}: {e:?}"))?;
+            let col = CollisionView::parse(bytes)
+                .map_err(|e| format!("probe store room {room}: {e:?}"))?;
             set.insert_collision(room, col)
                 .map_err(|e| format!("probe store room {room}: {e:?}"))?;
             let probes = ProbeView::parse_chunk(bytes)
