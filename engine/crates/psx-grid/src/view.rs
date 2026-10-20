@@ -614,6 +614,6 @@ impl<'a> RoomView<'a> {
         {
             return Err(FormatError::IndexRange);
         }
-        Ok(())
+        r.probes.validate_full()
     }
 }
