@@ -28,6 +28,12 @@ pub enum UvOp {
     SetOffset([i16; 2]),
     /// Set the scale, Q8 (256 is one).
     SetScale([i16; 2]),
+    /// Set the size of the texture on both axes, Q8 (256 is 1x, 512 twice as
+    /// big), each axis keeping its mirror: the quick scale picker.
+    SetZoom(i16),
+    /// Step the size to the next preset bigger (positive) or smaller
+    /// (negative), from the face's own: 1/4, 1/2, 1, 2 and 4 times.
+    StepZoom(i8),
     /// Set the rotation in degrees.
     SetRotation(i16),
     /// Set how the texture is laid over the face's frame. The frame goes back
@@ -66,6 +72,11 @@ impl UvOp {
             }
             Self::SetOffset(o) => uv.offset_texels = o,
             Self::SetScale(s) => uv.scale_q8 = s,
+            Self::SetZoom(q8) => uv.set_zoom_q8(q8),
+            Self::StepZoom(delta) => {
+                let now = uv.scale_q8[0];
+                uv.set_zoom_q8(crate::face_uv::step_zoom_q8(now, delta));
+            }
             Self::SetRotation(r) => uv.rotation_deg = r,
             Self::SetMode(mode) => {
                 uv.mode = mode;

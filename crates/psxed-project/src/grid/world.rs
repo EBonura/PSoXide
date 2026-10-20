@@ -4,9 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use super::light::FacingShade;
 use super::lighting::GlobalLight;
-use crate::face_uv::UvMode;
 use super::room::GridRoom;
 use super::units::{GridScale, SectorTexels, SECTOR_UNITS};
+use crate::face_uv::UvMode;
 
 /// A grid world: rooms on one shared sector lattice and the scale that maps
 /// it into the editor.

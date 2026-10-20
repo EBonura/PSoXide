@@ -54,7 +54,10 @@ fn centre(face: &GridFace) -> [f64; 2] {
 #[test]
 fn new_worlds_and_the_starter_spend_64_texels_per_sector() {
     assert_eq!(GridWorld::new().texels_per_sector.get(), 64);
-    assert_eq!(GridWorld::default().texels_per_sector, SectorTexels::DEFAULT);
+    assert_eq!(
+        GridWorld::default().texels_per_sector,
+        SectorTexels::DEFAULT
+    );
     let starter = starter_world(Some(rid(1)), Some(rid(2)), Some(rid(3)));
     assert_eq!(starter.texels_per_sector.get(), 64);
 }
@@ -107,10 +110,7 @@ fn every_tracked_reference_project_still_reads_as_32() {
 
 #[test]
 fn a_default_floor_spends_the_worlds_texels_per_sector() {
-    for (texels, expect) in [
-        (SectorTexels::DEFAULT, 64.0),
-        (SectorTexels::LEGACY, 32.0),
-    ] {
+    for (texels, expect) in [(SectorTexels::DEFAULT, 64.0), (SectorTexels::LEGACY, 32.0)] {
         let faces = all_faces(&floor_world(texels, FaceUv::default()));
         assert_eq!(extent(&faces[0]), [expect, expect], "{texels:?}");
     }
@@ -118,10 +118,7 @@ fn a_default_floor_spends_the_worlds_texels_per_sector() {
 
 #[test]
 fn an_authored_wall_spends_the_same_density() {
-    for (texels, expect) in [
-        (SectorTexels::DEFAULT, 64.0),
-        (SectorTexels::LEGACY, 32.0),
-    ] {
+    for (texels, expect) in [(SectorTexels::DEFAULT, 64.0), (SectorTexels::LEGACY, 32.0)] {
         let mut world = floor_world(texels, FaceUv::default());
         world.rooms[0]
             .sector_or_insert(3, 2)
@@ -139,10 +136,7 @@ fn an_authored_wall_spends_the_same_density() {
 
 #[test]
 fn a_derived_closure_wall_spends_the_same_density() {
-    for (texels, expect) in [
-        (SectorTexels::DEFAULT, 64.0),
-        (SectorTexels::LEGACY, 32.0),
-    ] {
+    for (texels, expect) in [(SectorTexels::DEFAULT, 64.0), (SectorTexels::LEGACY, 32.0)] {
         let mut world = starter_world(Some(rid(1)), Some(rid(2)), Some(rid(3)));
         world.texels_per_sector = texels;
         let faces = all_faces(&world);
@@ -158,10 +152,7 @@ fn a_derived_closure_wall_spends_the_same_density() {
 
 #[test]
 fn a_plane_in_tile_mode_spends_the_same_density() {
-    for (texels, expect) in [
-        (SectorTexels::DEFAULT, 64.0),
-        (SectorTexels::LEGACY, 32.0),
-    ] {
+    for (texels, expect) in [(SectorTexels::DEFAULT, 64.0), (SectorTexels::LEGACY, 32.0)] {
         let mut world = floor_world(texels, FaceUv::default());
         let mut plane = GridPlane::new([512, 512, 512], [1024, 1024]);
         plane.material = Some(rid(9));
@@ -236,7 +227,11 @@ fn a_generated_mesh_follows_the_world_density() {
     };
     let (legacy, new) = (at(SectorTexels::LEGACY), at(SectorTexels::DEFAULT));
     assert!(legacy > 0.0);
-    assert_eq!(new, legacy * 2.0, "an arch lays its texture on the world lattice");
+    assert_eq!(
+        new,
+        legacy * 2.0,
+        "an arch lays its texture on the world lattice"
+    );
 }
 
 mod switching {
@@ -274,7 +269,10 @@ mod switching {
         (project, small, big)
     }
 
-    fn width(small: ResourceId, big: ResourceId) -> impl Fn(&ProjectDocument, ResourceId) -> Option<u16> {
+    fn width(
+        small: ResourceId,
+        big: ResourceId,
+    ) -> impl Fn(&ProjectDocument, ResourceId) -> Option<u16> {
         move |_, id| (id == small).then_some(32).or((id == big).then_some(64))
     }
 
@@ -312,7 +310,12 @@ mod switching {
             }
         }
         assert_eq!(
-            project.active_scene().world.grid().unwrap().texels_per_sector,
+            project
+                .active_scene()
+                .world
+                .grid()
+                .unwrap()
+                .texels_per_sector,
             SectorTexels::DEFAULT
         );
     }
@@ -363,4 +366,184 @@ mod switching {
         assert_eq!((change.materials_pinned, change.planes_pinned), (0, 0));
         assert_eq!(project, before);
     }
+}
+
+mod zoom {
+    use super::*;
+    use crate::face_uv::ZOOM_STEPS_Q8;
+    use crate::grid::edit::UvOp;
+
+    #[test]
+    fn the_steps_are_a_quarter_to_four_times() {
+        assert_eq!(ZOOM_STEPS_Q8, [64, 128, 256, 512, 1024]);
+    }
+
+    #[test]
+    fn set_zoom_sets_both_axes_and_keeps_each_mirror() {
+        let mut uv = FaceUv {
+            scale_q8: [-256, 256],
+            ..FaceUv::default()
+        };
+        UvOp::SetZoom(512).apply(&mut uv);
+        assert_eq!(uv.scale_q8, [-512, 512]);
+        assert_eq!(uv.zoom_q8(), Some(512));
+        UvOp::SetZoom(256).apply(&mut uv);
+        assert_eq!(uv.scale_q8, [-256, 256]);
+        // The identity zoom on a plain face is the plain face.
+        let mut plain = FaceUv::default();
+        UvOp::SetZoom(256).apply(&mut plain);
+        assert!(plain.is_identity());
+    }
+
+    #[test]
+    fn stepping_goes_to_the_next_preset_and_stops_at_the_ends() {
+        let step = |q8: i16, delta: i8| {
+            let mut uv = FaceUv {
+                scale_q8: [q8, q8],
+                ..FaceUv::default()
+            };
+            UvOp::StepZoom(delta).apply(&mut uv);
+            uv.scale_q8[0]
+        };
+        assert_eq!(step(256, 1), 512);
+        assert_eq!(step(256, -1), 128);
+        assert_eq!(step(1024, 1), 1024);
+        assert_eq!(step(64, -1), 64);
+        // A scale between presets goes to the preset beyond it.
+        assert_eq!(step(300, 1), 512);
+        assert_eq!(step(300, -1), 256);
+    }
+
+    #[test]
+    fn a_uniform_zoom_reads_back_and_a_stretched_one_does_not() {
+        let uv = |x, y| FaceUv {
+            scale_q8: [x, y],
+            ..FaceUv::default()
+        };
+        assert_eq!(uv(256, 256).zoom_q8(), Some(256));
+        assert_eq!(uv(-512, 512).zoom_q8(), Some(512));
+        assert_eq!(uv(256, 512).zoom_q8(), None);
+    }
+
+    /// 2x draws the texture twice as big: half of it spans a sector.
+    #[test]
+    fn two_times_shows_half_the_texture_per_sector_at_the_default_unit() {
+        let mut uv = FaceUv::default();
+        UvOp::SetZoom(512).apply(&mut uv);
+        let faces = all_faces(&floor_world(SectorTexels::DEFAULT, uv));
+        assert_eq!(extent(&faces[0]), [32.0, 32.0]);
+        UvOp::SetZoom(64).apply(&mut uv);
+        let faces = all_faces(&floor_world(SectorTexels::DEFAULT, uv));
+        assert_eq!(extent(&faces[0]), [256.0, 256.0]);
+    }
+}
+
+#[test]
+fn the_report_counts_tiles_after_the_scale_and_follows_a_quarter_turn() {
+    use crate::grid::edit::FaceRef;
+    let tiles = |uv: FaceUv| {
+        let world = floor_world(SectorTexels::DEFAULT, uv);
+        crate::grid::uv::report_for(&world, &(), FaceRef::floor(0, [3, 2]), None)
+            .expect("a report")
+            .tiles
+    };
+    assert_eq!(tiles(FaceUv::default()), [1.0, 1.0]);
+    let at = |q8: [i16; 2], turns: u8| FaceUv {
+        scale_q8: q8,
+        turns,
+        ..FaceUv::default()
+    };
+    // 2x: half a tile; 0.25x: four.
+    assert_eq!(tiles(at([512, 512], 0)), [0.5, 0.5]);
+    assert_eq!(tiles(at([64, 64], 0)), [4.0, 4.0]);
+    // The texture's U runs down the screen on a turned face.
+    assert_eq!(tiles(at([512, 256], 0)), [0.5, 1.0]);
+    assert_eq!(tiles(at([512, 256], 1)), [1.0, 0.5]);
+}
+
+/// `PSXED_DP_WORLD=<project dir>` runs the switch on a copy of that project
+/// in memory with the real texture widths and says what it did: every face
+/// with a texture that is not 64 wide keeps its texels bit for bit, the 64
+/// wide ones follow the new density. Without the variable this does nothing.
+#[test]
+fn a_real_project_keeps_its_small_textures_through_the_switch() {
+    use crate::grid::density::{set_texels_per_sector, KeepLook};
+    use crate::grid::uv::ProjectUvDefaults;
+    use crate::ProjectDocument;
+    let Some(dir) = std::env::var_os("PSXED_DP_WORLD") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let mut project = ProjectDocument::load_from_path(dir.join("project.ron")).expect("loads");
+    let width = |p: &ProjectDocument, id: ResourceId| -> Option<u16> {
+        let (_, bytes) = crate::resolve_material_texture_psxt(p, id, &dir)
+            .ok()
+            .flatten()?;
+        psx_asset::Texture::from_bytes(&bytes)
+            .ok()
+            .map(|t| t.width())
+    };
+    let look = |p: &ProjectDocument| {
+        let world = p.active_scene().world.grid().unwrap();
+        all_faces_with(world, &ProjectUvDefaults(p))
+            .into_iter()
+            .map(|f| (f.material, f.texels))
+            .collect::<Vec<_>>()
+    };
+    let before = look(&project);
+    let from = project
+        .active_scene()
+        .world
+        .grid()
+        .unwrap()
+        .texels_per_sector;
+    let change = set_texels_per_sector(
+        &mut project,
+        SectorTexels::DEFAULT,
+        KeepLook::OtherTextureSizes,
+        &width,
+    )
+    .unwrap();
+    let after = look(&project);
+    assert_eq!(before.len(), after.len());
+    let (mut kept, mut followed, mut offset, mut flat) = (0, 0, 0, 0);
+    for ((material, was), (_, now)) in before.iter().zip(&after) {
+        match material.and_then(|id| width(&project, id)) {
+            Some(w) if w != 64 => {
+                assert_eq!(was, now, "a {w} wide texture must keep its texels");
+                kept += 1;
+            }
+            Some(_) => {
+                // Doubled, unless the face has a texel offset (which is not
+                // scaled with the density).
+                let doubled: Vec<[f64; 2]> = was.iter().map(|t| [t[0] * 2.0, t[1] * 2.0]).collect();
+                if &doubled == now {
+                    followed += 1;
+                } else {
+                    offset += 1;
+                }
+            }
+            None => flat += 1,
+        }
+    }
+    println!(
+        "DP_SWITCH from {from:?}: {change:?}; {kept} faces kept, {followed} followed (doubled), {offset} followed with an offset, {flat} untextured, of {}",
+        before.len()
+    );
+}
+
+#[test]
+fn a_project_the_editor_creates_spends_64_texels_per_sector() {
+    // The File menu's New project is `starter::create_project`, which builds
+    // the world from `starter_world`.
+    let base = crate::projects_dir().join(crate::grid::starter::STARTER_BASE);
+    let out = std::env::temp_dir().join(format!("psxed-texels-new-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&out);
+    let path = crate::grid::starter::create_project(&base, &out, "Texels").expect("creates");
+    let project = crate::ProjectDocument::load_from_path(&path).expect("loads");
+    let world = project.active_scene().world.grid().expect("a grid world");
+    assert_eq!(world.texels_per_sector, SectorTexels::DEFAULT);
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("texels_per_sector: 64"), "written explicitly");
+    let _ = std::fs::remove_dir_all(&out);
 }

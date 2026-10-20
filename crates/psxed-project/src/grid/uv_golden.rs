@@ -64,10 +64,18 @@ fn legacy_texels_are_bit_for_bit_what_they_were() {
 #[test]
 fn the_tracked_reference_levels_keep_their_pinned_texels() {
     for (name, golden) in PROJECTS.iter().zip(GOLDEN) {
-        if !crate::projects_dir().join(name).join("project.ron").is_file() {
+        if !crate::projects_dir()
+            .join(name)
+            .join("project.ron")
+            .is_file()
+        {
             eprintln!("skipping {name}: not present");
             continue;
         }
-        assert_eq!(texel_hash(name), golden, "{name}: texels of a legacy face changed");
+        assert_eq!(
+            texel_hash(name),
+            golden,
+            "{name}: texels of a legacy face changed"
+        );
     }
 }

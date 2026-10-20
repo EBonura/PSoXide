@@ -76,11 +76,13 @@ pub fn mesh_faces_with(
     // lattice at the original 32 texels per sector; they follow the world's
     // density so they continue the walls beside them. An imported mesh
     // carries its own texture coordinates.
-    let lattice = match world.mesh_assets.get(usize::from(mesh.asset)).map(|a| &a.kind) {
+    let lattice = match world
+        .mesh_assets
+        .get(usize::from(mesh.asset))
+        .map(|a| &a.kind)
+    {
         Some(MeshKind::Imported(_)) | None => 1.0,
-        Some(_) => {
-            f64::from(world.texels_per_sector.get()) / f64::from(SectorTexels::LEGACY.get())
-        }
+        Some(_) => f64::from(world.texels_per_sector.get()) / f64::from(SectorTexels::LEGACY.get()),
     };
     for face in &built.faces {
         let placed: Vec<[i32; 3]> = face.ring().iter().map(|p| mesh.place(*p)).collect();

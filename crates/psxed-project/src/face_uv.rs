@@ -52,6 +52,32 @@ impl UvMode {
     }
 }
 
+/// The zoom presets of the quick scale picker, as Q8 scales: a quarter, a
+/// half, one, two and four times. A scale of 2x draws the texture twice as
+/// big (half of it across a sector at 64 texels per sector); 1x is the
+/// tiling as it stands.
+pub const ZOOM_STEPS_Q8: [i16; 5] = [64, 128, 256, 512, 1024];
+
+/// The preset one step from `q8` in the direction of `delta` (positive
+/// bigger, negative smaller), clamped at the ends. A scale between presets
+/// goes to the preset beyond it.
+pub fn step_zoom_q8(q8: i16, delta: i8) -> i16 {
+    let q8 = q8.saturating_abs().max(1);
+    let steps = ZOOM_STEPS_Q8;
+    if delta > 0 {
+        steps.iter().copied().find(|&s| s > q8).unwrap_or(steps[4])
+    } else if delta < 0 {
+        steps
+            .iter()
+            .rev()
+            .copied()
+            .find(|&s| s < q8)
+            .unwrap_or(steps[0])
+    } else {
+        q8
+    }
+}
+
 fn zero_u8(value: &u8) -> bool {
     *value == 0
 }
@@ -114,6 +140,23 @@ impl FaceUv {
     /// Whether this is the identity placement.
     pub fn is_identity(&self) -> bool {
         *self == Self::default()
+    }
+
+    /// The zoom, Q8 (256 is 1x), when both axes have the same size: the
+    /// scale without its mirror. `None` for a stretched texture.
+    pub fn zoom_q8(&self) -> Option<i16> {
+        let size = |q8: i16| if q8 == 0 { 256 } else { q8.saturating_abs() };
+        let (x, y) = (size(self.scale_q8[0]), size(self.scale_q8[1]));
+        (x == y).then_some(x)
+    }
+
+    /// Set the size of the texture on both axes to `q8` (256 is 1x), each
+    /// axis keeping its mirror.
+    pub fn set_zoom_q8(&mut self, q8: i16) {
+        let q8 = q8.saturating_abs().max(1);
+        for scale in &mut self.scale_q8 {
+            *scale = if *scale < 0 { -q8 } else { q8 };
+        }
     }
 
     /// Whether the fine controls (offset, free rotation, scale) are at their

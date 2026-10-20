@@ -423,6 +423,15 @@ pub fn report(
             .abs()
             .max(1.0 / 256.0)
     };
+    // The scale draws the texture bigger or smaller, so the tiles on the
+    // face are fewer or more: the texture's U runs along the screen's
+    // vertical on a face turned a quarter.
+    let (across, down) = if turned {
+        (scale(1), scale(0))
+    } else {
+        (scale(0), scale(1))
+    };
+    let tiles = [tiles[0] / across as f32, tiles[1] / down as f32];
     let (span, approximate) = (
         [span[0] / scale(0), span[1] / scale(1)],
         uv.rotation_deg.rem_euclid(90) != 0,
@@ -700,10 +709,25 @@ mod tests {
     #[test]
     fn the_material_default_fills_in_for_inherit_only() {
         let default = Some(UvMode::fit(2, 2));
-        assert_eq!(resolve(UvMode::Inherit, default, UvMode::LEGACY), UvMode::fit(2, 2));
-        assert_eq!(resolve(UvMode::Inherit, None, UvMode::LEGACY), UvMode::LEGACY);
-        assert_eq!(resolve(UvMode::LEGACY, default, UvMode::LEGACY), UvMode::LEGACY);
-        let r = report(&FaceUv::default(), default, UvMode::LEGACY, [0.0; 2], [1024.0; 2]);
+        assert_eq!(
+            resolve(UvMode::Inherit, default, UvMode::LEGACY),
+            UvMode::fit(2, 2)
+        );
+        assert_eq!(
+            resolve(UvMode::Inherit, None, UvMode::LEGACY),
+            UvMode::LEGACY
+        );
+        assert_eq!(
+            resolve(UvMode::LEGACY, default, UvMode::LEGACY),
+            UvMode::LEGACY
+        );
+        let r = report(
+            &FaceUv::default(),
+            default,
+            UvMode::LEGACY,
+            [0.0; 2],
+            [1024.0; 2],
+        );
         assert!(r.from_material);
         assert_eq!(r.effective_text(), "2 x 2 on this face");
     }
