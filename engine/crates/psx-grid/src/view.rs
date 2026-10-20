@@ -7,6 +7,7 @@
 
 use crate::format::*;
 use crate::lattice::Lattice;
+use crate::probe::ProbeView;
 
 /// Why a blob was refused.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -53,7 +54,7 @@ impl core::fmt::Display for FormatError {
 }
 
 /// Cast `count` records of `T` at `offset`, checking bounds and alignment.
-fn table<T: Copy>(bytes: &[u8], offset: usize, count: usize) -> Result<&[T], FormatError> {
+pub(crate) fn table<T: Copy>(bytes: &[u8], offset: usize, count: usize) -> Result<&[T], FormatError> {
     let size = core::mem::size_of::<T>();
     let length = count.checked_mul(size).ok_or(FormatError::Truncated)?;
     let end = offset.checked_add(length).ok_or(FormatError::Truncated)?;
@@ -73,7 +74,7 @@ fn header<T: Copy>(bytes: &[u8]) -> Result<&T, FormatError> {
     header_at(bytes, 0)
 }
 
-fn header_at<T: Copy>(bytes: &[u8], offset: usize) -> Result<&T, FormatError> {
+pub(crate) fn header_at<T: Copy>(bytes: &[u8], offset: usize) -> Result<&T, FormatError> {
     Ok(&table::<T>(bytes, offset, 1)?[0])
 }
 
@@ -259,6 +260,8 @@ pub struct RenderView<'a> {
     pub lod_blocks: &'a [LodBlock],
     pub lod_quads: &'a [Quad],
     pub plane_refs: &'a [PlaneRef],
+    /// The room's light probes ([`ROOM_PROBES`]); empty when it has none.
+    pub probes: ProbeView<'a>,
 }
 
 /// A whole room chunk.
@@ -268,7 +271,7 @@ pub struct RoomView<'a> {
     pub render: RenderView<'a>,
 }
 
-fn room_header(bytes: &[u8]) -> Result<&RoomHeader, FormatError> {
+pub(crate) fn room_header(bytes: &[u8]) -> Result<&RoomHeader, FormatError> {
     let head = header::<RoomHeader>(bytes)?;
     if head.magic != ROOM_MAGIC {
         return Err(FormatError::BadMagic);
@@ -540,6 +543,7 @@ impl<'a> RoomView<'a> {
             lod_blocks: section(bytes, head, section::LOD_BLOCKS)?,
             lod_quads: section(bytes, head, section::LOD_QUADS)?,
             plane_refs: section(bytes, head, section::PLANE_REFS)?,
+            probes: ProbeView::parse(bytes, head)?,
         };
         if render.cells.len() != col.width() * col.depth()
             || render.quads.len() + render.lod_quads.len() > usize::from(u16::MAX)

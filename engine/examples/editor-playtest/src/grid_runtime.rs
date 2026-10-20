@@ -385,6 +385,12 @@ impl GridRuntime {
         }
     }
 
+    /// The rooms in memory, whose cooked light probes light the models
+    /// ([`psx_game_runtime::room_lighting::RuntimeRoomLighting::probes`]).
+    pub(super) fn light_probes(&self) -> &ResidentRooms<'static> {
+        &self.resident
+    }
+
     /// Whether every room the level wants resident now is: the loading screen
     /// waits for it, and nothing draws a hole while it holds.
     pub(super) fn rooms_ready(&self) -> bool {

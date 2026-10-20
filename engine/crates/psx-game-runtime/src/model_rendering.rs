@@ -1509,7 +1509,7 @@ pub fn draw_player<
     video_hz: VideoHz,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
-    lighting: &RuntimeRoomLighting,
+    lighting: &RuntimeRoomLighting<'_>,
     room_reflection_probe: Option<VramSlot>,
     resolve_override_texture: &mut impl FnMut(AssetId) -> Option<VramSlot>,
     triangles: &mut PrimitivePacketArena<'_>,
@@ -1583,7 +1583,7 @@ pub fn draw_player_from_pose<
     video_hz: VideoHz,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
-    lighting: &RuntimeRoomLighting,
+    lighting: &RuntimeRoomLighting<'_>,
     room_reflection_probe: Option<VramSlot>,
     resolve_override_texture: &mut impl FnMut(AssetId) -> Option<VramSlot>,
     phase_assembly: Option<ModelPhaseAssembly>,
@@ -2004,7 +2004,7 @@ pub fn draw_instance_equipment<
     video_hz: VideoHz,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
-    lighting: &RuntimeRoomLighting,
+    lighting: &RuntimeRoomLighting<'_>,
     models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
     model_faces: &[TexturedModelRenderFace],
     model_parts: &[ModelPart],
@@ -2070,7 +2070,7 @@ pub fn draw_instance_equipment_from_pose<
     video_hz: VideoHz,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
-    lighting: &RuntimeRoomLighting,
+    lighting: &RuntimeRoomLighting<'_>,
     models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
     model_faces: &[TexturedModelRenderFace],
     model_parts: &[ModelPart],
@@ -2140,7 +2140,7 @@ pub fn draw_player_equipment<
     video_hz: VideoHz,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
-    lighting: &RuntimeRoomLighting,
+    lighting: &RuntimeRoomLighting<'_>,
     triangles: &mut (impl PrimitiveSink<TriTextured> + PrimitiveSink<LineMono>),
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> EquipmentDrawStats {
@@ -2208,7 +2208,7 @@ pub fn draw_player_equipment_from_pose<
     video_hz: VideoHz,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
-    lighting: &RuntimeRoomLighting,
+    lighting: &RuntimeRoomLighting<'_>,
     triangles: &mut (impl PrimitiveSink<TriTextured> + PrimitiveSink<LineMono>),
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> EquipmentDrawStats {
@@ -2717,7 +2717,7 @@ fn model_world_bounds(
 
 #[inline]
 fn shade_model_material_at_bounds(
-    lighting: &RuntimeRoomLighting,
+    lighting: &RuntimeRoomLighting<'_>,
     fallback_point: WorldVertex,
     bounds_origin: WorldVertex,
     rotation: Mat3I16,

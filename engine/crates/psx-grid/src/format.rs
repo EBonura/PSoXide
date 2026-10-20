@@ -77,6 +77,12 @@ pub const ROOM_TREE: u16 = 1 << 4;
 /// their bytes are unchanged.
 pub const ROOM_SPANS: u16 = 1 << 5;
 
+/// Room flag: the render block opens with a [`ProbeExt`], the room's light
+/// probes (one per sector, a few more in a column of several floors). Rooms
+/// cooked before probes existed, and rooms with nothing to light, never set
+/// it, so their bytes are unchanged.
+pub const ROOM_PROBES: u16 = 1 << 6;
+
 /// Core file header, 52 bytes.
 ///
 /// Every field is sized to the range it can hold (fewest-bits rule, see
@@ -511,6 +517,76 @@ pub struct SpanRun {
     pub count: u16,
 }
 
+/// One light probe, 4 bytes: the light a character standing at `y` in this
+/// cell is lit by, baked by the same rig that colours the cell's quads.
+///
+/// `rgb` packs the colour as RGB555 (bits 0 to 4 red, 5 to 9 green, 10 to 14
+/// blue), each channel the light value divided by eight, so the neutral value
+/// 128 packs exactly; see [`probe_pack`]. In a [`ProbeExt::cells`] entry bit
+/// 15 ([`PROBE_MULTI`]) turns the entry into a pointer instead.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct Probe {
+    /// Height of the probe, room-local runtime units: the floor plus the
+    /// height of a character's chest. In a pointer entry, the index of the
+    /// first probe in [`ProbeExt::multi`].
+    pub y: i16,
+    /// RGB555 light colour. In a pointer entry, bit 15 set and the number of
+    /// probes in the low bits; zero probes means the cell holds none (a pit).
+    pub rgb: u16,
+}
+
+/// [`Probe::rgb`] bit 15 in a [`ProbeExt::cells`] entry: the cell is a column
+/// of several floors, or empty. `y` is then the first of `rgb & 0x7FFF`
+/// consecutive entries of [`ProbeExt::multi`], bottom to top (none for a cell
+/// with no floor).
+pub const PROBE_MULTI: u16 = 1 << 15;
+
+/// Most probes of one multi-floor column.
+pub const PROBE_MULTI_MAX: usize = 0x7FFF;
+
+/// The light probes of a room, at the start of its render block (see
+/// [`ROOM_PROBES`]), 20 bytes. The tables follow in the chunk, located by the
+/// two section references.
+///
+/// One probe per sector: at the middle of the sector, a chest height above
+/// the floor. A column of several floors (a storey stack, see [`SpanExt`]) has
+/// one per floor. A sector with no floor has none.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProbeExt {
+    /// [`PROBE_LAYOUT_HASH`], checked by the reader.
+    pub layout: u32,
+    /// [`Probe`] per sector, `cz * width + cx`, as the entry kinds above.
+    pub cells: SectionRef,
+    /// [`Probe`] per floor of the columns of several floors.
+    pub multi: SectionRef,
+}
+
+/// Pack a light colour (128 neutral, 255 twice neutral) to RGB555: each
+/// channel to the nearest multiple of eight, so the neutral 128 stays exact
+/// and anything from 252 up packs as 248.
+pub const fn probe_pack(rgb: [u8; 3]) -> u16 {
+    const fn c(v: u8) -> u16 {
+        let q = (v as u16 + 4) >> 3;
+        if q > 31 {
+            31
+        } else {
+            q
+        }
+    }
+    c(rgb[0]) | (c(rgb[1]) << 5) | (c(rgb[2]) << 10)
+}
+
+/// The light colour of a packed probe colour (bit 15 is ignored).
+pub const fn probe_unpack(packed: u16) -> [u8; 3] {
+    [
+        ((packed & 31) << 3) as u8,
+        (((packed >> 5) & 31) << 3) as u8,
+        (((packed >> 10) & 31) << 3) as u8,
+    ]
+}
+
 /// One collision sector, 20 bytes. Corners are `[NW, NE, SE, SW]`.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
@@ -885,6 +961,8 @@ sizes! {
     LodBlock = 8,
     PlaneRef = 12,
     TreeExt = 20,
+    Probe = 4,
+    ProbeExt = 20,
 }
 
 /// Size of one record of each section, in section order.
@@ -997,6 +1075,22 @@ const fn span_layout_hash() -> u32 {
 
 /// Hash of the span tables' layout, carried by [`SpanExt`].
 pub const SPAN_LAYOUT_HASH: u32 = span_layout_hash();
+
+const fn probe_layout_hash() -> u32 {
+    use core::mem::{offset_of, size_of};
+    let mut h = 0x811c_9dc5u32;
+    h = mix(h, size_of::<ProbeExt>());
+    h = mix(h, offset_of!(ProbeExt, cells));
+    h = mix(h, offset_of!(ProbeExt, multi));
+    h = mix(h, size_of::<Probe>());
+    h = mix(h, offset_of!(Probe, rgb));
+    h = mix(h, PROBE_MULTI as usize);
+    h = mix(h, PROBE_MULTI_MAX);
+    h
+}
+
+/// Hash of the light probe tables' layout, carried by [`ProbeExt`].
+pub const PROBE_LAYOUT_HASH: u32 = probe_layout_hash();
 
 /// Bytes of a table of plain records.
 ///

@@ -24,6 +24,7 @@ pub mod contents;
 pub mod format;
 pub mod height;
 pub mod lattice;
+pub mod probe;
 pub mod render;
 pub mod resident;
 pub mod stream;
@@ -35,6 +36,8 @@ pub mod write;
 #[cfg(test)]
 mod format_tests;
 #[cfg(test)]
+mod probe_tests;
+#[cfg(test)]
 mod stream_plan_tests;
 #[cfg(test)]
 mod stream_tests;
@@ -43,6 +46,7 @@ mod walk_tests;
 
 pub use activity::RoomActivity;
 pub use format::*;
+pub use probe::ProbeView;
 pub use lattice::{Lattice, LatticeTables, SMALL_WORLD_ROOMS};
 pub use resident::{ResidentError, ResidentRooms, RoomSlot, NO_SLOT};
 pub use view::{CollisionView, FormatError, LevelView, RenderView, RoomView};

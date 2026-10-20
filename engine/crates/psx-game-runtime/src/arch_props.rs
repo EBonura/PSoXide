@@ -32,7 +32,7 @@ pub fn draw_arch_props<T, const OT_DEPTH: usize>(
     mut object_visible: impl FnMut(usize) -> bool,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
-    lighting: &RuntimeRoomLighting,
+    lighting: &RuntimeRoomLighting<'_>,
     mut prop_texture_slot: impl FnMut(AssetId) -> Option<VramSlot>,
     triangles: &mut T,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,

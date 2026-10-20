@@ -1291,7 +1291,14 @@ impl Scene for Playtest {
                     );
                 }
                 let player = self.motor.position();
-                let player_lighting = self.current_room_lighting(camera);
+                // Borrows only the world, so the draw calls below may take other fields
+                // mutably while the lighting is alive.
+                let player_lighting = crate::playtest_runtime::room_lighting_of(
+                    &self.world_rt,
+                    self.room_index,
+                    self.current_ambient_rgb,
+                    camera,
+                );
                 let actor_options = current_actor_surface_options(self.room_index);
                 telemetry::stage_begin(telemetry::stage::PLAYER);
                 sort_probe_class(SORT_CLASS_PLAYER);
@@ -2004,7 +2011,7 @@ impl Playtest {
         room: RoomIndex,
         camera: &WorldCamera,
         actor_options: WorldSurfaceOptions,
-        lighting: &RuntimeRoomLighting,
+        lighting: &RuntimeRoomLighting<'_>,
         entity_poses: &[ModelInstancePoseOverride],
         world_object_visibility: WorldObjectVisibility,
         ctx: &Ctx,

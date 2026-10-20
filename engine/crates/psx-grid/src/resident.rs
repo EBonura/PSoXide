@@ -26,6 +26,7 @@ use crate::collision::{GridCollision, LeafDims};
 use crate::format::{ROOM_MAGIC, VERSION};
 use crate::height::{weight_recip, Recip};
 use crate::render::GridMaterial;
+use crate::probe::ProbeView;
 use crate::view::{CollisionView, LevelView, RenderView, RoomView};
 
 /// Marker in the room to slot table: not resident.
@@ -50,6 +51,9 @@ pub struct RoomSlot<'a> {
     pub col: CollisionView<'a>,
     /// The render block, `None` while only the collision block has landed.
     pub render: Option<RenderView<'a>>,
+    /// The room's light probes; empty until the render block (or a host
+    /// that parses them alone) provides them.
+    pub probes: ProbeView<'a>,
     /// Bindings of the room's materials: entry `i` serves quads whose
     /// `material` is `i`, and stands for `render.material_use[i]`.
     pub materials: Vec<GridMaterial>,
@@ -304,6 +308,7 @@ impl<'a> ResidentRooms<'a> {
                 room: room as u16,
                 col,
                 render: None,
+                probes: ProbeView::EMPTY,
                 materials: Vec::new(),
                 materials_ready: false,
             },
@@ -322,6 +327,7 @@ impl<'a> ResidentRooms<'a> {
                 room: room as u16,
                 col: view.col,
                 render: Some(view.render),
+                probes: view.render.probes,
                 materials: Vec::new(),
                 materials_ready: false,
             },
@@ -334,10 +340,24 @@ impl<'a> ResidentRooms<'a> {
         match self.get_mut(room) {
             Some(slot) if slot.render.is_none() => {
                 slot.render = Some(render);
+                slot.probes = render.probes;
                 self.epoch = self.epoch.wrapping_add(1);
                 true
             }
             _ => false,
+        }
+    }
+
+    /// Give a resident room its light probes without the rest of its render
+    /// block, for hosts that parse the probes alone.
+    pub fn attach_probes(&mut self, room: usize, probes: ProbeView<'a>) -> bool {
+        match self.get_mut(room) {
+            Some(slot) => {
+                slot.probes = probes;
+                self.epoch = self.epoch.wrapping_add(1);
+                true
+            }
+            None => false,
         }
     }
 

@@ -114,7 +114,7 @@ pub(super) fn draw_box_props<T>(
     object_visible: impl FnMut(usize) -> bool,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
-    lighting: &RuntimeRoomLighting,
+    lighting: &RuntimeRoomLighting<'_>,
     triangles: &mut T,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) where
@@ -146,7 +146,7 @@ pub(super) fn draw_box_prop_floor_debris<T>(
     object_visible: impl FnMut(usize) -> bool,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
-    lighting: &RuntimeRoomLighting,
+    lighting: &RuntimeRoomLighting<'_>,
     triangles: &mut T,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) where
@@ -186,7 +186,7 @@ pub(super) fn draw_box_prop_break_events<T>(
     object_visible: impl FnMut(usize) -> bool,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
-    lighting: &RuntimeRoomLighting,
+    lighting: &RuntimeRoomLighting<'_>,
     triangles: &mut T,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) where

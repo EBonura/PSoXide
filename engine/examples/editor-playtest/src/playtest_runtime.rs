@@ -110,6 +110,30 @@ const _: () = {
 /// every change of state. What reads well depends on BOTH ends: an attack
 /// must start crisply but settle slowly, and a gait change can afford a long
 /// fade only because the clips are phase-matched.
+/// The shading view of the room the player is in, over the resident rooms of
+/// the grid world. Takes the pieces rather than the whole playtest, so a
+/// draw call can hold it while it mutably borrows other fields.
+pub(super) fn room_lighting_of(
+    world_rt: &Option<WorldRuntime>,
+    room_index: RoomIndex,
+    ambient: [u8; 3],
+    camera: WorldCamera,
+) -> Option<RuntimeRoomLighting<'_>> {
+    let world = world_rt.as_ref()?;
+    let room_record = ROOMS.get(room_index.to_usize())?;
+    Some(RuntimeRoomLighting {
+        room_index,
+        ambient: Rgb8::from_array(ambient),
+        camera,
+        fog_enabled: room_record.flags & room_flags::FOG_ENABLED != 0,
+        fog_rgb: Rgb8::from_array(room_record.fog_rgb),
+        fog_near: room_record.fog_near,
+        fog_far: room_record.fog_far,
+        lights: room_light_slice(LIGHTS.as_slice(), room_index),
+        probes: Some(world.light_probes()),
+    })
+}
+
 fn player_blend_ticks(from: PlayerAnim, to: PlayerAnim) -> u32 {
     if to == PlayerAnim::Fall {
         0
@@ -1801,19 +1825,11 @@ impl Playtest {
         }
     }
 
-    pub(super) fn current_room_lighting(&self, camera: WorldCamera) -> Option<RuntimeRoomLighting> {
-        self.world_rt.as_ref()?;
-        let room_record = ROOMS.get(self.room_index.to_usize())?;
-        Some(RuntimeRoomLighting {
-            room_index: self.room_index,
-            ambient: Rgb8::from_array(self.current_ambient_rgb),
-            camera,
-            fog_enabled: room_record.flags & room_flags::FOG_ENABLED != 0,
-            fog_rgb: Rgb8::from_array(room_record.fog_rgb),
-            fog_near: room_record.fog_near,
-            fog_far: room_record.fog_far,
-            lights: room_light_slice(LIGHTS.as_slice(), self.room_index),
-        })
+    pub(super) fn current_room_lighting(
+        &self,
+        camera: WorldCamera,
+    ) -> Option<RuntimeRoomLighting<'_>> {
+        room_lighting_of(&self.world_rt, self.room_index, self.current_ambient_rgb, camera)
     }
 
     pub(super) fn free_orbit_camera(&self) -> WorldCamera {

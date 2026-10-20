@@ -5,17 +5,26 @@
 //! `LIGHTS` table arrives as `&'static` psx-level records.
 
 use psx_engine::{
-    MaterialTint, PointLightSample, Rgb8, RoomPoint, WorldCamera, WorldRenderMaterial,
-    WorldSurfaceLighting, WorldSurfaceSample, WorldVertex, Q8,
+    LightingRgb, MaterialTint, PointLightSample, Rgb8, RoomPoint, WorldCamera,
+    WorldRenderMaterial, WorldSurfaceLighting, WorldSurfaceSample, WorldVertex, Q8,
 };
 use psx_gpu::material::TextureMaterial;
+use psx_grid::ResidentRooms;
 use psx_level::{PointLightRecord, RoomIndex};
 
 /// Per-room shading view: the room's ambient colour, its cooked point
 /// lights, the render camera (for fog depth), and the authored fog
 /// band. Built per drawn room each frame; `Copy` by design.
+///
+/// In a grid world it also holds the resident rooms, whose light probes light
+/// a model by where it stands (see [`Self::model_light`]).
 #[derive(Copy, Clone)]
-pub struct RuntimeRoomLighting {
+pub struct RuntimeRoomLighting<'a> {
+    /// The resident rooms of the grid world, whose cooked light probes light
+    /// the models drawn through this view. `None` outside a grid world, and
+    /// a model a probe does not reach (outside every room that has probes)
+    /// takes the ambient and the cooked lights as before.
+    pub probes: Option<&'a ResidentRooms<'a>>,
     /// Room this lighting view shades (scopes the point-light query).
     pub room_index: RoomIndex,
     /// Room ambient colour.
@@ -34,15 +43,59 @@ pub struct RuntimeRoomLighting {
     pub lights: &'static [PointLightRecord],
 }
 
-impl RuntimeRoomLighting {
-    /// Shade a model material's tint at `point` (lights + fog).
+impl RuntimeRoomLighting<'_> {
+    /// The light a model standing at `point` is lit by (128 neutral): the
+    /// four light probes around it, blended, which carry the lamps with their
+    /// shadows and, when the world gathers its light, the occlusion, sky and
+    /// bounce of the place. Outside the reach of every probe, the ambient plus
+    /// the cooked lights within `receiver_radius` of the point.
+    ///
+    /// There is no directional term on top of a probe: a model has one tint
+    /// for its whole mesh, so a direction could only brighten or darken all
+    /// of it, and the probe already holds the lamps.
+    #[inline]
+    pub fn model_light(&self, point: RoomPoint, receiver_radius: i32) -> LightingRgb {
+        if let Some(rooms) = self.probes {
+            if let Some([r, g, b]) = rooms.probe_light(point.to_array()) {
+                return LightingRgb::new(u32::from(r), u32::from(g), u32::from(b));
+            }
+        }
+        psx_engine::accumulate_point_lights_rgb(
+            point.to_array(),
+            self.ambient,
+            self.point_lights_for_receiver_radius(receiver_radius),
+        )
+    }
+
+    /// Light `base` for a model at `point` ([`Self::model_light`]), then fog
+    /// it by the camera-view depth of `point`.
+    #[inline]
+    pub fn shade_model_tint(
+        &self,
+        point: RoomPoint,
+        receiver_radius: i32,
+        base: (u8, u8, u8),
+    ) -> (u8, u8, u8) {
+        let tint = psx_engine::modulate_material_tint(
+            MaterialTint::from_tuple(base),
+            self.model_light(point, receiver_radius),
+        )
+        .to_tuple();
+        if !self.fog_enabled || self.fog_far <= self.fog_near {
+            return tint;
+        }
+        let depth = self.camera.view_vertex(point).z;
+        self.apply_fog_at_depth(tint, depth)
+    }
+
+    /// Shade a model material's tint at `point` (light + fog).
     #[inline]
     pub fn shade_model_material(
         &self,
         point: WorldVertex,
         material: TextureMaterial,
     ) -> TextureMaterial {
-        material.with_tint(self.shade_tint_at(point, material.tint()))
+        material.with_tint(self.shade_model_tint(point, 0, material.tint()))
     }
 
     /// Shade one rigid model using its current world-space bounding sphere.
@@ -58,7 +111,7 @@ impl RuntimeRoomLighting {
         radius: i32,
         material: TextureMaterial,
     ) -> TextureMaterial {
-        material.with_tint(self.shade_tint_at_sphere(center, radius, material.tint()))
+        material.with_tint(self.shade_model_tint(center, radius, material.tint()))
     }
 
     /// Shade `base` at `point` with ambient + point lights, then fog by
@@ -189,7 +242,7 @@ pub fn room_light_slice(
     &lights[first..first + count]
 }
 
-impl WorldSurfaceLighting for RuntimeRoomLighting {
+impl WorldSurfaceLighting for RuntimeRoomLighting<'_> {
     #[inline]
     fn shade(
         &self,
@@ -365,7 +418,9 @@ pub const fn rgb_tuple(rgb: [u8; 3]) -> (u8, u8, u8) {
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
     use super::*;
+    use std::vec;
 
     #[test]
     fn black_fog_specialization_matches_generic_channel_exhaustively() {
@@ -460,6 +515,7 @@ mod tests {
             fog_near: 0,
             fog_far: 0,
             lights: RECEIVER_LIGHTS,
+            probes: None,
         };
         let center = WorldVertex::new(110, 0, 0);
         let point_tint = lighting.shade_tint_at(center, (128, 128, 128));
@@ -469,5 +525,130 @@ mod tests {
         assert!(sphere_tint.0 > point_tint.0, "got {sphere_tint:?}");
         assert_eq!(sphere_tint.0, sphere_tint.1);
         assert_eq!(sphere_tint.1, sphere_tint.2);
+        // Without probes a model is lit the way it always was.
+        assert_eq!(
+            lighting.shade_model_tint(center, 20, (128, 128, 128)),
+            sphere_tint
+        );
+        assert_eq!(
+            lighting.shade_model_tint(center, 0, (128, 128, 128)),
+            point_tint
+        );
+    }
+
+    /// A one room grid world (4 by 1 sectors of 80 units) whose probes are
+    /// `light` at the chest of each sector, held the way the guest holds it.
+    fn with_probe_room<R>(
+        light: [[u8; 3]; 4],
+        f: impl FnOnce(&psx_grid::ResidentRooms<'_>) -> R,
+    ) -> R {
+        use psx_grid::write::{aligned_copy, words_as_bytes, LevelCore, ProbeTables, RoomChunk};
+        use psx_grid::{
+            probe_pack, CollisionView, LevelView, ProbeView, ResidentRooms, RoomRecord, Sector,
+            NO_EXT, SECTOR_HAS_FLOOR,
+        };
+        let core = LevelCore {
+            sector_units: 80,
+            rooms: vec![RoomRecord {
+                width: 4,
+                depth: 1,
+                ..RoomRecord::default()
+            }],
+            ..LevelCore::default()
+        };
+        let core_bytes = core.to_bytes();
+        let core_words = aligned_copy(&core_bytes);
+        let mut probes = ProbeTables::empty(4, 1);
+        for (cell, rgb) in light.iter().enumerate() {
+            probes.set_cell(cell, &[(32, probe_pack(*rgb))]);
+        }
+        let chunk = RoomChunk {
+            width: 4,
+            depth: 1,
+            sectors: vec![
+                Sector {
+                    flags: SECTOR_HAS_FLOOR,
+                    ext: NO_EXT,
+                    ..Sector::default()
+                };
+                4
+            ],
+            probes: Some(probes),
+            ..RoomChunk::default()
+        };
+        let chunk_bytes = chunk.to_bytes();
+        let chunk_words = aligned_copy(&chunk_bytes);
+        let bytes = words_as_bytes(&chunk_words, chunk_bytes.len());
+        let level = LevelView::parse(words_as_bytes(&core_words, core_bytes.len())).unwrap();
+        let mut set = ResidentRooms::new(level).unwrap();
+        set.insert_collision(0, CollisionView::parse(bytes).unwrap())
+            .unwrap();
+        set.attach_probes(0, ProbeView::parse_chunk(bytes).unwrap());
+        f(&set)
+    }
+
+    fn lighting_over<'a>(
+        rooms: Option<&'a psx_grid::ResidentRooms<'a>>,
+        lights: &'static [PointLightRecord],
+    ) -> RuntimeRoomLighting<'a> {
+        let projection = psx_engine::WorldProjection::new(160, 120, 200, 40);
+        RuntimeRoomLighting {
+            room_index: RoomIndex(0),
+            ambient: Rgb8::new(32, 32, 32),
+            camera: WorldCamera::orbit_yaw(
+                projection,
+                WorldVertex::ZERO,
+                0,
+                200,
+                psx_engine::Angle::ZERO,
+            ),
+            fog_enabled: false,
+            fog_rgb: Rgb8::BLACK,
+            fog_near: 0,
+            fog_far: 0,
+            lights,
+            probes: rooms,
+        }
+    }
+
+    #[test]
+    fn a_model_takes_the_light_of_the_probe_it_stands_in() {
+        // A lit sector next to a dark one, and a cooked lamp right over the
+        // dark one that the probes already account for (it is shadowed there).
+        with_probe_room(
+            [[200, 120, 56], [200, 120, 56], [24, 24, 40], [24, 24, 40]],
+            |set| {
+                let lighting = lighting_over(Some(set), RECEIVER_LIGHTS);
+                let lit = lighting.shade_model_tint(WorldVertex::new(40, 32, 40), 0, (128, 128, 128));
+                assert_eq!(lit, (200, 120, 56));
+                // The base tint modulates the probe light like any light.
+                let half = lighting.shade_model_tint(WorldVertex::new(40, 32, 40), 0, (64, 64, 64));
+                assert_eq!(half, (100, 60, 28));
+                let dark = lighting.shade_model_tint(WorldVertex::new(280, 32, 40), 0, (128, 128, 128));
+                assert_eq!(dark, (24, 24, 40));
+                // The unshadowed cooked lamp (radius 100 at the origin) does
+                // not light the probe-lit model on top of the probe.
+                let near_lamp =
+                    lighting.shade_model_tint(WorldVertex::new(40, 32, 40), 30, (128, 128, 128));
+                assert_eq!(near_lamp, lit);
+                // Midway between two probes the light is between theirs.
+                let between =
+                    lighting.shade_model_tint(WorldVertex::new(160, 32, 40), 0, (128, 128, 128));
+                assert!(between.0 < 200 && between.0 > 24, "{between:?}");
+            },
+        );
+    }
+
+    #[test]
+    fn a_model_outside_every_probe_takes_the_cooked_lights_as_before() {
+        with_probe_room([[200; 3]; 4], |set| {
+            let with = lighting_over(Some(set), RECEIVER_LIGHTS);
+            let without = lighting_over(None, RECEIVER_LIGHTS);
+            let outside = WorldVertex::new(110, 32, 5000);
+            assert_eq!(
+                with.shade_model_tint(outside, 20, (128, 128, 128)),
+                without.shade_model_tint(outside, 20, (128, 128, 128))
+            );
+        });
     }
 }

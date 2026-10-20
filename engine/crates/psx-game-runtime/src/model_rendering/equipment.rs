@@ -38,7 +38,7 @@ pub(super) fn draw_player_equipment<
     video_hz: VideoHz,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
-    lighting: &RuntimeRoomLighting,
+    lighting: &RuntimeRoomLighting<'_>,
     triangles: &mut (impl PrimitiveSink<TriTextured> + PrimitiveSink<LineMono>),
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> EquipmentDrawStats {
@@ -111,7 +111,7 @@ pub(super) fn draw_player_equipment_from_pose<
     video_hz: VideoHz,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
-    lighting: &RuntimeRoomLighting,
+    lighting: &RuntimeRoomLighting<'_>,
     triangles: &mut (impl PrimitiveSink<TriTextured> + PrimitiveSink<LineMono>),
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> EquipmentDrawStats {
@@ -224,7 +224,7 @@ fn submit_equipped_weapon<
     video_hz: VideoHz,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
-    lighting: &RuntimeRoomLighting,
+    lighting: &RuntimeRoomLighting<'_>,
     triangles: &mut (impl PrimitiveSink<TriTextured> + PrimitiveSink<LineMono>),
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> Option<TexturedModelRenderStats> {
@@ -774,7 +774,7 @@ pub(super) fn draw_instance_equipment_from_pose<
     video_hz: VideoHz,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
-    lighting: &RuntimeRoomLighting,
+    lighting: &RuntimeRoomLighting<'_>,
     models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
     model_faces: &[TexturedModelRenderFace],
     model_parts: &[ModelPart],
@@ -856,7 +856,7 @@ pub(super) fn draw_instance_equipment<
     video_hz: VideoHz,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
-    lighting: &RuntimeRoomLighting,
+    lighting: &RuntimeRoomLighting<'_>,
     models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
     model_faces: &[TexturedModelRenderFace],
     model_parts: &[ModelPart],
@@ -950,7 +950,7 @@ fn submit_instance_equipment_record_from_pose<
     video_hz: VideoHz,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
-    lighting: &RuntimeRoomLighting,
+    lighting: &RuntimeRoomLighting<'_>,
     triangles: &mut (impl PrimitiveSink<TriTextured> + PrimitiveSink<LineMono>),
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> Option<TexturedModelRenderStats> {

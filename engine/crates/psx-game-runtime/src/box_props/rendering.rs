@@ -192,7 +192,7 @@ pub fn draw_box_props<
     mut object_visible: impl FnMut(usize) -> bool,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
-    lighting: &RuntimeRoomLighting,
+    lighting: &RuntimeRoomLighting<'_>,
     mut prop_texture_slot: impl FnMut(AssetId) -> Option<VramSlot>,
     triangles: &mut T,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
@@ -274,7 +274,7 @@ fn draw_generated_box_prop_surfaces<T, const OT_DEPTH: usize>(
     projector: LoadedWorldCameraGte,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
-    lighting: &RuntimeRoomLighting,
+    lighting: &RuntimeRoomLighting<'_>,
     prop_texture_slot: &mut impl FnMut(AssetId) -> Option<VramSlot>,
     face_texture_cache: &mut Option<(AssetId, BoxPropFaceTextureRuntime)>,
     triangles: &mut T,
@@ -393,7 +393,7 @@ pub fn draw_box_prop_floor_debris<
     mut object_visible: impl FnMut(usize) -> bool,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
-    lighting: &RuntimeRoomLighting,
+    lighting: &RuntimeRoomLighting<'_>,
     mut prop_texture_slot: impl FnMut(AssetId) -> Option<VramSlot>,
     triangles: &mut T,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
@@ -468,7 +468,7 @@ fn draw_box_prop_floor_debris_chips<
     projector: LoadedWorldCameraGte,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
-    lighting: &RuntimeRoomLighting,
+    lighting: &RuntimeRoomLighting<'_>,
     triangles: &mut T,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) where
@@ -492,7 +492,7 @@ fn draw_box_prop_floor_debris_chip<T, const GTE_PROJECT: bool, const OT_DEPTH: u
     projector: LoadedWorldCameraGte,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
-    lighting: &RuntimeRoomLighting,
+    lighting: &RuntimeRoomLighting<'_>,
     triangles: &mut T,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) where
@@ -569,7 +569,7 @@ pub fn draw_box_prop_break_events<
     mut object_visible: impl FnMut(usize) -> bool,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
-    lighting: &RuntimeRoomLighting,
+    lighting: &RuntimeRoomLighting<'_>,
     mut prop_texture_slot: impl FnMut(AssetId) -> Option<VramSlot>,
     triangles: &mut T,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
@@ -631,7 +631,7 @@ fn draw_box_prop_break_shards<T, const GTE_PROJECT: bool, const OT_DEPTH: usize>
     projector: LoadedWorldCameraGte,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
-    lighting: &RuntimeRoomLighting,
+    lighting: &RuntimeRoomLighting<'_>,
     triangles: &mut T,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) where
@@ -673,7 +673,7 @@ fn draw_box_prop_break_shard<T, const GTE_PROJECT: bool, const OT_DEPTH: usize>(
     projector: LoadedWorldCameraGte,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
-    lighting: &RuntimeRoomLighting,
+    lighting: &RuntimeRoomLighting<'_>,
     triangles: &mut T,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) where
@@ -742,7 +742,7 @@ fn submit_projected_textured_gouraud_quad_u8<T, const OT_DEPTH: usize>(
 }
 
 fn box_prop_apply_fog_weight(
-    lighting: &RuntimeRoomLighting,
+    lighting: &RuntimeRoomLighting<'_>,
     colors: [(u8, u8, u8); 4],
     fog_weight: i32,
 ) -> [(u8, u8, u8); 4] {
@@ -761,7 +761,7 @@ fn draw_box_prop_faces<T, const OT_DEPTH: usize>(
     projector: LoadedWorldCameraGte,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
-    lighting: &RuntimeRoomLighting,
+    lighting: &RuntimeRoomLighting<'_>,
     prop_texture_slot: &mut impl FnMut(AssetId) -> Option<VramSlot>,
     face_texture_cache: &mut Option<(AssetId, BoxPropFaceTextureRuntime)>,
     triangles: &mut T,

@@ -35,6 +35,65 @@ pub struct SpanTables {
     pub spans: Vec<Sector>,
 }
 
+/// The light probes of a room (see [`ProbeExt`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProbeTables {
+    /// One entry per sector, `cz * width + cx`: a plain probe, or a pointer
+    /// into `multi` ([`PROBE_MULTI`]).
+    pub cells: Vec<Probe>,
+    /// The probes of the columns of several floors, bottom to top within
+    /// each column.
+    pub multi: Vec<Probe>,
+}
+
+impl ProbeTables {
+    /// Tables for a `width` by `depth` room with no probe anywhere.
+    pub fn empty(width: usize, depth: usize) -> Self {
+        Self {
+            cells: alloc::vec![
+                Probe {
+                    y: 0,
+                    rgb: PROBE_MULTI,
+                };
+                width * depth
+            ],
+            multi: Vec::new(),
+        }
+    }
+
+    /// Put the floors of sector `cell` (`(y, packed colour)` pairs, bottom to
+    /// top). One floor is stored in the cell itself, several in `multi`, none
+    /// leaves the cell empty.
+    pub fn set_cell(&mut self, cell: usize, floors: &[(i16, u16)]) {
+        self.cells[cell] = match floors {
+            [] => Probe {
+                y: 0,
+                rgb: PROBE_MULTI,
+            },
+            [(y, rgb)] => Probe {
+                y: *y,
+                rgb: *rgb & !PROBE_MULTI,
+            },
+            many => {
+                let first = self.multi.len() as i16;
+                self.multi.extend(many.iter().map(|&(y, rgb)| Probe {
+                    y,
+                    rgb: rgb & !PROBE_MULTI,
+                }));
+                Probe {
+                    y: first,
+                    rgb: PROBE_MULTI | many.len() as u16,
+                }
+            }
+        };
+    }
+
+    /// Bytes the tables take in a chunk, header included.
+    pub fn bytes(&self) -> usize {
+        core::mem::size_of::<ProbeExt>() + core::mem::size_of::<Probe>() * (self.cells.len() + self.multi.len())
+    }
+}
+
 /// Everything a room chunk holds, as plain tables.
 #[derive(Clone, Debug, Default)]
 pub struct RoomChunk {
@@ -53,6 +112,8 @@ pub struct RoomChunk {
     /// Extra spans of the columns that have them; `None` when every column
     /// is a single span.
     pub spans: Option<SpanTables>,
+    /// The room's light probes; `None` for a room that has none.
+    pub probes: Option<ProbeTables>,
     pub exts: Vec<SectorExt>,
     pub walls: Vec<ColWall>,
     pub splitbs: Vec<SplitB>,
@@ -285,6 +346,35 @@ impl RoomChunk {
         }
         align4(&mut out);
         let render_offset = out.len() as u32;
+        let mut probe_flag = 0u16;
+        if let Some(probes) = &self.probes {
+            // The probe record opens the render block, its tables right
+            // behind it; the other render sections find their own places
+            // through the section table, so they simply follow.
+            probe_flag = ROOM_PROBES;
+            let at = out.len();
+            out.extend_from_slice(&[0u8; core::mem::size_of::<ProbeExt>()]);
+            let mut refs4 = [SectionRef::default(); 2];
+            put_ref(
+                &mut out,
+                &mut refs4[0],
+                bytes_of(&probes.cells),
+                probes.cells.len(),
+            );
+            put_ref(
+                &mut out,
+                &mut refs4[1],
+                bytes_of(&probes.multi),
+                probes.multi.len(),
+            );
+            let block = ProbeExt {
+                layout: PROBE_LAYOUT_HASH,
+                cells: refs4[0],
+                multi: refs4[1],
+            };
+            out[at..at + core::mem::size_of::<ProbeExt>()]
+                .copy_from_slice(bytes_of(core::slice::from_ref(&block)));
+        }
         put(
             &mut out,
             &mut refs,
@@ -338,7 +428,7 @@ impl RoomChunk {
         let header = RoomHeader {
             magic: ROOM_MAGIC,
             version: VERSION,
-            flags: self.flags | tree_flag | span_flag,
+            flags: self.flags | tree_flag | span_flag | probe_flag,
             byte_len: out.len() as u32,
             render_offset,
             room_id: self.room_id,
