@@ -14,6 +14,7 @@ pub mod leaf_collision;
 pub mod lod;
 pub mod mesh;
 pub mod mesh_collision;
+pub mod occupancy;
 pub mod plane_collision;
 pub mod portals;
 pub mod render;
@@ -573,7 +574,7 @@ fn cook_rooms(
     }
     let radii = world.stream;
     let mut level = LevelCore {
-        occupancy: Vec::new(),
+        occupancy: occupancy::derive(world),
         flags: (if any_sky { LEVEL_HAS_SKY } else { 0 })
             | (if any_planes { LEVEL_HAS_PLANES } else { 0 }),
         sector_units: s as u16,
@@ -632,6 +633,8 @@ mod mesh_tests;
 mod motor_harness;
 #[cfg(test)]
 mod natural_tests;
+#[cfg(test)]
+mod occupancy_tests;
 #[cfg(test)]
 mod plane_tests;
 #[cfg(test)]

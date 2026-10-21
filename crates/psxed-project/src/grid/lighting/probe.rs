@@ -61,7 +61,7 @@ impl CollisionProbe {
         cols: &[Tables],
     ) -> Result<Self, String> {
         let core = LevelCore {
-            occupancy: Vec::new(),
+            occupancy: crate::grid::cook::occupancy::derive(world),
             sector_units: units.sector() as u16,
             rooms: world
                 .rooms
