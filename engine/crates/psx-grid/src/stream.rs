@@ -163,24 +163,45 @@ impl StreamWindow {
     }
 
     /// [`Self::wanted`] for a ring level: each observer's room and the rooms
-    /// one portal away, all needed, nearest portal first.
+    /// one portal away are needed. The lead is the ring of the neighbour the
+    /// player is nearest (the rooms it would need on stepping across), so
+    /// they are on their way before the player gets there.
     fn wanted_ring(
         &mut self,
         level: &LevelView<'_>,
         observers: [Option<(usize, [i32; 3])>; 2],
         out: &mut Vec<WantedRoom>,
     ) {
-        for (room, at) in observers.into_iter().flatten() {
-            if room >= level.rooms.len() {
+        let rooms = level.rooms.len();
+        // The player's nearest neighbour and its distance.
+        let mut ahead: Option<(usize, i32)> = None;
+        for (index, observer) in observers.into_iter().enumerate() {
+            let Some((room, at)) = observer.filter(|(r, _)| *r < rooms) else {
                 continue;
-            }
+            };
             Self::note(&mut self.mark, &mut self.touched, out, room, 1, 0);
             let record = &level.rooms[room];
             for portal in level.room_portals(room) {
                 let cost = crate::walk::distance(at, crate::walk::centre(record, portal));
                 let dest = usize::from(portal.dest);
-                if dest < self.mark.len() {
+                if dest < rooms {
                     Self::note(&mut self.mark, &mut self.touched, out, dest, 1, cost);
+                    if index == 0 && ahead.is_none_or(|(_, c)| cost < c) {
+                        ahead = Some((dest, cost));
+                    }
+                }
+            }
+        }
+        if let Some((next, cost)) = ahead {
+            let record = &level.rooms[next];
+            for portal in level.room_portals(next) {
+                let dest = usize::from(portal.dest);
+                if dest < rooms {
+                    let far = cost.saturating_add(crate::walk::distance(
+                        crate::walk::centre(record, portal),
+                        record_centre(record, level.sector_units() as i32),
+                    ));
+                    Self::note(&mut self.mark, &mut self.touched, out, dest, 2, far);
                 }
             }
         }
@@ -188,7 +209,7 @@ impl StreamWindow {
             self.mark[usize::from(room)] = 0;
         }
         self.touched.clear();
-        out.sort_by_key(|w| (w.distance, w.room));
+        out.sort_by_key(|w| (w.want == Want::Lead, w.distance, w.room));
     }
 
     fn note(
@@ -222,6 +243,15 @@ impl StreamWindow {
         self.active.invalidate();
         self.lead.invalidate();
     }
+}
+
+/// Plan centre of a room's rectangle at its origin height, world units.
+fn record_centre(record: &crate::format::RoomRecord, s: i32) -> [i32; 3] {
+    [
+        record.origin[0] + i32::from(record.width) * s / 2,
+        record.origin[1],
+        record.origin[2] + i32::from(record.depth) * s / 2,
+    ]
 }
 
 /// How big a room pool a level needs.

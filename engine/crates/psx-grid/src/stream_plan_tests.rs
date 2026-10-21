@@ -207,7 +207,7 @@ fn a_point_is_located_from_the_core_alone() {
 }
 
 #[test]
-fn a_ring_level_wants_and_plans_the_observers_room_and_its_neighbours() {
+fn a_ring_level_needs_the_observers_room_and_neighbours_and_leads_ahead() {
     // Long rooms and a draw distance that would reach five rooms each way:
     // the ring ignores it.
     let words = corridor_flagged(8, 2, 10, 2, 4, LEVEL_RING_STREAM);
@@ -217,18 +217,29 @@ fn a_ring_level_wants_and_plans_the_observers_room_and_its_neighbours() {
     let mut wanted = Vec::new();
     let at = [3 * 160 + 80, 50, S / 2];
     window.wanted(&level, Some((3, at)), Some((3, at)), &mut wanted);
-    let mut rooms: Vec<u16> = wanted.iter().map(|w| w.room).collect();
-    assert!(wanted.iter().all(|w| w.want == Want::Need));
+    let set = |want: Want, wanted: &[WantedRoom]| -> Vec<u16> {
+        let mut rooms: Vec<u16> = wanted
+            .iter()
+            .filter(|w| w.want == want)
+            .map(|w| w.room)
+            .collect();
+        rooms.sort();
+        rooms
+    };
     assert_eq!(wanted[0].room, 3);
-    rooms.sort();
-    assert_eq!(rooms, [2, 3, 4]);
+    assert_eq!(set(Want::Need, &wanted), [2, 3, 4]);
+    // Both neighbours are equally near; the first portal's (room 2) wins and
+    // its ring beyond the need set leads.
+    assert_eq!(set(Want::Lead, &wanted), [1]);
+    // A step toward room 4 turns the lead to its side.
+    let east = [3 * 160 + 140, 50, S / 2];
+    window.wanted(&level, Some((3, east)), Some((3, east)), &mut wanted);
+    assert_eq!(set(Want::Lead, &wanted), [5]);
     // The camera in another room adds its own ring.
     let eye = [6 * 160 + 80, 50, S / 2];
     window.wanted(&level, Some((3, at)), Some((6, eye)), &mut wanted);
-    let mut rooms: Vec<u16> = wanted.iter().map(|w| w.room).collect();
-    rooms.sort();
-    assert_eq!(rooms, [2, 3, 4, 5, 6, 7]);
-    // The pool holds the busiest ring: three rooms of one page.
+    assert_eq!(set(Want::Need, &wanted), [2, 3, 4, 5, 6, 7]);
+    // The pool holds the busiest ring and its lead: four rooms of one page.
     let plan = plan_pool(&level, &[1; 8]);
-    assert_eq!((plan.peak_pages, plan.peak_rooms), (3, 3));
+    assert_eq!((plan.peak_pages, plan.peak_rooms), (4, 4));
 }
