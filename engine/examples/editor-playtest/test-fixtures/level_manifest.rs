@@ -29,6 +29,10 @@ pub const GAMEPLAY_PACK_MAX_CHUNK_BYTES: usize = 0;
 pub const WORLD_PACK_START_LBA: u32 = 1024;
 pub const GRID_ROOM_COUNT: usize = 0;
 pub const GRID_ROOM_POOL_PAGES: usize = 1;
+/// Per room, the sector of its baked cube sky relative to the start of
+/// WORLD.PAK (0 for none), and the sectors one sky occupies.
+pub const GRID_ROOM_SKY_SECTORS: [u32; GRID_ROOM_COUNT] = [];
+pub const GRID_SKY_SECTORS: u32 = 0;
 pub const LEN_ROOMS: usize = 1;
 pub const LEN_ROOM_REFLECTION_PROBES: usize = 0;
 pub const LEN_LIGHTS: usize = 0;
