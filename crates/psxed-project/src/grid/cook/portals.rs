@@ -4,7 +4,9 @@
 //!
 //! * Side by side: the neighbouring lattice cell across a room's boundary
 //!   edge belongs to another room and the open spans of the two cells meet
-//!   at the shared edge, so a body can pass.
+//!   at the shared edge, so a body can pass. Where neither cell has a
+//!   ceiling the opening is one sector tall over the higher floor, so open
+//!   ground split into rooms stays connected.
 //! * Stacked: the rooms overlap in plan and one of the two cells has no
 //!   floor or no ceiling, so there is a vertical opening between them.
 //!
@@ -124,8 +126,16 @@ pub fn derive(world: &GridWorld, units: &RuntimeUnits) -> Result<Vec<Vec<Portal>
                         continue;
                     };
                     let lo = a_lo.max(b_lo);
-                    let hi = a_hi.min(b_hi);
-                    if lo >= hi || lo == i32::MIN || hi == i32::MAX {
+                    if lo == i32::MIN {
+                        continue;
+                    }
+                    // Open air on both sides: the opening is one sector tall
+                    // over the higher floor (the walk reads only its centre).
+                    let hi = match a_hi.min(b_hi) {
+                        i32::MAX => lo + s,
+                        hi => hi,
+                    };
+                    if lo >= hi {
                         continue;
                     }
                     let (lo, hi) = (lo - origin_y, hi - origin_y);
