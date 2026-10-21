@@ -41,6 +41,8 @@ pub enum ExtrudeRefusal {
     NoWalls,
     /// The room's walls are hand placed: only derived walls extrude.
     AuthoredWalls,
+    /// The room derives its walls, but this one was placed by hand.
+    HandPlaced,
     /// A diagonal wall has no sector to push into.
     Diagonal,
     /// The piece covers only part of its edge (a triangle).
@@ -74,6 +76,10 @@ impl ExtrudeRefusal {
             Self::NoWalls => "Pick wall pieces to extrude".to_string(),
             Self::AuthoredWalls => {
                 "This room has hand-placed walls: convert it to derived walls (Rooms panel) to extrude them"
+                    .to_string()
+            }
+            Self::HandPlaced => {
+                "That wall is hand-placed: Extrude moves derived walls only"
                     .to_string()
             }
             Self::Diagonal => "A diagonal wall cannot be extruded".to_string(),
@@ -136,7 +142,7 @@ fn piece_of_face(
     }
     let FaceTarget::Derived { edge, .. } = face.target else {
         return Err(if matches!(face.target, FaceTarget::Wall { .. }) {
-            ExtrudeRefusal::AuthoredWalls
+            ExtrudeRefusal::HandPlaced
         } else {
             ExtrudeRefusal::NoWalls
         });
