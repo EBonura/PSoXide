@@ -14,22 +14,41 @@
 //! `apply(0)` gives the document back byte for byte. A refusal leaves the
 //! document as it was.
 //!
-//! Wall pieces move in whole sectors, in rooms whose walls are derived and
-//! whose cells are whole sectors; a sector another room occupies is never
-//! entered.
+//! Wall pieces move in whole sectors, in rooms whose cells are whole
+//! sectors; a sector another room occupies is never entered.
+//!
+//! **Hand-placed walls extrude too.** A wall record the user placed (in a
+//! derived room, where it sits beside the derived faces, or in a room that
+//! derives nothing) is a piece like any other. In the same step the push
+//! turns exactly the records it touches into derived behaviour: the picked
+//! records go (a room that derives nothing is first converted with its look
+//! kept, see [`convert_to_derived`], because the wall mode is per room), the
+//! walls the push makes wear the picked wall's material, and any other record
+//! on an edge of a sector the push makes or fills moves its look (material,
+//! placement, bands, solidity) onto the derived face that now stands exactly
+//! where it did, or stays when none does. Where a room has no way to derive
+//! a closure (an open top with no `open_wall`) the corridor or alcove is
+//! closed with hand-placed walls of the picked wall's material instead.
+//! Nothing else in the document is touched.
+
+use std::collections::BTreeSet;
 
 use crate::grid::auto_split;
 use crate::grid::band_geom::Span;
-use crate::grid::edit::bands::wall_bands;
+use crate::grid::derive::{self, DerivedKind, DerivedWall};
+use crate::grid::edit::bands::{effective_set, wall_bands};
+use crate::grid::edit::convert::{convert_to_derived, placement, ConvertMode};
 use crate::grid::edit::rects::{grow_room_to, CellRect};
 use crate::grid::edit::refs::{FaceRef, FaceTarget, GridElement};
 use crate::grid::edit::region::Region;
-use crate::grid::overrides::WallMode;
+use crate::grid::edit::walls::edge_corner_indices;
+use crate::grid::overrides::{EdgeKey, WallMode};
 use crate::grid::room::GridRoom;
 use crate::grid::sector::{GridSector, WallEdge};
-use crate::grid::surface::GridSurface;
+use crate::grid::surface::{GridSurface, GridWall, WallFacing};
 use crate::grid::units::{CLICK_UNITS, SECTOR_UNITS};
 use crate::grid::world::GridWorld;
+use crate::ResourceId;
 
 use super::rules::{ceiling_corners, floor_corners, set_floor_corners};
 use super::{Applied, Snapshot};
@@ -39,10 +58,6 @@ use super::{Applied, Snapshot};
 pub enum ExtrudeRefusal {
     /// Nothing wall-like was picked.
     NoWalls,
-    /// The room's walls are hand placed: only derived walls extrude.
-    AuthoredWalls,
-    /// The room derives its walls, but this one was placed by hand.
-    HandPlaced,
     /// A diagonal wall has no sector to push into.
     Diagonal,
     /// The piece covers only part of its edge (a triangle).
@@ -67,6 +82,9 @@ pub enum ExtrudeRefusal {
     /// The piece floats between the floor and the ceiling: there is nothing
     /// solid to grow it from.
     Floating,
+    /// The side the wall is drawn to has no floor: there is no sector to
+    /// push it from.
+    NoFloor,
 }
 
 impl ExtrudeRefusal {
@@ -74,14 +92,6 @@ impl ExtrudeRefusal {
     pub fn describe(&self) -> String {
         match self {
             Self::NoWalls => "Pick wall pieces to extrude".to_string(),
-            Self::AuthoredWalls => {
-                "This room has hand-placed walls: convert it to derived walls (Rooms panel) to extrude them"
-                    .to_string()
-            }
-            Self::HandPlaced => {
-                "That wall is hand-placed: Extrude moves derived walls only"
-                    .to_string()
-            }
             Self::Diagonal => "A diagonal wall cannot be extruded".to_string(),
             Self::PartialWidth => "That piece covers only part of its edge".to_string(),
             Self::MixedFacing => "Pick pieces that face the same way".to_string(),
@@ -97,8 +107,32 @@ impl ExtrudeRefusal {
                 "That piece floats between floor and ceiling: extrude the whole wall in, or out"
                     .to_string()
             }
+            Self::NoFloor => {
+                "That wall faces empty space: there is no floor to push it from".to_string()
+            }
         }
     }
+}
+
+/// How a wall looks, to give to the walls its extrusion makes.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Look {
+    /// The material.
+    pub material: Option<ResourceId>,
+    /// The band set, when the whole wall was picked (a band pushed out
+    /// makes a niche that is one piece, not banded again).
+    pub band_set: Option<u8>,
+}
+
+/// A hand-placed wall record a piece stands for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HandPlaced {
+    /// The sector that stores the record.
+    pub cell: [i32; 2],
+    /// The edge stack it is in.
+    pub edge: WallEdge,
+    /// The record as it was picked.
+    pub wall: GridWall,
 }
 
 /// One wall piece: where it is and the shape of its face.
@@ -112,6 +146,10 @@ pub struct WallPiece {
     pub edge: WallEdge,
     /// `[bottom a, bottom b, top b, top a]` along the edge, room-relative.
     pub heights: [i32; 4],
+    /// The hand-placed record this piece is, if it is not a derived face.
+    pub source: Option<HandPlaced>,
+    /// What the walls it makes look like.
+    pub look: Look,
 }
 
 impl WallPiece {
@@ -131,46 +169,142 @@ fn span_heights(span: &Span) -> Option<[i32; 4]> {
     ])
 }
 
+/// The ring of band `band` of `face`, if the wall is banded that way.
+fn band_ring(world: &GridWorld, face: FaceRef, band: Option<u8>) -> Option<Vec<[i32; 2]>> {
+    let band = band?;
+    wall_bands(world, face)?
+        .pieces
+        .into_iter()
+        .find(|p| p.band == usize::from(band))
+        .map(|p| p.ring)
+}
+
+/// The material of band `band` of `face`, falling back on the wall's own.
+fn band_material(world: &GridWorld, face: FaceRef, band: Option<u8>) -> Option<Option<ResourceId>> {
+    let band = band?;
+    let (_, set) = effective_set(world, face)?;
+    Some(set.bands.get(usize::from(band))?.material)
+}
+
 fn piece_of_face(
     world: &GridWorld,
     face: FaceRef,
     band: Option<u8>,
 ) -> Result<WallPiece, ExtrudeRefusal> {
     let room = face.room_of(world).ok_or(ExtrudeRefusal::NoRoom)?;
-    if room.wall_mode != WallMode::Derived {
-        return Err(ExtrudeRefusal::AuthoredWalls);
+    match face.target {
+        FaceTarget::Derived { edge, .. } => {
+            if edge.is_diagonal() {
+                return Err(ExtrudeRefusal::Diagonal);
+            }
+            let wall = face.derived_wall(world).ok_or(ExtrudeRefusal::NoWalls)?;
+            let whole = Span::from_ring(&wall.ring).ok_or(ExtrudeRefusal::PartialWidth)?;
+            let banded = band_ring(world, face, band);
+            let span = match &banded {
+                Some(ring) => Span::from_ring(ring).ok_or(ExtrudeRefusal::PartialWidth)?,
+                None => whole,
+            };
+            let heights = span_heights(&span).ok_or(ExtrudeRefusal::PartialWidth)?;
+            let material = match band_material(world, face, band.filter(|_| banded.is_some())) {
+                Some(Some(material)) => Some(material),
+                _ => wall.material,
+            };
+            Ok(WallPiece {
+                room: face.room,
+                host: wall.host,
+                edge: wall.edge,
+                heights,
+                source: None,
+                look: Look {
+                    material,
+                    band_set: if banded.is_some() {
+                        None
+                    } else {
+                        wall.band_set
+                    },
+                },
+            })
+        }
+        FaceTarget::Wall { edge, .. } => {
+            if edge.is_diagonal() {
+                return Err(ExtrudeRefusal::Diagonal);
+            }
+            let record = face.wall_of(world).ok_or(ExtrudeRefusal::NoWalls)?.clone();
+            let cell = face.cell();
+            // The side the wall is drawn to is the side it is pushed from.
+            let (host, host_edge, mirrored) = hand_placed_side(room, cell, edge, record.facing)?;
+            let banded = band_ring(world, face, band);
+            let mut heights = match &banded {
+                Some(ring) => {
+                    let span = Span::from_ring(ring).ok_or(ExtrudeRefusal::PartialWidth)?;
+                    span_heights(&span).ok_or(ExtrudeRefusal::PartialWidth)?
+                }
+                None => record.heights,
+            };
+            if mirrored {
+                // Along the far sector's own walking direction the ends swap.
+                heights = [heights[1], heights[0], heights[3], heights[2]];
+            }
+            let material = match band_material(world, face, band.filter(|_| banded.is_some())) {
+                Some(Some(material)) => Some(material),
+                _ => record.material,
+            };
+            Ok(WallPiece {
+                room: face.room,
+                host,
+                edge: host_edge,
+                heights,
+                look: Look {
+                    material,
+                    band_set: if banded.is_some() {
+                        None
+                    } else {
+                        record.band_set
+                    },
+                },
+                source: Some(HandPlaced {
+                    cell,
+                    edge,
+                    wall: record,
+                }),
+            })
+        }
+        FaceTarget::Surface { .. } => Err(ExtrudeRefusal::NoWalls),
     }
-    let FaceTarget::Derived { edge, .. } = face.target else {
-        return Err(if matches!(face.target, FaceTarget::Wall { .. }) {
-            ExtrudeRefusal::HandPlaced
-        } else {
-            ExtrudeRefusal::NoWalls
-        });
-    };
-    if edge.is_diagonal() {
-        return Err(ExtrudeRefusal::Diagonal);
-    }
-    let wall = face.derived_wall(world).ok_or(ExtrudeRefusal::NoWalls)?;
-    let whole = Span::from_ring(&wall.ring).ok_or(ExtrudeRefusal::PartialWidth)?;
-    let banded = band.and_then(|b| {
-        wall_bands(world, face)
-            .and_then(|w| w.pieces.into_iter().find(|p| p.band == usize::from(b)))
-    });
-    let span = match banded {
-        Some(piece) => Span::from_ring(&piece.ring).ok_or(ExtrudeRefusal::PartialWidth)?,
-        None => whole,
-    };
-    let heights = span_heights(&span).ok_or(ExtrudeRefusal::PartialWidth)?;
-    Ok(WallPiece {
-        room: face.room,
-        host: wall.host,
-        edge: wall.edge,
-        heights,
-    })
 }
 
-/// The wall pieces a selection names (faces and bands of derived walls);
-/// other elements are ignored.
+/// The sector a hand-placed wall on `edge` of `cell` is seen from, the edge
+/// of it the wall lies on and whether that is the far side of the record.
+fn hand_placed_side(
+    room: &GridRoom,
+    cell: [i32; 2],
+    edge: WallEdge,
+    facing: WallFacing,
+) -> Result<([i32; 2], WallEdge, bool), ExtrudeRefusal> {
+    let (opposite, offset) = edge.opposite().ok_or(ExtrudeRefusal::Diagonal)?;
+    let near = (cell, edge, false);
+    let far = ([cell[0] + offset[0], cell[1] + offset[1]], opposite, true);
+    let order = match facing {
+        WallFacing::Front => [near, near],
+        WallFacing::Back => [far, far],
+        // Seen from both sides: the sector the record is stored in, unless
+        // only the other one has a floor.
+        WallFacing::Both => [near, far],
+    };
+    order
+        .into_iter()
+        .find(|(host, ..)| has_floor(room, *host))
+        .ok_or(ExtrudeRefusal::NoFloor)
+}
+
+fn has_floor(room: &GridRoom, cell: [i32; 2]) -> bool {
+    room.local(cell)
+        .and_then(|[x, z]| room.sector(x, z))
+        .is_some_and(|s| s.ground_floor().is_some())
+}
+
+/// The wall pieces a selection names (faces and bands of derived walls and
+/// of hand-placed ones); other elements are ignored.
 pub fn pieces_of(
     world: &GridWorld,
     elements: &[GridElement],
@@ -213,9 +347,18 @@ pub struct Extruded {
     pub removed: usize,
 }
 
+/// The sectors an extrusion visited, for the walls to settle afterwards.
+#[derive(Default)]
+struct Touched {
+    /// Sectors made, with the piece that made them.
+    created: Vec<(usize, [i32; 2])>,
+    /// Every sector made, opened, filled or removed.
+    cells: Vec<[i32; 2]>,
+}
+
 impl ExtrudeDrag {
-    /// Start on `pieces`. Refused when they are not all in one derived room
-    /// of whole sectors, facing one way.
+    /// Start on `pieces`. Refused when they are not all in one room of whole
+    /// sectors, facing one way.
     pub fn begin(world: &GridWorld, pieces: Vec<WallPiece>) -> Result<Self, ExtrudeRefusal> {
         let first = pieces.first().ok_or(ExtrudeRefusal::NoWalls)?;
         let room = first.room;
@@ -229,11 +372,11 @@ impl ExtrudeDrag {
             return Err(ExtrudeRefusal::Diagonal);
         }
         let source = world.rooms.get(room).ok_or(ExtrudeRefusal::NoRoom)?;
-        if source.wall_mode != WallMode::Derived {
-            return Err(ExtrudeRefusal::AuthoredWalls);
-        }
         if !source.leaves.is_sectors_only() {
             return Err(ExtrudeRefusal::Leaves);
+        }
+        if pieces.iter().any(|p| !has_floor(source, p.host)) {
+            return Err(ExtrudeRefusal::NoFloor);
         }
         Ok(Self {
             room,
@@ -267,19 +410,42 @@ impl ExtrudeDrag {
         if steps == 0 {
             return Ok(Extruded::default());
         }
-        let result = if steps > 0 {
-            self.out(world, steps)
-        } else {
-            self.fill_in(world, -steps)
-        };
+        let result = self.run(world, steps);
         if result.is_err() {
             world.rooms[self.room] = self.before.clone();
         }
         result
     }
 
-    fn out(&self, world: &mut GridWorld, steps: i32) -> Result<Extruded, ExtrudeRefusal> {
-        // Another room in the way is checked before anything is written.
+    fn run(&self, world: &mut GridWorld, steps: i32) -> Result<Extruded, ExtrudeRefusal> {
+        if steps > 0 {
+            self.check_clear(world, steps)?;
+        }
+        // A room that derives nothing derives from here on, with every wall
+        // it had looking as it did.
+        if world.rooms[self.room].wall_mode != WallMode::Derived {
+            convert_to_derived(world, self.room, ConvertMode::PreserveLook);
+        }
+        let texels = world.texels_per_sector.get();
+        let window = self.window(steps);
+        let room = &world.rooms[self.room];
+        let faces_before = face_signatures(room, &window);
+        let hand_before = hand_placed_in(room, &window);
+        let mut touched = Touched::default();
+        let done = if steps > 0 {
+            self.out(world, steps, &mut touched)?
+        } else {
+            self.fill_in(world, -steps, &mut touched)?
+        };
+        let room = &mut world.rooms[self.room];
+        self.give_new_walls_their_look(room, steps, &faces_before);
+        self.settle_hand_placed(room, &hand_before, &touched, texels);
+        self.close_open_edges(room, &touched);
+        Ok(done)
+    }
+
+    /// Another room in the way is checked before anything is written.
+    fn check_clear(&self, world: &GridWorld, steps: i32) -> Result<(), ExtrudeRefusal> {
         for piece in &self.pieces {
             let out = piece.outward();
             for k in 1..=steps {
@@ -291,9 +457,27 @@ impl ExtrudeDrag {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// The sectors the push can change a wall of: the ones it visits and a
+    /// ring round them.
+    fn window(&self, steps: i32) -> BTreeSet<[i32; 2]> {
+        self.pieces
+            .iter()
+            .flat_map(|piece| Self::swath(piece, steps))
+            .collect()
+    }
+
+    fn out(
+        &self,
+        world: &mut GridWorld,
+        steps: i32,
+        touched: &mut Touched,
+    ) -> Result<Extruded, ExtrudeRefusal> {
         let room = &mut world.rooms[self.room];
         let mut done = Extruded::default();
-        for piece in &self.pieces {
+        for (index, piece) in self.pieces.iter().enumerate() {
             let out = piece.outward();
             let host = host_surfaces(room, piece.host);
             let (bottom, top) = patterns(piece);
@@ -315,8 +499,10 @@ impl ExtrudeDrag {
                     return Err(ExtrudeRefusal::RoomTooLarge);
                 };
                 let opened = open_up(sector, &host, bottom, top);
+                touched.cells.push(cell);
                 if !existed {
                     done.created += 1;
+                    touched.created.push((index, cell));
                 } else if opened {
                     done.opened += 1;
                 }
@@ -325,7 +511,12 @@ impl ExtrudeDrag {
         Ok(done)
     }
 
-    fn fill_in(&self, world: &mut GridWorld, steps: i32) -> Result<Extruded, ExtrudeRefusal> {
+    fn fill_in(
+        &self,
+        world: &mut GridWorld,
+        steps: i32,
+        touched: &mut Touched,
+    ) -> Result<Extruded, ExtrudeRefusal> {
         let room = &mut world.rooms[self.room];
         let mut done = Extruded::default();
         for piece in &self.pieces {
@@ -355,6 +546,7 @@ impl ExtrudeDrag {
                 let Some(sector) = room.sector_or_insert(x, z) else {
                     break;
                 };
+                touched.cells.push(cell);
                 match fill(sector, how, bottom, top) {
                     Filled::Removed => {
                         room.set_sector(x, z, None);
@@ -366,6 +558,245 @@ impl ExtrudeDrag {
         }
         Ok(done)
     }
+
+    /// The faces the push made, in each piece's swath, wear the piece's
+    /// look (a face that was there before keeps its own).
+    fn give_new_walls_their_look(
+        &self,
+        room: &mut GridRoom,
+        steps: i32,
+        before: &BTreeSet<FaceSignature>,
+    ) {
+        let mut claimed: BTreeSet<EdgeKey> = BTreeSet::new();
+        for piece in &self.pieces {
+            if piece.look == Look::default() {
+                continue;
+            }
+            let walls: Vec<DerivedWall> = Self::swath(piece, steps)
+                .iter()
+                .flat_map(|&c| derive::cell_walls(room, c))
+                .collect();
+            for wall in walls {
+                if wall.hidden || before.contains(&signature(&wall)) || !claimed.insert(wall.key) {
+                    continue;
+                }
+                let look = piece.look.clone();
+                room.edge_overrides.edit(wall.key, |o| {
+                    if o.material.is_none() && look.material != wall.material {
+                        o.material = look.material;
+                    }
+                    if o.band_set.is_none() {
+                        o.band_set = look.band_set;
+                    }
+                });
+            }
+        }
+    }
+
+    /// The sectors one piece's push runs through and the ring round them.
+    fn swath(piece: &WallPiece, steps: i32) -> BTreeSet<[i32; 2]> {
+        let out = piece.outward();
+        let mut cells = BTreeSet::new();
+        for k in steps.min(0)..=steps.max(0) {
+            let at = [piece.host[0] + out[0] * k, piece.host[1] + out[1] * k];
+            for dz in -1..=1 {
+                for dx in -1..=1 {
+                    cells.insert([at[0] + dx, at[1] + dz]);
+                }
+            }
+        }
+        cells
+    }
+
+    /// The hand-placed records the push touched become derived behaviour.
+    fn settle_hand_placed(
+        &self,
+        room: &mut GridRoom,
+        hand_before: &[HandPlaced],
+        touched: &Touched,
+        texels: u16,
+    ) {
+        // The picked records: gone, their look on whatever stands at their
+        // place now.
+        let picked: Vec<&HandPlaced> = self
+            .pieces
+            .iter()
+            .filter_map(|p| p.source.as_ref())
+            .collect();
+        for record in &picked {
+            remove_record(room, record);
+            let key = derive::edge_key(record.cell, record.edge);
+            // The record stood for the derived face the user had hidden.
+            room.edge_overrides.edit(key, |o| o.hidden = false);
+            let faces = derive::physical_edge_walls(room, record.cell, record.edge);
+            if let Some(face) = faces.first() {
+                carry_look(room, record, face, texels);
+            }
+        }
+        // The others on the edges of the sectors the push visited: the ones
+        // a derived face now stands exactly on move onto it, the rest stay.
+        let keys: BTreeSet<EdgeKey> = touched
+            .cells
+            .iter()
+            .flat_map(|&cell| {
+                derive::CARDINAL
+                    .into_iter()
+                    .map(move |edge| derive::edge_key(cell, edge))
+            })
+            .collect();
+        for record in hand_before {
+            if picked.contains(&record)
+                || !keys.contains(&derive::edge_key(record.cell, record.edge))
+            {
+                continue;
+            }
+            let faces = derive::physical_edge_walls(room, record.cell, record.edge);
+            let Some(face) = faces.iter().find(|f| covers(f, record)) else {
+                continue;
+            };
+            remove_record(room, record);
+            carry_look(room, record, face, texels);
+        }
+    }
+
+    /// Where the room cannot derive a wall (an open top with no wall
+    /// height), a sector the push made is closed by hand-placed walls of
+    /// the picked wall's material, as the wall it was cut from was.
+    fn close_open_edges(&self, room: &mut GridRoom, touched: &Touched) {
+        for &(index, cell) in &touched.created {
+            let piece = &self.pieces[index];
+            if piece.source.is_none() {
+                continue;
+            }
+            let (_, top) = patterns(piece);
+            for edge in derive::CARDINAL {
+                let front = edge.front_direction();
+                let beyond = [cell[0] - front[0], cell[1] - front[1]];
+                if occupies(room, beyond) || !derive::edge_walls(room, cell, edge).is_empty() {
+                    continue;
+                }
+                let Some([x, z]) = room.local(cell) else {
+                    continue;
+                };
+                let Some(sector) = room.sector_mut(x, z) else {
+                    continue;
+                };
+                if !sector.walls(edge).is_empty() {
+                    continue;
+                }
+                let Some(floor) = sector.ground_floor().map(|f| f.heights) else {
+                    continue;
+                };
+                let [a, b] = edge_corner_indices(edge);
+                let heights = [floor[a], floor[b], top[b], top[a]];
+                let wall = GridWall {
+                    heights,
+                    material: piece.look.material,
+                    band_set: piece.look.band_set,
+                    ..GridWall::span(0, 0, None)
+                };
+                if !wall.is_degenerate() {
+                    sector.walls_mut(edge).push(wall);
+                }
+            }
+        }
+    }
+}
+
+/// What identifies a derived face across an edit.
+type FaceSignature = (EdgeKey, [i32; 2], DerivedKind, u8);
+
+fn signature(wall: &DerivedWall) -> FaceSignature {
+    (wall.key, wall.host, wall.kind, wall.span)
+}
+
+fn face_signatures(room: &GridRoom, cells: &BTreeSet<[i32; 2]>) -> BTreeSet<FaceSignature> {
+    cells
+        .iter()
+        .flat_map(|&c| derive::cell_walls(room, c))
+        .map(|w| signature(&w))
+        .collect()
+}
+
+/// Every hand-placed record stored in the sectors of `cells`.
+fn hand_placed_in(room: &GridRoom, cells: &BTreeSet<[i32; 2]>) -> Vec<HandPlaced> {
+    let mut out = Vec::new();
+    for &cell in cells {
+        let Some(sector) = room.local(cell).and_then(|[x, z]| room.sector(x, z)) else {
+            continue;
+        };
+        for edge in derive::CARDINAL {
+            for wall in sector.walls(edge) {
+                out.push(HandPlaced {
+                    cell,
+                    edge,
+                    wall: wall.clone(),
+                });
+            }
+        }
+    }
+    out
+}
+
+fn remove_record(room: &mut GridRoom, record: &HandPlaced) {
+    let Some([x, z]) = room.local(record.cell) else {
+        return;
+    };
+    let Some(sector) = room.sector_mut(x, z) else {
+        return;
+    };
+    let stack = sector.walls_mut(record.edge);
+    if let Some(at) = stack.iter().position(|w| *w == record.wall) {
+        stack.remove(at);
+    }
+}
+
+/// Whether `face` is the same wall as the record: the same shape, seen
+/// from the side the record is drawn to.
+fn covers(face: &DerivedWall, record: &HandPlaced) -> bool {
+    let Some(shape) = face.as_wall_of(record.cell, record.edge) else {
+        return false;
+    };
+    let from_front = face.host == record.cell && face.edge == record.edge && !face.back;
+    shape.heights == record.wall.heights
+        && match record.wall.facing {
+            WallFacing::Front => from_front,
+            WallFacing::Back => !from_front,
+            WallFacing::Both => true,
+        }
+}
+
+/// Put a hand-placed wall's look on the override of the derived `face` that
+/// replaces it.
+fn carry_look(room: &mut GridRoom, record: &HandPlaced, face: &DerivedWall, texels: u16) {
+    let wall = &record.wall;
+    let mirrored = !(face.host == record.cell && face.edge == record.edge);
+    let uv = placement(wall, (face.host, face.edge), mirrored, texels);
+    let closure = face.kind == DerivedKind::Closure;
+    let chained = face.material;
+    let existing = room
+        .edge_overrides
+        .get(&face.key)
+        .cloned()
+        .unwrap_or_default();
+    room.edge_overrides.edit(face.key, |o| {
+        o.hidden = false;
+        if wall.material != chained || existing.material.is_some() {
+            o.material = wall.material;
+        }
+        if let Some(uv) = uv {
+            o.uv = uv;
+        }
+        if wall.band_set.is_some() {
+            o.band_set = wall.band_set;
+        }
+        o.solid = match (closure, wall.solid) {
+            (true, true) => None,
+            (true, false) => Some(false),
+            (false, true) => Some(true),
+            (false, false) => None,
+        };
+    });
 }
 
 /// Whether `room` has floor or ceiling in the world sector `cell`.

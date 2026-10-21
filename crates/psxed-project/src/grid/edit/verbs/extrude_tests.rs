@@ -229,36 +229,6 @@ fn a_run_of_pieces_goes_out_together_and_mixed_directions_are_refused() {
 }
 
 #[test]
-fn rooms_with_hand_placed_walls_are_pointed_at_the_conversion() {
-    let mut world = hall(4, 4);
-    world.rooms[0].wall_mode = crate::grid::overrides::WallMode::Authored;
-    let element = GridElement::Face(FaceRef::wall(0, [1, 0], WallEdge::North, 0));
-    assert!(matches!(
-        pieces_of(&world, &[element]),
-        Err(ExtrudeRefusal::AuthoredWalls)
-    ));
-}
-
-#[test]
-fn a_hand_placed_wall_in_a_derived_room_is_named_as_such() {
-    let mut world = hall(4, 4);
-    // Inside the room, where no derived wall stands.
-    world.rooms[0]
-        .sector_or_insert(1, 1)
-        .unwrap()
-        .walls_mut(WallEdge::North)
-        .push(crate::grid::surface::GridWall::span(0, 1536, None));
-    let element = GridElement::Face(FaceRef::wall(0, [1, 1], WallEdge::North, 0));
-    let refusal = pieces_of(&world, &[element]).unwrap_err();
-    assert_eq!(refusal, ExtrudeRefusal::HandPlaced);
-    assert!(refusal.describe().contains("hand-placed"));
-    assert!(
-        !refusal.describe().contains("convert"),
-        "the room is derived already"
-    );
-}
-
-#[test]
 fn ceilings_move_with_the_region_and_stay_a_click_above_the_floor() {
     let mut world = hall(6, 6);
     let region = Region::from_rect(0, CellRect::from_corners([2, 2], [3, 3]));

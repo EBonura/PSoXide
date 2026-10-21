@@ -102,6 +102,8 @@ impl Snapshot {
 }
 
 #[cfg(test)]
+mod extrude_authored_tests;
+#[cfg(test)]
 mod extrude_tests;
 #[cfg(test)]
 mod tests;

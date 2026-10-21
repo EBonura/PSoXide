@@ -135,7 +135,7 @@ fn find_match(room: &GridRoom, wall: &DerivedWall, host: LeafKey) -> Option<Matc
 
 /// The override placement that reproduces `authored`'s texels on a face
 /// seen from `host`. `None` when the mirror compensation does not fit.
-fn placement(
+pub(crate) fn placement(
     authored: &GridWall,
     host: ([i32; 2], WallEdge),
     mirrored: bool,
