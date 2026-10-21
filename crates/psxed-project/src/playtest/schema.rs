@@ -137,6 +137,10 @@ pub struct PlaytestGridWorld {
     pub triangles: usize,
     /// Cooked surfaces of the largest room.
     pub max_room_surfaces: usize,
+    /// One cube sky atlas per room (a PSXT), the world beyond that room's
+    /// ring of neighbours, for a ring-streamed world with a cube sky; empty
+    /// otherwise. `WORLD.PAK` holds room `i`'s sky after every room chunk.
+    pub chunk_skies: Vec<Vec<u8>>,
     /// One block of text with the cook's sizes, for the build log.
     pub summary: String,
 }

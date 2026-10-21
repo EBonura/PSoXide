@@ -312,6 +312,15 @@ pub(super) fn cook(
             return None;
         }
     };
+    let scene = project.active_scene();
+    let cube_sky = scene
+        .world_sky_for_node(scene.root)
+        .is_some_and(|sky| sky.mode == crate::SkyMode::Cube);
+    let chunk_skies = if world.stream.ring && cube_sky {
+        bake_chunk_skies(&cooked, report)
+    } else {
+        Vec::new()
+    };
     let summary = cooked.report.summary();
     report.warn(summary.trim_end().to_string());
     let surfaces = |room: &cook::RoomReport| room.quads + room.triangles;
@@ -332,7 +341,75 @@ pub(super) fn cook(
             .sum(),
         max_room_surfaces: cooked.report.rooms.iter().map(surfaces).max().unwrap_or(0),
         summary,
+        chunk_skies,
     })
+}
+
+/// Bake every room's sky ([`cook::sky_bake`]) across the host's cores, on
+/// palettes shared by all of them (so the guest streams one over another in
+/// place). A failure leaves the world with its one authored sky.
+fn bake_chunk_skies(
+    cooked: &cook::CookedLevel,
+    report: &mut PlaytestValidationReport,
+) -> Vec<Vec<u8>> {
+    let started = std::time::Instant::now();
+    let rooms = cooked.level.rooms.len();
+    let threads = std::thread::available_parallelism()
+        .map_or(4, std::num::NonZeroUsize::get)
+        .min(rooms.max(1));
+    // Run `job` for every room across the cores, results in room order.
+    let across = |job: &(dyn Fn(usize) -> Result<Vec<u8>, String> + Sync)| {
+        std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..threads)
+                .map(|worker| {
+                    scope.spawn(move || {
+                        (worker..rooms)
+                            .step_by(threads)
+                            .map(|room| job(room).map(|out| (room, out)))
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            let mut out = vec![Vec::new(); rooms];
+            for worker in workers {
+                for result in worker
+                    .join()
+                    .map_err(|_| "a bake thread panicked".to_string())?
+                {
+                    let (room, bytes) = result?;
+                    out[room] = bytes;
+                }
+            }
+            Ok::<_, String>(out)
+        })
+    };
+    let skies = std::sync::Mutex::new(Vec::new());
+    let baked = across(&|room| {
+        let sky = cook::sky_bake::bake_chunk_sky(cooked, room)?;
+        skies.lock().map_err(|_| "poisoned")?.push(sky);
+        Ok(Vec::new())
+    })
+    .and_then(|_| {
+        let mut skies = skies.into_inner().map_err(|_| "poisoned".to_string())?;
+        skies.sort_by_key(|sky| sky.chunk);
+        let palettes = cook::sky_bake::shared_palettes(&skies)?;
+        across(&|room| skies[room].to_psxt_with(&palettes))
+    });
+    match baked {
+        Ok(skies) => {
+            report.warn(format!(
+                "grid world: baked {rooms} chunk skies in {:.1} s",
+                started.elapsed().as_secs_f64()
+            ));
+            skies
+        }
+        Err(error) => {
+            report.warn(format!(
+                "grid world: chunk sky bake failed, keeping the authored sky: {error}"
+            ));
+            Vec::new()
+        }
+    }
 }
 
 #[cfg(test)]

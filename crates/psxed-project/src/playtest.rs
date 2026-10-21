@@ -510,6 +510,16 @@ pub fn build_package(
         &mut assets,
         &mut report,
     );
+    // A world that bakes a sky per chunk starts on one of them: they share
+    // their palettes, which the guest never re-uploads while it streams the
+    // player's chunk's sky over the shown one.
+    if let (Some(index), Some(first)) =
+        (sky_texture_asset_index, world_geometry.chunk_skies.first())
+    {
+        if resolved_sky.mode == crate::SkyMode::Cube {
+            assets[index].bytes = first.clone();
+        }
+    }
     rooms
         .last_mut()
         .expect("world metadata room was just appended")

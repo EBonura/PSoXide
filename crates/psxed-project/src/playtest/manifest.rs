@@ -383,6 +383,16 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         pool.pool_pages.max(1),
     );
 
+    // Baked chunk skies: where each room's sits in WORLD.PAK.
+    let (sky_sectors, sky_sectors_each) = chunk_sky_sectors(package);
+    let _ = writeln!(
+        out,
+        "/// Per room, the sector of its baked cube sky relative to the start of\n\
+         /// WORLD.PAK (0 for none), and the sectors one sky occupies.\n\
+         pub const GRID_ROOM_SKY_SECTORS: [u32; GRID_ROOM_COUNT] = {sky_sectors:?};\n\
+         pub const GRID_SKY_SECTORS: u32 = {sky_sectors_each};\n"
+    );
+
     // The shape of the level's own records: how many of each table chunk 1 of
     // WORLD.PAK holds. The records ride the disc; the executable keeps only
     // these counts, to size its arrays and to leave out code for tables the
@@ -1211,7 +1221,8 @@ fn xa_cache_key(
 }
 
 /// What `WORLD.PAK` holds, in disc order: the grid level core as chunk 0, the
-/// level's own records as chunk 1, then room `i` as chunk `i + 2`. The three
+/// level's own records as chunk 1, then room `i` as chunk `i + 2`, then (for a
+/// world that bakes them) room `i`'s sky as chunk `rooms + i + 2`. The three
 /// the guest needs first sit in the pack's first header sector. A package without a grid world (the placeholder
 /// manifest) has an empty pack, a header-only `WORLD.PAK`, which keeps
 /// `UI.PAK`'s start LBA and the loader contract stable.
@@ -1229,7 +1240,38 @@ fn world_pack_chunks(package: &PlaytestPackage) -> Vec<(u32, &[u8])> {
                 .enumerate()
                 .map(|(room, bytes)| (room as u32 + 2, bytes.as_slice())),
         )
+        .chain(
+            world
+                .chunk_skies
+                .iter()
+                .enumerate()
+                .filter(|(_, bytes)| !bytes.is_empty())
+                .map(|(room, bytes)| {
+                    (
+                        (world.room_chunks.len() + room) as u32 + 2,
+                        bytes.as_slice(),
+                    )
+                }),
+        )
         .collect()
+}
+
+/// Per room, the sector of its baked sky relative to the start of
+/// `WORLD.PAK` (0 for none), and the sectors one sky occupies.
+fn chunk_sky_sectors(package: &PlaytestPackage) -> (Vec<u32>, u32) {
+    let world = &package.world_geometry;
+    let rooms = world.room_chunks.len();
+    let layout = world_pack_layout(package);
+    let mut sectors = vec![0u32; rooms];
+    let mut each = 0;
+    for entry in &layout.entries {
+        let id = entry.chunk_id as usize;
+        if id >= rooms + 2 && id < 2 * rooms + 2 {
+            sectors[id - rooms - 2] = entry.sector_offset;
+            each = each.max(entry.sector_count);
+        }
+    }
+    (sectors, each)
 }
 
 fn world_pack_layout(package: &PlaytestPackage) -> psx_iso::WorldPackLayout {

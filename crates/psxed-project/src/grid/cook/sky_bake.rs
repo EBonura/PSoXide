@@ -76,32 +76,76 @@ impl ChunkSky {
     /// The atlas as a 4bpp PSXT texture with one 16-colour palette per face,
     /// the shape the cube sky takes.
     pub fn to_psxt(&self) -> Result<Vec<u8>, String> {
+        self.to_psxt_with(&shared_palettes(core::slice::from_ref(self))?)
+    }
+
+    /// [`Self::to_psxt`] over the given six face palettes (see
+    /// [`shared_palettes`]): every texel takes the nearest colour of its
+    /// face's palette.
+    pub fn to_psxt_with(&self, palettes: &[Vec<[u8; 3]>; 6]) -> Result<Vec<u8>, String> {
         let (w, h) = (
             usize::from(CUBE_SKY_FACE_WIDTH),
             usize::from(CUBE_SKY_FACE_HEIGHT),
         );
         let mut indices = vec![0u8; 6 * w * h];
-        let mut palettes = Vec::with_capacity(6);
-        for face in 0..6 {
-            let texels = &self.rgb[face * w * h..(face + 1) * w * h];
-            let (palette, index) =
-                psxed_tex::quantize_rgb(texels, 16).map_err(|e| format!("face {face}: {e}"))?;
+        for (face, palette) in palettes.iter().enumerate() {
             for y in 0..h {
-                indices[y * 6 * w + face * w..y * 6 * w + face * w + w]
-                    .copy_from_slice(&index[y * w..y * w + w]);
+                for x in 0..w {
+                    let texel = self.rgb[(face * h + y) * w + x];
+                    indices[y * 6 * w + face * w + x] = nearest(palette, texel);
+                }
             }
-            palettes.push(palette);
         }
         psxed_tex::encode_indexed_psxt_with_clut_rows(
             CUBE_SKY_FACE_WIDTH * 6,
             CUBE_SKY_FACE_HEIGHT,
             psxed_format::texture::Depth::Bit4,
             &indices,
-            &palettes,
+            palettes.as_slice(),
             false,
         )
         .map_err(|e| format!("encode the sky: {e}"))
     }
+}
+
+/// One 16-colour palette per cube face for a whole set of chunk skies. With
+/// every chunk's sky on the same palettes, the runtime can stream a new sky's
+/// texels over the shown one row by row: there is no palette to swap, so no
+/// frame shows texels under the wrong colours, and no second copy of the sky
+/// is needed in VRAM.
+pub fn shared_palettes(skies: &[ChunkSky]) -> Result<[Vec<[u8; 3]>; 6], String> {
+    let (w, h) = (
+        usize::from(CUBE_SKY_FACE_WIDTH),
+        usize::from(CUBE_SKY_FACE_HEIGHT),
+    );
+    // A sample of every sky's face, kept to about a quarter million texels.
+    let stride = (skies.len() * w * h / 262_144).max(1);
+    let mut palettes: [Vec<[u8; 3]>; 6] = Default::default();
+    for (face, palette) in palettes.iter_mut().enumerate() {
+        let sample: Vec<[u8; 3]> = skies
+            .iter()
+            .flat_map(|sky| sky.rgb[face * w * h..(face + 1) * w * h].iter().copied())
+            .step_by(stride)
+            .collect();
+        *palette = psxed_tex::quantize_rgb(&sample, 16)
+            .map_err(|e| format!("face {face}: {e}"))?
+            .0;
+    }
+    Ok(palettes)
+}
+
+/// Index of the colour of `palette` nearest `c`.
+fn nearest(palette: &[[u8; 3]], c: [u8; 3]) -> u8 {
+    let distance = |p: &[u8; 3]| {
+        (0..3)
+            .map(|i| (i32::from(p[i]) - i32::from(c[i])).pow(2))
+            .sum::<i32>()
+    };
+    palette
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, p)| distance(p))
+        .map_or(0, |(i, _)| i as u8)
 }
 
 /// Direction through face-local `(u, v)` in `-1..=1` of `face`: the inverse
