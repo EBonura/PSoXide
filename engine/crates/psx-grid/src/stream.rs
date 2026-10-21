@@ -352,7 +352,15 @@ pub fn plan_pool(level: &LevelView<'_>, room_pages: &[usize]) -> PoolPlan {
     }
     plan.peak_pages = peak.0;
     plan.peak_rooms = peak.1;
-    plan.pool_pages = (peak.0 + peak.0 / 2 + max_room_pages).min(total_pages);
+    // A ring level's wanted set already holds the rooms it will need next
+    // (the lead), so it needs room for one more chunk landing, not half its
+    // peak again.
+    plan.pool_pages = if window.ring {
+        peak.0 + max_room_pages
+    } else {
+        peak.0 + peak.0 / 2 + max_room_pages
+    }
+    .min(total_pages);
     plan
 }
 

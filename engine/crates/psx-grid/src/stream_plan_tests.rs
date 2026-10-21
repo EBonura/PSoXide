@@ -239,7 +239,9 @@ fn a_ring_level_needs_the_observers_room_and_neighbours_and_leads_ahead() {
     let eye = [6 * 160 + 80, 50, S / 2];
     window.wanted(&level, Some((3, at)), Some((6, eye)), &mut wanted);
     assert_eq!(set(Want::Need, &wanted), [2, 3, 4, 5, 6, 7]);
-    // The pool holds the busiest ring and its lead: four rooms of one page.
+    // The pool holds the busiest ring and its lead (four rooms of one page)
+    // and one more room landing.
     let plan = plan_pool(&level, &[1; 8]);
     assert_eq!((plan.peak_pages, plan.peak_rooms), (4, 4));
+    assert_eq!(plan.pool_pages, 5);
 }
