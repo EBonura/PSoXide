@@ -356,10 +356,16 @@ impl GridRuntime {
         }
         // Order-free signature of the set: the order follows distances, which
         // change every tick the observer moves.
-        let signature = self.wanted_res.iter().fold(self.wanted_res.len() as u32, |sig, w| {
-            let key = u32::from(w.key.index() as u16) << 1 | u32::from(w.class == Class::Lead);
-            sig ^ key.wrapping_add(1).wrapping_mul(0x9E37_79B1).rotate_left(13)
-        });
+        let signature = self
+            .wanted_res
+            .iter()
+            .fold(self.wanted_res.len() as u32, |sig, w| {
+                let key = u32::from(w.key.index() as u16) << 1 | u32::from(w.class == Class::Lead);
+                sig ^ key
+                    .wrapping_add(1)
+                    .wrapping_mul(0x9E37_79B1)
+                    .rotate_left(13)
+            });
         if self.settled == Some(signature) {
             return;
         }
