@@ -15,7 +15,6 @@ pub static ROOMS: &[LevelRoomRecord] = &[LevelRoomRecord {
     atmosphere_fall_speed_q4: 0,
     atmosphere_wind_speed_q4: 0,
     sky: LevelSkyRecord::DEFAULT,
-    far_vista: LevelFarVistaRecord::DEFAULT,
     camera: LevelCameraRecord::DEFAULT,
     flags: 0,
 }];

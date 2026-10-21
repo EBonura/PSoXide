@@ -1,4 +1,4 @@
-//! Sky cyclorama and far-vista backdrop policy, carved out of
+//! Sky cyclorama backdrop policy, carved out of
 //! `editor-playtest`'s `sky_runtime` module (phase 2 of
 //! docs/game-runtime-plan.md). [`SkyCyclorama`] owns the
 //! rotation-keyed packet cache the example previously kept in
@@ -7,27 +7,16 @@
 //! plain values, and the example's VRAM slot resolvers arrive as
 //! closures until their glue fully migrates.
 
-use psx_engine::{
-    Angle, CullMode, DepthPolicy, OtFrame, PrimitiveSink, SkyDirectionProjector, WorldCamera,
-    WorldRenderPass, WorldSurfaceOptions, WorldVertex,
-};
-use psx_gpu::{
-    material::TextureMaterial,
-    prim::{QuadTexturedMaterial, TriTextured},
-};
+use psx_engine::{Angle, OtFrame, SkyDirectionProjector, WorldCamera};
+use psx_gpu::{material::TextureMaterial, prim::QuadTexturedMaterial};
 use psx_level::{
-    far_vista_flags, find_asset_of_kind, sky_flags, AssetId, AssetKind, LevelAssetRecord,
-    LevelFarVistaRecord, LevelSkyRecord,
+    find_asset_of_kind, sky_flags, AssetId, AssetKind, LevelAssetRecord, LevelSkyRecord,
 };
 use psx_math::int32::{clamp_i16, mul_q12_i32};
 
-use crate::room_lighting::rgb_tuple;
 #[cfg(feature = "cd-stream-bench")]
 use crate::vram::SkyTextureKind;
-use crate::vram::{
-    vram_slot_texture_size_u8, VramSlot, VramSlotClutMode, SKY_PANORAMA_HEIGHT,
-    SKY_PANORAMA_PALETTE_BANDS, SKY_PANORAMA_WIDTH,
-};
+use crate::vram::{VramSlot, SKY_PANORAMA_HEIGHT, SKY_PANORAMA_PALETTE_BANDS, SKY_PANORAMA_WIDTH};
 
 /// Cooked sky panoramas occupy two side-by-side 4bpp pages. The
 /// texture pixels are outside the double-buffered framebuffer and
@@ -393,141 +382,19 @@ fn sky_panorama_local_u(global_u: u16, page: usize) -> u8 {
     page_u as u8
 }
 
-/// Draw the authored far-vista panel ring: a camera-centred cylinder of
-/// textured quads at the farthest depth slot behind world geometry.
-pub fn draw_far_vista_ring<const OT_DEPTH: usize>(
-    camera: WorldCamera,
-    vista: LevelFarVistaRecord,
-    options: WorldSurfaceOptions,
-    assets: &'static [LevelAssetRecord],
-    mut ensure_texture_uploaded_with_clut_mode: impl FnMut(
-        AssetId,
-        &[u8],
-        VramSlotClutMode,
-    ) -> Option<VramSlot>,
-    triangles: &mut impl PrimitiveSink<TriTextured>,
-    world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
-) {
-    if vista.flags & far_vista_flags::ENABLED == 0 {
-        return;
-    }
-    let segments = vista.segments.clamp(3, 16);
-    let radius = vista.radius.max(1_024);
-    let y0 = camera.position.y.saturating_add(vista.vertical_offset);
-    let y1 = y0.saturating_add(vista.height.max(128));
-    let step = 0x1_0000_u32 / segments as u32;
-    let base = angle_from_signed_degrees(vista.rotation_degrees);
-
-    for segment in 0..segments {
-        let a0 = base.add(Angle::from_raw_q16(segment as u16 * step as u16));
-        let a1 = base.add(Angle::from_raw_q16(
-            (segment as u16).wrapping_add(1).wrapping_mul(step as u16),
-        ));
-        let x0 = camera.position.x.saturating_add(a0.sin().mul_i32(radius));
-        let z0 = camera.position.z.saturating_add(a0.cos().mul_i32(radius));
-        let x1 = camera.position.x.saturating_add(a1.sin().mul_i32(radius));
-        let z1 = camera.position.z.saturating_add(a1.cos().mul_i32(radius));
-        let material = far_vista_texture_material(
-            far_vista_panel_asset(vista, segment, segments),
-            vista.tint_rgb,
-            assets,
-            &mut ensure_texture_uploaded_with_clut_mode,
-        );
-        if let Some((material, texture_width, texture_height)) = material {
-            let options = options
-                .with_depth_policy(DepthPolicy::Farthest)
-                .with_cull_mode(CullMode::None)
-                .with_material_layer(material);
-            let _ = world.submit_textured_world_quad(
-                triangles,
-                camera,
-                [
-                    WorldVertex::new(x0, y1, z0),
-                    WorldVertex::new(x1, y1, z1),
-                    WorldVertex::new(x1, y0, z1),
-                    WorldVertex::new(x0, y0, z0),
-                ],
-                [
-                    (0, 0),
-                    (texture_width.saturating_sub(1), 0),
-                    (
-                        texture_width.saturating_sub(1),
-                        texture_height.saturating_sub(1),
-                    ),
-                    (0, texture_height.saturating_sub(1)),
-                ],
-                material,
-                options,
-            );
-        }
-    }
-}
-
-fn angle_from_signed_degrees(degrees: i16) -> Angle {
-    Angle::from_degrees((degrees as i32).rem_euclid(360) as u32)
-}
-
-fn far_vista_panel_asset(vista: LevelFarVistaRecord, segment: u8, segments: u8) -> Option<AssetId> {
-    if vista.flags & far_vista_flags::TEXTURED == 0 || vista.texture_assets.is_empty() {
-        return None;
-    }
-    let panel_count = vista.texture_assets.len();
-    let panel_index = if panel_count == 1 {
-        0
-    } else {
-        ((segment as usize) * panel_count / (segments as usize).max(1)).min(panel_count - 1)
-    };
-    let asset = vista.texture_assets[panel_index];
-    (asset.0 != u16::MAX).then_some(asset)
-}
-
-fn far_vista_texture_material(
-    asset_id: Option<AssetId>,
-    tint_rgb: [u8; 3],
-    assets: &'static [LevelAssetRecord],
-    ensure_texture_uploaded_with_clut_mode: &mut impl FnMut(
-        AssetId,
-        &[u8],
-        VramSlotClutMode,
-    ) -> Option<VramSlot>,
-) -> Option<(TextureMaterial, u8, u8)> {
-    let asset = find_asset_of_kind(assets, asset_id?, AssetKind::Texture)?;
-    let slot = ensure_texture_uploaded_with_clut_mode(
-        asset.id,
-        asset.bytes,
-        VramSlotClutMode::TransparentZero,
-    )?;
-    Some((
-        TextureMaterial::opaque(slot.clut_word, slot.tpage_word, rgb_tuple(tint_rgb))
-            .with_texture_window(slot.texture_window),
-        vram_slot_texture_size_u8(slot.texture_width),
-        vram_slot_texture_size_u8(slot.texture_height),
-    ))
-}
-
-/// True once the room's sky panorama AND far-vista panel textures are
-/// VRAM-resident (the streamed-boot readiness gate).
+/// True once the room's sky panorama is VRAM-resident (the streamed-boot readiness gate).
 #[cfg(feature = "cd-stream-bench")]
 pub fn room_backdrop_textures_ready(
     record: &psx_level::LevelRoomRecord,
     assets: &'static [LevelAssetRecord],
     find_sky_texture_vram_slot: impl Fn(SkyTextureKind, AssetId) -> Option<VramSlot>,
     ensure_sky_texture_uploaded: impl FnMut(SkyTextureKind, AssetId, &[u8]) -> Option<VramSlot>,
-    ensure_texture_uploaded_with_clut_mode: impl FnMut(
-        AssetId,
-        &[u8],
-        VramSlotClutMode,
-    ) -> Option<VramSlot>,
 ) -> bool {
     scene_sky_texture_ready(
         record.sky,
         assets,
         find_sky_texture_vram_slot,
         ensure_sky_texture_uploaded,
-    ) & far_vista_textures_ready(
-        record.far_vista,
-        assets,
-        ensure_texture_uploaded_with_clut_mode,
     )
 }
 
@@ -573,39 +440,4 @@ fn scene_sky_resident(
     } else {
         ensure_sky_texture_uploaded(kind, asset.id, asset.bytes).is_some()
     }
-}
-
-#[cfg(feature = "cd-stream-bench")]
-fn far_vista_textures_ready(
-    vista: LevelFarVistaRecord,
-    assets: &'static [LevelAssetRecord],
-    mut ensure_texture_uploaded_with_clut_mode: impl FnMut(
-        AssetId,
-        &[u8],
-        VramSlotClutMode,
-    ) -> Option<VramSlot>,
-) -> bool {
-    if vista.flags & far_vista_flags::ENABLED == 0 || vista.flags & far_vista_flags::TEXTURED == 0 {
-        return true;
-    }
-    let segments = vista.segments.clamp(3, 16);
-    let mut ready = true;
-    let mut segment = 0u8;
-    while segment < segments {
-        if let Some(asset_id) = far_vista_panel_asset(vista, segment, segments) {
-            if let Some(asset) = find_asset_of_kind(assets, asset_id, AssetKind::Texture) {
-                if ensure_texture_uploaded_with_clut_mode(
-                    asset.id,
-                    asset.bytes,
-                    VramSlotClutMode::TransparentZero,
-                )
-                .is_none()
-                {
-                    ready = false;
-                }
-            }
-        }
-        segment += 1;
-    }
-    ready
 }

@@ -1478,7 +1478,6 @@ fn vblank_chart(args: &[String]) -> Result<(), String> {
         ("frame_clear", "frame clear", "#6e7681"),
         ("room", "room", "#2f81f7"),
         ("sky", "sky", "#58a6ff"),
-        ("far_vista", "far vista", "#79c0ff"),
         ("image_props", "props (image/box)", "#2ea043"),
         ("model_instances", "models", "#3fb950"),
         ("player", "player", "#56d364"),

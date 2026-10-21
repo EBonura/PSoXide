@@ -1224,18 +1224,6 @@ impl Scene for Playtest {
 
         let mut world = begin_world_render_pass(&mut ot, &mut render_scratch.world_commands);
 
-        if let Some(room_record) = room_record {
-            telemetry::stage_begin(telemetry::stage::FAR_VISTA);
-            draw_far_vista_ring(
-                camera,
-                room_record.far_vista,
-                room_surface_options(room_record),
-                &mut primitive_packets,
-                &mut world,
-            );
-            telemetry::stage_end(telemetry::stage::FAR_VISTA);
-        }
-
         if HAS_WORLD {
             let mut total_instance_stats = ModelInstanceDrawStats::default();
 

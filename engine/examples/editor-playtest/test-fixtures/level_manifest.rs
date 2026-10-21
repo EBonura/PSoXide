@@ -9,7 +9,7 @@ use psx_level::{
     GameFlow, InteractableMessageRecord, InteractableRecord, LevelArchPropCollisionRecord,
     LevelArchPropRecord, LevelArchPropSurfaceRecord, LevelAssetRecord, LevelBoxPropRecord,
     LevelBoxPropSurfaceRecord, LevelCameraRecord, LevelCharacterRecord, LevelCylinderPropRecord, LevelCylinderPropSurfaceRecord, LevelDestructibleRecord,
-    LevelFarVistaRecord, LevelGameEntityRecord, LevelGameplaySfxCueRecord, LevelImagePropRecord,
+    LevelGameEntityRecord, LevelGameplaySfxCueRecord, LevelImagePropRecord,
     LevelLogicRecord, LevelModelClipBoundsRecord, LevelModelClipRecord,
     LevelModelFrameBoundsRecord, LevelModelInstanceRecord, LevelModelRecord,
     LevelModelSocketRecord, LevelOptionDef, LevelRoomRecord,

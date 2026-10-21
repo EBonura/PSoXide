@@ -8,7 +8,7 @@
 use super::*;
 use psx_game_runtime::vram::VramLayout;
 
-pub(super) use psx_game_runtime::vram::{SkyTextureKind, VramSlot, VramSlotClutMode};
+pub(super) use psx_game_runtime::vram::{SkyTextureKind, VramSlot};
 
 /// This example's VRAM placement, threaded into every crate
 /// `VramRuntime` method as one value (the PROJECTION pattern).
@@ -249,20 +249,6 @@ pub(super) fn ensure_ui_texture_uploaded(
     asset_bytes: &[u8],
 ) -> Option<VramSlot> {
     vram_arena().ensure_ui_texture_uploaded(VRAM_LAYOUT, asset_id, asset_bytes, &upload_bytes_for)
-}
-
-/// Queue `asset_bytes` for upload with an explicit CLUT stamping mode.
-pub(super) fn ensure_texture_uploaded_with_clut_mode(
-    asset_id: AssetId,
-    asset_bytes: &[u8],
-    clut_mode: VramSlotClutMode,
-) -> Option<VramSlot> {
-    vram_arena().ensure_texture_uploaded_with_clut_mode(
-        VRAM_LAYOUT,
-        asset_id,
-        asset_bytes,
-        clut_mode,
-    )
 }
 
 /// Resolve (or begin uploading) a prop texture's transparent-zero slot.

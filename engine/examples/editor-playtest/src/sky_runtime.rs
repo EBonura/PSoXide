@@ -1,6 +1,6 @@
 //! Glue over `psx_game_runtime::sky`: threads the cooked asset table,
 //! this example's screen/projection knobs, and the arena-backed VRAM
-//! slot resolvers into the crate cyclorama/far-vista draws, keeping
+//! slot resolvers into the crate cyclorama draws, keeping
 //! the old call-site signatures.
 
 use super::*;
@@ -190,24 +190,4 @@ pub(super) fn draw_scene_sky(
     unsafe {
         ot.add_committed_tagged_packet_stream_unchecked(stream);
     }
-}
-
-/// Draw the authored far-vista panel ring over this example's cooked
-/// tables and texture uploader.
-pub(super) fn draw_far_vista_ring(
-    camera: WorldCamera,
-    vista: LevelFarVistaRecord,
-    options: WorldSurfaceOptions,
-    triangles: &mut impl PrimitiveSink<TriTextured>,
-    world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
-) {
-    psx_game_runtime::sky::draw_far_vista_ring(
-        camera,
-        vista,
-        options,
-        ASSETS,
-        ensure_texture_uploaded_with_clut_mode,
-        triangles,
-        world,
-    );
 }

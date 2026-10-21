@@ -28,7 +28,7 @@ use crate::*;
 pub const MAGIC: [u8; 4] = *b"PXLR";
 /// Version of the layout below. Bump it whenever a record or the table list
 /// changes.
-pub const VERSION: u16 = 1;
+pub const VERSION: u16 = 2;
 
 /// A cursor over the chunk's bytes. The bytes live for the whole run, so a
 /// string decoded from them can be `&'static`.
@@ -280,9 +280,6 @@ wire_struct! {
         top_rgb, horizon_rgb, bottom_rgb, horizon_percent, horizon_thickness_percent,
         skybox_columns, skybox_rows, flags, texture_asset, cyclorama_quads, cloud_layer
     }
-    LevelFarVistaRecord {
-        texture_assets, radius, height, vertical_offset, segments, rotation_degrees, tint_rgb, flags
-    }
     LevelCameraProfile { distance, height, target_height, shoulder_offset, fov_y_degrees }
     LevelCameraRecord {
         distance, height, target_height, lock_rise_percent, min_floor_clearance, orbit_speed_level,
@@ -293,7 +290,7 @@ wire_struct! {
     LevelRoomRecord {
         name, sector_size, draw_distance, gravity_per_tick_q8, fog_rgb, fog_near, fog_far,
         atmosphere_rgb, atmosphere_density, atmosphere_fall_speed_q4, atmosphere_wind_speed_q4,
-        sky, far_vista, camera, flags
+        sky, camera, flags
     }
     PointLightRecord { room, x, y, z, radius, intensity_q8, color, flags }
     LevelWorldObjectRecord {
@@ -591,16 +588,6 @@ mod tests {
                     noise_seed: 7,
                     flags: 0,
                 },
-            },
-            far_vista: LevelFarVistaRecord {
-                texture_assets: &[AssetId(1), AssetId(2)],
-                radius: 1,
-                height: 2,
-                vertical_offset: -3,
-                segments: 12,
-                rotation_degrees: 0,
-                tint_rgb: [5; 3],
-                flags: 1,
             },
             camera: LevelCameraRecord {
                 distance: 2000,
