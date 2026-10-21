@@ -60,6 +60,10 @@ pub const LEVEL_HAS_MOVERS: u32 = 1 << 3;
 /// because room rectangles overlap in plan (rooms shaped as sector sets, such
 /// as hexagonal chunks). Without it a room owns its whole rectangle.
 pub const LEVEL_HAS_OCCUPANCY: u32 = 1 << 4;
+/// Level flag: rooms stream and draw as a ring, the observer's room and every
+/// room one portal away (a level cut into even chunks, such as hexagons).
+/// The draw distance and lead radius do not apply; activation still walks.
+pub const LEVEL_RING_STREAM: u32 = 1 << 5;
 
 /// Room flag: sky may show (an open sector exists).
 pub const ROOM_OUTDOOR: u16 = 1;

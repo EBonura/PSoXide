@@ -51,6 +51,8 @@ pub struct StreamWindow {
     active_radius: i32,
     lead_radius: i32,
     tolerance: i32,
+    /// The level streams as a ring ([`LevelView::ring_stream`]).
+    ring: bool,
     /// Per room: 0 not seen this call, 1 need, 2 lead. Reset from `touched`.
     mark: Vec<u8>,
     touched: Vec<u16>,
@@ -85,6 +87,7 @@ impl StreamWindow {
             active_radius: active,
             lead_radius: lead,
             tolerance: s.max(1),
+            ring: level.ring_stream(),
             mark: vec![0; level.rooms.len()],
             touched: Vec::new(),
         }
@@ -102,7 +105,7 @@ impl StreamWindow {
 
     /// Whether the level bounds nothing: every room is always wanted.
     pub fn unbounded(&self) -> bool {
-        self.draw_radius >= UNBOUNDED
+        !self.ring && self.draw_radius >= UNBOUNDED
     }
 
     /// The rooms wanted with the player at `player` (room and position) and
@@ -117,6 +120,10 @@ impl StreamWindow {
         out: &mut Vec<WantedRoom>,
     ) {
         out.clear();
+        if self.ring {
+            self.wanted_ring(level, [player, camera], out);
+            return;
+        }
         let (t, ar, dr, lr) = (
             self.tolerance,
             self.active_radius,
@@ -153,6 +160,35 @@ impl StreamWindow {
         self.touched.clear();
         // Need rooms first, nearest first inside each group.
         out.sort_by_key(|w| (w.want == Want::Lead, w.distance, w.room));
+    }
+
+    /// [`Self::wanted`] for a ring level: each observer's room and the rooms
+    /// one portal away, all needed, nearest portal first.
+    fn wanted_ring(
+        &mut self,
+        level: &LevelView<'_>,
+        observers: [Option<(usize, [i32; 3])>; 2],
+        out: &mut Vec<WantedRoom>,
+    ) {
+        for (room, at) in observers.into_iter().flatten() {
+            if room >= level.rooms.len() {
+                continue;
+            }
+            Self::note(&mut self.mark, &mut self.touched, out, room, 1, 0);
+            let record = &level.rooms[room];
+            for portal in level.room_portals(room) {
+                let cost = crate::walk::distance(at, crate::walk::centre(record, portal));
+                let dest = usize::from(portal.dest);
+                if dest < self.mark.len() {
+                    Self::note(&mut self.mark, &mut self.touched, out, dest, 1, cost);
+                }
+            }
+        }
+        for &room in &self.touched {
+            self.mark[usize::from(room)] = 0;
+        }
+        self.touched.clear();
+        out.sort_by_key(|w| (w.distance, w.room));
     }
 
     fn note(

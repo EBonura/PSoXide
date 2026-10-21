@@ -30,6 +30,8 @@ pub struct RoomActivity {
     active_radius: i32,
     /// How far a start may drift before the search is run again: one sector.
     tolerance: i32,
+    /// The level draws as a ring ([`LevelView::ring_stream`]).
+    ring: bool,
 }
 
 impl RoomActivity {
@@ -49,6 +51,7 @@ impl RoomActivity {
             draw_radius: radius(level.header.draw_far),
             active_radius: radius(level.header.active_radius),
             tolerance: s.max(1),
+            ring: level.ring_stream(),
         }
     }
 
@@ -100,7 +103,8 @@ impl RoomActivity {
     }
 
     /// The rooms a frame may draw from `eye` in `room`: resident rooms within
-    /// the draw distance, nearest the eye's own room first. The eye's room
+    /// the draw distance (on a ring level, the eye's room and the rooms one
+    /// portal away), nearest the eye's own room first. The eye's room
     /// is `None` when the camera is outside every room, and then every
     /// resident room within a straight `draw_radius` is a candidate.
     pub fn draw_rooms(
@@ -113,6 +117,18 @@ impl RoomActivity {
     ) {
         out.clear();
         match room {
+            Some(room) if self.ring => {
+                // The eye's room, then each room one portal away, once.
+                if resident.contains(room) {
+                    out.push(room);
+                }
+                for portal in level.room_portals(room) {
+                    let dest = usize::from(portal.dest);
+                    if resident.contains(dest) && !out.contains(&dest) {
+                        out.push(dest);
+                    }
+                }
+            }
             Some(room) => {
                 self.draw
                     .ensure(level, room, eye, self.draw_radius, self.tolerance);

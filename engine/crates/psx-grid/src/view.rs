@@ -190,6 +190,13 @@ impl<'a> LevelView<'a> {
         u32::from(self.header.sector_units)
     }
 
+    /// Whether rooms stream and draw as a ring around the observer's room
+    /// ([`LEVEL_RING_STREAM`]).
+    #[inline]
+    pub fn ring_stream(&self) -> bool {
+        self.header.flags & LEVEL_RING_STREAM != 0
+    }
+
     /// Whether `room` owns the sector holding world `(x, z)`. A level without
     /// occupancy gives every room its whole rectangle.
     #[inline]

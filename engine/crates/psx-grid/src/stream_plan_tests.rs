@@ -11,6 +11,18 @@ const S: i32 = 80;
 /// `count` rooms of `len` sectors in a row along X, one sector deep, joined by
 /// an open portal at every shared wall (both directions).
 fn corridor(count: usize, len: u8, draw_far: u8, active: u8, lead: u8) -> Vec<u32> {
+    corridor_flagged(count, len, draw_far, active, lead, 0)
+}
+
+/// [`corridor`] with level `flags`.
+fn corridor_flagged(
+    count: usize,
+    len: u8,
+    draw_far: u8,
+    active: u8,
+    lead: u8,
+    flags: u32,
+) -> Vec<u32> {
     let mut rooms = Vec::new();
     let mut portals = Vec::new();
     for i in 0..count {
@@ -46,6 +58,7 @@ fn corridor(count: usize, len: u8, draw_far: u8, active: u8, lead: u8) -> Vec<u3
     }
     let core = LevelCore {
         occupancy: Vec::new(),
+        flags,
         sector_units: S as u16,
         draw_far,
         active_radius: active,
@@ -191,4 +204,31 @@ fn a_point_is_located_from_the_core_alone() {
     let mut window = StreamWindow::new(&level);
     window.wanted(&level, Some((0, [40, 50, 40])), None, &mut wanted);
     assert_eq!(window.distance_of(7), u32::MAX);
+}
+
+#[test]
+fn a_ring_level_wants_and_plans_the_observers_room_and_its_neighbours() {
+    // Long rooms and a draw distance that would reach five rooms each way:
+    // the ring ignores it.
+    let words = corridor_flagged(8, 2, 10, 2, 4, LEVEL_RING_STREAM);
+    let level = level(&words);
+    let mut window = StreamWindow::new(&level);
+    assert!(!window.unbounded());
+    let mut wanted = Vec::new();
+    let at = [3 * 160 + 80, 50, S / 2];
+    window.wanted(&level, Some((3, at)), Some((3, at)), &mut wanted);
+    let mut rooms: Vec<u16> = wanted.iter().map(|w| w.room).collect();
+    assert!(wanted.iter().all(|w| w.want == Want::Need));
+    assert_eq!(wanted[0].room, 3);
+    rooms.sort();
+    assert_eq!(rooms, [2, 3, 4]);
+    // The camera in another room adds its own ring.
+    let eye = [6 * 160 + 80, 50, S / 2];
+    window.wanted(&level, Some((3, at)), Some((6, eye)), &mut wanted);
+    let mut rooms: Vec<u16> = wanted.iter().map(|w| w.room).collect();
+    rooms.sort();
+    assert_eq!(rooms, [2, 3, 4, 5, 6, 7]);
+    // The pool holds the busiest ring: three rooms of one page.
+    let plan = plan_pool(&level, &[1; 8]);
+    assert_eq!((plan.peak_pages, plan.peak_rooms), (3, 3));
 }

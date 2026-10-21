@@ -27,14 +27,14 @@ const UNREACHED: i32 = i32::MAX;
 const AXIS_LIMIT: i32 = 16_383;
 
 /// Straight distance between two world points, saturating far out.
-fn distance(a: [i32; 3], b: [i32; 3]) -> i32 {
+pub(crate) fn distance(a: [i32; 3], b: [i32; 3]) -> i32 {
     let d = |axis: usize| (a[axis].wrapping_sub(b[axis])).clamp(-AXIS_LIMIT, AXIS_LIMIT);
     let (x, y, z) = (d(0), d(1), d(2));
     isqrt_i32(x * x + y * y + z * z)
 }
 
 /// World position of a portal's opening centre.
-fn centre(room: &RoomRecord, portal: &Portal) -> [i32; 3] {
+pub(crate) fn centre(room: &RoomRecord, portal: &Portal) -> [i32; 3] {
     let mut sum = [0i32; 3];
     for corner in &portal.v {
         for axis in 0..3 {
