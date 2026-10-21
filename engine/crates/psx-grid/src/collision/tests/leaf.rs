@@ -190,6 +190,7 @@ impl TreeRoom {
 /// is a tree room).
 pub(super) fn build_chunks(rooms: &[(Room, RoomChunk, bool)]) -> Built {
     let core = LevelCore {
+        occupancy: Vec::new(),
         sector_units: S as u16,
         rooms: rooms
             .iter()

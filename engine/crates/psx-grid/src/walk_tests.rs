@@ -54,6 +54,7 @@ fn corridor(lengths: &[u8]) -> (Vec<u32>, usize) {
         x += i32::from(len) * S;
     }
     let core = LevelCore {
+        occupancy: Vec::new(),
         sector_units: S as u16,
         rooms,
         portals,

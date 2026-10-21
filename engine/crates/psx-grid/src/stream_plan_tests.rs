@@ -45,6 +45,7 @@ fn corridor(count: usize, len: u8, draw_far: u8, active: u8, lead: u8) -> Vec<u3
         });
     }
     let core = LevelCore {
+        occupancy: Vec::new(),
         sector_units: S as u16,
         draw_far,
         active_radius: active,

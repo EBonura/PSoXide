@@ -19,6 +19,7 @@ const GOLDEN_TREE_ROOM: &[u8] = include_bytes!("../tests/fixtures/pgl_v4_tree_ro
 
 fn level() -> LevelCore {
     LevelCore {
+        occupancy: Vec::new(),
         flags: LEVEL_HAS_SKY,
         sector_units: 80,
         max_room_pages: 1,

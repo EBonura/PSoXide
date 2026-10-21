@@ -177,6 +177,7 @@ pub(super) fn build(rooms: &[Room]) -> Built {
 /// identically.
 fn build_with(rooms: &[Room], summary: bool) -> Built {
     let core = LevelCore {
+        occupancy: Vec::new(),
         sector_units: S as u16,
         rooms: rooms
             .iter()

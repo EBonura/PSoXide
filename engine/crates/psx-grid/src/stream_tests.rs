@@ -92,6 +92,7 @@ fn core(draw_far: u8) -> Vec<u8> {
         });
     }
     LevelCore {
+        occupancy: Vec::new(),
         sector_units: S as u16,
         draw_far,
         active_radius: 2,

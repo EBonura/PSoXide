@@ -92,6 +92,11 @@ pub struct LevelView<'a> {
     /// Row starts of the world lattice, then its room list.
     pub lattice_start: &'a [u16],
     pub lattice_rooms: &'a [u16],
+    /// With [`LEVEL_HAS_OCCUPANCY`]: byte offset of each room's occupancy
+    /// bits (`room_count + 1` entries), then the bits, one per sector of the
+    /// room's rectangle, row major from its origin. Empty otherwise.
+    pub occupancy_start: &'a [u16],
+    pub occupancy_bits: &'a [u8],
 }
 
 impl<'a> LevelView<'a> {
@@ -122,6 +127,15 @@ impl<'a> LevelView<'a> {
         let lattice_start = table::<u16>(bytes, offset, cells + 1)?;
         offset += core::mem::size_of_val(lattice_start);
         let lattice_rooms = table::<u16>(bytes, offset, usize::from(head.lattice_refs))?;
+        offset += core::mem::size_of_val(lattice_rooms);
+        let (occupancy_start, occupancy_bits) = if head.flags & LEVEL_HAS_OCCUPANCY != 0 {
+            let start = table::<u16>(bytes, offset, usize::from(head.room_count) + 1)?;
+            offset += core::mem::size_of_val(start);
+            let len = usize::from(*start.last().unwrap_or(&0));
+            (start, table::<u8>(bytes, offset, len)?)
+        } else {
+            (&[][..], &[][..])
+        };
         Ok(Self {
             header: head,
             rooms,
@@ -129,6 +143,8 @@ impl<'a> LevelView<'a> {
             materials,
             lattice_start,
             lattice_rooms,
+            occupancy_start,
+            occupancy_bits,
         })
     }
 
@@ -177,6 +193,26 @@ impl<'a> LevelView<'a> {
     /// World-space bounds of `room`, vertical range included: the
     /// footprint and `min_y..max_y` shifted by the room's origin. An index
     /// out of range gives an empty box at the origin.
+    /// Whether `room` owns the sector holding world `(x, z)`. A level without
+    /// occupancy gives every room its whole rectangle.
+    pub fn room_has_sector(&self, room: usize, x: i32, z: i32) -> bool {
+        if self.occupancy_start.is_empty() {
+            return true;
+        }
+        let (Some(record), Some(&first)) = (self.rooms.get(room), self.occupancy_start.get(room)) else {
+            return false;
+        };
+        let s = self.sector_units() as i32;
+        let (lx, lz) = ((x - record.origin[0]).div_euclid(s), (z - record.origin[2]).div_euclid(s));
+        if lx < 0 || lz < 0 || lx >= i32::from(record.width) || lz >= i32::from(record.depth) {
+            return false;
+        }
+        let bit = lz as usize * usize::from(record.width) + lx as usize;
+        self.occupancy_bits
+            .get(usize::from(first) + bit / 8)
+            .is_some_and(|b| b & (1 << (bit % 8)) != 0)
+    }
+
     pub fn room_bounds(&self, room: usize) -> ([i32; 3], [i32; 3]) {
         let Some(record) = self.rooms.get(room) else {
             return ([0; 3], [0; 3]);

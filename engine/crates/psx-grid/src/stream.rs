@@ -302,6 +302,9 @@ pub fn room_at(level: &LevelView<'_>, hint: usize, point: [i32; 3]) -> Option<us
         if point[0] < min[0] || point[0] >= max[0] || point[2] < min[2] || point[2] >= max[2] {
             continue;
         }
+        if !level.room_has_sector(room, point[0], point[2]) {
+            continue;
+        }
         let gap = (min[1] - point[1]).max(point[1] - max[1]).max(0);
         let key = (gap, room != hint, room);
         if best.is_none_or(|b| key < b) {

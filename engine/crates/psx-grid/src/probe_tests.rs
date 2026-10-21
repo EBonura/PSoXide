@@ -67,6 +67,7 @@ fn chunk_of(index: usize, room: &TestRoom) -> RoomChunk {
 /// probes), the way the guest holds a level.
 fn with_rooms<R>(rooms: &[TestRoom], f: impl FnOnce(&ResidentRooms<'_>) -> R) -> R {
     let core = LevelCore {
+        occupancy: Vec::new(),
         sector_units: S as u16,
         rooms: rooms
             .iter()
@@ -378,6 +379,7 @@ fn stacked_rooms_are_told_apart_by_height() {
         probes: Some(probes_with(2, 2, |_, _| vec![(32, [184; 3])])),
     };
     let core = LevelCore {
+        occupancy: Vec::new(),
         sector_units: S as u16,
         rooms: vec![
             RoomRecord {

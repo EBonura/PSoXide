@@ -56,6 +56,10 @@ pub const LEVEL_HAS_LIQUIDS: u32 = 1 << 1;
 pub const LEVEL_HAS_PLANES: u32 = 1 << 2;
 /// Level flag: some room holds movers.
 pub const LEVEL_HAS_MOVERS: u32 = 1 << 3;
+/// Level flag: the core carries per-room sector occupancy after the lattice,
+/// because room rectangles overlap in plan (rooms shaped as sector sets, such
+/// as hexagonal chunks). Without it a room owns its whole rectangle.
+pub const LEVEL_HAS_OCCUPANCY: u32 = 1 << 4;
 
 /// Room flag: sky may show (an open sector exists).
 pub const ROOM_OUTDOOR: u16 = 1;
