@@ -123,6 +123,10 @@ pub(super) struct GridRuntime {
     stream_hint: usize,
     /// Need rooms not resident when the last [`Self::stream`] ended.
     need_missing: u32,
+    /// The wanted set (rooms and classes, in any order) that the streamer
+    /// last left with every room resident and no read in flight. The same set
+    /// again has nothing to read, evict or install, so the step is skipped.
+    settled: Option<u32>,
     /// Windows in which a need room was missing after the world was first
     /// ready: the player met a solid box where a room should be.
     late_short_windows: u32,
@@ -248,6 +252,7 @@ impl GridRuntime {
             window,
             wanted: Vec::new(),
             wanted_res: Vec::new(),
+            settled: None,
             stream_hint: 0,
             need_missing: u32::MAX,
             late_short_windows: 0,
@@ -349,6 +354,15 @@ impl GridRuntime {
                 wanted.distance.max(0) as u32,
             ));
         }
+        // Order-free signature of the set: the order follows distances, which
+        // change every tick the observer moves.
+        let signature = self.wanted_res.iter().fold(self.wanted_res.len() as u32, |sig, w| {
+            let key = u32::from(w.key.index() as u16) << 1 | u32::from(w.class == Class::Lead);
+            sig ^ key.wrapping_add(1).wrapping_mul(0x9E37_79B1).rotate_left(13)
+        });
+        if self.settled == Some(signature) {
+            return;
+        }
         let streamer = Self::streamer();
         let window = &self.window;
         let mut evicted = false;
@@ -363,6 +377,7 @@ impl GridRuntime {
             },
         );
         telemetry::counter(telemetry::counter::CD_ROOM_CHUNK_LOADS, summary.issued);
+        self.settled = (summary.missing == 0 && summary.in_flight == 0).then_some(signature);
         let mut installed = false;
         let resident = &mut self.resident;
         streamer.install_next(&mut |room, bytes| {
