@@ -18,6 +18,7 @@ pub mod occupancy;
 pub mod plane_collision;
 pub mod portals;
 pub mod render;
+pub mod sky_bake;
 pub mod units;
 
 use psx_grid::write::{LevelCore, RoomChunk};
