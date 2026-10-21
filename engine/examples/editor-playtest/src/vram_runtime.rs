@@ -294,8 +294,82 @@ pub(super) fn load_streamed_sky_from_cd() {
 /// Return every gameplay-owned texture page and CLUT before a front-end scene
 /// becomes active.
 pub(super) fn release_gameplay_vram() {
+    #[cfg(feature = "cd-stream-bench")]
+    // SAFETY: single-threaded guest; the stream is touched only here and in
+    // `step_chunk_sky`.
+    unsafe {
+        (*core::ptr::addr_of_mut!(CHUNK_SKY))
+            .release(&mut psx_game_runtime::grid_stream::DiscTransport);
+    }
     vram_arena().release_gameplay_vram();
 }
+
+/// The chunk sky being streamed in, and the RAM its reads land in.
+#[cfg(feature = "cd-stream-bench")]
+static mut CHUNK_SKY: psx_game_runtime::cube_sky_stream::CubeSkyStream<
+    <psx_game_runtime::grid_stream::DiscTransport as psx_game_runtime::grid_stream::RoomTransport>::Ticket,
+> = psx_game_runtime::cube_sky_stream::CubeSkyStream::new();
+#[cfg(feature = "cd-stream-bench")]
+static mut CHUNK_SKY_WINDOW: psx_game_runtime::cube_sky_stream::CubeSkyWindow =
+    psx_game_runtime::cube_sky_stream::CubeSkyWindow::new();
+
+/// Keep the baked sky of the chunk the player is in on screen, for a world
+/// that bakes one per chunk (`GRID_SKY_SECTORS` non-zero). Call once per tick.
+#[cfg(feature = "cd-stream-bench")]
+pub(super) fn step_chunk_sky(room: Option<usize>) {
+    use crate::generated::{GRID_ROOM_SKY_SECTORS, GRID_SKY_SECTORS, WORLD_PACK_START_LBA};
+    if GRID_SKY_SECTORS == 0 {
+        return;
+    }
+    let Some(key) = ROOMS
+        .as_slice()
+        .iter()
+        .find(|room| {
+            room.sky.flags & psx_level::sky_flags::PROJECTION_MASK == psx_level::sky_flags::CUBE
+        })
+        .and_then(|room| {
+            psx_level::find_asset_of_kind(ASSETS, room.sky.texture_asset, AssetKind::Texture)
+        })
+        .map(|asset| asset.id)
+    else {
+        return;
+    };
+    let offset = room
+        .and_then(|room| GRID_ROOM_SKY_SECTORS.get(room))
+        .copied()
+        .unwrap_or(0);
+    let lba = if offset == 0 {
+        0
+    } else {
+        WORLD_PACK_START_LBA + offset
+    };
+    // SAFETY: single-threaded guest; see `release_gameplay_vram`.
+    unsafe {
+        (*core::ptr::addr_of_mut!(CHUNK_SKY)).step(
+            &mut psx_game_runtime::grid_stream::DiscTransport,
+            vram_arena(),
+            &mut *core::ptr::addr_of_mut!(CHUNK_SKY_WINDOW),
+            key,
+            lba,
+            GRID_SKY_SECTORS,
+        );
+        CHUNK_SKY_COUNTERS = (*core::ptr::addr_of!(CHUNK_SKY)).counters;
+    }
+}
+
+/// The chunk sky stream's counters, at a fixed address (like the fault
+/// registers) so a RAM dump of a run shows what the stream did.
+#[cfg(feature = "cd-stream-bench")]
+#[no_mangle]
+pub static mut CHUNK_SKY_COUNTERS: psx_game_runtime::cube_sky_stream::SkyCounters =
+    psx_game_runtime::cube_sky_stream::SkyCounters {
+        submitted: 0,
+        landed: 0,
+        failed: 0,
+        rows: 0,
+        shown: 0,
+        refused: 0,
+    };
 
 /// Upload (once) a recoloured palette copy of a resident texture.
 pub(super) fn ensure_clut_variant(

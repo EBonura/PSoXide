@@ -314,6 +314,11 @@ impl GridRuntime {
         telemetry::stage_end(telemetry::stage::CD_ROOM_CHUNK_LOAD);
     }
 
+    /// The room the player was last found in.
+    pub(super) fn player_room(&self) -> usize {
+        self.stream_hint
+    }
+
     fn stream_inner(&mut self, player: [i32; 3], camera: Option<[i32; 3]>, demand_only: bool) {
         let player_room = room_at(&self.level, self.stream_hint, player);
         if let Some(room) = player_room {

@@ -778,6 +778,17 @@ impl Playtest {
                 demand_only,
             );
         }
+        // A world that bakes a sky per chunk shows the player's chunk's, once
+        // the level has loaded: sky reads stay off the drive while the first
+        // rooms stream in.
+        #[cfg(feature = "cd-stream-bench")]
+        if self.initial_world_ready() {
+            let room = self
+                .world_rt
+                .as_ref()
+                .map(|world_rt| world_rt.player_room());
+            step_chunk_sky(room);
+        }
         if self.world_rt.is_some() && background_tick {
             let _ = self.streaming_jobs.step_vram_uploads();
             if let Some(world_rt) = self.world_rt.as_mut() {

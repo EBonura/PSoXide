@@ -442,6 +442,21 @@ impl<const STAGE_WORDS: usize, const SLOTS: usize> UiImageCache<STAGE_WORDS, SLO
     }
 }
 
+/// Upload whole cube-sky atlas rows (`DIRECTIONAL_SKY_ATLAS_WIDTH / 2` bytes
+/// each, six faces side by side) into the atlas at `origin` (see
+/// [`VramRuntime::cube_sky_origin`]), starting at row `first`.
+pub fn upload_cube_sky_rows(origin: (u16, u16), first: u16, bytes: &[u8]) {
+    let halfwords = DIRECTIONAL_SKY_ATLAS_WIDTH / 4;
+    let rows = bytes.len() / (usize::from(halfwords) * 2);
+    if rows == 0 {
+        return;
+    }
+    upload_bytes(
+        VramRect::new(origin.0, origin.1 + first, halfwords, rows as u16),
+        &bytes[..rows * usize::from(halfwords) * 2],
+    );
+}
+
 /// Per-asset upload bookkeeping. When a texture asset becomes
 /// VRAM-resident we record its CLUT word, tpage word, and texture
 /// window so the per-frame material build can reconstruct its
@@ -2048,6 +2063,19 @@ impl<
         self.slot_count = self.slot_count.saturating_add(1);
         let _ = self.residency.mark_vram_resident(asset_id);
         Some(())
+    }
+
+    /// The top-left VRAM pixel of the cube sky resident under `key`, for
+    /// streaming another sky's texels over it ([`upload_cube_sky_rows`]).
+    pub fn cube_sky_origin(&self, key: AssetId) -> Option<(u16, u16)> {
+        let slot = self.slots.iter().flatten().find(|slot| {
+            slot.asset == key && slot.clut_mode == VramSlotClutMode::DirectionalSky && slot.ready
+        })?;
+        // The tpage word encodes the page exactly: x / 64 and y / 256.
+        Some((
+            (slot.tpage_word & 0xF) * 64,
+            ((slot.tpage_word >> 4) & 1) * 256,
+        ))
     }
 
     /// Free the streamed sky panorama's VRAM on gameplay exit: return its two-page

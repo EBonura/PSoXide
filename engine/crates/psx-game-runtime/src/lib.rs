@@ -30,6 +30,7 @@ pub mod combat_feedback;
 pub mod combat_flow;
 pub mod combat_policy;
 pub mod combat_timing;
+pub mod cube_sky_stream;
 pub mod cylinder_props;
 pub mod destructibles;
 pub mod dormant;
