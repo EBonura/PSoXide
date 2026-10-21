@@ -1165,8 +1165,8 @@ impl ProjectDocument {
     /// them. Materials own their `.psxt` path now; the separate Texture
     /// resource kind only exists in pre-merge project files.
     ///
-    /// Texture ids referenced directly (UI image nodes, far-vista
-    /// rings/panels, particle emitter masks) are converted to materials
+    /// Texture ids referenced directly (UI image nodes, particle
+    /// emitter masks) are converted to materials
     /// in place under the SAME resource id, so those references stay
     /// valid without rewriting. Folded and orphaned Texture resources
     /// are dropped. One-way: saves write only merged materials. See
@@ -1209,17 +1209,8 @@ impl ProjectDocument {
         };
         for scene in &self.scenes {
             for node in &scene.nodes {
-                match &node.kind {
-                    NodeKind::World { far_vista, .. } => {
-                        note(far_vista.texture, &mut directly_referenced);
-                        for panel in far_vista.texture_panels {
-                            note(panel, &mut directly_referenced);
-                        }
-                    }
-                    NodeKind::ParticleEmitter { settings } => {
-                        note(settings.texture, &mut directly_referenced);
-                    }
-                    _ => {}
+                if let NodeKind::ParticleEmitter { settings } = &node.kind {
+                    note(settings.texture, &mut directly_referenced);
                 }
             }
         }
@@ -1318,7 +1309,6 @@ impl ProjectDocument {
                     NodeKind::World {
                         sector_size,
                         sky,
-                        far_vista,
                         camera,
                         culling,
                         physics,
@@ -1345,11 +1335,6 @@ impl ProjectDocument {
                             .skybox_columns
                             .clamp(SKYBOX_COLUMNS_MIN, SKYBOX_COLUMNS_MAX);
                         sky.skybox_rows = sky.skybox_rows.clamp(SKYBOX_ROWS_MIN, SKYBOX_ROWS_MAX);
-                        far_vista.radius = far_vista.radius.clamp(1_024, 65_535);
-                        far_vista.height = far_vista.height.clamp(128, 32_768);
-                        far_vista.vertical_offset =
-                            far_vista.vertical_offset.clamp(-32_768, 32_768);
-                        far_vista.segments = far_vista.segments.clamp(3, 16);
                         *camera = camera.normalized();
                         *culling = culling.normalized();
                         *physics = physics.normalized();
@@ -1615,7 +1600,6 @@ pub(crate) fn node_kind_reference_count(kind: &NodeKind, id: ResourceId) -> usiz
             option_resource_reference_count(settings.texture, id)
         }
         NodeKind::SpawnPoint { character, .. } => option_resource_reference_count(*character, id),
-        NodeKind::World { far_vista, .. } => far_vista_resource_reference_count(far_vista, id),
         NodeKind::PointOfInterest { reward, .. } => reward.as_ref().map_or(0, |reward| {
             option_resource_reference_count(reward.module, id)
         }),
@@ -1624,6 +1608,7 @@ pub(crate) fn node_kind_reference_count(kind: &NodeKind, id: ResourceId) -> usiz
         | NodeKind::HookPoint
         | NodeKind::Node3D
         | NodeKind::Entity
+        | NodeKind::World { .. }
         | NodeKind::Animator { .. }
         | NodeKind::Collider { .. }
         | NodeKind::Camera { .. }
@@ -1634,29 +1619,6 @@ pub(crate) fn node_kind_reference_count(kind: &NodeKind, id: ResourceId) -> usiz
         | NodeKind::PointLight { .. }
         | NodeKind::VitalityCircle { .. } => 0,
     }
-}
-
-pub(crate) fn far_vista_resource_reference_count(
-    far_vista: &FarVistaSettings,
-    id: ResourceId,
-) -> usize {
-    option_resource_reference_count(far_vista.texture, id)
-        + far_vista
-            .texture_panels
-            .iter()
-            .filter(|panel| **panel == Some(id))
-            .count()
-}
-
-pub(crate) fn clear_far_vista_resource_references(
-    far_vista: &mut FarVistaSettings,
-    id: ResourceId,
-) -> usize {
-    let mut cleared = clear_option_resource(&mut far_vista.texture, id);
-    for panel in &mut far_vista.texture_panels {
-        cleared += clear_option_resource(panel, id);
-    }
-    cleared
 }
 
 pub(crate) fn clear_node_kind_references(kind: &mut NodeKind, id: ResourceId) -> usize {
@@ -1693,7 +1655,6 @@ pub(crate) fn clear_node_kind_references(kind: &mut NodeKind, id: ResourceId) ->
         NodeKind::Equipment { weapon, .. } => clear_option_resource(weapon, id),
         NodeKind::ParticleEmitter { settings } => clear_option_resource(&mut settings.texture, id),
         NodeKind::SpawnPoint { character, .. } => clear_option_resource(character, id),
-        NodeKind::World { far_vista, .. } => clear_far_vista_resource_references(far_vista, id),
         NodeKind::PointOfInterest { reward, .. } => {
             if reward
                 .as_ref()
@@ -1710,6 +1671,7 @@ pub(crate) fn clear_node_kind_references(kind: &mut NodeKind, id: ResourceId) ->
         | NodeKind::HookPoint
         | NodeKind::Node3D
         | NodeKind::Entity
+        | NodeKind::World { .. }
         | NodeKind::Animator { .. }
         | NodeKind::Collider { .. }
         | NodeKind::Camera { .. }

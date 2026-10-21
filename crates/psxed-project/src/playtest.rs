@@ -420,10 +420,6 @@ pub fn build_package(
         .world_sky_for_node(scene.root)
         .unwrap_or_default()
         .resolved_for_room(false, [0; 3]);
-    let resolved_far_vista = scene
-        .world_far_vista_for_node(scene.root)
-        .unwrap_or_default()
-        .resolved_for_room(false, [0; 3]);
     rooms.push(PlaytestRoom {
         name: "World".to_string(),
         reflection_probe_asset_index: None,
@@ -465,16 +461,6 @@ pub fn build_package(
                     0
                 },
             },
-        },
-        far_vista: PlaytestFarVista {
-            texture_asset_indices: Vec::new(),
-            radius: resolved_far_vista.radius,
-            height: resolved_far_vista.height,
-            vertical_offset: resolved_far_vista.vertical_offset,
-            segments: resolved_far_vista.segments,
-            rotation_degrees: resolved_far_vista.rotation_degrees,
-            tint_rgb: resolved_far_vista.tint,
-            flags: 0,
         },
         camera: PlaytestCamera {
             distance: resolved_camera.distance,

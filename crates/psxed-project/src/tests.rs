@@ -1718,6 +1718,42 @@ fn legacy_world_without_message_keeps_world_message_disabled() {
     ));
 }
 
+/// The far vista ring was removed from the editor. Projects saved while it
+/// existed carry a `far_vista:` block on the World node (the shipped ones
+/// held a disabled ring, an author could also have enabled one with
+/// textures). They must still load, ignore the block, and save without it.
+#[test]
+fn removed_far_vista_data_loads_and_is_dropped_on_save() {
+    let project = ProjectDocument::from_ron_str(DEFAULT_PROJECT_RON).unwrap();
+    let ron = project.to_ron_string().unwrap();
+    assert!(
+        !ron.contains("far_vista"),
+        "a fresh save has no vista block"
+    );
+
+    let disabled = "far_vista: (enabled: false, texture: None, texture_panels: \
+        (None, None, None, None, None, None, None, None, None, None, None, None, None, None, \
+        None, None), radius: 18000, height: 4096, vertical_offset: -512, segments: 12, \
+        rotation_degrees: 0, tint: (91, 103, 115), match_room_fog: true), ";
+    let enabled = "far_vista: (enabled: true, texture: Some((7)), texture_panels: \
+        (Some((8)), None, None, None, None, None, None, None, None, None, None, None, None, \
+        None, None, Some((9))), radius: 9000, height: 2048, vertical_offset: 0, segments: 6, \
+        rotation_degrees: 45, tint: (1, 2, 3), match_room_fog: false), ";
+    for block in [disabled, enabled] {
+        let legacy = ron.replacen("kind: World(", &format!("kind: World({block}"), 1);
+        assert!(
+            legacy.contains("far_vista"),
+            "the fixture must hit the World node"
+        );
+        let loaded = ProjectDocument::from_ron_str(&legacy)
+            .expect("a project saved with a far vista still loads");
+        assert_eq!(loaded, project, "the vista block is ignored");
+        let resaved = loaded.to_ron_string().unwrap();
+        assert!(!resaved.contains("far_vista"), "and is not written back");
+        assert_eq!(resaved, ron);
+    }
+}
+
 #[test]
 fn deleting_boost_module_clears_point_of_interest_reward_reference() {
     let mut project = ProjectDocument::new("poi-reward-delete");
@@ -3474,7 +3510,7 @@ fn uv_transform_scales_quad_span_without_rebaking_texture() {
 fn legacy_texture_resources_migrate_into_materials_on_load() {
     // Pre-merge project shape: Texture resources + materials that
     // reference them by id, plus direct texture references from a UI
-    // image, a far-vista panel, and a particle emitter. Loading must
+    // image and a particle emitter. Loading must
     // fold wrapped textures into their materials, keep direct
     // references valid by converting those textures into materials in
     // place (same id), and drop the orphaned leftovers.
@@ -3490,9 +3526,9 @@ fn legacy_texture_resources_migrate_into_materials_on_load() {
         ResourceData::Material(MaterialResource::opaque(None)),
     );
     let direct = project.add_resource(
-        "VISTA_SLICE",
+        "EMITTER_MASK",
         ResourceData::Texture {
-            psxt_path: "assets/textures/vista.psxt".to_string(),
+            psxt_path: "assets/textures/emitter.psxt".to_string(),
         },
     );
     let orphan = project.add_resource(
@@ -3502,11 +3538,15 @@ fn legacy_texture_resources_migrate_into_materials_on_load() {
         },
     );
     let world_id = project.active_scene().root;
-    if let Some(node) = project.active_scene_mut().node_mut(world_id) {
-        if let NodeKind::World { far_vista, .. } = &mut node.kind {
-            far_vista.texture = Some(direct);
-        }
-    }
+    let emitter = ParticleEmitterSettings {
+        texture: Some(direct),
+        ..ParticleEmitterSettings::default()
+    };
+    project.active_scene_mut().add_node(
+        world_id,
+        "Emitter",
+        NodeKind::ParticleEmitter { settings: emitter },
+    );
 
     // New saves never write the legacy `texture:` field, so inject it
     // textually the way a pre-merge project file carried it.
@@ -3540,18 +3580,18 @@ fn legacy_texture_resources_migrate_into_materials_on_load() {
     };
     assert_eq!(
         converted.psxt_path.as_deref(),
-        Some("assets/textures/vista.psxt")
+        Some("assets/textures/emitter.psxt")
     );
     assert!(loaded.resource(orphan).is_none(), "orphan dropped");
-    let vista_ref = loaded
+    let emitter_ref = loaded
         .active_scene()
         .nodes()
         .iter()
         .find_map(|node| match &node.kind {
-            NodeKind::World { far_vista, .. } => far_vista.texture,
+            NodeKind::ParticleEmitter { settings } => settings.texture,
             _ => None,
         });
-    assert_eq!(vista_ref, Some(direct), "direct reference id unchanged");
+    assert_eq!(emitter_ref, Some(direct), "direct reference id unchanged");
 
     // Round-trip stability: a migrated project reloads unchanged.
     let ron2 = loaded.to_ron_string().expect("reserializes");

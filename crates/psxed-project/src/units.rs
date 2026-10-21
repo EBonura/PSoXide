@@ -134,7 +134,6 @@ fn scale_node(node: &mut SceneNode) {
         NodeKind::World {
             sector_size,
             sky,
-            far_vista,
             camera,
             culling,
             physics,
@@ -143,9 +142,6 @@ fn scale_node(node: &mut SceneNode) {
             *sector_size = div_i32_min1(*sector_size);
             sky.cloud_layer.altitude = div_u16(sky.cloud_layer.altitude);
             sky.cloud_layer.extent = div_u16_min1(sky.cloud_layer.extent);
-            far_vista.radius = div_i32_min1(far_vista.radius);
-            far_vista.height = div_i32_min1(far_vista.height);
-            far_vista.vertical_offset = div_i32(far_vista.vertical_offset);
             camera.distance = div_i32_min1(camera.distance);
             camera.height = div_i32(camera.height);
             camera.target_height = div_i32(camera.target_height);

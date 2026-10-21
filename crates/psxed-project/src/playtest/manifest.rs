@@ -1922,7 +1922,6 @@ use psx_level::{
     LevelGameplaySfxEvent,
     LevelLogicRecord,
     LevelCycloramaQuadRecord,
-    LevelFarVistaRecord,
     LevelImagePropRecord,
     LevelDestructibleRecord,
     LevelWorldObjectRecord,

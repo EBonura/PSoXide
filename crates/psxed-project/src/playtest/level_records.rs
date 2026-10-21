@@ -12,11 +12,11 @@ use psx_level::{
     LevelArchPropRecord, LevelArchPropSurfaceRecord, LevelBoxPropRecord, LevelBoxPropSurfaceRecord,
     LevelCameraProfile, LevelCameraRecord, LevelCloudLayerRecord, LevelCycloramaQuadRecord,
     LevelCylinderPropRecord, LevelCylinderPropSurfaceRecord, LevelDestructibleRecord,
-    LevelFarVistaRecord, LevelGameEntityRecord, LevelImagePropRecord, LevelLogicRecord,
-    LevelMaterialUvMotion, LevelModelInstanceRecord, LevelModelMaterialOverride,
-    LevelModelSecondaryLayer, LevelRoomRecord, LevelSkyRecord, LevelVitalityCircleRecord,
-    LevelWorldObjectRecord, ModelIndex, OptionalModelClipIndex, ParticleEmitterRecord,
-    PlayerControllerRecord, PlayerSpawnRecord, PointLightRecord, ResourceSlot, RoomIndex, StableId,
+    LevelGameEntityRecord, LevelImagePropRecord, LevelLogicRecord, LevelMaterialUvMotion,
+    LevelModelInstanceRecord, LevelModelMaterialOverride, LevelModelSecondaryLayer,
+    LevelRoomRecord, LevelSkyRecord, LevelVitalityCircleRecord, LevelWorldObjectRecord, ModelIndex,
+    OptionalModelClipIndex, ParticleEmitterRecord, PlayerControllerRecord, PlayerSpawnRecord,
+    PointLightRecord, ResourceSlot, RoomIndex, StableId,
 };
 
 use super::manifest::{model_material_flags, model_override_blend_code, reflection_material_flags};
@@ -133,12 +133,6 @@ impl OwnedLevelRecords {
                         flags: 0,
                     })
                     .collect();
-                let vista: Vec<AssetId> = room
-                    .far_vista
-                    .texture_asset_indices
-                    .iter()
-                    .map(|index| asset_or_none(*index))
-                    .collect();
                 LevelRoomRecord {
                     name: leak(&room.name),
                     sector_size: room.sector_size,
@@ -173,16 +167,6 @@ impl OwnedLevelRecords {
                             noise_seed: room.sky.cloud_layer.noise_seed,
                             flags: room.sky.cloud_layer.flags,
                         },
-                    },
-                    far_vista: LevelFarVistaRecord {
-                        texture_assets: Box::leak(vista.into_boxed_slice()),
-                        radius: room.far_vista.radius,
-                        height: room.far_vista.height,
-                        vertical_offset: room.far_vista.vertical_offset,
-                        segments: room.far_vista.segments,
-                        rotation_degrees: room.far_vista.rotation_degrees,
-                        tint_rgb: room.far_vista.tint_rgb,
-                        flags: room.far_vista.flags,
                     },
                     camera: LevelCameraRecord {
                         distance: room.camera.distance,
@@ -797,7 +781,7 @@ mod tests {
     }
 
     /// Every reference project: the chunk decodes to exactly what the cook
-    /// built, table by table (the default project has no sky, far vista or
+    /// built, table by table (the default project has no sky or
     /// props to speak of, these do).
     #[test]
     fn every_reference_projects_records_survive_the_chunk() {

@@ -235,8 +235,6 @@ pub struct PlaytestRoom {
     pub atmosphere_wind_speed_q4: i16,
     /// Resolved world sky for this cooked room.
     pub sky: PlaytestSky,
-    /// Resolved far-vista ring for this cooked room.
-    pub far_vista: PlaytestFarVista,
     /// Resolved world camera for this cooked room.
     pub camera: PlaytestCamera,
     /// Room flags mirrored into the runtime manifest.
@@ -290,30 +288,6 @@ pub struct PlaytestCloudLayer {
     /// Perlin generator seed.
     pub noise_seed: u32,
     /// Runtime cloud-layer flags.
-    pub flags: u16,
-}
-
-/// Resolved far-vista values written into one runtime room record.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlaytestFarVista {
-    /// Optional indices into [`PlaytestPackage::assets`] for
-    /// transparent texture panels. Empty means placeholder cards.
-    /// A one-entry list is repeated; a multi-entry list maps across
-    /// ring segments in order.
-    pub texture_asset_indices: Vec<Option<usize>>,
-    /// Radius from camera/player in engine units.
-    pub radius: i32,
-    /// Ring height in engine units.
-    pub height: i32,
-    /// Bottom-edge offset from camera height in engine units.
-    pub vertical_offset: i32,
-    /// Number of cards around the cylinder.
-    pub segments: u8,
-    /// World yaw rotation in degrees.
-    pub rotation_degrees: i16,
-    /// Resolved tint.
-    pub tint_rgb: [u8; 3],
-    /// Runtime far-vista flags.
     pub flags: u16,
 }
 

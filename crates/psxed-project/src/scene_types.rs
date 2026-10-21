@@ -39,9 +39,6 @@ pub enum NodeKind {
         /// Background sky drawn before room geometry.
         #[serde(default)]
         sky: SkySettings,
-        /// Distant scenery ring drawn between sky and room geometry.
-        #[serde(default)]
-        far_vista: FarVistaSettings,
         /// Third-person camera defaults inherited by descendant rooms.
         #[serde(default)]
         camera: WorldCameraSettings,
@@ -452,7 +449,6 @@ impl NodeKind {
         Self::World {
             sector_size: DEFAULT_WORLD_SECTOR_SIZE,
             sky: SkySettings::default(),
-            far_vista: FarVistaSettings::default(),
             camera: WorldCameraSettings::default(),
             culling: WorldCullingSettings::default(),
             physics: WorldPhysicsSettings::default(),
@@ -1115,19 +1111,6 @@ impl Scene {
             let node = self.node(node_id)?;
             if let NodeKind::World { sky, .. } = &node.kind {
                 return Some(*sky);
-            }
-            current = node.parent;
-        }
-        None
-    }
-
-    /// Far-vista settings inherited by `id` from the nearest World ancestor.
-    pub fn world_far_vista_for_node(&self, id: NodeId) -> Option<FarVistaSettings> {
-        let mut current = Some(id);
-        while let Some(node_id) = current {
-            let node = self.node(node_id)?;
-            if let NodeKind::World { far_vista, .. } = &node.kind {
-                return Some(*far_vista);
             }
             current = node.parent;
         }
