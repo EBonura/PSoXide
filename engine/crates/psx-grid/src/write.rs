@@ -11,6 +11,11 @@ use alloc::vec::Vec;
 use crate::format::*;
 use crate::lattice::LatticeTables;
 
+/// Lattice cells per room for a level of sector-set rooms (see
+/// [`LatticeTables::build_owned`]): measured on the hexagonal Citadel, 16
+/// takes a query from six rooms to two or three for about 6 KiB of core.
+const OWNED_LATTICE_CELLS_PER_ROOM: usize = 16;
+
 /// The leaf tree's tables (see [`TreeExt`]): present when the room has a leaf
 /// that is not a whole sector.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -517,7 +522,19 @@ impl LevelCore {
                 self.portals.len()
             ));
         }
-        let lattice = LatticeTables::build(&self.rooms, u32::from(self.sector_units))?;
+        // Rooms shaped as sector sets (hexagonal chunks) overlap heavily as
+        // rectangles: list them by the sectors they own, over cells fine
+        // enough that a query meets two or three rooms instead of six.
+        let lattice = if self.occupancy.is_empty() {
+            LatticeTables::build(&self.rooms, u32::from(self.sector_units))?
+        } else {
+            LatticeTables::build_owned(
+                &self.rooms,
+                u32::from(self.sector_units),
+                &self.occupancy,
+                OWNED_LATTICE_CELLS_PER_ROOM,
+            )?
+        };
         let header = LevelHeader {
             magic: LEVEL_MAGIC,
             version: VERSION,

@@ -60,6 +60,20 @@ impl LatticeTables {
     /// cell count within `max(16, 2 * rooms)` and the room list within
     /// `u16`.
     pub fn build(rooms: &[RoomRecord], s: u32) -> Result<Self, alloc::string::String> {
+        Self::build_owned(rooms, s, &[], 2)
+    }
+
+    /// [`Self::build`] for rooms that own only some sectors of their
+    /// rectangle (`occupancy`, one bit per sector row-major, as the core
+    /// carries it; empty for whole rectangles): a room is listed in a cell
+    /// only when a sector it owns, dilated by the margin, touches it. The
+    /// cell budget is `max(16, per_room * rooms)`.
+    pub fn build_owned(
+        rooms: &[RoomRecord],
+        s: u32,
+        occupancy: &[Vec<u8>],
+        per_room: usize,
+    ) -> Result<Self, alloc::string::String> {
         if rooms.is_empty() {
             return Ok(Self {
                 start: alloc::vec![0, 0],
@@ -83,7 +97,7 @@ impl LatticeTables {
                 hi[axis] = hi[axis].max(b[axis]);
             }
         }
-        let budget = (2 * rooms.len()).max(16);
+        let budget = (per_room * rooms.len()).max(16);
         let mut shift = MAX_SHIFT;
         let mut cells = [1usize; 2];
         for candidate in MIN_SHIFT..=MAX_SHIFT {
@@ -115,9 +129,37 @@ impl LatticeTables {
             };
             let (cx0, cx1) = (cell(a[0], 0, false), cell(b[0], 0, true));
             let (cz0, cz1) = (cell(a[1], 1, false), cell(b[1], 1, true));
+            let owned = occupancy.get(index);
             for cz in cz0..=cz1 {
                 for cx in cx0..=cx1 {
-                    lists[cz * cells[0] + cx].push(index as u16);
+                    let listed = match owned {
+                        None => true,
+                        Some(bits) => {
+                            // The cell, shrunk back by the margin, in the
+                            // room's sectors: any owned sector inside?
+                            let edge = 1i32 << shift;
+                            let (x0, z0) = (lo[0] + cx as i32 * edge, lo[1] + cz as i32 * edge);
+                            let range = |a: i32, origin: i32, n: u8| {
+                                let first = (a - margin - origin).div_euclid(s).max(0);
+                                let last = (a + edge + margin - 1 - origin)
+                                    .div_euclid(s)
+                                    .min(i32::from(n) - 1);
+                                (first, last)
+                            };
+                            let (sx0, sx1) = range(x0, record.origin[0], record.width);
+                            let (sz0, sz1) = range(z0, record.origin[2], record.depth);
+                            let w = usize::from(record.width);
+                            (sz0..=sz1).any(|z| {
+                                (sx0..=sx1).any(|x| {
+                                    let bit = z as usize * w + x as usize;
+                                    bits.get(bit / 8).is_some_and(|b| b & (1 << (bit % 8)) != 0)
+                                })
+                            })
+                        }
+                    };
+                    if listed {
+                        lists[cz * cells[0] + cx].push(index as u16);
+                    }
                 }
             }
         }
