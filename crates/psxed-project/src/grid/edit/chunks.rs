@@ -113,7 +113,9 @@ pub struct HexReport {
 /// Replace the rooms of `world` with one room per hexagon of `layout` that
 /// holds any leaf, named `Hex q,r`, in row order. Every chunk takes its
 /// settings (fog, ambient, wall mode, defaults) from the room that held the
-/// most leaves, and its tree is normalised. Nothing changes on refusal.
+/// most leaves, and its tree is normalised. The world then streams as a ring
+/// of chunks ([`super::super::world::StreamRadii::ring`]). Nothing changes on
+/// refusal.
 pub fn rechunk_hex(world: &mut GridWorld, layout: HexLayout) -> Result<HexReport, HexRefusal> {
     // At least a sector across, flat side to flat side.
     if !(layout.size * 3f64.sqrt() >= 1.0) {
@@ -194,6 +196,7 @@ pub fn rechunk_hex(world: &mut GridWorld, layout: HexLayout) -> Result<HexReport
         rooms.push(room);
     }
     world.rooms = rooms;
+    world.stream.ring = true;
     Ok(report)
 }
 

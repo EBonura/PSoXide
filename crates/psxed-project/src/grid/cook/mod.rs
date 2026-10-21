@@ -23,7 +23,8 @@ pub mod units;
 use psx_grid::write::{LevelCore, RoomChunk};
 use psx_grid::{
     Material, RoomRecord, CHUNK_HAS_LOD, CHUNK_HAS_PLANES, LEVEL_HAS_PLANES, LEVEL_HAS_SKY,
-    ROOM_FOG, ROOM_OUTDOOR, ROOM_PROBES, ROOM_SPANS, ROOM_TREE, SECTION_COUNT, SECTOR_BYTES,
+    LEVEL_RING_STREAM, ROOM_FOG, ROOM_OUTDOOR, ROOM_PROBES, ROOM_SPANS, ROOM_TREE, SECTION_COUNT,
+    SECTOR_BYTES,
 };
 
 pub use render::{BoundMaterial, MaterialBinder};
@@ -576,7 +577,8 @@ fn cook_rooms(
     let mut level = LevelCore {
         occupancy: occupancy::derive(world),
         flags: (if any_sky { LEVEL_HAS_SKY } else { 0 })
-            | (if any_planes { LEVEL_HAS_PLANES } else { 0 }),
+            | (if any_planes { LEVEL_HAS_PLANES } else { 0 })
+            | (if radii.ring { LEVEL_RING_STREAM } else { 0 }),
         sector_units: s as u16,
         draw_far: radii.draw_far,
         active_radius: radii.active_radius,

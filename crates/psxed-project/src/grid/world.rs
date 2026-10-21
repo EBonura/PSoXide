@@ -66,6 +66,11 @@ pub struct StreamRadii {
     /// Rooms between `draw_far` and `draw_far + lead_radius` are prefetched
     /// by a streamer and evicted first.
     pub lead_radius: u8,
+    /// Stream and draw as a ring instead: the observer's room and every room
+    /// one portal away, whatever `draw_far` and `lead_radius` say. For a
+    /// world cut into even chunks ([`super::edit::chunks`]).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub ring: bool,
 }
 
 impl StreamRadii {
@@ -75,6 +80,7 @@ impl StreamRadii {
         draw_far: 48,
         active_radius: 32,
         lead_radius: 8,
+        ring: false,
     };
 
     /// Whether these are the defaults (the document then omits them).
