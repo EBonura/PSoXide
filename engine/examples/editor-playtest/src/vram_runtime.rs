@@ -321,17 +321,7 @@ pub(super) fn step_chunk_sky(room: Option<usize>) {
     if GRID_SKY_SECTORS == 0 {
         return;
     }
-    let Some(key) = ROOMS
-        .as_slice()
-        .iter()
-        .find(|room| {
-            room.sky.flags & psx_level::sky_flags::PROJECTION_MASK == psx_level::sky_flags::CUBE
-        })
-        .and_then(|room| {
-            psx_level::find_asset_of_kind(ASSETS, room.sky.texture_asset, AssetKind::Texture)
-        })
-        .map(|asset| asset.id)
-    else {
+    let Some(key) = chunk_sky_key() else {
         return;
     };
     let offset = room
@@ -355,6 +345,75 @@ pub(super) fn step_chunk_sky(room: Option<usize>) {
         );
         CHUNK_SKY_COUNTERS = (*core::ptr::addr_of!(CHUNK_SKY)).counters;
     }
+}
+
+/// The asset id the scene's cube sky is resident under: the VRAM the chunk
+/// skies stream over.
+#[cfg(feature = "cd-stream-bench")]
+fn chunk_sky_key() -> Option<psx_level::AssetId> {
+    ROOMS
+        .as_slice()
+        .iter()
+        .find(|room| {
+            room.sky.flags & psx_level::sky_flags::PROJECTION_MASK == psx_level::sky_flags::CUBE
+        })
+        .and_then(|room| {
+            psx_level::find_asset_of_kind(ASSETS, room.sky.texture_asset, AssetKind::Texture)
+        })
+        .map(|asset| asset.id)
+}
+
+/// Chunk sky rows the GPU uploads per frame: about 1,700 words of packets,
+/// a whole sky in 32 frames.
+#[cfg(feature = "cd-stream-bench")]
+const CHUNK_SKY_ROWS_PER_FRAME: u16 = 8;
+
+/// Put the next landed rows of the chunk sky into this frame's list, in the
+/// sky's slot after the sky (so they run before it): the GPU uploads them as
+/// it draws and the CPU never waits for it.
+#[cfg(feature = "cd-stream-bench")]
+pub(super) fn emit_chunk_sky_rows(
+    primitive_packets: &mut PrimitivePacketArena<'_>,
+    ot: &mut OtFrame<'_, OT_DEPTH>,
+) {
+    use crate::generated::GRID_SKY_SECTORS;
+    use psx_game_runtime::cube_sky_stream::{row_packet_words, write_row_packets};
+    if GRID_SKY_SECTORS == 0 {
+        return;
+    }
+    let Some(origin) = chunk_sky_key().and_then(|key| vram_arena().cube_sky_origin(key)) else {
+        return;
+    };
+    // SAFETY: single-threaded guest; see `release_gameplay_vram`.
+    let (stream, window) = unsafe {
+        (
+            &mut *core::ptr::addr_of_mut!(CHUNK_SKY),
+            &*core::ptr::addr_of!(CHUNK_SKY_WINDOW),
+        )
+    };
+    let rows = stream.rows_ready().min(CHUNK_SKY_ROWS_PER_FRAME);
+    if rows == 0 {
+        return;
+    }
+    let Some(mut reservation) =
+        primitive_packets.reserve_packet_words(row_packet_words(usize::from(rows)))
+    else {
+        return;
+    };
+    let (words, packets) = write_row_packets(
+        stream,
+        window,
+        origin,
+        rows,
+        (OT_DEPTH - 1) as u16,
+        reservation.words_mut(),
+    );
+    let Some(packets) = reservation.commit(words, packets) else {
+        return;
+    };
+    // SAFETY: the stream is one committed arena range, live until the walk
+    // ends, and its slot is below OT_DEPTH.
+    unsafe { ot.add_committed_tagged_packet_stream_unchecked(packets) };
 }
 
 /// The chunk sky stream's counters, at a fixed address (like the fault
