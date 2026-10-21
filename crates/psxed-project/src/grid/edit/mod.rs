@@ -21,8 +21,10 @@
 //! * [`clipboard`]: copy, flip, turn and paste.
 //! * [`planes`]: free planes: add, edit, remove, copy and paste.
 //! * [`meshes`]: static meshes: assets, instances and the arch between two points.
+//! * [`chunks`]: re-chunking a world into hexagonal rooms.
 
 pub mod bands;
+pub mod chunks;
 pub mod clipboard;
 pub mod convert;
 pub mod delete;
