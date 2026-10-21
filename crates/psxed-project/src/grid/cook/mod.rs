@@ -573,6 +573,7 @@ fn cook_rooms(
     }
     let radii = world.stream;
     let mut level = LevelCore {
+        occupancy: Vec::new(),
         flags: (if any_sky { LEVEL_HAS_SKY } else { 0 })
             | (if any_planes { LEVEL_HAS_PLANES } else { 0 }),
         sector_units: s as u16,

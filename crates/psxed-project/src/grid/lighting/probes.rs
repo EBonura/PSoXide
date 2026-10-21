@@ -170,6 +170,7 @@ impl ProbeStore {
     ) -> Result<Self, String> {
         let origins = room_origins(world, units);
         let core = LevelCore {
+            occupancy: Vec::new(),
             sector_units: units.sector() as u16,
             rooms: world
                 .rooms
