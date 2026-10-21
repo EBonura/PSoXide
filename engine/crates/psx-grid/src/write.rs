@@ -522,7 +522,12 @@ impl LevelCore {
             magic: LEVEL_MAGIC,
             version: VERSION,
             min_reader: MIN_READER,
-            flags: self.flags | if self.occupancy.is_empty() { 0 } else { LEVEL_HAS_OCCUPANCY },
+            flags: self.flags
+                | if self.occupancy.is_empty() {
+                    0
+                } else {
+                    LEVEL_HAS_OCCUPANCY
+                },
             room_count: self.rooms.len() as u16,
             portal_count: self.portals.len() as u16,
             sector_units: u8::try_from(self.sector_units).expect("sector size above 255"),
@@ -552,15 +557,25 @@ impl LevelCore {
         out.extend_from_slice(bytes_of(&lattice.rooms));
         if !self.occupancy.is_empty() {
             if self.occupancy.len() != self.rooms.len() {
-                return Err(alloc::format!("occupancy for {} rooms, the level has {}", self.occupancy.len(), self.rooms.len()));
+                return Err(alloc::format!(
+                    "occupancy for {} rooms, the level has {}",
+                    self.occupancy.len(),
+                    self.rooms.len()
+                ));
             }
             let mut start = Vec::with_capacity(self.rooms.len() + 1);
             let mut at = 0usize;
             for bits in &self.occupancy {
-                start.push(u16::try_from(at).map_err(|_| alloc::string::String::from("occupancy table above 64 KiB"))?);
+                start
+                    .push(u16::try_from(at).map_err(|_| {
+                        alloc::string::String::from("occupancy table above 64 KiB")
+                    })?);
                 at += bits.len();
             }
-            start.push(u16::try_from(at).map_err(|_| alloc::string::String::from("occupancy table above 64 KiB"))?);
+            start.push(
+                u16::try_from(at)
+                    .map_err(|_| alloc::string::String::from("occupancy table above 64 KiB"))?,
+            );
             out.extend_from_slice(bytes_of(&start));
             for bits in &self.occupancy {
                 out.extend_from_slice(bits);

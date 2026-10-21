@@ -72,7 +72,8 @@ impl Visit<'_> {
 /// The collision world: the level core plus the rooms resident right now
 /// (see [`ResidentRooms`]).
 ///
-/// A room that is not resident is treated as **solid over its footprint** for
+/// A room that is not resident is treated as **solid over its footprint** (the
+/// sectors it owns, when the core carries occupancy) for
 /// bodies and as non-blocking for line of sight. No query loops over every
 /// room of the level: each asks the world lattice of the core for the rooms
 /// near the point, box or segment it concerns (a world of at most
@@ -561,6 +562,9 @@ impl<'a> GridCollision<'a> {
             ) else {
                 continue;
             };
+            if !self.level().room_owns_cell(room, cx, cz) {
+                continue;
+            }
             let Some(view) = self.view(room) else {
                 continue;
             };

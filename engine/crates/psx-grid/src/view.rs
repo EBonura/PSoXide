@@ -190,29 +190,52 @@ impl<'a> LevelView<'a> {
         u32::from(self.header.sector_units)
     }
 
-    /// World-space bounds of `room`, vertical range included: the
-    /// footprint and `min_y..max_y` shifted by the room's origin. An index
-    /// out of range gives an empty box at the origin.
     /// Whether `room` owns the sector holding world `(x, z)`. A level without
     /// occupancy gives every room its whole rectangle.
+    #[inline]
     pub fn room_has_sector(&self, room: usize, x: i32, z: i32) -> bool {
         if self.occupancy_start.is_empty() {
             return true;
         }
-        let (Some(record), Some(&first)) = (self.rooms.get(room), self.occupancy_start.get(room)) else {
+        let Some(record) = self.rooms.get(room) else {
             return false;
         };
         let s = self.sector_units() as i32;
-        let (lx, lz) = ((x - record.origin[0]).div_euclid(s), (z - record.origin[2]).div_euclid(s));
-        if lx < 0 || lz < 0 || lx >= i32::from(record.width) || lz >= i32::from(record.depth) {
+        let (cx, cz) = (
+            (x - record.origin[0]).div_euclid(s),
+            (z - record.origin[2]).div_euclid(s),
+        );
+        if cx < 0 || cz < 0 {
             return false;
         }
-        let bit = lz as usize * usize::from(record.width) + lx as usize;
+        self.room_owns_cell(room, cx as usize, cz as usize)
+    }
+
+    /// Whether `room` owns its plan cell `(cx, cz)` (room-local sector
+    /// indices). A level without occupancy gives every room its whole
+    /// rectangle; a cell outside the rectangle is never owned.
+    #[inline]
+    pub fn room_owns_cell(&self, room: usize, cx: usize, cz: usize) -> bool {
+        if self.occupancy_start.is_empty() {
+            return true;
+        }
+        let (Some(record), Some(&first)) = (self.rooms.get(room), self.occupancy_start.get(room))
+        else {
+            return false;
+        };
+        let w = usize::from(record.width);
+        if cx >= w || cz >= usize::from(record.depth) {
+            return false;
+        }
+        let bit = cz * w + cx;
         self.occupancy_bits
             .get(usize::from(first) + bit / 8)
             .is_some_and(|b| b & (1 << (bit % 8)) != 0)
     }
 
+    /// World-space bounds of `room`, vertical range included: the
+    /// footprint and `min_y..max_y` shifted by the room's origin. An index
+    /// out of range gives an empty box at the origin.
     pub fn room_bounds(&self, room: usize) -> ([i32; 3], [i32; 3]) {
         let Some(record) = self.rooms.get(room) else {
             return ([0; 3], [0; 3]);

@@ -387,7 +387,8 @@ impl<'a> GridCollision<'a> {
         }
     }
 
-    /// A non-resident room is solid over its footprint and `min_y..max_y`.
+    /// A non-resident room is solid over the footprint sectors it owns and
+    /// `min_y..max_y`.
     #[inline(never)]
     fn scan_foreign(&self, room: usize, scan: &mut Scan) {
         let rec = self.rec(room);
@@ -396,7 +397,7 @@ impl<'a> GridCollision<'a> {
             let (sx, sz) = scan.sample(i);
             if self
                 .cell_of(sx - rec.origin[0], sz - rec.origin[2], w, d)
-                .is_some()
+                .is_some_and(|(cx, cz, _, _)| self.level().room_owns_cell(room, cx, cz))
             {
                 if rec.max_y > rec.min_y {
                     let src = Src {
@@ -688,6 +689,11 @@ impl<'a> GridCollision<'a> {
             let Some(view) = self.view(room) else {
                 if foreign
                     && rec.max_y > rec.min_y
+                    && self.level().room_owns_cell(
+                        room,
+                        self.recip.cell(lx as u32) as usize,
+                        self.recip.cell(lz as u32) as usize,
+                    )
                     && y > oy + i32::from(rec.min_y) - h
                     && y < oy + i32::from(rec.max_y)
                 {

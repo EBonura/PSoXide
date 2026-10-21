@@ -176,8 +176,17 @@ pub(super) fn build(rooms: &[Room]) -> Built {
 /// Build with or without the derived sector summary bits: the two must trace
 /// identically.
 fn build_with(rooms: &[Room], summary: bool) -> Built {
+    build_full(rooms, summary, Vec::new())
+}
+
+/// Build with per-room sector occupancy (one bit per sector, row-major).
+fn build_occupied(rooms: &[Room], occupancy: Vec<Vec<u8>>) -> Built {
+    build_full(rooms, true, occupancy)
+}
+
+fn build_full(rooms: &[Room], summary: bool, occupancy: Vec<Vec<u8>>) -> Built {
     let core = LevelCore {
-        occupancy: Vec::new(),
+        occupancy,
         sector_units: S as u16,
         rooms: rooms
             .iter()
@@ -487,6 +496,54 @@ fn non_resident_rooms_are_solid_for_bodies_and_invisible_to_sight() {
         let t = trace(w, body([100, 0, 40], [300, 0, 40]));
         assert!(t.fraction_q12 < 4096);
     });
+}
+
+/// An L-shaped room `a` (its 2x2 rectangle minus the south-east sector) and
+/// a one-sector room `b` filling that corner: the rectangles overlap.
+fn overlapping_rooms(occupied: bool) -> Built {
+    let mut a = Room::flat([0, 0, 0], 2, 2, 0);
+    a.pit(1, 1);
+    let b = Room::flat([S, 0, S], 1, 1, 0);
+    if occupied {
+        build_occupied(&[a, b], vec![vec![0b0111], vec![0b1]])
+    } else {
+        build(&[a, b])
+    }
+}
+
+#[test]
+fn a_non_resident_room_is_solid_only_over_the_sectors_it_owns() {
+    let corner = [S + S / 2, 20, S + S / 2];
+    let owned = [S / 2, 20, S / 2];
+    overlapping_rooms(true).run_with(&[false, true], |w| {
+        assert!(w.body_blocked(owned, 12, 48));
+        assert!(!w.body_blocked(corner, 12, 48));
+        assert_eq!(
+            w.locate(0, [corner[0], 10, corner[2]]).map(|l| l.room),
+            Some(1)
+        );
+    });
+    // Without occupancy the rectangle stands in whole: the corner is solid.
+    overlapping_rooms(false).run_with(&[false, true], |w| {
+        assert!(w.body_blocked(corner, 12, 48));
+    });
+}
+
+#[test]
+fn locate_skips_a_resident_room_over_a_sector_it_does_not_own() {
+    // `a` keeps a floor in the corner it does not own: only occupancy tells
+    // the two rooms apart there.
+    let a = Room::flat([0, 0, 0], 2, 2, 0);
+    let b = Room::flat([S, 0, S], 1, 1, 0);
+    let built = build_occupied(&[a, b], vec![vec![0b0111], vec![0b1]]);
+    for lattice in [false, true] {
+        built.run(|w| {
+            let w = w.with_lattice(lattice);
+            let at = w.locate(0, [S + S / 2, 10, S + S / 2]).unwrap();
+            assert_eq!((at.room, at.cx, at.cz), (1, 0, 0));
+            assert_eq!(w.locate(1, [S / 2, 10, S / 2]).map(|l| l.room), Some(0));
+        });
+    }
 }
 
 pub(super) struct Lcg(pub(super) u32);
