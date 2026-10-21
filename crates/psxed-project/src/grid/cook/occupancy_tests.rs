@@ -101,3 +101,36 @@ fn open_air_rooms_side_by_side_get_a_portal() {
         assert_eq!(hi - lo, s);
     }
 }
+
+#[test]
+fn a_roofless_staircase_boundary_is_one_portal_each_way() {
+    // A 4x4 square cut along its anti-diagonal: `a` holds x + z < 4, `b`
+    // the rest, so the two meet along a staircase of seven edges.
+    let below: Vec<(usize, usize)> = (0..4)
+        .flat_map(|z| (0..4).map(move |x| (x, z)))
+        .filter(|(x, z)| x + z < 4)
+        .collect();
+    let above: Vec<(usize, usize)> = (0..4)
+        .flat_map(|z| (0..4).map(move |x| (x, z)))
+        .filter(|(x, z)| x + z >= 4)
+        .collect();
+    let mut a = room([0, 0], 4, 4, &below);
+    let mut b = room([0, 0], 4, 4, &above);
+    for (r, cells) in [(&mut a, &below), (&mut b, &above)] {
+        for &(x, z) in cells {
+            r.sector_mut(x, z).unwrap().set_ground_ceiling(None);
+        }
+    }
+    let cooked = cook(&world(vec![a, b])).unwrap();
+    for (from, dest) in [(0usize, 1u16), (1, 0)] {
+        let rec = &cooked.level.rooms[from];
+        assert_eq!(rec.portal_count, 1, "room {from}");
+        let portal = cooked.level.portals[usize::from(rec.portal_first)];
+        assert_eq!(portal.dest, dest);
+        // A diagonal opening, facing away from its room.
+        assert!(portal.normal[0] != 0 && portal.normal[2] != 0);
+        let out = if from == 0 { 1 } else { -1 };
+        assert_eq!(portal.normal[0].signum(), out);
+        assert_eq!(portal.normal[2].signum(), out);
+    }
+}

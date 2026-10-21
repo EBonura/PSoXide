@@ -101,6 +101,8 @@ pub fn derive(world: &GridWorld, units: &RuntimeUnits) -> Result<Vec<Vec<Portal>
     ];
     for (ra, room) in world.rooms.iter().enumerate() {
         let origin_y = units.rt(room.y_offset);
+        // Open-air side portals, merged by their own rule.
+        let mut air: Vec<Portal> = Vec::new();
         for (x, z, _) in room.iter() {
             let cell = room.world_cell(x, z);
             for side in &sides {
@@ -131,10 +133,8 @@ pub fn derive(world: &GridWorld, units: &RuntimeUnits) -> Result<Vec<Vec<Portal>
                     }
                     // Open air on both sides: the opening is one sector tall
                     // over the higher floor (the walk reads only its centre).
-                    let hi = match a_hi.min(b_hi) {
-                        i32::MAX => lo + s,
-                        hi => hi,
-                    };
+                    let open_air = a_hi.min(b_hi) == i32::MAX;
+                    let hi = if open_air { lo + s } else { a_hi.min(b_hi) };
                     if lo >= hi {
                         continue;
                     }
@@ -145,7 +145,8 @@ pub fn derive(world: &GridWorld, units: &RuntimeUnits) -> Result<Vec<Vec<Portal>
                         |v: i32| i16::try_from(v).map_err(|_| "portal out of range".to_string());
                     let (ax, az, bx, bz) =
                         (px(side.a[0]), pz(side.a[1]), px(side.b[0]), pz(side.b[1]));
-                    out[ra].push(Portal {
+                    let list = if open_air { &mut air } else { &mut out[ra] };
+                    list.push(Portal {
                         dest: rb as u16,
                         flags: 0,
                         v: [
@@ -202,6 +203,8 @@ pub fn derive(world: &GridWorld, units: &RuntimeUnits) -> Result<Vec<Vec<Portal>
             }
         }
         merge_runs(&mut out[ra]);
+        merge_open_air(&mut air);
+        out[ra].append(&mut air);
     }
     Ok(out)
 }
@@ -234,6 +237,84 @@ fn merge_runs(portals: &mut Vec<Portal>) {
             index += 1;
         }
     }
+}
+
+/// Join open-air side portals into the same room that meet at a corner and
+/// do not face each other, whatever their heights or direction, until none
+/// do. Each piece stands one sector over its own floor and a boundary that is
+/// not axis-aligned (a hexagon's slanted side) is a staircase of pieces, so
+/// joining only straight runs would leave a portal per step. The joined
+/// opening is the straight chord between the far ends, from the lowest
+/// bottom to the highest top; the walk reads only its centre.
+fn merge_open_air(portals: &mut Vec<Portal>) {
+    let mut index = 0;
+    while index < portals.len() {
+        let mut merged = false;
+        let mut other = index + 1;
+        while other < portals.len() {
+            if let Some(joined) = join_air(&portals[index], &portals[other]) {
+                portals[index] = joined;
+                portals.remove(other);
+                merged = true;
+            } else {
+                other += 1;
+            }
+        }
+        if !merged {
+            index += 1;
+        }
+    }
+}
+
+/// `a` and `b` as one open-air opening, if they share a plan end and face
+/// the same side.
+fn join_air(a: &Portal, b: &Portal) -> Option<Portal> {
+    let dot = |n: [i16; 3], m: [i16; 3]| {
+        i32::from(n[0]) * i32::from(m[0]) + i32::from(n[2]) * i32::from(m[2])
+    };
+    if a.dest != b.dest || dot(a.normal, b.normal) < 0 {
+        return None;
+    }
+    let plan = |v: [i16; 3]| [v[0], v[2]];
+    let (a0, a1, b0, b1) = (plan(a.v[0]), plan(a.v[1]), plan(b.v[0]), plan(b.v[1]));
+    let (from, to) = if a1 == b0 {
+        (a0, b1)
+    } else if b1 == a0 {
+        (b0, a1)
+    } else if a1 == b1 {
+        (a0, b0)
+    } else if a0 == b0 {
+        (b1, a1)
+    } else {
+        return None;
+    };
+    if from == to {
+        return None;
+    }
+    // The chord's horizontal normal, on the side the pieces face.
+    let (dx, dz) = (f64::from(to[0] - from[0]), f64::from(to[1] - from[1]));
+    let (mut nx, mut nz) = (dz, -dx);
+    let (sx, sz) = (
+        f64::from(a.normal[0]) + f64::from(b.normal[0]),
+        f64::from(a.normal[2]) + f64::from(b.normal[2]),
+    );
+    if nx * sx + nz * sz < 0.0 {
+        (nx, nz) = (-nx, -nz);
+    }
+    let length = (nx * nx + nz * nz).sqrt();
+    let normal = [
+        (nx / length * 4096.0).round() as i16,
+        0,
+        (nz / length * 4096.0).round() as i16,
+    ];
+    let lo = a.v[0][1].min(b.v[0][1]);
+    let hi = a.v[3][1].max(b.v[3][1]);
+    let at = |p: [i16; 2], y: i16| [p[0], y, p[1]];
+    Some(Portal {
+        v: [at(from, lo), at(to, lo), at(to, hi), at(from, hi)],
+        normal,
+        ..*a
+    })
 }
 
 /// `a` followed by `b` as one quad, if `b` continues `a`.

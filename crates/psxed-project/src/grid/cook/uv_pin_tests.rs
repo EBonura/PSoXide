@@ -11,7 +11,7 @@ const PROJECTS: [(&str, u64); 12] = [
     ("grid-cathedral", 0x05782fa4b4d023d2),
     ("grid-cave", 0xe32d61c5f9f86043),
     ("grid-corridor", 0xae7c3988a32b6bd1),
-    ("grid-dungeon", 0xaf4ade0b45499584),
+    ("grid-dungeon", 0x42f3011bdbc3cfe8),
     ("grid-gate", 0x13c9cb5b1f376f8b),
     ("grid-level008", 0x8f0c984a0d16a75a),
     ("grid-sewers", 0xde6d0bffc419b732),
