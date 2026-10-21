@@ -9,8 +9,9 @@
 //! and the fog continues across it.
 //!
 //! The rays use the runtime's collision, so the bake sees exactly the
-//! geometry the game has. Faces are shaded flat (a key light and the fog);
-//! materials are not sampled yet.
+//! geometry the game has. A hit takes the mean colour of the material of the
+//! surface it lands on ([`WorldColours`]: the floor, ceiling or derived wall
+//! of the document leaf there), shaded by a key light, then the fog.
 
 use psx_engine::sky::{CubeFace, CUBE_SKY_FACE_HEIGHT, CUBE_SKY_FACE_WIDTH};
 use psx_engine::{CollisionTrace, CollisionTraceProvider, CollisionTraceQuery, RoomPoint};
@@ -18,7 +19,154 @@ use psx_grid::collision::GridTraceProvider;
 use psx_grid::write::{aligned_copy, words_as_bytes};
 use psx_grid::{CollisionView, LevelView, ResidentRooms, RoomView};
 
+use std::collections::HashMap;
+
 use super::CookedLevel;
+use crate::grid::leaf::CLICKS_PER_SECTOR;
+use crate::grid::sector::GridSector;
+use crate::grid::world::GridWorld;
+use crate::ResourceId;
+
+/// What a hit is made of: the document's surfaces under a world point,
+/// coloured by their materials' mean texel colour.
+pub struct WorldColours<'a> {
+    world: &'a GridWorld,
+    /// Runtime units per sector.
+    sector: i32,
+    /// World sector of `rooms[0]`.
+    origin: [i32; 2],
+    width: usize,
+    /// Per world sector, the room holding a leaf there (`u16::MAX`: none).
+    rooms: Vec<u16>,
+    /// Mean texel colour per material, channels 0..=1.
+    albedo: HashMap<Option<ResourceId>, [f32; 3]>,
+}
+
+impl<'a> WorldColours<'a> {
+    /// Colours of `world` cooked at `sector` runtime units a sector, with the
+    /// mean colour of each material (a material missing from `albedo` reads
+    /// mid grey).
+    pub fn new(
+        world: &'a GridWorld,
+        sector: i32,
+        albedo: HashMap<Option<ResourceId>, [f32; 3]>,
+    ) -> Self {
+        let (mut lo, mut hi) = ([i32::MAX; 2], [i32::MIN; 2]);
+        for room in &world.rooms {
+            lo = [lo[0].min(room.origin[0]), lo[1].min(room.origin[1])];
+            hi = [
+                hi[0].max(room.origin[0] + room.width as i32),
+                hi[1].max(room.origin[1] + room.depth as i32),
+            ];
+        }
+        let width = (hi[0] - lo[0]).max(0) as usize;
+        let depth = (hi[1] - lo[1]).max(0) as usize;
+        let mut rooms = vec![u16::MAX; width * depth];
+        for (index, room) in world.rooms.iter().enumerate() {
+            for (key, _) in room.leaves() {
+                let (a, b) = key.sector_range();
+                for z in a[1]..=b[1] {
+                    for x in a[0]..=b[0] {
+                        let cell = (z - lo[1]) as usize * width + (x - lo[0]) as usize;
+                        if rooms[cell] == u16::MAX {
+                            rooms[cell] = index as u16;
+                        }
+                    }
+                }
+            }
+        }
+        Self {
+            world,
+            sector,
+            origin: lo,
+            width,
+            rooms,
+            albedo,
+        }
+    }
+
+    /// The materials a world uses, to fill the table [`Self::new`] takes.
+    pub fn materials(world: &GridWorld) -> Vec<Option<ResourceId>> {
+        let mut out = vec![None];
+        let mut add = |m: Option<ResourceId>| {
+            if !out.contains(&m) {
+                out.push(m);
+            }
+        };
+        for room in &world.rooms {
+            add(room.defaults.wall_material);
+            for (_, sector) in room.leaves() {
+                for surface in [sector.ground_floor(), sector.ground_ceiling()]
+                    .into_iter()
+                    .flatten()
+                {
+                    add(surface.tri_a.material);
+                    add(surface.tri_b.and_then(|t| t.material));
+                }
+                add(sector.ground_wall_material());
+            }
+        }
+        out
+    }
+
+    /// The leaf under world runtime point `(x, z)` and its room.
+    fn leaf(&self, x: i32, z: i32) -> Option<(usize, &'a GridSector)> {
+        let click = [
+            (x * CLICKS_PER_SECTOR).div_euclid(self.sector),
+            (z * CLICKS_PER_SECTOR).div_euclid(self.sector),
+        ];
+        let cell = [
+            click[0].div_euclid(CLICKS_PER_SECTOR) - self.origin[0],
+            click[1].div_euclid(CLICKS_PER_SECTOR) - self.origin[1],
+        ];
+        if cell[0] < 0 || cell[1] < 0 || cell[0] as usize >= self.width {
+            return None;
+        }
+        let room = usize::from(
+            *self
+                .rooms
+                .get(cell[1] as usize * self.width + cell[0] as usize)?,
+        );
+        let (_, sector) = self.world.rooms.get(room)?.leaf_at(click)?;
+        Some((room, sector))
+    }
+
+    /// Base colour (0..=255 a channel) of the surface hit at `at` with
+    /// normal `n`: a floor's or ceiling's material, or a wall's, chosen the
+    /// way the cook chooses a derived wall's (the sector behind it, the one
+    /// in front, the room's default, then the floor behind it).
+    pub fn colour(&self, at: [i32; 3], n: [f64; 3]) -> Option<[f64; 3]> {
+        let step = |k: f64| {
+            (
+                at[0] + (n[0] * k).round() as i32,
+                at[2] + (n[2] * k).round() as i32,
+            )
+        };
+        let material = if n[1] > 0.5 {
+            let (x, z) = step(-1.0);
+            self.leaf(x, z)?.1.ground_floor()?.tri_a.material
+        } else if n[1] < -0.5 {
+            let (x, z) = step(-1.0);
+            self.leaf(x, z)?.1.ground_ceiling()?.tri_a.material
+        } else {
+            let (bx, bz) = step(-2.0);
+            let (fx, fz) = step(2.0);
+            let behind = self.leaf(bx, bz);
+            let front = self.leaf(fx, fz);
+            behind
+                .and_then(|(_, s)| s.ground_wall_material())
+                .or_else(|| front.and_then(|(_, s)| s.ground_wall_material()))
+                .or_else(|| {
+                    behind
+                        .or(front)
+                        .and_then(|(room, _)| self.world.rooms[room].defaults.wall_material)
+                })
+                .or_else(|| behind.and_then(|(_, s)| s.ground_floor()?.tri_a.material))
+        };
+        let albedo = self.albedo.get(&material).copied().unwrap_or([0.5; 3]);
+        Some(albedo.map(|c| f64::from(c) * 255.0))
+    }
+}
 
 /// Faces of the atlas in its left-to-right order.
 const FACES: [CubeFace; 6] = [
@@ -177,6 +325,16 @@ fn point_trace(
 /// Bake the sky of room `chunk` of `cooked`: the chunk and every room one
 /// portal away are left out, the rest is traced from the chunk's centre.
 pub fn bake_chunk_sky(cooked: &CookedLevel, chunk: usize) -> Result<ChunkSky, String> {
+    bake_chunk_sky_with(cooked, chunk, None)
+}
+
+/// [`bake_chunk_sky`] with hits coloured by `colours` (flat graybox blues
+/// without).
+pub fn bake_chunk_sky_with(
+    cooked: &CookedLevel,
+    chunk: usize,
+    colours: Option<&WorldColours<'_>>,
+) -> Result<ChunkSky, String> {
     let rooms = cooked.level.rooms.len();
     if chunk >= rooms {
         return Err(format!("room {chunk} does not exist ({rooms} rooms)"));
@@ -283,12 +441,15 @@ pub fn bake_chunk_sky(cooked: &CookedLevel, chunk: usize) -> Result<ChunkSky, St
                     let distance = REACH * f64::from(t.fraction_q12) / 4096.0;
                     let n = t.normal_q12.map(|c| f64::from(c) / 4096.0);
                     let lambert = (n[0] * light[0] + n[1] * light[1] + n[2] * light[2]).max(0.0);
-                    // Tops a little lighter than sides, as the graybox reads.
-                    let base = if n[1] > 0.7 {
-                        [70.0, 92.0, 150.0]
-                    } else {
-                        [44.0, 58.0, 110.0]
-                    };
+                    let at = [t.end.x, t.end.y, t.end.z];
+                    let base = colours.and_then(|c| c.colour(at, n)).unwrap_or(
+                        // Tops a little lighter than sides, as the graybox reads.
+                        if n[1] > 0.7 {
+                            [70.0, 92.0, 150.0]
+                        } else {
+                            [44.0, 58.0, 110.0]
+                        },
+                    );
                     let lit = base.map(|c| c * (0.45 + 0.55 * lambert));
                     let k = if fogged {
                         ((distance - fog_near) / (fog_far - fog_near).max(1.0)).clamp(0.0, 1.0)

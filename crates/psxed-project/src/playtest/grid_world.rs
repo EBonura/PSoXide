@@ -317,7 +317,17 @@ pub(super) fn cook(
         .world_sky_for_node(scene.root)
         .is_some_and(|sky| sky.mode == crate::SkyMode::Cube);
     let chunk_skies = if world.stream.ring && cube_sky {
-        bake_chunk_skies(&cooked, report)
+        use crate::grid::lighting::BakeMaterials;
+        let materials = cook::sky_bake::WorldColours::materials(world);
+        let table = crate::grid::lighting::AlbedoTable::from_project(
+            project,
+            project_root,
+            materials.iter().copied(),
+        );
+        let albedo = materials.iter().map(|&m| (m, table.albedo(m))).collect();
+        let colours =
+            cook::sky_bake::WorldColours::new(world, i32::from(cooked.level.sector_units), albedo);
+        bake_chunk_skies(&cooked, &colours, report)
     } else {
         Vec::new()
     };
@@ -345,11 +355,13 @@ pub(super) fn cook(
     })
 }
 
-/// Bake every room's sky ([`cook::sky_bake`]) across the host's cores, on
+/// Bake every room's sky ([`cook::sky_bake`], hits in their materials'
+/// colours) across the host's cores, on
 /// palettes shared by all of them (so the guest streams one over another in
 /// place). A failure leaves the world with its one authored sky.
 fn bake_chunk_skies(
     cooked: &cook::CookedLevel,
+    colours: &cook::sky_bake::WorldColours<'_>,
     report: &mut PlaytestValidationReport,
 ) -> Vec<Vec<u8>> {
     let started = std::time::Instant::now();
@@ -385,7 +397,7 @@ fn bake_chunk_skies(
     };
     let skies = std::sync::Mutex::new(Vec::new());
     let baked = across(&|room| {
-        let sky = cook::sky_bake::bake_chunk_sky(cooked, room)?;
+        let sky = cook::sky_bake::bake_chunk_sky_with(cooked, room, Some(colours))?;
         skies.lock().map_err(|_| "poisoned")?.push(sky);
         Ok(Vec::new())
     })
