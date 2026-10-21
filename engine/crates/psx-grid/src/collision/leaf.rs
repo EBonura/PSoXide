@@ -103,7 +103,7 @@ impl<'a> GridCollision<'a> {
     /// Quarter sector (0 to 3) of a sector-local offset: three compares, no
     /// division.
     #[inline(always)]
-    fn quarter_of(v: i32, q: i32) -> i32 {
+    pub(crate) fn quarter_of(v: i32, q: i32) -> i32 {
         i32::from(v >= q) + i32::from(v >= 2 * q) + i32::from(v >= 3 * q)
     }
 
@@ -257,6 +257,34 @@ impl<'a> GridCollision<'a> {
             Some(e) if e & INDEX_SUB != 0 => SUBBLOCK_ENTRIES,
             _ => 1,
         }
+    }
+
+    /// The slots of sector `(cx, cz)` a box `[x0, x1] x [z0, z1]` (sector-local,
+    /// inclusive) can touch, as quarter ranges `(qx0, qx1, qz0, qz1)` for slot
+    /// `qz * 4 + qx`: `(0, 0, 0, 0)` for an undivided sector. The ranges are
+    /// widened to whole half-sector blocks, since a half leaf answers only in
+    /// the first of its four slots.
+    #[inline(always)]
+    pub(crate) fn box_slots(
+        &self,
+        view: &CollisionView<'_>,
+        (cx, cz): (usize, usize),
+        (x0, x1): (i32, i32),
+        (z0, z1): (i32, i32),
+    ) -> (i32, i32, i32, i32) {
+        if Self::cell_slots(view, cx, cz) == 1 {
+            return (0, 0, 0, 0);
+        }
+        let (s, q) = (self.s, self.s / 4);
+        let span = |a: i32, b: i32| {
+            (
+                Self::quarter_of(a.max(0), q) & !1,
+                Self::quarter_of(b.min(s - 1), q) | 1,
+            )
+        };
+        let (qx0, qx1) = span(x0, x1);
+        let (qz0, qz1) = span(z0, z1);
+        (qx0, qx1, qz0, qz1)
     }
 
     /// The leaf in slot `k` of sector `(cx, cz)` (`k < cell_slots`), `None`

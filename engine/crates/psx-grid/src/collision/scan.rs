@@ -629,7 +629,14 @@ impl<'a> GridCollision<'a> {
         let (cz0, cz1) = (cell(lz - r, d), cell(lz + r, d));
         for cz in cz0..=cz1 {
             for cx in cx0..=cx1 {
-                for k in 0..Self::cell_slots(view, cx, cz) {
+                // Only the slots under the body's box: a divided sector has
+                // sixteen, a body covers a few.
+                let (bx, bz) = (lx - cx as i32 * s, lz - cz as i32 * s);
+                let (qx0, qx1, qz0, qz1) =
+                    self.box_slots(view, (cx, cz), (bx - r, bx + r), (bz - r, bz + r));
+                for k in
+                    (qz0..=qz1).flat_map(|qz| (qx0..=qx1).map(move |qx| (qz * 4 + qx) as usize))
+                {
                     let Some(leaf) = self.cell_leaf(view, cx, cz, k) else {
                         continue;
                     };
