@@ -5,9 +5,16 @@ which itself defers to the [official Rust style guide](https://doc.rust-lang.org
 and the [Rust API guidelines](https://rust-lang.github.io/api-guidelines/). Where this file
 records a deviation, this file wins. Everywhere else the guide wins over taste.
 
+## Rule 0: performance first
+
+No style change may cost cycles, RAM or binary size. Where the guide and performance
+conflict, performance wins and the code carries a one-line comment saying why. Mechanical
+changes (formatting, renames, docs) must keep guest binaries byte-identical. Changes that can
+alter codegen (lint fixes, iterator or loop rewrites, panic handling) need a benchmark showing
+they are not slower or bigger. Manny, 2026-10-22: "performance trumps style".
+
 Status: the formatter settings and the lints marked "deny" are enforced today. The
-deviations under "Project deltas" are **PROPOSED** until Manny approves them; until then the
-guide applies as written.
+deviations under "Project deltas" were **APPROVED** by Manny on 2026-10-22.
 
 ## Scope
 
@@ -34,7 +41,7 @@ Run `make fmt` before pushing and `make lint` before asking for review. Three of
 options are unstable, so formatting needs the pinned nightly, which `rust-toolchain.toml`
 already selects.
 
-## Project deltas (PROPOSED)
+## Project deltas (APPROVED 2026-10-22)
 
 Each row is a place where the guide, applied as written, does not fit a PlayStation 1 target
 or this tree. None is a general exemption: the last column says what replaces the rule.
