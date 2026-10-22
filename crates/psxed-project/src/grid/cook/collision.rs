@@ -289,15 +289,37 @@ pub fn build_with(
     room_index: usize,
     camera_pass: &mut dyn FnMut(&crate::grid::plane::GridPlane) -> bool,
 ) -> Result<Tables, String> {
-    build_with_meshes(units, room, &[], room_index, camera_pass)
+    build_room(units, room, &[], None, room_index, camera_pass)
 }
 
-/// [`build_with`], plus the collision of the room's placed meshes (instances
-/// of `assets`).
+/// [`build_with`] for room `room_index` of `world`: the collision of the
+/// room's placed meshes (instances of the world's assets), and walls
+/// against the sibling chunks when the world is chunked.
 pub fn build_with_meshes(
+    units: &RuntimeUnits,
+    world: &crate::grid::world::GridWorld,
+    room_index: usize,
+    camera_pass: &mut dyn FnMut(&crate::grid::plane::GridPlane) -> bool,
+) -> Result<Tables, String> {
+    let room = world
+        .rooms
+        .get(room_index)
+        .ok_or_else(|| format!("room {room_index} does not exist"))?;
+    build_room(
+        units,
+        room,
+        &world.mesh_assets,
+        Some(world),
+        room_index,
+        camera_pass,
+    )
+}
+
+fn build_room(
     units: &RuntimeUnits,
     room: &GridRoom,
     assets: &[crate::grid::mesh::MeshAsset],
+    world: Option<&crate::grid::world::GridWorld>,
     room_index: usize,
     camera_pass: &mut dyn FnMut(&crate::grid::plane::GridPlane) -> bool,
 ) -> Result<Tables, String> {
@@ -319,14 +341,17 @@ pub fn build_with_meshes(
         camera_pass,
         extra,
     )?;
-    if !room.leaves.is_sectors_only() {
+    if world.map_or_else(
+        || !room.leaves.is_sectors_only(),
+        |world| world.builds_from_leaves(room),
+    ) {
         if room.leaves.iter().any(|(_, leaf)| !leaf.is_single_span()) {
             return Err(format!(
                 "room {room_index}: a column of several spans in a room with leaves of several sizes is not cooked: storeys are written per whole sector, so keep such a room to whole sectors (docs/grid/UX-NOTES.md)"
             ));
         }
         // Leaves of several sizes: one record per leaf and an index.
-        return super::leaf_collision::build(units, room, room_index, planes, mesh_warnings);
+        return super::leaf_collision::build(units, room, world, room_index, planes, mesh_warnings);
     }
     let mut range: Option<(i32, i32)> = planes.range;
     let mut note = |lo: i16, hi: i16| {

@@ -36,9 +36,7 @@ pub fn collision_tables(world: &GridWorld, units: &RuntimeUnits) -> Result<Vec<T
         .rooms
         .iter()
         .enumerate()
-        .map(|(index, room)| {
-            collision::build_with_meshes(units, room, &world.mesh_assets, index, &mut |_| false)
-        })
+        .map(|(index, _)| collision::build_with_meshes(units, world, index, &mut |_| false))
         .collect()
 }
 

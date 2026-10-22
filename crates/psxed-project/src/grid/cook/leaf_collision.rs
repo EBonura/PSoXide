@@ -21,12 +21,13 @@ use super::collision::{cliff, corners, edge_id, surface_record, PlaneRuns, Table
 use super::plane_collision::PlaneTables;
 use super::units::RuntimeUnits;
 use crate::grid::leaf::{LeafKey, CLICKS_PER_SECTOR, SECTOR_LEVEL};
-use crate::grid::leaf_derive::{leaf_walls, LeafWall};
+use crate::grid::leaf_derive::{leaf_walls, Around, LeafWall};
 use crate::grid::leaf_diag::leaf_diag_walls;
 use crate::grid::overrides::WallMode;
 use crate::grid::room::GridRoom;
 use crate::grid::sector::WallEdge;
 use crate::grid::tree::neighbours::along;
+use crate::grid::world::GridWorld;
 
 /// The size code a leaf of `level` is written with (see `psx_grid::leaf_code`).
 pub const fn code_of(level: u8) -> u16 {
@@ -74,6 +75,7 @@ fn span_flag(w: &LeafWall, key: LeafKey) -> u8 {
 pub fn build(
     units: &RuntimeUnits,
     room: &GridRoom,
+    world: Option<&GridWorld>,
     room_index: usize,
     planes: PlaneTables,
     mesh_warnings: Vec<String>,
@@ -87,6 +89,10 @@ pub fn build(
             leaves.len()
         ));
     }
+    let around = world.map_or_else(
+        || Around::room(room),
+        |world| Around::in_world(room, world, room_index),
+    );
     let mut tables = Tables::default();
     let mut range: Option<(i32, i32)> = planes.range;
     let mut note = |lo: i16, hi: i16| {
@@ -134,7 +140,7 @@ pub fn build(
             }
         }
         if room.wall_mode == WallMode::Derived {
-            let derived = leaf_walls(room, *key, doc)
+            let derived = leaf_walls(&around, *key, doc)
                 .into_iter()
                 .chain(leaf_diag_walls(room, *key, doc));
             for w in derived {

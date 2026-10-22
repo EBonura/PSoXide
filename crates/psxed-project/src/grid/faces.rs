@@ -590,7 +590,7 @@ pub fn cell_faces_with(
     let Some(r) = world.rooms.get(room) else {
         return;
     };
-    if !r.leaves.is_sectors_only() {
+    if world.builds_from_leaves(r) {
         super::leaf_faces::cell_faces(world, defaults, room, x, z, out);
         return;
     }

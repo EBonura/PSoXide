@@ -116,6 +116,8 @@ mod leaf_face_tests;
 #[cfg(test)]
 mod leaf_tests;
 #[cfg(test)]
+mod seam_tests;
+#[cfg(test)]
 mod span_face_tests;
 #[cfg(test)]
 mod spiral_tests;

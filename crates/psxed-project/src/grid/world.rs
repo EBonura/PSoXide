@@ -179,6 +179,24 @@ impl GridWorld {
         Self::default()
     }
 
+    /// Whether the rooms are chunks of one surface (a world cut into even
+    /// chunks, [`super::edit::chunks`]) rather than separate volumes. Across
+    /// the border of a chunk lies the next chunk, not open space, so derived
+    /// walls are worked out against the sibling chunks too.
+    pub fn is_chunked(&self) -> bool {
+        self.stream.ring
+    }
+
+    /// Whether faces and collision of `room` are made from its leaves one by
+    /// one (the path that looks across room borders) rather than as a dense
+    /// grid of whole sectors. A room with leaves of several sizes always
+    /// is; so is a chunk of a chunked world, unless a column of several
+    /// spans needs the dense path.
+    pub fn builds_from_leaves(&self, room: &GridRoom) -> bool {
+        !room.leaves.is_sectors_only()
+            || (self.is_chunked() && room.leaves.iter().all(|(_, s)| s.is_single_span()))
+    }
+
     /// The mapping a face takes when neither it nor its material says
     /// otherwise: world aligned at [`Self::texels_per_sector`].
     pub fn default_uv(&self) -> UvMode {

@@ -291,12 +291,11 @@ pub fn cook_level(
     // tables (stacked rooms shadow each other).
     let origins = crate::grid::lighting::probe::room_origins(world, &units);
     let mut cols: Vec<collision::Tables> = Vec::new();
-    for (index, room) in world.rooms.iter().enumerate() {
+    for index in 0..world.rooms.len() {
         let binder = &*input.binder;
         cols.push(collision::build_with_meshes(
             &units,
-            room,
-            &world.mesh_assets,
+            world,
             index,
             &mut |plane| {
                 plane

@@ -184,7 +184,8 @@ pub(super) fn cell_faces(
         leaf_faces(&mut builder, r, cell, key, sector);
     }
     if r.wall_mode == WallMode::Derived {
-        for w in leaf_derive::cell_walls(r, cell, &leaves) {
+        let around = leaf_derive::Around::in_world(r, world, room_index);
+        for w in leaf_derive::cell_walls(&around, cell, &leaves) {
             builder.leaf = w.host;
             builder.derived_wall_in(r, &w.wall, w.geom);
         }
