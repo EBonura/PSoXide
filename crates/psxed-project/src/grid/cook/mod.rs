@@ -663,6 +663,7 @@ fn cook_rooms(
 }
 
 mod flood_plan;
+pub mod skin;
 
 #[cfg(test)]
 mod band_cook_tests;
@@ -674,6 +675,8 @@ mod derived_tests;
 mod extrude_tests;
 #[cfg(test)]
 mod flood_plan_tests;
+#[cfg(test)]
+mod skin_tests;
 #[cfg(test)]
 mod gap_tests;
 #[cfg(test)]

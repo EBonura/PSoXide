@@ -277,7 +277,7 @@ pub(super) fn cook(
     for warning in std::mem::take(&mut binder.warnings) {
         report.warn(format!("grid world: {warning}"));
     }
-    let cooked = match cooked {
+    let mut cooked = match cooked {
         Ok(cooked) => cooked,
         Err(error) => {
             report.error(format!("grid world: {error}"));
@@ -286,6 +286,12 @@ pub(super) fn cook(
     };
     for warning in &cooked.report.warnings {
         report.warn(warning.clone());
+    }
+    if world.stream.flood.on && world.stream.flood.skin {
+        if let Err(error) = add_skin(project, project_root, &mut cooked, report) {
+            report.error(format!("grid world: {error}"));
+            return None;
+        }
     }
     let mut rooms = Vec::new();
     for chunk in &cooked.chunks {
@@ -365,6 +371,29 @@ pub struct CookedLevelBytes {
     pub chunks: Vec<Vec<u8>>,
     /// Cook warnings, one per line.
     pub warnings: Vec<String>,
+}
+
+/// Bake the far skin of `cooked` and put it in the core: each level material
+/// coloured by its mean texel colour, lit by the baked light of the surface.
+fn add_skin(
+    project: &ProjectDocument,
+    project_root: &Path,
+    cooked: &mut cook::CookedLevel,
+    report: &mut PlaytestValidationReport,
+) -> Result<(), String> {
+    use crate::grid::lighting::{AlbedoTable, BakeMaterials};
+    let ids: Vec<Option<ResourceId>> = cooked.materials.iter().map(|(id, _)| *id).collect();
+    let table = AlbedoTable::from_project(project, project_root, ids.iter().copied());
+    let albedo: Vec<[f32; 3]> = ids.iter().map(|&id| table.albedo(id)).collect();
+    let (block, summary) = cook::skin::bake(cooked, &albedo, cook::skin::SkinSettings::default())?;
+    cooked.level.skin = Some(block);
+    cooked.core = cooked.level.try_to_bytes()?;
+    cooked.report.core_bytes = cooked.core.len();
+    report.warn(format!(
+        "skin: {} sectors in {} leaves (1, 2, 4, 8 sectors across: {:?}), {} bytes in the core, height step {} units",
+        summary.sectors, summary.leaves, summary.by_size, summary.bytes, summary.height_step
+    ));
+    Ok(())
 }
 
 /// How [`cook_level_bytes`] binds materials.

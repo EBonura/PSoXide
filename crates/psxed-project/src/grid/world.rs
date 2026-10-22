@@ -99,6 +99,9 @@ pub struct FloodSettings {
     /// Most quads the plan cone of a camera may hold at `near_radius`; the
     /// cook refuses a level whose worst position exceeds it. 0 only reports.
     pub quad_budget: u16,
+    /// Also bake the far skin (the whole level as flat coloured top surfaces)
+    /// and draw it for the cells that are not drawn whole. Needs `on`.
+    pub skin: bool,
 }
 
 impl FloodSettings {
@@ -109,6 +112,7 @@ impl FloodSettings {
         near_radius: 8,
         res_radius: 12,
         quad_budget: 0,
+        skin: false,
     };
 
     /// Whether these are the defaults (the document then omits them).

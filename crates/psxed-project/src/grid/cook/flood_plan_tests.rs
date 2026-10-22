@@ -10,13 +10,13 @@ use crate::grid::room::GridRoom;
 use crate::grid::surface::GridSurface;
 use crate::grid::world::{FloodSettings, StreamRadii};
 
-/// `count` one-sector rooms side by side along X, floored and roofed so
+/// `count` one-sector rooms side by side, 25 to a row, floored and roofed so
 /// neighbours get portals.
 fn strip(count: usize) -> GridWorld {
     let rooms = (0..count)
         .map(|i| {
             let mut room = GridRoom::new(format!("r{i}"), 1, 1);
-            room.origin = [i as i32, 0];
+            room.origin = [(i % 25) as i32, (i / 25) as i32];
             let sector = room.sector_or_insert(0, 0).unwrap();
             sector.set_ground_floor(Some(GridSurface::flat(0, None)));
             sector.set_ground_ceiling(Some(GridSurface::flat(1024, None)));
@@ -30,11 +30,15 @@ fn strip(count: usize) -> GridWorld {
 }
 
 fn flooded(mut world: GridWorld, near: u8, res: u8) -> GridWorld {
+    // Entities only think close by, so the activation walk does not keep the
+    // whole level resident.
+    world.stream.active_radius = 2;
     world.stream.flood = FloodSettings {
         on: true,
         near_radius: near,
         res_radius: res,
         quad_budget: 0,
+        skin: false,
     };
     world
 }
