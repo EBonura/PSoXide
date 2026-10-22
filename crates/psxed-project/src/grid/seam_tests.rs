@@ -2,6 +2,7 @@
 //! not an edge of the world, so a step that falls on it gets its wall.
 
 use super::edit::chunks::{rechunk_hex, HexLayout};
+use super::faces::{all_faces, GridFaceKind};
 use super::leaf_derive::{
     derived_range, derived_range_in, leaf_walls, open_edges, seam_walls, Around, OpenKind,
 };
@@ -128,4 +129,38 @@ fn the_culling_range_of_a_cell_counts_the_wall_it_hosts_across_a_border() {
     // Taken alone the room would not know the wall.
     let alone = derived_range(&world.rooms[wall.room], cell);
     assert!(alone.is_none_or(|(lo, hi)| hi - lo < 2048), "{alone:?}");
+}
+
+/// Area of the derived wall faces the preview and the cook draw, editor
+/// units squared.
+fn drawn_wall_area(world: &GridWorld) -> i64 {
+    all_faces(world)
+        .iter()
+        .filter(|f| matches!(f.kind, GridFaceKind::Derived { .. }))
+        .map(|f| {
+            // Walls are vertical: area from the plan run and the heights.
+            let p = &f.points;
+            let twice: i64 = (0..p.len())
+                .map(|i| {
+                    let (a, b) = (p[i], p[(i + 1) % p.len()]);
+                    let u = |q: [i32; 3]| i64::from(q[0]) + i64::from(q[2]);
+                    u(a) * i64::from(b[1]) - u(b) * i64::from(a[1])
+                })
+                .sum();
+            twice.abs() / 2
+        })
+        .sum()
+}
+
+#[test]
+fn the_faces_of_a_chunked_world_hold_every_wall_the_whole_world_has() {
+    let whole = field_with_block(16, 5..11, 2048);
+    let mut chunked = whole.clone();
+    rechunk_hex(&mut chunked, HexLayout { size: 2.0 }).unwrap();
+    // Chunks of whole sectors, which would take the dense path alone.
+    assert!(chunked.rooms.iter().all(|r| r.leaves.is_sectors_only()));
+    assert_eq!(drawn_wall_area(&chunked), drawn_wall_area(&whole));
+    // Without the chunked setting the border walls are gone.
+    chunked.stream.ring = false;
+    assert!(drawn_wall_area(&chunked) < drawn_wall_area(&whole));
 }
