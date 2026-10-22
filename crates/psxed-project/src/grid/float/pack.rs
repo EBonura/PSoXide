@@ -17,6 +17,16 @@ pub struct Component {
     pub mean_thickness: i32,
 }
 
+/// Running totals of one component.
+#[derive(Default)]
+struct Tally {
+    cells: usize,
+    lo: [i32; 2],
+    hi: [i32; 2],
+    clearance: i64,
+    thickness: i64,
+}
+
 /// Label every cell with its component (cells touching along an edge are
 /// one) and describe the components, indexed by label.
 pub fn components(cells: &[PlanCell]) -> (Vec<usize>, Vec<Component>) {
@@ -42,7 +52,7 @@ pub fn components(cells: &[PlanCell]) -> (Vec<usize>, Vec<Component>) {
         }
     }
     let mut labels: HashMap<usize, usize> = HashMap::new();
-    let mut sums: Vec<(usize, [i32; 2], [i32; 2], i64, i64)> = Vec::new();
+    let mut sums: Vec<Tally> = Vec::new();
     let mut out = Vec::with_capacity(cells.len());
     for cell in cells {
         let node = nodes[&(cell.x, cell.z)];
@@ -50,23 +60,27 @@ pub fn components(cells: &[PlanCell]) -> (Vec<usize>, Vec<Component>) {
         let next = labels.len();
         let label = *labels.entry(r).or_insert(next);
         if label == sums.len() {
-            sums.push((0, [cell.x, cell.z], [cell.x, cell.z], 0, 0));
+            sums.push(Tally {
+                lo: [cell.x, cell.z],
+                hi: [cell.x, cell.z],
+                ..Tally::default()
+            });
         }
         let s = &mut sums[label];
-        s.0 += 1;
-        s.1 = [s.1[0].min(cell.x), s.1[1].min(cell.z)];
-        s.2 = [s.2[0].max(cell.x), s.2[1].max(cell.z)];
-        s.3 += i64::from(cell.clearance);
-        s.4 += i64::from(cell.top - cell.bottom);
+        s.cells += 1;
+        s.lo = [s.lo[0].min(cell.x), s.lo[1].min(cell.z)];
+        s.hi = [s.hi[0].max(cell.x), s.hi[1].max(cell.z)];
+        s.clearance += i64::from(cell.clearance);
+        s.thickness += i64::from(cell.top - cell.bottom);
         out.push(label);
     }
     let described = sums
         .into_iter()
-        .map(|(n, lo, hi, clearance, thickness)| Component {
-            cells: n,
-            bounds: (lo, hi),
-            mean_clearance: (clearance / n as i64) as i32,
-            mean_thickness: (thickness / n as i64) as i32,
+        .map(|t| Component {
+            cells: t.cells,
+            bounds: (t.lo, t.hi),
+            mean_clearance: (t.clearance / t.cells as i64) as i32,
+            mean_thickness: (t.thickness / t.cells as i64) as i32,
         })
         .collect();
     (out, described)

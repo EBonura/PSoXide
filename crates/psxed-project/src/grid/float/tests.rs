@@ -130,7 +130,7 @@ fn a_deck_over_the_island_becomes_one_slab_at_its_exact_height() {
     // 6912, whatever the voxel layers of the model would have been.
     assert_eq!(
         boxes(&w),
-        vec![(0, [2 * 1024, 6144, 3 * 1024], [6656 + 0, 6912, 4352])]
+        vec![(0, [2 * 1024, 6144, 3 * 1024], [6656, 6912, 4352])]
     );
     let mesh = &w.rooms[0].meshes[0];
     assert!(mesh.collide);
