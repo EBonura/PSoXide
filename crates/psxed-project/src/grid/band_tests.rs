@@ -923,3 +923,64 @@ fn merging_one_segment_leaves_the_rest_of_the_run_cut() {
         );
     }
 }
+
+// ---- painting a whole wall reaches its banded pieces ----
+
+#[test]
+fn painting_a_whole_wall_repaints_the_bands_that_keep_a_material_of_their_own() {
+    use super::edit::bands::paint_whole_wall;
+    let mut world = hall(3, 1);
+    let wall = north_wall(1);
+    // trim 0..256 in 1, body in 2, frieze 1792..2048 in 3.
+    assert!(edit_bands(&mut world, wall, BandScope::Piece, |set| {
+        *set = trim_body_frieze();
+        true
+    }));
+    let done = paint_whole_wall(&mut world, wall, Some(rid(7)));
+    let materials: Vec<_> = effective_set(&world, wall)
+        .map(|(_, s)| s.bands.iter().map(|b| b.material).collect())
+        .unwrap_or_default();
+    assert_eq!(
+        materials,
+        vec![Some(rid(7)); 3],
+        "every band that had its own material takes the paint"
+    );
+    assert_eq!(done.bands, 3);
+    assert!(done.changed());
+    // The neighbours of the run keep what they had.
+    for cell in [0, 2] {
+        assert!(effective_set(&world, north_wall(cell))
+            .is_none_or(|(_, s)| s.bands.iter().all(|b| b.material != Some(rid(7)))));
+    }
+}
+
+#[test]
+fn a_whole_wall_paint_leaves_bands_without_a_material_to_inherit_it() {
+    use super::edit::bands::paint_whole_wall;
+    let mut world = hall(1, 1);
+    let wall = north_wall(0);
+    assert!(edit_bands(&mut world, wall, BandScope::Piece, |set| {
+        assert!(set.insert_line(0, Anchor::Abs(768)));
+        set.set_band_material(0, Some(rid(4)));
+        set.set_band_material(1, None);
+        true
+    }));
+    let done = paint_whole_wall(&mut world, wall, Some(rid(7)));
+    assert_eq!(done.bands, 1, "only the band with a material is rewritten");
+    let materials: Vec<_> = effective_set(&world, wall)
+        .map(|(_, s)| s.bands.iter().map(|b| b.material).collect())
+        .unwrap_or_default();
+    assert_eq!(materials, vec![Some(rid(7)), None]);
+    // Painting the same material again changes nothing.
+    assert!(!paint_whole_wall(&mut world, wall, Some(rid(7))).changed());
+}
+
+#[test]
+fn a_whole_wall_paint_of_a_plain_wall_is_just_the_wall() {
+    use super::edit::bands::paint_whole_wall;
+    let mut world = hall(1, 1);
+    let done = paint_whole_wall(&mut world, north_wall(0), Some(rid(7)));
+    assert!(done.wall);
+    assert_eq!(done.bands, 0);
+    assert!(world.rooms[0].band_sets.is_empty(), "no set is made for it");
+}

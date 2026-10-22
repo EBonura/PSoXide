@@ -347,6 +347,35 @@ pub struct Extruded {
     pub removed: usize,
 }
 
+impl Extruded {
+    /// The words for a result that pushed `steps` sectors (out when
+    /// positive), for the status bar and the MCP reply alike.
+    pub fn describe(&self, steps: i32) -> String {
+        if steps == 0 {
+            return "Extrude: no change".to_string();
+        }
+        let way = if steps > 0 { "out" } else { "in" };
+        let n = steps.abs();
+        let sectors = if n == 1 { "sector" } else { "sectors" };
+        let mut line = format!("Extrude {way} {n} {sectors}");
+        let parts = [
+            (self.created, "made"),
+            (self.opened, "opened"),
+            (self.filled, "filled"),
+            (self.removed, "removed"),
+        ];
+        let text: Vec<String> = parts
+            .iter()
+            .filter(|(n, _)| *n > 0)
+            .map(|(n, what)| format!("{n} {what}"))
+            .collect();
+        if !text.is_empty() {
+            line += &format!(": {}", text.join(", "));
+        }
+        line
+    }
+}
+
 /// The sectors an extrusion visited, for the walls to settle afterwards.
 #[derive(Default)]
 struct Touched {

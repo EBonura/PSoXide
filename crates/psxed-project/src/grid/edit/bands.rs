@@ -525,6 +525,53 @@ pub fn paint_band(
     })
 }
 
+/// What painting a whole wall changed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WholeWallPaint {
+    /// The wall's own material changed.
+    pub wall: bool,
+    /// Bands that carried a material of their own and took the new one.
+    pub bands: usize,
+}
+
+impl WholeWallPaint {
+    /// Whether anything changed.
+    pub fn changed(self) -> bool {
+        self.wall || self.bands > 0
+    }
+}
+
+/// Put `material` on the whole of wall `face`: the wall's own material and
+/// every band of its set that carries a material of its own (a band without
+/// one already shows the wall's). Without this a band keeps its old look
+/// under a paint that was meant for the whole wall, with nothing to say so.
+/// The bands change as the Paint tool changes one: the wall segment gets a
+/// set of its own ([`BandScope::Piece`]) and the rest of its run is left.
+pub fn paint_whole_wall(
+    world: &mut GridWorld,
+    face: FaceRef,
+    material: Option<ResourceId>,
+) -> WholeWallPaint {
+    let wall = super::surfaces::set_material(world, face, None, material);
+    let mut repainted = 0;
+    let changed = effective_set(world, face).is_some()
+        && edit_bands(world, face, BandScope::Piece, |set| {
+            let mut n = 0;
+            for band in &mut set.bands {
+                if band.material.is_some() && band.material != material {
+                    band.material = material;
+                    n += 1;
+                }
+            }
+            repainted = n;
+            n > 0
+        });
+    WholeWallPaint {
+        wall,
+        bands: if changed { repainted } else { 0 },
+    }
+}
+
 /// Join band `other` of `face`'s wall to the band `keep` beside it, taking the
 /// cut between them away (what splitting the wall did, undone). The joined
 /// band keeps `keep`'s material and rule. With scope Run the cut goes from
