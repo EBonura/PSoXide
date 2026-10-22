@@ -34,8 +34,9 @@ use psx_grid::contents::{contents_of_liquid_kind, LiquidContentsSample, CONTENTS
 #[cfg(target_arch = "mips")]
 use psx_grid::render::load_gte_clip_planes;
 use psx_grid::render::{
-    classic_far_depth, draw_skin, load_view_rotation, plan_axes, FrustumPlanes, GridFrame, GridPhase,
-    GridRenderer, RoomCamera, SkinCamera, ViewProjection, ViewTransform, CLIP_ALL_PLANES,
+    classic_far_depth, load_view_rotation, plan_axes, FrustumPlanes, GridFrame, GridPhase,
+    GridRenderer, RoomCamera, SkinCamera, SkinRenderer, ViewProjection, ViewTransform,
+    CLIP_ALL_PLANES,
 };
 use psx_grid::stream::{room_at, StreamWindow, Want, WantedRoom};
 use psx_grid::{FormatError, LevelView, ResidentRooms, RoomActivity, RoomView, LEVEL_HAS_LIQUIDS};
@@ -146,6 +147,7 @@ pub(super) struct GridRuntime {
     visible_scratch: Vec<usize>,
     /// Per room, whether the frame draws it whole (the skin covers the rest).
     skin_skip: Vec<bool>,
+    skin: SkinRenderer,
     last_world_packet_words: usize,
     camera_traces: u32,
     /// Sight-line cache for [`Self::visible_view_bounds_mask`].
@@ -267,6 +269,7 @@ impl GridRuntime {
             draw_scratch: Vec::new(),
             visible_scratch: Vec::new(),
             skin_skip: Vec::new(),
+            skin: SkinRenderer::new(),
             last_world_packet_words: 0,
             camera_traces: 0,
             view_known: 0,
@@ -1127,7 +1130,7 @@ impl GridRuntime {
                             * 6
                             / 5,
                     };
-                    let skin = draw_skin(
+                    let skin = self.skin.draw(
                         &self.level,
                         &self.skin_skip,
                         &camera,
