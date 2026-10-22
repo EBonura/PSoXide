@@ -87,6 +87,7 @@ fn config() -> FloatConfig {
 fn style() -> SlabStyle {
     SlabStyle {
         materials: [Some(rid(8)), Some(rid(9)), Some(rid(10))],
+        ..SlabStyle::default()
     }
 }
 

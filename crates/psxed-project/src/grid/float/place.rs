@@ -17,11 +17,22 @@ const LARGE_UNIT: i32 = 8192;
 /// Material slots of a slab asset: the top, the four sides, the underside.
 const SLOT_COUNT: usize = 3;
 
-/// Materials of the three faces of every slab.
-#[derive(Clone, Copy, Debug, Default)]
+/// Materials of the three faces of every slab, and whether it collides.
+#[derive(Clone, Copy, Debug)]
 pub struct SlabStyle {
     /// Top, sides and underside, in that order.
     pub materials: [Option<ResourceId>; SLOT_COUNT],
+    /// Whether bodies, the camera and rays meet the slab.
+    pub collide: bool,
+}
+
+impl Default for SlabStyle {
+    fn default() -> Self {
+        Self {
+            materials: [None; SLOT_COUNT],
+            collide: true,
+        }
+    }
 }
 
 /// The unit cube as OBJ text, three materials in slot order.
@@ -211,6 +222,7 @@ pub fn place(
     let z = origin[1] + piece.z * piece.edge + size[2] / 2;
     let mut mesh = GridMesh::new(0, index, [x, piece.bottom, z]);
     mesh.scale = size.map(|s| (s * 256 / unit) as u16);
+    mesh.collide = style.collide;
     for (slot, material) in style.materials.iter().enumerate() {
         mesh.set_material(slot, *material);
     }

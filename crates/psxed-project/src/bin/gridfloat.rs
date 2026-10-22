@@ -14,6 +14,9 @@
 //!   --min-area N           smallest patch kept, in fitting blocks
 //!   --tolerance N          height wobble allowed inside one slab, grid units
 //!   --cover PERCENT        share of a cell's rays that must agree
+//!   --rechunk SIZE         afterwards re-chunk the world into hexagons of this
+//!                          centre-to-corner size in sectors, carrying the slabs
+//!   --no-collide           slabs draw but do not collide
 //!   --dry-run              report without writing the project
 //! ```
 //!
@@ -25,6 +28,7 @@
 use std::path::Path;
 use std::process::ExitCode;
 
+use psxed_project::grid::edit::chunks::{rechunk_hex, HexLayout};
 use psxed_project::grid::float::columns::{plan_cells, Frame, HitField};
 use psxed_project::grid::float::npy::parse_f32;
 use psxed_project::grid::float::place::SlabStyle;
@@ -38,16 +42,19 @@ struct Args {
     frame: String,
     options: Vec<(String, String)>,
     dry_run: bool,
+    no_collide: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
     let mut positional = Vec::new();
     let mut options = Vec::new();
     let mut dry_run = false;
+    let mut no_collide = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.strip_prefix("--") {
             Some("dry-run") => dry_run = true,
+            Some("no-collide") => no_collide = true,
             Some(name) => {
                 let value = args
                     .next()
@@ -65,6 +72,7 @@ fn parse_args() -> Result<Args, String> {
         frame,
         options,
         dry_run,
+        no_collide,
     })
 }
 
@@ -157,6 +165,7 @@ fn run() -> Result<(), String> {
     };
     let style = SlabStyle {
         materials: [material("top")?, material("side")?, material("under")?],
+        collide: !args.no_collide,
     };
     let world = project
         .active_scene_mut()
@@ -165,6 +174,13 @@ fn run() -> Result<(), String> {
         .ok_or("the project has no grid world")?;
     let report = float_slabs(world, &cells, &config, &style)?;
     print!("{}", report.summary());
+    if let Some(size) = args.number::<f64>("rechunk")? {
+        let moved = rechunk_hex(world, HexLayout { size }).map_err(|e| e.to_string())?;
+        println!(
+            "re-chunked into {} hexagon(s) of size {size}: {} leaf(s) moved",
+            moved.rooms, moved.leaves
+        );
+    }
     if args.dry_run {
         println!("dry run: the project was not written");
         return Ok(());
