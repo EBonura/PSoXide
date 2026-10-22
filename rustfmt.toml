@@ -1,0 +1,7 @@
+# Google's Rust style guide (sdk/docs/STYLE.md). Three of these options are unstable,
+# which is why rust-toolchain.toml pins a nightly and this file opts in.
+unstable_features = true
+max_width = 100
+hex_literal_case = "Lower"
+format_macro_matchers = true
+imports_granularity = "Module"
