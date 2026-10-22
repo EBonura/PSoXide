@@ -360,7 +360,11 @@ fn the_box_test_never_changes_what_a_ray_finds() {
             ];
             let d = match i % 5 {
                 0 => [rng.range(-40, 40), rng.range(-40, 40), rng.range(-40, 40)],
-                1 => [rng.range(-600, 600), rng.range(-200, 200), rng.range(-600, 600)],
+                1 => [
+                    rng.range(-600, 600),
+                    rng.range(-200, 200),
+                    rng.range(-600, 600),
+                ],
                 2 => [0, rng.range(-400, 400), 0],
                 3 => [rng.range(-300, 300), 0, 0],
                 _ => [0, 0, rng.range(-300, 300)],
@@ -381,7 +385,10 @@ fn the_box_test_never_changes_what_a_ray_finds() {
             assert_eq!(with.normal, without.normal, "{a:?} {d:?}");
             assert_eq!(with.start_solid, without.start_solid, "{a:?} {d:?}");
             let (s, t) = (with.src, without.src);
-            assert_eq!((s.kind, s.aux, s.cx, s.cz, s.room, s.span), (t.kind, t.aux, t.cx, t.cz, t.room, t.span));
+            assert_eq!(
+                (s.kind, s.aux, s.cx, s.cz, s.room, s.span),
+                (t.kind, t.aux, t.cx, t.cz, t.room, t.span)
+            );
             found += usize::from(with.fraction <= 4096 || with.start_solid);
             // Count how many planes the box test saved a crossing test.
             let view = w.view(0).unwrap();
@@ -407,10 +414,17 @@ fn the_room_plane_box_holds_every_plane_and_is_inverted_without_planes() {
         let [x0, z0, x1, z1] = view.plane_box;
         assert!(x0 < x1 && z0 < z1);
         for plane in view.col_planes {
-            let corners = if plane.kind == plane_kind::PLATFORM { 4 } else { 2 };
+            let corners = if plane.kind == plane_kind::PLATFORM {
+                4
+            } else {
+                2
+            };
             for c in &plane.xz[..corners] {
                 let (x, z) = (i32::from(c[0]), i32::from(c[1]));
-                assert!((x0..=x1).contains(&x) && (z0..=z1).contains(&z), "{plane:?}");
+                assert!(
+                    (x0..=x1).contains(&x) && (z0..=z1).contains(&z),
+                    "{plane:?}"
+                );
             }
         }
         // The box is tight: the wall at x = 440 is the east edge.

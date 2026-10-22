@@ -329,7 +329,11 @@ fn plane_bounds(planes: &[ColPlane]) -> [i32; 4] {
     let mut out = [i32::MAX, i32::MAX, i32::MIN, i32::MIN];
     for plane in planes {
         // A wall and a blocker use two corners, a platform all four.
-        let corners = if plane.kind == plane_kind::PLATFORM { 4 } else { 2 };
+        let corners = if plane.kind == plane_kind::PLATFORM {
+            4
+        } else {
+            2
+        };
         for corner in &plane.xz[..corners] {
             let (x, z) = (i32::from(corner[0]), i32::from(corner[1]));
             out = [out[0].min(x), out[1].min(z), out[2].max(x), out[3].max(z)];
