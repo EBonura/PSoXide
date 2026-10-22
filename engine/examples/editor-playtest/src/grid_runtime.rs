@@ -34,8 +34,8 @@ use psx_grid::contents::{contents_of_liquid_kind, LiquidContentsSample, CONTENTS
 #[cfg(target_arch = "mips")]
 use psx_grid::render::load_gte_clip_planes;
 use psx_grid::render::{
-    load_view_rotation, FrustumPlanes, GridFrame, GridPhase, GridRenderer, RoomCamera,
-    ViewProjection, ViewTransform, CLIP_ALL_PLANES,
+    classic_far_depth, draw_skin, load_view_rotation, FrustumPlanes, GridFrame, GridPhase,
+    GridRenderer, RoomCamera, SkinCamera, ViewProjection, ViewTransform, CLIP_ALL_PLANES,
 };
 use psx_grid::stream::{room_at, StreamWindow, Want, WantedRoom};
 use psx_grid::{FormatError, LevelView, ResidentRooms, RoomActivity, RoomView, LEVEL_HAS_LIQUIDS};
@@ -144,6 +144,8 @@ pub(super) struct GridRuntime {
     /// frustum.
     draw_scratch: Vec<usize>,
     visible_scratch: Vec<usize>,
+    /// Per room, whether the frame draws it whole (the skin covers the rest).
+    skin_skip: Vec<bool>,
     last_world_packet_words: usize,
     camera_traces: u32,
     /// Sight-line cache for [`Self::visible_view_bounds_mask`].
@@ -264,6 +266,7 @@ impl GridRuntime {
             room_hint: 0,
             draw_scratch: Vec::new(),
             visible_scratch: Vec::new(),
+            skin_skip: Vec::new(),
             last_world_packet_words: 0,
             camera_traces: 0,
             view_known: 0,
@@ -393,6 +396,11 @@ impl GridRuntime {
             installed = resident.insert(usize::from(room), view).is_ok();
             installed
         });
+        telemetry::counter(telemetry::counter::ROOM_STREAM_EVICTIONS, summary.evicted);
+        telemetry::counter(
+            telemetry::counter::ROOM_STREAM_RESIDENT_SLOTS,
+            self.resident.len() as u32,
+        );
         if evicted || installed {
             self.materials_epoch = None;
         }
@@ -1082,6 +1090,52 @@ impl GridRuntime {
                     if frame.overflowed {
                         break;
                     }
+                }
+                if self.level.skin.is_some() && !total.overflowed {
+                    scene::load_translation(view.translation);
+                    // The skin covers the rooms this frame does not draw whole.
+                    self.skin_skip.clear();
+                    self.skin_skip.resize(self.level.rooms.len(), false);
+                    if let Some(drawn) = self.window.drawn_rooms() {
+                        for entry in drawn {
+                            let room = usize::from(entry.room);
+                            if self.resident.get(room).is_some_and(|s| s.materials_ready) {
+                                self.skin_skip[room] = true;
+                            }
+                        }
+                    }
+                    // The room draws left their own planes in the GTE.
+                    #[cfg(target_arch = "mips")]
+                    load_gte_clip_planes(&world_frustum.planes);
+                    telemetry::stage_begin(telemetry::stage::FAR_VISTA);
+                    let camera = SkinCamera {
+                        frustum: &world_frustum,
+                        eye,
+                        screen,
+                        near_sz: (self.projection.focal_length / 2 + 2)
+                            .clamp(1, i32::from(u16::MAX)) as u16,
+                        reach: classic_far_depth(2048),
+                    };
+                    let skin = draw_skin(
+                        &self.level,
+                        &self.skin_skip,
+                        &camera,
+                        if reverse {
+                            &mut packets[..packet_count - total.packet_words]
+                        } else {
+                            &mut packets[total.packet_words..]
+                        },
+                        reverse,
+                    );
+                    telemetry::stage_end(telemetry::stage::FAR_VISTA);
+                    // Skin leaves and rooms visited, on counters the grid
+                    // renderer leaves unused.
+                    telemetry::counter(telemetry::counter::ROOM_SURF_FLOORS, skin.packets);
+                    telemetry::counter(
+                        telemetry::counter::ROOM_SURF_CEILINGS,
+                        u32::from(skin.cells_visible),
+                    );
+                    total.absorb(&skin);
                 }
             }
             scene::load_translation(view.translation);

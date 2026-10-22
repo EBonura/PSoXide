@@ -479,6 +479,8 @@ pub struct LevelCore {
     /// The flood block ([`LEVEL_BUDGET_FLOOD`]). `None`: the level streams as
     /// before and nothing is written for it.
     pub flood: Option<FloodBlock>,
+    /// The skin block ([`LEVEL_HAS_SKIN`]). `None`: nothing is written.
+    pub skin: Option<SkinBlock>,
 }
 
 /// The tail of a core that asks for a budgeted flood: its radii and a cost
@@ -488,6 +490,16 @@ pub struct FloodBlock {
     pub header: FloodHeader,
     /// One byte per portal, Q4 ([`FLOOD_WEIGHT_ONE`] is 1.0).
     pub portal_weight: Vec<u8>,
+}
+
+/// The skin of a level: its header, the first leaf of each room (and one
+/// past the last), and the leaves in room order.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SkinBlock {
+    pub header: SkinHeader,
+    /// `rooms + 1` entries.
+    pub cell_first: Vec<u16>,
+    pub leaves: Vec<SkinLeaf>,
 }
 
 impl LevelCore {
@@ -561,6 +573,11 @@ impl LevelCore {
                     LEVEL_BUDGET_FLOOD
                 } else {
                     0
+                }
+                | if self.skin.is_some() {
+                    LEVEL_HAS_SKIN
+                } else {
+                    0
                 },
             room_count: self.rooms.len() as u16,
             portal_count: self.portals.len() as u16,
@@ -626,6 +643,24 @@ impl LevelCore {
             align4(&mut out);
             out.extend_from_slice(bytes_of(core::slice::from_ref(&flood.header)));
             out.extend_from_slice(&flood.portal_weight);
+        }
+        if let Some(skin) = &self.skin {
+            if skin.cell_first.len() != self.rooms.len() + 1
+                || usize::from(skin.header.leaf_count) != skin.leaves.len()
+                || skin.cell_first.last().map(|&l| usize::from(l)) != Some(skin.leaves.len())
+            {
+                return Err(alloc::format!(
+                    "skin of {} leaves with {} room starts for {} rooms",
+                    skin.leaves.len(),
+                    skin.cell_first.len(),
+                    self.rooms.len()
+                ));
+            }
+            align4(&mut out);
+            out.extend_from_slice(bytes_of(core::slice::from_ref(&skin.header)));
+            out.extend_from_slice(bytes_of(&skin.cell_first));
+            align4(&mut out);
+            out.extend_from_slice(bytes_of(&skin.leaves));
         }
         align4(&mut out);
         Ok(out)

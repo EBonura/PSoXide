@@ -99,6 +99,114 @@ const _: () = assert!(core::mem::size_of::<FloodHeader>() == 8);
 /// 16 is 1.0.
 pub const FLOOD_WEIGHT_ONE: u8 = 16;
 
+/// Level flag: the core ends with a skin block (after the flood block, each
+/// part on a word boundary): a [`SkinHeader`], one `u16` first-leaf index per
+/// room and one more, and the [`SkinLeaf`] records. The skin is the whole
+/// level as untextured, flat coloured top surfaces (a quadtree of squares
+/// over the owned sectors), drawn for the rooms that are not drawn whole.
+pub const LEVEL_HAS_SKIN: u32 = 1 << 7;
+
+/// Fixed part of the skin block ([`LEVEL_HAS_SKIN`]), 12 bytes.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct SkinHeader {
+    pub leaf_count: u16,
+    /// Runtime-unit height of height step 0.
+    pub base_y: i16,
+    /// World sector `[x, z]` of grid cell `(0, 0)`.
+    pub origin: [i16; 2],
+    /// Runtime units per height step.
+    pub height_step: u8,
+    pub reserved: [u8; 3],
+}
+const _: () = assert!(core::mem::size_of::<SkinHeader>() == 12);
+
+/// Largest leaf, as the log2 of its edge in sectors (8 by 8).
+pub const SKIN_MAX_SIZE_LOG2: u8 = 3;
+/// Height steps a [`SkinLeaf`] can hold (9 bits).
+pub const SKIN_HEIGHT_STEPS: u16 = 512;
+
+/// Height steps a skirt nibble stands for: the drop from a leaf's top to the
+/// lowest neighbour across the edge, rounded up to the next entry.
+pub const SKIRT_STEPS: [u16; 16] = [0, 1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192];
+
+/// One skin leaf, 8 bytes: a square of `1 << size_log2` sectors with one top
+/// height and one colour.
+///
+/// `place`: bits 0 to 7 `x`, 8 to 15 `z` (sectors from the header's origin),
+/// 16 to 17 `size_log2`, 18 to 26 height in steps above `base_y`.
+/// `look`: bits 0 to 14 colour RGB555, 15 to 30 four skirt nibbles (edges
+/// towards -Z, +X, +Z, -X, each an index into [`SKIRT_STEPS`]).
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct SkinLeaf {
+    pub place: u32,
+    pub look: u32,
+}
+const _: () = assert!(core::mem::size_of::<SkinLeaf>() == 8);
+
+impl SkinLeaf {
+    /// Pack a leaf. `height` is below [`SKIN_HEIGHT_STEPS`], `size_log2` at
+    /// most [`SKIN_MAX_SIZE_LOG2`], `rgb555` below 32768 and every skirt
+    /// nibble below 16; larger values are masked.
+    pub const fn pack(
+        x: u8,
+        z: u8,
+        size_log2: u8,
+        height: u16,
+        rgb555: u16,
+        skirts: [u8; 4],
+    ) -> Self {
+        Self {
+            place: x as u32
+                | (z as u32) << 8
+                | ((size_log2 & 3) as u32) << 16
+                | ((height & 0x1ff) as u32) << 18,
+            look: (rgb555 & 0x7fff) as u32
+                | ((skirts[0] & 15) as u32) << 15
+                | ((skirts[1] & 15) as u32) << 19
+                | ((skirts[2] & 15) as u32) << 23
+                | ((skirts[3] & 15) as u32) << 27,
+        }
+    }
+
+    /// Sector column from the header's origin.
+    #[inline]
+    pub const fn x(&self) -> u8 {
+        self.place as u8
+    }
+
+    /// Sector row from the header's origin.
+    #[inline]
+    pub const fn z(&self) -> u8 {
+        (self.place >> 8) as u8
+    }
+
+    /// Log2 of the edge in sectors.
+    #[inline]
+    pub const fn size_log2(&self) -> u8 {
+        ((self.place >> 16) & 3) as u8
+    }
+
+    /// Height in steps above the header's `base_y`.
+    #[inline]
+    pub const fn height(&self) -> u16 {
+        ((self.place >> 18) & 0x1ff) as u16
+    }
+
+    /// Colour, RGB555 (bits 0 to 4 red).
+    #[inline]
+    pub const fn rgb555(&self) -> u16 {
+        (self.look & 0x7fff) as u16
+    }
+
+    /// Skirt nibble of edge `side` (0 -Z, 1 +X, 2 +Z, 3 -X).
+    #[inline]
+    pub const fn skirt(&self, side: u8) -> u8 {
+        ((self.look >> (15 + 4 * (side as u32 & 3))) & 15) as u8
+    }
+}
+
 /// Room flag: sky may show (an open sector exists).
 pub const ROOM_OUTDOOR: u16 = 1;
 /// Room flag: distance fog.

@@ -335,3 +335,72 @@ fn the_pool_plan_of_a_flooded_level_is_its_busiest_set_plus_one_room() {
     assert!(plan.peak_pages > 0 && plan.peak_pages < 40 * 3);
     assert_eq!(plan.pool_pages, plan.peak_pages + 3);
 }
+
+#[test]
+fn a_skin_leaf_packs_and_unpacks_every_field() {
+    let leaf = SkinLeaf::pack(200, 17, 3, 511, 0x7fff, [15, 0, 7, 9]);
+    assert_eq!((leaf.x(), leaf.z(), leaf.size_log2()), (200, 17, 3));
+    assert_eq!((leaf.height(), leaf.rgb555()), (511, 0x7fff));
+    assert_eq!(
+        [leaf.skirt(0), leaf.skirt(1), leaf.skirt(2), leaf.skirt(3)],
+        [15, 0, 7, 9]
+    );
+    let plain = SkinLeaf::pack(0, 0, 0, 0, 0, [0; 4]);
+    assert_eq!(plain, SkinLeaf::default());
+}
+
+#[test]
+fn a_skin_block_follows_the_flood_block_and_round_trips() {
+    use crate::write::SkinBlock;
+    let leaves = alloc::vec![
+        SkinLeaf::pack(0, 0, 1, 40, 0x1234, [0, 3, 0, 0]),
+        SkinLeaf::pack(2, 0, 0, 41, 0x4321, [0; 4]),
+        SkinLeaf::pack(3, 0, 0, 41, 0x4321, [1, 0, 0, 0]),
+    ];
+    let core = LevelCore {
+        sector_units: S as u16,
+        rooms: (0..4)
+            .map(|i| RoomRecord {
+                origin: [i * 160, 0, 0],
+                width: 2,
+                depth: 1,
+                pack_sectors: 3,
+                min_y: 0,
+                max_y: 100,
+                ..RoomRecord::default()
+            })
+            .collect(),
+        flood: Some(block(0, 1, 2, 0)),
+        skin: Some(SkinBlock {
+            header: SkinHeader {
+                leaf_count: 3,
+                base_y: -5,
+                origin: [-3, 7],
+                height_step: 5,
+                reserved: [0; 3],
+            },
+            cell_first: alloc::vec![0, 1, 3, 3, 3],
+            leaves: leaves.clone(),
+        }),
+        ..LevelCore::default()
+    };
+    let words = aligned_copy(&core.to_bytes());
+    let level = view(&words);
+    assert!(level.budget_flood().is_some());
+    let header = level.skin.expect("the skin header");
+    assert_eq!((header.base_y, header.origin, header.height_step), (-5, [-3, 7], 5));
+    assert_eq!(level.skin_cells, &[0, 1, 3, 3, 3]);
+    assert_eq!(level.skin_leaves, leaves.as_slice());
+    assert!(level.validate_full().is_ok());
+    assert_ne!(level.header.flags & LEVEL_HAS_SKIN, 0);
+
+    // A skin whose room starts do not match the rooms is refused at write.
+    let bad = LevelCore {
+        skin: Some(SkinBlock {
+            cell_first: alloc::vec![0, 3],
+            ..core.skin.clone().unwrap()
+        }),
+        ..core
+    };
+    assert!(bad.try_to_bytes().is_err());
+}

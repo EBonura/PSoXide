@@ -101,6 +101,11 @@ pub struct LevelView<'a> {
     /// cost weight per portal. `None` and empty otherwise.
     pub flood: Option<&'a FloodHeader>,
     pub flood_weight: &'a [u8],
+    /// With [`LEVEL_HAS_SKIN`]: the skin header, the first leaf of each room
+    /// (`room_count + 1` entries) and the leaves. `None` and empty otherwise.
+    pub skin: Option<&'a SkinHeader>,
+    pub skin_cells: &'a [u16],
+    pub skin_leaves: &'a [SkinLeaf],
 }
 
 impl<'a> LevelView<'a> {
@@ -146,12 +151,23 @@ impl<'a> LevelView<'a> {
             offset = offset.next_multiple_of(4);
             let block = header_at::<FloodHeader>(bytes, offset)?;
             offset += core::mem::size_of::<FloodHeader>();
-            (
-                Some(block),
-                table::<u8>(bytes, offset, usize::from(head.portal_count))?,
-            )
+            let weights = table::<u8>(bytes, offset, usize::from(head.portal_count))?;
+            offset += weights.len();
+            (Some(block), weights)
         } else {
             (None, &[][..])
+        };
+        let (skin, skin_cells, skin_leaves) = if head.flags & LEVEL_HAS_SKIN != 0 {
+            offset = offset.next_multiple_of(4);
+            let block = header_at::<SkinHeader>(bytes, offset)?;
+            offset += core::mem::size_of::<SkinHeader>();
+            let cells = table::<u16>(bytes, offset, usize::from(head.room_count) + 1)?;
+            offset += core::mem::size_of_val(cells);
+            offset = offset.next_multiple_of(4);
+            let leaves = table::<SkinLeaf>(bytes, offset, usize::from(block.leaf_count))?;
+            (Some(block), cells, leaves)
+        } else {
+            (None, &[][..], &[][..])
         };
         Ok(Self {
             header: head,
@@ -164,6 +180,9 @@ impl<'a> LevelView<'a> {
             occupancy_bits,
             flood,
             flood_weight,
+            skin,
+            skin_cells,
+            skin_leaves,
         })
     }
 
@@ -312,6 +331,14 @@ impl<'a> LevelView<'a> {
         }
         for portal in self.portals {
             if usize::from(portal.dest) >= self.rooms.len() {
+                return Err(FormatError::IndexRange);
+            }
+        }
+        if self.skin.is_some() {
+            let ascending = self.skin_cells.windows(2).all(|w| w[0] <= w[1]);
+            if !ascending
+                || self.skin_cells.last().map(|&l| usize::from(l)) != Some(self.skin_leaves.len())
+            {
                 return Err(FormatError::IndexRange);
             }
         }
