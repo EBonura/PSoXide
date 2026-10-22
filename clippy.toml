@@ -9,3 +9,7 @@
 # (editor/, emu/) where a parameter struct costs nothing, and carries the
 # allow deliberately rather than by reflex.
 too-many-arguments-threshold = 10
+
+# Google's Rust style guide (sdk/docs/STYLE.md). Tests may unwrap and panic.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true

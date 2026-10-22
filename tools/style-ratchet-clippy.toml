@@ -1,0 +1,13 @@
+# Appended to clippy.toml by tools/style-ratchet.sh for its measuring run only.
+# Kept out of clippy.toml itself: configuring these lists switches the two lints
+# on at warn level for every crate that has not opted into the workspace lints,
+# and `make lint` runs with -D warnings.
+disallowed-types = [
+    { path = "std::rc::Rc", reason = "avoid Rc/Arc: prefer unique ownership and borrowing (sdk/docs/STYLE.md)" },
+    { path = "std::sync::Arc", reason = "avoid Rc/Arc: prefer unique ownership and borrowing (sdk/docs/STYLE.md)" },
+    { path = "alloc::rc::Rc", reason = "avoid Rc/Arc: prefer unique ownership and borrowing (sdk/docs/STYLE.md)" },
+    { path = "alloc::sync::Arc", reason = "avoid Rc/Arc: prefer unique ownership and borrowing (sdk/docs/STYLE.md)" },
+]
+disallowed-methods = [
+    { path = "std::panic::catch_unwind", reason = "do not catch panics in first-party code (sdk/docs/STYLE.md)" },
+]
