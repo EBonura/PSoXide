@@ -26,6 +26,7 @@ use crate::ResourceId;
 pub use super::mesh_arch::{ArchProfile, ArchSpec};
 pub use super::mesh_column::{ColumnSpec, RubbleSpec};
 pub use super::mesh_obj::{ImportProxy, ImportedFace, ImportedMesh};
+pub use super::mesh_span::SpanSpec;
 
 /// Most faces one instance may build (one plane-run in the chunk holds at
 /// most 255 quads).
@@ -158,6 +159,8 @@ pub enum MeshKind {
     Column(ColumnSpec),
     /// A scatter of low-poly stones.
     Rubble(RubbleSpec),
+    /// A thick deck between two supports.
+    Span(SpanSpec),
     /// Geometry imported from an OBJ file.
     Imported(ImportedMesh),
 }
@@ -187,6 +190,7 @@ impl MeshAsset {
             MeshKind::Arch(spec) => spec.build()?,
             MeshKind::Column(spec) => spec.build()?,
             MeshKind::Rubble(spec) => spec.build()?,
+            MeshKind::Span(spec) => spec.build()?,
             MeshKind::Imported(mesh) => mesh.build()?,
         };
         if built.faces.len() > MAX_MESH_FACES {
@@ -227,6 +231,10 @@ impl MeshAsset {
             MeshKind::Rubble(s) => format!(
                 "rubble: size {}, {} stone(s), seed {}",
                 s.size, s.pieces, s.seed
+            ),
+            MeshKind::Span(s) => format!(
+                "span: length {}, width {}, thickness {}, rise {}",
+                s.length, s.width, s.thickness, s.rise
             ),
             MeshKind::Imported(m) => format!(
                 "imported: {} face(s), {} slot(s){}",

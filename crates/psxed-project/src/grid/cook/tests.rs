@@ -32,7 +32,7 @@ impl MaterialBinder for TestBinder {
     }
 }
 
-pub(super) fn cook(world: &GridWorld) -> Result<CookedLevel, String> {
+pub(crate) fn cook(world: &GridWorld) -> Result<CookedLevel, String> {
     cook_with(world, true)
 }
 

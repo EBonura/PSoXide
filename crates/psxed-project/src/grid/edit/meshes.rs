@@ -10,7 +10,8 @@ use crate::ResourceId;
 
 use super::super::limits::MAX_ROOM_SIDE;
 use super::super::mesh::{
-    ArchProfile, ArchSpec, GridMesh, MeshAsset, MeshKind, MAX_MESHES_PER_ROOM, MAX_MESH_ASSETS,
+    ArchProfile, ArchSpec, GridMesh, MeshAsset, MeshKind, SpanSpec, MAX_MESHES_PER_ROOM,
+    MAX_MESH_ASSETS,
 };
 use super::super::world::GridWorld;
 
@@ -313,6 +314,73 @@ pub fn arch_span(
     Ok((asset, id, placement))
 }
 
+/// Where a span goes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SpanPlacement {
+    /// The recipe, its length and rise solved from the two points.
+    pub spec: SpanSpec,
+    /// Where the instance goes (grid units).
+    pub position: [i32; 3],
+    /// Its heading, degrees.
+    pub yaw: i32,
+}
+
+/// Solve a deck whose top surface meets the supports at `from` and `to`
+/// (points on the top surface, grid units, `y` relative to the room): the
+/// length is their plan distance and the rise their height difference. Width
+/// and thickness come from `spec`.
+pub fn solve_span(
+    from: [i32; 3],
+    to: [i32; 3],
+    mut spec: SpanSpec,
+) -> Result<SpanPlacement, MeshRefusal> {
+    let (dx, dz) = (f64::from(to[0] - from[0]), f64::from(to[2] - from[2]));
+    let length = dx.hypot(dz);
+    if length < 1.0 {
+        return Err(MeshRefusal::Other(
+            "from and to must differ horizontally".to_string(),
+        ));
+    }
+    spec.length = length.round() as i32;
+    spec.rise = to[1] - from[1];
+    spec.check().map_err(MeshRefusal::Other)?;
+    // The span axis (+x of the asset) runs from `from` to `to`.
+    let yaw = (-dz).atan2(dx).to_degrees().round() as i32;
+    Ok(SpanPlacement {
+        spec,
+        position: [
+            (from[0] + to[0]) / 2,
+            from[1].min(to[1]),
+            (from[2] + to[2]) / 2,
+        ],
+        yaw,
+    })
+}
+
+/// Place a deck between two points: add (or reuse) the asset and place the
+/// instance. Returns the asset index and the instance id.
+pub fn span_between(
+    world: &mut GridWorld,
+    room: usize,
+    from: [i32; 3],
+    to: [i32; 3],
+    spec: SpanSpec,
+    name: Option<String>,
+) -> Result<(u16, u16, SpanPlacement), MeshRefusal> {
+    let placement = solve_span(from, to, spec)?;
+    let label = name.unwrap_or_else(|| {
+        format!(
+            "span {} x {} x {}",
+            placement.spec.length, placement.spec.width, placement.spec.thickness
+        )
+    });
+    let asset = add_asset(world, MeshAsset::new(label, MeshKind::Span(placement.spec)))?;
+    let mut mesh = GridMesh::new(0, asset, placement.position);
+    mesh.rotation = [placement.yaw, 0, 0];
+    let id = place_mesh(world, room, mesh)?;
+    Ok((asset, id, placement))
+}
+
 /// The profile named `name`, for tools that take words.
 pub fn parse_profile(name: &str) -> Result<ArchProfile, MeshRefusal> {
     ArchProfile::parse(name).ok_or_else(|| {
@@ -437,6 +505,42 @@ mod tests {
         let (room, i) = w.find_mesh(id).unwrap();
         assert_eq!(w.rooms[room].meshes[i].asset, 0);
         assert_eq!(w.mesh_assets.len(), 1);
+    }
+
+    #[test]
+    fn a_span_runs_between_its_points_and_climbs_with_them() {
+        let spec = SpanSpec::default();
+        let placed = solve_span([1024, 512, 1024], [5120, 1536, 1024], spec).unwrap();
+        assert_eq!(placed.spec.length, 4096);
+        assert_eq!(placed.spec.rise, 1024);
+        assert_eq!(placed.position, [3072, 512, 1024]);
+        assert_eq!(placed.yaw, 0);
+        // Toward +z the deck turns a quarter (yaw -90, plane convention).
+        let north = solve_span([2048, 0, 1024], [2048, 0, 3072], spec).unwrap();
+        assert_eq!(north.yaw, -90);
+        assert!(solve_span([0, 0, 0], [0, 900, 0], spec).is_err());
+        assert!(solve_span([0, 0, 0], [100, 0, 0], spec).is_err());
+        // The solved deck puts both ends of its top where it was told.
+        let mut world = GridWorld {
+            rooms: vec![crate::grid::room::GridRoom::new_derived("r", 8, 8)],
+            ..GridWorld::default()
+        };
+        let (_, id, _) = span_between(
+            &mut world,
+            0,
+            [1024, 512, 1024],
+            [5120, 1536, 1024],
+            spec,
+            None,
+        )
+        .unwrap();
+        let (room, index) = world.find_mesh(id).unwrap();
+        let mesh = &world.rooms[room].meshes[index];
+        let built = world.mesh_assets[usize::from(mesh.asset)].build().unwrap();
+        let (lo, hi) = mesh.bounds(&built).unwrap();
+        assert_eq!((lo[0], hi[0]), (1024, 5120));
+        // Top of the high end 1536, underside of the low end 512 - 512.
+        assert_eq!((lo[1], hi[1]), (0, 1536));
     }
 
     #[test]

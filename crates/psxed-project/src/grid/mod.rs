@@ -59,6 +59,7 @@ pub mod edit;
 pub mod faces;
 mod faces_bands;
 mod faces_derived;
+pub mod float;
 pub mod graybox_set;
 pub mod heat;
 pub mod leaf;
@@ -74,6 +75,7 @@ mod mesh_arch;
 mod mesh_column;
 pub mod mesh_faces;
 mod mesh_obj;
+mod mesh_span;
 pub mod overrides;
 pub mod paint_rules;
 pub mod palette;
@@ -135,6 +137,7 @@ pub use lighting::GlobalLight;
 pub use limits::{GridBudget, GridIssue, GridIssueKind, Severity};
 pub use mesh::{
     ArchProfile, ArchSpec, ColumnSpec, GridMesh, ImportedMesh, MeshAsset, MeshKind, RubbleSpec,
+    SpanSpec,
 };
 pub use overrides::{
     Axis, ClosureFacing, EdgeKey, EdgeOverride, EdgeOverrides, RoomDefaults, WallMode,

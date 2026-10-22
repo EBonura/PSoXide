@@ -57,7 +57,8 @@ pub use fit::{split_to_fit, ClickRect};
 pub use heights::{nudge, HeightDrag, WeldIndex};
 pub use meshes::{
     add_asset, arch_span, delete_meshes, place_mesh, remove_asset, set_asset, set_mesh_material,
-    solve_arch_span, update_mesh, ArchPlacement, MeshRefusal,
+    solve_arch_span, solve_span, span_between, update_mesh, ArchPlacement, MeshRefusal,
+    SpanPlacement,
 };
 pub use planes::{
     add_plane, edit_plane_uv, fit_room, remove_planes, set_plane_material, set_plane_uv,

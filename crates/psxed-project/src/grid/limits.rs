@@ -280,6 +280,12 @@ pub enum GridIssueKind {
         /// Instance id.
         id: u16,
     },
+    /// In a ring world, an instance that covers a sector another chunk
+    /// holds. Its collision would be missing for bodies in that sector.
+    MeshOverOtherChunk {
+        /// Instance id.
+        id: u16,
+    },
 }
 
 impl GridIssueKind {
@@ -417,6 +423,9 @@ impl GridIssue {
             GridIssueKind::MeshCoordinate { id } => {
                 format!("mesh {id} is beyond +/-{MAX_COORD_UNITS} grid units")
             }
+            GridIssueKind::MeshOverOtherChunk { id } => format!(
+                "mesh {id} covers sectors that another chunk holds; keep it inside its own chunk or cut it in two"
+            ),
             GridIssueKind::MeshOutsideRoom { id } => format!(
                 "mesh {id} reaches outside the room; move it in or grow the room (the part outside is culled with the room's box and does not collide)"
             ),
@@ -603,6 +612,11 @@ fn check_meshes(world: &GridWorld, room_index: usize, issues: &mut Vec<GridIssue
             let (lo, hi) = mesh.cell_span(&built);
             if room.local(lo).is_none() || room.local(hi).is_none() {
                 issues.push(at_room(GridIssueKind::MeshOutsideRoom { id }));
+            } else if world.stream.ring
+                && !(lo[0]..=hi[0])
+                    .all(|x| (lo[1]..=hi[1]).all(|z| !room.leaves.in_sector([x, z]).is_empty()))
+            {
+                issues.push(at_room(GridIssueKind::MeshOverOtherChunk { id }));
             }
         }
     }

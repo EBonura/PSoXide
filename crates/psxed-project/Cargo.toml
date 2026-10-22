@@ -43,5 +43,9 @@ name = "import-locomotion"
 path = "src/bin/import_locomotion.rs"
 
 [[bin]]
+name = "gridfloat"
+path = "src/bin/gridfloat.rs"
+
+[[bin]]
 name = "audit-animations"
 path = "src/bin/audit_animations.rs"

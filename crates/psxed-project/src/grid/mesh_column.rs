@@ -38,7 +38,7 @@ pub(super) fn outward(mut ring: Vec<[i32; 3]>, centre: [f64; 3]) -> Vec<[i32; 3]
 }
 
 /// Planar texels: `x` and `z` along the face, `-y` down it, 32 to a sector.
-fn texel(p: [i32; 3]) -> [i32; 2] {
+pub(super) fn texel(p: [i32; 3]) -> [i32; 2] {
     [(p[0] + p[2]) / UNITS_PER_TEXEL, -p[1] / UNITS_PER_TEXEL]
 }
 
