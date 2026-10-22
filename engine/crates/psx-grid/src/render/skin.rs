@@ -12,6 +12,7 @@
 //! from the eye).
 
 use psx_gte::math::Vec3I16 as GteVec3I16;
+use psx_math::int32::isqrt_i32;
 use psx_gte::scene;
 
 use super::frustum::{FrustumPlanes, CLIP_ALL_PLANES};
@@ -40,9 +41,34 @@ pub struct SkinCamera<'a> {
     /// Rooms and leaves farther than this many runtime units from the eye
     /// along both plan axes are not drawn (the ordering table's far end).
     pub reach: i32,
+    /// The view's right and forward axes in plan, `[x, z]` each, as Q12 unit
+    /// vectors ([`plan_axes`]).
+    pub right: [i32; 2],
+    pub forward: [i32; 2],
+    /// Half the horizontal field of view as `tan` times 4096, with margin.
+    pub half_tan_q12: i32,
+    /// Plan gap from the eye (runtime units) from which a room draws its
+    /// medium, then its coarse, level of detail.
+    pub lod_gap: [i32; 2],
 }
 
-/// Draw the skin of every room `skip` does not name. The GTE must hold the
+/// The view's right and forward axes in plan as Q12 unit vectors, from the
+/// rows of the view rotation (`rotation[0]` is view right, `rotation[2]` view
+/// depth, in world axes, whatever scale and pitch the matrix carries).
+pub fn plan_axes(rotation: &[[i16; 3]; 3]) -> ([i32; 2], [i32; 2]) {
+    let unit = |row: &[i16; 3]| {
+        let (x, z) = (i32::from(row[0]), i32::from(row[2]));
+        let length = isqrt_i32(x * x + z * z).max(1);
+        [(x << 12) / length, (z << 12) / length]
+    };
+    (unit(&rotation[0]), unit(&rotation[2]))
+}
+
+/// Draw the skin of every room `skip` does not name. The frame's
+/// `cells_visible` counts the rooms that passed the frustum, `screen_culled`
+/// the leaves looked at and `quads_visible` the leaves projected.
+///
+/// The GTE must hold the
 /// world view (rotation, and the translation of the world origin).
 ///
 /// Packets go forward from `out[0]`, or backward from the end of `out` when
@@ -119,10 +145,10 @@ fn gpu_safe(corners: &[GridScreen; 4]) -> bool {
         && bottom - top <= 511
 }
 
+/// A GTE vertex from world coordinates the cook proved fit 16 bits.
 #[inline(always)]
 fn vertex(x: i32, y: i32, z: i32) -> GteVec3I16 {
-    let c = |v: i32| v.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
-    GteVec3I16::new(c(x), c(y), c(z))
+    GteVec3I16::new(x as i16, y as i16, z as i16)
 }
 
 /// Project four corners: a triangle of the GTE and one more.
@@ -228,18 +254,21 @@ fn draw_dir<const REVERSE: bool>(
         if skip.get(room).copied().unwrap_or(false) {
             continue;
         }
-        let (Some(&first), Some(&last)) = (
-            level.skin_cells.get(room),
-            level.skin_cells.get(room + 1),
-        ) else {
+        let (lo, hi) = level.room_bounds(room);
+        let gap = |axis: usize| (lo[axis] - eye[axis]).max(eye[axis] - hi[axis]).max(0);
+        let plan_gap = gap(0).max(gap(2));
+        if plan_gap > camera.reach {
+            continue;
+        }
+        // A room draws the level of detail its distance can afford.
+        let lods = usize::from(header.lod_count).max(1);
+        let lod = usize::from(plan_gap >= camera.lod_gap[0]) + usize::from(plan_gap >= camera.lod_gap[1]);
+        let at = room * lods + lod.min(lods - 1);
+        let (Some(&first), Some(&last)) = (level.skin_cells.get(at), level.skin_cells.get(at + 1))
+        else {
             continue;
         };
         if first == last {
-            continue;
-        }
-        let (lo, hi) = level.room_bounds(room);
-        let gap = |axis: usize| (lo[axis] - eye[axis]).max(eye[axis] - hi[axis]).max(0);
-        if gap(0).max(gap(2)) > camera.reach {
             continue;
         }
         if camera
@@ -255,12 +284,21 @@ fn draw_dir<const REVERSE: bool>(
             .get(usize::from(first)..usize::from(last))
             .unwrap_or(&[])
         {
+            frame.screen_culled = frame.screen_culled.saturating_add(1);
             let n = sector << leaf.size_log2();
             let x0 = origin[0] + i32::from(leaf.x()) * sector;
             let z0 = origin[1] + i32::from(leaf.z()) * sector;
             let (x1, z1) = (x0 + n, z0 + n);
-            if (x0 - eye[0]).max(eye[0] - x1).max(0) > camera.reach
-                || (z0 - eye[2]).max(eye[2] - z1).max(0) > camera.reach
+            // Plan view cone, on the leaf's centre with its half diagonal as
+            // slack: behind the eye or outside the field of view is skipped
+            // before anything is projected.
+            let (dx, dz) = (x0 + n / 2 - eye[0], z0 + n / 2 - eye[2]);
+            let ahead = (camera.forward[0] * dx + camera.forward[1] * dz) >> 12;
+            let across = (camera.right[0] * dx + camera.right[1] * dz) >> 12;
+            let slack = n;
+            if ahead < -slack
+                || across.abs() > ((ahead.max(0) * camera.half_tan_q12) >> 12) + slack
+                || ahead > camera.reach + slack
             {
                 continue;
             }
@@ -285,17 +323,26 @@ fn draw_dir<const REVERSE: bool>(
                 [(x0, h, z0), (x1, h, z0), (x1, h, z1), (x0, h, z1)],
                 camera,
             );
-            let colour = colour_word(leaf.rgb555(), 4);
-            if top && drawable(&tops) && !emit([&tops[0], &tops[1], &tops[2], &tops[3]], colour) {
+            if top
+                && drawable(&tops)
+                && !emit(
+                    [&tops[0], &tops[1], &tops[2], &tops[3]],
+                    colour_word(leaf.rgb555(), 4),
+                )
+            {
                 frame.overflowed = true;
                 break 'rooms;
             }
-            let shade = colour_word(leaf.rgb555(), SKIRT_SHADE_QUARTERS);
             // Each skirt hangs from a top edge (corner pair) down to `depth`.
             let edges = [(0usize, 1usize), (1, 2), (2, 3), (3, 0)];
             for (side, &(a, b)) in edges.iter().enumerate() {
                 let depth = skirts[side];
-                if depth == 0 {
+                // A skirt hangs below its top edge: wholly past a side or the
+                // bottom of the screen when the edge is.
+                if depth == 0
+                    || tops[a].code & tops[b].code & (OFF_LEFT | OFF_RIGHT | OFF_BOTTOM) != 0
+                    || (tops[a].code | tops[b].code) & NEAR != 0
+                {
                     continue;
                 }
                 let corner = |i: usize| match i {
@@ -314,7 +361,12 @@ fn draw_dir<const REVERSE: bool>(
                     screen_of(low_b, camera),
                     screen_of(low_a, camera),
                 ];
-                if drawable(&quad) && !emit([&quad[0], &quad[1], &quad[2], &quad[3]], shade) {
+                if drawable(&quad)
+                    && !emit(
+                        [&quad[0], &quad[1], &quad[2], &quad[3]],
+                        colour_word(leaf.rgb555(), SKIRT_SHADE_QUARTERS),
+                    )
+                {
                     frame.overflowed = true;
                     break 'rooms;
                 }

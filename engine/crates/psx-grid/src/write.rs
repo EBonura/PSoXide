@@ -492,12 +492,12 @@ pub struct FloodBlock {
     pub portal_weight: Vec<u8>,
 }
 
-/// The skin of a level: its header, the first leaf of each room (and one
-/// past the last), and the leaves in room order.
+/// The skin of a level: its header, the first leaf of each room and level of
+/// detail (and one past the last), and the leaves in that order.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SkinBlock {
     pub header: SkinHeader,
-    /// `rooms + 1` entries.
+    /// `rooms * lod_count + 1` entries.
     pub cell_first: Vec<u16>,
     pub leaves: Vec<SkinLeaf>,
 }
@@ -645,7 +645,8 @@ impl LevelCore {
             out.extend_from_slice(&flood.portal_weight);
         }
         if let Some(skin) = &self.skin {
-            if skin.cell_first.len() != self.rooms.len() + 1
+            if skin.header.lod_count == 0
+                || skin.cell_first.len() != self.rooms.len() * usize::from(skin.header.lod_count) + 1
                 || usize::from(skin.header.leaf_count) != skin.leaves.len()
                 || skin.cell_first.last().map(|&l| usize::from(l)) != Some(skin.leaves.len())
             {

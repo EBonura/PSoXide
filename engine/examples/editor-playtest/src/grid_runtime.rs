@@ -34,7 +34,7 @@ use psx_grid::contents::{contents_of_liquid_kind, LiquidContentsSample, CONTENTS
 #[cfg(target_arch = "mips")]
 use psx_grid::render::load_gte_clip_planes;
 use psx_grid::render::{
-    classic_far_depth, draw_skin, load_view_rotation, FrustumPlanes, GridFrame, GridPhase,
+    classic_far_depth, draw_skin, load_view_rotation, plan_axes, FrustumPlanes, GridFrame, GridPhase,
     GridRenderer, RoomCamera, SkinCamera, ViewProjection, ViewTransform, CLIP_ALL_PLANES,
 };
 use psx_grid::stream::{room_at, StreamWindow, Want, WantedRoom};
@@ -1108,6 +1108,7 @@ impl GridRuntime {
                     #[cfg(target_arch = "mips")]
                     load_gte_clip_planes(&world_frustum.planes);
                     telemetry::stage_begin(telemetry::stage::FAR_VISTA);
+                    let (right, forward) = plan_axes(&view.rotation.m);
                     let camera = SkinCamera {
                         frustum: &world_frustum,
                         eye,
@@ -1115,6 +1116,16 @@ impl GridRuntime {
                         near_sz: (self.projection.focal_length / 2 + 2)
                             .clamp(1, i32::from(u16::MAX)) as u16,
                         reach: classic_far_depth(2048),
+                        right,
+                        forward,
+                        // Medium detail from 12 sectors off, coarse from 20.
+                        lod_gap: [12 * sector, 20 * sector],
+                        // Half the screen over the focal length, with a fifth
+                        // more for the leaf's own extent.
+                        half_tan_q12: ((self.projection.half_width << 12)
+                            / self.projection.focal_length.max(1))
+                            * 6
+                            / 5,
                     };
                     let skin = draw_skin(
                         &self.level,
@@ -1128,14 +1139,28 @@ impl GridRuntime {
                         reverse,
                     );
                     telemetry::stage_end(telemetry::stage::FAR_VISTA);
-                    // Skin leaves and rooms visited, on counters the grid
-                    // renderer leaves unused.
-                    telemetry::counter(telemetry::counter::ROOM_SURF_FLOORS, skin.packets);
+                    // The skin's own counters, on columns the grid renderer
+                    // leaves unused: leaves tested, leaves drawn from, rooms
+                    // that passed the frustum.
                     telemetry::counter(
-                        telemetry::counter::ROOM_SURF_CEILINGS,
+                        telemetry::counter::ROOM_CELLS_CONSIDERED,
+                        u32::from(skin.screen_culled),
+                    );
+                    telemetry::counter(
+                        telemetry::counter::ROOM_CELLS_DRAWN,
+                        u32::from(skin.quads_visible),
+                    );
+                    telemetry::counter(
+                        telemetry::counter::ROOM_VISIBLE_CELLS,
                         u32::from(skin.cells_visible),
                     );
-                    total.absorb(&skin);
+                    // Only the packets join the frame; its counters are the rooms'.
+                    total.absorb(&GridFrame {
+                        packet_words: skin.packet_words,
+                        packets: skin.packets,
+                        overflowed: skin.overflowed,
+                        ..GridFrame::default()
+                    });
                 }
             }
             scene::load_translation(view.translation);

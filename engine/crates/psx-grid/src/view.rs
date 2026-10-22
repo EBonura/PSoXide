@@ -102,7 +102,8 @@ pub struct LevelView<'a> {
     pub flood: Option<&'a FloodHeader>,
     pub flood_weight: &'a [u8],
     /// With [`LEVEL_HAS_SKIN`]: the skin header, the first leaf of each room
-    /// (`room_count + 1` entries) and the leaves. `None` and empty otherwise.
+    /// and level of detail (`room_count * lod_count + 1` entries) and the
+    /// leaves. `None` and empty otherwise.
     pub skin: Option<&'a SkinHeader>,
     pub skin_cells: &'a [u16],
     pub skin_leaves: &'a [SkinLeaf],
@@ -161,7 +162,11 @@ impl<'a> LevelView<'a> {
             offset = offset.next_multiple_of(4);
             let block = header_at::<SkinHeader>(bytes, offset)?;
             offset += core::mem::size_of::<SkinHeader>();
-            let cells = table::<u16>(bytes, offset, usize::from(head.room_count) + 1)?;
+            let cells = table::<u16>(
+                bytes,
+                offset,
+                usize::from(head.room_count) * usize::from(block.lod_count) + 1,
+            )?;
             offset += core::mem::size_of_val(cells);
             offset = offset.next_multiple_of(4);
             let leaves = table::<SkinLeaf>(bytes, offset, usize::from(block.leaf_count))?;
@@ -334,7 +339,10 @@ impl<'a> LevelView<'a> {
                 return Err(FormatError::IndexRange);
             }
         }
-        if self.skin.is_some() {
+        if let Some(skin) = self.skin {
+            if skin.lod_count == 0 || skin.lod_count > 3 {
+                return Err(FormatError::Inconsistent);
+            }
             let ascending = self.skin_cells.windows(2).all(|w| w[0] <= w[1]);
             if !ascending
                 || self.skin_cells.last().map(|&l| usize::from(l)) != Some(self.skin_leaves.len())

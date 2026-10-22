@@ -101,7 +101,7 @@ pub const FLOOD_WEIGHT_ONE: u8 = 16;
 
 /// Level flag: the core ends with a skin block (after the flood block, each
 /// part on a word boundary): a [`SkinHeader`], one `u16` first-leaf index per
-/// room and one more, and the [`SkinLeaf`] records. The skin is the whole
+/// room and level of detail and one more, and the [`SkinLeaf`] records. The skin is the whole
 /// level as untextured, flat coloured top surfaces (a quadtree of squares
 /// over the owned sectors), drawn for the rooms that are not drawn whole.
 pub const LEVEL_HAS_SKIN: u32 = 1 << 7;
@@ -117,7 +117,11 @@ pub struct SkinHeader {
     pub origin: [i16; 2],
     /// Runtime units per height step.
     pub height_step: u8,
-    pub reserved: [u8; 3],
+    /// Levels of detail each room's leaves come in (1 to 3): the finest
+    /// first. A room's lists are `cell_first[room * lod_count + lod]` up to
+    /// the next entry.
+    pub lod_count: u8,
+    pub reserved: [u8; 2],
 }
 const _: () = assert!(core::mem::size_of::<SkinHeader>() == 12);
 

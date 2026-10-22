@@ -42,7 +42,7 @@ mod skin;
 pub use clip::clip_polygon_plane;
 #[cfg(target_arch = "mips")]
 pub use frustum::load_gte_clip_planes;
-pub use skin::{draw_skin, SkinCamera, SKIN_PACKET_WORDS};
+pub use skin::{draw_skin, plan_axes, SkinCamera, SKIN_PACKET_WORDS};
 pub use frustum::{FrustumPlanes, CLIP_ALL_PLANES};
 pub use projection::{
     classic_far_depth, load_view_rotation, view_rotation, Camera, ViewProjection, ViewTransform,
