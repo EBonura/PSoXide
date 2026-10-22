@@ -39,6 +39,7 @@ fn flooded(mut world: GridWorld, near: u8, res: u8) -> GridWorld {
         res_radius: res,
         quad_budget: 0,
         skin: false,
+        skin_tolerance: 0,
     };
     world
 }

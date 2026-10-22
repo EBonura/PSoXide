@@ -288,7 +288,7 @@ pub(super) fn cook(
         report.warn(warning.clone());
     }
     if world.stream.flood.on && world.stream.flood.skin {
-        if let Err(error) = add_skin(project, project_root, &mut cooked, report) {
+        if let Err(error) = add_skin(project, project_root, world, &mut cooked, report) {
             report.error(format!("grid world: {error}"));
             return None;
         }
@@ -378,6 +378,7 @@ pub struct CookedLevelBytes {
 fn add_skin(
     project: &ProjectDocument,
     project_root: &Path,
+    world: &GridWorld,
     cooked: &mut cook::CookedLevel,
     report: &mut PlaytestValidationReport,
 ) -> Result<(), String> {
@@ -385,7 +386,11 @@ fn add_skin(
     let ids: Vec<Option<ResourceId>> = cooked.materials.iter().map(|(id, _)| *id).collect();
     let table = AlbedoTable::from_project(project, project_root, ids.iter().copied());
     let albedo: Vec<[f32; 3]> = ids.iter().map(|&id| table.albedo(id)).collect();
-    let (block, summary) = cook::skin::bake(cooked, &albedo, cook::skin::SkinSettings::default())?;
+    let mut settings = cook::skin::SkinSettings::default();
+    if world.stream.flood.skin_tolerance > 0 {
+        settings.height_tolerance = i32::from(world.stream.flood.skin_tolerance);
+    }
+    let (block, summary) = cook::skin::bake(cooked, &albedo, settings)?;
     cooked.level.skin = Some(block);
     cooked.core = cooked.level.try_to_bytes()?;
     cooked.report.core_bytes = cooked.core.len();

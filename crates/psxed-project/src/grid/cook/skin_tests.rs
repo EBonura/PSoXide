@@ -38,10 +38,12 @@ fn a_flat_room_is_one_leaf_and_a_step_gets_a_skirt_on_the_high_side_only() {
     // units) higher.
     let cooked = cook(&world(vec![plate([0, 0], 8, 0), plate([8, 0], 8, 1024)])).unwrap();
     let (block, report) = bake(&cooked, &albedo(&cooked), SkinSettings::default()).unwrap();
-    assert_eq!(report.leaves, 2, "{report:?}");
+    // One leaf per room at each of the three levels of detail.
+    assert_eq!(report.leaves, 6, "{report:?}");
+    assert_eq!(report.per_lod, [2, 2, 2]);
     assert_eq!(report.by_size, [0, 0, 0, 2]);
-    assert_eq!(block.cell_first, vec![0, 1, 2]);
-    let (low, high) = (block.leaves[0], block.leaves[1]);
+    assert_eq!(block.cell_first, vec![0, 1, 2, 3, 4, 5, 6]);
+    let (low, high) = (block.leaves[0], block.leaves[3]);
     assert_eq!((low.x(), low.z(), low.size_log2()), (0, 0, 3));
     assert_eq!((high.x(), high.z(), high.size_log2()), (8, 0, 3));
     assert_eq!(low.height(), 0);
@@ -68,15 +70,18 @@ fn a_bump_in_a_flat_floor_splits_the_block_down_to_the_bump() {
     let (block, report) = bake(&cooked, &albedo(&cooked), SkinSettings::default()).unwrap();
     // The 8 by 8 block is not flat: it splits in four, the quarter holding the
     // bump splits again, and so on down to the single sector.
-    assert!(report.leaves > 4 && report.leaves < 64, "{report:?}");
+    assert!(report.per_lod[0] > 4 && report.per_lod[0] < 64, "{report:?}");
     assert!(report.by_size[0] >= 1, "{report:?}");
-    let bump = block
-        .leaves
+    let finest = &block.leaves[..usize::from(block.cell_first[1])];
+    let bump = finest
         .iter()
         .find(|l| l.size_log2() == 0 && l.x() == 3 && l.z() == 3)
         .expect("the bump is a leaf of its own");
-    let flat = block.leaves.iter().find(|l| l.x() == 4 && l.z() == 4).unwrap();
+    let flat = finest.iter().find(|l| l.x() == 4 && l.z() == 4).unwrap();
     assert!(bump.height() > flat.height());
+    // The coarsest level of detail has no leaf smaller than 4 by 4.
+    let coarse = &block.leaves[usize::from(block.cell_first[2])..];
+    assert!(coarse.iter().all(|l| l.size_log2() >= 2), "{coarse:?}");
 }
 
 #[test]
@@ -111,7 +116,8 @@ fn leaves_never_cross_a_room() {
     .unwrap();
     let (block, report) = bake(&cooked, &albedo(&cooked), SkinSettings::default()).unwrap();
     assert_eq!(report.by_size, [0, 0, 4, 0], "{report:?}");
-    assert_eq!(block.cell_first, vec![0, 2, 4]);
+    // Two 4 by 4 leaves per room at every level of detail.
+    assert_eq!(block.cell_first, vec![0, 2, 4, 6, 8, 10, 12]);
 }
 
 #[test]

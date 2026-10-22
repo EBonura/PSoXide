@@ -102,6 +102,9 @@ pub struct FloodSettings {
     /// Also bake the far skin (the whole level as flat coloured top surfaces)
     /// and draw it for the cells that are not drawn whole. Needs `on`.
     pub skin: bool,
+    /// Runtime units two sectors' tops may differ by and still merge into one
+    /// skin leaf (the skin's one detail knob); 0 means the default, 20.
+    pub skin_tolerance: u8,
 }
 
 impl FloodSettings {
@@ -113,6 +116,7 @@ impl FloodSettings {
         res_radius: 12,
         quad_budget: 0,
         skin: false,
+        skin_tolerance: 0,
     };
 
     /// Whether these are the defaults (the document then omits them).

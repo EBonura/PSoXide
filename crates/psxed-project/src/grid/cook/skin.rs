@@ -20,10 +20,11 @@ use super::CookedLevel;
 /// Knobs of the bake.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct SkinSettings {
-    /// Runtime units two sectors' tops may differ by and still merge.
+    /// Runtime units two sectors' tops may differ by and still merge, at the
+    /// finest level of detail.
     pub height_tolerance: i32,
     /// Largest per-channel difference (of 255) two colours may have and
-    /// still merge.
+    /// still merge, at the finest level of detail.
     pub colour_tolerance: i32,
 }
 
@@ -36,14 +37,50 @@ impl Default for SkinSettings {
     }
 }
 
+/// Levels of detail the bake makes: the finest, a medium one for rooms a
+/// while off, a coarse one for the far field.
+pub const SKIN_LODS: usize = 3;
+
+/// What one level of detail merges: a multiple of the height tolerance, a
+/// colour tolerance, and the smallest leaf (log2) it makes where a block is
+/// whole.
+struct Detail {
+    height_tolerance: i32,
+    colour_tolerance: i32,
+    min_size_log2: u8,
+}
+
+fn details(settings: &SkinSettings) -> [Detail; SKIN_LODS] {
+    [
+        Detail {
+            height_tolerance: settings.height_tolerance,
+            colour_tolerance: settings.colour_tolerance,
+            min_size_log2: 0,
+        },
+        Detail {
+            height_tolerance: settings.height_tolerance * 3,
+            colour_tolerance: settings.colour_tolerance + 16,
+            min_size_log2: 1,
+        },
+        Detail {
+            height_tolerance: settings.height_tolerance * 8,
+            colour_tolerance: settings.colour_tolerance + 40,
+            min_size_log2: 2,
+        },
+    ]
+}
+
 /// What the bake made.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct SkinReport {
     pub sectors: usize,
+    /// Leaves over every level of detail.
     pub leaves: usize,
+    /// Leaves of each level of detail.
+    pub per_lod: [usize; SKIN_LODS],
     /// Bytes the block adds to the core.
     pub bytes: usize,
-    /// Leaves by size, 1, 2, 4 and 8 sectors across.
+    /// Finest-detail leaves by size, 1, 2, 4 and 8 sectors across.
     pub by_size: [usize; 4],
     /// Runtime units per height step.
     pub height_step: i32,
@@ -195,13 +232,14 @@ pub fn bake(
     let steps_of = |top: i32| ((top - min_top + height_step / 2) / height_step).clamp(0, 511);
 
     let rooms = cooked.level.rooms.len();
+    let detail = details(&settings);
     let mut leaves: Vec<SkinLeaf> = Vec::new();
-    let mut cell_first: Vec<u16> = Vec::with_capacity(rooms + 1);
-    // Leaf squares as (x, z, size log2, top height steps), for the skirts.
+    let mut cell_first: Vec<u16> = Vec::with_capacity(rooms * SKIN_LODS + 1);
+    // Leaf squares as (x, z, size log2, top height), for the skirts.
     let mut squares: Vec<(i32, i32, u8, i32)> = Vec::new();
     let mut by_size = [0usize; 4];
+    let mut per_lod = [0usize; SKIN_LODS];
     for room in 0..rooms {
-        cell_first.push(u16::try_from(leaves.len()).map_err(|_| "more than 65535 skin leaves")?);
         let mine: Vec<(i32, i32)> = cols
             .iter()
             .filter(|(_, c)| usize::from(c.room) == room)
@@ -213,27 +251,35 @@ pub fn bake(
             .collect();
         blocks.sort_unstable();
         blocks.dedup();
-        for (bx, bz) in blocks {
-            split(
-                &cols,
-                room as u16,
-                (bx, bz, SKIN_MAX_SIZE_LOG2),
-                &settings,
-                &mut |x, z, k, top, rgb| {
-                    let place_x = (x - lo_x) as u8;
-                    let place_z = (z - lo_z) as u8;
-                    squares.push((x, z, k, steps_of(top) * height_step + min_top));
-                    by_size[usize::from(k)] += 1;
-                    leaves.push(SkinLeaf::pack(
-                        place_x,
-                        place_z,
-                        k,
-                        steps_of(top) as u16,
-                        rgb555(rgb),
-                        [0; 4],
-                    ));
-                },
-            );
+        for (lod, level) in detail.iter().enumerate() {
+            cell_first
+                .push(u16::try_from(leaves.len()).map_err(|_| "more than 65535 skin leaves")?);
+            let before = leaves.len();
+            for &(bx, bz) in &blocks {
+                split(
+                    &cols,
+                    room as u16,
+                    (bx, bz, SKIN_MAX_SIZE_LOG2),
+                    level,
+                    &mut |x, z, k, top, rgb| {
+                        let place_x = (x - lo_x) as u8;
+                        let place_z = (z - lo_z) as u8;
+                        squares.push((x, z, k, steps_of(top) * height_step + min_top));
+                        if lod == 0 {
+                            by_size[usize::from(k)] += 1;
+                        }
+                        leaves.push(SkinLeaf::pack(
+                            place_x,
+                            place_z,
+                            k,
+                            steps_of(top) as u16,
+                            rgb555(rgb),
+                            [0; 4],
+                        ));
+                    },
+                );
+            }
+            per_lod[lod] += leaves.len() - before;
         }
     }
     cell_first.push(u16::try_from(leaves.len()).map_err(|_| "more than 65535 skin leaves")?);
@@ -263,7 +309,11 @@ pub fn bake(
                 }
             }
             if missing {
-                floor = if floor == i32::MAX { low_here } else { floor.min(low_here) };
+                floor = if floor == i32::MAX {
+                    low_here
+                } else {
+                    floor.min(low_here)
+                };
             }
             let drop = top - floor;
             if drop <= 0 {
@@ -288,6 +338,7 @@ pub fn bake(
     let report = SkinReport {
         sectors: cols.len(),
         leaves: leaves.len(),
+        per_lod,
         bytes: 12 + 2 * cell_first.len() + 8 * leaves.len(),
         by_size,
         height_step,
@@ -299,7 +350,8 @@ pub fn bake(
                 base_y: min_top as i16,
                 origin: [lo_x as i16, lo_z as i16],
                 height_step: u8::try_from(height_step).map_err(|_| "height step above 255")?,
-                reserved: [0; 3],
+                lod_count: SKIN_LODS as u8,
+                reserved: [0; 2],
             },
             cell_first,
             leaves,
@@ -315,7 +367,7 @@ fn split(
     cols: &BTreeMap<(i32, i32), Column>,
     room: u16,
     (x, z, k): (i32, i32, u8),
-    settings: &SkinSettings,
+    detail: &Detail,
     leaf: &mut dyn FnMut(i32, i32, u8, i32, [i32; 3]),
 ) {
     let n = 1i32 << k;
@@ -343,7 +395,11 @@ fn split(
             })
             .max()
             .unwrap_or(0);
-        if k == 0 || (hi - lo <= settings.height_tolerance && spread <= settings.colour_tolerance)
+        // A whole block is a leaf at the smallest size this level of detail
+        // makes, or when it is flat and uniform enough.
+        if k == 0
+            || k == detail.min_size_log2
+            || (hi - lo <= detail.height_tolerance && spread <= detail.colour_tolerance)
         {
             let count = found.len() as i32;
             let mean_top = (found.iter().map(|c| c.top).sum::<i32>() + count / 2) / count;
@@ -355,6 +411,6 @@ fn split(
     }
     let h = n / 2;
     for (qx, qz) in [(0, 0), (h, 0), (0, h), (h, h)] {
-        split(cols, room, (x + qx, z + qz, k - 1), settings, leaf);
+        split(cols, room, (x + qx, z + qz, k - 1), detail, leaf);
     }
 }
