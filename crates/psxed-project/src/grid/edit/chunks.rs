@@ -118,7 +118,7 @@ pub struct HexReport {
 /// refusal.
 pub fn rechunk_hex(world: &mut GridWorld, layout: HexLayout) -> Result<HexReport, HexRefusal> {
     // At least a sector across, flat side to flat side.
-    if !(layout.size * 3f64.sqrt() >= 1.0) {
+    if layout.size.is_nan() || layout.size * 3f64.sqrt() < 1.0 {
         return Err(HexRefusal::Size);
     }
     for (index, room) in world.rooms.iter().enumerate() {
