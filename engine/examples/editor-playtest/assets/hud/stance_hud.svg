@@ -1,0 +1,101 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="176" height="32" viewBox="0 0 176 32">
+  <!--
+    Cortex stance HUD (concept: cortex-hud/03-concept-final-r11.png). Units are screen pixels.
+    Budget: 80 GPU triangles for the whole asset (`--budget total=80`); a quad counts as two.
+
+    Shading is per corner (`data-corners`, one colour per path vertex) so every shape stays a
+    single quad or a few triangles; there are no multi-stop gradients.
+
+    Stance-coloured parts are authored in greys and tinted at runtime (multiply), so one asset
+    serves Horizon (red) and Zenith (cyan). Rail and crystals are authored in amber.
+
+    Draw order, back to front:
+      plate (dimmed, offset up: the inactive stance), plate, health_0..9, emblem, emblem_core,
+      rail, energy_0..9
+    An empty cell or crystal is the same group drawn with a dark tint.
+  -->
+
+  <!-- Armour plate: blade-shaped silhouette plus the dark strip the cells sit in. -->
+  <g id="plate">
+    <path d="M22 8 H152 L163.5 4.5 L157 14 L149 21 H22 Z"
+          data-corners="#f4f4f4 #f4f4f4 #ffffff #c8c8c8 #707070 #707070"/>
+    <path d="M24.6 9.8 H146.6 L143.9 18.8 H24.6 Z" fill="#12161a"/>
+  </g>
+
+  <g id="health_0" transform="translate(0.0 0)">
+    <path d="M28.3 10.5 H37.7 L35.2 17.5 H25.8 Z" data-corners="#ffffff #ffffff #9a9a9a #9a9a9a"/>
+  </g>
+  <g id="health_1" transform="translate(11.7 0)">
+    <path d="M28.3 10.5 H37.7 L35.2 17.5 H25.8 Z" data-corners="#ffffff #ffffff #9a9a9a #9a9a9a"/>
+  </g>
+  <g id="health_2" transform="translate(23.4 0)">
+    <path d="M28.3 10.5 H37.7 L35.2 17.5 H25.8 Z" data-corners="#ffffff #ffffff #9a9a9a #9a9a9a"/>
+  </g>
+  <g id="health_3" transform="translate(35.1 0)">
+    <path d="M28.3 10.5 H37.7 L35.2 17.5 H25.8 Z" data-corners="#ffffff #ffffff #9a9a9a #9a9a9a"/>
+  </g>
+  <g id="health_4" transform="translate(46.8 0)">
+    <path d="M28.3 10.5 H37.7 L35.2 17.5 H25.8 Z" data-corners="#ffffff #ffffff #9a9a9a #9a9a9a"/>
+  </g>
+  <g id="health_5" transform="translate(58.5 0)">
+    <path d="M28.3 10.5 H37.7 L35.2 17.5 H25.8 Z" data-corners="#ffffff #ffffff #9a9a9a #9a9a9a"/>
+  </g>
+  <g id="health_6" transform="translate(70.2 0)">
+    <path d="M28.3 10.5 H37.7 L35.2 17.5 H25.8 Z" data-corners="#ffffff #ffffff #9a9a9a #9a9a9a"/>
+  </g>
+  <g id="health_7" transform="translate(81.9 0)">
+    <path d="M28.3 10.5 H37.7 L35.2 17.5 H25.8 Z" data-corners="#ffffff #ffffff #9a9a9a #9a9a9a"/>
+  </g>
+  <g id="health_8" transform="translate(93.6 0)">
+    <path d="M28.3 10.5 H37.7 L35.2 17.5 H25.8 Z" data-corners="#ffffff #ffffff #9a9a9a #9a9a9a"/>
+  </g>
+  <g id="health_9" transform="translate(105.3 0)">
+    <path d="M28.3 10.5 H37.7 L35.2 17.5 H25.8 Z" data-corners="#ffffff #ffffff #9a9a9a #9a9a9a"/>
+  </g>
+
+  <!-- Octagon emblem and the small core in the other stance's colour. -->
+  <g id="emblem">
+    <path d="M17.75 2.54 L24.46 9.25 V18.75 L17.75 25.46 H8.25 L1.54 18.75 V9.25 L8.25 2.54 Z"
+          data-corners="#f2f2f2 #d8d8d8 #a8a8a8 #8e8e8e #8e8e8e #a8a8a8 #d8d8d8 #f2f2f2"/>
+  </g>
+  <g id="emblem_core">
+    <path d="M13 8.4 L18 14 L13 19.6 L8 14 Z" data-corners="#ffffff #d0d0d0 #a0a0a0 #d0d0d0"/>
+  </g>
+
+  <!-- Energy rail: three straight segments around the blade tip. -->
+  <g id="rail">
+    <polyline points="21,24.6 119,24.6 150,21 168,3.5" fill="none" stroke="#d9942a" stroke-width="1"
+              stroke-linejoin="bevel"/>
+  </g>
+
+  <g id="energy_0" transform="translate(28.8 24.6) rotate(0.0)">
+    <path d="M0 -2.6 L3.6 0 L0 2.6 L-3.6 0 Z" data-corners="#ffeaa6 #ffb41e #d86c00 #ffc84a"/>
+  </g>
+  <g id="energy_1" transform="translate(43.0 24.6) rotate(0.0)">
+    <path d="M0 -2.6 L3.6 0 L0 2.6 L-3.6 0 Z" data-corners="#ffeaa6 #ffb41e #d86c00 #ffc84a"/>
+  </g>
+  <g id="energy_2" transform="translate(57.2 24.6) rotate(0.0)">
+    <path d="M0 -2.6 L3.6 0 L0 2.6 L-3.6 0 Z" data-corners="#ffeaa6 #ffb41e #d86c00 #ffc84a"/>
+  </g>
+  <g id="energy_3" transform="translate(71.4 24.6) rotate(0.0)">
+    <path d="M0 -2.6 L3.6 0 L0 2.6 L-3.6 0 Z" data-corners="#ffeaa6 #ffb41e #d86c00 #ffc84a"/>
+  </g>
+  <g id="energy_4" transform="translate(85.6 24.6) rotate(0.0)">
+    <path d="M0 -2.6 L3.6 0 L0 2.6 L-3.6 0 Z" data-corners="#ffeaa6 #ffb41e #d86c00 #ffc84a"/>
+  </g>
+  <g id="energy_5" transform="translate(99.8 24.6) rotate(0.0)">
+    <path d="M0 -2.6 L3.6 0 L0 2.6 L-3.6 0 Z" data-corners="#ffeaa6 #ffb41e #d86c00 #ffc84a"/>
+  </g>
+  <g id="energy_6" transform="translate(114.0 24.6) rotate(0.0)">
+    <path d="M0 -2.6 L3.6 0 L0 2.6 L-3.6 0 Z" data-corners="#ffeaa6 #ffb41e #d86c00 #ffc84a"/>
+  </g>
+  <g id="energy_7" transform="translate(128.14 23.54) rotate(-6.6)">
+    <path d="M0 -2.6 L3.6 0 L0 2.6 L-3.6 0 Z" data-corners="#ffeaa6 #ffb41e #d86c00 #ffc84a"/>
+  </g>
+  <g id="energy_8" transform="translate(142.24 21.9) rotate(-6.6)">
+    <path d="M0 -2.6 L3.6 0 L0 2.6 L-3.6 0 Z" data-corners="#ffeaa6 #ffb41e #d86c00 #ffc84a"/>
+  </g>
+  <g id="energy_9" transform="translate(154.58 16.54) rotate(-44.2)">
+    <path d="M0 -2.6 L3.6 0 L0 2.6 L-3.6 0 Z" data-corners="#ffeaa6 #ffb41e #d86c00 #ffc84a"/>
+  </g>
+</svg>

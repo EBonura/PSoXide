@@ -290,6 +290,23 @@ name = "psx-tick"
 version = "0.1.0"
 
 [[package]]
+name = "psx-vector"
+version = "0.1.0"
+dependencies = [
+ "psx-gpu",
+ "psx-math",
+ "psx-vector",
+]
+
+[[package]]
+name = "psx-vector-cook"
+version = "0.1.0"
+dependencies = [
+ "psx-gpu",
+ "psx-vector",
+]
+
+[[package]]
 name = "psx-vram"
 version = "0.1.0"
 dependencies = [
