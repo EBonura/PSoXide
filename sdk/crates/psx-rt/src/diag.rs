@@ -501,6 +501,44 @@ enum Reason {
     Panic,
 }
 
+/// Boot-menu helper for diagnostic discs: reset the GPU (nothing may be in flight) and show a
+/// clear 320x240 screen for [`menu_entry`] and [`menu_countdown`]. Call it before the first
+/// entry, with no DMA running.
+pub fn menu_screen() {
+    take_screen();
+}
+
+/// Draw a menu line of 53 columns on row `row`: `marker`, a space, `letter`, two spaces, then
+/// `title`. `color` 0 white, 1 yellow, 2 green, 3 red, 4 cyan. A `letter` of 0 draws `title`
+/// alone. Polled GP0 fills only, so it works before any driver is set up.
+#[inline(never)]
+pub fn menu_entry(row: usize, color: u8, marker: u8, letter: u8, title: &str) {
+    let mut l = Line::new();
+    if letter != 0 {
+        l.byte(marker);
+        l.sp();
+        l.byte(letter);
+        l.sp().sp();
+    }
+    l.str(title);
+    let c = match color {
+        1 => YELLOW,
+        2 => GREEN,
+        3 => RED,
+        4 => CYAN,
+        _ => WHITE,
+    };
+    draw_line((row * 8 + 16) as u16, &l, c);
+}
+
+/// Draw `AUTO START IN nn S` on menu row `row`.
+#[inline(never)]
+pub fn menu_countdown(row: usize, seconds: u32) {
+    let mut l = Line::new();
+    l.str("AUTO START IN ").dec(seconds).str(" S ");
+    draw_line((row * 8 + 16) as u16, &l, GREEN);
+}
+
 #[inline(never)]
 fn is_return_address(w: u32) -> bool {
     if !(0x8001_0000..0x8020_0000).contains(&w) || w & 3 != 0 {

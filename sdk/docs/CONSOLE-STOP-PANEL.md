@@ -69,6 +69,14 @@ The panel also shows what the last instruction-cache flush found (DMA busy mask,
 register, status register), a `WILD PC` row when the program counter is outside any code, and
 whether a fault came with the cache isolated; see [CACHE-CONTROL](CACHE-CONTROL.md).
 
+## Boot menus
+
+A diagnostic disc that chain-loads one of several builds can draw its menu with the panel's
+own text: `psx_rt::diag::menu_screen()` resets the GPU and clears a 320x240 screen (call it at
+boot, with no DMA running), `menu_entry(row, color, marker, letter, title)` draws one line
+(colors: 0 white, 1 yellow, 2 green, 3 red, 4 cyan) and `menu_countdown(row, seconds)` draws
+`AUTO START IN nn S`. Everything is polled GP0 fills, so a menu needs no driver set up first.
+
 ## Seeing it
 
 `sdk/examples/hello-diag` draws a triangle, then stops in the way the
