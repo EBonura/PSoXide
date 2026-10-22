@@ -35,6 +35,10 @@ name = "cook-playtest"
 path = "src/bin/cook_playtest.rs"
 
 [[bin]]
+name = "rechunk-hex"
+path = "src/bin/rechunk_hex.rs"
+
+[[bin]]
 name = "miniaturise-project"
 path = "src/bin/miniaturise_project.rs"
 

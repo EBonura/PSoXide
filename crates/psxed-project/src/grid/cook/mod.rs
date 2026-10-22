@@ -44,6 +44,12 @@ pub const MAX_ROOM_PAGES: usize = 255;
 /// Total chunk pages above which the cook warns that a level with an
 /// unbounded draw distance, which keeps every room resident, may not fit.
 pub const ALL_RESIDENT_ADVISORY_PAGES: usize = 512;
+/// KiB of room pool the editor playtest guest can link: the hex lane
+/// measured 546 to 552 KiB as the point where it stops linking. A level that
+/// streams by flood ([`crate::grid::world::FloodSettings`]) is refused when
+/// its busiest position needs more, and a level whose rooms total less is
+/// held whole.
+pub const GUEST_POOL_CEILING_KIB: usize = 550;
 
 /// Everything the cook needs besides the document.
 pub struct CookInput<'a> {
@@ -631,6 +637,15 @@ fn cook_rooms(
         ..LevelCore::default()
     };
     level.measure_chunks(&tables, chunks.iter().map(|c| pages(c.len())));
+    if radii.flood.on {
+        let plan = flood_plan::plan(&level, &chunks, &radii.flood)?;
+        // The core's own radii stay meaningful for the observers outside any
+        // room: the draw distance is the flood's, the lead the rest of it.
+        level.draw_far = radii.flood.near_radius;
+        level.lead_radius = radii.flood.res_radius - radii.flood.near_radius;
+        level.flood = Some(plan.block);
+        report.warnings.extend(plan.notes);
+    }
     let core = level.to_bytes();
     report.core_bytes = core.len();
     report.materials = materials.slots.len();
@@ -647,6 +662,8 @@ fn cook_rooms(
     })
 }
 
+mod flood_plan;
+
 #[cfg(test)]
 mod band_cook_tests;
 #[cfg(test)]
@@ -655,6 +672,8 @@ mod convert_tests;
 mod derived_tests;
 #[cfg(test)]
 mod extrude_tests;
+#[cfg(test)]
+mod flood_plan_tests;
 #[cfg(test)]
 mod gap_tests;
 #[cfg(test)]

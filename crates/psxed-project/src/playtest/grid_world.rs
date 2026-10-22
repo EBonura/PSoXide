@@ -357,6 +357,96 @@ pub(super) fn cook(
     })
 }
 
+/// A cooked level core and its room chunks, without the package around them.
+#[derive(Clone, Debug)]
+pub struct CookedLevelBytes {
+    pub core: Vec<u8>,
+    /// One chunk per room, unpadded.
+    pub chunks: Vec<Vec<u8>>,
+    /// Cook warnings, one per line.
+    pub warnings: Vec<String>,
+}
+
+/// How [`cook_level_bytes`] binds materials.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum MaterialBinding {
+    /// The project's own materials and textures, as Play binds them.
+    Project,
+    /// Every material a 64 by 64 texture of its own id, the project's
+    /// textures and the scene's lights ignored, far LOD quads on: the stand-in
+    /// the flood design note was measured with, for reproducing its tables.
+    StandIn,
+}
+
+/// Binds every material as an untextured-size 64 by 64 stand-in.
+struct StandInBinder;
+
+impl MaterialBinder for StandInBinder {
+    fn bind(&mut self, material: Option<ResourceId>) -> Result<BoundMaterial, String> {
+        Ok(BoundMaterial {
+            asset: material.map_or(0, |m| m.raw() as u16),
+            flags: 0,
+            blend: 0,
+            uv_motion: 0,
+            tint: [128; 3],
+            textured: material.is_some(),
+            texels: [TILE_TEXELS, TILE_TEXELS],
+        })
+    }
+}
+
+/// Cook `world` into its level core and room chunks, for tools that read the
+/// shape of a level (page counts, portals, quads per sector) without
+/// building a disc: no sky is baked and no asset is packaged, so it takes
+/// seconds, not a minute.
+pub fn cook_level_bytes(
+    project: &ProjectDocument,
+    world: &GridWorld,
+    project_root: &Path,
+    binding: MaterialBinding,
+) -> Result<CookedLevelBytes, String> {
+    let lights = match binding {
+        MaterialBinding::Project => scene_lights(project.active_scene()),
+        MaterialBinding::StandIn => Vec::new(),
+    };
+    let mut assets = Vec::new();
+    let mut by_path = HashMap::new();
+    let mut project_binder = Binder {
+        project,
+        root: project_root,
+        assets: &mut assets,
+        by_path: &mut by_path,
+        used: Vec::new(),
+        warnings: Vec::new(),
+    };
+    let mut stand_in = StandInBinder;
+    let binder: &mut dyn MaterialBinder = match binding {
+        MaterialBinding::Project => &mut project_binder,
+        MaterialBinding::StandIn => &mut stand_in,
+    };
+    let cooked = cook::cook_level(
+        CookInput {
+            world,
+            binder,
+            lights: &lights,
+            first_pack_sector: 0,
+            lod_far_cells: match binding {
+                MaterialBinding::Project => lod_far_cells(),
+                MaterialBinding::StandIn => cook::lod::LOD_FAR_CELLS,
+            },
+            texture_repeat: cook::texture_repeat_default(),
+        },
+        None,
+    )?;
+    let mut warnings = std::mem::take(&mut project_binder.warnings);
+    warnings.extend(cooked.report.warnings);
+    Ok(CookedLevelBytes {
+        core: cooked.core,
+        chunks: cooked.chunks,
+        warnings,
+    })
+}
+
 /// Bake every room's sky ([`cook::sky_bake`], hits in their materials'
 /// colours) across the host's cores, on palettes shared by all of them (so
 /// the guest streams one over another in place), each stored sparsely against

@@ -57,6 +57,7 @@ mod budget;
 pub use budget::*;
 mod cook_ui;
 mod grid_world;
+pub use grid_world::{cook_level_bytes, CookedLevelBytes, MaterialBinding};
 mod level_records;
 mod manifest;
 mod mesh_sockets;

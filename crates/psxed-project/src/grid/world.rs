@@ -71,6 +71,55 @@ pub struct StreamRadii {
     /// world cut into even chunks ([`super::edit::chunks`]).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub ring: bool,
+    /// Stream by budgeted portal flood instead of a ring or walk radii
+    /// ([`FloodSettings`]).
+    #[serde(skip_serializing_if = "FloodSettings::is_default")]
+    pub flood: FloodSettings,
+}
+
+/// Settings of the budgeted portal flood (`psx_grid::flood`), which keeps
+/// resident the cells within a flood radius of the player and draws the ones
+/// within a smaller radius from the camera.
+///
+/// The cook turns these into the level's flood block and checks them: the
+/// pool the busiest position needs must fit the guest, and the quads of a
+/// view at the draw radius must fit `quad_budget`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FloodSettings {
+    /// Whether the level streams by flood.
+    pub on: bool,
+    /// Cells within this many sectors (flood distance) of the camera are
+    /// drawn, collide and run entities.
+    pub near_radius: u8,
+    /// Cells within this many sectors of the player are kept in memory, so
+    /// the drawn set can grow into them without a wait. At least
+    /// `near_radius`.
+    pub res_radius: u8,
+    /// Most quads the plan cone of a camera may hold at `near_radius`; the
+    /// cook refuses a level whose worst position exceeds it. 0 only reports.
+    pub quad_budget: u16,
+}
+
+impl FloodSettings {
+    /// Off, with the radii the Citadel was tuned at.
+    pub const DEFAULT: Self = Self {
+        on: false,
+        near_radius: 12,
+        res_radius: 16,
+        quad_budget: 0,
+    };
+
+    /// Whether these are the defaults (the document then omits them).
+    pub fn is_default(&self) -> bool {
+        *self == Self::DEFAULT
+    }
+}
+
+impl Default for FloodSettings {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
 }
 
 impl StreamRadii {
@@ -81,6 +130,7 @@ impl StreamRadii {
         active_radius: 32,
         lead_radius: 8,
         ring: false,
+        flood: FloodSettings::DEFAULT,
     };
 
     /// Whether these are the defaults (the document then omits them).

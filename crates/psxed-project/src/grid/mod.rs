@@ -50,6 +50,7 @@ pub mod auto_split;
 pub mod band_geom;
 pub mod bands;
 pub mod base_project;
+pub mod census;
 pub mod cook;
 pub mod density;
 pub mod derive;
