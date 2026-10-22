@@ -2,7 +2,11 @@
 //!
 //! Usage: `gridsweep <project dir> [out tsv]`, or
 //! `gridsweep <project dir> pose ex ey ez tx ty tz` to classify what one
-//! camera sees (see `print_pose`).
+//! camera sees (see `print_pose`), or
+//! `gridsweep <project dir> compare <png> ex ey ez tx ty tz` to count the
+//! pixels of an editor frame that show background where the faces cover the
+//! view, or `gridsweep sbs <left png> <right png> <out png>` to put two
+//! frames side by side.
 //!
 //! From a point above every floor, rays go out in a fan of directions. A ray
 //! that meets the BACK of a one-sided face before any front face went through
@@ -228,8 +232,75 @@ fn print_pose(index: &Index<'_>, eye: V3, target: V3) {
     }
 }
 
+/// Background colour of the editor preview.
+const BACKGROUND: [u8; 3] = [44, 52, 50];
+
+/// Two frames side by side with an 8 pixel white gap.
+fn side_by_side(left: &str, right: &str, out: &str) -> Result<(), String> {
+    let open = |p: &str| {
+        image::open(p)
+            .map(|i| i.to_rgb8())
+            .map_err(|e| format!("{p}: {e}"))
+    };
+    let (a, b) = (open(left)?, open(right)?);
+    let mut sheet = image::RgbImage::from_pixel(
+        a.width() + 8 + b.width(),
+        a.height().max(b.height()),
+        image::Rgb([255, 255, 255]),
+    );
+    image::imageops::replace(&mut sheet, &a, 0, 0);
+    image::imageops::replace(&mut sheet, &b, i64::from(a.width()) + 8, 0);
+    sheet.save(out).map_err(|e| format!("{out}: {e}"))
+}
+
+/// Counts of an editor frame against the faces: background pixels where a
+/// face is in front (`drop`, the preview lost it), background where nothing
+/// is (`sky`), and samples whose ray meets the back of a face (`back`).
+fn compare_frame(index: &Index<'_>, png: &str, eye: V3, target: V3) -> Result<(), String> {
+    let frame = image::open(png)
+        .map_err(|e| format!("{png}: {e}"))?
+        .to_rgb8();
+    let norm = |a: V3| {
+        let l = dot(a, a).sqrt();
+        [a[0] / l, a[1] / l, a[2] / l]
+    };
+    let fwd = norm(sub(target, eye));
+    let right = norm(cross(fwd, [0.0, 1.0, 0.0]));
+    let up = cross(right, fwd);
+    let (mut drop, mut sky, mut back) = (0, 0, 0);
+    for row in 0..60u32 {
+        for col in 0..80u32 {
+            let (x, y) = (col * 8 + 4, row * 8 + 4);
+            let (fx, fy) = (f64::from(x), f64::from(y));
+            let d = norm([
+                640.0 * fwd[0] + (fx - 320.0) * right[0] - (fy - 240.0) * up[0],
+                640.0 * fwd[1] + (fx - 320.0) * right[1] - (fy - 240.0) * up[1],
+                640.0 * fwd[2] + (fx - 320.0) * right[2] - (fy - 240.0) * up[2],
+            ]);
+            let is_sky = frame.get_pixel(x, y).0 == BACKGROUND;
+            match index.cast(eye, d, 200_000.0) {
+                None if is_sky => sky += 1,
+                Some((_, _, true)) if is_sky => drop += 1,
+                Some((_, _, false)) => back += 1,
+                _ => {}
+            }
+        }
+    }
+    println!("{png}: drop {drop} sky {sky} back {back}");
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("sbs") && args.len() == 4 {
+        return match side_by_side(&args[1], &args[2], &args[3]) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("gridsweep: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let Some(dir) = args.first() else {
         eprintln!("usage: gridsweep <project dir> [out tsv]");
         return ExitCode::from(2);
@@ -262,6 +333,18 @@ fn main() -> ExitCode {
             let cell = [(cx / sector).floor() as i32, (cz / sector).floor() as i32];
             let e = tops.entry(cell).or_insert(f64::MIN);
             *e = e.max(top);
+        }
+    }
+    if args.get(1).map(String::as_str) == Some("compare") && args.len() == 9 {
+        let n: Vec<f64> = args[3..9].iter().filter_map(|v| v.parse().ok()).collect();
+        if n.len() == 6 {
+            return match compare_frame(&index, &args[2], [n[0], n[1], n[2]], [n[3], n[4], n[5]]) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("gridsweep: {e}");
+                    ExitCode::FAILURE
+                }
+            };
         }
     }
     if args.get(1).map(String::as_str) == Some("pose") {
