@@ -350,7 +350,7 @@ const _: () = {
 pub const CONSOLE_DIAG: bool = cfg!(feature = "console-diag");
 
 /// Chains the present queue has kicked (0 without the `present-queue` feature).
-#[cfg(feature = "console-diag")]
+#[cfg(all(feature = "console-diag", target_arch = "mips"))]
 pub(crate) fn present_kick_count() -> u32 {
     #[cfg(feature = "present-queue")]
     // SAFETY: a volatile aligned read of a counter only the handler writes.
@@ -360,7 +360,7 @@ pub(crate) fn present_kick_count() -> u32 {
 }
 
 /// Present-queue edges that found the previous chain undrawn (0 without the feature).
-#[cfg(feature = "console-diag")]
+#[cfg(all(feature = "console-diag", target_arch = "mips"))]
 pub(crate) fn present_skip_count() -> u32 {
     #[cfg(feature = "present-queue")]
     // SAFETY: a volatile aligned read of a counter only the handler writes.

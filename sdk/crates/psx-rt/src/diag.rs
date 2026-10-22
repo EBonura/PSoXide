@@ -22,6 +22,9 @@
 //! Resolve the printed addresses against the link map of the same build.
 
 use core::arch::global_asm;
+use psx_hw::dma::{channel, CHANNEL_BASE, CHANNEL_STRIDE, CHCR, DPCR, MADR};
+use psx_hw::gpu::{GP0, GP1};
+use psx_hw::irq::{I_MASK, I_STAT};
 use psx_io::diag::{self, Block, PSX_DIAG};
 
 /// VBlanks without progress before the stall panel appears (15 seconds at 60 Hz).
@@ -380,8 +383,10 @@ const FONT: [[u8; 7]; 64] = [
 
 // ---------------------------------------------------------------- GPU
 
-const GP0: u32 = 0x1F80_1810;
-const GP1: u32 = 0x1F80_1814;
+/// Register `offset` (`MADR`, `CHCR`) of DMA channel `ch`.
+const fn dma_reg(ch: u32, offset: u32) -> u32 {
+    CHANNEL_BASE + CHANNEL_STRIDE * ch + offset
+}
 
 fn rd(addr: u32) -> u32 {
     // SAFETY: an aligned 32-bit read of a PS1 register or RAM word, as the caller intends.
@@ -406,7 +411,7 @@ fn gpu_ready() {
 #[inline(never)]
 fn take_screen() {
     // Channel 2 (GPU): drop START so nothing keeps feeding the GPU.
-    wr(0x1F80_10A8, 0);
+    wr(dma_reg(channel::GPU, CHCR), 0);
     wr(GP1, 0x0000_0000); // reset
     wr(GP1, 0x0400_0000); // DMA off
     wr(GP1, 0x0500_0000); // display start 0,0
@@ -417,7 +422,7 @@ fn take_screen() {
     gpu_ready();
     wr(GP0, 0xE100_0000);
     wr(GP0, 0xE300_0000);
-    wr(GP0, 0xE403_BD3F ^ 0x0000_0000);
+    wr(GP0, 0xE403_BD3F);
     wr(GP0, 0xE500_0000);
     wr(GP0, 0x0220_0000); // fill, dark blue
     wr(GP0, 0x0000_0000);
@@ -492,20 +497,22 @@ fn panel(reason: Reason, regs: *const u32, epc: u32) {
     // SAFETY: `regs` is the register save area filled by the trampoline.
     let reg = |n: usize| unsafe { regs.add(n).read_volatile() };
     let b: *const Block = &raw const PSX_DIAG;
-    // SAFETY: a field pointer into the diagnostics static.
-    let d = |f: *const u32| diag::get(f);
+    // SAFETY: every caller passes a field pointer into the diagnostics static.
+    let d = |f: *const u32| unsafe { diag::get(f) };
     macro_rules! f {
         ($name:ident) => {
             // SAFETY: a field pointer into the diagnostics static.
             d(unsafe { &raw const (*b).$name })
         };
     }
+    // SAFETY: the panel runs with interrupts off on one thread; nothing else touches WATCH.
     let frame = unsafe {
         let w = &raw mut WATCH;
         (*w).frame = (*w).frame.wrapping_add(1);
         (*w).frame
     };
-    let quiet = unsafe { (*(&raw const WATCH)).quiet };
+    // SAFETY: as above.
+    let quiet = unsafe { (&raw const WATCH.quiet).read_volatile() };
 
     let mut row = 0usize;
     let mut l = Line::new();
@@ -616,29 +623,30 @@ fn panel(reason: Reason, regs: *const u32, epc: u32) {
     l.str("GPUSTAT ")
         .hex(rd(GP1), 8)
         .str(" ISTAT ")
-        .hex(rd(0x1F80_1070), 4)
+        .hex(rd(I_STAT), 4)
         .str(" IMASK ")
-        .hex(rd(0x1F80_1074), 4);
+        .hex(rd(I_MASK), 4);
     put_line(&mut row, &l, WHITE);
     let mut l = Line::new();
     l.str("DMA2 CHCR ")
-        .hex(rd(0x1F80_10A8), 8)
+        .hex(rd(dma_reg(channel::GPU, CHCR)), 8)
         .str(" MADR ")
-        .hex(rd(0x1F80_10A0), 8)
+        .hex(rd(dma_reg(channel::GPU, MADR)), 8)
         .str(" DPCR ")
-        .hex(rd(0x1F80_10F0), 8);
+        .hex(rd(DPCR), 8);
     put_line(&mut row, &l, WHITE);
     let mut l = Line::new();
     l.str("DMA3 CHCR ")
-        .hex(rd(0x1F80_10B8), 8)
+        .hex(rd(dma_reg(channel::CD, CHCR)), 8)
         .str(" MADR ")
-        .hex(rd(0x1F80_10B0), 8)
+        .hex(rd(dma_reg(channel::CD, MADR)), 8)
         .str(" DMA4 ")
-        .hex(rd(0x1F80_10C8), 8);
+        .hex(rd(dma_reg(channel::SPU, CHCR)), 8);
     put_line(&mut row, &l, WHITE);
 
     let mut l = Line::new();
     l.str("KICKS");
+    // SAFETY: a field pointer into the diagnostics static.
     let kicks = unsafe { (&raw const (*b).dma_kicks).cast::<u32>() };
     let mut ch = 0;
     while ch < 7 {
@@ -676,7 +684,8 @@ fn panel(reason: Reason, regs: *const u32, epc: u32) {
     put_line(&mut row, &l, if now != 0 { YELLOW } else { WHITE });
 
     // The CD status register: reading index 0 has no side effect.
-    let cd_status = unsafe { psx_io::read_u8(0x1F80_1800) };
+    // SAFETY: an aligned byte read of the CD status register, which has no side effect.
+    let cd_status = unsafe { psx_io::read_u8(psx_hw::cd::BASE) };
     let mut l = Line::new();
     l.str("CD STAT ")
         .hex(cd_status as u32, 2)
@@ -826,10 +835,10 @@ extern "C" fn __psx_diag_fault(regs: *const u32, epc: u32) -> ! {
         panel(Reason::Fault, regs, epc);
         // Pace on the VBlank flag, which still latches with interrupts off.
         let mut n = 0u32;
-        while rd(0x1F80_1070) & 1 == 0 && n < 2_000_000 {
+        while rd(I_STAT) & 1 == 0 && n < 2_000_000 {
             n += 1;
         }
-        wr(0x1F80_1070, !1u32);
+        wr(I_STAT, !1u32);
     }
 }
 
@@ -857,14 +866,15 @@ extern "C" fn panic_entry(info: *const u8) -> ! {
     take_screen();
     let regs = &raw const __psx_diag_regs;
     loop {
+        // SAFETY: `regs` is the register save area; word 31 is the saved return address.
         panel(Reason::Panic, regs.cast::<u32>(), unsafe {
             regs.cast::<u32>().add(31).read_volatile()
         });
         let mut n = 0u32;
-        while rd(0x1F80_1070) & 1 == 0 && n < 2_000_000 {
+        while rd(I_STAT) & 1 == 0 && n < 2_000_000 {
             n += 1;
         }
-        wr(0x1F80_1070, !1u32);
+        wr(I_STAT, !1u32);
         let _ = info;
     }
 }
