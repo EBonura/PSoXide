@@ -106,6 +106,25 @@ pub enum PlaytestAssetKind {
     ModelAnimation,
 }
 
+/// What the guest needs to stream sparse chunk skies besides the skies
+/// themselves (empty: the world bakes none).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PlaytestSkyTables {
+    /// Room 0's sky as a dense PSXT: the scene's cube sky, the atlas VRAM
+    /// starts with.
+    pub initial: Vec<u8>,
+    /// The tile mask of room 0's sky ([`psx_level::sky_tiles::MASK_WORDS`]
+    /// words): which tiles of `initial` differ from the background.
+    pub initial_mask: Vec<u32>,
+    /// The level's background index map, as the runtime reads it
+    /// ([`psx_level::sky_tiles::Background`]).
+    pub background_rows: Vec<u16>,
+    /// See `background_rows`.
+    pub background_runs: Vec<u8>,
+    /// The six face palettes every sky is quantised to.
+    pub palettes: Vec<Vec<[u8; 3]>>,
+}
+
 /// A cooked grid world: the resident level core and the room chunks.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PlaytestGridWorld {
@@ -137,10 +156,13 @@ pub struct PlaytestGridWorld {
     pub triangles: usize,
     /// Cooked surfaces of the largest room.
     pub max_room_surfaces: usize,
-    /// One cube sky atlas per room (a PSXT), the world beyond that room's
-    /// ring of neighbours, for a ring-streamed world with a cube sky; empty
-    /// otherwise. `WORLD.PAK` holds room `i`'s sky after every room chunk.
+    /// One sparse cube sky per room ([`psx_level::sky_tiles`]), the world
+    /// beyond that room's ring of neighbours, for a ring-streamed world with
+    /// a cube sky; empty otherwise. `WORLD.PAK` holds room `i`'s sky after
+    /// every room chunk.
     pub chunk_skies: Vec<Vec<u8>>,
+    /// The tables the guest streams `chunk_skies` with.
+    pub sky_tables: PlaytestSkyTables,
     /// One block of text with the cook's sizes, for the build log.
     pub summary: String,
 }

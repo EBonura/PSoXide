@@ -384,13 +384,22 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     );
 
     // Baked chunk skies: where each room's sits in WORLD.PAK.
-    let (sky_sectors, sky_sectors_each) = chunk_sky_sectors(package);
+    let (sky_sectors, sky_counts) = chunk_sky_sectors(package);
+    let sky = &package.world_geometry.sky_tables;
     let _ = writeln!(
         out,
-        "/// Per room, the sector of its baked cube sky relative to the start of\n\
-         /// WORLD.PAK (0 for none), and the sectors one sky occupies.\n\
+        "/// Per room, the sector of its baked sparse cube sky relative to the start of\n\
+         /// WORLD.PAK (0 for none), and the sectors it occupies.\n\
          pub const GRID_ROOM_SKY_SECTORS: [u32; GRID_ROOM_COUNT] = {sky_sectors:?};\n\
-         pub const GRID_SKY_SECTORS: u32 = {sky_sectors_each};\n"
+         pub const GRID_ROOM_SKY_COUNT: [u32; GRID_ROOM_COUNT] = {sky_counts:?};\n\
+         /// The index of every texel of the sky no ray hit (`psx_level::sky_tiles::Background`):\n\
+         /// where each row of each face starts in the runs, and the runs. Empty: the\n\
+         /// world streams no chunk skies.\n\
+         pub const GRID_SKY_BG_ROWS: &[u16] = &{:?};\n\
+         pub const GRID_SKY_BG_RUNS: &[u8] = &{:?};\n\
+         /// The tiles of the sky VRAM starts with (room 0's) that differ from the background.\n\
+         pub const GRID_SKY_INITIAL_MASK: &[u32] = &{:?};\n",
+        sky.background_rows, sky.background_runs, sky.initial_mask,
     );
 
     // The shape of the level's own records: how many of each table chunk 1 of
@@ -1257,21 +1266,21 @@ fn world_pack_chunks(package: &PlaytestPackage) -> Vec<(u32, &[u8])> {
 }
 
 /// Per room, the sector of its baked sky relative to the start of
-/// `WORLD.PAK` (0 for none), and the sectors one sky occupies.
-fn chunk_sky_sectors(package: &PlaytestPackage) -> (Vec<u32>, u32) {
+/// `WORLD.PAK` (0 for none), and the sectors it occupies.
+fn chunk_sky_sectors(package: &PlaytestPackage) -> (Vec<u32>, Vec<u32>) {
     let world = &package.world_geometry;
     let rooms = world.room_chunks.len();
     let layout = world_pack_layout(package);
     let mut sectors = vec![0u32; rooms];
-    let mut each = 0;
+    let mut counts = vec![0u32; rooms];
     for entry in &layout.entries {
         let id = entry.chunk_id as usize;
         if id >= rooms + 2 && id < 2 * rooms + 2 {
             sectors[id - rooms - 2] = entry.sector_offset;
-            each = each.max(entry.sector_count);
+            counts[id - rooms - 2] = entry.sector_count;
         }
     }
-    (sectors, each)
+    (sectors, counts)
 }
 
 fn world_pack_layout(package: &PlaytestPackage) -> psx_iso::WorldPackLayout {

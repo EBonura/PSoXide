@@ -197,6 +197,9 @@ pub struct ChunkSky {
     pub ring: Vec<usize>,
     /// Where the rays start, world runtime units.
     pub eye: [i32; 3],
+    /// The horizon colour the bake used: the room's fog, or the neutral
+    /// horizon of a room without any.
+    pub fog: [f64; 3],
     /// Colour of every texel, face-major (`face * 256 * 256 + y * 256 + x`).
     pub rgb: Vec<[u8; 3]>,
     /// Rays that hit geometry.
@@ -231,6 +234,20 @@ impl ChunkSky {
     /// [`shared_palettes`]): every texel takes the nearest colour of its
     /// face's palette.
     pub fn to_psxt_with(&self, palettes: &[Vec<[u8; 3]>; 6]) -> Result<Vec<u8>, String> {
+        psxed_tex::encode_indexed_psxt_with_clut_rows(
+            CUBE_SKY_FACE_WIDTH * 6,
+            CUBE_SKY_FACE_HEIGHT,
+            psxed_format::texture::Depth::Bit4,
+            &self.indices(palettes),
+            palettes.as_slice(),
+            false,
+        )
+        .map_err(|e| format!("encode the sky: {e}"))
+    }
+
+    /// The palette index of every texel over `palettes`, as one row-major
+    /// 1536x256 image (faces side by side).
+    pub fn indices(&self, palettes: &[Vec<[u8; 3]>; 6]) -> Vec<u8> {
         let (w, h) = (
             usize::from(CUBE_SKY_FACE_WIDTH),
             usize::from(CUBE_SKY_FACE_HEIGHT),
@@ -244,15 +261,98 @@ impl ChunkSky {
                 }
             }
         }
-        psxed_tex::encode_indexed_psxt_with_clut_rows(
-            CUBE_SKY_FACE_WIDTH * 6,
-            CUBE_SKY_FACE_HEIGHT,
-            psxed_format::texture::Depth::Bit4,
-            &indices,
-            palettes.as_slice(),
-            false,
-        )
-        .map_err(|e| format!("encode the sky: {e}"))
+        indices
+    }
+
+    /// The sky as a sparse entry ([`psx_level::sky_tiles`]): the 8x8 tiles
+    /// whose indices over `palettes` differ from `background`'s, nothing else.
+    pub fn to_sparse(
+        &self,
+        palettes: &[Vec<[u8; 3]>; 6],
+        background: &SkyBackground,
+    ) -> Result<Vec<u8>, String> {
+        use psx_level::sky_tiles as st;
+        let indices = self.indices(palettes);
+        let view = background.view();
+        let width = st::FACES * st::FACE_TEXELS;
+        let mut mask = [0u8; st::MASK_BYTES];
+        let mut tiles = Vec::new();
+        let mut count = 0usize;
+        for index in 0..st::TILE_COUNT {
+            let (face, tile_y, tile_x) = st::tile_position(index);
+            let words: [u32; st::TILE_WORDS] = std::array::from_fn(|r| {
+                let y = tile_y * st::TILE_TEXELS + r;
+                let at = y * width + face * st::FACE_TEXELS + tile_x * st::TILE_TEXELS;
+                (0..st::TILE_TEXELS)
+                    .fold(0u32, |word, t| word | u32::from(indices[at + t]) << (4 * t))
+            });
+            if words == view.tile_words(face, tile_y, tile_x) {
+                continue;
+            }
+            mask[index / 8] |= 1 << (index % 8);
+            count += 1;
+            for word in words {
+                tiles.extend_from_slice(&word.to_le_bytes());
+            }
+        }
+        let mut entry = Vec::with_capacity(st::entry_bytes(count));
+        entry.extend_from_slice(&st::VERSION.to_le_bytes());
+        entry.extend_from_slice(&(count as u16).to_le_bytes());
+        entry.extend_from_slice(&mask);
+        entry.extend_from_slice(&tiles);
+        Ok(entry)
+    }
+}
+
+/// The index every texel that no ray hit reads, level-wide: what the sparse
+/// skies are sparse against ([`psx_level::sky_tiles::Background`]).
+///
+/// A miss paints the same colour whatever the chunk (a function of the
+/// texel's elevation, and the level's fog), and the palettes are shared, so
+/// the index it quantises to is a function of the texel's place on its face.
+/// The map is exact, texel by texel: the side faces' gradient contours bend
+/// with the column, and the zenith face's are circles, and both are kept as
+/// they quantise, as runs of equal index along each row.
+pub struct SkyBackground {
+    /// First run of every row of every face, then the end (1,537 entries).
+    pub rows: Vec<u16>,
+    /// Runs as `(last column, index)` byte pairs.
+    pub runs: Vec<u8>,
+}
+
+impl SkyBackground {
+    /// The background of a level whose rooms fog to `fog`, over `palettes`.
+    pub fn new(fog: [f64; 3], palettes: &[Vec<[u8; 3]>; 6]) -> Self {
+        let (w, h) = (
+            usize::from(CUBE_SKY_FACE_WIDTH),
+            usize::from(CUBE_SKY_FACE_HEIGHT),
+        );
+        let (mut rows, mut runs) = (Vec::new(), Vec::new());
+        for (face, palette) in palettes.iter().enumerate() {
+            for y in 0..h {
+                rows.push((runs.len() / 2) as u16);
+                let mut previous: Option<u8> = None;
+                for x in 0..w {
+                    let d = texel_direction(FACES[face], x, y);
+                    let index = nearest(palette, background_colour(d[1], fog));
+                    match previous {
+                        Some(p) if p == index => {
+                            let last = runs.len() - 2;
+                            runs[last] = x as u8;
+                        }
+                        _ => runs.extend([x as u8, index]),
+                    }
+                    previous = Some(index);
+                }
+            }
+        }
+        rows.push((runs.len() / 2) as u16);
+        Self { rows, runs }
+    }
+
+    /// The tables as the runtime reads them.
+    pub fn view(&self) -> psx_level::sky_tiles::Background<'_> {
+        psx_level::sky_tiles::Background::new(&self.rows, &self.runs)
     }
 }
 
@@ -294,6 +394,33 @@ fn nearest(palette: &[[u8; 3]], c: [u8; 3]) -> u8 {
         .enumerate()
         .min_by_key(|(_, p)| distance(p))
         .map_or(0, |(i, _)| i as u8)
+}
+
+/// The unit direction through the centre of texel `(x, y)` of `face`.
+fn texel_direction(face: CubeFace, x: usize, y: usize) -> [f64; 3] {
+    let (w, h) = (
+        usize::from(CUBE_SKY_FACE_WIDTH),
+        usize::from(CUBE_SKY_FACE_HEIGHT),
+    );
+    let u = (x as f64 + 0.5) / w as f64 * 2.0 - 1.0;
+    let v = (y as f64 + 0.5) / h as f64 * 2.0 - 1.0;
+    let d = cube_direction(face, u, v);
+    let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+    d.map(|c| c / len)
+}
+
+/// What a ray that hits nothing paints, looking along a unit direction with
+/// vertical component `dy`: the void under the level, darker than the fog,
+/// below the horizon; the sky's gradient from the fog up to a deep blue above.
+fn background_colour(dy: f64, fog: [f64; 3]) -> [u8; 3] {
+    let colour = if dy < 0.0 {
+        fog.map(|c| c * 0.6)
+    } else {
+        let k = dy.clamp(0.0, 1.0).powf(0.6);
+        let top = [fog[0] * 0.35, fog[1] * 0.45, fog[2] * 0.7];
+        [0, 1, 2].map(|i| fog[i] + (top[i] - fog[i]) * k)
+    };
+    colour.map(|c| c.clamp(0.0, 255.0) as u8)
 }
 
 /// Direction through face-local `(u, v)` in `-1..=1` of `face`: the inverse
@@ -425,18 +552,16 @@ pub fn bake_chunk_sky_with(
     for (index, face) in FACES.into_iter().enumerate() {
         for y in 0..h {
             for x in 0..w {
-                let u = (x as f64 + 0.5) / w as f64 * 2.0 - 1.0;
-                let v = (y as f64 + 0.5) / h as f64 * 2.0 - 1.0;
-                let d = cube_direction(face, u, v);
-                let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
-                let d = d.map(|c| c / len);
+                let d = texel_direction(face, x, y);
                 let end = [
                     eye[0] + (d[0] * REACH) as i32,
                     eye[1] + (d[1] * REACH) as i32,
                     eye[2] + (d[2] * REACH) as i32,
                 ];
                 let t = point_trace(&mut provider, eye, end);
-                let colour = if t.hit() && !t.start_solid {
+                rgb[(index * h + y) * w + x] = if !t.hit() || t.start_solid {
+                    background_colour(d[1], fog)
+                } else {
                     hits += 1;
                     let distance = REACH * f64::from(t.fraction_q12) / 4096.0;
                     let n = t.normal_q12.map(|c| f64::from(c) / 4096.0);
@@ -456,17 +581,10 @@ pub fn bake_chunk_sky_with(
                     } else {
                         0.0
                     };
-                    [0, 1, 2].map(|i| lit[i] + (fog[i] - lit[i]) * k)
-                } else if d[1] < 0.0 {
-                    // Below the horizon with nothing there: the void under
-                    // the level, darker than the fog.
-                    fog.map(|c| c * 0.6)
-                } else {
-                    let k = d[1].clamp(0.0, 1.0).powf(0.6);
-                    let top = [fog[0] * 0.35, fog[1] * 0.45, fog[2] * 0.7];
-                    [0, 1, 2].map(|i| fog[i] + (top[i] - fog[i]) * k)
+                    [0, 1, 2]
+                        .map(|i| lit[i] + (fog[i] - lit[i]) * k)
+                        .map(|c| c.clamp(0.0, 255.0) as u8)
                 };
-                rgb[(index * h + y) * w + x] = colour.map(|c| c.clamp(0.0, 255.0) as u8);
             }
         }
     }
@@ -474,6 +592,7 @@ pub fn bake_chunk_sky_with(
         chunk,
         ring,
         eye,
+        fog,
         rgb,
         hits,
     })
@@ -548,5 +667,73 @@ mod tests {
         let texture = psx_asset::Texture::from_bytes(&psxt).unwrap();
         assert_eq!([texture.width(), texture.height()], [1536, 256]);
         assert_eq!(texture.clut_entries(), 96);
+    }
+
+    /// The test world: a floor to stand on, a block in the ring, a far tower.
+    fn far_tower_world() -> GridWorld {
+        let mut tower = block([40, 0], 2, 2, 0);
+        tower.defaults.open_wall = 8192;
+        GridWorld {
+            rooms: vec![block([0, 0], 2, 2, 0), block([2, 0], 2, 2, 8192), tower],
+            ..GridWorld::default()
+        }
+    }
+
+    #[test]
+    fn a_sparse_sky_decodes_to_the_dense_indices_exactly() {
+        use psx_level::sky_tiles as st;
+        let cooked = cook(&far_tower_world()).unwrap();
+        let sky = bake_chunk_sky(&cooked, 0).unwrap();
+        let palettes = shared_palettes(core::slice::from_ref(&sky)).unwrap();
+        let background = SkyBackground::new(sky.fog, &palettes);
+        let entry = sky.to_sparse(&palettes, &background).unwrap();
+        let count = st::header_tile_count(&entry).unwrap();
+        assert_eq!(entry.len(), st::entry_bytes(count));
+        // The mask holds exactly the tiles the entry stores.
+        let stored: usize = entry[st::HEADER_BYTES..st::TILES_OFFSET]
+            .iter()
+            .map(|b| b.count_ones() as usize)
+            .sum();
+        assert_eq!(stored, count);
+        // The tower is in it, and most of the sky is not.
+        assert!(count > 0 && count < st::TILE_COUNT / 4, "{count} tiles");
+        let mut decoded = vec![0u8; 6 * 256 * 256];
+        st::decode_indices(&entry, &background.view(), &mut decoded).unwrap();
+        assert_eq!(decoded, sky.indices(&palettes));
+    }
+
+    #[test]
+    fn the_background_is_the_index_of_every_texel_no_ray_hit() {
+        let cooked = cook(&far_tower_world()).unwrap();
+        let sky = bake_chunk_sky(&cooked, 0).unwrap();
+        let palettes = shared_palettes(core::slice::from_ref(&sky)).unwrap();
+        let background = SkyBackground::new(sky.fog, &palettes);
+        let view = background.view();
+        let (w, h) = (256, 256);
+        let mut missed = 0;
+        for face in 0..6 {
+            for y in 0..h {
+                for x in 0..w {
+                    let d = texel_direction(FACES[face], x, y);
+                    let rgb = sky.rgb[(face * h + y) * w + x];
+                    if rgb == background_colour(d[1], sky.fog) {
+                        missed += 1;
+                        assert_eq!(
+                            usize::from(view.index_at(face, x, y)),
+                            usize::from(nearest(&palettes[face], rgb)),
+                            "face {face} ({x}, {y})"
+                        );
+                    }
+                }
+            }
+        }
+        // Nearly every ray of this world misses.
+        assert!(missed > 6 * w * h * 9 / 10);
+        // Every row ends its last run on column 255.
+        for row in 0..6 * h {
+            let end = usize::from(background.rows[row + 1]) * 2;
+            assert_eq!(background.runs[end - 2], 255);
+        }
+        assert_eq!(background.rows.len(), 6 * h + 1);
     }
 }

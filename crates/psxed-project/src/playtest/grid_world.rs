@@ -23,7 +23,8 @@ use crate::{
 };
 
 use super::{
-    PlaytestAsset, PlaytestAssetKind, PlaytestGridWorld, PlaytestValidationReport, StreamedClass,
+    PlaytestAsset, PlaytestAssetKind, PlaytestGridWorld, PlaytestSkyTables,
+    PlaytestValidationReport, StreamedClass,
 };
 
 /// Texel size of the tile the grid renderer maps one material onto.
@@ -316,7 +317,7 @@ pub(super) fn cook(
     let cube_sky = scene
         .world_sky_for_node(scene.root)
         .is_some_and(|sky| sky.mode == crate::SkyMode::Cube);
-    let chunk_skies = if world.stream.ring && cube_sky {
+    let (chunk_skies, sky_tables) = if world.stream.ring && cube_sky {
         use crate::grid::lighting::BakeMaterials;
         let materials = cook::sky_bake::WorldColours::materials(world);
         let table = crate::grid::lighting::AlbedoTable::from_project(
@@ -329,7 +330,7 @@ pub(super) fn cook(
             cook::sky_bake::WorldColours::new(world, i32::from(cooked.level.sector_units), albedo);
         bake_chunk_skies(&cooked, &colours, report)
     } else {
-        Vec::new()
+        (Vec::new(), PlaytestSkyTables::default())
     };
     let summary = cooked.report.summary();
     report.warn(summary.trim_end().to_string());
@@ -352,18 +353,20 @@ pub(super) fn cook(
         max_room_surfaces: cooked.report.rooms.iter().map(surfaces).max().unwrap_or(0),
         summary,
         chunk_skies,
+        sky_tables,
     })
 }
 
 /// Bake every room's sky ([`cook::sky_bake`], hits in their materials'
-/// colours) across the host's cores, on
-/// palettes shared by all of them (so the guest streams one over another in
-/// place). A failure leaves the world with its one authored sky.
+/// colours) across the host's cores, on palettes shared by all of them (so
+/// the guest streams one over another in place), each stored sparsely against
+/// the level's background. A failure leaves the world with its one authored
+/// sky.
 fn bake_chunk_skies(
     cooked: &cook::CookedLevel,
     colours: &cook::sky_bake::WorldColours<'_>,
     report: &mut PlaytestValidationReport,
-) -> Vec<Vec<u8>> {
+) -> (Vec<Vec<u8>>, PlaytestSkyTables) {
     let started = std::time::Instant::now();
     let rooms = cooked.level.rooms.len();
     let threads = std::thread::available_parallelism()
@@ -402,24 +405,49 @@ fn bake_chunk_skies(
         Ok(Vec::new())
     })
     .and_then(|_| {
+        use psx_level::sky_tiles as st;
         let mut skies = skies.into_inner().map_err(|_| "poisoned".to_string())?;
         skies.sort_by_key(|sky| sky.chunk);
         let palettes = cook::sky_bake::shared_palettes(&skies)?;
-        across(&|room| skies[room].to_psxt_with(&palettes))
+        // Every room fogs alike in a hex level; a room that did not would only
+        // store more tiles, never different texels.
+        let fog = skies.first().map_or([0.0; 3], |sky| sky.fog);
+        let background = cook::sky_bake::SkyBackground::new(fog, &palettes);
+        let entries = across(&|room| skies[room].to_sparse(&palettes, &background))?;
+        let initial = skies[0].to_psxt_with(&palettes)?;
+        let initial_mask = entries[0][st::HEADER_BYTES..st::TILES_OFFSET]
+            .chunks_exact(4)
+            .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
+            .collect();
+        Ok((
+            entries,
+            PlaytestSkyTables {
+                initial,
+                initial_mask,
+                background_rows: background.rows,
+                background_runs: background.runs,
+                palettes: palettes.to_vec(),
+            },
+        ))
     });
     match baked {
-        Ok(skies) => {
+        Ok((entries, tables)) => {
+            let bytes: usize = entries.iter().map(Vec::len).sum();
             report.warn(format!(
-                "grid world: baked {rooms} chunk skies in {:.1} s",
-                started.elapsed().as_secs_f64()
+                "grid world: baked {rooms} chunk skies in {:.1} s: {} KiB stored sparsely \
+                 (dense would be {} KiB), background {} runs",
+                started.elapsed().as_secs_f64(),
+                bytes / 1024,
+                rooms * (tables.initial.len().div_ceil(2048) * 2048) / 1024,
+                tables.background_runs.len() / 2,
             ));
-            skies
+            (entries, tables)
         }
         Err(error) => {
             report.warn(format!(
                 "grid world: chunk sky bake failed, keeping the authored sky: {error}"
             ));
-            Vec::new()
+            (Vec::new(), PlaytestSkyTables::default())
         }
     }
 }
@@ -475,5 +503,122 @@ mod tests {
         let message = report.error_messages().join("; ");
         assert!(message.contains("grid world: room 0"), "{message}");
         assert!(message.contains("outside the room rectangle"), "{message}");
+    }
+
+    /// FNV-1a over a byte string.
+    fn fnv(bytes: &[u8]) -> u64 {
+        bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, &b| {
+            (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+        })
+    }
+
+    /// Cooks the project in `PSXED_SKY_PROJECT` (a `project.ron`) and holds
+    /// every chunk's sparse sky to the dense atlas the dense cook produced:
+    /// `PSXED_SKY_HASHES` lists one FNV hash per room of that dense PSXT.
+    /// Rebuilding the PSXT from the sparse entry over the shared palettes
+    /// must give the same bytes, so not one texel differs.
+    #[test]
+    #[ignore = "needs PSXED_SKY_PROJECT and PSXED_SKY_HASHES"]
+    fn sparse_skies_rebuild_the_dense_atlases_texel_for_texel() {
+        use psx_level::sky_tiles as st;
+        let project_path = std::env::var("PSXED_SKY_PROJECT").expect("PSXED_SKY_PROJECT");
+        let hashes = std::fs::read_to_string(std::env::var("PSXED_SKY_HASHES").unwrap()).unwrap();
+        let project = ProjectDocument::load_from_path(&project_path).unwrap();
+        let root = std::path::Path::new(&project_path).parent().unwrap();
+        let (package, report) = super::super::build_package(&project, root);
+        let package = package.expect("a package");
+        assert!(report.is_ok(), "{:?}", report.error_messages());
+        let world = &package.world_geometry;
+        let tables = &world.sky_tables;
+        let background = st::Background::new(&tables.background_rows, &tables.background_runs);
+        let palettes: Vec<Vec<[u8; 3]>> = tables.palettes.clone();
+        let wanted: Vec<&str> = hashes.lines().collect();
+        assert_eq!(world.chunk_skies.len(), wanted.len());
+        let mut bad = Vec::new();
+        let mut total = 0;
+        for (room, entry) in world.chunk_skies.iter().enumerate() {
+            total += entry.len();
+            let mut indices = vec![0u8; 6 * 256 * 256];
+            st::decode_indices(entry, &background, &mut indices).expect("a readable entry");
+            assert!(st::entry_sectors(st::header_tile_count(entry).unwrap()) <= 26);
+            let psxt = psxed_tex::encode_indexed_psxt_with_clut_rows(
+                1536,
+                256,
+                psxed_format::texture::Depth::Bit4,
+                &indices,
+                palettes.as_slice(),
+                false,
+            )
+            .unwrap();
+            if format!("{:016x}", fnv(&psxt)) != wanted[room] {
+                bad.push(room);
+            }
+        }
+        std::eprintln!(
+            "{} sparse skies, {} KiB; background {} rows runs {}",
+            world.chunk_skies.len(),
+            total / 1024,
+            tables.background_rows.len(),
+            tables.background_runs.len() / 2
+        );
+        assert!(
+            bad.is_empty(),
+            "atlases that differ from the dense cook: {bad:?}"
+        );
+        // `PSXED_SKY_ATLAS_DIR`: every room's atlas as the VRAM words it
+        // should be (four texels a word), for comparing with a VRAM dump.
+        if let Ok(dir) = std::env::var("PSXED_SKY_ATLAS_DIR") {
+            for (room, entry) in world.chunk_skies.iter().enumerate() {
+                let mut indices = vec![0u8; 6 * 256 * 256];
+                st::decode_indices(entry, &background, &mut indices).unwrap();
+                let words: Vec<u8> = indices
+                    .chunks_exact(4)
+                    .flat_map(|t| {
+                        (u16::from(t[0])
+                            | u16::from(t[1]) << 4
+                            | u16::from(t[2]) << 8
+                            | u16::from(t[3]) << 12)
+                            .to_le_bytes()
+                    })
+                    .collect();
+                std::fs::write(
+                    std::path::Path::new(&dir).join(format!("atlas-{room}.bin")),
+                    words,
+                )
+                .unwrap();
+            }
+        }
+        // `PSXED_SKY_EXPECT=tiles,wipes`: which walks 0 -> a -> b of two skies
+        // upload and wipe that many tiles (to match a run's counters).
+        if let Ok(expect) = std::env::var("PSXED_SKY_EXPECT") {
+            let (tiles, wipes) = expect.split_once(',').expect("tiles,wipes");
+            let (tiles, wipes): (usize, usize) = (tiles.parse().unwrap(), wipes.parse().unwrap());
+            let mask = |room: usize| -> Vec<u32> {
+                world.chunk_skies[room][st::HEADER_BYTES..st::TILES_OFFSET]
+                    .chunks_exact(4)
+                    .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
+                    .collect()
+            };
+            let ones = |m: &[u32]| m.iter().map(|w| w.count_ones() as usize).sum::<usize>();
+            let minus = |a: &[u32], b: &[u32]| {
+                a.iter()
+                    .zip(b)
+                    .map(|(a, b)| (a & !b).count_ones() as usize)
+                    .sum::<usize>()
+            };
+            let rooms = world.chunk_skies.len();
+            for a in 0..rooms {
+                for b in 0..rooms {
+                    if a != b
+                        && ones(&mask(a)) + ones(&mask(b)) == tiles
+                        && minus(&mask(0), &mask(a)) + minus(&mask(a), &mask(b)) == wipes
+                    {
+                        std::eprintln!("walk 0 -> {a} -> {b} gives {tiles} tiles, {wipes} wipes");
+                    }
+                }
+            }
+        }
+        // Room 0's mask is what the entry's header says.
+        assert_eq!(tables.initial_mask.len(), st::MASK_WORDS);
     }
 }
