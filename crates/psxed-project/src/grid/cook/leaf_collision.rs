@@ -12,12 +12,12 @@
 
 use psx_grid::write::TreeTables;
 use psx_grid::{
-    leaf_code, ColWall, SectorExt, SplitB, COLPLANE_PRIMARY, INDEX_SUB, MAX_LEAVES, MAX_SUBBLOCKS,
-    NO_EXT, NO_LEAF, SECTOR_LEAF_SHIFT, SUBBLOCK_ENTRIES, WALL_BACK_ONLY, WALL_FRONT_ONLY,
-    WALL_HALF_FIRST, WALL_HALF_SECOND,
+    leaf_code, ColWall, SectorExt, SplitB, INDEX_SUB, MAX_LEAVES, MAX_SUBBLOCKS, NO_EXT, NO_LEAF,
+    SECTOR_LEAF_SHIFT, SUBBLOCK_ENTRIES, WALL_BACK_ONLY, WALL_FRONT_ONLY, WALL_HALF_FIRST,
+    WALL_HALF_SECOND,
 };
 
-use super::collision::{cliff, corners, edge_id, surface_record, Tables};
+use super::collision::{cliff, corners, edge_id, surface_record, PlaneRuns, Tables};
 use super::plane_collision::PlaneTables;
 use super::units::RuntimeUnits;
 use crate::grid::leaf::{LeafKey, CLICKS_PER_SECTOR, SECTOR_LEVEL};
@@ -95,6 +95,7 @@ pub fn build(
             None => (i32::from(lo), i32::from(hi)),
         });
     };
+    let mut runs = PlaneRuns::default();
     let mut ids: std::collections::BTreeMap<LeafKey, u16> = std::collections::BTreeMap::new();
     for (key, doc) in &leaves {
         let id = tables.sectors.len() as u16;
@@ -196,16 +197,8 @@ pub fn build(
             ..SectorExt::default()
         };
         if !walls.is_empty() || splitb.is_some() || !here.is_empty() {
-            ext.plane_first = u16::try_from(tables.planes.len())
-                .map_err(|_| format!("room {room_index} has too many plane copies"))?;
+            ext.plane_first = runs.run(&mut tables, &planes, &here, room_index)?;
             ext.plane_count = here.len() as u8;
-            for &i in &here {
-                let mut copy = planes.records[i];
-                if !tables.planes.iter().any(|p| p.id == copy.id) {
-                    copy.flags |= COLPLANE_PRIMARY;
-                }
-                tables.planes.push(copy);
-            }
             ext.wall_first = u16::try_from(tables.walls.len())
                 .map_err(|_| format!("room {room_index} has more than 65535 solid walls"))?;
             ext.wall_count =

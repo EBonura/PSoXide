@@ -138,6 +138,15 @@ pub struct RoomReport {
     pub probe_bytes: usize,
     /// Light probes (sectors with a floor, one more per extra floor).
     pub probes: usize,
+    /// Free-plane collision records in the chunk (`COL_PLANES`). Point rays
+    /// scan all of them for each trace of the room, so this is a run time
+    /// cost, not only bytes.
+    pub plane_records: usize,
+    /// Distinct collidable planes (a mesh box is five).
+    pub planes: usize,
+    /// Plane records the sector and leaf lists name together: what the table
+    /// would hold if each list had a run of its own.
+    pub plane_listed: usize,
 }
 
 impl CookReport {
@@ -167,7 +176,7 @@ impl CookReport {
         for (i, r) in self.rooms.iter().enumerate() {
             let c = |ids: &[usize]| ids.iter().map(|&k| r.section_bytes[k]).sum::<usize>();
             text.push_str(&format!(
-                "  room {i} {:?} {}x{}: {} faces -> {} quads + {} tris{}, {} verts, {} lod quads over {}, {} B (collision {} B, vertices {} B, quads {} B, cells {} B, {} light probes {} B)\n",
+                "  room {i} {:?} {}x{}: {} faces -> {} quads + {} tris{}, {} verts, {} lod quads over {}, {} B (collision {} B{}, vertices {} B, quads {} B, cells {} B, {} light probes {} B)\n",
                 r.name,
                 r.width,
                 r.depth,
@@ -196,6 +205,15 @@ impl CookReport {
                 r.lod_covered,
                 r.bytes,
                 c(&[0, 1, 2, 3, 4, 5, 6, 7]),
+                if r.plane_records == 0 {
+                    String::new()
+                } else {
+                    // Every point ray of the room scans all the records.
+                    format!(
+                        ": {} plane records for {} planes, {} listed by sectors and leaves",
+                        r.plane_records, r.planes, r.plane_listed
+                    )
+                },
                 c(&[9]),
                 c(&[10]),
                 c(&[11]),
@@ -434,6 +452,14 @@ fn cook_rooms(
             .iter()
             .any(|c| c.flags & psx_grid::CELL_OPEN_SKY != 0);
         any_sky |= outdoor;
+        let plane_records = col.planes.len();
+        let plane_listed = col.exts.iter().map(|e| usize::from(e.plane_count)).sum();
+        let plane_ids = col
+            .planes
+            .iter()
+            .map(|p| p.id)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
         let has_planes = !col.planes.is_empty() || !ren.plane_refs.is_empty();
         any_planes |= has_planes;
         report.warnings.extend(col.warnings.iter().cloned());
@@ -498,6 +524,9 @@ fn cook_rooms(
                 .iter()
                 .filter(|site| usize::from(site.room) == index)
                 .count(),
+            plane_records,
+            planes: plane_ids,
+            plane_listed,
         });
         let fog = &room.fog;
         let flags = (if outdoor { ROOM_OUTDOOR } else { 0 })
@@ -640,6 +669,8 @@ mod motor_harness;
 mod natural_tests;
 #[cfg(test)]
 mod occupancy_tests;
+#[cfg(test)]
+mod plane_share_tests;
 #[cfg(test)]
 mod plane_tests;
 #[cfg(test)]

@@ -46,12 +46,62 @@ pub struct Tables {
     pub exts: Vec<SectorExt>,
     pub walls: Vec<ColWall>,
     pub splitbs: Vec<SplitB>,
-    /// Free-plane records, a copy per overlapped sector.
+    /// Free-plane records: a run per distinct list of planes a sector (or
+    /// leaf) touches, shared by every extension record with that list (see
+    /// [`PlaneRuns`]).
     pub planes: Vec<ColPlane>,
     /// Lowest and highest local height over the room's geometry.
     pub range: Option<(i32, i32)>,
     /// Findings about planes, for the cook report.
     pub warnings: Vec<String>,
+}
+
+/// The plane runs of a room's collision table.
+///
+/// A plane is copied into the list of every sector it touches, and in a tree
+/// room into every leaf of those sectors. Copying each list into a run of its
+/// own made the table grow with the leaf count (the Outpost's 40 collidable
+/// boxes: 4,639 records for 200 distinct ones) and every point ray scans the
+/// whole table. Identical lists are written once and every extension record
+/// with that list points at the run: the reader only bounds-checks
+/// `plane_first` and `plane_count`, so this is a cook-only change.
+#[derive(Default)]
+pub(super) struct PlaneRuns {
+    /// The first record of the run written for each distinct list.
+    runs: std::collections::HashMap<Vec<usize>, u16>,
+    /// Plane ids that already have a record in the table.
+    seen: std::collections::HashSet<u8>,
+}
+
+impl PlaneRuns {
+    /// The first record of the run holding `list` (indices into
+    /// `planes.records`), written on first use. The first record of each
+    /// plane in the table is the one point rays test.
+    pub(super) fn run(
+        &mut self,
+        tables: &mut Tables,
+        planes: &super::plane_collision::PlaneTables,
+        list: &[usize],
+        room_index: usize,
+    ) -> Result<u16, String> {
+        let too_many = || format!("room {room_index} has too many plane copies");
+        if list.is_empty() {
+            return u16::try_from(tables.planes.len()).map_err(|_| too_many());
+        }
+        if let Some(&first) = self.runs.get(list) {
+            return Ok(first);
+        }
+        let first = u16::try_from(tables.planes.len()).map_err(|_| too_many())?;
+        for &i in list {
+            let mut copy = planes.records[i];
+            if self.seen.insert(copy.id) {
+                copy.flags |= COLPLANE_PRIMARY;
+            }
+            tables.planes.push(copy);
+        }
+        self.runs.insert(list.to_vec(), first);
+        Ok(first)
+    }
 }
 
 pub(super) fn edge_id(edge: WallEdge) -> u8 {
@@ -285,6 +335,7 @@ pub fn build_with_meshes(
             None => (i32::from(lo), i32::from(hi)),
         });
     };
+    let mut runs = PlaneRuns::default();
     for z in 0..room.depth {
         for x in 0..room.width {
             let at = |what: &str| format!("room {room_index} sector {x},{z}: {what}");
@@ -367,17 +418,8 @@ pub fn build_with_meshes(
             });
             let here = &planes.per_cell[z * room.width + x];
             if !walls.is_empty() || splitb.is_some() || !here.is_empty() {
-                ext.plane_first = u16::try_from(tables.planes.len())
-                    .map_err(|_| format!("room {room_index} has too many plane copies"))?;
+                ext.plane_first = runs.run(&mut tables, &planes, here, room_index)?;
                 ext.plane_count = here.len() as u8;
-                for &i in here {
-                    let mut copy = planes.records[i];
-                    // The first copy of each plane is the one point rays test.
-                    if !tables.planes.iter().any(|p| p.id == copy.id) {
-                        copy.flags |= COLPLANE_PRIMARY;
-                    }
-                    tables.planes.push(copy);
-                }
                 ext.wall_first = u16::try_from(tables.walls.len())
                     .map_err(|_| format!("room {room_index} has more than 65535 solid walls"))?;
                 ext.wall_count =

@@ -14,8 +14,9 @@
 //! * anything between: a **blocker** box around the plane, which over-blocks;
 //!   the cook says so.
 //!
-//! Every record is copied into every sector its footprint touches (the
+//! Every record is listed in every sector its footprint touches (the
 //! sector's extension names the run), carrying the plane's index as `id`.
+//! Sectors and leaves with the same list share one run (`collision::PlaneRuns`).
 //! All geometry is computed from the same rounded runtime corners the render
 //! quads use, so what is drawn is what is stood on.
 
