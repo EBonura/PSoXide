@@ -33,7 +33,7 @@ const GOURAUD_QUAD_COMMAND: u32 = 0x3800_0000;
 /// Skirts are drawn this much darker than the top, out of 4 (3 is 75 percent).
 const SKIRT_SHADE_QUARTERS: u32 = 3;
 /// Most leaves one frame draws from.
-const JOB_CAP: usize = 1024;
+const JOB_CAP: usize = 320;
 
 /// What a skin draw needs besides the level.
 pub struct SkinCamera<'a> {
@@ -130,18 +130,38 @@ impl SkinRenderer {
         out: &mut [u32],
         reverse: bool,
     ) -> GridFrame {
+        self.draw_with_marks(level, skip, camera, out, reverse, &mut |_, _| {})
+    }
+
+    /// [`Self::draw`] calling `mark(phase, begin)` around each of its three
+    /// phases (0 select, 1 project, 2 emit), for timing.
+    pub fn draw_with_marks(
+        &mut self,
+        level: &LevelView<'_>,
+        skip: &[bool],
+        camera: &SkinCamera<'_>,
+        out: &mut [u32],
+        reverse: bool,
+        mark: &mut dyn FnMut(u8, bool),
+    ) -> GridFrame {
         let mut frame = GridFrame::default();
         let Some(header) = level.skin else {
             return frame;
         };
+        mark(0, true);
         self.select(level, skip, camera, &mut frame);
+        mark(0, false);
         frame.quads_visible = self.jobs.len() as u16;
+        mark(1, true);
         self.project(i32::from(header.height_step), camera);
+        mark(1, false);
+        mark(2, true);
         if reverse {
             self.emit::<true>(out, &mut frame);
         } else {
             self.emit::<false>(out, &mut frame);
         }
+        mark(2, false);
         frame
     }
 
@@ -501,7 +521,11 @@ fn write_quad<const REVERSE: bool>(
         at.add(6).write(s[2].sxy);
         at.add(7).write(colour);
         at.add(8).write(s[3].sxy);
-        *next = if REVERSE { at } else { at.add(SKIN_PACKET_WORDS) };
+        *next = if REVERSE {
+            at
+        } else {
+            at.add(SKIN_PACKET_WORDS)
+        };
     }
     true
 }

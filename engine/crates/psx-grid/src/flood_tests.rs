@@ -196,7 +196,12 @@ fn the_result_in_force_holds_until_a_moved_query_finishes() {
     assert!(!flood.ensure(&level, query(6, 6 * 160 + 80, 3 * S, NO_PAGE_BUDGET), S, 1));
     assert!(flood.busy());
     assert_eq!(flood.rooms(), before.as_slice());
-    assert!(flood.ensure(&level, query(6, 6 * 160 + 80, 3 * S, NO_PAGE_BUDGET), S, 1000));
+    assert!(flood.ensure(
+        &level,
+        query(6, 6 * 160 + 80, 3 * S, NO_PAGE_BUDGET),
+        S,
+        1000
+    ));
     assert!(flood.contains(6) && !flood.contains(2));
 }
 
@@ -261,7 +266,10 @@ fn a_flooded_level_wants_the_drawn_set_as_need_and_the_resident_set_as_lead() {
     // Portals one sector from the middle of room 5, then three, five and so
     // on. Within 3 sectors (plus the activation walk of 1 sector): rooms
     // 4, 5, 6 and the far sides of 4 and 6, which are 3 sectors away.
-    assert!(need.contains(&5) && need.contains(&4) && need.contains(&6), "{need:?}");
+    assert!(
+        need.contains(&5) && need.contains(&4) && need.contains(&6),
+        "{need:?}"
+    );
     assert!(!need.contains(&2), "{need:?}");
     // The resident flood adds rooms out to 6 sectors, none twice.
     assert!(lead.iter().all(|r| !need.contains(r)), "{lead:?}");
@@ -291,7 +299,10 @@ fn a_flooded_level_that_fits_its_pool_is_held_whole() {
     assert_eq!(wanted.len(), 6);
     assert!(wanted.iter().all(|w| w.want == Want::Need));
     let plan = plan_pool(&level, &[3; 6]);
-    assert_eq!((plan.total_pages, plan.pool_pages, plan.peak_rooms), (18, 18, 6));
+    assert_eq!(
+        (plan.total_pages, plan.pool_pages, plan.peak_rooms),
+        (18, 18, 6)
+    );
 }
 
 #[test]
@@ -304,11 +315,7 @@ fn a_drawn_room_on_the_rim_stays_drawn_for_a_sector_but_one_never_drawn_does_not
     let mut at = [5 * 160 + 80, 50, S / 2];
     window.wanted(&level, Some((5, at)), Some((5, at)), &mut wanted);
     let drawn = |window: &StreamWindow, room: u16| {
-        window
-            .drawn_rooms()
-            .unwrap()
-            .iter()
-            .any(|f| f.room == room)
+        window.drawn_rooms().unwrap().iter().any(|f| f.room == room)
     };
     assert!(drawn(&window, 7));
     // Walk one sector towards room 4 (and inside room 5 still): room 7's
@@ -389,7 +396,10 @@ fn a_skin_block_follows_the_flood_block_and_round_trips() {
     let level = view(&words);
     assert!(level.budget_flood().is_some());
     let header = level.skin.expect("the skin header");
-    assert_eq!((header.base_y, header.origin, header.height_step), (-5, [-3, 7], 5));
+    assert_eq!(
+        (header.base_y, header.origin, header.height_step),
+        (-5, [-3, 7], 5)
+    );
     assert_eq!(level.skin_cells, &[0, 1, 3, 3, 3]);
     assert_eq!(level.skin_leaves, leaves.as_slice());
     assert!(level.validate_full().is_ok());

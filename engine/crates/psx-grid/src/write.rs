@@ -646,7 +646,8 @@ impl LevelCore {
         }
         if let Some(skin) = &self.skin {
             if skin.header.lod_count == 0
-                || skin.cell_first.len() != self.rooms.len() * usize::from(skin.header.lod_count) + 1
+                || skin.cell_first.len()
+                    != self.rooms.len() * usize::from(skin.header.lod_count) + 1
                 || usize::from(skin.header.leaf_count) != skin.leaves.len()
                 || skin.cell_first.last().map(|&l| usize::from(l)) != Some(skin.leaves.len())
             {

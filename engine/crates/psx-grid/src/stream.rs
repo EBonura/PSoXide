@@ -591,13 +591,10 @@ impl StreamWindow {
     /// [`Self::wanted`], or `u32::MAX` beyond the lead radius.
     pub fn distance_of(&self, room: u16) -> u32 {
         let cost = match &self.flood {
-            Some(flood) => flood.lead.cost(usize::from(room)).or_else(|| {
-                flood
-                    .drawn
-                    .iter()
-                    .find(|f| f.room == room)
-                    .map(|f| f.cost)
-            }),
+            Some(flood) => flood
+                .lead
+                .cost(usize::from(room))
+                .or_else(|| flood.drawn.iter().find(|f| f.room == room).map(|f| f.cost)),
             None => self.lead.cost(usize::from(room)),
         };
         cost.map_or(u32::MAX, |cost| cost.max(0) as u32)

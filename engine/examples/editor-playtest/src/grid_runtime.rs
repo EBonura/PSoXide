@@ -1130,7 +1130,7 @@ impl GridRuntime {
                             * 6
                             / 5,
                     };
-                    let skin = self.skin.draw(
+                    let skin = self.skin.draw_with_marks(
                         &self.level,
                         &self.skin_skip,
                         &camera,
@@ -1140,6 +1140,20 @@ impl GridRuntime {
                             &mut packets[total.packet_words..]
                         },
                         reverse,
+                        &mut |phase, begin| {
+                            // The skin's phases ride on stages the grid
+                            // runtime leaves unused.
+                            let id = match phase {
+                                0 => telemetry::stage::BOX_PROP_DEBRIS,
+                                1 => telemetry::stage::BOX_PROP_SHARDS,
+                                _ => telemetry::stage::IMAGE_CARDS,
+                            };
+                            if begin {
+                                telemetry::stage_begin(id);
+                            } else {
+                                telemetry::stage_end(id);
+                            }
+                        },
                     );
                     telemetry::stage_end(telemetry::stage::FAR_VISTA);
                     // The skin's own counters, on columns the grid renderer
