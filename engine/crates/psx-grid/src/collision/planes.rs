@@ -48,6 +48,40 @@ pub(crate) fn platform_y(plane: &ColPlane, x: i32, z: i32) -> i32 {
     i32::from(plane.y0) + ((i32::from(plane.sx_q12) * dx + i32::from(plane.sz_q12) * dz) >> 12)
 }
 
+/// Whether the box `lo..=hi` (room-local) lies clear of everything `plane`
+/// can block, so a segment inside the box cannot meet it. Exact: the plan
+/// box of every kind holds its shape, and a wall or a blocker also has its
+/// height range tested (a platform's top is tilted, so only its plan box is).
+#[inline(always)]
+pub(crate) fn box_misses(plane: &ColPlane, lo: &[i32; 3], hi: &[i32; 3]) -> bool {
+    let (p0, p1) = (plane.xz[0], plane.xz[1]);
+    let (x0, x1, z0, z1) = if plane.kind == plane_kind::PLATFORM {
+        let (p2, p3) = (plane.xz[2], plane.xz[3]);
+        (
+            i32::from(p0[0].min(p1[0]).min(p2[0]).min(p3[0])),
+            i32::from(p0[0].max(p1[0]).max(p2[0]).max(p3[0])),
+            i32::from(p0[1].min(p1[1]).min(p2[1]).min(p3[1])),
+            i32::from(p0[1].max(p1[1]).max(p2[1]).max(p3[1])),
+        )
+    } else {
+        // A wall's segment and a blocker's corners: two points each.
+        (
+            i32::from(p0[0].min(p1[0])),
+            i32::from(p0[0].max(p1[0])),
+            i32::from(p0[1].min(p1[1])),
+            i32::from(p0[1].max(p1[1])),
+        )
+    };
+    if hi[0] < x0 || lo[0] > x1 || hi[2] < z0 || lo[2] > z1 {
+        return true;
+    }
+    if plane.kind == plane_kind::PLATFORM {
+        return false;
+    }
+    let bottom = i32::from(plane.y0);
+    hi[1] < bottom || lo[1] > bottom + i32::from(plane.extent)
+}
+
 /// Cross product of footprint edge `i` (a to b) with the vector to `(x, z)`:
 /// not negative when the point is on the inside of it.
 #[inline(always)]
@@ -313,11 +347,19 @@ impl<'a> GridCollision<'a> {
             q.a[2] - rec.origin[2],
         ];
         let b = [a[0] + q.d[0], a[1] + q.d[1], a[2] + q.d[2]];
+        // The box around the segment: a plane whose own box it misses cannot
+        // be crossed, and the box test costs a few compares where the
+        // crossing test costs a thousand cycles.
+        let lo = [a[0].min(b[0]), a[1].min(b[1]), a[2].min(b[2])];
+        let hi = [a[0].max(b[0]), a[1].max(b[1]), a[2].max(b[2])];
         for (index, plane) in view.col_planes.iter().enumerate() {
             if plane.flags & COLPLANE_PRIMARY == 0 {
                 continue;
             }
             if self.camera_pass && plane.flags & COLPLANE_CAMERA_PASS != 0 {
+                continue;
+            }
+            if box_misses(plane, &lo, &hi) {
                 continue;
             }
             match plane.kind {
@@ -329,7 +371,7 @@ impl<'a> GridCollision<'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn ray_wall(
+    pub(super) fn ray_wall(
         &self,
         room: usize,
         index: usize,
@@ -361,7 +403,7 @@ impl<'a> GridCollision<'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn ray_platform(
+    pub(super) fn ray_platform(
         &self,
         room: usize,
         index: usize,
@@ -393,7 +435,7 @@ impl<'a> GridCollision<'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn ray_blocker(
+    pub(super) fn ray_blocker(
         &self,
         room: usize,
         index: usize,

@@ -1,7 +1,10 @@
 //! Free-plane collision: a bridge over a pit, a ramp, a slanted wall, a
 //! blocker box and the invariants every trace keeps.
 
+use super::body::{Query, Raw};
+use super::planes::box_misses;
 use super::tests::{body, build, point, trace, walk, Built, Lcg, Room};
+use super::world::GridCollision;
 use crate::format::*;
 use psx_engine::{CollisionTraceQuery, RoomPoint};
 use psx_math::int32::isqrt_i32;
@@ -312,5 +315,86 @@ fn the_camera_arm_passes_through_flagged_planes_and_everything_else_still_collid
         let mut body_trace = GridTraceProvider::new(w);
         let t = trace_collision(&mut body_trace, body([100, 0, 150], [300, 0, 150])).unwrap();
         assert!(t.fraction_q12 < 4096, "{t:?}");
+    });
+}
+
+/// The ray loop as it was before the box test: every primary plane, no
+/// rejection.
+fn ray_planes_unfiltered(w: &GridCollision<'_>, room: usize, q: &Query, hit: &mut Raw) {
+    let (Some(view), rec) = (w.view(room), w.rec(room)) else {
+        return;
+    };
+    let a = [
+        q.a[0] - rec.origin[0],
+        q.a[1] - rec.origin[1],
+        q.a[2] - rec.origin[2],
+    ];
+    let b = [a[0] + q.d[0], a[1] + q.d[1], a[2] + q.d[2]];
+    for (index, plane) in view.col_planes.iter().enumerate() {
+        if plane.flags & COLPLANE_PRIMARY == 0 {
+            continue;
+        }
+        if w.camera_pass && plane.flags & COLPLANE_CAMERA_PASS != 0 {
+            continue;
+        }
+        match plane.kind {
+            plane_kind::WALL => w.ray_wall(room, index, plane, &a, &b, q, hit),
+            plane_kind::PLATFORM => w.ray_platform(room, index, plane, &a, &b, q, hit),
+            _ => w.ray_blocker(room, index, plane, &a, &b, hit),
+        }
+    }
+}
+
+#[test]
+fn the_box_test_never_changes_what_a_ray_finds() {
+    let built = property_world();
+    built.run(|w| {
+        let mut rng = Lcg(77);
+        let mut found = 0;
+        let mut skipped = 0;
+        for i in 0..20000 {
+            let a = [
+                rng.range(-60, 520),
+                rng.range(-120, 200),
+                rng.range(-60, 520),
+            ];
+            let d = match i % 5 {
+                0 => [rng.range(-40, 40), rng.range(-40, 40), rng.range(-40, 40)],
+                1 => [rng.range(-600, 600), rng.range(-200, 200), rng.range(-600, 600)],
+                2 => [0, rng.range(-400, 400), 0],
+                3 => [rng.range(-300, 300), 0, 0],
+                _ => [0, 0, rng.range(-300, 300)],
+            };
+            let q = Query {
+                a,
+                d,
+                r: 0,
+                h: 0,
+                body: false,
+            };
+            let (mut with, mut without) = (Raw::new(), Raw::new());
+            with.fraction = 4097;
+            without.fraction = 4097;
+            w.ray_planes(0, &q, &mut with);
+            ray_planes_unfiltered(w, 0, &q, &mut without);
+            assert_eq!(with.fraction, without.fraction, "{a:?} {d:?}");
+            assert_eq!(with.normal, without.normal, "{a:?} {d:?}");
+            assert_eq!(with.start_solid, without.start_solid, "{a:?} {d:?}");
+            let (s, t) = (with.src, without.src);
+            assert_eq!((s.kind, s.aux, s.cx, s.cz, s.room, s.span), (t.kind, t.aux, t.cx, t.cz, t.room, t.span));
+            found += usize::from(with.fraction <= 4096 || with.start_solid);
+            // Count how many planes the box test saved a crossing test.
+            let view = w.view(0).unwrap();
+            let rec = w.rec(0);
+            let lo = [0, 1, 2].map(|k| (a[k] - rec.origin[k]).min(a[k] - rec.origin[k] + d[k]));
+            let hi = [0, 1, 2].map(|k| (a[k] - rec.origin[k]).max(a[k] - rec.origin[k] + d[k]));
+            skipped += view
+                .col_planes
+                .iter()
+                .filter(|p| p.flags & COLPLANE_PRIMARY != 0 && box_misses(p, &lo, &hi))
+                .count();
+        }
+        assert!(found > 500, "the rays must hit planes: {found}");
+        assert!(skipped > 20000, "the box test must skip planes: {skipped}");
     });
 }
