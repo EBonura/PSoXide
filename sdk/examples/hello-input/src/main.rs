@@ -29,7 +29,8 @@
 
 extern crate psx_rt;
 
-use psx_font::{fonts::BASIC, FontAtlas};
+use psx_font::fonts::BASIC;
+use psx_font::FontAtlas;
 use psx_gpu::display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode};
 use psx_gpu::prim::TriFlat;
 use psx_gpu::Gpu;
@@ -138,22 +139,22 @@ fn draw_button_labels(font: &FontAtlas, pad: ButtonState) {
     // where applicable so the label lines up visually with the
     // on-screen primitive.
     let rows: &[(u16, &str, (u8, u8, u8))] = &[
-        (button::UP, "UP", (0xC0, 0x30, 0x30)),
-        (button::DOWN, "DOWN", (0x30, 0xC0, 0x30)),
-        (button::LEFT, "LEFT", (0x30, 0x30, 0xC0)),
-        (button::RIGHT, "RIGHT", (0xA0, 0xA0, 0xA0)),
-        (button::TRIANGLE, "TRIANGLE", (0x30, 0xC0, 0x30)),
-        (button::CIRCLE, "CIRCLE", (0xC0, 0x30, 0x30)),
-        (button::CROSS, "CROSS", (0x30, 0x80, 0xC0)),
-        (button::SQUARE, "SQUARE", (0xC0, 0x30, 0xC0)),
-        (button::L1, "L1", (0xA0, 0xA0, 0x30)),
-        (button::R1, "R1", (0xA0, 0xA0, 0x30)),
-        (button::L2, "L2", (0x60, 0xA0, 0x60)),
-        (button::R2, "R2", (0x60, 0xA0, 0x60)),
-        (button::L3, "L3", (0x60, 0xC0, 0xC0)),
-        (button::R3, "R3", (0x60, 0xC0, 0xC0)),
-        (button::START, "START", (0xE0, 0xE0, 0xE0)),
-        (button::SELECT, "SELECT", (0xE0, 0xE0, 0xE0)),
+        (button::UP, "UP", (0xc0, 0x30, 0x30)),
+        (button::DOWN, "DOWN", (0x30, 0xc0, 0x30)),
+        (button::LEFT, "LEFT", (0x30, 0x30, 0xc0)),
+        (button::RIGHT, "RIGHT", (0xa0, 0xa0, 0xa0)),
+        (button::TRIANGLE, "TRIANGLE", (0x30, 0xc0, 0x30)),
+        (button::CIRCLE, "CIRCLE", (0xc0, 0x30, 0x30)),
+        (button::CROSS, "CROSS", (0x30, 0x80, 0xc0)),
+        (button::SQUARE, "SQUARE", (0xc0, 0x30, 0xc0)),
+        (button::L1, "L1", (0xa0, 0xa0, 0x30)),
+        (button::R1, "R1", (0xa0, 0xa0, 0x30)),
+        (button::L2, "L2", (0x60, 0xa0, 0x60)),
+        (button::R2, "R2", (0x60, 0xa0, 0x60)),
+        (button::L3, "L3", (0x60, 0xc0, 0xc0)),
+        (button::R3, "R3", (0x60, 0xc0, 0xc0)),
+        (button::START, "START", (0xe0, 0xe0, 0xe0)),
+        (button::SELECT, "SELECT", (0xe0, 0xe0, 0xe0)),
     ];
 
     // Label area: start at y=16 (below the HELD: header), advance 10
@@ -175,12 +176,12 @@ fn draw_button_labels(font: &FontAtlas, pad: ButtonState) {
 
 fn draw_pad_status(font: &FontAtlas, state: PadState) {
     let (mode, tint) = match state.mode {
-        PadMode::Disconnected => ("NO PAD", (0xE0, 0x50, 0x50)),
-        PadMode::Digital => ("DIGITAL", (0xE0, 0x90, 0x40)),
-        PadMode::Negcon => ("NEGCON", (0x60, 0xC0, 0xE0)),
-        PadMode::Analog => ("ANALOG", (0x60, 0xE0, 0x80)),
-        PadMode::Config => ("CONFIG", (0x90, 0xA0, 0xE0)),
-        PadMode::Unknown => ("UNKNOWN", (0xE0, 0xE0, 0x60)),
+        PadMode::Disconnected => ("NO PAD", (0xe0, 0x50, 0x50)),
+        PadMode::Digital => ("DIGITAL", (0xe0, 0x90, 0x40)),
+        PadMode::Negcon => ("NEGCON", (0x60, 0xc0, 0xe0)),
+        PadMode::Analog => ("ANALOG", (0x60, 0xe0, 0x80)),
+        PadMode::Config => ("CONFIG", (0x90, 0xa0, 0xe0)),
+        PadMode::Unknown => ("UNKNOWN", (0xe0, 0xe0, 0x60)),
     };
 
     font.draw_text(4, 188, "MODE:", (0x80, 0x80, 0x80));
@@ -192,32 +193,32 @@ fn draw_pad_status(font: &FontAtlas, state: PadState) {
 
     font.draw_text(4, 200, "ANALOG:", (0x80, 0x80, 0x80));
     if state.is_analog() {
-        font.draw_text(68, 200, "ON", (0x60, 0xE0, 0x80));
+        font.draw_text(68, 200, "ON", (0x60, 0xe0, 0x80));
         let lx = hex_u8(state.sticks.left_x);
         let ly = hex_u8(state.sticks.left_y);
         let rx = hex_u8(state.sticks.right_x);
         let ry = hex_u8(state.sticks.right_y);
         font.draw_text(4, 212, "L:", (0x80, 0x80, 0x80));
-        font.draw_text(28, 212, &lx, (0x70, 0xC0, 0xE0));
-        font.draw_text(68, 212, &ly, (0x70, 0xC0, 0xE0));
+        font.draw_text(28, 212, &lx, (0x70, 0xc0, 0xe0));
+        font.draw_text(68, 212, &ly, (0x70, 0xc0, 0xe0));
         font.draw_text(4, 224, "R:", (0x80, 0x80, 0x80));
-        font.draw_text(28, 224, &rx, (0xC0, 0x90, 0xE0));
-        font.draw_text(68, 224, &ry, (0xC0, 0x90, 0xE0));
+        font.draw_text(28, 224, &rx, (0xc0, 0x90, 0xe0));
+        font.draw_text(68, 224, &ry, (0xc0, 0x90, 0xe0));
     } else if let Some(negcon) = state.negcon {
-        font.draw_text(68, 200, "TWIST", (0x60, 0xC0, 0xE0));
-        font.draw_text(124, 200, &hex_u8(negcon.twist), (0x70, 0xC0, 0xE0));
+        font.draw_text(68, 200, "TWIST", (0x60, 0xc0, 0xe0));
+        font.draw_text(124, 200, &hex_u8(negcon.twist), (0x70, 0xc0, 0xe0));
         font.draw_text(4, 212, "I:", (0x80, 0x80, 0x80));
-        font.draw_text(28, 212, &hex_u8(negcon.i), (0x70, 0xC0, 0xE0));
+        font.draw_text(28, 212, &hex_u8(negcon.i), (0x70, 0xc0, 0xe0));
         font.draw_text(76, 212, "II:", (0x80, 0x80, 0x80));
-        font.draw_text(108, 212, &hex_u8(negcon.ii), (0x70, 0xC0, 0xE0));
+        font.draw_text(108, 212, &hex_u8(negcon.ii), (0x70, 0xc0, 0xe0));
         font.draw_text(4, 224, "L:", (0x80, 0x80, 0x80));
-        font.draw_text(28, 224, &hex_u8(negcon.left_shoulder), (0x70, 0xC0, 0xE0));
+        font.draw_text(28, 224, &hex_u8(negcon.left_shoulder), (0x70, 0xc0, 0xe0));
     } else if state.is_connected() {
-        font.draw_text(68, 200, "OFF", (0xE0, 0x90, 0x40));
+        font.draw_text(68, 200, "OFF", (0xe0, 0x90, 0x40));
         font.draw_text(4, 212, "PRESS ANALOG BUTTON", (0x90, 0x90, 0x90));
     } else {
-        font.draw_text(68, 200, "N/A", (0xE0, 0x50, 0x50));
-        font.draw_text(4, 212, "CONNECT A CONTROLLER", (0xE0, 0x90, 0x40));
+        font.draw_text(68, 200, "N/A", (0xe0, 0x50, 0x50));
+        font.draw_text(4, 212, "CONNECT A CONTROLLER", (0xe0, 0x90, 0x40));
     }
 }
 
@@ -228,10 +229,10 @@ fn hex_u16(v: u16) -> HexU16 {
     let mut out = [0u8; 6];
     out[0] = b'0';
     out[1] = b'x';
-    out[2] = HEX[((v >> 12) & 0xF) as usize];
-    out[3] = HEX[((v >> 8) & 0xF) as usize];
-    out[4] = HEX[((v >> 4) & 0xF) as usize];
-    out[5] = HEX[(v & 0xF) as usize];
+    out[2] = HEX[((v >> 12) & 0xf) as usize];
+    out[3] = HEX[((v >> 8) & 0xf) as usize];
+    out[4] = HEX[((v >> 4) & 0xf) as usize];
+    out[5] = HEX[(v & 0xf) as usize];
     HexU16(out)
 }
 
@@ -241,8 +242,8 @@ fn hex_u8(v: u8) -> HexU8 {
     let mut out = [0u8; 4];
     out[0] = b'0';
     out[1] = b'x';
-    out[2] = HEX[((v >> 4) & 0xF) as usize];
-    out[3] = HEX[(v & 0xF) as usize];
+    out[2] = HEX[((v >> 4) & 0xf) as usize];
+    out[3] = HEX[(v & 0xf) as usize];
     HexU8(out)
 }
 

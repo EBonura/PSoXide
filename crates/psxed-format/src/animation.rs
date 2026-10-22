@@ -218,7 +218,7 @@ pub const V4_MAX_RECONSTRUCTION_ERROR_Q12: i16 = 3;
 /// reserved code; everything else rounds to the nearest even Q12.
 pub const fn encode_q11(q12: i16) -> u16 {
     if q12 >= 4095 {
-        return 0x7FF;
+        return 0x7ff;
     }
     let clamped = if q12 < -4096 { -4096 } else { q12 } as i32;
     // Round-to-nearest halving, then clamp inside the regular range.
@@ -229,7 +229,7 @@ pub const fn encode_q11(q12: i16) -> u16 {
     if code < -2048 {
         code = -2048;
     }
-    (code as u16) & 0x0FFF
+    (code as u16) & 0x0fff
 }
 
 /// Decode one 12-bit Q11 code back to a Q3.12 element (reference
@@ -238,7 +238,7 @@ pub const fn decode_q11(code: u16) -> i16 {
     let signed = ((code << 4) as i16) >> 4;
     signed
         .wrapping_shl(1)
-        .wrapping_add((((code & 0x0FFF) == 0x07FF) as i16) << 1)
+        .wrapping_add((((code & 0x0fff) == 0x07ff) as i16) << 1)
 }
 
 /// Pack nine Q3.12 rotation elements into a v3 rotation block.
@@ -248,14 +248,14 @@ pub fn encode_rotation_q11(matrix: &[i16; 9], out: &mut [u8; POSE_ROTATION_BLOCK
         let a = encode_q11(matrix[pair * 2]) as u32;
         let b = encode_q11(matrix[pair * 2 + 1]) as u32;
         let packed = a | (b << 12);
-        out[pair * 3] = (packed & 0xFF) as u8;
-        out[pair * 3 + 1] = ((packed >> 8) & 0xFF) as u8;
-        out[pair * 3 + 2] = ((packed >> 16) & 0xFF) as u8;
+        out[pair * 3] = (packed & 0xff) as u8;
+        out[pair * 3 + 1] = ((packed >> 8) & 0xff) as u8;
+        out[pair * 3 + 2] = ((packed >> 16) & 0xff) as u8;
         pair += 1;
     }
     let last = encode_q11(matrix[8]);
-    out[12] = (last & 0xFF) as u8;
-    out[13] = ((last >> 8) & 0x0F) as u8;
+    out[12] = (last & 0xff) as u8;
+    out[13] = ((last >> 8) & 0x0f) as u8;
 }
 
 /// Unpack a v3 rotation block back to nine Q3.12 elements (reference).
@@ -266,11 +266,11 @@ pub fn decode_rotation_q11(block: &[u8; POSE_ROTATION_BLOCK_SIZE_V3]) -> [i16; 9
         let packed = (block[pair * 3] as u32)
             | ((block[pair * 3 + 1] as u32) << 8)
             | ((block[pair * 3 + 2] as u32) << 16);
-        out[pair * 2] = decode_q11((packed & 0x0FFF) as u16);
-        out[pair * 2 + 1] = decode_q11(((packed >> 12) & 0x0FFF) as u16);
+        out[pair * 2] = decode_q11((packed & 0x0fff) as u16);
+        out[pair * 2 + 1] = decode_q11(((packed >> 12) & 0x0fff) as u16);
         pair += 1;
     }
-    out[8] = decode_q11(((block[12] as u16) | ((block[13] as u16) << 8)) & 0x0FFF);
+    out[8] = decode_q11(((block[12] as u16) | ((block[13] as u16) << 8)) & 0x0fff);
     out
 }
 

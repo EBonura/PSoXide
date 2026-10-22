@@ -54,13 +54,13 @@ pub fn decode(adpcm: &[u8]) -> Vec<i16> {
     let (mut s1, mut s2) = (0i32, 0i32);
     for block in adpcm.chunks_exact(BLOCK_BYTES) {
         let f = FILTERS[((block[0] >> 4) as usize).min(4)];
-        let raw_shift = block[0] & 0x0F;
+        let raw_shift = block[0] & 0x0f;
         let shift = if raw_shift > 12 { 9 } else { raw_shift } as u32;
         for i in 0..BLOCK_SAMPLES {
             let byte = block[2 + i / 2] as i32;
-            let nib = if i & 1 == 0 { byte & 0xF } else { byte >> 4 };
+            let nib = if i & 1 == 0 { byte & 0xf } else { byte >> 4 };
             let raw = (((nib << 28) >> 28) << 12) >> shift;
-            let v = (raw + predict(f, s1, s2)).clamp(-0x8000, 0x7FFF);
+            let v = (raw + predict(f, s1, s2)).clamp(-0x8000, 0x7fff);
             out.push(v as i16);
             s2 = s1;
             s1 = v;
@@ -120,7 +120,7 @@ impl Block {
         b[0] = self.header;
         b[1] = flags;
         for i in 0..14 {
-            b[2 + i] = (self.nib[2 * i] & 0xF) | (self.nib[2 * i + 1] << 4);
+            b[2 + i] = (self.nib[2 * i] & 0xf) | (self.nib[2 * i + 1] << 4);
         }
         b
     }
@@ -151,10 +151,10 @@ fn greedy(x: &[i32; BLOCK_SAMPLES], state: (i32, i32), filter: usize, shift: u32
     for i in 0..BLOCK_SAMPLES {
         let p = predict(f, s1, s2);
         let q = nearest(x[i] - p, shift);
-        let v = (((q << 12) >> shift) + p).clamp(-0x8000, 0x7FFF);
+        let v = (((q << 12) >> shift) + p).clamp(-0x8000, 0x7fff);
         let d = (x[i] - v) as i64;
         err += d * d;
-        nib[i] = (q & 0xF) as u8;
+        nib[i] = (q & 0xf) as u8;
         s2 = s1;
         s1 = v;
     }
@@ -199,11 +199,11 @@ fn trellis(
                 if !(-8..=7).contains(&q) {
                     continue;
                 }
-                let v = (((q << 12) >> shift) + pred).clamp(-0x8000, 0x7FFF);
+                let v = (((q << 12) >> shift) + pred).clamp(-0x8000, 0x7fff);
                 let d = (x[i] - v) as i64;
                 let mut np = *p;
                 np.err += d * d;
-                np.nib[i] = (q & 0xF) as u8;
+                np.nib[i] = (q & 0xf) as u8;
                 np.s2 = p.s1;
                 np.s1 = v;
                 next.push(np);
@@ -273,7 +273,7 @@ pub fn encode(samples: &[i16], loop_block: Option<usize>, opts: &EncodeOptions) 
                             &target,
                             state,
                             (g.header >> 4) as usize,
-                            (g.header & 0xF) as u32,
+                            (g.header & 0xf) as u32,
                             opts.beam,
                             opts.span,
                         );

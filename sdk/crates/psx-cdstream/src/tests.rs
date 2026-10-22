@@ -7,7 +7,7 @@ use std::boxed::Box;
 use std::vec;
 use std::vec::Vec;
 
-const CANARY: u32 = 0xDEAD_BEEF;
+const CANARY: u32 = 0xdead_beef;
 const BRACKET: [u8; 5] = [CMD_SETLOC, CMD_SEEKL, CMD_SETMODE, CMD_READN, CMD_PAUSE];
 
 // ------------------------------------------------------------------ helpers

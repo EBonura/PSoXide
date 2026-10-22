@@ -8,7 +8,8 @@
 
 extern crate psx_rt;
 
-use psx_font::{fonts::BASIC, FontAtlas};
+use psx_font::fonts::BASIC;
+use psx_font::FontAtlas;
 use psx_gpu::display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode};
 use psx_gpu::Gpu;
 use psx_pad::{button, poll_on, ButtonState, Port};

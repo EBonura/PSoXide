@@ -376,9 +376,9 @@ mod tests {
         assert_eq!(overlay.collapse(&image, file.len(), base), file);
         // A change at the link address lands where the bytes sit.
         let mut changed = image.clone();
-        changed[link + 4] = 0xEE;
+        changed[link + 4] = 0xee;
         let back = overlay.collapse(&changed, file.len(), base);
-        assert_eq!(back[HEADER as usize + 0x24], 0xEE);
+        assert_eq!(back[HEADER as usize + 0x24], 0xee);
         assert_eq!(back.len(), file.len());
         assert_eq!(overlay.domain(0x8041_0004), Some(0));
         assert_eq!(overlay.domain(base), None);

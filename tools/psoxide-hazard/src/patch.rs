@@ -529,7 +529,7 @@ fn pass(
             put_word(&mut data, addr, encode_j(tramp, false));
             // Same opcode and registers, offset +3 words: skips nop, j FALL, nop.
             vec![
-                (original & 0xFFFF_0000) | 3,
+                (original & 0xffff_0000) | 3,
                 nop,
                 encode_j(fall, false),
                 nop,

@@ -246,16 +246,16 @@ mod tests {
     fn pack_xy_preserves_negative_sign() {
         // -1 packs to 0xFFFF in the low or high half without
         // contaminating the opposite half.
-        assert_eq!(pack_xy(-1, 5), 0x0005_FFFF);
-        assert_eq!(pack_xy(5, -1), 0xFFFF_0005);
-        assert_eq!(unpack_xy(0xFFFF_0005), (5, -1));
-        assert_eq!(unpack_xy(0x0005_FFFF), (-1, 5));
+        assert_eq!(pack_xy(-1, 5), 0x0005_ffff);
+        assert_eq!(pack_xy(5, -1), 0xffff_0005);
+        assert_eq!(unpack_xy(0xffff_0005), (5, -1));
+        assert_eq!(unpack_xy(0x0005_ffff), (-1, 5));
     }
 
     #[test]
     fn pack_xy_extreme_values() {
-        assert_eq!(pack_xy(i16::MIN, i16::MAX), 0x7FFF_8000);
-        assert_eq!(unpack_xy(0x7FFF_8000), (i16::MIN, i16::MAX));
+        assert_eq!(pack_xy(i16::MIN, i16::MAX), 0x7fff_8000);
+        assert_eq!(unpack_xy(0x7fff_8000), (i16::MIN, i16::MAX));
     }
 
     /// Verify the MFC2/MTC2/CFC2/CTC2 encoding tables we hand-coded
@@ -269,6 +269,6 @@ mod tests {
         assert_eq!(0x4808_0000u32, (0x12u32 << 26) | (8 << 16));
         assert_eq!(0x4888_0000u32, (0x12u32 << 26) | (4 << 21) | (8 << 16));
         assert_eq!(0x4848_0000u32, (0x12u32 << 26) | (2 << 21) | (8 << 16));
-        assert_eq!(0x48C8_0000u32, (0x12u32 << 26) | (6 << 21) | (8 << 16));
+        assert_eq!(0x48c8_0000u32, (0x12u32 << 26) | (6 << 21) | (8 << 16));
     }
 }

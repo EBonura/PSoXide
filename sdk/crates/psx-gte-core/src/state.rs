@@ -98,7 +98,7 @@ mod flag {
     pub const MAC2_POS: u32 = 1 << 29;
     pub const MAC1_POS: u32 = 1 << 30;
     /// Bits that participate in the FLAG[31] master OR.
-    pub const ERROR_MASK: u32 = 0x7F87_E000;
+    pub const ERROR_MASK: u32 = 0x7f87_e000;
 }
 
 /// Full GTE state. Field grouping matches the PSX register map:
@@ -245,26 +245,26 @@ fn gte_command_cycles(opcode: u8) -> Option<u8> {
     match opcode {
         0x01 => Some(15), // RTPS
         0x06 => Some(8),  // NCLIP
-        0x0C => Some(6),  // OP
+        0x0c => Some(6),  // OP
         0x10 => Some(8),  // DPCS
         0x11 => Some(8),  // INTPL
         0x12 => Some(8),  // MVMVA
         0x13 => Some(19), // NCDS
         0x14 => Some(13), // CDP
         0x16 => Some(44), // NCDT
-        0x1B => Some(17), // NCCS
-        0x1C => Some(11), // CC
-        0x1E => Some(14), // NCS
+        0x1b => Some(17), // NCCS
+        0x1c => Some(11), // CC
+        0x1e => Some(14), // NCS
         0x20 => Some(30), // NCT
         0x28 => Some(5),  // SQR
         0x29 => Some(8),  // DCPL
-        0x2A => Some(17), // DPCT
-        0x2D => Some(5),  // AVSZ3
-        0x2E => Some(6),  // AVSZ4
+        0x2a => Some(17), // DPCT
+        0x2d => Some(5),  // AVSZ3
+        0x2e => Some(6),  // AVSZ4
         0x30 => Some(23), // RTPT
-        0x3D => Some(5),  // GPF
-        0x3E => Some(5),  // GPL
-        0x3F => Some(39), // NCCT
+        0x3d => Some(5),  // GPF
+        0x3e => Some(5),  // GPL
+        0x3f => Some(39), // NCCT
         _ => None,
     }
 }
@@ -275,7 +275,7 @@ impl Gte {
     /// decode as nops. Lets a CPU model charge the latency it stalls on
     /// when a GTE result register is read before the op completes.
     pub fn command_cycles(instr: u32) -> u32 {
-        gte_command_cycles((instr & 0x3F) as u8).map_or(0, u32::from)
+        gte_command_cycles((instr & 0x3f) as u8).map_or(0, u32::from)
     }
 
     /// Construct a freshly-reset GTE -- all registers cleared. Real
@@ -431,9 +431,9 @@ impl Gte {
             // IRGB write -- unpack 5:5:5 and replicate into IR1..3 with
             // each component shifted up by 7 (so 5-bit 31 → 0xF80).
             28 => {
-                let r = (value & 0x1F) as i16;
-                let g = ((value >> 5) & 0x1F) as i16;
-                let b = ((value >> 10) & 0x1F) as i16;
+                let r = (value & 0x1f) as i16;
+                let g = ((value >> 5) & 0x1f) as i16;
+                let b = ((value >> 10) & 0x1f) as i16;
                 self.ir[0] = r << 7;
                 self.ir[1] = g << 7;
                 self.ir[2] = b << 7;
@@ -566,7 +566,7 @@ impl Gte {
             30 => self.zsf4 = value as i16,
             // FLAG: writes leave the master bit derived from the rest.
             31 => {
-                self.flag = value & 0x7FFF_F000;
+                self.flag = value & 0x7fff_f000;
                 self.update_flag_master();
             }
             _ => unreachable!(),
@@ -600,7 +600,7 @@ impl Gte {
     /// in PCSX-Redux's interpreter.
     pub fn execute(&mut self, instr: u32) {
         let cmd = Cmd::decode(instr);
-        let opcode = (instr & 0x3F) as u8;
+        let opcode = (instr & 0x3f) as u8;
         if let Some(cycles) = gte_command_cycles(opcode) {
             self.profile_ops = self.profile_ops.saturating_add(1);
             self.profile_estimated_cycles =
@@ -612,26 +612,26 @@ impl Gte {
         match opcode {
             0x01 => self.op_rtps(cmd, 0, true),
             0x06 => self.op_nclip(),
-            0x0C => self.op_op(cmd),
+            0x0c => self.op_op(cmd),
             0x10 => self.op_dpcs(cmd, false),
             0x11 => self.op_intpl(cmd),
             0x12 => self.op_mvmva(cmd),
             0x13 => self.op_ncds(cmd, 0),
             0x14 => self.op_cdp(cmd),
             0x16 => self.op_ncdt(cmd),
-            0x1B => self.op_nccs(cmd, 0),
-            0x1C => self.op_cc(cmd),
-            0x1E => self.op_ncs(cmd, 0),
+            0x1b => self.op_nccs(cmd, 0),
+            0x1c => self.op_cc(cmd),
+            0x1e => self.op_ncs(cmd, 0),
             0x20 => self.op_nct(cmd),
             0x28 => self.op_sqr(cmd),
             0x29 => self.op_dcpl(cmd),
-            0x2A => self.op_dpct(cmd),
-            0x2D => self.op_avsz3(),
-            0x2E => self.op_avsz4(),
+            0x2a => self.op_dpct(cmd),
+            0x2d => self.op_avsz3(),
+            0x2e => self.op_avsz4(),
             0x30 => self.op_rtpt(cmd),
-            0x3D => self.op_gpf(cmd),
-            0x3E => self.op_gpl(cmd),
-            0x3F => self.op_ncct(cmd),
+            0x3d => self.op_gpf(cmd),
+            0x3e => self.op_gpl(cmd),
+            0x3f => self.op_ncct(cmd),
             _ => {
                 // Real GTE silently ignores undefined commands. We
                 // mirror that -- the BIOS shouldn't issue any but
@@ -1182,7 +1182,7 @@ impl Gte {
     /// the corresponding `FLAG` bit on saturation.
     fn saturate_ir(&mut self, idx: u8, value: i32, lm: bool) -> i16 {
         let lo = if lm { 0 } else { -0x8000 };
-        let hi = 0x7FFFi32;
+        let hi = 0x7fffi32;
         let sat = if value > hi {
             self.set_ir_flag(idx);
             hi
@@ -1200,7 +1200,7 @@ impl Gte {
     /// value than the one stored (RTPS IR3 quirk, MVMVA-FC quirk).
     fn saturate_ir_flag_only(&mut self, idx: u8, value: i32, lm: bool) -> i16 {
         let lo = if lm { 0 } else { -0x8000 };
-        let hi = 0x7FFFi32;
+        let hi = 0x7fffi32;
         if value > hi || value < lo {
             self.set_ir_flag(idx);
         }
@@ -1211,7 +1211,7 @@ impl Gte {
     /// already set by [`saturate_ir_flag_only`].
     fn saturate_value_for_ir(&self, value: i32, lm: bool) -> i16 {
         let lo = if lm { 0 } else { -0x8000 };
-        value.clamp(lo, 0x7FFF) as i16
+        value.clamp(lo, 0x7fff) as i16
     }
 
     fn set_ir_flag(&mut self, idx: u8) {
@@ -1239,7 +1239,7 @@ impl Gte {
     /// flag (`is_x` chooses SX2 vs SY2).
     fn saturate_screen(&mut self, value: i64, is_x: bool) -> i16 {
         let lo = -0x400i64;
-        let hi = 0x3FFi64;
+        let hi = 0x3ffi64;
         let bit = if is_x { flag::SX2_SAT } else { flag::SY2_SAT };
         if value > hi {
             self.flag |= bit;
@@ -1256,9 +1256,9 @@ impl Gte {
         if value < 0 {
             self.flag |= flag::SZ3_OTZ_SAT;
             0
-        } else if value > 0xFFFF {
+        } else if value > 0xffff {
             self.flag |= flag::SZ3_OTZ_SAT;
-            0xFFFF
+            0xffff
         } else {
             value as u16
         }
@@ -1269,9 +1269,9 @@ impl Gte {
         let z = if value < 0 {
             self.flag |= flag::SZ3_OTZ_SAT;
             0
-        } else if value > 0xFFFF {
+        } else if value > 0xffff {
             self.flag |= flag::SZ3_OTZ_SAT;
-            0xFFFF
+            0xffff
         } else {
             value as u16
         };
@@ -1304,9 +1304,9 @@ impl Gte {
         if value < 0 {
             self.flag |= flag_bit;
             0
-        } else if value > 0xFF {
+        } else if value > 0xff {
             self.flag |= flag_bit;
-            0xFF
+            0xff
         } else {
             value as u8
         }
@@ -1319,7 +1319,7 @@ impl Gte {
         let sz3 = self.sz[3] as u32;
         if h >= sz3 * 2 {
             self.flag |= flag::DIV_OVERFLOW;
-            return 0x1FFFF;
+            return 0x1ffff;
         }
         let z = (sz3 as u16).leading_zeros();
         let n = h << z;
@@ -1332,12 +1332,12 @@ impl Gte {
         // u=0x200 (largest), producing a divisor ~2000× too small and
         // collapsing projected vertices toward the screen offset.
         // Matches Redux's `gte_divide` and PSX-SPX exactly.
-        let table_index = (d.wrapping_sub(0x7FC0) >> 7) as usize;
+        let table_index = (d.wrapping_sub(0x7fc0) >> 7) as usize;
         let u = (UNR_TABLE[table_index] as u32) + 0x101;
         let d = (0x2000080u32.wrapping_sub(d.wrapping_mul(u))) >> 8;
         let d = (0x80u32.wrapping_add(d.wrapping_mul(u))) >> 8;
         let result = (((n as u64) * (d as u64)) + 0x8000) >> 16;
-        cmp::min(0x1FFFF, result as u32)
+        cmp::min(0x1ffff, result as u32)
     }
 
     /// Recompute the master `FLAG[31]` bit from the error-mask OR.
@@ -1419,9 +1419,9 @@ fn sign_extend_16(value: i16) -> u32 {
 }
 
 fn pack_irgb(ir: &[i16; 3]) -> u32 {
-    let r = ir[0].clamp(0, 0xF80) >> 7;
-    let g = ir[1].clamp(0, 0xF80) >> 7;
-    let b = ir[2].clamp(0, 0xF80) >> 7;
+    let r = ir[0].clamp(0, 0xf80) >> 7;
+    let g = ir[1].clamp(0, 0xf80) >> 7;
+    let b = ir[2].clamp(0, 0xf80) >> 7;
     ((b as u32) << 10) | ((g as u32) << 5) | (r as u32)
 }
 
@@ -1479,27 +1479,27 @@ mod tests {
     fn mvmva_stale_v0x_reproduces_hwb010_compose_column() {
         let seed = |g: &mut Gte| {
             // VI rotation: (0F6D 0000 FBC1 / 0125 F098 0427 / FBEA FBB1 F125)
-            g.write_control(0, 0x0000_0F6D);
-            g.write_control(1, 0x0125_FBC1);
-            g.write_control(2, 0x0427_F098);
-            g.write_control(3, 0xFBB1_FBEA);
-            g.write_control(4, 0xFFFF_F125);
+            g.write_control(0, 0x0000_0f6d);
+            g.write_control(1, 0x0125_fbc1);
+            g.write_control(2, 0x0427_f098);
+            g.write_control(3, 0xfbb1_fbea);
+            g.write_control(4, 0xffff_f125);
             g.write_control(5, 0);
             g.write_control(6, 0);
             g.write_control(7, 0);
             // V0 = column 1 of the joint-9 model matrix: (-27, 536, 8).
-            g.write_data(0, 0x0218_FFE5);
+            g.write_data(0, 0x0218_ffe5);
             g.write_data(1, 0x0000_0008);
         };
-        const MVMVA_RT_V0_TR_SF1: u32 = 0x4A08_0012;
+        const MVMVA_RT_V0_TR_SF1: u32 = 0x4a08_0012;
 
         // Clean execute: the console-exact compose values.
         let mut g = Gte::new();
         seed(&mut g);
         g.execute(MVMVA_RT_V0_TR_SF1);
-        assert_eq!(g.read_data(25), 0xFFFF_FFE3); // -29
-        assert_eq!(g.read_data(26), 0xFFFF_FDFC); // -516
-        assert_eq!(g.read_data(27), 0xFFFF_FF6F); // -145
+        assert_eq!(g.read_data(25), 0xffff_ffe3); // -29
+        assert_eq!(g.read_data(26), 0xffff_fdfc); // -516
+        assert_eq!(g.read_data(27), 0xffff_ff6f); // -145
 
         // Hazard execute: stale x = previous column's x (0x0218 = 536).
         // MAC1 flips to the photographed corrupt value; MAC2/3 unchanged.
@@ -1507,12 +1507,12 @@ mod tests {
         seed(&mut g);
         g.execute_with_stale_v0x(MVMVA_RT_V0_TR_SF1, 0x0218);
         assert_eq!(g.read_data(25), 0x0000_0202); // 514 -- hardware photo
-        assert_eq!(g.read_data(26), 0xFFFF_FDFC);
-        assert_eq!(g.read_data(27), 0xFFFF_FF6F);
+        assert_eq!(g.read_data(26), 0xffff_fdfc);
+        assert_eq!(g.read_data(27), 0xffff_ff6f);
 
         // The injection is one-shot: a following clean execute is clean.
         g.execute(MVMVA_RT_V0_TR_SF1);
-        assert_eq!(g.read_data(25), 0xFFFF_FFE3);
+        assert_eq!(g.read_data(25), 0xffff_ffe3);
     }
 
     #[test]
@@ -1527,7 +1527,7 @@ mod tests {
             g.write_data(0, 10);
             g.write_data(1, 160);
         };
-        const RTPS_SF1: u32 = 0x4A08_0001;
+        const RTPS_SF1: u32 = 0x4a08_0001;
 
         let mut clean = Gte::new();
         seed(&mut clean);
@@ -1557,16 +1557,16 @@ mod tests {
     #[test]
     fn data_reg_v0_xy_round_trip() {
         let mut g = Gte::new();
-        g.write_data(0, 0xDEAD_BEEF);
+        g.write_data(0, 0xdead_beef);
         // Stored as two i16; reads back the same packed word.
-        assert_eq!(g.read_data(0), 0xDEAD_BEEF);
+        assert_eq!(g.read_data(0), 0xdead_beef);
     }
 
     #[test]
     fn data_reg_vz0_sign_extends_on_read() {
         let mut g = Gte::new();
         g.write_data(1, 0x0000_8000);
-        assert_eq!(g.read_data(1), 0xFFFF_8000);
+        assert_eq!(g.read_data(1), 0xffff_8000);
     }
 
     #[test]
@@ -1584,9 +1584,9 @@ mod tests {
     #[test]
     fn lzcs_write_recomputes_lzcr() {
         let mut g = Gte::new();
-        g.write_data(30, 0x0000_FFFF);
+        g.write_data(30, 0x0000_ffff);
         assert_eq!(g.read_data(31), 16);
-        g.write_data(30, 0xFFFF_0000);
+        g.write_data(30, 0xffff_0000);
         // Negative -- count of leading 1-bits.
         assert_eq!(g.read_data(31), 16);
         g.write_data(30, 0);
@@ -1599,7 +1599,7 @@ mod tests {
     fn ctrl_h_reads_back_sign_extended() {
         let mut g = Gte::new();
         g.write_control(26, 0x0000_8000);
-        assert_eq!(g.read_control(26), 0xFFFF_8000);
+        assert_eq!(g.read_control(26), 0xffff_8000);
     }
 
     #[test]
@@ -1652,11 +1652,11 @@ mod tests {
                                   // ZSF3 = 0x555 -- close enough to 0x1000/3 to land OTZ near the
                                   // simple arithmetic mean.
         g.write_control(29, 0x0555);
-        g.execute(0x2D); // AVSZ3
+        g.execute(0x2d); // AVSZ3
                          // MAC0 = 0x555 * (0x100 + 0x200 + 0x300) = 0x555 * 0x600 = 0x1FFE00.
                          // OTZ = 0x1FFE00 >> 12 = 0x1FF.
-        assert_eq!(g.read_data(24) as i32, 0x1FFE00);
-        assert_eq!(g.read_data(7), 0x1FF);
+        assert_eq!(g.read_data(24) as i32, 0x1ffe00);
+        assert_eq!(g.read_data(7), 0x1ff);
     }
 
     #[test]
@@ -1838,7 +1838,7 @@ mod tests {
         g.write_data(18, 0x030);
         g.write_data(19, 0x040);
         g.write_control(30, 0x0400); // ZSF4 = 0x400 (1/4 in 0.12)
-        g.execute(0x2E);
+        g.execute(0x2e);
         // MAC0 = ZSF4 * (SZ0+SZ1+SZ2+SZ3) = 0x400 * 0xA0 = 0x28000.
         assert_eq!(g.read_data(24) as i32, 0x28000, "MAC0");
         assert_eq!(g.read_data(7), 0x28, "OTZ = MAC0>>12");
@@ -1849,26 +1849,26 @@ mod tests {
         // IRGB packed (B<<10) | (G<<5) | R. Each 5-bit component scales
         // to IR_i = component << 7, matching PSX-SPX.
         let mut g = Gte::new();
-        g.write_data(28, (0x0A << 10) | (0x10 << 5) | 0x1F);
-        assert_eq!(g.read_data(9) as i16, 0x1F << 7);
+        g.write_data(28, (0x0a << 10) | (0x10 << 5) | 0x1f);
+        assert_eq!(g.read_data(9) as i16, 0x1f << 7);
         assert_eq!(g.read_data(10) as i16, 0x10 << 7);
-        assert_eq!(g.read_data(11) as i16, 0x0A << 7);
+        assert_eq!(g.read_data(11) as i16, 0x0a << 7);
     }
 
     #[test]
     fn orgb_packs_ir_into_5_5_5() {
         let mut g = Gte::new();
         g.write_data(9, 0); // R=0
-        g.write_data(10, 0xF80); // G=0x1F (max)
+        g.write_data(10, 0xf80); // G=0x1F (max)
         g.write_data(11, 0x780); // B=0x0F
-        assert_eq!(g.read_data(29), (0x0F << 10) | (0x1F << 5));
+        assert_eq!(g.read_data(29), (0x0f << 10) | (0x1f << 5));
     }
 
     #[test]
     fn orgb_write_is_read_only() {
         let mut g = Gte::new();
         g.write_data(9, 0x500);
-        g.write_data(29, 0xFFFF); // Writes to ORGB are silently dropped.
+        g.write_data(29, 0xffff); // Writes to ORGB are silently dropped.
         assert_eq!(g.read_data(9) as i16, 0x500);
     }
 
@@ -1878,9 +1878,9 @@ mod tests {
         // ~1e9 with maxed-out i16s) tips past 2^43-1 = 8.796_093e12.
         let mut g = Gte::new();
         install_identity_rotation(&mut g);
-        g.write_control(5, 0x7FFF_FFFF); // TR.x = i32::MAX
-        g.write_control(0, pack_xy_i16(0x7FFF, 0)); // RT[0][0] = max i16
-        g.write_data(0, pack_xy_i16(0x7FFF, 0)); // V0.x = max i16
+        g.write_control(5, 0x7fff_ffff); // TR.x = i32::MAX
+        g.write_control(0, pack_xy_i16(0x7fff, 0)); // RT[0][0] = max i16
+        g.write_data(0, pack_xy_i16(0x7fff, 0)); // V0.x = max i16
         g.execute(cmd_word(false, false, 0, 0, 0, 0x01));
         assert!(g.read_control(31) & flag::MAC1_POS != 0, "MAC1_POS");
         assert!(g.read_control(31) & 0x8000_0000 != 0, "master bit");
@@ -1893,13 +1893,13 @@ mod tests {
         g.write_data(9, 0x800);
         g.write_data(10, 0x1000); // will saturate color G
         g.write_data(11, 0x200);
-        g.execute(cmd_word(true, false, 0, 0, 0, 0x3D));
+        g.execute(cmd_word(true, false, 0, 0, 0, 0x3d));
         assert_eq!(g.read_data(25) as i32, 0x800, "MAC1");
         assert_eq!(g.read_data(26) as i32, 0x1000, "MAC2");
         assert_eq!(g.read_data(27) as i32, 0x200, "MAC3");
         // Newest color: (r,g,b,code) = (0x80, 0xFF, 0x20, 0) packed LE.
         // 0x1000>>4 = 0x100 → clamps to 0xFF, setting COLOR_G_SAT.
-        assert_eq!(g.read_data(22), 0x0020_FF80);
+        assert_eq!(g.read_data(22), 0x0020_ff80);
         assert!(g.read_control(31) & flag::COLOR_G_SAT != 0);
     }
 
@@ -1919,7 +1919,7 @@ mod tests {
         g.write_control(8, pack_xy_i16(0x1000, 0));
         g.write_control(16, pack_xy_i16(0x0400, 0));
 
-        g.execute(cmd_word(true, false, 0, 0, 0, 0x1E)); // NCS sf=1
+        g.execute(cmd_word(true, false, 0, 0, 0, 0x1e)); // NCS sf=1
 
         assert_eq!(g.read_data(25) as i32, 0x0400, "MAC1 after LCM");
         assert_eq!(g.read_data(22), 0x0000_0040, "RGB2 should ignore tiny RGBC");
@@ -1973,7 +1973,7 @@ mod tests {
         g.write_data(9, 0x400);
         g.write_data(10, 0x500);
         g.write_data(11, 0x600);
-        g.execute(cmd_word(true, false, 0, 0, 0, 0x3E));
+        g.execute(cmd_word(true, false, 0, 0, 0, 0x3e));
         assert_eq!(g.read_data(25) as i32, 0x500, "MAC1 = 0x100 + 0x400");
         assert_eq!(g.read_data(26) as i32, 0x700, "MAC2 = 0x200 + 0x500");
         assert_eq!(g.read_data(27) as i32, 0x900, "MAC3 = 0x300 + 0x600");
@@ -2021,7 +2021,7 @@ mod tests {
         g.write_data(9, 3);
         g.write_data(10, 4);
         g.write_data(11, 5);
-        g.execute(cmd_word(true, false, 0, 0, 0, 0x0C));
+        g.execute(cmd_word(true, false, 0, 0, 0, 0x0c));
         // MAC1 = IR3*D2 - IR2*D3 = 5-4 = 1
         // MAC2 = IR1*D3 - IR3*D1 = 3-5 = -2
         // MAC3 = IR2*D1 - IR1*D2 = 4-3 = 1
@@ -2043,7 +2043,7 @@ mod tests {
         g.write_data(0, pack_xy_i16(0, 0));
         g.write_data(1, 1); // V0.z=1 so SZ3=1 post-RTPS.
         g.write_control(26, 1); // H=1
-        g.write_control(27, 0x7FFF); // DQA max
+        g.write_control(27, 0x7fff); // DQA max
         g.write_control(28, 0); // DQB=0 keeps MAC0 in i32 range.
         g.execute(cmd_word(true, false, 0, 0, 0, 0x01));
         assert_eq!(g.read_data(8) as i16, 0x1000, "IR0 saturated");
@@ -2056,7 +2056,7 @@ mod tests {
         // slot 0 holds the oldest, slot 2 the newest.
         let mut g = Gte::new();
         g.write_data(8, 0x1000); // IR0 = 1.0
-        let instr = cmd_word(true, false, 0, 0, 0, 0x3D);
+        let instr = cmd_word(true, false, 0, 0, 0, 0x3d);
         g.write_data(9, 0x100);
         g.write_data(10, 0x200);
         g.write_data(11, 0x300);
@@ -2120,17 +2120,17 @@ mod tests {
         // MAC3 = V.z = 0x7FFF, so SZ3 = 0x7FFF; leading_zeros
         // normalises that to d = 0xFFFE which exercises table[256].
         g.write_data(0, pack_xy_i16(0x100, 0));
-        g.write_data(1, 0x7FFF);
+        g.write_data(1, 0x7fff);
         g.write_control(24, 0); // OFX
         g.write_control(25, 0); // OFY
         g.write_control(26, 0x4000); // H
         g.execute(cmd_word(true, false, 0, 0, 0, 0x01));
-        assert_eq!(g.read_data(19), 0x7FFF, "SZ3 fixture");
+        assert_eq!(g.read_data(19), 0x7fff, "SZ3 fixture");
         // Correct divisor is 0x8001 (≈(H<<16)/SZ3=0x8000.4, rounded
         // up by Newton-Raphson). With the buggy mask divisor=0x4 and
         // SX2 collapses to 0. Expected SX2 = (0x8001*0x100)>>16 = 0x80.
         let sxy2 = g.read_data(14);
-        let sx2 = (sxy2 & 0xFFFF) as i16;
+        let sx2 = (sxy2 & 0xffff) as i16;
         assert_eq!(sx2, 0x80, "SX2 should be 0x80, was {sx2:#x}");
     }
 
@@ -2139,7 +2139,7 @@ mod tests {
         // Regression: make sure an invalid opcode doesn't accidentally
         // flip flag bits from prior execution of a zeroed sub-path.
         let mut g = Gte::new();
-        g.execute(0x3C); // unassigned slot between 0x3B and 0x3D
+        g.execute(0x3c); // unassigned slot between 0x3B and 0x3D
         for i in 0..31 {
             assert_eq!(g.read_control(i), 0, "ctrl {i}");
         }

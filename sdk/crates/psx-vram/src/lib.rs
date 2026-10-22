@@ -97,7 +97,7 @@ impl Color555 {
     /// Opaque black with mask bit clear.
     pub const BLACK: Self = Self(0);
     /// Opaque white -- all five bits set in each channel.
-    pub const WHITE: Self = Self(0x7FFF);
+    pub const WHITE: Self = Self(0x7fff);
 
     /// Build a color from 8-bit channels, truncating the low 3 bits
     /// of each. `rgb8(255, 255, 255) == WHITE`.
@@ -629,7 +629,7 @@ impl TexturePage {
     #[doc(alias = "getTPage")]
     pub const fn uv_word(self, semi_trans: u8) -> u16 {
         assert!(semi_trans < 4, "semi_trans must be 0..4");
-        let tpx = (self.x / 64) & 0xF;
+        let tpx = (self.x / 64) & 0xf;
         let tpy = if self.y == 256 { 1 } else { 0 };
         let depth = self.depth.as_u16();
         tpx | (tpy << 4) | ((semi_trans as u16) << 5) | (depth << 7)
@@ -693,8 +693,8 @@ impl Clut {
     /// ```
     #[doc(alias = "getClut")]
     pub const fn uv_word(self) -> u16 {
-        let cx = (self.x / 16) & 0x3F;
-        let cy = self.y & 0x1FF;
+        let cx = (self.x / 16) & 0x3f;
+        let cy = self.y & 0x1ff;
         cx | (cy << 6)
     }
 }
@@ -1581,7 +1581,7 @@ mod tests {
     #[test]
     fn color_rgb8_truncates_low_bits() {
         assert_eq!(Color555::rgb8(0, 0, 0).as_u16(), 0);
-        assert_eq!(Color555::rgb8(255, 255, 255).as_u16(), 0x7FFF);
+        assert_eq!(Color555::rgb8(255, 255, 255).as_u16(), 0x7fff);
         // 0x18 = 24 → 24 >> 3 = 3.
         assert_eq!(Color555::rgb8(24, 0, 0).as_u16(), 3);
     }
@@ -1738,7 +1738,7 @@ mod tests {
         let tp = TexturePage::new(640, 0, TextureDepth::Bit15);
         // x=640 → tpx=10, y=0 → tpy=0, depth=15bpp → 2.
         let word = tp.uv_word(0);
-        assert_eq!(word & 0xF, 10, "tpx");
+        assert_eq!(word & 0xf, 10, "tpx");
         assert_eq!((word >> 4) & 1, 0, "tpy");
         assert_eq!((word >> 5) & 3, 0, "semi_trans");
         assert_eq!((word >> 7) & 3, 2, "depth");
@@ -1761,8 +1761,8 @@ mod tests {
         let cl = Clut::new(640, 240);
         // x=640 → cx=40, y=240 → cy=240.
         let word = cl.uv_word();
-        assert_eq!(word & 0x3F, 40, "cx");
-        assert_eq!((word >> 6) & 0x1FF, 240, "cy");
+        assert_eq!(word & 0x3f, 40, "cx");
+        assert_eq!((word >> 6) & 0x1ff, 240, "cy");
     }
 
     #[test]

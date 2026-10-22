@@ -112,7 +112,7 @@ impl Model {
     }
 
     pub fn in_config(&self) -> bool {
-        self.id == 0xF3
+        self.id == 0xf3
     }
 }
 
@@ -124,7 +124,7 @@ impl Default for Model {
             step: 0,
             final_step: 8,
             cmd: 0,
-            last_rx: 0xFF,
+            last_rx: 0xff,
             ack_at: 0,
             ack_end: 0,
             pending: Vec::new(),
@@ -293,7 +293,7 @@ pub unsafe fn write_u8(addr: u32, value: u8) {
             let ready = m.now + if late { 33_820 } else { m.rx_delay };
             m.pending.push((rx, ready));
         }
-        let acked = m.id != 0xFF && index < m.final_step && !faulted(m, Fault::Ack, index);
+        let acked = m.id != 0xff && index < m.final_step && !faulted(m, Fault::Ack, index);
         (m.ack_at, m.ack_end) = if acked {
             {
                 let delay = match m.slow_ack {
@@ -316,10 +316,10 @@ pub unsafe fn write_u8(addr: u32, value: u8) {
 /// The reply byte for packet byte `index`.
 fn reply(m: &Model, index: usize) -> u8 {
     match index {
-        _ if m.id == 0xFF => 0xFF,
-        0 => 0xFF,
+        _ if m.id == 0xff => 0xff,
+        0 => 0xff,
         1 => m.id,
-        2 => 0x5A,
+        2 => 0x5a,
         3 if m.cmd == 0x42 => !(m.buttons as u8),
         4 if m.cmd == 0x42 => !((m.buttons >> 8) as u8),
         5..=8 if m.cmd == 0x42 => m.axes[index - 5],
@@ -329,7 +329,7 @@ fn reply(m: &Model, index: usize) -> u8 {
 
 /// Track the motor bytes of a poll and the mapping of a 0x4D.
 fn note_motors(m: &mut Model, index: usize, value: u8) {
-    if m.id == 0xFF {
+    if m.id == 0xff {
         return;
     }
     match (m.cmd, index) {
@@ -340,8 +340,8 @@ fn note_motors(m: &mut Model, index: usize, value: u8) {
                 m.motors = (m.pending_small & 1 != 0, value);
             }
         }
-        (0x4D, 3) => m.map_params.push([value, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]),
-        (0x4D, 4..=8) if m.id == 0xF3 && m.dualshock => {
+        (0x4d, 3) => m.map_params.push([value, 0xff, 0xff, 0xff, 0xff, 0xff]),
+        (0x4d, 4..=8) if m.id == 0xf3 && m.dualshock => {
             if let Some(last) = m.map_params.last_mut() {
                 last[index - 3] = value;
                 if index == 4 {
@@ -355,12 +355,12 @@ fn note_motors(m: &mut Model, index: usize, value: u8) {
 
 /// A DualShock's response to the configuration commands the driver sends.
 fn apply_command(m: &mut Model, index: usize, value: u8) {
-    if !m.dualshock || m.id == 0xFF {
+    if !m.dualshock || m.id == 0xff {
         return;
     }
     match (m.cmd, index) {
-        (0x43, 3) if value == 1 => m.id = 0xF3,
-        (0x43, 3) if value == 0 && m.id == 0xF3 => {
+        (0x43, 3) if value == 1 => m.id = 0xf3,
+        (0x43, 3) if value == 0 && m.id == 0xf3 => {
             if m.ignore_exits > 0 {
                 m.ignore_exits -= 1;
             } else {

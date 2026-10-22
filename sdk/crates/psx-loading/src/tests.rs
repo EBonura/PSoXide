@@ -167,11 +167,11 @@ fn decode(packet: &[u32]) -> (i32, i32, i32, i32, u32) {
     assert_eq!(packet.len(), 3);
     assert_eq!(packet[0] >> 24, 0x60);
     (
-        (packet[1] & 0xFFFF) as i16 as i32,
+        (packet[1] & 0xffff) as i16 as i32,
         (packet[1] >> 16) as i16 as i32,
-        (packet[2] & 0xFFFF) as i32,
+        (packet[2] & 0xffff) as i32,
         (packet[2] >> 16) as i32,
-        packet[0] & 0x00FF_FFFF,
+        packet[0] & 0x00ff_ffff,
     )
 }
 
@@ -296,7 +296,7 @@ fn a_glyph_is_drawn_as_merged_runs() {
 fn prepare_resets_the_mask_and_draw_mode() {
     let mut sink = Record::default();
     prepare(&mut sink);
-    assert_eq!(sink.0, [[0xE600_0000], [0xE100_0000]]);
+    assert_eq!(sink.0, [[0xe600_0000], [0xe100_0000]]);
 }
 
 #[test]

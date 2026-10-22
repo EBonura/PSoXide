@@ -184,10 +184,10 @@ pub fn decode(word: u32, pc: u32) -> Option<Insn> {
     let rd = (word >> 11 & 31) as u8;
     let sa = (word >> 6 & 31) as u8;
     let funct = word & 63;
-    let imm = word & 0xFFFF;
+    let imm = word & 0xffff;
     let simm = i32::from(imm as u16 as i16);
     let branch = Target(pc.wrapping_add(4).wrapping_add((simm << 2) as u32));
-    let jump = (pc.wrapping_add(4) & 0xF000_0000) | (word & 0x03FF_FFFF) << 2;
+    let jump = (pc.wrapping_add(4) & 0xf000_0000) | (word & 0x03ff_ffff) << 2;
     let (s, t) = (Gpr(rs), Gpr(rt));
     match op {
         0 => special(word, rs, rt, rd, sa, funct),
@@ -220,8 +220,8 @@ pub fn decode(word: u32, pc: u32) -> Option<Insn> {
         14 => op3("xori", t, s, Hex(imm)),
         15 if rs == 0 => op2("lui", t, Hex(imm)),
         16..=19 => coprocessor((op - 16) as u8, word, rs, rt, rd, sa, funct, branch),
-        0x1D => op1("jalx", Target(jump | 1)),
-        0x20..=0x2E => {
+        0x1d => op1("jalx", Target(jump | 1)),
+        0x20..=0x2e => {
             let mnemonic = match op {
                 0x20 => "lb",
                 0x21 => "lh",
@@ -232,14 +232,14 @@ pub fn decode(word: u32, pc: u32) -> Option<Insn> {
                 0x26 => "lwr",
                 0x28 => "sb",
                 0x29 => "sh",
-                0x2A => "swl",
-                0x2B => "sw",
-                0x2E => "swr",
+                0x2a => "swl",
+                0x2b => "sw",
+                0x2e => "swr",
                 _ => return None,
             };
             op2(mnemonic, t, Mem(simm, rs))
         }
-        0x30..=0x33 | 0x38..=0x3B => {
+        0x30..=0x33 | 0x38..=0x3b => {
             let z = op & 3;
             let mnemonic = match (op, z) {
                 (0x30, _) => "lwc0",
@@ -248,7 +248,7 @@ pub fn decode(word: u32, pc: u32) -> Option<Insn> {
                 (0x33, _) => "lwc3",
                 (0x38, _) => "swc0",
                 (0x39, _) => "swc1",
-                (0x3A, _) => "swc2",
+                (0x3a, _) => "swc2",
                 _ => "swc3",
             };
             let reg = match z {
@@ -280,11 +280,11 @@ fn special(word: u32, rs: u8, rt: u8, rd: u8, sa: u8, funct: u32) -> Option<Insn
         8 if rt == 0 && rd == 0 && sa == 0 => op1("jr", s),
         9 if rt == 0 && sa == 0 && rd == 31 => op1("jalr", s),
         9 if rt == 0 && sa == 0 => op2("jalr", d, s),
-        12 => match word >> 6 & 0xF_FFFF {
+        12 => match word >> 6 & 0xf_ffff {
             0 => op0("syscall"),
             code => op1("syscall", Hex(code)),
         },
-        13 => match (word >> 16 & 0x3FF, word >> 6 & 0x3FF) {
+        13 => match (word >> 16 & 0x3ff, word >> 6 & 0x3ff) {
             (0, 0) => op0("break"),
             (high, 0) => op1("break", Hex(high)),
             (high, low) => op2("break", Hex(high), Hex(low)),
@@ -344,7 +344,7 @@ fn coprocessor(
         _ => Cop(rd),
     };
     let control = if z == 1 { Fcr(rd) } else { Cop(rd) };
-    let moves = word & 0x7FF == 0;
+    let moves = word & 0x7ff == 0;
     match rs {
         0 if moves => op2(MFC[i], Gpr(rt), data),
         2 if moves => op2(CFC[i], Gpr(rt), control),
@@ -362,7 +362,7 @@ fn coprocessor(
                 (1, _) => fpu(rs, rt, rd, sa, funct),
                 _ => None,
             };
-            named.or_else(|| op1(COFUN[i], Hex(word & 0x01FF_FFFF)))
+            named.or_else(|| op1(COFUN[i], Hex(word & 0x01ff_ffff)))
         }
         _ => None,
     }

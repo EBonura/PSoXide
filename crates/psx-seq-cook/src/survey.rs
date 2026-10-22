@@ -66,7 +66,7 @@ pub fn usage(
     }
     let mut drum_fonts: BTreeSet<u8> = sc.drum_keys.iter().map(|k| k.0).collect();
     // A drum layer whose keys the scan could not see still needs the kit.
-    if sc.ops.keys().any(|&(l, o)| l == Level::Layer && o == 0xC6) && drum_fonts.is_empty() {
+    if sc.ops.keys().any(|&(l, o)| l == Level::Layer && o == 0xc6) && drum_fonts.is_empty() {
         drum_fonts.insert(0);
     }
     for slot in drum_fonts {
@@ -130,11 +130,11 @@ pub fn scene_music(rom: &Rom) -> Result<SceneMusic, Error> {
                     0x18 => {
                         let seg = be_u32(&file, at + 4)?;
                         if seg >> 24 == 2 {
-                            let list = (seg & 0x00FF_FFFF) as usize;
+                            let list = (seg & 0x00ff_ffff) as usize;
                             for k in 0..3 {
                                 let p = be_u32(&file, list + 4 * k).unwrap_or(0);
-                                if p >> 24 == 2 && (p & 0x00FF_FFFF) as usize + 8 <= file.len() {
-                                    let t = (p & 0x00FF_FFFF) as usize;
+                                if p >> 24 == 2 && (p & 0x00ff_ffff) as usize + 8 <= file.len() {
+                                    let t = (p & 0x00ff_ffff) as usize;
                                     if !headers.contains(&t) {
                                         headers.push(t);
                                     }
@@ -366,7 +366,7 @@ pub fn report(rom: &Rom) -> Result<String, Error> {
     )
     .ok();
     for ((lv, op), (c, s)) in &op_total {
-        if matches!(lv, Level::Layer) && *op < 0xC0 {
+        if matches!(lv, Level::Layer) && *op < 0xc0 {
             continue;
         }
         writeln!(o, "{:?} {:02X} {:7} {:3}", lv, op, c, s).ok();
@@ -379,13 +379,13 @@ pub fn report(rom: &Rom) -> Result<String, Error> {
     )
     .ok();
     let dropped: [(Level, u8, &str); 9] = [
-        (Level::Chan, 0xB0, "ldfilter"),
-        (Level::Chan, 0xB1, "freefilter"),
-        (Level::Chan, 0xB3, "filter"),
-        (Level::Chan, 0xBB, "combfilter"),
-        (Level::Chan, 0xED, "gain"),
-        (Level::Seq, 0xC4, "runseq"),
-        (Level::Seq, 0xB0, "ldseq"),
+        (Level::Chan, 0xb0, "ldfilter"),
+        (Level::Chan, 0xb1, "freefilter"),
+        (Level::Chan, 0xb3, "filter"),
+        (Level::Chan, 0xbb, "combfilter"),
+        (Level::Chan, 0xed, "gain"),
+        (Level::Seq, 0xc4, "runseq"),
+        (Level::Seq, 0xb0, "ldseq"),
         (Level::Seq, 0x60, "ldres"),
         (Level::Chan, 0x10, "ldsample"),
     ];

@@ -130,7 +130,7 @@ pub fn yaz0(src: &[u8]) -> Result<Vec<u8>, Error> {
             let b0 = byte(pos)? as usize;
             let b1 = byte(pos + 1)? as usize;
             pos += 2;
-            let dist = (((b0 & 0x0F) << 8) | b1) + 1;
+            let dist = (((b0 & 0x0f) << 8) | b1) + 1;
             let len = match b0 >> 4 {
                 0 => {
                     let l = byte(pos)? as usize + 0x12;

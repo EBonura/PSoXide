@@ -119,13 +119,13 @@ mod tests {
     fn vec3_i16_xy_packs_little_endian() {
         // x in low half, y in high half -- matches MTC2 expectation.
         let v = Vec3I16::new(-1, 2, 3);
-        assert_eq!(v.xy_packed(), 0x0002_FFFF);
+        assert_eq!(v.xy_packed(), 0x0002_ffff);
     }
 
     #[test]
     fn vec3_i16_z_sign_extends() {
         let v = Vec3I16::new(0, 0, -1);
-        assert_eq!(v.z_packed(), 0xFFFF_FFFF);
+        assert_eq!(v.z_packed(), 0xffff_ffff);
     }
 
     #[test]

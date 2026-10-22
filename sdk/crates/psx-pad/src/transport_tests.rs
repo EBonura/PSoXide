@@ -34,7 +34,7 @@ fn fault_model(id: u8, fault: Fault, byte: usize, once: bool) -> Model {
 
 #[test]
 fn digital_analog_and_config_frames_decode_the_same_buttons() {
-    for (id, sends) in [(0x41, 5), (0x73, 9), (0xF3, 9)] {
+    for (id, sends) in [(0x41, 5), (0x73, 9), (0xf3, 9)] {
         let held = button::CROSS | button::START | button::LEFT;
         let pad = poll_with(Model {
             id,
@@ -126,7 +126,7 @@ fn a_stuck_acknowledge_on_select_recovers_on_the_next_attempt() {
 #[test]
 fn an_empty_socket_is_told_at_once_and_cheaply() {
     let absent = poll_with(Model {
-        id: 0xFF,
+        id: 0xff,
         ..Model::default()
     });
     assert_eq!(absent.mode, PadMode::Disconnected);
@@ -138,7 +138,7 @@ fn an_empty_socket_is_told_at_once_and_cheaply() {
     });
     // A reader that never saw a pad is told the same, once.
     start(Model {
-        id: 0xFF,
+        id: 0xff,
         ..Model::default()
     });
     let mut reader = PadReader::port1();
@@ -156,10 +156,10 @@ fn a_pad_that_was_there_has_its_absence_confirmed_four_times() {
     start(Model {
         sequence: vec![
             (0x73, Fault::None, 0),
-            (0xFF, Fault::None, 0),
-            (0xFF, Fault::None, 0),
-            (0xFF, Fault::None, 0),
-            (0xFF, Fault::None, 0),
+            (0xff, Fault::None, 0),
+            (0xff, Fault::None, 0),
+            (0xff, Fault::None, 0),
+            (0xff, Fault::None, 0),
         ],
         ..Model::default()
     });
@@ -172,10 +172,10 @@ fn a_pad_that_was_there_has_its_absence_confirmed_four_times() {
     start(Model {
         sequence: vec![
             (0x73, Fault::None, 0),
-            (0xFF, Fault::None, 0),
+            (0xff, Fault::None, 0),
             (0x73, Fault::Rx, 3),
-            (0xFF, Fault::None, 0),
-            (0xFF, Fault::None, 0),
+            (0xff, Fault::None, 0),
+            (0xff, Fault::None, 0),
         ],
         ..Model::default()
     });
@@ -239,7 +239,7 @@ fn the_late_acknowledge_model_does_slip_a_driver_that_does_not_wait() {
     // model that never slips.
     start(late_ack_pad());
     let raw = crate::poll_raw_on(&mut MockBus, Port::One, crate::Pacing::NoAckWait);
-    assert_eq!(raw.buttons_low, 0x5A);
+    assert_eq!(raw.buttons_low, 0x5a);
     let phantom = button::SELECT | button::R3 | button::LEFT | button::RIGHT;
     assert_eq!(raw.to_state().buttons.bits() & phantom, phantom);
 }
@@ -261,7 +261,7 @@ fn a_reader_holds_the_last_clean_state_through_a_failed_poll() {
     assert_eq!(during.buttons.bits(), held, "held Select must not release");
     mock::with(|m| m.fault = Fault::None);
     assert_eq!(reader.poll_on(&mut MockBus).buttons.bits(), held);
-    mock::with(|m| m.id = 0xFF);
+    mock::with(|m| m.id = 0xff);
     assert_eq!(
         reader.poll_on(&mut MockBus).buttons.bits(),
         0,
@@ -335,7 +335,7 @@ fn a_digital_only_pad_and_an_empty_port_are_told_apart() {
     });
     assert_eq!(require_quickly(), AnalogRequirement::DigitalOnly);
     start(Model {
-        id: 0xFF,
+        id: 0xff,
         ..Model::default()
     });
     assert_eq!(require_quickly(), AnalogRequirement::Absent);
@@ -398,10 +398,10 @@ fn enabling_rumble_enters_config_maps_the_motors_and_leaves() {
     assert!(enable_rumble_on(&mut MockBus, Port::One));
     mock::with(|m| {
         // Enter, map, exit, then the poll that reads what the pad settled on.
-        assert_eq!(m.cmd_log, [0x43, 0x4D, 0x43, 0x42]);
+        assert_eq!(m.cmd_log, [0x43, 0x4d, 0x43, 0x42]);
         // Small motor on the first motor byte, large on the second, the rest
         // unused.
-        assert_eq!(m.map_params, [[0x00, 0x01, 0xFF, 0xFF, 0xFF, 0xFF]]);
+        assert_eq!(m.map_params, [[0x00, 0x01, 0xff, 0xff, 0xff, 0xff]]);
         assert!(m.rumble_mapped);
         assert_eq!(m.id, 0x73, "analog mode is left as it was");
         assert!(!m.is_selected());
@@ -429,7 +429,7 @@ fn a_poll_sends_the_motor_bytes_to_a_mapped_dualshock() {
 #[test]
 fn only_a_dualshock_in_analog_mode_is_sent_motor_bytes() {
     // A digital pad, and a pad parked in configuration mode, hear zeros.
-    for id in [0x41, 0xF3] {
+    for id in [0x41, 0xf3] {
         start(Model {
             id,
             dualshock: false,
@@ -482,7 +482,7 @@ fn a_pad_that_drops_out_part_way_through_the_mapping_is_not_mapped() {
     start(Model {
         sequence: vec![
             (0x73, Fault::None, 0),
-            (0xFF, Fault::None, 0),
+            (0xff, Fault::None, 0),
             (0x73, Fault::None, 0),
             (0x73, Fault::None, 0),
         ],
@@ -535,9 +535,9 @@ fn one_empty_reply_right_after_the_exit_does_not_make_a_requested_pad_absent() {
     start(Model {
         sequence: vec![
             (0x41, Fault::None, 0),
-            (0xF3, Fault::None, 0),
-            (0xF3, Fault::None, 0),
-            (0xFF, Fault::None, 0),
+            (0xf3, Fault::None, 0),
+            (0xf3, Fault::None, 0),
+            (0xff, Fault::None, 0),
             (0x73, Fault::None, 0),
         ],
         ..digital_dualshock()
@@ -553,7 +553,7 @@ fn negcon_has_typed_inputs_and_never_reports_dualshock_sticks() {
         id: 0x23,
         dualshock: false,
         buttons: held,
-        axes: [0, 0xFF, 0x24, 0x81],
+        axes: [0, 0xff, 0x24, 0x81],
         ..Model::default()
     });
     assert_eq!(pad.mode, PadMode::Negcon);
@@ -611,7 +611,7 @@ fn incomplete_negcon_packets_never_publish_pressure_or_release_cached_input() {
 fn raw_negcon_requires_exact_id_magic_and_length() {
     let raw = crate::RawPoll {
         id_low: 0x23,
-        id_high: 0x5A,
+        id_high: 0x5a,
         mode: PadMode::Negcon,
         exchanges: 9,
         ..crate::RawPoll::NONE

@@ -60,7 +60,7 @@ impl Renderer {
             samples.push(Decoded {
                 addr: spu_base + s.adpcm_off,
                 pcm: adpcm::decode(bytes),
-                loop_start: (s.loop_block != 0xFFFF).then(|| s.loop_block as usize * 28),
+                loop_start: (s.loop_block != 0xffff).then(|| s.loop_block as usize * 28),
             });
         }
         Self {
@@ -68,7 +68,7 @@ impl Renderer {
             voices: vec![Voice::default(); 24],
             out: Vec::new(),
             peak_voices: 0,
-            main_volume: 0x3FFF,
+            main_volume: 0x3fff,
         }
     }
 
@@ -107,7 +107,7 @@ impl Renderer {
                     }
                 }
             }
-            let (l, r) = (l.clamp(-0x8000, 0x7FFF), r.clamp(-0x8000, 0x7FFF));
+            let (l, r) = (l.clamp(-0x8000, 0x7fff), r.clamp(-0x8000, 0x7fff));
             self.out.push(((l * self.main_volume) >> 15) as i16);
             self.out.push(((r * self.main_volume) >> 15) as i16);
         }

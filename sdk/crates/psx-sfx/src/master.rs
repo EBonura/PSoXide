@@ -10,8 +10,7 @@
 //! re-scales them immediately. Music is not routed here: [`Master::music_level_q15`]
 //! returns the value, and the game writes it to the CD volume register.
 
-use crate::SPU_LEVEL_MAX;
-use crate::SPU_LEVEL_MIN;
+use crate::{SPU_LEVEL_MAX, SPU_LEVEL_MIN};
 
 /// An exact fraction `num / den`.
 ///
@@ -236,7 +235,7 @@ impl Master {
     /// assert_eq!(m.music_level_q15(), 0x3FFF);
     /// ```
     pub const fn music_level_q15(&self) -> i16 {
-        ((self.music.apply(0x7FFF) * self.duck as i32) >> 12) as i16
+        ((self.music.apply(0x7fff) * self.duck as i32) >> 12) as i16
     }
 }
 
@@ -254,7 +253,7 @@ mod tests {
     fn a_ratio_multiplies_first_and_truncates_toward_zero() {
         assert_eq!(Ratio::new(1, 3).apply(100), 33);
         assert_eq!(Ratio::new(1, 3).apply(-100), -33);
-        assert_eq!(Ratio::new(8190, 0x3FFF).apply(16383), 8190);
+        assert_eq!(Ratio::new(8190, 0x3fff).apply(16383), 8190);
         assert_eq!(Ratio::MUTE.apply(12345), 0);
         // WipEout's `x * full / base` shape: the same integer result.
         for x in [-16384i32, -1, 0, 1, 777, 16383] {
@@ -272,7 +271,7 @@ mod tests {
     fn levels_are_clamped_to_the_spu_range_after_scaling() {
         let mut m = Master::new();
         m.set_sfx(Ratio::new(4, 1));
-        assert_eq!(m.scale_level(0x3000), 0x3FFF);
+        assert_eq!(m.scale_level(0x3000), 0x3fff);
         assert_eq!(m.scale_level(-0x3000), -0x4000);
         assert_eq!(m.scale_level(1000), 4000);
         assert_eq!(m.scale_level(i16::MIN), -0x4000);
@@ -300,11 +299,11 @@ mod tests {
     #[test]
     fn music_level_is_the_master_times_the_duck_in_signed_q15() {
         let mut m = Master::new();
-        assert_eq!(m.music_level_q15(), 0x7FFF);
+        assert_eq!(m.music_level_q15(), 0x7fff);
         m.set_music(Ratio::new(1, 2));
-        assert_eq!(m.music_level_q15(), 0x3FFF);
+        assert_eq!(m.music_level_q15(), 0x3fff);
         m.set_duck_rates(4096, 4096);
         m.step_duck(2048);
-        assert_eq!(m.music_level_q15(), 0x1FFF);
+        assert_eq!(m.music_level_q15(), 0x1fff);
     }
 }

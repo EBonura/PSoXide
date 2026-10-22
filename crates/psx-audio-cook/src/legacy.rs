@@ -90,7 +90,7 @@ pub fn encode_psxed(samples: &[i16]) -> Vec<u8> {
                     let q = round_div((sample - p) * (1 << shift), 4096).clamp(-8, 7);
                     let v = ((q << 12) >> shift) + p;
                     err += (sample as i64 - v as i64).pow(2);
-                    let nib = (q as i8 as u8) & 0x0F;
+                    let nib = (q as i8 as u8) & 0x0f;
                     bytes[2 + i / 2] |= if i & 1 == 0 { nib } else { nib << 4 };
                     s2 = s1;
                     s1 = v;

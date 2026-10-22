@@ -293,7 +293,7 @@ fn trim_ascii_byte(bytes: &[u8], byte: u8) -> &[u8] {
 }
 
 fn is_ascii_trim_byte(byte: u8) -> bool {
-    matches!(byte, b'\0' | b'\t' | b'\n' | b'\r' | b' ' | 0x0B | 0x0C)
+    matches!(byte, b'\0' | b'\t' | b'\n' | b'\r' | b' ' | 0x0b | 0x0c)
 }
 
 fn read_le_u32(bytes: &[u8]) -> u32 {
@@ -311,8 +311,8 @@ mod tests {
         let mut exe = vec![0u8; EXE_HEADER_BYTES];
         exe[..8].copy_from_slice(b"PS-X EXE");
         exe[0x10..0x14].copy_from_slice(&pc.to_le_bytes());
-        exe[0x18..0x1C].copy_from_slice(&load_addr.to_le_bytes());
-        exe[0x1C..0x20].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+        exe[0x18..0x1c].copy_from_slice(&load_addr.to_le_bytes());
+        exe[0x1c..0x20].copy_from_slice(&(payload.len() as u32).to_le_bytes());
         exe.extend_from_slice(payload);
         exe
     }
@@ -330,7 +330,7 @@ mod tests {
         let disc = Disc::from_bin(builder.build_bin());
         let boot = load_boot_exe_from_disc(&disc).unwrap();
         assert_eq!(boot.boot_path, "PSX.EXE;1");
-        assert_eq!(boot.stack_pointer, Some(0x801F_FFF0));
+        assert_eq!(boot.stack_pointer, Some(0x801f_fff0));
         assert_eq!(boot.exe.initial_pc, 0x8001_2340);
         assert_eq!(boot.exe.load_addr, 0x8001_0000);
         assert_eq!(boot.exe.payload, vec![1, 2, 3, 4]);
@@ -340,8 +340,8 @@ mod tests {
     fn boots_an_exe_whose_last_sector_was_padded_after_the_link() {
         // psoxide.ld starts .bss where .data ends: the linker's flat file ends
         // mid-sector and `pad_to_payload` writes the zeros the header counts.
-        let mut exe = make_exe(0x8001_0000, 0x8001_0000, &[0x5A; 3000]);
-        exe[0x1C..0x20].copy_from_slice(&4096u32.to_le_bytes());
+        let mut exe = make_exe(0x8001_0000, 0x8001_0000, &[0x5a; 3000]);
+        exe[0x1c..0x20].copy_from_slice(&4096u32.to_le_bytes());
         assert_eq!(crate::pad_to_payload(&mut exe), Ok(1096));
         assert_eq!(exe.len(), EXE_HEADER_BYTES + 4096);
         let mut builder = IsoBuilder::new();
@@ -351,7 +351,7 @@ mod tests {
         let disc = Disc::from_bin(builder.build_bin());
         let boot = load_boot_exe_from_disc(&disc).unwrap();
         assert_eq!(boot.exe.payload.len(), 4096);
-        assert!(boot.exe.payload[..3000].iter().all(|&b| b == 0x5A));
+        assert!(boot.exe.payload[..3000].iter().all(|&b| b == 0x5a));
         assert!(boot.exe.payload[3000..].iter().all(|&b| b == 0));
     }
 

@@ -28,11 +28,11 @@
 /// ```
 #[inline]
 pub const fn to_physical(virt: u32) -> u32 {
-    virt & 0x1FFF_FFFF
+    virt & 0x1fff_ffff
 }
 
 /// Base of KSEG1, the uncached mirror of the physical map.
-pub const KSEG1_BASE: u32 = 0xA000_0000;
+pub const KSEG1_BASE: u32 = 0xa000_0000;
 
 /// The uncached (KSEG1) address of physical address `phys`, the view device
 /// registers outside the I/O window are conventionally accessed through.
@@ -62,7 +62,7 @@ pub mod ram {
 /// Unused by stock hardware; reads return `0xFF`.
 pub mod expansion1 {
     /// Physical base address.
-    pub const BASE: u32 = 0x1F00_0000;
+    pub const BASE: u32 = 0x1f00_0000;
     /// Maximum size (configurable via `EXP1_DELAY_SIZE` register).
     pub const SIZE: usize = 8 * 1024 * 1024;
 }
@@ -73,7 +73,7 @@ pub mod expansion1 {
 /// KSEG1 (uncached access to scratchpad is undefined).
 pub mod scratchpad {
     /// Physical base address.
-    pub const BASE: u32 = 0x1F80_0000;
+    pub const BASE: u32 = 0x1f80_0000;
     /// Size in bytes (1 KiB).
     pub const SIZE: usize = 1024;
 }
@@ -85,7 +85,7 @@ pub mod scratchpad {
 /// (`gpu`, `spu`, `cd`, …).
 pub mod io {
     /// Physical base address.
-    pub const BASE: u32 = 0x1F80_1000;
+    pub const BASE: u32 = 0x1f80_1000;
     /// Size in bytes (4 KiB). Expansion 2 begins immediately after at
     /// `0x1F80_2000`.
     pub const SIZE: usize = 4 * 1024;
@@ -94,18 +94,18 @@ pub mod io {
 /// Expansion Region 2: 8 KiB debug / dev-kit port.
 pub mod expansion2 {
     /// Physical base address.
-    pub const BASE: u32 = 0x1F80_2000;
+    pub const BASE: u32 = 0x1f80_2000;
     /// Size in bytes (8 KiB).
     pub const SIZE: usize = 8 * 1024;
     /// POST status byte: BIOS writes progress codes here during boot.
-    pub const POST: u32 = 0x1F80_2041;
+    pub const POST: u32 = 0x1f80_2041;
 
     /// PSoXide's emulator-only telemetry port: four word registers in the
     /// expansion window that instrumented guests write and the emulator
     /// timestamps. Retail hardware sees ordinary expansion-port accesses.
     pub mod telemetry {
         /// Physical base of the port.
-        pub const BASE: u32 = super::BASE + 0x0F00;
+        pub const BASE: u32 = super::BASE + 0x0f00;
         /// Event command word (`kind << 24 | id`); a write appends one event.
         pub const EVENT: u32 = BASE;
         /// Event value latch; the next event write snapshots it.
@@ -120,7 +120,7 @@ pub mod expansion2 {
 /// Expansion Region 3: 2 MiB, rarely used.
 pub mod expansion3 {
     /// Physical base address.
-    pub const BASE: u32 = 0x1FA0_0000;
+    pub const BASE: u32 = 0x1fa0_0000;
     /// Size in bytes (2 MiB).
     pub const SIZE: usize = 2 * 1024 * 1024;
 }
@@ -132,11 +132,11 @@ pub mod expansion3 {
 /// an undefined state at reset).
 pub mod bios {
     /// Physical base address.
-    pub const BASE: u32 = 0x1FC0_0000;
+    pub const BASE: u32 = 0x1fc0_0000;
     /// Size in bytes (512 KiB).
     pub const SIZE: usize = 512 * 1024;
     /// Reset vector: KSEG1 view of BIOS base.
-    pub const RESET_VECTOR: u32 = 0xBFC0_0000;
+    pub const RESET_VECTOR: u32 = 0xbfc0_0000;
 }
 
 /// Cache control register at `0xFFFE_0130`.
@@ -153,7 +153,7 @@ pub mod bios {
 /// (`sdk/docs/CACHE-CONTROL.md`).
 pub mod cache_control {
     /// Virtual address. Does not follow the KUSEG/KSEG0/KSEG1 mirror rule.
-    pub const ADDR: u32 = 0xFFFE_0130;
+    pub const ADDR: u32 = 0xfffe_0130;
 
     /// Bit 2: tag test mode. While COP0 SR.IsC is set, word stores to
     /// `0x000..0x1000` write instruction-cache tags, which is how a line
@@ -217,6 +217,6 @@ mod tests {
     #[test]
     fn cache_control_settings_add_up() {
         assert_eq!(cache_control::FLUSH, 0x0000_0804);
-        assert_eq!(cache_control::RUNNING, 0x0001_E988);
+        assert_eq!(cache_control::RUNNING, 0x0001_e988);
     }
 }

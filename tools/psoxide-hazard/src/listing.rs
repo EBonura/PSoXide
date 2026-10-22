@@ -30,7 +30,7 @@ pub fn pad_to_payload(bytes: &mut Vec<u8>) -> Result<usize, Padding> {
     if bytes.len() < HEADER as usize || !bytes.starts_with(b"PS-X EXE") {
         return Err(Padding::NotAnExe);
     }
-    let expected = u32::from_le_bytes(bytes[0x1C..0x20].try_into().unwrap()) as usize;
+    let expected = u32::from_le_bytes(bytes[0x1c..0x20].try_into().unwrap()) as usize;
     let actual = bytes.len() - HEADER as usize;
     let Some(missing) = expected.checked_sub(actual) else {
         return Ok(0);
@@ -137,8 +137,8 @@ impl Listing {
 /// The header's load address (`t_addr`); an image without a PS-EXE header
 /// loads at [`LOAD_ADDR`].
 pub fn load_address(data: &[u8]) -> i64 {
-    if data.starts_with(b"PS-X EXE") && data.len() >= 0x1C {
-        i64::from(u32::from_le_bytes(data[0x18..0x1C].try_into().unwrap()))
+    if data.starts_with(b"PS-X EXE") && data.len() >= 0x1c {
+        i64::from(u32::from_le_bytes(data[0x18..0x1c].try_into().unwrap()))
     } else {
         LOAD_ADDR
     }

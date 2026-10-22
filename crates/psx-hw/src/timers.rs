@@ -11,7 +11,7 @@
 pub const COUNT: u32 = 3;
 
 /// Register block of counter 0; counter `n` is at `BASE + n * STRIDE`.
-pub const BASE: u32 = 0x1F80_1100;
+pub const BASE: u32 = 0x1f80_1100;
 /// Distance between two counters' register blocks.
 pub const STRIDE: u32 = 0x10;
 
@@ -86,10 +86,10 @@ mod tests {
     fn counter_blocks_follow_the_documented_addresses() {
         assert_eq!(
             [block(0), block(1), block(2)],
-            [0x1F80_1100, 0x1F80_1110, 0x1F80_1120]
+            [0x1f80_1100, 0x1f80_1110, 0x1f80_1120]
         );
-        assert_eq!(block(2) + MODE, 0x1F80_1124);
-        assert_eq!(block(1) + TARGET, 0x1F80_1118);
+        assert_eq!(block(2) + MODE, 0x1f80_1124);
+        assert_eq!(block(1) + TARGET, 0x1f80_1118);
     }
 
     #[test]

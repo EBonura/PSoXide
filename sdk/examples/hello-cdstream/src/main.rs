@@ -34,7 +34,8 @@ use psx_cdstream::{
     Completion, Config, FailureKind, LeaseState, Outcome, Priority, Request, RequestState, Ticket,
 };
 use psx_fmv::iso;
-use psx_font::{fonts::BASIC, FontAtlas};
+use psx_font::fonts::BASIC;
+use psx_font::FontAtlas;
 use psx_gpu::display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode};
 use psx_gpu::Gpu;
 use psx_io::cd::reader::SectorReader;
@@ -90,7 +91,7 @@ fn expected_byte(index: u32, sectors: u32) -> u8 {
         index
             .wrapping_mul(37)
             .wrapping_add(index >> 3)
-            .wrapping_add(0x5D) as u8
+            .wrapping_add(0x5d) as u8
     }
 }
 

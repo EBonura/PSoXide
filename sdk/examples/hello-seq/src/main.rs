@@ -47,7 +47,7 @@ const T2_HZ: u32 = 4_233_600;
 
 fn now() -> u32 {
     // SAFETY: a read of root counter 2's current-value register.
-    unsafe { read_volatile(T2_COUNTER) & 0xFFFF }
+    unsafe { read_volatile(T2_COUNTER) & 0xffff }
 }
 
 /// The SPU as [`Hw`]: each method is the register writes it names.
@@ -58,7 +58,7 @@ struct SpuHw {
 impl SpuHw {
     fn pitch_for(&self, voice: u8, pitch_q12: u16) -> Pitch {
         let raw = (self.rate[voice as usize] * pitch_q12 as u32) / 44_100;
-        Pitch::raw(raw.clamp(1, 0x3FFF) as u16)
+        Pitch::raw(raw.clamp(1, 0x3fff) as u16)
     }
 }
 
@@ -116,7 +116,9 @@ fn line(label: &str, v: u32) {
 
 #[no_mangle]
 fn main() {
-    let Some(p) = psx_rt::Peripherals::take() else { return };
+    let Some(p) = psx_rt::Peripherals::take() else {
+        return;
+    };
     let mut spu = Spu::new(p.spu_dma);
     let bank = match Bank::parse(BANK) {
         Ok(b) => b,
@@ -151,7 +153,7 @@ fn main() {
     let (mut spent, mut worst, mut worst_voices) = (0u32, 0u32, 0u32);
     while updates < total {
         let t = now();
-        acc += t.wrapping_sub(last) & 0xFFFF;
+        acc += t.wrapping_sub(last) & 0xffff;
         last = t;
         // catch up at most a dozen updates, as `pump` does
         let mut ran = 0;
@@ -159,7 +161,7 @@ fn main() {
             acc -= per_update;
             let a = now();
             seq.update(&mut hw);
-            let dt = now().wrapping_sub(a) & 0xFFFF;
+            let dt = now().wrapping_sub(a) & 0xffff;
             spent += dt;
             worst = worst.max(dt);
             worst_voices = worst_voices.max(seq.voices_in_use());

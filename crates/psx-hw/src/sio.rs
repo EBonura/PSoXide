@@ -10,10 +10,10 @@
 //! Reference: nocash PSX-SPX "Controllers / Memory Cards" section.
 
 /// `SIO0` register base: controllers and memory cards.
-pub const SIO0_BASE: u32 = 0x1F80_1040;
+pub const SIO0_BASE: u32 = 0x1f80_1040;
 
 /// `SIO1` register base: debug / standard serial.
-pub const SIO1_BASE: u32 = 0x1F80_1050;
+pub const SIO1_BASE: u32 = 0x1f80_1050;
 
 /// `SIO0` register bit layouts and standard mode/baud values, shared by every
 /// SIO0 device driver (pads in `psx-pad`, memory cards in `psx-mc`) and usable
@@ -21,19 +21,19 @@ pub const SIO1_BASE: u32 = 0x1F80_1050;
 pub mod sio0 {
     /// TX/RX FIFO port (byte).
     #[doc(alias = "JOY_DATA")]
-    pub const DATA: u32 = 0x1F80_1040;
+    pub const DATA: u32 = 0x1f80_1040;
     /// Status register (32-bit).
     #[doc(alias = "JOY_STAT")]
-    pub const STAT: u32 = 0x1F80_1044;
+    pub const STAT: u32 = 0x1f80_1044;
     /// Mode register (16-bit).
     #[doc(alias = "JOY_MODE")]
-    pub const MODE: u32 = 0x1F80_1048;
+    pub const MODE: u32 = 0x1f80_1048;
     /// Control register (16-bit).
     #[doc(alias = "JOY_CTRL")]
-    pub const CTRL: u32 = 0x1F80_104A;
+    pub const CTRL: u32 = 0x1f80_104a;
     /// Baud-rate divisor (16-bit).
     #[doc(alias = "JOY_BAUD")]
-    pub const BAUD: u32 = 0x1F80_104E;
+    pub const BAUD: u32 = 0x1f80_104e;
 
     /// `JOY_CTRL` (u16) bits.
     pub mod ctrl {
@@ -81,7 +81,7 @@ pub mod sio0 {
 
     /// `JOY_MODE` value used by pads and memory cards: 8 data bits, no parity,
     /// 1x baud multiplier.
-    pub const MODE_8N1: u16 = 0x000D;
+    pub const MODE_8N1: u16 = 0x000d;
     /// `JOY_BAUD` reload for the standard ~250 kHz controller/card clock.
     pub const BAUD_250KHZ: u16 = 0x0088;
 

@@ -26,7 +26,7 @@ pub fn println(s: &str) {
 pub fn print_hex_u32(v: u32) {
     const DIGITS: &[u8; 16] = b"0123456789ABCDEF";
     for shift in (0..8).rev() {
-        let nib = ((v >> (shift * 4)) & 0xF) as usize;
+        let nib = ((v >> (shift * 4)) & 0xf) as usize;
         bios::write_char(DIGITS[nib]);
     }
 }

@@ -14,9 +14,9 @@ use crate::rom::{be_u16, be_u32, Rom};
 use crate::Error;
 
 /// Virtual address of the first byte of the `code` file (NTSC 1.2).
-pub const CODE_VRAM: u32 = 0x8001_16E0;
+pub const CODE_VRAM: u32 = 0x8001_16e0;
 /// Soundfont table in `code`.
-pub const SOUNDFONT_TABLE_VRAM: u32 = 0x8011_3DF0;
+pub const SOUNDFONT_TABLE_VRAM: u32 = 0x8011_3df0;
 /// Per-sequence list of soundfont ids in `code`.
 pub const SEQ_FONT_TABLE_VRAM: u32 = 0x8011_4060;
 /// Sequence table in `code`.
@@ -394,7 +394,7 @@ impl Builder<'_> {
         let at = off as usize;
         let w0 = be_u32(self.raw, at)?;
         let medium = (w0 >> 26) & 3;
-        let size = w0 & 0x00FF_FFFF;
+        let size = w0 & 0x00ff_ffff;
         let addr = be_u32(self.raw, at + 4)?;
         let loop_off = be_u32(self.raw, at + 8)? as usize;
         let book_off = be_u32(self.raw, at + 12)?;
@@ -483,9 +483,9 @@ impl Font {
             .get(start..start + e.size as usize)
             .ok_or(Error::Truncated(start))?
             .to_vec();
-        let banks = [(e.s1 >> 8) as u8, (e.s1 & 0xFF) as u8];
+        let banks = [(e.s1 >> 8) as u8, (e.s1 & 0xff) as u8];
         let n_inst = ((e.s2 >> 8) as usize).min(126);
-        let n_drum = (e.s2 & 0xFF) as usize;
+        let n_drum = (e.s2 & 0xff) as usize;
         let n_sfx = e.s3 as usize;
         let mut b = Builder {
             data,
@@ -535,7 +535,7 @@ impl Font {
             let env = b.envelope(be_u32(&raw, off + 4)?);
             let low = if lo != 0 { b.tuned(off + 8)? } else { None };
             let normal = b.tuned(off + 16)?;
-            let high = if hi != 0x7F { b.tuned(off + 24)? } else { None };
+            let high = if hi != 0x7f { b.tuned(off + 24)? } else { None };
             instruments.push(Some(Instrument {
                 range_lo: lo,
                 range_hi: hi,

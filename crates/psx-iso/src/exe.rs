@@ -96,9 +96,9 @@ impl Exe {
         let initial_pc = read_u32_le(&bytes[0x10..]);
         let initial_gp = read_u32_le(&bytes[0x14..]);
         let load_addr = read_u32_le(&bytes[0x18..]);
-        let t_size = read_u32_le(&bytes[0x1C..]);
+        let t_size = read_u32_le(&bytes[0x1c..]);
         let bss_addr = read_u32_le(&bytes[0x28..]);
-        let bss_size = read_u32_le(&bytes[0x2C..]);
+        let bss_size = read_u32_le(&bytes[0x2c..]);
         let initial_sp_base = read_u32_le(&bytes[0x30..]);
         let initial_sp_offset = read_u32_le(&bytes[0x34..]);
 
@@ -161,7 +161,7 @@ pub fn pad_to_payload(bytes: &mut Vec<u8>) -> Result<usize, ExeError> {
     if &bytes[0..8] != MAGIC {
         return Err(ExeError::BadMagic);
     }
-    let expected = read_u32_le(&bytes[0x1C..]) as usize;
+    let expected = read_u32_le(&bytes[0x1c..]) as usize;
     let actual = bytes.len() - EXE_HEADER_BYTES;
     let Some(missing) = expected.checked_sub(actual) else {
         return Ok(0);
@@ -186,19 +186,19 @@ mod tests {
         let mut v = vec![0u8; EXE_HEADER_BYTES];
         v[..8].copy_from_slice(MAGIC);
         v[0x10..0x14].copy_from_slice(&pc.to_le_bytes());
-        v[0x18..0x1C].copy_from_slice(&t_addr.to_le_bytes());
-        v[0x1C..0x20].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+        v[0x18..0x1c].copy_from_slice(&t_addr.to_le_bytes());
+        v[0x1c..0x20].copy_from_slice(&(payload.len() as u32).to_le_bytes());
         v.extend_from_slice(payload);
         v
     }
 
     #[test]
     fn parses_minimal_exe() {
-        let raw = make_exe(0x8001_0000, 0x8001_0000, &[0xDE, 0xAD, 0xBE, 0xEF]);
+        let raw = make_exe(0x8001_0000, 0x8001_0000, &[0xde, 0xad, 0xbe, 0xef]);
         let exe = Exe::parse(&raw).unwrap();
         assert_eq!(exe.initial_pc, 0x8001_0000);
         assert_eq!(exe.load_addr, 0x8001_0000);
-        assert_eq!(exe.payload, vec![0xDE, 0xAD, 0xBE, 0xEF]);
+        assert_eq!(exe.payload, vec![0xde, 0xad, 0xbe, 0xef]);
     }
 
     #[test]
@@ -217,7 +217,7 @@ mod tests {
     fn rejects_truncated_payload() {
         let mut raw = vec![0u8; EXE_HEADER_BYTES];
         raw[..8].copy_from_slice(MAGIC);
-        raw[0x1C..0x20].copy_from_slice(&100u32.to_le_bytes());
+        raw[0x1c..0x20].copy_from_slice(&100u32.to_le_bytes());
         assert!(matches!(
             Exe::parse(&raw),
             Err(ExeError::TruncatedPayload {
@@ -231,7 +231,7 @@ mod tests {
     fn pads_a_short_last_sector_with_zeros() {
         let mut raw = make_exe(0x8001_0000, 0x8001_0000, &[1; 2048]);
         let whole = raw.clone();
-        raw[0x1C..0x20].copy_from_slice(&2048u32.to_le_bytes());
+        raw[0x1c..0x20].copy_from_slice(&2048u32.to_le_bytes());
         raw.truncate(EXE_HEADER_BYTES + 1500);
         assert_eq!(pad_to_payload(&mut raw), Ok(548));
         assert_eq!(raw.len(), whole.len());
@@ -246,7 +246,7 @@ mod tests {
     #[test]
     fn parse_reads_a_short_last_sector_as_zeros() {
         let mut raw = make_exe(0x8001_0000, 0x8001_0000, &[1; 1500]);
-        raw[0x1C..0x20].copy_from_slice(&2048u32.to_le_bytes());
+        raw[0x1c..0x20].copy_from_slice(&2048u32.to_le_bytes());
         let exe = Exe::parse(&raw).unwrap();
         assert_eq!(exe.payload.len(), 2048);
         assert!(exe.payload[..1500].iter().all(|&b| b == 1));
@@ -260,7 +260,7 @@ mod tests {
     fn parse_still_refuses_other_shortfalls() {
         // A whole sector or more missing.
         let mut raw = make_exe(0x8001_0000, 0x8001_0000, &[1; 2048]);
-        raw[0x1C..0x20].copy_from_slice(&4096u32.to_le_bytes());
+        raw[0x1c..0x20].copy_from_slice(&4096u32.to_le_bytes());
         assert!(matches!(
             Exe::parse(&raw),
             Err(ExeError::TruncatedPayload {
@@ -270,7 +270,7 @@ mod tests {
         ));
         // A size that is not whole sectors never came from the linker.
         let mut odd = make_exe(0x8001_0000, 0x8001_0000, &[1; 1000]);
-        odd[0x1C..0x20].copy_from_slice(&1500u32.to_le_bytes());
+        odd[0x1c..0x20].copy_from_slice(&1500u32.to_le_bytes());
         assert!(matches!(
             Exe::parse(&odd),
             Err(ExeError::TruncatedPayload {

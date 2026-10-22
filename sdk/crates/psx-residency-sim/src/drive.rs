@@ -46,7 +46,7 @@ impl DriveModel {
             micros_per_sector: READ_MICROS_PER_SECTOR_DOUBLE,
             abort_micros: 0,
             variance: Variance::Nominal,
-            rng: 0x9E37_79B9_7F4A_7C15,
+            rng: 0x9e37_79b9_7f4a_7c15,
             head: None,
         }
     }

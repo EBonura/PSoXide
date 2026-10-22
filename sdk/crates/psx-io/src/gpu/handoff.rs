@@ -157,7 +157,7 @@ impl CommandRecording {
         // SAFETY: `tail` is the last node's tag inside the caller's buffer,
         // which the caller keeps live and unwalked (this fn's `# Safety`).
         unsafe {
-            *self.tail = (*self.tail & 0xFF00_0000) | (next as u32 & 0x00FF_FFFF);
+            *self.tail = (*self.tail & 0xff00_0000) | (next as u32 & 0x00ff_ffff);
         }
     }
 }
@@ -232,7 +232,7 @@ fn close(generation: Option<u32>) -> Result<Option<CommandRecording>, RecordingO
         } else if recording.node.is_null() {
             Ok(None)
         } else {
-            *recording.node = (recording.node_words << 24) | 0x00FF_FFFF;
+            *recording.node = (recording.node_words << 24) | 0x00ff_ffff;
             Ok(Some(CommandRecording {
                 head: recording.head,
                 tail: recording.node,
@@ -359,7 +359,7 @@ fn record_word(word: u32) {
             if recording.node.is_null() {
                 recording.head = tag;
             } else {
-                *recording.node = (recording.node_words << 24) | (tag as u32 & 0x00FF_FFFF);
+                *recording.node = (recording.node_words << 24) | (tag as u32 & 0x00ff_ffff);
             }
             recording.node = tag;
             recording.node_words = 0;
@@ -456,10 +456,10 @@ mod tests {
         let base = words as u32;
         assert_eq!(recording.head() as u32, base);
         assert_eq!(word(0) >> 24, 16);
-        assert_eq!(word(0) & 0x00FF_FFFF, (base + 17 * 4) & 0x00FF_FFFF);
+        assert_eq!(word(0) & 0x00ff_ffff, (base + 17 * 4) & 0x00ff_ffff);
         assert_eq!([word(1), word(2)], [0x1000, 0x1001]);
         assert_eq!(word(17) >> 24, 16);
-        assert_eq!(word(34), (8 << 24) | 0x00FF_FFFF);
+        assert_eq!(word(34), (8 << 24) | 0x00ff_ffff);
         assert_eq!(word(42), 0x1000 + 39);
         assert_eq!(recording.len_words(), 43);
         // SAFETY: `buffer` is live and never walked.
@@ -482,16 +482,16 @@ mod tests {
         let mut resumed = [0u32; 8];
         // SAFETY: as above.
         let active = unsafe { start_recording_raw(resumed.as_mut_ptr(), resumed.len()) };
-        write_command(0xAA);
+        write_command(0xaa);
         {
             let _pause = pause_recording();
             assert!(!is_recording());
         }
         assert!(is_recording());
-        write_command(0xBB);
+        write_command(0xbb);
         let recording = active.end().expect("fits").expect("words recorded");
         assert_eq!(recording.len_words(), 3);
-        assert_eq!(&resumed[1..3], &[0xAA, 0xBB]);
+        assert_eq!(&resumed[1..3], &[0xaa, 0xbb]);
         assert!(!is_slow());
     }
 
@@ -503,7 +503,7 @@ mod tests {
         // SAFETY: the recording is ended below, before `buffer` goes, and it
         // is never walked.
         let active = unsafe { start_recording_raw(buffer.as_mut_ptr(), buffer.len()) };
-        write_command(0xCAFE);
+        write_command(0xcafe);
         let pause = pause_recording();
         assert!(active.end().expect("fits").is_some());
         pause

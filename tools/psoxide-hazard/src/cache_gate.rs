@@ -57,9 +57,9 @@ pub const DEFAULT_ALLOWED: &[&str] = &[
 
 /// Start of the address range the cache control register lives in (KSEG2, the only mapped
 /// register there).
-const KSEG2_REGISTER: u32 = 0xFFFE_0000;
+const KSEG2_REGISTER: u32 = 0xfffe_0000;
 /// End (exclusive) of that range.
-const KSEG2_END: u32 = 0xFFFF_0000;
+const KSEG2_END: u32 = 0xffff_0000;
 /// COP0 Status.IsC.
 const ISOLATE_CACHE: u32 = 1 << 16;
 
@@ -146,11 +146,11 @@ fn used_only_to_load(next: &[u32], r: usize) -> bool {
         }
         let writes = match op {
             0x00 => rd == r,
-            0x08..=0x0F => rt == r,
+            0x08..=0x0f => rt == r,
             _ => false,
         };
         let reads = match op {
-            0x0F => false,
+            0x0f => false,
             0x00 => rs == r || rt == r,
             _ => rs == r || (rt == r && !writes),
         };
@@ -182,7 +182,7 @@ pub fn find_violations(
         let rs = ((w >> 21) & 31) as usize;
         let rt = ((w >> 16) & 31) as usize;
         let rd = ((w >> 11) & 31) as usize;
-        let imm = w & 0xFFFF;
+        let imm = w & 0xffff;
         let simm = imm as u16 as i16 as i32 as u32;
         let funct = w & 63;
         let mut flag = |kind: Kind| {
@@ -196,26 +196,26 @@ pub fn find_violations(
             }
         };
         match op {
-            0x0F => regs[rt] = Val::known(imm << 16),
-            0x0D => {
+            0x0f => regs[rt] = Val::known(imm << 16),
+            0x0d => {
                 regs[rt] = combine(regs[rs], Val::known(imm), |a, b| a | b);
             }
             0x09 => {
                 regs[rt] = combine(regs[rs], Val::known(simm), u32::wrapping_add);
             }
-            0x0C => {
+            0x0c => {
                 // andi: the result has no bit 16.
                 regs[rt] = match regs[rs].known {
                     Some(v) => Val::known(v & imm),
                     None => Val::unknown(false),
                 };
             }
-            0x0E => regs[rt] = combine(regs[rs], Val::known(imm), |a, b| a ^ b),
-            0x0A | 0x0B => regs[rt] = Val::unknown(false),
+            0x0e => regs[rt] = combine(regs[rs], Val::known(imm), |a, b| a ^ b),
+            0x0a | 0x0b => regs[rt] = Val::unknown(false),
             // lb lh lwl lw lbu lhu lwr
             0x20..=0x26 => regs[rt] = Val::unknown(false),
             // sb sh swl sw swr
-            0x28 | 0x29 | 0x2A | 0x2B | 0x2E => {
+            0x28 | 0x29 | 0x2a | 0x2b | 0x2e => {
                 if let Some(base_value) = regs[rs].known {
                     let address = base_value.wrapping_add(simm);
                     if (KSEG2_REGISTER..KSEG2_END).contains(&address) {
@@ -268,7 +268,7 @@ pub fn find_violations(
                     regs[0] = Val::known(0);
                 }
                 // jr, syscall, break, mult, div, mthi, mtlo: no register result.
-                0x08 | 0x0C | 0x0D | 0x11 | 0x13 | 0x18..=0x1B => {}
+                0x08 | 0x0c | 0x0d | 0x11 | 0x13 | 0x18..=0x1b => {}
                 _ => regs[rd] = Val::unknown(false),
             },
             _ => {}
@@ -276,11 +276,11 @@ pub fn find_violations(
         regs[0] = Val::known(0);
         // The instruction just built the cache control register's exact address.
         let result = match op {
-            0x0F | 0x0D | 0x09 | 0x0C | 0x0E => Some(rt),
+            0x0f | 0x0d | 0x09 | 0x0c | 0x0e => Some(rt),
             0x00 => Some(rd),
             _ => None,
         };
-        if let Some(r) = result.filter(|&r| regs[r].known == Some(0xFFFE_0130)) {
+        if let Some(r) = result.filter(|&r| regs[r].known == Some(0xfffe_0130)) {
             if !used_only_to_load(&words[i + 1..], r) {
                 flag(Kind::CacheControlAddress);
             }
@@ -363,16 +363,16 @@ mod tests {
     use super::*;
 
     fn lui(rt: u32, imm: u32) -> u32 {
-        0x3C00_0000 | rt << 16 | imm
+        0x3c00_0000 | rt << 16 | imm
     }
     fn ori(rt: u32, rs: u32, imm: u32) -> u32 {
         0x3400_0000 | rs << 21 | rt << 16 | imm
     }
     fn sw(rt: u32, base: u32, off: u32) -> u32 {
-        0xAC00_0000 | base << 21 | rt << 16 | (off & 0xFFFF)
+        0xac00_0000 | base << 21 | rt << 16 | (off & 0xffff)
     }
     fn lw(rt: u32, base: u32, off: u32) -> u32 {
-        0x8C00_0000 | base << 21 | rt << 16 | (off & 0xFFFF)
+        0x8c00_0000 | base << 21 | rt << 16 | (off & 0xffff)
     }
     fn mtc0(rt: u32, rd: u32) -> u32 {
         0x4080_0000 | rt << 16 | rd << 11
@@ -389,7 +389,7 @@ mod tests {
     fn mfc0(rt: u32, rd: u32) -> u32 {
         0x4000_0000 | rt << 16 | rd << 11
     }
-    const JAL: u32 = 0x0C00_0000;
+    const JAL: u32 = 0x0c00_0000;
 
     fn run(words: &[u32], allowed: &[&str]) -> Vec<Violation> {
         let allowed: Vec<String> = allowed.iter().map(|s| s.to_string()).collect();
@@ -399,7 +399,7 @@ mod tests {
     #[test]
     fn a_store_through_lui_and_the_offset_is_caught() {
         // lui t0,0xFFFE ; sw t1,0x130(t0): the compiler's form of `write_volatile(0xFFFE0130)`.
-        let v = run(&[lui(8, 0xFFFE), sw(9, 8, 0x130)], &[]);
+        let v = run(&[lui(8, 0xfffe), sw(9, 8, 0x130)], &[]);
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].kind, Kind::CacheControlStore);
         assert_eq!(v[0].addr, 0x8001_0004);
@@ -408,7 +408,7 @@ mod tests {
     #[test]
     fn a_store_through_a_built_address_is_caught() {
         // lui t0,0xFFFE ; ori t0,t0,0x130 ; sw t1,0(t0)
-        let v = run(&[lui(8, 0xFFFE), ori(8, 8, 0x130), sw(9, 8, 0)], &[]);
+        let v = run(&[lui(8, 0xfffe), ori(8, 8, 0x130), sw(9, 8, 0)], &[]);
         let kinds: Vec<_> = v.iter().map(|v| v.kind).collect();
         assert_eq!(kinds, [Kind::CacheControlAddress, Kind::CacheControlStore]);
     }
@@ -416,7 +416,7 @@ mod tests {
     #[test]
     fn a_store_through_a_copied_register_is_caught() {
         // lui t0,0xFFFE ; or t2,t0,zero ; sw t1,0x130(t2)
-        let v = run(&[lui(8, 0xFFFE), or(10, 8, 0), sw(9, 10, 0x130)], &[]);
+        let v = run(&[lui(8, 0xfffe), or(10, 8, 0), sw(9, 10, 0x130)], &[]);
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].kind, Kind::CacheControlStore);
     }
@@ -454,27 +454,27 @@ mod tests {
         );
         assert!(v.is_empty(), "{v:?}");
         // A mask built with lui 0xFFFE (-2) and a store elsewhere.
-        let v = run(&[lui(8, 0xFFFE), ori(8, 8, 0xFFFF), sw(9, 29, 4)], &[]);
+        let v = run(&[lui(8, 0xfffe), ori(8, 8, 0xffff), sw(9, 29, 4)], &[]);
         assert!(v.is_empty());
         // The scratchpad and the I/O window are not the register.
         // (The upper half of the I/O window's address, written so the register-literal lint,
         // which keeps hardware addresses in psx-hw, has nothing to flag.)
-        let io_window = 0x1F8 << 4;
+        let io_window = 0x1f8 << 4;
         let v = run(&[lui(8, io_window), sw(9, 8, 0x1070)], &[]);
         assert!(v.is_empty());
         // Reading the register is the panel's business and harmless.
-        let v = run(&[lui(8, 0xFFFE), lw(9, 8, 0x130)], &[]);
+        let v = run(&[lui(8, 0xfffe), lw(9, 8, 0x130)], &[]);
         assert!(v.is_empty());
     }
 
     #[test]
     fn reading_the_register_for_the_panel_is_allowed_but_passing_its_address_on_is_not() {
         // lui t0,0xFFFE ; ori t0,t0,0x130 ; lw t1,0(t0)
-        let v = run(&[lui(8, 0xFFFE), ori(8, 8, 0x130), lw(9, 8, 0)], &[]);
+        let v = run(&[lui(8, 0xfffe), ori(8, 8, 0x130), lw(9, 8, 0)], &[]);
         assert!(v.is_empty(), "{v:?}");
         // ... ; or a0,t0,zero ; jal
         let v = run(
-            &[lui(8, 0xFFFE), ori(8, 8, 0x130), or(4, 8, 0), JAL, 0],
+            &[lui(8, 0xfffe), ori(8, 8, 0x130), or(4, 8, 0), JAL, 0],
             &[],
         );
         assert_eq!(v.len(), 1);
@@ -483,13 +483,13 @@ mod tests {
 
     #[test]
     fn a_call_forgets_what_was_known() {
-        let v = run(&[lui(8, 0xFFFE), JAL, 0, sw(9, 8, 0x130)], &[]);
+        let v = run(&[lui(8, 0xfffe), JAL, 0, sw(9, 8, 0x130)], &[]);
         assert!(v.is_empty());
     }
 
     #[test]
     fn the_allowlist_is_by_function() {
-        let words = [lui(8, 0xFFFE), sw(9, 8, 0x130)];
+        let words = [lui(8, 0xfffe), sw(9, 8, 0x130)];
         let allowed = vec!["__psx_rt_flush_i_cache".to_string()];
         let inside = find_violations(
             &words,
@@ -520,7 +520,7 @@ mod tests {
     fn exe(words: &[u32]) -> Vec<u8> {
         let mut data = vec![0u8; HEADER as usize];
         data[..8].copy_from_slice(b"PS-X EXE");
-        data[0x18..0x1C].copy_from_slice(&0x8001_0000u32.to_le_bytes());
+        data[0x18..0x1c].copy_from_slice(&0x8001_0000u32.to_le_bytes());
         for w in words {
             data.extend_from_slice(&w.to_le_bytes());
         }
@@ -552,7 +552,7 @@ mod tests {
     /// store inside the SDK's flush routine (green).
     #[test]
     fn an_image_that_pokes_the_register_fails_and_the_sdk_routine_passes() {
-        let poke = [lui(8, 0xFFFE), sw(9, 8, 0x130), 0x03E0_0008, 0];
+        let poke = [lui(8, 0xfffe), sw(9, 8, 0x130), 0x03e0_0008, 0];
         let (status, text) = gate_files("poke", &poke, &[(0x8001_0000, 16, "game_poke")]);
         assert_eq!(status, 1, "{text}");
         assert!(text.contains("game_poke"), "{text}");
@@ -565,7 +565,7 @@ mod tests {
 
     #[test]
     fn an_image_that_isolates_the_cache_fails() {
-        let isolate = [lui(12, 1), mtc0(12, 12), 0x03E0_0008, 0];
+        let isolate = [lui(12, 1), mtc0(12, 12), 0x03e0_0008, 0];
         let (status, text) = gate_files("isc", &isolate, &[(0x8001_0000, 16, "game_isolate")]);
         assert_eq!(status, 1, "{text}");
         assert!(text.contains("IsC"), "{text}");

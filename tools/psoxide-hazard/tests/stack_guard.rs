@@ -280,9 +280,9 @@ fn bios_style_register_jumps_are_refused() {
         2,
         "__bios_putchar",
         &[
-            addiu("t0", "zero", 0xA0),
+            addiu("t0", "zero", 0xa0),
             jr("t0"),
-            addiu("t1", "zero", 0x3C),
+            addiu("t1", "zero", 0x3c),
         ],
     );
     fx.caller(1, &entry(0, 1024), 8, &[bios]);
@@ -392,7 +392,7 @@ fn a_data_end_inside_the_last_sector_matches_the_sector_rounded_payload() {
     let mut fx = Fixture::new();
     fx.caller(1, &entry(0, 1024), 8, &[]);
     let (exe, map) = fx.write();
-    map_ending_data_at(&map, BASE + 0xF44);
+    map_ending_data_at(&map, BASE + 0xf44);
     let mut out = Vec::new();
     let failures = stack_guard::check(&exe, Some(&map), None, None, &mut out);
     let out = String::from_utf8(out).unwrap();
@@ -972,7 +972,7 @@ fn text_only_takes_the_bounds_from_the_map() {
 /// length of 8 (`jr zero`). Twenty records, so the heuristic data guard sees
 /// nothing undecodable near any of them.
 fn setting_table() -> Vec<u32> {
-    (0..20).flat_map(|i| [0x8001_0A40 + 4 * i, 8]).collect()
+    (0..20).flat_map(|i| [0x8001_0a40 + 4 * i, 8]).collect()
 }
 
 /// `t::g` returns a byte loaded in its `jr ra` slot (a real hazard, in

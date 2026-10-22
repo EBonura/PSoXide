@@ -198,10 +198,10 @@ mod tests {
         ];
         for (kind, number) in kinds {
             assert_eq!(kind, number);
-            for id in [0u16, 1, 51, 266, 0xFFFF] {
+            for id in [0u16, 1, 51, 266, 0xffff] {
                 let word = encode_event(kind, id);
-                assert_eq!((word >> 24) & 0xFF, number as u32);
-                assert_eq!(word & 0xFFFF, id as u32);
+                assert_eq!((word >> 24) & 0xff, number as u32);
+                assert_eq!(word & 0xffff, id as u32);
             }
         }
     }

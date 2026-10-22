@@ -53,11 +53,11 @@ pub const SIN_TABLE: [i16; 256] = [
 /// `sin(angle_q12)` as a Q1.12 value. Input wraps modulo 4096.
 #[inline]
 pub fn sin_q12(angle_q12: u16) -> i32 {
-    let angle = angle_q12 & 0x0FFF;
+    let angle = angle_q12 & 0x0fff;
     let idx = (angle >> 4) as usize;
-    let frac = (angle & 0x000F) as i32;
+    let frac = (angle & 0x000f) as i32;
     let a = SIN_TABLE[idx] as i32;
-    let b = SIN_TABLE[(idx + 1) & 0xFF] as i32;
+    let b = SIN_TABLE[(idx + 1) & 0xff] as i32;
     a + (((b - a) * frac) / 16)
 }
 
@@ -99,7 +99,7 @@ pub fn atan2_q12(y: i32, x: i32) -> u16 {
         (false, false) => 2048 + q,
         (true, false) => 4096 - q,
     };
-    (a & 0xFFF) as u16
+    (a & 0xfff) as u16
 }
 
 #[cfg(test)]
@@ -156,7 +156,7 @@ mod tests {
         for &angle in &[0u16, 100, 512, 900, 1024, 2000, 2048, 3000, 3072, 4000] {
             let (s, c) = (sin_q12(angle), cos_q12(angle));
             let back = atan2_q12(s, c);
-            let diff = (back.wrapping_sub(angle) & 0xFFF).min(angle.wrapping_sub(back) & 0xFFF);
+            let diff = (back.wrapping_sub(angle) & 0xfff).min(angle.wrapping_sub(back) & 0xfff);
             assert!(diff <= 46, "angle {angle} came back as {back}");
         }
     }

@@ -4,7 +4,7 @@
 //! Command Summary".
 
 /// Controller register base (index/status register; ports 1..3 follow).
-pub const BASE: u32 = 0x1F80_1800;
+pub const BASE: u32 = 0x1f80_1800;
 
 /// The four byte registers. Which function a register has depends on the
 /// index in the low two bits of [`INDEX`](reg::INDEX); only the functions
@@ -59,7 +59,7 @@ pub mod irq {
     pub const ERROR: u8 = 5;
     /// All five interrupt bits (INT1..INT5), the width of the interrupt
     /// enable and flag registers.
-    pub const ALL: u8 = 0x1F;
+    pub const ALL: u8 = 0x1f;
     /// Interrupt flag write that acknowledges every pending code.
     pub const ACK_ALL: u8 = ALL;
     /// Interrupt flag write bit that also empties the parameter FIFO.
@@ -111,7 +111,7 @@ pub const CMD_SETLOC: u8 = 0x02;
 /// play when [`MODE_XA_FILTER`] is set.
 #[doc(alias = "Setfilter")]
 #[doc(alias = "CdlSetfilter")]
-pub const CMD_SETFILTER: u8 = 0x0D;
+pub const CMD_SETFILTER: u8 = 0x0d;
 /// `Play` command.
 #[doc(alias = "Play")]
 #[doc(alias = "CdlPlay")]
@@ -124,7 +124,7 @@ pub const CMD_READN: u8 = 0x06;
 /// sector, the usual way to stream XA-ADPCM audio.
 #[doc(alias = "ReadS")]
 #[doc(alias = "CdlReadS")]
-pub const CMD_READS: u8 = 0x1B;
+pub const CMD_READS: u8 = 0x1b;
 /// `Stop` command.
 #[doc(alias = "Stop")]
 #[doc(alias = "CdlStop")]
@@ -136,19 +136,19 @@ pub const CMD_PAUSE: u8 = 0x09;
 /// `Init` command: reset mode, abort pending reads, spin the motor up.
 #[doc(alias = "Init")]
 #[doc(alias = "CdlInit")]
-pub const CMD_INIT: u8 = 0x0A;
+pub const CMD_INIT: u8 = 0x0a;
 /// `Mute` command.
 #[doc(alias = "Mute")]
 #[doc(alias = "CdlMute")]
-pub const CMD_MUTE: u8 = 0x0B;
+pub const CMD_MUTE: u8 = 0x0b;
 /// `Demute` command.
 #[doc(alias = "Demute")]
 #[doc(alias = "CdlDemute")]
-pub const CMD_DEMUTE: u8 = 0x0C;
+pub const CMD_DEMUTE: u8 = 0x0c;
 /// `Setmode` command.
 #[doc(alias = "Setmode")]
 #[doc(alias = "CdlSetmode")]
-pub const CMD_SETMODE: u8 = 0x0E;
+pub const CMD_SETMODE: u8 = 0x0e;
 /// `GetlocP` command: current physical play position.
 #[doc(alias = "GetlocP")]
 #[doc(alias = "CdlGetlocP")]
@@ -229,7 +229,7 @@ mod tests {
                 reg::PARAMETER,
                 reg::REQUEST_IRQ
             ],
-            [0x1F80_1800, 0x1F80_1801, 0x1F80_1802, 0x1F80_1803]
+            [0x1f80_1800, 0x1f80_1801, 0x1f80_1802, 0x1f80_1803]
         );
     }
 
@@ -249,7 +249,7 @@ mod tests {
             ],
             [1, 2, 3, 4, 5]
         );
-        assert_eq!(irq::ACK_ALL, 0x1F);
+        assert_eq!(irq::ACK_ALL, 0x1f);
         assert_eq!(request::WANT_DATA, 0x80);
     }
 }

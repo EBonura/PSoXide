@@ -1815,7 +1815,7 @@ fn decode_q11_element_wide(raw: u16) -> i32 {
         let signed = ((raw << 4) as i16) >> 4;
         signed
             .wrapping_shl(1)
-            .wrapping_add((((raw & 0x0FFF) == 0x07FF) as i16) << 1) as i32
+            .wrapping_add((((raw & 0x0fff) == 0x07ff) as i16) << 1) as i32
     }
 }
 
@@ -1841,8 +1841,8 @@ unsafe fn read_pose_matrix_q11_unchecked(bytes: &[u8], offset: usize) -> [[i16; 
                 | ((bytes.as_ptr().add(o + 1).read() as u32) << 8)
                 | ((bytes.as_ptr().add(o + 2).read() as u32) << 16)
         };
-        flat[pair * 2] = decode_q11_element((packed & 0x0FFF) as u16);
-        flat[pair * 2 + 1] = decode_q11_element(((packed >> 12) & 0x0FFF) as u16);
+        flat[pair * 2] = decode_q11_element((packed & 0x0fff) as u16);
+        flat[pair * 2 + 1] = decode_q11_element(((packed >> 12) & 0x0fff) as u16);
         pair += 1;
     }
     // SAFETY: bytes `offset + 12` and `offset + 13` are inside the
@@ -1851,7 +1851,7 @@ unsafe fn read_pose_matrix_q11_unchecked(bytes: &[u8], offset: usize) -> [[i16; 
         (bytes.as_ptr().add(offset + 12).read() as u16)
             | ((bytes.as_ptr().add(offset + 13).read() as u16) << 8)
     };
-    flat[8] = decode_q11_element(last & 0x0FFF);
+    flat[8] = decode_q11_element(last & 0x0fff);
     [
         [flat[0], flat[1], flat[2]],
         [flat[3], flat[4], flat[5]],

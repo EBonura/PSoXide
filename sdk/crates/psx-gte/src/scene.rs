@@ -23,9 +23,8 @@
 //! ```
 
 use crate::math::{Mat3I16, Vec3I16, Vec3I32};
-use crate::ops;
 use crate::regs::pack_xy;
-use crate::{read_control, read_data, write_control, write_data};
+use crate::{ops, read_control, read_data, write_control, write_data};
 #[cfg(target_arch = "mips")]
 use core::arch::asm;
 
@@ -1808,11 +1807,11 @@ mod host_smoke {
             seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
             seed
         };
-        let mut hash = 0xCBF2_9CE4_8422_2325u64;
+        let mut hash = 0xcbf2_9ce4_8422_2325u64;
         let mut eat = |value: i32| {
             for byte in value.to_le_bytes() {
                 hash ^= u64::from(byte);
-                hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
             }
         };
         for i in 0..40_000u32 {
@@ -1833,7 +1832,7 @@ mod host_smoke {
             eat(out.xy_squared);
             eat(out.squared);
         }
-        assert_eq!(hash, 0x803B_4A0D_7EA1_0CB5);
+        assert_eq!(hash, 0x803b_4a0d_7ea1_0cb5);
     }
 
     /// The table the previous implementation used, captured by running it.

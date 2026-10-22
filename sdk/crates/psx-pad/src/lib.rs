@@ -445,7 +445,7 @@ impl PadState {
         buttons: ButtonState::NONE,
         mode: PadMode::Disconnected,
         sticks: AnalogSticks::CENTERED,
-        id_low: 0xFF,
+        id_low: 0xff,
         negcon: None,
     };
 
@@ -650,15 +650,15 @@ pub struct RawPoll {
 
 impl RawPoll {
     /// A poll where nothing answered (id_low `0xFF`). Useful as a const seed.
-    pub const NONE: Self = Self::disconnected(0xFF);
+    pub const NONE: Self = Self::disconnected(0xff);
 
     /// A poll where nothing answered.
     const fn disconnected(id_low: u8) -> Self {
         Self {
             id_low,
-            id_high: 0xFF,
-            buttons_low: 0xFF,
-            buttons_high: 0xFF,
+            id_high: 0xff,
+            buttons_low: 0xff,
+            buttons_high: 0xff,
             sticks: AnalogSticks::CENTERED,
             mode: PadMode::Disconnected,
             ack_seen: 0,
@@ -708,7 +708,7 @@ impl RawPoll {
     pub fn negcon(self) -> Option<NegconState> {
         if self.mode != PadMode::Negcon
             || self.id_low != 0x23
-            || self.id_high != 0x5A
+            || self.id_high != 0x5a
             || self.exchanges != 9
         {
             return None;
@@ -1064,7 +1064,7 @@ fn poll_once_raw<T: Transport>(bus: &mut T, socket: Port, pacing: Pacing) -> Raw
 
     let analog = mode.has_axes();
     let id_high = ex(bus, socket, pacing, 0x00, false, &mut ack, &mut i);
-    if id_high != 0x5A {
+    if id_high != 0x5a {
         // Garbled handshake -- treat as Unknown and stop after the two
         // button bytes (we can no longer trust the reported length).
         mode = PadMode::Unknown;
@@ -1169,7 +1169,7 @@ fn poll_selected<T: Transport>(bus: &mut T, rumble: Rumble) -> Option<RawPoll> {
     };
     match bus.exchange(0x01, false, address) {
         Ok(_) => {}
-        Err(ExchangeError::AckTimeout { reply: 0xFF }) => return Some(RawPoll::NONE),
+        Err(ExchangeError::AckTimeout { reply: 0xff }) => return Some(RawPoll::NONE),
         Err(_) => return None,
     }
     let id_low = bus.exchange(0x42, false, Timing::PAD).ok()?;
@@ -1178,7 +1178,7 @@ fn poll_selected<T: Transport>(bus: &mut T, rumble: Rumble) -> Option<RawPoll> {
         return None;
     }
     let id_high = bus.exchange(0x00, false, Timing::PAD).ok()?;
-    if id_high != 0x5A {
+    if id_high != 0x5a {
         return None;
     }
     let analog = mode.has_axes();
@@ -1247,7 +1247,7 @@ fn poll_once_timed<T: Transport>(
     let analog = mode.has_axes();
     let id_high = exchange_delayed(bus, 0x00, interbyte_spins);
     i += 1;
-    if id_high != 0x5A {
+    if id_high != 0x5a {
         mode = PadMode::Unknown;
     }
     let read_sticks = analog && mode != PadMode::Unknown;
@@ -1315,7 +1315,7 @@ const CONFIG_EXIT_RETRIES: u32 = 3;
 /// puts the small motor on the first byte after the poll command's two, the
 /// second (`0x01`) the large motor on the next, and `0xFF` leaves a slot
 /// unused. A DualShock forgets it when it loses power.
-pub const MOTOR_MAP_PACKET: [u8; 8] = [0x4D, 0x00, 0x00, 0x01, 0xFF, 0xFF, 0xFF, 0xFF];
+pub const MOTOR_MAP_PACKET: [u8; 8] = [0x4d, 0x00, 0x00, 0x01, 0xff, 0xff, 0xff, 0xff];
 
 /// Put a DualShock's motors under the poll: enter configuration mode, map the
 /// small motor to the first motor byte and the large motor to the second
@@ -1346,7 +1346,7 @@ fn request_rumble<T: Transport>(bus: &mut T, socket: Port, gap: u32) -> (PadStat
     );
     bus.delay(gap);
     let answer = transaction(bus, socket, MOTOR_MAP_PACKET);
-    let mapped = answer[0] == 0xF3 && answer[1] == 0x5A;
+    let mapped = answer[0] == 0xf3 && answer[1] == 0x5a;
     bus.delay(gap);
     transaction(
         bus,
@@ -1423,8 +1423,8 @@ fn mode_from_id_low(id_low: u8) -> PadMode {
         0x41 => PadMode::Digital,
         0x23 => PadMode::Negcon,
         0x73 => PadMode::Analog,
-        0xF3 => PadMode::Config,
-        0xFF => PadMode::Disconnected,
+        0xf3 => PadMode::Config,
+        0xff => PadMode::Disconnected,
         _ => PadMode::Unknown,
     }
 }
@@ -1498,11 +1498,11 @@ fn transaction<T: Transport>(bus: &mut T, socket: Port, bytes: [u8; 8]) -> [u8; 
 #[inline]
 fn exchange_nowait<T: Transport>(bus: &mut T, tx: u8) -> u8 {
     if !bus.wait_status_set(STAT_TX_READY, EXCHANGE_WAIT_SPINS) {
-        return 0xFF;
+        return 0xff;
     }
     bus.transmit(tx);
     if !bus.wait_status_set(STAT_RX_NOT_EMPTY, EXCHANGE_WAIT_SPINS) {
-        return 0xFF;
+        return 0xff;
     }
     bus.receive()
 }
@@ -1526,11 +1526,11 @@ fn exchange_delayed<T: Transport>(bus: &mut T, tx: u8, interbyte_spins: u32) -> 
 #[inline]
 fn exchange_ack<T: Transport>(bus: &mut T, socket: Port, tx: u8) -> (u8, bool) {
     if !bus.wait_status_set(STAT_TX_READY, EXCHANGE_WAIT_SPINS) {
-        return (0xFF, false);
+        return (0xff, false);
     }
     bus.transmit(tx);
     if !bus.wait_status_set(STAT_RX_NOT_EMPTY, EXCHANGE_WAIT_SPINS) {
-        return (0xFF, false);
+        return (0xff, false);
     }
     let rx = bus.receive();
     // Wait for the latched `/ACK` interrupt (STAT bit 9). The latch cannot be
@@ -1672,14 +1672,14 @@ mod tests {
     fn mode_ids_match_dualshock_wire_values() {
         assert_eq!(mode_from_id_low(0x41), PadMode::Digital);
         assert_eq!(mode_from_id_low(0x73), PadMode::Analog);
-        assert_eq!(mode_from_id_low(0xF3), PadMode::Config);
-        assert_eq!(mode_from_id_low(0xFF), PadMode::Disconnected);
+        assert_eq!(mode_from_id_low(0xf3), PadMode::Config);
+        assert_eq!(mode_from_id_low(0xff), PadMode::Disconnected);
         assert_eq!(mode_from_id_low(0x12), PadMode::Unknown);
     }
 
     #[test]
     fn decode_buttons_converts_active_low_to_active_high() {
-        let state = decode_buttons(0xEF, 0xBF);
+        let state = decode_buttons(0xef, 0xbf);
         assert!(state.is_held(button::UP));
         assert!(state.is_held(button::CROSS));
         assert!(!state.is_held(button::DOWN));
@@ -1695,9 +1695,9 @@ mod tests {
     fn raw_poll_to_state_inverts_buttons() {
         let raw = RawPoll {
             id_low: 0x41,
-            id_high: 0x5A,
-            buttons_low: 0xEF,  // UP pressed (active-low)
-            buttons_high: 0xBF, // CROSS pressed (active-low)
+            id_high: 0x5a,
+            buttons_low: 0xef,  // UP pressed (active-low)
+            buttons_high: 0xbf, // CROSS pressed (active-low)
             sticks: AnalogSticks::CENTERED,
             mode: PadMode::Digital,
             ack_seen: 0,
@@ -1716,9 +1716,9 @@ mod tests {
         // must ACK; the final b1 does not.
         let mut raw = RawPoll {
             id_low: 0x41,
-            id_high: 0x5A,
-            buttons_low: 0xFF,
-            buttons_high: 0xFF,
+            id_high: 0x5a,
+            buttons_low: 0xff,
+            buttons_high: 0xff,
             sticks: AnalogSticks::CENTERED,
             mode: PadMode::Digital,
             ack_seen: 0b0_1111, // exchanges 0..=3 acked
@@ -1773,8 +1773,8 @@ mod tests {
             id_low: match mode {
                 PadMode::Digital => 0x41,
                 PadMode::Analog => 0x73,
-                PadMode::Config => 0xF3,
-                _ => 0xFF,
+                PadMode::Config => 0xf3,
+                _ => 0xff,
             },
             negcon: None,
         }
@@ -1794,9 +1794,9 @@ mod tests {
     fn analog_and_digital_frames_decode_the_same_buttons() {
         let digital = RawPoll {
             id_low: 0x41,
-            id_high: 0x5A,
-            buttons_low: 0xFE,  // SELECT (active-low)
-            buttons_high: 0xBF, // CROSS
+            id_high: 0x5a,
+            buttons_low: 0xfe,  // SELECT (active-low)
+            buttons_high: 0xbf, // CROSS
             sticks: AnalogSticks::CENTERED,
             mode: PadMode::Digital,
             ack_seen: 0x0f,
@@ -1806,7 +1806,7 @@ mod tests {
             right_x: 0x80,
             right_y: 0x80,
             left_x: 0x00,
-            left_y: 0xFF,
+            left_y: 0xff,
         };
         let analog = RawPoll {
             id_low: 0x73,
@@ -1830,7 +1830,7 @@ mod tests {
         // slips one byte delivers the ID's 0x5A as the first button byte.
         // That decodes as Select, R3, Left and Right held together, the
         // phantom-Select pattern seen on a console in analog mode.
-        let slipped = decode_buttons(0x5A, 0xFF);
+        let slipped = decode_buttons(0x5a, 0xff);
         assert_eq!(
             slipped.bits(),
             button::SELECT | button::R3 | button::LEFT | button::RIGHT

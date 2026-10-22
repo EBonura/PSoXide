@@ -68,9 +68,9 @@ fn main() {
         // frequency + phase. Angle steps are Q0.12 per frame --
         // 32/frame = ~4.2 s per rev; 48/frame = ~2.8 s. The full
         // cycle runs forever with no modulo-snap jumps.
-        let phase_red = (frame.wrapping_mul(32) & 0xFFF) as u16;
-        let phase_green = (frame.wrapping_mul(48).wrapping_add(1365) & 0xFFF) as u16; // +120°
-        let phase_blue = (frame.wrapping_mul(40).wrapping_add(2731) & 0xFFF) as u16; // +240°
+        let phase_red = (frame.wrapping_mul(32) & 0xfff) as u16;
+        let phase_green = (frame.wrapping_mul(48).wrapping_add(1365) & 0xfff) as u16; // +120°
+        let phase_blue = (frame.wrapping_mul(40).wrapping_add(2731) & 0xfff) as u16; // +240°
 
         let red_dx = drift(phase_red, 30);
         // Green moves vertically so the three axes differ.

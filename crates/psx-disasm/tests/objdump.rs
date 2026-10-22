@@ -155,7 +155,7 @@ fn random_words_match_objdump() {
         .ok()
         .and_then(|n| n.parse().ok())
         .unwrap_or(1_000_000);
-    let mut rng = XorShift(0x9E37_79B9_7F4A_7C15);
+    let mut rng = XorShift(0x9e37_79b9_7f4a_7c15);
     let mut words = Vec::with_capacity(count);
     for _ in 0..count {
         let roll = rng.next();
@@ -163,9 +163,9 @@ fn random_words_match_objdump() {
             0 => 0,
             // Bias toward the coprocessor and SPECIAL spaces, where the
             // masks are.
-            1 => rng.next() & 0x03FF_FFFF,
-            2 => (0x10 | (rng.next() & 3)) << 26 | (rng.next() & 0x03FF_FFFF),
-            3 => 0x4400_0000 | (rng.next() & 0x03FF_FFFF) & 0x03E0_F83F | (rng.next() & 1) << 6,
+            1 => rng.next() & 0x03ff_ffff,
+            2 => (0x10 | (rng.next() & 3)) << 26 | (rng.next() & 0x03ff_ffff),
+            3 => 0x4400_0000 | (rng.next() & 0x03ff_ffff) & 0x03e0_f83f | (rng.next() & 1) << 6,
             _ => rng.next(),
         });
     }

@@ -132,7 +132,7 @@ pub const LEVELS: u8 = 16;
 /// The braille "dots" spinner (cli-spinners), as its 2x3 dot grid: each entry's
 /// low six bits are the lit dots, bits 0 to 2 the left column top to bottom and
 /// bits 3 to 5 the right column.
-const SPINNER_FRAMES: [u8; 10] = [0x0B, 0x19, 0x39, 0x38, 0x3C, 0x34, 0x26, 0x27, 0x07, 0x0F];
+const SPINNER_FRAMES: [u8; 10] = [0x0b, 0x19, 0x39, 0x38, 0x3c, 0x34, 0x26, 0x27, 0x07, 0x0f];
 /// Spinner dot size, pitch and the gap before it, in unscaled pixels.
 const SPINNER_DOT: i16 = 3;
 const SPINNER_PITCH: i16 = 5;
@@ -437,8 +437,8 @@ pub struct Look {
 /// box lands, and a program that draws into a back buffer sets them to the
 /// buffer the viewer is looking at.
 pub fn prepare(sink: &mut dyn Sink) {
-    sink.packet(&[0xE600_0000]);
-    sink.packet(&[0xE100_0000]);
+    sink.packet(&[0xe600_0000]);
+    sink.packet(&[0xe100_0000]);
 }
 
 /// A running indicator.

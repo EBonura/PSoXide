@@ -409,8 +409,8 @@ pub fn flush_exit(busy_at_entry: bool, retries: u32, spins: u32, timed_out: bool
 /// True when `pc` is not an address code can run from: main RAM through KSEG0 or KSEG1 (the
 /// kernel area included), or the BIOS ROM. A jump into anything else went somewhere wild.
 pub const fn is_wild_pc(pc: u32) -> bool {
-    let ram = (pc >= 0x8000_0000 && pc < 0x8020_0000) || (pc >= 0xA000_0000 && pc < 0xA020_0000);
-    let rom = pc >= 0xBFC0_0000 && pc < 0xBFC8_0000;
+    let ram = (pc >= 0x8000_0000 && pc < 0x8020_0000) || (pc >= 0xa000_0000 && pc < 0xa020_0000);
+    let rom = pc >= 0xbfc0_0000 && pc < 0xbfc8_0000;
     !(ram || rom)
 }
 
@@ -419,7 +419,7 @@ pub const fn is_wild_pc(pc: u32) -> bool {
 /// fetched such a word from somewhere; if the word reads as a GPU list header, the fetch got
 /// DMA traffic.
 pub const fn jump_word_for(pc: u32) -> u32 {
-    0x0800_0000 | ((pc >> 2) & 0x03FF_FFFF)
+    0x0800_0000 | ((pc >> 2) & 0x03ff_ffff)
 }
 
 /// Name the step the program has reached, for the panel: `id` and up to 24
@@ -489,7 +489,7 @@ pub fn step_hex(id: u32, tag: &str, a: u32, b: u32) {
 pub fn ll_scan(head: u32) {
     #[cfg(feature = "console-diag")]
     {
-        const RAM_MASK: u32 = 0x001F_FFFC;
+        const RAM_MASK: u32 = 0x001f_fffc;
         touch();
         bump(field!(ll_scans));
         let mut addr = head & RAM_MASK;
@@ -531,19 +531,19 @@ mod tests {
     fn code_addresses_are_not_wild_and_the_bus_error_pc_is() {
         assert!(!is_wild_pc(0x8001_0000));
         assert!(!is_wild_pc(0x8000_0080));
-        assert!(!is_wild_pc(0xA00A_2B4C));
-        assert!(!is_wild_pc(0xBFC0_1944));
+        assert!(!is_wild_pc(0xa00a_2b4c));
+        assert!(!is_wild_pc(0xbfc0_1944));
         // The console fault of 2026-10-22: PC B428AD34.
-        assert!(is_wild_pc(0xB428_AD34));
+        assert!(is_wild_pc(0xb428_ad34));
         assert!(is_wild_pc(0x0000_0000));
         assert!(is_wild_pc(0x8020_0000));
-        assert!(is_wild_pc(0xBFC8_0000));
+        assert!(is_wild_pc(0xbfc8_0000));
     }
 
     #[test]
     fn the_wild_pc_decodes_to_the_jump_word_that_was_fetched() {
         // The word read as a GPU list header was count 9, next 0x0A2B4D, against MADR 0x0A2B4C.
-        assert_eq!(jump_word_for(0xB428_AD34), 0x090A_2B4D);
+        assert_eq!(jump_word_for(0xb428_ad34), 0x090a_2b4d);
         assert_eq!(jump_word_for(0x8001_0000) >> 26, 2, "opcode J");
     }
 

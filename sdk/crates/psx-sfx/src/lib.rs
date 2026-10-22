@@ -67,7 +67,7 @@ use psx_asset::Audio;
 use psx_spu::{Adsr, Pitch, Spu, SpuAddr, Voice, Volume};
 
 /// Highest level the SPU accepts in a volume register.
-pub(crate) const SPU_LEVEL_MAX: i16 = 0x3FFF;
+pub(crate) const SPU_LEVEL_MAX: i16 = 0x3fff;
 
 /// Lowest level the SPU accepts in a volume register (phase inverted).
 pub(crate) const SPU_LEVEL_MIN: i16 = -0x4000;

@@ -31,14 +31,13 @@
 extern crate psx_rt;
 
 use core::ptr::addr_of_mut;
-use psx_font::{fonts::BASIC, FontAtlas};
+use psx_font::fonts::BASIC;
+use psx_font::FontAtlas;
 use psx_gpu::display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode};
 use psx_gpu::frame::{FrameStorage, OtFrame};
 use psx_gpu::prim::TriGouraud;
 use psx_gpu::{is_draw_done, Gpu};
-use psx_rt::interrupts;
-use psx_rt::tty;
-use psx_rt::Peripherals;
+use psx_rt::{interrupts, tty, Peripherals};
 use psx_vram::{Clut, TextureDepth, TexturePage};
 
 const FONT_TPAGE: TexturePage = TexturePage::new(320, 0, TextureDepth::Bit4);
@@ -89,7 +88,7 @@ fn build_frame<'f>(
     }
     let count = (f as usize) % (TRIS + 1);
     for (t, packet) in packets.iter_mut().take(count).enumerate() {
-        let shade = ((t as u32 * 20 + f * 3) & 0x7F) as u8 + 0x20;
+        let shade = ((t as u32 * 20 + f * 3) & 0x7f) as u8 + 0x20;
         let verts = if t & 1 == 0 {
             [(0, 0), (319, 0), (0, 239)]
         } else {
@@ -108,7 +107,7 @@ fn line(label: &str, value: u32) -> ([u8; 32], usize) {
     text[..label.len()].copy_from_slice(label);
     text[label.len()] = b'=';
     for i in 0..8 {
-        text[label.len() + 1 + i] = DIGITS[(value >> (28 - 4 * i) & 0xF) as usize];
+        text[label.len() + 1 + i] = DIGITS[(value >> (28 - 4 * i) & 0xf) as usize];
     }
     (text, label.len() + 9)
 }

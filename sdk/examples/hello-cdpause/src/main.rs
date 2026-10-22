@@ -131,7 +131,7 @@ fn main() {
     check(
         "1 status after stop() (info)",
         stat.is_some(),
-        stat.unwrap_or(0xFF) as u32,
+        stat.unwrap_or(0xff) as u32,
     );
 
     // 2. stop_proved() waits for the stop.
@@ -143,7 +143,7 @@ fn main() {
     check(
         "2 the status then has no active bit",
         stat.is_some_and(|s| s & (STAT_READING | STAT_SEEKING | STAT_PLAYING) == 0),
-        stat.unwrap_or(0xFF) as u32,
+        stat.unwrap_or(0xff) as u32,
     );
 
     // 3. Pause sent while the read is still seeking: refused, then sent again.
@@ -166,7 +166,7 @@ fn main() {
     check(
         "3 the status then has no active bit",
         stat.is_some_and(|s| s & (STAT_READING | STAT_SEEKING | STAT_PLAYING) == 0),
-        stat.unwrap_or(0xFF) as u32,
+        stat.unwrap_or(0xff) as u32,
     );
     check(
         "3 no unproven-stop diagnostic",

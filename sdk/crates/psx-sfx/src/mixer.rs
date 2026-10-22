@@ -55,7 +55,7 @@ use psx_spu::Pitch;
 pub const VOICES: usize = 24;
 
 /// Mask of all 24 voices.
-pub const ALL_VOICES: u32 = 0x00FF_FFFF;
+pub const ALL_VOICES: u32 = 0x00ff_ffff;
 
 /// Ticks a keyed-off voice is considered still ringing before the mixer treats
 /// it as free again.
@@ -211,7 +211,7 @@ impl Sound {
             class: Class::Normal,
             prio: 0,
             looped,
-            volume: 0x3FFF,
+            volume: 0x3fff,
             pitch_q12: PITCH_UNITY,
             duck_q12: 4096,
         }
@@ -757,7 +757,7 @@ impl<const L: usize> Mixer<L> {
         };
 
         let s = &mut self.slots[v];
-        s.generation = (s.generation + 1) & 0x7FF;
+        s.generation = (s.generation + 1) & 0x7ff;
         s.state = State::Playing;
         s.looped = sound.looped;
         s.retail = lane.policy == Policy::StrictRetail;
@@ -1213,11 +1213,11 @@ mod tests {
         let p2 = m.play(&mut hw, &shot(Class::Protected, 0), at(10)).unwrap();
         // A very important, very loud effect still cannot take either voice.
         assert!(m
-            .play(&mut hw, &shot(Class::High, -1000), at(0x3FFF))
+            .play(&mut hw, &shot(Class::High, -1000), at(0x3fff))
             .is_none());
         // Nor can another protected sound: the lane is full of them.
         assert!(m
-            .play(&mut hw, &shot(Class::Protected, -1000), at(0x3FFF))
+            .play(&mut hw, &shot(Class::Protected, -1000), at(0x3fff))
             .is_none());
         assert!(m.is_alive(p1) && m.is_alive(p2));
     }

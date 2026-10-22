@@ -1,6 +1,7 @@
 //! `psx-seq-cook` command line.
 
-use psx_seq_cook::{rom::Rom, survey};
+use psx_seq_cook::rom::Rom;
+use psx_seq_cook::survey;
 use std::path::PathBuf;
 
 fn arg(args: &[String], flag: &str) -> Option<String> {

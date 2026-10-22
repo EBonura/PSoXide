@@ -31,9 +31,9 @@
 /// Fixed BS frame header size in bytes.
 pub const HEADER_BYTES: usize = 8;
 /// MDEC end-of-block / padding halfword.
-pub const END_OF_BLOCK: u16 = 0xFE00;
+pub const END_OF_BLOCK: u16 = 0xfe00;
 /// Version-2 DC value that ends the frame.
-const V2_END_OF_FRAME: u32 = 0x1FF;
+const V2_END_OF_FRAME: u32 = 0x1ff;
 
 /// Why a frame could not be decoded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -116,12 +116,12 @@ const AC_CODES: [(u8, u16, u8, u8); 111] = [
     (8, 0x27, 10, 1),
     (10, 0x008, 16, 1),
     (10, 0x009, 5, 2),
-    (10, 0x00A, 0, 7),
-    (10, 0x00B, 2, 3),
-    (10, 0x00C, 1, 4),
-    (10, 0x00D, 15, 1),
-    (10, 0x00E, 14, 1),
-    (10, 0x00F, 4, 2),
+    (10, 0x00a, 0, 7),
+    (10, 0x00b, 2, 3),
+    (10, 0x00c, 1, 4),
+    (10, 0x00d, 15, 1),
+    (10, 0x00e, 14, 1),
+    (10, 0x00f, 4, 2),
     (12, 0x010, 0, 11),
     (12, 0x011, 8, 2),
     (12, 0x012, 4, 3),
@@ -132,12 +132,12 @@ const AC_CODES: [(u8, u16, u8, u8); 111] = [
     (12, 0x017, 20, 1),
     (12, 0x018, 0, 9),
     (12, 0x019, 19, 1),
-    (12, 0x01A, 18, 1),
-    (12, 0x01B, 1, 5),
-    (12, 0x01C, 3, 3),
-    (12, 0x01D, 0, 8),
-    (12, 0x01E, 6, 2),
-    (12, 0x01F, 17, 1),
+    (12, 0x01a, 18, 1),
+    (12, 0x01b, 1, 5),
+    (12, 0x01c, 3, 3),
+    (12, 0x01d, 0, 8),
+    (12, 0x01e, 6, 2),
+    (12, 0x01f, 17, 1),
     (13, 0x0010, 10, 2),
     (13, 0x0011, 9, 2),
     (13, 0x0012, 5, 3),
@@ -148,12 +148,12 @@ const AC_CODES: [(u8, u16, u8, u8); 111] = [
     (13, 0x0017, 0, 15),
     (13, 0x0018, 0, 14),
     (13, 0x0019, 0, 13),
-    (13, 0x001A, 0, 12),
-    (13, 0x001B, 26, 1),
-    (13, 0x001C, 25, 1),
-    (13, 0x001D, 24, 1),
-    (13, 0x001E, 23, 1),
-    (13, 0x001F, 22, 1),
+    (13, 0x001a, 0, 12),
+    (13, 0x001b, 26, 1),
+    (13, 0x001c, 25, 1),
+    (13, 0x001d, 24, 1),
+    (13, 0x001e, 23, 1),
+    (13, 0x001f, 22, 1),
     (14, 0x0010, 0, 31),
     (14, 0x0011, 0, 30),
     (14, 0x0012, 0, 29),
@@ -164,12 +164,12 @@ const AC_CODES: [(u8, u16, u8, u8); 111] = [
     (14, 0x0017, 0, 24),
     (14, 0x0018, 0, 23),
     (14, 0x0019, 0, 22),
-    (14, 0x001A, 0, 21),
-    (14, 0x001B, 0, 20),
-    (14, 0x001C, 0, 19),
-    (14, 0x001D, 0, 18),
-    (14, 0x001E, 0, 17),
-    (14, 0x001F, 0, 16),
+    (14, 0x001a, 0, 21),
+    (14, 0x001b, 0, 20),
+    (14, 0x001c, 0, 19),
+    (14, 0x001d, 0, 18),
+    (14, 0x001e, 0, 17),
+    (14, 0x001f, 0, 16),
     (15, 0x0010, 0, 40),
     (15, 0x0011, 0, 39),
     (15, 0x0012, 0, 38),
@@ -180,12 +180,12 @@ const AC_CODES: [(u8, u16, u8, u8); 111] = [
     (15, 0x0017, 0, 33),
     (15, 0x0018, 0, 32),
     (15, 0x0019, 1, 14),
-    (15, 0x001A, 1, 13),
-    (15, 0x001B, 1, 12),
-    (15, 0x001C, 1, 11),
-    (15, 0x001D, 1, 10),
-    (15, 0x001E, 1, 9),
-    (15, 0x001F, 1, 8),
+    (15, 0x001a, 1, 13),
+    (15, 0x001b, 1, 12),
+    (15, 0x001c, 1, 11),
+    (15, 0x001d, 1, 10),
+    (15, 0x001e, 1, 9),
+    (15, 0x001f, 1, 8),
     (16, 0x0010, 1, 18),
     (16, 0x0011, 1, 17),
     (16, 0x0012, 1, 16),
@@ -196,12 +196,12 @@ const AC_CODES: [(u8, u16, u8, u8); 111] = [
     (16, 0x0017, 14, 2),
     (16, 0x0018, 13, 2),
     (16, 0x0019, 12, 2),
-    (16, 0x001A, 11, 2),
-    (16, 0x001B, 31, 1),
-    (16, 0x001C, 30, 1),
-    (16, 0x001D, 29, 1),
-    (16, 0x001E, 28, 1),
-    (16, 0x001F, 27, 1),
+    (16, 0x001a, 11, 2),
+    (16, 0x001b, 31, 1),
+    (16, 0x001c, 30, 1),
+    (16, 0x001d, 29, 1),
+    (16, 0x001e, 28, 1),
+    (16, 0x001f, 27, 1),
 ];
 
 /// First-level table, indexed by the next 8 bits. Covers every code of up
@@ -289,7 +289,7 @@ const fn build_fast() -> [u32; 256] {
     while i < 256 {
         let e = SHORT[i];
         t[i] = if e >> 24 == KIND_CODE {
-            ((((e >> 16) & 0x1F) + 1) << 16) | (e & 0xFFFF)
+            ((((e >> 16) & 0x1f) + 1) << 16) | (e & 0xffff)
         } else {
             0x8000_0000
         };
@@ -453,7 +453,7 @@ fn decode_body<const ALIGNED: bool>(
     pump_every: u32,
     pump: &mut impl FnMut(),
 ) -> Result<usize, DecodeError> {
-    let qscale = ((qscale as u32) & 0x3F) << 10;
+    let qscale = ((qscale as u32) & 0x3f) << 10;
     let mut bits = Bits::<ALIGNED>::new(body);
     // Past this, the reader has run more than the two look-ahead words off
     // the end of the input.
@@ -485,8 +485,8 @@ fn decode_body<const ALIGNED: bool>(
                     let used = e >> 16;
                     let sign = ((bits.buf << (used - 1)) as i32 >> 31) as u32;
                     bits.skip(used);
-                    let level = ((e & 0x3FF) ^ sign).wrapping_sub(sign) & 0x3FF;
-                    (e & 0xFC00) | level
+                    let level = ((e & 0x3ff) ^ sign).wrapping_sub(sign) & 0x3ff;
+                    (e & 0xfc00) | level
                 } else {
                     match slow_code(&mut bits) {
                         Ok(Some(hw)) => hw,
@@ -548,11 +548,11 @@ fn slow_code<const ALIGNED: bool>(bits: &mut Bits<ALIGNED>) -> Result<Option<u32
             if e2 >> 24 != KIND_CODE {
                 return Err(DecodeError::BadCode);
             }
-            bits.skip((e2 >> 16) & 0x1F);
+            bits.skip((e2 >> 16) & 0x1f);
             let negative = bits.read(1) != 0;
-            let hw = e2 & 0xFFFF;
+            let hw = e2 & 0xffff;
             Ok(Some(if negative {
-                (hw & 0xFC00) | ((0u32.wrapping_sub(hw & 0x3FF)) & 0x3FF)
+                (hw & 0xfc00) | ((0u32.wrapping_sub(hw & 0x3ff)) & 0x3ff)
             } else {
                 hw
             }))
@@ -625,7 +625,7 @@ mod tests {
             if !(1..=2).contains(&header.version) {
                 return Err(DecodeError::Version(header.version));
             }
-            let qscale = ((header.qscale as u32) & 0x3F) << 10;
+            let qscale = ((header.qscale as u32) & 0x3f) << 10;
             let mut bits = Bits::new(&frame[HEADER_BYTES..]);
             let mut n = 0usize;
             let mut mb = 0u32;
@@ -652,7 +652,7 @@ mod tests {
                                 n += 1;
                                 break;
                             }
-                            KIND_CODE => ((e >> 16) & 0x1F, e & 0xFFFF),
+                            KIND_CODE => ((e >> 16) & 0x1f, e & 0xffff),
                             KIND_ESCAPE => {
                                 bits.skip(6);
                                 let raw = bits.read(16);
@@ -673,14 +673,14 @@ mod tests {
                                 if e2 >> 24 != KIND_CODE {
                                     return Err(DecodeError::BadCode);
                                 }
-                                ((e2 >> 16) & 0x1F, e2 & 0xFFFF)
+                                ((e2 >> 16) & 0x1f, e2 & 0xffff)
                             }
                             _ => return Err(DecodeError::BadCode),
                         };
                         bits.skip(len);
                         let negative = bits.read(1) != 0;
                         let hw = if negative {
-                            (hw & 0xFC00) | ((0u32.wrapping_sub(hw & 0x3FF)) & 0x3FF)
+                            (hw & 0xfc00) | ((0u32.wrapping_sub(hw & 0x3ff)) & 0x3ff)
                         } else {
                             hw
                         };
@@ -727,7 +727,7 @@ mod tests {
     fn rewrite_matches_reference_on_random_streams() {
         // Random bodies hit every code, escape, long code, bad code, output
         // bound and overrun; small xorshift so the test needs no crate.
-        let mut x = 0x2545_F491u32;
+        let mut x = 0x2545_f491u32;
         let mut next = || {
             x ^= x << 13;
             x ^= x >> 17;
@@ -854,23 +854,23 @@ mod tests {
         }
         w.put(2, 0b10);
         for _ in 1..6 {
-            w.put(10, 0x3FE); // DC -2
+            w.put(10, 0x3fe); // DC -2
             w.put(2, 0b10);
         }
-        w.put(10, 0x1FF);
+        w.put(10, 0x1ff);
         let (frame, len) = w.frame(5);
         let (out, words) = decode(&frame[..len], 16);
         assert_eq!(out[0], (5 << 10) | 0x123);
         for (i, &(_, _, run, level)) in AC_CODES.iter().enumerate().take(20) {
             let lv = if i & 1 == 1 {
-                (-(level as i32)) as u32 & 0x3FF
+                (-(level as i32)) as u32 & 0x3ff
             } else {
                 level as u32
             };
             assert_eq!(out[1 + i] as u32, ((run as u32) << 10) | lv, "code {i}");
         }
         assert_eq!(out[21], END_OF_BLOCK);
-        assert_eq!(out[22], (5 << 10) | 0x3FE);
+        assert_eq!(out[22], (5 << 10) | 0x3fe);
         assert_eq!(words, 32);
         assert!(out[33..64].iter().all(|&h| h == END_OF_BLOCK));
     }
@@ -898,7 +898,7 @@ mod tests {
         for (k, &i) in long.iter().enumerate() {
             let (_, _, run, level) = AC_CODES[i];
             let lv = if k & 1 == 1 {
-                (-(level as i32)) as u32 & 0x3FF
+                (-(level as i32)) as u32 & 0x3ff
             } else {
                 level as u32
             };
@@ -912,7 +912,7 @@ mod tests {
     fn version_1_decodes_like_version_2() {
         let mut w = Writer::new();
         for block in 0..6u32 {
-            w.put(10, 0x1F0 + block);
+            w.put(10, 0x1f0 + block);
             let (len, code, _, _) = AC_CODES[block as usize * 7];
             w.put(len as u32, code as u32);
             w.put(1, block & 1);
@@ -939,8 +939,8 @@ mod tests {
                 let suffix = code as u32 & ((1 << suffix_bits) - 1);
                 LONG[((lz - 6) * 16 + (suffix << (4 - suffix_bits))) as usize]
             };
-            assert_eq!(e & 0xFFFF, hw, "code len {len} value {code:#x}");
-            assert_eq!((e >> 16) & 0x1F, len as u32);
+            assert_eq!(e & 0xffff, hw, "code len {len} value {code:#x}");
+            assert_eq!((e >> 16) & 0x1f, len as u32);
             seen += 1;
         }
         assert_eq!(seen, 111);

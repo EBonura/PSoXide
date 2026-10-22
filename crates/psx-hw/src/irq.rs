@@ -4,10 +4,10 @@
 
 /// Pending interrupt set. Write-to-ack: writing 0 to a bit clears it
 /// (writing 1 preserves).
-pub const I_STAT: u32 = 0x1F80_1070;
+pub const I_STAT: u32 = 0x1f80_1070;
 
 /// Interrupt enable set. Straight write.
-pub const I_MASK: u32 = 0x1F80_1074;
+pub const I_MASK: u32 = 0x1f80_1074;
 
 /// Source bit positions inside [`I_STAT`] and [`I_MASK`].
 pub mod source {

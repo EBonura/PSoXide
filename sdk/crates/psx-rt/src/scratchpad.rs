@@ -85,7 +85,7 @@ pub const STACK_OVERHEAD: usize = 20;
 
 /// The value the `scratchpad-stack-check` feature keeps in a stack region's
 /// bottom word.
-pub const CANARY: u32 = 0x5C4A_7C4D;
+pub const CANARY: u32 = 0x5c4a_7c4d;
 
 /// A byte range `start..end` of the scratchpad.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -430,7 +430,7 @@ mod tests {
     #[test]
     fn regions_report_their_bytes() {
         assert_eq!(BATCH.len(), 800);
-        assert_eq!(BATCH.addr(), BASE + 0xE0);
+        assert_eq!(BATCH.addr(), BASE + 0xe0);
         assert!(PLANES.overlaps(Stack::REGION));
         assert!(!HEADS.overlaps(PLANES));
         assert!(Region::new(0, 8).overlaps(Region::new(4, 12)));

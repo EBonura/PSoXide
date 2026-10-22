@@ -40,7 +40,7 @@ pub fn unescape(text: &str) -> String {
                 if let Ok(i) = INVALID_CHARREFS.binary_search_by_key(&num, |(k, _)| u64::from(*k)) {
                     return INVALID_CHARREFS[i].1.to_string();
                 }
-                if (0xD800..=0xDFFF).contains(&num) || num > 0x10FFFF {
+                if (0xd800..=0xdfff).contains(&num) || num > 0x10ffff {
                     return "\u{FFFD}".to_string();
                 }
                 if INVALID_CODEPOINTS.contains(&(num as u32)) {

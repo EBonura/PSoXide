@@ -12,7 +12,8 @@
 //! a compact binary encoding alongside this one -- the struct shape
 //! stays canonical.
 
-use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// Format version. Bump whenever [`InstructionRecord`] gains or removes
 /// a field. Readers should reject records with an unexpected version.
@@ -105,11 +106,11 @@ mod tests {
         cop2_data[6] = 0x8080_8080; // RGBC
         cop2_data[8] = 0x0000_1234; // IR0
         let mut cop2_ctl = [0u32; 32];
-        cop2_ctl[31] = 0x8000_F000; // FLAG
+        cop2_ctl[31] = 0x8000_f000; // FLAG
         InstructionRecord {
             tick,
-            pc: 0xBFC0_0000,
-            instr: 0x3C08_0013,
+            pc: 0xbfc0_0000,
+            instr: 0x3c08_0013,
             gprs: [0; 32],
             cop2_data,
             cop2_ctl,

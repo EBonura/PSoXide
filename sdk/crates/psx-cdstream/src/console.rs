@@ -466,7 +466,7 @@ psx_cdstream_exception_wrapper:
 const _: () = {
     let window = psx_hw::memory::io::BASE >> 16;
     assert!(psx_hw::irq::I_STAT >> 16 == window && psx_hw::irq::I_MASK >> 16 == window);
-    assert!(psx_hw::irq::I_STAT & 0xFFFF < 0x8000 && psx_hw::irq::I_MASK & 0xFFFF < 0x8000);
+    assert!(psx_hw::irq::I_STAT & 0xffff < 0x8000 && psx_hw::irq::I_MASK & 0xffff < 0x8000);
 };
 
 #[cfg(target_arch = "mips")]

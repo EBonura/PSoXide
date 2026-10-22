@@ -311,7 +311,7 @@ pub fn mul_q12_i32_wide(value: i32, q12: i32) -> i32 {
 const fn divide_digit(remainder: u32, next: u32, divisor: u32) -> (u32, u32) {
     const RADIX: u32 = 1 << 16;
     let upper = divisor >> 16;
-    let lower = divisor & 0xFFFF;
+    let lower = divisor & 0xffff;
     let mut q = remainder / upper;
     let mut r = remainder % upper;
     if q >= RADIX || q * lower > (r << 16) + next {
@@ -355,7 +355,7 @@ pub const fn div_u64_by_u32(hi: u32, lo: u32, divisor: u32) -> u32 {
     };
     let tail = lo << shift;
     let (upper, remainder) = divide_digit(top, tail >> 16, normalized);
-    let (lower, _) = divide_digit(remainder, tail & 0xFFFF, normalized);
+    let (lower, _) = divide_digit(remainder, tail & 0xffff, normalized);
     (upper << 16) | lower
 }
 

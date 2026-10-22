@@ -123,7 +123,7 @@ pub mod command {
     /// Winding of the three screen XY entries.
     pub const NCLIP: u32 = COMMAND | 0x06;
     /// Outer product of IR with the rotation matrix diagonal.
-    pub const OP: u32 = COMMAND | SF | 0x0C;
+    pub const OP: u32 = COMMAND | SF | 0x0c;
     /// Depth cue of the color in RGB.
     pub const DPCS: u32 = COMMAND | SF | 0x10;
     /// Interpolation of IR and the far color.
@@ -135,11 +135,11 @@ pub mod command {
     /// Light, color and depth cue of V0, V1 and V2.
     pub const NCDT: u32 = COMMAND | SF | 0x16;
     /// Light and color of V0.
-    pub const NCCS: u32 = COMMAND | SF | 0x1B;
+    pub const NCCS: u32 = COMMAND | SF | 0x1b;
     /// Color of the light result.
-    pub const CC: u32 = COMMAND | SF | 0x1C;
+    pub const CC: u32 = COMMAND | SF | 0x1c;
     /// Light of V0.
-    pub const NCS: u32 = COMMAND | SF | 0x1E;
+    pub const NCS: u32 = COMMAND | SF | 0x1e;
     /// Light of V0, V1 and V2.
     pub const NCT: u32 = COMMAND | SF | 0x20;
     /// Square of IR1..IR3.
@@ -149,21 +149,21 @@ pub mod command {
     /// Depth cue of the color in RGB with IR.
     pub const DCPL: u32 = COMMAND | SF | 0x29;
     /// Depth cue of RGB0, RGB1 and RGB2.
-    pub const DPCT: u32 = COMMAND | SF | 0x2A;
+    pub const DPCT: u32 = COMMAND | SF | 0x2a;
     /// Average of SZ1..SZ3 into OTZ.
-    pub const AVSZ3: u32 = COMMAND | 0x2D;
+    pub const AVSZ3: u32 = COMMAND | 0x2d;
     /// Average of SZ0..SZ3 into OTZ.
-    pub const AVSZ4: u32 = COMMAND | 0x2E;
+    pub const AVSZ4: u32 = COMMAND | 0x2e;
     /// Perspective transform of V0, V1 and V2.
     pub const RTPT: u32 = COMMAND | SF | 0x30;
     /// General-purpose interpolation.
-    pub const GPF: u32 = COMMAND | SF | 0x3D;
+    pub const GPF: u32 = COMMAND | SF | 0x3d;
     /// `GPF` without the fraction shift.
-    pub const GPF_UNSHIFTED: u32 = COMMAND | 0x3D;
+    pub const GPF_UNSHIFTED: u32 = COMMAND | 0x3d;
     /// General-purpose interpolation with accumulation.
-    pub const GPL: u32 = COMMAND | SF | 0x3E;
+    pub const GPL: u32 = COMMAND | SF | 0x3e;
     /// Light and color of V0, V1 and V2.
-    pub const NCCT: u32 = COMMAND | SF | 0x3F;
+    pub const NCCT: u32 = COMMAND | SF | 0x3f;
     /// Rotate V0 by the rotation matrix and add TR.
     pub const ROTATE_TRANSLATE_V0: u32 = super::mvmva(
         super::Matrix::Rotation,
@@ -186,37 +186,37 @@ mod tests {
     // before the builders existed.
     #[test]
     fn commands_match_the_documented_words() {
-        assert_eq!(command::RTPS, 0x4A08_0001);
-        assert_eq!(command::NCLIP, 0x4A00_0006);
-        assert_eq!(command::OP, 0x4A08_000C);
-        assert_eq!(command::DPCS, 0x4A08_0010);
-        assert_eq!(command::INTPL, 0x4A08_0011);
-        assert_eq!(command::NCDS, 0x4A08_0013);
-        assert_eq!(command::CDP, 0x4A08_0014);
-        assert_eq!(command::NCDT, 0x4A08_0016);
-        assert_eq!(command::NCCS, 0x4A08_001B);
-        assert_eq!(command::CC, 0x4A08_001C);
-        assert_eq!(command::NCS, 0x4A08_001E);
-        assert_eq!(command::NCT, 0x4A08_0020);
-        assert_eq!(command::SQR, 0x4A08_0028);
-        assert_eq!(command::SQR_UNSHIFTED, 0x4A00_0028);
-        assert_eq!(command::DCPL, 0x4A08_0029);
-        assert_eq!(command::DPCT, 0x4A08_002A);
-        assert_eq!(command::AVSZ3, 0x4A00_002D);
-        assert_eq!(command::AVSZ4, 0x4A00_002E);
-        assert_eq!(command::RTPT, 0x4A08_0030);
-        assert_eq!(command::GPF, 0x4A08_003D);
-        assert_eq!(command::GPF_UNSHIFTED, 0x4A00_003D);
-        assert_eq!(command::GPL, 0x4A08_003E);
-        assert_eq!(command::NCCT, 0x4A08_003F);
-        assert_eq!(command::ROTATE_TRANSLATE_V0, 0x4A08_0012);
-        assert_eq!(command::ROTATE_V0_FAR_COLOR, 0x4A08_4012);
+        assert_eq!(command::RTPS, 0x4a08_0001);
+        assert_eq!(command::NCLIP, 0x4a00_0006);
+        assert_eq!(command::OP, 0x4a08_000c);
+        assert_eq!(command::DPCS, 0x4a08_0010);
+        assert_eq!(command::INTPL, 0x4a08_0011);
+        assert_eq!(command::NCDS, 0x4a08_0013);
+        assert_eq!(command::CDP, 0x4a08_0014);
+        assert_eq!(command::NCDT, 0x4a08_0016);
+        assert_eq!(command::NCCS, 0x4a08_001b);
+        assert_eq!(command::CC, 0x4a08_001c);
+        assert_eq!(command::NCS, 0x4a08_001e);
+        assert_eq!(command::NCT, 0x4a08_0020);
+        assert_eq!(command::SQR, 0x4a08_0028);
+        assert_eq!(command::SQR_UNSHIFTED, 0x4a00_0028);
+        assert_eq!(command::DCPL, 0x4a08_0029);
+        assert_eq!(command::DPCT, 0x4a08_002a);
+        assert_eq!(command::AVSZ3, 0x4a00_002d);
+        assert_eq!(command::AVSZ4, 0x4a00_002e);
+        assert_eq!(command::RTPT, 0x4a08_0030);
+        assert_eq!(command::GPF, 0x4a08_003d);
+        assert_eq!(command::GPF_UNSHIFTED, 0x4a00_003d);
+        assert_eq!(command::GPL, 0x4a08_003e);
+        assert_eq!(command::NCCT, 0x4a08_003f);
+        assert_eq!(command::ROTATE_TRANSLATE_V0, 0x4a08_0012);
+        assert_eq!(command::ROTATE_V0_FAR_COLOR, 0x4a08_4012);
     }
 
     #[test]
     fn mvmva_places_each_select_in_its_field() {
         let word = mvmva(Matrix::Color, Vector::Ir, Translation::None);
-        assert_eq!(word, 0x4A00_0012 | 2 << 17 | 3 << 15 | 3 << 13);
+        assert_eq!(word, 0x4a00_0012 | 2 << 17 | 3 << 15 | 3 << 13);
         assert!(is_command(word));
     }
 
@@ -224,11 +224,11 @@ mod tests {
     fn register_moves_encode_the_documented_fields() {
         // The words the guest GTE macros and the RTPT sequence emit.
         assert_eq!(mfc2(8, 0), 0x4808_0000);
-        assert_eq!(mfc2(8, 31), 0x4808_F800);
+        assert_eq!(mfc2(8, 31), 0x4808_f800);
         assert_eq!(mtc2(8, 0), 0x4888_0000);
         assert_eq!(mtc2(9, 1), 0x4889_0800);
         assert_eq!(cfc2(8, 5), 0x4848_2800);
-        assert_eq!(ctc2(8, 5), 0x48C8_2800);
+        assert_eq!(ctc2(8, 5), 0x48c8_2800);
     }
 
     #[test]

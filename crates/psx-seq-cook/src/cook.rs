@@ -109,7 +109,7 @@ fn cook_sample(pcm: &[i16], s: &Sample, rate: u32) -> CookedSample {
         adpcm,
         blocks,
         rate: rate as u16,
-        loop_block: c.loop_block.map_or(0xFFFF, |b| b as u16),
+        loop_block: c.loop_block.map_or(0xffff, |b| b as u16),
         end_samples: s.end_samples,
         stretch_q16: (stretch * 65536.0).round() as u32,
     }
@@ -129,7 +129,7 @@ struct EnvPool {
 impl EnvPool {
     fn add(&mut self, env: &[EnvPoint]) -> u16 {
         if env.is_empty() {
-            return 0xFFFF;
+            return 0xffff;
         }
         if let Some((_, at)) = self.seen.iter().find(|(e, _)| e == env) {
             return *at;
@@ -221,7 +221,7 @@ pub fn cook_song(data: &AudioData, seq_id: usize, opts: &Options) -> Result<Cook
                 s.table_off,
                 pcm.len(),
                 cs.blocks,
-                if cs.loop_block == 0xFFFF {
+                if cs.loop_block == 0xffff {
                     String::new()
                 } else {
                     format!(", loop at block {}", cs.loop_block)
@@ -271,7 +271,7 @@ pub fn cook_song(data: &AudioData, seq_id: usize, opts: &Options) -> Result<Cook
                         le32(&mut b, tuning);
                     }
                     _ => {
-                        le16(&mut b, 0xFFFF);
+                        le16(&mut b, 0xffff);
                         le16(&mut b, 0);
                         le32(&mut b, 0);
                     }
@@ -284,7 +284,7 @@ pub fn cook_song(data: &AudioData, seq_id: usize, opts: &Options) -> Result<Cook
             && sc
                 .ops
                 .keys()
-                .any(|&(l, o)| l == crate::n64::aseq::Level::Layer && o == 0xC6);
+                .any(|&(l, o)| l == crate::n64::aseq::Level::Layer && o == 0xc6);
         for (i, d) in f.drums.iter().enumerate() {
             let used =
                 opts.all_instruments || drums_unknown || want_drum.contains_key(&(f.id, i as u8));

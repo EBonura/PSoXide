@@ -233,8 +233,8 @@ fn churn(seed: u64, config: Config<3>, seen: &mut Seen) {
 fn random_traffic_never_breaks_the_invariants() {
     let mut seen = Seen::default();
     for seed in 1..=if cfg!(miri) { 1 } else { 24 } {
-        churn(seed * 0x9E37_79B9, config(), &mut seen);
-        churn(seed * 0x85EB_CA6B, wide_config(), &mut seen);
+        churn(seed * 0x9e37_79b9, config(), &mut seen);
+        churn(seed * 0x85eb_ca6b, wide_config(), &mut seen);
     }
     if !cfg!(miri) {
         // The run really fought over room, backed off, cancelled and moved.
@@ -255,7 +255,7 @@ fn random_traffic_with_a_tight_cpu_budget_still_never_breaks_them() {
     tight.step_budget = 12;
     let mut seen = Seen::default();
     for seed in 1..=if cfg!(miri) { 1 } else { 10 } {
-        churn(seed * 0xC2B2_AE35, tight, &mut seen);
+        churn(seed * 0xc2b2_ae35, tight, &mut seen);
     }
     if !cfg!(miri) {
         assert!(seen.deferred > 0, "{seen:?}");

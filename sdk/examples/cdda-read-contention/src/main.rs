@@ -34,8 +34,8 @@ use psx_hw::cd::reg::{
 };
 
 // Uncached (KSEG1) RAM mirror so writes land in RAM immediately.
-const RESULT_BASE: u32 = 0xA010_0000;
-const DONE_MAGIC: u32 = 0x0C0D_0001;
+const RESULT_BASE: u32 = 0xa010_0000;
+const DONE_MAGIC: u32 = 0x0c0d_0001;
 
 const PLAY_TRACK: u8 = 2;
 const DATA_LBA: u32 = 16;
@@ -64,14 +64,14 @@ unsafe fn run() {
     psx_io::irq::set_mask(1 << psx_hw::irq::source::VBLANK);
     cd_set_index(1);
     write_u8(CD_PARAM, 0x00); // controller IRQ enable = 0 (poll only)
-    write_u8(CD_IRQ, 0x1F); // ack any pending
+    write_u8(CD_IRQ, 0x1f); // ack any pending
     cd_set_index(0);
 
     write_result(0x14, 1);
 
     // 1) Menu-style CD-DA playback.
-    let _ = cd_command(0x0E, &[0x81]); // SetMode: CDDA | DOUBLE_SPEED
-    let _ = cd_command(0x0C, &[]); // Demute
+    let _ = cd_command(0x0e, &[0x81]); // SetMode: CDDA | DOUBLE_SPEED
+    let _ = cd_command(0x0c, &[]); // Demute
     let _ = cd_command(0x03, &[bcd(PLAY_TRACK)]); // Play track 2
 
     // Let the drive settle into playback, then sample the stat byte.
@@ -81,7 +81,7 @@ unsafe fn run() {
     write_result(0x14, 2);
 
     // 2) Engine read path WHILE CD-DA plays, with no Pause/Stop first.
-    let _ = cd_command(0x0E, &[0x80]); // SetMode: DOUBLE_SPEED only (drop CDDA)
+    let _ = cd_command(0x0e, &[0x80]); // SetMode: DOUBLE_SPEED only (drop CDDA)
     let (m, s, f) = lba_to_bcd_msf(DATA_LBA);
     let _ = cd_command(0x02, &[m, s, f]); // SetLoc(data sector)
     write_result(0x14, 3);
@@ -118,7 +118,7 @@ unsafe fn run() {
     }
 
     write_result(0x04, irq_seen);
-    write_result(0x0C, last_stat as u32);
+    write_result(0x0c, last_stat as u32);
     write_result(0x10, data_ready);
     write_result(0x14, 4);
 
@@ -161,7 +161,7 @@ unsafe fn poll_irq(limit: u32) -> u8 {
     let mut i = 0u32;
     loop {
         cd_set_index(1);
-        let flag = read_u8(CD_IRQ) & 0x1F;
+        let flag = read_u8(CD_IRQ) & 0x1f;
         cd_set_index(0);
         if flag != 0 {
             return flag;
@@ -193,12 +193,12 @@ unsafe fn drain_responses() {
 
 unsafe fn cd_ack(bits: u8) {
     cd_set_index(1);
-    write_u8(CD_IRQ, bits & 0x1F);
+    write_u8(CD_IRQ, bits & 0x1f);
     cd_set_index(0);
 }
 
 unsafe fn cd_ack_all() {
-    cd_ack(0x1F);
+    cd_ack(0x1f);
 }
 
 unsafe fn cd_status() -> u8 {

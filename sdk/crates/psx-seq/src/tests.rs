@@ -40,15 +40,15 @@ fn test_bank() -> Vec<u8> {
     le32(&mut b, off_drum);
     // instruments (32 B each): sample, tuning, env
     for (sample, tuning, env) in [
-        (0u16, 65536u32, 0xFFFFu16),
-        (1, 131072, 0xFFFF),
+        (0u16, 65536u32, 0xffffu16),
+        (1, 131072, 0xffff),
         (0, 65536, 0),
     ] {
         b.extend_from_slice(&[0, 127, 200, 1]);
         le16(&mut b, env);
         le16(&mut b, 0);
         for k in 0..3 {
-            le16(&mut b, if k == 1 { sample } else { 0xFFFF });
+            le16(&mut b, if k == 1 { sample } else { 0xffff });
             le16(&mut b, 0);
             le32(&mut b, if k == 1 { tuning } else { 0 });
         }
@@ -57,7 +57,7 @@ fn test_bank() -> Vec<u8> {
     for key in 0..6 {
         if key == 5 {
             b.extend_from_slice(&[0, 0]); // decay, pan 0
-            le16(&mut b, 0xFFFF);
+            le16(&mut b, 0xffff);
             le16(&mut b, 0); // sample
             le16(&mut b, 1); // present
             le32(&mut b, 65536);
@@ -77,7 +77,7 @@ fn test_bank() -> Vec<u8> {
     le32(&mut b, 112);
     le16(&mut b, 4);
     le16(&mut b, 32000);
-    le16(&mut b, 0xFFFF);
+    le16(&mut b, 0xffff);
     le16(&mut b, 0);
     // envelope words (big endian): ramp to full in 24 units, then hang
     b.extend_from_slice(&24i16.to_be_bytes());
@@ -114,9 +114,9 @@ fn layout(seq: &[u8], chan: &[u8], layer: &[u8]) -> Vec<u8> {
     out.extend_from_slice(layer);
     let mut i = 0;
     while i + 1 < out.len() {
-        if out[i] == 0xCC && out[i + 1] == 0xCC {
+        if out[i] == 0xcc && out[i + 1] == 0xcc {
             out[i..i + 2].copy_from_slice(&ch_off.to_be_bytes());
-        } else if out[i] == 0xDD && out[i + 1] == 0xDD {
+        } else if out[i] == 0xdd && out[i + 1] == 0xdd {
             out[i..i + 2].copy_from_slice(&ly_off.to_be_bytes());
         }
         i += 1;
@@ -150,23 +150,23 @@ fn run<const P: usize, const N: usize>(
 
 /// Sequence: one channel (0), tempo 120 BPM, volume full, then waits.
 const SEQ_HEAD: [u8; 10] = [
-    0xD7, 0x00, 0x01, // initchan ch0
-    0x90, 0xCC, 0xCC, // ldchan 0
-    0xDD, 120, // tempo 120
-    0xDB, 127, // vol 127
+    0xd7, 0x00, 0x01, // initchan ch0
+    0x90, 0xcc, 0xcc, // ldchan 0
+    0xdd, 120, // tempo 120
+    0xdb, 127, // vol 127
 ];
 
 fn one_note_song(layer: &[u8]) -> Vec<u8> {
     let mut seq = SEQ_HEAD.to_vec();
-    seq.extend_from_slice(&[0xFD, 0x7F, 0xFF]); // delay 127, end
+    seq.extend_from_slice(&[0xfd, 0x7f, 0xff]); // delay 127, end
     let chan = [
-        0xC1, 0x00, // instr 0
-        0xC4, // large notes
-        0xDF, 127, // vol 127
-        0xDD, 64, // pan centre
-        0x88, 0xDD, 0xDD, // ldlayer 0
-        0xFD, 0x7F, // delay 127
-        0xFF,
+        0xc1, 0x00, // instr 0
+        0xc4, // large notes
+        0xdf, 127, // vol 127
+        0xdd, 64, // pan centre
+        0x88, 0xdd, 0xdd, // ldlayer 0
+        0xfd, 0x7f, // delay 127
+        0xff,
     ];
     layout(&seq, &chan, layer)
 }
@@ -174,7 +174,7 @@ fn one_note_song(layer: &[u8]) -> Vec<u8> {
 #[test]
 fn a_note_keys_on_with_the_instruments_pitch() {
     let mut bank = test_bank();
-    let mut code = song(&one_note_song(&[0x27, 0x30, 100, 0x00, 0xFF]));
+    let mut code = song(&one_note_song(&[0x27, 0x30, 100, 0x00, 0xff]));
     let mut hw = Recorder::<512>::new();
     let mut seq: Sequencer<'_, 1, 4> = Sequencer::new(0b1111);
     seq.set_bank(Bank::parse(&bank).unwrap(), 0x2000);
@@ -215,7 +215,7 @@ fn a_note_keys_on_with_the_instruments_pitch() {
 #[test]
 fn a_one_shot_instrument_uses_its_tuning_and_is_not_looped() {
     let bank = test_bank();
-    let mut code = song(&one_note_song(&[0xC6, 0x01, 0x27, 0x30, 100, 0x00, 0xFF]));
+    let mut code = song(&one_note_song(&[0xc6, 0x01, 0x27, 0x30, 100, 0x00, 0xff]));
     let mut hw = Recorder::<512>::new();
     let mut seq: Sequencer<'_, 1, 4> = Sequencer::new(0b1111);
     seq.set_bank(Bank::parse(&bank).unwrap(), 0);
@@ -249,7 +249,7 @@ fn notes_follow_the_tempo() {
     // half a second: 90 updates at 180 Hz.
     let bank = test_bank();
     let mut code = song(&one_note_song(&[
-        0x27, 0x30, 100, 0x00, 0x29, 0x30, 100, 0x00, 0xFF,
+        0x27, 0x30, 100, 0x00, 0x29, 0x30, 100, 0x00, 0xff,
     ]));
     let mut hw = Recorder::<512>::new();
     let mut seq: Sequencer<'_, 1, 4> = Sequencer::new(0b1111);
@@ -265,7 +265,7 @@ fn notes_follow_the_tempo() {
 fn a_note_gate_releases_it_before_the_next_note() {
     // gate 128 of 256: the note decays halfway through its 48 ticks.
     let bank = test_bank();
-    let mut code = song(&one_note_song(&[0x27, 0x30, 100, 0x80, 0xFF]));
+    let mut code = song(&one_note_song(&[0x27, 0x30, 100, 0x80, 0xff]));
     let mut hw = Recorder::<512>::new();
     let mut seq: Sequencer<'_, 1, 4> = Sequencer::new(0b1111);
     seq.set_bank(Bank::parse(&bank).unwrap(), 0);
@@ -280,18 +280,18 @@ fn a_note_gate_releases_it_before_the_next_note() {
 fn an_io_port_selects_the_branch() {
     // The sequence waits for port 0 to become non-negative, then ldchan.
     let bank = test_bank();
-    let mut seq_code = vec![0xD7, 0x00, 0x01, 0xDD, 120, 0xDB, 127];
+    let mut seq_code = vec![0xd7, 0x00, 0x01, 0xdd, 120, 0xdb, 127];
     // loop: ldio 0 ; bltz loop (value<0 means unset) ; ldchan ; delay ; end
     let loop_at = seq_code.len() as u16;
     seq_code.push(0x80); // ldio 0
-    seq_code.push(0xFE); // delay 1
-    seq_code.push(0xF9); // bltz
+    seq_code.push(0xfe); // delay 1
+    seq_code.push(0xf9); // bltz
     seq_code.extend_from_slice(&loop_at.to_be_bytes());
-    seq_code.extend_from_slice(&[0x90, 0xCC, 0xCC, 0xFD, 0x7F, 0xFF]);
+    seq_code.extend_from_slice(&[0x90, 0xcc, 0xcc, 0xfd, 0x7f, 0xff]);
     let chan = [
-        0xC1, 0x00, 0xC4, 0xDF, 127, 0x88, 0xDD, 0xDD, 0xFD, 0x7F, 0xFF,
+        0xc1, 0x00, 0xc4, 0xdf, 127, 0x88, 0xdd, 0xdd, 0xfd, 0x7f, 0xff,
     ];
-    let code = layout(&seq_code, &chan, &[0x27, 0x30, 100, 0x00, 0xFF]);
+    let code = layout(&seq_code, &chan, &[0x27, 0x30, 100, 0x00, 0xff]);
     let mut code = song(&code);
     let mut hw = Recorder::<512>::new();
     let mut seq: Sequencer<'_, 1, 4> = Sequencer::new(0b1111);
@@ -308,7 +308,7 @@ fn an_io_port_selects_the_branch() {
 fn the_song_can_write_an_io_port_back() {
     let bank = test_bank();
     // ldi 5 ; stio 3 ; end
-    let seq_code = [0xDD, 120, 0xCC, 5, 0x73, 0xFD, 0x10, 0xFF];
+    let seq_code = [0xdd, 120, 0xcc, 5, 0x73, 0xfd, 0x10, 0xff];
     let mut code = song(&seq_code);
     let mut hw = Recorder::<512>::new();
     let mut seq: Sequencer<'_, 1, 4> = Sequencer::new(0b1111);
@@ -322,7 +322,7 @@ fn the_song_can_write_an_io_port_back() {
 fn a_loop_repeats_its_body() {
     // layer: loop 3 { note } end   (each note 12 ticks)
     let bank = test_bank();
-    let layer = [0xF8, 3, 0x27, 12, 100, 0x00, 0xF7, 0xFF];
+    let layer = [0xf8, 3, 0x27, 12, 100, 0x00, 0xf7, 0xff];
     let mut code = song(&one_note_song(&layer));
     let mut hw = Recorder::<512>::new();
     let mut seq: Sequencer<'_, 1, 4> = Sequencer::new(0b1111);
@@ -338,14 +338,14 @@ fn a_higher_priority_note_takes_a_busy_voice() {
     // starts a priority-9 note on top of it.
     let bank = test_bank();
     let seq_code = [
-        0xD7, 0x00, 0x03, 0xDD, 120, 0xDB, 127, 0x90, 0xCC, 0xCC, 0x91, 0xEE, 0xEE, 0xFD, 0x7F,
-        0xFF,
+        0xd7, 0x00, 0x03, 0xdd, 120, 0xdb, 127, 0x90, 0xcc, 0xcc, 0x91, 0xee, 0xee, 0xfd, 0x7f,
+        0xff,
     ];
     let low = [
-        0xC1, 0, 0xC4, 0xDF, 127, 0xE9, 0x02, 0x88, 0xDD, 0xDD, 0xFD, 0x7F, 0xFF,
+        0xc1, 0, 0xc4, 0xdf, 127, 0xe9, 0x02, 0x88, 0xdd, 0xdd, 0xfd, 0x7f, 0xff,
     ];
     let high_ch = [
-        0xC1, 0, 0xC4, 0xDF, 127, 0xE9, 0x09, 0xFD, 0x20, 0x88, 0xDD, 0xDD, 0xFD, 0x7F, 0xFF,
+        0xc1, 0, 0xc4, 0xdf, 127, 0xe9, 0x09, 0xfd, 0x20, 0x88, 0xdd, 0xdd, 0xfd, 0x7f, 0xff,
     ];
     // layout: seq, low, high, layer
     let mut out = Vec::new();
@@ -355,8 +355,8 @@ fn a_higher_priority_note_takes_a_busy_voice() {
     out.extend_from_slice(&seq_code);
     out.extend_from_slice(&low);
     out.extend_from_slice(&high_ch);
-    out.extend_from_slice(&[0x27, 0x60, 100, 0x00, 0xFF]);
-    for (hole, v) in [(0xCCu8, lo_off), (0xEE, hi_off), (0xDD, ly_off)] {
+    out.extend_from_slice(&[0x27, 0x60, 100, 0x00, 0xff]);
+    for (hole, v) in [(0xccu8, lo_off), (0xee, hi_off), (0xdd, ly_off)] {
         let mut i = 0;
         while i + 1 < out.len() {
             if out[i] == hole && out[i + 1] == hole {
@@ -379,7 +379,7 @@ fn a_higher_priority_note_takes_a_busy_voice() {
 #[test]
 fn pump_runs_due_updates_and_caps_a_stall() {
     let bank = test_bank();
-    let mut code = song(&one_note_song(&[0x27, 0x30, 100, 0x00, 0xFF]));
+    let mut code = song(&one_note_song(&[0x27, 0x30, 100, 0x00, 0xff]));
     let mut hw = Recorder::<512>::new();
     let mut seq: Sequencer<'_, 1, 4> = Sequencer::new(0b1111);
     seq.set_bank(Bank::parse(&bank).unwrap(), 0);
@@ -392,7 +392,7 @@ fn pump_runs_due_updates_and_caps_a_stall() {
 
 #[test]
 fn starting_without_a_bank_is_refused() {
-    let mut code = song(&[0xFF]);
+    let mut code = song(&[0xff]);
     let mut seq: Sequencer<'_, 1, 4> = Sequencer::new(0b1111);
     assert_eq!(seq.start(0, &mut code), Err(StartError::NoBank));
 }
@@ -424,10 +424,10 @@ fn pitches(hw: &Recorder<512>) -> Vec<u16> {
 /// load, and one layer `layer`.
 fn song_with_channel(chan_prefix: &[u8], layer: &[u8]) -> Vec<u8> {
     let mut seq = SEQ_HEAD.to_vec();
-    seq.extend_from_slice(&[0xFD, 0x7F, 0xFF]);
-    let mut chan = vec![0xC4];
+    seq.extend_from_slice(&[0xfd, 0x7f, 0xff]);
+    let mut chan = vec![0xc4];
     chan.extend_from_slice(chan_prefix);
-    chan.extend_from_slice(&[0x88, 0xDD, 0xDD, 0xFD, 0x7F, 0xFF]);
+    chan.extend_from_slice(&[0x88, 0xdd, 0xdd, 0xfd, 0x7f, 0xff]);
     song(&layout(&seq, &chan, layer))
 }
 
@@ -449,12 +449,12 @@ fn channel_volume_is_squared() {
     // Full volume against half volume: the original squares the channel
     // volume, so half the setting is a quarter of the level.
     let mut full = song_with_channel(
-        &[0xC1, 0, 0xDF, 127, 0xDD, 64],
-        &[0x27, 0x30, 127, 0x00, 0xFF],
+        &[0xc1, 0, 0xdf, 127, 0xdd, 64],
+        &[0x27, 0x30, 127, 0x00, 0xff],
     );
     let mut half = song_with_channel(
-        &[0xC1, 0, 0xDF, 64, 0xDD, 64],
-        &[0x27, 0x30, 127, 0x00, 0xFF],
+        &[0xc1, 0, 0xdf, 64, 0xdd, 64],
+        &[0x27, 0x30, 127, 0x00, 0xff],
     );
     let (a, _) = play(&mut full, 0b1111, 40);
     let (b, _) = play(&mut half, 0b1111, 40);
@@ -470,12 +470,12 @@ fn channel_volume_is_squared() {
 #[test]
 fn pan_moves_the_level_between_the_ears() {
     let mut left = song_with_channel(
-        &[0xC1, 0, 0xDF, 127, 0xDD, 0],
-        &[0x27, 0x30, 127, 0x00, 0xFF],
+        &[0xc1, 0, 0xdf, 127, 0xdd, 0],
+        &[0x27, 0x30, 127, 0x00, 0xff],
     );
     let mut right = song_with_channel(
-        &[0xC1, 0, 0xDF, 127, 0xDD, 127],
-        &[0x27, 0x30, 127, 0x00, 0xFF],
+        &[0xc1, 0, 0xdf, 127, 0xdd, 127],
+        &[0x27, 0x30, 127, 0x00, 0xff],
     );
     let (a, _) = play(&mut left, 0b1111, 20);
     let (b, _) = play(&mut right, 0b1111, 20);
@@ -491,8 +491,8 @@ fn an_envelope_ramps_in_the_squared_domain() {
     // squared level is about a quarter of the final level... a linear ramp in
     // the squared domain, so the level at half time is half the final level.
     let mut code = song_with_channel(
-        &[0xC1, 2, 0xDF, 127, 0xDD, 64],
-        &[0x27, 0x60, 127, 0x00, 0xFF],
+        &[0xc1, 2, 0xdf, 127, 0xdd, 64],
+        &[0x27, 0x60, 127, 0x00, 0xff],
     );
     let (hw, _) = play(&mut code, 0b1111, 60);
     let v: Vec<i16> = volumes(&hw).iter().map(|x| x.0).collect();
@@ -509,8 +509,8 @@ fn an_envelope_ramps_in_the_squared_domain() {
 fn vibrato_swings_the_pitch_around_the_note() {
     // D8 vibrato depth 60, D7 rate 30
     let mut code = song_with_channel(
-        &[0xC1, 0, 0xDF, 127, 0xD8, 60, 0xD7, 30],
-        &[0x27, 0x60, 127, 0x00, 0xFF],
+        &[0xc1, 0, 0xdf, 127, 0xd8, 60, 0xd7, 30],
+        &[0x27, 0x60, 127, 0x00, 0xff],
     );
     let (hw, _) = play(&mut code, 0b1111, 120);
     let p = pitches(&hw);
@@ -525,8 +525,8 @@ fn vibrato_swings_the_pitch_around_the_note() {
 #[test]
 fn channel_transpose_shifts_the_pitch_by_semitones() {
     let mut code = song_with_channel(
-        &[0xC1, 0, 0xDF, 127, 0xDB, 12],
-        &[0x27, 0x30, 127, 0x00, 0xFF],
+        &[0xc1, 0, 0xdf, 127, 0xdb, 12],
+        &[0x27, 0x30, 127, 0x00, 0xff],
     );
     let (hw, _) = play(&mut code, 0b1111, 10);
     assert_eq!(pitches(&hw)[0], 8192, "an octave up doubles the pitch");
@@ -537,12 +537,12 @@ fn a_bend_scales_the_pitch() {
     // D3 bend by +127 is the top of the one-octave range: pitch doubles. A
     // bend of 0 leaves it alone.
     let mut up = song_with_channel(
-        &[0xC1, 0, 0xDF, 127, 0xD3, 127],
-        &[0x27, 0x30, 127, 0x00, 0xFF],
+        &[0xc1, 0, 0xdf, 127, 0xd3, 127],
+        &[0x27, 0x30, 127, 0x00, 0xff],
     );
     let mut flat = song_with_channel(
-        &[0xC1, 0, 0xDF, 127, 0xD3, 0],
-        &[0x27, 0x30, 127, 0x00, 0xFF],
+        &[0xc1, 0, 0xdf, 127, 0xd3, 0],
+        &[0x27, 0x30, 127, 0x00, 0xff],
     );
     let (hw, _) = play(&mut up, 0b1111, 10);
     assert_eq!(pitches(&hw)[0], 8192);
@@ -553,8 +553,8 @@ fn a_bend_scales_the_pitch() {
 #[test]
 fn legato_notes_share_a_voice_and_only_change_pitch() {
     // C4 legato on, two notes
-    let layer = [0xC4, 0x27, 0x18, 100, 0x00, 0x29, 0x18, 100, 0x00, 0xFF];
-    let mut code = song_with_channel(&[0xC1, 0, 0xDF, 127], &layer);
+    let layer = [0xc4, 0x27, 0x18, 100, 0x00, 0x29, 0x18, 100, 0x00, 0xff];
+    let mut code = song_with_channel(&[0xc1, 0, 0xdf, 127], &layer);
     let (hw, at) = play(&mut code, 0b1111, 100);
     assert_eq!(
         at.len(),
@@ -572,8 +572,8 @@ fn legato_notes_share_a_voice_and_only_change_pitch() {
 #[test]
 fn a_drum_plays_its_own_sample_and_pan() {
     // layer instrument 0x7F selects the drum kit; key 5
-    let layer = [0xC6, 0x7F, 0x05, 0x30, 127, 0x00, 0xFF];
-    let mut code = song_with_channel(&[0xC1, 0, 0xDF, 127, 0xDC, 0], &layer);
+    let layer = [0xc6, 0x7f, 0x05, 0x30, 127, 0x00, 0xff];
+    let mut code = song_with_channel(&[0xc1, 0, 0xdf, 127, 0xdc, 0], &layer);
     let (hw, at) = play(&mut code, 0b1111, 20);
     assert_eq!(at.len(), 1);
     let (l, r) = *volumes(&hw).last().unwrap();
@@ -586,7 +586,7 @@ fn a_drum_plays_its_own_sample_and_pan() {
 #[test]
 fn a_channel_mute_blocks_new_notes() {
     let bank = test_bank();
-    let layer = [0x27, 0x30, 127, 0x00, 0xFF];
+    let layer = [0x27, 0x30, 127, 0x00, 0xff];
     let mut code = song(&one_note_song(&layer));
     let mut hw = Recorder::<512>::new();
     let mut seq: Sequencer<'_, 1, 4> = Sequencer::new(0b1111);
@@ -603,7 +603,7 @@ fn a_channel_mute_blocks_new_notes() {
 #[test]
 fn stopping_with_a_fade_silences_every_voice() {
     let bank = test_bank();
-    let mut code = song(&one_note_song(&[0x27, 0x7F, 127, 0x00, 0xFF]));
+    let mut code = song(&one_note_song(&[0x27, 0x7f, 127, 0x00, 0xff]));
     let mut hw = Recorder::<512>::new();
     let mut seq: Sequencer<'_, 1, 4> = Sequencer::new(0b1111);
     seq.set_bank(Bank::parse(&bank).unwrap(), 0);
@@ -621,11 +621,11 @@ fn stopping_with_a_fade_silences_every_voice() {
 fn unsupported_opcodes_are_counted_and_skipped() {
     // runseq (C4 a b) in the sequence script, then the usual song
     let mut seq_code = vec![
-        0xD7, 0x00, 0x01, 0x90, 0xCC, 0xCC, 0xDD, 120, 0xDB, 127, 0xC4, 0x01, 0x02,
+        0xd7, 0x00, 0x01, 0x90, 0xcc, 0xcc, 0xdd, 120, 0xdb, 127, 0xc4, 0x01, 0x02,
     ];
-    seq_code.extend_from_slice(&[0xFD, 0x7F, 0xFF]);
-    let chan = [0xC1, 0, 0xC4, 0xDF, 127, 0x88, 0xDD, 0xDD, 0xFD, 0x7F, 0xFF];
-    let mut code = song(&layout(&seq_code, &chan, &[0x27, 0x30, 100, 0x00, 0xFF]));
+    seq_code.extend_from_slice(&[0xfd, 0x7f, 0xff]);
+    let chan = [0xc1, 0, 0xc4, 0xdf, 127, 0x88, 0xdd, 0xdd, 0xfd, 0x7f, 0xff];
+    let mut code = song(&layout(&seq_code, &chan, &[0x27, 0x30, 100, 0x00, 0xff]));
     let bank = test_bank();
     let mut hw = Recorder::<512>::new();
     let mut seq: Sequencer<'_, 1, 4> = Sequencer::new(0b1111);
@@ -642,9 +642,9 @@ fn a_song_that_patches_itself_plays_the_patched_note() {
     // The layer's note byte starts as 0x27 (pitch 4096) and becomes 12.
     let mut seq = SEQ_HEAD.to_vec();
     // ldi 12 ; stseq 0, <layer offset = 0xDDDD> ; delay ; end
-    seq.extend_from_slice(&[0xCC, 12, 0xC7, 0x00, 0xDD, 0xDD, 0xFD, 0x7F, 0xFF]);
-    let chan = [0xC1, 0, 0xC4, 0xDF, 127, 0x88, 0xDD, 0xDD, 0xFD, 0x7F, 0xFF];
-    let mut code = song(&layout(&seq, &chan, &[0x27, 0x30, 100, 0x00, 0xFF]));
+    seq.extend_from_slice(&[0xcc, 12, 0xc7, 0x00, 0xdd, 0xdd, 0xfd, 0x7f, 0xff]);
+    let chan = [0xc1, 0, 0xc4, 0xdf, 127, 0x88, 0xdd, 0xdd, 0xfd, 0x7f, 0xff];
+    let mut code = song(&layout(&seq, &chan, &[0x27, 0x30, 100, 0x00, 0xff]));
     let (hw, _) = play(&mut code, 0b1111, 12);
     let p = pitches(&hw)[0];
     // key 12 is 27 semitones below the unison key: 4096 * 2^(-27/12)
@@ -701,7 +701,7 @@ fn live_vibrato_wobbles_the_pitch() {
 #[test]
 fn a_live_note_sounds_over_a_song_on_its_own_voice() {
     let bank = test_bank();
-    let mut code = song(&one_note_song(&[0x27, 0x7F, 100, 0x00, 0xFF]));
+    let mut code = song(&one_note_song(&[0x27, 0x7f, 100, 0x00, 0xff]));
     let mut seq = live_bank_seq::<4>(&bank, 0b1111);
     let mut hw = Recorder::<512>::new();
     seq.start(0, &mut code).unwrap();
@@ -717,7 +717,7 @@ fn a_live_note_sounds_over_a_song_on_its_own_voice() {
 fn a_live_note_of_high_priority_takes_a_busy_voice() {
     // one voice, a song note of priority 3 already sounding
     let bank = test_bank();
-    let mut code = song(&one_note_song(&[0x27, 0x7F, 100, 0x00, 0xFF]));
+    let mut code = song(&one_note_song(&[0x27, 0x7f, 100, 0x00, 0xff]));
     let mut seq = live_bank_seq::<1>(&bank, 0b1);
     let mut hw = Recorder::<512>::new();
     seq.start(0, &mut code).unwrap();

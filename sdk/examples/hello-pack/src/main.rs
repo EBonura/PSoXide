@@ -24,7 +24,8 @@
 extern crate psx_rt;
 
 use core::ptr::addr_of_mut;
-use psx_font::{fonts::BASIC, FontAtlas};
+use psx_font::fonts::BASIC;
+use psx_font::FontAtlas;
 use psx_gpu::display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode};
 use psx_gpu::Gpu;
 use psx_pack::cd::{
@@ -53,16 +54,16 @@ const COMP_LEN: usize = 5000; // raw length; stored HLZC-compressed
 fn raw_byte(k: usize) -> u8 {
     let mut h = (k as u32).wrapping_add(RAW_ID.wrapping_mul(2_654_435_761));
     h ^= h >> 16;
-    h = h.wrapping_mul(0x85EB_CA6B);
+    h = h.wrapping_mul(0x85eb_ca6b);
     h ^= h >> 13;
-    h = h.wrapping_mul(0xC2B2_AE35);
+    h = h.wrapping_mul(0xc2b2_ae35);
     h ^= h >> 16;
     h as u8
 }
 
 /// Compressible pattern for chunk 85 (64-byte runs).
 fn comp_byte(k: usize) -> u8 {
-    (((k >> 6) as u32 + COMP_ID) & 0xFF) as u8
+    (((k >> 6) as u32 + COMP_ID) & 0xff) as u8
 }
 
 // The reader owns a one-sector bounce buffer and dst must hold the biggest
@@ -204,7 +205,7 @@ fn run(rd: &mut SectorReader) -> Report {
     }
 
     // A chunk id the pack does not contain must miss cleanly.
-    let absent = find_entry(rd, WORLD_PACK_DEFAULT_LBA, 0xDEAD_BEEF, scratch).is_none();
+    let absent = find_entry(rd, WORLD_PACK_DEFAULT_LBA, 0xdead_beef, scratch).is_none();
     // Every load above ran under the reader's VBlank-only mask; stop() put the
     // one we set back. Read it before anything else runs: TTY output goes
     // through the BIOS, which the emulator's HLE leaves with I_MASK rewritten.

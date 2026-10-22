@@ -223,7 +223,7 @@ impl Curve {
     /// ```
     pub const fn wipeout() -> Self {
         Curve::Ramp {
-            peak: 0x2FFF,
+            peak: 0x2fff,
             start: 0,
             slope: 1,
             shift: 0,
@@ -239,7 +239,7 @@ impl Curve {
     /// ```
     pub const fn wipeout_crowd() -> Self {
         Curve::Ramp {
-            peak: 0x2FFF,
+            peak: 0x2fff,
             start: 0,
             slope: 4,
             shift: 0,
@@ -829,7 +829,7 @@ mod tests {
                 &ls,
                 ListenerRule::Loudest,
                 &Emitter::new(far),
-                &Curve::linear_clip(0x3FFF, 20000),
+                &Curve::linear_clip(0x3fff, 20000),
             );
             // Whatever the answer, it is a valid, finite one.
             if let Some(g) = g {
@@ -848,10 +848,10 @@ mod tests {
         for d in [0, 1, 500, 1144, 5000, 12287, 12288, 30000] {
             assert_eq!(
                 one_shot.level(d),
-                (0x2FFF - d).max(0) as i16,
+                (0x2fff - d).max(0) as i16,
                 "one-shot {d}"
             );
-            assert_eq!(crowd.level(d), (0x2FFF - 4 * d).max(0) as i16, "crowd {d}");
+            assert_eq!(crowd.level(d), (0x2fff - 4 * d).max(0) as i16, "crowd {d}");
         }
     }
 
@@ -862,7 +862,7 @@ mod tests {
             (Attn::Idle, 500.0),
             (Attn::Static, 1000.0 / 3.0),
         ] {
-            let c = Curve::quake(attn, 0x3FFF);
+            let c = Curve::quake(attn, 0x3fff);
             for d in (0..1500).step_by(7) {
                 let scale = (1.0 - d as f64 / clip).max(0.0);
                 let want = 16383.0 * scale;
@@ -872,7 +872,7 @@ mod tests {
                     "{attn:?} at {d}: {got} vs {want}"
                 );
             }
-            assert_eq!(c.level(0), 0x3FFF);
+            assert_eq!(c.level(0), 0x3fff);
             assert_eq!(c.level(clip as i32 + 2), 0);
         }
     }
@@ -1015,7 +1015,7 @@ mod tests {
     fn the_sum_law_is_wipeouts_retail_split_for_every_level_and_bearing() {
         // WipEout `panned`: delta = v * a >> 11, left v + delta, right v - delta,
         // with a the bearing (positive to the left). Here pan = -4a.
-        for v in (0..=0x2FFFi32).step_by(37) {
+        for v in (0..=0x2fffi32).step_by(37) {
             for a in -1024..=1024i32 {
                 let delta = v.wrapping_mul(a) >> 11;
                 let want = (v + delta, v - delta);
@@ -1029,7 +1029,7 @@ mod tests {
         // audio_placement_tests.rs: a sound at [4096, 0, 8192] from the origin is
         // magnitude 1144 in the game's units, bearing -302, and places at
         // (2374, 3195) after the sample-level scale 8190 >> 15.
-        let v = 0x2FFF - 1144;
+        let v = 0x2fff - 1144;
         let (l, r) = PanLaw::Sum.apply(v, -4 * -302);
         assert_eq!(((l * 8190) >> 15, (r * 8190) >> 15), (2374, 3195));
     }
@@ -1044,20 +1044,20 @@ mod tests {
 
     #[test]
     fn output_levels_are_clamped_to_the_spu_range() {
-        let g = place(PanLaw::Sum, [0, 0, 100], &Curve::Flat(0x3FFF)).unwrap();
-        assert_eq!((g.left, g.right), (0x3FFF, 0x3FFF));
+        let g = place(PanLaw::Sum, [0, 0, 100], &Curve::Flat(0x3fff)).unwrap();
+        assert_eq!((g.left, g.right), (0x3fff, 0x3fff));
         fn inverted(level: i32, _: i32) -> (i32, i32) {
             (-level * 4, level * 4)
         }
-        let g = place(PanLaw::Custom(inverted), [0, 0, 100], &Curve::Flat(0x3FFF)).unwrap();
-        assert_eq!((g.left, g.right), (-0x4000, 0x3FFF));
+        let g = place(PanLaw::Custom(inverted), [0, 0, 100], &Curve::Flat(0x3fff)).unwrap();
+        assert_eq!((g.left, g.right), (-0x4000, 0x3fff));
     }
 
     #[test]
     fn a_sound_at_or_below_the_cull_level_is_inaudible_before_any_pan_work() {
         let space = Space::new(0, PanLaw::Dot).with_cull(100);
         let ls = Listeners::new([Listener::new([0; 3], 0)]);
-        let curve = Curve::linear_clip(0x3FFF, 1000);
+        let curve = Curve::linear_clip(0x3fff, 1000);
         let near = Emitter::new([0, 0, 900]); // level 1638
         let far = Emitter::new([0, 0, 990]); // level about 163
         let gone = Emitter::new([0, 0, 995]); // level about 82
@@ -1076,7 +1076,7 @@ mod tests {
     #[test]
     fn split_screen_loudest_hears_a_sound_from_the_listener_it_is_louder_to() {
         let (sp, ls) = two();
-        let curve = Curve::linear_clip(0x3FFF, 6000);
+        let curve = Curve::linear_clip(0x3fff, 6000);
         let by_p1 = gains(
             &sp,
             &ls,
@@ -1154,7 +1154,7 @@ mod tests {
     #[test]
     fn centroid_hears_a_sound_from_the_mean_position_so_neither_player_is_privileged() {
         let (sp, ls) = two();
-        let curve = Curve::linear_clip(0x3FFF, 6000);
+        let curve = Curve::linear_clip(0x3fff, 6000);
         // Straight ahead of the midpoint (2000, 0, 0): centred and 1000 away.
         let g = gains(
             &sp,

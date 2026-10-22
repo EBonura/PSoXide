@@ -184,8 +184,8 @@ fn init_with(dma: &mut SpuDma) {
     // Silence everything immediately -- key-off on all 24 voices
     // before we touch any other state, so nothing glitches audibly
     // on cold boot.
-    write_reg16(voice_mask::KEY_OFF_LO, 0xFFFF);
-    write_reg16(voice_mask::KEY_OFF_HI, 0x00FF);
+    write_reg16(voice_mask::KEY_OFF_LO, 0xffff);
+    write_reg16(voice_mask::KEY_OFF_HI, 0x00ff);
 
     // Zero every voice register block.
     for v in 0..24 {
@@ -215,7 +215,7 @@ fn init_with(dma: &mut SpuDma) {
     // game uploads above it shares memory with the reverb engine. Zeroing the
     // volumes above silences reverb's OUTPUT but leaves that claim on memory,
     // and nothing else here moves it.
-    write_reg16(REVERB_WORK_BASE, 0xFFFE);
+    write_reg16(REVERB_WORK_BASE, 0xfffe);
     write_reg16(voice_mask::PITCH_MOD_LO, 0);
     write_reg16(voice_mask::PITCH_MOD_HI, 0);
     write_reg16(voice_mask::NOISE_LO, 0);
@@ -346,7 +346,7 @@ impl Volume {
     /// Silence.
     pub const SILENCE: Self = Self(0);
     /// Maximum linear-positive volume (0x3FFF = +1.0).
-    pub const MAX: Self = Self(0x3FFF);
+    pub const MAX: Self = Self(0x3fff);
     /// Half-scale convenience (0x2000 ≈ 0.5).
     pub const HALF: Self = Self(0x2000);
 
@@ -371,12 +371,12 @@ impl Volume {
     const fn register_bits(self) -> u16 {
         let level = if self.0 < -0x4000 {
             -0x4000
-        } else if self.0 > 0x3FFF {
-            0x3FFF
+        } else if self.0 > 0x3fff {
+            0x3fff
         } else {
             self.0
         };
-        (level as u16) & 0x7FFF
+        (level as u16) & 0x7fff
     }
 }
 
@@ -399,7 +399,7 @@ impl CdVolume {
     /// Silence.
     pub const SILENCE: Self = Self(0);
     /// Maximum positive CD input gain.
-    pub const MAX: Self = Self(0x7FFF);
+    pub const MAX: Self = Self(0x7fff);
     /// Half-scale CD input gain.
     pub const HALF: Self = Self(0x4000);
 
@@ -431,7 +431,7 @@ impl Pitch {
     /// `0x2000` -- one octave above recorded rate.
     pub const OCTAVE_UP: Self = Self(0x2000);
     /// Hardware cap (14-bit field). Higher values clamp.
-    pub const MAX: Self = Self(0x3FFF);
+    pub const MAX: Self = Self(0x3fff);
 
     /// Raw constructor. Values above `0x3FFF` clamp on hardware.
     pub const fn raw(v: u16) -> Self {
@@ -450,8 +450,8 @@ impl Pitch {
     /// Integer-only so `no_std` users can compute at compile time.
     pub const fn for_frequency(target_hz: u32, base_hz: u32) -> Self {
         let raw = ((0x1000u32) * target_hz) / base_hz;
-        if raw > 0x3FFF {
-            Self(0x3FFF)
+        if raw > 0x3fff {
+            Self(0x3fff)
         } else {
             Self(raw as u16)
         }
@@ -464,8 +464,8 @@ impl Pitch {
             return Self::UNITY;
         }
         let raw = ((0x1000u32) * sample_rate_hz + 22_050) / 44_100;
-        if raw > 0x3FFF {
-            Self(0x3FFF)
+        if raw > 0x3fff {
+            Self(0x3fff)
         } else if raw == 0 {
             Self(1)
         } else {
@@ -561,7 +561,7 @@ impl Adsr {
         Self {
             // Linear attack, shift 0, step 0 (instant); no decay;
             // sustain level 0xF (max).
-            lower: 0x000F,
+            lower: 0x000f,
             // Sustain holds (linear increase, capped at max);
             // exponential release, shift 7.
             upper: 0x0027,
@@ -574,10 +574,10 @@ impl Adsr {
     pub const fn percussive() -> Self {
         Self {
             // Instant attack, no decay, sustain level max.
-            lower: 0x000F,
+            lower: 0x000f,
             // Sustain: exponential decrease, shift 6 (the self-fade);
             // exponential release, shift 5.
-            upper: 0xC625,
+            upper: 0xc625,
         }
     }
 
@@ -587,7 +587,7 @@ impl Adsr {
     /// silence block (as `Voice::configure_sample` does) for END handling.
     pub const fn sample_one_shot() -> Self {
         Self {
-            lower: 0x000F,
+            lower: 0x000f,
             upper: 0x0025,
         }
     }
@@ -607,8 +607,8 @@ impl Adsr {
     /// two frames on the same console.
     pub const fn sample() -> Self {
         Self {
-            lower: 0x000F,
-            upper: 0x001F,
+            lower: 0x000f,
+            upper: 0x001f,
         }
     }
 
@@ -865,7 +865,7 @@ pub fn set_cd_volume(left: CdVolume, right: CdVolume) {
 /// (0..=3) selects the +4..+7 fine increment. Applies to every voice
 /// routed to noise via [`Voice::set_noise_mask`].
 pub fn set_noise_clock(shift: u8, step: u8) {
-    let field = (((shift as u16) & 0xF) << 10) | (((step as u16) & 0x3) << 8);
+    let field = (((shift as u16) & 0xf) << 10) | (((step as u16) & 0x3) << 8);
     let control = read_reg16(SPUCNT) & !spucnt_bits::NOISE_CLOCK_MASK;
     write_reg16(SPUCNT, control | field);
 }
@@ -948,7 +948,7 @@ fn upload_adpcm_dma(dma: &mut SpuDma, dest: SpuAddr, bytes: &[u8]) -> bool {
         1
     };
     let block_count = words / block_size;
-    if block_count > 0xFFFF {
+    if block_count > 0xffff {
         return false; // larger than one block-sync transfer can describe
     }
 
@@ -1072,7 +1072,7 @@ mod tests {
         assert_eq!(Volume::linear(1, 1), Volume::MAX);
         // 0.5 → 0x1FFF (rounded down from 0x3FFF / 2).
         let half = Volume::linear(1, 2);
-        assert_eq!(half.0, 0x1FFF);
+        assert_eq!(half.0, 0x1fff);
     }
 
     /// psx-spx, SPU volume registers: bit 15 selects sweep mode, bits 0-14
@@ -1086,9 +1086,9 @@ mod tests {
             assert_eq!(bits & 0x8000, 0, "{raw}: sweep bit set");
             // Sign-extend the 15-bit field the way the SPU reads it.
             let level = ((bits << 1) as i16) >> 1;
-            assert_eq!(level, raw.clamp(-0x4000, 0x3FFF), "{raw}");
+            assert_eq!(level, raw.clamp(-0x4000, 0x3fff), "{raw}");
         }
-        assert_eq!(Volume(0x3FFF).register_bits(), 0x3FFF);
+        assert_eq!(Volume(0x3fff).register_bits(), 0x3fff);
         assert_eq!(Volume(-0x2000).register_bits(), 0x6000);
         assert_eq!(Volume(-0x4000).register_bits(), 0x4000);
     }
@@ -1099,7 +1099,7 @@ mod tests {
         assert_eq!(Volume::linear(2, 1), Volume::MAX);
         assert_eq!(Volume::linear(5, 4), Volume::MAX);
         assert_eq!(Volume::linear(1, 0), Volume::MAX);
-        assert_eq!(Volume::linear(3, 4).0, 0x2FFF);
+        assert_eq!(Volume::linear(3, 4).0, 0x2fff);
     }
 
     #[test]

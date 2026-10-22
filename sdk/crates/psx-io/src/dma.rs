@@ -487,7 +487,7 @@ mod tests {
     #[test]
     fn block_size_packs_size_low_and_count_high() {
         assert_eq!(size_blocks(16, 3), 0x0003_0010);
-        assert_eq!(size_blocks(0xFFFF, 0xFFFF), 0xFFFF_FFFF);
+        assert_eq!(size_blocks(0xffff, 0xffff), 0xffff_ffff);
         assert_eq!(size_words(0x1234), 0x1234);
     }
 
