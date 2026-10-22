@@ -914,8 +914,20 @@ impl GridRuntime {
         let room = self.room_of(eye);
         telemetry::stage_begin(telemetry::stage::PORTAL_VISIBILITY);
         let mut candidates = core::mem::take(&mut self.draw_scratch);
-        self.activity
-            .draw_rooms(&self.level, &self.resident, room, eye, &mut candidates);
+        if let Some(drawn) = self.window.drawn_rooms() {
+            // A flood level draws what the camera's flood reached, as of the
+            // last stream tick: the stream keeps every such room resident.
+            candidates.clear();
+            candidates.extend(
+                drawn
+                    .iter()
+                    .map(|f| usize::from(f.room))
+                    .filter(|&r| self.resident.contains(r)),
+            );
+        } else {
+            self.activity
+                .draw_rooms(&self.level, &self.resident, room, eye, &mut candidates);
+        }
         telemetry::stage_end(telemetry::stage::PORTAL_VISIBILITY);
         for &room in &candidates {
             let (min, max) = self.level.room_bounds(room);

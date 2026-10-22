@@ -34,7 +34,7 @@ pub(crate) fn distance(a: [i32; 3], b: [i32; 3]) -> i32 {
 }
 
 /// World position of a portal's opening centre.
-pub(crate) fn centre(room: &RoomRecord, portal: &Portal) -> [i32; 3] {
+pub fn centre(room: &RoomRecord, portal: &Portal) -> [i32; 3] {
     let mut sum = [0i32; 3];
     for corner in &portal.v {
         for axis in 0..3 {

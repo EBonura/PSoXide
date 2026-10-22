@@ -21,6 +21,7 @@ extern crate alloc;
 pub mod activity;
 pub mod collision;
 pub mod contents;
+pub mod flood;
 pub mod format;
 pub mod height;
 pub mod lattice;
@@ -33,6 +34,8 @@ pub mod view;
 pub mod walk;
 pub mod write;
 
+#[cfg(test)]
+mod flood_tests;
 #[cfg(test)]
 mod format_tests;
 #[cfg(test)]

@@ -97,6 +97,10 @@ pub struct LevelView<'a> {
     /// room's rectangle, row major from its origin. Empty otherwise.
     pub occupancy_start: &'a [u16],
     pub occupancy_bits: &'a [u8],
+    /// With [`LEVEL_BUDGET_FLOOD`]: the flood block's header, and one Q4
+    /// cost weight per portal. `None` and empty otherwise.
+    pub flood: Option<&'a FloodHeader>,
+    pub flood_weight: &'a [u8],
 }
 
 impl<'a> LevelView<'a> {
@@ -132,9 +136,22 @@ impl<'a> LevelView<'a> {
             let start = table::<u16>(bytes, offset, usize::from(head.room_count) + 1)?;
             offset += core::mem::size_of_val(start);
             let len = usize::from(*start.last().unwrap_or(&0));
-            (start, table::<u8>(bytes, offset, len)?)
+            let bits = table::<u8>(bytes, offset, len)?;
+            offset += len;
+            (start, bits)
         } else {
             (&[][..], &[][..])
+        };
+        let (flood, flood_weight) = if head.flags & LEVEL_BUDGET_FLOOD != 0 {
+            offset = offset.next_multiple_of(4);
+            let block = header_at::<FloodHeader>(bytes, offset)?;
+            offset += core::mem::size_of::<FloodHeader>();
+            (
+                Some(block),
+                table::<u8>(bytes, offset, usize::from(head.portal_count))?,
+            )
+        } else {
+            (None, &[][..])
         };
         Ok(Self {
             header: head,
@@ -145,7 +162,16 @@ impl<'a> LevelView<'a> {
             lattice_rooms,
             occupancy_start,
             occupancy_bits,
+            flood,
+            flood_weight,
         })
+    }
+
+    /// The flood block, when the level streams by budgeted flood
+    /// ([`LEVEL_BUDGET_FLOOD`]).
+    #[inline]
+    pub fn budget_flood(&self) -> Option<&'a FloodHeader> {
+        self.flood
     }
 
     /// Rooms listed in the lattice cell holding the world point `(x, z)`
@@ -191,10 +217,11 @@ impl<'a> LevelView<'a> {
     }
 
     /// Whether rooms stream and draw as a ring around the observer's room
-    /// ([`LEVEL_RING_STREAM`]).
+    /// ([`LEVEL_RING_STREAM`]). A level that streams by flood
+    /// ([`LEVEL_BUDGET_FLOOD`]) is never a ring, whatever the flag says.
     #[inline]
     pub fn ring_stream(&self) -> bool {
-        self.header.flags & LEVEL_RING_STREAM != 0
+        self.header.flags & LEVEL_RING_STREAM != 0 && self.flood.is_none()
     }
 
     /// Whether `room` owns the sector holding world `(x, z)`. A level without
@@ -286,6 +313,14 @@ impl<'a> LevelView<'a> {
         for portal in self.portals {
             if usize::from(portal.dest) >= self.rooms.len() {
                 return Err(FormatError::IndexRange);
+            }
+        }
+        if let Some(flood) = self.flood {
+            if flood.res_radius < flood.near_radius
+                || flood.bias != 0
+                || self.flood_weight.contains(&0)
+            {
+                return Err(FormatError::Inconsistent);
             }
         }
         Ok(())

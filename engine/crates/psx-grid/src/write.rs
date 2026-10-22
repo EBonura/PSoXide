@@ -476,6 +476,18 @@ pub struct LevelCore {
     /// (row major). Empty: every room owns its rectangle and no table is
     /// written, so levels without overlapping rooms cook as before.
     pub occupancy: Vec<Vec<u8>>,
+    /// The flood block ([`LEVEL_BUDGET_FLOOD`]). `None`: the level streams as
+    /// before and nothing is written for it.
+    pub flood: Option<FloodBlock>,
+}
+
+/// The tail of a core that asks for a budgeted flood: its radii and a cost
+/// weight per portal.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FloodBlock {
+    pub header: FloodHeader,
+    /// One byte per portal, Q4 ([`FLOOD_WEIGHT_ONE`] is 1.0).
+    pub portal_weight: Vec<u8>,
 }
 
 impl LevelCore {
@@ -544,6 +556,11 @@ impl LevelCore {
                     0
                 } else {
                     LEVEL_HAS_OCCUPANCY
+                }
+                | if self.flood.is_some() {
+                    LEVEL_BUDGET_FLOOD
+                } else {
+                    0
                 },
             room_count: self.rooms.len() as u16,
             portal_count: self.portals.len() as u16,
@@ -597,6 +614,18 @@ impl LevelCore {
             for bits in &self.occupancy {
                 out.extend_from_slice(bits);
             }
+        }
+        if let Some(flood) = &self.flood {
+            if flood.portal_weight.len() != self.portals.len() {
+                return Err(alloc::format!(
+                    "{} flood weights for {} portals",
+                    flood.portal_weight.len(),
+                    self.portals.len()
+                ));
+            }
+            align4(&mut out);
+            out.extend_from_slice(bytes_of(core::slice::from_ref(&flood.header)));
+            out.extend_from_slice(&flood.portal_weight);
         }
         align4(&mut out);
         Ok(out)

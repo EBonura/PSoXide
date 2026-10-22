@@ -64,6 +64,40 @@ pub const LEVEL_HAS_OCCUPANCY: u32 = 1 << 4;
 /// room one portal away (a level cut into even chunks, such as hexagons).
 /// The draw distance and lead radius do not apply; activation still walks.
 pub const LEVEL_RING_STREAM: u32 = 1 << 5;
+/// Level flag: the core ends with a [`FloodHeader`] and one weight byte per
+/// portal (after the occupancy table, each part on a word boundary). The
+/// streamer then keeps resident the rooms a budgeted portal flood from the
+/// observer reaches ([`crate::flood`]) in place of the ring or walk radii,
+/// draws the ones within `near_radius` and keeps the ones within
+/// `res_radius` and `pool_cap_pages` in memory. Levels without the flag are
+/// byte for byte what they were.
+pub const LEVEL_BUDGET_FLOOD: u32 = 1 << 6;
+
+/// Fixed part of the flood block ([`LEVEL_BUDGET_FLOOD`]), 8 bytes.
+///
+/// The radii are whole sectors, like the other radii of the core.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct FloodHeader {
+    /// Most pages the flood may hold resident; 0 means the whole level is
+    /// resident and no flood ever runs (a level that fits its pool).
+    pub pool_cap_pages: u16,
+    /// Rooms whose flood cost is within this many sectors are drawn and are
+    /// needed in memory.
+    pub near_radius: u8,
+    /// Rooms within this many sectors are kept in memory ahead of need
+    /// (at least `near_radius`).
+    pub res_radius: u8,
+    /// View-cone bias of the flood: 0 is off, the only value this reader
+    /// understands.
+    pub bias: u8,
+    pub reserved: [u8; 3],
+}
+const _: () = assert!(core::mem::size_of::<FloodHeader>() == 8);
+
+/// Flood weight of a portal that costs its plain length: weights are Q4, so
+/// 16 is 1.0.
+pub const FLOOD_WEIGHT_ONE: u8 = 16;
 
 /// Room flag: sky may show (an open sector exists).
 pub const ROOM_OUTDOOR: u16 = 1;
