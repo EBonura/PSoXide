@@ -38,11 +38,11 @@ use crate::grid::world::GridWorld;
 /// Most pages (2 KiB) one room chunk may take: the core's `max_room_pages`
 /// is a byte, and a streamed unit must fit a pool run. This is a per-room
 /// cap. The level as a whole has none: only the rooms around the player are
-/// resident at once. Until a streamer loads rooms from the disc the guest
-/// still holds every chunk, so [`ALL_RESIDENT_ADVISORY_PAGES`] warns.
+/// resident at once. Only a level with no draw distance (and no ring) wants
+/// every room at once, so only it can trip [`ALL_RESIDENT_ADVISORY_PAGES`].
 pub const MAX_ROOM_PAGES: usize = 255;
-/// Total chunk pages above which the cook warns that the all-resident
-/// runtime (every chunk baked into the guest) may not link.
+/// Total chunk pages above which the cook warns that a level with an
+/// unbounded draw distance, which keeps every room resident, may not fit.
 pub const ALL_RESIDENT_ADVISORY_PAGES: usize = 512;
 
 /// Everything the cook needs besides the document.
@@ -568,13 +568,15 @@ fn cook_rooms(
             MAX_ROOM_PAGES * 2
         ));
     }
-    if total_pages > ALL_RESIDENT_ADVISORY_PAGES {
+    let radii = world.stream;
+    // A bounded draw distance or a ring streams a window of rooms; only
+    // an unbounded level wants them all resident at once.
+    if !radii.ring && radii.draw_far == 0 && total_pages > ALL_RESIDENT_ADVISORY_PAGES {
         report.warnings.push(format!(
-            "the rooms total {total_pages} pages ({} KiB); the runtime still loads every chunk at boot, so a level this big may not link",
+            "the rooms total {total_pages} pages ({} KiB) and the draw distance is unbounded, so the runtime holds every chunk resident; a level this big may not fit (set a draw distance or ring streaming)",
             total_pages * 2
         ));
     }
-    let radii = world.stream;
     let mut level = LevelCore {
         occupancy: occupancy::derive(world),
         flags: (if any_sky { LEVEL_HAS_SKY } else { 0 })

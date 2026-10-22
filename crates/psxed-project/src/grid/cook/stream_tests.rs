@@ -131,3 +131,36 @@ fn the_default_draw_distance_is_in_the_header() {
         (d.draw_far, d.active_radius, d.lead_radius)
     );
 }
+
+/// The cook's note that the guest holds the whole level resident.
+fn resident_warning(cooked: &CookedLevel) -> Option<&String> {
+    cooked
+        .report
+        .warnings
+        .iter()
+        .find(|w| w.contains("every chunk"))
+}
+
+#[test]
+fn a_ring_streamed_level_does_not_warn_that_every_chunk_is_resident() {
+    let mut world = row(600);
+    world.stream.ring = true;
+    let cooked = cook(&world).unwrap();
+    assert!(cooked.report.pool_pages > ALL_RESIDENT_ADVISORY_PAGES);
+    assert_eq!(resident_warning(&cooked), None);
+}
+
+#[test]
+fn a_bounded_draw_distance_streams_so_it_does_not_warn() {
+    let cooked = cook(&row(600)).unwrap();
+    assert!(cooked.report.pool_pages > ALL_RESIDENT_ADVISORY_PAGES);
+    assert_eq!(resident_warning(&cooked), None);
+}
+
+#[test]
+fn an_unbounded_level_over_the_advisory_still_warns() {
+    let mut world = row(600);
+    world.stream.draw_far = 0;
+    let cooked = cook(&world).unwrap();
+    assert!(resident_warning(&cooked).is_some());
+}
