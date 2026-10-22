@@ -91,6 +91,24 @@ pub struct Block {
     pub ll_max: u32,
     /// Address of the first oversized node seen.
     pub ll_bad_addr: u32,
+    /// Instruction-cache flushes (`psx_rt::cache`), each behind the DMA gate.
+    pub flushes: u32,
+    /// Flushes that found a DMA channel busy on entry and waited.
+    pub flush_waits: u32,
+    /// Times a flush backed out because a walk was kicked between its idle check and its mask.
+    pub flush_retries: u32,
+    /// Flushes whose wait for an idle bus ran out (the flush went ahead).
+    pub flush_timeouts: u32,
+    /// Most busy polls one flush made.
+    pub flush_max_spins: u32,
+    /// DMA CHCR 0 to 6 as the last flush found them on entry.
+    pub flush_chcr: [u32; 7],
+    /// GPUSTAT on entry to the last flush.
+    pub flush_gpustat: u32,
+    /// COP0 Status on entry to the last flush.
+    pub flush_sr: u32,
+    /// The cache control register on entry to the last flush.
+    pub flush_cc: u32,
     /// Free-form step id set by the program ([`step`]).
     pub step_id: u32,
     /// Free-form step text, NUL padded.
@@ -133,6 +151,15 @@ pub static mut PSX_DIAG: Block = Block {
     ll_bad: 0,
     ll_max: 0,
     ll_bad_addr: 0,
+    flushes: 0,
+    flush_waits: 0,
+    flush_retries: 0,
+    flush_timeouts: 0,
+    flush_max_spins: 0,
+    flush_chcr: [0; 7],
+    flush_gpustat: 0,
+    flush_sr: 0,
+    flush_cc: 0,
     step_id: 0,
     step_text: [0; 24],
 };
@@ -328,6 +355,73 @@ pub fn cd_read_failed(word: u32) {
     let _ = word;
 }
 
+/// An instruction-cache flush has the bus quiet and is about to change the cache: record what it
+/// found. `chcr` are the seven DMA control registers, in channel order.
+#[inline(always)]
+pub fn flush_enter(chcr: [u32; 7], gpustat: u32, sr: u32, cc: u32) {
+    #[cfg(feature = "console-diag")]
+    {
+        touch();
+        bump(field!(flushes));
+        // SAFETY: `flush_chcr` is a 7-word array in the static; the writes stay inside it.
+        let dst = unsafe { (&raw mut PSX_DIAG.flush_chcr).cast::<u32>() };
+        let mut i = 0;
+        while i < 7 {
+            // SAFETY: `i` < 7, inside `flush_chcr`.
+            unsafe { dst.add(i).write_volatile(chcr[i]) };
+            i += 1;
+        }
+        set(field!(flush_gpustat), gpustat);
+        set(field!(flush_sr), sr);
+        set(field!(flush_cc), cc);
+    }
+    #[cfg(not(feature = "console-diag"))]
+    let _ = (chcr, gpustat, sr, cc);
+}
+
+/// An instruction-cache flush's gate has finished: whether a channel was busy on entry, how many
+/// times it backed out, the busy polls it made, and whether its bound ran out.
+#[inline(always)]
+pub fn flush_exit(busy_at_entry: bool, retries: u32, spins: u32, timed_out: bool) {
+    #[cfg(feature = "console-diag")]
+    {
+        if busy_at_entry {
+            bump(field!(flush_waits));
+        }
+        if retries != 0 {
+            let p = field!(flush_retries);
+            // SAFETY: `p` points into the block.
+            set(p, unsafe { get(p) }.wrapping_add(retries));
+        }
+        if timed_out {
+            bump(field!(flush_timeouts));
+        }
+        let max = field!(flush_max_spins);
+        // SAFETY: `max` points into the block.
+        if spins > unsafe { get(max) } {
+            set(max, spins);
+        }
+    }
+    #[cfg(not(feature = "console-diag"))]
+    let _ = (busy_at_entry, retries, spins, timed_out);
+}
+
+/// True when `pc` is not an address code can run from: main RAM through KSEG0 or KSEG1 (the
+/// kernel area included), or the BIOS ROM. A jump into anything else went somewhere wild.
+pub const fn is_wild_pc(pc: u32) -> bool {
+    let ram = (pc >= 0x8000_0000 && pc < 0x8020_0000) || (pc >= 0xA000_0000 && pc < 0xA020_0000);
+    let rom = pc >= 0xBFC0_0000 && pc < 0xBFC8_0000;
+    !(ram || rom)
+}
+
+/// The instruction word whose `j` target is `pc` (top four bits of `pc` taken from the jump's own
+/// address region): `0x08000000 | pc >> 2` in its 26-bit field. A CPU that jumped to a wild `pc`
+/// fetched such a word from somewhere; if the word reads as a GPU list header, the fetch got
+/// DMA traffic.
+pub const fn jump_word_for(pc: u32) -> u32 {
+    0x0800_0000 | ((pc >> 2) & 0x03FF_FFFF)
+}
+
 /// Name the step the program has reached, for the panel: `id` and up to 24
 /// ASCII bytes of `text`.
 #[inline(never)]
@@ -427,4 +521,35 @@ pub fn ll_scan(head: u32) {
     }
     #[cfg(not(feature = "console-diag"))]
     let _ = head;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn code_addresses_are_not_wild_and_the_bus_error_pc_is() {
+        assert!(!is_wild_pc(0x8001_0000));
+        assert!(!is_wild_pc(0x8000_0080));
+        assert!(!is_wild_pc(0xA00A_2B4C));
+        assert!(!is_wild_pc(0xBFC0_1944));
+        // The console fault of 2026-10-22: PC B428AD34.
+        assert!(is_wild_pc(0xB428_AD34));
+        assert!(is_wild_pc(0x0000_0000));
+        assert!(is_wild_pc(0x8020_0000));
+        assert!(is_wild_pc(0xBFC8_0000));
+    }
+
+    #[test]
+    fn the_wild_pc_decodes_to_the_jump_word_that_was_fetched() {
+        // The word read as a GPU list header was count 9, next 0x0A2B4D, against MADR 0x0A2B4C.
+        assert_eq!(jump_word_for(0xB428_AD34), 0x090A_2B4D);
+        assert_eq!(jump_word_for(0x8001_0000) >> 26, 2, "opcode J");
+    }
+
+    #[test]
+    fn the_flush_hooks_are_callable_without_the_feature() {
+        flush_enter([0; 7], 0, 0, 0);
+        flush_exit(true, 1, 2, false);
+    }
 }

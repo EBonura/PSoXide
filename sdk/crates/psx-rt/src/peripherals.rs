@@ -55,6 +55,21 @@ impl Peripherals {
         })
     }
 
+    /// Borrow every DMA owner token at once, for [`crate::cache::with_dma_quiesced`].
+    ///
+    /// For a program that kept its `Peripherals` whole. A program that handed the tokens to
+    /// drivers lends them back through the drivers (`Gpu::dma_mut`, `SectorReader::cd_mut`, ...)
+    /// into [`crate::cache::DmaOwners::new`].
+    pub fn dma_owners(&mut self) -> crate::cache::DmaOwners<'_> {
+        crate::cache::DmaOwners::new(
+            &mut self.gpu_dma,
+            &mut self.ordering_table_clear_dma,
+            &mut self.mdec_dma,
+            &mut self.spu_dma,
+            &mut self.cd,
+        )
+    }
+
     /// The token set, whether or not [`take`](Self::take) already ran.
     ///
     /// # Safety

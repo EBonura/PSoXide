@@ -63,6 +63,12 @@ still a call, though (`step` and `stop` are not inlined), so keep them behind
 the game's own `console-diag` feature (`#[cfg(feature = "console-diag")]`) and
 the shipping image does not carry them.
 
+## Cache flushes
+
+The panel also shows what the last instruction-cache flush found (DMA busy mask, cache control
+register, status register), a `WILD PC` row when the program counter is outside any code, and
+whether a fault came with the cache isolated; see [CACHE-CONTROL](CACHE-CONTROL.md).
+
 ## Seeing it
 
 `sdk/examples/hello-diag` draws a triangle, then stops in the way the

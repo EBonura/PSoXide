@@ -18,6 +18,26 @@ core::arch::global_asm!(
     .section .text.psx_rt_exception
     .globl __psx_rt_exception_handler
 __psx_rt_exception_handler:
+    # Console stop-panel builds: an exception taken with the cache isolated (the isolate bit of SR) means the
+    # fault is inside an instruction-cache flush, where this handler's loads and stores would
+    # reach the isolated cache and not RAM (every fault there was silent). Clear the bit first
+    # and record that it was set. Interrupts are masked for the whole flush, so only a fault can
+    # arrive here with it set.
+    .if {diag}
+    mfc0  $26, $12
+    lui   $27, {isc_hi}
+    and   $27, $26, $27
+    beqz  $27, 10f
+    nop
+    xor   $26, $26, $27
+    mtc0  $26, $12
+    nop
+    nop
+    lui   $26, %hi(__psx_diag_isc_hit)
+    addiu $27, $zero, 1
+    sw    $27, %lo(__psx_diag_isc_hit)($26)
+10:
+    .endif
     lui   $26, {io_hi}
     lw    $27, {i_stat}($26)
     lw    $26, {i_mask}($26)
@@ -304,6 +324,7 @@ __psx_rt_exception_handler:
     strict = const STRICT_FAULTS as u32,
     present = const PRESENT_QUEUE as u32,
     diag = const CONSOLE_DIAG as u32,
+    isc_hi = const crate::cache::ISOLATE_CACHE_BIT >> 16,
     // Every register the handler touches is in the I/O window, so one `lui`
     // of the window's high half reaches them all and the offsets are the low
     // halves (checked by the assertions below the block).

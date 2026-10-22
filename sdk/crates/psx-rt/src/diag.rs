@@ -44,7 +44,7 @@ pub fn set_stall_limit(vblanks: u32) {
 }
 
 const COLS: usize = 53;
-const ROWS: usize = 27;
+const ROWS: usize = 28;
 
 const BG: u16 = 0x1000;
 const WHITE: u16 = 0x7FFF;
@@ -56,6 +56,17 @@ const CYAN: u16 = 0x7FE0;
 /// Saved registers of the interrupted code: index = register number, then HI, LO.
 #[no_mangle]
 static mut __psx_diag_regs: [u32; 40] = [0; 40];
+
+/// The cache control register as the fault found it, saved by the fault trampoline before it
+/// restores the running setting.
+#[no_mangle]
+static mut __psx_diag_fault_cc: u32 = 0;
+
+/// Set by the exception handler when a fault arrived with the cache isolated (the isolate bit of SR): the fault
+/// happened inside an instruction-cache flush. The handler clears the bit first, so its own loads
+/// and stores reach RAM and the panel can be drawn.
+#[no_mangle]
+static mut __psx_diag_isc_hit: u32 = 0;
 
 /// Stack the panel runs on, so it works however the program's own stack looks.
 #[no_mangle]
@@ -219,9 +230,23 @@ __psx_diag_vblank_tramp:
     nop
     PSX_DIAG_RESTORE
 
-    # The fatal-fault halt: never returns.
+    # The fatal-fault halt: never returns. First thing, before any other store: note the cache
+    # control register as the fault found it and put the running setting back. A fault inside an
+    # instruction-cache flush leaves it in the flush setting (bus grant and read priority off),
+    # which with a DMA live is how the CPU can fetch the DMA's words; the panel's own code must
+    # not run like that. Uses $26 and $27 only, as the handler does. The exception handler has
+    # already cleared the isolate bit of SR.
     .globl __psx_diag_fault_tramp
 __psx_diag_fault_tramp:
+    lui   $26, {cc_hi}
+    lw    $27, {cc_lo}($26)
+    nop
+    lui   $26, %hi(__psx_diag_fault_cc)
+    sw    $27, %lo(__psx_diag_fault_cc)($26)
+    lui   $26, {cc_hi}
+    lui   $27, {run_hi}
+    ori   $27, $27, {run_lo}
+    sw    $27, {cc_lo}($26)
     PSX_DIAG_SAVE
     jal   __psx_diag_fault
     nop
@@ -229,7 +254,11 @@ __psx_diag_fault_tramp:
     nop
 
     .set reorder
-    "#
+    "#,
+    cc_hi = const crate::cache::CONTROL_ADDRESS >> 16,
+    cc_lo = const crate::cache::CONTROL_ADDRESS & 0xFFFF,
+    run_hi = const crate::cache::RUNNING_SETTING >> 16,
+    run_lo = const crate::cache::RUNNING_SETTING & 0xFFFF,
 );
 
 // ---------------------------------------------------------------- text
@@ -594,6 +623,21 @@ fn panel(reason: Reason, regs: *const u32, epc: u32) {
         .dec(crate::interrupts::stray_interrupt_count());
     put_line(&mut row, &l, WHITE);
 
+    // A program counter outside any code: say what the word that sent it there would be as a
+    // jump, and where the GPU's DMA was reading. A GPU list header with this value means the
+    // instruction fetch received a word of the DMA's traffic.
+    let dma2_madr = rd(dma_reg(channel::GPU, MADR));
+    if reason == Reason::Fault && diag::is_wild_pc(epc) {
+        let mut l = Line::new();
+        l.str("WILD PC ")
+            .hex(epc, 8)
+            .str(" J ")
+            .hex(diag::jump_word_for(epc), 8)
+            .str(" MADR ")
+            .hex(dma2_madr, 8);
+        put_line(&mut row, &l, RED);
+    }
+
     // A guess at the call chain: words on the stack that follow a call.
     let sp = reg(29);
     let mut l = Line::new();
@@ -747,6 +791,64 @@ fn panel(reason: Reason, regs: *const u32, epc: u32) {
         .str(" AT ")
         .hex(f!(ll_bad_addr), 6);
     put_line(&mut row, &l, if f!(ll_bad) != 0 { RED } else { WHITE });
+
+    if f!(flushes) != 0 {
+        let mut l = Line::new();
+        l.str("FLUSH N ")
+            .dec(f!(flushes))
+            .str(" WAIT ")
+            .dec(f!(flush_waits))
+            .str(" RETRY ")
+            .dec(f!(flush_retries))
+            .str(" TMO ")
+            .dec(f!(flush_timeouts))
+            .str(" SPIN ")
+            .dec(f!(flush_max_spins));
+        put_line(
+            &mut row,
+            &l,
+            if f!(flush_timeouts) != 0 { RED } else { WHITE },
+        );
+        if reason == Reason::Fault {
+            let mut l = Line::new();
+            l.str("ENTRY CC ")
+                .hex(f!(flush_cc), 8)
+                .str(" SR ")
+                .hex(f!(flush_sr), 8)
+                .str(" GS ")
+                .hex(f!(flush_gpustat), 8);
+            put_line(&mut row, &l, WHITE);
+            // SAFETY: a field pointer into the diagnostics static.
+            let chcr = unsafe { (&raw const (*b).flush_chcr).cast::<u32>() };
+            let mut busy = 0u32;
+            let mut ch = 0;
+            while ch < 7 {
+                // SAFETY: `ch` < 7, inside `flush_chcr`.
+                if d(unsafe { chcr.add(ch) }) & (1 << 24) != 0 {
+                    busy |= 1 << ch;
+                }
+                ch += 1;
+            }
+            let mut l = Line::new();
+            // SAFETY: plain reads of this module's statics, written before the panel runs.
+            let (fault_cc, isc) = unsafe {
+                (
+                    (&raw const __psx_diag_fault_cc).read_volatile(),
+                    (&raw const __psx_diag_isc_hit).read_volatile(),
+                )
+            };
+            l.str("ENTRY BUSY ")
+                .hex(busy, 2)
+                .str(" CHCR2 ")
+                // SAFETY: index 2 of 7, inside `flush_chcr`.
+                .hex(d(unsafe { chcr.add(2) }), 8)
+                .str(" FAULT CC ")
+                .hex(fault_cc, 8)
+                .str(" ISC ")
+                .hex(isc, 1);
+            put_line(&mut row, &l, if isc != 0 { RED } else { WHITE });
+        }
+    }
 
     let mut l = Line::new();
     l.str("PRESENT KICK ")

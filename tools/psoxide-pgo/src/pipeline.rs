@@ -653,7 +653,10 @@ impl Guest {
             psoxide_hazard::stack_guard::main,
             false,
             "stack guard",
-        )
+        )?;
+        // Nothing but psx-rt's flush routines may change the cache control register or isolate
+        // the cache (sdk/docs/CACHE-CONTROL.md); not overridable.
+        check(None, psoxide_hazard::cache_gate::main, true, "cache gate")
     }
 }
 
