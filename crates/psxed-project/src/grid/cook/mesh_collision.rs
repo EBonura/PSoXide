@@ -98,7 +98,11 @@ fn proxies(
         match *proxy {
             Proxy::Slab { corners, thickness } => {
                 let c = corners.map(rt);
-                let thick = i16::try_from(units.rt(thickness).max(1)).unwrap_or(i16::MAX);
+                // The thickness is vertical in the asset frame, so it scales
+                // with the instance's height.
+                let scaled = i64::from(thickness) * i64::from(mesh.scale[1]) / 256;
+                let scaled = i32::try_from(scaled).unwrap_or(i32::MAX);
+                let thick = i16::try_from(units.rt(scaled).max(1)).unwrap_or(i16::MAX);
                 let ny = normal_y(&c).abs();
                 let record = if ny >= PLATFORM_NORMAL_Y {
                     platform(&c, 0, thick)?

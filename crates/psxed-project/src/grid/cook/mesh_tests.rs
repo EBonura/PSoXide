@@ -405,3 +405,109 @@ fn what_a_mesh_costs_in_the_chunk() {
         assert!(added > 0 && added <= ceiling, "{name}: +{added} B");
     }
 }
+
+// A floating slab: the Block asset (a sector cube) as ONE thick platform.
+
+const SLAB_CUBE: &str = "v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nv 0 0 1\nv 1 0 1\nv 1 1 1\nv 0 1 1\n\
+                         f 5 6 7 8\nf 2 1 4 3\nf 1 5 8 4\nf 6 2 3 7\nf 8 7 3 4\nf 1 2 6 5\n";
+
+/// The hall with a 2 by 2 sector, one sector thick slab centred on sector
+/// corner (6, 4) whose underside is `underside` grid units up.
+fn slab_hall(underside: i32) -> GridWorld {
+    let mut world = hall();
+    let cube = ImportedMesh::from_obj(SLAB_CUBE, 1024.0, "box.obj", ImportProxy::Slab).unwrap();
+    world
+        .mesh_assets
+        .push(MeshAsset::new("Block", MeshKind::Imported(cube)));
+    let mut mesh = GridMesh::new(1, 0, [6 * SECTOR_UNITS, underside, 4 * SECTOR_UNITS]);
+    mesh.scale = [512, 256, 512];
+    mesh.set_material(0, Some(rid(8)));
+    world.rooms[0].meshes.push(mesh);
+    world
+}
+
+#[test]
+fn a_slab_instance_is_one_collision_record() {
+    let cooked = cook(&slab_hall(384)).unwrap();
+    let room = RoomView::parse(leak(&cooked.chunks[0])).unwrap();
+    // The thick platform over the 2 by 2 sectors: the same list in every
+    // one of them, so one record in the table (a BoxTop is twelve).
+    assert_eq!(room.col.col_planes.len(), 1, "{:?}", room.col.col_planes);
+    assert_eq!(room.col.col_planes[0].kind, plane_kind::PLATFORM);
+    assert_eq!(
+        cooked.report.warnings.len(),
+        0,
+        "{:?}",
+        cooked.report.warnings
+    );
+}
+
+#[test]
+fn a_slab_is_stood_on_walked_into_and_walked_under() {
+    // Underside 30 runtime units (384 grid), top 110 (1408): a body is 48 tall.
+    let (low, _) = native(&slab_hall(384));
+    // The slab spans x 400..560, z 240..400.
+    let landed = walk(&low, RoomPoint::new(480, 300, 320), 0, 0, 60);
+    let y = landed.position().y;
+    assert!((y - 110).abs() <= 2, "stood at {y}");
+    assert!(landed.grounded());
+    // From the floor its side stops a body that cannot fit under it.
+    let blocked = walk(&low, RoomPoint::new(300, 0, 320), 4096, 0, 200).position();
+    assert!(blocked.x < 400, "{blocked:?}");
+    assert_eq!(blocked.y, 0, "{blocked:?}");
+    // The same from the north face.
+    let north = walk(&low, RoomPoint::new(480, 0, 160), 0, 4096, 200).position();
+    assert!(north.z < 240, "{north:?}");
+    // A slab raised to leave headroom (underside 80) is walked under.
+    let (high, _) = native(&slab_hall(1024));
+    let through = walk(&high, RoomPoint::new(300, 0, 320), 4096, 0, 200).position();
+    assert!(through.x > 560, "{through:?}");
+    assert_eq!(through.y, 0, "{through:?}");
+    // And still stood on at its new height, 160.
+    let top = walk(&high, RoomPoint::new(480, 300, 320), 0, 0, 60)
+        .position()
+        .y;
+    assert!((top - 160).abs() <= 2, "stood at {top}");
+}
+
+#[test]
+fn a_turned_slab_is_solid_where_it_is_drawn() {
+    // Quarter turned is the same footprint; an eighth turn is a diamond whose
+    // far corner is 2 sectors * sqrt(2) / 2 from the centre.
+    let mut world = slab_hall(384);
+    world.rooms[0].meshes[0].rotation = [45, 0, 0];
+    let (native, cooked) = native(&world);
+    assert_eq!(
+        cooked.report.warnings.len(),
+        0,
+        "{:?}",
+        cooked.report.warnings
+    );
+    let landed = walk(&native, RoomPoint::new(480, 300, 320), 0, 0, 60)
+        .position()
+        .y;
+    assert!((landed - 110).abs() <= 2, "stood at {landed}");
+    // The diamond's corner is 80 * sqrt(2) = 113 from the centre; a body of
+    // radius 12 meets the two slanted edges up to 17 short of it. It stops
+    // there, not at the unturned edge 80 from the centre.
+    let blocked = walk(&native, RoomPoint::new(300, 0, 320), 4096, 0, 300).position();
+    assert!(
+        blocked.x > 480 - 113 - 24 && blocked.x < 480 - 113,
+        "{blocked:?}"
+    );
+}
+
+#[test]
+fn a_slab_thickness_follows_the_height_scale() {
+    // Twice as tall: underside 384 stays, the top rises to 384 + 2048 = 2432
+    // grid units (190 runtime units), and a body at the old 110 is inside it.
+    let mut world = slab_hall(384);
+    world.rooms[0].meshes[0].scale = [512, 512, 512];
+    let (native, _) = native(&world);
+    let top = walk(&native, RoomPoint::new(480, 300, 320), 0, 0, 60)
+        .position()
+        .y;
+    assert!((top - 190).abs() <= 2, "stood at {top}");
+    let blocked = walk(&native, RoomPoint::new(300, 0, 320), 4096, 0, 200).position();
+    assert!(blocked.x < 400, "{blocked:?}");
+}

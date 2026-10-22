@@ -26,6 +26,10 @@ pub enum ImportProxy {
     Box,
     /// A box with a standable top.
     BoxTop,
+    /// A solid slab: the top face as one thick platform, as thick as the
+    /// mesh is tall. One collision record where [`ImportProxy::BoxTop`] costs
+    /// up to twelve, and the body can neither stand in it nor go through it.
+    Slab,
 }
 
 /// One face of an imported mesh.
@@ -283,6 +287,15 @@ impl ImportedMesh {
                 max,
                 top: true,
             }],
+            ImportProxy::Slab => vec![Proxy::Slab {
+                corners: [
+                    [min[0], max[1], min[2]],
+                    [min[0], max[1], max[2]],
+                    [max[0], max[1], max[2]],
+                    [max[0], max[1], min[2]],
+                ],
+                thickness: max[1] - min[1],
+            }],
         };
         let slots = if self.slot_names.is_empty() {
             vec!["surface".to_string()]
@@ -369,6 +382,18 @@ f 2 3 7 6
                 .contains("no faces")
         );
         assert!(ImportedMesh::from_obj("v 0 0 0\n", 0.0, "", ImportProxy::None).is_err());
+    }
+
+    #[test]
+    fn a_slab_proxy_is_the_top_face_as_thick_as_the_mesh() {
+        let mesh = ImportedMesh::from_obj(CUBE, 1000.0, "cube.obj", ImportProxy::Slab).unwrap();
+        let built = mesh.build().unwrap();
+        assert_eq!(built.proxies.len(), 1);
+        let Proxy::Slab { corners, thickness } = built.proxies[0] else {
+            panic!("a slab proxy, got {:?}", built.proxies[0]);
+        };
+        assert_eq!(thickness, 1000);
+        assert!(corners.iter().all(|c| c[1] == 1000));
     }
 
     #[test]
