@@ -226,23 +226,24 @@ impl<'a> GridCollision<'a> {
         for cz in cz0..=cz1 {
             for cx in cx0..=cx1 {
                 // One record per sector in a dense room; in a tree room the
-                // leaves that fill the sector (planes are copied into every
-                // leaf they touch, in room coordinates, so any leaf's list
-                // serves).
+                // leaves that fill the sector. Planes are copied into every
+                // leaf they touch, in room coordinates, and the leaves of one
+                // sector touch the same planes, so the first leaf's list
+                // serves and the others are not read again.
                 for slot in 0..Self::cell_slots(view, cx, cz) {
                     let Some(leaf) = self.cell_leaf(view, cx, cz, slot) else {
                         continue;
                     };
-                    let Some(ext) = view.ext(leaf.rec) else {
-                        continue;
-                    };
-                    let first = usize::from(ext.plane_first);
-                    for (k, plane) in view.sector_planes(ext).iter().enumerate() {
-                        if self.camera_pass && plane.flags & COLPLANE_CAMERA_PASS != 0 {
-                            continue;
+                    if let Some(ext) = view.ext(leaf.rec) {
+                        let first = usize::from(ext.plane_first);
+                        for (k, plane) in view.sector_planes(ext).iter().enumerate() {
+                            if self.camera_pass && plane.flags & COLPLANE_CAMERA_PASS != 0 {
+                                continue;
+                            }
+                            Self::offer_plane(plane, first + k, lx, lz, scan);
                         }
-                        Self::offer_plane(plane, first + k, lx, lz, scan);
                     }
+                    break;
                 }
             }
         }
