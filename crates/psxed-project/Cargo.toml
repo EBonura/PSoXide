@@ -47,6 +47,18 @@ name = "import-locomotion"
 path = "src/bin/import_locomotion.rs"
 
 [[bin]]
+name = "gridcover"
+path = "src/bin/gridcover.rs"
+
+[[bin]]
+name = "gridsweep"
+path = "src/bin/gridsweep.rs"
+
+[[bin]]
+name = "gridholes"
+path = "src/bin/gridholes.rs"
+
+[[bin]]
 name = "gridfloat"
 path = "src/bin/gridfloat.rs"
 
