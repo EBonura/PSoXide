@@ -105,7 +105,11 @@ fn shade(albedo: [f32; 3], colours: [u32; 4]) -> [i32; 3] {
             *sum += ((c >> (8 * channel)) & 255) as f32 / 4.0;
         }
     }
-    [0, 1, 2].map(|i| (albedo[i] * 255.0 * light[i] / 128.0).round().clamp(0.0, 255.0) as i32)
+    [0, 1, 2].map(|i| {
+        (albedo[i] * 255.0 * light[i] / 128.0)
+            .round()
+            .clamp(0.0, 255.0) as i32
+    })
 }
 
 /// The columns of every owned sector that draws something, by world sector.
@@ -293,17 +297,19 @@ pub fn bake(
             .filter_map(|key| cols.get(&key).map(|c| c.low))
             .min()
             .unwrap_or(top);
-        let sides: [Box<dyn Fn(i32) -> (i32, i32)>; 4] = [
-            Box::new(move |i| (x + i, z - 1)),
-            Box::new(move |i| (x + n, z + i)),
-            Box::new(move |i| (x + i, z + n)),
-            Box::new(move |i| (x - 1, z + i)),
-        ];
-        for (side, neighbour) in sides.iter().enumerate() {
+        // The sector across edge `side` (-Z, +X, +Z, -X) beside the leaf's
+        // `i`th sector along that edge.
+        let neighbour = |side: usize, i: i32| match side {
+            0 => (x + i, z - 1),
+            1 => (x + n, z + i),
+            2 => (x + i, z + n),
+            _ => (x - 1, z + i),
+        };
+        for (side, nibble) in nibbles.iter_mut().enumerate() {
             let mut floor = i32::MAX;
             let mut missing = false;
             for i in 0..n {
-                match cols.get(&neighbour(i)) {
+                match cols.get(&neighbour(side, i)) {
                     Some(c) => floor = floor.min(c.top),
                     None => missing = true,
                 }
@@ -320,7 +326,7 @@ pub fn bake(
                 continue;
             }
             let need = ((drop + height_step - 1) / height_step) as u16;
-            nibbles[side] = SKIRT_STEPS
+            *nibble = SKIRT_STEPS
                 .iter()
                 .position(|&s| s >= need)
                 .map_or(15, |p| p as u8);
@@ -388,9 +394,9 @@ fn split(
         });
         let spread = (0..3)
             .map(|ch| {
-                let (a, b) = found.iter().fold((255, 0), |(a, b), c| {
-                    (a.min(c.rgb[ch]), b.max(c.rgb[ch]))
-                });
+                let (a, b) = found
+                    .iter()
+                    .fold((255, 0), |(a, b), c| (a.min(c.rgb[ch]), b.max(c.rgb[ch])));
                 b - a
             })
             .max()

@@ -70,7 +70,10 @@ fn a_bump_in_a_flat_floor_splits_the_block_down_to_the_bump() {
     let (block, report) = bake(&cooked, &albedo(&cooked), SkinSettings::default()).unwrap();
     // The 8 by 8 block is not flat: it splits in four, the quarter holding the
     // bump splits again, and so on down to the single sector.
-    assert!(report.per_lod[0] > 4 && report.per_lod[0] < 64, "{report:?}");
+    assert!(
+        report.per_lod[0] > 4 && report.per_lod[0] < 64,
+        "{report:?}"
+    );
     assert!(report.by_size[0] >= 1, "{report:?}");
     let finest = &block.leaves[..usize::from(block.cell_first[1])];
     let bump = finest
@@ -127,8 +130,8 @@ fn the_skin_round_trips_through_the_core() {
     cooked.level.skin = Some(block.clone());
     let bytes = cooked.level.try_to_bytes().unwrap();
     let words = psx_grid::write::aligned_copy(&bytes);
-    let level = psx_grid::LevelView::parse(psx_grid::write::words_as_bytes(&words, bytes.len()))
-        .unwrap();
+    let level =
+        psx_grid::LevelView::parse(psx_grid::write::words_as_bytes(&words, bytes.len())).unwrap();
     assert_ne!(level.header.flags & psx_grid::LEVEL_HAS_SKIN, 0);
     assert_eq!(level.skin.copied(), Some(block.header));
     assert_eq!(level.skin_cells, block.cell_first.as_slice());

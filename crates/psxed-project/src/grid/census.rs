@@ -64,7 +64,10 @@ impl LevelBlobs {
 
     /// Pages (2 KiB) of every room chunk, in room order.
     pub fn pages(&self) -> Vec<usize> {
-        self.rooms.iter().map(|(_, len)| len.div_ceil(2048)).collect()
+        self.rooms
+            .iter()
+            .map(|(_, len)| len.div_ceil(2048))
+            .collect()
     }
 
     /// Rooms in the level.
@@ -417,7 +420,10 @@ fn boundary_fan(
         while d < 90.0 {
             let x = (f64::from(at[0]) + dx * d * s).floor() as i32;
             let z = (f64::from(at[2]) + dz * d * s).floor() as i32;
-            if let Some(room) = graph.owner.get(&(x.div_euclid(sector), z.div_euclid(sector))) {
+            if let Some(room) = graph
+                .owner
+                .get(&(x.div_euclid(sector), z.div_euclid(sector)))
+            {
                 if !set.contains(room) {
                     nearest = nearest.min(d);
                     sum += d;
@@ -542,26 +548,12 @@ impl Sweep {
             ring_cells.push(need.len() as f64);
             ring_need.push(page_sum(&need));
             ring_all.push(page_sum(&all));
-            if let Some((n, _)) = boundary_fan(
-                graph,
-                sector,
-                &need,
-                sample.at,
-                0.0,
-                2.0 * PI,
-                36,
-            ) {
+            if let Some((n, _)) = boundary_fan(graph, sector, &need, sample.at, 0.0, 2.0 * PI, 36) {
                 ring_near.push(n);
             }
             ring_area.push(equal_area_radius(&level, &need));
 
-            let set = flood_from(
-                &mut flood,
-                &level,
-                sample,
-                i32::MAX,
-                page_budget as u32,
-            );
+            let set = flood_from(&mut flood, &level, sample, i32::MAX, page_budget as u32);
             let stats = flood.stats();
             if stats.end == psx_grid::flood::FloodEnd::Exhausted {
                 exhausted += 1;
@@ -591,7 +583,8 @@ impl Sweep {
                     }
                     total += 1.0;
                     let c = graph.centre[index];
-                    let angle = (f64::from(c[2] - sample.at[2]).atan2(f64::from(c[0] - sample.at[0]))
+                    let angle = (f64::from(c[2] - sample.at[2])
+                        .atan2(f64::from(c[0] - sample.at[0]))
                         - sample.yaw
                         + 3.0 * PI)
                         % (2.0 * PI)
@@ -691,7 +684,11 @@ pub struct ResidentRadius {
 /// [`ResidentRadius`] for each radius in `radii`, over two random owned
 /// sectors per cell (the camera positions of the design note; the random
 /// stream runs on from one radius to the next).
-pub fn resident_radii(blobs: &LevelBlobs, ceiling_kib: usize, radii: &[f64]) -> Vec<ResidentRadius> {
+pub fn resident_radii(
+    blobs: &LevelBlobs,
+    ceiling_kib: usize,
+    radii: &[f64],
+) -> Vec<ResidentRadius> {
     let level = blobs.view();
     let sector = level.sector_units() as i32;
     let page_budget = flood_page_budget(blobs, ceiling_kib) as u32;

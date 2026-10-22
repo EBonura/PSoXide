@@ -676,8 +676,6 @@ mod extrude_tests;
 #[cfg(test)]
 mod flood_plan_tests;
 #[cfg(test)]
-mod skin_tests;
-#[cfg(test)]
 mod gap_tests;
 #[cfg(test)]
 mod leaf_tests;
@@ -699,6 +697,8 @@ mod plane_tests;
 mod probe_tests;
 #[cfg(test)]
 mod ramp_tests;
+#[cfg(test)]
+mod skin_tests;
 #[cfg(test)]
 mod span_tests;
 #[cfg(test)]
