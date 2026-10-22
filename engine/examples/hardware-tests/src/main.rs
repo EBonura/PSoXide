@@ -62,6 +62,7 @@ mod handoff_probe;
 mod kernel_timing;
 mod lever_probes;
 mod list_busy_probes;
+mod list_upload_probe;
 mod payload;
 mod perf_probes;
 mod photo;
@@ -226,7 +227,7 @@ const FONT_TPAGE: TexturePage = TexturePage::new(320, 0, TextureDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
 
 const ROWS_PER_PAGE: usize = 6;
-const TEST_COUNT: usize = 234;
+const TEST_COUNT: usize = 235;
 const PAD_POLL_TEST_INDEX: usize = 26;
 
 /// Number of timing variants the controller probe sweeps.
@@ -2452,6 +2453,14 @@ const TESTS: [TestSpec; TEST_COUNT] = [
         group: "DMA",
         name: "CPU during walk: scratchpad walk clocks",
         run: list_busy_probes::test_spad_cycles,
+    },
+    // Image transfers inside list nodes of at most 16 words, as the grid
+    // runtime's sky stream sends them (list_upload_probe.rs). Index 234.
+    TestSpec {
+        id: 0x00ea,
+        group: "DMA",
+        name: "list upload: A0h rows in 16-word nodes read back",
+        run: list_upload_probe::test_list_upload,
     },
 ];
 

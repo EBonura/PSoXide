@@ -33,6 +33,14 @@ shipped without either, which is why no machine-code baseline exists for them.
 
 ## History
 
+### List-upload case (2026-10-22, no version number)
+
+One conformance case, `0xEA` (index 234, `src/list_upload_probe.rs`), joins the DMA group without a version bump (a case added at the end moves no existing id). It uploads four 384 halfword rows as GP0(A0h) image transfers inside a channel 2 linked list, each transfer chopped into nodes of at most 16 payload words and the list ended by a texture-cache flush node, the way the grid runtime's sky stream sends them. A poison fill goes first, the block is read back with GP0(C0h) and compared word for word. The observed value is the count of differing words, plus flags for a stuck channel (bit 16), a GPU that never reports ready (bit 17) and a short readback (bit 18); every wait is bounded. Headless in the emulator with `PSOXIDE_CHECK_GPU_LL_FIFO=1` it passes, and with the kick removed it fails with all 768 words wrong. Not run on a console.
+
+The suite's own build also needed a repair: `psx-engine` reaches `psx-level`, whose wire module uses `alloc`, so `make hardware-tests` (and the lint step for it) now builds with `-Zbuild-std=core,alloc` and the crate links psx-rt's bump allocator. The boot EXE stays under its sector budget.
+
+To run just this case headless: from the main menu go UP three rows to RESUME FROM TEST, press R1 23 times and RIGHT four times (start index 234), then CROSS. The case prints as `case 234` in the TTY report before the long scans start.
+
 ### Grid-line E2 probe (2026-10-17, no version number, pending port to the consolidated suite)
 
 This is not a suite release. A real v1.28 exists (console run 2026-10-08) and a newer consolidated suite lives on another branch line, so this tree keeps the version it started from (v1.27) and carries the probe as extra steps. Six GPU batches price GP0(E2), the texture window the grid renderer repeats textures through (`0x140`-`0x145`, `src/gpu_probes.rs`). Every grid packet carries its own E2 word in front of the polygon, so the cases read in pairs: a reset window carried in each packet against none (`0x140` against `0x103`), an active 64 texel window against none at the same UV span (`0x141` against `0x10D`), one 32 texel window every packet against two alternating (`0x142` against `0x143`, the cost of changing window between neighbours, a possible texture-cache flush), a reset alternating with a window (`0x144`, the stream a level of plain and repeating quads makes) and a window repeated four times across a primitive (`0x145`). The timing capacity grows by six slots. Not run on a console; do not burn a disc from this tree as a release. Port the six cases to the consolidated suite and number them there.

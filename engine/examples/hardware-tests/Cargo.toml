@@ -41,7 +41,7 @@ psx-hw     = { path = "../../../crates/psx-hw" }
 psx-io     = { path = "../../../sdk/crates/psx-io" }
 psx-pack   = { path = "../../../sdk/crates/psx-pack" }
 psx-pad    = { path = "../../../sdk/crates/psx-pad" }
-psx-rt     = { path = "../../../sdk/crates/psx-rt" }
+psx-rt     = { path = "../../../sdk/crates/psx-rt", features = ["alloc"] }
 psx-spu    = { path = "../../../sdk/crates/psx-spu" }
 psx-vram   = { path = "../../../sdk/crates/psx-vram" }
 hello-memcard-recovery = { package = "hello-memcard", path = "../../../sdk/examples/hello-memcard" }
