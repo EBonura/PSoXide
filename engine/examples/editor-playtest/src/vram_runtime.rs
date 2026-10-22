@@ -314,34 +314,36 @@ static mut CHUNK_SKY_WINDOW: psx_game_runtime::cube_sky_stream::CubeSkyWindow =
     psx_game_runtime::cube_sky_stream::CubeSkyWindow::new();
 
 /// Keep the baked sky of the chunk the player is in on screen, for a world
-/// that bakes one per chunk (`GRID_SKY_SECTORS` non-zero). Call once per tick.
+/// that bakes one per chunk (a background table in the manifest). Call once
+/// per tick.
 #[cfg(feature = "cd-stream-bench")]
 pub(super) fn step_chunk_sky(room: Option<usize>) {
-    use crate::generated::{GRID_ROOM_SKY_SECTORS, GRID_SKY_SECTORS, WORLD_PACK_START_LBA};
-    if GRID_SKY_SECTORS == 0 {
+    use crate::generated::{
+        GRID_ROOM_SKY_COUNT, GRID_ROOM_SKY_SECTORS, GRID_SKY_BG_ROWS, GRID_SKY_INITIAL_MASK,
+        WORLD_PACK_START_LBA,
+    };
+    if GRID_SKY_BG_ROWS.is_empty() {
         return;
     }
     let Some(key) = chunk_sky_key() else {
         return;
     };
-    let offset = room
-        .and_then(|room| GRID_ROOM_SKY_SECTORS.get(room))
-        .copied()
-        .unwrap_or(0);
-    let lba = if offset == 0 {
-        0
-    } else {
-        WORLD_PACK_START_LBA + offset
+    let room = room.filter(|&room| room < GRID_ROOM_SKY_SECTORS.len());
+    let offset = room.map_or(0, |room| GRID_ROOM_SKY_SECTORS[room]);
+    let (lba, sectors) = match room {
+        Some(room) if offset != 0 => (WORLD_PACK_START_LBA + offset, GRID_ROOM_SKY_COUNT[room]),
+        _ => (0, 0),
     };
+    let resident = vram_arena().cube_sky_origin(key).is_some();
     // SAFETY: single-threaded guest; see `release_gameplay_vram`.
     unsafe {
         (*core::ptr::addr_of_mut!(CHUNK_SKY)).step(
             &mut psx_game_runtime::grid_stream::DiscTransport,
-            vram_arena(),
             &mut *core::ptr::addr_of_mut!(CHUNK_SKY_WINDOW),
-            key,
+            resident,
             lba,
-            GRID_SKY_SECTORS,
+            sectors,
+            GRID_SKY_INITIAL_MASK,
         );
         CHUNK_SKY_COUNTERS = (*core::ptr::addr_of!(CHUNK_SKY)).counters;
     }
@@ -363,27 +365,24 @@ fn chunk_sky_key() -> Option<psx_level::AssetId> {
         .map(|asset| asset.id)
 }
 
-/// Chunk sky rows the GPU uploads per frame: about 1,700 words of packets,
-/// a whole sky in 32 frames.
+/// Chunk sky tiles the GPU uploads or wipes per frame: about 1,150 words of
+/// packets, a whole swap (a thousand tiles) in about a dozen frames.
 #[cfg(feature = "cd-stream-bench")]
-const CHUNK_SKY_ROWS_PER_FRAME: u16 = 8;
+const CHUNK_SKY_OPS_PER_FRAME: usize = 96;
 
-/// Put the next landed rows of the chunk sky into this frame's list, in the
-/// sky's slot after the sky (so they run before it): the GPU uploads them as
-/// it draws and the CPU never waits for it.
+/// Put the next tile operations of the chunk sky into this frame's list, in
+/// the sky's slot after the sky (so they run before it): the GPU uploads
+/// them as it draws and the CPU never waits for it.
 #[cfg(feature = "cd-stream-bench")]
-pub(super) fn emit_chunk_sky_rows(
+pub(super) fn emit_chunk_sky_tiles(
     primitive_packets: &mut PrimitivePacketArena<'_>,
     ot: &mut OtFrame<'_, OT_DEPTH>,
 ) {
-    use crate::generated::GRID_SKY_SECTORS;
-    use psx_game_runtime::cube_sky_stream::{row_packet_words, write_row_packets};
-    if GRID_SKY_SECTORS == 0 {
+    use crate::generated::{GRID_SKY_BG_ROWS, GRID_SKY_BG_RUNS};
+    use psx_game_runtime::cube_sky_stream::{tile_packet_words, write_tile_packets, SkyPlan};
+    if GRID_SKY_BG_ROWS.is_empty() {
         return;
     }
-    let Some(origin) = chunk_sky_key().and_then(|key| vram_arena().cube_sky_origin(key)) else {
-        return;
-    };
     // SAFETY: single-threaded guest; see `release_gameplay_vram`.
     let (stream, window) = unsafe {
         (
@@ -391,26 +390,36 @@ pub(super) fn emit_chunk_sky_rows(
             &*core::ptr::addr_of!(CHUNK_SKY_WINDOW),
         )
     };
-    let rows = stream.rows_ready().min(CHUNK_SKY_ROWS_PER_FRAME);
-    if rows == 0 {
+    if !stream.active() {
         return;
     }
+    let mut plan = SkyPlan::<CHUNK_SKY_OPS_PER_FRAME>::new();
+    stream.plan(&mut plan, CHUNK_SKY_OPS_PER_FRAME);
+    if plan.is_empty() {
+        return;
+    }
+    let Some(origin) = chunk_sky_key().and_then(|key| vram_arena().cube_sky_origin(key)) else {
+        return;
+    };
     let Some(mut reservation) =
-        primitive_packets.reserve_packet_words(row_packet_words(usize::from(rows)))
+        primitive_packets.reserve_packet_words(tile_packet_words(plan.len()))
     else {
         return;
     };
-    let (words, packets) = write_row_packets(
-        stream,
+    let background = psx_level::sky_tiles::Background::new(GRID_SKY_BG_ROWS, GRID_SKY_BG_RUNS);
+    let (words, packets) = write_tile_packets(
+        &plan,
         window,
+        &background,
         origin,
-        rows,
         (OT_DEPTH - 1) as u16,
         reservation.words_mut(),
     );
     let Some(packets) = reservation.commit(words, packets) else {
         return;
     };
+    // The operations are in the frame's list: the stream has taken them.
+    stream.apply(&plan);
     // SAFETY: the stream is one committed arena range, live until the walk
     // ends, and its slot is below OT_DEPTH.
     unsafe { ot.add_committed_tagged_packet_stream_unchecked(packets) };
@@ -425,7 +434,8 @@ pub static mut CHUNK_SKY_COUNTERS: psx_game_runtime::cube_sky_stream::SkyCounter
         submitted: 0,
         landed: 0,
         failed: 0,
-        rows: 0,
+        tiles: 0,
+        wipes: 0,
         shown: 0,
         refused: 0,
     };

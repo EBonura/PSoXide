@@ -2052,7 +2052,7 @@ impl<
 
     /// The top-left VRAM pixel of the cube sky resident under `key`, for
     /// streaming another sky's texels over it
-    /// ([`crate::cube_sky_stream::write_row_packets`]).
+    /// ([`crate::cube_sky_stream::write_tile_packets`]).
     pub fn cube_sky_origin(&self, key: AssetId) -> Option<(u16, u16)> {
         let slot = self.slots.iter().flatten().find(|slot| {
             slot.asset == key && slot.clut_mode == VramSlotClutMode::DirectionalSky && slot.ready

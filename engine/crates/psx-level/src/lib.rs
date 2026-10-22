@@ -30,6 +30,7 @@
 
 extern crate alloc;
 
+pub mod sky_tiles;
 mod stable;
 pub mod wire;
 pub use stable::{position_of, StableId};

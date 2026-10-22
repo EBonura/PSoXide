@@ -320,7 +320,7 @@ impl Playtest {
                 ot,
             );
             #[cfg(feature = "cd-stream-bench")]
-            emit_chunk_sky_rows(primitive_packets, ot);
+            emit_chunk_sky_tiles(primitive_packets, ot);
             telemetry::stage_end(telemetry::stage::SKY);
             sort_probe_class(SORT_CLASS_WORLD);
         }

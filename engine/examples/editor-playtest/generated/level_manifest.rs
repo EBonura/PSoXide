@@ -27,10 +27,17 @@ pub const GAMEPLAY_PACK_MAX_CHUNK_BYTES: usize = 0;
 pub const WORLD_PACK_START_LBA: u32 = 1024;
 pub const GRID_ROOM_COUNT: usize = 0;
 pub const GRID_ROOM_POOL_PAGES: usize = 1;
-/// Per room, the sector of its baked cube sky relative to the start of
-/// WORLD.PAK (0 for none), and the sectors one sky occupies.
+/// Per room, the sector of its baked sparse cube sky relative to the start of
+/// WORLD.PAK (0 for none), and the sectors it occupies.
 pub const GRID_ROOM_SKY_SECTORS: [u32; GRID_ROOM_COUNT] = [];
-pub const GRID_SKY_SECTORS: u32 = 0;
+pub const GRID_ROOM_SKY_COUNT: [u32; GRID_ROOM_COUNT] = [];
+/// The index of every texel of the sky no ray hit (`psx_level::sky_tiles::Background`):
+/// where each row of each face starts in the runs, and the runs. Empty: the
+/// world streams no chunk skies.
+pub const GRID_SKY_BG_ROWS: &[u16] = &[];
+pub const GRID_SKY_BG_RUNS: &[u8] = &[];
+/// The tiles of the sky VRAM starts with (room 0's) that differ from the background.
+pub const GRID_SKY_INITIAL_MASK: &[u32] = &[];
 pub const LEN_ROOMS: usize = 0;
 pub const LEN_ROOM_REFLECTION_PROBES: usize = 0;
 pub const LEN_LIGHTS: usize = 0;
