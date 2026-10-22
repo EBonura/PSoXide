@@ -142,6 +142,7 @@ fn fixture_modes(escaped: bool, call_capacity: usize, second: bool, pinned: bool
         parts[4].bytes.extend(vec![0; 20 + 8 * 12]);
         put32(&mut parts[9].bytes, 7 * 16 + 4, 0x80010080);
         put32(&mut parts[9].bytes, 8 * 16 + 4, 0x80010094);
+
         for (name, address, size, section, kind) in [
             ("other_intro", other, 16, 12, 2),
             ("other_run", other + 16, 8, 12, 2),
@@ -195,6 +196,18 @@ fn fixture_modes(escaped: bool, call_capacity: usize, second: bool, pinned: bool
         rel.stride = 8;
         parts.push(rel);
     }
+    // Room for two veneers after every other table, so it moves with the data section.
+    let veneers_at = parts[4].address + parts[4].bytes.len() as u32;
+    parts[4].bytes.extend(vec![0; 48]);
+    let name_at = parts[10].bytes.len() as u32;
+    parts[10].bytes.extend(b"veneers\0");
+    let symbol_at = parts[9].bytes.len();
+    parts[9].bytes.resize(symbol_at + 16, 0);
+    put32(&mut parts[9].bytes, symbol_at, name_at);
+    put32(&mut parts[9].bytes, symbol_at + 4, veneers_at);
+    put32(&mut parts[9].bytes, symbol_at + 8, 48);
+    parts[9].bytes[symbol_at + 12] = 0x11;
+    put16(&mut parts[9].bytes, symbol_at + 14, 4);
     if escaped {
         let mut rel = part(".rel.data", 9, 0, 0, words(&[parts[4].address, 0x102]));
         rel.link = 9;
@@ -297,6 +310,7 @@ fn final_link_header_metadata_payload_and_hardened_publication_stay_bound() {
         "descriptor",
         "sites",
         "trap",
+        None,
     )
     .unwrap();
     assert_eq!(word(&initial.resident, 28), 2048);
@@ -329,6 +343,7 @@ fn final_link_header_metadata_payload_and_hardened_publication_stay_bound() {
         "descriptor",
         "sites",
         "trap",
+        None,
     )
     .unwrap();
     let final_checksum = psx_residency::arena::checksum(&final_package.words);
@@ -378,7 +393,8 @@ fn omitted_pointer_owner_and_final_table_overflow_reject() {
         ".ps_exe_head",
         "descriptor",
         "sites",
-        "trap"
+        "trap",
+        None
     )
     .is_err());
 }
@@ -448,11 +464,13 @@ fn composition_two_link_addresses_publish_all_tables_and_hardened_images() {
             descriptor: "descriptor",
             sites: "sites",
             trap: "trap",
+            veneers: None,
         },
         Binding {
             descriptor: "other_descriptor",
             sites: "other_sites",
             trap: "trap",
+            veneers: None,
         },
     ];
     let initial = compose(&elf, &images, &bindings, &resident, ".ps_exe_head").unwrap();
@@ -557,11 +575,13 @@ fn composition_rejects_shared_metadata_and_duplicate_module_identity() {
         descriptor: "descriptor",
         sites: "sites",
         trap: "trap",
+        veneers: None,
     };
     let two = Binding {
         descriptor: "other_descriptor",
         sites: "other_sites",
         trap: "trap",
+        veneers: None,
     };
     assert!(compose(
         &elf,
@@ -730,6 +750,7 @@ fn legacy_pinned_callback_requires_exact_declaration_and_cannot_use_leased_table
         "descriptor",
         "sites",
         "trap",
+        None,
         vec![0; 4096]
     )
     .is_err());
@@ -878,4 +899,199 @@ fn legacy_compact_finalization_preserves_pinned_pair_and_callback() {
     assert_eq!(published.resident, initial.resident);
     assert_eq!(final_images[0].words, images[0].words);
     assert_eq!(published.guard, initial.guard);
+}
+
+#[test]
+fn veneered_publication_routes_each_site_through_its_own_published_veneer() {
+    use psx_residency::arena::PackedVeneer;
+    let source = fixture(false, 8);
+    let elf = Elf::parse(&source).unwrap();
+    let resident = [".text", ".data"];
+    let original = pack(
+        &elf,
+        3006,
+        ".cold.text",
+        &[".cold.rodata"],
+        &resident,
+        &[("call_intro", "intro"), ("call_run", "run")],
+    )
+    .unwrap();
+    let initial = executable_images(
+        &elf,
+        &original,
+        &resident,
+        ".ps_exe_head",
+        "descriptor",
+        "sites",
+        "trap",
+        Some("veneers"),
+    )
+    .unwrap();
+    // `veneers` follows descriptor (20) and sites (8 x 12) in `.data`.
+    let veneers = 0x80010020 + 20 + 8 * 12;
+    let at = |address: u32| (address - 0x80010000) as usize + 2048;
+    for (index, site) in [0x80010008u32, 0x80010010].into_iter().enumerate() {
+        let veneer = veneers + index as u32 * PackedVeneer::BYTES;
+        assert_eq!(word(&initial.resident, at(site)), jump(veneer));
+        let published = PackedVeneer::published(veneer, 0x80010018);
+        for (n, expected) in published.code.into_iter().enumerate() {
+            assert_eq!(word(&initial.resident, at(veneer) + n * 4), expected);
+        }
+        assert_eq!(word(&initial.resident, at(veneer) + 20), 0x80010018);
+        // The guard keeps the original typed call for the static closure.
+        assert_eq!(
+            word(&initial.guard, at(site)),
+            original.incoming[index].instruction
+        );
+    }
+    // Hardening and republishing keep the veneers.
+    let mut hardened = initial.guard.clone();
+    let end = initial.resident.len();
+    put32(
+        &mut hardened,
+        end + 8,
+        0x08000000 | (((original.linked + 40) >> 2) & 0x03ffffff),
+    );
+    put32(
+        &mut hardened,
+        end + 40,
+        0x08000000 | (((original.linked + 16) >> 2) & 0x03ffffff),
+    );
+    let (_, finalized) = finalize_guard(
+        &elf,
+        &original,
+        &initial,
+        &hardened,
+        &resident,
+        "descriptor",
+        "sites",
+        "trap",
+        Some("veneers"),
+    )
+    .unwrap();
+    assert_eq!(word(&finalized.resident, at(0x80010008)), jump(veneers));
+    assert_eq!(
+        word(&finalized.resident, at(0x80010010)),
+        jump(veneers + PackedVeneer::BYTES)
+    );
+    assert_eq!(word(&finalized.resident, at(veneers) + 20), 0x80010018);
+}
+
+#[test]
+fn a_veneer_table_that_is_too_small_or_overlaps_a_table_rejects() {
+    let source = fixture(false, 8);
+    let elf = Elf::parse(&source).unwrap();
+    let resident = [".text", ".data"];
+    let image = pack(
+        &elf,
+        3006,
+        ".cold.text",
+        &[".cold.rodata"],
+        &resident,
+        &[("call_intro", "intro"), ("call_run", "run")],
+    )
+    .unwrap();
+    for name in ["sites", "descriptor", "trap", "missing"] {
+        assert!(
+            executable_images(
+                &elf,
+                &image,
+                &resident,
+                ".ps_exe_head",
+                "descriptor",
+                "sites",
+                "trap",
+                Some(name),
+            )
+            .is_err(),
+            "{name} is not a veneer table"
+        );
+    }
+}
+
+#[test]
+fn a_smaller_trampoline_reservation_shrinks_the_image_and_is_recorded() {
+    let source = fixture(false, 8);
+    let elf = Elf::parse(&source).unwrap();
+    let resident = [".text", ".data"];
+    let calls = [("call_intro", "intro"), ("call_run", "run")];
+    let default = pack(
+        &elf,
+        3006,
+        ".cold.text",
+        &[".cold.rodata"],
+        &resident,
+        &calls,
+    )
+    .unwrap();
+    let small = pack_sized(
+        &elf,
+        3006,
+        ".cold.text",
+        &[".cold.rodata"],
+        &resident,
+        &calls,
+        &[],
+        32,
+    )
+    .unwrap();
+    assert_eq!(default.trampoline_words, TRAMPOLINE_WORDS);
+    assert_eq!(small.trampoline_words, 32);
+    assert_eq!(
+        default.words[2] - small.words[2],
+        TRAMPOLINE_WORDS - 32,
+        "the image shrinks by the unreserved words"
+    );
+    let tail = 5 + small.words[2] as usize - 34;
+    assert_eq!(small.words[tail..tail + 2], [0x48415a54, 32]);
+    for bad in [0, 7, 1025] {
+        assert!(pack_sized(
+            &elf,
+            3006,
+            ".cold.text",
+            &[".cold.rodata"],
+            &resident,
+            &calls,
+            &[],
+            bad
+        )
+        .is_err());
+    }
+    // A hardened image of the smaller reservation finalizes against that reservation.
+    let initial = executable_images(
+        &elf,
+        &small,
+        &resident,
+        ".ps_exe_head",
+        "descriptor",
+        "sites",
+        "trap",
+        None,
+    )
+    .unwrap();
+    let mut hardened = initial.guard.clone();
+    let end = initial.resident.len();
+    put32(
+        &mut hardened,
+        end + 8,
+        0x08000000 | (((small.linked + 40) >> 2) & 0x03ffffff),
+    );
+    put32(
+        &mut hardened,
+        end + 40,
+        0x08000000 | (((small.linked + 16) >> 2) & 0x03ffffff),
+    );
+    let (final_package, _) = finalize_guard(
+        &elf,
+        &small,
+        &initial,
+        &hardened,
+        &resident,
+        "descriptor",
+        "sites",
+        "trap",
+        None,
+    )
+    .unwrap();
+    assert_eq!(final_package.trampoline_words, 32);
 }

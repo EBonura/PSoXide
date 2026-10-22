@@ -12,6 +12,9 @@ pub struct Binding<'a> {
     pub descriptor: &'a str,
     pub sites: &'a str,
     pub trap: &'a str,
+    /// Optional table of `PackedVeneer` records, one per typed call site: the shipped
+    /// sites then jump to a resident veneer and a lease never patches an instruction.
+    pub veneers: Option<&'a str>,
 }
 /// Where the unchanged module-aware guards find each linked cold image.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,7 +51,10 @@ fn validate(
     let symbols = elf.symbols()?;
     let mut tables = Vec::new();
     for binding in bindings {
-        for name in [binding.descriptor, binding.sites] {
+        for name in [binding.descriptor, binding.sites]
+            .into_iter()
+            .chain(binding.veneers)
+        {
             let mut found = symbols.iter().filter(|s| s.name == name);
             let symbol = found.next().ok_or("composition metadata symbol")?;
             if found.next().is_some() {
@@ -178,6 +184,7 @@ pub fn compose(
         first.descriptor,
         first.sites,
         first.trap,
+        first.veneers,
     )?
     .resident;
     for (image, binding) in images.iter().zip(bindings).skip(1) {
@@ -188,6 +195,7 @@ pub fn compose(
             binding.descriptor,
             binding.sites,
             binding.trap,
+            binding.veneers,
             output,
         )?
         .resident;
@@ -264,6 +272,7 @@ pub fn finalize<'a>(
             binding.descriptor,
             binding.sites,
             binding.trap,
+            binding.veneers,
         )?;
         final_images.push(result);
     }
@@ -276,6 +285,7 @@ pub fn finalize<'a>(
             binding.descriptor,
             binding.sites,
             binding.trap,
+            binding.veneers,
             output,
         )?
         .resident;

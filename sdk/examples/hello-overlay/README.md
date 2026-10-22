@@ -110,6 +110,32 @@ let dependencies = [handle];
 registry.unload(handle);
 ```
 
+### Jump veneers: leases that never flush
+
+`StaticImport` patches the call-site instruction on lease entry and traps it again on exit, and
+each patch is a (DMA-gated) instruction-cache flush. A path that leases every tick pays two per
+import per tick. Declare a veneer table beside the call table and pass it to the packer, and the
+sites stop being patched at all:
+
+```rust
+#[used] #[no_mangle]
+#[cfg_attr(target_arch = "mips", link_section = ".data.actor_veneers")]
+static mut ACTOR_VENEERS: [PackedVeneer; N] = [PackedVeneer::PLACEHOLDER; N];
+```
+
+```sh
+overlay-compose ... --sites ACTOR_CALLS --veneers ACTOR_VENEERS --trap actor_unloaded ...
+```
+
+`N` is at least the number of emitted call sites (the packer rejects a smaller table). It routes
+shipped site `i` to veneer `i` (`lui t0; lw t0,lo(t0); nop; jr t0; nop` plus one data word,
+24 bytes, initialised to the trap). Admission then binds with `VeneerImport`
+(`record i` of the table, the module and the export offset) and `Admission::invoke_veneered`:
+entering the lease stores the module entry into each veneer's data word, leaving it (normal
+or unwind) stores the trap back. The code words never change, and the data word is not
+cached, so nothing flushes per call; `Registry::install` is the only flush, once per image
+placement. Veneer `i` must be paired with the `i`th `PackedCall` record.
+
 For multiple entries/sites construct the complete fixed-capacity import list
 from `packed.calls` and each `PackedCall`, with unique instruction words; do not
 bind only the selected wrapper's first site. Keep `Registry` resident across

@@ -93,6 +93,88 @@ pub struct PackedCall {
     /// Cold export byte offset.
     pub offset: u32,
 }
+/// A resident jump veneer for one typed call site, built by the final-link packer
+/// (`overlay-compose --veneers SYMBOL`). The site's J/JAL always targets the veneer;
+/// the veneer loads its own `target` word and jumps there. A lease writes the
+/// overlay's entry into `target` and the trap back when it ends, so entering and
+/// leaving a lease are two data stores: the instruction cache is flushed only when
+/// an image is installed or replaced ([`Registry::install`]), never per call.
+///
+/// The five code words never change after the final link and are never written at
+/// run time, so the cache can hold them for good. The data load of `target`
+/// is not cached (the console's data cache is the scratchpad).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PackedVeneer {
+    /// `lui t0, hi; lw t0, lo(t0); nop; jr t0; nop`, addressing `target` absolutely.
+    pub code: [u32; 5],
+    /// Where the veneer jumps: the resident trap while no lease is live.
+    pub target: u32,
+}
+impl PackedVeneer {
+    /// Size of one veneer, and the stride of a veneer table.
+    pub const BYTES: u32 = 24;
+    /// Initial contents of a veneer table in resident `.data`; the packer overwrites
+    /// every record it uses. Keep the table in `.data` (`link_section`), never `.bss`.
+    pub const PLACEHOLDER: Self = Self {
+        code: [0; 5],
+        target: 0,
+    };
+    /// The code words of the veneer stored at `address`. The pair `lui`/`lw`
+    /// addresses the veneer's own `target` word at `address + 20`; `$t0` is a
+    /// caller-saved temporary that no argument register or return value uses.
+    pub const fn code_for(address: u32) -> [u32; 5] {
+        let slot = address.wrapping_add(20);
+        [
+            0x3c08_0000 | (slot.wrapping_add(0x8000) >> 16),
+            0x8d08_0000 | (slot & 0xffff),
+            0,
+            0x0100_0008,
+            0,
+        ]
+    }
+    /// The veneer the packer publishes at `address`, trapping until a lease binds it.
+    pub const fn published(address: u32, trap: u32) -> Self {
+        Self {
+            code: Self::code_for(address),
+            target: trap,
+        }
+    }
+}
+
+/// One veneered typed call: the resident veneer, the module that owns the export and
+/// the export's byte offset in that module's image.
+pub struct VeneerImport<'a> {
+    veneer: &'a mut PackedVeneer,
+    address: u32,
+    module: Handle,
+    offset: u32,
+}
+impl<'a> VeneerImport<'a> {
+    /// Bind only a veneer the final-link packer published for the packaged Rust
+    /// entry at `offset`; its call site's typed caller and callee must share their
+    /// exact ABI/types, as for [`StaticImport`].
+    ///
+    /// # Safety
+    /// `veneer` must be the actual resident record at `address`, and no other CPU or
+    /// DMA user may write it while the import exists.
+    pub unsafe fn new(
+        veneer: &'a mut PackedVeneer,
+        address: u32,
+        module: Handle,
+        offset: u32,
+    ) -> Self {
+        #[cfg(target_arch = "mips")]
+        debug_assert_eq!(veneer as *mut PackedVeneer as usize as u32, address);
+        Self {
+            veneer,
+            address,
+            module,
+            offset,
+        }
+    }
+}
+
 /// Word checksum matching the existing HK module transport.
 pub fn checksum(words: &[u32]) -> u32 {
     words.iter().fold(0x811c9dc5, |hash, word| {
@@ -369,6 +451,84 @@ impl<const SLOTS: usize> Admission<'_, '_, SLOTS> {
         drop(guard);
         Ok(result)
     }
+
+    /// Like [`Admission::invoke`], for call sites the packer routed through
+    /// resident jump veneers ([`PackedVeneer`]). Entering the lease stores each
+    /// module entry into its veneer's `target` word; leaving it (normal or unwind)
+    /// stores the trap back. Nothing is patched and nothing is flushed: the
+    /// instruction cache sees only the image install, so a lease costs two data
+    /// stores per import instead of a gated cache flush on entry and another on exit.
+    ///
+    /// Every import is validated before any veneer is touched: the module must be
+    /// admitted, the export inside its executable prefix, the veneer exactly the
+    /// published code for its address, and its target the trap (a leaked earlier
+    /// lease is an integrity failure, not a silent rebind).
+    ///
+    /// # Safety
+    /// As [`Admission::invoke`]: the closure may call only the exact packaged
+    /// entries through their typed callers, must not retain module callbacks or
+    /// pointers, and must not start asynchronous users of module bytes beyond the scope.
+    pub unsafe fn invoke_veneered<R>(
+        &self,
+        imports: &mut [VeneerImport<'_>],
+        trap: u32,
+        caller: impl FnOnce() -> R,
+    ) -> Result<R, Error> {
+        if trap & 3 != 0 {
+            return Err(Error::Integrity);
+        }
+        for import in imports.iter() {
+            self.words(import.module)?;
+            let info = self.registry.installed[import.module.slot() as usize];
+            if import.address & 3 != 0
+                || import.offset & 3 != 0
+                || import.offset >= info.code_end
+                || import.veneer.code != PackedVeneer::code_for(import.address)
+                || import.veneer.target != trap
+            {
+                return Err(Error::Integrity);
+            }
+        }
+        for import in imports.iter_mut() {
+            let run = self
+                .registry
+                .pool
+                .try_run(import.module)
+                .ok_or(Error::Stale)?;
+            let entry = self.arena.address + run.first_page + import.offset;
+            // SAFETY: the record is exclusive (`VeneerImport::new`); a volatile store
+            // is the one write the veneer's load must observe.
+            unsafe { core::ptr::write_volatile(&mut import.veneer.target, entry) };
+        }
+        order_stores();
+        let guard = VeneerScope { imports, trap };
+        let result = caller();
+        drop(guard);
+        Ok(result)
+    }
+}
+struct VeneerScope<'a, 'veneer> {
+    imports: &'a mut [VeneerImport<'veneer>],
+    trap: u32,
+}
+impl Drop for VeneerScope<'_, '_> {
+    fn drop(&mut self) {
+        for import in self.imports.iter_mut() {
+            // SAFETY: as in `invoke_veneered`; the trap was validated before binding.
+            unsafe { core::ptr::write_volatile(&mut import.veneer.target, self.trap) };
+        }
+        order_stores();
+    }
+}
+/// Keep the compiler from moving the veneer stores across the lease's calls.
+fn order_stores() {
+    #[cfg(target_arch = "mips")]
+    // SAFETY: empty asm only constrains compiler memory ordering.
+    unsafe {
+        core::arch::asm!("", options(nostack, preserves_flags));
+    }
+    #[cfg(not(target_arch = "mips"))]
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
 }
 struct CallScope<'a, 'instruction> {
     imports: &'a mut [StaticImport<'instruction>],
@@ -393,6 +553,8 @@ fn flush_sites(imports: &[StaticImport<'_>]) {
         psx_rt::cache::flush_instruction_cache_range(import.site, import.site + 4);
         #[cfg(not(target_arch = "mips"))]
         let _ = import;
+        #[cfg(test)]
+        count_flush();
     }
     #[cfg(target_arch = "mips")]
     // SAFETY: empty asm only constrains compiler memory ordering.
@@ -403,6 +565,8 @@ fn flush_sites(imports: &[StaticImport<'_>]) {
     core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
 }
 fn flush() {
+    #[cfg(test)]
+    count_flush();
     #[cfg(target_arch = "mips")]
     psx_rt::cache::flush_instruction_cache();
     // The pinned MIPS-I backend lowers compiler_fence to unsupported SYNC.
@@ -414,6 +578,20 @@ fn flush() {
     }
     #[cfg(not(target_arch = "mips"))]
     core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// Instruction-cache flushes requested on this thread, for the host tests.
+    static FLUSHES: core::cell::Cell<u32> = const { core::cell::Cell::new(0) };
+}
+#[cfg(test)]
+fn count_flush() {
+    FLUSHES.with(|count| count.set(count.get() + 1));
+}
+#[cfg(test)]
+fn flush_count() -> u32 {
+    FLUSHES.with(core::cell::Cell::get)
 }
 
 #[cfg(test)]
@@ -579,5 +757,167 @@ mod tests {
             unsafe { admission.invoke(&mut imports, trap, || ()) },
             Err(Error::Integrity)
         );
+    }
+
+    const TRAP: u32 = 0x80010080;
+    const VENEER_AT: u32 = 0x80020000;
+
+    #[test]
+    fn veneered_calls_flush_nothing_after_install() {
+        let mut backing = [0u32; 8];
+        let mut arena = CallerArena::new(&mut backing, 0x801d8000).unwrap();
+        let mut registry = Registry::<2>::new(0, 32);
+        let words = package(7);
+        let installs = flush_count();
+        let handle = registry
+            .install(&mut arena, &words, descriptor(&words))
+            .unwrap();
+        assert_eq!(flush_count() - installs, 1, "an install flushes once");
+        let mut veneer = PackedVeneer::published(VENEER_AT, TRAP);
+        let after_install = flush_count();
+        for tick in 0..100u32 {
+            let dependencies = [handle];
+            let admission = registry.admit(&mut arena, &dependencies).unwrap();
+            let mut imports =
+                // SAFETY: model veneer storage is exclusive and never executed.
+                [unsafe { VeneerImport::new(&mut veneer, VENEER_AT, handle, 0) }];
+            // SAFETY: the closure executes no model instruction and starts no async user.
+            let seen = unsafe {
+                admission.invoke_veneered(&mut imports, TRAP, || {
+                    // Not reached through the model; the veneer is bound while we run.
+                    tick
+                })
+            };
+            assert_eq!(seen, Ok(tick));
+        }
+        assert_eq!(
+            flush_count(),
+            after_install,
+            "a lease must not flush the instruction cache"
+        );
+        // The counter sees the patching lease (so the assertion above is not vacuous):
+        // it flushes once to bind and once to trap again.
+        let mut instruction = 0x0c000000;
+        let dependencies = [handle];
+        let admission = registry.admit(&mut arena, &dependencies).unwrap();
+        // SAFETY: model instruction storage is exclusive and never executed.
+        let mut sites = [unsafe { StaticImport::new(&mut instruction, 0x80010000, handle, 0) }];
+        // SAFETY: the closure executes no model instruction or async user.
+        unsafe { admission.invoke(&mut sites, TRAP, || ()) }.unwrap();
+        assert_eq!(flush_count() - after_install, 2);
+    }
+
+    #[test]
+    fn a_veneer_targets_the_overlay_only_while_the_lease_is_live() {
+        let mut backing = [0u32; 8];
+        let mut arena = CallerArena::new(&mut backing, 0x801d8000).unwrap();
+        let mut registry = Registry::<2>::new(0, 32);
+        let words = package(7);
+        let handle = registry
+            .install(&mut arena, &words, descriptor(&words))
+            .unwrap();
+        let mut veneer = PackedVeneer::published(VENEER_AT, TRAP);
+        let dependencies = [handle];
+        let admission = registry.admit(&mut arena, &dependencies).unwrap();
+        let entry = 0x801d8000 + 4; // installed address plus the export offset
+        {
+            let veneer_ptr: *const PackedVeneer = &veneer;
+            let mut imports =
+                // SAFETY: model storage, never executed.
+                [unsafe { VeneerImport::new(&mut veneer, VENEER_AT, handle, 4) }];
+            // SAFETY: the closure only reads the model veneer through a raw pointer.
+            let bound = unsafe {
+                admission.invoke_veneered(&mut imports, TRAP, || {
+                    core::ptr::read_volatile(&(*veneer_ptr).target)
+                })
+            };
+            assert_eq!(bound, Ok(entry));
+        }
+        assert_eq!(veneer.target, TRAP, "the lease's end traps the veneer");
+        assert_eq!(veneer.code, PackedVeneer::code_for(VENEER_AT));
+        // An unwind restores the trap too.
+        {
+            let mut imports =
+                // SAFETY: model storage, never executed.
+                [unsafe { VeneerImport::new(&mut veneer, VENEER_AT, handle, 4) }];
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                // SAFETY: the closure only unwinds.
+                unsafe { admission.invoke_veneered(&mut imports, TRAP, || panic!("unwind")) }
+            }));
+            assert!(result.is_err());
+        }
+        assert_eq!(veneer.target, TRAP);
+    }
+
+    #[test]
+    fn a_veneer_that_is_not_the_published_one_is_refused_before_anything_binds() {
+        let mut backing = [0u32; 8];
+        let mut arena = CallerArena::new(&mut backing, 0x801d8000).unwrap();
+        let mut registry = Registry::<2>::new(0, 32);
+        let words = package(7);
+        let handle = registry
+            .install(&mut arena, &words, descriptor(&words))
+            .unwrap();
+        let dependencies = [handle];
+        let admission = registry.admit(&mut arena, &dependencies).unwrap();
+        let mut good = PackedVeneer::published(VENEER_AT, TRAP);
+        let mut bad = PackedVeneer::published(VENEER_AT + 32, TRAP);
+        bad.code[3] ^= 1; // not a `jr`
+        {
+            let mut imports = [
+                // SAFETY: model storage, never executed.
+                unsafe { VeneerImport::new(&mut good, VENEER_AT, handle, 0) },
+                // SAFETY: as above.
+                unsafe { VeneerImport::new(&mut bad, VENEER_AT + 32, handle, 0) },
+            ];
+            assert_eq!(
+                // SAFETY: validation rejects this before any lease begins.
+                unsafe { admission.invoke_veneered(&mut imports, TRAP, || ()) },
+                Err(Error::Integrity)
+            );
+        }
+        assert_eq!(good.target, TRAP, "nothing was bound on a refused lease");
+        // A veneer already pointing somewhere else (a lease leaked) is refused as well.
+        good.target = 0x801d8000;
+        let mut imports =
+            // SAFETY: model storage, never executed.
+            [unsafe { VeneerImport::new(&mut good, VENEER_AT, handle, 0) }];
+        assert_eq!(
+            // SAFETY: as above.
+            unsafe { admission.invoke_veneered(&mut imports, TRAP, || ()) },
+            Err(Error::Integrity)
+        );
+        // An export outside the executable prefix is refused like a site import.
+        let mut fresh = PackedVeneer::published(VENEER_AT, TRAP);
+        let mut imports =
+            // SAFETY: model storage, never executed.
+            [unsafe { VeneerImport::new(&mut fresh, VENEER_AT, handle, 8) }];
+        assert_eq!(
+            // SAFETY: as above.
+            unsafe { admission.invoke_veneered(&mut imports, TRAP, || ()) },
+            Err(Error::Integrity)
+        );
+    }
+
+    #[test]
+    fn the_veneer_encoding_loads_its_own_target_word_and_jumps_to_it() {
+        // lui t0, hi; lw t0, lo(t0); nop; jr t0; nop; then the target word.
+        for address in [0x80020000, 0x8002ffec, 0x80017ff8, 0x801fffe8] {
+            let code = PackedVeneer::code_for(address);
+            let slot = address + 20;
+            let hi = code[0] & 0xffff;
+            let lo = code[1] & 0xffff;
+            assert_eq!(code[0] >> 16, 0x3c08, "lui $t0");
+            assert_eq!(code[1] >> 16, 0x8d08, "lw $t0, lo($t0)");
+            assert_eq!(code[2], 0, "the load delay slot is a nop");
+            assert_eq!(code[3], 0x0100_0008, "jr $t0");
+            assert_eq!(code[4], 0, "the jump delay slot is a nop");
+            assert_eq!(
+                (hi << 16).wrapping_add(lo as u16 as i16 as i32 as u32),
+                slot,
+                "the pair addresses the veneer's own target word"
+            );
+        }
+        assert_eq!(core::mem::size_of::<PackedVeneer>(), 24);
     }
 }

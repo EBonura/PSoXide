@@ -16,6 +16,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut descriptor = None;
     let mut sites = None;
     let mut trap = None;
+    let mut veneers = None;
+    let mut trampoline_words = overlay_pack::TRAMPOLINE_WORDS;
     let mut final_guard = None;
     let mut fields = args[2..].chunks_exact(2);
     for field in fields.by_ref() {
@@ -33,6 +35,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "--descriptor" if descriptor.is_none() => descriptor = Some(field[1].as_str()),
             "--sites" if sites.is_none() => sites = Some(field[1].as_str()),
             "--trap" if trap.is_none() => trap = Some(field[1].as_str()),
+            "--veneers" if veneers.is_none() => veneers = Some(field[1].as_str()),
+            "--trampoline-words" => trampoline_words = field[1].parse()?,
             "--final-guard" if final_guard.is_none() => final_guard = Some(field[1].as_str()),
             _ => return Err("unknown or repeated argument".into()),
         }
@@ -42,13 +46,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     let bytes = std::fs::read(&args[0])?;
     let elf = Elf::parse(&bytes)?;
-    let mut image = overlay_pack::pack(
+    let mut image = overlay_pack::pack_sized(
         &elf,
         id.ok_or("missing id")?,
         code.ok_or("missing code")?,
         &data,
         &resident,
         &calls,
+        &[],
+        trampoline_words,
     )?;
     let mut executable =
         if header.is_some() || descriptor.is_some() || sites.is_some() || trap.is_some() {
@@ -60,6 +66,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 descriptor.ok_or("missing descriptor")?,
                 sites.ok_or("missing sites")?,
                 trap.ok_or("missing trap")?,
+                veneers,
             )?)
         } else {
             None
@@ -77,6 +84,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             descriptor.ok_or("missing descriptor")?,
             sites.ok_or("missing sites")?,
             trap.ok_or("missing trap")?,
+            veneers,
         )?;
         image = final_image;
         executable = Some(final_executable);
