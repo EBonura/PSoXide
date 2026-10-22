@@ -1,0 +1,24 @@
+[package]
+name    = "showcase-vector"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+
+[workspace]
+
+[[bin]]
+name = "showcase-vector"
+path = "src/main.rs"
+
+[profile.release]
+panic         = "abort"
+codegen-units = 1
+lto           = true
+opt-level     = 2
+
+[dependencies]
+psx-engine = { path = "../../crates/psx-engine" }
+psx-gpu    = { path = "../../../sdk/crates/psx-gpu" }
+psx-io     = { path = "../../../sdk/crates/psx-io" }
+psx-rt     = { path = "../../../sdk/crates/psx-rt", features = ["alloc"] }
+psx-vector = { path = "../../crates/psx-vector" }

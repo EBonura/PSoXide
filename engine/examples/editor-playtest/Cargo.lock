@@ -27,6 +27,7 @@ dependencies = [
  "psx-residency",
  "psx-rt",
  "psx-spu",
+ "psx-vector",
  "psx-vram",
  "psxed-format",
 ]
@@ -233,6 +234,14 @@ dependencies = [
 [[package]]
 name = "psx-tick"
 version = "0.1.0"
+
+[[package]]
+name = "psx-vector"
+version = "0.1.0"
+dependencies = [
+ "psx-gpu",
+ "psx-math",
+]
 
 [[package]]
 name = "psx-vram"

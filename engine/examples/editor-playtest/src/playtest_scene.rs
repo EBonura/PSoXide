@@ -1827,6 +1827,18 @@ impl Scene for Playtest {
                 } else {
                     None
                 };
+                #[cfg(feature = "vector-hud-proof")]
+                {
+                    let _ = (font, cooldown_progress_q12, echo_elapsed);
+                    crate::vector_hud::draw(
+                        gpu,
+                        active,
+                        share(active),
+                        share(active.other()),
+                        self.combat_flow.energy,
+                    );
+                }
+                #[cfg(not(feature = "vector-hud-proof"))]
                 draw_player_vitality_hud(
                     gpu,
                     font,

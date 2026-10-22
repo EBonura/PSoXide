@@ -121,6 +121,10 @@ mod player_ranged;
 mod playtest_runtime;
 mod playtest_scene;
 mod playtest_update;
+#[cfg(feature = "vector-hud-proof")]
+mod stance_hud_layout;
+#[cfg(feature = "vector-hud-proof")]
+mod vector_hud;
 mod vitality_circle_runtime;
 use playtest_update::{Gait, LocoPhase};
 mod room_lighting_runtime;

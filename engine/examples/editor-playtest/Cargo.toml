@@ -103,6 +103,11 @@ fps-overlay = []
 # Opt-in actor collision-cylinder tuning overlay (L3). The complete input,
 # scene-state and renderer path is absent from normal/shipping playtests.
 collision-debug-overlay = ["psx-game-runtime/collision-debug-overlay"]
+# Draw the stance HUD from the cooked SVG (assets/hud/stance_hud.psvg) instead of
+# the rectangle HUD, from the real stance, vitality and energy state, and keep
+# its cycle cost in a PSVGMEAS RAM block. Off by default: the default guest is
+# byte-identical with or without this code in the tree.
+vector-hud-proof = ["dep:psx-io", "dep:psx-vector"]
 ot-1024 = []
 ot-2048 = []
 
@@ -117,6 +122,7 @@ psx-gte    = { path = "../../../sdk/crates/psx-gte" }
 psx-io     = { path = "../../../sdk/crates/psx-io", optional = true }
 psx-level  = { path = "../../crates/psx-level" }
 psx-math   = { path = "../../../sdk/crates/psx-math" }
+psx-vector = { path = "../../crates/psx-vector", optional = true }
 psx-pad    = { path = "../../../sdk/crates/psx-pad" }
 psx-residency = { path = "../../../sdk/crates/psx-residency" }
 psx-mc     = { path = "../../../sdk/crates/psx-mc" }
