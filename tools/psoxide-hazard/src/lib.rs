@@ -160,7 +160,7 @@ pub fn text_bounds(
         Some(1)
     })?;
     let (lo, hi) = map.text;
-    if !(0x8001_0000 <= lo && lo < hi && hi <= 0x801F_8000) {
+    if !(0x8001_0000 <= lo && lo < hi && hi <= 0x801f_8000) {
         let _ = writeln!(out, "implausible .text bounds {lo:#x}..{hi:#x}");
         return Err(Some(1));
     }

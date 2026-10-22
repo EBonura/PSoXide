@@ -736,7 +736,7 @@ impl<'p, H: Hw> Engine<'p, H> {
         let reply = self.hw.receive();
         if last || self.txn.pacing == BytePacing::Timed {
             self.accept(reply);
-        } else if self.txn.idx == 0 && reply == 0xFF {
+        } else if self.txn.idx == 0 && reply == 0xff {
             self.finish(Outcome::Absent);
         } else {
             self.fail(Fault::AckTimeout);
@@ -757,7 +757,7 @@ impl<'p, H: Hw> Engine<'p, H> {
                 PadMode::Disconnected => return self.finish(Outcome::Absent),
                 PadMode::Unknown => return self.fail(Fault::BadId),
             },
-            (2, magic) if magic != 0x5A => return self.fail(Fault::BadMagic),
+            (2, magic) if magic != 0x5a => return self.fail(Fault::BadMagic),
             _ => {}
         }
         if idx + 1 >= self.txn.len {
@@ -765,8 +765,8 @@ impl<'p, H: Hw> Engine<'p, H> {
                 Kind::Poll => Outcome::Pad(self.decode()),
                 Kind::Config(packet) => Outcome::Configured {
                     mapped: packet[0] == MOTOR_MAP_PACKET[0]
-                        && self.txn.rx[1] == 0xF3
-                        && self.txn.rx[2] == 0x5A,
+                        && self.txn.rx[1] == 0xf3
+                        && self.txn.rx[2] == 0x5a,
                 },
             };
             self.finish(outcome);

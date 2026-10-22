@@ -9,13 +9,13 @@ pub const NAMES: [&str; 32] = [
     "t7", "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "t8", "t9", "k0", "k1", "gp", "sp", "fp",
     "ra",
 ];
-pub const MAGIC: u32 = 0x4841_5A54;
+pub const MAGIC: u32 = 0x4841_5a54;
 /// Every register starts as STALE + its number.
-pub const STALE: u32 = 0x5A1E_0000;
+pub const STALE: u32 = 0x5a1e_0000;
 /// What the slot load fetches.
-pub const VALUE: u32 = 0x2A;
+pub const VALUE: u32 = 0x2a;
 pub const NOP: u32 = 0;
-pub const BREAK: u32 = 0x0D;
+pub const BREAK: u32 = 0x0d;
 
 pub fn reg(name: &str) -> u32 {
     NAMES
@@ -28,7 +28,7 @@ pub fn r_type(funct: u32, rs: &str, rt: &str, rd: &str) -> u32 {
     reg(rs) << 21 | reg(rt) << 16 | reg(rd) << 11 | funct
 }
 pub fn i_type(op: u32, rs: &str, rt: &str, imm: i64) -> u32 {
-    op << 26 | reg(rs) << 21 | reg(rt) << 16 | (imm as u32 & 0xFFFF)
+    op << 26 | reg(rs) << 21 | reg(rt) << 16 | (imm as u32 & 0xffff)
 }
 pub fn addu(rd: &str, rs: &str, rt: &str) -> u32 {
     r_type(0x21, rs, rt, rd)
@@ -49,10 +49,10 @@ pub fn addiu(rt: &str, rs: &str, imm: i64) -> u32 {
     i_type(0x09, rs, rt, imm)
 }
 pub fn lui(rt: &str, imm: i64) -> u32 {
-    i_type(0x0F, "zero", rt, imm)
+    i_type(0x0f, "zero", rt, imm)
 }
 pub fn ori(rt: &str, rs: &str, imm: i64) -> u32 {
-    i_type(0x0D, rs, rt, imm)
+    i_type(0x0d, rs, rt, imm)
 }
 pub fn lw(rt: &str, off: i64, rs: &str) -> u32 {
     i_type(0x23, rs, rt, off)
@@ -61,7 +61,7 @@ pub fn lbu(rt: &str, off: i64, rs: &str) -> u32 {
     i_type(0x24, rs, rt, off)
 }
 pub fn sw(rt: &str, off: i64, rs: &str) -> u32 {
-    i_type(0x2B, rs, rt, off)
+    i_type(0x2b, rs, rt, off)
 }
 pub fn beq(rs: &str, rt: &str, offset: i64) -> u32 {
     i_type(0x04, rs, rt, offset)
@@ -73,16 +73,16 @@ pub fn b(offset: i64) -> u32 {
     beq("zero", "zero", offset)
 }
 pub fn j(target: u32) -> u32 {
-    2 << 26 | (target >> 2) & 0x03FF_FFFF
+    2 << 26 | (target >> 2) & 0x03ff_ffff
 }
 pub fn jal(target: u32) -> u32 {
-    3 << 26 | (target >> 2) & 0x03FF_FFFF
+    3 << 26 | (target >> 2) & 0x03ff_ffff
 }
 pub fn hi(addr: u32) -> i64 {
-    i64::from((addr.wrapping_add(0x8000) >> 16) & 0xFFFF)
+    i64::from((addr.wrapping_add(0x8000) >> 16) & 0xffff)
 }
 pub fn lo(addr: u32) -> i64 {
-    i64::from(addr & 0xFFFF)
+    i64::from(addr & 0xffff)
 }
 
 /// A PS-EXE with code at `base`, functions every 0x100 bytes, a data page at
@@ -97,7 +97,7 @@ pub struct Image {
 impl Image {
     pub const CODE: u32 = 0x000;
     pub const DATA: u32 = 0x800;
-    pub const TRAMPOLINES: u32 = 0xC00;
+    pub const TRAMPOLINES: u32 = 0xc00;
 
     pub fn new(base: u32) -> Self {
         let mut image = Self {
@@ -153,7 +153,7 @@ pub fn run(path: &Path) -> [u32; 32] {
     for _ in 0..500 {
         let w = word(mem, pc - base);
         let (op, rs, rt) = (w >> 26, (w >> 21 & 31) as usize, (w >> 16 & 31) as usize);
-        let (rd, funct, imm) = ((w >> 11 & 31) as usize, w & 63, w & 0xFFFF);
+        let (rd, funct, imm) = ((w >> 11 & 31) as usize, w & 63, w & 0xffff);
         let simm = imm as u16 as i16 as i32;
         let landing = pending.take();
         let (nxt, mut nnxt) = (npc, npc + 4);
@@ -170,7 +170,7 @@ pub fn run(path: &Path) -> [u32; 32] {
             nnxt = regs[rs];
         } else if op == 0 && w == NOP {
         } else if op == 2 || op == 3 {
-            nnxt = (pc & 0xF000_0000) | (w & 0x03FF_FFFF) << 2;
+            nnxt = (pc & 0xf000_0000) | (w & 0x03ff_ffff) << 2;
             if op == 3 {
                 write = Some((31, pc + 8));
             }
@@ -180,9 +180,9 @@ pub fn run(path: &Path) -> [u32; 32] {
             }
         } else if op == 0x09 {
             write = Some((rt, regs[rs].wrapping_add(simm as u32)));
-        } else if op == 0x0D {
+        } else if op == 0x0d {
             write = Some((rt, regs[rs] | imm));
-        } else if op == 0x0F {
+        } else if op == 0x0f {
             write = Some((rt, imm << 16));
         } else if op == 0x23 || op == 0x24 {
             let addr = regs[rs].wrapping_add(simm as u32);

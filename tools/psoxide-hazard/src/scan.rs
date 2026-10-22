@@ -50,7 +50,7 @@ twice. A slot load whose consumer cannot be seen from the image (`jr ra`,
 
 /// psx-spx's test for a GTE command: opcode 0x12 (COP2) with bit 25 set.
 pub fn is_gte_command(word: i64) -> bool {
-    word & 0xFE00_0000 == 0x4A00_0000
+    word & 0xfe00_0000 == 0x4a00_0000
 }
 
 /// Addresses of branches whose delay slot holds a GTE command.

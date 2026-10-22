@@ -90,7 +90,7 @@ pub fn decompress_from<F: FnMut() -> Option<u8>>(mut next: F, dst: &mut [u8]) ->
                 let b1 = next()? as u16;
                 let token = (b0 << 8) | b1;
                 let dist = ((token >> 4) + 1) as usize;
-                let len = (token & 0xF) as usize + MIN_MATCH;
+                let len = (token & 0xf) as usize + MIN_MATCH;
                 if dist > pos {
                     return None; // reference before start of output
                 }
@@ -194,7 +194,7 @@ mod tests {
         data[1] = b'C';
         for k in 0..8 {
             data[64 * k + 3] = k as u8;
-            data[64 * k + 4] = 0xFF;
+            data[64 * k + 4] = 0xff;
         }
         roundtrip(&data);
         let mut comp = [0u8; 2048];

@@ -269,7 +269,7 @@ mod tests {
 
     // ---- The same decisions through a StrictRetail mixer lane. ----
 
-    const RETAIL: u32 = 0x00FF_FFFE; // channels 1..=23
+    const RETAIL: u32 = 0x00ff_fffe; // channels 1..=23
 
     fn sample() -> Sample {
         Sample::resident(SpuAddr::new(0x1010), 44100, 100)

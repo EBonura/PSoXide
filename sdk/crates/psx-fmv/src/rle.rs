@@ -13,7 +13,7 @@ pub const BLOCK_WORDS: usize = 32;
 
 /// Longest run-length input one decode command can announce: the largest
 /// multiple of [`BLOCK_WORDS`] that fits the command's 16-bit word count.
-pub const MAX_WORDS: usize = 0xFFFF / BLOCK_WORDS * BLOCK_WORDS;
+pub const MAX_WORDS: usize = 0xffff / BLOCK_WORDS * BLOCK_WORDS;
 
 /// A run-length length the MDEC cannot be handed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -105,7 +105,7 @@ mod tests {
         assert_eq!(dma_block_count(32), Ok(1));
         assert_eq!(dma_block_count(33), Err(RleLengthError::NotWholeBlocks));
         assert_eq!(dma_block_count(MAX_WORDS), Ok(2047));
-        assert_eq!(MAX_WORDS, 0xFFE0);
+        assert_eq!(MAX_WORDS, 0xffe0);
         assert_eq!(
             dma_block_count(MAX_WORDS + BLOCK_WORDS),
             Err(RleLengthError::TooLong)
@@ -123,14 +123,14 @@ mod tests {
         assert_eq!(halfwords.len(), 8);
         halfwords[0] = 0x1111;
         halfwords[1] = 0x2222;
-        halfwords[7] = 0xFE00;
+        halfwords[7] = 0xfe00;
         let expected = if cfg!(target_endian = "little") {
-            [0x2222_1111, 0, 0, 0xFE00_0000]
+            [0x2222_1111, 0, 0, 0xfe00_0000]
         } else {
-            [0x1111_2222, 0, 0, 0x0000_FE00]
+            [0x1111_2222, 0, 0, 0x0000_fe00]
         };
         assert_eq!(buffer.as_words(), &expected);
-        buffer.as_halfwords_mut()[2] = 0xAAAA;
-        assert_eq!(buffer.as_words()[1] & 0xFFFF, 0xAAAA);
+        buffer.as_halfwords_mut()[2] = 0xaaaa;
+        assert_eq!(buffer.as_words()[1] & 0xffff, 0xaaaa);
     }
 }

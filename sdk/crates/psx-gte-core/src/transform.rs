@@ -31,7 +31,7 @@ use psx_math::SIN_TABLE;
 /// which is good enough for real-time 3D but not for scientific use.
 #[inline]
 pub const fn sin_1_3_12(angle: u16) -> i16 {
-    SIN_TABLE[(angle & 0xFF) as usize]
+    SIN_TABLE[(angle & 0xff) as usize]
 }
 
 /// Cosine of `angle` in 256-per-revolution units, returned in 1.3.12.

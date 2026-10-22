@@ -263,7 +263,7 @@ mod tests {
     /// into the field being shown), the rectangle command, its corner and its
     /// size.
     fn words(level: i8) -> [u32; 4] {
-        let mode = if level > 0 { 0xE100_0420 } else { 0xE100_0440 };
+        let mode = if level > 0 { 0xe100_0420 } else { 0xe100_0440 };
         [
             mode,
             0x6200_0000 | (grey(level) * 0x0001_0101),
@@ -301,14 +301,14 @@ mod tests {
                 .overlay(Resolution::R320X240)
                 .unwrap()
                 .words(),
-            [0xE100_0440, 0x6228_2828, 0, 0x00F0_0140]
+            [0xe100_0440, 0x6228_2828, 0, 0x00f0_0140]
         );
         assert_eq!(
             Brightness::MAX
                 .overlay(Resolution::R320X240)
                 .unwrap()
                 .words(),
-            [0xE100_0420, 0x6228_2828, 0, 0x00F0_0140]
+            [0xe100_0420, 0x6228_2828, 0, 0x00f0_0140]
         );
     }
 
@@ -325,7 +325,7 @@ mod tests {
             assert_eq!(
                 w,
                 [
-                    0xE100_0020,
+                    0xe100_0020,
                     0x6200_0000 | (level as u32 * 8 * 0x0001_0101),
                     0,
                     320 | (240 << 16)

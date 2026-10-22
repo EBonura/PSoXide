@@ -318,7 +318,7 @@ impl<const N: usize> OrderingTable<N> {
                 debug_assert!(slot < N);
                 // SAFETY: the caller guarantees the packet and the slot meet
                 // `link_tag_high_unchecked`'s contract.
-                unsafe { self.link_tag_high_unchecked(slot, packet_ptr, slot_words & 0xFF00_0000) };
+                unsafe { self.link_tag_high_unchecked(slot, packet_ptr, slot_words & 0xff00_0000) };
             }
         }
     }
@@ -419,7 +419,7 @@ impl<const N: usize> OrderingTable<N> {
                 debug_assert!(slot < N);
                 // SAFETY: the caller guarantees the packet and the slot meet
                 // `link_tag_high_unchecked`'s contract.
-                unsafe { self.link_tag_high_unchecked(slot, packet_ptr, slot_words & 0xFF00_0000) };
+                unsafe { self.link_tag_high_unchecked(slot, packet_ptr, slot_words & 0xff00_0000) };
             }
         }
     }
@@ -540,7 +540,7 @@ impl<const N: usize> OrderingTable<N> {
                 if slot != u16::MAX as usize {
                     debug_assert!(slot < N);
                     // SAFETY: the caller guarantees a writable packet and an in-range slot.
-                    unsafe { self.link_tag_high_unchecked(slot, packet, staged_tag & 0xFF00_0000) };
+                    unsafe { self.link_tag_high_unchecked(slot, packet, staged_tag & 0xff00_0000) };
                 }
                 packet = next;
             }
@@ -641,7 +641,7 @@ impl<const N: usize> OrderingTable<N> {
                     // SAFETY: the caller guarantees a writable packet and an in-range shifted
                     // slot.
                     unsafe {
-                        self.link_tag_high_unchecked(shifted_slot, packet, staged_tag & 0xFF00_0000)
+                        self.link_tag_high_unchecked(shifted_slot, packet, staged_tag & 0xff00_0000)
                     };
                 }
                 packet = next;
@@ -893,7 +893,7 @@ impl Iterator for Packets<'_> {
             // `packets`'s caller swore was live; tag word is
             // always present in any chained slot.
             let tag = unsafe { ptr::read_volatile(ptr) };
-            let words = ((tag >> 24) & 0xFF) as u8;
+            let words = ((tag >> 24) & 0xff) as u8;
             self.next = tag & OT_ADDR_MASK;
             if words > 0 {
                 self.last_packet = link;
@@ -1004,12 +1004,12 @@ mod tests {
         ot.clear();
         let mut packets = [
             (1 << 24) | 4,
-            0xAAAA_AAAA,
+            0xaaaa_aaaa,
             (2 << 24) | u16::MAX as u32,
-            0xBBBB_BBBB,
-            0xCCCC_CCCC,
+            0xbbbb_bbbb,
+            0xcccc_cccc,
             (1 << 24) | 4,
-            0xDDDD_DDDD,
+            0xdddd_dddd,
         ];
 
         let first = packets.as_mut_ptr();
@@ -1034,11 +1034,11 @@ mod tests {
         ot.clear();
         let mut packets = [
             (1 << 24) | 31,
-            0xAAAA_AAAA,
+            0xaaaa_aaaa,
             (1 << 24) | u16::MAX as u32,
-            0xBBBB_BBBB,
+            0xbbbb_bbbb,
             (1 << 24) | 24,
-            0xCCCC_CCCC,
+            0xcccc_cccc,
         ];
 
         // SAFETY: `packets` is one contiguous run of complete packets whose slots fit the
@@ -1071,9 +1071,9 @@ mod tests {
         ot.clear();
         // Packet layout: [tag, w0, w1, w2] -- 3 data words after the tag.
         let mut packet: [u32; 4] = [0; 4];
-        packet[1] = 0xAAAA_BBBB;
-        packet[2] = 0xCCCC_DDDD;
-        packet[3] = 0xEEEE_FFFF;
+        packet[1] = 0xaaaa_bbbb;
+        packet[2] = 0xcccc_dddd;
+        packet[3] = 0xeeee_ffff;
         // SAFETY: the packets are locals that outlive every use of the table in this test, and
         // their slots and word counts fit the table.
         unsafe {
@@ -1095,8 +1095,8 @@ mod tests {
     fn packets_walks_multiple_slots_in_dma_order() {
         let mut ot: OrderingTable<8> = OrderingTable::new();
         ot.clear();
-        let mut a: [u32; 2] = [0, 0xA];
-        let mut b: [u32; 2] = [0, 0xB];
+        let mut a: [u32; 2] = [0, 0xa];
+        let mut b: [u32; 2] = [0, 0xb];
         // SAFETY: the packets are locals that outlive every use of the table in this test, and
         // their slots and word counts fit the table.
         unsafe {
@@ -1150,9 +1150,9 @@ mod tests {
     fn end_with_node_puts_the_node_after_every_packet() {
         let mut ot: OrderingTable<4> = OrderingTable::new();
         ot.clear();
-        let node = [(1u32 << 24) | OT_END, 0x1F00_0000];
-        let mut far: [u32; 2] = [0, 0xF];
-        let mut near: [u32; 2] = [0, 0xE];
+        let node = [(1u32 << 24) | OT_END, 0x1f00_0000];
+        let mut far: [u32; 2] = [0, 0xf];
+        let mut near: [u32; 2] = [0, 0xe];
         // SAFETY: the packets are locals that outlive every use of the table in this test, and
         // their slots and word counts fit the table.
         unsafe {
@@ -1186,8 +1186,8 @@ mod tests {
     fn end_with_node_refuses_a_used_slot_0() {
         let mut ot: OrderingTable<4> = OrderingTable::new();
         ot.clear();
-        let node = [(1u32 << 24) | OT_END, 0x1F00_0000];
-        let mut packet: [u32; 2] = [0, 0xF];
+        let node = [(1u32 << 24) | OT_END, 0x1f00_0000];
+        let mut packet: [u32; 2] = [0, 0xf];
         // SAFETY: the packet and the node are locals that outlive the table's use.
         unsafe {
             ot.link(0, packet.as_mut_ptr(), 1);
@@ -1202,7 +1202,7 @@ mod tests {
         assert_eq!(node[0] >> 24, 1);
         assert_eq!(node[0] & OT_ADDR_MASK, OT_END);
         assert_eq!(node[1], psx_hw::gpu::gp0::REQUEST_IRQ);
-        assert_eq!(node[1] >> 24, 0x1F);
+        assert_eq!(node[1] >> 24, 0x1f);
     }
 
     /// Multiple primitives in the same slot chain via the most-
@@ -1239,7 +1239,7 @@ mod tests {
     fn packets_stops_on_duplicate_packet_in_same_slot() {
         let mut ot: OrderingTable<4> = OrderingTable::new();
         ot.clear();
-        let mut packet: [u32; 2] = [0, 0xAA00_0000];
+        let mut packet: [u32; 2] = [0, 0xaa00_0000];
         // SAFETY: the packets are locals that outlive every use of the table in this test, and
         // their slots and word counts fit the table.
         unsafe {
@@ -1263,7 +1263,7 @@ mod tests {
     fn packets_stops_on_duplicate_packet_through_empty_slot() {
         let mut ot: OrderingTable<4> = OrderingTable::new();
         ot.clear();
-        let mut packet: [u32; 2] = [0, 0xBB00_0000];
+        let mut packet: [u32; 2] = [0, 0xbb00_0000];
         // SAFETY: the packets are locals that outlive every use of the table in this test, and
         // their slots and word counts fit the table.
         unsafe {

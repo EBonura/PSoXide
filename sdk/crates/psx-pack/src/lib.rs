@@ -155,7 +155,7 @@ pub fn find_chunk(bytes: &[u8], header: &PackHeader, chunk_id: u32) -> Option<Pa
 
 /// FNV-1a over `bytes`; the checksum `psx-iso` stores per entry.
 pub fn fnv1a32(bytes: &[u8]) -> u32 {
-    let mut hash = 0x811C_9DC5u32;
+    let mut hash = 0x811c_9dc5u32;
     for &byte in bytes {
         hash ^= byte as u32;
         hash = hash.wrapping_mul(0x0100_0193);
@@ -294,7 +294,7 @@ mod tests {
 
     #[test]
     fn parses_a_pack_the_real_writer_built() {
-        let a = vec![0xAAu8; 100];
+        let a = vec![0xaau8; 100];
         let b: Vec<u8> = (0..5000u32).map(|i| (i * 7) as u8).collect();
         let pack = psx_iso::build_world_pack(&[(10, a.as_slice()), (42, b.as_slice())]);
 

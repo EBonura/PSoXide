@@ -66,9 +66,9 @@ fn base_discriminator(raw: u64) -> u32 {
     }
     let d = (raw >> 1) as u32;
     if d & 0x20 != 0 {
-        ((d >> 1) & 0xFE0) | (d & 0x1F)
+        ((d >> 1) & 0xfe0) | (d & 0x1f)
     } else {
-        d & 0x1F
+        d & 0x1f
     }
 }
 
@@ -614,7 +614,7 @@ fn convert(elf_path: &Path, pc_paths: &[PathBuf], out_path: &Path) -> Result<()>
             let Some(callee) = hit.func.name.as_ref() else {
                 break;
             };
-            let offset = (hit.call_line.wrapping_sub(current.line) & 0xFFFF) as u32;
+            let offset = (hit.call_line.wrapping_sub(current.line) & 0xffff) as u32;
             node = node
                 .calls
                 .entry((offset, hit.call_discriminator, callee.clone()))
@@ -622,7 +622,7 @@ fn convert(elf_path: &Path, pc_paths: &[PathBuf], out_path: &Path) -> Result<()>
             current = &hit.func;
             children = &hit.children;
         }
-        let offset = (line.wrapping_sub(current.line) & 0xFFFF) as u32;
+        let offset = (line.wrapping_sub(current.line) & 0xffff) as u32;
         // An unrolled copy runs once per `duplication` iterations of the
         // source loop, so its count stands for that many (AutoFDO scales the
         // same way). Unscaled, every unrolled hot loop reads as colder than
@@ -1023,7 +1023,7 @@ mod tests {
         assert_eq!(base_discriminator(1), 0); // odd: no base component
         assert_eq!(base_discriminator(3 << 1), 3);
         // Bases above 0x1f: low five bits, a flag, then the rest.
-        let encoded = ((0x25 & 0xFE0) << 1) | (0x25 & 0x1F) | 0x20;
+        let encoded = ((0x25 & 0xfe0) << 1) | (0x25 & 0x1f) | 0x20;
         assert_eq!(base_discriminator(encoded << 1), 0x25);
     }
 

@@ -19,7 +19,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
     fn live_index(&self, h: NoteHandle) -> Option<usize> {
         let n = (h.0 >> 8) as usize;
         let nt = self.notes.get(n)?;
-        (nt.live && nt.live_gen == (h.0 & 0xFF) as u8 && nt.list != NoteList::Disabled).then_some(n)
+        (nt.live && nt.live_gen == (h.0 & 0xff) as u8 && nt.list != NoteList::Disabled).then_some(n)
     }
 
     /// Start a note: `instrument` of the soundfont whose original id is
@@ -76,7 +76,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
         nt.sample_rate = info.rate_hz;
         nt.sample_blocks = info.blocks;
         nt.sample_looped = info.loop_block != NONE16;
-        nt.saved_freq_q16 = mul_q16(PITCH_Q16[(key & 0x7F) as usize], tuned.tuning_q16);
+        nt.saved_freq_q16 = mul_q16(PITCH_Q16[(key & 0x7f) as usize], tuned.tuning_q16);
         nt.saved_vel_q15 = vel_sq_q15(velocity);
         nt.saved_pan = pan.min(127);
         nt.needs_key_on = true;

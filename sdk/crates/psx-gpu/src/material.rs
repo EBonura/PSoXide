@@ -90,8 +90,8 @@ impl TextureWindow {
             origin_y as u16 + size_y as u16 <= 256,
             "texture window must fit the texture-page height"
         );
-        let mask_x = ((!((size_x as u16) - 1)) & 0x00FF) as u8;
-        let mask_y = ((!((size_y as u16) - 1)) & 0x00FF) as u8;
+        let mask_x = ((!((size_x as u16) - 1)) & 0x00ff) as u8;
+        let mask_y = ((!((size_y as u16) - 1)) & 0x00ff) as u8;
         Self::new(mask_x / 8, mask_y / 8, origin_x / 8, origin_y / 8)
     }
 
@@ -424,7 +424,7 @@ impl TextureMaterial {
     pub const fn draw_mode_word(self) -> u32 {
         let tpage = self.texture_page_word();
         gp0::draw_mode(
-            (tpage & 0x0F) as u32,
+            (tpage & 0x0f) as u32,
             ((tpage >> 4) & 1) as u32,
             self.blend_mode.texture_page_bits() as u32,
             ((tpage >> 7) & 0x3) as u32,
@@ -462,7 +462,7 @@ mod tests {
     #[test]
     fn material_encodes_blend_dither_and_command_bits() {
         let material =
-            TextureMaterial::blended(0x1234, 0x018F, (0x80, 0x40, 0x20), BlendMode::AddQuarter)
+            TextureMaterial::blended(0x1234, 0x018f, (0x80, 0x40, 0x20), BlendMode::AddQuarter)
                 .with_texture_window(super::TextureWindow::power_of_two_tile(64, 64, 64, 64))
                 .with_raw_texture(true)
                 .with_dither(true);
@@ -470,12 +470,12 @@ mod tests {
         assert_eq!(material.clut_word(), 0x1234);
         assert_eq!((material.texture_page_word() >> 5) & 0x3, 3);
         assert_eq!((material.texture_page_word() >> 9) & 0x1, 1);
-        assert_eq!(material.texture_window_word(), 0xE204_2318);
+        assert_eq!(material.texture_window_word(), 0xe204_2318);
         assert_eq!(material.texture_window.origin_texels(), [64, 64]);
-        assert_eq!((material.textured_rect_header() >> 24) & 0xFF, 0x67);
+        assert_eq!((material.textured_rect_header() >> 24) & 0xff, 0x67);
         assert_eq!(
-            (material.flat_textured_polygon_header(true) >> 24) & 0xFF,
-            0x2F
+            (material.flat_textured_polygon_header(true) >> 24) & 0xff,
+            0x2f
         );
     }
 

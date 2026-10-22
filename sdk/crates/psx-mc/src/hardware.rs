@@ -33,8 +33,8 @@ use psx_io::periph::ControllerPort;
 const CARD_SELECT: u8 = 0x81;
 const CMD_READ: u8 = 0x52;
 const CMD_WRITE: u8 = 0x57;
-const ID1: u8 = 0x5A;
-const ACK1: u8 = 0x5C;
+const ID1: u8 = 0x5a;
+const ACK1: u8 = 0x5c;
 const END_GOOD: u8 = 0x47;
 /// A card needs a slightly longer recovery interval after acknowledging the
 /// initial `0x81` device-select byte than it does between ordinary frame bytes.
@@ -306,7 +306,7 @@ impl<T: Transport> Link<'_, T> {
         let end = self.xfer(0x00, false); // terminator, no ACK
         self.end();
 
-        if id1 == 0xFF {
+        if id1 == 0xff {
             return Err(Error::NoCard);
         }
         // FLAG bit 2 reports an error from the previous write transaction.
@@ -354,7 +354,7 @@ impl<T: Transport> Link<'_, T> {
         let end = self.xfer(0x00, false); // terminator
         self.end();
 
-        if id1 == 0xFF {
+        if id1 == 0xff {
             return Err(Error::NoCard);
         }
         if id1 != ID1 || ack1 != ACK1 {

@@ -98,18 +98,18 @@ impl CardBus {
     /// The reply to the byte at packet position `index`.
     fn reply(&self, index: usize) -> u8 {
         if self.behaviour == Behaviour::Absent {
-            return 0xFF;
+            return 0xff;
         }
         let checksum = |data: &[u8]| data.iter().fold(self.msb ^ self.lsb, |a, b| a ^ b);
         match (self.command, index) {
-            (_, 0) => 0xFF,
+            (_, 0) => 0xff,
             (_, 1) => 0x08,
             (_, 2) => ID1,
-            (_, 3) => 0x5D,
+            (_, 3) => 0x5d,
             (_, 4) => 0x00,
             (_, 5) => self.msb,
             (CMD_READ, 6) => ACK1,
-            (CMD_READ, 7) => 0x5D,
+            (CMD_READ, 7) => 0x5d,
             (CMD_READ, 8) => self.msb,
             (CMD_READ, 9) => self.lsb,
             (CMD_READ, 10..=137) => {
@@ -126,12 +126,12 @@ impl CardBus {
             (CMD_READ, 139) => END_GOOD,
             (CMD_WRITE, 6..=134) => 0x00,
             (CMD_WRITE, 135) => ACK1,
-            (CMD_WRITE, 136) => 0x5D,
+            (CMD_WRITE, 136) => 0x5d,
             (CMD_WRITE, 137) => {
                 if self.staged_ok {
                     END_GOOD
                 } else {
-                    0x4E
+                    0x4e
                 }
             }
             _ => 0x00,
@@ -277,7 +277,7 @@ fn a_frame_reads_back_what_the_card_holds() {
     // 140 byte exchanges, every one but the terminator acknowledged.
     assert_eq!((trace.exchanges, trace.acknowledgements), (140, 139));
     assert_eq!(trace.fault, TransportFault::None);
-    assert_eq!(&trace.response_prefix[..3], &[0xFF, 0x08, ID1]);
+    assert_eq!(&trace.response_prefix[..3], &[0xff, 0x08, ID1]);
 }
 
 #[test]
@@ -347,12 +347,12 @@ fn a_stale_ack_during_select_does_not_acknowledge_the_first_byte() {
 #[test]
 fn a_written_frame_lands_on_the_card_and_reads_back() {
     let mut bus = CardBus::new(Behaviour::Normal);
-    let data = core::array::from_fn(|i| (i as u8).wrapping_mul(3) ^ 0xA5);
-    let (result, trace) = write(&mut bus, 0x2FF, &data);
+    let data = core::array::from_fn(|i| (i as u8).wrapping_mul(3) ^ 0xa5);
+    let (result, trace) = write(&mut bus, 0x2ff, &data);
     assert_eq!(result, Ok(()));
     assert_eq!((trace.exchanges, trace.acknowledgements), (138, 137));
-    assert_eq!(bus.frame(0x2FF), &data[..]);
-    let (result, out, _) = read(&mut bus, 0x2FF);
+    assert_eq!(bus.frame(0x2ff), &data[..]);
+    let (result, out, _) = read(&mut bus, 0x2ff);
     assert_eq!(result, Ok(()));
     assert_eq!(out, data);
 }
@@ -382,7 +382,7 @@ fn write_through(
     ignore = "the post-write settle is hundreds of thousands of interpreted reads"
 )]
 fn the_settled_write_spins_out_the_commit_and_the_unsettled_one_leaves_it_to_the_caller() {
-    let data = core::array::from_fn(|i| (i as u8).wrapping_mul(5) ^ 0x3C);
+    let data = core::array::from_fn(|i| (i as u8).wrapping_mul(5) ^ 0x3c);
     let mut settled = CardBus::new(Behaviour::Normal);
     assert_eq!(write_through(&mut settled, 0x40, &data, true), Ok(()));
     let mut unsettled = CardBus::new(Behaviour::Normal);

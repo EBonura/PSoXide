@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //! Batch same-final-link publication of independent cold images.
-use psoxide_hazard::{
-    overlay_composition::{self, Binding},
-    overlay_elf::Elf,
-    overlay_pack,
-};
-use std::{collections::BTreeSet, path::Path};
+use psoxide_hazard::overlay_composition::{self, Binding};
+use psoxide_hazard::overlay_elf::Elf;
+use psoxide_hazard::overlay_pack;
+use std::collections::BTreeSet;
+use std::path::Path;
 #[derive(Default)]
 struct Spec<'a> {
     name: &'a str,

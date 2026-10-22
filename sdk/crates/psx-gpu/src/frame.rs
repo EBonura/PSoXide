@@ -835,7 +835,7 @@ mod tests {
             b.as_mut_ptr() as usize,
             3 | (1 << 24),
         ];
-        let mut stream = [(1u32 << 24) | 1, 0xAAAA_AAAA];
+        let mut stream = [(1u32 << 24) | 1, 0xaaaa_aaaa];
         let mut ot = OrderingTable::<4>::new();
         let mut frame = ot.frame();
         // SAFETY: the commands, packets and stream outlive every use of the

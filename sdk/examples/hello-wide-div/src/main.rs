@@ -420,7 +420,7 @@ const T2_SYSCLK_DIV8: u32 = 1 << 9;
 
 fn now() -> u32 {
     // SAFETY: a read of root counter 2's current-value register.
-    unsafe { read_volatile(T2_COUNTER) & 0xFFFF }
+    unsafe { read_volatile(T2_COUNTER) & 0xffff }
 }
 
 /// Counter ticks (8 CPU cycles each) for `REPS` batches of `BATCH` calls of `body(i)`.
@@ -431,7 +431,7 @@ fn ticks(mut body: impl FnMut(usize)) -> u32 {
         for i in 0..BATCH as usize {
             body(i);
         }
-        total += now().wrapping_sub(start) & 0xFFFF;
+        total += now().wrapping_sub(start) & 0xffff;
     }
     total
 }

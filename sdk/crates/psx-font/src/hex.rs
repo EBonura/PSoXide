@@ -24,10 +24,10 @@ pub fn format_u16(v: u16) -> HexU16 {
     let mut out = [0u8; 6];
     out[0] = b'0';
     out[1] = b'x';
-    out[2] = HEX[((v >> 12) & 0xF) as usize];
-    out[3] = HEX[((v >> 8) & 0xF) as usize];
-    out[4] = HEX[((v >> 4) & 0xF) as usize];
-    out[5] = HEX[(v & 0xF) as usize];
+    out[2] = HEX[((v >> 12) & 0xf) as usize];
+    out[3] = HEX[((v >> 8) & 0xf) as usize];
+    out[4] = HEX[((v >> 4) & 0xf) as usize];
+    out[5] = HEX[(v & 0xf) as usize];
     HexU16(out)
 }
 
@@ -38,7 +38,7 @@ mod tests {
     #[test]
     fn formats_fixed_width_uppercase() {
         assert_eq!(format_u16(0).as_str(), "0x0000");
-        assert_eq!(format_u16(0x1F40).as_str(), "0x1F40");
+        assert_eq!(format_u16(0x1f40).as_str(), "0x1F40");
         assert_eq!(format_u16(u16::MAX).as_str(), "0xFFFF");
     }
 }

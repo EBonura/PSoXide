@@ -8,11 +8,11 @@
 use crate::format::NONE16;
 
 /// "No note", "no layer" and similar.
-pub(crate) const NONE8: u8 = 0xFF;
+pub(crate) const NONE8: u8 = 0xff;
 /// "No owner" for a note.
-pub(crate) const NO_OWNER: u16 = 0xFFFF;
+pub(crate) const NO_OWNER: u16 = 0xffff;
 /// IO port value meaning "never written".
-pub const IO_NONE: u8 = 0xFF;
+pub const IO_NONE: u8 = 0xff;
 /// Channels per player.
 pub const CHANNELS: usize = 16;
 /// Layers per channel.
@@ -201,7 +201,7 @@ impl Channel {
         mute_behavior: 0,
         note_alloc_policy: 0,
         env: EnvRef::Default,
-        decay_idx: 0xF0,
+        decay_idx: 0xf0,
         sustain: 0,
         volume_q15: 32768,
         volume_scale_q15: 32768,
@@ -288,7 +288,7 @@ impl Layer {
         transpose: 0,
         vel_sq_q15: 0,
         vel_sq2_q15: 0,
-        inst_or_wave: 0xFF,
+        inst_or_wave: 0xff,
         inst: InstSel::NONE,
         env: EnvRef::Default,
         decay_idx: 0,

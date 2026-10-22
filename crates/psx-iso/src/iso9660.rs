@@ -321,7 +321,7 @@ impl IsoBuilder {
 
         // ---------- Volume Descriptor Set Terminator ----------------
         let mut vdst = vec![0u8; SECTOR_SIZE];
-        vdst[0] = 0xFF;
+        vdst[0] = 0xff;
         vdst[1..6].copy_from_slice(b"CD001");
         vdst[6] = 0x01;
 
@@ -369,7 +369,7 @@ impl IsoBuilder {
             // Sync pattern: 00 FF×10 00.
             sector[0] = 0x00;
             for b in &mut sector[1..=10] {
-                *b = 0xFF;
+                *b = 0xff;
             }
             sector[11] = 0x00;
             // Header: BCD MSF + mode byte. MSF starts at 00:02:00 for
@@ -439,7 +439,7 @@ impl IsoBuilder {
 //   where it sits on the disc.
 
 /// Raw-sector offset of the four header bytes (BCD MSF, mode).
-const HEADER_AT: usize = 0x0C;
+const HEADER_AT: usize = 0x0c;
 /// Raw-sector offset of the first subheader copy; EDC coverage starts here.
 const SUBHEADER_AT: usize = 0x10;
 /// Raw-sector offset of the submode byte in the first subheader copy.
@@ -449,7 +449,7 @@ const SUBMODE_FORM2: u8 = 1 << 5;
 /// Where the EDC goes in a Form 1 sector (after 2048 data bytes).
 const FORM1_EDC_AT: usize = 0x818;
 /// Where the EDC goes in a Form 2 sector (after 2324 data bytes).
-const FORM2_EDC_AT: usize = 0x92C;
+const FORM2_EDC_AT: usize = 0x92c;
 
 /// The EDC generator, as ECMA-130 writes it:
 /// (x^16 + x^15 + x^2 + 1) * (x^16 + x^2 + x + 1). Each factor is
@@ -459,7 +459,7 @@ const EDC_GENERATOR: u64 = carryless_mul(0x1_8005, 0x1_0007);
 /// The generator's low 32 coefficients, bit-reversed, for a CRC that
 /// takes each byte least significant bit first.
 const EDC_POLY_LSB_FIRST: u32 = (EDC_GENERATOR as u32).reverse_bits();
-const _: () = assert!(EDC_POLY_LSB_FIRST == 0xD801_8001);
+const _: () = assert!(EDC_POLY_LSB_FIRST == 0xd801_8001);
 
 /// CRC of every byte value, for the byte-at-a-time EDC loop.
 const EDC_TABLE: [u32; 256] = {
@@ -503,7 +503,7 @@ fn edc(bytes: &[u8]) -> u32 {
 
 /// GF(2^8) field polynomial x^8 + x^4 + x^3 + x^2 + 1, without its x^8
 /// term: what a doubling that overflows bit 7 folds back in.
-const GF_REDUCE: u8 = 0x1D;
+const GF_REDUCE: u8 = 0x1d;
 
 /// Multiply a field element by alpha (x), the field's primitive element.
 const fn gf_times_alpha(a: u8) -> u8 {
@@ -633,7 +633,7 @@ pub fn sector_edc(bytes: &[u8]) -> u32 {
 /// is the EDC of `a` followed by `b`.
 pub fn sector_edc_continue(crc: u32, bytes: &[u8]) -> u32 {
     bytes.iter().fold(crc, |crc, &byte| {
-        (crc >> 8) ^ EDC_TABLE[((crc ^ u32::from(byte)) & 0xFF) as usize]
+        (crc >> 8) ^ EDC_TABLE[((crc ^ u32::from(byte)) & 0xff) as usize]
     })
 }
 
@@ -824,8 +824,8 @@ mod tests {
 
     fn test_sector(mode: u8) -> Vec<u8> {
         let mut sector = vec![0u8; RAW_SECTOR_SIZE];
-        sector[1..11].fill(0xFF);
-        sector[0x0C..0x10].copy_from_slice(&[0x01, 0x23, 0x45, mode]);
+        sector[1..11].fill(0xff);
+        sector[0x0c..0x10].copy_from_slice(&[0x01, 0x23, 0x45, mode]);
         for (i, byte) in sector[0x10..0x930].iter_mut().enumerate() {
             *byte = (i * 7 + 3) as u8;
         }
@@ -840,8 +840,8 @@ mod tests {
             sector[0x810..0x814],
             sector_edc(&sector[..0x810]).to_le_bytes()
         );
-        assert!(sector[0x814..0x81C].iter().all(|&b| b == 0));
-        assert!(parity_holds(&sector[0x0C..]));
+        assert!(sector[0x814..0x81c].iter().all(|&b| b == 0));
+        assert!(parity_holds(&sector[0x0c..]));
     }
 
     #[test]
@@ -849,15 +849,15 @@ mod tests {
         let mut sector = test_sector(2);
         sector[0x16] = 0;
         protect_mode2_form1(&mut sector);
-        assert_eq!(sector[0x0C..0x10], [0x01, 0x23, 0x45, 2]);
+        assert_eq!(sector[0x0c..0x10], [0x01, 0x23, 0x45, 2]);
         assert_eq!(
-            sector[0x818..0x81C],
+            sector[0x818..0x81c],
             sector_edc(&sector[0x10..0x818]).to_le_bytes()
         );
         let mut zeroed = sector.clone();
-        zeroed[0x0C..0x10].fill(0);
-        assert!(parity_holds(&zeroed[0x0C..]));
-        assert!(!parity_holds(&sector[0x0C..]));
+        zeroed[0x0c..0x10].fill(0);
+        assert!(parity_holds(&zeroed[0x0c..]));
+        assert!(!parity_holds(&sector[0x0c..]));
     }
 
     #[test]
@@ -875,10 +875,10 @@ mod tests {
         let before = sector.clone();
         protect_mode2_form2(&mut sector);
         assert_eq!(
-            sector[0x92C..0x930],
-            sector_edc(&sector[0x10..0x92C]).to_le_bytes()
+            sector[0x92c..0x930],
+            sector_edc(&sector[0x10..0x92c]).to_le_bytes()
         );
-        assert_eq!(sector[..0x92C], before[..0x92C]);
+        assert_eq!(sector[..0x92c], before[..0x92c]);
     }
 
     #[test]
@@ -911,24 +911,24 @@ mod tests {
         let mut raw = vec![0u8; 2 * XA_SECTOR_SIZE];
         // Sector 0: Form 1 video (submode 0x48), sector 1: Form 2 audio (0x64).
         raw[..8].copy_from_slice(&[1, 0, 0x48, 0, 1, 0, 0x48, 0]);
-        raw[8..8 + 2048].fill(0xAB);
+        raw[8..8 + 2048].fill(0xab);
         let s1 = XA_SECTOR_SIZE;
         raw[s1..s1 + 8].copy_from_slice(&[1, 0, 0x64, 0x01, 1, 0, 0x64, 0x01]);
-        raw[s1 + 8..s1 + 8 + 2324].fill(0xCD);
+        raw[s1 + 8..s1 + 8 + 2324].fill(0xcd);
         let mut b = IsoBuilder::new();
         b.add_xa_file("movie.str", raw).unwrap();
         let cooked = b.build();
         // File lands at LBA 21, size 2 * 2048, cooked data = Form 1 payload.
-        assert_eq!(cooked[21 * SECTOR_SIZE], 0xAB);
+        assert_eq!(cooked[21 * SECTOR_SIZE], 0xab);
         let bin = b.build_bin();
         let v = &bin[21 * RAW_SECTOR_SIZE..22 * RAW_SECTOR_SIZE];
         let a = &bin[22 * RAW_SECTOR_SIZE..23 * RAW_SECTOR_SIZE];
         assert_eq!(&v[16..24], &[1, 0, 0x48, 0, 1, 0, 0x48, 0]);
         assert_eq!(&a[16..24], &[1, 0, 0x64, 0x01, 1, 0, 0x64, 0x01]);
-        assert_eq!(a[24], 0xCD);
-        assert_eq!(v[24], 0xAB);
-        assert_eq!(&v[0x818..0x81C], &edc(&v[0x10..0x818]).to_le_bytes());
-        assert_eq!(&a[0x92C..0x930], &edc(&a[0x10..0x92C]).to_le_bytes());
+        assert_eq!(a[24], 0xcd);
+        assert_eq!(v[24], 0xab);
+        assert_eq!(&v[0x818..0x81c], &edc(&v[0x10..0x818]).to_le_bytes());
+        assert_eq!(&a[0x92c..0x930], &edc(&a[0x10..0x92c]).to_le_bytes());
         // Headers still carry the absolute MSF of LBA 21 / 22 in mode 2.
         assert_eq!(&v[12..16], &[0x00, 0x02, 0x21, 0x02]);
         assert_eq!(&a[12..16], &[0x00, 0x02, 0x22, 0x02]);
@@ -947,7 +947,7 @@ mod tests {
         assert_eq!(img[16 * SECTOR_SIZE], 0x01);
         assert_eq!(&img[16 * SECTOR_SIZE + 1..16 * SECTOR_SIZE + 6], b"CD001");
         // VDST at sector 17.
-        assert_eq!(img[17 * SECTOR_SIZE], 0xFF);
+        assert_eq!(img[17 * SECTOR_SIZE], 0xff);
         assert_eq!(&img[17 * SECTOR_SIZE + 1..17 * SECTOR_SIZE + 6], b"CD001");
     }
 
@@ -983,9 +983,9 @@ mod tests {
     #[test]
     fn system_area_overrides_initial_sectors() {
         let mut area = vec![0u8; 16 * SECTOR_SIZE];
-        area[4 * SECTOR_SIZE] = 0xAB;
+        area[4 * SECTOR_SIZE] = 0xab;
         let img = IsoBuilder::new().system_area(area).unwrap().build();
-        assert_eq!(img[4 * SECTOR_SIZE], 0xAB);
+        assert_eq!(img[4 * SECTOR_SIZE], 0xab);
         assert_eq!(&img[16 * SECTOR_SIZE + 1..16 * SECTOR_SIZE + 6], b"CD001");
     }
 
@@ -1072,7 +1072,7 @@ mod tests {
             let base = lba * RAW_SECTOR_SIZE;
             assert_eq!(img[base], 0x00, "LBA {lba}: sync byte 0");
             for (i, &b) in img[base + 1..base + 11].iter().enumerate() {
-                assert_eq!(b, 0xFF, "LBA {lba} sync[{}]", i + 1);
+                assert_eq!(b, 0xff, "LBA {lba} sync[{}]", i + 1);
             }
             assert_eq!(img[base + 11], 0x00, "LBA {lba}: sync byte 11");
             assert_eq!(img[base + 15], 0x02, "LBA {lba}: mode byte");
@@ -1103,8 +1103,8 @@ mod tests {
         let raw = b.build_bin();
         let sector = &raw[16 * RAW_SECTOR_SIZE..17 * RAW_SECTOR_SIZE];
         let expected_edc = edc(&sector[0x10..0x818]).to_le_bytes();
-        assert_eq!(&sector[0x818..0x81C], &expected_edc);
-        assert!(sector[0x81C..].iter().any(|&byte| byte != 0));
+        assert_eq!(&sector[0x818..0x81c], &expected_edc);
+        assert!(sector[0x81c..].iter().any(|&byte| byte != 0));
     }
 
     #[test]
@@ -1123,10 +1123,10 @@ mod tests {
 
     /// FNV-1a 64 over a whole image, used to pin `build_bin` output.
     fn fnv1a64(bytes: &[u8]) -> u64 {
-        let mut h = 0xCBF2_9CE4_8422_2325u64;
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
         for &b in bytes {
             h ^= u64::from(b);
-            h = h.wrapping_mul(0x0000_0100_0000_01B3);
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
         }
         h
     }
@@ -1167,7 +1167,7 @@ mod tests {
         let mut many = IsoBuilder::new();
         many.add_file("SYSTEM.CNF", default_system_cnf());
         many.add_file("ZERO.BIN", vec![0; 2048]);
-        many.add_file("ONES.BIN", vec![0xFF; 4097]);
+        many.add_file("ONES.BIN", vec![0xff; 4097]);
         many.add_padding_sectors(3);
         many.add_file("TINY.TXT", b"x".to_vec());
         many.add_file("RAND.BIN", filler(7, 3 * 2048 + 11));
@@ -1184,7 +1184,7 @@ mod tests {
                 (0x20, 14),
                 (0x08, 15),
                 (0x24, 16),
-                (0xE4, 17),
+                (0xe4, 17),
                 (0x48, 18),
             ]),
         )
@@ -1199,10 +1199,10 @@ mod tests {
             (xa.len(), fnv1a64(&xa)),
         ];
         let want: [(usize, u64); 4] = [
-            (21 * RAW_SECTOR_SIZE, 0x78C8_015E_E9F9_01A3),
-            (24 * RAW_SECTOR_SIZE, 0x5AFC_1554_D3AB_B66D),
-            (34 * RAW_SECTOR_SIZE, 0x92F9_30D2_6F43_49B0),
-            (32 * RAW_SECTOR_SIZE, 0x6643_03E0_863B_B740),
+            (21 * RAW_SECTOR_SIZE, 0x78c8_015e_e9f9_01a3),
+            (24 * RAW_SECTOR_SIZE, 0x5afc_1554_d3ab_b66d),
+            (34 * RAW_SECTOR_SIZE, 0x92f9_30d2_6f43_49b0),
+            (32 * RAW_SECTOR_SIZE, 0x6643_03e0_863b_b740),
         ];
         assert_eq!(got, want);
     }
@@ -1243,6 +1243,6 @@ mod tests {
             2 * (Q_CODE.parity_at + 2 * Q_CODE.vectors),
             RAW_SECTOR_SIZE - HEADER_AT
         );
-        assert_eq!(2 * P_CODE.parity_at, 0x81C - HEADER_AT);
+        assert_eq!(2 * P_CODE.parity_at, 0x81c - HEADER_AT);
     }
 }

@@ -153,9 +153,9 @@ fn texture_with_oversized_byte_counts_is_an_error_not_a_panic() {
     // and the slice panicked; no 64-bit host can show that, so the guest probe
     // in the evidence covers it and this pins the host behaviour.
     for (pixels, clut) in [
-        (0xFFFF_FFF0, 32),
+        (0xffff_fff0, 32),
         (u32::MAX, 0),
-        (8, 0xFFFF_FFF0),
+        (8, 0xffff_fff0),
         (8, u32::MAX),
         (9, 32),
         (8, 33),
@@ -999,7 +999,7 @@ mod pre_change {
         let signed = ((raw << 4) as i16) >> 4;
         signed
             .wrapping_shl(1)
-            .wrapping_add((((raw & 0x0FFF) == 0x07FF) as i16) << 1)
+            .wrapping_add((((raw & 0x0fff) == 0x07ff) as i16) << 1)
     }
 
     pub fn cross_component_q12(a: i16, b: i16, c: i16, d: i16) -> i16 {

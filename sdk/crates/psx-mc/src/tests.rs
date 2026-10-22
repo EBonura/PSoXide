@@ -212,7 +212,7 @@ fn compressed_roundtrip() {
     let mut data = [0u8; 4096];
     for k in 0..16 {
         data[256 * k] = k as u8;
-        data[256 * k + 1] = 0xFF;
+        data[256 * k + 1] = 0xff;
     }
     let mut scratch = [0u8; 4096];
     c.write_compressed(NAME, "COMPRESSED", &data, &mut scratch)
@@ -397,7 +397,7 @@ fn cross_linked_card() -> Card<RamCard> {
     c.write(NAME2, "B", b"save B").unwrap();
     let mut image = *c.into_inner().image();
     // Entry 0 is frame 1; its link field is bytes 8..10, `FFFF` for "none".
-    assert_eq!(&image[FRAME_SIZE + 8..FRAME_SIZE + 10], &[0xFF, 0xFF]);
+    assert_eq!(&image[FRAME_SIZE + 8..FRAME_SIZE + 10], &[0xff, 0xff]);
     image[FRAME_SIZE + 8] = 1;
     image[FRAME_SIZE + 9] = 0;
     Card::new(RamCard::from_image(&image).unwrap())
@@ -420,8 +420,8 @@ fn deleting_through_a_cross_linked_entry_does_not_free_the_other_save() {
     assert_eq!(c.delete(NAME), Err(Error::Corrupt));
     // B's entry is intact and still reads once the damaged entry is out of the way.
     let mut image = *c.into_inner().image();
-    image[FRAME_SIZE + 8] = 0xFF;
-    image[FRAME_SIZE + 9] = 0xFF;
+    image[FRAME_SIZE + 8] = 0xff;
+    image[FRAME_SIZE + 9] = 0xff;
     let mut c = Card::new(RamCard::from_image(&image).unwrap());
     let mut buf = [0u8; 16];
     let n = c.read(NAME2, &mut buf).unwrap();

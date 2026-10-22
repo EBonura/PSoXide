@@ -47,11 +47,11 @@ const COLS: usize = 53;
 const ROWS: usize = 28;
 
 const BG: u16 = 0x1000;
-const WHITE: u16 = 0x7FFF;
-const YELLOW: u16 = 0x03FF;
-const GREEN: u16 = 0x03E0;
-const RED: u16 = 0x001F;
-const CYAN: u16 = 0x7FE0;
+const WHITE: u16 = 0x7fff;
+const YELLOW: u16 = 0x03ff;
+const GREEN: u16 = 0x03e0;
+const RED: u16 = 0x001f;
+const CYAN: u16 = 0x7fe0;
 
 /// Saved registers of the interrupted code: index = register number, then HI, LO.
 #[no_mangle]
@@ -444,15 +444,15 @@ fn take_screen() {
     wr(GP1, 0x0000_0000); // reset
     wr(GP1, 0x0400_0000); // DMA off
     wr(GP1, 0x0500_0000); // display start 0,0
-    wr(GP1, 0x06C6_0260); // horizontal range for 320
+    wr(GP1, 0x06c6_0260); // horizontal range for 320
     wr(GP1, 0x0704_0010); // vertical range, NTSC
     wr(GP1, 0x0800_0001); // 320x240, NTSC, 15 bit
     wr(GP1, 0x0300_0000); // display on
     gpu_ready();
-    wr(GP0, 0xE100_0000);
-    wr(GP0, 0xE300_0000);
-    wr(GP0, 0xE403_BD3F);
-    wr(GP0, 0xE500_0000);
+    wr(GP0, 0xe100_0000);
+    wr(GP0, 0xe300_0000);
+    wr(GP0, 0xe403_bd3f);
+    wr(GP0, 0xe500_0000);
     wr(GP0, 0x0220_0000); // fill, dark blue
     wr(GP0, 0x0000_0000);
     wr(GP0, (240 << 16) | 320);
@@ -466,7 +466,7 @@ fn draw_line(y: u16, line: &Line, color: u16) {
     let mut row = 0usize;
     while row < 8 {
         gpu_ready();
-        wr(GP0, 0xA000_0000);
+        wr(GP0, 0xa000_0000);
         wr(GP0, (y as u32 + row as u32) << 16);
         wr(GP0, (1 << 16) | 320);
         let mut x = 0usize;
@@ -508,7 +508,7 @@ fn is_return_address(w: u32) -> bool {
     }
     let call = rd(w - 8);
     // JAL, or JALR (SPECIAL, function 9).
-    call >> 26 == 3 || (call >> 26 == 0 && call & 0x3F == 9)
+    call >> 26 == 3 || (call >> 26 == 0 && call & 0x3f == 9)
 }
 
 #[optimize(size)]
@@ -645,7 +645,7 @@ fn panel(reason: Reason, regs: *const u32, epc: u32) {
     put_line(&mut row, &l, CYAN);
     let mut l = Line::new();
     let mut found = 0;
-    if (0x8000_0000..0x801F_FF00).contains(&sp) && sp & 3 == 0 {
+    if (0x8000_0000..0x801f_ff00).contains(&sp) && sp & 3 == 0 {
         let mut at = sp;
         let end = (sp + 1024).min(0x8020_0000 - 8);
         while at < end && found < 12 {

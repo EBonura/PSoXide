@@ -21,7 +21,7 @@ pub(crate) const FAST_RELEASE_Q24: i32 = (1 << 24) / 3;
 /// 1.0 in Q24.
 const ONE_Q24: i32 = 1 << 24;
 /// Hardware voice level at gain 1.0.
-const SPU_FULL: u32 = 0x3FFF;
+const SPU_FULL: u32 = 0x3fff;
 
 /// `(arg / 32767)^2` as Q24.
 fn level_sq_q24(arg: i16) -> i32 {
@@ -412,7 +412,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
     fn porta_scale(&mut self, n: usize) -> u32 {
         let pt = &mut self.notes[n].porta;
         pt.cur = pt.cur.wrapping_add(pt.speed);
-        let mut lo = ((pt.cur >> 8) & 0xFF) as usize;
+        let mut lo = ((pt.cur >> 8) & 0xff) as usize;
         if lo >= 127 {
             lo = 127;
             pt.mode = 0;
@@ -746,7 +746,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
             ((s * self.master_q12 as u32) >> 12).min(SPU_FULL) as i16
         };
         let (lv, rv) = (to_spu(l15), to_spu(r15));
-        let pitch = (freq >> 4).clamp(1, 0xFFFF) as u16;
+        let pitch = (freq >> 4).clamp(1, 0xffff) as u16;
         let voice = self.voice_of[n];
         if nt.tuned.sample == NONE16 {
             return;

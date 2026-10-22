@@ -101,7 +101,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
                 }
                 continue;
             }
-            if cmd >= 0xC0 {
+            if cmd >= 0xc0 {
                 let keep_going = self.seq_op(p, code, &mut s, cmd);
                 self.players[p].script = s;
                 if !keep_going {
@@ -110,7 +110,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
                 continue;
             }
             let low = (cmd & 15) as usize;
-            match cmd & 0xF0 {
+            match cmd & 0xf0 {
                 0x00 => s.value = (!self.players[p].channels[low].enabled) as i8,
                 0x40 => self.disable_channel(p, low),
                 0x50 => s.value = s.value.wrapping_sub(self.players[p].io[low & 7] as i8),
@@ -129,12 +129,12 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
                     let t = rd16(code, &mut s);
                     self.enable_channel(p, low, t);
                 }
-                0xA0 => {
+                0xa0 => {
                     let rel = rd16(code, &mut s) as i16;
                     let t = (s.pc as i32 + rel as i32) as u16;
                     self.enable_channel(p, low, t);
                 }
-                0xB0 => {
+                0xb0 => {
                     rd8(code, &mut s);
                     rd16(code, &mut s);
                     self.unsupported += 1;
@@ -147,25 +147,25 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
 
     fn seq_op(&mut self, p: usize, code: &mut [u8], s: &mut Script, cmd: u8) -> bool {
         match cmd {
-            0xF1 | 0xD0 => {
+            0xf1 | 0xd0 => {
                 let v = rd8(code, s);
-                if cmd == 0xD0 {
+                if cmd == 0xd0 {
                     self.players[p].note_alloc_policy = v;
                 }
             }
-            0xDF | 0xDE => {
-                if cmd == 0xDF {
+            0xdf | 0xde => {
+                if cmd == 0xdf {
                     self.players[p].transpose = 0;
                 }
                 let v = rd8(code, s) as i8;
                 self.players[p].transpose = self.players[p].transpose.wrapping_add(v);
             }
-            0xDD => {
+            0xdd => {
                 let t = (rd8(code, s) as u32 * 48).min(MAX_TEMPO as u32);
                 self.players[p].tempo = if t == 0 { 1 } else { t as u16 };
             }
-            0xDC => self.players[p].tempo_change = (rd8(code, s) as i8 as i16) * 48,
-            0xDA => {
+            0xdc => self.players[p].tempo_change = (rd8(code, s) as i8 as i16) * 48,
+            0xda => {
                 let mode = rd8(code, s);
                 let t = rd16(code, s);
                 let pl = &mut self.players[p];
@@ -182,7 +182,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
                     _ => {}
                 }
             }
-            0xDB => {
+            0xdb => {
                 let v = rd8(code, s) as i32;
                 let pl = &mut self.players[p];
                 if pl.state == 1 {
@@ -199,11 +199,11 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
                     }
                 }
             }
-            0xD9 => {
+            0xd9 => {
                 let v = rd8(code, s) as i8 as i32;
                 self.players[p].fade_scale_q15 = ((v.max(0) << 15) / 127) as u16;
             }
-            0xD7 => {
+            0xd7 => {
                 let mask = rd16(code, s);
                 let font = self.players[p].default_font;
                 let mb = self.players[p].mute_behavior;
@@ -217,58 +217,58 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
                     }
                 }
             }
-            0xD6 => {
+            0xd6 => {
                 rd16(code, s);
             }
-            0xD5 => {
+            0xd5 => {
                 let v = rd8(code, s) as i8 as i32;
                 self.players[p].mute_scale_q15 = ((v.max(0) << 15) / 127) as u16;
             }
-            0xD4 => self.players[p].muted = true,
-            0xD3 => self.players[p].mute_behavior = rd8(code, s),
-            0xD1 => self.players[p].short_gate = Some(rd16(code, s)),
-            0xD2 => self.players[p].short_vel = Some(rd16(code, s)),
-            0xCE => {
+            0xd4 => self.players[p].muted = true,
+            0xd3 => self.players[p].mute_behavior = rd8(code, s),
+            0xd1 => self.players[p].short_gate = Some(rd16(code, s)),
+            0xd2 => self.players[p].short_vel = Some(rd16(code, s)),
+            0xce => {
                 let n = rd8(code, s) as u32;
                 let r = self.next_random() >> 2;
                 s.value = if n == 0 {
-                    (r & 0xFF) as i8
+                    (r & 0xff) as i8
                 } else {
                     (r % n) as i8
                 };
             }
-            0xCD => {
+            0xcd => {
                 let t = rd16(code, s);
                 if s.value != -1 && s.depth != 3 {
                     let at = t as usize + ((s.value as u8 as usize) << 1);
-                    let hi = code.get(at).copied().unwrap_or(0xFF) as u16;
-                    let lo = code.get(at + 1).copied().unwrap_or(0xFF) as u16;
+                    let hi = code.get(at).copied().unwrap_or(0xff) as u16;
+                    let lo = code.get(at + 1).copied().unwrap_or(0xff) as u16;
                     s.stack[s.depth as usize] = s.pc;
                     s.depth += 1;
                     s.pc = (hi << 8) | lo;
                 }
             }
-            0xCC => s.value = rd8(code, s) as i8,
-            0xC9 => s.value &= rd8(code, s) as i8,
-            0xC8 => s.value = s.value.wrapping_sub(rd8(code, s) as i8),
-            0xC7 => {
+            0xcc => s.value = rd8(code, s) as i8,
+            0xc9 => s.value &= rd8(code, s) as i8,
+            0xc8 => s.value = s.value.wrapping_sub(rd8(code, s) as i8),
+            0xc7 => {
                 let add = rd8(code, s);
                 let at = rd16(code, s) as usize;
                 if let Some(b) = code.get_mut(at) {
                     *b = (s.value as u8).wrapping_add(add);
                 }
             }
-            0xC6 => {
+            0xc6 => {
                 self.players[p].stop_script = true;
                 return false;
             }
-            0xC5 => self.players[p].script_counter = rd16(code, s),
-            0xC4 => {
+            0xc5 => self.players[p].script_counter = rd16(code, s),
+            0xc4 => {
                 rd8(code, s);
                 rd8(code, s);
                 self.unsupported += 1;
             }
-            0xEF => {
+            0xef => {
                 rd16(code, s);
                 rd8(code, s);
             }
@@ -335,10 +335,10 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
         if id >= 0x80 {
             ch.inst_or_wave = id;
             ch.inst = InstSel::NONE;
-        } else if id == 0x7F {
+        } else if id == 0x7f {
             ch.inst_or_wave = 0;
             ch.inst = InstSel::NONE;
-        } else if id == 0x7E {
+        } else if id == 0x7e {
             ch.inst_or_wave = 1;
             ch.inst = InstSel::NONE;
         } else {
@@ -368,8 +368,8 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
             let mut s = self.players[p].channels[c].script;
             let cmd = rd8(code, &mut s);
             let mut a = [0u32; 3];
-            if cmd >= 0xB0 {
-                let t = ARGS[(cmd - 0xB0) as usize];
+            if cmd >= 0xb0 {
+                let t = ARGS[(cmd - 0xb0) as usize];
                 let n = (t & 3) as usize;
                 for (i, slot) in a.iter_mut().enumerate().take(n) {
                     let wide = t & (0x80 >> i) != 0;
@@ -401,10 +401,10 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
             }
             if cmd >= 0x70 {
                 let mut low = (cmd & 7) as usize;
-                if cmd & 0xF8 != 0x70 && low >= 4 {
+                if cmd & 0xf8 != 0x70 && low >= 4 {
                     low = 0;
                 }
-                match cmd & 0xF8 {
+                match cmd & 0xf8 {
                     0x80 => {
                         let l = &self.players[p].channels[c].layers[low];
                         s.value = if l.alloc { l.finished as i8 } else { -1 };
@@ -426,7 +426,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
                 continue;
             }
             let low = (cmd & 15) as usize;
-            match cmd & 0xF0 {
+            match cmd & 0xf0 {
                 0x00 => {
                     self.players[p].channels[c].delay = low as u16;
                     self.players[p].channels[c].script = s;
@@ -475,105 +475,105 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
     ) -> bool {
         let u8_0 = a[0] as u8;
         match cmd {
-            0xEA => {
+            0xea => {
                 self.players[p].channels[c].stop_script = true;
                 return true;
             }
-            0xEB => {
+            0xeb => {
                 self.channel_font(p, c, u8_0);
                 self.set_instrument(p, c, a[1] as u8);
             }
-            0xC6 => self.channel_font(p, c, u8_0),
-            0xC1 => self.set_instrument(p, c, u8_0),
-            0xC3 => self.players[p].channels[c].large_notes = false,
-            0xC4 => self.players[p].channels[c].large_notes = true,
-            0xDF => {
+            0xc6 => self.channel_font(p, c, u8_0),
+            0xc1 => self.set_instrument(p, c, u8_0),
+            0xc3 => self.players[p].channels[c].large_notes = false,
+            0xc4 => self.players[p].channels[c].large_notes = true,
+            0xdf => {
                 let ch = &mut self.players[p].channels[c];
                 ch.volume_q15 = vol_q15(u8_0);
                 ch.changes.volume = true;
             }
-            0xE0 => {
+            0xe0 => {
                 let ch = &mut self.players[p].channels[c];
                 ch.volume_scale_q15 = (u8_0 as u16) << 8;
                 ch.changes.volume = true;
             }
-            0xDE => {
+            0xde => {
                 let ch = &mut self.players[p].channels[c];
-                ch.freq_q16 = (a[0] & 0xFFFF) << 1;
+                ch.freq_q16 = (a[0] & 0xffff) << 1;
                 ch.changes.freq = true;
             }
-            0xD3 | 0xEE => {
+            0xd3 | 0xee => {
                 let idx = u8_0.wrapping_add(0x80) as usize;
                 let ch = &mut self.players[p].channels[c];
-                ch.freq_q16 = if cmd == 0xD3 {
+                ch.freq_q16 = if cmd == 0xd3 {
                     BEND_OCTAVE_Q16[idx]
                 } else {
                     BEND_TWO_SEMITONES_Q16[idx]
                 };
                 ch.changes.freq = true;
             }
-            0xDD => {
+            0xdd => {
                 let ch = &mut self.players[p].channels[c];
                 ch.new_pan = u8_0;
                 ch.changes.pan = true;
             }
-            0xDC => {
+            0xdc => {
                 let ch = &mut self.players[p].channels[c];
                 ch.pan_weight = u8_0;
                 ch.changes.pan = true;
             }
-            0xDB => self.players[p].channels[c].transpose = u8_0 as i8,
-            0xDA => self.players[p].channels[c].env = EnvRef::Song(a[0] as u16),
-            0xD9 => self.players[p].channels[c].decay_idx = u8_0,
-            0xD8 => {
+            0xdb => self.players[p].channels[c].transpose = u8_0 as i8,
+            0xda => self.players[p].channels[c].env = EnvRef::Song(a[0] as u16),
+            0xd9 => self.players[p].channels[c].decay_idx = u8_0,
+            0xd8 => {
                 let ch = &mut self.players[p].channels[c];
                 ch.vib_depth_target = u8_0 as u16 * 8;
                 ch.vib_depth_start = 0;
                 ch.vib_depth_delay = 0;
             }
-            0xD7 => {
+            0xd7 => {
                 let ch = &mut self.players[p].channels[c];
                 ch.vib_rate_delay = 0;
                 ch.vib_rate_target = u8_0 as u16 * 32;
                 ch.vib_rate_start = u8_0 as u16 * 32;
             }
-            0xE2 => {
+            0xe2 => {
                 let ch = &mut self.players[p].channels[c];
                 ch.vib_depth_start = u8_0 as u16 * 8;
                 ch.vib_depth_target = a[1] as u16 * 8;
                 ch.vib_depth_delay = a[2] as u16 * 16;
             }
-            0xE1 => {
+            0xe1 => {
                 let ch = &mut self.players[p].channels[c];
                 ch.vib_rate_start = u8_0 as u16 * 32;
                 ch.vib_rate_target = a[1] as u16 * 32;
                 ch.vib_rate_delay = a[2] as u16 * 16;
             }
-            0xE3 => self.players[p].channels[c].vib_delay = u8_0 as u16 * 16,
-            0xD4 => self.players[p].channels[c].reverb = u8_0,
-            0xD2 => self.players[p].channels[c].sustain = u8_0,
-            0xD1 => self.players[p].channels[c].note_alloc_policy = u8_0,
-            0xD0 => {} // headset and stereo bits have no effect on the SPU's output
-            0xCA => {
+            0xe3 => self.players[p].channels[c].vib_delay = u8_0 as u16 * 16,
+            0xd4 => self.players[p].channels[c].reverb = u8_0,
+            0xd2 => self.players[p].channels[c].sustain = u8_0,
+            0xd1 => self.players[p].channels[c].note_alloc_policy = u8_0,
+            0xd0 => {} // headset and stereo bits have no effect on the SPU's output
+            0xca => {
                 let ch = &mut self.players[p].channels[c];
                 ch.mute_behavior = u8_0;
                 ch.changes.volume = true;
             }
-            0xC8 => s.value = s.value.wrapping_sub(u8_0 as i8),
-            0xC9 => s.value &= u8_0 as i8,
-            0xCC => s.value = u8_0 as i8,
-            0xCD => self.disable_channel(p, u8_0 as usize & 15),
-            0xC7 => {
+            0xc8 => s.value = s.value.wrapping_sub(u8_0 as i8),
+            0xc9 => s.value &= u8_0 as i8,
+            0xcc => s.value = u8_0 as i8,
+            0xcd => self.disable_channel(p, u8_0 as usize & 15),
+            0xc7 => {
                 if let Some(b) = code.get_mut(a[1] as usize) {
                     *b = (s.value as u8).wrapping_add(u8_0);
                 }
             }
-            0xCB => {
+            0xcb => {
                 let at = a[0] as usize + (s.value as u8 as usize);
                 s.value = code.get(at).copied().unwrap_or(0) as i8;
             }
-            0xCE => self.players[p].channels[c].ptr = a[0] as u16,
-            0xCF => {
+            0xce => self.players[p].channels[c].ptr = a[0] as u16,
+            0xcf => {
                 let at = a[0] as usize;
                 let v = self.players[p].channels[c].ptr;
                 if at + 1 < code.len() {
@@ -581,7 +581,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
                     code[at + 1] = v as u8;
                 }
             }
-            0xE7 => {
+            0xe7 => {
                 let at = a[0] as usize;
                 if at + 8 <= code.len() {
                     let d = [
@@ -605,7 +605,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
                     ch.changes.pan = true;
                 }
             }
-            0xE8 => {
+            0xe8 => {
                 let mb = a[0] as u8;
                 let na = a[1] as u8;
                 let pri = a[2] as u8;
@@ -624,8 +624,8 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
                 ch.reverb = rev;
                 ch.changes.pan = true;
             }
-            0xE9 => set_priorities(&mut self.players[p].channels[c], u8_0),
-            0xEC => {
+            0xe9 => set_priorities(&mut self.players[p].channels[c], u8_0),
+            0xec => {
                 let ch = &mut self.players[p].channels[c];
                 ch.vib_depth_target = 0;
                 ch.vib_depth_start = 0;
@@ -638,17 +638,17 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
                 ch.gate_variance = 0;
                 ch.freq_q16 = 1 << 16;
             }
-            0xB9 => self.players[p].channels[c].vel_variance = u8_0,
-            0xBA => self.players[p].channels[c].gate_variance = u8_0,
-            0xB8 => {
+            0xb9 => self.players[p].channels[c].vel_variance = u8_0,
+            0xba => self.players[p].channels[c].gate_variance = u8_0,
+            0xb8 => {
                 let r = self.next_random();
                 s.value = if a[0] == 0 {
-                    (r & 0xFF) as i8
+                    (r & 0xff) as i8
                 } else {
                     (r % a[0]) as i8
                 };
             }
-            0xB0 | 0xB1 | 0xB3 | 0xBB | 0xED => self.unsupported += 1,
+            0xb0 | 0xb1 | 0xb3 | 0xbb | 0xed => self.unsupported += 1,
             _ => {}
         }
         false
@@ -722,7 +722,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
                 self.note_decay(o);
             }
             let ly = &mut self.players[p].channels[c].layers[l];
-            if ly.porta.mode & 0x7F == 1 || ly.porta.mode & 0x7F == 2 {
+            if ly.porta.mode & 0x7f == 1 || ly.porta.mode & 0x7f == 2 {
                 ly.porta.mode = 0;
             }
             ly.props_need_init = true;
@@ -757,7 +757,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
         loop {
             let mut s = self.players[p].channels[c].layers[l].script;
             let cmd = rd8(code, &mut s);
-            if cmd <= 0xC0 {
+            if cmd <= 0xc0 {
                 self.players[p].channels[c].layers[l].script = s;
                 return Some(cmd);
             }
@@ -785,30 +785,30 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
             let mut legato = false;
             let ly = &mut self.players[p].channels[c].layers[l];
             match cmd {
-                0xC1 => ly.vel_sq_q15 = vel_sq_q15(rd8(code, &mut s)),
-                0xCA => ly.pan = rd8(code, &mut s),
-                0xC9 => ly.gate_time = rd8(code, &mut s),
-                0xC2 => ly.transpose = rd8(code, &mut s) as i8,
-                0xC4 | 0xC5 => {
-                    ly.continuous = cmd == 0xC4;
+                0xc1 => ly.vel_sq_q15 = vel_sq_q15(rd8(code, &mut s)),
+                0xca => ly.pan = rd8(code, &mut s),
+                0xc9 => ly.gate_time = rd8(code, &mut s),
+                0xc2 => ly.transpose = rd8(code, &mut s) as i8,
+                0xc4 | 0xc5 => {
+                    ly.continuous = cmd == 0xc4;
                     ly.bit1 = false;
                     legato = true;
                 }
-                0xC3 => ly.short_delay = rd_delay(code, &mut s),
-                0xC6 => {
+                0xc3 => ly.short_delay = rd_delay(code, &mut s),
+                0xc6 => {
                     let id = rd8(code, &mut s);
-                    if id >= 0x7E {
-                        ly.inst_or_wave = if id == 0x7E {
+                    if id >= 0x7e {
+                        ly.inst_or_wave = if id == 0x7e {
                             1
-                        } else if id == 0x7F {
+                        } else if id == 0x7f {
                             0
                         } else {
                             id
                         };
-                        if id > 0x7F {
+                        if id > 0x7f {
                             ly.inst = InstSel::NONE;
                         }
-                        if id == 0xFF {
+                        if id == 0xff {
                             ly.decay_idx = 0;
                         }
                     } else {
@@ -825,12 +825,12 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
                             }
                             None => {
                                 ly.inst = InstSel::NONE;
-                                ly.inst_or_wave = 0xFF;
+                                ly.inst_or_wave = 0xff;
                             }
                         }
                     }
                 }
-                0xC7 => {
+                0xc7 => {
                     ly.porta.mode = rd8(code, &mut s);
                     let t = rd8(code, &mut s)
                         .wrapping_add(ctrans as u8)
@@ -843,22 +843,22 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
                         rd_delay(code, &mut s)
                     };
                 }
-                0xC8 => ly.porta.mode = 0,
-                0xCB | 0xCF => {
-                    if cmd == 0xCB {
+                0xc8 => ly.porta.mode = 0,
+                0xcb | 0xcf => {
+                    if cmd == 0xcb {
                         ly.env = EnvRef::Song(rd16(code, &mut s));
                     }
                     ly.decay_idx = rd8(code, &mut s);
                 }
-                0xCC => ly.ignore_drum_pan = true,
-                0xCD => {
+                0xcc => ly.ignore_drum_pan = true,
+                0xcd => {
                     rd8(code, &mut s);
                 }
-                0xCE => {
+                0xce => {
                     let v = rd8(code, &mut s);
                     ly.bend_q16 = BEND_TWO_SEMITONES_Q16[v.wrapping_add(0x80) as usize];
                 }
-                0xD0..=0xDF => {
+                0xd0..=0xdf => {
                     let t = match short_vel {
                         Some(off) => code
                             .get(off as usize + (cmd & 15) as usize)
@@ -868,7 +868,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
                     };
                     ly.vel_sq_q15 = vel_sq_q15(t);
                 }
-                0xE0..=0xEF => {
+                0xe0..=0xef => {
                     ly.gate_time = match short_gate {
                         Some(off) => code
                             .get(off as usize + (cmd & 15) as usize)
@@ -896,7 +896,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
         cmd: u8,
     ) -> Option<u8> {
         let mut s = self.players[p].channels[c].layers[l].script;
-        if cmd == 0xC0 {
+        if cmd == 0xc0 {
             let d = rd_delay(code, &mut s);
             let ly = &mut self.players[p].channels[c].layers[l];
             ly.delay = d;
@@ -913,7 +913,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
         };
         let ly = &mut self.players[p].channels[c].layers[l];
         ly.muted = false;
-        let kind = cmd & 0xC0;
+        let kind = cmd & 0xc0;
         let delay;
         if large {
             let vel;
@@ -947,7 +947,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
                 _ => delay = ly.last_delay,
             }
         }
-        let note = cmd & 0x3F;
+        let note = cmd & 0x3f;
         ly.vel_sq2_q15 = if vel_var != 0 {
             let d = (ly.vel_sq_q15 as u32 * (rnd % vel_var as u32) / 100) as i32;
             let d = if rnd & 0x8000 != 0 { -d } else { d };
@@ -992,7 +992,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
         let mut ly = self.players[p].channels[c].layers[l];
         let mut inst_or_wave = ly.inst_or_wave;
         let mut same = true;
-        if inst_or_wave == 0xFF {
+        if inst_or_wave == 0xff {
             if !has_instrument {
                 return None;
             }
@@ -1040,7 +1040,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
                     self.players[p].channels[c].layers[l] = ly;
                     return None;
                 }
-                let inst = if ly.inst_or_wave == 0xFF {
+                let inst = if ly.inst_or_wave == 0xff {
                     ch_inst
                 } else {
                     ly.inst
@@ -1066,7 +1066,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
                     };
                     let f_here = mul_q16(PITCH_Q16[semitone as usize], t.tuning_q16);
                     let f_target = mul_q16(PITCH_Q16[ly.porta_target as usize], t.tuning_q16);
-                    let (f1, f2) = match ly.porta.mode & 0x7F {
+                    let (f1, f2) = match ly.porta.mode & 0x7f {
                         1 | 3 | 5 => (f_target, f_here),
                         2 | 4 => (f_here, f_target),
                         _ => (f_here, f_here),
@@ -1082,11 +1082,11 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
                     } else {
                         0x20000 / (ly.porta_time.max(1) as i32 * 3)
                     };
-                    speed = speed.clamp(1, 0x7FFF);
+                    speed = speed.clamp(1, 0x7fff);
                     ly.porta.speed = speed as u16;
                     ly.porta.cur = 0;
                     ly.freq_q16 = f1;
-                    if ly.porta.mode & 0x7F == 5 {
+                    if ly.porta.mode & 0x7f == 5 {
                         ly.porta_target = semitone;
                     }
                 } else {
@@ -1111,7 +1111,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
             } else {
                 (ly.freq_q16 >> 6) * 1875
             };
-            let ticks = (x / d.max(1)).min(0x7FFE);
+            let ticks = (x / d.max(1)).min(0x7ffe);
             ly.gate_delay = 0;
             ly.delay = ticks as u16 + 1;
         }

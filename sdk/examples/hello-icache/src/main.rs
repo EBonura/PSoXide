@@ -21,10 +21,12 @@
 
 extern crate psx_rt;
 
-use psx_font::{fonts::BASIC, FontAtlas};
+use psx_font::fonts::BASIC;
+use psx_font::FontAtlas;
 use psx_gpu::display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode};
 use psx_gpu::Gpu;
-use psx_rt::{cache::flush_instruction_cache, tty};
+use psx_rt::cache::flush_instruction_cache;
+use psx_rt::tty;
 use psx_vram::{Clut, TextureDepth, TexturePage};
 
 const FONT_TPAGE: TexturePage = TexturePage::new(320, 0, TextureDepth::Bit4);
@@ -34,7 +36,7 @@ const FONT_CLUT: Clut = Clut::new(320, 256);
 /// immediate.
 const ADDIU_V0_ZERO: u32 = 0x2402_0000;
 /// `jr $ra`.
-const JR_RA: u32 = 0x03E0_0008;
+const JR_RA: u32 = 0x03e0_0008;
 
 /// One cache line (16 bytes) of code, line aligned so the function sits
 /// in a single line.

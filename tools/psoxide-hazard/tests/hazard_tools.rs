@@ -175,7 +175,7 @@ fn return_value_loaded_in_jr_ra_slot() {
 fn jr_ra_at_a_non_default_load_address() {
     // The demo disc's chain loader is linked at 0x801F0000.
     let fx = Fixture::new();
-    let mut image = Image::new(0x801F_0000);
+    let mut image = Image::new(0x801f_0000);
     caller(&mut image, 0x100, "v0");
     let data = image.addr(Image::DATA);
     image.put(
@@ -413,7 +413,7 @@ fn register_jump_with_unresolved_target() {
         0,
         &[
             lui("t9", (target >> 16).into()),
-            ori("t9", "t9", (target & 0xFFFF).into()),
+            ori("t9", "t9", (target & 0xffff).into()),
             lui("t0", hi(data)),
             jr("t9"),
             lw("a0", lo(data), "t0"),
@@ -434,7 +434,7 @@ fn register_call_reads_argument_first() {
         0,
         &[
             lui("t9", (callee >> 16).into()),
-            ori("t9", "t9", (callee & 0xFFFF).into()),
+            ori("t9", "t9", (callee & 0xffff).into()),
             lui("t0", hi(data)),
             jalr("t9"),
             lw("a0", lo(data), "t0"),
@@ -458,7 +458,7 @@ fn register_call_slot_load_reading_the_jump_register() {
         0,
         &[
             lui("t9", (callee >> 16).into()),
-            ori("t9", "t9", (callee & 0xFFFF).into()),
+            ori("t9", "t9", (callee & 0xffff).into()),
             jalr("t9"),
             lw("a0", i64::from(Image::DATA) - 0x100, "t9"),
             addiu("s1", "zero", 7),
@@ -483,9 +483,9 @@ fn register_call_slot_load_reading_the_link_register_is_refused() {
         0,
         &[
             lui("t9", (callee >> 16).into()),
-            ori("t9", "t9", (callee & 0xFFFF).into()),
+            ori("t9", "t9", (callee & 0xffff).into()),
             lui("ra", (old_ra >> 16).into()),
-            ori("ra", "ra", (old_ra & 0xFFFF).into()),
+            ori("ra", "ra", (old_ra & 0xffff).into()),
             jalr("t9"),
             lw("a0", offset, "ra"),
             addu("s1", "a0", "zero"),
@@ -493,7 +493,7 @@ fn register_call_slot_load_reading_the_link_register_is_refused() {
         ],
     );
     image.put(0x100, &[addu("s0", "a0", "zero"), jr("ra"), NOP]);
-    image.put((0x40 + offset) as u32, &[0x0BAD]); // what the old ra would lead to
+    image.put((0x40 + offset) as u32, &[0x0bad]); // what the old ra would lead to
     image.write(&fx.path);
     assert_eq!(fx.scan().len(), 1);
     let regs = run(&fx.path);
@@ -518,7 +518,7 @@ fn register_call_slot_load_reading_the_link_register_is_refused() {
         &[lw("a0", offset, "ra"), jalr("t9"), NOP, j(back), NOP],
     );
     image.write(&fx.path);
-    assert_eq!(run(&fx.path)[reg("s1") as usize], 0x0BAD);
+    assert_eq!(run(&fx.path)[reg("s1") as usize], 0x0bad);
 }
 
 #[test]
@@ -554,7 +554,7 @@ fn gte_command_in_a_delay_slot_is_a_warning() {
     // psx-rt's handler cannot step over a GTE command in a delay slot (EPC
     // names the branch), so the scanner points at it, without failing the
     // image, and ignores GTE commands outside delay slots.
-    let rtps = 0x4A18_0001;
+    let rtps = 0x4a18_0001;
     let fx = Fixture::new();
     let mut image = Image::new(0x8001_0000);
     image.put(0, &[beq("zero", "zero", 2), rtps, NOP, rtps, NOP, BREAK]);
@@ -607,7 +607,7 @@ fn scanner_and_patcher_name_the_same_sites() {
     sites.sort();
     let mut want = vec![
         (hex(image.addr(0x104)), None),
-        (hex(image.addr(0x204)), Some(hex(image.addr(0x20C)))),
+        (hex(image.addr(0x204)), Some(hex(image.addr(0x20c)))),
         (hex(image.addr(0x204)), Some(hex(image.addr(0x210)))),
         (hex(image.addr(0x304)), None),
     ];
@@ -627,7 +627,7 @@ fn callers_can_replace_the_data_guard() {
         0x100,
         &[lui("at", hi(data)), jr("ra"), lbu("v0", lo(data), "at")],
     );
-    image.put(0x120, &[0xFFFF_FFFF]); // decodes as `.word`, inside the 16-word guard
+    image.put(0x120, &[0xffff_ffff]); // decodes as `.word`, inside the 16-word guard
     image.write(&fx.path);
     assert_eq!(fx.scan(), Vec::<String>::new());
     assert_eq!(fx.scan_with(&|_, _| true, TABLE_CEILING).0.len(), 1);
@@ -721,7 +721,7 @@ fn patching_pads_a_short_last_sector_with_zeros() {
     let image = Image::new(0x8001_0000);
     image.write(&fx.path);
     let whole = std::fs::read(&fx.path).unwrap();
-    let short = &whole[..whole.len() - 0x6C];
+    let short = &whole[..whole.len() - 0x6c];
     assert!(short[short.len() - 4..].iter().all(|&b| b == 0));
 
     std::fs::write(&fx.path, short).unwrap();

@@ -324,7 +324,7 @@ impl LinkMap {
         if data.starts_with(b"PS-X EXE") {
             let field =
                 |at: usize| i64::from(u32::from_le_bytes(data[at..at + 4].try_into().unwrap()));
-            let (pc, payload) = (field(0x10), field(0x1C));
+            let (pc, payload) = (field(0x10), field(0x1c));
             if let Some(data_end) = self.data_end {
                 let stored = (data_end - lo + SECTOR - 1) & !(SECTOR - 1);
                 if payload != stored || base != lo {
@@ -350,7 +350,7 @@ impl LinkMap {
         while addr < hi {
             if let Some(w) = word(addr) {
                 if w >> 26 == 3 {
-                    let target = (addr & 0xF000_0000) | (w & 0x03FF_FFFF) << 2;
+                    let target = (addr & 0xf000_0000) | (w & 0x03ff_ffff) << 2;
                     if lo <= target && target < hi && !known.contains(&target) {
                         calls.push((addr, target));
                     }
@@ -401,7 +401,7 @@ impl LinkMap {
     /// next to mutable `.data.*`; only the input section name tells them
     /// apart.
     pub fn rodata_section(&self, addr: i64) -> Option<(i64, i64)> {
-        let i = self.rodata.partition_point(|&s| s <= (addr, 0xFFFF_FFFF));
+        let i = self.rodata.partition_point(|&s| s <= (addr, 0xffff_ffff));
         let section = *self.rodata.get(i.checked_sub(1)?)?;
         (section.0 <= addr && addr < section.1).then_some(section)
     }

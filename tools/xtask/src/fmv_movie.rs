@@ -40,7 +40,7 @@ use crate::obj;
 use crate::pyjson::dumps;
 
 const XA_SECTOR: usize = 2336;
-const SEED: u32 = 0x9E37_79B9;
+const SEED: u32 = 0x9e37_79b9;
 
 /// The per-sector checksum hello-fmv recomputes.
 pub fn checksum(payload: &[u8], ordinal: u32) -> u32 {

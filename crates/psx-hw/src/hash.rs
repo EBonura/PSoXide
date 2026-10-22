@@ -9,8 +9,8 @@
 //! Not a cryptographic hash -- stable fingerprinting of trusted data
 //! only.
 
-const OFFSET_BASIS: u64 = 0xCBF2_9CE4_8422_2325;
-const PRIME: u64 = 0x0000_0100_0000_01B3;
+const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+const PRIME: u64 = 0x0000_0100_0000_01b3;
 
 /// Incremental FNV-1a-64 for callers that hash non-contiguous parts
 /// (clipped display rows, multi-slice fingerprints).
@@ -56,9 +56,9 @@ mod tests {
     #[test]
     fn matches_reference_vectors() {
         // Published FNV-1a-64 test vectors.
-        assert_eq!(fnv1a_64(b""), 0xCBF2_9CE4_8422_2325);
-        assert_eq!(fnv1a_64(b"a"), 0xAF63_DC4C_8601_EC8C);
-        assert_eq!(fnv1a_64(b"foobar"), 0x85944171F73967E8);
+        assert_eq!(fnv1a_64(b""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(fnv1a_64(b"a"), 0xaf63_dc4c_8601_ec8c);
+        assert_eq!(fnv1a_64(b"foobar"), 0x85944171f73967e8);
     }
 
     #[test]

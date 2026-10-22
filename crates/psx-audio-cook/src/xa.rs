@@ -26,7 +26,7 @@ pub const BLOCK_SAMPLES: usize = hw::BLOCK_SAMPLES;
 /// (8), 2324 data bytes and the 4-byte EDC (`mkisopsx` rebuilds the EDC).
 pub const RAW_SECTOR_BYTES: usize = 2336;
 /// Channel number of the filler sectors that pad unused interleave slots.
-pub const FILLER_CHANNEL: u8 = 0xFF;
+pub const FILLER_CHANNEL: u8 = 0xff;
 
 /// `(f0, f1)` per filter, in 1/64: the first four rows of the psx-spx tables.
 const FILTERS: [(i32, i32); 4] = [(0, 0), (60, 0), (115, -52), (98, -55)];
@@ -139,7 +139,7 @@ fn quantize(h: History, x: &[f64], filter: usize, range: u8) -> Block {
         let t = ((target - pred as f64) / step).round().clamp(-8.0, 7.0) as i32;
         let out = ((t << shift) + pred).clamp(-32768, 32767);
         error += (target - out as f64).powi(2);
-        *n = (t & 0xF) as u8;
+        *n = (t & 0xf) as u8;
         h = History {
             old: out,
             older: h.old,
@@ -253,14 +253,14 @@ pub fn decode(format: Format, sectors: &[SectorData]) -> Vec<Vec<i16>> {
                     let stream = if format.stereo { half } else { 0 };
                     let header = group[4 + blk * 2 + half];
                     // Shift 13..=15 are reserved and act like 9.
-                    let range = match header & 0xF {
+                    let range = match header & 0xf {
                         r @ 0..=12 => r,
                         _ => 9,
                     };
                     let filter = ((header >> 4) & 3) as usize;
                     for j in 0..BLOCK_SAMPLES {
                         let word = group[16 + j * 4 + blk];
-                        let nibble = ((word >> (4 * half)) & 0xF) as i32;
+                        let nibble = ((word >> (4 * half)) & 0xf) as i32;
                         let t = (nibble ^ 8) - 8;
                         let h = history[stream];
                         let s = ((t << (12 - range)) + predict(h, filter)).clamp(-32768, 32767);
@@ -404,7 +404,7 @@ pub fn parse_file(bytes: &[u8]) -> Result<Vec<RawSector>, String> {
 
 /// The format a coding-info byte describes, if it is 4-bit audio.
 pub fn format_of(coding: u8) -> Option<Format> {
-    if coding & 0xF0 != 0 || coding & 3 > 1 || coding & 0x08 != 0 {
+    if coding & 0xf0 != 0 || coding & 3 > 1 || coding & 0x08 != 0 {
         return None;
     }
     Some(Format {
@@ -570,7 +570,7 @@ mod tests {
         }
         // Left blocks take the low nibbles, right the high: left +1, right -2.
         for byte in data[16..128].iter_mut() {
-            *byte = 0xE1;
+            *byte = 0xe1;
         }
         let out = decode(STEREO_37K, &[data]);
         // s[n] = 1 + (s[n-1] * 60 + 32) >> 6 with s[-1] = 0: 1, 2, 3, ...
@@ -599,7 +599,7 @@ mod tests {
         for group in data[..hw::SECTOR_ADPCM_BYTES].chunks_exact(hw::GROUP_BYTES) {
             assert_eq!(group[0..4], group[4..8]);
             assert_eq!(group[8..12], group[12..16]);
-            assert!(group[4..12].iter().all(|&h| h & 0xC0 == 0 && h & 0xF <= 12));
+            assert!(group[4..12].iter().all(|&h| h & 0xc0 == 0 && h & 0xf <= 12));
         }
         assert!(data[hw::SECTOR_ADPCM_BYTES..].iter().all(|&b| b == 0));
         // The first block of each channel is history free (filter 0).

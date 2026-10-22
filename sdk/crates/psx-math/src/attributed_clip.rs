@@ -837,7 +837,7 @@ mod tests {
 
     #[test]
     fn reading_vertices_in_place_clips_exactly_as_copying_them_did() {
-        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
         let mut next = || {
             state ^= state << 13;
             state ^= state >> 7;

@@ -14,7 +14,8 @@
 extern crate psx_rt;
 
 use core::hint::black_box;
-use psx_font::{fonts::BASIC, FontAtlas};
+use psx_font::fonts::BASIC;
+use psx_font::FontAtlas;
 use psx_gpu::display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode};
 use psx_gpu::Gpu;
 use psx_rt::tty;
@@ -32,7 +33,7 @@ extern "C" {
 }
 
 const BUF: usize = 1200;
-const GUARD: u8 = 0xEE;
+const GUARD: u8 = 0xee;
 
 static mut SRC: [u8; BUF] = [0; BUF];
 static mut DST: [u8; BUF] = [0; BUF];
@@ -200,7 +201,7 @@ fn run_all() -> (u32, u32) {
             }
         }
         for do_ in 0..4 {
-            for value in [0x5Au8, 0x00] {
+            for value in [0x5au8, 0x00] {
                 cases += 1;
                 let bad = check_memset(do_ + 8, n, value);
                 if bad != 0 {
@@ -241,10 +242,10 @@ fn run_all() -> (u32, u32) {
             }
         }
         cases += 1;
-        let bad = check_memset(9, n, 0xA5);
+        let bad = check_memset(9, n, 0xa5);
         if bad != 0 {
             failures += 1;
-            log_failure(2, 0xA5, 9, n, bad);
+            log_failure(2, 0xa5, 9, n, bad);
         }
     }
     (cases, failures)

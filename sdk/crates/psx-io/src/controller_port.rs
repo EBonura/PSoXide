@@ -390,7 +390,7 @@ mod tests {
             word
         }
         fn receive(&mut self) -> u8 {
-            self.received.pop().unwrap_or(0xFF)
+            self.received.pop().unwrap_or(0xff)
         }
         fn transmit(&mut self, byte: u8) {
             self.sent.push(byte);
@@ -485,8 +485,8 @@ mod tests {
         // The pulse lands during the RX wait (DSR set, RX not yet), ends, and
         // RX arrives after: only the release wait remains.
         let mut bus = Script::with_status(&[TX, DSR, RX, 0]);
-        bus.received.push(0x5A);
-        assert_eq!(bus.exchange(0x00, false, TIMING), Ok(0x5A));
+        bus.received.push(0x5a);
+        assert_eq!(bus.exchange(0x00, false, TIMING), Ok(0x5a));
     }
 
     #[test]
@@ -503,18 +503,18 @@ mod tests {
         // The reply arrived before the card's ACK. The next observation is
         // after the pulse: DSR is low, but STAT.IRQ still records the edge.
         let mut bus = Script::with_status(&[TX, RX, sio0::stat::IRQ, 0]);
-        bus.received.push(0x5A);
-        assert_eq!(bus.exchange_card(Port::One, 0x00, false, TIMING), Ok(0x5A));
+        bus.received.push(0x5a);
+        assert_eq!(bus.exchange_card(Port::One, 0x00, false, TIMING), Ok(0x5a));
         assert_eq!(
             bus.control,
             [sio0::selected_ctrl(false, true) | sio0::ctrl::ACK]
         );
 
         let mut live = Script::with_status(&[TX, RX, 0]);
-        live.received.push(0x5A);
+        live.received.push(0x5a);
         assert_eq!(
             live.exchange(0x00, false, TIMING),
-            Err(ExchangeError::AckTimeout { reply: 0x5A })
+            Err(ExchangeError::AckTimeout { reply: 0x5a })
         );
     }
 
@@ -527,10 +527,10 @@ mod tests {
         assert!(last.control.is_empty());
 
         let mut absent = Script::with_status(&[TX, RX, 0]);
-        absent.received.push(0xFF);
+        absent.received.push(0xff);
         assert_eq!(
             absent.exchange_card(Port::One, 0x81, false, TIMING),
-            Err(ExchangeError::AckTimeout { reply: 0xFF })
+            Err(ExchangeError::AckTimeout { reply: 0xff })
         );
     }
 
@@ -550,10 +550,10 @@ mod tests {
         );
 
         let mut bus = Script::with_status(&[TX, RX, 0]);
-        bus.received.push(0xFF);
+        bus.received.push(0xff);
         assert_eq!(
             bus.exchange(0x01, false, TIMING),
-            Err(ExchangeError::AckTimeout { reply: 0xFF })
+            Err(ExchangeError::AckTimeout { reply: 0xff })
         );
 
         let mut bus = Script::with_status(&[TX, RX | DSR, DSR]);

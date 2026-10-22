@@ -35,7 +35,7 @@ fn ticks(mut body: impl FnMut()) -> u32 {
     while n < POLLS {
         let start = now();
         body();
-        total += now().wrapping_sub(start) & 0xFFFF;
+        total += now().wrapping_sub(start) & 0xffff;
         n += 1;
     }
     total

@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //! One final resident image and guard closure for independent cold packages.
-use crate::{
-    overlay_elf::Elf,
-    overlay_pack::{self, ExecutableImages, PackedImage},
-};
+use crate::overlay_elf::Elf;
+use crate::overlay_pack::{self, ExecutableImages, PackedImage};
 use std::collections::BTreeSet;
 
 /// Fixed resident publication symbols for one separately admitted image.

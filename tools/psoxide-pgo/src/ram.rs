@@ -11,7 +11,7 @@
 /// End of psoxide.ld's RAM region: 2 MiB of RAM from 0x8000_0000, less the
 /// 64 KiB the BIOS keeps below `LOAD_ADDR` and the 32 KiB `STACK_RESERVE`
 /// at the top. `.bss` must end below it; whatever lies between is free.
-pub const RAM_END: u32 = 0x801F_8000;
+pub const RAM_END: u32 = 0x801f_8000;
 
 /// `__bss_end` from a link map: the address column of the line that assigns
 /// it (`801f6a84 801f6a84        0     1         __bss_end = .`).

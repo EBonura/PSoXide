@@ -21,12 +21,10 @@ pub mod xa_clock;
 use crate::periph::Cd;
 use crate::{irq, read_u8, write_u8};
 
-use psx_hw::cd::index_status as status;
-use psx_hw::cd::irq as code;
-use psx_hw::cd::{reg, request, volume_apply};
 use psx_hw::cd::{
-    CMD_DEMUTE, CMD_GETLOCP, CMD_GETSTAT, CMD_MUTE, CMD_PAUSE, CMD_PLAY, CMD_READN, CMD_SETLOC,
-    CMD_SETMODE, CMD_STOP, STAT_PLAYING, STAT_SEEKING,
+    index_status as status, irq as code, reg, request, volume_apply, CMD_DEMUTE, CMD_GETLOCP,
+    CMD_GETSTAT, CMD_MUTE, CMD_PAUSE, CMD_PLAY, CMD_READN, CMD_SETLOC, CMD_SETMODE, CMD_STOP,
+    STAT_PLAYING, STAT_SEEKING,
 };
 
 /// Response bytes a sector probe discards at most. The FIFO holds 16, but a
@@ -660,7 +658,7 @@ pub const fn bin_to_bcd(v: u8) -> u8 {
 /// Convert a BCD byte back to binary. Inverse of [`bin_to_bcd`] for well-formed
 /// input; nibbles above 9 are not normalised (the drive never emits them).
 pub const fn bcd_to_bin(v: u8) -> u8 {
-    (v >> 4) * 10 + (v & 0x0F)
+    (v >> 4) * 10 + (v & 0x0f)
 }
 
 /// Decoded CdlGetlocP reply. The relative MSF (`relative_*`) is elapsed time
@@ -1157,7 +1155,7 @@ mod tests {
     impl CommandIo for FakeIo {
         fn begin(&mut self) -> u8 {
             self.event(BEGIN);
-            0x1F
+            0x1f
         }
         fn wait_param_room(&mut self, spins: u32) -> bool {
             self.event(ROOM);
