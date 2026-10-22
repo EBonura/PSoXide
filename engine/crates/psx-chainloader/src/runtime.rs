@@ -1,6 +1,6 @@
 //! Bare-metal teardown, retry diagnostics, cache flush and register handoff.
 use crate::paint;
-use crate::{Observer, Reader, SECTOR_WORDS};
+use crate::{Bounds, Observer, Reader, Span, SECTOR_WORDS};
 use psx_pack::cd::SectorReader;
 
 /// Collection-specific loading visuals. Shared transport owns the CD device.
@@ -128,6 +128,54 @@ pub unsafe fn run<P: Presentation>(
     cdda_track_base: u32,
     payload_fnv: u32,
     loader_base: u32,
+    loading: P,
+) -> ! {
+    unsafe {
+        run_bounded(
+            exe_lba,
+            lba_offset,
+            cdda_track_base,
+            payload_fnv,
+            &Bounds::BelowLoader(loader_base),
+            loading,
+        )
+    }
+}
+
+/// [`run`] for a loader that does not sit above every payload: the payload
+/// must be clear of `reserved` (see [`crate::check_payload`]), which has to
+/// cover the loader's code, data and live stack. A payload may then load above
+/// the loader as well as below it.
+///
+/// # Safety
+/// As [`run`], with `reserved` in place of `loader_base`.
+pub unsafe fn run_reserving<P: Presentation>(
+    exe_lba: u32,
+    lba_offset: u32,
+    cdda_track_base: u32,
+    payload_fnv: u32,
+    reserved: &[Span],
+    loading: P,
+) -> ! {
+    unsafe {
+        run_bounded(
+            exe_lba,
+            lba_offset,
+            cdda_track_base,
+            payload_fnv,
+            &Bounds::Clear(reserved),
+            loading,
+        )
+    }
+}
+
+/// The body of [`run`] and [`run_reserving`].
+unsafe fn run_bounded<P: Presentation>(
+    exe_lba: u32,
+    lba_offset: u32,
+    cdda_track_base: u32,
+    payload_fnv: u32,
+    bounds: &Bounds<'_>,
     mut loading: P,
 ) -> ! {
     unsafe { quiesce() };
@@ -163,14 +211,14 @@ pub unsafe fn run<P: Presentation>(
         // says; no other `Cd` token is in use.
         let mut reader = SectorReader::with_cd(unsafe { psx_io::periph::Cd::steal() });
         match unsafe {
-            crate::try_load(
+            crate::load(
                 &mut reader,
                 exe_lba,
                 &mut header,
                 payload_fnv,
                 &mut DirectMemory,
                 &mut Events(&mut loading),
-                loader_base,
+                bounds,
             )
         } {
             Ok(exe) => break exe,

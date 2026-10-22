@@ -1,7 +1,9 @@
 //! Legacy transport and fault-order oracle. No PSX hardware or retail assets required.
 #[path = "oracle/legacy.rs"]
 mod legacy;
-use psx_chainloader::{LoadedExe, Memory, Observer, Reader, SECTOR_WORDS};
+use psx_chainloader::{
+    check_payload, Conflict, LoadedExe, Memory, Observer, Reader, Span, RAM_END, SECTOR_WORDS,
+};
 use std::{cell::RefCell, rc::Rc};
 
 type Trace = Rc<RefCell<Vec<String>>>;
@@ -459,4 +461,140 @@ fn an_unproved_stop_fails_the_payload_stage_without_checksumming() {
     assert!(!x.trace.iter().any(|s| s == "finish" || s == "stage:6"));
     let x = run(false, 0, Fault::Proof, 0x80010000);
     assert_eq!(x.result, Err((6, 0)));
+}
+
+/// The demo disc's reservations: a 32 KiB loader at 0x801C8000 and the stack at
+/// the top of RAM.
+const DEMO_RESERVED: [Span; 2] = [
+    Span::new(0x801C_8000, 0x801D_0000),
+    Span::new(0x801F_8000, RAM_END),
+];
+
+#[test]
+fn a_payload_clear_of_the_reserved_spans_is_accepted_below_between_and_above() {
+    // Cortex-sized at the bottom, the Half-Life intro above the loader.
+    assert_eq!(
+        check_payload(0x8001_0000, 0x0011_5000, &DEMO_RESERVED),
+        Ok(())
+    );
+    assert_eq!(check_payload(0x801E_0000, 75_776, &DEMO_RESERVED), Ok(()));
+    // Ending exactly at a reserved span's start, or starting at its end, is clear.
+    assert_eq!(
+        check_payload(0x8001_0000, 0x1B_8000, &DEMO_RESERVED),
+        Ok(())
+    );
+    assert_eq!(check_payload(0x801D_0000, 0x8000, &DEMO_RESERVED), Ok(()));
+    // An empty payload occupies nothing, even inside a reserved span.
+    assert_eq!(check_payload(0x801C_9000, 0, &DEMO_RESERVED), Ok(()));
+}
+
+#[test]
+fn a_payload_that_touches_the_loader_or_the_stack_names_the_span() {
+    assert_eq!(
+        check_payload(0x8001_0000, 0x1B_8001, &DEMO_RESERVED),
+        Err(Conflict::Reserved(DEMO_RESERVED[0]))
+    );
+    assert_eq!(
+        check_payload(0x801C_7800, 4096, &DEMO_RESERVED),
+        Err(Conflict::Reserved(DEMO_RESERVED[0]))
+    );
+    assert_eq!(
+        check_payload(0x801E_0000, 0x1_9000, &DEMO_RESERVED),
+        Err(Conflict::Reserved(DEMO_RESERVED[1]))
+    );
+}
+
+#[test]
+fn the_extent_counts_whole_sectors_not_the_logical_size() {
+    // A payload of 2049 bytes writes two whole sectors, 4096 bytes.
+    assert_eq!(check_payload(0x801C_7800, 2048, &DEMO_RESERVED), Ok(()));
+    assert_eq!(
+        check_payload(0x801C_7800, 2049, &DEMO_RESERVED),
+        Err(Conflict::Reserved(DEMO_RESERVED[0])),
+        "the second sector runs to 0x801C8800"
+    );
+}
+
+#[test]
+fn a_payload_outside_ram_is_refused() {
+    assert_eq!(
+        check_payload(0x8000_FFFF, 0, &[]),
+        Err(Conflict::BelowFloor)
+    );
+    assert_eq!(
+        check_payload(0x801F_F800, 4096, &[]),
+        Err(Conflict::PastRam)
+    );
+    assert_eq!(
+        check_payload(u32::MAX - 100, 4096, &[]),
+        Err(Conflict::PastRam)
+    );
+    assert_eq!(
+        check_payload(0x8001_0000, u32::MAX, &[]),
+        Err(Conflict::PastRam)
+    );
+}
+
+#[test]
+fn try_load_reserving_loads_above_the_loader_and_refuses_an_overlap() {
+    let run_at = |address: u32, size: usize| {
+        let trace = Trace::default();
+        let count = size.div_ceil(2048);
+        let data: Vec<[u32; 512]> = (0..count)
+            .map(|s| std::array::from_fn(|i| ((s * 512 + i) as u32).wrapping_mul(0x719337b)))
+            .collect();
+        let checksum = hash(
+            data.iter()
+                .flat_map(|s| s.iter().flat_map(|w| w.to_le_bytes()))
+                .take(size),
+        );
+        let mut header = [0u32; 512];
+        header[0] = 0x582d5350;
+        header[1] = 0x45584520;
+        header[4] = address;
+        header[5] = 0x80071234;
+        header[6] = address;
+        header[7] = size as u32;
+        header[12] = 0xfffffff0;
+        header[13] = 0x30;
+        let mut cd = Cd {
+            trace: trace.clone(),
+            header,
+            data,
+            fault: Fault::None,
+            starts: 0,
+            reads: 0,
+            at: 0,
+            proofs: Vec::new(),
+        };
+        let mut ram = Ram(vec![[0; 512]; count.max(1)]);
+        let mut events = Events(trace.clone());
+        let mut scratch = [u32::MAX; SECTOR_WORDS];
+        // SAFETY: host RAM stands in for every address; no MMIO executes.
+        let result = unsafe {
+            psx_chainloader::try_load_reserving(
+                &mut cd,
+                24,
+                &mut scratch,
+                checksum,
+                &mut ram,
+                &mut events,
+                &DEMO_RESERVED,
+            )
+        };
+        let lines = trace.borrow().clone();
+        (result, lines)
+    };
+    // The Half-Life intro: 75,776 bytes at 0x801E0000, above the loader.
+    let (result, trace) = run_at(0x801E_0000, 75_776);
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(trace.last().unwrap(), "stage:7");
+    // The same program one sector lower would write the loader's last bytes.
+    let (result, trace) = run_at(0x801C_F800, 75_776);
+    assert_eq!(result, Err((5, 0x801C_F800)));
+    assert_eq!(
+        trace.last().unwrap(),
+        "stage:4",
+        "a bounds failure stops after the magic"
+    );
 }
