@@ -1,11 +1,12 @@
 #!/bin/sh
-# Style ratchet for the lints of Google's Rust style guide that are not yet
-# clean. Each is `allow` in the workspace manifests (so `-D warnings` stays
-# green) and measured here with `-W`. A count may go down, never up:
+# Style ratchet for the lints of Google's Rust style guide. Lints with a backlog are
+# `allow` in the workspace manifests (so `-D warnings` stays green) and measured here with
+# `-W`; lints that are clean are measured too, so they stay at zero even in crates that
+# have not opted into the workspace lints. A count may go down, never up:
 #
 #   tools/style-ratchet.sh            fail when any count exceeds the baseline
 #   tools/style-ratchet.sh --update   rewrite the baseline to today's counts
-#   tools/style-ratchet.sh --report   print the counts and the top files, never fail
+#   tools/style-ratchet.sh --report   print the counts, never fail
 #
 # Counted: library and binary targets only (tests may unwrap and panic, as the
 # guide allows), host workspaces plus the SDK on the PS1 target, because the
@@ -16,11 +17,21 @@ cd "$(dirname "$0")/.."
 BASELINE=tools/style-ratchet.baseline
 MODE=${1:-check}
 
-LINTS="clippy::must_use_candidate clippy::unwrap_used clippy::exhaustive_enums
+# Lints that are clean today (baseline 0 everywhere they are measured, so they
+# bind even in crates that have not opted into the workspace lints) ...
+CLEAN="clippy::wrong_self_convention clippy::should_implement_trait
+clippy::len_without_is_empty clippy::borrowed_box clippy::ptr_arg
+clippy::new_without_default clippy::new_ret_no_self clippy::missing_safety_doc
+clippy::undocumented_unsafe_blocks clippy::unnecessary_unwrap clippy::from_over_into
+clippy::inherent_to_string clippy::enum_glob_use clippy::rc_buffer clippy::rc_mutex
+clippy::get_first"
+# ... and the ones with a backlog.
+BACKLOG="clippy::must_use_candidate clippy::unwrap_used clippy::exhaustive_enums
 clippy::exhaustive_structs clippy::missing_errors_doc clippy::missing_panics_doc
 clippy::wildcard_imports clippy::string_add clippy::string_add_assign
 clippy::fn_params_excessive_bools clippy::needless_for_each
 clippy::disallowed_types clippy::disallowed_methods missing_docs"
+LINTS="$CLEAN $BACKLOG"
 
 WARN=""
 for l in $LINTS; do WARN="$WARN -W $l"; done
