@@ -145,6 +145,12 @@ pub mod bios {
 /// I-cache enable, scratchpad enable, and a handful of debug bits. Bit
 /// names and the "usually" settings follow psx-spx, "Memory Control",
 /// FFFE0130h.
+///
+/// This is the hardware map, for the emulator and host tools. Guest code never writes the
+/// register: changing it (or isolating the cache) while a DMA channel runs corrupts the next
+/// instruction fetch on a console. `psx_rt::cache` is the only code that does it, behind a
+/// DMA-idle gate, and the `cache-gate` link check fails an image in which anything else does
+/// (`sdk/docs/CACHE-CONTROL.md`).
 pub mod cache_control {
     /// Virtual address. Does not follow the KUSEG/KSEG0/KSEG1 mirror rule.
     pub const ADDR: u32 = 0xFFFE_0130;
@@ -175,9 +181,9 @@ pub mod cache_control {
     pub const FLUSH: u32 = TAG_TEST | I_CACHE;
 
     /// The normal running setting: every bit psx-spx lists as usually
-    /// set. It has not been read back from a console yet; a
-    /// hardware-tests case that reads the register after boot would
-    /// confirm it.
+    /// set. It is also the literal the BIOS ROM writes after its own flush
+    /// (read from SCPH-5501, 5502 and 7502); a hardware-tests case that
+    /// reads the register after boot would confirm it on a console.
     pub const RUNNING: u32 = SCRATCHPAD
         | DATA_CACHE
         | I_REFILL_4_WORDS

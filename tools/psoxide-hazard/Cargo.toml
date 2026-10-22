@@ -23,3 +23,7 @@ path = "src/bin/hazard-scan.rs"
 [[bin]]
 name = "stack-guard"
 path = "src/bin/stack-guard.rs"
+
+[[bin]]
+name = "cache-gate"
+path = "src/bin/cache-gate.rs"

@@ -5,6 +5,8 @@
 //!   moving any code, and rescans.
 //! * [`scan`] (`hazard-scan`) proves an image free of those hazards,
 //!   whatever built it.
+//! * [`cache_gate`] (`cache-gate`) proves nothing outside the SDK's flush routines writes the
+//!   cache control register or isolates the cache.
 //! * [`stack_guard`] (`stack-guard`) proves every scratchpad stack call tree
 //!   fits its region.
 //!
@@ -15,6 +17,7 @@
 
 use std::io::Write;
 
+pub mod cache_gate;
 pub mod detect;
 pub mod linkmap;
 pub mod listing;
