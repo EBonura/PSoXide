@@ -1,7 +1,7 @@
 .DEFAULT_GOAL := help
 include tools/sdk-examples.mk
 
-.PHONY: help check test miri fmt lint example disc hello-tri hello-tri-disc run-tri
+.PHONY: help check test miri fmt fmt-check lint example disc hello-tri hello-tri-disc run-tri
 help:
 	@echo "make check | test | miri | lint | hello-tri-disc"
 	@echo "make disc EXAMPLE=hello-input; make run-tri FRONTEND=/path/to/frontend"
@@ -23,9 +23,15 @@ miri:
 	MIRIFLAGS="$(MIRI_FLAGS)" cargo miri test --locked --manifest-path sdk/Cargo.toml --workspace --no-fail-fast
 	MIRIFLAGS="$(MIRI_FLAGS) -Zmiri-tree-borrows" cargo miri test --locked -p psx-hw
 	MIRIFLAGS="$(MIRI_FLAGS) -Zmiri-tree-borrows" cargo miri test --locked --manifest-path sdk/Cargo.toml --workspace --no-fail-fast
+# The examples are their own workspaces, so `cargo fmt --all` does not reach them.
 fmt:
 	cargo fmt --all
 	cargo fmt --manifest-path sdk/Cargo.toml --all
+	for m in sdk/examples/*/Cargo.toml; do cargo fmt --manifest-path "$$m" || exit 1; done
+fmt-check:
+	cargo fmt --all -- --check
+	cargo fmt --manifest-path sdk/Cargo.toml --all -- --check
+	for m in sdk/examples/*/Cargo.toml; do cargo fmt --manifest-path "$$m" -- --check || exit 1; done
 lint:
 	tools/check-register-literals.sh
 	sh tools/guest_symbol_gate_test.sh
@@ -37,3 +43,4 @@ lint:
 	# only exist there. Libraries only; the tests need std.
 	cargo clippy --locked --manifest-path sdk/Cargo.toml --workspace --target $(TARGET) \
 		-Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem --all-features -- -D warnings
+	tools/style-ratchet.sh
