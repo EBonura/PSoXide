@@ -32,6 +32,8 @@ pub struct PackedImage<'a> {
     pub incoming: Vec<IncomingCall<'a>>,
     /// Original sections selected for exclusion from the resident executable.
     pub sections: Vec<u16>,
+    /// Hazard-trampoline words reserved at the end of the image.
+    pub trampoline_words: u32,
 }
 
 /// One direct import emitted by the same compilation as its cold Rust entry.
@@ -114,6 +116,39 @@ pub fn pack_pinned<'a>(
     calls: &[(&str, &str)],
     pinned: &[PinnedImport<'_>],
 ) -> Result<PackedImage<'a>, String> {
+    pack_sized(
+        elf,
+        id,
+        code,
+        data,
+        resident,
+        calls,
+        pinned,
+        TRAMPOLINE_WORDS,
+    )
+}
+
+/// Smallest and largest hazard-trampoline reservation a package may carry.
+pub const TRAMPOLINE_WORDS_RANGE: Range<u32> = 8..1025;
+
+/// [`pack_pinned`] with an explicit hazard-trampoline reservation. The default
+/// ([`TRAMPOLINE_WORDS`]) covers a panic=immediate-abort image with many load-delay
+/// hazards; a size-bound consumer whose image needs fewer (the hazard patcher fails the
+/// build when the reservation runs out) reserves only what it uses.
+#[allow(clippy::too_many_arguments)]
+pub fn pack_sized<'a>(
+    elf: &Elf<'a>,
+    id: u32,
+    code: &str,
+    data: &[&str],
+    resident: &[&str],
+    calls: &[(&str, &str)],
+    pinned: &[PinnedImport<'_>],
+    trampoline_words: u32,
+) -> Result<PackedImage<'a>, String> {
+    if !TRAMPOLINE_WORDS_RANGE.contains(&trampoline_words) {
+        return Err("trampoline reservation out of range".into());
+    }
     let (code_index, text) = elf.section(code)?;
     for (index, pair) in calls.iter().enumerate() {
         if calls[..index].contains(pair) {
@@ -155,7 +190,7 @@ pub fn pack_pinned<'a>(
         .ok_or("image overflow")?
         & !3;
     let full_bytes = bytes
-        .checked_add(4 * (TRAMPOLINE_WORDS + 2))
+        .checked_add(4 * (trampoline_words + 2))
         .ok_or("trampoline overflow")?;
     overlay::placement(text.address, full_bytes, true).map_err(|e| format!("placement: {e:?}"))?;
     let symbols = elf.symbols()?;
@@ -207,7 +242,7 @@ pub fn pack_pinned<'a>(
         relocations.extend(elf.relocations(index)?);
     }
     image[bytes as usize / 4] = 0x48415a54;
-    image[bytes as usize / 4 + 1] = TRAMPOLINE_WORDS;
+    image[bytes as usize / 4 + 1] = trampoline_words;
     let selected_ranges = selected
         .iter()
         .map(|(i, s)| Ok((*i as u16, range(s.address, s.size)?)))
@@ -406,6 +441,7 @@ pub fn pack_pinned<'a>(
         code_ranges: vec![code_range, text.address + bytes..text.address + full_bytes],
         incoming,
         sections: selected.iter().map(|(i, _)| *i as u16).collect(),
+        trampoline_words,
     })
 }
 
@@ -451,9 +487,12 @@ pub fn executable_images(
     descriptor: &str,
     sites: &str,
     trap: &str,
+    veneers: Option<&str>,
 ) -> Result<ExecutableImages, String> {
     let image = resident_image(elf, &package.sections, resident, header)?;
-    publish_image(elf, package, resident, descriptor, sites, trap, image)
+    publish_image(
+        elf, package, resident, descriptor, sites, trap, veneers, image,
+    )
 }
 
 /// Extract resident bytes once after excluding the complete cold ownership set.
@@ -526,6 +565,11 @@ pub(crate) fn resident_image(
     Ok(image)
 }
 
+/// With `veneers`, every shipped call site jumps to its own resident veneer
+/// (`psx_residency::arena::PackedVeneer`) instead of straight to the trap; a lease then
+/// only has to store the module entry into the veneer's data word and the trap back,
+/// and nothing flushes the instruction cache per call. Without it the sites are
+/// patched in place at run time as before.
 pub(crate) fn publish_image(
     elf: &Elf<'_>,
     package: &PackedImage<'_>,
@@ -533,6 +577,7 @@ pub(crate) fn publish_image(
     descriptor: &str,
     sites: &str,
     trap: &str,
+    veneers: Option<&str>,
     mut image: Vec<u8>,
 ) -> Result<ExecutableImages, String> {
     if package.incoming.iter().any(|call| call.kind != 1) {
@@ -557,6 +602,9 @@ pub(crate) fn publish_image(
     let meta = unique_symbol(&symbols, descriptor)?;
     let table = unique_symbol(&symbols, sites)?;
     let trap = unique_symbol(&symbols, trap)?;
+    let veneer_table = veneers
+        .map(|name| unique_symbol(&symbols, name))
+        .transpose()?;
     let writable = |symbol: Symbol<'_>| {
         selected.iter().any(|(i, s)| {
             *i == symbol.section as usize
@@ -590,6 +638,25 @@ pub(crate) fn publish_image(
     {
         return Err("resident executable trap required".into());
     }
+    if let Some(veneer) = veneer_table {
+        let stride = psx_residency::arena::PackedVeneer::BYTES;
+        let overlaps = |other: Symbol<'_>| {
+            veneer.address < other.address.saturating_add(other.bytes)
+                && other.address < veneer.address.saturating_add(veneer.bytes)
+        };
+        if !writable(veneer)
+            || veneer.address & 3 != 0
+            || veneer.bytes % stride != 0
+            || ((veneer.bytes / stride) as usize) < package.incoming.len()
+            || overlaps(meta)
+            || overlaps(table)
+        {
+            return Err("initialized veneer table capacity, layout or overlap".into());
+        }
+        for i in (0..veneer.bytes).step_by(4) {
+            put_word(&mut image, base, veneer.address + i, 0)?;
+        }
+    }
     for (i, word) in [
         package.words.len() as u32,
         package.words[1],
@@ -617,7 +684,23 @@ pub(crate) fn publish_image(
                 word,
             )?;
         }
-        let trapped = overlay::direct(call.instruction, 1, trap.address, call.site)
+        let target = match veneer_table {
+            Some(veneer) => {
+                let at = veneer.address + i as u32 * psx_residency::arena::PackedVeneer::BYTES;
+                let record = psx_residency::arena::PackedVeneer::published(at, trap.address);
+                for (n, word) in record.code.into_iter().chain([record.target]).enumerate() {
+                    put_word(&mut image, base, at + n as u32 * 4, word)?;
+                }
+                if call.site >= veneer.address
+                    && call.site < veneer.address.saturating_add(veneer.bytes)
+                {
+                    return Err("typed call site lies inside the veneer table".into());
+                }
+                at
+            }
+            None => trap.address,
+        };
+        let trapped = overlay::direct(call.instruction, 1, target, call.site)
             .map_err(|e| format!("trap: {e:?}"))?;
         put_word(&mut image, base, call.site, trapped)?;
     }
@@ -648,6 +731,7 @@ pub fn finalize_guard<'a>(
     descriptor: &str,
     sites: &str,
     trap: &str,
+    veneers: Option<&str>,
 ) -> Result<(PackedImage<'a>, ExecutableImages), String> {
     let result = finalize_payload(elf, original, initial, hardened, resident)?;
     let published = publish_image(
@@ -657,6 +741,7 @@ pub fn finalize_guard<'a>(
         descriptor,
         sites,
         trap,
+        veneers,
         hardened[..initial.resident.len()].to_vec(),
     )?;
     Ok((result, published))
@@ -742,11 +827,12 @@ fn hardened_fixups(
     after: &[u32],
     resident_code: Vec<Range<u32>>,
 ) -> Result<Vec<u32>, String> {
-    if before.len() != after.len() || before.len() < TRAMPOLINE_WORDS as usize + 2 {
+    let reserve = original.trampoline_words;
+    if before.len() != after.len() || before.len() < reserve as usize + 2 {
         return Err("hardened image capacity changed".into());
     }
-    let tramp = before.len() - (TRAMPOLINE_WORDS as usize + 2);
-    if after[tramp..tramp + 2] != [0x48415a54, TRAMPOLINE_WORDS] {
+    let tramp = before.len() - (reserve as usize + 2);
+    if after[tramp..tramp + 2] != [0x48415a54, reserve] {
         return Err("hardened trampoline header changed".into());
     }
     let old_fixups = &original.words[5 + before.len()..];
@@ -1400,6 +1486,7 @@ mod tests {
             code_ranges: vec![base..base + 8, base + 20..base + 20 + 4 * TRAMPOLINE_WORDS],
             incoming: Vec::new(),
             sections: vec![1, 2],
+            trampoline_words: TRAMPOLINE_WORDS,
         }
     }
     #[test]

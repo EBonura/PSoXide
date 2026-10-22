@@ -24,6 +24,17 @@ and `PackedCall`; their fixed capacities are checked before publication. Each
 declared pair must have at least one call and all distinct sites are emitted.
 Undeclared incoming references and data-held cold pointers are rejected.
 
+Optional `--veneers SYMBOL` (both commands) names a writable `[PackedVeneer; N]` table in resident
+`.data`, `N` at least the number of emitted call sites. The shipped sites then jump to
+resident veneer `i` (initialised to the trap) instead of straight to the trap, and a lease
+binds by storing the module entry into the veneer's data word (`Admission::invoke_veneered`),
+so no instruction is patched or flushed per call. The guard image keeps the original typed
+calls either way.
+
+`--trampoline-words N` (per image, default 96) sets the hazard-trampoline reservation at the end of
+the package; a size-bound consumer reserves what its module hazards need (the hazard patcher fails
+the build when the reservation runs out).
+
 The command produces `raw.pak`, a trapped runtime `raw.pak.exe`, a composite
 `raw.pak.guard.exe`, and `raw.pak.guard-args`. Run the existing hazard patcher,
 hazard scanner and stack guard on the composite image with its matching map and

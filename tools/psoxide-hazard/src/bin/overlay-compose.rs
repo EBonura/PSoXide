@@ -17,11 +17,13 @@ struct Spec<'a> {
     descriptor: Option<&'a str>,
     sites: Option<&'a str>,
     trap: Option<&'a str>,
+    veneers: Option<&'a str>,
+    trampoline_words: Option<u32>,
 }
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.len() < 8 {
-        return Err("overlay-compose ELF NEW_DIRECTORY --header SECTION --resident SECTION --image NAME --id N --code SECTION --descriptor SYMBOL --sites SYMBOL --trap SYMBOL [--data SECTION] [--call WRAPPER:EXPORT] [--image ...] [--final-guard PATH]".into());
+        return Err("overlay-compose ELF NEW_DIRECTORY --header SECTION --resident SECTION --image NAME --id N --code SECTION --descriptor SYMBOL --sites SYMBOL --trap SYMBOL [--veneers SYMBOL] [--trampoline-words N] [--data SECTION] [--call WRAPPER:EXPORT] [--image ...] [--final-guard PATH]".into());
     }
     let mut header = None;
     let mut resident = Vec::new();
@@ -89,6 +91,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "--descriptor" if spec.descriptor.is_none() => spec.descriptor = Some(value),
                     "--sites" if spec.sites.is_none() => spec.sites = Some(value),
                     "--trap" if spec.trap.is_none() => spec.trap = Some(value),
+                    "--veneers" if spec.veneers.is_none() => spec.veneers = Some(value),
+                    "--trampoline-words" if spec.trampoline_words.is_none() => {
+                        spec.trampoline_words = Some(value.parse()?)
+                    }
                     _ => return Err("unknown or repeated image option".into()),
                 }
             }
@@ -102,7 +108,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut images = specs
         .iter()
         .map(|s| {
-            overlay_pack::pack_pinned(
+            overlay_pack::pack_sized(
                 &elf,
                 s.id.ok_or("missing image id")?,
                 s.code.ok_or("missing image code")?,
@@ -110,14 +116,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 &resident,
                 &s.calls,
                 &s.pinned,
+                s.trampoline_words.unwrap_or(overlay_pack::TRAMPOLINE_WORDS),
             )
         })
         .collect::<Result<Vec<_>, String>>()?;
     let compact = if compact_sites.is_some() || compact_ranges.is_some() || compact_trap.is_some() {
-        if specs
-            .iter()
-            .any(|s| s.descriptor.is_some() || s.sites.is_some() || s.trap.is_some())
-        {
+        if specs.iter().any(|s| {
+            s.descriptor.is_some() || s.sites.is_some() || s.trap.is_some() || s.veneers.is_some()
+        }) {
             return Err("compact and standard publication tables cannot be mixed".into());
         }
         Some(overlay_composition::CompactBinding {
@@ -141,6 +147,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     descriptor: s.descriptor.ok_or("missing descriptor")?,
                     sites: s.sites.ok_or("missing sites")?,
                     trap: s.trap.ok_or("missing trap")?,
+                    veneers: s.veneers,
                 })
             })
             .collect::<Result<Vec<_>, String>>()?

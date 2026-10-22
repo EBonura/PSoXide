@@ -73,8 +73,9 @@ The gate costs a few control-register reads when the bus is idle. When a walk is
 waits for it: the CPU gives up the overlap with the GPU for that frame. A path that flushes
 every tick (Quake's overlay admission: two flushes per tick; OoT's leases: a range flush on
 bind and on drop) therefore serialises with the GPU once per frame. That is correct and
-slower; the fix is to stop flushing per tick (resident veneers that jump through a data
-table, flushing only at install and swap), not to weaken the gate.
+slower; the fix is to stop flushing per tick, not to weaken the gate. `psx-residency` does that with
+resident jump veneers (`PackedVeneer`, `Admission::invoke_veneered`, `overlay-compose --veneers`):
+a lease stores the module entry into a data word and back, and only the image install flushes.
 
 ## On the console stop-panel
 
