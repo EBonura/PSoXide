@@ -24,9 +24,9 @@ use crate::walk::WalkSet;
 const UNBOUNDED: i32 = 1 << 28;
 
 /// Queue pops one call may spend on each flood once the first has finished.
-/// A flood to the resident radius of a hex 4 level takes about a hundred, so
+/// A flood to the resident radius of a hex 4 level takes about a hundred and fifty, so
 /// it lands within a couple of ticks and no tick pays for a whole search.
-pub const FLOOD_POPS_PER_CALL: u32 = 64;
+pub const FLOOD_POPS_PER_CALL: u32 = 16;
 
 /// Sectors past the draw radius a drawn room stays drawn, so a room on the
 /// rim does not flicker in and out as the camera crosses a sector.
