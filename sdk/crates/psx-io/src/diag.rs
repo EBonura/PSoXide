@@ -161,10 +161,13 @@ fn set(p: *mut u32, v: u32) {
 }
 
 /// A raw read of one word of the block, for the panel.
+///
+/// # Safety
+/// `p` must point at a word of [`PSX_DIAG`].
 #[cfg(feature = "console-diag")]
 #[inline(always)]
-pub fn get(p: *const u32) -> u32 {
-    // SAFETY: as in `bump`.
+pub unsafe fn get(p: *const u32) -> u32 {
+    // SAFETY: as in `bump`; the caller passes a pointer into the block.
     unsafe { p.read_volatile() }
 }
 
@@ -333,6 +336,7 @@ pub fn step(id: u32, text: &str) {
     {
         touch();
         set(field!(step_id), id);
+        // SAFETY: a raw pointer to a field of a private static; nothing is read or written here.
         let dst = unsafe { (&raw mut PSX_DIAG.step_text).cast::<u8>() };
         let bytes = text.as_bytes();
         let mut i = 0;
@@ -401,12 +405,16 @@ pub fn ll_scan(head: u32) {
             let tag = unsafe { core::ptr::read_volatile((0x8000_0000 | addr) as *const u32) };
             let words = tag >> 24;
             if words > 16 {
-                if get(field!(ll_bad)) == 0 {
+                let bad = field!(ll_bad);
+                // SAFETY: `bad` points into the block.
+                if unsafe { get(bad) } == 0 {
                     set(field!(ll_bad_addr), addr);
                 }
                 bump(field!(ll_bad));
             }
-            if words > get(field!(ll_max)) {
+            let max = field!(ll_max);
+            // SAFETY: `max` points into the block.
+            if words > unsafe { get(max) } {
                 set(field!(ll_max), words);
             }
             nodes += 1;
