@@ -16,13 +16,13 @@ use bitflags::bitflags;
 ///
 /// Reading from this address returns `GPUREAD` (VRAM-to-CPU transfer data
 /// or GP1(10h) register response).
-pub const GP0: u32 = 0x1F80_1810;
+pub const GP0: u32 = 0x1f80_1810;
 
 /// `GP1` -- write: display-control commands (reset, display enable, mode,
 /// DMA direction, display area, horizontal/vertical range, etc.).
 ///
 /// Reading from this address returns [`GPUSTAT`](GpuStat).
-pub const GP1: u32 = 0x1F80_1814;
+pub const GP1: u32 = 0x1f80_1814;
 
 /// Alias for reads from `0x1F80_1810`: the VRAM-to-CPU / GP1(10h) read path.
 pub const GPUREAD: u32 = GP0;
@@ -99,7 +99,7 @@ impl GpuStat {
     /// Texture page X base in pixels (0, 64, 128, …, 960).
     #[inline]
     pub const fn texpage_x(self) -> u16 {
-        (self.bits() as u16 & 0xF) * 64
+        (self.bits() as u16 & 0xf) * 64
     }
 
     /// Texture page Y base in pixels (0 or 256).
@@ -201,21 +201,21 @@ pub mod gp1 {
     /// to flip.
     #[inline(always)]
     pub const fn display_start(x: u32, y: u32) -> u32 {
-        0x0500_0000 | (x & 0x3FF) | ((y & 0x1FF) << 10)
+        0x0500_0000 | (x & 0x3ff) | ((y & 0x1ff) << 10)
     }
 
     /// GP1(06h) -- Horizontal display range (GPU clock counts from
     /// start-of-line). Standard NTSC window: `0x260..0xC60`.
     #[inline(always)]
     pub const fn h_display_range(x1: u32, x2: u32) -> u32 {
-        0x0600_0000 | (x1 & 0xFFF) | ((x2 & 0xFFF) << 12)
+        0x0600_0000 | (x1 & 0xfff) | ((x2 & 0xfff) << 12)
     }
 
     /// GP1(07h) -- Vertical display range (scanline). Standard NTSC:
     /// `0x10..0x100` → 240 lines starting at line 16.
     #[inline(always)]
     pub const fn v_display_range(y1: u32, y2: u32) -> u32 {
-        0x0700_0000 | (y1 & 0x3FF) | ((y2 & 0x3FF) << 10)
+        0x0700_0000 | (y1 & 0x3ff) | ((y2 & 0x3ff) << 10)
     }
 
     /// GP1(08h) -- Display mode (resolution, video standard, depth).
@@ -250,7 +250,7 @@ pub mod gp1 {
     /// - `0x07`: GPU type (always `0x02` on retail).
     #[inline(always)]
     pub const fn get_gpu_info(sub_op: u32) -> u32 {
-        0x1000_0000 | (sub_op & 0xF)
+        0x1000_0000 | (sub_op & 0xf)
     }
 }
 
@@ -288,8 +288,8 @@ pub mod gp0 {
         dither: bool,
         draw_to_display: bool,
     ) -> u32 {
-        0xE100_0000
-            | (texpage_x & 0xF)
+        0xe100_0000
+            | (texpage_x & 0xf)
             | ((texpage_y & 1) << 4)
             | ((semi_tp & 3) << 5)
             | ((tex_depth & 3) << 7)
@@ -300,36 +300,36 @@ pub mod gp0 {
     /// GP0(E2h) -- Texture window (wrap inside a rect).
     #[inline(always)]
     pub const fn tex_window(mask_x: u32, mask_y: u32, off_x: u32, off_y: u32) -> u32 {
-        0xE200_0000
-            | (mask_x & 0x1F)
-            | ((mask_y & 0x1F) << 5)
-            | ((off_x & 0x1F) << 10)
-            | ((off_y & 0x1F) << 15)
+        0xe200_0000
+            | (mask_x & 0x1f)
+            | ((mask_y & 0x1f) << 5)
+            | ((off_x & 0x1f) << 10)
+            | ((off_y & 0x1f) << 15)
     }
 
     /// GP0(E3h) -- Draw area top-left corner (pixels clipped inside).
     #[inline(always)]
     pub const fn draw_area_top_left(x: u32, y: u32) -> u32 {
-        0xE300_0000 | (x & 0x3FF) | ((y & 0x1FF) << 10)
+        0xe300_0000 | (x & 0x3ff) | ((y & 0x1ff) << 10)
     }
 
     /// GP0(E4h) -- Draw area bottom-right corner.
     #[inline(always)]
     pub const fn draw_area_bottom_right(x: u32, y: u32) -> u32 {
-        0xE400_0000 | (x & 0x3FF) | ((y & 0x1FF) << 10)
+        0xe400_0000 | (x & 0x3ff) | ((y & 0x1ff) << 10)
     }
 
     /// GP0(E5h) -- Draw offset (added to every vertex before raster).
     /// Each component is 11-bit signed; pass negatives as two's-comp.
     #[inline(always)]
     pub const fn draw_offset(x: i32, y: i32) -> u32 {
-        0xE500_0000 | ((x as u32) & 0x7FF) | (((y as u32) & 0x7FF) << 11)
+        0xe500_0000 | ((x as u32) & 0x7ff) | (((y as u32) & 0x7ff) << 11)
     }
 
     /// GP0(E6h) -- Mask-bit setting (stencil-style control).
     #[inline(always)]
     pub const fn mask_bit(set_on_draw: bool, check_before_draw: bool) -> u32 {
-        0xE600_0000 | (set_on_draw as u32) | ((check_before_draw as u32) << 1)
+        0xe600_0000 | (set_on_draw as u32) | ((check_before_draw as u32) << 1)
     }
 
     /// Build the opcode byte for a polygon command. Bits:
@@ -360,17 +360,17 @@ pub mod gp0 {
 
     /// GP0(A0h) -- Begin CPU→VRAM transfer. Header is this word; then
     /// two words of dest `xy` / `wh`; then `ceil(w*h/2)` pixel words.
-    pub const COPY_CPU_TO_VRAM: u32 = 0xA000_0000;
+    pub const COPY_CPU_TO_VRAM: u32 = 0xa000_0000;
 
     /// GP0(C0h) -- Begin VRAM→CPU transfer. Same header layout as
     /// [`COPY_CPU_TO_VRAM`]; pixel words come back via `GPUREAD`.
-    pub const COPY_VRAM_TO_CPU: u32 = 0xC000_0000;
+    pub const COPY_VRAM_TO_CPU: u32 = 0xc000_0000;
 
     /// GP0(80h) -- VRAM→VRAM copy (rect blit).
     pub const COPY_VRAM_TO_VRAM: u32 = 0x8000_0000;
 
     /// GP0(1Fh) -- Request IRQ1.
-    pub const REQUEST_IRQ: u32 = 0x1F00_0000;
+    pub const REQUEST_IRQ: u32 = 0x1f00_0000;
 }
 
 /// Pack three 8-bit color channels into the low 24 bits of a GP0
@@ -531,14 +531,14 @@ mod tests {
         assert_eq!(gp1::display_mode(1, 0, false, false, false), 0x0800_0001);
         // 640x480 PAL, 24bit, interlaced.
         let m = gp1::display_mode(3, 1, true, true, true);
-        assert_eq!(m & 0xFF, 0x3F, "low byte = 00111111");
+        assert_eq!(m & 0xff, 0x3f, "low byte = 00111111");
     }
 
     #[test]
     fn gp0_fill_rect_embeds_color() {
         // R=0xAA G=0xBB B=0xCC → 0x02CCBBAA
-        let word = gp0::fill_rect(0xAA, 0xBB, 0xCC);
-        assert_eq!(word, 0x02CC_BBAA);
+        let word = gp0::fill_rect(0xaa, 0xbb, 0xcc);
+        assert_eq!(word, 0x02cc_bbaa);
     }
 
     #[test]
@@ -560,7 +560,7 @@ mod tests {
                 SHADED_QUAD,
                 SHADED_TEXTURED_QUAD
             ],
-            [0x2800_0000, 0x2C00_0000, 0x3800_0000, 0x3C00_0000]
+            [0x2800_0000, 0x2c00_0000, 0x3800_0000, 0x3c00_0000]
         );
         assert_eq!([FLAT_LINE, SHADED_LINE], [0x4000_0000, 0x5000_0000]);
         assert_eq!([FLAT_RECT, TEXTURED_RECT], [0x6000_0000, 0x6400_0000]);
@@ -590,14 +590,14 @@ mod tests {
         // Gouraud quad, textured, semi-transparent, raw-tex: all bits set.
         assert_eq!(
             gp0::polygon_opcode(true, true, true, true, true),
-            0x3F00_0000
+            0x3f00_0000
         );
     }
 
     #[test]
     fn pack_vertex_handles_negative() {
         // (-1, -1) should produce 0xFFFFFFFF.
-        assert_eq!(pack_vertex(-1, -1), 0xFFFF_FFFF);
+        assert_eq!(pack_vertex(-1, -1), 0xffff_ffff);
         assert_eq!(pack_vertex(100, 200), 100 | (200 << 16));
     }
 
@@ -607,7 +607,7 @@ mod tests {
         // in opcode byte.
         let tl = gp0::draw_area_top_left(10, 20);
         let br = gp0::draw_area_bottom_right(10, 20);
-        assert_eq!(tl, 0xE300_0000 | 10 | (20 << 10));
-        assert_eq!(br, 0xE400_0000 | 10 | (20 << 10));
+        assert_eq!(tl, 0xe300_0000 | 10 | (20 << 10));
+        assert_eq!(br, 0xe400_0000 | 10 | (20 << 10));
     }
 }

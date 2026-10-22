@@ -106,8 +106,8 @@ pub const Q15_ONE: u32 = 1 << 15;
 /// assert_eq!(mul_q16(2 << 16, 2 << 16), 4 << 16);
 /// ```
 pub const fn mul_q16(a: u32, b: u32) -> u32 {
-    let (ah, al) = (a >> 16, a & 0xFFFF);
-    let (bh, bl) = (b >> 16, b & 0xFFFF);
+    let (ah, al) = (a >> 16, a & 0xffff);
+    let (bh, bl) = (b >> 16, b & 0xffff);
     (ah * b) + (al * bh) + ((al * bl) >> 16)
 }
 

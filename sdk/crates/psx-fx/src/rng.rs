@@ -71,7 +71,7 @@ impl LcgRng {
     #[inline]
     pub fn signed(&mut self, range: i16) -> i16 {
         let r = self.next();
-        spread(((r >> 16) & 0x1F) as u8, range)
+        spread(((r >> 16) & 0x1f) as u8, range)
     }
 
     /// Current internal state -- useful if a caller wants to save /
@@ -95,8 +95,8 @@ mod tests {
 
     #[test]
     fn same_seed_same_sequence() {
-        let mut a = LcgRng::new(0xC0DE_F00D);
-        let mut b = LcgRng::new(0xC0DE_F00D);
+        let mut a = LcgRng::new(0xc0de_f00d);
+        let mut b = LcgRng::new(0xc0de_f00d);
         for _ in 0..100 {
             assert_eq!(a.next(), b.next());
         }
@@ -104,7 +104,7 @@ mod tests {
 
     #[test]
     fn signed_stays_in_range() {
-        let mut rng = LcgRng::new(0xBEEF_0042);
+        let mut rng = LcgRng::new(0xbeef_0042);
         for _ in 0..10_000 {
             let v = rng.signed(40);
             assert!((-40..=40).contains(&v), "out of range: {v}");

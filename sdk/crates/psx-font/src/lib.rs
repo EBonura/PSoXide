@@ -89,8 +89,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
-use psx_hw::gpu::packet;
-use psx_hw::gpu::{gp0, pack_color, pack_texcoord, pack_vertex, pack_xy};
+use psx_hw::gpu::{gp0, pack_color, pack_texcoord, pack_vertex, pack_xy, packet};
 use psx_io::gpu::{wait_command_ready, write_command};
 use psx_math::sincos;
 use psx_vram::{
@@ -1707,7 +1706,7 @@ mod tests {
             // rect path and the quad path address one atlas identically.
             for blend in [TextBlend::Average, TextBlend::Add, TextBlend::Subtract] {
                 assert_eq!(
-                    blended_draw_mode_word(tpage, blend) & 0x1FF,
+                    blended_draw_mode_word(tpage, blend) & 0x1ff,
                     u32::from(tpage.uv_word(blend.semi_transparency_bits())),
                     "{blend:?} page/blend/depth encoding"
                 );
@@ -1832,7 +1831,7 @@ mod tests {
         glyph_count: 2,
         bitmap: &[
             // 'A': row 0 = all pixels, row 1 = leftmost only
-            0xFF, 0x01, // 'B': row 0 = alternating, row 1 = rightmost
+            0xff, 0x01, // 'B': row 0 = alternating, row 1 = rightmost
             0x55, 0x80,
         ],
         glyph_advances: None,
@@ -1870,7 +1869,7 @@ mod tests {
     #[test]
     fn lsb_row_unpacks_as_expected() {
         let row_a0 = TEST_FONT.glyph_row_packed(0, 0);
-        assert_eq!(row_a0, 0xFF);
+        assert_eq!(row_a0, 0xff);
         let row_a1 = TEST_FONT.glyph_row_packed(0, 1);
         assert_eq!(row_a1, 0x01);
         let row_b0 = TEST_FONT.glyph_row_packed(1, 0);
@@ -1886,11 +1885,11 @@ mod tests {
             ..TEST_FONT
         };
         // 0xFF mirrors to 0xFF.
-        assert_eq!(msb_font.glyph_row_packed(0, 0), 0xFF);
+        assert_eq!(msb_font.glyph_row_packed(0, 0), 0xff);
         // 0x01 in MSB-first becomes 0x80 after reversing.
         assert_eq!(msb_font.glyph_row_packed(0, 1), 0x80);
         // 0x55 (0b01010101) mirrors to 0xAA (0b10101010).
-        assert_eq!(msb_font.glyph_row_packed(1, 0), 0xAA);
+        assert_eq!(msb_font.glyph_row_packed(1, 0), 0xaa);
     }
 
     #[test]
@@ -1971,7 +1970,7 @@ mod tests {
                     <= FontAtlas::MAX_PACK_HALFWORDS
             );
         }
-        assert_eq!(crate::fonts::DRIPPY_SPACE.glyph_count, 0x5B - 0x20);
+        assert_eq!(crate::fonts::DRIPPY_SPACE.glyph_count, 0x5b - 0x20);
         assert_eq!(crate::fonts::DRIPPY_SPACE_DISPLAY.glyph_count, 26);
     }
 
@@ -2049,7 +2048,7 @@ mod tests {
                         + usize::from(local_x / 4);
                     let word =
                         scratch[usize::from(placement.y + local_y) * stride + global_halfword];
-                    let actual = (word >> ((local_x & 3) * 4)) & 0xF;
+                    let actual = (word >> ((local_x & 3) * 4)) & 0xf;
                     assert_eq!(
                         actual, expected,
                         "font {font_index} texel ({local_x},{local_y})"
@@ -2091,7 +2090,7 @@ mod tests {
                 // GP0(64h) takes this packed UV/CLUT word. Every quad path
                 // shares `glyph_uv` and only extends the same top-left corner.
                 let rect_uv_word = pack_texcoord(u, v, atlas.clut_word);
-                assert_eq!(rect_uv_word & 0xFFFF, u32::from(u) | (u32::from(v) << 8));
+                assert_eq!(rect_uv_word & 0xffff, u32::from(u) | (u32::from(v) << 8));
                 assert_eq!((rect_uv_word >> 16) as u16, atlas.clut_word);
                 let quad = glyph_quad_uvs(u, v, font.glyph_w, font.glyph_h);
                 assert_eq!(quad[0], (u, v));

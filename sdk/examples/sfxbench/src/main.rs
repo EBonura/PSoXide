@@ -40,7 +40,7 @@ const T2_SYSCLK_DIV8: u32 = 1 << 9;
 
 fn now() -> u32 {
     // SAFETY: a read of root counter 2's current-value register.
-    unsafe { read_volatile(T2_COUNTER) & 0xFFFF }
+    unsafe { read_volatile(T2_COUNTER) & 0xffff }
 }
 
 /// Counter ticks (8 CPU cycles each) for `REPS` batches of `BATCH` calls of
@@ -52,7 +52,7 @@ fn ticks(mut body: impl FnMut(u32)) -> u32 {
         for i in 0..BATCH {
             body(i);
         }
-        total += now().wrapping_sub(start) & 0xFFFF;
+        total += now().wrapping_sub(start) & 0xffff;
     }
     total
 }
@@ -122,7 +122,7 @@ fn main() {
     // SAFETY: counter 2's mode register; nothing else uses the counter here.
     unsafe { write_volatile(T2_MODE, T2_SYSCLK_DIV8) };
 
-    let curve = Curve::linear_clip(0x3FFF, 6000);
+    let curve = Curve::linear_clip(0x3fff, 6000);
     let one = Listeners::new([Listener::new([0, 0, 0], 300)]);
     let two = Listeners::new([
         Listener::new([0, 0, 0], 300),
@@ -156,25 +156,59 @@ fn main() {
         });
         report(label, t, base);
     };
-    run("gains 1 listener, EqualPower", &equal, ListenerRule::Loudest, false);
+    run(
+        "gains 1 listener, EqualPower",
+        &equal,
+        ListenerRule::Loudest,
+        false,
+    );
     run("gains 1 listener, Sum", &sum, ListenerRule::Loudest, false);
-    run("gains 1 listener, Off (no trig, no divide)", &off, ListenerRule::Loudest, false);
-    run("gains 2 listeners Loudest, EqualPower", &equal, ListenerRule::Loudest, true);
-    run("gains 2 listeners Nearest, EqualPower", &equal, ListenerRule::Nearest, true);
-    run("gains 2 listeners Centroid, EqualPower", &equal, ListenerRule::Centroid, true);
-    run("gains 1 listener, culled by curve", &culled, ListenerRule::Loudest, false);
+    run(
+        "gains 1 listener, Off (no trig, no divide)",
+        &off,
+        ListenerRule::Loudest,
+        false,
+    );
+    run(
+        "gains 2 listeners Loudest, EqualPower",
+        &equal,
+        ListenerRule::Loudest,
+        true,
+    );
+    run(
+        "gains 2 listeners Nearest, EqualPower",
+        &equal,
+        ListenerRule::Nearest,
+        true,
+    );
+    run(
+        "gains 2 listeners Centroid, EqualPower",
+        &equal,
+        ListenerRule::Centroid,
+        true,
+    );
+    run(
+        "gains 1 listener, culled by curve",
+        &culled,
+        ListenerRule::Loudest,
+        false,
+    );
     black_box(acc);
 
     // The pieces the placement chain is built from, for attribution.
     let mut acc2 = 0i32;
     let t = ticks(|i| {
         let p = black_box(POS[(i & 15) as usize]);
-        acc2 = acc2.wrapping_add(psx_math::int32::isqrt_i32(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]));
+        acc2 = acc2.wrapping_add(psx_math::int32::isqrt_i32(
+            p[0] * p[0] + p[1] * p[1] + p[2] * p[2],
+        ));
     });
     report("  isqrt_i32 of a 3D squared length", t, base);
     let t = ticks(|i| {
         let p = black_box(POS[(i & 15) as usize]);
-        acc2 = acc2.wrapping_add(psx_math::int32::isqrt_u64((p[0] * p[0] + p[1] * p[1] + p[2] * p[2]) as u64) as i32);
+        acc2 = acc2.wrapping_add(psx_math::int32::isqrt_u64(
+            (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]) as u64,
+        ) as i32);
     });
     report("  isqrt_u64 of the same", t, base);
     let t = ticks(|i| {
@@ -192,7 +226,7 @@ fn main() {
         acc2 = acc2.wrapping_add(curve.level(black_box(p[0] + p[2])) as i32);
     });
     report("  Curve::level (Ramp)", t, base);
-    let hyper = Curve::inverse(0x3FFF, 800);
+    let hyper = Curve::inverse(0x3fff, 800);
     let t = ticks(|i| {
         let p = black_box(POS[(i & 15) as usize]);
         acc2 = acc2.wrapping_add(hyper.level(black_box(p[0] + p[2])) as i32);
@@ -201,7 +235,11 @@ fn main() {
     let t = ticks(|i| {
         let p = black_box(POS[(i & 15) as usize]);
         let q = black_box([5, 6, 7]);
-        let d = [p[0].wrapping_sub(q[0]) >> 1, p[1].wrapping_sub(q[1]) >> 1, p[2].wrapping_sub(q[2]) >> 1];
+        let d = [
+            p[0].wrapping_sub(q[0]) >> 1,
+            p[1].wrapping_sub(q[1]) >> 1,
+            p[2].wrapping_sub(q[2]) >> 1,
+        ];
         let d = d.map(|v| v.clamp(-16383, 16383));
         acc2 = acc2.wrapping_add(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
     });
@@ -212,8 +250,8 @@ fn main() {
     let mut hw = NullHw;
     let mut mixer = Mixer::new(
         [
-            Lane::new(0x00_00FF, Policy::Smart),
-            Lane::new(0xFF_FF00, Policy::FirstFree),
+            Lane::new(0x00_00ff, Policy::Smart),
+            Lane::new(0xff_ff00, Policy::FirstFree),
         ],
         60,
     );
@@ -239,7 +277,7 @@ fn main() {
     report("Mixer::tick (loops only, nothing due)", t, base);
 
     // A full lane of low-priority one-shots, then a more important one steals.
-    let mut shots = Mixer::new([Lane::new(0x00_00FF, Policy::Smart)], 60);
+    let mut shots = Mixer::new([Lane::new(0x00_00ff, Policy::Smart)], 60);
     let low = sound(0, Class::Low, false);
     for _ in 0..8 {
         shots.play(&mut hw, &low, Play::new(500, 500).with_ticks(1000));

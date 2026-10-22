@@ -120,12 +120,12 @@ mod tests {
 
     #[test]
     fn key_round_trips_and_rejects_out_of_range() {
-        let key = ResourceKey::new(Category::ARCHETYPE_PACK, 0xABCDE).unwrap();
+        let key = ResourceKey::new(Category::ARCHETYPE_PACK, 0xabcde).unwrap();
         assert_eq!(key.category(), Category::ARCHETYPE_PACK);
-        assert_eq!(key.index(), 0xABCDE);
+        assert_eq!(key.index(), 0xabcde);
         assert_eq!(ResourceKey::from_u32(key.as_u32()), Some(key));
         assert!(ResourceKey::new(Category::WORLD_REGION, ResourceKey::MAX_INDEX + 1).is_none());
-        assert!(ResourceKey::from_u32(0xFF00_0000).is_none());
+        assert!(ResourceKey::from_u32(0xff00_0000).is_none());
         assert!(Category::from_number(Category::LIMIT).is_none());
     }
 

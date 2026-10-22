@@ -21,8 +21,7 @@
 
 use psx_asset::tracks::{host, RotKey};
 use psx_asset::Animation;
-use psxed_format::animation::tracks as fmt;
-use psxed_format::animation::{MAGIC, VERSION_V6};
+use psxed_format::animation::{tracks as fmt, MAGIC, VERSION_V6};
 
 type V3 = [f64; 3];
 type M3 = [[f64; 3]; 3];

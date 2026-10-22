@@ -27,10 +27,9 @@
 
 use psx_iso::{add_playtest_files, build_world_pack, Exe, IsoBuilder};
 use std::collections::HashSet;
-use std::env;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::{env, fs};
 
 const CDDA_PREGAP_SECTORS: u32 = 150;
 
@@ -590,7 +589,7 @@ fn looks_like_raw_sector(sector: &[u8]) -> bool {
     sector.len() >= psx_iso::SECTOR_BYTES
         && sector[0] == 0x00
         && sector[11] == 0x00
-        && sector[1..11] == [0xFF; 10]
+        && sector[1..11] == [0xff; 10]
 }
 
 fn build_world_pack_from_inputs(
@@ -867,7 +866,7 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("chunk_1000.psxm"), [0xA5, 0x5A]).unwrap();
+        std::fs::write(dir.join("chunk_1000.psxm"), [0xa5, 0x5a]).unwrap();
         std::fs::write(dir.join("ignored.psxm"), [0]).unwrap();
 
         let pack =
@@ -918,10 +917,10 @@ mod tests {
     #[test]
     fn extract_system_area_accepts_cooked_bytes() {
         let mut bytes = vec![0u8; 16 * psx_iso::iso9660::SECTOR_SIZE + 1];
-        bytes[4 * psx_iso::iso9660::SECTOR_SIZE] = 0xA5;
+        bytes[4 * psx_iso::iso9660::SECTOR_SIZE] = 0xa5;
         let area = extract_system_area(&bytes).unwrap();
         assert_eq!(area.len(), 16 * psx_iso::iso9660::SECTOR_SIZE);
-        assert_eq!(area[4 * psx_iso::iso9660::SECTOR_SIZE], 0xA5);
+        assert_eq!(area[4 * psx_iso::iso9660::SECTOR_SIZE], 0xa5);
     }
 
     #[test]
@@ -930,13 +929,13 @@ mod tests {
         for lba in 0..16 {
             let sector = &mut bytes[lba * psx_iso::SECTOR_BYTES..(lba + 1) * psx_iso::SECTOR_BYTES];
             sector[0] = 0;
-            sector[1..11].fill(0xFF);
+            sector[1..11].fill(0xff);
             sector[11] = 0;
         }
-        bytes[4 * psx_iso::SECTOR_BYTES + 24] = 0x5A;
+        bytes[4 * psx_iso::SECTOR_BYTES + 24] = 0x5a;
         let area = extract_system_area(&bytes).unwrap();
         assert_eq!(area.len(), 16 * psx_iso::iso9660::SECTOR_SIZE);
-        assert_eq!(area[4 * psx_iso::iso9660::SECTOR_SIZE], 0x5A);
+        assert_eq!(area[4 * psx_iso::iso9660::SECTOR_SIZE], 0x5a);
     }
 
     #[test]
@@ -950,8 +949,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
 
         let track_path = dir.join("track02.cdda");
-        let mut audio = vec![0x7Au8; psx_iso::SECTOR_BYTES * 2];
-        audio[psx_iso::SECTOR_BYTES] = 0x5D;
+        let mut audio = vec![0x7au8; psx_iso::SECTOR_BYTES * 2];
+        audio[psx_iso::SECTOR_BYTES] = 0x5d;
         std::fs::write(&track_path, &audio).unwrap();
 
         let mut image = vec![0x11u8; psx_iso::SECTOR_BYTES * 10];
@@ -966,8 +965,8 @@ mod tests {
         );
         assert_eq!(image.len(), psx_iso::SECTOR_BYTES * 162);
         assert_eq!(image[10 * psx_iso::SECTOR_BYTES], 0);
-        assert_eq!(image[160 * psx_iso::SECTOR_BYTES], 0x7A);
-        assert_eq!(image[161 * psx_iso::SECTOR_BYTES], 0x5D);
+        assert_eq!(image[160 * psx_iso::SECTOR_BYTES], 0x7a);
+        assert_eq!(image[161 * psx_iso::SECTOR_BYTES], 0x5d);
 
         let cue_path = dir.join("game.cue");
         let image_path = dir.join("game.bin");

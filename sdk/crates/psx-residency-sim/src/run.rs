@@ -387,7 +387,7 @@ impl<'a> Sim<'a> {
             need_tick: vec![None; regions],
             installing: None,
             report: SimReport::default(),
-            hash: Fnv(0x811C_9DC5),
+            hash: Fnv(0x811c_9dc5),
             now_tick: 0,
             origin: u32::MAX,
         }

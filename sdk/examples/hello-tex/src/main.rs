@@ -131,8 +131,8 @@ fn main() {
         // Brick in the upper half: anchor at (100, 40), drifts
         // horizontally ±80 px and vertically ±20 px at slightly
         // different rates so the motion is a Lissajous curve.
-        let brick_phase_x = (frame.wrapping_mul(48) & 0xFFF) as u16;
-        let brick_phase_y = (frame.wrapping_mul(64) & 0xFFF) as u16;
+        let brick_phase_x = (frame.wrapping_mul(48) & 0xfff) as u16;
+        let brick_phase_y = (frame.wrapping_mul(64) & 0xfff) as u16;
         let bx = 100 + drift(brick_phase_x, 80);
         let by = 40 + drift(brick_phase_y, 20);
         draw_sprite(
@@ -146,8 +146,8 @@ fn main() {
 
         // Floor in the lower half: faster, opposite phase, so the
         // two sprites cross each other without colliding.
-        let floor_phase_x = (frame.wrapping_mul(72).wrapping_add(2048) & 0xFFF) as u16;
-        let floor_phase_y = (frame.wrapping_mul(56).wrapping_add(1024) & 0xFFF) as u16;
+        let floor_phase_x = (frame.wrapping_mul(72).wrapping_add(2048) & 0xfff) as u16;
+        let floor_phase_y = (frame.wrapping_mul(56).wrapping_add(1024) & 0xfff) as u16;
         let fx = 160 + drift(floor_phase_x, 80);
         let fy = 140 + drift(floor_phase_y, 20);
         draw_sprite(

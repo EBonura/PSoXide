@@ -405,7 +405,7 @@ mod tests {
             Resolution::R640X480,
         ] {
             let word = DisplayConfig::new(VideoMode::Ntsc, resolution).horizontal_range_command();
-            let (x1, x2) = (word & 0xFFF, (word >> 12) & 0xFFF);
+            let (x1, x2) = (word & 0xfff, (word >> 12) & 0xfff);
             assert_eq!((x1, x2 - x1), (0x260, 2560), "{resolution:?}");
         }
     }
@@ -414,6 +414,6 @@ mod tests {
     fn an_offset_moves_by_whole_pixels_of_the_current_width() {
         let display = DisplayConfig::new(VideoMode::Ntsc, Resolution::R512X240);
         let word = display.with_offset((3, 0)).horizontal_range_command();
-        assert_eq!(word & 0xFFF, 0x260 + 3 * 5);
+        assert_eq!(word & 0xfff, 0x260 + 3 * 5);
     }
 }

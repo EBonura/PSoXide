@@ -21,7 +21,7 @@ const AT: u32 = BASE + 0x1000;
 /// The module's code, its trampoline array, and the array's end.
 const CODE: u32 = 0x00;
 const ARRAY: u32 = 0x80;
-const END: u32 = 0xC8;
+const END: u32 = 0xc8;
 
 struct Setup {
     _dir: TempDir,
@@ -274,7 +274,7 @@ fn a_branch_in_a_module_is_patched_to_link_address_targets() {
     assert_eq!(word(&file, AT), j(tramp));
     // The fall-through and the branch target, both in link addresses.
     assert_eq!(word(&file, AT + ARRAY + 8 + 8), j(LINK + 8));
-    assert_eq!(word(&file, AT + ARRAY + 8 + 16), j(LINK + 0xC));
+    assert_eq!(word(&file, AT + ARRAY + 8 + 16), j(LINK + 0xc));
     assert_eq!(run(scan::main, &setup, &declared(AT)).0, 0);
 }
 
@@ -423,10 +423,10 @@ fn a_module_link_range_must_be_in_the_ram_mirrors() {
     let setup = setup(&hazardous());
     for (link, size) in [
         (0x8010_0000, SIZE),
-        (0x801F_FF00, 0x200),
+        (0x801f_ff00, 0x200),
         (0x8080_0000 - 0x80, 0x100),
         (0x0041_0000, SIZE),
-        (0xA041_0000, SIZE),
+        (0xa041_0000, SIZE),
     ] {
         let flags = vec!["--module".to_string(), module_flag(link, size, AT)];
         let (status, out) = run(patch::main, &setup, &flags);
@@ -459,7 +459,7 @@ fn code_ranges_are_in_ram_or_in_a_module() {
     assert_eq!(status, 2, "{out}");
     assert!(out.contains("bad --code range"), "{out}");
     // Straddling the end of the module.
-    let straddling = format!("{:x}..{:x}", LINK + 0xF0, LINK + 0x110);
+    let straddling = format!("{:x}..{:x}", LINK + 0xf0, LINK + 0x110);
     let mut flags = declared(AT);
     flags.extend(["--code".into(), straddling]);
     assert_eq!(run(patch::main, &setup, &flags).0, 2);

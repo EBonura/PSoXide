@@ -1,8 +1,7 @@
 //! The `xa-encode`, `xa-decode` and `xa-score` subcommands of `psx-audio-cook`.
 
 use crate::xa::{self, DriveSpeed, Format, SampleRate};
-use crate::xa_pack;
-use crate::{metrics, wav};
+use crate::{metrics, wav, xa_pack};
 use std::path::Path;
 use std::process::ExitCode;
 

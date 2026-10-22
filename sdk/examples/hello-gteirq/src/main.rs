@@ -25,11 +25,11 @@
 
 extern crate psx_rt;
 
-use psx_font::{fonts::BASIC, FontAtlas};
+use psx_font::fonts::BASIC;
+use psx_font::FontAtlas;
 use psx_gpu::display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode};
 use psx_gpu::Gpu;
-use psx_rt::interrupts;
-use psx_rt::tty;
+use psx_rt::{interrupts, tty};
 use psx_vram::{Clut, TextureDepth, TexturePage};
 
 const FONT_TPAGE: TexturePage = TexturePage::new(320, 0, TextureDepth::Bit4);
@@ -40,9 +40,9 @@ const RED: (u8, u8, u8) = (230, 80, 80);
 
 /// Written to SXY0/SXY1/SXY2 before each RTPS. After one RTPS SXY0 holds
 /// B, after two C, after none A.
-const SXY_A: u32 = 0x5A5A_1111;
-const SXY_B: u32 = 0x5A5A_2222;
-const SXY_C: u32 = 0x5A5A_3333;
+const SXY_A: u32 = 0x5a5a_1111;
+const SXY_B: u32 = 0x5a5a_2222;
+const SXY_C: u32 = 0x5a5a_3333;
 /// Iterations between checks of the VBlank count.
 const CHUNK: u32 = 4096;
 /// Interrupts to run under: about five seconds on NTSC.
@@ -128,7 +128,7 @@ fn line(label: &str, value: u32) -> ([u8; 32], usize) {
     text[..label.len()].copy_from_slice(label);
     text[label.len()] = b'=';
     for i in 0..8 {
-        text[label.len() + 1 + i] = DIGITS[(value >> (28 - 4 * i) & 0xF) as usize];
+        text[label.len() + 1 + i] = DIGITS[(value >> (28 - 4 * i) & 0xf) as usize];
     }
     (text, label.len() + 9)
 }

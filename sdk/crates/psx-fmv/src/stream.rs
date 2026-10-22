@@ -171,13 +171,13 @@ mod tests {
     fn assembles_out_of_order_and_counts_drops() {
         let mut a = FrameAssembler::new();
         let mut buf = [0u8; 3 * CHUNK_PAYLOAD_BYTES];
-        assert_eq!(a.add(&sector(2, 3, 1, 0xC2), &mut buf), None);
-        assert_eq!(a.add(&sector(0, 3, 1, 0xC0), &mut buf), None);
-        let f = a.add(&sector(1, 3, 1, 0xC1), &mut buf).unwrap();
+        assert_eq!(a.add(&sector(2, 3, 1, 0xc2), &mut buf), None);
+        assert_eq!(a.add(&sector(0, 3, 1, 0xc0), &mut buf), None);
+        let f = a.add(&sector(1, 3, 1, 0xc1), &mut buf).unwrap();
         assert_eq!((f.number, f.size, f.width, f.height), (1, 5000, 320, 240));
-        assert_eq!(buf[0], 0xC0);
-        assert_eq!(buf[CHUNK_PAYLOAD_BYTES], 0xC1);
-        assert_eq!(buf[2 * CHUNK_PAYLOAD_BYTES + 5], 0xC2);
+        assert_eq!(buf[0], 0xc0);
+        assert_eq!(buf[CHUNK_PAYLOAD_BYTES], 0xc1);
+        assert_eq!(buf[2 * CHUNK_PAYLOAD_BYTES + 5], 0xc2);
         // Frame 2 loses a chunk; frame 3 completes and 2 counts as dropped.
         assert_eq!(a.add(&sector(0, 3, 2, 0), &mut buf), None);
         assert_eq!(a.add(&sector(0, 3, 3, 0), &mut buf), None);

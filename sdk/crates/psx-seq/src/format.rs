@@ -44,7 +44,7 @@ pub const SONG_MAGIC: [u8; 4] = *b"PSQ1";
 /// Bank magic.
 pub const BANK_MAGIC: [u8; 4] = *b"PSQB";
 /// "No sample" / "no envelope" marker.
-pub const NONE16: u16 = 0xFFFF;
+pub const NONE16: u16 = 0xffff;
 /// Song flag: the bytecode writes to itself.
 pub const FLAG_SELF_MODIFYING: u16 = 1;
 
@@ -112,7 +112,7 @@ impl SongHeader {
         if n_fonts as usize > 8 {
             return Err(FormatError::BadHeader);
         }
-        let mut font_ids = [0xFF; 8];
+        let mut font_ids = [0xff; 8];
         for (i, f) in font_ids.iter_mut().enumerate().take(n_fonts as usize) {
             *f = *bytes.get(16 + i).ok_or(FormatError::Truncated)?;
         }

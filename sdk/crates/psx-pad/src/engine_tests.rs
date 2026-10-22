@@ -77,7 +77,7 @@ impl Pad {
             ack_width: 100,
             slips_if_early: false,
             drop_ack_at: None,
-            magic: 0x5A,
+            magic: 0x5a,
             mapped: false,
             motors: (false, 0),
             motor_tx: Vec::new(),
@@ -86,7 +86,7 @@ impl Pad {
             map_small: false,
             step: 0,
             cmd: 0,
-            last_reply: 0xFF,
+            last_reply: 0xff,
             ack_start: 0,
         }
     }
@@ -111,7 +111,7 @@ impl Pad {
 
     fn reply(&self, idx: u8) -> u8 {
         match idx {
-            0 => 0xFF,
+            0 => 0xff,
             1 => self.id,
             2 => self.magic,
             3 if self.cmd == 0x42 => !(self.buttons as u8),
@@ -139,8 +139,8 @@ impl Pad {
             return;
         }
         match (self.cmd, idx) {
-            (0x43, 3) if value == 1 => self.id = 0xF3,
-            (0x43, 3) if value == 0 && self.id == 0xF3 => {
+            (0x43, 3) if value == 1 => self.id = 0xf3,
+            (0x43, 3) if value == 0 && self.id == 0xf3 => {
                 if self.ignore_exits > 0 {
                     self.ignore_exits -= 1;
                 } else {
@@ -150,8 +150,8 @@ impl Pad {
             (0x44, 3) => self.analog_requested = value == 1,
             // The mapping: small motor on the first motor byte, large on the
             // second. Only configuration mode takes it.
-            (0x4D, 3) if self.id == 0xF3 => self.map_small = value == 0x00,
-            (0x4D, 4) if self.id == 0xF3 => self.mapped = self.map_small && value == 0x01,
+            (0x4d, 3) if self.id == 0xf3 => self.map_small = value == 0x00,
+            (0x4d, 4) if self.id == 0xf3 => self.mapped = self.map_small && value == 0x01,
             _ => {}
         }
     }
@@ -296,7 +296,7 @@ impl Hw for Sim {
         let end = self.now + BYTE;
         let now = self.now;
         let Some(pad) = self.pads[port as usize].as_mut() else {
-            self.rx.push((0xFF, end));
+            self.rx.push((0xff, end));
             self.dsr = None;
             return;
         };
@@ -479,7 +479,7 @@ fn analog_with(buttons: u16) -> Pad {
 #[test]
 fn digital_analog_and_config_frames_decode_the_same_buttons() {
     let held = button::CROSS | button::START | button::LEFT;
-    for (id, exchanges) in [(0x41u8, 5usize), (0x73, 9), (0xF3, 9)] {
+    for (id, exchanges) in [(0x41u8, 5usize), (0x73, 9), (0xf3, 9)] {
         let mut rig = Rig::new(Config::DEFAULT);
         rig.plug(
             Port::One,
@@ -1067,7 +1067,7 @@ fn enabling_rumble_maps_the_motors_in_one_visit_and_then_every_poll_carries_them
     rig.frames(5);
     assert_eq!(
         commands(&mut rig, Port::One),
-        [0x43, 0x4D, 0x43],
+        [0x43, 0x4d, 0x43],
         "enter, map, exit"
     );
     assert!(rig.pad(Port::One).mapped);
@@ -1119,7 +1119,7 @@ fn an_analog_request_with_the_motors_wanted_maps_them_in_the_same_visit() {
     rig.frame();
     rig.engine.request_analog(Port::One);
     rig.frames(8);
-    assert_eq!(commands(&mut rig, Port::One), [0x43, 0x44, 0x4D, 0x43]);
+    assert_eq!(commands(&mut rig, Port::One), [0x43, 0x44, 0x4d, 0x43]);
     assert_eq!(
         rig.engine.analog_outcome(Port::One),
         Some(AnalogRequirement::Analog)
@@ -1157,7 +1157,7 @@ fn a_digital_pad_is_asked_once_and_hears_only_zeros() {
     assert!(!rig.engine.rumble_mapped(Port::One));
     assert!(rig.engine.rumble_refused(Port::One));
     let cmds = commands(&mut rig, Port::One);
-    assert_eq!(cmds, [0x43, 0x4D, 0x43], "asked once, not every frame");
+    assert_eq!(cmds, [0x43, 0x4d, 0x43], "asked once, not every frame");
     assert!(rig
         .pad(Port::One)
         .motor_tx
@@ -1179,7 +1179,7 @@ fn a_pad_that_refuses_configuration_mode_is_asked_once_and_not_driven() {
     rig.engine.set_rumble(Port::One, Rumble::new(true, 255));
     rig.frames(12);
     assert!(rig.engine.rumble_refused(Port::One));
-    assert_eq!(commands(&mut rig, Port::One), [0x43, 0x4D, 0x43]);
+    assert_eq!(commands(&mut rig, Port::One), [0x43, 0x4d, 0x43]);
     assert!(rig
         .pad(Port::One)
         .motor_tx
@@ -1286,7 +1286,7 @@ fn irq_negcon_preserves_typed_pressure_without_aliasing_sticks() {
             id: 0x23,
             dualshock: false,
             buttons: button::START | button::TRIANGLE,
-            sticks: [0x81, 0xFE, 0x02, 0x7F],
+            sticks: [0x81, 0xfe, 0x02, 0x7f],
             ..Pad::dualshock_analog()
         },
     );
@@ -1300,9 +1300,9 @@ fn irq_negcon_preserves_typed_pressure_without_aliasing_sticks() {
         Some(crate::NegconState {
             buttons: crate::ButtonState::from_bits(button::START | button::TRIANGLE),
             twist: 0x81,
-            i: 0xFE,
+            i: 0xfe,
             ii: 2,
-            left_shoulder: 0x7F,
+            left_shoulder: 0x7f,
         })
     );
     assert_eq!(snap.port(Port::One).health, Health::Present);

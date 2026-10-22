@@ -36,11 +36,13 @@
 #![no_std]
 
 use core::ptr::addr_of_mut;
-use psx_fmv::{bitstream, iso, mdec::Mdec, rle::RleBuffer, stream::FrameAssembler};
-use psx_font::{
-    fonts::{basic::BASIC, basic_8x16::BASIC_8X16_BITMAP},
-    BitOrder, BitmapFont, FontAtlas,
-};
+use psx_fmv::mdec::Mdec;
+use psx_fmv::rle::RleBuffer;
+use psx_fmv::stream::FrameAssembler;
+use psx_fmv::{bitstream, iso};
+use psx_font::fonts::basic::BASIC;
+use psx_font::fonts::basic_8x16::BASIC_8X16_BITMAP;
+use psx_font::{BitOrder, BitmapFont, FontAtlas};
 use psx_gpu::display::{DisplayConfig, Resolution, VideoMode};
 use psx_gpu::prim::FillRect;
 use psx_gpu::Gpu;
@@ -72,7 +74,7 @@ const RLE_WORDS: usize = 32 * 1024;
 /// End the stream if no sector arrives for this long (2 s).
 pub const STALL_VBLANKS: u32 = 120;
 /// Checksum seed; must match tools/xtask/src/fmv_movie.rs.
-const SEED: u32 = 0x9E37_79B9;
+const SEED: u32 = 0x9e37_79b9;
 /// First word of every STR video sector: 0x0160, 0x8001.
 const STR_MAGIC: u32 = 0x8001_0160;
 
@@ -108,7 +110,7 @@ const fn widen(src: &[u8; 2048]) -> [u8; 4096] {
         let mut bit = 0;
         while bit < 8 {
             if b & (0x80 >> bit) != 0 {
-                w |= 0xC000 >> (2 * bit);
+                w |= 0xc000 >> (2 * bit);
             }
             bit += 1;
         }
@@ -266,7 +268,7 @@ impl Stream {
 
     /// Validate one video sector's test fields. `false` drops it.
     fn check(&mut self, w: &[u32; SECTOR_WORDS]) -> bool {
-        let ordinal = w[5] & 0xFFFF;
+        let ordinal = w[5] & 0xffff;
         let mut h = SEED ^ ordinal;
         for &word in &w[8..] {
             h = h.rotate_left(5).wrapping_add(word);
@@ -964,7 +966,7 @@ pub fn frame_control(dma_setup: fn(&mut Mdec) -> bool) -> FrameControl {
 
     // CPU: feed while the input FIFO has room, drain whatever comes out.
     if mdec().reset() && mdec().load_tables_cpu() {
-        mdec().write_command(psx_hw::mdec::DECODE_15BPP | (words as u32 & 0xFFFF));
+        mdec().write_command(psx_hw::mdec::DECODE_15BPP | (words as u32 & 0xffff));
         let mut fed = 0usize;
         let mut idle = 0u32;
         while (fed < words || out.cpu_words < out.expected) && idle < CPU_STALL_SPINS {

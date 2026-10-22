@@ -3,9 +3,9 @@
 //! Reference: nocash PSX-SPX "Macroblock Decoder (MDEC)".
 
 /// Command and parameter register (write); decoded data (read).
-pub const MDEC0: u32 = 0x1F80_1820;
+pub const MDEC0: u32 = 0x1f80_1820;
 /// Control register (write); status register (read).
-pub const MDEC1: u32 = 0x1F80_1824;
+pub const MDEC1: u32 = 0x1f80_1824;
 
 /// Decode command, 15bpp output (bits 28..27 = 3).
 pub const DECODE_15BPP: u32 = 0x3800_0000;

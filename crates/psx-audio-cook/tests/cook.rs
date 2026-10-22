@@ -34,10 +34,10 @@ fn decoder_clamps_history_and_maps_reserved_shifts_to_nine() {
     block[0] = 0x10;
     block[1] = 0;
     let out = adpcm::decode(&block);
-    assert_eq!(*out.last().unwrap(), 0x7FFF);
+    assert_eq!(*out.last().unwrap(), 0x7fff);
     // Shift 13 decodes as shift 9.
     let mut a = [0u8; 16];
-    a[0] = 0x0D;
+    a[0] = 0x0d;
     a[2] = 0x01;
     let mut b = a;
     b[0] = 0x09;

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //! Package a complete cold executable section and immutable tables from one ELF.
-use psoxide_hazard::{overlay_elf::Elf, overlay_pack};
+use psoxide_hazard::overlay_elf::Elf;
+use psoxide_hazard::overlay_pack;
 use psx_residency::arena::checksum;
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();

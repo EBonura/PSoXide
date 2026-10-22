@@ -37,10 +37,10 @@ const E_CHK: usize = 127;
 const ST_FIRST: u8 = 0x51;
 const ST_MIDDLE: u8 = 0x52;
 const ST_LAST: u8 = 0x53;
-const ST_FREE: u8 = 0xA0;
+const ST_FREE: u8 = 0xa0;
 /// A block is free if its state's high nibble is `0xA` (formatted or deleted).
 fn is_free(state: u8) -> bool {
-    state & 0xF0 == 0xA0
+    state & 0xf0 == 0xa0
 }
 
 // Title (`SC`) header offsets within a file's first frame.
@@ -50,7 +50,7 @@ const T_TITLE: usize = 4;
 const T_TITLE_LEN: usize = 64;
 const T_CLUT: usize = 0x60;
 
-const LINK_NONE: u16 = 0xFFFF;
+const LINK_NONE: u16 = 0xffff;
 /// Payload frames in a file's first block (title + icon consume 2 frames).
 const FIRST_BLOCK_FRAMES: usize = FRAMES_PER_BLOCK - 2;
 /// Payload bytes in a file's first block.
@@ -346,20 +346,20 @@ impl<B: Block> Card<B> {
         for i in 0..DATA_BLOCKS {
             let mut e = [0u8; FRAME_SIZE];
             e[E_STATE] = ST_FREE;
-            e[E_LINK] = 0xFF;
-            e[E_LINK + 1] = 0xFF;
+            e[E_LINK] = 0xff;
+            e[E_LINK + 1] = 0xff;
             self.write_dir(i, &mut e)?;
         }
 
         // Frames 16..=35: broken-sector list (all "no broken sector").
         for frame in 16..36u16 {
             let mut f = [0u8; FRAME_SIZE];
-            f[0] = 0xFF;
-            f[1] = 0xFF;
-            f[2] = 0xFF;
-            f[3] = 0xFF;
-            f[8] = 0xFF;
-            f[9] = 0xFF;
+            f[0] = 0xff;
+            f[1] = 0xff;
+            f[2] = 0xff;
+            f[3] = 0xff;
+            f[8] = 0xff;
+            f[9] = 0xff;
             self.dev.write_frame(frame, &f)?;
         }
         // Remaining system frames 36..=63: cleared.
@@ -457,8 +457,8 @@ impl<B: Block> Card<B> {
             let index = chain.blocks[k] as usize - 1;
             let mut e = [0u8; FRAME_SIZE];
             e[E_STATE] = ST_FREE;
-            e[E_LINK] = 0xFF;
-            e[E_LINK + 1] = 0xFF;
+            e[E_LINK] = 0xff;
+            e[E_LINK + 1] = 0xff;
             self.write_dir(index, &mut e)?;
         }
         Ok(())
@@ -635,8 +635,8 @@ impl<B: Block> Card<B> {
             if mask & (1 << i) != 0 {
                 let mut e = [0u8; FRAME_SIZE];
                 e[E_STATE] = ST_FREE;
-                e[E_LINK] = 0xFF;
-                e[E_LINK + 1] = 0xFF;
+                e[E_LINK] = 0xff;
+                e[E_LINK + 1] = 0xff;
                 self.write_dir(i, &mut e)?;
             }
         }
@@ -762,7 +762,7 @@ fn validate_name(name: &[u8]) -> Result<()> {
     if name.is_empty() || name.len() > MAX_NAME_LEN {
         return Err(Error::BadName);
     }
-    if name.iter().any(|&b| !(0x20..=0x7E).contains(&b)) {
+    if name.iter().any(|&b| !(0x20..=0x7e).contains(&b)) {
         return Err(Error::BadName);
     }
     Ok(())
@@ -802,9 +802,9 @@ fn copy_entry_name(entry: &[u8; FRAME_SIZE], out: &mut [u8; MAX_NAME_LEN + 1]) -
 fn default_clut() -> [u16; 16] {
     let mut c = [0u16; 16];
     c[0] = 0x0000; // background
-    c[1] = 0x7FFF; // white frame
-    c[2] = 0x7C00; // blue fill (BGR555: blue in high bits)
-    c[3] = 0x03FF; // yellow accent
+    c[1] = 0x7fff; // white frame
+    c[2] = 0x7c00; // blue fill (BGR555: blue in high bits)
+    c[3] = 0x03ff; // yellow accent
     c
 }
 
@@ -821,9 +821,9 @@ fn default_icon(out: &mut [u8; FRAME_SIZE]) {
             };
             let byte = (y * 16 + x) / 2;
             if x & 1 == 0 {
-                out[byte] = (out[byte] & 0xF0) | idx; // low nibble = left pixel
+                out[byte] = (out[byte] & 0xf0) | idx; // low nibble = left pixel
             } else {
-                out[byte] = (out[byte] & 0x0F) | (idx << 4); // high nibble = right
+                out[byte] = (out[byte] & 0x0f) | (idx << 4); // high nibble = right
             }
         }
     }

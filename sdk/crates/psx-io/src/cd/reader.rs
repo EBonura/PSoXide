@@ -77,16 +77,16 @@ const ALL_IRQS_ENABLED: u8 = psx_hw::cd::irq::ALL;
 pub const DIAG_CD_ERROR: u8 = 0x05;
 /// [`SectorReader::diagnostics`] cause byte: the wait spun out; the snapshot
 /// carries the raw status register and the last IRQ flag seen.
-pub const DIAG_TIMEOUT: u8 = 0xFF;
+pub const DIAG_TIMEOUT: u8 = 0xff;
 /// [`SectorReader::diagnostics`] cause byte: the parameter FIFO never freed up.
-pub const DIAG_PARAM_STUCK: u8 = 0xFE;
+pub const DIAG_PARAM_STUCK: u8 = 0xfe;
 /// [`SectorReader::diagnostics`] cause byte: [`SectorReader::stop_proved`] could
 /// not prove the drive stopped; the snapshot's status byte is
 /// [`PauseFailure::code`] and the command byte is `CMD_PAUSE`.
-pub const DIAG_PAUSE: u8 = 0xFD;
+pub const DIAG_PAUSE: u8 = 0xfd;
 /// [`SectorReader::diagnostics`] command byte standing in for a `read_sector`
 /// wait (ReadN is streaming; no command byte is in flight).
-pub const DIAG_SITE_READ: u8 = 0xD0;
+pub const DIAG_SITE_READ: u8 = 0xd0;
 
 /// Called from every spin of every polled wait in this module, see [`set_idle_hook`].
 ///

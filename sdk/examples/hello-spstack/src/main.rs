@@ -27,12 +27,12 @@
 extern crate psx_rt;
 
 use core::hint::black_box;
-use psx_font::{fonts::BASIC, FontAtlas};
+use psx_font::fonts::BASIC;
+use psx_font::FontAtlas;
 use psx_gpu::display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode};
 use psx_gpu::Gpu;
-use psx_rt::interrupts;
 use psx_rt::scratchpad::{self, assert_disjoint, Region, ScratchpadStack};
-use psx_rt::tty;
+use psx_rt::{interrupts, tty};
 use psx_vram::{Clut, TextureDepth, TexturePage};
 
 const FONT_TPAGE: TexturePage = TexturePage::new(320, 0, TextureDepth::Bit4);
@@ -58,7 +58,7 @@ fn table() -> *mut u32 {
 }
 
 fn table_word(i: usize) -> u32 {
-    (i as u32).wrapping_mul(0x9E37_79B9) ^ 0x0BAD_F00D
+    (i as u32).wrapping_mul(0x9e37_79b9) ^ 0x0bad_f00d
 }
 
 #[inline(never)]
@@ -70,7 +70,7 @@ fn level3(seed: u32) -> u32 {
                 .add((seed as usize + i) % TABLE_WORDS)
                 .read_volatile()
         };
-        *word = seed.wrapping_mul(0x2545_F491).rotate_left(i as u32) ^ t;
+        *word = seed.wrapping_mul(0x2545_f491).rotate_left(i as u32) ^ t;
     }
     // Keep the array in the frame: an IRQ between the fill and the fold must
     // not disturb it.
@@ -137,7 +137,7 @@ fn line(label: &str, value: u32) -> ([u8; 32], usize) {
     text[..label.len()].copy_from_slice(label);
     text[label.len()] = b'=';
     for i in 0..8 {
-        text[label.len() + 1 + i] = DIGITS[(value >> (28 - 4 * i) & 0xF) as usize];
+        text[label.len() + 1 + i] = DIGITS[(value >> (28 - 4 * i) & 0xf) as usize];
     }
     (text, label.len() + 9)
 }
@@ -181,7 +181,7 @@ fn main() {
         unsafe { table().add(i).write_volatile(table_word(i)) };
     }
     // A RAM frame the scratchpad run must leave alone.
-    let ram_frame = black_box([0xA5A5_0000u32 | 0x1111, 0x2222, 0x3333, 0x4444]);
+    let ram_frame = black_box([0xa5a5_0000u32 | 0x1111, 0x2222, 0x3333, 0x4444]);
 
     let ram = workload(black_box(ROUNDS));
 
@@ -222,7 +222,7 @@ fn main() {
         (nested == [true, true], "nested run did not run in place"),
         (!scratchpad::is_on_scratchpad_stack(), "$sp not restored"),
         (
-            black_box(ram_frame) == [0xA5A5_1111, 0x2222, 0x3333, 0x4444],
+            black_box(ram_frame) == [0xa5a5_1111, 0x2222, 0x3333, 0x4444],
             "RAM frame changed",
         ),
         (

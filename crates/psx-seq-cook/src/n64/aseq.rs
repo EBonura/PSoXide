@@ -28,8 +28,8 @@ pub enum Level {
 /// Argument bytes after a flow-control opcode (`0xF2..=0xFF`).
 pub fn flow_args(op: u8) -> usize {
     match op {
-        0xF2..=0xF4 | 0xF8 => 1,
-        0xF5 | 0xF9..=0xFC => 2,
+        0xf2..=0xf4 | 0xf8 => 1,
+        0xf5 | 0xf9..=0xfc => 2,
         _ => 0,
     }
 }
@@ -38,29 +38,29 @@ pub fn flow_args(op: u8) -> usize {
 /// before any extra bytes the opcode reads itself.
 fn chan_table_args(op: u8) -> usize {
     match op {
-        0xB0 | 0xB2 | 0xC2 | 0xCB | 0xCE | 0xCF | 0xDA | 0xDE | 0xE7 => 2,
-        0xB3 | 0xB7 | 0xB8 | 0xB9 | 0xBA => 1,
-        0xBB => 3,
-        0xBC => 2,
-        0xBD => 4,
-        0xC1 | 0xC6 | 0xC8 | 0xC9 | 0xCA | 0xCC | 0xCD => 1,
-        0xC7 => 3,
-        0xD0..=0xD9
-        | 0xDB
-        | 0xDC
-        | 0xDD
-        | 0xDF
-        | 0xE0
-        | 0xE3
-        | 0xE5
-        | 0xE6
-        | 0xE9
-        | 0xED
-        | 0xEE
-        | 0xF1 => 1,
-        0xE1 | 0xE2 | 0xE8 => 3,
-        0xEB => 2,
-        0xEF => 3,
+        0xb0 | 0xb2 | 0xc2 | 0xcb | 0xce | 0xcf | 0xda | 0xde | 0xe7 => 2,
+        0xb3 | 0xb7 | 0xb8 | 0xb9 | 0xba => 1,
+        0xbb => 3,
+        0xbc => 2,
+        0xbd => 4,
+        0xc1 | 0xc6 | 0xc8 | 0xc9 | 0xca | 0xcc | 0xcd => 1,
+        0xc7 => 3,
+        0xd0..=0xd9
+        | 0xdb
+        | 0xdc
+        | 0xdd
+        | 0xdf
+        | 0xe0
+        | 0xe3
+        | 0xe5
+        | 0xe6
+        | 0xe9
+        | 0xed
+        | 0xee
+        | 0xf1 => 1,
+        0xe1 | 0xe2 | 0xe8 => 3,
+        0xeb => 2,
+        0xef => 3,
         _ => 0,
     }
 }
@@ -133,30 +133,30 @@ impl Scanner<'_> {
         *pc += arg;
         let a16 = if arg == 2 { s16(self.seq, here) } else { None };
         match op {
-            0xFF => return false,
-            0xFB => {
+            0xff => return false,
+            0xfb => {
                 if let Some(t) = a16 {
                     self.push(lv, t, st);
                 }
                 return false;
             }
-            0xF5 | 0xF9 | 0xFA | 0xFC => {
+            0xf5 | 0xf9 | 0xfa | 0xfc => {
                 if let Some(t) = a16 {
                     self.push(lv, t, st);
                 }
             }
-            0xF2 | 0xF3 => {
+            0xf2 | 0xf3 => {
                 if let Some(o) = self.byte(here) {
                     self.push(lv, (*pc as isize + o as i8 as isize) as usize, st);
                 }
             }
-            0xF4 => {
+            0xf4 => {
                 if let Some(o) = self.byte(here) {
                     self.push(lv, (*pc as isize + o as i8 as isize) as usize, st);
                 }
                 return false;
             }
-            0xFD => {
+            0xfd => {
                 // delay with a compressed length
                 if self.byte(*pc).is_some_and(|b| b & 0x80 != 0) {
                     *pc += 2;
@@ -182,7 +182,7 @@ impl Scanner<'_> {
                 let op = self.seq[pc];
                 pc += 1;
                 self.count(lv, op);
-                if op >= 0xF2 {
+                if op >= 0xf2 {
                     if !self.flow(lv, op, &mut pc, st) {
                         break;
                     }
@@ -203,7 +203,7 @@ impl Scanner<'_> {
     fn seq_op(&mut self, op: u8, pc: &mut usize) -> bool {
         let here = *pc;
         match op {
-            0x90..=0x9F => {
+            0x90..=0x9f => {
                 if let Some(t) = s16(self.seq, here) {
                     let ch = (op & 15) as usize;
                     self.out.channels.insert(ch);
@@ -211,7 +211,7 @@ impl Scanner<'_> {
                 }
                 *pc += 2;
             }
-            0xA0..=0xAF => {
+            0xa0..=0xaf => {
                 if let Some(o) = s16(self.seq, here) {
                     let ch = (op & 15) as usize;
                     self.out.channels.insert(ch);
@@ -220,25 +220,25 @@ impl Scanner<'_> {
                 }
                 *pc += 2;
             }
-            0x60..=0x6F => *pc += 2,
-            0xB0..=0xBF => *pc += 3,
-            0x70..=0x8F => self.out.io = true,
-            0xC4 => *pc += 2,
-            0xC5 => *pc += 2,
-            0xC6 => return false,
-            0xC7 => {
+            0x60..=0x6f => *pc += 2,
+            0xb0..=0xbf => *pc += 3,
+            0x70..=0x8f => self.out.io = true,
+            0xc4 => *pc += 2,
+            0xc5 => *pc += 2,
+            0xc6 => return false,
+            0xc7 => {
                 self.out.self_modifying = true;
                 *pc += 3;
             }
-            0xC8 | 0xC9 | 0xCC | 0xCE | 0xD0 | 0xD3 | 0xD5 | 0xD9 | 0xDB | 0xDC | 0xDD | 0xDE
-            | 0xDF | 0xF1 => *pc += 1,
-            0xCD => {
+            0xc8 | 0xc9 | 0xcc | 0xce | 0xd0 | 0xd3 | 0xd5 | 0xd9 | 0xdb | 0xdc | 0xdd | 0xde
+            | 0xdf | 0xf1 => *pc += 1,
+            0xcd => {
                 self.out.dynamic_targets = true;
                 *pc += 2;
             }
-            0xD1 | 0xD2 | 0xD6 | 0xD7 => *pc += 2,
-            0xDA => *pc += 3,
-            0xEF => *pc += 3,
+            0xd1 | 0xd2 | 0xd6 | 0xd7 => *pc += 2,
+            0xda => *pc += 3,
+            0xef => *pc += 3,
             _ => {}
         }
         true
@@ -246,52 +246,52 @@ impl Scanner<'_> {
 
     fn chan_op(&mut self, op: u8, pc: &mut usize, st: &mut ChanState) -> bool {
         let here = *pc;
-        if op >= 0xB0 {
+        if op >= 0xb0 {
             let n = chan_table_args(op);
             *pc += n;
             match op {
-                0xC1 => {
+                0xc1 => {
                     let i = self.byte(here).unwrap_or(0);
                     st.inst = Some(i);
-                    if i < 0x7E {
+                    if i < 0x7e {
                         self.out.instruments.insert((st.font, i));
                     }
                 }
-                0xC3 => st.large = false,
-                0xC4 => st.large = true,
-                0xC6 => {
+                0xc3 => st.large = false,
+                0xc4 => st.large = true,
+                0xc6 => {
                     let slot = self.byte(here).unwrap_or(0);
                     st.font = slot;
                     self.out.font_slots.insert(slot);
                 }
-                0xEB => {
+                0xeb => {
                     let slot = self.byte(here).unwrap_or(0);
                     let i = self.byte(here + 1).unwrap_or(0);
                     st.font = slot;
                     st.inst = Some(i);
                     self.out.font_slots.insert(slot);
-                    if i < 0x7E {
+                    if i < 0x7e {
                         self.out.instruments.insert((slot, i));
                     }
                 }
-                0xC7 | 0xCF => self.out.self_modifying = true,
-                0xC2 | 0xE4 | 0xC5 | 0xB4 | 0xB5 | 0xB6 => self.out.dynamic_targets = true,
-                0xDA => {
+                0xc7 | 0xcf => self.out.self_modifying = true,
+                0xc2 | 0xe4 | 0xc5 | 0xb4 | 0xb5 | 0xb6 => self.out.dynamic_targets = true,
+                0xda => {
                     if let Some(t) = s16(self.seq, here) {
                         self.out.envelopes.insert(t);
                     }
                 }
-                0xE8 => *pc += 5,
-                0xEA => return false,
+                0xe8 => *pc += 5,
+                0xea => return false,
                 _ => {}
             }
             return true;
         }
         if op >= 0x70 {
-            match op & 0xF8 {
+            match op & 0xf8 {
                 0x78 | 0x88 => {
                     // rldlayer is relative to the pc after its argument
-                    let target = if op & 0xF8 == 0x88 {
+                    let target = if op & 0xf8 == 0x88 {
                         s16(self.seq, here)
                     } else {
                         s16(self.seq, here)
@@ -309,7 +309,7 @@ impl Scanner<'_> {
             }
             return true;
         }
-        match op & 0xF0 {
+        match op & 0xf0 {
             0x20 => {
                 if let Some(t) = s16(self.seq, here) {
                     self.push(Level::Chan, t, *st);
@@ -335,9 +335,9 @@ impl Scanner<'_> {
                 1
             }
         };
-        if op < 0xC0 {
+        if op < 0xc0 {
             // a note: the arguments depend on the channel's note encoding
-            let kind = op & 0xC0;
+            let kind = op & 0xc0;
             if st.large {
                 match kind {
                     0x00 => *pc += compressed(self, here) + 2,
@@ -347,25 +347,25 @@ impl Scanner<'_> {
             } else if kind == 0x00 {
                 *pc += compressed(self, here);
             }
-            if st.inst == Some(0x7F) {
-                self.out.drum_keys.insert((st.font, op & 0x3F));
+            if st.inst == Some(0x7f) {
+                self.out.drum_keys.insert((st.font, op & 0x3f));
             }
             return true;
         }
         match op {
-            0xC0 | 0xC3 => *pc += compressed(self, here),
-            0xC1 | 0xC2 | 0xC9 | 0xCA | 0xCD | 0xCE | 0xCF => *pc += 1,
-            0xC6 => {
-                let i = self.byte(here).unwrap_or(0xFF);
+            0xc0 | 0xc3 => *pc += compressed(self, here),
+            0xc1 | 0xc2 | 0xc9 | 0xca | 0xcd | 0xce | 0xcf => *pc += 1,
+            0xc6 => {
+                let i = self.byte(here).unwrap_or(0xff);
                 *pc += 1;
-                if i < 0xFF {
+                if i < 0xff {
                     st.inst = Some(i);
-                    if i < 0x7E {
+                    if i < 0x7e {
                         self.out.instruments.insert((st.font, i));
                     }
                 }
             }
-            0xC7 => {
+            0xc7 => {
                 let first = self.byte(here).unwrap_or(0);
                 *pc += 2;
                 if first & 0x80 != 0 {
@@ -374,7 +374,7 @@ impl Scanner<'_> {
                     *pc += compressed(self, here + 2);
                 }
             }
-            0xCB => {
+            0xcb => {
                 if let Some(t) = s16(self.seq, here) {
                     self.out.envelopes.insert(t);
                 }
@@ -407,9 +407,9 @@ mod tests {
         // seq: initchan, ldchan 0 -> 0x0008, end
         // chan @8: noshort, instr 3, ldlayer 0 -> 0x0010, end
         // layer @0x10: note, end
-        let mut code = vec![0xD7, 0, 1, 0x90, 0, 8, 0xFF, 0xFF];
-        code.extend_from_slice(&[0xC4, 0xC1, 3, 0x88, 0, 0x10, 0xFF, 0x00]);
-        code.extend_from_slice(&[0x27, 0x30, 100, 0, 0xFF]);
+        let mut code = vec![0xd7, 0, 1, 0x90, 0, 8, 0xff, 0xff];
+        code.extend_from_slice(&[0xc4, 0xc1, 3, 0x88, 0, 0x10, 0xff, 0x00]);
+        code.extend_from_slice(&[0x27, 0x30, 100, 0, 0xff]);
         let s = scan(&code);
         assert!(s.channels.contains(&0));
         assert!(s.layers.contains(&0x10));
@@ -419,9 +419,9 @@ mod tests {
     #[test]
     fn both_outcomes_of_a_branch_are_scanned() {
         // seq: ldi 1 ; beqz -> 12 ; end ; @12: ldchan 2 -> 20 ; end
-        let mut code = vec![0xCC, 1, 0xFA, 0, 12, 0xFF, 0, 0, 0, 0, 0, 0];
-        code.extend_from_slice(&[0x92, 0, 20, 0xFF, 0, 0, 0, 0]);
-        code.extend_from_slice(&[0xFF]);
+        let mut code = vec![0xcc, 1, 0xfa, 0, 12, 0xff, 0, 0, 0, 0, 0, 0];
+        code.extend_from_slice(&[0x92, 0, 20, 0xff, 0, 0, 0, 0]);
+        code.extend_from_slice(&[0xff]);
         let s = scan(&code);
         assert!(s.channels.contains(&2));
     }
@@ -429,18 +429,18 @@ mod tests {
     #[test]
     fn drum_layers_name_their_keys() {
         // channel with drum instrument 0x7F plays key 5 in a layer
-        let mut code = vec![0xD7, 0, 1, 0x90, 0, 8, 0xFF, 0xFF];
-        code.extend_from_slice(&[0xC4, 0xC1, 0x7F, 0x88, 0, 0x10, 0xFF, 0x00]);
-        code.extend_from_slice(&[0x05, 0x30, 100, 0, 0xFF]);
+        let mut code = vec![0xd7, 0, 1, 0x90, 0, 8, 0xff, 0xff];
+        code.extend_from_slice(&[0xc4, 0xc1, 0x7f, 0x88, 0, 0x10, 0xff, 0x00]);
+        code.extend_from_slice(&[0x05, 0x30, 100, 0, 0xff]);
         let s = scan(&code);
         assert!(s.drum_keys.contains(&(0, 5)), "{:?}", s.drum_keys);
     }
 
     #[test]
     fn io_and_self_modifying_ops_are_flagged() {
-        let s = scan(&[0xC7, 0, 0, 0, 0xFF]);
+        let s = scan(&[0xc7, 0, 0, 0, 0xff]);
         assert!(s.self_modifying);
-        let s = scan(&[0x73, 0xFF]);
+        let s = scan(&[0x73, 0xff]);
         assert!(s.io);
     }
 }

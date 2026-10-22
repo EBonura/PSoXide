@@ -17,7 +17,7 @@ use crate::listing::{word_at_offset, Entry, Listing, HEADER, LOAD_ADDR};
 use crate::text::{fields, int_auto, load_operands, squeeze, strip, trailing_hex, whole_hex};
 
 /// psx-rt's `HAZARD_TRAMPOLINES` magic word ("HAZT").
-pub const MAGIC: i64 = 0x4841_5A54;
+pub const MAGIC: i64 = 0x4841_5a54;
 
 /// Loads, as the detector sees them: anything whose first operand arrives
 /// one instruction late.
@@ -165,8 +165,8 @@ fn is_prologue(op: &str, args: &str) -> bool {
 fn constant(op: &str, args: &str, operand: &mut dyn FnMut(&str) -> Option<i64>) -> Option<i64> {
     let parts = fields(args);
     match op {
-        "lui" => Some(int_auto(parts.get(1)?)?.wrapping_shl(16) & 0xFFFF_FFFF),
-        "li" => Some(int_auto(parts.get(1)?)? & 0xFFFF_FFFF),
+        "lui" => Some(int_auto(parts.get(1)?)?.wrapping_shl(16) & 0xffff_ffff),
+        "li" => Some(int_auto(parts.get(1)?)? & 0xffff_ffff),
         "addiu" | "ori" | "move" => {
             let mut v = operand(parts.get(1)?)?;
             if op == "addiu" {
@@ -174,7 +174,7 @@ fn constant(op: &str, args: &str, operand: &mut dyn FnMut(&str) -> Option<i64>) 
             } else if op == "ori" {
                 v |= int_auto(parts.get(2)?)?;
             }
-            Some(v & 0xFFFF_FFFF)
+            Some(v & 0xffff_ffff)
         }
         _ => None,
     }
@@ -190,7 +190,7 @@ pub fn branch_sources(args: &str) -> Vec<&str> {
 
 /// A `j`/`jal` word to `target`.
 pub fn encode_j(target: i64, link: bool) -> u32 {
-    ((if link { 3 } else { 2 }) << 26) | ((target >> 2) as u32 & 0x03FF_FFFF)
+    ((if link { 3 } else { 2 }) << 26) | ((target >> 2) as u32 & 0x03ff_ffff)
 }
 
 /// A listed instruction the detector needed but objdump did not list (a
@@ -365,7 +365,7 @@ impl Block {
         if known.len() != 1 {
             return None;
         }
-        Some((known[0] + offset) & 0xFFFF_FFFF)
+        Some((known[0] + offset) & 0xffff_ffff)
     }
 
     /// Every table address a dispatch in code resolves to, sorted.
@@ -738,7 +738,7 @@ impl Flow {
             if known.len() != 1 {
                 return None;
             }
-            tables.insert((known[0] + offset) & 0xFFFF_FFFF);
+            tables.insert((known[0] + offset) & 0xffff_ffff);
         }
         if tables.len() == 1 {
             tables.into_iter().next()

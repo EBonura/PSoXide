@@ -16,7 +16,7 @@ use std::vec::Vec;
 /// One word of the fake disc: sector `lba`, word `word`. Distinct for every
 /// (sector, word) pair in the ranges the tests use.
 pub fn sector_word(lba: u32, word: u32) -> u32 {
-    lba.wrapping_mul(0x9E37_79B1) ^ word.wrapping_mul(0x85EB_CA6B) ^ 0xA5A5_0000
+    lba.wrapping_mul(0x9e37_79b1) ^ word.wrapping_mul(0x85eb_ca6b) ^ 0xa5a5_0000
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

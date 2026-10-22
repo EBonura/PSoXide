@@ -67,7 +67,7 @@ fn parse(bytes: &[u8]) -> Result<(Wav, Vec<Vec<f64>>), Error> {
         match id {
             b"fmt " if body.len() >= 16 => {
                 let mut format = u16le(body, 0)?;
-                if format == 0xFFFE && body.len() >= 26 {
+                if format == 0xfffe && body.len() >= 26 {
                     format = u16le(body, 24)?; // WAVE_FORMAT_EXTENSIBLE sub-format
                 }
                 fmt = Some((format, u16le(body, 2)?, u32le(body, 4)?, u16le(body, 14)?));

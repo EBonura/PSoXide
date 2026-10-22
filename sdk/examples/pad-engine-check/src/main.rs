@@ -22,9 +22,8 @@
 extern crate psx_rt;
 
 use psx_io::cd::reader::{SectorReader, SECTOR_WORDS};
-use psx_pad::console;
 use psx_pad::engine::{BytePacing, Config};
-use psx_pad::{poll_on, Port};
+use psx_pad::{console, poll_on, Port};
 use psx_rt::interrupts::{install_vblank_counter, vblank_count};
 use psx_rt::tty;
 
@@ -116,7 +115,7 @@ fn main() {
         ("engine_both_every_other", every_other),
         ("engine_both", Config::DEFAULT),
     ];
-    let mut last_buttons = 0xFFFF_u16;
+    let mut last_buttons = 0xffff_u16;
     let mut last_seq = 0u32;
     let mut frame_no = 0u32;
     let mut work = [0u32; 6];
@@ -144,7 +143,10 @@ fn main() {
         work[slot] = total / FRAMES;
         line(label, work[slot]);
         let after = console::stats();
-        line("  events_per_frame_x10", (after.events - before.events) * 10 / FRAMES);
+        line(
+            "  events_per_frame_x10",
+            (after.events - before.events) * 10 / FRAMES,
+        );
     }
     line("seq", last_seq);
     let snap = console::snapshot();
@@ -298,7 +300,10 @@ fn main() {
             }
         }
         line("stream_sectors", sectors);
-        line("stream_pad_faults", console::snapshot().port(Port::One).faults - faults_before);
+        line(
+            "stream_pad_faults",
+            console::snapshot().port(Port::One).faults - faults_before,
+        );
         line("stream_pad_stalls", console::stats().stalls - before.stalls);
         done && sectors == 64
     };
@@ -325,7 +330,10 @@ fn main() {
     // An empty port 2 and the wrapper's own entry on every VBlank cost almost
     // nothing: within a percent of the idle loop (the loop's phase against the
     // VBlank moves the count by a few tenths of a percent).
-    check(no_ports * 100 >= idle * 99, "VBlank entry alone costs more than 1%");
+    check(
+        no_ports * 100 >= idle * 99,
+        "VBlank entry alone costs more than 1%",
+    );
     // A pad in port 2 (the emulator's `--pad2`) is polled for real, so only
     // an empty socket is expected to be free.
     let populated = snap.port(Port::Two).health == psx_pad::engine::Health::Present;
@@ -336,32 +344,83 @@ fn main() {
     // spends 119,000 cycles a frame finding the port empty (13,000 after the
     // empty-socket fix) on top of the connected pad's 17,000.
     let floor = if populated { 90 } else { 95 };
-    check(both * 100 >= idle * floor, "engine with both ports keeps too little of the CPU");
+    check(
+        both * 100 >= idle * floor,
+        "engine with both ports keeps too little of the CPU",
+    );
     if populated {
         tty::println("padcheck: port 2 is populated");
     } else {
-        check(both > sync, "the engine keeps more of the CPU than the synchronous driver");
-        check(both * 100 >= port1 * 99, "an empty port 2 costs more than 1%");
-        check(snap.port(Port::Two).health == psx_pad::engine::Health::Absent, "port 2 is absent");
+        check(
+            both > sync,
+            "the engine keeps more of the CPU than the synchronous driver",
+        );
+        check(
+            both * 100 >= port1 * 99,
+            "an empty port 2 costs more than 1%",
+        );
+        check(
+            snap.port(Port::Two).health == psx_pad::engine::Health::Absent,
+            "port 2 is absent",
+        );
     }
-    check(timed * 100 >= idle * floor, "fixed pacing keeps too little of the CPU");
-    check(snap.port(Port::One).health == psx_pad::engine::Health::Present, "port 1 is present");
-    check(snap.port(Port::One).faults == 0 && snap.port(Port::Two).faults == 0, "no faults");
-    check(stats.stalls == 0 && stats.spurious == 0, "no stalls or spurious interrupts");
-    check(console::handler_stack_unused_bytes() >= 256, "the handler stack has room");
-    check(updates_after_lease > snap.port(Port::One).updates, "polling resumes after the lease");
-    check(card_ok == 8 && card_failed == 0, "a memory card cannot be read through the lease");
-    check(card_pad_updates >= 8, "the pad is not read between card transactions");
+    check(
+        timed * 100 >= idle * floor,
+        "fixed pacing keeps too little of the CPU",
+    );
+    check(
+        snap.port(Port::One).health == psx_pad::engine::Health::Present,
+        "port 1 is present",
+    );
+    check(
+        snap.port(Port::One).faults == 0 && snap.port(Port::Two).faults == 0,
+        "no faults",
+    );
+    check(
+        stats.stalls == 0 && stats.spurious == 0,
+        "no stalls or spurious interrupts",
+    );
+    check(
+        console::handler_stack_unused_bytes() >= 256,
+        "the handler stack has room",
+    );
+    check(
+        updates_after_lease > snap.port(Port::One).updates,
+        "polling resumes after the lease",
+    );
+    check(
+        card_ok == 8 && card_failed == 0,
+        "a memory card cannot be read through the lease",
+    );
+    check(
+        card_pad_updates >= 8,
+        "the pad is not read between card transactions",
+    );
     if cd_ran {
-        check(cd_stalls == 0 && cd_faults == 0, "the engine stalls or faults during a polled CD read");
-        check(cd_updates >= 45, "the pad is still read during a polled CD read");
+        check(
+            cd_stalls == 0 && cd_faults == 0,
+            "the engine stalls or faults during a polled CD read",
+        );
+        check(
+            cd_updates >= 45,
+            "the pad is still read during a polled CD read",
+        );
     }
-    check(stream_ok, "psx-cdstream reads 64 sectors while the engine polls");
-    check(rumble_mapped, "the engine maps the motors of the emulator's pad");
+    check(
+        stream_ok,
+        "psx-cdstream reads 64 sectors while the engine polls",
+    );
+    check(
+        rumble_mapped,
+        "the engine maps the motors of the emulator's pad",
+    );
     check(stopped, "stopping the motors does not fault the port");
     check(handed_back, "uninstall hands the port back");
     check(reinstalled >= 15, "install works again after uninstall");
-    check(chained >= 25, "the pad is still read after psx-cdstream installs its wrapper");
+    check(
+        chained >= 25,
+        "the pad is still read after psx-cdstream installs its wrapper",
+    );
     if failures == 0 {
         tty::println("padcheck: PASS");
     }

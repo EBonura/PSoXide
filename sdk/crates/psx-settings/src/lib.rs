@@ -476,7 +476,7 @@ fn get_u32(bytes: &[u8], offset: usize) -> u32 {
 }
 
 fn checksum(header: &[u8], payload: &[u8]) -> u8 {
-    let mut value = 0xA7u8;
+    let mut value = 0xa7u8;
     for byte in header.iter().chain(payload) {
         value = value.rotate_left(1) ^ *byte;
     }
@@ -598,7 +598,7 @@ mod tests {
         let mut bytes = [0u8; MAX_RECORD_LEN];
         profile.encode(&mut bytes).unwrap();
         assert_eq!(bytes[8], Brightness::new(-3).to_byte());
-        assert_eq!(bytes[8], 0xFD);
+        assert_eq!(bytes[8], 0xfd);
     }
 
     #[test]
@@ -608,9 +608,9 @@ mod tests {
         let len = profile.encode(&mut bytes).unwrap();
         // 0x7F is +127 and 0x80 is -128 in two's complement; 0x64 stands for
         // the old percentage scale. Re-seal the checksum after each edit.
-        for (byte, level) in [(0x7F, 5), (0x80, -5), (0x64, 5), (0xFB, -5), (0x05, 5)] {
+        for (byte, level) in [(0x7f, 5), (0x80, -5), (0x64, 5), (0xfb, -5), (0x05, 5)] {
             bytes[8] = byte;
-            bytes[16] = 0x7F;
+            bytes[16] = 0x7f;
             bytes[17] = 0x80;
             bytes[15] = checksum(&bytes[..15], &bytes[16..len]);
             profile = Profile::<2, 1>::decode(&bytes[..len]).unwrap();
@@ -658,25 +658,25 @@ mod tests {
     #[test]
     fn game_bits_survive_every_record_version_and_sanitize() {
         let (mut old, old_len) = version_one_record(75);
-        old[7] = 0xA7;
+        old[7] = 0xa7;
         old[15] = checksum(&old[..15], &old[HEADER_LEN_V1..old_len]);
         let mut profile = Profile::<2, 3>::decode(&old[..old_len]).unwrap();
-        assert_eq!(profile.flags, 0xA7);
-        assert_eq!(profile.game_flags(), 0xA6);
+        assert_eq!(profile.flags, 0xa7);
+        assert_eq!(profile.game_flags(), 0xa6);
         assert!(profile.invert_y());
         profile.sanitize();
-        assert_eq!(profile.flags, 0xA7);
+        assert_eq!(profile.flags, 0xa7);
 
         let mut bytes = [0u8; MAX_RECORD_LEN];
         let len = profile.encode(&mut bytes).unwrap();
         assert_eq!(VERSION, 3);
         assert_eq!(len, old_len + 2 + GAME_BYTES_LEN);
-        assert_eq!(bytes[7], 0xA7);
+        assert_eq!(bytes[7], 0xa7);
         assert_eq!(Profile::<2, 3>::decode(&bytes[..len]).unwrap(), profile);
 
-        let (mut v2, v2_len) = version_two_record(0xA7);
+        let (mut v2, v2_len) = version_two_record(0xa7);
         let loaded = Profile::<2, 3>::decode(&v2[..v2_len]).unwrap();
-        assert_eq!(loaded.game_flags(), 0xA6);
+        assert_eq!(loaded.game_flags(), 0xa6);
         v2[7] ^= 0x40;
         assert_eq!(
             Profile::<2, 3>::decode(&v2[..v2_len]),
@@ -687,19 +687,19 @@ mod tests {
     #[test]
     fn game_flag_edits_preserve_other_bits_and_cannot_change_invert_y() {
         let mut profile = Profile::<2, 1>::new(ACTIONS);
-        profile.flags = 0xA7;
+        profile.flags = 0xa7;
         profile.set_game_flag(0x02, false);
-        assert_eq!(profile.flags, 0xA5);
+        assert_eq!(profile.flags, 0xa5);
         profile.set_game_flag(0x03, true);
-        assert_eq!(profile.flags, 0xA7);
+        assert_eq!(profile.flags, 0xa7);
         profile.set_game_flag(FLAG_INVERT_Y, false);
-        assert_eq!(profile.flags, 0xA7);
+        assert_eq!(profile.flags, 0xa7);
         profile.set_invert_y(false);
-        assert_eq!(profile.flags, 0xA6);
+        assert_eq!(profile.flags, 0xa6);
         profile.set_game_flag(0x02, false);
-        assert_eq!(profile.flags, 0xA4);
+        assert_eq!(profile.flags, 0xa4);
         profile.set_invert_y(true);
-        assert_eq!(profile.flags, 0xA5);
+        assert_eq!(profile.flags, 0xa5);
     }
 
     #[test]

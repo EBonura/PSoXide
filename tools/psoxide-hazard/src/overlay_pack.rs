@@ -3,7 +3,8 @@
 //! Resident targets stay fixed; references to other cold modules reject.
 use crate::overlay_elf::{Elf, Relocation, Symbol};
 use psx_residency::overlay;
-use std::{collections::BTreeSet, ops::Range};
+use std::collections::BTreeSet;
+use std::ops::Range;
 
 /// Words in the hazard-trampoline array every packed module image carries (after a
 /// magic and a capacity word). panic=immediate-abort gives HK modules more load-delay

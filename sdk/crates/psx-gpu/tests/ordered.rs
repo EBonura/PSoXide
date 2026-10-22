@@ -1,6 +1,7 @@
 //! Behavioral ordered-stream tests with delayed fake DMA consumption.
 use psx_gpu::ordered::{CommandStreamDma, OrderedCommandStream};
-use std::{cell::RefCell, rc::Rc};
+use std::cell::RefCell;
+use std::rc::Rc;
 #[derive(Default)]
 struct State {
     pending: Vec<(*const u32, Vec<u32>)>,

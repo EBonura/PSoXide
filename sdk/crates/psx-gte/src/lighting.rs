@@ -48,8 +48,7 @@
 #![allow(clippy::needless_range_loop)]
 
 use crate::math::{Mat3I16, Vec3I16, Vec3I32};
-use crate::scene;
-use crate::{ops, read_data, write_data};
+use crate::{ops, read_data, scene, write_data};
 
 /// A single directional light in some reference frame (caller's
 /// choice of world / object / eye space).
@@ -71,7 +70,7 @@ impl Light {
     pub const fn warm_white_at(direction: Vec3I16) -> Self {
         Self {
             direction,
-            colour: (0x0C00, 0x0A00, 0x0800),
+            colour: (0x0c00, 0x0a00, 0x0800),
         }
     }
 
@@ -80,7 +79,7 @@ impl Light {
     pub const fn cool_fill_at(direction: Vec3I16) -> Self {
         Self {
             direction,
-            colour: (0x0400, 0x0600, 0x0A00),
+            colour: (0x0400, 0x0600, 0x0a00),
         }
     }
 
@@ -386,9 +385,9 @@ fn unpack_projected(sxy: u32, sz: u16, rgb: u32) -> ProjectedLit {
         sx: sxy as i16,
         sy: (sxy >> 16) as i16,
         sz,
-        r: (rgb & 0xFF) as u8,
-        g: ((rgb >> 8) & 0xFF) as u8,
-        b: ((rgb >> 16) & 0xFF) as u8,
+        r: (rgb & 0xff) as u8,
+        g: ((rgb >> 8) & 0xff) as u8,
+        b: ((rgb >> 16) & 0xff) as u8,
     }
 }
 
@@ -508,18 +507,17 @@ pub fn project_lit(vert: Vec3I16, normal: Vec3I16, material: (u8, u8, u8)) -> Pr
         sx: sxy as i16,
         sy: (sxy >> 16) as i16,
         sz,
-        r: (lit & 0xFF) as u8,
-        g: ((lit >> 8) & 0xFF) as u8,
-        b: ((lit >> 16) & 0xFF) as u8,
+        r: (lit & 0xff) as u8,
+        g: ((lit >> 8) & 0xff) as u8,
+        b: ((lit >> 16) & 0xff) as u8,
     }
 }
 
 #[cfg(all(test, not(target_arch = "mips")))]
 mod host_smoke {
     use super::*;
-    use crate::host;
     use crate::math::{Mat3I16, Vec3I16, Vec3I32};
-    use crate::scene;
+    use crate::{host, scene};
 
     fn install_scene() {
         scene::load_rotation(&Mat3I16::IDENTITY);
@@ -530,11 +528,11 @@ mod host_smoke {
             [
                 Light {
                     direction: Vec3I16::new(0, 0, 0x1000),
-                    colour: (0x0C00, 0x0800, 0x0400),
+                    colour: (0x0c00, 0x0800, 0x0400),
                 },
                 Light {
                     direction: Vec3I16::new(0x0800, 0, 0x0800),
-                    colour: (0x0400, 0x0800, 0x0C00),
+                    colour: (0x0400, 0x0800, 0x0c00),
                 },
                 Light::OFF,
             ],
@@ -552,8 +550,8 @@ mod host_smoke {
         ];
         let normals = [
             Vec3I16::new(0, 0, 0x1000),
-            Vec3I16::new(0x0400, 0, 0x0F00),
-            Vec3I16::new(-0x0300, 0x0400, 0x0E00),
+            Vec3I16::new(0x0400, 0, 0x0f00),
+            Vec3I16::new(-0x0300, 0x0400, 0x0e00),
         ];
         let materials = [(128, 96, 64), (64, 128, 96), (96, 64, 128)];
 
@@ -581,8 +579,8 @@ mod host_smoke {
         ];
         let normals = [
             Vec3I16::new(0, 0, 0x1000),
-            Vec3I16::new(0x0200, 0x0200, 0x0F00),
-            Vec3I16::new(-0x0200, 0x0300, 0x0F00),
+            Vec3I16::new(0x0200, 0x0200, 0x0f00),
+            Vec3I16::new(-0x0200, 0x0300, 0x0f00),
         ];
         let materials = [(112, 144, 96); 3];
 

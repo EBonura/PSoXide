@@ -19,7 +19,8 @@
 extern crate psx_rt;
 
 use core::ptr::addr_of_mut;
-use psx_font::{fonts::BASIC, FontAtlas};
+use psx_font::fonts::BASIC;
+use psx_font::FontAtlas;
 use psx_gpu::chain::DRAW_DONE_NODE;
 use psx_gpu::display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode};
 use psx_gpu::ot::OrderingTable;
@@ -67,7 +68,7 @@ fn build_frame(table: &mut OrderingTable<8>, packets: &mut [TriGouraud; TRIS], f
     let mut frame = table.frame();
     let count = (f as usize) % (TRIS + 1);
     for (t, packet) in packets.iter_mut().take(count).enumerate() {
-        let shade = ((t as u32 * 20 + f * 3) & 0x7F) as u8 + 0x20;
+        let shade = ((t as u32 * 20 + f * 3) & 0x7f) as u8 + 0x20;
         let verts = if t & 1 == 0 {
             [(0, 0), (319, 0), (0, 239)]
         } else {
@@ -86,7 +87,7 @@ fn line(label: &str, value: u32) -> ([u8; 32], usize) {
     text[..label.len()].copy_from_slice(label);
     text[label.len()] = b'=';
     for i in 0..8 {
-        text[label.len() + 1 + i] = DIGITS[(value >> (28 - 4 * i) & 0xF) as usize];
+        text[label.len() + 1 + i] = DIGITS[(value >> (28 - 4 * i) & 0xf) as usize];
     }
     (text, label.len() + 9)
 }

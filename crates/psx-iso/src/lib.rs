@@ -251,7 +251,7 @@ pub const fn cd_stream_bench_expected_byte(index: usize, sectors: usize) -> u8 {
         let mixed = (index as u32)
             .wrapping_mul(37)
             .wrapping_add((index as u32) >> 3)
-            .wrapping_add(0x5D);
+            .wrapping_add(0x5d);
         mixed as u8
     }
 }
@@ -260,7 +260,7 @@ pub const fn cd_stream_bench_expected_byte(index: usize, sectors: usize) -> u8 {
 pub fn cd_stream_bench_expected_checksum(sectors: usize) -> u32 {
     let sectors = sectors.max(1);
     let len = sectors.saturating_mul(SECTOR_USER_DATA_BYTES);
-    let mut hash = 0x811C_9DC5u32;
+    let mut hash = 0x811c_9dc5u32;
     let mut i = 0usize;
     while i < len {
         hash ^= cd_stream_bench_expected_byte(i, sectors) as u32;
@@ -435,7 +435,7 @@ pub fn build_world_pack_layout(chunks: &[(u32, &[u8])]) -> WorldPackLayout {
 }
 
 fn fnv1a32(bytes: &[u8]) -> u32 {
-    let mut hash = 0x811C_9DC5u32;
+    let mut hash = 0x811c_9dc5u32;
     for &byte in bytes {
         hash ^= byte as u32;
         hash = hash.wrapping_mul(0x0100_0193);
@@ -693,13 +693,13 @@ pub fn detect_track1_pregap(first_sector: &[u8]) -> u32 {
         return 0;
     }
     let sector = &first_sector[..SECTOR_BYTES];
-    if sector[0] != 0x00 || sector[11] != 0x00 || sector[1..11] != [0xFF; 10] {
+    if sector[0] != 0x00 || sector[11] != 0x00 || sector[1..11] != [0xff; 10] {
         return 0;
     }
     let m = bcd_to_bin(sector[12]);
     let s = bcd_to_bin(sector[13]);
     let f = bcd_to_bin(sector[14]);
-    if [m, s, f].contains(&0xFF) {
+    if [m, s, f].contains(&0xff) {
         return 0;
     }
     let abs_frame = (m as u32) * 60 * 75 + (s as u32) * 75 + (f as u32);
@@ -723,10 +723,10 @@ fn track_contains_lba(track: &Track, lba: u32) -> bool {
 /// Convert a BCD byte pair to binary (used for MSF fields in commands).
 /// Returns 0xFF if either nibble is out of range.
 pub fn bcd_to_bin(bcd: u8) -> u8 {
-    let hi = (bcd >> 4) & 0xF;
-    let lo = bcd & 0xF;
+    let hi = (bcd >> 4) & 0xf;
+    let lo = bcd & 0xf;
     if hi > 9 || lo > 9 {
-        0xFF
+        0xff
     } else {
         hi * 10 + lo
     }
@@ -788,7 +788,7 @@ mod tests {
         assert_eq!(bcd_to_bin(0x00), 0);
         assert_eq!(bcd_to_bin(0x42), 42);
         assert_eq!(bcd_to_bin(0x99), 99);
-        assert_eq!(bcd_to_bin(0xAB), 0xFF);
+        assert_eq!(bcd_to_bin(0xab), 0xff);
     }
 
     #[test]
@@ -821,39 +821,39 @@ mod tests {
     #[test]
     fn read_sector_returns_slice() {
         let mut bytes = vec![0u8; SECTOR_BYTES];
-        bytes[SECTOR_USER_DATA_OFFSET] = 0xAB;
+        bytes[SECTOR_USER_DATA_OFFSET] = 0xab;
         let d = Disc::from_bin(bytes);
         let s = d.read_sector_raw(0).unwrap();
-        assert_eq!(s[SECTOR_USER_DATA_OFFSET], 0xAB);
+        assert_eq!(s[SECTOR_USER_DATA_OFFSET], 0xab);
         let u = d.read_sector_user(0).unwrap();
-        assert_eq!(u[0], 0xAB);
+        assert_eq!(u[0], 0xab);
     }
 
     fn minimal_exe() -> Vec<u8> {
         let mut exe = vec![0u8; EXE_HEADER_BYTES];
         exe[..8].copy_from_slice(b"PS-X EXE");
         exe[0x10..0x14].copy_from_slice(&0x8001_0000u32.to_le_bytes());
-        exe[0x18..0x1C].copy_from_slice(&0x8001_0000u32.to_le_bytes());
+        exe[0x18..0x1c].copy_from_slice(&0x8001_0000u32.to_le_bytes());
         exe
     }
 
     #[test]
     fn playtest_layout_pads_an_exe_the_linker_left_short_of_its_sectors() {
         let mut exe = minimal_exe();
-        exe[0x1C..0x20].copy_from_slice(&4096u32.to_le_bytes());
-        exe.extend_from_slice(&[0x5A; 3000]);
+        exe[0x1c..0x20].copy_from_slice(&4096u32.to_le_bytes());
+        exe.extend_from_slice(&[0x5a; 3000]);
         let mut builder = IsoBuilder::new();
         add_playtest_files(&mut builder, exe, None, None, None).unwrap();
         let disc = Disc::from_bin(builder.build_bin());
         let boot = load_boot_exe_from_disc(&disc).expect("boots");
         assert_eq!(boot.exe.payload.len(), 4096);
-        assert!(boot.exe.payload[..3000].iter().all(|&b| b == 0x5A));
+        assert!(boot.exe.payload[..3000].iter().all(|&b| b == 0x5a));
         assert!(boot.exe.payload[3000..].iter().all(|&b| b == 0));
         // The second payload sector is on the disc, not read from the next file.
         let tail = disc
             .read_sector_user(PLAYTEST_BOOT_EXE_START_LBA + 2)
             .expect("second payload sector");
-        assert!(tail[..952].iter().all(|&b| b == 0x5A));
+        assert!(tail[..952].iter().all(|&b| b == 0x5a));
         assert!(tail[952..].iter().all(|&b| b == 0));
     }
 
@@ -942,7 +942,7 @@ mod tests {
         let mut bytes = vec![0u8; SECTOR_BYTES * 4];
         bytes[2 * SECTOR_BYTES + 12..2 * SECTOR_BYTES + 20]
             .copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
-        bytes[2 * SECTOR_BYTES + 100] = 0x5A;
+        bytes[2 * SECTOR_BYTES + 100] = 0x5a;
         let late = LateSource::new(bytes, false);
         let disc = Disc::from_tracks(vec![Track {
             number: 1,
@@ -1013,10 +1013,10 @@ mod tests {
     fn mode1_user_reads_from_offset_16() {
         let mut bytes = vec![0u8; SECTOR_BYTES];
         bytes[15] = 1;
-        bytes[16] = 0x5D;
-        bytes[SECTOR_USER_DATA_OFFSET] = 0xA7;
+        bytes[16] = 0x5d;
+        bytes[SECTOR_USER_DATA_OFFSET] = 0xa7;
         let d = Disc::from_bin(bytes);
-        assert_eq!(d.read_sector_user(0).unwrap()[0], 0x5D);
+        assert_eq!(d.read_sector_user(0).unwrap()[0], 0x5d);
     }
 
     #[test]
@@ -1082,7 +1082,7 @@ mod tests {
     #[test]
     fn multitrack_sector_reads_map_through_pregap() {
         let mut track2 = vec![0u8; SECTOR_BYTES * 6];
-        track2[2 * SECTOR_BYTES] = 0xAB;
+        track2[2 * SECTOR_BYTES] = 0xab;
         let disc = Disc::from_tracks(vec![
             Track {
                 number: 1,
@@ -1103,13 +1103,13 @@ mod tests {
                 source: Box::new(track2),
             },
         ]);
-        assert_eq!(disc.read_sector_raw(12).unwrap()[0], 0xAB);
+        assert_eq!(disc.read_sector_raw(12).unwrap()[0], 0xab);
     }
 
     #[test]
     fn multitrack_sector_reads_honor_pregap_not_present_in_file() {
         let mut track2 = vec![0u8; SECTOR_BYTES * 4];
-        track2[0] = 0xCD;
+        track2[0] = 0xcd;
         let disc = Disc::from_tracks(vec![
             Track {
                 number: 1,
@@ -1131,7 +1131,7 @@ mod tests {
             },
         ]);
         assert!(disc.read_sector_raw(10).is_none());
-        assert_eq!(disc.read_sector_raw(12).unwrap()[0], 0xCD);
+        assert_eq!(disc.read_sector_raw(12).unwrap()[0], 0xcd);
     }
 
     #[test]
@@ -1173,7 +1173,7 @@ mod tests {
         assert_eq!(payload[12], cd_stream_bench_expected_byte(12, 2));
         assert_eq!(
             cd_stream_bench_expected_checksum(2),
-            payload.iter().fold(0x811C_9DC5u32, |hash, byte| {
+            payload.iter().fold(0x811c_9dc5u32, |hash, byte| {
                 (hash ^ (*byte as u32)).wrapping_mul(0x0100_0193)
             })
         );

@@ -1,8 +1,10 @@
 //! Package the same-compilation borrowed-arena example from its final ELF.
 //! Reuses the checked SDK ELF reader and existing legacy module ABI.
 use psoxide_hazard::overlay_elf::{Elf, Symbol};
-use psx_residency::{arena::checksum, overlay};
-use std::{collections::BTreeSet, error::Error};
+use psx_residency::arena::checksum;
+use psx_residency::overlay;
+use std::collections::BTreeSet;
+use std::error::Error;
 
 fn words(bytes: &[u8]) -> Result<Vec<u32>, Box<dyn Error>> {
     if bytes.len() & 3 != 0 {
