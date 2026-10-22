@@ -102,11 +102,12 @@ pub struct FloodSettings {
 }
 
 impl FloodSettings {
-    /// Off, with the radii the Citadel was tuned at.
+    /// Off, with the radii the Citadel was tuned at (hex 4 cells: the largest
+    /// draw radius that holds its route above 25.5 fps).
     pub const DEFAULT: Self = Self {
         on: false,
-        near_radius: 12,
-        res_radius: 16,
+        near_radius: 8,
+        res_radius: 12,
         quad_budget: 0,
     };
 
