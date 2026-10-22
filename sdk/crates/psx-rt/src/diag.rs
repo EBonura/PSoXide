@@ -443,7 +443,10 @@ fn draw_line(y: u16, line: &Line, color: u16) {
                 let xx = x + k;
                 let col = xx / 6;
                 let px = xx % 6;
-                let on = col < COLS && px < 5 && row < 7 && glyph(line.buf[col])[row] & (1 << (4 - px)) != 0;
+                let on = col < COLS
+                    && px < 5
+                    && row < 7
+                    && glyph(line.buf[col])[row] & (1 << (4 - px)) != 0;
                 let c = if on { color } else { BG } as u32;
                 pair |= c << (16 * k);
                 k += 1;

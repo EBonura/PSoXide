@@ -29,7 +29,10 @@
 #![cfg_attr(target_arch = "mips", feature(asm_experimental_arch))]
 // The console stop-panel is cold; its functions are size-optimised so a diagnostic build costs
 // as little RAM as possible.
-#![cfg_attr(all(feature = "console-diag", target_arch = "mips"), feature(optimize_attribute))]
+#![cfg_attr(
+    all(feature = "console-diag", target_arch = "mips"),
+    feature(optimize_attribute)
+)]
 
 // Corrected signed 64-bit divide/mod (compiler-builtins' are broken here).
 #[cfg(target_arch = "mips")]

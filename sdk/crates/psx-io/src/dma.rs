@@ -130,7 +130,9 @@ pub struct Transfer {
 pub unsafe fn start(ch: Channel, transfer: Transfer) {
     crate::diag::dma_kick(ch as u32);
     #[cfg(feature = "console-diag")]
-    if matches!(ch, Channel::Gpu) && transfer.control & psx_hw::dma::CHCR_SYNC_LINKED == psx_hw::dma::CHCR_SYNC_LINKED {
+    if matches!(ch, Channel::Gpu)
+        && transfer.control & psx_hw::dma::CHCR_SYNC_LINKED == psx_hw::dma::CHCR_SYNC_LINKED
+    {
         crate::diag::ll_scan(transfer.address);
     }
     // SAFETY: the caller upholds this function's contract for the transfer
