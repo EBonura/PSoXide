@@ -315,9 +315,27 @@ pub struct CollisionView<'a> {
     pub walls: &'a [ColWall],
     pub splitbs: &'a [SplitB],
     pub col_planes: &'a [ColPlane],
+    /// Plan box `[x0, z0, x1, z1]` (inclusive, room-local runtime units)
+    /// around every collision plane of the room, inverted when it has none.
+    /// A query that stays outside it need not read the plane table.
+    pub plane_box: [i32; 4],
     pub liquids: &'a [Liquid],
     pub movers: &'a [Mover],
     pub mover_verts: &'a [u16],
+}
+
+/// The plan box around `planes` (see [`CollisionView::plane_box`]).
+fn plane_bounds(planes: &[ColPlane]) -> [i32; 4] {
+    let mut out = [i32::MAX, i32::MAX, i32::MIN, i32::MIN];
+    for plane in planes {
+        // A wall and a blocker use two corners, a platform all four.
+        let corners = if plane.kind == plane_kind::PLATFORM { 4 } else { 2 };
+        for corner in &plane.xz[..corners] {
+            let (x, z) = (i32::from(corner[0]), i32::from(corner[1]));
+            out = [out[0].min(x), out[1].min(z), out[2].max(x), out[3].max(z)];
+        }
+    }
+    out
 }
 
 /// The render block of a room chunk.
@@ -436,6 +454,7 @@ impl<'a> CollisionView<'a> {
         } else {
             (&[], &[])
         };
+        let col_planes = section(bytes, head, section::COL_PLANES)?;
         Ok(Self {
             header: head,
             sectors,
@@ -447,7 +466,8 @@ impl<'a> CollisionView<'a> {
             exts: section(bytes, head, section::SECTOR_EXTS)?,
             walls: section(bytes, head, section::WALLS)?,
             splitbs: section(bytes, head, section::SPLITBS)?,
-            col_planes: section(bytes, head, section::COL_PLANES)?,
+            col_planes,
+            plane_box: plane_bounds(col_planes),
             liquids: section(bytes, head, section::LIQUIDS)?,
             movers: section(bytes, head, section::MOVERS)?,
             mover_verts: section(bytes, head, section::MOVER_VERTS)?,

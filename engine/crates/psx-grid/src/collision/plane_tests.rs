@@ -398,3 +398,27 @@ fn the_box_test_never_changes_what_a_ray_finds() {
         assert!(skipped > 20000, "the box test must skip planes: {skipped}");
     });
 }
+
+#[test]
+fn the_room_plane_box_holds_every_plane_and_is_inverted_without_planes() {
+    let built = property_world();
+    built.run(|w| {
+        let view = w.view(0).unwrap();
+        let [x0, z0, x1, z1] = view.plane_box;
+        assert!(x0 < x1 && z0 < z1);
+        for plane in view.col_planes {
+            let corners = if plane.kind == plane_kind::PLATFORM { 4 } else { 2 };
+            for c in &plane.xz[..corners] {
+                let (x, z) = (i32::from(c[0]), i32::from(c[1]));
+                assert!((x0..=x1).contains(&x) && (z0..=z1).contains(&z), "{plane:?}");
+            }
+        }
+        // The box is tight: the wall at x = 440 is the east edge.
+        assert_eq!((x0, x1), (60, 440));
+    });
+    let bare = build(&[Room::flat([0, 0, 0], 3, 3, 0)]);
+    bare.run(|w| {
+        let [x0, z0, x1, z1] = w.view(0).unwrap().plane_box;
+        assert!(x0 > x1 && z0 > z1);
+    });
+}

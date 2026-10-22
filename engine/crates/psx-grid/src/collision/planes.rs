@@ -217,6 +217,12 @@ impl<'a> GridCollision<'a> {
         if lx + r < 0 || lz + r < 0 || lx - r >= w * s || lz - r >= d * s {
             return;
         }
+        // Everything a plane offers lies within `r` of the column, so a
+        // column whose box misses the room's planes reads none of them.
+        let [bx0, bz0, bx1, bz1] = view.plane_box;
+        if lx + r < bx0 || lx - r > bx1 || lz + r < bz0 || lz - r > bz1 {
+            return;
+        }
         let recip = self.recip;
         let cell = |v: i32, n: i32| recip.cell(v.max(0).min(n * s - 1) as u32) as usize;
         let (cx0, cx1) = (cell(lx - r, w), cell(lx + r, w));
@@ -353,6 +359,10 @@ impl<'a> GridCollision<'a> {
         // crossing test costs a thousand cycles.
         let lo = [a[0].min(b[0]), a[1].min(b[1]), a[2].min(b[2])];
         let hi = [a[0].max(b[0]), a[1].max(b[1]), a[2].max(b[2])];
+        let [bx0, bz0, bx1, bz1] = view.plane_box;
+        if hi[0] < bx0 || lo[0] > bx1 || hi[2] < bz0 || lo[2] > bz1 {
+            return;
+        }
         for (index, plane) in view.col_planes.iter().enumerate() {
             if plane.flags & COLPLANE_PRIMARY == 0 {
                 continue;
