@@ -3,7 +3,6 @@
 use super::pack::Rect;
 use crate::grid::edit::meshes::{add_asset, delete_meshes, place_mesh, MeshRefusal};
 use crate::grid::mesh::{GridMesh, ImportProxy, ImportedMesh, MeshAsset, MeshKind, SCALE_RANGE};
-use crate::grid::units::CLICK_UNITS;
 use crate::grid::world::GridWorld;
 use crate::ResourceId;
 
@@ -17,8 +16,6 @@ const SMALL_UNIT: i32 = 1024;
 const LARGE_UNIT: i32 = 8192;
 /// Material slots of a slab asset: the top, the four sides, the underside.
 const SLOT_COUNT: usize = 3;
-/// Cells along the longest piece of a split slab (8192 grid units).
-const MAX_PIECE_CELLS: i32 = LARGE_UNIT / CLICK_UNITS;
 
 /// Materials of the three faces of every slab.
 #[derive(Clone, Copy, Debug, Default)]
@@ -84,15 +81,17 @@ pub struct Piece {
     pub top: i32,
     /// Stretches the large cube.
     pub large: bool,
+    /// Grid units along a cell.
+    pub edge: i32,
 }
 
 impl Piece {
     /// Extent along x, y (up) and z, grid units.
     fn size(&self) -> [i32; 3] {
         [
-            self.width * CLICK_UNITS,
+            self.width * self.edge,
             self.top - self.bottom,
-            self.depth * CLICK_UNITS,
+            self.depth * self.edge,
         ]
     }
 }
@@ -104,13 +103,14 @@ fn stretches(unit: i32, size: [i32; 3]) -> bool {
         .all(|&s| (s * 256 / unit) >= lo && (s * 256 / unit) <= hi)
 }
 
-/// The instances a rectangle needs: one when a cube stretches to it, else
-/// pieces of at most eight sectors cut along the long axes.
+/// The instances a rectangle of cells `edge` grid units on a side needs: one
+/// when a cube stretches to it, else pieces of at most eight sectors cut
+/// along the long axes.
 ///
 /// # Errors
 ///
 /// Returns a message when the slab is taller or thinner than a cube allows.
-pub fn pieces(rect: Rect) -> Result<Vec<Piece>, String> {
+pub fn pieces(rect: Rect, edge: i32) -> Result<Vec<Piece>, String> {
     let whole = Piece {
         x: rect.x,
         z: rect.z,
@@ -119,6 +119,7 @@ pub fn pieces(rect: Rect) -> Result<Vec<Piece>, String> {
         bottom: rect.bottom,
         top: rect.top,
         large: false,
+        edge,
     };
     if stretches(SMALL_UNIT, whole.size()) {
         return Ok(vec![whole]);
@@ -130,14 +131,15 @@ pub fn pieces(rect: Rect) -> Result<Vec<Piece>, String> {
         }]);
     }
     let thickness = whole.size()[1];
-    if !stretches(SMALL_UNIT, [CLICK_UNITS, thickness, CLICK_UNITS]) {
+    if !stretches(SMALL_UNIT, [edge, thickness, edge]) {
         return Err(format!(
             "a slab {thickness} grid units thick at cell [{}, {}] is outside what a cube stretches to",
             rect.x, rect.z
         ));
     }
+    let most = (LARGE_UNIT / edge).max(1);
     let cut = |length: i32| -> Vec<(i32, i32)> {
-        let n = (length + MAX_PIECE_CELLS - 1) / MAX_PIECE_CELLS;
+        let n = (length + most - 1) / most;
         let (each, extra) = (length / n, length % n);
         let mut at = 0;
         (0..n)
@@ -182,8 +184,8 @@ pub fn remove_placed(world: &mut GridWorld) -> usize {
     delete_meshes(world, &ids)
 }
 
-/// Place `piece` in `room`. `origin_cell` is the world click of the model's
-/// corner (cell `[0, 0]`).
+/// Place `piece` in `room`. `origin` is the world position, grid units, of the
+/// model's corner (cell `[0, 0]`).
 ///
 /// # Errors
 ///
@@ -192,7 +194,7 @@ pub fn place(
     world: &mut GridWorld,
     room: usize,
     piece: Piece,
-    origin_cell: [i32; 2],
+    origin: [i32; 2],
     style: &SlabStyle,
 ) -> Result<u16, MeshRefusal> {
     let (name, unit) = if piece.large {
@@ -205,8 +207,8 @@ pub fn place(
         None => add_asset(world, cube_asset(name, unit))?,
     };
     let size = piece.size();
-    let x = (piece.x + origin_cell[0]) * CLICK_UNITS + size[0] / 2;
-    let z = (piece.z + origin_cell[1]) * CLICK_UNITS + size[2] / 2;
+    let x = origin[0] + piece.x * piece.edge + size[0] / 2;
+    let z = origin[1] + piece.z * piece.edge + size[2] / 2;
     let mut mesh = GridMesh::new(0, index, [x, piece.bottom, z]);
     mesh.scale = size.map(|s| (s * 256 / unit) as u16);
     for (slot, material) in style.materials.iter().enumerate() {

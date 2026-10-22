@@ -73,9 +73,13 @@ fn world(rooms: Vec<GridRoom>) -> GridWorld {
     }
 }
 
+/// Quarter-sector fitting with the tight tolerance the exact decks need.
 fn config() -> FloatConfig {
     FloatConfig {
         origin_sector: [0, 0],
+        block_cells: 1,
+        tolerance: 256,
+        min_area_cells: 4,
         ..FloatConfig::default()
     }
 }
@@ -320,4 +324,51 @@ fn a_slab_world_cooks_and_the_body_stands_on_the_deck() {
     let y = motor.position().y;
     assert!((y - 320).abs() <= 2, "stood at {y}");
     assert_eq!(SECTOR_UNITS, 1024);
+}
+
+#[test]
+fn a_rough_deck_fits_sector_blocks_where_quarter_cells_would_shatter() {
+    // A deck whose underside wobbles by a third of a sector from quarter cell
+    // to quarter cell: one slab per sector block, not one per wobble.
+    let field = HitField::from_fn(
+        8 * COLUMNS_PER_SECTOR,
+        8 * COLUMNS_PER_SECTOR,
+        8,
+        |row, col| {
+            let (cx, cz) = (col / 4, row / 4);
+            let (x, z) = (cx as f32 / 4.0, cz as f32 / 4.0);
+            let wobble = ((cx * 7 + cz * 13) % 5) as i32 * 64;
+            if (2.0..6.0).contains(&x) && (2.0..5.0).contains(&z) {
+                vec![hit(5120 + wobble), hit(4096 + wobble), hit(512)]
+            } else {
+                vec![hit(512)]
+            }
+        },
+    );
+    let sectors = FloatConfig {
+        origin_sector: [0, 0],
+        ..FloatConfig::default()
+    };
+    let mut w = world(vec![room("island", [0, 0], 8, 8)]);
+    let (report, _) = run(&mut w, &field, &sectors);
+    assert_eq!(report.placed(), 1, "{}", report.summary());
+    let (_, lo, hi) = boxes(&w)[0];
+    assert_eq!((lo[0], hi[0], lo[2], hi[2]), (2048, 6144, 2048, 5120));
+    // Heights are the median of the wobble, on the lattice.
+    assert!(lo[1] % 64 == 0 && (4096..=4352).contains(&lo[1]), "{lo:?}");
+}
+
+#[test]
+fn a_mass_thicker_than_a_deck_is_not_floated() {
+    let tall = Deck {
+        x: (2.0, 4.0),
+        z: (2.0, 4.0),
+        bottom: 4096,
+        top: 4096 + 9 * 1024,
+    };
+    let field = island(6, &[tall]);
+    let mut w = world(vec![room("island", [0, 0], 6, 6)]);
+    let (report, cells) = run(&mut w, &field, &config());
+    assert!(cells.is_empty());
+    assert_eq!(report.placed(), 0);
 }

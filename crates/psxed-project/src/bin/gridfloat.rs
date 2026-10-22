@@ -8,7 +8,10 @@
 //!   --origin X,Z           world sector of the model's corner (default 2,2)
 //!   --clearance N          open space that makes a solid float, grid units
 //!   --min-thickness N      thinnest solid kept, grid units
-//!   --min-area N           smallest patch kept, plan cells of a quarter sector
+//!   --max-thickness N      thickest solid kept (a deck, not a mass), grid units
+//!   --block N              quarter sectors per side of a fitting block (2)
+//!   --block-cover PERCENT  share of a block's cells that must agree (50)
+//!   --min-area N           smallest patch kept, in fitting blocks
 //!   --tolerance N          height wobble allowed inside one slab, grid units
 //!   --cover PERCENT        share of a cell's rays that must agree
 //!   --dry-run              report without writing the project
@@ -91,6 +94,15 @@ fn config(args: &Args) -> Result<FloatConfig, String> {
     }
     if let Some(v) = args.number("min-thickness")? {
         config.min_thickness = v;
+    }
+    if let Some(v) = args.number("max-thickness")? {
+        config.max_thickness = v;
+    }
+    if let Some(v) = args.number("block")? {
+        config.block_cells = v;
+    }
+    if let Some(v) = args.number("block-cover")? {
+        config.coarse_cover_percent = v;
     }
     if let Some(v) = args.number("min-area")? {
         config.min_area_cells = v;

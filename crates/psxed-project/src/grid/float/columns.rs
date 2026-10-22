@@ -206,7 +206,7 @@ pub fn floating_in_column(hits: &[f32], frame: &Frame, config: &FloatConfig) -> 
             }),
         }
     }
-    out.retain(|s| s.top - s.bottom >= config.min_thickness);
+    out.retain(|s| (config.min_thickness..=config.max_thickness).contains(&(s.top - s.bottom)));
     out
 }
 
@@ -270,6 +270,51 @@ pub fn plan_cells(field: &HitField, frame: &Frame, config: &FloatConfig) -> Vec<
                     clearance: median(&mut clearances),
                 });
             }
+        }
+    }
+    out
+}
+
+/// Merge the quarter-sector cells into square blocks of `factor` cells on a
+/// side (2 is a half sector, 4 a sector). A block keeps a solid when at least
+/// `config.coarse_cover_percent` percent of its cells hold one within
+/// `config.tolerance` at both ends; its heights are the medians. Block
+/// coordinates are in blocks.
+pub fn coarsen(cells: &[PlanCell], factor: i32, config: &FloatConfig) -> Vec<PlanCell> {
+    if factor <= 1 {
+        return cells.to_vec();
+    }
+    let mut blocks: std::collections::BTreeMap<(i32, i32), Vec<Solid>> =
+        std::collections::BTreeMap::new();
+    for cell in cells {
+        blocks
+            .entry((cell.z.div_euclid(factor), cell.x.div_euclid(factor)))
+            .or_default()
+            .push(Solid {
+                bottom: cell.bottom,
+                top: cell.top,
+                clearance: cell.clearance,
+            });
+    }
+    let need = ((factor * factor) as usize * config.coarse_cover_percent as usize)
+        .div_ceil(100)
+        .max(1);
+    let mut out = Vec::new();
+    for ((z, x), solids) in blocks {
+        for cluster in clusters(&solids, config.tolerance) {
+            if cluster.len() < need {
+                continue;
+            }
+            let mut bottoms: Vec<i32> = cluster.iter().map(|s| s.bottom).collect();
+            let mut tops: Vec<i32> = cluster.iter().map(|s| s.top).collect();
+            let mut clearances: Vec<i32> = cluster.iter().map(|s| s.clearance).collect();
+            out.push(PlanCell {
+                x,
+                z,
+                bottom: snap(median(&mut bottoms)),
+                top: snap(median(&mut tops)),
+                clearance: median(&mut clearances),
+            });
         }
     }
     out
