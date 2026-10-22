@@ -23,7 +23,7 @@ const PROJECTS: [&str; 9] = [
 ];
 
 fn load(name: &str) -> crate::ProjectDocument {
-    let path = crate::projects_dir().join(name).join("project.ron");
+    let path = super::uv_golden::reference_project_path(name);
     crate::ProjectDocument::load_from_path(path).expect("project loads")
 }
 

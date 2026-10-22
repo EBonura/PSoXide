@@ -31,8 +31,24 @@ fn fnv(hash: &mut u64, bytes: &[u8]) {
     }
 }
 
+/// The `project.ron` of a reference level: the tracked project, or, for the
+/// one that only lives as a fixture (`grid-planes`, which was never tracked
+/// under `editor/projects`), the copy under `tests/fixtures`. A test never
+/// depends on a project that is not in the repository.
+pub(super) fn reference_project_path(name: &str) -> std::path::PathBuf {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name)
+        .join("project.ron");
+    if fixture.is_file() {
+        fixture
+    } else {
+        crate::projects_dir().join(name).join("project.ron")
+    }
+}
+
 fn texel_hash(name: &str) -> u64 {
-    let path = crate::projects_dir().join(name).join("project.ron");
+    let path = reference_project_path(name);
     let project = crate::ProjectDocument::load_from_path(path).expect("project loads");
     let world = project.active_scene().world.grid().expect("grid project");
     let mut hash = 0xcbf29ce484222325u64;
@@ -57,21 +73,16 @@ fn legacy_texels_are_bit_for_bit_what_they_were() {
     assert_eq!(got, GOLDEN.to_vec(), "texels of a legacy face changed");
 }
 
-/// The same pins for the levels that are tracked (`grid-planes` is not, so
-/// the test above cannot run on a clean checkout): the texels of every
-/// legacy face stay what they were whatever the world's default density is
-/// for a new world.
+/// The same pins one level at a time, so a failure names the level: the
+/// texels of every legacy face stay what they were whatever the world's
+/// default density is for a new world.
 #[test]
-fn the_tracked_reference_levels_keep_their_pinned_texels() {
+fn the_reference_levels_keep_their_pinned_texels() {
     for (name, golden) in PROJECTS.iter().zip(GOLDEN) {
-        if !crate::projects_dir()
-            .join(name)
-            .join("project.ron")
-            .is_file()
-        {
-            eprintln!("skipping {name}: not present");
-            continue;
-        }
+        assert!(
+            reference_project_path(name).is_file(),
+            "{name}: the reference level is missing from the repository"
+        );
         assert_eq!(
             texel_hash(name),
             golden,
