@@ -83,6 +83,10 @@ pub struct ResidentRooms<'a> {
     views: Vec<*const CollisionView<'a>>,
     slots: Vec<Option<RoomSlot<'a>>>,
     free: Vec<u16>,
+    /// Material binding lists of rooms that left, kept for the next room to load. The guest
+    /// allocator never frees, so a list dropped with its slot would leak its block every time
+    /// a room streams out.
+    spare_materials: Vec<Vec<GridMaterial>>,
     capacity: usize,
     resident: usize,
     /// Resident rooms holding collidable free planes.
@@ -107,6 +111,18 @@ impl<'a> ResidentRooms<'a> {
         Self::with_capacity(level, level.rooms.len())
     }
 
+    /// Make room for `rooms` resident rooms now, so loading them never grows the tables. The
+    /// guest allocator never frees: a table that grows leaves its old block behind for good.
+    pub fn reserve_rooms(&mut self, rooms: usize) {
+        let rooms = rooms.min(self.capacity);
+        self.slots
+            .reserve_exact(rooms.saturating_sub(self.slots.len()));
+        self.free
+            .reserve_exact(rooms.saturating_sub(self.free.len()));
+        self.spare_materials
+            .reserve_exact(rooms.saturating_sub(self.spare_materials.len()));
+    }
+
     /// An empty set that can hold at most `capacity` rooms at once.
     pub fn with_capacity(level: LevelView<'a>, capacity: usize) -> Option<Self> {
         let s = level.sector_units();
@@ -118,6 +134,7 @@ impl<'a> ResidentRooms<'a> {
             views: alloc::vec![core::ptr::null(); level.rooms.len()],
             slots: Vec::new(),
             free: Vec::new(),
+            spare_materials: Vec::new(),
             capacity,
             resident: 0,
             plane_rooms: 0,
@@ -310,6 +327,7 @@ impl<'a> ResidentRooms<'a> {
     ) -> Result<(), ResidentError> {
         debug_assert!(col.header.magic == ROOM_MAGIC && col.header.version == VERSION);
         self.check(room, col.width(), col.depth())?;
+        let materials = self.spare_materials.pop().unwrap_or_default();
         self.place(
             room,
             RoomSlot {
@@ -317,7 +335,7 @@ impl<'a> ResidentRooms<'a> {
                 col,
                 render: None,
                 probes: ProbeView::EMPTY,
-                materials: Vec::new(),
+                materials,
                 materials_ready: false,
             },
         );
@@ -329,6 +347,7 @@ impl<'a> ResidentRooms<'a> {
     /// not drawn before.
     pub fn insert(&mut self, room: usize, view: RoomView<'a>) -> Result<(), ResidentError> {
         self.check(room, view.col.width(), view.col.depth())?;
+        let materials = self.spare_materials.pop().unwrap_or_default();
         self.place(
             room,
             RoomSlot {
@@ -336,7 +355,7 @@ impl<'a> ResidentRooms<'a> {
                 col: view.col,
                 render: Some(view.render),
                 probes: view.render.probes,
-                materials: Vec::new(),
+                materials,
                 materials_ready: false,
             },
         );
@@ -375,7 +394,12 @@ impl<'a> ResidentRooms<'a> {
         if index == NO_SLOT {
             return None;
         }
-        let slot = self.slots[usize::from(index)].take()?;
+        let mut slot = self.slots[usize::from(index)].take()?;
+        if slot.materials.capacity() > 0 {
+            let mut list = core::mem::take(&mut slot.materials);
+            list.clear();
+            self.spare_materials.push(list);
+        }
         self.slot_of[room] = NO_SLOT;
         self.views[room] = core::ptr::null();
         self.free.push(index);

@@ -230,7 +230,10 @@ impl GridRuntime {
         if level.materials.is_empty() {
             return Err(GridRuntimeInitError::NoMaterials);
         }
-        let resident = ResidentRooms::new(level).ok_or(GridRuntimeInitError::Collision)?;
+        let mut resident = ResidentRooms::new(level).ok_or(GridRuntimeInitError::Collision)?;
+        if let Some(flood) = level.flood.filter(|flood| flood.peak_rooms > 0) {
+            resident.reserve_rooms(usize::from(flood.peak_rooms));
+        }
         // Scratch comes from the core's maxima, so it is right whichever
         // rooms are resident.
         let renderer = GridRenderer::with_maxima(&level.maxima());

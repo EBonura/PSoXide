@@ -67,7 +67,8 @@ fn block(cap: u16, near: u8, res: u8, portals: usize) -> FloodBlock {
             near_radius: near,
             res_radius: res,
             bias: 0,
-            reserved: [0; 3],
+            peak_rooms: 0,
+            reserved: [0; 2],
         },
         portal_weight: alloc::vec![FLOOD_WEIGHT_ONE; portals],
     }

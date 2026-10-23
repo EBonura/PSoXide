@@ -65,6 +65,10 @@ struct FloodWindow {
     /// The rooms drawn: the draw flood's rooms within the draw radius, plus
     /// the ones in the hysteresis band that were drawn before.
     drawn: Vec<FloodRoom>,
+    /// The buffer the next drawn set is built in; swapped with `drawn` every time one is
+    /// published. The guest allocator never frees, so a set built in a fresh `Vec` each time
+    /// would leak a block per flood.
+    spare: Vec<FloodRoom>,
     /// Per room: whether it is in `drawn`.
     in_drawn: Vec<bool>,
     /// The draw flood this `drawn` was made from.
@@ -81,6 +85,7 @@ impl FloodWindow {
             res: i32::from(header.res_radius) * s,
             budget: u32::from(header.pool_cap_pages),
             drawn: Vec::new(),
+            spare: Vec::new(),
             in_drawn: alloc::vec![false; level.rooms.len()],
             drawn_epoch: 0,
         }
@@ -124,7 +129,8 @@ impl FloodWindow {
     /// that already was.
     fn publish_drawn(&mut self) {
         let band_start = self.near;
-        let mut next = Vec::with_capacity(self.drawn.len() + 4);
+        let mut next = core::mem::take(&mut self.spare);
+        next.clear();
         for entry in self.draw.rooms() {
             if entry.cost <= band_start || self.in_drawn[usize::from(entry.room)] {
                 next.push(*entry);
@@ -136,7 +142,7 @@ impl FloodWindow {
         for entry in &next {
             self.in_drawn[usize::from(entry.room)] = true;
         }
-        self.drawn = next;
+        self.spare = core::mem::replace(&mut self.drawn, next);
         self.drawn_epoch = self.draw.epoch();
     }
 }

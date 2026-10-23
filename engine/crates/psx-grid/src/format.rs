@@ -91,7 +91,11 @@ pub struct FloodHeader {
     /// View-cone bias of the flood: 0 is off, the only value this reader
     /// understands.
     pub bias: u8,
-    pub reserved: [u8; 3],
+    /// Rooms the guest should make room for in its resident table: the most rooms the cook's
+    /// busiest position keeps resident, plus some slack. 0 means unknown (the table grows as
+    /// rooms arrive; the guest allocator never frees, so every growth step leaks the old table).
+    pub peak_rooms: u8,
+    pub reserved: [u8; 2],
 }
 const _: () = assert!(core::mem::size_of::<FloodHeader>() == 8);
 
