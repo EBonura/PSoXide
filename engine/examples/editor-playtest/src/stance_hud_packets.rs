@@ -25,11 +25,11 @@ pub struct HudVram {
 }
 
 impl HudVram {
-    /// Page 15, top half (right of the display buffers), and the strip just under the second
-    /// display buffer: free in the showcase.
+    /// Page 15, top half (right of the display buffers), and the palette strip just under the second
+    /// display buffer (23 palettes of 16 entries, so it ends at x 1008): free in the showcase.
     pub const SHOWCASE: Self = Self {
         page: TexturePage::new(960, 0, TextureDepth::Bit4),
-        clut_x: 704,
+        clut_x: 640,
         clut_y: 480,
     };
 
@@ -54,6 +54,9 @@ impl HudVram {
         Clut::new(self.clut_x + 16 * clut as u16, self.clut_y).uv_word()
     }
 }
+
+/// GP0 E6, the mask bit setting: bit 0 marks the pixels drawn, bit 1 skips marked pixels.
+const MASK_SETTING: u32 = 0xE600_0000;
 
 /// Bit 25 of a draw command: semi-transparent.
 const SEMI_TRANSPARENT: u32 = 1 << 25;
@@ -91,6 +94,11 @@ impl<const N: usize> HudPackets<N> {
             nodes: [Node::ZERO; N],
             len: 0,
         }
+    }
+
+    /// Forget the packets.
+    pub fn clear(&mut self) {
+        self.len = 0;
     }
 
     /// Packets held.
@@ -145,6 +153,17 @@ impl<const N: usize> HudPackets<N> {
                         }
                     }
                 }
+                Op::Mask { set, check } => Node {
+                    tag: 1 << 24,
+                    words: [
+                        MASK_SETTING | set as u32 | (check as u32) << 1,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                    ],
+                },
                 Op::Sprite {
                     x,
                     y,

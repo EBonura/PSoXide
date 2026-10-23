@@ -6,37 +6,36 @@ use crate::art::{
     self, bands, cap_palette, cell_palette, clut, emblem_palette, gem_palette, Tone, ATLAS_POS,
     ATLAS_W, CAP_GLASS, HORIZON, ZENITH,
 };
+use crate::palette::{mix, WHITE};
 
-/// CLUTs per stance, in this order, then the two gem CLUTs.
-pub const CLUT_NAMES: [&str; 7] = [
-    "FRONT_CELL_LIT",
-    "FRONT_CELL_EMPTY",
-    "FRONT_CAP",
-    "BACK_CELL_LIT",
-    "BACK_CELL_EMPTY",
-    "BACK_CAP",
-    "EMBLEM",
-];
+/// Looks of a bar, dimmest first: behind, halfway (while it moves), in front.
+pub const LOOKS: usize = 3;
 
-fn stance_colours() -> [(Tone, Tone, [u8; 3], [u8; 3]); 2] {
-    [
-        (Tone::front(HORIZON), Tone::back(HORIZON), HORIZON, ZENITH),
-        (Tone::front(ZENITH), Tone::back(ZENITH), ZENITH, HORIZON),
-    ]
+/// CLUTs per stance: for each look the lit cell, the empty cell and the bar end, then the emblem.
+pub const CLUTS_PER_STANCE: usize = LOOKS * 3 + 1;
+
+/// The tones of a stance colour, one per look.
+fn tones(base: [u8; 3]) -> [Tone; LOOKS] {
+    [Tone::back(base), Tone::mid(base), Tone::front(base)]
 }
 
-/// Every CLUT in table order.
+/// Every CLUT in table order: per stance its looks and its emblem, then the emblem halfway between
+/// the stances, then the two gem CLUTs.
 pub fn cluts() -> Vec<[u16; 16]> {
     let mut v = Vec::new();
-    for (front, back, active, other) in stance_colours() {
-        v.push(clut(&cell_palette(front, true), &[]));
-        v.push(clut(&cell_palette(front, false), &[]));
-        v.push(clut(&cap_palette(front), &CAP_GLASS));
-        v.push(clut(&cell_palette(back, true), &[]));
-        v.push(clut(&cell_palette(back, false), &[]));
-        v.push(clut(&cap_palette(back), &CAP_GLASS));
-        v.push(clut(&emblem_palette(active, other), &[]));
+    for (base, other) in [(HORIZON, ZENITH), (ZENITH, HORIZON)] {
+        for t in tones(base) {
+            v.push(clut(&cell_palette(t, true), &[]));
+            v.push(clut(&cell_palette(t, false), &[]));
+            v.push(clut(&cap_palette(t), &CAP_GLASS));
+        }
+        v.push(clut(&emblem_palette(base, other), &[]));
     }
+    let halfway = mix(HORIZON, ZENITH, 128);
+    v.push(clut(
+        &emblem_palette(halfway, mix(halfway, WHITE, 170)),
+        &[],
+    ));
     v.push(clut(&gem_palette(true), &[]));
     v.push(clut(&gem_palette(false), &[]));
     v
@@ -70,11 +69,6 @@ pub fn art_module() -> String {
     ] {
         let _ = writeln!(s, "pub const {name}: i32 = {v};");
     }
-    let _ = writeln!(
-        s,
-        "/// True when the front bar covers the whole left end of the bar behind.\npub const LCAPB_EMPTY: bool = {};",
-        art::lcapb_is_empty()
-    );
     let _ = writeln!(s, "\npub const ATLAS_HW_W: usize = {};", ATLAS_W / 4);
     let _ = writeln!(s, "pub const ATLAS_H: usize = {};", art::ATLAS_H);
     let atlas = art::atlas_halfwords();
@@ -97,24 +91,24 @@ pub fn art_module() -> String {
     }
     let table = cluts();
     let _ = writeln!(s, "\npub const CLUT_COUNT: usize = {};", table.len());
+    let per = CLUTS_PER_STANCE;
+    let _ = writeln!(s, "pub const LOOKS: usize = {LOOKS};");
+    let _ = writeln!(s, "pub const CLUTS_PER_STANCE: usize = {per};");
     let _ = writeln!(
         s,
-        "pub const CLUTS_PER_STANCE: usize = {};",
-        CLUT_NAMES.len()
+        "/// Within a look: the lit cell, the empty cell, the bar end. Looks follow each other."
     );
-    for (i, name) in CLUT_NAMES.iter().enumerate() {
-        let _ = writeln!(s, "pub const CLUT_{name}: usize = {i};");
+    for (i, name) in ["CLUT_CELL_LIT", "CLUT_CELL_EMPTY", "CLUT_CAP"]
+        .iter()
+        .enumerate()
+    {
+        let _ = writeln!(s, "pub const {name}: usize = {i};");
     }
-    let _ = writeln!(
-        s,
-        "pub const CLUT_GEM_LIT: usize = {};",
-        2 * CLUT_NAMES.len()
-    );
-    let _ = writeln!(
-        s,
-        "pub const CLUT_GEM_EMPTY: usize = {};",
-        2 * CLUT_NAMES.len() + 1
-    );
+    let _ = writeln!(s, "pub const CLUT_LOOK_STRIDE: usize = 3;");
+    let _ = writeln!(s, "pub const CLUT_EMBLEM: usize = {};", LOOKS * 3);
+    let _ = writeln!(s, "pub const CLUT_EMBLEM_HALFWAY: usize = {};", 2 * per);
+    let _ = writeln!(s, "pub const CLUT_GEM_LIT: usize = {};", 2 * per + 1);
+    let _ = writeln!(s, "pub const CLUT_GEM_EMPTY: usize = {};", 2 * per + 2);
     let _ = writeln!(
         s,
         "/// 15-bit CLUT entries, 16 per CLUT in table order, entry 0 of each transparent."
@@ -130,12 +124,12 @@ pub fn art_module() -> String {
     let _ = writeln!(s, "pub const BAND_COUNT: usize = {n};");
     let _ = writeln!(
         s,
-        "/// Plate bands by `[stance][front 0, back 1][band]`: rows `y0..y1` of the bar in this colour."
+        "/// Plate bands by `[stance][look][band]`: rows `y0..y1` of the bar in this colour."
     );
-    let _ = writeln!(s, "pub static BANDS: [[[Band; {n}]; 2]; 2] = [");
-    for (front, back, _, _) in stance_colours() {
+    let _ = writeln!(s, "pub static BANDS: [[[Band; {n}]; {LOOKS}]; 2] = [");
+    for base in [HORIZON, ZENITH] {
         let _ = writeln!(s, "    [");
-        for t in [front, back] {
+        for t in tones(base) {
             let items: Vec<String> = bands(t)
                 .iter()
                 .map(|(a, b, c, glass)| {

@@ -11,6 +11,8 @@ license = "GPL-2.0-or-later"
 hud-sprites = []
 # Draw a grid of HUD states (two stances by four levels) and nothing else, for frame review.
 hud-grid = []
+# Draw only the animated sprite HUD, swapping stance over and over, for a video.
+hud-anim = []
 
 [[bin]]
 name = "showcase-vector"

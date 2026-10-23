@@ -3,7 +3,11 @@
 //!
 //! hudview grid <out.ppm> [bg=r,g,b] [x0=n] [x1=n]
 //!     the two-stance, four-level grid of the `hud-grid` frame; x0 and x1 are the left edges of the columns
-//! hudview one <out.ppm> [horizon|zenith] [health] [back] [energy] [bg=r,g,b]
+//! hudview swap <out.ppm> [to=zenith|horizon] [bg=r,g,b] [x0=n]
+//!     one column of the swap frames 0, 2, 4 and 6 (the `HUD_SWAP` build of the grid frame)
+//! hudview bars <out.ppm> [bg=r,g,b]
+//!     every bar in every look, alone
+//! hudview one <out.ppm> [horizon|zenith] [health] [other health] [energy] [swap] [bg=r,g,b]
 
 #![allow(dead_code)]
 
@@ -14,7 +18,6 @@ use hud::{compose, HudState, Op, Stance};
 
 const BG: [u8; 3] = [16, 24, 40];
 
-/// A background given as `bg=r,g,b` on the command line.
 /// A number given as `key=n` on the command line.
 fn arg_num(args: &[String], key: &str, default: i32) -> i32 {
     args.iter()
@@ -33,10 +36,14 @@ fn background(args: &[String]) -> [u8; 3] {
         .unwrap_or(BG)
 }
 
+/// A frame as the GPU keeps it: five bits a channel and the mask bit.
 struct Frame {
     w: usize,
     h: usize,
     px: Vec<[u8; 3]>,
+    mask: Vec<bool>,
+    set_mask: bool,
+    check_mask: bool,
 }
 
 /// The 5-bit colour as the display shows it.
@@ -55,22 +62,32 @@ impl Frame {
             w,
             h,
             px: vec![shown(bg); w * h],
+            mask: vec![false; w * h],
+            set_mask: false,
+            check_mask: false,
         }
     }
 
-    fn put(&mut self, x: i32, y: i32, c: [u8; 3]) {
-        if x >= 0 && y >= 0 && (x as usize) < self.w && (y as usize) < self.h {
-            self.px[y as usize * self.w + x as usize] = c;
+    /// Draw one pixel of 5-bit colour `c5`: opaque, or averaged with the scene when `glass`.
+    fn plot(&mut self, x: i32, y: i32, c5: [u16; 3], glass: bool, stp: bool) {
+        if x < 0 || y < 0 || x as usize >= self.w || y as usize >= self.h {
+            return;
         }
-    }
-
-    /// Average the scene with a 5-bit colour, the GPU's semi-transparency mode 0.
-    fn blend(&mut self, x: i32, y: i32, f5: [u16; 3]) {
-        if x >= 0 && y >= 0 && (x as usize) < self.w && (y as usize) < self.h {
-            let p = &mut self.px[y as usize * self.w + x as usize];
-            for (c, f) in p.iter_mut().zip(f5) {
-                *c = expand(((*c as u16 >> 3) + f) >> 1);
-            }
+        let i = y as usize * self.w + x as usize;
+        if self.check_mask && self.mask[i] {
+            return;
+        }
+        for (c, f) in self.px[i].iter_mut().zip(c5) {
+            *c = if glass {
+                // The GPU's semi-transparency mode 0: half the scene and half the colour.
+                expand(((*c as u16 >> 3) + f) >> 1)
+            } else {
+                expand(f)
+            };
+        }
+        // A translucent texel keeps its own bit 15 in the frame, which is the mask bit.
+        if self.set_mask || stp {
+            self.mask[i] = true;
         }
     }
 
@@ -84,13 +101,10 @@ impl Frame {
                 rgb,
                 glass,
             } => {
+                let c5 = rgb.map(|v| (v >> 3) as u16);
                 for yy in y..y + h {
                     for xx in x..x + w {
-                        if glass {
-                            self.blend(xx, yy, rgb.map(|v| (v >> 3) as u16));
-                        } else {
-                            self.put(xx, yy, shown(rgb));
-                        }
+                        self.plot(xx, yy, c5, glass, false);
                     }
                 }
             }
@@ -111,13 +125,14 @@ impl Frame {
                             continue;
                         }
                         let c5 = [entry & 31, (entry >> 5) & 31, (entry >> 10) & 31];
-                        if glass && entry & 0x8000 != 0 {
-                            self.blend(x + tx as i32, y + ty as i32, c5);
-                        } else {
-                            self.put(x + tx as i32, y + ty as i32, c5.map(expand));
-                        }
+                        let translucent = glass && entry & 0x8000 != 0;
+                        self.plot(x + tx as i32, y + ty as i32, c5, translucent, translucent);
                     }
                 }
+            }
+            Op::Mask { set, check } => {
+                self.set_mask = set;
+                self.check_mask = check;
             }
         }
     }
@@ -131,10 +146,33 @@ impl Frame {
     }
 }
 
+/// The state of the HUD at `level` of 10 in the `hud-grid` frame: the active stance at `level`,
+/// the other one at 4, the gems at `level`.
+fn level_state(stance: Stance, level: u8) -> HudState {
+    let mut health = [4, 4];
+    health[stance.index()] = level;
+    HudState {
+        stance,
+        health,
+        energy: [level, level],
+        swap: 0,
+    }
+}
+
+/// The state of the `HUD_SWAP` frame: a swap to `stance` at frame `swap`.
+fn swap_state(stance: Stance, swap: u8) -> HudState {
+    HudState {
+        stance,
+        health: [7, 5],
+        energy: [8, 3],
+        swap,
+    }
+}
+
 fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
     let (Some(mode), Some(path)) = (a.first(), a.get(1)) else {
-        eprintln!("usage: hudview grid|one <out.ppm> [stance health back energy]");
+        eprintln!("usage: hudview grid|swap|one <out.ppm> [options]");
         std::process::exit(2);
     };
     match mode.as_str() {
@@ -144,14 +182,43 @@ fn main() {
             let cols = [arg_num(&a, "x0", 0), arg_num(&a, "x1", hud::CANVAS_W)];
             for (col, stance) in [Stance::Horizon, Stance::Zenith].into_iter().enumerate() {
                 for (row, level) in [10u8, 6, 3, 0].into_iter().enumerate() {
-                    let state = HudState {
-                        stance,
-                        health: level,
-                        back_health: 4,
-                        energy: level,
-                    };
+                    let state = level_state(stance, level);
                     compose((cols[col], 8 + 40 * row as i32), &state, &mut |op| f.op(op));
                 }
+            }
+            f.write(path);
+        }
+        "swap" => {
+            let mut f = Frame::new(320, 240, background(&a));
+            let stance = if a.iter().any(|s| s == "to=horizon") {
+                Stance::Horizon
+            } else {
+                Stance::Zenith
+            };
+            let x0 = arg_num(&a, "x0", 0);
+            for (row, swap) in [0u8, 2, 4, 6].into_iter().enumerate() {
+                let state = swap_state(stance, swap);
+                compose((x0, 8 + 40 * row as i32), &state, &mut |op| f.op(op));
+            }
+            f.write(path);
+        }
+        "bars" => {
+            // Every bar in every look, on its own: each is a complete object.
+            let mut f = Frame::new(176, 150, background(&a));
+            for (row, (stance, look)) in [
+                (Stance::Horizon, 2),
+                (Stance::Horizon, 1),
+                (Stance::Horizon, 0),
+                (Stance::Zenith, 2),
+                (Stance::Zenith, 1),
+                (Stance::Zenith, 0),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                hud::bar_alone((8, 4 + 24 * row as i32), stance, look, 7, &mut |op| {
+                    f.op(op)
+                });
             }
             f.write(path);
         }
@@ -162,59 +229,104 @@ fn main() {
             } else {
                 Stance::Horizon
             };
+            let mut health = [num(4, 4); 2];
+            health[stance.index()] = num(3, 7);
             let state = HudState {
                 stance,
-                health: num(3, 7),
-                back_health: num(4, 4),
-                energy: num(5, 6),
+                health,
+                energy: [num(5, 6); 2],
+                swap: num(6, 0),
             };
-            let mut f = Frame::new(160, 40, background(&a));
+            let mut f = Frame::new(hud::CANVAS_W as usize + 8, 48, background(&a));
             compose((0, 4), &state, &mut |op| f.op(op));
             f.write(path);
         }
         _ => std::process::exit(2),
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::hud::{
-        compose, HudState, Op, Stance, ATLAS_H, ATLAS_HW_W, CANVAS_H, CANVAS_W, MAX_OPS,
+        compose, HudState, Op, Stance, ATLAS_H, ATLAS_HW_W, CANVAS_H, CANVAS_W, MAX_OPS, SWAP_BOW,
+        SWAP_FRAMES,
     };
 
-    /// Every state fits the buffers, and paints inside the canvas and the atlas.
+    /// Every state, including every frame of a swap, fits the buffers, and paints inside the
+    /// canvas (give or take the bow of a swap) and the atlas.
     #[test]
     fn every_state_stays_inside_its_bounds() {
         for stance in [Stance::Horizon, Stance::Zenith] {
-            for health in 0..=10u8 {
-                for back_health in [0u8, 4, 10] {
+            for swap in 0..SWAP_FRAMES {
+                for health in [0u8, 4, 10] {
                     for energy in [0u8, 3, 10] {
                         let state = HudState {
                             stance,
-                            health,
-                            back_health,
-                            energy,
+                            health: [health, 10 - health],
+                            energy: [energy, 10 - energy],
+                            swap,
                         };
                         let mut n = 0;
                         compose((0, 0), &state, &mut |op| {
                             n += 1;
                             match op {
                                 Op::Rect { x, y, w, h, .. } => {
-                                    assert!(x >= 0 && y >= 0 && w > 0 && h > 0);
-                                    assert!(x + w <= CANVAS_W && y + h <= CANVAS_H);
+                                    assert!(x >= -SWAP_BOW && y >= 0 && w > 0 && h > 0);
+                                    assert!(x + w <= CANVAS_W + SWAP_BOW && y + h <= CANVAS_H);
                                 }
                                 Op::Sprite { x, y, src, .. } => {
-                                    assert!(x >= 0 && y >= 0);
-                                    assert!(x + src.w as i32 <= CANVAS_W);
+                                    assert!(x >= -SWAP_BOW && y >= 0);
+                                    assert!(x + src.w as i32 <= CANVAS_W + SWAP_BOW);
                                     assert!(y + src.h as i32 <= CANVAS_H);
                                     assert!(src.u as usize + src.w as usize <= ATLAS_HW_W * 4);
                                     assert!(src.v as usize + src.h as usize <= ATLAS_H);
                                 }
+                                Op::Mask { .. } => {}
                             }
                         });
                         assert!(n <= MAX_OPS, "{n} ops, room for {MAX_OPS}");
                     }
                 }
             }
+        }
+    }
+
+    /// Every frame of a swap looks different from the one before it and from the rest state it
+    /// ends in, in both directions: no wasted frames.
+    #[test]
+    fn swap_frames_all_differ() {
+        for stance in [Stance::Horizon, Stance::Zenith] {
+            let frames: Vec<Vec<[u8; 3]>> = (1..=super::hud::SWAP_FRAMES)
+                .map(|swap| {
+                    let mut f = super::Frame::new(176, 48, super::BG);
+                    super::compose((0, 4), &super::swap_state(stance, swap), &mut |op| f.op(op));
+                    f.px
+                })
+                .collect();
+            for pair in frames.windows(2) {
+                assert!(pair[0] != pair[1]);
+            }
+        }
+    }
+
+    /// Mask changes come in the same order every time and end with the mask off, so the GPU is left
+    /// as it was found.
+    #[test]
+    fn mask_is_left_off() {
+        for swap in 0..SWAP_FRAMES {
+            let state = HudState {
+                stance: Stance::Zenith,
+                health: [5, 5],
+                energy: [5, 5],
+                swap,
+            };
+            let mut last = None;
+            compose((0, 0), &state, &mut |op| {
+                if let Op::Mask { set, check } = op {
+                    last = Some((set, check));
+                }
+            });
+            assert_eq!(last, Some((false, false)));
         }
     }
 }

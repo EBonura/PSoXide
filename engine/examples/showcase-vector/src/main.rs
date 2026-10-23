@@ -57,6 +57,13 @@ const GRID: bool = cfg!(feature = "hud-grid");
 /// `hud-sprites` build: the sprite HUD stands in for the vector one.
 const SPRITES: bool = cfg!(feature = "hud-sprites");
 
+/// `hud-anim` build: only the animated sprite HUD, one HUD on the screen, swapping stance over and over.
+const ANIM: bool = cfg!(feature = "hud-anim");
+
+/// `HUD_SWAP` at build time: 0, or the stance a swap grid swaps to (1 Zenith, 2 Horizon). The grid
+/// then shows one column of swap frames 0, 2, 4 and 6 instead of the fill levels.
+const SWAP_GRID: i32 = env_px(option_env!("HUD_SWAP"), 0);
+
 const fn env_px(s: Option<&str>, default: i32) -> i32 {
     match s {
         Some(s) => {
@@ -237,27 +244,26 @@ impl Scene for Demo {
                 record("c_link", cache.len() as u32, ticks().wrapping_sub(t));
             }
         }
+        let mut walk = if frame % 64 != 63 {
+            "walk_hud"
+        } else {
+            "walk_off"
+        };
         #[cfg(feature = "hud-sprites")]
-        self.sprite_hud(&mut ot, frame);
+        {
+            walk = self.sprite_hud(&mut ot, frame);
+        }
         let t = ticks();
         ot.submit(ctx.gpu_dma());
         let dt = ticks().wrapping_sub(t);
-        record(
-            if frame % 64 != 63 {
-                "walk_hud"
-            } else {
-                "walk_off"
-            },
-            0,
-            dt,
-        );
+        record(walk, 0, dt);
     }
 
     fn render_overlay(&mut self, ctx: &mut Ctx) {
         let gpu = ctx.gpu();
         // SAFETY: single-threaded guest; SCRATCH is only used from here.
         let scratch = unsafe { &mut SCRATCH };
-        if GRID {
+        if GRID || ANIM {
             if !SPRITES {
                 self.draw_grid(gpu, scratch);
             }
@@ -507,7 +513,7 @@ impl Demo {
     /// HUD whose state flips every 48 frames, with the build and link cycles recorded like the vector
     /// HUD's.
     #[cfg(feature = "hud-sprites")]
-    fn sprite_hud(&mut self, ot: &mut OtFrame<'_, 16>, frame: u32) {
+    fn sprite_hud(&mut self, ot: &mut OtFrame<'_, 16>, frame: u32) -> &'static str {
         use hud_packets::HudVram;
         use hud_sprites::{HudState as SpriteState, Stance};
         // SAFETY: single-threaded guest; the packets are only touched here, and `submit` waits for the
@@ -517,17 +523,36 @@ impl Demo {
             if frame == 0 {
                 for (i, hud) in huds.iter_mut().enumerate() {
                     let (col, row) = (i / 4, i % 4);
-                    let level = [10u8, 6, 3, 0][row];
-                    let stance = if col == 0 {
-                        Stance::Horizon
+                    let state = if SWAP_GRID != 0 {
+                        if col != 0 {
+                            hud.clear();
+                            continue;
+                        }
+                        SpriteState {
+                            stance: if SWAP_GRID == 1 {
+                                Stance::Zenith
+                            } else {
+                                Stance::Horizon
+                            },
+                            health: [7, 5],
+                            energy: [8, 3],
+                            swap: [0u8, 2, 4, 6][row],
+                        }
                     } else {
-                        Stance::Zenith
-                    };
-                    let state = SpriteState {
-                        stance,
-                        health: level,
-                        back_health: 4,
-                        energy: level,
+                        let level = [10u8, 6, 3, 0][row];
+                        let stance = if col == 0 {
+                            Stance::Horizon
+                        } else {
+                            Stance::Zenith
+                        };
+                        let mut health = [4, 4];
+                        health[col] = level;
+                        SpriteState {
+                            stance,
+                            health,
+                            energy: [level, level],
+                            swap: 0,
+                        }
                     };
                     let origin = (GRID_X[col], 8 + 40 * row as i32);
                     let t = ticks();
@@ -543,37 +568,54 @@ impl Demo {
                     unsafe { ot.add_raw(8, ptr, words) };
                 }
             }
-            return;
+            return "walk_hud";
         }
-        let state = if (frame / 48) % 2 == 0 {
-            SpriteState {
-                stance: Stance::Zenith,
-                health: 9,
-                back_health: 6,
-                energy: 4,
-            }
-        } else {
-            SpriteState {
-                stance: Stance::Horizon,
-                health: 6,
-                back_health: 9,
-                energy: 7,
-            }
+        // A timeline of 64 game frames (the game runs at 30 frames a second, two screen frames each),
+        // over and over: at rest on Horizon, a swap to Zenith, at rest on Zenith, a swap back. Frame
+        // 63 links nothing, so that the walk without the HUD can be timed.
+        let frame = frame / 2;
+        let t = frame % 64;
+        let (stance, swap) = match t {
+            24..=30 => (Stance::Zenith, (t - 23) as u8),
+            31..=55 => (Stance::Zenith, 0),
+            56..=62 => (Stance::Horizon, (t - 55) as u8),
+            _ => (Stance::Horizon, 0),
         };
+        let state = SpriteState {
+            stance,
+            health: [7, 5],
+            energy: [8, 3],
+            swap,
+        };
+        let origin = if ANIM { (8, 100) } else { (6, 160) };
         let hud = &mut huds[0];
         if self.sprite_state != Some(state) {
-            let t = ticks();
-            hud.build(&HudVram::SHOWCASE, (6, 160), &state);
+            let t0 = ticks();
+            hud.build(&HudVram::SHOWCASE, origin, &state);
             self.sprite_state = Some(state);
-            record("c_build", hud.len() as u32, ticks().wrapping_sub(t));
+            if swap == 0 {
+                record("c_build", hud.len() as u32, ticks().wrapping_sub(t0));
+            } else if swap == 4 {
+                record("sw_build", hud.len() as u32, ticks().wrapping_sub(t0));
+            }
         }
-        if frame % 64 != 63 {
-            let t = ticks();
+        if t != 63 {
+            let t0 = ticks();
             for (ptr, words) in hud.links() {
                 // SAFETY: a `static`, unmodified until the walk ends.
                 unsafe { ot.add_raw(8, ptr, words) };
             }
-            record("c_link", hud.len() as u32, ticks().wrapping_sub(t));
+            if swap == 0 {
+                record("c_link", hud.len() as u32, ticks().wrapping_sub(t0));
+            } else if swap == 4 {
+                record("sw_link", hud.len() as u32, ticks().wrapping_sub(t0));
+            }
+        }
+        match (t, swap) {
+            (63, _) => "walk_off",
+            (_, 4) => "walk_sw",
+            (_, 0) => "walk_hud",
+            _ => "walk_mid",
         }
     }
 

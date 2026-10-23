@@ -70,7 +70,12 @@ fn compare(a: &[String]) -> Result<bool, String> {
         }
     }
     println!("{} of {} pixels differ", diff.len(), fa.w * fa.h);
-    for &(x, y) in diff.iter().take(12) {
+    let shown = if a.iter().any(|s| s == "--all") {
+        usize::MAX
+    } else {
+        12
+    };
+    for &(x, y) in diff.iter().take(shown) {
         println!("  ({x},{y}): {:?} against {:?}", fa.at(x, y), fb.at(x, y));
     }
     if let Some(i) = a.iter().position(|s| s == "--mark") {
