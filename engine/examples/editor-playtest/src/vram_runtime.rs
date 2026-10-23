@@ -505,8 +505,9 @@ const CARD_LEAD_FADES: i32 = 2;
 #[cfg(feature = "cd-stream-bench")]
 pub(super) fn step_cards(eye: [i32; 3]) {
     use crate::generated::{
-        GRID_CARDS, GRID_CARD_FADE, GRID_CARD_FAR, GRID_CARD_NEAR, GRID_CARD_VIEW_STRIDE,
-        GRID_ROOM_CARD_SECTORS, WORLD_PACK_START_LBA,
+        GRID_CARDS, GRID_CARD_FADE, GRID_CARD_FAR, GRID_CARD_COPIES, GRID_CARD_NEAR,
+        GRID_CARD_TILE_CENTRES, GRID_CARD_VIEW_STRIDE, GRID_ROOM_CARD_PLACE, GRID_ROOM_CARD_SECTORS,
+        GRID_ROOM_CARD_TILE, WORLD_PACK_START_LBA,
     };
     use psx_game_runtime::card_stream::CardInput;
     if GRID_CARDS.is_empty() || card_atlas().is_none() {
@@ -528,6 +529,10 @@ pub(super) fn step_cards(eye: [i32; 3]) {
         far: GRID_CARD_FAR + GRID_CARD_FAR / 12,
         near: GRID_CARD_NEAR,
         lead: CARD_LEAD_FADES * GRID_CARD_FADE,
+        centres: GRID_CARD_TILE_CENTRES,
+        copies: GRID_CARD_COPIES,
+        room_tile: GRID_ROOM_CARD_TILE,
+        room_place: GRID_ROOM_CARD_PLACE,
     };
     // SAFETY: single-threaded guest; the stream and the window are touched
     // only here, in `emit_card_uploads` and in `release_gameplay_vram`.

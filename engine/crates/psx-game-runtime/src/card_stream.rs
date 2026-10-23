@@ -223,6 +223,17 @@ pub struct CardInput<'a> {
     /// How much better a room the eye is walking straight towards ranks
     /// than one beside it, and one behind ranks worse, in runtime units.
     pub lead: i32,
+    /// Where each tile of rooms stands; the eye is in the tile whose centre is
+    /// nearest. Empty for a level without copies.
+    pub centres: &'a [[i16; 2]],
+    /// Per pair of tiles (`X * tiles + Y`): the sector (low 24 bits) and
+    /// views (top 8) of the copy of tile `Y`'s pictures that lies near tile
+    /// `X`, or 0.
+    pub copies: &'a [u32],
+    /// Per room, its tile and its place among the tile's rooms.
+    pub room_tile: &'a [u8],
+    /// Per room, its place among the rooms of its tile.
+    pub room_place: &'a [u8],
 }
 
 /// A landed picture ready for the GPU.
@@ -266,6 +277,8 @@ pub struct CardStream<K> {
     candidates: [u16; MAX_CANDIDATES],
     candidate_count: usize,
     candidates_eye: Option<[i32; 2]>,
+    /// The tile the eye is in (`usize::MAX` before it is known).
+    region: usize,
     /// Sector the drive ends at once the reads queued so far are done (0
     /// before the first), relative to the pictures' base.
     tail: u32,
@@ -303,6 +316,7 @@ impl<K: Copy> CardStream<K> {
             candidates: [0; MAX_CANDIDATES],
             candidate_count: 0,
             candidates_eye: None,
+            region: usize::MAX,
             tail: 0,
         }
     }
@@ -383,6 +397,52 @@ impl<K: Copy> CardStream<K> {
         }
     }
 
+    /// The tile the eye is in: the one whose centre is nearest, kept until
+    /// another is nearer by more than [`DRAW_MARGIN`].
+    fn update_region(&mut self, input: &CardInput<'_>) {
+        let [ex, _, ez] = input.eye;
+        let distance = |tile: usize| {
+            let c = input.centres[tile];
+            plan_distance(ex - i32::from(c[0]), ez - i32::from(c[1]))
+        };
+        let Some(best) = (0..input.centres.len()).min_by_key(|&tile| distance(tile)) else {
+            self.region = usize::MAX;
+            return;
+        };
+        if self.region >= input.centres.len()
+            || distance(best) + DRAW_MARGIN < distance(self.region)
+        {
+            self.region = best;
+        }
+    }
+
+    /// The sector of `room`'s picture of `view`: from the copy near the eye's
+    /// tile when it holds that view, else from the full set.
+    fn picture_sector(&self, room: usize, view: u8, input: &CardInput<'_>) -> u32 {
+        let first = input.sectors.get(room).copied().unwrap_or(0);
+        if first == 0 {
+            return 0;
+        }
+        let tiles = input.centres.len();
+        if self.region < tiles {
+            if let (Some(&tile), Some(&place)) =
+                (input.room_tile.get(room), input.room_place.get(room))
+            {
+                let copy = input
+                    .copies
+                    .get(self.region * tiles + usize::from(tile))
+                    .copied()
+                    .unwrap_or(0);
+                let mask = (copy >> 24) as u8;
+                if mask & (1 << view) != 0 {
+                    let before = (mask & ((1u8 << view) - 1)).count_ones();
+                    return (copy & 0x00ff_ffff) + before * input.stride + u32::from(place);
+                }
+            }
+        }
+        first + u32::from(view) * input.stride
+    }
+
     /// Follow the direction the eye walks in.
     fn update_heading(&mut self, eye: [i32; 3]) {
         let [ex, _, ez] = eye;
@@ -418,6 +478,7 @@ impl<K: Copy> CardStream<K> {
     fn pass(&mut self, input: &CardInput<'_>) {
         let [ex, _, ez] = input.eye;
         self.update_heading(input.eye);
+        self.update_region(input);
         // Slots whose rooms went out of range, and slots' views and ranks.
         for slot in 0..SLOTS {
             let held = self.slots[slot];
@@ -657,12 +718,8 @@ impl<K: Copy> CardStream<K> {
                 if held.pending {
                     continue;
                 }
-                let first = input
-                    .sectors
-                    .get(usize::from(held.room))
-                    .copied()
-                    .unwrap_or(0);
-                if first == 0 {
+                let sector = self.picture_sector(usize::from(held.room), held.want, input);
+                if sector == 0 {
                     // A room without pictures: never asked again.
                     self.slots[slot].want = NO_VIEW;
                     continue;
@@ -679,12 +736,7 @@ impl<K: Copy> CardStream<K> {
                 };
                 let key = tier * CLASS_GAP + held.rank % CLASS_GAP;
                 let waited = self.ticks.wrapping_sub(self.slots[slot].since);
-                wanted[count] = (
-                    key,
-                    first + u32::from(held.want) * input.stride,
-                    slot as u8,
-                    waited,
-                );
+                wanted[count] = (key, sector, slot as u8, waited);
                 count += 1;
             }
             let wanted = &wanted[..count];
@@ -1055,6 +1107,10 @@ mod tests {
             far: 300,
             near: 0,
             lead: 0,
+            centres: &[],
+            copies: &[],
+            room_tile: &[],
+            room_place: &[],
         }
     }
 
@@ -1276,6 +1332,48 @@ mod tests {
         let seen = watch(&mut stream, &mut disc, &mut window, &input, 3, 400);
         assert!(seen.iter().all(|entries| entries.len() == 1), "{seen:?}");
         assert_eq!(seen.last().unwrap(), &[(0, false)]);
+    }
+
+    #[test]
+    fn a_picture_is_read_from_the_copy_near_the_eye_when_it_holds_the_view() {
+        // Twelve rooms on the x axis in two tiles of six; the eye in tile 0.
+        let rows = rows(12);
+        let table = CardTable::new(&rows);
+        let sectors: Vec<u32> = (0..12).map(|r| 8 * r + 1).collect();
+        let centres = [[250, 0], [850, 0]];
+        let room_tile: Vec<u8> = (0..12).map(|r| (r / 6) as u8).collect();
+        let room_place: Vec<u8> = (0..12).map(|r| (r % 6) as u8).collect();
+        // Tile 1's pictures of view 4 sit at sector 150 near tile 0 (mask
+        // 0b1_0000, one view); tile 0 holds none near itself.
+        let copies = [0, 150 | (0b1_0000 << 24), 0, 0];
+        let mut disc = Disc::new(8 * 12 + 300);
+        let mut window = std::vec![0u32; CARD_WINDOW_WORDS];
+        let mut stream = CardStream::<usize>::new();
+        let mut input = input(&table, &sectors, [-10, 0, 0]);
+        input.enter = 1200;
+        input.leave = 1300;
+        input.far = 1200;
+        input.stride = 8;
+        input.centres = &centres;
+        input.copies = &copies;
+        input.room_tile = &room_tile;
+        input.room_place = &room_place;
+        run(&mut stream, &mut disc, &mut window, &input, 80);
+        // Room 7 (tile 1, place 1) wants view 4: its picture is at
+        // 150 + 1; the copy holds nothing of view 4 for the rooms of tile 0.
+        assert!(
+            disc.reads
+                .iter()
+                .any(|&(lba, n)| lba <= 10 + 151 && 10 + 151 < lba + n),
+            "{:?}",
+            disc.reads
+        );
+        // Room 2 (tile 0) comes from the full set: sector 8 * 2 + 1 + 4 * 8.
+        assert!(disc
+            .reads
+            .iter()
+            .any(|&(lba, n)| lba <= 10 + 49 && 10 + 49 < lba + n));
+        assert_eq!(stream.live().iter().filter(|s| s.view == 4).count(), 12);
     }
 
     #[test]

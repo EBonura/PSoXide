@@ -45,6 +45,13 @@ pub const GRID_CARDS: &[[i16; 6]] = &[];
 pub const GRID_ROOM_CARD_SECTORS: &[u32] = &[];
 /// Sectors from a room's picture of one view to its picture of the next.
 pub const GRID_CARD_VIEW_STRIDE: u32 = 0;
+/// Where each tile of rooms stands, and for each pair of tiles (X * tiles + Y) the sector
+/// (low 24 bits) and views (top 8) of the copy of Y's pictures that lies near X; each room's
+/// tile and its place among the tile's rooms. Empty without copies.
+pub const GRID_CARD_TILE_CENTRES: &[[i16; 2]] = &[];
+pub const GRID_CARD_COPIES: &[u32] = &[];
+pub const GRID_ROOM_CARD_TILE: &[u8] = &[];
+pub const GRID_ROOM_CARD_PLACE: &[u8] = &[];
 /// Cards show out to this many runtime units from the camera, fading in over the
 /// last `GRID_CARD_FADE`; the colours behind them (below the horizon, at it, at the
 /// top of the screen).
