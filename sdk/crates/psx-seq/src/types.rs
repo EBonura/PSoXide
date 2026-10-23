@@ -515,20 +515,6 @@ pub(crate) struct Player {
 }
 
 impl Player {
-    /// A player at its start values.
-    ///
-    /// A function and not a `const`: a constant would put every channel's
-    /// start values in the image, once per channel (the channel table is
-    /// most of this type), where a loop writes them from one copy.
-    pub fn init() -> Self {
-        let mut slot = core::mem::MaybeUninit::<Self>::uninit();
-        // SAFETY: `init_at` writes every field of the player it is given.
-        unsafe {
-            Self::init_at(slot.as_mut_ptr());
-            slot.assume_init()
-        }
-    }
-
     /// Write a player at its start values into `slot`, field by field, so the
     /// seven kilobytes of it are never built on the stack first.
     ///
