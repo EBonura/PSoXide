@@ -70,6 +70,30 @@ impl Frame {
         }
     }
 
+    /// A frame read from a binary PPM (the emulator's display dump), as the display shows it.
+    fn from_ppm(path: &str) -> Self {
+        let data = std::fs::read(path).expect("read ppm");
+        let mut fields = Vec::new();
+        let mut at = 0;
+        while fields.len() < 4 {
+            while data[at].is_ascii_whitespace() {
+                at += 1;
+            }
+            let start = at;
+            while !data[at].is_ascii_whitespace() {
+                at += 1;
+            }
+            fields.push(String::from_utf8_lossy(&data[start..at]).into_owned());
+        }
+        at += 1;
+        let (w, h): (usize, usize) = (fields[1].parse().unwrap(), fields[2].parse().unwrap());
+        let mut f = Self::new(w, h, [0, 0, 0]);
+        for (p, c) in f.px.iter_mut().zip(data[at..].chunks_exact(3)) {
+            *p = shown([c[0], c[1], c[2]]);
+        }
+        f
+    }
+
     /// Draw one pixel of 5-bit colour `c5`: opaque, or averaged with the scene when `glass`.
     fn plot(&mut self, x: i32, y: i32, c5: [u16; 3], glass: bool, stp: bool) {
         if x < 0 || y < 0 || x as usize >= self.w || y as usize >= self.h {
@@ -202,6 +226,35 @@ fn main() {
                 let state = swap_state(stance, swap);
                 compose((x0, 8 + 40 * row as i32), &state, &mut |op| f.op(op));
             }
+            f.write(path);
+        }
+        "over" => {
+            // The HUD over a frame of the game: `hudview over <out> <game.ppm> [x=n] [y=n] [stance=zenith]
+            // [health=n] [other=n] [energy=n] [swap=n]`.
+            let Some(game) = a.get(2) else {
+                eprintln!("usage: hudview over <out.ppm> <game.ppm> [options]");
+                std::process::exit(2);
+            };
+            let mut f = Frame::from_ppm(game);
+            let stance = if a.iter().any(|s| s == "stance=zenith") {
+                Stance::Zenith
+            } else {
+                Stance::Horizon
+            };
+            let mut health = [arg_num(&a, "other", 4) as u8; 2];
+            health[stance.index()] = arg_num(&a, "health", 7) as u8;
+            let energy = arg_num(&a, "energy", 6) as u8;
+            let state = HudState {
+                stance,
+                health,
+                energy: [energy; 2],
+                swap: arg_num(&a, "swap", 0) as u8,
+            };
+            compose(
+                (arg_num(&a, "x", 6), arg_num(&a, "y", 4)),
+                &state,
+                &mut |op| f.op(op),
+            );
             f.write(path);
         }
         "swapall" => {

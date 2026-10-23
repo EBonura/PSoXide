@@ -3,8 +3,8 @@
 use std::fmt::Write as _;
 
 use crate::art::{
-    self, bands, cap_palette, cell_palette, clut, emblem_palette, gem_palette, geos, pack, Tone,
-    ATLAS_W, CAP_GLASS, HORIZON, ZENITH,
+    self, bands, cap_glass, cap_palette, cell_palette, clut, emblem_palette, gem_palette, geos,
+    horizon, pack, zenith, Tone, ATLAS_W,
 };
 use crate::palette::{mix, WHITE};
 
@@ -15,16 +15,16 @@ pub const CLUTS_PER_STANCE: usize = art::SIZES * 3 + 1;
 /// the stances, then the two gem CLUTs.
 pub fn cluts() -> Vec<[u16; 16]> {
     let mut v = Vec::new();
-    for (base, other) in [(HORIZON, ZENITH), (ZENITH, HORIZON)] {
+    for (base, other) in [(horizon(), zenith()), (zenith(), horizon())] {
         for g in geos() {
             let t = Tone::at_depth(base, g.depth);
             v.push(clut(&cell_palette(t, true), &[]));
             v.push(clut(&cell_palette(t, false), &[]));
-            v.push(clut(&cap_palette(t), &CAP_GLASS));
+            v.push(clut(&cap_palette(t), &cap_glass()));
         }
         v.push(clut(&emblem_palette(base, other), &[]));
     }
-    let halfway = mix(HORIZON, ZENITH, 128);
+    let halfway = mix(horizon(), zenith(), 128);
     v.push(clut(
         &emblem_palette(halfway, mix(halfway, WHITE, 170)),
         &[],
@@ -56,7 +56,7 @@ pub fn art_module() -> String {
     let canvas_w = art::LCAP_X + g[0].width();
     let band_max = g
         .iter()
-        .map(|g| bands(g, Tone::at_depth(HORIZON, 0)).len())
+        .map(|g| bands(g, Tone::at_depth(horizon(), 0)).len())
         .max()
         .unwrap_or(0);
     for (name, v) in [
@@ -103,7 +103,7 @@ pub fn art_module() -> String {
     );
     let _ = writeln!(s, "pub static GEO: [SizeGeo; SIZES] = [");
     for (i, geo) in g.iter().enumerate() {
-        let band_count = bands(geo, Tone::at_depth(HORIZON, 0)).len();
+        let band_count = bands(geo, Tone::at_depth(horizon(), 0)).len();
         let _ = writeln!(
             s,
             "    SizeGeo {{ pitch: {}, cell_x0: {}, cell_row: {}, bar_h: {}, bar_x0: {}, cap_x: {}, \
@@ -154,7 +154,7 @@ pub fn art_module() -> String {
         "/// Plate bands by `[stance][size][band]`: rows `y0..y1` of the bar in this colour. A size uses\n/// the first `band_count` entries."
     );
     let _ = writeln!(s, "pub static BANDS: [[[Band; BAND_MAX]; SIZES]; 2] = [");
-    for base in [HORIZON, ZENITH] {
+    for base in [horizon(), zenith()] {
         let _ = writeln!(s, "    [");
         for geo in &g {
             let t = Tone::at_depth(base, geo.depth);

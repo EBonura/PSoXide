@@ -11,8 +11,83 @@
 
 use crate::palette::{desaturate, mix, scale, to_555, Rgb, WHITE};
 
-pub const HORIZON: Rgb = [234, 82, 48];
-pub const ZENITH: Rgb = [76, 202, 181];
+/// The look of the HUD: the same layout and sprites drawn with different colours and details.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Style {
+    /// Round 6: saturated colours, a dark outline, glossy cells.
+    Classic,
+    /// Worn gunmetal with a thin cold-light edge, dull ember colours, rivets.
+    Gunmetal,
+    /// Dark lacquer with one hot accent line and glowing cells.
+    Lacquer,
+    /// Etched bronze and iron: engraved double lines, patina colours, scratches.
+    Bronze,
+}
+
+/// The committed style: the one picked in round 7.
+pub const DEFAULT_STYLE: Style = Style::Gunmetal;
+
+/// The style to draw (`HUD_STYLE`: classic, gunmetal, lacquer or bronze), for trying looks without
+/// editing the code; the committed art is made with the default.
+pub fn style() -> Style {
+    match std::env::var("HUD_STYLE").as_deref() {
+        Ok("classic") => Style::Classic,
+        Ok("gunmetal") => Style::Gunmetal,
+        Ok("lacquer") => Style::Lacquer,
+        Ok("bronze") => Style::Bronze,
+        _ => DEFAULT_STYLE,
+    }
+}
+
+/// The colour of the Horizon stance in the current style.
+pub fn horizon() -> Rgb {
+    match style() {
+        Style::Classic => [234, 82, 48],
+        Style::Gunmetal => [190, 88, 62],
+        Style::Lacquer => [226, 66, 40],
+        Style::Bronze => [178, 104, 58],
+    }
+}
+
+/// The colour of the Zenith stance in the current style.
+pub fn zenith() -> Rgb {
+    match style() {
+        Style::Classic => [76, 202, 181],
+        Style::Gunmetal => [84, 160, 152],
+        Style::Lacquer => [58, 196, 180],
+        Style::Bronze => [96, 152, 126],
+    }
+}
+
+/// The metal of the plate in the current style, before the stance tints it.
+fn neutral() -> Rgb {
+    match style() {
+        Style::Classic => [0, 0, 0],
+        Style::Gunmetal => [100, 110, 122],
+        Style::Lacquer => [22, 24, 32],
+        Style::Bronze => [120, 92, 60],
+    }
+}
+
+/// How much of the stance colour the plate takes (of 256).
+fn tint() -> u32 {
+    match style() {
+        Style::Classic => 256,
+        Style::Gunmetal => 40,
+        Style::Lacquer => 24,
+        Style::Bronze => 70,
+    }
+}
+
+/// The light that catches edges, in the current style.
+fn light() -> Rgb {
+    match style() {
+        Style::Classic => WHITE,
+        Style::Gunmetal => [214, 230, 244],
+        Style::Lacquer => [255, 236, 224],
+        Style::Bronze => [244, 212, 156],
+    }
+}
 
 /// Health cells and gems per HUD.
 pub const COUNT: usize = 10;
@@ -293,8 +368,12 @@ fn cell_tones(h: usize) -> &'static [u8] {
     }
 }
 
+/// A palette index no style's palette gives a plain tone: the glint or scratch of a cell.
+const CELL_MARK: u8 = 9;
+
 /// The health cell: a parallelogram `body` pixels wide, `cell_h` rows tall, leaning over its height
-/// in two-row steps, with a bright top row, a lit left edge and a dark right edge.
+/// in two-row steps, with a bright top row, a lit left edge and a dark right edge, and the style's
+/// finish: dithered steps between tones, a glint, or scratches.
 pub fn cell(g: &Geo) -> Sprite {
     let body = g.body as usize;
     let mut s = Sprite::new(body + g.lean(), g.cell_h);
@@ -310,10 +389,68 @@ pub fn cell(g: &Geo) -> Sprite {
                     i = CELL_RIGHT;
                 }
             }
+            // Gunmetal: every other pixel of a row that starts a new tone takes the tone above, so
+            // that the step between two tones is a checkerboard.
+            if style() == Style::Gunmetal
+                && r >= 3
+                && r % 2 == 1
+                && i == tone
+                && (c + r) % 2 == 0
+                && tones[r - 1] != tone
+            {
+                i = tones[r - 1];
+            }
             s.set(c, r, i);
         }
     }
+    let mark = |s: &mut Sprite, r: usize, dx: usize| {
+        if r + 1 < g.cell_h {
+            let c = g.lean() - r / 2 + dx;
+            if dx + 1 < body {
+                s.set(c, r, CELL_MARK);
+            }
+        }
+    };
+    match style() {
+        // Lacquer: a two pixel glint high on the left.
+        Style::Lacquer => {
+            mark(&mut s, 1, 2);
+            mark(&mut s, 1, 3);
+        }
+        // Gunmetal: two specks of grime.
+        Style::Gunmetal => {
+            mark(&mut s, 2, body * 2 / 3);
+            mark(&mut s, 4, 3);
+        }
+        // Bronze: two scratches.
+        Style::Bronze => {
+            mark(&mut s, 2, body * 3 / 5);
+            mark(&mut s, 3, body * 3 / 5 + 1);
+            mark(&mut s, 4, 2);
+        }
+        _ => {}
+    }
     s
+}
+
+/// Rivet colours in the cap palette: light above, dark below.
+pub const CAP_RIVET_LIGHT: u8 = 11;
+pub const CAP_RIVET_DARK: u8 = 12;
+
+/// Gunmetal and bronze: a rivet in the dark glass of an end piece, 2 x 2 pixels, light above dark.
+/// `cols` are the columns to use; a pixel is only set where the end piece is glass there.
+fn rivet(s: &mut Sprite, g: &Geo, cols: [usize; 2]) {
+    if !matches!(style(), Style::Gunmetal | Style::Bronze) {
+        return;
+    }
+    let r0 = g.cell_row() + g.cell_h / 2 - 1;
+    for (dy, index) in [(0, CAP_RIVET_LIGHT), (1, CAP_RIVET_DARK)] {
+        for x in cols {
+            if s.get(x, r0 + dy) == row_index(Row::Recess) {
+                s.set(x, r0 + dy, index);
+            }
+        }
+    }
 }
 
 /// The cap index of a row kind.
@@ -374,6 +511,7 @@ pub fn cap(g: &Geo) -> Sprite {
             }
         }
     }
+    rivet(&mut s, g, [1, 2]);
     s
 }
 
@@ -419,6 +557,7 @@ pub fn lcap(g: &Geo) -> Sprite {
             }
         }
     }
+    rivet(&mut s, g, [END_W - 2, END_W - 1]);
     s
 }
 
@@ -429,9 +568,12 @@ const EM_RING_HI: u8 = 7;
 const EM_RING_LO: u8 = 8;
 const EM_CORE_OUT: u8 = 9;
 const EM_CORE: [u8; 4] = [10, 11, 12, 13];
+/// A bolt head (gunmetal) or the sheen across the top (lacquer).
+const EM_MARK: u8 = 14;
 
 /// The emblem: an octagon (7-pixel chamfers, all edges at 0 or 45 degrees, even size so that it
-/// mirrors exactly) with a diamond core, 24 x 24.
+/// mirrors exactly) with a diamond core, 24 x 24. Gunmetal adds four bolts, lacquer a sheen across
+/// the top and bronze a second engraved ring.
 pub fn emblem() -> Sprite {
     let mut s = Sprite::new(24, 24);
     for y in 0..24usize {
@@ -445,6 +587,12 @@ pub fn emblem() -> Sprite {
         for x in inset..24 - inset {
             let edge = x == inset || x == 23 - inset || y == 0 || y == 23;
             let ring = x == inset + 1 || x == 22 - inset || y == 1 || y == 22;
+            let groove = style() == Style::Bronze
+                && (x == inset + 3 || x == 20 - inset || y == 3 || y == 20)
+                && x > inset + 1
+                && x < 22 - inset
+                && y > 1
+                && y < 22;
             let i = if edge {
                 EM_OUT
             } else if ring {
@@ -453,6 +601,8 @@ pub fn emblem() -> Sprite {
                 } else {
                     EM_RING_LO
                 }
+            } else if groove {
+                EM_RING_LO
             } else {
                 EM_BODY[match y {
                     0..=4 => 0,
@@ -484,6 +634,28 @@ pub fn emblem() -> Sprite {
             s.set(x, y, i);
         }
     }
+    let is_body = |s: &Sprite, x: usize, y: usize| EM_BODY.contains(&s.get(x, y));
+    match style() {
+        Style::Gunmetal => {
+            for (bx, by) in [(5usize, 5usize), (17, 5), (5, 17), (17, 17)] {
+                for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                    if is_body(&s, bx + dx, by + dy) {
+                        s.set(bx + dx, by + dy, EM_MARK);
+                    }
+                }
+            }
+        }
+        Style::Lacquer => {
+            for (y, x0, x1) in [(2usize, 7usize, 16usize), (3, 9, 14)] {
+                for x in x0..=x1 {
+                    if is_body(&s, x, y) {
+                        s.set(x, y, EM_MARK);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
     s
 }
 
@@ -492,12 +664,19 @@ const GEM_OUT: u8 = 1;
 const GEM_FACET: [u8; 6] = [2, 3, 4, 5, 6, 7];
 const GEM_SPEC: u8 = 8;
 
-/// The energy gem: a hexagon with a flat top and bottom, outlined, two facets (bright above, dark
-/// below) and a two-pixel glint on the top facet, 10 x 8.
+/// The energy gem, 10 x 8: outlined, a bright facet above and a dark one below, and a glint. A
+/// hexagon in classic and gunmetal, a lozenge in lacquer and a stud with a rivet in bronze.
 pub fn gem() -> Sprite {
     let mut s = Sprite::new(10, 8);
-    const WIDTH: [usize; 8] = [4, 6, 8, 10, 10, 8, 6, 4];
-    for (y, &w) in WIDTH.iter().enumerate() {
+    const HEX: [usize; 8] = [4, 6, 8, 10, 10, 8, 6, 4];
+    const LOZENGE: [usize; 8] = [2, 4, 6, 8, 8, 6, 4, 2];
+    const STUD: [usize; 8] = [6, 8, 10, 10, 10, 10, 8, 6];
+    let width = match style() {
+        Style::Lacquer => LOZENGE,
+        Style::Bronze => STUD,
+        _ => HEX,
+    };
+    for (y, &w) in width.iter().enumerate() {
         let x0 = (10 - w) / 2;
         for x in x0..x0 + w {
             let edge = x == x0 || x == x0 + w - 1 || y == 0 || y == 7;
@@ -505,8 +684,14 @@ pub fn gem() -> Sprite {
             s.set(x, y, i);
         }
     }
-    s.set(4, 1, GEM_SPEC);
-    s.set(5, 1, GEM_SPEC);
+    if style() == Style::Bronze {
+        for (x, y) in [(4, 3), (5, 3), (4, 4), (5, 4)] {
+            s.set(x, y, GEM_SPEC);
+        }
+    } else {
+        s.set(4, 1, GEM_SPEC);
+        s.set(5, 1, GEM_SPEC);
+    }
     s
 }
 
@@ -519,31 +704,73 @@ fn pal(entries: &[(u8, Rgb)]) -> Palette {
     }
     p
 }
-fn row_colour(k: Row, c: Rgb) -> Rgb {
-    match k {
-        Row::Out => mix(c, WHITE, 90),
-        Row::Hi => scale(c, 250),
-        Row::Mid => scale(c, 205),
+fn row_colour(k: Row, t: Tone) -> Rgb {
+    let c = t.base;
+    let glass = |k: Row| match k {
         Row::WellTop => scale(c, 7),
         Row::Recess => scale(c, 15),
-        Row::WellLow => scale(c, 30),
-        Row::Lip => scale(c, 170),
-        Row::Shade => scale(c, 120),
-        Row::Foot => scale(c, 66),
-        // Never pure black: a black CLUT entry would read as transparent or as glass.
-        Row::Rim | Row::Drop => scale(c, 20).map(|v| v.max(8)),
+        _ => scale(c, 30),
+    };
+    if style() == Style::Classic {
+        return match k {
+            Row::Out => mix(c, WHITE, 90),
+            Row::Hi => scale(c, 250),
+            Row::Mid => scale(c, 205),
+            Row::WellTop | Row::Recess | Row::WellLow => glass(k),
+            Row::Lip => scale(c, 170),
+            Row::Shade => scale(c, 120),
+            Row::Foot => scale(c, 66),
+            // Never pure black: a black CLUT entry would read as transparent or as glass.
+            Row::Rim | Row::Drop => scale(c, 20).map(|v| v.max(8)),
+        };
+    }
+    let plate = scale(mix(neutral(), c, tint()), t.dim());
+    let l = light();
+    match (style(), k) {
+        (_, Row::WellTop | Row::Recess | Row::WellLow) => glass(k),
+        // The outline and the drop shadow are translucent darkness, not an opaque black line.
+        (Style::Gunmetal, Row::Rim | Row::Drop) => [4, 6, 12],
+        (Style::Lacquer, Row::Rim | Row::Drop) => [0, 0, 8],
+        (_, Row::Rim | Row::Drop) => [10, 6, 2],
+        (Style::Gunmetal, Row::Out) => mix(plate, l, 140),
+        (Style::Gunmetal, Row::Hi) => scale(plate, 285),
+        (Style::Gunmetal, Row::Mid) => plate,
+        (Style::Gunmetal, Row::Lip) => scale(plate, 215),
+        (Style::Gunmetal, Row::Shade) => scale(plate, 150),
+        (Style::Gunmetal, Row::Foot) => scale(plate, 96),
+        // One hot line along the top, a sheen under it, the rest almost black.
+        (Style::Lacquer, Row::Out) => scale(mix(c, l, 60), t.dim()),
+        (Style::Lacquer, Row::Hi) => scale(plate, 520),
+        (Style::Lacquer, Row::Mid) => scale(plate, 330),
+        (Style::Lacquer, Row::Lip) => scale(plate, 400),
+        (Style::Lacquer, Row::Shade) => scale(plate, 220),
+        (Style::Lacquer, Row::Foot) => scale(plate, 140),
+        // Engraved: a light edge, then a dark groove, as a double line cut in the metal.
+        (_, Row::Out) => mix(plate, l, 118),
+        (_, Row::Hi) => scale(plate, 120),
+        (_, Row::Mid) => plate,
+        (_, Row::Lip) => mix(plate, l, 56),
+        (_, Row::Shade) => scale(plate, 110),
+        (_, Row::Foot) => scale(plate, 66),
     }
 }
 
-/// Whether a row is the translucent glass the cells sit in: the scene shows through it.
+/// Whether a row is translucent: the glass the cells sit in, and in the new styles the outline and
+/// the shadow, which darken the scene instead of drawing a black line over it.
 fn is_glass(k: Row) -> bool {
-    matches!(k, Row::WellTop | Row::Recess | Row::WellLow)
+    match k {
+        Row::WellTop | Row::Recess | Row::WellLow => true,
+        Row::Rim | Row::Drop => style() != Style::Classic,
+        _ => false,
+    }
 }
 
 /// A stance colour as seen at a distance from the front: the bar behind is darker and greyer.
 #[derive(Clone, Copy)]
 pub struct Tone {
     pub base: Rgb,
+    /// How far back: 0 is the front bar.
+    pub depth: usize,
 }
 
 impl Tone {
@@ -553,7 +780,13 @@ impl Tone {
         let far = scale(desaturate(base, 70), 120);
         Self {
             base: mix(base, far, (depth * 256 / (SIZES - 1)) as u32),
+            depth,
         }
+    }
+
+    /// How much of its brightness the plate keeps (of 256).
+    fn dim(&self) -> u32 {
+        256 - 44 * self.depth as u32
     }
 }
 
@@ -568,13 +801,20 @@ pub fn bands(g: &Geo, t: Tone) -> Vec<(u8, u8, Rgb, bool)> {
         }
     }
     out.into_iter()
-        .map(|(a, b, k)| (a, b, row_colour(k, t.base), is_glass(k)))
+        .map(|(a, b, k)| (a, b, row_colour(k, t), is_glass(k)))
         .collect()
 }
 
-/// The cap palette indices that are glass (`WellTop`, `Recess`, `WellLow`).
-pub const CAP_GLASS: [u8; 3] = [8, 4, 9];
+/// The cap palette indices that are glass: the well and, in the new styles, the outline.
+pub fn cap_glass() -> Vec<u8> {
+    let mut v = vec![8, 4, 9];
+    if style() != Style::Classic {
+        v.push(10);
+    }
+    v
+}
 
+/// The cap palette, with the rivet colours (11 light, 12 dark) after the rows'.
 pub fn cap_palette(t: Tone) -> Palette {
     let mut p = [[0u8; 3]; 16];
     for k in [
@@ -589,15 +829,20 @@ pub fn cap_palette(t: Tone) -> Palette {
         Row::Shade,
         Row::Foot,
     ] {
-        p[row_index(k) as usize] = row_colour(k, t.base);
+        p[row_index(k) as usize] = row_colour(k, t);
+    }
+    if matches!(style(), Style::Gunmetal | Style::Bronze) {
+        p[CAP_RIVET_LIGHT as usize] = row_colour(Row::Out, t);
+        p[CAP_RIVET_DARK as usize] = row_colour(Row::Foot, t);
     }
     p
 }
 
 pub fn cell_palette(t: Tone, lit: bool) -> Palette {
     let c = t.base;
-    if lit {
-        pal(&[
+    let l = light();
+    match (style(), lit) {
+        (Style::Classic, true) => pal(&[
             (CELL_HI, mix(c, WHITE, 140)),
             (CELL_L1, mix(c, WHITE, 64)),
             (CELL_L2, c),
@@ -606,9 +851,8 @@ pub fn cell_palette(t: Tone, lit: bool) -> Palette {
             (CELL_DD, scale(c, 128)),
             (CELL_LEFT, mix(c, WHITE, 90)),
             (CELL_RIGHT, scale(c, 140)),
-        ])
-    } else {
-        pal(&[
+        ]),
+        (Style::Classic, false) => pal(&[
             (CELL_HI, scale(c, 77)),
             (CELL_L1, scale(c, 46)),
             (CELL_L2, scale(c, 36)),
@@ -617,54 +861,270 @@ pub fn cell_palette(t: Tone, lit: bool) -> Palette {
             (CELL_DD, scale(c, 20)),
             (CELL_LEFT, scale(c, 66)),
             (CELL_RIGHT, scale(c, 18)),
-        ])
+        ]),
+        // Dull ember behind a cold edge, tones stepping through a dither.
+        (Style::Gunmetal, true) => pal(&[
+            (CELL_HI, mix(c, l, 150)),
+            (CELL_L1, mix(c, l, 60)),
+            (CELL_L2, c),
+            (CELL_M, scale(c, 204)),
+            (CELL_D, scale(c, 150)),
+            (CELL_DD, scale(c, 104)),
+            (CELL_LEFT, mix(c, l, 90)),
+            (CELL_RIGHT, scale(c, 100)),
+            (CELL_MARK, scale(c, 120)),
+        ]),
+        (Style::Gunmetal, false) => pal(&[
+            (CELL_HI, mix(scale(c, 40), [60, 68, 78], 140)),
+            (CELL_L1, mix(scale(c, 30), [44, 50, 58], 140)),
+            (CELL_L2, mix(scale(c, 26), [38, 44, 52], 140)),
+            (CELL_M, mix(scale(c, 22), [34, 40, 46], 140)),
+            (CELL_D, mix(scale(c, 18), [28, 32, 38], 140)),
+            (CELL_DD, mix(scale(c, 14), [22, 26, 30], 140)),
+            (CELL_LEFT, mix(scale(c, 50), [74, 82, 92], 140)),
+            (CELL_RIGHT, [18, 21, 25]),
+            (CELL_MARK, [12, 14, 18]),
+        ]),
+        // A hot cell: white at the top, the accent colour, then deep into the dark.
+        (Style::Lacquer, true) => pal(&[
+            (CELL_HI, mix(c, l, 200)),
+            (CELL_L1, mix(c, l, 80)),
+            (CELL_L2, c),
+            (CELL_M, scale(c, 196)),
+            (CELL_D, scale(c, 128)),
+            (CELL_DD, scale(c, 70)),
+            (CELL_LEFT, mix(c, l, 120)),
+            (CELL_RIGHT, scale(c, 84)),
+            (CELL_MARK, [255, 250, 240]),
+        ]),
+        (Style::Lacquer, false) => pal(&[
+            (CELL_HI, [52, 56, 70]),
+            (CELL_L1, [34, 38, 48]),
+            (CELL_L2, [28, 30, 40]),
+            (CELL_M, [24, 26, 34]),
+            (CELL_D, [20, 22, 28]),
+            (CELL_DD, [14, 16, 20]),
+            (CELL_LEFT, [60, 66, 82]),
+            (CELL_RIGHT, [12, 13, 17]),
+            (CELL_MARK, [70, 76, 94]),
+        ]),
+        // Patinated metal inlaid in a groove, with scratches.
+        (Style::Bronze, true) => pal(&[
+            (CELL_HI, mix(c, l, 110)),
+            (CELL_L1, mix(c, l, 40)),
+            (CELL_L2, c),
+            (CELL_M, scale(c, 214)),
+            (CELL_D, scale(c, 178)),
+            (CELL_DD, scale(c, 140)),
+            (CELL_LEFT, scale(c, 120)),
+            (CELL_RIGHT, scale(c, 86)),
+            (CELL_MARK, mix(c, l, 170)),
+        ]),
+        (Style::Bronze, false) => pal(&[
+            (CELL_HI, mix(scale(c, 40), [58, 46, 32], 150)),
+            (CELL_L1, mix(scale(c, 30), [46, 36, 26], 150)),
+            (CELL_L2, mix(scale(c, 26), [40, 32, 22], 150)),
+            (CELL_M, mix(scale(c, 22), [36, 28, 20], 150)),
+            (CELL_D, mix(scale(c, 18), [30, 24, 16], 150)),
+            (CELL_DD, mix(scale(c, 14), [24, 18, 12], 150)),
+            (CELL_LEFT, mix(scale(c, 60), [84, 66, 44], 150)),
+            (CELL_RIGHT, [16, 12, 8]),
+            (CELL_MARK, [68, 54, 36]),
+        ]),
     }
 }
 
 /// The emblem of the stance `active`, its core in the colour of the other one.
 pub fn emblem_palette(active: Rgb, other: Rgb) -> Palette {
-    let c = active;
-    let o = other;
+    let (c, o) = (active, other);
+    let l = light();
+    if style() == Style::Classic {
+        return pal(&[
+            (EM_OUT, mix(c, WHITE, 90)),
+            (EM_BODY[0], mix(c, WHITE, 50)),
+            (EM_BODY[1], c),
+            (EM_BODY[2], scale(c, 220)),
+            (EM_BODY[3], scale(c, 184)),
+            (EM_BODY[4], scale(c, 148)),
+            (EM_RING_HI, mix(c, WHITE, 115)),
+            (EM_RING_LO, scale(c, 112)),
+            (EM_CORE_OUT, scale(o, 90)),
+            (EM_CORE[0], mix(o, WHITE, 128)),
+            (EM_CORE[1], mix(o, WHITE, 38)),
+            (EM_CORE[2], scale(o, 205)),
+            (EM_CORE[3], scale(o, 140)),
+        ]);
+    }
+    let plate = mix(neutral(), c, tint());
+    let (out, body, ring_hi, ring_lo, mark): (Rgb, [Rgb; 5], Rgb, Rgb, Rgb) = match style() {
+        Style::Gunmetal => (
+            mix(plate, l, 140),
+            [
+                mix(plate, l, 100),
+                scale(plate, 285),
+                scale(plate, 230),
+                scale(plate, 180),
+                scale(plate, 130),
+            ],
+            mix(c, l, 40),
+            scale(c, 120),
+            [196, 206, 216],
+        ),
+        Style::Lacquer => (
+            scale(c, 170),
+            [
+                scale(plate, 560),
+                scale(plate, 380),
+                scale(plate, 300),
+                scale(plate, 230),
+                scale(plate, 160),
+            ],
+            mix(c, l, 50),
+            scale(c, 130),
+            [120, 128, 150],
+        ),
+        _ => (
+            mix(plate, l, 150),
+            [
+                mix(plate, l, 90),
+                scale(plate, 250),
+                scale(plate, 210),
+                scale(plate, 170),
+                scale(plate, 130),
+            ],
+            mix(plate, l, 110),
+            scale(plate, 62),
+            [0, 0, 0],
+        ),
+    };
     pal(&[
-        (EM_OUT, mix(c, WHITE, 90)),
-        (EM_BODY[0], mix(c, WHITE, 50)),
-        (EM_BODY[1], c),
-        (EM_BODY[2], scale(c, 220)),
-        (EM_BODY[3], scale(c, 184)),
-        (EM_BODY[4], scale(c, 148)),
-        (EM_RING_HI, mix(c, WHITE, 115)),
-        (EM_RING_LO, scale(c, 112)),
-        (EM_CORE_OUT, scale(o, 90)),
-        (EM_CORE[0], mix(o, WHITE, 128)),
-        (EM_CORE[1], mix(o, WHITE, 38)),
-        (EM_CORE[2], scale(o, 205)),
-        (EM_CORE[3], scale(o, 140)),
+        (EM_OUT, out),
+        (EM_BODY[0], body[0]),
+        (EM_BODY[1], body[1]),
+        (EM_BODY[2], body[2]),
+        (EM_BODY[3], body[3]),
+        (EM_BODY[4], body[4]),
+        (EM_RING_HI, ring_hi),
+        (EM_RING_LO, ring_lo),
+        (EM_CORE_OUT, scale(o, 80)),
+        (EM_CORE[0], mix(o, l, 110)),
+        (EM_CORE[1], mix(o, l, 36)),
+        (EM_CORE[2], scale(o, 200)),
+        (EM_CORE[3], scale(o, 130)),
+        (EM_MARK, mark),
     ])
 }
 
 pub fn gem_palette(lit: bool) -> Palette {
-    if lit {
+    let p = |out: Rgb, f: [Rgb; 6], spec: Rgb| {
         pal(&[
-            (GEM_OUT, [96, 44, 0]),
-            (GEM_FACET[0], [255, 242, 190]),
-            (GEM_FACET[1], [255, 214, 100]),
-            (GEM_FACET[2], [255, 200, 70]),
-            (GEM_FACET[3], [232, 140, 16]),
-            (GEM_FACET[4], [200, 100, 6]),
-            (GEM_FACET[5], [168, 84, 0]),
-            (GEM_SPEC, [255, 255, 236]),
+            (GEM_OUT, out),
+            (GEM_FACET[0], f[0]),
+            (GEM_FACET[1], f[1]),
+            (GEM_FACET[2], f[2]),
+            (GEM_FACET[3], f[3]),
+            (GEM_FACET[4], f[4]),
+            (GEM_FACET[5], f[5]),
+            (GEM_SPEC, spec),
         ])
-    } else {
-        pal(&[
-            (GEM_OUT, [46, 28, 16]),
-            (GEM_FACET[0], [66, 42, 24]),
-            (GEM_FACET[1], [58, 36, 20]),
-            (GEM_FACET[2], [52, 32, 18]),
-            (GEM_FACET[3], [44, 28, 16]),
-            (GEM_FACET[4], [40, 24, 14]),
-            (GEM_FACET[5], [34, 20, 12]),
-            (GEM_SPEC, [74, 48, 28]),
-        ])
+    };
+    match (style(), lit) {
+        (Style::Classic, true) => p(
+            [96, 44, 0],
+            [
+                [255, 242, 190],
+                [255, 214, 100],
+                [255, 200, 70],
+                [232, 140, 16],
+                [200, 100, 6],
+                [168, 84, 0],
+            ],
+            [255, 255, 236],
+        ),
+        (Style::Classic, false) => p(
+            [46, 28, 16],
+            [
+                [66, 42, 24],
+                [58, 36, 20],
+                [52, 32, 18],
+                [44, 28, 16],
+                [40, 24, 14],
+                [34, 20, 12],
+            ],
+            [74, 48, 28],
+        ),
+        (Style::Gunmetal, true) => p(
+            [52, 36, 24],
+            [
+                [240, 214, 160],
+                [226, 180, 104],
+                [214, 156, 70],
+                [186, 118, 40],
+                [158, 92, 28],
+                [128, 70, 22],
+            ],
+            [252, 240, 208],
+        ),
+        (Style::Gunmetal, false) => p(
+            [30, 32, 38],
+            [
+                [58, 62, 70],
+                [52, 56, 64],
+                [46, 50, 58],
+                [40, 44, 50],
+                [34, 38, 44],
+                [30, 32, 38],
+            ],
+            [74, 80, 90],
+        ),
+        (Style::Lacquer, true) => p(
+            [24, 6, 0],
+            [
+                [255, 244, 214],
+                [255, 200, 110],
+                [255, 150, 50],
+                [236, 100, 24],
+                [196, 64, 10],
+                [150, 40, 4],
+            ],
+            [255, 255, 248],
+        ),
+        (Style::Lacquer, false) => p(
+            [8, 8, 12],
+            [
+                [40, 42, 54],
+                [32, 34, 44],
+                [26, 28, 36],
+                [22, 24, 30],
+                [18, 20, 26],
+                [14, 16, 20],
+            ],
+            [80, 86, 104],
+        ),
+        (Style::Bronze, true) => p(
+            [46, 28, 10],
+            [
+                [236, 196, 120],
+                [214, 156, 76],
+                [196, 128, 52],
+                [170, 102, 36],
+                [140, 80, 28],
+                [110, 62, 22],
+            ],
+            [255, 230, 170],
+        ),
+        (Style::Bronze, false) => p(
+            [22, 16, 10],
+            [
+                [66, 52, 36],
+                [58, 46, 32],
+                [50, 40, 28],
+                [44, 34, 24],
+                [38, 30, 20],
+                [32, 24, 16],
+            ],
+            [86, 70, 48],
+        ),
     }
 }
 

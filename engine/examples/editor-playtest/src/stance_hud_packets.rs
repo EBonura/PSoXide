@@ -254,8 +254,9 @@ impl<const N: usize> Packets<N> {
     }
 }
 
-/// Translucent bands and two ends; the most any size has.
-const GLASS_MAX: usize = 5;
+/// Translucent bands (the well, and the outline and shadow in the new styles) and two ends; the most
+/// any size has.
+const GLASS_MAX: usize = 7;
 /// Opaque bands: the most any size has.
 const OPAQUE_MAX: usize = 8;
 
