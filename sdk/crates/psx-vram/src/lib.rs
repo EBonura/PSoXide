@@ -1232,6 +1232,7 @@ pub fn upload_16bpp(rect: VramRect, pixels: &[u16]) {
         psx_io::gpu::write_command_unguarded(lo | (hi << 16));
         i += 2;
     }
+    clear_texture_cache_after_upload();
 }
 
 /// Upload raw byte-stream pixel data, interpreted as halfwords in
@@ -1270,6 +1271,7 @@ pub fn upload_bytes(rect: VramRect, bytes: &[u8]) {
         psx_io::gpu::write_command_unguarded(packed_upload_word(bytes, i));
         i += 4;
     }
+    clear_texture_cache_after_upload();
 }
 
 #[inline]
@@ -1327,6 +1329,33 @@ pub fn upload_words(rect: VramRect, words: &[u32]) {
     for &word in words {
         psx_io::gpu::write_command_unguarded(word);
     }
+    clear_texture_cache_after_upload();
+}
+
+/// Invalidate the GPU's texture cache (GP0(01h)).
+///
+/// The cache is not kept coherent with VRAM: lines filled from a texture page
+/// keep serving the texels they held when a later upload, or a drawn-in
+/// render target, rewrites the same addresses, and a draw that hits such a line
+/// samples stale data. Every `upload_*` and [`dma_copy_to_vram`] here clears
+/// the cache once the transfer is in. Call this yourself after
+/// [`dma_copy_to_vram_start`] has completed ([`dma_copy_to_vram_done`]), or
+/// after any other write into VRAM that a later primitive may sample.
+///
+/// Waits for the command FIFO like any other GP0 command; do not call it while
+/// an image transfer is open or an ordering-table walk is feeding GP0.
+#[doc(alias = "ClearTextureCache")]
+pub fn clear_texture_cache() {
+    wait_command_ready();
+    write_command(gp0::CLEAR_CACHE);
+}
+
+/// [`clear_texture_cache`] at the end of a FIFO upload, still under its
+/// recording pause: an upload is never recorded, and neither is its clear.
+#[inline]
+fn clear_texture_cache_after_upload() {
+    wait_command_ready();
+    psx_io::gpu::write_command_unguarded(gp0::CLEAR_CACHE);
 }
 
 /// Emit the GP0(0xA0) "copy CPU→VRAM" header (destination, halfword extent). Its writes run
@@ -1376,7 +1405,9 @@ pub fn dma_copy_to_vram(_dma: &mut GpuDma, rect: VramRect, words: &[u32]) -> boo
     }
     // On a wedge the GP0(A0) header is already out and the payload did not
     // land, so VRAM holds a partial upload either way; report it.
-    dma::wait_or_abort(Channel::Gpu, dma::DEFAULT_SPINS)
+    let done = dma::wait_or_abort(Channel::Gpu, dma::DEFAULT_SPINS);
+    clear_texture_cache();
+    done
 }
 
 /// [`dma_copy_to_vram`] without the completion wait: send the copy header,
