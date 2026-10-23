@@ -15,21 +15,23 @@ pub const ZENITH: Rgb = [76, 202, 181];
 pub const COUNT: usize = 10;
 /// Distance between cells, and between gems, in pixels.
 pub const PITCH: i32 = 12;
-/// Left edge of the flat part of the plate (it starts under the emblem) and the first column of the
-/// sloped end.
-pub const BAR_X0: i32 = 20;
+/// The sloped left end of the bar: its left column. The flat part of the plate starts after it and
+/// the sloped right end starts at `CAP_X`. The bar does not touch the emblem.
+pub const LCAP_X: i32 = 27;
+pub const LCAP_W: usize = 9;
+pub const BAR_X0: i32 = LCAP_X + LCAP_W as i32;
 pub const CAP_X: i32 = 151;
 /// The bar behind sits this many rows above the front one; only these rows of it show.
 pub const BACK_OFFSET: i32 = 9;
 /// Top row of the front bar, in HUD coordinates.
 pub const FRONT_Y: i32 = BACK_OFFSET;
 /// Cell origin (left edge of its bottom row) and its top row inside the bar.
-pub const CELL_X0: i32 = 30;
+pub const CELL_X0: i32 = 33;
 pub const CELL_ROW: i32 = 5;
 /// Emblem top-left.
 pub const EMBLEM_POS: (i32, i32) = (1, 6);
 /// First gem's left edge.
-pub const GEM_X0: i32 = 32;
+pub const GEM_X0: i32 = 35;
 /// Gem sprite height.
 pub const GEM_H: i32 = 8;
 
@@ -238,6 +240,52 @@ pub fn cap() -> Sprite {
                     s.set(c, r, i);
                 }
                 s.set(e, r, row_index(Row::Rim));
+            }
+        }
+    }
+    s
+}
+
+/// The sloped left end of the bar, the right end's counterpart: the end edge leans one pixel per two
+/// rows in the same direction as the cells (the bottom further left), the plate is to its right,
+/// and the dark rim follows the edge on the outside.
+pub fn lcap() -> Sprite {
+    let mut s = Sprite::new(LCAP_W, BAR_H as usize);
+    // Column of the end edge in row `r`.
+    let edge = |r: usize| 8 - (r.max(1) - 1) / 2;
+    for (r, &kind) in ROWS.iter().enumerate() {
+        match kind {
+            Row::Rim => {
+                for c in edge(1) - 1..LCAP_W {
+                    s.set(c, r, row_index(Row::Rim));
+                }
+            }
+            Row::Drop => {
+                for c in edge(r - 1) - 1..LCAP_W {
+                    s.set(c, r, row_index(Row::Drop));
+                }
+            }
+            _ => {
+                let e = edge(r);
+                for c in e..LCAP_W {
+                    let is_edge = c == e;
+                    let wall = c == e + 1;
+                    let i = match kind {
+                        Row::Out => row_index(Row::Out),
+                        Row::Foot => row_index(Row::Foot),
+                        _ if is_edge => {
+                            if r + 3 >= ROWS.len() {
+                                row_index(Row::Foot)
+                            } else {
+                                row_index(Row::Out)
+                            }
+                        }
+                        Row::WellTop | Row::Recess | Row::WellLow if wall => row_index(Row::Hi),
+                        k => row_index(k),
+                    };
+                    s.set(c, r, i);
+                }
+                s.set(e - 1, r, row_index(Row::Rim));
             }
         }
     }
@@ -519,20 +567,22 @@ pub fn clut(p: &Palette, glass: &[u8]) -> [u16; 16] {
 
 /// Where each sprite sits in the atlas.
 /// A multiple of 8 so that a row is a whole number of VRAM words.
-pub const ATLAS_W: usize = 56;
+pub const ATLAS_W: usize = 64;
 pub const ATLAS_H: usize = 24;
-pub const ATLAS_POS: [(&str, (usize, usize)); 4] = [
+pub const ATLAS_POS: [(&str, (usize, usize)); 5] = [
     ("EMBLEM", (0, 0)),
     ("CAP", (24, 0)),
+    ("LCAP", (50, 0)),
     ("CELL", (36, 0)),
     ("GEM", (36, 10)),
 ];
 
 /// All sprites by atlas name.
-pub fn sprites() -> [(&'static str, Sprite); 4] {
+pub fn sprites() -> [(&'static str, Sprite); 5] {
     [
         ("EMBLEM", emblem()),
         ("CAP", cap()),
+        ("LCAP", lcap()),
         ("CELL", cell()),
         ("GEM", gem()),
     ]

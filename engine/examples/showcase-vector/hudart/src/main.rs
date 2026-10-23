@@ -118,6 +118,21 @@ mod tests {
         assert!(art::gem().is_mirror_symmetric());
     }
 
+    /// Both ends of the bar lean like the cells, one pixel per two rows, with the bottom further left:
+    /// the left end's rim starts one column left every second row and the right end's plate ends one
+    /// column left every second row.
+    #[test]
+    fn bar_ends_lean_like_the_cells() {
+        let (l, r) = (art::lcap(), art::cap());
+        let first = |s: &art::Sprite, y: usize| (0..s.w).find(|&x| s.get(x, y) != 0).expect("row");
+        let last =
+            |s: &art::Sprite, y: usize| (0..s.w).rev().find(|&x| s.get(x, y) != 0).expect("row");
+        for y in 1..17 {
+            assert_eq!(first(&l, y), 7 - (y - 1) / 2, "left end, row {y}");
+            assert_eq!(last(&r, y), 8 - (y - 1) / 2, "right end, row {y}");
+        }
+    }
+
     /// The cell is the same parallelogram in every row pair: the lean is one pixel per two rows.
     #[test]
     fn cell_leans_one_pixel_per_two_rows() {

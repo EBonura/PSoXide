@@ -90,9 +90,9 @@ pub enum Op {
     },
 }
 
-/// Ops one HUD needs at most: every band of both bars, both caps, both bars' cells, the emblem
-/// and the gems.
-pub const MAX_OPS: usize = 2 * BAND_COUNT + 2 + 3 * (COUNT as usize) + 1;
+/// Ops one HUD needs at most: every band of both bars, both ends of both bars, both bars' cells,
+/// the emblem and the gems.
+pub const MAX_OPS: usize = 2 * BAND_COUNT + 4 + 3 * (COUNT as usize) + 1;
 
 fn bar(origin: (i32, i32), front: bool, stance: Stance, lit: u8, draw: &mut impl FnMut(Op)) {
     let top = origin.1 + if front { FRONT_Y } else { 0 };
@@ -119,16 +119,19 @@ fn bar(origin: (i32, i32), front: bool, stance: Stance, lit: u8, draw: &mut impl
     } else {
         (CLUT_BACK_CAP, CLUT_BACK_CELL_LIT, CLUT_BACK_CELL_EMPTY)
     };
-    draw(Op::Sprite {
-        x: origin.0 + CAP_X,
-        y: top,
-        src: SpriteRect {
-            h: (SPRITE_CAP.h as i32).min(rows) as u8,
-            ..SPRITE_CAP
-        },
-        clut: base + cap_clut,
-        glass: true,
-    });
+    // Both ends are drawn as far down as the bar shows.
+    for (x, src) in [(LCAP_X, SPRITE_LCAP), (CAP_X, SPRITE_CAP)] {
+        draw(Op::Sprite {
+            x: origin.0 + x,
+            y: top,
+            src: SpriteRect {
+                h: (src.h as i32).min(rows) as u8,
+                ..src
+            },
+            clut: base + cap_clut,
+            glass: true,
+        });
+    }
     let cell_rows = (rows - CELL_ROW).min(SPRITE_CELL.h as i32);
     if cell_rows <= 0 {
         return;

@@ -3,8 +3,8 @@
 use std::fmt::Write as _;
 
 use crate::art::{
-    self, bands, cap_palette, CAP_GLASS, cell_palette, clut, emblem_palette, gem_palette, Tone, ATLAS_POS,
-    ATLAS_W, HORIZON, ZENITH,
+    self, bands, cap_palette, cell_palette, clut, emblem_palette, gem_palette, Tone, ATLAS_POS,
+    ATLAS_W, CAP_GLASS, HORIZON, ZENITH,
 };
 
 /// CLUTs per stance, in this order, then the two gem CLUTs.
@@ -65,6 +65,7 @@ pub fn art_module() -> String {
         ("CANVAS_W", art::CANVAS.0),
         ("CANVAS_H", art::CANVAS.1),
         ("CAP_W", art::CAP_W as i32),
+        ("LCAP_X", art::LCAP_X),
     ] {
         let _ = writeln!(s, "pub const {name}: i32 = {v};");
     }
@@ -166,10 +167,11 @@ pub fn layout() -> String {
          gem_x0 = {gem_x0}\n\
          gem_band = {gy}, {gy2}\n\
          mirror = emblem_core {cx0} {cy0} {cx1} {cy1}\n\
-         mirror = emblem_inner {tx0} {ey} {tx1} {ey2}\n\
-         mirror = emblem_bottom {ex} {pb} {ex2} {ey2}\n",
+         mirror = emblem {ex} {ey} {ex2} {ey2}\n",
         count = art::COUNT,
-        cell_x0 = art::CELL_X0,
+        // The strips start 3 columns left of the first cell, so that the last strip ends before the
+        // right end of the bar.
+        cell_x0 = art::CELL_X0 - 3,
         pitch = art::PITCH,
         ft = plate_top,
         fb = plate_bottom,
@@ -182,9 +184,6 @@ pub fn layout() -> String {
         cx1 = ex + 18,
         cy1 = ey + 18,
         ex2 = ex + 24,
-        tx0 = ex + 5,
-        tx1 = ex + 19,
         ey2 = ey + 24,
-        pb = plate_bottom,
     )
 }

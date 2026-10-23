@@ -67,7 +67,14 @@ impl Frame {
 
     fn op(&mut self, op: Op) {
         match op {
-            Op::Rect { x, y, w, h, rgb, glass } => {
+            Op::Rect {
+                x,
+                y,
+                w,
+                h,
+                rgb,
+                glass,
+            } => {
                 for yy in y..y + h {
                     for xx in x..x + w {
                         if glass {
@@ -78,7 +85,13 @@ impl Frame {
                     }
                 }
             }
-            Op::Sprite { x, y, src, clut, glass } => {
+            Op::Sprite {
+                x,
+                y,
+                src,
+                clut,
+                glass,
+            } => {
                 for ty in 0..src.h as usize {
                     for tx in 0..src.w as usize {
                         let (u, v) = (src.u as usize + tx, src.v as usize + ty);
