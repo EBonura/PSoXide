@@ -40,6 +40,7 @@ impl TickRate {
     pub const HZ20: TickRate = TickRate(3);
 
     /// One tick every `vblanks` VBlanks (0 is treated as 1).
+    #[must_use]
     pub const fn every_vblanks(vblanks: u16) -> TickRate {
         TickRate(if vblanks == 0 { 1 } else { vblanks })
     }
@@ -97,6 +98,153 @@ impl TickConfig {
             rate: self.rate,
             catch_up: CatchUp::Cap(if max_ticks == 0 { 1 } else { max_ticks }),
         }
+    }
+}
+
+/// The fastest a game may change the picture: the fewest VBlanks between two
+/// display flips.
+///
+/// Every PSoXide game is capped at [`PresentCap::HZ30`] (a flip at most every
+/// second VBlank, 30 fps NTSC and 25 fps PAL) unless it opts out by name with
+/// [`PresentCap::UNCAPPED`]. A frame built inside one VBlank interval then waits
+/// for the next flip slot instead of flipping at 60 for a moment and falling back,
+/// which reads as a stutter. Frames slower than the cap are untouched: the cap
+/// bounds the rate from above and never speeds anything up.
+///
+/// `psx-rt` enforces it where the flip happens (see
+/// `psx_rt::interrupts::set_present_cap`); [`FlipGate`] is the same rule as pure
+/// logic, so it is host-testable and a tool can check a recorded run against it.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct PresentCap(u8);
+
+impl PresentCap {
+    /// At most one flip every second VBlank (30 fps NTSC, 25 PAL): the default.
+    pub const HZ30: PresentCap = PresentCap(2);
+    /// A flip on every VBlank (60 fps NTSC, 50 PAL). The explicit opt-out, for a
+    /// game that deliberately targets the full display rate.
+    pub const UNCAPPED: PresentCap = PresentCap(1);
+
+    /// At most one flip every `vblanks` VBlanks (0 is treated as 1).
+    pub const fn every_vblanks(vblanks: u8) -> PresentCap {
+        PresentCap(if vblanks == 0 { 1 } else { vblanks })
+    }
+
+    /// The fewest VBlanks between two flips.
+    #[must_use]
+    pub const fn min_vblanks(self) -> u8 {
+        self.0
+    }
+}
+
+impl Default for PresentCap {
+    /// [`PresentCap::HZ30`].
+    fn default() -> PresentCap {
+        PresentCap::HZ30
+    }
+}
+
+/// Buckets in [`FlipHistogram`]: flips 0 to 6 VBlanks after the previous one,
+/// and the last bucket for 7 or more.
+pub const FLIP_HISTOGRAM_BUCKETS: usize = 8;
+
+/// How many flips came `k` VBlanks after the one before.
+///
+/// `psx-rt` keeps one in RAM (`psx_rt::interrupts::flip_histogram`, read with
+/// [`from_buckets`](Self::from_buckets)), so a run's
+/// flip pacing can be read off a frame dump or a RAM watch and checked with
+/// [`below`](Self::below).
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct FlipHistogram {
+    buckets: [u32; FLIP_HISTOGRAM_BUCKETS],
+}
+
+impl FlipHistogram {
+    /// `buckets()[k]`: flips `k` VBlanks after the previous one (the last bucket
+    /// is "that many or more"). The first flip after a reset has no previous one
+    /// and is counted in the last bucket.
+    #[must_use]
+    pub const fn buckets(&self) -> &[u32; FLIP_HISTOGRAM_BUCKETS] {
+        &self.buckets
+    }
+
+    /// The histogram of `buckets` as `psx_rt::interrupts::flip_histogram` returns it.
+    #[must_use]
+    pub const fn from_buckets(buckets: [u32; FLIP_HISTOGRAM_BUCKETS]) -> FlipHistogram {
+        FlipHistogram { buckets }
+    }
+
+    /// Flips that came sooner than `min_vblanks` after the one before: zero for
+    /// a game that honours its cap.
+    #[must_use]
+    pub fn below(&self, min_vblanks: u8) -> u32 {
+        let end = usize::from(min_vblanks).min(FLIP_HISTOGRAM_BUCKETS);
+        self.buckets[..end].iter().sum()
+    }
+
+    /// All flips counted.
+    #[must_use]
+    pub fn total(&self) -> u32 {
+        self.buckets.iter().sum()
+    }
+
+    fn record(&mut self, interval: u32) {
+        let k = (interval as usize).min(FLIP_HISTOGRAM_BUCKETS - 1);
+        self.buckets[k] = self.buckets[k].saturating_add(1);
+    }
+}
+
+/// The presentation cap as a state machine, one call per VBlank edge: the
+/// reference for what `psx-rt`'s VBlank handler does with a queued flip.
+///
+/// ```
+/// use psx_tick::{FlipGate, PresentCap};
+/// let mut gate = FlipGate::new(PresentCap::HZ30);
+/// // A flip wanted on every edge is granted on every second one.
+/// let granted: Vec<bool> = (0..6).map(|_| gate.edge(true)).collect();
+/// assert_eq!(granted, [true, false, true, false, true, false]);
+/// assert_eq!(gate.histogram().below(2), 0);
+/// ```
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct FlipGate {
+    min: u32,
+    hold: u32,
+    age: u32,
+    histogram: FlipHistogram,
+}
+
+impl FlipGate {
+    /// A gate with `cap`, free to flip at the first edge.
+    #[must_use]
+    pub const fn new(cap: PresentCap) -> FlipGate {
+        FlipGate {
+            min: cap.min_vblanks() as u32,
+            hold: 0,
+            age: FLIP_HISTOGRAM_BUCKETS as u32 - 1,
+            histogram: FlipHistogram {
+                buckets: [0; FLIP_HISTOGRAM_BUCKETS],
+            },
+        }
+    }
+
+    /// One VBlank edge. `flip_wanted` is whether a finished frame is waiting to
+    /// be shown. Returns whether the flip was applied: it is held back while
+    /// fewer than the cap's VBlanks have passed since the last one.
+    pub fn edge(&mut self, flip_wanted: bool) -> bool {
+        let flipped = flip_wanted && self.hold == 0;
+        if flipped {
+            self.histogram.record(self.age);
+            self.age = 0;
+            self.hold = self.min;
+        }
+        self.hold = self.hold.saturating_sub(1);
+        self.age = self.age.saturating_add(1);
+        flipped
+    }
+
+    /// The flip intervals so far.
+    #[must_use]
+    pub const fn histogram(&self) -> FlipHistogram {
+        self.histogram
     }
 }
 
@@ -370,6 +518,48 @@ mod tests {
         run(&mut s, 0);
         assert_eq!(s.phase_q12(0), 0);
         assert_eq!(s.phase_q12(1), 4096);
+    }
+
+    #[test]
+    fn the_default_cap_never_flips_twice_in_two_vblanks_whatever_is_asked() {
+        let mut gate = FlipGate::new(PresentCap::default());
+        let mut last = None;
+        for edge in 0..1000u32 {
+            // An irregular request pattern, heavy on back-to-back wants.
+            let wanted = edge % 5 != 3;
+            if gate.edge(wanted) {
+                if let Some(prev) = last {
+                    assert!(edge - prev >= 2, "flips at {prev} and {edge}");
+                }
+                last = Some(edge);
+            }
+        }
+        assert_eq!(gate.histogram().below(2), 0);
+        assert!(gate.histogram().total() > 400);
+    }
+
+    #[test]
+    fn a_slower_game_is_not_delayed_and_uncapped_flips_every_edge() {
+        // A flip wanted every third edge is granted at once.
+        let mut gate = FlipGate::new(PresentCap::HZ30);
+        let granted: u32 = (0..30).map(|e| u32::from(gate.edge(e % 3 == 0))).sum();
+        assert_eq!(granted, 10);
+        assert_eq!(gate.histogram().buckets()[3], 9);
+        let mut free = FlipGate::new(PresentCap::UNCAPPED);
+        assert!((0..10).all(|_| free.edge(true)));
+        assert_eq!(free.histogram().buckets()[1], 9);
+        assert_eq!(free.histogram().below(2), 9);
+    }
+
+    #[test]
+    fn caps_below_one_vblank_are_one_and_slower_caps_hold_longer() {
+        assert_eq!(PresentCap::every_vblanks(0), PresentCap::UNCAPPED);
+        let mut gate = FlipGate::new(PresentCap::every_vblanks(3));
+        let mut granted = [false; 7];
+        for slot in &mut granted {
+            *slot = gate.edge(true);
+        }
+        assert_eq!(granted, [true, false, false, true, false, false, true]);
     }
 
     #[test]

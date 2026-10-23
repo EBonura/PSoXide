@@ -115,6 +115,13 @@ hello-cdpause-disc:
 	$(MAKE) example EXAMPLE=hello-cdpause
 	cargo run --locked --release -p mkisopsx -- --exe "$(BUILD)/$(TARGET)/release/hello-cdpause.exe" \
 		--out "$(BUILD)/$(TARGET)/release/hello-cdpause.bin" --volume PSOXIDESDK --cdtest-sectors 960
+# hello-flipcap checks the presentation cap (no flip within 2 VBlanks of the last, an explicit opt-out for 60 fps).
+hello-flipcap-disc:
+	$(MAKE) example EXAMPLE=hello-flipcap
+	cargo run --locked --release -p mkisopsx -- --exe "$(BUILD)/$(TARGET)/release/hello-flipcap.exe" --out "$(BUILD)/$(TARGET)/release/hello-flipcap.bin" --volume PSOXIDESDK
+hello-flipcap-gate: hello-flipcap-disc
+	@test -n "$(FRONTEND)" || (echo "Set FRONTEND to the PSoXide-emulator executable"; exit 1)
+	sh tools/flipcap_gate.sh "$(FRONTEND)" "$(BUILD)/$(TARGET)/release/hello-flipcap.cue"
 hello-cdpause-gate: hello-cdpause-disc
 	@test -n "$(FRONTEND)" || (echo "Set FRONTEND to the PSoXide-emulator executable"; exit 1)
 	sh tools/cdpause_gate.sh "$(FRONTEND)" "$(BUILD)/$(TARGET)/release/hello-cdpause.cue"
