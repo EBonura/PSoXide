@@ -1,6 +1,11 @@
 //! How well each room's card lines up with the room's own geometry.
 //!
 //! Usage: `card_fit <project.ron> <out dir> [room ...]`
+//!        `card_fit <project.ron> <out dir> eye=X,Y,Z [sectors]`
+//!
+//! With `eye=X,Y,Z` (runtime units) it instead lists every room whose centre is within
+//! `sectors` (12) of that eye, with how far the eye is above the room's lowest geometry and how its
+//! card and the geometry compare from there, for the two kinds of card.
 //!
 //! For each room named (the tallest, the widest and the most complex ones when none are) and
 //! each distance, an eye is put out along the card's heading, at the eye height the cards are
@@ -13,7 +18,7 @@
 use std::path::{Path, PathBuf};
 
 use image::{Rgb, RgbImage};
-use psxed_project::grid::cook::cards::{bake_room, bake_room_ortho, fit};
+use psxed_project::grid::cook::cards::{bake_room, bake_room_ortho, fit, EyeHeight};
 use psxed_project::playtest::{cook_for_cards, room_card_eye};
 use psxed_project::ProjectDocument;
 
@@ -33,11 +38,12 @@ fn main() {
     std::fs::create_dir_all(&out).expect("create the output directory");
     let scene = project.active_scene();
     let world = scene.world.grid().expect("a grid world");
-    let (cooked, albedo) = cook_for_cards(&project, world, &root).expect("cook the level");
+    let inputs = cook_for_cards(&project, world, &root).expect("cook the level");
+    let (cooked, albedo) = (inputs.cooked, inputs.albedo);
     let sector = i32::from(cooked.level.sector_units);
-    let eye = room_card_eye(&world.stream.flood, sector);
+    let eye = room_card_eye(&world.stream.flood, sector, inputs.spawn_floor_y);
     println!(
-        "eye: {:.0} units out ({:.1} sectors), {:.0} above the room's lowest geometry",
+        "eye: {:.0} units out ({:.1} sectors), height {:?}",
         eye.distance,
         eye.distance / sector as f32,
         eye.height
@@ -49,6 +55,36 @@ fn main() {
     let persp: Vec<_> = (0..rooms)
         .map(|r| bake_room(&cooked, &albedo, r, eye))
         .collect();
+    if let Some(eye_arg) = args.get(2).and_then(|a| a.strip_prefix("eye=")) {
+        let c: Vec<f32> = eye_arg.split(',').filter_map(|v| v.parse().ok()).collect();
+        let reach = args
+            .get(3)
+            .and_then(|a| a.parse::<f32>().ok())
+            .unwrap_or(12.0)
+            * sector as f32;
+        let at = [c[0], c[1], c[2]];
+        println!("eye {at:?}; room, plan distance (sectors), eye above the room's lowest geometry (sectors), shear mismatch/top/bottom, perspective mismatch/top/bottom");
+        for room in 0..rooms {
+            let (Some(old), Some(new)) = (ortho[room].as_ref(), persp[room].as_ref()) else {
+                continue;
+            };
+            let (dx, dz) = (new.centre[0] as f32 - at[0], new.centre[1] as f32 - at[2]);
+            let length = (dx * dx + dz * dz).sqrt();
+            if length > reach || length < 3.0 * sector as f32 {
+                continue;
+            }
+            let a = fit::fit_room(&cooked, &albedo, room, old, at);
+            let b = fit::fit_room(&cooked, &albedo, room, new, at);
+            let (Some(a), Some(b)) = (a, b) else { continue };
+            println!(
+                "{room:4} {:5.1} {:6.1} | {:5.2} {:5.1} {:5.1} | {:5.2} {:5.1} {:5.1}   geometry px {} card px {}",
+                length / sector as f32,
+                (at[1] - room_low(&cooked, room)) / sector as f32,
+                a.mismatch, a.top, a.bottom, b.mismatch, b.top, b.bottom, b.geometry, b.card
+            );
+        }
+        return;
+    }
     let chosen: Vec<usize> = if args.len() > 2 {
         args[2..].iter().filter_map(|a| a.parse().ok()).collect()
     } else {
@@ -82,12 +118,16 @@ fn main() {
                 // geometry. The room's lowest geometry is the card's base plus what the bake
                 // lowered it by; take the room's own floor from its triangles via the fit.
                 let ground = room_low(&cooked, room);
+                let nominal_y = match eye.height {
+                    EyeHeight::World(y) => y,
+                    EyeHeight::AboveRoom(h) => ground + h,
+                };
                 let angle = turn;
                 let (cx, cz) = (new.centre[0] as f32, new.centre[1] as f32);
                 let d = distance * sector as f32;
                 let at = [
                     cx + angle.cos() * d,
-                    ground + eye.height + extra_height,
+                    nominal_y + extra_height,
                     cz + angle.sin() * d,
                 ];
                 let a = fit::fit_room(&cooked, &albedo, room, old, at);

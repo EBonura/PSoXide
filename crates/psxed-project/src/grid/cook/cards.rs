@@ -337,8 +337,19 @@ pub struct RoomEye {
     /// Plan distance of the eye from the card's plane (the room's centre) along the
     /// heading: the distance the room's geometry hands over to its card at.
     pub distance: f32,
-    /// Height of the eye above the lowest geometry of the room.
-    pub height: f32,
+    /// Its height.
+    pub height: EyeHeight,
+}
+
+/// The height of the eye a room's pictures are rendered from.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum EyeHeight {
+    /// This far above the lowest geometry of the room.
+    AboveRoom(f32),
+    /// At this height in the world, the same for every room: the height of the floor the
+    /// player walks on most, plus a person's, so a room far below or above that floor is
+    /// seen from where the player sees it.
+    World(f32),
 }
 
 /// Bake one room's card as the eye of `eye` sees it, in perspective, `None` when the room
@@ -359,7 +370,10 @@ pub fn bake_room(
     let (tris, quads) = triangles(cooked, albedo, room);
     let frame = room_frame(cooked, room, &tris)?;
     let RoomFrame { centre, low, .. } = frame;
-    let eye_y = low + eye.height;
+    let eye_y = match eye.height {
+        EyeHeight::AboveRoom(height) => low + height,
+        EyeHeight::World(y) => y,
+    };
     let d = eye.distance;
     // Nothing nearer the eye than half the nominal distance is kept: the card is never used
     // that close, and the projection grows without bound towards the eye.
@@ -1784,13 +1798,12 @@ mod tests {
     fn a_perspective_card_lines_up_with_its_room_from_the_eye_it_was_baked_for() {
         let eye = RoomEye {
             distance: 960.0,
-            height: 104.0,
+            height: EyeHeight::AboveRoom(104.0),
         };
         let (cooked, card) = walled(eye);
-        let ground = 0.0;
         let at = [
             card.centre[0] as f32 + eye.distance,
-            ground + eye.height,
+            104.0,
             card.centre[1] as f32,
         ];
         let fit = fit::fit_room(&cooked, &albedo(), 0, &card, at).expect("a fit");

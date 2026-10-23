@@ -476,31 +476,64 @@ fn relayout_rooms(
     Ok(blob)
 }
 
-/// Height of the eye above the lowest geometry of a room, in sectors, that the room cards
-/// are drawn from: the follow camera's, a person's height above the ground plus its boom.
-const CARD_EYE_HEIGHT_SECTORS: f32 = 1.3;
+/// Height of a person's eye above the floor, in sectors, that the room cards are drawn
+/// from: the follow camera's (its boom and a person's height).
+const CARD_EYE_HEIGHT_SECTORS: f32 = 1.45;
+
+/// Height of the floor the player spawns on, runtime units, when the scene places one.
+fn player_floor_y(scene: &crate::Scene) -> Option<f32> {
+    scene.nodes().iter().find_map(|node| match node.kind {
+        crate::NodeKind::SpawnPoint { player: true, .. } => Some(node.transform.translation[1]),
+        crate::NodeKind::Entity
+            if super::cook_entities::component_character_controller(scene, node)
+                .is_some_and(|controller| controller.player) =>
+        {
+            Some(node.transform.translation[1])
+        }
+        _ => None,
+    })
+}
 
 /// The eye the room cards are baked from: out along each heading by the radius the rooms
-/// are drawn whole to, where the game hands a room's geometry over to its card.
+/// are drawn whole to, where the game hands a room's geometry over to its card, at a
+/// person's height above the floor the player spawns on (a room far below or above that
+/// floor is seen from where the player sees it), or above the room's own lowest geometry
+/// for a scene with no spawn.
 pub fn room_card_eye(
     flood: &crate::grid::world::FloodSettings,
     sector: i32,
+    spawn_floor_y: Option<f32>,
 ) -> cook::cards::RoomEye {
+    let eye = CARD_EYE_HEIGHT_SECTORS * sector as f32;
     cook::cards::RoomEye {
         distance: (i32::from(flood.near_radius) * sector) as f32,
-        height: CARD_EYE_HEIGHT_SECTORS * sector as f32,
+        height: spawn_floor_y.map_or(cook::cards::EyeHeight::AboveRoom(eye), |y| {
+            cook::cards::EyeHeight::World(y + eye)
+        }),
     }
 }
 
-/// Cook `world` as [`cook_level_bytes`] does and return the cooked level with the mean
-/// colour of each of its materials, which is what the cards are baked from: for the card
-/// fit example and tests.
+/// What the cards are baked from.
+pub struct CardInputs {
+    pub cooked: cook::CookedLevel,
+    /// The mean colour of each material of the level.
+    pub albedo: Vec<[f32; 3]>,
+    /// Height of the floor the player spawns on, runtime units.
+    pub spawn_floor_y: Option<f32>,
+}
+
+/// Cook `world` as [`cook_level_bytes`] does and return what the cards are baked from: for the
+/// card fit example and tests. `project` is as authored; it is scaled to runtime units here,
+/// as the package build does.
 pub fn cook_for_cards(
     project: &ProjectDocument,
     world: &GridWorld,
     project_root: &Path,
-) -> Result<(cook::CookedLevel, Vec<[f32; 3]>), String> {
+) -> Result<CardInputs, String> {
     use crate::grid::lighting::{AlbedoTable, BakeMaterials};
+    let mut scaled = project.clone();
+    crate::units::scale_project_to_engine_units(&mut scaled);
+    let project = &scaled;
     let lights = scene_lights(project.active_scene());
     let mut assets = Vec::new();
     let mut by_path = HashMap::new();
@@ -526,7 +559,11 @@ pub fn cook_for_cards(
     let ids: Vec<Option<ResourceId>> = cooked.materials.iter().map(|(id, _)| *id).collect();
     let table = AlbedoTable::from_project(project, project_root, ids.iter().copied());
     let albedo = ids.iter().map(|&id| table.albedo(id)).collect();
-    Ok((cooked, albedo))
+    Ok(CardInputs {
+        cooked,
+        albedo,
+        spawn_floor_y: player_floor_y(project.active_scene()),
+    })
 }
 
 /// Bake the far cards of `cooked`: each level material coloured by its mean
@@ -553,7 +590,7 @@ fn bake_cards(
         // to compare the two (the gap scan).
         std::env::var_os("PSXED_CARDS_SHEAR")
             .is_none()
-            .then(|| room_card_eye(flood, sector)),
+            .then(|| room_card_eye(flood, sector, player_floor_y(project.active_scene()))),
     );
     // The layers of cards beyond the room cards: the guest works their bands out the same way
     // (`psx_grid::render::outer_bands`), so the level carries only the layer of each card.

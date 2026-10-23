@@ -58,7 +58,7 @@ pub use budget::*;
 mod cook_ui;
 mod grid_world;
 pub use grid_world::{
-    cook_for_cards, cook_level_bytes, room_card_eye, CookedLevelBytes, MaterialBinding,
+    cook_for_cards, cook_level_bytes, room_card_eye, CardInputs, CookedLevelBytes, MaterialBinding,
 };
 mod level_records;
 mod manifest;
