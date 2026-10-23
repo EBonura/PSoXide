@@ -105,6 +105,7 @@ mod critical_section_impl {
 /// kilobytes of nops. Every guest that links psx-rt therefore carries this
 /// 392-byte array in `.data` (776 bytes with `hazard-trampolines-192`,
 /// 1,032 bytes with `hazard-trampolines-256`); nothing reads it at runtime except the CPU.
+#[cfg(feature = "runtime")]
 #[no_mangle]
 #[used]
 static mut HAZARD_TRAMPOLINES: [u32; 2 + HAZARD_TRAMPOLINE_WORDS] = {
@@ -116,14 +117,18 @@ static mut HAZARD_TRAMPOLINES: [u32; 2 + HAZARD_TRAMPOLINE_WORDS] = {
 // Code words available to the patcher. A guest whose link reports
 // "trampoline array full" opts into 192 (+384 bytes) or 256 (+640 bytes).
 // Cargo feature unification selects the larger capacity when both are enabled.
-#[cfg(feature = "hazard-trampolines-256")]
+#[cfg(all(feature = "runtime", feature = "hazard-trampolines-256"))]
 const HAZARD_TRAMPOLINE_WORDS: usize = 256;
 #[cfg(all(
+    feature = "runtime",
     not(feature = "hazard-trampolines-256"),
     feature = "hazard-trampolines-192"
 ))]
 const HAZARD_TRAMPOLINE_WORDS: usize = 192;
-#[cfg(not(any(feature = "hazard-trampolines-256", feature = "hazard-trampolines-192")))]
+#[cfg(all(
+    feature = "runtime",
+    not(any(feature = "hazard-trampolines-256", feature = "hazard-trampolines-192"))
+))]
 const HAZARD_TRAMPOLINE_WORDS: usize = 96;
 
 // Symbols emitted by `psoxide.ld`.
@@ -136,12 +141,12 @@ extern "C" {
     static __heap_end: u8;
 }
 
-#[cfg(target_arch = "mips")]
+#[cfg(all(target_arch = "mips", feature = "runtime"))]
 extern "Rust" {
     fn main();
 }
 
-#[cfg(target_arch = "mips")]
+#[cfg(all(target_arch = "mips", feature = "runtime"))]
 #[used]
 #[link_section = ".region"]
 static PSX_EXE_REGION: [u8; 55] = *b"PSoXide SDK homebrew executable                        ";
@@ -160,7 +165,7 @@ static PSX_EXE_REGION: [u8; 55] = *b"PSoXide SDK homebrew executable            
 /// have set up a valid stack pointer before branching here -- the
 /// PSX-EXE header's `initial_sp_base` + `initial_sp_offset` fields
 /// guarantee this.
-#[cfg(target_arch = "mips")]
+#[cfg(all(target_arch = "mips", feature = "runtime"))]
 #[no_mangle]
 #[link_section = ".text._start"]
 pub unsafe extern "C" fn _start(a0: u32, a1: u32, a2: u32) -> ! {
@@ -279,7 +284,7 @@ pub fn halt() -> ! {
 /// SDK use `std`'s panic handler -- this avoids the lang-item conflict
 /// that would otherwise fire when something on host transitively
 /// depends on both `psx-rt` and `std`.
-#[cfg(target_arch = "mips")]
+#[cfg(all(target_arch = "mips", feature = "runtime"))]
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
     let info = (info as *const core::panic::PanicInfo<'_>).cast::<u8>();
@@ -287,7 +292,7 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
     report_panic(info)
 }
 
-#[cfg(target_arch = "mips")]
+#[cfg(all(target_arch = "mips", feature = "runtime"))]
 #[inline(never)]
 extern "C" fn report_panic(info: *const u8) -> ! {
     // SAFETY: `panic` passes its `&PanicInfo`, alive for the whole panic.
@@ -327,7 +332,7 @@ extern "C" fn report_panic(info: *const u8) -> ! {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime"))]
 mod trampoline_capacity_tests {
     #[test]
     fn selected_header_and_exact_storage_match_feature_precedence() {

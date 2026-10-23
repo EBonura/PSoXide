@@ -101,6 +101,8 @@ transfer between) uses `with_dma_quiesced`; `Peripherals::dma_owners` borrows th
 for a program that kept its `Peripherals` whole, and a program that gave the tokens to
 drivers lends them back through `Gpu::dma_mut` and `SectorReader::cd_mut`.
 
-The chain loader's own flush routine (a copy of the same sequence) is outside this crate and
-needs the same wait before its cache control write; the link gate will flag it when it adopts
-the gate.
+A program that brings its own entry point and panic handler (the demo disc's chain-load blob)
+uses this module without the runtime: depend on `psx-rt` with `default-features = false`, which
+leaves out `_start`, the panic handler and the hazard-trampoline array and keeps `cache`,
+`critical_section` and `interrupts`. `psx-chainloader` does, and flushes through
+`flush_instruction_cache` like everything else, after waiting for every DMA channel to be idle.
