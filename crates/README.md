@@ -13,6 +13,7 @@ runtime; they are the lowest common layer the rest of the repo builds on.
 | [`psx-disasm`](psx-disasm) | R3000 (MIPS I) decoder that prints GNU objdump's `mips:3000` syntax, so the post-link hazard checks (`tools/psoxide-hazard`) read an image without objdump. |
 | [`psx-hw`](psx-hw) | PlayStation 1 hardware model: register addresses, bitfield layouts, and command packet formats. Shared by emulator and SDK. |
 | [`psx-iso`](psx-iso) | BIN/CUE and ISO9660 parsing for PS1 disc images. Shared by emulator, SDK, and disc-builder. |
+| [`psx-library`](psx-library) | Host-side install of a built disc into the games library: `Game Name (repo)` naming, atomic replace with digest check, safe removal of stale flat-named copies and a provenance record. Used by every game's build tool. |
 | [`psx-trace`](psx-trace) | Instruction trace record format emitted by the emulator core (originally shared with the retired PCSX-Redux parity oracle). |
 | [`psxed-format`](psxed-format) | Neutral cooked-asset formats shared by the SDK, editor cookers and engine. |
 
