@@ -85,16 +85,11 @@ pub enum Op {
     },
 }
 
-/// Ops one HUD needs at most (a loose upper bound for sizing buffers).
-pub const MAX_OPS: usize = 48;
+/// Ops one HUD needs at most: every band of both bars, both caps, both bars' cells, the emblem
+/// and the gems.
+pub const MAX_OPS: usize = 2 * BAND_COUNT + 2 + 3 * (COUNT as usize) + 1;
 
-fn bar(
-    origin: (i32, i32),
-    front: bool,
-    stance: Stance,
-    lit: u8,
-    draw: &mut impl FnMut(Op),
-) {
+fn bar(origin: (i32, i32), front: bool, stance: Stance, lit: u8, draw: &mut impl FnMut(Op)) {
     let top = origin.1 + if front { FRONT_Y } else { 0 };
     // The bar behind shows only the rows above the one in front.
     let rows = if front { BAR_H } else { BACK_OFFSET };
@@ -137,10 +132,15 @@ fn bar(
     };
     for k in 0..COUNT {
         draw(Op::Sprite {
-            x: origin.0 + CELL_X0 + PITCH * k as i32,
+            x: origin.0 + CELL_X0 + PITCH * k,
             y: top + CELL_ROW,
             src,
-            clut: base + if (k as u8) < lit { lit_clut } else { empty_clut },
+            clut: base
+                + if (k as u8) < lit {
+                    lit_clut
+                } else {
+                    empty_clut
+                },
         });
     }
 }
@@ -158,7 +158,7 @@ pub fn compose(origin: (i32, i32), state: &HudState, draw: &mut impl FnMut(Op)) 
     });
     for k in 0..COUNT {
         draw(Op::Sprite {
-            x: origin.0 + GEM_X0 + PITCH * k as i32,
+            x: origin.0 + GEM_X0 + PITCH * k,
             y: origin.1 + GEM_Y,
             src: SPRITE_GEM,
             clut: if (k as u8) < state.energy {

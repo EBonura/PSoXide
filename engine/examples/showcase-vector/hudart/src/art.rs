@@ -18,16 +18,16 @@ pub const PITCH: i32 = 12;
 /// Left edge of the flat part of the plate (it starts under the emblem) and the first column of the
 /// sloped end.
 pub const BAR_X0: i32 = 20;
-pub const CAP_X: i32 = 152;
+pub const CAP_X: i32 = 151;
 /// The bar behind sits this many rows above the front one; only these rows of it show.
-pub const BACK_OFFSET: i32 = 8;
+pub const BACK_OFFSET: i32 = 9;
 /// Top row of the front bar, in HUD coordinates.
 pub const FRONT_Y: i32 = BACK_OFFSET;
 /// Cell origin (left edge of its bottom row) and its top row inside the bar.
 pub const CELL_X0: i32 = 30;
-pub const CELL_ROW: i32 = 4;
+pub const CELL_ROW: i32 = 5;
 /// Emblem top-left.
-pub const EMBLEM_POS: (i32, i32) = (1, 3);
+pub const EMBLEM_POS: (i32, i32) = (1, 6);
 /// First gem's left edge.
 pub const GEM_X0: i32 = 32;
 /// Gem sprite height.
@@ -36,6 +36,8 @@ pub const GEM_H: i32 = 8;
 /// What a row of the bar plate is.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Row {
+    /// The dark rim above the bar, which keeps its edge visible over a bright scene.
+    Rim,
     /// The bright outline along the top.
     Out,
     /// The lit bevel under it.
@@ -54,10 +56,13 @@ enum Row {
     Shade,
     /// The dark outline along the bottom.
     Foot,
+    /// The dark rim under the bar.
+    Drop,
 }
 
 /// The rows of the bar plate, top to bottom. The recess holds the cells with one row of margin.
-const ROWS: [Row; 16] = [
+const ROWS: [Row; 18] = [
+    Row::Rim,
     Row::Out,
     Row::Hi,
     Row::Mid,
@@ -74,6 +79,7 @@ const ROWS: [Row; 16] = [
     Row::Lip,
     Row::Shade,
     Row::Foot,
+    Row::Drop,
 ];
 
 /// Rows of the bar plate.
@@ -185,32 +191,54 @@ fn row_index(k: Row) -> u8 {
         Row::Foot => 7,
         Row::WellTop => 8,
         Row::WellLow => 9,
+        Row::Rim => 10,
+        Row::Drop => 10,
     }
 }
 
-/// The sloped right end of the bar: 8 columns wide, as tall as the plate, its end edge leaning one
-/// pixel per two rows like the cells.
+/// Width of the cap sprite.
+pub const CAP_W: usize = 9;
+
+/// The sloped right end of the bar, as tall as the plate, its end edge leaning one pixel per two
+/// rows like the cells, with the dark rim following it on the outside.
 pub fn cap() -> Sprite {
-    let mut s = Sprite::new(8, BAR_H as usize);
+    let mut s = Sprite::new(CAP_W, BAR_H as usize);
+    // Columns of the plate (outline included) in row `r`, for the rows that have the plate.
+    let end = |r: usize| 8 - (r.max(1) - 1) / 2;
     for (r, &kind) in ROWS.iter().enumerate() {
-        let end = 8 - r / 2;
-        for c in 0..end {
-            let edge = c + 1 == end;
-            let wall = c + 2 == end;
-            let i = match kind {
-                Row::Out => row_index(Row::Out),
-                Row::Foot => row_index(Row::Foot),
-                _ if edge => {
-                    if r + 2 >= ROWS.len() {
-                        row_index(Row::Foot)
-                    } else {
-                        row_index(Row::Out)
-                    }
+        match kind {
+            Row::Rim => {
+                for c in 0..=end(1) {
+                    s.set(c, r, row_index(Row::Rim));
                 }
-                Row::WellTop | Row::Recess | Row::WellLow if wall => row_index(Row::Hi),
-                k => row_index(k),
-            };
-            s.set(c, r, i);
+            }
+            Row::Drop => {
+                for c in 0..=end(r - 1) {
+                    s.set(c, r, row_index(Row::Drop));
+                }
+            }
+            _ => {
+                let e = end(r);
+                for c in 0..e {
+                    let edge = c + 1 == e;
+                    let wall = c + 2 == e;
+                    let i = match kind {
+                        Row::Out => row_index(Row::Out),
+                        Row::Foot => row_index(Row::Foot),
+                        _ if edge => {
+                            if r + 3 >= ROWS.len() {
+                                row_index(Row::Foot)
+                            } else {
+                                row_index(Row::Out)
+                            }
+                        }
+                        Row::WellTop | Row::Recess | Row::WellLow if wall => row_index(Row::Hi),
+                        k => row_index(k),
+                    };
+                    s.set(c, r, i);
+                }
+                s.set(e, r, row_index(Row::Rim));
+            }
         }
     }
     s
@@ -345,6 +373,7 @@ fn row_colour(k: Row, c: Rgb) -> Rgb {
         Row::Lip => scale(c, 170),
         Row::Shade => scale(c, 120),
         Row::Foot => scale(c, 66),
+        Row::Rim | Row::Drop => scale(c, 20),
     }
 }
 
@@ -371,6 +400,7 @@ pub fn band_count() -> usize {
 pub fn cap_palette(t: Tone) -> Palette {
     let mut p = [[0u8; 3]; 16];
     for k in [
+        Row::Rim,
         Row::Out,
         Row::Hi,
         Row::Mid,
@@ -471,13 +501,14 @@ pub fn clut(p: &Palette) -> [u16; 16] {
 }
 
 /// Where each sprite sits in the atlas.
-pub const ATLAS_W: usize = 48;
+/// A multiple of 8 so that a row is a whole number of VRAM words.
+pub const ATLAS_W: usize = 56;
 pub const ATLAS_H: usize = 24;
 pub const ATLAS_POS: [(&str, (usize, usize)); 4] = [
     ("EMBLEM", (0, 0)),
     ("CAP", (24, 0)),
-    ("CELL", (32, 0)),
-    ("GEM", (32, 8)),
+    ("CELL", (36, 0)),
+    ("GEM", (36, 10)),
 ];
 
 /// All sprites by atlas name.

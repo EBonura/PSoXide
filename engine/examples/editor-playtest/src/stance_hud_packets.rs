@@ -36,7 +36,12 @@ impl HudVram {
     /// Copy the atlas and the palettes into VRAM. Do this once, before the first draw.
     pub fn upload(&self) {
         upload_16bpp(
-            VramRect::new(self.page.x(), self.page.y(), ATLAS_HW_W as u16, ATLAS_H as u16),
+            VramRect::new(
+                self.page.x(),
+                self.page.y(),
+                ATLAS_HW_W as u16,
+                ATLAS_H as u16,
+            ),
             &ATLAS,
         );
         upload_16bpp(
@@ -106,7 +111,9 @@ impl<const N: usize> HudPackets<N> {
         compose(origin, state, &mut |op| {
             let node = match op {
                 Op::Rect { x, y, w, h, rgb } => {
-                    let r = RectFlat::new(x as i16, y as i16, w as u16, h as u16, rgb[0], rgb[1], rgb[2]);
+                    let r = RectFlat::new(
+                        x as i16, y as i16, w as u16, h as u16, rgb[0], rgb[1], rgb[2],
+                    );
                     Node {
                         tag: 3 << 24,
                         words: [r.color_cmd, r.xy, r.wh, 0, 0, 0],

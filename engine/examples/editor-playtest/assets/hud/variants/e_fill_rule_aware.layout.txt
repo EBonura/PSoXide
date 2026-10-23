@@ -1,0 +1,16 @@
+# Layout of the round-2 vector variant E in the hud-grid frame (columns 0 and 160), for cellcheck --strict.
+cols = 0, 160
+y0 = 8
+pitch_y = 40
+levels = 10, 6, 3, 0
+count = 10
+cell_x0 = 30
+pitch = 12
+front_band = 8, 24
+back_band = 1, 8
+back_lit = 4
+gem_x0 = 31
+gem_band = 26, 34
+mirror = emblem_core 7 10 19 22
+mirror = emblem_top 6 4 20 8
+mirror = emblem_bottom 1 24 25 28

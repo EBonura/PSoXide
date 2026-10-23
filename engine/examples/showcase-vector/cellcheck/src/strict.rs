@@ -157,12 +157,7 @@ impl Layout {
 #[derive(Default)]
 pub struct Marks(pub Vec<(i32, i32)>);
 
-fn strip_pixels(
-    f: &Frame,
-    x0: i32,
-    band: (i32, i32),
-    width: i32,
-) -> Result<Vec<[u8; 3]>, String> {
+fn strip_pixels(f: &Frame, x0: i32, band: (i32, i32), width: i32) -> Result<Vec<[u8; 3]>, String> {
     if !f.contains(x0, band.0) || !f.contains(x0 + width - 1, band.1 - 1) {
         return Err(format!(
             "strip x {x0}..{} rows {}..{} is outside the frame",
@@ -207,7 +202,11 @@ fn check_strips(
 ) -> Result<(bool, String), String> {
     let mut classes: Vec<((u8, u8), Vec<usize>)> = Vec::new();
     for k in range.0..range.1.min(states.len()) {
-        let prev = if neighbour && k > 0 { states[k - 1] } else { EDGE };
+        let prev = if neighbour && k > 0 {
+            states[k - 1]
+        } else {
+            EDGE
+        };
         let key = (prev, states[k]);
         match classes.iter_mut().find(|c| c.0 == key) {
             Some(c) => c.1.push(k),
@@ -306,7 +305,10 @@ pub fn run(f: &Frame, l: &Layout, marks: &mut Marks) -> Result<bool, String> {
     for (ci, &ox) in l.cols.iter().enumerate() {
         for (ri, &lvl) in l.levels.iter().enumerate() {
             let oy = l.y0 + l.pitch_y * ri as i32;
-            println!("HUD col {ci} row {ri} (origin {ox},{oy}), lit {lvl}/{}", l.count);
+            println!(
+                "HUD col {ci} row {ri} (origin {ox},{oy}), lit {lvl}/{}",
+                l.count
+            );
             let lit_states: Vec<u8> = (0..l.count)
                 .map(|k| if k < lvl { LIT } else { EMPTY })
                 .collect();
@@ -353,7 +355,12 @@ pub fn run(f: &Frame, l: &Layout, marks: &mut Marks) -> Result<bool, String> {
             let mut gem_bad = 0usize;
             for k in l.gem_from..l.gem_to.min(l.count) {
                 let gx = ox + l.gem_x0 + l.pitch * k as i32;
-                let r = (gx + 1, oy + l.gem_band.0, gx + l.pitch - 1, oy + l.gem_band.1);
+                let r = (
+                    gx + 1,
+                    oy + l.gem_band.0,
+                    gx + l.pitch - 1,
+                    oy + l.gem_band.1,
+                );
                 let (ok, _) = check_mirror(f, "gem", r, marks)?;
                 if !ok {
                     gem_bad += 1;
@@ -372,12 +379,7 @@ pub fn run(f: &Frame, l: &Layout, marks: &mut Marks) -> Result<bool, String> {
                 ),
             ));
             for m in &l.mirrors {
-                let r = (
-                    ox + m.rect.0,
-                    oy + m.rect.1,
-                    ox + m.rect.2,
-                    oy + m.rect.3,
-                );
+                let r = (ox + m.rect.0, oy + m.rect.1, ox + m.rect.2, oy + m.rect.3);
                 results.push(check_mirror(f, &m.name, r, marks)?);
             }
             for (ok, text) in results {

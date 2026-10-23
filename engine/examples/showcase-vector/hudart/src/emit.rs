@@ -20,12 +20,7 @@ pub const CLUT_NAMES: [&str; 7] = [
 
 fn stance_colours() -> [(Tone, Tone, [u8; 3], [u8; 3]); 2] {
     [
-        (
-            Tone::front(HORIZON),
-            Tone::back(HORIZON),
-            HORIZON,
-            ZENITH,
-        ),
+        (Tone::front(HORIZON), Tone::back(HORIZON), HORIZON, ZENITH),
         (Tone::front(ZENITH), Tone::back(ZENITH), ZENITH, HORIZON),
     ]
 }
@@ -69,13 +64,17 @@ pub fn art_module() -> String {
         ("GEM_Y", art::GEM_Y),
         ("CANVAS_W", art::CANVAS.0),
         ("CANVAS_H", art::CANVAS.1),
+        ("CAP_W", art::CAP_W as i32),
     ] {
         let _ = writeln!(s, "pub const {name}: i32 = {v};");
     }
     let _ = writeln!(s, "\npub const ATLAS_HW_W: usize = {};", ATLAS_W / 4);
     let _ = writeln!(s, "pub const ATLAS_H: usize = {};", art::ATLAS_H);
     let atlas = art::atlas_halfwords();
-    let _ = writeln!(s, "/// 4-bit texels, four per halfword, leftmost in the low nibble.");
+    let _ = writeln!(
+        s,
+        "/// 4-bit texels, four per halfword, leftmost in the low nibble."
+    );
     let _ = writeln!(s, "pub static ATLAS: [u16; {}] = [", atlas.len());
     for row in atlas.chunks(ATLAS_W / 4) {
         let line: Vec<String> = row.iter().map(|w| format!("0x{w:04x}")).collect();
@@ -91,24 +90,41 @@ pub fn art_module() -> String {
     }
     let table = cluts();
     let _ = writeln!(s, "\npub const CLUT_COUNT: usize = {};", table.len());
-    let _ = writeln!(s, "pub const CLUTS_PER_STANCE: usize = {};", CLUT_NAMES.len());
+    let _ = writeln!(
+        s,
+        "pub const CLUTS_PER_STANCE: usize = {};",
+        CLUT_NAMES.len()
+    );
     for (i, name) in CLUT_NAMES.iter().enumerate() {
         let _ = writeln!(s, "pub const CLUT_{name}: usize = {i};");
     }
-    let _ = writeln!(s, "pub const CLUT_GEM_LIT: usize = {};", 2 * CLUT_NAMES.len());
-    let _ = writeln!(s, "pub const CLUT_GEM_EMPTY: usize = {};", 2 * CLUT_NAMES.len() + 1);
-    let _ = writeln!(s, "/// 15-bit CLUT entries, 16 per CLUT in table order, entry 0 of each transparent.");
+    let _ = writeln!(
+        s,
+        "pub const CLUT_GEM_LIT: usize = {};",
+        2 * CLUT_NAMES.len()
+    );
+    let _ = writeln!(
+        s,
+        "pub const CLUT_GEM_EMPTY: usize = {};",
+        2 * CLUT_NAMES.len() + 1
+    );
+    let _ = writeln!(
+        s,
+        "/// 15-bit CLUT entries, 16 per CLUT in table order, entry 0 of each transparent."
+    );
     let _ = writeln!(s, "pub static CLUTS: [u16; {}] = [", table.len() * 16);
     for c in &table {
         let line: Vec<String> = c.iter().map(|w| format!("0x{w:04x}")).collect();
         let _ = writeln!(s, "    {},", line.join(", "));
     }
     let _ = writeln!(s, "];\n");
+    let n = art::band_count();
+    let _ = writeln!(s, "/// Bands of one bar.");
+    let _ = writeln!(s, "pub const BAND_COUNT: usize = {n};");
     let _ = writeln!(
         s,
         "/// Plate bands by `[stance][front 0, back 1][band]`: rows `y0..y1` of the bar in this colour."
     );
-    let n = art::band_count();
     let _ = writeln!(s, "pub static BANDS: [[[Band; {n}]; 2]; 2] = [");
     for (front, back, _, _) in stance_colours() {
         let _ = writeln!(s, "    [");
@@ -116,7 +132,10 @@ pub fn art_module() -> String {
             let items: Vec<String> = bands(t)
                 .iter()
                 .map(|(a, b, c)| {
-                    format!("Band {{ y0: {a}, y1: {b}, rgb: [{}, {}, {}] }}", c[0], c[1], c[2])
+                    format!(
+                        "Band {{ y0: {a}, y1: {b}, rgb: [{}, {}, {}] }}",
+                        c[0], c[1], c[2]
+                    )
                 })
                 .collect();
             let _ = writeln!(s, "        [{}],", items.join(", "));
@@ -147,7 +166,7 @@ pub fn layout() -> String {
          gem_x0 = {gem_x0}\n\
          gem_band = {gy}, {gy2}\n\
          mirror = emblem_core {cx0} {cy0} {cx1} {cy1}\n\
-         mirror = emblem_top {tx0} {ey} {tx1} {plate_top}\n\
+         mirror = emblem_inner {tx0} {ey} {tx1} {ey2}\n\
          mirror = emblem_bottom {ex} {pb} {ex2} {ey2}\n",
         count = art::COUNT,
         cell_x0 = art::CELL_X0,

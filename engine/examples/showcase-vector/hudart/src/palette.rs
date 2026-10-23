@@ -34,12 +34,3 @@ pub fn to_555(c: Rgb) -> u16 {
         v
     }
 }
-
-/// What the GPU shows for an 8-bit colour (the top five bits, expanded the way the emulator's
-/// display conversion does).
-pub fn shown(c: Rgb) -> Rgb {
-    c.map(|v| {
-        let v5 = v >> 3;
-        (v5 << 3) | (v5 >> 2)
-    })
-}

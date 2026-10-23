@@ -17,11 +17,11 @@ extern crate psx_rt;
 mod hud;
 
 #[cfg(feature = "hud-sprites")]
-#[path = "../../editor-playtest/src/stance_hud_sprites.rs"]
-mod hud_sprites;
-#[cfg(feature = "hud-sprites")]
 #[path = "../../editor-playtest/src/stance_hud_packets.rs"]
 mod hud_packets;
+#[cfg(feature = "hud-sprites")]
+#[path = "../../editor-playtest/src/stance_hud_sprites.rs"]
+mod hud_sprites;
 
 use hud::{draw_hud, Bar, HudIds, HudState, SCRATCH_VERTICES};
 use psx_engine::{App, Config, Ctx, OtFrame, Scene};
@@ -177,7 +177,8 @@ impl Scene for Demo {
         let frame = self.frames;
         self.frames += 1;
         if let (false, Some(ids), Some(asset)) =
-            (GRID || SPRITES, self.ids.as_ref(), self.hud.as_ref()) {
+            (GRID || SPRITES, self.ids.as_ref(), self.hud.as_ref())
+        {
             // The HUD state flips every 48 frames; the packets are rebuilt
             // only then, and linked every frame.
             let state = if (frame / 48) % 2 == 0 {
@@ -510,7 +511,11 @@ impl Demo {
                 for (i, hud) in huds.iter_mut().enumerate() {
                     let (col, row) = (i / 4, i % 4);
                     let level = [10u8, 6, 3, 0][row];
-                    let stance = if col == 0 { Stance::Horizon } else { Stance::Zenith };
+                    let stance = if col == 0 {
+                        Stance::Horizon
+                    } else {
+                        Stance::Zenith
+                    };
                     let state = SpriteState {
                         stance,
                         health: level,
@@ -534,9 +539,19 @@ impl Demo {
             return;
         }
         let state = if (frame / 48) % 2 == 0 {
-            SpriteState { stance: Stance::Zenith, health: 9, back_health: 6, energy: 4 }
+            SpriteState {
+                stance: Stance::Zenith,
+                health: 9,
+                back_health: 6,
+                energy: 4,
+            }
         } else {
-            SpriteState { stance: Stance::Horizon, health: 6, back_health: 9, energy: 7 }
+            SpriteState {
+                stance: Stance::Horizon,
+                health: 6,
+                back_health: 9,
+                energy: 7,
+            }
         };
         let hud = &mut huds[0];
         if self.sprite_state != Some(state) {

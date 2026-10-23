@@ -1,8 +1,8 @@
 //! hudview: paints the sprite HUD on the host with the same composition code the guest uses, for
 //! quick looks and for comparing with an emulator frame.
 //!
-//! hudview grid <out.ppm>     the two-stance, four-level grid of the `hud-grid` frame
-//! hudview one <out.ppm> [horizon|zenith] [health] [back] [energy]
+//! hudview grid <out.ppm> [bg=r,g,b]    the two-stance, four-level grid of the `hud-grid` frame
+//! hudview one <out.ppm> [horizon|zenith] [health] [back] [energy] [bg=r,g,b]|zenith] [health] [back] [energy]
 
 #![allow(dead_code)]
 
@@ -12,6 +12,17 @@ mod hud;
 use hud::{compose, HudState, Op, Stance};
 
 const BG: [u8; 3] = [16, 24, 40];
+
+/// A background given as `bg=r,g,b` on the command line.
+fn background(args: &[String]) -> [u8; 3] {
+    args.iter()
+        .find_map(|a| a.strip_prefix("bg="))
+        .and_then(|v| {
+            let n: Vec<u8> = v.split(',').filter_map(|s| s.parse().ok()).collect();
+            (n.len() == 3).then(|| [n[0], n[1], n[2]])
+        })
+        .unwrap_or(BG)
+}
 
 struct Frame {
     w: usize,
@@ -30,11 +41,11 @@ fn shown(c: [u8; 3]) -> [u8; 3] {
 }
 
 impl Frame {
-    fn new(w: usize, h: usize) -> Self {
+    fn new(w: usize, h: usize, bg: [u8; 3]) -> Self {
         Self {
             w,
             h,
-            px: vec![shown(BG); w * h],
+            px: vec![shown(bg); w * h],
         }
     }
 
@@ -92,7 +103,7 @@ fn main() {
     };
     match mode.as_str() {
         "grid" => {
-            let mut f = Frame::new(320, 240);
+            let mut f = Frame::new(320, 240, background(&a));
             for (col, stance) in [Stance::Horizon, Stance::Zenith].into_iter().enumerate() {
                 for (row, level) in [10u8, 6, 3, 0].into_iter().enumerate() {
                     let state = HudState {
@@ -101,7 +112,9 @@ fn main() {
                         back_health: 4,
                         energy: level,
                     };
-                    compose((160 * col as i32, 8 + 40 * row as i32), &state, &mut |op| f.op(op));
+                    compose((160 * col as i32, 8 + 40 * row as i32), &state, &mut |op| {
+                        f.op(op)
+                    });
                 }
             }
             f.write(path);
@@ -119,10 +132,53 @@ fn main() {
                 back_health: num(4, 4),
                 energy: num(5, 6),
             };
-            let mut f = Frame::new(160, 40);
+            let mut f = Frame::new(160, 40, background(&a));
             compose((0, 4), &state, &mut |op| f.op(op));
             f.write(path);
         }
         _ => std::process::exit(2),
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::hud::{
+        compose, HudState, Op, Stance, ATLAS_H, ATLAS_HW_W, CANVAS_H, CANVAS_W, MAX_OPS,
+    };
+
+    /// Every state fits the buffers, and paints inside the canvas and the atlas.
+    #[test]
+    fn every_state_stays_inside_its_bounds() {
+        for stance in [Stance::Horizon, Stance::Zenith] {
+            for health in 0..=10u8 {
+                for back_health in [0u8, 4, 10] {
+                    for energy in [0u8, 3, 10] {
+                        let state = HudState {
+                            stance,
+                            health,
+                            back_health,
+                            energy,
+                        };
+                        let mut n = 0;
+                        compose((0, 0), &state, &mut |op| {
+                            n += 1;
+                            match op {
+                                Op::Rect { x, y, w, h, .. } => {
+                                    assert!(x >= 0 && y >= 0 && w > 0 && h > 0);
+                                    assert!(x + w <= CANVAS_W && y + h <= CANVAS_H);
+                                }
+                                Op::Sprite { x, y, src, .. } => {
+                                    assert!(x >= 0 && y >= 0);
+                                    assert!(x + src.w as i32 <= CANVAS_W);
+                                    assert!(y + src.h as i32 <= CANVAS_H);
+                                    assert!(src.u as usize + src.w as usize <= ATLAS_HW_W * 4);
+                                    assert!(src.v as usize + src.h as usize <= ATLAS_H);
+                                }
+                            }
+                        });
+                        assert!(n <= MAX_OPS, "{n} ops, room for {MAX_OPS}");
+                    }
+                }
+            }
+        }
     }
 }

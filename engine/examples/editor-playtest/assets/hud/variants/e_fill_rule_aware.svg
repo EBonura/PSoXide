@@ -1,0 +1,91 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="160" height="36" viewBox="0 0 160 36">
+  <!--
+    Cortex stance HUD, round 2 vector variant E. Every edge of a repeated or mirrored part is axis
+    aligned or at 45 degrees (the PS1 fill rule then rasterises left and right alike), the gradients
+    run top to bottom only, the gems are flat two-tone diamonds, and there is no rail.
+    Draw order, back to front: plate (dimmed, offset up), plate, health_0..9, emblem, emblem_core,
+    energy_0..9.
+  -->
+  <g id="plate">
+    <path d="M20 8 L152 8 L152 24 L20 24 Z" data-corners="#f8f8f8 #f8f8f8 #707070 #707070"/>
+    <path d="M152 8 L160 8 L152 24 Z" data-corners="#f8f8f8 #f8f8f8 #707070"/>
+    <path d="M20 11 L152 11 L152 21 L20 21 Z" fill="#0c0c0c"/>
+    <path d="M20 8 L160 8 L159 9 L20 9 Z" fill="#ffffff"/>
+  </g>
+  <g id="health_0">
+    <path d="M34 12 L44 12 L40 20 L30 20 Z" data-corners="#ffffff #ffffff #9a9a9a #9a9a9a"/>
+  </g>
+  <g id="health_1">
+    <path d="M46 12 L56 12 L52 20 L42 20 Z" data-corners="#ffffff #ffffff #9a9a9a #9a9a9a"/>
+  </g>
+  <g id="health_2">
+    <path d="M58 12 L68 12 L64 20 L54 20 Z" data-corners="#ffffff #ffffff #9a9a9a #9a9a9a"/>
+  </g>
+  <g id="health_3">
+    <path d="M70 12 L80 12 L76 20 L66 20 Z" data-corners="#ffffff #ffffff #9a9a9a #9a9a9a"/>
+  </g>
+  <g id="health_4">
+    <path d="M82 12 L92 12 L88 20 L78 20 Z" data-corners="#ffffff #ffffff #9a9a9a #9a9a9a"/>
+  </g>
+  <g id="health_5">
+    <path d="M94 12 L104 12 L100 20 L90 20 Z" data-corners="#ffffff #ffffff #9a9a9a #9a9a9a"/>
+  </g>
+  <g id="health_6">
+    <path d="M106 12 L116 12 L112 20 L102 20 Z" data-corners="#ffffff #ffffff #9a9a9a #9a9a9a"/>
+  </g>
+  <g id="health_7">
+    <path d="M118 12 L128 12 L124 20 L114 20 Z" data-corners="#ffffff #ffffff #9a9a9a #9a9a9a"/>
+  </g>
+  <g id="health_8">
+    <path d="M130 12 L140 12 L136 20 L126 20 Z" data-corners="#ffffff #ffffff #9a9a9a #9a9a9a"/>
+  </g>
+  <g id="health_9">
+    <path d="M142 12 L152 12 L148 20 L138 20 Z" data-corners="#ffffff #ffffff #9a9a9a #9a9a9a"/>
+  </g>
+  <g id="emblem">
+    <path d="M8 4 L18 4 L25 11 V21 L18 28 H8 L1 21 V11 Z" fill="#c8c8c8"/>
+  </g>
+  <g id="emblem_core">
+    <path d="M13 10 L19 16 L13 22 L7 16 Z" fill="#d0d0d0"/>
+  </g>
+  <g id="energy_0">
+    <path d="M33 30 L37 26 L41 30 Z" fill="#fff2be"/>
+    <path d="M33 30 L41 30 L37 34 Z" fill="#c06a08"/>
+  </g>
+  <g id="energy_1">
+    <path d="M45 30 L49 26 L53 30 Z" fill="#fff2be"/>
+    <path d="M45 30 L53 30 L49 34 Z" fill="#c06a08"/>
+  </g>
+  <g id="energy_2">
+    <path d="M57 30 L61 26 L65 30 Z" fill="#fff2be"/>
+    <path d="M57 30 L65 30 L61 34 Z" fill="#c06a08"/>
+  </g>
+  <g id="energy_3">
+    <path d="M69 30 L73 26 L77 30 Z" fill="#fff2be"/>
+    <path d="M69 30 L77 30 L73 34 Z" fill="#c06a08"/>
+  </g>
+  <g id="energy_4">
+    <path d="M81 30 L85 26 L89 30 Z" fill="#fff2be"/>
+    <path d="M81 30 L89 30 L85 34 Z" fill="#c06a08"/>
+  </g>
+  <g id="energy_5">
+    <path d="M93 30 L97 26 L101 30 Z" fill="#fff2be"/>
+    <path d="M93 30 L101 30 L97 34 Z" fill="#c06a08"/>
+  </g>
+  <g id="energy_6">
+    <path d="M105 30 L109 26 L113 30 Z" fill="#fff2be"/>
+    <path d="M105 30 L113 30 L109 34 Z" fill="#c06a08"/>
+  </g>
+  <g id="energy_7">
+    <path d="M117 30 L121 26 L125 30 Z" fill="#fff2be"/>
+    <path d="M117 30 L125 30 L121 34 Z" fill="#c06a08"/>
+  </g>
+  <g id="energy_8">
+    <path d="M129 30 L133 26 L137 30 Z" fill="#fff2be"/>
+    <path d="M129 30 L137 30 L133 34 Z" fill="#c06a08"/>
+  </g>
+  <g id="energy_9">
+    <path d="M141 30 L145 26 L149 30 Z" fill="#fff2be"/>
+    <path d="M141 30 L149 30 L145 34 Z" fill="#c06a08"/>
+  </g>
+</svg>
