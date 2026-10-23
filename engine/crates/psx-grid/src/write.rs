@@ -481,8 +481,6 @@ pub struct LevelCore {
     pub flood: Option<FloodBlock>,
     /// The skin block ([`LEVEL_HAS_SKIN`]). `None`: nothing is written.
     pub skin: Option<SkinBlock>,
-    /// The coarse block ([`LEVEL_HAS_COARSE`]). `None`: nothing is written.
-    pub coarse: Option<CoarseBlock>,
 }
 
 /// The tail of a core that asks for a budgeted flood: its radii and a cost
@@ -502,19 +500,6 @@ pub struct SkinBlock {
     /// `rooms * lod_count + 1` entries.
     pub cell_first: Vec<u16>,
     pub leaves: Vec<SkinLeaf>,
-}
-
-/// The coarse mesh of a level: its header, the first vertex and triangle of
-/// each room (and one past the last), the vertices and the triangles (corner
-/// indices local to the room's vertices).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct CoarseBlock {
-    pub header: CoarseHeader,
-    /// `rooms + 1` entries each.
-    pub vertex_first: Vec<u16>,
-    pub triangle_first: Vec<u16>,
-    pub vertices: Vec<CoarseVertex>,
-    pub triangles: Vec<[u8; 3]>,
 }
 
 impl LevelCore {
@@ -591,11 +576,6 @@ impl LevelCore {
                 }
                 | if self.skin.is_some() {
                     LEVEL_HAS_SKIN
-                } else {
-                    0
-                }
-                | if self.coarse.is_some() {
-                    LEVEL_HAS_COARSE
                 } else {
                     0
                 },
@@ -683,31 +663,6 @@ impl LevelCore {
             out.extend_from_slice(bytes_of(&skin.cell_first));
             align4(&mut out);
             out.extend_from_slice(bytes_of(&skin.leaves));
-        }
-        if let Some(coarse) = &self.coarse {
-            let rooms = self.rooms.len() + 1;
-            if coarse.vertex_first.len() != rooms
-                || coarse.triangle_first.len() != rooms
-                || usize::from(coarse.header.vertex_count) != coarse.vertices.len()
-                || usize::from(coarse.header.triangle_count) != coarse.triangles.len()
-                || coarse.vertex_first.last().map(|&v| usize::from(v))
-                    != Some(coarse.vertices.len())
-                || coarse.triangle_first.last().map(|&t| usize::from(t))
-                    != Some(coarse.triangles.len())
-            {
-                return Err(alloc::format!(
-                    "coarse mesh of {} vertices and {} triangles does not match its room starts",
-                    coarse.vertices.len(),
-                    coarse.triangles.len()
-                ));
-            }
-            align4(&mut out);
-            out.extend_from_slice(bytes_of(core::slice::from_ref(&coarse.header)));
-            out.extend_from_slice(bytes_of(&coarse.vertex_first));
-            out.extend_from_slice(bytes_of(&coarse.triangle_first));
-            align4(&mut out);
-            out.extend_from_slice(bytes_of(&coarse.vertices));
-            out.extend_from_slice(bytes_of(&coarse.triangles));
         }
         align4(&mut out);
         Ok(out)

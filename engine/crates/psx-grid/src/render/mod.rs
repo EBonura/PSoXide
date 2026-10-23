@@ -34,7 +34,6 @@ use crate::view::RoomView;
 
 mod cards;
 mod clip;
-mod coarse;
 mod emit;
 mod frustum;
 mod projection;
@@ -49,7 +48,6 @@ pub use cards::{
     TEXELS, VIEWS, VIEW_COS_Q12, VIEW_SIN_Q12,
 };
 pub use clip::clip_polygon_plane;
-pub use coarse::{rooms_within, CoarseCamera, CoarseRenderer, COARSE_PACKET_WORDS};
 #[cfg(target_arch = "mips")]
 pub use frustum::load_gte_clip_planes;
 pub use frustum::{FrustumPlanes, CLIP_ALL_PLANES};

@@ -27,6 +27,7 @@ pub const GAMEPLAY_PACK_MAX_CHUNK_BYTES: usize = 0;
 pub const WORLD_PACK_START_LBA: u32 = 1024;
 pub const GRID_ROOM_COUNT: usize = 0;
 pub const GRID_ROOM_POOL_PAGES: usize = 1;
+pub const GRID_ROOM_ENTRIES: usize = 1;
 /// Per room, the sector of its baked sparse cube sky relative to the start of
 /// WORLD.PAK (0 for none), and the sectors it occupies.
 pub const GRID_ROOM_SKY_SECTORS: [u32; GRID_ROOM_COUNT] = [];
@@ -57,7 +58,7 @@ pub const GRID_ROOM_CARD_PLACE: &[u8] = &[];
 /// top of the screen).
 pub const GRID_CARD_FAR: i32 = 0;
 pub const GRID_CARD_FADE: i32 = 0;
-/// No card is drawn closer than this (the coarse band stands there).
+/// No card is drawn closer than this (the rooms there are drawn whole).
 pub const GRID_CARD_NEAR: i32 = 0;
 pub const GRID_CARD_BACKDROP: [[u8; 3]; 3] = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
 pub const LEN_ROOMS: usize = 0;

@@ -388,7 +388,9 @@ impl<'a> ResidentRooms<'a> {
         }
     }
 
-    /// Drop a room from the set, returning its slot.
+    /// Drop a room from the set, returning its slot. The material buffer of
+    /// the slot is kept for the next room inserted, so the returned slot's is
+    /// empty.
     pub fn remove(&mut self, room: usize) -> Option<RoomSlot<'a>> {
         let index = *self.slot_of.get(room)?;
         if index == NO_SLOT {

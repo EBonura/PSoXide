@@ -107,14 +107,6 @@ pub struct LevelView<'a> {
     pub skin: Option<&'a SkinHeader>,
     pub skin_cells: &'a [u16],
     pub skin_leaves: &'a [SkinLeaf],
-    /// With [`LEVEL_HAS_COARSE`]: the coarse block's header, the first vertex
-    /// and first triangle of each room (`room_count + 1` entries each), the
-    /// vertices and the triangles. `None` and empty otherwise.
-    pub coarse: Option<&'a CoarseHeader>,
-    pub coarse_vertex_first: &'a [u16],
-    pub coarse_triangle_first: &'a [u16],
-    pub coarse_vertices: &'a [CoarseVertex],
-    pub coarse_triangles: &'a [[u8; 3]],
 }
 
 impl<'a> LevelView<'a> {
@@ -178,36 +170,10 @@ impl<'a> LevelView<'a> {
             offset += core::mem::size_of_val(cells);
             offset = offset.next_multiple_of(4);
             let leaves = table::<SkinLeaf>(bytes, offset, usize::from(block.leaf_count))?;
-            offset += core::mem::size_of_val(leaves);
             (Some(block), cells, leaves)
         } else {
             (None, &[][..], &[][..])
         };
-        let (coarse, coarse_vertex_first, coarse_triangle_first, coarse_vertices, coarse_triangles) =
-            if head.flags & LEVEL_HAS_COARSE != 0 {
-                offset = offset.next_multiple_of(4);
-                let block = header_at::<CoarseHeader>(bytes, offset)?;
-                offset += core::mem::size_of::<CoarseHeader>();
-                let starts = usize::from(head.room_count) + 1;
-                let vertex_first = table::<u16>(bytes, offset, starts)?;
-                offset += core::mem::size_of_val(vertex_first);
-                let triangle_first = table::<u16>(bytes, offset, starts)?;
-                offset += core::mem::size_of_val(triangle_first);
-                offset = offset.next_multiple_of(4);
-                let vertices =
-                    table::<CoarseVertex>(bytes, offset, usize::from(block.vertex_count))?;
-                offset += core::mem::size_of_val(vertices);
-                let triangles = table::<[u8; 3]>(bytes, offset, usize::from(block.triangle_count))?;
-                (
-                    Some(block),
-                    vertex_first,
-                    triangle_first,
-                    vertices,
-                    triangles,
-                )
-            } else {
-                (None, &[][..], &[][..], &[][..], &[][..])
-            };
         Ok(Self {
             header: head,
             rooms,
@@ -222,11 +188,6 @@ impl<'a> LevelView<'a> {
             skin,
             skin_cells,
             skin_leaves,
-            coarse,
-            coarse_vertex_first,
-            coarse_triangle_first,
-            coarse_vertices,
-            coarse_triangles,
         })
     }
 
@@ -387,33 +348,6 @@ impl<'a> LevelView<'a> {
                 || self.skin_cells.last().map(|&l| usize::from(l)) != Some(self.skin_leaves.len())
             {
                 return Err(FormatError::IndexRange);
-            }
-        }
-        if self.coarse.is_some() {
-            let ascending = |v: &[u16]| v.windows(2).all(|w| w[0] <= w[1]);
-            if !ascending(self.coarse_vertex_first)
-                || !ascending(self.coarse_triangle_first)
-                || self.coarse_vertex_first.last().map(|&v| usize::from(v))
-                    != Some(self.coarse_vertices.len())
-                || self.coarse_triangle_first.last().map(|&t| usize::from(t))
-                    != Some(self.coarse_triangles.len())
-            {
-                return Err(FormatError::IndexRange);
-            }
-            // A triangle's corners are indices into its room's vertices.
-            for room in 0..self.rooms.len() {
-                let verts = usize::from(self.coarse_vertex_first[room + 1])
-                    - usize::from(self.coarse_vertex_first[room]);
-                let (first, last) = (
-                    usize::from(self.coarse_triangle_first[room]),
-                    usize::from(self.coarse_triangle_first[room + 1]),
-                );
-                if self.coarse_triangles[first..last]
-                    .iter()
-                    .any(|t| t.iter().any(|&c| usize::from(c) >= verts))
-                {
-                    return Err(FormatError::IndexRange);
-                }
             }
         }
         if let Some(flood) = self.flood {

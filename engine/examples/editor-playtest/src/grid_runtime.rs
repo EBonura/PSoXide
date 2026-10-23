@@ -38,14 +38,16 @@ use psx_grid::render::{
     GridRenderer, RoomCamera, SkinCamera, SkinRenderer, ViewProjection, ViewTransform,
     CLIP_ALL_PLANES,
 };
-use psx_grid::stream::{room_at, StreamWindow, Want, WantedRoom};
+use psx_grid::stream::{room_at, StreamWindow, Want};
 use psx_grid::{FormatError, LevelView, ResidentRooms, RoomActivity, RoomView, LEVEL_HAS_LIQUIDS};
 use psx_gte::math::Vec3I32 as GteVec3I32;
 use psx_gte::scene;
 use psx_level::world_object_flags;
 use psx_residency::{CategoryConfig, Class, Wanted};
 
-use crate::generated::{GRID_ROOM_COUNT, GRID_ROOM_POOL_PAGES, WORLD_PACK_START_LBA};
+use crate::generated::{
+    GRID_ROOM_COUNT, GRID_ROOM_ENTRIES, GRID_ROOM_POOL_PAGES, WORLD_PACK_START_LBA,
+};
 use crate::grid_materials::{bind_pending, Pending};
 use crate::level_data::WORLD_OBJECTS;
 use crate::world_common::{
@@ -54,14 +56,27 @@ use crate::world_common::{
 use crate::world_objects_runtime::WorldObjectVisibility;
 use crate::{telemetry, PROJECTION};
 
-/// Rooms the pool and the residency table can hold at once: never more rooms
-/// than pages, and never more than the level has, plus slack for a room backing
-/// off after a failed read.
-const ROOM_ENTRIES: usize = (if GRID_ROOM_COUNT < GRID_ROOM_POOL_PAGES {
-    GRID_ROOM_COUNT
-} else {
-    GRID_ROOM_POOL_PAGES
-}) + 2;
+/// Rooms the residency table tracks at once: never more rooms than pages, and
+/// never more than the level has, nor more than the cook found any wanted set
+/// holding (with slack: `GRID_ROOM_ENTRIES`), plus slack for a room backing off
+/// after a failed read. Every lookup in the table walks it, so a Citadel's 150
+/// entries cost a streamer step several times what its busiest set needs.
+const ROOM_ENTRIES: usize = {
+    let by_pool = if GRID_ROOM_COUNT < GRID_ROOM_POOL_PAGES {
+        GRID_ROOM_COUNT
+    } else {
+        GRID_ROOM_POOL_PAGES
+    };
+    (if GRID_ROOM_ENTRIES < by_pool {
+        GRID_ROOM_ENTRIES
+    } else {
+        by_pool
+    }) + 2
+};
+
+/// Ticks an unchanged wanted set goes without a streamer step while reads are
+/// in flight and none has finished.
+const STEP_EVERY_TICKS: u8 = 8;
 
 /// Words of the room pool, 512 to a 2 KiB page.
 const ROOM_POOL_WORDS: usize = GRID_ROOM_POOL_PAGES * 512;
@@ -117,8 +132,11 @@ pub(super) struct GridRuntime {
     activity: RoomActivity,
     /// The rooms the level wants resident around the player and the camera.
     window: StreamWindow,
-    /// Scratch of the streamer's wanted list.
-    wanted: Vec<WantedRoom>,
+    /// The stamp of the wanted set `settled` was reached for, and whether the
+    /// lead ring was held back then.
+    wanted_seen: Option<(u32, bool)>,
+    /// Ticks since the streamer last stepped with the wanted set unchanged.
+    idle_ticks: u8,
     wanted_res: Vec<Wanted>,
     /// Room the player was last found in by the core alone, the search hint.
     stream_hint: usize,
@@ -150,11 +168,6 @@ pub(super) struct GridRuntime {
     skin: SkinRenderer,
     /// Per room, whether the frame draws it whole (no far card then).
     card_skip: Vec<bool>,
-    coarse: psx_grid::render::CoarseRenderer,
-    /// The rooms the coarse draw looks at, and the eye (plan) they were made
-    /// for: see `psx_grid::render::rooms_within`.
-    far_rooms: Vec<u16>,
-    far_rooms_eye: Option<[i32; 2]>,
     last_world_packet_words: usize,
     camera_traces: u32,
     /// Sight-line cache for [`Self::visible_view_bounds_mask`].
@@ -264,7 +277,8 @@ impl GridRuntime {
             resident,
             activity: RoomActivity::new(&level),
             window,
-            wanted: Vec::new(),
+            wanted_seen: None,
+            idle_ticks: 0,
             wanted_res: Vec::new(),
             settled: None,
             stream_hint: 0,
@@ -281,9 +295,6 @@ impl GridRuntime {
             skin_skip: Vec::new(),
             skin: SkinRenderer::new(),
             card_skip: Vec::new(),
-            coarse: psx_grid::render::CoarseRenderer::new(),
-            far_rooms: Vec::new(),
-            far_rooms_eye: None,
             last_world_packet_words: 0,
             camera_traces: 0,
             view_known: 0,
@@ -350,14 +361,37 @@ impl GridRuntime {
             self.stream_hint = room;
         }
         let camera_room = camera.and_then(|at| room_at(&self.level, self.stream_hint, at));
-        self.window.wanted(
+        let stamp = self.window.refresh(
             &self.level,
             player_room.map(|room| (room, player)),
             camera.zip(camera_room).map(|(at, room)| (room, at)),
-            &mut self.wanted,
         );
+        // The same wanted set again, after the streamer left every room of it
+        // resident: nothing to read, evict or install.
+        let same = self.wanted_seen == Some((stamp, demand_only));
+        if same && self.settled.is_some() {
+            return;
+        }
+        if same {
+            // The set has not changed but the streamer is still at work: a
+            // read is in flight, or a room waits for a free slot. A step then
+            // only polls the reads and tries again, which a step costs a good
+            // deal for (every wanted room is looked up in the residency table).
+            // Poll the reads cheaply instead, and step when one finished, a
+            // landed room waits to be installed, or a while has passed.
+            self.idle_ticks = self.idle_ticks.saturating_add(1);
+            if self.idle_ticks < STEP_EVERY_TICKS && !Self::streamer().has_work(&mut DiscTransport)
+            {
+                if self.need_missing != 0 && self.streamed_once {
+                    self.late_short_windows = self.late_short_windows.saturating_add(1);
+                }
+                return;
+            }
+        }
+        self.idle_ticks = 0;
+        self.wanted_seen = Some((stamp, demand_only));
         self.wanted_res.clear();
-        for wanted in &self.wanted {
+        for wanted in self.window.wanted_set() {
             if demand_only && wanted.want == Want::Lead {
                 continue;
             }
@@ -403,6 +437,18 @@ impl GridRuntime {
             },
         );
         telemetry::counter(telemetry::counter::CD_ROOM_CHUNK_LOADS, summary.issued);
+        // What the step saw, for the profile: the wanted list it was given
+        // (zero on a tick that skipped the step), the wanted rooms not yet
+        // resident, and the reads in flight.
+        telemetry::counter(
+            telemetry::counter::ROOM_STREAM_PREFETCH_REQUESTS,
+            self.wanted_res.len() as u32,
+        );
+        telemetry::counter(telemetry::counter::ROOM_STREAM_MISSES, summary.missing);
+        telemetry::counter(
+            telemetry::counter::ROOM_STREAM_PENDING_LOADS,
+            summary.in_flight,
+        );
         self.settled = (summary.missing == 0 && summary.in_flight == 0).then_some(signature);
         let mut installed = false;
         let resident = &mut self.resident;
@@ -425,7 +471,8 @@ impl GridRuntime {
             telemetry::counter(telemetry::counter::CD_ROOM_CHUNK_HITS, 1);
         }
         self.need_missing = self
-            .wanted
+            .window
+            .wanted_set()
             .iter()
             .filter(|w| w.want == Want::Need && !self.resident.contains(usize::from(w.room)))
             .count() as u32;
@@ -1193,13 +1240,10 @@ impl GridRuntime {
                         ..GridFrame::default()
                     });
                 }
-                if !total.overflowed
-                    && (self.level.coarse.is_some() || crate::vram_runtime::has_cards())
-                {
+                if !total.overflowed && crate::vram_runtime::has_cards() {
                     scene::load_translation(view.translation);
-                    // The rooms drawn whole stand in front of their own coarse
-                    // meshes and cards; every other room shows its coarse mesh
-                    // while it is near, and its card while it is far.
+                    // The rooms drawn whole stand in front of their own cards;
+                    // every other room shows its card.
                     self.card_skip.clear();
                     self.card_skip.resize(self.level.rooms.len(), false);
                     if let Some(drawn) = self.window.drawn_rooms() {
@@ -1210,69 +1254,15 @@ impl GridRuntime {
                             }
                         }
                     }
-                    let near_sz =
-                        (self.projection.focal_length / 2 + 2).clamp(1, i32::from(u16::MAX)) as u16;
-                    // Rooms whose centre is within this plan distance draw
-                    // their coarse mesh, and a card takes over `overlap` before.
-                    let (mesh_far, mesh_overlap) = self.level.coarse.map_or((0, 0), |c| {
-                        (
-                            i32::from(c.far_sectors) * sector,
-                            i32::from(c.overlap_sectors) * sector,
-                        )
-                    });
-                    if self.level.coarse.is_some() {
-                        telemetry::stage_begin(telemetry::stage::FAR_VISTA);
-                        // The band is a few rooms of the level: find them
-                        // again when the eye has walked two sectors, from
-                        // a radius three sectors wider than the draw's.
-                        let moved = self.far_rooms_eye.is_none_or(|at| {
-                            (eye[0] - at[0]).abs() > 2 * sector
-                                || (eye[2] - at[1]).abs() > 2 * sector
-                        });
-                        if moved {
-                            psx_grid::render::rooms_within(
-                                &self.level,
-                                eye,
-                                mesh_far + 3 * sector,
-                                &mut self.far_rooms,
-                            );
-                            self.far_rooms_eye = Some([eye[0], eye[2]]);
-                        }
-                        let coarse = self.coarse.draw(
-                            &self.level,
-                            &self.card_skip,
-                            &psx_grid::render::CoarseCamera {
-                                right: plan_axes(&view.rotation.m).0,
-                                forward: plan_axes(&view.rotation.m).1,
-                                half_tan_q12: ((self.projection.half_width << 12)
-                                    / self.projection.focal_length.max(1))
-                                    * 6
-                                    / 5,
-                                eye,
-                                screen,
-                                near_sz,
-                                far: mesh_far,
-                                rooms: &self.far_rooms,
-                            },
-                            if reverse {
-                                &mut packets[..packet_count - total.packet_words]
-                            } else {
-                                &mut packets[total.packet_words..]
-                            },
-                            reverse,
-                        );
-                        telemetry::stage_end(telemetry::stage::FAR_VISTA);
-                        total.absorb(&GridFrame {
-                            packet_words: coarse.packet_words,
-                            packets: coarse.packets,
-                            overflowed: coarse.overflowed,
-                            ..GridFrame::default()
-                        });
-                    }
                     #[cfg(feature = "cd-stream-bench")]
                     if !total.overflowed {
                         if let Some((atlas, tpage)) = crate::vram_runtime::card_atlas() {
-                            use crate::generated::{GRID_CARDS, GRID_CARD_FADE, GRID_CARD_FAR};
+                            use crate::generated::{
+                                GRID_CARDS, GRID_CARD_FADE, GRID_CARD_FAR, GRID_CARD_NEAR,
+                            };
+                            let near_sz = (self.projection.focal_length / 2 + 2)
+                                .clamp(1, i32::from(u16::MAX))
+                                as u16;
                             telemetry::stage_begin(telemetry::stage::FAR_VISTA);
                             let (right, forward) = plan_axes(&view.rotation.m);
                             let (card_live, card_list) = crate::vram_runtime::card_slots();
@@ -1296,11 +1286,7 @@ impl GridRuntime {
                                         .level
                                         .flood
                                         .map_or(0, |flood| i32::from(flood.near_radius) * sector),
-                                    hide_all: if self.level.coarse.is_some() {
-                                        (mesh_far - mesh_overlap).max(0)
-                                    } else {
-                                        crate::generated::GRID_CARD_NEAR
-                                    },
+                                    hide_all: GRID_CARD_NEAR,
                                     fade: GRID_CARD_FADE,
                                     outer: crate::vram_runtime::card_bands(),
                                     tpage,
@@ -1326,11 +1312,7 @@ impl GridRuntime {
                                     * 6
                                     / 5,
                                 far: GRID_CARD_FAR,
-                                hide_all: if self.level.coarse.is_some() {
-                                    (mesh_far - mesh_overlap).max(0)
-                                } else {
-                                    crate::generated::GRID_CARD_NEAR
-                                },
+                                hide_all: GRID_CARD_NEAR,
                                 drawn: cards.quads_visible,
                                 looked: cards.cells_visible,
                             });

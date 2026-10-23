@@ -177,6 +177,30 @@ fn draw(
 }
 
 #[test]
+fn an_evicted_rooms_material_buffer_serves_the_next_room_inserted() {
+    let core_words = aligned_copy(&core(0));
+    let level = LevelView::parse(words_as_bytes(&core_words, core_words.len() * 4)).unwrap();
+    let chunks: Vec<Vec<u32>> = (0..ROOMS).map(|_| aligned_copy(&chunk())).collect();
+    let view = |i: usize| RoomView::parse(words_as_bytes(&chunks[i], chunks[i].len() * 4)).unwrap();
+    let mut resident = ResidentRooms::with_capacity(level, 2).unwrap();
+    resident.reserve_rooms(2);
+    resident.insert(0, view(0)).unwrap();
+    resident.get_mut(0).unwrap().materials = vec![material(); 6];
+    let buffer = resident.get(0).unwrap().materials.as_ptr();
+    let removed = resident.remove(0).unwrap();
+    assert!(
+        removed.materials.is_empty(),
+        "the buffer stays with the set"
+    );
+    // The next room, whichever it is, takes the buffer back, emptied.
+    resident.insert(1, view(1)).unwrap();
+    let slot = resident.get_mut(1).unwrap();
+    assert!(slot.materials.is_empty() && slot.materials.capacity() >= 6);
+    slot.materials.push(material());
+    assert_eq!(slot.materials.as_ptr(), buffer);
+}
+
+#[test]
 fn rooms_load_and_evict_without_breaking_draw_collision_or_entities() {
     let core_words = aligned_copy(&core(0));
     let level = LevelView::parse(words_as_bytes(&core_words, core_words.len() * 4)).unwrap();

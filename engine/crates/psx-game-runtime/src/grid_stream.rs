@@ -412,6 +412,21 @@ impl<const ENTRIES: usize, T: RoomTransport> GridStreamer<ENTRIES, T> {
         }
     }
 
+    /// Whether a step or an install has something to act on that the last
+    /// step left: a read in flight that has finished, or a landed room waiting
+    /// to be installed. Cheap (one poll per read in flight and one pass over
+    /// the table), so a caller whose wanted list has not changed can use it to
+    /// skip the step until it says so.
+    pub fn has_work(&self, transport: &mut T) -> bool {
+        debug_assert!(self.started);
+        let finished = self.flight.iter().any(|flight| {
+            flight
+                .ticket
+                .is_some_and(|ticket| transport.poll(ticket) != Poll::Pending)
+        });
+        finished || self.res().next_install(None).is_some()
+    }
+
     /// Install at most one landed room: hand its bytes to `install` (parse the
     /// chunk and make it resident), and mark it resident when that succeeds.
     /// Returns the room installed. A room that fails to install backs off and
@@ -692,6 +707,29 @@ mod tests {
 
     fn want(room: u16, class: Class, distance: u32) -> Wanted {
         wanted_room(room, class, distance)
+    }
+
+    #[test]
+    fn a_streamer_has_work_only_when_a_read_finished_or_a_room_landed() {
+        let rooms = rooms(3, 3);
+        let mut t = Script::default();
+        let mut s = streamer::<3>(9);
+        let wanted = [want(0, Class::Demand, 0), want(1, Class::Demand, 100)];
+        assert!(!s.has_work(&mut t), "nothing in flight yet");
+        s.step(&mut t, &rooms, &wanted, &|_| u32::MAX, &mut |_| {});
+        assert_eq!(t.pending().len(), 2);
+        assert!(!s.has_work(&mut t), "both reads are still on the drive");
+        t.finish(0, 0);
+        assert!(
+            s.has_work(&mut t),
+            "a read finished and has not been collected"
+        );
+        s.step(&mut t, &rooms, &wanted, &|_| u32::MAX, &mut |_| {});
+        assert!(s.has_work(&mut t), "the landed room waits to be installed");
+        assert_eq!(s.install_next(&mut |_, _| true), Some(0));
+        assert!(!s.has_work(&mut t), "the other read is still pending");
+        t.fail(1);
+        assert!(s.has_work(&mut t), "a failed read also needs a step");
     }
 
     #[test]

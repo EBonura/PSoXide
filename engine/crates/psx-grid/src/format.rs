@@ -215,46 +215,6 @@ impl SkinLeaf {
     }
 }
 
-/// Level flag: the core ends with a coarse block (after the skin block, each
-/// part on a word boundary): a [`CoarseHeader`], `room_count + 1` first-vertex
-/// and first-triangle indices (`u16` each), the [`CoarseVertex`] records and
-/// the triangles. The coarse mesh is each room's geometry merged by vertex
-/// clustering into a few Gouraud triangles; it is drawn for the rooms between
-/// the full-detail radius and the far cards.
-pub const LEVEL_HAS_COARSE: u32 = 1 << 8;
-
-/// Fixed part of the coarse block ([`LEVEL_HAS_COARSE`]), 8 bytes.
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub struct CoarseHeader {
-    pub vertex_count: u16,
-    pub triangle_count: u16,
-    /// Rooms whose centre is within this many sectors of the eye draw their
-    /// coarse mesh.
-    pub far_sectors: u8,
-    /// Sectors a coarse room and its far card are both drawn, so the swap
-    /// between them overlaps.
-    pub overlap_sectors: u8,
-    pub reserved: [u8; 2],
-}
-const _: () = assert!(core::mem::size_of::<CoarseHeader>() == 8);
-
-/// One vertex of a room's coarse mesh, 8 bytes: a world position in runtime
-/// units and a colour.
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub struct CoarseVertex {
-    pub x: i16,
-    pub y: i16,
-    pub z: i16,
-    /// RGB555, bits 0 to 4 red.
-    pub rgb: u16,
-}
-const _: () = assert!(core::mem::size_of::<CoarseVertex>() == 8);
-
-/// Most vertices one room's coarse mesh holds (triangle corners are bytes).
-pub const COARSE_MAX_VERTICES: usize = 255;
-
 /// Room flag: sky may show (an open sector exists).
 pub const ROOM_OUTDOOR: u16 = 1;
 /// Room flag: distance fog.

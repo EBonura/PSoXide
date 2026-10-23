@@ -166,6 +166,25 @@ pub struct StreamWindow {
     /// Per room: 0 not seen this call, 1 need, 2 lead. Reset from `touched`.
     mark: Vec<u8>,
     touched: Vec<u16>,
+    /// The wanted set of the last [`Self::refresh`], and what it was made
+    /// from, so a tick that changed none of the searches reuses it.
+    wanted_cache: Vec<WantedRoom>,
+    wanted_key: Option<WantedKey>,
+    wanted_stamp: u32,
+    /// Bumped whenever the cached searches were thrown away.
+    generation: u32,
+}
+
+/// What a flood level's wanted set was made from: the observers present and
+/// the result in force of each search. The set is a function of these alone.
+#[derive(Copy, Clone, PartialEq, Eq)]
+struct WantedKey {
+    player: bool,
+    camera: bool,
+    generation: u32,
+    active: u32,
+    draw: u32,
+    lead: u32,
 }
 
 impl StreamWindow {
@@ -208,6 +227,10 @@ impl StreamWindow {
             flood,
             mark: vec![0; level.rooms.len()],
             touched: Vec::new(),
+            wanted_cache: Vec::new(),
+            wanted_key: None,
+            wanted_stamp: 0,
+            generation: 0,
         }
     }
 
@@ -256,7 +279,8 @@ impl StreamWindow {
     ) {
         out.clear();
         if self.flood.is_some() {
-            self.wanted_flood(level, player, camera, out);
+            self.refresh_flood(level, player, camera);
+            out.extend_from_slice(&self.wanted_cache);
             return;
         }
         if self.ring {
@@ -303,13 +327,13 @@ impl StreamWindow {
 
     /// [`Self::wanted`] for a flood level: need is the camera's drawn set and
     /// the player's activation walk, lead the rest of the player's resident
-    /// flood.
-    fn wanted_flood(
+    /// flood. Keeps the searches current and rebuilds `wanted_cache` only when
+    /// one of them (or the observers) changed.
+    fn refresh_flood(
         &mut self,
         level: &LevelView<'_>,
         player: Option<(usize, [i32; 3])>,
         camera: Option<(usize, [i32; 3])>,
-        out: &mut Vec<WantedRoom>,
     ) {
         let Some(flood) = self.flood.as_mut() else {
             return;
@@ -327,6 +351,26 @@ impl StreamWindow {
         } else {
             flood.draw.invalidate();
         }
+        // The set is a function of the observers present and of the result in
+        // force of the three searches; a tick that changed none of them
+        // (nearly every tick) keeps the set it made last time and spends no
+        // merge or sort on it.
+        let key = WantedKey {
+            player: player.is_some(),
+            camera: camera.is_some(),
+            generation: self.generation,
+            active: self.active.epoch(),
+            draw: flood.draw.epoch(),
+            lead: flood.lead.epoch(),
+        };
+        if self.wanted_key == Some(key) {
+            return;
+        }
+        self.wanted_key = Some(key);
+        self.wanted_stamp = self.wanted_stamp.wrapping_add(1);
+        let mut set = core::mem::take(&mut self.wanted_cache);
+        set.clear();
+        let out = &mut set;
         for entry in &flood.drawn {
             Self::note(
                 &mut self.mark,
@@ -356,6 +400,36 @@ impl StreamWindow {
         }
         self.touched.clear();
         out.sort_by_key(|w| (w.want == Want::Lead, w.distance, w.room));
+        self.wanted_cache = set;
+    }
+
+    /// Bring the wanted set up to date for the observers (see
+    /// [`Self::wanted`]) without copying it out: read it with
+    /// [`Self::wanted_set`]. Returns a stamp that differs from the last
+    /// call's whenever the set may have changed; a flood level, whose set
+    /// changes only when one of its searches finishes, returns the same stamp
+    /// tick after tick, which lets a caller skip the work it derives from the
+    /// set.
+    pub fn refresh(
+        &mut self,
+        level: &LevelView<'_>,
+        player: Option<(usize, [i32; 3])>,
+        camera: Option<(usize, [i32; 3])>,
+    ) -> u32 {
+        if self.flood.is_some() {
+            self.refresh_flood(level, player, camera);
+        } else {
+            let mut set = core::mem::take(&mut self.wanted_cache);
+            self.wanted(level, player, camera, &mut set);
+            self.wanted_cache = set;
+            self.wanted_stamp = self.wanted_stamp.wrapping_add(1);
+        }
+        self.wanted_stamp
+    }
+
+    /// The set [`Self::refresh`] last made: need rooms, then lead rooms.
+    pub fn wanted_set(&self) -> &[WantedRoom] {
+        &self.wanted_cache
     }
 
     /// [`Self::wanted`] for a ring level: each observer's room and the rooms
@@ -435,6 +509,8 @@ impl StreamWindow {
 
     /// Forget every cached search.
     pub fn invalidate(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.wanted_key = None;
         self.draw.invalidate();
         self.active.invalidate();
         self.lead.invalidate();
@@ -469,6 +545,10 @@ pub struct PoolPlan {
     pub peak_pages: usize,
     /// Rooms in that set.
     pub peak_rooms: usize,
+    /// Most rooms any wanted set holds at the positions tried (more rooms
+    /// than the set of the peak pages when many of them are small): what a
+    /// table of tracked rooms has to be able to list.
+    pub max_rooms: usize,
     /// Pages to reserve: the peak plus room for fragmentation and for the
     /// rooms still resident from the last position while the next fill lands,
     /// never more than the whole level.
@@ -495,6 +575,7 @@ pub fn plan_pool(level: &LevelView<'_>, room_pages: &[usize]) -> PoolPlan {
         max_room_pages,
         peak_pages: total_pages,
         peak_rooms: room_pages.len(),
+        max_rooms: room_pages.len(),
         pool_pages: total_pages,
     };
     let mut window = StreamWindow::new(level);
@@ -503,6 +584,7 @@ pub fn plan_pool(level: &LevelView<'_>, room_pages: &[usize]) -> PoolPlan {
     }
     let mut wanted = Vec::new();
     let mut peak = (0usize, 0usize);
+    let mut most_rooms = 0usize;
     let mut try_at = |window: &mut StreamWindow, room: usize, at: [i32; 3]| {
         window.invalidate();
         window.wanted(level, Some((room, at)), Some((room, at)), &mut wanted);
@@ -513,6 +595,7 @@ pub fn plan_pool(level: &LevelView<'_>, room_pages: &[usize]) -> PoolPlan {
         if pages > peak.0 {
             peak = (pages, wanted.len());
         }
+        most_rooms = most_rooms.max(wanted.len());
     };
     for room in 0..level.rooms.len() {
         let (min, max) = level.room_bounds(room);
@@ -556,6 +639,7 @@ pub fn plan_pool(level: &LevelView<'_>, room_pages: &[usize]) -> PoolPlan {
     }
     plan.peak_pages = peak.0;
     plan.peak_rooms = peak.1;
+    plan.max_rooms = most_rooms;
     // A ring or flood level's wanted set already holds the rooms it will need
     // next (the lead), so it needs room for one more chunk landing, not half
     // its peak again.

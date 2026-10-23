@@ -22,7 +22,6 @@ fn level() -> LevelCore {
         occupancy: Vec::new(),
         flood: None,
         skin: None,
-        coarse: None,
         flags: LEVEL_HAS_SKY,
         sector_units: 80,
         max_room_pages: 1,

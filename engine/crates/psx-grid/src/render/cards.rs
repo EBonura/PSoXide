@@ -289,7 +289,7 @@ pub struct CardCamera {
     /// plan distance, and no closer.
     pub hide_inside: i32,
     /// No card is drawn closer than this plan distance, drawn whole or not
-    /// (the coarse band stands there).
+    /// (the rooms there are drawn whole).
     pub hide_all: i32,
     /// A card within this distance of `far` fades in: its modulation colour
     /// ramps from black to neutral over it.
