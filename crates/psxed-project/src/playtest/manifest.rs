@@ -402,6 +402,25 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         sky.background_rows, sky.background_runs, sky.initial_mask,
     );
 
+    // Far cards: where each room stands, and where its pictures are on the disc.
+    let cards = &package.world_geometry.cards;
+    let card_sectors = chunk_card_sectors(package);
+    let _ = writeln!(
+        out,
+        "/// Far cards (`psx_grid::render::cards`): per room `[x, z, base, height, half width, 0]`\n\
+         /// in world runtime units (a zero height: no card), and the sector of its pictures\n\
+         /// relative to the start of WORLD.PAK (0 for none). Empty: the world has no cards.\n\
+         pub const GRID_CARDS: &[[i16; 6]] = &{:?};\n\
+         pub const GRID_ROOM_CARD_SECTORS: &[u32] = &{card_sectors:?};\n\
+         /// Cards show out to this many runtime units from the camera, fading in over the\n\
+         /// last `GRID_CARD_FADE`; the colours behind them (below the horizon, at it, at the\n\
+         /// top of the screen).\n\
+         pub const GRID_CARD_FAR: i32 = {};\n\
+         pub const GRID_CARD_FADE: i32 = {};\n\
+         pub const GRID_CARD_BACKDROP: [[u8; 3]; 3] = {:?};\n",
+        cards.rows, cards.far, cards.fade, cards.backdrop,
+    );
+
     // The shape of the level's own records: how many of each table chunk 1 of
     // WORLD.PAK holds. The records ride the disc; the executable keeps only
     // these counts, to size its arrays and to leave out code for tables the
@@ -1231,7 +1250,8 @@ fn xa_cache_key(
 
 /// What `WORLD.PAK` holds, in disc order: the grid level core as chunk 0, the
 /// level's own records as chunk 1, then room `i` as chunk `i + 2`, then (for a
-/// world that bakes them) room `i`'s sky as chunk `rooms + i + 2`. The three
+/// world that bakes them) room `i`'s sky as chunk `rooms + i + 2` and its card
+/// pictures as chunk `2 * rooms + i + 2`. The three
 /// the guest needs first sit in the pack's first header sector. A package without a grid world (the placeholder
 /// manifest) has an empty pack, a header-only `WORLD.PAK`, which keeps
 /// `UI.PAK`'s start LBA and the loader contract stable.
@@ -1262,6 +1282,20 @@ fn world_pack_chunks(package: &PlaytestPackage) -> Vec<(u32, &[u8])> {
                     )
                 }),
         )
+        .chain(
+            world
+                .cards
+                .pictures
+                .iter()
+                .enumerate()
+                .filter(|(_, bytes)| !bytes.is_empty())
+                .map(|(room, bytes)| {
+                    (
+                        (2 * world.room_chunks.len() + room) as u32 + 2,
+                        bytes.as_slice(),
+                    )
+                }),
+        )
         .collect()
 }
 
@@ -1281,6 +1315,25 @@ fn chunk_sky_sectors(package: &PlaytestPackage) -> (Vec<u32>, Vec<u32>) {
         }
     }
     (sectors, counts)
+}
+
+/// Per room, the sector of its card pictures relative to the start of
+/// `WORLD.PAK` (0 for none); empty when the world has no cards.
+fn chunk_card_sectors(package: &PlaytestPackage) -> Vec<u32> {
+    let world = &package.world_geometry;
+    if world.cards.pictures.iter().all(Vec::is_empty) {
+        return Vec::new();
+    }
+    let rooms = world.room_chunks.len();
+    let layout = world_pack_layout(package);
+    let mut sectors = vec![0u32; rooms];
+    for entry in &layout.entries {
+        let id = entry.chunk_id as usize;
+        if id >= 2 * rooms + 2 && id < 3 * rooms + 2 {
+            sectors[id - 2 * rooms - 2] = entry.sector_offset;
+        }
+    }
+    sectors
 }
 
 fn world_pack_layout(package: &PlaytestPackage) -> psx_iso::WorldPackLayout {

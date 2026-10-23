@@ -9,6 +9,8 @@
 //! Layout and meaning of every record: `docs/grid/level-format-and-runtime.md`
 //! and `psx_grid::format`.
 
+pub mod cards;
+pub mod coarse;
 pub mod collision;
 pub mod leaf_collision;
 pub mod lod;

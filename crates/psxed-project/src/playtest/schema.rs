@@ -125,6 +125,26 @@ pub struct PlaytestSkyTables {
     pub palettes: Vec<Vec<[u8; 3]>>,
 }
 
+/// The far cards of a world ([`psx_grid::render::cards`]); empty when the
+/// world has none.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PlaytestCards {
+    /// Per room, `[x, z, base, height, half width, 0]` in world runtime
+    /// units; a zero height is a room with no card.
+    pub rows: Vec<[i16; 6]>,
+    /// Per room, the sectors of its pictures (`psx_grid::render::VIEWS` of
+    /// them), or empty for a room with no card. `WORLD.PAK` holds room `i`'s
+    /// after every chunk sky.
+    pub pictures: Vec<Vec<u8>>,
+    /// Cards are shown out to this many runtime units from the camera, and
+    /// fade in over the last `fade`.
+    pub far: i32,
+    pub fade: i32,
+    /// The colours behind the cards (below the horizon, at it, at the top
+    /// of the screen).
+    pub backdrop: [[u8; 3]; 3],
+}
+
 /// A cooked grid world: the resident level core and the room chunks.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PlaytestGridWorld {
@@ -163,6 +183,8 @@ pub struct PlaytestGridWorld {
     pub chunk_skies: Vec<Vec<u8>>,
     /// The tables the guest streams `chunk_skies` with.
     pub sky_tables: PlaytestSkyTables,
+    /// The far cards, for a flood world that bakes them.
+    pub cards: PlaytestCards,
     /// One block of text with the cook's sizes, for the build log.
     pub summary: String,
 }

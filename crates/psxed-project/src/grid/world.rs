@@ -105,6 +105,21 @@ pub struct FloodSettings {
     /// Runtime units two sectors' tops may differ by and still merge into one
     /// skin leaf (the skin's one detail knob); 0 means the default, 20.
     pub skin_tolerance: u8,
+    /// Draw the rooms beyond `near_radius` as upright pictures standing where
+    /// the rooms stand (`psx_grid::render::cards`), baked at cook time from
+    /// eight headings round each room. Needs `on` and a cube sky (the pictures
+    /// take the sky atlas's VRAM; the sky is drawn as a plain gradient).
+    pub cards: bool,
+    /// Sectors from the camera out to which cards are shown; 0 means the
+    /// default, 20.
+    pub card_far: u8,
+    /// Draw the rooms between `near_radius` and this many sectors as coarse
+    /// meshes (`psx_grid::render::coarse`): each room's geometry merged by
+    /// vertex clustering into a few Gouraud triangles. 0 is off. Needs `on`.
+    pub mesh_far: u8,
+    /// Grid cell of the clustering in tenths of a sector; 0 means the
+    /// default, 20 (two sectors).
+    pub mesh_cluster: u8,
 }
 
 impl FloodSettings {
@@ -117,7 +132,29 @@ impl FloodSettings {
         quad_budget: 0,
         skin: false,
         skin_tolerance: 0,
+        cards: false,
+        card_far: 0,
+        mesh_far: 0,
+        mesh_cluster: 0,
     };
+
+    /// Grid cell of the coarse mesh in sectors.
+    pub fn mesh_cluster_sectors(&self) -> f32 {
+        if self.mesh_cluster > 0 {
+            f32::from(self.mesh_cluster) / 10.0
+        } else {
+            2.0
+        }
+    }
+
+    /// Sectors out to which cards are shown.
+    pub fn card_far_sectors(&self) -> i32 {
+        if self.card_far > 0 {
+            i32::from(self.card_far)
+        } else {
+            20
+        }
+    }
 
     /// Whether these are the defaults (the document then omits them).
     pub fn is_default(&self) -> bool {

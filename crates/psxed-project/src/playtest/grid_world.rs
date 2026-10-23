@@ -23,7 +23,7 @@ use crate::{
 };
 
 use super::{
-    PlaytestAsset, PlaytestAssetKind, PlaytestGridWorld, PlaytestSkyTables,
+    PlaytestAsset, PlaytestAssetKind, PlaytestCards, PlaytestGridWorld, PlaytestSkyTables,
     PlaytestValidationReport, StreamedClass,
 };
 
@@ -293,6 +293,12 @@ pub(super) fn cook(
             return None;
         }
     }
+    if world.stream.flood.on && world.stream.flood.mesh_far > 0 {
+        if let Err(error) = add_coarse(project, project_root, world, &mut cooked, report) {
+            report.error(format!("grid world: {error}"));
+            return None;
+        }
+    }
     let mut rooms = Vec::new();
     for chunk in &cooked.chunks {
         rooms.extend_from_slice(chunk);
@@ -323,7 +329,9 @@ pub(super) fn cook(
     let cube_sky = scene
         .world_sky_for_node(scene.root)
         .is_some_and(|sky| sky.mode == crate::SkyMode::Cube);
-    let (chunk_skies, sky_tables) = if world.stream.ring && cube_sky {
+    // Far cards take the sky atlas: no chunk sky is baked to stream over them.
+    let cards_on = world.stream.flood.on && world.stream.flood.cards;
+    let (chunk_skies, sky_tables) = if world.stream.ring && cube_sky && !cards_on {
         use crate::grid::lighting::BakeMaterials;
         let materials = cook::sky_bake::WorldColours::materials(world);
         let table = crate::grid::lighting::AlbedoTable::from_project(
@@ -337,6 +345,17 @@ pub(super) fn cook(
         bake_chunk_skies(&cooked, &colours, report)
     } else {
         (Vec::new(), PlaytestSkyTables::default())
+    };
+    let cards = if cards_on {
+        match bake_cards(project, project_root, world, &cooked, report) {
+            Ok(cards) => cards,
+            Err(error) => {
+                report.error(format!("grid world: {error}"));
+                return None;
+            }
+        }
+    } else {
+        PlaytestCards::default()
     };
     let summary = cooked.report.summary();
     report.warn(summary.trim_end().to_string());
@@ -368,6 +387,7 @@ pub(super) fn cook(
         summary,
         chunk_skies,
         sky_tables,
+        cards,
     })
 }
 
@@ -407,6 +427,114 @@ fn add_skin(
         summary.sectors, summary.leaves, summary.by_size, summary.bytes, summary.height_step
     ));
     Ok(())
+}
+
+/// Bake the coarse band of `cooked` and put it in the core: each level
+/// material coloured by its mean texel colour, lit by the baked light.
+fn add_coarse(
+    project: &ProjectDocument,
+    project_root: &Path,
+    world: &GridWorld,
+    cooked: &mut cook::CookedLevel,
+    report: &mut PlaytestValidationReport,
+) -> Result<(), String> {
+    use crate::grid::lighting::{AlbedoTable, BakeMaterials};
+    let ids: Vec<Option<ResourceId>> = cooked.materials.iter().map(|(id, _)| *id).collect();
+    let table = AlbedoTable::from_project(project, project_root, ids.iter().copied());
+    let albedo: Vec<[f32; 3]> = ids.iter().map(|&id| table.albedo(id)).collect();
+    let flood = &world.stream.flood;
+    let (block, summary) = cook::coarse::bake(
+        cooked,
+        &albedo,
+        flood.mesh_cluster_sectors(),
+        flood.mesh_far,
+        2,
+    )?;
+    cooked.level.coarse = Some(block);
+    cooked.core = cooked.level.try_to_bytes()?;
+    cooked.report.core_bytes = cooked.core.len();
+    report.warn(format!(
+        "coarse: {} triangles from {} ({} vertices, most in a room {} vertices and {} triangles, {} rooms regridded), {} bytes in the core",
+        summary.triangles,
+        summary.source_triangles,
+        summary.vertices,
+        summary.max_vertices,
+        summary.max_triangles,
+        summary.regridded,
+        summary.bytes
+    ));
+    Ok(())
+}
+
+/// Bake the far cards of `cooked`: each level material coloured by its mean
+/// texel colour, lit by the baked light of the surface.
+fn bake_cards(
+    project: &ProjectDocument,
+    project_root: &Path,
+    world: &GridWorld,
+    cooked: &cook::CookedLevel,
+    report: &mut PlaytestValidationReport,
+) -> Result<PlaytestCards, String> {
+    use crate::grid::lighting::{AlbedoTable, BakeMaterials};
+    let started = std::time::Instant::now();
+    let ids: Vec<Option<ResourceId>> = cooked.materials.iter().map(|(id, _)| *id).collect();
+    let table = AlbedoTable::from_project(project, project_root, ids.iter().copied());
+    let albedo: Vec<[f32; 3]> = ids.iter().map(|&id| table.albedo(id)).collect();
+    let (baked, summary) = cook::cards::bake(cooked, &albedo);
+    let limit = i32::from(i16::MAX);
+    let mut rows = Vec::with_capacity(baked.len());
+    let mut pictures = Vec::with_capacity(baked.len());
+    for (room, card) in baked.into_iter().enumerate() {
+        let Some(card) = card else {
+            rows.push([0; 6]);
+            pictures.push(Vec::new());
+            continue;
+        };
+        let reach = [
+            card.centre[0] - card.half_width,
+            card.centre[0] + card.half_width,
+            card.centre[1] - card.half_width,
+            card.centre[1] + card.half_width,
+            card.base,
+            card.base + card.height,
+        ];
+        if reach.iter().any(|v| v.abs() > limit) {
+            return Err(format!(
+                "the card of room {room} reaches past 32767 runtime units from the world origin"
+            ));
+        }
+        rows.push([
+            card.centre[0] as i16,
+            card.centre[1] as i16,
+            card.base as i16,
+            card.height as i16,
+            card.half_width as i16,
+            0,
+        ]);
+        pictures.push(card.sectors);
+    }
+    let sector = i32::from(cooked.level.sector_units);
+    let scene = project.active_scene();
+    let sky = scene.world_sky_for_node(scene.root);
+    let backdrop = sky.map_or([[0; 3]; 3], |s| [s.lower_color, s.horizon_color, s.top_color]);
+    report.warn(format!(
+        "cards: {} rooms in {:.1} s ({} empty), {} KiB of pictures, heights {} to {} units, half widths {} to {}",
+        summary.cards,
+        started.elapsed().as_secs_f64(),
+        summary.empty,
+        summary.bytes / 1024,
+        summary.height.0,
+        summary.height.1,
+        summary.half_width.0,
+        summary.half_width.1,
+    ));
+    Ok(PlaytestCards {
+        rows,
+        pictures,
+        far: world.stream.flood.card_far_sectors() * sector,
+        fade: 3 * sector,
+        backdrop,
+    })
 }
 
 /// How [`cook_level_bytes`] binds materials.

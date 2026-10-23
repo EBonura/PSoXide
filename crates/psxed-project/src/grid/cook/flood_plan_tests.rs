@@ -40,6 +40,10 @@ fn flooded(mut world: GridWorld, near: u8, res: u8) -> GridWorld {
         quad_budget: 0,
         skin: false,
         skin_tolerance: 0,
+        cards: false,
+        card_far: 0,
+        mesh_far: 0,
+        mesh_cluster: 0,
     };
     world
 }
