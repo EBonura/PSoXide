@@ -42,7 +42,7 @@ PGO_ARGS ?=
 PGO_VARIANTS ?= --variant off --variant default --variant hot=500 --variant hot=500+profi
 GATE ?=
 
-.PHONY: example disc hello-tri hello-tri-disc run-tri examples pgo-collect pgo-choose hello-xa-disc hello-xa-gate hello-xa-resume-disc hello-xa-resume-gate hello-cdstream-disc hello-cdstream-gate hello-cdpause-disc hello-cdpause-gate hello-wide-gate
+.PHONY: example disc hello-tri hello-tri-disc run-tri examples pgo-collect pgo-choose hello-xa-disc hello-xa-gate hello-xa-resume-disc hello-xa-resume-gate hello-cdstream-disc hello-cdstream-gate hello-cddrain-disc hello-cddrain-gate hello-cdpause-disc hello-cdpause-gate hello-wide-gate
 examples:
 	@set -e; for example in hello-tri hello-input hello-ot hello-gte hello-tex hello-memcard hello-spstack hello-gteirq hello-present hello-present-queue hello-asmprobe; do $(MAKE) -f tools/sdk-examples.mk disc EXAMPLE=$$example; done
 
@@ -109,6 +109,16 @@ hello-cdstream-disc:
 hello-cdstream-gate: hello-cdstream-disc
 	@test -n "$(FRONTEND)" || (echo "Set FRONTEND to the PSoXide-emulator executable"; exit 1)
 	sh tools/cdstream_gate.sh "$(FRONTEND)" "$(BUILD)/$(TARGET)/release/hello-cdstream.cue"
+# hello-cddrain reads CDTEST.BIN with the polled reader while psx_cdstream::drain pops the sectors
+# from the CD interrupt, and checks every byte.
+hello-cddrain-disc:
+	$(MAKE) example EXAMPLE=hello-cddrain
+	cargo run --locked --release -p mkisopsx -- --exe "$(BUILD)/$(TARGET)/release/hello-cddrain.exe" \
+		--out "$(BUILD)/$(TARGET)/release/hello-cddrain.bin" --volume PSOXIDESDK --cdtest-sectors $(CDSTREAM_SECTORS)
+# Runs hello-cddrain headless and checks its verdict: make hello-cddrain-gate FRONTEND=/path/to/frontend
+hello-cddrain-gate: hello-cddrain-disc
+	@test -n "$(FRONTEND)" || (echo "Set FRONTEND to the PSoXide-emulator executable"; exit 1)
+	sh tools/cddrain_gate.sh "$(FRONTEND)" "$(BUILD)/$(TARGET)/release/hello-cddrain.cue"
 # hello-cdpause plays the console's two-response Pause (second response 1.2 to 3.9 million clocks later,
 # refused during a seek) against psx_io::cd::reader::SectorReader::stop_proved on the emulator's model of it.
 hello-cdpause-disc:
