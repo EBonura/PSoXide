@@ -200,20 +200,26 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
         self.disable_player(player);
         let code = header.code_mut(song);
         self.codes[player] = code;
-        let mut pl = Player::init();
-        pl.n_fonts = header.n_fonts;
-        pl.fonts = header.font_ids;
-        let last = header.font_ids[header.n_fonts.saturating_sub(1) as usize];
-        pl.default_font = if header.n_fonts > 0 {
+        let n_fonts = header.n_fonts;
+        let fonts = header.font_ids;
+        let last = fonts[n_fonts.saturating_sub(1) as usize];
+        let default_font = if n_fonts > 0 {
             self.font_index(last).unwrap_or(NONE8)
         } else {
             NONE8
         };
+        // SAFETY: the slot is a valid, aligned `Player` owned by `self`; `init_at` overwrites it
+        // without reading it. Built in place: a `Player` is seven kilobytes, and a copy of it on
+        // the stack costs the caller that much for the whole call.
+        unsafe { Player::init_at(&raw mut self.players[player]) };
+        let pl = &mut self.players[player];
+        pl.n_fonts = n_fonts;
+        pl.fonts = fonts;
+        pl.default_font = default_font;
         pl.enabled = true;
         pl.state = 1;
-        self.players[player] = pl;
         for c in 0..CHANNELS {
-            self.players[player].channels[c].font = self.players[player].default_font;
+            pl.channels[c].font = default_font;
         }
         Ok(())
     }
