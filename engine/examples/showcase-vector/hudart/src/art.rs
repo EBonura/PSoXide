@@ -88,8 +88,10 @@ const ROWS: [Row; 18] = [
 pub const BAR_H: i32 = ROWS.len() as i32;
 /// The gem row.
 pub const GEM_Y: i32 = FRONT_Y + BAR_H + 1;
+/// How far the bar behind sits to the right of the front one (0: straight above it).
+pub const BACK_DX: i32 = 0;
 /// The HUD canvas.
-pub const CANVAS: (i32, i32) = (160, GEM_Y + GEM_H);
+pub const CANVAS: (i32, i32) = (160 + BACK_DX, GEM_Y + GEM_H);
 
 /// A paletted sprite.
 #[derive(Clone)]
@@ -252,7 +254,7 @@ pub fn cap() -> Sprite {
 pub fn lcap() -> Sprite {
     let mut s = Sprite::new(LCAP_W, BAR_H as usize);
     // Column of the end edge in row `r`.
-    let edge = |r: usize| 8 - (r.max(1) - 1) / 2;
+    let edge = lcap_edge;
     for (r, &kind) in ROWS.iter().enumerate() {
         match kind {
             Row::Rim => {
@@ -290,6 +292,36 @@ pub fn lcap() -> Sprite {
         }
     }
     s
+}
+
+/// Column of the left end's edge in bar row `r`.
+fn lcap_edge(r: usize) -> usize {
+    8 - (r.max(1) - 1) / 2
+}
+
+/// The part of the left end of the bar behind that the bar in front does not cover: bar rows
+/// `BACK_OFFSET..BAR_H`, only the pixels left of the front bar's own left rim in the same screen row.
+/// The front bar's well is translucent, so nothing of the back bar may lie under it; this keeps
+/// the back bar's end complete without that.
+pub fn lcapb() -> Sprite {
+    let full = lcap();
+    let rows = BAR_H as usize - BACK_OFFSET as usize;
+    let mut s = Sprite::new(LCAP_W, rows);
+    for j in 0..rows {
+        // Screen row BACK_OFFSET + j is row j of the front bar, whose rim starts here.
+        let front_rim = LCAP_X + lcap_edge(j) as i32 - 1;
+        for c in 0..LCAP_W {
+            if LCAP_X + BACK_DX + (c as i32) < front_rim {
+                s.set(c, j, full.get(c, BACK_OFFSET as usize + j));
+            }
+        }
+    }
+    s
+}
+
+/// True when the front bar covers the whole left end of the bar behind.
+pub fn lcapb_is_empty() -> bool {
+    lcapb().px.iter().all(|&p| p == 0)
 }
 
 /// Emblem indices.
@@ -568,8 +600,9 @@ pub fn clut(p: &Palette, glass: &[u8]) -> [u16; 16] {
 /// Where each sprite sits in the atlas.
 /// A multiple of 8 so that a row is a whole number of VRAM words.
 pub const ATLAS_W: usize = 64;
-pub const ATLAS_H: usize = 24;
-pub const ATLAS_POS: [(&str, (usize, usize)); 5] = [
+pub const ATLAS_H: usize = 27;
+pub const ATLAS_POS: [(&str, (usize, usize)); 6] = [
+    ("LCAPB", (24, 18)),
     ("EMBLEM", (0, 0)),
     ("CAP", (24, 0)),
     ("LCAP", (50, 0)),
@@ -578,8 +611,9 @@ pub const ATLAS_POS: [(&str, (usize, usize)); 5] = [
 ];
 
 /// All sprites by atlas name.
-pub fn sprites() -> [(&'static str, Sprite); 5] {
+pub fn sprites() -> [(&'static str, Sprite); 6] {
     [
+        ("LCAPB", lcapb()),
         ("EMBLEM", emblem()),
         ("CAP", cap()),
         ("LCAP", lcap()),

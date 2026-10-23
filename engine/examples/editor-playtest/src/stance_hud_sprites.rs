@@ -92,19 +92,21 @@ pub enum Op {
 
 /// Ops one HUD needs at most: every band of both bars, both ends of both bars, both bars' cells,
 /// the emblem and the gems.
-pub const MAX_OPS: usize = 2 * BAND_COUNT + 4 + 3 * (COUNT as usize) + 1;
+pub const MAX_OPS: usize = 2 * BAND_COUNT + 5 + 3 * (COUNT as usize) + 1;
 
 fn bar(origin: (i32, i32), front: bool, stance: Stance, lit: u8, draw: &mut impl FnMut(Op)) {
     let top = origin.1 + if front { FRONT_Y } else { 0 };
-    // The bar behind shows only the rows above the one in front.
+    // Of the bar behind only the rows above the front bar are drawn here (see below for the rest).
     let rows = if front { BAR_H } else { BACK_OFFSET };
     let kind = if front { 0 } else { 1 };
+    // The bar behind may sit to the right of the one in front.
+    let dx = if front { 0 } else { BACK_DX };
     let s = stance.index();
     for band in &BANDS[s][kind] {
         let y1 = (band.y1 as i32).min(rows);
         if (band.y0 as i32) < y1 {
             draw(Op::Rect {
-                x: origin.0 + BAR_X0,
+                x: origin.0 + dx + BAR_X0,
                 y: top + band.y0 as i32,
                 w: CAP_X - BAR_X0,
                 h: y1 - band.y0 as i32,
@@ -122,12 +124,23 @@ fn bar(origin: (i32, i32), front: bool, stance: Stance, lit: u8, draw: &mut impl
     // Both ends are drawn as far down as the bar shows.
     for (x, src) in [(LCAP_X, SPRITE_LCAP), (CAP_X, SPRITE_CAP)] {
         draw(Op::Sprite {
-            x: origin.0 + x,
+            x: origin.0 + dx + x,
             y: top,
             src: SpriteRect {
                 h: (src.h as i32).min(rows) as u8,
                 ..src
             },
+            clut: base + cap_clut,
+            glass: true,
+        });
+    }
+    // The bar behind goes on below the row where the front bar starts, but only left of the front
+    // bar (its translucent well must not show what is under it).
+    if !front && !LCAPB_EMPTY {
+        draw(Op::Sprite {
+            x: origin.0 + dx + LCAP_X,
+            y: top + BACK_OFFSET,
+            src: SPRITE_LCAPB,
             clut: base + cap_clut,
             glass: true,
         });
@@ -142,7 +155,7 @@ fn bar(origin: (i32, i32), front: bool, stance: Stance, lit: u8, draw: &mut impl
     };
     for k in 0..COUNT {
         draw(Op::Sprite {
-            x: origin.0 + CELL_X0 + PITCH * k,
+            x: origin.0 + dx + CELL_X0 + PITCH * k,
             y: top + CELL_ROW,
             src,
             clut: base

@@ -139,9 +139,11 @@ fn main() {
                         back_health: 4,
                         energy: level,
                     };
-                    compose((160 * col as i32, 8 + 40 * row as i32), &state, &mut |op| {
-                        f.op(op)
-                    });
+                    compose(
+                        (hud::CANVAS_W * col as i32, 8 + 40 * row as i32),
+                        &state,
+                        &mut |op| f.op(op),
+                    );
                 }
             }
             f.write(path);
