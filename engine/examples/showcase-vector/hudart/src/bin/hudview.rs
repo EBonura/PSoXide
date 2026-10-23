@@ -1,8 +1,9 @@
 //! hudview: paints the sprite HUD on the host with the same composition code the guest uses, for
 //! quick looks and for comparing with an emulator frame.
 //!
-//! hudview grid <out.ppm> [bg=r,g,b]    the two-stance, four-level grid of the `hud-grid` frame
-//! hudview one <out.ppm> [horizon|zenith] [health] [back] [energy] [bg=r,g,b]|zenith] [health] [back] [energy]
+//! hudview grid <out.ppm> [bg=r,g,b] [x0=n] [x1=n]
+//!     the two-stance, four-level grid of the `hud-grid` frame; x0 and x1 are the left edges of the columns
+//! hudview one <out.ppm> [horizon|zenith] [health] [back] [energy] [bg=r,g,b]
 
 #![allow(dead_code)]
 
@@ -14,6 +15,14 @@ use hud::{compose, HudState, Op, Stance};
 const BG: [u8; 3] = [16, 24, 40];
 
 /// A background given as `bg=r,g,b` on the command line.
+/// A number given as `key=n` on the command line.
+fn arg_num(args: &[String], key: &str, default: i32) -> i32 {
+    args.iter()
+        .find_map(|a| a.strip_prefix(key)?.strip_prefix('='))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
 fn background(args: &[String]) -> [u8; 3] {
     args.iter()
         .find_map(|a| a.strip_prefix("bg="))
@@ -131,6 +140,8 @@ fn main() {
     match mode.as_str() {
         "grid" => {
             let mut f = Frame::new(320, 240, background(&a));
+            // Left edge of the Horizon and Zenith columns (a column can be put off screen).
+            let cols = [arg_num(&a, "x0", 0), arg_num(&a, "x1", hud::CANVAS_W)];
             for (col, stance) in [Stance::Horizon, Stance::Zenith].into_iter().enumerate() {
                 for (row, level) in [10u8, 6, 3, 0].into_iter().enumerate() {
                     let state = HudState {
@@ -139,11 +150,7 @@ fn main() {
                         back_health: 4,
                         energy: level,
                     };
-                    compose(
-                        (hud::CANVAS_W * col as i32, 8 + 40 * row as i32),
-                        &state,
-                        &mut |op| f.op(op),
-                    );
+                    compose((cols[col], 8 + 40 * row as i32), &state, &mut |op| f.op(op));
                 }
             }
             f.write(path);

@@ -89,7 +89,7 @@ pub const BAR_H: i32 = ROWS.len() as i32;
 /// The gem row.
 pub const GEM_Y: i32 = FRONT_Y + BAR_H + 1;
 /// How far the bar behind sits to the right of the front one (0: straight above it).
-pub const BACK_DX: i32 = 0;
+pub const BACK_DX: i32 = 4;
 /// The HUD canvas.
 pub const CANVAS: (i32, i32) = (160 + BACK_DX, GEM_Y + GEM_H);
 
