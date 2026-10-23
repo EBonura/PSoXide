@@ -30,6 +30,11 @@ pub struct Options {
     /// sectors passes 2048 so the samples start on a sector boundary and
     /// the tables never share a sector with them.
     pub adpcm_align: usize,
+    /// Describe the samples without converting them: the bank has the right
+    /// tables (so a host sequencer makes every decision the console would)
+    /// but its ADPCM is silence. Cooking a whole soundfont this way takes
+    /// milliseconds instead of seconds.
+    pub analysis_only: bool,
 }
 
 impl Default for Options {
@@ -39,6 +44,7 @@ impl Default for Options {
             all_instruments: false,
             peak_voices: 16,
             adpcm_align: 16,
+            analysis_only: false,
         }
     }
 }
@@ -60,8 +66,24 @@ pub struct CookedSet {
     pub songs: Vec<Vec<u8>>,
     /// The `PSQB` bank all of them play from.
     pub bank: Vec<u8>,
+    /// Where each of the bank's samples came from, in bank order.
+    pub sources: Vec<SampleSource>,
     /// Human-readable cook report.
     pub report: String,
+}
+
+/// The cartridge sample behind one of a bank's samples.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SampleSource {
+    /// Soundfont that defined it.
+    pub font: usize,
+    /// Offset of its VADPCM data in the audiotable file (its identity).
+    pub table_off: u32,
+    /// Samples it decodes to.
+    pub pcm_len: usize,
+    /// The original loops it.
+    pub looped: bool,
 }
 
 /// A sound effect cooked as a one-shot `.psau` sample.
@@ -96,6 +118,10 @@ fn le32(v: &mut Vec<u8>, x: u32) {
     v.extend_from_slice(&x.to_le_bytes());
 }
 
+pub(crate) fn decode_sample(data: &AudioData, font: &Font, s: &Sample) -> Result<Vec<i16>, Error> {
+    decode(data, font, s)
+}
+
 fn decode(data: &AudioData, font: &Font, s: &Sample) -> Result<Vec<i16>, Error> {
     let start = s.table_off as usize;
     let raw = data
@@ -104,6 +130,27 @@ fn decode(data: &AudioData, font: &Font, s: &Sample) -> Result<Vec<i16>, Error> 
         .ok_or(Error::Truncated(start))?;
     let book = Book::parse(&font.raw, s.book_off as usize)?;
     Ok(vadpcm::decode(raw, &book))
+}
+
+/// What [`cook_sample`] would produce, without converting anything: the same
+/// block count and loop block, over a single block of silence.
+fn describe_sample(s: &Sample, rate: u32) -> CookedSample {
+    let pcm_len = s.pcm_len();
+    let out_len = pcm_len * rate as usize / NATIVE_RATE as usize;
+    let blocks = out_len.div_ceil(28).max(1);
+    let loop_block = s
+        .looped
+        .map(|l| (l.start as usize * rate as usize / NATIVE_RATE as usize / 28) as u16);
+    // One block stands in for the data: every sample still gets an address of its own.
+    let adpcm = vec![0u8; 16];
+    CookedSample {
+        adpcm,
+        blocks: blocks as u16,
+        rate: rate as u16,
+        loop_block: loop_block.unwrap_or(0xffff),
+        end_samples: s.end_samples,
+        stretch_q16: 65536,
+    }
 }
 
 fn cook_sample(pcm: &[i16], s: &Sample, rate: u32) -> CookedSample {
@@ -283,6 +330,7 @@ pub fn cook_songs(data: &AudioData, seq_ids: &[usize], opts: &Options) -> Result
 
     // samples, deduplicated by audiotable offset
     let mut samples: Vec<CookedSample> = Vec::new();
+    let mut sources: Vec<SampleSource> = Vec::new();
     let mut by_off: BTreeMap<u32, u16> = BTreeMap::new();
     let mut sample_index = |data: &AudioData,
                             font: &Font,
@@ -293,13 +341,23 @@ pub fn cook_songs(data: &AudioData, seq_ids: &[usize], opts: &Options) -> Result
         let idx = if let Some(&i) = by_off.get(&s.table_off) {
             i
         } else {
-            let pcm = decode(data, font, s)?;
-            let cs = cook_sample(&pcm, s, opts.rate);
+            let cs = if opts.analysis_only {
+                describe_sample(s, opts.rate)
+            } else {
+                let pcm = decode(data, font, s)?;
+                cook_sample(&pcm, s, opts.rate)
+            };
+            sources.push(SampleSource {
+                font: font.id,
+                table_off: s.table_off,
+                pcm_len: s.pcm_len(),
+                looped: s.looped.is_some(),
+            });
             writeln!(
                 report,
                 "  sample @{:#08x}: {} pcm -> {} blocks{} stretch {:+.1} cents",
                 s.table_off,
-                pcm.len(),
+                s.pcm_len(),
                 cs.blocks,
                 if cs.loop_block == 0xffff {
                     String::new()
@@ -509,6 +567,7 @@ pub fn cook_songs(data: &AudioData, seq_ids: &[usize], opts: &Options) -> Result
     Ok(CookedSet {
         songs,
         bank,
+        sources,
         report,
     })
 }

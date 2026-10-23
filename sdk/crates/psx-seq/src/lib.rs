@@ -110,42 +110,69 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
     /// A sequencer over the voices set in `voice_mask`, which must have
     /// exactly `N` bits set.
     ///
+    /// The sequencer is several kilobytes: a game that keeps one in a
+    /// `static` should build it in place with [`Sequencer::init_at`] and not
+    /// pass this return value through its stack.
+    ///
     /// # Panics
     ///
     /// If `voice_mask` does not have `N` bits set.
     pub fn new(voice_mask: u32) -> Self {
+        let mut slot = core::mem::MaybeUninit::<Self>::uninit();
+        // SAFETY: `init_at` writes every field of the sequencer it is given.
+        unsafe {
+            Self::init_at(slot.as_mut_ptr(), voice_mask);
+            slot.assume_init()
+        }
+    }
+
+    /// Build a sequencer over the voices set in `voice_mask` (exactly `N`
+    /// bits) directly in `slot`, field by field, without a copy of it on the
+    /// stack.
+    ///
+    /// # Safety
+    ///
+    /// `slot` must be valid for writes of a `Sequencer` and aligned for one;
+    /// whatever it held is overwritten without being read or dropped.
+    ///
+    /// # Panics
+    ///
+    /// If `voice_mask` does not have `N` bits set.
+    pub unsafe fn init_at(slot: *mut Self, voice_mask: u32) {
+        use core::ptr::addr_of_mut;
         assert_eq!(
             voice_mask.count_ones() as usize,
             N,
             "voice mask must have N bits"
         );
-        let mut voice_of = [0u8; N];
-        let mut k = 0;
-        for v in 0..24u8 {
-            if voice_mask & (1 << v) != 0 {
-                voice_of[k] = v;
-                k += 1;
+        // SAFETY: the caller guarantees `slot` is valid and aligned; every field is written once
+        // through a raw place, without forming a reference to the uninitialised sequencer.
+        unsafe {
+            let mut k = 0;
+            for v in 0..24u8 {
+                if voice_mask & (1 << v) != 0 {
+                    addr_of_mut!((*slot).voice_of[k]).write(v);
+                    k += 1;
+                }
             }
+            for p in 0..P {
+                Player::init_at(addr_of_mut!((*slot).players[p]));
+                (*slot).players[p].enabled = false;
+                addr_of_mut!((*slot).codes[p]).write(<&mut [u8]>::default());
+            }
+            for n in 0..N {
+                addr_of_mut!((*slot).notes[n]).write(Note::INIT);
+            }
+            addr_of_mut!((*slot).bank).write(None);
+            addr_of_mut!((*slot).spu_base).write(0);
+            addr_of_mut!((*slot).master_q12).write(4096);
+            addr_of_mut!((*slot).rng).write(0x1234_5678);
+            addr_of_mut!((*slot).order).write(0);
+            addr_of_mut!((*slot).pos_min).write(0);
+            addr_of_mut!((*slot).pos_max).write(0);
+            addr_of_mut!((*slot).unsupported).write(0);
+            addr_of_mut!((*slot).clock).write(None);
         }
-        let mut s = Self {
-            players: core::array::from_fn(|_| Player::init()),
-            codes: core::array::from_fn(|_| <&mut [u8]>::default()),
-            notes: core::array::from_fn(|_| Note::INIT),
-            voice_of,
-            bank: None,
-            spu_base: 0,
-            master_q12: 4096,
-            rng: 0x1234_5678,
-            order: 0,
-            pos_min: 0,
-            pos_max: 0,
-            unsupported: 0,
-            clock: None,
-        };
-        for p in 0..P {
-            s.players[p].enabled = false;
-        }
-        s
     }
 
     /// Use `bank` for instruments. `spu_base` is where its ADPCM region was

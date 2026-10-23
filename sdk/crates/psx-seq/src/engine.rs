@@ -573,6 +573,21 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
                 s.value = code.get(at).copied().unwrap_or(0) as i8;
             }
             0xce => self.players[p].channels[c].ptr = a[0] as u16,
+            // dyntable: where the table of `dyncall` lives.
+            0xc2 => self.players[p].channels[c].dyn_table = a[0] as u16,
+            // dyncall: call the script whose offset is entry `value` of that table. A game with many
+            // short sounds keeps one script per sound and picks it by number.
+            0xe4 => {
+                let at =
+                    self.players[p].channels[c].dyn_table as usize + 2 * (s.value as u8 as usize);
+                let hi = code.get(at).copied().unwrap_or(OP_END);
+                let lo = code.get(at + 1).copied().unwrap_or(OP_END);
+                if s.depth < 4 {
+                    s.stack[s.depth as usize] = s.pc;
+                    s.depth += 1;
+                }
+                s.pc = u16::from_be_bytes([hi, lo]);
+            }
             0xcf => {
                 let at = a[0] as usize;
                 let v = self.players[p].channels[c].ptr;
