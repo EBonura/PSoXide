@@ -5,7 +5,7 @@
 //! A load that blocks for seconds (a chain-load, a pack read, a sound bank
 //! streamed to the SPU) leaves the picture frozen, and a frozen picture reads
 //! as a hang. This crate draws the one thing such a picture needs: a label
-//! (`Loading`) with a tail that steps (trailing dots, or a small dot spinner)
+//! (`Loading`) with a tail that steps (trailing dots, or a ring of lights)
 //! and an ink that breathes, so the screen visibly moves while the CPU is busy
 //! elsewhere.
 //!
@@ -14,7 +14,7 @@
 //! The look every PSoXide game uses is the **corner widget**: a small black
 //! square in the bottom-right corner of the picture with a little animation in it
 //! and no text ([`Style::in_corner`] with an empty label). The animation is the
-//! game's own: the built-in dot spinner in the game's colours ([`Tail::Spinner`])
+//! game's own: the built-in ring of lights in the game's colours ([`Tail::Spinner`])
 //! or art it draws itself ([`Tail::Art`]). A label with dots is there for
 //! programs that want words.
 //!
@@ -129,17 +129,35 @@ const GP0_WAIT_SPINS: u32 = 1_000_000;
 /// `ink_bright` at this level.
 pub const LEVELS: u8 = 16;
 
-/// The braille "dots" spinner (cli-spinners), as its 2x3 dot grid: each entry's
-/// low six bits are the lit dots, bits 0 to 2 the left column top to bottom and
-/// bits 3 to 5 the right column.
-const SPINNER_FRAMES: [u8; 10] = [0x0b, 0x19, 0x39, 0x38, 0x3c, 0x34, 0x26, 0x27, 0x07, 0x0f];
-/// Spinner dot size, pitch and the gap before it, in unscaled pixels.
-const SPINNER_DOT: i16 = 3;
-const SPINNER_PITCH: i16 = 5;
+/// Lights on the spinner's ring: the edge cells of a 4 x 4 grid, which is a square.
+const RING_CELLS: usize = 12;
+/// The ring's cells (column, row) in order around the square, clockwise from the
+/// top left corner.
+const RING: [(u8, u8); RING_CELLS] = [
+    (0, 0),
+    (1, 0),
+    (2, 0),
+    (3, 0),
+    (3, 1),
+    (3, 2),
+    (3, 3),
+    (2, 3),
+    (1, 3),
+    (0, 3),
+    (0, 2),
+    (0, 1),
+];
+/// Cells along one side of the ring.
+const RING_SIDE_CELLS: i16 = 4;
+/// How brightly the light `n` places behind the head burns, out of 256: the head,
+/// then a tail that fades. Further back a light is only the unlit dot.
+const TRAIL: [u16; 5] = [256, 168, 98, 52, 24];
+/// Default dot size and pitch (cell to cell) of the ring, in unscaled display units
+/// (one unit is one pixel tall; see [`Style::with_display`]).
+const RING_DOT: i16 = 3;
+const RING_PITCH: i16 = 5;
+/// Gap before the spinner when a label comes first, in unscaled pixels.
 const SPINNER_GAP: i16 = 8;
-/// The spinner grid: two columns of three dots.
-const SPINNER_W: i16 = SPINNER_PITCH + SPINNER_DOT;
-const SPINNER_H: i16 = 2 * SPINNER_PITCH + SPINNER_DOT;
 
 /// What follows the label and moves.
 #[derive(Copy, Clone, Debug)]
@@ -150,11 +168,15 @@ pub enum Tail {
     /// `Loading..`, ...). The box has room for all of them, so the label does
     /// not slide as they step.
     Dots(u8),
-    /// A small spinner after the label: a 2x3 grid of dots, a rotating subset lit.
+    /// A ring of twelve lights chasing each other round a square: the head burns
+    /// at `lit`, a tail fades behind it, and every other light shows `unlit`. The
+    /// ring is square on the display, whatever the pixel aspect of the mode (see
+    /// [`Style::with_display`]), and its lights are drawn with the style's
+    /// [`Blend`].
     Spinner {
-        /// A lit dot.
+        /// The head light at full strength.
         lit: Rgb,
-        /// An unlit dot, dim enough that the grid still reads as a spinner.
+        /// A light with no head near it, dim enough that the ring still reads as a ring.
         unlit: Rgb,
     },
     /// Animation the game draws itself, in a box of `width` x `height` pixels
@@ -174,21 +196,12 @@ pub enum Tail {
 }
 
 impl Tail {
-    /// Size of the non-text tail in unscaled pixels, if it has one.
-    const fn art_size(self) -> Option<(i16, i16)> {
-        match self {
-            Tail::Spinner { .. } => Some((SPINNER_W, SPINNER_H)),
-            Tail::Art { width, height, .. } => Some((width, height)),
-            _ => None,
-        }
-    }
-
     /// Distinct steps before the tail repeats.
     const fn steps(self) -> u32 {
         match self {
             Tail::None => 1,
             Tail::Dots(n) => n as u32 + 1,
-            Tail::Spinner { .. } => SPINNER_FRAMES.len() as u32,
+            Tail::Spinner { .. } => RING_CELLS as u32,
             Tail::Art { frames, .. } => frames as u32,
         }
     }
@@ -198,6 +211,36 @@ impl Tail {
         match self {
             Tail::Dots(n) => n as i32,
             _ => 0,
+        }
+    }
+}
+
+/// How the spinner's lights combine with what is under them (the GPU's
+/// semi-transparency modes, set through the draw-mode word GP0(E1h)).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Blend {
+    /// Opaque: a light replaces the pixels under it.
+    Opaque,
+    /// `B/2 + F/2`: half the light and half of what is behind it. A light is
+    /// dimmer than its colour and nothing brightens past it.
+    Average,
+    /// `B + F`: the light's colour is added to what is behind it. A light burns
+    /// at its full colour, a faint one only brightens its neighbourhood, and where
+    /// two lights meet they add up.
+    Additive,
+    /// `B + F/4`: a quarter of the light added, for a faint glow.
+    Glow,
+}
+
+impl Blend {
+    /// The semi-transparency mode field of GP0(E1h), if the lights are blended.
+    const fn mode(self) -> Option<u32> {
+        match self {
+            Blend::Opaque => None,
+            Blend::Average => Some(0),
+            Blend::Additive => Some(1),
+            Blend::Glow => Some(3),
         }
     }
 }
@@ -243,6 +286,13 @@ pub struct Style {
     /// VBlanks per full breath (dim to bright and back). Even and at least
     /// twice [`LEVELS`]; a smaller value is raised to that.
     pub pulse_ticks: u16,
+    /// How the spinner's lights blend with what is under them.
+    pub blend: Blend,
+    /// The display mode's width and height in pixels, which fixes the shape of a
+    /// pixel on a 4:3 screen. See [`Style::with_display`].
+    pub display: (i16, i16),
+    /// Spinner dot size and spacing between dot centres, in unscaled display units.
+    pub ring: (i16, i16),
 }
 
 impl Style {
@@ -272,6 +322,9 @@ impl Style {
             min_size: (0, 0),
             step_ticks: 20,
             pulse_ticks: 64,
+            blend: Blend::Additive,
+            display: (320, 240),
+            ring: (RING_DOT, RING_PITCH),
         }
     }
 
@@ -295,17 +348,76 @@ impl Style {
         self
     }
 
-    /// The same style as a square `size` pixels across in the bottom-right corner of
-    /// a `screen_w` x `screen_h` picture, `margin` pixels in from the edges: the
-    /// corner widget. With an empty label and a [`Tail::Spinner`] it is the small
-    /// black square with a spinner in it.
+    /// The same style as a square `size` pixels tall in the bottom-right corner of
+    /// a `screen_w` x `screen_h` picture, `margin` pixels in from the bottom edge:
+    /// the corner widget. With an empty label and a [`Tail::Spinner`] it is the small
+    /// black square with a ring of lights in it.
+    ///
+    /// The square is square on the screen. A mode whose pixels are not square (512
+    /// wide at 240 lines on a 4:3 set, say) makes the box wider in pixels by the
+    /// pixel aspect (see [`with_display`](Self::with_display), which this calls), and
+    /// the side margin is stretched the same way so both margins look alike.
     pub const fn in_corner(mut self, size: i16, screen_w: i16, screen_h: i16, margin: i16) -> Self {
-        self.min_size = (size, size);
+        self = self.with_display(screen_w, screen_h);
+        let width = self.across(size as i32) as i16;
+        self.min_size = (width, size);
         self.pad_x = 0;
         self.pad_y = 0;
-        self.centre_x = screen_w - margin - size / 2;
+        self.centre_x = screen_w - self.across(margin as i32) as i16 - width / 2;
         self.top = screen_h - margin - size;
         self
+    }
+
+    /// The same style told the display mode it is drawn in, `width` x `height`
+    /// pixels. A 4:3 television shows any mode at 4:3, so a pixel is
+    /// `(4 / 3) * height / width` times as wide as it is tall: square at 320 x 240
+    /// and 640 x 480, wide at 256 x 240, narrow at 512 x 240. The spinner and the
+    /// corner box are laid out in units one pixel tall and widened by that factor,
+    /// so they are square on the screen, not in the framebuffer.
+    #[must_use]
+    pub const fn with_display(mut self, width: i16, height: i16) -> Self {
+        self.display = (
+            if width < 1 { 1 } else { width },
+            if height < 1 { 1 } else { height },
+        );
+        self
+    }
+
+    /// The same style with spinner dots `dot` units square, `pitch` units between
+    /// the centres of neighbouring dots (units are one pixel tall before
+    /// [`scaled`](Self::scaled); the ring is three pitches and a dot across).
+    #[must_use]
+    pub const fn with_ring(mut self, dot: i16, pitch: i16) -> Self {
+        self.ring = (
+            if dot < 1 { 1 } else { dot },
+            if pitch < 1 { 1 } else { pitch },
+        );
+        self
+    }
+
+    /// The same style with the spinner's lights blended by `blend`.
+    #[must_use]
+    pub const fn with_blend(mut self, blend: Blend) -> Self {
+        self.blend = blend;
+        self
+    }
+
+    /// `units` of height as pixels across, rounded: what makes a square on a 4:3 screen.
+    const fn across(&self, units: i32) -> i32 {
+        let (width, height) = (self.display.0 as i32, self.display.1 as i32);
+        (units * 3 * width + 2 * height) / (4 * height)
+    }
+
+    /// Side of the spinner's ring in units of height (before scale).
+    const fn ring_side(&self) -> i32 {
+        (RING_SIDE_CELLS as i32 - 1) * self.ring.1 as i32 + self.ring.0 as i32
+    }
+
+    /// The ring's width and height in pixels.
+    #[must_use]
+    pub const fn ring_size(&self) -> (i16, i16) {
+        let side = self.ring_side() * self.scale as i32;
+        (self.across(side) as i16, side as i16)
     }
 
     /// The same style at integer scale `scale` (at least 1).
@@ -349,26 +461,25 @@ impl Style {
             .sum();
         let dots = self.tail.cells() * self.advance(b'.') as i32;
         let text = (label + dots) * self.scale as i32;
-        match self.tail.art_size() {
-            Some((width, _)) => {
-                let gap = if self.label.is_empty() {
-                    0
-                } else {
-                    SPINNER_GAP
-                };
-                text + (gap + width) as i32 * self.scale as i32
-            }
-            None => text,
+        let gap = if self.label.is_empty() {
+            0
+        } else {
+            SPINNER_GAP as i32 * self.scale as i32
+        };
+        match self.tail {
+            Tail::Spinner { .. } => text + gap + self.ring_size().0 as i32,
+            Tail::Art { width, .. } => text + gap + width as i32 * self.scale as i32,
+            _ => text,
         }
     }
 
     /// Pixel height of the content: the label's row, or the spinner alone.
     fn content_height(&self) -> i32 {
-        let rows = match self.tail.art_size() {
-            Some((_, height)) if self.label.is_empty() => height as i32,
-            _ => self.font.glyph_h as i32,
-        };
-        rows * self.scale as i32
+        match self.tail {
+            Tail::Spinner { .. } if self.label.is_empty() => self.ring_size().1 as i32,
+            Tail::Art { height, .. } if self.label.is_empty() => height as i32 * self.scale as i32,
+            _ => self.font.glyph_h as i32 * self.scale as i32,
+        }
     }
 
     /// The box as `(x, y, width, height)` in screen pixels.
@@ -528,13 +639,13 @@ impl Indicator {
             Tail::Spinner { lit, unlit } => {
                 // Centred on the text's height, not sharing its baseline.
                 let rows = style.content_height() as i16;
-                let top = text_top + (rows - SPINNER_H * scale) / 2;
+                let top = text_top + (rows - style.ring_size().1) / 2;
                 let gap = if style.label.is_empty() {
                     0
                 } else {
                     SPINNER_GAP
                 };
-                spinner(sink, pen + gap * scale, top, scale, look.step, lit, unlit);
+                ring(sink, style, pen + gap * scale, top, look.step, lit, unlit);
             }
             Tail::Art { height, draw, .. } => {
                 let rows = style.content_height() as i16;
@@ -562,23 +673,85 @@ pub fn rect(sink: &mut dyn Sink, x: i16, y: i16, w: i16, h: i16, colour: Rgb) {
     ]);
 }
 
-/// One spinner frame: the 2x3 grid, every dot drawn lit or unlit.
-fn spinner(sink: &mut dyn Sink, x: i16, y: i16, scale: i16, frame: u8, lit: Rgb, unlit: Rgb) {
-    let mask = SPINNER_FRAMES[frame as usize % SPINNER_FRAMES.len()];
-    let mut dot = 0;
-    while dot < 6 {
-        let col = (dot / 3) as i16;
-        let row = (dot % 3) as i16;
-        let colour = if mask & (1 << dot) != 0 { lit } else { unlit };
-        rect(
-            sink,
-            x + col * SPINNER_PITCH * scale,
-            y + row * SPINNER_PITCH * scale,
-            SPINNER_DOT * scale,
-            SPINNER_DOT * scale,
-            colour,
-        );
-        dot += 1;
+/// One solid semi-transparent rectangle, GP0(62h): blended with what is under it
+/// by the mode last set with [`blend_mode`].
+fn rect_blended(sink: &mut dyn Sink, x: i16, y: i16, w: i16, h: i16, colour: Rgb) {
+    if w <= 0 || h <= 0 {
+        return;
+    }
+    sink.packet(&[
+        0x6200_0000 | colour.word(),
+        (y as u16 as u32) << 16 | x as u16 as u32,
+        (h as u16 as u32) << 16 | w as u16 as u32,
+    ]);
+}
+
+/// GP0(E1h) with semi-transparency mode `mode` (0 to 3) and everything else at the
+/// state [`prepare`] leaves.
+fn blend_mode(sink: &mut dyn Sink, mode: Option<u32>) {
+    sink.packet(&[0xe100_0000 | mode.unwrap_or(0) << 5]);
+}
+
+/// `colour` at `level` out of 256 of its strength.
+const fn dimmed(colour: Rgb, level: u16) -> Rgb {
+    const fn channel(value: u8, level: u16) -> u8 {
+        (value as u32 * level as u32 / 256) as u8
+    }
+    Rgb(
+        channel(colour.0, level),
+        channel(colour.1, level),
+        channel(colour.2, level),
+    )
+}
+
+/// The cell `(col, row)` of the ring as a pixel rectangle `(x, y, w, h)` from the
+/// ring's top left corner `(x0, y0)`.
+fn ring_cell(style: &Style, x0: i16, y0: i16, col: u8, row: u8) -> (i16, i16, i16, i16) {
+    let (dot, pitch) = (style.ring.0 as i32, style.ring.1 as i32);
+    let scale = style.scale as i32;
+    let left = style.across((col as i32 * pitch) * scale);
+    let right = style.across((col as i32 * pitch + dot) * scale);
+    let top = row as i32 * pitch * scale;
+    let bottom = (row as i32 * pitch + dot) * scale;
+    (
+        x0 + left as i16,
+        y0 + top as i16,
+        (right - left) as i16,
+        (bottom - top) as i16,
+    )
+}
+
+/// One frame of the ring: every cell as an `unlit` dot, then the head light at cell
+/// `frame` and its fading tail behind it (towards lower cell numbers, that is
+/// counter-clockwise behind a clockwise head), each blended as the style says.
+fn ring(sink: &mut dyn Sink, style: &Style, x: i16, y: i16, frame: u8, lit: Rgb, unlit: Rgb) {
+    for &(col, row) in &RING {
+        let (cx, cy, cw, ch) = ring_cell(style, x, y, col, row);
+        rect(sink, cx, cy, cw, ch, unlit);
+    }
+    let mode = style.blend.mode();
+    if mode.is_some() {
+        blend_mode(sink, mode);
+    }
+    for (behind, &level) in TRAIL.iter().enumerate() {
+        let cell = (frame as usize + RING_CELLS - behind) % RING_CELLS;
+        let (col, row) = RING[cell];
+        let (cx, cy, cw, ch) = ring_cell(style, x, y, col, row);
+        if mode.is_some() {
+            rect_blended(sink, cx, cy, cw, ch, dimmed(lit, level));
+        } else {
+            rect(
+                sink,
+                cx,
+                cy,
+                cw,
+                ch,
+                unlit.toward(lit, (level as u32 * LEVELS as u32 / 256) as u8),
+            );
+        }
+    }
+    if mode.is_some() {
+        blend_mode(sink, None);
     }
 }
 

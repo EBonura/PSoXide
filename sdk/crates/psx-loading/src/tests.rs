@@ -45,11 +45,10 @@ fn the_box_has_room_for_the_label_and_every_dot() {
 
 #[test]
 fn the_spinner_box_is_the_label_a_gap_and_the_grid() {
-    // 56 + 8 + 8 of content, 12 either side: the width of a 7-letter label
-    // with a spinner, as the HL strip sizes its plate.
+    // 56 + 8 + 18 of content, 12 either side: a 7-letter label with a ring.
     let (x, y, w, h) = spinning().bounds();
-    assert_eq!((w, h), (72 + 24, 24));
-    assert_eq!((x, y), (160 - 96 / 2, 208));
+    assert_eq!((w, h), (82 + 24, 24));
+    assert_eq!((x, y), (160 - 106 / 2, 208));
     let (_, _, none, _) = style().with_tail(Tail::None).bounds();
     assert_eq!(none, 56 + 24);
 }
@@ -73,10 +72,10 @@ fn the_dots_step_and_wrap() {
 }
 
 #[test]
-fn the_spinner_runs_its_ten_frames_and_wraps() {
+fn the_ring_runs_its_twelve_lights_and_wraps() {
     let s = spinning();
-    let steps: Vec<u8> = (0..11).map(|n| s.look(n * 2).step).collect();
-    assert_eq!(steps, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0]);
+    let steps: Vec<u8> = (0..13).map(|n| s.look(n * 2).step).collect();
+    assert_eq!(steps, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0]);
 }
 
 #[test]
@@ -165,7 +164,7 @@ fn the_tick_counter_may_wrap() {
 
 fn decode(packet: &[u32]) -> (i32, i32, i32, i32, u32) {
     assert_eq!(packet.len(), 3);
-    assert_eq!(packet[0] >> 24, 0x60);
+    assert!(matches!(packet[0] >> 24, 0x60 | 0x62));
     (
         (packet[1] & 0xffff) as i16 as i32,
         (packet[1] >> 16) as i16 as i32,
@@ -213,7 +212,7 @@ fn every_rectangle_stays_inside_the_box() {
             for step in 0..tail.steps() as u8 {
                 let mut sink = Record::default();
                 Indicator::new(s).draw(&mut sink, Look { step, level: 5 });
-                for packet in &sink.0 {
+                for packet in sink.0.iter().filter(|p| p.len() == 3) {
                     let (x, y, w, h, _) = decode(packet);
                     assert!(w > 0 && h > 0);
                     assert!(
@@ -242,35 +241,133 @@ fn more_dots_draw_more_ink_and_the_label_stays_put() {
     assert_eq!(all.0[..none.0.len()], none.0[..]);
 }
 
+/// The rectangles of a frame, without the draw-mode packets between them.
+fn rects(sink: &Record) -> Vec<(i32, i32, i32, i32, u32)> {
+    sink.0
+        .iter()
+        .filter(|p| p.len() == 3)
+        .map(|p| decode(p))
+        .collect()
+}
+
 #[test]
-fn the_spinner_draws_all_six_dots_with_the_lit_ones_bright() {
-    let s = spinning();
+fn the_ring_is_twelve_dots_with_a_bright_head_and_a_fading_tail() {
+    let s = corner().with_blend(Blend::Opaque);
     let lit = Rgb(255, 214, 96).word();
     let unlit = Rgb(40, 34, 20).word();
-    let indicator = Indicator::new(s);
     let mut sink = Record::default();
-    // Frame 0 is 0x0B: dots 0, 1 and 3 lit.
-    indicator.draw(&mut sink, Look { step: 0, level: 0 });
-    let dots: Vec<_> = sink
-        .0
-        .iter()
-        .map(|p| decode(p))
-        .filter(|&(_, _, w, h, c)| w == 3 && h == 3 && (c == lit || c == unlit))
-        .collect();
-    assert_eq!(dots.len(), 6);
-    let lit_dots: Vec<usize> = dots
-        .iter()
-        .enumerate()
-        .filter(|(_, d)| d.4 == lit)
-        .map(|(i, _)| i)
-        .collect();
-    assert_eq!(lit_dots, [0, 1, 3]);
-    // The grid: two columns 5 apart, three rows 5 apart.
-    assert_eq!(dots[3].0 - dots[0].0, 5);
-    assert_eq!(dots[1].1 - dots[0].1, 5);
-    // Centred on the text row: 16 tall text, 13 tall grid, 1 pixel lower than the text top.
-    let (_, by, _, _) = s.bounds();
-    assert_eq!(dots[0].1, by as i32 + 4 + 1);
+    Indicator::new(s).draw(&mut sink, Look { step: 5, level: 0 });
+    let all = rects(&sink);
+    // The plate, twelve dots, five lights over them (the head and four behind it).
+    assert_eq!(all.len(), 1 + RING_CELLS + TRAIL.len());
+    let dots = &all[1..1 + RING_CELLS];
+    assert!(dots.iter().all(|d| d.4 == unlit && d.2 == 3 && d.3 == 3));
+    // Cell 5 is the head, at the full lit colour; the others behind it dim away.
+    let lights = &all[1 + RING_CELLS..];
+    assert_eq!(lights[0].4, lit);
+    assert_eq!((lights[0].0, lights[0].1), (dots[5].0, dots[5].1));
+    for (n, light) in lights.iter().enumerate() {
+        assert_eq!((light.0, light.1), (dots[5 - n].0, dots[5 - n].1));
+    }
+    let strength = |c: u32| (c & 0xff) as i32;
+    assert!(lights
+        .windows(2)
+        .all(|w| strength(w[0].4) >= strength(w[1].4)));
+    // The ring: dots 5 apart in both directions, the head running clockwise.
+    assert_eq!(dots[1].0 - dots[0].0, 5);
+    assert_eq!(dots[RING_CELLS - 1].1 - dots[0].1, 5);
+    let (bx, by, _, bh) = s.bounds();
+    assert_eq!(dots[0].1, by as i32 + (bh as i32 - 18) / 2);
+    let _ = bx;
+}
+
+#[test]
+fn blended_lights_set_the_draw_mode_around_the_lights_only() {
+    for (blend, mode) in [
+        (Blend::Average, 0u32),
+        (Blend::Additive, 1),
+        (Blend::Glow, 3),
+    ] {
+        let mut sink = Record::default();
+        Indicator::new(spinning().with_blend(blend)).draw(&mut sink, Look { step: 2, level: 0 });
+        let packets = &sink.0;
+        let on = packets
+            .iter()
+            .position(|p| p.len() == 1)
+            .expect("a draw-mode packet before the lights");
+        assert_eq!(packets[on], [0xe100_0000 | mode << 5]);
+        // Everything before it is the opaque plate and dots (0x60), everything
+        // between the two draw-mode packets is a semi-transparent light (0x62).
+        assert!(packets[..on].iter().all(|p| p[0] >> 24 == 0x60));
+        let off = packets.len() - 1;
+        assert_eq!(packets[off], [0xe100_0000], "back to the plain draw mode");
+        assert!(packets[on + 1..off].iter().all(|p| p[0] >> 24 == 0x62));
+        assert_eq!(packets[on + 1..off].len(), TRAIL.len());
+    }
+    // Opaque lights need no draw-mode packets at all.
+    let mut sink = Record::default();
+    Indicator::new(spinning().with_blend(Blend::Opaque))
+        .draw(&mut sink, Look { step: 2, level: 0 });
+    assert!(sink.0.iter().all(|p| p.len() == 3 && p[0] >> 24 == 0x60));
+}
+
+/// The bounding box of the ring's dots (the rectangles after the plate) in pixels.
+fn ring_extent(sink: &Record) -> (i32, i32, i32, i32) {
+    let dots = &rects(sink)[1..1 + RING_CELLS];
+    let left = dots.iter().map(|d| d.0).min().unwrap();
+    let right = dots.iter().map(|d| d.0 + d.2).max().unwrap();
+    let top = dots.iter().map(|d| d.1).min().unwrap();
+    let bottom = dots.iter().map(|d| d.1 + d.3).max().unwrap();
+    (left, top, right - left, bottom - top)
+}
+
+#[test]
+fn the_ring_and_its_box_are_square_on_a_4_3_screen_in_every_mode() {
+    // Width and height of a pixel on a 4:3 set, from the mode: (4/3) * height / width.
+    for (w, h) in [
+        (320, 240),
+        (256, 240),
+        (368, 240),
+        (512, 240),
+        (640, 240),
+        (640, 480),
+    ] {
+        let style = Style::new(&BASIC_8X16, "", INK, Rgb(0, 0, 0))
+            .with_tail(Tail::Spinner {
+                lit: Rgb(255, 214, 96),
+                unlit: Rgb(40, 34, 20),
+            })
+            .in_corner(24, w, h, 12);
+        let par = 4.0 * h as f64 / (3.0 * w as f64);
+        let (_, _, box_w, box_h) = style.bounds();
+        assert_eq!(box_h, 24);
+        assert!(
+            (box_w as f64 * par - 24.0).abs() <= 0.5 * par.max(1.0) + 0.01,
+            "{w}x{h}: box {box_w}x{box_h} px is {:.2} wide on screen",
+            box_w as f64 * par
+        );
+        let mut sink = Record::default();
+        Indicator::new(style).draw(&mut sink, Look { step: 3, level: 0 });
+        let (_, _, ring_w, ring_h) = ring_extent(&sink);
+        assert_eq!(ring_h, 18);
+        assert!(
+            (ring_w as f64 * par - ring_h as f64).abs() <= 0.5 * par.max(1.0) + 0.01,
+            "{w}x{h}: ring {ring_w}x{ring_h} px is {:.2} wide on screen",
+            ring_w as f64 * par
+        );
+        // The ring is centred in the box, and the box keeps equal margins to the
+        // right edge and the bottom edge on the screen.
+        let (bx, by, bw, bh) = style.bounds();
+        let (rx, ry, rw, rh) = ring_extent(&sink);
+        assert!(((rx - bx as i32) - (bx as i32 + bw as i32 - rx - rw)).abs() <= 1);
+        assert!(((ry - by as i32) - (by as i32 + bh as i32 - ry - rh)).abs() <= 1);
+        let right_margin = (w - (bx + bw)) as f64 * par;
+        let bottom_margin = (h - (by + bh)) as f64;
+        assert!(
+            (right_margin - bottom_margin).abs() <= par.max(1.0),
+            "{w}x{h}: margins {right_margin:.1} right, {bottom_margin} bottom"
+        );
+    }
 }
 
 #[test]
@@ -351,19 +448,12 @@ fn corner() -> Style {
 #[test]
 fn the_corner_widget_is_a_square_in_the_bottom_right() {
     assert_eq!(corner().bounds(), (284, 204, 24, 24));
-    // The label-less spinner is centred in it: 8 wide, 13 tall.
+    // The label-less ring is centred in it: 18 square.
     let mut sink = Record::default();
     Indicator::new(corner()).draw(&mut sink, Look { step: 0, level: 0 });
-    let fill = decode(&sink.0[0]);
-    assert_eq!(fill, (284, 204, 24, 24, 0));
-    let dots: Vec<_> = sink.0[1..].iter().map(|p| decode(p)).collect();
-    assert_eq!(dots.len(), 6);
-    let left = dots.iter().map(|d| d.0).min().unwrap();
-    let right = dots.iter().map(|d| d.0 + d.2).max().unwrap();
-    let top = dots.iter().map(|d| d.1).min().unwrap();
-    let bottom = dots.iter().map(|d| d.1 + d.3).max().unwrap();
-    assert_eq!((right - left, bottom - top), (8, 13));
-    assert_eq!((left, top), (284 + 8, 204 + 5));
+    let all = rects(&sink);
+    assert_eq!(all[0], (284, 204, 24, 24, 0));
+    assert_eq!(ring_extent(&sink), (284 + 3, 204 + 3, 18, 18));
 }
 
 #[test]
@@ -373,7 +463,7 @@ fn the_corner_widget_animates_without_text() {
     let mut sink = Record::default();
     // One spinner frame every two VBlanks, nothing in between.
     let draws = (0..20u32).filter(|&t| indicator.poll(&mut sink, t)).count();
-    assert_eq!(draws, 10);
+    assert_eq!(draws, 10, "one frame every two VBlanks");
 }
 
 fn blocks(sink: &mut dyn Sink, x: i16, y: i16, frame: u8) {
