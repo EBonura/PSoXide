@@ -30,7 +30,7 @@ pub const BACK_X: i32 = 0;
 pub const LIFT: i32 = 9;
 /// How many rows lower than the front bar's top minus `LIFT` the bar behind is drawn: its top is at row
 /// `BACK_DROP`, so the more it is, the more the front bar covers of it.
-pub const BACK_DROP: i32 = 4;
+pub const BACK_DROP: i32 = 3;
 /// Top row of the front bar, in HUD coordinates (the bar behind starts at row 0).
 pub const FRONT_Y: i32 = LIFT;
 /// Emblem top-left.
