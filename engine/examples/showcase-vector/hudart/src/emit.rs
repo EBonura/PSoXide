@@ -64,10 +64,10 @@ pub fn art_module() -> String {
         ("LCAP_X", art::LCAP_X),
         ("BACK_X", art::BACK_X),
         ("LIFT", art::LIFT),
-        ("BACK_DROP", art::BACK_DROP),
+        ("BACK_DROP", art::back_drop()),
         ("FRONT_Y", art::FRONT_Y),
-        ("EMBLEM_X", art::EMBLEM_POS.0),
-        ("EMBLEM_Y", art::EMBLEM_POS.1),
+        ("EMBLEM_X", art::emblem_pos().0),
+        ("EMBLEM_Y", art::emblem_pos().1),
         ("GEM_X0", art::GEM_X0),
         ("GEM_PITCH", art::GEM_PITCH),
         ("GEM_Y", gem_y),
@@ -180,7 +180,7 @@ pub fn art_module() -> String {
 
 /// The layout file for `cellcheck --strict`: the HUD grid frame (two stances by four levels).
 pub fn layout() -> String {
-    let (ex, ey) = art::EMBLEM_POS;
+    let (ex, ey) = art::emblem_pos();
     let g = geos();
     let back = &g[art::BACK_SIZE];
     format!(
@@ -204,7 +204,7 @@ pub fn layout() -> String {
          mirror = emblem {ex} {ey} {ex2} {ey2}\n",
         canvas_w = g[0].width() + art::LCAP_X + art::BACK_X.max(0),
         back_band = {
-            let first = art::FRONT_Y - art::LIFT + art::BACK_DROP;
+            let first = art::FRONT_Y - art::LIFT + art::back_drop();
             if first < art::FRONT_Y {
                 format!("back_band = {first}, {}\n", art::FRONT_Y)
             } else {

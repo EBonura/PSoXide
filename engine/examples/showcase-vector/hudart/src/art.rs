@@ -29,12 +29,37 @@ pub const BACK_X: i32 = 0;
 /// How many rows the bar behind sits above the front bar.
 pub const LIFT: i32 = 9;
 /// How many rows lower than the front bar's top minus `LIFT` the bar behind is drawn: its top is at row
-/// `BACK_DROP`, so the more it is, the more the front bar covers of it.
-pub const BACK_DROP: i32 = 3;
+/// `back_drop()`, so the more it is, the more the front bar covers of it.
+pub const DEFAULT_DROP: i32 = 3;
+
+/// A number from the environment, for trying variants without editing the code; the committed art
+/// is made with the defaults.
+fn env_num(name: &str, default: i32) -> i32 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+/// The committed bar height variant: cells of 6 rows at full size, 14 rows with the plate around them.
+pub const DEFAULT_HEIGHT: i32 = 2;
+
+/// Rows the bar behind is lower (`HUD_DROP`).
+pub fn back_drop() -> i32 {
+    env_num("HUD_DROP", DEFAULT_DROP)
+}
+
+/// How much thinner the bars are: 0 is the original height, 1 to 3 trim the cells and the rows
+/// around them (`HUD_HEIGHT`).
+pub fn height_variant() -> usize {
+    env_num("HUD_HEIGHT", DEFAULT_HEIGHT).clamp(0, 3) as usize
+}
 /// Top row of the front bar, in HUD coordinates (the bar behind starts at row 0).
 pub const FRONT_Y: i32 = LIFT;
-/// Emblem top-left.
-pub const EMBLEM_POS: (i32, i32) = (1, 6);
+/// Emblem top-left: centred on the front bar.
+pub fn emblem_pos() -> (i32, i32) {
+    (1, FRONT_Y + geos()[0].bar_h() / 2 - 12)
+}
 /// First gem's left edge, and the distance between gems.
 pub const GEM_X0: i32 = 35;
 pub const GEM_PITCH: i32 = 12;
@@ -214,41 +239,51 @@ pub fn geos() -> [Geo; SIZES] {
         v.extend_from_slice(tail);
         v
     };
-    [
-        Geo {
-            pitch: 12,
-            body: 10,
-            cell_h: 8,
-            rows: rows(&[Rim, Out, Hi, Mid], 8, &[Lip, Shade, Foot, Drop]),
-            depth: 0,
-        },
-        Geo {
-            pitch: 11,
-            body: 9,
-            cell_h: 7,
-            rows: rows(&[Rim, Out, Hi, Mid], 7, &[Lip, Shade, Foot, Drop]),
-            depth: 1,
-        },
-        Geo {
-            pitch: 10,
-            body: 8,
-            cell_h: 6,
-            rows: rows(&[Rim, Out, Hi], 6, &[Lip, Shade, Foot, Drop]),
-            depth: 2,
-        },
-        Geo {
-            pitch: 9,
-            body: 7,
-            cell_h: 5,
-            rows: rows(&[Rim, Out], 5, &[Lip, Foot, Drop]),
-            depth: 3,
-        },
-    ]
+    // Per height variant and size: the rows above the well, the cells, the rows below. Each step
+    // takes a row off the cells and trims the plate around them to match.
+    type Plate = (&'static [Row], usize, &'static [Row]);
+    let table: [[Plate; SIZES]; 4] = [
+        [
+            (&[Rim, Out, Hi, Mid], 8, &[Lip, Shade, Foot, Drop]),
+            (&[Rim, Out, Hi, Mid], 7, &[Lip, Shade, Foot, Drop]),
+            (&[Rim, Out, Hi], 6, &[Lip, Shade, Foot, Drop]),
+            (&[Rim, Out], 5, &[Lip, Foot, Drop]),
+        ],
+        [
+            (&[Rim, Out, Hi, Mid], 7, &[Lip, Foot, Drop]),
+            (&[Rim, Out, Hi], 6, &[Lip, Foot, Drop]),
+            (&[Rim, Out, Hi], 5, &[Lip, Foot, Drop]),
+            (&[Rim, Out], 4, &[Lip, Foot, Drop]),
+        ],
+        [
+            (&[Rim, Out, Hi], 6, &[Lip, Foot, Drop]),
+            (&[Rim, Out, Hi], 5, &[Lip, Foot, Drop]),
+            (&[Rim, Out], 4, &[Lip, Foot, Drop]),
+            (&[Rim, Out], 4, &[Foot, Drop]),
+        ],
+        [
+            (&[Rim, Out], 5, &[Lip, Foot, Drop]),
+            (&[Rim, Out], 4, &[Lip, Foot, Drop]),
+            (&[Rim, Out], 4, &[Foot, Drop]),
+            (&[Rim, Out], 3, &[Foot, Drop]),
+        ],
+    ];
+    const PITCH: [(i32, i32); SIZES] = [(12, 10), (11, 9), (10, 8), (9, 7)];
+    let t = &table[height_variant()];
+    std::array::from_fn(|i| Geo {
+        pitch: PITCH[i].0,
+        body: PITCH[i].1,
+        cell_h: t[i].1,
+        rows: rows(t[i].0, t[i].1, t[i].2),
+        depth: i,
+    })
 }
 
 /// The tone indices of the rows of a cell, top to bottom, for each cell height.
 fn cell_tones(h: usize) -> &'static [u8] {
     match h {
+        3 => &[CELL_HI, CELL_M, CELL_DD],
+        4 => &[CELL_HI, CELL_L2, CELL_D, CELL_DD],
         8 => &[
             CELL_HI, CELL_L1, CELL_L2, CELL_L2, CELL_M, CELL_M, CELL_D, CELL_DD,
         ],
