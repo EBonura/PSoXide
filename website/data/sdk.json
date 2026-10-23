@@ -269,9 +269,19 @@
       "shows": "`psx-cdstream` on a disc: single, chained, prioritised, aborted-and-resumed and sustained reads of a known file checked byte for byte, an audio lease taken mid-read, and the foreground cost of a long read (`make hello-cdstream-disc`, `make hello-cdstream-gate`)."
     },
     {
+      "name": "hello-cddrain",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/hello-cddrain",
+      "shows": "`psx_cdstream::drain` popping sectors from the CD interrupt while the polled reader runs: one read, a partial last sector, thirty back-to-back reads, a cancel and the watchdog, every byte checked (`make hello-cddrain-disc`, `make hello-cddrain-gate`)."
+    },
+    {
       "name": "hello-cdpause",
       "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/hello-cdpause",
       "shows": "The console's two-response Pause against `SectorReader::stop_proved`: the second response 1.2 to 3.9 million clocks after the first, a Pause refused during a seek and sent again (`make hello-cdpause-disc`, `make hello-cdpause-gate`; needs an emulator with the silicon Pause model)."
+    },
+    {
+      "name": "hello-flipcap",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/hello-flipcap",
+      "shows": "The presentation cap: no display flip within two VBlanks of the last (30 fps NTSC), queued and direct, and an explicit opt-out for 60 fps; prints `FLIPCAP PASS` or `FAIL` (`make hello-flipcap-disc`, `make hello-flipcap-gate`)."
     },
     {
       "name": "hello-wide",
