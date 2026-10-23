@@ -64,6 +64,9 @@ pub const CARD_WINDOW_WORDS: usize = CELLS * SLOT_BYTES / 4;
 /// Rooms the stream can track. A level with more rooms has its farthest
 /// ones left without cards.
 pub const MAX_ROOMS: usize = 512;
+/// Rooms the candidate list holds: the rooms near the eye. A level with more
+/// in reach has the extra ones left without cards.
+const MAX_CANDIDATES: usize = 256;
 /// Ticks between two membership passes.
 const PASS_TICKS: u32 = 8;
 /// Units past `enter` the candidate room list reaches, and (halved) how far
@@ -260,7 +263,7 @@ pub struct CardStream<K> {
     seen_eye: bool,
     /// The rooms within `enter + CANDIDATE_MARGIN` of `candidates_eye`, so a
     /// pass looks at the few rooms near the eye and not at every room.
-    candidates: [u16; MAX_ROOMS],
+    candidates: [u16; MAX_CANDIDATES],
     candidate_count: usize,
     candidates_eye: Option<[i32; 2]>,
     /// Sector the drive ends at once the reads queued so far are done (0
@@ -297,7 +300,7 @@ impl<K: Copy> CardStream<K> {
             heading: [0; 2],
             last_eye: [0; 2],
             seen_eye: false,
-            candidates: [0; MAX_ROOMS],
+            candidates: [0; MAX_CANDIDATES],
             candidate_count: 0,
             candidates_eye: None,
             tail: 0,
@@ -537,6 +540,9 @@ impl<K: Copy> CardStream<K> {
             if (ex - card.centre[0]).abs() <= reach && (ez - card.centre[1]).abs() <= reach {
                 self.candidates[count] = room as u16;
                 count += 1;
+                if count == MAX_CANDIDATES {
+                    break;
+                }
             }
         }
         self.candidate_count = count;
