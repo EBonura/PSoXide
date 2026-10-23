@@ -42,10 +42,10 @@ mod select;
 mod skin;
 
 pub use cards::{
-    draw_cards, horizon_y, slot_clut_word, write_backdrop, Backdrop, BACKDROP_PACKET_WORDS, slot_origin, view_keep, view_toward, Card, CardCamera, CardTable,
-    LiveSlot, ATLAS_COLUMNS, ATLAS_ROWS, CARD_PACKET_WORDS, NO_SLOT, NO_VIEW, PICTURE_ROWS,
-    PITCH_TAN_Q12, SLOTS, SLOT_BYTES, SLOT_HALFWORDS, SLOT_ROWS, TEXELS, VIEWS, VIEW_COS_Q12,
-    VIEW_SIN_Q12,
+    draw_cards, horizon_y, slot_clut_word, slot_origin, view_keep, view_toward, write_backdrop,
+    Backdrop, Card, CardCamera, CardTable, LiveSlot, ATLAS_COLUMNS, ATLAS_ROWS,
+    BACKDROP_PACKET_WORDS, CARD_PACKET_WORDS, NO_SLOT, NO_VIEW, PICTURE_ROWS, PITCH_TAN_Q12, SLOTS,
+    SLOT_BYTES, SLOT_HALFWORDS, SLOT_ROWS, TEXELS, VIEWS, VIEW_COS_Q12, VIEW_SIN_Q12,
 };
 pub use clip::clip_polygon_plane;
 pub use coarse::{CoarseCamera, CoarseRenderer, COARSE_PACKET_WORDS};

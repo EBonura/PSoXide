@@ -188,7 +188,7 @@ impl<K: Copy> CardStream<K> {
             return;
         }
         self.poll(transport);
-        if self.ticks % PASS_TICKS == 0 {
+        if self.ticks.is_multiple_of(PASS_TICKS) {
             self.pass(input);
         }
         self.ticks = self.ticks.wrapping_add(1);
@@ -537,7 +537,7 @@ mod tests {
         fn new(sectors: usize) -> Self {
             let mut bytes = Vec::new();
             for n in 0..sectors {
-                bytes.extend(std::iter::repeat(n as u8).take(SECTOR));
+                bytes.extend(core::iter::repeat_n(n as u8, SECTOR));
             }
             Self {
                 bytes,
@@ -597,11 +597,7 @@ mod tests {
             .collect()
     }
 
-    fn input<'a>(
-        table: &'a CardTable<'a>,
-        sectors: &'a [u32],
-        eye: [i32; 3],
-    ) -> CardInput<'a> {
+    fn input<'a>(table: &'a CardTable<'a>, sectors: &'a [u32], eye: [i32; 3]) -> CardInput<'a> {
         CardInput {
             table,
             sectors,

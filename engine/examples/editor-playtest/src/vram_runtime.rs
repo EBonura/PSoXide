@@ -304,7 +304,8 @@ pub(super) fn release_gameplay_vram() {
     #[cfg(feature = "cd-stream-bench")]
     // SAFETY: single-threaded guest; see `step_cards`.
     unsafe {
-        (*core::ptr::addr_of_mut!(CARDS)).release_all(&mut psx_game_runtime::grid_stream::DiscTransport);
+        (*core::ptr::addr_of_mut!(CARDS))
+            .release_all(&mut psx_game_runtime::grid_stream::DiscTransport);
     }
     vram_arena().release_gameplay_vram();
 }
@@ -556,8 +557,7 @@ pub(super) fn emit_card_uploads(
     if count == 0 {
         return;
     }
-    let Some(mut reservation) =
-        primitive_packets.reserve_packet_words(upload_packet_words(count))
+    let Some(mut reservation) = primitive_packets.reserve_packet_words(upload_packet_words(count))
     else {
         return;
     };
