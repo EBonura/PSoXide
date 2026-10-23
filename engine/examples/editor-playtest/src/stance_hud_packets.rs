@@ -354,7 +354,8 @@ impl HudPackets {
                 self.bars[s][size] = BarPackets::build(&conv, stance, size, health[s]);
             }
             for k in 0..COUNT {
-                self.gems[s][k as usize] = conv.node(gem_op(origin, k, (k as u8) < energy[s]));
+                self.gems[s][k as usize] =
+                    conv.node(gem_op(origin, k, (k as u8) < energy[s], stance));
             }
         }
         for (i, look) in [
@@ -391,7 +392,7 @@ impl HudPackets {
             }
             self.health[s] = new;
             let (old, new) = (self.energy[s], energy[s].min(top));
-            let clut = vram.clut_word(gem_clut(new > old));
+            let clut = vram.clut_word(gem_clut(stance, new > old));
             for k in old.min(new)..old.max(new) {
                 self.gems[s][k as usize].set_clut(clut);
             }

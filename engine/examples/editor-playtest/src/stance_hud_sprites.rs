@@ -262,12 +262,12 @@ pub fn cell_clut(stance: Stance, size: usize, lit: bool) -> usize {
         + if lit { CLUT_CELL_LIT } else { CLUT_CELL_EMPTY }
 }
 
-/// The palette of an energy gem, lit or empty.
-pub fn gem_clut(lit: bool) -> usize {
-    if lit {
-        CLUT_GEM_LIT
-    } else {
-        CLUT_GEM_EMPTY
+/// The palette of an energy gem following `stance`, lit or empty.
+pub fn gem_clut(stance: Stance, lit: bool) -> usize {
+    match (lit, stance) {
+        (false, _) => CLUT_GEM_EMPTY,
+        (true, Stance::Horizon) => CLUT_GEM_LIT,
+        (true, Stance::Zenith) => CLUT_GEM_LIT_ZENITH,
     }
 }
 
@@ -367,12 +367,12 @@ pub fn emblem_op(origin: (i32, i32), look: EmblemLook) -> Op {
 }
 
 /// Gem `k` as one op, lit or not, with the HUD's top-left at `origin`.
-pub fn gem_op(origin: (i32, i32), k: i32, lit: bool) -> Op {
+pub fn gem_op(origin: (i32, i32), k: i32, lit: bool, stance: Stance) -> Op {
     Op::Sprite {
         x: origin.0 + GEM_X0 + GEM_PITCH * k,
         y: origin.1 + GEM_Y,
         src: SPRITE_GEM,
-        clut: gem_clut(lit),
+        clut: gem_clut(stance, lit),
         glass: false,
     }
 }
@@ -452,6 +452,6 @@ pub fn compose(origin: (i32, i32), state: &HudState, draw: &mut impl FnMut(Op)) 
     draw(emblem_op(origin, sc.emblem));
     let energy = state.energy[sc.gems.index()];
     for k in 0..COUNT {
-        draw(gem_op(origin, k, (k as u8) < energy));
+        draw(gem_op(origin, k, (k as u8) < energy, sc.gems));
     }
 }

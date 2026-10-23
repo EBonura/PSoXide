@@ -29,8 +29,9 @@ pub fn cluts() -> Vec<[u16; 16]> {
         &emblem_palette(halfway, mix(halfway, WHITE, 170)),
         &[],
     ));
-    v.push(clut(&gem_palette(true), &[]));
-    v.push(clut(&gem_palette(false), &[]));
+    v.push(clut(&gem_palette(true, 0), &[]));
+    v.push(clut(&gem_palette(true, 1), &[]));
+    v.push(clut(&gem_palette(false, 0), &[]));
     v
 }
 
@@ -138,7 +139,8 @@ pub fn art_module() -> String {
     let _ = writeln!(s, "pub const CLUT_EMBLEM: usize = {};", art::SIZES * 3);
     let _ = writeln!(s, "pub const CLUT_EMBLEM_HALFWAY: usize = {};", 2 * per);
     let _ = writeln!(s, "pub const CLUT_GEM_LIT: usize = {};", 2 * per + 1);
-    let _ = writeln!(s, "pub const CLUT_GEM_EMPTY: usize = {};", 2 * per + 2);
+    let _ = writeln!(s, "pub const CLUT_GEM_LIT_ZENITH: usize = {};", 2 * per + 2);
+    let _ = writeln!(s, "pub const CLUT_GEM_EMPTY: usize = {};", 2 * per + 3);
     let _ = writeln!(
         s,
         "/// 15-bit CLUT entries, 16 per CLUT in table order, entry 0 of each transparent."
