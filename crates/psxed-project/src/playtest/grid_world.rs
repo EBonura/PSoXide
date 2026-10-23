@@ -476,6 +476,59 @@ fn relayout_rooms(
     Ok(blob)
 }
 
+/// Height of the eye above the lowest geometry of a room, in sectors, that the room cards
+/// are drawn from: the follow camera's, a person's height above the ground plus its boom.
+const CARD_EYE_HEIGHT_SECTORS: f32 = 1.3;
+
+/// The eye the room cards are baked from: out along each heading by the radius the rooms
+/// are drawn whole to, where the game hands a room's geometry over to its card.
+pub fn room_card_eye(
+    flood: &crate::grid::world::FloodSettings,
+    sector: i32,
+) -> cook::cards::RoomEye {
+    cook::cards::RoomEye {
+        distance: (i32::from(flood.near_radius) * sector) as f32,
+        height: CARD_EYE_HEIGHT_SECTORS * sector as f32,
+    }
+}
+
+/// Cook `world` as [`cook_level_bytes`] does and return the cooked level with the mean
+/// colour of each of its materials, which is what the cards are baked from: for the card
+/// fit example and tests.
+pub fn cook_for_cards(
+    project: &ProjectDocument,
+    world: &GridWorld,
+    project_root: &Path,
+) -> Result<(cook::CookedLevel, Vec<[f32; 3]>), String> {
+    use crate::grid::lighting::{AlbedoTable, BakeMaterials};
+    let lights = scene_lights(project.active_scene());
+    let mut assets = Vec::new();
+    let mut by_path = HashMap::new();
+    let mut binder = Binder {
+        project,
+        root: project_root,
+        assets: &mut assets,
+        by_path: &mut by_path,
+        used: Vec::new(),
+        warnings: Vec::new(),
+    };
+    let cooked = cook::cook_level(
+        CookInput {
+            world,
+            binder: &mut binder,
+            lights: &lights,
+            first_pack_sector: 0,
+            lod_far_cells: 0,
+            texture_repeat: cook::texture_repeat_default(),
+        },
+        None,
+    )?;
+    let ids: Vec<Option<ResourceId>> = cooked.materials.iter().map(|(id, _)| *id).collect();
+    let table = AlbedoTable::from_project(project, project_root, ids.iter().copied());
+    let albedo = ids.iter().map(|&id| table.albedo(id)).collect();
+    Ok((cooked, albedo))
+}
+
 /// Bake the far cards of `cooked`: each level material coloured by its mean
 /// texel colour, lit by the baked light of the surface.
 fn bake_cards(
@@ -491,9 +544,17 @@ fn bake_cards(
     let ids: Vec<Option<ResourceId>> = cooked.materials.iter().map(|(id, _)| *id).collect();
     let table = AlbedoTable::from_project(project, project_root, ids.iter().copied());
     let albedo: Vec<[f32; 3]> = ids.iter().map(|&id| table.albedo(id)).collect();
-    let (rooms_baked, summary) = cook::cards::bake(cooked, &albedo);
     let sector = i32::from(cooked.level.sector_units);
     let flood = &world.stream.flood;
+    let (rooms_baked, summary) = cook::cards::bake(
+        cooked,
+        &albedo,
+        // PSXED_CARDS_SHEAR=1 bakes the shear orthographic room cards the game had before,
+        // to compare the two (the gap scan).
+        std::env::var_os("PSXED_CARDS_SHEAR")
+            .is_none()
+            .then(|| room_card_eye(flood, sector)),
+    );
     // The layers of cards beyond the room cards: the guest works their bands out the same way
     // (`psx_grid::render::outer_bands`), so the level carries only the layer of each card.
     let room_far = flood.card_far_sectors() * sector;
@@ -595,7 +656,7 @@ fn bake_cards(
     let mut local = cook::cards::local_copies(
         &layout,
         &centres,
-        flood.card_near_sectors() * sector,
+        flood.card_copy_near_sectors() * sector,
         far + 9 * sector,
         sector,
     );

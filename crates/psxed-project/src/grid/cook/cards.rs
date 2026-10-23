@@ -330,8 +330,195 @@ fn finish_picture(raster: &Raster) -> (Vec<u8>, Vec<[u8; 4]>) {
     (encode(&indices, &palette), shown)
 }
 
-/// Bake one room's card, `None` when the room draws nothing.
-pub fn bake_room(cooked: &CookedLevel, albedo: &[[f32; 3]], room: usize) -> Option<BakedCard> {
+/// Where the eye is when a room's pictures are rendered: the viewpoint the card has to
+/// match, in runtime units.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RoomEye {
+    /// Plan distance of the eye from the card's plane (the room's centre) along the
+    /// heading: the distance the room's geometry hands over to its card at.
+    pub distance: f32,
+    /// Height of the eye above the lowest geometry of the room.
+    pub height: f32,
+}
+
+/// Bake one room's card as the eye of `eye` sees it, in perspective, `None` when the room
+/// draws nothing.
+///
+/// Each of the [`VIEWS`] pictures is the room seen from a point `eye.distance` out along its
+/// heading at `eye.height` above the room's lowest geometry, looking along the heading,
+/// projected onto the card's plane (the vertical plane through the room's centre): the
+/// picture of the card and the room's own geometry then show the same silhouette from that
+/// point, which is where the game hands one over to the other. The card is sized to hold
+/// every view.
+pub fn bake_room(
+    cooked: &CookedLevel,
+    albedo: &[[f32; 3]],
+    room: usize,
+    eye: RoomEye,
+) -> Option<BakedCard> {
+    let (tris, quads) = triangles(cooked, albedo, room);
+    let frame = room_frame(cooked, room, &tris)?;
+    let RoomFrame { centre, low, .. } = frame;
+    let eye_y = low + eye.height;
+    let d = eye.distance;
+    // Nothing nearer the eye than half the nominal distance is kept: the card is never used
+    // that close, and the projection grows without bound towards the eye.
+    let nearest = d * 0.5;
+    let mut views: Vec<Vec<ViewTriangle>> = Vec::with_capacity(VIEWS);
+    for view in 0..VIEWS {
+        let (cos, sin) = (
+            f32::from(VIEW_COS_Q12[view]) / 4096.0,
+            f32::from(VIEW_SIN_Q12[view]) / 4096.0,
+        );
+        let (cx, cz) = (centre[0] as f32, centre[1] as f32);
+        let eye_at = [cx + cos * d, eye_y, cz + sin * d];
+        let behind = |p: [f32; 3]| -((p[0] - cx) * cos + (p[2] - cz) * sin);
+        let across = |p: [f32; 3]| (p[0] - cx) * sin - (p[2] - cz) * cos;
+        let mut out = Vec::new();
+        for t in &tris {
+            let centroid =
+                [0, 1, 2].map(|k| (t.position[0][k] + t.position[1][k] + t.position[2][k]) / 3.0);
+            let to_eye = [0, 1, 2].map(|k| eye_at[k] - centroid[k]);
+            if !faces(&quads[t.quad], to_eye) {
+                continue;
+            }
+            let mut poly: Vec<ClipVertex> = (0..3)
+                .map(|k| ClipVertex {
+                    p: t.position[k],
+                    c: t.colour[k],
+                })
+                .collect();
+            poly = clip_polygon(&poly, |v| d + behind(v.p) - nearest);
+            if poly.len() < 3 {
+                continue;
+            }
+            let project = |v: &ClipVertex| {
+                let t = behind(v.p);
+                let scale = d / (d + t);
+                [
+                    across(v.p) * scale,
+                    eye_y + (v.p[1] - eye_y) * scale,
+                    1.0 / (d + t),
+                ]
+            };
+            let first = project(&poly[0]);
+            for k in 1..poly.len() - 1 {
+                out.push(ViewTriangle {
+                    uvw: [first, project(&poly[k]), project(&poly[k + 1])],
+                    colour: [poly[0].c, poly[k].c, poly[k + 1].c],
+                });
+            }
+        }
+        views.push(out);
+    }
+    let (mut reach, mut low_v, mut high_v) = (0.0f32, f32::INFINITY, f32::NEG_INFINITY);
+    for tri in views.iter().flatten() {
+        for v in &tri.uvw {
+            reach = reach.max(v[0].abs());
+            low_v = low_v.min(v[1]);
+            high_v = high_v.max(v[1]);
+        }
+    }
+    if !low_v.is_finite() {
+        return None;
+    }
+    let half_width = (reach + 1.0).ceil().max(8.0);
+    let base = (low_v - 1.0).floor();
+    let top = (high_v + 1.0).ceil();
+    let height = (top - base).max(8.0);
+    let (sw, sh) = (Raster::WIDE as f32, Raster::HIGH as f32);
+    let mut sectors = Vec::with_capacity(VIEWS * SLOT_BYTES);
+    let mut preview = Vec::with_capacity(VIEWS * WIDE * HIGH);
+    for tris in &views {
+        let mut raster = Raster::new();
+        for t in tris {
+            let to_sample = |v: [f32; 3]| {
+                [
+                    (v[0] + half_width) / (2.0 * half_width) * sw,
+                    (base + height - v[1]) / height * sh,
+                    v[2],
+                ]
+            };
+            raster.fill_persp(t.uvw.map(to_sample), t.colour);
+        }
+        let (sector, shown) = finish_picture(&raster);
+        sectors.extend_from_slice(&sector);
+        preview.extend(shown);
+    }
+    Some(BakedCard {
+        centre,
+        base: base as i32,
+        height: height as i32,
+        half_width: half_width as i32,
+        sectors,
+        preview,
+        layer: 0,
+    })
+}
+
+/// The centre, reach and vertical extent of a room's geometry.
+struct RoomFrame {
+    centre: [i32; 2],
+    #[allow(dead_code)]
+    reach: f32,
+    low: f32,
+    #[allow(dead_code)]
+    high: f32,
+}
+
+/// Where a room stands: the centre of the sectors it owns, how far its geometry reaches
+/// from there and how low and high it goes. `None` when it owns nothing or draws nothing.
+fn room_frame(cooked: &CookedLevel, room: usize, tris: &[Triangle]) -> Option<RoomFrame> {
+    if tris.is_empty() {
+        return None;
+    }
+    let record = &cooked.level.rooms[room];
+    let sector = i32::from(cooked.level.sector_units);
+    let width = usize::from(record.width);
+    let owns = |cx: usize, cz: usize| {
+        cooked.level.occupancy.get(room).is_none_or(|bits| {
+            let bit = cz * width + cx;
+            bits.get(bit / 8).is_some_and(|b| b & (1 << (bit % 8)) != 0)
+        })
+    };
+    let (mut sx, mut sz, mut n) = (0i64, 0i64, 0i64);
+    for cz in 0..usize::from(record.depth) {
+        for cx in 0..width {
+            if owns(cx, cz) {
+                sx += i64::from(record.origin[0]) + (cx as i64) * i64::from(sector);
+                sz += i64::from(record.origin[2]) + (cz as i64) * i64::from(sector);
+                n += 1;
+            }
+        }
+    }
+    if n == 0 {
+        return None;
+    }
+    let centre = [(sx / n) as i32 + sector / 2, (sz / n) as i32 + sector / 2];
+    let (mut reach, mut low, mut high) = (0.0f32, f32::INFINITY, f32::NEG_INFINITY);
+    for t in tris {
+        for p in &t.position {
+            let (dx, dz) = (p[0] - centre[0] as f32, p[2] - centre[1] as f32);
+            reach = reach.max((dx * dx + dz * dz).sqrt());
+            low = low.min(p[1]);
+            high = high.max(p[1]);
+        }
+    }
+    Some(RoomFrame {
+        centre,
+        reach,
+        low,
+        high,
+    })
+}
+
+/// The old bake, a shear orthographic view with the eye pitched down: kept to compare the
+/// two (the fit example). Bake one room's card, `None` when the room draws nothing.
+pub fn bake_room_ortho(
+    cooked: &CookedLevel,
+    albedo: &[[f32; 3]],
+    room: usize,
+) -> Option<BakedCard> {
     let (tris, quads) = triangles(cooked, albedo, room);
     if tris.is_empty() {
         return None;
@@ -988,7 +1175,12 @@ pub fn local_copies(
 
 /// Bake every room's card. `albedo` is the mean colour of each level
 /// material in slot order (`cooked.materials`).
-pub fn bake(cooked: &CookedLevel, albedo: &[[f32; 3]]) -> (Vec<Option<BakedCard>>, CardsReport) {
+/// `eye` `None` bakes the old shear orthographic cards ([`bake_room_ortho`]), for comparing.
+pub fn bake(
+    cooked: &CookedLevel,
+    albedo: &[[f32; 3]],
+    eye: Option<RoomEye>,
+) -> (Vec<Option<BakedCard>>, CardsReport) {
     let rooms = cooked.level.rooms.len();
     let threads = std::thread::available_parallelism()
         .map_or(4, std::num::NonZeroUsize::get)
@@ -1001,7 +1193,13 @@ pub fn bake(cooked: &CookedLevel, albedo: &[[f32; 3]]) -> (Vec<Option<BakedCard>
                 scope.spawn(move || {
                     (worker..rooms)
                         .step_by(threads)
-                        .map(|room| (room, bake_room(cooked, albedo, room)))
+                        .map(|room| {
+                            let card = match eye {
+                                Some(eye) => bake_room(cooked, albedo, room, eye),
+                                None => bake_room_ortho(cooked, albedo, room),
+                            };
+                            (room, card)
+                        })
                         .collect::<Vec<_>>()
                 })
             })
@@ -1035,6 +1233,227 @@ pub fn bake(cooked: &CookedLevel, albedo: &[[f32; 3]]) -> (Vec<Option<BakedCard>
         }
     }
     (cards, report)
+}
+
+/// How well a room's card lines up with the room's own geometry seen from one eye: both are
+/// drawn into a mask the size of the game's screen and compared.
+pub mod fit {
+    use super::*;
+
+    /// The game's screen and focal length, in pixels.
+    pub const SCREEN: [usize; 2] = [320, 240];
+    pub const FOCAL: f32 = 320.0;
+
+    /// What [`fit_room`] measured.
+    #[derive(Clone, Debug)]
+    pub struct Fit {
+        /// Pixels the room's geometry covers, the card covers, and both.
+        pub geometry: usize,
+        pub card: usize,
+        pub both: usize,
+        /// Pixels in one and not the other, over pixels in either.
+        pub mismatch: f32,
+        /// Mean over the columns both cover of how far the top and the bottom edge of the card
+        /// stand from the geometry's, in pixels.
+        pub top: f32,
+        pub bottom: f32,
+        /// How far the left and right ends of the card stand from the geometry's, in pixels.
+        pub left: f32,
+        pub right: f32,
+        /// `SCREEN` pixels, row-major: white both, green geometry only, magenta card only.
+        pub overlay: Vec<[u8; 3]>,
+    }
+
+    /// The view of `VIEWS` the eye at `(dx, dz)` from the card is nearest to.
+    fn nearest_view(dx: f32, dz: f32) -> usize {
+        let mut best = (0usize, f32::MIN);
+        for view in 0..VIEWS {
+            let (c, s) = (
+                f32::from(VIEW_COS_Q12[view]) / 4096.0,
+                f32::from(VIEW_SIN_Q12[view]) / 4096.0,
+            );
+            let dot = (dx * c + dz * s) / (dx * dx + dz * dz).sqrt().max(1e-3);
+            if dot > best.1 {
+                best = (view, dot);
+            }
+        }
+        best.0
+    }
+
+    /// Fit `card` of `room` for an eye at `eye` (world `x, y, z`), looking level along the
+    /// line from the eye to the card's centre.
+    pub fn fit_room(
+        cooked: &CookedLevel,
+        albedo: &[[f32; 3]],
+        room: usize,
+        card: &BakedCard,
+        eye: [f32; 3],
+    ) -> Option<Fit> {
+        let (tris, quads) = triangles(cooked, albedo, room);
+        let (cx, cz) = (card.centre[0] as f32, card.centre[1] as f32);
+        let (dx, dz) = (eye[0] - cx, eye[2] - cz);
+        let length = (dx * dx + dz * dz).sqrt();
+        if length < 1.0 {
+            return None;
+        }
+        let h = [dx / length, dz / length];
+        let right = [h[1], -h[0]];
+        let (w, hh) = (SCREEN[0], SCREEN[1]);
+        let project = |p: [f32; 3]| -> Option<[f32; 2]> {
+            let rel = [p[0] - eye[0], p[1] - eye[1], p[2] - eye[2]];
+            let z = -(rel[0] * h[0] + rel[2] * h[1]);
+            if z < 4.0 {
+                return None;
+            }
+            let x = rel[0] * right[0] + rel[2] * right[1];
+            Some([
+                w as f32 / 2.0 + FOCAL * x / z,
+                hh as f32 / 2.0 - FOCAL * rel[1] / z,
+            ])
+        };
+        let mut geometry = vec![false; w * hh];
+        let to_eye_of = |t: &Triangle| {
+            let c =
+                [0, 1, 2].map(|k| (t.position[0][k] + t.position[1][k] + t.position[2][k]) / 3.0);
+            [0, 1, 2].map(|k| eye[k] - c[k])
+        };
+        for t in &tris {
+            if !faces(&quads[t.quad], to_eye_of(t)) {
+                continue;
+            }
+            let p: Vec<Option<[f32; 2]>> = t.position.iter().map(|&q| project(q)).collect();
+            if let [Some(a), Some(b), Some(c)] = p[..] {
+                fill_mask(&mut geometry, w, hh, [a, b, c]);
+            }
+        }
+        // The card: a rectangle standing at the centre, perpendicular to the view.
+        let corner = |u: f32, y: f32| project([cx + right[0] * u, y, cz + right[1] * u]);
+        let (top, bottom) = ((card.base + card.height) as f32, card.base as f32);
+        let hw = card.half_width as f32;
+        let (a, b, c) = (corner(-hw, top)?, corner(hw, top)?, corner(-hw, bottom)?);
+        let view = nearest_view(dx, dz);
+        let picture = &card.preview[view * WIDE * HIGH..(view + 1) * WIDE * HIGH];
+        let mut card_mask = vec![false; w * hh];
+        let (x0, x1) = (
+            a[0].floor().max(0.0) as usize,
+            (b[0].ceil() as usize).min(w),
+        );
+        let (y0, y1) = (
+            a[1].floor().max(0.0) as usize,
+            (c[1].ceil() as usize).min(hh),
+        );
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let u = ((x as f32 + 0.5) - a[0]) / (b[0] - a[0]);
+                let v = ((y as f32 + 0.5) - a[1]) / (c[1] - a[1]);
+                if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&v) {
+                    continue;
+                }
+                let (tx, ty) = ((u * WIDE as f32) as usize, (v * HIGH as f32) as usize);
+                if picture[ty.min(HIGH - 1) * WIDE + tx.min(WIDE - 1)][3] != 0 {
+                    card_mask[y * w + x] = true;
+                }
+            }
+        }
+        let (mut g, mut c2, mut both) = (0usize, 0usize, 0usize);
+        let mut overlay = vec![[24u8, 24, 28]; w * hh];
+        for i in 0..w * hh {
+            g += usize::from(geometry[i]);
+            c2 += usize::from(card_mask[i]);
+            overlay[i] = match (geometry[i], card_mask[i]) {
+                (true, true) => {
+                    both += 1;
+                    [255, 255, 255]
+                }
+                (true, false) => [40, 200, 80],
+                (false, true) => [220, 40, 220],
+                (false, false) => [24, 24, 28],
+            };
+        }
+        let union = g + c2 - both;
+        let edge = |mask: &[bool], x: usize, from_top: bool| {
+            let rows: Box<dyn Iterator<Item = usize>> = if from_top {
+                Box::new(0..hh)
+            } else {
+                Box::new((0..hh).rev())
+            };
+            rows.into_iter().find(|&y| mask[y * w + x])
+        };
+        let (mut top_sum, mut bottom_sum, mut columns) = (0.0f32, 0.0f32, 0usize);
+        for x in 0..w {
+            if let (Some(gt), Some(ct), Some(gb), Some(cb)) = (
+                edge(&geometry, x, true),
+                edge(&card_mask, x, true),
+                edge(&geometry, x, false),
+                edge(&card_mask, x, false),
+            ) {
+                top_sum += (gt as f32 - ct as f32).abs();
+                bottom_sum += (gb as f32 - cb as f32).abs();
+                columns += 1;
+            }
+        }
+        let extent = |mask: &[bool]| {
+            let cols: Vec<usize> = (0..w)
+                .filter(|&x| (0..hh).any(|y| mask[y * w + x]))
+                .collect();
+            (
+                cols.first().copied().unwrap_or(0) as f32,
+                cols.last().copied().unwrap_or(0) as f32,
+            )
+        };
+        let (gl, gr) = extent(&geometry);
+        let (cl, cr) = extent(&card_mask);
+        Some(Fit {
+            geometry: g,
+            card: c2,
+            both,
+            mismatch: if union == 0 {
+                0.0
+            } else {
+                1.0 - both as f32 / union as f32
+            },
+            top: if columns == 0 {
+                f32::NAN
+            } else {
+                top_sum / columns as f32
+            },
+            bottom: if columns == 0 {
+                f32::NAN
+            } else {
+                bottom_sum / columns as f32
+            },
+            left: (gl - cl).abs(),
+            right: (gr - cr).abs(),
+            overlay,
+        })
+    }
+
+    /// Fill the pixels whose centres lie in a screen triangle.
+    fn fill_mask(mask: &mut [bool], w: usize, h: usize, p: [[f32; 2]; 3]) {
+        let edge = |a: [f32; 2], b: [f32; 2], x: f32, y: f32| {
+            (b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (x - a[0])
+        };
+        let area = edge(p[0], p[1], p[2][0], p[2][1]);
+        if area.abs() < 1e-6 {
+            return;
+        }
+        let lo = |f: fn(f32, f32) -> f32, k: usize| f(f(p[0][k], p[1][k]), p[2][k]);
+        let x0 = (lo(f32::min, 0).floor().max(0.0)) as usize;
+        let x1 = (lo(f32::max, 0).ceil().min(w as f32)).max(0.0) as usize;
+        let y0 = (lo(f32::min, 1).floor().max(0.0)) as usize;
+        let y1 = (lo(f32::max, 1).ceil().min(h as f32)).max(0.0) as usize;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let (sx, sy) = (x as f32 + 0.5, y as f32 + 0.5);
+                let w0 = edge(p[1], p[2], sx, sy) / area;
+                let w1 = edge(p[2], p[0], sx, sy) / area;
+                let w2 = 1.0 - w0 - w1;
+                if w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0 {
+                    mask[y * w + x] = true;
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1086,7 +1505,7 @@ mod tests {
             ..GridWorld::default()
         };
         let cooked = cook(&world).unwrap();
-        let card = bake_room(&cooked, &albedo(), 0).expect("the room draws something");
+        let card = bake_room_ortho(&cooked, &albedo(), 0).expect("the room draws something");
         let sector = i32::from(cooked.level.sector_units);
         // The room spans x = 4..8 sectors, z = 2..3: its centre is at the
         // middle of that.
@@ -1117,7 +1536,7 @@ mod tests {
             ..GridWorld::default()
         };
         let cooked = cook(&world).unwrap();
-        let card = bake_room(&cooked, &albedo(), 0).unwrap();
+        let card = bake_room_ortho(&cooked, &albedo(), 0).unwrap();
         let view = |k: usize| {
             let (indices, _) = decode(&card.sectors[k * SQ..(k + 1) * SQ]);
             indices.iter().filter(|&&i| i != 0).count()
@@ -1336,7 +1755,7 @@ mod tests {
             ..GridWorld::default()
         };
         let cooked = cook(&world).unwrap();
-        let card = bake_room(&cooked, &albedo(), 0).unwrap();
+        let card = bake_room_ortho(&cooked, &albedo(), 0).unwrap();
         let (indices, palette) = decode(&card.sectors[..SLOT_BYTES]);
         // The preview shows each texel at its palette entry's 5-bit colour.
         for (k, texel) in card.preview[..WIDE * HIGH].iter().enumerate() {
@@ -1349,5 +1768,39 @@ mod tests {
                 assert_eq!(&texel[..3], &[c(0), c(5), c(10)]);
             }
         }
+    }
+    /// A room with a wall and a floor, a perspective card of it from `eye`.
+    fn walled(eye: RoomEye) -> (CookedLevel, BakedCard) {
+        let world = GridWorld {
+            rooms: vec![strip([20, 4], &[0, 0, 4096, 4096, 0, 0])],
+            ..GridWorld::default()
+        };
+        let cooked = cook(&world).unwrap();
+        let card = bake_room(&cooked, &albedo(), 0, eye).expect("the room draws something");
+        (cooked, card)
+    }
+
+    #[test]
+    fn a_perspective_card_lines_up_with_its_room_from_the_eye_it_was_baked_for() {
+        let eye = RoomEye {
+            distance: 960.0,
+            height: 104.0,
+        };
+        let (cooked, card) = walled(eye);
+        let ground = 0.0;
+        let at = [
+            card.centre[0] as f32 + eye.distance,
+            ground + eye.height,
+            card.centre[1] as f32,
+        ];
+        let fit = fit::fit_room(&cooked, &albedo(), 0, &card, at).expect("a fit");
+        assert!(fit.geometry > 200, "{} pixels of geometry", fit.geometry);
+        assert!(fit.mismatch < 0.2, "mismatch {}", fit.mismatch);
+        assert!(
+            fit.left < 6.0 && fit.right < 6.0,
+            "{} {}",
+            fit.left,
+            fit.right
+        );
     }
 }

@@ -113,9 +113,10 @@ pub struct FloodSettings {
     /// Sectors from the camera out to which cards are shown; 0 means the
     /// default, 20.
     pub card_far: u8,
-    /// Sectors from the camera inside which no card is drawn; 0 means two
-    /// sectors inside `near_radius`: the rooms nearer than that are always drawn
-    /// whole, so their pictures are not read.
+    /// Sectors from the camera inside which no card is drawn, drawn whole or
+    /// not; 0 (the default) means none: a room that is not drawn whole shows its
+    /// card at any distance, and one that is drawn whole fades its card in over
+    /// the last sector before `near_radius`.
     pub card_near: u8,
     /// Layers of cards beyond `card_far` (0 to 2), each holding everything
     /// from its distance to the next layer's, the last one everything to the
@@ -150,11 +151,14 @@ impl FloodSettings {
 
     /// Sectors inside which no card is drawn.
     pub fn card_near_sectors(&self) -> i32 {
-        if self.card_near > 0 {
-            i32::from(self.card_near)
-        } else {
-            (i32::from(self.near_radius) - 2).max(0)
-        }
+        i32::from(self.card_near)
+    }
+
+    /// Sectors from the camera inside which the cook does not lay copies of
+    /// the pictures beside their tiles: two sectors inside `near_radius`, where
+    /// the rooms are drawn whole and a card is rarely asked for.
+    pub fn card_copy_near_sectors(&self) -> i32 {
+        (i32::from(self.near_radius) - 2).max(0)
     }
 
     /// The layers of cards beyond the room cards, from the nearest out:
