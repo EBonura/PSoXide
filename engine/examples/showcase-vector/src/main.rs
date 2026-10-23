@@ -45,8 +45,13 @@ static mut CACHE: PacketCache<128> = PacketCache::new();
 /// The sprite HUDs: eight for the grid frame (two stances by four levels), the first one alone for the
 /// cycle measurements.
 #[cfg(feature = "hud-sprites")]
-static mut SPRITE_HUDS: [hud_packets::HudPackets<{ hud_packets::PACKETS }>; 8] =
+static mut SPRITE_HUDS: [hud_packets::HudPackets; 8] =
     [const { hud_packets::HudPackets::new() }; 8];
+
+/// One size of the bar on its own, for the `HUD_SIZE` grid frame.
+#[cfg(feature = "hud-sprites")]
+static mut SIZE_HUDS: [hud_packets::AlonePackets; 8] =
+    [const { hud_packets::AlonePackets::new() }; 8];
 
 /// Draw the inactive stance's cells on the back bar (variants that have them).
 const BACK: bool = option_env!("HUD_BACK").is_some();
@@ -63,6 +68,10 @@ const ANIM: bool = cfg!(feature = "hud-anim");
 /// `HUD_SWAP` at build time: 0, or the stance a swap grid swaps to (1 Zenith, 2 Horizon). The grid
 /// then shows one column of swap frames 0, 2, 4 and 6 instead of the fill levels.
 const SWAP_GRID: i32 = env_px(option_env!("HUD_SWAP"), 0);
+
+/// `HUD_SIZE` at build time: the size of the bar the grid frame shows alone, or `NO_SIZE`.
+const NO_SIZE: i32 = 99;
+const SIZE_GRID: i32 = env_px(option_env!("HUD_SIZE"), NO_SIZE);
 
 const fn env_px(s: Option<&str>, default: i32) -> i32 {
     match s {
@@ -510,8 +519,7 @@ fn main() -> ! {
 
 impl Demo {
     /// The sprite HUD: in the grid build eight HUDs built once and linked every frame; otherwise one
-    /// HUD whose state flips every 48 frames, with the build and link cycles recorded like the vector
-    /// HUD's.
+    /// HUD on a timeline of rests and swaps, with the link cycles recorded.
     #[cfg(feature = "hud-sprites")]
     fn sprite_hud(&mut self, ot: &mut OtFrame<'_, 16>, frame: u32) -> &'static str {
         use hud_packets::HudVram;
@@ -520,53 +528,76 @@ impl Demo {
         // walk before anything is rebuilt.
         let huds = unsafe { &mut SPRITE_HUDS };
         if GRID {
-            if frame == 0 {
-                for (i, hud) in huds.iter_mut().enumerate() {
-                    let (col, row) = (i / 4, i % 4);
-                    let state = if SWAP_GRID != 0 {
-                        if col != 0 {
-                            hud.clear();
-                            continue;
-                        }
-                        SpriteState {
-                            stance: if SWAP_GRID == 1 {
-                                Stance::Zenith
-                            } else {
-                                Stance::Horizon
-                            },
-                            health: [7, 5],
-                            energy: [8, 3],
-                            swap: [0u8, 2, 4, 6][row],
-                        }
-                    } else {
-                        let level = [10u8, 6, 3, 0][row];
+            if SIZE_GRID != NO_SIZE {
+                // SAFETY: as above.
+                let alone = unsafe { &mut SIZE_HUDS };
+                if frame == 0 {
+                    for (i, hud) in alone.iter_mut().enumerate() {
+                        let (col, row) = (i / 4, i % 4);
                         let stance = if col == 0 {
                             Stance::Horizon
                         } else {
                             Stance::Zenith
                         };
-                        let mut health = [4, 4];
-                        health[col] = level;
-                        SpriteState {
+                        let origin = (160 * col as i32, 8 + 40 * row as i32);
+                        let level = [10u8, 6, 3, 0][row];
+                        hud.build(
+                            &HudVram::SHOWCASE,
+                            origin,
                             stance,
-                            health,
-                            energy: [level, level],
-                            swap: 0,
-                        }
-                    };
-                    let origin = (GRID_X[col], 8 + 40 * row as i32);
-                    let t = ticks();
-                    hud.build(&HudVram::SHOWCASE, origin, &state);
-                    if i == 0 {
-                        record("c_build", hud.len() as u32, ticks().wrapping_sub(t));
+                            SIZE_GRID as usize,
+                            level,
+                        );
                     }
                 }
-            }
-            for hud in huds.iter_mut() {
-                for (ptr, words) in hud.links() {
+                for hud in alone.iter_mut() {
                     // SAFETY: a `static`, unmodified until the walk ends.
-                    unsafe { ot.add_raw(8, ptr, words) };
+                    hud.link(|ptr, words| unsafe { ot.add_raw(8, ptr, words) });
                 }
+                return "walk_hud";
+            }
+            for (i, hud) in huds.iter_mut().enumerate() {
+                let (col, row) = (i / 4, i % 4);
+                let state = if SWAP_GRID != 0 {
+                    SpriteState {
+                        stance: if SWAP_GRID == 1 {
+                            Stance::Zenith
+                        } else {
+                            Stance::Horizon
+                        },
+                        health: [7, 5],
+                        energy: [8, 3],
+                        swap: [0u8, 2, 4, 6][row],
+                    }
+                } else {
+                    let level = [10u8, 6, 3, 0][row];
+                    let stance = if col == 0 {
+                        Stance::Horizon
+                    } else {
+                        Stance::Zenith
+                    };
+                    let mut health = [4, 4];
+                    health[col] = level;
+                    SpriteState {
+                        stance,
+                        health,
+                        energy: [level, level],
+                        swap: 0,
+                    }
+                };
+                if SWAP_GRID != 0 && col != 0 {
+                    continue;
+                }
+                let origin = (GRID_X[col], 8 + 40 * row as i32);
+                if frame == 0 {
+                    let t = ticks();
+                    hud.build(&HudVram::SHOWCASE, origin, state.health, state.energy);
+                    if i == 0 {
+                        record("c_build", 0, ticks().wrapping_sub(t));
+                    }
+                }
+                // SAFETY: a `static`, unmodified until the walk ends.
+                hud.link(&state, |ptr, words| unsafe { ot.add_raw(8, ptr, words) });
             }
             return "walk_hud";
         }
@@ -589,26 +620,20 @@ impl Demo {
         };
         let origin = if ANIM { (8, 100) } else { (6, 160) };
         let hud = &mut huds[0];
-        if self.sprite_state != Some(state) {
+        if self.sprite_state.is_none() {
             let t0 = ticks();
-            hud.build(&HudVram::SHOWCASE, origin, &state);
+            hud.build(&HudVram::SHOWCASE, origin, state.health, state.energy);
+            record("c_build", 0, ticks().wrapping_sub(t0));
             self.sprite_state = Some(state);
-            if swap == 0 {
-                record("c_build", hud.len() as u32, ticks().wrapping_sub(t0));
-            } else if swap == 4 {
-                record("sw_build", hud.len() as u32, ticks().wrapping_sub(t0));
-            }
         }
         if t != 63 {
             let t0 = ticks();
-            for (ptr, words) in hud.links() {
-                // SAFETY: a `static`, unmodified until the walk ends.
-                unsafe { ot.add_raw(8, ptr, words) };
-            }
+            // SAFETY: a `static`, unmodified until the walk ends.
+            hud.link(&state, |ptr, words| unsafe { ot.add_raw(8, ptr, words) });
             if swap == 0 {
-                record("c_link", hud.len() as u32, ticks().wrapping_sub(t0));
+                record("c_link", 0, ticks().wrapping_sub(t0));
             } else if swap == 4 {
-                record("sw_link", hud.len() as u32, ticks().wrapping_sub(t0));
+                record("sw_link", 0, ticks().wrapping_sub(t0));
             }
         }
         match (t, swap) {

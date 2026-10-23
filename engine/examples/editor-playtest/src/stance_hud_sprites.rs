@@ -6,6 +6,10 @@
 //! different states are the same pixels by construction. Axis-aligned areas are flat rectangles, so
 //! nothing here depends on how the GPU fills a slanted triangle.
 //!
+//! A bar comes in a few sizes, each pixel art of its own and never scaled at run time (scaling would
+//! break the identical cells). The bar in front is full size; the bar behind is a smaller size, as if
+//! further back, and the sizes between are used for the frames while the bars trade places.
+//!
 //! The composition is written once against a `draw` callback, like `stance_hud_layout.rs`: the guest
 //! turns each [`Op`] into a packet, the host viewer (`hudart`'s `hudview`) paints them into a frame.
 //! This file has no dependencies, so both include it by path.
@@ -29,10 +33,31 @@ pub struct Band {
     pub glass: bool,
 }
 
+/// One size of the bar. Columns are relative to the HUD column of the bar's origin (the left end
+/// of every bar starts at `LCAP_X`), rows to the bar's first row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SizeGeo {
+    /// Distance between cells.
+    pub pitch: i32,
+    /// Left edge of the first cell's bottom row, and the row its top is on.
+    pub cell_x0: i32,
+    pub cell_row: i32,
+    /// Rows of the bar.
+    pub bar_h: i32,
+    /// Left edge of the flat part of the plate and the first column of the right end.
+    pub bar_x0: i32,
+    pub cap_x: i32,
+    /// Bands of the bar.
+    pub band_count: usize,
+    pub cell: SpriteRect,
+    pub cap: SpriteRect,
+    pub lcap: SpriteRect,
+}
+
 include!("../assets/hud/sprites/stance_hud_art.rs");
 
 /// The two stances. Each has its own bar, which is a complete object: it can be drawn at any
-/// position, in front or behind the other one, in any of its looks.
+/// position, in front or behind the other one, at any of its sizes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stance {
     Horizon,
@@ -104,30 +129,30 @@ pub enum Op {
 
 /// Ops one HUD needs at most: every band of both bars, both ends of both bars, both bars' cells,
 /// the emblem, the gems and four mask changes.
-pub const MAX_OPS: usize = 2 * BAND_COUNT + 9 + 3 * (COUNT as usize);
+pub const MAX_OPS: usize = 2 * BAND_MAX + 9 + 3 * (COUNT as usize);
 
-/// Where a bar is, relative to the HUD's origin, and how bright it looks (0 behind, 1 halfway,
-/// 2 in front).
+/// Where a bar is, relative to the HUD's origin, and which size it is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Pose {
-    x: i32,
-    y: i32,
-    look: usize,
+pub struct Pose {
+    pub x: i32,
+    pub y: i32,
+    pub size: usize,
 }
 
 /// Which emblem palette to draw.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum EmblemLook {
+pub enum EmblemLook {
     Of(Stance),
     Halfway,
 }
 
 /// What a state looks like: the bars back to front, the emblem and the stance the gems follow.
-struct Scene {
-    behind: (Stance, Pose),
-    front: (Stance, Pose),
-    emblem: EmblemLook,
-    gems: Stance,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Scene {
+    pub behind: (Stance, Pose),
+    pub front: (Stance, Pose),
+    pub emblem: EmblemLook,
+    pub gems: Stance,
 }
 
 /// Ease-out of frame `f` of a swap, 0 to 256: quicker at first, settling at the end. Halfway
@@ -148,27 +173,23 @@ fn bow(p: i32) -> i32 {
     (SWAP_BOW * ((4 * p * (256 - p)) >> 8)) >> 8
 }
 
-/// A bar's look at progress `p` when it is brightening (the one coming forward).
-fn look_at(p: i32) -> usize {
-    if p < 86 {
-        0
-    } else if p < 171 {
-        1
-    } else {
-        2
-    }
+/// How many sizes a bar steps through at progress `p` of its way, 0 at the start, `BACK_SIZE` at the
+/// end.
+fn steps_at(p: i32) -> usize {
+    ((p as usize) * (BACK_SIZE + 1) / 257).min(BACK_SIZE)
 }
 
-fn scene(state: &HudState) -> Scene {
+/// The bars' poses and the draw order for `state`.
+pub fn scene(state: &HudState) -> Scene {
     let front_pose = Pose {
         x: 0,
         y: FRONT_Y,
-        look: 2,
+        size: 0,
     };
     let back_pose = Pose {
-        x: BACK_DX,
-        y: 0,
-        look: 0,
+        x: BACK_X,
+        y: FRONT_Y - LIFT,
+        size: BACK_SIZE,
     };
     let (incoming, outgoing) = (state.stance, state.stance.other());
     if state.swap == 0 || state.swap >= SWAP_FRAMES {
@@ -179,19 +200,20 @@ fn scene(state: &HudState) -> Scene {
             gems: incoming,
         };
     }
-    // The bar coming forward goes down and left, the one going back goes up and right, bowing out
-    // so that they pass each other, and the one coming forward is drawn in front from the middle on.
+    // The bar coming forward goes down and grows through the sizes, the one going back goes up and
+    // shrinks, bowing out so that they pass each other, and the one coming forward is drawn in front
+    // from the middle on.
     let p = ease_out(state.swap);
     let b = bow(p);
     let coming = Pose {
-        x: lerp(BACK_DX, 0, p) - b,
-        y: lerp(0, FRONT_Y, p),
-        look: look_at(p),
+        x: lerp(BACK_X, 0, p) - b,
+        y: lerp(FRONT_Y - LIFT, FRONT_Y, p),
+        size: BACK_SIZE - steps_at(p),
     };
     let going = Pose {
-        x: lerp(0, BACK_DX, p) + b,
-        y: lerp(FRONT_Y, 0, p),
-        look: 2 - look_at(p),
+        x: lerp(0, BACK_X, p) + b,
+        y: lerp(FRONT_Y, FRONT_Y - LIFT, p),
+        size: steps_at(p),
     };
     let first_half = p < 128;
     Scene {
@@ -217,8 +239,8 @@ fn scene(state: &HudState) -> Scene {
 }
 
 /// Which parts of a bar to paint.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Part {
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Part {
     /// The translucent well and both ends, which carry translucent pixels.
     Glass,
     /// The opaque bands.
@@ -230,7 +252,7 @@ enum Part {
 }
 
 /// Paint one complete bar of `stance`, `lit` cells lit, at `pose`.
-fn bar(
+pub fn bar(
     origin: (i32, i32),
     stance: Stance,
     pose: Pose,
@@ -240,7 +262,8 @@ fn bar(
 ) {
     let (left, top) = (origin.0 + pose.x, origin.1 + pose.y);
     let s = stance.index();
-    for band in &BANDS[s][pose.look] {
+    let geo = &GEO[pose.size];
+    for band in &BANDS[s][pose.size][..geo.band_count] {
         let wanted = match part {
             Part::Plate => true,
             Part::Glass => band.glass,
@@ -249,18 +272,18 @@ fn bar(
         };
         if wanted {
             draw(Op::Rect {
-                x: left + BAR_X0,
+                x: left + geo.bar_x0,
                 y: top + band.y0 as i32,
-                w: CAP_X - BAR_X0,
+                w: geo.cap_x - geo.bar_x0,
                 h: (band.y1 - band.y0) as i32,
                 rgb: band.rgb,
                 glass: band.glass,
             });
         }
     }
-    let base = s * CLUTS_PER_STANCE + pose.look * CLUT_LOOK_STRIDE;
+    let base = s * CLUTS_PER_STANCE + pose.size * CLUT_SIZE_STRIDE;
     if part == Part::Glass || part == Part::Plate {
-        for (x, src) in [(LCAP_X, SPRITE_LCAP), (CAP_X, SPRITE_CAP)] {
+        for (x, src) in [(LCAP_X, geo.lcap), (geo.cap_x, geo.cap)] {
             draw(Op::Sprite {
                 x: left + x,
                 y: top,
@@ -273,9 +296,9 @@ fn bar(
     if part == Part::Cells {
         for k in 0..COUNT {
             draw(Op::Sprite {
-                x: left + CELL_X0 + PITCH * k,
-                y: top + CELL_ROW,
-                src: SPRITE_CELL,
+                x: left + geo.cell_x0 + geo.pitch * k,
+                y: top + geo.cell_row,
+                src: geo.cell,
                 clut: base
                     + if (k as u8) < lit {
                         CLUT_CELL_LIT
@@ -288,16 +311,67 @@ fn bar(
     }
 }
 
-/// One complete bar on its own, at `origin`, in `look` (0 behind, 1 halfway, 2 in front): the same
-/// object the HUD composes, for previews and tests.
+/// The ops that set the mask a given way.
+pub const MASK_SET: Op = Op::Mask {
+    set: true,
+    check: false,
+};
+/// Set and check, for the cells of the bar behind.
+pub const MASK_SET_CHECK: Op = Op::Mask {
+    set: true,
+    check: true,
+};
+/// Check only, for the plate of the bar behind.
+pub const MASK_CHECK: Op = Op::Mask {
+    set: false,
+    check: true,
+};
+/// Neither: the opaque parts of the front bar.
+pub const MASK_OFF: Op = Op::Mask {
+    set: false,
+    check: false,
+};
+
+/// The clut of the emblem for `look`.
+pub fn emblem_clut(look: EmblemLook) -> usize {
+    match look {
+        EmblemLook::Of(s) => s.index() * CLUTS_PER_STANCE + CLUT_EMBLEM,
+        EmblemLook::Halfway => CLUT_EMBLEM_HALFWAY,
+    }
+}
+
+/// The emblem as one op, with its top-left at `origin`.
+pub fn emblem_op(origin: (i32, i32), look: EmblemLook) -> Op {
+    Op::Sprite {
+        x: origin.0 + EMBLEM_X,
+        y: origin.1 + EMBLEM_Y,
+        src: SPRITE_EMBLEM,
+        clut: emblem_clut(look),
+        glass: false,
+    }
+}
+
+/// Gem `k` as one op, lit or not, with the HUD's top-left at `origin`.
+pub fn gem_op(origin: (i32, i32), k: i32, lit: bool) -> Op {
+    Op::Sprite {
+        x: origin.0 + GEM_X0 + GEM_PITCH * k,
+        y: origin.1 + GEM_Y,
+        src: SPRITE_GEM,
+        clut: if lit { CLUT_GEM_LIT } else { CLUT_GEM_EMPTY },
+        glass: false,
+    }
+}
+
+/// One complete bar on its own, at `origin`, at `size`: the same object the HUD composes, for
+/// previews and tests.
 pub fn bar_alone(
     origin: (i32, i32),
     stance: Stance,
-    look: usize,
+    size: usize,
     lit: u8,
     draw: &mut impl FnMut(Op),
 ) {
-    let pose = Pose { x: 0, y: 0, look };
+    let pose = Pose { x: 0, y: 0, size };
     bar(origin, stance, pose, lit, Part::Plate, draw);
     bar(origin, stance, pose, lit, Part::Cells, draw);
 }
@@ -316,10 +390,7 @@ pub fn bar_alone(
 pub fn compose(origin: (i32, i32), state: &HudState, draw: &mut impl FnMut(Op)) {
     let sc = scene(state);
     let lit = |s: Stance| state.health[s.index()];
-    draw(Op::Mask {
-        set: true,
-        check: false,
-    });
+    draw(MASK_SET);
     bar(
         origin,
         sc.front.0,
@@ -328,10 +399,7 @@ pub fn compose(origin: (i32, i32), state: &HudState, draw: &mut impl FnMut(Op)) 
         Part::Glass,
         draw,
     );
-    draw(Op::Mask {
-        set: true,
-        check: true,
-    });
+    draw(MASK_SET_CHECK);
     bar(
         origin,
         sc.behind.0,
@@ -340,10 +408,7 @@ pub fn compose(origin: (i32, i32), state: &HudState, draw: &mut impl FnMut(Op)) 
         Part::Cells,
         draw,
     );
-    draw(Op::Mask {
-        set: false,
-        check: true,
-    });
+    draw(MASK_CHECK);
     bar(
         origin,
         sc.behind.0,
@@ -352,10 +417,7 @@ pub fn compose(origin: (i32, i32), state: &HudState, draw: &mut impl FnMut(Op)) 
         Part::Plate,
         draw,
     );
-    draw(Op::Mask {
-        set: false,
-        check: false,
-    });
+    draw(MASK_OFF);
     bar(
         origin,
         sc.front.0,
@@ -372,28 +434,9 @@ pub fn compose(origin: (i32, i32), state: &HudState, draw: &mut impl FnMut(Op)) 
         Part::Cells,
         draw,
     );
-    draw(Op::Sprite {
-        x: origin.0 + EMBLEM_X,
-        y: origin.1 + EMBLEM_Y,
-        src: SPRITE_EMBLEM,
-        clut: match sc.emblem {
-            EmblemLook::Of(s) => s.index() * CLUTS_PER_STANCE + CLUT_EMBLEM,
-            EmblemLook::Halfway => CLUT_EMBLEM_HALFWAY,
-        },
-        glass: false,
-    });
+    draw(emblem_op(origin, sc.emblem));
     let energy = state.energy[sc.gems.index()];
     for k in 0..COUNT {
-        draw(Op::Sprite {
-            x: origin.0 + GEM_X0 + PITCH * k,
-            y: origin.1 + GEM_Y,
-            src: SPRITE_GEM,
-            clut: if (k as u8) < energy {
-                CLUT_GEM_LIT
-            } else {
-                CLUT_GEM_EMPTY
-            },
-            glass: false,
-        });
+        draw(gem_op(origin, k, (k as u8) < energy));
     }
 }

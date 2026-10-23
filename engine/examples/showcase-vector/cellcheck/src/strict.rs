@@ -39,9 +39,14 @@ pub struct Layout {
     /// Visible rows of the bar behind, when it shows cells.
     pub back_band: Option<(i32, i32)>,
     pub back_lit: usize,
+    /// Strip pitch and left edge of strip 0 of the bar behind, when it is not the front bar's size.
+    pub back_pitch: i32,
+    pub back_cell_x0: i32,
     /// Left edge of strip 0 of the gems.
     pub gem_x0: i32,
-    pub gem_band: (i32, i32),
+    pub gem_band: Option<(i32, i32)>,
+    /// Distance between gems.
+    pub gem_pitch: i32,
     /// Gem strips compared: `[gem_from, gem_to)`.
     pub gem_from: usize,
     pub gem_to: usize,
@@ -74,7 +79,10 @@ impl Layout {
             back_band: back.then_some((1, 8)),
             back_lit: 4,
             gem_x0: 31,
-            gem_band: (22, 32),
+            gem_band: Some((22, 32)),
+            gem_pitch: 12,
+            back_pitch: 12,
+            back_cell_x0: 30,
             // The rail ends one column into the last gem's strip.
             gem_from: 0,
             gem_to: 9,
@@ -87,6 +95,9 @@ impl Layout {
         let mut l = Self::legacy(false);
         l.mirrors.clear();
         l.back_band = None;
+        l.gem_band = None;
+        l.back_pitch = 0;
+        l.back_cell_x0 = i32::MIN;
         l.gem_from = 0;
         l.gem_to = usize::MAX;
         for (n, raw) in text.lines().enumerate() {
@@ -125,7 +136,10 @@ impl Layout {
                 "back_band" => l.back_band = Some(pair(value)?),
                 "back_lit" => l.back_lit = nums(value)?[0] as usize,
                 "gem_x0" => l.gem_x0 = nums(value)?[0],
-                "gem_band" => l.gem_band = pair(value)?,
+                "gem_band" => l.gem_band = Some(pair(value)?),
+                "gem_pitch" => l.gem_pitch = nums(value)?[0],
+                "back_pitch" => l.back_pitch = nums(value)?[0],
+                "back_cell_x0" => l.back_cell_x0 = nums(value)?[0],
                 "gem_range" => {
                     let (a, b) = pair(value)?;
                     l.gem_from = a as usize;
@@ -145,6 +159,12 @@ impl Layout {
                 }
                 other => return Err(format!("layout line {}: unknown key {other:?}", n + 1)),
             }
+        }
+        if l.back_pitch == 0 {
+            l.back_pitch = l.pitch;
+        }
+        if l.back_cell_x0 == i32::MIN {
+            l.back_cell_x0 = l.cell_x0;
         }
         if l.gem_to == usize::MAX {
             l.gem_to = l.count;
@@ -331,8 +351,8 @@ pub fn run(f: &Frame, l: &Layout, marks: &mut Marks) -> Result<bool, String> {
                 results.push(check_strips(
                     "back bar",
                     f,
-                    ox + l.cell_x0,
-                    l.pitch,
+                    ox + l.back_cell_x0,
+                    l.back_pitch,
                     (oy + b.0, oy + b.1),
                     &back_states,
                     (1, l.count),
@@ -340,44 +360,42 @@ pub fn run(f: &Frame, l: &Layout, marks: &mut Marks) -> Result<bool, String> {
                     marks,
                 )?);
             }
-            results.push(check_strips(
-                "gems",
-                f,
-                ox + l.gem_x0,
-                l.pitch,
-                (oy + l.gem_band.0, oy + l.gem_band.1),
-                &lit_states,
-                (l.gem_from, l.gem_to),
-                false,
-                marks,
-            )?);
-            // Each gem against its own reflection (strips are centred on the gem).
-            let mut gem_bad = 0usize;
-            for k in l.gem_from..l.gem_to.min(l.count) {
-                let gx = ox + l.gem_x0 + l.pitch * k as i32;
-                let r = (
-                    gx + 1,
-                    oy + l.gem_band.0,
-                    gx + l.pitch - 1,
-                    oy + l.gem_band.1,
-                );
-                let (ok, _) = check_mirror(f, "gem", r, marks)?;
-                if !ok {
-                    gem_bad += 1;
-                }
-            }
-            results.push((
-                gem_bad == 0,
-                format!(
-                    "  mirror gems: {} gems, {}",
-                    l.gem_to.min(l.count) - l.gem_from,
-                    if gem_bad == 0 {
-                        "all symmetric".to_string()
-                    } else {
-                        format!("{gem_bad} not symmetric")
+            if let Some(band) = l.gem_band {
+                results.push(check_strips(
+                    "gems",
+                    f,
+                    ox + l.gem_x0,
+                    l.gem_pitch,
+                    (oy + band.0, oy + band.1),
+                    &lit_states,
+                    (l.gem_from, l.gem_to),
+                    false,
+                    marks,
+                )?);
+                // Each gem against its own reflection (strips are centred on the gem).
+                let mut gem_bad = 0usize;
+                for k in l.gem_from..l.gem_to.min(l.count) {
+                    let gx = ox + l.gem_x0 + l.gem_pitch * k as i32;
+                    let r = (gx + 1, oy + band.0, gx + l.gem_pitch - 1, oy + band.1);
+                    let (ok, _) = check_mirror(f, "gem", r, marks)?;
+                    if !ok {
+                        gem_bad += 1;
                     }
-                ),
-            ));
+                }
+                results.push((
+                    gem_bad == 0,
+                    format!(
+                        "  mirror gems: {} gems, {}",
+                        l.gem_to.min(l.count) - l.gem_from,
+                        if gem_bad == 0 {
+                            "all symmetric".to_string()
+                        } else {
+                            format!("{gem_bad} not symmetric")
+                        }
+                    ),
+                ));
+            }
+
             for m in &l.mirrors {
                 let r = (ox + m.rect.0, oy + m.rect.1, ox + m.rect.2, oy + m.rect.3);
                 results.push(check_mirror(f, &m.name, r, marks)?);

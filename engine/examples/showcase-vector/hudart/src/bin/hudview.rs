@@ -6,7 +6,9 @@
 //! hudview swap <out.ppm> [to=zenith|horizon] [bg=r,g,b] [x0=n]
 //!     one column of the swap frames 0, 2, 4 and 6 (the `HUD_SWAP` build of the grid frame)
 //! hudview bars <out.ppm> [bg=r,g,b]
-//!     every bar in every look, alone
+//!     every bar at every size, alone
+//! hudview size <out.ppm> size=n [bg=r,g,b]
+//!     the grid of one size of the bar alone (the `HUD_SIZE` build of the grid frame)
 //! hudview one <out.ppm> [horizon|zenith] [health] [other health] [energy] [swap] [bg=r,g,b]
 
 #![allow(dead_code)]
@@ -203,22 +205,26 @@ fn main() {
             f.write(path);
         }
         "bars" => {
-            // Every bar in every look, on its own: each is a complete object.
-            let mut f = Frame::new(176, 150, background(&a));
-            for (row, (stance, look)) in [
-                (Stance::Horizon, 2),
-                (Stance::Horizon, 1),
-                (Stance::Horizon, 0),
-                (Stance::Zenith, 2),
-                (Stance::Zenith, 1),
-                (Stance::Zenith, 0),
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                hud::bar_alone((8, 4 + 24 * row as i32), stance, look, 7, &mut |op| {
-                    f.op(op)
-                });
+            // Every bar at every size, on its own: each is a complete object.
+            let mut f = Frame::new(176, 4 + 22 * 8, background(&a));
+            let mut row = 0;
+            for stance in [Stance::Horizon, Stance::Zenith] {
+                for size in 0..hud::SIZES {
+                    hud::bar_alone((8, 4 + 22 * row), stance, size, 7, &mut |op| f.op(op));
+                    row += 1;
+                }
+            }
+            f.write(path);
+        }
+        "size" => {
+            // The `HUD_SIZE` frame: one size of the bar on its own, two stances by four levels.
+            let size = arg_num(&a, "size", 0) as usize;
+            let mut f = Frame::new(320, 240, background(&a));
+            for (col, stance) in [Stance::Horizon, Stance::Zenith].into_iter().enumerate() {
+                for (row, level) in [10u8, 6, 3, 0].into_iter().enumerate() {
+                    let origin = (160 * col as i32, 8 + 40 * row as i32);
+                    hud::bar_alone(origin, stance, size, level, &mut |op| f.op(op));
+                }
             }
             f.write(path);
         }

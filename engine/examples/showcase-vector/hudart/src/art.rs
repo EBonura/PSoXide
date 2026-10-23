@@ -1,10 +1,13 @@
 //! The pixel art of the stance HUD, drawn as code so that every repeated and symmetric part is
 //! right by construction, and the palettes that colour it.
 //!
-//! One sprite per kind of part (health cell, bar end, emblem, gem), drawn once into a 4-bit atlas
-//! with palette indices. A colour state (lit cell, empty cell, the other stance) is a CLUT, so two
-//! cells in different states are the same pixels by construction. The long flat parts of the bars
-//! are horizontal bands of flat colour.
+//! A bar comes in a few sizes, each drawn as pixel art of its own (never scaled): the front one at
+//! full size and smaller ones for the bar further back, and for the frames in between when the bars
+//! trade places. One sprite per kind of part and size (health cell, left end, right end), plus the
+//! emblem and the gem, is drawn once into a 4-bit atlas with palette indices. A colour state (lit
+//! cell, empty cell, the other stance, how far back a bar is) is a CLUT, so two cells in different
+//! states are the same pixels by construction. The long flat parts of the bars are horizontal bands
+//! of flat colour.
 
 use crate::palette::{desaturate, mix, scale, to_555, Rgb, WHITE};
 
@@ -13,31 +16,31 @@ pub const ZENITH: Rgb = [76, 202, 181];
 
 /// Health cells and gems per HUD.
 pub const COUNT: usize = 10;
-/// Distance between cells, and between gems, in pixels.
-pub const PITCH: i32 = 12;
-/// The sloped left end of the bar: its left column. The flat part of the plate starts after it and
-/// the sloped right end starts at `CAP_X`. The bar does not touch the emblem.
+/// Number of sizes of a bar: 0 is full size, the others get smaller and darker.
+pub const SIZES: usize = 4;
+/// The size of the bar behind (1 to `SIZES - 1`); the sizes between are used while the bars move.
+pub const BACK_SIZE: usize = 2;
+/// Left edge of the left end of every bar: the bars are aligned on their left ends.
 pub const LCAP_X: i32 = 27;
-pub const LCAP_W: usize = 9;
-pub const BAR_X0: i32 = LCAP_X + LCAP_W as i32;
-pub const CAP_X: i32 = 151;
-/// The bar behind sits this many rows above the front one; only these rows of it show.
-pub const BACK_OFFSET: i32 = 9;
-/// Top row of the front bar, in HUD coordinates.
-pub const FRONT_Y: i32 = BACK_OFFSET;
-/// Cell origin (left edge of its bottom row) and its top row inside the bar.
-pub const CELL_X0: i32 = 33;
-pub const CELL_ROW: i32 = 5;
+/// Width of the sprite of either end of a bar.
+pub const END_W: usize = 9;
+/// How far the back bar's left end is to the right of the front bar's.
+pub const BACK_X: i32 = 0;
+/// How many rows the bar behind sits above the front bar.
+pub const LIFT: i32 = 9;
+/// Top row of the front bar, in HUD coordinates (the bar behind starts at row 0).
+pub const FRONT_Y: i32 = LIFT;
 /// Emblem top-left.
 pub const EMBLEM_POS: (i32, i32) = (1, 6);
-/// First gem's left edge.
+/// First gem's left edge, and the distance between gems.
 pub const GEM_X0: i32 = 35;
+pub const GEM_PITCH: i32 = 12;
 /// Gem sprite height.
 pub const GEM_H: i32 = 8;
 
 /// What a row of the bar plate is.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Row {
+pub enum Row {
     /// The dark rim above the bar, which keeps its edge visible over a bright scene.
     Rim,
     /// The bright outline along the top.
@@ -61,37 +64,6 @@ enum Row {
     /// The dark rim under the bar.
     Drop,
 }
-
-/// The rows of the bar plate, top to bottom. The recess holds the cells with one row of margin.
-const ROWS: [Row; 18] = [
-    Row::Rim,
-    Row::Out,
-    Row::Hi,
-    Row::Mid,
-    Row::WellTop,
-    Row::Recess,
-    Row::Recess,
-    Row::Recess,
-    Row::Recess,
-    Row::Recess,
-    Row::Recess,
-    Row::Recess,
-    Row::Recess,
-    Row::WellLow,
-    Row::Lip,
-    Row::Shade,
-    Row::Foot,
-    Row::Drop,
-];
-
-/// Rows of the bar plate.
-pub const BAR_H: i32 = ROWS.len() as i32;
-/// The gem row.
-pub const GEM_Y: i32 = FRONT_Y + BAR_H + 1;
-/// How far the bar behind sits to the right of the front one (0: straight above it).
-pub const BACK_DX: i32 = 4;
-/// The HUD canvas.
-pub const CANVAS: (i32, i32) = (160 + BACK_DX, GEM_Y + GEM_H);
 
 /// A paletted sprite.
 #[derive(Clone)]
@@ -150,30 +122,153 @@ const CELL_DD: u8 = 6;
 const CELL_LEFT: u8 = 7;
 const CELL_RIGHT: u8 = 8;
 
-/// Columns the top-left corner of a cell sits to the right of its bottom-left one, in row `r`.
-fn cell_lean(r: usize) -> usize {
-    3 - r / 2
+/// One size of the bar: its pixel geometry. Everything but the colours follows from these numbers.
+#[derive(Clone)]
+pub struct Geo {
+    /// Distance between cells.
+    pub pitch: i32,
+    /// Width of the body of a cell (the parallelogram, not counting its lean).
+    pub body: i32,
+    /// Height of a cell.
+    pub cell_h: usize,
+    /// The rows of the bar plate, top to bottom. The recess holds the cells, one row each.
+    pub rows: Vec<Row>,
+    /// How much the bar fades with distance, 0 (front) to `SIZES - 1`.
+    pub depth: usize,
 }
 
-/// The health cell: a parallelogram 10 pixels wide, 8 rows tall, leaning 3 pixels over its height
-/// in two-row steps. 13 x 8 with the lean.
-pub fn cell() -> Sprite {
-    let mut s = Sprite::new(13, 8);
-    for r in 0..8 {
-        let o = cell_lean(r);
-        for c in o..o + 10 {
-            let mut i = match r {
-                0 => CELL_HI,
-                1 => CELL_L1,
-                2 | 3 => CELL_L2,
-                4 | 5 => CELL_M,
-                6 => CELL_D,
-                _ => CELL_DD,
-            };
-            if r > 0 && r < 7 {
+impl Geo {
+    /// Columns a cell leans over its height: one pixel per two rows, the top to the right.
+    pub fn lean(&self) -> usize {
+        (self.cell_h - 1) / 2
+    }
+
+    /// First row of the recess, where the cells start.
+    pub fn cell_row(&self) -> usize {
+        self.rows
+            .iter()
+            .position(|&r| r == Row::Recess)
+            .unwrap_or(0)
+    }
+
+    /// 1 when the end edges must step on odd rows to run parallel to the cells' edges, else 0.
+    fn phase(&self) -> usize {
+        (self.cell_row() + 1) % 2
+    }
+
+    /// Rows of the bar.
+    pub fn bar_h(&self) -> i32 {
+        self.rows.len() as i32
+    }
+
+    /// Column of the end edge in bar row `r`: 8 at the top, one less every second row.
+    pub fn edge_col(&self, r: usize) -> usize {
+        8 - (r.max(1) - 1 + self.phase()) / 2
+    }
+
+    /// Steps of the end edge from the top row to the first cell row.
+    fn k(&self) -> i32 {
+        ((self.cell_row() as i32) - 1 + self.phase() as i32) / 2
+    }
+
+    /// Left edge of a cell's bottom row: fixes the gap of one pixel of well between the first cell
+    /// and the left end.
+    pub fn cell_x0(&self) -> i32 {
+        LCAP_X - self.lean() as i32 + 11 - self.k()
+    }
+
+    /// Left column of the right end: the same gap after the last cell.
+    pub fn cap_x(&self) -> i32 {
+        self.cell_x0() + 9 * self.pitch + self.lean() as i32 + self.body + self.k() - 5
+    }
+
+    /// Left edge of the flat part of the plate.
+    pub fn bar_x0(&self) -> i32 {
+        LCAP_X + END_W as i32
+    }
+
+    /// Width of the whole bar from the left end's first column.
+    pub fn width(&self) -> i32 {
+        self.cap_x() + END_W as i32 - LCAP_X
+    }
+
+    /// Where the strict check's strips of 'pitch' columns start, 3 or more columns left of the first
+    /// cell so that the last strip stops before the right end.
+    pub fn strip_x0(&self) -> i32 {
+        let need = self.pitch - (self.lean() as i32 + self.body + self.k() - 5);
+        self.cell_x0() - need.max(3)
+    }
+}
+
+/// The sizes of the bar, full size first.
+pub fn geos() -> [Geo; SIZES] {
+    use Row::*;
+    let rows = |head: &[Row], cells: usize, tail: &[Row]| -> Vec<Row> {
+        let mut v = head.to_vec();
+        v.push(WellTop);
+        v.extend(std::iter::repeat_n(Recess, cells));
+        v.push(WellLow);
+        v.extend_from_slice(tail);
+        v
+    };
+    [
+        Geo {
+            pitch: 12,
+            body: 10,
+            cell_h: 8,
+            rows: rows(&[Rim, Out, Hi, Mid], 8, &[Lip, Shade, Foot, Drop]),
+            depth: 0,
+        },
+        Geo {
+            pitch: 11,
+            body: 9,
+            cell_h: 7,
+            rows: rows(&[Rim, Out, Hi, Mid], 7, &[Lip, Shade, Foot, Drop]),
+            depth: 1,
+        },
+        Geo {
+            pitch: 10,
+            body: 8,
+            cell_h: 6,
+            rows: rows(&[Rim, Out, Hi], 6, &[Lip, Shade, Foot, Drop]),
+            depth: 2,
+        },
+        Geo {
+            pitch: 9,
+            body: 7,
+            cell_h: 5,
+            rows: rows(&[Rim, Out], 5, &[Lip, Foot, Drop]),
+            depth: 3,
+        },
+    ]
+}
+
+/// The tone indices of the rows of a cell, top to bottom, for each cell height.
+fn cell_tones(h: usize) -> &'static [u8] {
+    match h {
+        8 => &[
+            CELL_HI, CELL_L1, CELL_L2, CELL_L2, CELL_M, CELL_M, CELL_D, CELL_DD,
+        ],
+        7 => &[CELL_HI, CELL_L1, CELL_L2, CELL_M, CELL_M, CELL_D, CELL_DD],
+        6 => &[CELL_HI, CELL_L1, CELL_L2, CELL_M, CELL_D, CELL_DD],
+        _ => &[CELL_HI, CELL_L2, CELL_M, CELL_D, CELL_DD],
+    }
+}
+
+/// The health cell: a parallelogram `body` pixels wide, `cell_h` rows tall, leaning over its height
+/// in two-row steps, with a bright top row, a lit left edge and a dark right edge.
+pub fn cell(g: &Geo) -> Sprite {
+    let body = g.body as usize;
+    let mut s = Sprite::new(body + g.lean(), g.cell_h);
+    let tones = cell_tones(g.cell_h);
+    for (r, &tone) in tones.iter().enumerate().take(g.cell_h) {
+        let o = g.lean() - r / 2;
+        for c in o..o + body {
+            let mut i = tone;
+            if r > 0 && r + 1 < g.cell_h {
                 if c == o {
                     i = CELL_LEFT;
-                } else if c == o + 9 {
+                } else if c == o + body - 1 {
                     i = CELL_RIGHT;
                 }
             }
@@ -200,16 +295,12 @@ fn row_index(k: Row) -> u8 {
     }
 }
 
-/// Width of the cap sprite.
-pub const CAP_W: usize = 9;
-
 /// The sloped right end of the bar, as tall as the plate, its end edge leaning one pixel per two
 /// rows like the cells, with the dark rim following it on the outside.
-pub fn cap() -> Sprite {
-    let mut s = Sprite::new(CAP_W, BAR_H as usize);
-    // Columns of the plate (outline included) in row `r`, for the rows that have the plate.
-    let end = |r: usize| 8 - (r.max(1) - 1) / 2;
-    for (r, &kind) in ROWS.iter().enumerate() {
+pub fn cap(g: &Geo) -> Sprite {
+    let mut s = Sprite::new(END_W, g.rows.len());
+    let end = |r: usize| g.edge_col(r);
+    for (r, &kind) in g.rows.iter().enumerate() {
         match kind {
             Row::Rim => {
                 for c in 0..=end(1) {
@@ -230,7 +321,7 @@ pub fn cap() -> Sprite {
                         Row::Out => row_index(Row::Out),
                         Row::Foot => row_index(Row::Foot),
                         _ if edge => {
-                            if r + 3 >= ROWS.len() {
+                            if r + 3 >= g.rows.len() {
                                 row_index(Row::Foot)
                             } else {
                                 row_index(Row::Out)
@@ -251,32 +342,31 @@ pub fn cap() -> Sprite {
 /// The sloped left end of the bar, the right end's counterpart: the end edge leans one pixel per two
 /// rows in the same direction as the cells (the bottom further left), the plate is to its right,
 /// and the dark rim follows the edge on the outside.
-pub fn lcap() -> Sprite {
-    let mut s = Sprite::new(LCAP_W, BAR_H as usize);
-    // Column of the end edge in row `r`.
-    let edge = lcap_edge;
-    for (r, &kind) in ROWS.iter().enumerate() {
+pub fn lcap(g: &Geo) -> Sprite {
+    let mut s = Sprite::new(END_W, g.rows.len());
+    let edge = |r: usize| g.edge_col(r);
+    for (r, &kind) in g.rows.iter().enumerate() {
         match kind {
             Row::Rim => {
-                for c in edge(1) - 1..LCAP_W {
+                for c in edge(1) - 1..END_W {
                     s.set(c, r, row_index(Row::Rim));
                 }
             }
             Row::Drop => {
-                for c in edge(r - 1) - 1..LCAP_W {
+                for c in edge(r - 1) - 1..END_W {
                     s.set(c, r, row_index(Row::Drop));
                 }
             }
             _ => {
                 let e = edge(r);
-                for c in e..LCAP_W {
+                for c in e..END_W {
                     let is_edge = c == e;
                     let wall = c == e + 1;
                     let i = match kind {
                         Row::Out => row_index(Row::Out),
                         Row::Foot => row_index(Row::Foot),
                         _ if is_edge => {
-                            if r + 3 >= ROWS.len() {
+                            if r + 3 >= g.rows.len() {
                                 row_index(Row::Foot)
                             } else {
                                 row_index(Row::Out)
@@ -292,11 +382,6 @@ pub fn lcap() -> Sprite {
         }
     }
     s
-}
-
-/// Column of the left end's edge in bar row `r`.
-fn lcap_edge(r: usize) -> usize {
-    8 - (r.max(1) - 1) / 2
 }
 
 /// Emblem indices.
@@ -387,7 +472,6 @@ pub fn gem() -> Sprite {
     s
 }
 
-/// A 16-entry palette: index 0 is transparent.
 pub type Palette = [Rgb; 16];
 
 fn pal(entries: &[(u8, Rgb)]) -> Palette {
@@ -397,33 +481,6 @@ fn pal(entries: &[(u8, Rgb)]) -> Palette {
     }
     p
 }
-
-/// A stance colour as seen on the front bar, or dimmed on the one behind.
-#[derive(Clone, Copy)]
-pub struct Tone {
-    pub base: Rgb,
-}
-
-impl Tone {
-    pub fn front(base: Rgb) -> Self {
-        Self { base }
-    }
-
-    /// The inactive stance's bar: darker and greyer.
-    pub fn back(base: Rgb) -> Self {
-        Self {
-            base: scale(desaturate(base, 70), 120),
-        }
-    }
-
-    /// Halfway between the bar in front and the one behind, for the frames while a bar moves.
-    pub fn mid(base: Rgb) -> Self {
-        Self {
-            base: mix(Self::front(base).base, Self::back(base).base, 128),
-        }
-    }
-}
-
 fn row_colour(k: Row, c: Rgb) -> Rgb {
     match k {
         Row::Out => mix(c, WHITE, 90),
@@ -445,11 +502,28 @@ fn is_glass(k: Row) -> bool {
     matches!(k, Row::WellTop | Row::Recess | Row::WellLow)
 }
 
+/// A stance colour as seen at a distance from the front: the bar behind is darker and greyer.
+#[derive(Clone, Copy)]
+pub struct Tone {
+    pub base: Rgb,
+}
+
+impl Tone {
+    /// The stance colour `depth` steps back out of `SIZES - 1`: 0 is the front bar's own colour, the
+    /// last is the dim, grey colour of the farthest bar.
+    pub fn at_depth(base: Rgb, depth: usize) -> Self {
+        let far = scale(desaturate(base, 70), 120);
+        Self {
+            base: mix(base, far, (depth * 256 / (SIZES - 1)) as u32),
+        }
+    }
+}
+
 /// The bar's colours by row: `(first row, one past the last, colour, glass)`, equal neighbouring
 /// rows merged.
-pub fn bands(t: Tone) -> Vec<(u8, u8, Rgb, bool)> {
+pub fn bands(g: &Geo, t: Tone) -> Vec<(u8, u8, Rgb, bool)> {
     let mut out: Vec<(u8, u8, Row)> = Vec::new();
-    for (r, &k) in ROWS.iter().enumerate() {
+    for (r, &k) in g.rows.iter().enumerate() {
         match out.last_mut() {
             Some(last) if last.2 == k => last.1 = r as u8 + 1,
             _ => out.push((r as u8, r as u8 + 1, k)),
@@ -458,11 +532,6 @@ pub fn bands(t: Tone) -> Vec<(u8, u8, Rgb, bool)> {
     out.into_iter()
         .map(|(a, b, k)| (a, b, row_colour(k, t.base), is_glass(k)))
         .collect()
-}
-
-/// Bands per bar, as the generated data declares them.
-pub fn band_count() -> usize {
-    bands(Tone::front(HORIZON)).len()
 }
 
 /// The cap palette indices that are glass (`WellTop`, `Recess`, `WellLow`).
@@ -579,37 +648,57 @@ pub fn clut(p: &Palette, glass: &[u8]) -> [u16; 16] {
     out
 }
 
-/// Where each sprite sits in the atlas.
-/// A multiple of 8 so that a row is a whole number of VRAM words.
+/// Width of the atlas in texels: a multiple of 8 so that a row is a whole number of VRAM words.
 pub const ATLAS_W: usize = 64;
-pub const ATLAS_H: usize = 24;
-pub const ATLAS_POS: [(&str, (usize, usize)); 5] = [
-    ("EMBLEM", (0, 0)),
-    ("CAP", (24, 0)),
-    ("LCAP", (50, 0)),
-    ("CELL", (36, 0)),
-    ("GEM", (36, 10)),
-];
 
-/// All sprites by atlas name.
-pub fn sprites() -> [(&'static str, Sprite); 5] {
-    [
-        ("EMBLEM", emblem()),
-        ("CAP", cap()),
-        ("LCAP", lcap()),
-        ("CELL", cell()),
-        ("GEM", gem()),
-    ]
+/// A sprite and where it sits in the atlas.
+pub struct Placed {
+    pub name: String,
+    pub sprite: Sprite,
+    pub pos: (usize, usize),
+}
+
+/// All sprites by atlas name: the emblem and the gem, then the ends and the cell of every size.
+fn named_sprites() -> Vec<(String, Sprite)> {
+    let mut v = vec![("EMBLEM".to_string(), emblem()), ("GEM".to_string(), gem())];
+    for (i, g) in geos().iter().enumerate() {
+        v.push((format!("CAP_{i}"), cap(g)));
+        v.push((format!("LCAP_{i}"), lcap(g)));
+        v.push((format!("CELL_{i}"), cell(g)));
+    }
+    v
+}
+
+/// The sprites packed into shelves of the atlas, and the atlas height.
+pub fn pack() -> (Vec<Placed>, usize) {
+    let mut out = Vec::new();
+    let (mut x, mut y, mut shelf) = (0usize, 0usize, 0usize);
+    for (name, sprite) in named_sprites() {
+        if x + sprite.w > ATLAS_W {
+            x = 0;
+            y += shelf;
+            shelf = 0;
+        }
+        shelf = shelf.max(sprite.h);
+        out.push(Placed {
+            name,
+            pos: (x, y),
+            sprite: sprite.clone(),
+        });
+        x += sprite.w;
+    }
+    (out, y + shelf)
 }
 
 /// The 4-bit atlas as VRAM halfwords, row by row, four texels per halfword with the leftmost texel
 /// in the lowest nibble.
 pub fn atlas_halfwords() -> Vec<u16> {
-    let mut texels = vec![0u8; ATLAS_W * ATLAS_H];
-    for ((_, sprite), (_, (ox, oy))) in sprites().iter().zip(ATLAS_POS.iter()) {
-        for y in 0..sprite.h {
-            for x in 0..sprite.w {
-                texels[(oy + y) * ATLAS_W + ox + x] = sprite.get(x, y);
+    let (placed, height) = pack();
+    let mut texels = vec![0u8; ATLAS_W * height];
+    for p in &placed {
+        for y in 0..p.sprite.h {
+            for x in 0..p.sprite.w {
+                texels[(p.pos.1 + y) * ATLAS_W + p.pos.0 + x] = p.sprite.get(x, y);
             }
         }
     }
