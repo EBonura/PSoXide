@@ -53,6 +53,10 @@ lto           = true
 # PSoXide's emulator-only class port so `frontend launch --sort-log` splits
 # depth-sort errors by class pair. Retail hardware ignores the writes.
 sort-probe = []
+# Measurement builds only: `stance-hud-open` keeps the stance HUD unfolded and `stance-hud-off` draws
+# none, so its cost is the difference of two runs of one route (`EDITOR_PLAYTEST_FEATURES`).
+stance-hud-open = []
+stance-hud-off = []
 default = [
     "cd-stream-bench",
     "ot-2048",

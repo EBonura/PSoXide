@@ -32,11 +32,11 @@ pub(crate) const HUD_ENEMY_LEAVE: i32 = LOCK_BREAK_RANGE;
 /// Keep the ammunition pills showing when the bars are folded.
 pub(crate) const HUD_FOLDED_AMMO: bool = false;
 
-/// Build knobs for measuring (environment variables at guest build time): `STANCE_HUD_OPEN` keeps
-/// the HUD unfolded, `STANCE_HUD_OFF` draws no HUD, so that the HUD's cost is a difference of two
-/// runs of the same route. Neither is set in a shipping build.
-const FORCE_OPEN: bool = option_env!("STANCE_HUD_OPEN").is_some();
-const OFF: bool = option_env!("STANCE_HUD_OFF").is_some();
+/// Measurement features: `stance-hud-open` keeps the HUD unfolded, `stance-hud-off` draws no HUD,
+/// so that the HUD's cost is a difference of two runs of the same route. Neither is on in a
+/// shipping build.
+const FORCE_OPEN: bool = cfg!(feature = "stance-hud-open");
+const OFF: bool = cfg!(feature = "stance-hud-off");
 
 /// Ticks between looks for the nearest hostile: the HUD only needs it a few times a second.
 const SCAN_TICKS: u8 = 8;

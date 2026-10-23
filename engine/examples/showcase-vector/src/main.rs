@@ -74,11 +74,12 @@ fn demo_energy(t: u32) -> u16 {
     }
 }
 
-/// Whether the HUD is out at game frame `t`: it folds at 112 and unfolds again at 120, so the loop
-/// ends with it fully out.
+/// Whether the HUD is out at game frame `t`: it folds at 112 and stays folded to the end of the loop
+/// (the fold takes about eight frames, so the last few frames measure the folded HUD at rest); the
+/// next loop unfolds it again while its first frames play.
 #[cfg(feature = "hud-sprites")]
 fn demo_open(t: u32) -> bool {
-    !(112..120).contains(&t)
+    t < 112
 }
 
 /// One size of the bar on its own, for the `HUD_SIZE` grid frame.
@@ -733,8 +734,12 @@ impl Demo {
                 }
             } else if folding {
                 record("fo_link", 0, spent);
+            } else if state.reveal == [0, 0] {
+                record("fl_link", 0, spent);
             } else if shooting {
-                record("fx_link", 0, spent);
+                // The two shots break their pills in the first 40 frames; the rest is the
+                // recharge loading them.
+                record(if t < 40 { "br_link" } else { "fx_link" }, 0, spent);
             } else {
                 record("c_link", 0, spent);
             }
@@ -744,6 +749,8 @@ impl Demo {
             (_, 4) => "walk_sw",
             (_, s) if s != 0 => "walk_mid",
             _ if folding => "walk_fold",
+            _ if state.reveal == [0, 0] => "walk_fld",
+            _ if shooting && t < 40 => "walk_brk",
             _ if shooting => "walk_fx",
             _ => "walk_hud",
         }
