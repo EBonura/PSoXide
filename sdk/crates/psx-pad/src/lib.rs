@@ -1451,7 +1451,10 @@ const fn active_ctrl(socket: Port, ack_irq: bool) -> u16 {
 /// Run a fixed eight-byte DualShock command after the port-level controller
 /// select byte, using the default no-wait timing (matching the reverted poll
 /// path).
-#[inline]
+///
+/// Never inlined: `request_analog` runs it four times, and four copies of the byte loop made
+/// `enable_analog_on` the largest one-shot function of a game (4.3 KB, against 1.6 KB with one shared copy).
+#[inline(never)]
 fn transaction<T: Transport>(bus: &mut T, socket: Port, bytes: [u8; 8]) -> [u8; 8] {
     bus.select(socket);
     bus.delay(DEFAULT_SETUP_SPINS);
