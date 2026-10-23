@@ -34,8 +34,8 @@ fn assert_committed_is_current(svg: &str, psvg: &str, budget: Budget) {
     );
 }
 
-const HUD_SVG: &str = "examples/editor-playtest/assets/hud/stance_hud.svg";
-const HUD_PSVG: &str = "examples/editor-playtest/assets/hud/stance_hud.psvg";
+const HUD_SVG: &str = "examples/showcase-vector/assets/hud/stance_hud.svg";
+const HUD_PSVG: &str = "examples/showcase-vector/assets/hud/stance_hud.psvg";
 
 /// The stance HUD's budget: 80 GPU triangles for the whole asset.
 fn hud_budget() -> Budget {

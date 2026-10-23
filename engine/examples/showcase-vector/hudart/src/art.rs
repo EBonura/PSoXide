@@ -27,8 +27,8 @@ pub enum Style {
 /// The committed style: lacquer, which Manny preferred in round 7.
 pub const DEFAULT_STYLE: Style = Style::Lacquer;
 
-/// The committed lacquer variant (0 to 6, see [`variant`]): the one picked in round 8.
-pub const DEFAULT_VARIANT: u8 = 3;
+/// The committed lacquer variant (0 to 6, see [`variant`]): L13c, picked by Manny after round 8b.
+pub const DEFAULT_VARIANT: u8 = 9;
 
 /// The style to draw (`HUD_STYLE`: classic, gunmetal, lacquer, bronze, or l1 to l6 for the lacquer
 /// variants of round 8), for trying looks without editing the code; the committed art is made with
@@ -1176,7 +1176,7 @@ pub fn emblem_palette(active: Rgb, other: Rgb) -> Palette {
     ])
 }
 
-pub fn gem_palette(lit: bool, stance: usize) -> Palette {
+pub fn gem_palette(lit: bool) -> Palette {
     let p = |out: Rgb, f: [Rgb; 6], spec: Rgb| {
         pal(&[
             (GEM_OUT, out),
@@ -1187,27 +1187,11 @@ pub fn gem_palette(lit: bool, stance: usize) -> Palette {
             (GEM_FACET[4], f[4]),
             (GEM_FACET[5], f[5]),
             (GEM_SPEC, spec),
+            (GEM_CRACK_INDEX, out),
         ])
     };
     if style() == Style::Lacquer {
-        let l = light();
         match (variant(), lit) {
-            // Gems in the colour of the stance they follow.
-            (2 | 5, true) => {
-                let c = if stance == 0 { horizon() } else { zenith() };
-                return p(
-                    scale(c, 25).map(|v| v.max(8)),
-                    [
-                        mix(c, l, 200),
-                        mix(c, l, 100),
-                        c,
-                        scale(c, 200),
-                        scale(c, 150),
-                        scale(c, 100),
-                    ],
-                    [255, 255, 248],
-                );
-            }
             // Empty gems are an outline only: the facets are transparent.
             (1 | 7 | 8 | 9, false) => return p([46, 48, 60], [[0, 0, 0]; 6], [0, 0, 0]),
             // The gunmetal gems.
@@ -1373,6 +1357,13 @@ pub struct Placed {
 /// All sprites by atlas name: the emblem and the gem, then the ends and the cell of every size.
 fn named_sprites() -> Vec<(String, Sprite)> {
     let mut v = vec![("EMBLEM".to_string(), emblem()), ("GEM".to_string(), gem())];
+    v.push(("GEM_CRACK".to_string(), gem_cracked()));
+    for (i, q) in gem_quadrants().into_iter().enumerate() {
+        v.push((format!("GEM_Q{i}"), q));
+    }
+    for grow in 1..=2 {
+        v.push((format!("RING_{}", grow - 1), gem_ring(grow)));
+    }
     for (i, g) in geos().iter().enumerate() {
         v.push((format!("CAP_{i}"), cap(g)));
         v.push((format!("LCAP_{i}"), lcap(g)));
@@ -1418,4 +1409,118 @@ pub fn atlas_halfwords() -> Vec<u16> {
         .chunks(4)
         .map(|q| q[0] as u16 | (q[1] as u16) << 4 | (q[2] as u16) << 8 | (q[3] as u16) << 12)
         .collect()
+}
+
+/// The emblem as it flashes when it releases the bars: the same palette, lighter, so the ring and
+/// the edge catch the eye for a frame or two.
+pub fn emblem_pulse_palette(active: Rgb, other: Rgb) -> Palette {
+    let mut p = emblem_palette(active, other);
+    let l = light();
+    for c in p.iter_mut() {
+        if *c != [0, 0, 0] {
+            *c = mix(*c, l, 96);
+        }
+    }
+    p
+}
+
+/// Index of the crack lines in the cracked gem, in the lit palette.
+const GEM_CRACK_INDEX: u8 = 9;
+
+/// The gem with cracks along the two axes, as it is just before it breaks.
+pub fn gem_cracked() -> Sprite {
+    let mut s = gem();
+    for (x, y) in [
+        (4usize, 1usize),
+        (5, 2),
+        (4, 3),
+        (5, 4),
+        (4, 5),
+        (5, 6),
+        (1, 3),
+        (2, 4),
+        (3, 3),
+        (6, 4),
+        (7, 3),
+        (8, 4),
+    ] {
+        if s.get(x, y) != 0 {
+            s.set(x, y, GEM_CRACK_INDEX);
+        }
+    }
+    s
+}
+
+/// The four quadrants of the gem as sprites of their own, 5 x 4 each, in the order they fill: top
+/// right, bottom right, bottom left, top left (clockwise from the top). Drawn at
+/// [`GEM_QUADRANT_AT`] they put the gem back together.
+pub fn gem_quadrants() -> [Sprite; 4] {
+    let g = gem();
+    GEM_QUADRANT_AT.map(|(x0, y0)| {
+        let mut q = Sprite::new(5, 4);
+        for y in 0..4 {
+            for x in 0..5 {
+                q.set(x, y, g.get(x0 + x, y0 + y));
+            }
+        }
+        q
+    })
+}
+
+/// Where each quadrant sits in the gem, in the order of [`gem_quadrants`].
+pub const GEM_QUADRANT_AT: [(usize, usize); 4] = [(5, 0), (5, 4), (0, 4), (0, 0)];
+
+/// An outline one pixel wide round the gem, `grow` pixels out (1 or 2): the ring of an echo, as a
+/// sprite `10 + 2 * grow` wide and `8 + 2 * grow` tall that is drawn `grow` pixels up and left of
+/// the gem.
+pub fn gem_ring(grow: usize) -> Sprite {
+    let g = gem();
+    let (w, h) = (10 + 2 * grow, 8 + 2 * grow);
+    let mut s = Sprite::new(w, h);
+    // Within `r` steps (any direction, eight neighbours) of a gem pixel.
+    let near = |x: i32, y: i32, r: i32| {
+        (-r..=r).any(|dy| {
+            (-r..=r).any(|dx| {
+                let (gx, gy) = (x - grow as i32 + dx, y - grow as i32 + dy);
+                gx >= 0 && gy >= 0 && gx < 10 && gy < 8 && g.get(gx as usize, gy as usize) != 0
+            })
+        })
+    };
+    for y in 0..h as i32 {
+        for x in 0..w as i32 {
+            if near(x, y, grow as i32) && !near(x, y, grow as i32 - 1) {
+                s.set(x as usize, y as usize, 1);
+            }
+        }
+    }
+    s
+}
+
+/// Palettes of the gem effects, as 16 CLUT entries with the semi-transparency bit on every colour
+/// used (they fade into the scene): the white-hot flash, two steps of the pieces fading, and the
+/// bright and dim ring of the echo. The lit gem's own palette gets a crack colour.
+pub fn gem_fx_palettes() -> [Palette; 5] {
+    let lit = gem_palette(true);
+    let l = light();
+    let map = |f: &dyn Fn(Rgb) -> Rgb| {
+        let mut p = lit;
+        for c in p.iter_mut().skip(1) {
+            if *c != [0, 0, 0] {
+                *c = f(*c);
+            }
+        }
+        p
+    };
+    let ring = |c: Rgb| {
+        let mut p = [[0u8; 3]; 16];
+        p[1] = c;
+        p
+    };
+    [
+        map(&|c| mix(c, l, 200)),
+        map(&|c| scale(c, 150)),
+        map(&|c| scale(c, 80)),
+        ring([255, 214, 140]),
+        ring([200, 110, 40]),
+    ]
 }

@@ -16,7 +16,7 @@
 #[path = "../../../../editor-playtest/src/stance_hud_sprites.rs"]
 mod hud;
 
-use hud::{compose, HudState, Op, Stance};
+use hud::{compose, demo_state, AmmoFx, HudAnim, HudState, Op, Stance, REVEAL_MAX};
 
 const BG: [u8; 3] = [16, 24, 40];
 
@@ -177,21 +177,24 @@ impl Frame {
 fn level_state(stance: Stance, level: u8) -> HudState {
     let mut health = [4, 4];
     health[stance.index()] = level;
-    HudState {
-        stance,
-        health,
-        energy: [level, level],
-        swap: 0,
-    }
+    HudState::rest(stance, health, level)
 }
 
 /// The state of the `HUD_SWAP` frame: a swap to `stance` at frame `swap`.
 fn swap_state(stance: Stance, swap: u8) -> HudState {
     HudState {
-        stance,
-        health: [7, 5],
-        energy: [8, 3],
         swap,
+        ..HudState::rest(stance, [7, 5], 8)
+    }
+}
+
+/// The state of the `HUD_FOLD` frame at fold step `f` (1 to `REVEAL_MAX`): Horizon in front, the
+/// bar behind two steps more open.
+fn fold_state(f: u8) -> HudState {
+    HudState {
+        reveal: [f, (f + 2).min(REVEAL_MAX)],
+        ammo_reveal: f,
+        ..HudState::rest(Stance::Horizon, [7, 5], 8)
     }
 }
 
@@ -244,17 +247,92 @@ fn main() {
             let mut health = [arg_num(&a, "other", 4) as u8; 2];
             health[stance.index()] = arg_num(&a, "health", 7) as u8;
             let energy = arg_num(&a, "energy", 6) as u8;
-            let state = HudState {
-                stance,
-                health,
-                energy: [energy; 2],
+            let mut state = HudState {
                 swap: arg_num(&a, "swap", 0) as u8,
+                ..HudState::rest(stance, health, energy)
             };
+            state.reveal = [arg_num(&a, "reveal", REVEAL_MAX as i32) as u8; 2];
+            state.ammo_reveal = state.reveal[0];
+            state.ammo_hint = arg_num(&a, "hint", 0) != 0;
+            state.pulse = arg_num(&a, "pulse", 0) != 0;
             compose(
                 (arg_num(&a, "x", 6), arg_num(&a, "y", 4)),
                 &state,
                 &mut |op| f.op(op),
             );
+            f.write(path);
+        }
+        "fold" => {
+            // The `HUD_FOLD` frame: fold steps 1 to 8, four down each column.
+            let mut f = Frame::new(320, 240, background(&a));
+            for step in 1..=REVEAL_MAX {
+                let (col, row) = ((step - 1) as i32 / 4, (step - 1) as i32 % 4);
+                compose((160 * col, 8 + 40 * row), &fold_state(step), &mut |op| f.op(op));
+            }
+            f.write(path);
+        }
+        "seq" => {
+            // The `HUD_SEQ` frame: 12 frames of an animation demo (`demo=` 0 fold, 1 shot, 2 load, 3
+            // reload, 4 jump; `page=` 0 or 1 for frames 0 to 11 or 12 to 23), two columns of six.
+            let (demo, page) = (arg_num(&a, "demo", 0) as u8, arg_num(&a, "page", 0) as u16);
+            let mut f = Frame::new(320, 240, background(&a));
+            for i in 0..12u16 {
+                let (col, row) = ((i / 6) as i32, (i % 6) as i32);
+                let state = demo_state(demo, page * 12 + i);
+                compose((160 * col, 8 + 40 * row), &state, &mut |op| f.op(op));
+            }
+            f.write(path);
+        }
+        "fxseq" => {
+            // The ammunition effects frame by frame: `scenario=shot` (two shots), `load` (a pill
+            // recharging a unit at a time), `reload` (all pills at once) or `jump` (three pills),
+            // 12 frames down each of two columns.
+            let scenario = a
+                .iter()
+                .find_map(|s| s.strip_prefix("scenario="))
+                .unwrap_or("shot");
+            let start = match scenario {
+                "shot" => 100,
+                "load" => 70,
+                "reload" => 0,
+                _ => 40,
+            };
+            let mut fx = AmmoFx::new(start);
+            let mut f = Frame::new(320, 8 + 40 * 12, background(&a));
+            for n in 0..24u16 {
+                let energy = match scenario {
+                    "shot" => match n {
+                        0 => 100,
+                        1..=8 => 80,
+                        _ => 60,
+                    },
+                    "load" => 70 + n * 2 / 3,
+                    "reload" => if n == 0 { 0 } else { 100 },
+                    _ => if n == 0 { 40 } else { 70 },
+                };
+                fx.step(energy);
+                let mut state = HudState::rest(Stance::Horizon, [7, 5], 0);
+                fx.apply(&mut state);
+                let (col, row) = ((n / 12) as i32, (n % 12) as i32);
+                compose((160 * col, 8 + 40 * row), &state, &mut |op| f.op(op));
+            }
+            f.write(path);
+        }
+        "foldseq" => {
+            // A fold and then an unfold, frame by frame: the fold down the left column, the unfold
+            // down the right one, 12 frames each.
+            let hint = arg_num(&a, "hint", 0) != 0;
+            let mut f = Frame::new(320, 8 + 40 * 12, background(&a));
+            let mut anim = HudAnim::open();
+            for (col, open) in [(0, false), (1, true)] {
+                for row in 0..12 {
+                    anim.step(open, Stance::Horizon);
+                    let mut state = HudState::rest(Stance::Horizon, [7, 5], 8);
+                    state.ammo_hint = hint;
+                    anim.apply(&mut state);
+                    compose((160 * col, 8 + 40 * row), &state, &mut |op| f.op(op));
+                }
+            }
             f.write(path);
         }
         "swapall" => {
@@ -309,10 +387,8 @@ fn main() {
             let mut health = [num(4, 4); 2];
             health[stance.index()] = num(3, 7);
             let state = HudState {
-                stance,
-                health,
-                energy: [num(5, 6); 2],
                 swap: num(6, 0),
+                ..HudState::rest(stance, health, num(5, 6))
             };
             let mut f = Frame::new(hud::CANVAS_W as usize + 8, 48, background(&a));
             compose((0, 4), &state, &mut |op| f.op(op));
@@ -338,10 +414,8 @@ mod tests {
                 for health in [0u8, 4, 10] {
                     for energy in [0u8, 3, 10] {
                         let state = HudState {
-                            stance,
-                            health: [health, 10 - health],
-                            energy: [energy, 10 - energy],
                             swap,
+                            ..HudState::rest(stance, [health, 10 - health], energy)
                         };
                         let mut n = 0;
                         compose((0, 0), &state, &mut |op| {
@@ -392,10 +466,8 @@ mod tests {
     fn mask_is_left_off() {
         for swap in 0..SWAP_FRAMES {
             let state = HudState {
-                stance: Stance::Zenith,
-                health: [5, 5],
-                energy: [5, 5],
                 swap,
+                ..HudState::rest(Stance::Zenith, [5, 5], 5)
             };
             let mut last = None;
             compose((0, 0), &state, &mut |op| {

@@ -444,6 +444,8 @@ impl Playtest {
         self.shadow_material = upload_shadow_texture();
         self.vitality_circle_material = upload_vitality_circle_texture();
         self.particle_material = upload_particle_texture();
+        let hud_input = self.stance_hud_input();
+        crate::stance_hud::hud().init(&hud_input);
         self.destructibles
             .init(DESTRUCTIBLES.as_slice())
             .unwrap_or_else(|error| panic!("cooked destructible initialization failed: {error:?}"));

@@ -95,11 +95,57 @@ pub struct HudState {
     pub stance: Stance,
     /// Lit health cells of each stance's bar, 0 to [`COUNT`].
     pub health: [u8; 2],
-    /// Lit energy gems of each stance. The gems show the active stance's.
-    pub energy: [u8; 2],
+    /// Lit ammunition gems, 0 to [`COUNT`]. One count for both stances: the gems do not change in
+    /// a swap.
+    pub energy: u8,
     /// 0 at rest. During a swap to `stance`, the frame of it, 1 to [`SWAP_FRAMES`] - 1.
     pub swap: u8,
+    /// How far each stance's bar is unfolded, 0 (gone into the emblem) to [`REVEAL_MAX`] (fully
+    /// out).
+    pub reveal: [u8; 2],
+    /// How far the gems are unfolded, in the same steps.
+    pub ammo_reveal: u8,
+    /// The emblem flashes: it is releasing the bars.
+    pub pulse: bool,
+    /// Keep the gems showing while the bars are folded.
+    pub ammo_hint: bool,
+    /// Pills breaking or loading, see [`AmmoFx`].
+    pub fx: [PillFx; FX_SLOTS],
+    /// Quadrants (0 to 3) of the pill after the last lit one that are already recharged.
+    pub partial: u8,
+    /// Pills `start..end` have been recharged but are waiting their turn to load: they still show
+    /// empty.
+    pub queued: (u8, u8),
 }
+
+impl HudState {
+    /// The HUD at rest and fully unfolded.
+    pub const fn rest(stance: Stance, health: [u8; 2], energy: u8) -> Self {
+        Self {
+            stance,
+            health,
+            energy,
+            swap: 0,
+            reveal: [REVEAL_MAX; 2],
+            ammo_reveal: REVEAL_MAX,
+            pulse: false,
+            ammo_hint: false,
+            fx: [PillFx::Idle; FX_SLOTS],
+            partial: 0,
+            queued: (0, 0),
+        }
+    }
+}
+
+/// Steps of the fold: a bar is fully out at this value and gone into the emblem at 0. At 30 frames
+/// a second the front bar takes 8 frames (0.27 s) each way, the bar behind two more.
+pub const REVEAL_MAX: u8 = 8;
+
+/// Frames the bar behind trails the front bar by when the HUD folds or unfolds.
+pub const FOLD_LAG: u8 = 2;
+
+/// Frames the emblem flashes for when it releases the bars.
+pub const PULSE_FRAMES: u8 = 2;
 
 /// One thing to paint, in screen pixels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -144,15 +190,16 @@ pub struct Pose {
 pub enum EmblemLook {
     Of(Stance),
     Halfway,
+    /// The flash of the emblem of this stance as it releases the bars.
+    Pulse(Stance),
 }
 
-/// What a state looks like: the bars back to front, the emblem and the stance the gems follow.
+/// What a state looks like: the bars back to front and the emblem.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Scene {
     pub behind: (Stance, Pose),
     pub front: (Stance, Pose),
     pub emblem: EmblemLook,
-    pub gems: Stance,
 }
 
 /// Ease-out of frame `f` of a swap, 0 to 256: quicker at first, settling at the end. Halfway
@@ -199,8 +246,11 @@ pub fn scene(state: &HudState) -> Scene {
         return Scene {
             behind: (outgoing, back_pose),
             front: (incoming, front_pose),
-            emblem: EmblemLook::Of(incoming),
-            gems: incoming,
+            emblem: if state.pulse {
+                EmblemLook::Pulse(incoming)
+            } else {
+                EmblemLook::Of(incoming)
+            },
         };
     }
     // The bar coming forward goes down and grows through the sizes, the one going back goes up and
@@ -237,7 +287,509 @@ pub fn scene(state: &HudState) -> Scene {
         } else {
             EmblemLook::Of(incoming)
         },
-        gems: if first_half { outgoing } else { incoming },
+    }
+}
+
+/// Frames a spent pill takes to break: a flash, cracks, then the four pieces spreading and fading.
+pub const BREAK_FRAMES: u8 = 6;
+
+/// Frames a pill takes to load: its four quadrants fill one a frame, then three frames of echo.
+pub const LOAD_FRAMES: u8 = 7;
+
+/// First frame of a load that is the echo, the pill being full.
+const LOAD_ECHO: u8 = 4;
+
+/// Frames between the pills of a recharge that gains several at once.
+pub const LOAD_STAGGER: u8 = 2;
+
+/// Pills that can show an effect at the same time. A pill that would need a sixth snaps to its
+/// state with no effect.
+pub const FX_SLOTS: usize = 5;
+
+/// An effect on one pill, in the frame it is in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PillFx {
+    /// Nothing: the slot is free.
+    Idle,
+    /// The pill that was spent breaks, once `wait` more frames have passed (until then it still shows
+    /// lit).
+    Break { pill: u8, frame: u8, wait: u8 },
+    /// The pill that was recharged loads and echoes, once `wait` more frames have passed (until then
+    /// it still shows empty).
+    Load { pill: u8, frame: u8, wait: u8 },
+}
+
+impl PillFx {
+    /// The pill this effect is on.
+    pub const fn pill(self) -> Option<u8> {
+        match self {
+            Self::Idle => None,
+            Self::Break { pill, .. } | Self::Load { pill, .. } => Some(pill),
+        }
+    }
+}
+
+/// What an effect adds over a pill: whether the pill under it shows lit, and up to five more
+/// sprites drawn over it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PillExtras {
+    pub lit: bool,
+    pub n: usize,
+    pub ops: [Op; 5],
+}
+
+/// Which way each quadrant (in the order they fill) flies when the pill breaks.
+const BREAK_DIRECTION: [(i32, i32); 4] = [(1, -1), (1, 1), (-1, 1), (-1, -1)];
+
+/// How far the pieces are from the gem at each frame of the break from the third on.
+const BREAK_SPREAD: [i32; 4] = [1, 2, 3, 4];
+
+impl PillExtras {
+    const NONE: Op = Op::Mask {
+        set: false,
+        check: false,
+    };
+
+    fn new(lit: bool) -> Self {
+        Self {
+            lit,
+            n: 0,
+            ops: [Self::NONE; 5],
+        }
+    }
+
+    fn push(&mut self, op: Op) {
+        self.ops[self.n] = op;
+        self.n += 1;
+    }
+}
+
+/// The pieces of pill `pill` as sprites: quadrant `i` of the gem moved `(dx, dy)` away.
+fn quadrant(
+    extras: &mut PillExtras,
+    origin: (i32, i32),
+    pill: i32,
+    i: usize,
+    away: (i32, i32),
+    clut: usize,
+    glass: bool,
+) {
+    let (qx, qy) = GEM_QUADRANT_AT[i];
+    extras.push(Op::Sprite {
+        x: origin.0 + GEM_X0 + GEM_PITCH * pill + qx + away.0,
+        y: origin.1 + GEM_Y + qy + away.1,
+        src: SPRITE_GEM_Q[i],
+        clut,
+        glass,
+    });
+}
+
+/// What the effect `fx` of pill `pill` draws over the pill, with the HUD's top-left at `origin`.
+pub fn pill_fx(origin: (i32, i32), pill: i32, fx: PillFx) -> PillExtras {
+    let (gx, gy) = (origin.0 + GEM_X0 + GEM_PITCH * pill, origin.1 + GEM_Y);
+    match fx {
+        PillFx::Idle => PillExtras::new(false),
+        PillFx::Break { wait, .. } if wait > 0 => PillExtras::new(true),
+        PillFx::Load { wait, .. } if wait > 0 => PillExtras::new(false),
+        PillFx::Break { frame, .. } => {
+            let mut e = PillExtras::new(frame < 2);
+            match frame {
+                0 => e.push(Op::Sprite {
+                    x: gx,
+                    y: gy,
+                    src: SPRITE_GEM,
+                    clut: CLUT_GEM_FLASH,
+                    glass: false,
+                }),
+                1 => e.push(Op::Sprite {
+                    x: gx,
+                    y: gy,
+                    src: SPRITE_GEM_CRACK,
+                    clut: CLUT_GEM_LIT,
+                    glass: false,
+                }),
+                _ => {
+                    let step = (frame - 2).min(3) as usize;
+                    let spread = BREAK_SPREAD[step];
+                    let (clut, glass) = match step {
+                        0 => (CLUT_GEM_LIT, false),
+                        1 => (CLUT_GEM_FADE_1, true),
+                        _ => (CLUT_GEM_FADE_2, true),
+                    };
+                    for (i, dir) in BREAK_DIRECTION.iter().enumerate() {
+                        quadrant(
+                            &mut e,
+                            origin,
+                            pill,
+                            i,
+                            (dir.0 * spread, dir.1 * spread),
+                            clut,
+                            glass,
+                        );
+                    }
+                }
+            }
+            e
+        }
+        PillFx::Load { frame, .. } => {
+            let mut e = PillExtras::new(frame >= LOAD_ECHO);
+            if frame < LOAD_ECHO {
+                for i in 0..=frame as usize {
+                    quadrant(&mut e, origin, pill, i, (0, 0), CLUT_GEM_LIT, false);
+                }
+            } else {
+                let ring = (frame - LOAD_ECHO).min(2);
+                let (grow, clut) = match ring {
+                    0 => (1, CLUT_RING_BRIGHT),
+                    1 => (2, CLUT_RING_BRIGHT),
+                    _ => (2, CLUT_RING_DIM),
+                };
+                e.push(Op::Sprite {
+                    x: gx - grow,
+                    y: gy - grow,
+                    src: SPRITE_RING[grow as usize - 1],
+                    clut,
+                    glass: true,
+                });
+            }
+            e
+        }
+    }
+}
+
+/// What the pill that is partly recharged draws: `quadrants` of its four, filled clockwise.
+pub fn pill_partial(origin: (i32, i32), pill: i32, quadrants: u8) -> PillExtras {
+    let mut e = PillExtras::new(false);
+    for i in 0..quadrants.min(4) as usize {
+        quadrant(&mut e, origin, pill, i, (0, 0), CLUT_GEM_LIT, false);
+    }
+    e
+}
+
+/// What the ammunition does on screen, one step per HUD frame, from the energy the game reports
+/// (0 to 100, ten to a pill): a spent pill breaks, a recharged one loads and echoes, and the pill
+/// being recharged shows how far along it is. Each pill animates by itself, so rapid shots and
+/// a recharge that gains several pills at once overlap cleanly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AmmoFx {
+    energy: u16,
+    slots: [PillFx; FX_SLOTS],
+    /// Pills recharged by a jump of energy that have not started to load yet, and the frames to
+    /// wait before the next one does.
+    queue: (u8, u8),
+    gap: u8,
+}
+
+/// Energy a pill holds.
+pub const ENERGY_PER_PILL: u16 = 10;
+
+impl AmmoFx {
+    /// Starts at `energy` with nothing animating.
+    pub const fn new(energy: u16) -> Self {
+        Self {
+            energy,
+            slots: [PillFx::Idle; FX_SLOTS],
+            queue: (0, 0),
+            gap: 0,
+        }
+    }
+
+    fn start(&mut self, fx: PillFx) {
+        let pill = fx.pill();
+        // An effect already on the pill is replaced by the new one.
+        let slot = (0..FX_SLOTS)
+            .find(|&i| self.slots[i].pill() == pill)
+            .or_else(|| (0..FX_SLOTS).find(|&i| self.slots[i] == PillFx::Idle));
+        if let Some(i) = slot {
+            self.slots[i] = fx;
+        }
+    }
+
+    /// Advance one HUD frame with the game's energy now `energy`.
+    pub fn step(&mut self, energy: u16) {
+        let energy = energy.min(COUNT as u16 * ENERGY_PER_PILL);
+        for slot in self.slots.iter_mut() {
+            match slot {
+                PillFx::Idle => {}
+                PillFx::Break { wait, .. } | PillFx::Load { wait, .. } if *wait > 0 => *wait -= 1,
+                PillFx::Break { frame, .. } => {
+                    *frame += 1;
+                    if *frame >= BREAK_FRAMES {
+                        *slot = PillFx::Idle;
+                    }
+                }
+                PillFx::Load { frame, .. } => {
+                    *frame += 1;
+                    if *frame >= LOAD_FRAMES {
+                        *slot = PillFx::Idle;
+                    }
+                }
+            }
+        }
+        let (old, new) = (self.energy / ENERGY_PER_PILL, energy / ENERGY_PER_PILL);
+        // The pills that were showing lit: those before the ones waiting to load.
+        let lit = if self.queue.0 < self.queue.1 {
+            u16::from(self.queue.0)
+        } else {
+            old
+        };
+        if new < old {
+            self.queue.1 = self.queue.1.min(new as u8);
+            self.queue.0 = self.queue.0.min(self.queue.1);
+            // Pills are spent from the right: the last lit one breaks first.
+            for (n, pill) in (new..lit).rev().enumerate() {
+                self.start(PillFx::Break {
+                    pill: pill as u8,
+                    frame: 0,
+                    wait: n as u8,
+                });
+            }
+        } else if new > old {
+            if new == old + 1 && energy - self.energy <= 2 && self.queue.0 == self.queue.1 {
+                // A recharge that completes the pill it was filling has only the last quadrant
+                // and the echo left.
+                self.start(PillFx::Load {
+                    pill: old as u8,
+                    frame: 3,
+                    wait: 0,
+                });
+            } else if self.queue.0 == self.queue.1 {
+                self.queue = (old as u8, new as u8);
+            } else {
+                self.queue.1 = new as u8;
+            }
+        }
+        self.energy = energy;
+        // Pills recharged by a jump take their turns, a stagger apart.
+        if self.gap > 0 {
+            self.gap -= 1;
+        } else if self.queue.0 < self.queue.1 && self.slots.contains(&PillFx::Idle) {
+            self.start(PillFx::Load {
+                pill: self.queue.0,
+                frame: 0,
+                wait: 0,
+            });
+            self.queue.0 += 1;
+            self.gap = LOAD_STAGGER - 1;
+        }
+    }
+
+    /// Whether any pill is still animating.
+    pub fn busy(&self) -> bool {
+        self.queue.0 < self.queue.1 || self.slots.iter().any(|&s| s != PillFx::Idle)
+    }
+
+    /// Write the pills into `state`: how many are lit, the effects, and how far the next pill is.
+    pub fn apply(&self, state: &mut HudState) {
+        state.energy = (self.energy / ENERGY_PER_PILL) as u8;
+        state.fx = self.slots;
+        state.partial = ((self.energy % ENERGY_PER_PILL) * 4 / ENERGY_PER_PILL) as u8;
+        state.queued = self.queue;
+    }
+}
+
+/// How a bar is folded away: it shortens from the right a cell at a time, then the stub that is left
+/// slides left under the emblem. Everything is a whole pixel, and the shapes are the ones of the
+/// full bar, moved, shortened or left out: nothing is scaled and no packet is rebuilt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Fold {
+    /// Cells still showing, counted from the left.
+    pub cells: i32,
+    /// Pixels the plate has lost on the right: the plate is that much narrower and the right end
+    /// that much further left.
+    pub shrink: i32,
+    /// Pixels the whole bar has slid to the left.
+    pub slide: i32,
+}
+
+impl Fold {
+    /// A bar that is fully out.
+    pub const FULL: Self = Self {
+        cells: COUNT,
+        shrink: 0,
+        slide: 0,
+    };
+}
+
+/// Cells and slide for each fold step, from 1 (nearly gone) to [`REVEAL_MAX`] (fully out).
+const FOLD_STEPS: [(i32, i32); REVEAL_MAX as usize] = [
+    (0, 22),
+    (0, 8),
+    (0, 0),
+    (2, 0),
+    (4, 0),
+    (6, 0),
+    (8, 0),
+    (COUNT, 0),
+];
+
+/// Narrowest the plate gets: just enough that the two ends do not overlap.
+const FOLD_MIN_PLATE: i32 = 2;
+
+/// The fold of a bar of size `geo` at `reveal` (1 to [`REVEAL_MAX`]), or `None` when it is gone.
+pub fn fold_of(reveal: u8, geo: &SizeGeo) -> Option<Fold> {
+    if reveal == 0 {
+        return None;
+    }
+    let (cells, slide) = FOLD_STEPS[(reveal.min(REVEAL_MAX) - 1) as usize];
+    let shrink = if cells == 0 {
+        geo.cap_x - geo.bar_x0 - FOLD_MIN_PLATE
+    } else {
+        (COUNT - cells) * geo.pitch
+    };
+    Some(Fold {
+        cells,
+        shrink,
+        slide,
+    })
+}
+
+/// Gems showing at `reveal` (of [`REVEAL_MAX`]): they pop out of the row from the right as the HUD
+/// folds and pop in from the left as it unfolds.
+pub fn gems_shown(reveal: u8) -> i32 {
+    (i32::from(reveal.min(REVEAL_MAX)) * COUNT + i32::from(REVEAL_MAX) - 1) / i32::from(REVEAL_MAX)
+}
+
+/// The fold and unfold of the HUD, one step per HUD frame: the bar in front goes first, the bar
+/// behind and each of the two follows [`FOLD_LAG`] frames later, the gems go with the bar in front,
+/// and the emblem flashes for [`PULSE_FRAMES`] frames when the bars start to come out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HudAnim {
+    reveal: [u8; 2],
+    ammo: u8,
+    lag: [u8; 2],
+    open: bool,
+    pulse: u8,
+}
+
+impl HudAnim {
+    /// Fully unfolded.
+    pub const fn open() -> Self {
+        Self {
+            reveal: [REVEAL_MAX; 2],
+            ammo: REVEAL_MAX,
+            lag: [0; 2],
+            open: true,
+            pulse: 0,
+        }
+    }
+
+    /// Fully folded: only the emblem.
+    pub const fn closed() -> Self {
+        Self {
+            reveal: [0; 2],
+            ammo: 0,
+            lag: [0; 2],
+            open: false,
+            pulse: 0,
+        }
+    }
+
+    /// Advance one HUD frame towards open or closed. `front` is the active stance, whose bar goes
+    /// first.
+    pub fn step(&mut self, open: bool, front: Stance) {
+        self.pulse = self.pulse.saturating_sub(1);
+        if open != self.open {
+            self.open = open;
+            self.lag = [0; 2];
+            self.lag[front.other().index()] = FOLD_LAG;
+            self.pulse = if open { PULSE_FRAMES } else { 0 };
+        }
+        for (r, lag) in self.reveal.iter_mut().zip(self.lag.iter_mut()) {
+            if *lag > 0 {
+                *lag -= 1;
+            } else if open {
+                *r = (*r + 1).min(REVEAL_MAX);
+            } else {
+                *r = r.saturating_sub(1);
+            }
+        }
+        self.ammo = if open {
+            (self.ammo + 1).min(REVEAL_MAX)
+        } else {
+            self.ammo.saturating_sub(1)
+        };
+    }
+
+    /// Whether any part of the HUD is still moving.
+    pub fn moving(&self) -> bool {
+        let target = if self.open { REVEAL_MAX } else { 0 };
+        self.reveal.iter().any(|&r| r != target) || self.ammo != target || self.pulse > 0
+    }
+
+    /// Write the animation into `state`.
+    pub fn apply(&self, state: &mut HudState) {
+        state.reveal = self.reveal;
+        state.ammo_reveal = self.ammo;
+        state.pulse = self.pulse > 0;
+    }
+}
+
+/// What makes the HUD unfold this tick.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FoldTriggers {
+    /// A hostile is inside the radius (with its hysteresis, see [`FoldPolicy::near`]).
+    pub hostile_near: bool,
+    /// Lock-on or targeting is active.
+    pub targeting: bool,
+    /// The player took damage this tick.
+    pub damaged: bool,
+    /// Health or ammunition changed this tick, in combat or not.
+    pub changed: bool,
+    /// The player is attached to an arch, recharging.
+    pub attached: bool,
+}
+
+/// Ticks (of 60 a second) the HUD stays out after the last trigger.
+pub const FOLD_GRACE_TICKS: u16 = 120;
+
+/// Ticks the HUD stays out after only a change of health or ammunition, so it is seen.
+pub const FOLD_CHANGE_TICKS: u16 = 90;
+
+/// When the HUD is out: a trigger opens it and a grace period of ticks keeps it open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FoldPolicy {
+    open: bool,
+    grace: u16,
+    near: bool,
+}
+
+impl FoldPolicy {
+    /// Out, as at the start of a level.
+    pub const fn new() -> Self {
+        Self {
+            open: true,
+            grace: FOLD_GRACE_TICKS,
+            near: false,
+        }
+    }
+
+    /// Whether a hostile at squared distance `dist2` counts as near: inside the `enter` radius, or
+    /// inside the larger `leave` radius if it already counted (the margin keeps the HUD from
+    /// flickering at the edge of the radius).
+    pub fn near(&mut self, dist2: Option<i32>, enter: i32, leave: i32) -> bool {
+        let limit = if self.near { leave } else { enter };
+        self.near = dist2.is_some_and(|d| d <= limit.saturating_mul(limit));
+        self.near
+    }
+
+    /// Advance one tick and say whether the HUD should be out.
+    pub fn step(&mut self, t: FoldTriggers) -> bool {
+        if t.hostile_near || t.targeting || t.damaged || t.attached {
+            self.grace = FOLD_GRACE_TICKS;
+        } else if t.changed {
+            self.grace = self.grace.max(FOLD_CHANGE_TICKS);
+        } else {
+            self.grace = self.grace.saturating_sub(1);
+        }
+        self.open = self.grace > 0;
+        self.open
+    }
+}
+
+impl Default for FoldPolicy {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -262,25 +814,28 @@ pub fn cell_clut(stance: Stance, size: usize, lit: bool) -> usize {
         + if lit { CLUT_CELL_LIT } else { CLUT_CELL_EMPTY }
 }
 
-/// The palette of an energy gem following `stance`, lit or empty.
-pub fn gem_clut(stance: Stance, lit: bool) -> usize {
-    match (lit, stance) {
-        (false, _) => CLUT_GEM_EMPTY,
-        (true, Stance::Horizon) => CLUT_GEM_LIT,
-        (true, Stance::Zenith) => CLUT_GEM_LIT_ZENITH,
+/// The palette of an ammunition gem, lit or empty.
+pub fn gem_clut(lit: bool) -> usize {
+    if lit {
+        CLUT_GEM_LIT
+    } else {
+        CLUT_GEM_EMPTY
     }
 }
 
-/// Paint one complete bar of `stance`, `lit` cells lit, at `pose`.
+/// Paint one complete bar of `stance`, `lit` cells lit, at `pose`, folded as `fold` says.
+#[allow(clippy::too_many_arguments)]
 pub fn bar(
     origin: (i32, i32),
     stance: Stance,
     pose: Pose,
     lit: u8,
+    fold: Fold,
     part: Part,
     draw: &mut impl FnMut(Op),
 ) {
-    let (left, top) = (origin.0 + pose.x, origin.1 + pose.y);
+    let (left, top) = (origin.0 + pose.x - fold.slide, origin.1 + pose.y);
+    let cap_x = GEO[pose.size].cap_x - fold.shrink;
     let s = stance.index();
     let geo = &GEO[pose.size];
     for band in &BANDS[s][pose.size][..geo.band_count] {
@@ -294,7 +849,7 @@ pub fn bar(
             draw(Op::Rect {
                 x: left + geo.bar_x0,
                 y: top + band.y0 as i32,
-                w: geo.cap_x - geo.bar_x0,
+                w: cap_x - geo.bar_x0,
                 h: (band.y1 - band.y0) as i32,
                 rgb: band.rgb,
                 glass: band.glass,
@@ -303,7 +858,7 @@ pub fn bar(
     }
     let base = s * CLUTS_PER_STANCE + pose.size * CLUT_SIZE_STRIDE;
     if part == Part::Glass || part == Part::Plate {
-        for (x, src) in [(LCAP_X, geo.lcap), (geo.cap_x, geo.cap)] {
+        for (x, src) in [(LCAP_X, geo.lcap), (cap_x, geo.cap)] {
             draw(Op::Sprite {
                 x: left + x,
                 y: top,
@@ -314,7 +869,7 @@ pub fn bar(
         }
     }
     if part == Part::Cells {
-        for k in 0..COUNT {
+        for k in 0..fold.cells {
             draw(Op::Sprite {
                 x: left + geo.cell_x0 + geo.pitch * k,
                 y: top + geo.cell_row,
@@ -352,6 +907,7 @@ pub fn emblem_clut(look: EmblemLook) -> usize {
     match look {
         EmblemLook::Of(s) => s.index() * CLUTS_PER_STANCE + CLUT_EMBLEM,
         EmblemLook::Halfway => CLUT_EMBLEM_HALFWAY,
+        EmblemLook::Pulse(s) => CLUT_EMBLEM_PULSE + s.index(),
     }
 }
 
@@ -367,12 +923,12 @@ pub fn emblem_op(origin: (i32, i32), look: EmblemLook) -> Op {
 }
 
 /// Gem `k` as one op, lit or not, with the HUD's top-left at `origin`.
-pub fn gem_op(origin: (i32, i32), k: i32, lit: bool, stance: Stance) -> Op {
+pub fn gem_op(origin: (i32, i32), k: i32, lit: bool) -> Op {
     Op::Sprite {
         x: origin.0 + GEM_X0 + GEM_PITCH * k,
         y: origin.1 + GEM_Y,
         src: SPRITE_GEM,
-        clut: gem_clut(stance, lit),
+        clut: gem_clut(lit),
         glass: false,
     }
 }
@@ -387,8 +943,8 @@ pub fn bar_alone(
     draw: &mut impl FnMut(Op),
 ) {
     let pose = Pose { x: 0, y: 0, size };
-    bar(origin, stance, pose, lit, Part::Plate, draw);
-    bar(origin, stance, pose, lit, Part::Cells, draw);
+    bar(origin, stance, pose, lit, Fold::FULL, Part::Plate, draw);
+    bar(origin, stance, pose, lit, Fold::FULL, Part::Cells, draw);
 }
 
 /// Paint the HUD with its top-left at `origin`.
@@ -405,53 +961,151 @@ pub fn bar_alone(
 pub fn compose(origin: (i32, i32), state: &HudState, draw: &mut impl FnMut(Op)) {
     let sc = scene(state);
     let lit = |s: Stance| state.health[s.index()];
+    let fold_of_bar =
+        |(stance, pose): (Stance, Pose)| fold_of(state.reveal[stance.index()], &GEO[pose.size]);
+    let (front_fold, behind_fold) = (fold_of_bar(sc.front), fold_of_bar(sc.behind));
     draw(MASK_SET);
-    bar(
-        origin,
-        sc.front.0,
-        sc.front.1,
-        lit(sc.front.0),
-        Part::Glass,
-        draw,
-    );
-    draw(MASK_SET_CHECK);
-    bar(
-        origin,
-        sc.behind.0,
-        sc.behind.1,
-        lit(sc.behind.0),
-        Part::Cells,
-        draw,
-    );
-    draw(MASK_CHECK);
-    bar(
-        origin,
-        sc.behind.0,
-        sc.behind.1,
-        lit(sc.behind.0),
-        Part::Plate,
-        draw,
-    );
-    draw(MASK_OFF);
-    bar(
-        origin,
-        sc.front.0,
-        sc.front.1,
-        lit(sc.front.0),
-        Part::Opaque,
-        draw,
-    );
-    bar(
-        origin,
-        sc.front.0,
-        sc.front.1,
-        lit(sc.front.0),
-        Part::Cells,
-        draw,
-    );
-    draw(emblem_op(origin, sc.emblem));
-    let energy = state.energy[sc.gems.index()];
-    for k in 0..COUNT {
-        draw(gem_op(origin, k, (k as u8) < energy, sc.gems));
+    if let Some(fold) = front_fold {
+        bar(
+            origin,
+            sc.front.0,
+            sc.front.1,
+            lit(sc.front.0),
+            fold,
+            Part::Glass,
+            draw,
+        );
     }
+    draw(MASK_SET_CHECK);
+    if let Some(fold) = behind_fold {
+        bar(
+            origin,
+            sc.behind.0,
+            sc.behind.1,
+            lit(sc.behind.0),
+            fold,
+            Part::Cells,
+            draw,
+        );
+    }
+    draw(MASK_CHECK);
+    if let Some(fold) = behind_fold {
+        bar(
+            origin,
+            sc.behind.0,
+            sc.behind.1,
+            lit(sc.behind.0),
+            fold,
+            Part::Plate,
+            draw,
+        );
+    }
+    draw(MASK_OFF);
+    if let Some(fold) = front_fold {
+        bar(
+            origin,
+            sc.front.0,
+            sc.front.1,
+            lit(sc.front.0),
+            fold,
+            Part::Opaque,
+            draw,
+        );
+        bar(
+            origin,
+            sc.front.0,
+            sc.front.1,
+            lit(sc.front.0),
+            fold,
+            Part::Cells,
+            draw,
+        );
+    }
+    draw(emblem_op(origin, sc.emblem));
+    let shown = if state.ammo_hint {
+        COUNT
+    } else {
+        gems_shown(state.ammo_reveal)
+    };
+    for k in 0..shown {
+        let extras = pill_state(origin, state, k);
+        draw(gem_op(origin, k, extras.lit));
+        for op in &extras.ops[..extras.n] {
+            draw(*op);
+        }
+    }
+}
+
+/// How pill `k` looks in `state`: lit or empty underneath, and what is drawn over it by the effect it
+/// is in, or the quadrants of the recharge it is half way through.
+pub fn pill_state(origin: (i32, i32), state: &HudState, k: i32) -> PillExtras {
+    if let Some(fx) = state.fx.iter().find(|f| f.pill() == Some(k as u8)) {
+        return pill_fx(origin, k, *fx);
+    }
+    if i32::from(state.queued.0) <= k && k < i32::from(state.queued.1) {
+        return pill_partial(origin, k, 0);
+    }
+    if k == i32::from(state.energy) && state.partial > 0 {
+        return pill_partial(origin, k, state.partial);
+    }
+    let mut plain = pill_partial(origin, k, 0);
+    plain.lit = k < i32::from(state.energy);
+    plain
+}
+
+/// Names of the animation demos of [`demo_state`].
+pub const DEMO_FOLD: u8 = 0;
+pub const DEMO_SHOT: u8 = 1;
+pub const DEMO_LOAD: u8 = 2;
+pub const DEMO_RELOAD: u8 = 3;
+pub const DEMO_JUMP: u8 = 4;
+
+/// The HUD at frame `n` of an animation demo: `DEMO_FOLD` folds for 12 frames and then unfolds
+/// for 12, `DEMO_SHOT` fires two shots, `DEMO_LOAD` recharges a pill a unit of energy at a time,
+/// `DEMO_RELOAD` refills all ten pills at once and `DEMO_JUMP` gains three. Horizon in front,
+/// health 7 and 5. The host viewer and the emulator check draw the same frames.
+pub fn demo_state(demo: u8, n: u16) -> HudState {
+    let mut state = HudState::rest(Stance::Horizon, [7, 5], 8);
+    if demo == DEMO_FOLD {
+        let mut anim = HudAnim::open();
+        for i in 0..=n {
+            anim.step(i >= 12, Stance::Horizon);
+        }
+        anim.apply(&mut state);
+        return state;
+    }
+    let start = match demo {
+        DEMO_SHOT => 100,
+        DEMO_LOAD => 70,
+        DEMO_RELOAD => 0,
+        _ => 40,
+    };
+    let mut fx = AmmoFx::new(start);
+    for i in 0..=n {
+        let energy = match demo {
+            DEMO_SHOT => match i {
+                0 => 100,
+                1..=8 => 80,
+                _ => 60,
+            },
+            DEMO_LOAD => 70 + i * 2 / 3,
+            DEMO_RELOAD => {
+                if i == 0 {
+                    0
+                } else {
+                    100
+                }
+            }
+            _ => {
+                if i == 0 {
+                    40
+                } else {
+                    70
+                }
+            }
+        };
+        fx.step(energy);
+    }
+    fx.apply(&mut state);
+    state
 }

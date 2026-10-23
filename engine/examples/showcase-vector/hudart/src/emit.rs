@@ -3,7 +3,7 @@
 use std::fmt::Write as _;
 
 use crate::art::{
-    self, bands, cap_glass, cap_palette, cell_palette, clut, emblem_palette, gem_palette, geos,
+    self, bands, cap_glass, cap_palette, cell_palette, clut, emblem_palette, emblem_pulse_palette, gem_fx_palettes, gem_palette, geos,
     horizon, pack, zenith, Tone, ATLAS_W,
 };
 use crate::palette::{mix, WHITE};
@@ -12,7 +12,7 @@ use crate::palette::{mix, WHITE};
 pub const CLUTS_PER_STANCE: usize = art::SIZES * 3 + 1;
 
 /// Every CLUT in table order: per stance its sizes and its emblem, then the emblem halfway between
-/// the stances, then the two gem CLUTs.
+/// the stances, the gem CLUTs (lit, empty) and the two emblem pulse CLUTs.
 pub fn cluts() -> Vec<[u16; 16]> {
     let mut v = Vec::new();
     for (base, other) in [(horizon(), zenith()), (zenith(), horizon())] {
@@ -29,9 +29,15 @@ pub fn cluts() -> Vec<[u16; 16]> {
         &emblem_palette(halfway, mix(halfway, WHITE, 170)),
         &[],
     ));
-    v.push(clut(&gem_palette(true, 0), &[]));
-    v.push(clut(&gem_palette(true, 1), &[]));
-    v.push(clut(&gem_palette(false, 0), &[]));
+    v.push(clut(&gem_palette(true), &[]));
+    v.push(clut(&gem_palette(false), &[]));
+    for (base, other) in [(horizon(), zenith()), (zenith(), horizon())] {
+        v.push(clut(&emblem_pulse_palette(base, other), &[]));
+    }
+    // The gem effects: the palettes are translucent, so they fade into the scene.
+    for p in gem_fx_palettes() {
+        v.push(clut(&p, &[1, 2, 3, 4, 5, 6, 7, 8, 9]));
+    }
     v
 }
 
@@ -100,6 +106,32 @@ pub fn art_module() -> String {
     let _ = writeln!(s, "pub const SPRITE_GEM: SpriteRect = {gem};");
     let _ = writeln!(
         s,
+        "pub const SPRITE_GEM_CRACK: SpriteRect = {};",
+        rect_of("GEM_CRACK", &placed)
+    );
+    let quadrants: Vec<String> = (0..4).map(|i| rect_of(&format!("GEM_Q{i}"), &placed)).collect();
+    let _ = writeln!(
+        s,
+        "/// The gem's quadrants in the order they fill (clockwise from the top), and where each sits in\n/// the gem.\npub const SPRITE_GEM_Q: [SpriteRect; 4] = [{}];",
+        quadrants.join(", ")
+    );
+    let at: Vec<String> = art::GEM_QUADRANT_AT
+        .iter()
+        .map(|(x, y)| format!("({x}, {y})"))
+        .collect();
+    let _ = writeln!(
+        s,
+        "pub const GEM_QUADRANT_AT: [(i32, i32); 4] = [{}];",
+        at.join(", ")
+    );
+    let rings: Vec<String> = (0..2).map(|i| rect_of(&format!("RING_{i}"), &placed)).collect();
+    let _ = writeln!(
+        s,
+        "/// The echo rings, 1 and 2 pixels out; each is drawn that many pixels up and left of the gem.\npub const SPRITE_RING: [SpriteRect; 2] = [{}];",
+        rings.join(", ")
+    );
+    let _ = writeln!(
+        s,
         "\n/// The sizes of the bar, full size first. Positions are relative to the bar's own top-left\n/// corner (its first row, and the HUD column of the left end's first column, `LCAP_X`)."
     );
     let _ = writeln!(s, "pub static GEO: [SizeGeo; SIZES] = [");
@@ -139,8 +171,19 @@ pub fn art_module() -> String {
     let _ = writeln!(s, "pub const CLUT_EMBLEM: usize = {};", art::SIZES * 3);
     let _ = writeln!(s, "pub const CLUT_EMBLEM_HALFWAY: usize = {};", 2 * per);
     let _ = writeln!(s, "pub const CLUT_GEM_LIT: usize = {};", 2 * per + 1);
-    let _ = writeln!(s, "pub const CLUT_GEM_LIT_ZENITH: usize = {};", 2 * per + 2);
-    let _ = writeln!(s, "pub const CLUT_GEM_EMPTY: usize = {};", 2 * per + 3);
+    let _ = writeln!(s, "pub const CLUT_GEM_EMPTY: usize = {};", 2 * per + 2);
+    let _ = writeln!(
+        s,
+        "/// The emblem flashing as it releases the bars: Horizon's, then Zenith's."
+    );
+    let _ = writeln!(s, "pub const CLUT_EMBLEM_PULSE: usize = {};", 2 * per + 3);
+    let _ = writeln!(
+        s,
+        "/// The gem effects: the flash, two steps of the pieces fading, the bright and dim ring."
+    );
+    for (i, name) in ["CLUT_GEM_FLASH", "CLUT_GEM_FADE_1", "CLUT_GEM_FADE_2", "CLUT_RING_BRIGHT", "CLUT_RING_DIM"].iter().enumerate() {
+        let _ = writeln!(s, "pub const {name}: usize = {};", 2 * per + 5 + i);
+    }
     let _ = writeln!(
         s,
         "/// 15-bit CLUT entries, 16 per CLUT in table order, entry 0 of each transparent."

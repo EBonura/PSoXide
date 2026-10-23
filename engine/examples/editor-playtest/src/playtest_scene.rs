@@ -1137,6 +1137,8 @@ impl Scene for Playtest {
         );
         self.update_gameplay(ctx);
         self.tick_poi_presentation();
+        let hud_input = self.stance_hud_input();
+        crate::stance_hud::hud().update(&hud_input);
         // This tail runs after every intentional early return in
         // `update_gameplay`: freeze final actor state once, then run combat
         // from the same snapshots the next body/equipment render consumes.
@@ -1195,6 +1197,11 @@ impl Scene for Playtest {
             // The walk continues past slot 0 into the overlay the runner
             // records for this frame.
             unsafe { ot.end_with_chain(hook) };
+        }
+        // The stance HUD goes into slot 0 before anything else does, so that the slot walks it last:
+        // over the world and under the overlay.
+        if !self.inventory_overlay_active && !self.opening.active() {
+            crate::stance_hud::hud().link(&mut ot);
         }
 
         let room_record = ROOMS.get(self.room_index.to_usize());
@@ -1790,67 +1797,15 @@ impl Scene for Playtest {
             }
         }
 
-        // One runtime-owned cluster draws the mutation charge and both health
-        // pools. The previous implementation layered a moving rectangular bar
-        // beneath an authored slanted bar, leaving both visible at rest.
+        // The stance HUD (health, stance, ammunition) is linked into the ordering table in
+        // `render`; the tether meter, which only shows while attached to an arch, is drawn here.
         if !self.inventory_overlay_active {
             if let Some(font) = self.ui_fonts[0].as_ref() {
                 if self.player_has_ranged_weapon() {
-                    draw_combat_energy(
-                        gpu,
-                        font,
-                        self.combat_flow.energy,
-                        self.hook_attached.map(|_| self.combat_flow.air_left),
-                    );
-                }
-                const VITALITY_Q12_ONE: u16 = 4096;
-                let config = self.player_stance_config;
-                let active = self.player_stance.active();
-                let share = |channel| {
-                    let pool = self.player_vitality.pool(channel);
-                    if pool.maximum() == 0 {
-                        0
-                    } else {
-                        ((u32::from(pool.current()) * u32::from(VITALITY_Q12_ONE))
-                            / u32::from(pool.maximum())) as u16
+                    if let Some(air_left) = self.hook_attached.map(|_| self.combat_flow.air_left) {
+                        draw_tether_meter(gpu, font, air_left);
                     }
-                };
-                let elapsed = self.player_stance.swap_elapsed_ticks();
-                let cooldown_remaining = self.player_stance.swap_cooldown();
-                let cooldown_progress_q12 = swap_cooldown_display_progress_q12(
-                    config.swap_cooldown_ticks,
-                    cooldown_remaining,
-                );
-                let echo_elapsed = if elapsed != u16::MAX
-                    && elapsed >= config.swap_cooldown_ticks
-                    && elapsed < config.swap_cooldown_ticks.saturating_add(13)
-                {
-                    Some(elapsed - config.swap_cooldown_ticks)
-                } else {
-                    None
-                };
-                #[cfg(feature = "vector-hud-proof")]
-                {
-                    let _ = (font, cooldown_progress_q12, echo_elapsed);
-                    crate::vector_hud::draw(
-                        gpu,
-                        active,
-                        share(active),
-                        share(active.other()),
-                        self.combat_flow.energy,
-                    );
                 }
-                #[cfg(not(feature = "vector-hud-proof"))]
-                draw_player_vitality_hud(
-                    gpu,
-                    font,
-                    active,
-                    share(active),
-                    share(active.other()),
-                    self.player_stance.swap_progress_q12(&config),
-                    cooldown_progress_q12,
-                    echo_elapsed,
-                );
             }
         }
 

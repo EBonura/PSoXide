@@ -554,81 +554,6 @@ fn draw_chamfered(gpu: &mut Gpu, x: i16, y: i16, w: i16, h: i16, cut: i16, color
     ));
 }
 
-/// Draw the complete player vitality cluster. Owning the two bars and cooldown
-/// dial in one pass prevents the old animated bar from surviving behind the
-/// authored shell, and lets the active channel stay deliberately longer.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn draw_player_vitality_hud(
-    gpu: &mut Gpu,
-    font: &FontAtlas,
-    active: VitalityChannelId,
-    active_fill_q12: u16,
-    inactive_fill_q12: u16,
-    swap_motion_progress_q12: u16,
-    swap_cooldown_progress_q12: u16,
-    completion_echo_elapsed: Option<u16>,
-) {
-    let (active_rgb, active_label) = vitality_channel_style(active);
-    let (inactive_rgb, inactive_label) = vitality_channel_style(active.other());
-
-    // The gameplay state changes channel as soon as Triangle is accepted, but
-    // the HUD keeps the previous frame's composition at progress zero. The
-    // newly active channel then rises and grows into the dominant slot while
-    // the old channel drops and contracts. Their small opposing horizontal
-    // arcs let the two ribbons visibly pass one another instead of occupying
-    // the exact same pixels at the midpoint.
-    let (incoming, outgoing) = vitality_swap_geometry(swap_motion_progress_q12);
-    if swap_motion_progress_q12 < 2048 {
-        // The old active bar is still on the near side of the orbit.
-        draw_vitality_bar(
-            gpu,
-            font,
-            incoming.bounds,
-            incoming.cut,
-            active_fill_q12,
-            active_rgb,
-            active_label,
-        );
-        draw_vitality_bar(
-            gpu,
-            font,
-            outgoing.bounds,
-            outgoing.cut,
-            inactive_fill_q12,
-            inactive_rgb,
-            inactive_label,
-        );
-    } else {
-        // After the crossing, the newly active bar comes to the near side.
-        draw_vitality_bar(
-            gpu,
-            font,
-            outgoing.bounds,
-            outgoing.cut,
-            inactive_fill_q12,
-            inactive_rgb,
-            inactive_label,
-        );
-        draw_vitality_bar(
-            gpu,
-            font,
-            incoming.bounds,
-            incoming.cut,
-            active_fill_q12,
-            active_rgb,
-            active_label,
-        );
-    }
-    draw_swap_cooldown_diamond(
-        gpu,
-        20,
-        18,
-        swap_cooldown_progress_q12,
-        active_rgb,
-        completion_echo_elapsed,
-    );
-}
-
 /// Draw the targeted enemy's dual vitality with the same visual grammar and
 /// swap motion as the player HUD, but at a much smaller scale and without a
 /// cooldown diamond. Enemy swap timing is intentionally internal; the moving
@@ -702,32 +627,6 @@ fn vitality_channel_style(channel: VitalityChannelId) -> ((u8, u8, u8), &'static
 struct VitalityBarGeometry {
     bounds: (i16, i16, i16, i16),
     cut: i16,
-}
-
-const ACTIVE_VITALITY_BAR: VitalityBarGeometry = VitalityBarGeometry {
-    bounds: (34, 5, 152, 13),
-    cut: 8,
-};
-const INACTIVE_VITALITY_BAR: VitalityBarGeometry = VitalityBarGeometry {
-    bounds: (34, 19, 104, 11),
-    cut: 5,
-};
-
-/// Return the geometry of the new active bar and the previous active bar.
-///
-/// The endpoints exactly match the resting HUD. At progress zero this makes
-/// the first swap frame indistinguishable from the preceding frame even
-/// though gameplay has already changed channel; at one the new layout is
-/// likewise identical to the normal resting composition.
-#[inline(always)]
-fn vitality_swap_geometry(progress_q12: u16) -> (VitalityBarGeometry, VitalityBarGeometry) {
-    vitality_swap_geometry_between(
-        INACTIVE_VITALITY_BAR,
-        ACTIVE_VITALITY_BAR,
-        progress_q12,
-        -3,
-        8,
-    )
 }
 
 /// Resting enemy bars share one left edge and touch at one horizontal edge. The
@@ -887,204 +786,13 @@ fn draw_vitality_bar(
     }
 }
 
-#[inline(never)]
-fn draw_swap_cooldown_diamond(
-    gpu: &mut Gpu,
-    cx: i16,
-    cy: i16,
-    progress_q12: u16,
-    rgb: (u8, u8, u8),
-    echo_elapsed: Option<u16>,
-) {
-    // Completion sends a second diamond out from the charge cell, echoing the
-    // main-menu confirmation language without restoring circular decoration.
-    if let Some(elapsed) = echo_elapsed {
-        let radius = 13 + ((elapsed.min(12) >> 1) as i16);
-        let echo_rgb = if elapsed < 6 {
-            rgb
-        } else {
-            (rgb.0 / 2, rgb.1 / 2, rgb.2 / 2)
-        };
-        draw_diamond_outline(gpu, cx, cy, radius, echo_rgb);
-    }
-
-    // One dark outer quad gives the cell a hard silhouette. During lockout a
-    // brighter neutral grey advances clockwise over a darker grey remainder;
-    // stance colour appears only when the swap is available again.
-    draw_diamond(gpu, cx, cy, 12, (18, 20, 23));
-    if progress_q12 >= 4096 {
-        draw_diamond(gpu, cx, cy, 10, rgb);
-    } else {
-        draw_diamond(gpu, cx, cy, 10, (54, 54, 54));
-        draw_clockwise_diamond_fill(gpu, cx, cy, (112, 112, 112), progress_q12);
-    }
-}
-
-#[inline(never)]
-fn draw_clockwise_diamond_fill(
-    gpu: &mut Gpu,
-    cx: i16,
-    cy: i16,
-    rgb: (u8, u8, u8),
-    progress_q12: u16,
-) {
-    // Four evenly spaced samples per edge keep the same smooth sixteen-step
-    // clockwise read as the old dial while following the diamond silhouette.
-    const SCREEN_RING: [(i16, i16); 17] = [
-        (0, -10),
-        (3, -7),
-        (5, -5),
-        (7, -3),
-        (10, 0),
-        (7, 3),
-        (5, 5),
-        (3, 7),
-        (0, 10),
-        (-3, 7),
-        (-5, 5),
-        (-7, 3),
-        (-10, 0),
-        (-7, -3),
-        (-5, -5),
-        (-3, -7),
-        (0, -10),
-    ];
-
-    let scaled = u32::from(progress_q12.min(4096)) * 16;
-    let complete = (scaled >> 12).min(16) as usize;
-    let partial_q12 = (scaled & 4095) as i32;
-    let mut wedge = 0usize;
-    while wedge < complete {
-        let a = SCREEN_RING[wedge];
-        let b = SCREEN_RING[wedge + 1];
-        gpu.draw(&TriFlat::new(
-            [(cx, cy), (cx + a.0, cy + a.1), (cx + b.0, cy + b.1)],
-            rgb.0,
-            rgb.1,
-            rgb.2,
-        ));
-        wedge += 1;
-    }
-    if complete < 16 && partial_q12 > 0 {
-        let a = SCREEN_RING[complete];
-        let b = SCREEN_RING[complete + 1];
-        let end = (
-            a.0 + (((i32::from(b.0) - i32::from(a.0)) * partial_q12) >> 12) as i16,
-            a.1 + (((i32::from(b.1) - i32::from(a.1)) * partial_q12) >> 12) as i16,
-        );
-        gpu.draw(&TriFlat::new(
-            [(cx, cy), (cx + a.0, cy + a.1), (cx + end.0, cy + end.1)],
-            rgb.0,
-            rgb.1,
-            rgb.2,
-        ));
-    }
-}
-
-#[inline(always)]
-fn draw_diamond(gpu: &mut Gpu, cx: i16, cy: i16, radius: i16, rgb: (u8, u8, u8)) {
-    gpu.draw(&QuadFlat::new(
-        [
-            (cx, cy - radius),
-            (cx + radius, cy),
-            (cx - radius, cy),
-            (cx, cy + radius),
-        ],
-        rgb.0,
-        rgb.1,
-        rgb.2,
-    ));
-}
-
-#[inline(always)]
-fn draw_diamond_outline(gpu: &mut Gpu, cx: i16, cy: i16, radius: i16, rgb: (u8, u8, u8)) {
-    let top = (cx, cy - radius);
-    let right = (cx + radius, cy);
-    let bottom = (cx, cy + radius);
-    let left = (cx - radius, cy);
-    gpu.draw(&LineMono::new(
-        top.0, top.1, right.0, right.1, rgb.0, rgb.1, rgb.2,
-    ));
-    gpu.draw(&LineMono::new(
-        right.0, right.1, bottom.0, bottom.1, rgb.0, rgb.1, rgb.2,
-    ));
-    gpu.draw(&LineMono::new(
-        bottom.0, bottom.1, left.0, left.1, rgb.0, rgb.1, rgb.2,
-    ));
-    gpu.draw(&LineMono::new(
-        left.0, left.1, top.0, top.1, rgb.0, rgb.1, rgb.2,
-    ));
-}
-
-#[inline(always)]
-pub(crate) fn swap_cooldown_display_progress_q12(total: u16, remaining: u16) -> u16 {
-    if total == 0 || remaining == 0 {
-        return 4096;
-    }
-    // The request and the first cooldown tick share one update. Hold that
-    // first presented frame at zero (fully grey), then map the remaining
-    // ticks across the complete radial sweep.
-    let visible_span = total.saturating_sub(1).max(1);
-    let spent = total
-        .saturating_sub(remaining)
-        .saturating_sub(1)
-        .min(visible_span);
-    ((u32::from(spent) * 4096) / u32::from(visible_span)) as u16
-}
-
 #[cfg(test)]
 mod vitality_hud_tests {
-    use super::{
-        enemy_vitality_resting_geometry, enemy_vitality_swap_geometry,
-        swap_cooldown_display_progress_q12, vitality_swap_geometry, ACTIVE_VITALITY_BAR,
-        INACTIVE_VITALITY_BAR,
-    };
-
-    #[test]
-    fn cooldown_display_starts_grey_and_finishes_fully_coloured() {
-        assert_eq!(swap_cooldown_display_progress_q12(30, 29), 0);
-        assert!(swap_cooldown_display_progress_q12(30, 15) > 1800);
-        assert!(swap_cooldown_display_progress_q12(30, 15) < 2200);
-        assert_eq!(swap_cooldown_display_progress_q12(30, 0), 4096);
-        assert_eq!(swap_cooldown_display_progress_q12(0, 0), 4096);
-    }
-
-    #[test]
-    fn vitality_swap_preserves_both_resting_endpoints() {
-        let (incoming, outgoing) = vitality_swap_geometry(0);
-        assert_eq!(incoming, INACTIVE_VITALITY_BAR);
-        assert_eq!(outgoing, ACTIVE_VITALITY_BAR);
-
-        let (incoming, outgoing) = vitality_swap_geometry(4096);
-        assert_eq!(incoming, ACTIVE_VITALITY_BAR);
-        assert_eq!(outgoing, INACTIVE_VITALITY_BAR);
-    }
-
-    #[test]
-    fn active_bar_is_two_pixels_thicker_and_keeps_the_tight_gap() {
-        assert_eq!(
-            ACTIVE_VITALITY_BAR.bounds.3,
-            INACTIVE_VITALITY_BAR.bounds.3 + 2
-        );
-        assert_eq!(
-            ACTIVE_VITALITY_BAR.bounds.1 + ACTIVE_VITALITY_BAR.bounds.3 + 1,
-            INACTIVE_VITALITY_BAR.bounds.1
-        );
-    }
-
-    #[test]
-    fn vitality_bars_pass_on_separate_horizontal_arcs() {
-        let (incoming, outgoing) = vitality_swap_geometry(2048);
-        assert!(incoming.bounds.0 < outgoing.bounds.0);
-        assert_eq!(incoming.bounds.1, outgoing.bounds.1);
-        assert_eq!(incoming.bounds.2, outgoing.bounds.2);
-        assert_eq!(incoming.bounds.3, outgoing.bounds.3);
-    }
+    use super::{enemy_vitality_resting_geometry, enemy_vitality_swap_geometry};
 
     #[test]
     fn enemy_bars_are_smaller_left_aligned_and_edge_attached() {
         let (active, inactive) = enemy_vitality_resting_geometry(160, 34);
-        assert!(active.bounds.2 < INACTIVE_VITALITY_BAR.bounds.2);
         assert_eq!(active.bounds.3, inactive.bounds.3 + 2);
         assert_eq!(active.bounds.1 + active.bounds.3, inactive.bounds.1);
         assert_eq!(active.bounds.0, 160);
@@ -1182,43 +890,23 @@ pub(crate) fn draw_opening_fade(gpu: &mut Gpu, fb: &DoubleBuffer, amount: u8) {
     }
 }
 
-/// Resource is independent of the animated stance bars above it.
-pub(crate) fn draw_combat_energy(
-    gpu: &mut Gpu,
-    font: &FontAtlas,
-    energy: u16,
-    air_left: Option<u16>,
-) {
-    use psx_game_runtime::combat_flow::{AIR_TICKS, ENERGY_MAX, SHOT_COST};
-    let rgb = if energy < SHOT_COST {
-        (235, 108, 82)
+/// The tether meter, shown under the stance HUD while the player is attached to an arch: how many
+/// ticks of the airborne allowance are left. The stance HUD itself shows health and ammunition.
+pub(crate) fn draw_tether_meter(gpu: &mut Gpu, font: &FontAtlas, ticks_left: u16) {
+    use psx_game_runtime::combat_flow::AIR_TICKS;
+    let rgb = if ticks_left < 120 {
+        (255, 96, 64)
     } else {
-        (220, 194, 110)
+        (180, 210, 220)
     };
-    draw_vitality_bar(
+    draw_rect(gpu, 8, 42, 48, 6, (25, 30, 34));
+    draw_rect(
         gpu,
-        font,
-        (34, 33, 104, 11),
-        3,
-        (u32::from(energy.min(ENERGY_MAX)) * 4096 / u32::from(ENERGY_MAX)) as u16,
+        9,
+        43,
+        (u32::from(ticks_left.min(AIR_TICKS)) * 46 / u32::from(AIR_TICKS)) as i16,
+        4,
         rgb,
-        "ENG",
     );
-    if let Some(ticks) = air_left {
-        let rgb = if ticks < 120 {
-            (255, 96, 64)
-        } else {
-            (180, 210, 220)
-        };
-        draw_rect(gpu, 142, 35, 48, 6, (25, 30, 34));
-        draw_rect(
-            gpu,
-            143,
-            36,
-            (u32::from(ticks.min(AIR_TICKS)) * 46 / u32::from(AIR_TICKS)) as i16,
-            4,
-            rgb,
-        );
-        font.draw_text(142, 44, "TETHER", rgb);
-    }
+    font.draw_text(8, 50, "TETHER", rgb);
 }
