@@ -480,6 +480,15 @@ pub(super) fn has_cards() -> bool {
     !crate::generated::GRID_CARDS.is_empty()
 }
 
+/// The distances of the layers of cards beyond the rooms', as the card draw and
+/// the stream take them.
+pub(super) fn card_bands() -> [psx_grid::render::CardBand; psx_grid::render::OUTER_LAYERS] {
+    psx_grid::render::outer_bands(
+        crate::generated::GRID_CARD_FAR,
+        crate::generated::GRID_CARD_FADE,
+    )
+}
+
 /// The sky atlas as the cards use it: its top-left VRAM pixel and the
 /// texture-page word of its first page; `None` until the sky is resident.
 #[cfg(feature = "cd-stream-bench")]
@@ -505,9 +514,9 @@ const CARD_LEAD_FADES: i32 = 2;
 #[cfg(feature = "cd-stream-bench")]
 pub(super) fn step_cards(eye: [i32; 3]) {
     use crate::generated::{
-        GRID_CARDS, GRID_CARD_FADE, GRID_CARD_FAR, GRID_CARD_COPIES, GRID_CARD_NEAR,
-        GRID_CARD_TILE_CENTRES, GRID_CARD_VIEW_STRIDE, GRID_ROOM_CARD_PLACE, GRID_ROOM_CARD_SECTORS,
-        GRID_ROOM_CARD_TILE, WORLD_PACK_START_LBA,
+        GRID_CARDS, GRID_CARD_COPIES, GRID_CARD_FADE, GRID_CARD_FAR, GRID_CARD_NEAR,
+        GRID_CARD_TILE_CENTRES, GRID_CARD_VIEW_STRIDE, GRID_ROOM_CARD_PLACE,
+        GRID_ROOM_CARD_SECTORS, GRID_ROOM_CARD_TILE, WORLD_PACK_START_LBA,
     };
     use psx_game_runtime::card_stream::CardInput;
     if GRID_CARDS.is_empty() || card_atlas().is_none() {
@@ -529,6 +538,7 @@ pub(super) fn step_cards(eye: [i32; 3]) {
         far: GRID_CARD_FAR + GRID_CARD_FAR / 12,
         near: GRID_CARD_NEAR,
         lead: CARD_LEAD_FADES * GRID_CARD_FADE,
+        outer: card_bands(),
         centres: GRID_CARD_TILE_CENTRES,
         copies: GRID_CARD_COPIES,
         room_tile: GRID_ROOM_CARD_TILE,

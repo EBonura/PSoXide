@@ -10,6 +10,8 @@
 //!   that has any: cards in the band without a picture or with a picture of the
 //!   wrong side, the same counted only for cards inside the view cone, and of
 //!   those the ones two or more view steps off.
+//! * `ct S held0 held1 held2 shown0 shown1 shown2` slots held by each layer of cards, and how many of them show
+//!   a picture, every 30 drawn frames.
 //! * `ct D drawn looked fading` cards drawn, slots looked at and views fading in, every 30
 //!   drawn frames.
 //! * `ct P x z` the eye, 32768 added to each, every 30 drawn frames.
@@ -177,6 +179,21 @@ pub(super) fn frame(view: &View<'_>) {
         line.number(u32::from(view.looked));
         line.number(view.live.iter().filter(|s| s.fade).count() as u32);
         line.emit();
+        // Slots held by each layer of cards, and how many of them show a picture.
+        let mut held = [0u32; 3];
+        let mut shown = [0u32; 3];
+        for slot in view.live {
+            if let Some(card) = view.table.card(usize::from(slot.room)) {
+                let layer = usize::from(card.layer).min(2);
+                held[layer] += 1;
+                shown[layer] += u32::from(slot.view != NO_VIEW);
+            }
+        }
+        let mut line = Line::new("ct S");
+        for value in held.into_iter().chain(shown) {
+            line.number(value);
+        }
+        line.emit();
     }
     let (mut band_missing, mut band_stale, mut seen_missing, mut seen_stale, mut seen_bad) =
         (0u32, 0, 0, 0, 0);
@@ -184,13 +201,22 @@ pub(super) fn frame(view: &View<'_>) {
         let Some(card) = view.table.card(room) else {
             continue;
         };
+        // Each layer of cards has its own band.
+        let (near, far) = match usize::from(card.layer).checked_sub(1) {
+            None => (view.hide_all, view.far),
+            Some(k) => {
+                let band =
+                    crate::vram_runtime::card_bands()[k.min(psx_grid::render::OUTER_LAYERS - 1)];
+                (band.near, band.far)
+            }
+        };
         let (dx, dz) = (ex - card.centre[0], ez - card.centre[1]);
         let length = if dx.abs() > 8000 || dz.abs() > 8000 {
             i32::MAX
         } else {
             isqrt_i32(dx * dx + dz * dz).max(1)
         };
-        let in_band = length >= view.hide_all && length <= view.far;
+        let in_band = length >= near && length <= far;
         if !in_band {
             trace.in_band[room] = false;
             trace.waiting[room] = false;

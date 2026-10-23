@@ -1296,8 +1296,13 @@ impl GridRuntime {
                                         .level
                                         .flood
                                         .map_or(0, |flood| i32::from(flood.near_radius) * sector),
-                                    hide_all: (mesh_far - mesh_overlap).max(0),
+                                    hide_all: if self.level.coarse.is_some() {
+                                        (mesh_far - mesh_overlap).max(0)
+                                    } else {
+                                        crate::generated::GRID_CARD_NEAR
+                                    },
                                     fade: GRID_CARD_FADE,
+                                    outer: crate::vram_runtime::card_bands(),
                                     tpage,
                                     atlas,
                                 },
@@ -1321,7 +1326,11 @@ impl GridRuntime {
                                     * 6
                                     / 5,
                                 far: GRID_CARD_FAR,
-                                hide_all: (mesh_far - mesh_overlap).max(0),
+                                hide_all: if self.level.coarse.is_some() {
+                                    (mesh_far - mesh_overlap).max(0)
+                                } else {
+                                    crate::generated::GRID_CARD_NEAR
+                                },
                                 drawn: cards.quads_visible,
                                 looked: cards.cells_visible,
                             });

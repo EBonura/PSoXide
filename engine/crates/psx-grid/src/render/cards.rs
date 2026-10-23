@@ -158,10 +158,14 @@ pub struct Card {
     pub height: i32,
     /// Half its width.
     pub half_width: i32,
+    /// 0 for a room's card, 1 and up for a layer of cards beyond the rooms'
+    /// ([`CardCamera::outer`]): a card that holds everything behind it from
+    /// its distance out to the next layer's.
+    pub layer: u8,
 }
 
 impl Card {
-    /// A card from a table row `[x, z, base, height, half width, 0]`;
+    /// A card from a table row `[x, z, base, height, half width, layer]`;
     /// `None` for a room that has no card (a zero height).
     pub fn from_row(row: &[i16; 6]) -> Option<Self> {
         (row[3] > 0).then_some(Self {
@@ -169,8 +173,49 @@ impl Card {
             base: i32::from(row[2]),
             height: i32::from(row[3]),
             half_width: i32::from(row[4]),
+            layer: row[5].clamp(0, 255) as u8,
         })
     }
+}
+
+/// The distances a layer of cards shows between (plan distance, runtime
+/// units).
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct CardBand {
+    /// No card of the layer is drawn closer than this.
+    pub near: i32,
+    /// None is drawn farther than this.
+    pub far: i32,
+    /// A card within this distance of `far` fades in.
+    pub fade: i32,
+}
+
+/// Layers of cards beyond the rooms' that [`CardCamera::outer`] describes.
+pub const OUTER_LAYERS: usize = 2;
+
+/// Plan distance, runtime units, standing for "no limit" as the far edge of
+/// the last layer of cards (finite so sums with it stay inside 32 bits).
+pub const CARD_UNLIMITED: i32 = 1 << 20;
+
+/// The bands of the layers of cards beyond the rooms', given the far edge
+/// and the fade width of the rooms' cards. Each layer shows from where the
+/// one inside it has finished fading in, to twice as far, fading in over
+/// twice the width; the last shows to the horizon. The cook and the guest
+/// both work these out, so a level need not carry them.
+pub const fn outer_bands(far: i32, fade: i32) -> [CardBand; OUTER_LAYERS] {
+    let (far1, fade1) = (far * 2, fade * 2);
+    [
+        CardBand {
+            near: far - fade,
+            far: far1,
+            fade: fade1,
+        },
+        CardBand {
+            near: far1 - fade1,
+            far: CARD_UNLIMITED,
+            fade: fade1 * 2,
+        },
+    ]
 }
 
 /// The card of each room, borrowed from the manifest.
@@ -249,6 +294,9 @@ pub struct CardCamera {
     /// A card within this distance of `far` fades in: its modulation colour
     /// ramps from black to neutral over it.
     pub fade: i32,
+    /// The distances of the layers of cards beyond the rooms' (`far`,
+    /// `hide_all` and `fade` are layer 0's). A layer with `far` 0 has no cards.
+    pub outer: [CardBand; OUTER_LAYERS],
     /// Texture-page word of the atlas's first page (`uv_word(0)` of its
     /// slot), and the atlas's top-left VRAM pixel.
     pub tpage: u16,
@@ -312,7 +360,15 @@ pub fn draw_cards(
             camera.eye[0] - card.centre[0],
             camera.eye[2] - card.centre[1],
         );
-        if dx.abs() > camera.far || dz.abs() > camera.far {
+        let band = match card.layer {
+            0 => CardBand {
+                near: camera.hide_all,
+                far: camera.far,
+                fade: camera.fade,
+            },
+            layer => camera.outer[usize::from(layer - 1).min(OUTER_LAYERS - 1)],
+        };
+        if dx.abs() > band.far || dz.abs() > band.far {
             continue;
         }
         // Plan view cone on the card's centre, with its half width as
@@ -326,14 +382,15 @@ pub fn draw_cards(
             continue;
         }
         let length = isqrt_i32(dx * dx + dz * dz).max(1);
-        if length > camera.far {
+        if length > band.far {
             continue;
         }
         // A room drawn whole keeps its card until the eye is well inside
         // it: the live geometry then replaces what the card showed
         // piece by piece, where it stands in front of the card.
-        if length < camera.hide_all
-            || (length < camera.hide_inside
+        if length < band.near
+            || (card.layer == 0
+                && length < camera.hide_inside
                 && skip.get(usize::from(entry.room)).copied().unwrap_or(false))
         {
             continue;
@@ -363,14 +420,14 @@ pub fn draw_cards(
         // Fading in at the far edge, over `fade` units: opaque, then half
         // blended with what is behind it, then a quarter added to it with
         // its brightness ramping up from nothing.
-        let in_fade = camera.far - length;
-        let (brightness, blend) = if in_fade >= camera.fade {
+        let in_fade = band.far - length;
+        let (brightness, blend) = if in_fade >= band.fade {
             (128, Blend::Opaque)
-        } else if in_fade * 2 >= camera.fade {
+        } else if in_fade * 2 >= band.fade {
             (128, Blend::Average)
         } else {
             (
-                (256 * in_fade / camera.fade.max(1)).clamp(0, 128),
+                (256 * in_fade / band.fade.max(1)).clamp(0, 128),
                 Blend::AddQuarter,
             )
         };
@@ -427,7 +484,11 @@ pub fn draw_cards(
                 + u32::from(band_screen[3].sz);
             // The view fading in sorts a step nearer, so it is drawn after the
             // one it blends with.
-            let otz = (sum >> 4) - u32::from(entry.fade && sum >= 32);
+            let mut otz = (sum >> 4) - u32::from(entry.fade && sum >= 32);
+            if card.layer > 0 {
+                // A far layer sorts behind everything, however far.
+                otz = otz.min(2047);
+            }
             if otz == 0 || otz >= 2048 {
                 frame.depth_skipped += 1;
                 continue;
@@ -840,6 +901,7 @@ mod tests {
             hide_inside,
             hide_all: 0,
             fade: 240,
+            outer: [CardBand::default(); OUTER_LAYERS],
             tpage: 0x0105,
             atlas: (320, 0),
         };

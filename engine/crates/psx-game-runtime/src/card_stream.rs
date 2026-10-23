@@ -46,8 +46,8 @@
 //! Nothing here waits.
 
 use psx_grid::render::{
-    view_keep, view_toward, CardTable, LiveSlot, NO_SLOT, NO_VIEW, PICTURE_ROWS, SLOTS, SLOT_BYTES,
-    SLOT_HALFWORDS, SLOT_ROWS,
+    view_keep, view_toward, CardBand, CardTable, LiveSlot, NO_SLOT, NO_VIEW, OUTER_LAYERS,
+    PICTURE_ROWS, SLOTS, SLOT_BYTES, SLOT_HALFWORDS, SLOT_ROWS,
 };
 
 use crate::grid_stream::{Poll, RoomTransport};
@@ -66,7 +66,7 @@ pub const CARD_WINDOW_WORDS: usize = CELLS * SLOT_BYTES / 4;
 pub const MAX_ROOMS: usize = 512;
 /// Rooms the candidate list holds: the rooms near the eye. A level with more
 /// in reach has the extra ones left without cards.
-const MAX_CANDIDATES: usize = 256;
+const MAX_CANDIDATES: usize = 384;
 /// Ticks between two membership passes.
 const PASS_TICKS: u32 = 8;
 /// Units past `enter` the candidate room list reaches, and (halved) how far
@@ -150,6 +150,8 @@ struct Slot {
     drawable: bool,
     /// Sector of the wanted picture, as of the last pass (0 for none).
     sector: u32,
+    /// Layer of the card (0 for a room's, see [`CardInput::outer`]).
+    layer: u8,
     /// The other slot of this room while a change of view shows in two
     /// steps ([`NO_SLOT`] otherwise).
     partner: u8,
@@ -171,6 +173,7 @@ impl Slot {
         since: 0,
         drawable: false,
         sector: 0,
+        layer: 0,
         partner: NO_SLOT,
         incoming: false,
         fade_start: 0,
@@ -223,6 +226,11 @@ pub struct CardInput<'a> {
     pub far: i32,
     /// Cards are not drawn closer than this plan distance.
     pub near: i32,
+    /// The layers of cards beyond the rooms' (card layer `k + 1` is entry `k`,
+    /// see [`psx_grid::render::outer_bands`]). The values above are layer 0's.
+    /// A layer's cards take a slot a fade before they show and give it up
+    /// half a fade past that.
+    pub outer: [CardBand; OUTER_LAYERS],
     /// How much better a room the eye is walking straight towards ranks
     /// than one beside it, and one behind ranks worse, in runtime units.
     pub lead: i32,
@@ -248,6 +256,57 @@ pub struct Upload {
     pub cell: u8,
     room: u16,
     view: u8,
+}
+
+/// The distances one layer of cards works to.
+#[derive(Copy, Clone)]
+struct Band {
+    near: i32,
+    far: i32,
+    enter: i32,
+    leave: i32,
+}
+
+/// Rank offset between the cards of one layer and the next: a layer's cards
+/// rank behind every card of the nearer layers within the same class.
+const LAYER_RANK: i32 = 1 << 20;
+
+impl CardInput<'_> {
+    /// The distances layer `layer` works to.
+    fn band(&self, layer: u8) -> Band {
+        let Some(row) = usize::from(layer)
+            .checked_sub(1)
+            .and_then(|k| self.outer.get(k))
+            .filter(|row| row.far > 0)
+        else {
+            return Band {
+                near: self.near,
+                far: self.far,
+                enter: self.enter,
+                leave: self.leave,
+            };
+        };
+        // A fade past the far edge: the outer layers change slowly and
+        // their cards are few, but every slot they hold is one a nearer
+        // layer cannot use.
+        let enter = row.far + row.fade;
+        Band {
+            near: row.near,
+            // The stream measures plan distance to within 7.5 percent over.
+            far: row.far + row.far / 12,
+            enter,
+            leave: enter + row.fade / 2,
+        }
+    }
+
+    /// The farthest `enter` of any layer: how far from the eye a card can
+    /// want a slot.
+    fn widest_enter(&self) -> i32 {
+        self.outer
+            .iter()
+            .map(|row| row.far + row.fade)
+            .fold(self.enter, i32::max)
+    }
 }
 
 /// Plan distance of two offsets within 7 percent: the larger plus three
@@ -470,11 +529,14 @@ impl<K: Copy> CardStream<K> {
 
     /// Rank of a room the eye sees at offset `(dx, dz)` from it (eye minus
     /// card): plan distance, less the lead for a room straight ahead.
-    fn rank(&self, dx: i32, dz: i32, distance: i32, input: &CardInput<'_>) -> i32 {
-        let class = if distance <= input.far { 0 } else { CLASS_GAP };
+    fn rank(&self, dx: i32, dz: i32, distance: i32, band: &Band, layer: u8, lead: i32) -> i32 {
+        let class = if distance <= band.far { 0 } else { CLASS_GAP };
         let toward = -dx * self.heading[0] - dz * self.heading[1];
         let ahead = toward / distance.max(1);
-        class + (distance - ((ahead * input.lead) >> 12)).max(0)
+        // The distance a far layer's card is ranked by is its distance into
+        // the layer's band, so nothing in an outer layer outranks the near one.
+        let into = (distance - band.near).max(0);
+        class + i32::from(layer) * LAYER_RANK + (into - ((ahead * lead) >> 12)).max(0)
     }
 
     /// Membership and wanted views.
@@ -494,7 +556,8 @@ impl<K: Copy> CardStream<K> {
             };
             let (dx, dz) = (ex - card.centre[0], ez - card.centre[1]);
             let distance = plan_distance(dx, dz);
-            if distance > input.leave {
+            let band = input.band(card.layer);
+            if distance > band.leave {
                 self.release(slot);
                 continue;
             }
@@ -504,10 +567,10 @@ impl<K: Copy> CardStream<K> {
                 view_toward(dx, dz)
             };
             self.slots[slot].want = want;
-            self.slots[slot].rank = self.rank(dx, dz, distance, input);
-            self.slots[slot].hidden = distance < input.near;
+            self.slots[slot].rank = self.rank(dx, dz, distance, &band, card.layer, input.lead);
+            self.slots[slot].hidden = distance < band.near;
             self.slots[slot].drawable =
-                distance >= input.near - DRAW_MARGIN && distance <= input.far + DRAW_MARGIN;
+                distance >= band.near - DRAW_MARGIN && distance <= band.far + DRAW_MARGIN;
         }
         self.step_overlays();
         self.refresh_candidates(input);
@@ -524,11 +587,12 @@ impl<K: Copy> CardStream<K> {
             };
             let (dx, dz) = (ex - card.centre[0], ez - card.centre[1]);
             let distance = plan_distance(dx, dz);
-            if distance > input.enter {
+            let band = input.band(card.layer);
+            if distance > band.enter {
                 continue;
             }
             candidates += 1;
-            let rank = self.rank(dx, dz, distance, input);
+            let rank = self.rank(dx, dz, distance, &band, card.layer, input.lead);
             if rank >= best[NEW_PER_PASS - 1].0 {
                 continue;
             }
@@ -560,6 +624,7 @@ impl<K: Copy> CardStream<K> {
                 since: 0,
                 drawable: false,
                 sector: 0,
+                layer: card.layer,
                 partner: NO_SLOT,
                 incoming: false,
                 fade_start: 0,
@@ -606,7 +671,7 @@ impl<K: Copy> CardStream<K> {
         if !moved {
             return;
         }
-        let reach = input.enter + CANDIDATE_MARGIN;
+        let reach = input.widest_enter() + CANDIDATE_MARGIN;
         let mut count = 0;
         for room in 0..input.table.len().min(MAX_ROOMS) {
             let Some(card) = input.table.card(room) else {
@@ -816,6 +881,7 @@ impl<K: Copy> CardStream<K> {
                 if held.shown != NO_VIEW
                     && !held.incoming
                     && held.drawable
+                    && held.layer == 0
                     && spare > OVERLAY_RESERVE
                 {
                     if let Some(free) = self.slots.iter().position(|s| s.room == u16::MAX) {
@@ -1121,6 +1187,7 @@ mod tests {
             far: 300,
             near: 0,
             lead: 0,
+            outer: [CardBand::default(); OUTER_LAYERS],
             centres: &[],
             copies: &[],
             room_tile: &[],
@@ -1211,6 +1278,57 @@ mod tests {
         // A room behind the eye (x = 500 < 800) is seen from +x: view 0.
         let at = stream.live().iter().position(|s| s.room == 5).unwrap();
         assert_eq!(stream.live()[at].view, 0);
+    }
+
+    #[test]
+    fn a_far_layer_takes_a_slot_in_its_band_and_never_outranks_the_rooms() {
+        // Rooms 0..=3 on the x axis 100 apart; two layer cards, layer 1 at
+        // x = 700 (shows from 600 to 1200 away) and layer 2 at x = 4000
+        // (from 1100 on, no limit).
+        let mut rows = rows(4);
+        rows.push([700, 0, 0, 200, 40, 1]);
+        rows.push([4000, 0, 0, 200, 40, 2]);
+        let table = CardTable::new(&rows);
+        let sectors: Vec<u32> = (0..6).map(|r| 8 * r + 1).collect();
+        let mut disc = Disc::new(8 * 6 + 40);
+        let mut window = std::vec![0u32; CARD_WINDOW_WORDS];
+        let mut stream = CardStream::<usize>::new();
+        let outer = [
+            CardBand {
+                near: 600,
+                far: 1200,
+                fade: 100,
+            },
+            CardBand {
+                near: 1100,
+                far: 1 << 20,
+                fade: 200,
+            },
+        ];
+        let mut input = input(&table, &sectors, [-10, 0, 0]);
+        input.outer = outer;
+        run(&mut stream, &mut disc, &mut window, &input, 80);
+        // The layer cards hold slots and show the view facing the eye.
+        assert_eq!(held(&stream), [0, 1, 2, 3, 4, 5]);
+        for live in stream.live().iter().filter(|s| s.room != u16::MAX) {
+            assert_eq!(live.view, 4, "room {}", live.room);
+        }
+        // Both are drawn: layer 1 is 710 away, inside 600..=1200 (and its
+        // slack), layer 2 is 4010 away.
+        let drawn: Vec<u16> = stream
+            .draw_list()
+            .iter()
+            .map(|&slot| stream.live()[usize::from(slot)].room)
+            .collect();
+        assert!(drawn.contains(&4) && drawn.contains(&5), "{drawn:?}");
+        // Out of layer 1's band (past its enter) the card gives its slot up.
+        let input = CardInput {
+            eye: [-1300, 0, 0],
+            ..input
+        };
+        run(&mut stream, &mut disc, &mut window, &input, 80);
+        assert!(!held(&stream).contains(&4));
+        assert!(held(&stream).contains(&5));
     }
 
     #[test]
@@ -1494,8 +1612,8 @@ mod tests {
         // Walk towards +x.
         stream.update_heading([0, 0, 0]);
         stream.update_heading([100, 0, 0]);
-        let ahead = stream.rank(-100 - 400 + 100, 0, 400, &input);
-        let behind = stream.rank(-100 + 400 + 100, 0, 400, &input);
+        let ahead = stream.rank(-100 - 400 + 100, 0, 400, &input.band(0), 0, input.lead);
+        let behind = stream.rank(-100 + 400 + 100, 0, 400, &input.band(0), 0, input.lead);
         assert!(ahead < behind, "{ahead} {behind}");
     }
 
