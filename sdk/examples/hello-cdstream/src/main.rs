@@ -535,8 +535,11 @@ fn check_cpu(report: &mut Report) {
     report.push(" cycles, ");
     report.num(psx_cdstream::handler_stack_unused_bytes() as u32);
     report.push(" stack bytes unused");
+    // The handler's private stack is 768 bytes and the deepest call measured 248 (Half-Life,
+    // emulator); a console run that leaves less than 256 unused has found a deeper path.
     let ok = matches!(finished, Some(done) if done.outcome == Outcome::Done)
-        && verify(big(), 0, sectors);
+        && verify(big(), 0, sectors)
+        && psx_cdstream::handler_stack_unused_bytes() >= 256;
     report.finish(ok);
 }
 

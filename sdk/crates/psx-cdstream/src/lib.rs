@@ -65,6 +65,20 @@
 //! }
 //! ```
 //!
+//! # Next to the polled reader
+//!
+//! A program that loads with `SectorReader` (maps, tables, boot assets) and only
+//! wants some reads kept out of the frame loop (a weapon model that streams in
+//! while the world renders) does not have to give up the polled reader. Call
+//! [`ensure_installed`] with [`IrqMaskPolicy::OnlyWhileBusy`] before such a read
+//! (it also puts the wrapper back after `install_vblank_counter` reset the exception
+//! vector), submit the request, and look at it once a frame. Between requests the CD
+//! interrupt source is closed and the polled reader works as before; before a polled
+//! command, [`stop_and_wait`] ends a request still in flight. A polled read at 150
+//! sectors a second needs a call every 6.7 ms and loses sectors when the frame loop
+//! looks once per frame (the controller keeps a few, and delivers the newest); the
+//! handler has no such limit.
+//!
 //! # How it is built
 //!
 //! [`Engine`] is the whole state machine, generic over [`CdHw`], the
