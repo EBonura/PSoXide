@@ -243,13 +243,21 @@ unsafe fn run_bounded<P: Presentation>(
     // acknowledged and the CPU mask closed. SectorReader::prepare in the payload
     // starts from exactly that state.
     unsafe { leave_drive_clean() };
-    unsafe { flush_cache() };
+    // The game lands at 0x80010000, where the launcher was executing, so the
+    // instruction cache still holds launcher lines; `jr pc0` without this
+    // re-executes the launcher (the console showed five green stages, a full
+    // payload bar and the loader's own screen). The flush is the SDK's:
+    // it waits for every DMA channel to be idle with interrupts masked before
+    // it touches the cache control register, because a flush while a channel
+    // moves data makes the next instruction fetch return a word of that
+    // traffic (Quake, 2026-10-22; see the SDK's docs/CACHE-CONTROL.md).
+    psx_rt::cache::flush_instruction_cache();
     // The JUMP row going green means the cache flush returned and the jump
     // is the very next thing: anything wrong past this point is the game's
     // own first moments, not the load. Its status is a scratchpad
     // write/readback probe: NOSPAD is the fingerprint of a cache-control
-    // restore swallowed while the cache was isolated (see flush_cache's
-    // ordering note) -- the game inherits whichever machine this saw.
+    // restore swallowed while the cache was isolated -- the game inherits
+    // whichever machine this saw.
     // Invisible on a clean load; on a retried one the row is the last
     // thing the diagnostics record before the game takes the machine.
     let alive = unsafe {
@@ -361,6 +369,24 @@ fn verdict(s: &str, rgb: u32) {
     paint::text(8, VERDICT_Y, 2, s, rgb);
 }
 
+/// Every DMA channel, in controller order.
+const DMA_CHANNELS: [psx_io::dma::Channel; 7] = [
+    psx_io::dma::Channel::MdecIn,
+    psx_io::dma::Channel::MdecOut,
+    psx_io::dma::Channel::Gpu,
+    psx_io::dma::Channel::Cd,
+    psx_io::dma::Channel::Spu,
+    psx_io::dma::Channel::Expansion,
+    psx_io::dma::Channel::OrderingTableClear,
+];
+
+/// Let every DMA channel finish what it is doing, aborting one that will not.
+fn shut_down_dma() {
+    for channel in DMA_CHANNELS {
+        let _ = psx_io::dma::wait_or_abort(channel, psx_io::dma::DEFAULT_SPINS);
+    }
+}
+
 /// Put the hardware back roughly where the BIOS leaves it before a game
 /// boots: interrupts masked, DMA channels off, GPU reset. The launcher has
 /// been driving the GPU and vblank IRQs, and a game's `_start` does not
@@ -381,6 +407,14 @@ unsafe fn quiesce() {
         // Mask + acknowledge every interrupt source.
         psx_io::irq::set_mask(0);
         psx_io::irq::acknowledge(u32::MAX);
+
+        // With interrupts closed nothing can start another transfer, so wait
+        // for the ones in flight (the launcher's last frame's list walk, for
+        // one) to finish before the controller is reconfigured and, later,
+        // before the cache control register is touched. `wait_or_abort` is the
+        // SDK's bounded wait: a channel that does not finish is aborted and
+        // given the same budget to read idle, then the load goes on.
+        shut_down_dma();
 
         // Disable every DMA channel but keep the BIOS's priority ladder.
         // The third debug burn proved silicon cares about the difference:
@@ -435,87 +469,6 @@ unsafe fn leave_drive_clean() {
     cd.clear_data_request();
     psx_io::irq::set_mask(0);
     psx_io::irq::acknowledge(1 << psx_hw::irq::source::CDROM);
-}
-
-// Direct instruction-cache invalidation, open-coded here so the blob does
-// not link `psx-rt` (which would bring a second `_start` and panic handler
-// with it).
-//
-// This replaces a BIOS A(44h) FlushCache tail call. The flush is the last
-// thing standing between a loaded payload and a running game: the game's
-// code lands at 0x80010000, which is exactly where the launcher was
-// executing from moments earlier, so those cache lines hold launcher
-// instructions. Miss the invalidation and `jr pc0` re-executes the
-// launcher instead of the game, leaving the loader's own screen up --
-// which is precisely what the console showed with five green stages and
-// a full payload bar.
-//
-// The BIOS call was never proven on silicon in this position. This
-// sequence is: it is the routine psx-rt uses, and the launcher boots and
-// runs on the console with it. Steps, per the documented recipe: jump to
-// this code's KSEG1 alias so fetches bypass the cache being cleared, put
-// the cache-control port in tag-test mode with the i-cache enabled,
-// isolate the cache (COP0 SR bit 16) so stores hit tags instead of
-// memory, clear one tag per 16-byte line across the 4 KiB cache, then
-// DROP ISOLATION FIRST (SR = 0, interrupts still off), restore the
-// normal 0x1E988 cache-control value, then the caller's SR.
-//
-// The restore order is load-bearing and matches the BIOS routine (and
-// psx-rt after its 2026-07-31 fix): with IsC still set, whether a store
-// reaches the CPU-internal cache-control port or is swallowed by the
-// isolated cache is undocumented. A swallowed restore leaves cache
-// control at 0x804 -- tag-test latched, SCRATCHPAD UNMAPPED -- which is
-// exactly the machine every chain-loaded game would then inherit: a
-// green checklist, a dead game, and an emulator that forgives it. The
-// scratchpad probe on the JUMP row makes the next burn answer this on
-// screen either way.
-core::arch::global_asm!(
-    r#"
-    .set noreorder
-    .section .text.loader_flush_cache
-    .globl __loader_flush_cache
-__loader_flush_cache:
-    la    $8, .Lloader_flush_body
-    lui   $9, 0x2000
-    or    $8, $8, $9
-    jr    $8
-    nop
-
-.Lloader_flush_body:
-    mfc0  $10, $12
-    nop
-    lui   $8, 0xfffe
-    ori   $9, $zero, 0x0804
-    sw    $9, 0x0130($8)
-    lui   $9, 0x0001
-    mtc0  $9, $12
-    nop
-    nop
-    or    $9, $zero, $zero
-    ori   $11, $zero, 0x1000
-.Lloader_flush_line:
-    sw    $zero, 0($9)
-    addiu $9, $9, 0x0010
-    bne   $9, $11, .Lloader_flush_line
-    nop
-    mtc0  $zero, $12
-    nop
-    nop
-    lui   $9, 0x0001
-    ori   $9, $9, 0xe988
-    sw    $9, 0x0130($8)
-    mtc0  $10, $12
-    nop
-    nop
-    jr    $31
-    nop
-    .set reorder
-    "#
-);
-
-extern "C" {
-    #[link_name = "__loader_flush_cache"]
-    fn flush_cache();
 }
 
 /// Seed GP / SP / the disc-base handover and jump to the game's entry point.
