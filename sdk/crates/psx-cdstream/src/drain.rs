@@ -129,8 +129,8 @@ static DRAIN: Global = Global(UnsafeCell::new(Drain {
 #[repr(C, align(16))]
 struct Stack([u8; DRAIN_STACK_BYTES]);
 
-/// The handler's private stack, painted by [`start`] so a tool can see how much
-/// of it a run used ([`stack_unused_bytes`]).
+/// The handler's private stack, painted when [`start`] first puts the wrapper in
+/// the vector so a tool can see how much of it a run used ([`stack_unused_bytes`]).
 #[no_mangle]
 static mut PSX_CDDRAIN_STACK: Stack = Stack([0; DRAIN_STACK_BYTES]);
 /// Where the wrapper saves the interrupted context.
@@ -462,7 +462,6 @@ pub unsafe fn start(
     if destination.is_null() || destination.align_offset(4) != 0 || sectors == 0 {
         return false;
     }
-    paint_stack();
     install_vector();
     // SAFETY: the caller vouches for `destination` and `sectors`.
     let request = unsafe { Request::new_raw(0, sectors, destination) }.with_byte_len(byte_len);
@@ -539,7 +538,8 @@ fn paint_stack() {
     }
 }
 
-/// Bytes of the handler's stack never touched since [`start`] painted it.
+/// Bytes of the handler's stack never touched since [`start`] painted it (when it
+/// put the wrapper in the vector).
 pub fn stack_unused_bytes() -> usize {
     let mut unused = 0;
     // SAFETY: plain volatile reads of a static this module owns.
@@ -577,6 +577,7 @@ fn install_vector() {
         if !psx_rt::interrupts::is_stack_safe_handler_installed() {
             psx_rt::interrupts::install_vblank_counter();
         }
+        paint_stack();
         let epoch = psx_rt::interrupts::vector_epoch();
         core::ptr::write_volatile(&raw mut PSX_CDDRAIN_EPOCH, epoch);
         let current = core::ptr::read_volatile(EXCEPTION_VECTOR);
