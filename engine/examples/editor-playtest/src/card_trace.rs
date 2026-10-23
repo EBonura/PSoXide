@@ -174,6 +174,8 @@ pub(super) struct View<'a> {
     pub half_tan_q12: i32,
     pub far: i32,
     pub hide_all: i32,
+    /// Rooms nearer than this are drawn whole and their cards are not counted late.
+    pub hold_near: i32,
     /// Per room, whether the frame drew it whole.
     pub skip: &'a [bool],
     /// Rooms whose centre is within this plan distance are held to be covered.
@@ -234,7 +236,7 @@ pub(super) fn frame(view: &View<'_>) {
         };
         // Each layer of cards has its own band.
         let (near, far) = match usize::from(card.layer).checked_sub(1) {
-            None => (view.hide_all, view.far),
+            None => (view.hide_all.max(view.hold_near), view.far),
             Some(k) => {
                 let band =
                     crate::vram_runtime::card_bands()[k.min(psx_grid::render::OUTER_LAYERS - 1)];

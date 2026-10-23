@@ -226,6 +226,10 @@ pub struct CardInput<'a> {
     pub far: i32,
     /// Cards are not drawn closer than this plan distance.
     pub near: i32,
+    /// A room's card this near is held (it keeps its slot and a picture, so it can stand in
+    /// for the room at once) but its view is not kept up to date: a wrong side matters only
+    /// once the eye backs off. The rooms this near are drawn whole.
+    pub hold_near: i32,
     /// The layers of cards beyond the rooms' (card layer `k + 1` is entry `k`,
     /// see [`psx_grid::render::outer_bands`]). The values above are layer 0's.
     /// A layer's cards take a slot a fade before they show and give it up
@@ -568,7 +572,12 @@ impl<K: Copy> CardStream<K> {
             };
             self.slots[slot].want = want;
             self.slots[slot].rank = self.rank(dx, dz, distance, &band, card.layer, input.lead);
-            self.slots[slot].hidden = distance < band.near;
+            self.slots[slot].hidden = distance
+                < if card.layer == 0 {
+                    input.hold_near.max(band.near)
+                } else {
+                    band.near
+                };
             self.slots[slot].drawable =
                 distance >= band.near - DRAW_MARGIN && distance <= band.far + DRAW_MARGIN;
         }
@@ -1186,6 +1195,7 @@ mod tests {
             leave: 600,
             far: 300,
             near: 0,
+            hold_near: 0,
             lead: 0,
             outer: [CardBand::default(); OUTER_LAYERS],
             centres: &[],

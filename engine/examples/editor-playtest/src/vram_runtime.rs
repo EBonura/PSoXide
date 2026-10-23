@@ -512,7 +512,7 @@ const CARD_LEAD_FADES: i32 = 2;
 /// Keep the cards' pictures coming for an eye at `eye`. Call once per tick,
 /// once the level has loaded.
 #[cfg(feature = "cd-stream-bench")]
-pub(super) fn step_cards(eye: [i32; 3]) {
+pub(super) fn step_cards(eye: [i32; 3], hold_near: i32) {
     use crate::generated::{
         GRID_CARDS, GRID_CARD_COPIES, GRID_CARD_FADE, GRID_CARD_FAR, GRID_CARD_NEAR,
         GRID_CARD_TILE_CENTRES, GRID_CARD_VIEW_STRIDE, GRID_ROOM_CARD_PLACE,
@@ -537,6 +537,7 @@ pub(super) fn step_cards(eye: [i32; 3]) {
         // The stream measures plan distance to within 7.5 percent over.
         far: GRID_CARD_FAR + GRID_CARD_FAR / 12,
         near: GRID_CARD_NEAR,
+        hold_near,
         lead: CARD_LEAD_FADES * GRID_CARD_FADE,
         outer: card_bands(),
         centres: GRID_CARD_TILE_CENTRES,

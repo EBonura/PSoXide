@@ -359,6 +359,16 @@ impl GridRuntime {
         telemetry::stage_end(telemetry::stage::CD_ROOM_CHUNK_LOAD);
     }
 
+    /// Plan distance inside which a room is drawn whole for certain, so the stream keeps its
+    /// card's view up to date only outside it: two sectors inside the drawn radius.
+    #[cfg(feature = "cd-stream-bench")]
+    pub(super) fn card_hold_near(&self) -> i32 {
+        let sector = self.level.sector_units() as i32;
+        self.level.flood.map_or(0, |flood| {
+            (i32::from(flood.near_radius) - 2).max(0) * sector
+        })
+    }
+
     /// The room the player was last found in.
     pub(super) fn player_room(&self) -> usize {
         self.stream_hint
@@ -1338,6 +1348,7 @@ impl GridRuntime {
                                     / 5,
                                 far: GRID_CARD_FAR,
                                 hide_all: GRID_CARD_NEAR,
+                                hold_near: self.card_hold_near(),
                                 skip: &self.card_skip,
                                 cover_to: COVER_CHECK_SECTORS * sector,
                                 horizon: psx_grid::render::horizon_y(

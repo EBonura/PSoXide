@@ -794,7 +794,11 @@ impl Playtest {
                 .as_ref()
                 .map(|world_rt| world_rt.player_room());
             step_chunk_sky(room);
-            step_cards([eye.x, eye.y, eye.z]);
+            let hold_near = self
+                .world_rt
+                .as_ref()
+                .map_or(0, |world_rt| world_rt.card_hold_near());
+            step_cards([eye.x, eye.y, eye.z], hold_near);
         }
         if self.world_rt.is_some() && background_tick {
             let _ = self.streaming_jobs.step_vram_uploads();
