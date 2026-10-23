@@ -12,7 +12,14 @@ psx-io = { path = "../psx-io" }
 critical-section = { version = "1.2", optional = true, features = ["restore-state-bool"] }
 
 [features]
-default = []
+default = ["runtime"]
+# The program image: `_start`, the panic handler, the post-link hazard-trampoline array and
+# the PSX-EXE region marker. On by default. A library that wants only the SDK's own services
+# (the DMA-safe instruction-cache flush, critical sections, interrupts) inside a program that
+# brings its own entry point and panic handler, such as the demo disc's chain-load blob, turns
+# it off with `default-features = false`. Features are additive: a program that also links a
+# crate asking for the runtime gets it.
+runtime = []
 # Expose a bump allocator as the global allocator. Kept optional so a
 # minimal no-heap homebrew can opt out.
 alloc = []
