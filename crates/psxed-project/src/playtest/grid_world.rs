@@ -556,8 +556,8 @@ pub fn panel_eyes(
     let spawns = player_spawns(project, world);
     let analysis = analyse(world, &spawns, &psx_engine::WalkLimits::DEFAULT);
     // (lattice x, lattice z, storey) -> sectors: (room, x, floor y, z).
-    let mut groups: std::collections::BTreeMap<(i32, i32, i32), Vec<(usize, f32, f32, f32)>> =
-        Default::default();
+    type Floors = Vec<(usize, f32, f32, f32)>;
+    let mut groups: std::collections::BTreeMap<(i32, i32, i32), Floors> = Default::default();
     for (ri, room) in world.rooms.iter().enumerate() {
         let record = &cooked.level.rooms[ri];
         for (lx, lz, grid_sector) in room.iter() {
@@ -745,6 +745,7 @@ fn bake_panels(
         order,
         focal,
         spacing: spacing * sector,
+        sector,
         real: i32::from(flood.near_radius) * sector,
     })
 }

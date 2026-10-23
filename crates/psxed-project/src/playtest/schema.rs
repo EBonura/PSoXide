@@ -181,8 +181,9 @@ pub struct PlaytestPanels {
     pub order: Vec<PackItem>,
     /// The projection plane the panels were baked for, pixels.
     pub focal: i32,
-    /// The distance between lattice eyes, runtime units.
+    /// The distance between lattice eyes, runtime units, and the level's sector.
     pub spacing: i32,
+    pub sector: i32,
     /// Plan distance (runtime units) the rooms are drawn whole to: a panel is never drawn in
     /// front of the geometry inside it.
     pub real: i32,
@@ -2204,7 +2205,7 @@ mod card_pack_tests {
             .iter()
             .filter_map(|item| match item {
                 PackItem::Room(room) => Some(*room),
-                PackItem::Tile(_) | PackItem::Block(_) => None,
+                PackItem::Tile(_) | PackItem::Block(_) | PackItem::Eye(_) => None,
             })
             .collect();
         rooms.sort_unstable();
@@ -2213,7 +2214,7 @@ mod card_pack_tests {
             .iter()
             .filter_map(|item| match item {
                 PackItem::Tile(tile) => Some(*tile),
-                PackItem::Room(_) | PackItem::Block(_) => None,
+                PackItem::Room(_) | PackItem::Block(_) | PackItem::Eye(_) => None,
             })
             .collect();
         assert_eq!(tiles, [0, 1, 2]);

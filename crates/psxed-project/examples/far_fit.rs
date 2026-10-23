@@ -394,6 +394,7 @@ fn main() {
     let mut density: [Vec<(f32, f32)>; 2] = [Vec::new(), Vec::new()];
     let game_frames = std::env::var_os("FAR_FIT_GAME").map(|d| GameFrames::open(Path::new(&d)));
     let mut game_totals = (0usize, 0usize, 0usize);
+    let mut fill_total = (0usize, 0usize);
     for (index, pose) in picked.iter().enumerate() {
         let cam = Camera::game(pose.eye, pose.rot, FOCAL);
         let truth = world.render(&cam, 2, &|_| true).resolve(2);
@@ -695,6 +696,14 @@ fn main() {
             if variant == 2 {
                 density[1].extend(layer.density.iter().copied());
             }
+            if variant == 2 {
+                let covered = layer.covered.iter().filter(|&&c| c).count();
+                let hidden = (0..320 * 240)
+                    .filter(|&at| layer.covered[at] && real.coverage[at] >= 0.5)
+                    .count();
+                fill_total.0 += covered;
+                fill_total.1 += hidden;
+            }
             scores[variant] = compare(
                 &truth,
                 &real,
@@ -768,6 +777,11 @@ fn main() {
             100.0 * game_totals.2 as f64 / game_totals.0.max(1) as f64
         );
     }
+    println!(
+        "PANEL FILL: {} pixels covered by panel texels, {:.1}% of them hidden behind the rooms drawn whole",
+        fill_total.0,
+        100.0 * fill_total.1 as f64 / fill_total.0.max(1) as f64
+    );
     // Screen pixels per texel (median) by depth, for the game's cards and the panels.
     for (name, list) in ["cards", "panels"].iter().zip(&density) {
         let mut line = format!("PX/TEXEL {name:7}");

@@ -118,15 +118,9 @@ impl TextureImage {
                             n += 1;
                         }
                     }
-                    next.push(if n == 0 {
-                        [0, 0, 0, 0]
-                    } else {
-                        [
-                            (sum[0] / n) as u8,
-                            (sum[1] / n) as u8,
-                            (sum[2] / n) as u8,
-                            255,
-                        ]
+                    next.push(match sum.map(|c| c.checked_div(n)) {
+                        [Some(r), Some(g), Some(b)] => [r as u8, g as u8, b as u8, 255],
+                        _ => [0, 0, 0, 0],
                     });
                 }
             }
@@ -600,8 +594,8 @@ impl Samples {
                         let at = (y * ss + sy) * self.width + x * ss + sx;
                         if self.inverse[at] > 0.0 {
                             count += 1;
-                            for i in 0..3 {
-                                sum[i] += self.colour[at][i];
+                            for (total, c) in sum.iter_mut().zip(self.colour[at]) {
+                                *total += c;
                             }
                             if self.inverse[at] > best {
                                 best = self.inverse[at];
@@ -694,6 +688,10 @@ pub struct Panel {
     pub tiles: Vec<Option<Vec<[u8; 4]>>>,
     /// Depth along the heading at each mesh vertex (row-major).
     pub depth: Vec<f32>,
+    /// Per cell (`tile * cells + cy * CELLS_X + cx`, tiles column-major as the game has
+    /// them), the one room whose geometry is all the cell shows, `CELL_EMPTY` for a cell with
+    /// nothing in it, `CELL_MIXED` for any other.
+    pub rooms: Vec<u8>,
 }
 
 /// Bake the panel of `heading` at `eye`: the rooms `keep` names, seen with `ss * ss` samples a
@@ -816,12 +814,52 @@ pub fn bake_panel(
             *d = 500.0 * world.sector;
         }
     }
+    // The room of each cell: the rooms of the covered samples in its box.
+    let mut rooms = vec![shared::CELL_EMPTY; shared::CELLS];
+    for tx in 0..shape.tile_cols {
+        for ty in 0..shape.tile_rows {
+            let tile = tx * shape.tile_rows + ty;
+            for cy in 0..shape.cells[1] {
+                for cx in 0..shape.cells[0] {
+                    let (x0, x1) = (
+                        (tx * TILE_W + cx * (TILE_W / shape.cells[0])) * ss,
+                        (tx * TILE_W + (cx + 1) * (TILE_W / shape.cells[0])) * ss,
+                    );
+                    let (y0, y1) = (
+                        (ty * TILE_H + cy * (TILE_H / shape.cells[1])) * ss,
+                        (ty * TILE_H + (cy + 1) * (TILE_H / shape.cells[1])) * ss,
+                    );
+                    let mut room: Option<u16> = None;
+                    let mut mixed = false;
+                    for y in y0..y1.min(samples.height) {
+                        for x in x0..x1.min(samples.width) {
+                            let at = y * samples.width + x;
+                            if samples.inverse[at] > 0.0 {
+                                match room {
+                                    None => room = Some(samples.room[at]),
+                                    Some(r) if r != samples.room[at] => mixed = true,
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                    let k = tile * shape.cells[0] * shape.cells[1] + cy * shape.cells[0] + cx;
+                    rooms[k] = match room {
+                        None => shared::CELL_EMPTY,
+                        Some(r) if !mixed && r < u16::from(shared::CELL_MIXED) => r as u8,
+                        Some(_) => shared::CELL_MIXED,
+                    };
+                }
+            }
+        }
+    }
     Panel {
         eye,
         heading,
         shape: *shape,
         tiles,
         depth,
+        rooms,
     }
 }
 
@@ -1098,6 +1136,8 @@ pub fn to_disc(panel: &Panel, sector: f32) -> DiscPanel {
     for (k, depth) in panel.depth.iter().enumerate().take(shared::MESH) {
         header[k] = depth_byte_of(*depth, sector);
     }
+    header[shared::HEADER_ROOMS_AT..shared::HEADER_ROOMS_AT + shared::CELLS]
+        .copy_from_slice(&panel.rooms);
     out.sectors.extend_from_slice(&header);
     for col in 0..shape.tile_cols {
         for row in 0..shape.tile_rows {
@@ -1238,4 +1278,98 @@ pub fn pack_order(
         .map(|(_, e, i)| (e, i))
         .chain(loose)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn disc_panel(cols: [u8; shared::COLS], tiles: usize) -> DiscPanel {
+        DiscPanel {
+            cols,
+            sectors: vec![7u8; (1 + tiles) * shared::SLOT_BYTES],
+        }
+    }
+
+    #[test]
+    fn an_eye_block_lists_the_tiles_of_each_heading_then_holds_the_panels() {
+        let mut set: [Option<DiscPanel>; shared::HEADINGS] = Default::default();
+        set[0] = Some(disc_panel([3, 0, 0, 0, 1], 3));
+        set[5] = Some(disc_panel([0, 0, 127, 0, 0], 7));
+        let blocks = eye_blocks(&[set, Default::default()]);
+        assert_eq!(blocks.len(), 2);
+        // The list sector, then the two panels (a header and their tiles each).
+        assert_eq!(blocks[0].len(), (1 + 4 + 8) * shared::SLOT_BYTES);
+        assert_eq!(&blocks[0][0..5], &[3, 0, 0, 0, 1]);
+        assert_eq!(&blocks[0][5 * shared::COLS..5 * shared::COLS + 5], &[0, 0, 127, 0, 0]);
+        assert!(blocks[0][5..5 * shared::COLS].iter().all(|&b| b == 0));
+        // An eye with nothing to show has no block.
+        assert!(blocks[1].is_empty());
+    }
+
+    #[test]
+    fn rooms_and_eyes_go_in_the_pack_along_one_curve_and_room_zero_is_left_to_the_caller() {
+        let rooms = [
+            Some([0, 0]),
+            Some([100, 100]),
+            None,
+            Some([4000, 4000]),
+        ];
+        let eyes = [Some([120, 90]), None];
+        let order = pack_order(&rooms, &eyes);
+        // Room 0 is not listed, the room with no centre goes last, an eye with no block is
+        // left out, and the eye stands beside the room it is near.
+        assert!(!order.contains(&(false, 0)));
+        assert_eq!(order.last(), Some(&(false, 2)));
+        assert!(!order.iter().any(|&(is_eye, i)| is_eye && i == 1));
+        let at = |item: (bool, usize)| order.iter().position(|&o| o == item).unwrap();
+        assert!(at((true, 0)).abs_diff(at((false, 1))) == 1, "{order:?}");
+        assert!(at((false, 3)) > at((false, 1)));
+    }
+
+    #[test]
+    fn a_depth_in_runtime_units_round_trips_through_its_byte() {
+        let sector = 80.0;
+        for sectors in [3.0f32, 12.5, 24.0, 60.0, 100.0] {
+            let byte = depth_byte_of(sectors * sector, sector);
+            let back = f32::from(psx_grid::render::depth_units(byte) as u16)
+                / (1 << shared::DEPTH_SECTOR_SHIFT) as f32;
+            assert!((back - sectors).abs() <= sectors * 0.02, "{sectors}: {back}");
+        }
+    }
+
+    #[test]
+    fn a_texture_has_a_chain_of_filtered_levels_and_wraps() {
+        // 4 by 4 texels, 8 bit: the left half index 1 (red), the right half index 2 (blue),
+        // index 0 transparent nowhere.
+        let mut pixels = vec![0u8; 16];
+        for y in 0..4 {
+            for x in 0..4 {
+                pixels[y * 4 + x] = if x < 2 { 1 } else { 2 };
+            }
+        }
+        let palette = [[0, 0, 0], [248, 0, 0], [0, 0, 248]];
+        let psxt = psxed_tex::encode_indexed_psxt(
+            4,
+            4,
+            psxed_format::texture::Depth::Bit8,
+            &pixels,
+            &palette,
+            false,
+        )
+        .expect("a texture");
+        let image = TextureImage::from_psxt(&psxt).expect("decoded");
+        assert_eq!(image.width(), 4);
+        // Level 0 keeps the halves; wrapping reads the other side.
+        assert_eq!(image.sample(0, 0.5, 0.5).map(|c| c[0] > 200), Some(true));
+        assert_eq!(image.sample(0, 3.5, 0.5).map(|c| c[2] > 200), Some(true));
+        assert_eq!(image.sample(0, 4.5, 0.5).map(|c| c[0] > 200), Some(true));
+        assert_eq!(image.sample(0, -0.5, 0.5).map(|c| c[2] > 200), Some(true));
+        // The coarsest level is the mean of both.
+        let mean = image.sample(2, 0.0, 0.0).expect("a texel");
+        assert!(mean[0] > 100 && mean[2] > 100, "{mean:?}");
+        // A surface that packs four texels to a sample reads two levels down.
+        assert_eq!(image.level_for(4.0), 2);
+        assert_eq!(image.level_for(0.5), 0);
+    }
 }

@@ -467,9 +467,10 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
          /// The projection plane the panels were baked for, and the distance between eyes.\n\
          pub const GRID_PANEL_FOCAL: i32 = {};\n\
          pub const GRID_PANEL_SPACING: i32 = {};\n\
+         pub const GRID_PANEL_SECTOR: i32 = {};\n\
          /// Plan distance the rooms are drawn whole to.\n\
          pub const GRID_PANEL_REAL: i32 = {};\n",
-        panels.eyes, panels.focal, panels.spacing, panels.real,
+        panels.eyes, panels.focal, panels.spacing, panels.sector, panels.real,
     );
 
     // The shape of the level's own records: how many of each table chunk 1 of
