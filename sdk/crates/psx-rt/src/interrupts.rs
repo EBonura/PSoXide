@@ -15,6 +15,32 @@ use psx_io::irq;
 core::arch::global_asm!(
     r#"
     .set noreorder
+    # The presentation cap's bookkeeping for one applied display flip: arm the
+    # hold (the cap's VBlanks, counted down once per edge below) and count the
+    # flip in the interval histogram by the edges since the last one. Clobbers
+    # $26 and $27.
+    .macro PSX_RT_FLIP_RECORD
+    lui   $26, %hi(__psx_rt_flip_min)
+    lw    $27, %lo(__psx_rt_flip_min)($26)
+    lui   $26, %hi(__psx_rt_flip_hold)
+    sw    $27, %lo(__psx_rt_flip_hold)($26)
+    lui   $26, %hi(__psx_rt_flip_age)
+    lw    $27, %lo(__psx_rt_flip_age)($26)
+    nop
+    sw    $zero, %lo(__psx_rt_flip_age)($26)
+    sltiu $26, $27, 7
+    bnez  $26, .Lpsx_flip_bucket\@
+    nop
+    addiu $27, $zero, 7
+.Lpsx_flip_bucket\@:
+    sll   $27, $27, 2
+    lui   $26, %hi(__psx_rt_flip_hist)
+    addu  $26, $26, $27
+    lw    $27, %lo(__psx_rt_flip_hist)($26)
+    nop
+    addiu $27, $27, 1
+    sw    $27, %lo(__psx_rt_flip_hist)($26)
+    .endm
     .section .text.psx_rt_exception
     .globl __psx_rt_exception_handler
 __psx_rt_exception_handler:
@@ -67,6 +93,13 @@ __psx_rt_exception_handler:
     nop
     beqz  $27, 8f
     nop
+    # The presentation cap: hold the chain (and its flip) while the last flip is
+    # fewer than the cap's VBlanks old.
+    lui   $26, %hi(__psx_rt_flip_hold)
+    lw    $26, %lo(__psx_rt_flip_hold)($26)
+    nop
+    bnez  $26, 8f
+    nop
     lui   $26, {io_hi}
     lw    $27, {gp1}($26)
     nop
@@ -86,6 +119,8 @@ __psx_rt_exception_handler:
     beqz  $27, 6f
     nop
     sw    $27, {gp1}($26)
+    PSX_RT_FLIP_RECORD
+    lui   $26, {io_hi}
 6:
     lui   $27, {ack_irq_hi}
     sw    $27, {gp1}($26)
@@ -137,6 +172,18 @@ __psx_rt_exception_handler:
     nop
     beqz  $27, 2f
     nop
+    # A display-start word (GP1 05h) is a flip and waits out the presentation cap;
+    # any other word (display enable, say) is applied as before.
+    srl   $26, $27, 24
+    addiu $26, $26, -5
+    bnez  $26, 21f
+    nop
+    lui   $26, %hi(__psx_rt_flip_hold)
+    lw    $26, %lo(__psx_rt_flip_hold)($26)
+    nop
+    bnez  $26, 2f
+    nop
+21:
     lui   $26, {io_hi}
     lw    $26, {gp1}($26)
     nop
@@ -148,11 +195,31 @@ __psx_rt_exception_handler:
     sw    $zero, %lo(__psx_rt_pending_gp1)($26)
     lui   $26, {io_hi}
     sw    $27, {gp1}($26)
+    srl   $26, $27, 24
+    addiu $26, $26, -5
+    bnez  $26, 2f
+    nop
+    PSX_RT_FLIP_RECORD
 
 2:
     lui   $26, {io_hi}
     addiu $27, $zero, {ack_vblank}
     sw    $27, {i_stat}($26)
+
+    # The presentation cap counts one edge off the hold and ages the last flip.
+    lui   $26, %hi(__psx_rt_flip_hold)
+    lw    $27, %lo(__psx_rt_flip_hold)($26)
+    nop
+    beqz  $27, 22f
+    nop
+    addiu $27, $27, -1
+    sw    $27, %lo(__psx_rt_flip_hold)($26)
+22:
+    lui   $26, %hi(__psx_rt_flip_age)
+    lw    $27, %lo(__psx_rt_flip_age)($26)
+    nop
+    addiu $27, $27, 1
+    sw    $27, %lo(__psx_rt_flip_age)($26)
 
     # Console stop-panel watchdog (`diag`, feature `console-diag` only): save every
     # register, run the watch on its own stack, put everything back.
@@ -426,6 +493,37 @@ pub const STRICT_FAULTS: bool = cfg!(feature = "strict-faults");
 #[no_mangle]
 static mut __psx_rt_vblank_count: u32 = 0;
 
+/// The presentation cap every program starts with: a flip at most every second
+/// VBlank, 30 fps NTSC and 25 PAL (`psx_tick::PresentCap::HZ30`).
+pub const DEFAULT_MIN_FLIP_VBLANKS: u32 = 2;
+
+/// Buckets of the flip-interval histogram: flips 0 to 6 VBlanks after the
+/// previous one, and the last bucket for 7 or more
+/// (`psx_tick::FLIP_HISTOGRAM_BUCKETS`).
+pub const FLIP_HISTOGRAM_BUCKETS: usize = 8;
+
+/// The presentation cap: fewest VBlanks between two display flips
+/// (`psx_tick::PresentCap`). 2 is 30 fps; 1 is the explicit opt-out.
+#[no_mangle]
+static mut __psx_rt_flip_min: u32 = DEFAULT_MIN_FLIP_VBLANKS;
+
+/// VBlank edges a flip stays held back, set to the cap when a flip is applied
+/// and counted down once per edge by the handler. A flip is applied only at 0.
+#[no_mangle]
+static mut __psx_rt_flip_hold: u32 = 0;
+
+/// VBlank edges since the last applied flip, for the interval histogram. Starts
+/// at the last bucket so the first flip is not counted as a fast one.
+#[no_mangle]
+static mut __psx_rt_flip_age: u32 = FLIP_AGE_UNKNOWN;
+
+/// Flips by VBlanks since the previous one (see `psx_tick::FlipHistogram`).
+#[no_mangle]
+static mut __psx_rt_flip_hist: [u32; FLIP_HISTOGRAM_BUCKETS] = [0; FLIP_HISTOGRAM_BUCKETS];
+
+/// The age of a flip with no predecessor: lands in the last histogram bucket.
+const FLIP_AGE_UNKNOWN: u32 = FLIP_HISTOGRAM_BUCKETS as u32 - 1;
+
 /// Count of exceptions that were NOT interrupts: bus errors, address
 /// errors, reserved instructions.
 ///
@@ -663,6 +761,11 @@ pub fn install_vblank_counter() {
         core::ptr::write_volatile(&raw mut __psx_rt_claimed_irq, 0);
 
         core::ptr::write_volatile(&raw mut __psx_rt_vblank_count, 0);
+        core::ptr::write_volatile(&raw mut __psx_rt_flip_hold, 0);
+        core::ptr::write_volatile(&raw mut __psx_rt_flip_age, FLIP_AGE_UNKNOWN);
+        // The cap itself stays as the program set it. Direct flips (`DoubleBuffer::swap`) wait
+        // on it through this pacer.
+        psx_io::gpu::set_flip_pacer(Some(pace_direct_flip));
         irq::acknowledge(1 << psx_hw::irq::source::VBLANK);
         // This handler services VBlank only. After a BIOS disc boot, do not
         // preserve CD-ROM/DMA/etc. bits the BIOS may have left enabled.
@@ -808,6 +911,121 @@ pub fn fault_pc() -> u32 {
     // SAFETY: a volatile aligned u32 read through a raw pointer, so no reference is formed. Only
     // the asm exception handler writes it, and an aligned word load cannot tear.
     unsafe { core::ptr::read_volatile(&raw const __psx_rt_fault_epc) }
+}
+
+/// Set the presentation cap: the fewest VBlanks between two display flips (0 is
+/// treated as 1).
+///
+/// Every program starts at 2 ([`DEFAULT_MIN_FLIP_VBLANKS`], `psx_tick::PresentCap::HZ30`), so the picture never changes
+/// faster than 30 fps NTSC (25 PAL): a flip a frame finished early waits for its
+/// slot. A game that deliberately targets the full display rate opts out by name,
+/// once at boot:
+///
+/// ```ignore
+/// psx_rt::interrupts::set_min_flip_vblanks(psx_tick::PresentCap::UNCAPPED.min_vblanks());
+/// ```
+///
+/// The cap applies to every display flip made through psx-rt: a word queued
+/// with [`queue_display_control_at_vblank`] (the handler holds it at the edge
+/// until the cap allows it), a frame kicked by the present queue, and a
+/// `DoubleBuffer::swap` (which waits, bounded, before the flip). Other display
+/// words (video on or off) are never held. Frames slower than the cap are not
+/// delayed.
+pub fn set_min_flip_vblanks(vblanks: u8) {
+    // SAFETY: an aligned volatile word store; the handler only reads it and the cap is a plain
+    // value, so no ordering with the handler matters.
+    unsafe { core::ptr::write_volatile(&raw mut __psx_rt_flip_min, u32::from(vblanks.max(1))) }
+}
+
+/// The presentation cap in force, in VBlanks (see [`set_min_flip_vblanks`]).
+#[must_use]
+pub fn min_flip_vblanks() -> u8 {
+    // SAFETY: an aligned volatile word load of a value written only by `set_present_cap`.
+    let min = unsafe { core::ptr::read_volatile(&raw const __psx_rt_flip_min) };
+    min.min(u32::from(u8::MAX)) as u8
+}
+
+/// How many flips came 0, 1, 2 ... VBlanks after the one before, since boot or
+/// [`reset_flip_histogram`]. With the cap on, no flip is counted below its
+/// VBlanks (`psx_tick::FlipHistogram::from_buckets(flip_histogram())
+/// .below(min_flip_vblanks()) == 0`); the first flip after a reset has no
+/// predecessor and counts in the last bucket.
+#[must_use]
+pub fn flip_histogram() -> [u32; FLIP_HISTOGRAM_BUCKETS] {
+    let mut histogram = [0u32; FLIP_HISTOGRAM_BUCKETS];
+    let mut bucket = 0;
+    while bucket < FLIP_HISTOGRAM_BUCKETS {
+        // SAFETY: an aligned volatile word load of a counter only the handler and
+        // `reset_flip_histogram` write; a torn view across buckets is harmless for a count.
+        histogram[bucket] = unsafe {
+            core::ptr::read_volatile((&raw const __psx_rt_flip_hist).cast::<u32>().add(bucket))
+        };
+        bucket += 1;
+    }
+    histogram
+}
+
+/// Zero the flip histogram and forget the last flip, so the next one is the
+/// first of a new count. Call it at the start of a measured stretch.
+pub fn reset_flip_histogram() {
+    psx_io::irq::without_interrupts(|| {
+        // SAFETY: with CPU interrupts masked the handler cannot run, so these volatile stores
+        // are the only accesses.
+        unsafe {
+            let mut bucket = 0;
+            while bucket < FLIP_HISTOGRAM_BUCKETS {
+                core::ptr::write_volatile(
+                    (&raw mut __psx_rt_flip_hist).cast::<u32>().add(bucket),
+                    0,
+                );
+                bucket += 1;
+            }
+            core::ptr::write_volatile(&raw mut __psx_rt_flip_age, FLIP_AGE_UNKNOWN);
+        }
+    });
+}
+
+/// Whether CPU interrupts are enabled (COP0 SR.IEc).
+#[cfg(target_arch = "mips")]
+fn cpu_interrupts_enabled() -> bool {
+    let sr: u32;
+    // SAFETY: reads COP0 SR into $8 (the output); the nop covers MFC0's load delay. No memory or
+    // other register is touched.
+    unsafe { core::arch::asm!("mfc0 $8, $12", "nop", lateout("$8") sr) };
+    sr & 1 != 0
+}
+
+/// The wait in front of a direct display flip (`Gpu::set_display_start`): until
+/// the handler has counted the cap's VBlanks off since the last flip, then count
+/// this flip like the handler counts a queued one.
+///
+/// Skipped without the counter running or with interrupts masked, where nothing
+/// would ever release it; bounded either way ([`crate::wait::SPIN_LIMIT`]).
+#[cfg(target_arch = "mips")]
+fn pace_direct_flip() {
+    // SAFETY: an aligned volatile word load of a static only `set_min_flip_vblanks` writes.
+    let min = unsafe { core::ptr::read_volatile(&raw const __psx_rt_flip_min) };
+    // SAFETY: an aligned volatile byte load of a flag only `install_vblank_counter` writes.
+    let running = unsafe { core::ptr::read_volatile(&raw const INSTALLED) };
+    if min > 1 && running && cpu_interrupts_enabled() {
+        crate::wait::wait_while(
+            // SAFETY: an aligned volatile word load; the handler is the only writer.
+            || unsafe { core::ptr::read_volatile(&raw const __psx_rt_flip_hold) } != 0,
+            || false,
+            || {},
+            crate::wait::SPIN_LIMIT,
+        );
+    }
+    // SAFETY: with CPU interrupts masked the handler cannot run, so these aligned volatile
+    // accesses to its statics are the only ones, and the histogram index is clamped in range.
+    psx_io::irq::without_interrupts(|| unsafe {
+        let age = core::ptr::read_volatile(&raw const __psx_rt_flip_age);
+        let bucket = (age as usize).min(FLIP_HISTOGRAM_BUCKETS - 1);
+        let slot = (&raw mut __psx_rt_flip_hist).cast::<u32>().add(bucket);
+        core::ptr::write_volatile(slot, core::ptr::read_volatile(slot).wrapping_add(1));
+        core::ptr::write_volatile(&raw mut __psx_rt_flip_age, 0);
+        core::ptr::write_volatile(&raw mut __psx_rt_flip_hold, min);
+    });
 }
 
 /// Current monotonic VBlank count.
