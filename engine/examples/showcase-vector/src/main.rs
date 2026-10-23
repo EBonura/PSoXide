@@ -616,7 +616,7 @@ impl Demo {
                     let state = demo_state(SEQ_GRID as u8, n);
                     let origin = (160 * col as i32, 8 + 40 * row as i32);
                     if frame == 0 {
-                        hud.build(&HudVram::SHOWCASE, origin, state.health);
+                        hud.build(&HudVram::SHOWCASE, origin);
                     }
                     // SAFETY: a `static`, unmodified until the walk ends.
                     hud.link(&state, |ptr, tag| unsafe {
@@ -629,7 +629,7 @@ impl Demo {
                 let (col, row) = (i / 4, i % 4);
                 let state = if SWAP_GRID != 0 {
                     SpriteState {
-                        swap: [0u8, 2, 4, 6][row],
+                        swap: [0u16, 1024, 2048, 3072][row],
                         ..SpriteState::rest(
                             if SWAP_GRID == 1 {
                                 Stance::Zenith
@@ -657,7 +657,7 @@ impl Demo {
                 let origin = (GRID_X[col], 8 + 40 * row as i32);
                 if frame == 0 {
                     let t = ticks();
-                    hud.build(&HudVram::SHOWCASE, origin, state.health);
+                    hud.build(&HudVram::SHOWCASE, origin);
                     if i == 0 {
                         record("c_build", 0, ticks().wrapping_sub(t));
                     }
@@ -676,9 +676,9 @@ impl Demo {
         let game_frame = frame / 2;
         let t = game_frame % 128;
         let (stance, swap) = match t {
-            40..=46 => (Stance::Zenith, (t - 39) as u8),
+            40..=46 => (Stance::Zenith, (t - 39) as u16 * 512),
             47..=99 => (Stance::Zenith, 0),
-            100..=106 => (Stance::Horizon, (t - 99) as u8),
+            100..=106 => (Stance::Horizon, (t - 99) as u16 * 512),
             _ => (Stance::Horizon, 0),
         };
         // The animations step once a game frame.
@@ -697,27 +697,9 @@ impl Demo {
         let hud = &mut huds[0];
         if self.sprite_state.is_none() {
             let t0 = ticks();
-            hud.build(&HudVram::SHOWCASE, origin, state.health);
+            hud.build(&HudVram::SHOWCASE, origin);
             record("c_build", 0, ticks().wrapping_sub(t0));
             self.sprite_state = Some(state);
-        }
-        // Health changes by patching the cells' palettes, timed: a drain by one cell a frame (one
-        // cell each), and a refill of a whole bar.
-        let before = demo_health((t + 127) % 128);
-        if state.health != before {
-            let changed: u32 = state
-                .health
-                .iter()
-                .zip(before)
-                .map(|(a, b)| a.abs_diff(b) as u32)
-                .sum();
-            let t0 = ticks();
-            hud.set_levels(&HudVram::SHOWCASE, state.health);
-            record(
-                if changed == 1 { "c_pat1" } else { "c_pat10" },
-                0,
-                ticks().wrapping_sub(t0),
-            );
         }
         let folding = self.hud_anim.moving();
         let shooting = self.hud_ammo.busy() || state.partial > 0;
@@ -729,7 +711,7 @@ impl Demo {
             });
             let spent = ticks().wrapping_sub(t0);
             if swap != 0 {
-                if swap == 4 {
+                if swap == 2048 {
                     record("sw_link", 0, spent);
                 }
             } else if folding {
@@ -746,7 +728,7 @@ impl Demo {
         }
         match (t, swap) {
             (127, _) => "walk_off",
-            (_, 4) => "walk_sw",
+            (_, 2048) => "walk_sw",
             (_, s) if s != 0 => "walk_mid",
             _ if folding => "walk_fold",
             _ if state.reveal == [0, 0] => "walk_fld",

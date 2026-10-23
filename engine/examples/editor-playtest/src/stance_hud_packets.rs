@@ -1,26 +1,28 @@
-//! Guest side of the sprite stance HUD: put the atlas and palettes in VRAM once, build every bar's
-//! GPU packets once, and every frame only move the two bars that are drawn and link the packets
-//! into an ordering table.
+//! Guest side of the sprite stance HUD: put the atlas and palettes in VRAM once, build the emblem,
+//! the pills and the mask packets once, lay the two bars out whenever what they show changes, and
+//! every frame link the packets into an ordering table.
 //!
 //! Each packet carries its own draw mode, so it is correct wherever an ordering table walk puts it:
 //! a rectangle is three words (four when translucent), a sprite is six (draw mode, texture window
-//! reset, then the textured rectangle command). Include this file after `stance_hud_sprites.rs` as
-//! `hud_sprites`.
+//! reset, then the textured rectangle command), a flat quad five (six when translucent) and a
+//! textured quad ten (texture window reset, then the command with its four corners and their texture
+//! coordinates). Include this file after `stance_hud_sprites.rs` as `hud_sprites`.
 //!
-//! The bars are built at the bar's own origin, once per stance and size, and moved by patching the
-//! position word of each packet (a swap frame costs a few stores per packet and a relink, not a
-//! build). The scene code of `stance_hud_sprites.rs` decides where each bar goes and in which order,
-//! the same code the host viewer paints from, so the result is pixel for pixel what `compose` says.
+//! A bar at rest is rectangles and sprites, the art drawn 1:1, which is what the GPU draws fastest.
+//! A bar on the move is quads, the same pieces placed wherever the scene puts them, so a swap is
+//! smooth at any frame rate. The scene code of `stance_hud_sprites.rs` decides where each bar goes
+//! and in which order, the same code the host viewer paints from, so the result is pixel for pixel
+//! what `compose` says. Both kinds live in the same two sets of nodes, laid out again only when the
+//! state they depend on changes: a frame at rest does no layout.
 
 use psx_gpu::material::{BlendMode, TextureMaterial};
-use psx_gpu::prim::{RectFlat, Sprite};
+use psx_gpu::prim::{QuadFlat, QuadTexturedMaterial, RectFlat, Sprite};
 use psx_vram::{upload_16bpp, Clut, TextureDepth, TexturePage, VramRect};
 
 use super::hud_sprites::{
-    bar, cell_clut, emblem_op, fold_of, gem_clut, gem_op, gems_shown, pill_state, scene,
-    EmblemLook, Fold, HudState, Op, Part, Pose, Scene, Stance, ATLAS, ATLAS_H, ATLAS_HW_W,
-    BACK_SIZE, CLUTS, CLUT_COUNT, COUNT, FX_SLOTS, GEO, MASK_CHECK, MASK_OFF, MASK_SET,
-    MASK_SET_CHECK,
+    bar_at, emblem_op, fold_at, gem_clut, gem_op, gems_shown, pill_state, scene, EmblemLook, Fold,
+    HudState, Op, Part, Placement, Scene, Stance, ATLAS, ATLAS_H, ATLAS_HW_W, CLUTS, CLUT_COUNT,
+    COUNT, FX_SLOTS, MASK_CHECK, MASK_OFF, MASK_SET, MASK_SET_CHECK,
 };
 
 /// Where the HUD's texels and palettes live in VRAM.
@@ -142,37 +144,43 @@ impl Node {
             self.words[5] = ((src.h as u32) << 16) | src.w as u32;
         }
     }
+}
 
-    /// Make a rectangle packet `dw` pixels wider (narrower when negative): the size is the word after
-    /// the position.
-    fn add_width(&mut self, dw: i32) {
-        let at = match self.len() {
-            3 => 2,
-            4 => 3,
-            _ => return,
-        };
-        let w = self.words[at];
-        let width = (w & 0xFFFF) as i32 + dw;
-        self.words[at] = (w & 0xFFFF_0000) | (width as u32 & 0xFFFF);
+/// One ordering-table node of a quad: the tag and up to ten payload words (a textured quad is the
+/// texture window reset, the command, and four vertices with their texture coordinates).
+#[derive(Clone, Copy)]
+#[repr(C, align(4))]
+pub struct QuadNode {
+    tag: u32,
+    words: [u32; 10],
+}
+
+impl QuadNode {
+    const ZERO: Self = Self {
+        tag: 0,
+        words: [0; 10],
+    };
+
+    /// A sprite or rectangle packet in a node big enough for a quad: the bars at rest are made of
+    /// those, and take the same room as when they are quads on the move.
+    fn from_node(n: &Node) -> Self {
+        let mut q = Self::ZERO;
+        q.tag = n.tag;
+        q.words[..6].copy_from_slice(&n.words);
+        q
     }
 
-    /// Move the primitive by `(dx, dy)` pixels: the position word is the one after the command (and
-    /// the draw mode and texture window, when it has them).
-    fn translate(&mut self, dx: i32, dy: i32) {
-        let at = match self.len() {
-            3 => 1,
-            4 => 2,
-            6 => 3,
-            _ => return,
-        };
-        let w = self.words[at];
-        let x = (w as u16 as i16 as i32) + dx;
-        let y = ((w >> 16) as u16 as i16 as i32) + dy;
-        self.words[at] = ((y as u16 as u32) << 16) | (x as u16 as u32);
+    /// A node of whatever `op` asks for.
+    fn of(conv: &Converter, op: Op) -> Self {
+        match op {
+            Op::Quad { .. } | Op::TexQuad { .. } => conv.quad_node(op),
+            _ => Self::from_node(&conv.node(op)),
+        }
     }
 }
 
 /// Words that do not depend on the part, worked out once per build.
+#[derive(Clone, Copy)]
 struct Converter {
     vram: HudVram,
     page: u16,
@@ -183,6 +191,80 @@ struct Converter {
 }
 
 impl Converter {
+    const ZERO: Self = Self {
+        vram: HudVram::SHOWCASE,
+        page: 0,
+        plain_mode: 0,
+        glass_mode: 0,
+        window: 0,
+        sprite_cmd: 0,
+    };
+
+    /// The node of a quad op (a flat quad or a textured one). The quad is drawn as the GPU's
+    /// polygon: half-open texture coordinates, so that one texel is one pixel at full size.
+    fn quad_node(&self, op: Op) -> QuadNode {
+        let mut node = QuadNode::ZERO;
+        match op {
+            Op::Quad { p, rgb, glass } => {
+                let q = QuadFlat::new(p, rgb[0], rgb[1], rgb[2]);
+                let mut at = 0;
+                if glass {
+                    // Semi-transparent: the draw mode carries the equation.
+                    node.words[0] = self.glass_mode;
+                    at = 1;
+                }
+                let cmd = if glass {
+                    q.color_cmd | SEMI_TRANSPARENT
+                } else {
+                    q.color_cmd
+                };
+                node.words[at..at + 5].copy_from_slice(&[cmd, q.v0, q.v1, q.v2, q.v3]);
+                node.tag = (at as u32 + 5) << 24;
+            }
+            Op::TexQuad {
+                p,
+                src,
+                clut,
+                glass,
+            } => {
+                let clut_word = self.vram.clut_word(clut);
+                let material = if glass {
+                    TextureMaterial::blended(
+                        clut_word,
+                        self.page,
+                        (0x80, 0x80, 0x80),
+                        BlendMode::Average,
+                    )
+                } else {
+                    TextureMaterial::new(clut_word, self.page)
+                };
+                let u0 = src.u + self.vram.atlas_u;
+                let v0 = src.v + self.vram.atlas_v;
+                let (u1, v1) = (u0.saturating_add(src.w), v0.saturating_add(src.h));
+                let q = QuadTexturedMaterial::with_material(
+                    p,
+                    [(u0, v0), (u1, v0), (u0, v1), (u1, v1)],
+                    material,
+                );
+                node.words = [
+                    q.tex_window,
+                    q.color_cmd,
+                    q.v0,
+                    q.uv0_clut,
+                    q.v1,
+                    q.uv1_tpage,
+                    q.v2,
+                    q.uv2,
+                    q.v3,
+                    q.uv3,
+                ];
+                node.tag = 10 << 24;
+            }
+            Op::Rect { .. } | Op::Sprite { .. } | Op::Mask { .. } => {}
+        }
+        node
+    }
+
     fn new(vram: &HudVram) -> Self {
         let page = vram.page.uv_word(0);
         let plain = TextureMaterial::new(0, page);
@@ -230,6 +312,8 @@ impl Converter {
                     }
                 }
             }
+            // Quads are `QuadNode`s, see `quad_node`.
+            Op::Quad { .. } | Op::TexQuad { .. } => Node::ZERO,
             Op::Mask { set, check } => Node {
                 tag: 1 << 24,
                 words: [
@@ -281,109 +365,65 @@ impl Converter {
     }
 }
 
-/// Packets of one part of a bar, at most `N`.
-#[derive(Clone, Copy)]
-struct Packets<const N: usize> {
-    nodes: [Node; N],
-    len: usize,
-}
-
-impl<const N: usize> Packets<N> {
-    const NONE: Self = Self {
-        nodes: [Node::ZERO; N],
-        len: 0,
-    };
-
-    fn build(conv: &Converter, stance: Stance, size: usize, lit: u8, part: Part) -> Self {
-        let mut p = Self::NONE;
-        let pose = Pose { x: 0, y: 0, size };
-        bar((0, 0), stance, pose, lit, Fold::FULL, part, &mut |op| {
-            p.nodes[p.len] = conv.node(op);
-            p.len += 1;
-        });
-        p
-    }
-
-    fn translate(&mut self, dx: i32, dy: i32) {
-        for n in &mut self.nodes[..self.len] {
-            n.translate(dx, dy);
-        }
-    }
-}
-
 /// Translucent bands (the well, and the outline and shadow in the new styles) and two ends; the most
 /// any size has.
 const GLASS_MAX: usize = 7;
 /// Opaque bands: the most any size has.
 const OPAQUE_MAX: usize = 8;
 
-/// One bar of one stance at one size, as packets, and where they are now.
+/// One bar, as quads: made again whenever what it shows changes (a frame of a swap, a step of the
+/// fold, a point of health).
 #[derive(Clone, Copy)]
-struct BarPackets {
-    glass: Packets<GLASS_MAX>,
-    opaque: Packets<OPAQUE_MAX>,
-    cells: Packets<{ COUNT as usize }>,
-    /// How far the packets have been moved from where they were built (the bar's own origin).
-    at: (i32, i32),
-    /// How much shorter the plate and how much further left the right end are than when built.
-    shrink: i32,
+struct MovingBar {
+    glass: [QuadNode; GLASS_MAX],
+    glass_len: usize,
+    opaque: [QuadNode; OPAQUE_MAX],
+    opaque_len: usize,
+    cells: [QuadNode; COUNT as usize],
+    cells_len: usize,
 }
 
-impl BarPackets {
+impl MovingBar {
     const NONE: Self = Self {
-        glass: Packets::NONE,
-        opaque: Packets::NONE,
-        cells: Packets::NONE,
-        at: (0, 0),
-        shrink: 0,
+        glass: [QuadNode::ZERO; GLASS_MAX],
+        glass_len: 0,
+        opaque: [QuadNode::ZERO; OPAQUE_MAX],
+        opaque_len: 0,
+        cells: [QuadNode::ZERO; COUNT as usize],
+        cells_len: 0,
     };
 
-    fn build(conv: &Converter, stance: Stance, size: usize, lit: u8) -> Self {
-        Self {
-            glass: Packets::build(conv, stance, size, lit, Part::Glass),
-            opaque: Packets::build(conv, stance, size, lit, Part::Opaque),
-            cells: Packets::build(conv, stance, size, lit, Part::Cells),
-            at: (0, 0),
-            shrink: 0,
+    /// Lay out the bar of `stance` at `at`, `lit` cells lit, folded as `fold` says: sprites and
+    /// rectangles at rest, quads on the move.
+    #[inline(never)]
+    fn fill(
+        &mut self,
+        conv: &Converter,
+        origin: (i32, i32),
+        stance: Stance,
+        at: &Placement,
+        lit: u8,
+        fold: Fold,
+    ) {
+        // One closure for the three parts, so the layout code is in the program once.
+        for part in [Part::Glass, Part::Opaque, Part::Cells] {
+            let (nodes, len): (&mut [QuadNode], &mut usize) = match part {
+                Part::Glass => (&mut self.glass[..], &mut self.glass_len),
+                Part::Opaque => (&mut self.opaque[..], &mut self.opaque_len),
+                _ => (&mut self.cells[..], &mut self.cells_len),
+            };
+            *len = 0;
+            bar_at(origin, stance, at, lit, fold, part, &mut |op| {
+                nodes[*len] = QuadNode::of(conv, op);
+                *len += 1;
+            });
         }
-    }
-
-    /// Put the bar at `(x, y)`, folded as `fold` says, patching only what differs from where the
-    /// packets are: every packet moves by the same amount, the rectangles of the plate change width
-    /// and the right end (the last translucent packet) moves with the end of the plate.
-    fn place(&mut self, x: i32, y: i32, fold: Fold) {
-        let (tx, ty) = (x - fold.slide, y);
-        let (dx, dy) = (tx - self.at.0, ty - self.at.1);
-        let dshrink = fold.shrink - self.shrink;
-        if dx == 0 && dy == 0 && dshrink == 0 {
-            return;
-        }
-        let last = self.glass.len.saturating_sub(1);
-        for (i, n) in self.glass.nodes[..self.glass.len].iter_mut().enumerate() {
-            if n.len() == 6 && i == last {
-                n.translate(dx - dshrink, dy);
-            } else {
-                n.translate(dx, dy);
-                n.add_width(-dshrink);
-            }
-        }
-        for n in &mut self.opaque.nodes[..self.opaque.len] {
-            n.translate(dx, dy);
-            n.add_width(-dshrink);
-        }
-        self.cells.translate(dx, dy);
-        self.at = (tx, ty);
-        self.shrink = fold.shrink;
     }
 }
-
-/// Sizes that are ever drawn: the full size and the ones down to the size of the bar behind.
-const USED: usize = BACK_SIZE + 1;
 
 /// Every packet of the HUD, built once by [`HudPackets::build`] and linked each frame by
 /// [`HudPackets::link`].
 pub struct HudPackets {
-    bars: [[BarPackets; USED]; 2],
     /// The emblem of each stance, halfway between them, and the flash of each stance.
     emblem: [Node; 5],
     /// The pills, as they are when lit or empty.
@@ -393,6 +433,11 @@ pub struct HudPackets {
     effects: [[Node; 5]; FX_SLOTS],
     partial: [Node; 4],
     masks: [Node; 4],
+    /// The two bars: the one in front and the one behind.
+    bars: [MovingBar; 2],
+    /// What the bars were made for: they are made again when this changes.
+    bars_for: Option<BarKey>,
+    conv: Converter,
     origin: (i32, i32),
     /// Where the texels and palettes are, and the draw modes and command of a sprite packet, for
     /// patching the effect sprites.
@@ -404,8 +449,15 @@ pub struct HudPackets {
     /// many sprites; and whether its own node is patched to the lit palette.
     over: [(u8, u8); COUNT as usize],
     gem_lit: [bool; COUNT as usize],
-    /// Cells lit in the packets as they stand.
+}
+
+/// What decides how the bars look: everything of the state that is not the pills.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct BarKey {
+    stance: Stance,
     health: [u8; 2],
+    swap: u16,
+    reveal: [u8; 2],
 }
 
 /// The pool of the pill being recharged, in [`HudPackets::over`].
@@ -417,43 +469,34 @@ impl HudPackets {
     /// An empty set, usable in a `static`.
     pub const fn new() -> Self {
         Self {
-            bars: [[BarPackets::NONE; USED]; 2],
             emblem: [Node::ZERO; 5],
             gems: [Node::ZERO; COUNT as usize],
             effects: [[Node::ZERO; 5]; FX_SLOTS],
             partial: [Node::ZERO; 4],
             masks: [Node::ZERO; 4],
+            bars: [MovingBar::NONE; 2],
+            bars_for: None,
+            conv: Converter::ZERO,
             origin: (0, 0),
             vram: HudVram::SHOWCASE,
             modes: (0, 0, 0),
             shown: None,
             over: [(NO_POOL, 0); COUNT as usize],
             gem_lit: [false; COUNT as usize],
-            health: [0; 2],
         }
     }
 
-    /// Build the packets of every bar at every size for the HUD with its top-left at `origin`, with
-    /// `health` cells lit in each stance's bar. Do this once, and again when the HUD moves. A health
-    /// change needs no rebuild: see [`HudPackets::set_levels`]. The pills, and the sprites the
-    /// effects on them are drawn with, are set up from the state in each [`HudPackets::link`].
-    ///
-    /// # Panics
-    ///
-    /// When the generated art has more bands than the packet arrays hold.
-    pub fn build(&mut self, vram: &HudVram, origin: (i32, i32), health: [u8; 2]) {
+    /// Set up the packets for the HUD with its top-left at `origin`: the emblem, the pills and the
+    /// masks are built here, once, and again when the HUD moves. The bars, the pills and the sprites
+    /// the effects on them are drawn with are set up from the state in each [`HudPackets::link`].
+    pub fn build(&mut self, vram: &HudVram, origin: (i32, i32)) {
         let conv = Converter::new(vram);
+        self.conv = conv;
         self.origin = origin;
         self.vram = *vram;
         self.modes = (conv.plain_mode, conv.glass_mode, conv.sprite_cmd);
-        let health = health.map(|h| h.min(COUNT as u8));
-        self.health = health;
         self.shown = None;
-        for (s, stance) in [Stance::Horizon, Stance::Zenith].into_iter().enumerate() {
-            for size in 0..USED {
-                self.bars[s][size] = BarPackets::build(&conv, stance, size, health[s]);
-            }
-        }
+        self.bars_for = None;
         for k in 0..COUNT {
             self.gems[k as usize] = conv.node(gem_op(origin, k, false));
         }
@@ -481,37 +524,26 @@ impl HudPackets {
         }
     }
 
-    /// Change how many cells are lit, without a rebuild: only the cells whose state changes get
-    /// another palette in their packet (one store each, in every size of the bar). Values above ten
-    /// count as ten, as in [`HudPackets::build`].
-    pub fn set_levels(&mut self, vram: &HudVram, health: [u8; 2]) {
-        let top = COUNT as u8;
-        for (s, stance) in [Stance::Horizon, Stance::Zenith].into_iter().enumerate() {
-            let (old, new) = (self.health[s], health[s].min(top));
-            let lit = new > old;
-            for k in old.min(new)..old.max(new) {
-                for size in 0..USED {
-                    let clut = vram.clut_word(cell_clut(stance, size, lit));
-                    self.bars[s][size].cells.nodes[k as usize].set_clut(clut);
-                }
-            }
-            self.health[s] = new;
-        }
-    }
-
-    /// Set the packets up for `state`: place the two bars, and patch the pills and the sprites of
-    /// their effects. Nothing is rebuilt.
+    /// Set the packets up for `state`: lay out the two bars when they have changed, and patch the
+    /// pills and the sprites of their effects.
+    #[inline(never)]
     fn set_up(&mut self, state: &HudState, sc: &Scene) {
         let origin = self.origin;
-        let fold_of_bar =
-            |(stance, pose): (Stance, Pose)| fold_of(state.reveal[stance.index()], &GEO[pose.size]);
-        let (fs, fp) = (sc.front.0.index(), sc.front.1);
-        let (bs, bp) = (sc.behind.0.index(), sc.behind.1);
-        if let Some(fold) = fold_of_bar(sc.front) {
-            self.bars[fs][fp.size].place(origin.0 + fp.x, origin.1 + fp.y, fold);
-        }
-        if let Some(fold) = fold_of_bar(sc.behind) {
-            self.bars[bs][bp.size].place(origin.0 + bp.x, origin.1 + bp.y, fold);
+        let key = BarKey {
+            stance: state.stance,
+            health: state.health,
+            swap: state.swap,
+            reveal: state.reveal,
+        };
+        if self.bars_for != Some(key) {
+            self.bars_for = Some(key);
+            let conv = self.conv;
+            for (i, (stance, xf)) in [sc.front, sc.behind].into_iter().enumerate() {
+                if let Some(fold) = fold_at(state.reveal[stance.index()], &xf) {
+                    let lit = state.health[stance.index()].min(COUNT as u8);
+                    self.bars[i].fill(&conv, origin, stance, &xf, lit, fold);
+                }
+            }
         }
         let vram = self.vram;
         let atlas = (vram.atlas_u, vram.atlas_v);
@@ -552,13 +584,6 @@ impl HudPackets {
             self.set_up(state, &sc);
             self.shown = Some(*state);
         }
-        let fold_of_bar =
-            |(stance, pose): (Stance, Pose)| fold_of(state.reveal[stance.index()], &GEO[pose.size]);
-        let (front_fold, behind_fold) = (fold_of_bar(sc.front), fold_of_bar(sc.behind));
-        let (fs, fp) = (sc.front.0.index(), sc.front.1);
-        let (bs, bp) = (sc.behind.0.index(), sc.behind.1);
-        let front = &self.bars[fs][fp.size];
-        let behind = &self.bars[bs][bp.size];
         let emblem = match sc.emblem {
             EmblemLook::Of(s) => s.index(),
             EmblemLook::Halfway => 2,
@@ -579,7 +604,7 @@ impl HudPackets {
             ($nodes:expr) => {
                 for n in $nodes.iter().rev() {
                     add(
-                        (n as *const Node as *mut Node).cast::<u32>(),
+                        core::ptr::from_ref(n).cast::<u32>().cast_mut(),
                         n.tag & TAG_LEN,
                     );
                 }
@@ -597,22 +622,25 @@ impl HudPackets {
             add_all!(core::slice::from_ref(&self.gems[k]));
         }
         add_all!(core::slice::from_ref(&self.emblem[emblem]));
-        if let Some(fold) = front_fold {
-            add_all!(&front.cells.nodes[..fold.cells as usize]);
-            add_all!(&front.opaque.nodes[..front.opaque.len]);
+        let front_fold = fold_at(state.reveal[sc.front.0.index()], &sc.front.1);
+        let behind_fold = fold_at(state.reveal[sc.behind.0.index()], &sc.behind.1);
+        let (front, behind) = (&self.bars[0], &self.bars[1]);
+        if front_fold.is_some() {
+            add_all!(&front.cells[..front.cells_len]);
+            add_all!(&front.opaque[..front.opaque_len]);
         }
         add_all!(&self.masks[3..4]);
-        if let Some(fold) = behind_fold {
-            add_all!(&behind.opaque.nodes[..behind.opaque.len]);
-            add_all!(&behind.glass.nodes[..behind.glass.len]);
+        if behind_fold.is_some() {
+            add_all!(&behind.opaque[..behind.opaque_len]);
+            add_all!(&behind.glass[..behind.glass_len]);
             add_all!(&self.masks[2..3]);
-            add_all!(&behind.cells.nodes[..fold.cells as usize]);
+            add_all!(&behind.cells[..behind.cells_len]);
         } else {
             add_all!(&self.masks[2..3]);
         }
         add_all!(&self.masks[1..2]);
         if front_fold.is_some() {
-            add_all!(&front.glass.nodes[..front.glass.len]);
+            add_all!(&front.glass[..front.glass_len]);
         }
         add_all!(&self.masks[0..1]);
     }
@@ -676,82 +704,7 @@ mod tests {
     use super::*;
     use crate::hud_sprites::{
         compose, AmmoFx, HudAnim, PillFx, BREAK_FRAMES, ENERGY_PER_PILL, LOAD_FRAMES, REVEAL_MAX,
-        SWAP_FRAMES,
     };
-
-    fn same_node(a: &Node, b: &Node) -> bool {
-        a.tag == b.tag && a.words == b.words
-    }
-
-    fn same_nodes(a: &[Node], b: &[Node]) -> bool {
-        a.len() == b.len() && a.iter().zip(b).all(|(x, y)| same_node(x, y))
-    }
-
-    /// Every packet, in every bar and size, equal word for word.
-    fn same(a: &HudPackets, b: &HudPackets) -> bool {
-        let bars = (0..2).all(|s| {
-            (0..USED).all(|z| {
-                let (x, y) = (&a.bars[s][z], &b.bars[s][z]);
-                x.at == y.at
-                    && x.shrink == y.shrink
-                    && x.glass.len == y.glass.len
-                    && x.opaque.len == y.opaque.len
-                    && x.cells.len == y.cells.len
-                    && same_nodes(&x.glass.nodes, &y.glass.nodes)
-                    && same_nodes(&x.opaque.nodes, &y.opaque.nodes)
-                    && same_nodes(&x.cells.nodes, &y.cells.nodes)
-            })
-        });
-        bars && same_nodes(&a.gems, &b.gems)
-            && same_nodes(&a.emblem, &b.emblem)
-            && same_nodes(&a.masks, &b.masks)
-            && a.health == b.health
-    }
-
-    /// Patching the levels of a built HUD gives exactly the packets of a fresh build at the new
-    /// levels, from every level to every level, for both stances and every size.
-    #[test]
-    fn patched_levels_equal_a_fresh_build() {
-        let vram = HudVram::SHOWCASE;
-        for from in 0..=COUNT as u8 {
-            for to in 0..=COUNT as u8 {
-                let mut patched = HudPackets::new();
-                patched.build(&vram, (5, 7), [from, to]);
-                patched.set_levels(&vram, [to, from]);
-                let mut fresh = HudPackets::new();
-                fresh.build(&vram, (5, 7), [to, from]);
-                assert!(same(&patched, &fresh), "levels {from} -> {to}");
-            }
-        }
-    }
-
-    /// Values above ten count as ten.
-    #[test]
-    fn levels_above_ten_clamp() {
-        let vram = HudVram::SHOWCASE;
-        let mut patched = HudPackets::new();
-        patched.build(&vram, (0, 0), [3, 9]);
-        patched.set_levels(&vram, [250, 0]);
-        let mut fresh = HudPackets::new();
-        fresh.build(&vram, (0, 0), [10, 0]);
-        assert!(same(&patched, &fresh));
-    }
-
-    /// A patch touches only the cells that change, and a change of nothing touches nothing.
-    #[test]
-    fn only_changed_cells_are_written() {
-        let vram = HudVram::SHOWCASE;
-        let mut hud = HudPackets::new();
-        hud.build(&vram, (0, 0), [7, 5]);
-        let before = hud.bars[0][0].cells;
-        hud.set_levels(&vram, [7, 5]);
-        assert!(same_nodes(&before.nodes, &hud.bars[0][0].cells.nodes));
-        hud.set_levels(&vram, [8, 5]);
-        let changed = (0..COUNT as usize)
-            .filter(|&k| !same_node(&before.nodes[k], &hud.bars[0][0].cells.nodes[k]))
-            .count();
-        assert_eq!(changed, 1);
-    }
 
     /// The words of the packets a `link` hands over, in paint order, sorted: the order of parts that
     /// do not overlap does not matter.
@@ -771,9 +724,15 @@ mod tests {
     fn composed(vram: &HudVram, origin: (i32, i32), state: &HudState) -> Vec<Vec<u32>> {
         let conv = Converter::new(vram);
         let mut out = Vec::new();
-        compose(origin, state, &mut |op| {
-            let n = conv.node(op);
-            out.push(n.words[..n.len() as usize].to_vec());
+        compose(origin, state, &mut |op| match op {
+            Op::Quad { .. } | Op::TexQuad { .. } => {
+                let n = conv.quad_node(op);
+                out.push(n.words[..(n.tag >> 24) as usize].to_vec());
+            }
+            _ => {
+                let n = conv.node(op);
+                out.push(n.words[..n.len() as usize].to_vec());
+            }
         });
         out.sort();
         out
@@ -788,7 +747,7 @@ mod tests {
         };
         let mut state = HudState::rest(stance, [next(11) as u8, next(11) as u8], next(11) as u8);
         if next(3) == 0 {
-            state.swap = next(u32::from(SWAP_FRAMES)) as u8;
+            state.swap = next(4095) as u16 + 1;
         }
         state.reveal = [
             next(u32::from(REVEAL_MAX) + 1) as u8,
@@ -826,7 +785,7 @@ mod tests {
         let vram = HudVram::SHOWCASE;
         let origin = (6, 160);
         let mut hud = HudPackets::new();
-        hud.build(&vram, origin, [7, 5]);
+        hud.build(&vram, origin);
         let mut seed = 0x1234_5678u32;
         let mut next = |n: u32| {
             seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
@@ -834,7 +793,6 @@ mod tests {
         };
         for i in 0..6000 {
             let state = random_state(&mut next);
-            hud.set_levels(&vram, state.health);
             assert_eq!(
                 linked(&mut hud, &state),
                 composed(&vram, origin, &state),

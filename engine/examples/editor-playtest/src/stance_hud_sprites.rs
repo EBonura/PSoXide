@@ -82,11 +82,26 @@ impl Stance {
     }
 }
 
-/// Frames the two bars take to trade places (at 30 frames a second, a quarter of a second).
+/// Ticks (of 60 a second) the two bars take to trade places: half a second. The swap is drawn from
+/// the tick it has reached, so every frame the game renders shows the bars somewhere new, at any
+/// frame rate.
+pub const SWAP_TICKS: u16 = 30;
+
+/// Frames of the swap in the demos and grids (`demo`, the `HUD_SWAP` frame): frame `n` of them is
+/// the swap `n / SWAP_FRAMES` of the way.
 pub const SWAP_FRAMES: u8 = 8;
 
 /// How far the bars bow out sideways while they trade places, at the middle of the swap.
-pub const SWAP_BOW: i32 = 6;
+pub const SWAP_BOW: i32 = 22;
+
+/// How far the bar going back rises above its way, and the bar coming forward dips below it, at the
+/// middle of the swap: the bars go round each other rather than along a line.
+pub const SWAP_ARC: i32 = 4;
+
+/// How far the bars turn about the vertical axis at the middle of the swap, as the sine of the
+/// angle in Q12 (about 21 degrees). The bar coming forward turns one way and the bar going back
+/// the other, so they pass each other.
+pub const SWAP_YAW_Q12: i32 = 2048;
 
 /// Everything the HUD shows; packets built from it stay valid while it is equal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,8 +113,8 @@ pub struct HudState {
     /// Lit ammunition gems, 0 to [`COUNT`]. One count for both stances: the gems do not change in
     /// a swap.
     pub energy: u8,
-    /// 0 at rest. During a swap to `stance`, the frame of it, 1 to [`SWAP_FRAMES`] - 1.
-    pub swap: u8,
+    /// 0 at rest. During a swap to `stance`, how far it has gone, 1 to 4095 of 4096.
+    pub swap: u16,
     /// How far each stance's bar is unfolded, 0 (gone into the emblem) to [`REVEAL_MAX`] (fully
     /// out).
     pub reveal: [u8; 2],
@@ -171,6 +186,21 @@ pub enum Op {
     /// The GPU's mask bit: with `set` every pixel drawn from now on is marked, with `check` pixels
     /// that are marked are not drawn over. Both off ends the special case.
     Mask { set: bool, check: bool },
+    /// A flat quad with its corners anywhere (top-left, top-right, bottom-left, bottom-right), for
+    /// the bars while they trade places.
+    Quad {
+        p: [(i16, i16); 4],
+        rgb: [u8; 3],
+        glass: bool,
+    },
+    /// A quad of the atlas: the texels of `src`, stretched over the corners (top-left, top-right,
+    /// bottom-left, bottom-right) and drawn with CLUT number `clut`.
+    TexQuad {
+        p: [(i16, i16); 4],
+        src: SpriteRect,
+        clut: usize,
+        glass: bool,
+    },
 }
 
 /// Ops one HUD needs at most: every band of both bars, both ends of both bars, both bars' cells,
@@ -194,42 +224,74 @@ pub enum EmblemLook {
     Pulse(Stance),
 }
 
+/// A bar on the move. The pieces of the bar are laid out in a plane with the geometry of a size
+/// between two of the pixel art sizes, turned about the vertical axis and projected, so the bar
+/// changes size, tilts and goes where it is going smoothly, to the pixel, whatever the frame rate.
+/// (At rest the bar is not drawn this way: its sprites are cheaper for the GPU, and are the art.)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Xf {
+    /// Top-left corner of the bar (the first column of its left end, its first row), relative to the
+    /// HUD's origin, in 1/256 pixels.
+    pub x: i32,
+    pub y: i32,
+    /// How far back the bar is, in sizes of the art and 1/256 of one: 0 is the full size,
+    /// `BACK_SIZE << 8` the bar behind.
+    pub depth: i32,
+    /// Sine and cosine of the turn about the vertical axis, Q12.
+    pub sin: i32,
+    pub cos: i32,
+}
+
+/// Where a bar is, and how it is drawn there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Placement {
+    /// At rest: pixel art of one size, drawn 1:1 from rectangles and sprites.
+    Rest(Pose),
+    /// On its way to the other place: the pieces of the bar are quads, placed every frame.
+    Moving(Xf),
+}
+
 /// What a state looks like: the bars back to front and the emblem.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Scene {
-    pub behind: (Stance, Pose),
-    pub front: (Stance, Pose),
+    pub behind: (Stance, Placement),
+    pub front: (Stance, Placement),
     pub emblem: EmblemLook,
 }
 
-/// Ease-out of frame `f` of a swap, 0 to 256: quicker at first, settling at the end. Halfway
-/// between a straight line and a quadratic, so that even the last frames move by a pixel or more.
-fn ease_out(f: u8) -> i32 {
-    let u = f as i32 * 256 / SWAP_FRAMES as i32;
-    let quadratic = 256 - (((256 - u) * (256 - u)) >> 8);
-    (u + quadratic) >> 1
+/// Ease of a swap `p` of the way (Q12), 0 to 4096: it picks up speed and settles, as a smooth step.
+fn ease(p: i32) -> i32 {
+    let p2 = (p * p) >> 12;
+    (3 * p2) - ((2 * p2 * p) >> 12)
 }
 
-/// `a` to `b` by `p / 256`, rounded to a whole pixel.
-fn lerp(a: i32, b: i32, p: i32) -> i32 {
-    a + (((b - a) * p + 128) >> 8)
+/// `a` to `b` by `e / 4096`.
+fn lerp(a: i32, b: i32, e: i32) -> i32 {
+    a + (((b - a) * e) >> 12)
 }
 
-/// How far a bar bows out at progress `p`: 0 at both ends, [`SWAP_BOW`] in the middle.
-fn bow(p: i32) -> i32 {
-    (SWAP_BOW * ((4 * p * (256 - p)) >> 8)) >> 8
-}
-
-/// How many sizes a bar steps through at progress `p` of its way, 0 at the start, `BACK_SIZE` at the
-/// end.
-fn steps_at(p: i32) -> usize {
-    ((p as usize) * (BACK_SIZE + 1) / 257).min(BACK_SIZE)
+/// A bump that is 0 at both ends of the swap and 256 in the middle, from `e` (Q12).
+fn bump(e: i32) -> i32 {
+    let u = e >> 4;
+    (4 * u * (256 - u)) >> 8
 }
 
 /// Top row of the bar behind.
 const BACK_Y: i32 = FRONT_Y - LIFT + BACK_DROP;
 
-/// The bars' poses and the draw order for `state`.
+/// A bar at rest at `pose` as the plane it moves in: the art's own size, not turned.
+fn plane_of(pose: Pose) -> Xf {
+    Xf {
+        x: (LCAP_X + pose.x) << 8,
+        y: pose.y << 8,
+        depth: (pose.size as i32) << 8,
+        sin: 0,
+        cos: 4096,
+    }
+}
+
+/// The bars' places and the draw order for `state`.
+#[inline(never)]
 pub fn scene(state: &HudState) -> Scene {
     let front_pose = Pose {
         x: 0,
@@ -242,10 +304,10 @@ pub fn scene(state: &HudState) -> Scene {
         size: BACK_SIZE,
     };
     let (incoming, outgoing) = (state.stance, state.stance.other());
-    if state.swap == 0 || state.swap >= SWAP_FRAMES {
+    if state.swap == 0 || state.swap >= 4096 {
         return Scene {
-            behind: (outgoing, back_pose),
-            front: (incoming, front_pose),
+            behind: (outgoing, Placement::Rest(back_pose)),
+            front: (incoming, Placement::Rest(front_pose)),
             emblem: if state.pulse {
                 EmblemLook::Pulse(incoming)
             } else {
@@ -253,36 +315,42 @@ pub fn scene(state: &HudState) -> Scene {
             },
         };
     }
-    // The bar coming forward goes down and grows through the sizes, the one going back goes up and
-    // shrinks, bowing out so that they pass each other, and the one coming forward is drawn in front
-    // from the middle on.
-    let p = ease_out(state.swap);
-    let b = bow(p);
-    let coming = Pose {
-        x: lerp(BACK_X, 0, p) - b,
-        y: lerp(BACK_Y, FRONT_Y, p),
-        size: BACK_SIZE - steps_at(p),
+    // The bar coming forward goes down and grows, the one going back goes up and shrinks, bowing out
+    // and turning the opposite ways so that they pass each other, and the one coming forward is drawn
+    // in front from the middle on.
+    let e = ease(i32::from(state.swap));
+    let b = bump(e);
+    let (back, front) = (plane_of(back_pose), plane_of(front_pose));
+    let sin = (SWAP_YAW_Q12 * b) >> 8;
+    let cos = 4096 - ((sin * sin) >> 13);
+    let bow = SWAP_BOW * b;
+    let arc = SWAP_ARC * b;
+    let coming = Xf {
+        x: lerp(back.x, front.x, e) - bow,
+        y: lerp(back.y, front.y, e) + arc / 2,
+        depth: lerp(back.depth, front.depth, e),
+        sin,
+        cos,
     };
-    let going = Pose {
-        x: lerp(0, BACK_X, p) + b,
-        y: lerp(FRONT_Y, BACK_Y, p),
-        size: steps_at(p),
+    let going = Xf {
+        x: lerp(front.x, back.x, e) + bow,
+        y: lerp(front.y, back.y, e) - arc,
+        depth: lerp(front.depth, back.depth, e),
+        sin: -sin,
+        cos,
     };
-    let first_half = p < 128;
+    let first_half = e < 2048;
+    let (behind, front) = if first_half {
+        ((incoming, coming), (outgoing, going))
+    } else {
+        ((outgoing, going), (incoming, coming))
+    };
     Scene {
-        behind: if first_half {
-            (incoming, coming)
-        } else {
-            (outgoing, going)
-        },
-        front: if first_half {
-            (outgoing, going)
-        } else {
-            (incoming, coming)
-        },
-        emblem: if p < 100 {
+        behind: (behind.0, Placement::Moving(behind.1)),
+        front: (front.0, Placement::Moving(front.1)),
+        emblem: if e < 1600 {
             EmblemLook::Of(outgoing)
-        } else if p < 150 {
+        } else if e < 2400 {
             EmblemLook::Halfway
         } else {
             EmblemLook::Of(incoming)
@@ -881,6 +949,205 @@ pub fn bar(
     }
 }
 
+/// The geometry of a bar at a depth between two sizes of the art, in 1/256 pixels: every number is
+/// the two sizes' numbers mixed. Columns are those of [`SizeGeo`] (the left end starts at `LCAP_X`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Plane {
+    /// The size of the art whose texels and palettes are used: the nearest.
+    pub art: usize,
+    pub pitch: i32,
+    pub cell_x0: i32,
+    pub cell_row: i32,
+    pub cell_w: i32,
+    pub cell_h: i32,
+    pub bar_h: i32,
+    pub bar_x0: i32,
+    pub cap_x: i32,
+    pub cap_w: i32,
+    pub lcap_w: i32,
+}
+
+/// The plane at `depth` (see [`Xf::depth`]).
+#[inline(never)]
+pub fn plane(depth: i32) -> Plane {
+    let depth = depth.clamp(0, (BACK_SIZE as i32) << 8);
+    let lo = (depth >> 8) as usize;
+    let hi = (lo + 1).min(BACK_SIZE);
+    let f = depth & 255;
+    let (a, b) = (&GEO[lo], &GEO[hi]);
+    let mix = |x: i32, y: i32| x * (256 - f) + y * f;
+    Plane {
+        art: ((depth + 128) >> 8) as usize,
+        pitch: mix(a.pitch, b.pitch),
+        cell_x0: mix(a.cell_x0, b.cell_x0),
+        cell_row: mix(a.cell_row, b.cell_row),
+        cell_w: mix(a.cell.w as i32, b.cell.w as i32),
+        cell_h: mix(a.cell.h as i32, b.cell.h as i32),
+        bar_h: mix(a.bar_h, b.bar_h),
+        bar_x0: mix(a.bar_x0, b.bar_x0),
+        cap_x: mix(a.cap_x, b.cap_x),
+        cap_w: mix(a.cap.w as i32, b.cap.w as i32),
+        lcap_w: mix(a.lcap.w as i32, b.lcap.w as i32),
+    }
+}
+
+/// The fold of a bar at `reveal` (1 to [`REVEAL_MAX`]) in `plane`, or `None` when it is gone.
+fn fold_in(reveal: u8, plane: &Plane) -> Option<Fold> {
+    if reveal == 0 {
+        return None;
+    }
+    let (cells, slide) = FOLD_STEPS[(reveal.min(REVEAL_MAX) - 1) as usize];
+    let shrink = if cells == 0 {
+        ((plane.cap_x - plane.bar_x0) >> 8) - FOLD_MIN_PLATE
+    } else {
+        ((COUNT - cells) * plane.pitch) >> 8
+    };
+    Some(Fold {
+        cells,
+        shrink,
+        slide,
+    })
+}
+
+/// The fold of a bar placed at `at` when it is unfolded to `reveal`, or `None` when it is gone.
+pub fn fold_at(reveal: u8, at: &Placement) -> Option<Fold> {
+    match at {
+        Placement::Rest(pose) => fold_of(reveal, &GEO[pose.size]),
+        Placement::Moving(xf) => fold_in(reveal, &plane(xf.depth)),
+    }
+}
+
+/// The four corners (top-left, top-right, bottom-left, bottom-right) of the rectangle `x0..x1` by
+/// `y0..y1` of the bar's plane, given from the bar's top-left corner in 1/256 pixels, on the screen
+/// in whole pixels. `anchor` is the corner's place on the screen, `half` the middle of the bar the
+/// plane turns about.
+///
+/// The turn is about the vertical axis through the middle of the bar. A point `a` from the axis is
+/// `a * cos` to the side and `a * sin` deeper, and the perspective that scales it by `F / (F + z)`
+/// is taken to second order, so there is no division: `1 / (1 + e)` is `1 - e + e * e` for the small
+/// `e = z / F` the swap reaches (the focal length `F` is 256 pixels). The scale depends on the
+/// column alone, so a column's two corners share it, and the edges of neighbouring pieces meet
+/// exactly. Not inlined: it is called for every piece and is the bulk of the code.
+#[inline(never)]
+fn corners(
+    anchor: (i32, i32),
+    half: (i32, i32),
+    xf: &Xf,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+) -> [(i16, i16); 4] {
+    let column = |x: i32| {
+        let a = x - (LCAP_X << 8) - half.0;
+        let e = (a * xf.sin) >> 16;
+        let s = 4096 - e + ((e * e) >> 12);
+        let px = (anchor.0 + half.0 + ((((a * xf.cos) >> 12) * s) >> 12) + 128) >> 8;
+        (px, s)
+    };
+    let (left, sl) = column(x0);
+    let (right, sr) = column(x1);
+    let (top, bottom) = (y0 - half.1, y1 - half.1);
+    let py = |b: i32, s: i32| (anchor.1 + half.1 + ((b * s) >> 12) + 128) >> 8;
+    let at = |x: i32, y: i32| (x as i16, y as i16);
+    [
+        at(left, py(top, sl)),
+        at(right, py(top, sr)),
+        at(left, py(bottom, sl)),
+        at(right, py(bottom, sr)),
+    ]
+}
+
+/// Paint one complete bar of `stance` on the move, `lit` cells lit, folded as `fold` says: the same
+/// pieces as [`bar`], in the same order, each as a quad placed by [`corners`].
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+pub fn bar_moving(
+    origin: (i32, i32),
+    stance: Stance,
+    xf: Xf,
+    lit: u8,
+    fold: Fold,
+    part: Part,
+    draw: &mut dyn FnMut(Op),
+) {
+    let pl = plane(xf.depth);
+    let geo = &GEO[pl.art];
+    let s = stance.index();
+    let anchor = (
+        (origin.0 << 8) + xf.x - (fold.slide << 8),
+        (origin.1 << 8) + xf.y,
+    );
+    // The bar's whole width, folded or not, so that the turn is about the same middle.
+    let half = ((pl.cap_x + pl.cap_w - (LCAP_X << 8)) >> 1, pl.bar_h >> 1);
+    let at = |x0: i32, y0: i32, x1: i32, y1: i32| corners(anchor, half, &xf, x0, y0, x1, y1);
+    let cap_x = pl.cap_x - (fold.shrink << 8);
+    // The rows of the art's bands stretched over the rows of this depth.
+    let stretch = pl.bar_h / geo.bar_h;
+    for band in &BANDS[s][pl.art][..geo.band_count] {
+        let wanted = match part {
+            Part::Plate => true,
+            Part::Glass => band.glass,
+            Part::Opaque => !band.glass,
+            Part::Cells => false,
+        };
+        if wanted {
+            draw(Op::Quad {
+                p: at(
+                    pl.bar_x0,
+                    band.y0 as i32 * stretch,
+                    cap_x,
+                    band.y1 as i32 * stretch,
+                ),
+                rgb: band.rgb,
+                glass: band.glass,
+            });
+        }
+    }
+    let base = s * CLUTS_PER_STANCE + pl.art * CLUT_SIZE_STRIDE;
+    if part == Part::Glass || part == Part::Plate {
+        for (x, w, src) in [
+            (LCAP_X << 8, pl.lcap_w, geo.lcap),
+            (cap_x, pl.cap_w, geo.cap),
+        ] {
+            draw(Op::TexQuad {
+                p: at(x, 0, x + w, pl.bar_h),
+                src,
+                clut: base + CLUT_CAP,
+                glass: true,
+            });
+        }
+    }
+    if part == Part::Cells {
+        for k in 0..fold.cells {
+            let x = pl.cell_x0 + pl.pitch * k;
+            draw(Op::TexQuad {
+                p: at(x, pl.cell_row, x + pl.cell_w, pl.cell_row + pl.cell_h),
+                src: geo.cell,
+                clut: cell_clut(stance, pl.art, (k as u8) < lit),
+                glass: false,
+            });
+        }
+    }
+}
+
+/// Paint one complete bar wherever it is, at rest or on the move.
+#[allow(clippy::too_many_arguments)]
+pub fn bar_at(
+    origin: (i32, i32),
+    stance: Stance,
+    at: &Placement,
+    lit: u8,
+    fold: Fold,
+    part: Part,
+    draw: &mut dyn FnMut(Op),
+) {
+    match at {
+        Placement::Rest(pose) => bar(origin, stance, *pose, lit, fold, part, &mut |op| draw(op)),
+        Placement::Moving(xf) => bar_moving(origin, stance, *xf, lit, fold, part, draw),
+    }
+}
+
 /// The ops that set the mask a given way.
 pub const MASK_SET: Op = Op::Mask {
     set: true,
@@ -962,63 +1229,63 @@ pub fn compose(origin: (i32, i32), state: &HudState, draw: &mut impl FnMut(Op)) 
     let sc = scene(state);
     let lit = |s: Stance| state.health[s.index()];
     let fold_of_bar =
-        |(stance, pose): (Stance, Pose)| fold_of(state.reveal[stance.index()], &GEO[pose.size]);
+        |(stance, at): (Stance, Placement)| fold_at(state.reveal[stance.index()], &at);
     let (front_fold, behind_fold) = (fold_of_bar(sc.front), fold_of_bar(sc.behind));
     draw(MASK_SET);
     if let Some(fold) = front_fold {
-        bar(
+        bar_at(
             origin,
             sc.front.0,
-            sc.front.1,
+            &sc.front.1,
             lit(sc.front.0),
             fold,
             Part::Glass,
-            draw,
+            &mut |op| draw(op),
         );
     }
     draw(MASK_SET_CHECK);
     if let Some(fold) = behind_fold {
-        bar(
+        bar_at(
             origin,
             sc.behind.0,
-            sc.behind.1,
+            &sc.behind.1,
             lit(sc.behind.0),
             fold,
             Part::Cells,
-            draw,
+            &mut |op| draw(op),
         );
     }
     draw(MASK_CHECK);
     if let Some(fold) = behind_fold {
-        bar(
+        bar_at(
             origin,
             sc.behind.0,
-            sc.behind.1,
+            &sc.behind.1,
             lit(sc.behind.0),
             fold,
             Part::Plate,
-            draw,
+            &mut |op| draw(op),
         );
     }
     draw(MASK_OFF);
     if let Some(fold) = front_fold {
-        bar(
+        bar_at(
             origin,
             sc.front.0,
-            sc.front.1,
+            &sc.front.1,
             lit(sc.front.0),
             fold,
             Part::Opaque,
-            draw,
+            &mut |op| draw(op),
         );
-        bar(
+        bar_at(
             origin,
             sc.front.0,
-            sc.front.1,
+            &sc.front.1,
             lit(sc.front.0),
             fold,
             Part::Cells,
-            draw,
+            &mut |op| draw(op),
         );
     }
     draw(emblem_op(origin, sc.emblem));

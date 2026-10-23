@@ -16,8 +16,7 @@ use psx_game_runtime::vitality::VitalityChannelId;
 use super::*;
 use crate::hud_packets::{HudPackets, HudVram};
 use crate::hud_sprites::{
-    AmmoFx, FoldPolicy, FoldTriggers, HudAnim, HudState, Stance, COUNT, ENERGY_PER_PILL,
-    SWAP_FRAMES,
+    AmmoFx, FoldPolicy, FoldTriggers, HudAnim, HudState, Stance, COUNT, ENERGY_PER_PILL, SWAP_TICKS,
 };
 
 /// Where the HUD's top-left sits on the screen.
@@ -64,8 +63,6 @@ pub(crate) struct HudInput {
     pub share_q12: [u16; 2],
     /// Ammunition energy, 0 to 100.
     pub energy: u16,
-    /// How far through a stance swap, Q12; 4096 when none is under way.
-    pub swap_q12: u16,
     /// The squared distance to the nearest live hostile, if any.
     pub nearest_hostile_sq: Option<i32>,
     /// Lock-on or aiming.
@@ -84,6 +81,10 @@ pub(crate) struct StanceHud {
     cells: [u8; 2],
     energy_units: u16,
     parity: bool,
+    /// The stance in front, and the ticks since it became so while the bars trade places
+    /// (`SWAP_TICKS` and over: not swapping).
+    front: Stance,
+    swap_ticks: u16,
     scan: u8,
     nearest: Option<i32>,
     ready: bool,
@@ -101,6 +102,8 @@ impl StanceHud {
             cells: [10, 10],
             energy_units: 100,
             parity: false,
+            front: Stance::Horizon,
+            swap_ticks: SWAP_TICKS,
             scan: 0,
             nearest: None,
             ready: false,
@@ -119,13 +122,15 @@ impl StanceHud {
         };
         self.cells = [cells(input.share_q12[0]), cells(input.share_q12[1])];
         // SAFETY: single-threaded guest; PACKETS is only touched here and in `link`/`update`.
-        unsafe { (*core::ptr::addr_of_mut!(PACKETS)).build(&vram, ORIGIN, self.cells) };
+        unsafe { (*core::ptr::addr_of_mut!(PACKETS)).build(&vram, ORIGIN) };
         self.vram = Some(vram);
         self.anim = HudAnim::open();
         self.ammo = AmmoFx::new(input.energy);
         self.energy_units = input.energy;
         self.policy = FoldPolicy::new();
         self.parity = false;
+        self.front = stance_of(input.active);
+        self.swap_ticks = SWAP_TICKS;
         self.ready = true;
         self.refresh_state(input);
     }
@@ -141,7 +146,17 @@ impl StanceHud {
             .iter()
             .zip(self.cells)
             .any(|(now, before)| *now < before);
-        let changed = cells_now != self.cells || units != self.energy_units / ENERGY_PER_PILL;
+        // A change of stance starts the bars trading places, drawn from the tick they have reached
+        // so that every frame the game renders shows them further on, whatever the frame rate.
+        let front = stance_of(input.active);
+        if front != self.front {
+            self.front = front;
+            self.swap_ticks = 0;
+        }
+        let swapping = self.swap_ticks < SWAP_TICKS;
+        self.swap_ticks = self.swap_ticks.saturating_add(1);
+        let changed =
+            cells_now != self.cells || units != self.energy_units / ENERGY_PER_PILL || swapping;
         self.energy_units = input.energy;
         self.cells = cells_now;
         let hostile_near =
@@ -170,34 +185,24 @@ impl StanceHud {
         let stance = stance_of(input.active);
         let mut state = HudState::rest(stance, self.cells, 0);
         state.ammo_hint = HUD_FOLDED_AMMO;
-        // A swap in progress: the frame of it, 1 to 7, with the new stance in front. Before the
-        // first frame the bars are still where they were: the old stance in front, at rest.
-        if input.swap_q12 < 4096 {
-            let frame = ((u32::from(input.swap_q12) * u32::from(SWAP_FRAMES)) >> 12) as u8;
-            if frame == 0 {
-                state.stance = stance.other();
-            } else {
-                state.swap = frame;
-            }
+        // A swap in progress: how far it has gone, with the new stance in front.
+        if self.swap_ticks < SWAP_TICKS {
+            state.swap = (u32::from(self.swap_ticks.max(1)) * 4096 / u32::from(SWAP_TICKS)) as u16;
         }
         self.anim.apply(&mut state);
         self.ammo.apply(&mut state);
         self.state = state;
     }
 
-    /// Patch the packets for the current state and link them into slot 0 of `ot`. Link before the
+    /// Lay out the packets for the current state, if it changed, and link them into slot 0 of `ot`. Link before the
     /// rest of the frame so that the HUD is walked last of slot 0.
     pub(crate) fn link<const DEPTH: usize>(&mut self, ot: &mut OtFrame<'_, DEPTH>) {
-        let Some(vram) = self.vram.as_ref() else {
-            return;
-        };
         if !self.ready {
             return;
         }
         // SAFETY: single-threaded guest; the packets stay untouched until the walk ends, which
         // `submit` waits for before the next frame's update or link.
         let packets = unsafe { &mut *core::ptr::addr_of_mut!(PACKETS) };
-        packets.set_levels(vram, self.state.health);
         packets.link(&self.state, |ptr, tag| {
             // SAFETY: the packets are a `static`, so they outlive the walk.
             unsafe { ot.add_raw_tag_unchecked(0, ptr, tag) }
@@ -238,12 +243,6 @@ impl Playtest {
                 (u32::from(pool.current()) * VITALITY_Q12_ONE / u32::from(pool.maximum())) as u16
             }
         };
-        let config = self.player_stance_config;
-        let swap_q12 = if self.player_stance.swap_in_progress(&config) {
-            self.player_stance.swap_progress_q12(&config)
-        } else {
-            4096
-        };
         // The nearest live hostile, looked for a few times a second.
         hud().scan = hud().scan.saturating_sub(1);
         if hud().scan == 0 {
@@ -266,7 +265,6 @@ impl Playtest {
             active: self.player_stance.active(),
             share_q12: [share(VitalityChannelId::One), share(VitalityChannelId::Two)],
             energy: self.combat_flow.energy,
-            swap_q12,
             nearest_hostile_sq: hud().nearest,
             targeting: self.lock_target.is_some() || self.ranged_ready.aiming(),
             attached: self.hook_attached.is_some(),
