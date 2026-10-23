@@ -128,9 +128,9 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
             }
         }
         let mut s = Self {
-            players: [Player::INIT; P],
+            players: core::array::from_fn(|_| Player::init()),
             codes: core::array::from_fn(|_| <&mut [u8]>::default()),
-            notes: [Note::INIT; N],
+            notes: core::array::from_fn(|_| Note::INIT),
             voice_of,
             bank: None,
             spu_base: 0,
@@ -173,7 +173,7 @@ impl<'a, const P: usize, const N: usize> Sequencer<'a, P, N> {
         self.disable_player(player);
         let code = header.code_mut(song);
         self.codes[player] = code;
-        let mut pl = Player::INIT;
+        let mut pl = Player::init();
         pl.n_fonts = header.n_fonts;
         pl.fonts = header.font_ids;
         let last = header.font_ids[header.n_fonts.saturating_sub(1) as usize];

@@ -25,6 +25,11 @@ pub struct Options {
     pub all_instruments: bool,
     /// Voices the song may need (written to the header).
     pub peak_voices: u8,
+    /// Alignment of the ADPCM region inside the bank, in bytes (a power of
+    /// two, at least 16). A game that streams the bank from disc in whole
+    /// sectors passes 2048 so the samples start on a sector boundary and
+    /// the tables never share a sector with them.
+    pub adpcm_align: usize,
 }
 
 impl Default for Options {
@@ -33,6 +38,7 @@ impl Default for Options {
             rate: NATIVE_RATE,
             all_instruments: false,
             peak_voices: 16,
+            adpcm_align: 16,
         }
     }
 }
@@ -45,6 +51,32 @@ pub struct Cooked {
     pub bank: Vec<u8>,
     /// Human-readable cook report.
     pub report: String,
+}
+
+/// Several songs cooked against one shared bank.
+#[non_exhaustive]
+pub struct CookedSet {
+    /// One `PSQ1` song per requested sequence, in request order.
+    pub songs: Vec<Vec<u8>>,
+    /// The `PSQB` bank all of them play from.
+    pub bank: Vec<u8>,
+    /// Human-readable cook report.
+    pub report: String,
+}
+
+/// A sound effect cooked as a one-shot `.psau` sample.
+#[non_exhaustive]
+pub struct CookedEffect {
+    /// The `.psau` container (mono SPU-ADPCM, one-shot).
+    pub psau: Vec<u8>,
+    /// Playback rate written into the container: the sample's native rate
+    /// times the effect's tuning, so playing it at pitch 1.0 sounds as the
+    /// original did.
+    pub rate_hz: u32,
+    /// Length in ADPCM blocks.
+    pub blocks: usize,
+    /// The original loops this sample (a one-shot cook plays it once).
+    pub looped: bool,
 }
 
 struct CookedSample {
@@ -143,63 +175,111 @@ impl EnvPool {
 
 /// Cook sequence `seq_id`.
 pub fn cook_song(data: &AudioData, seq_id: usize, opts: &Options) -> Result<Cooked, Error> {
-    let code = data.sequence(seq_id)?.to_vec();
-    let sc = scan(&code);
-    let font_ids = data.fonts_of_sequence(seq_id)?;
-    let n = font_ids.len();
-    if n == 0 || n > 8 {
-        return Err(Error::Format(format!("sequence {seq_id} lists {n} fonts")));
+    let set = cook_songs(data, &[seq_id], opts)?;
+    Ok(Cooked {
+        song: set.songs.into_iter().next().unwrap_or_default(),
+        bank: set.bank,
+        report: set.report,
+    })
+}
+
+/// One requested song: its bytecode, scan and soundfont list.
+struct SongPlan {
+    id: usize,
+    code: Vec<u8>,
+    scan: crate::n64::aseq::Scan,
+    font_ids: Vec<u8>,
+}
+
+/// Cook several sequences against one bank: the union of the instruments,
+/// drums and samples they use, each sample once. A scene that changes its
+/// song without leaving its area keeps this bank in SPU RAM.
+///
+/// # Errors
+/// If a sequence or one of its soundfonts is missing or malformed.
+pub fn cook_songs(data: &AudioData, seq_ids: &[usize], opts: &Options) -> Result<CookedSet, Error> {
+    let mut plans: Vec<SongPlan> = Vec::new();
+    for &seq_id in seq_ids {
+        let code = data.sequence(seq_id)?.to_vec();
+        let scan = scan(&code);
+        let font_ids = data.fonts_of_sequence(seq_id)?;
+        let n = font_ids.len();
+        if n == 0 || n > 8 {
+            return Err(Error::Format(format!("sequence {seq_id} lists {n} fonts")));
+        }
+        plans.push(SongPlan {
+            id: seq_id,
+            code,
+            scan,
+            font_ids,
+        });
     }
-    let slot_font =
-        |slot: u8| -> Option<u8> { ((slot as usize) < n).then(|| font_ids[n - 1 - slot as usize]) };
 
     let mut fonts: Vec<Font> = Vec::new();
-    for &id in &font_ids {
-        if !fonts.iter().any(|f| f.id == id as usize) {
-            fonts.push(data.font(id as usize)?);
+    for p in &plans {
+        for &id in &p.font_ids {
+            if !fonts.iter().any(|f| f.id == id as usize) {
+                fonts.push(data.font(id as usize)?);
+            }
         }
     }
 
-    // which instruments and drums to carry
+    // which instruments and drums to carry, over all the songs
     let mut want_inst: BTreeMap<(usize, u8), ()> = BTreeMap::new();
     let mut want_drum: BTreeMap<(usize, u8), ()> = BTreeMap::new();
-    for &(slot, inst) in &sc.instruments {
-        if let Some(f) = slot_font(slot) {
-            want_inst.insert((f as usize, inst), ());
+    let mut drums_unknown = false;
+    for p in &plans {
+        let n = p.font_ids.len();
+        let slot_font = |slot: u8| -> Option<u8> {
+            ((slot as usize) < n).then(|| p.font_ids[n - 1 - slot as usize])
+        };
+        for &(slot, inst) in &p.scan.instruments {
+            if let Some(f) = slot_font(slot) {
+                want_inst.insert((f as usize, inst), ());
+            }
         }
-    }
-    for &(slot, key) in &sc.drum_keys {
-        if let Some(f) = slot_font(slot) {
-            want_drum.insert((f as usize, key), ());
+        for &(slot, key) in &p.scan.drum_keys {
+            if let Some(f) = slot_font(slot) {
+                want_drum.insert((f as usize, key), ());
+            }
         }
+        drums_unknown |= p.scan.drum_keys.is_empty()
+            && p.scan
+                .ops
+                .keys()
+                .any(|&(l, o)| l == crate::n64::aseq::Level::Layer && o == 0xc6);
     }
     let mut report = String::new();
-    writeln!(
-        report,
-        "song {seq_id} ({}) {} bytes, fonts {:?}",
-        crate::n64::SEQ_NAMES.get(seq_id).copied().unwrap_or("?"),
-        code.len(),
-        font_ids
-    )
-    .ok();
-    writeln!(
-        report,
-        "scan: channels {} layers {} instruments {} drum keys {} selfmod {} io {} dynamic {}",
-        sc.channels.len(),
-        sc.layers.len(),
-        sc.instruments.len(),
-        sc.drum_keys.len(),
-        sc.self_modifying,
-        sc.io,
-        sc.dynamic_targets
-    )
-    .ok();
-    writeln!(
-        report,
-        "instruments used (font slot, id): {:?}",
-        sc.instruments
-    )
-    .ok();
+    for p in &plans {
+        let sc = &p.scan;
+        writeln!(
+            report,
+            "song {} ({}) {} bytes, fonts {:?}",
+            p.id,
+            crate::n64::SEQ_NAMES.get(p.id).copied().unwrap_or("?"),
+            p.code.len(),
+            p.font_ids
+        )
+        .ok();
+        writeln!(
+            report,
+            "scan: channels {} layers {} instruments {} drum keys {} selfmod {} io {} dynamic {}",
+            sc.channels.len(),
+            sc.layers.len(),
+            sc.instruments.len(),
+            sc.drum_keys.len(),
+            sc.self_modifying,
+            sc.io,
+            sc.dynamic_targets
+        )
+        .ok();
+        writeln!(
+            report,
+            "instruments used (font slot, id): {:?}",
+            sc.instruments
+        )
+        .ok();
+    }
 
     // samples, deduplicated by audiotable offset
     let mut samples: Vec<CookedSample> = Vec::new();
@@ -280,11 +360,6 @@ pub fn cook_song(data: &AudioData, seq_id: usize, opts: &Options) -> Result<Cook
             insts.push(Some(b.try_into().unwrap()));
         }
         let mut drums: Vec<Option<[u8; 16]>> = Vec::new();
-        let drums_unknown = sc.drum_keys.is_empty()
-            && sc
-                .ops
-                .keys()
-                .any(|&(l, o)| l == crate::n64::aseq::Level::Layer && o == 0xc6);
         for (i, d) in f.drums.iter().enumerate() {
             let used =
                 opts.all_instruments || drums_unknown || want_drum.contains_key(&(f.id, i as u8));
@@ -302,6 +377,13 @@ pub fn cook_song(data: &AudioData, seq_id: usize, opts: &Options) -> Result<Cook
             le32(&mut b, tuning);
             le32(&mut b, 0);
             drums.push(Some(b.try_into().unwrap()));
+        }
+        // Trailing unused entries cost resident table bytes for nothing.
+        while matches!(insts.last(), Some(None)) {
+            insts.pop();
+        }
+        while matches!(drums.last(), Some(None)) {
+            drums.pop();
         }
         outs.push(FontOut {
             id: f.id as u8,
@@ -356,7 +438,8 @@ pub fn cook_song(data: &AudioData, seq_id: usize, opts: &Options) -> Result<Cook
         env_bytes.extend_from_slice(&p.arg.to_be_bytes());
     }
     off += env_bytes.len();
-    let off_adpcm = (off + 15) & !15;
+    let align = opts.adpcm_align.max(16).next_power_of_two();
+    let off_adpcm = (off + align - 1) & !(align - 1);
     let mut bank = Vec::new();
     bank.extend_from_slice(b"PSQB");
     le16(&mut bank, 1);
@@ -382,32 +465,37 @@ pub fn cook_song(data: &AudioData, seq_id: usize, opts: &Options) -> Result<Cook
     let total = bank.len() as u32;
     bank[8..12].copy_from_slice(&total.to_le_bytes());
 
-    // write the song
-    let mut flags = 0u16;
-    if sc.self_modifying {
-        flags |= 1;
+    // write the songs
+    let mut songs = Vec::new();
+    for p in &plans {
+        let sc = &p.scan;
+        let mut flags = 0u16;
+        if sc.self_modifying {
+            flags |= 1;
+        }
+        if sc.io {
+            flags |= 2;
+        }
+        let mut song = Vec::new();
+        song.extend_from_slice(b"PSQ1");
+        le16(&mut song, 1);
+        le16(&mut song, flags);
+        song.push(p.font_ids.len() as u8);
+        song.push(opts.peak_voices);
+        le16(&mut song, p.code.len() as u16);
+        le16(&mut song, sc.channels.len() as u16);
+        le16(&mut song, 0);
+        song.extend_from_slice(&p.font_ids);
+        while song.len() % 4 != 0 {
+            song.push(0);
+        }
+        song.extend_from_slice(&p.code);
+        songs.push(song);
     }
-    if sc.io {
-        flags |= 2;
-    }
-    let mut song = Vec::new();
-    song.extend_from_slice(b"PSQ1");
-    le16(&mut song, 1);
-    le16(&mut song, flags);
-    song.push(n as u8);
-    song.push(opts.peak_voices);
-    le16(&mut song, code.len() as u16);
-    le16(&mut song, sc.channels.len() as u16);
-    le16(&mut song, 0);
-    song.extend_from_slice(&font_ids);
-    while song.len() % 4 != 0 {
-        song.push(0);
-    }
-    song.extend_from_slice(&code);
 
     writeln!(
         report,
-        "bank: {} fonts, {} samples, {} envelope points, {} bytes (ADPCM {} bytes = {:.1} KiB at {} Hz); song {} bytes",
+        "bank: {} fonts, {} samples, {} envelope points, {} bytes (ADPCM {} bytes = {:.1} KiB at {} Hz); songs {:?} bytes",
         n_fonts,
         samples.len(),
         env.words.len(),
@@ -415,8 +503,54 @@ pub fn cook_song(data: &AudioData, seq_id: usize, opts: &Options) -> Result<Cook
         adpcm.len(),
         adpcm.len() as f64 / 1024.0,
         opts.rate,
-        song.len()
+        songs.iter().map(Vec::len).collect::<Vec<_>>()
     )
     .ok();
-    Ok(Cooked { song, bank, report })
+    Ok(CookedSet {
+        songs,
+        bank,
+        report,
+    })
+}
+
+/// Cook sound effect `index` of soundfont `font` as a one-shot `.psau`.
+///
+/// Effects are the soundfont's own list of tuned samples (what a game's
+/// sound-effect sequence plays), not instruments. The tuning is folded into
+/// the sample rate so the runtime plays the result at pitch 1.0.
+///
+/// # Errors
+/// If the soundfont or the effect is missing, or its tuning is not a positive number.
+pub fn cook_effect(data: &AudioData, font: usize, index: usize) -> Result<CookedEffect, Error> {
+    let f = data.font(font)?;
+    let tuned = f
+        .sfx
+        .get(index)
+        .and_then(Option::as_ref)
+        .ok_or_else(|| Error::Missing(format!("effect {index} of soundfont {font}")))?;
+    if !(tuned.tuning.is_finite() && tuned.tuning > 0.0) {
+        return Err(Error::Format(format!(
+            "effect {index} of soundfont {font} has tuning {}",
+            tuned.tuning
+        )));
+    }
+    let s = &f.samples[tuned.sample];
+    let pcm = decode(data, &f, s)?;
+    let wav = Wav {
+        rate: NATIVE_RATE,
+        samples: pcm.iter().map(|&v| f64::from(v)).collect(),
+        loop_start: None,
+        loop_end: None,
+        bits: 16,
+    };
+    let mut opts = CookOptions::one_shot(NATIVE_RATE);
+    opts.normalize_peak = None;
+    let c = cook(&wav, &opts);
+    let rate_hz = (f64::from(NATIVE_RATE) * f64::from(tuned.tuning)).round() as u32;
+    Ok(CookedEffect {
+        psau: psx_audio_cook::psau(rate_hz, c.pcm.len(), &c.adpcm),
+        rate_hz,
+        blocks: c.adpcm.len() / 16,
+        looped: s.looped.is_some(),
+    })
 }

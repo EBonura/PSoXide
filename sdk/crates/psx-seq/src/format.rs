@@ -224,11 +224,68 @@ pub struct Bank<'a> {
     off_env: u32,
     off_adpcm: u32,
     adpcm_bytes: u32,
+    /// Whether `bytes` includes the ADPCM region.
+    adpcm_held: bool,
 }
 
 impl<'a> Bank<'a> {
     /// Parse `bytes`.
     pub fn parse(bytes: &'a [u8]) -> Result<Self, FormatError> {
+        let b = Self::parse_header(bytes)?;
+        if b.off_adpcm as usize + b.adpcm_bytes as usize > bytes.len() {
+            return Err(FormatError::Truncated);
+        }
+        Ok(b)
+    }
+
+    /// Parse only the tables of a bank. `bytes` is the container up to the end of
+    /// the tables ([`Bank::tables_used`] bytes at least), without the ADPCM
+    /// region: a game that streams the samples from disc straight into SPU RAM
+    /// never holds them in main RAM. Everything works except [`Bank::adpcm`],
+    /// which returns an empty slice; [`Bank::adpcm_range`] says where the
+    /// region is in the full container.
+    ///
+    /// # Errors
+    /// As [`Bank::parse`], except that the ADPCM region need not be present.
+    ///
+    /// ```
+    /// use psx_seq::format::Bank;
+    /// let mut f = vec![0u8; 64];
+    /// f[..4].copy_from_slice(b"PSQB");
+    /// f[4] = 1;
+    /// f[28..32].copy_from_slice(&64u32.to_le_bytes()); // off_env
+    /// f[32..36].copy_from_slice(&64u32.to_le_bytes()); // off_adpcm
+    /// f[36..40].copy_from_slice(&4096u32.to_le_bytes()); // adpcm_bytes
+    /// assert!(Bank::parse(&f).is_err());
+    /// let b = Bank::parse_tables(&f).unwrap();
+    /// assert_eq!(b.adpcm_range(), (64, 4096));
+    /// assert!(b.adpcm().is_empty());
+    /// ```
+    pub fn parse_tables(bytes: &'a [u8]) -> Result<Self, FormatError> {
+        let mut b = Self::parse_header(bytes)?;
+        if b.tables_used() > bytes.len() {
+            return Err(FormatError::Truncated);
+        }
+        b.adpcm_held = b.off_adpcm as usize + b.adpcm_bytes as usize <= bytes.len();
+        Ok(b)
+    }
+
+    /// Bytes from the start of the container to the end of the last table
+    /// (envelopes included): what [`Bank::parse_tables`] needs resident. The
+    /// ADPCM region starts at or after this, at [`Bank::adpcm_range`].
+    #[must_use]
+    pub fn tables_used(&self) -> usize {
+        self.off_env as usize + 4 * self.n_env_words as usize
+    }
+
+    /// Where the ADPCM region sits in the full container, as
+    /// `(offset, length)` in bytes.
+    #[must_use]
+    pub fn adpcm_range(&self) -> (u32, u32) {
+        (self.off_adpcm, self.adpcm_bytes)
+    }
+
+    fn parse_header(bytes: &'a [u8]) -> Result<Self, FormatError> {
         if bytes.get(0..4) != Some(&BANK_MAGIC) || le16(bytes, 4) != Some(1) {
             return Err(FormatError::BadHeader);
         }
@@ -243,15 +300,17 @@ impl<'a> Bank<'a> {
             off_env: le32(bytes, 28).ok_or(t)?,
             off_adpcm: le32(bytes, 32).ok_or(t)?,
             adpcm_bytes: le32(bytes, 36).ok_or(t)?,
+            adpcm_held: true,
         };
-        if b.off_adpcm as usize + b.adpcm_bytes as usize > bytes.len() {
-            return Err(t);
-        }
         Ok(b)
     }
 
-    /// The ADPCM region, to upload to SPU RAM.
+    /// The ADPCM region, to upload to SPU RAM (empty for a bank parsed with
+    /// [`Bank::parse_tables`] over the tables alone).
     pub fn adpcm(&self) -> &'a [u8] {
+        if !self.adpcm_held {
+            return &[];
+        }
         &self.bytes[self.off_adpcm as usize..(self.off_adpcm + self.adpcm_bytes) as usize]
     }
 
