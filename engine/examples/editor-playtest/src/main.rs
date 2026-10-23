@@ -79,8 +79,8 @@ use psx_gpu::{
     material::{BlendMode, TextureMaterial},
     ot::OrderingTable,
     prim::{
-        LineMono, QuadFlat, QuadTexturedGouraud, QuadTexturedMaterial, Sprite, TriFlat,
-        TriTextured, TriTexturedGouraud,
+        QuadFlat, QuadTexturedGouraud, QuadTexturedMaterial, Sprite, TriFlat, TriTextured,
+        TriTexturedGouraud,
     },
     Gpu,
 };
@@ -121,10 +121,15 @@ mod player_ranged;
 mod playtest_runtime;
 mod playtest_scene;
 mod playtest_update;
-#[cfg(feature = "vector-hud-proof")]
-mod stance_hud_layout;
-#[cfg(feature = "vector-hud-proof")]
-mod vector_hud;
+// The stance HUD: the sprite art and its composition are shared with the host viewer and the
+// showcase, which use only part of them, hence the allowance.
+#[allow(dead_code)]
+#[path = "stance_hud_packets.rs"]
+mod hud_packets;
+#[allow(dead_code)]
+#[path = "stance_hud_sprites.rs"]
+mod hud_sprites;
+mod stance_hud;
 mod vitality_circle_runtime;
 use playtest_update::{Gait, LocoPhase};
 #[cfg(feature = "card-trace")]

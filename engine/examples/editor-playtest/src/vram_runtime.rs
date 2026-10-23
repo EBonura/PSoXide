@@ -201,6 +201,27 @@ pub(super) fn upload_particle_texture() -> Option<TextureMaterial> {
     vram_arena().upload_particle_texture()
 }
 
+/// Upload the stance HUD's atlas and palettes (see `VramRuntime::upload_stance_hud`) and say where
+/// they are, or `None` when VRAM has no room for them.
+pub(super) fn upload_stance_hud() -> Option<crate::hud_packets::HudVram> {
+    use psx_game_runtime::vram::STANCE_HUD_BLOCK;
+    let mut clut_words = [0u16; crate::hud_sprites::CLUT_COUNT];
+    let page = vram_arena().upload_stance_hud(
+        &crate::hud_sprites::ATLAS,
+        crate::hud_sprites::ATLAS_HW_W as u16,
+        crate::hud_sprites::ATLAS_H as u16,
+        &crate::hud_sprites::CLUTS,
+        &mut clut_words,
+    )?;
+    Some(crate::hud_packets::HudVram {
+        page,
+        // The effects quadrant is the lower right of the page, and the atlas is in a block of it.
+        atlas_u: (128 + STANCE_HUD_BLOCK.0) as u8,
+        atlas_v: (128 + STANCE_HUD_BLOCK.1) as u8,
+        clut_words,
+    })
+}
+
 /// Look up the sky panorama's VRAM slot, if the sky is uploaded.
 pub(super) fn find_sky_panorama_vram_slot(asset_id: AssetId) -> Option<VramSlot> {
     vram_arena().find_sky_panorama_vram_slot(asset_id)

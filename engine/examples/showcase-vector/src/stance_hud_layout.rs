@@ -20,12 +20,12 @@ pub struct HudIds {
     health: [GroupId; 10],
     emblem: GroupId,
     emblem_core: GroupId,
-    rail: GroupId,
+    rail: Option<GroupId>,
     energy: [GroupId; 10],
 }
 
 impl HudIds {
-    /// Resolve every group the HUD draws. `None` if the asset lacks one.
+    /// Resolve every group the HUD draws. `None` if the asset lacks one (the rail is optional).
     pub fn new(asset: &VectorAsset<'_>) -> Option<Self> {
         let numbered = |prefix: &str| -> Option<[GroupId; 10]> {
             let mut out = [asset.group("plate")?; 10];
@@ -44,7 +44,7 @@ impl HudIds {
             health: numbered("health_")?,
             emblem: asset.group("emblem")?,
             emblem_core: asset.group("emblem_core")?,
-            rail: asset.group("rail")?,
+            rail: asset.group("rail"),
             energy: numbered("energy_")?,
         })
     }
@@ -68,6 +68,8 @@ pub struct HudState {
     pub inactive: Bar,
     /// Lit energy crystals, 0 to 10.
     pub energy: u8,
+    /// Also draw the inactive stance's cells (dimmed) on the back bar.
+    pub back_cells: bool,
 }
 
 const AMBER_EMPTY: [u8; 3] = [70, 44, 24];
@@ -97,6 +99,18 @@ pub fn draw_hud(
         ..Style::DEFAULT
     };
     draw(ids.plate, &back, &dim);
+    if state.back_cells {
+        let lit = scaled(state.inactive.rgb, 96);
+        let off = scaled(state.inactive.rgb, 40);
+        for (i, &cell) in ids.health.iter().enumerate() {
+            let tint = if (i as u8) < state.inactive.cells {
+                lit
+            } else {
+                off
+            };
+            draw(cell, &back, &Style::tinted(tint));
+        }
+    }
     draw(ids.plate, &front, &Style::tinted(state.active.rgb));
     let empty = scaled(state.active.rgb, 52);
     for (i, &cell) in ids.health.iter().enumerate() {
@@ -109,7 +123,9 @@ pub fn draw_hud(
     }
     draw(ids.emblem, &front, &Style::tinted(state.active.rgb));
     draw(ids.emblem_core, &front, &Style::tinted(state.inactive.rgb));
-    draw(ids.rail, &front, &Style::DEFAULT);
+    if let Some(rail) = ids.rail {
+        draw(rail, &front, &Style::DEFAULT);
+    }
     for (i, &gem) in ids.energy.iter().enumerate() {
         let tint = if (i as u8) < state.energy {
             [255, 255, 255]

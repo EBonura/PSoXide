@@ -198,4 +198,5 @@ dependencies = [
  "psx-io",
  "psx-rt",
  "psx-vector",
+ "psx-vram",
 ]

@@ -6,6 +6,14 @@ license = "GPL-2.0-or-later"
 
 [workspace]
 
+[features]
+# Draw the sprite stance HUD (hud_sprites + hud_packets) instead of the vector one.
+hud-sprites = []
+# Draw a grid of HUD states (two stances by four levels) and nothing else, for frame review.
+hud-grid = []
+# Draw only the animated sprite HUD, swapping stance over and over, for a video.
+hud-anim = []
+
 [[bin]]
 name = "showcase-vector"
 path = "src/main.rs"
@@ -20,5 +28,6 @@ opt-level     = 2
 psx-engine = { path = "../../crates/psx-engine" }
 psx-gpu    = { path = "../../../sdk/crates/psx-gpu" }
 psx-io     = { path = "../../../sdk/crates/psx-io" }
+psx-vram   = { path = "../../../sdk/crates/psx-vram" }
 psx-rt     = { path = "../../../sdk/crates/psx-rt", features = ["alloc"] }
 psx-vector = { path = "../../crates/psx-vector" }

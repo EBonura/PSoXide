@@ -34,8 +34,8 @@ use psx_level::{
     ResidencyManager, RoomIndex,
 };
 use psx_vram::{
-    upload_bytes, Clut, TextureDepth, TexturePage, VramAllocator, VramHandle, VramRect,
-    VramRegionSource,
+    upload_16bpp, upload_bytes, Clut, TextureDepth, TexturePage, VramAllocator, VramHandle,
+    VramRect, VramRegionSource,
 };
 use upload_queue::{VramUploadJob, VramUploadKind, VramUploadQueue};
 
@@ -79,6 +79,13 @@ pub const VITALITY_HUD_DIAL_TEXEL_U: u8 = 16;
 pub const VITALITY_HUD_DIAL_TEXEL_V: u8 = 0;
 /// Square HUD swap-dial edge in texels.
 pub const VITALITY_HUD_DIAL_TEXEL_SIZE: u16 = 32;
+/// Where the stance HUD's atlas starts inside the shared gameplay-effects quadrant, in texels from
+/// the quadrant's corner: the lower-right 64 x 64 block, which the shadow decal (top right), the
+/// particle decal and the swap dial (top left) and the vitality circle (lower left) leave free.
+pub const STANCE_HUD_BLOCK: (u16, u16) = (64, 64);
+/// Most palettes the stance HUD can take from the CLUT band.
+pub const STANCE_HUD_MAX_CLUTS: usize = 40;
+
 /// Particle decals use the U=0 half of the shared shadow/particle 4bpp page.
 pub const PARTICLE_TEXEL_U: u8 = 0;
 /// Generated particle decal edge in texels.
@@ -638,6 +645,8 @@ pub struct VramRuntime<
     shadow_clut_region: VramHandle,
     vitality_circle_clut_region: VramHandle,
     particle_clut_region: VramHandle,
+    /// The stance HUD's palettes, 16 entries each, in the CLUT band.
+    stance_hud_cluts: [VramHandle; STANCE_HUD_MAX_CLUTS],
     upload_queue: VramUploadQueue,
     /// Streamed UI image VRAM slots created on menu entry, tracked so they
     /// can be released on gameplay entry. One entry per streamed Texture
@@ -693,6 +702,7 @@ impl<
             shadow_clut_region: VramHandle::Empty,
             vitality_circle_clut_region: VramHandle::Empty,
             particle_clut_region: VramHandle::Empty,
+            stance_hud_cluts: [VramHandle::Empty; STANCE_HUD_MAX_CLUTS],
             upload_queue: VramUploadQueue::new(),
             ui_image_slots: [None; MAX_UI_IMAGE_SLOTS],
         }
@@ -1103,6 +1113,70 @@ impl<
             )
             .with_texture_window(TextureWindow::power_of_two_tile(128, 128, 128, 128)),
         )
+    }
+
+    /// Upload the stance HUD: its 4bpp atlas into the free lower-right block of the shared
+    /// gameplay-effects quadrant (no page of its own) and each of its 16-entry palettes into a slot
+    /// of the CLUT band. `atlas` is `atlas_hw_w` halfwords by `atlas_h` rows (at most 16 by 64);
+    /// `cluts` holds the palettes one after another. The CLUT word of each is written to
+    /// `clut_words`. Returns the texture page (the atlas is at [`STANCE_HUD_BLOCK`] in its
+    /// effect quadrant, that is at texel `128 + 64` across and down), or `None`, with nothing
+    /// left allocated, when the effect page or the CLUT band has no room or the data does not fit.
+    /// The palettes are freed by [`Self::release_gameplay_vram`].
+    #[allow(clippy::needless_range_loop)] // a failed alloc frees the slots before `i` by index
+    pub fn upload_stance_hud(
+        &mut self,
+        atlas: &[u16],
+        atlas_hw_w: u16,
+        atlas_h: u16,
+        cluts: &[u16],
+        clut_words: &mut [u16],
+    ) -> Option<TexturePage> {
+        let count = cluts.len() / 16;
+        if atlas_hw_w > 16
+            || atlas_h > 64
+            || atlas.len() != usize::from(atlas_hw_w) * usize::from(atlas_h)
+            || !cluts.len().is_multiple_of(16)
+            || count > STANCE_HUD_MAX_CLUTS
+            || clut_words.len() < count
+        {
+            return None;
+        }
+        let page = self.effect_texture_page()?;
+        let mut placed = [Clut::new(0, 0); STANCE_HUD_MAX_CLUTS];
+        for i in 0..count {
+            match self.allocator.alloc_clut(16) {
+                Some((clut, region)) => {
+                    self.stance_hud_cluts[i] = region;
+                    placed[i] = clut;
+                }
+                None => {
+                    for handle in &mut self.stance_hud_cluts[..i] {
+                        self.allocator
+                            .free(core::mem::replace(handle, VramHandle::Empty));
+                    }
+                    return None;
+                }
+            }
+        }
+        upload_16bpp(
+            VramRect::new(
+                page.x() + (128 + STANCE_HUD_BLOCK.0) / 4,
+                page.y() + 128 + STANCE_HUD_BLOCK.1,
+                atlas_hw_w,
+                atlas_h,
+            ),
+            atlas,
+        );
+        for i in 0..count {
+            let clut = placed[i];
+            upload_16bpp(
+                VramRect::new(clut.x(), clut.y(), 16, 1),
+                &cluts[16 * i..16 * i + 16],
+            );
+            clut_words[i] = clut.uv_word();
+        }
+        Some(page)
     }
 
     /// Look up the VRAM slot a previously-uploaded asset occupies.
@@ -2125,6 +2199,10 @@ impl<
             &mut self.particle_clut_region,
             VramHandle::Empty,
         ));
+        for handle in &mut self.stance_hud_cluts {
+            self.allocator
+                .free(core::mem::replace(handle, VramHandle::Empty));
+        }
         self.small_texture_page = None;
         self.small_model_quadrants = 0;
         self.last_evict_room = INVALID_ROOM_INDEX;

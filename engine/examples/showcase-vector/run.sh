@@ -18,7 +18,7 @@ frontend=${FRONTEND:-$root/target/release/frontend}
 cook() { (cd "$engine" && cargo run -q -p psx-vector-cook --bin psx-svg-cook -- "$@"); }
 
 cook cook examples/showcase-vector/assets/gallery.svg -o examples/showcase-vector/assets/gallery.psvg --quiet
-cook cook examples/editor-playtest/assets/hud/stance_hud.svg -o examples/editor-playtest/assets/hud/stance_hud.psvg \
+cook cook examples/showcase-vector/assets/hud/stance_hud.svg -o examples/showcase-vector/assets/hud/stance_hud.psvg \
   --budget total=80 --quiet
 
 (
