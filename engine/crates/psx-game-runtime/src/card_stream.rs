@@ -148,6 +148,8 @@ struct Slot {
     /// The room is, as of the last pass, at a distance a card is drawn from
     /// (give or take [`DRAW_MARGIN`]).
     drawable: bool,
+    /// Sector of the wanted picture, as of the last pass (0 for none).
+    sector: u32,
     /// The other slot of this room while a change of view shows in two
     /// steps ([`NO_SLOT`] otherwise).
     partner: u8,
@@ -168,6 +170,7 @@ impl Slot {
         hidden: false,
         since: 0,
         drawable: false,
+        sector: 0,
         partner: NO_SLOT,
         incoming: false,
         fade_start: 0,
@@ -556,12 +559,23 @@ impl<K: Copy> CardStream<K> {
                 hidden: false,
                 since: 0,
                 drawable: false,
+                sector: 0,
                 partner: NO_SLOT,
                 incoming: false,
                 fade_start: 0,
             };
             self.by_room[usize::from(room)] = slot as u8;
             placed += 1;
+        }
+        for slot in 0..SLOTS {
+            let held = self.slots[slot];
+            if held.room != u16::MAX {
+                self.slots[slot].sector = if held.want == NO_VIEW {
+                    0
+                } else {
+                    self.picture_sector(usize::from(held.room), held.want, input)
+                };
+            }
         }
         let (mut live, mut backlog, mut blank) = (0, 0, 0);
         for (slot, held) in self.slots.iter().enumerate() {
@@ -718,7 +732,7 @@ impl<K: Copy> CardStream<K> {
                 if held.pending {
                     continue;
                 }
-                let sector = self.picture_sector(usize::from(held.room), held.want, input);
+                let sector = held.sector;
                 if sector == 0 {
                     // A room without pictures: never asked again.
                     self.slots[slot].want = NO_VIEW;
