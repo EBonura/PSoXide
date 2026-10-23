@@ -48,9 +48,10 @@ use crate::request::{Request, SECTOR_WORDS};
 const CD_BIT: u32 = 1 << source::CDROM;
 /// Status reads to wait for the data FIFO to fill after a sector interrupt.
 const FIFO_POLLS: u32 = 256;
-/// Bytes of private stack the handler runs on. The handler is a flat loop
-/// with a small frame; the full transport's deeper state machine measured 248.
-pub const DRAIN_STACK_BYTES: usize = 512;
+/// Bytes of private stack the handler runs on. The handler is a flat loop with
+/// a small frame: the deepest call measured used 112 bytes (Half-Life, five
+/// weapon switches in the emulator, stack painted by [`start`]).
+pub const DRAIN_STACK_BYTES: usize = 384;
 /// Fill byte of the handler stack, to measure how much of it was used.
 const STACK_FILL: u8 = 0xa5;
 
