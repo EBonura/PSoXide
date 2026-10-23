@@ -1123,6 +1123,7 @@ impl<
     /// effect quadrant, that is at texel `128 + 64` across and down), or `None`, with nothing
     /// left allocated, when the effect page or the CLUT band has no room or the data does not fit.
     /// The palettes are freed by [`Self::release_gameplay_vram`].
+    #[allow(clippy::needless_range_loop)] // a failed alloc frees the slots before `i` by index
     pub fn upload_stance_hud(
         &mut self,
         atlas: &[u16],
@@ -1135,7 +1136,7 @@ impl<
         if atlas_hw_w > 16
             || atlas_h > 64
             || atlas.len() != usize::from(atlas_hw_w) * usize::from(atlas_h)
-            || cluts.len() % 16 != 0
+            || !cluts.len().is_multiple_of(16)
             || count > STANCE_HUD_MAX_CLUTS
             || clut_words.len() < count
         {
