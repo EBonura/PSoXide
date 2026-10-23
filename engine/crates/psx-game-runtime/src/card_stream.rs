@@ -5,25 +5,37 @@
 //! [`SLOTS`] slots, each the size of one picture (one 2 KiB disc sector, a
 //! `16 x 64` halfword rectangle with its palette in the last row). This
 //! module decides which room holds which slot, which view each slot should
-//! show, and reads the missing views off the disc one sector at a time
-//! through the asynchronous transport the rooms stream through
-//! ([`RoomTransport`]).
+//! show, and reads the missing views off the disc through the asynchronous
+//! transport the rooms stream through ([`RoomTransport`]).
 //!
 //! * **Membership.** A room with a card holds a slot while it is within
 //!   `enter` units of the eye (plan distance) and gives it up past `leave`
-//!   (the gap is the hysteresis). With no slot free the farthest slot past
-//!   the newcomer's distance is taken over.
+//!   (the gap is the hysteresis). `enter` reaches past the distance cards
+//!   show from, so a room has its slot, and its picture on the way, before
+//!   its card is drawn. With no slot free the room with the worst *rank*
+//!   (see below) gives its slot up to a better one.
+//! * **Rank.** A room inside the card distance (`far`) always outranks one
+//!   beyond it. Among the rooms of a class the nearer one ranks better, and
+//!   one the eye is walking towards ranks better by up to `lead` units, so
+//!   slots and reads go to the rooms about to come into view first.
 //! * **Views.** Each slot wants the view [`view_toward`] picks for the eye,
 //!   kept while [`view_keep`] still says it serves. A slot whose shown view
-//!   is not the wanted one is read next, nearest first.
-//! * **Reads.** Up to [`STAGES`] sectors are in flight or waiting for the
-//!   GPU, each landing in its own 2 KiB part of a window the game keeps. A
-//!   landed picture is uploaded by [`write_upload_packets`] as GPU list
-//!   nodes (one row each, under the 16 word node limit), so the GPU does the
-//!   copy as it draws and the CPU never waits for it. Until it is, the slot
-//!   keeps showing what it had.
+//!   is not the wanted one is read next; one that shows nothing at all
+//!   (the card would be blank, or is about to be) before one that only shows
+//!   the wrong side.
+//! * **Reads.** The window the pictures land in is cut into [`CELLS`] cells
+//!   of one sector. Up to [`STAGES`] reads are in flight or waiting for the
+//!   GPU, each a run of up to [`RUN_CELLS`] consecutive sectors: the best
+//!   ranked picture and every other wanted picture that lies within the
+//!   same stretch of the disc (the cook lays the pictures of one view
+//!   side by side, nearby rooms next to each other, so rooms that are near
+//!   each other in the world are near on the disc). A landed picture is
+//!   uploaded by [`write_upload_packets`] as GPU list nodes (one row each,
+//!   under the 16 word node limit), so the GPU does the copy as it draws and
+//!   the CPU never waits for it. Until it is, the slot keeps showing what it
+//!   had.
 //!
-//! A failed read frees its stage and the slot is asked for again later.
+//! A failed read frees its stage and the slots are asked for again later.
 //! Nothing here waits.
 
 use psx_grid::render::{
@@ -33,15 +45,35 @@ use psx_grid::render::{
 
 use crate::grid_stream::{Poll, RoomTransport};
 
-/// Reads in flight or landed and waiting for the GPU, at most.
-pub const STAGES: usize = 4;
+/// Cells of one sector the window the reads land in is cut into.
+pub const CELLS: usize = 16;
+/// Sectors one read brings in at most.
+pub const RUN_CELLS: usize = 8;
+/// Reads in flight or landed and waiting for the GPU, at most. Two keep the
+/// drive busy and leave the queue room for the rooms' own reads.
+pub const STAGES: usize = CELLS / RUN_CELLS;
 /// Words of the window the stream reads into.
-pub const CARD_WINDOW_WORDS: usize = STAGES * SLOT_BYTES / 4;
+pub const CARD_WINDOW_WORDS: usize = CELLS * SLOT_BYTES / 4;
 /// Rooms the stream can track. A level with more rooms has its farthest
 /// ones left without cards.
 pub const MAX_ROOMS: usize = 512;
 /// Ticks between two membership passes.
 const PASS_TICKS: u32 = 4;
+/// Rooms that take a slot in one pass: a fresh level fills its atlas over a
+/// few passes instead of one long one.
+const NEW_PER_PASS: usize = 12;
+/// Rank offset between the rooms inside the card distance and the ones
+/// beyond it (and between the read tiers).
+const CLASS_GAP: i32 = 1 << 24;
+/// Shortest move between two passes, in runtime units, that updates the
+/// heading.
+const MIN_STEP: i32 = 16;
+/// Ticks a slot may wait for its picture before it is read ahead of the
+/// ones nearer on the disc.
+const PATIENCE: u32 = 90;
+/// Units past the distances a card is drawn between that a room still counts
+/// as drawable: the eye moves less than this between two passes.
+const DRAW_MARGIN: i32 = 100;
 
 /// What a [`CardStream`] has done, for telemetry and diagnosis.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
@@ -55,7 +87,7 @@ pub struct CardCounters {
     pub failed: u32,
     /// Pictures uploaded to VRAM.
     pub uploads: u32,
-    /// Slots taken over from a farther room.
+    /// Slots taken over from a worse ranked room.
     pub evictions: u32,
     /// Submits the transport refused (its queue full).
     pub refused: u32,
@@ -63,6 +95,17 @@ pub struct CardCounters {
     pub live: u32,
     /// Rooms in range at the last pass that found no slot.
     pub starved: u32,
+    /// Pictures that rode along in a read queued for another: the reads
+    /// merging saved.
+    pub merged: u32,
+    /// Slots at the last pass that wait for a picture (any tier).
+    pub backlog: u32,
+    /// Of those, slots inside the card distance that show nothing yet.
+    pub blank: u32,
+    /// First sector (from the pictures' base) of the last read queued.
+    pub last_first: u32,
+    /// Sectors of the last read queued.
+    pub last_sectors: u32,
 }
 
 #[derive(Copy, Clone)]
@@ -75,6 +118,17 @@ struct Slot {
     want: u8,
     /// A read for this slot is in flight or waiting for the GPU.
     pending: bool,
+    /// Rank of the room at the last pass: lower is better, rooms inside the
+    /// card distance below [`CLASS_GAP`].
+    rank: i32,
+    /// The room is too near for its card to be drawn (something else stands
+    /// there): a wrong side matters only once the eye backs off.
+    hidden: bool,
+    /// Tick the slot started waiting for a picture at (0 when it is not).
+    since: u32,
+    /// The room is, as of the last pass, at a distance a card is drawn from
+    /// (give or take [`DRAW_MARGIN`]).
+    drawable: bool,
 }
 
 impl Slot {
@@ -83,32 +137,46 @@ impl Slot {
         shown: NO_VIEW,
         want: NO_VIEW,
         pending: false,
+        rank: i32::MAX,
+        hidden: false,
+        since: 0,
+        drawable: false,
     };
+}
+
+/// A picture a read is bringing in.
+#[derive(Copy, Clone)]
+struct Entry {
+    slot: u8,
+    room: u16,
+    view: u8,
+}
+
+/// One read: consecutive sectors landing in consecutive cells of a stage.
+#[derive(Copy, Clone)]
+struct Run<K> {
+    ticket: K,
+    landed: bool,
+    /// Per cell of the run, the picture it holds that a slot still waits
+    /// for, until the picture is in a frame's list.
+    entries: [Option<Entry>; RUN_CELLS],
 }
 
 #[derive(Copy, Clone)]
 enum Stage<K> {
     Free,
-    Reading {
-        ticket: K,
-        slot: u8,
-        room: u16,
-        view: u8,
-    },
-    Ready {
-        slot: u8,
-        room: u16,
-        view: u8,
-    },
+    Busy(Run<K>),
 }
 
 /// What a call to [`CardStream::update`] knows about the level and the eye.
 pub struct CardInput<'a> {
     /// The card of each room.
     pub table: &'a CardTable<'a>,
-    /// Per room, the sector of its pictures relative to `base_lba` (0 for
-    /// none); empty for a level without cards.
+    /// Per room, the sector of its pictures (view 0) relative to `base_lba`
+    /// (0 for none); empty for a level without cards.
     pub sectors: &'a [u32],
+    /// Sectors between a room's view `k` and view `k + 1`.
+    pub stride: u32,
     /// Disc sector `sectors` is relative to.
     pub base_lba: u32,
     /// The eye, world runtime units.
@@ -117,6 +185,14 @@ pub struct CardInput<'a> {
     pub enter: i32,
     /// A room beyond this one gives its slot up.
     pub leave: i32,
+    /// Cards show out to this plan distance: rooms inside it outrank the
+    /// ones beyond (which only hold a slot to be early).
+    pub far: i32,
+    /// Cards are not drawn closer than this plan distance.
+    pub near: i32,
+    /// How much better a room the eye is walking straight towards ranks
+    /// than one beside it, and one behind ranks worse, in runtime units.
+    pub lead: i32,
 }
 
 /// A landed picture ready for the GPU.
@@ -124,8 +200,8 @@ pub struct CardInput<'a> {
 pub struct Upload {
     /// Atlas slot to write.
     pub slot: u8,
-    /// Which stage of the window holds the picture.
-    pub stage: u8,
+    /// Which cell of the window holds the picture.
+    pub cell: u8,
     room: u16,
     view: u8,
 }
@@ -143,9 +219,21 @@ pub struct CardStream<K> {
     pub counters: CardCounters,
     slots: [Slot; SLOTS],
     live: [LiveSlot; SLOTS],
+    /// The slots to draw, ascending: those with a picture whose room is
+    /// drawable.
+    draw: [u8; SLOTS],
+    draw_count: usize,
     by_room: [u8; MAX_ROOMS],
     stages: [Stage<K>; STAGES],
     ticks: u32,
+    /// Direction the eye has been walking in, plan, unit length as Q12
+    /// (zero before it has moved).
+    heading: [i32; 2],
+    last_eye: [i32; 2],
+    seen_eye: bool,
+    /// Sector the drive ends at once the reads queued so far are done (0
+    /// before the first), relative to the pictures' base.
+    tail: u32,
 }
 
 impl<K: Copy> CardStream<K> {
@@ -161,12 +249,23 @@ impl<K: Copy> CardStream<K> {
                 refused: 0,
                 live: 0,
                 starved: 0,
+                merged: 0,
+                backlog: 0,
+                blank: 0,
+                last_first: 0,
+                last_sectors: 0,
             },
             slots: [Slot::EMPTY; SLOTS],
             live: [LiveSlot::EMPTY; SLOTS],
+            draw: [0; SLOTS],
+            draw_count: 0,
             by_room: [NO_SLOT; MAX_ROOMS],
             stages: [Stage::Free; STAGES],
             ticks: 0,
+            heading: [0; 2],
+            last_eye: [0; 2],
+            seen_eye: false,
+            tail: 0,
         }
     }
 
@@ -174,6 +273,25 @@ impl<K: Copy> CardStream<K> {
     /// view its VRAM shows.
     pub fn live(&self) -> &[LiveSlot; SLOTS] {
         &self.live
+    }
+
+    /// The slots the card draw looks at: the ones that show a picture and
+    /// whose room is at a distance cards are drawn from. Refreshed every
+    /// pass and whenever a picture lands, so the draw does not walk every
+    /// slot to find the few in the band.
+    pub fn draw_list(&self) -> &[u8] {
+        &self.draw[..self.draw_count]
+    }
+
+    fn rebuild_draw_list(&mut self) {
+        let mut count = 0;
+        for (slot, held) in self.slots.iter().enumerate() {
+            if held.room != u16::MAX && held.drawable && held.shown != NO_VIEW {
+                self.draw[count] = slot as u8;
+                count += 1;
+            }
+        }
+        self.draw_count = count;
     }
 
     /// Drive the stream one tick: poll the reads in flight, every few ticks
@@ -201,37 +319,69 @@ impl<K: Copy> CardStream<K> {
         T: RoomTransport<Ticket = K>,
     {
         for stage in &mut self.stages {
-            if let Stage::Reading {
-                ticket,
-                slot,
-                room,
-                view,
-            } = *stage
-            {
-                match transport.poll(ticket) {
-                    Poll::Pending => {}
-                    Poll::Done => {
-                        self.counters.landed += 1;
-                        *stage = Stage::Ready { slot, room, view };
-                    }
-                    Poll::Cancelled | Poll::Failed => {
-                        self.counters.failed += 1;
-                        let held = &mut self.slots[usize::from(slot)];
-                        if held.room == room {
+            let Stage::Busy(run) = stage else {
+                continue;
+            };
+            if run.landed {
+                continue;
+            }
+            match transport.poll(run.ticket) {
+                Poll::Pending => {}
+                Poll::Done => {
+                    self.counters.landed += 1;
+                    run.landed = true;
+                }
+                Poll::Cancelled | Poll::Failed => {
+                    self.counters.failed += 1;
+                    for entry in run.entries.iter().flatten() {
+                        let held = &mut self.slots[usize::from(entry.slot)];
+                        if held.room == entry.room {
                             held.pending = false;
                         }
-                        *stage = Stage::Free;
                     }
+                    *stage = Stage::Free;
                 }
             }
         }
+    }
+
+    /// Follow the direction the eye walks in.
+    fn update_heading(&mut self, eye: [i32; 3]) {
+        let [ex, _, ez] = eye;
+        if self.seen_eye {
+            let (dx, dz) = (ex - self.last_eye[0], ez - self.last_eye[1]);
+            let length = plan_distance(dx, dz);
+            if length >= MIN_STEP {
+                let unit = [(dx << 12) / length, (dz << 12) / length];
+                self.heading = if self.heading == [0, 0] {
+                    unit
+                } else {
+                    [
+                        (3 * self.heading[0] + unit[0]) >> 2,
+                        (3 * self.heading[1] + unit[1]) >> 2,
+                    ]
+                };
+            }
+        }
+        self.last_eye = [ex, ez];
+        self.seen_eye = true;
+    }
+
+    /// Rank of a room the eye sees at offset `(dx, dz)` from it (eye minus
+    /// card): plan distance, less the lead for a room straight ahead.
+    fn rank(&self, dx: i32, dz: i32, distance: i32, input: &CardInput<'_>) -> i32 {
+        let class = if distance <= input.far { 0 } else { CLASS_GAP };
+        let toward = -dx * self.heading[0] - dz * self.heading[1];
+        let ahead = toward / distance.max(1);
+        class + (distance - ((ahead * input.lead) >> 12)).max(0)
     }
 
     /// Membership and wanted views.
     fn pass(&mut self, input: &CardInput<'_>) {
         let rooms = input.table.len().min(MAX_ROOMS);
         let [ex, _, ez] = input.eye;
-        // Slots whose rooms went out of range, and slots' views.
+        self.update_heading(input.eye);
+        // Slots whose rooms went out of range, and slots' views and ranks.
         for slot in 0..SLOTS {
             let held = self.slots[slot];
             if held.room == u16::MAX {
@@ -242,7 +392,8 @@ impl<K: Copy> CardStream<K> {
                 continue;
             };
             let (dx, dz) = (ex - card.centre[0], ez - card.centre[1]);
-            if plan_distance(dx, dz) > input.leave {
+            let distance = plan_distance(dx, dz);
+            if distance > input.leave {
                 self.release(slot);
                 continue;
             }
@@ -252,9 +403,14 @@ impl<K: Copy> CardStream<K> {
                 view_toward(dx, dz)
             };
             self.slots[slot].want = want;
+            self.slots[slot].rank = self.rank(dx, dz, distance, input);
+            self.slots[slot].hidden = distance < input.near;
+            self.slots[slot].drawable =
+                distance >= input.near - DRAW_MARGIN && distance <= input.far + DRAW_MARGIN;
         }
-        // Rooms that came into range take a free slot, or a farther one.
-        let mut starved = 0u32;
+        // The best ranked rooms in range that hold nothing, in order.
+        let mut best = [(i32::MAX, u16::MAX); NEW_PER_PASS];
+        let mut candidates = 0u32;
         for room in 0..rooms {
             if self.by_room[room] != NO_SLOT {
                 continue;
@@ -267,27 +423,57 @@ impl<K: Copy> CardStream<K> {
             if distance > input.enter {
                 continue;
             }
-            let Some(slot) = self.free_slot_for(distance, input) else {
-                starved += 1;
+            candidates += 1;
+            let rank = self.rank(dx, dz, distance, input);
+            if rank >= best[NEW_PER_PASS - 1].0 {
+                continue;
+            }
+            let mut at = NEW_PER_PASS - 1;
+            while at > 0 && best[at - 1].0 > rank {
+                best[at] = best[at - 1];
+                at -= 1;
+            }
+            best[at] = (rank, room as u16);
+        }
+        let mut starved = 0u32;
+        let mut placed = 0u32;
+        for &(rank, room) in best.iter().filter(|b| b.1 != u16::MAX) {
+            let Some(card) = input.table.card(usize::from(room)) else {
                 continue;
             };
+            let Some(slot) = self.free_slot_for(rank, input) else {
+                starved = candidates - placed;
+                break;
+            };
+            let (dx, dz) = (ex - card.centre[0], ez - card.centre[1]);
             self.slots[slot] = Slot {
-                room: room as u16,
+                room,
                 shown: NO_VIEW,
                 want: view_toward(dx, dz),
                 pending: false,
+                rank,
+                hidden: false,
+                since: 0,
+                drawable: false,
             };
-            self.by_room[room] = slot as u8;
+            self.by_room[usize::from(room)] = slot as u8;
+            placed += 1;
         }
-        let mut live = 0;
+        let (mut live, mut backlog, mut blank) = (0, 0, 0);
         for (slot, held) in self.slots.iter().enumerate() {
             self.live[slot] = LiveSlot {
                 room: held.room,
                 view: held.shown,
             };
             live += u32::from(held.room != u16::MAX);
+            let waiting = held.room != u16::MAX && held.want != NO_VIEW && held.shown != held.want;
+            backlog += u32::from(waiting);
+            blank += u32::from(waiting && held.shown == NO_VIEW && held.rank < CLASS_GAP);
         }
+        self.rebuild_draw_list();
         self.counters.live = live;
+        self.counters.backlog = backlog;
+        self.counters.blank = blank;
         self.counters.starved = starved;
     }
 
@@ -300,20 +486,19 @@ impl<K: Copy> CardStream<K> {
         self.slots[slot] = Slot::EMPTY;
     }
 
-    /// An empty slot, or the one held by the room farthest past `distance`.
-    fn free_slot_for(&mut self, distance: i32, input: &CardInput<'_>) -> Option<usize> {
+    /// An empty slot, or the one held by the worst ranked room, if that is
+    /// worse than `rank` by more than half the gap between entering and
+    /// leaving (so two rooms of equal rank do not trade a slot back and
+    /// forth).
+    fn free_slot_for(&mut self, rank: i32, input: &CardInput<'_>) -> Option<usize> {
         if let Some(slot) = self.slots.iter().position(|s| s.room == u16::MAX) {
             return Some(slot);
         }
-        let [ex, _, ez] = input.eye;
+        let margin = (input.leave - input.enter) / 2;
         let mut worst: Option<(usize, i32)> = None;
         for (slot, held) in self.slots.iter().enumerate() {
-            let Some(card) = input.table.card(usize::from(held.room)) else {
-                continue;
-            };
-            let d = plan_distance(ex - card.centre[0], ez - card.centre[1]);
-            if d > distance && worst.is_none_or(|(_, w)| d > w) {
-                worst = Some((slot, d));
+            if held.rank > rank.saturating_add(margin) && worst.is_none_or(|(_, w)| held.rank > w) {
+                worst = Some((slot, held.rank));
             }
         }
         let (slot, _) = worst?;
@@ -322,64 +507,150 @@ impl<K: Copy> CardStream<K> {
         Some(slot)
     }
 
-    /// Queue reads for the slots that need another view, nearest first, into
-    /// the free stages.
+    /// Queue reads for the slots that need another view into the free
+    /// stages: the best ranked picture, and every other wanted picture on
+    /// the same stretch of the disc.
     fn start_reads<T>(&mut self, transport: &mut T, window: &mut [u32], input: &CardInput<'_>)
     where
         T: RoomTransport<Ticket = K>,
     {
-        let [ex, _, ez] = input.eye;
         loop {
             let Some(stage) = self.stages.iter().position(|s| matches!(s, Stage::Free)) else {
                 return;
             };
-            let mut best: Option<(usize, i32)> = None;
-            for (slot, held) in self.slots.iter().enumerate() {
-                if held.room == u16::MAX
-                    || held.pending
-                    || held.want == NO_VIEW
-                    || held.shown == held.want
-                {
+            // Wanted pictures: (read key, sector, slot).
+            let mut wanted = [(0i32, 0u32, 0u8, 0u32); SLOTS];
+            let mut count = 0;
+            for slot in 0..SLOTS {
+                let held = self.slots[slot];
+                if held.room == u16::MAX || held.want == NO_VIEW {
                     continue;
                 }
-                let Some(card) = input.table.card(usize::from(held.room)) else {
+                if held.shown == held.want {
+                    self.slots[slot].since = 0;
                     continue;
+                }
+                if held.since == 0 {
+                    self.slots[slot].since = self.ticks.max(1);
+                }
+                if held.pending {
+                    continue;
+                }
+                let first = input
+                    .sectors
+                    .get(usize::from(held.room))
+                    .copied()
+                    .unwrap_or(0);
+                if first == 0 {
+                    // A room without pictures: never asked again.
+                    self.slots[slot].want = NO_VIEW;
+                    continue;
+                }
+                // Blank cards first (the ones about to be drawn before the
+                // ones further out), then wrong sides, those of cards
+                // that are drawn before those hidden by nearer geometry.
+                let tier = if held.shown != NO_VIEW {
+                    2 + i32::from(held.hidden)
+                } else if held.rank >= CLASS_GAP {
+                    1
+                } else {
+                    0
                 };
-                let d = plan_distance(ex - card.centre[0], ez - card.centre[1]);
-                if best.is_none_or(|(_, b)| d < b) {
-                    best = Some((slot, d));
-                }
+                let key = tier * CLASS_GAP + held.rank % CLASS_GAP;
+                let waited = self.ticks.wrapping_sub(self.slots[slot].since);
+                wanted[count] = (
+                    key,
+                    first + u32::from(held.want) * input.stride,
+                    slot as u8,
+                    waited,
+                );
+                count += 1;
             }
-            let Some((slot, _)) = best else {
+            let wanted = &wanted[..count];
+            // The most urgent tier first. Within it the picture nearest on the
+            // disc to where the reads queued before it end (the drive then
+            // sweeps the wanted pictures instead of hopping between them),
+            // unless one has waited out its patience: the one that waited
+            // longest, best ranked among equals.
+            let Some(tier) = wanted.iter().map(|w| w.0 / CLASS_GAP).min() else {
                 return;
             };
-            let held = self.slots[slot];
-            let sector = input
-                .sectors
-                .get(usize::from(held.room))
-                .copied()
-                .unwrap_or(0);
-            if sector == 0 {
-                // A room without pictures: never asked again.
-                self.slots[slot].want = NO_VIEW;
-                continue;
+            let urgent = wanted.iter().filter(|w| w.0 / CLASS_GAP == tier);
+            let tail = self.tail;
+            let Some(&(_, head, _, _)) = urgent
+                .clone()
+                .filter(|w| w.3 > PATIENCE)
+                .max_by_key(|w| (w.3, core::cmp::Reverse(w.0)))
+                .or_else(|| {
+                    urgent.min_by_key(|w| (if tail == 0 { 0 } else { w.1.abs_diff(tail) }, w.0))
+                })
+            else {
+                return;
+            };
+            // The stretch of RUN_CELLS sectors holding the head and the most
+            // other wanted pictures, the earliest among equals.
+            let mut start = head;
+            let mut most = 0;
+            for back in 0..RUN_CELLS as u32 {
+                let Some(lo) = head.checked_sub(back).filter(|&lo| lo > 0) else {
+                    break;
+                };
+                let inside = wanted
+                    .iter()
+                    .filter(|w| w.1 >= lo && w.1 < lo + RUN_CELLS as u32)
+                    .count();
+                if inside > most {
+                    most = inside;
+                    start = lo;
+                }
             }
-            let lba = input.base_lba + sector + u32::from(held.want);
+            let stretch = start..start + RUN_CELLS as u32;
+            let first = wanted
+                .iter()
+                .filter(|w| stretch.contains(&w.1))
+                .map(|w| w.1)
+                .min()
+                .unwrap_or(head);
+            let last = wanted
+                .iter()
+                .filter(|w| stretch.contains(&w.1))
+                .map(|w| w.1)
+                .max()
+                .unwrap_or(head);
+            let mut entries = [None; RUN_CELLS];
+            let mut riders = 0;
+            for &(_, sector, slot, _) in wanted.iter().filter(|w| stretch.contains(&w.1)) {
+                let held = self.slots[usize::from(slot)];
+                entries[(sector - first) as usize] = Some(Entry {
+                    slot,
+                    room: held.room,
+                    view: held.want,
+                });
+                riders += 1;
+            }
             transport.begin_transfer();
             // SAFETY: the window is memory the caller keeps for the stream's
-            // life, `stage` is one of its STAGES parts of one sector each,
-            // and the part is not reused until the read is reported finished.
-            let destination = unsafe { window.as_mut_ptr().add(stage * SLOT_BYTES / 4) };
-            match unsafe { transport.submit(lba, 1, destination, false) } {
+            // life, `stage` is one of its STAGES parts of RUN_CELLS sectors
+            // each, the run is at most RUN_CELLS sectors, and the part is not
+            // reused until the read is reported finished.
+            let destination =
+                unsafe { window.as_mut_ptr().add(stage * RUN_CELLS * SLOT_BYTES / 4) };
+            let lba = input.base_lba + first;
+            match unsafe { transport.submit(lba, last - first + 1, destination, false) } {
                 Some(ticket) => {
-                    self.stages[stage] = Stage::Reading {
+                    for entry in entries.iter().flatten() {
+                        self.slots[usize::from(entry.slot)].pending = true;
+                    }
+                    self.stages[stage] = Stage::Busy(Run {
                         ticket,
-                        slot: slot as u8,
-                        room: held.room,
-                        view: held.want,
-                    };
-                    self.slots[slot].pending = true;
+                        landed: false,
+                        entries,
+                    });
                     self.counters.submitted += 1;
+                    self.counters.merged += riders - 1;
+                    self.tail = last;
+                    self.counters.last_first = first;
+                    self.counters.last_sectors = last - first + 1;
                 }
                 None => {
                     self.counters.refused += 1;
@@ -395,41 +666,62 @@ impl<K: Copy> CardStream<K> {
         let mut out = [None; N];
         let mut count = 0;
         for (index, stage) in self.stages.iter_mut().enumerate() {
-            if count == N {
-                break;
+            let Stage::Busy(run) = stage else {
+                continue;
+            };
+            if !run.landed {
+                continue;
             }
-            if let Stage::Ready { slot, room, view } = *stage {
-                let held = &mut self.slots[usize::from(slot)];
-                if held.room != room {
+            for (cell, entry) in run.entries.iter_mut().enumerate() {
+                let Some(picture) = *entry else {
+                    continue;
+                };
+                if self.slots[usize::from(picture.slot)].room != picture.room {
                     // The slot was given to another room meanwhile.
-                    *stage = Stage::Free;
+                    *entry = None;
                     continue;
                 }
-                out[count] = Some(Upload {
-                    slot,
-                    stage: index as u8,
-                    room,
-                    view,
-                });
-                count += 1;
+                if count < N {
+                    out[count] = Some(Upload {
+                        slot: picture.slot,
+                        cell: (index * RUN_CELLS + cell) as u8,
+                        room: picture.room,
+                        view: picture.view,
+                    });
+                    count += 1;
+                }
+            }
+            if run.entries.iter().all(Option::is_none) {
+                *stage = Stage::Free;
             }
         }
         (out, count)
     }
 
     /// The uploads in `taken` are in a frame's list: VRAM now holds their
-    /// pictures and their stages are free again.
+    /// pictures and their cells are free again.
     pub fn applied(&mut self, taken: &[Option<Upload>]) {
         for upload in taken.iter().flatten() {
             let held = &mut self.slots[usize::from(upload.slot)];
             if held.room == upload.room {
                 held.shown = upload.view;
                 held.pending = false;
+                held.since = 0;
                 self.live[usize::from(upload.slot)].view = upload.view;
             }
-            self.stages[usize::from(upload.stage)] = Stage::Free;
+            let (index, cell) = (
+                usize::from(upload.cell) / RUN_CELLS,
+                usize::from(upload.cell) % RUN_CELLS,
+            );
+            if let Stage::Busy(run) = &mut self.stages[index] {
+                run.entries[cell] = None;
+                if run.entries.iter().all(Option::is_none) {
+                    self.stages[index] = Stage::Free;
+                }
+            }
             self.counters.uploads += 1;
         }
+        self.rebuild_draw_list();
     }
 
     /// Stop every read (on leaving gameplay) and forget every slot.
@@ -438,8 +730,10 @@ impl<K: Copy> CardStream<K> {
         T: RoomTransport<Ticket = K>,
     {
         for stage in &self.stages {
-            if let Stage::Reading { ticket, .. } = stage {
-                transport.cancel(*ticket);
+            if let Stage::Busy(run) = stage {
+                if !run.landed {
+                    transport.cancel(run.ticket);
+                }
             }
         }
         *self = Self::new();
@@ -499,7 +793,7 @@ pub fn write_upload_packets(
     let mut end = words;
     for upload in uploads.iter().flatten() {
         let (x, y) = psx_grid::render::slot_origin(origin, usize::from(upload.slot));
-        let from = usize::from(upload.stage) * SLOT_BYTES / 4;
+        let from = usize::from(upload.cell) * SLOT_BYTES / 4;
         for row in 0..ROWS {
             let node: &mut [u32; ROW_NODE_WORDS] = (&mut out[end - ROW_NODE_WORDS..end])
                 .try_into()
@@ -601,10 +895,14 @@ mod tests {
         CardInput {
             table,
             sectors,
+            stride: 1,
             base_lba: 10,
             eye,
             enter: 450,
             leave: 600,
+            far: 300,
+            near: 0,
+            lead: 0,
         }
     }
 
@@ -623,6 +921,17 @@ mod tests {
         }
     }
 
+    fn held(stream: &CardStream<usize>) -> Vec<u16> {
+        let mut v: Vec<u16> = stream
+            .live()
+            .iter()
+            .filter(|s| s.room != u16::MAX)
+            .map(|s| s.room)
+            .collect();
+        v.sort_unstable();
+        v
+    }
+
     #[test]
     fn rooms_in_range_take_slots_and_their_wanted_view_arrives() {
         let rows = rows(12);
@@ -635,13 +944,7 @@ mod tests {
         let input = input(&table, &sectors, [-10, 0, 0]);
         run(&mut stream, &mut disc, &mut window, &input, 60);
         // Rooms 0..=4 are within 450 units (x = 0..400).
-        let held: Vec<u16> = stream
-            .live()
-            .iter()
-            .filter(|s| s.room != u16::MAX)
-            .map(|s| s.room)
-            .collect();
-        assert_eq!(held.len(), 5, "{held:?}");
+        assert_eq!(held(&stream), [0, 1, 2, 3, 4]);
         // The eye is at x = 0 and the cards stand on +x: the eye is in
         // direction 180 degrees from them, view 4.
         for live in stream.live().iter().filter(|s| s.room != u16::MAX) {
@@ -677,14 +980,9 @@ mod tests {
             &input(&table, &sectors, [800, 0, 0]),
             80,
         );
-        let held: Vec<u16> = stream
-            .live()
-            .iter()
-            .filter(|s| s.room != u16::MAX)
-            .map(|s| s.room)
-            .collect();
-        assert!(!held.contains(&0) && !held.contains(&1));
-        assert!(held.contains(&8) && held.contains(&10));
+        let now = held(&stream);
+        assert!(!now.contains(&0) && !now.contains(&1));
+        assert!(now.contains(&8) && now.contains(&10));
         // A room ahead of the eye (x = 1000 > 800) is seen from -x: view 4.
         let at = stream.live().iter().position(|s| s.room == 10).unwrap();
         assert_eq!(stream.live()[at].view, 4);
@@ -730,18 +1028,9 @@ mod tests {
         let mut stream = CardStream::<usize>::new();
         let mut input = input(&table, &sectors, [0, 0, 0]);
         input.enter = 100_000;
-        input.leave = 200_000;
-        run(&mut stream, &mut disc, &mut window, &input, 8);
-        let held = |stream: &CardStream<usize>| -> Vec<u16> {
-            let mut v: Vec<u16> = stream
-                .live()
-                .iter()
-                .filter(|s| s.room != u16::MAX)
-                .map(|s| s.room)
-                .collect();
-            v.sort_unstable();
-            v
-        };
+        input.leave = 100_100;
+        input.far = 100_000;
+        run(&mut stream, &mut disc, &mut window, &input, 120);
         // The first SLOTS rooms (the nearest to the eye at x = 0) hold them;
         // nothing nearer is turned away and nothing farther takes over.
         assert_eq!(held(&stream), (0..SLOTS as u16).collect::<Vec<_>>());
@@ -749,11 +1038,120 @@ mod tests {
         // Move the eye to the far end: nearer rooms take over from the
         // farthest ones.
         input.eye = [(count as i32) * 10, 0, 0];
-        run(&mut stream, &mut disc, &mut window, &input, 16);
+        run(&mut stream, &mut disc, &mut window, &input, 120);
         let now = held(&stream);
         assert!(now.contains(&(count as u16 - 1)));
         assert!(!now.contains(&0));
         assert!(stream.counters.evictions > 0);
+    }
+
+    #[test]
+    fn pictures_that_lie_together_on_the_disc_come_in_one_read() {
+        // Twelve rooms side by side, the cook's layout: the eight views of
+        // all of them in blocks, room r's view k at sector 1 + 12 k + r.
+        let rows = rows(12);
+        let table = CardTable::new(&rows);
+        let sectors: Vec<u32> = (0..12).map(|r| 1 + r).collect();
+        let mut disc = Disc::new(1 + 12 * 8 + 40);
+        let mut window = std::vec![0u32; CARD_WINDOW_WORDS];
+        let mut stream = CardStream::<usize>::new();
+        let mut input = input(&table, &sectors, [-10, 0, 0]);
+        input.stride = 12;
+        input.enter = 1200;
+        input.leave = 1300;
+        input.far = 1200;
+        run(&mut stream, &mut disc, &mut window, &input, 80);
+        assert_eq!(held(&stream).len(), 12);
+        for live in stream.live().iter().filter(|s| s.room != u16::MAX) {
+            assert_eq!(live.view, 4, "room {}", live.room);
+        }
+        // Twelve pictures in two reads of the eight sectors each can hold.
+        assert!(disc.reads.len() <= 3, "{:?}", disc.reads);
+        assert!(disc.reads.iter().any(|&(_, n)| n > 1));
+        assert!(stream.counters.merged >= 8);
+        // Each picture is the sector it was asked for: sector 1 + 12 * 4 + r.
+        assert_eq!(stream.counters.uploads, 12);
+    }
+
+    #[test]
+    fn a_blank_card_is_read_before_one_showing_the_wrong_side() {
+        let rows = rows(4);
+        let table = CardTable::new(&rows);
+        let sectors: Vec<u32> = (0..4).map(|r| 8 * r + 1).collect();
+        let mut disc = Disc::new(8 * 4 + 40);
+        let mut window = std::vec![0u32; CARD_WINDOW_WORDS];
+        let mut stream = CardStream::<usize>::new();
+        let mut input = input(&table, &sectors, [-10, 0, 0]);
+        input.far = 1000;
+        run(&mut stream, &mut disc, &mut window, &input, 40);
+        assert!(stream
+            .live()
+            .iter()
+            .filter(|s| s.room != u16::MAX)
+            .all(|s| s.view == 4));
+        // The eye walks round behind the cards; room 3 is the farthest.
+        // Give room 0 (nearest) a stale view and room 3 a blank one.
+        let slot0 = stream.by_room[0] as usize;
+        let slot3 = stream.by_room[3] as usize;
+        stream.slots[slot3].shown = NO_VIEW;
+        stream.live[slot3].view = NO_VIEW;
+        input.eye = [600, 0, 0];
+        disc.reads.clear();
+        stream.update(&mut disc, &mut window, &input);
+        assert_eq!(stream.slots[slot0].want, 0);
+        let &(lba, _) = disc.reads.first().expect("a read");
+        // The first read holds room 3's picture of the view it wants (view 0
+        // from x = 600: room 3 stands at x = 300): sector 8 * 3 + 1 + 0.
+        assert!(
+            lba <= 10 + 25 && 10 + 25 < lba + 8 || lba == 10 + 25,
+            "lba {lba}"
+        );
+    }
+
+    #[test]
+    fn rooms_inside_the_card_distance_hold_slots_before_rooms_beyond_it() {
+        // Rooms on both sides of the eye at x = 0: ten at positive x inside
+        // `far`, the rest at negative x beyond it, more than the atlas holds.
+        let count = SLOTS + 20;
+        let rows: Vec<[i16; 6]> = (0..count)
+            .map(|room| {
+                let x = if room < 40 {
+                    10 * room as i16
+                } else {
+                    -2000 - 10 * room as i16
+                };
+                [x, 0, 0, 200, 40, 0]
+            })
+            .collect();
+        let table = CardTable::new(&rows);
+        let sectors: Vec<u32> = (0..count as u32).map(|r| 8 * r + 1).collect();
+        let mut disc = Disc::new(8 * count + 40);
+        let mut window = std::vec![0u32; CARD_WINDOW_WORDS];
+        let mut stream = CardStream::<usize>::new();
+        let mut input = input(&table, &sectors, [0, 0, 0]);
+        input.enter = 100_000;
+        input.leave = 200_000;
+        input.far = 500;
+        run(&mut stream, &mut disc, &mut window, &input, 200);
+        let now = held(&stream);
+        assert!((0..40).all(|r| now.contains(&r)), "{now:?}");
+    }
+
+    #[test]
+    fn the_room_the_eye_walks_towards_ranks_first() {
+        let rows: Vec<[i16; 6]> = std::vec![[400, 0, 0, 200, 40, 0], [-400, 0, 0, 200, 40, 0]];
+        let table = CardTable::new(&rows);
+        let sectors = [1u32, 9];
+        let mut stream = CardStream::<usize>::new();
+        let mut input = input(&table, &sectors, [0, 0, 0]);
+        input.far = 1000;
+        input.lead = 200;
+        // Walk towards +x.
+        stream.update_heading([0, 0, 0]);
+        stream.update_heading([100, 0, 0]);
+        let ahead = stream.rank(-100 - 400 + 100, 0, 400, &input);
+        let behind = stream.rank(-100 + 400 + 100, 0, 400, &input);
+        assert!(ahead < behind, "{ahead} {behind}");
     }
 
     #[test]
@@ -765,7 +1163,7 @@ mod tests {
         let uploads = [
             Some(Upload {
                 slot: 26,
-                stage: 1,
+                cell: 1,
                 room: 3,
                 view: 2,
             }),

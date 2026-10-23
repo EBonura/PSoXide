@@ -151,6 +151,10 @@ pub(super) struct GridRuntime {
     /// Per room, whether the frame draws it whole (no far card then).
     card_skip: Vec<bool>,
     coarse: psx_grid::render::CoarseRenderer,
+    /// The rooms the coarse draw looks at, and the eye (plan) they were made
+    /// for: see `psx_grid::render::rooms_within`.
+    far_rooms: Vec<u16>,
+    far_rooms_eye: Option<[i32; 2]>,
     last_world_packet_words: usize,
     camera_traces: u32,
     /// Sight-line cache for [`Self::visible_view_bounds_mask`].
@@ -275,6 +279,8 @@ impl GridRuntime {
             skin: SkinRenderer::new(),
             card_skip: Vec::new(),
             coarse: psx_grid::render::CoarseRenderer::new(),
+            far_rooms: Vec::new(),
+            far_rooms_eye: None,
             last_world_packet_words: 0,
             camera_traces: 0,
             view_known: 0,
@@ -1213,6 +1219,22 @@ impl GridRuntime {
                     });
                     if self.level.coarse.is_some() {
                         telemetry::stage_begin(telemetry::stage::FAR_VISTA);
+                        // The band is a few rooms of the level: find them
+                        // again when the eye has walked two sectors, from
+                        // a radius three sectors wider than the draw's.
+                        let moved = self.far_rooms_eye.is_none_or(|at| {
+                            (eye[0] - at[0]).abs() > 2 * sector
+                                || (eye[2] - at[1]).abs() > 2 * sector
+                        });
+                        if moved {
+                            psx_grid::render::rooms_within(
+                                &self.level,
+                                eye,
+                                mesh_far + 3 * sector,
+                                &mut self.far_rooms,
+                            );
+                            self.far_rooms_eye = Some([eye[0], eye[2]]);
+                        }
                         let coarse = self.coarse.draw(
                             &self.level,
                             &self.card_skip,
@@ -1227,6 +1249,7 @@ impl GridRuntime {
                                 screen,
                                 near_sz,
                                 far: mesh_far,
+                                rooms: &self.far_rooms,
                             },
                             if reverse {
                                 &mut packets[..packet_count - total.packet_words]
@@ -1249,9 +1272,11 @@ impl GridRuntime {
                             use crate::generated::{GRID_CARDS, GRID_CARD_FADE, GRID_CARD_FAR};
                             telemetry::stage_begin(telemetry::stage::FAR_VISTA);
                             let (right, forward) = plan_axes(&view.rotation.m);
+                            let (card_live, card_list) = crate::vram_runtime::card_slots();
                             let cards = psx_grid::render::draw_cards(
                                 &psx_grid::render::CardTable::new(GRID_CARDS),
-                                crate::vram_runtime::card_slots(),
+                                card_live,
+                                card_list,
                                 &self.card_skip,
                                 &psx_grid::render::CardCamera {
                                     eye,
@@ -1281,6 +1306,22 @@ impl GridRuntime {
                                 reverse,
                             );
                             telemetry::stage_end(telemetry::stage::FAR_VISTA);
+                            #[cfg(feature = "card-trace")]
+                            crate::card_trace::frame(&crate::card_trace::View {
+                                table: &psx_grid::render::CardTable::new(GRID_CARDS),
+                                live: card_live,
+                                eye,
+                                right,
+                                forward,
+                                half_tan_q12: ((self.projection.half_width << 12)
+                                    / self.projection.focal_length.max(1))
+                                    * 6
+                                    / 5,
+                                far: GRID_CARD_FAR,
+                                hide_all: (mesh_far - mesh_overlap).max(0),
+                                drawn: cards.quads_visible,
+                                looked: cards.cells_visible,
+                            });
                             total.absorb(&GridFrame {
                                 packet_words: cards.packet_words,
                                 packets: cards.packets,

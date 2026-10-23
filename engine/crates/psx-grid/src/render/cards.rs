@@ -265,7 +265,8 @@ pub fn slot_clut_word(atlas: (u16, u16), slot: usize) -> u16 {
     ((x / 16) & 0x3f) | (y << 6)
 }
 
-/// Draw the card of every live slot whose room `skip` does not name. The
+/// Draw the card of every slot in `list` (indices into `live`, as
+/// `CardStream::draw_list` gives them) whose room `skip` does not name. The
 /// GTE must hold the world view (rotation and the translation of the world
 /// origin).
 ///
@@ -276,6 +277,7 @@ pub fn slot_clut_word(atlas: (u16, u16), slot: usize) -> u16 {
 pub fn draw_cards(
     table: &CardTable<'_>,
     live: &[LiveSlot],
+    list: &[u8],
     skip: &[bool],
     camera: &CardCamera,
     out: &mut [u32],
@@ -289,7 +291,11 @@ pub fn draw_cards(
     let mut packets = 0u32;
     let mut looked = 0u16;
     let mut drawn = 0u16;
-    for (slot, entry) in live.iter().enumerate() {
+    for &slot in list {
+        let slot = usize::from(slot);
+        let Some(entry) = live.get(slot) else {
+            continue;
+        };
         if entry.view == NO_VIEW {
             continue;
         }
@@ -822,7 +828,7 @@ mod tests {
             atlas: (320, 0),
         };
         let mut out = vec![0u32; 64];
-        let frame = draw_cards(&table, &live, &[skipped], &camera, &mut out, false);
+        let frame = draw_cards(&table, &live, &[0], &[skipped], &camera, &mut out, false);
         (frame.packets > 0).then(|| out[..frame.packet_words].to_vec())
     }
 
@@ -838,7 +844,7 @@ mod tests {
         // bottom-left); texel columns say which side each is.
         let (tr, tl, br, bl) = (xy(packet[3]), xy(packet[5]), xy(packet[7]), xy(packet[9]));
         let texel = |word: u32| (word as u8, (word >> 8) as u8);
-        assert_eq!(texel(packet[4]).0 > texel(packet[6]).0, true);
+        assert!(texel(packet[4]).0 > texel(packet[6]).0);
         // Facing +X, the card's right (+Z) is the screen's right.
         assert!(tl.0 < tr.0 && bl.0 < br.0, "{tl:?} {tr:?} {bl:?} {br:?}");
         // The top is above the bottom, the horizon (y = 120) between them

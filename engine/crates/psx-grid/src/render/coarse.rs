@@ -26,7 +26,7 @@ pub const COARSE_PACKET_WORDS: usize = 7;
 const GOURAUD_TRIANGLE_COMMAND: u32 = 0x3000_0000;
 
 /// What a coarse draw needs besides the level.
-pub struct CoarseCamera {
+pub struct CoarseCamera<'a> {
     /// The view's right and forward axes in plan ([`super::plan_axes`]).
     pub right: [i32; 2],
     pub forward: [i32; 2],
@@ -41,6 +41,25 @@ pub struct CoarseCamera {
     /// A room whose centre is farther than this (plan, runtime units) is not
     /// drawn.
     pub far: i32,
+    /// The rooms the draw looks at, ascending ([`rooms_within`]): a room not
+    /// listed is not drawn. The list is made once and reused while the eye
+    /// stays within its slack, so a frame does not walk every room of the
+    /// level to find the few in the band.
+    pub rooms: &'a [u16],
+}
+
+/// Fill `out` with the rooms whose centre is within `radius` units of `eye`
+/// on both plan axes: every room a coarse draw with `far <= radius` can
+/// draw, for an eye that has not moved more than `radius - far` since.
+pub fn rooms_within(level: &LevelView<'_>, eye: [i32; 3], radius: i32, out: &mut Vec<u16>) {
+    out.clear();
+    for room in 0..level.rooms.len().min(usize::from(u16::MAX)) {
+        let (lo, hi) = level.room_bounds(room);
+        let (dx, dz) = ((lo[0] + hi[0]) / 2 - eye[0], (lo[2] + hi[2]) / 2 - eye[2]);
+        if dx.abs() <= radius && dz.abs() <= radius {
+            out.push(room as u16);
+        }
+    }
 }
 
 /// Scratch of the coarse draw, kept between frames.
@@ -82,7 +101,7 @@ impl CoarseRenderer {
         &mut self,
         level: &LevelView<'_>,
         skip: &[bool],
-        camera: &CoarseCamera,
+        camera: &CoarseCamera<'_>,
         out: &mut [u32],
         reverse: bool,
     ) -> GridFrame {
@@ -101,7 +120,8 @@ impl CoarseRenderer {
         let mut packets = 0u32;
         let mut tested = 0u16;
         let eye = camera.eye;
-        'rooms: for room in 0..level.rooms.len() {
+        'rooms: for &room in camera.rooms {
+            let room = usize::from(room);
             if skip.get(room).copied().unwrap_or(false) {
                 continue;
             }
@@ -240,7 +260,7 @@ fn colour_word(rgb555: u16) -> u32 {
 
 /// Outcode of a projected vertex.
 #[inline(always)]
-fn screen_of(p: scene::Projected, camera: &CoarseCamera) -> GridScreen {
+fn screen_of(p: scene::Projected, camera: &CoarseCamera<'_>) -> GridScreen {
     let (sx, sy) = (i32::from(p.sx), i32::from(p.sy));
     let mut code = 0u16;
     if p.sz < camera.near_sz {

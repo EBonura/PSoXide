@@ -468,6 +468,11 @@ pub static mut CARD_COUNTERS: psx_game_runtime::card_stream::CardCounters =
         refused: 0,
         live: 0,
         starved: 0,
+        merged: 0,
+        backlog: 0,
+        blank: 0,
+        last_first: 0,
+        last_sectors: 0,
     };
 
 /// Whether the level has far cards.
@@ -486,12 +491,22 @@ pub(super) fn card_atlas() -> Option<((u16, u16), u16)> {
     Some((vram_arena().cube_sky_origin(key)?, slot.tpage_word))
 }
 
+/// Fades' widths (3 sectors each) past the far edge a room takes its slot and
+/// starts its picture coming.
+#[cfg(feature = "cd-stream-bench")]
+const CARD_PREFETCH_FADES: i32 = 3;
+
+/// Fades' widths the room the eye walks towards ranks ahead of one beside it.
+#[cfg(feature = "cd-stream-bench")]
+const CARD_LEAD_FADES: i32 = 2;
+
 /// Keep the cards' pictures coming for an eye at `eye`. Call once per tick,
 /// once the level has loaded.
 #[cfg(feature = "cd-stream-bench")]
 pub(super) fn step_cards(eye: [i32; 3]) {
     use crate::generated::{
-        GRID_CARDS, GRID_CARD_FADE, GRID_CARD_FAR, GRID_ROOM_CARD_SECTORS, WORLD_PACK_START_LBA,
+        GRID_CARDS, GRID_CARD_FADE, GRID_CARD_FAR, GRID_CARD_NEAR, GRID_CARD_VIEW_STRIDE,
+        GRID_ROOM_CARD_SECTORS, WORLD_PACK_START_LBA,
     };
     use psx_game_runtime::card_stream::CardInput;
     if GRID_CARDS.is_empty() || card_atlas().is_none() {
@@ -501,12 +516,18 @@ pub(super) fn step_cards(eye: [i32; 3]) {
     let input = CardInput {
         table: &table,
         sectors: GRID_ROOM_CARD_SECTORS,
+        stride: GRID_CARD_VIEW_STRIDE,
         base_lba: WORLD_PACK_START_LBA,
         eye,
-        // A room takes a slot a fade's width before its card shows, and
-        // keeps it half as long past the far edge.
-        enter: GRID_CARD_FAR + GRID_CARD_FADE,
-        leave: GRID_CARD_FAR + GRID_CARD_FADE + GRID_CARD_FADE / 2,
+        // A room takes a slot, and its picture starts coming, a few fades
+        // before its card shows, and keeps the slot a little past the far
+        // edge.
+        enter: GRID_CARD_FAR + CARD_PREFETCH_FADES * GRID_CARD_FADE,
+        leave: GRID_CARD_FAR + CARD_PREFETCH_FADES * GRID_CARD_FADE + GRID_CARD_FADE / 2,
+        // The stream measures plan distance to within 7.5 percent over.
+        far: GRID_CARD_FAR + GRID_CARD_FAR / 12,
+        near: GRID_CARD_NEAR,
+        lead: CARD_LEAD_FADES * GRID_CARD_FADE,
     };
     // SAFETY: single-threaded guest; the stream and the window are touched
     // only here, in `emit_card_uploads` and in `release_gameplay_vram`.
@@ -517,14 +538,22 @@ pub(super) fn step_cards(eye: [i32; 3]) {
             &input,
         );
         CARD_COUNTERS = (*core::ptr::addr_of!(CARDS)).counters;
+        #[cfg(feature = "card-trace")]
+        crate::card_trace::counters(CARD_COUNTERS);
     }
 }
 
-/// The slots of the card atlas as the draw reads them.
+/// The slots of the card atlas as the draw reads them, and the ones to draw.
 #[cfg(feature = "cd-stream-bench")]
-pub(super) fn card_slots() -> &'static [psx_grid::render::LiveSlot; psx_grid::render::SLOTS] {
+pub(super) fn card_slots() -> (
+    &'static [psx_grid::render::LiveSlot; psx_grid::render::SLOTS],
+    &'static [u8],
+) {
     // SAFETY: single-threaded guest; the draw reads after the tick's update.
-    unsafe { (*core::ptr::addr_of!(CARDS)).live() }
+    unsafe {
+        let stream = &*core::ptr::addr_of!(CARDS);
+        (stream.live(), stream.draw_list())
+    }
 }
 
 /// Pictures the GPU uploads per frame: 770 words of packets each.

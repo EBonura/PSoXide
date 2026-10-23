@@ -45,11 +45,15 @@ pub const GRID_SKY_INITIAL_MASK: &[u32] = &[];
 /// relative to the start of WORLD.PAK (0 for none). Empty: the world has no cards.
 pub const GRID_CARDS: &[[i16; 6]] = &[];
 pub const GRID_ROOM_CARD_SECTORS: &[u32] = &[];
+/// Sectors from a room's picture of one view to its picture of the next.
+pub const GRID_CARD_VIEW_STRIDE: u32 = 0;
 /// Cards show out to this many runtime units from the camera, fading in over the
 /// last `GRID_CARD_FADE`; the colours behind them (below the horizon, at it, at the
 /// top of the screen).
 pub const GRID_CARD_FAR: i32 = 0;
 pub const GRID_CARD_FADE: i32 = 0;
+/// No card is drawn closer than this (the coarse band stands there).
+pub const GRID_CARD_NEAR: i32 = 0;
 pub const GRID_CARD_BACKDROP: [[u8; 3]; 3] = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
 pub const LEN_ROOMS: usize = 1;
 pub const LEN_ROOM_REFLECTION_PROBES: usize = 0;

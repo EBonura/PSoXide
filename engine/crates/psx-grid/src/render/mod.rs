@@ -48,7 +48,7 @@ pub use cards::{
     SLOT_BYTES, SLOT_HALFWORDS, SLOT_ROWS, TEXELS, VIEWS, VIEW_COS_Q12, VIEW_SIN_Q12,
 };
 pub use clip::clip_polygon_plane;
-pub use coarse::{CoarseCamera, CoarseRenderer, COARSE_PACKET_WORDS};
+pub use coarse::{rooms_within, CoarseCamera, CoarseRenderer, COARSE_PACKET_WORDS};
 #[cfg(target_arch = "mips")]
 pub use frustum::load_gte_clip_planes;
 pub use frustum::{FrustumPlanes, CLIP_ALL_PLANES};

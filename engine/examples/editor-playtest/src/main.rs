@@ -127,6 +127,8 @@ mod stance_hud_layout;
 mod vector_hud;
 mod vitality_circle_runtime;
 use playtest_update::{Gait, LocoPhase};
+#[cfg(feature = "card-trace")]
+mod card_trace;
 mod room_lighting_runtime;
 mod runtime_arenas;
 mod runtime_config;
