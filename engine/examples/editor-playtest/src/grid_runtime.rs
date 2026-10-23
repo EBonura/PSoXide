@@ -74,6 +74,15 @@ const ROOM_ENTRIES: usize = {
     }) + 2
 };
 
+/// Sectors, at the end of the drawn radius, over which the card of a room
+/// drawn whole fades in behind it.
+const CARD_OVERLAP_SECTORS: i32 = 1;
+
+/// Sectors within which `card-trace` holds every room in view to be covered, by its geometry
+/// or by its card, whatever radius the level draws whole to.
+#[cfg(feature = "card-trace")]
+const COVER_CHECK_SECTORS: i32 = 12;
+
 /// Ticks an unchanged wanted set goes without a streamer step while reads are
 /// in flight and none has finished.
 const STEP_EVERY_TICKS: u8 = 8;
@@ -1266,7 +1275,24 @@ impl GridRuntime {
                             telemetry::stage_begin(telemetry::stage::FAR_VISTA);
                             let (right, forward) = plan_axes(&view.rotation.m);
                             let (card_live, card_list) = crate::vram_runtime::card_slots();
-                            let cards = psx_grid::render::draw_cards(
+                            // A room drawn whole gets its card behind the last
+                            // `CARD_OVERLAP_SECTORS` of the drawn radius, fading in
+                            // so it is complete where the radius ends; the room's
+                            // geometry goes only past the radius plus one sector.
+                            let overlap_to = self
+                                .level
+                                .flood
+                                .map_or(0, |flood| i32::from(flood.near_radius) * sector);
+                            let overlap_from = (overlap_to - CARD_OVERLAP_SECTORS * sector).max(0);
+                            #[cfg(feature = "card-trace")]
+                            crate::card_trace::begin_frame();
+                            let mut mark = |room: u16| {
+                                #[cfg(feature = "card-trace")]
+                                crate::card_trace::mark(room);
+                                #[cfg(not(feature = "card-trace"))]
+                                let _ = room;
+                            };
+                            let cards = psx_grid::render::draw_cards_marked(
                                 &psx_grid::render::CardTable::new(GRID_CARDS),
                                 card_live,
                                 card_list,
@@ -1282,10 +1308,8 @@ impl GridRuntime {
                                         * 6
                                         / 5,
                                     far: GRID_CARD_FAR,
-                                    hide_inside: self
-                                        .level
-                                        .flood
-                                        .map_or(0, |flood| i32::from(flood.near_radius) * sector),
+                                    hide_inside: overlap_to,
+                                    overlap_from,
                                     hide_all: GRID_CARD_NEAR,
                                     fade: GRID_CARD_FADE,
                                     outer: crate::vram_runtime::card_bands(),
@@ -1298,6 +1322,7 @@ impl GridRuntime {
                                     &mut packets[total.packet_words..]
                                 },
                                 reverse,
+                                &mut mark,
                             );
                             telemetry::stage_end(telemetry::stage::FAR_VISTA);
                             #[cfg(feature = "card-trace")]
@@ -1313,6 +1338,14 @@ impl GridRuntime {
                                     / 5,
                                 far: GRID_CARD_FAR,
                                 hide_all: GRID_CARD_NEAR,
+                                skip: &self.card_skip,
+                                cover_to: COVER_CHECK_SECTORS * sector,
+                                horizon: psx_grid::render::horizon_y(
+                                    &view.rotation.m,
+                                    self.projection.focal_length,
+                                    screen,
+                                    screen[0] / 2,
+                                ),
                                 drawn: cards.quads_visible,
                                 looked: cards.cells_visible,
                             });

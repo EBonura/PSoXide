@@ -285,9 +285,14 @@ pub struct CardCamera {
     /// Cards farther than this (runtime units, plan distance) are not
     /// drawn.
     pub far: i32,
-    /// A room that is drawn whole (`skip`) still shows its card out to this
-    /// plan distance, and no closer.
+    /// A room that is drawn whole (`skip`) shows its card from `overlap_from`
+    /// plan distance, fading in until `hide_inside`, where it is fully there:
+    /// the geometry stays until it leaves the drawn set, further out, so the
+    /// card is complete before the geometry goes.
     pub hide_inside: i32,
+    /// Where the card of a room drawn whole starts to fade in (at most
+    /// `hide_inside`; equal means no fade, the card appears at once).
+    pub overlap_from: i32,
     /// No card is drawn closer than this plan distance, drawn whole or not
     /// (the rooms there are drawn whole).
     pub hide_all: i32,
@@ -335,6 +340,23 @@ pub fn draw_cards(
     camera: &CardCamera,
     out: &mut [u32],
     reverse: bool,
+) -> GridFrame {
+    draw_cards_marked(table, live, list, skip, camera, out, reverse, &mut |_| {})
+}
+
+/// [`draw_cards`], calling `mark(room)` for every room whose card it wrote a
+/// packet for (a room more than once only when it is drawn in bands, and
+/// then once).
+#[allow(clippy::too_many_arguments)]
+pub fn draw_cards_marked(
+    table: &CardTable<'_>,
+    live: &[LiveSlot],
+    list: &[u8],
+    skip: &[bool],
+    camera: &CardCamera,
+    out: &mut [u32],
+    reverse: bool,
+    mark: &mut dyn FnMut(u16),
 ) -> GridFrame {
     let mut frame = GridFrame::default();
     let start = out.as_mut_ptr();
@@ -385,14 +407,12 @@ pub fn draw_cards(
         if length > band.far {
             continue;
         }
-        // A room drawn whole keeps its card until the eye is well inside
-        // it: the live geometry then replaces what the card showed
-        // piece by piece, where it stands in front of the card.
-        if length < band.near
-            || (card.layer == 0
-                && length < camera.hide_inside
-                && skip.get(usize::from(entry.room)).copied().unwrap_or(false))
-        {
+        // A room drawn whole has no card closer than `overlap_from`; from
+        // there its card fades in (below), so by `hide_inside` it is complete
+        // behind the geometry, which only goes when the room leaves the drawn
+        // set, further out.
+        let whole = card.layer == 0 && skip.get(usize::from(entry.room)).copied().unwrap_or(false);
+        if length < band.near || (whole && length < camera.overlap_from) {
             continue;
         }
         // The card's right: the eye looks along (-dx, -dz), whose right
@@ -420,14 +440,23 @@ pub fn draw_cards(
         // Fading in at the far edge, over `fade` units: opaque, then half
         // blended with what is behind it, then a quarter added to it with
         // its brightness ramping up from nothing.
-        let in_fade = band.far - length;
-        let (brightness, blend) = if in_fade >= band.fade {
+        // The same three steps lead a card in at the near end over a room
+        // drawn whole, from `overlap_from` to `hide_inside`.
+        let (in_fade, width) = if whole && length < camera.hide_inside {
+            (
+                length - camera.overlap_from,
+                camera.hide_inside - camera.overlap_from,
+            )
+        } else {
+            (band.far - length, band.fade)
+        };
+        let (brightness, blend) = if in_fade >= width {
             (128, Blend::Opaque)
-        } else if in_fade * 2 >= band.fade {
+        } else if in_fade * 2 >= width {
             (128, Blend::Average)
         } else {
             (
-                (256 * in_fade / band.fade.max(1)).clamp(0, 128),
+                (256 * in_fade / width.max(1)).clamp(0, 128),
                 Blend::AddQuarter,
             )
         };
@@ -538,6 +567,9 @@ pub fn draw_cards(
             break;
         }
         drawn += u16::from(card_drawn);
+        if card_drawn {
+            mark(entry.room);
+        }
     }
     frame.packets = packets;
     frame.cells_visible = looked;
@@ -872,6 +904,19 @@ mod tests {
         hide_inside: i32,
         skipped: bool,
     ) -> Option<Vec<u32>> {
+        draw_one_overlap(eye, yaw, card_row, hide_inside, hide_inside, skipped)
+    }
+
+    /// [`draw_one`] with a card that fades in over a room drawn whole between
+    /// `overlap_from` and `hide_inside`.
+    fn draw_one_overlap(
+        eye: [i32; 3],
+        yaw: (i16, i16),
+        card_row: [i16; 6],
+        overlap_from: i32,
+        hide_inside: i32,
+        skipped: bool,
+    ) -> Option<Vec<u32>> {
         use crate::render::{load_view_rotation, plan_axes, view_rotation};
         use psx_gte::math::Vec3I32;
         psx_gte::host::reset();
@@ -899,6 +944,7 @@ mod tests {
             half_tan_q12: 4096 * 6 / 5,
             far: 1600,
             hide_inside,
+            overlap_from,
             hide_all: 0,
             fade: 240,
             outer: [CardBand::default(); OUTER_LAYERS],
@@ -1008,6 +1054,42 @@ mod tests {
         assert_eq!((command, brightness, tpage & 0x60), (0x2e, 128, 0));
         // Beyond the far edge: nothing.
         assert!(at(1650).is_none());
+    }
+
+    #[test]
+    fn the_card_of_a_room_drawn_whole_fades_in_between_two_distances() {
+        // Overlap from 500 to 700: the card is absent before 500, then a
+        // quarter added, dim; then half and half; then opaque.
+        let at = |x: i16| {
+            draw_one_overlap(
+                [0, 0, 0],
+                (0, 0x1000),
+                [x, 0, -60, 300, 200, 0],
+                500,
+                700,
+                true,
+            )
+            .map(|p| (p[2] >> 24, p[2] & 0xff, p[6] >> 16))
+        };
+        assert!(at(480).is_none());
+        let (command, brightness, tpage) = at(530).unwrap();
+        assert_eq!(command, 0x2e);
+        assert!(brightness > 0 && brightness < 128, "{brightness}");
+        assert_eq!(tpage & 0x60, 0x60);
+        let (command, brightness, tpage) = at(620).unwrap();
+        assert_eq!((command, brightness, tpage & 0x60), (0x2e, 128, 0));
+        let (command, brightness, _) = at(720).unwrap();
+        assert_eq!((command, brightness), (0x2c, 128));
+        // A room not drawn whole shows its card at any distance.
+        assert!(draw_one_overlap(
+            [0, 0, 0],
+            (0, 0x1000),
+            [300, 0, -60, 300, 200, 0],
+            500,
+            700,
+            false
+        )
+        .is_some());
     }
 
     #[test]

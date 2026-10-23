@@ -6,6 +6,11 @@
 //! * `ct A room dist` that room's card is first drawn with any picture.
 //! * `ct K room dist` that room's card is first drawn with a picture serving the
 //!   eye's side (the stream's own rule: [`view_keep`] or [`view_toward`]).
+//! * `ct H y eye_y` the screen row of the horizon at the middle of the view, 4096 added (9999: too
+//!   steep to say), and the eye's height, 32768 added, every drawn frame, for `gapscan`.
+//! * `ct G gaps checked nearest_gap_length nearest_gap_room` every frame in which a room whose
+//!   centre is within the drawn radius and in the view cone has neither its geometry drawn whole
+//!   nor its card drawn (`checked` counts the rooms tested).
 //! * `ct F band_missing band_stale seen_missing seen_stale seen_bad` every frame
 //!   that has any: cards in the band without a picture or with a picture of the
 //!   wrong side, the same counted only for cards inside the view cone, and of
@@ -26,6 +31,8 @@ use psx_grid::render::{view_keep, view_toward, CardTable, LiveSlot, NO_VIEW, SLO
 use psx_math::int32::isqrt_i32;
 
 struct Trace {
+    /// Rooms whose card the draw wrote this frame ([`mark`]).
+    drawn: [bool; MAX_ROOMS],
     in_band: [bool; MAX_ROOMS],
     waiting: [bool; MAX_ROOMS],
     blank: [bool; MAX_ROOMS],
@@ -35,6 +42,7 @@ struct Trace {
 }
 
 static mut TRACE: Trace = Trace {
+    drawn: [false; MAX_ROOMS],
     in_band: [false; MAX_ROOMS],
     waiting: [false; MAX_ROOMS],
     blank: [false; MAX_ROOMS],
@@ -108,6 +116,23 @@ impl Line {
     }
 }
 
+/// Forget the rooms whose card was drawn: call before the card draw.
+pub(super) fn begin_frame() {
+    // SAFETY: single-threaded guest; the trace is touched only here, in [`mark`],
+    // [`counters`] and [`frame`].
+    let trace = unsafe { &mut *core::ptr::addr_of_mut!(TRACE) };
+    trace.drawn = [false; MAX_ROOMS];
+}
+
+/// Note that the card of `room` was drawn this frame.
+pub(super) fn mark(room: u16) {
+    // SAFETY: see [`begin_frame`].
+    let trace = unsafe { &mut *core::ptr::addr_of_mut!(TRACE) };
+    if let Some(drawn) = trace.drawn.get_mut(usize::from(room)) {
+        *drawn = true;
+    }
+}
+
 /// Report the stream's counters when they changed since the last tick.
 pub(super) fn counters(now: CardCounters) {
     // SAFETY: single-threaded guest; the trace is touched only here and in
@@ -149,6 +174,12 @@ pub(super) struct View<'a> {
     pub half_tan_q12: i32,
     pub far: i32,
     pub hide_all: i32,
+    /// Per room, whether the frame drew it whole.
+    pub skip: &'a [bool],
+    /// Rooms whose centre is within this plan distance are held to be covered.
+    pub cover_to: i32,
+    /// Screen row of the horizon at the middle of the view.
+    pub horizon: Option<i32>,
     /// Cards the draw put in the frame and slots it looked at.
     pub drawn: u16,
     pub looked: u16,
@@ -264,6 +295,48 @@ pub(super) fn frame(view: &View<'_>) {
                 seen_bad += u32::from(seen && step.min(8 - step) >= 2);
             }
         }
+    }
+    let mut line = Line::new("ct H");
+    line.number(view.horizon.map_or(9999, |y| (y + 4096).max(0) as u32));
+    line.number((view.eye[1] + 32768).max(0) as u32);
+    line.emit();
+    // Coverage: every room in the view cone within the drawn radius is drawn
+    // whole or by its card.
+    let (mut gaps, mut checked, mut nearest, mut nearest_room) = (0u32, 0u32, i32::MAX, 0u32);
+    for room in 0..view.table.len().min(MAX_ROOMS) {
+        let Some(card) = view.table.card(room).filter(|card| card.layer == 0) else {
+            continue;
+        };
+        let (dx, dz) = (ex - card.centre[0], ez - card.centre[1]);
+        if dx.abs() > view.cover_to || dz.abs() > view.cover_to {
+            continue;
+        }
+        let length = isqrt_i32(dx * dx + dz * dz).max(1);
+        if length > view.cover_to {
+            continue;
+        }
+        let ahead = (view.forward[0] * -dx + view.forward[1] * -dz) >> 12;
+        let across = (view.right[0] * -dx + view.right[1] * -dz) >> 12;
+        let seen = ahead >= -card.half_width
+            && across.abs() <= ((ahead.max(0) * view.half_tan_q12) >> 12) + card.half_width;
+        if !seen {
+            continue;
+        }
+        checked += 1;
+        if !(view.skip.get(room).copied().unwrap_or(false) || trace.drawn[room]) {
+            gaps += 1;
+            if length < nearest {
+                nearest = length;
+                nearest_room = room as u32;
+            }
+        }
+    }
+    if gaps > 0 {
+        let mut line = Line::new("ct G");
+        for value in [gaps, checked, nearest as u32, nearest_room] {
+            line.number(value);
+        }
+        line.emit();
     }
     if band_missing + band_stale > 0 {
         let mut line = Line::new("ct F");
