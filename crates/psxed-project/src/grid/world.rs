@@ -113,6 +113,14 @@ pub struct FloodSettings {
     /// Sectors from the camera out to which cards are shown; 0 means the
     /// default, 20.
     pub card_far: u8,
+    /// Sectors from the camera inside which no card is drawn; 0 means the
+    /// edge of the coarse band (`mesh_far` less two sectors), or none when
+    /// there is no coarse mesh.
+    pub card_near: u8,
+    /// Layers of cards beyond `card_far` (0 to 2), each holding everything
+    /// from its distance to the next layer's, the last one everything to the
+    /// horizon ([`FloodSettings::card_layer_bands`]).
+    pub card_layers: u8,
     /// Draw the rooms between `near_radius` and this many sectors as coarse
     /// meshes (`psx_grid::render::coarse`): each room's geometry merged by
     /// vertex clustering into a few Gouraud triangles. 0 is off. Needs `on`.
@@ -134,6 +142,8 @@ impl FloodSettings {
         skin_tolerance: 0,
         cards: false,
         card_far: 0,
+        card_near: 0,
+        card_layers: 0,
         mesh_far: 0,
         mesh_cluster: 0,
     };
@@ -156,10 +166,51 @@ impl FloodSettings {
         }
     }
 
+    /// Sectors inside which no card is drawn.
+    pub fn card_near_sectors(&self) -> i32 {
+        if self.card_near > 0 {
+            i32::from(self.card_near)
+        } else {
+            (i32::from(self.mesh_far) - 2).max(0)
+        }
+    }
+
+    /// The layers of cards beyond the room cards, from the nearest out:
+    /// `(far, cell, depth)` in sectors. A layer's cards show out to `far` plan
+    /// sectors (the next layer shows from there); its anchors stand `cell`
+    /// sectors apart; its pictures hold everything behind the card out to `depth` sectors
+    /// (`None`: to the horizon). The first layer starts where the room cards
+    /// end ([`Self::card_far_sectors`]).
+    pub fn card_layer_bands(&self) -> Vec<CardLayerBand> {
+        let far = self.card_far_sectors();
+        let all = [
+            CardLayerBand {
+                cell: far * 7 / 6,
+                depth: Some(far),
+            },
+            CardLayerBand {
+                cell: far * 2,
+                depth: None,
+            },
+        ];
+        all.into_iter()
+            .take(usize::from(self.card_layers.min(2)))
+            .collect()
+    }
+
     /// Whether these are the defaults (the document then omits them).
     pub fn is_default(&self) -> bool {
         *self == Self::DEFAULT
     }
+}
+
+/// One layer of far cards beyond the room cards ([`FloodSettings::card_layer_bands`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CardLayerBand {
+    /// Sectors between the layer's anchors.
+    pub cell: i32,
+    /// Sectors behind a card its picture holds; `None` to the horizon.
+    pub depth: Option<i32>,
 }
 
 impl Default for FloodSettings {

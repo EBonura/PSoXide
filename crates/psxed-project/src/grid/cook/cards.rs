@@ -46,6 +46,9 @@ pub struct BakedCard {
     pub sectors: Vec<u8>,
     /// The pictures as RGBA, `WIDE * HIGH` texels each, after quantising.
     pub preview: Vec<[u8; 4]>,
+    /// 0 for a room's card; 1 and up for the layers of cards beyond them
+    /// ([`bake_layers`]).
+    pub layer: u8,
 }
 
 /// What the bake made.
@@ -97,6 +100,15 @@ fn faces(quad: &Quad, towards_eye: [f32; 3]) -> bool {
 
 /// The room's triangles in world space, and its quads.
 fn triangles(cooked: &CookedLevel, albedo: &[[f32; 3]], room: usize) -> (Vec<Triangle>, Vec<Quad>) {
+    triangles_of(cooked, albedo, room)
+}
+
+/// [`triangles`] for the layer bake.
+fn triangles_of(
+    cooked: &CookedLevel,
+    albedo: &[[f32; 3]],
+    room: usize,
+) -> (Vec<Triangle>, Vec<Quad>) {
     let table = &cooked.tables[room];
     let origin = cooked.level.rooms[room].origin;
     let world = |v: u16| {
@@ -189,6 +201,51 @@ impl Raster {
         }
     }
 
+    /// Fill a triangle given as `(x, y, w)` sample coordinates, `w` being one
+    /// over the distance from the eye (larger is nearer), with perspective
+    /// correct depth and colour.
+    fn fill_persp(&mut self, p: [[f32; 3]; 3], colour: [[f32; 3]; 3]) {
+        let edge = |a: [f32; 3], b: [f32; 3], x: f32, y: f32| {
+            (b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (x - a[0])
+        };
+        let area = edge(p[0], p[1], p[2][0], p[2][1]);
+        if area.abs() < 1e-6 {
+            return;
+        }
+        let lo = |f: fn(f32, f32) -> f32, k: usize| f(f(p[0][k], p[1][k]), p[2][k]);
+        let x0 = (lo(f32::min, 0) - 0.5).floor().max(0.0) as usize;
+        let x1 = ((lo(f32::max, 0) - 0.5).ceil().max(-1.0) as isize + 1)
+            .clamp(0, Self::WIDE as isize) as usize;
+        let y0 = (lo(f32::min, 1) - 0.5).floor().max(0.0) as usize;
+        let y1 = ((lo(f32::max, 1) - 0.5).ceil().max(-1.0) as isize + 1)
+            .clamp(0, Self::HIGH as isize) as usize;
+        for y in y0..y1 {
+            let sy = y as f32 + 0.5;
+            for x in x0..x1 {
+                let sx = x as f32 + 0.5;
+                let w0 = edge(p[1], p[2], sx, sy) / area;
+                let w1 = edge(p[2], p[0], sx, sy) / area;
+                let w2 = 1.0 - w0 - w1;
+                let eps = -1e-4;
+                if w0 < eps || w1 < eps || w2 < eps {
+                    continue;
+                }
+                let inv = w0 * p[0][2] + w1 * p[1][2] + w2 * p[2][2];
+                let at = y * Self::WIDE + x;
+                // The depth buffer holds the negated nearness: smaller wins.
+                if -inv < self.depth[at] {
+                    self.depth[at] = -inv;
+                    self.colour[at] = [0, 1, 2].map(|i| {
+                        (w0 * p[0][2] * colour[0][i]
+                            + w1 * p[1][2] * colour[1][i]
+                            + w2 * p[2][2] * colour[2][i])
+                            / inv
+                    });
+                }
+            }
+        }
+    }
+
     /// The texel grid: mean colour of the covered samples, or `None`.
     fn texels(&self) -> Vec<Option<[f32; 3]>> {
         let mut out = vec![None; WIDE * HIGH];
@@ -243,6 +300,34 @@ fn encode(indices: &[u8], palette: &[[u8; 3]]) -> Vec<u8> {
         out[clut + 2 * k..clut + 2 * k + 2].copy_from_slice(&word.to_le_bytes());
     }
     out
+}
+
+/// Quantise a rendered view into its disc sector, and the colours the
+/// sector will show.
+fn finish_picture(raster: &Raster) -> (Vec<u8>, Vec<[u8; 4]>) {
+    let rgba: Vec<[u8; 4]> = raster
+        .texels()
+        .iter()
+        .map(|t| match t {
+            Some(c) => [0, 1, 2].map(|i| c[i].clamp(0.0, 255.0) as u8).into_rgba(),
+            None => [0, 0, 0, 0],
+        })
+        .collect();
+    let (palette, indices) = psxed_tex::quantize_rgba_with_transparent_zero(&rgba, 16)
+        .unwrap_or_else(|_| (vec![[0; 3]; 16], vec![0; WIDE * HIGH]));
+    let shown = indices
+        .iter()
+        .map(|&i| {
+            if i == 0 {
+                [0, 0, 0, 0]
+            } else {
+                let c = palette.get(usize::from(i)).copied().unwrap_or([0; 3]);
+                // The colour the palette entry will show: 5 bits a channel.
+                [c[0] & 0xf8, c[1] & 0xf8, c[2] & 0xf8, 255]
+            }
+        })
+        .collect();
+    (encode(&indices, &palette), shown)
 }
 
 /// Bake one room's card, `None` when the room draws nothing.
@@ -326,26 +411,9 @@ pub fn bake_room(cooked: &CookedLevel, albedo: &[[f32; 3]], room: usize) -> Opti
             };
             raster.fill(t.position.map(project), t.colour);
         }
-        let texels = raster.texels();
-        let rgba: Vec<[u8; 4]> = texels
-            .iter()
-            .map(|t| match t {
-                Some(c) => [0, 1, 2].map(|i| c[i].clamp(0.0, 255.0) as u8).into_rgba(),
-                None => [0, 0, 0, 0],
-            })
-            .collect();
-        let (palette, indices) = psxed_tex::quantize_rgba_with_transparent_zero(&rgba, 16)
-            .unwrap_or_else(|_| (vec![[0; 3]; 16], vec![0; WIDE * HIGH]));
-        sectors.extend_from_slice(&encode(&indices, &palette));
-        preview.extend(indices.iter().map(|&i| {
-            if i == 0 {
-                [0, 0, 0, 0]
-            } else {
-                let c = palette.get(usize::from(i)).copied().unwrap_or([0; 3]);
-                // The colour the palette entry will show: 5 bits a channel.
-                [c[0] & 0xf8, c[1] & 0xf8, c[2] & 0xf8, 255]
-            }
-        }));
+        let (sector, shown) = finish_picture(&raster);
+        sectors.extend_from_slice(&sector);
+        preview.extend(shown);
     }
     Some(BakedCard {
         centre,
@@ -354,6 +422,7 @@ pub fn bake_room(cooked: &CookedLevel, albedo: &[[f32; 3]], room: usize) -> Opti
         half_width: half_width as i32,
         sectors,
         preview,
+        layer: 0,
     })
 }
 
@@ -366,6 +435,366 @@ impl IntoRgba for [u8; 3] {
     fn into_rgba(self) -> [u8; 4] {
         [self[0], self[1], self[2], 255]
     }
+}
+
+/// One layer of cards beyond the room cards: each card holds everything
+/// behind its plane, out to `depth`, seen from a nominal eye in front of it.
+/// All lengths are runtime units.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LayerSpec {
+    /// Plan distance from the eye the layer's cards start to show at.
+    pub near: i32,
+    /// Plan distance they stop at (`None`: never; the layer holds the horizon).
+    pub far: Option<i32>,
+    /// Distance between the layer's anchors.
+    pub cell: i32,
+    /// How far behind its plane a card's picture reaches (`None`: without limit).
+    pub depth: Option<i32>,
+}
+
+impl LayerSpec {
+    /// Distance in front of the card plane the picture is rendered from: a
+    /// third of the way into the band the layer shows in, where the eye
+    /// spends most of its time.
+    fn nominal(&self) -> f32 {
+        let far = self.far.unwrap_or(self.near.saturating_mul(2));
+        (self.near + (far - self.near) / 3) as f32
+    }
+
+    /// Half the width of a card: wide enough that the cards of neighbouring
+    /// anchors overlap a little.
+    fn half_width(&self) -> i32 {
+        self.cell * 3 / 4
+    }
+}
+
+/// Height of the nominal eye above the lowest ground by a card, in sectors.
+const EYE_SECTORS: f32 = 2.0;
+
+/// A cooked triangle of the whole level in world space.
+struct WorldTriangle {
+    position: [[f32; 3]; 3],
+    colour: [[f32; 3]; 3],
+    quad: Quad,
+}
+
+/// Every triangle of the level, and the world box of each room's.
+struct WorldTriangles {
+    triangles: Vec<WorldTriangle>,
+    /// Per room, its triangles' index range and world box `(lo, hi)`.
+    rooms: Vec<(std::ops::Range<usize>, [f32; 3], [f32; 3])>,
+}
+
+impl WorldTriangles {
+    fn new(cooked: &CookedLevel, albedo: &[[f32; 3]]) -> Self {
+        let mut triangles = Vec::new();
+        let mut rooms = Vec::new();
+        for room in 0..cooked.level.rooms.len() {
+            let start = triangles.len();
+            let (tris, quads) = triangles_of(cooked, albedo, room);
+            let (mut lo, mut hi) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
+            for t in tris {
+                for p in &t.position {
+                    for k in 0..3 {
+                        lo[k] = lo[k].min(p[k]);
+                        hi[k] = hi[k].max(p[k]);
+                    }
+                }
+                triangles.push(WorldTriangle {
+                    position: t.position,
+                    colour: t.colour,
+                    quad: quads[t.quad],
+                });
+            }
+            rooms.push((start..triangles.len(), lo, hi));
+        }
+        Self { triangles, rooms }
+    }
+}
+
+/// A polygon vertex while clipping: position and corner colour.
+#[derive(Clone, Copy)]
+struct ClipVertex {
+    p: [f32; 3],
+    c: [f32; 3],
+}
+
+/// Keep the part of `poly` where `f >= 0` (`f` linear in the vertex).
+fn clip_polygon(poly: &[ClipVertex], f: impl Fn(&ClipVertex) -> f32) -> Vec<ClipVertex> {
+    let mut out = Vec::with_capacity(poly.len() + 1);
+    for i in 0..poly.len() {
+        let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
+        let (fa, fb) = (f(&a), f(&b));
+        if fa >= 0.0 {
+            out.push(a);
+        }
+        if (fa >= 0.0) != (fb >= 0.0) {
+            let k = fa / (fa - fb);
+            let mix = |x: [f32; 3], y: [f32; 3]| [0, 1, 2].map(|i| x[i] + (y[i] - x[i]) * k);
+            out.push(ClipVertex {
+                p: mix(a.p, b.p),
+                c: mix(a.c, b.c),
+            });
+        }
+    }
+    out
+}
+
+/// A triangle of one view projected onto the card plane: `(u, v, w)` per
+/// vertex (across, height, one over the distance from the nominal eye) and
+/// the corner colours.
+struct ViewTriangle {
+    uvw: [[f32; 3]; 3],
+    colour: [[f32; 3]; 3],
+}
+
+/// The view `view` of a card of layer `spec` standing at `anchor`: every
+/// triangle of the level that faces the nominal eye and lies behind the card's
+/// plane (within `spec.depth` of it), projected onto the plane.
+fn view_triangles(
+    world: &WorldTriangles,
+    spec: &LayerSpec,
+    anchor: [i32; 2],
+    eye_y: f32,
+    half_width: f32,
+    view: usize,
+) -> Vec<ViewTriangle> {
+    let (cos, sin) = (
+        f32::from(VIEW_COS_Q12[view]) / 4096.0,
+        f32::from(VIEW_SIN_Q12[view]) / 4096.0,
+    );
+    let (cx, cz) = (anchor[0] as f32, anchor[1] as f32);
+    let distance = spec.nominal();
+    let eye = [cx + cos * distance, eye_y, cz + sin * distance];
+    // Depth behind the plane, and across it, of a world point.
+    let behind = |p: [f32; 3]| -((p[0] - cx) * cos + (p[2] - cz) * sin);
+    let across = |p: [f32; 3]| (p[0] - cx) * sin - (p[2] - cz) * cos;
+    let reach = spec.depth.map(|d| d as f32);
+    let mut out = Vec::new();
+    for (range, lo, hi) in &world.rooms {
+        if range.is_empty() {
+            continue;
+        }
+        // The room's box against the slab and the widening wedge: every
+        // corner on one wrong side puts it out.
+        let corners = (0..8).map(|i| {
+            [
+                if i & 1 == 0 { lo[0] } else { hi[0] },
+                if i & 2 == 0 { lo[1] } else { hi[1] },
+                if i & 4 == 0 { lo[2] } else { hi[2] },
+            ]
+        });
+        let (mut all_in_front, mut all_past, mut all_left, mut all_right) =
+            (true, true, true, true);
+        for c in corners {
+            let t = behind(c);
+            let wedge = half_width * (distance + t.max(0.0)) / distance;
+            all_in_front &= t < 0.0;
+            all_past &= reach.is_some_and(|r| t > r);
+            all_left &= across(c) < -wedge;
+            all_right &= across(c) > wedge;
+        }
+        if all_in_front || all_past || all_left || all_right {
+            continue;
+        }
+        for tri in &world.triangles[range.clone()] {
+            let centroid = [0, 1, 2]
+                .map(|k| (tri.position[0][k] + tri.position[1][k] + tri.position[2][k]) / 3.0);
+            let to_eye = [0, 1, 2].map(|k| eye[k] - centroid[k]);
+            if !faces(&tri.quad, to_eye) {
+                continue;
+            }
+            let mut poly: Vec<ClipVertex> = (0..3)
+                .map(|k| ClipVertex {
+                    p: tri.position[k],
+                    c: tri.colour[k],
+                })
+                .collect();
+            poly = clip_polygon(&poly, |v| behind(v.p));
+            if let Some(r) = reach {
+                if poly.len() >= 3 {
+                    poly = clip_polygon(&poly, |v| r - behind(v.p));
+                }
+            }
+            if poly.len() < 3 {
+                continue;
+            }
+            // The point where the ray from the eye meets the card's plane.
+            let project = |v: &ClipVertex| {
+                let t = behind(v.p);
+                let scale = distance / (distance + t);
+                [
+                    across(v.p) * scale,
+                    eye_y + (v.p[1] - eye_y) * scale,
+                    1.0 / (distance + t),
+                ]
+            };
+            let first = project(&poly[0]);
+            for k in 1..poly.len() - 1 {
+                out.push(ViewTriangle {
+                    uvw: [first, project(&poly[k]), project(&poly[k + 1])],
+                    colour: [poly[0].c, poly[k].c, poly[k + 1].c],
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Bake one layer card: the eight views of what stands behind `anchor`.
+/// `None` when nothing does.
+fn bake_layer_card(
+    world: &WorldTriangles,
+    spec: &LayerSpec,
+    layer: u8,
+    anchor: [i32; 2],
+    sector: i32,
+) -> Option<BakedCard> {
+    // The lowest ground near the anchor puts the nominal eye at a person's
+    // height above it.
+    let near = spec.cell as f32 / 2.0;
+    let mut ground = f32::INFINITY;
+    for (range, lo, hi) in &world.rooms {
+        if hi[0] < anchor[0] as f32 - near
+            || lo[0] > anchor[0] as f32 + near
+            || hi[2] < anchor[1] as f32 - near
+            || lo[2] > anchor[1] as f32 + near
+        {
+            continue;
+        }
+        for tri in &world.triangles[range.clone()] {
+            for p in &tri.position {
+                if (p[0] - anchor[0] as f32).abs() <= near
+                    && (p[2] - anchor[1] as f32).abs() <= near
+                {
+                    ground = ground.min(p[1]);
+                }
+            }
+        }
+    }
+    if !ground.is_finite() {
+        return None;
+    }
+    let eye_y = ground + EYE_SECTORS * sector as f32;
+    let half_width = spec.half_width() as f32;
+    let views: Vec<Vec<ViewTriangle>> = (0..VIEWS)
+        .map(|view| view_triangles(world, spec, anchor, eye_y, half_width, view))
+        .collect();
+    let (mut low, mut high) = (f32::INFINITY, f32::NEG_INFINITY);
+    for tri in views.iter().flatten() {
+        for v in &tri.uvw {
+            low = low.min(v[1]);
+            high = high.max(v[1]);
+        }
+    }
+    if !low.is_finite() {
+        return None;
+    }
+    let base = (low - 1.0).floor();
+    let top = (high + 1.0).ceil();
+    let height = (top - base).max(8.0);
+    let (sw, sh) = (Raster::WIDE as f32, Raster::HIGH as f32);
+    let mut sectors = Vec::with_capacity(VIEWS * SLOT_BYTES);
+    let mut preview = Vec::with_capacity(VIEWS * WIDE * HIGH);
+    for tris in &views {
+        let mut raster = Raster::new();
+        for t in tris {
+            let to_sample = |v: [f32; 3]| {
+                [
+                    (v[0] + half_width) / (2.0 * half_width) * sw,
+                    (base + height - v[1]) / height * sh,
+                    v[2],
+                ]
+            };
+            raster.fill_persp(t.uvw.map(to_sample), t.colour);
+        }
+        let (sector_bytes, shown) = finish_picture(&raster);
+        sectors.extend_from_slice(&sector_bytes);
+        preview.extend(shown);
+    }
+    Some(BakedCard {
+        centre: anchor,
+        base: base as i32,
+        height: height as i32,
+        half_width: half_width as i32,
+        sectors,
+        preview,
+        layer,
+    })
+}
+
+/// The anchors of a layer: the room cards' centres grouped by a lattice of
+/// `cell` units, each group's mean.
+fn layer_anchors(rooms: &[Option<BakedCard>], cell: i32) -> Vec<[i32; 2]> {
+    let mut groups: std::collections::BTreeMap<(i32, i32), ([i64; 2], i64)> = Default::default();
+    for card in rooms.iter().flatten() {
+        let key = (
+            card.centre[0].div_euclid(cell),
+            card.centre[1].div_euclid(cell),
+        );
+        let entry = groups.entry(key).or_default();
+        entry.0[0] += i64::from(card.centre[0]);
+        entry.0[1] += i64::from(card.centre[1]);
+        entry.1 += 1;
+    }
+    groups
+        .values()
+        .map(|(sum, n)| [(sum[0] / n) as i32, (sum[1] / n) as i32])
+        .collect()
+}
+
+/// Bake the layers of cards beyond the room cards `rooms`: for each layer,
+/// the cards at its anchors, one list per layer. Layer `k` of `specs` is card
+/// layer `k + 1`.
+pub fn bake_layers(
+    cooked: &CookedLevel,
+    albedo: &[[f32; 3]],
+    rooms: &[Option<BakedCard>],
+    specs: &[LayerSpec],
+) -> Vec<Vec<BakedCard>> {
+    let world = WorldTriangles::new(cooked, albedo);
+    let sector = i32::from(cooked.level.sector_units);
+    let threads = std::thread::available_parallelism()
+        .map_or(4, std::num::NonZeroUsize::get)
+        .clamp(1, 4);
+    specs
+        .iter()
+        .enumerate()
+        .map(|(index, spec)| {
+            let anchors = layer_anchors(rooms, spec.cell);
+            let world = &world;
+            let anchors = &anchors;
+            let mut cards: Vec<Option<BakedCard>> = vec![None; anchors.len()];
+            std::thread::scope(|scope| {
+                let workers: Vec<_> = (0..threads.min(anchors.len().max(1)))
+                    .map(|worker| {
+                        let step = threads.min(anchors.len().max(1));
+                        scope.spawn(move || {
+                            (worker..anchors.len())
+                                .step_by(step)
+                                .map(|i| {
+                                    let card = bake_layer_card(
+                                        world,
+                                        spec,
+                                        index as u8 + 1,
+                                        anchors[i],
+                                        sector,
+                                    );
+                                    (i, card)
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                    })
+                    .collect();
+                for worker in workers {
+                    for (i, card) in worker.join().expect("a layer bake thread panicked") {
+                        cards[i] = card;
+                    }
+                }
+            });
+            cards.into_iter().flatten().collect()
+        })
+        .collect()
 }
 
 /// Cells across one side of the grid the cards' centres are placed on to
@@ -703,6 +1132,80 @@ mod tests {
             view(4),
             view(0)
         );
+    }
+
+    /// How many texels of view `view` of `card` are drawn.
+    fn drawn(card: &BakedCard, view: usize) -> usize {
+        let (indices, _) = decode(&card.sectors[view * SLOT_BYTES..(view + 1) * SLOT_BYTES]);
+        indices.iter().filter(|&&i| i != 0).count()
+    }
+
+    #[test]
+    fn a_layer_card_holds_what_stands_behind_it_to_its_depth() {
+        // A flat strip to the west and a tall block at the far east end of
+        // another strip, 20 sectors on.
+        let world = GridWorld {
+            rooms: vec![
+                strip([0, 0], &[0, 0, 0, 0]),
+                strip([28, 0], &[0, 0, 8192, 8192]),
+            ],
+            ..GridWorld::default()
+        };
+        let cooked = cook(&world).unwrap();
+        let world_tris = WorldTriangles::new(&cooked, &albedo());
+        let sector = i32::from(cooked.level.sector_units);
+        let anchor = [10 * sector, sector / 2];
+        let spec = |depth: Option<i32>| LayerSpec {
+            near: 12 * sector,
+            far: Some(40 * sector),
+            cell: 16 * sector,
+            depth,
+        };
+        // View 4 is the eye on the west looking east: the block is behind
+        // the plane at 18 sectors or more, the strip is not behind it.
+        let far = bake_layer_card(&world_tris, &spec(None), 1, anchor, sector).unwrap();
+        assert_eq!(far.layer, 1);
+        assert!(drawn(&far, 4) > 40, "the block shows: {}", drawn(&far, 4));
+        // With a depth that stops short of the block it is not in the picture.
+        let near = bake_layer_card(&world_tris, &spec(Some(10 * sector)), 1, anchor, sector);
+        assert!(near.is_none_or(|card| drawn(&card, 4) < drawn(&far, 4) / 2));
+        // View 0, the eye on the east, sees the west strip behind the plane
+        // and the block's back not at all.
+        assert!(drawn(&far, 0) > 0);
+    }
+
+    #[test]
+    fn a_nearer_wall_hides_the_one_behind_it_in_a_layer_picture() {
+        // Two blocks on one line, 6 and 20 sectors behind the plane: the
+        // nearer is tall, the farther is as tall, and shows only past it.
+        let world = GridWorld {
+            rooms: vec![strip([16, 0], &[8192, 8192]), strip([30, 0], &[8192, 8192])],
+            ..GridWorld::default()
+        };
+        let cooked = cook(&world).unwrap();
+        let world_tris = WorldTriangles::new(&cooked, &albedo());
+        let sector = i32::from(cooked.level.sector_units);
+        let spec = LayerSpec {
+            near: 12 * sector,
+            far: None,
+            cell: 16 * sector,
+            depth: None,
+        };
+        let anchor = [10 * sector, sector / 2];
+        let both = bake_layer_card(&world_tris, &spec, 1, anchor, sector).unwrap();
+        // The same picture with the nearer block's room left out would show
+        // more of the farther one: here the farther block is behind the
+        // nearer one at the same height, so it adds almost nothing.
+        let alone = GridWorld {
+            rooms: vec![strip([16, 0], &[8192, 8192])],
+            ..GridWorld::default()
+        };
+        let cooked_alone = cook(&alone).unwrap();
+        let tris_alone = WorldTriangles::new(&cooked_alone, &albedo());
+        let one = bake_layer_card(&tris_alone, &spec, 1, anchor, sector).unwrap();
+        let (a, b) = (drawn(&both, 4), drawn(&one, 4));
+        assert!(a > 0 && b > 0);
+        assert!(a.abs_diff(b) * 5 < b, "both {a}, nearer alone {b}");
     }
 
     #[test]

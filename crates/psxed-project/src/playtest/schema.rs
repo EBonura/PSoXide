@@ -129,7 +129,7 @@ pub struct PlaytestSkyTables {
 /// world has none.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PlaytestCards {
-    /// Per room, `[x, z, base, height, half width, 0]` in world runtime
+    /// Per room, `[x, z, base, height, half width, layer]` in world runtime
     /// units; a zero height is a room with no card.
     pub rows: Vec<[i16; 6]>,
     /// Every picture of every card, one sector each, in the layout of

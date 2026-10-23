@@ -533,7 +533,33 @@ fn bake_cards(
     let ids: Vec<Option<ResourceId>> = cooked.materials.iter().map(|(id, _)| *id).collect();
     let table = AlbedoTable::from_project(project, project_root, ids.iter().copied());
     let albedo: Vec<[f32; 3]> = ids.iter().map(|&id| table.albedo(id)).collect();
-    let (baked, summary) = cook::cards::bake(cooked, &albedo);
+    let (rooms_baked, summary) = cook::cards::bake(cooked, &albedo);
+    let sector = i32::from(cooked.level.sector_units);
+    let flood = &world.stream.flood;
+    // The layers of cards beyond the room cards: the guest works their bands out the same way
+    // (`psx_grid::render::outer_bands`), so the level carries only the layer of each card.
+    let room_far = flood.card_far_sectors() * sector;
+    let room_fade = 3 * sector;
+    let bands = psx_grid::render::outer_bands(room_far, room_fade);
+    let mut layers: Vec<[i32; 3]> = vec![[flood.card_near_sectors() * sector, room_far, room_fade]];
+    let mut specs = Vec::new();
+    let mut prev_far = room_far;
+    for (band, layer) in bands.iter().zip(flood.card_layer_bands()) {
+        layers.push([band.near, band.far, band.fade]);
+        specs.push(cook::cards::LayerSpec {
+            near: prev_far,
+            far: (band.far < psx_grid::render::CARD_UNLIMITED).then_some(band.far),
+            cell: layer.cell * sector,
+            depth: layer.depth.map(|d| d * sector),
+        });
+        prev_far = band.far;
+    }
+    let layer_started = std::time::Instant::now();
+    let layer_cards = cook::cards::bake_layers(cooked, &albedo, &rooms_baked, &specs);
+    let rooms = rooms_baked.len();
+    let mut baked = rooms_baked;
+    let layer_counts: Vec<usize> = layer_cards.iter().map(Vec::len).collect();
+    baked.extend(layer_cards.into_iter().flatten().map(Some));
     let limit = i32::from(i16::MAX);
     let mut rows = Vec::with_capacity(baked.len());
     for (room, card) in baked.iter().enumerate() {
@@ -560,16 +586,39 @@ fn bake_cards(
             card.base as i16,
             card.height as i16,
             card.half_width as i16,
-            0,
+            i16::from(card.layer),
         ]);
     }
     // Tiles of eight rooms that stand together, each its eight views one
-    // after another: see `cook::cards::disc_layout`.
+    // after another: see `cook::cards::disc_layout`. The layers' cards go in
+    // tiles of their own after the rooms'.
     let centres: Vec<Option<[i32; 2]>> = baked
         .iter()
+        .take(rooms)
         .map(|card| card.as_ref().map(|card| card.centre))
         .collect();
     let layout = cook::cards::disc_layout(&centres);
+    let layer_centres: Vec<Option<[i32; 2]>> = baked
+        .iter()
+        .skip(rooms)
+        .map(|card| card.as_ref().map(|card| card.centre))
+        .collect();
+    let layer_layout = cook::cards::disc_layout(&layer_centres);
+    let room_tiles = (layout.sectors / (cook::cards::TILE_ROOMS * VIEWS as u32)) as usize;
+    let mut layout = layout;
+    layout.offsets.extend(layer_layout.offsets.iter().map(|&o| {
+        if o == u32::MAX {
+            o
+        } else {
+            o + layout.sectors
+        }
+    }));
+    layout.sectors += layer_layout.sectors;
+    // The copies are worked out for the rooms' cards alone.
+    let centres: Vec<Option<[i32; 2]>> = centres
+        .into_iter()
+        .chain(std::iter::repeat_n(None, baked.len() - rooms))
+        .collect();
     let tile = cook::cards::TILE_ROOMS as usize;
     let mut pictures = vec![0u8; layout.sectors as usize * SLOT_BYTES];
     for (card, &offset) in baked.iter().zip(&layout.offsets) {
@@ -582,18 +631,20 @@ fn bake_cards(
                 .copy_from_slice(&card.sectors[view * SLOT_BYTES..(view + 1) * SLOT_BYTES]);
         }
     }
-    let sector = i32::from(cooked.level.sector_units);
     // Copies of the pictures each tile's neighbourhood asks for, laid out
     // beside it: see `cook::cards::local_copies`.
-    let flood = &world.stream.flood;
-    let far = flood.card_far_sectors() * sector;
-    let local = cook::cards::local_copies(
+    let far = room_far;
+    let mut local = cook::cards::local_copies(
         &layout,
         &centres,
-        (i32::from(flood.mesh_far) - 2).max(0) * sector,
+        flood.card_near_sectors() * sector,
         far + 9 * sector,
         sector,
     );
+    // The tiles of the layers' cards stand nowhere the eye is in.
+    for centre in local.centres.iter_mut().skip(room_tiles) {
+        *centre = [i16::MAX as i32, i16::MAX as i32];
+    }
     let tiles = local.centres.len();
     let tile_bytes = tile * VIEWS * SLOT_BYTES;
     let mut blocks = Vec::new();
@@ -651,6 +702,20 @@ fn bake_cards(
     let backdrop = sky.map_or([[0; 3]; 3], |s| {
         [s.lower_color, s.horizon_color, s.top_color]
     });
+    if !layer_counts.is_empty() {
+        report.warn(format!(
+            "cards: layers beyond the rooms' {} sectors: {} cards ({} pictures, {} KiB) in {:.1} s; bands (near, far, fade, in sectors) {:?}",
+            flood.card_far_sectors(),
+            layer_counts.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(" + "),
+            layer_counts.iter().sum::<usize>() * VIEWS,
+            layer_counts.iter().sum::<usize>() * VIEWS * SLOT_BYTES / 1024,
+            layer_started.elapsed().as_secs_f64(),
+            layers
+                .iter()
+                .map(|l| (l[0] / sector, if l[1] >= psx_grid::render::CARD_UNLIMITED { -1 } else { l[1] / sector }, l[2] / sector))
+                .collect::<Vec<_>>()
+        ));
+    }
     report.warn(format!(
         "cards: {} rooms in {:.1} s ({} empty), {} KiB of pictures, heights {} to {} units, half widths {} to {}",
         summary.cards,
@@ -678,7 +743,7 @@ fn bake_cards(
         room_place,
         far: world.stream.flood.card_far_sectors() * sector,
         fade: 3 * sector,
-        near: (i32::from(world.stream.flood.mesh_far) - 2).max(0) * sector,
+        near: flood.card_near_sectors() * sector,
         backdrop,
     })
 }
