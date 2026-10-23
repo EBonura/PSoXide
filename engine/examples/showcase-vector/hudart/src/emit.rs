@@ -3,7 +3,7 @@
 use std::fmt::Write as _;
 
 use crate::art::{
-    self, bands, cap_palette, cell_palette, clut, emblem_palette, gem_palette, Tone, ATLAS_POS,
+    self, bands, cap_palette, CAP_GLASS, cell_palette, clut, emblem_palette, gem_palette, Tone, ATLAS_POS,
     ATLAS_W, HORIZON, ZENITH,
 };
 
@@ -29,16 +29,16 @@ fn stance_colours() -> [(Tone, Tone, [u8; 3], [u8; 3]); 2] {
 pub fn cluts() -> Vec<[u16; 16]> {
     let mut v = Vec::new();
     for (front, back, active, other) in stance_colours() {
-        v.push(clut(&cell_palette(front, true)));
-        v.push(clut(&cell_palette(front, false)));
-        v.push(clut(&cap_palette(front)));
-        v.push(clut(&cell_palette(back, true)));
-        v.push(clut(&cell_palette(back, false)));
-        v.push(clut(&cap_palette(back)));
-        v.push(clut(&emblem_palette(active, other)));
+        v.push(clut(&cell_palette(front, true), &[]));
+        v.push(clut(&cell_palette(front, false), &[]));
+        v.push(clut(&cap_palette(front), &CAP_GLASS));
+        v.push(clut(&cell_palette(back, true), &[]));
+        v.push(clut(&cell_palette(back, false), &[]));
+        v.push(clut(&cap_palette(back), &CAP_GLASS));
+        v.push(clut(&emblem_palette(active, other), &[]));
     }
-    v.push(clut(&gem_palette(true)));
-    v.push(clut(&gem_palette(false)));
+    v.push(clut(&gem_palette(true), &[]));
+    v.push(clut(&gem_palette(false), &[]));
     v
 }
 
@@ -131,9 +131,9 @@ pub fn art_module() -> String {
         for t in [front, back] {
             let items: Vec<String> = bands(t)
                 .iter()
-                .map(|(a, b, c)| {
+                .map(|(a, b, c, glass)| {
                     format!(
-                        "Band {{ y0: {a}, y1: {b}, rgb: [{}, {}, {}] }}",
+                        "Band {{ y0: {a}, y1: {b}, rgb: [{}, {}, {}], glass: {glass} }}",
                         c[0], c[1], c[2]
                     )
                 })

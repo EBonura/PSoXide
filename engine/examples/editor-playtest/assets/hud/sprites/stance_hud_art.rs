@@ -67,17 +67,17 @@ pub const CLUT_GEM_EMPTY: usize = 15;
 pub static CLUTS: [u16; 256] = [
     0x0000, 0x52de, 0x31fd, 0x195d, 0x1518, 0x10d3, 0x0cae, 0x3e3e, 0x0caf, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
     0x0000, 0x0468, 0x0425, 0x0024, 0x0023, 0x0022, 0x0002, 0x0447, 0x0002, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
-    0x0000, 0x3e3e, 0x155c, 0x1117, 0x0001, 0x0cd3, 0x088d, 0x0447, 0x8000, 0x0023, 0x0002, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+    0x0000, 0x3e3e, 0x155c, 0x1117, 0x8001, 0x0cd3, 0x088d, 0x0447, 0x8000, 0x8023, 0x0422, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
     0x0000, 0x4e76, 0x2990, 0x0cab, 0x0c8a, 0x0868, 0x0445, 0x35d2, 0x0846, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
     0x0000, 0x0423, 0x0002, 0x0001, 0x0001, 0x0001, 0x8000, 0x0023, 0x8000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
-    0x0000, 0x35d2, 0x0cab, 0x0c89, 0x8000, 0x0867, 0x0445, 0x0023, 0x8000, 0x0001, 0x8000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+    0x0000, 0x35d2, 0x0cab, 0x0c89, 0x8000, 0x0867, 0x0445, 0x0023, 0x8000, 0x8001, 0x0421, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
     0x0000, 0x3e3e, 0x2ddd, 0x195d, 0x1519, 0x10f5, 0x0cb0, 0x467e, 0x088c, 0x1d03, 0x6f94, 0x5f4c, 0x4a87, 0x31a5, 0x0000, 0x0000,
     0x0000, 0x6f95, 0x634f, 0x5b29, 0x4ea8, 0x3e26, 0x2d84, 0x6771, 0x31a5, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
     0x0000, 0x18e2, 0x1081, 0x0c61, 0x0861, 0x0840, 0x0420, 0x14c2, 0x0420, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
-    0x0000, 0x6771, 0x5b09, 0x4a87, 0x0420, 0x3e06, 0x2964, 0x14c2, 0x8000, 0x0841, 0x0420, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+    0x0000, 0x6771, 0x5b09, 0x4a87, 0x8420, 0x3e06, 0x2964, 0x14c2, 0x8000, 0x8841, 0x0421, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
     0x0000, 0x5ad4, 0x3e0c, 0x2965, 0x2124, 0x18e3, 0x14a2, 0x464e, 0x14c3, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
     0x0000, 0x0c61, 0x0421, 0x0420, 0x0420, 0x0420, 0x8000, 0x0841, 0x8000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
-    0x0000, 0x464e, 0x2945, 0x2104, 0x8000, 0x18e3, 0x10a2, 0x0841, 0x8000, 0x0420, 0x8000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+    0x0000, 0x464e, 0x2945, 0x2104, 0x8000, 0x18e3, 0x10a2, 0x0841, 0x8000, 0x8420, 0x0421, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
     0x0000, 0x6771, 0x634d, 0x5b29, 0x4ea8, 0x4246, 0x35c5, 0x6b93, 0x2564, 0x086a, 0x4abe, 0x25bd, 0x1117, 0x0caf, 0x0000, 0x0000,
     0x0000, 0x00ac, 0x5fdf, 0x335f, 0x233f, 0x0a3d, 0x0199, 0x0155, 0x77ff, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
     0x0000, 0x0865, 0x0ca8, 0x0887, 0x0886, 0x0865, 0x0465, 0x0444, 0x0cc9, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
@@ -88,11 +88,11 @@ pub const BAND_COUNT: usize = 11;
 /// Plate bands by `[stance][front 0, back 1][band]`: rows `y0..y1` of the bar in this colour.
 pub static BANDS: [[[Band; 11]; 2]; 2] = [
     [
-        [Band { y0: 0, y1: 1, rgb: [18, 6, 3] }, Band { y0: 1, y1: 2, rgb: [241, 142, 120] }, Band { y0: 2, y1: 3, rgb: [228, 80, 46] }, Band { y0: 3, y1: 4, rgb: [187, 65, 38] }, Band { y0: 4, y1: 5, rgb: [6, 2, 1] }, Band { y0: 5, y1: 13, rgb: [13, 4, 2] }, Band { y0: 13, y1: 14, rgb: [27, 9, 5] }, Band { y0: 14, y1: 15, rgb: [155, 54, 31] }, Band { y0: 15, y1: 16, rgb: [109, 38, 22] }, Band { y0: 16, y1: 17, rgb: [60, 21, 12] }, Band { y0: 17, y1: 18, rgb: [18, 6, 3] }],
-        [Band { y0: 0, y1: 1, rgb: [7, 3, 2] }, Band { y0: 1, y1: 2, rgb: [151, 117, 109] }, Band { y0: 2, y1: 3, rgb: [92, 41, 30] }, Band { y0: 3, y1: 4, rgb: [76, 34, 24] }, Band { y0: 4, y1: 5, rgb: [2, 1, 0] }, Band { y0: 5, y1: 13, rgb: [5, 2, 1] }, Band { y0: 13, y1: 14, rgb: [11, 5, 3] }, Band { y0: 14, y1: 15, rgb: [63, 28, 20] }, Band { y0: 15, y1: 16, rgb: [44, 20, 14] }, Band { y0: 16, y1: 17, rgb: [24, 11, 7] }, Band { y0: 17, y1: 18, rgb: [7, 3, 2] }],
+        [Band { y0: 0, y1: 1, rgb: [18, 8, 8], glass: false }, Band { y0: 1, y1: 2, rgb: [241, 142, 120], glass: false }, Band { y0: 2, y1: 3, rgb: [228, 80, 46], glass: false }, Band { y0: 3, y1: 4, rgb: [187, 65, 38], glass: false }, Band { y0: 4, y1: 5, rgb: [6, 2, 1], glass: true }, Band { y0: 5, y1: 13, rgb: [13, 4, 2], glass: true }, Band { y0: 13, y1: 14, rgb: [27, 9, 5], glass: true }, Band { y0: 14, y1: 15, rgb: [155, 54, 31], glass: false }, Band { y0: 15, y1: 16, rgb: [109, 38, 22], glass: false }, Band { y0: 16, y1: 17, rgb: [60, 21, 12], glass: false }, Band { y0: 17, y1: 18, rgb: [18, 8, 8], glass: false }],
+        [Band { y0: 0, y1: 1, rgb: [8, 8, 8], glass: false }, Band { y0: 1, y1: 2, rgb: [151, 117, 109], glass: false }, Band { y0: 2, y1: 3, rgb: [92, 41, 30], glass: false }, Band { y0: 3, y1: 4, rgb: [76, 34, 24], glass: false }, Band { y0: 4, y1: 5, rgb: [2, 1, 0], glass: true }, Band { y0: 5, y1: 13, rgb: [5, 2, 1], glass: true }, Band { y0: 13, y1: 14, rgb: [11, 5, 3], glass: true }, Band { y0: 14, y1: 15, rgb: [63, 28, 20], glass: false }, Band { y0: 15, y1: 16, rgb: [44, 20, 14], glass: false }, Band { y0: 16, y1: 17, rgb: [24, 11, 7], glass: false }, Band { y0: 17, y1: 18, rgb: [8, 8, 8], glass: false }],
     ],
     [
-        [Band { y0: 0, y1: 1, rgb: [5, 15, 14] }, Band { y0: 1, y1: 2, rgb: [138, 220, 207] }, Band { y0: 2, y1: 3, rgb: [74, 197, 176] }, Band { y0: 3, y1: 4, rgb: [60, 161, 144] }, Band { y0: 4, y1: 5, rgb: [2, 5, 4] }, Band { y0: 5, y1: 13, rgb: [4, 11, 10] }, Band { y0: 13, y1: 14, rgb: [8, 23, 21] }, Band { y0: 14, y1: 15, rgb: [50, 134, 120] }, Band { y0: 15, y1: 16, rgb: [35, 94, 84] }, Band { y0: 16, y1: 17, rgb: [19, 52, 46] }, Band { y0: 17, y1: 18, rgb: [5, 15, 14] }],
-        [Band { y0: 0, y1: 1, rgb: [3, 6, 6] }, Band { y0: 1, y1: 2, rgb: [119, 147, 142] }, Band { y0: 2, y1: 3, rgb: [44, 86, 80] }, Band { y0: 3, y1: 4, rgb: [36, 71, 65] }, Band { y0: 4, y1: 5, rgb: [1, 2, 2] }, Band { y0: 5, y1: 13, rgb: [2, 5, 4] }, Band { y0: 13, y1: 14, rgb: [5, 10, 9] }, Band { y0: 14, y1: 15, rgb: [30, 59, 54] }, Band { y0: 15, y1: 16, rgb: [21, 41, 38] }, Band { y0: 16, y1: 17, rgb: [11, 22, 21] }, Band { y0: 17, y1: 18, rgb: [3, 6, 6] }],
+        [Band { y0: 0, y1: 1, rgb: [8, 15, 14], glass: false }, Band { y0: 1, y1: 2, rgb: [138, 220, 207], glass: false }, Band { y0: 2, y1: 3, rgb: [74, 197, 176], glass: false }, Band { y0: 3, y1: 4, rgb: [60, 161, 144], glass: false }, Band { y0: 4, y1: 5, rgb: [2, 5, 4], glass: true }, Band { y0: 5, y1: 13, rgb: [4, 11, 10], glass: true }, Band { y0: 13, y1: 14, rgb: [8, 23, 21], glass: true }, Band { y0: 14, y1: 15, rgb: [50, 134, 120], glass: false }, Band { y0: 15, y1: 16, rgb: [35, 94, 84], glass: false }, Band { y0: 16, y1: 17, rgb: [19, 52, 46], glass: false }, Band { y0: 17, y1: 18, rgb: [8, 15, 14], glass: false }],
+        [Band { y0: 0, y1: 1, rgb: [8, 8, 8], glass: false }, Band { y0: 1, y1: 2, rgb: [119, 147, 142], glass: false }, Band { y0: 2, y1: 3, rgb: [44, 86, 80], glass: false }, Band { y0: 3, y1: 4, rgb: [36, 71, 65], glass: false }, Band { y0: 4, y1: 5, rgb: [1, 2, 2], glass: true }, Band { y0: 5, y1: 13, rgb: [2, 5, 4], glass: true }, Band { y0: 13, y1: 14, rgb: [5, 10, 9], glass: true }, Band { y0: 14, y1: 15, rgb: [30, 59, 54], glass: false }, Band { y0: 15, y1: 16, rgb: [21, 41, 38], glass: false }, Band { y0: 16, y1: 17, rgb: [11, 22, 21], glass: false }, Band { y0: 17, y1: 18, rgb: [8, 8, 8], glass: false }],
     ],
 ];

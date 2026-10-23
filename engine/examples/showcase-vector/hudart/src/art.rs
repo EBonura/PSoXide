@@ -373,13 +373,19 @@ fn row_colour(k: Row, c: Rgb) -> Rgb {
         Row::Lip => scale(c, 170),
         Row::Shade => scale(c, 120),
         Row::Foot => scale(c, 66),
-        Row::Rim | Row::Drop => scale(c, 20),
+        // Never pure black: a black CLUT entry would read as transparent or as glass.
+        Row::Rim | Row::Drop => scale(c, 20).map(|v| v.max(8)),
     }
 }
 
-/// The bar's colours by row: `(first row, one past the last, colour)`, equal neighbouring rows
-/// merged.
-pub fn bands(t: Tone) -> Vec<(u8, u8, Rgb)> {
+/// Whether a row is the translucent glass the cells sit in: the scene shows through it.
+fn is_glass(k: Row) -> bool {
+    matches!(k, Row::WellTop | Row::Recess | Row::WellLow)
+}
+
+/// The bar's colours by row: `(first row, one past the last, colour, glass)`, equal neighbouring
+/// rows merged.
+pub fn bands(t: Tone) -> Vec<(u8, u8, Rgb, bool)> {
     let mut out: Vec<(u8, u8, Row)> = Vec::new();
     for (r, &k) in ROWS.iter().enumerate() {
         match out.last_mut() {
@@ -388,7 +394,7 @@ pub fn bands(t: Tone) -> Vec<(u8, u8, Rgb)> {
         }
     }
     out.into_iter()
-        .map(|(a, b, k)| (a, b, row_colour(k, t.base)))
+        .map(|(a, b, k)| (a, b, row_colour(k, t.base), is_glass(k)))
         .collect()
 }
 
@@ -396,6 +402,9 @@ pub fn bands(t: Tone) -> Vec<(u8, u8, Rgb)> {
 pub fn band_count() -> usize {
     bands(Tone::front(HORIZON)).len()
 }
+
+/// The cap palette indices that are glass (`WellTop`, `Recess`, `WellLow`).
+pub const CAP_GLASS: [u8; 3] = [8, 4, 9];
 
 pub fn cap_palette(t: Tone) -> Palette {
     let mut p = [[0u8; 3]; 16];
@@ -490,12 +499,20 @@ pub fn gem_palette(lit: bool) -> Palette {
     }
 }
 
-/// A palette as 16 CLUT entries (entry 0 stays transparent).
-pub fn clut(p: &Palette) -> [u16; 16] {
+/// A palette as 16 CLUT entries (entry 0 stays transparent). The entries listed in `glass` get the
+/// semi-transparency bit: a sprite drawn with semi-transparency on blends them with the scene and
+/// draws the rest opaque.
+pub fn clut(p: &Palette, glass: &[u8]) -> [u16; 16] {
     let mut out = [0u16; 16];
-    for (o, c) in out.iter_mut().zip(p.iter()).skip(1) {
-        // Unused entries are black; keep them transparent rather than opaque black.
-        *o = if *c == [0, 0, 0] { 0 } else { to_555(*c) };
+    for (i, (o, c)) in out.iter_mut().zip(p.iter()).enumerate().skip(1) {
+        *o = if glass.contains(&(i as u8)) {
+            (to_555(*c) & 0x7fff) | 0x8000
+        } else if *c == [0, 0, 0] {
+            // Unused entry: transparent, not opaque black.
+            0
+        } else {
+            to_555(*c)
+        };
     }
     out
 }

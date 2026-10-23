@@ -19,12 +19,14 @@ pub struct SpriteRect {
     pub h: u8,
 }
 
-/// Rows `y0..y1` of a bar plate in one flat colour.
+/// Rows `y0..y1` of a bar plate in one flat colour. A `glass` band is drawn semi-transparently
+/// (average of the scene and the colour), so the scene shows through the well the cells sit in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Band {
     pub y0: u8,
     pub y1: u8,
     pub rgb: [u8; 3],
+    pub glass: bool,
 }
 
 include!("../assets/hud/sprites/stance_hud_art.rs");
@@ -68,20 +70,23 @@ pub struct HudState {
 /// One thing to paint, in screen pixels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Op {
-    /// A flat rectangle.
+    /// A flat rectangle, semi-transparent when `glass`.
     Rect {
         x: i32,
         y: i32,
         w: i32,
         h: i32,
         rgb: [u8; 3],
+        glass: bool,
     },
-    /// A sprite from the atlas, drawn 1:1 with CLUT number `clut` of [`CLUTS`].
+    /// A sprite from the atlas, drawn 1:1 with CLUT number `clut` of [`CLUTS`]. With `glass` the
+    /// palette entries that carry the semi-transparency bit blend with the scene.
     Sprite {
         x: i32,
         y: i32,
         src: SpriteRect,
         clut: usize,
+        glass: bool,
     },
 }
 
@@ -104,6 +109,7 @@ fn bar(origin: (i32, i32), front: bool, stance: Stance, lit: u8, draw: &mut impl
                 w: CAP_X - BAR_X0,
                 h: y1 - band.y0 as i32,
                 rgb: band.rgb,
+                glass: band.glass,
             });
         }
     }
@@ -121,6 +127,7 @@ fn bar(origin: (i32, i32), front: bool, stance: Stance, lit: u8, draw: &mut impl
             ..SPRITE_CAP
         },
         clut: base + cap_clut,
+        glass: true,
     });
     let cell_rows = (rows - CELL_ROW).min(SPRITE_CELL.h as i32);
     if cell_rows <= 0 {
@@ -141,6 +148,7 @@ fn bar(origin: (i32, i32), front: bool, stance: Stance, lit: u8, draw: &mut impl
                 } else {
                     empty_clut
                 },
+            glass: false,
         });
     }
 }
@@ -155,6 +163,7 @@ pub fn compose(origin: (i32, i32), state: &HudState, draw: &mut impl FnMut(Op)) 
         y: origin.1 + EMBLEM_Y,
         src: SPRITE_EMBLEM,
         clut: state.stance.index() * CLUTS_PER_STANCE + CLUT_EMBLEM,
+        glass: false,
     });
     for k in 0..COUNT {
         draw(Op::Sprite {
@@ -166,6 +175,7 @@ pub fn compose(origin: (i32, i32), state: &HudState, draw: &mut impl FnMut(Op)) 
             } else {
                 CLUT_GEM_EMPTY
             },
+            glass: false,
         });
     }
 }

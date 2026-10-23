@@ -6,7 +6,7 @@
 //! a rectangle is three words, a sprite is six (draw mode, texture window reset, then the textured
 //! rectangle command). Include this file after `stance_hud_sprites.rs` as `hud_sprites`.
 
-use psx_gpu::material::TextureMaterial;
+use psx_gpu::material::{BlendMode, TextureMaterial};
 use psx_gpu::prim::{RectFlat, Sprite};
 use psx_vram::{upload_16bpp, Clut, TextureDepth, TexturePage, VramRect};
 
@@ -54,6 +54,9 @@ impl HudVram {
         Clut::new(self.clut_x + 16 * clut as u16, self.clut_y).uv_word()
     }
 }
+
+/// Bit 25 of a draw command: semi-transparent.
+const SEMI_TRANSPARENT: u32 = 1 << 25;
 
 /// One ordering-table node: the tag, and up to six payload words.
 #[derive(Clone, Copy)]
@@ -108,19 +111,48 @@ impl<const N: usize> HudPackets<N> {
     pub fn build(&mut self, vram: &HudVram, origin: (i32, i32), state: &HudState) {
         self.len = 0;
         let (nodes, len) = (&mut self.nodes, &mut self.len);
+        // The draw mode words and the texture window reset do not depend on the part: build them
+        // once.
+        let page = vram.page.uv_word(0);
+        let plain = TextureMaterial::new(0, page);
+        let plain_mode = plain.draw_mode_word();
+        let window = plain.texture_window_word();
+        let average = TextureMaterial::blended(0, page, (0x80, 0x80, 0x80), BlendMode::Average);
+        let glass_mode = average.draw_mode_word();
         compose(origin, state, &mut |op| {
             let node = match op {
-                Op::Rect { x, y, w, h, rgb } => {
+                Op::Rect {
+                    x,
+                    y,
+                    w,
+                    h,
+                    rgb,
+                    glass,
+                } => {
                     let r = RectFlat::new(
                         x as i16, y as i16, w as u16, h as u16, rgb[0], rgb[1], rgb[2],
                     );
-                    Node {
-                        tag: 3 << 24,
-                        words: [r.color_cmd, r.xy, r.wh, 0, 0, 0],
+                    if glass {
+                        // Semi-transparent rectangle: the draw mode carries the equation.
+                        Node {
+                            tag: 4 << 24,
+                            words: [glass_mode, r.color_cmd | SEMI_TRANSPARENT, r.xy, r.wh, 0, 0],
+                        }
+                    } else {
+                        Node {
+                            tag: 3 << 24,
+                            words: [r.color_cmd, r.xy, r.wh, 0, 0, 0],
+                        }
                     }
                 }
-                Op::Sprite { x, y, src, clut } => {
-                    let material = TextureMaterial::new(vram.clut_word(clut), vram.page.uv_word(0));
+                Op::Sprite {
+                    x,
+                    y,
+                    src,
+                    clut,
+                    glass,
+                } => {
+                    let material = TextureMaterial::new(vram.clut_word(clut), page);
                     let s = Sprite::with_material(
                         x as i16,
                         y as i16,
@@ -132,9 +164,13 @@ impl<const N: usize> HudPackets<N> {
                     Node {
                         tag: 6 << 24,
                         words: [
-                            material.draw_mode_word(),
-                            material.texture_window_word(),
-                            s.color_cmd,
+                            if glass { glass_mode } else { plain_mode },
+                            window,
+                            if glass {
+                                s.color_cmd | SEMI_TRANSPARENT
+                            } else {
+                                s.color_cmd
+                            },
                             s.xy,
                             s.uv_clut,
                             s.wh,

@@ -71,6 +71,13 @@ const fn env_px(s: Option<&str>, default: i32) -> i32 {
         None => default,
     }
 }
+/// The clear colour: navy, or `HUD_BG_R`, `HUD_BG_G`, `HUD_BG_B` at build time, to check how
+/// translucent parts blend with a lighter scene.
+const CLEAR: (u8, u8, u8) = (
+    env_px(option_env!("HUD_BG_R"), 16) as u8,
+    env_px(option_env!("HUD_BG_G"), 24) as u8,
+    env_px(option_env!("HUD_BG_B"), 40) as u8,
+);
 /// Left edge of the Horizon and Zenith columns of the grid, in pixels.
 const GRID_X: [i32; 2] = [
     env_px(option_env!("HUD_GRID_X0"), 2),
@@ -489,7 +496,7 @@ fn main() -> ! {
         hud: None,
     };
     let config = Config {
-        clear_color: (16, 24, 40),
+        clear_color: CLEAR,
         ..Config::default()
     };
     App::run(config, &mut demo);

@@ -55,16 +55,30 @@ impl Frame {
         }
     }
 
+    /// Average the scene with a 5-bit colour, the GPU's semi-transparency mode 0.
+    fn blend(&mut self, x: i32, y: i32, f5: [u16; 3]) {
+        if x >= 0 && y >= 0 && (x as usize) < self.w && (y as usize) < self.h {
+            let p = &mut self.px[y as usize * self.w + x as usize];
+            for (c, f) in p.iter_mut().zip(f5) {
+                *c = expand(((*c as u16 >> 3) + f) >> 1);
+            }
+        }
+    }
+
     fn op(&mut self, op: Op) {
         match op {
-            Op::Rect { x, y, w, h, rgb } => {
+            Op::Rect { x, y, w, h, rgb, glass } => {
                 for yy in y..y + h {
                     for xx in x..x + w {
-                        self.put(xx, yy, shown(rgb));
+                        if glass {
+                            self.blend(xx, yy, rgb.map(|v| (v >> 3) as u16));
+                        } else {
+                            self.put(xx, yy, shown(rgb));
+                        }
                     }
                 }
             }
-            Op::Sprite { x, y, src, clut } => {
+            Op::Sprite { x, y, src, clut, glass } => {
                 for ty in 0..src.h as usize {
                     for tx in 0..src.w as usize {
                         let (u, v) = (src.u as usize + tx, src.v as usize + ty);
@@ -74,12 +88,12 @@ impl Frame {
                         if entry == 0 {
                             continue;
                         }
-                        let c = [
-                            expand(entry & 31),
-                            expand((entry >> 5) & 31),
-                            expand((entry >> 10) & 31),
-                        ];
-                        self.put(x + tx as i32, y + ty as i32, c);
+                        let c5 = [entry & 31, (entry >> 5) & 31, (entry >> 10) & 31];
+                        if glass && entry & 0x8000 != 0 {
+                            self.blend(x + tx as i32, y + ty as i32, c5);
+                        } else {
+                            self.put(x + tx as i32, y + ty as i32, c5.map(expand));
+                        }
                     }
                 }
             }
