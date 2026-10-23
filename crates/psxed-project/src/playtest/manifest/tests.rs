@@ -623,6 +623,7 @@ fn a_grid_world_rides_world_pack_with_the_core_first_and_one_chunk_per_room() {
         world.room_chunks.len()
     )));
     assert!(source.contains("pub const GRID_ROOM_POOL_PAGES: usize = "));
+    assert!(source.contains("pub const GRID_ROOM_ENTRIES: usize = "));
     assert!(source.contains(&format!(
         "pub const UI_PACK_START_LBA: u32 = {};",
         psx_iso::WORLD_PACK_DEFAULT_START_LBA + layout.total_sectors

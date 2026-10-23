@@ -44,8 +44,6 @@ fn flooded(mut world: GridWorld, near: u8, res: u8) -> GridWorld {
         card_far: 0,
         card_near: 0,
         card_layers: 0,
-        mesh_far: 0,
-        mesh_cluster: 0,
     };
     world
 }

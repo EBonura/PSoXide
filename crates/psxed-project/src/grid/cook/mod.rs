@@ -10,7 +10,6 @@
 //! and `psx_grid::format`.
 
 pub mod cards;
-pub mod coarse;
 pub mod collision;
 pub mod leaf_collision;
 pub mod lod;

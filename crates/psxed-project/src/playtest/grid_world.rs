@@ -293,12 +293,6 @@ pub(super) fn cook(
             return None;
         }
     }
-    if world.stream.flood.on && world.stream.flood.mesh_far > 0 {
-        if let Err(error) = add_coarse(project, project_root, world, &mut cooked, report) {
-            report.error(format!("grid world: {error}"));
-            return None;
-        }
-    }
     let mut rooms = Vec::new();
     for chunk in &cooked.chunks {
         rooms.extend_from_slice(chunk);
@@ -360,11 +354,12 @@ pub(super) fn cook(
     let summary = cooked.report.summary();
     report.warn(summary.trim_end().to_string());
     report.warn(format!(
-        "grid world: guest room pool {} pages ({} KiB): the wanted set peaks at {} pages in {} rooms, the largest room is {} pages; every page costs the guest heap 2 KiB",
+        "grid world: guest room pool {} pages ({} KiB): the wanted set peaks at {} pages in {} rooms (at most {} rooms in any set), the largest room is {} pages; every page costs the guest heap 2 KiB",
         pool.pool_pages,
         pool.pool_pages * 2,
         pool.peak_pages,
         pool.peak_rooms,
+        pool.max_rooms,
         pool.max_room_pages
     ));
     // A level with cards lays its pictures out among the room chunks: the
@@ -479,43 +474,6 @@ fn relayout_rooms(
     }
     cooked.core = cooked.level.try_to_bytes()?;
     Ok(blob)
-}
-
-/// Bake the coarse band of `cooked` and put it in the core: each level
-/// material coloured by its mean texel colour, lit by the baked light.
-fn add_coarse(
-    project: &ProjectDocument,
-    project_root: &Path,
-    world: &GridWorld,
-    cooked: &mut cook::CookedLevel,
-    report: &mut PlaytestValidationReport,
-) -> Result<(), String> {
-    use crate::grid::lighting::{AlbedoTable, BakeMaterials};
-    let ids: Vec<Option<ResourceId>> = cooked.materials.iter().map(|(id, _)| *id).collect();
-    let table = AlbedoTable::from_project(project, project_root, ids.iter().copied());
-    let albedo: Vec<[f32; 3]> = ids.iter().map(|&id| table.albedo(id)).collect();
-    let flood = &world.stream.flood;
-    let (block, summary) = cook::coarse::bake(
-        cooked,
-        &albedo,
-        flood.mesh_cluster_sectors(),
-        flood.mesh_far,
-        2,
-    )?;
-    cooked.level.coarse = Some(block);
-    cooked.core = cooked.level.try_to_bytes()?;
-    cooked.report.core_bytes = cooked.core.len();
-    report.warn(format!(
-        "coarse: {} triangles from {} ({} vertices, most in a room {} vertices and {} triangles, {} rooms regridded), {} bytes in the core",
-        summary.triangles,
-        summary.source_triangles,
-        summary.vertices,
-        summary.max_vertices,
-        summary.max_triangles,
-        summary.regridded,
-        summary.bytes
-    ));
-    Ok(())
 }
 
 /// Bake the far cards of `cooked`: each level material coloured by its mean

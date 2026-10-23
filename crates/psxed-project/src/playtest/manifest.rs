@@ -375,12 +375,20 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
          pub const GRID_ROOM_COUNT: usize = {};\n\
          /// Pages (2 KiB) of the room pool. The level wants at most {} pages ({} rooms) at\n\
          /// once, of {} pages in all; the rest of the pool is room for fragmentation.\n\
-         pub const GRID_ROOM_POOL_PAGES: usize = {};\n",
+         pub const GRID_ROOM_POOL_PAGES: usize = {};\n\
+         /// Rooms the residency table tracks at once: the most any wanted set holds ({}), with\n\
+         /// room for the ones still resident from the last position and one backing off.\n\
+         /// Every lookup in the table walks it, so it is no larger than that needs.\n\
+         pub const GRID_ROOM_ENTRIES: usize = {};\n",
         package.world_geometry.room_chunks.len(),
         pool.peak_pages,
         pool.peak_rooms,
         pool.total_pages,
         pool.pool_pages.max(1),
+        pool.max_rooms,
+        (pool.max_rooms + pool.max_rooms / 2 + 8)
+            .min(package.world_geometry.room_chunks.len())
+            .max(1),
     );
 
     // Baked chunk skies: where each room's sits in WORLD.PAK.
@@ -427,7 +435,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
          /// top of the screen).\n\
          pub const GRID_CARD_FAR: i32 = {};\n\
          pub const GRID_CARD_FADE: i32 = {};\n\
-         /// No card is drawn closer than this (the coarse band stands there).\n\
+         /// No card is drawn closer than this (the rooms there are drawn whole).\n\
          pub const GRID_CARD_NEAR: i32 = {};\n\
          pub const GRID_CARD_BACKDROP: [[u8; 3]; 3] = {:?};\n",
         cards.rows,

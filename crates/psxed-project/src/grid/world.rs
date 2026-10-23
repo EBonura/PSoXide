@@ -113,21 +113,14 @@ pub struct FloodSettings {
     /// Sectors from the camera out to which cards are shown; 0 means the
     /// default, 20.
     pub card_far: u8,
-    /// Sectors from the camera inside which no card is drawn; 0 means the
-    /// edge of the coarse band (`mesh_far` less two sectors), or none when
-    /// there is no coarse mesh.
+    /// Sectors from the camera inside which no card is drawn; 0 means two
+    /// sectors inside `near_radius`: the rooms nearer than that are always drawn
+    /// whole, so their pictures are not read.
     pub card_near: u8,
     /// Layers of cards beyond `card_far` (0 to 2), each holding everything
     /// from its distance to the next layer's, the last one everything to the
     /// horizon ([`FloodSettings::card_layer_bands`]).
     pub card_layers: u8,
-    /// Draw the rooms between `near_radius` and this many sectors as coarse
-    /// meshes (`psx_grid::render::coarse`): each room's geometry merged by
-    /// vertex clustering into a few Gouraud triangles. 0 is off. Needs `on`.
-    pub mesh_far: u8,
-    /// Grid cell of the clustering in tenths of a sector; 0 means the
-    /// default, 20 (two sectors).
-    pub mesh_cluster: u8,
 }
 
 impl FloodSettings {
@@ -144,18 +137,7 @@ impl FloodSettings {
         card_far: 0,
         card_near: 0,
         card_layers: 0,
-        mesh_far: 0,
-        mesh_cluster: 0,
     };
-
-    /// Grid cell of the coarse mesh in sectors.
-    pub fn mesh_cluster_sectors(&self) -> f32 {
-        if self.mesh_cluster > 0 {
-            f32::from(self.mesh_cluster) / 10.0
-        } else {
-            2.0
-        }
-    }
 
     /// Sectors out to which cards are shown.
     pub fn card_far_sectors(&self) -> i32 {
@@ -171,7 +153,7 @@ impl FloodSettings {
         if self.card_near > 0 {
             i32::from(self.card_near)
         } else {
-            (i32::from(self.mesh_far) - 2).max(0)
+            (i32::from(self.near_radius) - 2).max(0)
         }
     }
 

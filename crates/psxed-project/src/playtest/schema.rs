@@ -159,8 +159,8 @@ pub struct PlaytestCards {
     /// fade in over the last `fade`.
     pub far: i32,
     pub fade: i32,
-    /// No card is drawn closer than this many runtime units (the coarse
-    /// band stands there).
+    /// No card is drawn closer than this many runtime units (the rooms
+    /// there are drawn whole).
     pub near: i32,
     /// The colours behind the cards (below the horizon, at it, at the top
     /// of the screen).
