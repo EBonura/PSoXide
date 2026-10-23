@@ -597,7 +597,9 @@ impl Demo {
                     }
                 }
                 // SAFETY: a `static`, unmodified until the walk ends.
-                hud.link(&state, |ptr, words| unsafe { ot.add_raw(8, ptr, words) });
+                hud.link(&state, |ptr, tag| unsafe {
+                    ot.add_raw_tag_unchecked(8, ptr, tag)
+                });
             }
             return "walk_hud";
         }
@@ -626,10 +628,27 @@ impl Demo {
             record("c_build", 0, ticks().wrapping_sub(t0));
             self.sprite_state = Some(state);
         }
+        // Health and energy changes, timed: one cell, then eight, then ten, then back to rest.
+        let levels = match t {
+            10 => Some(([8, 5], [8, 3], "c_pat1")),
+            12 => Some(([0, 5], [8, 3], "c_pat8")),
+            14 => Some(([10, 5], [8, 3], "c_pat10")),
+            16 => Some(([7, 5], [8, 3], "c_pat3")),
+            18 => Some(([7, 5], [0, 3], "c_gem8")),
+            20 => Some(([7, 5], [8, 3], "c_gem8b")),
+            _ => None,
+        };
+        if let Some((health, energy, name)) = levels {
+            let t0 = ticks();
+            hud.set_levels(&HudVram::SHOWCASE, health, energy);
+            record(name, 0, ticks().wrapping_sub(t0));
+        }
         if t != 63 {
             let t0 = ticks();
             // SAFETY: a `static`, unmodified until the walk ends.
-            hud.link(&state, |ptr, words| unsafe { ot.add_raw(8, ptr, words) });
+            hud.link(&state, |ptr, tag| unsafe {
+                ot.add_raw_tag_unchecked(8, ptr, tag)
+            });
             if swap == 0 {
                 record("c_link", 0, ticks().wrapping_sub(t0));
             } else if swap == 4 {

@@ -17,9 +17,9 @@ use psx_gpu::prim::{RectFlat, Sprite};
 use psx_vram::{upload_16bpp, Clut, TextureDepth, TexturePage, VramRect};
 
 use super::hud_sprites::{
-    bar, emblem_op, gem_op, scene, EmblemLook, HudState, Op, Part, Pose, Stance, ATLAS, ATLAS_H,
-    ATLAS_HW_W, BACK_SIZE, CLUTS, CLUT_COUNT, COUNT, MASK_CHECK, MASK_OFF, MASK_SET,
-    MASK_SET_CHECK,
+    bar, cell_clut, emblem_op, gem_clut, gem_op, scene, EmblemLook, HudState, Op, Part, Pose,
+    Scene, Stance, ATLAS, ATLAS_H, ATLAS_HW_W, BACK_SIZE, CLUTS, CLUT_COUNT, COUNT, MASK_CHECK,
+    MASK_OFF, MASK_SET, MASK_SET_CHECK,
 };
 
 /// Where the HUD's texels and palettes live in VRAM.
@@ -66,6 +66,10 @@ impl HudVram {
 /// GP0 E6, the mask bit setting: bit 0 marks the pixels drawn, bit 1 skips marked pixels.
 const MASK_SETTING: u32 = 0xE600_0000;
 
+/// The payload length in the tag word. The low 24 bits hold the link the last ordering-table walk
+/// left there and must not be passed on as the length of the next one.
+const TAG_LEN: u32 = 0xFF00_0000;
+
 /// Bit 25 of a draw command: semi-transparent.
 const SEMI_TRANSPARENT: u32 = 1 << 25;
 
@@ -87,6 +91,14 @@ impl Node {
     /// Payload words, from the tag's high byte.
     fn len(&self) -> u8 {
         (self.tag >> 24) as u8
+    }
+
+    /// Point a sprite packet at another palette: the palette is the top half of the texture
+    /// coordinate word, the one after the position.
+    fn set_clut(&mut self, clut_word: u16) {
+        if self.len() == 6 {
+            self.words[4] = (self.words[4] & 0xFFFF) | ((clut_word as u32) << 16);
+        }
     }
 
     /// Move the primitive by `(dx, dy)` pixels: the position word is the one after the command (and
@@ -297,6 +309,11 @@ pub struct HudPackets {
     gems: [[Node; COUNT as usize]; 2],
     masks: [Node; 4],
     origin: (i32, i32),
+    /// The state the bars were last placed for, and the scene it gave: at rest a frame skips both.
+    shown: Option<(HudState, Scene)>,
+    /// Cells and gems lit in the packets as they stand, each stance.
+    health: [u8; 2],
+    energy: [u8; 2],
 }
 
 impl HudPackets {
@@ -308,12 +325,15 @@ impl HudPackets {
             gems: [[Node::ZERO; COUNT as usize]; 2],
             masks: [Node::ZERO; 4],
             origin: (0, 0),
+            shown: None,
+            health: [0; 2],
+            energy: [0; 2],
         }
     }
 
     /// Build the packets of every bar at every size for the HUD with its top-left at `origin`, with
     /// `health` cells lit in each stance's bar and `energy` gems lit for each stance. Do this once,
-    /// and again when a health or energy value changes.
+    /// and again when the HUD moves. A health or energy change needs no rebuild: see [`HudPackets::set_levels`].
     ///
     /// # Panics
     ///
@@ -321,6 +341,13 @@ impl HudPackets {
     pub fn build(&mut self, vram: &HudVram, origin: (i32, i32), health: [u8; 2], energy: [u8; 2]) {
         let conv = Converter::new(vram);
         self.origin = origin;
+        let (health, energy) = (
+            health.map(|h| h.min(COUNT as u8)),
+            energy.map(|e| e.min(COUNT as u8)),
+        );
+        self.health = health;
+        self.shown = None;
+        self.energy = energy;
         for (s, stance) in [Stance::Horizon, Stance::Zenith].into_iter().enumerate() {
             for size in 0..USED {
                 self.bars[s][size] = BarPackets::build(&conv, stance, size, health[s]);
@@ -347,18 +374,51 @@ impl HudPackets {
         }
     }
 
-    /// Place the two bars for `state` and hand every packet of the HUD to `add` as `(pointer,
+    /// Change how many cells and gems are lit, without a rebuild: only the cells and gems whose
+    /// state changes get another palette in their packet (one store each, in every size of the
+    /// bar). Values above ten count as ten, as in [`HudPackets::build`].
+    pub fn set_levels(&mut self, vram: &HudVram, health: [u8; 2], energy: [u8; 2]) {
+        let top = COUNT as u8;
+        for (s, stance) in [Stance::Horizon, Stance::Zenith].into_iter().enumerate() {
+            let (old, new) = (self.health[s], health[s].min(top));
+            let lit = new > old;
+            for k in old.min(new)..old.max(new) {
+                for size in 0..USED {
+                    let clut = vram.clut_word(cell_clut(stance, size, lit));
+                    self.bars[s][size].cells.nodes[k as usize].set_clut(clut);
+                }
+            }
+            self.health[s] = new;
+            let (old, new) = (self.energy[s], energy[s].min(top));
+            let clut = vram.clut_word(gem_clut(new > old));
+            for k in old.min(new)..old.max(new) {
+                self.gems[s][k as usize].set_clut(clut);
+            }
+            self.energy[s] = new;
+        }
+    }
+
+    /// Place the two bars for `state` (not again while the state stays the same) and hand every packet of the HUD to `add` as `(pointer,
     /// payload words)`, in the order to link them: back to front, so that within one ordering-table
     /// slot the first packet is walked first.
     ///
     /// The packets must stay unmodified until the walk that uses them ends.
-    pub fn link(&mut self, state: &HudState, mut add: impl FnMut(*mut u32, u8)) {
-        let sc = scene(state);
+    pub fn link(&mut self, state: &HudState, mut add: impl FnMut(*mut u32, u32)) {
+        let sc = match self.shown {
+            Some((shown, sc)) if shown == *state => sc,
+            _ => {
+                let sc = scene(state);
+                let origin = self.origin;
+                let (fs, fp) = (sc.front.0.index(), sc.front.1);
+                let (bs, bp) = (sc.behind.0.index(), sc.behind.1);
+                self.bars[fs][fp.size].place(origin.0 + fp.x, origin.1 + fp.y);
+                self.bars[bs][bp.size].place(origin.0 + bp.x, origin.1 + bp.y);
+                self.shown = Some((*state, sc));
+                sc
+            }
+        };
         let (fs, fp) = (sc.front.0.index(), sc.front.1);
         let (bs, bp) = (sc.behind.0.index(), sc.behind.1);
-        let origin = self.origin;
-        self.bars[fs][fp.size].place(origin.0 + fp.x, origin.1 + fp.y);
-        self.bars[bs][bp.size].place(origin.0 + bp.x, origin.1 + bp.y);
         let front = &self.bars[fs][fp.size];
         let behind = &self.bars[bs][bp.size];
         let emblem = match sc.emblem {
@@ -369,23 +429,29 @@ impl HudPackets {
         // first out: gems, emblem, the front bar's opaque parts and cells, the mask off, the back
         // bar's plate, the mask set to check, the back bar's cells, the mask set and checked, the
         // front bar's translucent parts, the mask set.
-        let mut add_all = |nodes: &[Node]| {
-            for n in nodes.iter().rev() {
-                add((n as *const Node as *mut Node).cast::<u32>(), n.len());
-            }
-        };
-        add_all(&self.gems[sc.gems.index()]);
-        add_all(core::slice::from_ref(&self.emblem[emblem]));
-        add_all(&front.cells.nodes[..front.cells.len]);
-        add_all(&front.opaque.nodes[..front.opaque.len]);
-        add_all(&self.masks[3..4]);
-        add_all(&behind.opaque.nodes[..behind.opaque.len]);
-        add_all(&behind.glass.nodes[..behind.glass.len]);
-        add_all(&self.masks[2..3]);
-        add_all(&behind.cells.nodes[..behind.cells.len]);
-        add_all(&self.masks[1..2]);
-        add_all(&front.glass.nodes[..front.glass.len]);
-        add_all(&self.masks[0..1]);
+        // A macro, not a closure, so that every packet is a plain store with no call in between.
+        macro_rules! add_all {
+            ($nodes:expr) => {
+                for n in $nodes.iter().rev() {
+                    add(
+                        (n as *const Node as *mut Node).cast::<u32>(),
+                        n.tag & TAG_LEN,
+                    );
+                }
+            };
+        }
+        add_all!(&self.gems[sc.gems.index()]);
+        add_all!(core::slice::from_ref(&self.emblem[emblem]));
+        add_all!(&front.cells.nodes[..front.cells.len]);
+        add_all!(&front.opaque.nodes[..front.opaque.len]);
+        add_all!(&self.masks[3..4]);
+        add_all!(&behind.opaque.nodes[..behind.opaque.len]);
+        add_all!(&behind.glass.nodes[..behind.glass.len]);
+        add_all!(&self.masks[2..3]);
+        add_all!(&behind.cells.nodes[..behind.cells.len]);
+        add_all!(&self.masks[1..2]);
+        add_all!(&front.glass.nodes[..front.glass.len]);
+        add_all!(&self.masks[0..1]);
     }
 }
 
@@ -439,5 +505,140 @@ impl AlonePackets {
 impl Default for AlonePackets {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn same_node(a: &Node, b: &Node) -> bool {
+        a.tag == b.tag && a.words == b.words
+    }
+
+    fn same_nodes(a: &[Node], b: &[Node]) -> bool {
+        a.len() == b.len() && a.iter().zip(b).all(|(x, y)| same_node(x, y))
+    }
+
+    /// Every packet, in every bar and size, equal word for word.
+    fn same(a: &HudPackets, b: &HudPackets) -> bool {
+        let bars = (0..2).all(|s| {
+            (0..USED).all(|z| {
+                let (x, y) = (&a.bars[s][z], &b.bars[s][z]);
+                x.at == y.at
+                    && x.glass.len == y.glass.len
+                    && x.opaque.len == y.opaque.len
+                    && x.cells.len == y.cells.len
+                    && same_nodes(&x.glass.nodes, &y.glass.nodes)
+                    && same_nodes(&x.opaque.nodes, &y.opaque.nodes)
+                    && same_nodes(&x.cells.nodes, &y.cells.nodes)
+            })
+        });
+        bars && (0..2).all(|s| same_nodes(&a.gems[s], &b.gems[s]))
+            && same_nodes(&a.emblem, &b.emblem)
+            && same_nodes(&a.masks, &b.masks)
+            && a.health == b.health
+            && a.energy == b.energy
+    }
+
+    /// Patching the levels of a built HUD gives exactly the packets of a fresh build at the new
+    /// levels, from every level to every level, for both stances, every size, health and energy.
+    #[test]
+    fn patched_levels_equal_a_fresh_build() {
+        let vram = HudVram::SHOWCASE;
+        for from in 0..=COUNT as u8 {
+            for to in 0..=COUNT as u8 {
+                let mut patched = HudPackets::new();
+                patched.build(&vram, (5, 7), [from, to], [to, from]);
+                patched.set_levels(&vram, [to, from], [from, to]);
+                let mut fresh = HudPackets::new();
+                fresh.build(&vram, (5, 7), [to, from], [from, to]);
+                assert!(same(&patched, &fresh), "levels {from} -> {to}");
+            }
+        }
+    }
+
+    /// The same after the bars have been moved, and values above ten count as ten.
+    #[test]
+    fn patching_after_a_move_and_clamping() {
+        let vram = HudVram::SHOWCASE;
+        let mut patched = HudPackets::new();
+        patched.build(&vram, (0, 0), [3, 9], [0, 10]);
+        for s in 0..2 {
+            for z in 0..USED {
+                patched.bars[s][z].place(-12 + 5 * z as i32, 33 - 9 * s as i32);
+            }
+        }
+        patched.set_levels(&vram, [250, 0], [4, 255]);
+        let mut fresh = HudPackets::new();
+        fresh.build(&vram, (0, 0), [10, 0], [4, 10]);
+        for s in 0..2 {
+            for z in 0..USED {
+                fresh.bars[s][z].place(-12 + 5 * z as i32, 33 - 9 * s as i32);
+            }
+        }
+        assert!(same(&patched, &fresh));
+    }
+
+    /// Linking a state again, or after other states, gives the packets of linking it on a fresh
+    /// HUD: the skipped placement never leaves a bar where an earlier state put it.
+    #[test]
+    fn repeated_states_link_like_fresh_ones() {
+        let vram = HudVram::SHOWCASE;
+        let states = |stance, swap| HudState {
+            stance,
+            health: [7, 5],
+            energy: [8, 3],
+            swap,
+        };
+        let mut hud = HudPackets::new();
+        hud.build(&vram, (6, 160), [7, 5], [8, 3]);
+        let sequence = [
+            (Stance::Horizon, 0),
+            (Stance::Horizon, 0),
+            (Stance::Zenith, 3),
+            (Stance::Zenith, 3),
+            (Stance::Zenith, 0),
+            (Stance::Horizon, 5),
+            (Stance::Horizon, 0),
+        ];
+        for (stance, swap) in sequence {
+            let state = states(stance, swap);
+            let mut fresh = HudPackets::new();
+            fresh.build(&vram, (6, 160), [7, 5], [8, 3]);
+            let (mut a, mut b) = (Vec::new(), Vec::new());
+            hud.link(&state, |p, t| a.push((p as usize, t)));
+            fresh.link(&state, |p, t| b.push((p as usize, t)));
+            assert_eq!(a.len(), b.len());
+            // Same packets in the same order, and the words they hold: where the bars are.
+            for (i, (x, y)) in a.iter().zip(&b).enumerate() {
+                assert_eq!(x.1, y.1, "{stance:?} {swap} packet {i}");
+                // SAFETY: the pointers point at live nodes of the two HUDs.
+                let (wx, wy) = unsafe {
+                    (
+                        core::slice::from_raw_parts(x.0 as *const u32, 7),
+                        core::slice::from_raw_parts(y.0 as *const u32, 7),
+                    )
+                };
+                let n = 1 + (x.1 >> 24) as usize;
+                assert_eq!(wx[1..n], wy[1..n], "{stance:?} {swap} packet {i}");
+            }
+        }
+    }
+
+    /// A patch touches only the cells and gems that change, and a change of nothing touches nothing.
+    #[test]
+    fn only_changed_cells_are_written() {
+        let vram = HudVram::SHOWCASE;
+        let mut hud = HudPackets::new();
+        hud.build(&vram, (0, 0), [7, 5], [8, 3]);
+        let before = hud.bars[0][0].cells;
+        hud.set_levels(&vram, [7, 5], [8, 3]);
+        assert!(same_nodes(&before.nodes, &hud.bars[0][0].cells.nodes));
+        hud.set_levels(&vram, [8, 5], [8, 3]);
+        let changed = (0..COUNT as usize)
+            .filter(|&k| !same_node(&before.nodes[k], &hud.bars[0][0].cells.nodes[k]))
+            .count();
+        assert_eq!(changed, 1);
     }
 }

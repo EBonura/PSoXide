@@ -64,6 +64,7 @@ pub fn art_module() -> String {
         ("LCAP_X", art::LCAP_X),
         ("BACK_X", art::BACK_X),
         ("LIFT", art::LIFT),
+        ("BACK_DROP", art::BACK_DROP),
         ("FRONT_Y", art::FRONT_Y),
         ("EMBLEM_X", art::EMBLEM_POS.0),
         ("EMBLEM_Y", art::EMBLEM_POS.1),
@@ -192,7 +193,7 @@ pub fn layout() -> String {
          cell_x0 = {cell_x0}\n\
          pitch = {pitch}\n\
          front_band = {ft}, {fb}\n\
-         back_band = 0, {front_y}\n\
+         {back_band}\
          back_pitch = {back_pitch}\n\
          back_cell_x0 = {back_cell_x0}\n\
          back_lit = 4\n\
@@ -202,12 +203,19 @@ pub fn layout() -> String {
          mirror = emblem_core {cx0} {cy0} {cx1} {cy1}\n\
          mirror = emblem {ex} {ey} {ex2} {ey2}\n",
         canvas_w = g[0].width() + art::LCAP_X + art::BACK_X.max(0),
+        back_band = {
+            let first = art::FRONT_Y - art::LIFT + art::BACK_DROP;
+            if first < art::FRONT_Y {
+                format!("back_band = {first}, {}\n", art::FRONT_Y)
+            } else {
+                String::new()
+            }
+        },
         count = art::COUNT,
         cell_x0 = g[0].strip_x0(),
         pitch = g[0].pitch,
         ft = art::FRONT_Y,
         fb = art::FRONT_Y + g[0].bar_h(),
-        front_y = art::FRONT_Y,
         back_pitch = back.pitch,
         back_cell_x0 = art::BACK_X + back.strip_x0(),
         gem_x0 = art::GEM_X0 - 1,

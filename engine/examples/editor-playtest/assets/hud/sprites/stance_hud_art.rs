@@ -4,6 +4,7 @@ pub const COUNT: i32 = 10;
 pub const LCAP_X: i32 = 27;
 pub const BACK_X: i32 = 0;
 pub const LIFT: i32 = 9;
+pub const BACK_DROP: i32 = 4;
 pub const FRONT_Y: i32 = 9;
 pub const EMBLEM_X: i32 = 1;
 pub const EMBLEM_Y: i32 = 6;

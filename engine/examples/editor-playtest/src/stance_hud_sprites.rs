@@ -179,6 +179,9 @@ fn steps_at(p: i32) -> usize {
     ((p as usize) * (BACK_SIZE + 1) / 257).min(BACK_SIZE)
 }
 
+/// Top row of the bar behind.
+const BACK_Y: i32 = FRONT_Y - LIFT + BACK_DROP;
+
 /// The bars' poses and the draw order for `state`.
 pub fn scene(state: &HudState) -> Scene {
     let front_pose = Pose {
@@ -188,7 +191,7 @@ pub fn scene(state: &HudState) -> Scene {
     };
     let back_pose = Pose {
         x: BACK_X,
-        y: FRONT_Y - LIFT,
+        y: BACK_Y,
         size: BACK_SIZE,
     };
     let (incoming, outgoing) = (state.stance, state.stance.other());
@@ -207,12 +210,12 @@ pub fn scene(state: &HudState) -> Scene {
     let b = bow(p);
     let coming = Pose {
         x: lerp(BACK_X, 0, p) - b,
-        y: lerp(FRONT_Y - LIFT, FRONT_Y, p),
+        y: lerp(BACK_Y, FRONT_Y, p),
         size: BACK_SIZE - steps_at(p),
     };
     let going = Pose {
         x: lerp(0, BACK_X, p) + b,
-        y: lerp(FRONT_Y, FRONT_Y - LIFT, p),
+        y: lerp(FRONT_Y, BACK_Y, p),
         size: steps_at(p),
     };
     let first_half = p < 128;
@@ -249,6 +252,23 @@ pub enum Part {
     Plate,
     /// The cells.
     Cells,
+}
+
+/// The palette of a cell of the bar of `stance` at `size`, lit or empty. A cell packet only ever
+/// changes between these two, so a health change is a one-word patch of the packet.
+pub fn cell_clut(stance: Stance, size: usize, lit: bool) -> usize {
+    stance.index() * CLUTS_PER_STANCE
+        + size * CLUT_SIZE_STRIDE
+        + if lit { CLUT_CELL_LIT } else { CLUT_CELL_EMPTY }
+}
+
+/// The palette of an energy gem, lit or empty.
+pub fn gem_clut(lit: bool) -> usize {
+    if lit {
+        CLUT_GEM_LIT
+    } else {
+        CLUT_GEM_EMPTY
+    }
 }
 
 /// Paint one complete bar of `stance`, `lit` cells lit, at `pose`.
@@ -299,12 +319,7 @@ pub fn bar(
                 x: left + geo.cell_x0 + geo.pitch * k,
                 y: top + geo.cell_row,
                 src: geo.cell,
-                clut: base
-                    + if (k as u8) < lit {
-                        CLUT_CELL_LIT
-                    } else {
-                        CLUT_CELL_EMPTY
-                    },
+                clut: cell_clut(stance, pose.size, (k as u8) < lit),
                 glass: false,
             });
         }
@@ -357,7 +372,7 @@ pub fn gem_op(origin: (i32, i32), k: i32, lit: bool) -> Op {
         x: origin.0 + GEM_X0 + GEM_PITCH * k,
         y: origin.1 + GEM_Y,
         src: SPRITE_GEM,
-        clut: if lit { CLUT_GEM_LIT } else { CLUT_GEM_EMPTY },
+        clut: gem_clut(lit),
         glass: false,
     }
 }

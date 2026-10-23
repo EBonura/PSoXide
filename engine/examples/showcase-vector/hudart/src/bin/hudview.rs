@@ -204,6 +204,24 @@ fn main() {
             }
             f.write(path);
         }
+        "swapall" => {
+            // Every frame of a swap, 0 to 7: frames 0 to 3 down the left column, 4 to 7 down the
+            // right one.
+            let mut f = Frame::new(320, 240, background(&a));
+            let stance = if a.iter().any(|s| s == "to=horizon") {
+                Stance::Horizon
+            } else {
+                Stance::Zenith
+            };
+            for swap in 0..hud::SWAP_FRAMES {
+                let origin = (
+                    160 * (swap as i32 / 4) + arg_num(&a, "x0", 0),
+                    8 + 40 * (swap as i32 % 4),
+                );
+                compose(origin, &swap_state(stance, swap), &mut |op| f.op(op));
+            }
+            f.write(path);
+        }
         "bars" => {
             // Every bar at every size, on its own: each is a complete object.
             let mut f = Frame::new(176, 4 + 22 * 8, background(&a));

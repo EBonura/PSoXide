@@ -6,3 +6,7 @@ license = "GPL-2.0-or-later"
 default-run = "hudart"
 
 [workspace]
+
+[dev-dependencies]
+psx-gpu  = { path = "../../../../sdk/crates/psx-gpu" }
+psx-vram = { path = "../../../../sdk/crates/psx-vram" }
