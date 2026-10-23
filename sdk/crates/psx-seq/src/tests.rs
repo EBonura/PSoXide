@@ -743,3 +743,43 @@ fn an_unknown_instrument_or_font_gives_no_note() {
     assert!(seq.note_on(&mut hw, 9, 0, 39, 100, 64, 9).is_none());
     assert!(seq.note_on(&mut hw, 0, 77, 39, 100, 64, 9).is_none());
 }
+
+#[test]
+fn a_dynamic_call_runs_the_script_the_table_names() {
+    // Sequence, then one channel: dyntable, value = 2, dyncall; a three-entry table of
+    // scripts that each load a layer, and three layers an octave apart.
+    let mut code = SEQ_HEAD.to_vec();
+    code.extend_from_slice(&[0xfd, 0x7f, 0xff]);
+    let chan_at = code.len();
+    // fix the ldchan operand (placeholder 0xCCCC at offset 4)
+    code[4..6].copy_from_slice(&(chan_at as u16).to_be_bytes());
+    let chan_len = 2 + 1 + 2 + 2 + 3 + 2 + 1 + 2 + 1; // instr, large, vol, pan, dyntable, ldi, dyncall, delay, end
+    let table_at = chan_at + chan_len;
+    let subs_at = table_at + 3 * 2;
+    let layers_at = subs_at + 3 * 4;
+    let layer = |key: u8| [key, 0x30, 100, 0x00, 0xff];
+    code.extend_from_slice(&[0xc1, 0x00, 0xc4, 0xdf, 127, 0xdd, 64]);
+    code.extend_from_slice(&[0xc2, (table_at >> 8) as u8, table_at as u8]);
+    code.extend_from_slice(&[0xcc, 2, 0xe4, 0xfd, 0x7f, 0xff]);
+    assert_eq!(code.len(), table_at, "channel length");
+    for i in 0..3 {
+        let at = subs_at + 4 * i;
+        code.extend_from_slice(&[(at >> 8) as u8, at as u8]);
+    }
+    for i in 0..3 {
+        let layer_at = layers_at + 5 * i;
+        code.extend_from_slice(&[0x88, (layer_at >> 8) as u8, layer_at as u8, 0xff]);
+    }
+    for key in [0x27u8, 0x33, 0x1b] {
+        code.extend_from_slice(&layer(key));
+    }
+    let mut code = song(&code);
+    let (hw, at) = play(&mut code, 0b1111, 10);
+    assert_eq!(
+        at.len(),
+        1,
+        "the called script loaded one layer: {:?}",
+        hw.events()
+    );
+    assert_eq!(pitches(&hw)[0], 2048, "entry 2 is the octave-down layer");
+}

@@ -80,7 +80,8 @@ fn main() {
                 let song_file = arg(&args, "--song-file").unwrap_or_else(|| "song.psq".into());
                 let mut song = std::fs::read(dir.join(song_file))
                     .map_err(|e| psx_seq_cook::Error::Io(e.to_string()))?;
-                let bank_bytes = std::fs::read(dir.join("bank.psqb"))
+                let bank_file = arg(&args, "--bank-file").unwrap_or_else(|| "bank.psqb".into());
+                let bank_bytes = std::fs::read(dir.join(bank_file))
                     .map_err(|e| psx_seq_cook::Error::Io(e.to_string()))?;
                 let bank = psx_seq::format::Bank::parse(&bank_bytes)
                     .map_err(|e| psx_seq_cook::Error::Format(format!("{e:?}")))?;
@@ -173,6 +174,59 @@ fn main() {
                 println!(
                     "hw calls {event_calls} fnv1a {event_hash:016x}; pcm fnv1a {pcm_hash:016x}"
                 );
+                Ok(())
+            }
+            "effect" => {
+                // `effect --ids 0x800,0x801 [--wav DIR]`: what the cartridge's effects sequence plays
+                // for each sound id, and (with --wav) a rendering of it.
+                let rom = Rom::load(&rom_path, &seg)?;
+                let data = psx_seq_cook::n64::AudioData::load(&rom)?;
+                let ids: Vec<u16> = arg(&args, "--ids")
+                    .unwrap_or_default()
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(|s| {
+                        u16::from_str_radix(s.trim_start_matches("0x"), 16)
+                            .map_err(|_| psx_seq_cook::Error::Format(format!("bad sound id {s}")))
+                    })
+                    .collect::<Result<_, _>>()?;
+                let set = psx_seq_cook::sfx::cook_effects(&data, &ids)?;
+                for (id, voices) in &set.effects {
+                    println!("{id:#06x}: {} voice(s)", voices.len());
+                    for v in voices {
+                        println!(
+                            "  sample {} pitch {} level {}/{} looped {} starts {} released {:?}",
+                            v.source,
+                            v.pitch_q12,
+                            v.left,
+                            v.right,
+                            v.looped,
+                            v.starts_after,
+                            v.released_after
+                        );
+                    }
+                }
+                println!(
+                    "{} sample(s), {} bytes of .psau",
+                    set.samples.len(),
+                    set.samples.iter().map(Vec::len).sum::<usize>()
+                );
+                if let Some(dir) = arg(&args, "--wav") {
+                    std::fs::create_dir_all(&dir)
+                        .map_err(|e| psx_seq_cook::Error::Io(e.to_string()))?;
+                    for &id in &ids {
+                        let pcm = psx_seq_cook::sfx::render_effect(&set, id, 1.5)?;
+                        let wav = psx_audio_cook::wav::write_pcm16(
+                            psx_seq_cook::sfx::OUT_RATE,
+                            &[
+                                &pcm.iter().step_by(2).copied().collect::<Vec<_>>(),
+                                &pcm.iter().skip(1).step_by(2).copied().collect::<Vec<_>>(),
+                            ],
+                        );
+                        std::fs::write(PathBuf::from(&dir).join(format!("{id:04x}.wav")), wav)
+                            .map_err(|e| psx_seq_cook::Error::Io(e.to_string()))?;
+                    }
+                }
                 Ok(())
             }
             "survey" => {

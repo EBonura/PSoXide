@@ -10,6 +10,7 @@ pub mod gen;
 pub mod n64;
 pub mod render;
 pub mod rom;
+pub mod sfx;
 pub mod survey;
 
 /// Errors from reading and cooking.
@@ -112,5 +113,39 @@ mod tests {
             })
             .sum();
         assert!(bank.adpcm().len() < alone);
+    }
+
+    /// The effects sequence, run on the host, plays sounds: a rupee pickup is one voice of a
+    /// short sample, an index past the end of a bank is refused, and a sound that a second
+    /// request would change (the enemy bank's ninth index bit) differs.
+    #[test]
+    fn effects_come_from_the_effects_sequence() {
+        let (Ok(rom), Ok(seg)) = (
+            std::env::var("PSX_SEQ_TEST_ROM"),
+            std::env::var("PSX_SEQ_TEST_SEGMENTS"),
+        ) else {
+            return;
+        };
+        let rom =
+            crate::rom::Rom::load(std::path::Path::new(&rom), std::path::Path::new(&seg)).unwrap();
+        let data = crate::n64::AudioData::load(&rom).unwrap();
+        let probe = crate::sfx::EffectProbe::new(&data).unwrap();
+        let rupee = probe.play(0x4803).unwrap();
+        assert_eq!(rupee.len(), 1, "{rupee:?}");
+        assert!(rupee[0].left > 0 && rupee[0].pitch_q12 > 0);
+        assert!(
+            probe.play(0x0800 + 224).is_err(),
+            "the player bank has 224 sounds"
+        );
+        assert!(probe.play(0x7800).is_err(), "there is no bank 7");
+        let low = probe.play(0x3800 + 92).unwrap();
+        let high = probe.play(0x3800 + 256 + 92).unwrap();
+        assert_ne!(
+            low[0].source, high[0].source,
+            "index bit 8 selects another script"
+        );
+        let set = crate::sfx::cook_effects(&data, &[0x4803, 0x083e]).unwrap();
+        assert_eq!(set.effects.len(), 2);
+        assert!(!set.samples.is_empty());
     }
 }

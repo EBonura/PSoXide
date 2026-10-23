@@ -180,6 +180,8 @@ pub(crate) struct Channel {
     pub gate_variance: u8,
     pub io: [u8; IO_PORTS],
     pub ptr: u16,
+    /// Start of the table `dyncall` indexes (a list of big-endian script offsets).
+    pub dyn_table: u16,
     pub layers: [Layer; LAYERS],
 }
 
@@ -225,6 +227,7 @@ impl Channel {
         gate_variance: 0,
         io: [IO_NONE; IO_PORTS],
         ptr: 0,
+        dyn_table: 0,
         layers: [Layer::INIT; LAYERS],
     };
 }
@@ -518,37 +521,63 @@ impl Player {
     /// start values in the image, once per channel (the channel table is
     /// most of this type), where a loop writes them from one copy.
     pub fn init() -> Self {
-        Self {
-            enabled: false,
-            finished: false,
-            muted: false,
-            stop_script: false,
-            script: Script::INIT,
-            delay: 0,
-            tempo: 120 * 48,
-            tempo_acc: 0,
-            tempo_change: 0,
-            transpose: 0,
-            note_alloc_policy: 0,
-            mute_behavior: MUTE_SOFTEN | MUTE_STOP_NOTES,
-            mute_scale_q15: 16384,
-            default_font: NONE8,
-            fonts: [0; 8],
-            n_fonts: 0,
-            short_vel: None,
-            short_gate: None,
-            io: [IO_NONE; IO_PORTS],
-            state: 1,
-            fade_q24: 1 << 24,
-            fade_vel_q24: 0,
-            fade_timer: 0,
-            fade_timer_default: 0,
-            fade_scale_q15: 32768,
-            applied_fade_q15: 32768,
-            recalc_volume: true,
-            bend_q16: 1 << 16,
-            script_counter: 0,
-            channels: core::array::from_fn(|_| Channel::INIT),
+        let mut slot = core::mem::MaybeUninit::<Self>::uninit();
+        // SAFETY: `init_at` writes every field of the player it is given.
+        unsafe {
+            Self::init_at(slot.as_mut_ptr());
+            slot.assume_init()
+        }
+    }
+
+    /// Write a player at its start values into `slot`, field by field, so the
+    /// seven kilobytes of it are never built on the stack first.
+    ///
+    /// # Safety
+    ///
+    /// `slot` must be valid for writes of a `Player` and aligned for one; any
+    /// player it held is overwritten without being read.
+    pub(crate) unsafe fn init_at(slot: *mut Self) {
+        use core::ptr::addr_of_mut;
+        macro_rules! put {
+            ($field:ident = $value:expr) => {
+                addr_of_mut!((*slot).$field).write($value)
+            };
+        }
+        // SAFETY: the caller guarantees `slot` is valid and aligned; each field is written once,
+        // through a raw place, without forming a reference to the uninitialised player.
+        unsafe {
+            put!(enabled = false);
+            put!(finished = false);
+            put!(muted = false);
+            put!(stop_script = false);
+            put!(script = Script::INIT);
+            put!(delay = 0);
+            put!(tempo = 120 * 48);
+            put!(tempo_acc = 0);
+            put!(tempo_change = 0);
+            put!(transpose = 0);
+            put!(note_alloc_policy = 0);
+            put!(mute_behavior = MUTE_SOFTEN | MUTE_STOP_NOTES);
+            put!(mute_scale_q15 = 16384);
+            put!(default_font = NONE8);
+            put!(fonts = [0; 8]);
+            put!(n_fonts = 0);
+            put!(short_vel = None);
+            put!(short_gate = None);
+            put!(io = [IO_NONE; IO_PORTS]);
+            put!(state = 1);
+            put!(fade_q24 = 1 << 24);
+            put!(fade_vel_q24 = 0);
+            put!(fade_timer = 0);
+            put!(fade_timer_default = 0);
+            put!(fade_scale_q15 = 32768);
+            put!(applied_fade_q15 = 32768);
+            put!(recalc_volume = true);
+            put!(bend_q16 = 1 << 16);
+            put!(script_counter = 0);
+            for c in 0..CHANNELS {
+                addr_of_mut!((*slot).channels[c]).write(Channel::INIT);
+            }
         }
     }
 }
