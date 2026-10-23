@@ -29,12 +29,32 @@
     {
       "name": "psx-sfx",
       "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/crates/psx-sfx",
-      "purpose": "One-shot sample banks, voice allocation and playback cutoff for SPU effects."
+      "purpose": "SPU effects: sample banks, the length-based one-shot cutoff, a host-testable voice mixer (lanes, priorities, handles, virtual loops), spatial gains and master volumes."
+    },
+    {
+      "name": "psx-seq",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/crates/psx-seq",
+      "purpose": "Sequenced music on the SPU: a script interpreter (sequence, channel, layer), software envelopes, vibrato and portamento, and a note allocator over `psx-sfx`'s hardware seam."
     },
     {
       "name": "psx-settings",
       "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/crates/psx-settings",
       "purpose": "Versioned game preferences with optional memory-card persistence."
+    },
+    {
+      "name": "psx-segments",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/crates/psx-segments",
+      "purpose": "Bounded segment selection and launch requests using game-owned state and controls."
+    },
+    {
+      "name": "psx-display",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/crates/psx-display",
+      "purpose": "Picture options: the BRIGHTNESS stepper (`DEFAULT`, `DARKER n`, `BRIGHTER n`) with its one-packet GPU overlay, and the SCREEN X/Y stepper, each with row text and a save byte. Host-tested, no heap ([adoption guide](https://github.com/EBonura/PSoXide/tree/main/sdk/docs/DISPLAY-OPTIONS.md))."
+    },
+    {
+      "name": "psx-loading",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/crates/psx-loading",
+      "purpose": "An animated LOADING indicator for blocking loads: a label with stepping dots or a dot spinner and a breathing ink, drawn as plain GP0 rectangles from any `BitmapFont` (no VRAM, no atlas, no heap). Polled from a load loop, redraws only when the picture changes. Host-tested ([adoption guide](https://github.com/EBonura/PSoXide/tree/main/sdk/docs/LOADING-INDICATOR.md))."
     },
     {
       "name": "psx-gte",
@@ -54,7 +74,7 @@
     {
       "name": "psx-pad",
       "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/crates/psx-pad",
-      "purpose": "SIO0 controller polling: digital + DualShock analog, `PadTracker` edges/repeat, diagnostic pacing."
+      "purpose": "SIO0 controller polling: digital + DualShock analog, `PadTracker` edges/repeat, diagnostic pacing. Feature `irq-engine`: the interrupt-driven engine that polls both ports from VBlank and IRQ7 without waiting ([PAD-IRQ-ENGINE](https://github.com/EBonura/PSoXide/tree/main/sdk/docs/PAD-IRQ-ENGINE.md))."
     },
     {
       "name": "psx-tick",
@@ -144,6 +164,26 @@
       "shows": "Controller polling via `psx-pad`."
     },
     {
+      "name": "sfxbench",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/sfxbench",
+      "shows": "Cycles the `psx-sfx` bookkeeping costs: placement gains, the mixer's level update, an idle tick and a stealing `play`."
+    },
+    {
+      "name": "hello-seq",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/hello-seq",
+      "shows": "Plays a song cooked by `psx-seq-cook` from the player's own cartridge through `psx-seq` and reports what the sequencer costs."
+    },
+    {
+      "name": "pollbench",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/pollbench",
+      "shows": "Cycles one synchronous controller poll costs: port 1, an empty port 2, both."
+    },
+    {
+      "name": "pad-engine-check",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/pad-engine-check",
+      "shows": "The interrupt-driven pad engine against the synchronous driver: CPU left to the game, snapshot, lease."
+    },
+    {
       "name": "hello-gte",
       "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/hello-gte",
       "shows": "GTE-accelerated transforms."
@@ -184,6 +224,16 @@
       "shows": "psx-rt's queued display flip, held until the frame's closing GP0(1Fh) sets GPUSTAT bit 24 (`arm_draw_done`, `end_with_draw_done`, `signal_draw_done`)."
     },
     {
+      "name": "hello-diag",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/hello-diag",
+      "shows": "The console stop-panel (`psx-rt` feature `console-diag`) shown on purpose: a stall, a fault, a panic, a failed CD read, an oversized GPU list node or a jump to nowhere (`wild`), chosen by `HELLO_DIAG_MODE`. See [CONSOLE-STOP-PANEL](https://github.com/EBonura/PSoXide/tree/main/sdk/docs/CONSOLE-STOP-PANEL.md)."
+    },
+    {
+      "name": "hello-fault",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/hello-fault",
+      "shows": "Panics on purpose (an out-of-range index) so `tools/abort_gate.sh` can prove a `panic=immediate-abort` guest records the `break` in `__psx_rt_fault_*` and that `psoxide-size faults` names `main`; the shared panic policy lives in `tools/psoxide-size`."
+    },
+    {
       "name": "hello-present-queue",
       "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/hello-present-queue",
       "shows": "psx-rt's VBlank-kicked present queue (`present-queue` feature): whole frames published as one chain each, preamble and HUD recorded with `psx_io::gpu::start_recording_raw`, kicked and flipped by the VBlank handler."
@@ -204,6 +254,11 @@
       "shows": "Checks psx-rt's `memcpy`/`memset`/`memcmp` against reference loops for every size and alignment; prints `MEMPROBE PASS` or `FAIL`."
     },
     {
+      "name": "hello-asmprobe",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/hello-asmprobe",
+      "shows": "Differential test and cycle benchmark for the hand-scheduled kernels (`psx-gpu` and `psx-math` `asm-kernels`): bit-identical against the portable definition on random and edge inputs, then timed; prints `ASMPROBE PASS` or `FAIL` and `BENCH` lines."
+    },
+    {
       "name": "hello-pack",
       "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/hello-pack",
       "shows": "`psx_pack::cd` smoke test: streams raw and compressed WORLD.PAK chunks off the disc and checks them."
@@ -214,6 +269,21 @@
       "shows": "`psx-cdstream` on a disc: single, chained, prioritised, aborted-and-resumed and sustained reads of a known file checked byte for byte, an audio lease taken mid-read, and the foreground cost of a long read (`make hello-cdstream-disc`, `make hello-cdstream-gate`)."
     },
     {
+      "name": "hello-cdpause",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/hello-cdpause",
+      "shows": "The console's two-response Pause against `SectorReader::stop_proved`: the second response 1.2 to 3.9 million clocks after the first, a Pause refused during a seek and sent again (`make hello-cdpause-disc`, `make hello-cdpause-gate`; needs an emulator with the silicon Pause model)."
+    },
+    {
+      "name": "hello-wide",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/hello-wide",
+      "shows": "Every `psx_math::Wide` / `WideU` / `Mask64` operation against a reference built from 32-bit arithmetic only, on the target; prints `WIDE PASS` or `FAIL`. Its link map must pass the symbol gate (`make hello-wide-gate`)."
+    },
+    {
+      "name": "hello-wide-div",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/hello-wide-div",
+      "shows": "Every `psx_math::wide_div` operation (division of a `Wide` / `WideU`, 128-bit product, ratio compare) against a bit-by-bit 32-bit reference, on the target; prints `WIDEDIV PASS` or `FAIL` and the cycles per call of each. Its link map must pass the symbol gate (`make hello-wide-gate`)."
+    },
+    {
       "name": "hello-i64probe",
       "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/hello-i64probe",
       "shows": "Runs software 64-bit multiply/divide/modulo on the target and checks the results; covers psx-rt's `__divdi3`/`__moddi3` overrides."
@@ -222,6 +292,11 @@
       "name": "hello-icache",
       "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/hello-icache",
       "shows": "Rewrites a function in cached RAM and checks that `psx_rt::cache::flush_instruction_cache` makes the CPU run the new code; prints `ICACHE PASS`, `INCONCLUSIVE` (nothing was stale) or `FAIL`."
+    },
+    {
+      "name": "hello-overlay",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/hello-overlay",
+      "shows": "Same-compilation Rust cold entry and resident service, caller-owned arena, scoped static-call binding and unload/re-admit generation checks. Uses its own checked packaging recipe; see [the example](https://github.com/EBonura/PSoXide/tree/main/sdk/examples/hello-overlay/README.md)."
     },
     {
       "name": "cdda-read-contention",
