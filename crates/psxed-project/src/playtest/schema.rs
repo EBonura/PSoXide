@@ -142,6 +142,19 @@ pub struct PlaytestCards {
     pub offsets: Vec<u32>,
     /// Sectors from a room's picture of one view to its picture of the next.
     pub stride: u32,
+    /// Per tile, where its rooms stand (runtime units): the eye is in the
+    /// tile whose centre is nearest.
+    pub tile_centres: Vec<[i16; 2]>,
+    /// Per tile `X`, its block of copies: for each tile `Y` it lists, the
+    /// views of `Y` in its mask, view after view, eight sectors a view.
+    pub blocks: Vec<Vec<u8>>,
+    /// Per (X, Y) pair (`X * tiles + Y`): where `Y`'s copy starts in `X`'s
+    /// block, in sectors, in the low 24 bits, and its view mask in the top 8;
+    /// 0 for no copy.
+    pub copies: Vec<u32>,
+    /// Per room, its tile and its place among the tile's rooms.
+    pub room_tile: Vec<u8>,
+    pub room_place: Vec<u8>,
     /// Cards are shown out to this many runtime units from the camera, and
     /// fade in over the last `fade`.
     pub far: i32,
@@ -152,6 +165,86 @@ pub struct PlaytestCards {
     /// The colours behind the cards (below the horizon, at it, at the top
     /// of the screen).
     pub backdrop: [[u8; 3]; 3],
+}
+
+/// One chunk of the room area of `WORLD.PAK` when the far cards' pictures are
+/// laid out among the rooms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackItem {
+    /// The chunk of this room.
+    Room(u32),
+    /// The pictures of this tile of the card layout.
+    Tile(u32),
+    /// The copies near this tile.
+    Block(u32),
+}
+
+impl PlaytestCards {
+    /// Whether the pictures are laid out among the room chunks (a level with
+    /// cards) and not left to the end of the pack.
+    pub fn interleaved(&self) -> bool {
+        !self.pictures.is_empty()
+    }
+
+    /// Sectors of one tile's pictures.
+    pub fn tile_sectors(&self) -> u32 {
+        self.stride * psx_grid::render::VIEWS as u32
+    }
+
+    /// Tiles the pictures are cut into.
+    pub fn tiles(&self) -> u32 {
+        if self.stride == 0 {
+            0
+        } else {
+            (self.pictures.len() as u32 / 2048) / self.tile_sectors()
+        }
+    }
+
+    /// The tile of `room`'s pictures, if it has any.
+    pub fn tile_of(&self, room: usize) -> Option<u32> {
+        self.offsets
+            .get(room)
+            .copied()
+            .filter(|&offset| offset != u32::MAX)
+            .map(|offset| offset / self.tile_sectors())
+    }
+
+    /// The order the chunks after the core and the records go in the pack,
+    /// for a level of `rooms` rooms: room 0 first (the rooms' sectors are
+    /// counted from it), then each tile's rooms followed by its pictures, tiles in
+    /// the layout's order, then the rooms with no card. A drive that is at
+    /// a room is then near the pictures of the rooms that stand with it.
+    pub fn pack_order(&self, rooms: usize) -> Vec<PackItem> {
+        let mut order = vec![PackItem::Room(0)];
+        let mut by_tile: Vec<Vec<u32>> = vec![Vec::new(); self.tiles() as usize];
+        let mut loose = Vec::new();
+        for room in 1..rooms {
+            match self.tile_of(room) {
+                Some(tile) if (tile as usize) < by_tile.len() => {
+                    by_tile[tile as usize].push(room as u32)
+                }
+                _ => loose.push(room as u32),
+            }
+        }
+        let local = !self.blocks.is_empty();
+        for (tile, mut members) in by_tile.into_iter().enumerate() {
+            // Room 0 stands in its tile but sits first in the pack.
+            members.sort_by_key(|&room| self.offsets[room as usize]);
+            order.extend(members.into_iter().map(PackItem::Room));
+            // With copies near each tile the full set is only the fallback
+            // (a view a copy lacks) and goes last.
+            order.push(if local {
+                PackItem::Block(tile as u32)
+            } else {
+                PackItem::Tile(tile as u32)
+            });
+        }
+        order.extend(loose.into_iter().map(PackItem::Room));
+        if !self.blocks.is_empty() {
+            order.extend((0..self.tiles()).map(PackItem::Tile));
+        }
+        order
+    }
 }
 
 /// A cooked grid world: the resident level core and the room chunks.
@@ -2045,5 +2138,61 @@ impl PlaytestValidationReport {
 
     pub(super) fn warn(&mut self, msg: impl Into<String>) {
         self.warnings.push(msg.into());
+    }
+}
+
+#[cfg(test)]
+mod card_pack_tests {
+    use super::*;
+
+    #[test]
+    fn rooms_and_tile_pictures_alternate_with_room_zero_first() {
+        // 20 rooms; rooms 3..=19 have cards, in tiles of 8 sectors a view.
+        let views = psx_grid::render::VIEWS as u32;
+        let stride = 8;
+        let tile_sectors = stride * views;
+        let mut offsets = vec![u32::MAX; 20];
+        for (position, room) in (3..20usize).enumerate() {
+            let tile = position as u32 / 8;
+            offsets[room] = tile * tile_sectors + position as u32 % 8;
+        }
+        let cards = PlaytestCards {
+            pictures: vec![0; 3 * tile_sectors as usize * 2048],
+            offsets,
+            stride,
+            ..PlaytestCards::default()
+        };
+        assert_eq!(cards.tiles(), 3);
+        let order = cards.pack_order(20);
+        assert_eq!(order[0], PackItem::Room(0));
+        // Every room once, every tile once.
+        let mut rooms: Vec<u32> = order
+            .iter()
+            .filter_map(|item| match item {
+                PackItem::Room(room) => Some(*room),
+                PackItem::Tile(_) | PackItem::Block(_) => None,
+            })
+            .collect();
+        rooms.sort_unstable();
+        assert_eq!(rooms, (0..20).collect::<Vec<_>>());
+        let tiles: Vec<u32> = order
+            .iter()
+            .filter_map(|item| match item {
+                PackItem::Tile(tile) => Some(*tile),
+                PackItem::Room(_) | PackItem::Block(_) => None,
+            })
+            .collect();
+        assert_eq!(tiles, [0, 1, 2]);
+        // Each tile's pictures follow the rooms of that tile.
+        let at = |item: PackItem| order.iter().position(|&i| i == item).unwrap();
+        for room in 3..20u32 {
+            let tile = cards.tile_of(room as usize).unwrap();
+            assert!(at(PackItem::Room(room)) < at(PackItem::Tile(tile)));
+            if tile > 0 {
+                assert!(at(PackItem::Tile(tile - 1)) < at(PackItem::Room(room)));
+            }
+        }
+        // Rooms 1 and 2 have no card: they come after the last tile.
+        assert!(at(PackItem::Room(1)) > at(PackItem::Tile(2)));
     }
 }

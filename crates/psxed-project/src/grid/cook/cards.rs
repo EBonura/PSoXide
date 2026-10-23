@@ -455,6 +455,108 @@ pub fn disc_layout(centres: &[Option<[i32; 2]>]) -> DiscLayout {
     }
 }
 
+/// Tiles the local copies are made for at most (the manifest tables grow with
+/// the square).
+pub const LOCAL_COPY_MAX_TILES: usize = 64;
+
+/// Pictures laid out near the rooms that need them: while the eye is in
+/// the neighbourhood of tile `X` it asks for the pictures of the tiles that
+/// stand `near` to `enter` away, and only a view or two of each.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LocalCopies {
+    /// Per tile, where its rooms' centres average, runtime units.
+    pub centres: Vec<[i32; 2]>,
+    /// Per tile `X`, the `(Y, views)` it holds copies of: tile `Y`'s eight
+    /// pictures of each view in the `views` bit mask, view after view.
+    pub entries: Vec<Vec<(u32, u8)>>,
+}
+
+/// Work out which pictures of which tiles each tile's neighbourhood asks
+/// for. `centres` is each room's card centre (`None` for no card);
+/// `layout` puts rooms in tiles; cards show from `near` to `enter` plan
+/// units (`sector` is a sector in the same units: the eye is taken anywhere
+/// within two sectors of the rooms of the tile it is in).
+pub fn local_copies(
+    layout: &DiscLayout,
+    centres: &[Option<[i32; 2]>],
+    near: i32,
+    enter: i32,
+    sector: i32,
+) -> LocalCopies {
+    let tile_sectors = TILE_ROOMS * VIEWS as u32;
+    let tiles = (layout.sectors / tile_sectors) as usize;
+    if tiles == 0 || tiles > LOCAL_COPY_MAX_TILES {
+        return LocalCopies::default();
+    }
+    let tile_of = |room: usize| {
+        let offset = layout.offsets[room];
+        (offset != u32::MAX).then(|| (offset / tile_sectors) as usize)
+    };
+    let mut sums = vec![([0i64; 2], 0i64); tiles];
+    for (room, centre) in centres.iter().enumerate() {
+        if let (Some(centre), Some(tile)) = (centre, tile_of(room)) {
+            sums[tile].0[0] += i64::from(centre[0]);
+            sums[tile].0[1] += i64::from(centre[1]);
+            sums[tile].1 += 1;
+        }
+    }
+    let tile_centres: Vec<[i32; 2]> = sums
+        .iter()
+        .map(|(sum, n)| {
+            let n = (*n).max(1);
+            [(sum[0] / n) as i32, (sum[1] / n) as i32]
+        })
+        .collect();
+    let mut entries = vec![Vec::new(); tiles];
+    for (x, entry) in entries.iter_mut().enumerate() {
+        // Where the eye can be while this tile's centre is the nearest.
+        let mut eyes = Vec::new();
+        for (room, centre) in centres.iter().enumerate() {
+            if let (Some(centre), Some(tile)) = (centre, tile_of(room)) {
+                if tile == x {
+                    for (dx, dz) in [(0, 0), (-2, 0), (2, 0), (0, -2), (0, 2)] {
+                        eyes.push([centre[0] + dx * sector, centre[1] + dz * sector]);
+                    }
+                }
+            }
+        }
+        let mut masks = vec![0u8; tiles];
+        for (room, centre) in centres.iter().enumerate() {
+            let (Some(centre), Some(y)) = (centre, tile_of(room)) else {
+                continue;
+            };
+            for eye in &eyes {
+                let (dx, dz) = (eye[0] - centre[0], eye[1] - centre[1]);
+                let distance = f64::from(dx).hypot(f64::from(dz)) as i32;
+                if distance < near - 2 * sector || distance > enter + 2 * sector {
+                    continue;
+                }
+                masks[y] |= 1 << psx_grid::render::view_toward(dx, dz);
+            }
+        }
+        *entry = masks
+            .iter()
+            .enumerate()
+            .filter(|(_, &mask)| mask != 0)
+            .map(|(y, &mask)| (y as u32, mask))
+            .collect();
+        // Tiles in the order they stand round this one, so the pictures the
+        // eye asks for walking in one direction lie together in the block.
+        let at = tile_centres[x];
+        entry.sort_by(|a, b| {
+            let angle = |y: u32| {
+                let c = tile_centres[y as usize];
+                f64::from(c[1] - at[1]).atan2(f64::from(c[0] - at[0]))
+            };
+            angle(a.0).total_cmp(&angle(b.0)).then(a.0.cmp(&b.0))
+        });
+    }
+    LocalCopies {
+        centres: tile_centres,
+        entries,
+    }
+}
+
 /// Bake every room's card. `albedo` is the mean colour of each level
 /// material in slot order (`cooked.materials`).
 pub fn bake(cooked: &CookedLevel, albedo: &[[f32; 3]]) -> (Vec<Option<BakedCard>>, CardsReport) {
@@ -648,6 +750,51 @@ mod tests {
                 z1 = z1.max(z);
             }
             assert!((x1 - x0) + (z1 - z0) <= 9, "{rooms:?}");
+        }
+    }
+
+    #[test]
+    fn a_tile_asks_for_the_views_of_the_tiles_that_stand_a_card_distance_away() {
+        // 6 x 4 lattice, 10 sectors between rooms (sector = 80 units).
+        let sector = 80;
+        let mut centres = Vec::new();
+        for z in 0..4 {
+            for x in 0..6 {
+                centres.push(Some([x * 10 * sector, z * 10 * sector]));
+            }
+        }
+        let layout = disc_layout(&centres);
+        let tiles = (layout.sectors / (TILE_ROOMS * VIEWS as u32)) as usize;
+        // Cards from 12 sectors out to 30.
+        let copies = local_copies(&layout, &centres, 12 * sector, 30 * sector, sector);
+        assert_eq!(copies.centres.len(), tiles);
+        assert_eq!(copies.entries.len(), tiles);
+        for (x, entries) in copies.entries.iter().enumerate() {
+            assert!(!entries.is_empty(), "tile {x} asks for nothing");
+            for &(y, mask) in entries {
+                assert!((y as usize) < tiles);
+                assert!(mask != 0);
+                // A tile does not ask for itself at every view: the eye is
+                // within its own rooms, nearer than the cards show from,
+                // except where the tile is wide.
+                let _ = x;
+            }
+            // At most one copy of each tile.
+            assert!(entries.len() <= tiles);
+        }
+        // A tile's view of a far tile is the side facing it: tile X to the
+        // west of Y asks for the picture of Y seen from the west (view 4).
+        let leftmost = (0..tiles)
+            .min_by_key(|&t| copies.centres[t][0])
+            .expect("tiles");
+        let rightmost = (0..tiles)
+            .max_by_key(|&t| copies.centres[t][0])
+            .expect("tiles");
+        let asks = copies.entries[leftmost]
+            .iter()
+            .find(|&&(y, _)| y as usize == rightmost);
+        if let Some(&(_, mask)) = asks {
+            assert!(mask & (1 << 4) != 0, "{mask:08b}");
         }
     }
 

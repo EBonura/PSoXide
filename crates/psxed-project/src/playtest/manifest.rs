@@ -405,6 +405,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     // Far cards: where each room stands, and where its pictures are on the disc.
     let cards = &package.world_geometry.cards;
     let card_sectors = chunk_card_sectors(package);
+    let card_copies = card_copy_table(package);
     let _ = writeln!(
         out,
         "/// Far cards (`psx_grid::render::cards`): per room `[x, z, base, height, half width, 0]`\n\
@@ -414,6 +415,13 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
          pub const GRID_ROOM_CARD_SECTORS: &[u32] = &{card_sectors:?};\n\
          /// Sectors from a room's picture of one view to its picture of the next.\n\
          pub const GRID_CARD_VIEW_STRIDE: u32 = {};\n\
+         /// Where each tile of rooms stands, and for each pair of tiles (X * tiles + Y) the sector\n\
+         /// (low 24 bits) and views (top 8) of the copy of Y's pictures that lies near X; each room's\n\
+         /// tile and its place among the tile's rooms. Empty without copies.\n\
+         pub const GRID_CARD_TILE_CENTRES: &[[i16; 2]] = &{:?};\n\
+         pub const GRID_CARD_COPIES: &[u32] = &{:?};\n\
+         pub const GRID_ROOM_CARD_TILE: &[u8] = &{:?};\n\
+         pub const GRID_ROOM_CARD_PLACE: &[u8] = &{:?};\n\
          /// Cards show out to this many runtime units from the camera, fading in over the\n\
          /// last `GRID_CARD_FADE`; the colours behind them (below the horizon, at it, at the\n\
          /// top of the screen).\n\
@@ -422,7 +430,16 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
          /// No card is drawn closer than this (the coarse band stands there).\n\
          pub const GRID_CARD_NEAR: i32 = {};\n\
          pub const GRID_CARD_BACKDROP: [[u8; 3]; 3] = {:?};\n",
-        cards.rows, cards.stride, cards.far, cards.fade, cards.near, cards.backdrop,
+        cards.rows,
+        cards.stride,
+        if cards.blocks.is_empty() { &[][..] } else { &cards.tile_centres[..] },
+        card_copies,
+        if cards.blocks.is_empty() { &[][..] } else { &cards.room_tile[..] },
+        if cards.blocks.is_empty() { &[][..] } else { &cards.room_place[..] },
+        cards.far,
+        cards.fade,
+        cards.near,
+        cards.backdrop,
     );
 
     // The shape of the level's own records: how many of each table chunk 1 of
@@ -1264,35 +1281,36 @@ fn world_pack_chunks(package: &PlaytestPackage) -> Vec<(u32, &[u8])> {
     if world.core.is_empty() {
         return Vec::new();
     }
-    std::iter::once((0, world.core.as_slice()))
-        .chain(std::iter::once((1, world.records.as_slice())))
-        .chain(
-            world
-                .room_chunks
-                .iter()
-                .enumerate()
-                .map(|(room, bytes)| (room as u32 + 2, bytes.as_slice())),
-        )
-        .chain(
-            world
-                .chunk_skies
-                .iter()
-                .enumerate()
-                .filter(|(_, bytes)| !bytes.is_empty())
-                .map(|(room, bytes)| {
-                    (
-                        (world.room_chunks.len() + room) as u32 + 2,
-                        bytes.as_slice(),
-                    )
-                }),
-        )
-        .chain((!world.cards.pictures.is_empty()).then(|| {
-            (
-                2 * world.room_chunks.len() as u32 + 2,
-                world.cards.pictures.as_slice(),
-            )
-        }))
-        .collect()
+    let rooms = world.room_chunks.len();
+    let room_chunk = |room: u32| (room + 2, world.room_chunks[room as usize].as_slice());
+    let mut chunks = vec![(0, world.core.as_slice()), (1, world.records.as_slice())];
+    if world.cards.interleaved() {
+        let tile = world.cards.tile_sectors() as usize * 2048;
+        for item in world.cards.pack_order(rooms) {
+            chunks.push(match item {
+                PackItem::Room(room) => room_chunk(room),
+                PackItem::Tile(t) => (
+                    2 * rooms as u32 + 2 + t,
+                    &world.cards.pictures[t as usize * tile..(t as usize + 1) * tile],
+                ),
+                PackItem::Block(x) => (
+                    2 * rooms as u32 + 2 + world.cards.tiles() + x,
+                    world.cards.blocks[x as usize].as_slice(),
+                ),
+            });
+        }
+        return chunks;
+    }
+    chunks.extend((0..rooms as u32).map(room_chunk));
+    chunks.extend(
+        world
+            .chunk_skies
+            .iter()
+            .enumerate()
+            .filter(|(_, bytes)| !bytes.is_empty())
+            .map(|(room, bytes)| ((rooms + room) as u32 + 2, bytes.as_slice())),
+    );
+    chunks
 }
 
 /// Per room, the sector of its baked sky relative to the start of
@@ -1318,25 +1336,60 @@ fn chunk_sky_sectors(package: &PlaytestPackage) -> (Vec<u32>, Vec<u32>) {
 /// of view `k` is `GRID_CARD_VIEW_STRIDE * k` sectors on.
 fn chunk_card_sectors(package: &PlaytestPackage) -> Vec<u32> {
     let world = &package.world_geometry;
-    if world.cards.pictures.is_empty() {
+    if !world.cards.interleaved() {
         return Vec::new();
     }
     let rooms = world.room_chunks.len();
     let layout = world_pack_layout(package);
-    let first = layout
-        .entries
-        .iter()
-        .find(|entry| entry.chunk_id as usize == 2 * rooms + 2)
-        .map_or(0, |entry| entry.sector_offset);
+    let tile_sectors = world.cards.tile_sectors();
     world
         .cards
         .offsets
         .iter()
         .map(|&offset| {
-            if offset == u32::MAX || first == 0 {
+            if offset == u32::MAX {
+                return 0;
+            }
+            let tile = offset / tile_sectors;
+            layout
+                .entries
+                .iter()
+                .find(|entry| entry.chunk_id == 2 * rooms as u32 + 2 + tile)
+                .map_or(0, |entry| entry.sector_offset + offset % tile_sectors)
+        })
+        .collect()
+}
+
+/// Per (X, Y) pair of tiles, where the copy of Y's pictures near X starts, as
+/// a sector from the start of `WORLD.PAK` in the low 24 bits and the views it
+/// holds in the top 8 (0 for no copy); empty when the world has none.
+fn card_copy_table(package: &PlaytestPackage) -> Vec<u32> {
+    let world = &package.world_geometry;
+    if world.cards.blocks.is_empty() {
+        return Vec::new();
+    }
+    let rooms = world.room_chunks.len() as u32;
+    let tiles = world.cards.tiles();
+    let layout = world_pack_layout(package);
+    let block_start = |x: u32| {
+        layout
+            .entries
+            .iter()
+            .find(|entry| entry.chunk_id == 2 * rooms + 2 + tiles + x)
+            .map_or(0, |entry| entry.sector_offset)
+    };
+    world
+        .cards
+        .copies
+        .iter()
+        .enumerate()
+        .map(|(pair, &copy)| {
+            let mask = copy >> 24;
+            if mask == 0 {
                 0
             } else {
-                first + offset
+                let x = (pair / tiles as usize) as u32;
+                (block_start(x) + (copy & 0x00ff_ffff)) | (mask << 24)
             }
         })
         .collect()

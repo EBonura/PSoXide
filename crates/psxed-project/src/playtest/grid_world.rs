@@ -23,8 +23,8 @@ use crate::{
 };
 
 use super::{
-    PlaytestAsset, PlaytestAssetKind, PlaytestCards, PlaytestGridWorld, PlaytestSkyTables,
-    PlaytestValidationReport, StreamedClass,
+    PackItem, PlaytestAsset, PlaytestAssetKind, PlaytestCards, PlaytestGridWorld,
+    PlaytestSkyTables, PlaytestValidationReport, StreamedClass,
 };
 
 /// Texel size of the tile the grid renderer maps one material onto.
@@ -367,6 +367,19 @@ pub(super) fn cook(
         pool.peak_rooms,
         pool.max_room_pages
     ));
+    // A level with cards lays its pictures out among the room chunks: the
+    // rooms' sectors (counted from room 0) follow the new order.
+    let rooms = if cards.interleaved() {
+        match relayout_rooms(&mut cooked, &cards) {
+            Ok(rooms) => rooms,
+            Err(error) => {
+                report.error(format!("grid world: {error}"));
+                return None;
+            }
+        }
+    } else {
+        rooms
+    };
     let surfaces = |room: &cook::RoomReport| room.quads + room.triangles;
     Some(PlaytestGridWorld {
         core: cooked.core,
@@ -427,6 +440,45 @@ fn add_skin(
         summary.sectors, summary.leaves, summary.by_size, summary.bytes, summary.height_step
     ));
     Ok(())
+}
+
+/// Set each room's sector for the pack order of a level with cards
+/// ([`PlaytestCards::pack_order`]), rewrite the core with them, and return
+/// the rooms as one run of sectors in that order, the tiles' pictures as
+/// zeroed sectors.
+fn relayout_rooms(
+    cooked: &mut cook::CookedLevel,
+    cards: &PlaytestCards,
+) -> Result<Vec<u8>, String> {
+    let rooms = cooked.chunks.len();
+    let mut blob = Vec::new();
+    let mut next = 0u32;
+    for item in cards.pack_order(rooms) {
+        match item {
+            PackItem::Room(room) => {
+                let room = room as usize;
+                let chunk = &cooked.chunks[room];
+                let sectors = chunk.len().div_ceil(SECTOR_BYTES).max(1);
+                cooked.level.rooms[room].pack_sector = next;
+                cooked.level.rooms[room].pack_sectors = u16::try_from(sectors)
+                    .map_err(|_| format!("room {room} chunk is too large"))?;
+                next += sectors as u32;
+                blob.extend_from_slice(chunk);
+                blob.resize(blob.len().next_multiple_of(SECTOR_BYTES), 0);
+            }
+            PackItem::Tile(_) => {
+                next += cards.tile_sectors();
+                blob.resize(blob.len() + cards.tile_sectors() as usize * SECTOR_BYTES, 0);
+            }
+            PackItem::Block(x) => {
+                let sectors = (cards.blocks[x as usize].len() / SECTOR_BYTES) as u32;
+                next += sectors;
+                blob.resize(blob.len() + sectors as usize * SECTOR_BYTES, 0);
+            }
+        }
+    }
+    cooked.core = cooked.level.try_to_bytes()?;
+    Ok(blob)
 }
 
 /// Bake the coarse band of `cooked` and put it in the core: each level
@@ -531,6 +583,69 @@ fn bake_cards(
         }
     }
     let sector = i32::from(cooked.level.sector_units);
+    // Copies of the pictures each tile's neighbourhood asks for, laid out
+    // beside it: see `cook::cards::local_copies`.
+    let flood = &world.stream.flood;
+    let far = flood.card_far_sectors() * sector;
+    let local = cook::cards::local_copies(
+        &layout,
+        &centres,
+        (i32::from(flood.mesh_far) - 2).max(0) * sector,
+        far + 9 * sector,
+        sector,
+    );
+    let tiles = local.centres.len();
+    let tile_bytes = tile * VIEWS * SLOT_BYTES;
+    let mut blocks = Vec::new();
+    let mut copies = vec![0u32; tiles * tiles];
+    let mut local_bytes = 0usize;
+    for (x, entries) in local.entries.iter().enumerate() {
+        let mut block = Vec::new();
+        for &(y, mask) in entries {
+            copies[x * tiles + y as usize] =
+                (block.len() / SLOT_BYTES) as u32 | (u32::from(mask) << 24);
+            for view in 0..VIEWS {
+                if mask & (1 << view) != 0 {
+                    let from = y as usize * tile_bytes + view * tile * SLOT_BYTES;
+                    block.extend_from_slice(&pictures[from..from + tile * SLOT_BYTES]);
+                }
+            }
+        }
+        // A chunk is at least a sector.
+        block.resize(block.len().max(SLOT_BYTES), 0);
+        local_bytes += block.len();
+        blocks.push(block);
+    }
+    let room_tile: Vec<u8> = layout
+        .offsets
+        .iter()
+        .map(|&o| {
+            if o == u32::MAX {
+                0
+            } else {
+                (o as usize / (tile * VIEWS)) as u8
+            }
+        })
+        .collect();
+    let room_place: Vec<u8> = layout
+        .offsets
+        .iter()
+        .map(|&o| {
+            if o == u32::MAX {
+                0
+            } else {
+                (o as usize % tile) as u8
+            }
+        })
+        .collect();
+    if tiles > 0 {
+        report.warn(format!(
+            "cards: {tiles} tiles of {tile} rooms, copies near each tile: {} KiB ({} KiB a tile), tables {} B",
+            local_bytes / 1024,
+            local_bytes / 1024 / tiles.max(1),
+            tiles * tiles * 4 + tiles * 4 + 2 * room_tile.len()
+        ));
+    }
     let scene = project.active_scene();
     let sky = scene.world_sky_for_node(scene.root);
     let backdrop = sky.map_or([[0; 3]; 3], |s| {
@@ -552,6 +667,15 @@ fn bake_cards(
         pictures,
         offsets: layout.offsets,
         stride: cook::cards::TILE_ROOMS,
+        tile_centres: local
+            .centres
+            .iter()
+            .map(|c| [c[0] as i16, c[1] as i16])
+            .collect(),
+        blocks: if tiles > 0 { blocks } else { Vec::new() },
+        copies: if tiles > 0 { copies } else { Vec::new() },
+        room_tile,
+        room_place,
         far: world.stream.flood.card_far_sectors() * sector,
         fade: 3 * sector,
         near: (i32::from(world.stream.flood.mesh_far) - 2).max(0) * sector,
