@@ -35,6 +35,32 @@ static mut SCRATCH: Scratch<SCRATCH_VERTICES> = Scratch::new();
 static mut OT: OrderingTable<16> = OrderingTable::new();
 static mut CACHE: PacketCache<128> = PacketCache::new();
 
+/// Draw the inactive stance's cells on the back bar (variants that have them).
+const BACK: bool = option_env!("HUD_BACK").is_some();
+
+/// `hud-grid` build: only the grid of HUD states is drawn.
+const GRID: bool = cfg!(feature = "hud-grid");
+
+const fn env_px(s: Option<&str>, default: i32) -> i32 {
+    match s {
+        Some(s) => {
+            let b = s.as_bytes();
+            let (mut i, mut v) = (0, 0i32);
+            while i < b.len() {
+                v = v * 10 + (b[i] - b'0') as i32;
+                i += 1;
+            }
+            v
+        }
+        None => default,
+    }
+}
+/// Left edge of the Horizon and Zenith columns of the grid, in pixels.
+const GRID_X: [i32; 2] = [
+    env_px(option_env!("HUD_GRID_X0"), 2),
+    env_px(option_env!("HUD_GRID_X1"), 162),
+];
+
 const HORIZON: [u8; 3] = [234, 82, 48];
 const ZENITH: [u8; 3] = [76, 202, 181];
 
@@ -130,7 +156,7 @@ impl Scene for Demo {
         let mut ot = OtFrame::begin(ot_table);
         let frame = self.frames;
         self.frames += 1;
-        if let (Some(ids), Some(asset)) = (self.ids.as_ref(), self.hud.as_ref()) {
+        if let (false, Some(ids), Some(asset)) = (GRID, self.ids.as_ref(), self.hud.as_ref()) {
             // The HUD state flips every 48 frames; the packets are rebuilt
             // only then, and linked every frame.
             let state = if (frame / 48) % 2 == 0 {
@@ -144,6 +170,7 @@ impl Scene for Demo {
                         cells: 6,
                     },
                     energy: 4,
+                    back_cells: BACK,
                 }
             } else {
                 HudState {
@@ -156,6 +183,7 @@ impl Scene for Demo {
                         cells: 9,
                     },
                     energy: 7,
+                    back_cells: BACK,
                 }
             };
             if self.cached_state != Some(state) {
@@ -198,6 +226,10 @@ impl Scene for Demo {
         let gpu = ctx.gpu();
         // SAFETY: single-threaded guest; SCRATCH is only used from here.
         let scratch = unsafe { &mut SCRATCH };
+        if GRID {
+            self.draw_grid(gpu, scratch);
+            return;
+        }
         let (Some(gallery), Some(hud_asset)) = (self.gallery.as_ref(), self.hud.as_ref()) else {
             return;
         };
@@ -283,6 +315,7 @@ impl Scene for Demo {
                     cells: 9,
                 },
                 energy: 6,
+                back_cells: BACK,
             };
             let state_max = HudState {
                 active: Bar {
@@ -294,6 +327,7 @@ impl Scene for Demo {
                     cells: 10,
                 },
                 energy: 10,
+                back_cells: BACK,
             };
             let t = ticks();
             let mut n = 0;
@@ -431,4 +465,35 @@ fn main() -> ! {
         ..Config::default()
     };
     App::run(config, &mut demo);
+}
+
+impl Demo {
+    /// Two stance columns by four health/energy levels, drawn straight to the GPU at native
+    /// resolution. The back bar shows four inactive cells where a variant draws them.
+    fn draw_grid(&self, gpu: &mut psx_gpu::Gpu, scratch: &mut Scratch<SCRATCH_VERTICES>) {
+        let (Some(ids), Some(asset)) = (self.ids.as_ref(), self.hud.as_ref()) else {
+            return;
+        };
+        const LEVELS: [u8; 4] = [10, 6, 3, 0];
+        for (col, (front, back)) in [(HORIZON, ZENITH), (ZENITH, HORIZON)].iter().enumerate() {
+            for (row, &level) in LEVELS.iter().enumerate() {
+                let state = HudState {
+                    active: Bar {
+                        rgb: *front,
+                        cells: level,
+                    },
+                    inactive: Bar {
+                        rgb: *back,
+                        cells: 4,
+                    },
+                    energy: level,
+                    back_cells: BACK,
+                };
+                let origin = (GRID_X[col], 8 + 40 * row as i32);
+                draw_hud(ids, origin, &state, &mut |g, p, s| {
+                    let _ = asset.draw_group(gpu, g, p, s, scratch);
+                });
+            }
+        }
+    }
 }

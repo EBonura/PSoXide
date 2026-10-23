@@ -6,6 +6,10 @@ license = "GPL-2.0-or-later"
 
 [workspace]
 
+[features]
+# Draw a grid of HUD states (two stances by four levels) and nothing else, for frame review.
+hud-grid = []
+
 [[bin]]
 name = "showcase-vector"
 path = "src/main.rs"

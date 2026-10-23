@@ -68,6 +68,8 @@ pub struct HudState {
     pub inactive: Bar,
     /// Lit energy crystals, 0 to 10.
     pub energy: u8,
+    /// Also draw the inactive stance's cells (dimmed) on the back bar.
+    pub back_cells: bool,
 }
 
 const AMBER_EMPTY: [u8; 3] = [70, 44, 24];
@@ -97,6 +99,18 @@ pub fn draw_hud(
         ..Style::DEFAULT
     };
     draw(ids.plate, &back, &dim);
+    if state.back_cells {
+        let lit = scaled(state.inactive.rgb, 96);
+        let off = scaled(state.inactive.rgb, 40);
+        for (i, &cell) in ids.health.iter().enumerate() {
+            let tint = if (i as u8) < state.inactive.cells {
+                lit
+            } else {
+                off
+            };
+            draw(cell, &back, &Style::tinted(tint));
+        }
+    }
     draw(ids.plate, &front, &Style::tinted(state.active.rgb));
     let empty = scaled(state.active.rgb, 52);
     for (i, &cell) in ids.health.iter().enumerate() {

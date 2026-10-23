@@ -137,6 +137,7 @@ pub(crate) fn draw(
             cells: cells(inactive_share_q12),
         },
         energy: (energy / 10).min(10) as u8,
+        back_cells: false,
     };
     if hud.built_for != Some(state) {
         let t = timers::counter(Timer::Timer2);

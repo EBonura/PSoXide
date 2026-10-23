@@ -1,0 +1,83 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="176" height="32" viewBox="0 0 176 32">
+  <!--
+    Cortex stance HUD, native-pixel-grid variant (horn: none, gems: diamond). Units are screen pixels and
+    every coordinate is a whole number. Cells and gems are the same shape repeated at a fixed 12 px
+    step (a multiple of 4), all at one y, so they are pixel-identical on screen.
+    Draw order, back to front: plate (dimmed, offset up), plate, health_0..9, emblem, emblem_core,
+    rail, energy_0..9.
+  -->
+  <g id="plate">
+    <path d="M22 8 L157 8 L150 22 L22 22 Z" data-corners="#f4f4f4 #ffffff #707070 #707070"/>
+    <path d="M28 19 L33 9 L154 9 L149 19 Z" fill="#12161a"/>
+  </g>
+  <g id="health_0">
+    <path d="M34 10 L44 10 L40 18 L30 18 Z" data-corners="#ffffff #ffffff #9a9a9a #9a9a9a"/>
+  </g>
+  <g id="health_1">
+    <path d="M46 10 L56 10 L52 18 L42 18 Z" data-corners="#ffffff #ffffff #9a9a9a #9a9a9a"/>
+  </g>
+  <g id="health_2">
+    <path d="M58 10 L68 10 L64 18 L54 18 Z" data-corners="#ffffff #ffffff #9a9a9a #9a9a9a"/>
+  </g>
+  <g id="health_3">
+    <path d="M70 10 L80 10 L76 18 L66 18 Z" data-corners="#ffffff #ffffff #9a9a9a #9a9a9a"/>
+  </g>
+  <g id="health_4">
+    <path d="M82 10 L92 10 L88 18 L78 18 Z" data-corners="#ffffff #ffffff #9a9a9a #9a9a9a"/>
+  </g>
+  <g id="health_5">
+    <path d="M94 10 L104 10 L100 18 L90 18 Z" data-corners="#ffffff #ffffff #9a9a9a #9a9a9a"/>
+  </g>
+  <g id="health_6">
+    <path d="M106 10 L116 10 L112 18 L102 18 Z" data-corners="#ffffff #ffffff #9a9a9a #9a9a9a"/>
+  </g>
+  <g id="health_7">
+    <path d="M118 10 L128 10 L124 18 L114 18 Z" data-corners="#ffffff #ffffff #9a9a9a #9a9a9a"/>
+  </g>
+  <g id="health_8">
+    <path d="M130 10 L140 10 L136 18 L126 18 Z" data-corners="#ffffff #ffffff #9a9a9a #9a9a9a"/>
+  </g>
+  <g id="health_9">
+    <path d="M142 10 L152 10 L148 18 L138 18 Z" data-corners="#ffffff #ffffff #9a9a9a #9a9a9a"/>
+  </g>
+  <g id="emblem">
+    <path d="M18 2 L25 9 V19 L18 26 H8 L1 19 V9 L8 2 Z"
+          data-corners="#f2f2f2 #d8d8d8 #a8a8a8 #8e8e8e #8e8e8e #a8a8a8 #d8d8d8 #f2f2f2"/>
+  </g>
+  <g id="emblem_core">
+    <path d="M13 8 L19 14 L13 20 L7 14 Z" data-corners="#ffffff #d0d0d0 #a0a0a0 #d0d0d0"/>
+  </g>
+  <g id="rail">
+    <path d="M27 26 H150 V28 H27 Z" fill="#d9942a"/>
+  </g>
+  <g id="energy_0">
+    <path d="M37 23 L41 27 L37 31 L33 27 Z" data-corners="#ffec78 #eba83c #d76400 #eba83c"/>
+  </g>
+  <g id="energy_1">
+    <path d="M49 23 L53 27 L49 31 L45 27 Z" data-corners="#ffec78 #eba83c #d76400 #eba83c"/>
+  </g>
+  <g id="energy_2">
+    <path d="M61 23 L65 27 L61 31 L57 27 Z" data-corners="#ffec78 #eba83c #d76400 #eba83c"/>
+  </g>
+  <g id="energy_3">
+    <path d="M73 23 L77 27 L73 31 L69 27 Z" data-corners="#ffec78 #eba83c #d76400 #eba83c"/>
+  </g>
+  <g id="energy_4">
+    <path d="M85 23 L89 27 L85 31 L81 27 Z" data-corners="#ffec78 #eba83c #d76400 #eba83c"/>
+  </g>
+  <g id="energy_5">
+    <path d="M97 23 L101 27 L97 31 L93 27 Z" data-corners="#ffec78 #eba83c #d76400 #eba83c"/>
+  </g>
+  <g id="energy_6">
+    <path d="M109 23 L113 27 L109 31 L105 27 Z" data-corners="#ffec78 #eba83c #d76400 #eba83c"/>
+  </g>
+  <g id="energy_7">
+    <path d="M121 23 L125 27 L121 31 L117 27 Z" data-corners="#ffec78 #eba83c #d76400 #eba83c"/>
+  </g>
+  <g id="energy_8">
+    <path d="M133 23 L137 27 L133 31 L129 27 Z" data-corners="#ffec78 #eba83c #d76400 #eba83c"/>
+  </g>
+  <g id="energy_9">
+    <path d="M145 23 L149 27 L145 31 L141 27 Z" data-corners="#ffec78 #eba83c #d76400 #eba83c"/>
+  </g>
+</svg>
