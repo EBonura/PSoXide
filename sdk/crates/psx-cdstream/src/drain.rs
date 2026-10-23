@@ -57,6 +57,7 @@ const STACK_FILL: u8 = 0xa5;
 
 /// Where a drain stands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DrainState {
     /// Nothing was started, or the last drain was cancelled.
     Idle,
@@ -73,6 +74,7 @@ pub enum DrainState {
 
 /// Why a drain gave up.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DrainFailure {
     /// The drive answered with an error (INT5).
     Drive {
@@ -485,6 +487,7 @@ pub unsafe fn start(
 
 /// Where the drain is. Also runs the no-progress check: a drain that has
 /// stored nothing for the `timeout_vblanks` given to [`start`] fails.
+#[must_use]
 pub fn poll() -> DrainState {
     with_drain(|drain| {
         if drain.state == RUNNING
@@ -540,6 +543,7 @@ fn paint_stack() {
 
 /// Bytes of the handler's stack never touched since [`start`] painted it (when it
 /// put the wrapper in the vector).
+#[must_use]
 pub fn stack_unused_bytes() -> usize {
     let mut unused = 0;
     // SAFETY: plain volatile reads of a static this module owns.
