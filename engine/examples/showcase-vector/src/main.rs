@@ -48,6 +48,25 @@ static mut CACHE: PacketCache<128> = PacketCache::new();
 static mut SPRITE_HUDS: [hud_packets::HudPackets; 8] =
     [const { hud_packets::HudPackets::new() }; 8];
 
+/// The health of the two bars at game frame `t` of the 64 frame timeline: Horizon drains from 10 to
+/// 0 a cell a frame and refills, then Zenith does the same from 8, so a swap and both the patched
+/// drain and the refill show in one loop.
+fn demo_health(t: u32) -> [u8; 2] {
+    let horizon = match t {
+        0..=3 => 10,
+        4..=13 => 13 - t as u8,
+        14..=15 => 0,
+        _ => 10,
+    };
+    let zenith = match t {
+        0..=35 => 8,
+        36..=43 => 43 - t as u8,
+        44..=47 => 0,
+        _ => 8,
+    };
+    [horizon, zenith]
+}
+
 /// One size of the bar on its own, for the `HUD_SIZE` grid frame.
 #[cfg(feature = "hud-sprites")]
 static mut SIZE_HUDS: [hud_packets::AlonePackets; 8] =
@@ -616,7 +635,7 @@ impl Demo {
         };
         let state = SpriteState {
             stance,
-            health: [7, 5],
+            health: demo_health(t),
             energy: [8, 3],
             swap,
         };
@@ -628,20 +647,23 @@ impl Demo {
             record("c_build", 0, ticks().wrapping_sub(t0));
             self.sprite_state = Some(state);
         }
-        // Health and energy changes, timed: one cell, then eight, then ten, then back to rest.
-        let levels = match t {
-            10 => Some(([8, 5], [8, 3], "c_pat1")),
-            12 => Some(([0, 5], [8, 3], "c_pat8")),
-            14 => Some(([10, 5], [8, 3], "c_pat10")),
-            16 => Some(([7, 5], [8, 3], "c_pat3")),
-            18 => Some(([7, 5], [0, 3], "c_gem8")),
-            20 => Some(([7, 5], [8, 3], "c_gem8b")),
-            _ => None,
-        };
-        if let Some((health, energy, name)) = levels {
+        // Health changes by patching the cells' palettes, timed: a drain by one cell a frame (one
+        // cell each), and a refill of a whole bar.
+        let before = demo_health((t + 63) % 64);
+        if state.health != before {
+            let changed: u32 = state
+                .health
+                .iter()
+                .zip(before)
+                .map(|(a, b)| a.abs_diff(b) as u32)
+                .sum();
             let t0 = ticks();
-            hud.set_levels(&HudVram::SHOWCASE, health, energy);
-            record(name, 0, ticks().wrapping_sub(t0));
+            hud.set_levels(&HudVram::SHOWCASE, state.health, state.energy);
+            record(
+                if changed == 1 { "c_pat1" } else { "c_pat10" },
+                0,
+                ticks().wrapping_sub(t0),
+            );
         }
         if t != 63 {
             let t0 = ticks();
