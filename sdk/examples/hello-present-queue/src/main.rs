@@ -110,6 +110,7 @@ fn main() {
     let font = FontAtlas::upload(&BASIC, FONT_TPAGE, FONT_CLUT);
     gpu.wait_idle();
 
+    interrupts::reset_flip_histogram();
     let before = present::stats();
     present::start();
     let mut overflows = 0u32;
@@ -177,6 +178,9 @@ fn main() {
     present::wait_idle();
     psx_io::gpu::write_display_control(shown);
     let vblanks = interrupts::vblank_count().wrapping_sub(start);
+    // The presentation cap: no flip within 2 VBlanks of the one before (bucket 7 holds the
+    // first flip, which has none).
+    let fast: u32 = interrupts::flip_histogram()[..2].iter().sum();
     let after = present::stats();
     let kicks = after.kick_count.wrapping_sub(before.kick_count);
     let skips = after.skip_count.wrapping_sub(before.skip_count);
@@ -187,6 +191,7 @@ fn main() {
         (recoveries == 0, "present queue stalled"),
         (overflows == 0, "recording overflowed"),
         (vblanks >= FRAMES, "fewer VBlanks than frames"),
+        (fast == 0, "a flip came under 2 VBlanks after the last"),
         (interrupts::fault_count() == 0, "exceptions other than IRQs"),
     ];
     let failures = checks.iter().filter(|check| !check.0).count() as u32;

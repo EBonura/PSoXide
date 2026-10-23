@@ -101,8 +101,13 @@ impl Gpu {
     }
 
     /// Show VRAM from `origin` (GP1(05h)): a double-buffer flip.
+    ///
+    /// Under psx-rt this first waits for the presentation cap (`psx_tick::PresentCap`,
+    /// 30 fps unless the game opted out), so a loop that flips every VBlank runs at
+    /// the cap. Bounded, and skipped with interrupts masked.
     #[inline]
     pub fn set_display_start(&mut self, origin: (u16, u16)) {
+        psx_io::gpu::pace_flip();
         write_display_control(gp1::display_start(origin.0 as u32, origin.1 as u32));
     }
 

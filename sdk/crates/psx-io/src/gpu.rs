@@ -90,6 +90,30 @@ pub fn write_display_control(word: u32) {
     unsafe { crate::write_u32(GP1, word) }
 }
 
+/// The function a display flip waits in, installed by the runtime that owns the
+/// VBlank clock (`psx_rt::interrupts::install_vblank_counter`).
+static mut FLIP_PACER: Option<fn()> = None;
+
+/// Install (or with `None` remove) the pacer [`pace_flip`] calls. Called by
+/// psx-rt; a program without that runtime never has one and flips unpaced.
+pub fn set_flip_pacer(pacer: Option<fn()>) {
+    // SAFETY: a volatile aligned store of a plain function pointer to a private static; the only
+    // reader is `pace_flip`, which runs in the same foreground thread.
+    unsafe { core::ptr::write_volatile(&raw mut FLIP_PACER, pacer) }
+}
+
+/// Wait, if the runtime says so, until a display flip is allowed (the
+/// presentation cap, `psx_tick::PresentCap`), and count the flip. Call it
+/// immediately before writing a GP1(05h) display-start word directly; a no-op
+/// without a pacer.
+#[inline]
+pub fn pace_flip() {
+    // SAFETY: a volatile aligned read of the private static written by `set_flip_pacer`.
+    if let Some(pacer) = unsafe { core::ptr::read_volatile(&raw const FLIP_PACER) } {
+        pacer();
+    }
+}
+
 /// [`write_display_control`] straight to the port, past the direct-access
 /// guard; see [`write_command_unguarded`].
 #[inline(always)]
