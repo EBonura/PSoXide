@@ -616,6 +616,7 @@ pub fn uninstall() -> Option<Cd> {
 /// audio lease holds the controller. Polled commands may run whenever no request
 /// is queued or active and [`is_idle`] reads true: with
 /// [`IrqMaskPolicy::OnlyWhileBusy`] the CD interrupt source is closed then.
+#[must_use]
 pub fn ensure_installed(config: Config) -> bool {
     if TOKEN.is_held() {
         // SAFETY: a plain read of a word only this module writes.
@@ -643,6 +644,7 @@ pub fn ensure_installed(config: Config) -> bool {
 /// drive itself), so this normally returns within a few milliseconds; a console
 /// Pause after a long read can take a few frames. The wait also gives up after a
 /// fixed number of polls, so a stopped VBlank clock cannot hang it.
+#[must_use]
 pub fn stop_and_wait(max_vblanks: u32) -> bool {
     cancel_all();
     let start = psx_rt::interrupts::vblank_count();
