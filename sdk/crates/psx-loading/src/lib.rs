@@ -288,9 +288,9 @@ pub struct Style {
     pub pulse_ticks: u16,
     /// How the spinner's lights blend with what is under them.
     pub blend: Blend,
-    /// The display mode's width and height in pixels, which fixes the shape of a
-    /// pixel on a 4:3 screen. See [`Style::with_display`].
-    pub display: (i16, i16),
+    /// Pixels across per unit of height on a 4:3 screen, in 1/256ths, from the display
+    /// mode (256 is square pixels). Set by [`Style::with_display`].
+    across_q8: u16,
     /// Spinner dot size and spacing between dot centres, in unscaled display units.
     pub ring: (i16, i16),
 }
@@ -323,7 +323,7 @@ impl Style {
             step_ticks: 20,
             pulse_ticks: 64,
             blend: Blend::Additive,
-            display: (320, 240),
+            across_q8: 256,
             ring: (RING_DOT, RING_PITCH),
         }
     }
@@ -376,10 +376,18 @@ impl Style {
     /// so they are square on the screen, not in the framebuffer.
     #[must_use]
     pub const fn with_display(mut self, width: i16, height: i16) -> Self {
-        self.display = (
-            if width < 1 { 1 } else { width },
-            if height < 1 { 1 } else { height },
+        let (w, h) = (
+            if width < 1 { 1 } else { width as i32 },
+            if height < 1 { 1 } else { height as i32 },
         );
+        // 3 * w / (4 * h) in 1/256ths, rounded. A mode this far from 4:3 is not one a
+        // PS1 has; the clamp keeps the factor in a u16 anyway.
+        let q8 = (3 * w * 256 * 2 + 4 * h) / (8 * h);
+        self.across_q8 = if q8 > u16::MAX as i32 {
+            u16::MAX
+        } else {
+            q8 as u16
+        };
         self
     }
 
@@ -404,8 +412,7 @@ impl Style {
 
     /// `units` of height as pixels across, rounded: what makes a square on a 4:3 screen.
     const fn across(&self, units: i32) -> i32 {
-        let (width, height) = (self.display.0 as i32, self.display.1 as i32);
-        (units * 3 * width + 2 * height) / (4 * height)
+        (units * self.across_q8 as i32 + 128) >> 8
     }
 
     /// Side of the spinner's ring in units of height (before scale).
