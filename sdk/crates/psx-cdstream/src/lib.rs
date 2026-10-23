@@ -108,6 +108,8 @@ mod request;
 mod console;
 #[cfg(any(target_arch = "mips", doc))]
 pub use console::*;
+#[cfg(any(target_arch = "mips", doc))]
+pub mod drain;
 
 pub use engine::*;
 pub use hw::CdHw;
