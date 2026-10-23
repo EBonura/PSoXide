@@ -16,6 +16,13 @@ extern crate psx_rt;
 #[path = "../../editor-playtest/src/stance_hud_layout.rs"]
 mod hud;
 
+#[cfg(feature = "hud-sprites")]
+#[path = "../../editor-playtest/src/stance_hud_sprites.rs"]
+mod hud_sprites;
+#[cfg(feature = "hud-sprites")]
+#[path = "../../editor-playtest/src/stance_hud_packets.rs"]
+mod hud_packets;
+
 use hud::{draw_hud, Bar, HudIds, HudState, SCRATCH_VERTICES};
 use psx_engine::{App, Config, Ctx, OtFrame, Scene};
 use psx_gpu::material::BlendMode;
@@ -35,11 +42,20 @@ static mut SCRATCH: Scratch<SCRATCH_VERTICES> = Scratch::new();
 static mut OT: OrderingTable<16> = OrderingTable::new();
 static mut CACHE: PacketCache<128> = PacketCache::new();
 
+/// The sprite HUDs: eight for the grid frame (two stances by four levels), the first one alone for the
+/// cycle measurements.
+#[cfg(feature = "hud-sprites")]
+static mut SPRITE_HUDS: [hud_packets::HudPackets<{ hud_packets::PACKETS }>; 8] =
+    [const { hud_packets::HudPackets::new() }; 8];
+
 /// Draw the inactive stance's cells on the back bar (variants that have them).
 const BACK: bool = option_env!("HUD_BACK").is_some();
 
 /// `hud-grid` build: only the grid of HUD states is drawn.
 const GRID: bool = cfg!(feature = "hud-grid");
+
+/// `hud-sprites` build: the sprite HUD stands in for the vector one.
+const SPRITES: bool = cfg!(feature = "hud-sprites");
 
 const fn env_px(s: Option<&str>, default: i32) -> i32 {
     match s {
@@ -99,6 +115,8 @@ static mut OVERHEAD: u32 = 0;
 struct Demo {
     frames: u32,
     cached_state: Option<HudState>,
+    #[cfg(feature = "hud-sprites")]
+    sprite_state: Option<hud_sprites::HudState>,
     ids: Option<HudIds>,
     gallery: Option<VectorAsset<'static>>,
     hud: Option<VectorAsset<'static>>,
@@ -142,6 +160,8 @@ impl Scene for Demo {
         let (a, b) = (ticks(), ticks());
         // SAFETY: single-threaded guest.
         unsafe { OVERHEAD = (b.wrapping_sub(a) as u32 * 8).min(64) };
+        #[cfg(feature = "hud-sprites")]
+        hud_packets::HudVram::SHOWCASE.upload();
         self.gallery = VectorAsset::parse(GALLERY).ok();
         self.hud = VectorAsset::parse(STANCE_HUD).ok();
         self.ids = self.hud.as_ref().and_then(HudIds::new);
@@ -156,7 +176,8 @@ impl Scene for Demo {
         let mut ot = OtFrame::begin(ot_table);
         let frame = self.frames;
         self.frames += 1;
-        if let (false, Some(ids), Some(asset)) = (GRID, self.ids.as_ref(), self.hud.as_ref()) {
+        if let (false, Some(ids), Some(asset)) =
+            (GRID || SPRITES, self.ids.as_ref(), self.hud.as_ref()) {
             // The HUD state flips every 48 frames; the packets are rebuilt
             // only then, and linked every frame.
             let state = if (frame / 48) % 2 == 0 {
@@ -208,6 +229,8 @@ impl Scene for Demo {
                 record("c_link", cache.len() as u32, ticks().wrapping_sub(t));
             }
         }
+        #[cfg(feature = "hud-sprites")]
+        self.sprite_hud(&mut ot, frame);
         let t = ticks();
         ot.submit(ctx.gpu_dma());
         let dt = ticks().wrapping_sub(t);
@@ -227,7 +250,9 @@ impl Scene for Demo {
         // SAFETY: single-threaded guest; SCRATCH is only used from here.
         let scratch = unsafe { &mut SCRATCH };
         if GRID {
-            self.draw_grid(gpu, scratch);
+            if !SPRITES {
+                self.draw_grid(gpu, scratch);
+            }
             return;
         }
         let (Some(gallery), Some(hud_asset)) = (self.gallery.as_ref(), self.hud.as_ref()) else {
@@ -456,6 +481,8 @@ fn main() -> ! {
     let mut demo = Demo {
         frames: 0,
         cached_state: None,
+        #[cfg(feature = "hud-sprites")]
+        sprite_state: None,
         ids: None,
         gallery: None,
         hud: None,
@@ -468,6 +495,66 @@ fn main() -> ! {
 }
 
 impl Demo {
+    /// The sprite HUD: in the grid build eight HUDs built once and linked every frame; otherwise one
+    /// HUD whose state flips every 48 frames, with the build and link cycles recorded like the vector
+    /// HUD's.
+    #[cfg(feature = "hud-sprites")]
+    fn sprite_hud(&mut self, ot: &mut OtFrame<'_, 16>, frame: u32) {
+        use hud_packets::HudVram;
+        use hud_sprites::{HudState as SpriteState, Stance};
+        // SAFETY: single-threaded guest; the packets are only touched here, and `submit` waits for the
+        // walk before anything is rebuilt.
+        let huds = unsafe { &mut SPRITE_HUDS };
+        if GRID {
+            if frame == 0 {
+                for (i, hud) in huds.iter_mut().enumerate() {
+                    let (col, row) = (i / 4, i % 4);
+                    let level = [10u8, 6, 3, 0][row];
+                    let stance = if col == 0 { Stance::Horizon } else { Stance::Zenith };
+                    let state = SpriteState {
+                        stance,
+                        health: level,
+                        back_health: 4,
+                        energy: level,
+                    };
+                    let origin = (GRID_X[col], 8 + 40 * row as i32);
+                    let t = ticks();
+                    hud.build(&HudVram::SHOWCASE, origin, &state);
+                    if i == 0 {
+                        record("c_build", hud.len() as u32, ticks().wrapping_sub(t));
+                    }
+                }
+            }
+            for hud in huds.iter_mut() {
+                for (ptr, words) in hud.links() {
+                    // SAFETY: a `static`, unmodified until the walk ends.
+                    unsafe { ot.add_raw(8, ptr, words) };
+                }
+            }
+            return;
+        }
+        let state = if (frame / 48) % 2 == 0 {
+            SpriteState { stance: Stance::Zenith, health: 9, back_health: 6, energy: 4 }
+        } else {
+            SpriteState { stance: Stance::Horizon, health: 6, back_health: 9, energy: 7 }
+        };
+        let hud = &mut huds[0];
+        if self.sprite_state != Some(state) {
+            let t = ticks();
+            hud.build(&HudVram::SHOWCASE, (6, 160), &state);
+            self.sprite_state = Some(state);
+            record("c_build", hud.len() as u32, ticks().wrapping_sub(t));
+        }
+        if frame % 64 != 63 {
+            let t = ticks();
+            for (ptr, words) in hud.links() {
+                // SAFETY: a `static`, unmodified until the walk ends.
+                unsafe { ot.add_raw(8, ptr, words) };
+            }
+            record("c_link", hud.len() as u32, ticks().wrapping_sub(t));
+        }
+    }
+
     /// Two stance columns by four health/energy levels, drawn straight to the GPU at native
     /// resolution. The back bar shows four inactive cells where a variant draws them.
     fn draw_grid(&self, gpu: &mut psx_gpu::Gpu, scratch: &mut Scratch<SCRATCH_VERTICES>) {
