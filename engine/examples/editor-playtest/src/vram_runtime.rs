@@ -301,6 +301,11 @@ pub(super) fn release_gameplay_vram() {
         (*core::ptr::addr_of_mut!(CHUNK_SKY))
             .release(&mut psx_game_runtime::grid_stream::DiscTransport);
     }
+    #[cfg(feature = "cd-stream-bench")]
+    // SAFETY: single-threaded guest; see `step_cards`.
+    unsafe {
+        (*core::ptr::addr_of_mut!(CARDS)).release_all(&mut psx_game_runtime::grid_stream::DiscTransport);
+    }
     vram_arena().release_gameplay_vram();
 }
 
@@ -439,6 +444,139 @@ pub static mut CHUNK_SKY_COUNTERS: psx_game_runtime::cube_sky_stream::SkyCounter
         shown: 0,
         refused: 0,
     };
+
+/// The far cards' stream and its counters. The pictures read through the
+/// chunk sky's window: a world that has cards bakes no chunk skies, so the
+/// window is idle.
+#[cfg(feature = "cd-stream-bench")]
+static mut CARDS: psx_game_runtime::card_stream::CardStream<
+    <psx_game_runtime::grid_stream::DiscTransport as psx_game_runtime::grid_stream::RoomTransport>::Ticket,
+> = psx_game_runtime::card_stream::CardStream::new();
+
+/// The card stream's counters, at a fixed address (like the chunk sky's) so a
+/// RAM dump of a run shows what the stream did.
+#[cfg(feature = "cd-stream-bench")]
+#[no_mangle]
+pub static mut CARD_COUNTERS: psx_game_runtime::card_stream::CardCounters =
+    psx_game_runtime::card_stream::CardCounters {
+        submitted: 0,
+        landed: 0,
+        failed: 0,
+        uploads: 0,
+        evictions: 0,
+        refused: 0,
+        live: 0,
+        starved: 0,
+    };
+
+/// Whether the level has far cards.
+pub(super) fn has_cards() -> bool {
+    !crate::generated::GRID_CARDS.is_empty()
+}
+
+/// The sky atlas as the cards use it: its top-left VRAM pixel and the
+/// texture-page word of its first page; `None` until the sky is resident.
+#[cfg(feature = "cd-stream-bench")]
+pub(super) fn card_atlas() -> Option<((u16, u16), u16)> {
+    let key = chunk_sky_key()?;
+    let slot = vram_arena()
+        .find_sky_texture_vram_slot(SkyTextureKind::Cube, key)
+        .filter(|slot| slot.ready)?;
+    Some((vram_arena().cube_sky_origin(key)?, slot.tpage_word))
+}
+
+/// Keep the cards' pictures coming for an eye at `eye`. Call once per tick,
+/// once the level has loaded.
+#[cfg(feature = "cd-stream-bench")]
+pub(super) fn step_cards(eye: [i32; 3]) {
+    use crate::generated::{
+        GRID_CARDS, GRID_CARD_FADE, GRID_CARD_FAR, GRID_ROOM_CARD_SECTORS, WORLD_PACK_START_LBA,
+    };
+    use psx_game_runtime::card_stream::CardInput;
+    if GRID_CARDS.is_empty() || card_atlas().is_none() {
+        return;
+    }
+    let table = psx_grid::render::CardTable::new(GRID_CARDS);
+    let input = CardInput {
+        table: &table,
+        sectors: GRID_ROOM_CARD_SECTORS,
+        base_lba: WORLD_PACK_START_LBA,
+        eye,
+        // A room takes a slot a fade's width before its card shows, and
+        // keeps it half as long past the far edge.
+        enter: GRID_CARD_FAR + GRID_CARD_FADE,
+        leave: GRID_CARD_FAR + GRID_CARD_FADE + GRID_CARD_FADE / 2,
+    };
+    // SAFETY: single-threaded guest; the stream and the window are touched
+    // only here, in `emit_card_uploads` and in `release_gameplay_vram`.
+    unsafe {
+        (*core::ptr::addr_of_mut!(CARDS)).update(
+            &mut psx_game_runtime::grid_stream::DiscTransport,
+            (*core::ptr::addr_of_mut!(CHUNK_SKY_WINDOW)).words_mut(),
+            &input,
+        );
+        CARD_COUNTERS = (*core::ptr::addr_of!(CARDS)).counters;
+    }
+}
+
+/// The slots of the card atlas as the draw reads them.
+#[cfg(feature = "cd-stream-bench")]
+pub(super) fn card_slots() -> &'static [psx_grid::render::LiveSlot; psx_grid::render::SLOTS] {
+    // SAFETY: single-threaded guest; the draw reads after the tick's update.
+    unsafe { (*core::ptr::addr_of!(CARDS)).live() }
+}
+
+/// Pictures the GPU uploads per frame: 770 words of packets each.
+#[cfg(feature = "cd-stream-bench")]
+const CARD_UPLOADS_PER_FRAME: usize = 2;
+
+/// Put the landed card pictures into this frame's list, in the sky's slot
+/// (they run before everything else): the GPU copies them as it draws and the
+/// CPU never waits for it.
+#[cfg(feature = "cd-stream-bench")]
+pub(super) fn emit_card_uploads(
+    primitive_packets: &mut PrimitivePacketArena<'_>,
+    ot: &mut OtFrame<'_, OT_DEPTH>,
+) {
+    use psx_game_runtime::card_stream::{upload_packet_words, write_upload_packets};
+    if !has_cards() {
+        return;
+    }
+    let Some((origin, _)) = card_atlas() else {
+        return;
+    };
+    // SAFETY: single-threaded guest; see `step_cards`.
+    let (stream, window) = unsafe {
+        (
+            &mut *core::ptr::addr_of_mut!(CARDS),
+            (*core::ptr::addr_of_mut!(CHUNK_SKY_WINDOW)).words_mut(),
+        )
+    };
+    let (uploads, count) = stream.uploads::<CARD_UPLOADS_PER_FRAME>();
+    if count == 0 {
+        return;
+    }
+    let Some(mut reservation) =
+        primitive_packets.reserve_packet_words(upload_packet_words(count))
+    else {
+        return;
+    };
+    let (words, packets) = write_upload_packets(
+        &uploads[..count],
+        window,
+        origin,
+        (OT_DEPTH - 1) as u16,
+        reservation.words_mut(),
+    );
+    let Some(packets) = reservation.commit(words, packets) else {
+        return;
+    };
+    // The uploads are in the frame's list: the stream has taken them.
+    stream.applied(&uploads[..count]);
+    // SAFETY: the stream is one committed arena range, live until the walk
+    // ends, and its slot is below OT_DEPTH.
+    unsafe { ot.add_committed_tagged_packet_stream_unchecked(packets) };
+}
 
 /// Upload (once) a recoloured palette copy of a resident texture.
 pub(super) fn ensure_clut_variant(

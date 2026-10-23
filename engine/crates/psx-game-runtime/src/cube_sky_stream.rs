@@ -53,6 +53,12 @@ impl CubeSkyWindow {
         self.words[byte / 4]
     }
 
+    /// The window's words, for a stream that shares its memory (the far
+    /// cards read their pictures through it when no chunk sky does).
+    pub fn words_mut(&mut self) -> &mut [u32] {
+        &mut self.words
+    }
+
     fn bytes_mut(&mut self) -> &mut [u8] {
         let len = self.words.len() * 4;
         // SAFETY: in-bounds byte view of plain words.

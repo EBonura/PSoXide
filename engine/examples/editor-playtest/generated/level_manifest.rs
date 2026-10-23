@@ -38,6 +38,17 @@ pub const GRID_SKY_BG_ROWS: &[u16] = &[];
 pub const GRID_SKY_BG_RUNS: &[u8] = &[];
 /// The tiles of the sky VRAM starts with (room 0's) that differ from the background.
 pub const GRID_SKY_INITIAL_MASK: &[u32] = &[];
+/// Far cards (`psx_grid::render::cards`): per room `[x, z, base, height, half width, 0]`
+/// in world runtime units (a zero height: no card), and the sector of its pictures
+/// relative to the start of WORLD.PAK (0 for none). Empty: the world has no cards.
+pub const GRID_CARDS: &[[i16; 6]] = &[];
+pub const GRID_ROOM_CARD_SECTORS: &[u32] = &[];
+/// Cards show out to this many runtime units from the camera, fading in over the
+/// last `GRID_CARD_FADE`; the colours behind them (below the horizon, at it, at the
+/// top of the screen).
+pub const GRID_CARD_FAR: i32 = 0;
+pub const GRID_CARD_FADE: i32 = 0;
+pub const GRID_CARD_BACKDROP: [[u8; 3]; 3] = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
 pub const LEN_ROOMS: usize = 0;
 pub const LEN_ROOM_REFLECTION_PROBES: usize = 0;
 pub const LEN_LIGHTS: usize = 0;

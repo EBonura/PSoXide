@@ -148,6 +148,9 @@ pub(super) struct GridRuntime {
     /// Per room, whether the frame draws it whole (the skin covers the rest).
     skin_skip: Vec<bool>,
     skin: SkinRenderer,
+    /// Per room, whether the frame draws it whole (no far card then).
+    card_skip: Vec<bool>,
+    coarse: psx_grid::render::CoarseRenderer,
     last_world_packet_words: usize,
     camera_traces: u32,
     /// Sight-line cache for [`Self::visible_view_bounds_mask`].
@@ -270,6 +273,8 @@ impl GridRuntime {
             visible_scratch: Vec::new(),
             skin_skip: Vec::new(),
             skin: SkinRenderer::new(),
+            card_skip: Vec::new(),
+            coarse: psx_grid::render::CoarseRenderer::new(),
             last_world_packet_words: 0,
             camera_traces: 0,
             view_known: 0,
@@ -1178,6 +1183,112 @@ impl GridRuntime {
                         overflowed: skin.overflowed,
                         ..GridFrame::default()
                     });
+                }
+                if !total.overflowed
+                    && (self.level.coarse.is_some() || crate::vram_runtime::has_cards())
+                {
+                    scene::load_translation(view.translation);
+                    // The rooms drawn whole stand in front of their own coarse
+                    // meshes and cards; every other room shows its coarse mesh
+                    // while it is near, and its card while it is far.
+                    self.card_skip.clear();
+                    self.card_skip.resize(self.level.rooms.len(), false);
+                    if let Some(drawn) = self.window.drawn_rooms() {
+                        for entry in drawn {
+                            let room = usize::from(entry.room);
+                            if self.resident.get(room).is_some_and(|s| s.materials_ready) {
+                                self.card_skip[room] = true;
+                            }
+                        }
+                    }
+                    let near_sz =
+                        (self.projection.focal_length / 2 + 2).clamp(1, i32::from(u16::MAX)) as u16;
+                    // Rooms whose centre is within this plan distance draw
+                    // their coarse mesh, and a card takes over `overlap` before.
+                    let (mesh_far, mesh_overlap) = self.level.coarse.map_or((0, 0), |c| {
+                        (
+                            i32::from(c.far_sectors) * sector,
+                            i32::from(c.overlap_sectors) * sector,
+                        )
+                    });
+                    if self.level.coarse.is_some() {
+                        telemetry::stage_begin(telemetry::stage::FAR_VISTA);
+                        let coarse = self.coarse.draw(
+                            &self.level,
+                            &self.card_skip,
+                            &psx_grid::render::CoarseCamera {
+                                right: plan_axes(&view.rotation.m).0,
+                                forward: plan_axes(&view.rotation.m).1,
+                                half_tan_q12: ((self.projection.half_width << 12)
+                                    / self.projection.focal_length.max(1))
+                                    * 6
+                                    / 5,
+                                eye,
+                                screen,
+                                near_sz,
+                                far: mesh_far,
+                            },
+                            if reverse {
+                                &mut packets[..packet_count - total.packet_words]
+                            } else {
+                                &mut packets[total.packet_words..]
+                            },
+                            reverse,
+                        );
+                        telemetry::stage_end(telemetry::stage::FAR_VISTA);
+                        total.absorb(&GridFrame {
+                            packet_words: coarse.packet_words,
+                            packets: coarse.packets,
+                            overflowed: coarse.overflowed,
+                            ..GridFrame::default()
+                        });
+                    }
+                    #[cfg(feature = "cd-stream-bench")]
+                    if !total.overflowed {
+                        if let Some((atlas, tpage)) = crate::vram_runtime::card_atlas() {
+                            use crate::generated::{GRID_CARDS, GRID_CARD_FADE, GRID_CARD_FAR};
+                            telemetry::stage_begin(telemetry::stage::FAR_VISTA);
+                            let (right, forward) = plan_axes(&view.rotation.m);
+                            let cards = psx_grid::render::draw_cards(
+                                &psx_grid::render::CardTable::new(GRID_CARDS),
+                                crate::vram_runtime::card_slots(),
+                                &self.card_skip,
+                                &psx_grid::render::CardCamera {
+                                    eye,
+                                    screen,
+                                    near_sz,
+                                    right,
+                                    forward,
+                                    half_tan_q12: ((self.projection.half_width << 12)
+                                        / self.projection.focal_length.max(1))
+                                        * 6
+                                        / 5,
+                                    far: GRID_CARD_FAR,
+                                    hide_inside: self
+                                        .level
+                                        .flood
+                                        .map_or(0, |flood| i32::from(flood.near_radius) * sector),
+                                    hide_all: (mesh_far - mesh_overlap).max(0),
+                                    fade: GRID_CARD_FADE,
+                                    tpage,
+                                    atlas,
+                                },
+                                if reverse {
+                                    &mut packets[..packet_count - total.packet_words]
+                                } else {
+                                    &mut packets[total.packet_words..]
+                                },
+                                reverse,
+                            );
+                            telemetry::stage_end(telemetry::stage::FAR_VISTA);
+                            total.absorb(&GridFrame {
+                                packet_words: cards.packet_words,
+                                packets: cards.packets,
+                                overflowed: cards.overflowed,
+                                ..GridFrame::default()
+                            });
+                        }
+                    }
                 }
             }
             scene::load_translation(view.translation);

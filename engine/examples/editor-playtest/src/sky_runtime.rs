@@ -105,6 +105,12 @@ pub(super) fn draw_scene_sky(
     let Some(slot) = slot.filter(|slot| slot.ready) else {
         return;
     };
+    if kind == SkyTextureKind::Cube && has_cards() {
+        // The atlas holds the far cards' pictures: the sky is a plain
+        // gradient behind them.
+        draw_card_backdrop(camera, primitive_packets, ot);
+        return;
+    }
     let word_capacity = match kind {
         SkyTextureKind::QuakeLayered => VIEW_RAY_SKY_PACKET_WORDS,
         SkyTextureKind::Cube => VIEW_RAY_CUBE_SKY_PACKET_WORDS,
@@ -190,4 +196,42 @@ pub(super) fn draw_scene_sky(
     unsafe {
         ot.add_committed_tagged_packet_stream_unchecked(stream);
     }
+}
+
+/// Draw the gradient the far cards stand in front of, in the sky's slot
+/// ([`psx_grid::render::write_backdrop`]).
+fn draw_card_backdrop(
+    camera: WorldCamera,
+    primitive_packets: &mut PrimitivePacketArena<'_>,
+    ot: &mut OtFrame<'_, OT_DEPTH>,
+) {
+    use crate::generated::GRID_CARD_BACKDROP;
+    use psx_grid::render::{write_backdrop, Backdrop, BACKDROP_PACKET_WORDS};
+    let Some(mut reservation) = primitive_packets.reserve_packet_words(2 * BACKDROP_PACKET_WORDS)
+    else {
+        return;
+    };
+    let view = psx_grid::render::load_view_rotation(
+        crate::world_common::view_camera(camera).origin,
+        crate::world_common::world_view_rotation(camera),
+    );
+    let [below, horizon, top] = GRID_CARD_BACKDROP;
+    let (words, packets) = write_backdrop(
+        &view.rotation.m,
+        camera.projection.focal_length,
+        [i32::from(SCREEN_W), i32::from(SCREEN_H)],
+        Backdrop {
+            below,
+            horizon,
+            top,
+        },
+        (OT_DEPTH - 1) as u16,
+        reservation.words_mut(),
+    );
+    let Some(packets) = reservation.commit(words, packets as usize) else {
+        return;
+    };
+    // SAFETY: the stream is one committed arena range, live until the walk
+    // ends, and its slot is below OT_DEPTH.
+    unsafe { ot.add_committed_tagged_packet_stream_unchecked(packets) };
 }

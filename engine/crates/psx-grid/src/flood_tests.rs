@@ -415,3 +415,84 @@ fn a_skin_block_follows_the_flood_block_and_round_trips() {
     };
     assert!(bad.try_to_bytes().is_err());
 }
+
+#[test]
+fn the_coarse_block_round_trips_after_the_skin_and_refuses_bad_starts() {
+    use crate::write::{CoarseBlock, SkinBlock};
+    let vertices: Vec<CoarseVertex> = (0..5)
+        .map(|i| CoarseVertex {
+            x: i * 10,
+            y: -i,
+            z: 7,
+            rgb: 0x7fff - i as u16,
+        })
+        .collect();
+    let block = CoarseBlock {
+        header: CoarseHeader {
+            vertex_count: 5,
+            triangle_count: 3,
+            far_sectors: 14,
+            overlap_sectors: 2,
+            reserved: [0; 2],
+        },
+        vertex_first: alloc::vec![0, 3, 5],
+        triangle_first: alloc::vec![0, 1, 3],
+        vertices: vertices.clone(),
+        triangles: alloc::vec![[0, 1, 2], [0, 1, 1], [1, 0, 1]],
+    };
+    let core = LevelCore {
+        sector_units: S as u16,
+        rooms: (0..2)
+            .map(|i| RoomRecord {
+                origin: [i * 160, 0, 0],
+                width: 2,
+                depth: 1,
+                pack_sectors: 3,
+                max_y: 100,
+                ..RoomRecord::default()
+            })
+            .collect(),
+        skin: Some(SkinBlock {
+            header: SkinHeader {
+                leaf_count: 1,
+                lod_count: 1,
+                ..SkinHeader::default()
+            },
+            cell_first: alloc::vec![0, 1, 1],
+            leaves: alloc::vec![SkinLeaf::pack(0, 0, 0, 1, 0x1234, [0; 4])],
+        }),
+        coarse: Some(block.clone()),
+        ..LevelCore::default()
+    };
+    let words = aligned_copy(&core.to_bytes());
+    let level = view(&words);
+    assert_ne!(level.header.flags & LEVEL_HAS_COARSE, 0);
+    assert_eq!(level.skin_leaves.len(), 1);
+    let header = level.coarse.expect("the coarse header");
+    assert_eq!((header.far_sectors, header.overlap_sectors), (14, 2));
+    assert_eq!(level.coarse_vertex_first, &[0, 3, 5]);
+    assert_eq!(level.coarse_triangle_first, &[0, 1, 3]);
+    assert_eq!(level.coarse_vertices, vertices.as_slice());
+    assert_eq!(level.coarse_triangles, block.triangles.as_slice());
+    assert!(level.validate_full().is_ok());
+
+    // Starts that do not match the rooms are refused at write.
+    let bad = LevelCore {
+        coarse: Some(CoarseBlock {
+            vertex_first: alloc::vec![0, 5],
+            ..block.clone()
+        }),
+        ..core.clone()
+    };
+    assert!(bad.try_to_bytes().is_err());
+    // A triangle corner past its room's vertices is refused at read.
+    let wild = LevelCore {
+        coarse: Some(CoarseBlock {
+            triangles: alloc::vec![[0, 1, 3], [0, 1, 1], [1, 0, 1]],
+            ..block
+        }),
+        ..core
+    };
+    let words = aligned_copy(&wild.to_bytes());
+    assert!(view(&words).validate_full().is_err());
+}

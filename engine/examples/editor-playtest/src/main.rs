@@ -792,6 +792,7 @@ impl Playtest {
                 .as_ref()
                 .map(|world_rt| world_rt.player_room());
             step_chunk_sky(room);
+            step_cards([eye.x, eye.y, eye.z]);
         }
         if self.world_rt.is_some() && background_tick {
             let _ = self.streaming_jobs.step_vram_uploads();

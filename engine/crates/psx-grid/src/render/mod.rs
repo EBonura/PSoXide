@@ -32,14 +32,23 @@ use psx_gte::scene;
 use crate::format::*;
 use crate::view::RoomView;
 
+mod cards;
 mod clip;
+mod coarse;
 mod emit;
 mod frustum;
 mod projection;
 mod select;
 mod skin;
 
+pub use cards::{
+    draw_cards, horizon_y, slot_clut_word, write_backdrop, Backdrop, BACKDROP_PACKET_WORDS, slot_origin, view_keep, view_toward, Card, CardCamera, CardTable,
+    LiveSlot, ATLAS_COLUMNS, ATLAS_ROWS, CARD_PACKET_WORDS, NO_SLOT, NO_VIEW, PICTURE_ROWS,
+    PITCH_TAN_Q12, SLOTS, SLOT_BYTES, SLOT_HALFWORDS, SLOT_ROWS, TEXELS, VIEWS, VIEW_COS_Q12,
+    VIEW_SIN_Q12,
+};
 pub use clip::clip_polygon_plane;
+pub use coarse::{CoarseCamera, CoarseRenderer, COARSE_PACKET_WORDS};
 #[cfg(target_arch = "mips")]
 pub use frustum::load_gte_clip_planes;
 pub use frustum::{FrustumPlanes, CLIP_ALL_PLANES};
