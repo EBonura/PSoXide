@@ -424,6 +424,7 @@ pub(super) fn panel_counters(now: psx_game_runtime::panel_stream::PanelCounters)
         now.eye,
         now.last_first,
         now.last_sectors,
+        now.sectors,
     ] {
         line.number(value);
     }
@@ -445,6 +446,7 @@ static mut PANEL_LAST: psx_game_runtime::panel_stream::PanelCounters =
         eye: 0,
         last_first: 0,
         last_sectors: 0,
+        sectors: 0,
     };
 
 /// What the panel stream was told about the camera, `pt I`, when the heading it looks along

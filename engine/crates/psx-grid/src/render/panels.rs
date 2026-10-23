@@ -65,6 +65,14 @@ pub const CENTRE_COLUMN: i32 = COLS as i32 * TILE_TEXELS / 2;
 pub const NO_TILE_SLOT: u8 = 0xff;
 /// Bytes of a panel's header sector that the depth mesh takes.
 pub const HEADER_DEPTH_BYTES: usize = MESH;
+/// Mesh cells of a panel that hold a picture: [`CELLS_X`] by [`CELLS_Y`] to a tile.
+pub const CELLS: usize = TILES * CELLS_X * CELLS_Y;
+/// Where the header sector's list of the room each cell shows starts.
+pub const HEADER_ROOMS_AT: usize = 256;
+/// Cell value: nothing in the cell (it is not drawn).
+pub const CELL_EMPTY: u8 = 0xff;
+/// Cell value: more than one room in the cell, or one the byte cannot name (it is drawn).
+pub const CELL_MIXED: u8 = 0xfe;
 
 /// Steps of the depth byte.
 pub const DEPTH_STEPS: usize = 256;
@@ -81,7 +89,7 @@ const fn build_depth_table() -> [u16; DEPTH_STEPS] {
     while step < DEPTH_STEPS {
         table[step] = depth as u16;
         // 1.66 percent, at least one.
-        let by = depth * 1180 >> 16;
+        let by = (depth * 1180) >> 16;
         depth += if by == 0 { 1 } else { by };
         step += 1;
     }
@@ -115,11 +123,14 @@ pub struct PanelRays {
     pub across: [i16; MESH_W],
     /// Down, positive below the horizon.
     pub down: [i16; MESH_H],
+    /// The distance each depth byte stands for, runtime units.
+    pub depth: [u16; DEPTH_STEPS],
 }
 
 impl PanelRays {
-    /// The rays of a panel baked for a view with projection plane `focal` (pixels).
-    pub const fn new(focal: i32) -> Self {
+    /// The rays of a panel baked for a view with projection plane `focal` (pixels), in a
+    /// level whose sector is `sector` runtime units.
+    pub const fn new(focal: i32, sector: i32) -> Self {
         let focal = if focal < 1 { 1 } else { focal };
         let mut across = [0i16; MESH_W];
         let mut down = [0i16; MESH_H];
@@ -133,7 +144,18 @@ impl PanelRays {
             down[j] = clamp_ray(((j as i32 * CELL_H - HORIZON_ROW) << 12) / focal);
             j += 1;
         }
-        Self { across, down }
+        let mut depth = [0u16; DEPTH_STEPS];
+        let mut k = 0;
+        while k < DEPTH_STEPS {
+            let units = (DEPTH_TABLE[k] as i32 * sector) >> DEPTH_SECTOR_SHIFT;
+            depth[k] = if units > 30000 { 30000 } else { units as u16 };
+            k += 1;
+        }
+        Self {
+            across,
+            down,
+            depth,
+        }
     }
 }
 
@@ -176,6 +198,39 @@ pub struct PanelRef<'a> {
     /// Per tile (column-major, `col * ROWS + row`), the atlas slot holding its picture, or
     /// [`NO_TILE_SLOT`] for a tile that is empty or not there yet.
     pub slots: &'a [u8; TILES],
+    /// Per cell (`tile * CELLS_X * CELLS_Y + cy * CELLS_X + cx`), the one room whose geometry
+    /// is all there is in it ([`CELL_EMPTY`], [`CELL_MIXED`] otherwise): a cell of a room the
+    /// camera draws whole is not drawn.
+    pub rooms: &'a [u8; CELLS],
+    /// The tiles to look at: columns `first_col..=last_col`, rows `first_row..=last_row`
+    /// (the rest are off screen).
+    pub first_col: u8,
+    pub last_col: u8,
+    pub first_row: u8,
+    pub last_row: u8,
+}
+
+impl<'a> PanelRef<'a> {
+    /// A panel with every tile to look at.
+    pub fn whole(
+        eye: [i32; 3],
+        heading: u8,
+        depth: &'a [u8; MESH],
+        slots: &'a [u8; TILES],
+        rooms: &'a [u8; CELLS],
+    ) -> Self {
+        Self {
+            eye,
+            heading,
+            depth,
+            slots,
+            rooms,
+            first_col: 0,
+            last_col: (COLS - 1) as u8,
+            first_row: 0,
+            last_row: (ROWS - 1) as u8,
+        }
+    }
 }
 
 /// A vertex projected for the frame, kept for the cells that share it.
@@ -244,30 +299,6 @@ fn screen_of(p: scene::Projected, camera: &PanelCamera) -> GridScreen {
     }
 }
 
-/// The world position of vertex `(i, j)` of a panel baked at `eye` along `heading`.
-#[inline(always)]
-fn mesh_point(
-    panel: &PanelRef<'_>,
-    rays: &PanelRays,
-    sector: i32,
-    i: usize,
-    j: usize,
-) -> (i32, i32, i32) {
-    let depth = ((depth_units(panel.depth[j * MESH_W + i]) as i32) * sector) >> DEPTH_SECTOR_SHIFT;
-    let h = usize::from(panel.heading) % HEADINGS;
-    let (c, s) = (i32::from(VIEW_COS_Q12[h]), i32::from(VIEW_SIN_Q12[h]));
-    let a = i32::from(rays.across[i]);
-    let b = i32::from(rays.down[j]);
-    // The ray is forward + a * right + b * down, right = (-s, c), down = -y.
-    let dx = c - ((a * s) >> 12);
-    let dz = s + ((a * c) >> 12);
-    (
-        panel.eye[0] + ((depth * dx) >> 12),
-        panel.eye[1] - ((depth * b) >> 12),
-        panel.eye[2] + ((depth * dz) >> 12),
-    )
-}
-
 #[inline(always)]
 fn clamp_world(v: i32) -> i16 {
     v.clamp(-32000, 32000) as i16
@@ -305,13 +336,13 @@ fn drawable(s: &[GridScreen; 4]) -> bool {
 ///
 /// The GTE must hold the world view (rotation and the translation of the world origin).
 /// Packets go forward from `out[0]`, or backward from the end of `out` when `reverse`;
-/// `used` is how many words of `out` are taken already, from that end, and the frame's
-/// `packets` and `packet_words` count what this call wrote.
+/// the frame's `packets` and `packet_words` say how many this call wrote.
 pub fn draw_panel(
     panel: &PanelRef<'_>,
     rays: &PanelRays,
     camera: &PanelCamera,
     scratch: &mut PanelScratch,
+    skip: &[bool],
     out: &mut [u32],
     reverse: bool,
 ) -> GridFrame {
@@ -323,47 +354,87 @@ pub fn draw_panel(
     let mut next = if reverse { end } else { start };
     let mut packets = 0u32;
     let stamp = scratch.stamp;
-    let vertex = |scratch: &mut PanelScratch, i: usize, j: usize| -> GridScreen {
-        let at = j * MESH_W + i;
-        if scratch.seen[at] == stamp {
-            return scratch.screen[at];
-        }
-        let (x, y, z) = mesh_point(panel, rays, camera.sector, i, j);
-        let p = scene::project_vertex_scheduled(GteVec3I16::new(
-            clamp_world(x),
-            clamp_world(y),
-            clamp_world(z),
-        ));
-        let s = screen_of(p, camera);
-        scratch.seen[at] = stamp;
-        scratch.screen[at] = s;
-        s
-    };
-    for col in 0..COLS {
-        for row in 0..ROWS {
+    // The ray of each mesh column: heading plus `across` times the heading's right.
+    let h = usize::from(panel.heading) % HEADINGS;
+    let (c, s) = (i32::from(VIEW_COS_Q12[h]), i32::from(VIEW_SIN_Q12[h]));
+    let mut dx = [0i32; MESH_W];
+    let mut dz = [0i32; MESH_W];
+    for i in 0..MESH_W {
+        let a = i32::from(rays.across[i]);
+        dx[i] = c - ((a * s) >> 12);
+        dz[i] = s + ((a * c) >> 12);
+    }
+    let first_col = usize::from(panel.first_col);
+    let last_col = usize::from(panel.last_col).min(COLS - 1);
+    let first_row = usize::from(panel.first_row);
+    let last_row = usize::from(panel.last_row).min(ROWS - 1);
+    for col in first_col..=last_col {
+        for row in first_row..=last_row {
             let tile = col * ROWS + row;
             let slot = panel.slots[tile];
             if slot == NO_TILE_SLOT {
                 continue;
             }
-            let (i0, j0) = (col * CELLS_X, row * CELLS_Y);
-            // The tile's corners first: a tile wholly off screen or behind costs four vertices.
-            let corners = [
-                vertex(scratch, i0, j0),
-                vertex(scratch, i0 + CELLS_X, j0),
-                vertex(scratch, i0 + CELLS_X, j0 + CELLS_Y),
-                vertex(scratch, i0, j0 + CELLS_Y),
-            ];
             frame.cells_visible += 1;
-            let any = corners[0].code | corners[1].code | corners[2].code | corners[3].code;
-            if any & NEAR != 0 {
-                frame.depth_skipped += 1;
+            let (i0, j0) = (col * CELLS_X, row * CELLS_Y);
+            // The cells that show anything the camera does not draw whole.
+            let mut wanted = [false; CELLS_X * CELLS_Y];
+            let mut any = false;
+            for (k, w) in wanted.iter_mut().enumerate() {
+                let room = panel.rooms[tile * CELLS_X * CELLS_Y + k];
+                *w = room != CELL_EMPTY
+                    && (room == CELL_MIXED || !skip.get(usize::from(room)).copied().unwrap_or(false));
+                any |= *w;
+            }
+            if !any {
+                frame.backface_culled += 1;
                 continue;
             }
-            if corners[0].code & corners[1].code & corners[2].code & corners[3].code & OFF_ANY != 0
-            {
-                frame.screen_culled += 1;
-                continue;
+            // The mesh vertices of those cells that no tile drawn before has projected, three
+            // at a time through the GTE.
+            let mut todo = [0u16; (CELLS_X + 1) * (CELLS_Y + 1)];
+            let mut count = 0;
+            for cy in 0..CELLS_Y {
+                for cx in 0..CELLS_X {
+                    if !wanted[cy * CELLS_X + cx] {
+                        continue;
+                    }
+                    for (di, dj) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                        let at = (j0 + cy + dj) * MESH_W + i0 + cx + di;
+                        if scratch.seen[at] != stamp {
+                            scratch.seen[at] = stamp;
+                            todo[count] = at as u16;
+                            count += 1;
+                        }
+                    }
+                }
+            }
+            let mut k = 0;
+            while k < count {
+                // A last group of fewer than three repeats a vertex.
+                let at = [
+                    usize::from(todo[k]),
+                    usize::from(todo[(k + 1).min(count - 1)]),
+                    usize::from(todo[(k + 2).min(count - 1)]),
+                ];
+                let point = |at: usize| {
+                    let (i, j) = (at % MESH_W, at / MESH_W);
+                    let depth = i32::from(rays.depth[usize::from(panel.depth[at])]);
+                    GteVec3I16::new(
+                        clamp_world(panel.eye[0] + ((depth * dx[i]) >> 12)),
+                        clamp_world(panel.eye[1] - ((depth * i32::from(rays.down[j])) >> 12)),
+                        clamp_world(panel.eye[2] + ((depth * dz[i]) >> 12)),
+                    )
+                };
+                let p = scene::project_triangle_scheduled(point(at[0]), point(at[1]), point(at[2]));
+                scratch.screen[at[0]] = screen_of(p[0], camera);
+                if k + 1 < count {
+                    scratch.screen[at[1]] = screen_of(p[1], camera);
+                }
+                if k + 2 < count {
+                    scratch.screen[at[2]] = screen_of(p[2], camera);
+                }
+                k += 3;
             }
             let slot = usize::from(slot);
             let (column, atlas_row) = (slot % ATLAS_COLUMNS, slot / ATLAS_COLUMNS);
@@ -374,14 +445,18 @@ pub fn draw_panel(
             let mut drawn = false;
             for cy in 0..CELLS_Y {
                 for cx in 0..CELLS_X {
+                    if !wanted[cy * CELLS_X + cx] {
+                        continue;
+                    }
                     let (i, j) = (i0 + cx, j0 + cy);
                     let s = [
-                        vertex(scratch, i, j),
-                        vertex(scratch, i + 1, j),
-                        vertex(scratch, i + 1, j + 1),
-                        vertex(scratch, i, j + 1),
+                        scratch.screen[j * MESH_W + i],
+                        scratch.screen[j * MESH_W + i + 1],
+                        scratch.screen[(j + 1) * MESH_W + i + 1],
+                        scratch.screen[(j + 1) * MESH_W + i],
                     ];
                     if !drawable(&s) {
+                        frame.screen_culled += 1;
                         continue;
                     }
                     let sum = u32::from(s[0].sz)
@@ -489,7 +564,7 @@ mod tests {
 
     #[test]
     fn the_rays_cross_the_principal_point_at_the_middle_column_and_horizon_row() {
-        let rays = PanelRays::new(305);
+        let rays = PanelRays::new(305, 80);
         assert_eq!(rays.across[MESH_W / 2], 0);
         assert_eq!(rays.down[3 * CELLS_Y], 0);
         // 160 texels left of the middle at focal 305: tan of 27.7 degrees.
@@ -544,16 +619,11 @@ mod tests {
             let mut slots = [NO_TILE_SLOT; TILES];
             let (col, row) = (2usize, 3usize);
             slots[col * ROWS + row] = 5;
-            let panel = PanelRef {
-                eye,
-                heading: 0,
-                depth: &depth,
-                slots: &slots,
-            };
-            let rays = PanelRays::new(305);
+            let panel = PanelRef::whole(eye, 0, &depth, &slots, &[0u8; CELLS]);
+            let rays = PanelRays::new(305, 80);
             let mut scratch = PanelScratch::new();
             let mut out = vec![0u32; 11 * 8];
-            let frame = draw_panel(&panel, &rays, &camera(), &mut scratch, &mut out, false);
+            let frame = draw_panel(&panel, &rays, &camera(), &mut scratch, &[], &mut out, false);
             assert_eq!(frame.packets as usize, CELLS_X * CELLS_Y);
             // The first cell is the tile's top-left: its top-left corner is texel
             // (col * 64, row * 63) of the panel.
@@ -578,16 +648,11 @@ mod tests {
             let depth = [depth_byte; MESH];
             let mut slots = [NO_TILE_SLOT; TILES];
             slots[2 * ROWS + 3] = 5;
-            let panel = PanelRef {
-                eye: [1000, 200, 1000],
-                heading: 0,
-                depth: &depth,
-                slots: &slots,
-            };
-            let rays = PanelRays::new(305);
+            let panel = PanelRef::whole([1000, 200, 1000], 0, &depth, &slots, &[0u8; CELLS]);
+            let rays = PanelRays::new(305, 80);
             let mut scratch = PanelScratch::new();
             let mut out = vec![0u32; 11 * 8];
-            let frame = draw_panel(&panel, &rays, &camera(), &mut scratch, &mut out, false);
+            let frame = draw_panel(&panel, &rays, &camera(), &mut scratch, &[], &mut out, false);
             assert!(frame.packets > 0);
             corner_xy(&out[..11])[1].0
         };
@@ -606,16 +671,11 @@ mod tests {
         setup(eye, (0, 0x1000));
         let depth = [100u8; MESH];
         let slots = [NO_TILE_SLOT; TILES];
-        let panel = PanelRef {
-            eye,
-            heading: 0,
-            depth: &depth,
-            slots: &slots,
-        };
-        let rays = PanelRays::new(305);
+        let panel = PanelRef::whole(eye, 0, &depth, &slots, &[0u8; CELLS]);
+        let rays = PanelRays::new(305, 80);
         let mut scratch = PanelScratch::new();
         let mut out: Vec<u32> = vec![0; 64];
-        let frame = draw_panel(&panel, &rays, &camera(), &mut scratch, &mut out, false);
+        let frame = draw_panel(&panel, &rays, &camera(), &mut scratch, &[], &mut out, false);
         assert_eq!(frame.packets, 0);
         // Too little storage: the draw says so and writes whole packets only.
         let mut slots = [NO_TILE_SLOT; TILES];
@@ -625,7 +685,7 @@ mod tests {
             ..panel
         };
         let mut out = vec![0u32; 11 * 2 + 5];
-        let frame = draw_panel(&panel, &rays, &camera(), &mut scratch, &mut out, false);
+        let frame = draw_panel(&panel, &rays, &camera(), &mut scratch, &[], &mut out, false);
         assert!(frame.overflowed);
         assert_eq!(frame.packets, 2);
         assert_eq!(frame.packet_words, 22);

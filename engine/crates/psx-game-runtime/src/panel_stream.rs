@@ -30,7 +30,7 @@
 
 use psx_grid::flood::octagonal_distance;
 use psx_grid::render::{
-    PanelRef, COLS, HEADINGS, HORIZON_ROW, MESH, NO_TILE_SLOT, PICTURE_ROWS, ROWS, SLOTS, TILES,
+    PanelRef, CELLS, CELL_EMPTY, HEADER_ROOMS_AT, COLS, HEADINGS, HORIZON_ROW, MESH, NO_TILE_SLOT, PICTURE_ROWS, ROWS, SLOTS, TILES,
     TILE_TEXELS, VIEW_COS_Q12, VIEW_SIN_Q12,
 };
 
@@ -48,6 +48,10 @@ const STALE: i32 = 1 << 20;
 /// Rank of a tile of the eye the camera is about to cross to, past every tile of the eye in
 /// use.
 const PREFETCH: i32 = 1 << 18;
+/// How far from the middle of the view a tile of the eye kept ready may be: `tan` of the
+/// yaw as Q12 (about 17 degrees) and texel rows.
+const PREFETCH_ACROSS: i32 = 1250;
+const PREFETCH_DOWN: i32 = 170;
 /// Rank of a held tile nothing wants now.
 const IDLE: i32 = 1 << 22;
 /// A held tile is only evicted for a tile that ranks better by more than this.
@@ -94,6 +98,8 @@ pub struct PanelCounters {
     pub last_first: u32,
     /// Sectors of the last read queued.
     pub last_sectors: u32,
+    /// Sectors read in all.
+    pub sectors: u32,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -212,6 +218,8 @@ struct Cached {
     /// The panel's header sector, relative to the pictures' base.
     sector: u32,
     depth: [u8; MESH],
+    /// Per cell, the room whose geometry is all it shows (see [`PanelRef::rooms`]).
+    rooms: [u8; CELLS],
     /// Per tile, the slot that holds it (any state), or [`NO_SLOT_INDEX`].
     held: [u8; TILES],
     /// Per tile, the slot to draw it from this frame, or [`NO_TILE_SLOT`].
@@ -228,6 +236,7 @@ impl Cached {
         since: 0,
         sector: 0,
         depth: [0; MESH],
+        rooms: [CELL_EMPTY; CELLS],
         held: [NO_SLOT_INDEX; TILES],
         show: [NO_TILE_SLOT; TILES],
     };
@@ -313,6 +322,46 @@ pub struct Visible {
 /// The columns and rows of the panel of `heading` the camera looks at, with a margin of a few
 /// degrees to turn into; `None` when the panel is wholly outside the view.
 pub fn visible(heading: usize, input: &PanelInput<'_>) -> Option<Visible> {
+    visible_in(heading, &input.view(), 18, PICTURE_ROWS / 3)
+}
+
+/// What the camera looks like to the tile choice: the part of [`PanelInput`] that is about the
+/// view.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct ViewSpec {
+    /// The camera's forward direction in plan, unit length as Q12.
+    pub forward: [i32; 2],
+    /// `tan` of the camera's pitch (up positive) as Q12.
+    pub pitch_tan_q12: i32,
+    /// The camera's projection plane, pixels.
+    pub focal: i32,
+    /// Half the screen, pixels, as `[width, height]`.
+    pub half_screen: [i32; 2],
+    /// The projection plane the panels were baked for.
+    pub panel_focal: i32,
+}
+
+impl PanelInput<'_> {
+    /// The view part of the input.
+    pub fn view(&self) -> ViewSpec {
+        ViewSpec {
+            forward: self.forward,
+            pitch_tan_q12: self.pitch_tan_q12,
+            focal: self.focal,
+            half_screen: self.half_screen,
+            panel_focal: self.panel_focal,
+        }
+    }
+}
+
+/// [`visible`] for a view, with the field of view widened by `widen / 16` (16 is none) and
+/// `row_margin` texel rows kept above and below it.
+pub fn visible_in(
+    heading: usize,
+    input: &ViewSpec,
+    widen: i32,
+    row_margin: i32,
+) -> Option<Visible> {
     let h = heading % HEADINGS;
     let (c, s) = (i32::from(VIEW_COS_Q12[h]), i32::from(VIEW_SIN_Q12[h]));
     let (fx, fz) = (input.forward[0], input.forward[1]);
@@ -325,7 +374,7 @@ pub fn visible(heading: usize, input: &PanelInput<'_>) -> Option<Visible> {
     }
     let tan_yaw = (sin << 12) / cos;
     // `tan` of half the field of view, a quarter more for the margin.
-    let half = ((input.half_screen[0] << 12) / input.focal.max(1)) * 5 / 4;
+    let half = ((input.half_screen[0] << 12) / input.focal.max(1)) * widen / 16;
     let numerator_hi = (tan_yaw + half) << 12;
     let denominator_hi = 4096 - ((tan_yaw * half) >> 12);
     let high = if denominator_hi > 0 {
@@ -363,7 +412,7 @@ pub fn visible(heading: usize, input: &PanelInput<'_>) -> Option<Visible> {
     // The rows: the panel's texel row at the middle of the view, and half the screen's height
     // in panel texels, with a row of margin.
     let middle_row = HORIZON_ROW - ((focal * input.pitch_tan_q12) >> 12);
-    let reach = input.half_screen[1] * focal / input.focal.max(1) + PICTURE_ROWS / 2;
+    let reach = input.half_screen[1] * focal / input.focal.max(1) + row_margin;
     let first_row = ((middle_row - reach).max(0) / PICTURE_ROWS) as usize;
     let last_row =
         (((middle_row + reach).min(ROWS as i32 * PICTURE_ROWS - 1)).max(0) / PICTURE_ROWS) as usize;
@@ -417,6 +466,8 @@ pub struct PanelStream<K> {
     /// The bake eye in use (valid when `have_eye`).
     eye: u16,
     have_eye: bool,
+    /// The view of the last update, for the draw.
+    view: ViewSpec,
     /// The eye whose tiles are kept ready, if the camera is near enough to crossing to it.
     next: Option<u16>,
     /// Where the eye was at the last pass (plan), and its smoothed step a pass.
@@ -445,6 +496,7 @@ impl<K: Copy> PanelStream<K> {
                 eye: 0,
                 last_first: 0,
                 last_sectors: 0,
+                sectors: 0,
             },
             slots: [Slot::FREE; SLOTS],
             cache: [Cached::EMPTY; CACHE],
@@ -453,6 +505,13 @@ impl<K: Copy> PanelStream<K> {
             ticks: 0,
             eye: 0,
             have_eye: false,
+            view: ViewSpec {
+                forward: [0; 2],
+                pitch_tan_q12: 0,
+                focal: 0,
+                half_screen: [0; 2],
+                panel_focal: 0,
+            },
             next: None,
             last_eye: [0; 2],
             have_last: false,
@@ -475,6 +534,7 @@ impl<K: Copy> PanelStream<K> {
         {
             return;
         }
+        self.view = input.view();
         self.poll(transport, window);
         if self.ticks.is_multiple_of(PASS_TICKS) {
             self.pass(input);
@@ -528,6 +588,10 @@ impl<K: Copy> PanelStream<K> {
                                     *d = *byte;
                                 }
                             }
+                        }
+                        for (k, room) in cached.rooms.iter_mut().enumerate() {
+                            let at = from + (HEADER_ROOMS_AT + k) / 4;
+                            *room = window[at].to_le_bytes()[(HEADER_ROOMS_AT + k) % 4];
                         }
                         cached.header = Header::Ready;
                     }
@@ -841,6 +905,12 @@ impl<K: Copy> PanelStream<K> {
                     let across = (middle - view.tan_yaw).abs();
                     let down =
                         (row as i32 * PICTURE_ROWS + PICTURE_ROWS / 2 - view.middle_row).abs();
+                    // Of the eye the camera is about to cross to only the middle of the view is
+                    // kept ready: a read costs the CPU a sector's interrupt, and the rest comes
+                    // within a moment of the crossing.
+                    if prefetch && (across > PREFETCH_ACROSS || down > PREFETCH_DOWN) {
+                        continue;
+                    }
                     let rank = base + across + 4 * down;
                     let cached = &mut self.cache[usize::from(ci)];
                     cached.rank = cached.rank.min(rank);
@@ -1143,6 +1213,7 @@ impl<K: Copy> PanelStream<K> {
                     self.tail = last;
                     self.counters.last_first = first;
                     self.counters.last_sectors = last - first + 1;
+                    self.counters.sectors += last - first + 1;
                     let _ = riders;
                 }
                 None => {
@@ -1250,11 +1321,22 @@ impl<K: Copy> PanelStream<K> {
                     continue;
                 };
                 if count < out.len() {
+                    // The tiles the screen shows, with a few percent to spare: the others
+                    // are not worth projecting.
+                    let Some(v) = visible_in(usize::from(c.heading), &self.view, 17, PICTURE_ROWS / 8)
+                    else {
+                        continue;
+                    };
                     out[count] = Some(PanelRef {
                         eye: [i32::from(at[0]), i32::from(at[1]), i32::from(at[2])],
                         heading: c.heading,
                         depth: &c.depth,
                         slots: &c.show,
+                        rooms: &c.rooms,
+                        first_col: v.first_col as u8,
+                        last_col: v.last_col as u8,
+                        first_row: v.first_row as u8,
+                        last_row: v.last_row as u8,
                     });
                     count += 1;
                 }
@@ -1613,6 +1695,11 @@ mod tests {
             stream.update(&mut disc, &mut window, &crossed);
         }
         assert_eq!(stream.counters.eye, 1);
+        // The middle of the view was ready; the rest follows within a moment.
+        assert!(stream.counters.missing < stream.counters.wanted);
+        let list = drawn(&stream, &eyes);
+        assert!(list.iter().any(|d| d.0 == 1), "{list:?}");
+        run(&mut stream, &mut disc, &mut window, &crossed, 200);
         assert_eq!(stream.counters.missing, 0);
         let list = drawn(&stream, &eyes);
         assert_eq!(

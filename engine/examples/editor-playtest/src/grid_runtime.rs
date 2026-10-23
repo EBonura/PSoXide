@@ -1378,11 +1378,11 @@ impl GridRuntime {
                     #[cfg(feature = "cd-stream-bench")]
                     if !total.overflowed && crate::vram_runtime::has_panels() {
                         if let Some((atlas, tpage)) = crate::vram_runtime::card_atlas() {
-                            use crate::generated::{GRID_PANEL_FOCAL, GRID_PANEL_REAL};
+                            use crate::generated::{GRID_PANEL_FOCAL, GRID_PANEL_REAL, GRID_PANEL_SECTOR};
                             use psx_grid::render::{
                                 draw_panel, PanelCamera, PanelRays, PanelRef, PanelScratch,
                             };
-                            static PANEL_RAYS: PanelRays = PanelRays::new(GRID_PANEL_FOCAL);
+                            static PANEL_RAYS: PanelRays = PanelRays::new(GRID_PANEL_FOCAL, GRID_PANEL_SECTOR);
                             static mut PANEL_SCRATCH: PanelScratch = PanelScratch::new();
                             let mut list: [Option<PanelRef<'static>>; 4] = [None; 4];
                             let count = crate::vram_runtime::panel_drawables(&mut list);
@@ -1412,6 +1412,8 @@ impl GridRuntime {
                                     otz_floor: (((units * scale) >> 12) >> 2) as u32,
                                 };
                                 telemetry::stage_begin(telemetry::stage::FAR_VISTA);
+                                #[cfg(feature = "panel-nodraw")]
+                                let count = 0;
                                 for panel in list[..count].iter().flatten() {
                                     // SAFETY: single-threaded guest; the scratch is touched
                                     // only here.
@@ -1420,6 +1422,7 @@ impl GridRuntime {
                                         &PANEL_RAYS,
                                         &camera,
                                         unsafe { &mut *core::ptr::addr_of_mut!(PANEL_SCRATCH) },
+                                        &self.card_skip,
                                         if reverse {
                                             &mut packets[..packet_count - total.packet_words]
                                         } else {
