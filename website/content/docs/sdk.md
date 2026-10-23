@@ -1,6 +1,6 @@
 +++
 title = "PSoXide SDK documentation"
-description = "24 crate guides, searchable Rust APIs and 20 complete example programs for building PS1 homebrew."
+description = "28 crate guides, searchable Rust APIs and 34 complete example programs for building PS1 homebrew."
 weight = 3
 [extra]
 kind = "Reference"
@@ -67,7 +67,7 @@ PSoXide/
   rust-toolchain.toml         pinned compiler and components
   crates/                    shared formats and host tools
   sdk/
-    Cargo.toml               workspace containing the 24 SDK crates
+    Cargo.toml               workspace containing the 28 SDK crates
     psoxide.ld               target linker script
     crates/<crate>/src/      subsystem implementations
     examples/hello-tri/
