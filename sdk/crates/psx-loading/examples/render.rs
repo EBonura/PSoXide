@@ -97,7 +97,7 @@ fn main() {
     let out = args.next().expect("usage: render OUT.ppm [options]");
     let (mut mode, mut size, mut margin, mut scale) = ((320usize, 240usize), 24i16, 12i16, 1u8);
     let (mut ring, mut blend, mut tick, mut bg, mut legacy) =
-        ((2i16, 4i16), Blend::Additive, 0u32, None::<String>, false);
+        ((3i16, 5i16), Blend::Additive, 0u32, None::<String>, false);
     while let Some(flag) = args.next() {
         let mut value = || args.next().expect("a value after the flag");
         match flag.as_str() {
