@@ -1058,6 +1058,74 @@ fn corners(
     ]
 }
 
+/// Where a bar on the move is on the screen, and the middle of it the plane turns about, both in
+/// 1/256 pixels. The middle is the one of the whole bar, folded or not.
+fn frame_of(origin: (i32, i32), xf: &Xf, pl: &Plane, fold: &Fold) -> ((i32, i32), (i32, i32)) {
+    (
+        (
+            (origin.0 << 8) + xf.x - (fold.slide << 8),
+            (origin.1 << 8) + xf.y,
+        ),
+        ((pl.cap_x + pl.cap_w - (LCAP_X << 8)) >> 1, pl.bar_h >> 1),
+    )
+}
+
+/// The pixels a bar covers, folded as `fold` says: left, top, right, bottom.
+pub fn bar_bounds(origin: (i32, i32), at: &Placement, fold: &Fold) -> [i32; 4] {
+    match at {
+        Placement::Rest(pose) => {
+            let geo = &GEO[pose.size];
+            let left = origin.0 + pose.x - fold.slide;
+            let top = origin.1 + pose.y;
+            [
+                left + LCAP_X,
+                top,
+                left + geo.cap_x - fold.shrink + geo.cap.w as i32,
+                top + geo.bar_h,
+            ]
+        }
+        Placement::Moving(xf) => {
+            let pl = plane(xf.depth);
+            let (anchor, half) = frame_of(origin, xf, &pl, fold);
+            let right = pl.cap_x - (fold.shrink << 8) + pl.cap_w;
+            let p = corners(anchor, half, xf, LCAP_X << 8, 0, right, pl.bar_h);
+            let (mut b, mut c) = ([i32::MAX; 2], [i32::MIN; 2]);
+            for (x, y) in p {
+                (b[0], b[1]) = (b[0].min(i32::from(x)), b[1].min(i32::from(y)));
+                (c[0], c[1]) = (c[0].max(i32::from(x)), c[1].max(i32::from(y)));
+            }
+            [b[0], b[1], c[0] + 1, c[1] + 1]
+        }
+    }
+}
+
+/// A quad of a bar at rest as the rectangle or sprite it is: not turned, whole pixels, 1:1.
+fn as_rest(op: Op) -> Op {
+    match op {
+        Op::Quad { p, rgb, glass } => Op::Rect {
+            x: i32::from(p[0].0),
+            y: i32::from(p[0].1),
+            w: i32::from(p[1].0 - p[0].0),
+            h: i32::from(p[2].1 - p[0].1),
+            rgb,
+            glass,
+        },
+        Op::TexQuad {
+            p,
+            src,
+            clut,
+            glass,
+        } => Op::Sprite {
+            x: i32::from(p[0].0),
+            y: i32::from(p[0].1),
+            src,
+            clut,
+            glass,
+        },
+        other => other,
+    }
+}
+
 /// Paint one complete bar of `stance` on the move, `lit` cells lit, folded as `fold` says: the same
 /// pieces as [`bar`], in the same order, each as a quad placed by [`corners`].
 #[allow(clippy::too_many_arguments)]
@@ -1069,17 +1137,14 @@ pub fn bar_moving(
     lit: u8,
     fold: Fold,
     part: Part,
+    rest: bool,
     draw: &mut dyn FnMut(Op),
 ) {
+    let mut put = |op: Op| draw(if rest { as_rest(op) } else { op });
     let pl = plane(xf.depth);
     let geo = &GEO[pl.art];
     let s = stance.index();
-    let anchor = (
-        (origin.0 << 8) + xf.x - (fold.slide << 8),
-        (origin.1 << 8) + xf.y,
-    );
-    // The bar's whole width, folded or not, so that the turn is about the same middle.
-    let half = ((pl.cap_x + pl.cap_w - (LCAP_X << 8)) >> 1, pl.bar_h >> 1);
+    let (anchor, half) = frame_of(origin, &xf, &pl, &fold);
     let at = |x0: i32, y0: i32, x1: i32, y1: i32| corners(anchor, half, &xf, x0, y0, x1, y1);
     let cap_x = pl.cap_x - (fold.shrink << 8);
     // The rows of the art's bands stretched over the rows of this depth.
@@ -1092,7 +1157,7 @@ pub fn bar_moving(
             Part::Cells => false,
         };
         if wanted {
-            draw(Op::Quad {
+            put(Op::Quad {
                 p: at(
                     pl.bar_x0,
                     band.y0 as i32 * stretch,
@@ -1110,7 +1175,7 @@ pub fn bar_moving(
             (LCAP_X << 8, pl.lcap_w, geo.lcap),
             (cap_x, pl.cap_w, geo.cap),
         ] {
-            draw(Op::TexQuad {
+            put(Op::TexQuad {
                 p: at(x, 0, x + w, pl.bar_h),
                 src,
                 clut: base + CLUT_CAP,
@@ -1121,7 +1186,7 @@ pub fn bar_moving(
     if part == Part::Cells {
         for k in 0..fold.cells {
             let x = pl.cell_x0 + pl.pitch * k;
-            draw(Op::TexQuad {
+            put(Op::TexQuad {
                 p: at(x, pl.cell_row, x + pl.cell_w, pl.cell_row + pl.cell_h),
                 src: geo.cell,
                 clut: cell_clut(stance, pl.art, (k as u8) < lit),
@@ -1143,8 +1208,12 @@ pub fn bar_at(
     draw: &mut dyn FnMut(Op),
 ) {
     match at {
-        Placement::Rest(pose) => bar(origin, stance, *pose, lit, fold, part, &mut |op| draw(op)),
-        Placement::Moving(xf) => bar_moving(origin, stance, *xf, lit, fold, part, draw),
+        // At rest the bar is the plane at one of the art's sizes with no turn, drawn as the
+        // rectangles and sprites the art was made for: the same pieces, so the same pixels.
+        Placement::Rest(pose) => {
+            bar_moving(origin, stance, plane_of(*pose), lit, fold, part, true, draw)
+        }
+        Placement::Moving(xf) => bar_moving(origin, stance, *xf, lit, fold, part, false, draw),
     }
 }
 

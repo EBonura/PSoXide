@@ -20,9 +20,9 @@ use psx_gpu::prim::{QuadFlat, QuadTexturedMaterial, RectFlat, Sprite};
 use psx_vram::{upload_16bpp, Clut, TextureDepth, TexturePage, VramRect};
 
 use super::hud_sprites::{
-    bar_at, emblem_op, fold_at, gem_clut, gem_op, gems_shown, pill_state, scene, EmblemLook, Fold,
-    HudState, Op, Part, Placement, Scene, Stance, ATLAS, ATLAS_H, ATLAS_HW_W, CLUTS, CLUT_COUNT,
-    COUNT, FX_SLOTS, MASK_CHECK, MASK_OFF, MASK_SET, MASK_SET_CHECK,
+    bar_at, bar_bounds, emblem_op, fold_at, gem_clut, gem_op, gems_shown, pill_state, scene,
+    EmblemLook, Fold, HudState, Op, Part, Placement, Scene, Stance, ATLAS, ATLAS_H, ATLAS_HW_W,
+    CLUTS, CLUT_COUNT, COUNT, FX_SLOTS, MASK_CHECK, MASK_OFF, MASK_SET, MASK_SET_CHECK,
 };
 
 /// Where the HUD's texels and palettes live in VRAM.
@@ -115,6 +115,12 @@ impl Node {
         (self.tag >> 24) as u8
     }
 
+    /// As [`QuadNode::assign`].
+    fn assign(&mut self, new: &Self) {
+        self.words = new.words;
+        self.tag = (self.tag & !TAG_LEN) | (new.tag & TAG_LEN);
+    }
+
     /// Point a sprite packet at another palette: the palette is the top half of the texture
     /// coordinate word, the one after the position.
     fn set_clut(&mut self, clut_word: u16) {
@@ -170,6 +176,14 @@ impl QuadNode {
         q
     }
 
+    /// Take the words and length of `new` and keep this node's link to the next one. A walk that
+    /// started before this frame's layout (the last frame's list may still be going) reads the old
+    /// links, which are rewritten with the same values, so the nodes it reaches are the same nodes.
+    fn assign(&mut self, new: &Self) {
+        self.words = new.words;
+        self.tag = (self.tag & !TAG_LEN) | (new.tag & TAG_LEN);
+    }
+
     /// A node of whatever `op` asks for.
     fn of(conv: &Converter, op: Op) -> Self {
         match op {
@@ -186,6 +200,9 @@ struct Converter {
     page: u16,
     plain_mode: u32,
     glass_mode: u32,
+    /// The draw mode that adds the colour to the scene: with a black colour it changes nothing but
+    /// the mask bit.
+    add_mode: u32,
     window: u32,
     sprite_cmd: u32,
 }
@@ -196,12 +213,14 @@ impl Converter {
         page: 0,
         plain_mode: 0,
         glass_mode: 0,
+        add_mode: 0,
         window: 0,
         sprite_cmd: 0,
     };
 
     /// The node of a quad op (a flat quad or a textured one). The quad is drawn as the GPU's
     /// polygon: half-open texture coordinates, so that one texel is one pixel at full size.
+    #[inline(never)]
     fn quad_node(&self, op: Op) -> QuadNode {
         let mut node = QuadNode::ZERO;
         match op {
@@ -265,6 +284,25 @@ impl Converter {
         node
     }
 
+    /// The rectangle over `bounds` (left, top, right, bottom) that clears the mask bit: black
+    /// added to the scene is the scene, and the pixel is written without the bit.
+    fn clear_node(&self, bounds: [i32; 4]) -> Node {
+        let (x, y) = (bounds[0].max(0), bounds[1].max(0));
+        let (w, h) = ((bounds[2] - x).max(1), (bounds[3] - y).max(1));
+        let r = RectFlat::new(x as i16, y as i16, w as u16, h as u16, 0, 0, 0);
+        Node {
+            tag: 4 << 24,
+            words: [
+                self.add_mode,
+                r.color_cmd | SEMI_TRANSPARENT,
+                r.xy,
+                r.wh,
+                0,
+                0,
+            ],
+        }
+    }
+
     fn new(vram: &HudVram) -> Self {
         let page = vram.page.uv_word(0);
         let plain = TextureMaterial::new(0, page);
@@ -274,11 +312,14 @@ impl Converter {
             page,
             plain_mode: plain.draw_mode_word(),
             glass_mode: average.draw_mode_word(),
+            add_mode: TextureMaterial::blended(0, page, (0x80, 0x80, 0x80), BlendMode::Add)
+                .draw_mode_word(),
             window: plain.texture_window_word(),
             sprite_cmd: Sprite::with_material(0, 0, 1, 1, (0, 0), plain).color_cmd,
         }
     }
 
+    #[inline(never)]
     fn node(&self, op: Op) -> Node {
         match op {
             Op::Rect {
@@ -368,8 +409,8 @@ impl Converter {
 /// Translucent bands (the well, and the outline and shadow in the new styles) and two ends; the most
 /// any size has.
 const GLASS_MAX: usize = 7;
-/// Opaque bands: the most any size has.
-const OPAQUE_MAX: usize = 8;
+/// Opaque bands: the most any size has (the art has nine bands a size, four of them opaque).
+const OPAQUE_MAX: usize = 4;
 
 /// One bar, as quads: made again whenever what it shows changes (a frame of a swap, a step of the
 /// fold, a point of health).
@@ -414,7 +455,7 @@ impl MovingBar {
             };
             *len = 0;
             bar_at(origin, stance, at, lit, fold, part, &mut |op| {
-                nodes[*len] = QuadNode::of(conv, op);
+                nodes[*len].assign(&QuadNode::of(conv, op));
                 *len += 1;
             });
         }
@@ -433,10 +474,10 @@ pub struct HudPackets {
     effects: [[Node; 5]; FX_SLOTS],
     partial: [Node; 4],
     masks: [Node; 4],
-    /// The two bars: the one in front and the one behind.
-    bars: [MovingBar; 2],
-    /// What the bars were made for: they are made again when this changes.
-    bars_for: Option<BarKey>,
+    /// The bars. The list of a frame may still be walked while the next frame is built, so they are
+    /// laid out again over the same nodes without ever touching the links between them: see
+    /// [`QuadNode::assign`].
+    set: BarSet,
     conv: Converter,
     origin: (i32, i32),
     /// Where the texels and palettes are, and the draw modes and command of a sprite packet, for
@@ -449,6 +490,27 @@ pub struct HudPackets {
     /// many sprites; and whether its own node is patched to the lit palette.
     over: [(u8, u8); COUNT as usize],
     gem_lit: [bool; COUNT as usize],
+}
+
+/// The two bars, front and behind, with what they were laid out for and the rectangle that clears
+/// the mask bit under the bar behind.
+#[derive(Clone, Copy)]
+struct BarSet {
+    bars: [MovingBar; 2],
+    /// A black rectangle added to the scene over the bar behind: it changes no colour and clears the
+    /// mask bit that the world's own pixels may carry there (opaque black texels are drawn with it),
+    /// which would make the bar skip those pixels.
+    clear: Node,
+    /// What the bars were laid out for: they are laid out again when this changes.
+    for_key: Option<BarKey>,
+}
+
+impl BarSet {
+    const NONE: Self = Self {
+        bars: [MovingBar::NONE; 2],
+        clear: Node::ZERO,
+        for_key: None,
+    };
 }
 
 /// What decides how the bars look: everything of the state that is not the pills.
@@ -474,8 +536,7 @@ impl HudPackets {
             effects: [[Node::ZERO; 5]; FX_SLOTS],
             partial: [Node::ZERO; 4],
             masks: [Node::ZERO; 4],
-            bars: [MovingBar::NONE; 2],
-            bars_for: None,
+            set: BarSet::NONE,
             conv: Converter::ZERO,
             origin: (0, 0),
             vram: HudVram::SHOWCASE,
@@ -496,7 +557,7 @@ impl HudPackets {
         self.vram = *vram;
         self.modes = (conv.plain_mode, conv.glass_mode, conv.sprite_cmd);
         self.shown = None;
-        self.bars_for = None;
+        self.set = BarSet::NONE;
         for k in 0..COUNT {
             self.gems[k as usize] = conv.node(gem_op(origin, k, false));
         }
@@ -524,27 +585,37 @@ impl HudPackets {
         }
     }
 
-    /// Set the packets up for `state`: lay out the two bars when they have changed, and patch the
-    /// pills and the sprites of their effects.
+    /// Lay out the bars of set `at` for `state` when they are not as it asks.
     #[inline(never)]
-    fn set_up(&mut self, state: &HudState, sc: &Scene) {
-        let origin = self.origin;
+    fn lay_out(&mut self, state: &HudState, sc: &Scene) {
         let key = BarKey {
             stance: state.stance,
             health: state.health,
             swap: state.swap,
             reveal: state.reveal,
         };
-        if self.bars_for != Some(key) {
-            self.bars_for = Some(key);
-            let conv = self.conv;
-            for (i, (stance, xf)) in [sc.front, sc.behind].into_iter().enumerate() {
-                if let Some(fold) = fold_at(state.reveal[stance.index()], &xf) {
-                    let lit = state.health[stance.index()].min(COUNT as u8);
-                    self.bars[i].fill(&conv, origin, stance, &xf, lit, fold);
+        let (origin, conv) = (self.origin, self.conv);
+        let set = &mut self.set;
+        if set.for_key == Some(key) {
+            return;
+        }
+        set.for_key = Some(key);
+        for (i, (stance, xf)) in [sc.front, sc.behind].into_iter().enumerate() {
+            if let Some(fold) = fold_at(state.reveal[stance.index()], &xf) {
+                let lit = state.health[stance.index()].min(COUNT as u8);
+                set.bars[i].fill(&conv, origin, stance, &xf, lit, fold);
+                if i == 1 {
+                    set.clear
+                        .assign(&conv.clear_node(bar_bounds(origin, &xf, &fold)));
                 }
             }
         }
+    }
+
+    /// Set the packets up for `state`: patch the pills and the sprites of their effects.
+    #[inline(never)]
+    fn set_up(&mut self, state: &HudState) {
+        let origin = self.origin;
         let vram = self.vram;
         let atlas = (vram.atlas_u, vram.atlas_v);
         for k in 0..COUNT as usize {
@@ -581,9 +652,10 @@ impl HudPackets {
     pub fn link(&mut self, state: &HudState, mut add: impl FnMut(*mut u32, u32)) {
         let sc = scene(state);
         if self.shown != Some(*state) {
-            self.set_up(state, &sc);
+            self.set_up(state);
             self.shown = Some(*state);
         }
+        self.lay_out(state, &sc);
         let emblem = match sc.emblem {
             EmblemLook::Of(s) => s.index(),
             EmblemLook::Halfway => 2,
@@ -624,7 +696,7 @@ impl HudPackets {
         add_all!(core::slice::from_ref(&self.emblem[emblem]));
         let front_fold = fold_at(state.reveal[sc.front.0.index()], &sc.front.1);
         let behind_fold = fold_at(state.reveal[sc.behind.0.index()], &sc.behind.1);
-        let (front, behind) = (&self.bars[0], &self.bars[1]);
+        let (front, behind) = (&self.set.bars[0], &self.set.bars[1]);
         if front_fold.is_some() {
             add_all!(&front.cells[..front.cells_len]);
             add_all!(&front.opaque[..front.opaque_len]);
@@ -643,6 +715,11 @@ impl HudPackets {
             add_all!(&front.glass[..front.glass_len]);
         }
         add_all!(&self.masks[0..1]);
+        // Walked first: the world's pixels under the bar behind may carry the mask bit (opaque
+        // black texels are drawn with it), and a pixel that carries it is skipped by that bar.
+        if behind_fold.is_some() {
+            add_all!(core::slice::from_ref(&self.set.clear));
+        }
     }
 }
 
@@ -702,6 +779,31 @@ impl Default for AlonePackets {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Grow `bounds` (left, top, right, bottom) over the pixels `op` covers.
+    fn grow(bounds: &mut [i32; 4], op: Op) {
+        let mut cover = |x0: i32, y0: i32, x1: i32, y1: i32| {
+            bounds[0] = bounds[0].min(x0);
+            bounds[1] = bounds[1].min(y0);
+            bounds[2] = bounds[2].max(x1);
+            bounds[3] = bounds[3].max(y1);
+        };
+        match op {
+            Op::Rect { x, y, w, h, .. } => cover(x, y, x + w, y + h),
+            Op::Sprite { x, y, src, .. } => cover(x, y, x + i32::from(src.w), y + i32::from(src.h)),
+            Op::Quad { p, .. } | Op::TexQuad { p, .. } => {
+                for (x, y) in p {
+                    cover(
+                        i32::from(x),
+                        i32::from(y),
+                        i32::from(x) + 1,
+                        i32::from(y) + 1,
+                    );
+                }
+            }
+            Op::Mask { .. } => {}
+        }
+    }
+
     use crate::hud_sprites::{
         compose, AmmoFx, HudAnim, PillFx, BREAK_FRAMES, ENERGY_PER_PILL, LOAD_FRAMES, REVEAL_MAX,
     };
@@ -710,11 +812,15 @@ mod tests {
     /// do not overlap does not matter.
     fn linked(hud: &mut HudPackets, state: &HudState) -> Vec<Vec<u32>> {
         let mut out = Vec::new();
+        let add_mode = hud.conv.add_mode;
         hud.link(state, |p, tag| {
             let words = (tag >> 24) as usize;
             // SAFETY: the pointer is to a node of `hud`, which has six payload words after the tag.
             let payload = unsafe { core::slice::from_raw_parts((p as *const u32).add(1), words) };
-            out.push(payload.to_vec());
+            // The rectangle that clears the mask bit is not part of the composition.
+            if !(words == 4 && payload[0] == add_mode) {
+                out.push(payload.to_vec());
+            }
         });
         out.sort();
         out
@@ -907,5 +1013,130 @@ mod tests {
         fx.apply(&mut state);
         assert!(state.queued.0 >= state.queued.1);
         let _ = ENERGY_PER_PILL;
+    }
+
+    /// The mask-clearing rectangle comes first in the walk (last in the links), covers every pixel
+    /// the bar behind draws, and is only there while that bar is.
+    #[test]
+    fn a_rectangle_clears_the_mask_under_the_bar_behind() {
+        let vram = HudVram::SHOWCASE;
+        let origin = (6, 160);
+        let mut hud = HudPackets::new();
+        hud.build(&vram, origin);
+        let mut seed = 0x9e37_79b9u32;
+        let mut next = |n: u32| {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed >> 8) % n
+        };
+        for i in 0..400 {
+            let state = random_state(&mut next);
+            let mut nodes = Vec::new();
+            hud.link(&state, |p, tag| {
+                let words = (tag >> 24) as usize;
+                // SAFETY: as in `linked`.
+                let payload =
+                    unsafe { core::slice::from_raw_parts((p as *const u32).add(1), words) };
+                nodes.push(payload.to_vec());
+            });
+            // Walked first is linked last.
+            let clears = nodes
+                .iter()
+                .filter(|n| n.len() == 4 && n[0] == hud.conv.add_mode);
+            let behind_shown = state.reveal[scene(&state).behind.0.index()] > 0;
+            assert_eq!(
+                clears.count(),
+                usize::from(behind_shown),
+                "step {i}: {state:?}"
+            );
+            if behind_shown {
+                let last = nodes.last().unwrap();
+                assert!(last.len() == 4 && last[0] == hud.conv.add_mode, "step {i}");
+                let (x, y) = (
+                    (last[2] & 0xffff) as i16 as i32,
+                    (last[2] >> 16) as i16 as i32,
+                );
+                let (w, h) = ((last[3] & 0xffff) as i32, (last[3] >> 16) as i32);
+                // Every piece of the bar behind sits inside the rectangle.
+                let sc = scene(&state);
+                let fold = fold_at(state.reveal[sc.behind.0.index()], &sc.behind.1).unwrap();
+                let lit = state.health[sc.behind.0.index()].min(COUNT as u8);
+                let mut covered = [i32::MAX, i32::MAX, i32::MIN, i32::MIN];
+                for part in [Part::Glass, Part::Opaque, Part::Cells] {
+                    bar_at(
+                        origin,
+                        sc.behind.0,
+                        &sc.behind.1,
+                        lit,
+                        fold,
+                        part,
+                        &mut |op| grow(&mut covered, op),
+                    );
+                }
+                assert!(
+                    x <= covered[0].max(0)
+                        && y <= covered[1].max(0)
+                        && x + w >= covered[2]
+                        && y + h >= covered[3],
+                    "step {i}: rectangle {x} {y} {w} {h} against {covered:?}"
+                );
+                assert!(
+                    w > 0 && h > 0 && x >= 0 && y >= 0,
+                    "step {i}: {x} {y} {w} {h}"
+                );
+            }
+        }
+    }
+
+    /// The list of a frame may still be walked while the next frame is built, and a walk follows the
+    /// links between nodes: laying the bars out again never changes a link, whatever the new nodes
+    /// are.
+    #[test]
+    fn laying_the_bars_out_again_keeps_every_link() {
+        let vram = HudVram::SHOWCASE;
+        let mut hud = HudPackets::new();
+        hud.build(&vram, (6, 160));
+        let base = HudState::rest(Stance::Horizon, [7, 5], 8);
+        hud.link(&base, |_, _| {});
+        // Give every node of the bars and the clearing rectangle a link, as a walk would have left.
+        let mark = |hud: &mut HudPackets| {
+            for (i, bar) in hud.set.bars.iter_mut().enumerate() {
+                for (j, n) in bar
+                    .glass
+                    .iter_mut()
+                    .chain(bar.opaque.iter_mut())
+                    .chain(bar.cells.iter_mut())
+                    .enumerate()
+                {
+                    n.tag = (n.tag & TAG_LEN) | 0x0010_0000 | (i as u32) << 12 | j as u32;
+                }
+            }
+            hud.set.clear.tag = (hud.set.clear.tag & TAG_LEN) | 0x0020_0000;
+        };
+        mark(&mut hud);
+        for swap in (1u16..4096).step_by(131) {
+            let state = HudState { swap, ..base };
+            hud.link(&state, |_, _| {});
+            for (i, bar) in hud.set.bars.iter().enumerate() {
+                for (j, n) in bar
+                    .glass
+                    .iter()
+                    .chain(bar.opaque.iter())
+                    .chain(bar.cells.iter())
+                    .enumerate()
+                {
+                    let want = 0x0010_0000 | (i as u32) << 12 | j as u32;
+                    assert_eq!(
+                        n.tag & !TAG_LEN,
+                        want,
+                        "swap {swap}: node {i}/{j} lost its link"
+                    );
+                }
+            }
+            assert_eq!(
+                hud.set.clear.tag & !TAG_LEN,
+                0x0020_0000,
+                "swap {swap}: clear"
+            );
+        }
     }
 }

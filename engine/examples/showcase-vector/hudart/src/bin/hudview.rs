@@ -736,9 +736,16 @@ mod tests {
                         cos: 4096,
                     };
                     for part in [Part::Plate, Part::Cells] {
-                        bar_moving((4, 3), stance, xf, lit, Fold::FULL, part, &mut |op| {
-                            quads.op(op)
-                        });
+                        bar_moving(
+                            (4, 3),
+                            stance,
+                            xf,
+                            lit,
+                            Fold::FULL,
+                            part,
+                            false,
+                            &mut |op| quads.op(op),
+                        );
                     }
                     let differ = sprites
                         .px
@@ -747,6 +754,36 @@ mod tests {
                         .filter(|(a, b)| a != b)
                         .count();
                     assert_eq!(differ, 0, "{stance:?} size {size} lit {lit}");
+                }
+            }
+        }
+    }
+
+    /// A bar at rest comes out of the same code as a bar on the move, and yet its ops are exactly the
+    /// ones the pixel art was made with (`bar`): every stance, both sizes it rests at, every fold
+    /// step, every part.
+    #[test]
+    fn a_bar_at_rest_is_the_ops_of_the_art() {
+        use super::hud::{bar, bar_at, fold_of, Part, Placement, Pose, BACK_SIZE, GEO, REVEAL_MAX};
+        for stance in [Stance::Horizon, Stance::Zenith] {
+            for size in [0, BACK_SIZE] {
+                for reveal in 1..=REVEAL_MAX {
+                    let fold = fold_of(reveal, &GEO[size]).unwrap();
+                    for part in [Part::Glass, Part::Opaque, Part::Plate, Part::Cells] {
+                        let pose = Pose { x: 3, y: 9, size };
+                        let (mut art, mut rest) = (Vec::new(), Vec::new());
+                        bar((5, 7), stance, pose, 6, fold, part, &mut |op| art.push(op));
+                        bar_at(
+                            (5, 7),
+                            stance,
+                            &Placement::Rest(pose),
+                            6,
+                            fold,
+                            part,
+                            &mut |op| rest.push(op),
+                        );
+                        assert_eq!(art, rest, "{stance:?} size {size} reveal {reveal} {part:?}");
+                    }
                 }
             }
         }
