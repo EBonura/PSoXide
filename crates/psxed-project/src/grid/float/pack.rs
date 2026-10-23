@@ -129,6 +129,77 @@ pub fn pack(cells: &[PlanCell], tolerance: i32) -> Vec<Rect> {
     }
 }
 
+/// Widen `rects` over the `rim` cells that run along their sides.
+///
+/// A rectangle takes the strip of cells beside one of its sides when at least
+/// `percent` of the strip is rim cells with ends within `tolerance` of the
+/// rectangle's. The strip is taken whole, so a deck gets its edge back as one
+/// wider slab instead of a scatter of single-cell ones. Each rectangle grows
+/// by at most `reach` cells on a side.
+pub fn grow_rects(
+    rects: &mut [Rect],
+    rim: &[PlanCell],
+    tolerance: i32,
+    percent: usize,
+    reach: i32,
+) {
+    let mut at: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
+    for (i, cell) in rim.iter().enumerate() {
+        at.entry((cell.x, cell.z)).or_default().push(i);
+    }
+    let mut claimed = vec![false; rim.len()];
+    for rect in rects.iter_mut() {
+        for _ in 0..reach.max(0) {
+            let mut grew = false;
+            for side in 0..4 {
+                // The strip beside the side: first cell, step, length.
+                let (start, step, len) = match side {
+                    0 => ((rect.x - 1, rect.z), (0, 1), rect.depth),
+                    1 => ((rect.x + rect.width, rect.z), (0, 1), rect.depth),
+                    2 => ((rect.x, rect.z - 1), (1, 0), rect.width),
+                    _ => ((rect.x, rect.z + rect.depth), (1, 0), rect.width),
+                };
+                let cell_at = |k: i32| (start.0 + step.0 * k, start.1 + step.1 * k);
+                let mut hits: Vec<usize> = Vec::new();
+                for k in 0..len {
+                    let Some(list) = at.get(&cell_at(k)) else {
+                        continue;
+                    };
+                    if let Some(&i) = list.iter().find(|&&i| {
+                        !claimed[i]
+                            && (rim[i].bottom - rect.bottom).abs() <= tolerance
+                            && (rim[i].top - rect.top).abs() <= tolerance
+                    }) {
+                        hits.push(i);
+                    }
+                }
+                if hits.is_empty() || hits.len() * 100 < len as usize * percent {
+                    continue;
+                }
+                for i in hits {
+                    claimed[i] = true;
+                }
+                match side {
+                    0 => {
+                        rect.x -= 1;
+                        rect.width += 1;
+                    }
+                    1 => rect.width += 1,
+                    2 => {
+                        rect.z -= 1;
+                        rect.depth += 1;
+                    }
+                    _ => rect.depth += 1,
+                }
+                grew = true;
+            }
+            if !grew {
+                break;
+            }
+        }
+    }
+}
+
 fn median(values: &mut [i32]) -> i32 {
     values.sort_unstable();
     values[values.len() / 2]

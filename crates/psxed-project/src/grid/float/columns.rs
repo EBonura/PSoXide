@@ -139,7 +139,8 @@ impl HitField {
         self.cols
     }
 
-    fn column(&self, row: usize, col: usize) -> &[f32] {
+    /// The hits of the ray at `row`, `col`, `NaN` for none.
+    pub fn column(&self, row: usize, col: usize) -> &[f32] {
         let start = (row * self.cols + col) * self.depth;
         &self.heights[start..start + self.depth]
     }
@@ -183,6 +184,21 @@ fn intervals(hits: &[f32], frame: &Frame) -> Vec<(i32, i32)> {
 /// The floating solids of one ray: what stands more than
 /// [`FloatConfig::clearance`] over the ground run and is thick enough.
 pub fn floating_in_column(hits: &[f32], frame: &Frame, config: &FloatConfig) -> Vec<Solid> {
+    let mut out = floating_raw(hits, frame, config);
+    out.retain(|s| (config.min_thickness..=config.max_thickness).contains(&(s.top - s.bottom)));
+    out
+}
+
+/// Everything [`floating_in_column`] starts from: the solids over the ground
+/// run before the thickness limits drop any. The census uses it to say what
+/// those limits cost.
+pub fn floating_raw(hits: &[f32], frame: &Frame, config: &FloatConfig) -> Vec<Solid> {
+    ground_and_floating(hits, frame, config).1
+}
+
+/// The top of the solid run standing on the ground (grid units over the
+/// model's ground, 0 for none) and the solids floating over it.
+pub fn ground_and_floating(hits: &[f32], frame: &Frame, config: &FloatConfig) -> (i32, Vec<Solid>) {
     let mut ground_top = 0;
     let mut out: Vec<Solid> = Vec::new();
     for (bottom, top) in intervals(hits, frame) {
@@ -206,8 +222,7 @@ pub fn floating_in_column(hits: &[f32], frame: &Frame, config: &FloatConfig) -> 
             }),
         }
     }
-    out.retain(|s| (config.min_thickness..=config.max_thickness).contains(&(s.top - s.bottom)));
-    out
+    (ground_top, out)
 }
 
 /// A floating solid agreed on by the rays of one plan cell.
@@ -235,15 +250,78 @@ fn median(values: &mut [i32]) -> i32 {
     values[values.len() / 2]
 }
 
+/// A plan position's solid and how many of its members agreed on it.
+type Candidate = (PlanCell, usize);
+
+/// Keep the candidates `need` members agree on, and with them the weaker ones
+/// (at least `need_rim`) that touch a kept one with ends within `tolerance`.
+/// This brings back the rim of a deck, where a cell or block is only partly
+/// covered, without keeping a sparse frame that touches nothing.
+fn split_by_rim(
+    candidates: Vec<Candidate>,
+    need: usize,
+    need_rim: usize,
+    tolerance: i32,
+) -> (Vec<PlanCell>, Vec<PlanCell>) {
+    let mut out: Vec<PlanCell> = Vec::new();
+    let mut weak: Vec<PlanCell> = Vec::new();
+    for (cell, members) in candidates {
+        if members >= need {
+            out.push(cell);
+        } else if members >= need_rim {
+            weak.push(cell);
+        }
+    }
+    if weak.is_empty() {
+        return (out, Vec::new());
+    }
+    let mut at: std::collections::HashMap<(i32, i32), Vec<PlanCell>> =
+        std::collections::HashMap::new();
+    for cell in &out {
+        at.entry((cell.x, cell.z)).or_default().push(*cell);
+    }
+    let mut rim = Vec::new();
+    for cell in weak {
+        let touches = (-1..=1).any(|dz| {
+            (-1..=1).any(|dx| {
+                at.get(&(cell.x + dx, cell.z + dz)).is_some_and(|near| {
+                    near.iter().any(|n| {
+                        (n.bottom - cell.bottom).abs() <= tolerance
+                            && (n.top - cell.top).abs() <= tolerance
+                    })
+                })
+            })
+        });
+        if touches {
+            rim.push(cell);
+        }
+    }
+    (out, rim)
+}
+
+/// [`split_by_rim`] with the rim joined to the kept cells.
+fn accept_with_rim(
+    candidates: Vec<Candidate>,
+    need: usize,
+    need_rim: usize,
+    tolerance: i32,
+) -> Vec<PlanCell> {
+    let (mut out, rim) = split_by_rim(candidates, need, need_rim, tolerance);
+    out.extend(rim);
+    out
+}
+
 /// The floating solids of every plan cell of the field. A cell keeps an
 /// interval when at least [`FloatConfig::min_cover_percent`] percent of its
-/// rays have one within [`FloatConfig::tolerance`] of it at both ends.
+/// rays have one within [`FloatConfig::tolerance`] of it at both ends, or
+/// [`FloatConfig::rim_cell_percent`] when a neighbouring cell keeps one that
+/// agrees.
 pub fn plan_cells(field: &HitField, frame: &Frame, config: &FloatConfig) -> Vec<PlanCell> {
     let rays = COLUMNS_PER_CELL * COLUMNS_PER_CELL;
-    let need = (rays * config.min_cover_percent as usize)
-        .div_ceil(100)
-        .max(1);
-    let mut out = Vec::new();
+    let percent = |p: u32| (rays * p as usize).div_ceil(100).max(1);
+    let need = percent(config.min_cover_percent);
+    let need_rim = percent(config.rim_cell_percent.min(config.min_cover_percent));
+    let mut candidates = Vec::new();
     for cz in 0..field.rows() / COLUMNS_PER_CELL {
         for cx in 0..field.cols() / COLUMNS_PER_CELL {
             let mut found: Vec<Solid> = Vec::new();
@@ -252,37 +330,53 @@ pub fn plan_cells(field: &HitField, frame: &Frame, config: &FloatConfig) -> Vec<
                     found.extend(floating_in_column(field.column(row, col), frame, config));
                 }
             }
-            if found.len() < need {
+            if found.len() < need_rim {
                 continue;
             }
             for cluster in clusters(&found, config.tolerance) {
-                if cluster.len() < need {
+                if cluster.len() < need_rim {
                     continue;
                 }
                 let mut bottoms: Vec<i32> = cluster.iter().map(|s| s.bottom).collect();
                 let mut tops: Vec<i32> = cluster.iter().map(|s| s.top).collect();
                 let mut clearances: Vec<i32> = cluster.iter().map(|s| s.clearance).collect();
-                out.push(PlanCell {
-                    x: cx as i32,
-                    z: cz as i32,
-                    bottom: snap(median(&mut bottoms)),
-                    top: snap(median(&mut tops)),
-                    clearance: median(&mut clearances),
-                });
+                candidates.push((
+                    PlanCell {
+                        x: cx as i32,
+                        z: cz as i32,
+                        bottom: snap(median(&mut bottoms)),
+                        top: snap(median(&mut tops)),
+                        clearance: median(&mut clearances),
+                    },
+                    cluster.len(),
+                ));
             }
         }
     }
-    out
+    accept_with_rim(candidates, need, need_rim, config.tolerance)
 }
 
 /// Merge the quarter-sector cells into square blocks of `factor` cells on a
 /// side (2 is a half sector, 4 a sector). A block keeps a solid when at least
 /// `config.coarse_cover_percent` percent of its cells hold one within
-/// `config.tolerance` at both ends; its heights are the medians. Block
+/// `config.tolerance` at both ends (`config.rim_block_percent` next to a block
+/// that keeps one that agrees); its heights are the medians. Block
 /// coordinates are in blocks.
 pub fn coarsen(cells: &[PlanCell], factor: i32, config: &FloatConfig) -> Vec<PlanCell> {
+    let (mut kept, rim) = coarsen_split(cells, factor, config);
+    kept.extend(rim);
+    kept
+}
+
+/// [`coarsen`], with the blocks kept by the rim rule apart from the ones the
+/// cover keeps on its own: `(kept, rim)`.
+pub fn coarsen_split(
+    cells: &[PlanCell],
+    factor: i32,
+    config: &FloatConfig,
+) -> (Vec<PlanCell>, Vec<PlanCell>) {
     if factor <= 1 {
-        return cells.to_vec();
+        return (cells.to_vec(), Vec::new());
     }
     let mut blocks: std::collections::BTreeMap<(i32, i32), Vec<Solid>> =
         std::collections::BTreeMap::new();
@@ -296,28 +390,35 @@ pub fn coarsen(cells: &[PlanCell], factor: i32, config: &FloatConfig) -> Vec<Pla
                 clearance: cell.clearance,
             });
     }
-    let need = ((factor * factor) as usize * config.coarse_cover_percent as usize)
-        .div_ceil(100)
-        .max(1);
-    let mut out = Vec::new();
+    let percent = |p: u32| {
+        ((factor * factor) as usize * p as usize)
+            .div_ceil(100)
+            .max(1)
+    };
+    let need = percent(config.coarse_cover_percent);
+    let need_rim = percent(config.rim_block_percent.min(config.coarse_cover_percent));
+    let mut candidates = Vec::new();
     for ((z, x), solids) in blocks {
         for cluster in clusters(&solids, config.tolerance) {
-            if cluster.len() < need {
+            if cluster.len() < need_rim {
                 continue;
             }
             let mut bottoms: Vec<i32> = cluster.iter().map(|s| s.bottom).collect();
             let mut tops: Vec<i32> = cluster.iter().map(|s| s.top).collect();
             let mut clearances: Vec<i32> = cluster.iter().map(|s| s.clearance).collect();
-            out.push(PlanCell {
-                x,
-                z,
-                bottom: snap(median(&mut bottoms)),
-                top: snap(median(&mut tops)),
-                clearance: median(&mut clearances),
-            });
+            candidates.push((
+                PlanCell {
+                    x,
+                    z,
+                    bottom: snap(median(&mut bottoms)),
+                    top: snap(median(&mut tops)),
+                    clearance: median(&mut clearances),
+                },
+                cluster.len(),
+            ));
         }
     }
-    out
+    split_by_rim(candidates, need, need_rim, config.tolerance)
 }
 
 /// Group solids whose ends all lie within `tolerance` of the group's first.

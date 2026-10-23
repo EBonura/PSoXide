@@ -16,7 +16,16 @@
 //!   --cover PERCENT        share of a cell's rays that must agree
 //!   --rechunk SIZE         afterwards re-chunk the world into hexagons of this
 //!                          centre-to-corner size in sectors, carrying the slabs
+//!   --rim-cell PERCENT --rim-block PERCENT
+//!                          cover that suffices next to a kept cell or block (15, 25)
+//!   --cap-min-deficit N    height the ground fit must lose for a tower cap, grid units
+//!   --cap-collide 0|1     whether tower caps collide (0)
+//!   --cap-cover PERCENT --cap-block-cover PERCENT --cap-min-area CELLS --cap-reach SECTORS
+//!                          tower caps: cover per cell and block, patch size that stands
+//!                          alone, and distance from a bridge that makes any patch structure
 //!   --no-collide           slabs draw but do not collide
+//!   --caps-tsv PATH        write the cap cells kept and left out
+//!   --no-caps              leave the lost tops of towers alone
 //!   --dry-run              report without writing the project
 //! ```
 //!
@@ -29,7 +38,9 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use psxed_project::grid::edit::chunks::{rechunk_hex, HexLayout};
-use psxed_project::grid::float::columns::{plan_cells, Frame, HitField};
+use psxed_project::grid::float::caps::{cap_cells, CapReport};
+use psxed_project::grid::float::columns::{coarsen, plan_cells, Frame, HitField, PlanCell};
+use psxed_project::grid::float::cover::ground_tops;
 use psxed_project::grid::float::npy::parse_f32;
 use psxed_project::grid::float::place::SlabStyle;
 use psxed_project::grid::float::{float_slabs, FloatConfig};
@@ -43,6 +54,7 @@ struct Args {
     options: Vec<(String, String)>,
     dry_run: bool,
     no_collide: bool,
+    no_caps: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -50,11 +62,13 @@ fn parse_args() -> Result<Args, String> {
     let mut options = Vec::new();
     let mut dry_run = false;
     let mut no_collide = false;
+    let mut no_caps = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.strip_prefix("--") {
             Some("dry-run") => dry_run = true,
             Some("no-collide") => no_collide = true,
+            Some("no-caps") => no_caps = true,
             Some(name) => {
                 let value = args
                     .next()
@@ -73,6 +87,7 @@ fn parse_args() -> Result<Args, String> {
         options,
         dry_run,
         no_collide,
+        no_caps,
     })
 }
 
@@ -120,6 +135,28 @@ fn config(args: &Args) -> Result<FloatConfig, String> {
     }
     if let Some(v) = args.number("cover")? {
         config.min_cover_percent = v;
+    }
+    for (name, slot) in [
+        ("rim-cell", &mut config.rim_cell_percent),
+        ("rim-block", &mut config.rim_block_percent),
+        ("cap-cover", &mut config.cap_cover_percent),
+        ("cap-block-cover", &mut config.cap_block_percent),
+    ] {
+        if let Some(v) = args.number(name)? {
+            *slot = v;
+        }
+    }
+    if let Some(v) = args.number("cap-min-deficit")? {
+        config.cap_min_deficit = v;
+    }
+    if let Some(v) = args.number("cap-min-area")? {
+        config.cap_min_area = v;
+    }
+    if let Some(v) = args.number::<u8>("cap-collide")? {
+        config.cap_collide = v != 0;
+    }
+    if let Some(v) = args.number("cap-reach")? {
+        config.cap_reach = v;
     }
     if let Some(origin) = args.get("origin") {
         let (x, z) = origin
@@ -172,7 +209,32 @@ fn run() -> Result<(), String> {
         .world
         .grid_mut()
         .ok_or("the project has no grid world")?;
-    let report = float_slabs(world, &cells, &config, &style)?;
+    let (caps, cap_report) = if args.no_caps {
+        (Vec::new(), CapReport::default())
+    } else {
+        let tops = ground_tops(world);
+        let near: Vec<_> = coarsen(&cells, config.block_cells, &config)
+            .into_iter()
+            .map(|c| PlanCell {
+                x: c.x * config.block_cells,
+                z: c.z * config.block_cells,
+                ..c
+            })
+            .collect();
+        cap_cells(&field, &frame, &config, &tops, &near)
+    };
+    let mut report = float_slabs(world, &cells, &caps, &config, &style)?;
+    if let Some(path) = args.get("caps-tsv") {
+        let mut text = String::new();
+        for c in &caps {
+            text += &format!("{}\t{}\t{}\t{}\tkept\n", c.x, c.z, c.bottom, c.top);
+        }
+        for [x, z] in &cap_report.scenery {
+            text += &format!("{x}\t{z}\t0\t0\tscenery\n");
+        }
+        std::fs::write(path, text).map_err(|e| format!("{path}: {e}"))?;
+    }
+    report.caps = cap_report;
     print!("{}", report.summary());
     if let Some(size) = args.number::<f64>("rechunk")? {
         let moved = rechunk_hex(world, HexLayout { size }).map_err(|e| e.to_string())?;

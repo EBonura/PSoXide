@@ -340,6 +340,14 @@ pub(super) fn cook(
     };
     let summary = cooked.report.summary();
     report.warn(summary.trim_end().to_string());
+    report.warn(format!(
+        "grid world: guest room pool {} pages ({} KiB): the wanted set peaks at {} pages in {} rooms, the largest room is {} pages; every page costs the guest heap 2 KiB",
+        pool.pool_pages,
+        pool.pool_pages * 2,
+        pool.peak_pages,
+        pool.peak_rooms,
+        pool.max_room_pages
+    ));
     let surfaces = |room: &cook::RoomReport| room.quads + room.triangles;
     Some(PlaytestGridWorld {
         core: cooked.core,

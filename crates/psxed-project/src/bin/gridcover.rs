@@ -16,6 +16,7 @@ use std::process::ExitCode;
 
 use psxed_project::grid::faces::all_faces_with;
 use psxed_project::grid::float::columns::{Frame, COLUMNS_PER_SECTOR};
+use psxed_project::grid::float::cover::raster_tops;
 use psxed_project::grid::float::npy::parse_f32;
 use psxed_project::ProjectDocument;
 
@@ -79,56 +80,7 @@ fn main() -> ExitCode {
         let sector_editor = f64::from(world.scale.to_editor(1024));
         let to_grid = 1024.0 / sector_editor;
         let faces = all_faces_with(world, &());
-        // Highest upward face over each 1/16 sector column, from rasterising
-        // the upward triangles at the ray lattice.
-        let per = COLUMNS_PER_SECTOR as f64;
-        let mut top: BTreeMap<(i32, i32), f64> = BTreeMap::new();
-        for f in faces.iter().filter(|f| f.normal[1] > 0.02) {
-            let p: Vec<[f64; 3]> = f
-                .points
-                .iter()
-                .map(|p| [f64::from(p[0]), f64::from(p[1]), f64::from(p[2])])
-                .collect();
-            for t in 1..p.len() - 1 {
-                let tri = [p[0], p[t], p[t + 1]];
-                let col = |v: f64| (v / sector_editor * per).floor() as i32;
-                let (x0, x1) = (
-                    col(tri.iter().map(|v| v[0]).fold(f64::MAX, f64::min)),
-                    col(tri.iter().map(|v| v[0]).fold(f64::MIN, f64::max)),
-                );
-                let (z0, z1) = (
-                    col(tri.iter().map(|v| v[2]).fold(f64::MAX, f64::min)),
-                    col(tri.iter().map(|v| v[2]).fold(f64::MIN, f64::max)),
-                );
-                for cz in z0..=z1 {
-                    for cx in x0..=x1 {
-                        let (x, z) = (
-                            (f64::from(cx) + 0.5) / per * sector_editor,
-                            (f64::from(cz) + 0.5) / per * sector_editor,
-                        );
-                        // Barycentric test in plan, then the plane's height.
-                        let d = (tri[1][2] - tri[2][2]) * (tri[0][0] - tri[2][0])
-                            + (tri[2][0] - tri[1][0]) * (tri[0][2] - tri[2][2]);
-                        if d.abs() < 1e-9 {
-                            continue;
-                        }
-                        let a = ((tri[1][2] - tri[2][2]) * (x - tri[2][0])
-                            + (tri[2][0] - tri[1][0]) * (z - tri[2][2]))
-                            / d;
-                        let b = ((tri[2][2] - tri[0][2]) * (x - tri[2][0])
-                            + (tri[0][0] - tri[2][0]) * (z - tri[2][2]))
-                            / d;
-                        let c = 1.0 - a - b;
-                        if a < -1e-6 || b < -1e-6 || c < -1e-6 {
-                            continue;
-                        }
-                        let y = a * tri[0][1] + b * tri[1][1] + c * tri[2][1];
-                        let e = top.entry((cx, cz)).or_insert(f64::MIN);
-                        *e = e.max(y);
-                    }
-                }
-            }
-        }
+        let top = raster_tops(&faces, sector_editor);
         let (mut agree, mut low, mut high, mut bare) = (0u64, 0u64, 0u64, 0u64);
         let mut worst: BTreeMap<(i32, i32), (u32, f64)> = BTreeMap::new();
         let mut tsv = String::new();

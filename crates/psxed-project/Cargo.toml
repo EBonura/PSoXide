@@ -63,5 +63,9 @@ name = "gridfloat"
 path = "src/bin/gridfloat.rs"
 
 [[bin]]
+name = "gridbridges"
+path = "src/bin/gridbridges.rs"
+
+[[bin]]
 name = "audit-animations"
 path = "src/bin/audit_animations.rs"

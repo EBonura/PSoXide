@@ -110,7 +110,7 @@ fn run(
     config: &FloatConfig,
 ) -> (FloatReport, Vec<PlanCell>) {
     let cells = plan_cells(field, &UNIT, config);
-    let report = float_slabs(world, &cells, config, &style()).unwrap();
+    let report = float_slabs(world, &cells, &[], config, &style()).unwrap();
     (report, cells)
 }
 
@@ -360,16 +360,108 @@ fn a_rough_deck_fits_sector_blocks_where_quarter_cells_would_shatter() {
 }
 
 #[test]
-fn a_mass_thicker_than_a_deck_is_not_floated() {
+fn a_mass_thicker_than_the_limit_is_not_floated() {
     let tall = Deck {
         x: (2.0, 4.0),
         z: (2.0, 4.0),
         bottom: 4096,
-        top: 4096 + 9 * 1024,
+        top: 4096 + 25 * 1024,
     };
     let field = island(6, &[tall]);
     let mut w = world(vec![room("island", [0, 0], 6, 6)]);
     let (report, cells) = run(&mut w, &field, &config());
     assert!(cells.is_empty());
     assert_eq!(report.placed(), 0);
+}
+
+#[test]
+fn a_tower_on_legs_taller_than_a_deck_is_floated_as_a_large_slab() {
+    // A hollow-based tower: 12 sectors of solid over four sectors of air.
+    let tower = Deck {
+        x: (2.0, 4.0),
+        z: (2.0, 4.0),
+        bottom: 4096,
+        top: 4096 + 12 * 1024,
+    };
+    let field = island(6, &[tower]);
+    let mut w = world(vec![room("island", [0, 0], 6, 6)]);
+    let sectors = FloatConfig {
+        origin_sector: [0, 0],
+        ..FloatConfig::default()
+    };
+    let (report, _) = run(&mut w, &field, &sectors);
+    assert_eq!(report.placed(), 1, "{}", report.summary());
+    let (_, lo, hi) = boxes(&w)[0];
+    assert_eq!(
+        (lo, hi),
+        ([2048, 4096, 2048], [4096, 4096 + 12 * 1024, 4096])
+    );
+}
+
+#[test]
+fn the_rim_of_a_deck_is_kept_when_it_touches_the_deck() {
+    // A strip one ray wide along the deck's edge fills too little of its cells
+    // to count alone.
+    let field = HitField::from_fn(
+        8 * COLUMNS_PER_SECTOR,
+        8 * COLUMNS_PER_SECTOR,
+        8,
+        |row, col| {
+            let (x, z) = (
+                col as f32 / COLUMNS_PER_SECTOR as f32,
+                row as f32 / COLUMNS_PER_SECTOR as f32,
+            );
+            let on_deck = (2.0..6.0).contains(&x) || (6.0..6.03).contains(&x);
+            if on_deck && (2.0..5.0).contains(&z) {
+                vec![hit(5120), hit(4096), hit(512)]
+            } else {
+                vec![hit(512)]
+            }
+        },
+    );
+    let with_rim = plan_cells(&field, &UNIT, &config());
+    let without = FloatConfig {
+        rim_cell_percent: config().min_cover_percent,
+        ..config()
+    };
+    let without = plan_cells(&field, &UNIT, &without);
+    // Three sectors of edge, four cells to a sector.
+    assert_eq!(with_rim.len(), without.len() + 12);
+}
+
+#[test]
+fn a_big_tower_the_ground_fit_cut_down_is_capped_and_a_lone_spire_is_left() {
+    use super::caps::cap_cells;
+    use super::cover::ground_tops;
+    let field = HitField::from_fn(
+        8 * COLUMNS_PER_SECTOR,
+        8 * COLUMNS_PER_SECTOR,
+        8,
+        |row, col| {
+            let (x, z) = (
+                (col as f32 + 0.5) / COLUMNS_PER_SECTOR as f32,
+                (row as f32 + 0.5) / COLUMNS_PER_SECTOR as f32,
+            );
+            let tower = (1.0..3.0).contains(&x) && (1.0..3.0).contains(&z);
+            let spire = (5.0..6.0).contains(&x) && (5.0..6.0).contains(&z);
+            if tower || spire {
+                vec![hit(12 * 1024)]
+            } else {
+                vec![hit(512)]
+            }
+        },
+    );
+    let sectors = FloatConfig {
+        origin_sector: [0, 0],
+        ..FloatConfig::default()
+    };
+    let mut w = world(vec![room("island", [0, 0], 8, 8)]);
+    let tops = ground_tops(&w);
+    let (caps, found) = cap_cells(&field, &UNIT, &sectors, &tops, &[]);
+    assert_eq!(found.kept_cells, 64, "{found:?}");
+    assert_eq!(found.scenery_cells, 16, "{found:?}");
+    let report = float_slabs(&mut w, &[], &caps, &sectors, &style()).unwrap();
+    assert_eq!(report.placed(), 1, "{}", report.summary());
+    let (_, lo, hi) = boxes(&w)[0];
+    assert_eq!((lo, hi), ([1024, 0, 1024], [3072, 12 * 1024, 3072]));
 }

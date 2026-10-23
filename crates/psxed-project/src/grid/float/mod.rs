@@ -10,15 +10,18 @@
 //! Heights come from the exact hits snapped to the 64 unit lattice, never
 //! from voxel layers, so they do not depend on how the model was voxelised.
 
+pub mod caps;
 pub mod columns;
+pub mod cover;
 pub mod npy;
 pub mod pack;
 pub mod place;
 
 use std::collections::HashMap;
 
-use columns::{coarsen, PlanCell};
-use pack::{components, pack, Component, Rect};
+use caps::CapReport;
+use columns::{coarsen_split, PlanCell};
+use pack::{components, grow_rects, pack, Component, Rect};
 use place::{pieces, place, remove_placed, SlabStyle};
 
 use super::mesh::MAX_MESHES_PER_ROOM;
@@ -50,6 +53,35 @@ pub struct FloatConfig {
     pub tolerance: i32,
     /// World sector of the model's corner.
     pub origin_sector: [i32; 2],
+    /// Percent of a cell's rays that suffice when a neighbouring cell keeps a
+    /// solid that agrees (the rim of a deck).
+    pub rim_cell_percent: u32,
+    /// The same for a fitting block.
+    pub rim_block_percent: u32,
+    /// Height the fitted ground must lose against the model, grid units, for
+    /// a tower to be capped.
+    pub cap_min_deficit: i32,
+    /// Percent of a cell's rays that must have lost that much.
+    pub cap_cover_percent: u32,
+    /// Cells (quarter sectors) a lost patch needs to count as a structure on
+    /// its own.
+    pub cap_min_area: usize,
+    /// Sectors from a bridge within which any lost patch counts as structure.
+    pub cap_reach: i32,
+    /// Tallest cap, grid units.
+    pub cap_max_thickness: i32,
+    /// Percent of a block's cells that must hold a cap for the block to get one.
+    pub cap_block_percent: u32,
+    /// Height wobble allowed inside one cap slab, grid units.
+    pub cap_tolerance: i32,
+    /// Percent of the cells along a slab's side that must be rim for the slab
+    /// to widen over them.
+    pub rim_grow_percent: u32,
+    /// Most cells a slab widens by on a side.
+    pub rim_reach: i32,
+    /// Whether tower caps collide. Off, a cap draws but bodies walk through it:
+    /// the wall of the tower above the fitted ground is not solid.
+    pub cap_collide: bool,
 }
 
 impl Default for FloatConfig {
@@ -58,13 +90,25 @@ impl Default for FloatConfig {
             clearance: 2304,
             merge_gap: 768,
             min_thickness: 512,
-            max_thickness: 8192,
+            max_thickness: 24576,
             min_cover_percent: 40,
             block_cells: 4,
             coarse_cover_percent: 50,
             min_area_cells: 1,
             tolerance: 768,
             origin_sector: [2, 2],
+            rim_cell_percent: 15,
+            rim_block_percent: 25,
+            cap_min_deficit: 4096,
+            cap_cover_percent: 30,
+            cap_min_area: 48,
+            cap_reach: 3,
+            cap_max_thickness: 28672,
+            cap_block_percent: 25,
+            cap_tolerance: 2048,
+            rim_grow_percent: 50,
+            rim_reach: 2,
+            cap_collide: false,
         }
     }
 }
@@ -101,6 +145,8 @@ pub struct FloatReport {
     pub rooms: Vec<RoomSlabs>,
     /// Slabs no cube stretches to.
     pub refused: Vec<String>,
+    /// What the tower caps found.
+    pub caps: CapReport,
 }
 
 impl FloatReport {
@@ -133,6 +179,10 @@ impl FloatReport {
                 f64::from(c.mean_thickness) / 1024.0,
             );
         }
+        out += &format!(
+            "tower caps: {} lost cell(s) in {} patch(es); {} kept as structure, {} left as scenery\n",
+            self.caps.lost_cells, self.caps.patches, self.caps.kept_cells, self.caps.scenery_cells
+        );
         out += &format!(
             "dropped under the minimum area: {} block(s); over no room: {}; removed from an earlier run: {}\n",
             self.small_cells, self.unowned_cells, self.removed
@@ -179,9 +229,17 @@ impl Owners {
     }
 }
 
+/// The cells of one room: what covers on its own and the rim to widen over.
+#[derive(Default)]
+struct RoomCells {
+    kept: Vec<PlanCell>,
+    rim: Vec<PlanCell>,
+}
+
 /// Place the floating solids `cells` describe into `world` as slabs, each in
-/// the room that holds the sectors under it. Slabs of an earlier run are
-/// removed first, so the run can be repeated.
+/// the room that holds the sectors under it, and `caps` (the lost tops of
+/// towers, see [`caps`]) as slabs standing on the ground. Slabs of an earlier
+/// run are removed first, so the run can be repeated.
 ///
 /// # Errors
 ///
@@ -190,6 +248,7 @@ impl Owners {
 pub fn float_slabs(
     world: &mut GridWorld,
     cells: &[PlanCell],
+    caps: &[PlanCell],
     config: &FloatConfig,
     style: &SlabStyle,
 ) -> Result<FloatReport, String> {
@@ -197,36 +256,103 @@ pub fn float_slabs(
         removed: remove_placed(world),
         ..FloatReport::default()
     };
-    let cells = &coarsen(cells, config.block_cells, config);
+    let (kept, rim) = coarsen_split(cells, config.block_cells, config);
+    let cap_config = FloatConfig {
+        coarse_cover_percent: config.cap_block_percent,
+        rim_block_percent: config.cap_block_percent,
+        ..config.clone()
+    };
+    let (cap_kept, cap_rim) = coarsen_split(caps, config.block_cells, &cap_config);
     let edge = config.block_cells.max(1) * CLICK_UNITS;
     report.edge = edge;
-    let (labels, components) = components(cells);
+    let all: Vec<PlanCell> = kept.iter().chain(&cap_kept).copied().collect();
+    let (labels, components) = components(&all);
     let owners = Owners::of(world);
     let origin = config.origin_sector.map(|s| s * SECTOR_UNITS);
-    let mut by_room: HashMap<usize, Vec<PlanCell>> = HashMap::new();
-    for (cell, &label) in cells.iter().zip(&labels) {
-        if components[label].cells < config.min_area_cells {
-            report.small_cells += 1;
-            continue;
-        }
+    let room_of = |cell: &PlanCell| {
         let sector = [
             (cell.x * edge).div_euclid(SECTOR_UNITS) + config.origin_sector[0],
             (cell.z * edge).div_euclid(SECTOR_UNITS) + config.origin_sector[1],
         ];
-        match owners.0.get(&sector) {
-            Some(&room) => by_room.entry(room).or_default().push(*cell),
+        owners.0.get(&sector).copied()
+    };
+    // Floating cells and cap cells are packed apart: a cap's underside is
+    // buried, so only its top matters and it can take a coarser tolerance.
+    let mut by_room: HashMap<(usize, bool), RoomCells> = HashMap::new();
+    for (index, (cell, &label)) in all.iter().zip(&labels).enumerate() {
+        if components[label].cells < config.min_area_cells {
+            report.small_cells += 1;
+            continue;
+        }
+        let is_cap = index >= kept.len();
+        match room_of(cell) {
+            Some(room) => by_room.entry((room, is_cap)).or_default().kept.push(*cell),
             None => report.unowned_cells += 1,
         }
     }
+    for (rim_cells, is_cap) in [(&rim, false), (&cap_rim, true)] {
+        for cell in rim_cells {
+            if let Some(room) = room_of(cell) {
+                by_room.entry((room, is_cap)).or_default().rim.push(*cell);
+            }
+        }
+    }
     report.components = components;
-    let mut rooms: Vec<usize> = by_room.keys().copied().collect();
+    let mut keys: Vec<(usize, bool)> = by_room.keys().copied().collect();
+    keys.sort_unstable();
+    let mut packed: HashMap<usize, Vec<(Rect, bool)>> = HashMap::new();
+    for (room, is_cap) in keys {
+        let cells = &by_room[&(room, is_cap)];
+        let tolerance = if is_cap {
+            config.cap_tolerance
+        } else {
+            config.tolerance
+        };
+        let mut rects = pack(&cells.kept, tolerance);
+        let before = rects.clone();
+        grow_rects(
+            &mut rects,
+            &cells.rim,
+            tolerance,
+            config.rim_grow_percent as usize,
+            config.rim_reach,
+        );
+        // A slab belongs to one chunk: a widening that reaches into the next
+        // room is undone.
+        for (rect, old) in rects.iter_mut().zip(before) {
+            let inside = (rect.z..rect.z + rect.depth).all(|z| {
+                (rect.x..rect.x + rect.width).all(|x| {
+                    room_of(&PlanCell {
+                        x,
+                        z,
+                        bottom: 0,
+                        top: 0,
+                        clearance: 0,
+                    }) == Some(room)
+                })
+            });
+            if !inside {
+                *rect = old;
+            }
+        }
+        packed
+            .entry(room)
+            .or_default()
+            .extend(rects.into_iter().map(|rect| (rect, is_cap)));
+    }
+    let mut rooms: Vec<usize> = packed.keys().copied().collect();
     rooms.sort_unstable();
     for room in rooms {
-        let mut rects = pack(&by_room[&room], config.tolerance);
         let mut planned: Vec<(Rect, Vec<place::Piece>)> = Vec::new();
-        for rect in rects.drain(..) {
+        for (rect, is_cap) in packed.remove(&room).unwrap_or_default() {
             match pieces(rect, edge) {
-                Ok(p) => planned.push((rect, p)),
+                Ok(mut p) => {
+                    for piece in &mut p {
+                        piece.cap = is_cap;
+                        piece.collide = !is_cap || config.cap_collide;
+                    }
+                    planned.push((rect, p));
+                }
                 Err(why) => report.refused.push(why),
             }
         }

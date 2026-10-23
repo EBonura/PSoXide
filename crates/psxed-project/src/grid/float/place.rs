@@ -10,6 +10,10 @@ use crate::ResourceId;
 pub const SMALL_NAME: &str = "Floating slab";
 /// Name of the eight sector cube, for slabs too long for the small one.
 pub const LARGE_NAME: &str = "Floating slab (large)";
+/// Names of the cubes of tower caps: no underside, it is buried.
+pub const CAP_SMALL_NAME: &str = "Tower cap";
+/// The eight sector cube of the tower caps.
+pub const CAP_LARGE_NAME: &str = "Tower cap (large)";
 /// Edge of the small cube, grid units.
 const SMALL_UNIT: i32 = 1024;
 /// Edge of the large cube, grid units.
@@ -36,8 +40,8 @@ impl Default for SlabStyle {
 }
 
 /// The unit cube as OBJ text, three materials in slot order.
-fn cube_obj() -> String {
-    "\
+fn cube_obj(underside: bool) -> String {
+    let mut text = "\
 o slab
 v 0 0 0
 v 1 0 0
@@ -58,15 +62,17 @@ f 5/1 6/2 7/3 8/4
 f 2/1 1/2 4/3 3/4
 f 1/1 5/2 8/3 4/4
 f 6/1 2/2 3/3 7/4
-usemtl under
-f 1/1 2/2 6/3 5/4
 "
-    .to_string()
+    .to_string();
+    if underside {
+        text += "usemtl under\nf 1/1 2/2 6/3 5/4\n";
+    }
+    text
 }
 
-fn cube_asset(name: &str, unit: i32) -> MeshAsset {
+fn cube_asset(name: &str, unit: i32, underside: bool) -> MeshAsset {
     let mesh = ImportedMesh::from_obj(
-        &cube_obj(),
+        &cube_obj(underside),
         f64::from(unit),
         "floating slab",
         ImportProxy::Slab,
@@ -92,6 +98,10 @@ pub struct Piece {
     pub top: i32,
     /// Stretches the large cube.
     pub large: bool,
+    /// A tower cap: a cube without underside.
+    pub cap: bool,
+    /// Whether bodies, the camera and rays meet it (and the style allows it).
+    pub collide: bool,
     /// Grid units along a cell.
     pub edge: i32,
 }
@@ -130,6 +140,8 @@ pub fn pieces(rect: Rect, edge: i32) -> Result<Vec<Piece>, String> {
         bottom: rect.bottom,
         top: rect.top,
         large: false,
+        cap: false,
+        collide: true,
         edge,
     };
     if stretches(SMALL_UNIT, whole.size()) {
@@ -182,7 +194,9 @@ pub fn remove_placed(world: &mut GridWorld) -> usize {
         .mesh_assets
         .iter()
         .enumerate()
-        .filter(|(_, a)| a.name == SMALL_NAME || a.name == LARGE_NAME)
+        .filter(|(_, a)| {
+            [SMALL_NAME, LARGE_NAME, CAP_SMALL_NAME, CAP_LARGE_NAME].contains(&a.name.as_str())
+        })
         .map(|(i, _)| i as u16)
         .collect();
     let ids: Vec<u16> = world
@@ -208,21 +222,22 @@ pub fn place(
     origin: [i32; 2],
     style: &SlabStyle,
 ) -> Result<u16, MeshRefusal> {
-    let (name, unit) = if piece.large {
-        (LARGE_NAME, LARGE_UNIT)
-    } else {
-        (SMALL_NAME, SMALL_UNIT)
+    let (name, unit) = match (piece.large, piece.cap) {
+        (true, false) => (LARGE_NAME, LARGE_UNIT),
+        (false, false) => (SMALL_NAME, SMALL_UNIT),
+        (true, true) => (CAP_LARGE_NAME, LARGE_UNIT),
+        (false, true) => (CAP_SMALL_NAME, SMALL_UNIT),
     };
     let index = match world.mesh_assets.iter().position(|a| a.name == name) {
         Some(i) => i as u16,
-        None => add_asset(world, cube_asset(name, unit))?,
+        None => add_asset(world, cube_asset(name, unit, !piece.cap))?,
     };
     let size = piece.size();
     let x = origin[0] + piece.x * piece.edge + size[0] / 2;
     let z = origin[1] + piece.z * piece.edge + size[2] / 2;
     let mut mesh = GridMesh::new(0, index, [x, piece.bottom, z]);
     mesh.scale = size.map(|s| (s * 256 / unit) as u16);
-    mesh.collide = style.collide;
+    mesh.collide = style.collide && piece.collide;
     for (slot, material) in style.materials.iter().enumerate() {
         mesh.set_material(slot, *material);
     }
