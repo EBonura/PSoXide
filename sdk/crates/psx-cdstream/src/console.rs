@@ -9,7 +9,7 @@
 //! The wrapper sits in the general exception vector in front of psx-rt's
 //! handler, or in front of another wrapper that leads there (the pad engine's),
 //! whichever was in the vector when [`install`] ran. For an interrupt with the CD source pending it saves the
-//! interrupted CPU context, switches to a private 2 KiB stack, calls the
+//! interrupted CPU context, switches to a private 768-byte stack, calls the
 //! engine for one sector or one response, restores the context, and jumps to
 //! psx-rt's handler either way, so the VBlank counter, the display flip and
 //! the fault handling run exactly as before. Anything else goes straight
@@ -40,7 +40,12 @@ const PARAM_POLLS: u32 = 32;
 /// Status reads to wait for the data FIFO to fill after a sector interrupt.
 const FIFO_POLLS: u32 = 256;
 /// Bytes of private stack the handler runs on.
-pub const HANDLER_STACK_BYTES: usize = 2048;
+///
+/// The deepest call measured used 248 bytes (a Half-Life run of five weapon
+/// switches in the emulator, every sector popped by the handler, with the stack
+/// painted by [`install`]); the pad engine's comparable handler gets the same 768.
+/// RAM matters to the games that fit tight, and 2 KiB of it sat unused.
+pub const HANDLER_STACK_BYTES: usize = 768;
 /// Fill byte of the handler stack, to measure how much of it was used.
 const STACK_FILL: u8 = 0xa5;
 
@@ -596,6 +601,67 @@ pub fn uninstall() -> Option<Cd> {
     }
     TOKEN.take()
 }
+
+/// Put the transport in the exception vector if it is not there, taking the
+/// controller token itself. For a program that reads with the polled
+/// `SectorReader` and hands only some reads (a streamed asset the frame loop must
+/// not wait for) to the transport: call it before each such read and nothing else
+/// needs tracking.
+///
+/// Idempotent. `install_vblank_counter` puts psx-rt's handler back in the vector,
+/// which drops the wrapper; this notices (by [`psx_rt::interrupts::vector_epoch`])
+/// and installs again, which a program that calls `install_vblank_counter` for
+/// every scene (Half-Life does, for every map) must do. Returns `false` when it
+/// could not: a read is in flight or queued while the vector was reset, or an
+/// audio lease holds the controller. Polled commands may run whenever no request
+/// is queued or active and [`is_idle`] reads true: with
+/// [`IrqMaskPolicy::OnlyWhileBusy`] the CD interrupt source is closed then.
+pub fn ensure_installed(config: Config) -> bool {
+    if TOKEN.is_held() {
+        // SAFETY: a plain read of a word only this module writes.
+        let installed = unsafe { core::ptr::read_volatile(&raw const PSX_CD_EPOCH) };
+        if installed == psx_rt::interrupts::vector_epoch() {
+            return true;
+        }
+        if uninstall().is_none() {
+            return false;
+        }
+    } else if owner() == Owner::Audio {
+        return false;
+    }
+    // SAFETY: a token is a logic guard (see `psx_io::periph`). The caller keeps
+    // polled commands away from the controller while a request is queued or
+    // active, which is the only time the transport programs it.
+    let cd = unsafe { Cd::steal() };
+    install(cd, config).is_ok()
+}
+
+/// Cancel every read and wait, for at most `max_vblanks` VBlanks, until the drive
+/// has stopped and nothing is queued. `true` once it has: polled commands can follow.
+///
+/// Cancelling takes effect at the next sector (the handler drops it and pauses the
+/// drive itself), so this normally returns within a few milliseconds; a console
+/// Pause after a long read can take a few frames. The wait also gives up after a
+/// fixed number of polls, so a stopped VBlank clock cannot hang it.
+pub fn stop_and_wait(max_vblanks: u32) -> bool {
+    cancel_all();
+    let start = psx_rt::interrupts::vblank_count();
+    let mut polls = 0u32;
+    loop {
+        if is_idle() && queued_count() == 0 {
+            return true;
+        }
+        polls += 1;
+        if polls >= STOP_POLLS
+            || psx_rt::interrupts::vblank_count().wrapping_sub(start) >= max_vblanks
+        {
+            return false;
+        }
+    }
+}
+
+/// Polls of [`is_idle`] before [`stop_and_wait`] gives up whatever the VBlank clock says.
+const STOP_POLLS: u32 = 1 << 18;
 
 // ------------------------------------------------------------ the foreground
 
