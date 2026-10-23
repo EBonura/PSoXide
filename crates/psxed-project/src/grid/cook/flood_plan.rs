@@ -20,6 +20,9 @@ const SAMPLE_SEED: u64 = 12345;
 /// How far, in sectors, the gate counts quads from the camera: the fog
 /// distance the Citadel is cooked with.
 const GATE_REACH_SECTORS: f64 = 70.3;
+/// Rooms beyond the busiest position's that the guest's resident table is sized for: the room
+/// being installed and the ones not yet evicted when the observer moves on.
+const RESIDENT_SLACK_ROOMS: usize = 4;
 /// Bytes in a pool page, in KiB.
 const PAGE_KIB: usize = 2;
 
@@ -53,7 +56,8 @@ pub(super) fn plan(
             near_radius: settings.near_radius,
             res_radius: settings.res_radius,
             bias: 0,
-            reserved: [0; 3],
+            peak_rooms: 0,
+            reserved: [0; 2],
         },
         portal_weight: vec![FLOOD_WEIGHT_ONE; level.portals.len()],
     };
@@ -86,6 +90,8 @@ pub(super) fn plan(
             settings.res_radius
         ));
     }
+    block.header.peak_rooms =
+        u8::try_from(pool.peak_rooms + RESIDENT_SLACK_ROOMS).unwrap_or(u8::MAX);
     let graph = Graph::new(&blobs);
     let samples = sample_cameras(&view, SAMPLE_SEED);
     let load = draw_load(
