@@ -267,7 +267,9 @@ fn main() {
             let mut f = Frame::new(320, 240, background(&a));
             for step in 1..=REVEAL_MAX {
                 let (col, row) = ((step - 1) as i32 / 4, (step - 1) as i32 % 4);
-                compose((160 * col, 8 + 40 * row), &fold_state(step), &mut |op| f.op(op));
+                compose((160 * col, 8 + 40 * row), &fold_state(step), &mut |op| {
+                    f.op(op)
+                });
             }
             f.write(path);
         }
@@ -307,8 +309,20 @@ fn main() {
                         _ => 60,
                     },
                     "load" => 70 + n * 2 / 3,
-                    "reload" => if n == 0 { 0 } else { 100 },
-                    _ => if n == 0 { 40 } else { 70 },
+                    "reload" => {
+                        if n == 0 {
+                            0
+                        } else {
+                            100
+                        }
+                    }
+                    _ => {
+                        if n == 0 {
+                            40
+                        } else {
+                            70
+                        }
+                    }
                 };
                 fx.step(energy);
                 let mut state = HudState::rest(Stance::Horizon, [7, 5], 0);

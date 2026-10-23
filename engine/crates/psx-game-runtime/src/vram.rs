@@ -34,8 +34,8 @@ use psx_level::{
     ResidencyManager, RoomIndex,
 };
 use psx_vram::{
-    upload_16bpp, upload_bytes, Clut, TextureDepth, TexturePage, VramAllocator, VramHandle, VramRect,
-    VramRegionSource,
+    upload_16bpp, upload_bytes, Clut, TextureDepth, TexturePage, VramAllocator, VramHandle,
+    VramRect, VramRegionSource,
 };
 use upload_queue::{VramUploadJob, VramUploadKind, VramUploadQueue};
 
@@ -1151,7 +1151,8 @@ impl<
                 }
                 None => {
                     for handle in &mut self.stance_hud_cluts[..i] {
-                        self.allocator.free(core::mem::replace(handle, VramHandle::Empty));
+                        self.allocator
+                            .free(core::mem::replace(handle, VramHandle::Empty));
                     }
                     return None;
                 }
@@ -1168,7 +1169,10 @@ impl<
         );
         for i in 0..count {
             let clut = placed[i];
-            upload_16bpp(VramRect::new(clut.x(), clut.y(), 16, 1), &cluts[16 * i..16 * i + 16]);
+            upload_16bpp(
+                VramRect::new(clut.x(), clut.y(), 16, 1),
+                &cluts[16 * i..16 * i + 16],
+            );
             clut_words[i] = clut.uv_word();
         }
         Some(page)

@@ -3,8 +3,8 @@
 use std::fmt::Write as _;
 
 use crate::art::{
-    self, bands, cap_glass, cap_palette, cell_palette, clut, emblem_palette, emblem_pulse_palette, gem_fx_palettes, gem_palette, geos,
-    horizon, pack, zenith, Tone, ATLAS_W,
+    self, bands, cap_glass, cap_palette, cell_palette, clut, emblem_palette, emblem_pulse_palette,
+    gem_fx_palettes, gem_palette, geos, horizon, pack, zenith, Tone, ATLAS_W,
 };
 use crate::palette::{mix, WHITE};
 
@@ -109,7 +109,9 @@ pub fn art_module() -> String {
         "pub const SPRITE_GEM_CRACK: SpriteRect = {};",
         rect_of("GEM_CRACK", &placed)
     );
-    let quadrants: Vec<String> = (0..4).map(|i| rect_of(&format!("GEM_Q{i}"), &placed)).collect();
+    let quadrants: Vec<String> = (0..4)
+        .map(|i| rect_of(&format!("GEM_Q{i}"), &placed))
+        .collect();
     let _ = writeln!(
         s,
         "/// The gem's quadrants in the order they fill (clockwise from the top), and where each sits in\n/// the gem.\npub const SPRITE_GEM_Q: [SpriteRect; 4] = [{}];",
@@ -124,7 +126,9 @@ pub fn art_module() -> String {
         "pub const GEM_QUADRANT_AT: [(i32, i32); 4] = [{}];",
         at.join(", ")
     );
-    let rings: Vec<String> = (0..2).map(|i| rect_of(&format!("RING_{i}"), &placed)).collect();
+    let rings: Vec<String> = (0..2)
+        .map(|i| rect_of(&format!("RING_{i}"), &placed))
+        .collect();
     let _ = writeln!(
         s,
         "/// The echo rings, 1 and 2 pixels out; each is drawn that many pixels up and left of the gem.\npub const SPRITE_RING: [SpriteRect; 2] = [{}];",
@@ -181,7 +185,16 @@ pub fn art_module() -> String {
         s,
         "/// The gem effects: the flash, two steps of the pieces fading, the bright and dim ring."
     );
-    for (i, name) in ["CLUT_GEM_FLASH", "CLUT_GEM_FADE_1", "CLUT_GEM_FADE_2", "CLUT_RING_BRIGHT", "CLUT_RING_DIM"].iter().enumerate() {
+    for (i, name) in [
+        "CLUT_GEM_FLASH",
+        "CLUT_GEM_FADE_1",
+        "CLUT_GEM_FADE_2",
+        "CLUT_RING_BRIGHT",
+        "CLUT_RING_DIM",
+    ]
+    .iter()
+    .enumerate()
+    {
         let _ = writeln!(s, "pub const {name}: usize = {};", 2 * per + 5 + i);
     }
     let _ = writeln!(
