@@ -447,7 +447,29 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         cards.far,
         cards.fade,
         cards.near,
-        cards.backdrop,
+        if cards.rows.is_empty() {
+            package.world_geometry.panels.backdrop
+        } else {
+            cards.backdrop
+        },
+    );
+
+    // Far panels (`psx_grid::render::panels`): the bake eyes, and per eye and heading where the
+    // panel starts on the disc and which tiles it stores.
+    let panels = &package.world_geometry.panels;
+    let panel_blocks = chunk_panel_blocks(package);
+    let _ = writeln!(
+        out,
+        "/// Far panels: the bake eyes (runtime units), and per eye the sector of its block\n\
+         /// relative to the start of WORLD.PAK (0 for an eye with no panel). Empty: no panels.\n\
+         pub const GRID_PANEL_EYES: &[[i16; 3]] = &{:?};\n\
+         pub const GRID_PANEL_BLOCKS: &[u32] = &{panel_blocks:?};\n\
+         /// The projection plane the panels were baked for, and the distance between eyes.\n\
+         pub const GRID_PANEL_FOCAL: i32 = {};\n\
+         pub const GRID_PANEL_SPACING: i32 = {};\n\
+         /// Plan distance the rooms are drawn whole to.\n\
+         pub const GRID_PANEL_REAL: i32 = {};\n",
+        panels.eyes, panels.focal, panels.spacing, panels.real,
     );
 
     // The shape of the level's own records: how many of each table chunk 1 of
@@ -1305,7 +1327,21 @@ fn world_pack_chunks(package: &PlaytestPackage) -> Vec<(u32, &[u8])> {
                     2 * rooms as u32 + 2 + world.cards.tiles() + x,
                     world.cards.blocks[x as usize].as_slice(),
                 ),
+                PackItem::Eye(_) => continue,
             });
+        }
+        return chunks;
+    }
+    if !world.panels.is_empty() {
+        for item in &world.panels.order {
+            match *item {
+                PackItem::Room(room) => chunks.push(room_chunk(room)),
+                PackItem::Eye(eye) => chunks.push((
+                    2 * rooms as u32 + 2 + eye,
+                    world.panels.blocks[eye as usize].as_slice(),
+                )),
+                PackItem::Tile(_) | PackItem::Block(_) => {}
+            }
         }
         return chunks;
     }
@@ -1319,6 +1355,26 @@ fn world_pack_chunks(package: &PlaytestPackage) -> Vec<(u32, &[u8])> {
             .map(|(room, bytes)| ((rooms + room) as u32 + 2, bytes.as_slice())),
     );
     chunks
+}
+
+/// Per eye, the sector of its block relative to the start of `WORLD.PAK` (0 for none); empty
+/// when the world has no panels.
+fn chunk_panel_blocks(package: &PlaytestPackage) -> Vec<u32> {
+    let world = &package.world_geometry;
+    if world.panels.is_empty() {
+        return Vec::new();
+    }
+    let rooms = world.room_chunks.len() as u32;
+    let layout = world_pack_layout(package);
+    (0..world.panels.eyes.len() as u32)
+        .map(|eye| {
+            layout
+                .entries
+                .iter()
+                .find(|entry| entry.chunk_id == 2 * rooms + 2 + eye)
+                .map_or(0, |entry| entry.sector_offset)
+        })
+        .collect()
 }
 
 /// Per room, the sector of its baked sky relative to the start of

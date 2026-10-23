@@ -23,7 +23,7 @@ use crate::{
 };
 
 use super::{
-    PackItem, PlaytestAsset, PlaytestAssetKind, PlaytestCards, PlaytestGridWorld,
+    PackItem, PlaytestAsset, PlaytestAssetKind, PlaytestCards, PlaytestGridWorld, PlaytestPanels,
     PlaytestSkyTables, PlaytestValidationReport, StreamedClass,
 };
 
@@ -323,9 +323,10 @@ pub(super) fn cook(
     let cube_sky = scene
         .world_sky_for_node(scene.root)
         .is_some_and(|sky| sky.mode == crate::SkyMode::Cube);
-    // Far cards take the sky atlas: no chunk sky is baked to stream over them.
+    // Far cards and panels take the sky atlas: no chunk sky is baked to stream over them.
     let cards_on = world.stream.flood.on && world.stream.flood.cards;
-    let (chunk_skies, sky_tables) = if world.stream.ring && cube_sky && !cards_on {
+    let panels_on = world.stream.flood.on && world.stream.flood.panels > 0;
+    let (chunk_skies, sky_tables) = if world.stream.ring && cube_sky && !cards_on && !panels_on {
         use crate::grid::lighting::BakeMaterials;
         let materials = cook::sky_bake::WorldColours::materials(world);
         let table = crate::grid::lighting::AlbedoTable::from_project(
@@ -351,6 +352,17 @@ pub(super) fn cook(
     } else {
         PlaytestCards::default()
     };
+    let panels = if panels_on {
+        match bake_panels(project, project_root, world, &cooked, report) {
+            Ok(panels) => panels,
+            Err(error) => {
+                report.error(format!("grid world: {error}"));
+                return None;
+            }
+        }
+    } else {
+        PlaytestPanels::default()
+    };
     let summary = cooked.report.summary();
     report.warn(summary.trim_end().to_string());
     report.warn(format!(
@@ -364,7 +376,15 @@ pub(super) fn cook(
     ));
     // A level with cards lays its pictures out among the room chunks: the
     // rooms' sectors (counted from room 0) follow the new order.
-    let rooms = if cards.interleaved() {
+    let rooms = if !panels.is_empty() {
+        match relayout_panel_rooms(&mut cooked, &panels) {
+            Ok(rooms) => rooms,
+            Err(error) => {
+                report.error(format!("grid world: {error}"));
+                return None;
+            }
+        }
+    } else if cards.interleaved() {
         match relayout_rooms(&mut cooked, &cards) {
             Ok(rooms) => rooms,
             Err(error) => {
@@ -396,6 +416,7 @@ pub(super) fn cook(
         chunk_skies,
         sky_tables,
         cards,
+        panels,
     })
 }
 
@@ -470,11 +491,291 @@ fn relayout_rooms(
                 next += sectors;
                 blob.resize(blob.len() + sectors as usize * SECTOR_BYTES, 0);
             }
+            PackItem::Eye(_) => {}
         }
     }
     cooked.core = cooked.level.try_to_bytes()?;
     Ok(blob)
 }
+
+/// [`relayout_rooms`] for a level with panels: the rooms and the eyes' blocks in
+/// [`PlaytestPanels::order`], the blocks as zeroed sectors.
+fn relayout_panel_rooms(
+    cooked: &mut cook::CookedLevel,
+    panels: &PlaytestPanels,
+) -> Result<Vec<u8>, String> {
+    let mut blob = Vec::new();
+    let mut next = 0u32;
+    for item in &panels.order {
+        match *item {
+            PackItem::Room(room) => {
+                let room = room as usize;
+                let chunk = &cooked.chunks[room];
+                let sectors = chunk.len().div_ceil(SECTOR_BYTES).max(1);
+                cooked.level.rooms[room].pack_sector = next;
+                cooked.level.rooms[room].pack_sectors = u16::try_from(sectors)
+                    .map_err(|_| format!("room {room} chunk is too large"))?;
+                next += sectors as u32;
+                blob.extend_from_slice(chunk);
+                blob.resize(blob.len().next_multiple_of(SECTOR_BYTES), 0);
+            }
+            PackItem::Eye(eye) => {
+                let bytes = panels.blocks[eye as usize].len();
+                next += (bytes / SECTOR_BYTES) as u32;
+                blob.resize(blob.len() + bytes, 0);
+            }
+            PackItem::Tile(_) | PackItem::Block(_) => {}
+        }
+    }
+    cooked.core = cooked.level.try_to_bytes()?;
+    Ok(blob)
+}
+
+/// Height of the bake eyes of the panels above the floor they stand over, in sectors: the
+/// follow camera's, as for the room cards.
+const PANEL_EYE_SECTORS: f32 = 1.45;
+
+/// Floors this many sectors apart (or more) in height get bake eyes of their own where they
+/// stand over the same lattice cell: a bridge over the ground.
+const PANEL_STOREY_SECTORS: f32 = 2.5;
+
+/// The bake eyes of the panels: the floors a body can stand on and reach, grouped by a
+/// lattice of `spacing` sectors (and by storey), each group one eye at the walkable sector
+/// nearest the group's mean, a person's height over the floor.
+pub fn panel_eyes(
+    project: &ProjectDocument,
+    world: &GridWorld,
+    cooked: &cook::CookedLevel,
+    spacing: i32,
+) -> Vec<cook::panels::EyeSpec> {
+    use crate::grid::walk::{analyse, player_spawns};
+    let sector = cooked.level.sector_units as i32;
+    let Ok(units) = RuntimeUnits::new(world.scale) else {
+        return Vec::new();
+    };
+    let spawns = player_spawns(project, world);
+    let analysis = analyse(world, &spawns, &psx_engine::WalkLimits::DEFAULT);
+    // (lattice x, lattice z, storey) -> sectors: (room, x, floor y, z).
+    let mut groups: std::collections::BTreeMap<(i32, i32, i32), Vec<(usize, f32, f32, f32)>> =
+        Default::default();
+    for (ri, room) in world.rooms.iter().enumerate() {
+        let record = &cooked.level.rooms[ri];
+        for (lx, lz, grid_sector) in room.iter() {
+            let Some(floor) = grid_sector.ground_floor() else {
+                continue;
+            };
+            let walk = analysis
+                .as_ref()
+                .and_then(|a| a.rooms.get(ri))
+                .and_then(|r| r.cell([room.origin[0] + lx as i32, room.origin[1] + lz as i32]));
+            if let Some(walk) = walk {
+                let reach = analysis
+                    .as_ref()
+                    .is_none_or(|a| !a.reach_ran || !walk.unreachable);
+                if !walk.standable || !reach {
+                    continue;
+                }
+            } else if !floor.walkable {
+                continue;
+            }
+            let mean = floor.heights.iter().sum::<i32>() / 4;
+            let y = units.rt(room.y_offset + mean) as f32;
+            let x = (record.origin[0] + lx as i32 * sector + sector / 2) as f32;
+            let z = (record.origin[2] + lz as i32 * sector + sector / 2) as f32;
+            let cell = (
+                (x / (spacing * sector) as f32).floor() as i32,
+                (z / (spacing * sector) as f32).floor() as i32,
+                (y / (PANEL_STOREY_SECTORS * sector as f32)).floor() as i32,
+            );
+            groups.entry(cell).or_default().push((ri, x, y, z));
+        }
+    }
+    let height = PANEL_EYE_SECTORS * sector as f32;
+    groups
+        .values()
+        .map(|cells| {
+            let n = cells.len() as f32;
+            let (mx, mz) = (
+                cells.iter().map(|c| c.1).sum::<f32>() / n,
+                cells.iter().map(|c| c.3).sum::<f32>() / n,
+            );
+            let best = cells
+                .iter()
+                .min_by(|a, b| {
+                    let da = (a.1 - mx).powi(2) + (a.3 - mz).powi(2);
+                    let db = (b.1 - mx).powi(2) + (b.3 - mz).powi(2);
+                    da.total_cmp(&db)
+                })
+                .expect("a group has a sector");
+            cook::panels::EyeSpec {
+                room: best.0,
+                eye: [best.1, best.2 + height, best.3],
+            }
+        })
+        .collect()
+}
+
+/// Bake the far panels of `cooked` for a tool (the probe examples): `project` and `world` are
+/// as [`cook_for_cards`] cooked them.
+pub fn bake_panels_for_tools(
+    project: &ProjectDocument,
+    project_root: &Path,
+    world: &GridWorld,
+    cooked: &cook::CookedLevel,
+) -> Result<PlaytestPanels, String> {
+    bake_panels(
+        project,
+        project_root,
+        world,
+        cooked,
+        &mut PlaytestValidationReport::default(),
+    )
+}
+
+/// Bake the far panels of `cooked`.
+fn bake_panels(
+    project: &ProjectDocument,
+    project_root: &Path,
+    world: &GridWorld,
+    cooked: &cook::CookedLevel,
+    report: &mut PlaytestValidationReport,
+) -> Result<PlaytestPanels, String> {
+    use crate::grid::lighting::{AlbedoTable, BakeMaterials};
+    use psx_grid::flood::{Flood, FloodQuery, NO_PAGE_BUDGET};
+    let started = std::time::Instant::now();
+    let ids: Vec<Option<ResourceId>> = cooked.materials.iter().map(|(id, _)| *id).collect();
+    let table = AlbedoTable::from_project(project, project_root, ids.iter().copied());
+    let albedo: Vec<[f32; 3]> = ids.iter().map(|&id| table.albedo(id)).collect();
+    let sector = cooked.level.sector_units as i32;
+    let flood = &world.stream.flood;
+    let spacing = i32::from(flood.panels);
+    let eyes = panel_eyes(project, world, cooked, spacing);
+    if eyes.is_empty() {
+        return Err("panels: the level has no floor to put a bake eye on".into());
+    }
+    let limit = i32::from(i16::MAX);
+    if eyes
+        .iter()
+        .any(|e| e.eye.iter().any(|v| v.abs() as i32 > limit))
+    {
+        return Err(
+            "panels: a bake eye lies past 32767 runtime units from the world origin".into(),
+        );
+    }
+    let tris = cook::panels::World::new(
+        cooked,
+        &albedo,
+        Some(panel_textures(project, project_root, cooked)),
+    );
+    let blobs = crate::grid::census::LevelBlobs::new(&cooked.core, &cooked.chunks);
+    let view = blobs.view();
+    // The rooms the flood draws whole from anywhere within a lattice cell of an eye: the eye's
+    // own flood with the radius cut by the distance the eye can be from its lattice vertex
+    // (the flood's distance is within 7 percent of straight).
+    let reach = spacing * sector * 4 / 5;
+    let radius = (i32::from(flood.near_radius) * sector - reach * 107 / 100).max(0);
+    let rooms = cooked.level.rooms.len();
+    let exclude = |spec: &cook::panels::EyeSpec| -> Vec<bool> {
+        let mut flood = Flood::new(&view);
+        flood.solve(
+            &view,
+            FloodQuery {
+                room: spec.room,
+                at: spec.eye.map(|v| v as i32),
+                radius,
+                page_budget: NO_PAGE_BUDGET,
+            },
+        );
+        let mut drawn = vec![false; rooms];
+        for entry in flood.rooms() {
+            drawn[usize::from(entry.room)] = true;
+        }
+        drawn
+    };
+    let focal = PANEL_FOCAL;
+    let baked = cook::panels::bake_eyes(&tris, &eyes, focal as f32, &exclude);
+    let blocks = cook::panels::eye_blocks(&baked);
+    let count: usize = baked.iter().map(|set| set.iter().flatten().count()).sum();
+    // Rooms and eyes along one Hilbert curve; an eye with nothing to show is left out.
+    let room_centres: Vec<Option<[i32; 2]>> = tris
+        .centres
+        .iter()
+        .map(|c| c.map(|c| [c[0] as i32, c[1] as i32]))
+        .collect();
+    let eye_centres: Vec<Option<[i32; 2]>> = eyes
+        .iter()
+        .zip(&blocks)
+        .map(|(e, block)| (!block.is_empty()).then(|| [e.eye[0] as i32, e.eye[2] as i32]))
+        .collect();
+    let mut order = vec![PackItem::Room(0)];
+    order.extend(
+        cook::panels::pack_order(&room_centres, &eye_centres)
+            .into_iter()
+            .map(|(is_eye, i)| {
+                if is_eye {
+                    PackItem::Eye(i as u32)
+                } else {
+                    PackItem::Room(i as u32)
+                }
+            }),
+    );
+    let kib: usize = blocks.iter().map(Vec::len).sum::<usize>() / 1024;
+    report.warn(format!(
+        "panels: {} eyes {} sectors apart, {} panels, {} KiB of pictures, drawn whole radius {} sectors (cut to {:.1} for the eyes' reach), baked in {:.1} s",
+        eyes.len(),
+        spacing,
+        count,
+        kib,
+        flood.near_radius,
+        radius as f32 / sector as f32,
+        started.elapsed().as_secs_f64()
+    ));
+    let scene = project.active_scene();
+    let sky = scene.world_sky_for_node(scene.root);
+    let backdrop = sky.map_or([[0; 3]; 3], |s| {
+        [s.lower_color, s.horizon_color, s.top_color]
+    });
+    Ok(PlaytestPanels {
+        backdrop,
+        eyes: eyes
+            .iter()
+            .map(|e| [e.eye[0] as i16, e.eye[1] as i16, e.eye[2] as i16])
+            .collect(),
+        blocks,
+        order,
+        focal,
+        spacing: spacing * sector,
+        real: i32::from(flood.near_radius) * sector,
+    })
+}
+
+/// The textures of the level's materials as the panel bake samples them, by material slot.
+pub fn panel_textures(
+    project: &ProjectDocument,
+    project_root: &Path,
+    cooked: &cook::CookedLevel,
+) -> cook::panels::TextureSet {
+    let mut set = cook::panels::TextureSet::default();
+    for (id, bound) in &cooked.materials {
+        let image = bound
+            .textured
+            .then(|| {
+                let id = (*id)?;
+                let (_, bytes) = crate::resolve_material_texture_psxt(project, id, project_root)
+                    .ok()
+                    .flatten()?;
+                cook::panels::TextureImage::from_psxt(&bytes)
+            })
+            .flatten();
+        set.images.push(image);
+        set.tint.push(bound.tint.map(|c| f32::from(c) / 128.0));
+    }
+    set
+}
+
+/// The projection plane the panels are baked for: the follow camera's, at 43 degrees of
+/// vertical field of view on a 240 row screen.
+const PANEL_FOCAL: i32 = 305;
 
 /// Height of a person's eye above the floor, in sectors, that the room cards are drawn
 /// from: the follow camera's (its boom and a person's height).

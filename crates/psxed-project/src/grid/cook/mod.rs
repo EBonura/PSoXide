@@ -16,6 +16,7 @@ pub mod lod;
 pub mod mesh;
 pub mod mesh_collision;
 pub mod occupancy;
+pub mod panels;
 pub mod plane_collision;
 pub mod portals;
 pub mod render;

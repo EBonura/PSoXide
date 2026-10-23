@@ -167,6 +167,36 @@ pub struct PlaytestCards {
     pub backdrop: [[u8; 3]; 3],
 }
 
+/// The far panels of a world (`psx_grid::render::panels`); empty when the world has none.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PlaytestPanels {
+    /// The bake eyes, runtime units.
+    pub eyes: Vec<[i16; 3]>,
+    /// Per eye, its block (`WORLD.PAK` chunk `2 * rooms + 2 + eye`): a sector listing the
+    /// tiles each heading stores, then the panels; empty for an eye with no panel.
+    pub blocks: Vec<Vec<u8>>,
+    /// The order the chunks after the core and the records go in the pack: room 0 first, then
+    /// the rooms and the eyes' blocks along a Hilbert curve through their positions, so a
+    /// drive at a room is near the panels of the eyes that stand with it.
+    pub order: Vec<PackItem>,
+    /// The projection plane the panels were baked for, pixels.
+    pub focal: i32,
+    /// The distance between lattice eyes, runtime units.
+    pub spacing: i32,
+    /// Plan distance (runtime units) the rooms are drawn whole to: a panel is never drawn in
+    /// front of the geometry inside it.
+    pub real: i32,
+    /// The colours behind the panels (below the horizon, at it, at the top of the screen).
+    pub backdrop: [[u8; 3]; 3],
+}
+
+impl PlaytestPanels {
+    /// Whether the world has panels.
+    pub fn is_empty(&self) -> bool {
+        self.blocks.is_empty()
+    }
+}
+
 /// One chunk of the room area of `WORLD.PAK` when the far cards' pictures are
 /// laid out among the rooms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -177,6 +207,8 @@ pub enum PackItem {
     Tile(u32),
     /// The copies near this tile.
     Block(u32),
+    /// The panels of this bake eye.
+    Eye(u32),
 }
 
 impl PlaytestCards {
@@ -287,6 +319,8 @@ pub struct PlaytestGridWorld {
     pub sky_tables: PlaytestSkyTables,
     /// The far cards, for a flood world that bakes them.
     pub cards: PlaytestCards,
+    /// The far panels (instead of cards).
+    pub panels: PlaytestPanels,
     /// One block of text with the cook's sizes, for the build log.
     pub summary: String,
 }

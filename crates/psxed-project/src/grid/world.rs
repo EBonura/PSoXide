@@ -122,6 +122,11 @@ pub struct FloodSettings {
     /// from its distance to the next layer's, the last one everything to the
     /// horizon ([`FloodSettings::card_layer_bands`]).
     pub card_layers: u8,
+    /// Draw everything beyond the rooms drawn whole as depth-meshed panels baked at a
+    /// lattice of eyes (`psx_grid::render::panels`) instead of cards: the lattice's spacing in
+    /// sectors, 0 for none. Needs `on` and a cube sky (the pictures take the sky atlas's
+    /// VRAM, as the cards do); `cards` is left off.
+    pub panels: u8,
 }
 
 impl FloodSettings {
@@ -138,6 +143,7 @@ impl FloodSettings {
         card_far: 0,
         card_near: 0,
         card_layers: 0,
+        panels: 0,
     };
 
     /// Sectors out to which cards are shown.

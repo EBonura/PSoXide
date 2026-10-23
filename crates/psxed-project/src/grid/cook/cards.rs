@@ -66,11 +66,13 @@ pub struct CardsReport {
 }
 
 /// A triangle of the room in world space with its corner colours.
-struct Triangle {
-    position: [[f32; 3]; 3],
-    colour: [[f32; 3]; 3],
+pub(super) struct Triangle {
+    pub(super) position: [[f32; 3]; 3],
+    pub(super) colour: [[f32; 3]; 3],
     /// Index into the room's quads, for the facing test.
-    quad: usize,
+    pub(super) quad: usize,
+    /// Which corners of the quad the triangle has.
+    pub(super) corner: [usize; 3],
 }
 
 /// Corner colour: the material's mean colour times the baked light of the
@@ -81,7 +83,7 @@ fn shade(albedo: [f32; 3], colour: u32) -> [f32; 3] {
 
 /// Whether `quad` faces an eye in direction `towards_eye` (a unit vector,
 /// world axes `x`, `y`, `z`) from the card.
-fn faces(quad: &Quad, towards_eye: [f32; 3]) -> bool {
+pub(super) fn faces(quad: &Quad, towards_eye: [f32; 3]) -> bool {
     if quad.flags & QUAD_DOUBLE != 0 {
         return true;
     }
@@ -104,7 +106,7 @@ fn triangles(cooked: &CookedLevel, albedo: &[[f32; 3]], room: usize) -> (Vec<Tri
 }
 
 /// [`triangles`] for the layer bake.
-fn triangles_of(
+pub(super) fn triangles_of(
     cooked: &CookedLevel,
     albedo: &[[f32; 3]],
     room: usize,
@@ -132,6 +134,7 @@ fn triangles_of(
             position: [a.0, b.0, c.0],
             colour: [a.1, b.1, c.1],
             quad: index,
+            corner: [0, 1, 2],
         });
         if quad.flags & QUAD_TRI == 0 {
             let d = corner(3);
@@ -139,6 +142,7 @@ fn triangles_of(
                 position: [a.0, c.0, d.0],
                 colour: [a.1, c.1, d.1],
                 quad: index,
+                corner: [0, 2, 3],
             });
         }
     }
@@ -273,7 +277,7 @@ impl Raster {
 }
 
 /// The sector of a picture: 63 rows of packed 4-bit texels, then the palette.
-fn encode(indices: &[u8], palette: &[[u8; 3]]) -> Vec<u8> {
+pub(super) fn encode(indices: &[u8], palette: &[[u8; 3]]) -> Vec<u8> {
     let mut out = vec![0u8; SLOT_BYTES];
     for row in 0..HIGH {
         for pair in 0..WIDE / 2 {
@@ -471,18 +475,22 @@ pub fn bake_room(
 }
 
 /// The centre, reach and vertical extent of a room's geometry.
-struct RoomFrame {
-    centre: [i32; 2],
+pub(super) struct RoomFrame {
+    pub(super) centre: [i32; 2],
     #[allow(dead_code)]
-    reach: f32,
-    low: f32,
+    pub(super) reach: f32,
+    pub(super) low: f32,
     #[allow(dead_code)]
-    high: f32,
+    pub(super) high: f32,
 }
 
 /// Where a room stands: the centre of the sectors it owns, how far its geometry reaches
 /// from there and how low and high it goes. `None` when it owns nothing or draws nothing.
-fn room_frame(cooked: &CookedLevel, room: usize, tris: &[Triangle]) -> Option<RoomFrame> {
+pub(super) fn room_frame(
+    cooked: &CookedLevel,
+    room: usize,
+    tris: &[Triangle],
+) -> Option<RoomFrame> {
     if tris.is_empty() {
         return None;
     }
@@ -673,21 +681,24 @@ impl LayerSpec {
 const EYE_SECTORS: f32 = 2.0;
 
 /// A cooked triangle of the whole level in world space.
-struct WorldTriangle {
-    position: [[f32; 3]; 3],
-    colour: [[f32; 3]; 3],
-    quad: Quad,
+pub(super) struct WorldTriangle {
+    pub(super) position: [[f32; 3]; 3],
+    pub(super) colour: [[f32; 3]; 3],
+    pub(super) quad: Quad,
+    /// Which corners of the quad the triangle has, and the level material slot of the quad.
+    pub(super) corner: [usize; 3],
+    pub(super) slot: usize,
 }
 
 /// Every triangle of the level, and the world box of each room's.
-struct WorldTriangles {
-    triangles: Vec<WorldTriangle>,
+pub(super) struct WorldTriangles {
+    pub(super) triangles: Vec<WorldTriangle>,
     /// Per room, its triangles' index range and world box `(lo, hi)`.
-    rooms: Vec<(std::ops::Range<usize>, [f32; 3], [f32; 3])>,
+    pub(super) rooms: Vec<(std::ops::Range<usize>, [f32; 3], [f32; 3])>,
 }
 
 impl WorldTriangles {
-    fn new(cooked: &CookedLevel, albedo: &[[f32; 3]]) -> Self {
+    pub(super) fn new(cooked: &CookedLevel, albedo: &[[f32; 3]]) -> Self {
         let mut triangles = Vec::new();
         let mut rooms = Vec::new();
         for room in 0..cooked.level.rooms.len() {
@@ -701,10 +712,17 @@ impl WorldTriangles {
                         hi[k] = hi[k].max(p[k]);
                     }
                 }
+                let quad = quads[t.quad];
+                let slot = cooked.tables[room]
+                    .material_use
+                    .get(usize::from(quad.material))
+                    .map_or(0, |&m| usize::from(m));
                 triangles.push(WorldTriangle {
                     position: t.position,
                     colour: t.colour,
-                    quad: quads[t.quad],
+                    quad,
+                    corner: t.corner,
+                    slot,
                 });
             }
             rooms.push((start..triangles.len(), lo, hi));
@@ -715,13 +733,13 @@ impl WorldTriangles {
 
 /// A polygon vertex while clipping: position and corner colour.
 #[derive(Clone, Copy)]
-struct ClipVertex {
-    p: [f32; 3],
-    c: [f32; 3],
+pub(super) struct ClipVertex {
+    pub(super) p: [f32; 3],
+    pub(super) c: [f32; 3],
 }
 
 /// Keep the part of `poly` where `f >= 0` (`f` linear in the vertex).
-fn clip_polygon(poly: &[ClipVertex], f: impl Fn(&ClipVertex) -> f32) -> Vec<ClipVertex> {
+pub(super) fn clip_polygon(poly: &[ClipVertex], f: impl Fn(&ClipVertex) -> f32) -> Vec<ClipVertex> {
     let mut out = Vec::with_capacity(poly.len() + 1);
     for i in 0..poly.len() {
         let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
@@ -1004,7 +1022,7 @@ const ORDER_GRID: u32 = 256;
 
 /// Position of cell `(x, y)` along the Hilbert curve through an
 /// `ORDER_GRID` square: cells close on the curve are close in the plane.
-fn hilbert_index(mut x: u32, mut y: u32) -> u32 {
+pub(super) fn hilbert_index(mut x: u32, mut y: u32) -> u32 {
     let mut index = 0;
     let mut step = ORDER_GRID / 2;
     while step > 0 {
