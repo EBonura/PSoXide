@@ -798,7 +798,14 @@ impl Playtest {
                 .world_rt
                 .as_ref()
                 .map_or(0, |world_rt| world_rt.card_hold_near());
+            #[cfg(feature = "far-cards")]
             step_cards([eye.x, eye.y, eye.z], hold_near);
+            #[cfg(not(feature = "far-cards"))]
+            let _ = hold_near;
+            crate::vram_runtime::step_panels(
+                [eye.x, eye.y, eye.z],
+                self.render_camera.projection.focal_length,
+            );
         }
         if self.world_rt.is_some() && background_tick {
             let _ = self.streaming_jobs.step_vram_uploads();

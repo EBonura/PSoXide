@@ -1059,6 +1059,8 @@ impl GridRuntime {
         let view_rotation = world_view_rotation(camera);
         let cam = view_camera(camera);
         let view = load_view_rotation(cam.origin, view_rotation);
+        #[cfg(feature = "cd-stream-bench")]
+        crate::vram_runtime::note_view(&view.rotation.m);
         let eye = [cam.origin.x >> 12, cam.origin.y >> 12, cam.origin.z >> 12];
         // Planes for a camera at the origin: the room boxes below are made
         // eye-relative, so nothing here depends on how far the world is from
@@ -1273,9 +1275,11 @@ impl GridRuntime {
                             }
                         }
                     }
-                    #[cfg(feature = "cd-stream-bench")]
+                    #[cfg(feature = "far-cards")]
                     if !total.overflowed {
-                        if let Some((atlas, tpage)) = crate::vram_runtime::card_atlas() {
+                        if let Some((atlas, tpage)) = crate::vram_runtime::card_atlas()
+                            .filter(|_| crate::vram_runtime::has_room_cards())
+                        {
                             use crate::generated::{
                                 GRID_CARDS, GRID_CARD_FADE, GRID_CARD_FAR, GRID_CARD_NEAR,
                             };
@@ -1340,6 +1344,7 @@ impl GridRuntime {
                                 table: &psx_grid::render::CardTable::new(GRID_CARDS),
                                 live: card_live,
                                 eye,
+                                rotation: view.rotation.m,
                                 right,
                                 forward,
                                 half_tan_q12: ((self.projection.half_width << 12)
@@ -1366,6 +1371,77 @@ impl GridRuntime {
                                 overflowed: cards.overflowed,
                                 ..GridFrame::default()
                             });
+                        }
+                    }
+                    // The far panels: the level beyond the rooms drawn whole, as meshes of
+                    // pictures standing where the level stands.
+                    #[cfg(feature = "cd-stream-bench")]
+                    if !total.overflowed && crate::vram_runtime::has_panels() {
+                        if let Some((atlas, tpage)) = crate::vram_runtime::card_atlas() {
+                            use crate::generated::{GRID_PANEL_FOCAL, GRID_PANEL_REAL};
+                            use psx_grid::render::{
+                                draw_panel, PanelCamera, PanelRays, PanelRef, PanelScratch,
+                            };
+                            static PANEL_RAYS: PanelRays = PanelRays::new(GRID_PANEL_FOCAL);
+                            static mut PANEL_SCRATCH: PanelScratch = PanelScratch::new();
+                            let mut list: [Option<PanelRef<'static>>; 4] = [None; 4];
+                            let count = crate::vram_runtime::panel_drawables(&mut list);
+                            #[cfg(feature = "card-trace")]
+                            crate::card_trace::panel_pose(
+                                eye,
+                                &view.rotation.m,
+                                crate::vram_runtime::panel_eye(),
+                            );
+                            if count > 0 {
+                                // The depth the rooms drawn whole end at, as an ordering
+                                // table slot (the view's rotation is scaled, and a slot is a
+                                // quarter of the mean of four corners' depth).
+                                let row = view.rotation.m[2].map(i32::from);
+                                let scale = psx_math::int32::isqrt_i32(
+                                    row[0] * row[0] + row[1] * row[1] + row[2] * row[2],
+                                );
+                                let units = GRID_PANEL_REAL + sector;
+                                let camera = PanelCamera {
+                                    screen,
+                                    near_sz: (self.projection.focal_length / 2 + 2)
+                                        .clamp(1, i32::from(u16::MAX))
+                                        as u16,
+                                    tpage,
+                                    atlas,
+                                    sector,
+                                    otz_floor: (((units * scale) >> 12) >> 2) as u32,
+                                };
+                                telemetry::stage_begin(telemetry::stage::FAR_VISTA);
+                                for panel in list[..count].iter().flatten() {
+                                    // SAFETY: single-threaded guest; the scratch is touched
+                                    // only here.
+                                    let frame = draw_panel(
+                                        panel,
+                                        &PANEL_RAYS,
+                                        &camera,
+                                        unsafe { &mut *core::ptr::addr_of_mut!(PANEL_SCRATCH) },
+                                        if reverse {
+                                            &mut packets[..packet_count - total.packet_words]
+                                        } else {
+                                            &mut packets[total.packet_words..]
+                                        },
+                                        reverse,
+                                    );
+                                    total.absorb(&GridFrame {
+                                        packet_words: frame.packet_words,
+                                        packets: frame.packets,
+                                        overflowed: frame.overflowed,
+                                        ..GridFrame::default()
+                                    });
+                                    #[cfg(feature = "card-trace")]
+                                    crate::card_trace::panel_frame(
+                                        &frame,
+                                        panel.heading,
+                                        crate::vram_runtime::panel_eye() as u16,
+                                    );
+                                }
+                                telemetry::stage_end(telemetry::stage::FAR_VISTA);
+                            }
                         }
                     }
                 }

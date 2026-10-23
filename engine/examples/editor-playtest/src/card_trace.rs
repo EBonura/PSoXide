@@ -169,6 +169,8 @@ pub(super) struct View<'a> {
     pub table: &'a CardTable<'a>,
     pub live: &'a [LiveSlot; SLOTS],
     pub eye: [i32; 3],
+    /// The view rotation (Q12 rows), for `ct Q`.
+    pub rotation: [[i16; 3]; 3],
     pub right: [i32; 2],
     pub forward: [i32; 2],
     pub half_tan_q12: i32,
@@ -202,6 +204,27 @@ pub(super) fn frame(view: &View<'_>) {
     }
     let [ex, _, ez] = view.eye;
     trace.frames = trace.frames.wrapping_add(1);
+    // Every frame: the camera, then the cards drawn with the view each shows.
+    let mut line = Line::new("ct Q");
+    for value in view.eye {
+        line.number((value + 32768) as u32);
+    }
+    for row in view.rotation {
+        for value in row {
+            line.number((i32::from(value) + 32768) as u32);
+        }
+    }
+    line.emit();
+    for entry in view.live {
+        if entry.view != NO_VIEW && trace.drawn.get(usize::from(entry.room)).copied() == Some(true)
+        {
+            let mut line = Line::new("ct W");
+            line.number(u32::from(entry.room));
+            line.number(u32::from(entry.view));
+            line.number(u32::from(entry.fade));
+            line.emit();
+        }
+    }
     if trace.frames % 30 == 0 {
         let mut line = Line::new("ct P");
         line.number((ex + 32768) as u32);
@@ -347,4 +370,97 @@ pub(super) fn frame(view: &View<'_>) {
         }
         line.emit();
     }
+}
+
+/// The camera of every frame the panels are drawn for, `pt Q`: the eye and the nine words of
+/// the view rotation, 32768 added to each.
+pub(super) fn panel_pose(eye: [i32; 3], rotation: &[[i16; 3]; 3], eye_index: u32) {
+    let mut line = Line::new("pt Q");
+    for value in eye {
+        line.number((value + 32768) as u32);
+    }
+    for row in rotation {
+        for &value in row {
+            line.number((i32::from(value) + 32768) as u32);
+        }
+    }
+    line.number(eye_index);
+    line.emit();
+}
+
+/// One panel drawn: `pt D packets tiles_looked_at`.
+pub(super) fn panel_frame(frame: &psx_grid::render::GridFrame, heading: u8, eye: u16) {
+    let mut line = Line::new("pt D");
+    line.number(frame.packets);
+    line.number(u32::from(frame.cells_visible));
+    line.number(u32::from(frame.quads_visible));
+    line.number(u32::from(frame.depth_skipped));
+    line.number(u32::from(frame.screen_culled));
+    line.number(u32::from(heading));
+    line.number(u32::from(eye));
+    line.emit();
+}
+
+/// Report the panel stream's counters when they changed.
+pub(super) fn panel_counters(now: psx_game_runtime::panel_stream::PanelCounters) {
+    // SAFETY: single-threaded guest; the trace is touched only here and in the card trace.
+    let trace = unsafe { &mut *core::ptr::addr_of_mut!(PANEL_LAST) };
+    if now == *trace {
+        return;
+    }
+    *trace = now;
+    let mut line = Line::new("pt R");
+    for value in [
+        now.submitted,
+        now.landed,
+        now.failed,
+        now.uploads,
+        now.evictions,
+        now.refused,
+        now.held,
+        now.wanted,
+        now.missing,
+        now.starved,
+        now.eye,
+        now.last_first,
+        now.last_sectors,
+    ] {
+        line.number(value);
+    }
+    line.emit();
+}
+
+static mut PANEL_LAST: psx_game_runtime::panel_stream::PanelCounters =
+    psx_game_runtime::panel_stream::PanelCounters {
+        submitted: 0,
+        landed: 0,
+        failed: 0,
+        uploads: 0,
+        evictions: 0,
+        refused: 0,
+        held: 0,
+        wanted: 0,
+        missing: 0,
+        starved: 0,
+        eye: 0,
+        last_first: 0,
+        last_sectors: 0,
+    };
+
+/// What the panel stream was told about the camera, `pt I`, when the heading it looks along
+/// changes: the forward direction in plan (Q12, 32768 added), the pitch's `tan` (32768 added)
+/// and the eye.
+pub(super) fn panel_input(forward: [i32; 2], pitch_tan: i32, eye: [i32; 3]) {
+    static mut LAST: [i32; 2] = [i32::MAX; 2];
+    // SAFETY: single-threaded guest; the trace is touched only here.
+    let last = unsafe { &mut *core::ptr::addr_of_mut!(LAST) };
+    if (forward[0] - last[0]).abs() < 256 && (forward[1] - last[1]).abs() < 256 {
+        return;
+    }
+    *last = forward;
+    let mut line = Line::new("pt I");
+    for value in [forward[0], forward[1], pitch_tan, eye[0], eye[1], eye[2]] {
+        line.number((value + 32768) as u32);
+    }
+    line.emit();
 }

@@ -36,6 +36,7 @@ mod cards;
 mod clip;
 mod emit;
 mod frustum;
+mod panels;
 mod projection;
 mod select;
 mod skin;
@@ -51,6 +52,12 @@ pub use clip::clip_polygon_plane;
 #[cfg(target_arch = "mips")]
 pub use frustum::load_gte_clip_planes;
 pub use frustum::{FrustumPlanes, CLIP_ALL_PLANES};
+pub use panels::{
+    depth_byte, depth_units, draw_panel, PanelCamera, PanelRays, PanelRef, PanelScratch, CELLS_X,
+    CELLS_Y, CELL_H, CELL_W, CENTRE_COLUMN, COLS, DEPTH_SECTOR_SHIFT, DEPTH_STEPS,
+    HEADER_DEPTH_BYTES, HEADINGS, HORIZON_ROW, MESH, MESH_H, MESH_W, NO_TILE_SLOT, ROWS, TILES,
+    TILE_TEXELS,
+};
 pub use projection::{
     classic_far_depth, load_view_rotation, view_rotation, Camera, ViewProjection, ViewTransform,
     VIEW_SCALE_Q12,

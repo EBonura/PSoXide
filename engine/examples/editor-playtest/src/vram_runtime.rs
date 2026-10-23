@@ -304,7 +304,10 @@ pub(super) fn release_gameplay_vram() {
     #[cfg(feature = "cd-stream-bench")]
     // SAFETY: single-threaded guest; see `step_cards`.
     unsafe {
+        #[cfg(feature = "far-cards")]
         (*core::ptr::addr_of_mut!(CARDS))
+            .release_all(&mut psx_game_runtime::grid_stream::DiscTransport);
+        (*core::ptr::addr_of_mut!(PANELS))
             .release_all(&mut psx_game_runtime::grid_stream::DiscTransport);
     }
     vram_arena().release_gameplay_vram();
@@ -449,14 +452,14 @@ pub static mut CHUNK_SKY_COUNTERS: psx_game_runtime::cube_sky_stream::SkyCounter
 /// The far cards' stream and its counters. The pictures read through the
 /// chunk sky's window: a world that has cards bakes no chunk skies, so the
 /// window is idle.
-#[cfg(feature = "cd-stream-bench")]
+#[cfg(feature = "far-cards")]
 static mut CARDS: psx_game_runtime::card_stream::CardStream<
     <psx_game_runtime::grid_stream::DiscTransport as psx_game_runtime::grid_stream::RoomTransport>::Ticket,
 > = psx_game_runtime::card_stream::CardStream::new();
 
 /// The card stream's counters, at a fixed address (like the chunk sky's) so a
 /// RAM dump of a run shows what the stream did.
-#[cfg(feature = "cd-stream-bench")]
+#[cfg(feature = "far-cards")]
 #[no_mangle]
 pub static mut CARD_COUNTERS: psx_game_runtime::card_stream::CardCounters =
     psx_game_runtime::card_stream::CardCounters {
@@ -475,9 +478,20 @@ pub static mut CARD_COUNTERS: psx_game_runtime::card_stream::CardCounters =
         last_sectors: 0,
     };
 
-/// Whether the level has far cards.
+/// Whether the level has far cards or far panels: either takes the sky atlas, and the sky
+/// is a plain gradient behind them.
 pub(super) fn has_cards() -> bool {
-    !crate::generated::GRID_CARDS.is_empty()
+    !crate::generated::GRID_CARDS.is_empty() || has_panels()
+}
+
+/// Whether the level has far cards of rooms.
+pub(super) fn has_room_cards() -> bool {
+    cfg!(feature = "far-cards") && !crate::generated::GRID_CARDS.is_empty()
+}
+
+/// Whether the level has far panels.
+pub(super) fn has_panels() -> bool {
+    !crate::generated::GRID_PANEL_BLOCKS.is_empty()
 }
 
 /// The distances of the layers of cards beyond the rooms', as the card draw and
@@ -502,16 +516,16 @@ pub(super) fn card_atlas() -> Option<((u16, u16), u16)> {
 
 /// Fades' widths (3 sectors each) past the far edge a room takes its slot and
 /// starts its picture coming.
-#[cfg(feature = "cd-stream-bench")]
+#[cfg(feature = "far-cards")]
 const CARD_PREFETCH_FADES: i32 = 3;
 
 /// Fades' widths the room the eye walks towards ranks ahead of one beside it.
-#[cfg(feature = "cd-stream-bench")]
+#[cfg(feature = "far-cards")]
 const CARD_LEAD_FADES: i32 = 2;
 
 /// Keep the cards' pictures coming for an eye at `eye`. Call once per tick,
 /// once the level has loaded.
-#[cfg(feature = "cd-stream-bench")]
+#[cfg(feature = "far-cards")]
 pub(super) fn step_cards(eye: [i32; 3], hold_near: i32) {
     use crate::generated::{
         GRID_CARDS, GRID_CARD_COPIES, GRID_CARD_FADE, GRID_CARD_FAR, GRID_CARD_NEAR,
@@ -559,8 +573,166 @@ pub(super) fn step_cards(eye: [i32; 3], hold_near: i32) {
     }
 }
 
-/// The slots of the card atlas as the draw reads them, and the ones to draw.
+/// The far panels' stream and its counters. Their tiles read through the chunk sky's window,
+/// like the cards' pictures: a world that has panels bakes no chunk skies.
 #[cfg(feature = "cd-stream-bench")]
+static mut PANELS: psx_game_runtime::panel_stream::PanelStream<
+    <psx_game_runtime::grid_stream::DiscTransport as psx_game_runtime::grid_stream::RoomTransport>::Ticket,
+> = psx_game_runtime::panel_stream::PanelStream::new();
+
+/// The panel stream's counters, at a fixed address so a RAM dump of a run shows what the
+/// stream did.
+#[cfg(feature = "cd-stream-bench")]
+#[no_mangle]
+pub static mut PANEL_COUNTERS: psx_game_runtime::panel_stream::PanelCounters =
+    psx_game_runtime::panel_stream::PanelCounters {
+        submitted: 0,
+        landed: 0,
+        failed: 0,
+        uploads: 0,
+        evictions: 0,
+        refused: 0,
+        held: 0,
+        wanted: 0,
+        missing: 0,
+        starved: 0,
+        eye: 0,
+        last_first: 0,
+        last_sectors: 0,
+    };
+
+/// The view rotation the last frame was drawn with (the world's axes composed with the
+/// camera's, as the GTE holds it), for the panel stream to read which way the camera looks.
+#[cfg(feature = "cd-stream-bench")]
+static mut LAST_VIEW: Option<[[i16; 3]; 3]> = None;
+
+/// Note the rotation a frame is drawn with.
+#[cfg(feature = "cd-stream-bench")]
+pub(super) fn note_view(rotation: &[[i16; 3]; 3]) {
+    // SAFETY: single-threaded guest; see `step_panels`.
+    unsafe { *core::ptr::addr_of_mut!(LAST_VIEW) = Some(*rotation) };
+}
+
+/// Keep the panels' tiles coming for a camera at `eye` (a frame behind in its direction).
+/// Call once per tick, once the level has loaded.
+#[cfg(feature = "cd-stream-bench")]
+pub(super) fn step_panels(eye: [i32; 3], focal: i32) {
+    use crate::generated::{
+        GRID_PANEL_BLOCKS, GRID_PANEL_EYES, GRID_PANEL_FOCAL, GRID_PANEL_SPACING,
+        WORLD_PACK_START_LBA,
+    };
+    use psx_game_runtime::panel_stream::PanelInput;
+    if GRID_PANEL_BLOCKS.is_empty() || card_atlas().is_none() {
+        return;
+    }
+    // SAFETY: single-threaded guest; the view is written by the draw.
+    let Some(rotation) = (unsafe { *core::ptr::addr_of!(LAST_VIEW) }) else {
+        return;
+    };
+    let rotation = &rotation;
+    let (_, forward) = psx_grid::render::plan_axes(rotation);
+    // `tan` of the pitch: the forward row's height over its plan length.
+    let (fx, fy, fz) = (
+        i32::from(rotation[2][0]),
+        i32::from(rotation[2][1]),
+        i32::from(rotation[2][2]),
+    );
+    let plan = psx_math::int32::isqrt_i32(fx * fx + fz * fz).max(1);
+    #[cfg(feature = "card-trace")]
+    crate::card_trace::panel_input(forward, (fy << 12) / plan, eye);
+    let input = PanelInput {
+        eyes: GRID_PANEL_EYES,
+        blocks: GRID_PANEL_BLOCKS,
+        base_lba: WORLD_PACK_START_LBA,
+        eye,
+        forward,
+        pitch_tan_q12: ((fy << 12) / plan).clamp(-16384, 16384),
+        focal,
+        half_screen: [i32::from(SCREEN_W) / 2, i32::from(SCREEN_H) / 2],
+        panel_focal: GRID_PANEL_FOCAL,
+        spacing: GRID_PANEL_SPACING,
+    };
+    // SAFETY: single-threaded guest; the stream and the window are touched only here, in
+    // `emit_panel_uploads`, `panel_drawables` and `release_gameplay_vram`.
+    unsafe {
+        (*core::ptr::addr_of_mut!(PANELS)).update(
+            &mut psx_game_runtime::grid_stream::DiscTransport,
+            (*core::ptr::addr_of_mut!(CHUNK_SKY_WINDOW)).words_mut(),
+            &input,
+        );
+        PANEL_COUNTERS = (*core::ptr::addr_of!(PANELS)).counters;
+        #[cfg(feature = "card-trace")]
+        crate::card_trace::panel_counters(PANEL_COUNTERS);
+    }
+}
+
+/// The panels to draw this frame, as many as `out` holds.
+#[cfg(feature = "cd-stream-bench")]
+pub(super) fn panel_drawables(out: &mut [Option<psx_grid::render::PanelRef<'static>>]) -> usize {
+    // SAFETY: single-threaded guest; the draw reads after the tick's update, and the stream
+    // lives for the program.
+    unsafe { (*core::ptr::addr_of!(PANELS)).drawables(crate::generated::GRID_PANEL_EYES, out) }
+}
+
+/// The bake eye the panels are drawn from (for the trace).
+#[cfg(feature = "cd-stream-bench")]
+pub(super) fn panel_eye() -> u32 {
+    // SAFETY: single-threaded guest; see `step_panels`.
+    unsafe { (*core::ptr::addr_of!(PANELS)).counters.eye }
+}
+
+/// Panel tiles the GPU uploads per frame: 770 words of packets each.
+#[cfg(feature = "cd-stream-bench")]
+const PANEL_UPLOADS_PER_FRAME: usize = 3;
+
+/// Put the landed panel tiles into this frame's list, in the sky's slot (they run before
+/// everything else): the GPU copies them as it draws and the CPU never waits for it.
+#[cfg(feature = "cd-stream-bench")]
+pub(super) fn emit_panel_uploads(
+    primitive_packets: &mut PrimitivePacketArena<'_>,
+    ot: &mut OtFrame<'_, OT_DEPTH>,
+) {
+    use psx_game_runtime::card_stream::{upload_packet_words, write_upload_packets};
+    if !has_panels() {
+        return;
+    }
+    let Some((origin, _)) = card_atlas() else {
+        return;
+    };
+    // SAFETY: single-threaded guest; see `step_panels`.
+    let (stream, window) = unsafe {
+        (
+            &mut *core::ptr::addr_of_mut!(PANELS),
+            (*core::ptr::addr_of_mut!(CHUNK_SKY_WINDOW)).words_mut(),
+        )
+    };
+    let (uploads, count) = stream.uploads::<PANEL_UPLOADS_PER_FRAME>();
+    if count == 0 {
+        return;
+    }
+    let Some(mut reservation) = primitive_packets.reserve_packet_words(upload_packet_words(count))
+    else {
+        return;
+    };
+    let (words, packets) = write_upload_packets(
+        &uploads[..count],
+        window,
+        origin,
+        (OT_DEPTH - 1) as u16,
+        reservation.words_mut(),
+    );
+    let Some(packets) = reservation.commit(words, packets) else {
+        return;
+    };
+    // The uploads are in the frame's list: the stream has taken them.
+    stream.applied(&uploads[..count]);
+    // SAFETY: the stream is one committed arena range, live until the walk ends, and its slot
+    // is below OT_DEPTH.
+    unsafe { ot.add_committed_tagged_packet_stream_unchecked(packets) };
+}
+
+/// The slots of the card atlas as the draw reads them, and the ones to draw.
+#[cfg(feature = "far-cards")]
 pub(super) fn card_slots() -> (
     &'static [psx_grid::render::LiveSlot; psx_grid::render::SLOTS],
     &'static [u8],
@@ -573,13 +745,13 @@ pub(super) fn card_slots() -> (
 }
 
 /// Pictures the GPU uploads per frame: 770 words of packets each.
-#[cfg(feature = "cd-stream-bench")]
+#[cfg(feature = "far-cards")]
 const CARD_UPLOADS_PER_FRAME: usize = 2;
 
 /// Put the landed card pictures into this frame's list, in the sky's slot
 /// (they run before everything else): the GPU copies them as it draws and the
 /// CPU never waits for it.
-#[cfg(feature = "cd-stream-bench")]
+#[cfg(feature = "far-cards")]
 pub(super) fn emit_card_uploads(
     primitive_packets: &mut PrimitivePacketArena<'_>,
     ot: &mut OtFrame<'_, OT_DEPTH>,

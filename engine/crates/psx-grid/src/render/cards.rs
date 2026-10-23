@@ -85,7 +85,7 @@ const SEMI_TRANSPARENT: u32 = 0x0200_0000;
 
 /// How a card is mixed with what is behind it.
 #[derive(Copy, Clone)]
-enum Blend {
+pub(super) enum Blend {
     Opaque,
     /// Half the card, half the picture behind.
     Average,
@@ -311,7 +311,7 @@ pub struct CardCamera {
 /// Add the sky's atlas page offsets: the tpage word of the page `page`
 /// pages to the right of `first`.
 #[inline]
-fn page_word(first: u16, page: usize) -> u16 {
+pub(super) fn page_word(first: u16, page: usize) -> u16 {
     first.wrapping_add(page as u16)
 }
 
@@ -594,7 +594,7 @@ pub fn draw_cards_marked(
 /// # Safety
 /// `at` must have room for [`CARD_PACKET_WORDS`].
 #[inline(always)]
-unsafe fn write_card(
+pub(super) unsafe fn write_card(
     at: *mut u32,
     s: &[GridScreen; 4],
     uv: [(u8, u8); 4],

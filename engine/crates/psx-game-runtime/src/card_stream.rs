@@ -262,6 +262,22 @@ pub struct Upload {
     view: u8,
 }
 
+impl Upload {
+    /// An upload of the picture in `cell` of the window to `slot`, for the streams that
+    /// keep track of what their slots hold themselves (the panels').
+    pub const fn new(slot: u8, cell: u8) -> Self {
+        Self {
+            slot,
+            cell,
+            room: 0,
+            view: 0,
+        }
+    }
+}
+
+/// Words of one sector.
+pub const SECTOR_WORDS: usize = SLOT_BYTES / 4;
+
 /// The distances one layer of cards works to.
 #[derive(Copy, Clone)]
 struct Band {

@@ -40,6 +40,7 @@ pub mod grid_stream;
 pub mod image_props;
 pub mod logic;
 pub mod model_rendering;
+pub mod panel_stream;
 pub mod particles;
 pub mod poi;
 pub mod poise;

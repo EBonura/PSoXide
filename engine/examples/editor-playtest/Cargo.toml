@@ -66,6 +66,9 @@ cd-stream-bench = ["dep:psx-io", "psx-game-runtime/cd-stream-bench"]
 cd-stream-benchmark = ["cd-stream-bench", "psx-game-runtime/cd-stream-benchmark"]
 boot-trace = ["psx-engine/boot-trace", "psx-rt/boot-trace"]
 emulator-telemetry = ["psx-engine/emulator-telemetry"]
+# The far cards of rooms (`flood: (cards: true)`): the older far view, replaced by the
+# panels (`flood: (panels: N)`); a build for a level that has cards needs this.
+far-cards = ["cd-stream-bench"]
 # Measurement builds: one debug line per far-card event (card_trace.rs).
 card-trace = ["cd-stream-bench", "emulator-telemetry"]
 # Pad polled by the interrupt-driven engine (see psx-engine `pad-irq`).
