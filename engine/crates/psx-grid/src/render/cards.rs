@@ -209,6 +209,10 @@ pub struct LiveSlot {
     pub room: u16,
     /// The view the slot holds, or [`NO_VIEW`] while nothing has landed.
     pub view: u8,
+    /// The slot holds the view the room is changing to, shown over the one
+    /// it is leaving (still in another slot of the same room): drawn half
+    /// blended with it and a hair nearer, so the change takes two steps.
+    pub fade: bool,
 }
 
 impl LiveSlot {
@@ -216,6 +220,7 @@ impl LiveSlot {
     pub const EMPTY: Self = Self {
         room: u16::MAX,
         view: NO_VIEW,
+        fade: false,
     };
 }
 
@@ -369,6 +374,11 @@ pub fn draw_cards(
                 Blend::AddQuarter,
             )
         };
+        // A view fading in over the one it replaces is half blended with it.
+        let blend = match blend {
+            Blend::Opaque if entry.fade => Blend::Average,
+            other => other,
+        };
         let brightness = brightness as u32;
         if brightness == 0 {
             continue;
@@ -415,7 +425,9 @@ pub fn draw_cards(
                 + u32::from(band_screen[1].sz)
                 + u32::from(band_screen[2].sz)
                 + u32::from(band_screen[3].sz);
-            let otz = sum >> 4;
+            // The view fading in sorts a step nearer, so it is drawn after the
+            // one it blends with.
+            let otz = (sum >> 4) - u32::from(entry.fade && sum >= 32);
             if otz == 0 || otz >= 2048 {
                 frame.depth_skipped += 1;
                 continue;
@@ -812,7 +824,11 @@ mod tests {
         let (right, forward) = plan_axes(&view.rotation.m);
         let rows = [card_row];
         let table = CardTable::new(&rows);
-        let live = [LiveSlot { room: 0, view: 0 }];
+        let live = [LiveSlot {
+            room: 0,
+            view: 0,
+            fade: false,
+        }];
         let camera = CardCamera {
             eye,
             screen: [320, 240],

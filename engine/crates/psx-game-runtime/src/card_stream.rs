@@ -35,6 +35,13 @@
 //!   the CPU never waits for it. Until it is, the slot keeps showing what it
 //!   had.
 //!
+//! * **Changes of view.** A wrong side that is drawn is not overwritten: while
+//!   more than [`OVERLAY_RESERVE`] slots are free the new view is read into a
+//!   spare slot of the same room and shown half blended over the old one for
+//!   [`FADE_TICKS`] (the draw marks it [`LiveSlot::fade`]), then takes over and
+//!   the old slot is freed, so a view change shows in two steps. With no slot
+//!   to spare it is overwritten in place, as before.
+//!
 //! A failed read frees its stage and the slots are asked for again later.
 //! Nothing here waits.
 
@@ -58,7 +65,10 @@ pub const CARD_WINDOW_WORDS: usize = CELLS * SLOT_BYTES / 4;
 /// ones left without cards.
 pub const MAX_ROOMS: usize = 512;
 /// Ticks between two membership passes.
-const PASS_TICKS: u32 = 4;
+const PASS_TICKS: u32 = 8;
+/// Units past `enter` the candidate room list reaches, and (halved) how far
+/// the eye may walk before it is made again.
+const CANDIDATE_MARGIN: i32 = 320;
 /// Rooms that take a slot in one pass: a fresh level fills its atlas over a
 /// few passes instead of one long one.
 const NEW_PER_PASS: usize = 12;
@@ -71,6 +81,12 @@ const MIN_STEP: i32 = 16;
 /// Ticks a slot may wait for its picture before it is read ahead of the
 /// ones nearer on the disc.
 const PATIENCE: u32 = 90;
+/// Slots left free for newcomers: a wrong side is only replaced beside the old
+/// picture (so the change shows in two steps) while more than this many are.
+const OVERLAY_RESERVE: usize = 6;
+/// Ticks the new view shows half blended over the old one before it takes
+/// over.
+const FADE_TICKS: u32 = 14;
 /// Units past the distances a card is drawn between that a room still counts
 /// as drawable: the eye moves less than this between two passes.
 const DRAW_MARGIN: i32 = 100;
@@ -129,6 +145,14 @@ struct Slot {
     /// The room is, as of the last pass, at a distance a card is drawn from
     /// (give or take [`DRAW_MARGIN`]).
     drawable: bool,
+    /// The other slot of this room while a change of view shows in two
+    /// steps ([`NO_SLOT`] otherwise).
+    partner: u8,
+    /// This slot holds the view the room is changing to; `partner` holds the
+    /// one it is leaving.
+    incoming: bool,
+    /// Tick the incoming view began to show at.
+    fade_start: u32,
 }
 
 impl Slot {
@@ -141,6 +165,9 @@ impl Slot {
         hidden: false,
         since: 0,
         drawable: false,
+        partner: NO_SLOT,
+        incoming: false,
+        fade_start: 0,
     };
 }
 
@@ -231,6 +258,11 @@ pub struct CardStream<K> {
     heading: [i32; 2],
     last_eye: [i32; 2],
     seen_eye: bool,
+    /// The rooms within `enter + CANDIDATE_MARGIN` of `candidates_eye`, so a
+    /// pass looks at the few rooms near the eye and not at every room.
+    candidates: [u16; MAX_ROOMS],
+    candidate_count: usize,
+    candidates_eye: Option<[i32; 2]>,
     /// Sector the drive ends at once the reads queued so far are done (0
     /// before the first), relative to the pictures' base.
     tail: u32,
@@ -265,6 +297,9 @@ impl<K: Copy> CardStream<K> {
             heading: [0; 2],
             last_eye: [0; 2],
             seen_eye: false,
+            candidates: [0; MAX_ROOMS],
+            candidate_count: 0,
+            candidates_eye: None,
             tail: 0,
         }
     }
@@ -378,13 +413,12 @@ impl<K: Copy> CardStream<K> {
 
     /// Membership and wanted views.
     fn pass(&mut self, input: &CardInput<'_>) {
-        let rooms = input.table.len().min(MAX_ROOMS);
         let [ex, _, ez] = input.eye;
         self.update_heading(input.eye);
         // Slots whose rooms went out of range, and slots' views and ranks.
         for slot in 0..SLOTS {
             let held = self.slots[slot];
-            if held.room == u16::MAX {
+            if held.room == u16::MAX || held.incoming {
                 continue;
             }
             let Some(card) = input.table.card(usize::from(held.room)) else {
@@ -408,10 +442,13 @@ impl<K: Copy> CardStream<K> {
             self.slots[slot].drawable =
                 distance >= input.near - DRAW_MARGIN && distance <= input.far + DRAW_MARGIN;
         }
+        self.step_overlays();
+        self.refresh_candidates(input);
         // The best ranked rooms in range that hold nothing, in order.
         let mut best = [(i32::MAX, u16::MAX); NEW_PER_PASS];
         let mut candidates = 0u32;
-        for room in 0..rooms {
+        for index in 0..self.candidate_count {
+            let room = usize::from(self.candidates[index]);
             if self.by_room[room] != NO_SLOT {
                 continue;
             }
@@ -455,6 +492,9 @@ impl<K: Copy> CardStream<K> {
                 hidden: false,
                 since: 0,
                 drawable: false,
+                partner: NO_SLOT,
+                incoming: false,
+                fade_start: 0,
             };
             self.by_room[usize::from(room)] = slot as u8;
             placed += 1;
@@ -464,6 +504,7 @@ impl<K: Copy> CardStream<K> {
             self.live[slot] = LiveSlot {
                 room: held.room,
                 view: held.shown,
+                fade: held.incoming && held.shown != NO_VIEW,
             };
             live += u32::from(held.room != u16::MAX);
             let waiting = held.room != u16::MAX && held.want != NO_VIEW && held.shown != held.want;
@@ -477,13 +518,84 @@ impl<K: Copy> CardStream<K> {
         self.counters.starved = starved;
     }
 
-    /// Give a slot's room up.
+    /// Make the list of rooms a pass looks at again when the eye has walked
+    /// far enough from where it was made.
+    fn refresh_candidates(&mut self, input: &CardInput<'_>) {
+        let [ex, _, ez] = input.eye;
+        let moved = self.candidates_eye.is_none_or(|at| {
+            (ex - at[0]).abs() > CANDIDATE_MARGIN / 2 || (ez - at[1]).abs() > CANDIDATE_MARGIN / 2
+        });
+        if !moved {
+            return;
+        }
+        let reach = input.enter + CANDIDATE_MARGIN;
+        let mut count = 0;
+        for room in 0..input.table.len().min(MAX_ROOMS) {
+            let Some(card) = input.table.card(room) else {
+                continue;
+            };
+            if (ex - card.centre[0]).abs() <= reach && (ez - card.centre[1]).abs() <= reach {
+                self.candidates[count] = room as u16;
+                count += 1;
+            }
+        }
+        self.candidate_count = count;
+        self.candidates_eye = Some([ex, ez]);
+    }
+
+    /// Give a slot's room up. The outgoing slot of a change of view takes
+    /// the incoming one with it; an incoming slot leaves the outgoing one
+    /// holding the room.
     fn release(&mut self, slot: usize) {
-        let room = self.slots[slot].room;
-        if let Some(by) = self.by_room.get_mut(usize::from(room)) {
-            *by = NO_SLOT;
+        let held = self.slots[slot];
+        if held.partner != NO_SLOT {
+            let other = usize::from(held.partner);
+            if held.incoming {
+                self.slots[other].partner = NO_SLOT;
+            } else {
+                self.slots[other] = Slot::EMPTY;
+            }
+        }
+        if !held.incoming {
+            if let Some(by) = self.by_room.get_mut(usize::from(held.room)) {
+                *by = NO_SLOT;
+            }
         }
         self.slots[slot] = Slot::EMPTY;
+    }
+
+    /// Keep the changes of view that show in two steps going: the incoming
+    /// slot follows its room's rank, wants what the room wants, and takes
+    /// over once it has shown half blended for [`FADE_TICKS`].
+    fn step_overlays(&mut self) {
+        for slot in 0..SLOTS {
+            let held = self.slots[slot];
+            if held.room == u16::MAX || !held.incoming {
+                continue;
+            }
+            let outgoing = usize::from(held.partner);
+            let base = self.slots[outgoing];
+            self.slots[slot].rank = base.rank;
+            self.slots[slot].hidden = base.hidden;
+            self.slots[slot].drawable = base.drawable;
+            if held.shown == NO_VIEW {
+                // Not landed yet: follow the room's wanted view; if the room
+                // wants what it shows again, forget the change.
+                if !held.pending {
+                    if base.want == base.shown {
+                        self.release(slot);
+                    } else {
+                        self.slots[slot].want = base.want;
+                    }
+                }
+            } else if self.ticks.wrapping_sub(held.fade_start) >= FADE_TICKS {
+                // The new view takes over; the old one's slot is free.
+                self.slots[outgoing] = Slot::EMPTY;
+                self.slots[slot].partner = NO_SLOT;
+                self.slots[slot].incoming = false;
+                self.by_room[usize::from(held.room)] = slot as u8;
+            }
+        }
     }
 
     /// An empty slot, or the one held by the worst ranked room, if that is
@@ -523,7 +635,10 @@ impl<K: Copy> CardStream<K> {
             let mut count = 0;
             for slot in 0..SLOTS {
                 let held = self.slots[slot];
-                if held.room == u16::MAX || held.want == NO_VIEW {
+                if held.room == u16::MAX
+                    || held.want == NO_VIEW
+                    || (held.partner != NO_SLOT && !held.incoming)
+                {
                     continue;
                 }
                 if held.shown == held.want {
@@ -549,7 +664,7 @@ impl<K: Copy> CardStream<K> {
                 // Blank cards first (the ones about to be drawn before the
                 // ones further out), then wrong sides, those of cards
                 // that are drawn before those hidden by nearer geometry.
-                let tier = if held.shown != NO_VIEW {
+                let tier = if held.shown != NO_VIEW || held.incoming {
                     2 + i32::from(held.hidden)
                 } else if held.rank >= CLASS_GAP {
                     1
@@ -619,10 +734,36 @@ impl<K: Copy> CardStream<K> {
                 .unwrap_or(head);
             let mut entries = [None; RUN_CELLS];
             let mut riders = 0;
+            let mut spare = self.slots.iter().filter(|s| s.room == u16::MAX).count();
             for &(_, sector, slot, _) in wanted.iter().filter(|w| stretch.contains(&w.1)) {
-                let held = self.slots[usize::from(slot)];
+                let mut slot = usize::from(slot);
+                let held = self.slots[slot];
+                // A wrong side that is drawn is replaced beside the old
+                // picture while there is room to spare, so it shows in two
+                // steps.
+                if held.shown != NO_VIEW
+                    && !held.incoming
+                    && held.drawable
+                    && spare > OVERLAY_RESERVE
+                {
+                    if let Some(free) = self.slots.iter().position(|s| s.room == u16::MAX) {
+                        self.slots[free] = Slot {
+                            shown: NO_VIEW,
+                            pending: true,
+                            since: 0,
+                            partner: slot as u8,
+                            incoming: true,
+                            fade_start: 0,
+                            ..held
+                        };
+                        self.slots[slot].partner = free as u8;
+                        spare -= 1;
+                        slot = free;
+                    }
+                }
+                let held = self.slots[slot];
                 entries[(sector - first) as usize] = Some(Entry {
-                    slot,
+                    slot: slot as u8,
                     room: held.room,
                     view: held.want,
                 });
@@ -707,7 +848,12 @@ impl<K: Copy> CardStream<K> {
                 held.shown = upload.view;
                 held.pending = false;
                 held.since = 0;
-                self.live[usize::from(upload.slot)].view = upload.view;
+                if held.incoming {
+                    held.fade_start = self.ticks;
+                }
+                let live = &mut self.live[usize::from(upload.slot)];
+                live.view = upload.view;
+                live.fade = held.incoming;
             }
             let (index, cell) = (
                 usize::from(upload.cell) / RUN_CELLS,
@@ -1043,6 +1189,87 @@ mod tests {
         assert!(now.contains(&(count as u16 - 1)));
         assert!(!now.contains(&0));
         assert!(stream.counters.evictions > 0);
+    }
+
+    /// Ticks the eye is held at `eye`, and for each tick the live entries of
+    /// `room` (view, fade).
+    fn watch(
+        stream: &mut CardStream<usize>,
+        disc: &mut Disc,
+        window: &mut [u32],
+        input: &CardInput<'_>,
+        room: u16,
+        ticks: usize,
+    ) -> Vec<Vec<(u8, bool)>> {
+        let mut seen = Vec::new();
+        for _ in 0..ticks {
+            stream.update(disc, window, input);
+            let (ups, count) = stream.uploads::<2>();
+            stream.applied(&ups[..count]);
+            seen.push(
+                stream
+                    .live()
+                    .iter()
+                    .filter(|s| s.room == room)
+                    .map(|s| (s.view, s.fade))
+                    .collect(),
+            );
+        }
+        seen
+    }
+
+    #[test]
+    fn a_wrong_side_fades_in_beside_the_old_one_while_slots_are_free() {
+        let rows = rows(12);
+        let table = CardTable::new(&rows);
+        let sectors: Vec<u32> = (0..12).map(|r| 8 * r + 1).collect();
+        let mut disc = Disc::new(8 * 12 + 40);
+        let mut window = std::vec![0u32; CARD_WINDOW_WORDS];
+        let mut stream = CardStream::<usize>::new();
+        let mut input = input(&table, &sectors, [-10, 0, 0]);
+        input.far = 2000;
+        run(&mut stream, &mut disc, &mut window, &input, 60);
+        // Room 4 shows view 4. The eye walks past it: it is now seen from
+        // the other side.
+        input.eye = [800, 0, 0];
+        let seen = watch(&mut stream, &mut disc, &mut window, &input, 4, 160);
+        let pair = seen
+            .iter()
+            .find(|entries| entries.len() == 2)
+            .expect("two slots for a while");
+        // The old picture stays whole, the new one is the one fading in.
+        assert!(
+            pair.contains(&(4, false)) && pair.contains(&(0, true)),
+            "{pair:?}"
+        );
+        // At the end one slot holds the new view, no longer fading.
+        assert_eq!(seen.last().unwrap(), &[(0, false)]);
+        // It never showed nothing on the way.
+        assert!(seen.iter().all(|entries| !entries.is_empty()));
+    }
+
+    #[test]
+    fn a_wrong_side_is_replaced_in_place_when_the_atlas_is_nearly_full() {
+        // Slots all taken by rooms at the eye: nothing to spare.
+        let count = SLOTS;
+        let rows: Vec<[i16; 6]> = (0..count)
+            .map(|room| [(room as i16) * 10 + 20, 0, 0, 200, 40, 0])
+            .collect();
+        let table = CardTable::new(&rows);
+        let sectors: Vec<u32> = (0..count as u32).map(|r| 8 * r + 1).collect();
+        let mut disc = Disc::new(8 * count + 40);
+        let mut window = std::vec![0u32; CARD_WINDOW_WORDS];
+        let mut stream = CardStream::<usize>::new();
+        let mut input = input(&table, &sectors, [0, 0, 0]);
+        input.enter = 100_000;
+        input.leave = 100_100;
+        input.far = 100_000;
+        run(&mut stream, &mut disc, &mut window, &input, 400);
+        assert_eq!(held(&stream).len(), SLOTS);
+        input.eye = [2000, 0, 0];
+        let seen = watch(&mut stream, &mut disc, &mut window, &input, 3, 400);
+        assert!(seen.iter().all(|entries| entries.len() == 1), "{seen:?}");
+        assert_eq!(seen.last().unwrap(), &[(0, false)]);
     }
 
     #[test]

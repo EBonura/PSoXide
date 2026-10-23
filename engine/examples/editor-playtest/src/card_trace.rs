@@ -10,7 +10,8 @@
 //!   that has any: cards in the band without a picture or with a picture of the
 //!   wrong side, the same counted only for cards inside the view cone, and of
 //!   those the ones two or more view steps off.
-//! * `ct D drawn looked` cards drawn and slots looked at, every 30 drawn frames.
+//! * `ct D drawn looked fading` cards drawn, slots looked at and views fading in, every 30
+//!   drawn frames.
 //! * `ct P x z` the eye, 32768 added to each, every 30 drawn frames.
 //! * `ct R submitted landed failed uploads live starved refused evictions merged backlog blank last_first last_sectors` when
 //!   the stream's counters changed.
@@ -156,6 +157,10 @@ pub(super) fn frame(view: &View<'_>) {
     let trace = unsafe { &mut *core::ptr::addr_of_mut!(TRACE) };
     trace.shown = [NO_VIEW; MAX_ROOMS];
     for entry in view.live {
+        // A view fading in over another counts once it has taken over.
+        if entry.view == NO_VIEW || entry.fade {
+            continue;
+        }
         if let Some(shown) = trace.shown.get_mut(usize::from(entry.room)) {
             *shown = entry.view;
         }
@@ -170,6 +175,7 @@ pub(super) fn frame(view: &View<'_>) {
         let mut line = Line::new("ct D");
         line.number(u32::from(view.drawn));
         line.number(u32::from(view.looked));
+        line.number(view.live.iter().filter(|s| s.fade).count() as u32);
         line.emit();
     }
     let (mut band_missing, mut band_stale, mut seen_missing, mut seen_stale, mut seen_bad) =
