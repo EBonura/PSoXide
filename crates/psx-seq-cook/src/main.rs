@@ -32,23 +32,44 @@ fn main() {
             "cook" => {
                 let rom = Rom::load(&rom_path, &seg)?;
                 let data = psx_seq_cook::n64::AudioData::load(&rom)?;
-                let name = arg(&args, "--song").unwrap_or_else(|| "KOKIRI".into());
-                let id = psx_seq_cook::n64::resolve_seq(&name)
-                    .ok_or_else(|| psx_seq_cook::Error::Missing(format!("song {name}")))?;
+                // `--songs A,B,C` cooks several songs against one bank, each written as
+                // `<name>.psq`; `--song A` (the default KOKIRI) writes `song.psq`.
+                let names: Vec<String> = match arg(&args, "--songs") {
+                    Some(list) => list.split(',').map(str::to_string).collect(),
+                    None => vec![arg(&args, "--song").unwrap_or_else(|| "KOKIRI".into())],
+                };
+                let ids = names
+                    .iter()
+                    .map(|name| {
+                        psx_seq_cook::n64::resolve_seq(name)
+                            .ok_or_else(|| psx_seq_cook::Error::Missing(format!("song {name}")))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
                 let mut o = psx_seq_cook::cook::Options::default();
                 if let Some(r) = arg(&args, "--rate") {
                     o.rate = r.parse().unwrap_or(o.rate);
                 }
+                if let Some(a) = arg(&args, "--align") {
+                    o.adpcm_align = a.parse().unwrap_or(o.adpcm_align);
+                }
                 o.all_instruments = args.iter().any(|a| a == "--all-instruments");
                 let out = PathBuf::from(arg(&args, "--out").unwrap_or_else(|| ".".into()));
-                let c = psx_seq_cook::cook::cook_song(&data, id, &o)?;
+                let set = psx_seq_cook::cook::cook_songs(&data, &ids, &o)?;
                 std::fs::create_dir_all(&out)
                     .map_err(|e| psx_seq_cook::Error::Io(e.to_string()))?;
-                std::fs::write(out.join("song.psq"), &c.song)
+                let single = arg(&args, "--songs").is_none();
+                for (name, song) in names.iter().zip(&set.songs) {
+                    let file = if single {
+                        "song.psq".to_string()
+                    } else {
+                        format!("{}.psq", name.to_ascii_lowercase())
+                    };
+                    std::fs::write(out.join(file), song)
+                        .map_err(|e| psx_seq_cook::Error::Io(e.to_string()))?;
+                }
+                std::fs::write(out.join("bank.psqb"), &set.bank)
                     .map_err(|e| psx_seq_cook::Error::Io(e.to_string()))?;
-                std::fs::write(out.join("bank.psqb"), &c.bank)
-                    .map_err(|e| psx_seq_cook::Error::Io(e.to_string()))?;
-                print!("{}", c.report);
+                print!("{}", set.report);
                 Ok(())
             }
             "render" => {
@@ -56,7 +77,8 @@ fn main() {
                 let secs: f64 = arg(&args, "--seconds")
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(30.0);
-                let mut song = std::fs::read(dir.join("song.psq"))
+                let song_file = arg(&args, "--song-file").unwrap_or_else(|| "song.psq".into());
+                let mut song = std::fs::read(dir.join(song_file))
                     .map_err(|e| psx_seq_cook::Error::Io(e.to_string()))?;
                 let bank_bytes = std::fs::read(dir.join("bank.psqb"))
                     .map_err(|e| psx_seq_cook::Error::Io(e.to_string()))?;
@@ -75,6 +97,12 @@ fn main() {
                         .unwrap_or(r.main_volume);
                 }
                 let mask: u32 = (1u32 << voices) - 1;
+                let first: u32 = arg(&args, "--first-voice")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                let mask = mask << first;
+                let event_hash;
+                let event_calls;
                 macro_rules! go {
                     ($n:literal) => {{
                         let mut seq: psx_seq::Sequencer<'_, 1, $n> = psx_seq::Sequencer::new(mask);
@@ -82,7 +110,7 @@ fn main() {
                         seq.start(0, &mut song)
                             .map_err(|e| psx_seq_cook::Error::Format(format!("{e:?}")))?;
                         let mut held: Option<psx_seq::NoteHandle> = None;
-                        psx_seq_cook::render::render(&mut seq, &mut r, secs, |u, seq, r| {
+                        let trace = psx_seq_cook::render::render(&mut seq, &mut r, secs, |u, seq, r| {
                             let Some((font, inst)) = live else { return };
                             // a short ocarina-like phrase from 10 s: a note every 0.4 s, a little
                             // vibrato, a glide on the last one
@@ -109,6 +137,8 @@ fn main() {
                                 }
                             }
                         });
+                        event_hash = trace.event_hash;
+                        event_calls = trace.calls;
                         seq.unsupported_ops()
                     }};
                 }
@@ -131,11 +161,17 @@ fn main() {
                 );
                 let out = PathBuf::from(arg(&args, "--out").unwrap_or_else(|| "render.wav".into()));
                 std::fs::write(&out, wav).map_err(|e| psx_seq_cook::Error::Io(e.to_string()))?;
+                let pcm_hash = r.out.iter().fold(psx_seq_cook::render::FNV_OFFSET, |h, s| {
+                    psx_seq_cook::render::fnv1a(h, &s.to_le_bytes())
+                });
                 println!(
                     "rendered {secs} s to {}; peak voices {}; unsupported ops {}",
                     out.display(),
                     r.peak_voices,
                     unsupported
+                );
+                println!(
+                    "hw calls {event_calls} fnv1a {event_hash:016x}; pcm fnv1a {pcm_hash:016x}"
                 );
                 Ok(())
             }

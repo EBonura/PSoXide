@@ -162,20 +162,137 @@ impl Hw for Renderer {
     }
 }
 
-/// Run `seq` for `seconds` and render it; returns stereo samples at
-/// [`OUT_RATE`]. `each_update` runs before every update with the update
-/// number, so a script can write IO ports or play live notes on a timeline.
+/// What an [`Hw`] trace of a run amounts to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Trace {
+    /// FNV-1a over every call made, in order (see [`Traced`]).
+    pub event_hash: u64,
+    /// Number of calls made.
+    pub calls: u32,
+}
+
+/// Run `seq` for `seconds` and render it; returns the trace of the calls the
+/// sequencer made. The stereo samples at [`OUT_RATE`] are in `r.out`.
+/// `each_update` runs before every update with the update number, so a script
+/// can write IO ports or play live notes on a timeline.
 pub fn render<const P: usize, const N: usize>(
     seq: &mut Sequencer<'_, P, N>,
     r: &mut Renderer,
     seconds: f64,
     mut each_update: impl FnMut(u32, &mut Sequencer<'_, P, N>, &mut Renderer),
-) {
+) -> Trace {
     let updates = (seconds * UPDATE_HZ as f64) as u32;
     let per = (OUT_RATE / UPDATE_HZ) as usize;
+    let (mut hash, mut calls) = (FNV_OFFSET, 0u32);
     for u in 0..updates {
         each_update(u, seq, r);
-        seq.update(r);
+        let mut traced = Traced::resume(r, hash, calls);
+        seq.update(&mut traced);
+        (hash, calls) = (traced.hash(), traced.calls());
         r.mix(per);
+    }
+    Trace {
+        event_hash: hash,
+        calls,
+    }
+}
+
+/// FNV-1a over `bytes`, continuing from `state` (start from [`FNV_OFFSET`]).
+#[must_use]
+pub fn fnv1a(mut state: u64, bytes: &[u8]) -> u64 {
+    for &b in bytes {
+        state ^= u64::from(b);
+        state = state.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    state
+}
+
+/// FNV-1a 64-bit offset basis.
+pub const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+
+/// An [`Hw`] that hashes every call, in order, and forwards it to `inner`.
+///
+/// The hash is the identity of what the sequencer would write to the SPU:
+/// two builds that play a song the same way produce the same hash, whatever
+/// the host. It is the gate that proves a change to the engine, the cook or
+/// the game's glue did not change the music.
+pub struct Traced<'a, H: Hw> {
+    inner: &'a mut H,
+    hash: u64,
+    calls: u32,
+}
+
+impl<'a, H: Hw> Traced<'a, H> {
+    /// Wrap `inner`.
+    #[must_use]
+    pub fn new(inner: &'a mut H) -> Self {
+        Self {
+            inner,
+            hash: FNV_OFFSET,
+            calls: 0,
+        }
+    }
+
+    /// Wrap `inner`, continuing a trace that has hashed `calls` calls to `hash`.
+    #[must_use]
+    pub fn resume(inner: &'a mut H, hash: u64, calls: u32) -> Self {
+        Self { inner, hash, calls }
+    }
+
+    /// Hash of every call so far.
+    #[must_use]
+    pub fn hash(&self) -> u64 {
+        self.hash
+    }
+
+    /// Number of calls so far.
+    #[must_use]
+    pub fn calls(&self) -> u32 {
+        self.calls
+    }
+
+    fn note(&mut self, tag: u8, words: &[u32]) {
+        self.calls += 1;
+        self.hash = fnv1a(self.hash, &[tag]);
+        for w in words {
+            self.hash = fnv1a(self.hash, &w.to_le_bytes());
+        }
+    }
+}
+
+impl<H: Hw> Hw for Traced<'_, H> {
+    fn configure(&mut self, voice: u8, sample: &Sample, looped: bool, pitch_q12: u16) {
+        self.note(
+            1,
+            &[
+                u32::from(voice),
+                sample.addr().byte_offset(),
+                sample.sample_rate_hz(),
+                u32::from(looped),
+                u32::from(pitch_q12),
+            ],
+        );
+        self.inner.configure(voice, sample, looped, pitch_q12);
+    }
+
+    fn set_volume(&mut self, voice: u8, left: i16, right: i16) {
+        self.note(2, &[u32::from(voice), left as u32, right as u32]);
+        self.inner.set_volume(voice, left, right);
+    }
+
+    fn set_pitch(&mut self, voice: u8, pitch_q12: u16) {
+        self.note(3, &[u32::from(voice), u32::from(pitch_q12)]);
+        self.inner.set_pitch(voice, pitch_q12);
+    }
+
+    fn key_on(&mut self, mask: u32) {
+        self.note(4, &[mask]);
+        self.inner.key_on(mask);
+    }
+
+    fn key_off(&mut self, mask: u32) {
+        self.note(5, &[mask]);
+        self.inner.key_off(mask);
     }
 }

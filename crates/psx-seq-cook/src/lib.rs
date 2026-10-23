@@ -71,4 +71,46 @@ mod tests {
         }
         assert!(found >= 12, "the song's instruments are present: {found}");
     }
+
+    /// Cook two songs of one area against one bank: the bank holds both
+    /// songs' instruments once, the ADPCM starts on the requested boundary,
+    /// and the tables alone parse without the samples.
+    #[test]
+    fn songs_of_one_area_share_a_bank() {
+        let (Ok(rom), Ok(seg)) = (
+            std::env::var("PSX_SEQ_TEST_ROM"),
+            std::env::var("PSX_SEQ_TEST_SEGMENTS"),
+        ) else {
+            return;
+        };
+        let rom =
+            crate::rom::Rom::load(std::path::Path::new(&rom), std::path::Path::new(&seg)).unwrap();
+        let data = crate::n64::AudioData::load(&rom).unwrap();
+        let options = crate::cook::Options {
+            adpcm_align: 2048,
+            ..crate::cook::Options::default()
+        };
+        // KOKIRI (60) and LINK_HOUSE (31) draw on the same sample banks.
+        let set = crate::cook::cook_songs(&data, &[60, 31], &options).unwrap();
+        assert_eq!(set.songs.len(), 2);
+        let bank = psx_seq::format::Bank::parse(&set.bank).unwrap();
+        let (off, len) = bank.adpcm_range();
+        assert_eq!(off % 2048, 0, "ADPCM starts on a sector boundary");
+        assert_eq!(bank.adpcm().len(), len as usize);
+        let tables = psx_seq::format::Bank::parse_tables(&set.bank[..bank.tables_used()]).unwrap();
+        assert!(tables.adpcm().is_empty());
+        assert_eq!(tables.sample_count(), bank.sample_count());
+        // Shared samples are cooked once: the pair costs less than the two alone.
+        let alone: usize = [60usize, 31]
+            .iter()
+            .map(|&id| {
+                let one = crate::cook::cook_song(&data, id, &options).unwrap();
+                psx_seq::format::Bank::parse(&one.bank)
+                    .unwrap()
+                    .adpcm()
+                    .len()
+            })
+            .sum();
+        assert!(bank.adpcm().len() < alone);
+    }
 }

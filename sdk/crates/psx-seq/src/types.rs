@@ -512,36 +512,43 @@ pub(crate) struct Player {
 }
 
 impl Player {
-    pub const INIT: Self = Self {
-        enabled: false,
-        finished: false,
-        muted: false,
-        stop_script: false,
-        script: Script::INIT,
-        delay: 0,
-        tempo: 120 * 48,
-        tempo_acc: 0,
-        tempo_change: 0,
-        transpose: 0,
-        note_alloc_policy: 0,
-        mute_behavior: MUTE_SOFTEN | MUTE_STOP_NOTES,
-        mute_scale_q15: 16384,
-        default_font: NONE8,
-        fonts: [0; 8],
-        n_fonts: 0,
-        short_vel: None,
-        short_gate: None,
-        io: [IO_NONE; IO_PORTS],
-        state: 1,
-        fade_q24: 1 << 24,
-        fade_vel_q24: 0,
-        fade_timer: 0,
-        fade_timer_default: 0,
-        fade_scale_q15: 32768,
-        applied_fade_q15: 32768,
-        recalc_volume: true,
-        bend_q16: 1 << 16,
-        script_counter: 0,
-        channels: [Channel::INIT; CHANNELS],
-    };
+    /// A player at its start values.
+    ///
+    /// A function and not a `const`: a constant would put every channel's
+    /// start values in the image, once per channel (the channel table is
+    /// most of this type), where a loop writes them from one copy.
+    pub fn init() -> Self {
+        Self {
+            enabled: false,
+            finished: false,
+            muted: false,
+            stop_script: false,
+            script: Script::INIT,
+            delay: 0,
+            tempo: 120 * 48,
+            tempo_acc: 0,
+            tempo_change: 0,
+            transpose: 0,
+            note_alloc_policy: 0,
+            mute_behavior: MUTE_SOFTEN | MUTE_STOP_NOTES,
+            mute_scale_q15: 16384,
+            default_font: NONE8,
+            fonts: [0; 8],
+            n_fonts: 0,
+            short_vel: None,
+            short_gate: None,
+            io: [IO_NONE; IO_PORTS],
+            state: 1,
+            fade_q24: 1 << 24,
+            fade_vel_q24: 0,
+            fade_timer: 0,
+            fade_timer_default: 0,
+            fade_scale_q15: 32768,
+            applied_fade_q15: 32768,
+            recalc_volume: true,
+            bend_q16: 1 << 16,
+            script_counter: 0,
+            channels: core::array::from_fn(|_| Channel::INIT),
+        }
+    }
 }
