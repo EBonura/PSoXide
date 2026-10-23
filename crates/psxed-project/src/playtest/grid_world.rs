@@ -476,6 +476,7 @@ fn bake_cards(
     report: &mut PlaytestValidationReport,
 ) -> Result<PlaytestCards, String> {
     use crate::grid::lighting::{AlbedoTable, BakeMaterials};
+    use psx_grid::render::{SLOT_BYTES, VIEWS};
     let started = std::time::Instant::now();
     let ids: Vec<Option<ResourceId>> = cooked.materials.iter().map(|(id, _)| *id).collect();
     let table = AlbedoTable::from_project(project, project_root, ids.iter().copied());
@@ -483,11 +484,9 @@ fn bake_cards(
     let (baked, summary) = cook::cards::bake(cooked, &albedo);
     let limit = i32::from(i16::MAX);
     let mut rows = Vec::with_capacity(baked.len());
-    let mut pictures = Vec::with_capacity(baked.len());
-    for (room, card) in baked.into_iter().enumerate() {
+    for (room, card) in baked.iter().enumerate() {
         let Some(card) = card else {
             rows.push([0; 6]);
-            pictures.push(Vec::new());
             continue;
         };
         let reach = [
@@ -511,7 +510,25 @@ fn bake_cards(
             card.half_width as i16,
             0,
         ]);
-        pictures.push(card.sectors);
+    }
+    // Tiles of eight rooms that stand together, each its eight views one
+    // after another: see `cook::cards::disc_layout`.
+    let centres: Vec<Option<[i32; 2]>> = baked
+        .iter()
+        .map(|card| card.as_ref().map(|card| card.centre))
+        .collect();
+    let layout = cook::cards::disc_layout(&centres);
+    let tile = cook::cards::TILE_ROOMS as usize;
+    let mut pictures = vec![0u8; layout.sectors as usize * SLOT_BYTES];
+    for (card, &offset) in baked.iter().zip(&layout.offsets) {
+        let Some(card) = card.as_ref().filter(|_| offset != u32::MAX) else {
+            continue;
+        };
+        for view in 0..VIEWS {
+            let to = (offset as usize + view * tile) * SLOT_BYTES;
+            pictures[to..to + SLOT_BYTES]
+                .copy_from_slice(&card.sectors[view * SLOT_BYTES..(view + 1) * SLOT_BYTES]);
+        }
     }
     let sector = i32::from(cooked.level.sector_units);
     let scene = project.active_scene();
@@ -533,8 +550,11 @@ fn bake_cards(
     Ok(PlaytestCards {
         rows,
         pictures,
+        offsets: layout.offsets,
+        stride: cook::cards::TILE_ROOMS,
         far: world.stream.flood.card_far_sectors() * sector,
         fade: 3 * sector,
+        near: (i32::from(world.stream.flood.mesh_far) - 2).max(0) * sector,
         backdrop,
     })
 }

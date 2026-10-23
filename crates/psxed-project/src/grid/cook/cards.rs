@@ -368,6 +368,93 @@ impl IntoRgba for [u8; 3] {
     }
 }
 
+/// Cells across one side of the grid the cards' centres are placed on to
+/// order them along a Hilbert curve.
+const ORDER_GRID: u32 = 256;
+
+/// Position of cell `(x, y)` along the Hilbert curve through an
+/// `ORDER_GRID` square: cells close on the curve are close in the plane.
+fn hilbert_index(mut x: u32, mut y: u32) -> u32 {
+    let mut index = 0;
+    let mut step = ORDER_GRID / 2;
+    while step > 0 {
+        let rx = u32::from(x & step != 0);
+        let ry = u32::from(y & step != 0);
+        index += step * step * ((3 * rx) ^ ry);
+        if ry == 0 {
+            if rx == 1 {
+                x = ORDER_GRID - 1 - x;
+                y = ORDER_GRID - 1 - y;
+            }
+            std::mem::swap(&mut x, &mut y);
+        }
+        step /= 2;
+    }
+    index
+}
+
+/// Rooms in one tile of the disc layout, and so the sectors between a room's
+/// picture of one view and its picture of the next. A tile holds the eight
+/// views of eight rooms that stand together, one view after another: the
+/// eight pictures of one view are eight consecutive sectors, a single read.
+pub const TILE_ROOMS: u32 = 8;
+
+/// Where the pictures of the rooms go on the disc.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DiscLayout {
+    /// Per room, the sector (from the start of the pictures) of its picture
+    /// of view 0, or [`u32::MAX`] for a room without a card. Its picture of
+    /// view `k` is `TILE_ROOMS * k` sectors on.
+    pub offsets: Vec<u32>,
+    /// Sectors the pictures take.
+    pub sectors: u32,
+}
+
+/// Lay the pictures out: the rooms ordered along a Hilbert curve through
+/// their centres, cut into tiles of [`TILE_ROOMS`] consecutive rooms, so the
+/// rooms of a tile stand together in the world and one read brings the
+/// pictures of a whole tile for one view, and tiles that stand near each
+/// other are near each other on the disc.
+pub fn disc_layout(centres: &[Option<[i32; 2]>]) -> DiscLayout {
+    let present: Vec<(usize, [i32; 2])> = centres
+        .iter()
+        .enumerate()
+        .filter_map(|(room, centre)| centre.map(|centre| (room, centre)))
+        .collect();
+    let mut offsets = vec![u32::MAX; centres.len()];
+    if present.is_empty() {
+        return DiscLayout {
+            offsets,
+            sectors: 0,
+        };
+    }
+    let lo = |k: usize| present.iter().map(|p| p.1[k]).min().unwrap_or(0);
+    let hi = |k: usize| present.iter().map(|p| p.1[k]).max().unwrap_or(0);
+    let side = i64::from((hi(0) - lo(0)).max(hi(1) - lo(1)).max(1));
+    let cell =
+        |value: i32, low: i32| (i64::from(value - low) * i64::from(ORDER_GRID - 1) / side) as u32;
+    let mut keyed: Vec<(u32, usize)> = present
+        .iter()
+        .map(|&(room, centre)| {
+            (
+                hilbert_index(cell(centre[0], lo(0)), cell(centre[1], lo(1))),
+                room,
+            )
+        })
+        .collect();
+    keyed.sort_unstable();
+    let views = VIEWS as u32;
+    for (position, &(_, room)) in keyed.iter().enumerate() {
+        let (tile, place) = (position as u32 / TILE_ROOMS, position as u32 % TILE_ROOMS);
+        offsets[room] = tile * TILE_ROOMS * views + place;
+    }
+    let tiles = (keyed.len() as u32).div_ceil(TILE_ROOMS);
+    DiscLayout {
+        offsets,
+        sectors: tiles * TILE_ROOMS * views,
+    }
+}
+
 /// Bake every room's card. `albedo` is the mean colour of each level
 /// material in slot order (`cooked.materials`).
 pub fn bake(cooked: &CookedLevel, albedo: &[[f32; 3]]) -> (Vec<Option<BakedCard>>, CardsReport) {
@@ -514,6 +601,54 @@ mod tests {
             view(4),
             view(0)
         );
+    }
+
+    #[test]
+    fn rooms_on_a_lattice_are_laid_out_in_tiles_of_neighbours() {
+        let mut centres = Vec::new();
+        for z in 0..12 {
+            for x in 0..16 {
+                centres.push(Some([x * 1000, z * 1000]));
+            }
+        }
+        centres[5] = None;
+        let layout = disc_layout(&centres);
+        let rooms = 12 * 16 - 1;
+        assert_eq!(layout.offsets[5], u32::MAX);
+        assert_eq!(
+            layout.sectors,
+            (rooms as u32).div_ceil(TILE_ROOMS) * TILE_ROOMS * VIEWS as u32
+        );
+        // Every picture of every room has a sector of its own.
+        let mut taken = vec![false; layout.sectors as usize];
+        for &offset in layout.offsets.iter().filter(|&&o| o != u32::MAX) {
+            for view in 0..VIEWS as u32 {
+                let sector = (offset + view * TILE_ROOMS) as usize;
+                assert!(!taken[sector], "sector {sector} used twice");
+                taken[sector] = true;
+            }
+        }
+        // The rooms of a tile stand together: a few lattice steps across.
+        let mut tiles: std::collections::BTreeMap<u32, Vec<usize>> = Default::default();
+        for (room, &offset) in layout.offsets.iter().enumerate() {
+            if offset != u32::MAX {
+                tiles
+                    .entry(offset / (TILE_ROOMS * VIEWS as u32))
+                    .or_default()
+                    .push(room);
+            }
+        }
+        for rooms in tiles.values() {
+            let (mut x0, mut x1, mut z0, mut z1) = (99, 0, 99, 0);
+            for &room in rooms {
+                let (x, z) = (room % 16, room / 16);
+                x0 = x0.min(x);
+                x1 = x1.max(x);
+                z0 = z0.min(z);
+                z1 = z1.max(z);
+            }
+            assert!((x1 - x0) + (z1 - z0) <= 9, "{rooms:?}");
+        }
     }
 
     #[test]

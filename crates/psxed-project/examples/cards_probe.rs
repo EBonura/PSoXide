@@ -61,9 +61,9 @@ fn main() {
     let package = package.expect("a package");
     let cards = &package.world_geometry.cards;
     println!(
-        "{} rows, {} pictures, far {}, fade {}",
+        "{} rows, {} sectors between views, far {}, fade {}",
         cards.rows.len(),
-        cards.pictures.iter().filter(|p| !p.is_empty()).count(),
+        cards.stride,
         cards.far,
         cards.fade
     );
@@ -74,9 +74,14 @@ fn main() {
     };
     let scale = 3usize;
     for room in rooms {
-        let Some(pictures) = cards.pictures.get(room).filter(|p| !p.is_empty()) else {
+        let offset = cards.offsets.get(room).copied().unwrap_or(u32::MAX);
+        if offset == u32::MAX {
             println!("room {room}: no card");
             continue;
+        }
+        let picture = |view: usize| {
+            let from = (view * cards.stride as usize + offset as usize) * 2048;
+            &cards.pictures[from..from + 2048]
         };
         let row = cards.rows[room];
         println!(
@@ -89,7 +94,7 @@ fn main() {
             *pixel = Rgba([255, 0, 255, 255]);
         }
         for view in 0..8 {
-            let texels = decode(&pictures[view * 2048..(view + 1) * 2048]);
+            let texels = decode(picture(view));
             for y in 0..h {
                 for x in 0..w {
                     let t = texels[(y / scale) * 64 + x / scale];

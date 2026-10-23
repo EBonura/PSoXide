@@ -132,14 +132,23 @@ pub struct PlaytestCards {
     /// Per room, `[x, z, base, height, half width, 0]` in world runtime
     /// units; a zero height is a room with no card.
     pub rows: Vec<[i16; 6]>,
-    /// Per room, the sectors of its pictures (`psx_grid::render::VIEWS` of
-    /// them), or empty for a room with no card. `WORLD.PAK` holds room `i`'s
-    /// after every chunk sky.
-    pub pictures: Vec<Vec<u8>>,
+    /// Every picture of every card, one sector each, in the layout of
+    /// `cook::cards::disc_layout`: tiles of eight rooms that stand together,
+    /// each the eight views of its rooms one view after another. `WORLD.PAK`
+    /// holds the run as one chunk after every chunk sky.
+    pub pictures: Vec<u8>,
+    /// Per room, the sector in `pictures` of its picture of view 0, or
+    /// [`u32::MAX`] for a room with no card.
+    pub offsets: Vec<u32>,
+    /// Sectors from a room's picture of one view to its picture of the next.
+    pub stride: u32,
     /// Cards are shown out to this many runtime units from the camera, and
     /// fade in over the last `fade`.
     pub far: i32,
     pub fade: i32,
+    /// No card is drawn closer than this many runtime units (the coarse
+    /// band stands there).
+    pub near: i32,
     /// The colours behind the cards (below the horizon, at it, at the top
     /// of the screen).
     pub backdrop: [[u8; 3]; 3],
