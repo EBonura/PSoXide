@@ -516,7 +516,9 @@ fn bake_cards(
     let sector = i32::from(cooked.level.sector_units);
     let scene = project.active_scene();
     let sky = scene.world_sky_for_node(scene.root);
-    let backdrop = sky.map_or([[0; 3]; 3], |s| [s.lower_color, s.horizon_color, s.top_color]);
+    let backdrop = sky.map_or([[0; 3]; 3], |s| {
+        [s.lower_color, s.horizon_color, s.top_color]
+    });
     report.warn(format!(
         "cards: {} rooms in {:.1} s ({} empty), {} KiB of pictures, heights {} to {} units, half widths {} to {}",
         summary.cards,

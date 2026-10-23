@@ -85,7 +85,11 @@ fn faces(quad: &Quad, towards_eye: [f32; 3]) -> bool {
     if quad.flags & QUAD_AXIS != 0 {
         let axis = usize::from((quad.flags >> QUAD_AXIS_SHIFT) & 3);
         let c = towards_eye[axis.min(2)];
-        return (if quad.flags & QUAD_AXIS_NEG != 0 { -c } else { c }) > 0.0;
+        return (if quad.flags & QUAD_AXIS_NEG != 0 {
+            -c
+        } else {
+            c
+        }) > 0.0;
     }
     let n = quad.n.map(f32::from);
     n[0] * towards_eye[0] + n[1] * towards_eye[1] + n[2] * towards_eye[2] > 0.0
@@ -178,8 +182,8 @@ impl Raster {
                 let at = y * Self::WIDE + x;
                 if depth < self.depth[at] {
                     self.depth[at] = depth;
-                    self.colour[at] =
-                        [0, 1, 2].map(|i| w0 * colour[0][i] + w1 * colour[1][i] + w2 * colour[2][i]);
+                    self.colour[at] = [0, 1, 2]
+                        .map(|i| w0 * colour[0][i] + w1 * colour[1][i] + w2 * colour[2][i]);
                 }
             }
         }
@@ -196,8 +200,8 @@ impl Raster {
                         let at = (ty * SUPERSAMPLE + sy) * Self::WIDE + tx * SUPERSAMPLE + sx;
                         if self.depth[at].is_finite() {
                             count += 1;
-                            for i in 0..3 {
-                                sum[i] += self.colour[at][i];
+                            for (total, c) in sum.iter_mut().zip(self.colour[at]) {
+                                *total += c;
                             }
                         }
                     }
@@ -216,7 +220,10 @@ fn encode(indices: &[u8], palette: &[[u8; 3]]) -> Vec<u8> {
     let mut out = vec![0u8; SLOT_BYTES];
     for row in 0..HIGH {
         for pair in 0..WIDE / 2 {
-            let (a, b) = (indices[row * WIDE + 2 * pair], indices[row * WIDE + 2 * pair + 1]);
+            let (a, b) = (
+                indices[row * WIDE + 2 * pair],
+                indices[row * WIDE + 2 * pair + 1],
+            );
             out[row * (WIDE / 2) + pair] = (a & 15) | (b << 4);
         }
     }
@@ -267,10 +274,7 @@ pub fn bake_room(cooked: &CookedLevel, albedo: &[[f32; 3]], room: usize) -> Opti
     if n == 0 {
         return None;
     }
-    let centre = [
-        (sx / n) as i32 + sector / 2,
-        (sz / n) as i32 + sector / 2,
-    ];
+    let centre = [(sx / n) as i32 + sector / 2, (sz / n) as i32 + sector / 2];
     // Horizontal reach and vertical extent over everything the room draws,
     // so no quad falls outside any view.
     let (mut reach, mut low, mut high) = (0.0f32, f32::INFINITY, f32::NEG_INFINITY);
@@ -400,7 +404,10 @@ pub fn bake(cooked: &CookedLevel, albedo: &[[f32; 3]]) -> (Vec<Option<BakedCard>
             Some(card) => {
                 report.cards += 1;
                 report.bytes += card.sectors.len();
-                report.height = (report.height.0.min(card.height), report.height.1.max(card.height));
+                report.height = (
+                    report.height.0.min(card.height),
+                    report.height.1.max(card.height),
+                );
                 report.half_width = (
                     report.half_width.0.min(card.half_width),
                     report.half_width.1.max(card.half_width),
@@ -471,7 +478,8 @@ mod tests {
         assert_eq!(card.sectors.len(), VIEWS * SLOT_BYTES);
         assert_eq!(card.preview.len(), VIEWS * WIDE * HIGH);
         for view in 0..VIEWS {
-            let (indices, palette) = decode(&card.sectors[view * SLOT_BYTES..(view + 1) * SLOT_BYTES]);
+            let (indices, palette) =
+                decode(&card.sectors[view * SLOT_BYTES..(view + 1) * SLOT_BYTES]);
             // Index 0 is transparent: its palette entry is 0 and no other is.
             assert_eq!(palette[0], 0);
             assert!(palette[1..].iter().all(|&c| c & 0x8000 != 0), "{palette:?}");
@@ -552,7 +560,7 @@ mod tests {
                 assert_eq!(texel[3], 0);
             } else {
                 let word = palette[index];
-                let c = |shift: u32| ((((word >> shift) & 31) as u8) << 3);
+                let c = |shift: u32| (((word >> shift) & 31) as u8) << 3;
                 assert_eq!(&texel[..3], &[c(0), c(5), c(10)]);
             }
         }

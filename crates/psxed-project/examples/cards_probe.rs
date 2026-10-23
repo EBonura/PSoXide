@@ -46,7 +46,9 @@ fn main() {
     let project_path = Path::new(&args[0]);
     let text = std::fs::read_to_string(project_path).expect("read the project");
     let project = ProjectDocument::from_ron_str(&text).expect("parse the project");
-    let root = project_path.parent().map_or_else(|| PathBuf::from("."), PathBuf::from);
+    let root = project_path
+        .parent()
+        .map_or_else(|| PathBuf::from("."), PathBuf::from);
     let out = PathBuf::from(&args[1]);
     std::fs::create_dir_all(&out).expect("create the output directory");
     let (package, report) = build_package(&project, &root);

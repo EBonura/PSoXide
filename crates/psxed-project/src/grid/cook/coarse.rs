@@ -41,7 +41,11 @@ type Sample = ([f32; 3], [f32; 3]);
 
 /// A room's triangles as indices into `samples` (corner samples, one per
 /// quad corner so each keeps its own colour).
-fn gather(cooked: &CookedLevel, albedo: &[[f32; 3]], room: usize) -> (Vec<Sample>, Vec<[usize; 3]>) {
+fn gather(
+    cooked: &CookedLevel,
+    albedo: &[[f32; 3]],
+    room: usize,
+) -> (Vec<Sample>, Vec<[usize; 3]>) {
     let table = &cooked.tables[room];
     let origin = cooked.level.rooms[room].origin;
     let mut samples = Vec::new();
@@ -154,14 +158,17 @@ pub fn bake(
             grew = true;
             cell *= 1.25;
             if cell > sector * 64.0 {
-                return Err(format!("room {room}: no grid fits its mesh in 255 vertices"));
+                return Err(format!(
+                    "room {room}: no grid fits its mesh in 255 vertices"
+                ));
             }
             (vertices, tris) = cluster(&samples, &triangles, cell);
         }
         report.regridded += usize::from(grew);
-        if vertices.iter().any(|v| {
-            [v.x, v.y, v.z].iter().any(|&c| i32::from(c).abs() >= limit)
-        }) {
+        if vertices
+            .iter()
+            .any(|v| [v.x, v.y, v.z].iter().any(|&c| i32::from(c).abs() >= limit))
+        {
             return Err(format!(
                 "room {room}'s coarse mesh reaches past 32767 runtime units from the world origin"
             ));
@@ -171,8 +178,12 @@ pub fn bake(
         block.vertices.extend(vertices);
         block.triangles.extend(tris);
         let (v, t) = (block.vertices.len(), block.triangles.len());
-        block.vertex_first.push(u16::try_from(v).map_err(|_| "coarse vertices above 65535")?);
-        block.triangle_first.push(u16::try_from(t).map_err(|_| "coarse triangles above 65535")?);
+        block
+            .vertex_first
+            .push(u16::try_from(v).map_err(|_| "coarse vertices above 65535")?);
+        block
+            .triangle_first
+            .push(u16::try_from(t).map_err(|_| "coarse triangles above 65535")?);
     }
     block.header = CoarseHeader {
         vertex_count: block.vertices.len() as u16,
@@ -183,10 +194,8 @@ pub fn bake(
     };
     report.vertices = block.vertices.len();
     report.triangles = block.triangles.len();
-    report.bytes = 8
-        + 4 * block.vertex_first.len()
-        + 8 * block.vertices.len()
-        + 3 * block.triangles.len();
+    report.bytes =
+        8 + 4 * block.vertex_first.len() + 8 * block.vertices.len() + 3 * block.triangles.len();
     Ok((block, report))
 }
 
@@ -218,10 +227,14 @@ mod tests {
             ..GridWorld::default()
         })
         .unwrap();
-        let (block, report) = bake(&cooked, &vec![[0.5; 3]; 8], 4.0, 14, 2).unwrap();
+        let (block, report) = bake(&cooked, &[[0.5; 3]; 8], 4.0, 14, 2).unwrap();
         // 64 cells of two triangles each become a handful.
         assert_eq!(report.source_triangles, 128);
-        assert!(report.triangles > 0 && report.triangles < 24, "{}", report.triangles);
+        assert!(
+            report.triangles > 0 && report.triangles < 24,
+            "{}",
+            report.triangles
+        );
         assert_eq!(block.vertex_first, vec![0, block.vertices.len() as u16]);
         assert_eq!(block.triangle_first, vec![0, block.triangles.len() as u16]);
         assert!(block
@@ -229,7 +242,11 @@ mod tests {
             .iter()
             .all(|t| t.iter().all(|&c| usize::from(c) < block.vertices.len())));
         // The floor stays at its height.
-        assert!(block.vertices.iter().all(|v| v.y.abs() < 8), "{:?}", block.vertices);
+        assert!(
+            block.vertices.iter().all(|v| v.y.abs() < 8),
+            "{:?}",
+            block.vertices
+        );
         // And round-trips through the core.
         let mut level = cooked.level.clone();
         level.coarse = Some(block);
