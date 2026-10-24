@@ -1320,18 +1320,20 @@ mod tests {
     #[test]
     fn an_eye_block_lists_the_tiles_of_each_heading_then_holds_the_panels() {
         let mut set: [Option<DiscPanel>; shared::HEADINGS] = Default::default();
-        set[0] = Some(disc_panel([3, 0, 0, 0, 1], 3));
-        set[5] = Some(disc_panel([0, 0, 127, 0, 0], 7));
+        let (mut first, mut second) = ([0u8; shared::COLS], [0u8; shared::COLS]);
+        (first[0], first[shared::COLS - 1]) = (3, 1);
+        second[shared::COLS - 1] = 7;
+        set[0] = Some(disc_panel(first, 3));
+        set[5] = Some(disc_panel(second, 3));
         let blocks = eye_blocks(&[set, Default::default()]);
         assert_eq!(blocks.len(), 2);
         // The list sector, then the two panels (a header and their tiles each).
-        assert_eq!(blocks[0].len(), (1 + 4 + 8) * shared::SLOT_BYTES);
-        assert_eq!(&blocks[0][0..5], &[3, 0, 0, 0, 1]);
-        assert_eq!(
-            &blocks[0][5 * shared::COLS..5 * shared::COLS + 5],
-            &[0, 0, 127, 0, 0]
-        );
-        assert!(blocks[0][5..5 * shared::COLS].iter().all(|&b| b == 0));
+        assert_eq!(blocks[0].len(), (1 + 4 + 4) * shared::SLOT_BYTES);
+        assert_eq!(&blocks[0][..shared::COLS], &first);
+        assert_eq!(&blocks[0][5 * shared::COLS..6 * shared::COLS], &second);
+        assert!(blocks[0][shared::COLS..5 * shared::COLS]
+            .iter()
+            .all(|&b| b == 0));
         // An eye with nothing to show has no block.
         assert!(blocks[1].is_empty());
     }
