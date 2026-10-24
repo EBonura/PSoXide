@@ -419,7 +419,7 @@ fn record_words(words: &[u32]) {
                 if node.is_null() {
                     head = tag;
                 } else {
-                    *node = (node_words << 24) | (tag as u32 & 0x00FF_FFFF);
+                    *node = (node_words << 24) | (tag as u32 & 0x00ff_ffff);
                 }
                 node = tag;
                 node_words = 0;
