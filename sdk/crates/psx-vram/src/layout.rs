@@ -195,6 +195,15 @@ impl Ledger {
         self.live |= 1 << owner.index();
     }
 
+    /// The owner's region becomes live inside another live owner's pool without displacing it:
+    /// the pool's allocator keeps clear of this rectangle (a picture placed in the part of an
+    /// atlas band that the atlas leaves free), so nothing there has lost its pixels.
+    #[inline(never)]
+    #[optimize(size)]
+    pub fn coexist(&mut self, owner: Owner) {
+        self.live |= 1 << owner.index();
+    }
+
     /// The owner's region becomes live on top of whatever overlaps it: those owners are displaced,
     /// their uploads refused, until [`end`](Self::end).
     #[inline(never)]
@@ -280,6 +289,17 @@ mod tests {
         assert_eq!(L.overlapping(D), 0);
         const _: () = assert!(L.disjoint(0b1011));
         assert!(!L.disjoint(0b0111));
+    }
+
+    #[test]
+    fn a_picture_in_the_free_part_of_a_pool_displaces_nothing() {
+        let mut l = Ledger::with_live(bit(A) | bit(B));
+        l.coexist(C);
+        assert!(l.is_live(C));
+        assert_eq!(l.displaced(), 0);
+        assert!(l.permit(&L, A, VramRect::new(0, 0, 8, 8)));
+        assert!(l.permit(&L, C, VramRect::new(32, 0, 8, 8)));
+        assert_eq!(l.end(&L, bit(C)), 0);
     }
 
     #[test]
