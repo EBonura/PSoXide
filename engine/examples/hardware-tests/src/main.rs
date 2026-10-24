@@ -3793,6 +3793,7 @@ const fn mode_short(mode: psx_pad::PadMode) -> &'static str {
     match mode {
         psx_pad::PadMode::Digital => "DIG",
         psx_pad::PadMode::Analog => "ANA",
+        psx_pad::PadMode::Negcon => "NEG",
         psx_pad::PadMode::Config => "CFG",
         psx_pad::PadMode::Unknown => "UNK",
         psx_pad::PadMode::Disconnected => "---",

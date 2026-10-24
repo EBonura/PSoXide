@@ -298,6 +298,16 @@ fn required_buttons(mode: PadMode) -> u16 {
         0
     } else if mode.has_sticks() {
         u16::MAX
+    } else if matches!(mode, PadMode::Negcon) {
+        // The only digital switches a neGcon wires (psx_pad::NegconState).
+        button::START
+            | button::UP
+            | button::DOWN
+            | button::LEFT
+            | button::RIGHT
+            | button::R1
+            | button::TRIANGLE
+            | button::CIRCLE
     } else {
         !(button::L3 | button::R3)
     }
@@ -308,6 +318,7 @@ const fn pad_kind(mode: PadMode) -> &'static str {
         PadMode::Disconnected => "EMPTY",
         PadMode::Digital => "DIGITAL",
         PadMode::Analog => "DUALSHOCK",
+        PadMode::Negcon => "NEGCON",
         PadMode::Config => "CONFIG",
         PadMode::Unknown => "UNKNOWN",
     }
