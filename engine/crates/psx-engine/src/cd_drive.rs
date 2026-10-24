@@ -384,8 +384,7 @@ pub(crate) fn music_head() -> Option<SongOffset> {
         with_player(|player| {
             player.is_streaming().then(|| {
                 // The player counts from the first sector it was given.
-                let sectors = (u64::from(player.elapsed_millis()) * u64::from(SECTORS_PER_SECOND))
-                    .div_ceil(1000) as u32;
+                let sectors = sectors_for_millis(player.elapsed_millis());
                 offset.saturating_add(sectors)
             })
         })
@@ -405,6 +404,13 @@ pub(crate) fn music_head() -> Option<SongOffset> {
             None
         }
     }
+}
+
+/// Sectors that `millis` of playback cover, rounded up, in 32-bit arithmetic
+/// (the guest has no 64-bit divide): whole seconds, then the remainder.
+#[cfg(any(target_arch = "mips", test))]
+const fn sectors_for_millis(millis: u32) -> u32 {
+    (millis / 1000) * SECTORS_PER_SECOND + ((millis % 1000) * SECTORS_PER_SECOND).div_ceil(1000)
 }
 
 /// Whether the music code currently holds the lease.
@@ -544,4 +550,18 @@ pub(crate) fn stop_playback() {
     }
     #[cfg(all(not(target_arch = "mips"), test))]
     HOST_PLAYING.with(|flag| flag.set(false));
+}
+
+#[cfg(test)]
+mod sector_math_tests {
+    use super::{sectors_for_millis, SECTORS_PER_SECOND};
+
+    #[test]
+    fn sectors_for_millis_matches_the_wide_formula() {
+        let wide =
+            |millis: u32| (u64::from(millis) * u64::from(SECTORS_PER_SECOND)).div_ceil(1000) as u32;
+        for millis in (0..200_000).chain([u32::MAX / 1000 * 999, u32::MAX]) {
+            assert_eq!(sectors_for_millis(millis), wide(millis), "{millis} ms");
+        }
+    }
 }

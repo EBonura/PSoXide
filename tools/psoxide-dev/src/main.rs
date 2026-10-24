@@ -264,7 +264,12 @@ fn runtime_numeric_guard() -> Result<(), String> {
     // Every other engine crate is guest-linked too (psx-bsp's collision and
     // frustum kernels once linked `__udivdi3` unseen because only the three
     // roots above were scanned). `collect_rs_files` de-duplicates.
-    push_child_src_dirs(&mut runtime_roots, &root.join("engine/crates"))?;
+    // psx-vector-cook is the host cooker for vector art; it never links into a guest.
+    for entry in sorted_dirs(&root.join("engine/crates"))? {
+        if entry.file_name().and_then(|s| s.to_str()) != Some("psx-vector-cook") {
+            runtime_roots.push(entry.join("src"));
+        }
+    }
     for entry in sorted_dirs(&root.join("sdk/crates"))? {
         // psx-gte-core is the host GTE model; psx-residency-sim replays a route
         // against the real residency policy on the host and never links into a
@@ -305,6 +310,18 @@ fn runtime_numeric_guard() -> Result<(), String> {
                 .unwrap_or(f)
                 .components()
                 .any(|part| part.as_os_str() == "tests")
+    });
+    // A file that only a `#[cfg(test)] mod name;` declaration includes is host
+    // test code like `tests.rs`, whatever it is called.
+    let mut test_only = HashSet::new();
+    for path in &files {
+        let src = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        test_only.extend(cfg_test_module_paths(path, &src));
+    }
+    files.retain(|f| {
+        !test_only
+            .iter()
+            .any(|t| f == t || f.starts_with(t.with_extension("")))
     });
     files.sort();
 
@@ -395,6 +412,51 @@ fn collect_rs_files(
         }
     }
     Ok(())
+}
+
+/// Names of the modules `src` declares as `#[cfg(test)] mod name;`.
+fn cfg_test_module_names(src: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut lines = src.lines().map(str::trim);
+    while let Some(line) = lines.next() {
+        if line != "#[cfg(test)]" {
+            continue;
+        }
+        let Some(decl) = lines.next() else { break };
+        let decl = decl
+            .strip_prefix("pub(crate) ")
+            .or(decl.strip_prefix("pub "))
+            .unwrap_or(decl);
+        if let Some(name) = decl
+            .strip_prefix("mod ")
+            .and_then(|rest| rest.strip_suffix(';'))
+        {
+            names.push(name.trim().to_string());
+        }
+    }
+    names
+}
+
+/// Source files that a `#[cfg(test)] mod name;` declaration in `declaring`
+/// pulls in: `name.rs` beside it (or inside its own directory for a file that
+/// is not a crate or module root).
+fn cfg_test_module_paths(declaring: &Path, src: &str) -> Vec<PathBuf> {
+    let Some(parent) = declaring.parent() else {
+        return Vec::new();
+    };
+    let stem = declaring
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default();
+    let base = if matches!(stem, "lib" | "main" | "mod") {
+        parent.to_path_buf()
+    } else {
+        parent.join(stem)
+    };
+    cfg_test_module_names(src)
+        .into_iter()
+        .map(|name| base.join(format!("{name}.rs")))
+        .collect()
 }
 
 fn allowed_lines(src: &str) -> HashSet<usize> {
@@ -2608,6 +2670,23 @@ mod tests {
     /// The numeric guard is only meaningful if it blanks exactly the
     /// test-only items: too little and it flags host oracles that
     /// legitimately use f64, too much and guest violations slip through.
+    #[test]
+    fn cfg_test_module_declarations_name_their_files() {
+        let src = "mod real;\n#[cfg(test)]\nmod flood_tests;\n#[cfg(test)]\npub(crate) mod probe;\n#[cfg(test)]\nmod inline { }\n";
+        assert_eq!(cfg_test_module_names(src), ["flood_tests", "probe"]);
+        assert_eq!(
+            cfg_test_module_paths(Path::new("a/src/lib.rs"), src),
+            [
+                Path::new("a/src/flood_tests.rs"),
+                Path::new("a/src/probe.rs")
+            ]
+        );
+        assert_eq!(
+            cfg_test_module_paths(Path::new("a/src/walk.rs"), src)[0],
+            Path::new("a/src/walk/flood_tests.rs")
+        );
+    }
+
     #[test]
     fn blank_test_items_blanks_test_only_and_keeps_the_rest() {
         let src = "\
