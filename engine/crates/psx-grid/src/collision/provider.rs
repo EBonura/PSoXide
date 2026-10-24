@@ -7,6 +7,114 @@ use psx_engine::{
     CollisionTrace, CollisionTraceProvider, CollisionTraceQuery, CollisionTraceShape, RoomPoint,
 };
 
+/// Traces the memo of a [`TraceMemo`] holds.
+const MEMO_ENTRIES: usize = 12;
+
+/// One remembered trace: the exact request and the answer it got.
+#[derive(Copy, Clone)]
+struct MemoEntry {
+    /// `start`, `end`, then radius and height (both -1 for a point trace) and
+    /// whether the camera's world answered.
+    key: [i32; 9],
+    trace: CollisionTrace,
+}
+
+/// The last traces a [`GridTraceProvider`] answered, so asking the same
+/// question again costs a lookup instead of a walk through the world.
+///
+/// The answer to a trace is a pure function of the request, of the rooms
+/// resident when it is asked ([`crate::ResidentRooms::epoch`]) and of whether
+/// the camera's world asked: the world is immutable between two changes of
+/// that set. The memo remembers the epoch its entries were made at and drops
+/// them all when the set changes, so a hit is the very answer a fresh trace
+/// would give. Camera and motor ask the same question several times in one
+/// tick (and again the next while nothing moves), which is why this pays.
+pub struct TraceMemo {
+    /// Resident set epoch of the entries.
+    epoch: u32,
+    /// Entries in use, the first `used` of `entries`.
+    used: u8,
+    /// Slot the next new answer takes once all are in use.
+    next: u8,
+    entries: [MemoEntry; MEMO_ENTRIES],
+}
+
+impl TraceMemo {
+    /// Answers the memo keeps.
+    pub const CAPACITY: usize = MEMO_ENTRIES;
+
+    /// An empty memo.
+    pub const fn new() -> Self {
+        const NONE: MemoEntry = MemoEntry {
+            key: [0; 9],
+            trace: CollisionTrace {
+                all_solid: false,
+                start_solid: false,
+                fraction_q12: 0,
+                end: RoomPoint::ZERO,
+                normal_q12: [0; 3],
+                plane_distance: 0,
+            },
+        };
+        Self {
+            epoch: 0,
+            used: 0,
+            next: 0,
+            entries: [NONE; MEMO_ENTRIES],
+        }
+    }
+
+    /// Answers held now.
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        usize::from(self.used)
+    }
+
+    /// Forget every entry unless they were made at `epoch`.
+    #[inline(always)]
+    fn sync(&mut self, epoch: u32) {
+        if self.epoch != epoch {
+            self.epoch = epoch;
+            self.used = 0;
+            self.next = 0;
+        }
+    }
+
+    /// The answer remembered for `key`, if any.
+    #[inline(always)]
+    fn find(&self, key: &[i32; 9]) -> Option<CollisionTrace> {
+        self.entries[..usize::from(self.used)]
+            .iter()
+            .find(|entry| entry.key == *key)
+            .map(|entry| entry.trace)
+    }
+
+    /// Remember `trace` as the answer to `key`, replacing the oldest entry
+    /// once the memo is full.
+    #[inline(always)]
+    fn remember(&mut self, key: [i32; 9], trace: CollisionTrace) {
+        let slot = if usize::from(self.used) < MEMO_ENTRIES {
+            self.used += 1;
+            usize::from(self.used) - 1
+        } else {
+            let slot = usize::from(self.next);
+            self.next = if slot + 1 == MEMO_ENTRIES {
+                0
+            } else {
+                self.next + 1
+            };
+            slot
+        };
+        self.entries[slot] = MemoEntry { key, trace };
+    }
+}
+
+impl Default for TraceMemo {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Trace provider over a [`GridCollision`].
 ///
 /// Bodies need `radius <= S / 2`; larger radii are clamped to `S` so a trace
@@ -17,6 +125,8 @@ pub struct GridTraceProvider<'a, 'b> {
     /// The world with its camera flag set, copied at construction so a trace
     /// carries no copy on the (scratchpad) stack.
     camera_world: Option<GridCollision<'a>>,
+    /// Answers remembered across traces, see [`TraceMemo`].
+    memo: Option<&'b mut TraceMemo>,
 }
 
 impl<'a, 'b> GridTraceProvider<'a, 'b> {
@@ -24,7 +134,16 @@ impl<'a, 'b> GridTraceProvider<'a, 'b> {
         Self {
             world,
             camera_world: None,
+            memo: None,
         }
+    }
+
+    /// Answer repeated requests from `memo` instead of tracing them again.
+    /// The memo may be shared by providers of the same resident set, the
+    /// camera's among them: the camera flag is part of what it remembers.
+    pub fn with_memo(mut self, memo: &'b mut TraceMemo) -> Self {
+        self.memo = Some(memo);
+        self
     }
 
     /// The provider of the camera arm: free planes flagged
@@ -38,6 +157,7 @@ impl<'a, 'b> GridTraceProvider<'a, 'b> {
                 camera_pass: true,
                 ..*world
             }),
+            memo: None,
         }
     }
 }
@@ -102,6 +222,32 @@ impl CollisionTraceProvider for GridTraceProvider<'_, '_> {
             Some(camera) => camera,
             None => self.world,
         };
+        let memo_key = match self.memo.as_deref_mut() {
+            Some(memo) => {
+                let (radius, height) = match query.shape {
+                    CollisionTraceShape::Point => (-1, -1),
+                    CollisionTraceShape::Body { radius, height } => (radius, height),
+                };
+                let key = [
+                    a[0],
+                    a[1],
+                    a[2],
+                    b[0],
+                    b[1],
+                    b[2],
+                    radius,
+                    height,
+                    i32::from(world.camera_pass),
+                ];
+                memo.sync(world.set.epoch());
+                if let Some(trace) = memo.find(&key) {
+                    *output = trace;
+                    return true;
+                }
+                Some(key)
+            }
+            None => None,
+        };
         let (r, h, body) = match query.shape {
             CollisionTraceShape::Point => (0, 0, false),
             CollisionTraceShape::Body { radius, height } => {
@@ -121,6 +267,9 @@ impl CollisionTraceProvider for GridTraceProvider<'_, '_> {
             world.contact(&q, raw.fraction, i32::from(raw.contact_hi), &mut raw);
         }
         world.finish(&q, &raw, output);
+        if let (Some(memo), Some(key)) = (self.memo.as_deref_mut(), memo_key) {
+            memo.remember(key, *output);
+        }
         true
     }
 }

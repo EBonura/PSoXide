@@ -318,6 +318,32 @@ fn the_camera_arm_passes_through_flagged_planes_and_everything_else_still_collid
     });
 }
 
+#[test]
+fn the_memo_keeps_the_camera_arm_and_the_motor_apart() {
+    use super::provider::{GridTraceProvider, TraceMemo};
+    use psx_engine::trace_collision;
+    let mut screen = wall([160, 20], [160, 300], 0, 120);
+    screen.flags |= COLPLANE_CAMERA_PASS;
+    let mut room = Room::flat([0, 0, 0], 8, 4, 0);
+    room.planes.push(screen);
+    let built = build(&[room]);
+    built.run(|w| {
+        let across = point([100, 30, 150], [220, 30, 150]);
+        let mut memo = TraceMemo::new();
+        // The same request, asked alternately by the motor's provider and the
+        // camera's, always gets its own answer.
+        for _ in 0..3 {
+            let mut normal = GridTraceProvider::new(w).with_memo(&mut memo);
+            assert!(trace_collision(&mut normal, across).unwrap().fraction_q12 < 4096);
+            let mut camera = GridTraceProvider::for_camera(w).with_memo(&mut memo);
+            assert_eq!(
+                trace_collision(&mut camera, across).unwrap().fraction_q12,
+                4096
+            );
+        }
+    });
+}
+
 /// The ray loop as it was before the box test: every primary plane, no
 /// rejection.
 fn ray_planes_unfiltered(w: &GridCollision<'_>, room: usize, q: &Query, hit: &mut Raw) {

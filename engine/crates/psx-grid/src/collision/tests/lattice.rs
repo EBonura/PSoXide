@@ -6,7 +6,7 @@ use crate::resident::{ResidentError, ResidentRooms};
 
 /// A 6 by 5 plaza of 2 by 2 sector rooms on a 3 sector pitch, with a few
 /// features so the rooms differ, plus one room stacked over room 7.
-fn plaza() -> Vec<Room> {
+pub(super) fn plaza() -> Vec<Room> {
     let mut rooms = Vec::new();
     for iz in 0..5 {
         for ix in 0..6 {
@@ -28,7 +28,7 @@ fn plaza() -> Vec<Room> {
     rooms
 }
 
-fn queries(rng: &mut Lcg, count: usize) -> Vec<([i32; 3], [i32; 3])> {
+pub(super) fn queries(rng: &mut Lcg, count: usize) -> Vec<([i32; 3], [i32; 3])> {
     let (wx, wz) = (6 * 3 * S, 5 * 3 * S);
     (0..count)
         .map(|i| {

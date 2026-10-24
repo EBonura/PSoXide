@@ -29,7 +29,7 @@ use psx_game_runtime::cd_stream::{
 };
 use psx_game_runtime::destructibles::RuntimeDestructibles;
 use psx_game_runtime::grid_stream::{wanted_room, DiscTransport, GridStreamer};
-use psx_grid::collision::GridTraceProvider;
+use psx_grid::collision::{GridTraceProvider, TraceMemo};
 use psx_grid::contents::{contents_of_liquid_kind, LiquidContentsSample, CONTENTS_EMPTY};
 #[cfg(target_arch = "mips")]
 use psx_grid::render::load_gte_clip_planes;
@@ -182,6 +182,10 @@ pub(super) struct GridRuntime {
     card_skip: Vec<bool>,
     last_world_packet_words: usize,
     camera_traces: u32,
+    /// Traces the motor and the camera asked of the world lately, so a
+    /// request repeated within a tick, or while nothing moves, is not walked
+    /// again.
+    trace_memo: TraceMemo,
     /// Sight-line cache for [`Self::visible_view_bounds_mask`].
     // psx-numeric-allow-next-line: one bit per model instance, the caller's mask width
     view_known: u64,
@@ -315,6 +319,7 @@ impl GridRuntime {
             card_skip: Vec::new(),
             last_world_packet_words: 0,
             camera_traces: 0,
+            trace_memo: TraceMemo::new(),
             view_known: 0,
             view_seen: 0,
             view_phase: 0,
@@ -871,7 +876,7 @@ impl GridRuntime {
         aabb_blockers: &[CharacterCollisionAabb],
     ) -> Result<CharacterMotorFrame, CollisionQueryError> {
         let world = self.resident.collision();
-        let mut provider = GridTraceProvider::new(&world);
+        let mut provider = GridTraceProvider::new(&world).with_memo(&mut self.trace_memo);
         let mut provider =
             CharacterBlockerTraceProvider::new_with_aabbs(&mut provider, blockers, aabb_blockers);
         motor.update_vblanks_with_trace_provider(&mut provider, input, config, delta_vblanks)
@@ -971,7 +976,7 @@ impl GridRuntime {
     ) -> Result<ThirdPersonCameraFrame, CollisionQueryError> {
         // The camera arm passes through translucent and alpha-cut planes.
         let world = self.resident.collision();
-        let mut provider = GridTraceProvider::for_camera(&world);
+        let mut provider = GridTraceProvider::for_camera(&world).with_memo(&mut self.trace_memo);
         let mut provider =
             CharacterBlockerTraceProvider::new_with_aabbs(&mut provider, &[], aabb_blockers);
         let mut counting = CountingTraceProvider::new(&mut provider);

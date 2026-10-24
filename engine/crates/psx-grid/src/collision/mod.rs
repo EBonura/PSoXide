@@ -35,6 +35,6 @@ mod plane_tests;
 mod tests;
 
 pub use leaf::LeafDims;
-pub use provider::GridTraceProvider;
+pub use provider::{GridTraceProvider, TraceMemo};
 pub use summary::{summarize_leaves, summarize_sectors};
 pub use world::{GridCollision, Located, COORD_LIMIT, SLAB_THICKNESS};

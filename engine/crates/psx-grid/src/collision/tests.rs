@@ -12,6 +12,7 @@ use psx_engine::{
 
 mod lattice;
 mod leaf;
+mod memo;
 mod spans;
 
 const S: i32 = 80;
