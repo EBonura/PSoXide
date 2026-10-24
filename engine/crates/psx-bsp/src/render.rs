@@ -2628,8 +2628,6 @@ impl Renderer {
         true
     }
 
-
-
     /// Rebuild the per-node PVS stamp for render nodes. This runs only
     /// when the camera enters a different leaf; per-frame traversal can then
     /// skip every branch that cannot lead to a PVS-visible leaf.

@@ -40,17 +40,9 @@ const RESIDENT_LUMPS: [PxbspLumpKind; 14] = [
 pub enum PxbspMapLoadError<E> {
     Index(PxbspError<E>),
     Read(E),
-    TooLarge {
-        required: usize,
-        capacity: usize,
-    },
-    StaticLegacyVersion {
-        found: u16,
-    },
-    LegacyRecord {
-        kind: PxbspLumpKind,
-        index: usize,
-    },
+    TooLarge { required: usize, capacity: usize },
+    StaticLegacyVersion { found: u16 },
+    LegacyRecord { kind: PxbspLumpKind, index: usize },
     BadVertexData,
     BadPlane(usize),
     BadMaterial(usize, PxbspMaterialError),
@@ -118,7 +110,6 @@ pub struct PxbspResidentMap {
     source_ranges: [LumpRange; PXBSP_LUMP_COUNT],
     source_file_len: u32,
 }
-
 
 /// Backing bytes for a validated resident map.
 ///
