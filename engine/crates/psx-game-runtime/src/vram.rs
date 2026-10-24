@@ -33,6 +33,7 @@ use psx_level::{
     find_asset_of_kind, sky_flags, AssetId, AssetKind, LevelAssetRecord, LevelRoomRecord,
     ResidencyManager, RoomIndex,
 };
+use psx_vram::map::{ClaimError, Owner, Policy, RestoreFn, VramMap};
 use psx_vram::{
     upload_16bpp, upload_bytes, Clut, TextureDepth, TexturePage, VramAllocator, VramHandle,
     VramRect, VramRegionSource,
@@ -97,6 +98,16 @@ pub const PARTICLE_TEXTURE_HALFWORDS_PER_ROW: u16 = PARTICLE_TEXTURE_SIZE / 4;
 /// can be released on gameplay entry. One entry per streamed Texture
 /// asset.
 const MAX_UI_IMAGE_SLOTS: usize = 16;
+
+/// Owner of the double-buffered framebuffer in [`VramRuntime::map`].
+pub const OWNER_FRAMEBUFFER: Owner = Owner::new(0);
+/// Owner of the managed CLUT band in [`VramRuntime::map`].
+pub const OWNER_CLUT_BAND: Owner = Owner::new(1);
+/// First owner number a scene state may use for a loan from [`VramRuntime::borrow_region`].
+pub const OWNER_FIRST_LOAN: Owner = Owner::new(2);
+/// Owners the runtime's ownership ledger holds: the two fixed regions plus
+/// four loans (a cutscene, a menu backdrop, an FMV buffer and one spare).
+const MAP_OWNERS: usize = 6;
 
 const UI_TEXTURE_UPLOAD_MAX_STEPS: u8 = 8;
 
@@ -654,6 +665,12 @@ pub struct VramRuntime<
     particle_clut_region: VramHandle,
     /// The stance HUD's palettes, 16 entries each, in the CLUT band.
     stance_hud_cluts: [VramHandle; STANCE_HUD_MAX_CLUTS],
+    /// Ownership ledger for the fixed regions (framebuffer, CLUT band) and for
+    /// loans of space a scene state needs outside the allocator (see
+    /// [`Self::borrow_region`]). The allocator stays the authority for
+    /// everything it hands out; a map entry per allocation would cost more RAM
+    /// than Cortex has to spare.
+    map: VramMap<MAP_OWNERS>,
     upload_queue: VramUploadQueue,
     /// Streamed UI image VRAM slots created on menu entry, tracked so they
     /// can be released on gameplay entry. One entry per streamed Texture
@@ -713,6 +730,7 @@ impl<
             vitality_circle_clut_region: VramHandle::Empty,
             particle_clut_region: VramHandle::Empty,
             stance_hud_cluts: [VramHandle::Empty; STANCE_HUD_MAX_CLUTS],
+            map: VramMap::new(),
             upload_queue: VramUploadQueue::new(),
             ui_image_slots: [None; MAX_UI_IMAGE_SLOTS],
         }
@@ -772,6 +790,14 @@ impl<
     fn reserve_static_vram_regions(&mut self, layout: VramLayout) {
         // Double-buffered framebuffer.
         self.allocator.reserve_rect(layout.framebuffer);
+        // The ledger mirrors the two fixed regions; the CLUT band is already
+        // reserved by `VramAllocator::with_clut_band`.
+        let _ = self
+            .map
+            .claim(OWNER_FRAMEBUFFER, layout.framebuffer, Policy::Persist);
+        let _ = self
+            .map
+            .claim(OWNER_CLUT_BAND, layout.clut_band, Policy::Persist);
         // Room-material pages are backed lazily by the unified allocator; this
         // call records their preferred range without reserving unused capacity.
         self.allocator
@@ -2575,6 +2601,46 @@ impl<
             }
         }
     }
+
+    /// The ownership ledger: the fixed regions plus any loans in force.
+    pub fn map(&self) -> &VramMap<MAP_OWNERS> {
+        &self.map
+    }
+
+    /// Lend `rect` to a scene state (a cutscene panorama, an FMV buffer, a menu
+    /// backdrop) that needs VRAM the allocator does not hand out. Any region in
+    /// the ledger that overlaps it is marked displaced; `end_borrow` puts it
+    /// back. `owner` must be at or above [`OWNER_FIRST_LOAN`].
+    pub fn borrow_region(
+        &mut self,
+        owner: Owner,
+        rect: VramRect,
+        policy: Policy,
+    ) -> Result<(), ClaimError> {
+        let result = self.map.borrow(owner, rect, policy);
+        self.publish_ownership_violations();
+        result
+    }
+
+    /// End a loan from [`Self::borrow_region`] and restore what it displaced.
+    pub fn end_borrow(&mut self, owner: Owner) {
+        self.map.end_borrow(owner);
+        self.publish_ownership_violations();
+    }
+
+    /// Register the callback that re-uploads `owner`'s region after a loan.
+    pub fn set_region_restore(&mut self, owner: Owner, restore: RestoreFn<MAP_OWNERS>) {
+        self.map.set_restore(owner, restore);
+    }
+
+    fn publish_ownership_violations(&self) {
+        if self.map.violations() != 0 {
+            telemetry::counter(
+                telemetry::counter::VRAM_OWNERSHIP_VIOLATIONS,
+                u32::from(self.map.violations()),
+            );
+        }
+    }
 }
 
 fn room_texture_window_size(layout: VramLayout, size: u16) -> Option<u8> {
@@ -2699,6 +2765,30 @@ mod tests {
         let vram = TestVram::new(ARENA_LAYOUT);
         assert_eq!(vram.allocator.clut_bounds(), ARENA_LAYOUT.clut_band);
         assert!(vram.allocator.clut_band_is_reserved());
+    }
+
+    /// A scene state can borrow space over a fixed region, and the ledger puts
+    /// the lender back when the loan ends.
+    #[test]
+    fn loans_displace_and_restore_the_fixed_regions() {
+        const FMV: Owner = OWNER_FIRST_LOAN;
+        let mut vram = TestVram::new(ARENA_LAYOUT);
+        vram.reserve_static_vram_regions(ARENA_LAYOUT);
+        assert_eq!(
+            vram.map().rect_of(OWNER_FRAMEBUFFER),
+            Some(ARENA_LAYOUT.framebuffer)
+        );
+        assert_eq!(
+            vram.map().rect_of(OWNER_CLUT_BAND),
+            Some(ARENA_LAYOUT.clut_band)
+        );
+        vram.borrow_region(FMV, VramRect::new(0, 0, 320, 240), Policy::Level)
+            .expect("a loan may overlap");
+        assert!(vram.map().is_displaced(OWNER_FRAMEBUFFER));
+        assert!(!vram.map().is_displaced(OWNER_CLUT_BAND));
+        vram.end_borrow(FMV);
+        assert!(!vram.map().is_displaced(OWNER_FRAMEBUFFER));
+        assert_eq!(vram.map().violations(), 0);
     }
 
     #[test]
