@@ -721,9 +721,12 @@ fn bake_panels(
     );
     let kib: usize = blocks.iter().map(Vec::len).sum::<usize>() / 1024;
     if std::env::var_os("PANEL_TILE_STATS").is_some() {
-        use psx_grid::render::{CELLS_X, CELLS_Y, CELL_EMPTY, COLS, HEADER_ROOMS_AT, ROWS, SLOT_BYTES};
+        use psx_grid::render::{
+            CELLS_X, CELLS_Y, CELL_EMPTY, COLS, HEADER_ROOMS_AT, ROWS, SLOT_BYTES,
+        };
         let mut cells_hist = [0usize; 7];
-        let (mut tiles, mut texels_live, mut bbox_area, mut cell_live_area) = (0usize, 0usize, 0usize, 0usize);
+        let (mut tiles, mut texels_live, mut bbox_area, mut cell_live_area) =
+            (0usize, 0usize, 0usize, 0usize);
         for panel in baked.iter().flat_map(|set| set.iter().flatten()) {
             let mut at = 1;
             for col in 0..COLS {
@@ -734,7 +737,8 @@ fn bake_panels(
                     let tile = col * ROWS + row;
                     let sector = &panel.sectors[at * SLOT_BYTES..(at + 1) * SLOT_BYTES];
                     at += 1;
-                    let rooms = &panel.sectors[HEADER_ROOMS_AT + tile * CELLS_X * CELLS_Y..][..CELLS_X * CELLS_Y];
+                    let rooms = &panel.sectors[HEADER_ROOMS_AT + tile * CELLS_X * CELLS_Y..]
+                        [..CELLS_X * CELLS_Y];
                     let live_cells = rooms.iter().filter(|&&r| r != CELL_EMPTY).count();
                     cells_hist[live_cells] += 1;
                     cell_live_area += live_cells;
@@ -746,13 +750,18 @@ fn bake_panels(
                             let n = if x % 2 == 0 { b & 15 } else { b >> 4 };
                             if n != 0 {
                                 live += 1;
-                                x0 = x0.min(x); x1 = x1.max(x + 1); y0 = y0.min(y); y1 = y1.max(y + 1);
+                                x0 = x0.min(x);
+                                x1 = x1.max(x + 1);
+                                y0 = y0.min(y);
+                                y1 = y1.max(y + 1);
                             }
                         }
                     }
                     tiles += 1;
                     texels_live += live;
-                    if live > 0 { bbox_area += (x1 - x0) * (y1 - y0); }
+                    if live > 0 {
+                        bbox_area += (x1 - x0) * (y1 - y0);
+                    }
                 }
             }
         }

@@ -1230,8 +1230,32 @@ pub fn eye_blocks(panels: &[[Option<DiscPanel>; shared::HEADINGS]]) -> Vec<Vec<u
                         .copy_from_slice(&panel.cols);
                 }
             }
+            // The headers of the panels, then the tiles of the rows on screen with the camera
+            // level, panel after panel, then the other rows' tiles: a view is a stretch of the
+            // disc, and the drive seeks once for it (the guest derives every sector from the
+            // list's row masks, see `panel_stream::EyeList::parse`).
+            let bytes = shared::SLOT_BYTES;
             for panel in set.iter().flatten() {
-                block.extend_from_slice(&panel.sectors);
+                block.extend_from_slice(&panel.sectors[..bytes]);
+            }
+            for outer in [false, true] {
+                for panel in set.iter().flatten() {
+                    let mut at = 1;
+                    for col in 0..shared::COLS {
+                        for row in 0..shared::ROWS {
+                            if panel.cols[col] >> row & 1 == 0 {
+                                continue;
+                            }
+                            let central = shared::CENTRAL_ROWS >> row & 1 != 0;
+                            if central != outer {
+                                block.extend_from_slice(
+                                    &panel.sectors[at * bytes..(at + 1) * bytes],
+                                );
+                            }
+                            at += 1;
+                        }
+                    }
+                }
             }
             block
         })
@@ -1301,7 +1325,10 @@ mod tests {
         // The list sector, then the two panels (a header and their tiles each).
         assert_eq!(blocks[0].len(), (1 + 4 + 8) * shared::SLOT_BYTES);
         assert_eq!(&blocks[0][0..5], &[3, 0, 0, 0, 1]);
-        assert_eq!(&blocks[0][5 * shared::COLS..5 * shared::COLS + 5], &[0, 0, 127, 0, 0]);
+        assert_eq!(
+            &blocks[0][5 * shared::COLS..5 * shared::COLS + 5],
+            &[0, 0, 127, 0, 0]
+        );
         assert!(blocks[0][5..5 * shared::COLS].iter().all(|&b| b == 0));
         // An eye with nothing to show has no block.
         assert!(blocks[1].is_empty());
@@ -1309,12 +1336,7 @@ mod tests {
 
     #[test]
     fn rooms_and_eyes_go_in_the_pack_along_one_curve_and_room_zero_is_left_to_the_caller() {
-        let rooms = [
-            Some([0, 0]),
-            Some([100, 100]),
-            None,
-            Some([4000, 4000]),
-        ];
+        let rooms = [Some([0, 0]), Some([100, 100]), None, Some([4000, 4000])];
         let eyes = [Some([120, 90]), None];
         let order = pack_order(&rooms, &eyes);
         // Room 0 is not listed, the room with no centre goes last, an eye with no block is
@@ -1334,7 +1356,10 @@ mod tests {
             let byte = depth_byte_of(sectors * sector, sector);
             let back = f32::from(psx_grid::render::depth_units(byte) as u16)
                 / (1 << shared::DEPTH_SECTOR_SHIFT) as f32;
-            assert!((back - sectors).abs() <= sectors * 0.02, "{sectors}: {back}");
+            assert!(
+                (back - sectors).abs() <= sectors * 0.02,
+                "{sectors}: {back}"
+            );
         }
     }
 
