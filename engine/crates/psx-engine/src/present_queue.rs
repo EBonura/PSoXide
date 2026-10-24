@@ -93,9 +93,8 @@ impl PresentQueue {
     }
 
     pub(crate) fn hook(&self) -> *const u32 {
-        // SAFETY: only the address of the static is taken; no reference is
-        // formed.
-        unsafe { core::ptr::addr_of!(PRESENT_HOOK) }
+        // Only the address of the static is taken; no reference is formed.
+        core::ptr::addr_of!(PRESENT_HOOK)
     }
 
     /// Point the hook node at `next`, the overlay of the frame being published.
