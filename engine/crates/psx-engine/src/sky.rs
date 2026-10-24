@@ -1941,6 +1941,8 @@ mod sample_emission_tests {
 /// halves a ray from 2^14 where quake halves from 16,000.
 #[cfg(test)]
 mod quake_sky_parity {
+    extern crate alloc;
+
     use super::{directional_texel, screen_view_ray};
     use psx_math::int32::isqrt_i32;
 

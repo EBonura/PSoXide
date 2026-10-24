@@ -242,7 +242,7 @@ const SEMI_TRANSPARENT_COMMAND_BIT: u32 = 0x0200_0000;
 /// from the near plane than a first-person view does. Keep one profile
 /// authority for every world, special-surface and model submission so their
 /// shared edges cross subdivision bands together.
-const PXBSP_RENDER_PROFILE: SurfaceProfile = SurfaceProfile::PXBSP_THIRD_PERSON;
+const PXBSP_RENDER_PROFILE: SurfaceProfile = SurfaceProfile::THIRD_PERSON;
 
 /// Q20.12 world camera and Q0.12 turn angles.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -5089,7 +5089,7 @@ mod frustum_tests {
 
     #[test]
     fn pxbsp_renderer_uses_the_third_person_affine_profile() {
-        assert_eq!(PXBSP_RENDER_PROFILE, SurfaceProfile::PXBSP_THIRD_PERSON);
+        assert_eq!(PXBSP_RENDER_PROFILE, SurfaceProfile::THIRD_PERSON);
         assert_eq!(PXBSP_RENDER_PROFILE.split_once_below, 340);
         assert_eq!(PXBSP_RENDER_PROFILE.split_twice_below, 170);
         assert_eq!(PXBSP_RENDER_PROFILE.ot_depth, 2048);

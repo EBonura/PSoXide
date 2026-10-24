@@ -2273,7 +2273,7 @@ mod tests {
                 surfaces.as_ptr(),
                 surfaces.len(),
                 words.as_mut_ptr(),
-                &SurfaceProfile::PXBSP_THIRD_PERSON,
+                &SurfaceProfile::THIRD_PERSON,
                 rule,
             )
         }
