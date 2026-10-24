@@ -23,16 +23,28 @@ use crate::time::EngineClock;
 #[cfg(feature = "present-queue")]
 const PRESENT_PREAMBLE_WORDS: usize = 16;
 
-/// Runner-owned nodes for the frames in the present queue, one per frame of
-/// the pair (the frame before the last published one is never walked while
-/// its successor builds, see `psx_rt::present::wait_arena_free`).
+/// The runner's nodes for the frames in the present queue.
 ///
-/// `PRESENT_HOOKS[i]` is a tag-only node a scene's ordering table ends on;
-/// the runner links it to the recorded overlay, or straight to GP0(1Fh).
+/// `PRESENT_HOOK` is the one tag-only node every frame's ordering table ends
+/// on; the runner links it to the overlay of the frame it publishes last, or
+/// straight to GP0(1Fh). It is one node, not one for each frame of the pair,
+/// because a scene may keep a chain of its own that every frame's table walks
+/// into (the stance HUD's packets are linked into slot 0 of each table and
+/// reused): the last packet of such a chain links on to whatever the table
+/// ended on, so with a hook for each frame the walk of a frame still being
+/// drawn followed the link written for the frame being built, into an overlay
+/// that frame's successor had already overwritten. The hook always names the
+/// overlay of the newest published frame, which stays intact until the frame
+/// after the one that follows it is built, and the walk of the frame before is
+/// over by then (`psx_rt::present::wait_arena_free`): a walk that reaches the
+/// hook after the next frame was published draws that frame's overlay, which
+/// is whole, instead of its own.
+///
 /// `PRESENT_PREAMBLES[i]` holds the recorded draw target and clear that
-/// precede the table.
+/// precede frame `i`'s table, one for each frame of the pair (the frame before
+/// the last published one is never walked while its successor builds).
 #[cfg(feature = "present-queue")]
-static mut PRESENT_HOOKS: [u32; 2] = [0x00FF_FFFF; 2];
+static mut PRESENT_HOOK: u32 = 0x00FF_FFFF;
 #[cfg(feature = "present-queue")]
 static mut PRESENT_PREAMBLES: [[u32; PRESENT_PREAMBLE_WORDS]; 2] = [[0; PRESENT_PREAMBLE_WORDS]; 2];
 
@@ -43,7 +55,7 @@ pub(crate) struct PresentQueue {
     /// GP1(05h) word that shows the last published frame, published with the
     /// next one; 0 before the first.
     display: u32,
-    /// Which [`PRESENT_HOOKS`] / [`PRESENT_PREAMBLES`] entry the frame being
+    /// Which [`PRESENT_PREAMBLES`] entry the frame being
     /// built uses.
     frame: usize,
 }
@@ -83,17 +95,18 @@ impl PresentQueue {
     pub(crate) fn hook(&self) -> *const u32 {
         // SAFETY: only the address of the static is taken; no reference is
         // formed.
-        unsafe { core::ptr::addr_of!(PRESENT_HOOKS[self.frame]) }
+        unsafe { core::ptr::addr_of!(PRESENT_HOOK) }
     }
 
-    /// Point this frame's hook node at `next`.
+    /// Point the hook node at `next`, the overlay of the frame being published.
     fn link_hook(&self, next: *const u32) {
         // SAFETY: a volatile word store into the runner-owned static, through
-        // a raw pointer. Nothing walks this frame's hook while the frame is
-        // being built (`wait_arena_free` ran first).
+        // a raw pointer: one aligned word, which a walk reads whole, and
+        // `next` names memory that stays intact until the frame after the one
+        // being published is built (see `PRESENT_HOOK`).
         unsafe {
             core::ptr::write_volatile(
-                core::ptr::addr_of_mut!(PRESENT_HOOKS[self.frame]),
+                core::ptr::addr_of_mut!(PRESENT_HOOK),
                 next as u32 & 0x00FF_FFFF,
             );
         }
