@@ -187,6 +187,58 @@ impl SurfaceProfile {
     };
 }
 
+/// How an edge of a projected surface decides to be halved.
+///
+/// The decision may depend only on the edge's two end vertices and the level,
+/// never on the triangle they belong to: two triangles sharing an edge then
+/// always split it identically and the refinement stays conforming.
+pub trait SplitRule: Copy {
+    /// Whether the edge from `a` to `b` is halved at `level` (0, then 1). Both
+    /// vertices are projected: `screen` and `depth` (SZ) are valid.
+    ///
+    /// `bands` are the profile's depth bands, for the rule that uses them.
+    fn splits(self, bands: [u32; 2], a: &AffineVertex, b: &AffineVertex, level: usize) -> bool;
+}
+
+/// The depth-band rule of [`SurfaceProfile`]: an edge splits while the mean
+/// of its end depths, in ordering-table units (SZ / 4), is nearer than the
+/// level's band. Every brush-world draw before the error-bounded rule used
+/// this one, and the plain submit functions still do. It carries nothing: the
+/// splitter hands it the profile's bands, so choosing it adds no state to the
+/// writer.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct DepthBands;
+
+impl SplitRule for DepthBands {
+    #[inline(always)]
+    fn splits(self, bands: [u32; 2], a: &AffineVertex, b: &AffineVertex, level: usize) -> bool {
+        (a.depth + b.depth) >> 3 < bands[level]
+    }
+}
+
+/// Error-bounded rule: an edge splits while the screen-space displacement
+/// between its affine midpoint and the perspective-correct one exceeds
+/// `budget_q3` eighths of a pixel (each bisection divides it by four; see
+/// [`crate::tess`]). A distant wall costs nothing and a near floor splits as
+/// far as its error needs, whatever its depth.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct ErrorBounded {
+    /// Allowed displacement, in eighths of a pixel.
+    pub budget_q3: u32,
+}
+
+impl SplitRule for ErrorBounded {
+    #[inline(always)]
+    fn splits(self, _bands: [u32; 2], a: &AffineVertex, b: &AffineVertex, level: usize) -> bool {
+        let point = |vertex: &AffineVertex| crate::tess::ScreenDepth {
+            x: i32::from(vertex.screen[0]),
+            y: i32::from(vertex.screen[1]),
+            z: vertex.depth.min(i32::MAX as u32) as i32,
+        };
+        crate::tess::edge_exceeds(point(a), point(b), self.budget_q3, level as u32)
+    }
+}
+
 /// Result of one batch submission.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct SurfaceSubmit {
@@ -1094,17 +1146,18 @@ const EDGE_BC: u8 = 2;
 const EDGE_CA: u8 = 4;
 
 /// Splits one surface's fan triangles into pieces and writes their packets.
-struct Splitter<'a, R: Reproject> {
+struct Splitter<'a, R: Reproject, S: SplitRule> {
     vertices: *mut AffineVertex,
     /// Index of the first scratch slot after the batch.
     scratch: usize,
     sink: &'a mut PacketSink,
     surface: AffineSurface,
     bands: [u32; 2],
+    rule: S,
     view: R,
 }
 
-impl<R: Reproject> Splitter<'_, R> {
+impl<R: Reproject, S: SplitRule> Splitter<'_, R, S> {
     #[inline(always)]
     fn vertex(&self, index: usize) -> &AffineVertex {
         // SAFETY: every index handed out is a batch vertex or a scratch slot.
@@ -1116,7 +1169,8 @@ impl<R: Reproject> Splitter<'_, R> {
     /// than that level's band.
     #[inline(always)]
     fn splits(&self, a: usize, b: usize, level: usize) -> bool {
-        (self.vertex(a).depth + self.vertex(b).depth) >> 3 < self.bands[level]
+        self.rule
+            .splits(self.bands, self.vertex(a), self.vertex(b), level)
     }
 
     #[inline(always)]
@@ -1363,6 +1417,7 @@ pub unsafe fn submit_surface_batch(
             output,
             &profile,
             (),
+            DepthBands,
         )
         .0
     }
@@ -1393,6 +1448,35 @@ pub unsafe fn submit_surface_batch_screened(
             output,
             profile,
             Screened,
+            DepthBands,
+        )
+    }
+}
+
+/// [`submit_surface_batch_screened`] with a caller-chosen [`SplitRule`].
+///
+/// # Safety
+/// As [`submit_surface_batch_screened`].
+pub unsafe fn submit_surface_batch_screened_with_rule<S: SplitRule>(
+    vertices: *mut AffineVertex,
+    vertex_count: usize,
+    surfaces: *const AffineSurface,
+    surface_count: usize,
+    output: *mut u32,
+    profile: &SurfaceProfile,
+    rule: S,
+) -> (SurfaceSubmit, u32) {
+    // SAFETY: the caller's contract is the inner function's.
+    unsafe {
+        submit_surface_batch_with(
+            vertices,
+            vertex_count,
+            surfaces,
+            surface_count,
+            output,
+            profile,
+            Screened,
+            rule,
         )
     }
 }
@@ -1428,13 +1512,47 @@ pub unsafe fn submit_surface_batch_near(
             output,
             &profile,
             (view, end),
+            DepthBands,
+        )
+        .0
+    }
+}
+
+/// [`submit_surface_batch_near`] with a caller-chosen [`SplitRule`].
+///
+/// # Safety
+/// As [`submit_surface_batch_near`].
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn submit_surface_batch_near_with_rule<S: SplitRule>(
+    vertices: *mut AffineVertex,
+    vertex_count: usize,
+    surfaces: *const AffineSurface,
+    surface_count: usize,
+    output: *mut u32,
+    end: *mut u32,
+    profile: SurfaceProfile,
+    view: &NearView,
+    rule: S,
+) -> SurfaceSubmit {
+    // SAFETY: the caller's contract is the inner function's.
+    unsafe {
+        submit_surface_batch_with(
+            vertices,
+            vertex_count,
+            surfaces,
+            surface_count,
+            output,
+            &profile,
+            (view, end),
+            rule,
         )
         .0
     }
 }
 
 #[inline(always)]
-unsafe fn submit_surface_batch_with<R: Reproject>(
+#[allow(clippy::too_many_arguments)]
+unsafe fn submit_surface_batch_with<R: Reproject, S: SplitRule>(
     vertices: *mut AffineVertex,
     vertex_count: usize,
     surfaces: *const AffineSurface,
@@ -1442,6 +1560,7 @@ unsafe fn submit_surface_batch_with<R: Reproject>(
     output: *mut u32,
     profile: &SurfaceProfile,
     view: R,
+    rule: S,
 ) -> (SurfaceSubmit, u32) {
     let mut sink = PacketSink {
         next: output,
@@ -1500,6 +1619,7 @@ unsafe fn submit_surface_batch_with<R: Reproject>(
             sink: &mut sink,
             surface,
             bands,
+            rule,
             view,
         };
         // SAFETY: range checked above; capacity and scratch per the contract.
@@ -2135,5 +2255,136 @@ mod tests {
         let winding = cross(&from, &to, &above);
         let at = cut(&from, &to, 0, 670, winding);
         assert_eq!((at.x, at.y), (670, 3), "away from the interior above");
+    }
+    /// [`submit`] with a caller-chosen split rule on the screened path.
+    fn submit_with_rule<S: SplitRule>(
+        vertices: &[AffineVertex],
+        surfaces: &[AffineSurface],
+        rule: S,
+    ) -> SurfaceSubmit {
+        configure();
+        let mut batch = vertices.to_vec();
+        batch.extend([AffineVertex::default(); AFFINE_SPLIT_SCRATCH_VERTICES]);
+        let mut words = std::vec![0u32; 8192];
+        unsafe {
+            submit_surface_batch_screened_with_rule(
+                batch.as_mut_ptr(),
+                vertices.len(),
+                surfaces.as_ptr(),
+                surfaces.len(),
+                words.as_mut_ptr(),
+                &SurfaceProfile::PXBSP_THIRD_PERSON,
+                rule,
+            )
+        }
+        .0
+    }
+
+    #[test]
+    fn depth_bands_through_the_rule_path_match_the_plain_writer() {
+        let triangle = [
+            vertex([-100, -60, 200], [0, 0]),
+            vertex([100, -60, 200], [64, 0]),
+            vertex([0, 60, 200], [32, 64]),
+        ];
+        let (plain, _) = submit(&triangle, &[surface(0, 3, false)]);
+        let ruled = submit_with_rule(&triangle, &[surface(0, 3, false)], DepthBands);
+        assert_eq!(ruled.packets, plain.packets);
+        assert_eq!(ruled.hardware_triangles, plain.hardware_triangles);
+    }
+
+    #[test]
+    fn error_bounded_spends_splits_where_the_error_is_not_where_the_depth_is() {
+        let budget = ErrorBounded { budget_q3: 128 };
+        // A wall square to the view at depth 800 (ordering depth 200, inside
+        // the first depth band): every point is at one depth, so the affine
+        // error is zero. The bands split it anyway; the bound does not.
+        let wall = [
+            vertex([-60, -40, 800], [0, 0]),
+            vertex([60, -40, 800], [64, 0]),
+            vertex([60, 40, 800], [64, 64]),
+            vertex([-60, 40, 800], [0, 64]),
+        ];
+        let banded = submit_with_rule(&wall, &[surface(0, 4, true)], DepthBands);
+        let bounded = submit_with_rule(&wall, &[surface(0, 4, true)], budget);
+        assert!(banded.packets > 1, "the bands split a near wall");
+        assert_eq!(bounded.packets, 1, "no depth change, no error");
+
+        // A floor running from 1500 to 6000 deep: past both bands (mean
+        // ordering depth about 940), but a steep depth gradient over a long
+        // screen edge.
+        let floor = [
+            vertex([-400, 200, 1500], [0, 0]),
+            vertex([400, 200, 1500], [64, 0]),
+            vertex([400, 200, 6000], [64, 255]),
+            vertex([-400, 200, 6000], [0, 255]),
+        ];
+        let banded = submit_with_rule(&floor, &[surface(0, 4, true)], DepthBands);
+        let bounded = submit_with_rule(&floor, &[surface(0, 4, true)], budget);
+        assert_eq!(banded.packets, 1, "the bands leave a far floor whole");
+        assert!(bounded.packets > 1, "the bound splits where it swims");
+        assert!(bounded.packets as usize <= AFFINE_PACKETS_PER_TRIANGLE * 2);
+        // A tighter budget never splits less.
+        let tighter = submit_with_rule(
+            &floor,
+            &[surface(0, 4, true)],
+            ErrorBounded { budget_q3: 16 },
+        );
+        assert!(tighter.hardware_triangles >= bounded.hardware_triangles);
+    }
+
+    #[test]
+    fn the_error_rule_is_symmetric_and_a_deeper_level_never_splits_alone() {
+        let budget = ErrorBounded { budget_q3: 64 };
+        let lattice: Vec<AffineVertex> = [-300i16, -40, 0, 90, 280]
+            .iter()
+            .flat_map(|&x| {
+                [-200i16, 0, 150].iter().flat_map(move |&y| {
+                    [100u32, 400, 1800, 7000]
+                        .iter()
+                        .map(move |&depth| AffineVertex {
+                            screen: [160 + x, 120 + y],
+                            depth,
+                            ..AffineVertex::default()
+                        })
+                })
+            })
+            .collect();
+        for a in &lattice {
+            for b in &lattice {
+                for level in 0..2 {
+                    assert_eq!(
+                        budget.splits([0; 2], a, b, level),
+                        budget.splits([0; 2], b, a, level)
+                    );
+                }
+                if budget.splits([0; 2], a, b, 1) {
+                    assert!(budget.splits([0; 2], a, b, 0), "level 1 implies level 0");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn neighbours_split_a_shared_edge_identically_under_the_error_rule() {
+        // Two triangles share the edge 1-2 of a quad fan; the points the
+        // bound adds on it must be the same set from both sides, so the
+        // split edge has no T-junction.
+        let strip = [
+            vertex([-60, 40, 120], [0, 0]),
+            vertex([60, 40, 120], [64, 0]),
+            vertex([60, 40, 900], [64, 255]),
+            vertex([-60, 40, 900], [0, 255]),
+        ];
+        let rule = ErrorBounded { budget_q3: 32 };
+        let whole = submit_with_rule(&strip, &[surface(0, 4, true)], rule);
+        // The same edges, fed as two surfaces that share them: identical
+        // triangle counts mean the decisions did not depend on the fan.
+        let halves = submit_with_rule(
+            &[strip[0], strip[1], strip[2], strip[0], strip[2], strip[3]],
+            &[surface(0, 3, true), surface(3, 3, true)],
+            rule,
+        );
+        assert_eq!(whole.hardware_triangles, halves.hardware_triangles);
     }
 }

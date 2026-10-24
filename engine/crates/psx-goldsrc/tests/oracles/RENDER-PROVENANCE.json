@@ -1,0 +1,121 @@
+{
+  "hl_commit": "70072ce98efe11ec1ba493ea2e52624864ba4e5a",
+  "hl_sha256": "e292547ef24ca9985bace2d50d1ce7e2c2dce1c555909c633757d2a3210dfda2",
+  "cs_commit": "988f308f2be2e12c18cca199d5b10a2ff02aa010",
+  "cs_sha256": "42a793460d0c33dc06b4ea185f751a7f71537f23a1a7b82aef77c81436afef0e",
+  "cs_line_delta": [
+    {
+      "start": 20,
+      "end": 23,
+      "replacement": [
+        "/// Screen centre (matches `set_screen_offset(160<<16, 120<<16)`). The\n",
+        "/// vertical centre and the vertical clip apron are per-view state for\n",
+        "/// split-screen: `set_view_rows` selects the 320x120 half being built.\n",
+        "static mut OFX_V: i32 = 160;\n",
+        "static mut OFY_V: i32 = 120;\n",
+        "static mut VX0_V: i32 = -1;\n",
+        "static mut VX1_V: i32 = 320;\n",
+        "static mut VY0_V: i32 = -1;\n",
+        "static mut VY1_V: i32 = 240;\n",
+        "#[inline(always)]\n",
+        "pub fn ofx() -> i32 {\n",
+        "    unsafe { OFX_V }\n",
+        "}\n",
+        "#[inline(always)]\n",
+        "pub fn ofy() -> i32 {\n",
+        "    unsafe { OFY_V }\n",
+        "}\n",
+        "#[inline(always)]\n",
+        "fn vx0() -> i32 {\n",
+        "    unsafe { VX0_V }\n",
+        "}\n",
+        "#[inline(always)]\n",
+        "fn vx1() -> i32 {\n",
+        "    unsafe { VX1_V }\n",
+        "}\n",
+        "#[inline(always)]\n",
+        "fn vy0() -> i32 {\n",
+        "    unsafe { VY0_V }\n",
+        "}\n",
+        "#[inline(always)]\n",
+        "fn vy1() -> i32 {\n",
+        "    unsafe { VY1_V }\n",
+        "}\n",
+        "/// Select the window of the current view: its screen centre and the\n",
+        "/// one-pixel apron the soft path clips against (x0-1 .. x0+w, y0-1 .. y0+h).\n",
+        "pub unsafe fn set_view_rect(x0: i32, y0: i32, w: i32, h: i32) {\n",
+        "    OFX_V = x0 + w / 2;\n",
+        "    OFY_V = y0 + h / 2;\n",
+        "    VX0_V = x0 - 1;\n",
+        "    VX1_V = x0 + w;\n",
+        "    VY0_V = y0 - 1;\n",
+        "    VY1_V = y0 + h;\n",
+        "}\n"
+      ]
+    },
+    {
+      "start": 103,
+      "end": 107,
+      "replacement": []
+    },
+    {
+      "start": 397,
+      "end": 398,
+      "replacement": [
+        "        (\n",
+        "            ((cv.v[0] * inv) >> 12) + ofx(),\n",
+        "            ((cv.v[1] * inv) >> 12) + ofy(),\n",
+        "        )\n"
+      ]
+    },
+    {
+      "start": 402,
+      "end": 403,
+      "replacement": [
+        "        (cv.v[0] * h / z + ofx(), cv.v[1] * h / z + ofy())\n"
+      ]
+    },
+    {
+      "start": 435,
+      "end": 437,
+      "replacement": [
+        "    c.iter().all(|v| h * v.v[1] + (ofy() - vy0()) * v.v[2] < 0)\n",
+        "        || c.iter().all(|v| (vy1() - ofy()) * v.v[2] - h * v.v[1] < 0)\n"
+      ]
+    },
+    {
+      "start": 445,
+      "end": 446,
+      "replacement": [
+        "    p.x <= vx0() + 1 || p.x >= vx1() - 1 || p.y <= vy0() + 1 || p.y >= vy1() - 1\n"
+      ]
+    },
+    {
+      "start": 577,
+      "end": 581,
+      "replacement": [
+        "        ViewPlane::Left => h * v.x + (ofx() - vx0()) * v.z,\n",
+        "        ViewPlane::Right => (vx1() - ofx()) * v.z - h * v.x,\n",
+        "        ViewPlane::Top => h * v.y + (ofy() - vy0()) * v.z,\n",
+        "        ViewPlane::Bottom => (vy1() - ofy()) * v.z - h * v.y,\n"
+      ]
+    },
+    {
+      "start": 657,
+      "end": 661,
+      "replacement": [
+        "        h * v.x + (ofx() - vx0()) * v.z,\n",
+        "        (vx1() - ofx()) * v.z - h * v.x,\n",
+        "        h * v.y + (ofy() - vy0()) * v.z,\n",
+        "        (vy1() - ofy()) * v.z - h * v.y,\n"
+      ]
+    },
+    {
+      "start": 896,
+      "end": 897,
+      "replacement": [
+        "        assert_eq!((p.x, p.y), (1_760, ofy()));\n"
+      ]
+    }
+  ]
+}
