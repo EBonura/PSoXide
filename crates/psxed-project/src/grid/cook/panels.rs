@@ -717,7 +717,9 @@ pub fn bake_panel(
             for y in 0..TILE_H {
                 for x in 0..TILE_W {
                     let at = (ty * TILE_H + y) * w + tx * TILE_W + x;
-                    if pic.coverage[at] >= 0.25 {
+                    // A texel any sample of which hits geometry is drawn: at a texel of several
+                    // pixels a thin tower would otherwise fall under a quarter coverage and vanish.
+                    if pic.coverage[at] > 0.0 {
                         any = true;
                         let c = pic.rgb[at].map(|v| v.clamp(0.0, 255.0) as u8);
                         rgba.push([c[0], c[1], c[2], 255]);

@@ -829,7 +829,7 @@ pub fn panel_textures(
 
 /// The projection plane the panels are baked for: the follow camera's, at 43 degrees of
 /// vertical field of view on a 240 row screen.
-const PANEL_FOCAL: i32 = 305;
+const PANEL_FOCAL: i32 = 305 * (psx_grid::render::COLS as i32 * 64) / 320;
 
 /// Height of a person's eye above the floor, in sectors, that the room cards are drawn
 /// from: the follow camera's (its boom and a person's height).
