@@ -63,6 +63,8 @@ const IDLE: i32 = 1 << 22;
 const EVICT_MARGIN: i32 = 64;
 /// Ticks a wanted sector may wait before it is read ahead of the better ranked ones.
 const PATIENCE: u32 = 90;
+/// Tenths of a spacing from the eye in use the camera is before the second eye is kept ready.
+const SECOND_FROM: i32 = 3;
 /// Smallest smoothed step of the eye a pass, runtime units, that counts as walking.
 const MIN_WALK: i32 = 3;
 /// Sectors a read may read over, to start where the last one ended and so skip a seek.
@@ -126,6 +128,11 @@ pub struct PanelCounters {
     pub wait_load: u32,
     /// With `METER` on: of the queued-to-frame wait, the part until the read landed.
     pub wait_read: u32,
+    /// Passes in a row the camera has had a nearer eye it did not cross to yet (its pictures
+    /// were not all in VRAM). Read from RAM to see how long a crossing waits.
+    pub gate_run: u32,
+    /// How far the camera is from the eye in use, in tenths of a spacing between eyes.
+    pub far: u32,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -547,6 +554,8 @@ pub struct PanelStream<K> {
     view: ViewSpec,
     /// The eye whose tiles are kept ready, if the camera is near enough to crossing to it.
     next: Option<u16>,
+    /// The eye nearest where the camera walks to, kept ready as well.
+    next2: Option<u16>,
     /// Where the eye was at the last pass (plan), and its smoothed step a pass.
     last_eye: [i32; 2],
     have_last: bool,
@@ -581,6 +590,8 @@ impl<K: Copy> PanelStream<K> {
                 wait_queue: 0,
                 wait_load: 0,
                 wait_read: 0,
+                gate_run: 0,
+                far: 0,
             },
             slots: [Slot::FREE; SLOTS],
             cache: [Cached::EMPTY; CACHE],
@@ -599,6 +610,7 @@ impl<K: Copy> PanelStream<K> {
                 panel_focal: 0,
             },
             next: None,
+            next2: None,
             last_eye: [0; 2],
             have_last: false,
             velocity: [0; 2],
@@ -763,6 +775,13 @@ impl<K: Copy> PanelStream<K> {
             self.have_eye = true;
         }
         let waiting = nearer && usize::from(self.eye) != best;
+        self.counters.gate_run = if waiting {
+            self.counters.gate_run + 1
+        } else {
+            0
+        };
+        let here = distance(usize::from(self.eye));
+        self.counters.far = (here * 10 / input.spacing.max(1)) as u32;
         self.counters.eye = u32::from(self.eye);
         // The eye the camera is about to cross to: the one nearest the place it walks to (a bit
         // under a spacing ahead along the way it has been going, or where it is when it stands
@@ -795,15 +814,27 @@ impl<K: Copy> PanelStream<K> {
             let e = input.eyes[eye];
             octagonal_distance(ahead, [i32::from(e[0]), i32::from(e[1]), i32::from(e[2])])
         };
-        let here = distance(usize::from(self.eye));
-        self.next = (0..input.eyes.len())
-            .filter(|&eye| eye != usize::from(self.eye))
+        // Two eyes are kept ready beside the one in use: the nearest to the camera, which is the
+        // one it crosses to when it is a quarter spacing nearer, and the one nearest where it
+        // walks to, so that a crossing finds the pictures there whichever way the walk bends.
+        let current = usize::from(self.eye);
+        let near = (0..input.eyes.len())
+            .filter(|&eye| eye != current)
+            .min_by_key(|&eye| distance(eye))
+            .filter(|&eye| distance(eye) < here + input.spacing);
+        self.next = near.map(|eye| eye as u16);
+        // The second is only started while the camera walks and once the first is in VRAM: its
+        // list and headers are read ahead of every tile, and the one nearest the walk changes
+        // from pass to pass, so starting it early would spend the drive on the lists of eyes
+        // never crossed to.
+        let first_ready = speed >= MIN_WALK
+            && here * 10 >= SECOND_FROM * input.spacing
+            && near.is_none_or(|eye| self.eye_ready(eye as u16, input));
+        self.next2 = (0..input.eyes.len())
+            .filter(|&eye| first_ready && eye != current && Some(eye) != near)
             .min_by_key(|&eye| to_ahead(eye))
             .filter(|&eye| distance(eye) < here + input.spacing)
             .map(|eye| eye as u16);
-        if waiting {
-            self.next = Some(best as u16);
-        }
     }
 
     /// Whether every picture of the eye in use is in VRAM, as of the last pass.
@@ -931,7 +962,11 @@ impl<K: Copy> PanelStream<K> {
         // A tile of an eye left that was never read is not worth reading now.
         for slot in 0..SLOTS {
             let held = self.slots[slot];
-            if held.state == SlotState::Wanted && held.eye != eye && Some(held.eye) != self.next {
+            if held.state == SlotState::Wanted
+                && held.eye != eye
+                && Some(held.eye) != self.next
+                && Some(held.eye) != self.next2
+            {
                 self.release(slot);
             }
         }
@@ -946,6 +981,9 @@ impl<K: Copy> PanelStream<K> {
         self.want_tiles(input, eye, 0, false, &mut wanted, &mut starved);
         if let Some(next) = self.next {
             self.want_tiles(input, next, PREFETCH, true, &mut wanted, &mut starved);
+        }
+        if let Some(next) = self.next2 {
+            self.want_tiles(input, next, 2 * PREFETCH, true, &mut wanted, &mut starved);
         }
         self.rebuild_show(input, eye);
         let (mut held, mut missing) = (0u32, 0u32);
@@ -1290,27 +1328,31 @@ impl<K: Copy> PanelStream<K> {
             // The best ranked sector, unless one has waited out its patience.
             let head = wanted
                 .iter()
-                .filter(|w| w.4 > PATIENCE)
+                .filter(|w| w.4 > PATIENCE && w.0 < 2 * PREFETCH)
                 .max_by_key(|w| (w.4, core::cmp::Reverse(w.0)))
                 .or_else(|| {
                     // The most urgent tier first (the lists and headers, the tiles of the eye in
-                    // use, the ones kept ready), and within it the sector the drive reaches
-                    // soonest: the one that continues the last read, then the next ones
-                    // ahead, then those behind. The drive then sweeps the wanted sectors, and a
-                    // read that starts where the last ended costs no seek.
+                    // use, those of the eye nearest the camera, those of the one it walks to),
+                    // and within it the sector the drive reaches soonest: the one that continues
+                    // the last read, then the next ones ahead, then those behind, the lowest
+                    // first (a seek back lands at the start of the stretch, and the reads after
+                    // it each start where the last ended). The drive then sweeps the wanted
+                    // sectors upward, and a read that starts where the last ended costs no seek.
                     let tail = self.tail;
                     wanted.iter().min_by_key(|w| {
                         let tier = if w.0 < 0 {
                             0
                         } else if w.0 < PREFETCH {
                             1
-                        } else {
+                        } else if w.0 < 2 * PREFETCH {
                             2
+                        } else {
+                            3
                         };
                         let reach = if tail == 0 || w.1 > tail {
                             w.1.saturating_sub(tail)
                         } else {
-                            1 << 24 | (tail - w.1)
+                            1 << 24 | w.1
                         };
                         (tier, reach, w.0)
                     })

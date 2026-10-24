@@ -310,6 +310,17 @@ fn clamp_world(v: i32) -> i16 {
     v.clamp(-32000, 32000) as i16
 }
 
+/// The ordering table slot of a panel's quad whose four corners' depths add up to `sum`. Where
+/// two cells of neighbouring panels cover the same pixels, the odd panel's is a slot farther, so
+/// the order never depends on the frame: packets of one slot are drawn in the order of the
+/// frame's packet arena, which runs the other way every other frame. The far end is kept one
+/// short of the last slot so the step is never lost to the clamp (everything past about 8,000
+/// units of depth lands there, and that is where the horizon of a level is).
+#[inline(always)]
+fn panel_slot(sum: u32, floor: u32, heading: u8) -> u32 {
+    (sum >> 4).max(floor).clamp(1, 2046) + u32::from(heading & 1)
+}
+
 /// Whether a quad with these corners is worth a packet: nothing at or behind the near plane,
 /// not wholly off one edge, safe for the GPU.
 #[inline(always)]
@@ -352,6 +363,10 @@ fn drawable(s: &[GridScreen; 4]) -> bool {
         dx <= MAX_EDGE && dy <= MAX_EDGE
     })
 }
+
+/// `tan` of half the angle between two headings (22.5 degrees) as Q12: past it a cell is the
+/// next panel's.
+const SEAM_Q12: i32 = 1697;
 
 /// Longest screen edge of a cell worth drawing, in pixels (see [`drawable`]): three cells of a
 /// panel of five columns (one texel to a pixel), and as much longer as the texels are larger.
@@ -407,7 +422,15 @@ pub fn draw_panel(
             let mut any = false;
             for (k, w) in wanted.iter_mut().enumerate() {
                 let room = panel.rooms[tile * CELLS_X * CELLS_Y + k];
+                // A cell belongs to the one panel whose heading its middle is nearest: the
+                // panels overlap past 22.5 degrees off their heading, and a camera over such a
+                // seam drew both, in an order that changed every frame.
+                let across = (i32::from(rays.across[i0 + k % CELLS_X])
+                    + i32::from(rays.across[i0 + k % CELLS_X + 1]))
+                    >> 1;
                 *w = room != CELL_EMPTY
+                    && across <= SEAM_Q12
+                    && across > -SEAM_Q12
                     && (room == CELL_MIXED
                         || !skip.get(usize::from(room)).copied().unwrap_or(false));
                 any |= *w;
@@ -498,7 +521,7 @@ pub fn draw_panel(
                         + u32::from(s[1].sz)
                         + u32::from(s[2].sz)
                         + u32::from(s[3].sz);
-                    let otz = (sum >> 4).max(camera.otz_floor).clamp(1, 2047);
+                    let otz = panel_slot(sum, camera.otz_floor, panel.heading);
                     // SAFETY: both pointers lie in the packet storage.
                     let left = unsafe {
                         if reverse {
@@ -571,6 +594,24 @@ mod tests {
     use super::*;
     use alloc::vec;
     use alloc::vec::Vec;
+
+    #[test]
+    fn neighbouring_panels_never_share_a_slot() {
+        // From the nearest quad to one past the clamp, with and without a floor.
+        for sum in (0..70_000u32).step_by(7) {
+            for floor in [0, 300, 2047] {
+                for heading in 0..HEADINGS as u8 {
+                    let slot = panel_slot(sum, floor, heading);
+                    assert!(
+                        (1..=2047).contains(&slot),
+                        "{sum} {floor} {heading}: {slot}"
+                    );
+                    let next = panel_slot(sum, floor, (heading + 1) % HEADINGS as u8);
+                    assert_ne!(slot, next, "{sum} {floor} {heading}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn the_depth_table_climbs_from_three_sectors_to_about_two_hundred() {
