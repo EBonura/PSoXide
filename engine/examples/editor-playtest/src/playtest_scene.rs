@@ -1034,6 +1034,9 @@ impl Scene for Playtest {
         }
         self.step_streaming_jobs(ctx);
         let ready = self.initial_world_ready();
+        // The far panels of the first eye are in VRAM before the level opens.
+        #[cfg(feature = "cd-stream-bench")]
+        let ready = ready && crate::vram_runtime::panels_loaded();
         // Replay diagnostic: a recorded input tape is indexed by pad poll,
         // and the loading screen polls too, so a load that finishes a few
         // ticks earlier or later (a streamed world against a whole-map one)

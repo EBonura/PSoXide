@@ -49,7 +49,7 @@ const PASS_TICKS: u32 = 8;
 const OFF_VIEW: i32 = 1 << 14;
 /// Measurement: count the tiles the screen shows that have no picture, and how long tiles
 /// wait (the counters are read from RAM; it costs code and time, so a shipping build has it off).
-const METER: bool = true;
+const METER: bool = false;
 /// Panels whose header and tile slots are kept.
 pub const CACHE: usize = 3 * HEADINGS;
 /// Rank of a tile of an eye the camera has left, past every tile of the eye it is at.
@@ -537,6 +537,8 @@ pub struct PanelStream<K> {
     stages: [Stage<K>; STAGES],
     /// Slots in use: the first atlas's, or both atlases'.
     limit: usize,
+    /// Every picture of the eye in use is in VRAM (as of the last pass).
+    loaded: bool,
     ticks: u32,
     /// The bake eye in use (valid when `have_eye`).
     eye: u16,
@@ -585,6 +587,7 @@ impl<K: Copy> PanelStream<K> {
             lists: [EyeList::EMPTY; EYES],
             stages: [Stage::Free; STAGES],
             limit: ATLAS_SLOTS,
+            loaded: false,
             ticks: 0,
             eye: 0,
             have_eye: false,
@@ -803,6 +806,11 @@ impl<K: Copy> PanelStream<K> {
         }
     }
 
+    /// Whether every picture of the eye in use is in VRAM, as of the last pass.
+    pub fn eye_loaded(&self) -> bool {
+        self.loaded
+    }
+
     /// Whether every stored tile of every panel of `eye` is in VRAM.
     fn eye_ready(&self, eye: u16, input: &PanelInput<'_>) -> bool {
         let Some(list) = self
@@ -953,6 +961,7 @@ impl<K: Copy> PanelStream<K> {
         self.counters.wanted = wanted;
         self.counters.missing = missing;
         self.counters.starved = starved;
+        self.loaded = self.have_eye && self.eye_ready(self.eye, input);
         if METER {
             self.count_visible(input, eye);
         }
@@ -1747,7 +1756,7 @@ mod tests {
             pitch_tan_q12: 0,
             focal: FOCAL,
             half_screen: [160, 120],
-            panel_focal: FOCAL,
+            panel_focal: FOCAL * (COLS as i32 * TILE_TEXELS) / 320,
             spacing: 800,
         }
     }
@@ -1844,14 +1853,14 @@ mod tests {
 
     #[test]
     fn a_tile_sector_counts_the_stored_tiles_before_it() {
-        // Column 0: rows 1 and 3 (central); column 1: row 0 (not); header 10, central tiles
-        // from 20, the others from 30.
-        let entry = [10u32, 20, 30, 0b0000_0001_0000_1010, 0];
-        assert!(stored(&entry, 1) && stored(&entry, 3) && stored(&entry, ROWS));
-        assert!(!stored(&entry, 0) && !stored(&entry, 2));
-        assert_eq!(tile_sector(&entry, 1), 20);
-        assert_eq!(tile_sector(&entry, 3), 21);
-        assert_eq!(tile_sector(&entry, ROWS), 30);
+        // Column 0: rows 0 and 2; column 1: row 1; header 10, tiles from 20 (every row of a
+        // panel is a central one), the others from 30.
+        let entry = [10u32, 20, 30, 0b0000_0010_0000_0101, 0];
+        assert!(stored(&entry, 0) && stored(&entry, 2) && stored(&entry, ROWS + 1));
+        assert!(!stored(&entry, 1) && !stored(&entry, ROWS));
+        assert_eq!(tile_sector(&entry, 0), 20);
+        assert_eq!(tile_sector(&entry, 2), 21);
+        assert_eq!(tile_sector(&entry, ROWS + 1), 22);
     }
 
     #[test]
@@ -1889,7 +1898,7 @@ mod tests {
     }
 
     #[test]
-    fn turning_to_the_next_heading_brings_its_tiles_and_keeps_the_ones_still_in_view() {
+    fn turning_to_the_next_heading_needs_nothing_read_the_panels_are_all_there() {
         let eyes = [[0i16; 3]];
         let blocks = [5u32];
         let mut disc = Disc::new(4 + 5 + 100);
@@ -1905,7 +1914,8 @@ mod tests {
         let list = drawn(&stream, &eyes);
         assert!(list.iter().any(|&(_, h, _)| h == 1), "{list:?}");
         assert!(list.iter().any(|&(_, h, _)| h == 0), "{list:?}");
-        assert!(stream.counters.uploads > before);
+        // Every panel of the eye was there before the turn: nothing is read for it.
+        assert_eq!(stream.counters.uploads, before);
         assert_eq!(stream.counters.starved, 0);
     }
 

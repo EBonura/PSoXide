@@ -535,6 +535,67 @@ pub(super) fn card_atlas() -> Option<((u16, u16), u16)> {
     Some((vram_arena().cube_sky_origin(key)?, slot.tpage_word))
 }
 
+/// Ticks the loading screen waits for the panels of the eye the level starts at.
+#[cfg(feature = "cd-stream-bench")]
+const PANELS_LOADING_TICKS: u32 = 900;
+
+/// Loading screen: put the tiles that have landed into VRAM straight away (the frame list that
+/// carries them in the game is not running yet) and say whether every picture of the first eye is
+/// there, so that the level opens with the far view whole. Gives up after
+/// [`PANELS_LOADING_TICKS`] (a disc that cannot be read must not hold the screen for ever).
+#[cfg(feature = "cd-stream-bench")]
+pub(super) fn panels_loaded() -> bool {
+    use psx_grid::render::SLOT_BYTES;
+    static mut WAITED: u32 = 0;
+    if !has_panels() {
+        return true;
+    }
+    let Some((origin, _)) = card_atlas() else {
+        return false;
+    };
+    let second = panel_atlas_origin();
+    // SAFETY: single-threaded guest; see `step_panels`.
+    let (stream, window) = unsafe {
+        (
+            &mut *core::ptr::addr_of_mut!(PANELS),
+            (*core::ptr::addr_of_mut!(CHUNK_SKY_WINDOW)).words_mut(),
+        )
+    };
+    loop {
+        let (uploads, count) = stream.uploads::<8>();
+        if count == 0 {
+            break;
+        }
+        for upload in uploads[..count].iter().flatten() {
+            let slot = usize::from(upload.slot);
+            let (x, y) = match second {
+                Some(second) if slot >= psx_grid::render::SLOTS => psx_grid::render::slot_origin(
+                    second,
+                    psx_grid::render::second_atlas_slot(slot - psx_grid::render::SLOTS),
+                ),
+                _ => psx_grid::render::slot_origin(origin, slot),
+            };
+            let from = usize::from(upload.cell) * SLOT_BYTES / 4;
+            psx_vram::upload_words(
+                psx_vram::VramRect::new(
+                    x,
+                    y,
+                    psx_grid::render::SLOT_HALFWORDS,
+                    psx_grid::render::SLOT_ROWS as u16,
+                ),
+                &window[from..from + SLOT_BYTES / 4],
+            );
+        }
+        stream.applied(&uploads[..count]);
+    }
+    // SAFETY: single-threaded guest.
+    unsafe {
+        let waited = &mut *core::ptr::addr_of_mut!(WAITED);
+        *waited += 1;
+        stream.eye_loaded() || *waited > PANELS_LOADING_TICKS
+    }
+}
+
 /// A second atlas for the far panels' tiles, as large as the sky's, from VRAM nothing else
 /// uses: its top-left pixel and first texture-page word. The allocator is asked once a
 /// gameplay; with no six pages in a row to give, the panels keep to the sky atlas's slots.
@@ -668,10 +729,11 @@ pub(super) fn step_panels(eye: [i32; 3], focal: i32) {
     if GRID_PANEL_BLOCKS.is_empty() || card_atlas().is_none() {
         return;
     }
-    // SAFETY: single-threaded guest; the view is written by the draw.
-    let Some(rotation) = (unsafe { *core::ptr::addr_of!(LAST_VIEW) }) else {
-        return;
-    };
+    // SAFETY: single-threaded guest; the view is written by the draw. Before the first draw (the
+    // loading screen) the panels are read for a camera looking along the axis: every heading is
+    // read whichever way the camera looks.
+    let rotation = unsafe { *core::ptr::addr_of!(LAST_VIEW) }
+        .unwrap_or([[4096, 0, 0], [0, 4096, 0], [0, 0, 4096]]);
     let rotation = &rotation;
     let (_, forward) = psx_grid::render::plan_axes(rotation);
     // `tan` of the pitch: the forward row's height over its plan length.
