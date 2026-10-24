@@ -57,6 +57,9 @@ const STALE: i32 = 1 << 20;
 /// Rank of a tile of the eye the camera is about to cross to, past every tile of the eye in
 /// use.
 const PREFETCH: i32 = 1 << 18;
+/// Rank of a tile of an eye kept ready that nothing else could stand in for, past every tile
+/// of the eye in use and ahead of the other tiles of the eyes kept ready.
+const EXPOSED: i32 = PREFETCH / 4;
 /// Rank of a held tile nothing wants now.
 const IDLE: i32 = 1 << 22;
 /// A held tile is only evicted for a tile that ranks better by more than this.
@@ -65,6 +68,9 @@ const EVICT_MARGIN: i32 = 64;
 const PATIENCE: u32 = 90;
 /// Tenths of a spacing from the eye in use the camera is before the second eye is kept ready.
 const SECOND_FROM: i32 = 3;
+/// The eye kept ready is kept while it is within this fraction (1 in) of a spacing of being as near
+/// the camera as the nearest.
+const NEXT_STICKS: i32 = 8;
 /// Smallest smoothed step of the eye a pass, runtime units, that counts as walking.
 const MIN_WALK: i32 = 3;
 /// Sectors a read may read over, to start where the last one ended and so skip a seek.
@@ -568,6 +574,14 @@ fn stored(entry: &PanelEntry, tile: usize) -> bool {
     entry[0] != 0 && cols_of(entry)[tile / ROWS] >> (tile % ROWS) & 1 != 0
 }
 
+/// What a pass works out about the camera once for every eye it asks tiles of.
+struct View {
+    /// Per heading, the tiles the camera sees of its panel.
+    seen: [Option<Visible>; HEADINGS],
+    /// Per tile column, `tan` of its middle's angle off the panel's heading, Q12.
+    middle: [i32; COLS],
+}
+
 /// Streams the tiles the panels show.
 pub struct PanelStream<K> {
     /// What the stream has done so far.
@@ -596,6 +610,10 @@ pub struct PanelStream<K> {
     velocity: [i32; 2],
     /// Sector the drive ends at once the reads queued so far are done (0 before the first).
     tail: u32,
+    /// A sector may be wanted that no read has been queued for: set when a pass asks for
+    /// something or a read fails, cleared when [`Self::start_reads`] finds nothing to ask the
+    /// drive for, so the idle ticks between two passes cost a test.
+    reads_due: bool,
 }
 
 impl<K: Copy> PanelStream<K> {
@@ -625,6 +643,7 @@ impl<K: Copy> PanelStream<K> {
             have_last: false,
             velocity: [0; 2],
             tail: 0,
+            reads_due: true,
         }
     }
 
@@ -717,6 +736,7 @@ impl<K: Copy> PanelStream<K> {
                 }
                 Poll::Cancelled | Poll::Failed => {
                     self.counters.failed += 1;
+                    self.reads_due = true;
                     for e in run.entries.iter().flatten() {
                         match e.kind {
                             Kind::Eye => {
@@ -768,28 +788,33 @@ impl<K: Copy> PanelStream<K> {
                 [i32::from(e[0]), i32::from(e[1]), i32::from(e[2])],
             )
         };
-        let best = (0..input.eyes.len())
-            .min_by_key(|&eye| distance(eye))
-            .unwrap_or(0);
+        // The nearest eye (the first of equals), one distance an eye.
+        let mut best = 0;
+        let mut best_distance = i32::MAX;
+        for eye in 0..input.eyes.len() {
+            let d = distance(eye);
+            if d < best_distance {
+                (best, best_distance) = (eye, d);
+            }
+        }
         // The camera crosses to a nearer eye at once, whatever the disc has brought in: the
         // tiles of the eye it leaves stand in for those of the new one that have not landed
         // ([`Self::rebuild_show`]), so the camera never waits on the drive.
         let current = usize::from(self.eye);
         let lost = !self.have_eye || current >= input.eyes.len();
-        let nearer = !lost && distance(best) + input.spacing / 4 < distance(current);
+        let nearer = !lost && best_distance + input.spacing / 4 < distance(current);
         if lost || nearer {
             self.eye = best as u16;
             self.have_eye = true;
         }
-        let waiting = !lost
-            && usize::from(self.eye) != best
-            && distance(best) + input.spacing / 4 < distance(usize::from(self.eye));
+        let here = distance(usize::from(self.eye));
+        let waiting =
+            !lost && usize::from(self.eye) != best && best_distance + input.spacing / 4 < here;
         self.counters.gate_run = if waiting {
             self.counters.gate_run + 1
         } else {
             0
         };
-        let here = distance(usize::from(self.eye));
         self.counters.far = (here * 10 / input.spacing.max(1)) as u32;
         self.counters.eye = u32::from(self.eye);
         // The eye the camera is about to cross to: the one nearest the place it walks to (a bit
@@ -823,27 +848,57 @@ impl<K: Copy> PanelStream<K> {
             let e = input.eyes[eye];
             octagonal_distance(ahead, [i32::from(e[0]), i32::from(e[1]), i32::from(e[2])])
         };
-        // Two eyes are kept ready beside the one in use: the nearest to the camera, which is the
-        // one it crosses to when it is a quarter spacing nearer, and the one nearest where it
-        // walks to, so that a crossing finds the pictures there whichever way the walk bends.
+        // The second eye is only started while the camera walks, once it is out from the eye
+        // in use and the first is in VRAM: its list and headers are read ahead of every tile,
+        // and the one nearest the walk changes from pass to pass, so starting it early would
+        // spend the drive on the lists of eyes never crossed to.
+        let walking = speed >= MIN_WALK && here * 10 >= SECOND_FROM * input.spacing;
+        // One sweep of the other eyes finds both: the nearest to the camera, which is the one it
+        // crosses to when it is a quarter spacing nearer, and the two nearest where it walks to
+        // (the second of them for when the first is the nearest), so that a crossing finds the
+        // pictures there whichever way the walk bends. Each is the first of equals.
         let current = usize::from(self.eye);
-        let near = (0..input.eyes.len())
-            .filter(|&eye| eye != current)
-            .min_by_key(|&eye| distance(eye))
+        let (mut near, mut near_distance) = (None, i32::MAX);
+        let mut ahead_best: [Option<(usize, i32)>; 2] = [None; 2];
+        for eye in (0..input.eyes.len()).filter(|&eye| eye != current) {
+            let d = distance(eye);
+            if d < near_distance {
+                (near, near_distance) = (Some(eye), d);
+            }
+            if walking {
+                let a = to_ahead(eye);
+                if ahead_best[0].is_none_or(|(_, best)| a < best) {
+                    ahead_best[1] = ahead_best[0];
+                    ahead_best[0] = Some((eye, a));
+                } else if ahead_best[1].is_none_or(|(_, second)| a < second) {
+                    ahead_best[1] = Some((eye, a));
+                }
+            }
+        }
+        // The eye kept ready stays so while it is almost as near as the nearest: where the
+        // camera is about as near to several eyes it would otherwise change from pass to pass,
+        // and none would be read in before the camera crossed.
+        let kept = self
+            .next
+            .map(usize::from)
+            .filter(|&eye| eye != current && eye < input.eyes.len())
+            .filter(|&eye| distance(eye) <= near_distance + input.spacing / NEXT_STICKS);
+        let near = kept
+            .or(near)
             .filter(|&eye| distance(eye) < here + input.spacing);
         self.next = near.map(|eye| eye as u16);
-        // The second is only started while the camera walks and once the first is in VRAM: its
-        // list and headers are read ahead of every tile, and the one nearest the walk changes
-        // from pass to pass, so starting it early would spend the drive on the lists of eyes
-        // never crossed to.
-        let first_ready = speed >= MIN_WALK
-            && here * 10 >= SECOND_FROM * input.spacing
-            && near.is_none_or(|eye| self.eye_ready(eye as u16, input));
-        self.next2 = (0..input.eyes.len())
-            .filter(|&eye| first_ready && eye != current && Some(eye) != near)
-            .min_by_key(|&eye| to_ahead(eye))
-            .filter(|&eye| distance(eye) < here + input.spacing)
-            .map(|eye| eye as u16);
+        let first_ready = walking && near.is_none_or(|eye| self.eye_ready(eye as u16, input));
+        self.next2 = None;
+        if first_ready {
+            let pick = match ahead_best {
+                [Some((eye, _)), second] if Some(eye) == near => second,
+                [first, _] => first,
+            };
+            self.next2 = pick
+                .map(|(eye, _)| eye)
+                .filter(|&eye| distance(eye) < here + input.spacing)
+                .map(|eye| eye as u16);
+        }
     }
 
     /// Whether every picture of the eye in use is in VRAM, as of the last pass.
@@ -987,12 +1042,42 @@ impl<K: Copy> PanelStream<K> {
         }
         let mut wanted = 0u32;
         let mut starved = 0u32;
-        self.want_tiles(input, eye, 0, false, &mut wanted, &mut starved);
+        // What the camera sees of each heading, and where each tile column stands across a
+        // panel: the same for every eye, so worked out once a pass.
+        let panel_focal = input.panel_focal.max(1);
+        let mut sights = View {
+            seen: [None; HEADINGS],
+            middle: [0; COLS],
+        };
+        for (heading, seen) in sights.seen.iter_mut().enumerate() {
+            *seen = visible_in(heading, &self.view, 18, PICTURE_ROWS / 3);
+        }
+        for (col, middle) in sights.middle.iter_mut().enumerate() {
+            *middle =
+                ((col as i32 * TILE_TEXELS + TILE_TEXELS / 2 - COLS_CENTRE) << 12) / panel_focal;
+        }
+        self.want_tiles(input, &sights, eye, 0, false, &mut wanted, &mut starved);
         if let Some(next) = self.next {
-            self.want_tiles(input, next, PREFETCH, true, &mut wanted, &mut starved);
+            self.want_tiles(
+                input,
+                &sights,
+                next,
+                PREFETCH,
+                true,
+                &mut wanted,
+                &mut starved,
+            );
         }
         if let Some(next) = self.next2 {
-            self.want_tiles(input, next, 2 * PREFETCH, true, &mut wanted, &mut starved);
+            self.want_tiles(
+                input,
+                &sights,
+                next,
+                2 * PREFETCH,
+                true,
+                &mut wanted,
+                &mut starved,
+            );
         }
         self.rebuild_show(input, eye);
         let (mut held, mut missing) = (0u32, 0u32);
@@ -1008,6 +1093,7 @@ impl<K: Copy> PanelStream<K> {
         self.counters.wanted = wanted;
         self.counters.missing = missing;
         self.counters.starved = starved;
+        self.reads_due = true;
         self.loaded = self.have_eye && self.eye_ready(self.eye, input);
         self.counters.settling = if self.loaded {
             0
@@ -1110,11 +1196,37 @@ impl<K: Copy> PanelStream<K> {
         ])
     }
 
+    /// Tiles of the panels of `heading` that a panel of an eye other than `eye` holds in VRAM:
+    /// the ones that would not be blank if the camera crossed to `eye` before its own landed.
+    fn standing_in(&self, eye: u16, heading: u8) -> u8 {
+        let mut mask = 0u8;
+        for c in &self.cache {
+            if c.eye == u16::MAX
+                || c.eye == eye
+                || c.heading != heading
+                || c.header != Header::Ready
+            {
+                continue;
+            }
+            for (tile, &held) in c.held.iter().enumerate() {
+                if held != NO_SLOT_INDEX && self.slots[usize::from(held)].state == SlotState::Shown
+                {
+                    mask |= 1 << tile;
+                }
+            }
+        }
+        mask
+    }
+
     /// Ask for the tiles of `eye` the camera can see, ranked from `base` up by how far each is
-    /// from the middle of the view.
+    /// from the middle of the view. A tile of an eye kept ready that the screen shows and no
+    /// panel of another eye could stand in for is ranked ahead of the rest of its eye
+    /// ([`EXPOSED`]): crossing to the eye before it lands would leave a hole.
+    #[allow(clippy::too_many_arguments)]
     fn want_tiles(
         &mut self,
         input: &PanelInput<'_>,
+        sights: &View,
         eye: u16,
         base: i32,
         prefetch: bool,
@@ -1135,7 +1247,7 @@ impl<K: Copy> PanelStream<K> {
             };
             // Every panel of the eye is kept, whichever way the camera looks: it may turn at any
             // moment, and a turn must not wait for the disc. The view only orders the reads.
-            let seen = visible(heading, input);
+            let seen = sights.seen[heading];
             let Some(ci) = self.cache_index(eye, heading as u8) else {
                 continue;
             };
@@ -1146,6 +1258,10 @@ impl<K: Copy> PanelStream<K> {
                 self.cache[usize::from(ci)].since = self.ticks.max(1);
                 self.cache[usize::from(ci)].sector = entry[0];
             }
+            let standing_in = match seen {
+                Some(_) if prefetch => self.standing_in(eye, heading as u8),
+                _ => u8::MAX,
+            };
             for col in 0..COLS {
                 for row in 0..ROWS {
                     let tile = col * ROWS + row;
@@ -1154,21 +1270,23 @@ impl<K: Copy> PanelStream<K> {
                     }
                     *wanted += u32::from(!prefetch);
                     // The tiles the camera sees first, the others after them.
-                    let rank = base
-                        + match seen {
-                            Some(view) => {
-                                let middle = ((col as i32 * TILE_TEXELS + TILE_TEXELS / 2
-                                    - COLS_CENTRE)
-                                    << 12)
-                                    / input.panel_focal.max(1);
-                                let across = (middle - view.tan_yaw).abs();
-                                let down = (row as i32 * PICTURE_ROWS + PICTURE_ROWS / 2
-                                    - view.middle_row)
-                                    .abs();
-                                across + 4 * down
-                            }
-                            None => OFF_VIEW,
-                        };
+                    let rank = match seen {
+                        Some(view) => {
+                            let across = (sights.middle[col] - view.tan_yaw).abs();
+                            let down = (row as i32 * PICTURE_ROWS + PICTURE_ROWS / 2
+                                - view.middle_row)
+                                .abs();
+                            let in_view = (view.first_col..=view.last_col).contains(&col)
+                                && (view.first_row..=view.last_row).contains(&row);
+                            let ahead = if in_view && standing_in >> tile & 1 == 0 {
+                                EXPOSED
+                            } else {
+                                base
+                            };
+                            ahead + across + 4 * down
+                        }
+                        None => base + OFF_VIEW,
+                    };
                     let cached = &mut self.cache[usize::from(ci)];
                     cached.rank = cached.rank.min(rank);
                     let held = cached.held[tile];
@@ -1203,46 +1321,54 @@ impl<K: Copy> PanelStream<K> {
     /// The slots to draw each tile from: those of the eye in use that a pass wants, and those
     /// of an eye left where the new eye's tile is stored and not in VRAM yet.
     fn rebuild_show(&mut self, input: &PanelInput<'_>, eye: u16) {
+        let list = self.lists.iter().position(|l| l.eye == eye);
         for c in 0..CACHE {
-            for tile in 0..TILES {
-                let cached = &self.cache[c];
-                let held = cached.held[tile];
-                let mut show = NO_TILE_SLOT;
-                if cached.eye != u16::MAX && cached.header == Header::Ready && held != NO_SLOT_INDEX
-                {
-                    let slot = &self.slots[usize::from(held)];
-                    if slot.state == SlotState::Shown {
-                        if cached.eye == eye {
-                            if slot.wanted {
-                                show = held;
-                            }
-                        } else {
-                            // Stale: only while the tile of the eye in use is not there.
-                            let entry =
-                                self.lists.iter().position(|l| l.eye == eye).and_then(|l| {
-                                    self.entry_of(l, usize::from(cached.heading), input)
-                                });
-                            let replaced = self
-                                .cache
-                                .iter()
-                                .find(|o| o.eye == eye && o.heading == cached.heading)
-                                .is_some_and(|o| {
-                                    let s = o.held[tile];
-                                    s != NO_SLOT_INDEX
-                                        && self.slots[usize::from(s)].state == SlotState::Shown
-                                        && o.header == Header::Ready
-                                });
-                            // While the new eye's list is not in, its tile is not known to be
-                            // stored: the old one stands in.
-                            let new_stored = entry.is_none_or(|e| stored(&e, tile));
-                            if new_stored && !replaced {
-                                show = held;
+            let cached = &self.cache[c];
+            let mut shows = [NO_TILE_SLOT; TILES];
+            if cached.eye != u16::MAX && cached.header == Header::Ready {
+                if cached.eye == eye {
+                    for (tile, show) in shows.iter_mut().enumerate() {
+                        let held = cached.held[tile];
+                        if held != NO_SLOT_INDEX {
+                            let slot = &self.slots[usize::from(held)];
+                            if slot.state == SlotState::Shown && slot.wanted {
+                                *show = held;
                             }
                         }
                     }
+                } else {
+                    // Stale: only while the tile of the eye in use is not there. What the new
+                    // eye stores of this heading, and the panel it holds for it, are the same
+                    // for every tile.
+                    let entry =
+                        list.and_then(|l| self.entry_of(l, usize::from(cached.heading), input));
+                    let replacing = self
+                        .cache
+                        .iter()
+                        .find(|o| o.eye == eye && o.heading == cached.heading)
+                        .filter(|o| o.header == Header::Ready);
+                    for (tile, show) in shows.iter_mut().enumerate() {
+                        let held = cached.held[tile];
+                        if held == NO_SLOT_INDEX
+                            || self.slots[usize::from(held)].state != SlotState::Shown
+                        {
+                            continue;
+                        }
+                        let replaced = replacing.is_some_and(|o| {
+                            let s = o.held[tile];
+                            s != NO_SLOT_INDEX
+                                && self.slots[usize::from(s)].state == SlotState::Shown
+                        });
+                        // While the new eye's list is not in, its tile is not known to be
+                        // stored: the old one stands in.
+                        let new_stored = entry.is_none_or(|e| stored(&e, tile));
+                        if new_stored && !replaced {
+                            *show = held;
+                        }
+                    }
                 }
-                self.cache[c].show[tile] = show;
             }
+            self.cache[c].show = shows;
         }
     }
 
@@ -1253,6 +1379,9 @@ impl<K: Copy> PanelStream<K> {
         T: RoomTransport<Ticket = K>,
     {
         loop {
+            if !self.reads_due {
+                return;
+            }
             let Some(stage) = self.stages.iter().position(|s| matches!(s, Stage::Free)) else {
                 return;
             };
@@ -1326,6 +1455,7 @@ impl<K: Copy> PanelStream<K> {
             }
             let wanted = &wanted[..count];
             if wanted.is_empty() {
+                self.reads_due = false;
                 return;
             }
             // The best ranked sector, unless one has waited out its patience.
@@ -1335,7 +1465,8 @@ impl<K: Copy> PanelStream<K> {
                 .max_by_key(|w| (w.4, core::cmp::Reverse(w.0)))
                 .or_else(|| {
                     // The most urgent tier first (the lists and headers, the tiles of the eye in
-                    // use, those of the eye nearest the camera, those of the one it walks to),
+                    // use, the tiles of an eye kept ready that nothing could stand in for, the
+                    // other tiles of the eye nearest the camera, those of the one it walks to),
                     // and within it the sector the drive reaches soonest: the one that continues
                     // the last read, then the next ones ahead, then those behind, the lowest
                     // first (a seek back lands at the start of the stretch, and the reads after
@@ -1345,12 +1476,14 @@ impl<K: Copy> PanelStream<K> {
                     wanted.iter().min_by_key(|w| {
                         let tier = if w.0 < 0 {
                             0
-                        } else if w.0 < PREFETCH {
+                        } else if w.0 < EXPOSED {
                             1
-                        } else if w.0 < 2 * PREFETCH {
+                        } else if w.0 < PREFETCH / 2 {
                             2
-                        } else {
+                        } else if w.0 < 2 * PREFETCH {
                             3
+                        } else {
+                            4
                         };
                         let reach = if tail == 0 || w.1 > tail {
                             w.1.saturating_sub(tail)
@@ -1607,7 +1740,9 @@ impl<K: Copy> PanelStream<K> {
             }
             self.counters.uploads += 1;
         }
-        // The tiles that landed show from the next frame on.
+        // The tiles that landed show from the next frame on, and the tile of an eye left that
+        // stood in for each stops at once (drawn under it, it would only cost fill until the
+        // next pass).
         for c in 0..CACHE {
             for tile in 0..TILES {
                 let cached = &self.cache[c];
@@ -1619,7 +1754,13 @@ impl<K: Copy> PanelStream<K> {
                 {
                     let slot = &self.slots[usize::from(held)];
                     if slot.state == SlotState::Shown && slot.wanted {
+                        let heading = cached.heading;
                         self.cache[c].show[tile] = held;
+                        for left in &mut self.cache {
+                            if left.eye != self.eye && left.heading == heading {
+                                left.show[tile] = NO_TILE_SLOT;
+                            }
+                        }
                     }
                 }
             }
@@ -2117,6 +2258,102 @@ mod tests {
             [800, 0, 0],
             "the eye in use is drawn, not the one left"
         );
+    }
+
+    #[test]
+    fn a_tile_is_never_drawn_from_two_eyes_while_a_crossing_settles() {
+        let eyes = [[0i16; 3], [800, 0, 0]];
+        let blocks = [5u32, 5 + 1 + FULL];
+        let mut disc = Disc::new(4 + 5 + 120);
+        disc.put_block(5, &[0]);
+        disc.put_block(5 + 1 + FULL, &[0]);
+        let mut window = window();
+        let mut stream = PanelStream::<usize>::new();
+        let at_first = input(&eyes, &blocks, [-100, 0, 0], [4096, 0]);
+        run(&mut stream, &mut disc, &mut window, &at_first, 200);
+        let crossed = input(&eyes, &blocks, [650, 0, 0], [4096, 0]);
+        let mut stand_ins = 0;
+        for _ in 0..300 {
+            run(&mut stream, &mut disc, &mut window, &crossed, 1);
+            let mut out = [None; 9];
+            let count = stream.drawables(&eyes, &mut out);
+            let panels: Vec<_> = out[..count].iter().flatten().collect();
+            for (a, first) in panels.iter().enumerate() {
+                for second in &panels[a + 1..] {
+                    if first.heading != second.heading || first.eye == second.eye {
+                        continue;
+                    }
+                    for tile in 0..TILES {
+                        assert!(
+                            first.slots[tile] == NO_TILE_SLOT || second.slots[tile] == NO_TILE_SLOT,
+                            "tile {tile} drawn from both eyes"
+                        );
+                    }
+                }
+            }
+            stand_ins += panels.iter().filter(|p| p.eye == [0, 0, 0]).count();
+        }
+        assert!(stand_ins > 0, "the eye left never stood in");
+    }
+
+    #[test]
+    fn a_tile_no_other_eye_could_stand_in_for_is_read_ahead_of_the_rest_of_its_eye() {
+        let eyes = [[0i16; 3], [1600, 0, 0]];
+        let blocks = [5u32, 5 + 1 + FULL];
+        let mut disc = Disc::new(4 + 5 + 120);
+        disc.put_block(5, &[0]);
+        disc.put_block(5 + 1 + FULL, &[0]);
+        // The first eye stores nothing of the second column of the panel; the second does.
+        disc.bytes[(4 + 5) * SECTOR + 1] = 0;
+        let mut window = window();
+        let mut stream = PanelStream::<usize>::new();
+        let between = input(&eyes, &blocks, [650, 0, 0], [4096, 0]);
+        run(&mut stream, &mut disc, &mut window, &between, 400);
+        assert_eq!(stream.counters.eye, 0);
+        let ranks = |column: usize| -> Vec<i32> {
+            stream
+                .slots
+                .iter()
+                .filter(|s| s.state != SlotState::Free && s.eye == 1)
+                .filter(|s| usize::from(s.tile) / ROWS == column)
+                .map(|s| s.rank)
+                .collect()
+        };
+        let (hole, covered) = (ranks(1), ranks(0));
+        assert!(
+            !hole.is_empty() && !covered.is_empty(),
+            "{hole:?} {covered:?}"
+        );
+        assert!(hole.iter().any(|&r| r < PREFETCH / 2), "{hole:?}");
+        assert!(covered.iter().all(|&r| r >= PREFETCH), "{covered:?}");
+    }
+
+    #[test]
+    fn the_eye_kept_ready_stays_while_another_is_barely_nearer() {
+        let eyes = [[0i16; 3], [700, 0, 0], [0, 0, 730]];
+        let blocks = [5u32, 5 + 1 + FULL, 5 + 2 * (1 + FULL)];
+        let mut disc = Disc::new(4 + 5 + 3 * (1 + FULL as usize) + 10);
+        for &block in &blocks {
+            disc.put_block(block, &[0]);
+        }
+        let mut window = window();
+        let mut stream = PanelStream::<usize>::new();
+        let at = |z: i32| input(&eyes, &blocks, [0, 0, z], [4096, 0]);
+        // Next to the first eye, the one along x the nearest of the others.
+        for _ in 0..PASS_TICKS + 1 {
+            stream.update(&mut disc, &mut window, &at(0));
+        }
+        assert_eq!((stream.eye, stream.next), (0, Some(1)));
+        // The one along z is nearer now, by less than an eighth of a spacing: no change.
+        for _ in 0..PASS_TICKS + 1 {
+            stream.update(&mut disc, &mut window, &at(40));
+        }
+        assert_eq!(stream.next, Some(1));
+        // Clearly nearer: the eye kept ready follows.
+        for _ in 0..PASS_TICKS + 1 {
+            stream.update(&mut disc, &mut window, &at(200));
+        }
+        assert_eq!(stream.next, Some(2));
     }
 
     #[test]
