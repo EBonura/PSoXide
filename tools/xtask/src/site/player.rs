@@ -34,6 +34,15 @@ const RECORD: &str = "psoxide-player-build.json";
 /// use it.
 const NOT_SHIPPED: &[&str] = &["examples"];
 
+/// Whether `components.lock.json` marks the emulator's SDK as vendored.
+fn sdk_is_vendored(root: &Path) -> bool {
+    fs::read(root.join("components.lock.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|lock| lock["components"]["sdk"]["vendored"].as_bool())
+        .unwrap_or(false)
+}
+
 /// `Path.read_text(errors="replace")`.
 fn read_lossy(path: &Path) -> Result<String, String> {
     let bytes = fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -99,8 +108,13 @@ pub fn main(args: &[String]) -> Result<(), String> {
         .args(["target", "add", "wasm32-unknown-unknown"]);
     show(&target);
     run(&mut target)?;
-    psoxide_link::components::materialize(&root, &Default::default(), false, None)
-        .map_err(|e| format!("emulator components: {e}"))?;
+    // An emulator that vendors its SDK carries the crates in git, so there is
+    // nothing to fetch, and the materializer would refuse to replace the
+    // committed files. Its own CI checks that the copy matches the lock.
+    if !sdk_is_vendored(&root) {
+        psoxide_link::components::materialize(&root, &Default::default(), false, None)
+            .map_err(|e| format!("emulator components: {e}"))?;
+    }
     let mut build = Command::new("trunk");
     // trunk rejects NO_COLOR=1 ("invalid value for --no-color").
     build
