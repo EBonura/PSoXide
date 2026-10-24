@@ -634,6 +634,13 @@ pub struct VramRuntime<
     /// the unified allocator on gameplay exit. `Empty` while the sky is not
     /// resident.
     sky_page_region: VramHandle,
+    /// A second picture atlas for the far panels (four pages in a row), kept
+    /// for the gameplay: its run in the allocator and the texture-page word of its first
+    /// page. `Empty` and 0 until [`Self::reserve_panel_atlas`] gets one.
+    panel_atlas_region: VramHandle,
+    panel_atlas_word: u16,
+    /// The allocator was asked this gameplay (it is asked once).
+    panel_atlas_tried: bool,
     sky_clut_regions: [VramHandle; SKY_PANORAMA_PALETTE_BANDS],
     /// Up to four 128x128 4bpp model atlases occupy the quadrants of one page.
     /// Shadow and particle pixels normally borrow the gameplay font page; if a
@@ -695,6 +702,9 @@ impl<
             sky_page_tpage_words: [0; 2],
             sky_clut_words: [0; SKY_PANORAMA_PALETTE_BANDS],
             sky_page_region: VramHandle::Empty,
+            panel_atlas_region: VramHandle::Empty,
+            panel_atlas_word: 0,
+            panel_atlas_tried: false,
             sky_clut_regions: [VramHandle::Empty; SKY_PANORAMA_PALETTE_BANDS],
             small_texture_page: None,
             small_texture_region: VramHandle::Empty,
@@ -2138,6 +2148,38 @@ impl<
         ))
     }
 
+    /// A second atlas of four pages for the far panels' tiles (64 slots): its top-left
+    /// pixel and the texture-page word of its first page. Idempotent; `None` when the
+    /// allocator has no six pages in a row to give.
+    pub fn reserve_panel_atlas(&mut self) -> Option<((u16, u16), u16)> {
+        if matches!(self.panel_atlas_region, VramHandle::Empty) {
+            if self.panel_atlas_tried {
+                return None;
+            }
+            self.panel_atlas_tried = true;
+            // Four pages in a row, in whichever band has them: the sky's six leave the rest of
+            // its band, and the room textures take pages as the level needs them.
+            let (left, region) = self
+                .allocator
+                .alloc_page_run(4, TextureDepth::Bit4, 0)
+                .or_else(|| self.allocator.alloc_page_run(4, TextureDepth::Bit4, 256))?;
+            self.panel_atlas_region = region;
+            self.panel_atlas_word = left.uv_word(0);
+        }
+        let word = self.panel_atlas_word;
+        // The tpage word encodes the page exactly: x / 64 and y / 256.
+        Some((((word & 0xF) * 64, ((word >> 4) & 1) * 256), word))
+    }
+
+    /// The second panel atlas, if one was reserved: see [`Self::reserve_panel_atlas`].
+    pub fn panel_atlas(&self) -> Option<((u16, u16), u16)> {
+        if matches!(self.panel_atlas_region, VramHandle::Empty) {
+            return None;
+        }
+        let word = self.panel_atlas_word;
+        Some((((word & 0xF) * 64, ((word >> 4) & 1) * 256), word))
+    }
+
     /// Free the streamed sky panorama's VRAM on gameplay exit: return its two-page
     /// run and per-band CLUTs to the unified allocator, drop its VRAM slot, and
     /// clear the cached placement words so the next gameplay entry re-streams it.
@@ -2175,6 +2217,14 @@ impl<
     /// no model, sky, shadow, or particle allocation crosses this edge.
     pub fn release_gameplay_vram(&mut self) {
         self.release_streamed_sky();
+        if !matches!(self.panel_atlas_region, VramHandle::Empty) {
+            self.allocator.free(core::mem::replace(
+                &mut self.panel_atlas_region,
+                VramHandle::Empty,
+            ));
+            self.panel_atlas_word = 0;
+        }
+        self.panel_atlas_tried = false;
         // Scene transitions happen after the loader has drained uploads. Reset
         // defensively so no queued writeback can target a returned window.
         self.upload_queue = VramUploadQueue::new();

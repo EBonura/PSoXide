@@ -1087,6 +1087,7 @@ pub fn write_upload_packets(
     uploads: &[Option<Upload>],
     window: &[u32],
     origin: (u16, u16),
+    origin2: (u16, u16),
     slot: u16,
     out: &mut [u32],
 ) -> (usize, usize) {
@@ -1101,7 +1102,15 @@ pub fn write_upload_packets(
     out[1] = 0x0100_0000;
     let mut end = words;
     for upload in uploads.iter().flatten() {
-        let (x, y) = psx_grid::render::slot_origin(origin, usize::from(upload.slot));
+        // Slots past the first atlas's are the second's (the far panels', when it was got).
+        let (x, y) = if usize::from(upload.slot) >= SLOTS {
+            psx_grid::render::slot_origin(
+                origin2,
+                psx_grid::render::second_atlas_slot(usize::from(upload.slot) - SLOTS),
+            )
+        } else {
+            psx_grid::render::slot_origin(origin, usize::from(upload.slot))
+        };
         let from = usize::from(upload.cell) * SLOT_BYTES / 4;
         for row in 0..ROWS {
             let node: &mut [u32; ROW_NODE_WORDS] = (&mut out[end - ROW_NODE_WORDS..end])
@@ -1659,7 +1668,8 @@ mod tests {
             None,
         ];
         let mut out = std::vec![0u32; upload_packet_words(1)];
-        let (words, packets) = write_upload_packets(&uploads, &window, (320, 0), 2047, &mut out);
+        let (words, packets) =
+            write_upload_packets(&uploads, &window, (320, 0), (0, 0), 2047, &mut out);
         assert_eq!(words, upload_packet_words(1));
         assert_eq!(packets, 1 + ROWS);
         // Walk the nodes as the GPU does, from the last written to the first.

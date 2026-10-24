@@ -535,6 +535,20 @@ pub(super) fn card_atlas() -> Option<((u16, u16), u16)> {
     Some((vram_arena().cube_sky_origin(key)?, slot.tpage_word))
 }
 
+/// A second atlas for the far panels' tiles, as large as the sky's, from VRAM nothing else
+/// uses: its top-left pixel and first texture-page word. The allocator is asked once a
+/// gameplay; with no six pages in a row to give, the panels keep to the sky atlas's slots.
+#[cfg(feature = "cd-stream-bench")]
+pub(super) fn panel_atlas() -> Option<((u16, u16), u16)> {
+    card_atlas()?;
+    vram_arena().reserve_panel_atlas()
+}
+
+#[cfg(feature = "cd-stream-bench")]
+pub(super) fn panel_atlas_origin() -> Option<(u16, u16)> {
+    panel_atlas().map(|(origin, _)| origin)
+}
+
 /// Fades' widths (3 sectors each) past the far edge a room takes its slot and
 /// starts its picture coming.
 #[cfg(feature = "far-cards")]
@@ -624,10 +638,6 @@ pub static mut PANEL_COUNTERS: psx_game_runtime::panel_stream::PanelCounters =
         visible: 0,
         visible_missing: 0,
         passes_missing: 0,
-        why_nocache: 0,
-        why_noslot: 0,
-        why_pending: 0,
-        why_unwanted: 0,
         shown: 0,
         wait_queue: 0,
         wait_load: 0,
@@ -677,6 +687,11 @@ pub(super) fn step_panels(eye: [i32; 3], focal: i32) {
         eyes: GRID_PANEL_EYES,
         blocks: GRID_PANEL_BLOCKS,
         base_lba: WORLD_PACK_START_LBA,
+        slots: if panel_atlas().is_some() {
+            psx_grid::render::SLOTS + psx_grid::render::SECOND_ATLAS_SLOTS
+        } else {
+            psx_grid::render::SLOTS
+        },
         eye,
         forward,
         pitch_tan_q12: ((fy << 12) / plan).clamp(-16384, 16384),
@@ -751,6 +766,7 @@ pub(super) fn emit_panel_uploads(
         &uploads[..count],
         window,
         origin,
+        panel_atlas_origin().unwrap_or(origin),
         (OT_DEPTH - 1) as u16,
         reservation.words_mut(),
     );
@@ -814,6 +830,7 @@ pub(super) fn emit_card_uploads(
     let (words, packets) = write_upload_packets(
         &uploads[..count],
         window,
+        origin,
         origin,
         (OT_DEPTH - 1) as u16,
         reservation.words_mut(),

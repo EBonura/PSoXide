@@ -26,7 +26,7 @@ use psx_gte::math::Vec3I16 as GteVec3I16;
 use psx_gte::scene;
 
 use super::cards::{
-    page_word, slot_clut_word, write_card, Blend, ATLAS_COLUMNS, PICTURE_ROWS, SLOT_ROWS,
+    page_word, slot_clut_word, write_card, Blend, ATLAS_COLUMNS, PICTURE_ROWS, SLOTS, SLOT_ROWS,
     VIEW_COS_Q12, VIEW_SIN_Q12,
 };
 use super::{GridFrame, GridScreen, NEAR, OFF_ANY, OFF_BOTTOM, OFF_LEFT, OFF_RIGHT, OFF_TOP};
@@ -61,6 +61,9 @@ pub const MESH: usize = MESH_W * MESH_H;
 pub const HORIZON_ROW: i32 = 3 * PICTURE_ROWS;
 /// Texel column of the principal point.
 pub const CENTRE_COLUMN: i32 = COLS as i32 * TILE_TEXELS / 2;
+/// The tile rows on screen with the camera level (bit `row`): an eye's block stores them
+/// together, ahead of the other rows, so a view of one heading is a stretch of the disc.
+pub const CENTRAL_ROWS: u8 = 0b001_1110;
 /// Tile value of an atlas slot that holds nothing.
 pub const NO_TILE_SLOT: u8 = 0xff;
 /// Bytes of a panel's header sector that the depth mesh takes.
@@ -179,6 +182,9 @@ pub struct PanelCamera {
     /// Texture-page word of the atlas's first page, and its top-left VRAM pixel.
     pub tpage: u16,
     pub atlas: (u16, u16),
+    /// The same of a second atlas, for the slots past [`SLOTS`] (unused when 0 slots go there).
+    pub tpage2: u16,
+    pub atlas2: (u16, u16),
     /// Runtime units in a sector, for the depth mesh.
     pub sector: i32,
     /// Ordering-table slot no cell goes in front of: the depth the real rooms end at, so a
@@ -456,11 +462,20 @@ pub fn draw_panel(
                 k += 3;
             }
             let slot = usize::from(slot);
+            let (slot, atlas, base_tpage) = if slot >= SLOTS {
+                (
+                    super::cards::second_atlas_slot(slot - SLOTS),
+                    camera.atlas2,
+                    camera.tpage2,
+                )
+            } else {
+                (slot, camera.atlas, camera.tpage)
+            };
             let (column, atlas_row) = (slot % ATLAS_COLUMNS, slot / ATLAS_COLUMNS);
             let u_tile = ((column % 4) as i32 * TILE_TEXELS) as u32;
             let v_tile = (atlas_row as i32 * SLOT_ROWS) as u32;
-            let tpage = page_word(camera.tpage, column / 4);
-            let clut = slot_clut_word(camera.atlas, slot);
+            let tpage = page_word(base_tpage, column / 4);
+            let clut = slot_clut_word(atlas, slot);
             let mut drawn = false;
             for cy in 0..CELLS_Y {
                 for cx in 0..CELLS_X {
@@ -611,6 +626,8 @@ mod tests {
             near_sz: 154,
             tpage: 0x0105,
             atlas: (320, 0),
+            tpage2: 0,
+            atlas2: (0, 0),
             sector: 80,
             otz_floor: 0,
         }

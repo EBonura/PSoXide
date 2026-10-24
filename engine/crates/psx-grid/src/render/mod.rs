@@ -42,11 +42,12 @@ mod select;
 mod skin;
 
 pub use cards::{
-    draw_cards, draw_cards_marked, horizon_y, outer_bands, slot_clut_word, slot_origin, view_keep,
-    view_toward, write_backdrop, Backdrop, Card, CardBand, CardCamera, CardTable, LiveSlot,
-    ATLAS_COLUMNS, ATLAS_ROWS, BACKDROP_PACKET_WORDS, CARD_PACKET_WORDS, CARD_UNLIMITED, NO_SLOT,
-    NO_VIEW, OUTER_LAYERS, PICTURE_ROWS, PITCH_TAN_Q12, SLOTS, SLOT_BYTES, SLOT_HALFWORDS,
-    SLOT_ROWS, TEXELS, VIEWS, VIEW_COS_Q12, VIEW_SIN_Q12,
+    draw_cards, draw_cards_marked, horizon_y, outer_bands, second_atlas_slot, slot_clut_word,
+    slot_origin, view_keep, view_toward, write_backdrop, Backdrop, Card, CardBand, CardCamera,
+    CardTable, LiveSlot, ATLAS_COLUMNS, ATLAS_ROWS, BACKDROP_PACKET_WORDS, CARD_PACKET_WORDS,
+    CARD_UNLIMITED, NO_SLOT, NO_VIEW, OUTER_LAYERS, PICTURE_ROWS, PITCH_TAN_Q12,
+    SECOND_ATLAS_SLOTS, SLOTS, SLOT_BYTES, SLOT_HALFWORDS, SLOT_ROWS, TEXELS, VIEWS, VIEW_COS_Q12,
+    VIEW_SIN_Q12,
 };
 pub use clip::clip_polygon_plane;
 #[cfg(target_arch = "mips")]
@@ -54,7 +55,7 @@ pub use frustum::load_gte_clip_planes;
 pub use frustum::{FrustumPlanes, CLIP_ALL_PLANES};
 pub use panels::{
     depth_byte, depth_units, draw_panel, PanelCamera, PanelRays, PanelRef, PanelScratch, CELLS,
-    CELLS_X, CELLS_Y, CELL_EMPTY, CELL_H, CELL_MIXED, CELL_W, CENTRE_COLUMN, COLS,
+    CELLS_X, CELLS_Y, CELL_EMPTY, CELL_H, CELL_MIXED, CELL_W, CENTRAL_ROWS, CENTRE_COLUMN, COLS,
     DEPTH_SECTOR_SHIFT, DEPTH_STEPS, HEADER_DEPTH_BYTES, HEADER_ROOMS_AT, HEADINGS, HORIZON_ROW,
     MESH, MESH_H, MESH_W, NO_TILE_SLOT, ROWS, TILES, TILE_TEXELS,
 };
