@@ -18,7 +18,7 @@ use alloc::vec::Vec;
 use crate::flood::{Flood, FloodQuery, FloodRoom, NO_PAGE_BUDGET};
 use crate::format::{FloodHeader, SECTOR_BYTES};
 use crate::view::LevelView;
-use crate::walk::WalkSet;
+use crate::walk::{SharedWalkScratch, WalkSet};
 
 /// Walk radius standing for "no bound" (see `activity`).
 const UNBOUNDED: i32 = 1 << 28;
@@ -188,8 +188,15 @@ struct WantedKey {
 }
 
 impl StreamWindow {
+    /// The scratch the searches run in, for other walk sets of the level to share.
+    pub fn walk_scratch(&self) -> SharedWalkScratch {
+        self.draw.scratch()
+    }
+
     /// Searches over `level`, with the radii its core carries.
     pub fn new(level: &LevelView<'_>) -> Self {
+        let draw_set = WalkSet::new(level);
+        let scratch = draw_set.scratch();
         let s = level.sector_units() as i32;
         let sectors = |n: u8| i32::from(n) * s;
         // A flood level whose rooms all fit the pool is held whole: no draw
@@ -216,9 +223,9 @@ impl StreamWindow {
                 .saturating_add(sectors(level.header.lead_radius))
         };
         Self {
-            draw: WalkSet::new(level),
-            active: WalkSet::new(level),
-            lead: WalkSet::new(level),
+            draw: draw_set,
+            active: WalkSet::sharing(level, scratch.clone()),
+            lead: WalkSet::sharing(level, scratch),
             draw_radius: draw,
             active_radius: active,
             lead_radius: lead,

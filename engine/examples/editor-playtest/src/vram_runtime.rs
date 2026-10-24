@@ -681,31 +681,7 @@ static mut PANELS: psx_game_runtime::panel_stream::PanelStream<
 #[cfg(feature = "cd-stream-bench")]
 #[no_mangle]
 pub static mut PANEL_COUNTERS: psx_game_runtime::panel_stream::PanelCounters =
-    psx_game_runtime::panel_stream::PanelCounters {
-        submitted: 0,
-        landed: 0,
-        failed: 0,
-        uploads: 0,
-        evictions: 0,
-        refused: 0,
-        held: 0,
-        wanted: 0,
-        missing: 0,
-        starved: 0,
-        eye: 0,
-        last_first: 0,
-        last_sectors: 0,
-        sectors: 0,
-        visible: 0,
-        visible_missing: 0,
-        passes_missing: 0,
-        shown: 0,
-        wait_queue: 0,
-        wait_load: 0,
-        wait_read: 0,
-        gate_run: 0,
-        far: 0,
-    };
+    psx_game_runtime::panel_stream::PanelCounters::ZERO;
 
 /// The view rotation the last frame was drawn with (the world's axes composed with the
 /// camera's, as the GTE holds it), for the panel stream to read which way the camera looks.

@@ -284,7 +284,7 @@ impl GridRuntime {
         Ok(Self {
             level,
             resident,
-            activity: RoomActivity::new(&level),
+            activity: RoomActivity::sharing(&level, window.walk_scratch()),
             window,
             wanted_seen: None,
             idle_ticks: 0,
@@ -1385,7 +1385,7 @@ impl GridRuntime {
                             };
                             static PANEL_RAYS: PanelRays = PanelRays::new(GRID_PANEL_FOCAL, GRID_PANEL_SECTOR);
                             static mut PANEL_SCRATCH: PanelScratch = PanelScratch::new();
-                            let mut list: [Option<PanelRef<'static>>; 4] = [None; 4];
+                            let mut list: [Option<PanelRef<'static>>; 6] = [None; 6];
                             let count = crate::vram_runtime::panel_drawables(&mut list);
                             #[cfg(feature = "card-trace")]
                             crate::card_trace::panel_pose(

@@ -1002,12 +1002,32 @@ fn playtest_visual_pacing(video_mode: VideoMode) -> VisualPacing {
 /// boot state at the top of `main`, before anything else touches it.
 static mut SCENE: core::mem::MaybeUninit<Playtest> = core::mem::MaybeUninit::zeroed();
 
+/// The game's heap, which reuses what is freed (`psx-rt`'s `alloc` feature is off); `main`
+/// gives it the range the linker left.
+#[cfg(target_arch = "mips")]
+#[global_allocator]
+static HEAP: psx_game_runtime::reuse_heap::ReuseHeap =
+    psx_game_runtime::reuse_heap::ReuseHeap::new();
+
 // psx-rt's `_start` calls this through an unmangled `extern "Rust" { fn main(); }`,
 // so the guest needs the raw symbol. Under `cargo test` libtest owns the `main`
 // entry symbol, so only there is this one left mangled. `not(test)` is true for
 // every guest build, so MIPS keeps the exact same `#[no_mangle] fn main`.
 #[cfg_attr(not(test), no_mangle)]
 fn main() -> ! {
+    // The heap first: nothing may allocate before it has its range.
+    #[cfg(target_arch = "mips")]
+    // SAFETY: first thing the program does; `__heap_start..__heap_end` is the range
+    // `psoxide.ld` leaves between .bss and the stack reserve (empty when they meet), used by
+    // nothing else.
+    unsafe {
+        extern "C" {
+            static __heap_start: u8;
+            static __heap_end: u8;
+        }
+        let start = &raw const __heap_start as usize;
+        HEAP.init(start, &raw const __heap_end as usize);
+    }
     // Stamp the scene's boot state onto its link-time-zero storage BEFORE
     // any other use (see `SCENE` and `Playtest::init_zeroed`).
     // SAFETY: single-threaded boot path; the raw stamping happens before

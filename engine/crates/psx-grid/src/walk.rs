@@ -9,12 +9,16 @@
 //! centre of any portal that opens into it, going portal centre to portal
 //! centre through each room on the way.
 //!
-//! One [`WalkSet`] holds its scratch (a cost per room and per portal) and
-//! cleans only what a search touched, so a search costs what it reaches, not
-//! the size of the level.
+//! A [`WalkSet`] holds the result of its last search (a cost per room). What a
+//! search needs while it runs (a cost per portal and the queue) is a
+//! [`WalkScratch`], which the sets of a level share: it is clean between
+//! searches, and a search cleans only what it touched, so a search costs what
+//! it reaches, not the size of the level.
 
 use alloc::collections::BinaryHeap;
+use alloc::rc::Rc;
 use alloc::vec::Vec;
+use core::cell::RefCell;
 use core::cmp::Ordering;
 
 use psx_math::int32::isqrt_i32;
@@ -78,49 +82,31 @@ struct Anchor {
     radius: i32,
 }
 
-/// Rooms within a walk radius of a point, with their distances.
-pub struct WalkSet {
-    room_cost: Vec<i32>,
+/// What a search needs while it runs: a cost per portal, the portals it
+/// touched and its queue. Every field is empty or unreached between searches,
+/// so any number of [`WalkSet`]s of one level can share one.
+pub struct WalkScratch {
     portal_cost: Vec<i32>,
-    rooms: Vec<u16>,
     portals: Vec<u16>,
     heap: BinaryHeap<Node>,
-    anchor: Option<Anchor>,
-    epoch: u32,
 }
 
-impl WalkSet {
-    /// Scratch for `level`.
-    pub fn new(level: &LevelView<'_>) -> Self {
+impl WalkScratch {
+    fn new(level: &LevelView<'_>) -> Self {
         Self {
-            room_cost: alloc::vec![UNREACHED; level.rooms.len()],
             portal_cost: alloc::vec![UNREACHED; level.portals.len()],
-            rooms: Vec::new(),
             portals: Vec::new(),
             heap: BinaryHeap::new(),
-            anchor: None,
-            epoch: 0,
         }
     }
 
+    /// Leave the scratch as a search found it.
     fn clear(&mut self) {
-        for &room in &self.rooms {
-            self.room_cost[usize::from(room)] = UNREACHED;
-        }
         for &portal in &self.portals {
             self.portal_cost[usize::from(portal)] = UNREACHED;
         }
-        self.rooms.clear();
         self.portals.clear();
         self.heap.clear();
-    }
-
-    fn reach(&mut self, room: usize, cost: i32) {
-        let slot = &mut self.room_cost[room];
-        if *slot == UNREACHED {
-            self.rooms.push(room as u16);
-        }
-        *slot = (*slot).min(cost);
     }
 
     fn expand(&mut self, level: &LevelView<'_>, room: usize, at: [i32; 3], cost: i32, radius: i32) {
@@ -142,6 +128,57 @@ impl WalkSet {
             });
         }
     }
+}
+
+/// A [`WalkScratch`] shared by the sets of a level (the guest has one thread).
+pub type SharedWalkScratch = Rc<RefCell<WalkScratch>>;
+
+/// Rooms within a walk radius of a point, with their distances.
+pub struct WalkSet {
+    room_cost: Vec<i32>,
+    rooms: Vec<u16>,
+    scratch: SharedWalkScratch,
+    anchor: Option<Anchor>,
+    epoch: u32,
+}
+
+impl WalkSet {
+    /// A set for `level`, with scratch of its own.
+    pub fn new(level: &LevelView<'_>) -> Self {
+        Self::sharing(level, Rc::new(RefCell::new(WalkScratch::new(level))))
+    }
+
+    /// A set for `level` that searches with `scratch`, which was made for the
+    /// same level (see [`Self::scratch`]).
+    pub fn sharing(level: &LevelView<'_>, scratch: SharedWalkScratch) -> Self {
+        Self {
+            room_cost: alloc::vec![UNREACHED; level.rooms.len()],
+            rooms: Vec::new(),
+            scratch,
+            anchor: None,
+            epoch: 0,
+        }
+    }
+
+    /// The scratch this set searches with, for other sets of the level to share.
+    pub fn scratch(&self) -> SharedWalkScratch {
+        Rc::clone(&self.scratch)
+    }
+
+    fn clear(&mut self) {
+        for &room in &self.rooms {
+            self.room_cost[usize::from(room)] = UNREACHED;
+        }
+        self.rooms.clear();
+    }
+
+    fn reach(&mut self, room: usize, cost: i32) {
+        let slot = &mut self.room_cost[room];
+        if *slot == UNREACHED {
+            self.rooms.push(room as u16);
+        }
+        *slot = (*slot).min(cost);
+    }
 
     /// Search from `from` inside `room`, out to `radius` runtime units.
     pub fn compute(&mut self, level: &LevelView<'_>, room: usize, from: [i32; 3], radius: i32) {
@@ -155,10 +192,12 @@ impl WalkSet {
         if room >= level.rooms.len() {
             return;
         }
+        let shared = Rc::clone(&self.scratch);
+        let mut scratch = shared.borrow_mut();
         self.reach(room, 0);
-        self.expand(level, room, from, 0, radius);
-        while let Some(Node { cost, portal }) = self.heap.pop() {
-            if cost > self.portal_cost[usize::from(portal)] {
+        scratch.expand(level, room, from, 0, radius);
+        while let Some(Node { cost, portal }) = scratch.heap.pop() {
+            if cost > scratch.portal_cost[usize::from(portal)] {
                 continue;
             }
             let dest = usize::from(level.portals[usize::from(portal)].dest);
@@ -170,8 +209,9 @@ impl WalkSet {
             // is also where the matching portal of `dest` opens.
             let source = self.source_of(level, usize::from(portal));
             let at = centre(&level.rooms[source], &level.portals[usize::from(portal)]);
-            self.expand(level, dest, at, cost, radius);
+            scratch.expand(level, dest, at, cost, radius);
         }
+        scratch.clear();
     }
 
     /// The room a portal belongs to (rooms own contiguous portal runs).

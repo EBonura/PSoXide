@@ -128,11 +128,45 @@ pub struct PanelCounters {
     pub wait_load: u32,
     /// With `METER` on: of the queued-to-frame wait, the part until the read landed.
     pub wait_read: u32,
-    /// Passes in a row the camera has had a nearer eye it did not cross to yet (its pictures
-    /// were not all in VRAM). Read from RAM to see how long a crossing waits.
+    /// Passes in a row the camera has had a nearer eye it did not cross to. The camera crosses
+    /// as soon as an eye is nearer, so this stays 0; a replay checks that it does.
     pub gate_run: u32,
     /// How far the camera is from the eye in use, in tenths of a spacing between eyes.
     pub far: u32,
+    /// Passes in a row since the camera crossed to another eye in which a picture of the eye in
+    /// use was still on its way (the eye left stands in for it): how long a crossing takes to
+    /// settle.
+    pub settling: u32,
+}
+
+impl PanelCounters {
+    /// All counters zero.
+    pub const ZERO: Self = Self {
+        submitted: 0,
+        landed: 0,
+        failed: 0,
+        uploads: 0,
+        evictions: 0,
+        refused: 0,
+        held: 0,
+        wanted: 0,
+        missing: 0,
+        starved: 0,
+        eye: 0,
+        last_first: 0,
+        last_sectors: 0,
+        sectors: 0,
+        visible: 0,
+        visible_missing: 0,
+        passes_missing: 0,
+        shown: 0,
+        wait_queue: 0,
+        wait_load: 0,
+        wait_read: 0,
+        gate_run: 0,
+        far: 0,
+        settling: 0,
+    };
 }
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -568,31 +602,7 @@ impl<K: Copy> PanelStream<K> {
     /// A stream holding nothing.
     pub const fn new() -> Self {
         Self {
-            counters: PanelCounters {
-                submitted: 0,
-                landed: 0,
-                failed: 0,
-                uploads: 0,
-                evictions: 0,
-                refused: 0,
-                held: 0,
-                wanted: 0,
-                missing: 0,
-                starved: 0,
-                eye: 0,
-                last_first: 0,
-                last_sectors: 0,
-                sectors: 0,
-                visible: 0,
-                visible_missing: 0,
-                passes_missing: 0,
-                shown: 0,
-                wait_queue: 0,
-                wait_load: 0,
-                wait_read: 0,
-                gate_run: 0,
-                far: 0,
-            },
+            counters: PanelCounters::ZERO,
             slots: [Slot::FREE; SLOTS],
             cache: [Cached::EMPTY; CACHE],
             lists: [EyeList::EMPTY; EYES],
@@ -761,20 +771,19 @@ impl<K: Copy> PanelStream<K> {
         let best = (0..input.eyes.len())
             .min_by_key(|&eye| distance(eye))
             .unwrap_or(0);
-        // The camera crosses to a nearer eye only once every picture of that eye is in VRAM, so
-        // that nothing is ever blank: until then the eye in use keeps serving it (the pictures
-        // drift a little further from the real view), unless it is out of reach altogether.
+        // The camera crosses to a nearer eye at once, whatever the disc has brought in: the
+        // tiles of the eye it leaves stand in for those of the new one that have not landed
+        // ([`Self::rebuild_show`]), so the camera never waits on the drive.
         let current = usize::from(self.eye);
         let lost = !self.have_eye || current >= input.eyes.len();
         let nearer = !lost && distance(best) + input.spacing / 4 < distance(current);
-        if lost
-            || (nearer
-                && (self.eye_ready(best as u16, input) || distance(current) > 2 * input.spacing))
-        {
+        if lost || nearer {
             self.eye = best as u16;
             self.have_eye = true;
         }
-        let waiting = nearer && usize::from(self.eye) != best;
+        let waiting = !lost
+            && usize::from(self.eye) != best
+            && distance(best) + input.spacing / 4 < distance(usize::from(self.eye));
         self.counters.gate_run = if waiting {
             self.counters.gate_run + 1
         } else {
@@ -1000,6 +1009,11 @@ impl<K: Copy> PanelStream<K> {
         self.counters.missing = missing;
         self.counters.starved = starved;
         self.loaded = self.have_eye && self.eye_ready(self.eye, input);
+        self.counters.settling = if self.loaded {
+            0
+        } else {
+            self.counters.settling + 1
+        };
         if METER {
             self.count_visible(input, eye);
         }
@@ -1022,29 +1036,18 @@ impl<K: Copy> PanelStream<K> {
             let Some(v) = visible_in(heading, &self.view, 16, 0) else {
                 continue;
             };
-            let Some(ci) = self
-                .cache
-                .iter()
-                .position(|c| c.eye == eye && c.heading == heading as u8)
-            else {
-                // Stored tiles of a panel nothing has asked for yet.
-                for col in v.first_col..=v.last_col {
-                    for row in v.first_row..=v.last_row {
-                        let tile = col * ROWS + row;
-                        if stored(&entry, tile) {
-                            seen += 1;
-                            absent += 1;
-                        }
-                    }
-                }
-                continue;
-            };
             for col in v.first_col..=v.last_col {
                 for row in v.first_row..=v.last_row {
                     let tile = col * ROWS + row;
                     if stored(&entry, tile) {
                         seen += 1;
-                        absent += u32::from(self.cache[ci].show[tile] == NO_TILE_SLOT);
+                        // Blank only if no panel of the heading, of the eye in use or of one left,
+                        // has a picture to show for it.
+                        let covered = self
+                            .cache
+                            .iter()
+                            .any(|o| o.heading == heading as u8 && o.show[tile] != NO_TILE_SLOT);
+                        absent += u32::from(!covered);
                     }
                 }
             }
@@ -1623,44 +1626,58 @@ impl<K: Copy> PanelStream<K> {
         }
     }
 
-    /// The panels to draw this frame, the ones of an eye the camera has left first (the eye in
-    /// use draws over them), as many as `out` holds.
+    /// The panel `c` as the draw reads it, when it has a picture to show and the screen sees it.
+    fn drawable<'a>(&'a self, c: &'a Cached, eyes: &[[i16; 3]]) -> Option<PanelRef<'a>> {
+        if c.eye == u16::MAX
+            || c.header != Header::Ready
+            || c.show.iter().all(|&s| s == NO_TILE_SLOT)
+        {
+            return None;
+        }
+        let at = eyes.get(usize::from(c.eye))?;
+        // The tiles the screen shows, with a few percent to spare: the others are not worth
+        // projecting.
+        let v = visible_in(usize::from(c.heading), &self.view, 17, PICTURE_ROWS / 8)?;
+        Some(PanelRef {
+            eye: [i32::from(at[0]), i32::from(at[1]), i32::from(at[2])],
+            heading: c.heading,
+            depth: &c.depth,
+            slots: &c.show,
+            rooms: &c.rooms,
+            first_col: v.first_col as u8,
+            last_col: v.last_col as u8,
+            first_row: v.first_row as u8,
+            last_row: v.last_row as u8,
+        })
+    }
+
+    /// The panels to draw this frame, the ones of the eyes the camera has left first (the eye in
+    /// use draws over them), as many as `out` holds. The eye in use keeps its places: the
+    /// panels of the eyes left give way when `out` is short.
     pub fn drawables<'a>(&'a self, eyes: &[[i16; 3]], out: &mut [Option<PanelRef<'a>>]) -> usize {
-        let mut count = 0;
-        for stale in [true, false] {
-            for c in &self.cache {
-                if c.eye == u16::MAX
-                    || c.header != Header::Ready
-                    || (c.eye != self.eye) != stale
-                    || c.show.iter().all(|&s| s == NO_TILE_SLOT)
-                {
-                    continue;
+        let mut current = [None; HEADINGS];
+        let mut kept = 0;
+        for c in self.cache.iter().filter(|c| c.eye == self.eye) {
+            if let Some(panel) = self.drawable(c, eyes) {
+                if kept < current.len() {
+                    current[kept] = Some(panel);
+                    kept += 1;
                 }
-                let Some(at) = eyes.get(usize::from(c.eye)) else {
-                    continue;
-                };
-                if count < out.len() {
-                    // The tiles the screen shows, with a few percent to spare: the others
-                    // are not worth projecting.
-                    let Some(v) =
-                        visible_in(usize::from(c.heading), &self.view, 17, PICTURE_ROWS / 8)
-                    else {
-                        continue;
-                    };
-                    out[count] = Some(PanelRef {
-                        eye: [i32::from(at[0]), i32::from(at[1]), i32::from(at[2])],
-                        heading: c.heading,
-                        depth: &c.depth,
-                        slots: &c.show,
-                        rooms: &c.rooms,
-                        first_col: v.first_col as u8,
-                        last_col: v.last_col as u8,
-                        first_row: v.first_row as u8,
-                        last_row: v.last_row as u8,
-                    });
+            }
+        }
+        let room = out.len().saturating_sub(kept);
+        let mut count = 0;
+        for c in self.cache.iter().filter(|c| c.eye != self.eye) {
+            if count < room {
+                if let Some(panel) = self.drawable(c, eyes) {
+                    out[count] = Some(panel);
                     count += 1;
                 }
             }
+        }
+        for panel in current.iter().take(kept.min(out.len() - count)) {
+            out[count] = *panel;
+            count += 1;
         }
         count
     }
@@ -2029,6 +2046,76 @@ mod tests {
             list.iter().map(|d| d.0).collect::<Vec<_>>(),
             [1],
             "{list:?}"
+        );
+    }
+
+    #[test]
+    fn the_camera_crosses_to_a_nearer_eye_at_once_and_never_waits_for_the_drive() {
+        let eyes = [[0i16; 3], [800, 0, 0]];
+        let blocks = [5u32, 5 + 1 + FULL];
+        let mut disc = Disc::new(4 + 5 + 120);
+        disc.put_block(5, &[0]);
+        disc.put_block(5 + 1 + FULL, &[0]);
+        let mut window = window();
+        let mut stream = PanelStream::<usize>::new();
+        // Next to the first eye, with the second a spacing away (not kept ready).
+        let at_first = input(&eyes, &blocks, [-100, 0, 0], [4096, 0]);
+        run(&mut stream, &mut disc, &mut window, &at_first, 200);
+        assert_eq!(stream.counters.eye, 0);
+        assert!(stream.eye_loaded());
+        // Past the middle by more than the hysteresis, with nothing of the second eye in
+        // VRAM: the very next pass uses it.
+        let crossed = input(&eyes, &blocks, [650, 0, 0], [4096, 0]);
+        for _ in 0..PASS_TICKS + 1 {
+            stream.update(&mut disc, &mut window, &crossed);
+        }
+        assert_eq!(stream.counters.eye, 1);
+        assert!(!stream.eye_loaded());
+        // The first eye's tiles stand in, so nothing the screen shows is blank meanwhile.
+        let list = drawn(&stream, &eyes);
+        assert!(list.iter().any(|d| d.0 == 0 && d.2 > 0), "{list:?}");
+        // And the second eye's own tiles replace them as they land.
+        run(&mut stream, &mut disc, &mut window, &crossed, 300);
+        assert!(stream.eye_loaded());
+        let list = drawn(&stream, &eyes);
+        assert_eq!(
+            list.iter().map(|d| d.0).collect::<Vec<_>>(),
+            [1],
+            "{list:?}"
+        );
+    }
+
+    #[test]
+    fn the_eye_in_use_keeps_its_places_when_the_list_is_short() {
+        let eyes = [[0i16; 3], [800, 0, 0]];
+        let blocks = [5u32, 5 + 1 + FULL];
+        let mut disc = Disc::new(4 + 5 + 120);
+        disc.put_block(5, &[0]);
+        disc.put_block(5 + 1 + FULL, &[0]);
+        let mut window = window();
+        let mut stream = PanelStream::<usize>::new();
+        let at_first = input(&eyes, &blocks, [-100, 0, 0], [4096, 0]);
+        run(&mut stream, &mut disc, &mut window, &at_first, 200);
+        let crossed = input(&eyes, &blocks, [650, 0, 0], [4096, 0]);
+        // Until a moment when the new eye has some tiles in and the old one still stands in
+        // for the rest.
+        let mut both = false;
+        for _ in 0..300 {
+            run(&mut stream, &mut disc, &mut window, &crossed, 1);
+            let eyes_drawn: Vec<u16> = drawn(&stream, &eyes).iter().map(|d| d.0).collect();
+            if eyes_drawn.contains(&0) && eyes_drawn.contains(&1) {
+                both = true;
+                break;
+            }
+        }
+        assert!(both, "the crossing never drew both eyes");
+        let mut out = [None; 1];
+        assert_eq!(stream.drawables(&eyes, &mut out), 1);
+        let panel = out[0].expect("a panel");
+        assert_eq!(
+            panel.eye,
+            [800, 0, 0],
+            "the eye in use is drawn, not the one left"
         );
     }
 

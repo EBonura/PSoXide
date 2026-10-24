@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 
 use crate::resident::ResidentRooms;
 use crate::view::LevelView;
-use crate::walk::WalkSet;
+use crate::walk::{SharedWalkScratch, WalkSet};
 
 /// Walk radius, in runtime units, standing for "no bound": far past any
 /// coordinate a level can hold, small enough to add distances without
@@ -37,6 +37,18 @@ pub struct RoomActivity {
 impl RoomActivity {
     /// Sets over `level`, with the radii its core carries.
     pub fn new(level: &LevelView<'_>) -> Self {
+        let draw = WalkSet::new(level);
+        let scratch = draw.scratch();
+        Self::with_draw(level, draw, scratch)
+    }
+
+    /// Sets over `level` that search with `scratch`, shared with other sets of the
+    /// level (see [`WalkSet::scratch`]).
+    pub fn sharing(level: &LevelView<'_>, scratch: SharedWalkScratch) -> Self {
+        Self::with_draw(level, WalkSet::sharing(level, scratch.clone()), scratch)
+    }
+
+    fn with_draw(level: &LevelView<'_>, draw: WalkSet, scratch: SharedWalkScratch) -> Self {
         let s = level.sector_units() as i32;
         let radius = |sectors: u8| {
             if sectors == 0 {
@@ -46,8 +58,11 @@ impl RoomActivity {
             }
         };
         Self {
-            draw: WalkSet::new(level),
-            active: [WalkSet::new(level), WalkSet::new(level)],
+            draw,
+            active: [
+                WalkSet::sharing(level, scratch.clone()),
+                WalkSet::sharing(level, scratch),
+            ],
             draw_radius: radius(level.header.draw_far),
             active_radius: radius(level.header.active_radius),
             tolerance: s.max(1),
