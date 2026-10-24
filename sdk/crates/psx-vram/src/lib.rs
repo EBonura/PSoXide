@@ -59,6 +59,8 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
+pub mod map;
+
 use psx_hw::gpu::{gp0, gp1, pack_xy};
 use psx_io::dma::{self, Channel};
 use psx_io::gpu::{pause_recording, wait_command_ready, write_command, write_display_control};

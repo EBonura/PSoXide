@@ -834,6 +834,9 @@ id_table! {
     /// clip in Blender: it accounts for the cook, playback speed and frame
     /// range that the guest actually applies.
     pub const PLAYER_ANIM_PHASE_Q12: u16 = 266;
+    /// VRAM ownership violations (`psx_vram::map::VramMap::violations`): uploads outside
+    /// the writer's live region and refused claims. Sampled by the game; non-zero is a bug.
+    pub const VRAM_OWNERSHIP_VIOLATIONS: u16 = 267;
     }
 }
 
@@ -891,9 +894,9 @@ mod tests {
             assert!((id as usize) < TASK_COUNT, "task {id}");
         }
         // And they are exactly one past the highest id, not slack that would
-        // hide a missing bump: the old hand-written values were 52 and 267.
+        // hide a missing bump: the old hand-written values were 52 and 267 (before VRAM_OWNERSHIP_VIOLATIONS).
         assert_eq!(STAGE_COUNT, 52);
-        assert_eq!(COUNTER_COUNT, 267);
+        assert_eq!(COUNTER_COUNT, 268);
     }
 
     #[test]
