@@ -36,9 +36,9 @@ use super::{GridFrame, GridScreen, NEAR, OFF_ANY, OFF_BOTTOM, OFF_LEFT, OFF_RIGH
 /// ([`VIEW_COS_Q12`], [`VIEW_SIN_Q12`]).
 pub const HEADINGS: usize = 8;
 /// Tile columns across a panel.
-pub const COLS: usize = 5;
+pub const COLS: usize = 2;
 /// Tile rows down a panel.
-pub const ROWS: usize = 7;
+pub const ROWS: usize = 3;
 /// Tiles of a panel.
 pub const TILES: usize = COLS * ROWS;
 /// Texels across a tile.
@@ -58,12 +58,12 @@ pub const MESH_H: usize = ROWS * CELLS_Y + 1;
 /// Mesh vertices of a panel.
 pub const MESH: usize = MESH_W * MESH_H;
 /// Texel row of the horizon (the principal point), counted from the top of the panel.
-pub const HORIZON_ROW: i32 = 3 * PICTURE_ROWS;
+pub const HORIZON_ROW: i32 = ROWS as i32 * PICTURE_ROWS * 3 / 7;
 /// Texel column of the principal point.
 pub const CENTRE_COLUMN: i32 = COLS as i32 * TILE_TEXELS / 2;
 /// The tile rows on screen with the camera level (bit `row`): an eye's block stores them
 /// together, ahead of the other rows, so a view of one heading is a stretch of the disc.
-pub const CENTRAL_ROWS: u8 = 0b001_1110;
+pub const CENTRAL_ROWS: u8 = ((1u16 << ROWS) - 1) as u8;
 /// Tile value of an atlas slot that holds nothing.
 pub const NO_TILE_SLOT: u8 = 0xff;
 /// Bytes of a panel's header sector that the depth mesh takes.
@@ -353,8 +353,9 @@ fn drawable(s: &[GridScreen; 4]) -> bool {
     })
 }
 
-/// Longest screen edge of a cell worth drawing, in pixels (see [`drawable`]).
-const MAX_EDGE: i32 = 96;
+/// Longest screen edge of a cell worth drawing, in pixels (see [`drawable`]): three cells of a
+/// panel of five columns (one texel to a pixel), and as much longer as the texels are larger.
+const MAX_EDGE: i32 = 96 * 5 / COLS as i32;
 
 /// Draw the tiles of `panel` that are in VRAM.
 ///
@@ -600,9 +601,11 @@ mod tests {
     fn the_rays_cross_the_principal_point_at_the_middle_column_and_horizon_row() {
         let rays = PanelRays::new(305, 80);
         assert_eq!(rays.across[MESH_W / 2], 0);
-        assert_eq!(rays.down[3 * CELLS_Y], 0);
-        // 160 texels left of the middle at focal 305: tan of 27.7 degrees.
-        assert!((i32::from(rays.across[0]) + (160 << 12) / 305).abs() <= 1);
+        // The horizon falls within a cell of a mesh row.
+        let near = rays.down[(HORIZON_ROW / CELL_H) as usize];
+        assert!(i32::from(near).abs() <= (CELL_H << 12) / 305 + 1);
+        // The panel's half width left of the middle.
+        assert!((i32::from(rays.across[0]) + (CENTRE_COLUMN << 12) / 305).abs() <= 1);
         assert!(rays.across[0] < 0 && rays.across[MESH_W - 1] > 0);
         assert!(rays.down[0] < 0 && rays.down[MESH_H - 1] > 0);
     }
@@ -653,7 +656,7 @@ mod tests {
             setup(eye, (0, 0x1000));
             let depth = [depth_byte; MESH];
             let mut slots = [NO_TILE_SLOT; TILES];
-            let (col, row) = (2usize, 3usize);
+            let (col, row) = (COLS / 2, ROWS / 2);
             slots[col * ROWS + row] = 5;
             let panel = PanelRef::whole(eye, 0, &depth, &slots, &[0u8; CELLS]);
             let rays = PanelRays::new(305, 80);
@@ -684,12 +687,12 @@ mod tests {
         // the cells between are stretched from the near edge towards the horizon.
         let mut depth = [60u8; MESH];
         for j in 0..MESH_H {
-            for i in (2 * CELLS_X)..MESH_W {
+            for i in ((COLS / 2) * CELLS_X)..MESH_W {
                 depth[j * MESH_W + i] = 255;
             }
         }
         let mut slots = [NO_TILE_SLOT; TILES];
-        slots[2 * ROWS + 3] = 5;
+        slots[(COLS / 2) * ROWS + ROWS / 2] = 5;
         let panel = PanelRef::whole(eye, 0, &depth, &slots, &[0u8; CELLS]);
         let rays = PanelRays::new(305, 80);
         let mut scratch = PanelScratch::new();
@@ -722,7 +725,7 @@ mod tests {
             setup(eye, (0, 0x1000));
             let depth = [depth_byte; MESH];
             let mut slots = [NO_TILE_SLOT; TILES];
-            slots[2 * ROWS + 3] = 5;
+            slots[(COLS / 2) * ROWS + ROWS / 2] = 5;
             let panel = PanelRef::whole([1000, 200, 1000], 0, &depth, &slots, &[0u8; CELLS]);
             let rays = PanelRays::new(305, 80);
             let mut scratch = PanelScratch::new();
@@ -754,7 +757,7 @@ mod tests {
         assert_eq!(frame.packets, 0);
         // Too little storage: the draw says so and writes whole packets only.
         let mut slots = [NO_TILE_SLOT; TILES];
-        slots[2 * ROWS + 3] = 1;
+        slots[(COLS / 2) * ROWS + ROWS / 2] = 1;
         let panel = PanelRef {
             slots: &slots,
             ..panel

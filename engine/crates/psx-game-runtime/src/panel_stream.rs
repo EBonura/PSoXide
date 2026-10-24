@@ -45,22 +45,18 @@ const HEADER_SECTORS: u32 = 1;
 const OUTER_ROWS: u8 = !CENTRAL_ROWS & ((1 << ROWS) - 1);
 /// Ticks between two passes.
 const PASS_TICKS: u32 = 8;
-/// Experiment: keep the tiles a turn brings into view.
-const WIDE_PASS: bool = false;
+/// Rank added to a tile of a panel the camera is not looking at.
+const OFF_VIEW: i32 = 1 << 14;
 /// Measurement: count the tiles the screen shows that have no picture, and how long tiles
 /// wait (the counters are read from RAM; it costs code and time, so a shipping build has it off).
-const METER: bool = false;
+const METER: bool = true;
 /// Panels whose header and tile slots are kept.
-pub const CACHE: usize = 9;
+pub const CACHE: usize = 3 * HEADINGS;
 /// Rank of a tile of an eye the camera has left, past every tile of the eye it is at.
 const STALE: i32 = 1 << 20;
 /// Rank of a tile of the eye the camera is about to cross to, past every tile of the eye in
 /// use.
 const PREFETCH: i32 = 1 << 18;
-/// How far from the middle of the view a tile of the eye kept ready may be: `tan` of the
-/// yaw as Q12 (about 17 degrees) and texel rows.
-const PREFETCH_ACROSS: i32 = 1250;
-const PREFETCH_DOWN: i32 = 170;
 /// Rank of a held tile nothing wants now.
 const IDLE: i32 = 1 << 22;
 /// A held tile is only evicted for a tile that ranks better by more than this.
@@ -495,10 +491,18 @@ const COLS_CENTRE: i32 = COLS as i32 * TILE_TEXELS / 2;
 /// columns]`, the columns being one row mask each (`COLS` bytes in the last two words).
 type PanelEntry = [u32; 5];
 
+/// The row masks of a panel's columns, four to a word.
+fn pack_cols(cols: &[u8; COLS]) -> (u32, u32) {
+    let mut words = [0u32; 2];
+    for (i, &c) in cols.iter().enumerate() {
+        words[i / 4] |= u32::from(c) << (8 * (i % 4));
+    }
+    (words[0], words[1])
+}
+
 /// The stored tiles of a panel, one row mask a column.
 fn cols_of(entry: &PanelEntry) -> [u8; COLS] {
-    let b = entry[3].to_le_bytes();
-    [b[0], b[1], b[2], b[3], entry[4] as u8]
+    core::array::from_fn(|i| (entry[3 + i / 4] >> (8 * (i % 4))) as u8)
 }
 
 /// The sector of `tile` of a panel: among the central rows' tiles or the others', column by
@@ -742,13 +746,20 @@ impl<K: Copy> PanelStream<K> {
         let best = (0..input.eyes.len())
             .min_by_key(|&eye| distance(eye))
             .unwrap_or(0);
-        if !self.have_eye
-            || usize::from(self.eye) >= input.eyes.len()
-            || distance(best) + input.spacing / 4 < distance(usize::from(self.eye))
+        // The camera crosses to a nearer eye only once every picture of that eye is in VRAM, so
+        // that nothing is ever blank: until then the eye in use keeps serving it (the pictures
+        // drift a little further from the real view), unless it is out of reach altogether.
+        let current = usize::from(self.eye);
+        let lost = !self.have_eye || current >= input.eyes.len();
+        let nearer = !lost && distance(best) + input.spacing / 4 < distance(current);
+        if lost
+            || (nearer
+                && (self.eye_ready(best as u16, input) || distance(current) > 2 * input.spacing))
         {
             self.eye = best as u16;
             self.have_eye = true;
         }
+        let waiting = nearer && usize::from(self.eye) != best;
         self.counters.eye = u32::from(self.eye);
         // The eye the camera is about to cross to: the one nearest the place it walks to (a bit
         // under a spacing ahead along the way it has been going, or where it is when it stands
@@ -787,6 +798,46 @@ impl<K: Copy> PanelStream<K> {
             .min_by_key(|&eye| to_ahead(eye))
             .filter(|&eye| distance(eye) < here + input.spacing)
             .map(|eye| eye as u16);
+        if waiting {
+            self.next = Some(best as u16);
+        }
+    }
+
+    /// Whether every stored tile of every panel of `eye` is in VRAM.
+    fn eye_ready(&self, eye: u16, input: &PanelInput<'_>) -> bool {
+        let Some(list) = self
+            .lists
+            .iter()
+            .position(|l| l.eye == eye && l.state == Header::Ready)
+        else {
+            return false;
+        };
+        for heading in 0..HEADINGS {
+            let Some(entry) = self.entry_of(list, heading, input) else {
+                continue;
+            };
+            let Some(cached) = self
+                .cache
+                .iter()
+                .find(|c| c.eye == eye && c.heading == heading as u8)
+            else {
+                return false;
+            };
+            if cached.header != Header::Ready {
+                return false;
+            }
+            for tile in 0..TILES {
+                if !stored(&entry, tile) {
+                    continue;
+                }
+                let held = cached.held[tile];
+                if held == NO_SLOT_INDEX || self.slots[usize::from(held)].state != SlotState::Shown
+                {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     /// Cache index of the panel `(eye, heading)`, making one (and dropping the least
@@ -884,28 +935,9 @@ impl<K: Copy> PanelStream<K> {
         }
         let mut wanted = 0u32;
         let mut starved = 0u32;
-        self.want_tiles(input, eye, 0, false, false, &mut wanted, &mut starved);
-        if WIDE_PASS {
-            self.want_tiles(
-                input,
-                eye,
-                PREFETCH / 2,
-                true,
-                true,
-                &mut wanted,
-                &mut starved,
-            );
-        }
+        self.want_tiles(input, eye, 0, false, &mut wanted, &mut starved);
         if let Some(next) = self.next {
-            self.want_tiles(
-                input,
-                next,
-                PREFETCH,
-                true,
-                false,
-                &mut wanted,
-                &mut starved,
-            );
+            self.want_tiles(input, next, PREFETCH, true, &mut wanted, &mut starved);
         }
         self.rebuild_show(input, eye);
         let (mut held, mut missing) = (0u32, 0u32);
@@ -1023,8 +1055,8 @@ impl<K: Copy> PanelStream<K> {
             block + l.first[heading],
             block + l.central[heading],
             block + l.outer[heading],
-            u32::from_le_bytes([c[0], c[1], c[2], c[3]]),
-            u32::from(c[4]),
+            pack_cols(&c).0,
+            pack_cols(&c).1,
         ])
     }
 
@@ -1036,7 +1068,6 @@ impl<K: Copy> PanelStream<K> {
         eye: u16,
         base: i32,
         prefetch: bool,
-        wide: bool,
         wanted: &mut u32,
         starved: &mut u32,
     ) {
@@ -1052,16 +1083,9 @@ impl<K: Copy> PanelStream<K> {
             let Some(entry) = self.entry_of(list, heading, input) else {
                 continue;
             };
-            // The wide pass keeps the tiles a turn of the camera brings into view ready, at the
-            // rank of the next eye's.
-            let seen = if wide {
-                visible_in(heading, &input.view(), 32, PICTURE_ROWS)
-            } else {
-                visible(heading, input)
-            };
-            let Some(view) = seen else {
-                continue;
-            };
+            // Every panel of the eye is kept, whichever way the camera looks: it may turn at any
+            // moment, and a turn must not wait for the disc. The view only orders the reads.
+            let seen = visible(heading, input);
             let Some(ci) = self.cache_index(eye, heading as u8) else {
                 continue;
             };
@@ -1072,32 +1096,29 @@ impl<K: Copy> PanelStream<K> {
                 self.cache[usize::from(ci)].since = self.ticks.max(1);
                 self.cache[usize::from(ci)].sector = entry[0];
             }
-            for col in view.first_col..=view.last_col {
-                for row in view.first_row..=view.last_row {
+            for col in 0..COLS {
+                for row in 0..ROWS {
                     let tile = col * ROWS + row;
                     if !stored(&entry, tile) {
                         continue;
                     }
                     *wanted += u32::from(!prefetch);
-                    if wide {
-                        let held = self.cache[usize::from(ci)].held[tile];
-                        if held != NO_SLOT_INDEX && self.slots[usize::from(held)].wanted {
-                            continue;
-                        }
-                    }
-                    // How far the tile's middle is from the middle of the view.
-                    let middle = ((col as i32 * TILE_TEXELS + TILE_TEXELS / 2 - COLS_CENTRE) << 12)
-                        / input.panel_focal.max(1);
-                    let across = (middle - view.tan_yaw).abs();
-                    let down =
-                        (row as i32 * PICTURE_ROWS + PICTURE_ROWS / 2 - view.middle_row).abs();
-                    // Of the eye the camera is about to cross to only the middle of the view is
-                    // kept ready: a read costs the CPU a sector's interrupt, and the rest comes
-                    // within a moment of the crossing.
-                    if prefetch && !wide && (across > PREFETCH_ACROSS || down > PREFETCH_DOWN) {
-                        continue;
-                    }
-                    let rank = base + across + 4 * down;
+                    // The tiles the camera sees first, the others after them.
+                    let rank = base
+                        + match seen {
+                            Some(view) => {
+                                let middle = ((col as i32 * TILE_TEXELS + TILE_TEXELS / 2
+                                    - COLS_CENTRE)
+                                    << 12)
+                                    / input.panel_focal.max(1);
+                                let across = (middle - view.tan_yaw).abs();
+                                let down = (row as i32 * PICTURE_ROWS + PICTURE_ROWS / 2
+                                    - view.middle_row)
+                                    .abs();
+                                across + 4 * down
+                            }
+                            None => OFF_VIEW,
+                        };
                     let cached = &mut self.cache[usize::from(ci)];
                     cached.rank = cached.rank.min(rank);
                     let held = cached.held[tile];
