@@ -94,6 +94,7 @@ dependencies = [
  "psx-hw",
  "psx-io",
  "psx-pack",
+ "psx-rt",
 ]
 
 [[package]]
@@ -264,9 +265,10 @@ dependencies = [
 
 [[package]]
 name = "psx-sfx"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "psx-asset",
+ "psx-math",
  "psx-spu",
 ]
 
