@@ -720,6 +720,50 @@ fn bake_panels(
             }),
     );
     let kib: usize = blocks.iter().map(Vec::len).sum::<usize>() / 1024;
+    if std::env::var_os("PANEL_TILE_STATS").is_some() {
+        use psx_grid::render::{CELLS_X, CELLS_Y, CELL_EMPTY, COLS, HEADER_ROOMS_AT, ROWS, SLOT_BYTES};
+        let mut cells_hist = [0usize; 7];
+        let (mut tiles, mut texels_live, mut bbox_area, mut cell_live_area) = (0usize, 0usize, 0usize, 0usize);
+        for panel in baked.iter().flat_map(|set| set.iter().flatten()) {
+            let mut at = 1;
+            for col in 0..COLS {
+                for row in 0..ROWS {
+                    if panel.cols[col] >> row & 1 == 0 {
+                        continue;
+                    }
+                    let tile = col * ROWS + row;
+                    let sector = &panel.sectors[at * SLOT_BYTES..(at + 1) * SLOT_BYTES];
+                    at += 1;
+                    let rooms = &panel.sectors[HEADER_ROOMS_AT + tile * CELLS_X * CELLS_Y..][..CELLS_X * CELLS_Y];
+                    let live_cells = rooms.iter().filter(|&&r| r != CELL_EMPTY).count();
+                    cells_hist[live_cells] += 1;
+                    cell_live_area += live_cells;
+                    let (mut x0, mut x1, mut y0, mut y1) = (64usize, 0usize, 63usize, 0usize);
+                    let mut live = 0;
+                    for y in 0..63 {
+                        for x in 0..64 {
+                            let b = sector[y * 32 + x / 2];
+                            let n = if x % 2 == 0 { b & 15 } else { b >> 4 };
+                            if n != 0 {
+                                live += 1;
+                                x0 = x0.min(x); x1 = x1.max(x + 1); y0 = y0.min(y); y1 = y1.max(y + 1);
+                            }
+                        }
+                    }
+                    tiles += 1;
+                    texels_live += live;
+                    if live > 0 { bbox_area += (x1 - x0) * (y1 - y0); }
+                }
+            }
+        }
+        report.warn(format!(
+            "panel tiles: {tiles} stored, live texels {:.1} % of the slots, bounding boxes of the live texels {:.1} %, non-empty cells {:.1} % ({:?} tiles with 0..6 non-empty cells)",
+            100.0 * texels_live as f64 / (tiles * 4032) as f64,
+            100.0 * bbox_area as f64 / (tiles * 4032) as f64,
+            100.0 * cell_live_area as f64 / (tiles * 6) as f64,
+            cells_hist
+        ));
+    }
     report.warn(format!(
         "panels: {} eyes {} sectors apart, {} panels, {} KiB of pictures, drawn whole radius {} sectors (cut to {:.1} for the eyes' reach), baked in {:.1} s",
         eyes.len(),
