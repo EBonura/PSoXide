@@ -1776,9 +1776,11 @@ impl<K: Copy> PanelStream<K> {
             return None;
         }
         let at = eyes.get(usize::from(c.eye))?;
-        // The tiles the screen shows, with a few percent to spare: the others are not worth
-        // projecting.
-        let v = visible_in(usize::from(c.heading), &self.view, 17, PICTURE_ROWS / 8)?;
+        // The tiles the screen shows, with a quarter of the field of view to spare (the view is
+        // the last frame's, and a quick turn moves the screen's edge well past a few percent:
+        // at 6 % a column of the next panel came a few frames late, a hole the colour of the
+        // sky): the others are not worth projecting.
+        let v = visible_in(usize::from(c.heading), &self.view, 20, PICTURE_ROWS / 8)?;
         Some(PanelRef {
             eye: [i32::from(at[0]), i32::from(at[1]), i32::from(at[2])],
             heading: c.heading,
