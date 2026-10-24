@@ -18,15 +18,14 @@
 //! ## Cost
 //!
 //! * No heap, no `dyn`, no float, no 64-bit arithmetic.
-//! * RAM: `16 * N + 4` bytes. An all-zero map is empty ([`VramMap::new`]), so a
-//!   game keeps it in `.bss`.
+//! * RAM: `16 * N + 4` bytes. An all-zero map is empty ([`VramMap::new`]), so a game keeps it in
+//!   `.bss`.
 //! * One slot per [`Owner`]; the owner id is the table index, so the hot calls
-//!   ([`VramMap::permit`], [`VramMap::ensure`]) never scan. Only claims and
-//!   borrows scan the table (`N` compares), and those happen at scene or level
-//!   boundaries, never per frame.
+//!   ([`VramMap::permit`], [`VramMap::ensure`]) never scan. Only claims and borrows scan the table
+//!   (`N` compares), and those happen at scene or level boundaries, never per frame.
 //! * Debug builds assert on every violation; release builds only count them
-//!   ([`VramMap::violations`]) and still let the upload through, so a counter
-//!   can never change shipped behaviour.
+//!   ([`VramMap::violations`]) and still let the upload through, so a counter can never change
+//!   shipped behaviour.
 //!
 //! ## One loader, any loading model
 //!
@@ -121,11 +120,16 @@ pub const NO_KEY: u16 = u16::MAX;
 
 const LIVE: u8 = 1;
 const DISPLACED: u8 = 2;
-const PENDING: u8 = 4;
 
+/// One owner's region. The rectangle is kept as its corners so the overlap and containment tests
+/// (the hot ones) need no sums.
 #[derive(Copy, Clone)]
+#[repr(C)]
 struct Slot<const N: usize> {
-    rect: VramRect,
+    x0: u16,
+    y0: u16,
+    x1: u16,
+    y1: u16,
     restore: Option<RestoreFn<N>>,
     key: u16,
     flags: u8,
@@ -134,12 +138,10 @@ struct Slot<const N: usize> {
 
 impl<const N: usize> Slot<N> {
     const EMPTY: Self = Self {
-        rect: VramRect {
-            x: 0,
-            y: 0,
-            w: 0,
-            h: 0,
-        },
+        x0: 0,
+        y0: 0,
+        x1: 0,
+        y1: 0,
         restore: None,
         key: 0,
         flags: 0,
@@ -153,24 +155,51 @@ impl<const N: usize> Slot<N> {
     const fn displaced(&self) -> bool {
         self.flags & DISPLACED != 0
     }
+
+    const fn rect(&self) -> VramRect {
+        VramRect {
+            x: self.x0,
+            y: self.y0,
+            w: self.x1 - self.x0,
+            h: self.y1 - self.y0,
+        }
+    }
+
+    /// Whether this region shares a pixel with the corners `[x0, x1) x [y0, y1)`.
+    #[inline(always)]
+    const fn overlaps(&self, c: &Corners) -> bool {
+        self.x0 < c.x1 && c.x0 < self.x1 && self.y0 < c.y1 && c.y0 < self.y1
+    }
 }
 
-const fn overlaps(a: VramRect, b: VramRect) -> bool {
-    a.overlaps(b)
+/// A rectangle as its corners.
+#[derive(Copy, Clone)]
+struct Corners {
+    x0: u16,
+    y0: u16,
+    x1: u16,
+    y1: u16,
 }
 
-const fn contains(outer: VramRect, inner: VramRect) -> bool {
-    inner.x >= outer.x
-        && inner.y >= outer.y
-        && inner.x as u32 + inner.w as u32 <= outer.x as u32 + outer.w as u32
-        && inner.y as u32 + inner.h as u32 <= outer.y as u32 + outer.h as u32
+impl Corners {
+    const fn of(rect: VramRect) -> Self {
+        Self {
+            x0: rect.x,
+            y0: rect.y,
+            x1: rect.x + rect.w,
+            y1: rect.y + rect.h,
+        }
+    }
 }
 
 /// The ownership ledger. `N` is the number of distinct owners (at most 256).
 ///
 /// `Copy` on purpose: `let checkpoint = map;` / `map = checkpoint;` is the
-/// checkpoint and restore of a pre-load pool.
+/// checkpoint and restore of a pre-load pool. `repr(C)`: `N` slots of 16 bytes, then the
+/// violation count (`u16`) and the last violator (`u8`), so a debugger or a test gate can
+/// read a map in RAM by offset.
 #[derive(Copy, Clone)]
+#[repr(C)]
 pub struct VramMap<const N: usize> {
     slots: [Slot<N>; N],
     violations: u16,
@@ -193,6 +222,9 @@ impl<const N: usize> VramMap<N> {
         }
     }
 
+    #[cold]
+    #[inline(never)]
+    #[optimize(size)]
     fn note_violation(&mut self, owner: Owner) {
         self.violations = self.violations.saturating_add(1);
         self.last_violation = owner.0;
@@ -213,7 +245,7 @@ impl<const N: usize> VramMap<N> {
     /// The owner's live region, if any.
     pub fn rect_of(&self, owner: Owner) -> Option<VramRect> {
         let slot = self.slots.get(owner.index())?;
-        slot.live().then_some(slot.rect)
+        slot.live().then(|| slot.rect())
     }
 
     /// Whether the owner has a live region.
@@ -232,10 +264,10 @@ impl<const N: usize> VramMap<N> {
     /// The live, undisplaced owner of the pixel `(x, y)`: a debugging aid for
     /// "who wrote this".
     pub fn owner_at(&self, x: u16, y: u16) -> Option<Owner> {
-        let probe = VramRect { x, y, w: 1, h: 1 };
+        let probe = Corners::of(VramRect { x, y, w: 1, h: 1 });
         (0..N)
             .rev()
-            .find(|&i| self.slots[i].live() && overlaps(self.slots[i].rect, probe))
+            .find(|&i| self.slots[i].live() && self.slots[i].overlaps(&probe))
             .map(|i| Owner(i as u8))
     }
 
@@ -249,6 +281,7 @@ impl<const N: usize> VramMap<N> {
     }
 
     #[inline(never)]
+    #[optimize(size)]
     fn claim_inner(
         &mut self,
         owner: Owner,
@@ -262,21 +295,28 @@ impl<const N: usize> VramMap<N> {
             debug_assert!(false, "vram owner {index} out of range");
             return Err(ClaimError::OwnerOutOfRange);
         }
-        let mut i = 0;
-        while i < N {
-            let other = &self.slots[i];
-            if i != index && other.live() && overlaps(other.rect, rect) {
+        let mut clash = None;
+        let c = Corners::of(rect);
+        let slots = core::hint::black_box(&mut self.slots[..]);
+        for (i, other) in slots.iter_mut().enumerate() {
+            if i != index && other.flags & LIVE != 0 && other.overlaps(&c) {
                 if !borrowing {
-                    self.note_violation(owner);
-                    debug_assert!(false, "vram owner {index} overlaps owner {i}");
-                    return Err(ClaimError::Overlap(Owner(i as u8)));
+                    clash = Some(i);
+                    break;
                 }
-                self.slots[i].flags |= DISPLACED;
+                other.flags |= DISPLACED;
             }
-            i += 1;
+        }
+        if let Some(i) = clash {
+            self.note_violation(owner);
+            debug_assert!(false, "vram owner {index} overlaps owner {i}");
+            return Err(ClaimError::Overlap(Owner(i as u8)));
         }
         let slot = &mut self.slots[index];
-        slot.rect = rect;
+        slot.x0 = c.x0;
+        slot.y0 = c.y0;
+        slot.x1 = c.x1;
+        slot.y1 = c.y1;
         slot.policy = policy;
         slot.key = NO_KEY;
         slot.flags = LIVE;
@@ -308,48 +348,63 @@ impl<const N: usize> VramMap<N> {
         self.claim_inner(owner, rect, policy, true)
     }
 
-    /// End a loan: release the borrower, then restore every displaced region
-    /// that no live region overlaps any more, in owner-number order, by running
-    /// its restore callback (or resetting its key when it has none).
+    /// End a loan: release the borrower, then run the restore callback of every
+    /// displaced region that no live region overlaps any more, in owner-number
+    /// order (or reset its key when it has none, so the next
+    /// [`ensure`](Self::ensure) misses). A callback may write its own region
+    /// (it is permitted again); regions the same loan displaced that come later
+    /// in owner order are still marked displaced when it runs.
+    #[optimize(size)]
     pub fn end_borrow(&mut self, owner: Owner) {
         self.release(owner);
         self.restore_uncovered();
     }
 
+    #[inline(never)]
+    #[optimize(size)]
     fn restore_uncovered(&mut self) {
-        // Pass one clears every flag, so a callback may write any region the
-        // loan displaced (its upload is permitted); pass two runs them in order.
-        let mut i = 0;
-        while i < N {
-            if self.slots[i].live() && self.slots[i].displaced() && !self.is_covered(i) {
-                self.slots[i].flags = LIVE | PENDING;
+        let mut from = 0;
+        while let Some(i) = self.take_uncovered(from) {
+            match self.slots[i].restore {
+                Some(restore) => restore(self, Owner(i as u8)),
+                None => self.slots[i].key = NO_KEY,
             }
-            i += 1;
-        }
-        let mut i = 0;
-        while i < N {
-            let slot = self.slots[i];
-            if slot.flags & PENDING != 0 {
-                self.slots[i].flags = LIVE;
-                match slot.restore {
-                    Some(restore) => restore(self, Owner(i as u8)),
-                    None => self.slots[i].key = NO_KEY,
-                }
-            }
-            i += 1;
+            from = i + 1;
         }
     }
 
-    /// Whether any other live region overlaps slot `i`.
-    fn is_covered(&self, i: usize) -> bool {
-        let rect = self.slots[i].rect;
-        (0..N).any(|j| j != i && self.slots[j].live() && overlaps(self.slots[j].rect, rect))
+    /// [`end_borrow`](Self::end_borrow) without callbacks, for games that
+    /// re-upload from one place: returns the owners (bit n = owner n, the first
+    /// 32) whose regions the loan displaced and nothing covers any more. They are
+    /// usable again; their pixels are the caller's to put back.
+    #[optimize(size)]
+    pub fn end_borrow_mask(&mut self, owner: Owner) -> u32 {
+        self.release(owner);
+        let mut mask = 0;
+        let mut from = 0;
+        while let Some(i) = self.take_uncovered(from) {
+            self.slots[i].key = NO_KEY;
+            if i < 32 {
+                mask |= 1 << i;
+            }
+            from = i + 1;
+        }
+        mask
+    }
+
+    /// The first displaced region at or after `from` that no other live region
+    /// overlaps: marks it no longer displaced and returns its index.
+    #[inline(never)]
+    #[optimize(size)]
+    fn take_uncovered(&mut self, from: usize) -> Option<usize> {
+        take_uncovered(&mut self.slots, from)
     }
 
     /// Make `rect` the owner's region holding `key`. [`Ensure::Hit`] when it
     /// already does (same rectangle, live, not displaced, same key, or a
     /// [`Policy::Pool`] container), so the caller skips the upload;
     /// [`Ensure::Miss`] after (re)claiming it.
+    #[optimize(size)]
     pub fn ensure(
         &mut self,
         owner: Owner,
@@ -361,7 +416,7 @@ impl<const N: usize> VramMap<N> {
         if let Some(slot) = self.slots.get(owner.index()) {
             let same = slot.live()
                 && !slot.displaced()
-                && slot.rect == rect
+                && slot.rect() == rect
                 && slot.policy == policy
                 && (slot.key == key || policy == Policy::Pool);
             if same {
@@ -376,6 +431,7 @@ impl<const N: usize> VramMap<N> {
 
     /// Drop the owner's region. Whatever it displaced is not restored (that is
     /// [`end_borrow`](Self::end_borrow)).
+    #[optimize(size)]
     pub fn release(&mut self, owner: Owner) {
         if let Some(slot) = self.slots.get_mut(owner.index()) {
             slot.flags = 0;
@@ -383,12 +439,9 @@ impl<const N: usize> VramMap<N> {
     }
 
     /// Drop every [`Policy::Level`] region (a level or scene change).
+    #[optimize(size)]
     pub fn reset_scene(&mut self) {
-        for slot in &mut self.slots {
-            if slot.policy == Policy::Level {
-                slot.flags = 0;
-            }
-        }
+        drop_level(&mut self.slots);
         self.restore_uncovered();
     }
 
@@ -405,11 +458,16 @@ impl<const N: usize> VramMap<N> {
     /// live, undisplaced region. A `false` is a violation: counted in release,
     /// asserted in debug. Callers may still proceed (see the module docs).
     #[inline(never)]
+    #[optimize(size)]
     pub fn permit(&mut self, owner: Owner, rect: VramRect) -> bool {
-        let ok = self
-            .slots
-            .get(owner.index())
-            .is_some_and(|slot| slot.live() && !slot.displaced() && contains(slot.rect, rect));
+        let ok = self.slots.get(owner.index()).is_some_and(|slot| {
+            let c = Corners::of(rect);
+            slot.flags & (LIVE | DISPLACED) == LIVE
+                && slot.x0 <= c.x0
+                && slot.y0 <= c.y0
+                && c.x1 <= slot.x1
+                && c.y1 <= slot.y1
+        });
         if !ok {
             self.note_violation(owner);
             debug_assert!(false, "vram owner {} wrote outside its region", owner.0);
@@ -427,6 +485,50 @@ impl<const N: usize> VramMap<N> {
     pub fn upload_bytes_aligned(&mut self, owner: Owner, rect: VramRect, bytes: &[u8]) {
         self.permit(owner, rect);
         crate::upload_bytes_aligned(rect, bytes);
+    }
+}
+
+// The scans take the table as a slice, out of line, and read it through `black_box`, so each
+// compiles once and runs as a loop; written against the `[Slot; N]` array, or with the constant
+// length propagated into them, they unroll N times (about 2 KB of code at N = 24 on the PS1).
+
+/// The first displaced region at or after `from` that no other live region overlaps; clears its
+/// displaced flag.
+#[inline(never)]
+#[optimize(size)]
+fn take_uncovered<const N: usize>(slots: &mut [Slot<N>], from: usize) -> Option<usize> {
+    let slots = core::hint::black_box(slots);
+    for i in from..slots.len() {
+        if slots[i].flags & (LIVE | DISPLACED) != LIVE | DISPLACED {
+            continue;
+        }
+        let c = Corners {
+            x0: slots[i].x0,
+            y0: slots[i].y0,
+            x1: slots[i].x1,
+            y1: slots[i].y1,
+        };
+        let covered = slots
+            .iter()
+            .enumerate()
+            .any(|(j, other)| j != i && other.flags & LIVE != 0 && other.overlaps(&c));
+        if !covered {
+            slots[i].flags = LIVE;
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Drop every [`Policy::Level`] region.
+#[inline(never)]
+#[optimize(size)]
+fn drop_level<const N: usize>(slots: &mut [Slot<N>]) {
+    let slots = core::hint::black_box(slots);
+    for slot in slots.iter_mut() {
+        if slot.policy == Policy::Level {
+            slot.flags = 0;
+        }
     }
 }
 
@@ -491,10 +593,9 @@ mod tests {
         use core::sync::atomic::{AtomicU32, Ordering};
         static ORDER: AtomicU32 = AtomicU32::new(0);
         fn restore(map: &mut VramMap<4>, owner: Owner) {
-            // The callback uploads through the map, and every region the loan
-            // displaced is permitted again by the time the first one runs.
+            // The callback uploads through the map: its own region is permitted
+            // again by the time it runs.
             assert!(map.permit(owner, map.rect_of(owner).unwrap()));
-            assert!(map.permit(B, map.rect_of(B).unwrap()));
             ORDER.store(
                 ORDER.load(Ordering::Relaxed) * 10 + owner.index() as u32 + 1,
                 Ordering::Relaxed,
@@ -580,5 +681,18 @@ mod tests {
         map.claim(B, r(8, 0, 8, 8), Policy::Persist).unwrap();
         map = checkpoint;
         assert!(map.is_live(A) && !map.is_live(B));
+    }
+
+    #[test]
+    fn end_borrow_mask_names_the_regions_to_put_back() {
+        let mut map = VramMap::<8>::new();
+        map.claim(A, r(0, 0, 64, 64), Policy::Pool).unwrap();
+        map.claim(B, r(64, 0, 64, 64), Policy::Pool).unwrap();
+        map.claim(Owner::new(5), r(0, 64, 64, 64), Policy::Pool)
+            .unwrap();
+        map.borrow(C, r(32, 0, 64, 32), Policy::Persist).unwrap();
+        assert_eq!(map.end_borrow_mask(C), 0b11);
+        assert!(!map.is_displaced(A) && !map.is_displaced(B));
+        assert_eq!(map.end_borrow_mask(C), 0, "a second end changes nothing");
     }
 }
