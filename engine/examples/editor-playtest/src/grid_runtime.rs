@@ -74,6 +74,9 @@ const ROOM_ENTRIES: usize = {
     }) + 2
 };
 
+/// Slots the resident table is made with beyond the cook's busiest set.
+const RESIDENT_SPARE_SLOTS: usize = 2;
+
 /// Sectors, at the end of the drawn radius, over which the card of a room
 /// drawn whole fades in behind it.
 const CARD_OVERLAP_SECTORS: i32 = 1;
@@ -254,7 +257,13 @@ impl GridRuntime {
         }
         let mut resident = ResidentRooms::new(level).ok_or(GridRuntimeInitError::Collision)?;
         if let Some(flood) = level.flood.filter(|flood| flood.peak_rooms > 0) {
-            resident.reserve_rooms(usize::from(flood.peak_rooms));
+            // The cook's busiest set carries its own slack, and a walk still kept one room more
+            // (15 slots for 14 on the longest tape): two spare keep the table from doubling,
+            // which on this level takes 6.4 KB of a heap that never gives a block of that size
+            // back. The streamer tracks `ROOM_ENTRIES` rooms at most, so no more is needed.
+            resident.reserve_rooms(
+                (usize::from(flood.peak_rooms) + RESIDENT_SPARE_SLOTS).min(ROOM_ENTRIES),
+            );
         }
         // Scratch comes from the core's maxima, so it is right whichever
         // rooms are resident.
