@@ -621,6 +621,17 @@ pub static mut PANEL_COUNTERS: psx_game_runtime::panel_stream::PanelCounters =
         last_first: 0,
         last_sectors: 0,
         sectors: 0,
+        visible: 0,
+        visible_missing: 0,
+        passes_missing: 0,
+        why_nocache: 0,
+        why_noslot: 0,
+        why_pending: 0,
+        why_unwanted: 0,
+        shown: 0,
+        wait_queue: 0,
+        wait_load: 0,
+        wait_read: 0,
     };
 
 /// The view rotation the last frame was drawn with (the world's axes composed with the

@@ -30,8 +30,8 @@
 
 use psx_grid::flood::octagonal_distance;
 use psx_grid::render::{
-    PanelRef, CELLS, CELL_EMPTY, HEADER_ROOMS_AT, COLS, HEADINGS, HORIZON_ROW, MESH, NO_TILE_SLOT, PICTURE_ROWS, ROWS, SLOTS, TILES,
-    TILE_TEXELS, VIEW_COS_Q12, VIEW_SIN_Q12,
+    PanelRef, CELLS, CELL_EMPTY, COLS, HEADER_ROOMS_AT, HEADINGS, HORIZON_ROW, MESH, NO_TILE_SLOT,
+    PICTURE_ROWS, ROWS, SLOTS, TILES, TILE_TEXELS, VIEW_COS_Q12, VIEW_SIN_Q12,
 };
 
 use crate::card_stream::{Upload, RUN_CELLS, STAGES};
@@ -41,6 +41,8 @@ use crate::grid_stream::{Poll, RoomTransport};
 const HEADER_SECTORS: u32 = 1;
 /// Ticks between two passes.
 const PASS_TICKS: u32 = 8;
+/// Experiment: keep the tiles a turn brings into view.
+const WIDE_PASS: bool = false;
 /// Panels whose header and tile slots are kept.
 pub const CACHE: usize = 9;
 /// Rank of a tile of an eye the camera has left, past every tile of the eye it is at.
@@ -100,6 +102,24 @@ pub struct PanelCounters {
     pub last_sectors: u32,
     /// Sectors read in all.
     pub sectors: u32,
+    /// Over every pass: the tiles the screen shows that the eye in use stores, and the ones of
+    /// those with no picture to draw (not even a stale one standing in), and the passes with any.
+    pub visible: u32,
+    pub visible_missing: u32,
+    pub passes_missing: u32,
+    /// Of the missing visible tiles: no cache entry; no slot assigned; slot waiting or in
+    /// flight; held and shown but not wanted by the last pass.
+    pub why_nocache: u32,
+    pub why_noslot: u32,
+    pub why_pending: u32,
+    pub why_unwanted: u32,
+    /// Tiles shown after a wait, the ticks they waited from the pass that wanted them to the
+    /// read being queued, and from there to the upload being in a frame's list.
+    pub shown: u32,
+    pub wait_queue: u32,
+    pub wait_load: u32,
+    /// Of the queued-to-frame wait, the part until the read landed.
+    pub wait_read: u32,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -497,6 +517,17 @@ impl<K: Copy> PanelStream<K> {
                 last_first: 0,
                 last_sectors: 0,
                 sectors: 0,
+                visible: 0,
+                visible_missing: 0,
+                passes_missing: 0,
+                why_nocache: 0,
+                why_noslot: 0,
+                why_pending: 0,
+                why_unwanted: 0,
+                shown: 0,
+                wait_queue: 0,
+                wait_load: 0,
+                wait_read: 0,
             },
             slots: [Slot::FREE; SLOTS],
             cache: [Cached::EMPTY; CACHE],
@@ -572,6 +603,12 @@ impl<K: Copy> PanelStream<K> {
                                 list.parse(bytes);
                             }
                             continue;
+                        }
+                        if e.kind == Kind::Tile {
+                            let slot = &self.slots[usize::from(e.slot)];
+                            if slot.state == SlotState::Pending && slot.since != 0 {
+                                self.counters.wait_read += self.ticks.wrapping_sub(slot.since);
+                            }
                         }
                         if e.kind != Kind::Header {
                             continue;
@@ -785,9 +822,28 @@ impl<K: Copy> PanelStream<K> {
         }
         let mut wanted = 0u32;
         let mut starved = 0u32;
-        self.want_tiles(input, eye, 0, false, &mut wanted, &mut starved);
+        self.want_tiles(input, eye, 0, false, false, &mut wanted, &mut starved);
+        if WIDE_PASS {
+            self.want_tiles(
+                input,
+                eye,
+                PREFETCH / 2,
+                true,
+                true,
+                &mut wanted,
+                &mut starved,
+            );
+        }
         if let Some(next) = self.next {
-            self.want_tiles(input, next, PREFETCH, true, &mut wanted, &mut starved);
+            self.want_tiles(
+                input,
+                next,
+                PREFETCH,
+                true,
+                false,
+                &mut wanted,
+                &mut starved,
+            );
         }
         self.rebuild_show(input, eye);
         let (mut held, mut missing) = (0u32, 0u32);
@@ -803,6 +859,67 @@ impl<K: Copy> PanelStream<K> {
         self.counters.wanted = wanted;
         self.counters.missing = missing;
         self.counters.starved = starved;
+        self.count_visible(input, eye);
+    }
+
+    /// Tally the tiles the screen shows against the ones that have a picture.
+    fn count_visible(&mut self, input: &PanelInput<'_>, eye: u16) {
+        let Some(list) = self
+            .lists
+            .iter()
+            .position(|l| l.eye == eye && l.state == Header::Ready)
+        else {
+            return;
+        };
+        let (mut seen, mut absent) = (0u32, 0u32);
+        for heading in 0..HEADINGS {
+            let Some(entry) = self.entry_of(list, heading, input) else {
+                continue;
+            };
+            let Some(v) = visible_in(heading, &self.view, 16, 0) else {
+                continue;
+            };
+            let Some(ci) = self
+                .cache
+                .iter()
+                .position(|c| c.eye == eye && c.heading == heading as u8)
+            else {
+                // Stored tiles of a panel nothing has asked for yet.
+                for col in v.first_col..=v.last_col {
+                    for row in v.first_row..=v.last_row {
+                        let tile = col * ROWS + row;
+                        if stored(&entry, tile) {
+                            seen += 1;
+                            absent += 1;
+                            self.counters.why_nocache += 1;
+                        }
+                    }
+                }
+                continue;
+            };
+            for col in v.first_col..=v.last_col {
+                for row in v.first_row..=v.last_row {
+                    let tile = col * ROWS + row;
+                    if stored(&entry, tile) {
+                        seen += 1;
+                        if self.cache[ci].show[tile] == NO_TILE_SLOT {
+                            absent += 1;
+                            let held = self.cache[ci].held[tile];
+                            if held == NO_SLOT_INDEX {
+                                self.counters.why_noslot += 1;
+                            } else if self.slots[usize::from(held)].state == SlotState::Shown {
+                                self.counters.why_unwanted += 1;
+                            } else {
+                                self.counters.why_pending += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.counters.visible = self.counters.visible.wrapping_add(seen);
+        self.counters.visible_missing = self.counters.visible_missing.wrapping_add(absent);
+        self.counters.passes_missing += u32::from(absent > 0);
     }
 
     /// Index of the list of `eye`'s stored tiles, asking for it (and giving up the one used
@@ -864,6 +981,7 @@ impl<K: Copy> PanelStream<K> {
         eye: u16,
         base: i32,
         prefetch: bool,
+        wide: bool,
         wanted: &mut u32,
         starved: &mut u32,
     ) {
@@ -879,7 +997,14 @@ impl<K: Copy> PanelStream<K> {
             let Some(entry) = self.entry_of(list, heading, input) else {
                 continue;
             };
-            let Some(view) = visible(heading, input) else {
+            // The wide pass keeps the tiles a turn of the camera brings into view ready, at the
+            // rank of the next eye's.
+            let seen = if wide {
+                visible_in(heading, &input.view(), 32, PICTURE_ROWS)
+            } else {
+                visible(heading, input)
+            };
+            let Some(view) = seen else {
                 continue;
             };
             let Some(ci) = self.cache_index(eye, heading as u8) else {
@@ -899,6 +1024,12 @@ impl<K: Copy> PanelStream<K> {
                         continue;
                     }
                     *wanted += u32::from(!prefetch);
+                    if wide {
+                        let held = self.cache[usize::from(ci)].held[tile];
+                        if held != NO_SLOT_INDEX && self.slots[usize::from(held)].wanted {
+                            continue;
+                        }
+                    }
                     // How far the tile's middle is from the middle of the view.
                     let middle = ((col as i32 * TILE_TEXELS + TILE_TEXELS / 2 - COLS_CENTRE) << 12)
                         / input.panel_focal.max(1);
@@ -908,7 +1039,7 @@ impl<K: Copy> PanelStream<K> {
                     // Of the eye the camera is about to cross to only the middle of the view is
                     // kept ready: a read costs the CPU a sector's interrupt, and the rest comes
                     // within a moment of the crossing.
-                    if prefetch && (across > PREFETCH_ACROSS || down > PREFETCH_DOWN) {
+                    if prefetch && !wide && (across > PREFETCH_ACROSS || down > PREFETCH_DOWN) {
                         continue;
                     }
                     let rank = base + across + 4 * down;
@@ -1200,7 +1331,10 @@ impl<K: Copy> PanelStream<K> {
                                 self.cache[usize::from(entry.cache)].header = Header::Pending;
                             }
                             Kind::Tile => {
-                                self.slots[usize::from(entry.slot)].state = SlotState::Pending;
+                                let slot = &mut self.slots[usize::from(entry.slot)];
+                                slot.state = SlotState::Pending;
+                                self.counters.wait_queue += self.ticks.wrapping_sub(slot.since);
+                                slot.since = self.ticks.max(1);
                             }
                         }
                     }
@@ -1271,6 +1405,8 @@ impl<K: Copy> PanelStream<K> {
             let slot = &mut self.slots[usize::from(upload.slot)];
             if slot.state == SlotState::Pending {
                 slot.state = SlotState::Shown;
+                self.counters.shown += 1;
+                self.counters.wait_load += self.ticks.wrapping_sub(slot.since);
                 slot.since = 0;
             }
             let (index, cell) = (
@@ -1323,7 +1459,8 @@ impl<K: Copy> PanelStream<K> {
                 if count < out.len() {
                     // The tiles the screen shows, with a few percent to spare: the others
                     // are not worth projecting.
-                    let Some(v) = visible_in(usize::from(c.heading), &self.view, 17, PICTURE_ROWS / 8)
+                    let Some(v) =
+                        visible_in(usize::from(c.heading), &self.view, 17, PICTURE_ROWS / 8)
                     else {
                         continue;
                     };
