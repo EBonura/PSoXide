@@ -324,13 +324,31 @@ fn drawable(s: &[GridScreen; 4]) -> bool {
         top = top.min(y);
         bottom = bottom.max(y);
     }
-    left > -1000
+    if !(left > -1000
         && right < 1000
         && top > -1000
         && bottom < 1000
         && right - left <= 1023
-        && bottom - top <= 511
+        && bottom - top <= 511)
+    {
+        return false;
+    }
+    // A cell across a jump in depth (the edge of a cliff against the far sky behind it) is a long
+    // sliver once the eye has moved off the one the picture was baked from. The pictures are 1
+    // texel to a pixel and a cell is 32 by 21 of them; an eye within a few sectors of the camera
+    // magnifies what the rooms drawn whole leave to the panels by two at most, so an edge longer
+    // than [`MAX_EDGE`] is the stretch, not the scene, and the cells beyond it (which are right)
+    // show instead.
+    (0..4).all(|k| {
+        let (a, b) = (s[k].sxy, s[(k + 1) & 3].sxy);
+        let dx = (i32::from(a as u16 as i16) - i32::from(b as u16 as i16)).abs();
+        let dy = (i32::from((a >> 16) as u16 as i16) - i32::from((b >> 16) as u16 as i16)).abs();
+        dx <= MAX_EDGE && dy <= MAX_EDGE
+    })
 }
+
+/// Longest screen edge of a cell worth drawing, in pixels (see [`drawable`]).
+const MAX_EDGE: i32 = 96;
 
 /// Draw the tiles of `panel` that are in VRAM.
 ///
@@ -383,7 +401,8 @@ pub fn draw_panel(
             for (k, w) in wanted.iter_mut().enumerate() {
                 let room = panel.rooms[tile * CELLS_X * CELLS_Y + k];
                 *w = room != CELL_EMPTY
-                    && (room == CELL_MIXED || !skip.get(usize::from(room)).copied().unwrap_or(false));
+                    && (room == CELL_MIXED
+                        || !skip.get(usize::from(room)).copied().unwrap_or(false));
                 any |= *w;
             }
             if !any {
@@ -637,6 +656,45 @@ mod tests {
             );
             // And its width is one cell wide.
             assert!((first[1].0 - first[0].0 - CELL_W).abs() <= 2, "{first:?}");
+        }
+    }
+
+    #[test]
+    fn a_cell_across_a_jump_of_depth_is_not_drawn_as_a_sliver() {
+        let eye = [1000, 200, 1000];
+        setup(eye, (0, 0x1000));
+        // A tile whose right column of vertices is at the far end of the table and the rest near:
+        // the cells between are stretched from the near edge towards the horizon.
+        let mut depth = [60u8; MESH];
+        for j in 0..MESH_H {
+            for i in (2 * CELLS_X)..MESH_W {
+                depth[j * MESH_W + i] = 255;
+            }
+        }
+        let mut slots = [NO_TILE_SLOT; TILES];
+        slots[2 * ROWS + 3] = 5;
+        let panel = PanelRef::whole(eye, 0, &depth, &slots, &[0u8; CELLS]);
+        let rays = PanelRays::new(305, 80);
+        let mut scratch = PanelScratch::new();
+        let mut out = vec![0u32; 11 * 8];
+        let mut cam = camera();
+        // Move the eye a few sectors to the side of the bake eye.
+        setup([1000, 200, 1000 + 400], (0, 0x1000));
+        cam.near_sz = 1;
+        let stretched = draw_panel(&panel, &rays, &cam, &mut scratch, &[], &mut out, false);
+        setup(eye, (0, 0x1000));
+        let mut scratch = PanelScratch::new();
+        let at_bake_eye = draw_panel(&panel, &rays, &cam, &mut scratch, &[], &mut out, false);
+        assert!(stretched.packets <= at_bake_eye.packets);
+        for packet in out[..stretched.packet_words].chunks(11) {
+            let c = corner_xy(packet);
+            for k in 0..4 {
+                let (a, b) = (c[k], c[(k + 1) % 4]);
+                assert!(
+                    (a.0 - b.0).abs() <= MAX_EDGE && (a.1 - b.1).abs() <= MAX_EDGE,
+                    "{c:?}"
+                );
+            }
         }
     }
 
