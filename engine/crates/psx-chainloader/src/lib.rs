@@ -26,14 +26,40 @@ pub trait Reader {
     /// # Safety
     /// Same exclusive-device requirement as `prepare`.
     unsafe fn start_read_seek_first(&mut self, lba: u32, spin_limit: u32) -> bool;
+    /// [`start_read_seek_first`](Self::start_read_seek_first), calling `idle`
+    /// while it waits for the seek to finish (once per spin, so it must be
+    /// cheap). The default ignores `idle`; a reader that can run it between its
+    /// own polls overrides this. `idle` must not touch the CD controller.
+    /// # Safety
+    /// Same exclusive-device requirement as `prepare`.
+    unsafe fn start_read_seek_first_idle(
+        &mut self,
+        lba: u32,
+        spin_limit: u32,
+        _idle: &mut dyn FnMut(),
+    ) -> bool {
+        unsafe { self.start_read_seek_first(lba, spin_limit) }
+    }
     /// Read one complete user-data sector.
     /// # Safety
     /// The output must be writable and not overlap any live loader state.
     unsafe fn read_sector(&mut self, out: &mut [u32; SECTOR_WORDS]) -> bool;
-    /// Stop a stream after a chunk or failure.
+    /// Stop a stream after a chunk or failure. Returns once the Pause is
+    /// acknowledged, not when the drive has stopped: the next command of a read
+    /// sequence cancels the Pause's second response, so this is right between
+    /// chunks.
     /// # Safety
     /// Same exclusive-device requirement as `prepare`.
     unsafe fn stop(&mut self);
+    /// Stop the stream and return only once the drive has really stopped, with
+    /// no Pause response still to come. The console answers a Pause twice and
+    /// the second response comes 1.2 to 3.9 million system clocks after the
+    /// first, so after a plain [`stop`](Self::stop) it lands inside whatever runs
+    /// next. The loader calls this after the last read, before the payload gets
+    /// the drive. `false` if the stop could not be proved.
+    /// # Safety
+    /// Same exclusive-device requirement as `prepare`.
+    unsafe fn stop_proved(&mut self) -> bool;
 }
 
 /// Address translation for payload storage and RAM checksum readback.
@@ -56,6 +82,101 @@ pub trait Observer {
     fn progress(&mut self, complete: u32, total: u32);
     /// All payload sectors were read, before checksum validation.
     fn finish(&mut self);
+    /// Time passes during a load: called after every payload sector, once per
+    /// spin of a seek wait and every 4 KiB of the checksum pass, so a
+    /// presentation can keep a clean screen animated through the whole load.
+    /// It runs between CD steps, with the drive owned by the loader: it must
+    /// not touch the controller or the payload, and it must be cheap when
+    /// there is nothing to do. The default does nothing.
+    fn tick(&mut self) {}
+}
+
+/// Top of the console's 2 MiB of RAM, as a KSEG0 address.
+pub const RAM_END: u32 = 0x8020_0000;
+
+/// Lowest address a PSX-EXE may load at: the kernel owns everything below it.
+pub const MIN_LOAD_ADDR: u32 = 0x8001_0000;
+
+/// A half-open span of RAM, `[start, end)`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Span {
+    /// First address of the span.
+    pub start: u32,
+    /// First address past the span.
+    pub end: u32,
+}
+
+impl Span {
+    /// The span `[start, end)`.
+    pub const fn new(start: u32, end: u32) -> Self {
+        Self { start, end }
+    }
+
+    /// Whether the two spans share an address. An empty span shares none.
+    pub const fn overlaps(self, other: Span) -> bool {
+        self.start < self.end
+            && other.start < other.end
+            && self.start < other.end
+            && other.start < self.end
+    }
+}
+
+/// Why a payload cannot be loaded where its header says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Conflict {
+    /// The load address is under [`MIN_LOAD_ADDR`].
+    BelowFloor,
+    /// The payload's sectors run past [`RAM_END`] (or wrap the address space).
+    PastRam,
+    /// The payload's sectors overlap this reserved span.
+    Reserved(Span),
+}
+
+/// The RAM a payload of `size` bytes loaded at `address` writes: its whole
+/// sectors, because the transport stores every sector in full. `None` if the
+/// extent does not fit the address space.
+pub fn payload_extent(address: u32, size: u32) -> Option<Span> {
+    let end = address.checked_add(size.div_ceil(SECTOR_BYTES).checked_mul(SECTOR_BYTES)?)?;
+    Some(Span::new(address, end))
+}
+
+/// Check that a payload fits in RAM, at or above [`MIN_LOAD_ADDR`], and clear of
+/// every `reserved` span (the loader's own code and the stack it runs on).
+///
+/// This is the rule [`try_load_reserving`] applies on the console and the one
+/// a disc builder should apply before it ships the payload, so the two cannot
+/// disagree.
+pub fn check_payload(address: u32, size: u32, reserved: &[Span]) -> Result<(), Conflict> {
+    if address < MIN_LOAD_ADDR {
+        return Err(Conflict::BelowFloor);
+    }
+    let extent = payload_extent(address, size).ok_or(Conflict::PastRam)?;
+    if extent.end > RAM_END {
+        return Err(Conflict::PastRam);
+    }
+    match reserved.iter().find(|span| extent.overlaps(**span)) {
+        Some(span) => Err(Conflict::Reserved(*span)),
+        None => Ok(()),
+    }
+}
+
+/// Where a payload may load, as `try_load` and `try_load_reserving` differ in it.
+enum Bounds<'a> {
+    /// The shipped rule: the payload's logical bytes end at or below the loader.
+    BelowLoader(u32),
+    /// [`check_payload`] against these spans.
+    Clear(&'a [Span]),
+}
+
+impl Bounds<'_> {
+    fn admits(&self, address: u32, size: u32) -> bool {
+        match *self {
+            Bounds::BelowLoader(loader_base) => {
+                address >= MIN_LOAD_ADDR && address.saturating_add(size) <= loader_base
+            }
+            Bounds::Clear(reserved) => check_payload(address, size, reserved).is_ok(),
+        }
+    }
 }
 
 /// Entry values copied verbatim from the accepted EXE header.
@@ -108,6 +229,64 @@ pub unsafe fn try_load<R: Reader, M: Memory, O: Observer>(
     observer: &mut O,
     loader_base: u32,
 ) -> Result<LoadedExe, (u32, u32)> {
+    unsafe {
+        load(
+            reader,
+            exe_lba,
+            header,
+            payload_fnv,
+            memory,
+            observer,
+            &Bounds::BelowLoader(loader_base),
+        )
+    }
+}
+
+/// [`try_load`] for a loader that does not sit above every payload.
+///
+/// The payload is refused (stage 5, detail the load address) unless
+/// [`check_payload`] accepts it against `reserved`: at or above
+/// [`MIN_LOAD_ADDR`], inside RAM, and with none of its whole sectors on a
+/// reserved span. A loader reserves its own code and the stack it runs on, and
+/// a payload may then lie above the loader as well as below it. Everything else
+/// is `try_load`.
+///
+/// # Safety
+/// As [`try_load`], except that the writable extent must lie clear of every
+/// span in `reserved`, and `reserved` must cover the loader's code, data and
+/// live stack.
+pub unsafe fn try_load_reserving<R: Reader, M: Memory, O: Observer>(
+    reader: &mut R,
+    exe_lba: u32,
+    header: &mut [u32; SECTOR_WORDS],
+    payload_fnv: u32,
+    memory: &mut M,
+    observer: &mut O,
+    reserved: &[Span],
+) -> Result<LoadedExe, (u32, u32)> {
+    unsafe {
+        load(
+            reader,
+            exe_lba,
+            header,
+            payload_fnv,
+            memory,
+            observer,
+            &Bounds::Clear(reserved),
+        )
+    }
+}
+
+/// One load attempt under `bounds`; see [`try_load`].
+unsafe fn load<R: Reader, M: Memory, O: Observer>(
+    reader: &mut R,
+    exe_lba: u32,
+    header: &mut [u32; SECTOR_WORDS],
+    payload_fnv: u32,
+    memory: &mut M,
+    observer: &mut O,
+    bounds: &Bounds<'_>,
+) -> Result<LoadedExe, (u32, u32)> {
     // Scrub the header buffer before every attempt, volatile so the
     // write cannot be elided. The 2026-08-01 11:00 burn's MAGIC panel
     // showed detail = the requested LBA -- a value that exists only in
@@ -134,7 +313,7 @@ pub unsafe fn try_load<R: Reader, M: Memory, O: Observer>(
         // BIOS-style bracket: explicit SeekL waited to completion before
         // ReadN, for the header and every payload chunk alike. Seek poll
         // budget covers the measured worst case (~310 ms cross-disc).
-        if !reader.start_read_seek_first(exe_lba, SEEK_POLL) {
+        if !reader.start_read_seek_first_idle(exe_lba, SEEK_POLL, &mut || observer.tick()) {
             reader.stop();
             return Err((2, exe_lba));
         }
@@ -157,9 +336,10 @@ pub unsafe fn try_load<R: Reader, M: Memory, O: Observer>(
     let t_size = header[HDR_T_SIZE];
     let sp = header[HDR_SP_BASE].wrapping_add(header[HDR_SP_OFFSET]);
 
-    // The payload must not reach this blob; `mkdisc` rejects such a game at
-    // build time, so a failure here means the disc and the blob disagree.
-    if t_addr < 0x8001_0000 || t_addr.saturating_add(t_size) > loader_base {
+    // The payload must not reach the loader; the disc builder rejects such a
+    // program at build time, so a failure here means the disc and the loader
+    // disagree.
+    if !bounds.admits(t_addr, t_size) {
         return Err((5, t_addr));
     }
     observer.stage_ok(5);
@@ -179,11 +359,20 @@ pub unsafe fn try_load<R: Reader, M: Memory, O: Observer>(
     const CHUNK_SECTORS: u32 = 64;
     let sectors = t_size.div_ceil(SECTOR_BYTES);
     let mut dst = unsafe { memory.payload(t_addr) };
-    unsafe { reader.stop() };
+    // With no payload sectors this is the last stop before the handoff.
+    if sectors == 0 {
+        if !unsafe { reader.stop_proved() } {
+            return Err((6, 0));
+        }
+    } else {
+        unsafe { reader.stop() };
+    }
     let mut sector = 0u32;
     while sector < sectors {
         let chunk_lba = exe_lba + 1 + sector;
-        if !unsafe { reader.start_read_seek_first(chunk_lba, SEEK_POLL) } {
+        if !unsafe {
+            reader.start_read_seek_first_idle(chunk_lba, SEEK_POLL, &mut || observer.tick())
+        } {
             unsafe { reader.stop() };
             return Err((2, chunk_lba));
         }
@@ -195,9 +384,19 @@ pub unsafe fn try_load<R: Reader, M: Memory, O: Observer>(
                 return Err((6, sector + k));
             }
             dst = unsafe { dst.add(1) };
+            observer.tick();
             k += 1;
         }
-        unsafe { reader.stop() };
+        // The last chunk's stop is the one the payload inherits: prove it, so
+        // no Pause response arrives after the jump. Failing here retries the
+        // load; `Reader::stop_proved` leaves the cause in the reader's diag word.
+        if sector + n == sectors {
+            if !unsafe { reader.stop_proved() } {
+                return Err((6, sectors));
+            }
+        } else {
+            unsafe { reader.stop() };
+        }
         sector += n;
         observer.progress(sector, sectors);
     }
@@ -212,6 +411,9 @@ pub unsafe fn try_load<R: Reader, M: Memory, O: Observer>(
     let mut at = unsafe { memory.payload(t_addr) } as *const u8;
     let end = unsafe { at.add(t_size as usize) };
     while at < end {
+        if at as usize & 0xFFF == 0 {
+            observer.tick();
+        }
         // Volatile: the buffer was just written by the sector reader.
         hash ^= unsafe { core::ptr::read_volatile(at) } as u32;
         hash = hash.wrapping_mul(0x0100_0193);

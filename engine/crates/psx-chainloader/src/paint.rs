@@ -105,6 +105,18 @@ pub fn ack_vblank() {
     psx_io::irq::acknowledge(1 << psx_hw::irq::source::VBLANK);
 }
 
+/// Whether a VBlank edge has arrived since the last call, acknowledging it.
+/// The loader runs with interrupts masked, so a presentation that animates by
+/// VBlank counts the edges this way (one tick per `true`).
+pub fn take_vblank() -> bool {
+    if vblank_pending() {
+        ack_vblank();
+        true
+    } else {
+        false
+    }
+}
+
 /// Wait until every submitted primitive has drained before presenting its
 /// buffer: GPUSTAT bit 28, then bit 26, as `psx_gpu::draw_sync` does. Bit 28
 /// alone is not a drawing-complete test on silicon (hardware-tests v1.24): it

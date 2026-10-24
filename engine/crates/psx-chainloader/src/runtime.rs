@@ -1,6 +1,6 @@
 //! Bare-metal teardown, retry diagnostics, cache flush and register handoff.
 use crate::paint;
-use crate::{Observer, Reader, SECTOR_WORDS};
+use crate::{Bounds, Observer, Reader, Span, SECTOR_WORDS};
 use psx_pack::cd::SectorReader;
 
 /// Collection-specific loading visuals. Shared transport owns the CD device.
@@ -17,20 +17,36 @@ pub trait Presentation {
     fn diagnostic_mode(&mut self);
     /// Report dead scratchpad on an otherwise clean loading screen.
     fn no_scratchpad(&mut self);
+    /// Time passes during the load (see `Observer::tick`): animate the clean
+    /// loading screen here. Not called once the diagnostic checklist is up.
+    /// Callbacks must not issue CD commands or modify the payload. The default
+    /// does nothing.
+    fn tick(&mut self) {}
 }
 
 impl Reader for SectorReader {
     unsafe fn prepare(&mut self) -> bool {
-        unsafe { SectorReader::prepare(self) }
+        SectorReader::prepare(self)
     }
     unsafe fn start_read_seek_first(&mut self, lba: u32, limit: u32) -> bool {
-        unsafe { SectorReader::start_read_seek_first(self, lba, limit) }
+        SectorReader::start_read_seek_first(self, lba, limit)
+    }
+    unsafe fn start_read_seek_first_idle(
+        &mut self,
+        lba: u32,
+        limit: u32,
+        idle: &mut dyn FnMut(),
+    ) -> bool {
+        SectorReader::start_read_seek_first_with(self, lba, limit, idle)
     }
     unsafe fn read_sector(&mut self, out: &mut [u32; SECTOR_WORDS]) -> bool {
-        unsafe { SectorReader::read_sector(self, out) }
+        SectorReader::read_sector(self, out)
     }
     unsafe fn stop(&mut self) {
-        unsafe { SectorReader::stop(self) }
+        SectorReader::stop(self)
+    }
+    unsafe fn stop_proved(&mut self) -> bool {
+        SectorReader::stop_proved(self).is_ok()
     }
 }
 struct DirectMemory;
@@ -62,6 +78,11 @@ impl<P: Presentation> Observer for Events<'_, P> {
     fn finish(&mut self) {
         if !paint::checklist_shown() {
             self.0.finish();
+        }
+    }
+    fn tick(&mut self) {
+        if !paint::checklist_shown() {
+            self.0.tick();
         }
     }
 }
@@ -107,6 +128,54 @@ pub unsafe fn run<P: Presentation>(
     cdda_track_base: u32,
     payload_fnv: u32,
     loader_base: u32,
+    loading: P,
+) -> ! {
+    unsafe {
+        run_bounded(
+            exe_lba,
+            lba_offset,
+            cdda_track_base,
+            payload_fnv,
+            &Bounds::BelowLoader(loader_base),
+            loading,
+        )
+    }
+}
+
+/// [`run`] for a loader that does not sit above every payload: the payload
+/// must be clear of `reserved` (see [`crate::check_payload`]), which has to
+/// cover the loader's code, data and live stack. A payload may then load above
+/// the loader as well as below it.
+///
+/// # Safety
+/// As [`run`], with `reserved` in place of `loader_base`.
+pub unsafe fn run_reserving<P: Presentation>(
+    exe_lba: u32,
+    lba_offset: u32,
+    cdda_track_base: u32,
+    payload_fnv: u32,
+    reserved: &[Span],
+    loading: P,
+) -> ! {
+    unsafe {
+        run_bounded(
+            exe_lba,
+            lba_offset,
+            cdda_track_base,
+            payload_fnv,
+            &Bounds::Clear(reserved),
+            loading,
+        )
+    }
+}
+
+/// The body of [`run`] and [`run_reserving`].
+unsafe fn run_bounded<P: Presentation>(
+    exe_lba: u32,
+    lba_offset: u32,
+    cdda_track_base: u32,
+    payload_fnv: u32,
+    bounds: &Bounds<'_>,
     mut loading: P,
 ) -> ! {
     unsafe { quiesce() };
@@ -138,16 +207,18 @@ pub unsafe fn run<P: Presentation>(
         // drain after the first prepare(), but a failed attempt leaves the
         // drive mid-stream -- the 2026-08-01 console panels showed retry 2
         // reading an all-ones header straight from a poisoned FIFO.
-        let mut reader = SectorReader::new();
+        // SAFETY: `run` owns the drive from here to the jump, as its contract
+        // says; no other `Cd` token is in use.
+        let mut reader = SectorReader::with_cd(unsafe { psx_io::periph::Cd::steal() });
         match unsafe {
-            crate::try_load(
+            crate::load(
                 &mut reader,
                 exe_lba,
                 &mut header,
                 payload_fnv,
                 &mut DirectMemory,
                 &mut Events(&mut loading),
-                loader_base,
+                bounds,
             )
         } {
             Ok(exe) => break exe,
@@ -166,13 +237,27 @@ pub unsafe fn run<P: Presentation>(
         }
     };
 
-    unsafe { flush_cache() };
+    // The payload's last read ended in a proved Pause (`Reader::stop_proved`), so
+    // the drive is idle with no response on the way. Leave the controller the way
+    // a BIOS disc boot does: nothing latched, no data request, the CD source
+    // acknowledged and the CPU mask closed. SectorReader::prepare in the payload
+    // starts from exactly that state.
+    unsafe { leave_drive_clean() };
+    // The game lands at 0x80010000, where the launcher was executing, so the
+    // instruction cache still holds launcher lines; `jr pc0` without this
+    // re-executes the launcher (the console showed five green stages, a full
+    // payload bar and the loader's own screen). The flush is the SDK's:
+    // it waits for every DMA channel to be idle with interrupts masked before
+    // it touches the cache control register, because a flush while a channel
+    // moves data makes the next instruction fetch return a word of that
+    // traffic (Quake, 2026-10-22; see the SDK's docs/CACHE-CONTROL.md).
+    psx_rt::cache::flush_instruction_cache();
     // The JUMP row going green means the cache flush returned and the jump
     // is the very next thing: anything wrong past this point is the game's
     // own first moments, not the load. Its status is a scratchpad
     // write/readback probe: NOSPAD is the fingerprint of a cache-control
-    // restore swallowed while the cache was isolated (see flush_cache's
-    // ordering note) -- the game inherits whichever machine this saw.
+    // restore swallowed while the cache was isolated -- the game inherits
+    // whichever machine this saw.
     // Invisible on a clean load; on a retried one the row is the last
     // thing the diagnostics record before the game takes the machine.
     let alive = unsafe {
@@ -284,6 +369,24 @@ fn verdict(s: &str, rgb: u32) {
     paint::text(8, VERDICT_Y, 2, s, rgb);
 }
 
+/// Every DMA channel, in controller order.
+const DMA_CHANNELS: [psx_io::dma::Channel; 7] = [
+    psx_io::dma::Channel::MdecIn,
+    psx_io::dma::Channel::MdecOut,
+    psx_io::dma::Channel::Gpu,
+    psx_io::dma::Channel::Cd,
+    psx_io::dma::Channel::Spu,
+    psx_io::dma::Channel::Expansion,
+    psx_io::dma::Channel::OrderingTableClear,
+];
+
+/// Let every DMA channel finish what it is doing, aborting one that will not.
+fn shut_down_dma() {
+    for channel in DMA_CHANNELS {
+        let _ = psx_io::dma::wait_or_abort(channel, psx_io::dma::DEFAULT_SPINS);
+    }
+}
+
 /// Put the hardware back roughly where the BIOS leaves it before a game
 /// boots: interrupts masked, DMA channels off, GPU reset. The launcher has
 /// been driving the GPU and vblank IRQs, and a game's `_start` does not
@@ -304,6 +407,14 @@ unsafe fn quiesce() {
         // Mask + acknowledge every interrupt source.
         psx_io::irq::set_mask(0);
         psx_io::irq::acknowledge(u32::MAX);
+
+        // With interrupts closed nothing can start another transfer, so wait
+        // for the ones in flight (the launcher's last frame's list walk, for
+        // one) to finish before the controller is reconfigured and, later,
+        // before the cache control register is touched. `wait_or_abort` is the
+        // SDK's bounded wait: a channel that does not finish is aborted and
+        // given the same budget to read idle, then the load goes on.
+        shut_down_dma();
 
         // Disable every DMA channel but keep the BIOS's priority ladder.
         // The third debug burn proved silicon cares about the difference:
@@ -345,85 +456,19 @@ unsafe fn quiesce() {
     }
 }
 
-// Direct instruction-cache invalidation, open-coded here so the blob does
-// not link `psx-rt` (which would bring a second `_start` and panic handler
-// with it).
-//
-// This replaces a BIOS A(44h) FlushCache tail call. The flush is the last
-// thing standing between a loaded payload and a running game: the game's
-// code lands at 0x80010000, which is exactly where the launcher was
-// executing from moments earlier, so those cache lines hold launcher
-// instructions. Miss the invalidation and `jr pc0` re-executes the
-// launcher instead of the game, leaving the loader's own screen up --
-// which is precisely what the console showed with five green stages and
-// a full payload bar.
-//
-// The BIOS call was never proven on silicon in this position. This
-// sequence is: it is the routine psx-rt uses, and the launcher boots and
-// runs on the console with it. Steps, per the documented recipe: jump to
-// this code's KSEG1 alias so fetches bypass the cache being cleared, put
-// the cache-control port in tag-test mode with the i-cache enabled,
-// isolate the cache (COP0 SR bit 16) so stores hit tags instead of
-// memory, clear one tag per 16-byte line across the 4 KiB cache, then
-// DROP ISOLATION FIRST (SR = 0, interrupts still off), restore the
-// normal 0x1E988 cache-control value, then the caller's SR.
-//
-// The restore order is load-bearing and matches the BIOS routine (and
-// psx-rt after its 2026-07-31 fix): with IsC still set, whether a store
-// reaches the CPU-internal cache-control port or is swallowed by the
-// isolated cache is undocumented. A swallowed restore leaves cache
-// control at 0x804 -- tag-test latched, SCRATCHPAD UNMAPPED -- which is
-// exactly the machine every chain-loaded game would then inherit: a
-// green checklist, a dead game, and an emulator that forgives it. The
-// scratchpad probe on the JUMP row makes the next burn answer this on
-// screen either way.
-core::arch::global_asm!(
-    r#"
-    .set noreorder
-    .section .text.loader_flush_cache
-    .globl __loader_flush_cache
-__loader_flush_cache:
-    la    $8, .Lloader_flush_body
-    lui   $9, 0x2000
-    or    $8, $8, $9
-    jr    $8
-    nop
-
-.Lloader_flush_body:
-    mfc0  $10, $12
-    nop
-    lui   $8, 0xfffe
-    ori   $9, $zero, 0x0804
-    sw    $9, 0x0130($8)
-    lui   $9, 0x0001
-    mtc0  $9, $12
-    nop
-    nop
-    or    $9, $zero, $zero
-    ori   $11, $zero, 0x1000
-.Lloader_flush_line:
-    sw    $zero, 0($9)
-    addiu $9, $9, 0x0010
-    bne   $9, $11, .Lloader_flush_line
-    nop
-    mtc0  $zero, $12
-    nop
-    nop
-    lui   $9, 0x0001
-    ori   $9, $9, 0xe988
-    sw    $9, 0x0130($8)
-    mtc0  $10, $12
-    nop
-    nop
-    jr    $31
-    nop
-    .set reorder
-    "#
-);
-
-extern "C" {
-    #[link_name = "__loader_flush_cache"]
-    fn flush_cache();
+/// Hand the CD controller over idle: every response flag acknowledged, the
+/// parameter FIFO reset, the data request dropped, and the CD source acknowledged
+/// in `I_STAT` with `I_MASK` closed. Runs after the proved stop, so nothing is
+/// still to arrive; a flag found here would be a response nobody collected.
+///
+/// # Safety
+/// `run` owns the drive; no other `Cd` token is in use.
+unsafe fn leave_drive_clean() {
+    let mut cd = unsafe { psx_io::periph::Cd::steal() };
+    cd.acknowledge_all_and_reset_parameters();
+    cd.clear_data_request();
+    psx_io::irq::set_mask(0);
+    psx_io::irq::acknowledge(1 << psx_hw::irq::source::CDROM);
 }
 
 /// Seed GP / SP / the disc-base handover and jump to the game's entry point.
