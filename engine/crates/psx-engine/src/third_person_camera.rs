@@ -279,6 +279,7 @@ pub struct ThirdPersonCameraFrame {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct ThirdPersonCameraState {
     profile: ProfileBlend,
+    pitch_cache: PitchCache,
     yaw: Angle,
     pitch_q12: i16,
     frame_pitch_q12: i16,
@@ -328,6 +329,7 @@ impl ThirdPersonCameraState {
     pub const fn new(yaw: Angle) -> Self {
         Self {
             profile: ProfileBlend::new(),
+            pitch_cache: PitchCache::new(),
             yaw,
             pitch_q12: 0,
             frame_pitch_q12: 0,
@@ -397,19 +399,20 @@ impl ThirdPersonCameraState {
         yaw: Angle,
     ) {
         let config = normalize_config(config);
-        self.profile.snap(config, target.lock_target.is_some());
+        self.profile.snap(&config, target.lock_target.is_some());
         let config = self.profile.apply(config);
         self.yaw = yaw;
         self.recenter_active = false;
         self.distance = config
             .distance
             .clamp(config.min_distance, config.max_distance);
-        self.pitch_q12 = default_pitch_q12(&config);
+        self.pitch_q12 = self.pitch_cache.of(&config);
         self.frame_pitch_q12 = self.pitch_q12;
         self.lock_height_offset = 0;
         self.lock_pitch_offset_q12 = 0;
         self.focus = player_focus(target.player, config.target_height);
-        self.base_position_y = camera_height_goal(target.player, self.pitch_q12, &config);
+        self.base_position_y =
+            camera_height_goal(target.player, self.pitch_q12, &config, self.pitch_q12);
         self.position = camera_position_at_height(
             self.focus,
             self.distance,
@@ -570,9 +573,20 @@ impl ThirdPersonCameraState {
             self.snap_to_player(target, *config);
         }
 
-        let previous_default_pitch = default_pitch_q12(&self.profile.apply(*config));
-        self.profile.advance(*config, target.lock_target.is_some());
+        let previous_default_pitch = {
+            let (height, target_height, distance) = self.profile.applied_pitch_inputs(config);
+            self.pitch_cache.pitch(
+                height,
+                target_height,
+                distance,
+                config.lock_target_framing,
+                config.pitch_min_q12,
+                config.pitch_max_q12,
+            )
+        };
+        self.profile.advance(config, target.lock_target.is_some());
         let mut config = self.profile.apply(*config);
+        let authored_pitch = self.pitch_cache.of(&config);
         if config.lock_target_framing && config.fov_y_degrees == 0 {
             config.fov_y_degrees = self.profile.vertical_fov_degrees();
         }
@@ -582,7 +596,7 @@ impl ThirdPersonCameraState {
         {
             self.pitch_q12 = self
                 .pitch_q12
-                .saturating_add(default_pitch_q12(&config).saturating_sub(previous_default_pitch))
+                .saturating_add(authored_pitch.saturating_sub(previous_default_pitch))
                 .clamp(config.pitch_min_q12, config.pitch_max_q12);
         }
         if config.lock_target_framing && target.lock_target.is_some() {
@@ -703,7 +717,7 @@ impl ThirdPersonCameraState {
             let recenter_pitch = if config.recenter_preserves_pitch {
                 self.pitch_q12
             } else {
-                default_pitch_q12(&config)
+                authored_pitch
             };
             self.pitch_q12 = approach_i16(
                 self.pitch_q12,
@@ -784,7 +798,14 @@ impl ThirdPersonCameraState {
             .saturating_add(self.lock_pitch_offset_q12)
             .clamp(config.pitch_min_q12, config.pitch_max_q12);
         let lift_ceiling = lift_pitch_ceiling(&config).max(pitch_base);
-        self.advance_escape(collision, target, &config, pitch_base, lift_ceiling)?;
+        self.advance_escape(
+            collision,
+            target,
+            &config,
+            authored_pitch,
+            pitch_base,
+            lift_ceiling,
+        )?;
         let orbit_pitch = pitch_base
             .saturating_add(self.lift_pitch_q12)
             .min(lift_ceiling);
@@ -802,7 +823,8 @@ impl ThirdPersonCameraState {
             config.focus_lag_shift.saturating_add(2),
         )
         .clamp(0, config.lock_height_boost);
-        let base_camera_y_goal = camera_height_goal(target.player, orbit_pitch, &config);
+        let base_camera_y_goal =
+            camera_height_goal(target.player, orbit_pitch, &config, authored_pitch);
         let locked_camera_y_goal = base_camera_y_goal.saturating_add(self.lock_height_offset);
 
         // Spring-arm sweep throttle: the sweep dominates the camera's
@@ -998,8 +1020,11 @@ impl ThirdPersonCameraState {
             }
         }
         self.check_sight_to_player(collision, target, &config, pitch_base, lift_ceiling)?;
-        self.frame_pitch_q12 =
-            orbit_pitch.saturating_add(lock_pitch_offset_q12(&config, self.lock_height_offset));
+        self.frame_pitch_q12 = orbit_pitch.saturating_add(lock_pitch_offset_q12(
+            &config,
+            authored_pitch,
+            self.lock_height_offset,
+        ));
 
         self.last_pull_in = collision_solve.pull_in || endpoint_clamped;
         self.last_rotated = false;
@@ -1045,6 +1070,7 @@ impl ThirdPersonCameraState {
         collision: &mut C,
         target: ThirdPersonCameraTarget,
         config: &ThirdPersonCameraConfig,
+        authored_pitch: i16,
         pitch_base: i16,
         ceiling: i16,
     ) -> Result<(), CollisionQueryError> {
@@ -1061,7 +1087,7 @@ impl ThirdPersonCameraState {
             self.slide_yaw_q12 = 0;
         } else if prior.distance < clear_orbit_distance(config) || self.escape_checks_due(config) {
             // Escape: measure the arm at the stick yaw and the base pitch.
-            let y_base = camera_height_goal(target.player, pitch_base, config);
+            let y_base = camera_height_goal(target.player, pitch_base, config, authored_pitch);
             let at_stick = collision.solve(self.focus, self.yaw, pitch_base, y_base, config)?;
             let mut slid = at_stick;
             let mut offset = 0i32;
@@ -1089,7 +1115,7 @@ impl ThirdPersonCameraState {
             self.lift_wall_q12 = if slid.distance >= comfort {
                 0
             } else {
-                let y = camera_height_goal(target.player, ceiling, config);
+                let y = camera_height_goal(target.player, ceiling, config, authored_pitch);
                 let (probe, run) = lift_probe(collision, self.focus, slid_yaw, ceiling, y, config)?;
                 if probe.pull_in {
                     // Geometry reaches the cap ray too (a wall): the horizontal
@@ -1847,8 +1873,14 @@ fn camera_position_at_height(
     RoomPoint::new(orbit.x, camera_y, orbit.z)
 }
 
-fn camera_height_goal(player: RoomPoint, pitch_q12: i16, config: &ThirdPersonCameraConfig) -> i32 {
-    let authored_pitch = default_pitch_q12(config);
+/// Camera height for the orbit pitch `pitch_q12`; `authored_pitch` is
+/// [`default_pitch_q12`] of `config`, which the caller has at hand.
+fn camera_height_goal(
+    player: RoomPoint,
+    pitch_q12: i16,
+    config: &ThirdPersonCameraConfig,
+    authored_pitch: i16,
+) -> i32 {
     let manual_height_delta = pitch_vertical_offset(config.distance, pitch_q12)
         .saturating_sub(pitch_vertical_offset(config.distance, authored_pitch));
     player
@@ -1894,18 +1926,113 @@ fn camera_from_position_focus(
     }
 }
 
+#[cfg(test)]
 fn default_pitch_q12(config: &ThirdPersonCameraConfig) -> i16 {
-    let vertical = config.height.saturating_sub(config.target_height);
-    let pitch = if config.lock_target_framing {
-        framing::pitch_from_height_offset(vertical, config.distance)
-    } else {
-        pitch_from_vertical_distance(vertical, config.distance)
-    };
-    pitch.clamp(config.pitch_min_q12, config.pitch_max_q12)
+    default_pitch_of(
+        config.height,
+        config.target_height,
+        config.distance,
+        config.lock_target_framing,
+        config.pitch_min_q12,
+        config.pitch_max_q12,
+    )
 }
 
-fn lock_pitch_offset_q12(config: &ThirdPersonCameraConfig, height_offset: i32) -> i16 {
-    let base = default_pitch_q12(config);
+/// The pitch of a composition with these fields, which are all
+/// [`default_pitch_q12`] reads of its config.
+fn default_pitch_of(
+    height: i32,
+    target_height: i32,
+    distance: i32,
+    lock_target_framing: bool,
+    pitch_min_q12: i16,
+    pitch_max_q12: i16,
+) -> i16 {
+    let vertical = height.saturating_sub(target_height);
+    let pitch = if lock_target_framing {
+        framing::pitch_from_height_offset(vertical, distance)
+    } else {
+        pitch_from_vertical_distance(vertical, distance)
+    };
+    pitch.clamp(pitch_min_q12, pitch_max_q12)
+}
+
+/// [`default_pitch_q12`] of the composition last asked about, so the several
+/// asks of one tick (and of the ticks after it, while the composition holds)
+/// cost a compare instead of a search of the trig table.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct PitchCache {
+    /// Height, target height, distance, lowest and highest pitch.
+    key: [i32; 5],
+    framing: bool,
+    pitch: i16,
+    valid: bool,
+}
+
+impl PitchCache {
+    const fn new() -> Self {
+        Self {
+            key: [0; 5],
+            framing: false,
+            pitch: 0,
+            valid: false,
+        }
+    }
+
+    /// The pitch of a composition with these fields.
+    fn pitch(
+        &mut self,
+        height: i32,
+        target_height: i32,
+        distance: i32,
+        framing: bool,
+        pitch_min_q12: i16,
+        pitch_max_q12: i16,
+    ) -> i16 {
+        let key = [
+            height,
+            target_height,
+            distance,
+            i32::from(pitch_min_q12),
+            i32::from(pitch_max_q12),
+        ];
+        if !(self.valid && self.key == key && self.framing == framing) {
+            *self = Self {
+                key,
+                framing,
+                pitch: default_pitch_of(
+                    height,
+                    target_height,
+                    distance,
+                    framing,
+                    pitch_min_q12,
+                    pitch_max_q12,
+                ),
+                valid: true,
+            };
+        }
+        self.pitch
+    }
+
+    /// [`default_pitch_q12`] of `config`.
+    fn of(&mut self, config: &ThirdPersonCameraConfig) -> i16 {
+        self.pitch(
+            config.height,
+            config.target_height,
+            config.distance,
+            config.lock_target_framing,
+            config.pitch_min_q12,
+            config.pitch_max_q12,
+        )
+    }
+}
+
+fn lock_pitch_offset_q12(
+    config: &ThirdPersonCameraConfig,
+    authored_pitch: i16,
+    height_offset: i32,
+) -> i16 {
+    let base = authored_pitch;
     let raised = pitch_from_vertical_distance(
         config
             .height
@@ -2015,6 +2142,35 @@ fn lerp_vertex(from: RoomPoint, to: RoomPoint, num: i32, den: i32) -> RoomPoint 
 mod tests {
     extern crate std;
     use super::*;
+
+    #[test]
+    fn the_pitch_cache_answers_like_the_default_pitch_whatever_changes() {
+        let mut cache = PitchCache::new();
+        let mut c = ThirdPersonCameraConfig::character(158, 61, 61);
+        for round in 0..3 {
+            for framing in [false, true] {
+                c.lock_target_framing = framing;
+                for (height, target, distance) in [
+                    (61, 61, 158),
+                    (113, 73, 219),
+                    (113, 73, 219),
+                    (113, 73, 244),
+                    (-20, 90, 100),
+                    (400, 10, 40),
+                ] {
+                    c.height = height;
+                    c.target_height = target;
+                    c.distance = distance;
+                    for (low, high) in [(-192, 704), (-455, 796), (10, 20)] {
+                        c.pitch_min_q12 = low;
+                        c.pitch_max_q12 = high;
+                        assert_eq!(cache.of(&c), default_pitch_q12(&c), "round {round} {c:?}");
+                        assert_eq!(cache.of(&c), default_pitch_q12(&c));
+                    }
+                }
+            }
+        }
+    }
     use crate::{CharacterBlockerTraceProvider, CharacterCollisionAabb};
 
     struct ClearTraceProvider;

@@ -40,7 +40,7 @@ impl ProfileBlend {
         }
     }
 
-    fn goal(&self, config: ThirdPersonCameraConfig, locked: bool) -> [i32; 5] {
+    fn goal(&self, config: &ThirdPersonCameraConfig, locked: bool) -> [i32; 5] {
         let base = ThirdPersonCameraProfile {
             distance: config.distance,
             height: config.height,
@@ -97,7 +97,7 @@ impl ProfileBlend {
         self.base_projection = Some(projection);
     }
 
-    pub fn snap(&mut self, config: ThirdPersonCameraConfig, locked: bool) {
+    pub fn snap(&mut self, config: &ThirdPersonCameraConfig, locked: bool) {
         self.active = config.blend_profiles
             || config.fov_y_degrees != 0
             || config.lock_profile.is_some()
@@ -116,7 +116,7 @@ impl ProfileBlend {
         self.changing = false;
     }
 
-    pub fn advance(&mut self, config: ThirdPersonCameraConfig, locked: bool) {
+    pub fn advance(&mut self, config: &ThirdPersonCameraConfig, locked: bool) {
         let enabled = config.blend_profiles
             || config.fov_y_degrees != 0
             || config.lock_profile.is_some()
@@ -146,6 +146,21 @@ impl ProfileBlend {
         }
         self.distance = approach(self.distance, self.values[0], response.max(210));
         self.changing = before != self.values || distance_before != self.distance;
+    }
+
+    /// Height, target height and distance of [`Self::apply`] of `config`,
+    /// without building the config: all the default pitch reads of it that
+    /// the blend changes.
+    pub fn applied_pitch_inputs(&self, config: &ThirdPersonCameraConfig) -> (i32, i32, i32) {
+        if self.active {
+            (
+                (self.values[1] + 2048) / 4096,
+                (self.values[2] + 2048) / 4096,
+                ((self.distance + 2048) / 4096).max(config.min_distance),
+            )
+        } else {
+            (config.height, config.target_height, config.distance)
+        }
     }
 
     pub fn apply(&self, mut config: ThirdPersonCameraConfig) -> ThirdPersonCameraConfig {
@@ -195,6 +210,34 @@ fn approach(value: i32, goal: i32, rate: i32) -> i32 {
 mod tests {
     use super::*;
     #[test]
+    fn applied_pitch_inputs_are_the_fields_of_the_applied_config() {
+        let mut c = config();
+        c.profile_response_q12 = 700;
+        for blend_profiles in [true, false] {
+            c.blend_profiles = blend_profiles;
+            let mut blend = ProfileBlend::new();
+            blend.snap(&c, false);
+            // Idle, then locked on and settling, then released again.
+            for step in 0..40 {
+                blend.advance(&c, (10..25).contains(&step));
+                let applied = blend.apply(c);
+                assert_eq!(
+                    blend.applied_pitch_inputs(&c),
+                    (applied.height, applied.target_height, applied.distance),
+                    "step {step}"
+                );
+            }
+        }
+        // A distance below the config's minimum is lifted to it.
+        let mut blend = ProfileBlend::new();
+        c.blend_profiles = true;
+        c.min_distance = 300;
+        blend.snap(&c, true);
+        assert_eq!(blend.apply(c).distance, 300);
+        assert_eq!(blend.applied_pitch_inputs(&c).2, 300);
+    }
+
+    #[test]
     fn held_composition_is_independent_of_lock_and_reverses_without_reset() {
         let mut c = config();
         c.profile_response_q12 = 1024;
@@ -207,28 +250,28 @@ mod tests {
         };
         for locked in [false, true] {
             let mut blend = ProfileBlend::new();
-            blend.snap(c, locked);
+            blend.snap(&c, locked);
             let normal = blend.apply(c);
             c.composition_override = Some(aim);
             for _ in 0..6 {
-                blend.advance(c, locked);
+                blend.advance(&c, locked);
             }
             let partial = blend.apply(c);
             assert!(partial.distance > aim.distance && partial.distance < normal.distance);
             assert!(partial.shoulder_offset > 0 && partial.shoulder_offset < 24);
             c.composition_override = None;
-            blend.advance(c, locked);
+            blend.advance(&c, locked);
             assert!(blend.apply(c).shoulder_offset < partial.shoulder_offset);
             assert!(blend.apply(c).shoulder_offset > 0);
             c.composition_override = Some(aim);
             for _ in 0..24 {
-                blend.advance(c, !locked);
+                blend.advance(&c, !locked);
             }
             assert!((blend.apply(c).distance - aim.distance).abs() <= 1);
             assert!((blend.apply(c).shoulder_offset - 24).abs() <= 1);
             c.composition_override = None;
             for _ in 0..120 {
-                blend.advance(c, locked);
+                blend.advance(&c, locked);
             }
             assert_eq!(blend.apply(c).distance, normal.distance);
             assert_eq!(blend.apply(c).shoulder_offset, 0);
@@ -253,13 +296,13 @@ mod tests {
         let mut blend = ProfileBlend::new();
         let projection = WorldProjection::new(160, 120, 320, 4);
         blend.set_base_projection(projection);
-        blend.snap(c, false);
+        blend.snap(&c, false);
         assert!((303..=306).contains(&blend.projection(projection).focal_length));
-        blend.advance(c, true);
+        blend.advance(&c, true);
         assert!(blend.values[0] > 219 * 4096 && blend.values[0] < 244 * 4096);
         assert!(blend.distance < blend.values[0]);
         for _ in 0..1000 {
-            blend.advance(c, true);
+            blend.advance(&c, true);
         }
         assert_eq!(
             (
@@ -271,7 +314,7 @@ mod tests {
         );
         assert!((281..=284).contains(&blend.projection(projection).focal_length));
         for _ in 0..1000 {
-            blend.advance(c, false);
+            blend.advance(&c, false);
         }
         assert_eq!(
             (
@@ -290,19 +333,19 @@ mod tests {
         let projection = WorldProjection::new(160, 120, 320, 4);
         let mut blend = ProfileBlend::new();
         blend.set_base_projection(projection);
-        blend.snap(c, false);
+        blend.snap(&c, false);
         assert_eq!(blend.projection(projection), projection);
         for _ in 0..1000 {
-            blend.advance(c, true);
+            blend.advance(&c, true);
         }
         assert!(blend.projection(projection).focal_length < projection.focal_length);
         for _ in 0..1000 {
-            blend.advance(c, false);
+            blend.advance(&c, false);
         }
         assert_eq!(blend.projection(projection), projection);
         c.lock_profile = None;
         c.blend_profiles = false;
-        blend.advance(c, false);
+        blend.advance(&c, false);
         assert_eq!(blend.apply(c), c);
         assert_eq!(blend.projection(projection), projection);
     }
@@ -313,18 +356,18 @@ mod tests {
         let projection = WorldProjection::new(160, 120, 320, 4);
         let mut blend = ProfileBlend::new();
         blend.set_base_projection(projection);
-        blend.snap(c, false);
+        blend.snap(&c, false);
         assert_eq!(blend.projection(projection), projection);
         c.fov_y_degrees = 48;
         for _ in 0..1000 {
-            blend.advance(c, false);
+            blend.advance(&c, false);
         }
         assert!(blend.projection(projection).focal_length < 280);
         c.fov_y_degrees = 0;
-        blend.advance(c, false);
+        blend.advance(&c, false);
         assert_ne!(blend.projection(projection), projection);
         for _ in 0..1000 {
-            blend.advance(c, false);
+            blend.advance(&c, false);
         }
         assert_eq!(blend.projection(projection), projection);
     }
@@ -334,11 +377,11 @@ mod tests {
         let mut c = config();
         c.blend_profiles = false;
         let mut blend = ProfileBlend::new();
-        blend.snap(c, false);
-        blend.advance(c, true);
+        blend.snap(&c, false);
+        blend.advance(&c, true);
         assert!(blend.changing());
         assert_eq!(blend.apply(c).distance, 244);
-        blend.advance(c, true);
+        blend.advance(&c, true);
         assert!(!blend.changing());
     }
 }
