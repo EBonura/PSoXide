@@ -724,8 +724,11 @@ pub(super) fn step_panels(eye: [i32; 3], focal: i32) {
     // SAFETY: single-threaded guest; the view is written by the draw. Before the first draw (the
     // loading screen) the panels are read for a camera looking along the axis: every heading is
     // read whichever way the camera looks.
-    let rotation = unsafe { *core::ptr::addr_of!(LAST_VIEW) }
-        .unwrap_or([[4096, 0, 0], [0, 4096, 0], [0, 0, 4096]]);
+    let rotation = unsafe { *core::ptr::addr_of!(LAST_VIEW) }.unwrap_or([
+        [4096, 0, 0],
+        [0, 4096, 0],
+        [0, 0, 4096],
+    ]);
     let rotation = &rotation;
     let (_, forward) = psx_grid::render::plan_axes(rotation);
     // `tan` of the pitch: the forward row's height over its plan length.

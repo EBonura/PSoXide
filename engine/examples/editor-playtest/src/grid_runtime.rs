@@ -1408,11 +1408,14 @@ impl GridRuntime {
                     if !total.overflowed && crate::vram_runtime::has_panels() {
                         if let Some((atlas, tpage)) = crate::vram_runtime::card_atlas() {
                             let second = crate::vram_runtime::panel_atlas();
-                            use crate::generated::{GRID_PANEL_FOCAL, GRID_PANEL_REAL, GRID_PANEL_SECTOR};
+                            use crate::generated::{
+                                GRID_PANEL_FOCAL, GRID_PANEL_REAL, GRID_PANEL_SECTOR,
+                            };
                             use psx_grid::render::{
                                 draw_panel, PanelCamera, PanelRays, PanelRef, PanelScratch,
                             };
-                            static PANEL_RAYS: PanelRays = PanelRays::new(GRID_PANEL_FOCAL, GRID_PANEL_SECTOR);
+                            static PANEL_RAYS: PanelRays =
+                                PanelRays::new(GRID_PANEL_FOCAL, GRID_PANEL_SECTOR);
                             static mut PANEL_SCRATCH: PanelScratch = PanelScratch::new();
                             let mut list: [Option<PanelRef<'static>>; 6] = [None; 6];
                             let count = crate::vram_runtime::panel_drawables(&mut list);

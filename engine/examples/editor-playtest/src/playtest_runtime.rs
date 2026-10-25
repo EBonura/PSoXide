@@ -1829,7 +1829,12 @@ impl Playtest {
         &self,
         camera: WorldCamera,
     ) -> Option<RuntimeRoomLighting<'_>> {
-        room_lighting_of(&self.world_rt, self.room_index, self.current_ambient_rgb, camera)
+        room_lighting_of(
+            &self.world_rt,
+            self.room_index,
+            self.current_ambient_rgb,
+            camera,
+        )
     }
 
     pub(super) fn free_orbit_camera(&self) -> WorldCamera {
