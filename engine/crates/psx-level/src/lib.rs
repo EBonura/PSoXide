@@ -28,10 +28,12 @@
 #![no_std]
 #![warn(missing_docs)]
 
+#[cfg(feature = "wire")]
 extern crate alloc;
 
 pub mod sky_tiles;
 mod stable;
+#[cfg(feature = "wire")]
 pub mod wire;
 pub use stable::{position_of, StableId};
 
