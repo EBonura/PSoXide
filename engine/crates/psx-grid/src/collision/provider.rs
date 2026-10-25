@@ -85,7 +85,7 @@ impl TraceMemo {
     fn find(&self, key: &[i32; 9]) -> Option<CollisionTrace> {
         self.entries[..usize::from(self.used)]
             .iter()
-            .find(|entry| entry.key == *key)
+            .find(|entry| same_key(&entry.key, key))
             .map(|entry| entry.trace)
     }
 
@@ -107,6 +107,22 @@ impl TraceMemo {
         };
         self.entries[slot] = MemoEntry { key, trace };
     }
+}
+
+/// Whether two keys are equal, word by word with an early exit: the array
+/// `==` lowers to a call to `memcmp` on MIPS, which costs more than the whole
+/// compare of a key that differs in its first words (nearly all of them do).
+#[inline(always)]
+fn same_key(a: &[i32; 9], b: &[i32; 9]) -> bool {
+    a[0] == b[0]
+        && a[3] == b[3]
+        && a[2] == b[2]
+        && a[5] == b[5]
+        && a[1] == b[1]
+        && a[4] == b[4]
+        && a[6] == b[6]
+        && a[7] == b[7]
+        && a[8] == b[8]
 }
 
 impl Default for TraceMemo {

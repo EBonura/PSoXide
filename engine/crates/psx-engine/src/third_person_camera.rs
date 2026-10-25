@@ -1996,7 +1996,15 @@ impl PitchCache {
             i32::from(pitch_min_q12),
             i32::from(pitch_max_q12),
         ];
-        if !(self.valid && self.key == key && self.framing == framing) {
+        // Word by word: the array `==` lowers to a call to `memcmp` on MIPS.
+        let same = self.valid
+            && self.framing == framing
+            && self.key[0] == key[0]
+            && self.key[1] == key[1]
+            && self.key[2] == key[2]
+            && self.key[3] == key[3]
+            && self.key[4] == key[4];
+        if !same {
             *self = Self {
                 key,
                 framing,
