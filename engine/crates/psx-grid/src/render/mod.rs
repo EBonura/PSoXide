@@ -198,6 +198,21 @@ pub(crate) const QUAD_PACKET_WORDS: usize = 14;
 /// Worst case for one quad through the shared path (two fan triangles).
 pub(crate) const ROBUST_WORST_WORDS: usize = AFFINE_PACKETS_PER_TRIANGLE * 15 * 3;
 
+/// The stack of a room draw's phases. The loops of the four phases hold more
+/// live values than the CPU has registers, and on the RAM stack every reload
+/// of a spilled one stalls for about six cycles; the scratchpad answers in
+/// one. Only where `$sp` points changes, so the packets are the same bytes.
+///
+/// The grid renderer keeps nothing in the scratchpad, and nothing else is
+/// live around a room draw (the model passes and the collision traces that
+/// share it run in other phases of the frame), so the stack may take all of
+/// it: [`assert_disjoint`](psx_engine::scratchpad::assert_disjoint) records
+/// that. `stack-guard` proves the deepest call tree of a phase (the near-plane
+/// path of the emit phase) fits, and psx-rt's exception handler leaves `$sp`
+/// alone.
+type PhaseStack = psx_engine::scratchpad::ScratchpadStack<0, { psx_engine::scratchpad::SIZE }>;
+const _: () = psx_engine::scratchpad::assert_disjoint(&[PhaseStack::REGION]);
+
 /// Everything a room draw needs besides the room's data.
 pub struct RoomCamera<'a> {
     /// Frustum planes in room-local space.
@@ -345,16 +360,28 @@ impl GridRenderer {
         load_gte_clip_planes(&eye.frustum.planes);
 
         mark(GridPhase::Cells, true);
-        self.select_cells(room, eye.frustum, eye.sector, eye.camera, &mut frame);
+        // SAFETY: see `PhaseStack`.
+        unsafe {
+            PhaseStack::run(|| {
+                self.select_cells(room, eye.frustum, eye.sector, eye.camera, &mut frame)
+            })
+        };
         mark(GridPhase::Cells, false);
         mark(GridPhase::Quads, true);
-        self.select_quads(room, eye.frustum, eye.sector, eye.camera, &mut frame);
+        // SAFETY: see `PhaseStack`.
+        unsafe {
+            PhaseStack::run(|| {
+                self.select_quads(room, eye.frustum, eye.sector, eye.camera, &mut frame)
+            })
+        };
         mark(GridPhase::Quads, false);
         let near_sz = (eye.focal_length / 2 + 2).clamp(1, i32::from(u16::MAX)) as u16;
         mark(GridPhase::Project, true);
-        self.project_corners(room, eye.screen, near_sz, &mut frame);
+        // SAFETY: see `PhaseStack`.
+        unsafe { PhaseStack::run(|| self.project_corners(room, eye.screen, near_sz, &mut frame)) };
         mark(GridPhase::Project, false);
         mark(GridPhase::Emit, true);
+        // The emit phase puts its straight-line loop on the stack itself.
         self.emit(room, eye, materials, out, &mut frame, reverse);
         mark(GridPhase::Emit, false);
         frame

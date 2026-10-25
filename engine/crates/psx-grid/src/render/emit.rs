@@ -41,14 +41,120 @@ impl GridRenderer {
         // Forward: the next word to write. Reverse: the first word written.
         let mut next = if REVERSE { end } else { start };
         let mut packets = 0u32;
-        let cache = self.screen.as_ptr();
-        let window_reset = TextureWindow::NONE.word();
         let mut robust_quads = 0u16;
         let mut robust_packets = 0u32;
         let quad_total = room.render.quads.len();
+        let this = &*self;
+        let count = this.quads.len();
+        let mut position = 0;
+        // The loop over the quads runs with its stack in the scratchpad (see
+        // `PhaseStack`) up to a quad that needs the near-plane path, whose
+        // call tree is too deep for it: that one is drawn here, on the RAM
+        // stack, and the loop goes on after it. The packets keep queue order.
+        while let Some(at) = {
+            // SAFETY: see `PhaseStack`; the fast loop's own tree is shallow.
+            unsafe {
+                PhaseStack::run(|| {
+                    this.emit_straight::<REVERSE>(
+                        room,
+                        materials,
+                        frame,
+                        (start, end),
+                        &mut next,
+                        &mut packets,
+                        position,
+                    )
+                })
+            }
+        } {
+            position = at + 1;
+            // Reverse walks the queue backwards so the stream keeps its order.
+            let q = usize::from(if REVERSE {
+                this.quads[count - 1 - at]
+            } else {
+                this.quads[at]
+            });
+            // SAFETY: queued from valid quad indices (cell quads below
+            // `quad_total`, merged quads after).
+            let quad = unsafe {
+                if q >= quad_total {
+                    room.render.lod_quads.get_unchecked(q - quad_total)
+                } else {
+                    room.render.quads.get_unchecked(q)
+                }
+            };
+            // Its material passed the checks of the loop that sent it here.
+            let Some(material) = materials.get(usize::from(quad.material)) else {
+                continue;
+            };
+            // Near-plane, oversize and saturated quads share one path.
+            // SAFETY: both pointers lie in the packet storage.
+            let room_left = unsafe {
+                if REVERSE {
+                    next.offset_from(start)
+                } else {
+                    end.offset_from(next)
+                }
+            };
+            if room_left < ROBUST_WORST_WORDS as isize {
+                frame.overflowed = true;
+                break;
+            }
+            robust_quads += 1;
+            let before = packets;
+            // SAFETY: room for the worst case was just checked. In reverse
+            // the packets are built at the low end of the free space and then
+            // moved up against the stream written so far.
+            unsafe {
+                if REVERSE {
+                    let built = robust_quad(start, next, room, eye, quad, material, &mut packets);
+                    let words = built.offset_from(start) as usize;
+                    core::ptr::copy(start, next.sub(words), words);
+                    next = next.sub(words);
+                } else {
+                    next = robust_quad(next, end, room, eye, quad, material, &mut packets);
+                }
+            }
+            robust_packets += packets - before;
+        }
+        frame.robust_quads = robust_quads;
+        frame.robust_packets = robust_packets.min(u32::from(u16::MAX)) as u16;
+        frame.packets = packets;
+        // SAFETY: both pointers lie in the packet storage.
+        frame.packet_words = unsafe {
+            if REVERSE {
+                end.offset_from(next)
+            } else {
+                next.offset_from(start)
+            }
+        } as usize;
+    }
+
+    /// The straight-line part of the emit loop: from queue `position` on,
+    /// write the quads the GPU draws as they are. Returns the queue position
+    /// of the first quad that needs the near-plane path, or `None` when the
+    /// queue is done or the packet storage ran out.
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn emit_straight<const REVERSE: bool>(
+        &self,
+        room: &RoomView<'_>,
+        materials: &[GridMaterial],
+        frame: &mut GridFrame,
+        (start, end): (*mut u32, *mut u32),
+        next_word: &mut *mut u32,
+        packets_written: &mut u32,
+        from: usize,
+    ) -> Option<usize> {
+        let mut next = *next_word;
+        let mut packets = *packets_written;
+        let cache = self.screen.as_ptr();
+        let window_reset = TextureWindow::NONE.word();
+        let quad_total = room.render.quads.len();
         let queue = self.quads.as_slice();
         let count = queue.len();
-        for position in 0..count {
+        let mut stop = None;
+        for position in from..count {
             // Reverse walks the queue backwards so the stream keeps its order.
             let q = usize::from(if REVERSE {
                 queue[count - 1 - position]
@@ -97,52 +203,25 @@ impl GridRenderer {
             // Every corner on screen and in front of the near plane: nothing
             // else to prove. Otherwise the corners must still fit the GPU.
             let fast = any == 0 || (any & NEAR == 0 && gpu_safe(&[s0, s1, s2, s3], triangle));
-            if fast {
-                let sum = u32::from(s0.sz) + u32::from(s1.sz) + u32::from(s2.sz);
-                let otz = if triangle {
-                    (sum * 0x155) >> 12
-                } else {
-                    (sum + u32::from(s3.sz)) >> 4
-                };
-                if otz == 0 || otz >= 2048 {
-                    frame.depth_skipped += 1;
-                    continue;
-                }
-                let words = if triangle {
-                    QUAD_PACKET_WORDS - 3
-                } else {
-                    QUAD_PACKET_WORDS
-                };
-                // SAFETY: both pointers lie in the packet storage.
-                let room_left = unsafe {
-                    if REVERSE {
-                        next.offset_from(start)
-                    } else {
-                        end.offset_from(next)
-                    }
-                };
-                if room_left < words as isize {
-                    frame.overflowed = true;
-                    break;
-                }
-                // SAFETY: room for `words` was just checked.
-                unsafe {
-                    if REVERSE {
-                        next = next.sub(words);
-                    }
-                    let after = if triangle {
-                        write_triangle(next, quad, material, [s0, s1, s2], otz, origin, window)
-                    } else {
-                        write_quad(next, quad, material, [s0, s1, s2, s3], otz, origin, window)
-                    };
-                    if !REVERSE {
-                        next = after;
-                    }
-                }
-                packets += 1;
+            if !fast {
+                stop = Some(position);
+                break;
+            }
+            let sum = u32::from(s0.sz) + u32::from(s1.sz) + u32::from(s2.sz);
+            let otz = if triangle {
+                (sum * 0x155) >> 12
+            } else {
+                (sum + u32::from(s3.sz)) >> 4
+            };
+            if otz == 0 || otz >= 2048 {
+                frame.depth_skipped += 1;
                 continue;
             }
-            // Near-plane, oversize and saturated quads share one path.
+            let words = if triangle {
+                QUAD_PACKET_WORDS - 3
+            } else {
+                QUAD_PACKET_WORDS
+            };
             // SAFETY: both pointers lie in the packet storage.
             let room_left = unsafe {
                 if REVERSE {
@@ -151,38 +230,29 @@ impl GridRenderer {
                     end.offset_from(next)
                 }
             };
-            if room_left < ROBUST_WORST_WORDS as isize {
+            if room_left < words as isize {
                 frame.overflowed = true;
                 break;
             }
-            robust_quads += 1;
-            let before = packets;
-            // SAFETY: room for the worst case was just checked. In reverse
-            // the packets are built at the low end of the free space and then
-            // moved up against the stream written so far.
+            // SAFETY: room for `words` was just checked.
             unsafe {
                 if REVERSE {
-                    let built = robust_quad(start, next, room, eye, quad, material, &mut packets);
-                    let words = built.offset_from(start) as usize;
-                    core::ptr::copy(start, next.sub(words), words);
                     next = next.sub(words);
+                }
+                let after = if triangle {
+                    write_triangle(next, quad, material, [s0, s1, s2], otz, origin, window)
                 } else {
-                    next = robust_quad(next, end, room, eye, quad, material, &mut packets);
+                    write_quad(next, quad, material, [s0, s1, s2, s3], otz, origin, window)
+                };
+                if !REVERSE {
+                    next = after;
                 }
             }
-            robust_packets += packets - before;
+            packets += 1;
         }
-        frame.robust_quads = robust_quads;
-        frame.robust_packets = robust_packets.min(u32::from(u16::MAX)) as u16;
-        frame.packets = packets;
-        // SAFETY: both pointers lie in the packet storage.
-        frame.packet_words = unsafe {
-            if REVERSE {
-                end.offset_from(next)
-            } else {
-                next.offset_from(start)
-            }
-        } as usize;
+        *next_word = next;
+        *packets_written = packets;
+        stop
     }
 }
 
