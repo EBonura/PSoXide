@@ -941,6 +941,10 @@ fn cut(from: &ClipCorner, to: &ClipCorner, axis: usize, bound: i32, winding: i32
     }
     // `from + (to - from) * numerator / denominator`, rounded to nearest.
     let nearest = |a: i32, b: i32| -> i32 {
+        if a == b {
+            // The sum below is `a * denominator + denominator / 2`.
+            return a;
+        }
         (a * denominator + (b - a) * numerator + denominator / 2).div_euclid(denominator)
     };
     let exact = from_b * denominator + (to_b - from_b) * numerator;
@@ -979,11 +983,20 @@ fn cut(from: &ClipCorner, to: &ClipCorner, axis: usize, bound: i32, winding: i32
 
 /// Clip a triangle to the window. Returns the convex polygon (at most seven
 /// corners) in the triangle's winding.
+///
+/// Each of the four bounds turns the corners it is given into the next list.
+/// Two lists take turns, so nothing is cleared or copied between bounds.
 fn clip_to_window(triangle: [ClipCorner; 3]) -> ([ClipCorner; 8], usize) {
     let winding = cross(&triangle[0], &triangle[1], &triangle[2]);
-    let mut current = [ClipCorner::default(); 8];
-    current[..3].copy_from_slice(&triangle);
+    let mut lists = [[ClipCorner::default(); 8]; 2];
+    lists[0][..3].copy_from_slice(&triangle);
     let mut count = 3;
+    // The list the corners are in now, and where its first corner is: a bound
+    // that keeps every corner hands them on turned by one (its walk ends each
+    // corner on the edge's far end), which is a shift of `first` here and a
+    // copy only once, at the end.
+    let mut now = 0;
+    let mut first = 0;
     // (axis, bound, keeps coordinates at least / at most the bound)
     let bounds = [
         (0usize, WINDOW_X.0, true),
@@ -1000,11 +1013,20 @@ fn clip_to_window(triangle: [ClipCorner; 3]) -> ([ClipCorner; 8], usize) {
                 coordinate(c) <= bound
             }
         };
-        let mut next = [ClipCorner::default(); 8];
+        if lists[now][..count].iter().all(inside) {
+            first = (first + 1) % count;
+            continue;
+        }
+        let (low, high) = lists.split_at_mut(1);
+        let (current, next) = if now == 0 {
+            (&low[0], &mut high[0])
+        } else {
+            (&high[0], &mut low[0])
+        };
         let mut kept = 0;
         for index in 0..count {
-            let from = current[index];
-            let to = current[(index + 1) % count];
+            let from = current[(first + index) % count];
+            let to = current[(first + index + 1) % count];
             match (inside(&from), inside(&to)) {
                 (true, true) => {
                     next[kept] = to;
@@ -1022,13 +1044,15 @@ fn clip_to_window(triangle: [ClipCorner; 3]) -> ([ClipCorner; 8], usize) {
                 (false, false) => {}
             }
         }
-        current = next;
+        now ^= 1;
+        first = 0;
         count = kept;
         if count < 3 {
-            return (current, 0);
+            return (lists[now], 0);
         }
     }
-    (current, count)
+    lists[now][..count].rotate_left(first);
+    (lists[now], count)
 }
 
 impl PacketSink {
@@ -2094,6 +2118,157 @@ mod tests {
             let (a, b) = (&polygon[index], &polygon[(index + 1) % polygon.len()]);
             cross(a, b, &point) * winding >= -slack
         })
+    }
+
+    // The clip as it was before its two lists took turns and a channel that
+    // does not change stopped dividing, frozen so the rewrite is held to the
+    // same corners.
+    fn cut_frozen(
+        from: &ClipCorner,
+        to: &ClipCorner,
+        axis: usize,
+        bound: i32,
+        winding: i32,
+    ) -> ClipCorner {
+        // Coordinates along the cut axis, then along the other one.
+        let (from_a, from_b, to_a, to_b) = if axis == 0 {
+            (from.x, from.y, to.x, to.y)
+        } else {
+            (from.y, from.x, to.y, to.x)
+        };
+        let mut numerator = bound - from_a;
+        let mut denominator = to_a - from_a;
+        if denominator < 0 {
+            numerator = -numerator;
+            denominator = -denominator;
+        }
+        // `from + (to - from) * numerator / denominator`, rounded to nearest.
+        let nearest = |a: i32, b: i32| -> i32 {
+            (a * denominator + (b - a) * numerator + denominator / 2).div_euclid(denominator)
+        };
+        let exact = from_b * denominator + (to_b - from_b) * numerator;
+        let low = exact.div_euclid(denominator);
+        let point = |other: i32| -> (i32, i32) {
+            if axis == 0 {
+                (bound, other)
+            } else {
+                (other, bound)
+            }
+        };
+        // Which side of the edge a candidate lies on, positive toward the interior.
+        let interior = |other: i32| -> i32 {
+            let (x, y) = point(other);
+            let side = (to.x - from.x) * (y - from.y) - (to.y - from.y) * (x - from.x);
+            side * winding.signum()
+        };
+        let other = if exact.rem_euclid(denominator) != 0 && interior(low + 1) < interior(low) {
+            low + 1
+        } else {
+            low
+        };
+        let (x, y) = point(other);
+        ClipCorner {
+            x,
+            y,
+            u: nearest(from.u, to.u),
+            v: nearest(from.v, to.v),
+            color: [
+                nearest(from.color[0], to.color[0]),
+                nearest(from.color[1], to.color[1]),
+                nearest(from.color[2], to.color[2]),
+            ],
+        }
+    }
+
+    fn clip_to_window_frozen(triangle: [ClipCorner; 3]) -> ([ClipCorner; 8], usize) {
+        let winding = cross(&triangle[0], &triangle[1], &triangle[2]);
+        let mut current = [ClipCorner::default(); 8];
+        current[..3].copy_from_slice(&triangle);
+        let mut count = 3;
+        // (axis, bound, keeps coordinates at least / at most the bound)
+        let bounds = [
+            (0usize, WINDOW_X.0, true),
+            (0, WINDOW_X.1, false),
+            (1, WINDOW_Y.0, true),
+            (1, WINDOW_Y.1, false),
+        ];
+        for (axis, bound, keep_above) in bounds {
+            let coordinate = |c: &ClipCorner| if axis == 0 { c.x } else { c.y };
+            let inside = |c: &ClipCorner| {
+                if keep_above {
+                    coordinate(c) >= bound
+                } else {
+                    coordinate(c) <= bound
+                }
+            };
+            let mut next = [ClipCorner::default(); 8];
+            let mut kept = 0;
+            for index in 0..count {
+                let from = current[index];
+                let to = current[(index + 1) % count];
+                match (inside(&from), inside(&to)) {
+                    (true, true) => {
+                        next[kept] = to;
+                        kept += 1;
+                    }
+                    (true, false) => {
+                        next[kept] = cut_frozen(&from, &to, axis, bound, winding);
+                        kept += 1;
+                    }
+                    (false, true) => {
+                        next[kept] = cut_frozen(&from, &to, axis, bound, winding);
+                        next[kept + 1] = to;
+                        kept += 2;
+                    }
+                    (false, false) => {}
+                }
+            }
+            current = next;
+            count = kept;
+            if count < 3 {
+                return (current, 0);
+            }
+        }
+        (current, count)
+    }
+
+    #[test]
+    fn the_clip_gives_the_corners_it_always_gave() {
+        let mut state = 0x2468_ace1u32;
+        let mut next = |span: i32| -> i32 {
+            state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            ((state >> 8) % (2 * span as u32)) as i32 - span
+        };
+        let mut clipped = 0;
+        for round in 0..4000 {
+            // Some triangles keep a flat channel, as a flat-lit wall does.
+            let flat = round % 3 == 0;
+            let mut triangle = [(); 3].map(|_| {
+                let mut c = corner(next(5000), next(4000), next(128) + 128, next(128) + 128);
+                c.color = if flat {
+                    [90, 90, 90]
+                } else {
+                    [next(128) + 128, next(128) + 128, 64]
+                };
+                c
+            });
+            if flat {
+                triangle[2].color = triangle[0].color;
+            }
+            let (new, new_count) = clip_to_window(triangle);
+            let (old, old_count) = clip_to_window_frozen(triangle);
+            assert_eq!(new_count, old_count);
+            clipped += usize::from(new_count > 0);
+            for k in 0..new_count {
+                let (n, o) = (&new[k], &old[k]);
+                assert_eq!(
+                    (n.x, n.y, n.u, n.v, n.color),
+                    (o.x, o.y, o.u, o.v, o.color),
+                    "corner {k} of round {round}"
+                );
+            }
+        }
+        assert!(clipped > 500, "the sample must exercise the clip");
     }
 
     #[test]
