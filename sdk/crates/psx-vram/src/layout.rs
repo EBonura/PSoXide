@@ -169,8 +169,8 @@ impl Ledger {
         self.live & (1 << owner.index()) != 0
     }
 
-    /// The live owners whose pixels a loan took and [`end`](Self::end) has not handed back, as a
-    /// bit set.
+    /// The live owners some of whose pixels a loan took and [`end`](Self::end) has not handed back,
+    /// as a bit set.
     pub const fn displaced(&self) -> u32 {
         self.displaced
     }
@@ -192,15 +192,6 @@ impl Ledger {
         if self.live & layout.overlaps[owner.index()] != 0 {
             self.violation(owner);
         }
-        self.live |= 1 << owner.index();
-    }
-
-    /// The owner's region becomes live inside another live owner's pool without displacing it:
-    /// the pool's allocator keeps clear of this rectangle (a picture placed in the part of an
-    /// atlas band that the atlas leaves free), so nothing there has lost its pixels.
-    #[inline(never)]
-    #[optimize(size)]
-    pub fn coexist(&mut self, owner: Owner) {
         self.live |= 1 << owner.index();
     }
 
@@ -237,9 +228,10 @@ impl Ledger {
         restore
     }
 
-    /// The gate every upload passes: `true` when `owner` is live, no loan displaced it and `rect`
-    /// lies inside its region. A `false` is counted, and asserts in a debug build; the caller
-    /// may still go ahead.
+    /// The gate every upload passes: `true` when `owner` is live, `rect` lies inside its
+    /// region, and no live owner that a loan put over it covers `rect` (a displaced owner may
+    /// still write the part of its region the loan left alone). A `false` is counted, and
+    /// asserts in a debug build; the caller may still go ahead.
     #[inline(never)]
     #[optimize(size)]
     pub fn permit<const N: usize>(
@@ -248,13 +240,31 @@ impl Ledger {
         owner: Owner,
         rect: VramRect,
     ) -> bool {
-        let bit = 1 << owner.index();
+        let layout = core::hint::black_box(layout);
         let own = layout.corners[owner.index()];
-        let ok = (self.live & !self.displaced) & bit != 0
+        let mut ok = self.live & (1 << owner.index()) != 0
             && own[0] <= rect.x
             && own[1] <= rect.y
             && rect.x + rect.w <= own[2]
             && rect.y + rect.h <= own[3];
+        if ok && self.displaced & (1 << owner.index()) != 0 {
+            let mut over = self.live & layout.overlaps[owner.index()];
+            let mut i = 0;
+            while over != 0 {
+                if over & 1 != 0 {
+                    let c = layout.corners[i];
+                    if c[0] < rect.x + rect.w
+                        && rect.x < c[2]
+                        && c[1] < rect.y + rect.h
+                        && rect.y < c[3]
+                    {
+                        ok = false;
+                    }
+                }
+                over >>= 1;
+                i += 1;
+            }
+        }
         if !ok {
             self.violation(owner);
         }
@@ -292,14 +302,26 @@ mod tests {
     }
 
     #[test]
-    fn a_picture_in_the_free_part_of_a_pool_displaces_nothing() {
+    fn a_displaced_owner_may_write_where_the_loan_is_not() {
         let mut l = Ledger::with_live(bit(A) | bit(B));
-        l.coexist(C);
-        assert!(l.is_live(C));
-        assert_eq!(l.displaced(), 0);
-        assert!(l.permit(&L, A, VramRect::new(0, 0, 8, 8)));
-        assert!(l.permit(&L, C, VramRect::new(32, 0, 8, 8)));
-        assert_eq!(l.end(&L, bit(C)), 0);
+        l.borrow(&L, C); // x 32..96, y 0..32: over the right of A and the left of B
+        assert_eq!(l.displaced(), bit(A) | bit(B));
+        assert!(
+            l.permit(&L, A, VramRect::new(0, 32, 64, 32)),
+            "below the loan"
+        );
+        assert!(
+            l.permit(&L, A, VramRect::new(0, 0, 32, 32)),
+            "left of the loan"
+        );
+        #[cfg(not(debug_assertions))]
+        {
+            assert!(
+                !l.permit(&L, A, VramRect::new(24, 0, 16, 16)),
+                "under the loan"
+            );
+            assert_eq!(l.violations(), 1);
+        }
     }
 
     #[test]
@@ -324,8 +346,8 @@ mod tests {
         );
         l.borrow(&L, C);
         assert!(
-            !l.permit(&L, A, VramRect::new(0, 0, 8, 8)),
-            "A is displaced"
+            !l.permit(&L, A, VramRect::new(0, 0, 40, 8)),
+            "A's pixels there are under C"
         );
         assert_eq!(l.violations(), 3);
         assert_eq!(l.last_violation(), A);
