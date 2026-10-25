@@ -28,6 +28,12 @@ fn material() -> GridMaterial {
 /// One cell with a wall on the plane `x = 80`, facing -X: a plain quad
 /// first, then a repeating one with the given raw UV corner `far`.
 fn chunk(far: u8) -> Vec<u8> {
+    chunk_with_cell_range(far, (0, 80))
+}
+
+/// [`chunk`] whose cell claims the vertical extent `range`, as the cook
+/// would record it for geometry up there.
+fn chunk_with_cell_range(far: u8, range: (i16, i16)) -> Vec<u8> {
     let wall = |first: usize| {
         let mut quad = Quad {
             v: [0, 1, 2, 3],
@@ -73,8 +79,8 @@ fn chunk(far: u8) -> Vec<u8> {
             first: 0,
             count: 2,
             flags: 0,
-            min_y: 0,
-            max_y: 80,
+            min_y: range.0,
+            max_y: range.1,
         }],
         material_use: vec![0],
         ..RoomChunk::default()
@@ -85,7 +91,12 @@ fn chunk(far: u8) -> Vec<u8> {
 /// Draw the chunk from `eye_x` (room-local, looking along +X) and return
 /// the packet words.
 fn draw(far: u8, eye_x: i32) -> (GridFrame, Vec<u32>) {
-    let words = aligned_copy(&chunk(far));
+    draw_chunk(chunk(far), eye_x)
+}
+
+/// [`draw`] of a given chunk.
+fn draw_chunk(chunk: Vec<u8>, eye_x: i32) -> (GridFrame, Vec<u32>) {
+    let words = aligned_copy(&chunk);
     let bytes = words_as_bytes(&words, words.len() * 4);
     let room = RoomView::parse(bytes).expect("room parses");
     room.validate_full(1).expect("room validates");
@@ -192,4 +203,25 @@ fn near_plane_repeat_quads_take_the_windowed_packet_shape() {
     }
     // No plain packet carries the window.
     assert!(packets.iter().any(|p| !windowed(p)));
+}
+
+#[test]
+fn a_cell_wholly_above_or_below_the_view_is_not_queued() {
+    // The eye looks along +X from 40 units up; the frustum there is a few
+    // hundred units tall.
+    let (seen, stream) = draw_chunk(chunk_with_cell_range(63, (0, 80)), -120);
+    assert_eq!(seen.cells_visible, 1, "{seen:?}");
+    assert!(seen.packets > 0);
+    for range in [(9_000, 9_080), (-9_080, -9_000)] {
+        let (frame, _) = draw_chunk(chunk_with_cell_range(63, range), -120);
+        assert_eq!(frame.cells_visible, 0, "{range:?}: {frame:?}");
+        assert_eq!(frame.packets, 0, "{range:?}");
+    }
+    // A cell that merely reaches into the view stays.
+    let (reaching, again) = draw_chunk(chunk_with_cell_range(63, (-9_000, 40)), -120);
+    assert_eq!(reaching.cells_visible, 1, "{reaching:?}");
+    assert_eq!(
+        again, stream,
+        "the recorded range does not change the packets"
+    );
 }
