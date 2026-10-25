@@ -558,6 +558,20 @@ const START_MARGIN_SECTORS: i32 = 10;
 /// follow camera's, as for the room cards.
 const PANEL_EYE_SECTORS: f32 = 1.45;
 
+/// How far out of its eye the camera is, in tenths of the eyes' spacing, when the rooms the eye
+/// leaves out of its panels are chosen: it leaves out the rooms the flood draws whole from
+/// wherever the camera is within this of it. Too small and rooms are left out that are not drawn
+/// whole after all (a hole); too large and the rooms near the eye stay in as occluders hiding what
+/// stands behind them once the camera has walked on (a hole as well). Share of the far pixels the
+/// level shows and the game does not, on the 0851 tape: with the lattice's eyes, 0.86 spacings
+/// (what this was) 6.7 %, 0.5 5.2 %, 0.3 5.5 %, none left out 7.5 %; with the eyes of
+/// [`PANEL_CAMERA_OUT_TENTHS`], 0.5: 3.2 %.
+const PANEL_REACH_TENTHS: i32 = 5;
+
+/// How far from a standable floor, in tenths of the spacing, a bake eye is still put: the camera
+/// follows the player out over the edge of the level.
+const PANEL_CAMERA_OUT_TENTHS: i32 = 7;
+
 /// Floors this many sectors apart (or more) in height get bake eyes of their own where they
 /// stand over the same lattice cell: a bridge over the ground.
 const PANEL_STOREY_SECTORS: f32 = 2.5;
@@ -611,6 +625,46 @@ pub fn panel_eyes(
                 (y / (PANEL_STOREY_SECTORS * sector as f32)).floor() as i32,
             );
             groups.entry(cell).or_default().push((ri, x, y, z));
+        }
+    }
+    // Sectors without a floor within [`PANEL_CAMERA_OUT_TENTHS`] of a spacing of one a body stands
+    // on also get samples (at that floor's height): the follow camera stands out over the edge
+    // and the eye nearest it should be near, not a lattice cell away. Without them the camera
+    // was more than 8 sectors from its eye a third of the time on the east side of the
+    // Citadel.
+    let dilate: i32 = spacing * PANEL_CAMERA_OUT_TENTHS / 10;
+    if dilate > 0 {
+        let key = |x: f32, z: f32| ((x / sector as f32).floor() as i32, (z / sector as f32).floor() as i32);
+        let stood: Vec<(usize, f32, f32, f32)> = groups.values().flatten().copied().collect();
+        let mut taken: std::collections::HashSet<(i32, i32)> =
+            stood.iter().map(|s| key(s.1, s.3)).collect();
+        // Nearest standable sector first, so a point takes the height of the floor it hangs near.
+        let mut candidates: std::collections::HashMap<(i32, i32), (i32, usize, f32)> = Default::default();
+        for (k, s) in stood.iter().enumerate() {
+            let (sx, sz) = key(s.1, s.3);
+            for dz in -dilate..=dilate {
+                for dx in -dilate..=dilate {
+                    let d = dx * dx + dz * dz;
+                    if d == 0 || d > dilate * dilate || taken.contains(&(sx + dx, sz + dz)) {
+                        continue;
+                    }
+                    let e = candidates.entry((sx + dx, sz + dz)).or_insert((d, k, s.2));
+                    if d < e.0 {
+                        *e = (d, k, s.2);
+                    }
+                }
+            }
+        }
+        taken.clear();
+        for ((cx, cz), (_, k, y)) in candidates {
+            let x = (cx * sector + sector / 2) as f32;
+            let z = (cz * sector + sector / 2) as f32;
+            let cell = (
+                (x / (spacing * sector) as f32).floor() as i32,
+                (z / (spacing * sector) as f32).floor() as i32,
+                (y / (PANEL_STOREY_SECTORS * sector as f32)).floor() as i32,
+            );
+            groups.entry(cell).or_default().push((stood[k].0, x, y, z));
         }
     }
     let height = PANEL_EYE_SECTORS * sector as f32;
@@ -695,7 +749,7 @@ fn bake_panels(
     // The rooms the flood draws whole from anywhere within a lattice cell of an eye: the eye's
     // own flood with the radius cut by the distance the eye can be from its lattice vertex
     // (the flood's distance is within 7 percent of straight).
-    let reach = spacing * sector * 4 / 5;
+    let reach = spacing * sector * PANEL_REACH_TENTHS / 10;
     let radius = (i32::from(flood.near_radius) * sector - reach * 107 / 100).max(0);
     let rooms = cooked.level.rooms.len();
     let exclude = |spec: &cook::panels::EyeSpec| -> Vec<bool> {

@@ -384,6 +384,13 @@ impl World {
         self.tris.rooms.len()
     }
 
+    /// The box (low and high corner, runtime units) round the geometry of `room`; `None` for a
+    /// room that draws nothing.
+    pub fn room_bounds(&self, room: usize) -> Option<([f32; 3], [f32; 3])> {
+        let (range, lo, hi) = self.tris.rooms.get(room)?;
+        (!range.is_empty()).then_some((*lo, *hi))
+    }
+
     /// Triangles in the level.
     pub fn triangles(&self) -> usize {
         self.tris.triangles.len()
