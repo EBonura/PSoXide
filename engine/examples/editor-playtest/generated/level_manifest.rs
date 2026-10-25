@@ -61,6 +61,14 @@ pub const GRID_CARD_FADE: i32 = 0;
 /// No card is drawn closer than this (the rooms there are drawn whole).
 pub const GRID_CARD_NEAR: i32 = 0;
 pub const GRID_CARD_BACKDROP: [[u8; 3]; 3] = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+
+/// Far panels: none in the placeholder.
+pub const GRID_PANEL_EYES: &[[i16; 3]] = &[];
+pub const GRID_PANEL_BLOCKS: &[u32] = &[];
+pub const GRID_PANEL_FOCAL: i32 = 0;
+pub const GRID_PANEL_SPACING: i32 = 0;
+pub const GRID_PANEL_SECTOR: i32 = 0;
+pub const GRID_PANEL_REAL: i32 = 0;
 pub const LEN_ROOMS: usize = 0;
 pub const LEN_ROOM_REFLECTION_PROBES: usize = 0;
 pub const LEN_LIGHTS: usize = 0;
