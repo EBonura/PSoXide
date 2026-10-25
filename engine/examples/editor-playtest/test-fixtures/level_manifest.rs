@@ -27,6 +27,9 @@ pub const UI_SFX_PACK_FIRST_CHUNK: u32 = 0;
 pub const UI_SFX_MAX_SAMPLE_BYTES: usize = 0;
 pub const GAMEPLAY_PACK_MAX_CHUNK_BYTES: usize = 0;
 pub const WORLD_PACK_START_LBA: u32 = 1024;
+
+/// Where WORLD.PAK holds its first three chunks: none in the placeholder.
+pub const WORLD_PACK_FIRST_CHUNKS: [[u32; 4]; 3] = [[0; 4]; 3];
 pub const GRID_ROOM_COUNT: usize = 0;
 pub const GRID_ROOM_POOL_PAGES: usize = 1;
 pub const GRID_ROOM_ENTRIES: usize = 1;
@@ -67,6 +70,8 @@ pub const GRID_CARD_BACKDROP: [[u8; 3]; 3] = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
 /// Far panels: none in the fixture.
 pub const GRID_PANEL_EYES: &[[i16; 3]] = &[];
 pub const GRID_PANEL_BLOCKS: &[u32] = &[];
+/// Sectors each eye's block takes.
+pub const GRID_PANEL_SECTORS: &[u16] = &[];
 pub const GRID_PANEL_FOCAL: i32 = 0;
 pub const GRID_PANEL_SPACING: i32 = 0;
 pub const GRID_PANEL_SECTOR: i32 = 0;
