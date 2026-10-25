@@ -150,10 +150,10 @@ pub struct PanelCounters {
     pub settling: u32,
     /// Tiles whose LZ block did not decode (a damaged disc); they are drawn blank.
     pub undecodable: u32,
-    /// Which stages of the window hold a read (bit 0 the first, bit 1 the second), bit 2 when
-    /// the one in the first landed.
+    /// With `METER` on: which stages of the window hold a read (bit 0 the first, bit 1 the
+    /// second), bit 2 when the one in the first landed.
     pub stage_mask: u32,
-    /// Eye indexes asked for and not queued yet.
+    /// With `METER` on: eye indexes asked for and not queued yet.
     pub indexes_waiting: u32,
     /// Landed reads of tiles for eyes the camera is not at yet that gave up their stage to a
     /// read the eye in use was waiting for.
@@ -745,21 +745,23 @@ impl<K: Copy> PanelStream<K> {
         }
         self.ticks = self.ticks.wrapping_add(1);
         self.start_reads(transport, window, input);
-        self.counters.stage_mask = self
-            .stages
-            .iter()
-            .enumerate()
-            .map(|(i, s)| u32::from(!matches!(s, Stage::Free)) << i)
-            .sum::<u32>()
-            | match &self.stages[0] {
-                Stage::Busy(run) if run.landed => 4,
-                _ => 0,
-            };
-        self.counters.indexes_waiting = self
-            .lists
-            .iter()
-            .filter(|l| l.eye != u16::MAX && l.state == Header::Wanted)
-            .count() as u32;
+        if METER {
+            self.counters.stage_mask = self
+                .stages
+                .iter()
+                .enumerate()
+                .map(|(i, s)| u32::from(!matches!(s, Stage::Free)) << i)
+                .sum::<u32>()
+                | match &self.stages[0] {
+                    Stage::Busy(run) if run.landed => 4,
+                    _ => 0,
+                };
+            self.counters.indexes_waiting = self
+                .lists
+                .iter()
+                .filter(|l| l.eye != u16::MAX && l.state == Header::Wanted)
+                .count() as u32;
+        }
     }
 
     /// Retire the reads that finished, taking the indexes out of the window.
