@@ -1931,6 +1931,10 @@ impl<
     ///
     /// A no-op for non-streamed (baked) builds: a non-empty sky asset is uploaded
     /// lazily by the render path's `ensure_sky_panorama_uploaded`.
+    ///
+    /// With `cube_atlas_is_overwritten` (a world whose far panels or cards take the sky atlas
+    /// for their pictures and draw a plain backdrop) a cube sky only reserves its pages and
+    /// CLUT: its 192 KiB of pixels, which nothing would show, are not read off the disc.
     #[cfg(feature = "cd-stream-bench")]
     pub fn load_streamed_sky_from_cd<const LEN: usize>(
         &mut self,
@@ -1942,6 +1946,7 @@ impl<
         rooms: &'static [LevelRoomRecord],
         ui_pack_start_lba: u32,
         ui_pack_toc: &'static [LevelWorldPackEntryRecord],
+        cube_atlas_is_overwritten: bool,
     ) {
         for asset in assets {
             if asset.kind != AssetKind::Texture || !asset.bytes.is_empty() {
@@ -1961,7 +1966,14 @@ impl<
             // it through a few KiB instead and upload row bands as they land.
             if kind == SkyTextureKind::Cube {
                 if self
-                    .upload_cube_sky_banded(cd, scratch, asset.id, ui_pack_start_lba, ui_pack_toc)
+                    .upload_cube_sky_banded(
+                        cd,
+                        scratch,
+                        asset.id,
+                        ui_pack_start_lba,
+                        ui_pack_toc,
+                        cube_atlas_is_overwritten,
+                    )
                     .is_none()
                 {
                     telemetry::counter(telemetry::counter::VRAM_CLUT_FULL, 0);
@@ -2013,6 +2025,7 @@ impl<
         asset_id: AssetId,
         ui_pack_start_lba: u32,
         ui_pack_toc: &'static [LevelWorldPackEntryRecord],
+        reserve_only: bool,
     ) -> Option<()> {
         const ASSET_AND_TEXTURE_HEADER_BYTES: usize = 28;
         let halfwords_per_row = DIRECTIONAL_SKY_ATLAS_WIDTH / 4;
@@ -2037,6 +2050,24 @@ impl<
                 return None;
             }
         };
+
+        if reserve_only {
+            self.slots[idx] = Some(VramSlot {
+                asset: asset_id,
+                clut_mode: VramSlotClutMode::DirectionalSky,
+                ready: true,
+                clut_word: clut.uv_word(),
+                tpage_word: left_tpage.uv_word(0),
+                texture_window: TextureWindow::NONE,
+                texture_width: DIRECTIONAL_SKY_ATLAS_WIDTH,
+                texture_height: DIRECTIONAL_SKY_ATLAS_HEIGHT,
+                region: page_region,
+                clut_region,
+            });
+            self.slot_count = self.slot_count.saturating_add(1);
+            let _ = self.residency.mark_vram_resident(asset_id);
+            return Some(());
+        }
 
         // One row plus one sector is the smallest window that always makes
         // progress; round up to keep the staging view word aligned.

@@ -206,14 +206,29 @@ impl GridRuntime {
             return Ok(());
         }
         crate::game_trace("editor-playtest: level read begin");
-        // The pack header names the core (chunk 0), the level's own records
-        // (chunk 1) and the first room chunk (chunk 2); room records count
-        // their sector from the last.
+        // The core (chunk 0), the level's own records (chunk 1) and the first room chunk
+        // (chunk 2; room records count their sector from it). The manifest says where the cook
+        // put them, which saves the read of the pack's header (a seek to the far end of the
+        // pack); a manifest without them (all zero) sends the load to the header.
         let mut found = [WorldChunkInfo::EMPTY; 3];
-        let status =
-            read_world_pack_entries_blocking(cd, WORLD_PACK_START_LBA, &[0, 1, 2], &mut found);
-        if status != ROOM_CHUNK_STATUS_OK {
-            return Err(GridRuntimeInitError::NoCore(status));
+        if crate::generated::WORLD_PACK_FIRST_CHUNKS[0][2] != 0 {
+            for (info, at) in found
+                .iter_mut()
+                .zip(crate::generated::WORLD_PACK_FIRST_CHUNKS)
+            {
+                *info = WorldChunkInfo {
+                    sector_offset: at[0],
+                    sector_count: at[1],
+                    byte_size: at[2] as usize,
+                    checksum: at[3],
+                };
+            }
+        } else {
+            let status =
+                read_world_pack_entries_blocking(cd, WORLD_PACK_START_LBA, &[0, 1, 2], &mut found);
+            if status != ROOM_CHUNK_STATUS_OK {
+                return Err(GridRuntimeInitError::NoCore(status));
+            }
         }
         let [core_info, records_info, first_room] = found;
         let core = Self::read_chunk(cd, core_info)?;

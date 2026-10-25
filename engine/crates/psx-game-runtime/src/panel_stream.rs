@@ -8,41 +8,50 @@
 //!
 //! * **The eye.** The nearest bake eye in 3D ([`octagonal_distance`]), kept until another is
 //!   nearer by a sixth of the lattice's spacing.
+//! * **The block.** Everything an eye's panels need sits in one block of the disc
+//!   ([`psx_grid::eye_block`]): an index (which tiles each heading stores, every panel's depth
+//!   mesh and room cells, the length of each tile) and then the tiles as LZ blocks
+//!   ([`psx_grid::tile_lz`]), cut into groups of [`GROUP_SECTORS`] sectors that no tile
+//!   crosses. A read brings in whole groups.
 //! * **The tiles.** For each heading whose panel can be in the view, the tile columns the
 //!   field of view (and a margin to turn into) crosses and the rows the pitch looks at; those
 //!   tiles that are stored take a slot, the ones nearest the middle of the view ranking first.
-//!   A tile is one sector, found from the panel's first sector and which tiles precede it.
-//! * **The panels' headers.** The sector before a panel's tiles holds its depth mesh; it is
-//!   read like a tile and kept in a small cache of panels, which also holds which slot has
-//!   which tile. A tile is drawn once its header is in.
+//!   Every panel of the eye is kept, whichever way the camera looks.
 //! * **A change of eye.** The tiles of the eye left are kept, and drawn where the new eye's
 //!   tile of the same place is stored and not in VRAM yet, until it lands: the picture is
 //!   never blank while the new one comes. They are the first to give up their slots.
-//! * **Reads.** The window the pictures land in is cut into cells of one sector. Up to
-//!   [`STAGES`] reads are in flight or landed and waiting for the GPU, each a run of up to
-//!   [`RUN_CELLS`] consecutive sectors: the best ranked wanted sector and every other wanted
-//!   sector within the same stretch (the cook lays the tiles of a panel one after another,
-//!   column by column). A landed tile is uploaded by `card_stream::write_upload_packets` as GPU
-//!   list nodes, so the GPU does the copy as it draws and the CPU never waits.
+//! * **Reads.** The window the blocks land in is [`STAGES`] stages of one group. A read of an
+//!   eye's first group brings in its index and the tiles after it; when both stages are free
+//!   it takes the second group too, one seek for the average eye. A landed group stays in its
+//!   stage a while ([`WARM_TICKS`]): the tiles the next pass wants that lie in it are taken
+//!   from there without another read. A landed tile is decoded by
+//!   [`write_tile_uploads`] straight into GPU list nodes, so the GPU does the copy as it draws
+//!   and the CPU never waits.
 //!
 //! A failed read frees its stage and the tile is asked for again at the next pass. Nothing
 //! here waits.
 
+use psx_grid::eye_block::{BlockIndex, GROUP_BYTES, GROUP_SECTORS, NO_PANEL};
 use psx_grid::flood::octagonal_distance;
 use psx_grid::render::{
-    PanelRef, CELLS, CELL_EMPTY, CENTRAL_ROWS, COLS, HEADER_ROOMS_AT, HEADINGS, HORIZON_ROW, MESH,
-    NO_TILE_SLOT, PICTURE_ROWS, ROWS, SLOTS as ATLAS_SLOTS, TILES, TILE_TEXELS, VIEW_COS_Q12,
-    VIEW_SIN_Q12,
+    PanelRef, CELLS, CELL_EMPTY, COLS, HEADINGS, HORIZON_ROW, MESH, NO_TILE_SLOT, PICTURE_ROWS,
+    ROWS, SLOTS as ATLAS_SLOTS, TILES, TILE_TEXELS, VIEW_COS_Q12, VIEW_SIN_Q12,
 };
+use psx_grid::tile_lz::{decode_tile, TILE_BYTES};
 
-use crate::card_stream::{Upload, RUN_CELLS, STAGES};
 use crate::grid_stream::{Poll, RoomTransport};
 
-/// Sectors of a panel's header: its depth mesh.
 /// Slots of the stream: the sky atlas's, and a second atlas's when there is one.
 const SLOTS: usize = ATLAS_SLOTS + psx_grid::render::SECOND_ATLAS_SLOTS;
-const HEADER_SECTORS: u32 = 1;
-const OUTER_ROWS: u8 = !CENTRAL_ROWS & ((1 << ROWS) - 1);
+/// Groups the window holds at once: reads in flight, or landed and waiting for the GPU.
+pub const STAGES: usize = 2;
+/// Words of the window the reads land in.
+pub const WINDOW_WORDS: usize = STAGES * GROUP_BYTES / 4;
+/// Entries a read keeps: the tiles it brought in that wait for the GPU, and an eye's index.
+const ENTRIES: usize = 32;
+/// Ticks a landed group stays in its stage with nothing to give: the pass that the index
+/// forces runs in the tick it lands, so its tiles are attached by the end of that tick.
+pub const WARM_TICKS: u32 = 1;
 /// Ticks between two passes.
 const PASS_TICKS: u32 = 8;
 /// Rank added to a tile of a panel the camera is not looking at.
@@ -73,13 +82,6 @@ const SECOND_FROM: i32 = 3;
 const NEXT_STICKS: i32 = 8;
 /// Smallest smoothed step of the eye a pass, runtime units, that counts as walking.
 const MIN_WALK: i32 = 3;
-/// Sectors a read may read over, to start where the last one ended and so skip a seek.
-const CHAIN_GAP: u32 = 6;
-/// Wanted sectors a read over both stages' parts of the window must bring in beyond the best
-/// stretch of one part's length for both to be taken.
-const SPAN_GAIN: usize = 3;
-/// Experiment: one read over both stages' parts of the window (it did not cut the reads).
-const SPAN: bool = false;
 const NO_SLOT_INDEX: u8 = 0xff;
 const NO_ENTRY: u8 = 0xff;
 /// Eyes whose lists of stored tiles are kept: the one in use, the one the camera is about to
@@ -143,6 +145,19 @@ pub struct PanelCounters {
     /// use was still on its way (the eye left stands in for it): how long a crossing takes to
     /// settle.
     pub settling: u32,
+    /// Tiles whose LZ block did not decode (a damaged disc); they are drawn blank.
+    pub undecodable: u32,
+    /// Which stages of the window hold a read (bit 0 the first, bit 1 the second), bit 2 when
+    /// the one in the first landed.
+    pub stage_mask: u32,
+    /// Eye indexes asked for and not queued yet.
+    pub indexes_waiting: u32,
+    /// Landed reads of tiles for eyes the camera is not at yet that gave up their stage to a
+    /// read the eye in use was waiting for.
+    pub preempted: u32,
+    /// Tiles of the panels in view of the eye in use that are not in VRAM (`u32::MAX` while its
+    /// index is not in).
+    pub view_missing: u32,
 }
 
 impl PanelCounters {
@@ -172,6 +187,11 @@ impl PanelCounters {
         gate_run: 0,
         far: 0,
         settling: 0,
+        undecodable: 0,
+        stage_mask: 0,
+        indexes_waiting: 0,
+        preempted: 0,
+        view_missing: 0,
     };
 }
 
@@ -230,21 +250,19 @@ enum Header {
     Ready,
 }
 
-/// What an eye's block says of its panels (its first sector): which tiles each heading
-/// stores, and so where each panel and each tile of it is.
+/// What an eye's block says of its panels: the index at its start, kept (the depth meshes and
+/// room cells of its panels too, for the cache to take), and so where each tile is.
 #[derive(Copy, Clone)]
 struct EyeList {
     eye: u16,
     state: Header,
     used: u32,
     since: u32,
-    cols: [[u8; COLS]; HEADINGS],
-    /// Sector of each panel's header counted from the block's start, 0 for a heading with no
-    /// panel.
-    first: [u32; HEADINGS],
-    /// Where the central rows' tiles of each panel start, and the other rows'.
-    central: [u32; HEADINGS],
-    outer: [u32; HEADINGS],
+    index: BlockIndex,
+    /// Per heading, the panel's depth mesh as the index holds it.
+    depth: [[u8; MESH]; HEADINGS],
+    /// Per heading, the panel's room cells.
+    rooms: [[u8; CELLS]; HEADINGS],
 }
 
 impl EyeList {
@@ -253,46 +271,36 @@ impl EyeList {
         state: Header::Absent,
         used: 0,
         since: 0,
-        cols: [[0; COLS]; HEADINGS],
-        first: [0; HEADINGS],
-        central: [0; HEADINGS],
-        outer: [0; HEADINGS],
+        index: BlockIndex::EMPTY,
+        depth: [[0; MESH]; HEADINGS],
+        rooms: [[CELL_EMPTY; CELLS]; HEADINGS],
     };
 
-    /// Fill from the list's sector.
+    /// Fill from the block's first sector, `bytes` giving its byte at an offset.
     fn parse(&mut self, bytes: impl Fn(usize) -> u8) {
-        // The block: this list, the headers of the panels there are, then the central rows'
-        // tiles of each panel in turn, then the others'.
-        let (mut present, mut central, mut outer) = (0u32, [0u32; HEADINGS], [0u32; HEADINGS]);
-        let mut any = [false; HEADINGS];
-        for h in 0..HEADINGS {
-            let (mut c_count, mut o_count) = (0u32, 0u32);
-            for c in 0..COLS {
-                let b = bytes(h * COLS + c);
-                self.cols[h][c] = b;
-                any[h] |= b != 0;
-                c_count += u32::from(b & CENTRAL_ROWS).count_ones();
-                o_count += u32::from(b & OUTER_ROWS).count_ones();
-            }
-            central[h] = c_count;
-            outer[h] = o_count;
-            present += u32::from(any[h]);
-        }
-        let (mut header, mut c_next) = (1u32, 1 + present * HEADER_SECTORS);
-        let mut o_next = c_next + central.iter().sum::<u32>();
-        for h in 0..HEADINGS {
-            if !any[h] {
-                self.first[h] = 0;
+        self.index = BlockIndex::parse(&bytes);
+        for heading in 0..HEADINGS {
+            let Some(at) = self.index.panel_at(heading) else {
                 continue;
+            };
+            for (k, d) in self.depth[heading].iter_mut().enumerate() {
+                *d = bytes(at + k);
             }
-            self.first[h] = header;
-            header += HEADER_SECTORS;
-            self.central[h] = c_next;
-            c_next += central[h];
-            self.outer[h] = o_next;
-            o_next += outer[h];
+            for (k, r) in self.rooms[heading].iter_mut().enumerate() {
+                *r = bytes(at + MESH + k);
+            }
         }
         self.state = Header::Ready;
+    }
+
+    /// Whether `tile` of `heading` is stored (the index is in).
+    fn stored(&self, heading: usize, tile: usize) -> bool {
+        self.state == Header::Ready && self.index.stored(heading, tile)
+    }
+
+    /// The group of the block `tile` of `heading` lies in.
+    fn group_of(&self, heading: usize, tile: usize) -> u16 {
+        (self.index.offset[heading][tile] / GROUP_BYTES as u32) as u16
     }
 }
 
@@ -306,8 +314,6 @@ struct Cached {
     rank: i32,
     used: u32,
     since: u32,
-    /// The panel's header sector, relative to the pictures' base.
-    sector: u32,
     depth: [u8; MESH],
     /// Per cell, the room whose geometry is all it shows (see [`PanelRef::rooms`]).
     rooms: [u8; CELLS],
@@ -325,7 +331,6 @@ impl Cached {
         rank: i32::MAX,
         used: 0,
         since: 0,
-        sector: 0,
         depth: [0; MESH],
         rooms: [CELL_EMPTY; CELLS],
         held: [NO_SLOT_INDEX; TILES],
@@ -335,14 +340,13 @@ impl Cached {
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum Kind {
-    /// An eye's list of stored tiles.
+    /// An eye's index.
     Eye,
-    /// A panel's depth mesh.
-    Header,
+    /// A tile.
     Tile,
 }
 
-/// What a cell of a read holds.
+/// What a read holds that something waits for.
 #[derive(Copy, Clone)]
 struct Entry {
     kind: Kind,
@@ -351,20 +355,29 @@ struct Entry {
     tile: u8,
     slot: u8,
     cache: u8,
+    /// Byte of the tile's LZ block in the read, from the start of its first stage.
+    at: u16,
+    /// Bytes of the block.
+    len: u16,
 }
 
-/// One read: consecutive sectors landing in consecutive cells of a stage.
+/// One read: whole groups of one eye's block landing in consecutive stages.
 #[derive(Copy, Clone)]
 struct Run<K> {
     ticket: K,
     landed: bool,
-    entries: [Option<Entry>; RUN_MAX],
-    /// The read fills both stages' parts of the window: up to `RUN_MAX` sectors for one seek.
-    span: bool,
+    /// The group stays in its stage a while after the tiles it was read for are gone, for the
+    /// tiles a pass will want from it (an eye's first read).
+    warm: bool,
+    eye: u16,
+    /// The block's group in the first stage.
+    group: u16,
+    /// Groups read: 1, or 2 when the read fills both stages.
+    groups: u8,
+    /// Tick the read landed at.
+    landed_at: u32,
+    entries: [Option<Entry>; ENTRIES],
 }
-
-/// Sectors of the longest read (`RUN_CELLS * STAGES` when `SPAN` is on).
-const RUN_MAX: usize = RUN_CELLS;
 
 #[derive(Copy, Clone)]
 enum Stage<K> {
@@ -372,6 +385,75 @@ enum Stage<K> {
     Busy(Run<K>),
     /// Taken by the long read of the stage before.
     Spanned,
+}
+
+/// A landed tile ready for the GPU: where its LZ block sits in the window.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct TileUpload {
+    /// Atlas slot to write.
+    pub slot: u8,
+    stage: u8,
+    entry: u8,
+    /// Byte of the block in the window.
+    pub at: u32,
+    /// Bytes of the block.
+    pub len: u16,
+}
+
+/// Decode the tile `upload` names into `picture` (one atlas slot as words, the 63 rows and the
+/// palette row). `false` when its LZ block does not decode; `picture` is then zero.
+pub fn decode_upload(
+    upload: &TileUpload,
+    window: &[u32],
+    picture: &mut [u32; crate::card_stream::SECTOR_WORDS],
+) -> bool {
+    // SAFETY: a byte view of the window's words, which live as long as the borrow.
+    let bytes =
+        unsafe { core::slice::from_raw_parts(window.as_ptr().cast::<u8>(), window.len() * 4) };
+    // SAFETY: the picture is 512 aligned words, which is `TILE_BYTES` of bytes.
+    let tile = unsafe { &mut *picture.as_mut_ptr().cast::<[u8; TILE_BYTES]>() };
+    let at = upload.at as usize;
+    let decoded = bytes
+        .get(at..at + usize::from(upload.len))
+        .is_some_and(|block| decode_tile(block, tile).is_ok());
+    if !decoded {
+        picture.fill(0);
+    }
+    decoded
+}
+
+/// Put the landed tiles in `uploads` into `out` as GPU list nodes (see
+/// [`crate::card_stream::write_filled_packets`]), decoding each straight into the nodes' rows.
+/// `window` is the memory the stream's reads landed in. Returns `(words, packets, undecodable)`.
+pub fn write_tile_uploads(
+    uploads: &[Option<TileUpload>],
+    window: &[u32],
+    origin: (u16, u16),
+    origin2: (u16, u16),
+    slot: u16,
+    out: &mut [u32],
+) -> (usize, usize, u32) {
+    let mut slots = [0u8; 8];
+    let mut picked = [None; 8];
+    let mut count = 0;
+    for upload in uploads.iter().flatten().take(slots.len()) {
+        slots[count] = upload.slot;
+        picked[count] = Some(*upload);
+        count += 1;
+    }
+    let mut bad = 0;
+    let (words, packets) = crate::card_stream::write_filled_packets(
+        &slots[..count],
+        origin,
+        origin2,
+        slot,
+        out,
+        |k, picture| {
+            let ok = picked[k].is_some_and(|upload| decode_upload(&upload, window, picture));
+            bad += u32::from(!ok);
+        },
+    );
+    (words, packets, bad)
 }
 
 /// What a call to [`PanelStream::update`] knows about the level and the camera.
@@ -382,6 +464,8 @@ pub struct PanelInput<'a> {
     /// The block starts with a sector that lists which tiles each heading stores, then the
     /// eight panels, each its header sector and its stored tiles.
     pub blocks: &'a [u32],
+    /// Per eye, the sectors its block takes.
+    pub sectors: &'a [u16],
     /// Disc sector `blocks` is relative to.
     pub base_lba: u32,
     /// Slots the atlases hold: that of the sky's, or twice that with a second atlas.
@@ -534,46 +618,6 @@ const PANEL_EDGE: i32 = 1760;
 /// Texel column of the principal point.
 const COLS_CENTRE: i32 = COLS as i32 * TILE_TEXELS / 2;
 
-/// A panel's place on the disc: `[header sector, first central tile, first other tile, stored
-/// columns]`, the columns being one row mask each (`COLS` bytes in the last two words).
-type PanelEntry = [u32; 5];
-
-/// The row masks of a panel's columns, four to a word.
-fn pack_cols(cols: &[u8; COLS]) -> (u32, u32) {
-    let mut words = [0u32; 2];
-    for (i, &c) in cols.iter().enumerate() {
-        words[i / 4] |= u32::from(c) << (8 * (i % 4));
-    }
-    (words[0], words[1])
-}
-
-/// The stored tiles of a panel, one row mask a column.
-fn cols_of(entry: &PanelEntry) -> [u8; COLS] {
-    core::array::from_fn(|i| (entry[3 + i / 4] >> (8 * (i % 4))) as u8)
-}
-
-/// The sector of `tile` of a panel: among the central rows' tiles or the others', column by
-/// column.
-fn tile_sector(entry: &PanelEntry, tile: usize) -> u32 {
-    let cols = cols_of(entry);
-    let (col, row) = (tile / ROWS, tile % ROWS);
-    let (mask, base) = if CENTRAL_ROWS >> row & 1 != 0 {
-        (CENTRAL_ROWS, entry[1])
-    } else {
-        (OUTER_ROWS, entry[2])
-    };
-    let before: u32 = cols[..col]
-        .iter()
-        .map(|b| (b & mask).count_ones())
-        .sum::<u32>()
-        + (cols[col] & mask & ((1u8 << row) - 1)).count_ones();
-    base + before
-}
-
-fn stored(entry: &PanelEntry, tile: usize) -> bool {
-    entry[0] != 0 && cols_of(entry)[tile / ROWS] >> (tile % ROWS) & 1 != 0
-}
-
 /// What a pass works out about the camera once for every eye it asks tiles of.
 struct View {
     /// Per heading, the tiles the camera sees of its panel.
@@ -610,10 +654,12 @@ pub struct PanelStream<K> {
     velocity: [i32; 2],
     /// Sector the drive ends at once the reads queued so far are done (0 before the first).
     tail: u32,
-    /// A sector may be wanted that no read has been queued for: set when a pass asks for
-    /// something or a read fails, cleared when [`Self::start_reads`] finds nothing to ask the
-    /// drive for, so the idle ticks between two passes cost a test.
-    reads_due: bool,
+    /// An eye's index landed: decide the tiles at once, not at the next pass.
+    force_pass: bool,
+    /// Something that decides what to read may have changed (a pass, a read that finished, a
+    /// stage freed): [`Self::start_reads`] looks. Clear, with every stage free, the tick has
+    /// nothing to do and costs next to nothing.
+    reads_dirty: bool,
 }
 
 impl<K: Copy> PanelStream<K> {
@@ -643,35 +689,49 @@ impl<K: Copy> PanelStream<K> {
             have_last: false,
             velocity: [0; 2],
             tail: 0,
-            reads_due: true,
+            force_pass: false,
+            reads_dirty: true,
         }
     }
 
-    /// Drive the stream one tick: poll the reads in flight, every few ticks re-decide the eye
-    /// and the wanted tiles, and start the next reads. `window` is
-    /// [`crate::card_stream::CARD_WINDOW_WORDS`] words of memory the reads land in, and must
-    /// stay put while the stream lives.
+    /// Drive the stream one tick: poll the reads in flight, every few ticks (and when an eye's
+    /// index has just landed) re-decide the eye and the wanted tiles, and start the next reads.
+    /// `window` is [`WINDOW_WORDS`] words of memory the reads land in, and must stay put while
+    /// the stream lives.
     pub fn update<T>(&mut self, transport: &mut T, window: &mut [u32], input: &PanelInput<'_>)
     where
         T: RoomTransport<Ticket = K>,
     {
-        if window.len() < crate::card_stream::CARD_WINDOW_WORDS
-            || input.blocks.is_empty()
-            || input.eyes.is_empty()
-        {
+        if window.len() < WINDOW_WORDS || input.blocks.is_empty() || input.eyes.is_empty() {
             return;
         }
         self.view = input.view();
         self.limit = input.slots.clamp(ATLAS_SLOTS, SLOTS);
         self.poll(transport, window);
-        if self.ticks.is_multiple_of(PASS_TICKS) {
+        if self.ticks.is_multiple_of(PASS_TICKS) || self.force_pass {
+            self.force_pass = false;
             self.pass(input);
         }
         self.ticks = self.ticks.wrapping_add(1);
         self.start_reads(transport, window, input);
+        self.counters.stage_mask = self
+            .stages
+            .iter()
+            .enumerate()
+            .map(|(i, s)| u32::from(!matches!(s, Stage::Free)) << i)
+            .sum::<u32>()
+            | match &self.stages[0] {
+                Stage::Busy(run) if run.landed => 4,
+                _ => 0,
+            };
+        self.counters.indexes_waiting = self
+            .lists
+            .iter()
+            .filter(|l| l.eye != u16::MAX && l.state == Header::Wanted)
+            .count() as u32;
     }
 
-    /// Retire the reads that finished, taking the headers out of the window.
+    /// Retire the reads that finished, taking the indexes out of the window.
     fn poll<T>(&mut self, transport: &mut T, window: &[u32])
     where
         T: RoomTransport<Ticket = K>,
@@ -686,69 +746,47 @@ impl<K: Copy> PanelStream<K> {
             match transport.poll(run.ticket) {
                 Poll::Pending => {}
                 Poll::Done => {
+                    self.reads_dirty = true;
                     self.counters.landed += 1;
                     run.landed = true;
-                    for (cell, entry) in run.entries.iter_mut().enumerate() {
+                    run.landed_at = self.ticks;
+                    let base = index * GROUP_BYTES;
+                    for entry in run.entries.iter_mut() {
                         let Some(e) = *entry else { continue };
-                        if e.kind == Kind::Eye {
-                            *entry = None;
-                            let list = &mut self.lists[usize::from(e.cache)];
-                            if list.eye == e.eye {
-                                let from =
-                                    (index * RUN_CELLS + cell) * crate::card_stream::SECTOR_WORDS;
-                                let bytes = |k: usize| window[from + k / 4].to_le_bytes()[k % 4];
-                                list.parse(bytes);
+                        match e.kind {
+                            Kind::Eye => {
+                                *entry = None;
+                                let list = &mut self.lists[usize::from(e.cache)];
+                                if list.eye == e.eye {
+                                    let bytes = |k: usize| {
+                                        window[(base + k) / 4].to_le_bytes()[(base + k) % 4]
+                                    };
+                                    list.parse(bytes);
+                                    self.force_pass = true;
+                                }
                             }
-                            continue;
-                        }
-                        if e.kind == Kind::Tile {
-                            let slot = &self.slots[usize::from(e.slot)];
-                            if METER && slot.state == SlotState::Pending && slot.since != 0 {
-                                self.counters.wait_read += self.ticks.wrapping_sub(slot.since);
-                            }
-                        }
-                        if e.kind != Kind::Header {
-                            continue;
-                        }
-                        *entry = None;
-                        let cached = &mut self.cache[usize::from(e.cache)];
-                        if cached.eye != e.eye || cached.heading != e.heading {
-                            continue;
-                        }
-                        let from = (index * RUN_CELLS + cell) * crate::card_stream::SECTOR_WORDS;
-                        for (k, word) in window[from..from + MESH.div_ceil(4)].iter().enumerate() {
-                            for (b, byte) in word.to_le_bytes().iter().enumerate() {
-                                if let Some(d) = cached.depth.get_mut(4 * k + b) {
-                                    *d = *byte;
+                            Kind::Tile => {
+                                let slot = &self.slots[usize::from(e.slot)];
+                                if METER && slot.state == SlotState::Pending && slot.since != 0 {
+                                    self.counters.wait_read += self.ticks.wrapping_sub(slot.since);
                                 }
                             }
                         }
-                        for (k, room) in cached.rooms.iter_mut().enumerate() {
-                            let at = from + (HEADER_ROOMS_AT + k) / 4;
-                            *room = window[at].to_le_bytes()[(HEADER_ROOMS_AT + k) % 4];
-                        }
-                        cached.header = Header::Ready;
                     }
-                    if run.entries.iter().all(Option::is_none) {
-                        let span = run.span;
+                    if !run.warm && run.entries.iter().all(Option::is_none) {
+                        let span = run.groups > 1;
                         self.free_stage(index, span);
                     }
                 }
                 Poll::Cancelled | Poll::Failed => {
+                    self.reads_dirty = true;
                     self.counters.failed += 1;
-                    self.reads_due = true;
                     for e in run.entries.iter().flatten() {
                         match e.kind {
                             Kind::Eye => {
                                 let list = &mut self.lists[usize::from(e.cache)];
                                 if list.eye == e.eye {
                                     list.state = Header::Wanted;
-                                }
-                            }
-                            Kind::Header => {
-                                let cached = &mut self.cache[usize::from(e.cache)];
-                                if cached.eye == e.eye && cached.heading == e.heading {
-                                    cached.header = Header::Wanted;
                                 }
                             }
                             Kind::Tile => {
@@ -763,7 +801,7 @@ impl<K: Copy> PanelStream<K> {
                             }
                         }
                     }
-                    let span = run.span;
+                    let span = run.groups > 1;
                     self.free_stage(index, span);
                 }
             }
@@ -887,7 +925,7 @@ impl<K: Copy> PanelStream<K> {
             .or(near)
             .filter(|&eye| distance(eye) < here + input.spacing);
         self.next = near.map(|eye| eye as u16);
-        let first_ready = walking && near.is_none_or(|eye| self.eye_ready(eye as u16, input));
+        let first_ready = walking && near.is_none_or(|eye| self.eye_ready(eye as u16, true, input));
         self.next2 = None;
         if first_ready {
             let pick = match ahead_best {
@@ -906,19 +944,22 @@ impl<K: Copy> PanelStream<K> {
         self.loaded
     }
 
-    /// Whether every stored tile of every panel of `eye` is in VRAM.
-    fn eye_ready(&self, eye: u16, input: &PanelInput<'_>) -> bool {
+    /// Whether every stored tile of every panel of `eye` is in VRAM (of the panels in view
+    /// only, with `view_only`).
+    fn eye_ready(&self, eye: u16, view_only: bool, input: &PanelInput<'_>) -> bool {
         let Some(list) = self
             .lists
             .iter()
-            .position(|l| l.eye == eye && l.state == Header::Ready)
+            .find(|l| l.eye == eye && l.state == Header::Ready)
         else {
             return false;
         };
         for heading in 0..HEADINGS {
-            let Some(entry) = self.entry_of(list, heading, input) else {
+            if list.index.panel[heading] == NO_PANEL
+                || (view_only && visible(heading, input).is_none())
+            {
                 continue;
-            };
+            }
             let Some(cached) = self
                 .cache
                 .iter()
@@ -930,7 +971,7 @@ impl<K: Copy> PanelStream<K> {
                 return false;
             }
             for tile in 0..TILES {
-                if !stored(&entry, tile) {
+                if !list.stored(heading, tile) {
                     continue;
                 }
                 let held = cached.held[tile];
@@ -941,6 +982,37 @@ impl<K: Copy> PanelStream<K> {
             }
         }
         true
+    }
+
+    /// Tiles of the panels in view of the eye in use that are not in VRAM.
+    fn view_missing(&self, input: &PanelInput<'_>) -> u32 {
+        let Some(list) = self
+            .lists
+            .iter()
+            .find(|l| l.eye == self.eye && l.state == Header::Ready)
+        else {
+            return u32::MAX;
+        };
+        let mut missing = 0;
+        for heading in 0..HEADINGS {
+            if list.index.panel[heading] == NO_PANEL || visible(heading, input).is_none() {
+                continue;
+            }
+            let cached = self
+                .cache
+                .iter()
+                .find(|c| c.eye == self.eye && c.heading == heading as u8);
+            for tile in 0..TILES {
+                if !list.stored(heading, tile) {
+                    continue;
+                }
+                let held = cached.map_or(NO_SLOT_INDEX, |c| c.held[tile]);
+                let shown = held != NO_SLOT_INDEX
+                    && self.slots[usize::from(held)].state == SlotState::Shown;
+                missing += u32::from(!shown);
+            }
+        }
+        missing
     }
 
     /// Cache index of the panel `(eye, heading)`, making one (and dropping the least
@@ -1079,7 +1151,7 @@ impl<K: Copy> PanelStream<K> {
                 &mut starved,
             );
         }
-        self.rebuild_show(input, eye);
+        self.rebuild_show(eye);
         let (mut held, mut missing) = (0u32, 0u32);
         for slot in &self.slots {
             if slot.state != SlotState::Free {
@@ -1093,39 +1165,41 @@ impl<K: Copy> PanelStream<K> {
         self.counters.wanted = wanted;
         self.counters.missing = missing;
         self.counters.starved = starved;
-        self.reads_due = true;
-        self.loaded = self.have_eye && self.eye_ready(self.eye, input);
-        self.counters.settling = if self.loaded {
-            0
-        } else {
-            self.counters.settling + 1
-        };
+        self.reads_dirty = true;
+        self.loaded = self.have_eye && self.eye_ready(self.eye, false, input);
+        self.counters.view_missing = self.view_missing(input);
+        // Counted in the passes of every `PASS_TICKS` ticks, not in the extra one an index asks for.
+        if self.loaded {
+            self.counters.settling = 0;
+        } else if self.ticks.is_multiple_of(PASS_TICKS) {
+            self.counters.settling += 1;
+        }
         if METER {
-            self.count_visible(input, eye);
+            self.count_visible(eye);
         }
     }
 
     /// Tally the tiles the screen shows against the ones that have a picture.
-    fn count_visible(&mut self, input: &PanelInput<'_>, eye: u16) {
+    fn count_visible(&mut self, eye: u16) {
         let Some(list) = self
             .lists
             .iter()
-            .position(|l| l.eye == eye && l.state == Header::Ready)
+            .find(|l| l.eye == eye && l.state == Header::Ready)
         else {
             return;
         };
         let (mut seen, mut absent) = (0u32, 0u32);
         for heading in 0..HEADINGS {
-            let Some(entry) = self.entry_of(list, heading, input) else {
+            if list.index.panel[heading] == NO_PANEL {
                 continue;
-            };
+            }
             let Some(v) = visible_in(heading, &self.view, 16, 0) else {
                 continue;
             };
             for col in v.first_col..=v.last_col {
                 for row in v.first_row..=v.last_row {
                     let tile = col * ROWS + row;
-                    if stored(&entry, tile) {
+                    if list.stored(heading, tile) {
                         seen += 1;
                         // Blank only if no panel of the heading, of the eye in use or of one left,
                         // has a picture to show for it.
@@ -1174,28 +1248,6 @@ impl<K: Copy> PanelStream<K> {
         Some(at)
     }
 
-    /// The entry of the panel of `heading` of the eye whose list is `list`: `[first sector,
-    /// stored columns]`, in the shape [`tile_sector`] and [`stored`] read.
-    fn entry_of(&self, list: usize, heading: usize, input: &PanelInput<'_>) -> Option<PanelEntry> {
-        let l = &self.lists[list];
-        let block = input
-            .blocks
-            .get(usize::from(l.eye))
-            .copied()
-            .filter(|&b| b != 0)?;
-        if l.state != Header::Ready || l.first[heading] == 0 {
-            return None;
-        }
-        let c = l.cols[heading];
-        Some([
-            block + l.first[heading],
-            block + l.central[heading],
-            block + l.outer[heading],
-            pack_cols(&c).0,
-            pack_cols(&c).1,
-        ])
-    }
-
     /// Tiles of the panels of `heading` that a panel of an eye other than `eye` holds in VRAM:
     /// the ones that would not be blank if the camera crossed to `eye` before its own landed.
     fn standing_in(&self, eye: u16, heading: u8) -> u8 {
@@ -1242,21 +1294,29 @@ impl<K: Copy> PanelStream<K> {
             return;
         }
         for heading in 0..HEADINGS {
-            let Some(entry) = self.entry_of(list, heading, input) else {
+            if self.lists[list].index.panel[heading] == NO_PANEL {
                 continue;
-            };
-            // Every panel of the eye is kept, whichever way the camera looks: it may turn at any
-            // moment, and a turn must not wait for the disc. The view only orders the reads.
+            }
+            // Every panel of the eye in use is kept, whichever way the camera looks: it may turn at
+            // any moment, and a turn must not wait for the disc. The view only orders the reads.
+            // An eye the camera is only about to cross to brings the panels it will see on
+            // arriving; the others follow once it has crossed (the eye left stands in).
             let seen = sights.seen[heading];
+            if prefetch && seen.is_none() {
+                continue;
+            }
             let Some(ci) = self.cache_index(eye, heading as u8) else {
                 continue;
             };
             self.cache[usize::from(ci)].used = self.ticks.max(1);
             self.cache[usize::from(ci)].rank = i32::MAX;
             if self.cache[usize::from(ci)].header == Header::Absent {
-                self.cache[usize::from(ci)].header = Header::Wanted;
-                self.cache[usize::from(ci)].since = self.ticks.max(1);
-                self.cache[usize::from(ci)].sector = entry[0];
+                // The index came with the depth mesh and the room cells.
+                let cached = &mut self.cache[usize::from(ci)];
+                cached.depth = self.lists[list].depth[heading];
+                cached.rooms = self.lists[list].rooms[heading];
+                cached.header = Header::Ready;
+                cached.since = self.ticks.max(1);
             }
             let standing_in = match seen {
                 Some(_) if prefetch => self.standing_in(eye, heading as u8),
@@ -1265,7 +1325,7 @@ impl<K: Copy> PanelStream<K> {
             for col in 0..COLS {
                 for row in 0..ROWS {
                     let tile = col * ROWS + row;
-                    if !stored(&entry, tile) {
+                    if !self.lists[list].stored(heading, tile) {
                         continue;
                     }
                     *wanted += u32::from(!prefetch);
@@ -1320,8 +1380,11 @@ impl<K: Copy> PanelStream<K> {
 
     /// The slots to draw each tile from: those of the eye in use that a pass wants, and those
     /// of an eye left where the new eye's tile is stored and not in VRAM yet.
-    fn rebuild_show(&mut self, input: &PanelInput<'_>, eye: u16) {
-        let list = self.lists.iter().position(|l| l.eye == eye);
+    fn rebuild_show(&mut self, eye: u16) {
+        let list = self
+            .lists
+            .iter()
+            .find(|l| l.eye == eye && l.state == Header::Ready);
         for c in 0..CACHE {
             let cached = &self.cache[c];
             let mut shows = [NO_TILE_SLOT; TILES];
@@ -1339,9 +1402,10 @@ impl<K: Copy> PanelStream<K> {
                 } else {
                     // Stale: only while the tile of the eye in use is not there. What the new
                     // eye stores of this heading, and the panel it holds for it, are the same
-                    // for every tile.
-                    let entry =
-                        list.and_then(|l| self.entry_of(l, usize::from(cached.heading), input));
+                    // for every tile. While the new eye's index is not in, its tile is not
+                    // known to be stored: the old one stands in.
+                    let heading = usize::from(cached.heading);
+                    let list = list.filter(|l| l.index.panel[heading] != NO_PANEL);
                     let replacing = self
                         .cache
                         .iter()
@@ -1359,9 +1423,7 @@ impl<K: Copy> PanelStream<K> {
                             s != NO_SLOT_INDEX
                                 && self.slots[usize::from(s)].state == SlotState::Shown
                         });
-                        // While the new eye's list is not in, its tile is not known to be
-                        // stored: the old one stands in.
-                        let new_stored = entry.is_none_or(|e| stored(&e, tile));
+                        let new_stored = list.is_none_or(|l| l.stored(heading, tile));
                         if new_stored && !replaced {
                             *show = held;
                         }
@@ -1372,21 +1434,155 @@ impl<K: Copy> PanelStream<K> {
         }
     }
 
-    /// Queue reads for the headers and tiles that need one into the free stages: the best
-    /// ranked sector, and every other wanted sector in the same stretch of the disc.
+    /// Free the landed groups nothing took tiles from within [`WARM_TICKS`].
+    fn retire_warm(&mut self) {
+        for index in 0..STAGES {
+            let Stage::Busy(run) = &self.stages[index] else {
+                continue;
+            };
+            if run.landed
+                && run.entries.iter().all(Option::is_none)
+                && self.ticks.wrapping_sub(run.landed_at) >= WARM_TICKS
+            {
+                let span = run.groups > 1;
+                self.free_stage(index, span);
+            }
+        }
+    }
+
+    /// Give the wanted tiles that lie in a group already landed an entry in it: they need no
+    /// read.
+    fn attach_warm(&mut self, input: &PanelInput<'_>) {
+        let _ = input;
+        for stage in 0..STAGES {
+            let Stage::Busy(run) = &mut self.stages[stage] else {
+                continue;
+            };
+            if !run.landed {
+                continue;
+            }
+            let Some(list) = self
+                .lists
+                .iter()
+                .find(|l| l.eye == run.eye && l.state == Header::Ready)
+            else {
+                continue;
+            };
+            let (first, last) = (run.group, run.group + u16::from(run.groups) - 1);
+            for (index, s) in self.slots.iter_mut().enumerate() {
+                if s.state != SlotState::Wanted || s.eye != run.eye {
+                    continue;
+                }
+                let (heading, tile) = (usize::from(s.heading), usize::from(s.tile));
+                if !list.stored(heading, tile) {
+                    continue;
+                }
+                let group = list.group_of(heading, tile);
+                if group < first || group > last {
+                    continue;
+                }
+                let Some(free) = run.entries.iter().position(Option::is_none) else {
+                    break;
+                };
+                run.entries[free] = Some(Entry {
+                    kind: Kind::Tile,
+                    eye: s.eye,
+                    heading: s.heading,
+                    tile: s.tile,
+                    slot: index as u8,
+                    cache: s.cache,
+                    at: (list.index.offset[heading][tile] - u32::from(first) * GROUP_BYTES as u32)
+                        as u16,
+                    len: list.index.len[heading][tile],
+                });
+                s.state = SlotState::Pending;
+                if METER && s.since == 0 {
+                    s.since = self.ticks.max(1);
+                }
+            }
+        }
+    }
+
+    /// Whether something the eye in use needs is waiting for a read: its index, or a tile of
+    /// its view that has no read yet.
+    fn urgent_waiting(&self, input: &PanelInput<'_>) -> bool {
+        self.lists.iter().any(|l| {
+            l.eye == self.eye
+                && l.state == Header::Wanted
+                && input
+                    .blocks
+                    .get(usize::from(l.eye))
+                    .is_some_and(|&b| b != 0)
+        }) || self
+            .slots
+            .iter()
+            .any(|s| s.state == SlotState::Wanted && !s.prefetch && s.eye == self.eye)
+    }
+
+    /// Free a stage whose landed tiles are all for eyes the camera is not at yet: a read the
+    /// eye in use is waiting for must not wait for those to reach the GPU. The tiles are asked
+    /// for again later. Returns whether a stage was freed.
+    fn make_room(&mut self) -> bool {
+        for index in 0..STAGES {
+            let Stage::Busy(run) = &self.stages[index] else {
+                continue;
+            };
+            if !run.landed {
+                continue;
+            }
+            let only_prefetch =
+                run.entries.iter().flatten().all(|e| {
+                    e.kind == Kind::Tile && self.slots[usize::from(e.slot)].eye != self.eye
+                });
+            if !only_prefetch {
+                continue;
+            }
+            let span = run.groups > 1;
+            let entries = run.entries;
+            for e in entries.iter().flatten() {
+                let slot = &mut self.slots[usize::from(e.slot)];
+                if slot.eye == e.eye
+                    && slot.heading == e.heading
+                    && slot.tile == e.tile
+                    && slot.state == SlotState::Pending
+                {
+                    slot.state = SlotState::Wanted;
+                }
+            }
+            self.free_stage(index, span);
+            self.counters.preempted += 1;
+            self.reads_dirty = true;
+            return true;
+        }
+        false
+    }
+
+    /// Queue reads for the indexes and tiles that need one into the free stages: the best
+    /// ranked of them, and everything else wanted in the same group (and the next, when both
+    /// stages are free).
     fn start_reads<T>(&mut self, transport: &mut T, window: &mut [u32], input: &PanelInput<'_>)
     where
         T: RoomTransport<Ticket = K>,
     {
+        if !self.reads_dirty {
+            return;
+        }
+        self.attach_warm(input);
+        self.retire_warm();
+        // Every few ticks while all stages are taken: a read the eye in use waits for may
+        // take one from tiles that are not for it.
+        if self.ticks.is_multiple_of(4)
+            && !self.stages.iter().any(|s| matches!(s, Stage::Free))
+            && self.urgent_waiting(input)
+        {
+            self.make_room();
+        }
         loop {
-            if !self.reads_due {
-                return;
-            }
             let Some(stage) = self.stages.iter().position(|s| matches!(s, Stage::Free)) else {
                 return;
             };
-            // Wanted sectors: (rank, sector, kind, which, waited).
-            let mut wanted = [(0i32, 0u32, Kind::Tile, 0u8, 0u32); SLOTS + CACHE + EYES];
+            // What is wanted: (rank, sector, kind, which, waited, eye, group).
+            let mut wanted = [(0i32, 0u32, Kind::Tile, 0u8, 0u32, 0u16, 0u16); SLOTS + EYES];
             let mut count = 0;
             for (index, l) in self.lists.iter().enumerate() {
                 if l.eye == u16::MAX || l.state != Header::Wanted {
@@ -1395,7 +1591,7 @@ impl<K: Copy> PanelStream<K> {
                 let Some(&block) = input.blocks.get(usize::from(l.eye)).filter(|&&b| b != 0) else {
                     continue;
                 };
-                // Nothing of the eye can be asked for until its list is in.
+                // Nothing of the eye can be asked for until its index is in.
                 let rank = if Some(l.eye) == Some(self.eye) {
                     -2
                 } else {
@@ -1407,20 +1603,8 @@ impl<K: Copy> PanelStream<K> {
                     Kind::Eye,
                     index as u8,
                     self.ticks.wrapping_sub(l.since),
-                );
-                count += 1;
-            }
-            for (index, c) in self.cache.iter().enumerate() {
-                if c.eye == u16::MAX || c.header != Header::Wanted || c.sector == 0 {
-                    continue;
-                }
-                // A header gates every tile of its panel: it goes before them.
-                wanted[count] = (
-                    c.rank.saturating_sub(1),
-                    c.sector,
-                    Kind::Header,
-                    index as u8,
-                    self.ticks.wrapping_sub(c.since),
+                    l.eye,
+                    0,
                 );
                 count += 1;
             }
@@ -1428,23 +1612,25 @@ impl<K: Copy> PanelStream<K> {
                 if s.state != SlotState::Wanted {
                     continue;
                 }
-                // The tile's sector, from its panel's place in its eye's block.
-                let Some(sector) = self
+                // The tile's group, from its place in its eye's block.
+                let Some((list, block)) = self
                     .lists
                     .iter()
-                    .position(|l| l.eye == s.eye)
-                    .and_then(|l| self.entry_of(l, usize::from(s.heading), input))
-                    .map(|entry| tile_sector(&entry, usize::from(s.tile)))
+                    .find(|l| l.eye == s.eye && l.state == Header::Ready)
+                    .zip(input.blocks.get(usize::from(s.eye)).filter(|&&b| b != 0))
                 else {
                     continue;
                 };
+                let group = list.group_of(usize::from(s.heading), usize::from(s.tile));
                 let since = if s.since == 0 { self.ticks } else { s.since };
                 wanted[count] = (
                     s.rank,
-                    sector,
+                    block + u32::from(group) * GROUP_SECTORS as u32,
                     Kind::Tile,
                     index as u8,
                     self.ticks.wrapping_sub(since),
+                    s.eye,
+                    group,
                 );
                 count += 1;
             }
@@ -1455,23 +1641,22 @@ impl<K: Copy> PanelStream<K> {
             }
             let wanted = &wanted[..count];
             if wanted.is_empty() {
-                self.reads_due = false;
+                self.reads_dirty = !self.stages.iter().all(|s| matches!(s, Stage::Free));
                 return;
             }
-            // The best ranked sector, unless one has waited out its patience.
+            // The best ranked item, unless one has waited out its patience.
             let head = wanted
                 .iter()
                 .filter(|w| w.4 > PATIENCE && w.0 < 2 * PREFETCH)
                 .max_by_key(|w| (w.4, core::cmp::Reverse(w.0)))
                 .or_else(|| {
-                    // The most urgent tier first (the lists and headers, the tiles of the eye in
-                    // use, the tiles of an eye kept ready that nothing could stand in for, the
-                    // other tiles of the eye nearest the camera, those of the one it walks to),
-                    // and within it the sector the drive reaches soonest: the one that continues
-                    // the last read, then the next ones ahead, then those behind, the lowest
-                    // first (a seek back lands at the start of the stretch, and the reads after
-                    // it each start where the last ended). The drive then sweeps the wanted
-                    // sectors upward, and a read that starts where the last ended costs no seek.
+                    // The most urgent tier first (the indexes, the tiles of the eye in use,
+                    // those of the eye nearest the camera, those of the one it walks to), and
+                    // within it the group the drive reaches soonest: the one that continues the
+                    // last read, then the next ones ahead, then those behind, the lowest first
+                    // (a seek back lands at the start of the stretch, and the reads after it each
+                    // start where the last ended). The drive then sweeps the wanted groups
+                    // upward, and a read that starts where the last ended costs no seek.
                     let tail = self.tail;
                     wanted.iter().min_by_key(|w| {
                         let tier = if w.0 < 0 {
@@ -1493,139 +1678,100 @@ impl<K: Copy> PanelStream<K> {
                         (tier, reach, w.0)
                     })
                 })
-                .map(|w| w.1)
-                .unwrap_or(0);
-            // A read that starts where the last one ended continues without a seek, which
-            // costs far more than the few sectors it reads over to get there: chain onto the
-            // last read when the head is within [`CHAIN_GAP`] sectors of its end.
-            let chain = self.tail != 0
-                && head > self.tail
-                && head - self.tail - 1 <= CHAIN_GAP
-                && head - self.tail < RUN_CELLS as u32;
-            // Otherwise the stretch of RUN_CELLS sectors holding the head and the most other
-            // wanted sectors, the earliest among equals.
-            let mut start = if chain { self.tail + 1 } else { head };
-            let mut most = 0;
-            if !chain {
-                for back in 0..RUN_CELLS as u32 {
-                    let Some(lo) = head.checked_sub(back).filter(|&lo| lo > 0) else {
-                        break;
-                    };
-                    let inside = wanted
-                        .iter()
-                        .filter(|w| w.1 >= lo && w.1 < lo + RUN_CELLS as u32)
-                        .count();
-                    if inside > most {
-                        most = inside;
-                        start = lo;
-                    }
-                }
-            }
-            // With both stages free, a read may take both parts of the window: when it brings
-            // in several more wanted sectors than the stretch of one, the one seek is worth it.
-            let both_free = self.stages.iter().all(|s| matches!(s, Stage::Free));
-            let mut span = false;
-            if SPAN && both_free && !chain {
-                let (mut start_long, mut most_long) = (start, 0);
-                for back in 0..RUN_MAX as u32 {
-                    let Some(lo) = head.checked_sub(back).filter(|&lo| lo > 0) else {
-                        break;
-                    };
-                    let inside = wanted
-                        .iter()
-                        .filter(|w| w.1 >= lo && w.1 < lo + RUN_MAX as u32)
-                        .count();
-                    if inside > most_long {
-                        most_long = inside;
-                        start_long = lo;
-                    }
-                }
-                if most_long >= most + SPAN_GAIN {
-                    span = true;
-                    start = start_long;
-                }
-            }
-            let stage = if span { 0 } else { stage };
-            let stretch = start..start + if span { RUN_MAX } else { RUN_CELLS } as u32;
-            let first = if chain {
-                start
-            } else {
-                wanted
-                    .iter()
-                    .filter(|w| stretch.contains(&w.1))
-                    .map(|w| w.1)
-                    .min()
-                    .unwrap_or(head)
+                .copied()
+                .unwrap_or(wanted[0]);
+            let (_, _, head_kind, head_which, _, eye, group) = head;
+            let Some(&block) = input.blocks.get(usize::from(eye)) else {
+                return;
             };
-            let last = wanted
+            // How many sectors the eye's block has.
+            let known = input
+                .sectors
+                .get(usize::from(eye))
+                .map(|&sectors| u32::from(sectors))
+                .filter(|&sectors| sectors > 0);
+            // With both stages free, a read takes two groups: an eye's first read brings in its
+            // index and, for the average eye, all its tiles for one seek; a tile's brings in the
+            // next group too when something wanted lies in it.
+            let both_free = self.stages.iter().all(|s| matches!(s, Stage::Free));
+            let next_wanted = wanted
                 .iter()
-                .filter(|w| stretch.contains(&w.1))
-                .map(|w| w.1)
-                .max()
-                .unwrap_or(head);
-            let mut entries = [None; RUN_MAX];
-            let mut riders = 0;
-            for &(_, sector, kind, which, _) in wanted.iter().filter(|w| stretch.contains(&w.1)) {
-                let cell = (sector - first) as usize;
-                if entries[cell].is_some() {
+                .any(|w| w.5 == eye && w.6 == group + 1 && w.2 == Kind::Tile);
+            let more_blocks =
+                known.is_none_or(|k| k > (u32::from(group) + 1) * GROUP_SECTORS as u32);
+            let groups: u8 = if both_free && more_blocks && (head_kind == Kind::Eye || next_wanted)
+            {
+                2
+            } else {
+                1
+            };
+            let first = block + u32::from(group) * GROUP_SECTORS as u32;
+            let mut sectors = u32::from(groups) * GROUP_SECTORS as u32;
+            if let Some(k) = known {
+                sectors = sectors.min(k.saturating_sub(u32::from(group) * GROUP_SECTORS as u32));
+            }
+            let sectors = sectors.max(1);
+            let _ = head_which;
+            let mut entries = [None; ENTRIES];
+            let mut at = 0;
+            let mut warm = false;
+            for &(_, _, kind, which, _, w_eye, w_group) in wanted.iter() {
+                if w_eye != eye || w_group < group || w_group >= group + u16::from(groups) {
                     continue;
                 }
-                entries[cell] = Some(match kind {
+                if at >= ENTRIES {
+                    break;
+                }
+                entries[at] = Some(match kind {
                     Kind::Eye => {
-                        let l = &self.lists[usize::from(which)];
+                        warm = true;
                         Entry {
                             kind,
-                            eye: l.eye,
+                            eye,
                             heading: 0,
                             tile: 0,
                             slot: NO_SLOT_INDEX,
                             cache: which,
-                        }
-                    }
-                    Kind::Header => {
-                        let c = &self.cache[usize::from(which)];
-                        Entry {
-                            kind,
-                            eye: c.eye,
-                            heading: c.heading,
-                            tile: 0,
-                            slot: NO_SLOT_INDEX,
-                            cache: which,
+                            at: 0,
+                            len: 0,
                         }
                     }
                     Kind::Tile => {
                         let s = &self.slots[usize::from(which)];
+                        let list = self
+                            .lists
+                            .iter()
+                            .find(|l| l.eye == eye && l.state == Header::Ready)
+                            .expect("a tile is wanted from a list that is in");
+                        let (heading, tile) = (usize::from(s.heading), usize::from(s.tile));
                         Entry {
                             kind,
-                            eye: s.eye,
+                            eye,
                             heading: s.heading,
                             tile: s.tile,
                             slot: which,
                             cache: s.cache,
+                            at: (list.index.offset[heading][tile]
+                                - u32::from(group) * GROUP_BYTES as u32)
+                                as u16,
+                            len: list.index.len[heading][tile],
                         }
                     }
                 });
-                riders += 1;
+                at += 1;
             }
             transport.begin_transfer();
-            // SAFETY: the window is memory the caller keeps for the stream's life, `stage` is
-            // one of its STAGES parts of RUN_CELLS sectors each, the run is at most RUN_CELLS
-            // sectors, and the part is not reused until the read is reported finished.
-            let destination = unsafe {
-                window
-                    .as_mut_ptr()
-                    .add(stage * RUN_CELLS * crate::card_stream::SECTOR_WORDS)
-            };
+            // SAFETY: the window is memory the caller keeps for the stream's life; the stage is
+            // one of its STAGES groups (the first, when two are read), the read is at most
+            // `groups` groups, and the memory is not reused until the read is reported finished.
+            let destination = unsafe { window.as_mut_ptr().add(stage * GROUP_BYTES / 4) };
             let lba = input.base_lba + first;
-            match unsafe { transport.submit(lba, last - first + 1, destination, false) } {
+            match unsafe { transport.submit(lba, sectors, destination, false) } {
                 Some(ticket) => {
                     for entry in entries.iter().flatten() {
                         match entry.kind {
                             Kind::Eye => {
                                 self.lists[usize::from(entry.cache)].state = Header::Pending;
-                            }
-                            Kind::Header => {
-                                self.cache[usize::from(entry.cache)].header = Header::Pending;
                             }
                             Kind::Tile => {
                                 let slot = &mut self.slots[usize::from(entry.slot)];
@@ -1640,20 +1786,23 @@ impl<K: Copy> PanelStream<K> {
                     self.stages[stage] = Stage::Busy(Run {
                         ticket,
                         landed: false,
+                        warm,
+                        eye,
+                        group,
+                        groups,
+                        landed_at: 0,
                         entries,
-                        span,
                     });
-                    if span {
+                    if groups > 1 {
                         for part in stage + 1..STAGES {
                             self.stages[part] = Stage::Spanned;
                         }
                     }
                     self.counters.submitted += 1;
-                    self.tail = last;
+                    self.tail = first + sectors - 1;
                     self.counters.last_first = first;
-                    self.counters.last_sectors = last - first + 1;
-                    self.counters.sectors += last - first + 1;
-                    let _ = riders;
+                    self.counters.last_sectors = sectors;
+                    self.counters.sectors += sectors;
                 }
                 None => {
                     self.counters.refused += 1;
@@ -1663,9 +1812,10 @@ impl<K: Copy> PanelStream<K> {
         }
     }
 
-    /// The landed tiles waiting for the GPU, up to `N`, for slots that still hold the tile
-    /// they were read for.
-    pub fn uploads<const N: usize>(&mut self) -> ([Option<Upload>; N], usize) {
+    /// The landed tiles waiting for the GPU, up to `limit` (and `N`), for slots that still hold
+    /// the tile they were read for.
+    pub fn uploads<const N: usize>(&mut self, limit: usize) -> ([Option<TileUpload>; N], usize) {
+        let limit = limit.min(N);
         let mut out = [None; N];
         let mut count = 0;
         let mut freed = [false; STAGES];
@@ -1676,7 +1826,7 @@ impl<K: Copy> PanelStream<K> {
             if !run.landed {
                 continue;
             }
-            for (cell, entry) in run.entries.iter_mut().enumerate() {
+            for (n, entry) in run.entries.iter_mut().enumerate() {
                 let Some(e) = *entry else { continue };
                 if e.kind != Kind::Tile {
                     *entry = None;
@@ -1692,14 +1842,21 @@ impl<K: Copy> PanelStream<K> {
                     *entry = None;
                     continue;
                 }
-                if count < N {
-                    out[count] = Some(Upload::new(e.slot, (index * RUN_CELLS + cell) as u8));
+                if count < limit {
+                    out[count] = Some(TileUpload {
+                        slot: e.slot,
+                        stage: index as u8,
+                        entry: n as u8,
+                        at: (index * GROUP_BYTES) as u32 + u32::from(e.at),
+                        len: e.len,
+                    });
                     count += 1;
                 }
             }
-            if run.entries.iter().all(Option::is_none) {
-                freed[index] = run.span;
+            if !run.warm && run.entries.iter().all(Option::is_none) {
+                freed[index] = run.groups > 1;
                 *stage = Stage::Free;
+                self.reads_dirty = true;
             }
         }
         for (index, &spanned) in freed.iter().enumerate() {
@@ -1710,9 +1867,10 @@ impl<K: Copy> PanelStream<K> {
         (out, count)
     }
 
-    /// The uploads in `taken` are in a frame's list: VRAM now holds their tiles and their cells
-    /// are free again.
-    pub fn applied(&mut self, taken: &[Option<Upload>]) {
+    /// The uploads in `taken` are in a frame's list: VRAM now holds their tiles and their
+    /// entries are free again.
+    pub fn applied(&mut self, taken: &[Option<TileUpload>]) {
+        self.reads_dirty |= !taken.is_empty();
         for upload in taken.iter().flatten() {
             let slot = &mut self.slots[usize::from(upload.slot)];
             if slot.state == SlotState::Pending {
@@ -1723,18 +1881,11 @@ impl<K: Copy> PanelStream<K> {
                 }
                 slot.since = 0;
             }
-            // A cell past the first part of the window is the long read's when that stage is.
-            let id = usize::from(upload.cell);
-            let index = if matches!(self.stages[id / RUN_CELLS], Stage::Spanned) {
-                0
-            } else {
-                id / RUN_CELLS
-            };
-            let cell = id - index * RUN_CELLS;
+            let index = usize::from(upload.stage);
             if let Stage::Busy(run) = &mut self.stages[index] {
-                run.entries[cell] = None;
-                if run.entries.iter().all(Option::is_none) {
-                    let span = run.span;
+                run.entries[usize::from(upload.entry)] = None;
+                if !run.warm && run.entries.iter().all(Option::is_none) {
+                    let span = run.groups > 1;
                     self.free_stage(index, span);
                 }
             }
@@ -1854,8 +2005,27 @@ mod tests {
     use std::vec::Vec;
 
     const SECTOR: usize = psx_grid::render::SLOT_BYTES;
-    /// Sectors of a panel with every tile stored.
-    const FULL: u32 = 1 + (COLS * ROWS) as u32;
+    /// Sectors between the blocks of the eyes a test puts on the disc.
+    const SPAN: u32 = 40;
+
+    /// The tile `k` of a panel, as the cook would have laid it out: 63 rows of 64 texels and a
+    /// palette row, in a few runs that compress.
+    fn picture(k: usize) -> Vec<u8> {
+        (0..SECTOR)
+            .map(|i| if i % 64 < 40 { 0 } else { (i / 64 + k) as u8 })
+            .collect()
+    }
+
+    /// A tile nothing compresses.
+    fn noise(k: usize) -> Vec<u8> {
+        let mut x = k as u32 * 7919 + 1;
+        (0..SECTOR)
+            .map(|_| {
+                x = x.wrapping_mul(1664525).wrapping_add(1013904223);
+                (x >> 24) as u8
+            })
+            .collect()
+    }
 
     /// A disc of sectors, a read finishing on the poll after it was queued.
     struct Disc {
@@ -1878,26 +2048,49 @@ mod tests {
             }
         }
 
-        /// Lay an eye's block at `sector` (disc sector, `base_lba` 4 included in the
-        /// caller's arithmetic): the list of stored tiles, then the panels of `headings`,
-        /// every tile stored, each header's depth byte `k` being `k`.
-        fn put_block(&mut self, sector: u32, headings: &[usize]) {
+        /// Lay an eye's block at `sector` (disc sector, `base_lba` 4 included in the caller's
+        /// arithmetic): the panels of `headings`, every tile stored, each depth byte `k` being
+        /// `k`. With `noisy` the tiles do not compress and the block takes several groups.
+        /// Returns the sectors the block takes.
+        fn put_block(&mut self, sector: u32, headings: &[usize], noisy: bool) -> u32 {
+            let panels: Vec<(usize, [u8; COLS])> = headings
+                .iter()
+                .map(|&h| (h, [(1 << ROWS) - 1; COLS]))
+                .collect();
+            self.put_panels(sector, &panels, noisy)
+        }
+
+        /// [`Self::put_block`] with the stored rows of each column given.
+        fn put_panels(&mut self, sector: u32, panels: &[(usize, [u8; COLS])], noisy: bool) -> u32 {
+            let depth: [u8; MESH] = core::array::from_fn(|k| k as u8);
+            let rooms = [CELL_EMPTY; CELLS];
+            let encoded: Vec<Vec<u8>> = (0..TILES)
+                .map(|k| {
+                    let tile = if noisy { noise(k) } else { picture(k) };
+                    psx_grid::tile_lz::encode_tile(&tile)
+                })
+                .collect();
+            let mut parts: [Option<psx_grid::eye_block::PanelPart<'_>>; HEADINGS] =
+                Default::default();
+            for &(h, cols) in panels {
+                parts[h] = Some(psx_grid::eye_block::PanelPart {
+                    cols,
+                    depth: &depth,
+                    rooms: &rooms,
+                    tiles: core::array::from_fn(|k| {
+                        (cols[k / ROWS] >> (k % ROWS) & 1 != 0).then(|| encoded[k].as_slice())
+                    }),
+                });
+            }
+            let block = if panels.is_empty() {
+                // An eye that stores nothing still has its index sector.
+                std::vec![0u8; SECTOR]
+            } else {
+                psx_grid::eye_block::build_block(&parts)
+            };
             let at = (4 + sector as usize) * SECTOR;
-            for b in &mut self.bytes[at..at + SECTOR] {
-                *b = 0;
-            }
-            for &h in headings {
-                for c in 0..COLS {
-                    self.bytes[at + h * COLS + c] = (1 << ROWS) - 1;
-                }
-            }
-            for (n, &h) in headings.iter().enumerate() {
-                let _ = h;
-                let header = at + (1 + n) * SECTOR;
-                for k in 0..MESH {
-                    self.bytes[header + k] = k as u8;
-                }
-            }
+            self.bytes[at..at + block.len()].copy_from_slice(&block);
+            (block.len() / SECTOR) as u32
         }
     }
 
@@ -1951,6 +2144,7 @@ mod tests {
         PanelInput {
             eyes,
             blocks,
+            sectors: &[],
             base_lba: 4,
             slots: SLOTS,
             eye,
@@ -1973,7 +2167,7 @@ mod tests {
     ) {
         for _ in 0..ticks {
             stream.update(disc, window, input);
-            let (ups, count) = stream.uploads::<2>();
+            let (ups, count) = stream.uploads::<2>(2);
             stream.applied(&ups[..count]);
         }
     }
@@ -1999,7 +2193,7 @@ mod tests {
     }
 
     fn window() -> Vec<u32> {
-        std::vec![0u32; crate::card_stream::CARD_WINDOW_WORDS]
+        std::vec![0u32; WINDOW_WORDS]
     }
 
     #[test]
@@ -2054,15 +2248,22 @@ mod tests {
     }
 
     #[test]
-    fn a_tile_sector_counts_the_stored_tiles_before_it() {
-        // Column 0: rows 0 and 2; column 1: row 1; header 10, tiles from 20 (every row of a
-        // panel is a central one), the others from 30.
-        let entry = [10u32, 20, 30, 0b0000_0010_0000_0101, 0];
-        assert!(stored(&entry, 0) && stored(&entry, 2) && stored(&entry, ROWS + 1));
-        assert!(!stored(&entry, 1) && !stored(&entry, ROWS));
-        assert_eq!(tile_sector(&entry, 0), 20);
-        assert_eq!(tile_sector(&entry, 2), 21);
-        assert_eq!(tile_sector(&entry, ROWS + 1), 22);
+    fn an_index_says_which_tiles_are_stored_and_in_which_group() {
+        let mut disc = Disc::new(4 + 20);
+        let sectors = disc.put_block(0, &[0, 3], true);
+        assert!(
+            sectors > GROUP_SECTORS as u32,
+            "noise takes several groups: {sectors}"
+        );
+        let first = disc.bytes[4 * SECTOR..(4 + 1) * SECTOR].to_vec();
+        let mut list = EyeList::EMPTY;
+        list.parse(|k| first[k]);
+        assert!(list.stored(0, 0) && list.stored(3, TILES - 1));
+        assert!(!list.stored(1, 0));
+        // Noise stores whole tiles, six to a group at most: the later ones sit in later groups.
+        assert_eq!(list.group_of(0, 0), 0);
+        assert!(list.group_of(3, TILES - 1) >= 1);
+        assert_eq!(list.depth[3][5], 5);
     }
 
     #[test]
@@ -2070,7 +2271,7 @@ mod tests {
         let eyes = [[0i16; 3]];
         let blocks = [5u32];
         let mut disc = Disc::new(4 + 5 + 60);
-        disc.put_block(5, &[0]);
+        disc.put_block(5, &[0], false);
         let mut window = window();
         let mut stream = PanelStream::<usize>::new();
         let input = input(&eyes, &blocks, [0; 3], [4096, 0]);
@@ -2104,7 +2305,7 @@ mod tests {
         let eyes = [[0i16; 3]];
         let blocks = [5u32];
         let mut disc = Disc::new(4 + 5 + 100);
-        disc.put_block(5, &[0, 1]);
+        disc.put_block(5, &[0, 1], false);
         let mut window = window();
         let mut stream = PanelStream::<usize>::new();
         let facing = input(&eyes, &blocks, [0; 3], [4096, 0]);
@@ -2124,10 +2325,10 @@ mod tests {
     #[test]
     fn a_change_of_eye_draws_the_old_tiles_until_the_new_ones_land() {
         let eyes = [[0i16; 3], [2000, 0, 0]];
-        let blocks = [5u32, 5 + 1 + FULL];
-        let mut disc = Disc::new(4 + 5 + 120);
-        disc.put_block(5, &[0]);
-        disc.put_block(5 + 1 + FULL, &[0]);
+        let blocks = [5u32, 5 + SPAN];
+        let mut disc = Disc::new(4 + 5 + 2 * SPAN as usize + 40);
+        disc.put_block(5, &[0], false);
+        disc.put_block(5 + SPAN, &[0], false);
         let mut window = window();
         let mut stream = PanelStream::<usize>::new();
         // Near the first eye: the second is far enough not to be kept ready.
@@ -2160,10 +2361,10 @@ mod tests {
     #[test]
     fn the_next_eye_is_kept_ready_before_the_camera_crosses_to_it() {
         let eyes = [[0i16; 3], [1600, 0, 0]];
-        let blocks = [5u32, 5 + 1 + FULL];
-        let mut disc = Disc::new(4 + 5 + 120);
-        disc.put_block(5, &[0]);
-        disc.put_block(5 + 1 + FULL, &[0]);
+        let blocks = [5u32, 5 + SPAN];
+        let mut disc = Disc::new(4 + 5 + 2 * SPAN as usize + 40);
+        disc.put_block(5, &[0], false);
+        disc.put_block(5 + SPAN, &[0], false);
         let mut window = window();
         let mut stream = PanelStream::<usize>::new();
         // Nearer the first eye, but within half a spacing of the second.
@@ -2171,7 +2372,7 @@ mod tests {
         run(&mut stream, &mut disc, &mut window, &between, 400);
         assert_eq!(stream.counters.eye, 0);
         let lbas: Vec<u32> = disc.reads.iter().map(|r| r.0).collect();
-        assert!(lbas.iter().any(|&l| l >= 4 + 5 + 1 + FULL), "{lbas:?}");
+        assert!(lbas.iter().any(|&l| l >= 4 + 5 + SPAN), "{lbas:?}");
         // Crossing: the new eye's tiles are in already, so it draws at once.
         let crossed = input(&eyes, &blocks, [1000, 0, 0], [4096, 0]);
         for _ in 0..PASS_TICKS + 1 {
@@ -2195,10 +2396,10 @@ mod tests {
     #[test]
     fn the_camera_crosses_to_a_nearer_eye_at_once_and_never_waits_for_the_drive() {
         let eyes = [[0i16; 3], [800, 0, 0]];
-        let blocks = [5u32, 5 + 1 + FULL];
-        let mut disc = Disc::new(4 + 5 + 120);
-        disc.put_block(5, &[0]);
-        disc.put_block(5 + 1 + FULL, &[0]);
+        let blocks = [5u32, 5 + SPAN];
+        let mut disc = Disc::new(4 + 5 + 2 * SPAN as usize + 40);
+        disc.put_block(5, &[0], false);
+        disc.put_block(5 + SPAN, &[0], false);
         let mut window = window();
         let mut stream = PanelStream::<usize>::new();
         // Next to the first eye, with the second a spacing away (not kept ready).
@@ -2231,10 +2432,10 @@ mod tests {
     #[test]
     fn the_eye_in_use_keeps_its_places_when_the_list_is_short() {
         let eyes = [[0i16; 3], [800, 0, 0]];
-        let blocks = [5u32, 5 + 1 + FULL];
-        let mut disc = Disc::new(4 + 5 + 120);
-        disc.put_block(5, &[0]);
-        disc.put_block(5 + 1 + FULL, &[0]);
+        let blocks = [5u32, 5 + SPAN];
+        let mut disc = Disc::new(4 + 5 + 2 * SPAN as usize + 40);
+        disc.put_block(5, &[0], false);
+        disc.put_block(5 + SPAN, &[0], false);
         let mut window = window();
         let mut stream = PanelStream::<usize>::new();
         let at_first = input(&eyes, &blocks, [-100, 0, 0], [4096, 0]);
@@ -2265,10 +2466,10 @@ mod tests {
     #[test]
     fn a_tile_is_never_drawn_from_two_eyes_while_a_crossing_settles() {
         let eyes = [[0i16; 3], [800, 0, 0]];
-        let blocks = [5u32, 5 + 1 + FULL];
-        let mut disc = Disc::new(4 + 5 + 120);
-        disc.put_block(5, &[0]);
-        disc.put_block(5 + 1 + FULL, &[0]);
+        let blocks = [5u32, 5 + SPAN];
+        let mut disc = Disc::new(4 + 5 + 2 * SPAN as usize + 40);
+        disc.put_block(5, &[0], false);
+        disc.put_block(5 + SPAN, &[0], false);
         let mut window = window();
         let mut stream = PanelStream::<usize>::new();
         let at_first = input(&eyes, &blocks, [-100, 0, 0], [4096, 0]);
@@ -2301,12 +2502,12 @@ mod tests {
     #[test]
     fn a_tile_no_other_eye_could_stand_in_for_is_read_ahead_of_the_rest_of_its_eye() {
         let eyes = [[0i16; 3], [1600, 0, 0]];
-        let blocks = [5u32, 5 + 1 + FULL];
-        let mut disc = Disc::new(4 + 5 + 120);
-        disc.put_block(5, &[0]);
-        disc.put_block(5 + 1 + FULL, &[0]);
+        let blocks = [5u32, 5 + SPAN];
+        let mut disc = Disc::new(4 + 5 + 2 * SPAN as usize + 40);
+        disc.put_block(5, &[0], false);
+        disc.put_block(5 + SPAN, &[0], false);
         // The first eye stores nothing of the second column of the panel; the second does.
-        disc.bytes[(4 + 5) * SECTOR + 1] = 0;
+        disc.put_panels(5, &[(0, [(1 << ROWS) - 1, 0])], false);
         let mut window = window();
         let mut stream = PanelStream::<usize>::new();
         let between = input(&eyes, &blocks, [650, 0, 0], [4096, 0]);
@@ -2333,10 +2534,10 @@ mod tests {
     #[test]
     fn the_eye_kept_ready_stays_while_another_is_barely_nearer() {
         let eyes = [[0i16; 3], [700, 0, 0], [0, 0, 730]];
-        let blocks = [5u32, 5 + 1 + FULL, 5 + 2 * (1 + FULL)];
-        let mut disc = Disc::new(4 + 5 + 3 * (1 + FULL as usize) + 10);
+        let blocks = [5u32, 5 + SPAN, 5 + 2 * SPAN];
+        let mut disc = Disc::new(4 + 5 + 3 * SPAN as usize + 10);
         for &block in &blocks {
-            disc.put_block(block, &[0]);
+            disc.put_block(block, &[0], false);
         }
         let mut window = window();
         let mut stream = PanelStream::<usize>::new();
@@ -2364,7 +2565,7 @@ mod tests {
         let blocks = [5u32];
         let mut disc = Disc::new(4 + 40);
         // The list says nothing is stored.
-        disc.put_block(5, &[]);
+        disc.put_block(5, &[], false);
         let mut stream = PanelStream::<usize>::new();
         let mut window = window();
         let input = input(&eyes, &blocks, [0; 3], [4096, 0]);
@@ -2372,5 +2573,123 @@ mod tests {
         // Only the list itself was read.
         assert_eq!(disc.reads.len(), 1);
         assert_eq!(drawn(&stream, &eyes).len(), 0);
+    }
+
+    #[test]
+    fn a_big_eye_loads_by_groups_and_every_tile_decodes_to_what_was_baked() {
+        let eyes = [[0i16; 3]];
+        let blocks = [5u32];
+        let mut disc = Disc::new(4 + 5 + 80);
+        let sectors = disc.put_block(5, &[0, 1], true);
+        assert!(sectors > 2 * GROUP_SECTORS as u32 / 2, "{sectors}");
+        let mut window = window();
+        let mut stream = PanelStream::<usize>::new();
+        let input = input(&eyes, &blocks, [0; 3], [4096, 0]);
+        let mut checked = [[false; TILES]; 2];
+        for _ in 0..600 {
+            stream.update(&mut disc, &mut window, &input);
+            let (ups, count) = stream.uploads::<3>(3);
+            // SAFETY: a byte view of the window for the test.
+            let bytes = unsafe {
+                core::slice::from_raw_parts(window.as_ptr().cast::<u8>(), window.len() * 4)
+            };
+            for up in ups[..count].iter().flatten() {
+                let slot = stream.slots[usize::from(up.slot)];
+                let mut tile = [0u8; TILE_BYTES];
+                decode_tile(
+                    &bytes[up.at as usize..up.at as usize + usize::from(up.len)],
+                    &mut tile,
+                )
+                .expect("decodes");
+                let want = noise(usize::from(slot.tile));
+                assert_eq!(
+                    &tile[..],
+                    &want[..],
+                    "tile {} of heading {}",
+                    slot.tile,
+                    slot.heading
+                );
+                checked[usize::from(slot.heading)][usize::from(slot.tile)] = true;
+            }
+            stream.applied(&ups[..count]);
+        }
+        assert!(checked[0].iter().all(|&c| c) && checked[1].iter().all(|&c| c));
+        assert!(stream.eye_loaded());
+        // The index and the first groups came in one read of two groups; the rest in few.
+        assert!(disc.reads.len() <= 3, "{:?}", disc.reads);
+        assert_eq!(stream.counters.failed, 0);
+    }
+
+    #[test]
+    fn landed_tiles_become_gpu_nodes_with_their_rows() {
+        let eyes = [[0i16; 3]];
+        let blocks = [5u32];
+        let mut disc = Disc::new(4 + 5 + 80);
+        disc.put_block(5, &[0], true);
+        let mut window = window();
+        let mut stream = PanelStream::<usize>::new();
+        let input = input(&eyes, &blocks, [0; 3], [4096, 0]);
+        for _ in 0..200 {
+            stream.update(&mut disc, &mut window, &input);
+            let (ups, count) = stream.uploads::<2>(2);
+            if count == 0 {
+                continue;
+            }
+            let mut out = std::vec![0u32; crate::card_stream::upload_packet_words(count)];
+            let (words, packets, bad) =
+                write_tile_uploads(&ups[..count], &window, (0, 0), (0, 0), 7, &mut out);
+            assert_eq!((words, packets, bad), (out.len(), 1 + count * 64, 0));
+            // The last node written is the first picture's first row: its data is the first
+            // eight words of the decoded tile.
+            let up = ups[0].unwrap();
+            let slot = stream.slots[usize::from(up.slot)];
+            let want = noise(usize::from(slot.tile));
+            let node = &out[out.len() - 12..];
+            let row: Vec<u8> = node[4..].iter().flat_map(|w| w.to_le_bytes()).collect();
+            assert_eq!(&row[..], &want[..32]);
+            return;
+        }
+        panic!("nothing landed");
+    }
+
+    #[test]
+    fn a_read_the_eye_in_use_waits_for_does_not_wait_for_prefetched_tiles_to_reach_the_gpu() {
+        let eyes = [[0i16; 3], [1600, 0, 0], [8000, 0, 0]];
+        let blocks = [5u32, 5 + SPAN, 5 + 2 * SPAN];
+        let mut disc = Disc::new(4 + 5 + 3 * SPAN as usize + 40);
+        disc.put_block(5, &[0], true);
+        disc.put_block(5 + SPAN, &[0], true);
+        disc.put_block(5 + 2 * SPAN, &[0], true);
+        let mut window = window();
+        let mut stream = PanelStream::<usize>::new();
+        // The first eye loads and shows.
+        let at_first = input(&eyes, &blocks, [-1200, 0, 0], [4096, 0]);
+        run(&mut stream, &mut disc, &mut window, &at_first, 300);
+        assert!(stream.eye_loaded());
+        // Within reach of the second: its tiles are read ahead, and the GPU takes none of them.
+        let between = input(&eyes, &blocks, [650, 0, 0], [4096, 0]);
+        for _ in 0..200 {
+            stream.update(&mut disc, &mut window, &between);
+        }
+        assert!(
+            !stream.stages.iter().any(|s| matches!(s, Stage::Free)),
+            "both stages hold prefetched tiles"
+        );
+        // The camera jumps to the third eye: its index is queued at once, not after the GPU has
+        // taken the second eye's tiles.
+        let before = disc.reads.len();
+        let far = input(&eyes, &blocks, [8000, 0, 0], [4096, 0]);
+        for _ in 0..PASS_TICKS + 2 {
+            stream.update(&mut disc, &mut window, &far);
+        }
+        assert!(stream.counters.preempted >= 1);
+        let lba = |sector: u32| 4 + sector;
+        assert!(
+            disc.reads[before..]
+                .iter()
+                .any(|r| r.0 == lba(5 + 2 * SPAN)),
+            "{:?}",
+            &disc.reads[before..]
+        );
     }
 }

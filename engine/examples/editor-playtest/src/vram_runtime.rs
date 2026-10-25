@@ -309,6 +309,7 @@ pub(super) fn load_streamed_sky_from_cd() {
         ROOMS.as_slice(),
         UI_PACK_START_LBA,
         UI_PACK_TOC,
+        has_cards(),
     );
 }
 
@@ -340,8 +341,18 @@ static mut CHUNK_SKY: psx_game_runtime::cube_sky_stream::CubeSkyStream<
     <psx_game_runtime::grid_stream::DiscTransport as psx_game_runtime::grid_stream::RoomTransport>::Ticket,
 > = psx_game_runtime::cube_sky_stream::CubeSkyStream::new();
 #[cfg(feature = "cd-stream-bench")]
-static mut CHUNK_SKY_WINDOW: psx_game_runtime::cube_sky_stream::CubeSkyWindow =
+static mut CHUNK_SKY_WINDOW: psx_game_runtime::cube_sky_stream::CubeSkyWindow<WINDOW_WORDS> =
     psx_game_runtime::cube_sky_stream::CubeSkyWindow::new();
+
+/// Words of the window the streams read through. A world with far panels reads only the
+/// panels' groups through it (it bakes no chunk skies and has no cards); any other keeps the
+/// size the chunk sky and the cards need.
+#[cfg(feature = "cd-stream-bench")]
+const WINDOW_WORDS: usize = if crate::generated::GRID_PANEL_BLOCKS.is_empty() {
+    psx_game_runtime::cube_sky_stream::CUBE_SKY_WINDOW_WORDS
+} else {
+    psx_game_runtime::panel_stream::WINDOW_WORDS
+};
 
 /// Keep the baked sky of the chunk the player is in on screen, for a world
 /// that bakes one per chunk (a background table in the manifest). Call once
@@ -562,7 +573,7 @@ pub(super) fn panels_loaded() -> bool {
         )
     };
     loop {
-        let (uploads, count) = stream.uploads::<8>();
+        let (uploads, count) = stream.uploads::<8>(8);
         if count == 0 {
             break;
         }
@@ -575,7 +586,10 @@ pub(super) fn panels_loaded() -> bool {
                 ),
                 _ => psx_grid::render::slot_origin(origin, slot),
             };
-            let from = usize::from(upload.cell) * SLOT_BYTES / 4;
+            let mut picture = [0u32; SLOT_BYTES / 4];
+            if !psx_game_runtime::panel_stream::decode_upload(upload, window, &mut picture) {
+                stream.counters.undecodable += 1;
+            }
             psx_vram::upload_words(
                 psx_vram::VramRect::new(
                     x,
@@ -583,7 +597,7 @@ pub(super) fn panels_loaded() -> bool {
                     psx_grid::render::SLOT_HALFWORDS,
                     psx_grid::render::SLOT_ROWS as u16,
                 ),
-                &window[from..from + SLOT_BYTES / 4],
+                &picture,
             );
         }
         stream.applied(&uploads[..count]);
@@ -700,8 +714,8 @@ pub(super) fn note_view(rotation: &[[i16; 3]; 3]) {
 #[cfg(feature = "cd-stream-bench")]
 pub(super) fn step_panels(eye: [i32; 3], focal: i32) {
     use crate::generated::{
-        GRID_PANEL_BLOCKS, GRID_PANEL_EYES, GRID_PANEL_FOCAL, GRID_PANEL_SPACING,
-        WORLD_PACK_START_LBA,
+        GRID_PANEL_BLOCKS, GRID_PANEL_EYES, GRID_PANEL_FOCAL, GRID_PANEL_SECTORS,
+        GRID_PANEL_SPACING, WORLD_PACK_START_LBA,
     };
     use psx_game_runtime::panel_stream::PanelInput;
     if GRID_PANEL_BLOCKS.is_empty() || card_atlas().is_none() {
@@ -726,6 +740,7 @@ pub(super) fn step_panels(eye: [i32; 3], focal: i32) {
     let input = PanelInput {
         eyes: GRID_PANEL_EYES,
         blocks: GRID_PANEL_BLOCKS,
+        sectors: GRID_PANEL_SECTORS,
         base_lba: WORLD_PACK_START_LBA,
         slots: if panel_atlas().is_some() {
             psx_grid::render::SLOTS + psx_grid::render::SECOND_ATLAS_SLOTS
@@ -769,18 +784,27 @@ pub(super) fn panel_eye() -> u32 {
     unsafe { (*core::ptr::addr_of!(PANELS)).counters.eye }
 }
 
-/// Panel tiles the GPU uploads per frame: 770 words of packets each.
+/// Panel tiles the GPU uploads per frame at most: 770 words of packets each. A landed read holds
+/// its stage of the window until its tiles are in a frame's list, and the next read waits for a
+/// stage, so the tiles go as fast as the frame's list has room; the decoding is the same work
+/// whenever it is done.
 #[cfg(feature = "cd-stream-bench")]
-const PANEL_UPLOADS_PER_FRAME: usize = 3;
+const PANEL_UPLOADS_PER_FRAME: usize = 6;
+
+/// Panel tiles a frame takes when the list has no room for [`PANEL_UPLOADS_PER_FRAME`].
+#[cfg(feature = "cd-stream-bench")]
+const PANEL_UPLOADS_FEW: usize = 3;
 
 /// Put the landed panel tiles into this frame's list, in the sky's slot (they run before
-/// everything else): the GPU copies them as it draws and the CPU never waits for it.
+/// everything else): each is decoded straight into its nodes, and the GPU copies them as it draws
+/// so the CPU never waits for it.
 #[cfg(feature = "cd-stream-bench")]
 pub(super) fn emit_panel_uploads(
     primitive_packets: &mut PrimitivePacketArena<'_>,
     ot: &mut OtFrame<'_, OT_DEPTH>,
 ) {
-    use psx_game_runtime::card_stream::{upload_packet_words, write_upload_packets};
+    use psx_game_runtime::card_stream::upload_packet_words;
+    use psx_game_runtime::panel_stream::write_tile_uploads;
     if !has_panels() {
         return;
     }
@@ -794,15 +818,25 @@ pub(super) fn emit_panel_uploads(
             (*core::ptr::addr_of_mut!(CHUNK_SKY_WINDOW)).words_mut(),
         )
     };
-    let (uploads, count) = stream.uploads::<PANEL_UPLOADS_PER_FRAME>();
+    let (mut uploads, mut count) =
+        stream.uploads::<PANEL_UPLOADS_PER_FRAME>(PANEL_UPLOADS_PER_FRAME);
     if count == 0 {
         return;
     }
-    let Some(mut reservation) = primitive_packets.reserve_packet_words(upload_packet_words(count))
-    else {
-        return;
+    let mut reservation = loop {
+        if let Some(reservation) =
+            primitive_packets.reserve_packet_words(upload_packet_words(count))
+        {
+            break reservation;
+        }
+        if count <= PANEL_UPLOADS_FEW {
+            return;
+        }
+        // The list has no room for them all: fewer now, the rest next frame.
+        count = PANEL_UPLOADS_FEW;
+        uploads[count..].fill(None);
     };
-    let (words, packets) = write_upload_packets(
+    let (words, packets, undecodable) = write_tile_uploads(
         &uploads[..count],
         window,
         origin,
@@ -814,6 +848,7 @@ pub(super) fn emit_panel_uploads(
         return;
     };
     // The uploads are in the frame's list: the stream has taken them.
+    stream.counters.undecodable += undecodable;
     stream.applied(&uploads[..count]);
     // SAFETY: the stream is one committed arena range, live until the walk ends, and its slot
     // is below OT_DEPTH.

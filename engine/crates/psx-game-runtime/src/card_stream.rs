@@ -1128,6 +1128,54 @@ pub fn write_upload_packets(
     (words, 1 + pictures * ROWS)
 }
 
+/// [`write_upload_packets`] for pictures that are not in memory as they are: `fill(k, words)`
+/// writes the picture for `slots[k]` into the sector-sized buffer it is given, which is then
+/// copied into the packets. The far panels decode their tiles this way. Returns `(words,
+/// packets)` written; nothing when `out` is short or there are no slots.
+pub fn write_filled_packets(
+    slots: &[u8],
+    origin: (u16, u16),
+    origin2: (u16, u16),
+    slot: u16,
+    out: &mut [u32],
+    mut fill: impl FnMut(usize, &mut [u32; SECTOR_WORDS]),
+) -> (usize, usize) {
+    let pictures = slots.len();
+    let words = upload_packet_words(pictures);
+    if pictures == 0 || out.len() < words {
+        return (0, 0);
+    }
+    let tag = u32::from(slot) | ((ROW_NODE_WORDS as u32 - 1) << 24);
+    out[0] = u32::from(slot) | (1 << 24);
+    out[1] = 0x0100_0000;
+    let mut end = words;
+    let mut picture = [0u32; SECTOR_WORDS];
+    for (k, &atlas_slot) in slots.iter().enumerate() {
+        fill(k, &mut picture);
+        let (x, y) = if usize::from(atlas_slot) >= SLOTS {
+            psx_grid::render::slot_origin(
+                origin2,
+                psx_grid::render::second_atlas_slot(usize::from(atlas_slot) - SLOTS),
+            )
+        } else {
+            psx_grid::render::slot_origin(origin, usize::from(atlas_slot))
+        };
+        for row in 0..ROWS {
+            let node: &mut [u32; ROW_NODE_WORDS] = (&mut out[end - ROW_NODE_WORDS..end])
+                .try_into()
+                .unwrap_or_else(|_| unreachable!());
+            node[0] = tag;
+            node[1] = psx_hw::gpu::gp0::COPY_CPU_TO_VRAM;
+            node[2] = psx_hw::gpu::pack_xy(x, y + row as u16);
+            node[3] = psx_hw::gpu::pack_xy(SLOT_HALFWORDS, 1);
+            let at = row * ROW_WORDS;
+            node[4..].copy_from_slice(&picture[at..at + ROW_WORDS]);
+            end -= ROW_NODE_WORDS;
+        }
+    }
+    (words, 1 + pictures * ROWS)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

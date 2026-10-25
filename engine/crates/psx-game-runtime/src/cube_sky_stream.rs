@@ -37,16 +37,14 @@ pub const CUBE_SKY_WINDOW_WORDS: usize = (PIECE_SECTORS as usize * SECTOR_BYTES 
 /// The RAM a sky read lands in. The game keeps one in a static, so it stays
 /// in `.bss`.
 #[repr(C, align(4))]
-pub struct CubeSkyWindow {
-    words: [u32; CUBE_SKY_WINDOW_WORDS],
+pub struct CubeSkyWindow<const W: usize = CUBE_SKY_WINDOW_WORDS> {
+    words: [u32; W],
 }
 
-impl CubeSkyWindow {
+impl<const W: usize> CubeSkyWindow<W> {
     /// A zeroed window.
     pub const fn new() -> Self {
-        Self {
-            words: [0; CUBE_SKY_WINDOW_WORDS],
-        }
+        Self { words: [0; W] }
     }
 
     fn word(&self, byte: usize) -> u32 {
@@ -66,7 +64,7 @@ impl CubeSkyWindow {
     }
 }
 
-impl Default for CubeSkyWindow {
+impl<const W: usize> Default for CubeSkyWindow<W> {
     fn default() -> Self {
         Self::new()
     }
@@ -230,10 +228,10 @@ impl<K: Copy> CubeSkyStream<K> {
     /// `initial` is the tile mask of the level's own sky, which VRAM starts
     /// with. Call once per tick; the renderer takes the tile operations with
     /// [`Self::plan`].
-    pub fn step<T>(
+    pub fn step<T, const W: usize>(
         &mut self,
         transport: &mut T,
-        window: &mut CubeSkyWindow,
+        window: &mut CubeSkyWindow<W>,
         resident: bool,
         lba: u32,
         sectors: u32,
@@ -370,10 +368,10 @@ impl<K: Copy> CubeSkyStream<K> {
     /// Note what the first `landed` bytes of the window hold: the entry's
     /// header and mask first, then the whole tiles as ready for the renderer.
     /// `Err` when the entry does not parse.
-    fn land(
+    fn land<const W: usize>(
         job: &mut Job<K>,
         incoming: &mut [u32; MASK_WORDS],
-        window: &CubeSkyWindow,
+        window: &CubeSkyWindow<W>,
         landed: usize,
     ) -> Result<(), ()> {
         let mut at = 0;
@@ -543,9 +541,9 @@ pub const fn tile_packet_words(ops: usize) -> usize {
 /// last). Returns `(words, packets)` written; nothing when `out` is short or
 /// the plan is empty. The caller applies the plan once the stream is
 /// committed.
-pub fn write_tile_packets<const N: usize>(
+pub fn write_tile_packets<const N: usize, const W: usize>(
     plan: &SkyPlan<N>,
-    window: &CubeSkyWindow,
+    window: &CubeSkyWindow<W>,
     background: &Background<'_>,
     origin: (u16, u16),
     slot: u16,
@@ -1040,7 +1038,7 @@ mod tests {
         let (mut disc, at) = Disc::with(&[bad]);
         let initial = mask_words(&rig.entries[0]);
         let mut stream = CubeSkyStream::<usize>::new();
-        let mut window = CubeSkyWindow::new();
+        let mut window: CubeSkyWindow = CubeSkyWindow::new();
         for _ in 0..8 {
             stream.step(&mut disc, &mut window, true, at[0].0, at[0].1, &initial);
         }
@@ -1057,7 +1055,7 @@ mod tests {
         let rig = Rig::new(&[60, 5]);
         let (mut disc, at) = Disc::with(&rig.entries);
         let mut stream = CubeSkyStream::<usize>::new();
-        let mut window = CubeSkyWindow::new();
+        let mut window: CubeSkyWindow = CubeSkyWindow::new();
         let initial = mask_words(&rig.entries[0]);
         assert_eq!(
             stream.step(&mut disc, &mut window, false, at[1].0, at[1].1, &initial),
