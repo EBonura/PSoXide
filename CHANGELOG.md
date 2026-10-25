@@ -60,7 +60,7 @@ needing the rename at their next repin: hk-psx (the files other lanes had
 open, `game/src/cd_stream.rs`, `render.rs`, `main.rs`, `display.rs` and
 others, and `shared/hk-cache` for `begin_load` and `finish_load`; the renames
 are ready on the branch `lane/sdk-deprecations-hk-busy`), and gh-psx, ds-psx,
-alttp-psx and psx-demo-disc, whose pins predate the replacements.
+and alttp-psx, whose pins predate the replacements, and psx-demo-disc's launcher (the demo lanes are replacing it).
 
 ## Source 2026.09.05
 
