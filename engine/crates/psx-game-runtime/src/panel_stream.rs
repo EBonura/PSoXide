@@ -86,9 +86,10 @@ const NEXT_STICKS: i32 = 8;
 const MIN_WALK: i32 = 3;
 const NO_SLOT_INDEX: u8 = 0xff;
 const NO_ENTRY: u8 = 0xff;
-/// Eyes whose lists of stored tiles are kept: the one in use, the one the camera is about to
-/// cross to, and the ones just left.
-const EYES: usize = 4;
+/// Eyes whose indexes are kept: the one in use and the two the camera is about to cross to. An
+/// eye just left needs only its index read again if the camera goes back (its tiles stay in VRAM
+/// meanwhile), so a fourth index would cost 1.2 KiB of the guest's scarce RAM for nothing much.
+const EYES: usize = 3;
 
 /// What a [`PanelStream`] has done, for telemetry and diagnosis.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
