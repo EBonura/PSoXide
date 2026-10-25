@@ -138,7 +138,7 @@ impl Playtest {
         while let Some((emitter, release)) = combat::authored_projectile_release_pending_at_frame(
             records,
             CharacterAnimationAction::RangedAttack,
-            Some(pose.pose()),
+            Some(*pose.pose()),
             self.ranged_ready.released,
             (phase >> 12).min(u32::from(u16::MAX)) as u16,
         ) {

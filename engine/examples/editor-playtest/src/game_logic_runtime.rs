@@ -465,7 +465,10 @@ impl Playtest {
                 COMBAT_CAPSULES.get(first..end)
             })
             .unwrap_or(&[]);
-        let player_pose = self.player_actor_pose.map(|snapshot| snapshot.pose());
+        let player_pose = self
+            .player_actor_pose
+            .as_ref()
+            .map(|snapshot| *snapshot.pose());
         let mut prop_blockers =
             psx_engine::FixedScratch::<CharacterCollisionAabb, MAX_STATIC_PROP_AABB_BLOCKERS>::new(
             );
@@ -1491,7 +1494,7 @@ impl Playtest {
                         == 1
                     && phase >= previous.pose().phase_q12()
             })
-            .map(|previous| previous.pose());
+            .map(|previous| *previous.pose());
         let mut active = [ActivePlayerCapsule::EMPTY; psx_level::MAX_CHARACTER_COMBAT_CAPSULES];
         let mut active_count = 0usize;
         let mut authored_action = false;
@@ -1516,7 +1519,7 @@ impl Playtest {
             let Some((capsule, previous_capsule)) = combat::transform_actor_combat_capsule_sweep(
                 record,
                 previous_pose,
-                player_pose.pose(),
+                *player_pose.pose(),
                 sweep_start_phase,
                 sweep_end_phase,
             ) else {

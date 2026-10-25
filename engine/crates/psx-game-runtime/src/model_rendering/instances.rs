@@ -1044,8 +1044,9 @@ mod tests {
             rotation_q12: [0; 3],
             flags: 0,
         };
-        let socket_pose = super::super::equipment::attachment_socket_pose(snapshot.pose(), &socket)
-            .expect("socket pose");
+        let socket_pose =
+            super::super::equipment::attachment_socket_pose(&snapshot.pose(), &socket)
+                .expect("socket pose");
         assert_eq!(socket_pose.origin, WorldVertex::new(1_030, 1_974, 2_784));
         assert_eq!(
             socket_pose.rotation,

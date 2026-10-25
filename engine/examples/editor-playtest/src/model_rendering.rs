@@ -827,6 +827,7 @@ impl Playtest {
                 // misses and the resolver samples once.
                 let cached_clip_first_root_xz = self
                     .previous_player_actor_pose
+                    .as_ref()
                     .filter(|previous| {
                         previous.clip_local() == clip_local
                             && previous.model().index == character.model
@@ -884,13 +885,17 @@ impl Playtest {
             }
         }
 
-        self.player_actor_pose = self
-            .player_actor_pose
-            .map(|pose| self.arch_player_pose(pose, ctx.sim_tick));
+        // Only a body hanging from an arch is posed differently; every other
+        // tick would copy the whole snapshot through the call for nothing.
+        if self.hook_attached.is_some() {
+            self.player_actor_pose = self
+                .player_actor_pose
+                .map(|pose| self.arch_player_pose(pose, ctx.sim_tick));
+        }
 
         // Where rendering samples the phase is where it is worth measuring:
         // this is the number that says which cooked frame is on screen.
-        if let Some(pose) = self.player_actor_pose {
+        if let Some(pose) = self.player_actor_pose.as_ref() {
             self.player_dash_assembly.observe(pose);
             if let Some(character) = self.character.as_ref() {
                 self.player_scarf.tick(

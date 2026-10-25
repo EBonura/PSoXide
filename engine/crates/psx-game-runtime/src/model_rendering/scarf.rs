@@ -55,7 +55,7 @@ impl PlayerScarf {
     pub fn tick(
         &mut self,
         tables: ModelTables,
-        pose: PlayerActorPoseSnapshot,
+        pose: &PlayerActorPoseSnapshot,
         height: i32,
         floor_y: i32,
         hz: VideoHz,

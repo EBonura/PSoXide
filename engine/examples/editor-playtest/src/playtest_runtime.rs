@@ -1579,7 +1579,7 @@ impl Playtest {
                 if let Some(mut charge) = psx_game_runtime::combat::authored_projectile_charge(
                     capsules,
                     CharacterAnimationAction::RangedAttack,
-                    Some(pose.pose()),
+                    Some(*pose.pose()),
                 ) {
                     charge.visual.core_rgb = [224, 255, 248];
                     charge.visual.glow_rgb = [64, 208, 168];

@@ -156,7 +156,7 @@ impl PlayerDashAssembly {
     }
 
     /// Track a new evade without tying reconstruction to its animation clip.
-    pub fn observe(&mut self, pose: PlayerActorPoseSnapshot) {
+    pub fn observe(&mut self, pose: &PlayerActorPoseSnapshot) {
         let now = pose.pose().tick().as_u32();
         self.observe_action(pose.action(), now.saturating_sub(pose.action_tick), now);
     }

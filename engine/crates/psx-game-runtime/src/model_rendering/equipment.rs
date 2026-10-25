@@ -554,7 +554,7 @@ pub(super) fn draw_player_weapon_trails_from_pose<
             let back = history_q12.saturating_mul(sample as u32) / segment_count as u32;
             let sample_phase = current_phase.saturating_sub(back).max(start_phase);
             let sampled_pose = pose.with_phase_q12(sample_phase);
-            let Some(socket_pose) = attachment_socket_pose(sampled_pose, socket) else {
+            let Some(socket_pose) = attachment_socket_pose(&sampled_pose, socket) else {
                 continue;
             };
             let (origin, rotation) = equipped_weapon_placement(
@@ -963,7 +963,7 @@ fn submit_instance_equipment_record_from_pose<
                 weapon.default_character_socket,
             )
         })?;
-    let socket_pose = attachment_socket_pose(instance_pose.pose(), socket)?;
+    let socket_pose = attachment_socket_pose(&instance_pose.pose(), socket)?;
     submit_equipped_weapon::<
         MAX_RUNTIME_MODELS,
         MAX_RUNTIME_MODEL_CLIPS,
@@ -1007,7 +1007,7 @@ fn find_model_socket(
 }
 
 pub(super) fn attachment_socket_pose(
-    pose: ActorPoseSnapshot,
+    pose: &ActorPoseSnapshot,
     socket: &LevelModelSocketRecord,
 ) -> Option<AttachmentPose> {
     let (joint, basis) = pose.joint_world_transform_and_basis(socket.joint)?;
@@ -1226,7 +1226,7 @@ mod tests {
                             rotation_q12: [i16::MIN, i16::MAX, 0x2000],
                             flags: 0,
                         };
-                        let socket_pose = attachment_socket_pose(pose, &socket)
+                        let socket_pose = attachment_socket_pose(&pose, &socket)
                             .expect("extreme socket still samples");
                         assert_sane(socket_pose.origin.x, "socket origin x");
                         assert_sane(socket_pose.origin.y, "socket origin y");

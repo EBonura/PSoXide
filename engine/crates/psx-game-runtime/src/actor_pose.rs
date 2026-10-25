@@ -56,17 +56,17 @@ impl ActorPoseSnapshot {
     }
 
     /// Simulation tick whose actor state produced this snapshot.
-    pub const fn tick(self) -> SimTick {
+    pub const fn tick(&self) -> SimTick {
         self.tick
     }
 
     /// Primary animation sampled by this snapshot.
-    pub const fn animation(self) -> Animation<'static> {
+    pub const fn animation(&self) -> Animation<'static> {
         self.animation
     }
 
     /// Q12 animation phase frozen into the snapshot.
-    pub const fn phase_q12(self) -> u32 {
+    pub const fn phase_q12(&self) -> u32 {
         self.phase_q12
     }
 
@@ -98,33 +98,33 @@ impl ActorPoseSnapshot {
     }
 
     /// Optional outgoing-pose crossfade sampled with the body.
-    pub const fn blend_from(self) -> Option<ModelPoseBlend<'static>> {
+    pub const fn blend_from(&self) -> Option<ModelPoseBlend<'static>> {
         self.blend_from
     }
 
     /// Floor/visual-offset-adjusted model origin in world space.
-    pub const fn origin(self) -> WorldVertex {
+    pub const fn origin(&self) -> WorldVertex {
         self.origin
     }
 
     /// Actor presentation rotation.
-    pub const fn rotation(self) -> Mat3I16 {
+    pub const fn rotation(&self) -> Mat3I16 {
         self.rotation
     }
 
     /// Model-local to world scale.
-    pub const fn local_to_world(self) -> LocalToWorldScale {
+    pub const fn local_to_world(&self) -> LocalToWorldScale {
         self.local_to_world
     }
 
     /// Root-motion/floor-anchor correction applied to every sampled joint.
-    pub const fn pose_translation(self) -> ModelPoseTranslation {
+    pub const fn pose_translation(&self) -> ModelPoseTranslation {
         self.pose_translation
     }
 
     /// Sample one joint through the exact phase, crossfade, and root
     /// correction frozen into this snapshot.
-    pub fn joint_pose(self, joint: u16) -> Option<JointPose> {
+    pub fn joint_pose(&self, joint: u16) -> Option<JointPose> {
         let primary = self.animation.pose_looped_q12(self.phase_q12, joint)?;
         let blended = match self.blend_from {
             Some(blend) => blend.blend_toward(primary, joint),
@@ -134,7 +134,7 @@ impl ActorPoseSnapshot {
     }
 
     /// Sample one joint in world space for combat and attachment geometry.
-    pub fn joint_world_transform(self, joint: u16) -> Option<JointWorldTransform> {
+    pub fn joint_world_transform(&self, joint: u16) -> Option<JointWorldTransform> {
         Some(compute_joint_world_transform(
             self.joint_pose(joint)?,
             self.rotation,
@@ -144,7 +144,7 @@ impl ActorPoseSnapshot {
     }
 
     /// Transform a joint-local socket point using the retained body pose.
-    pub fn joint_world_point(self, joint: u16, local: [i32; 3]) -> Option<WorldVertex> {
+    pub fn joint_world_point(&self, joint: u16, local: [i32; 3]) -> Option<WorldVertex> {
         let transform = self.joint_world_transform(joint)?;
         let offset = |row: [i16; 3]| {
             i32::from(row[0])
@@ -174,7 +174,7 @@ impl ActorPoseSnapshot {
     /// The attached model supplies its own local-to-world scale; using the
     /// scaled joint transform as an orientation would apply character scale a
     /// second time and collapse weapon geometry.
-    pub fn joint_world_basis(self, joint: u16) -> Option<Mat3I16> {
+    pub fn joint_world_basis(&self, joint: u16) -> Option<Mat3I16> {
         Some(compute_joint_world_basis(
             self.joint_pose(joint)?,
             self.rotation,

@@ -358,7 +358,7 @@ pub struct PlayerActorPoseSnapshot {
 
 impl PlayerActorPoseSnapshot {
     /// Runtime model whose skeleton the pose samples.
-    pub const fn model(self) -> RuntimeModelAsset {
+    pub const fn model(&self) -> RuntimeModelAsset {
         self.model
     }
 
@@ -370,12 +370,12 @@ impl PlayerActorPoseSnapshot {
     }
 
     /// Gameplay action that produced this pose.
-    pub const fn action(self) -> CharacterAnimationAction {
+    pub const fn action(&self) -> CharacterAnimationAction {
         self.action
     }
 
     /// Model-local clip index active for this snapshot.
-    pub const fn clip_local(self) -> ModelClipIndex {
+    pub const fn clip_local(&self) -> ModelClipIndex {
         self.clip_local
     }
 
@@ -388,7 +388,7 @@ impl PlayerActorPoseSnapshot {
     /// [`resolve_player_actor_pose`] whenever the clip has not changed, which
     /// needs no cache outside the pose state that already exists and cannot go
     /// stale: a different clip simply misses.
-    pub const fn clip_first_root_xz(self) -> Option<[i32; 2]> {
+    pub const fn clip_first_root_xz(&self) -> Option<[i32; 2]> {
         self.clip_first_root_xz
     }
 
@@ -406,8 +406,8 @@ impl PlayerActorPoseSnapshot {
     }
 
     /// Shared actor pose consumed by rendering, sockets, and hit volumes.
-    pub const fn pose(self) -> ActorPoseSnapshot {
-        self.pose
+    pub const fn pose(&self) -> &ActorPoseSnapshot {
+        &self.pose
     }
 }
 
