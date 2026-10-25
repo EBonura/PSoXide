@@ -3,6 +3,7 @@
 //! Every function takes the query by reference and writes into one
 //! caller-owned [`Raw`], so frames stay small (see `scan.rs`).
 
+use super::provider::BlockedMemo;
 use super::scan::{kind, nc, Scan, Src};
 use super::world::{GridCollision, SLAB_THICKNESS};
 use crate::format::ROOM_TREE;
@@ -14,16 +15,19 @@ const MAX_STEPS: i32 = 2048;
 const BISECT: u32 = 12;
 
 /// One trace request in world units. `d = end - start`.
-pub(crate) struct Query {
+pub(crate) struct Query<'m> {
     pub a: [i32; 3],
     pub d: [i32; 3],
     pub r: i16,
     pub h: i16,
     /// A `Shape::Body` request: non-resident rooms are solid.
     pub body: bool,
+    /// Answers of the column tests this trace makes that an earlier trace
+    /// already made, when the provider has a memo.
+    pub memo: Option<&'m BlockedMemo>,
 }
 
-impl Query {
+impl Query<'_> {
     /// Lowest plan corner of the box the sweep can touch, world units.
     #[inline(always)]
     pub fn plan_lo(&self) -> (i32, i32) {
@@ -140,7 +144,7 @@ pub(crate) fn back_code(d: &[i32; 3]) -> u8 {
 impl<'a> GridCollision<'a> {
     /// Dispatch a trace. `q.r()` must already be clamped to `0..=S`.
     #[inline(always)]
-    pub(crate) fn trace(&self, q: &Query, raw: &mut Raw) {
+    pub(crate) fn trace(&self, q: &Query<'_>, raw: &mut Raw) {
         if q.d[0] == 0 && q.d[2] == 0 {
             self.vertical_trace(q, raw);
         } else if q.r() == 0 && q.h() == 0 {
@@ -152,11 +156,37 @@ impl<'a> GridCollision<'a> {
 
     /// Is the cylinder at `q.at(t)` inside solid?
     #[inline(never)]
-    pub(crate) fn blocked_t(&self, q: &Query, t: i32) -> bool {
-        if q.r() == 0 {
-            return self.point_blocked(&q.at(t), q.h(), q.body);
+    pub(crate) fn blocked_t(&self, q: &Query<'_>, t: i32) -> bool {
+        let p = q.at(t);
+        let Some(memo) = q.memo else {
+            return self.blocked_at(q, &p);
+        };
+        // The test is a pure function of the point, the body and the rooms
+        // resident (the memo is dropped when they change), and one trace
+        // often starts where the last one ended.
+        let key = [
+            p[0],
+            p[1],
+            p[2],
+            q.r(),
+            q.h(),
+            i32::from(q.body) | i32::from(self.camera_pass) << 1,
+        ];
+        if let Some(blocked) = memo.find(&key) {
+            return blocked;
         }
-        let mut scan = Scan::any(q.at(t), q.r(), q.h(), q.body);
+        let blocked = self.blocked_at(q, &p);
+        memo.remember(key, blocked);
+        blocked
+    }
+
+    /// Is the body of `q` (a point when its radius is 0) at `p` inside solid?
+    #[inline(always)]
+    fn blocked_at(&self, q: &Query<'_>, p: &[i32; 3]) -> bool {
+        if q.r() == 0 {
+            return self.point_blocked(p, q.h(), q.body);
+        }
+        let mut scan = Scan::any(*p, q.r(), q.h(), q.body);
         self.scan_column(&mut scan);
         scan.found
     }
@@ -164,7 +194,7 @@ impl<'a> GridCollision<'a> {
     /// Pure vertical sweep: every blocking interval is collected once and the
     /// first one along the path wins. Exact for any length.
     #[inline(never)]
-    pub(crate) fn vertical_trace(&self, q: &Query, raw: &mut Raw) {
+    pub(crate) fn vertical_trace(&self, q: &Query<'_>, raw: &mut Raw) {
         let a = q.a;
         let y1 = a[1] + q.d[1];
         let mut scan = Scan::sweep(a, y1, q.r(), q.h(), q.body);
@@ -200,7 +230,7 @@ impl<'a> GridCollision<'a> {
 
     /// Horizontal or diagonal body sweep by marching and bisecting.
     #[inline(never)]
-    pub(crate) fn march_trace(&self, q: &Query, raw: &mut Raw) {
+    pub(crate) fn march_trace(&self, q: &Query<'_>, raw: &mut Raw) {
         if self.blocked_t(q, 0) {
             let all = self.blocked_t(q, 4096);
             solid_start(raw, all);
@@ -245,7 +275,7 @@ impl<'a> GridCollision<'a> {
 
     /// Normal of the surface that blocked a cylinder moving `lo -> hi`.
     #[inline(never)]
-    pub(crate) fn contact(&self, q: &Query, lo: i32, hi: i32, raw: &mut Raw) {
+    pub(crate) fn contact(&self, q: &Query<'_>, lo: i32, hi: i32, raw: &mut Raw) {
         let mut scan = Scan::any(q.at(hi), q.r(), q.h(), q.body);
         self.scan_column(&mut scan);
         self.classify(q, lo, hi, &scan, raw);
@@ -277,7 +307,7 @@ impl<'a> GridCollision<'a> {
     }
 
     #[inline(never)]
-    fn classify(&self, q: &Query, lo: i32, hi: i32, scan: &Scan, raw: &mut Raw) {
+    fn classify(&self, q: &Query<'_>, lo: i32, hi: i32, scan: &Scan, raw: &mut Raw) {
         let d = &q.d;
         if !scan.found {
             raw.normal = back_code(d);

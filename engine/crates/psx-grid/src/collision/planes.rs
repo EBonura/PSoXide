@@ -340,7 +340,7 @@ impl<'a> GridCollision<'a> {
     /// Fold the first crossing of the ray with any plane of `room` into
     /// `hit` (`consider` keeps the earliest).
     #[inline(never)]
-    pub(crate) fn ray_planes(&self, room: usize, q: &Query, hit: &mut Raw) {
+    pub(crate) fn ray_planes(&self, room: usize, q: &Query<'_>, hit: &mut Raw) {
         let Some(view) = self.view(room) else {
             return;
         };
@@ -389,7 +389,7 @@ impl<'a> GridCollision<'a> {
         plane: &ColPlane,
         a: &[i32; 3],
         b: &[i32; 3],
-        q: &Query,
+        q: &Query<'_>,
         hit: &mut Raw,
     ) {
         let (p0, p1) = (plane.xz[0], plane.xz[1]);
@@ -421,7 +421,7 @@ impl<'a> GridCollision<'a> {
         plane: &ColPlane,
         a: &[i32; 3],
         b: &[i32; 3],
-        q: &Query,
+        q: &Query<'_>,
         hit: &mut Raw,
     ) {
         let mut prism = Prism::new();
@@ -552,7 +552,7 @@ impl<'a> GridCollision<'a> {
     /// Contact normal of a body that was stopped by the plane named by
     /// `scan.src` while moving `lo -> hi` (Q12 fractions of `q`).
     #[inline(never)]
-    pub(crate) fn classify_plane(&self, q: &Query, lo: i32, scan: &Scan, raw: &mut Raw) {
+    pub(crate) fn classify_plane(&self, q: &Query<'_>, lo: i32, scan: &Scan, raw: &mut Raw) {
         let d = &q.d;
         let from = q.at(lo);
         let src = scan.src;

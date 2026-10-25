@@ -106,6 +106,29 @@ fn a_memoized_provider_answers_like_a_fresh_one_across_set_changes() {
 }
 
 #[test]
+fn the_column_tests_are_remembered_across_traces_that_share_an_end() {
+    // Walking: each step starts where the last one ended, so its start test
+    // is the last step's end test.
+    let built = build(&plaza());
+    built.run_with(&[true; 31], |w| {
+        let mut memo = TraceMemo::new();
+        let mut fresh = GridTraceProvider::new(w);
+        let mut walker = GridTraceProvider::new(w).with_memo(&mut memo);
+        let mut at = [40, 40, 40];
+        for step in 0..60 {
+            let to = [at[0] + 7, 40, at[2] + if step % 3 == 0 { 5 } else { 0 }];
+            let query = body(at, to);
+            assert_eq!(
+                ask(&mut walker, query),
+                ask(&mut fresh, query),
+                "step {step}"
+            );
+            at = to;
+        }
+    });
+}
+
+#[test]
 fn a_memoized_provider_answers_like_a_fresh_one_on_mixed_requests() {
     let built = build(&plaza());
     for resident in [
@@ -154,4 +177,38 @@ fn a_request_out_of_range_fails_and_leaves_the_output_alone() {
         assert_eq!(out, before);
         assert_eq!(memo.len(), 0);
     });
+}
+
+#[test]
+fn a_column_test_made_before_a_room_arrived_is_not_reused_after() {
+    let built = build(&plaza());
+    let level = LevelView::parse(words_as_bytes(&built.level, built.level_len)).unwrap();
+    let views: Vec<CollisionView<'_>> = built
+        .rooms
+        .iter()
+        .map(|(w, l)| CollisionView::parse(words_as_bytes(w, *l)).unwrap())
+        .collect();
+    let mut set = ResidentRooms::with_capacity(level, 12).unwrap();
+    let mut memo = TraceMemo::new();
+    let rec = set.level().rooms[3];
+    let (x, z) = (rec.origin[0] + S, rec.origin[2] + S);
+    let step = body([x - 10, 40, z], [x + 10, 40, z]);
+    // Room 3 is not resident: it is a solid box, and the step starts inside it.
+    let world = set.collision();
+    let before = ask(
+        &mut GridTraceProvider::new(&world).with_memo(&mut memo),
+        step,
+    )
+    .unwrap();
+    assert!(before.start_solid, "{before:?}");
+    // It arrives: the same step is free, and the memo must not say otherwise.
+    set.insert_collision(3, views[3]).unwrap();
+    let world = set.collision();
+    let after = ask(
+        &mut GridTraceProvider::new(&world).with_memo(&mut memo),
+        step,
+    )
+    .unwrap();
+    assert_eq!(Some(after), ask(&mut GridTraceProvider::new(&world), step));
+    assert!(!after.start_solid, "{after:?}");
 }

@@ -346,7 +346,7 @@ fn the_memo_keeps_the_camera_arm_and_the_motor_apart() {
 
 /// The ray loop as it was before the box test: every primary plane, no
 /// rejection.
-fn ray_planes_unfiltered(w: &GridCollision<'_>, room: usize, q: &Query, hit: &mut Raw) {
+fn ray_planes_unfiltered(w: &GridCollision<'_>, room: usize, q: &Query<'_>, hit: &mut Raw) {
     let (Some(view), rec) = (w.view(room), w.rec(room)) else {
         return;
     };
@@ -396,6 +396,7 @@ fn the_box_test_never_changes_what_a_ray_finds() {
                 _ => [0, 0, rng.range(-300, 300)],
             };
             let q = Query {
+                memo: None,
                 a,
                 d,
                 r: 0,

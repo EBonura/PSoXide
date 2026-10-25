@@ -3,6 +3,7 @@
 use super::body::{Query, Raw, NO_Y};
 use super::scan::nc;
 use super::world::{GridCollision, COORD_LIMIT};
+use core::cell::Cell;
 use psx_engine::{
     CollisionTrace, CollisionTraceProvider, CollisionTraceQuery, CollisionTraceShape, RoomPoint,
 };
@@ -37,6 +38,89 @@ pub struct TraceMemo {
     /// Slot the next new answer takes once all are in use.
     next: u8,
     entries: [MemoEntry; MEMO_ENTRIES],
+    /// The column tests the traces made, see [`BlockedMemo`].
+    blocked: BlockedMemo,
+}
+
+/// Column tests the memo of [`BlockedMemo`] keeps.
+const BLOCKED_ENTRIES: usize = 10;
+
+/// Answers of the "is this body inside solid" tests the traces make. One
+/// trace often starts where another ended (the camera's segment check and
+/// sight line, the motor's step from where its last step stood), so the
+/// same test comes again with nothing changed in between. The cells let the
+/// trace, which only reads the world, fill it in. The same rules as
+/// [`TraceMemo`] decide when an answer may be reused.
+pub(crate) struct BlockedMemo {
+    epoch: Cell<u32>,
+    used: Cell<u8>,
+    next: Cell<u8>,
+    /// Point, radius, height and the body and camera flags of each entry.
+    keys: [[Cell<i32>; 6]; BLOCKED_ENTRIES],
+    blocked: [Cell<bool>; BLOCKED_ENTRIES],
+}
+
+impl BlockedMemo {
+    const fn new() -> Self {
+        Self {
+            epoch: Cell::new(0),
+            used: Cell::new(0),
+            next: Cell::new(0),
+            keys: [const { [const { Cell::new(0) }; 6] }; BLOCKED_ENTRIES],
+            blocked: [const { Cell::new(false) }; BLOCKED_ENTRIES],
+        }
+    }
+
+    /// Forget every answer unless they were made at `epoch`.
+    #[inline(always)]
+    fn sync(&self, epoch: u32) {
+        if self.epoch.get() != epoch {
+            self.epoch.set(epoch);
+            self.used.set(0);
+            self.next.set(0);
+        }
+    }
+
+    /// The answer remembered for `key`, if any.
+    #[inline(always)]
+    pub(crate) fn find(&self, key: &[i32; 6]) -> Option<bool> {
+        for index in 0..usize::from(self.used.get()) {
+            let entry = &self.keys[index];
+            if entry[0].get() == key[0]
+                && entry[2].get() == key[2]
+                && entry[1].get() == key[1]
+                && entry[3].get() == key[3]
+                && entry[4].get() == key[4]
+                && entry[5].get() == key[5]
+            {
+                return Some(self.blocked[index].get());
+            }
+        }
+        None
+    }
+
+    /// Remember `blocked` as the answer to `key`, replacing the oldest entry
+    /// once the memo is full.
+    #[inline(always)]
+    pub(crate) fn remember(&self, key: [i32; 6], blocked: bool) {
+        let used = usize::from(self.used.get());
+        let slot = if used < BLOCKED_ENTRIES {
+            self.used.set(used as u8 + 1);
+            used
+        } else {
+            let slot = usize::from(self.next.get());
+            self.next.set(if slot + 1 == BLOCKED_ENTRIES {
+                0
+            } else {
+                slot as u8 + 1
+            });
+            slot
+        };
+        for (cell, word) in self.keys[slot].iter().zip(key) {
+            cell.set(word);
+        }
+        self.blocked[slot].set(blocked);
+    }
 }
 
 impl TraceMemo {
@@ -61,6 +145,7 @@ impl TraceMemo {
             used: 0,
             next: 0,
             entries: [NONE; MEMO_ENTRIES],
+            blocked: BlockedMemo::new(),
         }
     }
 
@@ -78,6 +163,7 @@ impl TraceMemo {
             self.used = 0;
             self.next = 0;
         }
+        self.blocked.sync(epoch);
     }
 
     /// The answer remembered for `key`, if any.
@@ -181,7 +267,7 @@ impl<'a, 'b> GridTraceProvider<'a, 'b> {
 impl<'a> GridCollision<'a> {
     /// Expand a raw result into the engine's trace.
     #[inline(never)]
-    fn finish(&self, q: &Query, raw: &Raw, output: &mut CollisionTrace) {
+    fn finish(&self, q: &Query<'_>, raw: &Raw, output: &mut CollisionTrace) {
         output.all_solid = raw.all_solid;
         output.start_solid = raw.start_solid;
         output.fraction_q12 = raw.fraction;
@@ -276,6 +362,7 @@ impl CollisionTraceProvider for GridTraceProvider<'_, '_> {
             r: r as i16,
             h: h.min(30_000) as i16,
             body,
+            memo: self.memo.as_deref().map(|memo| &memo.blocked),
         };
         let mut raw = Raw::new();
         world.trace(&q, &mut raw);

@@ -192,7 +192,7 @@ impl<'a> GridCollision<'a> {
     /// in `raw.fraction/normal/src`, then validated against the discrete slab
     /// predicate.
     #[inline(always)]
-    pub(crate) fn point_trace(&self, q: &Query, raw: &mut Raw) {
+    pub(crate) fn point_trace(&self, q: &Query<'_>, raw: &mut Raw) {
         // Non-resident rooms are not walked by the ray, so a level that has
         // some needs the explicit start test.
         if self.foreign && self.blocked_t(q, 0) {
@@ -252,6 +252,7 @@ impl<'a> GridCollision<'a> {
             r: 0,
             h: 0,
             body: false,
+            memo: None,
         };
         let mut raw = Raw::new();
         raw.fraction = 4097;
@@ -270,7 +271,7 @@ impl<'a> GridCollision<'a> {
     fn ray_setup<'v>(
         &'v self,
         room: usize,
-        q: &Query,
+        q: &Query<'_>,
         hit: &Raw,
         c: &mut MaybeUninit<Cell<'v>>,
     ) -> bool {
@@ -349,7 +350,7 @@ impl<'a> GridCollision<'a> {
 
     /// Walk the ray through one room's cells.
     #[inline(never)]
-    fn ray_walk(&self, room: usize, q: &Query, hit: &mut Raw) {
+    fn ray_walk(&self, room: usize, q: &Query<'_>, hit: &mut Raw) {
         let mut cell = MaybeUninit::uninit();
         if !self.ray_setup(room, q, hit, &mut cell) {
             return;
@@ -408,7 +409,7 @@ impl<'a> GridCollision<'a> {
     /// a divided sector, of each of its leaves against the part of the ray's
     /// piece that lies inside that leaf.
     #[inline(never)]
-    fn ray_tree_cell<'v>(&'v self, q: &Query, c: &mut Cell<'v>, hit: &mut Raw) {
+    fn ray_tree_cell<'v>(&'v self, q: &Query<'_>, c: &mut Cell<'v>, hit: &mut Raw) {
         let Some(view) = self.view(c.room()) else {
             return;
         };
@@ -459,7 +460,7 @@ impl<'a> GridCollision<'a> {
     /// Test one leaf (the cell's frame is set from it) against the piece
     /// `[c.q0, c.q1]`.
     #[inline(always)]
-    fn ray_leaf<'v>(&self, q: &Query, c: &mut Cell<'v>, hit: &mut Raw, leaf: &LeafAt<'v>)
+    fn ray_leaf<'v>(&self, q: &Query<'_>, c: &mut Cell<'v>, hit: &mut Raw, leaf: &LeafAt<'v>)
     where
         'a: 'v,
     {
@@ -484,7 +485,7 @@ impl<'a> GridCollision<'a> {
     /// record (see [`Cell::rec`]); false when there is none. `*next` is left
     /// after it.
     #[inline(never)]
-    fn next_extra<'v>(&self, q: &Query, c: &mut Cell<'v>, next: &mut usize) -> bool
+    fn next_extra<'v>(&self, q: &Query<'_>, c: &mut Cell<'v>, next: &mut usize) -> bool
     where
         'a: 'v,
     {
@@ -506,7 +507,7 @@ impl<'a> GridCollision<'a> {
     /// Step to the next cell along the ray, refreshing the crossing times of
     /// the axes crossed. False when the ray leaves the room.
     #[inline(never)]
-    fn ray_advance(&self, q: &Query, c: &mut Cell<'_>) -> bool {
+    fn ray_advance(&self, q: &Query<'_>, c: &mut Cell<'_>) -> bool {
         let (d, s) = (&q.d, self.s);
         let (otx, otz) = (c.tx, c.tz);
         let leave = otx.min(otz);
@@ -539,7 +540,7 @@ impl<'a> GridCollision<'a> {
     /// set) or when the walk is over (`false`). A leaf: the state stays in
     /// registers, which is what makes the common cell cheap.
     #[inline(never)]
-    fn ray_skip(&self, q: &Query, c: &mut Cell<'_>, hit_fraction: i32) -> bool {
+    fn ray_skip(&self, q: &Query<'_>, c: &mut Cell<'_>, hit_fraction: i32) -> bool {
         let (d, s) = (&q.d, self.s);
         let (ax, az) = (c.ax, c.az);
         let (ex, ez) = (i32::from(c.ex), i32::from(c.ez));
@@ -627,7 +628,7 @@ impl<'a> GridCollision<'a> {
 
     /// Wall pieces of the cell against the whole ray.
     #[inline(never)]
-    fn ray_walls(&self, q: &Query, c: &Cell<'_>, hit: &mut Raw) {
+    fn ray_walls(&self, q: &Query<'_>, c: &Cell<'_>, hit: &mut Raw) {
         let Some(sector) = c.sector() else {
             return;
         };
@@ -651,7 +652,7 @@ impl<'a> GridCollision<'a> {
     /// Crossing of the ray with one wall piece: `(q << 8) | normal_code`, or
     /// -1. `q` is the last clear fraction.
     #[inline(never)]
-    fn wall_cross(&self, wall: &ColWall, q: &Query, c: &Cell<'_>) -> i32 {
+    fn wall_cross(&self, wall: &ColWall, q: &Query<'_>, c: &Cell<'_>) -> i32 {
         let (ox, oz, s, inv) = c.frame(self.s, self.inv24);
         let ax = c.ax - ox;
         let az = c.az - oz;
@@ -726,7 +727,7 @@ impl<'a> GridCollision<'a> {
 
     /// Cell-local plan offset of the ray at `t`, clamped into the sector.
     #[inline(always)]
-    fn cell_local(&self, q: &Query, c: &Cell<'_>, t: i32) -> (u32, u32) {
+    fn cell_local(&self, q: &Query<'_>, c: &Cell<'_>, t: i32) -> (u32, u32) {
         let (ox, oz, s, _) = c.frame(self.s, self.inv24);
         (
             (c.ax + q.d[0] * t / 4096 - ox).max(0).min(s) as u32,
@@ -739,7 +740,7 @@ impl<'a> GridCollision<'a> {
     /// below when the second is `<= 0`, inside otherwise. The first is
     /// [`NO_SLAB`] when the cell has no such slab.
     #[inline(never)]
-    fn slab_g(&self, q: &Query, c: &Cell<'_>, t: i32) -> (i32, i32) {
+    fn slab_g(&self, q: &Query<'_>, c: &Cell<'_>, t: i32) -> (i32, i32) {
         let Some(sector) = c.sector() else {
             return (NO_SLAB, 0);
         };
@@ -769,7 +770,7 @@ impl<'a> GridCollision<'a> {
     /// (the common case) when the segment's heights stay clear of both slabs'
     /// whole corner ranges.
     #[inline(never)]
-    fn slabs_matter(&self, q: &Query, c: &Cell<'_>, sector: &Sector) -> bool {
+    fn slabs_matter(&self, q: &Query<'_>, c: &Cell<'_>, sector: &Sector) -> bool {
         let flags = sector.flags;
         let solid_ceil = flags & SECTOR_CEIL_SOLID != 0 && flags & SECTOR_HAS_CEIL != 0;
         if flags & SECTOR_HAS_FLOOR == 0 && !solid_ceil {
@@ -795,7 +796,7 @@ impl<'a> GridCollision<'a> {
     /// Where the piece crosses the floor and ceiling triangle diagonals (the
     /// piece end when it does not), sorted: `(first, second)`.
     #[inline(never)]
-    fn slab_breaks(&self, q: &Query, c: &Cell<'_>, flags: u16, want: [bool; 2]) -> (i32, i32) {
+    fn slab_breaks(&self, q: &Query<'_>, c: &Cell<'_>, flags: u16, want: [bool; 2]) -> (i32, i32) {
         let s = c.frame(self.s, self.inv24).2;
         let (l0x, l0z) = self.cell_local(q, c, c.q0());
         let (l1x, l1z) = self.cell_local(q, c, c.q1());
@@ -841,7 +842,7 @@ impl<'a> GridCollision<'a> {
     /// loop is in this function, not around it, so the slab test is not a
     /// call deeper on the 1 KiB stack.
     #[inline(never)]
-    fn ray_slabs<'v>(&self, q: &Query, c: &mut Cell<'v>, hit: &mut Raw)
+    fn ray_slabs<'v>(&self, q: &Query<'_>, c: &mut Cell<'v>, hit: &mut Raw)
     where
         'a: 'v,
     {
@@ -861,7 +862,7 @@ impl<'a> GridCollision<'a> {
 
     /// The slabs of the cell's current record, see [`Self::ray_slabs`].
     #[inline(always)]
-    fn ray_span_slabs(&self, q: &Query, c: &mut Cell<'_>, hit: &mut Raw) {
+    fn ray_span_slabs(&self, q: &Query<'_>, c: &mut Cell<'_>, hit: &mut Raw) {
         let Some(sector) = c.sector() else {
             return;
         };
@@ -921,7 +922,7 @@ impl<'a> GridCollision<'a> {
     /// reports one before the piece start with bit 16 set; passing below
     /// sets bit 17.
     #[inline(never)]
-    fn slab_cross(&self, q: &Query, c: &mut Cell<'_>) -> i32 {
+    fn slab_cross(&self, q: &Query<'_>, c: &mut Cell<'_>) -> i32 {
         let (s0, e0) = (i32::from(c.s0), i32::from(c.e0));
         let (a0, b0) = (c.ga, c.gb);
         let (a1, b1) = self.slab_g(q, c, e0);
@@ -975,7 +976,7 @@ impl<'a> GridCollision<'a> {
 
     /// Record the crossing `v` from [`Self::slab_cross`] with its normal.
     #[inline(never)]
-    fn slab_hit(&self, q: &Query, c: &Cell<'_>, v: i32, hit: &mut Raw) {
+    fn slab_hit(&self, q: &Query<'_>, c: &Cell<'_>, v: i32, hit: &mut Raw) {
         if v == START_IN {
             hit.start_solid = true;
             return;
