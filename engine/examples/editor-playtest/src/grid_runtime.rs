@@ -75,7 +75,7 @@ const ROOM_ENTRIES: usize = {
 };
 
 /// Slots the resident table is made with beyond the cook's busiest set.
-const RESIDENT_SPARE_SLOTS: usize = 2;
+const RESIDENT_SPARE_SLOTS: usize = 5;
 
 /// Sectors, at the end of the drawn radius, over which the card of a room
 /// drawn whole fades in behind it.
@@ -276,12 +276,12 @@ impl GridRuntime {
         }
         let mut resident = ResidentRooms::new(level).ok_or(GridRuntimeInitError::Collision)?;
         if let Some(flood) = level.flood.filter(|flood| flood.peak_rooms > 0) {
-            // The cook's busiest set carries its own slack, and a walk still kept one room more
-            // (15 slots for 14 on the longest tape): two spare keep the table from doubling,
-            // which on this level takes 6.4 KB of a heap that never gives a block of that size
-            // back. The streamer tracks `ROOM_ENTRIES` rooms at most, so no more is needed.
+            // The cook's busiest set carries its own slack, and a walk still kept more rooms (15
+            // slots for 14 on one tape, 25 on the 0851 tape): the table is made for everything
+            // the streamer tracks (`ROOM_ENTRIES`) once. A table that grows takes a block of 4 to
+            // 7 KB of a heap that never gives one back, and the heap has about 10 KB to spare.
             resident.reserve_rooms(
-                (usize::from(flood.peak_rooms) + RESIDENT_SPARE_SLOTS).min(ROOM_ENTRIES),
+                ROOM_ENTRIES.max(usize::from(flood.peak_rooms) + RESIDENT_SPARE_SLOTS),
             );
         }
         // Scratch comes from the core's maxima, so it is right whichever
@@ -1417,7 +1417,7 @@ impl GridRuntime {
                             static PANEL_RAYS: PanelRays =
                                 PanelRays::new(GRID_PANEL_FOCAL, GRID_PANEL_SECTOR);
                             static mut PANEL_SCRATCH: PanelScratch = PanelScratch::new();
-                            let mut list: [Option<PanelRef<'static>>; 6] = [None; 6];
+                            let mut list: [Option<PanelRef<'static>>; 8] = [None; 8];
                             let count = crate::vram_runtime::panel_drawables(&mut list);
                             #[cfg(feature = "card-trace")]
                             crate::card_trace::panel_pose(
@@ -1471,6 +1471,8 @@ impl GridRuntime {
                                         overflowed: frame.overflowed,
                                         ..GridFrame::default()
                                     });
+                                    #[cfg(feature = "panel-meter")]
+                                    crate::vram_runtime::note_panel_draw(&frame);
                                     #[cfg(feature = "card-trace")]
                                     crate::card_trace::panel_frame(
                                         &frame,
@@ -1483,6 +1485,12 @@ impl GridRuntime {
                         }
                     }
                 }
+            }
+            #[cfg(feature = "panel-meter")]
+            // SAFETY: single-threaded guest.
+            unsafe {
+                let seen = &mut (*core::ptr::addr_of_mut!(crate::vram_runtime::PANEL_DRAW))[7];
+                *seen = (*seen).max(self.resident.slot_count() as u32);
             }
             scene::load_translation(view.translation);
             telemetry::counter(

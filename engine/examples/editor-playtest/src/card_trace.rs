@@ -398,6 +398,9 @@ pub(super) fn panel_frame(frame: &psx_grid::render::GridFrame, heading: u8, eye:
     line.number(u32::from(frame.screen_culled));
     line.number(u32::from(heading));
     line.number(u32::from(eye));
+    line.number(u32::from(frame.robust_quads));
+    line.number(u32::from(frame.lod_replaced));
+    line.number(u32::from(frame.lod_quads));
     line.emit();
 }
 
@@ -432,22 +435,7 @@ pub(super) fn panel_counters(now: psx_game_runtime::panel_stream::PanelCounters)
 }
 
 static mut PANEL_LAST: psx_game_runtime::panel_stream::PanelCounters =
-    psx_game_runtime::panel_stream::PanelCounters {
-        submitted: 0,
-        landed: 0,
-        failed: 0,
-        uploads: 0,
-        evictions: 0,
-        refused: 0,
-        held: 0,
-        wanted: 0,
-        missing: 0,
-        starved: 0,
-        eye: 0,
-        last_first: 0,
-        last_sectors: 0,
-        sectors: 0,
-    };
+    psx_game_runtime::panel_stream::PanelCounters::ZERO;
 
 /// What the panel stream was told about the camera, `pt I`, when the heading it looks along
 /// changes: the forward direction in plan (Q12, 32768 added), the pitch's `tan` (32768 added)

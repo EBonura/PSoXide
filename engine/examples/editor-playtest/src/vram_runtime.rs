@@ -697,6 +697,14 @@ static mut PANELS: psx_game_runtime::panel_stream::PanelStream<
 pub static mut PANEL_COUNTERS: psx_game_runtime::panel_stream::PanelCounters =
     psx_game_runtime::panel_stream::PanelCounters::ZERO;
 
+/// Measurement: the camera as the stream last saw it (the eye in runtime units, then the nine
+/// entries of the view rotation packed in 16 bits), at a fixed address so a replay can log it
+/// with `--route-watch-u32` and compare each frame with the level seen from where it was
+/// drawn.
+#[cfg(feature = "panel-meter")]
+#[no_mangle]
+pub static mut PANEL_POSE: [i32; 8] = [0; 8];
+
 /// The view rotation the last frame was drawn with (the world's axes composed with the
 /// camera's, as the GTE holds it), for the panel stream to read which way the camera looks.
 #[cfg(feature = "cd-stream-bench")]
@@ -707,6 +715,16 @@ static mut LAST_VIEW: Option<[[i16; 3]; 3]> = None;
 pub(super) fn note_view(rotation: &[[i16; 3]; 3]) {
     // SAFETY: single-threaded guest; see `step_panels`.
     unsafe { *core::ptr::addr_of_mut!(LAST_VIEW) = Some(*rotation) };
+    // SAFETY: as above.
+    #[cfg(feature = "panel-meter")]
+    unsafe {
+        let pose = &mut *core::ptr::addr_of_mut!(PANEL_POSE);
+        let r = rotation.as_flattened();
+        for k in 0..4 {
+            pose[3 + k] = i32::from(r[2 * k] as u16) | (i32::from(r[2 * k + 1]) << 16);
+        }
+        pose[7] = i32::from(r[8]);
+    }
 }
 
 /// Keep the panels' tiles coming for a camera at `eye` (a frame behind in its direction).
@@ -729,6 +747,12 @@ pub(super) fn step_panels(eye: [i32; 3], focal: i32) {
         [0, 4096, 0],
         [0, 0, 4096],
     ]);
+    // SAFETY: as above.
+    #[cfg(feature = "panel-meter")]
+    unsafe {
+        let pose = &mut *core::ptr::addr_of_mut!(PANEL_POSE);
+        pose[..3].copy_from_slice(&eye);
+    }
     let rotation = &rotation;
     let (_, forward) = psx_grid::render::plan_axes(rotation);
     // `tan` of the pitch: the forward row's height over its plan length.
@@ -767,6 +791,12 @@ pub(super) fn step_panels(eye: [i32; 3], focal: i32) {
             &input,
         );
         PANEL_COUNTERS = (*core::ptr::addr_of!(PANELS)).counters;
+        #[cfg(feature = "panel-meter")]
+        {
+            let (next, next2) = (*core::ptr::addr_of!(PANELS)).ahead();
+            (*core::ptr::addr_of_mut!(PANEL_DRAW))[6] =
+                u32::from(next.unwrap_or(0xffff)) | (u32::from(next2.unwrap_or(0xffff)) << 16);
+        }
         #[cfg(feature = "card-trace")]
         crate::card_trace::panel_counters(PANEL_COUNTERS);
     }
@@ -1016,4 +1046,24 @@ mod tests {
         assert_eq!(centre, 1, "decal centre must be the black core index");
         assert_eq!(px[0] & 0x0f, 0, "decal corner must be transparent");
     }
+}
+
+/// Measurement: the far panels' draw, summed over the frames so far: packets, cells wholly behind
+/// the near plane, cells off screen, cells too large, cells with an edge too long, panels drawn.
+/// A RAM dump or `--route-watch-u32` reads it.
+#[cfg(feature = "panel-meter")]
+#[no_mangle]
+pub static mut PANEL_DRAW: [u32; 8] = [0; 8];
+
+/// Add one panel's draw to [`PANEL_DRAW`].
+#[cfg(feature = "panel-meter")]
+pub(super) fn note_panel_draw(frame: &psx_grid::render::GridFrame) {
+    // SAFETY: single-threaded guest; the draw is the only writer.
+    let sums = unsafe { &mut *core::ptr::addr_of_mut!(PANEL_DRAW) };
+    sums[0] += frame.packets;
+    sums[1] += u32::from(frame.depth_skipped);
+    sums[2] += u32::from(frame.lod_replaced);
+    sums[3] += u32::from(frame.lod_quads);
+    sums[4] += u32::from(frame.robust_quads);
+    sums[5] += 1;
 }

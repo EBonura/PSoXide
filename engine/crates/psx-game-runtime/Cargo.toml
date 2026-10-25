@@ -21,6 +21,10 @@ cd-stream-benchmark = ["cd-stream-bench"]
 # the helper is intentionally explicit and sizeable on MIPS, and is only useful
 # while tuning authored collision bounds.
 collision-debug-overlay = []
+# Counters of the far panels for a replay to read (`PANEL_COUNTERS` fills more of itself,
+# the stream tallies what the screen shows against what has a picture): measurement builds
+# only, it costs code and time.
+panel-meter = []
 
 [dependencies]
 # Explicit paths, same rationale as psx-engine: resolvable when

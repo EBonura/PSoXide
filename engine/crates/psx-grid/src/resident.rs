@@ -111,6 +111,12 @@ impl<'a> ResidentRooms<'a> {
         Self::with_capacity(level, level.rooms.len())
     }
 
+    /// Slots the table has grown to: the most rooms that were resident at once, counting the
+    /// ones an eviction left a hole for.
+    pub fn slot_count(&self) -> usize {
+        self.slots.len()
+    }
+
     /// Make room for `rooms` resident rooms now, so loading them never grows the tables. The
     /// guest allocator never frees: a table that grows leaves its old block behind for good.
     pub fn reserve_rooms(&mut self, rooms: usize) {
@@ -303,6 +309,12 @@ impl<'a> ResidentRooms<'a> {
                 free
             }
             None => {
+                // A table that is full grows by two slots, not by doubling: the guest allocator
+                // never gives a block that size back, and doubling 16 slots takes 7 KB of a heap
+                // that has about 10 KB to spare.
+                if self.slots.len() == self.slots.capacity() {
+                    self.slots.reserve_exact(2);
+                }
                 self.slots.push(Some(slot));
                 (self.slots.len() - 1) as u16
             }

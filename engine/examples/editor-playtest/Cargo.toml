@@ -68,6 +68,8 @@ default = [
 ]
 cd-stream-bench = ["dep:psx-io", "psx-game-runtime/cd-stream-bench"]
 cd-stream-benchmark = ["cd-stream-bench", "psx-game-runtime/cd-stream-benchmark"]
+# Measurement builds: the far panels' counters, the camera and the draw tallies at fixed addresses.
+panel-meter = ["cd-stream-bench", "psx-game-runtime/panel-meter"]
 boot-trace = ["psx-engine/boot-trace", "psx-rt/boot-trace"]
 emulator-telemetry = ["psx-engine/emulator-telemetry"]
 # The far cards of rooms (`flood: (cards: true)`): the older far view, replaced by the
