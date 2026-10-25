@@ -15,7 +15,7 @@
 
 extern crate psx_rt;
 
-use psx_gpu::{Resolution, VideoMode};
+use psx_gpu::{display::Resolution, display::VideoMode};
 
 /// Four-byte alignment, because the level is parsed in place from these statics.
 #[repr(align(4))]
