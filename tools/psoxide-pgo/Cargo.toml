@@ -19,3 +19,11 @@ serde_json = { workspace = true }
 name = "psoxide-pgo"
 path = "src/main.rs"
 
+
+[[bin]]
+name = "psoxide-rustc"
+path = "src/bin/psoxide-rustc.rs"
+
+[[bin]]
+name = "repro-gate"
+path = "src/bin/repro-gate.rs"
