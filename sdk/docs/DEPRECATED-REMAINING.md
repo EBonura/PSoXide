@@ -10,7 +10,6 @@ Each row gives the number of call sites and the files, per repo. Re-run the scan
 
 | Item | Instead | Callers |
 | --- | --- | --- |
-| `hello_memcard_recovery::Diagnostic::new` | use `Diagnostic::new_on` with the `ControllerPort` token | **PSoXide-editor examples/hardware-tests** 2 (src/main.rs) |
 | `psx_fmv::mdec::load_tables` | use `Mdec::load_tables` with the `MdecDma` token | **PSoXide-editor examples/hardware-tests** 1 (src/fmv_diag.rs) |
 | `psx_fmv::mdec::reset` | use `Mdec::reset` with the `MdecDma` token | **PSoXide-editor examples/hardware-tests** 1 (src/fmv_diag.rs) |
 | `psx_gpu::arm_draw_done` | use `Gpu::arm_draw_done` | **wipeout-psx** 1 (game/src/render.rs)<br>**hk-psx** 5 (game/src/render.rs, game/src/menu.rs, game/src/scene_transition.rs) |
@@ -49,20 +48,10 @@ Each row gives the number of call sites and the files, per repo. Re-run the scan
 | `psx_gpu::wait_idle` | use `Gpu::wait_idle` | **PSoXide-editor examples/toolchain-probe** 1 (src/main.rs)<br>**oot-psx** 9 (src/bg.rs, src/main.rs, src/scene_actors/treasure_light_profile.rs, src/gameplay_objects.rs)<br>**quake-psx** 5 (game/src/intro.rs, game/src/platform.rs) |
 | `psx_io::cd::acknowledge_irq` | use `Cd::acknowledge_irq` with the `Cd` token | **PSoXide-editor examples/hardware-tests** 7 (src/main.rs)<br>**cs-psx** 5 (game/src/cd_irq.rs) |
 | `psx_io::cd::discard_response` | use `Cd::discard_response` with the `Cd` token | **cs-psx** 6 (game/src/cd_irq.rs)<br>**PSoXide-editor examples/hardware-tests** 6 (src/main.rs) |
-| `psx_io::cd::dispatch_command` | use `Cd::dispatch_command` with the `Cd` token | **PSoXide-editor examples/hardware-tests** 1 (src/main.rs) |
 | `psx_io::cd::irq_flag_value` | use `Cd::irq_flag_value` with the `Cd` token | **cs-psx** 1 (game/src/cd_irq.rs)<br>**PSoXide-editor examples/hardware-tests** 2 (src/main.rs) |
-| `psx_io::cd::poll_data_sector` | use `Cd::poll_data_sector` with the `Cd` token | **PSoXide-editor examples/hardware-tests** 1 (src/lever_probes.rs) |
-| `psx_io::cd::restore_irq_output` | use `Cd::restore_irq_output` with the `Cd` token | **PSoXide-editor examples/hardware-tests** 1 (src/main.rs) |
-| `psx_io::cd::try_mute` | use `Cd::try_mute` with the `Cd` token | **PSoXide-editor examples/hardware-tests** 4 (src/audio_probe.rs, src/main.rs) |
-| `psx_io::cd::try_pause_until_complete` | use `Cd::try_pause_until_complete` with the `Cd` token | **PSoXide-editor examples/hardware-tests** 2 (src/audio_probe.rs) |
-| `psx_io::cd::try_play_position` | use `Cd::try_play_position` with the `Cd` token | **PSoXide-editor examples/hardware-tests** 3 (src/main.rs) |
 | `psx_io::cd::try_play_track` | use `Cd::try_play_track` with the `Cd` token | **PSoXide-editor examples/game-magikaaaaaarp-pong** 1 (src/main.rs)<br>**PSoXide-editor examples/hardware-tests** 3 (src/main.rs) |
 | `psx_io::cd::try_set_mode` | use `Cd::try_set_mode` with the `Cd` token | **PSoXide-editor examples/hardware-tests** 7 (src/audio_probe.rs, src/main.rs)<br>**PSoXide-editor examples/game-magikaaaaaarp-pong** 1 (src/main.rs) |
-| `psx_io::cd::try_set_target_lba` | use `Cd::try_set_target_lba` with the `Cd` token | **PSoXide-editor examples/hardware-tests** 6 (src/audio_probe.rs, src/main.rs) |
-| `psx_io::cd::try_start_reading` | use `Cd::try_start_reading` with the `Cd` token | **PSoXide-editor examples/hardware-tests** 3 (src/audio_probe.rs, src/main.rs) |
-| `psx_io::cd::try_status` | use `Cd::try_status` with the `Cd` token | **PSoXide-editor examples/hardware-tests** 4 (src/main.rs, src/cd_chain_probe.rs) |
 | `psx_io::cd::try_unmute` | use `Cd::try_unmute` with the `Cd` token | **PSoXide-editor examples/game-magikaaaaaarp-pong** 1 (src/main.rs)<br>**PSoXide-editor examples/hardware-tests** 6 (src/main.rs, src/audio_probe.rs) |
-| `psx_io::dma::clear_ordering_table` | use `OrderingTableClearDma::clear_table` with the token | **PSoXide-editor examples/hardware-tests** 1 (src/main.rs) |
 | `psx_math::attributed_clip::clip_convex_plane` | use the safe `clip_to_plane` (checked) or `clip_to_plane_unchecked` (proven capacity) | **voxide** 2 (game/src/main.rs) |
 | `psx_math::attributed_clip::clip_convex_plane_uninit` | use the safe `clip_to_plane_uninit` (checked) or `clip_to_plane_uninit_unchecked` (proven capacity) | **quake-psx** 2 (game/src/renderer.rs) |
 | `psx_mc::HardwareCard::new` | use `HardwareCard::on_port` with the `ControllerPort` token | **hk-psx** 1 (game/src/save.rs)<br>**celeste-collection-psx** 2 (pico8-0.1.0/src/save.rs)<br>**wipeout-psx** 1 (game/src/saves.rs)<br>**voxide** 3 (game/src/save.rs, game/src/main.rs)<br>**hl-psx** 1 (game/src/save.rs)<br>**oot-psx** 2 (src/scene_actors/mode.rs, src/boot_assets.rs)<br>**psxcel** 5 (src/main.rs) |
