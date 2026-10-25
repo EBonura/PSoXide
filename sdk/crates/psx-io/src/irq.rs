@@ -169,28 +169,6 @@ pub fn without_interrupts<R>(f: impl FnOnce() -> R) -> R {
     result
 }
 
-/// Renamed to [`acknowledge`].
-#[deprecated(note = "renamed to `acknowledge`")]
-#[inline(always)]
-pub fn ack(bits: u32) {
-    acknowledge(bits)
-}
-
-/// Moved to [`psx_hw::irq::source`].
-pub mod source {
-    use psx_hw::irq::source as bit;
-
-    /// Moved to [`psx_hw::irq::source::CDROM`].
-    #[deprecated(note = "moved to `psx_hw::irq::source::CDROM`")]
-    pub const CDROM: u32 = bit::CDROM;
-    /// Moved to [`psx_hw::irq::source::DMA`].
-    #[deprecated(note = "moved to `psx_hw::irq::source::DMA`")]
-    pub const DMA: u32 = bit::DMA;
-    /// Moved to [`psx_hw::irq::source::SPU`].
-    #[deprecated(note = "moved to `psx_hw::irq::source::SPU`")]
-    pub const SPU: u32 = bit::SPU;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

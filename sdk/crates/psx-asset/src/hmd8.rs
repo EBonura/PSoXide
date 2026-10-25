@@ -156,20 +156,16 @@ fn unpack_normal_555(packed: u16) -> [i8; 3] {
 /// an empty model rather than panicking, so a bad cook draws nothing instead
 /// of taking the guest down.
 ///
-/// Every accessor is memory-safe on any model, including one whose public
-/// counts (the deprecated `n_verts` and `n_tris`) were overwritten:
-/// reads are bounded by the blob and the private offsets `from_bytes`
-/// validated, never by the
-/// public counts. An index past a table reads an inert value (origin vertex,
+/// Every accessor is memory-safe on any model: reads are bounded by the blob
+/// and the private offsets `from_bytes` validated, never by the counts.
+/// An index past a table reads an inert value (origin vertex,
 /// skipped triangle, identity pose). The `*_unchecked` forms skip that check
 /// for hot loops that already bound their index by the loaded count.
 #[derive(Clone, Copy)]
 pub struct Model {
     data: &'static [u8],
-    #[deprecated(note = "use `vertex_count()`")]
-    pub n_verts: usize,
-    #[deprecated(note = "use `triangle_count()`")]
-    pub n_tris: usize,
+    n_verts: usize,
+    n_tris: usize,
     n_frames: usize,
     n_clips: usize,
     n_bones: usize,
@@ -468,7 +464,6 @@ unsafe fn write_render_face(
 
 impl Model {
     /// Zero model for static cache slots (never drawn: no triangles).
-    #[allow(deprecated)] // initialises the deprecated public count fields
     pub const EMPTY: Model = Model {
         data: &[],
         n_verts: 0,
@@ -505,49 +500,42 @@ impl Model {
     }
 
     /// Number of vertices in the stream.
-    #[allow(deprecated)] // reads the deprecated field this accessor replaces
     #[inline]
     pub const fn vertex_count(&self) -> usize {
         self.n_verts
     }
 
     /// Number of triangles in the face table.
-    #[allow(deprecated)] // reads the deprecated field this accessor replaces
     #[inline]
     pub const fn triangle_count(&self) -> usize {
         self.n_tris
     }
 
     /// Number of baked palette frames across every clip.
-    #[allow(deprecated)] // reads the deprecated field this accessor replaces
     #[inline]
     pub const fn frame_count(&self) -> usize {
         self.n_frames
     }
 
     /// Number of clips in the clip table.
-    #[allow(deprecated)] // reads the deprecated field this accessor replaces
     #[inline]
     pub const fn clip_count(&self) -> usize {
         self.n_clips
     }
 
     /// Number of bones in each pose palette.
-    #[allow(deprecated)] // reads the deprecated field this accessor replaces
     #[inline]
     pub const fn bone_count(&self) -> usize {
         self.n_bones
     }
 
     /// Number of bone ranges (see [`Model::bone_range`]).
-    #[allow(deprecated)] // reads the deprecated field this accessor replaces
     #[inline]
     pub const fn bone_range_count(&self) -> usize {
         self.n_ranges
     }
 
     /// Number of studio hitboxes (zero when the cook emitted none).
-    #[allow(deprecated)] // reads the deprecated field this accessor replaces
     #[inline]
     pub const fn hitbox_count(&self) -> usize {
         self.n_hitboxes
@@ -570,7 +558,6 @@ impl Model {
     /// only for the call, so [`Model::compact_visible_bodies`] can lay out a
     /// buffer it holds by `&mut`. The detached model never leaves this
     /// module: its offsets describe a blob it does not hold.
-    #[allow(deprecated)] // initialises the deprecated public count fields
     fn layout(data: &[u8], max_verts: usize) -> (Model, bool) {
         if data.len() < HMD7_HEADER_BYTES || data.get(0..4) != Some(b"HMD8") {
             return (Self::EMPTY, false);
@@ -1743,20 +1730,6 @@ impl Model {
             );
             (out_t, run_count)
         }
-    }
-
-    /// Renamed to [`Model::vertex`].
-    #[deprecated(note = "renamed to `vertex`")]
-    #[inline(always)]
-    pub fn vert(&self, index: usize) -> Vec3I16 {
-        self.vertex(index)
-    }
-
-    /// Renamed to [`Model::triangle_uv_words`].
-    #[deprecated(note = "renamed to `triangle_uv_words`")]
-    #[inline(always)]
-    pub fn tri_uv_words(&self, t: usize) -> [u16; 3] {
-        self.triangle_uv_words(t)
     }
 }
 

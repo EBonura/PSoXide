@@ -171,7 +171,7 @@ A rename never breaks a game that has not repinned:
 2. The old name stays as a thin `#[deprecated(note = "renamed to ...")]`
    wrapper (`#[inline(always)]` function, type alias or constant), so a repin
    compiles with warnings that point at the new name.
-3. Once no game's main uses the old name, it is removed. [DEPRECATED-REMAINING.md](DEPRECATED-REMAINING.md) lists every item still deprecated and who calls it.
+3. Once no game's main uses the old name, it is removed. (On 2026-10-25 the forwarders that take no device owner were removed in one pass, the few remaining callers listed in `CHANGELOG.md`; the ones that need a `Gpu`, `Cd`, `ControllerPort` or other owner are still here.) [DEPRECATED-REMAINING.md](DEPRECATED-REMAINING.md) lists every item still deprecated and who calls it.
 
 The forwarder takes the form the item allows:
 

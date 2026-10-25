@@ -1600,39 +1600,6 @@ pub fn error_flags() -> u32 {
     read_control!(31)
 }
 
-/// Renamed to [`start_project_triple`].
-#[deprecated(note = "renamed to `start_project_triple`")]
-#[inline(always)]
-pub fn rtpt_kick(v0: Vec3I16, v1: Vec3I16, v2: Vec3I16) -> ProjectTripleInFlight {
-    start_project_triple(v0, v1, v2)
-}
-
-/// Renamed to [`classic_ordering_depth3_from_sum`].
-#[deprecated(note = "renamed to `classic_ordering_depth3_from_sum`")]
-#[inline(always)]
-pub fn classic_otz3_from_sum(sum: u32) -> u16 {
-    classic_ordering_depth3_from_sum(sum)
-}
-
-/// Renamed to [`is_aabb_outside_clip4`].
-#[deprecated(note = "renamed to `is_aabb_outside_clip4`")]
-#[inline(always)]
-pub fn aabb_outside_clip4(
-    mins: [i16; 3],
-    maxs: [i16; 3],
-    planes: &[AabbClipPlane; 4],
-    clip_flags: u8,
-) -> bool {
-    is_aabb_outside_clip4(mins, maxs, planes, clip_flags)
-}
-
-/// Renamed to [`screen_area_scheduled`].
-#[deprecated(note = "renamed to `screen_area_scheduled`")]
-#[inline(always)]
-pub fn screen_area_mac0_scheduled(vertices: [(i16, i16); 3]) -> i32 {
-    screen_area_scheduled(vertices)
-}
-
 #[cfg(all(test, not(target_arch = "mips")))]
 mod host_smoke {
     //! Smoke tests for the host-side software-GTE shim.

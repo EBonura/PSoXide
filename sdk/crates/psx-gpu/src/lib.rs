@@ -45,8 +45,7 @@ pub use compat::{
     draw_quad_textured_gouraud_material, draw_quad_textured_material, draw_rect_flat,
     draw_sprite_material, draw_sync, draw_tri_flat, draw_tri_flat_blended, draw_tri_gouraud,
     fill_rect, init, set_draw_area, set_draw_offset, signal_draw_done, submit_linked_list_async,
-    submit_linked_list_async_raw, submit_linked_list_raw, submit_linked_list_raw_async,
-    submit_linked_list_wait, vsync, wait_idle,
+    submit_linked_list_raw, submit_linked_list_raw_async, submit_linked_list_wait, wait_idle,
 };
 // The chain items' old root paths, kept for one stage: they are the same
 // items, so they cannot carry a deprecation of their own.
@@ -54,14 +53,6 @@ pub use chain::{DrawDoneNode, StaticChain, StaticPacket, DRAW_DONE_NODE, MAX_NOD
 pub use gpu::{Gpu, MaskMode};
 
 use psx_io::gpu::wait_command_ready;
-
-/// Moved to [`display::VideoMode`].
-#[deprecated(note = "moved to `psx_gpu::display::VideoMode`")]
-pub type VideoMode = display::VideoMode;
-
-/// Moved to [`display::Resolution`].
-#[deprecated(note = "moved to `psx_gpu::display::Resolution`")]
-pub type Resolution = display::Resolution;
 
 /// [`Gpu::wait_idle`]'s waits, shared with the deprecated free function.
 ///

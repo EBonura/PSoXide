@@ -224,13 +224,6 @@ impl<'a> Mesh<'a> {
         self.vert_count
     }
 
-    /// Renamed to [`Self::vertex_count`].
-    #[deprecated(note = "renamed to `vertex_count`")]
-    #[inline(always)]
-    pub fn vert_count(&self) -> u16 {
-        self.vertex_count()
-    }
-
     /// Triangle count.
     #[inline]
     pub fn face_count(&self) -> u16 {
@@ -3031,13 +3024,6 @@ impl WorldSectorFloorCollision {
         self.walkable
     }
 
-    /// Renamed to [`Self::is_walkable`].
-    #[deprecated(note = "renamed to `is_walkable`")]
-    #[inline(always)]
-    pub fn walkable(self) -> bool {
-        self.is_walkable()
-    }
-
     /// Floor corner heights `[NW, NE, SE, SW]`.
     #[inline]
     pub fn floor_heights(self) -> [i32; 4] {
@@ -3220,13 +3206,6 @@ impl WorldSector {
         self.is_floor_triangle_walkable(0) || self.is_floor_triangle_walkable(1)
     }
 
-    /// Renamed to [`Self::is_floor_walkable`].
-    #[deprecated(note = "renamed to `is_floor_walkable`")]
-    #[inline(always)]
-    pub fn floor_walkable(&self) -> bool {
-        self.is_floor_walkable()
-    }
-
     /// Floor diagonal split id.
     #[inline]
     pub fn floor_split(&self) -> u8 {
@@ -3259,13 +3238,6 @@ impl WorldSector {
         horizontal_triangle_present(self.floor_triangle_flags, index)
     }
 
-    /// Renamed to [`Self::has_floor_triangle`].
-    #[deprecated(note = "renamed to `has_floor_triangle`")]
-    #[inline(always)]
-    pub fn floor_triangle_present(&self, index: usize) -> bool {
-        self.has_floor_triangle(index)
-    }
-
     /// Floor split-triangle material slot.
     #[inline]
     pub fn floor_triangle_material(&self, index: usize) -> Option<u16> {
@@ -3293,13 +3265,6 @@ impl WorldSector {
     pub fn is_floor_triangle_walkable(&self, index: usize) -> bool {
         self.has_floor_triangle(index)
             && horizontal_triangle_walkable(self.floor_triangle_flags, index)
-    }
-
-    /// Renamed to [`Self::is_floor_triangle_walkable`].
-    #[deprecated(note = "renamed to `is_floor_triangle_walkable`")]
-    #[inline(always)]
-    pub fn floor_triangle_walkable(&self, index: usize) -> bool {
-        self.is_floor_triangle_walkable(index)
     }
 
     /// Ceiling diagonal split id.
@@ -3332,13 +3297,6 @@ impl WorldSector {
     #[inline]
     pub fn has_ceiling_triangle(&self, index: usize) -> bool {
         horizontal_triangle_present(self.ceiling_triangle_flags, index)
-    }
-
-    /// Renamed to [`Self::has_ceiling_triangle`].
-    #[deprecated(note = "renamed to `has_ceiling_triangle`")]
-    #[inline(always)]
-    pub fn ceiling_triangle_present(&self, index: usize) -> bool {
-        self.has_ceiling_triangle(index)
     }
 
     /// Ceiling split-triangle material slot.

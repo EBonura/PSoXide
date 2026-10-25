@@ -131,13 +131,6 @@ impl BlendMode {
         }
     }
 
-    /// Renamed to [`from_texture_page_bits`](Self::from_texture_page_bits).
-    #[deprecated(note = "renamed to `from_texture_page_bits`")]
-    #[inline(always)]
-    pub const fn from_tpage_bits(bits: u8) -> Self {
-        Self::from_texture_page_bits(bits)
-    }
-
     /// Encode as GP0(E1) / tpage bits 5..6.
     ///
     /// `Opaque` uses the common average-blend encoding because the

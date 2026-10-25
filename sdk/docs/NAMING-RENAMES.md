@@ -5,11 +5,12 @@ the reason, and how often each game's `main` uses the old name.
 
 How to read it:
 
-- **Status**: `done` means the new name is the real item on
-  `naming/psoxide-convention` and the old name is a deprecated forwarder
-  (games keep compiling and get a warning that names the new item).
-  `deferred` means no forwarder is possible (a public field) and the rename
-  waits for a breaking release.
+- **Status**: `done` means the new name is the real item. The old name was a
+  deprecated forwarder until 2026-10-25, when the forwarders that took no
+  device owner were deleted (`CHANGELOG.md` lists them); a game that has not
+  repinned past that date still compiles against its pin, and this table is
+  the map for the rename at its next repin. `deferred` means no forwarder was
+  possible (a public field); the `n_verts` and `n_tris` fields are private now.
 - **Uses** counts lines in files that use the crate, per game, on each
   repo's `main` as of 2026-10-03 (`git grep`; vendored SDK copies excluded).
   It is approximate: short identifiers can match unrelated code. `new` means

@@ -164,10 +164,10 @@ controller cleaned up (drained, acknowledged, IRQ enable restored); a
 timeout leaves CD IRQ output masked, as `try_command` already did. The
 `cd::audio` default budget is the same constant.
 
-The deprecated `psx_io::cdrom` forwarders keep their `Response` return and
-hand back `Response::empty()` on an error. No game calls the blocking forms
-(they use `try_*`); the one caller in the tree is the `hello-cdda` example,
-updated to ignore the result as it always did.
+The `psx_io::cdrom` forwarders that used to keep the `Response` return (and
+hand back `Response::empty()` on an error) were removed on 2026-10-25. No game
+calls the blocking forms (they use `try_*`); the one caller in the tree is the
+`hello-cdda` example, updated to ignore the result as it always did.
 
 ## psx-settings: saving never formats a card (settings-01)
 
@@ -200,10 +200,10 @@ value_for_1)` left key 2 `Ready` with key 1's value. Asynchronous loads
 | `mark_ready(slot, value)` | `finish_load(reservation, value) -> Result<(), Stale>` |
 
 `finish_load` stores only if the reservation's key still owns the slot and
-returns `Stale` otherwise. The old pair stays, deprecated and unchanged, for
-one stage. Caller: hk-psx `shared/hk-cache/src/lib.rs` (1 `reserve`, 1
-`mark_ready`, the latter in the same call so it cannot go stale today; move
-it anyway when a load can span frames).
+returns `Stale` otherwise. The old pair was removed on 2026-10-25. Caller:
+hk-psx `shared/hk-cache/src/lib.rs` (1 `reserve`, 1 `mark_ready`, the latter
+in the same call so it cannot go stale today; it moves to `begin_load` and
+`finish_load` at hk-psx's next repin).
 
 ## psx-fx: slow particles drift (fx-01)
 
@@ -252,12 +252,10 @@ view shake and impact streams use `next()`, which is unchanged); voxide
 
 `PANEL_TOP` is now the painted top (122) and `PANEL_HEIGHT` the painted height
 (118); the keyboard draws the same pixels as before. A game keeps its content
-above `PANEL_TOP` with no adjustment. The deprecated `Y0` keeps its old value
-(136, the top of the key rows) so a repin does not move anything;
-`PANEL_H` now reports 118, not 104.
-
-Caller: psxcel `game/src/main.rs:68`, `KBD_GRID_Y1` uses `psx_osk::Y0 - 14`.
-Change it to `psx_osk::PANEL_TOP` and the grid ends at the same line.
+above `PANEL_TOP` with no adjustment. `Y0` kept its old value (136, the top of
+the key rows) until it was removed on 2026-10-25; `Y0 - 14` is `PANEL_TOP`.
+`PANEL_H` now reports 118, not 104. psxcel was the one caller and uses
+`PANEL_TOP`.
 
 ## psx-asset: a malformed texture is an error on the console too (asset-02)
 

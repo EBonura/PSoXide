@@ -53,24 +53,6 @@ macro_rules! cofun {
     }};
 }
 
-/// Emit the deprecated forwarder that keeps an op's old mnemonic name
-/// compiling after its rename. `$note` is the full deprecation note, spelled
-/// out at each use because `#[deprecated]` only takes a string literal.
-macro_rules! renamed_op {
-    ($old:ident => $new:ident, $note:literal) => {
-        #[doc = concat!("Renamed to [`", stringify!($new), "`].")]
-        ///
-        /// # Safety
-        #[doc = concat!("See [`", stringify!($new), "`].")]
-        #[deprecated(note = $note)]
-        #[inline(always)]
-        pub unsafe fn $old() {
-            // SAFETY: same contract as the renamed function.
-            unsafe { $new() }
-        }
-    };
-}
-
 /// Perspective-project V0 (`RTPS`, `sf=1, lm=0`).
 ///
 /// # Safety
@@ -356,10 +338,3 @@ pub unsafe fn rotate_translate_v0() {
 pub unsafe fn rotate_v0_far_color() {
     cofun!(crate::encoding::command::ROTATE_V0_FAR_COLOR)
 }
-
-// Deprecated forwarders for the mnemonic names these ops had before the
-// naming convention (sdk/docs/NAMING.md).
-renamed_op!(rtps => project_single, "renamed to `project_single`");
-renamed_op!(rtpt => project_triple, "renamed to `project_triple`");
-renamed_op!(nccs => light_color_single, "renamed to `light_color_single`");
-renamed_op!(ncct => light_color_triple, "renamed to `light_color_triple`");

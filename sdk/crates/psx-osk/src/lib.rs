@@ -64,10 +64,6 @@ pub enum Direction {
     Down,
 }
 
-/// Renamed to [`Direction`].
-#[deprecated(note = "renamed to `Direction`")]
-pub type Dir = Direction;
-
 /// Colors for the keyboard panel; all `(r, g, b)`.
 #[derive(Copy, Clone, Debug)]
 pub struct Palette {
@@ -139,13 +135,6 @@ pub const PANEL_HEIGHT: i16 = HINT_BAND + ROWS as i16 * KH + BOTTOM_MARGIN;
 pub const PANEL_TOP: i16 = 240 - PANEL_HEIGHT;
 /// Top edge of the first key row, below the hint line.
 const KEYS_TOP: i16 = PANEL_TOP + HINT_BAND;
-
-/// The top of the key rows, 14 pixels below [`PANEL_TOP`]. It was documented as
-/// the panel's top edge and callers subtract the hint line from it
-/// (`Y0 - 14`); that is `PANEL_TOP`, so use [`PANEL_TOP`] and drop the
-/// subtraction.
-#[deprecated(note = "this is the top of the key rows, 14 below `PANEL_TOP`; use `PANEL_TOP`")]
-pub const Y0: i16 = KEYS_TOP;
 
 /// The keyboard state machine: highlight position + page/case toggles.
 pub struct Keyboard {
@@ -370,10 +359,6 @@ mod tests {
             assert!(PANEL_TOP + 2 + 8 <= KEYS_TOP);
             assert!(KEYS_TOP + ROWS as i16 * KH <= PANEL_TOP + PANEL_HEIGHT);
             assert!(KEYS_TOP >= PANEL_TOP);
-        }
-        #[allow(deprecated)]
-        {
-            assert_eq!(Y0, KEYS_TOP, "the old name keeps its old value");
         }
     }
 
