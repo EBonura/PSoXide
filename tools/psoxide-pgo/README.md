@@ -644,6 +644,60 @@ unmapped summary). Those blocks have no weights on any build, before or after
 an edit, so adding or removing lines elsewhere changes neither the profile nor
 the code. Only an edit inside a function changes that function's own keys.
 
+## One guest from any directory (`psoxide-rustc`, `repro-gate`)
+
+Portable names make a profile usable anywhere, but the disambiguator still
+decides the build itself. rustc and LLVM order items by symbol name, so the
+same commit built from two directories gives two executables of the same size
+and different layout: two OoT checkouts differed in 85,544 bytes of the exe
+and one measured window moved 0.6 percent on the path alone, which pollutes
+every A/B between lane clones and makes a library disc reproducible only at
+the path it was gated at.
+
+Where the path enters: Cargo hashes a path package by its path relative to the
+workspace root when it is under it, and by its absolute path otherwise. That
+hash is `-C metadata`, and rustc derives each crate's disambiguator from it. A
+game whose workspace root is `game/` and whose SDK is `../.psoxide` (OoT, the
+editor's staged guest, where the stage root is a parameter) hashes absolute
+paths. A game whose workspace root is the repository root (hl-psx, with
+`trim-paths = "all"`) does not, and needs nothing.
+
+`psoxide-rustc` fixes the first kind without touching any manifest. It is a
+`RUSTC_WRAPPER` that rewrites only the `-C metadata` value to a hash of the
+crate name, edition, target, crate types, `--cfg` set (features) and the source
+path relative to `PSOXIDE_REPRO_ROOT`. Rustflags, profile-guided flags, debug
+info and output paths stay out of it, as they stay out of Cargo's own hash, so
+the DWARF twin and the profile-guided build still share symbol names. Set it
+for the guest compile only:
+
+```sh
+export RUSTC_WRAPPER=<psoxide-rustc>            # cargo build -p psoxide-pgo --bin psoxide-rustc
+export PSOXIDE_REPRO_ROOT=<checkout, or the stage root>
+export PSOXIDE_REPRO_INNER=<sccache>            # optional: the cache to run the compiler under
+```
+
+A missing root, or a source path outside the root, the Cargo registry and the
+toolchain's `rust-src`, stops the build: a wrapper that quietly did nothing
+would look reproducible and not be. The committed profile and layout need no
+re-collection: both bind by portable name and code hash, and the build rebinds
+the profile onto its own twin every time. Adopting the wrapper moves the
+layout once, to a canonical one.
+
+`repro-gate` proves it for a game. It clones the tree twice (APFS clones,
+different depth and name length, no `target/`), gives each clone its own output
+and stage directories, runs the same build in both and compares the named
+artifacts byte for byte (exit 0 identical, 1 different, 2 failure):
+
+```sh
+repro-gate --source <checkout> --work <scratch dir> \
+  --build 'zsh tools/qualified/build-disc.sh "$PSOXIDE_REPRO_CHECKOUT" "$PSOXIDE_REPRO_OUT"' \
+  --artifact '{out}/disc/oot-psx.bin' --artifact '{out}/publication/final/runtime.exe'
+```
+
+The build sees `PSOXIDE_REPRO_CHECKOUT`, `PSOXIDE_REPRO_OUT` and
+`PSOXIDE_GUEST_STAGE_ROOT`. Run it before landing a build-script change and
+after every SDK repin.
+
 ## Profile quality notes
 
 - **Head samples** (a function's entry count) come from the samples at its
