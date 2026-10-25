@@ -7099,13 +7099,13 @@ fn prime_rtpt_hazard_state() {
     }
     #[cfg(not(target_arch = "mips"))]
     {
-        mtc2!(0, v0_xy);
-        mtc2!(1, v0_z);
-        mtc2!(2, v1_xy);
-        mtc2!(3, v1_z);
-        mtc2!(4, v2_xy);
-        mtc2!(5, v2_z);
-        unsafe { gte_ops::rtpt() };
+        write_data!(0, v0_xy);
+        write_data!(1, v0_z);
+        write_data!(2, v1_xy);
+        write_data!(3, v1_z);
+        write_data!(4, v2_xy);
+        write_data!(5, v2_z);
+        unsafe { gte_ops::project_triple() };
     }
     gte_nops!(64);
 }
@@ -7142,13 +7142,13 @@ macro_rules! rtpt_input_gap_probe {
             }
             #[cfg(not(target_arch = "mips"))]
             {
-                mtc2!(0, v0_xy);
-                mtc2!(1, v0_z);
-                mtc2!(2, v1_xy);
-                mtc2!(3, v1_z);
-                mtc2!(4, v2_xy);
-                mtc2!(5, v2_z);
-                unsafe { gte_ops::rtpt() };
+                write_data!(0, v0_xy);
+                write_data!(1, v0_z);
+                write_data!(2, v1_xy);
+                write_data!(3, v1_z);
+                write_data!(4, v2_xy);
+                write_data!(5, v2_z);
+                unsafe { gte_ops::project_triple() };
             }
             gte_nops!(64);
             rtpt_result_digest(
@@ -7210,19 +7210,19 @@ macro_rules! rtpt_read_gap_probe {
             }
             #[cfg(not(target_arch = "mips"))]
             {
-                mtc2!(0, v0_xy);
-                mtc2!(1, v0_z);
-                mtc2!(2, v1_xy);
-                mtc2!(3, v1_z);
-                mtc2!(4, v2_xy);
-                mtc2!(5, v2_z);
-                unsafe { gte_ops::rtpt() };
-                v0_xy = mfc2!(12);
-                v0_z = mfc2!(13);
-                v1_xy = mfc2!(14);
-                v1_z = mfc2!(17);
-                v2_xy = mfc2!(18);
-                v2_z = mfc2!(19);
+                write_data!(0, v0_xy);
+                write_data!(1, v0_z);
+                write_data!(2, v1_xy);
+                write_data!(3, v1_z);
+                write_data!(4, v2_xy);
+                write_data!(5, v2_z);
+                unsafe { gte_ops::project_triple() };
+                v0_xy = read_data!(12);
+                v0_z = read_data!(13);
+                v1_xy = read_data!(14);
+                v1_z = read_data!(17);
+                v2_xy = read_data!(18);
+                v2_z = read_data!(19);
             }
             rtpt_result_digest(v0_xy, v0_z, v1_xy, v1_z, v2_xy, v2_z)
         }
