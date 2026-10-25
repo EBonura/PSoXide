@@ -34,6 +34,7 @@ use crate::view::RoomView;
 
 mod cards;
 mod clip;
+mod cut;
 mod emit;
 mod frustum;
 mod panels;
@@ -78,6 +79,13 @@ pub(crate) const GRID_RENDER_PROFILE: SurfaceProfile = SurfaceProfile {
     split_twice_below: 0,
     ..SurfaceProfile::THIRD_PERSON
 };
+
+/// Affine texture error, in eighths of a pixel (3 pixels), a repeating quad's
+/// edge may carry before the renderer cuts the quad (see `psx_engine::tess`).
+/// The GPU interpolates texture coordinates in screen space, so the picture on
+/// a wall that runs away from the eye bends where the quad's depth changes
+/// most.
+pub(crate) const WARP_BUDGET_Q3: u16 = 24;
 
 /// A material slot as the runtime resolved it: page words and the texture's
 /// page-local origin, or not resident while its texture is not uploaded.

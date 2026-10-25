@@ -1,5 +1,6 @@
 //! Packet writing: the straight-line fast path and the shared near-plane path.
 
+use super::cut::{bend_edges, cut_quad, Writer};
 use super::*;
 
 impl GridRenderer {
@@ -51,7 +52,7 @@ impl GridRenderer {
         // `PhaseStack`) up to a quad that needs the near-plane path, whose
         // call tree is too deep for it: that one is drawn here, on the RAM
         // stack, and the loop goes on after it. The packets keep queue order.
-        while let Some(at) = {
+        while let Some(stop) = {
             // SAFETY: see `PhaseStack`; the fast loop's own tree is shallow.
             unsafe {
                 PhaseStack::run(|| {
@@ -67,6 +68,7 @@ impl GridRenderer {
                 })
             }
         } {
+            let (at, bends) = stop;
             position = at + 1;
             // Reverse walks the queue backwards so the stream keeps its order.
             let q = usize::from(if REVERSE {
@@ -87,7 +89,9 @@ impl GridRenderer {
             let Some(material) = materials.get(usize::from(quad.material)) else {
                 continue;
             };
-            // Near-plane, oversize and saturated quads share one path.
+            // Near-plane, oversize and saturated quads share one path, and so
+            // do quads whose texture would bend: the room has to hold the
+            // worst case of the longer one.
             // SAFETY: both pointers lie in the packet storage.
             let room_left = unsafe {
                 if REVERSE {
@@ -99,6 +103,37 @@ impl GridRenderer {
             if room_left < ROBUST_WORST_WORDS as isize {
                 frame.overflowed = true;
                 break;
+            }
+            if bends != 0 {
+                let Some((origin, window)) = material.addressing(quad, TextureWindow::NONE.word())
+                else {
+                    continue;
+                };
+                // SAFETY: validation proved every corner index is in range.
+                let corners = unsafe {
+                    [0, 1, 2, 3].map(|k| &*this.screen.as_ptr().add(usize::from(quad.v[k])))
+                };
+                let mut write = Writer {
+                    material,
+                    origin,
+                    window,
+                    packets: 0,
+                };
+                // SAFETY: room for the worst case was just checked; in
+                // reverse the pieces are built at the low end of the free
+                // space and moved up against the stream, as below.
+                unsafe {
+                    if REVERSE {
+                        let built = cut_quad(start, room, quad, corners, bends, &mut write);
+                        let words = built.offset_from(start) as usize;
+                        core::ptr::copy(start, next.sub(words), words);
+                        next = next.sub(words);
+                    } else {
+                        next = cut_quad(next, room, quad, corners, bends, &mut write);
+                    }
+                }
+                packets += write.packets;
+                continue;
             }
             robust_quads += 1;
             let before = packets;
@@ -132,7 +167,8 @@ impl GridRenderer {
 
     /// The straight-line part of the emit loop: from queue `position` on,
     /// write the quads the GPU draws as they are. Returns the queue position
-    /// of the first quad that needs the near-plane path, or `None` when the
+    /// of the first quad that needs the near-plane path (with the bits of its
+    /// bending edges when it is the cutter's instead), or `None` when the
     /// queue is done or the packet storage ran out.
     #[inline(never)]
     #[allow(clippy::too_many_arguments)]
@@ -145,7 +181,7 @@ impl GridRenderer {
         next_word: &mut *mut u32,
         packets_written: &mut u32,
         from: usize,
-    ) -> Option<usize> {
+    ) -> Option<(usize, u8)> {
         let mut next = *next_word;
         let mut packets = *packets_written;
         let cache = self.screen.as_ptr();
@@ -202,9 +238,21 @@ impl GridRenderer {
             let triangle = quad.flags & QUAD_TRI != 0;
             // Every corner on screen and in front of the near plane: nothing
             // else to prove. Otherwise the corners must still fit the GPU.
-            let fast = any == 0 || (any & NEAR == 0 && gpu_safe(&[s0, s1, s2, s3], triangle));
-            if !fast {
-                stop = Some(position);
+            let fast = any == 0 || (any & NEAR == 0 && gpu_safe(&[s0, s1, s2, s3]));
+            // A quad the GPU draws as given, but whose texture would bend
+            // visibly, is cut where it bends (see `cut`). Only a repeating
+            // quad is tested: it carries up to four tiles of texture, so its
+            // texture bends four times as far in texels as a plain quad's of
+            // the same shape, and the walls that show the worst bending (tall
+            // pillars seen at a slant) are all of this kind. Testing every
+            // quad took more of the frame than the plain ones gained.
+            let bends = if fast && !triangle && quad.flags2 & QUAD2_REPEAT != 0 {
+                bend_edges(&[s0, s1, s2, s3])
+            } else {
+                0
+            };
+            if !fast || bends != 0 {
+                stop = Some((position, bends));
                 break;
             }
             let sum = u32::from(s0.sz) + u32::from(s1.sz) + u32::from(s2.sz);
@@ -260,20 +308,19 @@ impl GridRenderer {
 /// corner inside its 11-bit coordinates and the polygon under the 1024 by 512
 /// span limit.
 #[inline(always)]
-fn gpu_safe(corners: &[&GridScreen; 4], triangle: bool) -> bool {
-    let count = if triangle { 3 } else { 4 };
-    let mut left = i32::MAX;
-    let mut right = i32::MIN;
-    let mut top = i32::MAX;
-    let mut bottom = i32::MIN;
-    for corner in corners.iter().take(count) {
-        let x = i32::from(corner.sxy as u16 as i16);
-        let y = i32::from((corner.sxy >> 16) as u16 as i16);
-        left = left.min(x);
-        right = right.max(x);
-        top = top.min(y);
-        bottom = bottom.max(y);
-    }
+fn gpu_safe(corners: &[&GridScreen; 4]) -> bool {
+    // A triangle repeats its third corner in the fourth, so four corners
+    // always give its extent.
+    let x = |k: usize| i32::from(corners[k].sxy as u16 as i16);
+    let y = |k: usize| i32::from((corners[k].sxy >> 16) as u16 as i16);
+    let (left, right) = (
+        x(0).min(x(1)).min(x(2)).min(x(3)),
+        x(0).max(x(1)).max(x(2)).max(x(3)),
+    );
+    let (top, bottom) = (
+        y(0).min(y(1)).min(y(2)).min(y(3)),
+        y(0).max(y(1)).max(y(2)).max(y(3)),
+    );
     left > -1000
         && right < 1000
         && top > -1000
@@ -292,7 +339,7 @@ fn gpu_safe(corners: &[&GridScreen; 4], triangle: bool) -> bool {
 /// # Safety
 /// `next` must have room for [`QUAD_PACKET_WORDS`].
 #[inline(always)]
-unsafe fn write_quad(
+pub(super) unsafe fn write_quad(
     next: *mut u32,
     quad: &Quad,
     material: &GridMaterial,
@@ -330,7 +377,7 @@ unsafe fn write_quad(
 /// # Safety
 /// `next` must have room for `QUAD_PACKET_WORDS - 3`.
 #[inline(always)]
-unsafe fn write_triangle(
+pub(super) unsafe fn write_triangle(
     next: *mut u32,
     quad: &Quad,
     material: &GridMaterial,

@@ -28,12 +28,18 @@ fn material() -> GridMaterial {
 /// One cell with a wall on the plane `x = 80`, facing -X: a plain quad
 /// first, then a repeating one with the given raw UV corner `far`.
 fn chunk(far: u8) -> Vec<u8> {
-    chunk_with_cell_range(far, (0, 80))
+    chunk_with(far, 0)
 }
 
-/// [`chunk`] whose cell claims the vertical extent `range`, as the cook
+/// [`chunk`] with the wall turned: its far end (`z = 80`) is `slant` units
+/// farther from the eye along X than its near end, and it shows both faces.
+fn chunk_with(far: u8, slant: i16) -> Vec<u8> {
+    chunk_in_range(far, slant, (0, 80))
+}
+
+/// [`chunk_with`] whose cell claims the vertical extent `range`, as the cook
 /// would record it for geometry up there.
-fn chunk_with_cell_range(far: u8, range: (i16, i16)) -> Vec<u8> {
+fn chunk_in_range(far: u8, slant: i16, range: (i16, i16)) -> Vec<u8> {
     let wall = |first: usize| {
         let mut quad = Quad {
             v: [0, 1, 2, 3],
@@ -41,7 +47,11 @@ fn chunk_with_cell_range(far: u8, range: (i16, i16)) -> Vec<u8> {
             d: -80,
             n: [-127, 0, 0],
             material: 0,
-            flags: QUAD_AXIS | QUAD_AXIS_NEG | (0 << QUAD_AXIS_SHIFT),
+            flags: if slant == 0 {
+                QUAD_AXIS | QUAD_AXIS_NEG | (0 << QUAD_AXIS_SHIFT)
+            } else {
+                QUAD_DOUBLE
+            },
             ..Quad::default()
         };
         if first == 1 {
@@ -58,7 +68,7 @@ fn chunk_with_cell_range(far: u8, range: (i16, i16)) -> Vec<u8> {
         quad
     };
     let vtx = |z: i16, y: i16| Vtx {
-        x: 80,
+        x: 80 + slant * z / 80,
         y,
         z,
         pad: 0,
@@ -91,11 +101,17 @@ fn chunk_with_cell_range(far: u8, range: (i16, i16)) -> Vec<u8> {
 /// Draw the chunk from `eye_x` (room-local, looking along +X) and return
 /// the packet words.
 fn draw(far: u8, eye_x: i32) -> (GridFrame, Vec<u32>) {
-    draw_chunk(chunk(far), eye_x)
+    draw_from(far, [eye_x, 40, 40])
 }
 
-/// [`draw`] of a given chunk.
-fn draw_chunk(chunk: Vec<u8>, eye_x: i32) -> (GridFrame, Vec<u32>) {
+/// [`draw`] from an eye anywhere.
+fn draw_from(far: u8, eye: [i32; 3]) -> (GridFrame, Vec<u32>) {
+    let (frame, out, _) = draw_screens(chunk(far), eye);
+    (frame, out)
+}
+
+/// [`draw_from`] that also returns the corner cache (`sxy`, `sz`).
+fn draw_screens(chunk: Vec<u8>, eye: [i32; 3]) -> (GridFrame, Vec<u32>, Vec<(u32, u16)>) {
     let words = aligned_copy(&chunk);
     let bytes = words_as_bytes(&words, words.len() * 4);
     let room = RoomView::parse(bytes).expect("room parses");
@@ -104,7 +120,6 @@ fn draw_chunk(chunk: Vec<u8>, eye_x: i32) -> (GridFrame, Vec<u32>) {
     scene::set_screen_offset(160 << 16, 120 << 16);
     scene::set_projection_plane(160);
     scene::set_average_z_weights(0x155, 0x100);
-    let eye = [eye_x, 40, 40];
     let view = load_view_rotation(
         GteVec3I32::new(eye[0] << 12, eye[1] << 12, eye[2] << 12),
         Mat3I16::IDENTITY,
@@ -126,7 +141,8 @@ fn draw_chunk(chunk: Vec<u8>, eye_x: i32) -> (GridFrame, Vec<u32>) {
     let mut out = vec![0u32; 4096];
     let frame = renderer.draw_room(&room, &camera, &[material()], &mut out, false);
     out.truncate(frame.packet_words);
-    (frame, out)
+    let screens = renderer.screen.iter().map(|s| (s.sxy, s.sz)).collect();
+    (frame, out, screens)
 }
 
 /// Packets of a stream as `(tag, data words)`; `tag >> 24` is the data count.
@@ -206,19 +222,58 @@ fn near_plane_repeat_quads_take_the_windowed_packet_shape() {
 }
 
 #[test]
+fn a_quad_seen_head_on_is_not_cut() {
+    let (frame, _) = draw(255, -120);
+    assert_eq!(frame.packets, 2, "{frame:?}");
+}
+
+#[test]
+fn a_quad_that_runs_away_from_the_eye_is_cut_where_it_bends() {
+    // A wall 80 wide whose far end is 80 units farther than its near end,
+    // seen from close by so that it runs off the screen: the texture would
+    // bend visibly.
+    let (flat, _, _) = draw_screens(chunk(255), [40, 40, 40]);
+    let (bent, stream, screens) = draw_screens(chunk_with(255, 80), [40, 40, 40]);
+    let off = |(sxy, _): &(u32, u16)| {
+        let (x, y) = (*sxy as u16 as i16, (*sxy >> 16) as u16 as i16);
+        !(0..320).contains(&x) || !(0..240).contains(&y)
+    };
+    assert!(screens.iter().take(4).any(off), "{screens:x?}");
+    assert!(bent.packets > flat.packets, "{bent:?} {flat:?}");
+    // Every piece is a complete packet and none runs off the stream.
+    let all = packets(&stream);
+    assert_eq!(all.iter().map(|p| p.len()).sum::<usize>(), stream.len());
+    assert_eq!(all.len() as u32, bent.packets);
+}
+
+#[test]
+fn only_a_repeating_quad_is_cut_a_plain_one_bends_whole() {
+    // The slanted wall holds a plain quad and a repeating one on the same
+    // corners. The repeating one spans four tiles, so its texture bends
+    // four times as far in texels and it alone is tested.
+    let (_, stream, _) = draw_screens(chunk_with(255, 80), [40, 40, 40]);
+    let all = packets(&stream);
+    let plain = all.iter().filter(|p| p[1] != WINDOW).count();
+    let repeating = all.len() - plain;
+    assert_eq!(plain, 1, "the plain quad is one packet");
+    assert!(repeating >= 2, "the repeating quad is cut: {repeating}");
+}
+
+#[test]
 fn a_cell_wholly_above_or_below_the_view_is_not_queued() {
     // The eye looks along +X from 40 units up; the frustum there is a few
     // hundred units tall.
-    let (seen, stream) = draw_chunk(chunk_with_cell_range(63, (0, 80)), -120);
+    let eye = [-120, 40, 40];
+    let (seen, stream, _) = draw_screens(chunk_in_range(63, 0, (0, 80)), eye);
     assert_eq!(seen.cells_visible, 1, "{seen:?}");
     assert!(seen.packets > 0);
     for range in [(9_000, 9_080), (-9_080, -9_000)] {
-        let (frame, _) = draw_chunk(chunk_with_cell_range(63, range), -120);
+        let (frame, _, _) = draw_screens(chunk_in_range(63, 0, range), eye);
         assert_eq!(frame.cells_visible, 0, "{range:?}: {frame:?}");
         assert_eq!(frame.packets, 0, "{range:?}");
     }
     // A cell that merely reaches into the view stays.
-    let (reaching, again) = draw_chunk(chunk_with_cell_range(63, (-9_000, 40)), -120);
+    let (reaching, again, _) = draw_screens(chunk_in_range(63, 0, (-9_000, 40)), eye);
     assert_eq!(reaching.cells_visible, 1, "{reaching:?}");
     assert_eq!(
         again, stream,
