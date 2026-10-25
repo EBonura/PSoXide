@@ -44,7 +44,7 @@ sdk clippy::enum_glob_use 0
 sdk clippy::rc_buffer 0
 sdk clippy::rc_mutex 0
 sdk clippy::get_first 0
-sdk clippy::must_use_candidate 1052
+sdk clippy::must_use_candidate 1045
 sdk clippy::unwrap_used 5
 sdk clippy::exhaustive_enums 69
 sdk clippy::exhaustive_structs 146
@@ -74,7 +74,7 @@ sdk-guest clippy::enum_glob_use 0
 sdk-guest clippy::rc_buffer 0
 sdk-guest clippy::rc_mutex 0
 sdk-guest clippy::get_first 0
-sdk-guest clippy::must_use_candidate 1057
+sdk-guest clippy::must_use_candidate 1050
 sdk-guest clippy::unwrap_used 5
 sdk-guest clippy::exhaustive_enums 71
 sdk-guest clippy::exhaustive_structs 148

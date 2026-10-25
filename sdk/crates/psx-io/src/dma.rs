@@ -272,15 +272,6 @@ impl OrderingTableClearDma {
     }
 }
 
-/// [`OrderingTableClearDma::clear_table`] on a token the caller does not hold.
-#[deprecated(note = "use `OrderingTableClearDma::clear_table` with the token")]
-#[inline(always)]
-pub fn clear_ordering_table(buf: &mut [u32]) -> bool {
-    // SAFETY: a token is a logic guard, not a memory-safety one (see
-    // `crate::periph`), and the old function never took one.
-    unsafe { OrderingTableClearDma::steal() }.clear_table(buf)
-}
-
 fn clear_table(buf: &mut [u32]) -> bool {
     let Ok(words) = u16::try_from(buf.len()) else {
         // Truncating to 16 bits would clear only the tail of the table

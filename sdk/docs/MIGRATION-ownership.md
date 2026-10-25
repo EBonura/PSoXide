@@ -213,10 +213,10 @@ references need the new signature on repin.
 
 ## Ordering-table clear (`OrderingTableClearDma`)
 
-`dma::clear_ordering_table(buf)` is `OrderingTableClearDma::clear_table(&mut
-self, buf)`. psx-gpu's `OrderingTable::clear_with_dma` already took the token
-and now runs the clear through it. Call sites: the editor engine's
-`engine/examples/hardware-tests/src/main.rs` (1).
+`dma::clear_ordering_table(buf)` (removed on 2026-10-25) is
+`OrderingTableClearDma::clear_table(&mut self, buf)`. psx-gpu's
+`OrderingTable::clear_with_dma` already took the token and now runs the clear
+through it.
 
 ## DPCR updates are atomic with respect to the VBlank handler (io-05)
 

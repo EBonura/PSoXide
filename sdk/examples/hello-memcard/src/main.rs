@@ -128,14 +128,6 @@ impl Diagnostic {
         }
     }
 
-    /// [`new_on`](Self::new_on) on a token the caller does not hold.
-    #[deprecated(note = "use `Diagnostic::new_on` with the `ControllerPort` token")]
-    pub fn new() -> Self {
-        // SAFETY: a token is a logic guard, not a memory-safety one, and this
-        // constructor never took one.
-        Self::new_on(unsafe { ControllerPort::steal() })
-    }
-
     /// The port the card sits on, for polling the pad between card steps.
     pub fn controller_port(&mut self) -> &mut ControllerPort {
         self.card.device().controller_port()

@@ -953,34 +953,6 @@ pub fn discard_response() {
     steal().discard_response()
 }
 
-/// Moved to [`Cd::dispatch_command`].
-#[deprecated(note = "use `Cd::dispatch_command` with the `Cd` token")]
-#[inline(always)]
-pub fn dispatch_command(command: u8, params: &[u8], spin_limit: u32) -> Option<u8> {
-    steal().dispatch_command(command, params, spin_limit)
-}
-
-/// Moved to [`Cd::restore_irq_output`].
-#[deprecated(note = "use `Cd::restore_irq_output` with the `Cd` token")]
-#[inline(always)]
-pub fn restore_irq_output(saved: u8) {
-    steal().restore_irq_output(saved)
-}
-
-/// Moved to [`Cd::poll_data_sector`].
-#[deprecated(note = "use `Cd::poll_data_sector` with the `Cd` token")]
-#[inline(always)]
-pub fn poll_data_sector() -> Result<bool, SectorPollError> {
-    steal().poll_data_sector()
-}
-
-/// Moved to [`Cd::try_status`].
-#[deprecated(note = "use `Cd::try_status` with the `Cd` token")]
-#[inline(always)]
-pub fn try_status(spin_limit: u32) -> Option<Response> {
-    steal().try_status(spin_limit)
-}
-
 /// Moved to [`Cd::try_set_mode`].
 #[deprecated(note = "use `Cd::try_set_mode` with the `Cd` token")]
 #[inline(always)]
@@ -988,32 +960,11 @@ pub fn try_set_mode(mode: u8, spin_limit: u32) -> Option<Response> {
     steal().try_set_mode(mode, spin_limit)
 }
 
-/// Moved to [`Cd::try_set_target_lba`].
-#[deprecated(note = "use `Cd::try_set_target_lba` with the `Cd` token")]
-#[inline(always)]
-pub fn try_set_target_lba(lba: u32, spin_limit: u32) -> Option<Response> {
-    steal().try_set_target_lba(lba, spin_limit)
-}
-
-/// Moved to [`Cd::try_start_reading`].
-#[deprecated(note = "use `Cd::try_start_reading` with the `Cd` token")]
-#[inline(always)]
-pub fn try_start_reading(spin_limit: u32) -> Option<Response> {
-    steal().try_start_reading(spin_limit)
-}
-
 /// Moved to [`Cd::try_unmute`].
 #[deprecated(note = "use `Cd::try_unmute` with the `Cd` token")]
 #[inline(always)]
 pub fn try_unmute(spin_limit: u32) -> Option<Response> {
     steal().try_unmute(spin_limit)
-}
-
-/// Moved to [`Cd::try_mute`].
-#[deprecated(note = "use `Cd::try_mute` with the `Cd` token")]
-#[inline(always)]
-pub fn try_mute(spin_limit: u32) -> Option<Response> {
-    steal().try_mute(spin_limit)
 }
 
 /// Moved to [`Cd::try_play_track`].
@@ -1028,20 +979,6 @@ pub fn try_play_track(track: u8, spin_limit: u32) -> Option<Response> {
 #[inline(always)]
 pub fn try_pause(spin_limit: u32) -> Option<Response> {
     steal().try_pause(spin_limit)
-}
-
-/// Moved to [`Cd::try_pause_until_complete`].
-#[deprecated(note = "use `Cd::try_pause_until_complete` with the `Cd` token")]
-#[inline(always)]
-pub fn try_pause_until_complete(spin_limit: u32) -> bool {
-    steal().try_pause_until_complete(spin_limit)
-}
-
-/// Moved to [`Cd::try_play_position`].
-#[deprecated(note = "use `Cd::try_play_position` with the `Cd` token")]
-#[inline(always)]
-pub fn try_play_position(spin_limit: u32) -> Option<Response> {
-    steal().try_play_position(spin_limit)
 }
 
 #[cfg(test)]

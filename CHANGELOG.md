@@ -34,8 +34,13 @@ calls it.
   `set_chcr` (`dma::start`, or `dma::raw` for probes), `gpu::write_gp0`,
   `write_gp1`, `gpustat` and `wait_cmd_ready` (`write_command`,
   `write_display_control`, `status`, `wait_command_ready`), `irq::ack` and
-  `irq::source` (`acknowledge`, `psx_hw::irq::source`), and `read8`, `write8`
-  (`read_u8`, `write_u8`).
+  `irq::source` (`acknowledge`, `psx_hw::irq::source`), `read8`, `write8`
+  (`read_u8`, `write_u8`), `dma::clear_ordering_table`
+  (`OrderingTableClearDma::clear_table`) and the free `cd::dispatch_command`,
+  `poll_data_sector`, `restore_irq_output`, `try_status`, `try_set_target_lba`,
+  `try_start_reading`, `try_mute`, `try_pause_until_complete` and
+  `try_play_position` (the same names as methods on `Cd`).
+- hello-memcard: `Diagnostic::new` (`new_on`).
 - psx-mc: `MAX_NAME` (`MAX_NAME_LEN`).
 - psx-osk: `Dir` (`Direction`) and `Y0` (`PANEL_TOP`, and drop the `- 14`).
 - psx-rt: `cache::flush_i_cache`, and `interrupts::queue_gp1_at_vblank`,
@@ -51,10 +56,10 @@ Games and tools migrated before the removal (names only, EXEs unchanged where
 they could be built): psxcel, celeste-collection-psx, psoxide-arcade, voxide,
 nitroxide, quake-psx, oot-psx, wipeout-psx, hk-psx (the files no lane had
 open) and the editor's toolchain probe. Still on the removed names, and
-needing the rename at their next repin: hk-psx (`game/src/cd_stream.rs`,
-`xa_player.rs`, `music.rs`, `audio_probe.rs`, `exit_fade.rs`, `render.rs`,
-`main.rs`, `display.rs` and the other files other lanes had open;
-`shared/hk-cache` for `begin_load` and `finish_load`), and gh-psx, ds-psx,
+needing the rename at their next repin: hk-psx (the files other lanes had
+open, `game/src/cd_stream.rs`, `render.rs`, `main.rs`, `display.rs` and
+others, and `shared/hk-cache` for `begin_load` and `finish_load`; the renames
+are ready on the branch `lane/sdk-deprecations-hk-busy`), and gh-psx, ds-psx,
 alttp-psx and psx-demo-disc, whose pins predate the replacements.
 
 ## Source 2026.09.05
