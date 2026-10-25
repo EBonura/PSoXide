@@ -50,6 +50,24 @@ pub struct WantedRoom {
     pub distance: i32,
 }
 
+/// Order a wanted list: need rooms first, nearest first inside each group.
+///
+/// A room appears once in a list, so the key is a total order and any sort
+/// gives the order the stable one did. An insertion sort: the lists hold a
+/// few rooms to a few dozen, and the library sorts were 14 KB to 22 KB of
+/// code on a guest whose heap is a few KB.
+#[inline(never)]
+pub(crate) fn sort_wanted(wanted: &mut [WantedRoom]) {
+    let key = |w: &WantedRoom| (w.want == Want::Lead, w.distance, w.room);
+    for i in 1..wanted.len() {
+        let mut j = i;
+        while j > 0 && key(&wanted[j - 1]) > key(&wanted[j]) {
+            wanted.swap(j - 1, j);
+            j -= 1;
+        }
+    }
+}
+
 /// The two floods of a level that streams by flood
 /// ([`crate::LEVEL_BUDGET_FLOOD`]): the camera's draw flood and the player's
 /// resident flood.
@@ -329,7 +347,7 @@ impl StreamWindow {
         }
         self.touched.clear();
         // Need rooms first, nearest first inside each group.
-        out.sort_by_key(|w| (w.want == Want::Lead, w.distance, w.room));
+        sort_wanted(out);
     }
 
     /// [`Self::wanted`] for a flood level: need is the camera's drawn set and
@@ -406,7 +424,7 @@ impl StreamWindow {
             self.mark[usize::from(room)] = 0;
         }
         self.touched.clear();
-        out.sort_by_key(|w| (w.want == Want::Lead, w.distance, w.room));
+        sort_wanted(out);
         self.wanted_cache = set;
     }
 
@@ -486,7 +504,7 @@ impl StreamWindow {
             self.mark[usize::from(room)] = 0;
         }
         self.touched.clear();
-        out.sort_by_key(|w| (w.want == Want::Lead, w.distance, w.room));
+        sort_wanted(out);
     }
 
     fn note(

@@ -245,3 +245,29 @@ fn a_ring_level_needs_the_observers_room_and_neighbours_and_leads_ahead() {
     assert_eq!((plan.peak_pages, plan.peak_rooms), (4, 4));
     assert_eq!(plan.pool_pages, 5);
 }
+
+#[test]
+fn the_wanted_list_sorts_need_first_then_nearest_then_by_room() {
+    // Every room once, as the walks leave them: the order is the key's.
+    let mut seed = 0x2468_ace1u32;
+    let mut next = |range: u32| {
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        (seed >> 8) % range
+    };
+    for length in [0usize, 1, 2, 5, 17, 93] {
+        let mut wanted: Vec<WantedRoom> = (0..length)
+            .map(|room| WantedRoom {
+                room: room as u16,
+                want: if next(2) == 0 { Want::Need } else { Want::Lead },
+                distance: next(6) as i32 * 80,
+            })
+            .collect();
+        for k in (1..wanted.len()).rev() {
+            wanted.swap(k, next(k as u32 + 1) as usize);
+        }
+        let mut expected = wanted.clone();
+        expected.sort_by_key(|w| (w.want == Want::Lead, w.distance, w.room));
+        crate::stream::sort_wanted(&mut wanted);
+        assert_eq!(wanted, expected, "{length} rooms");
+    }
+}
