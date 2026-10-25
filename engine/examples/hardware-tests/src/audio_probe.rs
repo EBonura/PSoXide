@@ -114,7 +114,7 @@ impl AudioProbe {
         Voice::V0.set_pitch(Pitch::UNITY);
         Voice::V0.set_start_addr(tone_addr);
         Voice::V0.set_adsr(Adsr::sample());
-        let _ = psx_io::cd::try_pause_until_complete(200_000);
+        let _ = crate::probe_tokens::cd().try_pause_until_complete(200_000);
         let _ = psx_io::cd::try_unmute(200_000);
         self.apply_stage();
         tty::println("hardware-tests: pa1 begin automatic CD/SPU probe");
@@ -174,13 +174,17 @@ impl AudioProbe {
                 let demute = psx_io::cd::try_unmute(200_000).is_some();
                 let mode =
                     psx_io::cd::try_set_mode(psx_hw::cd::MODE_DOUBLE_SPEED, 200_000).is_some();
-                let loc = psx_io::cd::try_set_target_lba(CDTEST_LBA, 200_000).is_some();
-                let read = psx_io::cd::try_start_reading(200_000).is_some();
+                let loc = crate::probe_tokens::cd()
+                    .try_set_target_lba(CDTEST_LBA, 200_000)
+                    .is_some();
+                let read = crate::probe_tokens::cd()
+                    .try_start_reading(200_000)
+                    .is_some();
                 demute as u8 | ((mode as u8) << 1) | ((loc as u8) << 2) | ((read as u8) << 3)
             }
             2 => {
                 spu::enable_cd_audio(false);
-                psx_io::cd::try_mute(200_000).is_some() as u8
+                crate::probe_tokens::cd().try_mute(200_000).is_some() as u8
             }
             3 => {
                 let demute = psx_io::cd::try_unmute(200_000).is_some();
@@ -189,7 +193,7 @@ impl AudioProbe {
             }
             _ => {
                 spu::enable_cd_audio(false);
-                let paused = psx_io::cd::try_pause_until_complete(200_000);
+                let paused = crate::probe_tokens::cd().try_pause_until_complete(200_000);
                 let demute = psx_io::cd::try_unmute(200_000).is_some();
                 paused as u8 | ((demute as u8) << 1)
             }

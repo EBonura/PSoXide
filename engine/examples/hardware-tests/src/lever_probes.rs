@@ -1194,7 +1194,7 @@ impl Activity {
                 self.spu_enabled = false;
             }
         }
-        if self.cd_streaming && matches!(psx_io::cd::poll_data_sector(), Ok(true)) {
+        if self.cd_streaming && matches!(crate::probe_tokens::cd().poll_data_sector(), Ok(true)) {
             let sink = unsafe { &mut *addr_of_mut!(CD_SINK) };
             if self.reader.read_sector(sink) {
                 self.cd_sectors += 1;

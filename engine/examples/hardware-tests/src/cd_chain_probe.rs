@@ -661,7 +661,8 @@ fn drive_state() -> u32 {
         psx_io::write_u8(0x1F80_1800, 0);
         f
     };
-    let stat = psx_io::cd::try_status(CD_SPINS)
+    let stat = crate::probe_tokens::cd()
+        .try_status(CD_SPINS)
         .and_then(|r| r.bytes().first().copied())
         .unwrap_or(0xEE);
     ((hw_status as u32) << 24) | ((irq_flag as u32) << 16) | ((stat as u32) << 8)

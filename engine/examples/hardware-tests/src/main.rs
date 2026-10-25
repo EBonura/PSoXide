@@ -66,6 +66,7 @@ mod list_upload_probe;
 mod payload;
 mod perf_probes;
 mod photo;
+mod probe_tokens;
 mod regs;
 mod reverb_probe;
 mod ring_probe;
@@ -2570,7 +2571,7 @@ impl HardwareTests {
             ring_probe: RingProbe::new(),
             audio_probe: AudioProbe::new(),
             controller_test: ControllerTest::new(),
-            memory_card: MemoryCardDiagnostic::new(),
+            memory_card: probe_tokens::memcard_diagnostic(),
             memcard_armed: false,
             pass_count: 0,
             fail_count: 0,
@@ -2890,7 +2891,7 @@ impl HardwareTests {
         self.page = 0;
         match mode {
             Mode::MemoryCard => {
-                self.memory_card = MemoryCardDiagnostic::new();
+                self.memory_card = probe_tokens::memcard_diagnostic();
                 self.memcard_armed = false;
             }
             Mode::ReverbProbe => self.reverb_probe.start(),
@@ -4633,7 +4634,7 @@ fn push_standard_records(records: &mut [TimingRecord; TIMING_RECORD_COUNT], next
         records,
         next,
         sample_timing(0x96, 1, || {
-            cd_timed(|| psx_io::cd::try_status(CD_SPINS).is_some())
+            cd_timed(|| probe_tokens::cd().try_status(CD_SPINS).is_some())
         }),
     );
     push_timing_record(
@@ -4647,7 +4648,7 @@ fn push_standard_records(records: &mut [TimingRecord; TIMING_RECORD_COUNT], next
         records,
         next,
         sample_timing(0x98, 1, || {
-            cd_timed(|| psx_io::cd::try_play_position(CD_SPINS).is_some())
+            cd_timed(|| probe_tokens::cd().try_play_position(CD_SPINS).is_some())
         }),
     );
     push_timing_record(
@@ -5623,7 +5624,7 @@ fn cd_clock_reset() {
 /// passes `CD_DEADLINE_HBLANKS`. Assumes the caller has already reset the
 /// clock, so the deadline covers the whole operation being timed.
 fn cd_command_until_complete_timed(command: u8, params: &[u8]) -> bool {
-    let Some(saved) = psx_io::cd::dispatch_command(command, params, CD_SPINS) else {
+    let Some(saved) = probe_tokens::cd().dispatch_command(command, params, CD_SPINS) else {
         return false;
     };
     let mut seen_ack = false;
@@ -5654,7 +5655,7 @@ fn cd_command_until_complete_timed(command: u8, params: &[u8]) -> bool {
             }
         }
     };
-    psx_io::cd::restore_irq_output(saved);
+    probe_tokens::cd().restore_irq_output(saved);
     ok
 }
 
@@ -5693,8 +5694,10 @@ fn cd_read_with_audio(playing: bool, sectors: u32) -> u16 {
 
     // Data mode for the read itself.
     if psx_io::cd::try_set_mode(0, CD_SPINS).is_none()
-        || psx_io::cd::try_set_target_lba(CD_TEST_LBA, CD_SPINS).is_none()
-        || psx_io::cd::try_start_reading(CD_SPINS).is_none()
+        || probe_tokens::cd()
+            .try_set_target_lba(CD_TEST_LBA, CD_SPINS)
+            .is_none()
+        || probe_tokens::cd().try_start_reading(CD_SPINS).is_none()
     {
         cd_clock_reset();
         let _ = cd_command_until_complete_timed(psx_hw::cd::CMD_PAUSE, &[]);
@@ -5714,7 +5717,7 @@ fn cd_read_with_audio(playing: bool, sectors: u32) -> u16 {
     });
     cd_clock_reset();
     let _ = cd_command_until_complete_timed(psx_hw::cd::CMD_PAUSE, &[]);
-    let _ = psx_io::cd::try_mute(CD_SPINS);
+    let _ = probe_tokens::cd().try_mute(CD_SPINS);
     if primed {
         elapsed
     } else {
@@ -5737,7 +5740,7 @@ fn cd_play_start() -> u16 {
         // rather than the command merely having been accepted.
         let mut polls = 0;
         while polls < 64 {
-            if let Some(response) = psx_io::cd::try_play_position(CD_SPINS) {
+            if let Some(response) = probe_tokens::cd().try_play_position(CD_SPINS) {
                 if !response.is_empty() {
                     return true;
                 }
@@ -5748,7 +5751,7 @@ fn cd_play_start() -> u16 {
     });
     cd_clock_reset();
     let _ = cd_command_until_complete_timed(psx_hw::cd::CMD_PAUSE, &[]);
-    let _ = psx_io::cd::try_mute(CD_SPINS);
+    let _ = probe_tokens::cd().try_mute(CD_SPINS);
     elapsed
 }
 
@@ -5764,11 +5767,13 @@ fn cd_getlocp_during_playback() -> u16 {
     cd_clock_reset();
     while timers::counter(timers::Timer::Timer1) < 1_000 {}
     let elapsed = cd_timed(|| {
-        psx_io::cd::try_play_position(CD_SPINS).is_some_and(|response| !response.is_empty())
+        probe_tokens::cd()
+            .try_play_position(CD_SPINS)
+            .is_some_and(|response| !response.is_empty())
     });
     cd_clock_reset();
     let _ = cd_command_until_complete_timed(psx_hw::cd::CMD_PAUSE, &[]);
-    let _ = psx_io::cd::try_mute(CD_SPINS);
+    let _ = probe_tokens::cd().try_mute(CD_SPINS);
     elapsed
 }
 
@@ -5802,7 +5807,9 @@ fn cd_sector_timed() -> bool {
 /// previous record happened to leave the head.
 fn cd_park(lba: u32) -> bool {
     cd_clock_reset();
-    psx_io::cd::try_set_target_lba(lba, CD_SPINS).is_some()
+    probe_tokens::cd()
+        .try_set_target_lba(lba, CD_SPINS)
+        .is_some()
         && cd_command_until_complete_timed(psx_hw::cd::CMD_SEEKL, &[])
 }
 
@@ -5813,7 +5820,10 @@ fn cd_seek_backward(distance: u32) -> u16 {
     if !cd_park(origin) {
         return CD_FAILED;
     }
-    if psx_io::cd::try_set_target_lba(CD_TEST_LBA, CD_SPINS).is_none() {
+    if probe_tokens::cd()
+        .try_set_target_lba(CD_TEST_LBA, CD_SPINS)
+        .is_none()
+    {
         return CD_FAILED;
     }
     cd_timed(|| cd_command_until_complete_timed(psx_hw::cd::CMD_SEEKL, &[]))
@@ -5825,7 +5835,10 @@ fn cd_seek_distance(distance: u32) -> u16 {
         return CD_FAILED;
     }
     let target = CD_TEST_LBA + distance;
-    if psx_io::cd::try_set_target_lba(target, CD_SPINS).is_none() {
+    if probe_tokens::cd()
+        .try_set_target_lba(target, CD_SPINS)
+        .is_none()
+    {
         return CD_FAILED;
     }
     cd_timed(|| cd_command_until_complete_timed(psx_hw::cd::CMD_SEEKL, &[]))
@@ -5841,8 +5854,10 @@ fn cd_read_throughput(double_speed: bool, sectors: u32) -> u16 {
     };
     if psx_io::cd::try_set_mode(mode, CD_SPINS).is_none()
         || !cd_park(CD_TEST_LBA)
-        || psx_io::cd::try_set_target_lba(CD_TEST_LBA, CD_SPINS).is_none()
-        || psx_io::cd::try_start_reading(CD_SPINS).is_none()
+        || probe_tokens::cd()
+            .try_set_target_lba(CD_TEST_LBA, CD_SPINS)
+            .is_none()
+        || probe_tokens::cd().try_start_reading(CD_SPINS).is_none()
     {
         cd_clock_reset();
         let _ = cd_command_until_complete_timed(psx_hw::cd::CMD_PAUSE, &[]);
@@ -9945,7 +9960,7 @@ fn test_gpu_dma_direction_after_otc() -> TestResult {
     // The helper is bounded now, so a wedged OTC channel reports instead
     // of hanging the battery; bit 2 carries whether it completed.
     // SAFETY: single-threaded test battery, no other live borrow of OT.
-    let cleared = dma::clear_ordering_table(unsafe { &mut OT });
+    let cleared = probe_tokens::clear_ordering_table(unsafe { &mut OT });
     gpu_io::write_display_control(0x0400_0000 | 2);
     let observed = ((gpu_io::status().bits() >> 29) & 0b11) | ((cleared as u32) << 2);
     expect_eq(0b110, observed, "dma dir | otc done")
@@ -10191,7 +10206,7 @@ fn test_scratchpad_roundtrip() -> TestResult {
 }
 
 fn test_cdrom_getstat_response() -> TestResult {
-    match psx_io::cd::try_status(200_000) {
+    match probe_tokens::cd().try_status(200_000) {
         Some(response) if !response.is_empty() => {
             TestResult::info(1, response.bytes()[0] as u32, "getstat")
         }
@@ -11203,7 +11218,7 @@ fn timed_gpu_line_batch(shaded: bool, length: u16, count: u16) -> u16 {
 fn timed_cdrom_getstat() -> u16 {
     timers::set_mode(timers::Timer::Timer2, 0);
     timers::set_counter(timers::Timer::Timer2, 0);
-    let response = psx_io::cd::try_status(200_000);
+    let response = probe_tokens::cd().try_status(200_000);
     let elapsed = timers::counter(timers::Timer::Timer2);
     if response.is_some_and(|value| !value.is_empty()) {
         elapsed
