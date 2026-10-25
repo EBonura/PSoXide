@@ -23,6 +23,7 @@
 #   PSOXIDE_GUEST_STAGE=0          build in-tree, exactly as before (escape hatch)
 #   PSOXIDE_GUEST_STAGE_ROOT=<dir> override the canonical root
 #   PSOXIDE_GUEST_CARGO_HOME=<dir> override the isolated Cargo home
+#   PSOXIDE_RUSTC=<path>           psoxide-rustc binary (default: built from the hydrated SDK)
 #
 # Every argument is forwarded verbatim to `cargo build --release`; the
 # Makefile passes the target/build-std flags and the feature selection, and
@@ -36,6 +37,24 @@ GUEST_DIR="engine/examples/editor-playtest"
 EXE_RELATIVE="build/examples/mipsel-sony-psx/release/editor-playtest.exe"
 # The linker script is reached relative to the guest crate directory, so the
 # stage has to mirror the repository layout rather than flatten it.
+# Crate identity that does not depend on where the guest is built. Cargo hashes the absolute path of a path
+# dependency outside the workspace root, rustc seeds every symbol disambiguator from it, and the stage root is a
+# parameter (PSOXIDE_GUEST_STAGE_ROOT), so two stage roots gave different guests. psoxide-rustc (SDK
+# tools/psoxide-pgo) replaces that one value with a hash of the crate name, features and stage-relative path.
+repro_rustc="${PSOXIDE_RUSTC:-}"
+if [ -z "$repro_rustc" ] && [ -f "$ROOT/tools/psoxide-pgo/src/bin/psoxide-rustc.rs" ]; then
+    (cd "$ROOT" && cargo build -q --release --locked -p psoxide-pgo --bin psoxide-rustc \
+        --target-dir "${CARGO_TARGET_DIR:-$ROOT/target}") || {
+        echo "[guest-build] could not build psoxide-rustc" >&2
+        exit 1
+    }
+    repro_rustc="${CARGO_TARGET_DIR:-$ROOT/target}/release/psoxide-rustc"
+fi
+if [ ! -x "$repro_rustc" ]; then
+    echo "[guest-build] WARNING: the pinned SDK has no psoxide-rustc: the guest depends on the stage root" >&2
+    repro_rustc=""
+fi
+
 # Delay-slot filling. LLVM's MipsDelaySlotFiller can move a load into a
 # branch delay slot whose consumer is the first instruction at the branch
 # target or fall-through. The R3000A has no load interlock, so that consumer
@@ -227,6 +246,9 @@ cd "$STAGE/$GUEST_DIR"
 CARGO_HOME="$GUEST_CARGO_HOME" \
 CARGO_TARGET_DIR="$STAGE/build/examples" \
 RUSTFLAGS="$RUSTFLAGS_VALUE" \
+RUSTC_WRAPPER="${repro_rustc:-${RUSTC_WRAPPER:-}}" \
+PSOXIDE_REPRO_ROOT="$STAGE" \
+PSOXIDE_REPRO_INNER="$([ -n "$repro_rustc" ] && printf %s "${RUSTC_WRAPPER:-}")" \
     cargo build --release "$@"
 
 staged_exe="$STAGE/$EXE_RELATIVE"
