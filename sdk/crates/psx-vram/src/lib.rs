@@ -1483,32 +1483,6 @@ pub fn upload_clut(clut: Clut, entries: &[Color555]) {
 // Tests
 // ======================================================================
 
-/// Renamed to [`TexturePage`].
-#[deprecated(note = "renamed to `TexturePage`")]
-pub type Tpage = TexturePage;
-
-/// Renamed to [`TextureDepth`].
-#[deprecated(note = "renamed to `TextureDepth`")]
-pub type TexDepth = TextureDepth;
-
-impl TexturePage {
-    /// Renamed to [`TexturePage::uv_word`].
-    #[deprecated(note = "renamed to `uv_word`")]
-    #[inline(always)]
-    pub const fn uv_tpage_word(self, semi_trans: u8) -> u16 {
-        self.uv_word(semi_trans)
-    }
-}
-
-impl Clut {
-    /// Renamed to [`Clut::uv_word`].
-    #[deprecated(note = "renamed to `uv_word`")]
-    #[inline(always)]
-    pub const fn uv_clut_word(self) -> u16 {
-        self.uv_word()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

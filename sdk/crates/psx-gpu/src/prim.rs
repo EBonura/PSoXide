@@ -504,17 +504,6 @@ impl TriTextured {
         }
     }
 
-    /// The same packet as [`Self::with_material`], which it forwards to.
-    #[deprecated(note = "identical to `with_material`")]
-    #[inline(always)]
-    pub const fn with_material_packet_texcoords(
-        verts: [(i16, i16); 3],
-        uvs: [(u8, u8); 3],
-        material: TextureMaterial,
-    ) -> Self {
-        Self::with_material(verts, uvs, material)
-    }
-
     /// Build a textured triangle from UV words that already contain
     /// the low `(u, v)` bytes in packet layout. The material still
     /// supplies CLUT, tpage, tint, blend, and texture-window state.
@@ -695,18 +684,6 @@ impl TriTexturedGouraud {
         }
     }
 
-    /// The same packet as [`Self::with_material`], which it forwards to.
-    #[deprecated(note = "identical to `with_material`")]
-    #[inline(always)]
-    pub const fn with_material_packet_texcoords(
-        verts: [(i16, i16); 3],
-        uvs: [(u8, u8); 3],
-        colors: [(u8, u8, u8); 3],
-        material: TextureMaterial,
-    ) -> Self {
-        Self::with_material(verts, uvs, colors, material)
-    }
-
     /// Build a textured Gouraud triangle from UV words that already
     /// contain the low `(u, v)` packet bytes.
     pub const fn with_material_packed_uv_words(
@@ -798,34 +775,6 @@ impl TriTexturedGouraud {
             v2: pack_vertex(verts[2].0, verts[2].1),
             uv2: uv_words[2] as u32,
         }
-    }
-
-    /// Renamed to [`Self::with_staged_slot_prepacked_colors`], which is safe.
-    ///
-    /// # Safety
-    ///
-    /// Nothing beyond that function's preconditions; it stays `unsafe` so
-    /// existing `unsafe` blocks keep compiling without a warning.
-    #[deprecated(note = "renamed to `with_staged_slot_prepacked_colors`, which is safe")]
-    #[inline(always)]
-    pub const unsafe fn with_staged_slot_prepacked_unchecked(
-        verts: [(i16, i16); 3],
-        uv_words: [u16; 3],
-        colors: [u32; 3],
-        clut_high_word: u32,
-        tpage_high_word: u32,
-        texture_window_word: u32,
-        ot_slot: u16,
-    ) -> Self {
-        Self::with_staged_slot_prepacked_colors(
-            verts,
-            uv_words,
-            colors,
-            clut_high_word,
-            tpage_high_word,
-            texture_window_word,
-            ot_slot,
-        )
     }
 
     /// Zeroed packet for static prebuilt-pool initialisation. Real
@@ -990,32 +939,6 @@ impl ClassicTriTexturedGouraud {
             uv2: uv_words[2] as u32,
         }
     }
-
-    /// Renamed to [`Self::with_staged_slot_prepacked_colors`], which is safe.
-    ///
-    /// # Safety
-    ///
-    /// Nothing beyond that function's preconditions; it stays `unsafe` so
-    /// existing `unsafe` blocks keep compiling without a warning.
-    #[deprecated(note = "renamed to `with_staged_slot_prepacked_colors`, which is safe")]
-    #[inline(always)]
-    pub const unsafe fn with_staged_slot_prepacked_unchecked(
-        verts: [(i16, i16); 3],
-        uv_words: [u16; 3],
-        colors: [u32; 3],
-        clut_high_word: u32,
-        tpage_high_word: u32,
-        ot_slot: u16,
-    ) -> Self {
-        Self::with_staged_slot_prepacked_colors(
-            verts,
-            uv_words,
-            colors,
-            clut_high_word,
-            tpage_high_word,
-            ot_slot,
-        )
-    }
 }
 
 /// Classic textured Gouraud quad without inline texture-window state. This
@@ -1133,32 +1056,6 @@ impl ClassicQuadTexturedGouraud {
             v3: pack_vertex(verts[3].0, verts[3].1),
             uv3: uv_words[3] as u32,
         }
-    }
-
-    /// Renamed to [`Self::with_staged_slot_prepacked_colors`], which is safe.
-    ///
-    /// # Safety
-    ///
-    /// Nothing beyond that function's preconditions; it stays `unsafe` so
-    /// existing `unsafe` blocks keep compiling without a warning.
-    #[deprecated(note = "renamed to `with_staged_slot_prepacked_colors`, which is safe")]
-    #[inline(always)]
-    pub const unsafe fn with_staged_slot_prepacked_unchecked(
-        verts: [(i16, i16); 4],
-        uv_words: [u16; 4],
-        colors: [u32; 4],
-        clut_high_word: u32,
-        tpage_high_word: u32,
-        ot_slot: u16,
-    ) -> Self {
-        Self::with_staged_slot_prepacked_colors(
-            verts,
-            uv_words,
-            colors,
-            clut_high_word,
-            tpage_high_word,
-            ot_slot,
-        )
     }
 }
 
@@ -1306,34 +1203,6 @@ impl QuadTexturedGouraud {
             v3: pack_vertex(verts[3].0, verts[3].1),
             uv3: uv_words[3] as u32,
         }
-    }
-
-    /// Renamed to [`Self::with_staged_slot_prepacked_colors`], which is safe.
-    ///
-    /// # Safety
-    ///
-    /// Nothing beyond that function's preconditions; it stays `unsafe` so
-    /// existing `unsafe` blocks keep compiling without a warning.
-    #[deprecated(note = "renamed to `with_staged_slot_prepacked_colors`, which is safe")]
-    #[inline(always)]
-    pub const unsafe fn with_staged_slot_prepacked_unchecked(
-        verts: [(i16, i16); 4],
-        uv_words: [u16; 4],
-        colors: [u32; 4],
-        clut_high_word: u32,
-        tpage_high_word: u32,
-        texture_window_word: u32,
-        ot_slot: u16,
-    ) -> Self {
-        Self::with_staged_slot_prepacked_colors(
-            verts,
-            uv_words,
-            colors,
-            clut_high_word,
-            tpage_high_word,
-            texture_window_word,
-            ot_slot,
-        )
     }
 
     /// Zeroed packet for static prebuilt-pool initialisation. Real

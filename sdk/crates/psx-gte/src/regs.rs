@@ -203,20 +203,6 @@ macro_rules! write_control {
     }};
 }
 
-/// Renamed to [`read_data!`].
-#[deprecated(note = "renamed to `read_data!`")]
-#[macro_export]
-macro_rules! mfc2 {
-    ($($t:tt)*) => { $crate::read_data!($($t)*) };
-}
-
-/// Renamed to [`write_data!`].
-#[deprecated(note = "renamed to `write_data!`")]
-#[macro_export]
-macro_rules! mtc2 {
-    ($($t:tt)*) => { $crate::write_data!($($t)*) };
-}
-
 /// Helper: pack two i16 values into one u32 for MTC2/CTC2 of XY-pair
 /// registers (V0 X/Y, SXY slots, rotation matrix rows, …).
 ///

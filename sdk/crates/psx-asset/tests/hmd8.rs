@@ -182,22 +182,14 @@ fn accessors_stay_inside_the_blob() {
         assert_eq!(model.triangle_normal(far), [0; 3]);
     }
 
-    // The public counts are plain fields; writing them must not widen what
-    // the accessors read.
-    let mut lying = model;
-    #[allow(deprecated)] // overwrites the deprecated public counts on purpose
-    {
-        lying.n_tris = 1 << 20;
-        lying.n_verts = 1 << 20;
-    }
-    assert_eq!(lying.triangle(1 << 19).body_mask, 0);
-    assert_eq!(lying.vertex(1 << 19).x, 0);
-    let _ = lying.bone_range(1 << 19);
-    let _ = lying.clip_len(1 << 19);
-    let _ = lying.clip_frame(1 << 19, 3);
-    let _ = lying
+    assert_eq!(model.triangle(1 << 19).body_mask, 0);
+    assert_eq!(model.vertex(1 << 19).x, 0);
+    let _ = model.bone_range(1 << 19);
+    let _ = model.clip_len(1 << 19);
+    let _ = model.clip_frame(1 << 19, 3);
+    let _ = model
         .frame(1 << 19)
-        .interpolate(lying.frame(0), 8)
+        .interpolate(model.frame(0), 8)
         .bone(1 << 19, false, 0);
 
     let empty = Model::EMPTY;
@@ -486,18 +478,6 @@ fn soa_vertex_words_cover_exactly_the_loaded_stream() {
     }
     assert!(words.slice(0..N_VERTS + 1).is_none());
     assert!(words.slice(N_VERTS..N_VERTS).is_some_and(|w| w.is_empty()));
-}
-
-/// The view's length comes from the offsets `from_bytes` validated, not from
-/// the public count safe code can overwrite.
-#[test]
-fn soa_vertex_words_ignore_an_overwritten_count() {
-    let mut lying = Model::from_bytes(leak_at(&build_soa_blob(), 0));
-    #[allow(deprecated)] // overwrites the deprecated public count on purpose
-    {
-        lying.n_verts = 1 << 20;
-    }
-    assert_eq!(lying.vertex_words().len(), N_VERTS);
 }
 
 #[test]

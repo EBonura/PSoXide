@@ -305,13 +305,6 @@ fn with_internal_owners(f: impl FnOnce(&mut Quiesced<'_>)) {
     );
 }
 
-/// Renamed to [`flush_instruction_cache`].
-#[deprecated(note = "renamed to `flush_instruction_cache`")]
-#[inline(always)]
-pub fn flush_i_cache() {
-    flush_instruction_cache()
-}
-
 // ---------------------------------------------------------------- hardware
 
 /// The value `psx_rt::diag` writes back to the cache control register when a fault is taken

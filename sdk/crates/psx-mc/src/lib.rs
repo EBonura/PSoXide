@@ -96,9 +96,6 @@ pub const CARD_SIZE: usize = FRAME_COUNT * FRAME_SIZE;
 pub const DATA_BLOCKS: usize = BLOCK_COUNT - 1;
 /// Maximum file-name length (region+product code + name), excluding the NUL.
 pub const MAX_NAME_LEN: usize = 20;
-/// Renamed to [`MAX_NAME_LEN`].
-#[deprecated(note = "renamed to `MAX_NAME_LEN`")]
-pub const MAX_NAME: usize = MAX_NAME_LEN;
 
 /// A native PS1 memory-card save icon.
 ///

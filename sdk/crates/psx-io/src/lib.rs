@@ -16,8 +16,6 @@
 #![warn(missing_docs)]
 
 pub mod cd;
-pub mod cdda;
-pub mod cdrom;
 pub mod controller_port;
 pub mod diag;
 pub mod disc_base;
@@ -93,26 +91,4 @@ pub unsafe fn write_u8(addr: u32, value: u8) {
     // SAFETY: the caller guarantees `addr` is mapped and valid for an 8-bit volatile write (this
     // fn's `# Safety`).
     unsafe { core::ptr::write_volatile(addr as *mut u8, value) }
-}
-
-/// Renamed to [`read_u8`].
-///
-/// # Safety
-/// See [`read_u8`].
-#[deprecated(note = "renamed to `read_u8`")]
-#[inline(always)]
-pub unsafe fn read8(addr: u32) -> u8 {
-    // SAFETY: same contract as the renamed function.
-    unsafe { read_u8(addr) }
-}
-
-/// Renamed to [`write_u8`].
-///
-/// # Safety
-/// See [`write_u8`].
-#[deprecated(note = "renamed to `write_u8`")]
-#[inline(always)]
-pub unsafe fn write8(addr: u32, value: u8) {
-    // SAFETY: same contract as the renamed function.
-    unsafe { write_u8(addr, value) }
 }

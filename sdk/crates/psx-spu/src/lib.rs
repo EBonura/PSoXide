@@ -752,13 +752,6 @@ impl Voice {
         write_reg16(voice_mask::KEY_ON_HI, (mask >> 16) as u16);
     }
 
-    /// Renamed to [`start`](Self::start).
-    #[deprecated(note = "renamed to `start`")]
-    #[inline(always)]
-    pub fn key_on(mask: u32) {
-        Self::start(mask)
-    }
-
     /// Which voices have decoded a block carrying the END flag since ENDX was
     /// last cleared, one sticky bit each.
     ///
@@ -786,13 +779,6 @@ impl Voice {
     pub fn release(mask: u32) {
         write_reg16(voice_mask::KEY_OFF_LO, mask as u16);
         write_reg16(voice_mask::KEY_OFF_HI, (mask >> 16) as u16);
-    }
-
-    /// Renamed to [`release`](Self::release).
-    #[deprecated(note = "renamed to `release`")]
-    #[inline(always)]
-    pub fn key_off(mask: u32) {
-        Self::release(mask)
     }
 
     /// Route the voices whose bits are set in `mask` to the noise generator
@@ -834,13 +820,6 @@ pub fn enable_irq(enabled: bool) {
 /// Whether the SPU's address IRQ latch is set.
 pub fn is_irq_pending() -> bool {
     read_reg16(SPUSTAT) & spustat_bits::IRQ_FLAG != 0
-}
-
-/// Renamed to [`is_irq_pending`].
-#[deprecated(note = "renamed to `is_irq_pending`")]
-#[inline(always)]
-pub fn irq_pending() -> bool {
-    is_irq_pending()
 }
 
 // ======================================================================

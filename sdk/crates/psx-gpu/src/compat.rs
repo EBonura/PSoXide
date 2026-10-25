@@ -15,7 +15,6 @@ use crate::prim::{
     FillRect, LineMono, QuadFlat, QuadTexturedGouraud, QuadTexturedMaterial, Sprite, TriFlat,
     TriGouraud,
 };
-use psx_io::timers;
 
 /// Initialise the GPU: reset, display mode, display window, DMA direction,
 /// display on.
@@ -166,33 +165,6 @@ pub fn draw_sprite_material(
     gpu::draw(&Sprite::with_material(x, y, w, h, uv, material));
 }
 
-/// Program Timer 1 to count HBlanks, reset at VBlank.
-///
-/// Writing a timer's mode register resets its counter, so every call
-/// restarts the count from zero.
-fn configure_scanline_timer() {
-    use psx_hw::timers::mode;
-    timers::set_mode(
-        timers::Timer::Timer1,
-        mode::SYNC_ENABLE | mode::sync_mode(1) | mode::clock_source(1),
-    );
-}
-
-/// Wait 242 HBlank periods (~15.4ms) from the moment of the call.
-///
-/// Despite the name, this does NOT sync to the display: reconfiguring
-/// Timer 1 resets its counter, so the wait starts from zero at the call
-/// site. Frame time becomes `work + 15.4ms` instead of snapping to the
-/// next VBlank -- nearly right for light frames, badly slow for heavy
-/// ones. It cannot be repaired here: syncing needs the VBlank IRQ, which
-/// the runtime owns.
-#[deprecated(note = "busy-waits a fixed 242 HBlanks from the call site instead of \
-            syncing to the display; use psx_rt::interrupts::wait_vblank()")]
-pub fn vsync() {
-    configure_scanline_timer();
-    while timers::counter(timers::Timer::Timer1) < 242 {}
-}
-
 /// Kick a linked-list chain without waiting for the walk.
 ///
 /// # Safety
@@ -201,24 +173,12 @@ pub fn vsync() {
 #[deprecated(note = "use `chain::submit_async_raw`, which takes the `GpuDma` token")]
 #[doc(alias = "DrawOTag")]
 #[inline(always)]
-pub unsafe fn submit_linked_list_async_raw(head: *const u32) {
-    // SAFETY: forwarded contract.
-    unsafe { crate::chain::start_walk(head) }
-}
-
-/// Renamed to [`submit_linked_list_async_raw`].
-///
-/// # Safety
-///
-/// As [`crate::chain::submit_async_raw`].
-#[deprecated(note = "use `chain::submit_async_raw`, which takes the `GpuDma` token")]
-#[inline(always)]
 pub unsafe fn submit_linked_list_raw_async(head: *const u32) {
     // SAFETY: forwarded contract.
     unsafe { crate::chain::start_walk(head) }
 }
 
-/// Old name of [`submit_linked_list_async_raw`].
+/// Kick a linked-list chain without waiting for the walk.
 ///
 /// # Safety
 ///

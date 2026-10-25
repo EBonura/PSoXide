@@ -238,26 +238,6 @@ impl<V: Copy, const N: usize, const MAX_KEY: usize> SlotCache<V, N, MAX_KEY> {
         }
     }
 
-    /// Renamed to [`begin_load`](Self::begin_load), which returns the key with
-    /// the slot so a stale completion can be told from a live one.
-    #[deprecated(note = "renamed to `begin_load`")]
-    pub fn reserve(&mut self, key: u16) -> Option<usize> {
-        self.begin_load(key).map(|r| r.slot())
-    }
-
-    /// Renamed to [`finish_load`](Self::finish_load). A bare slot index cannot
-    /// tell that the slot was evicted and reused for another key since
-    /// [`reserve`](Self::reserve), so a late completion stores its value under
-    /// the wrong key; this keeps that behaviour for one stage.
-    #[deprecated(note = "renamed to `finish_load`, which checks the key still owns the slot")]
-    pub fn mark_ready(&mut self, slot: usize, value: V) {
-        if slot < N && self.slots[slot].state != SlotState::Empty {
-            self.slots[slot].value = Some(value);
-            self.slots[slot].state = SlotState::Ready;
-            self.slots[slot].last_used = self.epoch;
-        }
-    }
-
     /// Return the cached value for `key`, or synchronously build and insert it.
     /// Evicts LRU on a miss when full. If `build` returns `None` the reservation
     /// is released and this returns `None`.
@@ -459,19 +439,6 @@ mod tests {
         c.evict(3);
         assert_eq!(c.finish_load(r, 30), Err(Stale));
         assert!(c.is_empty());
-    }
-
-    /// The deprecated pair keeps the old behaviour for one stage: a bare slot
-    /// index cannot tell the slot changed hands, so key 2 reads key 1's value.
-    #[allow(deprecated)]
-    #[test]
-    fn the_deprecated_pair_still_stores_under_the_wrong_key() {
-        let mut c = SlotCache::<u32, 1, 16>::new();
-        let slot = c.reserve(1).unwrap();
-        c.evict(1);
-        assert_eq!(c.reserve(2), Some(slot));
-        c.mark_ready(slot, 111);
-        assert_eq!(c.get(2), Some(&111));
     }
 
     #[test]

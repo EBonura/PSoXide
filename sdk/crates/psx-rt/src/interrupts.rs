@@ -1077,13 +1077,6 @@ pub fn queue_display_control_at_vblank(word: u32) {
 #[doc(alias = "GP1")]
 pub fn queue_display_control_at_vblank(_word: u32) {}
 
-/// Renamed to [`queue_display_control_at_vblank`].
-#[deprecated(note = "renamed to `queue_display_control_at_vblank`")]
-#[inline(always)]
-pub fn queue_gp1_at_vblank(word: u32) {
-    queue_display_control_at_vblank(word)
-}
-
 /// True while a word queued by [`queue_display_control_at_vblank`] has not
 /// yet been applied by the VBlank handler.
 #[cfg(target_arch = "mips")]
@@ -1131,26 +1124,12 @@ pub fn take_queued_display_control() -> u32 {
     0
 }
 
-/// Renamed to [`take_queued_display_control`].
-#[deprecated(note = "renamed to `take_queued_display_control`")]
-#[inline(always)]
-pub fn take_pending_gp1() -> u32 {
-    take_queued_display_control()
-}
-
 /// Host no-op: nothing is ever pending off-target.
 #[cfg(not(target_arch = "mips"))]
 #[inline]
 #[doc(alias = "GP1")]
 pub fn is_display_control_queued() -> bool {
     false
-}
-
-/// Renamed to [`is_display_control_queued`].
-#[deprecated(note = "renamed to `is_display_control_queued`")]
-#[inline(always)]
-pub fn gp1_queue_pending() -> bool {
-    is_display_control_queued()
 }
 
 /// Block until the next VBlank IRQ.

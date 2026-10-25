@@ -387,28 +387,11 @@ fn poll_drive_ms(cd: &mut Cd) -> Option<u32> {
     PlayPosition::parse(&resp).map(|p| p.relative_millis())
 }
 
-impl PlaybackStarter {
-    /// [`tick_on`](Self::tick_on) on a token the caller does not hold.
-    #[deprecated(note = "use `tick_on` with the `Cd` token")]
-    pub fn tick(&mut self, now_tick: u32, track: u8) -> bool {
-        self.tick_on(&mut steal(), now_tick, track)
-    }
-
-    /// Renamed to [`Self::has_started`].
-    #[deprecated(note = "renamed to `has_started`")]
-    pub fn started(&self) -> bool {
-        self.has_started()
-    }
-}
-
-impl EndDetector {}
-
-impl PlaybackClock {}
-
-/// A token for a deprecated forwarder that never took one.
+/// A token for a host test that has no drive to own.
+#[cfg(test)]
 fn steal() -> Cd {
     // SAFETY: a token is a logic guard, not a memory-safety one (see
-    // `crate::periph`), and the old methods never took one.
+    // `crate::periph`), and a host test drives no hardware.
     unsafe { Cd::steal() }
 }
 

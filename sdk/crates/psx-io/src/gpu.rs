@@ -267,34 +267,6 @@ fn try_wait_ready(flag: GpuStat, spin_limit: u32) -> bool {
     poll_ready(spin_limit, || status().contains(flag))
 }
 
-/// Renamed to [`write_command`].
-#[deprecated(note = "renamed to `write_command`")]
-#[inline(always)]
-pub fn write_gp0(word: u32) {
-    write_command(word)
-}
-
-/// Renamed to [`write_display_control`].
-#[deprecated(note = "renamed to `write_display_control`")]
-#[inline(always)]
-pub fn write_gp1(word: u32) {
-    write_display_control(word)
-}
-
-/// Renamed to [`status`].
-#[deprecated(note = "renamed to `status`")]
-#[inline(always)]
-pub fn gpustat() -> GpuStat {
-    status()
-}
-
-/// Renamed to [`wait_command_ready`].
-#[deprecated(note = "renamed to `wait_command_ready`")]
-#[inline(always)]
-pub fn wait_cmd_ready() {
-    wait_command_ready()
-}
-
 fn poll_ready(spin_limit: u32, mut ready: impl FnMut() -> bool) -> bool {
     let mut remaining = spin_limit;
     loop {
