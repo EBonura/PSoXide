@@ -1097,18 +1097,38 @@ pub struct EyeSpec {
 }
 
 /// One panel of the disc, as bytes.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct DiscPanel {
     /// Tile columns' row masks (bit `row` of `cols[col]` is set when that tile is stored).
     pub cols: [u8; shared::COLS],
-    /// The header sector, then each stored tile's sector in column-major order.
-    pub sectors: Vec<u8>,
+    /// The depth mesh, one byte a vertex.
+    pub depth: [u8; shared::MESH],
+    /// The room whose geometry is all a cell shows, per cell.
+    pub rooms: [u8; shared::CELLS],
+    /// The LZ block of each stored tile (`psx_grid::tile_lz`), `None` where it is not stored.
+    pub tiles: [Option<Vec<u8>>; shared::TILES],
+}
+
+impl Default for DiscPanel {
+    fn default() -> Self {
+        Self {
+            cols: [0; shared::COLS],
+            depth: [0; shared::MESH],
+            rooms: [shared::CELL_EMPTY; shared::CELLS],
+            tiles: Default::default(),
+        }
+    }
 }
 
 impl DiscPanel {
-    /// Sectors the panel takes (the header and its tiles).
-    pub fn sector_count(&self) -> usize {
-        self.sectors.len() / psx_grid::render::SLOT_BYTES
+    /// Bytes the panel's tiles take on the disc.
+    pub fn tile_bytes(&self) -> usize {
+        self.tiles.iter().flatten().map(Vec::len).sum()
+    }
+
+    /// Tiles the panel stores.
+    pub fn tile_count(&self) -> usize {
+        self.tiles.iter().flatten().count()
     }
 }
 
@@ -1133,14 +1153,10 @@ pub fn game_shape(focal: f32) -> PanelShape {
 pub fn to_disc(panel: &Panel, sector: f32) -> DiscPanel {
     let shape = &panel.shape;
     let mut out = DiscPanel::default();
-    let bytes = psx_grid::render::SLOT_BYTES;
-    let mut header = vec![0u8; bytes];
     for (k, depth) in panel.depth.iter().enumerate().take(shared::MESH) {
-        header[k] = depth_byte_of(*depth, sector);
+        out.depth[k] = depth_byte_of(*depth, sector);
     }
-    header[shared::HEADER_ROOMS_AT..shared::HEADER_ROOMS_AT + shared::CELLS]
-        .copy_from_slice(&panel.rooms);
-    out.sectors.extend_from_slice(&header);
+    out.rooms.copy_from_slice(&panel.rooms[..shared::CELLS]);
     for col in 0..shape.tile_cols {
         for row in 0..shape.tile_rows {
             let Some(rgba) = panel.tiles[row * shape.tile_cols + col].as_ref() else {
@@ -1149,8 +1165,9 @@ pub fn to_disc(panel: &Panel, sector: f32) -> DiscPanel {
             out.cols[col] |= 1 << row;
             let (palette, indices) = quantize_rgba_with_transparent_zero(rgba, 16)
                 .unwrap_or_else(|_| (vec![[0; 3]; 16], vec![0; TILE_W * TILE_H]));
-            out.sectors
-                .extend_from_slice(&super::cards::encode(&indices, &palette));
+            let sector_bytes = super::cards::encode(&indices, &palette);
+            out.tiles[col * shape.tile_rows + row] =
+                Some(psx_grid::tile_lz::encode_tile(&sector_bytes));
         }
     }
     out
@@ -1215,9 +1232,9 @@ pub fn bake_eyes(
     out
 }
 
-/// Each eye's panels as one block of sectors: a sector that lists which tiles each heading
-/// stores (`HEADINGS` times `COLS` row masks), then the panels one after another, each its
-/// header sector and its stored tiles. An eye with no panel has an empty block.
+/// Each eye's panels as one block of sectors (`psx_grid::eye_block`): the index of every
+/// panel's depth mesh, room cells and tile lengths, then the LZ blocks of the stored tiles of
+/// all the panels in stream order. An eye with no panel has an empty block.
 pub fn eye_blocks(panels: &[[Option<DiscPanel>; shared::HEADINGS]]) -> Vec<Vec<u8>> {
     panels
         .iter()
@@ -1225,52 +1242,46 @@ pub fn eye_blocks(panels: &[[Option<DiscPanel>; shared::HEADINGS]]) -> Vec<Vec<u
             if set.iter().all(Option::is_none) {
                 return Vec::new();
             }
-            let mut block = vec![0u8; shared::SLOT_BYTES];
-            for (heading, panel) in set.iter().enumerate() {
-                if let Some(panel) = panel {
-                    block[heading * shared::COLS..(heading + 1) * shared::COLS]
-                        .copy_from_slice(&panel.cols);
-                }
-            }
-            // The headers of the panels, then the tiles of the rows on screen with the camera
-            // level, panel after panel, then the other rows' tiles: a view is a stretch of the
-            // disc, and the drive seeks once for it (the guest derives every sector from the
-            // list's row masks, see `panel_stream::EyeList::parse`).
-            let bytes = shared::SLOT_BYTES;
-            for panel in set.iter().flatten() {
-                block.extend_from_slice(&panel.sectors[..bytes]);
-            }
-            for outer in [false, true] {
-                for panel in set.iter().flatten() {
-                    let mut at = 1;
-                    for col in 0..shared::COLS {
-                        for row in 0..shared::ROWS {
-                            if panel.cols[col] >> row & 1 == 0 {
-                                continue;
-                            }
-                            let central = shared::CENTRAL_ROWS >> row & 1 != 0;
-                            if central != outer {
-                                block.extend_from_slice(
-                                    &panel.sectors[at * bytes..(at + 1) * bytes],
-                                );
-                            }
-                            at += 1;
-                        }
-                    }
-                }
-            }
-            block
+            let parts: [Option<psx_grid::eye_block::PanelPart<'_>>; shared::HEADINGS] =
+                core::array::from_fn(|heading| {
+                    set[heading]
+                        .as_ref()
+                        .map(|panel| psx_grid::eye_block::PanelPart {
+                            cols: panel.cols,
+                            depth: &panel.depth,
+                            rooms: &panel.rooms,
+                            tiles: core::array::from_fn(|t| panel.tiles[t].as_deref()),
+                        })
+                });
+            psx_grid::eye_block::build_block(&parts)
         })
         .collect()
+}
+
+/// Where the player starts and what the level load reads from there, for [`pack_order`].
+#[derive(Clone, Debug, Default)]
+pub struct PackStart {
+    /// The start, plan, runtime units.
+    pub at: [i32; 2],
+    /// Plan distance within which the first walk reads more rooms and eyes.
+    pub radius: i32,
+    /// The rooms and eyes the load reads at once, as `(is_eye, index)`.
+    pub exact: Vec<(bool, usize)>,
 }
 
 /// The order rooms and eyes' blocks go in the pack: along a Hilbert curve through their plan
 /// positions, so the drive at a room is near the panels of the eyes that stand with it.
 /// Returns `(is_eye, index)`; room 0 is left to the caller (it goes first). `None` centres
-/// (rooms that draw nothing) go last.
+/// (rooms that draw nothing) go first.
+///
+/// With a `start`, the pack ends with what is read from it, beside `UI.PAK`, which the level
+/// load reads from as well: first everything within the start's radius (each part along its
+/// own stretch of the curve), last the items the load reads at once. The load then moves the
+/// drive over a few dozen sectors instead of the whole pack.
 pub fn pack_order(
     room_centres: &[Option<[i32; 2]>],
     eye_centres: &[Option<[i32; 2]>],
+    start: Option<&PackStart>,
 ) -> Vec<(bool, usize)> {
     let (mut lo, mut hi) = ([i32::MAX; 2], [i32::MIN; 2]);
     for c in room_centres.iter().chain(eye_centres).flatten() {
@@ -1284,25 +1295,43 @@ pub fn pack_order(
         let cell = |v: i32, lo: i32| (((v - lo) as f32 / span) * 255.0) as u32;
         super::cards::hilbert_index(cell(c[0], lo[0]), cell(c[1], lo[1]))
     };
-    let mut items: Vec<(u32, bool, usize)> = Vec::new();
+    let mut items: Vec<(u32, bool, usize, [i32; 2])> = Vec::new();
     let mut loose = Vec::new();
     for (room, c) in room_centres.iter().enumerate().skip(1) {
         match c {
-            Some(c) => items.push((key(c), false, room)),
+            Some(c) => items.push((key(c), false, room, *c)),
             None => loose.push((false, room)),
         }
     }
     for (eye, c) in eye_centres.iter().enumerate() {
         if let Some(c) = c {
             // An eye's panels follow the rooms that share its curve cell.
-            items.push((key(c), true, eye));
+            items.push((key(c), true, eye, *c));
         }
     }
-    items.sort_by_key(|&(k, is_eye, i)| (k, is_eye, i));
-    items
+    items.sort_by_key(|&(k, is_eye, i, _)| (k, is_eye, i));
+    if let Some(start) = start {
+        // The items read at once go last in the order they are asked for (the streamer takes the
+        // nearest first, and reads that follow one another on the disc need no seek); the ones
+        // within the radius before them, and every other item first, each along the curve.
+        let key = |item: &(u32, bool, usize, [i32; 2])| {
+            if let Some(place) = start.exact.iter().position(|&e| e == (item.1, item.2)) {
+                (2u8, place)
+            } else {
+                let (dx, dz) = (
+                    i64::from(item.3[0] - start.at[0]),
+                    i64::from(item.3[1] - start.at[1]),
+                );
+                let near = dx * dx + dz * dz <= i64::from(start.radius) * i64::from(start.radius);
+                (u8::from(near), 0)
+            }
+        };
+        // Stable: each tier keeps its places on the curve.
+        items.sort_by_key(|item| key(item));
+    }
+    loose
         .into_iter()
-        .map(|(_, e, i)| (e, i))
-        .chain(loose)
+        .chain(items.into_iter().map(|(_, e, i, _)| (e, i)))
         .collect()
 }
 
@@ -1310,30 +1339,44 @@ pub fn pack_order(
 mod tests {
     use super::*;
 
-    fn disc_panel(cols: [u8; shared::COLS], tiles: usize) -> DiscPanel {
-        DiscPanel {
+    fn disc_panel(cols: [u8; shared::COLS], fill: u8) -> DiscPanel {
+        let mut panel = DiscPanel {
             cols,
-            sectors: vec![7u8; (1 + tiles) * shared::SLOT_BYTES],
+            ..DiscPanel::default()
+        };
+        for (col, &mask) in cols.iter().enumerate() {
+            for row in 0..shared::ROWS {
+                if mask >> row & 1 != 0 {
+                    // A stored tile block: its length tells the tiles apart.
+                    panel.tiles[col * shared::ROWS + row] =
+                        Some(vec![fill; 10 + col * shared::ROWS + row]);
+                }
+            }
         }
+        panel
     }
 
     #[test]
-    fn an_eye_block_lists_the_tiles_of_each_heading_then_holds_the_panels() {
+    fn an_eye_block_indexes_the_panels_then_holds_their_tiles() {
         let mut set: [Option<DiscPanel>; shared::HEADINGS] = Default::default();
         let (mut first, mut second) = ([0u8; shared::COLS], [0u8; shared::COLS]);
         (first[0], first[shared::COLS - 1]) = (3, 1);
         second[shared::COLS - 1] = 7;
-        set[0] = Some(disc_panel(first, 3));
-        set[5] = Some(disc_panel(second, 3));
+        set[0] = Some(disc_panel(first, 0x11));
+        set[5] = Some(disc_panel(second, 0x22));
         let blocks = eye_blocks(&[set, Default::default()]);
         assert_eq!(blocks.len(), 2);
-        // The list sector, then the two panels (a header and their tiles each).
-        assert_eq!(blocks[0].len(), (1 + 4 + 4) * shared::SLOT_BYTES);
-        assert_eq!(&blocks[0][..shared::COLS], &first);
-        assert_eq!(&blocks[0][5 * shared::COLS..6 * shared::COLS], &second);
-        assert!(blocks[0][shared::COLS..5 * shared::COLS]
+        // Two panels and six tiles of a few bytes: one sector holds all of it.
+        assert_eq!(blocks[0].len(), psx_grid::eye_block::SECTOR);
+        let index = psx_grid::eye_block::BlockIndex::parse(|k| blocks[0][k]);
+        assert_eq!(index.cols[0], first);
+        assert_eq!(index.cols[5], second);
+        assert_eq!(index.tiles, 6);
+        let tile = shared::ROWS + 1;
+        let at = index.offset[0][tile] as usize;
+        assert!(blocks[0][at..at + usize::from(index.len[0][tile])]
             .iter()
-            .all(|&b| b == 0));
+            .all(|&b| b == 0x11));
         // An eye with nothing to show has no block.
         assert!(blocks[1].is_empty());
     }
@@ -1342,15 +1385,56 @@ mod tests {
     fn rooms_and_eyes_go_in_the_pack_along_one_curve_and_room_zero_is_left_to_the_caller() {
         let rooms = [Some([0, 0]), Some([100, 100]), None, Some([4000, 4000])];
         let eyes = [Some([120, 90]), None];
-        let order = pack_order(&rooms, &eyes);
-        // Room 0 is not listed, the room with no centre goes last, an eye with no block is
+        let order = pack_order(&rooms, &eyes, None);
+        // Room 0 is not listed, the room with no centre goes first, an eye with no block is
         // left out, and the eye stands beside the room it is near.
         assert!(!order.contains(&(false, 0)));
-        assert_eq!(order.last(), Some(&(false, 2)));
+        assert_eq!(order.first(), Some(&(false, 2)));
         assert!(!order.iter().any(|&(is_eye, i)| is_eye && i == 1));
         let at = |item: (bool, usize)| order.iter().position(|&o| o == item).unwrap();
         assert!(at((true, 0)).abs_diff(at((false, 1))) == 1, "{order:?}");
         assert!(at((false, 3)) > at((false, 1)));
+    }
+
+    #[test]
+    fn the_pack_ends_around_the_start_point() {
+        // Rooms on a line: the curve keeps their order, and the start is near the 11th.
+        let mut rooms: Vec<Option<[i32; 2]>> = vec![None];
+        rooms.extend((0..100).map(|k| Some([k * 100, 0])));
+        let plain = pack_order(&rooms, &[], None);
+        let start = PackStart {
+            at: [1000, 0],
+            radius: 250,
+            exact: vec![(false, 12)],
+        };
+        let turned = pack_order(&rooms, &[], Some(&start));
+        assert_eq!(plain.len(), turned.len());
+        let at = |order: &[(bool, usize)], room: usize| {
+            order.iter().position(|&o| o == (false, room)).unwrap()
+        };
+        // Rooms 9 to 13 (centres 800 to 1200) are the last five of the turned pack, room 12
+        // (read at once) the very last and the others in their curve order, and they were
+        // early in the plain one; no item is lost.
+        assert!(at(&plain, 11) < 20);
+        assert_eq!(at(&turned, 12), turned.len() - 1);
+        let ordered = PackStart {
+            exact: vec![(false, 13), (false, 9), (false, 11)],
+            ..start.clone()
+        };
+        let asked = pack_order(&rooms, &[], Some(&ordered));
+        // What is read at once sits last, in the order it is asked for.
+        assert_eq!(
+            &asked[asked.len() - 3..],
+            &[(false, 13), (false, 9), (false, 11)]
+        );
+        for (place, room) in [9, 10, 11, 13].into_iter().enumerate() {
+            assert_eq!(at(&turned, room), turned.len() - 5 + place, "room {room}");
+        }
+        let mut a = plain.clone();
+        let mut b = turned.clone();
+        a.sort();
+        b.sort();
+        assert_eq!(a, b);
     }
 
     #[test]

@@ -531,6 +531,29 @@ fn relayout_panel_rooms(
     Ok(blob)
 }
 
+/// Where the player starts, in runtime units, when the scene places one (the cook has already
+/// brought the scene to runtime units).
+fn player_start(scene: &crate::Scene) -> Option<[i32; 3]> {
+    scene.nodes().iter().find_map(|node| {
+        let is_player = match node.kind {
+            crate::NodeKind::SpawnPoint { player: true, .. } => true,
+            crate::NodeKind::Entity => {
+                super::cook_entities::component_character_controller(scene, node)
+                    .is_some_and(|controller| controller.player)
+            }
+            _ => false,
+        };
+        is_player.then(|| node.transform.translation.map(|v| v.round() as i32))
+    })
+}
+
+/// Eyes, nearest the start first, whose blocks the level load reads at once.
+const FIRST_EYES: usize = 3;
+
+/// Sectors beyond the radius the rooms are drawn whole to that the level load may read rooms
+/// and eyes from (a room is placed by its centre; rooms are wide).
+const START_MARGIN_SECTORS: i32 = 10;
+
 /// Height of the bake eyes of the panels above the floor they stand over, in sectors: the
 /// follow camera's, as for the room cards.
 const PANEL_EYE_SECTORS: f32 = 1.45;
@@ -696,6 +719,43 @@ fn bake_panels(
     let baked = cook::panels::bake_eyes(&tris, &eyes, focal as f32, &exclude);
     let blocks = cook::panels::eye_blocks(&baked);
     let count: usize = baked.iter().map(|set| set.iter().flatten().count()).sum();
+    // Where the player starts, in plan: the pack ends around it.
+    let start = player_start(project.active_scene()).map(|point| {
+        // What the first frames read: the rooms the streamer wants with the player there, and
+        // the eyes nearest.
+        let mut exact = Vec::new();
+        let mut window = psx_grid::stream::StreamWindow::new(&view);
+        let room = psx_grid::stream::room_at(&view, 0, point);
+        let mut wanted = Vec::new();
+        window.wanted(
+            &view,
+            room.map(|r| (r, point)),
+            room.map(|r| (r, point)),
+            &mut wanted,
+        );
+        // Need rooms first, nearest first: the order the streamer asks for them in.
+        wanted.sort_by_key(|w| (w.want != psx_grid::stream::Want::Need, w.distance));
+        exact.extend(wanted.iter().map(|w| (false, usize::from(w.room))));
+        let at = [point[0], point[2]];
+        let mut by_distance: Vec<(i64, usize)> = eyes
+            .iter()
+            .enumerate()
+            .map(|(i, e)| {
+                let (dx, dz) = (
+                    i64::from(e.eye[0] as i32 - at[0]),
+                    i64::from(e.eye[2] as i32 - at[1]),
+                );
+                (dx * dx + dz * dz, i)
+            })
+            .collect();
+        by_distance.sort();
+        exact.extend(by_distance.iter().take(FIRST_EYES).map(|&(_, i)| (true, i)));
+        cook::panels::PackStart {
+            at,
+            radius: (i32::from(flood.near_radius) + START_MARGIN_SECTORS) * sector,
+            exact,
+        }
+    });
     // Rooms and eyes along one Hilbert curve; an eye with nothing to show is left out.
     let room_centres: Vec<Option<[i32; 2]>> = tris
         .centres
@@ -709,7 +769,7 @@ fn bake_panels(
         .collect();
     let mut order = vec![PackItem::Room(0)];
     order.extend(
-        cook::panels::pack_order(&room_centres, &eye_centres)
+        cook::panels::pack_order(&room_centres, &eye_centres, start.as_ref())
             .into_iter()
             .map(|(is_eye, i)| {
                 if is_eye {
@@ -719,58 +779,42 @@ fn bake_panels(
                 }
             }),
     );
+    if let Some(start) = &start {
+        let (at, radius) = (start.at, start.radius);
+        let within = room_centres
+            .iter()
+            .chain(&eye_centres)
+            .flatten()
+            .filter(|c| {
+                let (dx, dz) = (i64::from(c[0] - at[0]), i64::from(c[1] - at[1]));
+                dx * dx + dz * dz <= i64::from(radius) * i64::from(radius)
+            })
+            .count();
+        report.warn(format!(
+            "panels: the pack ends around the start at {at:?} (radius {radius}): {within} rooms and eyes of {} placed, {} read at once",
+            room_centres.iter().chain(&eye_centres).flatten().count(),
+            start.exact.len()
+        ));
+    } else {
+        report.warn("panels: the scene has no player start the pack could end around".to_string());
+    }
     let kib: usize = blocks.iter().map(Vec::len).sum::<usize>() / 1024;
     if std::env::var_os("PANEL_TILE_STATS").is_some() {
-        use psx_grid::render::{
-            CELLS_X, CELLS_Y, CELL_EMPTY, COLS, HEADER_ROOMS_AT, ROWS, SLOT_BYTES,
-        };
-        let mut cells_hist = [0usize; 7];
-        let (mut tiles, mut texels_live, mut bbox_area, mut cell_live_area) =
-            (0usize, 0usize, 0usize, 0usize);
+        let (mut tiles, mut bytes, mut stored) = (0usize, 0usize, 0usize);
         for panel in baked.iter().flat_map(|set| set.iter().flatten()) {
-            let mut at = 1;
-            for col in 0..COLS {
-                for row in 0..ROWS {
-                    if panel.cols[col] >> row & 1 == 0 {
-                        continue;
-                    }
-                    let tile = col * ROWS + row;
-                    let sector = &panel.sectors[at * SLOT_BYTES..(at + 1) * SLOT_BYTES];
-                    at += 1;
-                    let rooms = &panel.sectors[HEADER_ROOMS_AT + tile * CELLS_X * CELLS_Y..]
-                        [..CELLS_X * CELLS_Y];
-                    let live_cells = rooms.iter().filter(|&&r| r != CELL_EMPTY).count();
-                    cells_hist[live_cells] += 1;
-                    cell_live_area += live_cells;
-                    let (mut x0, mut x1, mut y0, mut y1) = (64usize, 0usize, 63usize, 0usize);
-                    let mut live = 0;
-                    for y in 0..63 {
-                        for x in 0..64 {
-                            let b = sector[y * 32 + x / 2];
-                            let n = if x % 2 == 0 { b & 15 } else { b >> 4 };
-                            if n != 0 {
-                                live += 1;
-                                x0 = x0.min(x);
-                                x1 = x1.max(x + 1);
-                                y0 = y0.min(y);
-                                y1 = y1.max(y + 1);
-                            }
-                        }
-                    }
-                    tiles += 1;
-                    texels_live += live;
-                    if live > 0 {
-                        bbox_area += (x1 - x0) * (y1 - y0);
-                    }
-                }
-            }
+            tiles += panel.tile_count();
+            bytes += panel.tile_bytes();
+            stored += panel
+                .tiles
+                .iter()
+                .flatten()
+                .filter(|t| t.len() >= psx_grid::tile_lz::TILE_BYTES)
+                .count();
         }
         report.warn(format!(
-            "panel tiles: {tiles} stored, live texels {:.1} % of the slots, bounding boxes of the live texels {:.1} %, non-empty cells {:.1} % ({:?} tiles with 0..6 non-empty cells)",
-            100.0 * texels_live as f64 / (tiles * 4032) as f64,
-            100.0 * bbox_area as f64 / (tiles * 4032) as f64,
-            100.0 * cell_live_area as f64 / (tiles * 6) as f64,
-            cells_hist
+            "panel tiles: {tiles} stored in {bytes} bytes (mean {:.0} B, {stored} kept whole), {} bytes uncompressed",
+            bytes as f64 / tiles.max(1) as f64,
+            tiles * psx_grid::tile_lz::TILE_BYTES
         ));
     }
     report.warn(format!(

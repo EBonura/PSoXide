@@ -365,6 +365,30 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         "pub const WORLD_PACK_START_LBA: u32 = {};",
         psx_iso::WORLD_PACK_DEFAULT_START_LBA
     );
+    out.push('\n'); // Where the pack puts chunks 0, 1 and 2 (the core, the records, the first room), so the
+                    // load reads the core without first reading the pack's header: `[sector offset, sectors,
+                    // bytes, checksum]` each, all zero for a pack without a grid world.
+    let pack_layout = world_pack_layout(package);
+    let chunk_info = |id: u32| {
+        pack_layout
+            .entries
+            .iter()
+            .find(|entry| entry.chunk_id == id)
+            .map_or([0u32; 4], |entry| {
+                [
+                    entry.sector_offset,
+                    entry.sector_count,
+                    entry.byte_size,
+                    entry.checksum,
+                ]
+            })
+    };
+    let _ = writeln!(
+        out,
+        "/// Where WORLD.PAK holds its first three chunks.\n\
+         pub const WORLD_PACK_FIRST_CHUNKS: [[u32; 4]; 3] = {:?};",
+        [chunk_info(0), chunk_info(1), chunk_info(2)]
+    );
     out.push('\n');
     // The room pool: how many rooms the level has, and how many 2 KiB pages
     // the guest reserves to hold the ones around the player (`plan_pool`).
@@ -458,12 +482,19 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     // panel starts on the disc and which tiles it stores.
     let panels = &package.world_geometry.panels;
     let panel_blocks = chunk_panel_blocks(package);
+    let panel_sectors: Vec<u16> = panels
+        .blocks
+        .iter()
+        .map(|block| (block.len() / 2048) as u16)
+        .collect();
     let _ = writeln!(
         out,
         "/// Far panels: the bake eyes (runtime units), and per eye the sector of its block\n\
          /// relative to the start of WORLD.PAK (0 for an eye with no panel). Empty: no panels.\n\
          pub const GRID_PANEL_EYES: &[[i16; 3]] = &{:?};\n\
          pub const GRID_PANEL_BLOCKS: &[u32] = &{panel_blocks:?};\n\
+         /// Sectors each eye's block takes.\n\
+         pub const GRID_PANEL_SECTORS: &[u16] = &{panel_sectors:?};\n\
          /// The projection plane the panels were baked for, and the distance between eyes.\n\
          pub const GRID_PANEL_FOCAL: i32 = {};\n\
          pub const GRID_PANEL_SPACING: i32 = {};\n\
@@ -1334,6 +1365,10 @@ fn world_pack_chunks(package: &PlaytestPackage) -> Vec<(u32, &[u8])> {
         return chunks;
     }
     if !world.panels.is_empty() {
+        // The core and the records go last, beside UI.PAK (which the load reads from as well,
+        // and the first rooms and eyes it needs sit before them): the guest finds them from
+        // `WORLD_PACK_FIRST_CHUNKS`, not by their place in the header.
+        chunks.clear();
         for item in &world.panels.order {
             match *item {
                 PackItem::Room(room) => chunks.push(room_chunk(room)),
@@ -1344,6 +1379,8 @@ fn world_pack_chunks(package: &PlaytestPackage) -> Vec<(u32, &[u8])> {
                 PackItem::Tile(_) | PackItem::Block(_) => {}
             }
         }
+        chunks.push((0, world.core.as_slice()));
+        chunks.push((1, world.records.as_slice()));
         return chunks;
     }
     chunks.extend((0..rooms as u32).map(room_chunk));
@@ -1471,13 +1508,52 @@ fn world_pack_layout(package: &PlaytestPackage) -> psx_iso::WorldPackLayout {
 /// index, so the disc packer stays unchanged; only the runtime staging
 /// buffer differs per class.
 fn ui_pack_chunks(package: &PlaytestPackage) -> Vec<(u32, &[u8])> {
-    package
+    // The disc order is the order the guest reads: the UI sounds first, then the menu images,
+    // then what the loading screen keeps for the whole session, then what each gameplay entry
+    // streams (within a class, in asset order). The drive then moves forward through the pack
+    // and a read starts where the last one ended.
+    let class_rank = |class: StreamedClass| match class {
+        StreamedClass::None => 0,
+        StreamedClass::UiImage => 1,
+        StreamedClass::PersistentGameplay => 2,
+        StreamedClass::Gameplay => 3,
+    };
+    // The assets a gameplay entry loads for the models come last, in the order the loader asks
+    // for them: each model's atlas, then its mesh (an atlas two models share is asked for
+    // twice, and sits where the first asks).
+    let mut model_order: Vec<usize> = Vec::new();
+    for model in &package.models {
+        for index in model
+            .texture_asset_index
+            .into_iter()
+            .chain(std::iter::once(model.mesh_asset_index))
+        {
+            if !model_order.contains(&index) {
+                model_order.push(index);
+            }
+        }
+    }
+    let mut assets: Vec<(usize, &PlaytestAsset)> = package
         .assets
         .iter()
         .enumerate()
         .filter(|(_, asset)| asset.is_streamed())
-        .map(|(index, asset)| (index as u32, asset.bytes.as_slice()))
-        .chain(ui_sfx_pack_chunks(package))
+        .collect();
+    assets.sort_by_key(|(index, asset)| {
+        let model = model_order.iter().position(|m| m == index);
+        (
+            class_rank(asset.streamed_class),
+            model.is_some() && asset.streamed_class == StreamedClass::Gameplay,
+            model.unwrap_or(0),
+            *index,
+        )
+    });
+    ui_sfx_pack_chunks(package)
+        .chain(
+            assets
+                .into_iter()
+                .map(|(index, asset)| (index as u32, asset.bytes.as_slice())),
+        )
         .collect()
 }
 
