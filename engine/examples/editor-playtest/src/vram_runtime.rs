@@ -586,7 +586,7 @@ pub(super) fn panels_loaded() -> bool {
                 ),
                 _ => psx_grid::render::slot_origin(origin, slot),
             };
-            let mut picture = [0u32; SLOT_BYTES / 4];
+            let mut picture: psx_game_runtime::card_stream::Picture = [0; SLOT_BYTES / 4 + 1];
             if !psx_game_runtime::panel_stream::decode_upload(upload, window, &mut picture) {
                 stream.counters.undecodable += 1;
             }
@@ -597,7 +597,7 @@ pub(super) fn panels_loaded() -> bool {
                     psx_grid::render::SLOT_HALFWORDS,
                     psx_grid::render::SLOT_ROWS as u16,
                 ),
-                &picture,
+                &picture[..SLOT_BYTES / 4],
             );
         }
         stream.applied(&uploads[..count]);

@@ -31,13 +31,13 @@
 //! A failed read frees its stage and the tile is asked for again at the next pass. Nothing
 //! here waits.
 
-use psx_grid::eye_block::{BlockIndex, GROUP_BYTES, GROUP_SECTORS, NO_PANEL};
+use psx_grid::eye_block::{BlockIndex, GROUP_BYTES, GROUP_SECTORS, NO_PANEL, SECTOR};
 use psx_grid::flood::octagonal_distance;
 use psx_grid::render::{
     PanelRef, CELLS, CELL_EMPTY, COLS, HEADINGS, HORIZON_ROW, MESH, NO_TILE_SLOT, PICTURE_ROWS,
     ROWS, SLOTS as ATLAS_SLOTS, TILES, TILE_TEXELS, VIEW_COS_Q12, VIEW_SIN_Q12,
 };
-use psx_grid::tile_lz::{decode_tile, TILE_BYTES};
+use psx_grid::tile_lz::{decode_tile_slack, OUT_SLACK, TILE_BYTES};
 
 use crate::grid_stream::{Poll, RoomTransport};
 
@@ -52,6 +52,8 @@ const ENTRIES: usize = 32;
 /// Ticks a landed group stays in its stage with nothing to give: the pass that the index
 /// forces runs in the tick it lands, so its tiles are attached by the end of that tick.
 pub const WARM_TICKS: u32 = 1;
+/// Bytes of a sector, as the index counts offsets.
+const SECTOR_BYTES: u32 = SECTOR as u32;
 /// Ticks between two passes.
 const PASS_TICKS: u32 = 8;
 /// Rank added to a tile of a panel the camera is not looking at.
@@ -259,6 +261,9 @@ struct EyeList {
     used: u32,
     since: u32,
     index: BlockIndex,
+    /// The eye's tiles are in VRAM (or on their way) from an earlier time: only the index is
+    /// read, one sector.
+    only_index: bool,
     /// Per heading, the panel's depth mesh as the index holds it.
     depth: [[u8; MESH]; HEADINGS],
     /// Per heading, the panel's room cells.
@@ -272,6 +277,7 @@ impl EyeList {
         used: 0,
         since: 0,
         index: BlockIndex::EMPTY,
+        only_index: false,
         depth: [[0; MESH]; HEADINGS],
         rooms: [[CELL_EMPTY; CELLS]; HEADINGS],
     };
@@ -374,11 +380,17 @@ struct Run<K> {
     group: u16,
     /// Groups read: 1, or 2 when the read fills both stages.
     groups: u8,
+    /// Sectors of the groups the read brought in, from the first group's start: `lo..hi`. A
+    /// read takes only the sectors the tiles wanted lie in (and what lies between them).
+    lo: u8,
+    hi: u8,
     /// Tick the read landed at.
     landed_at: u32,
     entries: [Option<Entry>; ENTRIES],
 }
 
+// The stages sit in a static array and a boxed read would be a heap block for every one.
+#[allow(clippy::large_enum_variant)]
 #[derive(Copy, Clone)]
 enum Stage<K> {
     Free,
@@ -405,17 +417,18 @@ pub struct TileUpload {
 pub fn decode_upload(
     upload: &TileUpload,
     window: &[u32],
-    picture: &mut [u32; crate::card_stream::SECTOR_WORDS],
+    picture: &mut crate::card_stream::Picture,
 ) -> bool {
     // SAFETY: a byte view of the window's words, which live as long as the borrow.
     let bytes =
         unsafe { core::slice::from_raw_parts(window.as_ptr().cast::<u8>(), window.len() * 4) };
-    // SAFETY: the picture is 512 aligned words, which is `TILE_BYTES` of bytes.
-    let tile = unsafe { &mut *picture.as_mut_ptr().cast::<[u8; TILE_BYTES]>() };
+    // SAFETY: the picture is `SECTOR_WORDS + 1` aligned words, which is `TILE_BYTES + OUT_SLACK`
+    // bytes.
+    let tile = unsafe { &mut *picture.as_mut_ptr().cast::<[u8; TILE_BYTES + OUT_SLACK]>() };
     let at = upload.at as usize;
     let decoded = bytes
         .get(at..at + usize::from(upload.len))
-        .is_some_and(|block| decode_tile(block, tile).is_ok());
+        .is_some_and(|block| decode_tile_slack(block, tile).is_ok());
     if !decoded {
         picture.fill(0);
     }
@@ -617,6 +630,23 @@ pub fn visible_in(
 const PANEL_EDGE: i32 = 1760;
 /// Texel column of the principal point.
 const COLS_CENTRE: i32 = COLS as i32 * TILE_TEXELS / 2;
+
+/// The sectors a tile's block lies in, `from..to`, counted from the start of group `group` of its
+/// eye's block.
+fn tile_sectors(index: &BlockIndex, heading: usize, tile: usize, group: u16) -> (u8, u8) {
+    let offset = index.offset[heading][tile];
+    let len = u32::from(index.len[heading][tile]);
+    let base = u32::from(group) * GROUP_SECTORS as u32;
+    let from = offset / SECTOR_BYTES - base;
+    let to = (offset + len - 1) / SECTOR_BYTES + 1 - base;
+    (from as u8, to as u8)
+}
+
+/// Whether the screen shows the tile at `col`, `row` of a panel `view` sees.
+fn tile_in_view(view: &Visible, col: usize, row: usize) -> bool {
+    (view.first_col..=view.last_col).contains(&col)
+        && (view.first_row..=view.last_row).contains(&row)
+}
 
 /// What a pass works out about the camera once for every eye it asks tiles of.
 struct View {
@@ -970,8 +1000,16 @@ impl<K: Copy> PanelStream<K> {
             if cached.header != Header::Ready {
                 return false;
             }
+            let view = if view_only {
+                visible(heading, input)
+            } else {
+                None
+            };
             for tile in 0..TILES {
-                if !list.stored(heading, tile) {
+                if !list.stored(heading, tile)
+                    || (view_only
+                        && !view.is_some_and(|v| tile_in_view(&v, tile / ROWS, tile % ROWS)))
+                {
                     continue;
                 }
                 let held = cached.held[tile];
@@ -995,15 +1033,17 @@ impl<K: Copy> PanelStream<K> {
         };
         let mut missing = 0;
         for heading in 0..HEADINGS {
-            if list.index.panel[heading] == NO_PANEL || visible(heading, input).is_none() {
+            let Some(view) =
+                visible(heading, input).filter(|_| list.index.panel[heading] != NO_PANEL)
+            else {
                 continue;
-            }
+            };
             let cached = self
                 .cache
                 .iter()
                 .find(|c| c.eye == self.eye && c.heading == heading as u8);
             for tile in 0..TILES {
-                if !list.stored(heading, tile) {
+                if !list.stored(heading, tile) || !tile_in_view(&view, tile / ROWS, tile % ROWS) {
                     continue;
                 }
                 let held = cached.map_or(NO_SLOT_INDEX, |c| c.held[tile]);
@@ -1239,10 +1279,17 @@ impl<K: Copy> PanelStream<K> {
                     l.used.max(1)
                 }
             })?;
+        // An eye whose tiles are still held (the camera was there lately) needs only its index
+        // again.
+        let only_index = self
+            .cache
+            .iter()
+            .any(|c| c.eye == eye && c.header == Header::Ready);
         self.lists[at] = EyeList {
             eye,
             state: Header::Wanted,
             since: self.ticks.max(1),
+            only_index,
             ..EyeList::EMPTY
         };
         Some(at)
@@ -1328,6 +1375,10 @@ impl<K: Copy> PanelStream<K> {
                     if !self.lists[list].stored(heading, tile) {
                         continue;
                     }
+                    // An eye about to be crossed to brings the tiles the screen will show.
+                    if prefetch && !seen.is_some_and(|view| tile_in_view(&view, col, row)) {
+                        continue;
+                    }
                     *wanted += u32::from(!prefetch);
                     // The tiles the camera sees first, the others after them.
                     let rank = match seen {
@@ -1336,13 +1387,12 @@ impl<K: Copy> PanelStream<K> {
                             let down = (row as i32 * PICTURE_ROWS + PICTURE_ROWS / 2
                                 - view.middle_row)
                                 .abs();
-                            let in_view = (view.first_col..=view.last_col).contains(&col)
-                                && (view.first_row..=view.last_row).contains(&row);
-                            let ahead = if in_view && standing_in >> tile & 1 == 0 {
-                                EXPOSED
-                            } else {
-                                base
-                            };
+                            let ahead =
+                                if tile_in_view(&view, col, row) && standing_in >> tile & 1 == 0 {
+                                    EXPOSED
+                                } else {
+                                    base
+                                };
                             ahead + across + 4 * down
                         }
                         None => base + OFF_VIEW,
@@ -1481,6 +1531,11 @@ impl<K: Copy> PanelStream<K> {
                 if group < first || group > last {
                     continue;
                 }
+                // The tile's sectors, from the first group's start, must have been read.
+                let (from, to) = tile_sectors(&list.index, heading, tile, first);
+                if from < run.lo || to > run.hi {
+                    continue;
+                }
                 let Some(free) = run.entries.iter().position(Option::is_none) else {
                     break;
                 };
@@ -1519,29 +1574,33 @@ impl<K: Copy> PanelStream<K> {
             .any(|s| s.state == SlotState::Wanted && !s.prefetch && s.eye == self.eye)
     }
 
-    /// Free a stage whose landed tiles are all for eyes the camera is not at yet: a read the
-    /// eye in use is waiting for must not wait for those to reach the GPU. The tiles are asked
-    /// for again later. Returns whether a stage was freed.
-    fn make_room(&mut self) -> bool {
+    /// Free a stage for a read the eye in use is waiting for: one whose landed tiles are all for
+    /// eyes the camera is not at yet gives up its stage (the tiles are asked for again later),
+    /// and a read of such tiles (or of such an eye's index) still on its way is cancelled (its
+    /// stage frees when the transport says so). Returns whether a stage was freed at once.
+    fn make_room<T>(&mut self, transport: &mut T) -> bool
+    where
+        T: RoomTransport<Ticket = K>,
+    {
+        let others = |stream: &Self, run: &Run<K>| {
+            run.entries.iter().flatten().all(|e| match e.kind {
+                Kind::Tile => stream.slots[usize::from(e.slot)].eye != stream.eye,
+                Kind::Eye => e.eye != stream.eye,
+            })
+        };
         for index in 0..STAGES {
             let Stage::Busy(run) = &self.stages[index] else {
                 continue;
             };
-            if !run.landed {
-                continue;
-            }
-            let only_prefetch =
-                run.entries.iter().flatten().all(|e| {
-                    e.kind == Kind::Tile && self.slots[usize::from(e.slot)].eye != self.eye
-                });
-            if !only_prefetch {
+            if !run.landed || !others(self, run) {
                 continue;
             }
             let span = run.groups > 1;
             let entries = run.entries;
             for e in entries.iter().flatten() {
                 let slot = &mut self.slots[usize::from(e.slot)];
-                if slot.eye == e.eye
+                if e.kind == Kind::Tile
+                    && slot.eye == e.eye
                     && slot.heading == e.heading
                     && slot.tile == e.tile
                     && slot.state == SlotState::Pending
@@ -1553,6 +1612,21 @@ impl<K: Copy> PanelStream<K> {
             self.counters.preempted += 1;
             self.reads_dirty = true;
             return true;
+        }
+        let mut cancelled = false;
+        for index in 0..STAGES {
+            let Stage::Busy(run) = &self.stages[index] else {
+                continue;
+            };
+            if run.landed || !others(self, run) {
+                continue;
+            }
+            transport.cancel(run.ticket);
+            self.counters.preempted += 1;
+            cancelled = true;
+        }
+        if cancelled {
+            self.reads_dirty = true;
         }
         false
     }
@@ -1575,7 +1649,7 @@ impl<K: Copy> PanelStream<K> {
             && !self.stages.iter().any(|s| matches!(s, Stage::Free))
             && self.urgent_waiting(input)
         {
-            self.make_room();
+            self.make_room(transport);
         }
         loop {
             let Some(stage) = self.stages.iter().position(|s| matches!(s, Stage::Free)) else {
@@ -1699,19 +1773,30 @@ impl<K: Copy> PanelStream<K> {
                 .any(|w| w.5 == eye && w.6 == group + 1 && w.2 == Kind::Tile);
             let more_blocks =
                 known.is_none_or(|k| k > (u32::from(group) + 1) * GROUP_SECTORS as u32);
-            let groups: u8 = if both_free && more_blocks && (head_kind == Kind::Eye || next_wanted)
+            // The eye in use reads its index and everything after it in one go (a crossing
+            // waits for it); an eye kept ready reads its index alone, and then the sectors its
+            // tiles lie in.
+            let index_only = head_kind == Kind::Eye
+                && (self.lists[usize::from(head_which)].only_index || eye != self.eye);
+            let groups: u8 = if both_free
+                && more_blocks
+                && !index_only
+                && (head_kind == Kind::Eye || next_wanted)
             {
                 2
             } else {
                 1
             };
             let first = block + u32::from(group) * GROUP_SECTORS as u32;
-            let mut sectors = u32::from(groups) * GROUP_SECTORS as u32;
+            let mut whole = u32::from(groups) * GROUP_SECTORS as u32;
             if let Some(k) = known {
-                sectors = sectors.min(k.saturating_sub(u32::from(group) * GROUP_SECTORS as u32));
+                whole = whole.min(k.saturating_sub(u32::from(group) * GROUP_SECTORS as u32));
             }
-            let sectors = sectors.max(1);
-            let _ = head_which;
+            let whole = whole.max(1) as u8;
+            // The sectors to read, from the first group's start: all of them for an eye's first
+            // read, the index's for an eye kept ready, else from the first sector a wanted tile
+            // lies in to the last.
+            let (mut lo, mut hi) = (whole, 0u8);
             let mut entries = [None; ENTRIES];
             let mut at = 0;
             let mut warm = false;
@@ -1725,6 +1810,7 @@ impl<K: Copy> PanelStream<K> {
                 entries[at] = Some(match kind {
                     Kind::Eye => {
                         warm = true;
+                        (lo, hi) = (0, hi.max(if index_only { 1 } else { whole }));
                         Entry {
                             kind,
                             eye,
@@ -1744,6 +1830,8 @@ impl<K: Copy> PanelStream<K> {
                             .find(|l| l.eye == eye && l.state == Header::Ready)
                             .expect("a tile is wanted from a list that is in");
                         let (heading, tile) = (usize::from(s.heading), usize::from(s.tile));
+                        let (from, to) = tile_sectors(&list.index, heading, tile, group);
+                        (lo, hi) = (lo.min(from), hi.max(to.min(whole)));
                         Entry {
                             kind,
                             eye,
@@ -1760,13 +1848,26 @@ impl<K: Copy> PanelStream<K> {
                 });
                 at += 1;
             }
+            if hi <= lo {
+                // Nothing the groups hold is wanted (the wanted items went to other places).
+                (lo, hi) = (0, 1);
+            }
+            let sectors = u32::from(hi - lo);
+            let first = first + u32::from(lo);
             transport.begin_transfer();
             // SAFETY: the window is memory the caller keeps for the stream's life; the stage is
             // one of its STAGES groups (the first, when two are read), the read is at most
             // `groups` groups, and the memory is not reused until the read is reported finished.
-            let destination = unsafe { window.as_mut_ptr().add(stage * GROUP_BYTES / 4) };
+            let destination = unsafe {
+                window
+                    .as_mut_ptr()
+                    .add((stage * GROUP_BYTES + usize::from(lo) * SECTOR) / 4)
+            };
             let lba = input.base_lba + first;
-            match unsafe { transport.submit(lba, sectors, destination, false) } {
+            // A read for the eye in use (its index, the tiles of its view and those nothing
+            // could stand in for) goes ahead of reads that are waiting.
+            let urgent = head.0 < EXPOSED;
+            match unsafe { transport.submit(lba, sectors, destination, urgent) } {
                 Some(ticket) => {
                     for entry in entries.iter().flatten() {
                         match entry.kind {
@@ -1790,6 +1891,8 @@ impl<K: Copy> PanelStream<K> {
                         eye,
                         group,
                         groups,
+                        lo,
+                        hi,
                         landed_at: 0,
                         entries,
                     });
@@ -2596,7 +2699,7 @@ mod tests {
             for up in ups[..count].iter().flatten() {
                 let slot = stream.slots[usize::from(up.slot)];
                 let mut tile = [0u8; TILE_BYTES];
-                decode_tile(
+                psx_grid::tile_lz::decode_tile(
                     &bytes[up.at as usize..up.at as usize + usize::from(up.len)],
                     &mut tile,
                 )
@@ -2690,6 +2793,41 @@ mod tests {
                 .any(|r| r.0 == lba(5 + 2 * SPAN)),
             "{:?}",
             &disc.reads[before..]
+        );
+    }
+
+    #[test]
+    fn an_eye_kept_ready_reads_its_index_alone_then_only_the_sectors_its_tiles_lie_in() {
+        let eyes = [[0i16; 3], [1600, 0, 0]];
+        let blocks = [5u32, 5 + SPAN];
+        let mut disc = Disc::new(4 + 5 + 2 * SPAN as usize + 40);
+        disc.put_block(5, &[0], true);
+        // Two panels, so the block is several groups long and the camera sees one of them.
+        let sectors = disc.put_block(5 + SPAN, &[0, 4], true);
+        assert!(sectors > 2 * GROUP_SECTORS as u32, "{sectors}");
+        let mut window = window();
+        let mut stream = PanelStream::<usize>::new();
+        let between = input(&eyes, &blocks, [650, 0, 0], [4096, 0]);
+        run(&mut stream, &mut disc, &mut window, &between, 400);
+        let second = 4 + blocks[1];
+        let reads: Vec<(u32, u32)> = disc
+            .reads
+            .iter()
+            .copied()
+            .filter(|&(lba, _)| lba >= second && lba < second + sectors)
+            .collect();
+        // The first read of the eye is its index, one sector.
+        assert_eq!(reads.first(), Some(&(second, 1)), "{reads:?}");
+        // The heading the camera does not look at is never read: the eye's tiles that were
+        // read are fewer sectors than the block.
+        let read: u32 = reads.iter().map(|r| r.1).sum();
+        assert!(read < sectors, "{read} of {sectors}: {reads:?}");
+        assert!(
+            stream
+                .slots
+                .iter()
+                .any(|s| s.eye == 1 && s.state == SlotState::Shown),
+            "the tiles in view were read"
         );
     }
 }

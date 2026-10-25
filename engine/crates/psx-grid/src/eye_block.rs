@@ -316,7 +316,7 @@ mod tests {
         let index = BlockIndex::parse(|k| block[k]);
         let mut groups = 0;
         for heading in [0, 2, 4, 6, 7] {
-            for tile in 0..TILES {
+            for (tile, expected) in blocks.iter().enumerate() {
                 let at = index.offset[heading][tile] as usize;
                 let len = usize::from(index.len[heading][tile]);
                 assert_eq!(
@@ -324,7 +324,7 @@ mod tests {
                     (at + len - 1) / GROUP_BYTES,
                     "{heading} {tile}"
                 );
-                assert_eq!(&block[at..at + len], &blocks[tile][..]);
+                assert_eq!(&block[at..at + len], &expected[..]);
                 groups = groups.max(at / GROUP_BYTES + 1);
             }
         }

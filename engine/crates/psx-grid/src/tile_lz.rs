@@ -26,60 +26,62 @@ pub enum TileLzError {
     Short,
 }
 
-/// Copy `n` bytes from `src` to `dst`, four at a time where it can (the R3000 has `lwl`/`lwr` and
-/// `swl`/`swr`, so an unaligned word costs a few cycles; a byte loop costs six a byte, and a
-/// call to `memcpy` more than that for the short runs a tile is made of).
+/// Bytes past the tile a decoding buffer needs: a copy writes whole words, so it may write up to
+/// three bytes past the end of what it was asked for.
+pub const OUT_SLACK: usize = 4;
+
+/// Copy `n` (more than 0) bytes from `src` to `dst` a word at a time, so up to three bytes more
+/// are read and written. The R3000 has `lwl`/`lwr` and `swl`/`swr`, so an unaligned word costs a
+/// few cycles; a byte loop costs six a byte, and the tail of one a sequence cost as much as the
+/// body of a short run.
 ///
 /// With `dst` after `src` the copy may overlap, as a match does, provided `dst - src >= 4`: each
 /// word then reads only bytes that were already written.
 ///
 /// # Safety
-/// `src` must be valid for `n` reads and `dst` for `n` writes.
+/// `src` must be valid for `n` rounded up to four reads and `dst` for as many writes.
 #[inline(always)]
-unsafe fn copy_forward(dst: *mut u8, src: *const u8, n: usize) {
+unsafe fn copy_words(dst: *mut u8, src: *const u8, n: usize) {
     let mut i = 0;
-    while i + 4 <= n {
-        // SAFETY: `i + 4 <= n`, within both ranges (the caller's contract).
+    loop {
+        // SAFETY: `i < n` rounded up to four, within both ranges (the caller's contract).
         unsafe {
             dst.add(i)
                 .cast::<u32>()
                 .write_unaligned(src.add(i).cast::<u32>().read_unaligned());
         }
         i += 4;
-    }
-    while i < n {
-        // SAFETY: `i < n`.
-        unsafe { *dst.add(i) = *src.add(i) };
-        i += 1;
+        if i >= n {
+            break;
+        }
     }
 }
 
-/// Write `n` copies of `byte` at `dst`, four at a time.
+/// Write `n` copies of `byte` at `dst` a word at a time (up to three more bytes are written).
 ///
 /// # Safety
-/// `dst` must be valid for `n` writes.
+/// `dst` must be valid for `n` rounded up to four writes.
 #[inline(always)]
-unsafe fn fill(dst: *mut u8, byte: u8, n: usize) {
+unsafe fn fill_words(dst: *mut u8, byte: u8, n: usize) {
     let word = u32::from(byte) * 0x0101_0101;
     let mut i = 0;
-    while i + 4 <= n {
-        // SAFETY: `i + 4 <= n`.
+    while i < n {
+        // SAFETY: `i < n`, within the range (the caller's contract).
         unsafe { dst.add(i).cast::<u32>().write_unaligned(word) };
         i += 4;
     }
-    while i < n {
-        // SAFETY: `i < n`.
-        unsafe { *dst.add(i) = byte };
-        i += 1;
-    }
 }
 
-/// Decode the block `src` into `out`.
+/// Decode the block `src` into `out`, which has [`OUT_SLACK`] bytes after the tile for the
+/// copies that run past its end (their contents are not defined afterwards).
 ///
 /// A block of exactly [`TILE_BYTES`] bytes is a stored tile and is copied.
-pub fn decode_tile(src: &[u8], out: &mut [u8; TILE_BYTES]) -> Result<(), TileLzError> {
+pub fn decode_tile_slack(
+    src: &[u8],
+    out: &mut [u8; TILE_BYTES + OUT_SLACK],
+) -> Result<(), TileLzError> {
     if src.len() == TILE_BYTES {
-        out.copy_from_slice(src);
+        out[..TILE_BYTES].copy_from_slice(src);
         return Ok(());
     }
     let (mut i, mut o) = (0usize, 0usize);
@@ -104,8 +106,19 @@ pub fn decode_tile(src: &[u8], out: &mut [u8; TILE_BYTES]) -> Result<(), TileLzE
         if literals > TILE_BYTES - o {
             return Err(TileLzError::Overrun);
         }
-        // SAFETY: the checks above leave `literals` bytes to read at `i` and to write at `o`.
-        unsafe { copy_forward(output.add(o), input.add(i), literals) };
+        if literals > 0 {
+            // SAFETY: the checks above leave `literals` bytes to read at `i` and to write at
+            // `o`; a word copy reads up to three bytes more, which exist when the block goes
+            // on (an offset follows) and are copied exactly otherwise, and writes up to three
+            // more into the buffer's slack or the bytes the sequences after this one fill.
+            unsafe {
+                if i + literals + 3 <= src.len() {
+                    copy_words(output.add(o), input.add(i), literals);
+                } else {
+                    core::ptr::copy_nonoverlapping(input.add(i), output.add(o), literals);
+                }
+            }
+        }
         i += literals;
         o += literals;
         if i == src.len() {
@@ -134,14 +147,15 @@ pub fn decode_tile(src: &[u8], out: &mut [u8; TILE_BYTES]) -> Result<(), TileLzE
             return Err(TileLzError::Overrun);
         }
         // SAFETY: `offset <= o` puts the source inside what was written, and `length` bytes
-        // fit after `o`. An offset of four or more is read through `copy_forward`, which
-        // handles the overlap; a run of one byte is a fill; two and three go a byte at a time.
+        // fit after `o` (a word copy runs at most three past, into the slack). With an offset
+        // of four or more each word reads only bytes already written; a run of one byte is a
+        // fill; two and three go a byte at a time.
         unsafe {
             let at = output.add(o);
             if offset >= 4 {
-                copy_forward(at, at.sub(offset), length);
+                copy_words(at, at.sub(offset), length);
             } else if offset == 1 {
-                fill(at, *at.sub(1), length);
+                fill_words(at, *at.sub(1), length);
             } else {
                 for k in 0..length {
                     *at.add(k) = *at.add(k).sub(offset);
@@ -155,6 +169,15 @@ pub fn decode_tile(src: &[u8], out: &mut [u8; TILE_BYTES]) -> Result<(), TileLzE
     } else {
         Err(TileLzError::Short)
     }
+}
+
+/// Decode the block `src` into `out`. The guest uses [`decode_tile_slack`], which is faster for
+/// having room to copy whole words.
+pub fn decode_tile(src: &[u8], out: &mut [u8; TILE_BYTES]) -> Result<(), TileLzError> {
+    let mut wide = [0u8; TILE_BYTES + OUT_SLACK];
+    decode_tile_slack(src, &mut wide)?;
+    out.copy_from_slice(&wide[..TILE_BYTES]);
+    Ok(())
 }
 
 pub use encode::encode_tile;
@@ -199,7 +222,7 @@ mod encode {
             }
         }
         // Longest first; among equals the nearest offset (it was found first).
-        found.sort_by(|a, b| b.0.cmp(&a.0));
+        found.sort_by_key(|found| core::cmp::Reverse(found.0));
         found.truncate(CANDIDATES);
         found
     }
