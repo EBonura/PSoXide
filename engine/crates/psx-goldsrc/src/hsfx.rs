@@ -37,6 +37,9 @@ pub struct Hsfx<const N: usize, const HEALTH: u8, const SUIT: u8> {
     rates: [u32; N],
     count: usize,
     next_voice: u8,
+    /// Voices the rotating one-shot pool uses (0..pool): [`VOICE_POOL`] unless the
+    /// caller reserved the tail with [`Self::reserve_pool_tail`].
+    pool: u8,
     dialogue_base: u32,
     voice_addrs: [u32; MAX_VOICES],
     voice_rates: [u32; MAX_VOICES],
@@ -351,6 +354,7 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
             rates: [0; N],
             count: 0,
             next_voice: 0,
+            pool: VOICE_POOL,
             dialogue_base: 0,
             voice_addrs: [0; MAX_VOICES],
             voice_rates: [0; MAX_VOICES],
@@ -359,6 +363,17 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
             map_sample_loops: [0; MAX_VOICES / 32],
             authored: AuthoredLoops::new(),
             ear: [0; 3],
+        }
+    }
+
+    /// Take the one-shot pool's voices from index `first` up out of its rotation,
+    /// for a caller that plays on them itself (a weapon bank, say): no pool sound
+    /// starts on them, so none cuts what the caller keeps there. `first` is
+    /// clamped to 1..=15; the default keeps all 15 voices in the pool.
+    pub fn reserve_pool_tail(&mut self, first: u8) {
+        self.pool = first.clamp(1, VOICE_POOL);
+        if self.next_voice >= self.pool {
+            self.next_voice = 0;
         }
     }
 
@@ -648,7 +663,7 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
             return;
         };
         let voice = Voice::new(self.next_voice);
-        self.next_voice = (self.next_voice + 1) % VOICE_POOL;
+        self.next_voice = (self.next_voice + 1) % self.pool;
         OneShot::new(
             Sample::resident(SpuAddr::new(addr), rate, 0),
             Volume::linear(1, den.max(1)),
@@ -674,7 +689,7 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
             return;
         }
         let voice = Voice::new(self.next_voice);
-        self.next_voice = (self.next_voice + 1) % VOICE_POOL;
+        self.next_voice = (self.next_voice + 1) % self.pool;
         OneShot::new(Sample::resident(SpuAddr::new(addr), rate, 0), gain).play(voice);
     }
 
@@ -929,7 +944,7 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
             CHARGER_VOICE
         } else {
             let voice = self.next_voice;
-            self.next_voice = (self.next_voice + 1) % VOICE_POOL;
+            self.next_voice = (self.next_voice + 1) % self.pool;
             voice
         });
         v.configure_sample(
@@ -1000,7 +1015,7 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
         }
         let voice = Voice::new({
             let next = self.next_voice;
-            self.next_voice = (self.next_voice + 1) % VOICE_POOL;
+            self.next_voice = (self.next_voice + 1) % self.pool;
             next
         });
         OneShot::new(
