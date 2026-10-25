@@ -656,6 +656,11 @@ pub fn panel_eyes(
             }
         }
         taken.clear();
+        // In sector order: the hash map's own order differs from run to run, and the eyes' means
+        // are sums of floats, so a cook of the same level put the eyes in slightly different
+        // places every time.
+        let mut candidates: Vec<_> = candidates.into_iter().collect();
+        candidates.sort_by_key(|&(at, _)| at);
         for ((cx, cz), (_, k, y)) in candidates {
             let x = (cx * sector + sector / 2) as f32;
             let z = (cz * sector + sector / 2) as f32;
@@ -770,7 +775,43 @@ fn bake_panels(
         drawn
     };
     let focal = PANEL_FOCAL;
-    let baked = cook::panels::bake_eyes(&tris, &eyes, focal as f32, &exclude);
+    // PSXED_PANEL_CACHE=<file>: keep the baked panels there, and use them when the level, the
+    // eyes and the radius are those they were baked for (the bake's code is not part of the key:
+    // delete the file when it changes).
+    let cache = std::env::var_os("PSXED_PANEL_CACHE").map(std::path::PathBuf::from);
+    let eyes_text = format!(
+        "{:?} {focal} {radius} {rooms}",
+        eyes.iter()
+            .map(|e| (e.room, e.eye.map(f32::to_bits)))
+            .collect::<Vec<_>>()
+    );
+    let key = cook::panels::bake_cache::key(&[
+        &cooked.core,
+        &cooked.chunks.concat(),
+        eyes_text.as_bytes(),
+    ]);
+    if cache.is_some() {
+        report.warn(format!(
+            "panels: bake cache key {key:x} (core {:x}, chunks {:x}, eyes {:x})",
+            cook::panels::bake_cache::key(&[&cooked.core]),
+            cook::panels::bake_cache::key(&[&cooked.chunks.concat()]),
+            cook::panels::bake_cache::key(&[eyes_text.as_bytes()]),
+        ));
+    }
+    let kept = cache
+        .as_ref()
+        .and_then(|path| std::fs::read(path).ok())
+        .and_then(|bytes| cook::panels::bake_cache::read(&bytes, key, eyes.len()));
+    let baked = match kept {
+        Some(baked) => baked,
+        None => {
+            let baked = cook::panels::bake_eyes(&tris, &eyes, focal as f32, &exclude);
+            if let Some(path) = &cache {
+                let _ = std::fs::write(path, cook::panels::bake_cache::write(&baked, key));
+            }
+            baked
+        }
+    };
     let blocks = cook::panels::eye_blocks(&baked);
     let count: usize = baked.iter().map(|set| set.iter().flatten().count()).sum();
     // Where the player starts, in plan: the pack ends around it.

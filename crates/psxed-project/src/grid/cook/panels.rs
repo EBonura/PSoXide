@@ -1493,3 +1493,81 @@ mod tests {
         assert_eq!(image.level_for(0.5), 0);
     }
 }
+
+/// Baked panels as the bake cache keeps them: a development aid that skips the bake (minutes)
+/// when a run changes only what is done with the panels, not the panels themselves.
+pub mod bake_cache {
+    use super::{shared, DiscPanel};
+
+    type Set = [Option<DiscPanel>; shared::HEADINGS];
+
+    /// FNV-1a over `parts`, to tell whether the bake's inputs are the ones a cache was made from.
+    pub fn key(parts: &[&[u8]]) -> u64 {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for part in parts {
+            for &byte in part.iter().chain(&(part.len() as u64).to_le_bytes()) {
+                hash = (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
+            }
+        }
+        hash
+    }
+
+    /// The panels `bytes` hold, when it was written for `key` and `eyes` eyes.
+    pub fn read(bytes: &[u8], key: u64, eyes: usize) -> Option<Vec<Set>> {
+        let mut at = 0usize;
+        let mut take = |n: usize| -> Option<&[u8]> {
+            let part = bytes.get(at..at + n)?;
+            at += n;
+            Some(part)
+        };
+        if u64::from_le_bytes(take(8)?.try_into().ok()?) != key
+            || u32::from_le_bytes(take(4)?.try_into().ok()?) as usize != eyes
+        {
+            return None;
+        }
+        let mut out = Vec::with_capacity(eyes);
+        for _ in 0..eyes {
+            let mut set: Set = Default::default();
+            for slot in &mut set {
+                if take(1)?[0] == 0 {
+                    continue;
+                }
+                let mut panel = DiscPanel::default();
+                panel.cols.copy_from_slice(take(shared::COLS)?);
+                panel.depth.copy_from_slice(take(shared::MESH)?);
+                panel.rooms.copy_from_slice(take(shared::CELLS)?);
+                for tile in &mut panel.tiles {
+                    let len = u16::from_le_bytes(take(2)?.try_into().ok()?) as usize;
+                    *tile = (len > 0).then(|| take(len).map(<[u8]>::to_vec)).flatten();
+                }
+                *slot = Some(panel);
+            }
+            out.push(set);
+        }
+        Some(out)
+    }
+
+    /// `panels` as bytes for [`read`].
+    pub fn write(panels: &[Set], key: u64) -> Vec<u8> {
+        let mut out = key.to_le_bytes().to_vec();
+        out.extend_from_slice(&(panels.len() as u32).to_le_bytes());
+        for set in panels {
+            for slot in set {
+                let Some(panel) = slot else {
+                    out.push(0);
+                    continue;
+                };
+                out.push(1);
+                out.extend_from_slice(&panel.cols);
+                out.extend_from_slice(&panel.depth);
+                out.extend_from_slice(&panel.rooms);
+                for tile in &panel.tiles {
+                    let block = tile.as_deref().unwrap_or(&[]);
+                    out.extend_from_slice(&(block.len() as u16).to_le_bytes());
+                    out.extend_from_slice(block);
+                }
+            }
+        }
+        out
+    }
+}
