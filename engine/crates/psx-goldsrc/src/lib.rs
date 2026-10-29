@@ -6,6 +6,7 @@
 pub mod chunk_stream;
 pub mod ground_logic;
 pub mod hitbox_logic;
+pub mod hmd_gte;
 pub mod hsfx;
 pub mod ladder_logic;
 pub mod model_variant;

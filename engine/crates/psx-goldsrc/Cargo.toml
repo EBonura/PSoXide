@@ -12,6 +12,7 @@ psx-pack = { path = "../../../sdk/crates/psx-pack" }
 psx-gpu = { path = "../../../sdk/crates/psx-gpu" }
 psx-io = { path = "../../../sdk/crates/psx-io" }
 psx-math = { path = "../../../sdk/crates/psx-math" }
+psx-gte = { path = "../../../sdk/crates/psx-gte" }
 psx-telemetry = { path = "../../../sdk/crates/psx-telemetry" }
 psx-engine = { path = "../psx-engine" }
 

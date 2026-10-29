@@ -246,6 +246,7 @@ dependencies = [
  "psx-asset",
  "psx-engine",
  "psx-gpu",
+ "psx-gte",
  "psx-io",
  "psx-math",
  "psx-pack",
