@@ -217,9 +217,9 @@ const fn mul32(a: u32, b: u32) -> u64 {
 /// took 226 cycles against 300 for the table-seeded nibble root it replaced,
 /// loop and call overhead included, with identical results.
 ///
-/// Out of line: the body is a few hundred bytes, and every codegen unit that
-/// inlined it carried its own copy.
-#[inline(never)]
+/// Left `#[inline]`: forcing it out of line cost 0.6% on Quake's E1M1 route
+/// (26.879 to 26.715 fps) for a size gain that was never measured.
+#[inline]
 // psx-numeric-allow-next-line: HL/CS/HK squared-distance roots require full u64 input; the body splits it into two words.
 pub const fn isqrt_u64(value: u64) -> u32 {
     if value == 0 {
@@ -1086,14 +1086,14 @@ mod tests {
         }
     }
 
-    /// `isqrt_u64` only changed its inlining attribute; pin the values
-    /// against the u128 definition on edges and a deterministic sweep.
+    /// Pin `isqrt_u64` to the u128 definition on edges, around every square up
+    /// to 70,000 and the top of the 32-bit roots, and on a deterministic sweep.
     #[test]
     #[cfg_attr(
         miri,
         ignore = "exhaustive sweep, minutes under Miri; make test runs it natively"
     )]
-    fn isqrt_u64_is_unchanged_by_going_out_of_line() {
+    fn isqrt_u64_is_exact_on_edges_squares_and_a_sweep() {
         for n in [
             0u64,
             1,
