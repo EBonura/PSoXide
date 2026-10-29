@@ -10,6 +10,10 @@ use crate::bios;
 
 /// Write a string to TTY. Each byte is emitted via the BIOS
 /// `putchar` trampoline.
+///
+/// Out of line so a literal is not unrolled into one `__bios_putchar` call per
+/// byte at every call site.
+#[inline(never)]
 pub fn print(s: &str) {
     for b in s.bytes() {
         bios::write_char(b);
@@ -17,6 +21,7 @@ pub fn print(s: &str) {
 }
 
 /// [`print`] + a trailing `\n`.
+#[inline(never)]
 pub fn println(s: &str) {
     print(s);
     bios::write_char(b'\n');

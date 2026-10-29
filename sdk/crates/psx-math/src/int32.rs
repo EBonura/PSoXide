@@ -216,7 +216,10 @@ const fn mul32(a: u32, b: u32) -> u64 {
 /// Hollow Knight (512 squared lengths of random 3D vectors, Timer2) a call
 /// took 226 cycles against 300 for the table-seeded nibble root it replaced,
 /// loop and call overhead included, with identical results.
-#[inline]
+///
+/// Out of line: the body is a few hundred bytes, and every codegen unit that
+/// inlined it carried its own copy.
+#[inline(never)]
 // psx-numeric-allow-next-line: HL/CS/HK squared-distance roots require full u64 input; the body splits it into two words.
 pub const fn isqrt_u64(value: u64) -> u32 {
     if value == 0 {
@@ -342,7 +345,10 @@ const fn divide_digit(remainder: u32, next: u32, divisor: u32) -> (u32, u32) {
 /// replaced (random divisors of every magnitude). The generic
 /// compiler-builtins `u64_div_rem` before that was 1,412 bytes of branchy
 /// code and the only 64-bit divide reachable from runtime code.
-#[inline]
+///
+/// Out of line: inlined copies cost about 460 bytes each, and the callers
+/// (`mul_div_i32`, `mul_div_u32`) are not hot enough to pay for them.
+#[inline(never)]
 pub const fn div_u64_by_u32(hi: u32, lo: u32, divisor: u32) -> u32 {
     debug_assert!(divisor != 0 && hi < divisor);
     let shift = divisor.leading_zeros();
@@ -407,13 +413,13 @@ pub fn mul_div_i32(a: i32, b: i32, c: i32) -> i32 {
     let lo = product as u32;
     let magnitude = if hi == 0 {
         lo / divisor
-    } else if hi < divisor {
-        div_u64_by_u32(hi, lo, divisor)
     } else {
-        // The quotient needs more than 32 bits. Its low word is the quotient
-        // of the remainder of the high word (hi = qh * c + rh, and the qh
-        // part only adds multiples of 2^32).
-        div_u64_by_u32(hi % divisor, lo, divisor)
+        // When the quotient needs more than 32 bits, its low word is the
+        // quotient of the remainder of the high word (hi = qh * c + rh, and
+        // the qh part only adds multiples of 2^32). Computing that remainder
+        // first leaves a single `div_u64_by_u32` call site.
+        let high = if hi < divisor { hi } else { hi % divisor };
+        div_u64_by_u32(high, lo, divisor)
     };
     if negative {
         magnitude.wrapping_neg() as i32
@@ -978,6 +984,139 @@ mod tests {
             // The Q16 multiply and divide shapes the games use.
             assert_eq!(mul_div_i32(a, b, 65536), mul_div_wide(a, b, 65536));
             assert_eq!(mul_div_i32(a, 65536, c), mul_div_wide(a, 65536, c));
+        }
+    }
+
+    /// `mul_div_i32` as it was before the single-call-site rewrite: two
+    /// `div_u64_by_u32` calls, one for `hi < divisor` and one after `hi %
+    /// divisor`. Kept here as the oracle the new body must equal.
+    fn mul_div_i32_two_call_sites(a: i32, b: i32, c: i32) -> i32 {
+        let negative = (a < 0) ^ (b < 0) ^ (c < 0);
+        let divisor = c.unsigned_abs();
+        let product = u64::from(a.unsigned_abs()) * u64::from(b.unsigned_abs());
+        let hi = (product >> 32) as u32;
+        let lo = product as u32;
+        let magnitude = if hi == 0 {
+            lo / divisor
+        } else if hi < divisor {
+            div_u64_by_u32(hi, lo, divisor)
+        } else {
+            div_u64_by_u32(hi % divisor, lo, divisor)
+        };
+        if negative {
+            magnitude.wrapping_neg() as i32
+        } else {
+            magnitude as i32
+        }
+    }
+
+    #[test]
+    fn mul_div_i32_equals_the_two_call_site_version_on_edges() {
+        for a in SIGNED_EDGES {
+            for b in SIGNED_EDGES {
+                for c in SIGNED_EDGES.into_iter().filter(|&c| c != 0) {
+                    assert_eq!(
+                        mul_div_i32(a, b, c),
+                        mul_div_i32_two_call_sites(a, b, c),
+                        "{a} * {b} / {c}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "exhaustive sweep, minutes under Miri; make test runs it natively"
+    )]
+    fn mul_div_i32_equals_the_two_call_site_version_on_a_random_sweep() {
+        let mut next = xorshift(0x0c57_0007_5d1f_e5ed);
+        let (mut equal_hi, mut greater_hi) = (0u32, 0u32);
+        for i in 0..2_000_000u32 {
+            let r = next();
+            let a = (r as i32) >> (i % 32);
+            let b = ((r >> 32) as i32) >> ((i / 32) % 32);
+            let c = ((next() as i32) >> (i % 31)) | 1;
+            assert_eq!(
+                mul_div_i32(a, b, c),
+                mul_div_i32_two_call_sites(a, b, c),
+                "{a} * {b} / {c}"
+            );
+            // Count the three paths so the sweep provably reaches the
+            // `hi >= divisor` branch the rewrite touched.
+            let hi = ((u64::from(a.unsigned_abs()) * u64::from(b.unsigned_abs())) >> 32) as u32;
+            if hi >= c.unsigned_abs() {
+                greater_hi += 1;
+            } else if hi != 0 {
+                equal_hi += 1;
+            }
+        }
+        assert!(
+            greater_hi > 10_000 && equal_hi > 10_000,
+            "{greater_hi} {equal_hi}"
+        );
+    }
+
+    #[test]
+    fn mul_div_i32_covers_hi_equal_to_and_just_around_the_divisor() {
+        // products whose high word is divisor - 1, divisor and divisor + 1
+        for c in [1i32, 2, 3, 7, 65535, 65536, 65537, 46341, 1 << 30, i32::MAX] {
+            for delta in [-1i64, 0, 1] {
+                let hi = i64::from(c) + delta;
+                if !(1..=i64::from(u32::MAX)).contains(&hi) {
+                    continue;
+                }
+                let target = (hi as u64) << 32;
+                // find a, b with a * b near target using a = 2^k factors
+                for a in [1u32 << 16, 1 << 30, 0xffff, 0x8000_0000] {
+                    let b = (target / u64::from(a)).min(u64::from(u32::MAX)) as u32;
+                    for (sa, sb, sc) in [(1, 1, 1), (-1, 1, 1), (-1, -1, -1), (1, -1, 1)] {
+                        let (a, b) = ((a as i32).wrapping_mul(sa), (b as i32).wrapping_mul(sb));
+                        let c = c * sc;
+                        assert_eq!(
+                            mul_div_i32(a, b, c),
+                            mul_div_i32_two_call_sites(a, b, c),
+                            "{a} * {b} / {c}"
+                        );
+                        assert_eq!(mul_div_i32(a, b, c), mul_div_wide(a, b, c));
+                    }
+                }
+            }
+        }
+    }
+
+    /// `isqrt_u64` only changed its inlining attribute; pin the values
+    /// against the u128 definition on edges and a deterministic sweep.
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "exhaustive sweep, minutes under Miri; make test runs it natively"
+    )]
+    fn isqrt_u64_is_unchanged_by_going_out_of_line() {
+        for n in [
+            0u64,
+            1,
+            2,
+            3,
+            4,
+            u64::MAX,
+            u64::MAX - 1,
+            1 << 63,
+            (1 << 32) - 1,
+            1 << 32,
+        ] {
+            assert_floor_root(n);
+        }
+        // Squares and their neighbours, up to the largest 32-bit root.
+        for k in (1..=70_000u64).chain(u64::from(u32::MAX) - 70_000..=u64::from(u32::MAX)) {
+            assert_floor_root(k * k - 1);
+            assert_floor_root(k * k);
+            assert_floor_root(k * k + 1);
+        }
+        let mut next = xorshift(0x1357_9bdf_2468_ace0);
+        for i in 0..1_000_000u32 {
+            assert_floor_root(next() >> (i % 64));
         }
     }
 
