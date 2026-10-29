@@ -2,6 +2,7 @@
 name    = "psoxide-pgo"
 version = "0.1.0"
 edition = "2021"
+default-run = "psoxide-pgo"
 license = "GPL-2.0-or-later"
 description = "Turn an emulator PC histogram into an LLVM sample profile for a PS1 guest"
 
