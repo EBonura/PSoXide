@@ -683,6 +683,10 @@ pub fn main(args: &[String], out: &mut dyn Write) -> i32 {
 /// as that many bytes and not followed. Calls through registers, jumps that are not provable tables, `$sp` writes
 /// other than `addiu` frames, trampolines that are not hazard patches and recursion are errors, as in `check`. This
 /// is what `window_gate` proves a scratchpad window's guards and roots against.
+///
+/// # Errors
+///
+/// The walk reaches something it cannot bound (see above) or code outside the image.
 pub fn tree_depth(
     image: &GuardImage,
     addr: i64,
