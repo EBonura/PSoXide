@@ -4,6 +4,7 @@
 #![feature(optimize_attribute)]
 #![cfg_attr(target_arch = "mips", feature(asm_experimental_arch))]
 
+pub mod affine_edges;
 pub mod chunk_stream;
 pub mod ground_logic;
 pub mod hitbox_logic;
