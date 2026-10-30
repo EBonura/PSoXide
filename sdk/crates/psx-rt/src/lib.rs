@@ -52,6 +52,7 @@ mod peripherals;
 #[cfg(feature = "present-queue")]
 pub mod present;
 pub mod scratchpad;
+#[cfg(feature = "scratchpad-window")]
 pub mod scratchpad_window;
 #[cfg(target_arch = "mips")]
 pub mod tty;

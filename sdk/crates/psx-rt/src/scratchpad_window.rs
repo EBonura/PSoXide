@@ -6,20 +6,22 @@
 //! the scratchpad for the shallow part and runs the deep or recursive callees on the RAM stack.
 //!
 //! * A **level-1 thunk** (`window_fn!` `level1`) switches `$sp` to [`TOP`] for one call, copies the
-//!   stack-passed arguments across, calls the target and switches back. Already on the scratchpad stack,
+//!   stack-passed arguments to the window top, calls the target and switches back. Already on the scratchpad stack,
 //!   or with a switch in progress, it just calls the target.
 //! * A **guard** (`window_fn!` `guard`) sits in front of a deep or recursive callee. It calls the target
 //!   in place when `$sp` is in RAM or when the window has `floor + need` bytes left, and otherwise
 //!   **hops back**: it runs the target on the RAM stack below the outermost switch, copying the
-//!   stack-passed arguments, and returns to the window afterwards.
+//!   stack-passed arguments to that stack, and returns to the window afterwards.
 //!
-//! The wrappers forward every argument register and stack word untouched, so a wrapper has the callee's
-//! own signature and the Rust call sites do not change. On the host the wrappers call the target.
+//! The wrappers forward every argument register and the first stack words untouched (eight for a level-1
+//! switch, twelve for a hop), so a wrapper has the callee's own signature and the Rust call sites do not
+//! change. On the host the wrappers call the target. The module is behind the `scratchpad-window` feature of
+//! `psx-rt`; a program that leaves it off links none of it and `ScratchpadStack::run` does not look at it.
 //!
 //! # What makes it sound
 //!
 //! * `need` is the static worst-case stack depth of the callee with other guards counted as 24 bytes,
-//!   read from the linked image. [`psoxide-hazard`'s `window-gate`] fails the build when a `need` is
+//!   read from the linked image. `window-gate` (in `psoxide-hazard`, run by `psoxide-pgo`) fails the build when a `need` is
 //!   smaller than that bound, when a level-1 root does not fit [`TOP`], when any code calls a guarded
 //!   or wrapped function directly instead of through its stub, or when the guard-free closure holds an
 //!   indirect call or a second `$sp` adjustment.
@@ -31,9 +33,11 @@
 //! * [`ScratchpadStack::run`](crate::scratchpad::ScratchpadStack::run) called from inside a hopped-back
 //!   region runs in place (a nested run must not restart at the scratchpad top and overwrite the frames
 //!   the window left suspended).
-//! * The scratchpad bytes `floor..TOP` must be free while a level-1 call runs: no other tenant, no
-//!   engine `ScratchpadStack` live around it. Record that with [`Region`](crate::scratchpad::Region) and
-//!   `assert_disjoint`.
+//! * The scratchpad bytes `floor..1024` (the stack, the copied arguments above [`TOP`]) must be free while a
+//!   level-1 call runs: no other tenant, no engine `ScratchpadStack` live around it. Record that with
+//!   [`Region`](crate::scratchpad::Region) and `assert_disjoint`.
+//! * Frames live on the scratchpad, which DMA cannot reach: the address of a stack object must never be handed
+//!   to a DMA channel or the GPU (the address masks into low kernel RAM and a DMA write lands there).
 //!
 //! A crate that uses `window_fn!` needs `#![feature(asm_experimental_arch)]` on the PS1 target, like any
 //! crate with `global_asm!`.
@@ -52,10 +56,15 @@ pub const LEVEL1_ARG_WORDS: usize = 8;
 /// Stack-argument words a hop copies.
 pub const HOP_ARG_WORDS: usize = 12;
 
-/// `[RAM $sp of the outermost switch, busy]`. Not part of the API; the asm reads and writes it.
+/// `[RAM $sp of the outermost switch, busy]`, 8-aligned so the asm's `%hi(state)` pairs with `%lo(state)` and
+/// `%lo(state+4)` without a carry. Not part of the API.
+#[repr(C, align(8))]
+pub struct WindowState(pub [u32; 2]);
+
+/// The window's state; the asm reads and writes it.
 #[no_mangle]
 #[used]
-pub static mut __psx_rt_window_state: [u32; 2] = [0; 2];
+pub static mut __psx_rt_window_state: WindowState = WindowState([0; 2]);
 
 /// Argument words the Rust ABI uses for a value of `size` bytes on mipsel: aggregates over two words go
 /// by pointer.
@@ -71,7 +80,7 @@ pub const fn abi_words(size: usize) -> usize {
 #[inline(always)]
 pub fn is_active() -> bool {
     // SAFETY: a plain read of a word only the thunks write, in the same thread of control.
-    unsafe { core::ptr::read_volatile(&raw const __psx_rt_window_state[1]) != 0 }
+    unsafe { core::ptr::read_volatile(&raw const __psx_rt_window_state.0[1]) != 0 }
 }
 
 // Shared level-1 switch: `$t9` = target. See the module docs.
@@ -226,7 +235,7 @@ core::arch::global_asm!(
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __window_level1_stub {
-    ($name:literal, $target:ident) => {
+    ($name:literal, $target:ident, $floor:expr) => {
         #[cfg(target_arch = "mips")]
         core::arch::global_asm!(
             ".section .text.__psx_rt_window_stub,\"ax\",@progbits",
@@ -238,9 +247,12 @@ macro_rules! __window_level1_stub {
             "addiu $t9, $t9, %lo({f})",
             "j __psx_rt_window_l1",
             "nop",
-            concat!(".size ", $name, ", 16"),
+            // Never executed: the floor `window-gate` reads back.
+            ".word {floor}",
+            concat!(".size ", $name, ", 20"),
             ".set reorder",
             f = sym $target,
+            floor = const $floor,
         );
     };
 }
@@ -249,7 +261,7 @@ macro_rules! __window_level1_stub {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __window_guard_stub {
-    ($name:literal, $target:ident, $room:expr) => {
+    ($name:literal, $target:ident, $floor:expr, $room:expr) => {
         #[cfg(target_arch = "mips")]
         core::arch::global_asm!(
             ".section .text.__psx_rt_window_stub,\"ax\",@progbits",
@@ -261,10 +273,12 @@ macro_rules! __window_guard_stub {
             "addiu $t9, $t9, %lo({f})",
             "j __psx_rt_window_guard",
             "addiu $t8, $zero, {room}",
-            concat!(".size ", $name, ", 16"),
+            ".word {floor}",
+            concat!(".size ", $name, ", 20"),
             ".set reorder",
             f = sym $target,
             room = const $room,
+            floor = const $floor,
         );
     };
 }
@@ -273,23 +287,34 @@ macro_rules! __window_guard_stub {
 /// own signature.
 ///
 /// ```text
-/// psx_rt::window_fn!(level1, "__ws_patches", ext_patches, patches, orig_patches,
+/// const FLOOR: usize = 8; // first scratchpad byte the window may use
+/// psx_rt::window_fn!(level1 FLOOR, true, "__ws_patches", ext_patches, patches, orig_patches,
 ///     (a: &mut X, n: usize) -> bool);
-/// psx_rt::window_fn!(guard FLOOR + 368, "__ws_cell", ext_cell, cell, orig_cell,
-///     (a: &mut X) );
+/// psx_rt::window_fn!(guard FLOOR, 368, true, "__ws_cell", ext_cell, cell, orig_cell,
+///     (a: &mut X));
 /// ```
 ///
-/// `level1` roots must not be called from inside a hop-free guarded callee they themselves call; a guard
-/// takes the room it needs (`floor + need`, at most 32767). Call sites use the wrapper name, never the
-/// target, and the `window-gate` fails the build otherwise. The wrapper calls the target directly when
-/// `$on` is false (a control build) and on the host.
+/// * `level1 FLOOR` or `guard FLOOR, NEED`: the window floor (written into the stub for `window-gate` to
+///   read back) and, for a guard, the bytes its callee needs. `NEED` comes from `window-gate --emit` and the
+///   gate fails the build when it is too small.
+/// * `$on` (`true` here): a constant that compiles the window out for a control build. Use the same value
+///   for every `window_fn!` of a program; mixing `true` and `false` leaves stubs the gate cannot prove.
+/// * The wrapper has the callee's signature; call sites use it, never the target (the gate fails the build
+///   on a direct call). Arguments must be at most 4-byte aligned and fit the copied stack words
+///   ([`LEVEL1_ARG_WORDS`], [`HOP_ARG_WORDS`]); the macro asserts both at compile time.
 #[macro_export]
 macro_rules! window_fn {
-    (level1, $on:expr, $sym:literal, $ext:ident, $wrap:ident, $orig:ident,
+    (level1 $floor:expr, $on:expr, $sym:literal, $ext:ident, $wrap:ident, $orig:ident,
      ($($a:ident : $t:ty),* $(,)?) $(-> $r:ty)?) => {
         #[cfg(target_arch = "mips")]
         extern "Rust" { #[link_name = $sym] fn $ext($($a: $t),*) $(-> $r)?; }
-        $crate::__window_level1_stub!($sym, $orig);
+        $crate::__window_level1_stub!($sym, $orig, $floor);
+        #[cfg(target_arch = "mips")]
+        const _: () = assert!(
+            true $(&& core::mem::align_of::<$t>() <= 4)*,
+            "window_fn! arguments must be at most 4-byte aligned (no 64-bit values)"
+        );
+        #[cfg(target_arch = "mips")]
         const _: () = assert!(
             1 $(+ $crate::scratchpad_window::abi_words(core::mem::size_of::<$t>()))*
                 <= 4 + $crate::scratchpad_window::LEVEL1_ARG_WORDS,
@@ -302,17 +327,23 @@ macro_rules! window_fn {
             unsafe { $orig($($a),*) }
         }
     };
-    (guard $room:expr, $on:expr, $sym:literal, $ext:ident, $wrap:ident, $orig:ident,
+    (guard $floor:expr, $need:expr, $on:expr, $sym:literal, $ext:ident, $wrap:ident, $orig:ident,
      ($($a:ident : $t:ty),* $(,)?) $(-> $r:ty)?) => {
         #[cfg(target_arch = "mips")]
         extern "Rust" { #[link_name = $sym] fn $ext($($a: $t),*) $(-> $r)?; }
-        $crate::__window_guard_stub!($sym, $orig, $room);
+        $crate::__window_guard_stub!($sym, $orig, $floor, ($floor) + ($need));
+        #[cfg(target_arch = "mips")]
+        const _: () = assert!(
+            true $(&& core::mem::align_of::<$t>() <= 4)*,
+            "window_fn! arguments must be at most 4-byte aligned (no 64-bit values)"
+        );
+        #[cfg(target_arch = "mips")]
         const _: () = assert!(
             1 $(+ $crate::scratchpad_window::abi_words(core::mem::size_of::<$t>()))*
                 <= 4 + $crate::scratchpad_window::HOP_ARG_WORDS,
             "hop copies only 12 stack words"
         );
-        const _: () = assert!(($room) <= 32767, "guard room does not fit the stub immediate");
+        const _: () = assert!(($floor) + ($need) <= 32767, "guard room does not fit the stub immediate");
         #[inline(always)]
         unsafe fn $wrap($($a: $t),*) $(-> $r)? {
             #[cfg(target_arch = "mips")]
@@ -342,9 +373,9 @@ mod tests {
         (x.len() as u32, y)
     }
 
-    crate::window_fn!(level1, true, "__test_add3", ext_add3, win_add3, add3,
+    crate::window_fn!(level1 8, true, "__test_add3", ext_add3, win_add3, add3,
         (a: u32, b: u32, c: u32, d: u32, e: u32, f: u32) -> u32);
-    crate::window_fn!(guard 100 + 368, true, "__test_pair", ext_pair, win_pair, pair,
+    crate::window_fn!(guard 100, 368, true, "__test_pair", ext_pair, win_pair, pair,
         (x: &[u8], y: u32) -> (u32, u32));
 
     #[test]

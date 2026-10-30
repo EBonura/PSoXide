@@ -26,7 +26,7 @@ panic-on-stack = []
 chained-vector = []
 # Also run a recursive workload through psx_rt::scratchpad_window (level-1 switch plus a guard that hops
 # back to the RAM stack) with the same VBlank pressure; the result must match a plain RAM run.
-window = []
+window = ["psx-rt/scratchpad-window"]
 
 [dependencies]
 psx-gpu  = { path = "../../crates/psx-gpu" }

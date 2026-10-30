@@ -196,15 +196,19 @@ struct Walker<'a> {
     memo: HashMap<i64, (i64, Vec<String>)>,
     /// Functions no tree may reach (`--forbid`).
     forbidden: &'a [String],
+    /// Call targets that cost a fixed number of bytes and are not followed (a scratchpad window's guard stubs:
+    /// the callee behind a guard runs on its own, checked, budget).
+    leaves: &'a HashMap<i64, i64>,
 }
 
 impl<'a> Walker<'a> {
-    fn new(image: &'a GuardImage, forbidden: &'a [String]) -> Self {
+    fn new(image: &'a GuardImage, forbidden: &'a [String], leaves: &'a HashMap<i64, i64>) -> Self {
         Self {
             image,
             detector: Detector::new(image.image(), Some(&image.map)),
             memo: HashMap::new(),
             forbidden,
+            leaves,
         }
     }
 
@@ -223,6 +227,13 @@ impl<'a> Walker<'a> {
                 return Ok(Vec::new());
             };
             if start <= dest && dest < end {
+                // A branch or jump inside the function is control flow; a `jal` into its own range is a call to
+                // itself (or into its middle), which is recursion the walk would otherwise never see.
+                if op == "jal" {
+                    return Err(GuardError(format!(
+                        "{name} calls itself at {addr:08x}, so its depth has no bound"
+                    )));
+                }
                 return Ok(Vec::new());
             }
             if self.image.in_trampolines(dest) {
@@ -296,6 +307,9 @@ impl<'a> Walker<'a> {
 
     /// `(bytes, chain)` for the deepest path from the function at `addr`.
     fn depth(&mut self, addr: i64, path: &mut Vec<i64>) -> Result<(i64, Vec<String>), GuardError> {
+        if let Some(&cost) = self.leaves.get(&addr) {
+            return Ok((cost, vec![format!("guard@{addr:08x}({cost})")]));
+        }
         let Some((start, end, name)) = self.image.map.function(addr) else {
             return Err(GuardError(format!("call to {addr:08x}, outside .text")));
         };
@@ -557,7 +571,8 @@ pub fn check_forbidding_modules(
         );
         return 0;
     }
-    let mut walker = Walker::new(&image, forbidden);
+    let no_leaves = HashMap::new();
+    let mut walker = Walker::new(&image, forbidden, &no_leaves);
     let mut failures = 0;
     for (address, name, limit, region) in entries {
         let place = region.map_or(String::new(), |(lo, hi)| format!("region {lo}..{hi}, "));
@@ -662,6 +677,19 @@ pub fn main(args: &[String], out: &mut dyn Write) -> i32 {
         );
     }
     i32::from(failures != 0)
+}
+
+/// Static stack depth, in bytes of frames, of the call tree rooted at `addr`, with every address in `leaves` counted
+/// as that many bytes and not followed. Calls through registers, jumps that are not provable tables, `$sp` writes
+/// other than `addiu` frames, trampolines that are not hazard patches and recursion are errors, as in `check`. This
+/// is what `window_gate` proves a scratchpad window's guards and roots against.
+pub fn tree_depth(
+    image: &GuardImage,
+    addr: i64,
+    leaves: &HashMap<i64, i64>,
+) -> Result<(i64, Vec<String>), GuardError> {
+    let mut walker = Walker::new(image, &[], leaves);
+    walker.depth(addr, &mut Vec::new())
 }
 
 #[cfg(test)]
