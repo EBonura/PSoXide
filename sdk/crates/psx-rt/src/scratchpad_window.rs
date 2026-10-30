@@ -42,6 +42,20 @@
 //! A crate that uses `window_fn!` needs `#![feature(asm_experimental_arch)]` on the PS1 target, like any
 //! crate with `global_asm!`.
 //!
+//! # Known limits (second review, not blocking)
+//!
+//! * `window-gate` does not see a `jal` to itself that hazard-patch rerouted through a trampoline, nor a
+//!   `bal` self-call; LLVM does not emit either for the prologue-first code this targets, but the proof
+//!   does not cover them.
+//! * Its bypass scan reads `j` and `jal`; a call through a trampoline or a `beq` to a stubbed target is not
+//!   reported as a bypass (the depth is still counted, so it stays sound).
+//! * There is no `--module` support: stubs in streamed overlay code are invisible to the gate.
+//! * The proof's per-guard cost (24 bytes) and overhead (20) are conservative constants the tests do not pin
+//!   individually.
+//! * Mixing `$on` values between stubs of one program is not supported; use one value for all.
+//! * The level-1 "already on the scratchpad" path is unreachable through the gate (a level-1 stub reached
+//!   from inside a window tree is refused); the stub still tail-calls the target in that case.
+//!
 //! # Layout
 //!
 //! Stack-argument words are copied to the window top: eight for level-1 calls, twelve for hops
