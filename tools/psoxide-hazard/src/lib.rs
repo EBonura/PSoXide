@@ -28,6 +28,7 @@ pub mod overlay_pack;
 pub mod patch;
 pub mod scan;
 pub mod stack_guard;
+pub mod window_gate;
 pub mod text;
 
 use detect::Unlisted;

@@ -222,7 +222,7 @@ impl<const START: usize, const END: usize> ScratchpadStack<START, END> {
     pub unsafe fn run<R, F: FnOnce() -> R>(f: F) -> R {
         // Force the layout checks for every instantiation.
         let region = Self::REGION;
-        if is_on_scratchpad_stack() {
+        if is_on_scratchpad_stack() || crate::scratchpad_window::is_active() {
             return f();
         }
         let mut frame = Frame::<F, R> {
@@ -332,7 +332,7 @@ __psx_rt_jump_on_stack:
 /// in progress; zero when none is.
 #[cfg(target_arch = "mips")]
 #[no_mangle]
-static mut __psx_rt_scratchpad_return_sp: usize = 0;
+pub(crate) static mut __psx_rt_scratchpad_return_sp: usize = 0;
 
 #[cfg(target_arch = "mips")]
 extern "C" {

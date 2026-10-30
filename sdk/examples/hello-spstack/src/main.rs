@@ -22,7 +22,10 @@
 
 #![no_std]
 #![no_main]
-#![cfg_attr(feature = "chained-vector", feature(asm_experimental_arch))]
+#![cfg_attr(
+    any(feature = "chained-vector", feature = "window"),
+    feature(asm_experimental_arch)
+)]
 
 extern crate psx_rt;
 
@@ -164,6 +167,110 @@ extern "C" {
     fn hello_spstack_vector();
 }
 
+/// The window workload: a recursion that is deeper than the scratchpad window, so the guard has to hop back.
+#[cfg(feature = "window")]
+mod window {
+    use super::*;
+
+    /// First scratchpad byte the window may use: everything below is the table.
+    pub const FLOOR: usize = TABLE.len();
+    /// Levels of recursion per call: about 80 bytes each, so the tail does not fit the 720-byte window.
+    pub const DEPTH: u32 = 18;
+    pub static mut LEVELS_ON_SCRATCHPAD: u32 = 0;
+    pub static mut LEVELS_ON_RAM: u32 = 0;
+    pub static mut NESTED_RUN_ON_SCRATCHPAD: u32 = 0;
+
+    /// The recursion, once as the window target (`W` true: calls go through the guard) and once as the plain RAM
+    /// reference (`W` false: ordinary calls), so the control run never calls a stubbed function directly.
+    #[inline(never)]
+    unsafe fn deep<const W: bool>(n: u32, seed: u32) -> u32 {
+        let mut local = [0u32; 12];
+        for (i, word) in local.iter_mut().enumerate() {
+            let t = unsafe {
+                table()
+                    .add((seed as usize + i) % TABLE_WORDS)
+                    .read_volatile()
+            };
+            *word = seed.wrapping_mul(0x2545_f491).rotate_left(i as u32) ^ t;
+        }
+        if W {
+            unsafe {
+                if scratchpad::is_on_scratchpad_stack() {
+                    LEVELS_ON_SCRATCHPAD += 1;
+                } else {
+                    LEVELS_ON_RAM += 1;
+                    // A nested run from a hopped-back region must run in place on the RAM stack.
+                    let inside = WorkStack::run(|| scratchpad::is_on_scratchpad_stack());
+                    NESTED_RUN_ON_SCRATCHPAD += u32::from(inside);
+                }
+            }
+        }
+        let local = black_box(&mut local);
+        let below = if n == 0 {
+            seed
+        } else if W {
+            unsafe { win_deep(n - 1, seed ^ local[3]) }
+        } else {
+            unsafe { deep::<false>(n - 1, seed ^ local[3]) }
+        };
+        local.iter().fold(below, |acc, &w| acc.rotate_left(3) ^ w)
+    }
+
+    #[inline(never)]
+    unsafe fn entry<const W: bool>(depth: u32, seed: u32) -> u32 {
+        let mut local = [0u32; 6];
+        for (i, word) in local.iter_mut().enumerate() {
+            *word = seed.wrapping_add(i as u32 * 0x1234_5679);
+        }
+        let local = black_box(&mut local);
+        let below = if W {
+            unsafe { win_deep(depth, seed) }
+        } else {
+            unsafe { deep::<false>(depth, seed) }
+        };
+        local
+            .iter()
+            .fold(below, |acc, &w| acc.wrapping_mul(31).wrapping_add(w))
+    }
+
+    #[inline(never)]
+    unsafe fn deep_impl(n: u32, seed: u32) -> u32 {
+        unsafe { deep::<true>(n, seed) }
+    }
+
+    #[inline(never)]
+    unsafe fn entry_impl(depth: u32, seed: u32) -> u32 {
+        unsafe { entry::<true>(depth, seed) }
+    }
+
+    // `need` comes from `window-gate --emit`; the gate fails the build when it is too small.
+    psx_rt::window_fn!(guard FLOOR + 160, true, "__spwin_deep", ext_deep, win_deep, deep_impl,
+        (n: u32, seed: u32) -> u32);
+    psx_rt::window_fn!(level1, true, "__spwin_entry", ext_entry, win_entry, entry_impl,
+        (depth: u32, seed: u32) -> u32);
+
+    /// Plain run: the guard stubs see a RAM `$sp` and call straight through.
+    #[inline(never)]
+    pub fn ram_workload(rounds: u32) -> u32 {
+        let mut checksum = 0x1234_5678u32;
+        for round in 0..rounds {
+            checksum ^= unsafe { entry::<false>(DEPTH, checksum.wrapping_add(round)) };
+        }
+        checksum
+    }
+
+    /// Window run: every call switches `$sp` onto the scratchpad and the deep tail hops back.
+    #[inline(never)]
+    pub fn window_workload(rounds: u32) -> (u32, u32) {
+        let start = interrupts::vblank_count();
+        let mut checksum = 0x1234_5678u32;
+        for round in 0..rounds {
+            checksum ^= unsafe { win_entry(DEPTH, checksum.wrapping_add(round)) };
+        }
+        (checksum, interrupts::vblank_count().wrapping_sub(start))
+    }
+}
+
 #[no_mangle]
 fn main() {
     interrupts::install_vblank_counter();
@@ -231,7 +338,63 @@ fn main() {
         ),
         (interrupts::fault_count() == 0, "exceptions other than IRQs"),
     ];
-    let failures = checks.iter().filter(|check| !check.0).count() as u32;
+    #[cfg(feature = "window")]
+    let window_failures = {
+        let ram_sum = window::ram_workload(black_box(ROUNDS * 8));
+        let (win_sum, win_irqs) = window::window_workload(black_box(ROUNDS * 8));
+        let (spad_levels, ram_levels, nested) = unsafe {
+            (
+                window::LEVELS_ON_SCRATCHPAD,
+                window::LEVELS_ON_RAM,
+                window::NESTED_RUN_ON_SCRATCHPAD,
+            )
+        };
+        let window_checks = [
+            (
+                ram_sum == win_sum,
+                "window checksum differs from the RAM run",
+            ),
+            (spad_levels > 0, "window run never used the scratchpad"),
+            (
+                ram_levels > ROUNDS,
+                "guard never hopped back to the RAM stack",
+            ),
+            (
+                win_irqs >= MIN_IRQS_ON_STACK,
+                "too few IRQs during the window run",
+            ),
+            (
+                nested == 0,
+                "a nested run inside a hopped-back region left the RAM stack",
+            ),
+            (
+                !scratchpad::is_on_scratchpad_stack() && !psx_rt::scratchpad_window::is_active(),
+                "window left $sp or its state behind",
+            ),
+        ];
+        for (ok, what) in window_checks.iter() {
+            if !*ok {
+                tty::print("SPSTACK window check failed: ");
+                tty::println(what);
+            }
+        }
+        tty::print("SPSTACK window");
+        for (label, v) in [
+            ("sum", win_sum),
+            ("irqs", win_irqs),
+            ("spad_levels", spad_levels),
+            ("ram_levels", ram_levels),
+        ] {
+            let (text, len) = line(label, v);
+            tty::print(" ");
+            tty::print(as_str(&text[..len]));
+        }
+        tty::println("");
+        window_checks.iter().filter(|c| !c.0).count() as u32
+    };
+    #[cfg(not(feature = "window"))]
+    let window_failures = 0u32;
+    let failures = checks.iter().filter(|check| !check.0).count() as u32 + window_failures;
     for (_, what) in checks.iter().filter(|check| !check.0) {
         tty::print("SPSTACK check failed: ");
         tty::println(what);
