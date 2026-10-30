@@ -656,7 +656,10 @@ impl Guest {
         )?;
         // Nothing but psx-rt's flush routines may change the cache control register or isolate
         // the cache (sdk/docs/CACHE-CONTROL.md); not overridable.
-        check(None, psoxide_hazard::cache_gate::main, true, "cache gate")
+        check(None, psoxide_hazard::cache_gate::main, true, "cache gate")?;
+        // A game that uses psx_rt::scratchpad_window gets its guard rooms and level-1 roots proved
+        // from the final image; a game without stubs passes silently.
+        check(None, psoxide_hazard::window_gate::main, true, "window gate")
     }
 }
 
