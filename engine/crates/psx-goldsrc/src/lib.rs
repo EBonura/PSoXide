@@ -2,6 +2,7 @@
 // Host unit tests in the moved gameplay modules use `Vec`, `Box` and `std::vec`.
 #![cfg_attr(not(test), no_std)]
 #![feature(optimize_attribute)]
+#![cfg_attr(target_arch = "mips", feature(asm_experimental_arch))]
 
 pub mod chunk_stream;
 pub mod ground_logic;
