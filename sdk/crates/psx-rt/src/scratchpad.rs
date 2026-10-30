@@ -222,7 +222,11 @@ impl<const START: usize, const END: usize> ScratchpadStack<START, END> {
     pub unsafe fn run<R, F: FnOnce() -> R>(f: F) -> R {
         // Force the layout checks for every instantiation.
         let region = Self::REGION;
-        if is_on_scratchpad_stack() || crate::scratchpad_window::is_active() {
+        #[cfg(feature = "scratchpad-window")]
+        let in_window = crate::scratchpad_window::is_active();
+        #[cfg(not(feature = "scratchpad-window"))]
+        let in_window = false;
+        if is_on_scratchpad_stack() || in_window {
             return f();
         }
         let mut frame = Frame::<F, R> {

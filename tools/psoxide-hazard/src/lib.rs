@@ -28,8 +28,8 @@ pub mod overlay_pack;
 pub mod patch;
 pub mod scan;
 pub mod stack_guard;
-pub mod window_gate;
 pub mod text;
+pub mod window_gate;
 
 use detect::Unlisted;
 use linkmap::LinkMap;

@@ -174,7 +174,7 @@ mod window {
 
     /// First scratchpad byte the window may use: everything below is the table.
     pub const FLOOR: usize = TABLE.len();
-    /// Levels of recursion per call: about 80 bytes each, so the tail does not fit the 720-byte window.
+    /// Levels of recursion per call: about 130 bytes each, so the tail does not fit the 720-byte window.
     pub const DEPTH: u32 = 18;
     pub static mut LEVELS_ON_SCRATCHPAD: u32 = 0;
     pub static mut LEVELS_ON_RAM: u32 = 0;
@@ -243,13 +243,14 @@ mod window {
         unsafe { entry::<true>(depth, seed) }
     }
 
-    // `need` comes from `window-gate --emit`; the gate fails the build when it is too small.
-    psx_rt::window_fn!(guard FLOOR + 160, true, "__spwin_deep", ext_deep, win_deep, deep_impl,
+    // The guard `NEED` comes from `window-gate --emit`; the gate fails the build when it is too small, and
+    // PSOXIDE_WINDOW_FLOOR (or the stubs' own floor) is what it proves against.
+    psx_rt::window_fn!(guard FLOOR, 184, true, "__spwin_deep", ext_deep, win_deep, deep_impl,
         (n: u32, seed: u32) -> u32);
-    psx_rt::window_fn!(level1, true, "__spwin_entry", ext_entry, win_entry, entry_impl,
+    psx_rt::window_fn!(level1 FLOOR, true, "__spwin_entry", ext_entry, win_entry, entry_impl,
         (depth: u32, seed: u32) -> u32);
 
-    /// Plain run: the guard stubs see a RAM `$sp` and call straight through.
+    /// Plain run: the same recursion called directly (`W` false), so no stub is involved.
     #[inline(never)]
     pub fn ram_workload(rounds: u32) -> u32 {
         let mut checksum = 0x1234_5678u32;
