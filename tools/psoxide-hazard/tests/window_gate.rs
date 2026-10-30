@@ -5,8 +5,6 @@
 
 mod common;
 
-use std::path::PathBuf;
-
 use common::*;
 use psoxide_hazard::stack_guard::GuardImage;
 use psoxide_hazard::window_gate::{self, Report};
@@ -39,7 +37,7 @@ fn stub(target: u32, guard: bool, floor: u32, room: u32) -> Vec<u32> {
         } else {
             NOP
         },
-        floor,
+        0x2400_0000 | floor,
     ]
 }
 
@@ -214,4 +212,15 @@ fn a_program_without_stubs_passes_silently() {
     assert_eq!(r.stubs, 0);
 }
 
-fn _unused(_: PathBuf) {}
+#[test]
+fn a_jump_to_a_window_routine_outside_a_stub_fails() {
+    let mut s = scene(8 + 128 + 20, 128, 8);
+    // A hand-written 3-word stub (size under 20) is not recognised, so its `j` is found instead.
+    s.put(
+        7,
+        "handmade",
+        &[lui("t9", hi(addr(6))), j(addr(GUARD)), NOP],
+    );
+    let r = s.check(None, 976);
+    assert!(failed(&r, "not a recognised stub"), "{:?}", r.lines);
+}

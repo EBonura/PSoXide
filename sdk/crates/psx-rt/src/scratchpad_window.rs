@@ -59,6 +59,7 @@ pub const HOP_ARG_WORDS: usize = 12;
 /// `[RAM $sp of the outermost switch, busy]`, 8-aligned so the asm's `%hi(state)` pairs with `%lo(state)` and
 /// `%lo(state+4)` without a carry. Not part of the API.
 #[repr(C, align(8))]
+#[non_exhaustive]
 pub struct WindowState(pub [u32; 2]);
 
 /// The window's state; the asm reads and writes it.
@@ -68,6 +69,7 @@ pub static mut __psx_rt_window_state: WindowState = WindowState([0; 2]);
 
 /// Argument words the Rust ABI uses for a value of `size` bytes on mipsel: aggregates over two words go
 /// by pointer.
+#[must_use]
 pub const fn abi_words(size: usize) -> usize {
     if size <= 8 {
         size.div_ceil(4)
@@ -78,6 +80,7 @@ pub const fn abi_words(size: usize) -> usize {
 
 /// True while a level-1 switch is in progress (on the window or hopped back to RAM).
 #[inline(always)]
+#[must_use]
 pub fn is_active() -> bool {
     // SAFETY: a plain read of a word only the thunks write, in the same thread of control.
     unsafe { core::ptr::read_volatile(&raw const __psx_rt_window_state.0[1]) != 0 }
@@ -92,7 +95,7 @@ core::arch::global_asm!(
     ".set noreorder",
     ".set noat",
     "__psx_rt_window_l1:",
-    "lui $t0, 0x1f80",
+    "lui $t0, {spad_hi}",
     "subu $t1, $sp, $t0",
     "sltiu $t1, $t1, 0x400",
     "bnez $t1, 1f",
@@ -148,6 +151,7 @@ core::arch::global_asm!(
     ".set reorder",
     state = sym __psx_rt_window_state,
     retsp = sym crate::scratchpad::__psx_rt_scratchpad_return_sp,
+    spad_hi = const psx_hw::memory::scratchpad::BASE >> 16,
 );
 
 // Common hop-back: `$t9` = target, `$sp` on the window. Runs the target on the RAM stack below the outermost
@@ -214,7 +218,7 @@ core::arch::global_asm!(
     ".set noreorder",
     ".set noat",
     "__psx_rt_window_guard:",
-    "lui $t0, 0x1f80",
+    "lui $t0, {spad_hi}",
     "subu $t1, $sp, $t0",
     "sltiu $t2, $t1, 0x400",
     "beqz $t2, 1f",
@@ -229,6 +233,7 @@ core::arch::global_asm!(
     ".size __psx_rt_window_guard, .-__psx_rt_window_guard",
     ".set at",
     ".set reorder",
+    spad_hi = const psx_hw::memory::scratchpad::BASE >> 16,
 );
 
 /// The asm of a level-1 stub (an implementation detail of `window_fn!`).
@@ -247,8 +252,9 @@ macro_rules! __window_level1_stub {
             "addiu $t9, $t9, %lo({f})",
             "j __psx_rt_window_l1",
             "nop",
-            // Never executed: the floor `window-gate` reads back.
-            ".word {floor}",
+            // Never executed (the `j` and its slot come first): the floor `window-gate` reads back, as an
+            // instruction that writes `$zero` so the hazard tools see ordinary code.
+            "addiu $zero, $zero, {floor}",
             concat!(".size ", $name, ", 20"),
             ".set reorder",
             f = sym $target,
@@ -273,7 +279,7 @@ macro_rules! __window_guard_stub {
             "addiu $t9, $t9, %lo({f})",
             "j __psx_rt_window_guard",
             "addiu $t8, $zero, {room}",
-            ".word {floor}",
+            "addiu $zero, $zero, {floor}",
             concat!(".size ", $name, ", 20"),
             ".set reorder",
             f = sym $target,
@@ -323,7 +329,9 @@ macro_rules! window_fn {
         #[inline(always)]
         unsafe fn $wrap($($a: $t),*) $(-> $r)? {
             #[cfg(target_arch = "mips")]
+            // SAFETY: the wrapper has the callee's own signature and contract; it only moves the stack.
             if $on { return unsafe { $ext($($a),*) }; }
+            // SAFETY: as above, a plain call of the target.
             unsafe { $orig($($a),*) }
         }
     };
@@ -347,7 +355,9 @@ macro_rules! window_fn {
         #[inline(always)]
         unsafe fn $wrap($($a: $t),*) $(-> $r)? {
             #[cfg(target_arch = "mips")]
+            // SAFETY: the wrapper has the callee's own signature and contract; it only moves the stack.
             if $on { return unsafe { $ext($($a),*) }; }
+            // SAFETY: as above, a plain call of the target.
             unsafe { $orig($($a),*) }
         }
     };

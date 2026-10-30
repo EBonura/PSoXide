@@ -20,7 +20,7 @@
 //! ```text
 //! window-gate path/to/game.exe --map path/to/game.map [--floor N] [--top N] [--emit]
 //! ```
-//! `--emit` prints `EMIT <function> <room>` lines, the smallest guard room per target.
+//! `--emit` prints `EMIT <function> <need>` lines, the smallest `NEED` for `window_fn!` per target.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -37,7 +37,7 @@ Fail when a scratchpad stack window can overflow.
 
 --floor is the window floor the stubs must carry (default: from PSOXIDE_WINDOW_FLOOR, else the stubs'
 own), --top the window's stack top (default 976, psx_rt::scratchpad_window::TOP). --emit prints the room
-each guard needs.
+each guard needs (the `NEED` of `window_fn!`).
 ";
 
 /// `STACK_OVERHEAD` of `stack-guard`: bytes a tree cannot use at the bottom of its region.
@@ -47,6 +47,7 @@ const GUARD_COST: i64 = 24;
 
 /// One stub found in the image.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Stub {
     /// Its address.
     pub at: i64,
@@ -62,6 +63,7 @@ pub struct Stub {
 
 /// What the gate concluded.
 #[derive(Debug, Default)]
+#[non_exhaustive]
 pub struct Report {
     /// One line per check.
     pub lines: Vec<String>,
@@ -69,7 +71,7 @@ pub struct Report {
     pub ok: bool,
     /// Number of stubs found.
     pub stubs: usize,
-    /// `(target name, smallest room)` for `--emit`.
+    /// `(target name, smallest NEED)` for `--emit`: what `window_fn!`'s `guard FLOOR, NEED` takes.
     pub rooms: Vec<(String, u32)>,
 }
 
@@ -104,18 +106,23 @@ fn find_stubs(image: &GuardImage) -> Vec<Stub> {
         } else {
             0
         };
+        // The floor rides in the fifth word as `addiu $zero,$zero,floor`.
+        if w(4) >> 16 != 0x2400 {
+            continue;
+        }
         stubs.push(Stub {
             at,
             target,
             guard: is_guard,
             room,
-            floor: w(4),
+            floor: w(4) & 0xffff,
         });
     }
     stubs
 }
 
 /// Run the checks over the image.
+#[must_use]
 pub fn analyse(image: &GuardImage, floor_arg: Option<u32>, top: u32) -> Report {
     let stubs = find_stubs(image);
     let mut report = Report {
@@ -179,7 +186,9 @@ pub fn analyse(image: &GuardImage, floor_arg: Option<u32>, top: u32) -> Report {
                         i64::from(floor) + needed
                     ));
                     report.ok &= good;
-                    report.rooms.push((name, smallest as u32));
+                    report
+                        .rooms
+                        .push((name, (smallest - i64::from(floor)) as u32));
                 } else {
                     let window = i64::from(top) - i64::from(floor);
                     let good = needed <= window;
@@ -221,6 +230,41 @@ pub fn analyse(image: &GuardImage, floor_arg: Option<u32>, top: u32) -> Report {
             }
         }
     }
+    let commons: Vec<i64> = [
+        "__psx_rt_window_l1",
+        "__psx_rt_window_guard",
+        "__psx_rt_window_hop",
+    ]
+    .iter()
+    .filter_map(|n| {
+        image
+            .map
+            .names
+            .iter()
+            .find(|(_, v)| v.iter().any(|(_, x)| x == n))
+            .map(|(a, _)| *a)
+    })
+    .collect();
+    for (addr, entry) in image.listing.iter() {
+        if entry.op != "j" && entry.op != "jal" {
+            continue;
+        }
+        let Some(dest) = crate::text::trailing_hex(&entry.args) else {
+            continue;
+        };
+        if commons.contains(&dest) && !stub_ranges.iter().any(|&(a, b)| a <= addr && addr < b) {
+            let inside = image
+                .map
+                .function(addr)
+                .is_some_and(|(_, _, n)| n.starts_with("__psx_rt_window_"));
+            if !inside {
+                fail(
+                    &mut report,
+                    format!("{addr:08x} jumps to a window routine but is not a recognised stub"),
+                );
+            }
+        }
+    }
     report.lines.push(format!(
         "{} stubs: {}",
         stubs.len(),
@@ -234,6 +278,10 @@ pub fn analyse(image: &GuardImage, floor_arg: Option<u32>, top: u32) -> Report {
 }
 
 /// Open `exe` and `map_path` and run the gate.
+///
+/// # Errors
+///
+/// The image or its map cannot be read, or the map is from another link.
 pub fn check(exe: &Path, map_path: &Path, floor: Option<u32>, top: u32) -> Result<Report, String> {
     let image = GuardImage::open(exe, map_path).map_err(|e| e.to_string())?;
     Ok(analyse(&image, floor, top))
