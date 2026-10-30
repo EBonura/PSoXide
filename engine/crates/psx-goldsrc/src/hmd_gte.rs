@@ -187,7 +187,10 @@ mod tests {
             Vec3I16::new(5, 77, 120),
         );
         for i in 0..3 {
-            assert_eq!((got[i].sx, got[i].sy, got[i].sz), (want[i].sx, want[i].sy, want[i].sz));
+            assert_eq!(
+                (got[i].sx, got[i].sy, got[i].sz),
+                (want[i].sx, want[i].sy, want[i].sz)
+            );
         }
     }
 }
