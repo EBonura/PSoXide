@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+Added `psx_rt::scratchpad_window` (feature `scratchpad-window`, off by default, programs that leave it off are
+byte-identical): a stack window on the scratchpad for whole call trees with hop-back to the RAM stack at guarded
+callees (`window_fn!`), and `window-gate` in psoxide-hazard, run by psoxide-pgo after every link, which proves from
+the final image that each guard's room covers its target's static depth, that level-1 roots fit the window, that
+nothing bypasses a stub and that the walker finds no indirect call, `$sp` realignment or recursion. `stack-guard`
+now treats a `jal` to the function's own range as recursion. `hello-spstack` runs a recursion deeper than the
+window under VBlank interrupts. Known limits are listed in the module docs.
+
 Removed the deprecated forwarders that need no device owner, so a repin that
 still uses an old name stops compiling at that name. Every removed item has a
 replacement of the same shape; `sdk/docs/NAMING-RENAMES.md` maps old to new
