@@ -66,11 +66,139 @@ const CHANNELS: [Channel; 7] = [
     Channel::OrderingTableClear,
 ];
 
+/// What the program found in the machine registers when it started, before
+/// [`set_entry_state`] replaced it (feature `entry-census`).
+///
+/// This is how the hardware tests learn what each BIOS leaves behind; nothing in the SDK reads it.
+#[cfg(feature = "entry-census")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Inherited {
+    /// cop0 SR.
+    pub status: u32,
+    /// `I_STAT`.
+    pub i_stat: u32,
+    /// `I_MASK`.
+    pub i_mask: u32,
+    /// `DPCR`.
+    pub dpcr: u32,
+    /// `DICR`.
+    pub dicr: u32,
+    /// Bit `n` is set when DMA channel `n` was busy.
+    pub dma_busy: u32,
+    /// Root counter 0 to 2 mode registers.
+    pub timer_mode: [u16; 3],
+    /// SPUCNT.
+    pub spucnt: u16,
+    /// SPUSTAT.
+    pub spustat: u16,
+    /// Main volume, left and right.
+    pub main_volume: [u16; 2],
+    /// CD input volume, left and right.
+    pub cd_volume: [u16; 2],
+    /// Reverb output volume, left and right.
+    pub reverb_volume: [u16; 2],
+    /// Reverb work-area base.
+    pub reverb_base: u16,
+    /// Reverb enable mask, voices 0 to 15.
+    pub reverb_enable: u16,
+    /// SIO0 STAT.
+    pub sio_status: u32,
+    /// SIO0 CTRL.
+    pub sio_control: u16,
+    /// The four words at the general exception vector.
+    pub vector: [u32; 4],
+}
+
+#[cfg(feature = "entry-census")]
+static mut INHERITED: Inherited = Inherited {
+    status: 0,
+    i_stat: 0,
+    i_mask: 0,
+    dpcr: 0,
+    dicr: 0,
+    dma_busy: 0,
+    timer_mode: [0; 3],
+    spucnt: 0,
+    spustat: 0,
+    main_volume: [0; 2],
+    cd_volume: [0; 2],
+    reverb_volume: [0; 2],
+    reverb_base: 0,
+    reverb_enable: 0,
+    sio_status: 0,
+    sio_control: 0,
+    vector: [0; 4],
+};
+
+/// The registers as the program found them (all zero before `_start` has run, or off the console).
+#[cfg(feature = "entry-census")]
+pub fn inherited() -> Inherited {
+    // SAFETY: a copy of a static written once by `set_entry_state` at boot, before `main`.
+    unsafe { *core::ptr::addr_of!(INHERITED) }
+}
+
+/// Read the registers `set_entry_state` is about to replace.
+#[cfg(all(feature = "entry-census", target_arch = "mips"))]
+fn take_census() {
+    use psx_hw::sio::sio0;
+    const EXCEPTION_VECTOR: *const u32 = 0x8000_0080 as *const u32;
+    let status: u32;
+    // SAFETY: reads cop0 SR into $8 (the nop covers MFC0's load delay), then plain register and
+    // kernel-RAM reads, all without side effects except that reading a root counter's mode clears
+    // its sticky bits, which `set_entry_state` rewrites next.
+    unsafe {
+        core::arch::asm!("mfc0 $8, $12", "nop", lateout("$8") status, options(nomem, nostack));
+        let mut census = Inherited {
+            status,
+            i_stat: psx_io::irq::pending(),
+            i_mask: psx_io::irq::mask(),
+            dpcr: psx_io::read_u32(dma::DPCR),
+            dicr: psx_io::read_u32(dma::DICR),
+            spucnt: psx_io::read_u16(spu::SPUCNT),
+            spustat: psx_io::read_u16(spu::SPUSTAT),
+            main_volume: [
+                psx_io::read_u16(spu::MAIN_VOL_LEFT),
+                psx_io::read_u16(spu::MAIN_VOL_RIGHT),
+            ],
+            cd_volume: [
+                psx_io::read_u16(spu::CD_VOL_LEFT),
+                psx_io::read_u16(spu::CD_VOL_RIGHT),
+            ],
+            reverb_volume: [
+                psx_io::read_u16(spu::REVERB_VOL_LEFT),
+                psx_io::read_u16(spu::REVERB_VOL_RIGHT),
+            ],
+            reverb_base: psx_io::read_u16(spu::REVERB_WORK_BASE),
+            reverb_enable: psx_io::read_u16(spu::mask::REVERB_ENABLE_LO),
+            sio_status: psx_io::read_u32(sio0::STAT),
+            sio_control: psx_io::read_u16(sio0::CTRL),
+            ..Inherited::default()
+        };
+        for (n, channel) in CHANNELS.iter().enumerate() {
+            if psx_io::dma::is_busy(*channel) {
+                census.dma_busy |= 1 << n;
+            }
+        }
+        for (n, timer) in [Timer::Timer0, Timer::Timer1, Timer::Timer2]
+            .into_iter()
+            .enumerate()
+        {
+            census.timer_mode[n] = psx_io::timers::mode(timer);
+        }
+        for (n, word) in census.vector.iter_mut().enumerate() {
+            *word = core::ptr::read_volatile(EXCEPTION_VECTOR.add(n));
+        }
+        INHERITED = census;
+    }
+}
+
 /// Put the machine in the state described in the [module documentation](self).
 ///
 /// Call it from foreground code before any driver is set up. Off the console it does nothing.
 #[cfg(target_arch = "mips")]
 pub fn set_entry_state() {
+    #[cfg(feature = "entry-census")]
+    take_census();
     // SAFETY: the registers written are the interrupt, DMA, root-counter, SIO0 and SPU
     // controllers' own, with values their drivers re-program before use; the program has not
     // started a transfer or taken an interrupt it depends on yet, which is the caller's contract.
