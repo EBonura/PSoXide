@@ -24,11 +24,12 @@ enum Mode {
     Capture,
 }
 
-const MENU: [&str; 6] = [
+const MENU: [&str; 7] = [
     // Row 0 is pinned: `make hwtest-run` selects it by firing CROSS at a fixed
     // tick with the cursor still at its boot position.
     "RUN HARDWARE TEST",
     "GPU DONE SIGNAL ONLY",
+    "GPU DONE FIX CANDIDATES",
     "RADIUS + LIST NODE SWEEP ONLY",
     "CONTROLLER TEST (P1 + P2)",
     "MEMORY CARD (AT OWN RISK)",
@@ -136,9 +137,9 @@ impl HardwareTests {
     }
 
     /// GPU DONE SIGNAL ONLY: run the one step, then show its pages.
-    fn start_gpu_done(&mut self, ctx: &mut Ctx) {
+    fn start_gpu_done(&mut self, ctx: &mut Ctx, set: u8) {
         tty::println("hardware-tests: gpu-done run begins");
-        run::execute_gpu_done(&mut self.run, ctx);
+        run::execute_gpu_done(&mut self.run, ctx, set);
         self.font = Some(ui::upload_font());
         self.done_page = 0;
         self.mode = Mode::GpuDone;
@@ -184,13 +185,14 @@ impl Scene for HardwareTests {
                 if ctx.just_pressed(button::CROSS) {
                     match self.menu_cursor {
                         0 => self.start_run(ctx, false),
-                        1 => self.start_gpu_done(ctx),
-                        2 => self.start_run(ctx, true),
-                        3 => {
+                        1 => self.start_gpu_done(ctx, 0),
+                        2 => self.start_gpu_done(ctx, 1),
+                        3 => self.start_run(ctx, true),
+                        4 => {
                             self.controller_test.start();
                             self.mode = Mode::ControllerTest;
                         }
-                        4 => {
+                        5 => {
                             self.memory_card = crate::probe_tokens::memcard_diagnostic();
                             self.memcard_armed = false;
                             self.mode = Mode::MemoryCard;
@@ -342,7 +344,7 @@ impl HardwareTests {
                 (176, 190, 210)
             };
             font.draw_text(22, y, label, colour);
-            if row == 5 && !self.have_capture {
+            if row == 6 && !self.have_capture {
                 font.draw_text(22, y + 9, "NONE YET - RUN FIRST", (112, 136, 170));
             }
             y += MENU_ROW_PITCH;

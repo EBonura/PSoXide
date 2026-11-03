@@ -129,7 +129,7 @@ struct Row {
     transport: Transport,
 }
 
-const TABLE: [Row; ROWS] = [
+const TABLE_A: [Row; ROWS] = [
     Row { name: "PORT IDLE", transport: Transport::Port },
     Row { name: "PORT NOP", transport: Transport::Port },
     Row { name: "PORT X2", transport: Transport::Port },
@@ -150,7 +150,47 @@ const TABLE: [Row; ROWS] = [
     Row { name: "PORT FILL", transport: Transport::Port },
 ];
 
+const ROWS_B: usize = 11;
+const TABLE_B: [Row; ROWS_B] = [
+    Row { name: "FIX PORT IDLE", transport: Transport::Port },
+    Row { name: "FIX DMA IDLE", transport: Transport::Dma },
+    Row { name: "FIX BIG16", transport: Transport::Dma },
+    Row { name: "FIX BIG15", transport: Transport::Dma },
+    Row { name: "FIX PORT BIG", transport: Transport::Port },
+    Row { name: "COPY 1X1", transport: Transport::Dma },
+    Row { name: "COPY 3X3", transport: Transport::Dma },
+    Row { name: "COPY 6X4", transport: Transport::Dma },
+    Row { name: "COPY 8X8", transport: Transport::Dma },
+    Row { name: "COPY 16X4", transport: Transport::Dma },
+    Row { name: "COPY 40X6", transport: Transport::Dma },
+];
+
+/// Which table is on show: 0 the probe, 1 the fix candidates.
+static mut SET: u8 = 0;
+
+fn table() -> &'static [Row] {
+    // SAFETY: single thread; plain static.
+    if unsafe { SET } == 0 {
+        &TABLE_A
+    } else {
+        &TABLE_B
+    }
+}
+
+fn row_count() -> usize {
+    table().len()
+}
+
+/// Sizes of the self-copies in the closing sequence, in order.
+pub(crate) const FIX_COPIES: [(u32, u32); 4] = [(16, 4), (6, 4), (40, 6), (8, 8)];
+/// Where the self-copies sit: the corner of VRAM, nothing drawn or displayed.
+pub(crate) const COPY_X: u32 = 976;
+pub(crate) const COPY_Y: u32 = 500;
+
 fn script(row: usize) -> Script {
+    if unsafe { SET } == 1 {
+        return script_b(row);
+    }
     let mut s = Script::new();
     match row {
         // Idle GPU, GP0 port.
@@ -235,6 +275,68 @@ fn script(row: usize) -> Script {
     s
 }
 
+impl Script {
+    /// A VRAM-to-VRAM copy of a block onto itself: no pixel changes.
+    fn self_copy(&mut self, w: u32, h: u32) {
+        self.word(0x8000_0000);
+        self.word(xy(COPY_X, COPY_Y));
+        self.word(xy(COPY_X, COPY_Y));
+        self.word(xy(w, h));
+    }
+
+    /// The closing sequence a game sends instead of one 1Fh: the request, then
+    /// a self-copy and another request, for each size. Bit 24 is sticky, so
+    /// only the first request that lands matters.
+    fn fix_sequence(&mut self, cut: bool) {
+        self.word(IRQ_CMD);
+        if cut {
+            self.cut();
+        }
+        for (w, h) in FIX_COPIES {
+            self.self_copy(w, h);
+            if cut {
+                self.cut();
+            }
+            self.word(IRQ_CMD);
+            if cut {
+                self.cut();
+            }
+        }
+    }
+}
+
+fn script_b(row: usize) -> Script {
+    let mut s = Script::new();
+    // Mask off, as a game's reset leaves it: a copy must not set or check it.
+    s.word(0xE600_0000);
+    match row {
+        0 => s.fix_sequence(false),
+        1 => s.fix_sequence(true),
+        2 | 3 => {
+            s.cut();
+            for _ in 0..(if row == 2 { BIG_COUNT } else { BIG_COUNT - 1 }) {
+                s.tri();
+                s.cut();
+            }
+            s.fix_sequence(true);
+        }
+        4 => {
+            s.tri();
+            s.fix_sequence(false);
+        }
+        _ => {
+            let (w, h) = [(1, 1), (3, 3), (6, 4), (8, 8), (16, 4), (40, 6)][row - 5];
+            s.cut();
+            s.word(IRQ_CMD);
+            s.cut();
+            s.self_copy(w, h);
+            s.cut();
+            s.word(IRQ_CMD);
+        }
+    }
+    s
+}
+
 /// Build the DMA list for a script. Returns the head address.
 fn build_list(s: &Script) -> u32 {
     let list = addr_of_mut!(LIST) as *mut u32;
@@ -303,7 +405,7 @@ fn quiet() -> bool {
 
 #[inline(never)]
 fn attempt(row: usize, s: &Script, head: u32) -> Attempt {
-    let transport = TABLE[row].transport;
+    let transport = table()[row].transport;
     // A GPU that never went quiet gets a command-buffer reset; the attempt
     // still runs and reports that it was not clean.
     let quiet_before = quiet();
@@ -338,7 +440,13 @@ fn attempt(row: usize, s: &Script, head: u32) -> Attempt {
     let mut clock = Clock32::start();
     match transport {
         Transport::Port => {
+            // A long script is paced: bit 26 before each word, so the 16-word
+            // FIFO never overflows behind a big draw.
+            let paced = s.len > 12;
             for w in &s.words[..s.len] {
+                if paced {
+                    gpu_io::wait_command_ready();
+                }
                 gpu_io::write_command(*w);
             }
         }
@@ -442,7 +550,7 @@ fn median(values: &mut [u32]) -> u32 {
 
 fn run_row(row: usize) -> Stats {
     let s = script(row);
-    let head = if TABLE[row].transport == Transport::Dma {
+    let head = if table()[row].transport == Transport::Dma {
         build_list(&s)
     } else {
         0
@@ -487,7 +595,9 @@ fn us(clocks: u32) -> u32 {
 }
 
 /// Run every row. Draws progress on the run screen; results stay in statics.
-pub(crate) fn run(font: &FontAtlas) {
+pub(crate) fn run(font: &FontAtlas, set: u8) {
+    // SAFETY: single thread; plain static.
+    unsafe { SET = set };
     // SAFETY: single thread; plain statics.
     unsafe {
         *addr_of_mut!(RESULTS) = [EMPTY; ROWS];
@@ -495,9 +605,9 @@ pub(crate) fn run(font: &FontAtlas) {
     }
     crate::gpu_probes::upload_textures();
     tty::println("hardware-tests: gpu-done begins");
-    for row in 0..ROWS {
+    for row in 0..row_count() {
         let mut tag = ui::Line::new();
-        tag.s("ROW ").u(row as u32 + 1).s(" OF ").u(ROWS as u32).s(" ").s(TABLE[row].name);
+        tag.s("ROW ").u(row as u32 + 1).s(" OF ").u(row_count() as u32).s(" ").s(table()[row].name);
         ui::detail(font, "DONE", tag.as_str());
         let stats = run_row(row);
         // SAFETY: single thread; plain statics.
@@ -508,7 +618,7 @@ pub(crate) fn run(font: &FontAtlas) {
         let mut line = ui::Line::new();
         summary_line(&mut line, row, &stats);
         ui::live_line(font, (row as u32) % ui::LIVE_ROWS, line.as_str(), colour(&stats));
-        ui::sub(row + 1, ROWS);
+        ui::sub(row + 1, row_count());
         tty_row(row, &stats);
     }
     tty::println("hardware-tests: gpu-done complete");
@@ -516,7 +626,7 @@ pub(crate) fn run(font: &FontAtlas) {
 
 fn tty_row(row: usize, st: &Stats) {
     let mut l = ui::Line::new();
-    l.s("hardware-tests: gpu-done ").s(TABLE[row].name);
+    l.s("hardware-tests: gpu-done ").s(table()[row].name);
     l.s(" ok=").u(st.ok).s("/").u(REPEATS as u32);
     l.s(" istat=").u(st.istat).s(" istat_only=").u(st.istat_only);
     tty::println(l.as_str());
@@ -560,7 +670,7 @@ fn pad_num(line: &mut ui::Line, value: u32, width: usize) {
 }
 
 fn summary_line(line: &mut ui::Line, row: usize, st: &Stats) {
-    pad_to(line, TABLE[row].name, 12);
+    pad_to(line, table()[row].name, 12);
     pad_num(line, st.ok, 3);
     line.s("/").u(REPEATS as u32);
 }
@@ -582,7 +692,7 @@ pub(crate) fn draw_page(font: &FontAtlas, page: usize) {
     let plain = (176, 190, 210);
     match page {
         0 => {
-            font.draw_text_scaled_q8(4, 2, "GPU DONE SIGNAL", 512, 512, head);
+            font.draw_text_scaled_q8(4, 2, if unsafe { SET } == 0 { "GPU DONE SIGNAL" } else { "GPU DONE FIX" }, 512, 512, head);
             let mut y = 20;
             for (row, st) in results.iter().take(rows).enumerate() {
                 let mut line = ui::Line::new();
@@ -597,7 +707,7 @@ pub(crate) fn draw_page(font: &FontAtlas, page: usize) {
             let mut y = 25;
             for (row, st) in results.iter().take(rows).enumerate() {
                 let mut line = ui::Line::new();
-                pad_to(&mut line, TABLE[row].name, 12);
+                pad_to(&mut line, table()[row].name, 12);
                 line.s(" ");
                 pad_num(&mut line, st.ok, 2);
                 line.s(" ");
@@ -621,7 +731,7 @@ pub(crate) fn draw_page(font: &FontAtlas, page: usize) {
             let mut y = 25;
             for (row, st) in results.iter().take(rows).enumerate() {
                 let mut line = ui::Line::new();
-                pad_to(&mut line, TABLE[row].name, 12);
+                pad_to(&mut line, table()[row].name, 12);
                 line.s(" ");
                 pad_num(&mut line, st.timeouts, 3);
                 line.s(" ");

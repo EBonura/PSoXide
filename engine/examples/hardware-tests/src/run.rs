@@ -1050,7 +1050,7 @@ fn step_spu_init(run: &mut Run) {
 
 /// GPU DONE SIGNAL ONLY: the GPU area's starting state, then the one step.
 /// No CD or SPU reset, no capture; the results stay in `gpu_done`'s statics.
-pub(crate) fn execute_gpu_done(run: &mut Run, ctx: &mut Ctx) {
+pub(crate) fn execute_gpu_done(run: &mut Run, ctx: &mut Ctx, set: u8) {
     run.irq_baseline = irq::mask();
     // SAFETY: plain read of the DMA control word.
     run.dpcr_baseline = unsafe { psx_io::read_u32(DPCR) };
@@ -1071,7 +1071,7 @@ pub(crate) fn execute_gpu_done(run: &mut Run, ctx: &mut Ctx) {
     ui::begin_step(run.font(), 4, 10, "GPU, MDEC, DISPLAY", 0, "GPU DONE SIGNAL");
     bounds::begin_step();
     let font = run.font.take().expect("font uploaded above");
-    crate::gpu_done::run(&font);
+    crate::gpu_done::run(&font, set);
     run.font = Some(font);
     quiesce(run);
     let (gpu, fb) = ctx.gpu_and_buffers();
