@@ -179,6 +179,50 @@ fn main() {
     let proved = reader.stop_proved();
     check("4 a later read delivers", ok && proved.is_ok(), 0);
 
+    // 5. Taking the drive over from a program that left it busy, as another BIOS or a chain
+    // loader's last read can: a fresh reader's first prepare asks the drive what it is doing
+    // and stops it, instead of trusting it idle.
+    let ok = read_n(&mut reader, lba + 200, 2);
+    let mut reader = SectorReader::with_cd(reader.release()); // the stream is still running
+    let prepared = reader.prepare();
+    let stat = status(&mut reader);
+    check(
+        "5 takeover from a running read: prepare",
+        ok && prepared,
+        reader.diagnostics(),
+    );
+    check(
+        "5 the status then has no active bit",
+        stat.is_some_and(|s| s & (STAT_READING | STAT_SEEKING | STAT_PLAYING) == 0),
+        stat.unwrap_or(0xff) as u32,
+    );
+    let ok = read_n(&mut reader, lba + 300, 4);
+    reader.stop();
+    check("5 a read after the takeover delivers", ok, 0);
+    // The same with a Pause acknowledged and its second response still to come.
+    let ok = read_n(&mut reader, lba + 400, 2);
+    reader.stop();
+    let mut reader = SectorReader::with_cd(reader.release());
+    let prepared = reader.prepare();
+    let stat = status(&mut reader);
+    check(
+        "5 takeover mid-Pause: prepare",
+        ok && prepared,
+        reader.diagnostics(),
+    );
+    check(
+        "5 the status then has no active bit",
+        stat.is_some_and(|s| s & (STAT_READING | STAT_SEEKING | STAT_PLAYING) == 0),
+        stat.unwrap_or(0xff) as u32,
+    );
+    let ok = read_n(&mut reader, lba + 500, 4);
+    let proved = reader.stop_proved();
+    check(
+        "5 a read after the second takeover delivers",
+        ok && proved.is_ok(),
+        0,
+    );
+
     // SAFETY: single threaded.
     let bad = unsafe { BAD };
     psx_rt::tty::println(if bad == 0 {
