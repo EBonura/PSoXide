@@ -17,6 +17,8 @@ every program works on every Sony BIOS and on OpenBIOS).
   modulation off, main volume at its maximum, CD input volume silent and CD audio off, enabled and unmuted) and the
   cache control register. `_start` calls it, and the demo disc's chain loader calls it between programs. A Sony
   console was measured handing over `DPCR` 0x9099, not 0x07654321, and other BIOS versions and OpenBIOS differ again.
+- `boot-trace` now implies `host-tty`. Feature `entry-census` keeps the registers the program found at start
+  (`psx_rt::entry::inherited`) for the hardware tests to report; off by default.
 - `SectorReader::prepare` no longer trusts the drive to be idle on its first call: it asks GetStat and stops a
   drive that is reading, seeking or playing with the proven Pause (`pause::settle_drive`). An idle drive gets no
   Pause. `hello-cdpause` takes the drive over from a running read and from a Pause in flight.

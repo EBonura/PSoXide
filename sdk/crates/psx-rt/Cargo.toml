@@ -30,8 +30,12 @@ alloc = []
 # `console-diag`, by emulator-gated test programs (the SDK examples ask for it)
 # and by any game build whose gate reads the terminal.
 host-tty = []
-# Emit coarse boot breadcrumbs through `tty` (only seen with `host-tty`).
-boot-trace = []
+# Emit coarse boot breadcrumbs through `tty`. Implies `host-tty`: a breadcrumb nobody can see is a trap.
+boot-trace = ["host-tty"]
+# Keep what the program found in the machine registers when it started, before `entry` set them
+# ([`entry::inherited`]): the hardware tests report it to learn what each BIOS leaves. About 120
+# bytes of `.bss` and a few dozen register reads at boot; never in a shipping build.
+entry-census = []
 # Reserve 192 trampoline words instead of 96 (+384 bytes of `.data`).
 # The 256-word option takes precedence if both features are enabled.
 hazard-trampolines-192 = []
