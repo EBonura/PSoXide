@@ -81,8 +81,7 @@ pub fn start() {
     psx_io::gpu::set_direct_access_guard(wait_idle);
     #[cfg(target_arch = "mips")]
     {
-        psx_io::gpu::wait_command_ready();
-        psx_io::gpu::write_command(psx_hw::gpu::gp0::REQUEST_IRQ);
+        psx_io::gpu::signal_draw_done();
     }
 }
 
@@ -239,11 +238,9 @@ fn stop_walk_and_raise() {
             dma::abort(Channel::Gpu);
             psx_io::gpu::write_display_control_unguarded(psx_hw::gpu::gp1::RESET_CMD_BUFFER);
         }
-        // `wait_command_ready`, with its timeout reset written past the guard.
-        if !psx_io::gpu::try_wait_command_ready(psx_io::gpu::READY_SPINS) {
-            psx_io::gpu::write_display_control_unguarded(psx_hw::gpu::gp1::RESET_CMD_BUFFER);
-        }
-        psx_io::gpu::write_command_unguarded(psx_hw::gpu::gp0::REQUEST_IRQ);
+        // The draw-done sequence, each word's ready wait with its timeout
+        // reset written past the guard.
+        psx_io::gpu::signal_draw_done_unguarded();
     }
     // SAFETY: volatile aligned u32 accesses to this module's private static;
     // the program is single threaded and no handler touches it.
