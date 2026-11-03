@@ -63,8 +63,10 @@ static mut LIST: [u32; LIST_WORDS] = [0; LIST_WORDS];
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum Transport {
-    /// Words written one by one to GP0.
+    /// Words written one by one to GP0, paced on bit 26 when the script is long.
     Port,
+    /// Words written to GP0 back to back, never paced (idle GPU only).
+    PortRaw,
     /// One DMA channel 2 linked list; a node ends at every cut.
     Dma,
 }
@@ -165,15 +167,37 @@ const TABLE_B: [Row; ROWS_B] = [
     Row { name: "COPY 40X6", transport: Transport::Dma },
 ];
 
-/// Which table is on show: 0 the probe, 1 the fix candidates.
+const ROWS_C: usize = 18;
+const TABLE_C: [Row; ROWS_C] = [
+    Row { name: "FILL 16X2", transport: Transport::Dma },
+    Row { name: "FILL 16X3", transport: Transport::Dma },
+    Row { name: "FILL 16X4", transport: Transport::Dma },
+    Row { name: "FILL 16X5", transport: Transport::Dma },
+    Row { name: "FILL 16X6", transport: Transport::Dma },
+    Row { name: "FILL 16X7", transport: Transport::Dma },
+    Row { name: "FILL 16X8", transport: Transport::Dma },
+    Row { name: "BIG FILL X1", transport: Transport::Dma },
+    Row { name: "BIG FILL X2", transport: Transport::Dma },
+    Row { name: "BIG FILL X3", transport: Transport::Dma },
+    Row { name: "BIG FILL X4", transport: Transport::Dma },
+    Row { name: "BIG FILL X5", transport: Transport::Dma },
+    Row { name: "BIG FILL X6", transport: Transport::Dma },
+    Row { name: "BIG FILL X7", transport: Transport::Dma },
+    Row { name: "BIG FILL X8", transport: Transport::Dma },
+    Row { name: "SHIP DMA IDLE", transport: Transport::Dma },
+    Row { name: "SHIP DMA BIG", transport: Transport::Dma },
+    Row { name: "SHIP PORT RAW", transport: Transport::PortRaw },
+];
+
+/// Which table is on show: 0 the probe, 1 the fix candidates, 2 fills and the shipped node.
 static mut SET: u8 = 0;
 
 fn table() -> &'static [Row] {
     // SAFETY: single thread; plain static.
-    if unsafe { SET } == 0 {
-        &TABLE_A
-    } else {
-        &TABLE_B
+    match unsafe { SET } {
+        0 => &TABLE_A,
+        1 => &TABLE_B,
+        _ => &TABLE_C,
     }
 }
 
@@ -188,8 +212,10 @@ pub(crate) const COPY_X: u32 = 976;
 pub(crate) const COPY_Y: u32 = 500;
 
 fn script(row: usize) -> Script {
-    if unsafe { SET } == 1 {
-        return script_b(row);
+    match unsafe { SET } {
+        1 => return script_b(row),
+        2 => return script_c(row),
+        _ => {}
     }
     let mut s = Script::new();
     match row {
@@ -337,6 +363,63 @@ fn script_b(row: usize) -> Script {
     s
 }
 
+/// The scratch block of the SDK's draw-done sequence (psx-hw
+/// `gp0::DRAW_DONE_SCRATCH`, branch lane/fpga-irq-draw-done): 16 x 8 pixels.
+const SCRATCH_X: u32 = 1008;
+const SCRATCH_Y: u32 = 504;
+const fn shipped_copy(w: u32, h: u32) -> [u32; 4] {
+    let at = xy(SCRATCH_X, SCRATCH_Y);
+    [0x8000_0000, at, at, xy(w, h)]
+}
+/// The words of the SDK's `gp0::DRAW_DONE_SEQUENCE`, written out again here
+/// (this repo's psx-hw is a hydrated copy that does not have it); the TTY
+/// prints them so a log can be compared with the SDK's.
+const SHIPPED_NODE: [u32; 16] = {
+    let a = shipped_copy(16, 4);
+    let b = shipped_copy(6, 4);
+    let c = shipped_copy(8, 8);
+    [
+        IRQ_CMD, a[0], a[1], a[2], a[3], IRQ_CMD, b[0], b[1], b[2], b[3], IRQ_CMD, c[0], c[1],
+        c[2], c[3], IRQ_CMD,
+    ]
+};
+
+/// A fill of `h` lines of the scratch block: GP0(02h) ignores the draw area
+/// and the mask bits and reads no VRAM, so it changes nothing but the block.
+fn fill_scratch(s: &mut Script, h: u32) {
+    s.word(0x0200_0000);
+    s.word(xy(SCRATCH_X, SCRATCH_Y));
+    s.word(xy(16, h));
+}
+
+fn script_c(row: usize) -> Script {
+    let mut s = Script::new();
+    match row {
+        0..=14 => {
+            let (big, h) = if row < 7 { (false, row as u32 + 2) } else { (true, row as u32 - 6) };
+            if big {
+                s.big_chain();
+            }
+            s.word(IRQ_CMD);
+            s.cut();
+            fill_scratch(&mut s, h);
+            s.cut();
+            s.word(IRQ_CMD);
+        }
+        _ => {
+            // The words that ship: the shared node, as one node or as a
+            // burst, after nothing or after 16 big triangles.
+            if row == 16 {
+                s.big_chain();
+            }
+            for w in SHIPPED_NODE {
+                s.word(w);
+            }
+        }
+    }
+    s
+}
+
 /// Build the DMA list for a script. Returns the head address.
 fn build_list(s: &Script) -> u32 {
     let list = addr_of_mut!(LIST) as *mut u32;
@@ -416,7 +499,7 @@ fn attempt(row: usize, s: &Script, head: u32) -> Attempt {
     v24::environment(1 << 10);
     gpu_io::wait_command_ready();
     gpu_io::write_display_control(match transport {
-        Transport::Port => 0x0400_0000,
+        Transport::Port | Transport::PortRaw => 0x0400_0000,
         Transport::Dma => 0x0400_0002,
     });
     dma::enable_channel(dma::Channel::Gpu);
@@ -439,10 +522,10 @@ fn attempt(row: usize, s: &Script, head: u32) -> Attempt {
     };
     let mut clock = Clock32::start();
     match transport {
-        Transport::Port => {
+        Transport::Port | Transport::PortRaw => {
             // A long script is paced: bit 26 before each word, so the 16-word
             // FIFO never overflows behind a big draw.
-            let paced = s.len > 12;
+            let paced = s.len > 12 && transport == Transport::Port;
             for w in &s.words[..s.len] {
                 if paced {
                     gpu_io::wait_command_ready();
@@ -605,6 +688,16 @@ pub(crate) fn run(font: &FontAtlas, set: u8) {
     }
     crate::gpu_probes::upload_textures();
     tty::println("hardware-tests: gpu-done begins");
+    if unsafe { SET } == 2 {
+        for half in 0..4 {
+            let mut l = ui::Line::new();
+            l.s("hardware-tests: gpu-done shipped node ").u(half as u32);
+            for w in &SHIPPED_NODE[half * 4..half * 4 + 4] {
+                l.s(" ").hex(*w, 8);
+            }
+            tty::println(l.as_str());
+        }
+    }
     for row in 0..row_count() {
         let mut tag = ui::Line::new();
         tag.s("ROW ").u(row as u32 + 1).s(" OF ").u(row_count() as u32).s(" ").s(table()[row].name);
@@ -692,7 +785,7 @@ pub(crate) fn draw_page(font: &FontAtlas, page: usize) {
     let plain = (176, 190, 210);
     match page {
         0 => {
-            font.draw_text_scaled_q8(4, 2, if unsafe { SET } == 0 { "GPU DONE SIGNAL" } else { "GPU DONE FIX" }, 512, 512, head);
+            font.draw_text_scaled_q8(4, 2, match unsafe { SET } { 0 => "GPU DONE SIGNAL", 1 => "GPU DONE FIX", _ => "GPU DONE FILLS" }, 512, 512, head);
             let mut y = 20;
             for (row, st) in results.iter().take(rows).enumerate() {
                 let mut line = ui::Line::new();

@@ -24,12 +24,13 @@ enum Mode {
     Capture,
 }
 
-const MENU: [&str; 7] = [
+const MENU: [&str; 8] = [
     // Row 0 is pinned: `make hwtest-run` selects it by firing CROSS at a fixed
     // tick with the cursor still at its boot position.
     "RUN HARDWARE TEST",
     "GPU DONE SIGNAL ONLY",
     "GPU DONE FIX CANDIDATES",
+    "GPU DONE FILLS + SHIPPED NODE",
     "RADIUS + LIST NODE SWEEP ONLY",
     "CONTROLLER TEST (P1 + P2)",
     "MEMORY CARD (AT OWN RISK)",
@@ -187,12 +188,13 @@ impl Scene for HardwareTests {
                         0 => self.start_run(ctx, false),
                         1 => self.start_gpu_done(ctx, 0),
                         2 => self.start_gpu_done(ctx, 1),
-                        3 => self.start_run(ctx, true),
-                        4 => {
+                        3 => self.start_gpu_done(ctx, 2),
+                        4 => self.start_run(ctx, true),
+                        5 => {
                             self.controller_test.start();
                             self.mode = Mode::ControllerTest;
                         }
-                        5 => {
+                        6 => {
                             self.memory_card = crate::probe_tokens::memcard_diagnostic();
                             self.memcard_armed = false;
                             self.mode = Mode::MemoryCard;
@@ -344,7 +346,7 @@ impl HardwareTests {
                 (176, 190, 210)
             };
             font.draw_text(22, y, label, colour);
-            if row == 6 && !self.have_capture {
+            if row == 7 && !self.have_capture {
                 font.draw_text(22, y + 9, "NONE YET - RUN FIRST", (112, 136, 170));
             }
             y += MENU_ROW_PITCH;
