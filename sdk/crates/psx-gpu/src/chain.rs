@@ -13,7 +13,7 @@
 //! and the GPU's half-read command discarded, so a wedged channel costs a
 //! reset instead of a hang; [`crate::recovery_stats`] counts the aborts.
 
-use psx_hw::gpu::{gp0, gp1, DmaDirection};
+use psx_hw::gpu::{gp1, DmaDirection};
 use psx_io::dma::{self, Channel};
 use psx_io::gpu::write_display_control;
 use psx_io::periph::GpuDma;
@@ -36,25 +36,30 @@ pub const LIST_END: u32 = 0x00FF_FFFF;
 /// packets, and every [`crate::prim`] packet is shorter.
 pub const MAX_NODE_WORDS: usize = 16;
 
-/// A linked-list DMA node holding only GP0(1Fh), for the end of a chain.
+/// A linked-list DMA node holding the draw-done sequence
+/// ([`psx_hw::gpu::gp0::DRAW_DONE_SEQUENCE`]: GP0(1Fh) requests with fills of a scratch
+/// block between them), for the end of a chain.
 ///
 /// Link it as the chain's last node and the GPU raises
 /// [`crate::is_draw_done`] when it gets there. It is immutable and shared:
-/// every chain can end on [`DRAW_DONE_NODE`].
+/// every chain can end on [`DRAW_DONE_NODE`]. The sequence is more than one
+/// word because the FPGA PSX core misses a lone GP0(1Fh) (see
+/// [`psx_hw::gpu::gp0::DRAW_DONE_SEQUENCE`]); silicon ignores the repeats.
 #[derive(Debug)]
-#[repr(C, align(4))]
-pub struct DrawDoneNode([u32; 2]);
+#[repr(C)]
+pub struct DrawDoneNode(());
 
 impl DrawDoneNode {
-    /// The node's tag word, the address a chain links to.
+    /// The node's tag word, the address a chain links to: the list `psx-io`
+    /// keeps (`psx_io::gpu::DRAW_DONE_LIST`), so the words exist once.
     #[inline]
     pub fn as_ptr(&self) -> *const u32 {
-        self.0.as_ptr()
+        psx_io::gpu::DRAW_DONE_LIST.as_ptr()
     }
 }
 
-/// The shared GP0(1Fh) node: one payload word, then the end of the list.
-pub static DRAW_DONE_NODE: DrawDoneNode = DrawDoneNode([(1 << 24) | LIST_END, gp0::REQUEST_IRQ]);
+/// The shared draw-done node: the sequence, then the end of the list.
+pub static DRAW_DONE_NODE: DrawDoneNode = DrawDoneNode(());
 
 /// One immutable linked-list node: `W` GP0 words, then the end of the list.
 ///

@@ -72,8 +72,7 @@ pub fn arm_draw_done() {
 #[deprecated(note = "use `Gpu::signal_draw_done`")]
 #[inline]
 pub fn signal_draw_done() {
-    psx_io::gpu::wait_command_ready();
-    psx_io::gpu::write_command(psx_hw::gpu::gp0::REQUEST_IRQ);
+    psx_io::gpu::signal_draw_done();
 }
 
 /// Kick a `'static` chain without waiting for it.

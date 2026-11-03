@@ -701,6 +701,18 @@ impl Clut {
 // Unified VRAM allocator
 // ======================================================================
 
+/// The 16 x 8 pixel block every frame's draw-done sequence fills with black
+/// (`psx_hw::gpu::gp0::DRAW_DONE_SCRATCH`, the bottom right corner of VRAM).
+/// [`VramAllocator`] never hands out a rectangle that touches it, so a texture
+/// page that would cover it is skipped; code that places data there by hand
+/// loses it to the sequence.
+pub const DRAW_DONE_SCRATCH: VramRect = VramRect::new(
+    psx_hw::gpu::gp0::DRAW_DONE_SCRATCH.0,
+    psx_hw::gpu::gp0::DRAW_DONE_SCRATCH.1,
+    16,
+    8,
+);
+
 /// Coarse VRAM occupancy cell width in pixels (one texture-page column).
 const ALLOC_COL_W: u16 = 64;
 /// Coarse VRAM occupancy cell height in pixels.
@@ -871,6 +883,9 @@ impl<const ROOM_PAGES: usize, const CLUT_ROWS: usize> VramAllocator<ROOM_PAGES, 
 
     #[allow(dead_code)] // used by later stages for overlap assertions
     fn rect_free(&self, x: u16, y: u16, w: u16, h: u16) -> bool {
+        if DRAW_DONE_SCRATCH.overlaps(VramRect::new(x, y, w, h)) {
+            return false;
+        }
         let (c0, c1, r0, r1) = Self::span(x, y, w, h);
         for r in r0..r1 {
             for c in c0..c1 {
@@ -964,7 +979,13 @@ impl<const ROOM_PAGES: usize, const CLUT_ROWS: usize> VramAllocator<ROOM_PAGES, 
         let n = count as usize;
         let mut c = 0usize;
         while c + n <= VRAM_ALLOC_COLS {
-            let cols_free = (c..c + n).all(|col| (r0..r1).all(|r| self.grid[r] & (1 << col) == 0));
+            let cols_free = (c..c + n).all(|col| (r0..r1).all(|r| self.grid[r] & (1 << col) == 0))
+                && !DRAW_DONE_SCRATCH.overlaps(VramRect::new(
+                    (c as u16) * ALLOC_COL_W,
+                    page_y,
+                    count * ALLOC_COL_W,
+                    TEXTURE_PAGE_TEXELS,
+                ));
             if cols_free {
                 return Some((c as u16) * ALLOC_COL_W);
             }
@@ -1624,6 +1645,23 @@ mod tests {
             a.alloc_page_run(6, TextureDepth::Bit4, 0).is_some(),
             "last-window release must return the physical room page"
         );
+    }
+
+    #[test]
+    fn the_draw_done_scratch_block_is_never_allocated() {
+        // Fill every page column of the model row with one-page slots: the one
+        // at the right edge would cover the corner block, so it is refused.
+        let mut a: VramAllocator<2, 32> = VramAllocator::new(480);
+        let mut got = 0;
+        while let Some((page, _)) = a.alloc_model_slot(64, TextureDepth::Bit4) {
+            let rect = VramRect::new(page.x(), page.y(), 64, TEXTURE_PAGE_TEXELS);
+            assert!(!rect.overlaps(DRAW_DONE_SCRATCH), "page at {} {}", page.x(), page.y());
+            got += 1;
+        }
+        assert_eq!(got, VRAM_ALLOC_COLS - 1, "every column but the corner one");
+        assert!(!a.rect_free(960, 256, 64, 256));
+        assert!(!a.rect_free(1008, 504, 16, 8));
+        assert!(a.rect_free(960, 256, 64, 240));
     }
 
     #[test]

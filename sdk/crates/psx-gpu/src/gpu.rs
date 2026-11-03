@@ -176,12 +176,14 @@ impl Gpu {
         write_display_control(gp1::ACK_IRQ);
     }
 
-    /// Send GP0(1Fh), closing immediate drawing so `is_draw_done` rises
-    /// once it is drawn.
+    /// Send the draw-done sequence (GP0(1Fh) with fills of a scratch block
+    /// between the requests, as one DMA node; see
+    /// `psx_io::gpu::signal_draw_done`), closing immediate drawing so
+    /// `is_draw_done` rises once it is drawn. Bounded; waits out a walk still
+    /// running on channel 2.
     #[inline]
     pub fn signal_draw_done(&mut self) {
-        wait_command_ready();
-        write_command(gp0::REQUEST_IRQ);
+        psx_io::gpu::signal_draw_done();
     }
 
     /// Kick a `'static`, immutable chain, such as
