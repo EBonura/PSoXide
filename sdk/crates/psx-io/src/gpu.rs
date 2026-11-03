@@ -185,9 +185,11 @@ pub fn command_reset_count() -> u32 {
 }
 
 /// The draw-done sequence ([`psx_hw::gpu::gp0::DRAW_DONE_SEQUENCE`]) as one
-/// linked-list node, then the end of the list. Immutable, shared by
-/// `psx_gpu::chain::DRAW_DONE_NODE` and [`signal_draw_done`].
-pub static DRAW_DONE_LIST: [u32; 1 + psx_hw::gpu::gp0::DRAW_DONE_WORDS] = {
+/// linked-list node, then the end of the list. Shared by
+/// `psx_gpu::chain::DRAW_DONE_NODE` and [`signal_draw_done`]. A `static mut`
+/// only so that [`set_draw_done_scratch`] can move the filled block; nothing
+/// else writes it.
+static mut DRAW_DONE_LIST: [u32; 1 + psx_hw::gpu::gp0::DRAW_DONE_WORDS] = {
     let mut list = [0u32; 1 + psx_hw::gpu::gp0::DRAW_DONE_WORDS];
     list[0] = ((psx_hw::gpu::gp0::DRAW_DONE_WORDS as u32) << psx_hw::dma::linked_list::LENGTH_SHIFT)
         | psx_hw::dma::linked_list::END;
@@ -198,6 +200,35 @@ pub static DRAW_DONE_LIST: [u32; 1 + psx_hw::gpu::gp0::DRAW_DONE_WORDS] = {
     }
     list
 };
+
+/// Pointer to the draw-done list (a node chains can end on).
+#[inline]
+pub fn draw_done_list() -> *const u32 {
+    core::ptr::addr_of!(DRAW_DONE_LIST).cast::<u32>()
+}
+
+/// Move the 16 x 8 block the draw-done sequence fills with black to `(x, y)`,
+/// for a game that keeps data in the default one (the bottom right corner of
+/// VRAM, [`psx_hw::gpu::gp0::DRAW_DONE_SCRATCH`]). Call it once at start, before
+/// the first frame is submitted: it waits for channel 2 to go idle (bounded)
+/// and rewrites the three fill coordinates in place.
+///
+/// `x` must be a multiple of 16 (GP0(02h) rounds it down) and the block must
+/// lie inside VRAM and stay unused.
+pub fn set_draw_done_scratch(x: u16, y: u16) {
+    assert!(x % 16 == 0 && x <= 1008 && y <= 504, "the scratch block must fit VRAM");
+    #[cfg(target_arch = "mips")]
+    let _ = crate::dma::wait_done(crate::dma::Channel::Gpu, crate::dma::DEFAULT_SPINS);
+    let at = psx_hw::gpu::pack_xy(x, y);
+    // SAFETY: the list is only read by a channel 2 walk, which is idle; the three words
+    // are the fills' coordinate words in the sequence (list index = word index + 1).
+    unsafe {
+        let list = core::ptr::addr_of_mut!(DRAW_DONE_LIST).cast::<u32>();
+        for fill in 0..3 {
+            list.add(1 + 4 * fill + 2).write_volatile(at);
+        }
+    }
+}
 
 /// Close immediate drawing so that GPUSTAT bit 24 ([`GpuStat::IRQ1`]) rises
 /// once it is drawn: send the draw-done sequence
@@ -250,7 +281,7 @@ fn kick_draw_done_list() {
         dma::start(
             Channel::Gpu,
             dma::Transfer {
-                address: core::ptr::addr_of!(DRAW_DONE_LIST) as usize as u32,
+                address: draw_done_list() as usize as u32,
                 size: dma::size_words(0),
                 control: psx_hw::dma::CHCR_TO_DEVICE
                     | psx_hw::dma::CHCR_SYNC_LINKED
@@ -347,6 +378,25 @@ fn poll_ready(spin_limit: u32, mut ready: impl FnMut() -> bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn the_scratch_block_can_be_moved_and_the_list_stays_well_formed() {
+        let words = psx_hw::gpu::gp0::DRAW_DONE_WORDS;
+        let list = || unsafe { core::slice::from_raw_parts(draw_done_list(), 1 + words) };
+        assert_eq!(&list()[1..], &psx_hw::gpu::gp0::DRAW_DONE_SEQUENCE);
+        set_draw_done_scratch(960, 488);
+        let at = psx_hw::gpu::pack_xy(960, 488);
+        for fill in 0..3 {
+            assert_eq!(list()[1 + 4 * fill], psx_hw::gpu::gp0::REQUEST_IRQ);
+            assert_eq!(list()[1 + 4 * fill + 1], psx_hw::gpu::gp0::FILL_RECT);
+            assert_eq!(list()[1 + 4 * fill + 2], at);
+            assert_eq!(list()[1 + 4 * fill + 3], psx_hw::gpu::pack_xy(16, 8));
+        }
+        assert_eq!(list()[words], psx_hw::gpu::gp0::REQUEST_IRQ);
+        assert_eq!(list()[0] >> 24, words as u32);
+        set_draw_done_scratch(1008, 504);
+        assert_eq!(&list()[1..], &psx_hw::gpu::gp0::DRAW_DONE_SEQUENCE);
+    }
+
     #[test]
     fn readiness_budget_includes_initial_probe() {
         for limit in 0..5 {
