@@ -394,6 +394,23 @@ fn poll_ready(spin_limit: u32, mut ready: impl FnMut() -> bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// The draw-done kick runs inside the present queue's stall recovery, which a
+    /// scratchpad stack call tree reaches: the stack guard cannot bound a call
+    /// through a register, and `dma::start` stores the channel address through
+    /// the direct-access guard's function pointer. It must use
+    /// `dma::start_unguarded` (Cortex's build was refused for this).
+    #[test]
+    fn the_draw_done_kick_never_reaches_the_direct_access_guard() {
+        let source = include_str!("gpu.rs");
+        let from = source.find("fn kick_draw_done_list()").expect("the kick exists");
+        let body = &source[from..];
+        let body = &body[..body.find("\n}\n").expect("the kick ends")];
+        assert!(body.contains("dma::start_unguarded("), "the kick starts the walk unguarded");
+        assert!(!body.contains("dma::start("), "dma::start runs the guard on its address store");
+        assert!(!body.contains("raw::set_address"), "raw::set_address runs the guard");
+        assert!(!body.contains("run_direct_access_guard"), "the kick is already past the guard");
+    }
+
     #[test]
     fn the_scratch_block_can_be_moved_and_the_list_stays_well_formed() {
         let words = psx_hw::gpu::gp0::DRAW_DONE_WORDS;
