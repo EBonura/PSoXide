@@ -2,8 +2,8 @@
 //! PS1 bare-metal runtime.
 //!
 //! Provides the `_start` entry point that the PSX-EXE loader jumps to,
-//! a panic handler, direct i-cache control, a BIOS TTY debug
-//! trampoline, and optional heap initialisation. Homebrew crates
+//! a panic handler, direct i-cache control, a debug TTY that is off unless
+//! asked for, and optional heap initialisation. Homebrew crates
 //! depend on this crate to get a working `main()` environment without
 //! thinking about linker symbols or cache-flushing.
 //!
@@ -23,7 +23,7 @@
 #![no_std]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
-// Required for MIPS `global_asm!` blocks (BIOS trampolines). Suppress
+// Required for MIPS `global_asm!` blocks (the exception handler and friends). Suppress
 // the "feature is declared but not used" warning that shows on the
 // host target where only the panic handler + heap are live.
 #![cfg_attr(target_arch = "mips", feature(asm_experimental_arch))]
@@ -41,12 +41,11 @@ mod builtins;
 #[cfg(target_arch = "mips")]
 mod mem;
 
-#[cfg(target_arch = "mips")]
-pub mod bios;
 pub mod cache;
 pub mod critical_section;
 #[cfg(all(feature = "console-diag", target_arch = "mips"))]
 pub mod diag;
+pub mod entry;
 pub mod interrupts;
 mod peripherals;
 #[cfg(feature = "present-queue")]
@@ -185,6 +184,10 @@ pub unsafe extern "C" fn _start(a0: u32, a1: u32, a2: u32) -> ! {
     #[cfg(feature = "boot-trace")]
     tty::println("psx-rt: bss ok");
 
+    // Before anything else uses the machine: set it to one documented state instead of
+    // inheriting what this BIOS (or the program that handed over) left.
+    entry::set_entry_state();
+
     // Before any game code can replace the exception vector: `wait_vblank` installs lazily only
     // over the word found here.
     interrupts::record_boot_vector();
@@ -272,11 +275,12 @@ pub fn halt() -> ! {
     }
 }
 
-/// Panic handler. Tries to write the message to TTY so PCSX-Redux
-/// (and our emulator's future console hook) shows it, then halts.
+/// Panic handler. With the `host-tty` feature it writes the message to the
+/// debug console (PCSX-Redux and our emulator print it), then halts; without
+/// it, and without `console-diag`'s stop-panel, it just halts.
 ///
 /// A panic raised on a [`scratchpad::ScratchpadStack`] first moves back to
-/// the RAM stack, so reporting (BIOS `putchar` included) never runs on the
+/// the RAM stack, so reporting never runs on the
 /// scratchpad. `stack-guard` counts this function's own frame and
 /// nothing below it, which is only sound while the report stays out of line.
 ///

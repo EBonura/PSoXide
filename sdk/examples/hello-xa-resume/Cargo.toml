@@ -22,6 +22,6 @@ psx-fmv  = { path = "../../crates/psx-fmv" }
 psx-gpu  = { path = "../../crates/psx-gpu" }
 psx-io   = { path = "../../crates/psx-io" }
 psx-pack = { path = "../../crates/psx-pack" }
-psx-rt   = { path = "../../crates/psx-rt" }
+psx-rt   = { path = "../../crates/psx-rt", features = ["host-tty"] }
 psx-spu  = { path = "../../crates/psx-spu" }
 psx-vram = { path = "../../crates/psx-vram" }

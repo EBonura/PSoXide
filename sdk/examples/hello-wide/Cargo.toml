@@ -17,5 +17,5 @@ codegen-units = 1
 lto = true
 
 [dependencies]
-psx-rt   = { path = "../../crates/psx-rt" }
+psx-rt   = { path = "../../crates/psx-rt", features = ["host-tty"] }
 psx-math = { path = "../../crates/psx-math" }

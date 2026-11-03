@@ -59,8 +59,8 @@ Three layers, each catching what the one above cannot.
    13 to 16, 3 or 7 while a DMA channel is busy, so the headless gates turn red on exactly the
    variants that failed on the console (tracked in the emulator repository).
 
-No BIOS flush wrapper exists in the SDK (`A(44h)` is not reachable; the only BIOS call left is
-`A(3Ch) putchar`). A new service that flushes internally (a BIOS exec or load call) belongs
+No BIOS flush wrapper exists in the SDK (`A(44h)` is not reachable, and the SDK makes no BIOS call
+at all). A new service that flushes internally (a BIOS exec or load call) belongs
 behind the `Quiesced` token too.
 
 A wait that runs out is never silent: it is counted (`flush_timeouts` in `psx_io::diag`,
