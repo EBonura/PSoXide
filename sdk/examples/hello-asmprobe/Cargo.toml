@@ -18,6 +18,6 @@ lto = true
 
 [dependencies]
 psx-gpu  = { path = "../../crates/psx-gpu", features = ["asm-kernels"] }
-psx-rt   = { path = "../../crates/psx-rt" }
+psx-rt   = { path = "../../crates/psx-rt", features = ["host-tty"] }
 psx-io   = { path = "../../crates/psx-io" }
 psx-math = { path = "../../crates/psx-math", features = ["asm-kernels"] }

@@ -30,6 +30,6 @@ window = ["psx-rt/scratchpad-window"]
 
 [dependencies]
 psx-gpu  = { path = "../../crates/psx-gpu" }
-psx-rt   = { path = "../../crates/psx-rt", features = ["scratchpad-stack-check"] }
+psx-rt   = { path = "../../crates/psx-rt", features = ["scratchpad-stack-check", "host-tty"] }
 psx-font = { path = "../../crates/psx-font" }
 psx-vram = { path = "../../crates/psx-vram" }

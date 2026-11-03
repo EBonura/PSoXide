@@ -17,7 +17,7 @@ lto = true
 
 [dependencies]
 psx-pad  = { path = "../../crates/psx-pad", features = ["irq-engine"] }
-psx-rt   = { path = "../../crates/psx-rt" }
+psx-rt   = { path = "../../crates/psx-rt", features = ["host-tty"] }
 psx-cdstream = { path = "../../crates/psx-cdstream" }
 psx-io      = { path = "../../crates/psx-io" }
 psx-mc      = { path = "../../crates/psx-mc" }

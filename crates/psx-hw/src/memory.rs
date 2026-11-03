@@ -99,6 +99,10 @@ pub mod expansion2 {
     pub const SIZE: usize = 8 * 1024;
     /// POST status byte: BIOS writes progress codes here during boot.
     pub const POST: u32 = 0x1f80_2041;
+    /// Debug console character-out: a byte stored here is printed on the host
+    /// by PCSX-Redux, OpenBIOS's own `putchar` and PSoXide's emulator. A
+    /// retail console has nothing mapped here, so the store is ignored.
+    pub const DEBUG_CONSOLE: u32 = 0x1f80_2080;
 
     /// PSoXide's emulator-only telemetry port: four word registers in the
     /// expansion window that instrumented guests write and the emulator

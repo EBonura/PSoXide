@@ -18,4 +18,4 @@ lto = true
 
 [dependencies]
 psx-residency = { path = "../../crates/psx-residency" }
-psx-rt = { path = "../../crates/psx-rt" }
+psx-rt = { path = "../../crates/psx-rt", features = ["host-tty"] }

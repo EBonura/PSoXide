@@ -18,4 +18,4 @@ lto = true
 [dependencies]
 psx-io   = { path = "../../crates/psx-io" }
 psx-pad  = { path = "../../crates/psx-pad" }
-psx-rt   = { path = "../../crates/psx-rt" }
+psx-rt   = { path = "../../crates/psx-rt", features = ["host-tty"] }

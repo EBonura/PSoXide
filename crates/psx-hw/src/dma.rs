@@ -26,6 +26,19 @@ pub const DPCR: u32 = 0x1f80_10f0;
 /// Global interrupt / completion-flag register.
 pub const DICR: u32 = 0x1f80_10f4;
 
+/// [`DPCR`] as a program starts: every channel disabled, channel `n` at priority
+/// `n + 1` (0 is highest). This is the controller's own power-on value (nocash
+/// PSX-SPX "DMA Channels"); `psx_rt::entry` writes it so a program does not inherit
+/// whatever ladder and enable bits the BIOS that booted it left. Sony BIOS
+/// versions do not agree on that (a retail console was measured handing over
+/// `0x9099`), and OpenBIOS does something else again.
+pub const DPCR_ENTRY: u32 = 0x0765_4321;
+
+/// [`DICR`] write that acknowledges every completion flag (bits 24..=30, write 1
+/// to clear) and leaves the force bit, the channel enables and the master enable
+/// at zero: no channel raises the DMA interrupt.
+pub const DICR_ENTRY: u32 = 0x7f00_0000;
+
 /// CHCR.0: direction, 0 = device to RAM, 1 = RAM to device.
 pub const CHCR_TO_DEVICE: u32 = 1 << 0;
 /// CHCR.1: step, 0 = +4 per word, 1 = -4 per word.
