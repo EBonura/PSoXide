@@ -371,6 +371,49 @@ pub mod gp0 {
 
     /// GP0(1Fh) -- Request IRQ1.
     pub const REQUEST_IRQ: u32 = 0x1f00_0000;
+
+    /// GP0(02h) -- Fill rectangle in VRAM.
+    pub const FILL_RECT: u32 = 0x0200_0000;
+
+    /// Top-left of the 16 x 8 VRAM block the [`DRAW_DONE_SEQUENCE`] fills
+    /// with black (the bottom right corner of VRAM). Nothing may keep data
+    /// there: every frame's closing sequence overwrites it. `psx-vram`
+    /// reserves it; a game that places something there must not use the
+    /// sequence as it stands.
+    pub const DRAW_DONE_SCRATCH: (u16, u16) = (1008, 504);
+
+    /// Words of [`DRAW_DONE_SEQUENCE`]: one GPU list node, the most a node
+    /// may hold is 16.
+    pub const DRAW_DONE_WORDS: usize = 13;
+
+    /// What a frame sends to close its drawing: GP0(1Fh), a fill of the
+    /// scratch block, GP0(1Fh), another fill, GP0(1Fh), a third fill,
+    /// GP0(1Fh).
+    ///
+    /// On silicon one GP0(1Fh) is enough, and the later ones are ignored once
+    /// GPUSTAT bit 24 is set (it stays set until GP1(02h)). The FPGA PSX core
+    /// (MiSTer PSX_MiSTer 480094b, `gpu.vhd`) raises bit 24 and I_STAT bit 1
+    /// only if the word is popped from its command FIFO on an odd clk2x
+    /// edge (the ones between clk1x edges); the pulse is one clk2x wide on
+    /// an even edge and no clk1x flip-flop sees it. A word that reaches an
+    /// idle GPU is popped on an even edge every time. A word already queued
+    /// behind a running command is popped two edges after the command
+    /// finishes, so its phase is the command's duration. A 16 x 8 fill takes
+    /// 3 + 4 * 8 edges, odd, with no VRAM read and no dependence on memory
+    /// timing (checked cycle by cycle in simulation of the core's `gpu.vhd`
+    /// and on a SuperStation One), so the request after it lands on an odd
+    /// edge whatever phase the first one had. Each fill costs the GPU 32
+    /// pixel-pair writes.
+    pub const DRAW_DONE_SEQUENCE: [u32; DRAW_DONE_WORDS] = {
+        let at = super::pack_xy(DRAW_DONE_SCRATCH.0, DRAW_DONE_SCRATCH.1);
+        let size = super::pack_xy(16, 8);
+        [
+            REQUEST_IRQ, FILL_RECT, at, size,
+            REQUEST_IRQ, FILL_RECT, at, size,
+            REQUEST_IRQ, FILL_RECT, at, size,
+            REQUEST_IRQ,
+        ]
+    };
 }
 
 /// Pack three 8-bit color channels into the low 24 bits of a GP0
