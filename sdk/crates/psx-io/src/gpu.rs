@@ -275,7 +275,9 @@ pub fn set_draw_done_scratch(x: u16, y: u16) {
 pub fn signal_draw_done() {
     #[cfg(any(feature = "present-queue", test))]
     if handoff::is_recording() {
-        write_commands(&psx_hw::gpu::gp0::DRAW_DONE_SEQUENCE);
+        for &word in &psx_hw::gpu::gp0::DRAW_DONE_SEQUENCE {
+            write_command(word);
+        }
         return;
     }
     run_direct_access_guard();
