@@ -17,6 +17,12 @@
 //! * cop0 SR: only CU2 (the GTE) on. Interrupts off, kernel mode, normal exception vectors,
 //!   cache not isolated, no interrupt line unmasked. A driver that wants interrupts turns them
 //!   on itself ([`crate::interrupts::install_vblank_counter`]).
+//! * The memory controller's access timings (Expansion 1 to 3, BIOS ROM, SPU, CD-ROM and common
+//!   delay, [`psx_hw::memory::timing::ENTRY`]). BIOS versions differ here (OpenBIOS programs a
+//!   CD-ROM delay and a common delay of its own), and the CD controller's register timing is
+//!   what every polled CD read depends on. The base-address and RAM-size registers are not touched.
+//! * The GTE: every control and data register zero. A BIOS leaves it zeroed, but not every one
+//!   of them is documented to, and no driver should rely on it.
 //! * `I_MASK` zero and every `I_STAT` bit acknowledged.
 //! * DMA: every channel is given its bounded chance to finish, then aborted, then `DPCR`
 //!   becomes [`psx_hw::dma::DPCR_ENTRY`] (no channel enabled, the controller's own priority
@@ -107,6 +113,9 @@ pub struct Inherited {
     pub sio_control: u16,
     /// The four words at the general exception vector.
     pub vector: [u32; 4],
+    /// The memory controller's seven access-timing registers, in the order of
+    /// [`psx_hw::memory::timing::ENTRY`].
+    pub bus_timing: [u32; 7],
 }
 
 #[cfg(feature = "entry-census")]
@@ -128,6 +137,7 @@ static mut INHERITED: Inherited = Inherited {
     sio_status: 0,
     sio_control: 0,
     vector: [0; 4],
+    bus_timing: [0; 7],
 };
 
 /// The registers as the program found them (all zero before `_start` has run, or off the console).
@@ -188,6 +198,9 @@ fn take_census() {
         for (n, word) in census.vector.iter_mut().enumerate() {
             *word = core::ptr::read_volatile(EXCEPTION_VECTOR.add(n));
         }
+        for (n, (address, _)) in psx_hw::memory::timing::ENTRY.iter().enumerate() {
+            census.bus_timing[n] = psx_io::read_u32(*address);
+        }
         INHERITED = census;
     }
 }
@@ -204,6 +217,10 @@ pub fn set_entry_state() {
     // started a transfer or taken an interrupt it depends on yet, which is the caller's contract.
     unsafe {
         write_status(SR_ENTRY);
+        for (address, value) in psx_hw::memory::timing::ENTRY {
+            psx_io::write_u32(address, value);
+        }
+        zero_gte();
         psx_io::irq::set_mask(0);
         psx_io::irq::acknowledge(u32::MAX);
 
@@ -232,6 +249,85 @@ pub fn set_entry_state() {
 /// Off the console there is no machine to set up.
 #[cfg(not(target_arch = "mips"))]
 pub fn set_entry_state() {}
+
+/// Zero every GTE data and control register. The data registers go first and FLAG (control 31)
+/// is among the control ones, so it ends zero. The writes to registers the GTE ignores (LZCR,
+/// ORGB, the read-only ones; the moves are `.word`s because the target's assembler has no COP2 mnemonics) do nothing, and IRGB (28) converts to IR1 to IR3 = 0, which the
+/// zero writes before it already left.
+#[cfg(target_arch = "mips")]
+unsafe fn zero_gte() {
+    // SAFETY: COP2 register moves of zero with SR.CU2 set by `write_status` just before; no
+    // memory or other register is touched.
+    unsafe {
+        core::arch::asm!(
+            ".word 0x48800000", // mtc2 $0, $0
+            ".word 0x48800800", // mtc2 $0, $1
+            ".word 0x48801000", // mtc2 $0, $2
+            ".word 0x48801800", // mtc2 $0, $3
+            ".word 0x48802000", // mtc2 $0, $4
+            ".word 0x48802800", // mtc2 $0, $5
+            ".word 0x48803000", // mtc2 $0, $6
+            ".word 0x48803800", // mtc2 $0, $7
+            ".word 0x48804000", // mtc2 $0, $8
+            ".word 0x48804800", // mtc2 $0, $9
+            ".word 0x48805000", // mtc2 $0, $10
+            ".word 0x48805800", // mtc2 $0, $11
+            ".word 0x48806000", // mtc2 $0, $12
+            ".word 0x48806800", // mtc2 $0, $13
+            ".word 0x48807000", // mtc2 $0, $14
+            ".word 0x48807800", // mtc2 $0, $15
+            ".word 0x48808000", // mtc2 $0, $16
+            ".word 0x48808800", // mtc2 $0, $17
+            ".word 0x48809000", // mtc2 $0, $18
+            ".word 0x48809800", // mtc2 $0, $19
+            ".word 0x4880a000", // mtc2 $0, $20
+            ".word 0x4880a800", // mtc2 $0, $21
+            ".word 0x4880b000", // mtc2 $0, $22
+            ".word 0x4880b800", // mtc2 $0, $23
+            ".word 0x4880c000", // mtc2 $0, $24
+            ".word 0x4880c800", // mtc2 $0, $25
+            ".word 0x4880d000", // mtc2 $0, $26
+            ".word 0x4880d800", // mtc2 $0, $27
+            ".word 0x4880e000", // mtc2 $0, $28
+            ".word 0x4880e800", // mtc2 $0, $29
+            ".word 0x4880f000", // mtc2 $0, $30
+            ".word 0x4880f800", // mtc2 $0, $31
+            ".word 0x48c00000", // ctc2 $0, $0
+            ".word 0x48c00800", // ctc2 $0, $1
+            ".word 0x48c01000", // ctc2 $0, $2
+            ".word 0x48c01800", // ctc2 $0, $3
+            ".word 0x48c02000", // ctc2 $0, $4
+            ".word 0x48c02800", // ctc2 $0, $5
+            ".word 0x48c03000", // ctc2 $0, $6
+            ".word 0x48c03800", // ctc2 $0, $7
+            ".word 0x48c04000", // ctc2 $0, $8
+            ".word 0x48c04800", // ctc2 $0, $9
+            ".word 0x48c05000", // ctc2 $0, $10
+            ".word 0x48c05800", // ctc2 $0, $11
+            ".word 0x48c06000", // ctc2 $0, $12
+            ".word 0x48c06800", // ctc2 $0, $13
+            ".word 0x48c07000", // ctc2 $0, $14
+            ".word 0x48c07800", // ctc2 $0, $15
+            ".word 0x48c08000", // ctc2 $0, $16
+            ".word 0x48c08800", // ctc2 $0, $17
+            ".word 0x48c09000", // ctc2 $0, $18
+            ".word 0x48c09800", // ctc2 $0, $19
+            ".word 0x48c0a000", // ctc2 $0, $20
+            ".word 0x48c0a800", // ctc2 $0, $21
+            ".word 0x48c0b000", // ctc2 $0, $22
+            ".word 0x48c0b800", // ctc2 $0, $23
+            ".word 0x48c0c000", // ctc2 $0, $24
+            ".word 0x48c0c800", // ctc2 $0, $25
+            ".word 0x48c0d000", // ctc2 $0, $26
+            ".word 0x48c0d800", // ctc2 $0, $27
+            ".word 0x48c0e000", // ctc2 $0, $28
+            ".word 0x48c0e800", // ctc2 $0, $29
+            ".word 0x48c0f000", // ctc2 $0, $30
+            ".word 0x48c0f800", // ctc2 $0, $31
+            options(nomem, nostack)
+        );
+    }
+}
 
 /// Write cop0 SR.
 #[cfg(target_arch = "mips")]
@@ -305,6 +401,33 @@ mod tests {
     fn the_entry_status_word_enables_only_the_gte() {
         // Bit 0 (interrupt enable), bits 8..=15 (interrupt masks), bit 16 (cache isolate), bit 22 (BEV) and the other CU bits are 0.
         assert_eq!(SR_ENTRY, 0x4000_0000);
+    }
+
+    #[test]
+    fn the_gte_zeroing_words_are_the_moves_they_say() {
+        // `zero_gte` spells its COP2 moves as raw words; this pins the first and last of each run
+        // to the encoders the rest of the SDK uses.
+        assert_eq!(0x4880_0000, psx_hw::gte::mtc2(0, 0));
+        assert_eq!(0x4880_f800, psx_hw::gte::mtc2(0, 31));
+        assert_eq!(0x48c0_0000, psx_hw::gte::ctc2(0, 0));
+        assert_eq!(0x48c0_f800, psx_hw::gte::ctc2(0, 31));
+    }
+
+    #[test]
+    fn the_bus_timing_entry_writes_only_delay_registers() {
+        use psx_hw::memory::timing::{COMMON, ENTRY, EXPANSION1};
+        // Only the seven delay registers, which sit together after the two expansion base
+        // addresses and well before the RAM size register: moving any of those would take the
+        // program's own memory away.
+        for (address, _) in ENTRY {
+            assert!((EXPANSION1..=COMMON).contains(&address), "{address:#x}");
+            assert_eq!(address % 4, 0);
+        }
+        let mut seen = [0u32; 7];
+        for (n, (address, _)) in ENTRY.iter().enumerate() {
+            assert!(!seen[..n].contains(address), "{address:#x} twice");
+            seen[n] = *address;
+        }
     }
 
     #[test]
