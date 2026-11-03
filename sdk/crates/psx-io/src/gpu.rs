@@ -242,6 +242,120 @@ pub fn command_reset_count() -> u32 {
     unsafe { core::ptr::addr_of!(COMMAND_RESETS).read_volatile() }
 }
 
+/// Send the draw-done sequence ([`psx_hw::gpu::gp0::DRAW_DONE_SEQUENCE`]) to
+/// the command port, bit 26 awaited before each word so the 16-word FIFO
+/// never overflows behind a big draw. This is what closes immediate drawing
+/// so that [`GpuStat::IRQ1`] rises once it is drawn; the sequence holds
+/// GP0(1Fh) several times, with VRAM self-copies between them, because the
+/// FPGA PSX core misses a lone GP0(1Fh) (see the sequence's documentation).
+/// On silicon the repeats are ignored once the flag is set.
+#[inline(never)]
+pub fn signal_draw_done() {
+    for &word in &psx_hw::gpu::gp0::DRAW_DONE_SEQUENCE {
+        wait_command_ready();
+        write_command(word);
+    }
+}
+
+/// [`signal_draw_done`] straight to the port, past the direct-access guard
+/// and any recording, for code that has already made the port safe (the
+/// present queue's stall recovery). A word whose ready wait times out is
+/// preceded by a command-buffer reset, as that recovery does.
+#[cold]
+#[inline(never)]
+pub fn signal_draw_done_unguarded() {
+    for &word in &psx_hw::gpu::gp0::DRAW_DONE_SEQUENCE {
+        if !try_wait_command_ready(READY_SPINS) {
+            write_display_control_unguarded(psx_hw::gpu::gp1::RESET_CMD_BUFFER);
+        }
+        write_command_unguarded(word);
+    }
+}
+
+/// Times a [`DrawDoneWatch`] has said a frame is done without GPUSTAT bit 24.
+/// In `.data` like the other counters here. It stays 0 on silicon and in the
+/// emulator.
+#[cfg_attr(target_arch = "mips", link_section = ".data")]
+static mut DRAW_DONE_FALLBACKS: u32 = 0;
+
+/// How many times a [`DrawDoneWatch`] has fired since boot.
+pub fn draw_done_fallback_count() -> u32 {
+    // SAFETY: a volatile aligned read of a private static.
+    unsafe { core::ptr::addr_of!(DRAW_DONE_FALLBACKS).read_volatile() }
+}
+
+/// A bounded fallback for a frame whose GP0(1Fh) never raised GPUSTAT bit 24.
+///
+/// A caller that waits for bit 24 (a queued display flip) polls this too.
+/// It says the frame is done when DMA channel 2 is idle and GPUSTAT bits 26
+/// and 28 (ready for a command, ready for a DMA block) have stayed up from one
+/// VBlank count to at least [`Self::STRETCH_VBLANKS`] counts later. Bit 28
+/// alone rises about one large primitive before the drawing ends and bit 26
+/// can pulse high between primitives, but with the channel idle nothing new
+/// arrives, so a stretch longer than any one primitive (a whole VBlank
+/// interval and more) proves the GPU is finished.
+///
+/// It must not be needed on silicon: bit 24 rises first and the caller stops
+/// asking. Its calls cost two register reads. The caller resets it whenever it
+/// starts a new wait, and counts a `true` with [`Self::fired`].
+#[derive(Debug)]
+pub struct DrawDoneWatch {
+    quiet_since: u32,
+    quiet: bool,
+}
+
+impl DrawDoneWatch {
+    /// VBlank counts the GPU must stay quiet for.
+    pub const STRETCH_VBLANKS: u32 = 2;
+
+    pub const fn new() -> Self {
+        Self {
+            quiet_since: 0,
+            quiet: false,
+        }
+    }
+
+    /// Forget any quiet seen: a new frame's work is starting.
+    pub fn reset(&mut self) {
+        self.quiet = false;
+    }
+
+    /// True when the GPU has been quiet for the stretch, `vblank_count` being
+    /// the current VBlank counter (`psx_rt::interrupts::vblank_count`).
+    pub fn poll(&mut self, vblank_count: u32) -> bool {
+        let status = status();
+        let quiet = status.contains(GpuStat::READY_CMD | GpuStat::READY_DMA_RECV)
+            && !crate::dma::is_busy(crate::dma::Channel::Gpu);
+        if !quiet {
+            self.quiet = false;
+            return false;
+        }
+        if !self.quiet {
+            self.quiet = true;
+            self.quiet_since = vblank_count;
+            return false;
+        }
+        vblank_count.wrapping_sub(self.quiet_since) >= Self::STRETCH_VBLANKS
+    }
+
+    /// Count a fallback the caller acted on.
+    pub fn fired(&mut self) {
+        self.quiet = false;
+        // SAFETY: volatile aligned accesses to a private static; the program
+        // is single threaded and no handler touches it.
+        unsafe {
+            let count = core::ptr::addr_of_mut!(DRAW_DONE_FALLBACKS);
+            count.write_volatile(count.read_volatile().wrapping_add(1));
+        }
+    }
+}
+
+impl Default for DrawDoneWatch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Spin until the GPU can start a DMA block transfer.
 #[inline]
 pub fn wait_dma_ready() {

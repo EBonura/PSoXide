@@ -36,14 +36,17 @@ pub const LIST_END: u32 = psx_hw::dma::linked_list::END;
 /// packets, and every [`crate::prim`] packet is shorter.
 pub const MAX_NODE_WORDS: usize = 16;
 
-/// A linked-list DMA node holding only GP0(1Fh), for the end of a chain.
+/// A linked-list DMA node holding the draw-done sequence
+/// ([`gp0::DRAW_DONE_SEQUENCE`]: GP0(1Fh) requests with VRAM self-copies
+/// between them), for the end of a chain.
 ///
 /// Link it as the chain's last node and the GPU raises
 /// [`crate::is_draw_done`] when it gets there. It is immutable and shared:
-/// every chain can end on [`DRAW_DONE_NODE`].
+/// every chain can end on [`DRAW_DONE_NODE`]. See
+/// [`gp0::DRAW_DONE_SEQUENCE`] for why it is more than one word.
 #[derive(Debug)]
 #[repr(C, align(4))]
-pub struct DrawDoneNode([u32; 2]);
+pub struct DrawDoneNode([u32; 1 + gp0::DRAW_DONE_WORDS]);
 
 impl DrawDoneNode {
     /// The node's tag word, the address a chain links to.
@@ -53,8 +56,19 @@ impl DrawDoneNode {
     }
 }
 
-/// The shared GP0(1Fh) node: one payload word, then the end of the list.
-pub static DRAW_DONE_NODE: DrawDoneNode = DrawDoneNode([(1 << 24) | LIST_END, gp0::REQUEST_IRQ]);
+const fn draw_done_node() -> DrawDoneNode {
+    let mut words = [0u32; 1 + gp0::DRAW_DONE_WORDS];
+    words[0] = ((gp0::DRAW_DONE_WORDS as u32) << 24) | LIST_END;
+    let mut i = 0;
+    while i < gp0::DRAW_DONE_WORDS {
+        words[1 + i] = gp0::DRAW_DONE_SEQUENCE[i];
+        i += 1;
+    }
+    DrawDoneNode(words)
+}
+
+/// The shared draw-done node: the sequence, then the end of the list.
+pub static DRAW_DONE_NODE: DrawDoneNode = draw_done_node();
 
 /// One immutable linked-list node: `W` GP0 words, then the end of the list.
 ///

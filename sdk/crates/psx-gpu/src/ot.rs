@@ -1196,13 +1196,17 @@ mod tests {
     }
 
     #[test]
-    fn the_shared_draw_done_node_is_one_gp0_1f_word_then_the_end() {
-        // SAFETY: the node is two words of immutable static data.
-        let node = unsafe { core::slice::from_raw_parts(crate::chain::DRAW_DONE_NODE.as_ptr(), 2) };
-        assert_eq!(node[0] >> 24, 1);
+    fn the_shared_draw_done_node_is_the_sequence_then_the_end() {
+        let words = psx_hw::gpu::gp0::DRAW_DONE_WORDS;
+        // SAFETY: the node is a tag and its words of immutable static data.
+        let node = unsafe { core::slice::from_raw_parts(crate::chain::DRAW_DONE_NODE.as_ptr(), 1 + words) };
+        assert_eq!(node[0] >> 24, words as u32);
         assert_eq!(node[0] & OT_ADDR_MASK, OT_END);
+        assert_eq!(&node[1..], &psx_hw::gpu::gp0::DRAW_DONE_SEQUENCE);
         assert_eq!(node[1], psx_hw::gpu::gp0::REQUEST_IRQ);
-        assert_eq!(node[1] >> 24, 0x1f);
+        // It ends on a request, and every copy is between two of them.
+        assert_eq!(node[words], psx_hw::gpu::gp0::REQUEST_IRQ);
+        assert!(words <= crate::chain::MAX_NODE_WORDS);
     }
 
     /// Multiple primitives in the same slot chain via the most-

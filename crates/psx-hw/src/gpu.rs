@@ -371,6 +371,47 @@ pub mod gp0 {
 
     /// GP0(1Fh) -- Request IRQ1.
     pub const REQUEST_IRQ: u32 = 0x1f00_0000;
+
+    /// Top-left of the 16 x 8 VRAM block the [`DRAW_DONE_SEQUENCE`] copies
+    /// onto itself. Nothing may draw or keep data there; with the mask bit
+    /// settings off (GP0(E6h) = 0, the reset state) the copies change no
+    /// pixel.
+    pub const DRAW_DONE_SCRATCH: (u16, u16) = (1008, 504);
+
+    const fn scratch_copy(w: u16, h: u16) -> [u32; 4] {
+        let at = super::pack_xy(DRAW_DONE_SCRATCH.0, DRAW_DONE_SCRATCH.1);
+        [COPY_VRAM_TO_VRAM, at, at, super::pack_xy(w, h)]
+    }
+
+    /// Words of [`DRAW_DONE_SEQUENCE`]: one GPU list node, the most a node
+    /// may hold.
+    pub const DRAW_DONE_WORDS: usize = 16;
+
+    /// What a frame sends to close its drawing: GP0(1Fh), a copy of a small
+    /// VRAM block onto itself, GP0(1Fh), another copy, and so on.
+    ///
+    /// On silicon one GP0(1Fh) is enough, and the later ones are ignored once
+    /// GPUSTAT bit 24 is set (it stays set until GP1(02h)). The FPGA PSX core
+    /// (MiSTer PSX_MiSTer 480094b, `gpu.vhd`) raises bit 24 only if the word
+    /// is taken from its command FIFO on one phase of its double-rate clock;
+    /// an idle GPU takes it on the wrong phase every time, and so does a GPU
+    /// that has just finished an even number of equal draws. A drawing
+    /// command ahead of the word shifts the phase by a fixed amount that
+    /// depends on the command, so the sequence puts a few different commands
+    /// between requests: if the first request lands on the wrong phase, one
+    /// of the later ones lands on the right one. The copies write what they
+    /// read, so no frame changes, and each costs the GPU a few dozen cycles.
+    pub const DRAW_DONE_SEQUENCE: [u32; DRAW_DONE_WORDS] = {
+        let a = scratch_copy(16, 4);
+        let b = scratch_copy(6, 4);
+        let c = scratch_copy(8, 8);
+        [
+            REQUEST_IRQ, a[0], a[1], a[2], a[3],
+            REQUEST_IRQ, b[0], b[1], b[2], b[3],
+            REQUEST_IRQ, c[0], c[1], c[2], c[3],
+            REQUEST_IRQ,
+        ]
+    };
 }
 
 /// Pack three 8-bit color channels into the low 24 bits of a GP0

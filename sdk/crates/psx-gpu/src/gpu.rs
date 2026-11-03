@@ -181,12 +181,12 @@ impl Gpu {
         write_display_control(gp1::ACK_IRQ);
     }
 
-    /// Send GP0(1Fh), closing immediate drawing so `is_draw_done` rises
-    /// once it is drawn.
+    /// Send the draw-done sequence (GP0(1Fh) with VRAM self-copies between the
+    /// requests; see `psx_hw::gpu::gp0::DRAW_DONE_SEQUENCE`), closing immediate
+    /// drawing so `is_draw_done` rises once it is drawn.
     #[inline]
     pub fn signal_draw_done(&mut self) {
-        wait_command_ready();
-        write_command(gp0::REQUEST_IRQ);
+        psx_io::gpu::signal_draw_done();
     }
 
     /// Kick a `'static`, immutable chain, such as
