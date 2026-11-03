@@ -54,7 +54,7 @@ impl DrawDoneNode {
     /// keeps (`psx_io::gpu::DRAW_DONE_LIST`), so the words exist once.
     #[inline]
     pub fn as_ptr(&self) -> *const u32 {
-        psx_io::gpu::DRAW_DONE_LIST.as_ptr()
+        psx_io::gpu::draw_done_list()
     }
 }
 
