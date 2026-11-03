@@ -121,6 +121,42 @@ pub mod expansion2 {
     }
 }
 
+/// The memory controller's access-timing registers (nocash PSX-SPX "Memory Control"). The
+/// base-address and RAM-size registers beside them are not here: a program never sets those.
+pub mod timing {
+    /// Expansion 1 (parallel port) delay and size.
+    pub const EXPANSION1: u32 = 0x1f80_1008;
+    /// Expansion 3 delay and size.
+    pub const EXPANSION3: u32 = 0x1f80_100c;
+    /// BIOS ROM delay and size.
+    pub const BIOS_ROM: u32 = 0x1f80_1010;
+    /// SPU delay and size.
+    pub const SPU: u32 = 0x1f80_1014;
+    /// CD-ROM controller delay and size.
+    pub const CDROM: u32 = 0x1f80_1018;
+    /// Expansion 2 delay and size.
+    pub const EXPANSION2: u32 = 0x1f80_101c;
+    /// Common delay: the extra cycles around every device access.
+    pub const COMMON: u32 = 0x1f80_1020;
+
+    /// Each register with the value a program starts with (`psx_rt::entry` writes them).
+    ///
+    /// They are the values the retail BIOS programs, from PSX-SPX; the SPU word is the
+    /// one a retail console measured at program start (hardware tests, boot capture). OpenBIOS
+    /// writes a few of its own (CD-ROM `0x00020943`, common `0x0000132C`, Expansion 2
+    /// `0x00080777`), and Sony versions need not agree either, which is why a program sets
+    /// them instead of taking what it finds.
+    pub const ENTRY: [(u32, u32); 7] = [
+        (EXPANSION1, 0x0013_243f),
+        (EXPANSION3, 0x0000_3022),
+        (BIOS_ROM, 0x0013_243f),
+        (SPU, 0x2009_31e1),
+        (CDROM, 0x0002_0843),
+        (EXPANSION2, 0x0007_0777),
+        (COMMON, 0x0000_1325),
+    ];
+}
+
 /// Expansion Region 3: 2 MiB, rarely used.
 pub mod expansion3 {
     /// Physical base address.
