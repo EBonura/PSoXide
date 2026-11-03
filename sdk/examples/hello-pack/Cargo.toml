@@ -18,7 +18,7 @@ lto = true
 
 [dependencies]
 psx-gpu  = { path = "../../crates/psx-gpu" }
-psx-rt   = { path = "../../crates/psx-rt" }
+psx-rt   = { path = "../../crates/psx-rt", features = ["host-tty"] }
 psx-font = { path = "../../crates/psx-font" }
 psx-vram = { path = "../../crates/psx-vram" }
 psx-pack = { path = "../../crates/psx-pack" }

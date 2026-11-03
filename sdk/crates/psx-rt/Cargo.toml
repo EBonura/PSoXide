@@ -4,7 +4,7 @@ version      = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description  = "PS1 bare-metal runtime: _start, BIOS calls, panic, heap."
+description  = "PS1 bare-metal runtime: _start, panic, heap. Makes no BIOS call."
 
 [dependencies]
 psx-hw = { workspace = true }
@@ -23,7 +23,14 @@ runtime = []
 # Expose a bump allocator as the global allocator. Kept optional so a
 # minimal no-heap homebrew can opt out.
 alloc = []
-# Emit coarse boot breadcrumbs over the BIOS TTY channel.
+# Debug TTY: `tty::print` and friends store each byte to the Expansion 2 debug
+# console (`psx_hw::memory::expansion2::DEBUG_CONSOLE`), where PCSX-Redux, OpenBIOS and our emulator print it to the
+# host terminal. Off, they compile to nothing, which is what a shipping build
+# wants: no cycles, no port traffic, and no BIOS call either way. Turned on by
+# `console-diag`, by emulator-gated test programs (the SDK examples ask for it)
+# and by any game build whose gate reads the terminal.
+host-tty = []
+# Emit coarse boot breadcrumbs through `tty` (only seen with `host-tty`).
 boot-trace = []
 # Reserve 192 trampoline words instead of 96 (+384 bytes of `.data`).
 # The 256-word option takes precedence if both features are enabled.
@@ -59,7 +66,7 @@ critical-section = ["dep:critical-section"]
 # Stop-panel for diagnostic discs: a fault, a panic or a stall puts the program counter,
 # stack, GPU/DMA/CD state and any panic message on screen. See `diag`. Never in a shipping
 # build. Also switches on psx-io's counters.
-console-diag = ["psx-io/console-diag"]
+console-diag = ["psx-io/console-diag", "host-tty"]
 
 [lints]
 workspace = true
