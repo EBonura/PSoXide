@@ -164,6 +164,26 @@ pub unsafe fn start(ch: Channel, transfer: Transfer) {
     unsafe { raw::set_control(ch, transfer.control) };
 }
 
+/// [`start`] without the direct-access guard on the address store, for the
+/// draw-done kick that runs inside the guard or inside a scratchpad stack call
+/// tree (the stack guard cannot bound the guard's function pointer).
+///
+/// # Safety
+///
+/// As [`start`]; and the caller has already made the GPU channel safe to
+/// re-arm (the guard has run, or the channel is idle by construction).
+pub(crate) unsafe fn start_unguarded(ch: Channel, transfer: Transfer) {
+    crate::diag::dma_kick(ch as u32);
+    // SAFETY: a store to this channel's address register; the caller upholds
+    // `start`'s contract, and the guard is not needed (see above).
+    unsafe { crate::write_u32(ch.register_base() + reg::MADR, transfer.address) };
+    // SAFETY: as `raw::set_size`.
+    unsafe { raw::set_size(ch, transfer.size) };
+    compiler_barrier();
+    // SAFETY: as `start`.
+    unsafe { raw::set_control(ch, transfer.control) };
+}
+
 /// Compiler-only barrier: ordinary RAM accesses are not moved across it in
 /// either direction, so stores before it land before an MMIO store after it
 /// and accesses after it follow an MMIO read before it.
