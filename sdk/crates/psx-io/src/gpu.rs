@@ -336,7 +336,7 @@ fn kick_draw_done_list() {
     // SAFETY: the channel is idle (waited out or aborted above) and the list is
     // immutable static RAM that outlives the walk, which is waited out below.
     unsafe {
-        dma::start(
+        dma::start_unguarded(
             Channel::Gpu,
             dma::Transfer {
                 address: draw_done_list() as usize as u32,
