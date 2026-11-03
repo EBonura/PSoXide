@@ -98,15 +98,15 @@ __psx_rt_exception_handler:
     # miss it), so kick anyway and count it. A PS1 never gets here: bit 24 is
     # up by the first edge after the chain's last primitive.
 31:
-    lw    $27, {gp1}($26)
+    lw    $27, 0x1814($26)
     lui   $26, 0x1400
     and   $27, $27, $26
     bne   $27, $26, 7f
     nop
-    lui   $26, {io_hi}
-    lw    $27, {gpu_chcr}($26)
+    lui   $26, 0x1f80
+    lw    $27, 0x10a8($26)
     nop
-    srl   $27, $27, {chcr_start_shift}
+    srl   $27, $27, 24
     andi  $27, $27, 1
     bnez  $27, 7f
     nop
@@ -127,7 +127,7 @@ __psx_rt_exception_handler:
     nop
     addiu $27, $27, 1
     sw    $27, %lo(__psx_rt_draw_done_fallbacks)($26)
-    lui   $26, {io_hi}
+    lui   $26, 0x1f80
     b     34b
     nop
 7:
@@ -177,16 +177,16 @@ __psx_rt_exception_handler:
     # (an FPGA PSX core can miss it): apply the word and count it. Such a flip
     # costs one VBlank more than one that sees bit 24.
 41:
-    lui   $26, {io_hi}
-    lw    $26, {gp1}($26)
+    lui   $26, 0x1f80
+    lw    $26, 0x1814($26)
     lui   $27, 0x1400
     and   $26, $26, $27
     bne   $26, $27, 2f
     nop
-    lui   $26, {io_hi}
-    lw    $27, {gpu_chcr}($26)
+    lui   $26, 0x1f80
+    lw    $27, 0x10a8($26)
     nop
-    srl   $27, $27, {chcr_start_shift}
+    srl   $27, $27, 24
     andi  $27, $27, 1
     bnez  $27, 2f
     nop
