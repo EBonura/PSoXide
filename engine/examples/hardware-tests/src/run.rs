@@ -771,8 +771,8 @@ fn step_boot_snapshot(run: &mut Run) {
 
 fn step_kernel_timing(run: &mut Run) {
     probe_gpu!(gpu);
-    let skip_bios_vblank = run.skip_risky;
-    let records = kernel_timing::run_headless(gpu, run.font(), skip_bios_vblank);
+    let skip_bios = run.skip_risky;
+    let records = kernel_timing::run_headless(gpu, run.font(), skip_bios);
     run.push_all(&records);
 }
 

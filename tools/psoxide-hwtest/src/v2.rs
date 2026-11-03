@@ -114,6 +114,52 @@ fn build() -> BTreeMap<u32, V2Entry> {
         ["volume_left", "volume_right", "work_base"],
     );
     b.put(
+        0x405,
+        "boot_irq",
+        ["i_stat_found", "i_mask_found", "cop0_sr_low16_found"],
+    );
+    b.put(
+        0x406,
+        "boot_dma",
+        ["dpcr_low16_found", "dpcr_high16_found", "dicr_low16_found"],
+    );
+    b.put(
+        0x407,
+        "boot_dma_b",
+        [
+            "dicr_high16_found",
+            "dma_channels_busy_mask",
+            "cop0_sr_high16_found",
+        ],
+    );
+    b.put(
+        0x408,
+        "boot_timers",
+        [
+            "timer0_mode_found",
+            "timer1_mode_found",
+            "timer2_mode_found",
+        ],
+    );
+    b.put(
+        0x409,
+        "boot_spu_volumes",
+        [
+            "main_volume_lr_found",
+            "cd_volume_lr_found",
+            "sio0_ctrl_found",
+        ],
+    );
+    b.put(
+        0x40A,
+        "boot_vector_decode",
+        [
+            "kernel_stub_target_low16_or_ffff",
+            "vector_word0_low16",
+            "sio0_stat_low16_found",
+        ],
+    );
+    b.put(
         0x41A,
         "silence_final",
         [
