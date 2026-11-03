@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+No program depends on a BIOS any more, not a call into one and not the state one leaves behind (Manny's rule:
+every program works on every Sony BIOS and on OpenBIOS).
+
+- `psx_rt::tty` is off unless the `host-tty` feature is on (`console-diag` turns it on): `print`, `println` and
+  `print_hex_u32` compile to nothing without it, and with it each byte is one store to the Expansion 2 debug
+  console (`psx_hw::memory::expansion2::DEBUG_CONSOLE`), where PCSX-Redux, OpenBIOS and our emulator print it.
+  `psx_rt::bios` and its `A(3Ch)` trampoline are gone, so the SDK makes no BIOS call at all. A game whose gate
+  reads the terminal asks for `host-tty` in that build; the SDK examples do. `boot-trace` only prints with
+  `host-tty` as well.
+- `psx_rt::entry::set_entry_state` writes one documented state before `main`: cop0 SR (CU2 only, interrupts off),
+  `I_MASK` and `I_STAT`, every DMA channel quiesced then `DPCR` (`psx_hw::dma::DPCR_ENTRY`, the controller's own
+  priority ladder, nothing enabled) and `DICR`, the root counters' modes, SIO0, the SPU (voices off, reverb and
+  modulation off, main volume at its maximum, CD input volume silent and CD audio off, enabled and unmuted) and the
+  cache control register. `_start` calls it, and the demo disc's chain loader calls it between programs. A Sony
+  console was measured handing over `DPCR` 0x9099, not 0x07654321, and other BIOS versions and OpenBIOS differ again.
+- `SectorReader::prepare` no longer trusts the drive to be idle on its first call: it asks GetStat and stops a
+  drive that is reading, seeking or playing with the proven Pause (`pause::settle_drive`). An idle drive gets no
+  Pause. `hello-cdpause` takes the drive over from a running read and from a Pause in flight.
+
 Added `psx_rt::scratchpad_window` (feature `scratchpad-window`, off by default, programs that leave it off are
 byte-identical): a stack window on the scratchpad for whole call trees with hop-back to the RAM stack at guarded
 callees (`window_fn!`), and `window-gate` in psoxide-hazard, run by psoxide-pgo after every link, which proves from

@@ -20,4 +20,4 @@ lto = true
 psx-fmv = { path = "../../crates/psx-fmv" }
 psx-hw  = { path = "../../../crates/psx-hw" }
 psx-io  = { path = "../../crates/psx-io" }
-psx-rt  = { path = "../../crates/psx-rt" }
+psx-rt  = { path = "../../crates/psx-rt", features = ["host-tty"] }

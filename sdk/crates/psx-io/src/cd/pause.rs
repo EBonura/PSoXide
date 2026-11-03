@@ -153,6 +153,37 @@ pub fn pause_until_stopped(drive: &mut impl PauseDrive) -> Result<(), PauseFailu
     }
 }
 
+/// What [`settle_drive`] found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Settled {
+    /// GetStat showed no reading, seeking or playing bit: nothing to stop.
+    AlreadyIdle,
+    /// The drive was busy and a proven Pause stopped it.
+    Stopped,
+}
+
+/// Bring a drive of unknown state to rest: ask GetStat what it is doing, leave it alone when
+/// it is idle, and when it is reading, seeking or playing stop it with
+/// [`pause_until_stopped`].
+///
+/// This is how a program takes the drive over from whatever ran before it (a BIOS of any
+/// version, OpenBIOS, another program's read). The GetStat also cancels a second response
+/// still pending from an earlier Pause, which is why it comes first. An idle drive gets no
+/// Pause, so a drive model with no read to pause has nothing to leave unanswered.
+///
+/// # Errors
+///
+/// [`PauseFailure::NoAnswer`] when the drive does not answer GetStat, and otherwise whatever
+/// [`pause_until_stopped`] reports for a drive that was busy.
+pub fn settle_drive(drive: &mut impl PauseDrive) -> Result<Settled, PauseFailure> {
+    match drive.status() {
+        None => Err(PauseFailure::NoAnswer),
+        Some(status) if status & ACTIVE == 0 => Ok(Settled::AlreadyIdle),
+        Some(_) => pause_until_stopped(drive).map(|()| Settled::Stopped),
+    }
+}
+
 /// Status bits that mean the drive is doing something.
 const ACTIVE: u8 = STAT_PLAYING | STAT_SEEKING | STAT_READING;
 
@@ -377,6 +408,57 @@ mod tests {
             Err(PauseFailure::NoAnswer)
         );
         assert_eq!(console.sends, 1);
+    }
+
+    #[test]
+    fn an_idle_drive_is_left_alone_when_taking_it_over() {
+        let mut console = Console::new(Some(340));
+        console.status_clears_after = 0; // idle from the start
+        console.acked_at = Some(0);
+        assert_eq!(settle_drive(&mut console), Ok(Settled::AlreadyIdle));
+        assert_eq!(
+            console.sends, 0,
+            "no Pause for a drive that is not doing anything"
+        );
+        assert_eq!(console.statuses, 1);
+    }
+
+    #[test]
+    fn a_drive_still_reading_is_paused_and_proved_stopped() {
+        // Status reads "reading" until well after the acknowledge, as a ReadN left running does.
+        let mut console = Console::new(Some(SLOWEST));
+        assert_eq!(settle_drive(&mut console), Ok(Settled::Stopped));
+        assert_eq!(console.statuses, 1, "the one GetStat that found it busy");
+        assert_eq!(console.sends, 1);
+    }
+
+    #[test]
+    fn a_drive_that_will_not_stop_is_reported_when_taking_it_over() {
+        let mut console = Console::new(None);
+        console.status_clears_after = u32::MAX / 2;
+        assert_eq!(settle_drive(&mut console), Err(PauseFailure::NeverStopped));
+    }
+
+    struct Deaf;
+
+    impl PauseDrive for Deaf {
+        fn send_pause(&mut self) -> PauseAnswer {
+            unreachable!("a deaf drive is not paused")
+        }
+        fn wait_completion(&mut self, _spins: u32) -> Completion {
+            unreachable!()
+        }
+        fn status(&mut self) -> Option<u8> {
+            None
+        }
+        fn wait_seek_end(&mut self, _spins: u32) -> bool {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn a_drive_that_does_not_answer_is_reported_without_a_pause() {
+        assert_eq!(settle_drive(&mut Deaf), Err(PauseFailure::NoAnswer));
     }
 
     #[test]
