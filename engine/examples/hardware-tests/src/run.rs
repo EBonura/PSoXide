@@ -1048,6 +1048,37 @@ fn step_spu_init(run: &mut Run) {
     run.push(boot::post_init_reverb());
 }
 
+/// GPU DONE SIGNAL ONLY: the GPU area's starting state, then the one step.
+/// No CD or SPU reset, no capture; the results stay in `gpu_done`'s statics.
+pub(crate) fn execute_gpu_done(run: &mut Run, ctx: &mut Ctx) {
+    run.irq_baseline = irq::mask();
+    // SAFETY: plain read of the DMA control word.
+    run.dpcr_baseline = unsafe { psx_io::read_u32(DPCR) };
+    run.font = Some(ui::upload_font());
+    ui::begin_run(run.font(), 1);
+    interrupts::install_vblank_counter();
+    quiesce(run);
+    let _ = Gpu::new(
+        probe_gpu_dma(),
+        DisplayConfig::new(VideoMode::Ntsc, Resolution::R320X240),
+    );
+    run.font = Some(ui::upload_font());
+    let (gpu, fb) = ctx.gpu_and_buffers();
+    gpu.draw(&FillRect::new((0, 0), (320, 512), (6, 8, 18)));
+    fb.apply_draw_target(gpu);
+    ctx.request_timing_realign();
+    ui::banner(run.font());
+    ui::begin_step(run.font(), 4, 10, "GPU, MDEC, DISPLAY", 0, "GPU DONE SIGNAL");
+    bounds::begin_step();
+    let font = run.font.take().expect("font uploaded above");
+    crate::gpu_done::run(&font);
+    run.font = Some(font);
+    quiesce(run);
+    let (gpu, fb) = ctx.gpu_and_buffers();
+    fb.apply_draw_target(gpu);
+    ctx.request_timing_realign();
+}
+
 /// Run everything, in order. Blocks; the picture is the progress screen.
 pub(crate) fn execute(
     run: &mut Run,

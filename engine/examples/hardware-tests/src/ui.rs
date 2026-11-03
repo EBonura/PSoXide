@@ -236,14 +236,14 @@ pub(crate) fn record_id(id: u16) {
 
 /// A line of text built in place.
 pub(crate) struct Line {
-    buf: [u8; 44],
+    buf: [u8; 96],
     len: usize,
 }
 
 impl Line {
     pub(crate) const fn new() -> Self {
         Self {
-            buf: [0; 44],
+            buf: [0; 96],
             len: 0,
         }
     }

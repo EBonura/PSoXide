@@ -42,20 +42,20 @@ use psx_io::gpu as gpu_io;
 use psx_io::timers;
 
 /// Where the batches draw: right of both framebuffers, below the font atlas.
-const DRAW_X: u32 = 640;
-const DRAW_Y: u32 = 400;
+pub(crate) const DRAW_X: u32 = 640;
+pub(crate) const DRAW_Y: u32 = 400;
 /// Probe textures: two copies of one 64x64 4bpp image in neighbouring texture
 /// pages, so a record can alternate pages without changing what is sampled.
 const TEX_X: u16 = 768;
 const TEX_Y: u16 = 256;
-const TEX_PAGE_A: u32 = (TEX_X as u32 / 64) | (1 << 4);
+pub(crate) const TEX_PAGE_A: u32 = (TEX_X as u32 / 64) | (1 << 4);
 const TEX_PAGE_B: u32 = TEX_PAGE_A + 1;
 /// Two 256-entry CLUT rows. The first 16 entries serve the 4bpp modes.
 const CLUT_X: u16 = 768;
 const CLUT_Y: u16 = 336;
-const CLUT_A: u32 = ((CLUT_Y as u32) << 6) | (CLUT_X as u32 / 16);
+pub(crate) const CLUT_A: u32 = ((CLUT_Y as u32) << 6) | (CLUT_X as u32 / 16);
 const CLUT_B: u32 = ((CLUT_Y as u32 + 1) << 6) | (CLUT_X as u32 / 16);
-const DEPTH_4BPP: u32 = 0;
+pub(crate) const DEPTH_4BPP: u32 = 0;
 const DEPTH_8BPP: u32 = 1 << 7;
 const BLEND_AVERAGE: u32 = 0;
 
@@ -337,7 +337,7 @@ fn push_texture_state(records: &mut [TimingRecord; TIMING_RECORD_COUNT], next: &
 /// A 64x64 image with no zero texel in either depth, and two CLUT rows with
 /// no zero colour: texel or colour 0x0000 is transparent, and the GPU skips
 /// transparent pixels faster than it draws opaque ones.
-fn upload_textures() {
+pub(crate) fn upload_textures() {
     // 4bpp packs four texels a word; 0x4321-style nibbles are never zero, and
     // as 8bpp pairs (0x21, 0x43, ...) they are never zero either.
     let mut texture = [0u16; 16 * 64];

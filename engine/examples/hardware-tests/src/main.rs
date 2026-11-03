@@ -62,6 +62,7 @@ mod filler;
 mod dma_edge;
 mod dma_matrix;
 mod field_rule;
+mod gpu_done;
 mod gpu_probes;
 mod handoff_probe;
 mod kernel_timing;

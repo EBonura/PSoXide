@@ -7,6 +7,7 @@
 
 use super::*;
 use crate::controller_test::ControllerTest;
+use crate::gpu_done;
 use crate::photo::PhotoCapture;
 use crate::run::Run;
 use hello_memcard_recovery::Diagnostic as MemoryCardDiagnostic;
@@ -17,14 +18,17 @@ enum Mode {
     Menu,
     ControllerTest,
     MemoryCard,
+    /// GPU DONE SIGNAL ONLY: its result pages.
+    GpuDone,
     /// The capture, as pages to film.
     Capture,
 }
 
-const MENU: [&str; 5] = [
+const MENU: [&str; 6] = [
     // Row 0 is pinned: `make hwtest-run` selects it by firing CROSS at a fixed
     // tick with the cursor still at its boot position.
     "RUN HARDWARE TEST",
+    "GPU DONE SIGNAL ONLY",
     "RADIUS + LIST NODE SWEEP ONLY",
     "CONTROLLER TEST (P1 + P2)",
     "MEMORY CARD (AT OWN RISK)",
@@ -41,6 +45,8 @@ pub(crate) struct HardwareTests {
     font: Option<FontAtlas>,
     mode: Mode,
     menu_cursor: usize,
+    /// The GPU DONE SIGNAL page on show.
+    done_page: usize,
     run: Run,
     capture: PhotoCapture,
     have_capture: bool,
@@ -66,6 +72,7 @@ impl HardwareTests {
             font: None,
             mode: Mode::Menu,
             menu_cursor: 0,
+            done_page: 0,
             run: Run::new(),
             capture: PhotoCapture::new(),
             have_capture: false,
@@ -128,6 +135,15 @@ impl HardwareTests {
         }
     }
 
+    /// GPU DONE SIGNAL ONLY: run the one step, then show its pages.
+    fn start_gpu_done(&mut self, ctx: &mut Ctx) {
+        tty::println("hardware-tests: gpu-done run begins");
+        run::execute_gpu_done(&mut self.run, ctx);
+        self.font = Some(ui::upload_font());
+        self.done_page = 0;
+        self.mode = Mode::GpuDone;
+    }
+
     /// A 16-bit id for this run, so pages from different runs in one
     /// recording can be told apart before any CRC is checked.
     fn new_run_id(&self) -> u16 {
@@ -168,12 +184,13 @@ impl Scene for HardwareTests {
                 if ctx.just_pressed(button::CROSS) {
                     match self.menu_cursor {
                         0 => self.start_run(ctx, false),
-                        1 => self.start_run(ctx, true),
-                        2 => {
+                        1 => self.start_gpu_done(ctx),
+                        2 => self.start_run(ctx, true),
+                        3 => {
                             self.controller_test.start();
                             self.mode = Mode::ControllerTest;
                         }
-                        3 => {
+                        4 => {
                             self.memory_card = crate::probe_tokens::memcard_diagnostic();
                             self.memcard_armed = false;
                             self.mode = Mode::MemoryCard;
@@ -185,6 +202,18 @@ impl Scene for HardwareTests {
                             }
                         }
                     }
+                }
+            }
+            Mode::GpuDone => {
+                if ctx.just_pressed(button::START) || ctx.just_pressed(button::TRIANGLE) {
+                    self.open_menu();
+                }
+                let pages = gpu_done::page_count().max(1);
+                if ctx.just_pressed(button::LEFT) {
+                    self.done_page = (self.done_page + pages - 1) % pages;
+                }
+                if ctx.just_pressed(button::RIGHT) {
+                    self.done_page = (self.done_page + 1) % pages;
                 }
             }
             Mode::Capture => self.update_capture(ctx),
@@ -200,6 +229,7 @@ impl Scene for HardwareTests {
                 draw_test_pattern(ctx.sim_tick.as_u32());
                 self.draw_menu(font);
             }
+            Mode::GpuDone => gpu_done::draw_page(font, self.done_page),
             Mode::Capture => {
                 if self.view == 0 {
                     draw_test_pattern(ctx.sim_tick.as_u32());
@@ -312,7 +342,7 @@ impl HardwareTests {
                 (176, 190, 210)
             };
             font.draw_text(22, y, label, colour);
-            if row == 4 && !self.have_capture {
+            if row == 5 && !self.have_capture {
                 font.draw_text(22, y + 9, "NONE YET - RUN FIRST", (112, 136, 170));
             }
             y += MENU_ROW_PITCH;
