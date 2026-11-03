@@ -82,7 +82,7 @@ pub fn start() {
     #[cfg(target_arch = "mips")]
     {
         psx_io::gpu::wait_command_ready();
-        psx_io::gpu::write_command(psx_hw::gpu::gp0::REQUEST_IRQ);
+        psx_io::gpu::signal_draw_done();
     }
 }
 
@@ -243,7 +243,9 @@ fn stop_walk_and_raise() {
         if !psx_io::gpu::try_wait_command_ready(psx_io::gpu::READY_SPINS) {
             psx_io::gpu::write_display_control_unguarded(psx_hw::gpu::gp1::RESET_CMD_BUFFER);
         }
-        psx_io::gpu::write_command_unguarded(psx_hw::gpu::gp0::REQUEST_IRQ);
+        // The draw-done sequence as one DMA node, past the guard (this runs
+        // inside it); its waits are bounded like the ones above.
+        psx_io::gpu::signal_draw_done_unguarded();
     }
     // SAFETY: volatile aligned u32 accesses to this module's private static;
     // the program is single threaded and no handler touches it.
