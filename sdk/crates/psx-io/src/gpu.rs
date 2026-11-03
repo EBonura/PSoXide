@@ -183,6 +183,87 @@ pub fn command_reset_count() -> u32 {
     unsafe { core::ptr::addr_of!(COMMAND_RESETS).read_volatile() }
 }
 
+/// The draw-done sequence ([`psx_hw::gpu::gp0::DRAW_DONE_SEQUENCE`]) as one
+/// linked-list node, then the end of the list. Immutable, shared by
+/// `psx_gpu::chain::DRAW_DONE_NODE` and [`signal_draw_done`].
+pub static DRAW_DONE_LIST: [u32; 1 + psx_hw::gpu::gp0::DRAW_DONE_WORDS] = {
+    let mut list = [0u32; 1 + psx_hw::gpu::gp0::DRAW_DONE_WORDS];
+    list[0] = ((psx_hw::gpu::gp0::DRAW_DONE_WORDS as u32) << psx_hw::dma::linked_list::LENGTH_SHIFT)
+        | psx_hw::dma::linked_list::END;
+    let mut i = 0;
+    while i < psx_hw::gpu::gp0::DRAW_DONE_WORDS {
+        list[1 + i] = psx_hw::gpu::gp0::DRAW_DONE_SEQUENCE[i];
+        i += 1;
+    }
+    list
+};
+
+/// Close immediate drawing so that GPUSTAT bit 24 ([`GpuStat::IRQ1`]) rises
+/// once it is drawn: send the draw-done sequence
+/// ([`psx_hw::gpu::gp0::DRAW_DONE_SEQUENCE`], GP0(1Fh) requests with fills of
+/// a scratch block between them, see its documentation for why one request is
+/// not enough on an FPGA PSX core).
+///
+/// The words go to the GPU as one DMA channel 2 linked-list node, back to
+/// back, because the fix depends on the later requests already being queued
+/// behind the fills; a write-by-write port path waiting on GPUSTAT bit 26
+/// would hand each request to an idle GPU. With a command recording open
+/// (`present-queue`) the words are recorded instead. Otherwise an armed
+/// direct-access guard runs first, a walk still running on the channel is
+/// waited out (aborted if it is wedged: [`psx_hw::dma`] spin budget), the
+/// list is kicked and waited out again. Every wait is bounded.
+#[inline(never)]
+pub fn signal_draw_done() {
+    #[cfg(any(feature = "present-queue", test))]
+    if handoff::is_recording() {
+        write_commands(&psx_hw::gpu::gp0::DRAW_DONE_SEQUENCE);
+        return;
+    }
+    run_direct_access_guard();
+    kick_draw_done_list();
+}
+
+/// [`signal_draw_done`] past the direct-access guard and any recording, for
+/// code that has already made the port and the channel safe (the present
+/// queue's stall recovery, which the guard itself runs).
+#[cold]
+#[inline(never)]
+pub fn signal_draw_done_unguarded() {
+    kick_draw_done_list();
+}
+
+fn kick_draw_done_list() {
+    use crate::dma::{self, Channel};
+    if !dma::wait_done(Channel::Gpu, dma::DEFAULT_SPINS) {
+        dma::abort(Channel::Gpu);
+        write_display_control_unguarded(psx_hw::gpu::gp1::RESET_CMD_BUFFER);
+    }
+    // Games re-route DMA for VRAM readback and do not always restore it.
+    write_display_control_unguarded(psx_hw::gpu::gp1::dma_direction(
+        psx_hw::gpu::DmaDirection::CpuToGp0 as u32,
+    ));
+    dma::enable_channel(Channel::Gpu);
+    // SAFETY: the channel is idle (waited out or aborted above) and the list is
+    // immutable static RAM that outlives the walk, which is waited out below.
+    unsafe {
+        dma::start(
+            Channel::Gpu,
+            dma::Transfer {
+                address: core::ptr::addr_of!(DRAW_DONE_LIST) as usize as u32,
+                size: dma::size_words(0),
+                control: psx_hw::dma::CHCR_TO_DEVICE
+                    | psx_hw::dma::CHCR_SYNC_LINKED
+                    | psx_hw::dma::CHCR_START,
+            },
+        );
+    }
+    if !dma::wait_done(Channel::Gpu, dma::DEFAULT_SPINS) {
+        dma::abort(Channel::Gpu);
+        write_display_control_unguarded(psx_hw::gpu::gp1::RESET_CMD_BUFFER);
+    }
+    dma::compiler_barrier();
+}
+
 /// Spin until the GPU can start a DMA block transfer.
 #[inline]
 pub fn wait_dma_ready() {
