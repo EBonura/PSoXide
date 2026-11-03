@@ -173,7 +173,6 @@ pub unsafe fn start(ch: Channel, transfer: Transfer) {
 /// As [`start`]; and the caller has already made the GPU channel safe to
 /// re-arm (the guard has run, or the channel is idle by construction).
 pub(crate) unsafe fn start_unguarded(ch: Channel, transfer: Transfer) {
-    crate::diag::dma_kick(ch as u32);
     // SAFETY: a store to this channel's address register; the caller upholds
     // `start`'s contract, and the guard is not needed (see above).
     unsafe { crate::write_u32(ch.register_base() + reg::MADR, transfer.address) };

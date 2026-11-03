@@ -191,8 +191,7 @@ pub fn command_reset_count() -> u32 {
 /// else writes it.
 static mut DRAW_DONE_LIST: [u32; 1 + psx_hw::gpu::gp0::DRAW_DONE_WORDS] = {
     let mut list = [0u32; 1 + psx_hw::gpu::gp0::DRAW_DONE_WORDS];
-    list[0] = ((psx_hw::gpu::gp0::DRAW_DONE_WORDS as u32) << psx_hw::dma::linked_list::LENGTH_SHIFT)
-        | psx_hw::dma::linked_list::END;
+    list[0] = ((psx_hw::gpu::gp0::DRAW_DONE_WORDS as u32) << 24) | 0x00FF_FFFF;
     let mut i = 0;
     while i < psx_hw::gpu::gp0::DRAW_DONE_WORDS {
         list[1 + i] = psx_hw::gpu::gp0::DRAW_DONE_SEQUENCE[i];
@@ -248,7 +247,9 @@ pub fn set_draw_done_scratch(x: u16, y: u16) {
 pub fn signal_draw_done() {
     #[cfg(any(feature = "present-queue", test))]
     if handoff::is_recording() {
-        write_commands(&psx_hw::gpu::gp0::DRAW_DONE_SEQUENCE);
+        for &word in &psx_hw::gpu::gp0::DRAW_DONE_SEQUENCE {
+            write_command(word);
+        }
         return;
     }
     run_direct_access_guard();
