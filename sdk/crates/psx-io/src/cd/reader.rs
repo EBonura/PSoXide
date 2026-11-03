@@ -32,9 +32,13 @@
 //!   storm.
 //! * The latched CD-ROM `I_STAT` bit is acked and the controller's five IRQ
 //!   enables are switched on, then every pending controller IRQ is acked.
-//! * On the first `prepare` of a reader, IRQs latched by earlier activity (the
-//!   BIOS disc boot's file load) are drained. Pausing instead would hang on
-//!   an emulator that has no active read to pause.
+//! * On the first `prepare` of a reader the drive is not assumed idle, whatever
+//!   booted the program (Sony BIOS versions end their file load differently,
+//!   OpenBIOS and a chain loader differently again). IRQs latched by earlier
+//!   activity are drained, GetStat asks what the drive is doing, and if it is
+//!   reading, seeking or playing it is stopped with the proven Pause
+//!   ([`pause::settle_drive`]); an idle drive is left alone, so there is no
+//!   Pause for an emulator to leave unanswered. Every wait is counted.
 //! * `SetMode` is sent: double speed and 2048-byte user data by default.
 //!
 //! No DMA channel is enabled: nothing here uses one.
@@ -48,8 +52,8 @@ use psx_hw::cd::irq::{
     DATA_READY as IRQ_DATA_READY, ERROR as IRQ_ERROR,
 };
 use psx_hw::cd::{
-    CMD_DEMUTE, CMD_PAUSE, CMD_READN, CMD_SEEKL, CMD_SETFILTER, CMD_SETLOC, CMD_SETMODE,
-    MODE_DOUBLE_SPEED,
+    CMD_DEMUTE, CMD_GETSTAT, CMD_PAUSE, CMD_READN, CMD_SEEKL, CMD_SETFILTER, CMD_SETLOC,
+    CMD_SETMODE, MODE_DOUBLE_SPEED,
 };
 
 /// One CD sector's user data in 32-bit words.
@@ -389,6 +393,39 @@ impl SectorReader {
         Some(outcome)
     }
 
+    /// GetStat: the drive's status byte, or `None` when it does not answer within
+    /// [`ACK_POLL`] spins. Same masking, draining and acknowledging as
+    /// [`send_command`](Self::send_command), so a read still streaming sectors
+    /// (each popped and acknowledged by the wait) cannot hold the answer back.
+    fn get_status(&mut self) -> Option<u8> {
+        let saved = self.cd.irq_enable_mask();
+        self.cd.set_irq_enable_mask(0);
+        self.cd.acknowledge_all_and_reset_parameters();
+        self.cd.drain_response_limited(DRAIN_LIMIT);
+        self.cd.reset_parameter_fifo();
+        self.cd.send_command_byte(CMD_GETSTAT);
+        let status = match self.wait_irq(IRQ_ACK, ACK_POLL) {
+            Wait::Matched => {
+                let status = self.cd.read_response_byte();
+                self.cd.drain_response_limited(DRAIN_LIMIT);
+                self.cd.acknowledge_irq(IRQ_ACK);
+                Some(status)
+            }
+            Wait::CdError => {
+                self.note_drive_error(CMD_GETSTAT);
+                self.cd.drain_response_limited(DRAIN_LIMIT);
+                self.cd.acknowledge_all_and_reset_parameters();
+                None
+            }
+            Wait::Timeout => {
+                self.note_timeout(CMD_GETSTAT);
+                None
+            }
+        };
+        self.cd.set_irq_enable_mask(saved);
+        status
+    }
+
     /// Set `I_MASK` to VBlank-only, keeping the caller's mask for
     /// [`stop`](Self::stop), plus the sources [`irq::keep_enabled_while_polling`]
     /// holds (the pad engine's). Idempotent within a stream.
@@ -461,11 +498,13 @@ impl SectorReader {
         self.cd.set_irq_enable_mask(ALL_IRQS_ENABLED);
         self.cd.acknowledge_all_and_reset_parameters();
         if !self.prepared {
-            // A BIOS disc boot has already finished its file load. Do not
-            // send Pause before our first stream; on real BIOS boot paths
-            // some emulators have no active read command to pause and
-            // never acknowledge it. Drain any already-latched data/ack
-            // instead.
+            // Do not trust what the program that ran before us left in the drive. A Sony BIOS
+            // ends its file load with a Pause; another BIOS (OpenBIOS) or a chain loader's last
+            // read can hand over with a ReadN still streaming, a Pause's second response
+            // pending, or IRQs latched. First drop whatever is already latched (bounded: a
+            // streaming drive refills the flag, the loop gives up after 16 and the next steps
+            // deal with the stream), then ask the drive what it is doing and stop it if it is
+            // doing anything.
             let mut drained = 0;
             while drained < 16 {
                 let flag = self.cd.irq_flag_value();
@@ -474,6 +513,17 @@ impl SectorReader {
                 }
                 self.ack_unexpected(flag);
                 drained += 1;
+            }
+            self.cd.acknowledge_all_and_reset_parameters();
+            match pause::settle_drive(&mut ReaderPause(self)) {
+                // Idle, or stopped and proved so. A drive that does not answer at all is left
+                // to the SetMode below, which fails on its own bound and reports it.
+                Ok(_) | Err(PauseFailure::NoAnswer) => {}
+                Err(failure) => {
+                    self.diag = [DIAG_PAUSE, failure.code(), CMD_PAUSE, 0];
+                    self.cd.acknowledge_all_and_reset_parameters();
+                    return false;
+                }
             }
             self.cd.acknowledge_all_and_reset_parameters();
             self.prepared = true;
@@ -713,8 +763,7 @@ impl PauseDrive for ReaderPause<'_> {
     }
 
     fn status(&mut self) -> Option<u8> {
-        let response = self.0.cd.try_status(ACK_POLL)?;
-        response.bytes().first().copied()
+        self.0.get_status()
     }
 
     fn wait_seek_end(&mut self, spins: u32) -> bool {
