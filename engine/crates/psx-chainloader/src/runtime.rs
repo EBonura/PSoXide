@@ -369,91 +369,29 @@ fn verdict(s: &str, rgb: u32) {
     paint::text(8, VERDICT_Y, 2, s, rgb);
 }
 
-/// Every DMA channel, in controller order.
-const DMA_CHANNELS: [psx_io::dma::Channel; 7] = [
-    psx_io::dma::Channel::MdecIn,
-    psx_io::dma::Channel::MdecOut,
-    psx_io::dma::Channel::Gpu,
-    psx_io::dma::Channel::Cd,
-    psx_io::dma::Channel::Spu,
-    psx_io::dma::Channel::Expansion,
-    psx_io::dma::Channel::OrderingTableClear,
-];
-
-/// Let every DMA channel finish what it is doing, aborting one that will not.
-fn shut_down_dma() {
-    for channel in DMA_CHANNELS {
-        let _ = psx_io::dma::wait_or_abort(channel, psx_io::dma::DEFAULT_SPINS);
-    }
-}
-
-/// Put the hardware back roughly where the BIOS leaves it before a game
-/// boots: interrupts masked, DMA channels off, GPU reset. The launcher has
+/// Put the hardware in the SDK's entry state before a game
+/// boots: interrupts masked, DMA channels off, SPU silent, GPU reset. The launcher has
 /// been driving the GPU and vblank IRQs, and a game's `_start` does not
 /// expect to inherit that.
 unsafe fn quiesce() {
-    unsafe {
-        // Silence the SPU before anything else. The launcher hands over
-        // with its launch swoosh still sounding, and nothing between here
-        // and the game's own spu::init() stops it -- on console that came
-        // out as the sound cutting at the end of the warp and then
-        // repeating over the game's first moments. Key off all 24 voices
-        // and drop the main volume; every program sets its own on boot.
-        psx_io::write_u16(0x1F80_1D8C, 0xFFFF); // KEY_OFF lo
-        psx_io::write_u16(0x1F80_1D8E, 0x00FF); // KEY_OFF hi
-        psx_io::write_u16(0x1F80_1D80, 0); // main volume L
-        psx_io::write_u16(0x1F80_1D82, 0); // main volume R
-
-        // Mask + acknowledge every interrupt source.
-        psx_io::irq::set_mask(0);
-        psx_io::irq::acknowledge(u32::MAX);
-
-        // With interrupts closed nothing can start another transfer, so wait
-        // for the ones in flight (the launcher's last frame's list walk, for
-        // one) to finish before the controller is reconfigured and, later,
-        // before the cache control register is touched. `wait_or_abort` is the
-        // SDK's bounded wait: a channel that does not finish is aborted and
-        // given the same budget to read idle, then the load goes on.
-        shut_down_dma();
-
-        // Disable every DMA channel but keep the BIOS's priority ladder.
-        // The third debug burn proved silicon cares about the difference:
-        // with DPCR fully zeroed, re-enabling channel 3 alone (enable bit,
-        // priority nibble 0) left the CD DMA transferring nothing, and
-        // every chain-loaded header arrived as all zeros with no drive
-        // error. Standalone programs inherit 0x07654321 from the BIOS and
-        // the identical reader code works there; hand the next program
-        // the same baseline. (The emulator does not model priorities, so
-        // only a burn could catch this.)
-        psx_io::write_u32(0x1F80_10F0, 0x0765_4321); // DPCR
-
-        // GP1(00h): reset the GPU (display off, FIFO cleared, defaults).
-        psx_io::gpu::write_display_control(0);
-    }
-    // Clear cop0 SR.IEc (bit 0) so no interrupt fires between here and the
-    // game's own setup. Shift the bit out and back rather than masking with a
-    // register: MIPS-I `andi` zero-extends, and letting the allocator pick a
-    // mask register lands on $at, which the assembler reserves.
+    // The SDK's entry state (`psx_rt::entry`): the same one `_start` sets for a program a BIOS
+    // booted, so a chain-loaded game starts exactly as a game booted from any BIOS does. It
+    // keys off the SPU (the launcher hands over with its launch swoosh still sounding, and
+    // nothing between here and the game's own `Spu::new` would stop it), masks and
+    // acknowledges every interrupt source, waits for the DMA channels (the launcher's last
+    // frame's list walk, for one) and aborts one that will not finish, and writes DPCR, DICR,
+    // the root counters, SIO0, SR and the cache control register.
     //
-    // The nop after mfc0 is load-bearing: MFC0 has a one-instruction
-    // load-delay hazard on the R3000, so without it the srl reads the STALE
-    // $8 (whatever the caller left there) and writes it into SR. That
-    // exact failure shipped once: the launcher's cache flush leaves
-    // 0xFFFE0000 in $8, which landed in SR with BEV set and sent every
-    // interrupt to the ROM vector. See psx-rt's enable_cpu_interrupts for
-    // the same hazard note.
-    unsafe {
-        core::arch::asm!(
-            "mfc0 $8, $12",
-            "nop",
-            "srl  $8, $8, 1",
-            "sll  $8, $8, 1",
-            "mtc0 $8, $12",
-            "nop",
-            out("$8") _,
-            options(nostack, preserves_flags),
-        );
-    }
+    // DPCR becomes the controller's power-on priority ladder with nothing enabled. The third
+    // debug burn proved silicon cares about that over zero: with DPCR fully zeroed, re-enabling
+    // channel 3 alone (enable bit, priority nibble 0) left the CD DMA transferring nothing, and
+    // every chain-loaded header arrived as all zeros with no drive error. (The old comment here
+    // said a standalone program inherits this ladder from the BIOS; a Sony console was measured
+    // handing over 0x9099, so no BIOS is relied on for it.) The emulator does not model
+    // priorities, so only a burn could catch this.
+    psx_rt::entry::set_entry_state();
+    // GP1(00h): reset the GPU (display off, FIFO cleared, defaults).
+    psx_io::gpu::write_display_control(0);
 }
 
 /// Hand the CD controller over idle: every response flag acknowledged, the

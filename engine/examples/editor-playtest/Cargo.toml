@@ -71,6 +71,9 @@ cd-stream-benchmark = ["cd-stream-bench", "psx-game-runtime/cd-stream-benchmark"
 # Measurement builds: the far panels' counters, the camera and the draw tallies at fixed addresses.
 panel-meter = ["cd-stream-bench", "psx-game-runtime/panel-meter"]
 boot-trace = ["psx-engine/boot-trace", "psx-rt/boot-trace"]
+# The SDK's debug TTY (off in every other build, so a shipped disc makes no port traffic and no BIOS
+# call): the duel, sample and persistent-load logs the editor's validation runs read from the terminal.
+host-tty = ["psx-rt/host-tty"]
 emulator-telemetry = ["psx-engine/emulator-telemetry"]
 # The far cards of rooms (`flood: (cards: true)`): the older far view, replaced by the
 # panels (`flood: (panels: N)`); a build for a level that has cards needs this.
