@@ -364,23 +364,19 @@ fn script_b(row: usize) -> Script {
 }
 
 /// The scratch block of the SDK's draw-done sequence (psx-hw
-/// `gp0::DRAW_DONE_SCRATCH`, branch lane/fpga-irq-draw-done): 16 x 8 pixels.
+/// `gp0::DRAW_DONE_SCRATCH`, branch lane/fpga-irq-shared-fix): 16 x 8 pixels.
 const SCRATCH_X: u32 = 1008;
 const SCRATCH_Y: u32 = 504;
-const fn shipped_copy(w: u32, h: u32) -> [u32; 4] {
+/// The words of the SDK's `gp0::DRAW_DONE_SEQUENCE` (GP0(1Fh), a fill of the
+/// scratch block, three times, then GP0(1Fh): 13 words, one node), written out
+/// again here because this repo's psx-hw is a hydrated copy that does not have
+/// it; the TTY prints them so a log can be compared with the SDK's.
+const SHIPPED_NODE: [u32; 13] = {
     let at = xy(SCRATCH_X, SCRATCH_Y);
-    [0x8000_0000, at, at, xy(w, h)]
-}
-/// The words of the SDK's `gp0::DRAW_DONE_SEQUENCE`, written out again here
-/// (this repo's psx-hw is a hydrated copy that does not have it); the TTY
-/// prints them so a log can be compared with the SDK's.
-const SHIPPED_NODE: [u32; 16] = {
-    let a = shipped_copy(16, 4);
-    let b = shipped_copy(6, 4);
-    let c = shipped_copy(8, 8);
+    let size = xy(16, 8);
     [
-        IRQ_CMD, a[0], a[1], a[2], a[3], IRQ_CMD, b[0], b[1], b[2], b[3], IRQ_CMD, c[0], c[1],
-        c[2], c[3], IRQ_CMD,
+        IRQ_CMD, 0x0200_0000, at, size, IRQ_CMD, 0x0200_0000, at, size, IRQ_CMD, 0x0200_0000, at,
+        size, IRQ_CMD,
     ]
 };
 
@@ -692,7 +688,7 @@ pub(crate) fn run(font: &FontAtlas, set: u8) {
         for half in 0..4 {
             let mut l = ui::Line::new();
             l.s("hardware-tests: gpu-done shipped node ").u(half as u32);
-            for w in &SHIPPED_NODE[half * 4..half * 4 + 4] {
+            for w in &SHIPPED_NODE[half * 4..(half * 4 + 4).min(13)] {
                 l.s(" ").hex(*w, 8);
             }
             tty::println(l.as_str());
