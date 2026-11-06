@@ -31,7 +31,7 @@ static mut NEXT_MAP_LOOP: usize = 0;
 pub unsafe fn stop_dialogue() {
     let voice = Voice::new(DIALOGUE_VOICE);
     voice.set_volume(Volume::SILENCE, Volume::SILENCE);
-    Voice::key_off(voice.mask());
+    Voice::release(voice.mask());
     VOICE_COUNT = 0;
 }
 
@@ -42,7 +42,7 @@ pub unsafe fn stop_map_loops() {
     while index < MAP_LOOP_VOICE_COUNT {
         let voice = Voice::new(MAP_LOOP_VOICE_FIRST + index as u8);
         voice.set_volume(Volume::SILENCE, Volume::SILENCE);
-        Voice::key_off(voice.mask());
+        Voice::release(voice.mask());
         MAP_LOOP_OWNER[index] = MAP_LOOP_OWNER_NONE;
         index += 1;
     }
@@ -58,7 +58,7 @@ pub unsafe fn stop_all() {
         Voice::new(index).set_volume(Volume::SILENCE, Volume::SILENCE);
         index += 1;
     }
-    Voice::key_off((1u32 << 24) - 1);
+    Voice::release((1u32 << 24) - 1);
     NEXT_VOICE = 0;
     VOICE_COUNT = 0;
     let mut loop_index = 0usize;
@@ -405,7 +405,7 @@ unsafe fn play_map_loop_with_volume(local_id: u8, owner: u16, gain: Volume) {
     NEXT_MAP_LOOP = (NEXT_MAP_LOOP + 1) % MAP_LOOP_VOICE_COUNT;
     let voice = Voice::new(MAP_LOOP_VOICE_FIRST + slot as u8);
     voice.set_volume(Volume::SILENCE, Volume::SILENCE);
-    Voice::key_off(voice.mask());
+    Voice::release(voice.mask());
     MAP_LOOP_OWNER[slot] = owner;
 
     // A genuine WAV loop still sustains forever because its ADPCM END block
@@ -423,7 +423,7 @@ pub unsafe fn stop_map_loop(owner: u16) {
         if MAP_LOOP_OWNER[index] == owner {
             let voice = Voice::new(MAP_LOOP_VOICE_FIRST + index as u8);
             voice.set_volume(Volume::SILENCE, Volume::SILENCE);
-            Voice::key_off(voice.mask());
+            Voice::release(voice.mask());
             MAP_LOOP_OWNER[index] = MAP_LOOP_OWNER_NONE;
         }
         index += 1;
@@ -457,7 +457,7 @@ pub unsafe fn play_vol(id: u8, den: u16) {
             Adsr::default_tone()
         },
     );
-    Voice::key_on(v.mask());
+    Voice::start(v.mask());
 }
 
 /// Full-volume one-shot (player-local sounds: own weapon, pain, pickups).
@@ -471,7 +471,7 @@ pub unsafe fn play(id: u8) {
 pub unsafe fn charger_stop() {
     let voice = Voice::new(CHARGER_VOICE);
     voice.set_volume(Volume::SILENCE, Volume::SILENCE);
-    Voice::key_off(voice.mask());
+    Voice::release(voice.mask());
 }
 
 static mut EAR: [i32; 3] = [0; 3];

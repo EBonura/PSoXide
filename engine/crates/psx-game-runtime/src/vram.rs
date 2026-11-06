@@ -2829,7 +2829,7 @@ mod tests {
     }
 
     #[test]
-    fn cortex_shared_enemy_atlas_plan_leaves_twelve_texture_pages_free() {
+    fn cortex_shared_enemy_atlas_plan_leaves_eleven_texture_pages_free() {
         let mut vram = TestVram::new(ARENA_LAYOUT);
         vram.reserve_static_vram_regions(ARENA_LAYOUT);
 
@@ -2864,6 +2864,8 @@ mod tests {
                 free_pages += 1;
             }
         }
-        assert_eq!(free_pages, 12, "384 KiB of page capacity remains");
+        // Twelve before the SDK reserved the draw-done block (psx_vram::DRAW_DONE_SCRATCH): the
+        // page at the bottom right corner of the model row now covers it and is never handed out.
+        assert_eq!(free_pages, 11, "352 KiB of page capacity remains");
     }
 }
