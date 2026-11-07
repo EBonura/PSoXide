@@ -826,3 +826,11 @@ no flag for them), so it inlines by the wrong numbers and free RAM jumps by
 tens of KB. hl-psx's committed profiles read, against one build: same commit
 100%, next commit 99.3%, four commits on 95.5%, ten on 91%, a week of HUD work
 88.9%. Thresholds are provisional.
+
+`--baseline FILE` takes the scores (`score NAME VALUE` lines, the bench's own
+format) of the build being replaced. A candidate more than
+`--baseline-tolerance` percent (default 1) under it on any metric is not
+eligible, the table shows each score's delta against the baseline, and the
+ladder fails, printing the table, when no candidate qualifies.
+
+The pick's scores are written to `scores.txt` in the work directory in the same format, ready to commit as the next run's baseline.

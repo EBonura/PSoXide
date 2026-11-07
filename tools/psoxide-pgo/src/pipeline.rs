@@ -63,6 +63,7 @@ pub const USAGE: &str = "\
                            [--pack CMD] [--frame-budget VBLANKS] [--rank deadline|work] -- CARGO-ARGS...
        psoxide-pgo ladder  [GUEST] --profile PROFILE [--layout LAYOUT] [--variant BASE] --ram-floor BYTES
                            [--from N] [--to N] [--step N] [--candidates K] [--tie PERCENT] [--scan]
+                           [--baseline FILE [--baseline-tolerance PERCENT]]
                            [--link CMD] [--pack CMD] [--bench CMD] [--out TABLE] [-- CARGO-ARGS...]
        psoxide-pgo measure --frontend PATH --image PATH [--tape PATH] --polls A..B
                            [--launch-arg ARG]... [--name NAME] [--wait-range START..END]...
@@ -85,7 +86,9 @@ pub const USAGE: &str = "\
          candidate (env PSOXIDE_PGO_THRESHOLD, _FREE, _EXE, _IMAGE) and prints `score NAME VALUE`
          lines, higher is better. Pick = best geometric mean of per-metric ratios; candidates
          within --tie (0.3) percent tie and the one with the most free RAM wins; a pick more
-         than 1% under the best on any metric is warned. The table goes to --out (ladder.txt).
+         than 1% under the best on any metric is warned. --baseline FILE (`score NAME VALUE` lines
+         of the build being replaced) makes any candidate more than --baseline-tolerance (1)
+         percent under it on a metric ineligible and prints the per-metric deltas. The table goes to --out (ladder.txt).
   A..B: the gameplay window in port-1 polls, loads excluded
   START..END: guest addresses in hex (one build's layout) of a loop to count as waiting";
 
@@ -244,6 +247,18 @@ fn parse(mode: &str, args: &[String]) -> Result<Options> {
                     .map_err(|_| format!("--tie wants a percentage, not {text:?}"))?;
             }
             "--scan" => options.ladder.scan = true,
+            "--baseline" => {
+                let path = value()?;
+                options.ladder.baseline = ladder::parse_scores(
+                    &fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?,
+                );
+                if options.ladder.baseline.is_empty() {
+                    return Err(format!("{path} holds no `score NAME VALUE` lines").into());
+                }
+            }
+            "--baseline-tolerance" => {
+                options.ladder.baseline_tolerance = flag_number(&value()?, "--baseline-tolerance")?
+            }
             "--bench" => options.bench = Some(value()?),
             "--link" => options.link = Some(value()?),
             "--ram-fallback" => options.ram_fallbacks.push(value()?),
@@ -2519,6 +2534,21 @@ fn ladder_mode(guest: &Guest, options: &Options) -> Result<()> {
         work.join("shipped-variant.txt"),
         format!("threshold {}\n{table}", outcome.chosen),
     )?;
+    // The pick's scores, in the bench's own format: the next run's --baseline.
+    if let Some(rung) = outcome
+        .rungs
+        .iter()
+        .find(|rung| rung.threshold == outcome.chosen)
+    {
+        let scores: String = rung
+            .scores
+            .iter()
+            .map(|(name, value)| format!("score {name} {value}\n"))
+            .collect();
+        if !scores.is_empty() {
+            fs::write(work.join("scores.txt"), scores)?;
+        }
+    }
     // Leave the pick linked, as the last link made may be another rung.
     let free = rig.link(outcome.chosen)?;
     if free.is_none() {

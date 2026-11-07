@@ -35,6 +35,10 @@ pub struct Config {
     pub tie_percent: f64,
     /// Link every grid point instead of binary searching.
     pub scan: bool,
+    /// Scores of the build being replaced; a candidate more than
+    /// `baseline_tolerance` percent under it on any metric is not eligible.
+    pub baseline: Vec<(String, f64)>,
+    pub baseline_tolerance: f64,
 }
 
 impl Default for Config {
@@ -47,6 +51,8 @@ impl Default for Config {
             candidates: 4,
             tie_percent: 0.3,
             scan: false,
+            baseline: Vec::new(),
+            baseline_tolerance: 1.0,
         }
     }
 }
@@ -105,6 +111,8 @@ pub struct Rung {
     pub geomean: Option<f64>,
     /// The worst per-metric ratio to the best candidate.
     pub worst: Option<(String, f64)>,
+    /// Score over the baseline's, per metric, when a baseline is given.
+    pub vs_baseline: Vec<(String, f64)>,
 }
 
 impl Rung {
@@ -218,6 +226,7 @@ pub fn search(rig: &mut dyn Rig, config: &Config) -> Result<Outcome> {
                 scores: scored.get(&threshold).cloned().unwrap_or_default(),
                 geomean: None,
                 worst: None,
+                vs_baseline: Vec::new(),
             })
         })
         .collect();
@@ -225,7 +234,34 @@ pub fn search(rig: &mut dyn Rig, config: &Config) -> Result<Outcome> {
         candidates[0]
     } else {
         rate(&mut rungs, &candidates)?;
-        let chosen = pick(&rungs, &candidates, config.tie_percent);
+        let mut eligible = candidates.clone();
+        if !config.baseline.is_empty() {
+            compare_baseline(&mut rungs, &candidates, config)?;
+            let floor = 1.0 - config.baseline_tolerance / 100.0;
+            eligible.retain(|threshold| {
+                rungs
+                    .iter()
+                    .find(|rung| rung.threshold == *threshold)
+                    .is_some_and(|rung| rung.vs_baseline.iter().all(|(_, ratio)| *ratio >= floor))
+            });
+            if eligible.is_empty() {
+                return Err(format!(
+                    "every candidate is more than {}% under the baseline on some metric:\n{}",
+                    config.baseline_tolerance,
+                    table(
+                        &Outcome {
+                            rungs: rungs.clone(),
+                            candidates: candidates.clone(),
+                            chosen: 0,
+                            warnings: Vec::new(),
+                        },
+                        config
+                    )
+                )
+                .into());
+            }
+        }
+        let chosen = pick(&rungs, &eligible, config.tie_percent);
         let rung = rungs
             .iter()
             .find(|rung| rung.threshold == chosen)
@@ -284,6 +320,32 @@ fn rate(rungs: &mut [Rung], candidates: &[u32]) -> Result<()> {
         }
         rung.geomean = Some((log_sum / best.len() as f64).exp());
         rung.worst = worst;
+    }
+    Ok(())
+}
+
+/// Each benched rung's score over the baseline's, per metric.
+fn compare_baseline(rungs: &mut [Rung], candidates: &[u32], config: &Config) -> Result<()> {
+    for rung in rungs
+        .iter_mut()
+        .filter(|rung| candidates.contains(&rung.threshold))
+    {
+        let mut ratios = Vec::new();
+        for (name, base) in &config.baseline {
+            let value = rung
+                .scores
+                .iter()
+                .find(|(other, _)| other == name)
+                .map(|(_, value)| *value)
+                .ok_or_else(|| {
+                    format!("the bench printed no score {name} (named by the baseline)")
+                })?;
+            if *base <= 0.0 {
+                return Err(format!("baseline score {name} must be positive").into());
+            }
+            ratios.push((name.clone(), value / base));
+        }
+        rung.vs_baseline = ratios;
     }
     Ok(())
 }
@@ -355,6 +417,11 @@ pub fn table(outcome: &Outcome, config: &Config) -> String {
             match rung.scores.iter().find(|(other, _)| other == name) {
                 Some((_, value)) => {
                     let _ = write!(text, "  {value:.3}");
+                    if let Some((_, ratio)) =
+                        rung.vs_baseline.iter().find(|(other, _)| other == name)
+                    {
+                        let _ = write!(text, " ({:+.2}%)", 100.0 * (ratio - 1.0));
+                    }
                 }
                 None => text.push_str("  -"),
             }
@@ -382,6 +449,13 @@ pub fn table(outcome: &Outcome, config: &Config) -> String {
     }
     for warning in &outcome.warnings {
         let _ = writeln!(text, "warning: {warning}");
+    }
+    if !config.baseline.is_empty() {
+        let _ = writeln!(
+            text,
+            "(percentages are against the baseline; a candidate more than {}% under it on any metric is not eligible)",
+            config.baseline_tolerance
+        );
     }
     let _ = writeln!(text, "chosen threshold {}", outcome.chosen);
     text
@@ -532,6 +606,42 @@ mod tests {
         assert_eq!(outcome.candidates, [950, 850, 750, 650]);
         assert_eq!(rig.benches, [950, 850, 750, 650]);
         assert!(table(&outcome, &config(3600)).contains("same code as 950"));
+    }
+
+    #[test]
+    fn a_candidate_under_the_baseline_is_not_eligible() {
+        let speeds: &[(u32, &[(&str, f64)])] = &[
+            (950, &[("a", 10.0), ("b", 20.0)]),
+            (900, &[("a", 12.0), ("b", 19.5)]),
+            (850, &[("a", 10.1), ("b", 20.1)]),
+            (800, &[("a", 9.0), ("b", 15.0)]),
+        ];
+        let baseline = vec![("a".to_string(), 10.0), ("b".to_string(), 20.0)];
+        let with = Config {
+            baseline: baseline.clone(),
+            ..config(3600)
+        };
+        let outcome = search(&mut Fake::new(speeds), &with).unwrap();
+        // 900 has the best geomean but is 2.5% under the baseline on b.
+        assert_eq!(outcome.chosen, 850);
+        let text = table(&outcome, &with);
+        assert!(text.contains("(-2.50%)"), "{text}");
+        // Without a baseline 900 wins.
+        assert_eq!(
+            search(&mut Fake::new(speeds), &config(3600))
+                .unwrap()
+                .chosen,
+            900
+        );
+        // A baseline nobody meets is an error that shows the table.
+        let high = Config {
+            baseline: vec![("a".to_string(), 20.0), ("b".to_string(), 20.0)],
+            ..config(3600)
+        };
+        let error = search(&mut Fake::new(speeds), &high)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("under the baseline"), "{error}");
     }
 
     #[test]
