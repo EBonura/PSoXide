@@ -320,19 +320,11 @@ mod tests {
         let mut p = EdgePolicy::new(176);
         for round in 0..6u32 {
             p.begin_frame(176);
-            let mut m = Model {
-                next: Vec::new(),
-                patches: 0,
-                budget: 176,
-            };
+            let mut m = Model { next: Vec::new(), patches: 0, budget: 176 };
             for i in 0..50u32 {
                 let k = keys(round * 1000 + i);
                 let cost = 3 + (i % 9) as u16;
-                assert_eq!(
-                    p.request(k, cost),
-                    m.request(k, cost),
-                    "round {round} patch {i}"
-                );
+                assert_eq!(p.request(k, cost), m.request(k, cost), "round {round} patch {i}");
                 assert_eq!(p.next_count as usize, m.next.len());
             }
             assert_eq!(&p.next[..p.next_count as usize], m.next.as_slice());

@@ -1,1 +1,5 @@
-# Formatted with rustfmt defaults, as it was in PSoXide-editor; not the SDK style (see the root rustfmt.toml).
+# Formatted with rustfmt defaults, as it was in PSoXide-editor.
+# These two files stay as they were written: a reflow moves line numbers, and the games that panic with
+# a Location (not immediate-abort builds) embed psx-engine and psx-goldsrc line numbers in their exe.
+unstable_features = true
+ignore = ["crates/psx-engine/src/app.rs", "crates/psx-goldsrc/src/affine_edges.rs"]
