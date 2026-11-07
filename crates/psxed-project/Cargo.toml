@@ -1,0 +1,71 @@
+[package]
+name = "psxed-project"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+repository = "https://github.com/EBonura/PSoXide-editor"
+description = "PSoXide editor project model: scenes, nodes, resources, and PS1-facing authoring metadata."
+
+[dependencies]
+psxed-format = { path = "../../../crates/psxed-format" }
+psxed-audio  = { path = "../psxed-audio" }
+psxed-gltf   = { path = "../psxed-gltf" }
+psxed-tex    = { path = "../psxed-tex" }
+psx-asset    = { path = "../../../sdk/crates/psx-asset" }
+psx-anim-tracks = { path = "../../../crates/psx-anim-tracks" }
+psx-engine   = { path = "../../../engine/crates/psx-engine" }
+psx-grid     = { path = "../../../engine/crates/psx-grid" }
+psx-font     = { path = "../../../sdk/crates/psx-font" }
+psx-render-contract = { path = "../../../engine/crates/psx-render-contract" }
+psx-iso      = { path = "../../../crates/psx-iso" }
+psx-hw       = { path = "../../../crates/psx-hw" }
+psx-audio-cook = { path = "../../../crates/psx-audio-cook" }
+psx-level    = { path = "../../../engine/crates/psx-level", features = ["wire"] }
+flate2 = "1.1"
+image.workspace = true
+ron = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+
+[[bin]]
+name = "reimport-model-probe"
+path = "src/bin/reimport_model_probe.rs"
+
+[[bin]]
+name = "cook-playtest"
+path = "src/bin/cook_playtest.rs"
+
+[[bin]]
+name = "rechunk-hex"
+path = "src/bin/rechunk_hex.rs"
+
+[[bin]]
+name = "miniaturise-project"
+path = "src/bin/miniaturise_project.rs"
+
+[[bin]]
+name = "import-locomotion"
+path = "src/bin/import_locomotion.rs"
+
+[[bin]]
+name = "gridcover"
+path = "src/bin/gridcover.rs"
+
+[[bin]]
+name = "gridsweep"
+path = "src/bin/gridsweep.rs"
+
+[[bin]]
+name = "gridholes"
+path = "src/bin/gridholes.rs"
+
+[[bin]]
+name = "gridfloat"
+path = "src/bin/gridfloat.rs"
+
+[[bin]]
+name = "gridbridges"
+path = "src/bin/gridbridges.rs"
+
+[[bin]]
+name = "audit-animations"
+path = "src/bin/audit_animations.rs"

@@ -1,0 +1,883 @@
+//! Creating and deleting floors and ceilings over a rectangle of sectors.
+//!
+//! The room grows to take in the rectangle (towards negative coordinates
+//! too, moving its origin so nothing shifts in the world), and shrinks back
+//! after a delete. Growth that would pass [`MAX_ROOM_SIDE`] is refused
+//! before anything changes, so an oversize room fails loudly in the editor.
+
+use crate::ResourceId;
+
+use super::super::leaf::{edge_clicks, LeafKey, CLICKS_PER_SECTOR, SECTOR_LEVEL};
+use super::super::limits::MAX_ROOM_SIDE;
+use super::super::room::GridRoom;
+use super::super::sector::GridSector;
+use super::super::surface::GridSurface;
+use super::super::tree::normalize;
+use super::super::world::GridWorld;
+use super::fit::{split_to_fit, ClickRect};
+use super::refs::SurfaceKind;
+
+/// Inclusive rectangle of world sectors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CellRect {
+    /// Smallest corner, `[x, z]`.
+    pub min: [i32; 2],
+    /// Largest corner, `[x, z]`, inclusive.
+    pub max: [i32; 2],
+}
+
+impl CellRect {
+    /// The rectangle spanned by two cells in either order.
+    pub fn from_corners(a: [i32; 2], b: [i32; 2]) -> Self {
+        Self {
+            min: [a[0].min(b[0]), a[1].min(b[1])],
+            max: [a[0].max(b[0]), a[1].max(b[1])],
+        }
+    }
+
+    /// Sectors along X.
+    pub fn width(&self) -> i32 {
+        self.max[0] - self.min[0] + 1
+    }
+
+    /// Sectors along Z.
+    pub fn depth(&self) -> i32 {
+        self.max[1] - self.min[1] + 1
+    }
+
+    /// Number of sectors.
+    pub fn count(&self) -> usize {
+        (self.width().max(0) as usize) * (self.depth().max(0) as usize)
+    }
+
+    /// Whether `cell` is inside.
+    pub fn contains(&self, cell: [i32; 2]) -> bool {
+        (self.min[0]..=self.max[0]).contains(&cell[0])
+            && (self.min[1]..=self.max[1]).contains(&cell[1])
+    }
+
+    /// The part of the rectangle inside `room`, or `None` when they do not
+    /// overlap. Lets a huge drag be walked cell by cell safely.
+    pub fn clipped_to(&self, room: &GridRoom) -> Option<Self> {
+        let max = [
+            room.origin[0] + room.width as i32 - 1,
+            room.origin[1] + room.depth as i32 - 1,
+        ];
+        let clipped = Self {
+            min: [
+                self.min[0].max(room.origin[0]),
+                self.min[1].max(room.origin[1]),
+            ],
+            max: [self.max[0].min(max[0]), self.max[1].min(max[1])],
+        };
+        (clipped.min[0] <= clipped.max[0] && clipped.min[1] <= clipped.max[1]).then_some(clipped)
+    }
+
+    /// Every cell, `z` major.
+    pub fn cells(&self) -> impl Iterator<Item = [i32; 2]> + '_ {
+        (self.min[1]..=self.max[1]).flat_map(|z| (self.min[0]..=self.max[0]).map(move |x| [x, z]))
+    }
+}
+
+/// Why a rectangle edit changed nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RectRefusal {
+    /// The room index does not exist.
+    NoSuchRoom,
+    /// The room would grow past [`MAX_ROOM_SIDE`] along one side.
+    RoomTooLarge {
+        /// Sectors the room would need along the offending side.
+        needed: usize,
+    },
+}
+
+/// What a rectangle edit did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RectOutcome {
+    /// Surfaces created or removed.
+    pub changed: usize,
+    /// Cells left alone: a surface was already there (create) or none was
+    /// (delete).
+    pub skipped: usize,
+    /// Whether the room's extent changed.
+    pub resized: bool,
+    /// Set when nothing was done.
+    pub refused: Option<RectRefusal>,
+}
+
+impl RectOutcome {
+    fn refused(reason: RectRefusal) -> Self {
+        Self {
+            refused: Some(reason),
+            ..Self::default()
+        }
+    }
+}
+
+/// Grow `room` to include the world sectors in `rect`, refusing when a side
+/// would exceed the cap. Returns whether the room changed.
+pub fn grow_room_to(room: &mut GridRoom, rect: CellRect) -> Result<bool, RectRefusal> {
+    let low = [
+        room.origin[0].min(rect.min[0]),
+        room.origin[1].min(rect.min[1]),
+    ];
+    let high = [
+        (room.origin[0] + room.width as i32 - 1).max(rect.max[0]),
+        (room.origin[1] + room.depth as i32 - 1).max(rect.max[1]),
+    ];
+    let (need_x, need_z) = (
+        (high[0] - low[0] + 1) as usize,
+        (high[1] - low[1] + 1) as usize,
+    );
+    if need_x > MAX_ROOM_SIDE || need_z > MAX_ROOM_SIDE {
+        return Err(RectRefusal::RoomTooLarge {
+            needed: need_x.max(need_z),
+        });
+    }
+    let before = (room.width, room.depth, room.origin);
+    room.grow_to_include(
+        i64::from(rect.min[0]) - i64::from(room.origin[0]),
+        i64::from(rect.min[1]) - i64::from(room.origin[1]),
+    );
+    room.grow_to_include(
+        i64::from(rect.max[0]) - i64::from(room.origin[0]),
+        i64::from(rect.max[1]) - i64::from(room.origin[1]),
+    );
+    Ok(before != (room.width, room.depth, room.origin))
+}
+
+/// Create a flat `kind` surface at room-relative `height` on every sector of
+/// `rect` that has none. Existing surfaces are kept untouched.
+pub fn create_surfaces(
+    world: &mut GridWorld,
+    room: usize,
+    kind: SurfaceKind,
+    rect: CellRect,
+    height: i32,
+    material: Option<ResourceId>,
+) -> RectOutcome {
+    let Some(target) = world.rooms.get_mut(room) else {
+        return RectOutcome::refused(RectRefusal::NoSuchRoom);
+    };
+    if !target.leaves.is_sectors_only() {
+        return create_surfaces_cells(
+            world,
+            room,
+            kind,
+            SECTOR_LEVEL,
+            rect.min,
+            rect.max,
+            height,
+            material,
+        );
+    }
+    let mut outcome = RectOutcome::default();
+    match grow_room_to(target, rect) {
+        Ok(resized) => outcome.resized = resized,
+        Err(refusal) => return RectOutcome::refused(refusal),
+    }
+    for cell in rect.cells() {
+        let Some([x, z]) = target.local(cell) else {
+            continue;
+        };
+        let Some(sector) = target.sector_or_insert(x, z) else {
+            continue;
+        };
+        let slot = match kind {
+            SurfaceKind::Floor => sector.ground_floor_slot_mut(),
+            SurfaceKind::Ceiling => sector.ground_ceiling_slot_mut(),
+        };
+        if slot.is_some() {
+            outcome.skipped += 1;
+        } else {
+            *slot = Some(GridSurface::flat_auto(height, material));
+            outcome.changed += 1;
+        }
+    }
+    outcome
+}
+
+/// What joining new floor to its neighbours did, see [`join_fresh_floors`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct JoinOutcome {
+    /// Rooms that had walls opened, with how many sector edges, ascending by
+    /// room.
+    pub opened: Vec<(usize, usize)>,
+    /// Sector edges whose walls stay because the two floors meet at heights
+    /// further apart than a body steps.
+    pub kept_edges: usize,
+}
+
+/// The tallest step, editor units, between two floors that a wall between
+/// them is still opened for (what the player climbs: see the walk limits).
+pub const JOIN_MAX_STEP: i32 = psx_engine::WalkLimits::DEFAULT.step_up * 16;
+
+/// New floor was just made in `room` over the world cells `fresh` (the ones
+/// that had no floor before). Where a fresh cell lies beside a floor, in the
+/// same room or in another, the walls on the edge between them are opened on
+/// both sides so the new floor connects:
+///
+/// * authored walls on either side are removed;
+/// * a derived closure wall of either side gets an override that hides it and
+///   makes it passable (a riser inside one room is a step, not a wall, and is
+///   left alone).
+///
+/// Where the two floors meet more than [`JOIN_MAX_STEP`] apart the wall stays
+/// and is counted in `kept_edges`.
+pub fn join_fresh_floors(world: &mut GridWorld, room: usize, fresh: &[[i32; 2]]) -> JoinOutcome {
+    use super::super::derive::DerivedKind;
+    use super::super::leaf_derive::derived_walls_of;
+    use super::super::overrides::WallMode;
+    use super::super::sector::WallEdge;
+    use super::walls::surface_edge_heights;
+    let mut out = JoinOutcome::default();
+    let mut opened: std::collections::BTreeMap<usize, usize> = Default::default();
+    let sides = [
+        (WallEdge::North, [0, -1]),
+        (WallEdge::East, [1, 0]),
+        (WallEdge::South, [0, 1]),
+        (WallEdge::West, [-1, 0]),
+    ];
+    // The floor of a cell, and its room's vertical offset.
+    let floor_at = |world: &GridWorld, r: usize, c: [i32; 2]| {
+        let room = world.rooms.get(r)?;
+        let [x, z] = room.local(c)?;
+        let floor = room.sector(x, z)?.ground_floor()?.clone();
+        Some((floor, room.y_offset))
+    };
+    // Whether the edge of a cell has something that closes it: authored walls
+    // or, in a derived room, a closure wall.
+    let closes = |world: &GridWorld, r: usize, c: [i32; 2], e: WallEdge| {
+        let Some(room) = world.rooms.get(r) else {
+            return false;
+        };
+        let authored = room
+            .local(c)
+            .and_then(|[x, z]| room.sector(x, z))
+            .is_some_and(|s| !s.walls(e).is_empty());
+        authored
+            || (room.wall_mode == WallMode::Derived
+                && derived_walls_of(room, LeafKey::sector(c))
+                    .iter()
+                    .any(|w| w.edge == e && w.kind == DerivedKind::Closure && !is_open(w)))
+    };
+    fn is_open(w: &super::super::derive::DerivedWall) -> bool {
+        w.hidden && w.solid == Some(false)
+    }
+    for &cell in fresh {
+        for (edge, step) in sides {
+            let beside = [cell[0] + step[0], cell[1] + step[1]];
+            if fresh.contains(&beside) {
+                continue;
+            }
+            let Some((back, _)) = edge.opposite() else {
+                continue;
+            };
+            let Some((new, new_offset)) = floor_at(world, room, cell) else {
+                continue;
+            };
+            // The neighbouring floor: in this room first, else any other.
+            let Some((other, (old, old_offset))) = std::iter::once(room)
+                .chain((0..world.rooms.len()).filter(|r| *r != room))
+                .find_map(|r| floor_at(world, r, beside).map(|f| (r, f)))
+            else {
+                continue;
+            };
+            if !closes(world, room, cell, edge) && !closes(world, other, beside, back) {
+                continue;
+            }
+            let mut a = surface_edge_heights(&new, edge).map(|h| h + new_offset);
+            let mut b = surface_edge_heights(&old, back).map(|h| h + old_offset);
+            a.sort_unstable();
+            b.sort_unstable();
+            let step = (0..2)
+                .map(|i| world.scale.to_editor((a[i] - b[i]).abs()))
+                .max()
+                .unwrap_or(0);
+            if step > JOIN_MAX_STEP {
+                out.kept_edges += 1;
+                continue;
+            }
+            let mut done = std::collections::BTreeSet::new();
+            for (r, c, e) in [(room, cell, edge), (other, beside, back)] {
+                let mut did = false;
+                let target = &mut world.rooms[r];
+                if let Some([x, z]) = target.local(c) {
+                    if let Some(sector) = target.sector_mut(x, z) {
+                        did |= !sector.walls(e).is_empty();
+                        sector.walls_mut(e).clear();
+                    }
+                }
+                if target.wall_mode == WallMode::Derived {
+                    let keys: Vec<_> = derived_walls_of(target, LeafKey::sector(c))
+                        .into_iter()
+                        .filter(|w| w.edge == e && w.kind == DerivedKind::Closure && !is_open(w))
+                        .map(|w| w.key)
+                        .collect();
+                    for key in keys {
+                        target.edge_overrides.edit(key, |o| {
+                            o.hidden = true;
+                            o.solid = Some(false);
+                        });
+                        did = true;
+                    }
+                }
+                if did {
+                    done.insert(r);
+                }
+            }
+            // One physical edge counts once for each room it was opened in.
+            for r in done {
+                *opened.entry(r).or_default() += 1;
+            }
+        }
+    }
+    out.opened = opened.into_iter().collect();
+    out
+}
+
+/// Remove the `kind` surface from every sector of `rect`, then drop empty
+/// sectors and shrink the room around what is left.
+pub fn delete_surfaces(
+    world: &mut GridWorld,
+    room: usize,
+    kind: SurfaceKind,
+    rect: CellRect,
+) -> RectOutcome {
+    let Some(target) = world.rooms.get_mut(room) else {
+        return RectOutcome::refused(RectRefusal::NoSuchRoom);
+    };
+    if !target.leaves.is_sectors_only() {
+        return delete_surfaces_cells(world, room, kind, SECTOR_LEVEL, rect.min, rect.max);
+    }
+    let before = (target.width, target.depth, target.origin);
+    let mut outcome = RectOutcome::default();
+    // Only the part over the room can hold anything; a rectangle dragged
+    // across the whole world must not be walked cell by cell.
+    let Some(rect) = rect.clipped_to(target) else {
+        return outcome;
+    };
+    for cell in rect.cells() {
+        let Some([x, z]) = target.local(cell) else {
+            outcome.skipped += 1;
+            continue;
+        };
+        let Some(sector) = target.sector_mut(x, z) else {
+            outcome.skipped += 1;
+            continue;
+        };
+        let slot = match kind {
+            SurfaceKind::Floor => sector.ground_floor_slot_mut(),
+            SurfaceKind::Ceiling => sector.ground_ceiling_slot_mut(),
+        };
+        if slot.take().is_some() {
+            outcome.changed += 1;
+        } else {
+            outcome.skipped += 1;
+        }
+    }
+    if outcome.changed > 0 {
+        target.trim_empty();
+    }
+    outcome.resized = before != (target.width, target.depth, target.origin);
+    outcome
+}
+
+/// The sectors a rectangle of `level` cells lies over.
+fn sector_rect(level: u8, lo: [i32; 2], hi: [i32; 2]) -> CellRect {
+    let e = edge_clicks(level);
+    let per = CLICKS_PER_SECTOR;
+    CellRect {
+        min: [(lo[0] * e).div_euclid(per), (lo[1] * e).div_euclid(per)],
+        max: [
+            (hi[0] * e + e - 1).div_euclid(per),
+            (hi[1] * e + e - 1).div_euclid(per),
+        ],
+    }
+}
+
+fn slot_of(sector: &mut GridSector, kind: SurfaceKind) -> &mut Option<GridSurface> {
+    match kind {
+        SurfaceKind::Floor => sector.ground_floor_slot_mut(),
+        SurfaceKind::Ceiling => sector.ground_ceiling_slot_mut(),
+    }
+}
+
+/// [`create_surfaces`] over cells of any size: a flat `kind` surface on every
+/// cell of `level` in `lo..=hi` (cell coordinates at that level) that has
+/// none. A leaf larger than a cell is split to fit first, a cell with no leaf
+/// gets a new one, and the tree is balanced afterwards, so a quarter cell
+/// floor can start next to a whole sector one.
+#[allow(clippy::too_many_arguments)]
+pub fn create_surfaces_cells(
+    world: &mut GridWorld,
+    room: usize,
+    kind: SurfaceKind,
+    level: u8,
+    lo: [i32; 2],
+    hi: [i32; 2],
+    height: i32,
+    material: Option<ResourceId>,
+) -> RectOutcome {
+    let Some(target) = world.rooms.get_mut(room) else {
+        return RectOutcome::refused(RectRefusal::NoSuchRoom);
+    };
+    let mut outcome = RectOutcome::default();
+    match grow_room_to(target, sector_rect(level, lo, hi)) {
+        Ok(resized) => outcome.resized = resized,
+        Err(refusal) => return RectOutcome::refused(refusal),
+    }
+    let rect = ClickRect::of_cells(level, lo, hi);
+    split_to_fit(target, rect, level);
+    let e = edge_clicks(level);
+    for cz in lo[1]..=hi[1] {
+        for cx in lo[0]..=hi[0] {
+            let min = [cx * e, cz * e];
+            if target.leaf_at(min).is_none() {
+                let key = LeafKey::containing(level, min);
+                if target.leaves.conflict(key).is_none() {
+                    let _ = target.insert_leaf(key, GridSector::default());
+                } else {
+                    // Finer leaves fill part of the cell: fill the rest.
+                    for dz in 0..e {
+                        for dx in 0..e {
+                            let click = [min[0] + dx, min[1] + dz];
+                            if target.leaf_at(click).is_none() {
+                                let _ = target.insert_leaf(
+                                    LeafKey::containing(crate::grid::leaf::FINEST_LEVEL, click),
+                                    GridSector::default(),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let keys: Vec<LeafKey> = target
+        .leaves()
+        .map(|(k, _)| k)
+        .filter(|k| rect.holds(*k))
+        .collect();
+    for key in keys {
+        let Some(sector) = target.leaf_mut(key) else {
+            continue;
+        };
+        let slot = slot_of(sector, kind);
+        if slot.is_some() {
+            outcome.skipped += 1;
+        } else {
+            *slot = Some(GridSurface::flat_auto(height, material));
+            outcome.changed += 1;
+        }
+    }
+    normalize(target);
+    outcome
+}
+
+/// [`delete_surfaces`] over cells of any size (see [`create_surfaces_cells`]).
+pub fn delete_surfaces_cells(
+    world: &mut GridWorld,
+    room: usize,
+    kind: SurfaceKind,
+    level: u8,
+    lo: [i32; 2],
+    hi: [i32; 2],
+) -> RectOutcome {
+    let Some(target) = world.rooms.get_mut(room) else {
+        return RectOutcome::refused(RectRefusal::NoSuchRoom);
+    };
+    let before = (target.width, target.depth, target.origin);
+    let mut outcome = RectOutcome::default();
+    let rect = ClickRect::of_cells(level, lo, hi);
+    let keys = split_to_fit(target, rect, level);
+    for key in keys {
+        let Some(sector) = target.leaf_mut(key) else {
+            continue;
+        };
+        if slot_of(sector, kind).take().is_some() {
+            outcome.changed += 1;
+        } else {
+            outcome.skipped += 1;
+        }
+        if sector.is_empty() {
+            target.remove_leaf(key);
+        }
+    }
+    if outcome.changed > 0 {
+        target.trim_empty();
+        normalize(target);
+    }
+    outcome.resized = before != (target.width, target.depth, target.origin);
+    outcome
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::grid::units::GridScale;
+
+    fn world() -> GridWorld {
+        GridWorld {
+            scale: GridScale { num: 1, den: 1 },
+            rooms: vec![GridRoom::new("r", 1, 1)],
+            ..GridWorld::default()
+        }
+    }
+
+    fn has(world: &GridWorld, cell: [i32; 2], kind: SurfaceKind) -> bool {
+        let room = &world.rooms[0];
+        let Some([x, z]) = room.local(cell) else {
+            return false;
+        };
+        room.sector(x, z).is_some_and(|s| match kind {
+            SurfaceKind::Floor => s.ground_floor().is_some(),
+            SurfaceKind::Ceiling => s.ground_ceiling().is_some(),
+        })
+    }
+
+    #[test]
+    fn a_rectangle_creates_floors_and_grows_the_room() {
+        let mut world = world();
+        let rect = CellRect::from_corners([2, 1], [-1, -2]);
+        let out = create_surfaces(&mut world, 0, SurfaceKind::Floor, rect, 256, None);
+        assert_eq!((out.changed, out.skipped), (16, 0));
+        assert!(out.resized);
+        let room = &world.rooms[0];
+        assert_eq!(room.origin, [-1, -2]);
+        assert_eq!((room.width, room.depth), (4, 4));
+        for cell in rect.cells() {
+            assert!(has(&world, cell, SurfaceKind::Floor));
+        }
+        // The cell the room started with (0,0) is inside the rectangle too.
+        let [x, z] = room.local([0, 0]).unwrap();
+        assert_eq!(
+            room.sector(x, z).unwrap().ground_floor().unwrap().heights,
+            [256; 4]
+        );
+    }
+
+    #[test]
+    fn existing_surfaces_are_kept_and_counted_as_skipped() {
+        let mut world = world();
+        create_surfaces(
+            &mut world,
+            0,
+            SurfaceKind::Floor,
+            CellRect::from_corners([0, 0], [1, 0]),
+            0,
+            None,
+        );
+        let out = create_surfaces(
+            &mut world,
+            0,
+            SurfaceKind::Floor,
+            CellRect::from_corners([0, 0], [2, 0]),
+            512,
+            None,
+        );
+        assert_eq!((out.changed, out.skipped), (1, 2));
+        let room = &world.rooms[0];
+        assert_eq!(
+            room.sector(0, 0).unwrap().ground_floor().unwrap().heights,
+            [0; 4]
+        );
+        assert_eq!(
+            room.sector(2, 0).unwrap().ground_floor().unwrap().heights,
+            [512; 4]
+        );
+    }
+
+    #[test]
+    fn ceilings_and_floors_are_independent() {
+        let mut world = world();
+        let rect = CellRect::from_corners([0, 0], [1, 1]);
+        create_surfaces(&mut world, 0, SurfaceKind::Floor, rect, 0, None);
+        let out = create_surfaces(&mut world, 0, SurfaceKind::Ceiling, rect, 3072, None);
+        assert_eq!(out.changed, 4);
+        assert!(!out.resized);
+        let out = delete_surfaces(&mut world, 0, SurfaceKind::Ceiling, rect);
+        assert_eq!(out.changed, 4);
+        assert!(has(&world, [1, 1], SurfaceKind::Floor));
+        assert!(!has(&world, [1, 1], SurfaceKind::Ceiling));
+    }
+
+    #[test]
+    fn deleting_shrinks_the_room_without_moving_what_is_left() {
+        let mut world = world();
+        create_surfaces(
+            &mut world,
+            0,
+            SurfaceKind::Floor,
+            CellRect::from_corners([0, 0], [3, 3]),
+            0,
+            None,
+        );
+        let out = delete_surfaces(
+            &mut world,
+            0,
+            SurfaceKind::Floor,
+            CellRect::from_corners([0, 0], [3, 1]),
+        );
+        assert_eq!(out.changed, 8);
+        assert!(out.resized);
+        let room = &world.rooms[0];
+        assert_eq!(room.origin, [0, 2]);
+        assert_eq!((room.width, room.depth), (4, 2));
+        assert!(has(&world, [3, 3], SurfaceKind::Floor));
+        // Deleting where there is no room at all changes and counts nothing.
+        let out = delete_surfaces(
+            &mut world,
+            0,
+            SurfaceKind::Floor,
+            CellRect::from_corners([0, 0], [1, 0]),
+        );
+        assert_eq!((out.changed, out.skipped), (0, 0));
+    }
+
+    #[test]
+    fn rooms_never_grow_past_the_cap_and_nothing_changes_when_refused() {
+        let mut world = world();
+        let before = world.clone();
+        let rect = CellRect::from_corners([0, 0], [MAX_ROOM_SIDE as i32, 0]);
+        let out = create_surfaces(&mut world, 0, SurfaceKind::Floor, rect, 0, None);
+        assert_eq!(
+            out.refused,
+            Some(RectRefusal::RoomTooLarge {
+                needed: MAX_ROOM_SIDE + 1
+            })
+        );
+        assert_eq!(world, before);
+        let ok = CellRect::from_corners([0, 0], [MAX_ROOM_SIDE as i32 - 1, 0]);
+        assert!(
+            create_surfaces(&mut world, 0, SurfaceKind::Floor, ok, 0, None)
+                .refused
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn deleting_over_a_world_sized_rectangle_only_walks_the_room() {
+        let mut world = world();
+        create_surfaces(
+            &mut world,
+            0,
+            SurfaceKind::Floor,
+            CellRect::from_corners([0, 0], [1, 1]),
+            0,
+            None,
+        );
+        let huge = CellRect::from_corners(
+            [-2_000_000_000, -2_000_000_000],
+            [2_000_000_000, 2_000_000_000],
+        );
+        let out = delete_surfaces(&mut world, 0, SurfaceKind::Floor, huge);
+        assert_eq!(out.changed, 4);
+        let away = CellRect::from_corners([1000, 1000], [2_000_000_000, 2_000_000_000]);
+        assert_eq!(
+            delete_surfaces(&mut world, 0, SurfaceKind::Floor, away),
+            RectOutcome::default()
+        );
+    }
+
+    #[test]
+    fn a_missing_room_is_refused() {
+        let mut world = world();
+        let out = create_surfaces(
+            &mut world,
+            4,
+            SurfaceKind::Floor,
+            CellRect::from_corners([0, 0], [0, 0]),
+            0,
+            None,
+        );
+        assert_eq!(out.refused, Some(RectRefusal::NoSuchRoom));
+    }
+
+    #[test]
+    fn quarter_cells_of_floor_start_next_to_a_whole_sector_one() {
+        let mut world = world();
+        create_surfaces(
+            &mut world,
+            0,
+            SurfaceKind::Floor,
+            CellRect::from_corners([0, 0], [1, 1]),
+            0,
+            None,
+        );
+        // Quarter cells (click coordinates) east of the room: a strip two
+        // quarters wide and one sector deep at height 256.
+        let out = create_surfaces_cells(
+            &mut world,
+            0,
+            SurfaceKind::Floor,
+            4,
+            [8, 0],
+            [9, 3],
+            256,
+            None,
+        );
+        assert_eq!(out.changed, 8, "{out:?}");
+        assert!(out.resized);
+        let room = &world.rooms[0];
+        assert!(crate::grid::tree::check(room).is_empty());
+        let (key, leaf) = room.leaf_at([8, 0]).unwrap();
+        assert_eq!(key.level, 4);
+        assert_eq!(leaf.ground_floor().unwrap().heights, [256; 4]);
+        // The old sector floors are where they were.
+        let (key, leaf) = room.leaf_at([0, 0]).unwrap();
+        assert!(key.level <= 2);
+        assert_eq!(leaf.ground_floor().unwrap().heights, [0; 4]);
+        // A second call changes nothing; a ceiling is independent.
+        let again = create_surfaces_cells(
+            &mut world,
+            0,
+            SurfaceKind::Floor,
+            4,
+            [8, 0],
+            [9, 3],
+            0,
+            None,
+        );
+        assert_eq!((again.changed, again.skipped), (0, 8));
+        let roof = create_surfaces_cells(
+            &mut world,
+            0,
+            SurfaceKind::Ceiling,
+            4,
+            [8, 0],
+            [9, 3],
+            1024,
+            None,
+        );
+        assert_eq!(roof.changed, 8);
+        // Delete half of them.
+        let gone = delete_surfaces_cells(&mut world, 0, SurfaceKind::Floor, 4, [8, 0], [8, 3]);
+        assert_eq!(gone.changed, 4);
+        assert!(crate::grid::tree::check(&world.rooms[0]).is_empty());
+    }
+
+    #[test]
+    fn a_floor_on_a_part_of_a_big_leaf_splits_it_to_fit() {
+        let mut world = world();
+        create_surfaces(
+            &mut world,
+            0,
+            SurfaceKind::Ceiling,
+            CellRect::from_corners([0, 0], [3, 3]),
+            2048,
+            None,
+        );
+        crate::grid::tree::merge_all(&mut world.rooms[0], None, 0);
+        assert_eq!(world.rooms[0].leaf_count(), 1);
+        let out = create_surfaces_cells(
+            &mut world,
+            0,
+            SurfaceKind::Floor,
+            3,
+            [2, 2],
+            [3, 3],
+            0,
+            None,
+        );
+        assert_eq!(out.changed, 4);
+        // The ceiling over the other cells is unchanged, floor only inside.
+        let room = &world.rooms[0];
+        assert!(room.leaf_at([0, 0]).unwrap().1.ground_floor().is_none());
+        assert!(room.leaf_at([4, 4]).unwrap().1.ground_floor().is_some());
+        assert!(crate::grid::tree::check(room).is_empty());
+    }
+
+    fn walled_pair(second_floor: i32) -> GridWorld {
+        use crate::grid::sector::WallEdge;
+        use crate::grid::surface::GridWall;
+        let mut world = world();
+        create_surfaces(
+            &mut world,
+            0,
+            SurfaceKind::Floor,
+            CellRect::from_corners([0, 0], [0, 0]),
+            0,
+            None,
+        );
+        let wall = GridWall::span(0, 1024, None);
+        world.rooms[0]
+            .sector_mut(0, 0)
+            .unwrap()
+            .walls_mut(WallEdge::East)
+            .push(wall);
+        create_surfaces(
+            &mut world,
+            0,
+            SurfaceKind::Floor,
+            CellRect::from_corners([1, 0], [1, 0]),
+            second_floor,
+            None,
+        );
+        world
+    }
+
+    #[test]
+    fn joining_drops_the_wall_between_two_floors_at_one_height() {
+        use crate::grid::sector::WallEdge;
+        let mut world = walled_pair(0);
+        let out = join_fresh_floors(&mut world, 0, &[[1, 0]]);
+        assert_eq!((out.opened.clone(), out.kept_edges), (vec![(0, 1)], 0));
+        assert!(world.rooms[0]
+            .sector(0, 0)
+            .unwrap()
+            .walls(WallEdge::East)
+            .is_empty());
+    }
+
+    #[test]
+    fn joining_keeps_a_wall_where_the_floors_meet_at_different_heights() {
+        use crate::grid::sector::WallEdge;
+        let mut world = walled_pair(1024);
+        let out = join_fresh_floors(&mut world, 0, &[[1, 0]]);
+        assert_eq!((out.opened.clone(), out.kept_edges), (vec![], 1));
+        assert_eq!(
+            world.rooms[0]
+                .sector(0, 0)
+                .unwrap()
+                .walls(WallEdge::East)
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn joining_opens_the_walls_of_a_room_the_floor_touches() {
+        use crate::grid::overrides::WallMode;
+        use crate::grid::sector::WallEdge;
+        let mut world = world();
+        let mut other = GridRoom::new("other", 1, 1);
+        other.origin = [2, 0];
+        other.wall_mode = WallMode::Derived;
+        world.rooms.push(other);
+        world.rooms[1]
+            .sector_or_insert(0, 0)
+            .unwrap()
+            .set_ground_floor(Some(GridSurface::flat(0, None)));
+        world.rooms[1]
+            .sector_mut(0, 0)
+            .unwrap()
+            .set_ground_ceiling(Some(GridSurface::flat(1024, None)));
+        create_surfaces(
+            &mut world,
+            0,
+            SurfaceKind::Floor,
+            CellRect::from_corners([1, 0], [1, 0]),
+            0,
+            None,
+        );
+        let out = join_fresh_floors(&mut world, 0, &[[1, 0]]);
+        assert_eq!(out.opened, vec![(1, 1)]);
+        let key = crate::grid::derive::edge_key([2, 0], WallEdge::West);
+        let o = world.rooms[1].edge_overrides.get(&key).unwrap();
+        assert!(o.hidden && o.solid == Some(false));
+        // Doing it again changes nothing.
+        let again = join_fresh_floors(&mut world, 0, &[[1, 0]]);
+        assert!(again.opened.is_empty());
+    }
+}

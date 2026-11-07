@@ -1,0 +1,2233 @@
+//! Host-side package schema for embedded editor play mode.
+
+use crate::{
+    NodeId, ResourceId, SkyCycloramaQuad, UiGradientDirection, UiNodeKind, UiValueBinding,
+};
+
+/// Number of cooked character animation action slots.
+pub const PLAYTEST_CHARACTER_ACTION_COUNT: usize = psx_level::CHARACTER_ANIMATION_ACTION_COUNT;
+
+/// Cook-time string interner (hl-psx style): authored names become
+/// deterministic u16 ids in first-intern order (the scene walk is
+/// deterministic), starting at 1; empty/whitespace names intern to
+/// `psx_level::LOGIC_NAME_NONE`. The strings never reach the runtime.
+#[derive(Default)]
+pub(crate) struct NameInterner {
+    ids: std::collections::HashMap<String, u16>,
+}
+
+impl NameInterner {
+    /// Intern `name`, returning its stable id.
+    pub(crate) fn intern(&mut self, name: &str) -> u16 {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return psx_level::LOGIC_NAME_NONE;
+        }
+        if let Some(&id) = self.ids.get(trimmed) {
+            return id;
+        }
+        let id = u16::try_from(self.ids.len() + 1).unwrap_or(u16::MAX);
+        self.ids.insert(trimmed.to_string(), id);
+        id
+    }
+
+    /// Number of distinct interned names.
+    pub(crate) fn len(&self) -> usize {
+        self.ids.len()
+    }
+}
+
+/// Generated subdirectory inside the playtest example that
+/// receives manifest source + `rooms/` + `textures/`. Stable
+/// so the example's `include!` paths don't move.
+pub const GENERATED_DIRNAME: &str = "generated";
+
+/// Tracked placeholder manifest. Kept buildable in source
+/// control so a fresh clone can compile before any project cook.
+pub const MANIFEST_FILENAME: &str = "level_manifest.rs";
+
+/// Ignored cooked Rust-source manifest written by editor Play /
+/// `make cook-playtest`.
+pub const COOKED_MANIFEST_FILENAME: &str = "level_manifest.cooked.rs";
+/// Generated list of the XA music files the playtest disc carries after its
+/// packs. One line per file in disc order: its path, a tab, and the sector it
+/// must land on (the cooked `MUSIC_TRACKS` table bakes that sector in).
+pub const XA_MUSIC_FILENAME: &str = "xa_music.txt";
+
+/// Cooked WORLD.PAK room ordering hint consumed by disc builders.
+pub const WORLD_PACK_ORDER_FILENAME: &str = "world_pack_order.txt";
+
+/// Cooked UI.PAK chunk ordering hint consumed by disc builders.
+/// One streamed UI asset index per line, in pack order.
+pub const UI_PACK_ORDER_FILENAME: &str = "ui_pack_order.txt";
+
+/// Subdirectory inside `generated/` that holds cooked `.psxw`
+/// blobs.
+pub const ROOMS_DIRNAME: &str = "rooms";
+
+/// Subdirectory inside `generated/` that holds CD-streamable room
+/// chunks. Each `.psxc` stores a collision payload plus the cooked
+/// render cache for that room.
+pub const STREAM_CHUNKS_DIRNAME: &str = "stream_chunks";
+
+/// Subdirectory inside `generated/` that holds CD-streamable UI
+/// image chunks. Each `ui_NNN.psxt` is the raw texture payload for
+/// one streamed UI image asset, with no chunk header.
+pub const UI_STREAM_CHUNKS_DIRNAME: &str = "ui_stream_chunks";
+
+/// Subdirectory inside `generated/` that holds copied `.psxt`
+/// texture blobs.
+pub const TEXTURES_DIRNAME: &str = "textures";
+
+/// Subdirectory inside `generated/` that holds per-model
+/// folders (`model_NNN/`) carrying mesh + atlas + animation
+/// blobs. One subfolder per unique [`ResourceData::Model`]
+/// referenced by any placed [`NodeKind::MeshInstance`].
+pub const MODELS_DIRNAME: &str = "models";
+
+/// Subdirectory inside `generated/` that holds cooked UI SFX `.psau`
+/// blobs selected by button/slider cue pools.
+pub const UI_SFX_DIRNAME: &str = "ui_sfx";
+
+/// Subdirectory inside `generated/` that holds the cooked XA music files
+/// selected by Music nodes.
+pub const XA_MUSIC_DIRNAME: &str = "xa_music";
+
+/// Coarse asset class -- mirrors [`psx_level::AssetKind`] but
+/// stays host-side `String`/`Vec` friendly. Converted to the
+/// runtime enum at write time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaytestAssetKind {
+    /// Cooked `.psxt` texture blob (room atlas or model atlas).
+    Texture,
+    /// Cooked `.psxmdl` mesh blob.
+    ModelMesh,
+    /// Cooked `.psxanim` skeletal animation clip.
+    ModelAnimation,
+}
+
+/// What the guest needs to stream sparse chunk skies besides the skies
+/// themselves (empty: the world bakes none).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PlaytestSkyTables {
+    /// Room 0's sky as a dense PSXT: the scene's cube sky, the atlas VRAM
+    /// starts with.
+    pub initial: Vec<u8>,
+    /// The tile mask of room 0's sky ([`psx_level::sky_tiles::MASK_WORDS`]
+    /// words): which tiles of `initial` differ from the background.
+    pub initial_mask: Vec<u32>,
+    /// The level's background index map, as the runtime reads it
+    /// ([`psx_level::sky_tiles::Background`]).
+    pub background_rows: Vec<u16>,
+    /// See `background_rows`.
+    pub background_runs: Vec<u8>,
+    /// The six face palettes every sky is quantised to.
+    pub palettes: Vec<Vec<[u8; 3]>>,
+}
+
+/// The far cards of a world ([`psx_grid::render::cards`]); empty when the
+/// world has none.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PlaytestCards {
+    /// Per room, `[x, z, base, height, half width, layer]` in world runtime
+    /// units; a zero height is a room with no card.
+    pub rows: Vec<[i16; 6]>,
+    /// Every picture of every card, one sector each, in the layout of
+    /// `cook::cards::disc_layout`: tiles of eight rooms that stand together,
+    /// each the eight views of its rooms one view after another. `WORLD.PAK`
+    /// holds the run as one chunk after every chunk sky.
+    pub pictures: Vec<u8>,
+    /// Per room, the sector in `pictures` of its picture of view 0, or
+    /// [`u32::MAX`] for a room with no card.
+    pub offsets: Vec<u32>,
+    /// Sectors from a room's picture of one view to its picture of the next.
+    pub stride: u32,
+    /// Per tile, where its rooms stand (runtime units): the eye is in the
+    /// tile whose centre is nearest.
+    pub tile_centres: Vec<[i16; 2]>,
+    /// Per tile `X`, its block of copies: for each tile `Y` it lists, the
+    /// views of `Y` in its mask, view after view, eight sectors a view.
+    pub blocks: Vec<Vec<u8>>,
+    /// Per (X, Y) pair (`X * tiles + Y`): where `Y`'s copy starts in `X`'s
+    /// block, in sectors, in the low 24 bits, and its view mask in the top 8;
+    /// 0 for no copy.
+    pub copies: Vec<u32>,
+    /// Per room, its tile and its place among the tile's rooms.
+    pub room_tile: Vec<u8>,
+    pub room_place: Vec<u8>,
+    /// Cards are shown out to this many runtime units from the camera, and
+    /// fade in over the last `fade`.
+    pub far: i32,
+    pub fade: i32,
+    /// No card is drawn closer than this many runtime units (the rooms
+    /// there are drawn whole).
+    pub near: i32,
+    /// The colours behind the cards (below the horizon, at it, at the top
+    /// of the screen).
+    pub backdrop: [[u8; 3]; 3],
+}
+
+/// The far panels of a world (`psx_grid::render::panels`); empty when the world has none.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PlaytestPanels {
+    /// The bake eyes, runtime units.
+    pub eyes: Vec<[i16; 3]>,
+    /// Per eye, its block (`WORLD.PAK` chunk `2 * rooms + 2 + eye`): a sector listing the
+    /// tiles each heading stores, then the panels; empty for an eye with no panel.
+    pub blocks: Vec<Vec<u8>>,
+    /// The order the chunks after the core and the records go in the pack: room 0 first, then
+    /// the rooms and the eyes' blocks along a Hilbert curve through their positions, so a
+    /// drive at a room is near the panels of the eyes that stand with it.
+    pub order: Vec<PackItem>,
+    /// The projection plane the panels were baked for, pixels.
+    pub focal: i32,
+    /// The distance between lattice eyes, runtime units, and the level's sector.
+    pub spacing: i32,
+    pub sector: i32,
+    /// Plan distance (runtime units) the rooms are drawn whole to: a panel is never drawn in
+    /// front of the geometry inside it.
+    pub real: i32,
+    /// The colours behind the panels (below the horizon, at it, at the top of the screen).
+    pub backdrop: [[u8; 3]; 3],
+}
+
+impl PlaytestPanels {
+    /// Whether the world has panels.
+    pub fn is_empty(&self) -> bool {
+        self.blocks.is_empty()
+    }
+}
+
+/// One chunk of the room area of `WORLD.PAK` when the far cards' pictures are
+/// laid out among the rooms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackItem {
+    /// The chunk of this room.
+    Room(u32),
+    /// The pictures of this tile of the card layout.
+    Tile(u32),
+    /// The copies near this tile.
+    Block(u32),
+    /// The panels of this bake eye.
+    Eye(u32),
+}
+
+impl PlaytestCards {
+    /// Whether the pictures are laid out among the room chunks (a level with
+    /// cards) and not left to the end of the pack.
+    pub fn interleaved(&self) -> bool {
+        !self.pictures.is_empty()
+    }
+
+    /// Sectors of one tile's pictures.
+    pub fn tile_sectors(&self) -> u32 {
+        self.stride * psx_grid::render::VIEWS as u32
+    }
+
+    /// Tiles the pictures are cut into.
+    pub fn tiles(&self) -> u32 {
+        if self.stride == 0 {
+            0
+        } else {
+            (self.pictures.len() as u32 / 2048) / self.tile_sectors()
+        }
+    }
+
+    /// The tile of `room`'s pictures, if it has any.
+    pub fn tile_of(&self, room: usize) -> Option<u32> {
+        self.offsets
+            .get(room)
+            .copied()
+            .filter(|&offset| offset != u32::MAX)
+            .map(|offset| offset / self.tile_sectors())
+    }
+
+    /// The order the chunks after the core and the records go in the pack,
+    /// for a level of `rooms` rooms: room 0 first (the rooms' sectors are
+    /// counted from it), then each tile's rooms followed by its pictures, tiles in
+    /// the layout's order, then the rooms with no card. A drive that is at
+    /// a room is then near the pictures of the rooms that stand with it.
+    pub fn pack_order(&self, rooms: usize) -> Vec<PackItem> {
+        let mut order = vec![PackItem::Room(0)];
+        let mut by_tile: Vec<Vec<u32>> = vec![Vec::new(); self.tiles() as usize];
+        let mut loose = Vec::new();
+        for room in 1..rooms {
+            match self.tile_of(room) {
+                Some(tile) if (tile as usize) < by_tile.len() => {
+                    by_tile[tile as usize].push(room as u32)
+                }
+                _ => loose.push(room as u32),
+            }
+        }
+        let local = !self.blocks.is_empty();
+        for (tile, mut members) in by_tile.into_iter().enumerate() {
+            // Room 0 stands in its tile but sits first in the pack.
+            members.sort_by_key(|&room| self.offsets[room as usize]);
+            order.extend(members.into_iter().map(PackItem::Room));
+            // With copies near each tile the full set is only the fallback
+            // (a view a copy lacks) and goes last.
+            order.push(if local {
+                PackItem::Block(tile as u32)
+            } else {
+                PackItem::Tile(tile as u32)
+            });
+        }
+        order.extend(loose.into_iter().map(PackItem::Room));
+        if !self.blocks.is_empty() {
+            order.extend((0..self.tiles()).map(PackItem::Tile));
+        }
+        order
+    }
+}
+
+/// A cooked grid world: the resident level core and the room chunks.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PlaytestGridWorld {
+    /// Level core file (`PGL1`).
+    pub core: Vec<u8>,
+    /// Room chunks (`PGRM`) laid end to end, each starting on a 2048-byte
+    /// boundary, so a room record's `pack_sector` is the sector offset of its
+    /// chunk in this blob. In `WORLD.PAK` the chunks keep this relative layout:
+    /// room `i` is chunk `i + 2` and the guest adds the sector of chunk 2.
+    pub rooms: Vec<u8>,
+    /// The same chunks one by one, unpadded: `WORLD.PAK` chunk `i + 2` is
+    /// `room_chunks[i]` (chunk 0 is [`Self::core`], chunk 1 the records).
+    pub room_chunks: Vec<Vec<u8>>,
+    /// The records the level owns (`psx_level::wire`): `WORLD.PAK` chunk 1,
+    /// between the core and the rooms. Filled once the package is complete.
+    pub records: Vec<u8>,
+    /// How many records each table of `records` holds, in
+    /// `psx_level::wire::TABLE_NAMES` order. The executable keeps these counts
+    /// (the shape of the level, not its contents) to size its arrays.
+    pub record_lens: Vec<usize>,
+    /// The room pool the guest reserves: sized from the wanted set at the
+    /// busiest position of the level (see `psx_grid::stream::plan_pool`).
+    pub pool: psx_grid::stream::PoolPlan,
+    /// Texture assets the level's materials use.
+    pub texture_asset_indices: Vec<usize>,
+    /// Cooked surfaces (quads and triangles) over all rooms.
+    pub faces: usize,
+    /// Triangles the cooked surfaces amount to (a quad is two).
+    pub triangles: usize,
+    /// Cooked surfaces of the largest room.
+    pub max_room_surfaces: usize,
+    /// One sparse cube sky per room ([`psx_level::sky_tiles`]), the world
+    /// beyond that room's ring of neighbours, for a ring-streamed world with
+    /// a cube sky; empty otherwise. `WORLD.PAK` holds room `i`'s sky after
+    /// every room chunk.
+    pub chunk_skies: Vec<Vec<u8>>,
+    /// The tables the guest streams `chunk_skies` with.
+    pub sky_tables: PlaytestSkyTables,
+    /// The far cards, for a flood world that bakes them.
+    pub cards: PlaytestCards,
+    /// The far panels (instead of cards).
+    pub panels: PlaytestPanels,
+    /// One block of text with the cook's sizes, for the build log.
+    pub summary: String,
+}
+
+/// Streaming class of a [`PlaytestAsset`]. A streamed asset's baked
+/// manifest static is empty bytes (under `cd-stream-bench`) and its
+/// payload is packed into the parallel UI.PAK that the runtime loads
+/// on demand, keeping it out of the guest's baked `.data`. The class
+/// distinguishes which transient staging buffer the runtime loads
+/// through, or whether the payload receives stable session-lifetime
+/// storage for parsed models and animations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamedClass {
+    /// Baked into the guest `.data` via `include_bytes!`; never streamed.
+    None,
+    /// Menu UI image. Streamed off UI.PAK and staged through the small
+    /// per-image UI staging buffer, loaded on menu entry.
+    UiImage,
+    /// Gameplay-scoped texture (e.g. the sky panorama). Streamed off
+    /// UI.PAK and staged through a larger transient buffer, loaded on
+    /// gameplay entry and freed on gameplay exit.
+    Gameplay,
+    /// Model mesh, atlas, or animation loaded during the initial loading
+    /// screen and kept in stable RAM for the complete gameplay session.
+    PersistentGameplay,
+}
+
+impl StreamedClass {
+    /// `true` when the asset is CD-streamed (any non-`None` class).
+    pub fn is_streamed(self) -> bool {
+        !matches!(self, StreamedClass::None)
+    }
+}
+
+/// One asset destined for the master table. Owns its bytes so
+/// callers can write them out to the generated tree without
+/// reaching back into the project.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaytestAsset {
+    /// Asset class -- drives extension + loader.
+    pub kind: PlaytestAssetKind,
+    /// Backing payload.
+    pub bytes: Vec<u8>,
+    /// Filename inside the kind's subdirectory (e.g.
+    /// `room_000.psxw`). Stable across runs because asset order
+    /// is deterministic.
+    pub filename: String,
+    /// Diagnostic label -- display name of the source resource
+    /// or room. Surfaces in cook reports and stays out of the
+    /// runtime contract.
+    pub source_label: String,
+    /// CD-streaming class. [`StreamedClass::None`] bakes the payload
+    /// into the guest `.data`; the other variants route the payload to
+    /// UI.PAK keyed by asset index, with the variant selecting the
+    /// runtime lifetime and destination arena.
+    pub streamed_class: StreamedClass,
+}
+
+impl PlaytestAsset {
+    /// `true` when this asset's payload is CD-streamed off the asset pack.
+    pub fn is_streamed(&self) -> bool {
+        self.streamed_class.is_streamed()
+    }
+}
+
+/// One room's residency-aware record. Carries indices into
+/// [`PlaytestPackage::assets`] and [`PlaytestPackage::materials`]
+/// so the writer can resolve `AssetId`s deterministically.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaytestRoom {
+    /// Display name lifted from the editor scene tree.
+    pub name: String,
+    /// Host-baked 4bpp environment map used by reflective model materials in
+    /// this runtime room. `None` when the project has no reflective materials.
+    pub reflection_probe_asset_index: Option<usize>,
+    /// Engine units per sector.
+    pub sector_size: i32,
+    /// Camera-space far plane used for room/actor rendering.
+    pub draw_distance: i32,
+    /// Downward acceleration inherited from the World node, in Q8 engine units
+    /// per fixed 60 Hz tick squared.
+    pub gravity_per_tick_q8: i32,
+    /// Fog/depth-cue far colour.
+    pub fog_rgb: [u8; 3],
+    /// Fog start distance in engine units.
+    pub fog_near: i32,
+    /// Fog end distance in engine units.
+    pub fog_far: i32,
+    /// Base colour for the cheap screen-space room atmosphere pass.
+    pub atmosphere_rgb: [u8; 3],
+    /// Number of screen-space particles to draw for this room.
+    pub atmosphere_density: u8,
+    /// Base vertical particle speed, in 1/16 pixel-per-vblank units.
+    pub atmosphere_fall_speed_q4: i16,
+    /// Base horizontal particle speed, in 1/16 pixel-per-vblank units.
+    pub atmosphere_wind_speed_q4: i16,
+    /// Resolved world sky for this cooked room.
+    pub sky: PlaytestSky,
+    /// Resolved world camera for this cooked room.
+    pub camera: PlaytestCamera,
+    /// Room flags mirrored into the runtime manifest.
+    pub flags: u16,
+}
+
+/// Resolved sky values written into one runtime room record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaytestSky {
+    /// Zenith colour.
+    pub top_rgb: [u8; 3],
+    /// Colour at the authored horizon line.
+    pub horizon_rgb: [u8; 3],
+    /// Colour at the bottom of the frame.
+    pub bottom_rgb: [u8; 3],
+    /// Horizon line as a percentage of screen height.
+    pub horizon_percent: u8,
+    /// Angular thickness of the horizon colour band.
+    pub horizon_thickness_percent: u8,
+    /// Horizontal cyclorama subdivisions.
+    pub skybox_columns: u8,
+    /// Vertical cyclorama subdivisions.
+    pub skybox_rows: u8,
+    /// Runtime sky flags.
+    pub flags: u16,
+    /// Texture asset used by the selected scene sky projection.
+    pub texture_asset_index: Option<usize>,
+    /// Cooked panorama/cyclorama backdrop geometry.
+    pub cyclorama_quads: Vec<SkyCycloramaQuad>,
+    /// Cloud-layer parameters used to generate the cooked cyclorama.
+    pub cloud_layer: PlaytestCloudLayer,
+}
+
+/// Resolved cloud-layer values written into one runtime room record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestCloudLayer {
+    /// Cooked 4bpp multi-CLUT sky panorama texture used by the runtime.
+    pub texture_asset_index: Option<usize>,
+    /// Cloud highlight colour.
+    pub color_rgb: [u8; 3],
+    /// Cloud coverage density 0..=255.
+    pub density: u8,
+    /// Cyclorama cloud-band vertical bias.
+    pub altitude: u16,
+    /// Cyclorama cloud-band width.
+    pub extent: u16,
+    /// Noise/tile repeats across the cloud layer.
+    pub tile_count: u8,
+    /// Reserved cloud scroll speed.
+    pub scroll_speed: [i16; 2],
+    /// Perlin generator seed.
+    pub noise_seed: u32,
+    /// Runtime cloud-layer flags.
+    pub flags: u16,
+}
+
+/// Resolved third-person camera values written into one runtime room record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestCamera {
+    /// Preferred trailing distance from focus to camera.
+    pub distance: i32,
+    /// Camera origin height above the player origin.
+    pub height: i32,
+    /// Look-at height above the player origin.
+    pub target_height: i32,
+    /// Additional lock-on camera elevation as a percentage of camera height.
+    pub lock_rise_percent: u8,
+    /// Minimum camera origin height above the sampled floor.
+    pub min_floor_clearance: i32,
+    /// Manual orbit input speed level. Higher values turn faster.
+    pub orbit_speed_level: u8,
+    /// Ramp held orbit input from a gentle rate to a fast rate.
+    pub accelerated_orbit: bool,
+    /// Keep the selected elevation when recentering behind the player.
+    pub recenter_preserves_pitch: bool,
+    /// Vertical field of view in degrees; zero preserves the legacy lens.
+    pub fov_y_degrees: u8,
+    /// Smooth changes to camera distance, offsets and field of view.
+    pub blend_profiles: bool,
+    /// Frame the live lock target using a separate elevated camera anchor.
+    pub lock_target_framing: bool,
+    /// Optional distance, height and lens while locked on.
+    pub lock_profile: Option<crate::WorldCameraProfile>,
+    /// Camera origin follow lag shift. Lower values move faster.
+    pub position_lag_shift: u8,
+    /// Resolved vertical position lag shift. Lower values move faster.
+    pub position_vertical_lag_shift: u8,
+    /// Camera focus follow lag shift. Lower values move faster.
+    pub focus_lag_shift: u8,
+    /// Resolved vertical focus lag shift. Lower values move faster.
+    pub focus_vertical_lag_shift: u8,
+    /// Collision boom recovery lag shift. Lower values move faster.
+    pub distance_lag_shift: u8,
+}
+
+/// One animation clip bound to a [`PlaytestModel`]. Carries
+/// pre-resolved indices into the master asset table so the
+/// writer can emit `LevelModelClipRecord`s without re-walking
+/// the project.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaytestModelClip {
+    /// Owning model index in [`PlaytestPackage::models`].
+    pub model: u16,
+    /// Display name surfaced in debug HUDs.
+    pub name: String,
+    /// Index into [`PlaytestPackage::assets`] of the cooked
+    /// `.psxanim` blob.
+    pub animation_asset_index: usize,
+    /// Standalone Animation Clip resource this model clip resolved from.
+    pub animation_resource: Option<ResourceId>,
+    /// First/last source frames retained by still-end trimming, before any
+    /// error-budget resampling. Animation Studio event frames are mapped from
+    /// this authored domain into the final cooked frame count.
+    pub source_frame_first: u16,
+    pub source_frame_last: u16,
+    pub source_frame_count: u16,
+    pub cooked_frame_count: u16,
+}
+
+/// Bounds-table slice for one global model clip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestModelClipBounds {
+    /// Owning model index in [`PlaytestPackage::models`].
+    pub model: u16,
+    /// Global clip index in [`PlaytestPackage::model_clips`].
+    pub clip: u16,
+    /// First index in [`PlaytestPackage::model_frame_bounds`].
+    pub first_frame: u16,
+    /// Number of frame-bound records for this clip.
+    pub frame_count: u16,
+    /// Grounding floor in raw model-local units.
+    pub floor_y: i32,
+    /// Additional model-local pose offset in cooked pose units.
+    pub pose_offset: [i32; 3],
+    /// See `psx_level::model_clip_flags`.
+    pub flags: u16,
+}
+
+/// Conservative local-space sphere for one animation frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestModelFrameBounds {
+    /// Model-local center in engine world units.
+    pub center: [i32; 3],
+    /// Conservative radius in engine world units.
+    pub radius: i32,
+    /// Grounding floor in raw model-local units.
+    pub floor_y: i32,
+}
+
+/// One named model attachment socket.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaytestModelSocket {
+    /// Owning model index.
+    pub model: u16,
+    /// Socket name used by Equipment records.
+    pub name: String,
+    /// Joint index in the cooked model skeleton.
+    pub joint: u16,
+    /// Local translation relative to the joint pose.
+    pub translation: [i32; 3],
+    /// Local Euler rotation in Q12 turns: X/Y/Z.
+    pub rotation_q12: [i16; 3],
+}
+
+/// One cooked PSX model included in the playtest package. A
+/// [`ResourceData::Model`] referenced by any placed instance is
+/// promoted into one `PlaytestModel`; multiple instances share
+/// the same record (deduplicated by source `ResourceId`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaytestModel {
+    /// Display name lifted from the editor resource.
+    pub name: String,
+    /// Source resource id -- used to deduplicate instances and
+    /// to resolve per-instance clip overrides back to clip
+    /// indices within this model's slice.
+    pub source_resource: ResourceId,
+    /// Index into [`PlaytestPackage::assets`] of the cooked
+    /// `.psxmdl` blob.
+    pub mesh_asset_index: usize,
+    /// Index into [`PlaytestPackage::assets`] of the atlas
+    /// `.psxt` blob. Always `Some` for placed models -- the
+    /// playtest cooker rejects instances of models without an
+    /// atlas. Kept as `Option` so the schema can later carry
+    /// untextured author-time bundles unchanged.
+    pub texture_asset_index: Option<usize>,
+    /// First index into [`PlaytestPackage::model_clips`] for
+    /// this model's clip slice.
+    pub clip_first: u16,
+    /// Number of clips in this model's slice. Matches the
+    /// editor resource's clip count exactly.
+    pub clip_count: u16,
+    /// Default clip index *within this model's slice*.
+    /// Cooker validation guarantees this is `< clip_count`,
+    /// so the runtime always has a clip to play.
+    pub default_clip: u16,
+    /// First index in [`PlaytestPackage::model_sockets`].
+    pub socket_first: u16,
+    /// Number of sockets on this model.
+    pub socket_count: u16,
+    /// World-space height (engine units) -- propagated from the
+    /// editor resource.
+    pub world_height: u16,
+    /// Authored coarse collision radius (engine units) used by
+    /// the playtest actor-cylinder blocker.
+    pub collision_radius: u16,
+}
+
+/// Material override cooked for one placed model instance or the
+/// player character. A missing texture keeps the model's baked atlas
+/// while still applying blend mode, tint, and face sidedness.
+/// Mirrors [`psx_level::LevelModelMaterialOverride`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestModelMaterialOverride {
+    /// Index into [`PlaytestPackage::assets`] of an optional covering
+    /// `.psxt` texture. `None` keeps the model atlas.
+    pub texture_asset_index: Option<usize>,
+    /// Authored PS1 blend mode.
+    pub blend_mode: crate::PsxBlendMode,
+    /// Authored modulation tint.
+    pub tint_rgb: [u8; 3],
+    /// Independent movement for layer 1.
+    pub motion: crate::MaterialUvMotion,
+    /// Optional independently blended second texture pass.
+    pub secondary_layer: Option<PlaytestModelSecondaryLayer>,
+    /// Room-probe controls retained for manifest flag packing. The texture
+    /// itself is selected from the actor's current runtime room.
+    pub reflection_probe: Option<crate::ReflectionProbeMaterial>,
+    /// Authored face sidedness.
+    pub face_sidedness: crate::MaterialFaceSidedness,
+}
+
+/// Cooked host-side description of a model material's second pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestModelSecondaryLayer {
+    /// Index into [`PlaytestPackage::assets`] of the 4bpp layer texture, or
+    /// `None` when this layer samples the active room probe.
+    pub texture_asset_index: Option<usize>,
+    /// Independent authored PS1 blend mode.
+    pub blend_mode: crate::PsxBlendMode,
+    /// Independent modulation tint.
+    pub tint_rgb: [u8; 3],
+    /// Signed Q8 texels-per-second UV scroll and initial phase.
+    pub motion: crate::MaterialUvMotion,
+    /// Active-room probe controls when this layer is reflective.
+    pub reflection_probe: Option<crate::ReflectionProbeMaterial>,
+}
+
+/// One placed model instance. Coordinates are room-local
+/// engine units (the same space cooked rooms live in).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestModelInstance {
+    /// Owning room index in [`PlaytestPackage::rooms`].
+    pub room: u16,
+    /// Model index in [`PlaytestPackage::models`].
+    pub model: u16,
+    /// Per-instance clip override, or [`MODEL_CLIP_INHERIT`]
+    /// to use the model's `default_clip`.
+    pub clip: u16,
+    /// Static pose frame within `clip`, or [`MODEL_INSTANCE_POSE_ANIMATE`]
+    /// to advance the clip normally.
+    pub pose_frame: u16,
+    /// Room-local X.
+    pub x: i32,
+    /// Y.
+    pub y: i32,
+    /// Room-local Z.
+    pub z: i32,
+    /// Yaw, PSX angle units.
+    pub yaw: i16,
+    /// Render-only yaw from the Model Renderer component, PSX angle units.
+    pub visual_yaw: i16,
+    /// Render-only pitch from the entity transform, PSX angle units.
+    /// The runtime composes `Rz(roll) * Ry(yaw + visual_yaw) * Rx(pitch)`,
+    /// matching the attachment-socket Euler convention.
+    pub pitch: i16,
+    /// Render-only roll from the entity transform, PSX angle units.
+    pub roll: i16,
+    /// Render-only model offset from the authored floor anchor,
+    /// in entity-local engine units.
+    pub visual_offset: [i16; 3],
+    /// Render-only uniform scale in Q8 fixed point (`256 = 1.0`).
+    pub visual_scale_q8: u16,
+    /// Covering material replacing the model's cooked atlas, or
+    /// `None` to render the atlas (the default path).
+    pub material_override: Option<PlaytestModelMaterialOverride>,
+    /// Reserved.
+    pub flags: u16,
+}
+
+/// Sentinel for [`PlaytestModelInstance::clip`] meaning
+/// "inherit model default" -- same value as
+/// [`psx_level::MODEL_CLIP_INHERIT`].
+pub const MODEL_CLIP_INHERIT: u16 = 0xFFFF;
+
+/// Sentinel for [`PlaytestModelInstance::pose_frame`] meaning "play the
+/// clip" -- same value as [`psx_level::MODEL_INSTANCE_POSE_ANIMATE`].
+pub const MODEL_INSTANCE_POSE_ANIMATE: u16 = 0xFFFF;
+
+/// Shared spatial registration for one cooked world object.
+/// `kind`/`source_index` select the compact typed payload while this record
+/// owns room membership, conservative bounds, and runtime spatial policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestWorldObject {
+    pub room: u16,
+    pub kind: u8,
+    pub flags: u8,
+    pub source_index: u16,
+    pub destructible: u16,
+    pub bounds_min: [i32; 3],
+    pub bounds_max: [i32; 3],
+}
+
+/// Shared damage state referenced by typed world objects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestDestructible {
+    pub max_health: u16,
+    pub persistent_flag: u16,
+    pub damage_affinity: u8,
+    pub flags: u8,
+}
+
+/// One material-backed flat image prop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestImageProp {
+    /// Owning room index in [`PlaytestPackage::rooms`].
+    pub room: u16,
+    /// Index into [`PlaytestPackage::assets`] of the prop texture.
+    pub texture_asset_index: usize,
+    /// Bottom-center room-local X.
+    pub x: i32,
+    /// Bottom Y.
+    pub y: i32,
+    /// Bottom-center room-local Z.
+    pub z: i32,
+    /// Static pitch, PSX angle units.
+    pub pitch: i16,
+    /// Static yaw, PSX angle units.
+    pub yaw: i16,
+    /// Static roll, PSX angle units.
+    pub roll: i16,
+    /// Quad width in engine units.
+    pub width: u16,
+    /// Quad height in engine units.
+    pub height: u16,
+    /// Material modulation tint.
+    pub tint_rgb: [u8; 3],
+    /// Baked static light base per quad vertex, in perimeter order.
+    pub baked_vertex_rgb: [(u8, u8, u8); 4],
+    /// Conservative room-local collision AABB minimum.
+    pub collision_min: [i32; 3],
+    /// Conservative room-local collision AABB maximum.
+    pub collision_max: [i32; 3],
+    /// Shared destructible state, or [`psx_level::WORLD_OBJECT_DESTRUCTIBLE_NONE`].
+    pub destructible: u16,
+    /// Runtime flags.
+    pub flags: u16,
+}
+
+/// One material-backed editable box prop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PlaytestBoxProp {
+    /// Owning room index in [`PlaytestPackage::rooms`].
+    pub room: u16,
+    /// Per-face texture asset indices. `None` skips that face.
+    pub texture_asset_indices: [Option<usize>; psx_level::BOX_PROP_FACE_COUNT],
+    /// Per-face material blend codes using `model_override_blend` values.
+    pub blend_modes: [u8; psx_level::BOX_PROP_FACE_COUNT],
+    /// Final per-face PS1 UV coordinates in face perimeter order.
+    pub uvs: [[(u8, u8); 4]; psx_level::BOX_PROP_FACE_COUNT],
+    /// Bottom-center room-local X.
+    pub x: i32,
+    /// Bottom Y.
+    pub y: i32,
+    /// Bottom-center room-local Z.
+    pub z: i32,
+    /// Room-floor Y directly beneath the prop (the floor-anchored
+    /// height), baked so fragments and falling boxes settle on the
+    /// ground rather than the prop's own elevated bottom.
+    pub ground_y: i32,
+    /// Static pitch, PSX angle units.
+    pub pitch: i16,
+    /// Static yaw, PSX angle units.
+    pub yaw: i16,
+    /// Static roll, PSX angle units.
+    pub roll: i16,
+    /// Editable local vertices, bottom ring then top ring.
+    pub vertices: [[i16; 3]; psx_level::BOX_PROP_VERTEX_COUNT],
+    /// Conservative room-local collision AABB minimum after authored resize
+    /// and rotation. The guest consumes these cooked bounds directly.
+    pub collision_min: [i32; 3],
+    /// Conservative room-local collision AABB maximum.
+    pub collision_max: [i32; 3],
+    /// First generated quad in [`PlaytestPackage::box_prop_surfaces`].
+    pub surface_first: u16,
+    /// Number of generated erosion quads. Zero selects legacy cage faces.
+    pub surface_count: u16,
+    /// Material modulation tint per face.
+    pub tint_rgb: [[u8; 3]; psx_level::BOX_PROP_FACE_COUNT],
+    /// Baked static light base per face vertex.
+    pub baked_vertex_rgb: [[(u8, u8, u8); 4]; psx_level::BOX_PROP_FACE_COUNT],
+    /// Runtime flags.
+    pub flags: u16,
+}
+
+/// One generated BoxProp quad baked into room-local coordinates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestBoxPropSurface {
+    pub vertices: [[i32; 3]; 4],
+    pub center: [i32; 3],
+    pub normal: [i32; 3],
+    pub uv_q8: [[u8; 2]; 4],
+    pub baked_vertex_rgb: [(u8, u8, u8); 4],
+    pub source_face: u8,
+    pub flags: u8,
+}
+
+/// One cooked low-poly procedural radial prop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestCylinderProp {
+    pub room: u16,
+    pub texture_asset_indices: [Option<usize>; psx_level::CYLINDER_PROP_MATERIAL_COUNT],
+    pub blend_modes: [u8; psx_level::CYLINDER_PROP_MATERIAL_COUNT],
+    pub uvs: [[(u8, u8); 4]; psx_level::CYLINDER_PROP_MATERIAL_COUNT],
+    pub tint_rgb: [[u8; 3]; psx_level::CYLINDER_PROP_MATERIAL_COUNT],
+    pub surface_first: u16,
+    pub surface_count: u16,
+    pub center: [i32; 3],
+    pub cull_radius: i32,
+    pub bounds_min: [i32; 3],
+    pub bounds_max: [i32; 3],
+    pub flags: u16,
+}
+
+/// One generated CylinderProp triangle or quad in room-local coordinates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestCylinderPropSurface {
+    pub vertices: [[i32; 3]; 4],
+    pub center: [i32; 3],
+    pub normal: [i32; 3],
+    /// Final cooked GPU UV coordinates; the field name is retained for
+    /// manifest/schema compatibility.
+    pub uv_q8: [[u8; 2]; 4],
+    pub baked_vertex_rgb: [(u8, u8, u8); 4],
+    pub material_slot: u8,
+    pub vertex_count: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestArchProp {
+    pub room: u16,
+    pub texture_asset_indices: [Option<usize>; psx_level::ARCH_PROP_MATERIAL_COUNT],
+    pub blend_modes: [u8; psx_level::ARCH_PROP_MATERIAL_COUNT],
+    pub uvs: [[(u8, u8); 4]; psx_level::ARCH_PROP_MATERIAL_COUNT],
+    pub tint_rgb: [[u8; 3]; psx_level::ARCH_PROP_MATERIAL_COUNT],
+    pub surface_first: u16,
+    pub surface_count: u16,
+    pub collision_first: u16,
+    pub collision_count: u8,
+    pub center: [i32; 3],
+    pub cull_radius: i32,
+    pub flags: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestArchPropSurface {
+    pub vertices: [[i32; 3]; 4],
+    pub center: [i32; 3],
+    pub normal: [i32; 3],
+    pub uv_q8: [[u8; 2]; 4],
+    pub baked_vertex_rgb: [(u8, u8, u8); 4],
+    pub material_slot: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestArchPropCollision {
+    pub min: [i32; 3],
+    pub max: [i32; 3],
+}
+
+/// Cooked button action, ready for manifest emission. Mirrors
+/// [`psx_level::LevelUiAction`]: the authored `GotoScene(UiSceneId)`
+/// is resolved to a cooked [`PlaytestUiScene::id`] at cook time, and
+/// the option/game ids are carried as compact integers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PlaytestUiAction {
+    /// Switch to the cooked composed scene state with this id.
+    GotoState {
+        /// Target [`PlaytestSceneState::id`].
+        state: u16,
+    },
+    /// Switch to a cooked composed scene state with a full-screen transition.
+    TransitionToState {
+        /// Target [`PlaytestSceneState::id`].
+        state: u16,
+        /// Transition effect.
+        transition: PlaytestTransition,
+    },
+    /// Switch to the cooked UI scene with this id.
+    GotoScene {
+        /// Target [`PlaytestUiScene::id`].
+        scene: u16,
+    },
+    /// Switch to a cooked UI scene with a full-screen transition.
+    TransitionToScene {
+        /// Target [`PlaytestUiScene::id`].
+        scene: u16,
+        /// Transition effect.
+        transition: PlaytestTransition,
+    },
+    /// Enter the gameplay/level simulation.
+    StartGameplay,
+    /// Enter gameplay with a full-screen transition.
+    StartGameplayTransition {
+        /// Transition effect.
+        transition: PlaytestTransition,
+    },
+    /// Return to the previous menu/scene.
+    #[default]
+    Back,
+    /// Adjust a project option by a signed delta.
+    SetOption {
+        /// Target option id.
+        option: u16,
+        /// Signed step.
+        delta: i32,
+    },
+    /// Game-specific action dispatched by opaque id.
+    Game {
+        /// Caller-defined id.
+        id: u16,
+    },
+}
+
+/// Cooked full-screen transition settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestTransition {
+    /// Effect variant.
+    pub kind: PlaytestTransitionKind,
+    /// Duration in visual frames.
+    pub frames: u16,
+    /// Overlay colour.
+    pub color: [u8; 3],
+    /// Deterministic noise seed.
+    pub seed: u16,
+}
+
+impl PlaytestTransition {
+    /// No transition.
+    pub const NONE: Self = Self {
+        kind: PlaytestTransitionKind::None,
+        frames: 0,
+        color: [0, 0, 0],
+        seed: 0,
+    };
+}
+
+/// Cooked transition effect kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaytestTransitionKind {
+    /// No transition.
+    None,
+    /// Darken toward the transition colour.
+    Fade,
+    /// Random block cover.
+    BlockDissolve,
+    /// Digital glitch break.
+    GlitchBreak,
+}
+
+/// One cooked UI gradient paint. Nodes reference these by small indices
+/// when one of their color roles needs something richer than a solid fill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestUiPaint {
+    /// Near/top/left colour.
+    pub from: [u8; 3],
+    /// Far/bottom/right colour.
+    pub to: [u8; 3],
+    /// Gradient direction.
+    pub direction: UiGradientDirection,
+}
+
+/// One cooked screen-space UI node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaytestUiNode {
+    /// Parent index in [`PlaytestPackage::ui_nodes`], or `None` for the root canvas.
+    pub parent: Option<u16>,
+    /// Node kind.
+    pub kind: UiNodeKind,
+    /// Left edge in canvas pixels.
+    pub x: i16,
+    /// Top edge in canvas pixels.
+    pub y: i16,
+    /// Width in canvas pixels.
+    pub width: u16,
+    /// Height in canvas pixels.
+    pub height: u16,
+    /// Primary colour: fill for `Rect`/`Bar`/`Button`, text tint for
+    /// `Label`, track colour for `Slider`.
+    pub color: [u8; 3],
+    /// Secondary colour: `Bar` background or `Slider` fill.
+    pub background: [u8; 3],
+    /// Tertiary colour, currently the `Slider` knob.
+    pub accent: [u8; 3],
+    /// Optional paint override for [`Self::color`].
+    pub color_paint: Option<u16>,
+    /// Optional paint override for [`Self::background`].
+    pub background_paint: Option<u16>,
+    /// Optional paint override for [`Self::accent`].
+    pub accent_paint: Option<u16>,
+    /// Current value binding for `Bar`.
+    pub value: UiValueBinding,
+    /// Maximum value binding for `Bar`.
+    pub max: UiValueBinding,
+    /// Texture asset index for `Image` or a sprite-strip `Bar`, or `None`.
+    pub texture_asset: Option<usize>,
+    /// Animated image vertex-colour effect preset.
+    pub image_effect: crate::UiImageEffect,
+    /// Text for `Label`/`Button`.
+    pub text: String,
+    /// Runtime lookup tag for dynamic labels. Empty means untagged.
+    pub tag: String,
+    /// Action fired by a `Button`. Ignored by other kinds.
+    pub action: PlaytestUiAction,
+    /// Project option a `Slider` binds to; sprite-strip frame count for a
+    /// textured `Bar`; otherwise [`psx_level::UI_OPTION_NONE`].
+    pub option: u16,
+    /// Clockwise visual rotation around this node's centre, in degrees.
+    pub rotation_degrees: i16,
+    /// Runtime flags.
+    pub flags: u16,
+    /// First index into [`PlaytestPackage::ui_sfx_cues`], or
+    /// [`psx_level::UI_SFX_NONE`] when the node has no SFX.
+    pub sfx_first: u16,
+    /// Number of SFX cues belonging to this node.
+    pub sfx_count: u8,
+    /// Authored font choice index for text-bearing nodes. The manifest writer
+    /// compacts this into the runtime font-table selector.
+    pub font: u8,
+    /// Q8 font scale for text-bearing nodes (`256` = 1.0x).
+    pub font_scale: u16,
+    /// Extra signed screen pixels inserted between adjacent glyphs.
+    pub letter_spacing: i8,
+}
+
+/// One cooked UI SFX sample. Written to `generated/ui_sfx/` and
+/// referenced by [`PlaytestUiSfxCue::sample`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaytestUiSfxSample {
+    /// Cooked `.psau` bytes.
+    pub bytes: Vec<u8>,
+    /// Filename inside the generated UI SFX directory.
+    pub filename: String,
+    /// Source WAV path for diagnostics.
+    pub source_path: String,
+}
+
+/// One cooked SFX cue owned by a UI node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestUiSfxCue {
+    /// Index into [`PlaytestPackage::ui_sfx_samples`].
+    pub sample: u16,
+    /// Runtime event that triggers this cue.
+    pub event: psx_level::LevelUiSfxEvent,
+    /// Per-play volume as a percentage of full voice volume.
+    pub volume_percent: u8,
+    /// Pitch multiplier in Q12 (`4096` = source pitch).
+    pub pitch_q12: u16,
+    /// Reserved runtime flags.
+    pub flags: u16,
+}
+
+/// One cooked gameplay SFX cue backed by the shared resident SFX sample bank.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestGameplaySfxCue {
+    pub sample: u16,
+    pub event: psx_level::LevelGameplaySfxEvent,
+    pub volume_percent: u8,
+    pub pitch_q12: u16,
+    pub flags: u16,
+}
+
+/// One cooked UI scene addressing a contiguous block of
+/// [`PlaytestPackage::ui_nodes`]. Mirrors
+/// [`psx_level::LevelUiScene`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaytestUiScene {
+    /// Stable authored scene id.
+    pub id: u16,
+    /// Display name.
+    pub name: String,
+    /// First node index into [`PlaytestPackage::ui_nodes`].
+    pub node_first: u16,
+    /// Number of nodes belonging to this scene.
+    pub node_count: u16,
+    /// Authored focus-ring style, copied through to the cooked scene.
+    pub focus_style: crate::ui_types::UiFocusStyle,
+}
+
+/// One WAV source assigned to a cooked music track number.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaytestCddaTrack {
+    /// Music-node track number. Numbering keeps the CD-DA convention (track 1
+    /// is the data track), so the first song is track 2; the song is entry
+    /// `track - 2` of the cooked `MUSIC_TRACKS` table.
+    pub track: u8,
+    /// Source WAV path the XA song is encoded from.
+    pub wav_path: String,
+    /// Baked playback-speed multiplier in Q12 (`4096` = 1.0x).
+    pub playback_speed_q12: u16,
+    /// Samples per channel of the song at the XA rate, speed baked in. The
+    /// manifest's music table is laid out from this alone, without encoding.
+    pub xa_frames: u32,
+}
+
+/// One cooked project option, ready for manifest emission. Mirrors
+/// [`psx_level::LevelOptionDef`]: the authored [`crate::OptionKind`] is
+/// flattened to a bounded integer triple at cook time (an enum becomes
+/// `[0, variants - 1]` step `1`, a bool becomes `[0, 1]` step `1`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestOption {
+    /// Stable option id, low 16 bits of the authored [`crate::OptionId`].
+    pub id: u16,
+    /// Inclusive minimum value.
+    pub min: i32,
+    /// Inclusive maximum value.
+    pub max: i32,
+    /// Step applied per slider nudge.
+    pub step: i32,
+    /// Initial runtime value.
+    pub default: i32,
+}
+
+/// Runtime world layer attached to a composed scene state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaytestWorldLayer {
+    /// No 3D/gameplay world layer.
+    None,
+    /// Project gameplay world layer.
+    Gameplay,
+}
+
+/// One composed runtime scene state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaytestSceneState {
+    /// Stable cooked state id.
+    pub id: u16,
+    /// Display/debug name.
+    pub name: String,
+    /// Optional world layer.
+    pub world: PlaytestWorldLayer,
+    /// Optional cooked UI scene id, or [`psx_level::UI_SCENE_NONE`].
+    pub ui_scene: u16,
+    /// Runtime flags from [`psx_level::scene_state_flags`].
+    pub flags: u16,
+    /// Cooked START target state id, or [`psx_level::SCENE_STATE_NONE`].
+    pub start_state: u16,
+}
+
+impl PlaytestSceneState {
+    /// Built-in gameplay-only state used by projects with no authored
+    /// frontend and as the final "Play" target for menu-driven projects.
+    pub fn gameplay() -> Self {
+        Self {
+            id: 0,
+            name: "Gameplay".to_string(),
+            world: PlaytestWorldLayer::Gameplay,
+            ui_scene: psx_level::UI_SCENE_NONE,
+            flags: 0,
+            start_state: psx_level::SCENE_STATE_NONE,
+        }
+    }
+}
+
+/// One cooked game-flow state. Mirrors [`psx_level::FlowState`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaytestFlowState {
+    /// Enter the cooked composed scene state with this id.
+    SceneState {
+        /// Target [`PlaytestSceneState::id`].
+        state: u16,
+    },
+    /// Show a UI scene by its [`PlaytestUiScene::id`].
+    UiScene {
+        /// Target scene id.
+        scene: u16,
+    },
+    /// Run the gameplay/level simulation.
+    Gameplay,
+}
+
+/// Cooked game-state flow. Mirrors [`psx_level::GameFlow`]: an
+/// addressable state table plus the entry index into it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaytestGameFlow {
+    /// Flow state table.
+    pub states: Vec<PlaytestFlowState>,
+    /// Composed scene states referenced by [`Self::states`].
+    pub scene_states: Vec<PlaytestSceneState>,
+    /// Index into `states` of the starting state.
+    pub entry: u16,
+    /// Project-wide transition for ordinary state changes.
+    pub transition: PlaytestTransition,
+}
+
+impl Default for PlaytestGameFlow {
+    /// A project with no authored UI scenes starts straight in
+    /// gameplay.
+    fn default() -> Self {
+        Self {
+            states: vec![PlaytestFlowState::SceneState { state: 0 }],
+            scene_states: vec![PlaytestSceneState::gameplay()],
+            entry: 0,
+            transition: PlaytestTransition::NONE,
+        }
+    }
+}
+
+/// Compact rig-attached combat capsule ready for manifest emission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestCombatCapsule {
+    pub joint: u8,
+    pub flags: u8,
+    pub action: u8,
+    pub start: [i16; 3],
+    pub end: [i16; 3],
+    pub radius: u16,
+    pub active_start_frame: u16,
+    pub active_end_frame: u16,
+    pub damage: u16,
+    pub poise_damage: u16,
+    pub projectile_speed: u16,
+    pub projectile_lifetime_ticks: u16,
+    pub projectile_min_range: u16,
+    pub projectile_max_range: u16,
+    pub projectile_tint_rgb: [u8; 3],
+    pub projectile_damage_channel: u8,
+    pub projectile_core_rgb: [u8; 3],
+    pub projectile_trail_segments: u8,
+    pub projectile_glow_rgb: [u8; 3],
+    pub projectile_length_ticks: u8,
+    pub projectile_impact_rgb: [u8; 3],
+    pub projectile_trail_spacing_ticks: u8,
+    pub projectile_charge_start_frame: u16,
+    pub projectile_glow_scale_q8: u16,
+    pub projectile_impact_lifetime_ticks: u8,
+}
+
+/// Weapon-local hit shape, ready for manifest emission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaytestWeaponHitShape {
+    /// Box hit volume.
+    Box {
+        /// Local center.
+        center: [i32; 3],
+        /// Half extents.
+        half_extents: [u16; 3],
+    },
+    /// Capsule hit volume.
+    Capsule {
+        /// Local start.
+        start: [i32; 3],
+        /// Local end.
+        end: [i32; 3],
+        /// Radius.
+        radius: u16,
+    },
+}
+
+/// One weapon hitbox and active animation-frame window.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaytestWeaponHitbox {
+    /// Display name.
+    pub name: String,
+    /// Local shape.
+    pub shape: PlaytestWeaponHitShape,
+    /// First active frame.
+    pub active_start_frame: u16,
+    /// Last active frame.
+    pub active_end_frame: u16,
+}
+
+/// Cooked weapon resource.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaytestWeapon {
+    /// Display name.
+    pub name: String,
+    /// Source resource id.
+    pub source_resource: ResourceId,
+    /// Optional visual model index.
+    pub model: Option<u16>,
+    /// Character socket this weapon expects by default.
+    pub default_character_socket: String,
+    /// Weapon-local grip/pivot name.
+    pub grip_name: String,
+    /// Weapon-local grip translation.
+    pub grip_translation: [i32; 3],
+    /// Weapon-local grip rotation, Q12 turns.
+    pub grip_rotation_q12: [i16; 3],
+    /// First index in [`PlaytestPackage::weapon_hitboxes`].
+    pub hitbox_first: u16,
+    /// Number of hitboxes.
+    pub hitbox_count: u16,
+    /// Melee arc reach from the wielder's origin, engine units.
+    pub arc_reach: u16,
+    /// Melee arc half-width, PSX angle units (cooked from authored
+    /// degrees: `deg * 4096 / 360`).
+    pub arc_half_angle: u16,
+    /// Damage per light-attack connection.
+    pub damage: u16,
+    /// Poise damage per light-attack connection.
+    pub poise_damage: u16,
+}
+
+/// Cooked Equipment component on an Entity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaytestEquipment {
+    /// Owning room.
+    pub room: u16,
+    /// Weapon index.
+    pub weapon: u16,
+    /// Parent entity room-local X.
+    pub x: i32,
+    /// Parent entity room-local Y.
+    pub y: i32,
+    /// Parent entity room-local Z.
+    pub z: i32,
+    /// Parent entity yaw.
+    pub yaw: i16,
+    /// Character socket to follow.
+    pub character_socket: String,
+    /// Host entity's model-instance index, or `u16::MAX` for the
+    /// player (no bound instance).
+    pub model_instance: u16,
+    /// Weapon grip/pivot to align.
+    pub weapon_grip: String,
+    /// Runtime flags. Bit 0 = follows the live player controller.
+    pub flags: u16,
+}
+
+/// Cooked weapon-visibility beat matching one character action and one
+/// equipped weapon/socket pair.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaytestWeaponAppearance {
+    pub character: u16,
+    pub action: crate::CharacterAnimationAction,
+    pub weapon: u16,
+    pub character_socket: String,
+    pub fully_visible_frame: u16,
+    pub hidden_frame: u16,
+    pub transition_frames: u16,
+    pub trail_start_frame: u16,
+    pub trail_end_frame: u16,
+    pub trail_history_frames: u16,
+    pub trail_segments: u8,
+    pub trail_root_color: [u8; 3],
+    pub trail_tip_color: [u8; 3],
+    pub trail_blend_mode: crate::WeaponTrailBlendMode,
+    pub flags: u16,
+}
+
+/// One placed point light, room-local engine units. Mirrors
+/// [`psx_level::PointLightRecord`] one-for-one -- intensity is
+/// already quantised to Q8.8 so the cook output is a direct
+/// copy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestLight {
+    /// Room index in [`PlaytestPackage::rooms`].
+    pub room: u16,
+    /// Room-local X.
+    pub x: i32,
+    /// Y.
+    pub y: i32,
+    /// Room-local Z.
+    pub z: i32,
+    /// Cutoff distance in engine units. Cooker rejects `0`.
+    pub radius: u16,
+    /// Brightness multiplier in Q8.8 (`256` = 1.0). Derived
+    /// from the editor's `f32` intensity at cook time.
+    pub intensity_q8: u16,
+    /// 8-bit RGB tint.
+    pub color: [u8; 3],
+}
+
+/// One placed point-projected particle emitter, room-local engine
+/// units. Mirrors [`psx_level::ParticleEmitterRecord`] so the
+/// generated manifest can copy fields directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestParticleEmitter {
+    /// Room index in [`PlaytestPackage::rooms`].
+    pub room: u16,
+    /// Room-local X.
+    pub x: i32,
+    /// Y.
+    pub y: i32,
+    /// Room-local Z.
+    pub z: i32,
+    /// Hard live-particle cap.
+    pub max_particles: u16,
+    /// Spawn rate in particles/second, Q8 fixed point.
+    pub spawn_rate_q8: u16,
+    /// Particle lifetime in 60 Hz frames.
+    pub lifetime_frames: u8,
+    /// Particle size at birth, in engine units before projection.
+    pub start_size: u16,
+    /// Particle size at death, in engine units before projection.
+    pub end_size: u16,
+    /// 8-bit RGB tint at birth.
+    pub start_color: [u8; 3],
+    /// 8-bit RGB tint at death.
+    pub end_color: [u8; 3],
+    /// PS1 semi-transparency mode code: 0 average, 1 add, 2 subtract, 3 add-quarter.
+    pub blend_mode: u8,
+    /// Base velocity in Q4.4 engine units per 60 Hz frame.
+    pub base_velocity_q4: [i16; 3],
+    /// Random velocity spread in Q4.4 engine units per 60 Hz frame.
+    pub random_velocity_q4: [u16; 3],
+    /// Constant acceleration in Q4.4 engine units per 60 Hz frame.
+    pub acceleration_q4: [i16; 3],
+    /// Random spawn offset radius, in engine units.
+    pub spawn_radius: u16,
+    /// Runtime flags. Bit 0 = enabled.
+    pub flags: u16,
+}
+
+/// Cooked interaction behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaytestInteractableKind {
+    /// Show a message overlay.
+    Message,
+    /// Update the in-memory checkpoint.
+    Checkpoint,
+    /// Persistent, beacon-backed point of interest.
+    PointOfInterest,
+}
+
+/// Text payload used by an interactable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaytestInteractableMessage {
+    /// Header/title line.
+    pub title: String,
+    /// Body text.
+    pub body: String,
+    /// First page in [`PlaytestPackage::interactable_message_pages`].
+    pub page_first: u16,
+    /// Number of consecutive entries in the flat page table.
+    pub page_count: u16,
+}
+
+/// One placed gameplay interaction, room-local engine units.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaytestInteractable {
+    /// Owning room.
+    pub room: u16,
+    /// Runtime behavior.
+    pub kind: PlaytestInteractableKind,
+    /// Room-local X.
+    pub x: i32,
+    /// Y.
+    pub y: i32,
+    /// Room-local Z.
+    pub z: i32,
+    /// Yaw, PSX angle units.
+    pub yaw: i16,
+    /// Interaction radius in XZ engine units.
+    pub radius: u16,
+    /// Authored visual scale for the ground-anchored archive beacon.
+    pub marker_height: u16,
+    /// Prompt shown while in range.
+    pub prompt: String,
+    /// Index into [`PlaytestPackage::interactable_messages`], or
+    /// [`psx_level::INTERACTABLE_MESSAGE_NONE`].
+    pub message: u16,
+    /// Index of the paired record in [`PlaytestPackage::logic`] (the
+    /// cook emits both from one authored component).
+    pub logic: u16,
+    /// Stable authored checkpoint id. Empty for message-only records.
+    pub checkpoint_id: String,
+    /// Persistent read flag, or [`psx_level::POI_FLAG_NONE`].
+    pub read_flag: u16,
+    /// Persistent one-time reward flag, or [`psx_level::POI_FLAG_NONE`].
+    pub reward_flag: u16,
+    /// Cooker-resolved boost module selector, or [`psx_level::POI_REWARD_NONE`].
+    pub reward_resource: u16,
+    /// Number of module copies granted by this POI.
+    pub reward_quantity: u8,
+    /// Runtime flags from [`psx_level::interactable_flags`].
+    pub flags: u16,
+}
+
+/// Cooked vitality circle before manifest emission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestVitalityCircle {
+    pub room: u16,
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+    pub radius: u16,
+    pub axis: u8,
+    pub refill_per_second: u16,
+    pub drain_per_second: u16,
+}
+
+/// One unique collectible module cooked from a POI reward.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaytestBoostModule {
+    pub name: String,
+    pub description: String,
+    /// Italian name and description; empty keeps the English strings.
+    pub name_it: String,
+    pub description_it: String,
+    pub effect_summary: String,
+    pub assignment_label: String,
+    pub remove_label: String,
+    pub percentages: [i16; psx_level::boost_stat::COUNT],
+}
+
+/// One cooked logic entity (hl-psx `LogicEnt`-shaped). Mirrors
+/// `psx_level::LevelLogicRecord`; see that type for field semantics.
+/// All names are already interned to u16 ids -- the strings die here,
+/// on the host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestLogic {
+    /// Owning room.
+    pub room: u16,
+    /// Behavior selector from `psx_level::logic_kind`.
+    pub kind: u8,
+    /// Kind-specific authored flag bits.
+    pub spawnflags: u16,
+    /// Interned record name, or `psx_level::LOGIC_NAME_NONE`.
+    pub targetname: u16,
+    /// Interned fire target, or `psx_level::LOGIC_NAME_NONE`.
+    pub target: u16,
+    /// Interned kill target, or `psx_level::LOGIC_NAME_NONE`.
+    pub killtarget: u16,
+    /// Interned multisource gate, or `psx_level::LOGIC_NAME_NONE`.
+    pub master: u16,
+    /// 60 Hz ticks between triggering and firing `target`.
+    pub delay_ticks: u16,
+    /// Re-arm delay in 60 Hz ticks; negative = fire once.
+    pub wait_ticks: i16,
+    /// First kind-specific argument.
+    pub arg0: u16,
+    /// Second kind-specific argument.
+    pub arg1: u16,
+    /// Kind-defined entity link, or `psx_level::LOGIC_LINK_NONE`.
+    pub link: u16,
+    /// Index into [`PlaytestPackage::interactable_messages`], or
+    /// `psx_level::INTERACTABLE_MESSAGE_NONE`.
+    pub message: u16,
+    /// Room-local origin X.
+    pub x: i32,
+    /// Y.
+    pub y: i32,
+    /// Room-local origin Z.
+    pub z: i32,
+    /// Trigger AABB minimum corner, room-local.
+    pub min: [i32; 3],
+    /// Trigger AABB maximum corner.
+    pub max: [i32; 3],
+    /// Runtime flags from `psx_level::logic_flags`.
+    pub flags: u16,
+}
+
+/// One placed souls-like game entity. Mirrors
+/// `psx_level::LevelGameEntityRecord`; see that type for semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestGameEntity {
+    /// Owning room.
+    pub room: u16,
+    /// Interned archetype tag (the Character resource name).
+    pub kind: u16,
+    /// Interned name logic can target, or `psx_level::LOGIC_NAME_NONE`.
+    pub targetname: u16,
+    /// Index into [`PlaytestPackage::model_instances`], or
+    /// `psx_level::GAME_ENTITY_MODEL_INSTANCE_NONE`.
+    pub model_instance: u16,
+    /// Model-local clip index for the Idle state, resolved at cook
+    /// from the Character's AnimationSet roles (like all state
+    /// clips; missing roles already fell back at cook).
+    pub idle_clip: u16,
+    /// Initial acquisition one-shot (Intro/activation action).
+    pub alert_clip: u16,
+    /// In-place player-tracking turn loop.
+    pub turn_clip: u16,
+    /// Patrol (walk role) clip.
+    pub walk_clip: u16,
+    /// Retreat (walk-backward action) clip.
+    pub walk_backward_clip: u16,
+    /// Circle-left (strafe-left action) clip.
+    pub strafe_left_clip: u16,
+    /// Circle-right (strafe-right action) clip.
+    pub strafe_right_clip: u16,
+    /// Aggro (run role) clip.
+    pub run_clip: u16,
+    /// Windup/Attack/Recover one-shot clip.
+    pub attack_clip: u16,
+    /// Q8 playback speed authored for the Horizon Light action.
+    pub attack_speed_q8: u16,
+    /// Inclusive authored playback range for the Horizon Light action.
+    pub attack_frame_range: psx_level::CharacterActionFrameRange,
+    /// Horizon Heavy one-shot clip.
+    pub heavy_attack_clip: u16,
+    /// Q8 playback speed authored for the Horizon Heavy action.
+    pub heavy_attack_speed_q8: u16,
+    /// Inclusive authored playback range for the Horizon Heavy action.
+    pub heavy_attack_frame_range: psx_level::CharacterActionFrameRange,
+    /// Projectile one-shot clip.
+    pub ranged_attack_clip: u16,
+    /// Q8 playback speed authored for the projectile action.
+    pub ranged_attack_speed_q8: u16,
+    /// Inclusive authored playback range for the projectile action.
+    pub ranged_attack_frame_range: psx_level::CharacterActionFrameRange,
+    /// Complete Stun one-shot, including recovery (HitReact fallback).
+    pub stagger_clip: u16,
+    /// Authored stun speed; zero preserves legacy 3x playback.
+    pub stagger_speed_q8: u16,
+    /// Inclusive authored stun range.
+    pub stagger_frame_range: psx_level::CharacterActionFrameRange,
+    /// Complete stun duration at 60 Hz; zero preserves the legacy 32 ticks.
+    pub stagger_ticks: u16,
+    /// Death one-shot clip.
+    pub death_clip: u16,
+    /// First rig-attached volume in [`PlaytestPackage::combat_capsules`].
+    pub combat_capsule_first: u16,
+    /// Number of rig-attached volumes.
+    pub combat_capsule_count: u8,
+    /// Compact `CharacterAnimationAction` index owning the projectile emitter.
+    pub ranged_attack_action: u8,
+    /// Room-local spawn X.
+    pub x: i32,
+    /// Y.
+    pub y: i32,
+    /// Room-local spawn Z.
+    pub z: i32,
+    /// Spawn yaw, PSX angle units.
+    pub yaw: i16,
+    /// Body cylinder radius, engine units (Character-bound).
+    pub radius: u16,
+    /// Body cylinder height, engine units (Character-bound).
+    pub height: u16,
+    /// Patrol speed, engine units per 60 Hz tick (Character walk).
+    pub walk_speed: i32,
+    /// Chase speed, engine units per 60 Hz tick (Character run).
+    pub run_speed: i32,
+    /// Patrol anchor one, room-local (== spawn when unauthored).
+    pub patrol: [i32; 3],
+    /// 60 Hz ticks idled at a reached patrol anchor.
+    pub patrol_wait_ticks: u16,
+    /// XZ aggro radius in engine units.
+    pub aggro_radius: u16,
+    /// Initial combat reaction delay in 60 Hz ticks.
+    pub reaction_ticks: u8,
+    /// Desired non-attacker distance in engine units.
+    pub preferred_distance: u16,
+    /// Half-width of the desired-distance band.
+    pub spacing_tolerance: u16,
+    /// Circling/retreat percentage of walk speed; retains fractional units.
+    pub spacing_speed_percent: u8,
+    /// Hold/circle decision cadence in 60 Hz ticks.
+    pub decision_interval_ticks: u8,
+    /// Percent chance that an in-band decision circles.
+    pub circle_chance: u8,
+    /// Relative combat-director attack priority.
+    pub attack_priority: u8,
+    /// Local post-attack cooldown in 60 Hz ticks.
+    pub attack_cooldown_ticks: u8,
+    /// Shared director delay after this entity attacks.
+    pub group_attack_delay_ticks: u8,
+    /// Attack windup ticks.
+    pub windup_ticks: u8,
+    /// Attack-state ticks. The cooker extends the legacy six-tick window far
+    /// enough for the authored Light Attack event at the cooked clip rate.
+    pub attack_active_ticks: u16,
+    /// Attack-state ticks for Horizon Heavy.
+    pub heavy_attack_active_ticks: u16,
+    /// Attack-state ticks for the projectile action.
+    pub ranged_attack_active_ticks: u16,
+    /// Post-attack recovery ticks.
+    pub recovery_ticks: u8,
+    /// Closest ranged-attack distance. Zero for melee entities.
+    pub attack_min_range: u16,
+    /// Furthest ranged-attack distance. Zero for melee entities.
+    pub attack_max_range: u16,
+    /// Poise pool.
+    pub poise: u16,
+    /// Touch/melee damage.
+    pub touch_damage: u16,
+    /// First vitality channel's pool at spawn (Horizon).
+    pub max_health: u16,
+    /// Second vitality channel's pool at spawn (Zenith).
+    pub max_health_secondary: u16,
+    /// Souls credited to the player for the killing blow. Zero grants none.
+    pub soul_value: u16,
+    /// Runtime flags from `psx_level::game_entity_flags`.
+    pub flags: u16,
+}
+
+/// Player spawn record. Coordinates are room-local engine units
+/// (the same space the cooked `.psxw` lives in -- array-rooted at
+/// world `(0, 0)`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestSpawn {
+    /// Room index in [`PlaytestPackage::rooms`].
+    pub room: u16,
+    /// Room-local X.
+    pub x: i32,
+    /// Y.
+    pub y: i32,
+    /// Room-local Z.
+    pub z: i32,
+    /// Yaw in PSX angle units.
+    pub yaw: i16,
+    /// Reserved flags. Bit 0 = "spawn enabled".
+    pub flags: u16,
+}
+
+/// Coarse runtime kind for [`PlaytestEntity`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaytestEntityKind {
+    /// Elevated hook landing; marker floats above the authored foot position.
+    HookPoint,
+    /// Visual marker (debug cube).
+    Marker,
+    /// Static mesh instance pinned by `resource_slot`.
+    StaticMesh,
+}
+
+/// Cooked character record. Mirrors
+/// [`psx_level::LevelCharacterRecord`] one-to-one -- the writer
+/// emits the static slice from this struct.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestCharacter {
+    /// Source resource id (so the writer can dedupe + cross-link).
+    pub source_resource: ResourceId,
+    /// Index into [`PlaytestPackage::models`].
+    pub model: u16,
+    /// Optional clip index per [`crate::CharacterAnimationAction`]
+    /// slot, within the model's runtime clip slice.
+    pub action_clips: [u16; PLAYTEST_CHARACTER_ACTION_COUNT],
+    /// Per-action playback flags matching [`Self::action_clips`].
+    pub action_flags: [u8; PLAYTEST_CHARACTER_ACTION_COUNT],
+    /// Per-action playback speed in Q8 fixed point (`256 = 1.0x`),
+    /// matching [`Self::action_clips`].
+    pub action_speeds: [u16; PLAYTEST_CHARACTER_ACTION_COUNT],
+    /// Inclusive playback frame window per action.
+    pub action_frame_ranges:
+        [psx_level::CharacterActionFrameRange; PLAYTEST_CHARACTER_ACTION_COUNT],
+    /// Forward push per action.
+    pub action_pushes: [psx_level::CharacterActionPush; PLAYTEST_CHARACTER_ACTION_COUNT],
+    pub action_chains: [psx_level::CharacterActionChain; psx_level::MAX_CHARACTER_ACTION_CHAINS],
+    /// Explicit combat permissions and protection windows.
+    pub combat_windows: [psx_level::CharacterCombatWindow; psx_level::MAX_CHARACTER_COMBAT_WINDOWS],
+    /// First rig-attached volume in [`PlaytestPackage::combat_capsules`].
+    pub combat_capsule_first: u16,
+    /// Number of rig-attached volumes.
+    pub combat_capsule_count: u8,
+    /// Render-only model offset from the player/controller root,
+    /// in entity-local engine units.
+    pub visual_offset: [i16; 3],
+    /// Render-only yaw from the Model Renderer component, PSX angle units.
+    pub visual_yaw: i16,
+    /// Render-only uniform scale in Q8 fixed point (`256 = 1.0`).
+    pub visual_scale_q8: u16,
+    /// Gravity multiplier in Q8 fixed point (`256 = 1.0x`).
+    pub weight_q8: u16,
+    /// Capsule radius in engine units.
+    pub radius: u16,
+    /// Capsule height in engine units.
+    pub height: u16,
+    /// Walk speed (engine units / 60 Hz frame).
+    pub walk_speed: i32,
+    /// Run speed (engine units / 60 Hz frame).
+    pub run_speed: i32,
+    /// Turn speed (degrees / second).
+    pub turn_speed_degrees_per_second: u16,
+    /// Maximum stamina in Q12-style arbitrary units.
+    pub stamina_max_q12: i32,
+    /// Minimum stamina required to start sprinting.
+    pub sprint_min_q12: i32,
+    /// Stamina spent per sprinting 60 Hz frame.
+    pub sprint_drain_q12: i32,
+    /// Stamina recovered per grounded non-sprint 60 Hz frame.
+    pub stamina_recover_q12: i32,
+    /// Stamina spent to start a roll.
+    pub roll_cost_q12: i32,
+    /// Roll travel speed in engine units per 60 Hz frame.
+    pub roll_speed: i32,
+    /// Frames where the roll keeps moving.
+    pub roll_active_frames: u8,
+    /// Recovery frames after roll movement ends.
+    pub roll_recovery_frames: u8,
+    /// Invulnerable frames from roll start.
+    pub roll_invulnerable_frames: u8,
+    /// Legacy quickstep stamina cost retained for package compatibility.
+    pub backstep_cost_q12: i32,
+    /// Backstep travel speed in engine units per 60 Hz frame.
+    pub backstep_speed: i32,
+    /// Legacy quickstep active movement frames.
+    pub backstep_active_frames: u8,
+    /// Legacy quickstep recovery frames.
+    pub backstep_recovery_frames: u8,
+    /// Legacy quickstep invulnerability frames.
+    pub backstep_invulnerable_frames: u8,
+    pub stance_aligned_damage_q12: u16,
+    pub stance_opposed_damage_q12: u16,
+    pub stance_regen_delay_ticks: u16,
+    pub stance_broken_regen_delay_ticks: u16,
+    pub stance_regen_per_tick_q12: u16,
+    pub stance_break_threshold_q12: u16,
+    pub stance_swap_cooldown_ticks: u16,
+    pub stance_swap_duration_ticks: u16,
+    /// Camera follow distance (engine units).
+    pub camera_distance: i32,
+    /// Camera vertical offset above the character origin.
+    pub camera_height: i32,
+    /// Vertical offset of the camera's look-at target.
+    pub camera_target_height: i32,
+    /// Covering material replacing the model's cooked atlas, or
+    /// `None` to render the atlas (the default path).
+    pub material_override: Option<PlaytestModelMaterialOverride>,
+}
+
+/// Cooked player-controller record. Always paired with a
+/// [`PlaytestSpawn`] in the same package.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestPlayerController {
+    /// Resolved spawn -- same data the manifest's `PLAYER_SPAWN`
+    /// carries.
+    pub spawn: PlaytestSpawn,
+    /// Character index in [`PlaytestPackage::characters`].
+    pub character: u16,
+}
+
+/// Sentinel used in [`PlaytestCharacter::run_clip`] /
+/// [`PlaytestCharacter::turn_clip`] when the role wasn't
+/// authored. Mirrors [`psx_level::CHARACTER_CLIP_NONE`].
+pub const CHARACTER_CLIP_NONE: u16 = u16::MAX;
+
+/// One non-spawn entity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestEntity {
+    /// Owning room index.
+    pub room: u16,
+    /// Entity kind.
+    pub kind: PlaytestEntityKind,
+    /// Room-local X.
+    pub x: i32,
+    /// Y.
+    pub y: i32,
+    /// Room-local Z.
+    pub z: i32,
+    /// Yaw, PSX angle units.
+    pub yaw: i16,
+    /// Resource slot (0 if unused).
+    pub resource_slot: u16,
+    /// Reserved flags.
+    pub flags: u16,
+}
+
+/// Cooked playtest scene, ready to write to disk. Holds
+/// everything the generated manifest needs to render: assets,
+/// per-room metadata, per-room material slices, models, model
+/// instances, and residency.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PlaytestPackage {
+    /// Stable project-specific PS1 memory-card filename.
+    pub save_name: String,
+    /// Human-readable ASCII memory-card title.
+    pub save_title: String,
+    /// The cooked grid world.
+    pub world_geometry: PlaytestGridWorld,
+    /// Project-relative paths of every source texture the cook actually
+    /// reached, deduplicated.
+    ///
+    /// A project's `assets/` directory is a library, not a working set:
+    /// cortex_v5 carries 704 `.psxt` files and its level reaches 3. This is the
+    /// reachable set, taken from the same map the cook uses to dedupe texture
+    /// references, so it cannot disagree with what was actually cooked. Used to
+    /// produce a shippable copy of a project containing only what it needs, and
+    /// as an orphaned-asset report.
+    pub used_texture_paths: Vec<String>,
+    /// Project-relative paths of every source model mesh and animation clip the
+    /// cook actually reached. Same purpose and same guarantee as
+    /// [`Self::used_texture_paths`]: taken from the maps the cook itself keeps,
+    /// so it cannot name a file the cook did not use, nor miss one it did.
+    pub used_model_paths: Vec<String>,
+    /// Project-global UI source files: CD-DA and SFX `.wav`s plus UI image
+    /// textures. Not reachable from any room, so they need copying wholesale
+    /// rather than by reachability.
+    pub used_ui_paths: Vec<String>,
+    /// Master asset table -- rooms first, then room textures,
+    /// then per-model assets (mesh + atlas + clips), in
+    /// deterministic order.
+    pub assets: Vec<PlaytestAsset>,
+    /// Cooked rooms with material-slice metadata.
+    pub rooms: Vec<PlaytestRoom>,
+    /// Cooked model bundles, deduplicated across instances.
+    pub models: Vec<PlaytestModel>,
+    /// Per-model clip records ordered as `(model, clip_index)`.
+    pub model_clips: Vec<PlaytestModelClip>,
+    /// Per-global-clip bounds slices.
+    pub model_clip_bounds: Vec<PlaytestModelClipBounds>,
+    /// Flattened per-frame model bounds.
+    pub model_frame_bounds: Vec<PlaytestModelFrameBounds>,
+    /// Per-model socket records ordered as `(model, socket_index)`.
+    pub model_sockets: Vec<PlaytestModelSocket>,
+    /// Placed model instances, room-local coordinates.
+    pub model_instances: Vec<PlaytestModelInstance>,
+    /// Shared destructible states; targets refer to these indices.
+    pub destructibles: Vec<PlaytestDestructible>,
+    /// Shared spatial registry for every specialized static prop and beacon.
+    /// The grid's structural geometry lives in the level core and room chunks.
+    pub world_objects: Vec<PlaytestWorldObject>,
+    /// Placed flat image props, room-local coordinates.
+    pub image_props: Vec<PlaytestImageProp>,
+    /// Placed editable box props, room-local coordinates.
+    pub box_props: Vec<PlaytestBoxProp>,
+    /// Generated directional-erosion surfaces sliced by [`Self::box_props`].
+    pub box_prop_surfaces: Vec<PlaytestBoxPropSurface>,
+    /// Placed low-poly procedural radial props.
+    pub cylinder_props: Vec<PlaytestCylinderProp>,
+    /// Generated surfaces sliced by [`Self::cylinder_props`].
+    pub cylinder_prop_surfaces: Vec<PlaytestCylinderPropSurface>,
+    /// Placed tile-native arches.
+    pub arch_props: Vec<PlaytestArchProp>,
+    /// Generated quads sliced by [`Self::arch_props`].
+    pub arch_prop_surfaces: Vec<PlaytestArchPropSurface>,
+    /// Conservative curved-band collision boxes sliced by [`Self::arch_props`].
+    pub arch_prop_collisions: Vec<PlaytestArchPropCollision>,
+    /// Cooked screen-space UI nodes for every scene, concatenated
+    /// into one shared pool. [`Self::ui_scenes`] slices this pool.
+    pub ui_nodes: Vec<PlaytestUiNode>,
+    /// Cooked UI gradient paints referenced by [`Self::ui_nodes`].
+    pub ui_paints: Vec<PlaytestUiPaint>,
+    /// Addressable cooked UI scene table indexing [`Self::ui_nodes`].
+    pub ui_scenes: Vec<PlaytestUiScene>,
+    /// Cooked UI SFX samples, deduplicated by source WAV path.
+    pub ui_sfx_samples: Vec<PlaytestUiSfxSample>,
+    /// Cooked UI SFX cues, sliced by [`PlaytestUiNode::sfx_first`] /
+    /// [`PlaytestUiNode::sfx_count`].
+    pub ui_sfx_cues: Vec<PlaytestUiSfxCue>,
+    /// Project-convention gameplay cues backed by `ui_sfx_samples`.
+    pub gameplay_sfx_cues: Vec<PlaytestGameplaySfxCue>,
+    /// Cooked game-state flow definition.
+    pub game_flow: PlaytestGameFlow,
+    /// Cooked project options, flattened to bounded integer ranges.
+    /// Sliders and `SetOption` actions reference these by id.
+    pub options: Vec<PlaytestOption>,
+    /// WAV sources baked as XA songs in the playtest/export disc image.
+    pub cdda_tracks: Vec<PlaytestCddaTrack>,
+    /// Compact rig-attached hurtboxes and action-gated hitboxes.
+    pub combat_capsules: Vec<PlaytestCombatCapsule>,
+    /// Weapon hitboxes, shared by [`Self::weapons`].
+    pub weapon_hitboxes: Vec<PlaytestWeaponHitbox>,
+    /// Cooked Weapon resources, deduplicated by source resource id.
+    pub weapons: Vec<PlaytestWeapon>,
+    /// Equipment components placed in rooms.
+    pub equipment: Vec<PlaytestEquipment>,
+    /// Animation-authored visibility beats for equipped weapons.
+    pub weapon_appearances: Vec<PlaytestWeaponAppearance>,
+    /// Placed point lights, room-local coordinates.
+    pub lights: Vec<PlaytestLight>,
+    /// Placed point-projected particle emitters.
+    pub particle_emitters: Vec<PlaytestParticleEmitter>,
+    /// Text payloads referenced by placed interactables.
+    pub interactable_messages: Vec<PlaytestInteractableMessage>,
+    /// Flat body-page table sliced by [`Self::interactable_messages`].
+    pub interactable_message_pages: Vec<String>,
+    /// Italian column of [`Self::interactable_message_pages`], same length;
+    /// an empty entry means "show the English page".
+    pub interactable_message_pages_it: Vec<String>,
+    /// Optional per-scene message shown once when gameplay first becomes active.
+    pub world_message: Option<PlaytestInteractableMessage>,
+    /// Number of persistent flag bits assigned by this cook.
+    pub persistent_flag_count: u16,
+    /// Unique collectible modules referenced by point-of-interest rewards.
+    pub boost_modules: Vec<PlaytestBoostModule>,
+    /// Placed gameplay interactables.
+    pub interactables: Vec<PlaytestInteractable>,
+    /// Placed dual-vitality fields.
+    pub vitality_circles: Vec<PlaytestVitalityCircle>,
+    /// Cooked logic entities (phase-3 event graph). Interactables
+    /// emit one of these alongside their `PlaytestInteractable` so
+    /// the graph can reference them; trigger/relay/door authoring
+    /// nodes land with the next editor slice.
+    pub logic: Vec<PlaytestLogic>,
+    /// Placed souls-like game entities (enemies).
+    pub game_entities: Vec<PlaytestGameEntity>,
+    /// Stable spawn id of each [`Self::game_entities`] record, parallel to
+    /// it: a hash of the authored node, so it survives a recook that reorders
+    /// or cuts the tables (`psx_level::StableId`).
+    pub game_entity_ids: Vec<u32>,
+    /// Stable id of each [`Self::logic`] record, parallel to it.
+    pub logic_ids: Vec<u32>,
+    /// Single player spawn -- required.
+    pub spawn: Option<PlaytestSpawn>,
+    /// Cooked Character resources used by player / future
+    /// gameplay. Currently only the player spawn references
+    /// these, but the slice ships in the manifest unconditionally
+    /// so the runtime can table-drive any future controllers.
+    pub characters: Vec<PlaytestCharacter>,
+    /// Resolved player controller -- `Some` when a player spawn
+    /// was authored *and* a Character was assigned (or
+    /// auto-picked). The runtime falls back to a debug camera
+    /// when this is `None`.
+    pub player_controller: Option<PlaytestPlayerController>,
+    /// Optional entity markers (legacy, non-Model MeshInstance).
+    pub entities: Vec<PlaytestEntity>,
+}
+
+impl PlaytestPackage {
+    /// Number of `Texture` entries in [`Self::assets`].
+    pub fn texture_asset_count(&self) -> usize {
+        self.assets
+            .iter()
+            .filter(|a| a.kind == PlaytestAssetKind::Texture)
+            .count()
+    }
+
+    /// Number of `ModelMesh` entries in [`Self::assets`].
+    pub fn model_mesh_asset_count(&self) -> usize {
+        self.assets
+            .iter()
+            .filter(|a| a.kind == PlaytestAssetKind::ModelMesh)
+            .count()
+    }
+
+    /// Number of `ModelAnimation` entries in [`Self::assets`].
+    pub fn model_animation_asset_count(&self) -> usize {
+        self.assets
+            .iter()
+            .filter(|a| a.kind == PlaytestAssetKind::ModelAnimation)
+            .count()
+    }
+}
+
+/// Outcome of validating a project for playtest. Errors block
+/// cooking; warnings are surfaced but not fatal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaytestValidationTarget {
+    /// Scene-tree node responsible for the failure.
+    Node(NodeId),
+    /// Project resource responsible for the failure.
+    Resource(ResourceId),
+}
+
+/// One hard error, with the authoring object responsible when the cook can
+/// derive one. Per-error rather than per-report: the diagnostics panel lists
+/// every failure, and an author who reads row four wants to jump to row four's
+/// node, not to whatever row one happened to blame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaytestValidationError {
+    pub message: String,
+    /// Authoring object the editor can select and frame. `None` when the
+    /// failure is a whole-map limit with no single offender.
+    pub target: Option<PlaytestValidationTarget>,
+}
+
+impl PlaytestValidationError {
+    /// `true` when the message contains `needle`. Diagnostics assertions ask
+    /// this constantly, and spelling it out keeps them reading as prose.
+    pub fn contains(&self, needle: &str) -> bool {
+        self.message.contains(needle)
+    }
+}
+
+impl std::fmt::Display for PlaytestValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PlaytestValidationReport {
+    /// Hard errors. Embedded Play must refuse to launch when this
+    /// list is non-empty.
+    pub errors: Vec<PlaytestValidationError>,
+    /// Soft warnings. Surface in the editor status line but
+    /// don't block cooking.
+    pub warnings: Vec<String>,
+}
+
+impl PlaytestValidationReport {
+    /// `true` when there are zero hard errors.
+    pub fn is_ok(&self) -> bool {
+        self.errors.is_empty()
+    }
+
+    /// First authoring object any hard error can blame. The single-target
+    /// convenience the auto-focus-after-a-failing-cook flow has always used.
+    pub fn focus_target(&self) -> Option<PlaytestValidationTarget> {
+        self.errors.iter().find_map(|error| error.target)
+    }
+
+    /// Just the messages, for joins, logs and `contains` assertions.
+    pub fn error_messages(&self) -> Vec<&str> {
+        self.errors
+            .iter()
+            .map(|error| error.message.as_str())
+            .collect()
+    }
+
+    pub(super) fn error(&mut self, msg: impl Into<String>) {
+        self.errors.push(PlaytestValidationError {
+            message: msg.into(),
+            target: None,
+        });
+    }
+
+    pub(super) fn error_at(&mut self, target: PlaytestValidationTarget, msg: impl Into<String>) {
+        self.errors.push(PlaytestValidationError {
+            message: msg.into(),
+            target: Some(target),
+        });
+    }
+
+    /// Push an error whose target may or may not be derivable, without
+    /// forcing every call site to branch.
+    pub(super) fn error_maybe_at(
+        &mut self,
+        target: Option<PlaytestValidationTarget>,
+        msg: impl Into<String>,
+    ) {
+        self.errors.push(PlaytestValidationError {
+            message: msg.into(),
+            target,
+        });
+    }
+
+    /// Run `body`, then stamp `target` onto every error it pushed that does
+    /// not already name one.
+    ///
+    /// The per-kind cook helpers only receive a node NAME, so they cannot
+    /// build a `Node` target themselves, and threading a `NodeId` through
+    /// every helper signature would touch far more code than it is worth.
+    /// The caller loop already holds the node, so it blames it here. A helper
+    /// that DID derive a more precise target (a specific resource, say) keeps
+    /// it: only `None` targets are filled in.
+    pub(super) fn blaming<R>(
+        &mut self,
+        target: PlaytestValidationTarget,
+        body: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let before = self.errors.len();
+        let result = body(self);
+        for error in &mut self.errors[before..] {
+            error.target.get_or_insert(target);
+        }
+        result
+    }
+
+    pub(super) fn warn(&mut self, msg: impl Into<String>) {
+        self.warnings.push(msg.into());
+    }
+}
+
+#[cfg(test)]
+mod card_pack_tests {
+    use super::*;
+
+    #[test]
+    fn rooms_and_tile_pictures_alternate_with_room_zero_first() {
+        // 20 rooms; rooms 3..=19 have cards, in tiles of 8 sectors a view.
+        let views = psx_grid::render::VIEWS as u32;
+        let stride = 8;
+        let tile_sectors = stride * views;
+        let mut offsets = vec![u32::MAX; 20];
+        for (position, room) in (3..20usize).enumerate() {
+            let tile = position as u32 / 8;
+            offsets[room] = tile * tile_sectors + position as u32 % 8;
+        }
+        let cards = PlaytestCards {
+            pictures: vec![0; 3 * tile_sectors as usize * 2048],
+            offsets,
+            stride,
+            ..PlaytestCards::default()
+        };
+        assert_eq!(cards.tiles(), 3);
+        let order = cards.pack_order(20);
+        assert_eq!(order[0], PackItem::Room(0));
+        // Every room once, every tile once.
+        let mut rooms: Vec<u32> = order
+            .iter()
+            .filter_map(|item| match item {
+                PackItem::Room(room) => Some(*room),
+                PackItem::Tile(_) | PackItem::Block(_) | PackItem::Eye(_) => None,
+            })
+            .collect();
+        rooms.sort_unstable();
+        assert_eq!(rooms, (0..20).collect::<Vec<_>>());
+        let tiles: Vec<u32> = order
+            .iter()
+            .filter_map(|item| match item {
+                PackItem::Tile(tile) => Some(*tile),
+                PackItem::Room(_) | PackItem::Block(_) | PackItem::Eye(_) => None,
+            })
+            .collect();
+        assert_eq!(tiles, [0, 1, 2]);
+        // Each tile's pictures follow the rooms of that tile.
+        let at = |item: PackItem| order.iter().position(|&i| i == item).unwrap();
+        for room in 3..20u32 {
+            let tile = cards.tile_of(room as usize).unwrap();
+            assert!(at(PackItem::Room(room)) < at(PackItem::Tile(tile)));
+            if tile > 0 {
+                assert!(at(PackItem::Tile(tile - 1)) < at(PackItem::Room(room)));
+            }
+        }
+        // Rooms 1 and 2 have no card: they come after the last tile.
+        assert!(at(PackItem::Room(1)) > at(PackItem::Tile(2)));
+    }
+}

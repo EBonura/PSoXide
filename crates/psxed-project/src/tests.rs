@@ -1,0 +1,4172 @@
+use super::*;
+
+#[test]
+fn ui_font_runtime_indices_follow_the_editor_font_table() {
+    for (index, font) in UiFontChoice::ALL.iter().copied().enumerate() {
+        assert_eq!(font.runtime_index(), index as u8, "{}", font.label());
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct UiFontScaleFixture {
+    #[serde(
+        default = "default_ui_font_scale",
+        deserialize_with = "deserialize_ui_font_scale",
+        serialize_with = "serialize_ui_font_scale"
+    )]
+    font_scale: u16,
+}
+
+#[test]
+fn ui_font_scale_deserializes_legacy_and_fractional_values() {
+    let legacy: UiFontScaleFixture = ron::from_str("(font_scale: 2)").unwrap();
+    assert_eq!(legacy.font_scale, UI_FONT_SCALE_ONE_Q8 * 2);
+
+    let fractional: UiFontScaleFixture = ron::from_str("(font_scale: 1.5)").unwrap();
+    assert_eq!(
+        fractional.font_scale,
+        UI_FONT_SCALE_ONE_Q8 + UI_FONT_SCALE_ONE_Q8 / 2
+    );
+
+    let q8: UiFontScaleFixture = ron::from_str("(font_scale: 384)").unwrap();
+    assert_eq!(
+        q8.font_scale,
+        UI_FONT_SCALE_ONE_Q8 + UI_FONT_SCALE_ONE_Q8 / 2
+    );
+}
+
+#[test]
+fn ui_font_scale_serializes_as_decimal_multiplier() {
+    let value = UiFontScaleFixture {
+        font_scale: UI_FONT_SCALE_ONE_Q8 + UI_FONT_SCALE_ONE_Q8 / 2,
+    };
+    let ron = ron::to_string(&value).unwrap();
+    assert!(ron.contains("1.5"), "{ron}");
+}
+
+#[test]
+fn snap_height_rounds_to_nearest_quantum() {
+    assert_eq!(HEIGHT_QUANTUM, 64);
+    // Exact multiples are unchanged (positive + negative).
+    assert_eq!(snap_height(0), 0);
+    assert_eq!(snap_height(64), 64);
+    assert_eq!(snap_height(1024), 1024);
+    assert_eq!(snap_height(-64), -64);
+    assert_eq!(snap_height(-1024), -1024);
+    // Below half-quantum rounds down toward zero.
+    assert_eq!(snap_height(31), 0);
+    assert_eq!(snap_height(-31), 0);
+    // At half-quantum (32), away-from-zero on both sides.
+    assert_eq!(snap_height(32), 64);
+    assert_eq!(snap_height(-32), -64);
+    // Above half-quantum rounds up away from zero.
+    assert_eq!(snap_height(33), 64);
+    assert_eq!(snap_height(-33), -64);
+    // Past one quantum the same rule applies -- round to the
+    // nearest multiple.
+    assert_eq!(snap_height(95), 64);
+    assert_eq!(snap_height(96), 128);
+    assert_eq!(snap_height(-95), -64);
+    assert_eq!(snap_height(-96), -128);
+}
+
+#[test]
+fn character_resource_deserializes_without_new_motor_tuning_fields() {
+    let ron = r#"(
+            model: None,
+            animation_set: None,
+            idle_clip: None,
+            walk_clip: None,
+            run_clip: None,
+            turn_clip: None,
+            radius: 192,
+            height: 1024,
+            walk_speed: 48,
+            run_speed: 96,
+            turn_speed_degrees_per_second: 180,
+            camera_distance: 6144,
+            camera_height: 1280,
+            camera_target_height: 640,
+        )"#;
+    let character: CharacterResource =
+        ron::from_str(ron).expect("legacy character resource deserializes");
+
+    assert_eq!(
+        character.stamina_max_q12,
+        default_character_stamina_max_q12()
+    );
+    assert_eq!(character.roll_speed, default_character_roll_speed());
+    assert_eq!(
+        character.backstep_invulnerable_frames,
+        default_character_backstep_invulnerable_frames()
+    );
+    assert!(character.combat_capsules.is_empty());
+    assert!(character.material.is_none());
+    assert_eq!(character.spawn_role, CharacterSpawnRole::Auto);
+    assert!(character.enemy_behavior.is_none());
+    assert_eq!(
+        character.camera_lock_rise_percent,
+        default_world_camera_lock_rise_percent()
+    );
+}
+
+#[test]
+fn character_combat_capsules_roundtrip_roles_and_joint_local_geometry() {
+    let mut character = CharacterResource::defaults();
+    character.combat_capsules = vec![
+        CharacterCombatCapsule {
+            additional_hit_windows: Vec::new(),
+            name: "Torso".to_string(),
+            joint: 3,
+            capsule: JointCapsule {
+                start: [0, -120, 0],
+                end: [0, 180, 0],
+                radius: 96,
+            },
+            projectile_preview_rotation_q12: [0; 3],
+            role: CombatCapsuleRole::Hurtbox,
+        },
+        CharacterCombatCapsule {
+            additional_hit_windows: Vec::new(),
+            name: "Right Fist".to_string(),
+            joint: 14,
+            capsule: JointCapsule {
+                start: [0, 0, 0],
+                end: [90, 0, 0],
+                radius: 42,
+            },
+            projectile_preview_rotation_q12: [0; 3],
+            role: CombatCapsuleRole::Hitbox {
+                action: CharacterAnimationAction::LightAttack,
+                active_start_frame: 8,
+                active_end_frame: 13,
+                damage: 30,
+                poise_damage: 20,
+            },
+        },
+        CharacterCombatCapsule {
+            additional_hit_windows: Vec::new(),
+            name: "Right Palm Bolt".to_string(),
+            joint: 14,
+            capsule: JointCapsule {
+                start: [30, 0, 0],
+                end: [30, 0, 0],
+                radius: 36,
+            },
+            projectile_preview_rotation_q12: [0, 512, 0],
+            role: CombatCapsuleRole::ProjectileEmitter {
+                action: CharacterAnimationAction::LightAttack,
+                charge_start_frame: 6,
+                active_start_frame: 10,
+                active_end_frame: 13,
+                projectile: None,
+                speed: 192,
+                lifetime_ticks: 150,
+                min_range: 600,
+                max_range: 5000,
+                damage: 26,
+                poise_damage: 18,
+                tint_rgb: [120, 210, 255],
+            },
+        },
+    ];
+
+    let ron = ron::to_string(&character).expect("combat capsules serialize");
+    let restored: CharacterResource = ron::from_str(&ron).expect("combat capsules deserialize");
+    assert_eq!(restored, character);
+}
+
+#[test]
+fn enemy_behavior_deserializes_without_combat_director_tuning_fields() {
+    let ron = r#"(
+        aggro_radius: 2048,
+        patrol_offset: (0, 0, 0),
+        patrol_wait_ticks: 60,
+        windup_ticks: 20,
+        recovery_ticks: 24,
+        poise: 100,
+        touch_damage: 10,
+        max_health: 100,
+    )"#;
+    let enemy: EnemyBehaviorSettings =
+        ron::from_str(ron).expect("legacy enemy behavior deserializes");
+    let defaults = EnemyBehaviorSettings::defaults();
+
+    assert_eq!(enemy.reaction_ticks, defaults.reaction_ticks);
+    assert_eq!(enemy.preferred_distance, defaults.preferred_distance);
+    assert_eq!(enemy.spacing_tolerance, defaults.spacing_tolerance);
+    assert_eq!(enemy.spacing_speed_percent, 100);
+    assert_eq!(
+        enemy.decision_interval_ticks,
+        defaults.decision_interval_ticks
+    );
+    assert_eq!(enemy.circle_chance, defaults.circle_chance);
+    assert_eq!(enemy.attack_priority, defaults.attack_priority);
+    assert_eq!(enemy.attack_cooldown_ticks, defaults.attack_cooldown_ticks);
+    assert_eq!(
+        enemy.group_attack_delay_ticks,
+        defaults.group_attack_delay_ticks
+    );
+    // A project authored before souls existed grants the stock award rather
+    // than silently becoming worth nothing.
+    assert_eq!(enemy.soul_value, defaults.soul_value);
+    assert_ne!(defaults.soul_value, 0);
+}
+
+#[test]
+fn camera_node_kind_serializes_roundtrip() {
+    let kind = NodeKind::Camera {
+        settings: WorldCameraSettings {
+            distance: 2048,
+            height: 900,
+            target_height: 700,
+            lock_rise_percent: 24,
+            min_floor_clearance: 96,
+            orbit_speed_level: 6,
+            accelerated_orbit: true,
+            recenter_preserves_pitch: true,
+            fov_y_degrees: 43,
+            blend_profiles: true,
+            lock_target_framing: true,
+            lock_profile: Some(WorldCameraProfile {
+                distance: 3900,
+                height: 1900,
+                target_height: 1160,
+                fov_y_degrees: 46,
+                shoulder_offset: 0,
+            }),
+            position_lag_shift: 1,
+            position_vertical_lag_shift: Some(4),
+            focus_lag_shift: 2,
+            focus_vertical_lag_shift: Some(4),
+            distance_lag_shift: 3,
+        },
+    };
+
+    let ron = ron::to_string(&kind).expect("camera node serializes");
+    let decoded: NodeKind = ron::from_str(&ron).expect("camera node deserializes");
+    assert_eq!(decoded, kind);
+}
+
+#[test]
+fn sky_settings_resolve_clamps_subdivision_defaults() {
+    let default_sky = SkySettings::default().resolved_for_room(false, [0, 0, 0]);
+    assert_eq!(default_sky.skybox_columns, SKYBOX_COLUMNS_DEFAULT);
+    assert_eq!(default_sky.skybox_rows, SKYBOX_ROWS_DEFAULT);
+    assert_eq!(
+        default_sky.horizon_glow_percent,
+        default_sky_horizon_glow_percent()
+    );
+    assert_eq!(
+        default_sky.horizon_glow_yaw_degrees,
+        default_sky_horizon_glow_yaw_degrees()
+    );
+    assert_eq!(default_sky.sun_enabled, default_sky_sun_enabled());
+    assert_eq!(default_sky.sun_color, default_sky_sun_color());
+    assert_eq!(default_sky.sun_border_color, default_sky_sun_border_color());
+    assert_eq!(default_sky.sun_yaw_degrees, default_sky_sun_yaw_degrees());
+    assert_eq!(
+        default_sky.sun_pitch_degrees,
+        default_sky_sun_pitch_degrees()
+    );
+    assert_eq!(default_sky.sun_size_percent, default_sky_sun_size_percent());
+    assert_eq!(default_sky.sun_glow_percent, default_sky_sun_glow_percent());
+    assert_eq!(
+        default_sky.sun_glow_size_percent,
+        default_sky_sun_glow_size_percent()
+    );
+    assert_eq!(
+        default_sky.mountain_height_percent,
+        default_sky_mountain_height_percent()
+    );
+    assert_eq!(
+        default_sky.mountain_top_color,
+        default_sky_mountain_top_color()
+    );
+    assert_eq!(
+        default_sky.mountain_base_color,
+        default_sky_mountain_base_color()
+    );
+    assert_eq!(
+        default_sky.mountain_gap_percent,
+        default_sky_mountain_gap_percent()
+    );
+    assert_eq!(
+        default_sky.mountain_roughness_percent,
+        default_sky_mountain_roughness_percent()
+    );
+    assert_eq!(
+        default_sky.mountain_layer_count,
+        default_sky_mountain_layer_count()
+    );
+
+    let sky = SkySettings {
+        horizon_glow_percent: 240,
+        horizon_glow_yaw_degrees: 720,
+        sun_yaw_degrees: -720,
+        sun_pitch_degrees: 120,
+        sun_size_percent: 0,
+        sun_glow_percent: 240,
+        sun_glow_size_percent: 240,
+        mountain_height_percent: 240,
+        mountain_gap_percent: 240,
+        mountain_roughness_percent: 240,
+        mountain_layer_count: 9,
+        skybox_columns: 1,
+        skybox_rows: 99,
+        ..Default::default()
+    };
+    let resolved = sky.resolved_for_room(false, [0, 0, 0]);
+    assert_eq!(resolved.horizon_glow_percent, 100);
+    assert_eq!(resolved.horizon_glow_yaw_degrees, 180);
+    assert_eq!(resolved.sun_yaw_degrees, -180);
+    assert_eq!(resolved.sun_pitch_degrees, 75);
+    assert_eq!(resolved.sun_size_percent, 1);
+    assert_eq!(resolved.sun_glow_percent, 100);
+    assert_eq!(resolved.sun_glow_size_percent, 100);
+    assert_eq!(
+        resolved.mountain_height_percent,
+        SKY_MOUNTAIN_HEIGHT_PERCENT_MAX
+    );
+    assert_eq!(resolved.mountain_gap_percent, 100);
+    assert_eq!(resolved.mountain_roughness_percent, 100);
+    assert_eq!(resolved.mountain_layer_count, 3);
+    assert_eq!(resolved.skybox_columns, SKYBOX_COLUMNS_MIN);
+    assert_eq!(resolved.skybox_rows, SKYBOX_ROWS_MAX);
+}
+
+#[test]
+fn sky_cyclorama_generation_is_cook_time_geometry() {
+    let mut sky = SkySettings::default();
+    sky.cloud_layer.enabled = true;
+    sky.cloud_layer.density = 192;
+    let resolved = sky.resolved_for_room(false, [0, 0, 0]);
+    let quads = generate_sky_cyclorama(resolved);
+    assert!(!quads.is_empty());
+    assert!(quads.len() <= SKY_CYCLORAMA_QUAD_MAX);
+    assert!(quads
+        .iter()
+        .any(|quad| quad.direction_q12[0] != quad.direction_q12[1]));
+
+    let mut disabled = sky;
+    disabled.mode = SkyMode::Off;
+    assert!(generate_sky_cyclorama(disabled.resolved_for_room(false, [0, 0, 0])).is_empty());
+}
+
+#[test]
+fn dense_cyclorama_sky_stays_under_playtest_budget() {
+    let mut sky = SkySettings {
+        top_color: [36, 36, 36],
+        horizon_color: [87, 34, 34],
+        lower_color: [0, 0, 0],
+        horizon_percent: 40,
+        horizon_thickness_percent: 0,
+        sun_enabled: true,
+        mountain_layer_count: 3,
+        skybox_columns: 12,
+        skybox_rows: 5,
+        ..Default::default()
+    };
+    sky.cloud_layer.enabled = true;
+    sky.cloud_layer.color = [155, 142, 140];
+    sky.cloud_layer.density = 255;
+    sky.cloud_layer.altitude = 5800;
+    sky.cloud_layer.extent = 49_800;
+    sky.cloud_layer.tile_count = 9;
+    sky.cloud_layer.noise_seed = 0x5a7b_c91d;
+
+    let quads = generate_sky_cyclorama(sky.resolved_for_room(false, [0, 0, 0]));
+
+    // The runtime consumes a baked panorama; this guard keeps
+    // cook/editor-preview source geometry from growing without
+    // bound as the procedural sky gains detail.
+    assert!(
+        quads.len() <= 1050,
+        "dense sky generated {} quads",
+        quads.len()
+    );
+}
+
+#[test]
+fn sky_cyclorama_sun_uses_faceted_polar_geometry() {
+    let mut sky = SkySettings {
+        sun_enabled: true,
+        mountain_height_percent: 0,
+        top_color: [178, 178, 198],
+        horizon_color: [142, 108, 100],
+        lower_color: [80, 58, 70],
+        ..Default::default()
+    };
+    sky.cloud_layer.enabled = false;
+
+    let resolved = sky.resolved_for_room(false, [0, 0, 0]);
+    let base_quads = resolved.skybox_columns as usize * resolved.skybox_rows as usize;
+    let quads = generate_sky_cyclorama(resolved);
+    let sun_quads = &quads[base_quads..];
+
+    assert_eq!(sun_quads.len(), SKY_CYCLORAMA_SUN_QUAD_MAX);
+    assert!(sun_quads.iter().any(|quad| {
+        quad.direction_q12[2] == quad.direction_q12[3]
+            && quad.direction_q12[0] != quad.direction_q12[2]
+    }));
+    assert!(sun_quads.iter().any(|quad| quad.rgb[0] != quad.rgb[1]));
+}
+
+#[test]
+fn normalize_loaded_removes_only_legacy_character_capsule_colliders() {
+    let mut project = ProjectDocument::new("legacy-character-collider");
+    let scene = project.active_scene_mut();
+    let character = scene.add_node(scene.root, "Character", NodeKind::Entity);
+    scene.add_node(
+        character,
+        "Character Controller",
+        NodeKind::CharacterController {
+            loadout: None,
+            character: None,
+            settings: Some(CharacterControllerSettings::default()),
+            player: true,
+        },
+    );
+    let redundant_capsule = scene.add_node(
+        character,
+        "Collider",
+        NodeKind::Collider {
+            shape: ColliderShape::Capsule {
+                radius: 312,
+                height: 1664,
+            },
+            solid: true,
+        },
+    );
+    let retained_box = scene.add_node(
+        character,
+        "Hit Box",
+        NodeKind::Collider {
+            shape: ColliderShape::Box {
+                half_extents: [128; 3],
+            },
+            solid: false,
+        },
+    );
+    let retained_custom_capsule = scene.add_node(
+        character,
+        "Interaction Capsule",
+        NodeKind::Collider {
+            shape: ColliderShape::Capsule {
+                radius: 640,
+                height: 1024,
+            },
+            solid: false,
+        },
+    );
+    let prop = scene.add_node(scene.root, "Prop", NodeKind::Entity);
+    let retained_prop_capsule = scene.add_node(
+        prop,
+        "Collider",
+        NodeKind::Collider {
+            shape: ColliderShape::Capsule {
+                radius: 128,
+                height: 512,
+            },
+            solid: true,
+        },
+    );
+
+    project.normalize_loaded();
+
+    let scene = project.active_scene();
+    assert!(scene.node(redundant_capsule).is_none());
+    assert!(scene.node(retained_box).is_some());
+    assert!(scene.node(retained_custom_capsule).is_some());
+    assert!(scene.node(retained_prop_capsule).is_some());
+    assert!(!scene
+        .node(character)
+        .unwrap()
+        .children
+        .contains(&redundant_capsule));
+}
+
+#[test]
+fn dynamic_material_recipe_round_trips_through_project_ron() {
+    let mut project = ProjectDocument::new("dynamic material persistence");
+    let source_a = project.add_resource(
+        "Frame A",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    let source_b = project.add_resource(
+        "Frame B",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    let mut material = MaterialResource::opaque(None);
+    let layer = ModelSecondaryLayer {
+        motion: MaterialUvMotion {
+            enabled: true,
+            speed_u_q8: 640,
+            speed_v_q8: -384,
+            phase_u: 17,
+            phase_v: 231,
+        },
+        ..Default::default()
+    };
+    material.secondary_layer = Some(layer.clone());
+    material.set_secondary_layer_enabled(false);
+    material.animation = MaterialAnimation {
+        mode: MaterialAnimationMode::Flipbook,
+        flipbook: MaterialFlipbook {
+            columns: 4,
+            rows: 2,
+            frame_count: 7,
+            ticks_per_frame: 3,
+            phase: 2,
+            source_a: Some(source_a),
+            source_b: Some(source_b),
+        },
+        ..MaterialAnimation::default()
+    };
+    let expected_animation = material.animation;
+    let material_id = project.add_resource("Flowing glass", ResourceData::Material(material));
+
+    let dir = unique_temp_dir("dynamic-material-roundtrip");
+    let path = dir.join("project.ron");
+    project.save_to_path(&path).unwrap();
+    let loaded = ProjectDocument::load_from_path(&path).unwrap();
+    let ResourceData::Material(loaded_material) = &loaded.resource(material_id).unwrap().data
+    else {
+        panic!("saved resource changed kind");
+    };
+    assert!(loaded_material.enabled_secondary_layer().is_none());
+    let loaded_layer = loaded_material
+        .secondary_layer
+        .as_ref()
+        .expect("disabled layer recipe remains serialized");
+    assert!(!loaded_layer.enabled);
+    assert_eq!(loaded_layer.motion, layer.motion);
+    assert_eq!(loaded_material.animation, expected_animation);
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn material_versions_preserve_complete_recipes_and_stable_identity() {
+    let mut material = MaterialResource::opaque(Some("materials/original.psxt".to_string()));
+    material.tint = [24, 48, 96];
+    material.blend_mode = PsxBlendMode::Average;
+    material.animation.mode = MaterialAnimationMode::UvScroll;
+    material.secondary_layer = Some(ModelSecondaryLayer::moving_default());
+    material.sky_aperture = false;
+
+    let original_recipe = MaterialVersionRecipe::from(&material);
+    let llm_version = material.create_version("LLM Gothic");
+    assert_eq!(llm_version.raw(), 2);
+    assert_eq!(material.active_version_name, "LLM Gothic");
+    assert_eq!(material.version_count(), 2);
+
+    material.texture_mode = MaterialTextureMode::Generated;
+    material.psxt_path = Some("materials/llm_gothic.psxt".to_string());
+    material.tint = [131, 37, 171];
+    material.generated.noise.seed = 0xfeed_beef;
+    material.secondary_layer = None;
+    material.sky_aperture = true;
+    let llm_recipe = MaterialVersionRecipe::from(&material);
+
+    assert!(material.activate_version(MaterialVersionId::ORIGINAL));
+    assert_eq!(material.active_version_name, "Original");
+    assert_eq!(MaterialVersionRecipe::from(&material), original_recipe);
+    assert!(!material.sky_aperture);
+    assert!(material.activate_version(llm_version));
+    assert_eq!(MaterialVersionRecipe::from(&material), llm_recipe);
+    assert!(material.sky_aperture);
+
+    assert!(material.rename_version(llm_version, "LLM Cathedral"));
+    assert!(!material.rename_version(llm_version, "Original"));
+    assert!(material.delete_version(llm_version));
+    assert_eq!(material.active_version_id, MaterialVersionId::ORIGINAL);
+    assert_eq!(material.version_count(), 1);
+    assert!(!material.delete_version(MaterialVersionId::ORIGINAL));
+}
+
+#[test]
+fn material_versions_round_trip_and_legacy_materials_become_original() {
+    let legacy = r#"(
+        texture_mode: SimpleImage,
+        psxt_path: Some("materials/legacy.psxt"),
+        blend_mode: Opaque,
+        tint: (128, 128, 128),
+        face_sidedness: Both,
+        double_sided: true,
+    )"#;
+    let legacy: MaterialResource = ron::from_str(legacy).expect("legacy material parses");
+    assert_eq!(legacy.active_version_id, MaterialVersionId::ORIGINAL);
+    assert_eq!(legacy.active_version_name, "Original");
+    assert_eq!(legacy.version_count(), 1);
+
+    let mut project = ProjectDocument::new("version persistence");
+    let mut material = legacy;
+    let generated = material.create_version("LLM Moss");
+    material.texture_mode = MaterialTextureMode::Generated;
+    material.generated.noise.seed = 73;
+    material.tint = [52, 91, 47];
+    let material_id = project.add_resource("Stone", ResourceData::Material(material));
+
+    let loaded = ProjectDocument::from_ron_str(&project.to_ron_string().unwrap()).unwrap();
+    let ResourceData::Material(loaded) = &loaded.resource(material_id).unwrap().data else {
+        panic!("material changed resource kind");
+    };
+    assert_eq!(loaded.active_version_id, generated);
+    assert_eq!(loaded.active_version_name, "LLM Moss");
+    assert_eq!(loaded.version_count(), 2);
+    assert_eq!(loaded.generated.noise.seed, 73);
+    assert!(loaded
+        .version_options()
+        .iter()
+        .any(|(id, name)| *id == MaterialVersionId::ORIGINAL && name == "Original"));
+}
+
+#[test]
+fn new_materials_default_to_front_faces() {
+    for material in [
+        MaterialResource::opaque(None),
+        MaterialResource::translucent(None, PsxBlendMode::Average),
+    ] {
+        assert_eq!(material.face_sidedness, MaterialFaceSidedness::Front);
+        assert_eq!(material.sidedness(), MaterialFaceSidedness::Front);
+        assert!(!material.double_sided);
+    }
+    assert_eq!(
+        MaterialFaceSidedness::default(),
+        MaterialFaceSidedness::Front
+    );
+}
+
+#[test]
+fn legacy_double_sided_materials_still_resolve_to_both_faces() {
+    let legacy = r#"(
+        texture_mode: SimpleImage,
+        blend_mode: Opaque,
+        tint: (128, 128, 128),
+        double_sided: true,
+    )"#;
+    let material: MaterialResource = ron::from_str(legacy).expect("legacy material parses");
+
+    assert_eq!(material.face_sidedness, MaterialFaceSidedness::Front);
+    assert_eq!(material.sidedness(), MaterialFaceSidedness::Both);
+}
+
+#[test]
+fn embedded_default_project_ron_deserializes() {
+    let project = ProjectDocument::from_ron_str(DEFAULT_PROJECT_RON).unwrap();
+    let material_path = |r: &Resource| match &r.data {
+        ResourceData::Material(material) => material.psxt_path.clone(),
+        _ => None,
+    };
+    // The v0.4b starter's own kit. The courtyard and sanctum materials are
+    // authored by their respective New Project / slice commands rather than
+    // carried in the embedded starter.
+    assert!(project
+        .resources
+        .iter()
+        .any(|r| material_path(r).is_some_and(|p| p.ends_with("dp_city_deck_plate.psxt"))));
+    assert!(project
+        .resources
+        .iter()
+        .any(|r| material_path(r).is_some_and(|p| p.ends_with("dp_city_wall_megastructure.psxt"))));
+    assert!(!project.resources.iter().any(|r| material_path(r)
+        .is_some_and(|p| p.ends_with("floor.psxt") || p.ends_with("brick-wall.psxt"))));
+    // The legacy Texture resource kind is fully folded at load.
+    assert!(!project
+        .resources
+        .iter()
+        .any(|r| matches!(&r.data, ResourceData::Texture { .. })));
+    let starter_materials: Vec<(&str, &MaterialResource)> = project
+        .resources
+        .iter()
+        .filter_map(|resource| match &resource.data {
+            ResourceData::Material(material) => Some((resource.name.as_str(), material)),
+            _ => None,
+        })
+        .collect();
+    assert!(!starter_materials.is_empty());
+    // v0.4b's three transparent DP City overlays are deliberately two-sided;
+    // everything else must stay front-only so backface culling keeps working.
+    const TWO_SIDED_STARTER_OVERLAYS: &[&str] = &[
+        "DP City / Cable Run (Average)",
+        "DP City / Hanging Lattice (Average)",
+        "DP City / Guardrail (Cutout)",
+    ];
+    assert!(starter_materials.iter().all(|(name, material)| {
+        TWO_SIDED_STARTER_OVERLAYS.contains(name)
+            || (material.face_sidedness == MaterialFaceSidedness::Front && !material.double_sided)
+    }));
+    // Starter seeds the active player with the VERIFIED cortex_v1 combat
+    // loadout: the ci_player model, the Aletha Complete Animation Set (the
+    // clips the measured attack windows were authored against), and the
+    // measured combat capsules. The Bonnie AI / Aletha-uthana resources stay
+    // in the project for experiments, but the starter profile must stay on
+    // catalogue-synced content or it dangles in freshly synced projects.
+    // Resolve the character through the wired player controller rather than
+    // assuming a particular resource id.
+    // The starter player is an Entity with a player-controlled
+    // CharacterController (the same form the tech demo uses), so the
+    // renderer component can set the presentation scale.
+    let character_id = project
+        .active_scene()
+        .nodes()
+        .iter()
+        .find_map(|node| match &node.kind {
+            NodeKind::CharacterController {
+                player: true,
+                character,
+                ..
+            } => *character,
+            _ => None,
+        })
+        .expect("starter scene wires a player controller to a character");
+    let character = project
+        .resource(character_id)
+        .and_then(|resource| match &resource.data {
+            ResourceData::Character(character) => Some(character),
+            _ => None,
+        })
+        .expect("starter player character resource missing");
+    let model_id = character.model.expect("starter character has a model");
+    let model = project
+        .resource(model_id)
+        .and_then(|resource| match &resource.data {
+            ResourceData::Model(model) => Some(model),
+            _ => None,
+        })
+        .expect("starter player model resource missing");
+    assert!(model
+        .model_path
+        .ends_with("aletha_delivered/aletha_delivered.psxmdl"));
+    assert!(model
+        .texture_path
+        .as_deref()
+        .is_some_and(|path| path.ends_with("aletha_delivered.psxt")));
+    assert!(model.skeleton.is_some());
+    assert_eq!(
+        model.collision_radius,
+        default_model_collision_radius_for_height(model.world_height)
+    );
+    assert_eq!(model.scale_q8, [MODEL_SCALE_ONE_Q8; 3]);
+    assert!(
+        model
+            .attachments
+            .iter()
+            .any(|socket| socket.name == "right_hand_grip" && socket.joint == 13),
+        "starter player model must expose the verified weapon socket"
+    );
+    assert_eq!(
+        character.combat_capsules.len(),
+        8,
+        "starter Aletha carries two hurtboxes plus six swing capsules, including the light follow-up"
+    );
+
+    let animation_set_id = character
+        .animation_set
+        .expect("starter character has an animation set");
+    let animation_set_resource = project
+        .resource(animation_set_id)
+        .expect("starter animation set resource missing");
+    assert_eq!(
+        animation_set_resource.name,
+        "Aletha Delivered Animation Set"
+    );
+    let ResourceData::AnimationSet(animation_set) = &animation_set_resource.data else {
+        panic!("starter animation set has the wrong resource kind");
+    };
+    // The approved cybernetic Walk retains the stable generated-pack path.
+    let walk_clip = animation_set
+        .action_clip(CharacterAnimationAction::Walk)
+        .expect("starter animation set is missing Walk");
+    let walk = project
+        .resource(walk_clip)
+        .and_then(|resource| match &resource.data {
+            ResourceData::AnimationClip(clip) => Some(clip),
+            _ => None,
+        })
+        .expect("starter Walk clip resource missing");
+    assert_eq!(walk.psxanim_path, "assets/animations/gen/walk_fwd.psxanim");
+    let run = animation_set
+        .action_clip(CharacterAnimationAction::Run)
+        .and_then(|id| project.resource(id))
+        .and_then(|resource| match &resource.data {
+            ResourceData::AnimationClip(clip) => Some(clip),
+            _ => None,
+        })
+        .expect("starter Run clip resource missing");
+    assert_eq!(run.psxanim_path, "assets/animations/gen/run_fwd.psxanim");
+    // Approved replacements retain their stable generated-pack paths.
+    for (action, stem) in [
+        (CharacterAnimationAction::WalkBackward, "walk_bwd"),
+        (CharacterAnimationAction::StrafeLeft, "walk_lft"),
+        (CharacterAnimationAction::StrafeRight, "walk_rgt"),
+        // Combat is the recorded set too: the three horizontal levels, the
+        // vertical axis's first level, and the hit reaction.
+        (CharacterAnimationAction::LightAttack, "light_attack"),
+        (CharacterAnimationAction::HeavyAttack, "heavy_attack"),
+        (
+            CharacterAnimationAction::VertLightAttack,
+            "vert_light_attack",
+        ),
+        (
+            CharacterAnimationAction::VertHeavyAttack,
+            "vert_heavy_attack",
+        ),
+        (CharacterAnimationAction::HitReact, "hit_react"),
+    ] {
+        let clip = animation_set
+            .action_clip(action)
+            .and_then(|id| project.resource(id))
+            .and_then(|resource| match &resource.data {
+                ResourceData::AnimationClip(clip) => Some(clip),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("starter {action:?} clip resource missing"));
+        assert_eq!(
+            clip.psxanim_path,
+            format!("assets/animations/gen/{stem}.psxanim")
+        );
+    }
+    // Idle, evade and death still use the original delivered clips.
+    for (action, stem) in [
+        (CharacterAnimationAction::Idle, "aletha_idle"),
+        (CharacterAnimationAction::Roll, "aletha_dash_fwd"),
+        (CharacterAnimationAction::Death, "aletha_death"),
+    ] {
+        let clip_id = animation_set
+            .action_clip(action)
+            .unwrap_or_else(|| panic!("starter animation set is missing {action:?}"));
+        let clip = project
+            .resource(clip_id)
+            .and_then(|resource| match &resource.data {
+                ResourceData::AnimationClip(clip) => Some(clip),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("starter {action:?} clip resource missing"));
+        assert_eq!(
+            clip.psxanim_path,
+            format!("assets/animations/aletha_delivered/{stem}.psxanim")
+        );
+        // Native clips may pin their model or stay skeleton-shared (None);
+        // either resolves to the starter model on this skeleton.
+        assert!(clip.target_model.is_none_or(|model| model == model_id));
+        assert_eq!(clip.skeleton, model.skeleton);
+    }
+}
+
+#[test]
+fn default_project_instantiates_the_single_animated_heavy_enemy() {
+    let project = ProjectDocument::from_ron_str(DEFAULT_PROJECT_RON).unwrap();
+    let tank_resource = project
+        .resources
+        .iter()
+        .find(|resource| resource.name == "Heavy Enemy")
+        .expect("default project catalogues the boss enemy");
+    let ResourceData::Character(tank) = &tank_resource.data else {
+        panic!("Heavy Enemy is a Character resource");
+    };
+    assert_eq!(tank.spawn_role, CharacterSpawnRole::Enemy);
+
+    let model_id = tank.model.expect("Heavy Enemy character owns a model");
+    let model_resource = project
+        .resource(model_id)
+        .expect("Heavy Enemy model exists");
+    let ResourceData::Model(model) = &model_resource.data else {
+        panic!("Heavy Enemy model binding points at a Model resource");
+    };
+    assert_eq!(model_resource.name, "Heavy Enemy Model");
+    assert!(
+        model.source_path.is_none(),
+        "generated Heavy Enemy animation sources remain local-only"
+    );
+    assert!(default_project_dir().join(&model.model_path).is_file());
+    assert!(model
+        .texture_path
+        .as_ref()
+        .is_some_and(|path| default_project_dir().join(path).is_file()));
+
+    let animation_set_id = tank
+        .animation_set
+        .expect("Heavy Enemy has an animation-set binding");
+    let animation_set = project
+        .resource(animation_set_id)
+        .expect("Heavy Enemy animation set exists");
+    let ResourceData::AnimationSet(animation_set) = &animation_set.data else {
+        panic!("Heavy Enemy animation binding points at an Animation Set");
+    };
+    assert_eq!(
+        animation_set.clips.len(),
+        13,
+        "idle, four-direction locomotion, light/heavy/ranged attacks, hit, stun and death ship"
+    );
+    for action in [
+        CharacterAnimationAction::Idle,
+        CharacterAnimationAction::Walk,
+        CharacterAnimationAction::WalkBackward,
+        CharacterAnimationAction::StrafeLeft,
+        CharacterAnimationAction::StrafeRight,
+        CharacterAnimationAction::LightAttack,
+        CharacterAnimationAction::HeavyAttack,
+        CharacterAnimationAction::RangedAttack,
+        CharacterAnimationAction::HitReact,
+        CharacterAnimationAction::Stun,
+        CharacterAnimationAction::Death,
+    ] {
+        let binding = animation_set
+            .action_clips
+            .iter()
+            .find(|binding| binding.action == action)
+            .unwrap_or_else(|| panic!("Heavy Enemy has a {action:?} binding"));
+        let clip = project.resource(binding.clip).expect("bound clip exists");
+        assert!(matches!(clip.data, ResourceData::AnimationClip(_)));
+    }
+
+    let scene = project.active_scene();
+    let tank_entity = scene
+        .nodes()
+        .iter()
+        .find(|node| node.name == "Heavy Enemy" && matches!(node.kind, NodeKind::Entity))
+        .expect("animated Heavy Enemy is placed in the default level");
+    assert!(tank_entity.children.iter().any(|child| {
+        scene.node(*child).is_some_and(|node| {
+            matches!(
+                &node.kind,
+                NodeKind::ModelRenderer {
+                    model: Some(id), ..
+                } if *id == model_id
+            )
+        })
+    }));
+    assert!(tank_entity.children.iter().any(|child| {
+        scene.node(*child).is_some_and(|node| {
+            matches!(
+                &node.kind,
+                NodeKind::CharacterController {
+                    character: Some(id),
+                    player: false,
+                    ..
+                } if *id == tank_resource.id
+            )
+        })
+    }));
+
+    for removed in [
+        "Tank Boss Model",
+        "Tank Boss Animation Set",
+        "Tank Boss / Rest Pose",
+        "Tank Boss Skeleton",
+    ] {
+        assert!(
+            project
+                .resources
+                .iter()
+                .all(|resource| resource.name != removed),
+            "obsolete duplicate resource '{removed}' should be gone"
+        );
+    }
+
+    let mut project = project;
+    crate::grid::starter::attach_starter_world(&mut project);
+    let (package, report) = playtest::build_package(&project, &default_project_dir());
+    assert!(
+        report.is_ok(),
+        "default project with the animated Heavy Enemy must cook: {:?}",
+        report.errors
+    );
+    let package = package.expect("default project produces a playtest package");
+    assert!(
+        package.models.iter().any(|cooked| cooked.clip_count == 13),
+        "the cooked Heavy Enemy model carries all thirteen selected clips"
+    );
+    assert!(
+        package.game_entities.iter().any(|entity| {
+            entity.flags & psx_level::game_entity_flags::RANGED_ATTACK != 0
+                && entity.attack_min_range == 768 / crate::units::WORLD_UNIT_DIVISOR as u16
+                && entity.attack_max_range == 4608 / crate::units::WORLD_UNIT_DIVISOR as u16
+        }),
+        "the placed Heavy Enemy cooks its projectile-driven AI attack band: {:?}",
+        package
+            .game_entities
+            .iter()
+            .map(|entity| (
+                entity.flags,
+                entity.attack_min_range,
+                entity.attack_max_range
+            ))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn current_player_attack_slots_are_exactly_the_four_direct_shoulders() {
+    assert_eq!(
+        CharacterAnimationAction::PLAYER_ATTACKS,
+        [
+            CharacterAnimationAction::LightAttack,
+            CharacterAnimationAction::HeavyAttack,
+            CharacterAnimationAction::VertLightAttack,
+            CharacterAnimationAction::VertHeavyAttack,
+        ]
+    );
+    assert_eq!(
+        CharacterAnimationAction::LightAttack.label(),
+        "Horizon Light"
+    );
+    assert_eq!(
+        CharacterAnimationAction::HeavyAttack.label(),
+        "Horizon Heavy"
+    );
+    assert_eq!(
+        CharacterAnimationAction::VertLightAttack.label(),
+        "Zenith Light"
+    );
+    assert_eq!(
+        CharacterAnimationAction::VertHeavyAttack.label(),
+        "Zenith Heavy"
+    );
+    assert!(
+        !CharacterAnimationAction::PLAYER_ATTACKS.contains(&CharacterAnimationAction::ComboAttack)
+    );
+    assert!(!CharacterAnimationAction::PLAYER_ATTACKS
+        .contains(&CharacterAnimationAction::VertComboAttack));
+    assert!(
+        !CharacterAnimationAction::PLAYER_ATTACKS.contains(&CharacterAnimationAction::RangedAttack)
+    );
+    assert_eq!(
+        CharacterAnimationAction::guess_from_name("three chimney missile salvo"),
+        Some(CharacterAnimationAction::RangedAttack)
+    );
+    assert_eq!(
+        CharacterAnimationAction::RangedAttack.to_index(),
+        33,
+        "the new NPC ranged slot stays appended after every legacy index"
+    );
+}
+
+#[test]
+fn default_project_uses_one_complete_stun_clip_per_character() {
+    assert_eq!(
+        CharacterAnimationAction::guess_from_name("stun recovery"),
+        Some(CharacterAnimationAction::Stun),
+        "new imports should author the complete motion as one action"
+    );
+    assert!(
+        !CharacterAnimationAction::AUTHORABLE.contains(&CharacterAnimationAction::StunRecovery),
+        "the legacy split recovery slot must not appear in current authoring"
+    );
+    let project = ProjectDocument::from_ron_str(DEFAULT_PROJECT_RON).unwrap();
+    for character_name in ["Aletha", "Light Enemy", "Heavy Enemy"] {
+        let character = project
+            .resources
+            .iter()
+            .find_map(|resource| match &resource.data {
+                ResourceData::Character(character) if resource.name == character_name => {
+                    Some(character)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing {character_name} Character"));
+        let set = character
+            .animation_set
+            .and_then(|id| project.resource(id))
+            .and_then(|resource| match &resource.data {
+                ResourceData::AnimationSet(set) => Some(set),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing {character_name} Animation Set"));
+        let stun = set
+            .action_clip(CharacterAnimationAction::Stun)
+            .unwrap_or_else(|| panic!("missing {character_name} Stun"));
+        assert!(
+            set.action_clip(CharacterAnimationAction::StunRecovery)
+                .is_none(),
+            "{character_name} must author its recovery inside Stun"
+        );
+        assert_ne!(
+            Some(stun),
+            set.action_clip(CharacterAnimationAction::HitReact),
+            "{character_name} uses a dedicated complete stun/recovery one-shot"
+        );
+    }
+
+    let bytes = std::fs::read(
+        default_project_dir().join("assets/animations/aletha_delivered/aletha_stun.psxanim"),
+    )
+    .expect("read unified Aletha stun");
+    let stun = psx_asset::Animation::from_bytes(&bytes).expect("parse unified Aletha stun");
+    assert_eq!(
+        (
+            stun.joint_count(),
+            stun.frame_count(),
+            stun.sample_rate_hz()
+        ),
+        (26, 25, 12)
+    );
+
+    for (path, expected) in [
+        (
+            "assets/animations/rust_mantis_starter/stun_recovery.psxanim",
+            (22, 12, 12),
+        ),
+        (
+            "assets/animations/tank_boss_ai/stun_recovery.psxanim",
+            (27, 24, 12),
+        ),
+    ] {
+        let bytes = std::fs::read(default_project_dir().join(path))
+            .unwrap_or_else(|error| panic!("read {path}: {error}"));
+        let stun = psx_asset::Animation::from_bytes(&bytes)
+            .unwrap_or_else(|error| panic!("parse {path}: {error:?}"));
+        assert_eq!(
+            (
+                stun.joint_count(),
+                stun.frame_count(),
+                stun.sample_rate_hz(),
+            ),
+            expected,
+            "{path} is the selected no-pause stun/recovery cook"
+        );
+    }
+}
+
+#[test]
+fn starter_model_files_present_on_disk() {
+    let root = default_project_dir();
+    assert!(root
+        .join("assets/models/aletha_delivered/aletha_delivered.psxmdl")
+        .is_file());
+    assert!(root
+        .join("assets/models/aletha_delivered/aletha_delivered.psxt")
+        .is_file());
+    assert!(root
+        .join("assets/animations/aletha_delivered/aletha_idle.psxanim")
+        .is_file());
+    assert!(root
+        .join("assets/models/tank_boss_animated_model/tank_boss_animated_model.psxmdl")
+        .is_file());
+    assert!(root
+        .join("assets/models/rust_mantis/rust_mantis.psxmdl")
+        .is_file());
+    assert!(root
+        .join("assets/animations/tank_boss_ai/idle.psxanim")
+        .is_file());
+    let mantis_idle_path = root.join("assets/animations/rust_mantis_starter/idle.psxanim");
+    assert!(mantis_idle_path.is_file());
+    let mantis_idle_bytes = std::fs::read(&mantis_idle_path).expect("read Light Enemy idle");
+    let mantis_idle =
+        psx_asset::Animation::from_bytes(&mantis_idle_bytes).expect("parse Light Enemy idle");
+    assert_eq!(mantis_idle.joint_count(), 22);
+    assert_eq!(mantis_idle.frame_count(), 97);
+    assert_eq!(mantis_idle.sample_rate_hz(), 12);
+    for joint in 0..mantis_idle.joint_count() {
+        assert_eq!(
+            mantis_idle.pose(0, joint),
+            mantis_idle.pose(mantis_idle.frame_count() - 1, joint),
+            "Light Enemy idle must close exactly at joint {joint}"
+        );
+    }
+}
+
+#[test]
+fn light_enemy_look_idle_is_installed_in_every_enemy_project() {
+    let expected = std::fs::read(
+        default_project_dir().join("assets/animations/rust_mantis_starter/idle.psxanim"),
+    )
+    .expect("read selected Light Enemy idle");
+
+    {
+        let project_name = "default";
+        let root = projects_dir().join(project_name);
+        let idle_path = root.join("assets/animations/rust_mantis_starter/idle.psxanim");
+        assert_eq!(
+            std::fs::read(&idle_path).expect("read project Light Enemy idle"),
+            expected,
+            "{project_name} must carry the selected look-around idle"
+        );
+
+        let project = ProjectDocument::load_from_path(root.join("project.ron"))
+            .unwrap_or_else(|error| panic!("load {project_name}: {error}"));
+        let clip = project
+            .resources
+            .iter()
+            .find_map(|resource| match &resource.data {
+                ResourceData::AnimationClip(clip) if resource.name == "Light Enemy / Idle" => {
+                    Some(clip)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{project_name} has no Light Enemy idle resource"));
+        assert!(clip.looping, "{project_name} idle must loop");
+        assert_eq!(
+            clip.tags,
+            ["rust_mantis_idle_look_v2", "selected_idle_look_01"],
+            "{project_name} must identify the selected look-around take"
+        );
+    }
+}
+
+#[test]
+fn light_enemy_turn_and_alert_are_installed_in_every_enemy_project() {
+    let default_root = default_project_dir();
+    let expected_turn =
+        std::fs::read(default_root.join("assets/animations/rust_mantis_starter/turn.psxanim"))
+            .expect("read selected Light Enemy turn");
+    let expected_alert =
+        std::fs::read(default_root.join("assets/animations/rust_mantis_starter/alert.psxanim"))
+            .expect("read selected Light Enemy alert");
+    let turn = psx_asset::Animation::from_bytes(&expected_turn).expect("parse Light Enemy turn");
+    let alert = psx_asset::Animation::from_bytes(&expected_alert).expect("parse Light Enemy alert");
+    assert_eq!(
+        (
+            turn.joint_count(),
+            turn.frame_count(),
+            turn.sample_rate_hz()
+        ),
+        (22, 11, 12)
+    );
+    assert_eq!(
+        (
+            alert.joint_count(),
+            alert.frame_count(),
+            alert.sample_rate_hz()
+        ),
+        (22, 9, 12)
+    );
+
+    {
+        let project_name = "default";
+        let root = projects_dir().join(project_name);
+        assert_eq!(
+            std::fs::read(root.join("assets/animations/rust_mantis_starter/turn.psxanim"))
+                .expect("read project Light Enemy turn"),
+            expected_turn,
+            "{project_name} must carry the selected turn take"
+        );
+        assert_eq!(
+            std::fs::read(root.join("assets/animations/rust_mantis_starter/alert.psxanim"))
+                .expect("read project Light Enemy alert"),
+            expected_alert,
+            "{project_name} must carry the selected alert take"
+        );
+
+        let project = ProjectDocument::load_from_path(root.join("project.ron"))
+            .unwrap_or_else(|error| panic!("load {project_name}: {error}"));
+        let set = project
+            .resources
+            .iter()
+            .find_map(|resource| match &resource.data {
+                ResourceData::AnimationSet(set) if resource.name == "Light Enemy Animation Set" => {
+                    Some(set)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{project_name} has no Light Enemy animation set"));
+        assert!(
+            set.action_clip(CharacterAnimationAction::Turn).is_some(),
+            "{project_name} must bind the tracking turn"
+        );
+        assert!(
+            set.action_clip(CharacterAnimationAction::Intro).is_some(),
+            "{project_name} must bind the first-acquisition alert"
+        );
+    }
+}
+
+#[test]
+fn cortex_v04b_light_enemy_attack_ladder_uses_named_attack_clips() {
+    let root = projects_dir().join("default");
+    let project = ProjectDocument::load_from_path(root.join("project.ron"))
+        .expect("load Cortex Ignition tech demo 0.4b");
+    let set = project
+        .resources
+        .iter()
+        .find_map(|resource| match &resource.data {
+            ResourceData::AnimationSet(set) if resource.name == "Light Enemy Animation Set" => {
+                Some(set)
+            }
+            _ => None,
+        })
+        .expect("Light Enemy animation set");
+    let bound_name = |action| {
+        let clip = set.action_clip(action).expect("bound Light Enemy attack");
+        project
+            .resource(clip)
+            .expect("bound attack resource")
+            .name
+            .as_str()
+    };
+    assert_eq!(
+        bound_name(CharacterAnimationAction::LightAttack),
+        "Light Enemy / Horizon Light (Single Strike)"
+    );
+    assert_eq!(
+        bound_name(CharacterAnimationAction::HeavyAttack),
+        "Light Enemy / Horizon Heavy (Three Swings)"
+    );
+    assert_eq!(
+        bound_name(CharacterAnimationAction::VertLightAttack),
+        "Light Enemy / Charged Shot"
+    );
+
+    for (path, expected_frames) in [
+        ("assets/animations/mantis_combat/horizon_light.psxanim", 62),
+        ("assets/animations/mantis_combat/horizon_heavy.psxanim", 143),
+        ("assets/animations/mantis_combat/zenith_light.psxanim", 70),
+    ] {
+        let bytes = std::fs::read(root.join(path)).unwrap_or_else(|error| {
+            panic!("read {path}: {error}");
+        });
+        let animation = psx_asset::Animation::from_bytes(&bytes)
+            .unwrap_or_else(|error| panic!("parse {path}: {error:?}"));
+        assert_eq!(animation.joint_count(), 22, "{path}");
+        assert_eq!(animation.frame_count(), expected_frames, "{path}");
+    }
+
+    for source in ["horizon_light.glb", "horizon_heavy.glb", "zenith_light.glb"] {
+        assert!(
+            root.join("source_assets/animations/light_enemy")
+                .join(source)
+                .is_file(),
+            "missing editable source {source}"
+        );
+    }
+
+    for resource in &project.resources {
+        let ResourceData::Character(character) = &resource.data else {
+            continue;
+        };
+        if !resource.name.starts_with("Light Enemy / ") {
+            continue;
+        }
+        for volume in &character.combat_capsules {
+            if let CombatCapsuleRole::ProjectileEmitter { action, .. } = volume.role {
+                assert_eq!(
+                    action,
+                    CharacterAnimationAction::VertLightAttack,
+                    "{} / {}",
+                    resource.name,
+                    volume.name
+                );
+            }
+        }
+    }
+
+    let heavy_set = project
+        .resources
+        .iter()
+        .find_map(|resource| match &resource.data {
+            ResourceData::AnimationSet(set) if resource.name == "Heavy Enemy Animation Set" => {
+                Some(set)
+            }
+            _ => None,
+        })
+        .expect("Heavy Enemy animation set");
+    let heavy_attack_name = |action| {
+        let clip = heavy_set
+            .action_clip(action)
+            .expect("bound Heavy Enemy attack");
+        project
+            .resource(clip)
+            .expect("bound Heavy Enemy attack resource")
+            .name
+            .as_str()
+    };
+    assert_eq!(
+        heavy_attack_name(CharacterAnimationAction::LightAttack),
+        "Heavy Enemy / Light Attack"
+    );
+    assert_eq!(
+        heavy_attack_name(CharacterAnimationAction::HeavyAttack),
+        "Heavy Enemy / Heavy Attack"
+    );
+    assert_eq!(
+        heavy_attack_name(CharacterAnimationAction::RangedAttack),
+        "Heavy Enemy / Ranged Attack"
+    );
+    let heavy = project
+        .resources
+        .iter()
+        .find_map(|resource| match &resource.data {
+            ResourceData::Character(character) if resource.name == "Heavy Enemy" => Some(character),
+            _ => None,
+        })
+        .expect("Heavy Enemy character");
+    assert!(heavy.combat_capsules.iter().any(|volume| matches!(
+        volume.role,
+        CombatCapsuleRole::ProjectileEmitter {
+            action: CharacterAnimationAction::RangedAttack,
+            ..
+        }
+    )));
+
+    let mut project = project;
+    crate::grid::starter::attach_starter_world(&mut project);
+    let (package, report) = playtest::build_package(&project, &root);
+    assert!(report.is_ok(), "Cortex 0.3 must cook: {:?}", report.errors);
+    let package = package.expect("Cortex 0.3 package");
+    let light = package
+        .game_entities
+        .iter()
+        .find(|entity| {
+            entity.ranged_attack_action
+                == CharacterAnimationAction::VertLightAttack.to_index() as u8
+        })
+        .expect("placed Light Enemy hybrid attack record");
+    assert_ne!(light.attack_clip, light.heavy_attack_clip);
+    assert_ne!(light.attack_clip, light.ranged_attack_clip);
+    assert_ne!(light.heavy_attack_clip, light.ranged_attack_clip);
+    assert_eq!(light.attack_speed_q8, 384);
+    // v0.4b rebuilt the ladder: the single-strike light attack now plays the
+    // late window of the clip, and the three-swing heavy plays the early one.
+    // These two ranges are exactly the v0.3 pair with their actions swapped.
+    assert_eq!(
+        light.attack_frame_range,
+        psx_level::CharacterActionFrameRange {
+            start: 81,
+            end: 118,
+        }
+    );
+    assert_eq!(light.heavy_attack_speed_q8, 384);
+    // Authored 2..53. The cook drops the frames nothing references and rebases
+    // what it emits, so the runtime sees the same window against a clip that is
+    // two frames shorter at the front. The played span is unchanged: 52 frames
+    // either way.
+    assert_eq!(
+        light.heavy_attack_frame_range,
+        psx_level::CharacterActionFrameRange { start: 0, end: 51 }
+    );
+    assert_eq!(light.ranged_attack_speed_q8, 256);
+    assert_eq!(
+        light.ranged_attack_frame_range,
+        psx_level::CharacterActionFrameRange::FULL
+    );
+    assert_eq!(
+        (
+            light.attack_active_ticks,
+            light.heavy_attack_active_ticks,
+            light.ranged_attack_active_ticks,
+        ),
+        (59, 96, 148),
+        "state timing must use the same trim/speed contract as presentation"
+    );
+    assert!(light.flags & psx_level::game_entity_flags::RANGED_ATTACK != 0);
+}
+
+#[test]
+fn projects_dir_resolves_to_real_directory() {
+    assert!(projects_dir().is_dir(), "{}", projects_dir().display());
+    assert!(default_project_dir().join("project.ron").is_file());
+    assert!(default_project_dir()
+        .join("assets/textures/courtyard_cobbles.psxt")
+        .is_file());
+    assert!(default_project_dir()
+        .join("assets/models/rust_mantis/rust_mantis.psxmdl")
+        .is_file());
+    assert!(default_project_dir()
+        .join("assets/models/tank_boss_animated_model/tank_boss_animated_model.psxmdl")
+        .is_file());
+}
+
+#[test]
+fn project_file_stem_is_filesystem_safe() {
+    assert_eq!(
+        project_file_stem("Stone Room: Vertical Slice!"),
+        "stone_room_vertical_slice"
+    );
+    assert_eq!(project_file_stem("PSoXide 2"), "psoxide_2");
+    assert_eq!(project_file_stem("..."), "project");
+}
+
+#[test]
+fn starter_project_has_scene_tree_and_resources() {
+    let project = ProjectDocument::starter();
+
+    assert_eq!(project.scenes.len(), 1);
+    // Starter includes the starter room plus gameplay resources for the
+    // animated character and weapon path.
+    assert!(project.resources.len() >= 10);
+    assert!(project.active_scene().world.grid().is_some());
+
+    let aletha = project
+        .resources
+        .iter()
+        .find_map(|resource| match &resource.data {
+            ResourceData::Character(character) if resource.name == "Aletha" => Some(character),
+            _ => None,
+        })
+        .expect("starter includes Aletha");
+    assert_eq!(aletha.spawn_role, CharacterSpawnRole::Player);
+    // v0.4b's tuned movement: slower walk, tighter sprint.
+    assert_eq!(
+        (aletha.radius, aletha.walk_speed, aletha.run_speed),
+        (188, 13, 64)
+    );
+    assert_eq!(aletha.roll_speed, 112);
+    let aletha_material = aletha
+        .material
+        .expect("Aletha carries her crystal material");
+    let material_resource = project
+        .resource(aletha_material)
+        .expect("Aletha material exists");
+    assert_eq!(material_resource.name, "Aletha Crystal");
+    assert!(matches!(material_resource.data, ResourceData::Material(_)));
+    assert_eq!(
+        (
+            aletha.camera_distance,
+            aletha.camera_height,
+            aletha.camera_target_height,
+        ),
+        (2000, 1000, 850)
+    );
+
+    let mantis = project
+        .resources
+        .iter()
+        .find_map(|resource| match &resource.data {
+            ResourceData::Character(character) if resource.name == "Light Enemy" => Some(character),
+            _ => None,
+        })
+        .expect("starter includes the Light Enemy");
+    assert_eq!(mantis.spawn_role, CharacterSpawnRole::Enemy);
+    assert_eq!(mantis.walk_speed, 28);
+    let enemy = mantis.enemy_behavior.expect("Mantis enemy behavior preset");
+    assert_eq!(enemy.aggro_radius, 5632);
+    assert_eq!(enemy.patrol_offset, [0, 0, -6000]);
+    assert_eq!(enemy.reaction_ticks, 42);
+
+    let mantis_idle = project
+        .resources
+        .iter()
+        .find_map(|resource| match &resource.data {
+            ResourceData::AnimationClip(clip) if resource.name == "Light Enemy / Idle" => {
+                Some(clip)
+            }
+            _ => None,
+        })
+        .expect("starter includes the selected Light Enemy idle");
+    assert_eq!(
+        mantis_idle.psxanim_path,
+        "assets/animations/rust_mantis_starter/idle.psxanim"
+    );
+    assert!(mantis_idle.looping);
+    assert_eq!(
+        mantis_idle.tags,
+        ["rust_mantis_idle_look_v2", "selected_idle_look_01"]
+    );
+}
+
+#[test]
+fn project_missing_point_light_color_uses_default() {
+    let light: NodeKind =
+        ron::from_str("PointLight(intensity: 1.25, radius: 3.0)").expect("light parses");
+    let NodeKind::PointLight { color, .. } = light else {
+        panic!("parsed kind is a light");
+    };
+    assert_eq!(color, default_light_color());
+}
+
+#[test]
+fn legacy_door_motion_fields_are_ignored() {
+    let door: LogicNodeKind = ron::from_str(
+        "Door(box_prop: \"Legacy Box\", start_open: true, open_offset: (0, 128, 0), travel_ticks: 60)",
+    )
+        .expect("legacy door parses");
+    assert_eq!(
+        door,
+        LogicNodeKind::Door {
+            box_prop: "Legacy Box".to_string(),
+            start_open: true,
+        }
+    );
+}
+
+#[test]
+fn adding_node_preserves_parent_child_relationship() {
+    let mut scene = Scene::new("Test");
+
+    let room = scene.add_node(scene.root, "Room", NodeKind::Node3D);
+    let child = scene.add_node(
+        room,
+        "Spawn",
+        NodeKind::SpawnPoint {
+            player: true,
+            character: None,
+        },
+    );
+
+    assert_eq!(scene.node(child).and_then(|node| node.parent), Some(room));
+    assert!(scene
+        .node(room)
+        .is_some_and(|node| node.children.contains(&child)));
+}
+
+#[test]
+fn removing_node_removes_descendants() {
+    let mut scene = Scene::new("Test");
+    let parent = scene.add_node(scene.root, "A", NodeKind::Node3D);
+    let child = scene.add_node(parent, "B", NodeKind::Node3D);
+
+    assert!(scene.remove_node(parent));
+    assert!(scene.node(parent).is_none());
+    assert!(scene.node(child).is_none());
+    assert!(scene
+        .node(scene.root)
+        .is_some_and(|root| root.children.is_empty()));
+}
+
+#[test]
+fn move_node_reparents_and_reorders() {
+    let mut scene = Scene::new("Test");
+    let a = scene.add_node(scene.root, "A", NodeKind::Node3D);
+    let b = scene.add_node(scene.root, "B", NodeKind::Node3D);
+    let c = scene.add_node(a, "C", NodeKind::Node3D);
+
+    // Reparent c from a to b at position 0.
+    assert!(scene.move_node(c, b, 0));
+    assert_eq!(scene.node(c).unwrap().parent, Some(b));
+    assert!(scene.node(a).unwrap().children.is_empty());
+    assert_eq!(scene.node(b).unwrap().children, vec![c]);
+
+    // Reorder b before a at the root.
+    assert!(scene.move_node(b, scene.root, 0));
+    assert_eq!(scene.node(scene.root).unwrap().children, vec![b, a]);
+}
+
+#[test]
+fn move_node_rejects_cycles_and_root() {
+    let mut scene = Scene::new("Test");
+    let a = scene.add_node(scene.root, "A", NodeKind::Node3D);
+    let b = scene.add_node(a, "B", NodeKind::Node3D);
+
+    // Cannot reparent a node under itself.
+    assert!(!scene.move_node(a, a, 0));
+    // Cannot reparent an ancestor under its descendant.
+    assert!(!scene.move_node(a, b, 0));
+    // Cannot move the root.
+    assert!(!scene.move_node(scene.root, a, 0));
+}
+
+#[test]
+fn project_roundtrips_through_ron_string() {
+    let project = ProjectDocument::starter();
+    let ron = project.to_ron_string().unwrap();
+
+    assert!(ron.contains("Aletha"));
+    assert_eq!(ProjectDocument::from_ron_str(&ron).unwrap(), project);
+}
+
+#[test]
+fn point_of_interest_world_message_and_boost_module_roundtrip() {
+    let mut project = ProjectDocument::new("messages");
+    let scene = project.active_scene_mut();
+    let root = scene.root;
+    let NodeKind::World { world_message, .. } = &mut scene.node_mut(root).expect("world root").kind
+    else {
+        panic!("root must be a world");
+    };
+    *world_message = Some(WorldMessage {
+        pages: vec![
+            "The cortex stirs.".to_string(),
+            "Ignition follows.".to_string(),
+        ],
+        pages_it: Vec::new(),
+    });
+    let host = scene.add_node(root, "Archive Beacon", NodeKind::Entity);
+    scene.add_node(
+        host,
+        "Archive Beacon",
+        NodeKind::PointOfInterest {
+            pages: vec!["Recovered protocol.".to_string()],
+            pages_it: vec!["Protocollo recuperato.".to_string()],
+            prompt: "READ".to_string(),
+            radius: 576,
+            marker_height: 192,
+            repeatable: false,
+            persistence_id: "archive-beacon-01".to_string(),
+            reward: Some(PointOfInterestReward {
+                module: None,
+                quantity: 1,
+                item_name: "Kinetic Relay".to_string(),
+                description: "Amplifies Horizon attack output.".to_string(),
+                item_name_it: "Rele' Cinetico".to_string(),
+                description_it: "Amplifica l'attacco Orizzonte.".to_string(),
+                modifiers: vec![BoostStatModifier {
+                    stat: BoostStatKind::HorizonAttack,
+                    percent: 15,
+                }],
+            }),
+            enabled: true,
+        },
+    );
+
+    let ron = project.to_ron_string().expect("serializes");
+    let restored = ProjectDocument::from_ron_str(&ron).expect("deserializes");
+    assert_eq!(restored, project);
+}
+
+#[test]
+fn legacy_world_without_message_keeps_world_message_disabled() {
+    let world: NodeKind = ron::from_str("World()")
+        .expect("all World fields, including world_message, have compatible defaults");
+    assert!(matches!(
+        world,
+        NodeKind::World {
+            world_message: None,
+            ..
+        }
+    ));
+}
+
+/// The far vista ring was removed from the editor. Projects saved while it
+/// existed carry a `far_vista:` block on the World node (the shipped ones
+/// held a disabled ring, an author could also have enabled one with
+/// textures). They must still load, ignore the block, and save without it.
+#[test]
+fn removed_far_vista_data_loads_and_is_dropped_on_save() {
+    let project = ProjectDocument::from_ron_str(DEFAULT_PROJECT_RON).unwrap();
+    let ron = project.to_ron_string().unwrap();
+    assert!(
+        !ron.contains("far_vista"),
+        "a fresh save has no vista block"
+    );
+
+    let disabled = "far_vista: (enabled: false, texture: None, texture_panels: \
+        (None, None, None, None, None, None, None, None, None, None, None, None, None, None, \
+        None, None), radius: 18000, height: 4096, vertical_offset: -512, segments: 12, \
+        rotation_degrees: 0, tint: (91, 103, 115), match_room_fog: true), ";
+    let enabled = "far_vista: (enabled: true, texture: Some((7)), texture_panels: \
+        (Some((8)), None, None, None, None, None, None, None, None, None, None, None, None, \
+        None, None, Some((9))), radius: 9000, height: 2048, vertical_offset: 0, segments: 6, \
+        rotation_degrees: 45, tint: (1, 2, 3), match_room_fog: false), ";
+    for block in [disabled, enabled] {
+        let legacy = ron.replacen("kind: World(", &format!("kind: World({block}"), 1);
+        assert!(
+            legacy.contains("far_vista"),
+            "the fixture must hit the World node"
+        );
+        let loaded = ProjectDocument::from_ron_str(&legacy)
+            .expect("a project saved with a far vista still loads");
+        assert_eq!(loaded, project, "the vista block is ignored");
+        let resaved = loaded.to_ron_string().unwrap();
+        assert!(!resaved.contains("far_vista"), "and is not written back");
+        assert_eq!(resaved, ron);
+    }
+}
+
+#[test]
+fn deleting_boost_module_clears_point_of_interest_reward_reference() {
+    let mut project = ProjectDocument::new("poi-reward-delete");
+    let module = project.add_resource(
+        "Surge Drive",
+        ResourceData::BoostModule(BoostModuleResource {
+            kind: BoostModuleKind::Surge,
+            ..BoostModuleResource::default()
+        }),
+    );
+    let scene = project.active_scene_mut();
+    let host = scene.add_node(scene.root, "Beacon", NodeKind::Entity);
+    let poi = scene.add_node(
+        host,
+        "Beacon",
+        NodeKind::PointOfInterest {
+            pages: default_message_pages(),
+            pages_it: Vec::new(),
+            prompt: default_point_of_interest_prompt(),
+            radius: default_point_of_interest_radius(),
+            marker_height: default_point_of_interest_marker_height(),
+            repeatable: true,
+            persistence_id: String::new(),
+            reward: Some(PointOfInterestReward {
+                module: Some(module),
+                quantity: 1,
+                ..PointOfInterestReward::default()
+            }),
+            enabled: true,
+        },
+    );
+
+    project.delete_resource(module).expect("module exists");
+    let NodeKind::PointOfInterest { reward, .. } =
+        &project.active_scene().node(poi).expect("poi remains").kind
+    else {
+        panic!("poi remains authored");
+    };
+    assert_eq!(*reward, None);
+}
+
+#[test]
+fn new_project_seeds_hud_ui_scene() {
+    let project = ProjectDocument::new("ui");
+    let ui_scene = project.active_ui_scene().expect("default UI scene");
+    assert_eq!(ui_scene.name, "HUD");
+    assert!(matches!(
+        ui_scene.node(ui_scene.root).map(|node| &node.kind),
+        Some(UiNodeKind::Canvas {
+            width: 320,
+            height: 240
+        })
+    ));
+    assert_eq!(ui_scene.nodes().len(), 1);
+    assert!(project.resources.is_empty());
+}
+
+#[test]
+fn ui_bar_frame_mapping_keeps_zero_empty_and_max_completely_full() {
+    assert_eq!(ui_bar_frame_index(0, 4096, 7), 0);
+    assert_eq!(ui_bar_frame_index(1, 4096, 7), 1);
+    assert_eq!(ui_bar_frame_index(2048, 4096, 7), 3);
+    assert_eq!(ui_bar_frame_index(4095, 4096, 7), 6);
+    assert_eq!(ui_bar_frame_index(4096, 4096, 7), 6);
+}
+
+#[test]
+fn deleting_a_sprite_bar_material_clears_the_ui_reference() {
+    let mut project = ProjectDocument::new("ui resource deletion");
+    let texture = project.add_resource(
+        "Gauge",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    let scene = project.active_ui_scene_mut().expect("HUD");
+    let gauge = scene.add_node(
+        scene.root,
+        "Gauge",
+        UiNodeKind::Bar {
+            rect: UiRect::new(0, 0, 106, 29),
+            value: UiValueBinding::PlayerHealth,
+            max: UiValueBinding::PlayerHealthMax,
+            texture: Some(texture),
+            frame_count: 7,
+            fill: [128, 128, 128],
+            fill_gradient: None,
+            background: [0, 0, 0],
+            background_gradient: None,
+        },
+    );
+    assert_eq!(project.resource_reference_count(texture), 1);
+    let report = project.delete_resource(texture).expect("resource deleted");
+    assert_eq!(report.cleared_references, 1);
+    assert!(matches!(
+        project
+            .active_ui_scene()
+            .and_then(|scene| scene.node(gauge))
+            .map(|node| &node.kind),
+        Some(UiNodeKind::Bar { texture: None, .. })
+    ));
+}
+
+#[test]
+fn default_project_ui_controls_ship_with_cortex_sound_palette() {
+    let project_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/default/project.ron");
+    let project = ProjectDocument::load_from_path(&project_path)
+        .unwrap_or_else(|error| panic!("{}: {error}", project_path.display()));
+    let project_root = project_path.parent().expect("default project root");
+    let mut buttons = 0usize;
+    let mut sliders = 0usize;
+
+    for scene in &project.ui_scenes {
+        for node in scene.nodes() {
+            let pools: [&[UiSfxCue]; 4] = match &node.kind {
+                UiNodeKind::Button { sfx, .. } => {
+                    buttons += 1;
+                    assert!(!sfx.focus.is_empty(), "{} needs focus SFX", node.name);
+                    // v0.4b's tab buttons switch on focus rather than on press,
+                    // so they carry no activate cue. Every other button must.
+                    assert!(
+                        !sfx.activate.is_empty() || node.name.ends_with("Tab"),
+                        "{} needs press SFX",
+                        node.name
+                    );
+                    [sfx.focus.as_slice(), sfx.activate.as_slice(), &[], &[]]
+                }
+                UiNodeKind::Slider { sfx, .. } => {
+                    sliders += 1;
+                    assert!(!sfx.focus.is_empty(), "{} needs focus SFX", node.name);
+                    assert!(!sfx.nudge.is_empty(), "{} needs nudge SFX", node.name);
+                    assert!(!sfx.limit.is_empty(), "{} needs limit SFX", node.name);
+                    [
+                        sfx.focus.as_slice(),
+                        &[],
+                        sfx.nudge.as_slice(),
+                        sfx.limit.as_slice(),
+                    ]
+                }
+                _ => continue,
+            };
+            for cue in pools.into_iter().flatten() {
+                assert!(
+                    cue.wav_path.starts_with("assets/audio/ui/"),
+                    "{} uses a UI cue outside the shared palette: {}",
+                    node.name,
+                    cue.wav_path
+                );
+                assert!(
+                    project_root.join(&cue.wav_path).is_file(),
+                    "{} references missing UI cue {}",
+                    node.name,
+                    cue.wav_path
+                );
+            }
+        }
+    }
+
+    // v0.4b's UI: 19 buttons (the extra three are its tab controls) and the
+    // same twelve sliders.
+    assert_eq!(buttons, 19);
+    assert_eq!(sliders, 12);
+}
+
+#[test]
+fn default_project_system_overlay_matches_inventory_language_and_exposes_options() {
+    let project_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/default/project.ron");
+    let project = ProjectDocument::load_from_path(&project_path)
+        .unwrap_or_else(|error| panic!("{}: {error}", project_path.display()));
+    let system_scene = project
+        .ui_scenes
+        .iter()
+        .find(|scene| scene.name == "System Overlay")
+        .expect("System Overlay UI scene");
+    let gameplay = project
+        .scene_states
+        .iter()
+        .find(|state| state.name == "Gameplay")
+        .expect("Gameplay state");
+    let inventory_state = project
+        .scene_states
+        .iter()
+        .find(|state| state.name == "Inventory Overlay")
+        .expect("Inventory Overlay state");
+    let system = project
+        .scene_states
+        .iter()
+        .find(|state| state.name == "System Overlay")
+        .expect("System Overlay state");
+
+    assert_eq!(gameplay.start_state, Some(inventory_state.id));
+    assert_eq!(inventory_state.start_state, Some(gameplay.id));
+    assert_eq!(system.start_state, Some(gameplay.id));
+    assert_eq!(system.world, SceneWorldLayer::Gameplay);
+    assert_eq!(system.ui_scene, Some(system_scene.id));
+    assert!(system.ui_input);
+    assert!(system.pause_world);
+    assert!(project
+        .scene_states
+        .iter()
+        .all(|state| state.name != "Paused Settings"));
+
+    let node_names: HashSet<&str> = system_scene
+        .nodes()
+        .iter()
+        .map(|node| node.name.as_str())
+        .collect();
+    assert!(node_names.contains("System Player Tab"));
+    assert!(node_names.contains("System Tab"));
+    assert!(node_names.iter().all(|name| !name.contains("Armament")));
+    assert!(!node_names.contains("Settings"));
+    assert!(node_names.contains("Return To Title"));
+    assert_eq!(
+        system_scene
+            .default_focus
+            .and_then(|id| system_scene.node(id))
+            .map(|node| node.name.as_str()),
+        Some("System Tab")
+    );
+    assert_eq!(
+        system_scene
+            .nodes()
+            .iter()
+            .filter(|node| matches!(&node.kind, UiNodeKind::Button { tag, .. } if tag.starts_with("tab.")))
+            .count(),
+        2
+    );
+    let system_rail = system_scene
+        .nodes()
+        .iter()
+        .find(|node| node.name == "System Tab Rail")
+        .and_then(|node| match node.kind {
+            UiNodeKind::Rect { rect, .. } => Some(rect),
+            _ => None,
+        })
+        .expect("System Tab Rail");
+    assert_eq!(
+        (
+            system_rail.x,
+            system_rail.y,
+            system_rail.width,
+            system_rail.height,
+        ),
+        (184, 8, 127, 29)
+    );
+    assert!(system_scene
+        .nodes()
+        .iter()
+        .all(|node| node.name != "System Tab Glow"));
+
+    let housing = |name: &str| {
+        system_scene
+            .nodes()
+            .iter()
+            .find(|node| node.name == name)
+            .and_then(|node| match node.kind {
+                UiNodeKind::Rect {
+                    shape: Some(shape), ..
+                } => Some(shape),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing geometric {name}"))
+    };
+    // v0.4b replaced the drawn L1/R1 glyph housings with real cooked
+    // button-prompt images, so the shoulder affordances are Image nodes now.
+    for name in ["System L1 Prompt", "System R1 Prompt"] {
+        let (rect, texture) = system_scene
+            .nodes()
+            .iter()
+            .find(|node| node.name == name)
+            .and_then(|node| match &node.kind {
+                UiNodeKind::Image { rect, texture, .. } => Some((rect, texture)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing prompt image {name}"));
+        assert_eq!((rect.width, rect.height), (16, 16));
+        assert!(texture.is_some(), "{name} must carry a prompt texture");
+    }
+
+    for name in ["System World Dimmer", "System World Quarter Scrim"] {
+        let (rect, color, shape) = system_scene
+            .nodes()
+            .iter()
+            .find(|node| node.name == name)
+            .and_then(|node| match &node.kind {
+                UiNodeKind::Rect {
+                    rect,
+                    color,
+                    shape: Some(shape),
+                    ..
+                } => Some((rect, color, shape)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing {name}"));
+        assert_eq!((rect.x, rect.y, rect.width, rect.height), (0, 0, 320, 240));
+        assert_eq!(*color, [0, 0, 0]);
+        assert!(shape.semi_transparent_fill);
+        assert_eq!((shape.corner_cut, shape.border_width), (0, 0));
+    }
+
+    for name in ["System Tab Rail", "System Panel"] {
+        let frame = housing(name);
+        assert!(!frame.semi_transparent_fill);
+        assert_eq!(frame.corner_cut, 5);
+        assert!(frame.cut_top_left && frame.cut_bottom_right);
+    }
+    assert!(system_scene
+        .nodes()
+        .iter()
+        .all(|node| !node.name.contains("Session")));
+
+    {
+        let (name, expected_rect) = ("System Inset Rail", (15, 49, 290, 22));
+        let (rect, shape) = system_scene
+            .nodes()
+            .iter()
+            .find(|node| node.name == name)
+            .and_then(|node| match &node.kind {
+                UiNodeKind::Rect {
+                    rect,
+                    shape: Some(shape),
+                    ..
+                } => Some((rect, shape)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing {name}"));
+        assert_eq!((rect.x, rect.y, rect.width, rect.height), expected_rect);
+        assert_eq!((shape.corner_cut, shape.border_width), (5, 1));
+        assert!(shape.cut_top_left);
+        assert!(!shape.cut_top_right && !shape.cut_bottom_right && !shape.cut_bottom_left);
+        assert!(!shape.semi_transparent_fill);
+    }
+
+    for (name, option) in [
+        ("Screen X", OptionId(1)),
+        ("Screen Y", OptionId(2)),
+        ("Brightness", OptionId(6)),
+        ("Stick Deadzone", OptionId(5)),
+        ("Music Volume", OptionId(3)),
+        ("SFX Volume", OptionId(4)),
+    ] {
+        let (authored_option, rect) = system_scene
+            .nodes()
+            .iter()
+            .find(|node| node.name == name)
+            .and_then(|node| match &node.kind {
+                UiNodeKind::Slider { option, rect, .. } => Some((*option, *rect)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing {name}"));
+        assert_eq!(authored_option, option);
+        assert_eq!((rect.x, rect.width, rect.height), (94, 201, 6));
+    }
+    let return_to_title = system_scene
+        .nodes()
+        .iter()
+        .find(|node| node.name == "Return To Title")
+        .and_then(|node| match node.kind {
+            UiNodeKind::Button { rect, .. } => Some(rect),
+            _ => None,
+        })
+        .expect("Return To Title");
+    assert_eq!(
+        (
+            return_to_title.x,
+            return_to_title.y,
+            return_to_title.width,
+            return_to_title.height,
+        ),
+        (94, 201, 201, 18),
+        "Return to Title must be the final aligned row after SFX"
+    );
+}
+
+#[test]
+fn normalize_loaded_restores_missing_ui_scenes() {
+    let mut project = ProjectDocument::new("legacy");
+    project.ui_scenes.clear();
+    project.scene_states.clear();
+    project.normalize_loaded();
+    assert_eq!(project.active_ui_scene().unwrap().name, "HUD");
+    assert!(project
+        .scene_states
+        .iter()
+        .any(|state| state.world == SceneWorldLayer::Gameplay));
+}
+
+#[test]
+fn normalize_loaded_creates_screen_states_for_ui_scenes() {
+    let mut project = ProjectDocument::new("states");
+    project.add_ui_scene("Menu");
+    for state in &mut project.scene_states {
+        state.id = SceneStateId::UNASSIGNED;
+    }
+    project.normalize_loaded();
+
+    for scene in &project.ui_scenes {
+        assert!(
+            project
+                .scene_states
+                .iter()
+                .any(|state| state.ui_scene == Some(scene.id)),
+            "missing state for UI scene {}",
+            scene.name
+        );
+    }
+    assert!(project
+        .scene_states
+        .iter()
+        .any(|state| state.world == SceneWorldLayer::Gameplay));
+    let ids: HashSet<SceneStateId> = project.scene_states.iter().map(|state| state.id).collect();
+    assert_eq!(ids.len(), project.scene_states.len());
+    assert!(ids.iter().all(|id| *id != SceneStateId::UNASSIGNED));
+}
+
+#[test]
+fn screen_state_start_targets_survive_normalization_and_clear_when_invalid() {
+    let mut project = ProjectDocument::new("pause flow");
+    let gameplay = project
+        .scene_states
+        .iter()
+        .find(|state| state.world == SceneWorldLayer::Gameplay)
+        .expect("default gameplay state")
+        .id;
+    let pause = project.add_scene_state("Pause Menu");
+    project.scene_state_mut(gameplay).unwrap().start_state = Some(pause);
+    project.scene_state_mut(pause).unwrap().start_state = Some(gameplay);
+
+    project.normalize_loaded();
+    assert_eq!(
+        project.scene_state(gameplay).unwrap().start_state,
+        Some(pause)
+    );
+    assert_eq!(
+        project.scene_state(pause).unwrap().start_state,
+        Some(gameplay)
+    );
+
+    project.scene_state_mut(pause).unwrap().start_state = Some(pause);
+    project.normalize_loaded();
+    assert_eq!(project.scene_state(pause).unwrap().start_state, None);
+
+    project.scene_state_mut(gameplay).unwrap().start_state = Some(pause);
+    let pause_index = project
+        .scene_states
+        .iter()
+        .position(|state| state.id == pause)
+        .unwrap();
+    assert!(project.remove_scene_state(pause_index));
+    assert_eq!(project.scene_state(gameplay).unwrap().start_state, None);
+}
+
+#[test]
+fn normalize_loaded_assigns_stable_unique_ui_scene_ids() {
+    let mut project = ProjectDocument::new("ids");
+    // Simulate a legacy project: scenes with the unassigned sentinel.
+    let mut second = UiScene::default_hud();
+    second.name = "Pause".to_string();
+    second.id = UiSceneId::UNASSIGNED;
+    project.ui_scenes.push(second);
+    for scene in &mut project.ui_scenes {
+        scene.id = UiSceneId::UNASSIGNED;
+    }
+
+    project.normalize_loaded();
+
+    let ids: Vec<UiSceneId> = project.ui_scenes.iter().map(|scene| scene.id).collect();
+    assert!(ids.iter().all(|id| *id != UiSceneId::UNASSIGNED));
+    let unique: HashSet<UiSceneId> = ids.iter().copied().collect();
+    assert_eq!(unique.len(), ids.len(), "scene ids must be unique");
+
+    // Ids are stable across a second normalize and addressable.
+    let first_id = project.ui_scenes[0].id;
+    project.normalize_loaded();
+    assert_eq!(project.ui_scenes[0].id, first_id);
+    assert_eq!(
+        project.ui_scene(first_id).map(|scene| scene.name.as_str()),
+        Some(project.ui_scenes[0].name.as_str())
+    );
+    assert_eq!(
+        project.ui_scene_at(1).map(|scene| scene.id),
+        Some(project.ui_scenes[1].id)
+    );
+}
+
+#[test]
+fn ui_scene_id_survives_ron_roundtrip() {
+    let mut project = ProjectDocument::new("ids");
+    project.normalize_loaded();
+    let assigned = project.ui_scenes[0].id;
+    let ron = project.to_ron_string().unwrap();
+    let mut reloaded = ProjectDocument::from_ron_str(&ron).unwrap();
+    reloaded.normalize_loaded();
+    assert_eq!(reloaded.ui_scenes[0].id, assigned);
+}
+
+#[test]
+fn add_ui_scene_seeds_empty_canvas_with_fresh_id() {
+    let mut project = ProjectDocument::new("crud");
+    project.normalize_loaded();
+    let existing: HashSet<UiSceneId> = project.ui_scenes.iter().map(|scene| scene.id).collect();
+
+    let id = project.add_ui_scene("Pause");
+    assert!(id != UiSceneId::UNASSIGNED);
+    assert!(!existing.contains(&id), "new scene id is unique");
+
+    let scene = project.ui_scene(id).unwrap();
+    assert_eq!(scene.name, "Pause");
+    assert!(project
+        .scene_states
+        .iter()
+        .any(|state| state.ui_scene == Some(id)));
+    // Empty root canvas at PSX resolution: exactly one node, a Canvas.
+    assert_eq!(scene.nodes().len(), 1);
+    assert_eq!(scene.root, UiNodeId::ROOT);
+    let root = scene.node(scene.root).unwrap();
+    assert!(matches!(
+        root.kind,
+        UiNodeKind::Canvas {
+            width: 320,
+            height: 240
+        }
+    ));
+}
+
+#[test]
+fn duplicate_ui_scene_deep_copies_after_source_with_fresh_id() {
+    let mut project = ProjectDocument::new("crud");
+    project.normalize_loaded();
+    // Give the source an extra node so the deep copy is observable.
+    let source_index = 0;
+    let source_root = project.ui_scenes[source_index].root;
+    let extra = project.ui_scenes[source_index].add_node(
+        source_root,
+        "Extra",
+        UiNodeKind::Rect {
+            rect: UiRect::new(1, 2, 3, 4),
+            color: [9, 9, 9],
+            gradient: None,
+            transparent: false,
+            shape: None,
+        },
+    );
+    let source_id = project.ui_scenes[source_index].id;
+    let source_name = project.ui_scenes[source_index].name.clone();
+    let source_node_count = project.ui_scenes[source_index].nodes().len();
+
+    let copy_id = project.duplicate_ui_scene(source_index).unwrap();
+    // Inserted directly after the source.
+    assert_eq!(project.ui_scenes[source_index + 1].id, copy_id);
+    assert_ne!(copy_id, source_id, "copy gets a fresh id");
+    let copy = project.ui_scene(copy_id).unwrap();
+    assert_eq!(copy.name, format!("{source_name} Copy"));
+    assert_eq!(copy.nodes().len(), source_node_count);
+    assert!(copy.node(extra).is_some(), "deep copy carries child nodes");
+
+    // Editing the copy does not touch the source.
+    let copy_index = source_index + 1;
+    project.ui_scenes[copy_index].remove_node(extra);
+    assert!(project.ui_scene(source_id).unwrap().node(extra).is_some());
+}
+
+#[test]
+fn remove_ui_scene_never_leaves_list_empty() {
+    let mut project = ProjectDocument::new("crud");
+    project.normalize_loaded();
+    project.add_ui_scene("Second");
+    assert_eq!(project.ui_scenes.len(), 2);
+
+    assert!(project.remove_ui_scene(0));
+    assert_eq!(project.ui_scenes.len(), 1);
+
+    // Removing the final scene re-seeds a default so the list is
+    // never empty, and out-of-range indices are a no-op.
+    assert!(project.remove_ui_scene(0));
+    assert_eq!(project.ui_scenes.len(), 1, "list re-seeds a default HUD");
+    assert!(project.ui_scenes[0].id != UiSceneId::UNASSIGNED);
+    assert!(!project.remove_ui_scene(9));
+    assert_eq!(project.ui_scenes.len(), 1);
+}
+
+#[test]
+fn ui_scene_remove_node_removes_descendants_and_root_is_stable() {
+    let mut scene = UiScene::default_hud();
+    let group = scene.add_node(
+        scene.root,
+        "Prompt",
+        UiNodeKind::Group {
+            rect: UiRect::new(48, 180, 120, 24),
+        },
+    );
+    let label = scene.add_node(
+        group,
+        "Prompt Text",
+        UiNodeKind::Label {
+            rect: UiRect::new(52, 184, 96, 12),
+            text: "Open".to_string(),
+            random_message: false,
+            messages: Vec::new(),
+            tag: String::new(),
+            align: UiTextAlign::Left,
+            wrap: false,
+            font: UiFontChoice::Basic,
+            font_scale: default_ui_font_scale(),
+            letter_spacing: default_ui_letter_spacing(),
+            color: [220, 226, 240],
+            gradient: None,
+            focus_with_next_control: false,
+            effect: UiImageEffect::None,
+        },
+    );
+
+    assert!(!scene.remove_node(scene.root));
+    assert!(scene.remove_node(group));
+    assert!(scene.node(group).is_none());
+    assert!(scene.node(label).is_none());
+    assert!(!scene
+        .node(scene.root)
+        .expect("root")
+        .children
+        .contains(&group));
+}
+
+#[test]
+fn ui_scene_parent_rect_offsets_children() {
+    let mut scene = UiScene::default_hud();
+    let group = scene.add_node(
+        scene.root,
+        "Panel",
+        UiNodeKind::Group {
+            rect: UiRect::new(40, 30, 100, 50),
+        },
+    );
+    let label = scene.add_node(
+        group,
+        "Prompt",
+        UiNodeKind::Label {
+            rect: UiRect::new(8, 6, 48, 12),
+            text: "Open".to_string(),
+            random_message: false,
+            messages: Vec::new(),
+            tag: String::new(),
+            align: UiTextAlign::Left,
+            wrap: false,
+            font: UiFontChoice::Basic,
+            font_scale: default_ui_font_scale(),
+            letter_spacing: default_ui_letter_spacing(),
+            color: [220, 226, 240],
+            gradient: None,
+            focus_with_next_control: false,
+            effect: UiImageEffect::None,
+        },
+    );
+
+    assert_eq!(
+        scene.absolute_rect(label),
+        Some(UiRect::new(48, 36, 48, 12))
+    );
+    assert_eq!(
+        scene
+            .hierarchy_node_ids()
+            .into_iter()
+            .filter(|id| *id == group || *id == label)
+            .collect::<Vec<_>>(),
+        vec![group, label]
+    );
+}
+
+#[test]
+fn ui_scene_absolute_rect_preserves_visual_transform() {
+    let mut scene = UiScene::default_hud();
+    let rect = UiRect::new(8, 6, 48, 12)
+        .with_rotation(30)
+        .with_flips(true, false);
+    let label = scene.add_node(
+        scene.root,
+        "Prompt",
+        UiNodeKind::Label {
+            rect,
+            text: "Open".to_string(),
+            random_message: false,
+            messages: Vec::new(),
+            tag: String::new(),
+            align: UiTextAlign::Left,
+            wrap: false,
+            font: UiFontChoice::Basic,
+            font_scale: default_ui_font_scale(),
+            letter_spacing: default_ui_letter_spacing(),
+            color: [220, 226, 240],
+            gradient: None,
+            focus_with_next_control: false,
+            effect: UiImageEffect::None,
+        },
+    );
+
+    let absolute = scene.absolute_rect(label).expect("absolute rect");
+    assert_eq!(absolute.x, 8);
+    assert_eq!(absolute.y, 6);
+    assert_eq!(absolute.rotation_degrees, 30);
+    assert!(absolute.flip_x);
+    assert!(!absolute.flip_y);
+}
+
+#[test]
+fn ui_scene_move_node_reparents_and_rejects_cycles() {
+    let mut scene = UiScene::default_hud();
+    let a = scene.add_node(
+        scene.root,
+        "A",
+        UiNodeKind::Group {
+            rect: UiRect::new(4, 5, 16, 16),
+        },
+    );
+    let b = scene.add_node(
+        scene.root,
+        "B",
+        UiNodeKind::Group {
+            rect: UiRect::new(20, 30, 16, 16),
+        },
+    );
+    let label = scene.add_node(
+        a,
+        "Label",
+        UiNodeKind::Label {
+            rect: UiRect::new(2, 3, 8, 8),
+            text: "x".to_string(),
+            random_message: false,
+            messages: Vec::new(),
+            tag: String::new(),
+            align: UiTextAlign::Left,
+            wrap: false,
+            font: UiFontChoice::Basic,
+            font_scale: default_ui_font_scale(),
+            letter_spacing: default_ui_letter_spacing(),
+            color: [255, 255, 255],
+            gradient: None,
+            focus_with_next_control: false,
+            effect: UiImageEffect::None,
+        },
+    );
+
+    assert!(scene.move_node(label, b, 0));
+    assert_eq!(scene.node(label).unwrap().parent, Some(b));
+    assert_eq!(scene.absolute_rect(label), Some(UiRect::new(22, 33, 8, 8)));
+    assert!(!scene.move_node(b, label, 0));
+    assert!(!scene.move_node(scene.root, b, 0));
+}
+
+#[test]
+fn ui_scene_paste_subtree_remaps_ids_and_preserves_children() {
+    let mut source = UiScene::empty_canvas("Source", UiSceneId::FIRST);
+    let group = source.add_node(
+        source.root,
+        "Panel",
+        UiNodeKind::Group {
+            rect: UiRect::new(10, 12, 80, 40),
+        },
+    );
+    let child = source.add_node(
+        group,
+        "Child",
+        UiNodeKind::Group {
+            rect: UiRect::new(3, 4, 16, 8),
+        },
+    );
+    let subtree = source.subtree_nodes(group).unwrap();
+
+    let mut target = UiScene::empty_canvas("Target", UiSceneId(2));
+    let parent = target.add_node(
+        target.root,
+        "Destination",
+        UiNodeKind::Group {
+            rect: UiRect::new(20, 30, 100, 50),
+        },
+    );
+    let pasted = target.paste_subtree(parent, &subtree, group).unwrap();
+
+    assert_ne!(pasted, group);
+    let pasted_node = target.node(pasted).unwrap();
+    assert_eq!(pasted_node.name, "Panel");
+    assert_eq!(pasted_node.parent, Some(parent));
+    assert_eq!(pasted_node.children.len(), 1);
+
+    let pasted_child = pasted_node.children[0];
+    assert_ne!(pasted_child, child);
+    assert_eq!(target.node(pasted_child).unwrap().name, "Child");
+    assert_eq!(target.node(pasted_child).unwrap().parent, Some(pasted));
+    assert_eq!(
+        target.absolute_rect(pasted_child),
+        Some(UiRect::new(33, 46, 16, 8))
+    );
+}
+
+#[test]
+fn editor_camera_roundtrips_through_ron_string() {
+    let mut project = ProjectDocument::new("camera");
+    project.editor_camera = EditorCameraState {
+        mode: EditorCameraMode::Free,
+        orbit_yaw_q12: 384,
+        orbit_pitch_q12: 4096 - 128,
+        orbit_radius: 8192,
+        orbit_target: [1024, 512, -2048],
+        free_yaw_q12: 1536,
+        free_pitch_q12: 128,
+        free_position: [-300, 700, 900],
+        free_initialized: true,
+        zoom_speed: 1.6,
+    };
+    let ron = project.to_ron_string().unwrap();
+
+    assert!(ron.contains("editor_camera"));
+    assert_eq!(ProjectDocument::from_ron_str(&ron).unwrap(), project);
+}
+
+#[test]
+fn editor_visibility_roundtrips_through_ron_string() {
+    let mut project = ProjectDocument::new("visibility");
+    project.editor_visibility = EditorVisibilityState {
+        show_grid: false,
+        show_brush_surface_grid: false,
+        show_lights: false,
+        preview_bounds: false,
+        show_play_debug_overlays: false,
+    };
+    let ron = project.to_ron_string().unwrap();
+
+    assert!(ron.contains("editor_visibility"));
+    assert_eq!(ProjectDocument::from_ron_str(&ron).unwrap(), project);
+}
+
+#[test]
+fn editor_workspace_roundtrips_through_ron_string() {
+    let mut project = ProjectDocument::new("workspace");
+    project.editor_workspace = EditorWorkspaceState {
+        active: EditorWorkspaceView::Material,
+    };
+    let ron = project.to_ron_string().unwrap();
+
+    assert!(ron.contains("editor_workspace"));
+    assert_eq!(ProjectDocument::from_ron_str(&ron).unwrap(), project);
+}
+
+#[test]
+fn editor_viewport_roundtrips_and_defaults_for_legacy_projects() {
+    let mut project = ProjectDocument::new("viewport");
+    project.editor_viewport = EditorViewportState {
+        view_2d: true,
+        orthographic_view: EditorOrthographicView::Top,
+        orthographic_focus: [128.0, 256.0, -64.0],
+        viewport_zoom: 48.0,
+        snap_units: 32,
+    };
+    let ron = project.to_ron_string().unwrap();
+    assert!(ron.contains("editor_viewport"));
+    assert_eq!(ProjectDocument::from_ron_str(&ron).unwrap(), project);
+
+    // A project saved before the field existed loads with defaults: the
+    // struct fills every field from serde defaults (empty record), and
+    // the ProjectDocument field itself is #[serde(default)].
+    let legacy: EditorViewportState = ron::from_str("()").unwrap();
+    assert_eq!(legacy, EditorViewportState::default());
+
+    // The removed Front and Side views read back as the plan view.
+    let front: EditorViewportState = ron::from_str("(orthographic_view: Front)").unwrap();
+    let side: EditorViewportState = ron::from_str("(orthographic_view: Side)").unwrap();
+    assert_eq!(front.orthographic_view, EditorOrthographicView::Top);
+    assert_eq!(side.orthographic_view, EditorOrthographicView::Top);
+}
+
+#[test]
+fn material_lab_recipe_roundtrips_through_ron_string() {
+    let mut project = ProjectDocument::new("material-lab");
+    let mut material = MaterialResource::translucent(None, PsxBlendMode::Average);
+    material.texture_mode = MaterialTextureMode::Generated;
+    material.generated = GeneratedMaterialTexture {
+        size: 32,
+        base_color: [16, 32, 48],
+        noise_color: [200, 210, 220],
+        noise_uv: GeneratedTextureUv {
+            scale_u_q8: 384,
+            scale_v_q8: 192,
+            offset_u: -3,
+            offset_v: 9,
+            rotation_quarters: 3,
+        },
+        ..GeneratedMaterialTexture::default()
+    };
+    project.add_resource("Generated Glass", ResourceData::Material(material));
+
+    let ron = project.to_ron_string().unwrap();
+    assert!(ron.contains("texture_mode: Generated"));
+    assert_eq!(ProjectDocument::from_ron_str(&ron).unwrap(), project);
+}
+
+#[test]
+fn transition_material_recipe_roundtrips_through_ron_string() {
+    let mut project = ProjectDocument::new("transition-material");
+    let source_a = project.add_resource(
+        "Sand",
+        ResourceData::Material(MaterialResource::opaque(Some("sand.psxt".to_string()))),
+    );
+    let source_b = project.add_resource(
+        "Stone",
+        ResourceData::Material(MaterialResource::opaque(Some("stone.psxt".to_string()))),
+    );
+    let mut material = MaterialResource::opaque(None);
+    material.texture_mode = MaterialTextureMode::Transition;
+    material.transition = TransitionMaterialTexture {
+        source_a: Some(source_a),
+        source_b: Some(source_b),
+        size: 128,
+        coverage: 191,
+        shape: TransitionMaskShape::Corner,
+        rotation_quarters: 3,
+        flip_x: true,
+        flip_y: false,
+        edge_breakup: 37,
+        seed: 0x5eed_cafe,
+        connected_edges: 0b1010,
+    };
+    project.add_resource("Sand over stone", ResourceData::Material(material));
+
+    let ron = project.to_ron_string().unwrap();
+    assert!(ron.contains("texture_mode: Transition"));
+    assert!(ron.contains("shape: Corner"));
+    assert!(ron.contains("connected_edges: 10"));
+    assert_eq!(ProjectDocument::from_ron_str(&ron).unwrap(), project);
+}
+
+#[test]
+fn removed_runtime_render_knobs_in_old_files_are_ignored() {
+    // Projects saved before the legacy grid removal carry four `runtime_*`
+    // render keys that no longer exist. They must still load, and saving
+    // drops them.
+    let current = ProjectDocument::new("old-file").to_ron_string().unwrap();
+    let old_keys = "    runtime_depth_sort_mode: HybridWalls,\n    \
+                    runtime_texture_split_mode: All,\n    \
+                    runtime_room_draw_order_mode: Distance,\n    \
+                    runtime_texture_split_max_edge: 0,\n";
+    let at = current.find("    scenes:").expect("scenes field");
+    let mut old = current.clone();
+    old.insert_str(at, old_keys);
+
+    let loaded = ProjectDocument::from_ron_str(&old).unwrap();
+    assert_eq!(loaded.name, "old-file");
+    let resaved = loaded.to_ron_string().unwrap();
+    assert!(!resaved.contains("runtime_depth_sort_mode"));
+    assert!(!resaved.contains("runtime_texture_split_max_edge"));
+}
+
+#[test]
+fn animation_library_resources_roundtrip_and_resolve_by_path() {
+    let mut project = ProjectDocument::new("Animation Test");
+    let skeleton = project.add_resource(
+        "Humanoid Skeleton",
+        ResourceData::Skeleton(SkeletonResource {
+            joint_count: 2,
+            parents: vec![None, Some(0)],
+            signature: "psx-parent-v1:2:root,0".to_string(),
+            note: "test skeleton".to_string(),
+            joint_names: Vec::new(),
+        }),
+    );
+    let idle_animation = project.add_resource(
+        "Idle",
+        ResourceData::AnimationClip(AnimationClipResource {
+            preserve_samples: false,
+            psxanim_path: "assets/animations/idle.psxanim".to_string(),
+            skeleton: Some(skeleton),
+            target_model: None,
+            source: None,
+            bake: AnimationClipBakeKind::LegacyShared,
+            role: AnimationRole::Idle,
+            looping: true,
+            tags: vec!["idle".to_string()],
+            calibration: Default::default(),
+            pose_corrections: Vec::new(),
+        }),
+    );
+    let set = project.add_resource(
+        "Humanoid Set",
+        ResourceData::AnimationSet(AnimationSetResource {
+            skeleton: Some(skeleton),
+            idle_clip: Some(idle_animation),
+            walk_clip: None,
+            run_clip: None,
+            turn_clip: None,
+            roll_clip: None,
+            backstep_clip: None,
+            action_clips: Vec::new(),
+            weapon_appearance_tracks: Vec::new(),
+            action_chains: Vec::new(),
+            combat_windows: Vec::new(),
+            clips: Vec::new(),
+        }),
+    );
+    let model = project.add_resource(
+        "Humanoid Model",
+        ResourceData::Model(ModelResource {
+            model_path: "assets/models/humanoid.psxmdl".to_string(),
+            source_path: None,
+            texture_path: Some("assets/models/humanoid.psxt".to_string()),
+            skeleton: Some(skeleton),
+            world_height: 1024,
+            collision_radius: default_model_collision_radius_for_height(1024),
+            scale_q8: [MODEL_SCALE_ONE_Q8; 3],
+            default_visual_yaw_q12: 0,
+            attachments: Vec::new(),
+        }),
+    );
+    project.add_resource(
+        "Character",
+        ResourceData::Character(CharacterResource {
+            model: Some(model),
+            animation_set: Some(set),
+            ..CharacterResource::defaults()
+        }),
+    );
+
+    let restored = ProjectDocument::from_ron_str(&project.to_ron_string().unwrap()).unwrap();
+    assert_eq!(restored, project);
+    assert_eq!(
+        restored.resolved_model_animation_index(model, idle_animation),
+        Some(0),
+        "standalone clips matching legacy model-local paths resolve to the stable legacy index",
+    );
+}
+
+#[test]
+fn model_targeted_animation_clips_do_not_leak_across_shared_skeletons() {
+    let mut project = ProjectDocument::new("Targeted Animation Test");
+    let skeleton = project.add_resource(
+        "Humanoid Skeleton",
+        ResourceData::Skeleton(SkeletonResource {
+            joint_count: 1,
+            parents: vec![None],
+            signature: "psx-parent-v1:1:root".to_string(),
+            note: String::new(),
+            joint_names: Vec::new(),
+        }),
+    );
+    let make_model = |path: &str| ModelResource {
+        model_path: path.to_string(),
+        source_path: None,
+        texture_path: None,
+        skeleton: Some(skeleton),
+        world_height: 1024,
+        collision_radius: default_model_collision_radius_for_height(1024),
+        scale_q8: [MODEL_SCALE_ONE_Q8; 3],
+        default_visual_yaw_q12: 0,
+        attachments: Vec::new(),
+    };
+    let model_a = project.add_resource(
+        "Model A",
+        ResourceData::Model(make_model("assets/models/a.psxmdl")),
+    );
+    let model_b = project.add_resource(
+        "Model B",
+        ResourceData::Model(make_model("assets/models/b.psxmdl")),
+    );
+    let make_clip = |path: &str, target_model| AnimationClipResource {
+        preserve_samples: false,
+        psxanim_path: path.to_string(),
+        skeleton: Some(skeleton),
+        target_model,
+        source: None,
+        bake: if target_model.is_some() {
+            AnimationClipBakeKind::Retargeted
+        } else {
+            AnimationClipBakeKind::LegacyShared
+        },
+        role: AnimationRole::Idle,
+        looping: true,
+        tags: Vec::new(),
+        calibration: Default::default(),
+        pose_corrections: Vec::new(),
+    };
+    let shared = project.add_resource(
+        "Shared",
+        ResourceData::AnimationClip(make_clip("assets/animations/shared.psxanim", None)),
+    );
+    let clip_a = project.add_resource(
+        "A Idle",
+        ResourceData::AnimationClip(make_clip("assets/animations/a_idle.psxanim", Some(model_a))),
+    );
+    let clip_b = project.add_resource(
+        "B Idle",
+        ResourceData::AnimationClip(make_clip("assets/animations/b_idle.psxanim", Some(model_b))),
+    );
+
+    let resolved_a = project.resolved_model_animation_clips(model_a);
+    assert_eq!(
+        resolved_a
+            .iter()
+            .filter_map(|clip| clip.animation_resource)
+            .collect::<Vec<_>>(),
+        vec![clip_a, shared],
+    );
+    assert_eq!(
+        project.resolved_model_animation_index(model_a, clip_b),
+        None
+    );
+
+    let resolved_b = project.resolved_model_animation_clips(model_b);
+    assert_eq!(
+        resolved_b
+            .iter()
+            .filter_map(|clip| clip.animation_resource)
+            .collect::<Vec<_>>(),
+        vec![clip_b, shared],
+    );
+    assert_eq!(
+        project.resolved_model_animation_index(model_b, clip_a),
+        None
+    );
+
+    let restored = ProjectDocument::from_ron_str(&project.to_ron_string().unwrap()).unwrap();
+    assert_eq!(restored, project);
+
+    let mut deleted = restored;
+    deleted.delete_resource(model_a).unwrap();
+    let ResourceData::AnimationClip(orphaned) = &deleted.resource(clip_a).unwrap().data else {
+        unreachable!();
+    };
+    assert_eq!(orphaned.target_model, None);
+    assert_eq!(orphaned.skeleton, None);
+    assert_eq!(
+        deleted
+            .resolved_model_animation_clips(model_b)
+            .iter()
+            .filter_map(|clip| clip.animation_resource)
+            .collect::<Vec<_>>(),
+        vec![clip_b, shared],
+    );
+}
+
+#[test]
+fn mesh_instance_with_animation_clip_roundtrips() {
+    let mut project = ProjectDocument::new("mesh animation roundtrip");
+    let scene = project.active_scene_mut();
+    let model_resource_id = ResourceId(99);
+    scene.add_node(
+        NodeId::ROOT,
+        "TestWraith",
+        NodeKind::MeshInstance {
+            mesh: Some(model_resource_id),
+            material: None,
+            animation_clip: Some(2),
+        },
+    );
+    let ron = project.to_ron_string().unwrap();
+    let restored = ProjectDocument::from_ron_str(&ron).unwrap();
+    assert_eq!(restored, project);
+    // Confirm the new field survives.
+    let surviving = restored
+        .active_scene()
+        .nodes()
+        .iter()
+        .find(|n| n.name == "TestWraith")
+        .unwrap();
+    assert!(matches!(
+        surviving.kind,
+        NodeKind::MeshInstance {
+            mesh: Some(_),
+            animation_clip: Some(2),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn legacy_mesh_instance_without_animation_clip_loads() {
+    // Synthesize the pre-extension MeshInstance shape -- `animation_clip`
+    // missing -- and confirm `#[serde(default)]` lands `None`.
+    let ron = r#"
+            (
+                name: "Legacy",
+                next_resource_id: 1,
+                resources: [],
+                scenes: [
+                    Scene(
+                        name: "Demo",
+                        next_node_id: 3,
+                        root: NodeId(1),
+                        nodes: [
+                            (
+                                id: NodeId(1),
+                                name: "Root",
+                                parent: None,
+                                children: [NodeId(2)],
+                                kind: Node3D,
+                                transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)),
+                            ),
+                            (
+                                id: NodeId(2),
+                                name: "OldMesh",
+                                parent: Some(NodeId(1)),
+                                children: [],
+                                kind: MeshInstance(mesh: None, material: None),
+                                transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)),
+                            ),
+                        ],
+                    ),
+                ],
+            )
+        "#;
+    let project = ProjectDocument::from_ron_str(ron).unwrap();
+    let mesh = project
+        .active_scene()
+        .nodes()
+        .iter()
+        .find(|n| n.name == "OldMesh")
+        .unwrap();
+    assert!(matches!(
+        mesh.kind,
+        NodeKind::MeshInstance {
+            mesh: None,
+            material: None,
+            animation_clip: None,
+        }
+    ));
+}
+
+#[test]
+fn project_saves_and_loads_from_disk() {
+    let mut project = ProjectDocument::starter();
+    project.name = "Disk Test".to_string();
+
+    let dir = std::env::temp_dir().join(format!(
+        "psxed-project-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let path = dir.join("project.ron");
+
+    project.save_to_path(&path).unwrap();
+    assert_eq!(ProjectDocument::load_from_path(&path).unwrap(), project);
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+pub(crate) fn unique_temp_dir(tag: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "psxed-project-{tag}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ))
+}
+
+#[test]
+fn resource_rename_moves_project_owned_texture_file() {
+    let root = unique_temp_dir("resource-rename-texture");
+    let texture_dir = root.join("assets").join("textures");
+    std::fs::create_dir_all(&texture_dir).unwrap();
+    std::fs::write(texture_dir.join("floor.psxt"), b"texture").unwrap();
+
+    let mut project = ProjectDocument::new("test");
+    let id = project.add_resource(
+        "Floor",
+        ResourceData::Material(MaterialResource::opaque(Some(
+            "assets/textures/floor.psxt".to_string(),
+        ))),
+    );
+
+    let report = project
+        .rename_resource_with_files(id, "Stone Floor", &root)
+        .unwrap();
+
+    assert_eq!(project.resource_name(id), Some("Stone Floor"));
+    let ResourceData::Material(material) = &project.resource(id).unwrap().data else {
+        panic!("expected material");
+    };
+    assert_eq!(
+        material.psxt_path.as_deref(),
+        Some("assets/textures/stone_floor.psxt")
+    );
+    assert!(!texture_dir.join("floor.psxt").exists());
+    assert_eq!(
+        std::fs::read(texture_dir.join("stone_floor.psxt")).unwrap(),
+        b"texture"
+    );
+    assert_eq!(report.renamed_files.len(), 1);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn deleting_versioned_material_removes_each_unshared_texture() {
+    let root = unique_temp_dir("delete-versioned-material-files");
+    let texture_dir = root.join("assets").join("textures");
+    std::fs::create_dir_all(&texture_dir).unwrap();
+    std::fs::write(texture_dir.join("original.psxt"), b"original").unwrap();
+    std::fs::write(texture_dir.join("llm.psxt"), b"llm").unwrap();
+
+    let mut project = ProjectDocument::new("version files");
+    let mut material = MaterialResource::opaque(Some("assets/textures/original.psxt".to_string()));
+    material.create_version("LLM");
+    material.psxt_path = Some("assets/textures/llm.psxt".to_string());
+    let id = project.add_resource("Stone", ResourceData::Material(material));
+
+    let report = project
+        .delete_resource_with_files(id, &root)
+        .expect("versioned material deletes");
+    let mut deleted = report
+        .deleted_files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect::<Vec<_>>();
+    deleted.sort_unstable();
+    assert_eq!(
+        deleted,
+        vec!["assets/textures/llm.psxt", "assets/textures/original.psxt"]
+    );
+    assert!(!texture_dir.join("original.psxt").exists());
+    assert!(!texture_dir.join("llm.psxt").exists());
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn renaming_material_keeps_texture_shared_with_saved_version() {
+    let root = unique_temp_dir("rename-version-shared-texture");
+    let texture_dir = root.join("assets").join("textures");
+    std::fs::create_dir_all(&texture_dir).unwrap();
+    std::fs::write(texture_dir.join("stone.psxt"), b"stone").unwrap();
+
+    let mut project = ProjectDocument::new("version sharing");
+    let mut material = MaterialResource::opaque(Some("assets/textures/stone.psxt".to_string()));
+    material.create_version("LLM");
+    let id = project.add_resource("Stone", ResourceData::Material(material));
+
+    let report = project
+        .rename_resource_with_files(id, "Cathedral Stone", &root)
+        .unwrap();
+    assert!(report.renamed_files.is_empty());
+    assert!(texture_dir.join("stone.psxt").exists());
+    assert!(!texture_dir.join("cathedral_stone.psxt").exists());
+    let ResourceData::Material(material) = &project.resource(id).unwrap().data else {
+        panic!("stone remains a material");
+    };
+    assert!(material
+        .version_texture_paths()
+        .iter()
+        .all(|path| *path == "assets/textures/stone.psxt"));
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn resource_rename_moves_imported_model_bundle_files() {
+    let root = unique_temp_dir("resource-rename-model");
+    let bundle_dir = root.join("assets").join("models").join("obsidian_wraith");
+    std::fs::create_dir_all(&bundle_dir).unwrap();
+    std::fs::write(bundle_dir.join("obsidian_wraith.psxmdl"), b"model").unwrap();
+    std::fs::write(bundle_dir.join("obsidian_wraith.psxt"), b"atlas").unwrap();
+
+    let mut project = ProjectDocument::new("test");
+    let id = project.add_resource(
+        "Obsidian Wraith",
+        ResourceData::Model(ModelResource {
+            model_path: "assets/models/obsidian_wraith/obsidian_wraith.psxmdl".to_string(),
+            source_path: None,
+            texture_path: Some("assets/models/obsidian_wraith/obsidian_wraith.psxt".to_string()),
+            skeleton: None,
+            world_height: 1024,
+            collision_radius: default_model_collision_radius_for_height(1024),
+            scale_q8: [MODEL_SCALE_ONE_Q8; 3],
+            default_visual_yaw_q12: 0,
+            attachments: Vec::new(),
+        }),
+    );
+
+    let report = project
+        .rename_resource_with_files(id, "Hooded Wretch", &root)
+        .unwrap();
+
+    let ResourceData::Model(model) = &project.resource(id).unwrap().data else {
+        panic!("expected model");
+    };
+    assert_eq!(
+        model.model_path,
+        "assets/models/hooded_wretch/hooded_wretch.psxmdl"
+    );
+    assert_eq!(
+        model.texture_path.as_deref(),
+        Some("assets/models/hooded_wretch/hooded_wretch.psxt")
+    );
+    assert_eq!(report.renamed_files.len(), 2);
+    assert!(!bundle_dir.exists());
+    assert!(root
+        .join("assets/models/hooded_wretch/hooded_wretch.psxmdl")
+        .exists());
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn resource_rename_refuses_existing_target_without_mutating_project() {
+    let root = unique_temp_dir("resource-rename-target-exists");
+    let texture_dir = root.join("assets").join("textures");
+    std::fs::create_dir_all(&texture_dir).unwrap();
+    std::fs::write(texture_dir.join("floor.psxt"), b"old").unwrap();
+    std::fs::write(texture_dir.join("stone_floor.psxt"), b"target").unwrap();
+
+    let mut project = ProjectDocument::new("test");
+    let id = project.add_resource(
+        "Floor",
+        ResourceData::Material(MaterialResource::opaque(Some(
+            "assets/textures/floor.psxt".to_string(),
+        ))),
+    );
+
+    let error = project
+        .rename_resource_with_files(id, "Stone Floor", &root)
+        .unwrap_err();
+
+    assert!(matches!(error, ResourceRenameError::TargetExists(_)));
+    assert_eq!(project.resource_name(id), Some("Floor"));
+    let ResourceData::Material(material) = &project.resource(id).unwrap().data else {
+        panic!("expected material");
+    };
+    assert_eq!(
+        material.psxt_path.as_deref(),
+        Some("assets/textures/floor.psxt")
+    );
+    assert_eq!(
+        std::fs::read(texture_dir.join("floor.psxt")).unwrap(),
+        b"old"
+    );
+    assert_eq!(
+        std::fs::read(texture_dir.join("stone_floor.psxt")).unwrap(),
+        b"target"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn delete_resource_removes_entry_and_clears_references() {
+    let root = unique_temp_dir("resource-delete");
+    let texture_dir = root.join("assets").join("textures");
+    std::fs::create_dir_all(&texture_dir).unwrap();
+    std::fs::write(texture_dir.join("target.psxt"), b"texture").unwrap();
+
+    let mut project = ProjectDocument::new("delete-resource");
+    let target = project.add_resource(
+        "Target",
+        ResourceData::Material(MaterialResource::opaque(Some(
+            "assets/textures/target.psxt".to_string(),
+        ))),
+    );
+    let character = project.add_resource(
+        "Character",
+        ResourceData::Character(CharacterResource {
+            model: Some(target),
+            default_equipment: vec![CharacterEquipmentBinding {
+                weapon: Some(target),
+                character_socket: "left_hand_grip".to_string(),
+                weapon_grip: "grip".to_string(),
+            }],
+            ..CharacterResource::defaults()
+        }),
+    );
+    let weapon = project.add_resource(
+        "Weapon",
+        ResourceData::Weapon(WeaponResource {
+            model: Some(target),
+            ..WeaponResource::default()
+        }),
+    );
+
+    let scene = project.active_scene_mut();
+    let room = scene.add_node(scene.root, "Room", NodeKind::Node3D);
+    scene.add_node(
+        room,
+        "Mesh",
+        NodeKind::MeshInstance {
+            mesh: Some(target),
+            material: Some(target),
+            animation_clip: None,
+        },
+    );
+    let entity = scene.add_node(room, "Entity", NodeKind::Entity);
+    scene.add_node(
+        entity,
+        "Renderer",
+        NodeKind::ModelRenderer {
+            model: Some(target),
+            material: Some(target),
+            visual_offset: [0; 3],
+            visual_scale_q8: MODEL_SCALE_ONE_Q8,
+        },
+    );
+    scene.add_node(
+        entity,
+        "Controller",
+        NodeKind::CharacterController {
+            loadout: None,
+            character: Some(target),
+            settings: Some(CharacterControllerSettings::default()),
+            player: true,
+        },
+    );
+    scene.add_node(
+        entity,
+        "Equipment",
+        NodeKind::Equipment {
+            weapon: Some(target),
+            character_socket: "right_hand_grip".to_string(),
+            weapon_grip: "grip".to_string(),
+        },
+    );
+    scene.add_node(
+        room,
+        "Spawn",
+        NodeKind::SpawnPoint {
+            player: false,
+            character: Some(target),
+        },
+    );
+    assert_eq!(project.resource_reference_count(target), 10);
+    let report = project
+        .delete_resource_with_files(target, &root)
+        .expect("resource exists");
+    assert_eq!(report.removed.name, "Target");
+    assert_eq!(report.cleared_references, 10);
+    assert_eq!(
+        report.deleted_files,
+        vec![ResourceFileDelete {
+            path: "assets/textures/target.psxt".to_string(),
+        }]
+    );
+    assert!(report.skipped_files.is_empty());
+    assert!(!texture_dir.join("target.psxt").exists());
+    assert!(project.resource(target).is_none());
+    let ResourceData::Character(character_data) = &project.resource(character).unwrap().data else {
+        panic!("expected character");
+    };
+    assert_eq!(character_data.model, None);
+    assert_eq!(character_data.default_equipment[0].weapon, None);
+    let ResourceData::Weapon(weapon_data) = &project.resource(weapon).unwrap().data else {
+        panic!("expected weapon");
+    };
+    assert_eq!(weapon_data.model, None);
+
+    for node in project.active_scene().nodes() {
+        match &node.kind {
+            NodeKind::MeshInstance { mesh, material, .. } => {
+                assert_eq!((*mesh, *material), (None, None));
+            }
+            NodeKind::ModelRenderer {
+                model, material, ..
+            } => {
+                assert_eq!((*model, *material), (None, None));
+            }
+            NodeKind::CharacterController { character, .. }
+            | NodeKind::SpawnPoint { character, .. } => {
+                assert_eq!(*character, None);
+            }
+            NodeKind::Equipment { weapon, .. } => {
+                assert_eq!(*weapon, None);
+            }
+            _ => {}
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn delete_material_source_clears_transition_recipes() {
+    let mut project = ProjectDocument::new("delete-transition-source");
+    let source = project.add_resource(
+        "Source",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    let transition = project.add_resource(
+        "Transition",
+        ResourceData::Material(MaterialResource {
+            texture_mode: MaterialTextureMode::Transition,
+            transition: TransitionMaterialTexture {
+                source_a: Some(source),
+                source_b: Some(source),
+                ..TransitionMaterialTexture::default()
+            },
+            secondary_layer: Some(ModelSecondaryLayer {
+                texture_mode: MaterialTextureMode::Transition,
+                transition: TransitionMaterialTexture {
+                    source_a: Some(source),
+                    source_b: Some(source),
+                    ..TransitionMaterialTexture::default()
+                },
+                ..ModelSecondaryLayer::default()
+            }),
+            ..MaterialResource::opaque(None)
+        }),
+    );
+
+    assert_eq!(project.resource_reference_count(source), 4);
+    let report = project.delete_resource(source).expect("source exists");
+    assert_eq!(report.cleared_references, 4);
+    let ResourceData::Material(material) = &project.resource(transition).unwrap().data else {
+        panic!("transition remains a material");
+    };
+    assert_eq!(material.transition.source_a, None);
+    assert_eq!(material.transition.source_b, None);
+    let layer = material
+        .secondary_layer
+        .as_ref()
+        .expect("layer is preserved");
+    assert_eq!(layer.transition.source_a, None);
+    assert_eq!(layer.transition.source_b, None);
+}
+
+#[test]
+fn delete_material_source_clears_cycle_recipe() {
+    let mut project = ProjectDocument::new("delete-cycle-source");
+    let source = project.add_resource(
+        "Source",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    let mut cycle = MaterialResource::opaque(None);
+    cycle.animation.mode = MaterialAnimationMode::Flipbook;
+    cycle.animation.flipbook.source_a = Some(source);
+    cycle.animation.flipbook.source_b = Some(source);
+    let cycle = project.add_resource("Cycle", ResourceData::Material(cycle));
+
+    assert_eq!(project.resource_reference_count(source), 2);
+    let report = project.delete_resource(source).expect("source exists");
+    assert_eq!(report.cleared_references, 2);
+    let ResourceData::Material(material) = &project.resource(cycle).unwrap().data else {
+        panic!("cycle remains a material");
+    };
+    assert_eq!(material.animation.flipbook.source_a, None);
+    assert_eq!(material.animation.flipbook.source_b, None);
+}
+
+#[test]
+fn delete_material_source_clears_inactive_version_recipes() {
+    let mut project = ProjectDocument::new("delete-versioned-transition-source");
+    let source = project.add_resource(
+        "Source",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    let mut transition = MaterialResource::opaque(None);
+    transition.texture_mode = MaterialTextureMode::Transition;
+    transition.transition.source_a = Some(source);
+    transition.transition.source_b = Some(source);
+    transition.create_version("LLM Alternative");
+    transition.texture_mode = MaterialTextureMode::Generated;
+    transition.transition.source_a = None;
+    transition.transition.source_b = None;
+    let transition_id = project.add_resource("Transition", ResourceData::Material(transition));
+
+    assert_eq!(project.resource_reference_count(source), 2);
+    let report = project.delete_resource(source).expect("source exists");
+    assert_eq!(report.cleared_references, 2);
+    let ResourceData::Material(material) = &mut project.resource_mut(transition_id).unwrap().data
+    else {
+        panic!("transition remains a material");
+    };
+    assert!(material.activate_version(MaterialVersionId::ORIGINAL));
+    assert_eq!(material.transition.source_a, None);
+    assert_eq!(material.transition.source_b, None);
+}
+
+#[test]
+fn uv_transform_rotates_quad_without_rebaking_texture() {
+    let transform = UvTransform {
+        offset: [0, 0],
+        span: [0, 0],
+        rotation: UvRotation::Deg90,
+        flip_u: false,
+        flip_v: false,
+    };
+
+    assert_eq!(
+        transform.apply_to_quad([(0, 0), (64, 0), (64, 64), (0, 64)]),
+        [(64, 0), (64, 64), (0, 64), (0, 0)]
+    );
+}
+
+#[test]
+fn uv_transform_rotates_quad_45_degrees_without_rebaking_texture() {
+    let transform = UvTransform {
+        offset: [0, 0],
+        span: [0, 0],
+        rotation: UvRotation::Deg45,
+        flip_u: false,
+        flip_v: false,
+    };
+
+    assert_eq!(
+        transform.apply_to_quad([(0, 0), (64, 0), (64, 64), (0, 64)]),
+        [(32, 0), (64, 32), (32, 64), (0, 32)]
+    );
+}
+
+#[test]
+fn uv_transform_rotates_quad_315_degrees_without_rebaking_texture() {
+    let transform = UvTransform {
+        offset: [0, 0],
+        span: [0, 0],
+        rotation: UvRotation::Deg315,
+        flip_u: false,
+        flip_v: false,
+    };
+
+    assert_eq!(
+        transform.apply_to_quad([(0, 0), (64, 0), (64, 64), (0, 64)]),
+        [(0, 32), (32, 0), (64, 32), (32, 64)]
+    );
+}
+
+#[test]
+fn uv_transform_flips_and_wraps_ps1_uv_offsets() {
+    let transform = UvTransform {
+        offset: [-8, 12],
+        span: [0, 0],
+        rotation: UvRotation::Deg0,
+        flip_u: true,
+        flip_v: false,
+    };
+
+    assert_eq!(
+        transform.apply_to_quad([(0, 0), (64, 0), (64, 64), (0, 64)]),
+        [(56, 12), (248, 12), (248, 76), (56, 76)]
+    );
+}
+
+#[test]
+fn uv_transform_scales_quad_span_without_rebaking_texture() {
+    let transform = UvTransform {
+        offset: [0, 0],
+        span: [0, 32],
+        rotation: UvRotation::Deg0,
+        flip_u: false,
+        flip_v: false,
+    };
+
+    assert_eq!(
+        transform.apply_to_quad([(0, 64), (64, 64), (64, 0), (0, 0)]),
+        [(0, 32), (64, 32), (64, 0), (0, 0)]
+    );
+}
+
+#[test]
+fn legacy_texture_resources_migrate_into_materials_on_load() {
+    // Pre-merge project shape: Texture resources + materials that
+    // reference them by id, plus direct texture references from a UI
+    // image and a particle emitter. Loading must
+    // fold wrapped textures into their materials, keep direct
+    // references valid by converting those textures into materials in
+    // place (same id), and drop the orphaned leftovers.
+    let mut project = ProjectDocument::new("legacy-textures");
+    let wrapped = project.add_resource(
+        "WALL_1A",
+        ResourceData::Texture {
+            psxt_path: "assets/textures/wall_1a.psxt".to_string(),
+        },
+    );
+    let material = project.add_resource(
+        "WALL_1A Material",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    let direct = project.add_resource(
+        "EMITTER_MASK",
+        ResourceData::Texture {
+            psxt_path: "assets/textures/emitter.psxt".to_string(),
+        },
+    );
+    let orphan = project.add_resource(
+        "UNUSED",
+        ResourceData::Texture {
+            psxt_path: "assets/textures/unused.psxt".to_string(),
+        },
+    );
+    let world_id = project.active_scene().root;
+    let emitter = ParticleEmitterSettings {
+        texture: Some(direct),
+        ..ParticleEmitterSettings::default()
+    };
+    project.active_scene_mut().add_node(
+        world_id,
+        "Emitter",
+        NodeKind::ParticleEmitter { settings: emitter },
+    );
+
+    // New saves never write the legacy `texture:` field, so inject it
+    // textually the way a pre-merge project file carried it.
+    let ron = project.to_ron_string().expect("serializes");
+    assert_eq!(ron.matches("Material((").count(), 1);
+    let ron = ron.replace(
+        "Material((",
+        &format!("Material((texture: Some(({})),", wrapped.raw()),
+    );
+    let loaded = ProjectDocument::from_ron_str(&ron).expect("loads");
+
+    assert!(
+        !loaded
+            .resources
+            .iter()
+            .any(|r| matches!(&r.data, ResourceData::Texture { .. })),
+        "no Texture resources survive migration"
+    );
+    let ResourceData::Material(folded) = &loaded.resource(material).expect("material kept").data
+    else {
+        panic!("material kept its kind");
+    };
+    assert_eq!(
+        folded.psxt_path.as_deref(),
+        Some("assets/textures/wall_1a.psxt")
+    );
+    assert_eq!(folded.legacy_texture, None);
+    let ResourceData::Material(converted) = &loaded.resource(direct).expect("direct ref kept").data
+    else {
+        panic!("directly referenced texture converts in place");
+    };
+    assert_eq!(
+        converted.psxt_path.as_deref(),
+        Some("assets/textures/emitter.psxt")
+    );
+    assert!(loaded.resource(orphan).is_none(), "orphan dropped");
+    let emitter_ref = loaded
+        .active_scene()
+        .nodes()
+        .iter()
+        .find_map(|node| match &node.kind {
+            NodeKind::ParticleEmitter { settings } => settings.texture,
+            _ => None,
+        });
+    assert_eq!(emitter_ref, Some(direct), "direct reference id unchanged");
+
+    // Round-trip stability: a migrated project reloads unchanged.
+    let ron2 = loaded.to_ron_string().expect("reserializes");
+    let reloaded = ProjectDocument::from_ron_str(&ron2).expect("reloads");
+    assert_eq!(loaded.resources, reloaded.resources);
+}
+
+// --- Legacy grid worlds are refused, never dropped ---------------------
+
+/// A serialized project with one extra top-level child whose kind text is
+/// replaced by `legacy_kind`, standing in for a pre-removal grid-world node.
+fn project_ron_with_legacy_nodes(legacy_kinds: &[&str]) -> String {
+    let mut project = ProjectDocument::new("legacy grid");
+    let scene = project.active_scene_mut();
+    let root = scene.root;
+    for index in 0..legacy_kinds.len() {
+        scene.add_node(root, format!("Legacy {index}"), NodeKind::Node3D);
+    }
+    let mut ron = project.to_ron_string().expect("project serializes");
+    for legacy_kind in legacy_kinds {
+        assert!(ron.contains("kind: Node3D"), "scaffold node serialized");
+        ron = ron.replacen("kind: Node3D", &format!("kind: {legacy_kind}"), 1);
+    }
+    ron
+}
+
+#[test]
+fn legacy_grid_world_nodes_fail_the_load_with_a_clear_error() {
+    for variant in ["Section", "Room", "Map", "WaterVolume", "Portal"] {
+        let ron = project_ron_with_legacy_nodes(&[&format!("{variant}(grid: ())")]);
+        assert!(ron.contains(&format!("kind: {variant}(")), "{variant}");
+        match ProjectDocument::from_ron_str(&ron) {
+            Err(ProjectIoError::LegacyGridWorld { nodes }) => {
+                assert_eq!(nodes, 1, "{variant}");
+            }
+            other => panic!("{variant}: expected LegacyGridWorld, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn legacy_grid_world_error_counts_every_node_and_names_the_kinds() {
+    let ron = project_ron_with_legacy_nodes(&[
+        "Section(grid: ())",
+        "WaterVolume(cells: [])",
+        "Portal(destination: 0)",
+    ]);
+    let error = ProjectDocument::from_ron_str(&ron).expect_err("legacy nodes refuse to load");
+    assert!(
+        matches!(error, ProjectIoError::LegacyGridWorld { nodes: 3 }),
+        "{error:?}"
+    );
+    let text = error.to_string();
+    assert!(text.contains("3 legacy grid-world node(s)"), "{text}");
+    for kind in ["Section", "Room", "Map", "Water Volume", "Portal"] {
+        assert!(text.contains(kind), "{kind} missing from {text:?}");
+    }
+}
+
+#[test]
+fn a_file_with_legacy_nodes_is_left_untouched_by_a_failed_load() {
+    let dir = unique_temp_dir("legacy-grid-load");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("project.ron");
+    let ron = project_ron_with_legacy_nodes(&["Section(grid: ())"]);
+    std::fs::write(&path, &ron).unwrap();
+
+    let error = ProjectDocument::load_from_path(&path).expect_err("legacy project refuses");
+    assert!(matches!(
+        error,
+        ProjectIoError::LegacyGridWorld { nodes: 1 }
+    ));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), ron);
+
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Every `project.ron` shipped under `editor/projects` and
+/// `editor/archive/fixtures`.
+fn tracked_project_files() -> Vec<PathBuf> {
+    let editor = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut files = Vec::new();
+    for group in ["projects", "archive/fixtures"] {
+        let Ok(entries) = std::fs::read_dir(editor.join(group)) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let candidate = entry.path().join("project.ron");
+            if candidate.is_file() {
+                files.push(candidate);
+            }
+        }
+    }
+    files.sort();
+    files
+}
+
+#[test]
+fn every_tracked_project_loads_without_legacy_grid_nodes() {
+    let files = tracked_project_files();
+    assert!(
+        files.len() >= 8,
+        "expected the tracked projects and fixtures, found {files:?}"
+    );
+    for path in files {
+        let text = std::fs::read_to_string(&path).unwrap();
+        for variant in ["Section(", "Room(", "Map(", "WaterVolume(", "Portal("] {
+            assert!(
+                !text.contains(&format!("kind: {variant}")),
+                "{} still holds a legacy {variant} node",
+                path.display()
+            );
+        }
+        ProjectDocument::load_from_path(&path)
+            .unwrap_or_else(|error| panic!("{} fails to load: {error}", path.display()));
+    }
+}
+
+#[test]
+fn removed_world_tuning_keys_in_old_files_are_ignored() {
+    let ron = ProjectDocument::new("inert keys")
+        .to_ron_string()
+        .expect("project serializes");
+    assert!(ron.contains("culling: ("), "scaffold culling block");
+    assert!(ron.contains("physics: ("), "scaffold physics block");
+    let ron = ron
+        .replacen(
+            "culling: (",
+            "culling: (chunk_activation_radius_sectors: 64, visibility_radius: 32, ",
+            1,
+        )
+        .replacen(
+            "physics: (",
+            "streaming: (resident_chunk_limit: 10, visible_chunk_limit: 10), physics: (",
+            1,
+        );
+    assert!(ron.contains("streaming: (resident_chunk_limit"));
+
+    let project = ProjectDocument::from_ron_str(&ron).expect("inert keys do not break the load");
+    let root = project.active_scene().root;
+    let NodeKind::World { culling, .. } = &project.active_scene().node(root).unwrap().kind else {
+        panic!("scene root is not a World");
+    };
+    assert_eq!(
+        culling.draw_distance,
+        WorldCullingSettings::default().draw_distance
+    );
+}
+
+/// A binding is only identified by its socket here; the weapon is what the
+/// assertions care about.
+fn loadout_binding(weapon: ResourceId) -> CharacterEquipmentBinding {
+    CharacterEquipmentBinding {
+        weapon: Some(weapon),
+        character_socket: "left_hand_grip".to_string(),
+        weapon_grip: "grip".to_string(),
+    }
+}
+
+#[test]
+fn a_placement_without_a_loadout_carries_the_character_default() {
+    let mut project = ProjectDocument::default();
+    let sword = project.add_resource("Sword", ResourceData::Weapon(Default::default()));
+    let mut character = CharacterResource::defaults();
+    character.default_equipment = vec![loadout_binding(sword)];
+
+    assert_eq!(character.equipment_for(None).len(), 1);
+    assert_eq!(character.equipment_for(None)[0].weapon, Some(sword));
+}
+
+#[test]
+fn a_placement_with_a_loadout_carries_that_loadout_instead_of_the_default() {
+    let mut project = ProjectDocument::default();
+    let default_sword = project.add_resource("Default", ResourceData::Weapon(Default::default()));
+    let heavy_sword = project.add_resource("Heavy", ResourceData::Weapon(Default::default()));
+    let mut character = CharacterResource::defaults();
+    character.default_equipment = vec![loadout_binding(default_sword)];
+    character.loadouts = vec![
+        CharacterLoadout {
+            name: "Unarmed".to_string(),
+            equipment: Vec::new(),
+        },
+        CharacterLoadout {
+            name: "Heavy Weapon".to_string(),
+            equipment: vec![loadout_binding(heavy_sword)],
+        },
+    ];
+
+    // An unarmed loadout is a real answer, not a missing one: it must not
+    // fall through to the default the way an absent selection does.
+    assert!(character.equipment_for(Some(0)).is_empty());
+    assert_eq!(
+        character.equipment_for(Some(1))[0].weapon,
+        Some(heavy_sword)
+    );
+}
+
+#[test]
+fn a_loadout_index_the_character_no_longer_has_falls_back_to_the_default() {
+    // Deleting or reordering loadouts must degrade a stale placement to the
+    // default rather than cooking as an error or an empty hand.
+    let mut project = ProjectDocument::default();
+    let sword = project.add_resource("Sword", ResourceData::Weapon(Default::default()));
+    let mut character = CharacterResource::defaults();
+    character.default_equipment = vec![loadout_binding(sword)];
+
+    assert_eq!(character.equipment_for(Some(7))[0].weapon, Some(sword));
+}
+
+#[test]
+fn a_weapon_reachable_only_through_a_loadout_is_still_a_reference() {
+    // Reference counting decides what a delete may remove and what the cook
+    // may prune, so a loadout-only weapon must not read as unreferenced.
+    let mut project = ProjectDocument::default();
+    let sword = project.add_resource("Sword", ResourceData::Weapon(Default::default()));
+    let mut character = CharacterResource::defaults();
+    character.loadouts = vec![CharacterLoadout {
+        name: "Armed".to_string(),
+        equipment: vec![loadout_binding(sword)],
+    }];
+    project.add_resource("Enemy", ResourceData::Character(character));
+
+    assert_eq!(project.resource_reference_count(sword), 1);
+
+    project.delete_resource(sword);
+    let remaining = project
+        .resources
+        .iter()
+        .find_map(|resource| match &resource.data {
+            ResourceData::Character(character) if resource.name == "Enemy" => Some(character),
+            _ => None,
+        })
+        .expect("character survives");
+    assert_eq!(remaining.loadouts[0].equipment[0].weapon, None);
+}
+
+// NOTE: the authored twin-ladder player HUD and the inventory's four vitality
+// poles were removed with v0.4b. The player's two swappable bars are now drawn
+// by the runtime in editor-playtest's overlay::draw_player_vitality_hud, which
+// owns the Triangle stance swap and is covered by that module's own tests. Only
+// the enemy/target bars stay authored as UI scene Bars.
+
+#[test]
+fn action_chains_default_empty_for_legacy_sets() {
+    let set: AnimationSetResource = ron::from_str("(clips: [])").unwrap();
+    assert!(set.action_chains.is_empty());
+    assert_eq!(CharacterAnimationAction::RangedAttack.to_index(), 33);
+    assert_eq!(CharacterAnimationAction::LightAttackFollowup.to_index(), 34);
+    assert_eq!(CharacterAnimationAction::LightAttackFinisher.to_index(), 35);
+}
+
+#[test]
+fn action_chains_cook_and_reject_missing_targets_bad_windows_and_duplicates() {
+    let root = default_project_dir();
+    let mut project = ProjectDocument::load_from_path(root.join("project.ron")).unwrap();
+    crate::grid::starter::attach_starter_world(&mut project);
+    let set_id = project
+        .resources
+        .iter()
+        .find(|r| r.name == "Aletha Delivered Animation Set")
+        .unwrap()
+        .id;
+    let (package, report) = playtest::build_package(&project, &root);
+    assert!(report.is_ok(), "{:?}", report.errors);
+    let package = package.unwrap();
+    let player = package
+        .characters
+        .iter()
+        .find(|c| c.source_resource == ResourceId(62))
+        .unwrap();
+    assert_eq!(player.action_chains[0].action, 6);
+    assert_eq!(player.action_chains[0].next_action, 34);
+    assert_eq!(player.action_chains[0].handoff_frame, 34);
+    assert_eq!(player.action_chains[0].input_start, 12);
+    assert_eq!(player.action_chains[0].input_end, 34);
+    assert_eq!(
+        player.action_chains[1],
+        psx_level::CharacterActionChain::NONE
+    );
+    for case in 0..4 {
+        let mut broken = project.clone();
+        let ResourceData::AnimationSet(set) = &mut broken.resource_mut(set_id).unwrap().data else {
+            panic!()
+        };
+        match case {
+            0 => set
+                .action_clips
+                .retain(|b| b.action != CharacterAnimationAction::LightAttackFollowup),
+            1 => set.action_chains[0].input_end = 61,
+            2 => set.action_chains.push(set.action_chains[0]),
+            _ => set.action_chains[0].next_action = CharacterAnimationAction::LightAttack,
+        }
+        let (_, report) = playtest::build_package(&broken, &root);
+        assert!(!report.is_ok(), "invalid chain case {case} was accepted");
+        assert!(
+            report.errors.iter().any(|e| e.contains("chain")),
+            "{:?}",
+            report.errors
+        );
+    }
+}
+
+#[test]
+fn camera_vertical_smoothing_preserves_legacy_settings_and_clamps_overrides() {
+    let legacy: WorldCameraSettings = ron::from_str("(position_lag_shift: 1, focus_lag_shift: 5)")
+        .expect("older camera settings load");
+    assert!(!legacy.accelerated_orbit);
+    assert!(!legacy.recenter_preserves_pitch);
+    assert!(!legacy.blend_profiles);
+    assert!(!legacy.lock_target_framing);
+    assert_eq!(legacy.fov_y_degrees, 0);
+    assert_eq!(legacy.lock_profile, None);
+    assert_eq!(legacy.position_vertical_lag_shift, None);
+    assert_eq!(legacy.focus_vertical_lag_shift, None);
+    assert_eq!((legacy.position_lag_shift, legacy.focus_lag_shift), (1, 5));
+    let split = WorldCameraSettings {
+        position_vertical_lag_shift: Some(255),
+        focus_vertical_lag_shift: Some(0),
+        ..legacy
+    }
+    .normalized();
+    assert_eq!(
+        split.position_vertical_lag_shift,
+        Some(MAX_WORLD_CAMERA_LAG_SHIFT)
+    );
+    assert_eq!(split.focus_vertical_lag_shift, Some(0));
+}
+
+#[test]
+fn camera_profiles_normalize_extremes_and_preserve_legacy_lens() {
+    let settings = WorldCameraSettings {
+        fov_y_degrees: 255,
+        lock_profile: Some(WorldCameraProfile {
+            distance: -1,
+            height: -9,
+            target_height: i32::MAX,
+            fov_y_degrees: 0,
+            shoulder_offset: 0,
+        }),
+        ..Default::default()
+    }
+    .normalized();
+    assert_eq!(settings.fov_y_degrees, 48);
+    let profile = settings.lock_profile.unwrap();
+    assert_eq!(profile.distance, MIN_WORLD_CAMERA_DISTANCE);
+    assert_eq!(profile.height, 0);
+    assert_eq!(profile.target_height, MAX_WORLD_CAMERA_HEIGHT);
+    assert_eq!(profile.fov_y_degrees, 38);
+    assert_eq!(WorldCameraSettings::default().normalized().fov_y_degrees, 0);
+}
+
+#[test]
+fn graybox_single_enemy_tactical_encounter_cooks_with_approved_walk() {
+    let root = projects_dir().join("graybox-reach");
+    let source = std::fs::read_to_string(root.join("project.ron")).unwrap();
+    let mut project = ProjectDocument::from_ron_str(&source).unwrap();
+    crate::grid::starter::attach_starter_world(&mut project);
+    let (package, report) = playtest::build_package(&project, &root);
+    assert!(report.is_ok(), "{:?}", report.errors);
+    let package = package.unwrap();
+    assert_eq!(package.game_entities.len(), 1);
+    let enemy = &package.game_entities[0];
+    assert_ne!(enemy.flags & psx_level::game_entity_flags::TACTICAL, 0);
+    assert_ne!(enemy.flags & psx_level::game_entity_flags::TRAINING, 0);
+    assert_ne!(enemy.walk_clip, enemy.run_clip);
+    assert_ne!(enemy.attack_clip, enemy.heavy_attack_clip);
+    assert_ne!(enemy.attack_clip, enemy.ranged_attack_clip);
+    let walk = project
+        .resources
+        .iter()
+        .find(|r| r.name == "Light Enemy / Walk")
+        .unwrap();
+    let ResourceData::AnimationClip(walk) = &walk.data else {
+        panic!("walk clip");
+    };
+    assert_eq!(
+        walk.psxanim_path,
+        "assets/animations/light_walk_v5/walk.psxanim"
+    );
+}
+
+#[test]
+fn graybox_ranged_weapon_cooks_without_a_melee_arc_but_melee_still_requires_one() {
+    let root = projects_dir().join("graybox-reach");
+    let source = std::fs::read_to_string(root.join("project.ron")).unwrap();
+    let mut project = ProjectDocument::from_ron_str(&source).unwrap();
+    crate::grid::starter::attach_starter_world(&mut project);
+    let (package, report) = playtest::build_package(&project, &root);
+    assert!(report.is_ok(), "{:?}", report.errors);
+    let package = package.unwrap();
+    let weapon = package
+        .weapons
+        .iter()
+        .find(|w| w.name == "Zenith Projector")
+        .unwrap();
+    assert_eq!(weapon.arc_reach, 0);
+    assert_eq!(weapon.hitbox_count, 0);
+    assert!(package.combat_capsules.iter().any(|c| c.action
+        == psx_level::CharacterAnimationAction::RangedAttack.to_index() as u8
+        && c.flags & psx_level::combat_capsule_flags::PROJECTILE_EMITTER != 0
+        && c.damage > 0
+        && c.poise_damage == 0));
+    let ResourceData::Weapon(weapon) = &mut project
+        .resources
+        .iter_mut()
+        .find(|r| r.name == "Zenith Projector")
+        .unwrap()
+        .data
+    else {
+        panic!("weapon resource")
+    };
+    assert_eq!(weapon.class, WeaponClass::Ranged);
+    weapon.class = WeaponClass::Melee;
+    let (_, report) = playtest::build_package(&project, &root);
+    assert!(
+        !report.is_ok(),
+        "A melee weapon with a zero arc must still be rejected"
+    );
+}
+
+#[test]
+fn combat_windows_default_empty_and_cook_validate_the_authored_contract() {
+    let legacy: AnimationSetResource = ron::from_str("(clips: [])").unwrap();
+    assert!(legacy.combat_windows.is_empty());
+    let root = default_project_dir()
+        .parent()
+        .unwrap()
+        .join("graybox-reach");
+    let mut project = ProjectDocument::load_from_path(root.join("project.ron")).unwrap();
+    crate::grid::starter::attach_starter_world(&mut project);
+    let id = project
+        .resources
+        .iter()
+        .find(|r| r.name == "Aletha Delivered Animation Set")
+        .unwrap()
+        .id;
+    let windows = vec![
+        AnimationCombatWindow {
+            action: CharacterAnimationAction::HitReact,
+            kind: CombatWindowKind::DodgeBuffer,
+            start: 24,
+            end: 81,
+        },
+        AnimationCombatWindow {
+            action: CharacterAnimationAction::HitReact,
+            kind: CombatWindowKind::Dodge,
+            start: 60,
+            end: 81,
+        },
+    ];
+    let ResourceData::AnimationSet(set) = &mut project.resource_mut(id).unwrap().data else {
+        panic!()
+    };
+    set.combat_windows = windows.clone();
+    let (package, report) = playtest::build_package(&project, &root);
+    assert!(report.is_ok(), "{:?}", report.errors);
+    let character = package
+        .unwrap()
+        .characters
+        .into_iter()
+        .find(|c| c.source_resource == ResourceId(62))
+        .unwrap();
+    assert_eq!(character.combat_windows[1].start, 60);
+    assert_eq!(character.combat_windows[1].end, 81);
+    assert_eq!(
+        character.combat_windows[1].kind,
+        psx_level::CombatWindowKind::Dodge
+    );
+    for case in 0..6 {
+        let mut broken = project.clone();
+        let ResourceData::AnimationSet(set) = &mut broken.resource_mut(id).unwrap().data else {
+            panic!()
+        };
+        match case {
+            0 => set.combat_windows.push(windows[0]),
+            1 => set.combat_windows[1].end = 900,
+            2 => set.combat_windows[1].start = 82,
+            3 => {
+                set.combat_windows.pop();
+            }
+            4 => set.combat_windows[1].action = CharacterAnimationAction::Death,
+            _ => {
+                set.combat_windows[1].start = 81;
+                set.combat_windows[1].end = 82;
+            }
+        }
+        let (_, report) = playtest::build_package(&broken, &root);
+        assert!(
+            report.errors.iter().any(|e| e.contains("combat")),
+            "case {case}: {:?}",
+            report.errors
+        );
+    }
+}
+
+#[test]
+fn hook_launch_action_round_trips_without_moving_existing_slots() {
+    let action = CharacterAnimationAction::HookLaunch;
+    let encoded = ron::ser::to_string(&action).unwrap();
+    assert_eq!(
+        ron::from_str::<CharacterAnimationAction>(&encoded).unwrap(),
+        action
+    );
+    assert_eq!(CharacterAnimationAction::RangedRight.to_index(), 40);
+    assert_eq!(
+        action.to_index(),
+        psx_level::CharacterAnimationAction::HookLaunch.to_index()
+    );
+    assert!(CharacterAnimationAction::AUTHORABLE.contains(&action));
+}
+
+#[test]
+fn arch_perch_action_round_trips_without_moving_existing_slots() {
+    let action = CharacterAnimationAction::ArchPerch;
+    let encoded = ron::ser::to_string(&action).unwrap();
+    assert_eq!(
+        ron::from_str::<CharacterAnimationAction>(&encoded).unwrap(),
+        action
+    );
+    assert_eq!(CharacterAnimationAction::HookLaunch.to_index(), 41);
+    assert_eq!(action.to_index(), 42);
+    assert_eq!(
+        action.to_index(),
+        psx_level::CharacterAnimationAction::ArchPerch.to_index()
+    );
+    assert!(CharacterAnimationAction::AUTHORABLE.contains(&action));
+}
+
+#[test]
+fn fractional_world_gravity_survives_authoring_units_and_legacy_defaults() {
+    let legacy: WorldPhysicsSettings = ron::from_str("(gravity_per_tick:96)").unwrap();
+    assert_eq!(legacy.gravity_per_tick_q8, None);
+    let mut project = ProjectDocument::new("fractional gravity");
+    let root = project.active_scene().root;
+    if let NodeKind::World { physics, .. } =
+        &mut project.active_scene_mut().node_mut(root).unwrap().kind
+    {
+        physics.gravity_per_tick = 96;
+        physics.gravity_per_tick_q8 = Some(512);
+    }
+    crate::units::scale_project_to_engine_units(&mut project);
+    if let NodeKind::World { physics, .. } = &project.active_scene().node(root).unwrap().kind {
+        assert_eq!(physics.gravity_per_tick, 6);
+        assert_eq!(physics.gravity_per_tick_q8, Some(32));
+    } else {
+        panic!("world");
+    }
+    assert_eq!(CharacterAnimationAction::ArchPerch.to_index(), 42);
+    for (action, index) in [
+        (CharacterAnimationAction::Fall, 43),
+        (CharacterAnimationAction::Land, 44),
+    ] {
+        assert_eq!(action.to_index(), index);
+        assert_eq!(
+            ron::from_str::<CharacterAnimationAction>(&ron::ser::to_string(&action).unwrap())
+                .unwrap(),
+            action
+        );
+    }
+}
+
+#[test]
+fn legacy_scene_nodes_with_a_floor_field_still_load() {
+    let project = ProjectDocument::from_ron_str(DEFAULT_PROJECT_RON).unwrap();
+    let ron = project.to_ron_string().unwrap();
+    let lines: Vec<_> = ron.lines().map(str::trim).collect();
+    assert!(
+        !lines
+            .windows(2)
+            .any(|pair| pair[0].starts_with("floor:") && pair[1].starts_with("parent:")),
+        "SceneNode no longer writes floor"
+    );
+
+    // Projects saved while SceneNode carried `floor` have it on every node.
+    let legacy = ron.replace("parent:", "floor: 2,\n parent:");
+    assert!(legacy.contains("floor: 2,"), "the fixture must hit a node");
+    assert_eq!(ProjectDocument::from_ron_str(&legacy).unwrap(), project);
+}

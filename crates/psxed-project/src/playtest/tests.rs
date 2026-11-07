@@ -1,0 +1,363 @@
+use super::*;
+use crate::ProjectDocument;
+
+#[test]
+fn authored_vitality_circle_cooks_as_dedicated_record() {
+    let mut project = ProjectDocument::starter();
+    let scene = project.active_scene_mut();
+    let id = scene.add_node(
+        scene.root,
+        "Zenith Field",
+        crate::NodeKind::VitalityCircle {
+            axis: crate::VitalityCircleAxis::Zenith,
+            radius: 333,
+            refill_per_second: 17,
+            drain_per_second: 11,
+            enabled: true,
+        },
+    );
+    scene.node_mut(id).unwrap().transform.translation = [24.0, 8.0, -48.0];
+    let (package, report) = build_package(&project, &crate::default_project_dir());
+    assert!(report.is_ok(), "circle fixture cooks: {:?}", report.errors);
+    let circle = package.expect("package").vitality_circles[0];
+    assert_eq!(circle.axis, 1);
+    assert_eq!(circle.radius, 21, "world-unit conversion rounds up");
+    assert_eq!(circle.refill_per_second, 17);
+    assert_eq!(circle.drain_per_second, 11);
+}
+
+#[test]
+fn cook_output_capture_mirrors_main_and_worker_diagnostics() {
+    let (value, lines) = capture_cook_output(|| {
+        emit_cook_output(format_args!("[cook-capture-test] main"));
+        std::thread::scope(|scope| {
+            scope.spawn(|| emit_cook_output(format_args!("[cook-capture-test] worker")));
+        });
+        42
+    });
+
+    assert_eq!(value, 42);
+    assert!(lines.iter().any(|line| line == "[cook-capture-test] main"));
+    assert!(lines
+        .iter()
+        .any(|line| line == "[cook-capture-test] worker"));
+}
+
+/// The report keeps a target PER ERROR, not one for the whole report, and the
+/// `focus_target` convenience still answers with the first focusable one.
+/// `blaming` fills in only the errors that named nothing themselves.
+#[test]
+fn every_report_error_keeps_its_own_focus_target() {
+    let node_a = crate::NodeId(7);
+    let node_b = crate::NodeId(9);
+    let resource = crate::ResourceId(3);
+
+    let mut report = PlaytestValidationReport::default();
+    report.error("no offender for this one");
+    report.error_at(PlaytestValidationTarget::Node(node_a), "first offender");
+    report.blaming(PlaytestValidationTarget::Node(node_b), |report| {
+        report.error("raised by a helper that only knows a name");
+        report.error_at(PlaytestValidationTarget::Resource(resource), "knows better");
+    });
+
+    let targets: Vec<_> = report.errors.iter().map(|error| error.target).collect();
+    assert_eq!(
+        targets,
+        vec![
+            None,
+            Some(PlaytestValidationTarget::Node(node_a)),
+            Some(PlaytestValidationTarget::Node(node_b)),
+            Some(PlaytestValidationTarget::Resource(resource)),
+        ],
+        "blaming fills in untargeted errors and leaves precise ones alone"
+    );
+    assert_eq!(
+        report.focus_target(),
+        Some(PlaytestValidationTarget::Node(node_a)),
+        "the convenience accessor skips the untargeted first error"
+    );
+    assert_eq!(
+        report.error_messages().join("; "),
+        "no offender for this one; first offender; \
+raised by a helper that only knows a name; knows better"
+    );
+}
+
+#[test]
+fn combat_sections_roundtrip_and_cook_as_independent_strikes_with_shared_geometry() {
+    let mut character = crate::CharacterResource::defaults();
+    let mut volume = crate::CharacterCombatCapsule {
+        name: "Three-swing claw".into(),
+        joint: 9,
+        capsule: crate::JointCapsule {
+            start: [19516, 11992, 1101],
+            end: [31889, 11992, 1101],
+            radius: 86,
+        },
+        role: crate::CombatCapsuleRole::Hitbox {
+            action: crate::CharacterAnimationAction::HeavyAttack,
+            active_start_frame: 8,
+            active_end_frame: 11,
+            damage: 25,
+            poise_damage: 25,
+        },
+        additional_hit_windows: vec![
+            crate::CombatHitWindow { start: 19, end: 22 },
+            crate::CombatHitWindow { start: 31, end: 34 },
+        ],
+        ..Default::default()
+    };
+    volume.name = "Renamed claw".into();
+    character.combat_capsules.push(volume.clone());
+    let restored: crate::CharacterResource =
+        ron::from_str(&ron::to_string(&character).unwrap()).unwrap();
+    assert_eq!(restored, character);
+    let mut records = Vec::new();
+    let mut report = PlaytestValidationReport::default();
+    assert_eq!(
+        cook_character_combat_capsules(
+            &ProjectDocument::new("sections"),
+            "Fighter",
+            &restored,
+            10,
+            &mut records,
+            &mut report
+        ),
+        Some((0, 3))
+    );
+    assert!(report.is_ok());
+    assert_eq!(
+        records
+            .iter()
+            .map(|r| (r.active_start_frame, r.active_end_frame))
+            .collect::<Vec<_>>(),
+        [(8, 11), (19, 22), (31, 34)]
+    );
+    for r in &records {
+        assert_eq!(r.joint, 9);
+        assert_eq!(r.start, [19516, 11992, 1101]);
+        assert_eq!(r.end, [31889, 11992, 1101]);
+        assert_eq!(r.radius, 86);
+        assert_eq!(
+            r.action,
+            crate::CharacterAnimationAction::HeavyAttack.to_index() as u8
+        );
+        assert_eq!((r.damage, r.poise_damage), (25, 25));
+    }
+}
+
+#[test]
+fn combat_sections_reject_invalid_ranges_and_expanded_runtime_overflow_without_partial_output() {
+    let mut character = crate::CharacterResource::defaults();
+    character
+        .combat_capsules
+        .push(crate::CharacterCombatCapsule {
+            role: crate::CombatCapsuleRole::Hitbox {
+                action: crate::CharacterAnimationAction::HeavyAttack,
+                active_start_frame: 8,
+                active_end_frame: 11,
+                damage: 25,
+                poise_damage: 25,
+            },
+            ..Default::default()
+        });
+    for windows in [
+        vec![crate::CombatHitWindow { start: 20, end: 19 }],
+        vec![
+            crate::CombatHitWindow { start: 20, end: 23 };
+            psx_level::MAX_CHARACTER_COMBAT_CAPSULES
+        ],
+    ] {
+        character.combat_capsules[0].additional_hit_windows = windows;
+        let mut records = Vec::new();
+        let mut report = PlaytestValidationReport::default();
+        assert_eq!(
+            cook_character_combat_capsules(
+                &ProjectDocument::new("invalid"),
+                "Fighter",
+                &character,
+                10,
+                &mut records,
+                &mut report
+            ),
+            None
+        );
+        assert!(!report.is_ok());
+        assert!(records.is_empty());
+    }
+}
+
+#[test]
+fn legacy_combat_volume_keeps_its_single_section() {
+    let volume: crate::CharacterCombatCapsule = ron::from_str(r#"(name: "Claw", role: Hitbox(action: LightAttack, active_start_frame: 8, active_end_frame: 11, damage: 25, poise_damage: 25))"#).unwrap();
+    assert!(volume.additional_hit_windows.is_empty());
+    assert_eq!(
+        volume.hit_windows().collect::<Vec<_>>(),
+        [crate::CombatHitWindow { start: 8, end: 11 }]
+    );
+}
+
+#[test]
+fn camera_controls_survive_cooking_and_manifest_export() {
+    for split in [false, true] {
+        let mut project = ProjectDocument::starter();
+        let settings = crate::WorldCameraSettings {
+            position_lag_shift: 1,
+            focus_lag_shift: 2,
+            accelerated_orbit: split,
+            recenter_preserves_pitch: split,
+            fov_y_degrees: if split { 43 } else { 0 },
+            blend_profiles: split,
+            lock_target_framing: split,
+            lock_profile: split.then_some(crate::WorldCameraProfile {
+                distance: 3900,
+                height: 1900,
+                target_height: 1160,
+                fov_y_degrees: 46,
+                shoulder_offset: 384,
+            }),
+            position_vertical_lag_shift: split.then_some(3),
+            focus_vertical_lag_shift: split.then_some(4),
+            ..crate::WorldCameraSettings::default()
+        };
+        // Set every authored camera source so this fixture covers the resolved
+        // camera regardless of whether the starter supplies a player override.
+        for node in &mut project.active_scene_mut().nodes {
+            match &mut node.kind {
+                crate::NodeKind::Camera { settings: camera } => *camera = settings,
+                crate::NodeKind::World { camera, .. } => *camera = settings,
+                _ => {}
+            }
+        }
+        let (package, report) = build_package(&project, &crate::default_project_dir());
+        assert!(report.is_ok(), "camera fixture cooks: {:?}", report.errors);
+        let package = package.expect("package");
+        assert!(!package.rooms.is_empty());
+        let (position, focus) = if split { (3, 4) } else { (1, 2) };
+        for room in &package.rooms {
+            assert_eq!(room.camera.accelerated_orbit, split);
+            assert_eq!(room.camera.recenter_preserves_pitch, split);
+            assert_eq!(room.camera.blend_profiles, split);
+            assert_eq!(room.camera.lock_target_framing, split);
+            assert_eq!(
+                room.camera.lock_profile,
+                split.then_some(crate::WorldCameraProfile {
+                    distance: 244,
+                    height: 119,
+                    target_height: 73,
+                    fov_y_degrees: 46,
+                    shoulder_offset: 24
+                })
+            );
+            assert_eq!(room.camera.position_vertical_lag_shift, position);
+            assert_eq!(room.camera.focus_vertical_lag_shift, focus);
+        }
+        // The records the guest reads off the disc carry the same camera.
+        let records = decode_level_records(&package);
+        assert_eq!(records.rooms.len(), package.rooms.len());
+        for room in records.rooms {
+            assert_eq!(room.camera.accelerated_orbit, split);
+            assert_eq!(room.camera.recenter_preserves_pitch, split);
+            assert_eq!(
+                room.camera.lock_profile,
+                split.then_some(psx_level::LevelCameraProfile {
+                    distance: 244,
+                    height: 119,
+                    target_height: 73,
+                    fov_y_degrees: 46,
+                    shoulder_offset: 24
+                })
+            );
+            assert_eq!(room.camera.position_vertical_lag_shift, position);
+            assert_eq!(room.camera.focus_vertical_lag_shift, focus);
+        }
+    }
+}
+
+/// The records a package's level chunk decodes to, as the guest reads them.
+pub(super) fn decode_level_records(
+    package: &PlaytestPackage,
+) -> psx_level::wire::LevelRecords<'static> {
+    let owned = level_records::OwnedLevelRecords::build(package);
+    let bytes: &'static [u8] = Box::leak(owned.records().encode().into_boxed_slice());
+    psx_level::wire::LevelRecords::decode(bytes).expect("the chunk decodes")
+}
+
+#[test]
+fn hook_points_round_trip_and_cook_with_world_scale() {
+    let mut project = ProjectDocument::starter();
+    let scene = project.active_scene_mut();
+    let id = scene.add_node(scene.root, "Upper landing", NodeKind::HookPoint);
+    scene.node_mut(id).unwrap().transform.translation = [4096.0, 2048.0, -2048.0];
+    let text = ron::to_string(&project).unwrap();
+    let project: ProjectDocument = ron::from_str(&text).unwrap();
+    let (package, report) = build_package(&project, &crate::default_project_dir());
+    assert!(report.is_ok(), "{:?}", report.errors);
+    let package = package.unwrap();
+    let hook = package
+        .entities
+        .iter()
+        .find(|e| e.kind == PlaytestEntityKind::HookPoint)
+        .unwrap();
+    assert_eq!((hook.x, hook.y, hook.z), (256, 128, -128));
+}
+
+#[test]
+fn hook_point_cap_is_reported_instead_of_silently_ignoring_landings() {
+    let mut project = ProjectDocument::starter();
+    let scene = project.active_scene_mut();
+    for _ in 0..=psx_level::MAX_HOOK_POINTS {
+        scene.add_node(scene.root, "Hook", NodeKind::HookPoint);
+    }
+    let (package, report) = build_package(&project, &crate::default_project_dir());
+    assert!(package.is_none());
+    assert!(report.errors.iter().any(|e| e.contains("32 hook points")));
+}
+
+/// Audit for `docs/grid/meshes.md`: the older ArchProp node does cook in a grid
+/// world (the cook reads scene nodes whatever the world is), with its
+/// per-segment collision boxes. Nothing in the grid MCP can create one (a node
+/// is only cloned there and `set_node` keeps its variant), which is why arches
+/// are meshes now.
+#[test]
+fn an_arch_prop_node_cooks_in_a_grid_world_with_segment_boxes() {
+    use crate::{ArchPropGeometry, NodeKind, ResourceData, UvTransform, ARCH_PROP_MATERIAL_COUNT};
+    let mut project = ProjectDocument::starter();
+    // A room material of the starter (a 4bpp one), on every slot.
+    let material = project
+        .resources
+        .iter()
+        .find(|r| {
+            r.name == "DP City / Deck Plate"
+                && matches!(&r.data, ResourceData::Material(m) if m.psxt_path.is_some())
+        })
+        .map(|r| r.id)
+        .unwrap_or_else(|| {
+            let names: Vec<&str> = project
+                .resources
+                .iter()
+                .filter(|r| matches!(&r.data, ResourceData::Material(_)))
+                .map(|r| r.name.as_str())
+                .collect();
+            panic!("no Graybox material in {names:?}")
+        });
+    let scene = project.active_scene_mut();
+    let id = scene.add_node(
+        scene.root,
+        "Old arch",
+        NodeKind::ArchProp {
+            materials: [Some(material); ARCH_PROP_MATERIAL_COUNT],
+            uvs: [UvTransform::IDENTITY; ARCH_PROP_MATERIAL_COUNT],
+            geometry: ArchPropGeometry::default(),
+            collision_enabled: true,
+        },
+    );
+    scene.node_mut(id).unwrap().transform.translation = [1280.0, 0.0, 1280.0];
+    let (package, report) = build_package(&project, &crate::default_project_dir());
+    assert!(report.is_ok(), "{:?}", report.errors);
+    let package = package.unwrap();
+    assert_eq!(package.arch_props.len(), 1, "{:?}", report.warnings);
+    assert!(!package.arch_prop_surfaces.is_empty());
+    // One conservative box per profile segment, plus the legs.
+    assert!(package.arch_prop_collisions.len() >= 6);
+}
