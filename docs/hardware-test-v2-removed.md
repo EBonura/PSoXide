@@ -1,5 +1,9 @@
 # What v2.0 took out of the hardware-test suite, and where each thing went
 
+(v2.10 put the measurements that v1.27 had and v2.0 dropped back in; see
+[hardware-test-v1-to-v2.10.md](hardware-test-v1-to-v2.10.md) for the current
+mapping, which supersedes the MDEC DIAGNOSTIC row below.)
+
 v1.28 was a menu of about forty screens that had to be run in a sensible order
 by a person. v2.0 is one run in a fixed order with a reset per area (see
 [hardware-test-disc.md](hardware-test-disc.md)). Everything below existed in

@@ -33,7 +33,22 @@ shipped without either, which is why no machine-code baseline exists for them.
 
 ## History
 
-### List-upload case (2026-10-22, no version number)
+### v2.10 (2026-11-07, schema PX8)
+
+MINOR. The suite that is burned and put on the SuperStation card (v2.9, the BIOS-free linear run) and the v1.27 tree that sat on editor main are one tree again, on editor main, and every v1.26/v1.27 measurement either runs in it or is named as covered. [hardware-test-v1-to-v2.10.md](hardware-test-v1-to-v2.10.md) is the mapping, feature by feature. Added to v2.9:
+
+* `MDEC SETUP DIAGNOSTIC` (GPU area, after `MDEC DECODE`; `src/mdec_diag.rs`, records `0x230`-`0x2AA`): the v1.26 diagnostic. Six MDEC setup sequences (the v1.25 driver, settle then enable, fixed delay, CPU tables, PSn00bSDK's order, the SDK driver), eight runs each, a probe decode after each; MDEC1 traced after a reset from idle, from busy and from busy with the enable written straight after; a one-macroblock control decode over CPU writes and reads against DMA. The v1.26 record ids `0x200`-`0x2A2` collide with the v2 texture-state block (`0x200`-`0x223`), so the layout moved to `0x230`-`0x2AA` (the playback block is gone, see the mapping). Every wait is spin-bounded. The decoder is `psoxide-hwtest report` (`mdec_diag`, `mdec_reset_trace`, `mdec_control` rows).
+* `GPU BATCHES` gains the six grid-line E2 texture-window cases, `0x146`-`0x14B` (the v1.27 tree numbered them `0x140`-`0x145`, which the v2 CPU/DMA matrix owns; they never ran on a console under the old ids).
+* Conformance case `0xEA` (index 234, `src/list_upload_probe.rs`): GP0(A0h) rows in 16-word list nodes read back word for word. It runs in the GPU area. `TEST_COUNT` 235.
+* `CD DATA VERSUS AUDIO ROUTE` keeps everything the v1.x CD/SPU audio probe (PA1) recorded per stage that v2.0 dropped: SPUCNT, SPUSTAT, the CD volumes, the CD status and request flag, and for each capture half the FNV hash, the non-zero sample count and the summed magnitude. Records `0x520 + 8 * stage + k`.
+* The device owners (`Cd`, DMA 6, the memory-card diagnostic) are taken by `steal` in `src/probe_tokens.rs`, as v1.27 does since 4fcfc51ae: the SDK removed the free forwarders the v2.9 sources still called. The host-only fallbacks of the RTPT probes use `write_data!`, `read_data!` and `project_triple` (ea367f697).
+* `SUITE_VERSION_MINOR` says 10. v2.9 shipped the display string `HWTEST v2.9` with the minor constant still 8, so every v2.9 capture reports itself as v2.8 in its header; the header of a v2.10 capture is right.
+* `TIMING_RECORD_COUNT` 1700 (v2.9: 1500) and `CAPTURE_PAGE_MAX` 32 (28). A plain-disc run goes from 1,215 records to 1,332 (19 to 20 QR pages); the radius disc adds the sweep's `0xB00`-`0xBF7`, which still fits.
+* The disc is always the console-diag build with `CDTEST.BIN` at 400 sectors (`make hardware-tests-disc`). The BIOS-free boot EXE is 577 sectors, past the 542 that a 460-sector `CDTEST.BIN` leaves; every v2.9 burn and test image already used this layout.
+
+Pins: SDK `bfb464405` (SDK main), emulator `bb788f5b` (emulator main), the editor main lock. v2.9 was built on SDK `838c09fb`. What that move changes in the records is in [the v2.9 to v2.10 comparison](hardware-test-v2.10-vs-v2.9.md): the SDK's new entry sets the bus timings itself (COMMON_DELAY `0x132C` to `0x1325`, CD_DELAY `0x20943` to `0x20843`, the retail values) where the emulator's HLE entry left others, which moves every SPU and CD register timing record; the shared draw-done node adds 9 clocks to a list walk; the rest is phase. No conformance verdict changed on either target (real: cases 139 and 201 fail, as in v2.9; MiSTer: 139, 201, 204, 205, 227).
+
+### List-upload case (2026-10-22, v1.27 tree; in the suite since v2.10)
 
 One conformance case, `0xEA` (index 234, `src/list_upload_probe.rs`), joins the DMA group without a version bump (a case added at the end moves no existing id). It uploads four 384 halfword rows as GP0(A0h) image transfers inside a channel 2 linked list, each transfer chopped into nodes of at most 16 payload words and the list ended by a texture-cache flush node, the way the grid runtime's sky stream sends them. A poison fill goes first, the block is read back with GP0(C0h) and compared word for word. The observed value is the count of differing words, plus flags for a stuck channel (bit 16), a GPU that never reports ready (bit 17) and a short readback (bit 18); every wait is bounded. Headless in the emulator with `PSOXIDE_CHECK_GPU_LL_FIFO=1` it passes, and with the kick removed it fails with all 768 words wrong. Not run on a console.
 
@@ -41,7 +56,7 @@ The suite's own build also needed a repair: `psx-engine` reaches `psx-level`, wh
 
 To run just this case headless: from the main menu go UP three rows to RESUME FROM TEST, press R1 23 times and RIGHT four times (start index 234), then CROSS. The case prints as `case 234` in the TTY report before the long scans start.
 
-### Grid-line E2 probe (2026-10-17, no version number, pending port to the consolidated suite)
+### Grid-line E2 probe (2026-10-17, v1.27 tree; in the suite since v2.10 under new record ids)
 
 This is not a suite release. A real v1.28 exists (console run 2026-10-08) and a newer consolidated suite lives on another branch line, so this tree keeps the version it started from (v1.27) and carries the probe as extra steps. Six GPU batches price GP0(E2), the texture window the grid renderer repeats textures through (`0x140`-`0x145`, `src/gpu_probes.rs`). Every grid packet carries its own E2 word in front of the polygon, so the cases read in pairs: a reset window carried in each packet against none (`0x140` against `0x103`), an active 64 texel window against none at the same UV span (`0x141` against `0x10D`), one 32 texel window every packet against two alternating (`0x142` against `0x143`, the cost of changing window between neighbours, a possible texture-cache flush), a reset alternating with a window (`0x144`, the stream a level of plain and repeating quads makes) and a window repeated four times across a primitive (`0x145`). The timing capacity grows by six slots. Not run on a console; do not burn a disc from this tree as a release. Port the six cases to the consolidated suite and number them there.
 ### v2.8 (2026-10-19, schema PX8)
